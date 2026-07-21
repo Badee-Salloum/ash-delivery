@@ -1,0 +1,17 @@
+{
+  "name": "ash-delivery",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "packageManager": "pnpm@11.3.0",
+  "scripts": {
+    "test": "pnpm -r test",
+    "typecheck": "tsc -b",
+    "check:domain-pure": "node scripts/check-domain-pure.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2"
+  }
+}

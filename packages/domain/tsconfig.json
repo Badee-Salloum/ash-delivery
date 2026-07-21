@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    // No ambient global types. `process`, `Buffer`, `setTimeout` must be type errors here.
+    // Test files import from 'vitest' explicitly, which supplies its own types without globals.
+    "types": [],
+    // The domain is consumed as SOURCE (`exports: "./src/index.ts"`), never as a build artifact.
+    // Explicit `.ts` specifiers keep it runnable under Node's native type stripping as well as
+    // under Vite/Vitest, with no resolution guessing anywhere.
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

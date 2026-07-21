@@ -1,0 +1,6 @@
+packages:
+  - 'packages/*'
+  - 'apps/*'
+allowBuilds:
+  # vitest -> esbuild. Needs its postinstall to fetch the platform binary.
+  esbuild: true
