@@ -19,6 +19,7 @@ import { SESSION_COOKIE, SESSION_IDLE_MS, login, logout, resolveSession } from '
 import { assertEveryRouteDeclaresPermission, collectRoutes, makeAuthorize, resetRouteRegistry } from './rbac.ts'
 import { registerExpenseRoutes } from './expenses.routes.ts'
 import { registerFleetRoutes } from './fleet.routes.ts'
+import { registerTreasuryRoutes } from './treasury.routes.ts'
 import { MAX_UPLOAD_BYTES, readEvidence, uploadEvidence } from './media.service.ts'
 import {
   ServiceError,
@@ -333,6 +334,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   // ── Expenses (SRS G) ────────────────────────────────────────────────────────────
   registerExpenseRoutes(app, deps)
+
+  // ── Treasury: daily cash count + manual entries (SRS E-3, E-5) ──────────────────
+  registerTreasuryRoutes(app, deps)
 
   // ── Daily FX (BR6) — system admin only ──────────────────────────────────────────────────
   app.put('/fx', { config: { permission: 'fx_rate.write' } }, async (req) => {

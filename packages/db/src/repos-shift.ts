@@ -4,6 +4,8 @@ import type {
   EvidencePackage,
   MediaRecord,
   MediaRepo,
+  CashCountRecord,
+  CashCountRepo,
   DirectoryRepo,
   DocumentRecord,
   ExpenseCategoryRecord,
@@ -669,5 +671,112 @@ export class PgSettingsRepo implements SettingsRepo {
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = now()`,
       [key, JSON.stringify(value), actorId],
     )
+  }
+}
+
+// ── Daily cash count (SRS E-5 / س51) ─────────────────────────────────────────────────────
+
+export class PgCashCountRepo implements CashCountRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async create(count: CashCountRecord): Promise<void> {
+    try {
+      await withTransaction(this.pool, { actorId: count.countedBy }, async (client) => {
+        await client.query(
+          `INSERT INTO cash_counts (id, branch_id, business_date, counted_by, counted_at, proof_sha256, sealed_at, notes)
+           VALUES ($1,$2,$3,$4, to_timestamp($5::double precision/1000), $6,
+                   CASE WHEN $7::bigint IS NULL THEN NULL ELSE to_timestamp($7::double precision/1000) END, $8)`,
+          [
+            count.id,
+            count.branchId,
+            count.businessDate,
+            count.countedBy,
+            count.countedAtMs,
+            count.proofSha256,
+            count.sealedAtMs,
+            count.notes,
+          ],
+        )
+        for (const line of count.lines) {
+          // Resolve the fund by code; a count line naming a fund that does not exist is a bug
+          // worth failing on rather than silently dropping.
+          const { rows } = await client.query<{ id: string }>(
+            'SELECT id FROM funds WHERE branch_id = $1 AND code = $2',
+            [count.branchId, line.fundCode],
+          )
+          const fundId = rows[0]?.id
+          if (!fundId) throw new Error(`cash count names an unknown fund: ${line.fundCode}`)
+
+          await client.query(
+            `INSERT INTO cash_count_lines (cash_count_id, fund_id, counted_minor, computed_minor, variance_minor, resolution)
+             VALUES ($1,$2,$3,$4,$5,$6)`,
+            [
+              count.id,
+              fundId,
+              line.counted.toString(),
+              line.computed.toString(),
+              line.variance.toString(),
+              line.resolution,
+            ],
+          )
+        }
+      })
+    } catch (err) {
+      if (isPgError(err, PG.UNIQUE_VIOLATION)) {
+        throw Object.assign(new Error(`cash count already exists for ${count.businessDate}`), {
+          code: 'DUPLICATE_COUNT',
+        })
+      }
+      throw err
+    }
+  }
+
+  async find(branchId: string, businessDate: CalendarDate): Promise<CashCountRecord | null> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT c.*,
+              COALESCE(json_agg(json_build_object(
+                'fundCode', f.code,
+                'counted',  l.counted_minor::text,
+                'computed', l.computed_minor::text,
+                'variance', l.variance_minor::text,
+                'resolution', l.resolution
+              ) ORDER BY f.code) FILTER (WHERE l.id IS NOT NULL), '[]') AS lines
+         FROM cash_counts c
+         LEFT JOIN cash_count_lines l ON l.cash_count_id = c.id
+         LEFT JOIN funds f ON f.id = l.fund_id
+        WHERE c.branch_id = $1 AND c.business_date = $2
+        GROUP BY c.id`,
+      [branchId, businessDate],
+    )
+    const r = rows[0]
+    if (!r) return null
+    return {
+      id: String(r.id),
+      branchId: String(r.branch_id),
+      businessDate: isoDate(r.business_date),
+      countedBy: String(r.counted_by),
+      countedAtMs: (r.counted_at as Date).getTime(),
+      proofSha256: (r.proof_sha256 as string | null) ?? null,
+      sealedAtMs: r.sealed_at === null ? null : (r.sealed_at as Date).getTime(),
+      notes: (r.notes as string | null) ?? null,
+      lines: (r.lines as Array<Record<string, string | null>>).map((l) => ({
+        fundCode: String(l.fundCode),
+        counted: minor(BigInt(String(l.counted))),
+        computed: minor(BigInt(String(l.computed))),
+        variance: minor(BigInt(String(l.variance))),
+        resolution: l.resolution ?? null,
+      })),
+    }
+  }
+
+  async listDatesInRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<CalendarDate[]> {
+    const { rows } = await this.pool.query<{ business_date: unknown }>(
+      'SELECT business_date FROM cash_counts WHERE branch_id = $1 AND business_date BETWEEN $2 AND $3 ORDER BY business_date',
+      [branchId, from, to],
+    )
+    return rows.map((r) => isoDate(r.business_date))
   }
 }

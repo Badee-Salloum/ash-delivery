@@ -5,6 +5,7 @@ import { assertBigIntParser, createPool } from '../src/pool.ts'
 import { migrate } from '../src/migrate.ts'
 import { PgAuditRepo, PgFxRepo, PgLedgerRepo, PgOrderRepo, PgSessionRepo, PgUserRepo } from '../src/repos.ts'
 import {
+  PgCashCountRepo,
   PgDirectoryRepo,
   PgExpenseRepo,
   PgMediaRepo,
@@ -50,7 +51,7 @@ if (!DATABASE_URL) {
       // Truncate rather than re-migrate: orders of magnitude faster, and it exercises the real
       // constraints on every run instead of a freshly-empty database.
       await pool.query(`
-        TRUNCATE journal_lines, journal_entries, shift_orders, shift_media, media, float_tranches, expenses, expense_categories, settings,
+        TRUNCATE journal_lines, journal_entries, shift_orders, shift_media, media, float_tranches, expenses, expense_categories, settings, cash_counts, cash_count_lines,
                  shifts, funds, fx_days, week_locks, audit_log, sessions, drivers, vehicles,
                  vehicle_types, users, branches
         RESTART IDENTITY CASCADE
@@ -116,6 +117,7 @@ if (!DATABASE_URL) {
         orders: new PgOrderRepo(pool),
         ledger: new PgLedgerRepo(pool),
         expenses: new PgExpenseRepo(pool),
+        cashCounts: new PgCashCountRepo(pool),
         settings: new PgSettingsRepo(pool),
         media: new PgMediaRepo(pool),
         // Blob storage is not a database concern; the suite exercises MediaRepo, not bytes.

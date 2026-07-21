@@ -140,6 +140,35 @@ export const createExpenseRequest = z.object({
   receiptMediaId: z.string().nullable().default(null),
 })
 
+// ── Treasury: daily count and manual entries (SRS E-3, E-5) ───────────────────────────────
+
+export const createCashCountRequest = z.object({
+  branchId: z.string().optional(),
+  businessDate: calendarDateSchema.optional(),
+  lines: z
+    .array(
+      z.object({
+        fundCode: z.string().min(1),
+        counted: moneySchema,
+        /** Required by the manager when the variance is non-zero; recorded either way. */
+        resolution: z.string().max(500).nullable().default(null),
+      }),
+    )
+    .min(1),
+  notes: z.string().max(1000).nullable().default(null),
+})
+
+export const manualEntryRequest = z.object({
+  branchId: z.string().optional(),
+  businessDate: calendarDateSchema.optional(),
+  /** E-3 / س50: a manual entry without a stated reason is not auditable. */
+  reason: z.string().min(1).max(500),
+  evidenceMediaId: z.string().nullable().default(null),
+  lines: z
+    .array(z.object({ fundCode: z.string().min(1), side: z.enum(['D', 'C']), amount: moneySchema }))
+    .min(2),
+})
+
 // ── Money admin ───────────────────────────────────────────────────────────────────────────
 
 export const setFxRequest = z.object({

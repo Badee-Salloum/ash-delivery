@@ -3,6 +3,7 @@ import { MemoryBlobStore, createMemoryDeps } from '@ash/adapters/memory'
 import type { BlobStore, Deps } from '@ash/contracts'
 import {
   PgAuditRepo,
+  PgCashCountRepo,
   PgDirectoryRepo,
   PgExpenseRepo,
   PgFxRepo,
@@ -87,6 +88,7 @@ export async function buildDeps(config: Config): Promise<BuiltDeps> {
       orders: new PgOrderRepo(pool),
       ledger: new PgLedgerRepo(pool),
       expenses: new PgExpenseRepo(pool),
+      cashCounts: new PgCashCountRepo(pool),
       settings: new PgSettingsRepo(pool),
       media: new PgMediaRepo(pool),
       fx: new PgFxRepo(pool),

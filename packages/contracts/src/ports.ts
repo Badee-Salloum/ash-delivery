@@ -331,6 +331,37 @@ export interface ExpenseRepo {
   ): Promise<Array<{ costCenterKind: string; vehicleId: string | null; total: Minor }>>
 }
 
+// ── Daily cash count (SRS E-5 / س51) ──────────────────────────────────────────────────────
+
+export interface CashCountLine {
+  fundCode: string
+  counted: Minor
+  /** Frozen at count time, NOT recomputed at read time — otherwise a later posting silently
+   *  rewrites history and the variance a manager signed off disappears. */
+  computed: Minor
+  variance: Minor
+  resolution: string | null
+}
+
+export interface CashCountRecord {
+  id: string
+  branchId: string
+  businessDate: CalendarDate
+  countedBy: string
+  countedAtMs: number
+  lines: CashCountLine[]
+  /** sha256 over the frozen lines. «إثبات الجرد» — the count cannot be quietly restated. */
+  proofSha256: string | null
+  sealedAtMs: number | null
+  notes: string | null
+}
+
+export interface CashCountRepo {
+  create(count: CashCountRecord): Promise<void>
+  find(branchId: string, businessDate: CalendarDate): Promise<CashCountRecord | null>
+  listDatesInRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<CalendarDate[]>
+}
+
 // ── Settings (SRS A-4) ────────────────────────────────────────────────────────────────────
 
 export interface SettingsRepo {
@@ -401,6 +432,7 @@ export interface Deps {
   orders: OrderRepo
   ledger: LedgerRepo
   expenses: ExpenseRepo
+  cashCounts: CashCountRepo
   settings: SettingsRepo
   media: MediaRepo
   blobs: BlobStore

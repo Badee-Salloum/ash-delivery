@@ -1,0 +1,221 @@
+import type { LightMyRequestResponse } from 'fastify'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { BRANCH, type Harness, makeHarness, sypStr } from './harness.ts'
+
+/**
+ * Treasury: the daily cash count (E-5 / س51) and disciplined manual entries (E-3 / س50).
+ */
+
+let h: Harness
+beforeEach(async () => {
+  h = await makeHarness()
+})
+afterEach(async () => {
+  await h.app.close()
+})
+
+const post = async (token: string, url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> =>
+  await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(token) }, payload })
+const get = async (token: string, url: string): Promise<LightMyRequestResponse> =>
+  await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(token) } })
+
+/** Put some money in the office funds so a count has something to reconcile against. */
+async function seedOfficeCash(amount: string): Promise<void> {
+  const manager = await h.loginAs('manager')
+  await post(manager, '/journal/manual', {
+    reason: 'رصيد افتتاحي',
+    lines: [
+      { fundCode: 'office_cash', side: 'D', amount },
+      { fundCode: 'opening_balance', side: 'C', amount },
+    ],
+  })
+}
+
+describe('the daily cash count (E-5)', () => {
+  it('offers a sheet of what the system believes each fund holds', async () => {
+    const manager = await h.loginAs('manager')
+    const res = await get(manager, '/cash-counts/sheet')
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json().businessDate).toBe('2026-07-21')
+    expect(res.json().alreadyCounted).toBe(false)
+    expect((res.json().funds as Array<{ fundCode: string }>).map((f) => f.fundCode)).toEqual([
+      'office_cash',
+      'office_wallet',
+    ])
+  })
+
+  it('records a matching count with zero variance and a proof hash', async () => {
+    await seedOfficeCash(sypStr(500_000))
+    const manager = await h.loginAs('manager')
+
+    const res = await post(manager, '/cash-counts', {
+      lines: [
+        { fundCode: 'office_cash', counted: sypStr(500_000) },
+        { fundCode: 'office_wallet', counted: sypStr(0) },
+      ],
+    })
+    expect(res.statusCode, res.body).toBe(201)
+    expect(res.json().balanced).toBe(true)
+    expect(res.json().lines[0].variance).toBe('0.00')
+    // «إثبات الجرد» — the count cannot be quietly restated later.
+    expect(res.json().proofSha256).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it('reports a variance when the drawer disagrees with the ledger', async () => {
+    await seedOfficeCash(sypStr(500_000))
+    const manager = await h.loginAs('manager')
+
+    const res = await post(manager, '/cash-counts', {
+      lines: [
+        { fundCode: 'office_cash', counted: sypStr(495_000), resolution: 'نقص غير مفسر' },
+        { fundCode: 'office_wallet', counted: sypStr(0) },
+      ],
+    })
+    expect(res.statusCode).toBe(201)
+    expect(res.json().balanced).toBe(false)
+    expect(res.json().lines[0].variance).toBe('-5000.00')
+    expect(res.json().lines[0].resolution).toBe('نقص غير مفسر')
+  })
+
+  it('FREEZES the computed side — a later posting cannot rewrite a signed-off variance', async () => {
+    await seedOfficeCash(sypStr(500_000))
+    const manager = await h.loginAs('manager')
+    await post(manager, '/cash-counts', {
+      lines: [{ fundCode: 'office_cash', counted: sypStr(500_000) }],
+    })
+
+    // Money moves after the count. The recorded count must not change.
+    await seedOfficeCash(sypStr(100_000))
+    const stored = await get(manager, '/cash-counts/2026-07-21')
+    expect(stored.json().lines[0].computed).toBe('500000.00')
+    expect(stored.json().lines[0].variance).toBe('0.00')
+  })
+
+  it('refuses a second count for the same day', async () => {
+    const manager = await h.loginAs('manager')
+    const body = { lines: [{ fundCode: 'office_cash', counted: sypStr(0) }] }
+    expect((await post(manager, '/cash-counts', body)).statusCode).toBe(201)
+
+    // Two counts would make "what did we agree the drawer held" ambiguous.
+    const second = await post(manager, '/cash-counts', body)
+    expect(second.statusCode).toBe(409)
+    expect(second.json().error).toBe('already_counted_today')
+  })
+
+  it('refuses a fund that is not physically countable', async () => {
+    const manager = await h.loginAs('manager')
+    const res = await post(manager, '/cash-counts', {
+      lines: [{ fundCode: 'yalago_share', counted: sypStr(1) }],
+    })
+    expect(res.statusCode).toBe(422)
+    expect(res.json().error).toBe('fund_not_countable')
+  })
+
+  it('the system admin may NOT count the drawer (§3 matrix, D-5)', async () => {
+    const admin = await h.loginAs('sysadmin')
+    const res = await post(admin, '/cash-counts', { lines: [{ fundCode: 'office_cash', counted: sypStr(0) }] })
+    expect(res.statusCode).toBe(403)
+  })
+
+  it('a driver may not count anything', async () => {
+    const driver = await h.loginAs('driver1')
+    expect((await get(driver, '/cash-counts/sheet')).statusCode).toBe(403)
+  })
+})
+
+describe('manual entries (E-3 / س50)', () => {
+  it('posts a balanced entry with a mandatory reason', async () => {
+    const manager = await h.loginAs('manager')
+    const res = await post(manager, '/journal/manual', {
+      reason: 'تصحيح رصيد',
+      lines: [
+        { fundCode: 'office_cash', side: 'D', amount: sypStr(1_000) },
+        { fundCode: 'adjustments', side: 'C', amount: sypStr(1_000) },
+      ],
+    })
+    expect(res.statusCode, res.body).toBe(201)
+    expect(res.json().entryId).not.toBeNull()
+    expect(res.json().reason).toBe('تصحيح رصيد')
+  })
+
+  it('refuses an unbalanced entry', async () => {
+    const manager = await h.loginAs('manager')
+    const res = await post(manager, '/journal/manual', {
+      reason: 'خطأ',
+      lines: [
+        { fundCode: 'office_cash', side: 'D', amount: sypStr(1_000) },
+        { fundCode: 'adjustments', side: 'C', amount: sypStr(900) },
+      ],
+    })
+    expect(res.statusCode).toBe(500) // the domain throws; the ledger would refuse it too
+  })
+
+  it('refuses an entry with no reason', async () => {
+    const manager = await h.loginAs('manager')
+    const res = await post(manager, '/journal/manual', {
+      reason: '',
+      lines: [
+        { fundCode: 'office_cash', side: 'D', amount: sypStr(1) },
+        { fundCode: 'adjustments', side: 'C', amount: sypStr(1) },
+      ],
+    })
+    expect(res.statusCode).toBe(400) // schema rejects it before the handler
+  })
+
+  it('demands evidence above the configured ceiling', async () => {
+    const manager = await h.loginAs('manager')
+    await h.deps.settings.set('expense.receipt_required_above_minor', '100000', 'u-sa') // 1,000 SYP
+
+    const res = await post(manager, '/journal/manual', {
+      reason: 'مبلغ كبير',
+      lines: [
+        { fundCode: 'office_cash', side: 'D', amount: sypStr(50_000) },
+        { fundCode: 'adjustments', side: 'C', amount: sypStr(50_000) },
+      ],
+    })
+    expect(res.statusCode).toBe(422)
+    expect(res.json().error).toBe('evidence_required')
+  })
+
+  it('the system admin may NOT post manual entries (§3 matrix, D-5)', async () => {
+    const admin = await h.loginAs('sysadmin')
+    const res = await post(admin, '/journal/manual', {
+      reason: 'x',
+      lines: [
+        { fundCode: 'office_cash', side: 'D', amount: sypStr(1) },
+        { fundCode: 'adjustments', side: 'C', amount: sypStr(1) },
+      ],
+    })
+    expect(res.statusCode).toBe(403)
+  })
+})
+
+describe('corrections are visible reversals, never edits (BR7)', () => {
+  it('reverses an entry and leaves both visible', async () => {
+    const manager = await h.loginAs('manager')
+    const original = await post(manager, '/journal/manual', {
+      reason: 'قيد خاطئ',
+      lines: [
+        { fundCode: 'office_cash', side: 'D', amount: sypStr(7_000) },
+        { fundCode: 'adjustments', side: 'C', amount: sypStr(7_000) },
+      ],
+    })
+    const entryId = original.json().entryId as number
+    expect(await h.deps.ledger.fundBalance(BRANCH, 'office_cash')).toBe(700_000n)
+
+    const res = await post(manager, `/journal/${entryId}/reverse`, { reason: 'تصحيح ظاهر مؤرَّخ' })
+    expect(res.statusCode, res.body).toBe(201)
+    expect(res.json().reversalOf).toBe(entryId)
+
+    // Net zero, and BOTH entries remain in the ledger — nothing was edited away.
+    expect(await h.deps.ledger.fundBalance(BRANCH, 'office_cash')).toBe(0n)
+    expect(h.deps.ledger.entries.filter((e) => e.eventType === 'manual')).toHaveLength(1)
+    expect(h.deps.ledger.entries.filter((e) => e.eventType === 'correction')).toHaveLength(1)
+  })
+
+  it('404s on an entry that does not exist', async () => {
+    const manager = await h.loginAs('manager')
+    const res = await post(manager, '/journal/99999/reverse', { reason: 'x' })
+    expect(res.statusCode).toBe(404)
+  })
+})

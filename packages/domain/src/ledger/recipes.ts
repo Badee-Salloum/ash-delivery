@@ -378,3 +378,57 @@ export const isFund =
   (kind: FundRef['kind']) =>
   (fund: FundRef): boolean =>
     fund.kind === kind
+
+/**
+ * Stable string identity for a fund. The database stores this in `funds.code`.
+ */
+export function fundCode(fund: FundRef): string {
+  switch (fund.kind) {
+    case 'driver_cash':
+    case 'driver_wallet':
+    case 'driver_share_payable':
+      return `${fund.kind}:${fund.driverId}`
+    case 'cost_center':
+      return `cost_center:${fund.costCenterId}`
+    default:
+      return fund.kind
+  }
+}
+
+/**
+ * The inverse of `fundCode`.
+ *
+ * A manual entry (E-3) names its funds by code, and mapping every one of them to a cost centre
+ * — as a first version did — means `office_cash` becomes `cost_center:office_cash` and a manual
+ * correction silently fails to touch the fund the operator meant. The money appears to move and
+ * the real balance never changes.
+ *
+ * An UNRECOGNISED code becomes a cost centre deliberately: an operator needs contra accounts
+ * ("opening_balance", "adjustments") that are not part of the client's fixed tree, and refusing
+ * them would make E-3 unusable. What must never happen is a *known* fund name being silently
+ * re-pointed.
+ */
+export function fundRefFromCode(code: string): FundRef {
+  const [head, ...rest] = code.split(':')
+  const tail = rest.join(':')
+
+  switch (head) {
+    case 'office_cash':
+    case 'office_wallet':
+    case 'yalago_share':
+    case 'company_revenue':
+    case 'yalago_income':
+    case 'fee_earned':
+      return { kind: head }
+    case 'driver_cash':
+    case 'driver_wallet':
+    case 'driver_share_payable':
+      if (tail === '') throw new RangeError(`${head} requires a driver id, got ${JSON.stringify(code)}`)
+      return { kind: head, driverId: tail }
+    case 'cost_center':
+      if (tail === '') throw new RangeError(`cost_center requires an id, got ${JSON.stringify(code)}`)
+      return { kind: 'cost_center', costCenterId: tail }
+    default:
+      return { kind: 'cost_center', costCenterId: code }
+  }
+}
