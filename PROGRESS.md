@@ -72,14 +72,50 @@ office covers the shortfall, the fund still lands on zero), and `minWalletBalanc
 **separate** check — because **BR1 evaluates to exactly zero throughout**, so the zero equation
 genuinely cannot detect it. Logged as A-26, and it raised a new question for the client.
 
+**Also done and VERIFIED — FX, week close, fleet rules**
+
+- **Daily FX** (BR6, AC #6) — rates stored as SYP *minor units per USD*, because USD-per-SYP is a
+  fraction and there is no honest way to hold a fraction in an integer. Conversion is half-up
+  because it is a display figure only; the ledger is SYP minor units end to end. A missing rate
+  carries forward flagged `provisional` rather than failing — a broken cron must never freeze the
+  business — and the Sunday close then refuses to seal a week that still contains one.
+- **Sunday-close pre-flight** (BR7, AC #9) — reports *every* blocker at once rather than one
+  refusal at a time. Closing on Sunday the 26th seals the 19th–25th; a shift worked on the 26th
+  belongs to the new week. The Yallago reconciliation gate reports `deferred_to_bundle_2` instead
+  of silently reading as satisfied.
+- **Fleet rules** (B-1/B-2/B-3) — expiry alerts fire once per threshold (T-30/14/7/0), not daily
+  for a month; an *expired* document blocks assignment, one merely expiring does not.
+
+**Where the domain stands**
+
+| Module | Covers | Tests |
+| --- | --- | --- |
+| `money/` | minor units, residual 80% block, exhaustive split | 10 |
+| `br1/` | the zero equation, split components, cause breakdown | 14 |
+| `tier/` | bands, whole + marginal, day true-up, effective dating | 27 |
+| `ledger/` | posting recipes, balance invariant, corrections | 22 |
+| `shift/` | BR5 gates, state machine, RBAC on transitions | 30 |
+| `rbac/` | the SRS §3 matrix as data | 93 |
+| `time/` | Damascus business dates, Sunday weeks | 14 |
+| `fx/` | daily rate, carry-forward, USD equivalence | 11 |
+| `week/` | close pre-flight, lock coverage | 15 |
+| `fleet/` | document expiry, vehicle state, assignment | 24 |
+| | **total** | **260 in ~1.3 s** |
+
 **Next**
 
 1. **Send `docs/client-request-samples.md`.** Still the highest-value hour in the project. It now
    carries a second question: what does Yallago do when its 20% cut exceeds the wallet balance?
-2. `./scripts/db-verify.sh` — install Docker, or just push and let CI prove the guards.
+2. `./scripts/db-verify.sh` — install Docker, or just push and let CI prove the guards. Until that
+   runs green, every claim in `packages/db/migrations/0006` is unproven.
 3. `packages/contracts` (Zod + ports), then `apps/api` with the route-permission registry and
-   its boot-time completeness assertion.
+   its boot-time completeness assertion, then the admin/driver shells.
 4. The photo-legibility spike, once a real dashboard screenshot exists.
+
+**Honest status against the plan:** the *arithmetic* of Bundle 1 is done and green — M2's and
+M3's hardest logic both exist as pure, tested code. What does not exist yet is anything a human
+can log into: no API, no UI, no running database. M0's "log in as four roles" demo is not
+reachable yet.
 
 ---
 

@@ -22,7 +22,7 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 | **5** | Σ debits == Σ credits across every entry of any day | `money/allocate.test.ts` › "driver + company + yalago === feeTotal, exactly" | ✅ |
 | | | `ledger/recipes.test.ts` › "every posting balances under random event streams" (400 runs) | ✅ |
 | | | `db/verify-guards.sql` › guard 1 — rejected at COMMIT by Postgres | ⚠ written, unrun |
-| **6** | The day's rate applies to all that day's transactions **and the USD equivalent appears in reports** | `fx/rate-application.itest.ts` | 🔜 M2 |
+| **6** | The day's rate applies to all that day's transactions **and the USD equivalent appears in reports** | `fx/rate.test.ts` › "USD equivalence (BR6, AC #6)" (6 cases) + "resolving the day's rate" (5 cases) | ✅ |
 | | | `fx/usd-display.itest.ts` — the *second half* of the criterion, easy to miss | 🔜 M5 |
 | **7** | The daily band is computed automatically from the order count, changes only the company's share, and only the sysadmin may edit it | `tier/bands.test.ts` › "band boundaries — 14/15, 24/25, 34/35" (9 cases) | ✅ |
 | | | `tier/bands.test.ts` › "the company absorbs the rounding remainder, never the driver and never Yallago" | ✅ |
@@ -50,7 +50,9 @@ accrues weekly — which is exactly the kind of thing that silently regresses.
 | BR3 three payment modes | `br1/property.test.ts` (all three generated) | ✅ |
 | BR4 80% block + company absorbs remainder | `money/allocate.test.ts` › "the company absorbs the rounding remainder" | ✅ |
 | BR5 both gates | `shift/state.test.ts` (30 cases) | ✅ |
-| BR6 daily FX, one rate per day | `fx/*.itest.ts` | 🔜 M2 |
+| BR6 daily FX, one rate per day | `fx/rate.test.ts` (11 cases) | ✅ |
+| BR7 close pre-flight blockers | `week/close.test.ts` (15 cases) | ✅ |
+| B-1 document expiry / B-3 assignment binding | `fleet/documents.test.ts` (24 cases) | ✅ |
 | BR7 Sunday week, Sunday→Saturday | `time/civil.test.ts` › "financial week — Sunday → Saturday" (7 cases) | ✅ |
 | BR7 non-Sunday week start refused by the DB | `db/verify-guards.sql` › guard 4 | ⚠ written, unrun |
 | BR8 visibility limits | `rbac/matrix.test.ts` (93 cases) | ✅ |
@@ -84,7 +86,7 @@ real protection either way.
 ## Current state
 
 ```
-8 test files · 210 tests · ~1.0 s · no Docker required
+11 test files · 260 tests · ~1.3 s · no Docker required
 ```
 
 **⚠ Rows marked "written, unrun"** live in `packages/db/verify-guards.sql`. That file attempts
