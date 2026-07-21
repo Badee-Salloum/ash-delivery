@@ -13,9 +13,10 @@
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "@ash/testkit": "workspace:*"
   },
   "scripts": {
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run"
   }
 }

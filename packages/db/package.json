@@ -1,0 +1,24 @@
+{
+  "name": "@ash/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "comment": "PostgreSQL adapters. Same ports as @ash/adapters/memory, proven by a shared conformance suite that runs against BOTH.",
+  "dependencies": {
+    "@ash/contracts": "workspace:*",
+    "@ash/domain": "workspace:*",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@ash/testkit": "workspace:*",
+    "@types/node": "^26.1.1",
+    "@types/pg": "^8.11.10",
+    "vitest": "^3.2.4"
+  },
+  "scripts": {
+    "test": "vitest run"
+  }
+}

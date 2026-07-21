@@ -122,3 +122,23 @@ jobs:
             exit 1
           fi
           echo "OK: removing a guard makes the verification fail, as it must"
+
+      # The PostgreSQL adapters must pass the SAME conformance suite as the in-memory ones.
+      # A behaviour that differs between the two is a bug in one of them, and this is the only
+      # place it surfaces. Uses its own database so the guard checks above stay untouched.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: port conformance — PostgreSQL
+        env:
+          PGPASSWORD: postgres
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/ash_conformance
+        run: |
+          set -euo pipefail
+          psql -v ON_ERROR_STOP=1 -h localhost -U postgres -d postgres \
+               -c 'CREATE DATABASE ash_conformance;'
+          pnpm --filter @ash/db test
