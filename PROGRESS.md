@@ -41,9 +41,41 @@
   `fin_seal_week()` stamps `week_lock_id` onto entries *before* setting `closed_at`, so a
   NEW-based check would pass or fail depending on statement order. Now `OLD` only.
 
+**Also done and VERIFIED — the ledger and the shift gates**
+
+- **Posting recipes** (`ledger/recipes.ts`) — pure and balanced. All three payment modes share
+  one shape: `order_fee` debits whichever asset received the fee, `yalago_cut` always debits
+  `yalago_share` and credits the wallet (BR2's instant deduction), and `share_split` closes the
+  whole of `fee_earned` into driver + company + Yallago. It balances *by construction*, because
+  `splitBlock()` already guarantees the three shares exhaust the fee total exactly — acceptance
+  criterion #5 falls out of the arithmetic instead of being checked afterwards.
+  The §2.3 example now walks the ledger end to end and lands on 20,000 / 40,000 / 40,000 with
+  `fee_earned` closing to zero and both driver funds at zero after the daily returns.
+- **Shift state machine** (`shift/state.ts`) — BR5's two gates as pure transitions, 30 tests.
+  Every refusal carries a machine-readable reason and package gaps come back as a *checklist*,
+  not a boolean. Covers: the driver's confirmation as the first signature and the manager's as
+  the second, re-shoot requests, `suspended` closing under the same equation, the
+  `br1_split_gate` advisory→strict switch, the orders-hash check that stops an approval landing
+  on numbers nobody reviewed, and RBAC on every transition.
+- **210 tests green in ~1.0 s**, still no Docker.
+
+**A real bug the property tests found**
+
+The random-event-stream property failed with `driver_wallet` at −1. Every cash order takes 20%
+*out* of the wallet while putting nothing in, so a thin top-up plus many cash orders drives it
+negative — twenty 5,000 fees against a 1,000 top-up leaves −19,000. My first `walletReturn`
+skipped the posting when the balance was negative, silently leaving money unaccounted for.
+
+This is the negative-wallet scenario the design review flagged as a blocker, reproduced
+independently by a generator. Two consequences: the return posting now runs the other way (the
+office covers the shortfall, the fund still lands on zero), and `minWalletBalance()` is a
+**separate** check — because **BR1 evaluates to exactly zero throughout**, so the zero equation
+genuinely cannot detect it. Logged as A-26, and it raised a new question for the client.
+
 **Next**
 
-1. **Send `docs/client-request-samples.md`.** Still the highest-value hour in the project.
+1. **Send `docs/client-request-samples.md`.** Still the highest-value hour in the project. It now
+   carries a second question: what does Yallago do when its 20% cut exceeds the wallet balance?
 2. `./scripts/db-verify.sh` — install Docker, or just push and let CI prove the guards.
 3. `packages/contracts` (Zod + ports), then `apps/api` with the route-permission registry and
    its boot-time completeness assertion.
