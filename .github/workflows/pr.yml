@@ -43,6 +43,12 @@ jobs:
       - name: wire-money check
         run: pnpm check:wire
 
+      # Node runs TypeScript in strip-only mode. Syntax needing a real transform (parameter
+      # properties, enums, decorators) fails at LOAD time — a container that crash-loops on
+      # deploy. The API hit exactly this, so it is a gate now.
+      - name: strippable-TypeScript check
+        run: pnpm check:strip
+
   domain:
     name: domain (unit + property)
     runs-on: ubuntu-latest

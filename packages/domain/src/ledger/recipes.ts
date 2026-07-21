@@ -80,13 +80,15 @@ export interface Posting {
 }
 
 export class UnbalancedPostingError extends Error {
-  constructor(
-    readonly posting: Posting,
-    readonly debits: Minor,
-    readonly credits: Minor,
-  ) {
+  readonly posting: Posting
+  readonly debits: Minor
+  readonly credits: Minor
+  constructor(posting: Posting, debits: Minor, credits: Minor) {
     super(`posting ${posting.eventType}/${posting.occurrenceKey} is unbalanced: D ${debits} <> C ${credits}`)
     this.name = 'UnbalancedPostingError'
+    this.posting = posting
+    this.debits = debits
+    this.credits = credits
   }
 }
 

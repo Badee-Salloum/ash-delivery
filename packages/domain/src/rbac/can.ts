@@ -178,12 +178,13 @@ export function can(
 
 /** Throwing form, for use at a route boundary. */
 export class ForbiddenError extends Error {
-  constructor(
-    readonly permission: PermissionKey,
-    readonly reason: DenyReason,
-  ) {
+  readonly permission: PermissionKey
+  readonly reason: DenyReason
+  constructor(permission: PermissionKey, reason: DenyReason) {
     super(`forbidden: ${permission} (${reason})`)
     this.name = 'ForbiddenError'
+    this.permission = permission
+    this.reason = reason
   }
 }
 

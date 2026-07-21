@@ -31,12 +31,14 @@ import { fundCodeOf } from '@ash/adapters/memory'
 import { grantsFromRows } from './rbac.ts'
 
 export class ServiceError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: string,
-    readonly detail?: unknown,
-  ) {
+  readonly status: number
+  readonly code: string
+  readonly detail?: unknown
+  constructor(status: number, code: string, detail?: unknown) {
     super(code)
+    this.status = status
+    this.code = code
+    this.detail = detail
   }
 }
 

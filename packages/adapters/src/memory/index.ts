@@ -39,10 +39,15 @@ import { type CalendarDate, type FxDay, type Minor, type Posting, isLive, minor 
  */
 
 export class FixedClock implements Clock {
-  constructor(
-    private ms: number,
-    private readonly offset = 180, // Asia/Damascus, UTC+3 year-round since Oct 2022
-  ) {}
+  // Explicit fields, not TypeScript parameter properties: Node's strip-only type stripping
+  // cannot erase those, and this code is executed as source in development.
+  private ms: number
+  private readonly offset: number
+  constructor(ms: number, offset = 180) {
+    // Asia/Damascus, UTC+3 year-round since Oct 2022
+    this.ms = ms
+    this.offset = offset
+  }
   nowMs(): number {
     return this.ms
   }
@@ -80,7 +85,10 @@ export class PlainHasher implements PasswordHasher {
 }
 
 export class MemoryUserRepo implements UserRepo {
-  constructor(readonly rows = new Map<string, UserRecord>()) {}
+  readonly rows: Map<string, UserRecord>
+  constructor(rows = new Map<string, UserRecord>()) {
+    this.rows = rows
+  }
   async findByUsername(username: string): Promise<UserRecord | null> {
     for (const u of this.rows.values()) if (u.username === username) return { ...u }
     return null
@@ -290,7 +298,10 @@ export class MemoryFxRepo implements FxRepo {
 export class MemoryWeekLockRepo implements WeekLockRepo {
   readonly rows: WeekLockRecord[] = []
   private nextId = 1
-  constructor(private readonly ledger: MemoryLedgerRepo) {}
+  private readonly ledger: MemoryLedgerRepo
+  constructor(ledger: MemoryLedgerRepo) {
+    this.ledger = ledger
+  }
   async find(branchId: string, weekStartDate: CalendarDate): Promise<WeekLockRecord | null> {
     return this.rows.find((r) => r.branchId === branchId && r.weekStartDate === weekStartDate) ?? null
   }

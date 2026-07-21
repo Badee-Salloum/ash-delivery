@@ -12,8 +12,10 @@
     "check:domain-pure": "node scripts/check-domain-pure.mjs",
     "check:sql": "node scripts/check-sql.mjs",
     "check:wire": "node scripts/check-wire-money.mjs",
-    "check": "pnpm typecheck && pnpm check:domain-pure && pnpm check:sql && pnpm check:wire && pnpm test",
-    "dev:db": "docker compose -f infra/compose/docker-compose.dev.yml up -d"
+    "check": "pnpm typecheck && pnpm check:domain-pure && pnpm check:sql && pnpm check:wire && pnpm check:strip && pnpm test",
+    "dev:db": "docker compose -f infra/compose/docker-compose.dev.yml up -d",
+    "check:strip": "node scripts/check-strippable.mjs",
+    "start": "node apps/api/src/server.ts"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
