@@ -14,7 +14,7 @@ import {
   setFxRequest,
   startPackageRequest,
 } from '@ash/contracts'
-import { checkWeekClose, minor, sum, weekClosedOn, weekStartFor } from '@ash/domain'
+import { addDays, checkWeekClose, dayOfWeek, minor, sum, weekClosedOn, weekStartFor } from '@ash/domain'
 import { SESSION_COOKIE, SESSION_IDLE_MS, login, logout, resolveSession } from './auth.ts'
 import { assertEveryRouteDeclaresPermission, collectRoutes, makeAuthorize, resetRouteRegistry } from './rbac.ts'
 import { registerExpenseRoutes } from './expenses.routes.ts'
@@ -358,6 +358,22 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       return reply.code(422).send({ error: 'branch_required_for_close' })
     }
 
+    // `weekClosedOn` throws on a non-Sunday, and an operator typing the wrong date deserves a
+    // clear 422 naming the problem rather than a 500. checkWeekClose reports it as a blocker,
+    // so ask it first — it returns early for exactly this case.
+    if (dayOfWeek(body.closeDate) !== 0) {
+      const check = checkWeekClose({
+        closeDate: body.closeDate,
+        unapprovedShiftCount: 0,
+        daysMissingCashCount: [],
+        provisionalFxDays: [],
+        priorWeekClosed: true,
+        trialBalanceDiff: minor(0n),
+        alreadyClosed: false,
+      })
+      return reply.code(422).send({ error: 'week_not_closable', blockers: check.blockers })
+    }
+
     const { start, end } = weekClosedOn(body.closeDate)
     const shifts = await deps.shifts.listByBranchAndDate(branchId, start)
     const closedStarts = await deps.weekLocks.listClosedStarts(branchId)
@@ -367,10 +383,19 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     let diff = 0n
     for (const e of entries) for (const l of e.lines) diff += l.side === 'D' ? l.amount : -l.amount
 
+    // Every day of the week must have been physically counted (E-5) before it can be sealed.
+    // This was a placeholder until cash counts existed; leaving it empty would have let a week
+    // close with drawers nobody ever opened.
+    const counted = new Set(await deps.cashCounts.listDatesInRange(branchId, start, end))
+    const daysMissingCashCount: string[] = []
+    for (let d = start; d <= end; d = addDays(d, 1)) {
+      if (!counted.has(d)) daysMissingCashCount.push(d)
+    }
+
     const check = checkWeekClose({
       closeDate: body.closeDate,
       unapprovedShiftCount: shifts.filter((s) => s.state !== 'approved' && s.state !== 'week_locked').length,
-      daysMissingCashCount: [],
+      daysMissingCashCount,
       provisionalFxDays: (await deps.fx.list())
         .filter((d) => d.provisional && d.businessDate >= start && d.businessDate <= end)
         .map((d) => d.businessDate),
