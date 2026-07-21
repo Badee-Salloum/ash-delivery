@@ -8,8 +8,10 @@
   "packageManager": "pnpm@11.3.0",
   "scripts": {
     "test": "pnpm -r test",
-    "typecheck": "tsc -b",
-    "check:domain-pure": "node scripts/check-domain-pure.mjs"
+    "typecheck": "tsc -p packages/domain/tsconfig.json",
+    "check:domain-pure": "node scripts/check-domain-pure.mjs",
+    "check:sql": "node scripts/check-sql.mjs",
+    "check": "pnpm typecheck && pnpm check:domain-pure && pnpm check:sql && pnpm test"
   },
   "devDependencies": {
     "typescript": "^5.9.2"
