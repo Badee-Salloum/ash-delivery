@@ -9,5 +9,5 @@
     "declarationMap": false,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "api/**/*.ts"]
 }

@@ -29,6 +29,26 @@ const schema = z.object({
   TZ_OFFSET_MINUTES: z.coerce.number().int().default(180),
 
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+
+  /**
+   * Pool size. Serverless (Vercel) opens a pool PER INSTANCE, so a large value multiplied by the
+   * concurrency limit exhausts Postgres. Neon's pooled connection string handles the fan-in;
+   * keep this small there. On a VPS with one long-lived process, 10 is fine.
+   */
+  DB_POOL_MAX: z.coerce.number().int().min(1).max(50).default(10),
+
+  /**
+   * Where evidence photos live. `disk` is correct on a VPS with a mounted volume; on a
+   * serverless host the filesystem is ephemeral, so production there MUST be `s3`.
+   */
+  BLOB_DRIVER: z.enum(['memory', 'disk', 's3']).default('disk'),
+  BLOB_DISK_ROOT: z.string().default('./media'),
+  S3_ENDPOINT: z.string().url().optional(),
+  S3_REGION: z.string().default('auto'),
+  S3_BUCKET: z.string().optional(),
+  S3_ACCESS_KEY_ID: z.string().optional(),
+  S3_SECRET_ACCESS_KEY: z.string().optional(),
+  S3_FORCE_PATH_STYLE: z.coerce.boolean().default(true),
 })
 
 export type Config = z.infer<typeof schema>
@@ -44,5 +64,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (config.NODE_ENV === 'production' && !config.DATABASE_URL) {
     throw new Error('DATABASE_URL is required in production — refusing to start against an in-memory store')
   }
+
+  if (config.BLOB_DRIVER === 's3') {
+    // Fail here, naming the variable, rather than on the first photo a driver uploads.
+    const missing = (['S3_ENDPOINT', 'S3_BUCKET', 'S3_ACCESS_KEY_ID', 'S3_SECRET_ACCESS_KEY'] as const).filter(
+      (k) => !config[k],
+    )
+    if (missing.length > 0) {
+      throw new Error(`BLOB_DRIVER=s3 requires: ${missing.join(', ')}`)
+    }
+  }
+
   return config
 }

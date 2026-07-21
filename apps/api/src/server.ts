@@ -1,8 +1,6 @@
-import { createMemoryDeps } from '@ash/adapters/memory'
-import type { Deps } from '@ash/contracts'
 import { buildApp } from './app.ts'
 import { loadConfig } from './config.ts'
-import { BcryptHasher, CryptoIdGen, SystemClock } from './runtime.ts'
+import { buildDeps } from './deps.ts'
 
 /**
  * Process entry point.
@@ -18,13 +16,7 @@ async function main(): Promise<void> {
     console.warn('[ash] no DATABASE_URL — running against the IN-MEMORY store. Data will not persist.')
   }
 
-  const deps: Deps = {
-    ...createMemoryDeps(Date.now()),
-    clock: new SystemClock(config.TZ_OFFSET_MINUTES),
-    ids: new CryptoIdGen(),
-    hasher: new BcryptHasher(config.BCRYPT_ROUNDS),
-  }
-
+  const { deps, dispose } = await buildDeps(config)
   const app = await buildApp({ deps, logger: true, splitGate: config.BR1_SPLIT_GATE })
 
   const shutdown = async (signal: string): Promise<void> => {
@@ -32,6 +24,7 @@ async function main(): Promise<void> {
     // Close the server before the process exits so in-flight approvals finish rather than being
     // cut mid-transaction. A half-posted shift is far worse than a slow deploy.
     await app.close()
+    await dispose()
     process.exit(0)
   }
   process.on('SIGTERM', () => void shutdown('SIGTERM'))
