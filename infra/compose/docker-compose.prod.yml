@@ -1,0 +1,114 @@
+# Production / staging stack.
+#
+# Run as TWO separate compose projects on one VPS:
+#   docker compose -p ash-prod    --env-file .env.prod    -f docker-compose.prod.yml up -d
+#   docker compose -p ash-staging --env-file .env.staging -f docker-compose.prod.yml up -d
+#
+# They share nothing but the external `ash-edge` network that Caddy sits on. Distinct project
+# names give distinct container names, volumes and networks, so a staging mistake cannot reach
+# production data. Ports are never published — only Caddy is reachable from outside.
+#
+#   docker network create ash-edge   # once, before the first deploy
+
+name: ${COMPOSE_PROJECT_NAME:-ash}
+
+services:
+  postgres:
+    image: postgis/postgis:17-3.5
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
+      POSTGRES_INITDB_ARGS: '--locale=C.UTF-8 --encoding=UTF8'
+    command:
+      - postgres
+      - -c
+      - timezone=Asia/Damascus
+      - -c
+      - log_min_duration_statement=500
+      - -c
+      - shared_buffers=256MB
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # Itemised so staging cannot starve production on a 4 GB box.
+    mem_limit: 1200m
+    networks: [internal]
+
+  # One-shot. Runs migrations to completion, then exits; the API waits for it to succeed.
+  # Separating it from the API means a failed migration stops the deploy instead of putting a
+  # container into a crash-loop that half-applies schema changes.
+  migrate:
+    image: ${API_IMAGE:?set API_IMAGE to a digest-pinned image}
+    restart: 'no'
+    command: ['node', 'apps/api/src/migrate-cli.ts']
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 256m
+    networks: [internal]
+
+  api:
+    image: ${API_IMAGE:?set API_IMAGE to a digest-pinned image}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-12}
+      # Pilot default. Flip to `strict` only after BR1 has been calibrated against a real
+      # Yallago shift — see RUNBOOK §1 and ASSUMPTIONS A-26.
+      BR1_SPLIT_GATE: ${BR1_SPLIT_GATE:-advisory}
+      TZ_OFFSET_MINUTES: ${TZ_OFFSET_MINUTES:-180}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - media:/app/media
+    mem_limit: 512m
+    networks: [internal, edge]
+
+  # Nightly pg_dump + media, pushed offsite by restic. On its OWN schedule, deliberately not
+  # inside the API process: backups must keep running while the app is in a crash loop.
+  backup:
+    image: ${BACKUP_IMAGE:-restic/restic:latest}
+    restart: unless-stopped
+    entrypoint: ['/bin/sh', '/scripts/backup-loop.sh']
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:?set RESTIC_REPOSITORY}
+      # Custody is SEPARATE from the SOPS age key. A backup you cannot decrypt is not a backup.
+      RESTIC_PASSWORD: ${RESTIC_PASSWORD:?set RESTIC_PASSWORD}
+      RETENTION_DAYS: ${RETENTION_DAYS:-90}
+    volumes:
+      - media:/app/media:ro
+      - ../scripts:/scripts:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 256m
+    networks: [internal]
+
+volumes:
+  pgdata:
+  media:
+
+networks:
+  internal:
+  edge:
+    external: true
+    name: ash-edge

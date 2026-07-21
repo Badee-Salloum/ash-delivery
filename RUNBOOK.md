@@ -85,22 +85,66 @@ carries the correction sequence so repeated corrections remain possible.
 
 ---
 
-## 5. Deploy / rollback / restore ⚠ NOT YET BUILT
+## 5. Deploy / rollback / restore ⚠ WRITTEN, NOT YET EXERCISED
 
-Planned and not yet implemented — do not treat this section as operational. Target: GitHub
-Actions → buildx → GHCR, deploy via `docker context` over SSH, migrations in a one-shot
-container under a PG advisory lock with an automatic pre-migration `pg_dump -Fc`, rollback by
-re-pinning the previous image digest. Backups: `restic` to Backblaze B2, nightly `pg_dump -Fc`
-plus the media volume, 90-day retention, from a sidecar on its **own** cron so backups keep
-running while the app is in a crash loop.
+The pipeline exists (`.github/workflows/release.yml`, `infra/`) but **no deploy has ever run**.
+Treat this as the intended procedure, not a proven one, until the first staging deploy is green.
+
+### First-time VPS setup
+
+```bash
+docker network create ash-edge          # the only network Caddy and the APIs share
+mkdir -p /srv/ash/backups && cd /srv/ash
+git clone <repo> . && sops -d .env.prod.enc > .env.prod   # never store plaintext at rest
+docker run -d --name ash-caddy --network ash-edge -p 80:80 -p 443:443   -v /srv/ash/infra/caddy/Caddyfile:/etc/caddy/Caddyfile   -v caddy_data:/data -v /srv/ash/www:/srv caddy:2
+```
+
+Staging and production run as **two compose projects on one box** (`-p ash-staging`,
+`-p ash-prod`). Distinct project names give distinct container names, volumes and networks, so a
+staging mistake cannot reach production data. Neither publishes a port — only Caddy is reachable.
+
+### Deploying
+
+Push a `v*` tag. The release workflow runs the full PR gate first (a tag can never deploy
+something that skipped it), builds in CI, pushes to GHCR, then over SSH:
+
+1. takes a **pre-migration `pg_dump -Fc`** — the cheapest insurance in the pipeline;
+2. pulls the image **pinned by digest**, not tag: a tag can be moved, a digest cannot, so what
+   was tested is exactly what runs;
+3. runs the one-shot `migrate` container — if it fails the API never starts and the **old
+   container keeps serving**;
+4. runs the smoke test: `/health`, HTTP→HTTPS redirect, and an unauthenticated `PUT /api/fx`
+   that must return 401.
+
+### Rolling back
+
+Automatic on smoke failure: the workflow re-pins the previously running digest. Manually:
+
+```bash
+export API_IMAGE=ghcr.io/OWNER/ash-delivery/api@sha256:<previous>
+docker compose -p ash-prod --env-file .env.prod -f infra/compose/docker-compose.prod.yml up -d --wait api
+```
+
+**Migrations are forward-only and are NOT reverted by a rollback.** Before rolling back across a
+migration, confirm the new schema is still compatible with the older image — additive changes
+usually are, a dropped or renamed column is not.
+
+### Restoring
+
+```bash
+restic snapshots --tag db
+restic dump <snapshot> ash-<stamp>.dump > /tmp/restore.dump
+# Restore into a THROWAWAY database first and foot the trial balance before touching production.
+createdb ash_restore && pg_restore -d ash_restore /tmp/restore.dump
+psql -d ash_restore -c "SELECT SUM(CASE WHEN side='D' THEN amount_minor ELSE -amount_minor END) FROM journal_lines;"
+# Expect exactly 0.
+```
 
 **The restore rehearsal is a deliverable, not a formality.** It must be run by hand once before
 go-live and **timed**, and the measured number written here. If it exceeds the SRS's 4-hour RTO,
 the client is told in writing rather than the figure being left as fiction.
 
 > Measured RTO: **not yet measured.**
-
----
 
 ## 6. Onboarding a driver or vehicle ⚠ NOT YET BUILT — M1
 

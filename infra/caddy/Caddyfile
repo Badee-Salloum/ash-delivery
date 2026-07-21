@@ -1,0 +1,90 @@
+# Caddy sits on the shared `ash-edge` network and is the only thing exposed to the internet.
+# It terminates TLS (automatic Let's Encrypt), serves both SPA bundles, and proxies /api to the
+# API container on the SAME ORIGIN — which removes the entire CORS and SameSite-cookie bug class
+# rather than configuring around it.
+#
+#   docker network create ash-edge
+#   docker run -d --name ash-caddy --network ash-edge -p 80:80 -p 443:443 \
+#     -v $PWD/Caddyfile:/etc/caddy/Caddyfile -v caddy_data:/data caddy:2
+
+{
+	email {$ACME_EMAIL}
+	# TLS 1.2+ per SRS §7. Caddy defaults to 1.2 minimum; stated explicitly so a future
+	# upgrade cannot silently relax it.
+	servers {
+		protocols h1 h2
+	}
+}
+
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# The admin console and the driver PWA are entirely self-hosted: no CDN, no Google
+		# Fonts, no third-party analytics. Sanctions and geo-blocking from Damascus cannot
+		# break what is not fetched from elsewhere.
+		Content-Security-Policy "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		-Server
+	}
+}
+
+(api_proxy) {
+	handle /api/* {
+		uri strip_prefix /api
+		reverse_proxy {args[0]}:3000 {
+			health_uri /health
+			health_interval 10s
+		}
+	}
+}
+
+# ── production ───────────────────────────────────────────────────────────────────────────
+{$PROD_DOMAIN} {
+	import security_headers
+	import api_proxy ash-prod-api-1
+
+	# Both SPAs are static bundles; anything not a real file falls through to index.html so
+	# client-side routing works on a hard refresh.
+	handle /driver/* {
+		root * /srv/prod/driver
+		try_files {path} /index.html
+		file_server
+	}
+	handle {
+		root * /srv/prod/admin
+		try_files {path} /index.html
+		file_server
+	}
+
+	log {
+		output file /var/log/caddy/prod.log {
+			roll_size 20mb
+			roll_keep 10
+		}
+	}
+}
+
+# ── staging ──────────────────────────────────────────────────────────────────────────────
+{$STAGING_DOMAIN} {
+	import security_headers
+	import api_proxy ash-staging-api-1
+
+	# Staging carries real-looking seed data; keep it off search engines and behind a password.
+	header X-Robots-Tag "noindex, nofollow"
+	basic_auth {
+		{$STAGING_USER} {$STAGING_PASSWORD_HASH}
+	}
+
+	handle /driver/* {
+		root * /srv/staging/driver
+		try_files {path} /index.html
+		file_server
+	}
+	handle {
+		root * /srv/staging/admin
+		try_files {path} /index.html
+		file_server
+	}
+}

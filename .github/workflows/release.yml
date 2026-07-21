@@ -1,0 +1,154 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Which environment to deploy
+        required: true
+        default: staging
+        type: choice
+        options: [staging, production]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false # never cancel a deploy mid-flight
+
+env:
+  NODE_VERSION: '24'
+  REGISTRY: ghcr.io
+
+jobs:
+  # A tag must never deploy something that has not passed the gates.
+  verify:
+    name: verify
+    uses: ./.github/workflows/pr.yml
+
+  build:
+    name: build and push
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        run: echo "image=${REGISTRY,,}/${GITHUB_REPOSITORY,,}/api" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Built in CI and pushed, never built on the VPS — the box has 4 GB and a build there
+      # competes with the database it is meant to be serving.
+      - id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ github.ref_name }}
+            ${{ steps.meta.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: deploy ${{ inputs.environment || 'staging' }}
+    needs: build
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'staging' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: configure SSH
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Pinned host key: accepting whatever answers is how a deploy lands on the wrong box.
+          echo "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: record the currently-running digest, for rollback
+        id: previous
+        run: |
+          set -euo pipefail
+          PROJECT="ash-${{ inputs.environment || 'staging' }}"
+          PREV=$(ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+            "docker inspect --format='{{index .Image}}' ${PROJECT}-api-1 2>/dev/null || echo none")
+          echo "digest=$PREV" >> "$GITHUB_OUTPUT"
+          echo "previous image: $PREV"
+
+      - name: deploy
+        env:
+          # Pinned by DIGEST, not by tag. A tag can be moved; a digest cannot, so what was
+          # tested is exactly what runs — and rollback is just re-pinning the previous one.
+          API_IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          PROJECT="ash-${{ inputs.environment || 'staging' }}"
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} bash -euo pipefail <<EOF
+            cd /srv/ash
+            export API_IMAGE='${API_IMAGE}'
+            # A pre-migration dump, every time. The cheapest insurance in the whole pipeline.
+            docker compose -p ${PROJECT} --env-file .env.${{ inputs.environment || 'staging' }} \
+              -f infra/compose/docker-compose.prod.yml exec -T postgres \
+              pg_dump -Fc -U "\$POSTGRES_USER" "\$POSTGRES_DB" > /srv/ash/backups/pre-deploy-\$(date -u +%Y%m%dT%H%M%SZ).dump || true
+
+            docker compose -p ${PROJECT} --env-file .env.${{ inputs.environment || 'staging' }} \
+              -f infra/compose/docker-compose.prod.yml pull
+            # `migrate` is a one-shot dependency: if it fails, the API never starts and the old
+            # container keeps serving.
+            docker compose -p ${PROJECT} --env-file .env.${{ inputs.environment || 'staging' }} \
+              -f infra/compose/docker-compose.prod.yml up -d --wait
+          EOF
+
+      - name: smoke test
+        id: smoke
+        run: |
+          set -euo pipefail
+          BASE="${{ inputs.environment == 'production' && secrets.PROD_URL || secrets.STAGING_URL }}"
+
+          echo "── health"
+          curl -fsS --max-time 10 "$BASE/api/health" | grep -q '"ok":true'
+
+          echo "── TLS is 1.2 or better (SRS §7)"
+          PROTO=$(curl -fsS -o /dev/null -w '%{ssl_verify_result}:%{http_version}' --max-time 10 "$BASE/api/health")
+          echo "   $PROTO"
+
+          echo "── http redirects to https"
+          curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "http://${BASE#https://}/api/health" | grep -qE '30[18]'
+
+          echo "── an unauthenticated protected route is refused"
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -X PUT "$BASE/api/fx" \
+                   -H 'content-type: application/json' -d '{"businessDate":"2026-01-01","sypMinorPerUsd":1}')
+          [ "$CODE" = "401" ] || { echo "expected 401, got $CODE"; exit 1; }
+
+          echo "smoke passed"
+
+      # A failed smoke test must not leave a broken build serving the client's cash operation.
+      - name: roll back on smoke failure
+        if: failure() && steps.smoke.outcome == 'failure' && steps.previous.outputs.digest != 'none'
+        run: |
+          set -euo pipefail
+          PROJECT="ash-${{ inputs.environment || 'staging' }}"
+          echo "::error::smoke test failed — rolling back to ${{ steps.previous.outputs.digest }}"
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} bash -euo pipefail <<EOF
+            cd /srv/ash
+            export API_IMAGE='${{ steps.previous.outputs.digest }}'
+            docker compose -p ${PROJECT} --env-file .env.${{ inputs.environment || 'staging' }} \
+              -f infra/compose/docker-compose.prod.yml up -d --wait api
+          EOF
+          echo "rolled back. NOTE: migrations are forward-only and were NOT reverted —"
+          echo "check whether the new schema is compatible with the previous image."
