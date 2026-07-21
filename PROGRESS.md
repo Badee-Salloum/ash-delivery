@@ -1,5 +1,38 @@
 # PROGRESS
 
+## 2026-07-21 (late) — Bundle 1a backend complete
+
+**415 tests green, no Docker.** See [STATUS.md](STATUS.md) for the full picture.
+
+Every SRS section in Bundle 1a now has working, tested endpoints — 34 of them. All twelve ports
+have both an in-memory and a PostgreSQL implementation, proven by one shared conformance suite.
+
+**Closed this session**
+
+- **Photo evidence (C-6)** — was entirely absent. Real upload, content-addressed dedupe,
+  magic-byte sniffing, RBAC-checked serving. Critically, the BR5 gates now read *uploaded media*
+  rather than a list of slot names the client asserted.
+- **The last three PostgreSQL adapters**, so the API can actually run against a database.
+- **Fleet management (B)** — drivers, vehicles, documents, expiry board.
+- **Expenses (G)** — an entire priced section that was at zero.
+- **Cash count (E-5) and manual entries (E-3)**, completing section E, and the Sunday close now
+  actually verifies every day was counted.
+- **Vercel + Neon deployment path**, with a durability guard that refuses to boot production
+  against storage that would lose evidence on redeploy.
+
+**Six bugs the tests found**, each invisible to reading — see STATUS.md. The two worth repeating:
+a manual entry naming `office_cash` moved nothing at all, and the API could not start because
+TypeScript parameter properties are not strippable by Node while every test passed.
+
+**Next, in order**
+
+1. Send `docs/client-request-samples.md` — still the highest-value hour in the project.
+2. Prove `verify-guards.sql` against Neon (run against stock Postgres 17, not Neon).
+3. Choose object storage for evidence photos.
+4. Build the two front-ends (~7 days). Nothing can be *used* until then.
+
+---
+
 ## 2026-07-21 — deployable backend: Postgres adapters, Docker, release pipeline, seed
 
 **319 tests green, ~4 s, no Docker needed on this machine.**
