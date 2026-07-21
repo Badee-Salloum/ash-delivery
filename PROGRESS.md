@@ -1,5 +1,71 @@
 # PROGRESS
 
+## 2026-07-21 — M0/M3: the API, and the §2.3 shift running over real HTTP
+
+**Done and VERIFIED — 293 tests, ~3 s, still no Docker**
+
+The whole shift lifecycle now runs end to end through the actual HTTP surface a driver and a
+branch manager will use. `apps/api/test/lifecycle.test.ts` drives the client's own §2.3 example:
+float 100,000 + top-up 50,000 → 20 orders (12 cash / 6 electronic / 2 free) → close at 160,000
+cash and 70,000 wallet → «الفرق: ٠» → manager approves → the ledger shows Yallago 20,000, driver
+40,000, company 40,000, `fee_earned` closed to zero, and both driver funds back at zero.
+
+This works without a database because every dependency is a **port**:
+
+- `packages/contracts` — the port interfaces and the Zod wire schemas.
+- `packages/adapters/memory` — in-memory implementations that enforce the *same* invariants the
+  database does: the `(shiftId, eventType, occurrenceKey)` idempotency key, the double-entry
+  balance check, and the global uniqueness of `provider_order_no`. They are not stubs that
+  always say yes, so a test passing here is testing real behaviour.
+- `apps/api` — Fastify, with the PostgreSQL adapters dropping in later one file at a time.
+
+**Security properties now enforced at the HTTP layer**
+
+- Sessions are opaque and DB-backed, 30-minute *idle*-sliding — tested by advancing the clock
+  past the window, and by polling every 29 minutes to prove a manager mid-review is not kicked out.
+- Account locks after exactly 5 failed attempts, and even the correct password is then refused.
+- **The lockout write is audited with `actor_kind='anonymous'`** — it happens on the
+  unauthenticated path where no actor exists, and a trigger that raised there would make the
+  lockout impossible to implement and turn every failed login into a 500.
+- Login failures are indistinguishable between "wrong password" and "no such user", including a
+  dummy hash comparison so the response time does not enumerate usernames.
+- **Every route declares the permission it needs, and the app refuses to boot if one forgot.**
+  A test asserts the public list is exactly `/health`, `/me`, `/auth/login`, `/auth/logout`.
+
+**A third guard, negative-tested like the others**
+
+`scripts/check-wire-money.mjs` — money crosses HTTP as a decimal string, never a JSON number.
+`JSON.stringify` throws on a bigint and the tempting fix is `Number(amount)`, which is the single
+most likely way a defect ever enters this system. The guard bans `z.number()` on money-shaped
+fields, `Number(...)` on money-shaped identifiers, and `parseFloat` outright. Verified to fail on
+an injected violation, then pass again.
+
+**Notable behaviours proven over HTTP**
+
+- Approving twice does not double-post — the state machine refuses, and the idempotency key would
+  have stopped the postings even if it hadn't.
+- A stale `reviewedOrdersHash` returns **409**, so approval cannot land on numbers nobody reviewed.
+- A non-zero BR1 returns **422** *and* names the likely cause; no `share_split` is written.
+- The pay-mode blind spot survives the round trip: difference `"0.00"`, `cashDifference`
+  `"5000.00"`, `walletDifference` `"-5000.00"`, cause `pay_mode_misclassified`. Advisory lets it
+  through, strict blocks it.
+- A duplicate Yallago order number is caught as it is typed (409).
+- A branch manager reaching another branch gets 403 `outside_branch`; a driver touching another
+  driver's shift gets 403 `not_owner`.
+
+**Next**
+
+1. **Send `docs/client-request-samples.md`** — still the highest-value hour in the project.
+2. Swap the in-memory adapters for PostgreSQL ones (`packages/db`), which also runs the guard
+   harness for real. This is the step that needs Docker.
+3. The two front-ends: the admin console and the driver PWA.
+4. bcrypt for the production hasher (the port exists; only the test implementation is wired).
+
+**Still true, and worth repeating:** no UI exists, and the SQL migrations have never been
+executed. What is real is the arithmetic and the HTTP contract.
+
+---
+
 ## 2026-07-21 — M0 in progress: RBAC, schema, and the guard harness
 
 **Done and VERIFIED** (green on this machine)

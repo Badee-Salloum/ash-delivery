@@ -8,12 +8,15 @@
   "packageManager": "pnpm@11.3.0",
   "scripts": {
     "test": "pnpm -r test",
-    "typecheck": "tsc -p packages/domain/tsconfig.json",
+    "typecheck": "tsc -p packages/domain/tsconfig.json && tsc -p packages/contracts/tsconfig.json && tsc -p packages/adapters/tsconfig.json && tsc -p apps/api/tsconfig.json",
     "check:domain-pure": "node scripts/check-domain-pure.mjs",
     "check:sql": "node scripts/check-sql.mjs",
-    "check": "pnpm typecheck && pnpm check:domain-pure && pnpm check:sql && pnpm test"
+    "check:wire": "node scripts/check-wire-money.mjs",
+    "check": "pnpm typecheck && pnpm check:domain-pure && pnpm check:sql && pnpm check:wire && pnpm test",
+    "dev:db": "docker compose -f infra/compose/docker-compose.dev.yml up -d"
   },
   "devDependencies": {
+    "@types/node": "^26.1.1",
     "typescript": "^5.9.2"
   }
 }

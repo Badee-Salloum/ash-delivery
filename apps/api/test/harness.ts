@@ -1,0 +1,92 @@
+import type { FastifyInstance } from 'fastify'
+import { type MemoryDeps, createMemoryDeps } from '@ash/adapters/memory'
+import { type Minor, businessDateFor, minor } from '@ash/domain'
+import { buildApp } from '../src/app.ts'
+import { SESSION_COOKIE } from '../src/auth.ts'
+
+export const BRANCH = 'branch-damascus'
+export const OTHER_BRANCH = 'branch-aleppo'
+export const DRIVER_ID = 'driver-1'
+export const DRIVER2_ID = 'driver-2'
+export const VEHICLE_ID = 'vehicle-1'
+
+/** 2026-07-21, 08:00 Damascus (UTC+3) — a Tuesday, mid-week, so week logic is unambiguous. */
+export const NOW_MS = Date.UTC(2026, 6, 21, 5, 0, 0)
+
+export const syp = (n: number): Minor => minor(BigInt(n) * 100n)
+export const sypStr = (n: number): string => `${n}.00`
+
+export interface Harness {
+  app: FastifyInstance
+  deps: MemoryDeps
+  loginAs(username: string): Promise<string>
+  cookie(token: string): string
+}
+
+export async function makeHarness(opts: { splitGate?: 'advisory' | 'strict' } = {}): Promise<Harness> {
+  const deps = createMemoryDeps(NOW_MS)
+
+  deps.directory.branches.set(BRANCH, { id: BRANCH, code: 'DAM', nameAr: 'دمشق', nameEn: 'Damascus' })
+  deps.directory.branches.set(OTHER_BRANCH, { id: OTHER_BRANCH, code: 'ALP', nameAr: 'حلب', nameEn: 'Aleppo' })
+  deps.directory.drivers.set(DRIVER_ID, { id: DRIVER_ID, branchId: BRANCH, code: 'DRV-1', fullNameAr: 'سائق ١', active: true })
+  deps.directory.drivers.set(DRIVER2_ID, { id: DRIVER2_ID, branchId: BRANCH, code: 'DRV-2', fullNameAr: 'سائق ٢', active: true })
+  deps.directory.vehicles.set(VEHICLE_ID, {
+    id: VEHICLE_ID,
+    branchId: BRANCH,
+    vehicleTypeId: 'e_motorbike',
+    code: 'VEH-1',
+    state: 'ready',
+    active: true,
+  })
+  deps.directory.vehicles.set('vehicle-2', {
+    id: 'vehicle-2',
+    branchId: BRANCH,
+    vehicleTypeId: 'e_motorbike',
+    code: 'VEH-2',
+    state: 'ready',
+    active: true,
+  })
+
+  // The brief's seed cast: GM, sysadmin, branch manager, two drivers.
+  const users = [
+    { id: 'u-gm', roleKey: 'general_manager' as const, username: 'gm', branchId: null, driverId: null },
+    { id: 'u-sa', roleKey: 'system_admin' as const, username: 'sysadmin', branchId: null, driverId: null },
+    { id: 'u-bm', roleKey: 'branch_manager' as const, username: 'manager', branchId: BRANCH, driverId: null },
+    { id: 'u-bm2', roleKey: 'branch_manager' as const, username: 'manager2', branchId: OTHER_BRANCH, driverId: null },
+    { id: 'u-d1', roleKey: 'driver' as const, username: 'driver1', branchId: BRANCH, driverId: DRIVER_ID },
+    { id: 'u-d2', roleKey: 'driver' as const, username: 'driver2', branchId: BRANCH, driverId: DRIVER2_ID },
+  ]
+  for (const u of users) {
+    deps.users.seed({
+      ...u,
+      fullNameAr: u.username,
+      passwordHash: 'plain:secret',
+      failedAttempts: 0,
+      lockedUntilMs: null,
+      active: true,
+    })
+  }
+
+  const app = await buildApp({ deps, ...(opts.splitGate ? { splitGate: opts.splitGate } : {}) })
+
+  return {
+    app,
+    deps,
+    cookie: (token: string) => `${SESSION_COOKIE}=${token}`,
+    async loginAs(username: string) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/auth/login',
+        payload: { username, password: 'secret' },
+      })
+      if (res.statusCode !== 200) throw new Error(`login failed for ${username}: ${res.statusCode} ${res.body}`)
+      const setCookie = res.headers['set-cookie']
+      const raw = Array.isArray(setCookie) ? setCookie[0] : setCookie
+      const token = /ash_session=([^;]+)/.exec(String(raw))?.[1]
+      if (!token) throw new Error('no session cookie returned')
+      return token
+    },
+  }
+}
+
+export const today = businessDateFor(NOW_MS, 180)

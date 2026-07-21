@@ -10,11 +10,12 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 | # | Criterion (SRS §8) | Test | Status |
 | --- | --- | --- | --- |
 | **1** | A shift cannot open before the start package is complete, the driver confirms, and the branch manager approves | `shift/state.test.ts` › "the OPEN gate (BR5, AC #1)" (5 cases) | ✅ |
-| | | `shift/gates.open.itest.ts` (through the API) | 🔜 M3 |
+| | | `api/lifecycle.test.ts` › "will not open without the odometer photo" / "will not open before the branch manager approves" | ✅ |
 | **2** | A shift cannot close before the zero equation holds and the branch manager approves | `br1/canonical.test.ts` › "closes the zero equation exactly" · `br1/property.test.ts` › "closes at exactly zero for any mix" | ✅ |
 | | | `shift/state.test.ts` › "the CLOSE gate (BR5, AC #2)" (7 cases) | ✅ |
-| | | `shift/gates.close.itest.ts` (through the API) | 🔜 M3 |
-| | | `shift/lifecycle.e2e.ts` — the §2.3 example through the real UI | 🔜 M3 |
+| | | `api/lifecycle.test.ts` › "will not close when the equation is not zero, and says why" | ✅ |
+| | | `api/lifecycle.test.ts` › "the SRS §2.3 shift, end to end over HTTP" | ✅ |
+| | | `shift/lifecycle.e2e.ts` — the same, through the real **UI** | 🔜 M3 |
 | **3** | A cash order deducts 20% of its fee instantly from the driver's wallet to the Yallago fund | `br1/canonical.test.ts` › "reproduces the SRS table row for row" · "splits at approval" | ✅ |
 | | | `ledger/recipes.test.ts` › "yalago_share accumulates the 20,000" | ✅ |
 | **4** | An electronic or free order adds 80% of its fee to the driver's wallet | `br1/canonical.test.ts` › "reproduces the SRS table row for row" | ✅ |
@@ -24,6 +25,7 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 | | | `db/verify-guards.sql` › guard 1 — rejected at COMMIT by Postgres | ⚠ written, unrun |
 | **6** | The day's rate applies to all that day's transactions **and the USD equivalent appears in reports** | `fx/rate.test.ts` › "USD equivalence (BR6, AC #6)" (6 cases) + "resolving the day's rate" (5 cases) | ✅ |
 | | | `fx/usd-display.itest.ts` — the *second half* of the criterion, easy to miss | 🔜 M5 |
+| | | `api/auth-rbac.test.ts` › "only the system admin may set the daily rate" | ✅ |
 | **7** | The daily band is computed automatically from the order count, changes only the company's share, and only the sysadmin may edit it | `tier/bands.test.ts` › "band boundaries — 14/15, 24/25, 34/35" (9 cases) | ✅ |
 | | | `tier/bands.test.ts` › "the company absorbs the rounding remainder, never the driver and never Yallago" | ✅ |
 | | | `rbac/matrix.test.ts` › "the General Manager may NOT edit tier rules" | ✅ |
@@ -32,7 +34,8 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 | | | `ledger/recipes.test.ts` › "corrections (BR7)" | ✅ |
 | **12** | Total profits are visible to the General Manager only; a branch manager sees only his branch | `rbac/matrix.test.ts` — every role × every permission, 93 generated cases | ✅ |
 | | | `shift/state.test.ts` › "RBAC on transitions" | ✅ |
-| | | `rbac/visibility.e2e.ts` | 🔜 M5 |
+| | | `api/auth-rbac.test.ts` › "RBAC over HTTP" (7 cases, every role × protected route) | ✅ |
+| | | `rbac/visibility.e2e.ts` — through the real UI | 🔜 M5 |
 
 ---
 
@@ -46,7 +49,7 @@ accrues weekly — which is exactly the kind of thing that silently regresses.
 | BR1 zero equation | `br1/canonical.test.ts`, `br1/property.test.ts` | ✅ |
 | BR1 pay-mode blind spot | `br1/canonical.test.ts` › "the pay-mode blind spot" · `br1/property.test.ts` › "flipping any order cash↔electronic" | ✅ |
 | BR1 cause breakdown | `br1/canonical.test.ts` › "difference breakdown — the arithmetic signatures are distinguishable" | ✅ |
-| BR2 no weekly settlement | `ledger/br2.no-settlement.itest.ts` — asserts the cut posts per order at approval and no weekly accrual recipe exists | 🔜 M2 |
+| BR2 no weekly settlement | `api/lifecycle.test.ts` — yalago_share lands per order at approval; there is no weekly accrual recipe to call | ✅ |
 | BR3 three payment modes | `br1/property.test.ts` (all three generated) | ✅ |
 | BR4 80% block + company absorbs remainder | `money/allocate.test.ts` › "the company absorbs the rounding remainder" | ✅ |
 | BR5 both gates | `shift/state.test.ts` (30 cases) | ✅ |
@@ -55,7 +58,9 @@ accrues weekly — which is exactly the kind of thing that silently regresses.
 | B-1 document expiry / B-3 assignment binding | `fleet/documents.test.ts` (24 cases) | ✅ |
 | BR7 Sunday week, Sunday→Saturday | `time/civil.test.ts` › "financial week — Sunday → Saturday" (7 cases) | ✅ |
 | BR7 non-Sunday week start refused by the DB | `db/verify-guards.sql` › guard 4 | ⚠ written, unrun |
-| BR8 visibility limits | `rbac/matrix.test.ts` (93 cases) | ✅ |
+| BR8 visibility limits | `rbac/matrix.test.ts` (93 cases) + `api/auth-rbac.test.ts` | ✅ |
+| A-1 auth: 5-attempt lockout, 30-min idle sessions | `api/auth-rbac.test.ts` › "authentication" (9 cases) | ✅ |
+| Every route declares a permission (boot assertion) | `api/auth-rbac.test.ts` › "the boot assertion" (3 cases) | ✅ |
 
 ## Invariants proven by property test
 
@@ -86,7 +91,10 @@ real protection either way.
 ## Current state
 
 ```
-11 test files · 260 tests · ~1.3 s · no Docker required
+domain    11 files · 260 tests
+api        2 files ·  33 tests   (full lifecycle over HTTP, no database)
+           ────────────────────
+           13 files · 293 tests · ~3 s · no Docker required
 ```
 
 **⚠ Rows marked "written, unrun"** live in `packages/db/verify-guards.sql`. That file attempts

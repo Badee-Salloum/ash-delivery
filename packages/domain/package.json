@@ -7,7 +7,6 @@
     ".": "./src/index.ts"
   },
   "comment": "PURE. `dependencies` MUST stay empty — asserted by scripts/check-domain-pure.mjs in CI.",
-  "dependencies": {},
   "devDependencies": {
     "fast-check": "^4.1.1",
     "vitest": "^3.2.4"

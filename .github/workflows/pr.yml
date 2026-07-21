@@ -38,6 +38,11 @@ jobs:
       - name: SQL static checks
         run: pnpm check:sql
 
+      # Money crosses HTTP as a decimal string. JSON.stringify throws on a bigint, and the
+      # tempting fix — Number(amount) — is the likeliest way a defect ever enters this system.
+      - name: wire-money check
+        run: pnpm check:wire
+
   domain:
     name: domain (unit + property)
     runs-on: ubuntu-latest
