@@ -293,6 +293,55 @@ export interface MediaRepo {
   listSlots(shiftId: string): Promise<AttachedSlot[]>
 }
 
+// ── Expenses (SRS G) ──────────────────────────────────────────────────────────────────────
+
+export interface ExpenseCategoryRecord {
+  id: string
+  code: string
+  nameAr: string
+  active: boolean
+}
+
+export interface ExpenseRecord {
+  id: string
+  branchId: string
+  categoryId: string
+  /** G-1 cost centres: vehicle / branch / general — these feed per-axis profitability. */
+  costCenterKind: 'vehicle' | 'branch' | 'general'
+  vehicleId: string | null
+  amount: Minor
+  businessDate: CalendarDate
+  description: string
+  /** Required above the configured ceiling (G-3 / س52). */
+  receiptMediaId: string | null
+  journalEntryId: number | null
+  createdBy: string
+}
+
+export interface ExpenseRepo {
+  listCategories(): Promise<ExpenseCategoryRecord[]>
+  createCategory(category: ExpenseCategoryRecord): Promise<void>
+  create(expense: ExpenseRecord): Promise<void>
+  listByBranchAndDate(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ExpenseRecord[]>
+  /** Per-cost-centre totals — G-1's «تُغذي ربحية كل محور». */
+  totalsByCostCenter(
+    branchId: string,
+    from: CalendarDate,
+    to: CalendarDate,
+  ): Promise<Array<{ costCenterKind: string; vehicleId: string | null; total: Minor }>>
+}
+
+// ── Settings (SRS A-4) ────────────────────────────────────────────────────────────────────
+
+export interface SettingsRepo {
+  /** Approval ceilings (س52): above this, an expense needs a photographed receipt. */
+  receiptRequiredAbove(branchId: string): Promise<Minor | null>
+  /** Fixed kWh price for charging cost (G-2 / س64). */
+  kwhPriceMinor(): Promise<Minor | null>
+  get(key: string): Promise<unknown>
+  set(key: string, value: unknown, actorId: string): Promise<void>
+}
+
 export interface AuditFilter {
   // `| undefined` explicitly, because `exactOptionalPropertyTypes` distinguishes "absent" from
   // "present and undefined" — and a parsed query object hands us the latter.
@@ -351,6 +400,8 @@ export interface Deps {
   shifts: ShiftRepo
   orders: OrderRepo
   ledger: LedgerRepo
+  expenses: ExpenseRepo
+  settings: SettingsRepo
   media: MediaRepo
   blobs: BlobStore
   fx: FxRepo

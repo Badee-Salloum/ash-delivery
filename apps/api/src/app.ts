@@ -17,6 +17,7 @@ import {
 import { checkWeekClose, minor, sum, weekClosedOn, weekStartFor } from '@ash/domain'
 import { SESSION_COOKIE, SESSION_IDLE_MS, login, logout, resolveSession } from './auth.ts'
 import { assertEveryRouteDeclaresPermission, collectRoutes, makeAuthorize, resetRouteRegistry } from './rbac.ts'
+import { registerExpenseRoutes } from './expenses.routes.ts'
 import { registerFleetRoutes } from './fleet.routes.ts'
 import { MAX_UPLOAD_BYTES, readEvidence, uploadEvidence } from './media.service.ts'
 import {
@@ -329,6 +330,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   // ── Fleet: drivers, vehicles, documents (SRS B) ─────────────────────────────────
   registerFleetRoutes(app, deps)
+
+  // ── Expenses (SRS G) ────────────────────────────────────────────────────────────
+  registerExpenseRoutes(app, deps)
 
   // ── Daily FX (BR6) — system admin only ──────────────────────────────────────────────────
   app.put('/fx', { config: { permission: 'fx_rate.write' } }, async (req) => {

@@ -6,6 +6,10 @@ import type {
   MediaRepo,
   DirectoryRepo,
   DocumentRecord,
+  ExpenseCategoryRecord,
+  ExpenseRecord,
+  ExpenseRepo,
+  SettingsRepo,
   DriverRecord,
   RoleGrantRecord,
   ShiftRecord,
@@ -531,3 +535,139 @@ const toMedia = (r: Record<string, unknown>): MediaRecord => ({
   receivedAtMs: (r.received_at as Date).getTime(),
   uploadedBy: String(r.uploaded_by ?? ''),
 })
+
+// ── Expenses and settings (SRS G, A-4) ───────────────────────────────────────────────────
+
+export class PgExpenseRepo implements ExpenseRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async listCategories(): Promise<ExpenseCategoryRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT id, code, name_ar, active FROM expense_categories WHERE active ORDER BY code',
+    )
+    return rows.map((r) => ({
+      id: String(r.id),
+      code: String(r.code),
+      nameAr: String(r.name_ar),
+      active: Boolean(r.active),
+    }))
+  }
+
+  async createCategory(category: ExpenseCategoryRecord): Promise<void> {
+    try {
+      await this.pool.query(
+        'INSERT INTO expense_categories (id, code, name_ar, active) VALUES ($1,$2,$3,$4)',
+        [category.id, category.code, category.nameAr, category.active],
+      )
+    } catch (err) {
+      if (isPgError(err, PG.UNIQUE_VIOLATION)) {
+        throw Object.assign(new Error(`duplicate category ${category.code}`), { code: 'DUPLICATE_CODE' })
+      }
+      throw err
+    }
+  }
+
+  async create(expense: ExpenseRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO expenses (id, branch_id, category_id, cost_center_kind, vehicle_id, amount_minor,
+                             business_date, description, receipt_media_id, journal_entry_id, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [
+        expense.id,
+        expense.branchId,
+        expense.categoryId,
+        expense.costCenterKind,
+        expense.vehicleId,
+        expense.amount.toString(),
+        expense.businessDate,
+        expense.description,
+        expense.receiptMediaId,
+        expense.journalEntryId,
+        expense.createdBy,
+      ],
+    )
+  }
+
+  async listByBranchAndDate(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ExpenseRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT *, amount_minor::text AS amount FROM expenses
+        WHERE branch_id = $1 AND business_date BETWEEN $2 AND $3
+        ORDER BY business_date, id`,
+      [branchId, from, to],
+    )
+    return rows.map((r) => ({
+      id: String(r.id),
+      branchId: String(r.branch_id),
+      categoryId: String(r.category_id),
+      costCenterKind: r.cost_center_kind as ExpenseRecord['costCenterKind'],
+      vehicleId: (r.vehicle_id as string | null) ?? null,
+      amount: minor(BigInt(String(r.amount))),
+      businessDate: isoDate(r.business_date),
+      description: String(r.description),
+      receiptMediaId: (r.receipt_media_id as string | null) ?? null,
+      journalEntryId: r.journal_entry_id === null ? null : Number(r.journal_entry_id),
+      createdBy: String(r.created_by),
+    }))
+  }
+
+  /** Aggregated in the database: G-1's per-axis profitability over a year of rows is not a JS loop. */
+  async totalsByCostCenter(
+    branchId: string,
+    from: CalendarDate,
+    to: CalendarDate,
+  ): Promise<Array<{ costCenterKind: string; vehicleId: string | null; total: Minor }>> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT cost_center_kind, vehicle_id, SUM(amount_minor)::text AS total
+         FROM expenses
+        WHERE branch_id = $1 AND business_date BETWEEN $2 AND $3
+        GROUP BY cost_center_kind, vehicle_id
+        ORDER BY cost_center_kind`,
+      [branchId, from, to],
+    )
+    return rows.map((r) => ({
+      costCenterKind: String(r.cost_center_kind),
+      vehicleId: (r.vehicle_id as string | null) ?? null,
+      total: minor(BigInt(String(r.total))),
+    }))
+  }
+}
+
+export class PgSettingsRepo implements SettingsRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  private async money(key: string): Promise<Minor | null> {
+    const raw = await this.get(key)
+    if (raw === null || raw === undefined) return null
+    // Settings are jsonb; a money setting is stored as a STRING of minor units so a large
+    // ceiling cannot lose precision passing through JSON.
+    return minor(BigInt(String(raw)))
+  }
+
+  async receiptRequiredAbove(_branchId: string): Promise<Minor | null> {
+    return this.money('expense.receipt_required_above_minor')
+  }
+
+  async kwhPriceMinor(): Promise<Minor | null> {
+    return this.money('vehicle.kwh_price_minor')
+  }
+
+  async get(key: string): Promise<unknown> {
+    const { rows } = await this.pool.query<{ value: unknown }>('SELECT value FROM settings WHERE key = $1', [key])
+    return rows[0]?.value ?? null
+  }
+
+  async set(key: string, value: unknown, actorId: string): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO settings (key, value, value_type, updated_by, updated_at)
+       VALUES ($1, $2::jsonb, 'json', $3, now())
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+      [key, JSON.stringify(value), actorId],
+    )
+  }
+}

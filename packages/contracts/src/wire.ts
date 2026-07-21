@@ -120,6 +120,26 @@ export const createDocumentRequest = z.object({
   mediaId: z.string().nullable().default(null),
 })
 
+// ── Expenses (SRS G) ──────────────────────────────────────────────────────────────────────
+
+export const createExpenseCategoryRequest = z.object({
+  code: z.string().min(1).max(32),
+  nameAr: z.string().min(1).max(120),
+})
+
+export const createExpenseRequest = z.object({
+  branchId: z.string().optional(),
+  categoryId: z.string().min(1),
+  /** G-1: vehicle / branch / general — these feed per-axis profitability. */
+  costCenterKind: z.enum(['vehicle', 'branch', 'general']),
+  vehicleId: z.string().nullable().default(null),
+  amount: moneySchema,
+  businessDate: calendarDateSchema.optional(),
+  description: z.string().min(1).max(500),
+  /** Mandatory above the configured ceiling (G-3 / س52). */
+  receiptMediaId: z.string().nullable().default(null),
+})
+
 // ── Money admin ───────────────────────────────────────────────────────────────────────────
 
 export const setFxRequest = z.object({

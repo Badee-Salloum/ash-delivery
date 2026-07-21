@@ -28,8 +28,10 @@ import type {
 } from '@ash/contracts'
 import { type CalendarDate, type FxDay, type Minor, type Posting, isLive, minor } from '@ash/domain'
 import { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
+import { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
 
 export { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
+export { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
 
 /**
  * In-memory implementations of every port.
@@ -442,6 +444,8 @@ export interface MemoryDeps extends Deps {
   clock: FixedClock
   media: MemoryMediaRepo
   blobs: MemoryBlobStore
+  expenses: MemoryExpenseRepo
+  settings: MemorySettingsRepo
   users: MemoryUserRepo
   shifts: MemoryShiftRepo
   orders: MemoryOrderRepo
@@ -464,6 +468,8 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     shifts: new MemoryShiftRepo(media),
     orders: new MemoryOrderRepo(),
     ledger,
+    expenses: new MemoryExpenseRepo(),
+    settings: new MemorySettingsRepo(),
     media,
     blobs: new MemoryBlobStore(),
     fx: new MemoryFxRepo(),
