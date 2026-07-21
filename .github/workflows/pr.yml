@@ -1,0 +1,113 @@
+name: PR
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: pr-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '24'
+
+jobs:
+  # Fast, no services. Fails in under a minute on the cheap mistakes.
+  static:
+    name: static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: typecheck
+        run: pnpm typecheck
+
+      # The money core must import nothing, and must not reach for a clock or a locale.
+      - name: domain purity
+        run: pnpm check:domain-pure
+
+      # Money is never a float; no subquery in CHECK; no STABLE generated columns;
+      # no date_trunc('week'); the idempotency index carries occurrence_key.
+      - name: SQL static checks
+        run: pnpm check:sql
+
+  domain:
+    name: domain (unit + property)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # No Docker, no database — the domain package is pure by construction.
+      - name: unit and property tests
+        run: pnpm -r test
+
+  # THE job that turns the database guards from "written" into "proven".
+  #
+  # 0006 claims three things hold up the architecture: an unbalanced entry is rejected at
+  # COMMIT, app_user cannot UPDATE or DELETE the ledger, and a locked-week write raises 25006.
+  # None of it was executable on the dev machine. This runs the migrations against real
+  # PostgreSQL 17 and then attempts every illegal write, failing if the database ALLOWS one.
+  database:
+    name: database guards (real Postgres 17)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ash_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: apply migrations, in order
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          for f in packages/db/migrations/*.sql; do
+            echo "── applying $f"
+            psql -v ON_ERROR_STOP=1 -h localhost -U postgres -d ash_test -f "$f"
+          done
+
+      - name: prove the guards reject what they claim to reject
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          psql -v ON_ERROR_STOP=1 -h localhost -U postgres -d ash_test \
+               -f packages/db/verify-guards.sql
+
+      # A guard that cannot fail is decoration. This asserts the harness itself has teeth by
+      # dropping a trigger and confirming verify-guards.sql then FAILS.
+      - name: negative-test the harness
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          psql -v ON_ERROR_STOP=1 -h localhost -U postgres -d ash_test \
+               -c 'DROP TRIGGER journal_lines_week_locked ON journal_lines;'
+          if psql -v ON_ERROR_STOP=1 -h localhost -U postgres -d ash_test \
+                  -f packages/db/verify-guards.sql > /dev/null 2>&1; then
+            echo "::error::verify-guards.sql PASSED with a guard removed — the harness has no teeth"
+            exit 1
+          fi
+          echo "OK: removing a guard makes the verification fail, as it must"

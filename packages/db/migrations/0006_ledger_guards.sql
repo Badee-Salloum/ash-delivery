@@ -68,7 +68,13 @@ DECLARE
   v_closed_at    timestamptz;
 BEGIN
   IF TG_TABLE_NAME = 'journal_entries' THEN
-    v_week_lock_id := COALESCE(OLD.week_lock_id, NEW.week_lock_id);
+    -- OLD only, deliberately. The rule is "an entry that ALREADY belongs to a closed week may
+    -- not change" — not "may not be assigned to a lock". Using COALESCE(OLD, NEW) here would
+    -- make the guard order-dependent: fin_seal_week() stamps week_lock_id onto entries and
+    -- only then sets closed_at, so a NEW-based check would pass or fail depending on which of
+    -- those two statements ran first. That is precisely the kind of coupling that works in
+    -- testing and breaks the day someone reorders two lines.
+    v_week_lock_id := OLD.week_lock_id;
   ELSE
     v_entry_id := COALESCE(OLD.entry_id, NEW.entry_id);
     SELECT week_lock_id INTO v_week_lock_id FROM journal_entries WHERE id = v_entry_id;

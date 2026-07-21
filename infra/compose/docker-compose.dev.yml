@@ -1,0 +1,43 @@
+# Local development stack.
+#
+# Only Postgres for now — the API and the two front-ends are added to this file as they land in
+# M0/M3. Writing service definitions for containers that do not yet exist would be speculative
+# config that nobody has ever run, which is the same trap the migrations are already in.
+#
+#   docker compose -f infra/compose/docker-compose.dev.yml up -d
+#   ./scripts/db-verify.sh
+#
+name: ash-dev
+
+services:
+  postgres:
+    # postgis image from day one with the extension NOT created. Bundle 3's geographic work
+    # then becomes a CREATE EXTENSION migration rather than a re-platform onto a new image.
+    image: postgis/postgis:17-3.5
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ash_dev
+      # Deterministic collation: index ordering must not depend on the host's locale.
+      POSTGRES_INITDB_ARGS: '--locale=C.UTF-8 --encoding=UTF8'
+    command:
+      - postgres
+      # Asia/Damascus for readable logs; all business-date logic is computed in the domain and
+      # written explicitly, so nothing depends on this setting being right.
+      - -c
+      - timezone=Asia/Damascus
+      - -c
+      - log_min_duration_statement=500
+    ports:
+      - '55432:5432' # deliberately not 5432 — do not collide with a host Postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d ash_dev']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    mem_limit: 1g
+
+volumes:
+  pgdata:
