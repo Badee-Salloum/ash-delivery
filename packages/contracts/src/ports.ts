@@ -306,11 +306,39 @@ export interface AuditRepo {
   list(filter: AuditFilter): Promise<AuditRecord[]>
 }
 
+export interface DocumentRecord {
+  id: string
+  branchId: string
+  ownerKind: 'driver' | 'vehicle'
+  driverId: string | null
+  vehicleId: string | null
+  /** driving_licence | national_id | criminal_record | registration | insurance */
+  kind: string
+  issuedOn: CalendarDate | null
+  expiresOn: CalendarDate | null
+  mediaId: string | null
+  supersededBy: string | null
+}
+
 export interface DirectoryRepo {
   branch(id: string): Promise<BranchRecord | null>
   driver(id: string): Promise<DriverRecord | null>
   vehicle(id: string): Promise<VehicleRecord | null>
   grants(): Promise<RoleGrantRecord[]>
+
+  // ── Fleet management (SRS B) ────────────────────────────────────────────────────────────
+  listDrivers(branchId: string): Promise<DriverRecord[]>
+  createDriver(driver: DriverRecord): Promise<void>
+  updateDriver(driver: DriverRecord): Promise<void>
+
+  listVehicles(branchId: string): Promise<VehicleRecord[]>
+  createVehicle(vehicle: VehicleRecord): Promise<void>
+  updateVehicle(vehicle: VehicleRecord): Promise<void>
+
+  createDocument(doc: DocumentRecord): Promise<void>
+  listDocuments(owner: { driverId?: string; vehicleId?: string }): Promise<DocumentRecord[]>
+  /** Everything expiring on or before `through`, for the morning alert sweep (س37). */
+  listExpiringDocuments(branchId: string, through: CalendarDate): Promise<DocumentRecord[]>
 }
 
 /** Everything the API is handed at construction. One object, so wiring is explicit. */

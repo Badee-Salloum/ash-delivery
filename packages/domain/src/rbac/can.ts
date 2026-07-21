@@ -52,6 +52,19 @@ export type PermissionKey =
   | 'audit.view'
   /** Settings: approval ceilings, vehicle types, kWh price, old-lira factor (A-4). */
   | 'settings.write'
+  /**
+   * Onboarding drivers, vehicles and their documents (SRS §B).
+   *
+   * The §3 matrix has no row for this. «إدارة المستخدمين والصلاحيات» is sysadmin + GM, but that
+   * is about *user accounts and permissions* — a driver record is fleet data, and the person who
+   * onboards a driver is the branch manager who works with him daily. Granting fleet management
+   * to user.manage instead would mean NOBODY could create a driver: both holders of that
+   * permission are organisation-wide roles with no branch, and a driver must belong to one.
+   *
+   * ASSUMPTION A-27: fleet management is branch_manager (own branch) + sysadmin + GM. Stored as
+   * data, so one row changes it if the client disagrees.
+   */
+  | 'fleet.manage'
 
 export type GrantTable = Readonly<Partial<Record<PermissionKey, Readonly<Partial<Record<RoleKey, Scope>>>>>>
 
@@ -87,6 +100,7 @@ export const DEFAULT_GRANTS: GrantTable = {
   },
   'audit.view': { system_admin: 'all', general_manager: 'all' },
   'settings.write': { system_admin: 'all' },
+  'fleet.manage': { branch_manager: 'branch', system_admin: 'all', general_manager: 'all' },
   // `accountant` (س77) is seeded with no grants at all — enabling the role is a data change,
   // not a migration. See ASSUMPTIONS A-17.
 }
@@ -215,6 +229,7 @@ export const ALL_PERMISSIONS: readonly PermissionKey[] = [
   'driver_earnings.view',
   'audit.view',
   'settings.write',
+  'fleet.manage',
 ]
 
 export const ALL_ROLES: readonly RoleKey[] = [

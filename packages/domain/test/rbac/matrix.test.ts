@@ -61,6 +61,8 @@ const SRS_MATRIX: Record<PermissionKey, Partial<Record<RoleKey, Scope>>> = {
   },
   'audit.view': { system_admin: 'all', general_manager: 'all' },
   'settings.write': { system_admin: 'all' },
+  // Not in the §3 matrix — ASSUMPTION A-27. See the rationale on the PermissionKey union.
+  'fleet.manage': { branch_manager: 'branch', system_admin: 'all', general_manager: 'all' },
 }
 
 describe('the grant table IS the SRS §3 matrix', () => {

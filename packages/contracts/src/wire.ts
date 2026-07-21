@@ -83,6 +83,43 @@ export const approveCloseRequest = z.object({
   reviewedOrdersHash: z.string().min(1),
 })
 
+// ── Fleet (SRS B) ─────────────────────────────────────────────────────────────────────────
+
+export const createDriverRequest = z.object({
+  code: z.string().min(1).max(32),
+  fullNameAr: z.string().min(1).max(120),
+})
+
+/** Organisation-wide roles have no branch of their own, so writes may name one explicitly. */
+export const branchTarget = z.object({ branchId: z.string().optional() })
+
+export const updateDriverRequest = z.object({
+  fullNameAr: z.string().min(1).max(120).optional(),
+  active: z.boolean().optional(),
+})
+
+export const createVehicleRequest = z.object({
+  code: z.string().min(1).max(32),
+  vehicleTypeId: z.string().min(1),
+})
+
+export const updateVehicleRequest = z.object({
+  /** «جاهزة/تشحن/صيانة/متوقفة» — only a `ready` vehicle may start a shift. */
+  state: z.enum(['ready', 'charging', 'maintenance', 'stopped']).optional(),
+  active: z.boolean().optional(),
+})
+
+export const createDocumentRequest = z.object({
+  ownerKind: z.enum(['driver', 'vehicle']),
+  driverId: z.string().nullable().default(null),
+  vehicleId: z.string().nullable().default(null),
+  /** SRS B-1: driving licence, national ID, criminal record; B-2: registration, insurance. */
+  kind: z.enum(['driving_licence', 'national_id', 'criminal_record', 'registration', 'insurance']),
+  issuedOn: calendarDateSchema.nullable().default(null),
+  expiresOn: calendarDateSchema.nullable().default(null),
+  mediaId: z.string().nullable().default(null),
+})
+
 // ── Money admin ───────────────────────────────────────────────────────────────────────────
 
 export const setFxRequest = z.object({

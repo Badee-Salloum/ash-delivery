@@ -6,6 +6,7 @@ import type {
   Clock,
   Deps,
   DirectoryRepo,
+  DocumentRecord,
   DriverRecord,
   FxRepo,
   IdGen,
@@ -383,6 +384,57 @@ export class MemoryDirectoryRepo implements DirectoryRepo {
   }
   setGrants(rows: RoleGrantRecord[]): void {
     this.grantRows = rows
+  }
+
+  // ── Fleet management (SRS B) ────────────────────────────────────────────────────────────
+  readonly documents = new Map<string, DocumentRecord>()
+
+  async listDrivers(branchId: string): Promise<DriverRecord[]> {
+    return [...this.drivers.values()].filter((d) => d.branchId === branchId)
+  }
+  async createDriver(driver: DriverRecord): Promise<void> {
+    for (const d of this.drivers.values()) {
+      // Mirrors the schema's UNIQUE on drivers.code.
+      if (d.code === driver.code) {
+        throw Object.assign(new Error(`duplicate driver code ${driver.code}`), { code: 'DUPLICATE_CODE' })
+      }
+    }
+    this.drivers.set(driver.id, { ...driver })
+  }
+  async updateDriver(driver: DriverRecord): Promise<void> {
+    this.drivers.set(driver.id, { ...driver })
+  }
+
+  async listVehicles(branchId: string): Promise<VehicleRecord[]> {
+    return [...this.vehicles.values()].filter((v) => v.branchId === branchId)
+  }
+  async createVehicle(vehicle: VehicleRecord): Promise<void> {
+    for (const v of this.vehicles.values()) {
+      if (v.code === vehicle.code) {
+        throw Object.assign(new Error(`duplicate vehicle code ${vehicle.code}`), { code: 'DUPLICATE_CODE' })
+      }
+    }
+    this.vehicles.set(vehicle.id, { ...vehicle })
+  }
+  async updateVehicle(vehicle: VehicleRecord): Promise<void> {
+    this.vehicles.set(vehicle.id, { ...vehicle })
+  }
+
+  async createDocument(doc: DocumentRecord): Promise<void> {
+    this.documents.set(doc.id, { ...doc })
+  }
+  async listDocuments(owner: { driverId?: string; vehicleId?: string }): Promise<DocumentRecord[]> {
+    return [...this.documents.values()].filter(
+      (d) =>
+        d.supersededBy === null &&
+        ((owner.driverId !== undefined && d.driverId === owner.driverId) ||
+          (owner.vehicleId !== undefined && d.vehicleId === owner.vehicleId)),
+    )
+  }
+  async listExpiringDocuments(branchId: string, through: CalendarDate): Promise<DocumentRecord[]> {
+    return [...this.documents.values()].filter(
+      (d) => d.branchId === branchId && d.supersededBy === null && d.expiresOn !== null && d.expiresOn <= through,
+    )
   }
 }
 

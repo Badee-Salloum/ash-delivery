@@ -5,6 +5,7 @@ import type {
   MediaRecord,
   MediaRepo,
   DirectoryRepo,
+  DocumentRecord,
   DriverRecord,
   RoleGrantRecord,
   ShiftRecord,
@@ -15,7 +16,7 @@ import type {
 } from '@ash/contracts'
 import { type CalendarDate, LIVE_STATES, type Minor, minor } from '@ash/domain'
 import type { Pool } from './pool.ts'
-import { withTransaction } from './pool.ts'
+import { PG, isPgError, withTransaction } from './pool.ts'
 
 /**
  * The remaining PostgreSQL adapters: shifts, week locks, and the directory.
@@ -325,7 +326,130 @@ export class PgDirectoryRepo implements DirectoryRepo {
       scope: r.scope as RoleGrantRecord['scope'],
     }))
   }
+
+  // ── Fleet management (SRS B) ────────────────────────────────────────────────────────────
+
+  async listDrivers(branchId: string): Promise<DriverRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM drivers WHERE branch_id = $1 ORDER BY code',
+      [branchId],
+    )
+    return rows.map(toDriver)
+  }
+
+  async createDriver(driver: DriverRecord): Promise<void> {
+    try {
+      await this.pool.query(
+        'INSERT INTO drivers (id, branch_id, code, full_name_ar, active) VALUES ($1,$2,$3,$4,$5)',
+        [driver.id, driver.branchId, driver.code, driver.fullNameAr, driver.active],
+      )
+    } catch (err) {
+      // Same shape the memory adapter throws, so the route handles one case, not two.
+      if (isPgError(err, PG.UNIQUE_VIOLATION)) {
+        throw Object.assign(new Error(`duplicate driver code ${driver.code}`), { code: 'DUPLICATE_CODE' })
+      }
+      throw err
+    }
+  }
+
+  async updateDriver(driver: DriverRecord): Promise<void> {
+    await this.pool.query('UPDATE drivers SET full_name_ar = $2, active = $3 WHERE id = $1', [
+      driver.id,
+      driver.fullNameAr,
+      driver.active,
+    ])
+  }
+
+  async listVehicles(branchId: string): Promise<VehicleRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM vehicles WHERE branch_id = $1 ORDER BY code',
+      [branchId],
+    )
+    return rows.map(toVehicle)
+  }
+
+  async createVehicle(vehicle: VehicleRecord): Promise<void> {
+    try {
+      await this.pool.query(
+        'INSERT INTO vehicles (id, branch_id, vehicle_type_id, code, state, active) VALUES ($1,$2,$3,$4,$5,$6)',
+        [vehicle.id, vehicle.branchId, vehicle.vehicleTypeId, vehicle.code, vehicle.state, vehicle.active],
+      )
+    } catch (err) {
+      if (isPgError(err, PG.UNIQUE_VIOLATION)) {
+        throw Object.assign(new Error(`duplicate vehicle code ${vehicle.code}`), { code: 'DUPLICATE_CODE' })
+      }
+      throw err
+    }
+  }
+
+  async updateVehicle(vehicle: VehicleRecord): Promise<void> {
+    await this.pool.query('UPDATE vehicles SET state = $2, active = $3 WHERE id = $1', [
+      vehicle.id,
+      vehicle.state,
+      vehicle.active,
+    ])
+  }
+
+  async createDocument(doc: DocumentRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO documents (id, branch_id, owner_kind, driver_id, vehicle_id, kind, issued_on, expires_on, media_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [doc.id, doc.branchId, doc.ownerKind, doc.driverId, doc.vehicleId, doc.kind, doc.issuedOn, doc.expiresOn, doc.mediaId],
+    )
+  }
+
+  async listDocuments(owner: { driverId?: string; vehicleId?: string }): Promise<DocumentRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM documents
+        WHERE superseded_by IS NULL
+          AND (($1::uuid IS NOT NULL AND driver_id = $1) OR ($2::uuid IS NOT NULL AND vehicle_id = $2))
+        ORDER BY kind`,
+      [owner.driverId ?? null, owner.vehicleId ?? null],
+    )
+    return rows.map(toDocument)
+  }
+
+  async listExpiringDocuments(branchId: string, through: CalendarDate): Promise<DocumentRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM documents
+        WHERE branch_id = $1 AND superseded_by IS NULL
+          AND expires_on IS NOT NULL AND expires_on <= $2
+        ORDER BY expires_on`,
+      [branchId, through],
+    )
+    return rows.map(toDocument)
+  }
 }
+
+const toDriver = (r: Record<string, unknown>): DriverRecord => ({
+  id: String(r.id),
+  branchId: String(r.branch_id),
+  code: String(r.code),
+  fullNameAr: String(r.full_name_ar),
+  active: Boolean(r.active),
+})
+
+const toVehicle = (r: Record<string, unknown>): VehicleRecord => ({
+  id: String(r.id),
+  branchId: String(r.branch_id),
+  vehicleTypeId: String(r.vehicle_type_id),
+  code: String(r.code),
+  state: r.state as VehicleRecord['state'],
+  active: Boolean(r.active),
+})
+
+const toDocument = (r: Record<string, unknown>): DocumentRecord => ({
+  id: String(r.id),
+  branchId: String(r.branch_id),
+  ownerKind: r.owner_kind as DocumentRecord['ownerKind'],
+  driverId: (r.driver_id as string | null) ?? null,
+  vehicleId: (r.vehicle_id as string | null) ?? null,
+  kind: String(r.kind),
+  issuedOn: r.issued_on === null ? null : isoDate(r.issued_on),
+  expiresOn: r.expires_on === null ? null : isoDate(r.expires_on),
+  mediaId: (r.media_id as string | null) ?? null,
+  supersededBy: (r.superseded_by as string | null) ?? null,
+})
 
 // ── Evidence (SRS C-6) ───────────────────────────────────────────────────────────────────
 
