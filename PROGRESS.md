@@ -1,5 +1,65 @@
 # PROGRESS
 
+## 2026-07-21 — deployable backend: Postgres adapters, Docker, release pipeline, seed
+
+**319 tests green, ~4 s, no Docker needed on this machine.**
+
+| Package | Covers | Tests |
+| --- | --- | --- |
+| `domain` | money, BR1, tier, ledger recipes, shift gates, RBAC, dates, FX, week close, fleet | 260 |
+| `adapters` | port conformance, in-memory | 10 |
+| `db` | port conformance, PostgreSQL | *skipped locally, runs in CI* |
+| `api` | lifecycle over HTTP, auth/RBAC, config, seed guard | 49 |
+
+**What became real since the last entry**
+
+- **PostgreSQL adapters + migration runner.** Held to the *same* conformance suite as the
+  in-memory ones — a behaviour that differs between the two is a bug in one of them, and a shared
+  suite is the only place that surfaces. The load-bearing line is the int8 → `BigInt` parser:
+  node-postgres returns bigint columns as strings by default and other drivers return Numbers,
+  which silently loses precision above 2^53. `assertBigIntParser()` proves at boot that it took
+  effect, and a `numeric` column reaching the driver throws rather than handing back a lossy float.
+- **The migration runner** is forward-only, one transaction per file, advisory-locked so two
+  replicas starting together cannot both migrate, and it **refuses** if an already-applied
+  migration's checksum has changed — the database and the repo disagreeing about history is not
+  something to paper over.
+- **Production deployment**: Dockerfile (Node 24, runs as `node`, healthcheck on Fastify's own
+  `/health`), two-project compose so staging cannot reach production data, Caddy with same-origin
+  `/api` and a self-only CSP, and a release pipeline that runs the full PR gate first, pins by
+  **digest** not tag, takes a pre-migration dump, smoke-tests, and rolls back automatically.
+- **The demo seed** is the SRS §2.3 shift posted through the *same recipes the API uses*, and the
+  CLI asserts the resulting BR1 difference is exactly zero — the demo data proves itself.
+
+**A real crash-on-boot the tests could not have caught**
+
+The server would not start: Node runs TypeScript in strip-only mode and cannot erase **parameter
+properties** (`constructor(private readonly x: T)`). Nine of them across three packages, all
+failing at *load* time — i.e. a crash-looping container on deploy, with 33 API tests passing the
+whole time. Running the thing is not the same as testing the thing. Fixed, and
+`scripts/check-strippable.mjs` now gates the repo.
+
+**Four guards, all negative-tested** — domain purity, SQL statics, wire-money, strippability. Each
+was verified to actually fail on an injected violation, because a guard nobody has watched fail is
+decoration.
+
+**What is NOT done**
+
+1. **No UI.** Neither the admin console nor the driver PWA exists. The API is driven by HTTP calls
+   today, so there is nothing a driver or branch manager can log into.
+2. **Nothing has touched a real database or a real server.** The migrations, their guards, and the
+   entire deploy pipeline are written and unexecuted. CI proves the first two on the first push.
+3. **The client samples are still unsent** (`docs/client-request-samples.md`), and BR1's calibration
+   still depends on them.
+
+**To deploy, I need from you**
+
+- The GitHub repo URL (to push, and to let CI prove the database guards).
+- VPS host + SSH key, and the domain names for staging and production.
+- Backblaze B2 (or equivalent) credentials for restic, plus a repository password held separately
+  from the SOPS age key.
+
+---
+
 ## 2026-07-21 — M0/M3: the API, and the §2.3 shift running over real HTTP
 
 **Done and VERIFIED — 293 tests, ~3 s, still no Docker**
