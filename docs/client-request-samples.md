@@ -84,9 +84,17 @@ one complete real event.
 and the current funds/opening-balances Excel — the last of which is **required before section E goes
 live in production** (SRS open point م-2).
 
-**One question:** for an electronic order, does the **goods value** reach the driver's wallet along
-with the fee, or the fee only? (SRS م-3.) The build does not block on it — the current assumption is
-fee-only and flipping it is a setting, not a migration — but sample 1 settles it for good.
+**Two questions:**
+
+1. For an electronic order, does the **goods value** reach the driver's wallet along with the fee,
+   or the fee only? (SRS م-3.) The build does not block on it — the current assumption is fee-only
+   and flipping it is a setting, not a migration — but sample 1 settles it for good.
+2. **What happens when Yallago's 20% cut exceeds the driver's wallet balance?** Does the app refuse
+   the order, allow the wallet to go negative, or auto-settle? This is not hypothetical: every cash
+   order takes 20% *out* of the wallet while putting nothing in, so twenty 5,000 cash orders on a
+   1,000 top-up want 20,000 from a wallet holding 1,000. The zero equation still balances perfectly
+   while it happens, so BR1 cannot catch it. The answer decides whether this blocks a shift close or
+   just warns the branch manager.
 
 ---
 

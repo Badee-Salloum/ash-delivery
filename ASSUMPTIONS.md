@@ -34,6 +34,7 @@ matters when an answer finally arrives.
 | A-03 | **Yallago floors its own 20% cut.** | We do not control this arithmetic; it happens inside their app. Rounding mode is a parameter (`yalagoCut(fee, rounding)`), not a constant. | `cheap` — one argument |
 | A-04 | **The company absorbs every rounding remainder**, never the driver, never Yallago. | BR4: "Yallago's 20% is always fixed; tier changes come only out of the company's side." | `moderate` |
 | A-05 | **م-3 — for electronic orders, the goods value round-trips to the wallet.** `goods_value_minor` and the per-order goods flags ship **inactive**. | The brief instructs isolating this behind a strategy seam. BR1 is fee-only under either branch *provided* the round-trip holds. | `cheap` — a setting, not a migration |
+| A-26 | **A driver's wallet may legitimately go NEGATIVE, and the office covers the shortfall.** `walletReturn` posts in the opposite direction when the closing balance is below zero. | Every cash order takes 20% of its fee *out* of the wallet (BR2) while putting nothing in, so a thin top-up plus many cash orders drives it below zero — 20 orders × 5,000 against a 1,000 top-up leaves −19,000. Found by a property test, not by inspection. **BR1 still evaluates to exactly zero throughout**, so the zero equation cannot detect it; `minWalletBalance()` is a separate check surfaced at the close gate. | `moderate` |
 
 ### Tier engine
 
@@ -86,6 +87,14 @@ These were genuine conflicts or real-money questions, and were asked, not defaul
 3. Manual entries: SRS E-3 vs. the §3 matrix — an internal SRS conflict → **answered** (D-5).
 4. Two shifts in one day: whole-day band vs. per-shift → **answered** (D-6).
 5. The 19-day contract vs. a realistic 40–56 days → **answered** (D-7).
+
+## New question raised by the code, for the same conversation
+
+6. **What does Yallago's app do when its 20% cut exceeds the driver's wallet balance?** Refuse
+   the order, allow a negative balance, or auto-settle? This is reachable in ordinary operation
+   (see A-26) and BR1 cannot detect it. The answer decides whether `minWalletBalance() < 0`
+   **blocks** the shift close or merely warns the branch manager. Until the first real sample
+   arrives it warns. Add this to the samples request.
 
 ## Still to escalate before M2
 
