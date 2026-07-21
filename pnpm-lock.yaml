@@ -23,6 +23,9 @@ importers:
       '@ash/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@ash/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@ash/domain':
         specifier: workspace:*
         version: link:../../packages/domain

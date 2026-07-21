@@ -54,10 +54,32 @@ Authoritative specs: [SRSv1.0.md](SRSv1.0.md) (Arabic) and [CLAUDECODEKICKOFF.md
 
 ## Current state, honestly
 
-The **arithmetic** of Bundle 1 is written and green: money, BR1, the tier engine, ledger posting
-recipes, the shift state machine, RBAC, Damascus dates, FX, week close, fleet rules — 260 tests.
+**Working and tested — 319 tests, ~4 s, no Docker needed:**
 
-**Not yet built:** the API, both front-ends, and any running database. Nothing here can be logged
-into yet. The SQL migrations and their guards have **never been executed** — this was written on a
-machine with no Docker and no `psql` — so treat `0006` as unproven until CI or `db-verify.sh`
-turns green.
+- The whole money core: BR1, the tier engine, ledger posting recipes, Damascus dates, FX, week
+  close, fleet rules, and the SRS §3 permission matrix.
+- A running HTTP API: auth with 5-attempt lockout and 30-minute idle sessions, the full shift
+  lifecycle, FX, the Sunday close, and an audit reader. The client's §2.3 example runs end to end
+  over real HTTP. The server boots and serves — verified, not assumed.
+- PostgreSQL adapters and a migration runner, held to the *same* conformance suite as the
+  in-memory ones.
+- Production Dockerfile, two-project compose, Caddy, and a release pipeline with a smoke test and
+  automatic rollback.
+
+**Not built yet:** both front-ends. There is no UI — the API is driven by HTTP calls today.
+
+**Never executed:** the SQL migrations and their guards, and the deploy pipeline. This was written
+on a machine with no Docker and no `psql`, so `packages/db/migrations/0006` and everything in
+`infra/` are *written*, not *proven*. CI runs them on the first push; until it is green, say so.
+
+### Four guards, each negative-tested
+
+A guard nobody has watched fail is decoration, so each of these was verified to actually fail on
+an injected violation:
+
+| Guard | Catches |
+| --- | --- |
+| `check-domain-pure` | the money core importing anything, or reaching for a clock or locale |
+| `check-sql` | money as a float, a subquery in CHECK, `date_trunc('week')`, a missing `occurrence_key` |
+| `check-wire-money` | money crossing HTTP as a JSON number |
+| `check-strippable` | TypeScript that Node cannot run — this one caught a real crash-on-boot |
