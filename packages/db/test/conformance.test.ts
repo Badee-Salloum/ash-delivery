@@ -4,6 +4,7 @@ import { runConformanceSuite } from '@ash/testkit/conformance'
 import { assertBigIntParser, createPool } from '../src/pool.ts'
 import { migrate } from '../src/migrate.ts'
 import { PgAuditRepo, PgFxRepo, PgLedgerRepo, PgOrderRepo, PgSessionRepo, PgUserRepo } from '../src/repos.ts'
+import { PgDirectoryRepo, PgMediaRepo, PgShiftRepo, PgWeekLockRepo } from '../src/repos-shift.ts'
 
 /**
  * The PostgreSQL adapters run the SAME conformance suite as the in-memory ones.
@@ -42,8 +43,9 @@ if (!DATABASE_URL) {
       // Truncate rather than re-migrate: orders of magnitude faster, and it exercises the real
       // constraints on every run instead of a freshly-empty database.
       await pool.query(`
-        TRUNCATE journal_lines, journal_entries, shift_orders, shifts, funds, fx_days,
-                 week_locks, audit_log, sessions, drivers, vehicles, vehicle_types, users, branches
+        TRUNCATE journal_lines, journal_entries, shift_orders, shift_media, media, float_tranches,
+                 shifts, funds, fx_days, week_locks, audit_log, sessions, drivers, vehicles,
+                 vehicle_types, users, branches
         RESTART IDENTITY CASCADE
       `)
 
@@ -103,13 +105,16 @@ if (!DATABASE_URL) {
         hasher: { hash: async (p: string) => p, verify: async (p: string, h: string) => p === h },
         users: new PgUserRepo(pool),
         sessions: new PgSessionRepo(pool),
-        shifts: notYetImplemented('ShiftRepo'),
+        shifts: new PgShiftRepo(pool),
         orders: new PgOrderRepo(pool),
         ledger: new PgLedgerRepo(pool),
+        media: new PgMediaRepo(pool),
+        // Blob storage is not a database concern; the suite exercises MediaRepo, not bytes.
+        blobs: notYetImplemented('BlobStore'),
         fx: new PgFxRepo(pool),
-        weekLocks: notYetImplemented('WeekLockRepo'),
+        weekLocks: new PgWeekLockRepo(pool),
         audit: new PgAuditRepo(pool),
-        directory: notYetImplemented('DirectoryRepo'),
+        directory: new PgDirectoryRepo(pool),
       }
     },
   })

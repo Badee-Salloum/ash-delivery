@@ -107,6 +107,14 @@ export interface ShiftRecord {
   state: ShiftState
   floatTranches: Minor[]
   topupTranches: Minor[]
+  /**
+   * READ-ONLY projections of the evidence actually uploaded.
+   *
+   * These are derived from `MediaRepo`, never supplied by the client. An earlier version let
+   * the driver's app send a list of slot names, which meant the BR5 gates were verifying that
+   * the app *claimed* a photo existed — not that one did. For a system whose premise is
+   * «الأدلة المصوَّرة», a claim is not evidence.
+   */
   mediaSlotsStart: string[]
   mediaSlotsEnd: string[]
   odoStart: number | null
@@ -249,6 +257,42 @@ export interface WeekLockRepo {
   listClosedStarts(branchId: string): Promise<CalendarDate[]>
 }
 
+export type EvidencePackage = 'start' | 'end'
+
+export interface MediaRecord {
+  id: string
+  branchId: string
+  /** Content address. Also the upload idempotency key: a retry after a dropped Wi-Fi dedupes. */
+  sha256: string
+  byteSize: number
+  mimeType: string
+  storageKey: string
+  /**
+   * The phone's clock is a CLAIM; `receivedAtMs` is authoritative. Both are kept, and a large
+   * gap is surfaced to the branch manager — that difference is what makes a photo evidence
+   * rather than just a picture.
+   */
+  clientTakenAtMs: number | null
+  receivedAtMs: number
+  uploadedBy: string
+}
+
+export interface AttachedSlot {
+  package: EvidencePackage
+  slot: string
+  mediaId: string
+}
+
+export interface MediaRepo {
+  /** Content-addressed: an existing sha256 returns the stored record instead of duplicating. */
+  put(record: MediaRecord): Promise<MediaRecord>
+  findBySha(branchId: string, sha256: string): Promise<MediaRecord | null>
+  findById(id: string): Promise<MediaRecord | null>
+  /** One photo per (shift, package, slot): re-shooting replaces rather than accumulating. */
+  attach(shiftId: string, pkg: EvidencePackage, slot: string, mediaId: string): Promise<void>
+  listSlots(shiftId: string): Promise<AttachedSlot[]>
+}
+
 export interface AuditFilter {
   // `| undefined` explicitly, because `exactOptionalPropertyTypes` distinguishes "absent" from
   // "present and undefined" — and a parsed query object hands us the latter.
@@ -279,6 +323,8 @@ export interface Deps {
   shifts: ShiftRepo
   orders: OrderRepo
   ledger: LedgerRepo
+  media: MediaRepo
+  blobs: BlobStore
   fx: FxRepo
   weekLocks: WeekLockRepo
   audit: AuditRepo

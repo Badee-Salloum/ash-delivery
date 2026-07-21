@@ -154,7 +154,6 @@ export async function submitStartPackage(
     batteryPercent: number
     floatTranches: Minor[]
     topupTranches: Minor[]
-    mediaSlots: string[]
   },
 ): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
@@ -164,7 +163,7 @@ export async function submitStartPackage(
     batteryStart: input.batteryPercent,
     floatTranches: input.floatTranches,
     topupTranches: input.topupTranches,
-    mediaSlotsStart: input.mediaSlots,
+    // mediaSlotsStart is NOT taken from the caller — it is whatever actually uploaded.
   }
 
   const result = await guard(deps, draft, 'driver_confirm_start', actor, {
@@ -323,7 +322,6 @@ export async function submitEndPackage(
     batteryPercent: number
     cashDeclared: Minor
     walletDeclared: Minor
-    mediaSlots: string[]
   },
 ): Promise<{ shift: ShiftRecord; br1: Br1View }> {
   const shift = await mustFind(deps, shiftId)
@@ -335,7 +333,7 @@ export async function submitEndPackage(
     batteryEnd: input.batteryPercent,
     endCashDeclared: input.cashDeclared,
     endWalletDeclared: input.walletDeclared,
-    mediaSlotsEnd: input.mediaSlots,
+    // mediaSlotsEnd likewise comes from uploaded evidence, not from the request.
   }
 
   const result = await guard(deps, staged, 'driver_submit_end', actor, {

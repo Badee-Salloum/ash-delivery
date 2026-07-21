@@ -16,11 +16,27 @@ export const NOW_MS = Date.UTC(2026, 6, 21, 5, 0, 0)
 export const syp = (n: number): Minor => minor(BigInt(n) * 100n)
 export const sypStr = (n: number): string => `${n}.00`
 
+/** A genuine 1x1 JPEG. Magic bytes matter — the API sniffs them and rejects anything else. */
+export const TINY_JPEG = Buffer.from(
+  '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0a' +
+    'HBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAA' +
+    'AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==',
+  'base64',
+)
+
 export interface Harness {
   app: FastifyInstance
   deps: MemoryDeps
   loginAs(username: string): Promise<string>
   cookie(token: string): string
+  /** Upload one evidence photo. Returns the parsed response body. */
+  uploadPhoto(
+    token: string,
+    shiftId: string,
+    pkg: 'start' | 'end',
+    slot: string,
+    bytes?: Buffer,
+  ): Promise<Record<string, unknown>>
 }
 
 export async function makeHarness(opts: { splitGate?: 'advisory' | 'strict' } = {}): Promise<Harness> {
@@ -69,10 +85,22 @@ export async function makeHarness(opts: { splitGate?: 'advisory' | 'strict' } = 
 
   const app = await buildApp({ deps, ...(opts.splitGate ? { splitGate: opts.splitGate } : {}) })
 
+  const cookieFor = (token: string) => `${SESSION_COOKIE}=${token}`
+
   return {
     app,
     deps,
-    cookie: (token: string) => `${SESSION_COOKIE}=${token}`,
+    cookie: cookieFor,
+    async uploadPhoto(token, shiftId, pkg, slot, bytes = TINY_JPEG) {
+      const res = await app.inject({
+        method: 'PUT',
+        url: `/shifts/${shiftId}/media/${pkg}/${slot}`,
+        headers: { cookie: cookieFor(token), 'content-type': 'image/jpeg' },
+        payload: bytes,
+      })
+      if (res.statusCode !== 201) throw new Error(`upload failed: ${res.statusCode} ${res.body}`)
+      return res.json()
+    },
     async loginAs(username: string) {
       const res = await app.inject({
         method: 'POST',

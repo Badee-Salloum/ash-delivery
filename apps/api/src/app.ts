@@ -9,6 +9,7 @@ import {
   createShiftRequest,
   endPackageRequest,
   loginRequest,
+  uploadEvidenceParams,
   serializeMoney,
   setFxRequest,
   startPackageRequest,
@@ -16,6 +17,7 @@ import {
 import { checkWeekClose, minor, sum, weekClosedOn, weekStartFor } from '@ash/domain'
 import { SESSION_COOKIE, SESSION_IDLE_MS, login, logout, resolveSession } from './auth.ts'
 import { assertEveryRouteDeclaresPermission, collectRoutes, makeAuthorize, resetRouteRegistry } from './rbac.ts'
+import { MAX_UPLOAD_BYTES, readEvidence, uploadEvidence } from './media.service.ts'
 import {
   ServiceError,
   addOrder,
@@ -42,6 +44,15 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   resetRouteRegistry()
   collectRoutes(app)
   await app.register(cookie)
+
+  // Evidence photos arrive as RAW BYTES. Fastify has no parser for image/* by default, and we
+  // deliberately do not want multipart or base64: a driver on office Wi-Fi should pay for the
+  // 300 KB the photo actually weighs, not 400 KB of base64.
+  for (const mime of ['image/jpeg', 'image/png', 'image/webp', 'application/octet-stream']) {
+    app.addContentTypeParser(mime, { parseAs: 'buffer' }, (_req, body, done) => {
+      done(null, body)
+    })
+  }
 
   const authorize = makeAuthorize(deps)
 
@@ -141,6 +152,12 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   })
 
   // ── Shifts ──────────────────────────────────────────────────────────────────────────────
+  const mediaSubject = async (req: { params: unknown }) => {
+    const { mediaId } = z.object({ mediaId: z.string() }).parse(req.params)
+    const media = await deps.media.findById(mediaId)
+    return media ? { branchId: media.branchId } : {}
+  }
+
   const shiftSubject = async (req: { params: unknown }) => {
     const { id } = z.object({ id: z.string() }).parse(req.params)
     const shift = await deps.shifts.findById(id)
@@ -206,6 +223,54 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const body = endPackageRequest.parse(req.body)
       const { shift, br1 } = await submitEndPackage(deps, req.actor!, id, body)
       return { id: shift.id, state: shift.state, br1: serializeBr1(br1) }
+    },
+  )
+
+  /**
+   * Evidence upload (SRS C-6). Raw image bytes as the body — not multipart, not base64 — so a
+   * ~300 KB photo costs 300 KB on a phone connection rather than 400.
+   */
+  app.put(
+    '/shifts/:id/media/:package/:slot',
+    {
+      config: { permission: 'shift.operate', subject: shiftSubject },
+      bodyLimit: MAX_UPLOAD_BYTES,
+    },
+    async (req, reply) => {
+      const params = uploadEvidenceParams.parse(req.params)
+      const takenHeader = req.headers['x-client-taken-at']
+      const clientTakenAtMs = typeof takenHeader === 'string' && /^\d+$/.test(takenHeader) ? Number(takenHeader) : null
+
+      const result = await uploadEvidence(deps, {
+        shiftId: params.id,
+        package: params.package,
+        slot: params.slot,
+        bytes: new Uint8Array(req.body as Buffer),
+        clientTakenAtMs,
+        uploadedBy: req.actor!.userId,
+      })
+      return reply.code(201).send({
+        mediaId: result.media.id,
+        sha256: result.media.sha256,
+        byteSize: result.media.byteSize,
+        deduped: result.deduped,
+        clockSkewMs: result.clockSkewMs,
+        slots: result.slotsNow,
+      })
+    },
+  )
+
+  /** Every read is RBAC-checked; evidence is never served from a public path. */
+  app.get(
+    '/media/:mediaId',
+    { config: { permission: 'branch_data.view', subject: mediaSubject } },
+    async (req, reply) => {
+      const { mediaId } = z.object({ mediaId: z.string() }).parse(req.params)
+      const { media, bytes } = await readEvidence(deps, mediaId)
+      return reply
+        .header('content-type', media.mimeType)
+        .header('cache-control', 'private, max-age=31536000, immutable')
+        .send(Buffer.from(bytes))
     },
   )
 

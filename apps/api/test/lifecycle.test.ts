@@ -23,6 +23,14 @@ afterEach(async () => {
 const START_MEDIA = ['odometer']
 const END_MEDIA = ['dashboard', 'wallet', 'odometer', 'wallet_zeroed']
 
+/** Evidence is now REAL: the gates read what was uploaded, not what the client claimed. */
+async function uploadStart(shiftId: string, token: string) {
+  for (const slot of START_MEDIA) await h.uploadPhoto(token, shiftId, 'start', slot)
+}
+async function uploadEnd(shiftId: string, token: string, slots: readonly string[] = END_MEDIA) {
+  for (const slot of slots) await h.uploadPhoto(token, shiftId, 'end', slot)
+}
+
 async function openShift(driverToken: string, managerToken: string, vehicleId = VEHICLE_ID) {
   const created = await h.app.inject({
     method: 'POST',
@@ -33,6 +41,8 @@ async function openShift(driverToken: string, managerToken: string, vehicleId = 
   expect(created.statusCode).toBe(201)
   const id = created.json().id as string
 
+  await uploadStart(id, driverToken)
+
   const start = await h.app.inject({
     method: 'PUT',
     url: `/shifts/${id}/start-package`,
@@ -42,7 +52,6 @@ async function openShift(driverToken: string, managerToken: string, vehicleId = 
       batteryPercent: 95,
       floatTranches: [sypStr(100_000)],
       topupTranches: [sypStr(50_000)],
-      mediaSlots: START_MEDIA,
     },
   })
   expect(start.statusCode).toBe(200)
@@ -86,6 +95,7 @@ describe('the SRS §2.3 shift, end to end over HTTP', () => {
     await addTwentyOrders(shiftId, driver)
 
     // ── The driver submits the end package ────────────────────────────────────────────────
+    await uploadEnd(shiftId, driver)
     const submitted = await h.app.inject({
       method: 'PUT',
       url: `/shifts/${shiftId}/end-package`,
@@ -95,7 +105,6 @@ describe('the SRS §2.3 shift, end to end over HTTP', () => {
         batteryPercent: 22,
         cashDeclared: sypStr(160_000),
         walletDeclared: sypStr(70_000),
-        mediaSlots: END_MEDIA,
       },
     })
     expect(submitted.statusCode, submitted.body).toBe(200)
@@ -161,6 +170,7 @@ describe('the SRS §2.3 shift, end to end over HTTP', () => {
     const manager = await h.loginAs('manager')
     const shiftId = await openShift(driver, manager)
     await addTwentyOrders(shiftId, driver)
+    await uploadEnd(shiftId, driver)
 
     await h.app.inject({
       method: 'PUT',
@@ -168,7 +178,7 @@ describe('the SRS §2.3 shift, end to end over HTTP', () => {
       headers: { cookie: h.cookie(driver) },
       payload: {
         odometerKm: 15_412, batteryPercent: 22,
-        cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000), mediaSlots: END_MEDIA,
+        cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000),
       },
     })
     const review = await h.app.inject({
@@ -209,7 +219,7 @@ describe('the gates refuse what BR5 says they must (AC #1, #2)', () => {
       headers: { cookie: h.cookie(driver) },
       payload: {
         odometerKm: 100, batteryPercent: 90,
-        floatTranches: [sypStr(1_000)], topupTranches: [sypStr(1_000)], mediaSlots: [],
+        floatTranches: [sypStr(1_000)], topupTranches: [sypStr(1_000)],
       },
     })
     expect(res.statusCode).toBe(422)
@@ -228,7 +238,7 @@ describe('the gates refuse what BR5 says they must (AC #1, #2)', () => {
       method: 'PUT', url: `/shifts/${id}/start-package`, headers: { cookie: h.cookie(driver) },
       payload: {
         odometerKm: 100, batteryPercent: 90,
-        floatTranches: [sypStr(1_000)], topupTranches: [sypStr(1_000)], mediaSlots: START_MEDIA,
+        floatTranches: [sypStr(1_000)], topupTranches: [sypStr(1_000)],
       },
     })
     // Still awaiting approval — the driver cannot record an order yet.
@@ -247,11 +257,12 @@ describe('the gates refuse what BR5 says they must (AC #1, #2)', () => {
     await addTwentyOrders(shiftId, driver)
 
     // The driver hands over 5,000 too little in cash.
+    await uploadEnd(shiftId, driver)
     await h.app.inject({
       method: 'PUT', url: `/shifts/${shiftId}/end-package`, headers: { cookie: h.cookie(driver) },
       payload: {
         odometerKm: 15_412, batteryPercent: 22,
-        cashDeclared: sypStr(155_000), walletDeclared: sypStr(70_000), mediaSlots: END_MEDIA,
+        cashDeclared: sypStr(155_000), walletDeclared: sypStr(70_000),
       },
     })
 
@@ -278,11 +289,12 @@ describe('the gates refuse what BR5 says they must (AC #1, #2)', () => {
     const manager = await h.loginAs('manager')
     const shiftId = await openShift(driver, manager)
     await addTwentyOrders(shiftId, driver)
+    await uploadEnd(shiftId, driver)
     await h.app.inject({
       method: 'PUT', url: `/shifts/${shiftId}/end-package`, headers: { cookie: h.cookie(driver) },
       payload: {
         odometerKm: 15_412, batteryPercent: 22,
-        cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000), mediaSlots: END_MEDIA,
+        cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000),
       },
     })
     const review = await h.app.inject({
@@ -339,11 +351,12 @@ describe('the pay-mode blind spot, over HTTP', () => {
     await add('free', 2)
 
     // The driver hands over what he ACTUALLY holds.
+    await uploadEnd(shiftId, driver)
     const res = await h.app.inject({
       method: 'PUT', url: `/shifts/${shiftId}/end-package`, headers: { cookie: h.cookie(driver) },
       payload: {
         odometerKm: 15_412, batteryPercent: 22,
-        cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000), mediaSlots: END_MEDIA,
+        cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000),
       },
     })
     const br1 = res.json().br1
@@ -368,11 +381,12 @@ describe('the pay-mode blind spot, over HTTP', () => {
         payload: { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 },
       })
       const id = created.json().id
+      await strict.uploadPhoto(driver, id, 'start', 'odometer')
       await strict.app.inject({
         method: 'PUT', url: `/shifts/${id}/start-package`, headers: { cookie: strict.cookie(driver) },
         payload: {
           odometerKm: 1, batteryPercent: 90,
-          floatTranches: [sypStr(100_000)], topupTranches: [sypStr(50_000)], mediaSlots: START_MEDIA,
+          floatTranches: [sypStr(100_000)], topupTranches: [sypStr(50_000)],
         },
       })
       await strict.app.inject({
@@ -384,11 +398,12 @@ describe('the pay-mode blind spot, over HTTP', () => {
           payload: { providerOrderNo: `S-${i}`, payMode: i <= 11 ? 'cash' : 'electronic', fee: sypStr(5_000), zone: null },
         })
       }
+      for (const slot of END_MEDIA) await strict.uploadPhoto(driver, id, 'end', slot)
       await strict.app.inject({
         method: 'PUT', url: `/shifts/${id}/end-package`, headers: { cookie: strict.cookie(driver) },
         payload: {
           odometerKm: 2, batteryPercent: 20,
-          cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000), mediaSlots: END_MEDIA,
+          cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000),
         },
       })
       const review = await strict.app.inject({

@@ -171,11 +171,12 @@ describe('RBAC over HTTP (AC #12)', () => {
       payload: { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 },
     })
     const id = created.json().id
+    await h.uploadPhoto(driver, id, 'start', 'odometer')
     await h.app.inject({
       method: 'PUT', url: `/shifts/${id}/start-package`, headers: { cookie: h.cookie(driver) },
       payload: {
         odometerKm: 1, batteryPercent: 90,
-        floatTranches: [sypStr(1_000)], topupTranches: [sypStr(1_000)], mediaSlots: ['odometer'],
+        floatTranches: [sypStr(1_000)], topupTranches: [sypStr(1_000)],
       },
     })
     const asDriver = await h.app.inject({
@@ -275,7 +276,7 @@ describe('money on the wire', () => {
       payload: {
         odometerKm: 1, batteryPercent: 90,
         floatTranches: [100000], // ← a Number, not a decimal string
-        topupTranches: [], mediaSlots: ['odometer'],
+        topupTranches: [],
       },
     })
     expect(res.statusCode).toBe(400)
@@ -293,7 +294,7 @@ describe('money on the wire', () => {
       headers: { cookie: h.cookie(driver) },
       payload: {
         odometerKm: 1, batteryPercent: 90,
-        floatTranches: ['100.005'], topupTranches: [], mediaSlots: ['odometer'],
+        floatTranches: ['100.005'], topupTranches: [],
       },
     })
     expect(res.statusCode).toBe(400)

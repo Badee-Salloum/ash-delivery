@@ -51,7 +51,6 @@ export const startPackageRequest = z.object({
   /** SRS C-5: several tranches per day are legitimate, so this is a list, not a scalar. */
   floatTranches: z.array(moneySchema).min(0),
   topupTranches: z.array(moneySchema).min(0),
-  mediaSlots: z.array(z.string()).default([]),
 })
 
 export const addOrderRequest = z.object({
@@ -66,7 +65,17 @@ export const endPackageRequest = z.object({
   batteryPercent: z.number().int().min(0).max(100),
   cashDeclared: moneySchema,
   walletDeclared: moneySchema,
-  mediaSlots: z.array(z.string()).default([]),
+})
+
+/**
+ * Evidence upload. The photo itself is the request BODY (raw bytes); everything else is a
+ * header or a path param, so a 300 KB image is never base64-inflated by 33% over a phone
+ * connection.
+ */
+export const uploadEvidenceParams = z.object({
+  id: z.string().min(1),
+  package: z.enum(['start', 'end']),
+  slot: z.string().min(1).max(32),
 })
 
 export const approveCloseRequest = z.object({

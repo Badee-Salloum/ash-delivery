@@ -26,6 +26,9 @@ import type {
   WeekLockRepo,
 } from '@ash/contracts'
 import { type CalendarDate, type FxDay, type Minor, type Posting, isLive, minor } from '@ash/domain'
+import { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
+
+export { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 
 /**
  * In-memory implementations of every port.
@@ -127,12 +130,31 @@ export class MemorySessionRepo implements SessionRepo {
 
 export class MemoryShiftRepo implements ShiftRepo {
   readonly rows = new Map<string, ShiftRecord>()
+  private readonly media: MemoryMediaRepo
+  constructor(media: MemoryMediaRepo) {
+    this.media = media
+  }
+
+  /**
+   * Evidence slots are a PROJECTION of uploaded media, never whatever the caller passed in.
+   * Persisting a client-supplied list would let the driver's app assert a photo exists that
+   * never arrived — and the BR5 gates read exactly this field.
+   */
+  private async withSlots(shift: ShiftRecord): Promise<ShiftRecord> {
+    const attached = await this.media.listSlots(shift.id)
+    return {
+      ...structuredClone(shift),
+      mediaSlotsStart: attached.filter((a) => a.package === 'start').map((a) => a.slot).sort(),
+      mediaSlotsEnd: attached.filter((a) => a.package === 'end').map((a) => a.slot).sort(),
+    }
+  }
+
   async create(shift: ShiftRecord): Promise<void> {
     this.rows.set(shift.id, structuredClone(shift))
   }
   async findById(id: string): Promise<ShiftRecord | null> {
     const s = this.rows.get(id)
-    return s ? structuredClone(s) : null
+    return s ? this.withSlots(s) : null
   }
   async update(shift: ShiftRecord): Promise<void> {
     this.rows.set(shift.id, structuredClone(shift))
@@ -366,6 +388,8 @@ export class MemoryDirectoryRepo implements DirectoryRepo {
 
 export interface MemoryDeps extends Deps {
   clock: FixedClock
+  media: MemoryMediaRepo
+  blobs: MemoryBlobStore
   users: MemoryUserRepo
   shifts: MemoryShiftRepo
   orders: MemoryOrderRepo
@@ -378,15 +402,18 @@ export interface MemoryDeps extends Deps {
 
 export function createMemoryDeps(nowMs: number): MemoryDeps {
   const ledger = new MemoryLedgerRepo()
+  const media = new MemoryMediaRepo()
   return {
     clock: new FixedClock(nowMs),
     ids: new SeqIdGen(),
     hasher: new PlainHasher(),
     users: new MemoryUserRepo(),
     sessions: new MemorySessionRepo(),
-    shifts: new MemoryShiftRepo(),
+    shifts: new MemoryShiftRepo(media),
     orders: new MemoryOrderRepo(),
     ledger,
+    media,
+    blobs: new MemoryBlobStore(),
     fx: new MemoryFxRepo(),
     weekLocks: new MemoryWeekLockRepo(ledger),
     audit: new MemoryAuditRepo(),
