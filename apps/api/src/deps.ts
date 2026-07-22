@@ -1,4 +1,4 @@
-import { LocalDiskBlobStore, S3BlobStore, assertDurableBlobStore } from '@ash/adapters/blob'
+import { LocalDiskBlobStore, S3BlobStore, VercelBlobStore, assertDurableBlobStore } from '@ash/adapters/blob'
 import { MemoryBlobStore, createMemoryDeps } from '@ash/adapters/memory'
 import type { BlobStore, Deps } from '@ash/contracts'
 import {
@@ -49,6 +49,8 @@ function buildBlobStore(config: Config): BlobStore {
         secretAccessKey: config.S3_SECRET_ACCESS_KEY!,
         forcePathStyle: config.S3_FORCE_PATH_STYLE,
       })
+    case 'vercel':
+      return new VercelBlobStore({ token: config.BLOB_READ_WRITE_TOKEN! })
     case 'disk':
       return new LocalDiskBlobStore(config.BLOB_DISK_ROOT)
     case 'memory':

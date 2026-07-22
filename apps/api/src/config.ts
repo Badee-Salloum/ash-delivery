@@ -41,7 +41,7 @@ const schema = z.object({
    * Where evidence photos live. `disk` is correct on a VPS with a mounted volume; on a
    * serverless host the filesystem is ephemeral, so production there MUST be `s3`.
    */
-  BLOB_DRIVER: z.enum(['memory', 'disk', 's3']).default('disk'),
+  BLOB_DRIVER: z.enum(['memory', 'disk', 's3', 'vercel']).default('disk'),
   BLOB_DISK_ROOT: z.string().default('./media'),
   S3_ENDPOINT: z.string().url().optional(),
   S3_REGION: z.string().default('auto'),
@@ -49,6 +49,8 @@ const schema = z.object({
   S3_ACCESS_KEY_ID: z.string().optional(),
   S3_SECRET_ACCESS_KEY: z.string().optional(),
   S3_FORCE_PATH_STYLE: z.coerce.boolean().default(true),
+  /** Injected by linking a Vercel Blob store to the project; required when BLOB_DRIVER=vercel. */
+  BLOB_READ_WRITE_TOKEN: z.string().optional(),
 })
 
 export type Config = z.infer<typeof schema>
@@ -73,6 +75,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     if (missing.length > 0) {
       throw new Error(`BLOB_DRIVER=s3 requires: ${missing.join(', ')}`)
     }
+  }
+
+  if (config.BLOB_DRIVER === 'vercel' && !config.BLOB_READ_WRITE_TOKEN) {
+    throw new Error('BLOB_DRIVER=vercel requires BLOB_READ_WRITE_TOKEN (link a Vercel Blob store to the project)')
   }
 
   return config

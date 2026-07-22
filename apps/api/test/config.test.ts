@@ -33,6 +33,15 @@ describe('configuration is validated at boot, not discovered at 2am', () => {
   it('names the offending variable in the error', () => {
     expect(() => loadConfig({ PORT: 'not-a-port' } as NodeJS.ProcessEnv)).toThrow(/PORT/)
   })
+
+  it('refuses BLOB_DRIVER=vercel without the token — the misconfig would 500 on first upload', () => {
+    expect(() => loadConfig({ BLOB_DRIVER: 'vercel' } as NodeJS.ProcessEnv)).toThrow(/BLOB_READ_WRITE_TOKEN/)
+  })
+
+  it('accepts BLOB_DRIVER=vercel when the token is present', () => {
+    const c = loadConfig({ BLOB_DRIVER: 'vercel', BLOB_READ_WRITE_TOKEN: 'vercel_blob_rw_x' } as NodeJS.ProcessEnv)
+    expect(c.BLOB_DRIVER).toBe('vercel')
+  })
 })
 
 describe('bcrypt hasher (SRS §7)', () => {

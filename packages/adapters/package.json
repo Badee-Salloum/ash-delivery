@@ -10,12 +10,13 @@
   "comment": "In-memory implementations of every port. Real Postgres/S3 adapters land beside these; the API cannot tell the difference, which is what makes it testable without Docker.",
   "dependencies": {
     "@ash/contracts": "workspace:*",
-    "@ash/domain": "workspace:*"
+    "@ash/domain": "workspace:*",
+    "@vercel/blob": "^2.6.1"
   },
   "devDependencies": {
+    "@ash/testkit": "workspace:*",
     "@types/node": "^26.1.1",
-    "vitest": "^3.2.4",
-    "@ash/testkit": "workspace:*"
+    "vitest": "^3.2.4"
   },
   "scripts": {
     "test": "vitest run"

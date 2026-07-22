@@ -5,6 +5,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import { LocalDiskBlobStore, NonDurableBlobStoreError, assertDurableBlobStore } from '../src/blob/disk.ts'
 import { MemoryBlobStore } from '../src/memory/media.ts'
 import { S3BlobStore } from '../src/blob/s3.ts'
+import { VercelBlobStore } from '../src/blob/vercel.ts'
 
 const root = mkdtempSync(join(tmpdir(), 'ash-blob-'))
 afterAll(() => rmSync(root, { recursive: true, force: true }))
@@ -63,5 +64,18 @@ describe('the durability guard', () => {
     })
     expect(s3.durable).toBe(true)
     expect(() => assertDurableBlobStore(s3, 'production')).not.toThrow()
+  })
+
+  it('accepts a Vercel Blob store in production', () => {
+    // The put/get/exists round trip against a real private store is proven by a manual spike,
+    // not wired into CI (it needs a live BLOB_READ_WRITE_TOKEN). Here we assert the two things
+    // that are pure: it declares itself durable, and the boot guard lets it through.
+    const vb = new VercelBlobStore({ token: 'vercel_blob_rw_test_token' })
+    expect(vb.durable).toBe(true)
+    expect(() => assertDurableBlobStore(vb, 'production')).not.toThrow()
+  })
+
+  it('refuses to construct without a token — a silent misconfig would 500 on first upload', () => {
+    expect(() => new VercelBlobStore({ token: '' })).toThrow(/BLOB_READ_WRITE_TOKEN/)
   })
 })
