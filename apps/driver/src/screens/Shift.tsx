@@ -162,6 +162,7 @@ function StartPackage({
   const [odoShot, setOdoShot] = useState(false)
   const [busy, setBusy] = useState(false)
   const [ocrBusy, setOcrBusy] = useState(false)
+  const [createError, setCreateError] = useState<string | null>(null)
 
   // Assisted OCR: read the odometer + battery off the dashboard photo and PRE-FILL the fields the
   // driver would otherwise type. Only fills a field the driver has not already entered, and any
@@ -178,13 +179,22 @@ function StartPackage({
     }
   }, [])
 
-  // Create the draft shift once, so the odometer photo has a shift to attach to.
+  // Create the draft shift once, so the odometer photo has a shift to attach to. If this fails the
+  // driver must be TOLD: swallowing it left the camera tile stuck on "loading" with no way to know
+  // the bike was already on someone else's shift.
   useEffect(() => {
     if (shiftId) return
     void api
       .post<{ id: string }>('/shifts', assignment)
-      .then((s) => setShiftId(s.id))
-      .catch(() => undefined)
+      .then((s) => {
+        setShiftId(s.id)
+        setCreateError(null)
+      })
+      .catch((e) => {
+        const err = e as { error?: string; detail?: unknown }
+        const detail = Array.isArray(err.detail) ? String(err.detail[0]) : undefined
+        setCreateError(detail ?? err.error ?? 'error')
+      })
   }, [api, assignment, shiftId])
 
   async function confirm(): Promise<void> {
@@ -254,7 +264,13 @@ function StartPackage({
         />
       ) : (
         <Card>
-          <p className="text-center text-slate-400">{t.common.loading}</p>
+          {createError ? (
+            <p className="text-center font-medium text-red-600">
+              {t.shift.cannotStart[createError as keyof typeof t.shift.cannotStart] ?? createError}
+            </p>
+          ) : (
+            <p className="text-center text-slate-400">{t.common.loading}</p>
+          )}
         </Card>
       )}
       {ocrBusy ? <p className="text-center text-sm text-slate-400">{t.shift.reading}…</p> : null}

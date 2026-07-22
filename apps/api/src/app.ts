@@ -241,9 +241,19 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       branchId: driver.branchId,
       liveShiftId: live[0]?.id ?? null,
       liveShiftState: live[0]?.state ?? null,
-      vehicles: vehicles
-        .filter((v) => v.active && v.state === 'ready')
-        .map((v) => ({ id: v.id, code: v.code, state: v.state })),
+      // A bike already bound to a live shift is NOT pickable: POST /shifts refuses it with
+      // `vehicle_already_on_shift`. Reporting it here is what stops a driver choosing a dead end
+      // and staring at a screen that never advances.
+      vehicles: await Promise.all(
+        vehicles
+          .filter((v) => v.active && v.state === 'ready')
+          .map(async (v) => ({
+            id: v.id,
+            code: v.code,
+            state: v.state,
+            busy: (await deps.shifts.listLiveForVehicle(v.id)).length > 0,
+          })),
+      ),
     }
   })
 

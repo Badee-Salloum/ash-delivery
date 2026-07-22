@@ -9,7 +9,7 @@ interface Assignment {
   branchId: string
   liveShiftId: string | null
   liveShiftState: string | null
-  vehicles: Array<{ id: string; code: string; state: string }>
+  vehicles: Array<{ id: string; code: string; state: string; busy?: boolean }>
 }
 
 /**
@@ -76,9 +76,12 @@ export function DriverApp(): ReactNode {
               <p className="text-center text-slate-500">—</p>
             </Card>
           ) : (
+            // A bike on someone else's live shift cannot be started: show it, but disabled and
+            // labelled, rather than letting the driver pick it and hit a refusal.
             assignment.vehicles.map((v) => (
-              <Button key={v.id} variant="ghost" onClick={() => setVehicleId(v.id)}>
+              <Button key={v.id} variant="ghost" disabled={v.busy === true} onClick={() => setVehicleId(v.id)}>
                 {t.shift.vehicle} {v.code}
+                {v.busy === true ? ` — ${t.shift.busyVehicle}` : ''}
               </Button>
             ))
           )}

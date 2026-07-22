@@ -105,6 +105,11 @@ export const en: Catalog = {
     shiftNo: 'Shift number',
     startPackage: 'Start package',
     reading: 'Reading the photo',
+    busyVehicle: 'On a shift now',
+    cannotStart: {
+      vehicle_already_on_shift: 'That bike is on another shift right now — pick a different one.',
+      driver_already_on_shift: 'You already have an open shift.',
+    },
     endPackage: 'End package',
     odometer: 'Odometer',
     battery: 'Battery',

@@ -106,6 +106,11 @@ export const ar = {
     shiftNo: 'رقم النوبة',
     startPackage: 'حزمة البداية',
     reading: 'جارٍ قراءة الصورة',
+    busyVehicle: 'على نوبة الآن',
+    cannotStart: {
+      vehicle_already_on_shift: 'هذه الآلية على نوبة أخرى الآن — اختر آلية غيرها.',
+      driver_already_on_shift: 'لديك نوبة مفتوحة بالفعل.',
+    },
     endPackage: 'حزمة النهاية',
     odometer: 'العداد',
     battery: 'البطارية',
