@@ -1,5 +1,34 @@
 # PROGRESS
 
+## 2026-07-23 — bikes are assigned, not chosen; and a stranded bike can be released
+
+**190 API tests + 290 domain green, 6 guards green, all three Vercel projects redeployed.**
+
+The driver no longer picks his bike from a menu. The branch manager binds driver ↔ vehicle for a
+business date (SRS B-3 / س34) on the fleet screen; from then on `/me/assignment` returns that bike
+alone, and `createShift` refuses any other. A bike assigned to somebody else is off limits even to
+an unassigned driver. Where no assignment exists the old free choice still stands, so a branch that
+has not started assigning is not locked out of its own shifts — the rule is enforced server-side,
+because a driver with the API can post any vehicle id.
+
+The `assignments` table has existed since migration 0003, with both UNIQUE constraints, and had
+**zero code references**. This wires it end to end.
+
+**The trap it exposed.** A driver who backs out of the start screen leaves a shift in `draft`. That
+shift still holds its bike, and a draft shift notifies nobody — so the bike became unusable for the
+rest of the day with no route back short of a DBA. Now: `DELETE /shifts/:id` releases it, refuses
+anything from `open` onward (money may already have posted), and is audited; `GET /shifts` surfaces
+the stranded shift the approval queue never sees; and the fleet screen shows a **release** button on
+exactly those vehicles.
+
+Also: the treasury nav read «الجرد اليومي», which hid the branch cash box + wallet deposits behind a
+label about counting. Renamed to «خزينة الفرع».
+
+**Still open:** approval ceilings per role (A-4) and attendance (B-4) — both tables exist, neither is
+wired. OCR accuracy still needs calibrating against the client's real dashboard photos.
+
+---
+
 ## 2026-07-21 (later) — Phase A + B complete: Bundle 1a is feature-complete
 
 **471 tests + 6 CI guards green, both front-ends build.** See [STATUS.md](STATUS.md).
