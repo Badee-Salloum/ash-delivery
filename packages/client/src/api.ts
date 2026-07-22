@@ -105,11 +105,47 @@ export class ApiClient {
   branches() {
     return this.get<{ branches: Array<{ id: string; code: string; nameAr: string; nameEn: string }> }>('/branches')
   }
+  /** Edit an account: rename, change role/branch, deactivate, or reset the password. */
+  updateUser(
+    id: string,
+    body: { fullNameAr?: string; roleKey?: string; branchId?: string | null; active?: boolean; password?: string },
+  ) {
+    return this.patch<{
+      id: string
+      username: string
+      roleKey: string
+      fullNameAr: string
+      branchId: string | null
+      driverId: string | null
+      active: boolean
+    }>(`/users/${id}`, body)
+  }
   createUser(body: { username: string; password: string; roleKey: string; fullNameAr: string; branchId?: string }) {
     return this.post<{ id: string; username: string; roleKey: string; fullNameAr: string; branchId: string | null; driverId: string | null }>(
       '/users',
       body,
     )
+  }
+
+  // ── Audit trail (SRS A-5) ───────────────────────────────────────────────────────────────────
+  audit(filter: { tableName?: string; recordId?: string; actorId?: string } = {}) {
+    const q = new URLSearchParams()
+    for (const [k, v] of Object.entries(filter)) if (v) q.set(k, v)
+    const qs = q.toString()
+    return this.get<{
+      rows: Array<{
+        id: number
+        tableName: string
+        recordId: string
+        action: string
+        actorId: string | null
+        actorKind: string
+        branchId: string | null
+        before: unknown
+        after: unknown
+        occurredAt: string
+      }>
+    }>(`/audit${qs ? `?${qs}` : ''}`)
   }
 
   // ── Branch treasury (cash box + wallet) ─────────────────────────────────────────────────────

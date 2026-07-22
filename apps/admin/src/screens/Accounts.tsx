@@ -34,6 +34,11 @@ export function Accounts(): ReactNode {
   const [error, setError] = useState<string | null>(null)
   const [ok, setOk] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // Row-level editing: at most one account is being edited or having its password reset.
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editForm, setEditForm] = useState({ fullNameAr: '', roleKey: '', branchId: '' })
+  const [pwId, setPwId] = useState<string | null>(null)
+  const [pwValue, setPwValue] = useState('')
 
   function refresh(): void {
     void api.users().then((r) => setAccounts(r.users)).catch(() => setAccounts([]))
@@ -72,6 +77,43 @@ export function Accounts(): ReactNode {
     } finally {
       setBusy(false)
     }
+  }
+
+  /** Run a row action, surfacing its error the same way the create form does. */
+  async function rowAction(fn: () => Promise<unknown>): Promise<void> {
+    setError(null)
+    setOk(null)
+    try {
+      await fn()
+      setOk(t.accounts.updated)
+      refresh()
+    } catch (err) {
+      setError((err as { error?: string }).error ?? 'error')
+    }
+  }
+
+  function startEdit(a: Account): void {
+    setPwId(null)
+    setEditingId(a.id)
+    setEditForm({ fullNameAr: a.fullNameAr, roleKey: a.roleKey, branchId: a.branchId ?? '' })
+  }
+
+  async function saveEdit(id: string): Promise<void> {
+    const scoped = BRANCH_SCOPED.has(editForm.roleKey)
+    await rowAction(() =>
+      api.updateUser(id, {
+        fullNameAr: editForm.fullNameAr.trim(),
+        roleKey: editForm.roleKey,
+        branchId: scoped ? editForm.branchId : null,
+      }),
+    )
+    setEditingId(null)
+  }
+
+  async function savePassword(id: string): Promise<void> {
+    await rowAction(() => api.updateUser(id, { password: pwValue }))
+    setPwId(null)
+    setPwValue('')
   }
 
   const canSubmit =
@@ -146,18 +188,106 @@ export function Accounts(): ReactNode {
       </Card>
 
       <Card title={t.accounts.title}>
-        <Table head={[t.accounts.username, t.accounts.fullName, t.accounts.role, t.accounts.branch, t.accounts.status]}>
-          {accounts.map((a) => (
-            <tr key={a.id}>
-              <td className="px-3 py-2 font-medium">{a.username}</td>
-              <td className="px-3 py-2">{a.fullNameAr}</td>
-              <td className="px-3 py-2">{t.roles[a.roleKey as keyof typeof t.roles] ?? a.roleKey}</td>
-              <td className="px-3 py-2">{branchName(a.branchId)}</td>
-              <td className="px-3 py-2">
-                <Badge tone={a.active ? 'green' : 'slate'}>{a.active ? t.accounts.active : t.accounts.inactive}</Badge>
-              </td>
-            </tr>
-          ))}
+        <Table
+          head={[t.accounts.username, t.accounts.fullName, t.accounts.role, t.accounts.branch, t.accounts.status, t.accounts.actions]}
+        >
+          {accounts.map((a) =>
+            editingId === a.id ? (
+              <tr key={a.id} className="bg-slate-50">
+                <td className="px-3 py-2 font-medium">{a.username}</td>
+                <td className="px-3 py-2">
+                  <TextInput
+                    value={editForm.fullNameAr}
+                    onChange={(e) => setEditForm({ ...editForm, fullNameAr: e.target.value })}
+                    className="w-full"
+                  />
+                </td>
+                <td className="px-3 py-2">
+                  <select
+                    value={editForm.roleKey}
+                    onChange={(e) => setEditForm({ ...editForm, roleKey: e.target.value })}
+                    className="min-h-10 rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none focus:border-brand"
+                  >
+                    {ROLE_KEYS.map((r) => (
+                      <option key={r} value={r}>
+                        {t.roles[r]}
+                      </option>
+                    ))}
+                  </select>
+                </td>
+                <td className="px-3 py-2">
+                  {BRANCH_SCOPED.has(editForm.roleKey) ? (
+                    <select
+                      value={editForm.branchId}
+                      onChange={(e) => setEditForm({ ...editForm, branchId: e.target.value })}
+                      className="min-h-10 rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none focus:border-brand"
+                    >
+                      <option value="">—</option>
+                      {branches.map((b) => (
+                        <option key={b.id} value={b.id}>
+                          {lang === 'ar' ? b.nameAr : b.nameEn}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    '—'
+                  )}
+                </td>
+                <td className="px-3 py-2">—</td>
+                <td className="px-3 py-2">
+                  <div className="flex gap-2">
+                    <Button onClick={() => void saveEdit(a.id)}>{t.accounts.save}</Button>
+                    <Button variant="ghost" onClick={() => setEditingId(null)}>
+                      {t.accounts.cancel}
+                    </Button>
+                  </div>
+                </td>
+              </tr>
+            ) : (
+              <tr key={a.id}>
+                <td className="px-3 py-2 font-medium">{a.username}</td>
+                <td className="px-3 py-2">{a.fullNameAr}</td>
+                <td className="px-3 py-2">{t.roles[a.roleKey as keyof typeof t.roles] ?? a.roleKey}</td>
+                <td className="px-3 py-2">{branchName(a.branchId)}</td>
+                <td className="px-3 py-2">
+                  <Badge tone={a.active ? 'green' : 'slate'}>{a.active ? t.accounts.active : t.accounts.inactive}</Badge>
+                </td>
+                <td className="px-3 py-2">
+                  {pwId === a.id ? (
+                    <div className="flex gap-2">
+                      <TextInput
+                        value={pwValue}
+                        onChange={(e) => setPwValue(e.target.value)}
+                        placeholder={t.accounts.newPassword}
+                        className="w-40"
+                      />
+                      <Button disabled={pwValue.length < 8} onClick={() => void savePassword(a.id)}>
+                        {t.accounts.save}
+                      </Button>
+                      <Button variant="ghost" onClick={() => { setPwId(null); setPwValue('') }}>
+                        {t.accounts.cancel}
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      <Button variant="ghost" onClick={() => startEdit(a)}>
+                        {t.accounts.edit}
+                      </Button>
+                      <Button
+                        variant={a.active ? 'danger' : 'success'}
+                        onClick={() => void rowAction(() => api.updateUser(a.id, { active: !a.active }))}
+                      >
+                        {a.active ? t.accounts.deactivate : t.accounts.activate}
+                      </Button>
+                      <Button variant="ghost" onClick={() => { setEditingId(null); setPwId(a.id); setPwValue('') }}>
+                        {t.accounts.resetPassword}
+                      </Button>
+                    </div>
+                  )}
+                </td>
+              </tr>
+            ),
+          )}
         </Table>
       </Card>
     </div>

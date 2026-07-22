@@ -102,6 +102,18 @@ export const branchTarget = z.object({ branchId: z.string().optional() })
 
 // ── Accounts (SRS A-2) ────────────────────────────────────────────────────────────────────
 
+/**
+ * Edit an account. Every field is optional — only what is sent changes. `username` is absent on
+ * purpose: it is the login identity, not a profile field. A `password` here is a reset.
+ */
+export const updateUserRequest = z.object({
+  fullNameAr: z.string().min(1).max(120).optional(),
+  roleKey: z.enum(['driver', 'branch_manager', 'system_admin', 'general_manager', 'accountant']).optional(),
+  branchId: z.string().nullable().optional(),
+  active: z.boolean().optional(),
+  password: z.string().min(8).max(200).optional(),
+})
+
 /** Create a login account. A driver-role account also gets a linked driver record. */
 export const createUserRequest = z.object({
   username: z.string().min(3).max(40),

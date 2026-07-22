@@ -8,8 +8,9 @@ import { Approval } from './screens/Approval.tsx'
 import { Fleet } from './screens/Fleet.tsx'
 import { Treasury } from './screens/Treasury.tsx'
 import { Accounts } from './screens/Accounts.tsx'
+import { Audit } from './screens/Audit.tsx'
 
-type Section = 'dashboard' | 'queue' | 'fleet' | 'treasury' | 'accounts'
+type Section = 'dashboard' | 'queue' | 'fleet' | 'treasury' | 'accounts' | 'audit'
 
 /**
  * The admin console shell: a side rail of sections and a main pane. The approval review takes over
@@ -41,6 +42,8 @@ export function AdminApp(): ReactNode {
     { key: 'fleet', label: `${t.fleet.drivers} / ${t.fleet.vehicles}` },
     { key: 'treasury', label: t.treasury.cashCount },
     ...(canManageUsers ? [{ key: 'accounts' as const, label: t.accounts.title }] : []),
+    // audit.view is granted to the sysadmin and the GM — the same two roles.
+    ...(canManageUsers ? [{ key: 'audit' as const, label: t.audit.title }] : []),
   ]
 
   return (
@@ -101,6 +104,8 @@ export function AdminApp(): ReactNode {
           <Fleet />
         ) : section === 'accounts' ? (
           <Accounts />
+        ) : section === 'audit' ? (
+          <Audit />
         ) : (
           <Treasury />
         )}

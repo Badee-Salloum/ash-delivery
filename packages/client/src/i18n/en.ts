@@ -31,6 +31,26 @@ export const en: Catalog = {
     created: 'Account created',
     duplicate: 'That username is already taken',
     passwordHint: 'At least 8 characters',
+    actions: 'Actions',
+    edit: 'Edit',
+    save: 'Save',
+    cancel: 'Cancel',
+    deactivate: 'Disable',
+    activate: 'Enable',
+    resetPassword: 'Reset password',
+    newPassword: 'New password',
+    updated: 'Account updated',
+  },
+
+  audit: {
+    title: 'Audit trail',
+    table: 'Table',
+    record: 'Record',
+    action: 'Action',
+    actor: 'Actor',
+    when: 'When',
+    search: 'Search',
+    details: 'Details',
   },
 
   common: {

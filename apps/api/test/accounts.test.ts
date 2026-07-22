@@ -17,6 +17,10 @@ afterEach(async () => {
 type Payload = Record<string, unknown>
 const post = async (token: string, url: string, payload: Payload): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(token) }, payload })
+const patch = async (token: string, url: string, payload: Payload): Promise<LightMyRequestResponse> =>
+  await h.app.inject({ method: 'PATCH', url, headers: { cookie: h.cookie(token) }, payload })
+const login = async (username: string, password: string): Promise<LightMyRequestResponse> =>
+  await h.app.inject({ method: 'POST', url: '/auth/login', payload: { username, password } })
 const get = async (token: string, url: string): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(token) } })
 
@@ -77,6 +81,50 @@ describe('accounts (SRS A-2)', () => {
     const res = await post(sa, '/users', account({ username: 'dupe', roleKey: 'accountant', branchId: undefined }))
     expect(res.statusCode).toBe(409)
     expect(res.json().error).toBe('duplicate_username')
+  })
+
+  it('renames an account and changes its role', async () => {
+    const sa = await h.loginAs('sysadmin')
+    const id = (await post(sa, '/users', account({ username: 'renameme', roleKey: 'accountant', branchId: undefined }))).json().id
+    const res = await patch(sa, `/users/${id}`, { fullNameAr: 'اسم جديد' })
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json().fullNameAr).toBe('اسم جديد')
+    expect(res.json()).not.toHaveProperty('passwordHash')
+  })
+
+  it('deactivating an account stops it logging in', async () => {
+    const sa = await h.loginAs('sysadmin')
+    const id = (await post(sa, '/users', account({ username: 'disableme', roleKey: 'accountant', branchId: undefined }))).json().id
+    expect((await login('disableme', 'password1234')).statusCode).toBe(200)
+    expect((await patch(sa, `/users/${id}`, { active: false })).statusCode).toBe(200)
+    expect((await login('disableme', 'password1234')).statusCode).not.toBe(200)
+  })
+
+  it('resets a password — the old one stops working, the new one works', async () => {
+    const sa = await h.loginAs('sysadmin')
+    const id = (await post(sa, '/users', account({ username: 'resetme', roleKey: 'accountant', branchId: undefined }))).json().id
+    expect((await patch(sa, `/users/${id}`, { password: 'brandnewpass99' })).statusCode).toBe(200)
+    expect((await login('resetme', 'password1234')).statusCode).toBe(401)
+    expect((await login('resetme', 'brandnewpass99')).statusCode).toBe(200)
+  })
+
+  it('a branch manager cannot edit accounts', async () => {
+    const sa = await h.loginAs('sysadmin')
+    const id = (await post(sa, '/users', account({ username: 'protected', roleKey: 'accountant', branchId: undefined }))).json().id
+    const mgr = await h.loginAs('manager')
+    expect((await patch(mgr, `/users/${id}`, { fullNameAr: 'x' })).statusCode).toBe(403)
+  })
+
+  it('404s on an unknown account', async () => {
+    const sa = await h.loginAs('sysadmin')
+    const res = await patch(sa, '/users/00000000-0000-4000-8000-000000000000', { fullNameAr: 'x' })
+    expect(res.statusCode).toBe(404)
+  })
+
+  it('refuses to make someone a driver without a branch', async () => {
+    const sa = await h.loginAs('sysadmin')
+    const id = (await post(sa, '/users', account({ username: 'nobranchrole', roleKey: 'accountant', branchId: undefined }))).json().id
+    expect((await patch(sa, `/users/${id}`, { roleKey: 'driver' })).statusCode).toBe(422)
   })
 
   it('lists accounts, never leaking a password hash', async () => {

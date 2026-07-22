@@ -32,6 +32,26 @@ export const ar = {
     created: 'تم إنشاء الحساب',
     duplicate: 'اسم المستخدم مستخدم مسبقاً',
     passwordHint: '٨ أحرف على الأقل',
+    actions: 'إجراءات',
+    edit: 'تعديل',
+    save: 'حفظ',
+    cancel: 'إلغاء',
+    deactivate: 'تعطيل',
+    activate: 'تفعيل',
+    resetPassword: 'كلمة مرور جديدة',
+    newPassword: 'كلمة المرور الجديدة',
+    updated: 'تم تحديث الحساب',
+  },
+
+  audit: {
+    title: 'سجل التدقيق',
+    table: 'الجدول',
+    record: 'السجل',
+    action: 'العملية',
+    actor: 'المستخدم',
+    when: 'الوقت',
+    search: 'بحث',
+    details: 'التفاصيل',
   },
 
   common: {

@@ -418,19 +418,33 @@ export class PgUserRepo implements UserRepo {
       active: Boolean(r.active),
     }
   }
+  /**
+   * Write the whole mutable record, exactly as the memory adapter's `update` does — otherwise the
+   * two drift and an admin "edit account" silently changes nothing on Postgres. `username` is the
+   * one field deliberately NOT updated: it is the login identity, and renaming it is a different
+   * (and auditable) decision from editing a profile.
+   */
   async update(user: UserRecord): Promise<void> {
     await this.pool.query(
-      `UPDATE users SET failed_attempts = $2,
-                        locked_until = CASE WHEN $3::bigint IS NULL THEN NULL
-                                            ELSE to_timestamp($3::double precision / 1000) END,
-                        active = $4,
-                        mfa_secret_enc = $5,
-                        mfa_enrolled_at = CASE WHEN $6::bigint IS NULL THEN NULL
-                                               ELSE to_timestamp($6::double precision / 1000) END,
+      `UPDATE users SET full_name_ar = $2,
+                        role_key = $3,
+                        branch_id = $4,
+                        password_hash = $5,
+                        failed_attempts = $6,
+                        locked_until = CASE WHEN $7::bigint IS NULL THEN NULL
+                                            ELSE to_timestamp($7::double precision / 1000) END,
+                        active = $8,
+                        mfa_secret_enc = $9,
+                        mfa_enrolled_at = CASE WHEN $10::bigint IS NULL THEN NULL
+                                               ELSE to_timestamp($10::double precision / 1000) END,
                         updated_at = now()
         WHERE id = $1`,
       [
         user.id,
+        user.fullNameAr,
+        user.roleKey,
+        user.branchId,
+        user.passwordHash,
         user.failedAttempts,
         user.lockedUntilMs,
         user.active,
