@@ -61,8 +61,10 @@ fail is decoration.
    is calibrated against one real shift.
 2. **Run `verify-guards.sql` against Neon.** Proven on stock Postgres 17, not Neon. Expected to
    pass; expected is not evidence.
-3. **Pick object storage** (R2 / B2 / Hetzner). `BLOB_DRIVER=s3` is mandatory on Vercel — the app
-   refuses to boot production on non-durable storage, so evidence photos cannot silently vanish.
+3. ~~**Pick object storage**~~ **Done — Vercel Blob (private).** `BLOB_DRIVER=vercel`, a
+   `VercelBlobStore` adapter behind the `BlobStore` port, store linked to the `ash-api` project so
+   `BLOB_READ_WRITE_TOKEN` is injected. The durable-storage boot guard accepts it; evidence photos
+   cannot silently vanish. (`s3` remains available for a VPS deploy.)
 4. **Have a fluent speaker review the Arabic** — ~150 keys, including the BR1 cause explanations a
    manager reads under time pressure. CI checks key parity, not that the financial Arabic is right.
 5. **Create the first admin by hand** — the seed refuses to run against production.
