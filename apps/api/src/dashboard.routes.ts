@@ -2,7 +2,8 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { type Deps, type ShiftRecord, serializeMoney } from '@ash/contracts'
 import { isLive, minor, toUsdMinor, weekStartFor } from '@ash/domain'
-import { ServiceError, todayFor } from './shifts.service.ts'
+import { todayFor } from './shifts.service.ts'
+import { branchSubject, resolveBranchId } from './branch-scope.ts'
 
 /**
  * The minimal ops dashboard (SRS I-1, in scope per the brief's "minimal ops dashboard").
@@ -18,11 +19,13 @@ import { ServiceError, todayFor } from './shifts.service.ts'
  * Every figure is branch-scoped and read-only. Nothing here writes.
  */
 export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void {
-  const ownBranch = (req: { actor?: { branchId: string | null } }) => ({ branchId: req.actor?.branchId ?? null })
+  const ownBranch = branchSubject
 
   app.get('/dashboard', { config: { permission: 'branch_data.view', subject: ownBranch } }, async (req) => {
-    const branchId = req.actor!.branchId
-    if (!branchId) throw new ServiceError(422, 'branch_required')
+    // The GM and the sysadmin have no branch of their own — they name one with `?branchId=`.
+    // Reading `req.actor.branchId` alone was why this endpoint 422'd for exactly the two roles
+    // the §3 matrix grants `branch_data.view` at scope 'all'.
+    const branchId = resolveBranchId(req)
 
     const today = todayFor(deps)
     const shifts = await deps.shifts.listByBranchAndDate(branchId, today)
@@ -109,11 +112,9 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
   app.get('/dashboard/profit', { config: { permission: 'profit.view_total', subject: () => ({}) } }, async (req) => {
     const { from, to } = z.object({ from: z.string().optional(), to: z.string().optional() }).parse(req.query)
     const today = todayFor(deps)
-    const branchId = req.actor!.branchId
-
-    // The GM is org-wide; without a branch this would need to fan out over all branches. Single
-    // branch today, so require one to keep the figure unambiguous.
-    if (!branchId) throw new ServiceError(422, 'branch_required')
+    // The GM is org-wide; totalling across every branch would need a fan-out. Single branch
+    // today, so he names the one he means and the figure stays unambiguous.
+    const branchId = resolveBranchId(req)
 
     const weekStart = weekStartFor(from ?? today)
     const entries = await deps.ledger.listByWeek(branchId, weekStart)

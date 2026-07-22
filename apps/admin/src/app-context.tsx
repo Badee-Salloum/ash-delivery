@@ -16,6 +16,13 @@ export interface Session {
   businessDate: string
 }
 
+export interface Branch {
+  id: string
+  code: string
+  nameAr: string
+  nameEn: string
+}
+
 interface AppContextValue {
   api: ApiClient
   lang: Lang
@@ -24,6 +31,11 @@ interface AppContextValue {
   session: Session | null
   setSession(session: Session | null): void
   refreshSession(): Promise<void>
+  /** Branches an organisation-wide role may choose between. Empty for a branch-scoped role. */
+  branches: Branch[]
+  /** The branch every branch-scoped read is currently pointed at. */
+  branchId: string | null
+  setBranchId(branchId: string): void
 }
 
 const AppContext = createContext<AppContextValue | null>(null)
@@ -32,6 +44,8 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
   const api = useMemo(() => new ApiClient('/api'), [])
   const [lang, setLangState] = useState<Lang>('ar')
   const [session, setSession] = useState<Session | null>(null)
+  const [branches, setBranches] = useState<Branch[]>([])
+  const [branchId, setBranchIdState] = useState<string | null>(null)
 
   const setLang = useCallback((next: Lang) => {
     setLangState(next)
@@ -59,6 +73,49 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     void refreshSession()
   }, [refreshSession])
 
+  const setBranchId = useCallback(
+    (next: string) => {
+      api.setBranch(next)
+      setBranchIdState(next)
+    },
+    [api],
+  )
+
+  /**
+   * Point the client at a branch.
+   *
+   * A branch-scoped role (branch_manager) already carries his branch on the session, so the client
+   * stays in session scope and sends nothing. An ORGANISATION-WIDE role (GM, system admin) has
+   * `branchId === null` by design — the §3 matrix gives him scope 'all' — so until he picks one,
+   * every branch-scoped read answers 422 and every screen sits on a spinner. He gets the list and
+   * lands on the first branch, which for a single-branch install means it just works.
+   */
+  useEffect(() => {
+    if (!session) {
+      setBranches([])
+      setBranchIdState(null)
+      api.setBranch(null)
+      return
+    }
+    if (session.branchId) {
+      setBranches([])
+      setBranchIdState(session.branchId)
+      api.setBranch(null) // his session says it; naming it again would only be refusable
+      return
+    }
+    void api
+      .branches()
+      .then((r) => {
+        setBranches(r.branches)
+        const first = r.branches[0]
+        if (first) {
+          api.setBranch(first.id)
+          setBranchIdState(first.id)
+        }
+      })
+      .catch(() => setBranches([]))
+  }, [api, session])
+
   const value: AppContextValue = {
     api,
     lang,
@@ -67,6 +124,9 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     session,
     setSession,
     refreshSession,
+    branches,
+    branchId,
+    setBranchId,
   }
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>
 }

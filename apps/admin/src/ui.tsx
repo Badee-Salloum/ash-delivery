@@ -125,3 +125,46 @@ export function Badge({ tone, children }: { tone: 'green' | 'amber' | 'red' | 's
   }
   return <span className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${tones[tone]}`}>{children}</span>
 }
+
+/**
+ * What a screen shows before it has data — either still loading, or why it never will.
+ *
+ * A failed fetch used to leave the screen's state `null`, which rendered "جارِ التحميل…" forever.
+ * The user saw an eternal spinner and the actual HTTP error never surfaced: in practice a 422
+ * `branch_required`, because the general manager and the system admin have no branch on their
+ * session. Showing the code is the difference between "this app is broken" and "pick a branch".
+ */
+export function Pending({
+  error,
+  loadingLabel,
+  errorLabel,
+  onRetry,
+  retryLabel,
+}: {
+  error: string | null
+  loadingLabel: string
+  errorLabel: string
+  onRetry?: (() => void) | undefined
+  retryLabel?: string | undefined
+}): ReactNode {
+  if (!error) {
+    return (
+      <Card>
+        <p className="py-6 text-center text-slate-400">{loadingLabel}</p>
+      </Card>
+    )
+  }
+  return (
+    <Card>
+      <p className="text-center font-medium text-red-600">{errorLabel}</p>
+      <p className="mt-1 text-center text-xs text-slate-400">{error}</p>
+      {onRetry ? (
+        <div className="mt-3 flex justify-center">
+          <Button variant="ghost" onClick={onRetry}>
+            {retryLabel ?? '↻'}
+          </Button>
+        </div>
+      ) : null}
+    </Card>
+  )
+}

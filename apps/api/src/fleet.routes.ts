@@ -12,6 +12,7 @@ import {
 import type { AssignmentRecord } from '@ash/contracts'
 import { addDays, canTransitionVehicle, documentStatusOn } from '@ash/domain'
 import { ServiceError, todayFor } from './shifts.service.ts'
+import { branchSubject, resolveBranchId } from './branch-scope.ts'
 
 /**
  * Fleet management (SRS §B): drivers, vehicles and their documents.
@@ -21,26 +22,12 @@ import { ServiceError, todayFor } from './shifts.service.ts'
  * to the roles the §3 matrix allows.
  */
 export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
-  /**
-   * The branch a write targets: the body's `branchId` if given, otherwise the actor's own.
-   *
-   * A branch-scoped manager can only ever name his own branch (the `branch` grant refuses any
-   * other), while an organisation-wide role must name one explicitly — sysadmin and GM have no
-   * branch of their own, so defaulting would leave them unable to onboard anyone.
-   */
-  const targetBranch = (req: { actor?: { branchId: string | null }; body?: unknown }) => {
-    const parsed = z.object({ branchId: z.string().optional() }).safeParse(req.body ?? {})
-    const fromBody = parsed.success ? parsed.data.branchId : undefined
-    return { branchId: fromBody ?? req.actor?.branchId ?? null }
-  }
-
-  const ownBranch = (req: { actor?: { branchId: string | null } }) => ({ branchId: req.actor?.branchId ?? null })
-
-  const resolveBranch = (req: { actor?: { branchId: string | null }; body?: unknown }): string => {
-    const branchId = targetBranch(req).branchId
-    if (!branchId) throw new ServiceError(422, 'branch_required', { hint: 'organisation-wide roles must send branchId' })
-    return branchId
-  }
+  // The branch a request targets, from `?branchId=` or the body, else the actor's own session.
+  // Shared so a read and a write resolve it identically — see branch-scope.ts for why a GET must
+  // have a channel at all.
+  const targetBranch = branchSubject
+  const ownBranch = branchSubject
+  const resolveBranch = resolveBranchId
 
   // ── Drivers (B-1) ───────────────────────────────────────────────────────────────────────
 

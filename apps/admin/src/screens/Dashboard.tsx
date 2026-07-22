@@ -1,6 +1,7 @@
-import { type ReactNode, useEffect, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useState } from 'react'
 import { useApp } from '../app-context.tsx'
-import { Card, Money, Stat } from '../ui.tsx'
+import { explainError } from '../errors.ts'
+import { Card, Money, Pending, Stat } from '../ui.tsx'
 
 interface DashboardData {
   businessDate: string
@@ -13,19 +14,44 @@ interface DashboardData {
 
 /** The five-indicator ops dashboard (SRS I-1). Total profit is a GM-only tile, fetched separately. */
 export function Dashboard(): ReactNode {
-  const { api, t, session } = useApp()
+  const { api, t, session, branchId } = useApp()
   const [data, setData] = useState<DashboardData | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [profit, setProfit] = useState<{ companyShareSyp: string; driverShareSyp: string; yalagoShareSyp: string } | null>(null)
 
-  useEffect(() => {
-    void api.get<DashboardData>('/dashboard').then(setData).catch(() => setData(null))
+  // `branchId` is a dependency: an organisation-wide role picks his branch AFTER the first render,
+  // and switching branches must refetch rather than leave last branch's figures on screen.
+  const load = useCallback(() => {
+    setError(null)
+    void api
+      .get<DashboardData>('/dashboard')
+      .then((d) => {
+        setData(d)
+        setError(null)
+      })
+      .catch((e: { error?: string }) => {
+        setData(null)
+        setError(e.error ?? 'error')
+      })
     // Only the GM may see total profit (BR8); a 403 for anyone else simply leaves the tile absent.
     if (session?.roleKey === 'general_manager') {
       void api.get<typeof profit>('/dashboard/profit').then(setProfit).catch(() => setProfit(null))
     }
   }, [api, session])
 
-  if (!data) return <Card>{t.common.loading}</Card>
+  useEffect(load, [load, branchId])
+
+  if (!data) {
+    return (
+      <Pending
+        error={error}
+        loadingLabel={t.common.loading}
+        errorLabel={explainError(error, t)}
+        onRetry={load}
+        retryLabel={t.common.retry}
+      />
+    )
+  }
 
   return (
     <div className="flex flex-col gap-4">

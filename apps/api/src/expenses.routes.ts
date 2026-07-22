@@ -4,6 +4,7 @@ import type { Deps, ExpenseCategoryRecord, ExpenseRecord } from '@ash/contracts'
 import { createExpenseCategoryRequest, createExpenseRequest, serializeMoney } from '@ash/contracts'
 import { type Posting, expense as expensePosting, minor, weekStartFor } from '@ash/domain'
 import { ServiceError, ensureFxDay, todayFor } from './shifts.service.ts'
+import { branchSubject, resolveBranchId } from './branch-scope.ts'
 
 /**
  * Expenses (SRS §G) — «كل ليرة تخرج: مصنَّفة وموثَّقة ومنسوبة لمركز كلفتها».
@@ -16,18 +17,12 @@ import { ServiceError, ensureFxDay, todayFor } from './shifts.service.ts'
  * system admin.
  */
 export function registerExpenseRoutes(app: FastifyInstance, deps: Deps): void {
-  const targetBranch = (req: { actor?: { branchId: string | null }; body?: unknown }) => {
-    const parsed = z.object({ branchId: z.string().optional() }).safeParse(req.body ?? {})
-    const fromBody = parsed.success ? parsed.data.branchId : undefined
-    return { branchId: fromBody ?? req.actor?.branchId ?? null }
-  }
-  const ownBranch = (req: { actor?: { branchId: string | null } }) => ({ branchId: req.actor?.branchId ?? null })
-
-  const resolveBranch = (req: { actor?: { branchId: string | null }; body?: unknown }): string => {
-    const branchId = targetBranch(req).branchId
-    if (!branchId) throw new ServiceError(422, 'branch_required')
-    return branchId
-  }
+  // The branch a request targets, from `?branchId=` or the body, else the actor's own session.
+  // Shared so a read and a write resolve it identically — see branch-scope.ts for why a GET must
+  // have a channel at all.
+  const targetBranch = branchSubject
+  const ownBranch = branchSubject
+  const resolveBranch = resolveBranchId
 
   // ── Categories (G-1) ────────────────────────────────────────────────────────────────────
 

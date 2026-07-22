@@ -18,8 +18,36 @@ export interface ApiError {
 export class ApiClient {
   private readonly baseUrl: string
 
+  /**
+   * The branch an organisation-wide role is currently looking at.
+   *
+   * The GM and the system admin have `branchId === null` on their session — the §3 matrix grants
+   * them scope 'all', so the session deliberately cannot pick a branch for them. Every
+   * branch-scoped READ therefore has to carry the branch it means, or the server answers 422
+   * `branch_required` and the screen sits on a spinner forever. A branch-scoped role leaves this
+   * null: his session already says which branch, and naming another would be refused anyway.
+   */
+  branchId: string | null = null
+
   constructor(baseUrl = '/api') {
     this.baseUrl = baseUrl.replace(/\/$/, '')
+  }
+
+  /** Point every subsequent branch-scoped read at this branch. `null` restores session scope. */
+  setBranch(branchId: string | null): void {
+    this.branchId = branchId
+  }
+
+  /**
+   * Append the selected branch to a read.
+   *
+   * Reads only: a write names its branch in the body, where it is explicit and auditable, and
+   * where creating the wrong thing in the wrong branch is not one forgotten query param away.
+   */
+  private scoped(path: string): string {
+    if (!this.branchId) return path
+    const sep = path.includes('?') ? '&' : '?'
+    return `${path}${sep}branchId=${encodeURIComponent(this.branchId)}`
   }
 
   private async request<T>(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<T> {
@@ -44,7 +72,7 @@ export class ApiClient {
   }
 
   get<T>(path: string): Promise<T> {
-    return this.request<T>('GET', path)
+    return this.request<T>('GET', this.scoped(path))
   }
   post<T>(path: string, body?: unknown): Promise<T> {
     return this.request<T>('POST', path, body)
@@ -56,7 +84,7 @@ export class ApiClient {
     return this.request<T>('PATCH', path, body)
   }
   del<T>(path: string): Promise<T> {
-    return this.request<T>('DELETE', path)
+    return this.request<T>('DELETE', this.scoped(path))
   }
 
   /** Raw bytes for evidence upload — never base64, never multipart. */
@@ -181,7 +209,7 @@ export class ApiClient {
     }>(`/assignments${date ? `?date=${encodeURIComponent(date)}` : ''}`)
   }
   createAssignment(body: { driverId: string; vehicleId: string; businessDate?: string; shiftNo?: number }) {
-    return this.post<{ id: string }>('/assignments', body)
+    return this.post<{ id: string }>('/assignments', { ...body, ...(this.branchId ? { branchId: this.branchId } : {}) })
   }
   deleteAssignment(id: string) {
     return this.del<{ ok: boolean }>(`/assignments/${id}`)
@@ -205,7 +233,14 @@ export class ApiClient {
     return this.get<{ cash: string; wallet: string }>('/treasury/balances')
   }
   treasuryDeposit(target: 'cash' | 'wallet', amount: string, note?: string) {
-    return this.post<{ target: string; balance: string }>('/treasury/deposit', { target, amount, note })
+    // branchId is explicit here: the GM has scope 'all' and no session branch, so without it the
+    // deposit 422s — the money would have nowhere to land.
+    return this.post<{ target: string; balance: string }>('/treasury/deposit', {
+      target,
+      amount,
+      note,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
   }
 
   // ── Notifications ─────────────────────────────────────────────────────────────────────────

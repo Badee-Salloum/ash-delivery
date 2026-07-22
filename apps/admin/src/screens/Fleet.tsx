@@ -40,7 +40,7 @@ const vehTone: Record<string, 'green' | 'sky' | 'amber' | 'slate'> = {
 
 /** Drivers & vehicles (SRS B). Each driver carries his document status; an expired doc blocks him. */
 export function Fleet(): ReactNode {
-  const { api, t } = useApp()
+  const { api, t, branchId } = useApp()
   const [drivers, setDrivers] = useState<Driver[]>([])
   const [vehicles, setVehicles] = useState<Vehicle[]>([])
   const [newDriver, setNewDriver] = useState({ code: '', fullNameAr: '' })
@@ -68,7 +68,7 @@ export function Fleet(): ReactNode {
       .then((r) => setDayShifts(r.shifts))
       .catch(() => setDayShifts([]))
   }
-  useEffect(load, [assignDate]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(load, [assignDate, branchId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const nameOfDriver = (id: string): string => drivers.find((d) => d.id === id)?.fullNameAr ?? id.slice(0, 8)
   const codeOfVehicle = (id: string): string => vehicles.find((v) => v.id === id)?.code ?? id.slice(0, 8)
@@ -90,7 +90,7 @@ export function Fleet(): ReactNode {
           <TextInput placeholder={t.fleet.name} value={newDriver.fullNameAr} onChange={(e) => setNewDriver({ ...newDriver, fullNameAr: e.target.value })} className="flex-1" />
           <Button
             onClick={async () => {
-              await api.post('/drivers', newDriver).catch(() => undefined)
+              await api.post('/drivers', { ...newDriver, ...(branchId ? { branchId } : {}) }).catch(() => undefined)
               setNewDriver({ code: '', fullNameAr: '' })
               load()
             }}
@@ -126,7 +126,7 @@ export function Fleet(): ReactNode {
           <TextInput placeholder={t.fleet.code} value={newVehicle.code} onChange={(e) => setNewVehicle({ ...newVehicle, code: e.target.value })} className="flex-1" />
           <Button
             onClick={async () => {
-              await api.post('/vehicles', newVehicle).catch(() => undefined)
+              await api.post('/vehicles', { ...newVehicle, ...(branchId ? { branchId } : {}) }).catch(() => undefined)
               setNewVehicle({ code: '', vehicleTypeId: 'e_motorbike' })
               load()
             }}

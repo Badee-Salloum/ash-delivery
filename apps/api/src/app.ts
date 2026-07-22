@@ -27,6 +27,7 @@ import {
   resolveSession,
   verifySecondFactor,
 } from './auth.ts'
+import { branchSubject, resolveBranchId } from './branch-scope.ts'
 import { assertEveryRouteDeclaresPermission, collectRoutes, makeAuthorize, resetRouteRegistry } from './rbac.ts'
 import { registerExpenseRoutes } from './expenses.routes.ts'
 import { registerFleetRoutes } from './fleet.routes.ts'
@@ -292,11 +293,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
    */
   app.get(
     '/shifts',
-    { config: { permission: 'branch_data.view', subject: (req) => ({ branchId: req.actor?.branchId ?? null }) } },
+    { config: { permission: 'branch_data.view', subject: branchSubject } },
     async (req) => {
-      const { date, branchId } = z.object({ date: z.string().optional(), branchId: z.string().optional() }).parse(req.query)
-      const target = branchId ?? req.actor?.branchId
-      if (!target) throw new ServiceError(422, 'branch_required')
+      const { date } = z.object({ date: z.string().optional() }).parse(req.query)
+      const target = resolveBranchId(req)
       const businessDate = date ?? todayFor(deps)
       const shifts = await deps.shifts.listByBranchAndDate(target, businessDate)
       return {

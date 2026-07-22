@@ -18,7 +18,7 @@ type Section = 'dashboard' | 'queue' | 'fleet' | 'treasury' | 'accounts' | 'audi
  * the main pane when a queue item is opened, then returns.
  */
 export function AdminApp(): ReactNode {
-  const { session, t, lang, setLang, api, setSession } = useApp()
+  const { session, t, lang, setLang, api, setSession, branches, branchId, setBranchId } = useApp()
   const [section, setSection] = useState<Section>('dashboard')
   const [openShift, setOpenShift] = useState<string | null>(null)
   const [unread, setUnread] = useState(0)
@@ -56,6 +56,26 @@ export function AdminApp(): ReactNode {
           <div className="mt-3 inline-block rounded-md bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">
             {t.roles?.[session.roleKey as keyof typeof t.roles] ?? session.roleKey}
           </div>
+          {/*
+            An organisation-wide role (GM, system admin) has no branch on his session — the §3
+            matrix gives him scope 'all'. Every branch-scoped screen therefore needs him to say
+            which branch he is looking at; without this picker they all answer 422 and render an
+            eternal spinner. A branch manager never sees it: his session already decides.
+          */}
+          {branches.length > 0 ? (
+            <select
+              className="mt-3 w-full rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
+              value={branchId ?? ''}
+              onChange={(e) => setBranchId(e.target.value)}
+              aria-label={t.accounts.branch}
+            >
+              {branches.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {lang === 'ar' ? b.nameAr : b.nameEn}
+                </option>
+              ))}
+            </select>
+          ) : null}
         </div>
         {nav.map((n) => (
           <button

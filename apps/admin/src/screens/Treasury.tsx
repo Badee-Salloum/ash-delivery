@@ -1,13 +1,14 @@
-import { type ReactNode, useEffect, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useState } from 'react'
 import { useApp } from '../app-context.tsx'
-import { Button, Card, Money, MoneyInput, Table } from '../ui.tsx'
+import { explainError } from '../errors.ts'
+import { Button, Card, Money, MoneyInput, Pending, Table } from '../ui.tsx'
 
 /**
  * Treasury (SRS E-5, E-6): the daily cash count and the Sunday close. Both are branch-manager +
  * GM; the close itself is system-admin-only and its pre-flight blockers are shown before sealing.
  */
 export function Treasury(): ReactNode {
-  const { api, t, session } = useApp()
+  const { api, t, session, branchId } = useApp()
   const [sheet, setSheet] = useState<{ businessDate: string; alreadyCounted: boolean; funds: Array<{ fundCode: string; computed: string }> } | null>(null)
   const [counted, setCounted] = useState<Record<string, string>>({})
   const [result, setResult] = useState<{ balanced: boolean; lines: Array<{ fundCode: string; variance: string }> } | null>(null)
@@ -16,13 +17,36 @@ export function Treasury(): ReactNode {
   const [depositAmt, setDepositAmt] = useState<{ cash: string; wallet: string }>({ cash: '', wallet: '' })
   const [depositMsg, setDepositMsg] = useState<string | null>(null)
 
-  // Only the branch manager + GM may put money in (the §3 matrix); the sysadmin can see it.
+  const [sheetError, setSheetError] = useState<string | null>(null)
+  const [balanceError, setBalanceError] = useState<string | null>(null)
+
+  // Only the branch manager + GM may put money in — `journal.manual.write` in the §3 matrix, and
+  // product-owner decision 5. The system admin can SEE the money and not move it; that is
+  // deliberate, so the screen says so rather than silently rendering nothing.
   const canDeposit = session?.roleKey === 'branch_manager' || session?.roleKey === 'general_manager'
 
-  useEffect(() => {
-    void api.get<typeof sheet>('/cash-counts/sheet').then(setSheet).catch(() => setSheet(null))
-    void api.treasuryBalances().then(setBalances).catch(() => setBalances(null))
+  const load = useCallback(() => {
+    setSheetError(null)
+    setBalanceError(null)
+    void api
+      .get<typeof sheet>('/cash-counts/sheet')
+      .then((d) => setSheet(d))
+      .catch((e: { error?: string }) => {
+        setSheet(null)
+        setSheetError(e.error ?? 'error')
+      })
+    void api
+      .treasuryBalances()
+      .then(setBalances)
+      .catch((e: { error?: string }) => {
+        setBalances(null)
+        setBalanceError(e.error ?? 'error')
+      })
   }, [api])
+
+  // Refetch when an organisation-wide role switches branch — the treasury is per branch, and
+  // showing branch A's cash box under branch B's name is the worst kind of wrong.
+  useEffect(load, [load, branchId])
 
   async function deposit(target: 'cash' | 'wallet'): Promise<void> {
     const amount = depositAmt[target]
@@ -66,7 +90,13 @@ export function Treasury(): ReactNode {
                 {target === 'cash' ? t.treasury.cashBox : t.treasury.wallet}
               </div>
               <div className="mt-1 text-2xl font-bold">
-                {balances ? <Money value={balances[target]} /> : '—'}
+                {balances ? (
+                  <Money value={balances[target]} />
+                ) : (
+                  <span className="text-base font-medium text-red-600">
+                    {balanceError ? explainError(balanceError, t) : '—'}
+                  </span>
+                )}
               </div>
               {canDeposit ? (
                 <div className="mt-3 flex gap-2">
@@ -80,7 +110,11 @@ export function Treasury(): ReactNode {
                     {t.treasury.deposit}
                   </Button>
                 </div>
-              ) : null}
+              ) : (
+                // Deliberate, not an oversight: `journal.manual.write` is branch manager + GM only.
+                // Saying so beats an empty card the system admin reads as a broken screen.
+                <p className="mt-3 text-xs text-slate-400">{t.treasury.depositRoleHint}</p>
+              )}
             </div>
           ))}
         </div>
@@ -89,7 +123,13 @@ export function Treasury(): ReactNode {
 
       <Card title={t.treasury.cashCount}>
         {!sheet ? (
-          t.common.loading
+          <Pending
+            error={sheetError}
+            loadingLabel={t.common.loading}
+            errorLabel={explainError(sheetError, t)}
+            onRetry={load}
+            retryLabel={t.common.retry}
+          />
         ) : sheet.alreadyCounted && !result ? (
           <p className="text-emerald-700">{t.treasury.sealProof} ✓</p>
         ) : (
