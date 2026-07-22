@@ -11,7 +11,11 @@ import type {
   ExpenseCategoryRecord,
   ExpenseRecord,
   ExpenseRepo,
+  NotificationRecord,
+  NotificationRepo,
   SettingsRepo,
+  TierRepo,
+  TierRuleRecord,
   DriverRecord,
   RoleGrantRecord,
   ShiftRecord,
@@ -780,3 +784,122 @@ export class PgCashCountRepo implements CashCountRepo {
     return rows.map((r) => isoDate(r.business_date))
   }
 }
+
+// ── Tier rules (SRS F) and notifications (SRS A-6) ───────────────────────────────────────
+
+export class PgTierRepo implements TierRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async list(): Promise<TierRuleRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT id, basis, mode, vehicle_type_id, bands, effective_from, status, created_by FROM tier_rules ORDER BY effective_from DESC, id DESC',
+    )
+    return rows.map(toTierRule)
+  }
+
+  async publish(rule: Omit<TierRuleRecord, 'id' | 'status'>): Promise<TierRuleRecord> {
+    return withTransaction(this.pool, { actorId: rule.createdBy }, async (client) => {
+      // Supersede the incumbent for this vehicle type, never delete it — a past day must still
+      // resolve to the rate that actually applied. Resolution reads 'active' AND 'superseded'.
+      await client.query(
+        `UPDATE tier_rules SET status = 'superseded'
+          WHERE status = 'active'
+            AND (vehicle_type_id IS NOT DISTINCT FROM $1)`,
+        [rule.vehicleTypeId],
+      )
+      const { rows } = await client.query<Record<string, unknown>>(
+        `INSERT INTO tier_rules (basis, mode, vehicle_type_id, bands, effective_from, status, created_by)
+         VALUES ($1,$2,$3,$4::jsonb,$5,'active',$6)
+         RETURNING id, basis, mode, vehicle_type_id, bands, effective_from, status, created_by`,
+        [rule.basis, rule.mode, rule.vehicleTypeId, JSON.stringify(rule.bands), rule.effectiveFrom, rule.createdBy],
+      )
+      return toTierRule(rows[0]!)
+    })
+  }
+
+  async withdraw(id: number, actorId: string): Promise<void> {
+    await withTransaction(this.pool, { actorId }, async (client) => {
+      await client.query("UPDATE tier_rules SET status = 'withdrawn' WHERE id = $1", [id])
+    })
+  }
+}
+
+const toTierRule = (r: Record<string, unknown>): TierRuleRecord => ({
+  id: Number(r.id),
+  basis: r.basis as TierRuleRecord['basis'],
+  mode: r.mode as TierRuleRecord['mode'],
+  vehicleTypeId: (r.vehicle_type_id as string | null) ?? null,
+  // jsonb comes back parsed; the band shape is validated by the domain before insert.
+  bands: r.bands as TierRuleRecord['bands'],
+  effectiveFrom: isoDate(r.effective_from),
+  status: r.status as TierRuleRecord['status'],
+  createdBy: String(r.created_by),
+})
+
+export class PgNotificationRepo implements NotificationRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async push(record: Omit<NotificationRecord, 'id'>): Promise<void> {
+    // ON CONFLICT DO NOTHING against the partial unique index on (recipient_id, dedupe_key):
+    // the same real-world event must not ring the bell twice.
+    await this.pool.query(
+      `INSERT INTO notifications (recipient_id, branch_id, kind, payload, dedupe_key, read_at, created_at)
+       VALUES ($1,$2,$3,$4::jsonb,$5,
+               CASE WHEN $6::bigint IS NULL THEN NULL ELSE to_timestamp($6::double precision/1000) END,
+               to_timestamp($7::double precision/1000))
+       ON CONFLICT (recipient_id, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING`,
+      [
+        record.recipientId,
+        record.branchId,
+        record.kind,
+        JSON.stringify(record.payload),
+        record.dedupeKey,
+        record.readAtMs,
+        record.createdAtMs,
+      ],
+    )
+  }
+
+  async listForRecipient(recipientId: string, unreadOnly: boolean): Promise<NotificationRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM notifications
+        WHERE recipient_id = $1 AND ($2 = false OR read_at IS NULL)
+        ORDER BY created_at DESC`,
+      [recipientId, unreadOnly],
+    )
+    return rows.map(toNotification)
+  }
+
+  async markRead(id: number, recipientId: string, atMs: number): Promise<void> {
+    await this.pool.query(
+      `UPDATE notifications SET read_at = to_timestamp($3::double precision/1000)
+        WHERE id = $1 AND recipient_id = $2 AND read_at IS NULL`,
+      [id, recipientId, atMs],
+    )
+  }
+
+  async unreadCount(recipientId: string): Promise<number> {
+    const { rows } = await this.pool.query<{ count: string }>(
+      'SELECT count(*)::text AS count FROM notifications WHERE recipient_id = $1 AND read_at IS NULL',
+      [recipientId],
+    )
+    return Number(rows[0]?.count ?? '0')
+  }
+}
+
+const toNotification = (r: Record<string, unknown>): NotificationRecord => ({
+  id: Number(r.id),
+  recipientId: String(r.recipient_id),
+  branchId: (r.branch_id as string | null) ?? null,
+  kind: String(r.kind),
+  payload: (r.payload as Record<string, unknown>) ?? {},
+  dedupeKey: (r.dedupe_key as string | null) ?? null,
+  readAtMs: r.read_at === null ? null : (r.read_at as Date).getTime(),
+  createdAtMs: (r.created_at as Date).getTime(),
+})

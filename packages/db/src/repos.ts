@@ -400,6 +400,12 @@ export class PgUserRepo implements UserRepo {
       fullNameAr: String(r.full_name_ar),
       passwordHash: String(r.password_hash),
       driverId: (r.driver_id as string | null) ?? null,
+      // mfa_secret_enc is bytea; here it is decoded from UTF-8. App-side AES-GCM wrapping is a
+      // documented follow-up (docs/DEPLOY-VERCEL-NEON — key management).
+      mfaSecret: r.mfa_secret_enc === null || r.mfa_secret_enc === undefined
+        ? null
+        : Buffer.from(r.mfa_secret_enc as Buffer).toString('utf8'),
+      mfaEnrolledAtMs: r.mfa_enrolled_at === null ? null : (r.mfa_enrolled_at as Date).getTime(),
       failedAttempts: Number(r.failed_attempts),
       lockedUntilMs: r.locked_until === null ? null : (r.locked_until as Date).getTime(),
       active: Boolean(r.active),
@@ -410,9 +416,20 @@ export class PgUserRepo implements UserRepo {
       `UPDATE users SET failed_attempts = $2,
                         locked_until = CASE WHEN $3::bigint IS NULL THEN NULL
                                             ELSE to_timestamp($3::double precision / 1000) END,
-                        active = $4, updated_at = now()
+                        active = $4,
+                        mfa_secret_enc = $5,
+                        mfa_enrolled_at = CASE WHEN $6::bigint IS NULL THEN NULL
+                                               ELSE to_timestamp($6::double precision / 1000) END,
+                        updated_at = now()
         WHERE id = $1`,
-      [user.id, user.failedAttempts, user.lockedUntilMs, user.active],
+      [
+        user.id,
+        user.failedAttempts,
+        user.lockedUntilMs,
+        user.active,
+        user.mfaSecret === null ? null : Buffer.from(user.mfaSecret, 'utf8'),
+        user.mfaEnrolledAtMs,
+      ],
     )
   }
 }
@@ -424,9 +441,9 @@ export class PgSessionRepo implements SessionRepo {
   }
   async create(s: SessionRecord): Promise<void> {
     await this.pool.query(
-      `INSERT INTO sessions (id, user_id, token_hash, created_at, last_seen_at, expires_at)
-       VALUES ($1, $2, $3, to_timestamp($4::double precision/1000), to_timestamp($5::double precision/1000), to_timestamp($6::double precision/1000))`,
-      [s.id, s.userId, s.tokenHash, s.createdAtMs, s.lastSeenAtMs, s.expiresAtMs],
+      `INSERT INTO sessions (id, user_id, token_hash, mfa_satisfied, created_at, last_seen_at, expires_at)
+       VALUES ($1, $2, $3, $4, to_timestamp($5::double precision/1000), to_timestamp($6::double precision/1000), to_timestamp($7::double precision/1000))`,
+      [s.id, s.userId, s.tokenHash, s.mfaSatisfied, s.createdAtMs, s.lastSeenAtMs, s.expiresAtMs],
     )
   }
   async findByTokenHash(tokenHash: string): Promise<SessionRecord | null> {
@@ -437,6 +454,7 @@ export class PgSessionRepo implements SessionRepo {
       id: String(r.id),
       userId: String(r.user_id),
       tokenHash: String(r.token_hash),
+      mfaSatisfied: Boolean(r.mfa_satisfied),
       createdAtMs: (r.created_at as Date).getTime(),
       lastSeenAtMs: (r.last_seen_at as Date).getTime(),
       expiresAtMs: (r.expires_at as Date).getTime(),
@@ -445,12 +463,13 @@ export class PgSessionRepo implements SessionRepo {
   }
   async update(s: SessionRecord): Promise<void> {
     await this.pool.query(
-      `UPDATE sessions SET last_seen_at = to_timestamp($2::double precision/1000),
-                           expires_at   = to_timestamp($3::double precision/1000),
-                           revoked_at   = CASE WHEN $4::bigint IS NULL THEN NULL
-                                               ELSE to_timestamp($4::double precision/1000) END
+      `UPDATE sessions SET last_seen_at   = to_timestamp($2::double precision/1000),
+                           expires_at    = to_timestamp($3::double precision/1000),
+                           mfa_satisfied = $4,
+                           revoked_at    = CASE WHEN $5::bigint IS NULL THEN NULL
+                                                ELSE to_timestamp($5::double precision/1000) END
         WHERE id = $1`,
-      [s.id, s.lastSeenAtMs, s.expiresAtMs, s.revokedAtMs],
+      [s.id, s.lastSeenAtMs, s.expiresAtMs, s.mfaSatisfied, s.revokedAtMs],
     )
   }
   async revokeAllForUser(userId: string, atMs = Date.now()): Promise<void> {

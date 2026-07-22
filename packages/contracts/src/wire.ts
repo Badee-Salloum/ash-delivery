@@ -169,6 +169,33 @@ export const manualEntryRequest = z.object({
     .min(2),
 })
 
+// ── Tier admin (SRS F-3…F-6) ───────────────────────────────────────────────────────────────
+
+const bandSchema = z.object({
+  from: z.number().int().min(0),
+  to: z.number().int().min(0).nullable(),
+  // Upper bound intentionally loose (10000). The domain's validateBands() owns the real rule —
+  // driver share may not exceed 80% (Yallago's 20% is fixed) — and returns a 422 that says so.
+  driverBps: z.number().int().min(0).max(10000),
+})
+
+export const publishTierRequest = z.object({
+  basis: z.enum(['orders', 'revenue']).default('orders'),
+  mode: z.enum(['whole', 'marginal']).default('whole'),
+  vehicleTypeId: z.string().nullable().default(null),
+  bands: z.array(bandSchema).min(1),
+  effectiveFrom: calendarDateSchema,
+})
+
+export const simulateTierRequest = z.object({
+  branchId: z.string().optional(),
+  basis: z.enum(['orders', 'revenue']).default('orders'),
+  mode: z.enum(['whole', 'marginal']).default('whole'),
+  bands: z.array(bandSchema).min(1),
+  from: calendarDateSchema,
+  to: calendarDateSchema,
+})
+
 // ── Money admin ───────────────────────────────────────────────────────────────────────────
 
 export const setFxRequest = z.object({

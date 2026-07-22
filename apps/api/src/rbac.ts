@@ -23,6 +23,8 @@ declare module 'fastify' {
   interface FastifyRequest {
     actor?: Actor
     sessionToken?: string
+    /** Whether the current session has cleared its second factor (SRS §7, admin roles). */
+    mfaSatisfied?: boolean
     requestId: string
   }
   interface FastifyContextConfig {
@@ -59,6 +61,13 @@ export function makeAuthorize(deps: Deps) {
 
     if (!req.actor) {
       await reply.code(401).send({ error: 'unauthenticated' })
+      return
+    }
+
+    // A session that has not cleared its second factor may authenticate (/me works) but may not
+    // reach any permissioned route. 403 with a specific code so the UI shows the 2FA step.
+    if (req.mfaSatisfied === false) {
+      await reply.code(403).send({ error: 'second_factor_required' })
       return
     }
 

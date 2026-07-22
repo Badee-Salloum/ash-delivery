@@ -64,6 +64,13 @@ export interface UserRecord {
   fullNameAr: string
   passwordHash: string
   driverId: string | null
+  /**
+   * TOTP shared secret, base32. `null` until enrolled. In PostgreSQL this lands in
+   * `mfa_secret_enc bytea`; app-side AES-256-GCM wrapping around it is a documented follow-up
+   * (see docs/DEPLOY-VERCEL-NEON — key management). The port exposes the decrypted secret.
+   */
+  mfaSecret: string | null
+  mfaEnrolledAtMs: number | null
   failedAttempts: number
   lockedUntilMs: number | null
   active: boolean
@@ -73,6 +80,8 @@ export interface SessionRecord {
   id: string
   userId: string
   tokenHash: string
+  /** False until the second factor is presented, for an admin role that has enrolled. */
+  mfaSatisfied: boolean
   createdAtMs: number
   lastSeenAtMs: number
   expiresAtMs: number
@@ -362,6 +371,51 @@ export interface CashCountRepo {
   listDatesInRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<CalendarDate[]>
 }
 
+// ── Tier rules (SRS F) ────────────────────────────────────────────────────────────────────
+
+export interface TierRuleRecord {
+  id: number
+  basis: 'orders' | 'revenue'
+  mode: 'whole' | 'marginal'
+  vehicleTypeId: string | null
+  bands: Array<{ from: number; to: number | null; driverBps: number }>
+  effectiveFrom: CalendarDate
+  /** Resolution reads 'active' AND 'superseded' — see the note on TierRepo.resolve. */
+  status: 'active' | 'superseded' | 'withdrawn'
+  createdBy: string
+}
+
+export interface TierRepo {
+  list(): Promise<TierRuleRecord[]>
+  /**
+   * Publish a new version. Marks any incumbent for the same vehicle type 'superseded' rather
+   * than deleting it — a past day must still resolve to the rate that actually applied to it.
+   */
+  publish(rule: Omit<TierRuleRecord, 'id' | 'status'>): Promise<TierRuleRecord>
+  withdraw(id: number, actorId: string): Promise<void>
+}
+
+// ── Notifications (SRS A-6) ───────────────────────────────────────────────────────────────
+
+export interface NotificationRecord {
+  id: number
+  recipientId: string
+  branchId: string | null
+  kind: string
+  payload: Record<string, unknown>
+  dedupeKey: string | null
+  readAtMs: number | null
+  createdAtMs: number
+}
+
+export interface NotificationRepo {
+  /** Dedupe-keyed: the same real-world event must not ring the bell twice. */
+  push(record: Omit<NotificationRecord, 'id'>): Promise<void>
+  listForRecipient(recipientId: string, unreadOnly: boolean): Promise<NotificationRecord[]>
+  markRead(id: number, recipientId: string, atMs: number): Promise<void>
+  unreadCount(recipientId: string): Promise<number>
+}
+
 // ── Settings (SRS A-4) ────────────────────────────────────────────────────────────────────
 
 export interface SettingsRepo {
@@ -433,6 +487,8 @@ export interface Deps {
   ledger: LedgerRepo
   expenses: ExpenseRepo
   cashCounts: CashCountRepo
+  tiers: TierRepo
+  notifications: NotificationRepo
   settings: SettingsRepo
   media: MediaRepo
   blobs: BlobStore

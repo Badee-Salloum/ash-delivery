@@ -184,8 +184,38 @@ export async function submitStartPackage(
     driverConfirmedAt: new Date(deps.clock.nowMs()).toISOString(),
   }
   await deps.shifts.update(updated)
+  await notifyBranch(deps, updated, 'shift_awaiting_open_approval')
   return updated
 }
+
+/**
+ * Ring the branch bell for a shift awaiting a manager (SRS A-6).
+ *
+ * Addressed to the BRANCH, not to a named user: any approver in the branch should see it, and
+ * enumerating users is not this layer's job. The bell query surfaces branch-addressed
+ * notifications to every member of that branch.
+ *
+ * Dedupe-keyed on (shift, kind), so re-submitting after a re-shoot request does not stack the
+ * counter. Best-effort: a notification failure must never roll back the shift transition that
+ * triggered it — the bell is a convenience, the state change is the record.
+ */
+async function notifyBranch(deps: Deps, shift: ShiftRecord, kind: string): Promise<void> {
+  try {
+    await deps.notifications.push({
+      recipientId: `branch:${shift.branchId}`,
+      branchId: shift.branchId,
+      kind,
+      payload: { shiftId: shift.id, driverId: shift.driverId, businessDate: shift.businessDate },
+      dedupeKey: `${shift.id}:${kind}`,
+      readAtMs: null,
+      createdAtMs: deps.clock.nowMs(),
+    })
+  } catch {
+    // swallow — the bell is a convenience, never a precondition
+  }
+}
+
+export { notifyBranch }
 
 export async function approveOpen(deps: Deps, actor: Actor, shiftId: string): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
@@ -359,6 +389,7 @@ export async function submitEndPackage(
     ordersHash: br1.ordersHash,
   }
   await deps.shifts.update(updated)
+  await notifyBranch(deps, updated, 'shift_awaiting_close_approval')
   return { shift: updated, br1 }
 }
 

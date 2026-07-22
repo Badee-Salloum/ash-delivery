@@ -15,10 +15,23 @@ import {
   startPackageRequest,
 } from '@ash/contracts'
 import { addDays, checkWeekClose, dayOfWeek, minor, sum, weekClosedOn, weekStartFor } from '@ash/domain'
-import { SESSION_COOKIE, SESSION_IDLE_MS, login, logout, resolveSession } from './auth.ts'
+import {
+  SESSION_COOKIE,
+  SESSION_IDLE_MS,
+  beginEnrollment,
+  confirmEnrollment,
+  login,
+  logout,
+  mfaEnrollmentRequired,
+  resolveSession,
+  verifySecondFactor,
+} from './auth.ts'
 import { assertEveryRouteDeclaresPermission, collectRoutes, makeAuthorize, resetRouteRegistry } from './rbac.ts'
 import { registerExpenseRoutes } from './expenses.routes.ts'
 import { registerFleetRoutes } from './fleet.routes.ts'
+import { registerDashboardRoutes } from './dashboard.routes.ts'
+import { registerNotificationRoutes } from './notification.routes.ts'
+import { registerTierRoutes } from './tier.routes.ts'
 import { registerTreasuryRoutes } from './treasury.routes.ts'
 import { MAX_UPLOAD_BYTES, readEvidence, uploadEvidence } from './media.service.ts'
 import {
@@ -68,6 +81,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     if (check.ok) {
       req.actor = check.actor
       req.sessionToken = token
+      req.mfaSatisfied = check.session.mfaSatisfied
     }
   })
   app.addHook('preHandler', authorize)
@@ -135,7 +149,59 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         branchId: result.user.branchId,
         fullNameAr: result.user.fullNameAr,
         expiresAt: result.session.expiresAtMs,
+        // The client uses these to decide whether to show the 2FA code step or an enrol prompt.
+        secondFactorRequired: !result.session.mfaSatisfied,
+        enrollmentRequired: mfaEnrollmentRequired(result.user),
       })
+  })
+
+  // ── Second factor (SRS §7, A-1) ──────────────────────────────────────────────────────────
+
+  /** Present the TOTP code after a password login, flipping the session to fully authenticated. */
+  app.post('/auth/2fa/verify', { config: { permission: null } }, async (req, reply) => {
+    const { code } = z.object({ code: z.string() }).parse(req.body)
+    const result = await verifySecondFactor(deps, req.cookies[SESSION_COOKIE], code)
+    if (!result.ok) {
+      const status = result.reason === 'bad_code' ? 401 : 400
+      return reply.code(status).send({ error: result.reason })
+    }
+    return reply.send({ ok: true })
+  })
+
+  /** Begin enrolment: returns a secret + otpauth URI for the authenticator app to scan. */
+  app.post('/auth/2fa/enroll', { config: { permission: null } }, async (req, reply) => {
+    if (!req.actor) return reply.code(401).send({ error: 'unauthenticated' })
+    const user = await deps.users.findById(req.actor.userId)
+    if (!user) return reply.code(401).send({ error: 'unauthenticated' })
+    const challenge = beginEnrollment(deps, user)
+    // The secret is echoed once so the client can render a manual-entry fallback; it is not
+    // stored until confirmEnrollment proves a code from it.
+    return reply.send(challenge)
+  })
+
+  /** Confirm enrolment with a code, which proves the phone and server agree before persisting. */
+  app.post('/auth/2fa/confirm', { config: { permission: null } }, async (req, reply) => {
+    if (!req.actor) return reply.code(401).send({ error: 'unauthenticated' })
+    const { secret, code } = z.object({ secret: z.string().min(8), code: z.string() }).parse(req.body)
+    const user = await deps.users.findById(req.actor.userId)
+    if (!user) return reply.code(401).send({ error: 'unauthenticated' })
+
+    const confirmed = await confirmEnrollment(deps, user, secret, code)
+    if (!confirmed) return reply.code(401).send({ error: 'bad_code' })
+
+    await deps.audit.append({
+      tableName: 'users',
+      recordId: user.id,
+      action: 'UPDATE',
+      actorId: user.id,
+      actorKind: 'user',
+      branchId: user.branchId,
+      requestId: req.requestId,
+      before: { mfaEnrolled: false },
+      after: { mfaEnrolled: true },
+      occurredAtMs: deps.clock.nowMs(),
+    })
+    return reply.send({ ok: true, enrolled: true })
   })
 
   app.post('/auth/logout', { config: { permission: null } }, async (req, reply) => {
@@ -337,6 +403,15 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   // ── Treasury: daily cash count + manual entries (SRS E-3, E-5) ──────────────────
   registerTreasuryRoutes(app, deps)
+
+  // ── Tier admin (SRS F-3…F-6) ────────────────────────────────────────────────────
+  registerTierRoutes(app, deps)
+
+  // ── Notifications bell (SRS A-6) ────────────────────────────────────────────────
+  registerNotificationRoutes(app, deps)
+
+  // ── Minimal ops dashboard (SRS I-1) ─────────────────────────────────────────────
+  registerDashboardRoutes(app, deps)
 
   // ── Daily FX (BR6) — system admin only ──────────────────────────────────────────────────
   app.put('/fx', { config: { permission: 'fx_rate.write' } }, async (req) => {

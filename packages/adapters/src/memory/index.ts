@@ -30,10 +30,12 @@ import { type CalendarDate, type FxDay, type Minor, type Posting, isLive, minor 
 import { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 import { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
 import { MemoryCashCountRepo } from './cashcount.ts'
+import { MemoryNotificationRepo, MemoryTierRepo } from './tiers.ts'
 
 export { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 export { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
 export { MemoryCashCountRepo } from './cashcount.ts'
+export { MemoryNotificationRepo, MemoryTierRepo } from './tiers.ts'
 
 /**
  * In-memory implementations of every port.
@@ -108,8 +110,9 @@ export class MemoryUserRepo implements UserRepo {
   async update(user: UserRecord): Promise<void> {
     this.rows.set(user.id, { ...user })
   }
-  seed(user: UserRecord): void {
-    this.rows.set(user.id, { ...user })
+  /** Test seed. mfa fields default to unenrolled so callers need not spell them out. */
+  seed(user: Omit<UserRecord, 'mfaSecret' | 'mfaEnrolledAtMs'> & Partial<Pick<UserRecord, 'mfaSecret' | 'mfaEnrolledAtMs'>>): void {
+    this.rows.set(user.id, { mfaSecret: null, mfaEnrolledAtMs: null, ...user })
   }
 }
 
@@ -448,6 +451,8 @@ export interface MemoryDeps extends Deps {
   blobs: MemoryBlobStore
   expenses: MemoryExpenseRepo
   cashCounts: MemoryCashCountRepo
+  tiers: MemoryTierRepo
+  notifications: MemoryNotificationRepo
   settings: MemorySettingsRepo
   users: MemoryUserRepo
   shifts: MemoryShiftRepo
@@ -473,6 +478,8 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     ledger,
     expenses: new MemoryExpenseRepo(),
     cashCounts: new MemoryCashCountRepo(),
+    tiers: new MemoryTierRepo(),
+    notifications: new MemoryNotificationRepo(),
     settings: new MemorySettingsRepo(),
     media,
     blobs: new MemoryBlobStore(),

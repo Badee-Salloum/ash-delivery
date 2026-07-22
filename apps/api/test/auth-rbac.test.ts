@@ -125,7 +125,13 @@ describe('the boot assertion — no route can escape RBAC', () => {
       .filter((r) => r.permission === null)
       .map((r) => `${r.method} ${r.url}`)
       .sort()
-    expect(publicRoutes).toEqual(['GET /me', 'GET /health', 'POST /auth/login', 'POST /auth/logout'].sort())
+    expect(publicRoutes).toEqual(
+      [
+        'GET /me', 'GET /health', 'POST /auth/login', 'POST /auth/logout',
+        'POST /auth/2fa/verify', 'POST /auth/2fa/enroll', 'POST /auth/2fa/confirm',
+        'GET /notifications', 'POST /notifications/:id/read',
+      ].sort(),
+    )
   })
 })
 
