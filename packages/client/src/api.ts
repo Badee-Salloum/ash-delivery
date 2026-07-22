@@ -88,6 +88,30 @@ export class ApiClient {
     return this.get<{ userId: string; roleKey: string; branchId: string | null; driverId: string | null; businessDate: string }>('/me')
   }
 
+  // ── Accounts (SRS A-2) ──────────────────────────────────────────────────────────────────────
+  users() {
+    return this.get<{
+      users: Array<{
+        id: string
+        username: string
+        roleKey: string
+        fullNameAr: string
+        branchId: string | null
+        driverId: string | null
+        active: boolean
+      }>
+    }>('/users')
+  }
+  branches() {
+    return this.get<{ branches: Array<{ id: string; code: string; nameAr: string; nameEn: string }> }>('/branches')
+  }
+  createUser(body: { username: string; password: string; roleKey: string; fullNameAr: string; branchId?: string }) {
+    return this.post<{ id: string; username: string; roleKey: string; fullNameAr: string; branchId: string | null; driverId: string | null }>(
+      '/users',
+      body,
+    )
+  }
+
   // ── Notifications ─────────────────────────────────────────────────────────────────────────
   notifications() {
     return this.get<{ unreadCount: number; notifications: Array<{ id: number; kind: string; payload: Record<string, unknown>; read: boolean; createdAt: string }> }>(

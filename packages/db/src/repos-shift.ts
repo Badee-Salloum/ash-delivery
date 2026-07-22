@@ -284,6 +284,11 @@ export class PgDirectoryRepo implements DirectoryRepo {
     this.pool = pool
   }
 
+  async listBranches(): Promise<BranchRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>('SELECT * FROM branches ORDER BY code')
+    return rows.map((r) => ({ id: String(r.id), code: String(r.code), nameAr: String(r.name_ar), nameEn: String(r.name_en) }))
+  }
+
   async branch(id: string): Promise<BranchRecord | null> {
     const { rows } = await this.pool.query<Record<string, unknown>>('SELECT * FROM branches WHERE id = $1', [id])
     const r = rows[0]
@@ -350,8 +355,8 @@ export class PgDirectoryRepo implements DirectoryRepo {
   async createDriver(driver: DriverRecord): Promise<void> {
     try {
       await this.pool.query(
-        'INSERT INTO drivers (id, branch_id, code, full_name_ar, active) VALUES ($1,$2,$3,$4,$5)',
-        [driver.id, driver.branchId, driver.code, driver.fullNameAr, driver.active],
+        'INSERT INTO drivers (id, branch_id, user_id, code, full_name_ar, active) VALUES ($1,$2,$3,$4,$5,$6)',
+        [driver.id, driver.branchId, driver.userId ?? null, driver.code, driver.fullNameAr, driver.active],
       )
     } catch (err) {
       // Same shape the memory adapter throws, so the route handles one case, not two.

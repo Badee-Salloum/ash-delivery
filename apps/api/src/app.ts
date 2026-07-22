@@ -29,6 +29,7 @@ import {
 import { assertEveryRouteDeclaresPermission, collectRoutes, makeAuthorize, resetRouteRegistry } from './rbac.ts'
 import { registerExpenseRoutes } from './expenses.routes.ts'
 import { registerFleetRoutes } from './fleet.routes.ts'
+import { registerUserRoutes } from './users.routes.ts'
 import { registerDashboardRoutes } from './dashboard.routes.ts'
 import { registerNotificationRoutes } from './notification.routes.ts'
 import { registerTierRoutes } from './tier.routes.ts'
@@ -422,6 +423,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   // ── Fleet: drivers, vehicles, documents (SRS B) ─────────────────────────────────
   registerFleetRoutes(app, deps)
+
+  // ── Accounts (SRS A-2) ──────────────────────────────────────────────────────────
+  registerUserRoutes(app, deps)
 
   // ── Expenses (SRS G) ────────────────────────────────────────────────────────────
   registerExpenseRoutes(app, deps)

@@ -94,6 +94,8 @@ export interface DriverRecord {
   code: string
   fullNameAr: string
   active: boolean
+  /** The login account that operates as this driver, if one is linked. */
+  userId?: string | null
 }
 
 export interface VehicleRecord {
@@ -201,6 +203,10 @@ export interface UserRepo {
   findByUsername(username: string): Promise<UserRecord | null>
   findById(id: string): Promise<UserRecord | null>
   update(user: UserRecord): Promise<void>
+  /** Create a login account. Rejects a duplicate username with a DUPLICATE_USERNAME code. */
+  create(user: UserRecord): Promise<void>
+  /** All accounts, optionally scoped to one branch (global admins have a null branch). */
+  list(branchId?: string | null): Promise<UserRecord[]>
 }
 
 export interface SessionRepo {
@@ -456,6 +462,7 @@ export interface DocumentRecord {
 
 export interface DirectoryRepo {
   branch(id: string): Promise<BranchRecord | null>
+  listBranches(): Promise<BranchRecord[]>
   driver(id: string): Promise<DriverRecord | null>
   vehicle(id: string): Promise<VehicleRecord | null>
   grants(): Promise<RoleGrantRecord[]>

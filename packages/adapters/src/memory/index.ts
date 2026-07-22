@@ -110,6 +110,18 @@ export class MemoryUserRepo implements UserRepo {
   async update(user: UserRecord): Promise<void> {
     this.rows.set(user.id, { ...user })
   }
+  async create(user: UserRecord): Promise<void> {
+    for (const u of this.rows.values()) {
+      if (u.username === user.username) {
+        throw Object.assign(new Error(`duplicate username ${user.username}`), { code: 'DUPLICATE_USERNAME' })
+      }
+    }
+    this.rows.set(user.id, { ...user })
+  }
+  async list(branchId?: string | null): Promise<UserRecord[]> {
+    const all = [...this.rows.values()].map((u) => ({ ...u }))
+    return branchId === undefined ? all : all.filter((u) => u.branchId === branchId)
+  }
   /** Test seed. mfa fields default to unenrolled so callers need not spell them out. */
   seed(user: Omit<UserRecord, 'mfaSecret' | 'mfaEnrolledAtMs'> & Partial<Pick<UserRecord, 'mfaSecret' | 'mfaEnrolledAtMs'>>): void {
     this.rows.set(user.id, { mfaSecret: null, mfaEnrolledAtMs: null, ...user })
@@ -379,6 +391,9 @@ export class MemoryDirectoryRepo implements DirectoryRepo {
 
   async branch(id: string): Promise<BranchRecord | null> {
     return this.branches.get(id) ?? null
+  }
+  async listBranches(): Promise<BranchRecord[]> {
+    return [...this.branches.values()].map((b) => ({ ...b }))
   }
   async driver(id: string): Promise<DriverRecord | null> {
     return this.drivers.get(id) ?? null

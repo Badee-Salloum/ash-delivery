@@ -16,6 +16,24 @@ export const ar = {
     accountant: 'محاسب',
   },
 
+  accounts: {
+    title: 'الحسابات',
+    add: 'إضافة حساب',
+    username: 'اسم المستخدم',
+    password: 'كلمة المرور',
+    fullName: 'الاسم الكامل',
+    role: 'الدور',
+    branch: 'الفرع',
+    status: 'الحالة',
+    active: 'نشط',
+    inactive: 'متوقف',
+    create: 'إنشاء الحساب',
+    branchHint: 'مطلوب لمدير الفرع والسائق',
+    created: 'تم إنشاء الحساب',
+    duplicate: 'اسم المستخدم مستخدم مسبقاً',
+    passwordHint: '٨ أحرف على الأقل',
+  },
+
   common: {
     save: 'حفظ',
     cancel: 'إلغاء',

@@ -1,4 +1,5 @@
 import pg from 'pg'
+import { Pool as NeonPool, neonConfig, types as neonTypes } from '@neondatabase/serverless'
 
 /**
  * The connection pool, and the single most important line of configuration in this package.
@@ -9,24 +10,44 @@ import pg from 'pg'
  * money column in this schema is BIGINT minor units, so getting this wrong corrupts money on the
  * way out of the database, where no application-level test would notice.
  *
- * We register an explicit parser to `BigInt`. `assertBigIntParser()` then proves at boot that it
- * took effect, because a silently-reverted type parser is exactly the kind of failure that shows
- * up as a rounding complaint six months later.
+ * We register an explicit parser to `BigInt` on BOTH driver registries. `assertBigIntParser()`
+ * then proves at boot that it took effect, because a silently-reverted type parser is exactly the
+ * kind of failure that shows up as a rounding complaint six months later.
+ *
+ * ── TWO DRIVERS, ONE INTERFACE ────────────────────────────────────────────────────────────
+ * On a VPS with a directly-reachable Postgres, node-postgres (`pg`) over TCP is right. On Vercel
+ * talking to Neon it is NOT: the serverless environment reaches Neon over the pooler, and `pg`'s
+ * behaviour there breaks trigger-firing INSERTs (the audit triggers) while leaving SELECTs fine —
+ * an INSERT 500s, a login succeeds. Neon's own serverless driver speaks the same wire protocol
+ * over a WebSocket (port 443) and does not have that problem, so a Neon URL uses it. Both expose
+ * the same `Pool`/`PoolClient` surface the repos are written against.
  */
-pg.types.setTypeParser(20, (value: string) => BigInt(value))
-
+const parseBigInt = (value: string): bigint => BigInt(value)
 // numeric/decimal (OID 1700) must never appear on a money column — check-sql.mjs enforces that
 // statically — but if one ever does, fail loudly rather than hand back a lossy float.
-pg.types.setTypeParser(1700, (value: string) => {
+const refuseNumeric = (value: string): never => {
   throw new Error(
     `a numeric/decimal column reached the driver (value ${value}). Money is BIGINT minor units in this schema.`,
   )
-})
+}
+pg.types.setTypeParser(20, parseBigInt)
+pg.types.setTypeParser(1700, refuseNumeric)
+neonTypes.setTypeParser(20, parseBigInt)
+neonTypes.setTypeParser(1700, refuseNumeric)
 
 export type Pool = pg.Pool
 export type PoolClient = pg.PoolClient
 
+/** Neon connection strings carry `neon.tech` in the host; anything else is a plain Postgres. */
+const isNeon = (connectionString: string): boolean => /[.@]neon\.tech\b/i.test(connectionString)
+
 export function createPool(connectionString: string, max = 10): pg.Pool {
+  if (isNeon(connectionString)) {
+    // Node 22+/24 (Vercel's runtime) has a global WebSocket, which the serverless driver needs.
+    neonConfig.webSocketConstructor = globalThis.WebSocket as unknown as typeof neonConfig.webSocketConstructor
+    // Structurally a pg Pool for the repos' purposes; the cast keeps one Pool type across drivers.
+    return new NeonPool({ connectionString, max }) as unknown as pg.Pool
+  }
   return new pg.Pool({
     connectionString,
     max,

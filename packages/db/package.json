@@ -10,11 +10,11 @@
   "dependencies": {
     "@ash/contracts": "workspace:*",
     "@ash/domain": "workspace:*",
+    "@neondatabase/serverless": "^1.1.0",
     "pg": "^8.13.1"
   },
   "devDependencies": {
     "@ash/testkit": "workspace:*",
-    "@neondatabase/serverless": "^1.1.0",
     "@types/node": "^26.1.1",
     "@types/pg": "^8.11.10",
     "vitest": "^3.2.4"

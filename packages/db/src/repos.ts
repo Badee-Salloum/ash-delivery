@@ -391,7 +391,10 @@ export class PgUserRepo implements UserRepo {
       params,
     )
     const r = rows[0]
-    if (!r) return null
+    return r ? this.mapRow(r) : null
+  }
+
+  private mapRow(r: Record<string, unknown>): UserRecord {
     return {
       id: String(r.id),
       branchId: (r.branch_id as string | null) ?? null,
@@ -431,6 +434,35 @@ export class PgUserRepo implements UserRepo {
         user.mfaEnrolledAtMs,
       ],
     )
+  }
+
+  async create(user: UserRecord): Promise<void> {
+    try {
+      await this.pool.query(
+        `INSERT INTO users (id, branch_id, role_key, username, full_name_ar, password_hash, active)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [user.id, user.branchId, user.roleKey, user.username, user.fullNameAr, user.passwordHash, user.active],
+      )
+    } catch (err) {
+      // Same shape the memory adapter throws, so the route handles one case, not two.
+      if (isPgError(err, PG.UNIQUE_VIOLATION)) {
+        throw Object.assign(new Error(`duplicate username ${user.username}`), { code: 'DUPLICATE_USERNAME' })
+      }
+      throw err
+    }
+  }
+
+  async list(branchId?: string | null): Promise<UserRecord[]> {
+    // `undefined` = every branch; an explicit value (incl. null for global admins) scopes it.
+    // IS NOT DISTINCT FROM matches NULL against NULL, which plain `=` does not.
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT u.*, d.id AS driver_id FROM users u
+         LEFT JOIN drivers d ON d.user_id = u.id
+         ${branchId === undefined ? '' : 'WHERE u.branch_id IS NOT DISTINCT FROM $1'}
+        ORDER BY u.created_at`,
+      branchId === undefined ? [] : [branchId],
+    )
+    return rows.map((r) => this.mapRow(r))
   }
 }
 

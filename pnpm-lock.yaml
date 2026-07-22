@@ -200,6 +200,9 @@ importers:
       '@ash/domain':
         specifier: workspace:*
         version: link:../domain
+      '@neondatabase/serverless':
+        specifier: ^1.1.0
+        version: 1.1.0
       pg:
         specifier: ^8.13.1
         version: 8.22.0
@@ -207,9 +210,6 @@ importers:
       '@ash/testkit':
         specifier: workspace:*
         version: link:../testkit
-      '@neondatabase/serverless':
-        specifier: ^1.1.0
-        version: 1.1.0
       '@types/node':
         specifier: ^26.1.1
         version: 26.1.1

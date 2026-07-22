@@ -46,5 +46,43 @@ async function getApp(): Promise<FastifyInstance> {
 
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const app = await getApp()
-  app.server.emit('request', req, res)
+
+  // Why not `app.server.emit('request', req, res)`: the request reaches this function through a
+  // Vercel rewrite, and for a body with multi-byte UTF-8 (all our Arabic names) the delivered
+  // byte length disagrees with the Content-Length header — Fastify's stream reader then rejects it
+  // with "Request body size did not match Content-Length" and every Arabic POST 500s while ASCII
+  // ones pass. So we buffer the body ourselves and hand it to Fastify via inject() with a length
+  // it computes from the actual bytes. Responses at this scale are small (JSON, ≤300 KB images).
+  // Vercel's `@vercel/node` already parses JSON/urlencoded bodies with the correct encoding and
+  // hands them back on `req.body`. Re-reading the raw stream instead corrupts multi-byte UTF-8
+  // (Arabic names came back as `????`) AND disagrees with Content-Length. So prefer the pre-parsed
+  // body; only fall back to buffering the stream for content types Vercel leaves raw (binary
+  // uploads). Handing inject a value it owns keeps body and Content-Length consistent by design.
+  const parsedBody = (req as IncomingMessage & { body?: unknown }).body
+  let payload: unknown
+  if (parsedBody !== undefined && parsedBody !== null && parsedBody !== '') {
+    payload = parsedBody
+  } else {
+    const chunks: Buffer[] = []
+    for await (const chunk of req) chunks.push(chunk as Buffer)
+    const raw = Buffer.concat(chunks)
+    payload = raw.length > 0 ? raw : undefined
+  }
+
+  const headers = { ...req.headers }
+  delete headers['content-length'] // let inject size the body from the value above
+  delete headers['transfer-encoding']
+
+  const response = await app.inject({
+    method: (req.method ?? 'GET') as never,
+    url: req.url ?? '/',
+    headers: headers as never,
+    payload: payload as never,
+  })
+
+  res.statusCode = response.statusCode
+  for (const [key, value] of Object.entries(response.headers)) {
+    if (value !== undefined) res.setHeader(key, value as string | string[])
+  }
+  res.end(response.rawPayload)
 }

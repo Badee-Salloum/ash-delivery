@@ -7,8 +7,9 @@ import { Queue } from './screens/Queue.tsx'
 import { Approval } from './screens/Approval.tsx'
 import { Fleet } from './screens/Fleet.tsx'
 import { Treasury } from './screens/Treasury.tsx'
+import { Accounts } from './screens/Accounts.tsx'
 
-type Section = 'dashboard' | 'queue' | 'fleet' | 'treasury'
+type Section = 'dashboard' | 'queue' | 'fleet' | 'treasury' | 'accounts'
 
 /**
  * The admin console shell: a side rail of sections and a main pane. The approval review takes over
@@ -32,11 +33,14 @@ export function AdminApp(): ReactNode {
 
   if (!session) return <Login />
 
+  // Account management is a sysadmin/GM permission (user.manage), so the tab only shows for them.
+  const canManageUsers = session.roleKey === 'system_admin' || session.roleKey === 'general_manager'
   const nav: Array<{ key: Section; label: string; badge?: number | undefined }> = [
     { key: 'dashboard', label: t.dashboard.title },
     { key: 'queue', label: t.approval.queue, badge: unread || undefined },
     { key: 'fleet', label: `${t.fleet.drivers} / ${t.fleet.vehicles}` },
     { key: 'treasury', label: t.treasury.cashCount },
+    ...(canManageUsers ? [{ key: 'accounts' as const, label: t.accounts.title }] : []),
   ]
 
   return (
@@ -95,6 +99,8 @@ export function AdminApp(): ReactNode {
           <Queue onOpen={setOpenShift} />
         ) : section === 'fleet' ? (
           <Fleet />
+        ) : section === 'accounts' ? (
+          <Accounts />
         ) : (
           <Treasury />
         )}

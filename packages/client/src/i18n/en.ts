@@ -15,6 +15,24 @@ export const en: Catalog = {
     accountant: 'Accountant',
   },
 
+  accounts: {
+    title: 'Accounts',
+    add: 'Add account',
+    username: 'Username',
+    password: 'Password',
+    fullName: 'Full name',
+    role: 'Role',
+    branch: 'Branch',
+    status: 'Status',
+    active: 'Active',
+    inactive: 'Disabled',
+    create: 'Create account',
+    branchHint: 'Required for branch manager and driver',
+    created: 'Account created',
+    duplicate: 'That username is already taken',
+    passwordHint: 'At least 8 characters',
+  },
+
   common: {
     save: 'Save',
     cancel: 'Cancel',

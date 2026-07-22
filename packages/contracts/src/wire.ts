@@ -93,6 +93,18 @@ export const createDriverRequest = z.object({
 /** Organisation-wide roles have no branch of their own, so writes may name one explicitly. */
 export const branchTarget = z.object({ branchId: z.string().optional() })
 
+// ── Accounts (SRS A-2) ────────────────────────────────────────────────────────────────────
+
+/** Create a login account. A driver-role account also gets a linked driver record. */
+export const createUserRequest = z.object({
+  username: z.string().min(3).max(40),
+  password: z.string().min(8).max(200),
+  roleKey: z.enum(['driver', 'branch_manager', 'system_admin', 'general_manager', 'accountant']),
+  fullNameAr: z.string().min(1).max(120),
+  // Required for a branch-scoped role (driver, branch_manager); ignored for global roles.
+  branchId: z.string().optional(),
+})
+
 export const updateDriverRequest = z.object({
   fullNameAr: z.string().min(1).max(120).optional(),
   active: z.boolean().optional(),
