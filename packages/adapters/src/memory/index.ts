@@ -1,4 +1,6 @@
 import type {
+  AssignmentRecord,
+  AssignmentRepo,
   AuditFilter,
   AuditRecord,
   AuditRepo,
@@ -192,6 +194,32 @@ export class MemoryShiftRepo implements ShiftRepo {
     return [...this.rows.values()].filter(
       (s) => s.driverId === driverId && s.businessDate === businessDate && (s.state === 'approved' || s.state === 'week_locked'),
     )
+  }
+  async delete(id: string): Promise<void> {
+    this.rows.delete(id)
+  }
+}
+
+/** Driver↔vehicle assignments (SRS B-3), mirroring the table's two uniqueness rules. */
+export class MemoryAssignmentRepo implements AssignmentRepo {
+  readonly rows = new Map<string, AssignmentRecord>()
+  async create(a: AssignmentRecord): Promise<void> {
+    for (const existing of this.rows.values()) {
+      const sameSlot = existing.businessDate === a.businessDate && existing.shiftNo === a.shiftNo
+      if (sameSlot && (existing.driverId === a.driverId || existing.vehicleId === a.vehicleId)) {
+        throw Object.assign(new Error('already assigned'), { code: 'DUPLICATE_ASSIGNMENT' })
+      }
+    }
+    this.rows.set(a.id, { ...a })
+  }
+  async listByDate(branchId: string, businessDate: CalendarDate): Promise<AssignmentRecord[]> {
+    return [...this.rows.values()].filter((a) => a.branchId === branchId && a.businessDate === businessDate)
+  }
+  async findForDriver(driverId: string, businessDate: CalendarDate): Promise<AssignmentRecord[]> {
+    return [...this.rows.values()].filter((a) => a.driverId === driverId && a.businessDate === businessDate)
+  }
+  async delete(id: string): Promise<void> {
+    this.rows.delete(id)
   }
 }
 
@@ -485,6 +513,7 @@ export interface MemoryDeps extends Deps {
   weekLocks: MemoryWeekLockRepo
   audit: MemoryAuditRepo
   directory: MemoryDirectoryRepo
+  assignments: MemoryAssignmentRepo
 }
 
 export function createMemoryDeps(nowMs: number): MemoryDeps {
@@ -497,6 +526,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     users: new MemoryUserRepo(),
     sessions: new MemorySessionRepo(),
     shifts: new MemoryShiftRepo(media),
+    assignments: new MemoryAssignmentRepo(),
     orders: new MemoryOrderRepo(),
     ledger,
     expenses: new MemoryExpenseRepo(),

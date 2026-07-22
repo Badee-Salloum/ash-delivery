@@ -1,4 +1,6 @@
 import type {
+  AssignmentRecord,
+  AssignmentRepo,
   AttachedSlot,
   BranchRecord,
   EvidencePackage,
@@ -154,6 +156,11 @@ export class PgShiftRepo implements ShiftRepo {
 
   async listByBranchAndDate(branchId: string, businessDate: CalendarDate): Promise<ShiftRecord[]> {
     return this.load('s.branch_id = $1 AND s.business_date = $2', [branchId, businessDate])
+  }
+
+  /** Only ever called for a shift that never opened; the route enforces that. */
+  async delete(id: string): Promise<void> {
+    await this.pool.query('DELETE FROM shifts WHERE id = $1', [id])
   }
 
   async listApprovedForDriverOnDate(driverId: string, businessDate: CalendarDate): Promise<ShiftRecord[]> {
@@ -926,4 +933,62 @@ const toNotification = (r: Record<string, unknown>): NotificationRecord => ({
   dedupeKey: (r.dedupe_key as string | null) ?? null,
   readAtMs: r.read_at === null ? null : (r.read_at as Date).getTime(),
   createdAtMs: (r.created_at as Date).getTime(),
+})
+
+/**
+ * Driver↔vehicle assignments (SRS B-3). The manager binds a bike to a driver for a business date;
+ * the driver app then shows him that bike rather than a free choice. The table's two UNIQUE
+ * constraints (per driver, per vehicle, per date+shift) are what stop double-booking either side.
+ */
+export class PgAssignmentRepo implements AssignmentRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async create(a: AssignmentRecord): Promise<void> {
+    try {
+      await this.pool.query(
+        `INSERT INTO assignments (id, branch_id, driver_id, vehicle_id, business_date, shift_no, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [a.id, a.branchId, a.driverId, a.vehicleId, a.businessDate, a.shiftNo, a.createdBy],
+      )
+    } catch (err) {
+      // Same shape the memory adapter throws, so the route handles one case, not two.
+      if (isPgError(err, PG.UNIQUE_VIOLATION)) {
+        throw Object.assign(new Error('already assigned'), { code: 'DUPLICATE_ASSIGNMENT' })
+      }
+      throw err
+    }
+  }
+
+  async listByDate(branchId: string, businessDate: CalendarDate): Promise<AssignmentRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM assignments WHERE branch_id = $1 AND business_date = $2 ORDER BY shift_no`,
+      [branchId, businessDate],
+    )
+    return rows.map(toAssignment)
+  }
+
+  async findForDriver(driverId: string, businessDate: CalendarDate): Promise<AssignmentRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM assignments WHERE driver_id = $1 AND business_date = $2 ORDER BY shift_no`,
+      [driverId, businessDate],
+    )
+    return rows.map(toAssignment)
+  }
+
+  async delete(id: string): Promise<void> {
+    await this.pool.query('DELETE FROM assignments WHERE id = $1', [id])
+  }
+}
+
+const toAssignment = (r: Record<string, unknown>): AssignmentRecord => ({
+  id: String(r.id),
+  branchId: String(r.branch_id),
+  driverId: String(r.driver_id),
+  vehicleId: String(r.vehicle_id),
+  businessDate: isoDate(r.business_date),
+  shiftNo: Number(r.shift_no),
+  createdBy: (r.created_by as string | null) ?? null,
 })

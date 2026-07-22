@@ -222,8 +222,36 @@ export interface ShiftRepo {
   update(shift: ShiftRecord): Promise<void>
   listLiveForDriver(driverId: string): Promise<ShiftRecord[]>
   listLiveForVehicle(vehicleId: string): Promise<ShiftRecord[]>
+  /**
+   * Remove a shift that never opened. Only legal for `draft` / `awaiting_open_approval`, which
+   * have posted nothing to the ledger — it is how a mistakenly started shift releases the bike and
+   * the driver it would otherwise hold hostage. The audit trigger records the deletion.
+   */
+  delete(id: string): Promise<void>
   listByBranchAndDate(branchId: string, businessDate: CalendarDate): Promise<ShiftRecord[]>
   listApprovedForDriverOnDate(driverId: string, businessDate: CalendarDate): Promise<ShiftRecord[]>
+}
+
+/**
+ * A driver↔vehicle binding the branch manager makes IN ADVANCE (SRS B-3): the driver does not
+ * choose a bike, he is given one. The table enforces one bike per driver and one driver per bike
+ * for a given (business date, shift no).
+ */
+export interface AssignmentRecord {
+  id: string
+  branchId: string
+  driverId: string
+  vehicleId: string
+  businessDate: CalendarDate
+  shiftNo: number
+  createdBy: string | null
+}
+
+export interface AssignmentRepo {
+  create(assignment: AssignmentRecord): Promise<void>
+  listByDate(branchId: string, businessDate: CalendarDate): Promise<AssignmentRecord[]>
+  findForDriver(driverId: string, businessDate: CalendarDate): Promise<AssignmentRecord[]>
+  delete(id: string): Promise<void>
 }
 
 export interface OrderRepo {
@@ -497,6 +525,7 @@ export interface Deps {
   users: UserRepo
   sessions: SessionRepo
   shifts: ShiftRepo
+  assignments: AssignmentRepo
   orders: OrderRepo
   ledger: LedgerRepo
   expenses: ExpenseRepo

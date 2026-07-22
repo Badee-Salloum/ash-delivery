@@ -12,6 +12,7 @@ import {
   PgMediaRepo,
   PgSettingsRepo,
   PgTierRepo,
+  PgAssignmentRepo,
   PgShiftRepo,
   PgWeekLockRepo,
 } from '../src/repos-shift.ts'
@@ -116,6 +117,7 @@ if (!DATABASE_URL) {
         users: new PgUserRepo(pool),
         sessions: new PgSessionRepo(pool),
         shifts: new PgShiftRepo(pool),
+        assignments: new PgAssignmentRepo(pool),
         orders: new PgOrderRepo(pool),
         ledger: new PgLedgerRepo(pool),
         expenses: new PgExpenseRepo(pool),

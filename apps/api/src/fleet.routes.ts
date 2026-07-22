@@ -2,12 +2,14 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { Deps, DocumentRecord, DriverRecord, VehicleRecord } from '@ash/contracts'
 import {
+  createAssignmentRequest,
   createDocumentRequest,
   createDriverRequest,
   createVehicleRequest,
   updateDriverRequest,
   updateVehicleRequest,
 } from '@ash/contracts'
+import type { AssignmentRecord } from '@ash/contracts'
 import { addDays, canTransitionVehicle, documentStatusOn } from '@ash/domain'
 import { ServiceError, todayFor } from './shifts.service.ts'
 
@@ -155,6 +157,65 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
     await deps.directory.updateVehicle(after)
     await audit(deps, req, 'vehicles', id, 'UPDATE', before, after)
     return after
+  })
+
+  // ── Driver ↔ vehicle assignments (B-3 / س34) ────────────────────────────────────────────
+
+  /**
+   * The manager binds a bike to a driver ahead of the shift. Once bound, `createShift` refuses
+   * any other bike for that driver — the driver app then shows him one vehicle instead of a menu.
+   */
+  app.post('/assignments', { config: { permission: 'fleet.manage', subject: targetBranch } }, async (req, reply) => {
+    const body = createAssignmentRequest.parse(req.body)
+    const branchId = resolveBranch(req)
+
+    const [driver, vehicle] = await Promise.all([
+      deps.directory.driver(body.driverId),
+      deps.directory.vehicle(body.vehicleId),
+    ])
+    if (!driver || !vehicle) throw new ServiceError(404, 'driver_or_vehicle_not_found')
+    // A cross-branch binding would produce a shift `createShift` itself refuses; catch it here,
+    // where the manager can still see which of the two is in the wrong branch.
+    if (driver.branchId !== branchId || vehicle.branchId !== branchId) {
+      throw new ServiceError(422, 'cross_branch_assignment')
+    }
+
+    const assignment: AssignmentRecord = {
+      id: deps.ids.uuid(),
+      branchId,
+      driverId: driver.id,
+      vehicleId: vehicle.id,
+      businessDate: body.businessDate ?? todayFor(deps),
+      shiftNo: body.shiftNo,
+      createdBy: req.actor?.userId ?? null,
+    }
+
+    try {
+      await deps.assignments.create(assignment)
+    } catch (err) {
+      // Both adapters raise DUPLICATE_ASSIGNMENT; the table's two UNIQUE constraints are the real
+      // guard, so a race between two managers still ends here rather than in a double booking.
+      if ((err as { code?: string }).code === 'DUPLICATE_ASSIGNMENT') {
+        throw new ServiceError(409, 'already_assigned')
+      }
+      throw err
+    }
+    await audit(deps, req, 'assignments', assignment.id, 'INSERT', null, assignment)
+    return reply.code(201).send(assignment)
+  })
+
+  app.get('/assignments', { config: { permission: 'branch_data.view', subject: ownBranch } }, async (req) => {
+    const branchId = resolveBranch(req)
+    const { date } = z.object({ date: z.string().optional() }).parse(req.query)
+    const businessDate = date ?? todayFor(deps)
+    return { businessDate, assignments: await deps.assignments.listByDate(branchId, businessDate) }
+  })
+
+  app.delete('/assignments/:id', { config: { permission: 'fleet.manage', subject: ownBranch } }, async (req) => {
+    const { id } = z.object({ id: z.string() }).parse(req.params)
+    await deps.assignments.delete(id)
+    await audit(deps, req, 'assignments', id, 'DELETE', { id }, null)
+    return { ok: true }
   })
 
   // ── Documents with expiry (B-1 / س37) ───────────────────────────────────────────────────

@@ -113,6 +113,22 @@ export async function createShift(
   if (!check.ok) throw new ServiceError(409, 'cannot_open_shift', check.blockers)
 
   const businessDate = todayFor(deps)
+
+  // SRS B-3: the manager binds the bike to the driver in advance. Two rules, both enforced here
+  // rather than only in the UI:
+  //   • if this driver HAS an assignment for the slot, he may only start that bike;
+  //   • a bike assigned to somebody else is off limits even to an unassigned driver.
+  // Where no assignment exists at all the old free choice stands, so a branch that has not
+  // started assigning is not locked out of its own shifts.
+  const dayAssignments = await deps.assignments.listByDate(driver.branchId, businessDate)
+  const slot = dayAssignments.filter((a) => a.shiftNo === input.shiftNo)
+  const mine = slot.find((a) => a.driverId === driver.id)
+  if (mine && mine.vehicleId !== vehicle.id) {
+    throw new ServiceError(409, 'vehicle_not_assigned', { assignedVehicleId: mine.vehicleId })
+  }
+  if (!mine && slot.some((a) => a.vehicleId === vehicle.id)) {
+    throw new ServiceError(409, 'vehicle_assigned_to_other_driver')
+  }
   const shift: ShiftRecord = {
     id: deps.ids.uuid(),
     branchId: driver.branchId,
@@ -140,6 +156,25 @@ export async function createShift(
     approvedBy: null,
   }
   await deps.shifts.create(shift)
+  return shift
+}
+
+/**
+ * Discard a shift that never opened.
+ *
+ * A shift abandoned in `draft` or `awaiting_open_approval` still holds its bike: `canOpenShift`
+ * sees a live shift on that vehicle and refuses every subsequent one, so a driver who backs out
+ * of the start screen can strand the bike for the rest of the day with no way out but a DBA.
+ * Deleting is safe for exactly these two states and no others — nothing has posted to the ledger
+ * yet, so there is no entry to reverse. Anything from `open` onward must be corrected by the
+ * normal shift flow, never erased.
+ */
+export async function cancelShift(deps: Deps, shiftId: string): Promise<ShiftRecord> {
+  const shift = await mustFind(deps, shiftId)
+  if (shift.state !== 'draft' && shift.state !== 'awaiting_open_approval') {
+    throw new ServiceError(409, 'shift_already_opened', { state: shift.state })
+  }
+  await deps.shifts.delete(shift.id)
   return shift
 }
 

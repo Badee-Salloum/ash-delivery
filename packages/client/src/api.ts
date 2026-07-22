@@ -55,6 +55,9 @@ export class ApiClient {
   patch<T>(path: string, body?: unknown): Promise<T> {
     return this.request<T>('PATCH', path, body)
   }
+  del<T>(path: string): Promise<T> {
+    return this.request<T>('DELETE', path)
+  }
 
   /** Raw bytes for evidence upload — never base64, never multipart. */
   putBytes<T>(path: string, bytes: Uint8Array, contentType: string, extraHeaders: Record<string, string> = {}): Promise<T> {
@@ -162,6 +165,39 @@ export class ApiClient {
         occurredAt: string
       }>
     }>(`/audit${qs ? `?${qs}` : ''}`)
+  }
+
+  // ── Driver ↔ vehicle assignments (B-3) ──────────────────────────────────────────────────────
+  assignments(date?: string) {
+    return this.get<{
+      businessDate: string
+      assignments: Array<{
+        id: string
+        driverId: string
+        vehicleId: string
+        businessDate: string
+        shiftNo: number
+      }>
+    }>(`/assignments${date ? `?date=${encodeURIComponent(date)}` : ''}`)
+  }
+  createAssignment(body: { driverId: string; vehicleId: string; businessDate?: string; shiftNo?: number }) {
+    return this.post<{ id: string }>('/assignments', body)
+  }
+  deleteAssignment(id: string) {
+    return this.del<{ ok: boolean }>(`/assignments/${id}`)
+  }
+
+  /** A day's shifts for the branch, every state — including the ones stuck before `open`. */
+  shiftsOfDay(date?: string) {
+    return this.get<{
+      businessDate: string
+      shifts: Array<{ id: string; driverId: string; vehicleId: string; shiftNo: number; state: string }>
+    }>(`/shifts${date ? `?date=${encodeURIComponent(date)}` : ''}`)
+  }
+
+  /** Discard a shift that never opened — see the route: only draft/awaiting_open_approval. */
+  cancelShift(id: string) {
+    return this.del<{ ok: boolean; id: string }>(`/shifts/${id}`)
   }
 
   // ── Branch treasury (cash box + wallet) ─────────────────────────────────────────────────────

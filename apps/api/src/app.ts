@@ -41,6 +41,7 @@ import {
   addOrder,
   approveClose,
   approveOpen,
+  cancelShift,
   createShift,
   ensureFxDay,
   evaluateShift,
@@ -234,11 +235,23 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     if (!req.actor?.driverId) return reply.code(422).send({ error: 'not_a_driver' })
     const driver = await deps.directory.driver(req.actor.driverId)
     if (!driver) return reply.code(404).send({ error: 'driver_not_found' })
-    const vehicles = await deps.directory.listVehicles(driver.branchId)
-    const live = await deps.shifts.listLiveForDriver(driver.id)
+    const today = todayFor(deps)
+    const [allVehicles, live, assignments] = await Promise.all([
+      deps.directory.listVehicles(driver.branchId),
+      deps.shifts.listLiveForDriver(driver.id),
+      deps.assignments.findForDriver(driver.id, today),
+    ])
+
+    // SRS B-3: once the manager has bound a bike to this driver for today, the app shows that bike
+    // and nothing else — the driver confirms, he does not choose. With no assignment on file the
+    // full ready list is returned, so a branch that has not started assigning still works.
+    const assignedIds = new Set(assignments.map((a) => a.vehicleId))
+    const vehicles = assignedIds.size > 0 ? allVehicles.filter((v) => assignedIds.has(v.id)) : allVehicles
     return {
       driverId: driver.id,
       branchId: driver.branchId,
+      businessDate: today,
+      assigned: assignedIds.size > 0,
       liveShiftId: live[0]?.id ?? null,
       liveShiftState: live[0]?.state ?? null,
       // A bike already bound to a live shift is NOT pickable: POST /shifts refuses it with
@@ -270,6 +283,35 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     return shift ? { driverId: shift.driverId, branchId: shift.branchId } : {}
   }
 
+  /**
+   * A day's shifts for the branch — the manager's view of who is out and on what.
+   *
+   * It is also how a stranded bike is found: a shift left in `draft` never reaches the approval
+   * queue (nothing notified), yet it still holds its vehicle. Listing every state is what makes
+   * that visible, and `DELETE /shifts/:id` is what clears it.
+   */
+  app.get(
+    '/shifts',
+    { config: { permission: 'branch_data.view', subject: (req) => ({ branchId: req.actor?.branchId ?? null }) } },
+    async (req) => {
+      const { date, branchId } = z.object({ date: z.string().optional(), branchId: z.string().optional() }).parse(req.query)
+      const target = branchId ?? req.actor?.branchId
+      if (!target) throw new ServiceError(422, 'branch_required')
+      const businessDate = date ?? todayFor(deps)
+      const shifts = await deps.shifts.listByBranchAndDate(target, businessDate)
+      return {
+        businessDate,
+        shifts: shifts.map((s) => ({
+          id: s.id,
+          driverId: s.driverId,
+          vehicleId: s.vehicleId,
+          shiftNo: s.shiftNo,
+          state: s.state,
+        })),
+      }
+    },
+  )
+
   app.post(
     '/shifts',
     {
@@ -288,6 +330,32 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       return reply.code(201).send({ id: shift.id, state: shift.state, businessDate: shift.businessDate })
     },
   )
+
+  /**
+   * Discard a shift that never opened.
+   *
+   * A driver who backs out of the start screen leaves the shift in `draft`/`awaiting_open_approval`
+   * — and that shift still holds the bike, so nobody can start it again for the rest of the day.
+   * The manager needs a way out that does not involve the database. Nothing has posted yet at
+   * these two states, so there is no ledger entry to reverse; the service refuses anything later.
+   */
+  app.delete('/shifts/:id', { config: { permission: 'shift.approve', subject: shiftSubject } }, async (req) => {
+    const { id } = z.object({ id: z.string() }).parse(req.params)
+    const shift = await cancelShift(deps, id)
+    await deps.audit.append({
+      tableName: 'shifts',
+      recordId: shift.id,
+      action: 'DELETE',
+      actorId: req.actor?.userId ?? null,
+      actorKind: req.actor ? 'user' : 'system',
+      branchId: shift.branchId,
+      requestId: req.requestId,
+      before: { state: shift.state, driverId: shift.driverId, vehicleId: shift.vehicleId },
+      after: null,
+      occurredAtMs: deps.clock.nowMs(),
+    })
+    return { ok: true, id: shift.id }
+  })
 
   app.put(
     '/shifts/:id/start-package',

@@ -41,7 +41,7 @@ export function AdminApp(): ReactNode {
     { key: 'dashboard', label: t.dashboard.title },
     { key: 'queue', label: t.approval.queue, badge: unread || undefined },
     { key: 'fleet', label: `${t.fleet.drivers} / ${t.fleet.vehicles}` },
-    { key: 'treasury', label: t.treasury.cashCount },
+    { key: 'treasury', label: t.treasury.branchTreasury },
     ...(canManageUsers ? [{ key: 'accounts' as const, label: t.accounts.title }] : []),
     // audit.view is granted to the sysadmin and the GM — the same two roles.
     ...(canManageUsers ? [{ key: 'audit' as const, label: t.audit.title }] : []),

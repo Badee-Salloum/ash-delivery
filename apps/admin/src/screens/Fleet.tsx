@@ -16,6 +16,13 @@ interface Vehicle {
   state: 'ready' | 'charging' | 'maintenance' | 'stopped'
   active: boolean
 }
+interface Assignment {
+  id: string
+  driverId: string
+  vehicleId: string
+  businessDate: string
+  shiftNo: number
+}
 
 const docTone: Record<string, 'green' | 'amber' | 'red' | 'slate'> = {
   valid: 'green',
@@ -38,12 +45,42 @@ export function Fleet(): ReactNode {
   const [vehicles, setVehicles] = useState<Vehicle[]>([])
   const [newDriver, setNewDriver] = useState({ code: '', fullNameAr: '' })
   const [newVehicle, setNewVehicle] = useState({ code: '', vehicleTypeId: 'e_motorbike' })
+  const [assignments, setAssignments] = useState<Assignment[]>([])
+  const [assignDate, setAssignDate] = useState('')
+  const [pick, setPick] = useState({ driverId: '', vehicleId: '' })
+  const [assignError, setAssignError] = useState<string | null>(null)
+  const [dayShifts, setDayShifts] = useState<Array<{ id: string; vehicleId: string; state: string }>>([])
 
   const load = (): void => {
     void api.get<{ drivers: Driver[] }>('/drivers').then((r) => setDrivers(r.drivers)).catch(() => setDrivers([]))
     void api.get<{ vehicles: Vehicle[] }>('/vehicles').then((r) => setVehicles(r.vehicles)).catch(() => setVehicles([]))
+    void api
+      .assignments(assignDate || undefined)
+      .then((r) => {
+        setAssignments(r.assignments)
+        // The server decides what "today" is (Asia/Damascus business date) — echo its answer back
+        // rather than computing a date in the browser's timezone.
+        setAssignDate((d) => d || r.businessDate)
+      })
+      .catch(() => setAssignments([]))
+    void api
+      .shiftsOfDay(assignDate || undefined)
+      .then((r) => setDayShifts(r.shifts))
+      .catch(() => setDayShifts([]))
   }
-  useEffect(load, []) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(load, [assignDate]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const nameOfDriver = (id: string): string => drivers.find((d) => d.id === id)?.fullNameAr ?? id.slice(0, 8)
+  const codeOfVehicle = (id: string): string => vehicles.find((v) => v.id === id)?.code ?? id.slice(0, 8)
+
+  /**
+   * A shift that never opened still holds its bike, and it never reaches the approval queue. This
+   * is the only place it surfaces — so the manager can release the bike instead of the day's
+   * second driver finding it permanently "busy".
+   */
+  const strandedShiftFor = (vehicleId: string): string | null =>
+    dayShifts.find((s) => s.vehicleId === vehicleId && (s.state === 'draft' || s.state === 'awaiting_open_approval'))?.id ??
+    null
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -120,10 +157,106 @@ export function Fleet(): ReactNode {
                     </option>
                   ))}
                 </select>
+                {strandedShiftFor(v.id) ? (
+                  <Button
+                    variant="danger"
+                    className="ms-2"
+                    onClick={async () => {
+                      await api.cancelShift(strandedShiftFor(v.id)!).catch(() => undefined)
+                      load()
+                    }}
+                  >
+                    {t.fleet.releaseVehicle}
+                  </Button>
+                ) : null}
               </td>
             </tr>
           ))}
         </Table>
+      </Card>
+
+      {/*
+        SRS B-3: the bike is bound to the driver BEFORE the shift. Once a row exists here the
+        driver app shows him that bike only, and the API refuses a shift on any other — so this
+        screen, not the driver's phone, is where the day's fleet is decided.
+      */}
+      <Card title={t.fleet.assignments}>
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <label className="text-xs text-slate-500">{t.fleet.date}</label>
+          <TextInput type="date" value={assignDate} onChange={(e) => setAssignDate(e.target.value)} className="w-40" />
+        </div>
+        <div className="mb-3 flex flex-wrap gap-2">
+          <select
+            className="rounded border border-slate-300 px-2 py-1 text-sm"
+            value={pick.driverId}
+            onChange={(e) => setPick({ ...pick, driverId: e.target.value })}
+          >
+            <option value="">{t.fleet.driver}</option>
+            {drivers
+              .filter((d) => d.active)
+              .map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.code} — {d.fullNameAr}
+                </option>
+              ))}
+          </select>
+          <select
+            className="rounded border border-slate-300 px-2 py-1 text-sm"
+            value={pick.vehicleId}
+            onChange={(e) => setPick({ ...pick, vehicleId: e.target.value })}
+          >
+            <option value="">{t.fleet.vehicles}</option>
+            {vehicles
+              .filter((v) => v.active)
+              .map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.code}
+                </option>
+              ))}
+          </select>
+          <Button
+            disabled={!pick.driverId || !pick.vehicleId}
+            onClick={async () => {
+              setAssignError(null)
+              try {
+                await api.createAssignment({ ...pick, businessDate: assignDate })
+                setPick({ driverId: '', vehicleId: '' })
+              } catch (err) {
+                // A duplicate is the one failure a manager will actually hit — name it, rather
+                // than leaving the row silently absent from the table.
+                const code = (err as { error?: string }).error
+                setAssignError(code === 'already_assigned' ? t.fleet.alreadyAssigned : (code ?? 'error'))
+              }
+              load()
+            }}
+          >
+            {t.fleet.assign}
+          </Button>
+        </div>
+        {assignError ? <p className="mb-2 text-sm text-rose-600">{assignError}</p> : null}
+        {assignments.length === 0 ? (
+          <p className="py-2 text-sm text-slate-500">{t.fleet.noAssignments}</p>
+        ) : (
+          <Table head={[t.fleet.driver, t.fleet.vehicles, '']}>
+            {assignments.map((a) => (
+              <tr key={a.id}>
+                <td className="px-3 py-1">{nameOfDriver(a.driverId)}</td>
+                <td className="px-3 py-1 num">{codeOfVehicle(a.vehicleId)}</td>
+                <td className="px-3 py-1">
+                  <Button
+                    variant="ghost"
+                    onClick={async () => {
+                      await api.deleteAssignment(a.id).catch(() => undefined)
+                      load()
+                    }}
+                  >
+                    {t.fleet.unassign}
+                  </Button>
+                </td>
+              </tr>
+            ))}
+          </Table>
+        )}
       </Card>
     </div>
   )

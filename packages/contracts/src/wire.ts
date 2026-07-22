@@ -140,6 +140,20 @@ export const updateVehicleRequest = z.object({
   active: z.boolean().optional(),
 })
 
+/**
+ * Binding a bike to a driver for one business date (SRS B-3).
+ *
+ * `businessDate` is optional and defaults to today: the manager assigning for the morning is the
+ * common case, and making him retype the date is how the wrong date gets typed.
+ */
+export const createAssignmentRequest = z.object({
+  driverId: z.string().min(1),
+  vehicleId: z.string().min(1),
+  businessDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  shiftNo: z.number().int().min(1).max(9).default(1),
+  branchId: z.string().optional(),
+})
+
 export const createDocumentRequest = z.object({
   ownerKind: z.enum(['driver', 'vehicle']),
   driverId: z.string().nullable().default(null),

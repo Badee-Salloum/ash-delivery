@@ -7,6 +7,8 @@ import { ShiftFlow } from './screens/Shift.tsx'
 interface Assignment {
   driverId: string
   branchId: string
+  /** True when the manager has bound a bike to this driver for today — then `vehicles` is just it. */
+  assigned?: boolean
   liveShiftId: string | null
   liveShiftState: string | null
   vehicles: Array<{ id: string; code: string; state: string; busy?: boolean }>
@@ -60,9 +62,12 @@ export function DriverApp(): ReactNode {
     )
   }
 
-  // Bike not yet chosen — the driver confirms which vehicle he is on. The server enforces the
-  // real binding rules on shift create, so this pick can never produce an unbacked shift.
+  // Bike not yet chosen. When the manager has pre-assigned one (SRS B-3) the server sends exactly
+  // that bike and the driver only confirms it; otherwise he picks from the branch's ready list.
+  // Either way the server re-checks the binding on shift create, so no pick can produce an
+  // unbacked shift.
   if (!vehicleId) {
+    const assigned = assignment?.assigned === true
     return (
       <div>
         {bar}
@@ -73,17 +78,29 @@ export function DriverApp(): ReactNode {
             </Card>
           ) : assignment.vehicles.length === 0 ? (
             <Card>
-              <p className="text-center text-slate-500">—</p>
+              <p className="text-center text-slate-500">{assigned ? '—' : t.shift.noAssignment}</p>
             </Card>
           ) : (
-            // A bike on someone else's live shift cannot be started: show it, but disabled and
-            // labelled, rather than letting the driver pick it and hit a refusal.
-            assignment.vehicles.map((v) => (
-              <Button key={v.id} variant="ghost" disabled={v.busy === true} onClick={() => setVehicleId(v.id)}>
-                {t.shift.vehicle} {v.code}
-                {v.busy === true ? ` — ${t.shift.busyVehicle}` : ''}
-              </Button>
-            ))
+            <>
+              <Card>
+                <p className="text-center text-sm text-slate-500">
+                  {assigned ? t.shift.assignedVehicle : t.shift.pickVehicle}
+                </p>
+              </Card>
+              {/* A bike on someone else's live shift cannot be started: show it, but disabled and
+                  labelled, rather than letting the driver pick it and hit a refusal. */}
+              {assignment.vehicles.map((v) => (
+                <Button
+                  key={v.id}
+                  variant={assigned ? 'primary' : 'ghost'}
+                  disabled={v.busy === true}
+                  onClick={() => setVehicleId(v.id)}
+                >
+                  {t.shift.vehicle} {v.code}
+                  {v.busy === true ? ` — ${t.shift.busyVehicle}` : ''}
+                </Button>
+              ))}
+            </>
           )}
         </Screen>
       </div>
