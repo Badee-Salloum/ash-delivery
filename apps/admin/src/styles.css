@@ -1,0 +1,10 @@
+@import 'tailwindcss';
+
+:root { color-scheme: light; --ash-bg: #f1f5f9; --ash-ink: #0f172a; }
+body {
+  margin: 0;
+  font-family: 'IBM Plex Sans Arabic', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  background: var(--ash-bg); color: var(--ash-ink);
+  font-variant-numeric: tabular-nums;
+}
+.num { unicode-bidi: isolate; font-variant-numeric: tabular-nums; }

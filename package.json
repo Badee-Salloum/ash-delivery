@@ -8,16 +8,19 @@
   "packageManager": "pnpm@11.3.0",
   "scripts": {
     "test": "pnpm -r test",
-    "typecheck": "tsc -p packages/domain/tsconfig.json && tsc -p packages/contracts/tsconfig.json && tsc -p packages/testkit/tsconfig.json && tsc -p packages/adapters/tsconfig.json && tsc -p packages/db/tsconfig.json && tsc -p packages/client/tsconfig.json && tsc -p apps/api/tsconfig.json",
+    "typecheck": "tsc -p packages/domain/tsconfig.json && tsc -p packages/contracts/tsconfig.json && tsc -p packages/testkit/tsconfig.json && tsc -p packages/adapters/tsconfig.json && tsc -p packages/db/tsconfig.json && tsc -p packages/client/tsconfig.json && tsc -p apps/api/tsconfig.json && tsc -p apps/admin/tsconfig.json && tsc -p apps/driver/tsconfig.json",
     "check:domain-pure": "node scripts/check-domain-pure.mjs",
     "check:sql": "node scripts/check-sql.mjs",
     "check:wire": "node scripts/check-wire-money.mjs",
-    "check": "pnpm typecheck && pnpm check:domain-pure && pnpm check:sql && pnpm check:wire && pnpm check:strip && pnpm test",
+    "check": "pnpm typecheck && pnpm check:domain-pure && pnpm check:sql && pnpm check:wire && pnpm check:strip && pnpm check:i18n && pnpm check:css && pnpm test",
     "dev:db": "docker compose -f infra/compose/docker-compose.dev.yml up -d",
     "check:strip": "node scripts/check-strippable.mjs",
     "start": "node apps/api/src/server.ts",
     "migrate": "pnpm --filter @ash/api migrate",
-    "seed:demo": "pnpm --filter @ash/api seed:demo"
+    "seed:demo": "pnpm --filter @ash/api seed:demo",
+    "check:i18n": "node scripts/check-i18n-parity.mjs",
+    "check:css": "node scripts/check-physical-css.mjs",
+    "build:apps": "pnpm --filter @ash/driver build && pnpm --filter @ash/admin build"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
