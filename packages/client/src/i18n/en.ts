@@ -70,6 +70,7 @@ export const en: Catalog = {
     vehicle: 'Vehicle',
     shiftNo: 'Shift number',
     startPackage: 'Start package',
+    reading: 'Reading the photo',
     endPackage: 'End package',
     odometer: 'Odometer',
     battery: 'Battery',

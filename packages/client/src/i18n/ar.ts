@@ -71,6 +71,7 @@ export const ar = {
     vehicle: 'الآلية',
     shiftNo: 'رقم النوبة',
     startPackage: 'حزمة البداية',
+    reading: 'جارٍ قراءة الصورة',
     endPackage: 'حزمة النهاية',
     odometer: 'العداد',
     battery: 'البطارية',

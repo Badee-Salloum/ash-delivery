@@ -85,12 +85,15 @@ function PhotoSlot({
   slot,
   label,
   onUploaded,
+  onImage,
 }: {
   shiftId: string
   pkg: 'start' | 'end'
   slot: string
   label: string
   onUploaded(): void
+  /** The compressed image bytes, for on-device OCR. Best-effort — never blocks the upload. */
+  onImage?(bytes: Uint8Array): void
 }): ReactNode {
   const { api, t } = useApp()
   const ref = useRef<HTMLInputElement>(null)
@@ -106,12 +109,13 @@ function PhotoSlot({
         })
         setState('done')
         onUploaded()
+        onImage?.(bytes) // fire-and-forget OCR after the upload is safely done
       } catch {
         // The upload is idempotent, so the fix is simply to tap again.
         setState('error')
       }
     },
-    [api, shiftId, pkg, slot, onUploaded],
+    [api, shiftId, pkg, slot, onUploaded, onImage],
   )
 
   return (
@@ -157,6 +161,22 @@ function StartPackage({
   const [battery, setBattery] = useState('')
   const [odoShot, setOdoShot] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [ocrBusy, setOcrBusy] = useState(false)
+
+  // Assisted OCR: read the odometer + battery off the dashboard photo and PRE-FILL the fields the
+  // driver would otherwise type. Only fills a field the driver has not already entered, and any
+  // failure is silent — the driver just types, exactly as before.
+  const runOcr = useCallback(async (bytes: Uint8Array): Promise<void> => {
+    setOcrBusy(true)
+    try {
+      const { readDashboard } = await import('../ocr.ts')
+      const reading = await readDashboard(bytes)
+      if (reading?.odometer != null) setOdo((cur) => (cur === '' ? String(reading.odometer) : cur))
+      if (reading?.battery != null) setBattery((cur) => (cur === '' ? String(reading.battery) : cur))
+    } finally {
+      setOcrBusy(false)
+    }
+  }, [])
 
   // Create the draft shift once, so the odometer photo has a shift to attach to.
   useEffect(() => {
@@ -224,12 +244,20 @@ function StartPackage({
       }
     >
       {shiftId ? (
-        <PhotoSlot shiftId={shiftId} pkg="start" slot="odometer" label={t.shift.odometer} onUploaded={() => setOdoShot(true)} />
+        <PhotoSlot
+          shiftId={shiftId}
+          pkg="start"
+          slot="odometer"
+          label={t.shift.odometer}
+          onUploaded={() => setOdoShot(true)}
+          onImage={runOcr}
+        />
       ) : (
         <Card>
           <p className="text-center text-slate-400">{t.common.loading}</p>
         </Card>
       )}
+      {ocrBusy ? <p className="text-center text-sm text-slate-400">{t.shift.reading}…</p> : null}
       <Card className="flex flex-col gap-3">
         <Field label={t.shift.odometer}>
           <TextInput inputMode="numeric" value={odo} onChange={(e) => setOdo(e.target.value)} />

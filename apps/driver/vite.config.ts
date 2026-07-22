@@ -12,6 +12,23 @@ export default defineConfig({
     tailwind(),
     VitePWA({
       registerType: 'prompt',
+      workbox: {
+        // The on-device OCR assets (a few MB of wasm core + traineddata) must NOT be folded into the
+        // install precache — that would bloat every update. They are fetched lazily on first use and
+        // then cached at runtime, so OCR still works offline after the first read.
+        globIgnores: ['**/tesseract/**'],
+        runtimeCaching: [
+          {
+            urlPattern: ({ url }: { url: URL }) => url.pathname.startsWith('/tesseract/'),
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'tesseract-ocr',
+              expiration: { maxEntries: 40 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+        ],
+      },
       manifest: {
         name: 'ASH Delivery — السائق',
         short_name: 'ASH',

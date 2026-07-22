@@ -4,3 +4,6 @@ packages:
 allowBuilds:
   # vitest -> esbuild. Needs its postinstall to fetch the platform binary.
   esbuild: true
+  # We self-host tesseract's wasm core + traineddata (scripts/copy-tesseract.mjs), so its own
+  # postinstall (which would fetch the core to node_modules) is not needed.
+  tesseract.js: false
