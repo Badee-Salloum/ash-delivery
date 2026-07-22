@@ -51,6 +51,17 @@ jobs:
       - name: strippable-TypeScript check
         run: pnpm check:strip
 
+      # RTL-first: only Tailwind logical properties, and the two i18n catalogs stay in parity.
+      - name: RTL & i18n checks
+        run: |
+          pnpm check:css
+          pnpm check:i18n
+
+      # Both front-ends must build. Catches a broken JSX/Tailwind/PWA config at PR time rather
+      # than on deploy, and keeps the driver bundle honest.
+      - name: build front-ends
+        run: pnpm build:apps
+
   domain:
     name: domain (unit + property)
     runs-on: ubuntu-latest

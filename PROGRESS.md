@@ -1,5 +1,34 @@
 # PROGRESS
 
+## 2026-07-21 (later) — Phase A + B complete: Bundle 1a is feature-complete
+
+**471 tests + 6 CI guards green, both front-ends build.** See [STATUS.md](STATUS.md).
+
+**Phase B — the remaining backend**
+- Tier admin (F-3…F-6): effective-dated publishing that supersedes rather than deletes, band
+  validation at publish time, and a what-if simulation that reads-only (a test asserts the ledger
+  is untouched after simulating).
+- 2FA / TOTP (§7): RFC 6238 verified against the spec's own vectors, the deterministic parts pure
+  in the domain with the HMAC injected. Password → code; an enrolled admin is blocked from every
+  permissioned route until the second factor clears.
+- Notification bell (A-6), branch-addressed and dedupe-keyed.
+- The minimal ops dashboard (I-1), with total profit a GM-only endpoint.
+
+**Phase A — the front-ends**
+- `packages/client`: the typed API client, i18n catalogs (ar default + en, parity type-enforced),
+  and the order-entry model — duplicate detection, one-tap mode cycling, and a live BR1 preview
+  that reproduces the §2.3 numbers. All tested without a DOM.
+- Driver PWA: RTL-first, 70 KB gzip, prompt-mode service worker. The order-entry screen with its
+  live BR1 footer, and camera capture that compresses to ~300 KB and retries idempotently.
+- Admin console: 2FA login, the C-7 approval review (BR1 panel pinned first with ranked causes,
+  start-vs-end odometer compare), the dashboard, fleet CRUD, and treasury (cash count + close).
+- Two new guards, both negative-tested: physical-CSS (RTL logical properties only) and i18n parity.
+
+**What's left** is operational, not code — the go-live checklist in STATUS.md. The one caveat
+worth repeating: the UIs typecheck and build but have not been run in a browser here.
+
+---
+
 ## 2026-07-21 (late) — Bundle 1a backend complete
 
 **415 tests green, no Docker.** See [STATUS.md](STATUS.md) for the full picture.
