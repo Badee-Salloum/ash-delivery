@@ -7,9 +7,24 @@ Run `pnpm check` to confirm, `pnpm build:apps` to build the UIs.
 
 ## The one-line answer
 
-**Bundle 1a is feature-complete end to end** — backend *and* both front-ends. What remains before
-a real go-live is operational, not code: send the client samples, prove the DB guards on Neon,
-pick object storage, and have someone fluent review the Arabic.
+**Bundle 1a is feature-complete AND live on Vercel + Neon + Vercel Blob.** Backend, both
+front-ends, database, and evidence storage are all deployed and verified end to end
+(`POST /api/auth/login` → 200 with a working session cookie). What remains is operational, not
+code: send the client samples, prove the DB guards on Neon via psql, calibrate BR1, enrol admin
+2FA, and have someone fluent review the Arabic.
+
+## Live URLs (team `hadis-projects-3c86ccdb`, all public)
+
+| Surface | URL |
+| --- | --- |
+| Admin console | https://ash-admin-eta.vercel.app |
+| Driver PWA | https://ash-driver.vercel.app |
+| API | https://ash-api-xi.vercel.app |
+
+Neon (Postgres 18, eu-central-1) is migrated and bootstrapped with the §3 permission matrix, the
+Damascus branch, the default tier table, and two admins (`admin`/system_admin, `gm`/general_manager)
+— **no demo data in the live ledger.** Full deploy detail and redeploy steps:
+[docs/DEPLOY-VERCEL-NEON.md](docs/DEPLOY-VERCEL-NEON.md).
 
 ---
 
