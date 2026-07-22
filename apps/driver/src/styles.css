@@ -5,9 +5,19 @@
  * start-/end-, text-start/text-end) so a single stylesheet serves both directions — CI fails the
  * build on any physical utility (ml-/mr-/left-/right-/text-left/text-right).
  */
+
+/* ASH GROUP brand — the navy hexagon and its blue bar-chart accent. */
+@theme {
+  --color-brand: #1b2a5c;
+  --color-brand-700: #22347a;
+  --color-brand-300: #6b7bb0;
+  --color-accent: #2d6cb0;
+  --color-accent-600: #245a97;
+}
+
 :root {
   color-scheme: light;
-  --ash-bg: #f8fafc;
+  --ash-bg: #eef1f8;
   --ash-ink: #0f172a;
 }
 

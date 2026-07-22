@@ -6,6 +6,24 @@ import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from 'react
  * properties only so RTL is free.
  */
 
+/** The ASH GROUP mark — hexagon around an ascending bar chart, in the brand CSS variables. */
+export function Logo({ size = 40, className = '' }: { size?: number; className?: string }): ReactNode {
+  return (
+    <svg width={size} height={size} viewBox="0 0 48 48" fill="none" role="img" aria-label="ASH GROUP" className={className}>
+      <path
+        d="M24 3 L43 13.5 L43 34.5 L24 45 L5 34.5 L5 13.5 Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.5"
+        strokeLinejoin="round"
+      />
+      <rect x="14.5" y="26" width="4.6" height="10" rx="1.1" fill="currentColor" />
+      <rect x="21.7" y="20" width="4.6" height="16" rx="1.1" fill="currentColor" opacity="0.85" />
+      <rect x="28.9" y="14" width="4.6" height="22" rx="1.1" fill="currentColor" opacity="0.7" />
+    </svg>
+  )
+}
+
 export function Money({ value, className = '' }: { value: string; className?: string }): ReactNode {
   // `.num` isolates the run and forces Western tabular digits, so a figure never reorders inside
   // an Arabic sentence.
@@ -19,8 +37,8 @@ export function Button({
   ...rest
 }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'ghost' | 'danger' | 'success' }): ReactNode {
   const styles: Record<string, string> = {
-    primary: 'bg-slate-900 text-white active:bg-slate-700',
-    ghost: 'bg-slate-100 text-slate-900 active:bg-slate-200',
+    primary: 'bg-brand text-white active:bg-brand-700',
+    ghost: 'bg-slate-100 text-brand active:bg-slate-200',
     danger: 'bg-red-600 text-white active:bg-red-700',
     success: 'bg-emerald-600 text-white active:bg-emerald-700',
   }
@@ -75,7 +93,8 @@ export function Card({ children, className = '' }: { children: ReactNode; classN
 export function Screen({ title, children, footer }: { title: string; children: ReactNode; footer?: ReactNode }): ReactNode {
   return (
     <div className="mx-auto flex min-h-dvh max-w-md flex-col">
-      <header className="sticky top-0 z-10 bg-slate-900 px-4 py-3 text-white">
+      <header className="sticky top-0 z-10 flex items-center gap-2.5 bg-brand px-4 py-3 text-white">
+        <Logo size={26} className="text-white" />
         <h1 className="text-xl font-bold">{title}</h1>
       </header>
       <main className="flex flex-1 flex-col gap-4 p-4 pb-28">{children}</main>

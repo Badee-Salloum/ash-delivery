@@ -8,6 +8,14 @@
 export const ar = {
   app: { title: 'ASH Delivery', tagline: 'منصة التوصيل والإدارة المالية' },
 
+  roles: {
+    general_manager: 'المدير العام',
+    system_admin: 'مدير النظام',
+    branch_manager: 'مدير الفرع',
+    driver: 'سائق',
+    accountant: 'محاسب',
+  },
+
   common: {
     save: 'حفظ',
     cancel: 'إلغاء',

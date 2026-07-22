@@ -29,12 +29,17 @@ export function DriverApp(): ReactNode {
   if (!session) return <Login />
 
   const bar = (
-    <div className="flex items-center justify-between bg-slate-900 px-4 py-2 text-xs text-slate-300">
+    <div className="flex items-center justify-between bg-brand-700 px-4 py-2 text-xs text-white/80">
       <button onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}>{lang === 'ar' ? 'EN' : 'ع'}</button>
       <button
         onClick={async () => {
-          await api.logout()
-          setSession(null)
+          try {
+            await api.logout()
+          } finally {
+            // Always clear the session locally, even if the network call fails.
+            setVehicleId(null)
+            setSession(null)
+          }
         }}
       >
         {t.common.logout}

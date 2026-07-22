@@ -206,7 +206,12 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   app.post('/auth/logout', { config: { permission: null } }, async (req, reply) => {
     await logout(deps, req.cookies[SESSION_COOKIE])
-    return reply.clearCookie(SESSION_COOKIE, { path: '/' }).send({ ok: true })
+    // Clearing a cookie only works if the attributes match the ones it was set with — the set
+    // cookie is Secure + SameSite=Lax in production, so the clear must be too, or the browser
+    // keeps the session cookie and the user is silently logged back in on the next request.
+    return reply
+      .clearCookie(SESSION_COOKIE, { path: '/', secure: process.env.NODE_ENV === 'production', sameSite: 'lax' })
+      .send({ ok: true })
   })
 
   app.get('/me', { config: { permission: null } }, async (req, reply) => {

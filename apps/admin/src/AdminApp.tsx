@@ -1,6 +1,6 @@
 import { type ReactNode, useEffect, useState } from 'react'
 import { useApp } from './app-context.tsx'
-import { Badge } from './ui.tsx'
+import { Badge, Wordmark } from './ui.tsx'
 import { Login } from './screens/Login.tsx'
 import { Dashboard } from './screens/Dashboard.tsx'
 import { Queue } from './screens/Queue.tsx'
@@ -41,10 +41,12 @@ export function AdminApp(): ReactNode {
 
   return (
     <div className="flex min-h-dvh">
-      <aside className="flex w-56 flex-col gap-1 border-e border-slate-200 bg-white p-3">
-        <div className="mb-4 px-2">
-          <div className="text-lg font-bold">{t.app.title}</div>
-          <div className="text-xs text-slate-400">{session.roleKey}</div>
+      <aside className="flex w-60 flex-col gap-1 border-e border-slate-200 bg-white p-3">
+        <div className="mb-5 border-b border-slate-100 px-2 pb-4 pt-1">
+          <Wordmark size={32} />
+          <div className="mt-3 inline-block rounded-md bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">
+            {t.roles?.[session.roleKey as keyof typeof t.roles] ?? session.roleKey}
+          </div>
         </div>
         {nav.map((n) => (
           <button
@@ -53,24 +55,31 @@ export function AdminApp(): ReactNode {
               setSection(n.key)
               setOpenShift(null)
             }}
-            className={`flex items-center justify-between rounded-lg px-3 py-2 text-start text-sm ${
-              section === n.key && !openShift ? 'bg-slate-900 text-white' : 'hover:bg-slate-100'
+            className={`flex items-center justify-between rounded-lg px-3 py-2 text-start text-sm font-medium transition-colors ${
+              section === n.key && !openShift ? 'bg-brand text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100'
             }`}
           >
             <span>{n.label}</span>
             {n.badge ? <Badge tone="red">{n.badge}</Badge> : null}
           </button>
         ))}
-        <div className="mt-auto flex flex-col gap-1">
-          <button onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')} className="rounded-lg px-3 py-2 text-start text-sm hover:bg-slate-100">
+        <div className="mt-auto flex flex-col gap-1 border-t border-slate-100 pt-2">
+          <button onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')} className="rounded-lg px-3 py-2 text-start text-sm text-slate-600 hover:bg-slate-100">
             {lang === 'ar' ? 'English' : 'العربية'}
           </button>
           <button
             onClick={async () => {
-              await api.logout()
-              setSession(null)
+              try {
+                await api.logout()
+              } finally {
+                // Always clear the session, even if the network call fails — otherwise a hiccup
+                // leaves the user stuck logged in with no way out.
+                setSession(null)
+                setSection('dashboard')
+                setOpenShift(null)
+              }
             }}
-            className="rounded-lg px-3 py-2 text-start text-sm text-red-600 hover:bg-red-50"
+            className="rounded-lg px-3 py-2 text-start text-sm font-medium text-red-600 hover:bg-red-50"
           >
             {t.common.logout}
           </button>

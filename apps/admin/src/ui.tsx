@@ -2,6 +2,42 @@ import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from 'react
 
 /** Admin console primitives — desktop/tablet, denser than the driver app, logical properties only. */
 
+/**
+ * The ASH GROUP mark: a hexagon around an ascending bar chart, navy rising to blue. Drawn in the
+ * brand CSS variables so it recolours with the theme and stays crisp at any size — no raster asset.
+ */
+export function Logo({ size = 40, className = '' }: { size?: number; className?: string }): ReactNode {
+  return (
+    <svg width={size} height={size} viewBox="0 0 48 48" fill="none" role="img" aria-label="ASH GROUP" className={className}>
+      <path
+        d="M24 3 L43 13.5 L43 34.5 L24 45 L5 34.5 L5 13.5 Z"
+        fill="none"
+        stroke="var(--color-brand)"
+        strokeWidth="2.5"
+        strokeLinejoin="round"
+      />
+      <rect x="14.5" y="26" width="4.6" height="10" rx="1.1" fill="var(--color-brand)" />
+      <rect x="21.7" y="20" width="4.6" height="16" rx="1.1" fill="var(--color-brand-700)" />
+      <rect x="28.9" y="14" width="4.6" height="22" rx="1.1" fill="var(--color-accent)" />
+    </svg>
+  )
+}
+
+/** Mark + wordmark, for the header rail and the login card. */
+export function Wordmark({ size = 34 }: { size?: number }): ReactNode {
+  return (
+    <div className="flex items-center gap-2.5">
+      <Logo size={size} />
+      <div className="leading-tight">
+        <div className="text-base font-extrabold tracking-tight text-brand">
+          ASH <span className="text-accent">GROUP</span>
+        </div>
+        <div className="text-[9px] font-semibold tracking-[0.22em] text-slate-400">FINANCIAL SERVICES</div>
+      </div>
+    </div>
+  )
+}
+
 export function Money({ value, className = '' }: { value: string; className?: string }): ReactNode {
   return <span className={`num ${className}`}>{value}</span>
 }
@@ -13,14 +49,14 @@ export function Button({
   ...rest
 }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'ghost' | 'danger' | 'success' }): ReactNode {
   const styles: Record<string, string> = {
-    primary: 'bg-slate-900 text-white hover:bg-slate-700',
-    ghost: 'bg-white text-slate-900 border border-slate-300 hover:bg-slate-50',
+    primary: 'bg-brand text-white shadow-sm hover:bg-brand-700',
+    ghost: 'bg-white text-brand border border-slate-300 hover:border-brand hover:bg-slate-50',
     danger: 'bg-red-600 text-white hover:bg-red-700',
     success: 'bg-emerald-600 text-white hover:bg-emerald-700',
   }
   return (
     <button
-      className={`inline-flex min-h-10 items-center justify-center rounded-lg px-4 text-sm font-semibold disabled:opacity-40 ${styles[variant]} ${className}`}
+      className={`inline-flex min-h-10 items-center justify-center rounded-lg px-4 text-sm font-semibold transition-colors disabled:opacity-40 ${styles[variant]} ${className}`}
       {...rest}
     >
       {children}
@@ -31,7 +67,7 @@ export function Button({
 export function TextInput({ className = '', ...rest }: InputHTMLAttributes<HTMLInputElement>): ReactNode {
   return (
     <input
-      className={`min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm outline-none focus:border-slate-900 ${className}`}
+      className={`min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm outline-none transition-colors focus:border-brand focus:ring-2 focus:ring-brand/15 ${className}`}
       {...rest}
     />
   )

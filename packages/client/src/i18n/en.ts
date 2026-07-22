@@ -7,6 +7,14 @@ import type { Catalog } from './ar.ts'
 export const en: Catalog = {
   app: { title: 'ASH Delivery', tagline: 'Delivery & financial operations platform' },
 
+  roles: {
+    general_manager: 'General Manager',
+    system_admin: 'System Admin',
+    branch_manager: 'Branch Manager',
+    driver: 'Driver',
+    accountant: 'Accountant',
+  },
+
   common: {
     save: 'Save',
     cancel: 'Cancel',
