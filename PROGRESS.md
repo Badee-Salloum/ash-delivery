@@ -1,5 +1,44 @@
 # PROGRESS
 
+## 2026-07-23 (later) — the two roles that own the business could not use the app
+
+**207 API tests + 290 domain green, 6 guards green, redeployed.**
+
+Reported as "the dashboard is stuck on جارِ التحميل and there is nowhere to add a deposit". One
+root cause, much wider than the screen.
+
+The GM and the system admin have `branchId === null` **by design** — the §3 matrix grants them
+scope **'all'**, so the session deliberately cannot pick a branch for them. But every branch-scoped
+route read the branch from the request **body**, and a GET has no body. Scope 'all' was therefore a
+permission nobody could exercise: `/dashboard`, `/drivers`, `/vehicles`, `/assignments`, `/shifts`,
+`/treasury/balances`, `/documents/expiring` and `/expenses` all answered 422 `branch_required` to
+exactly those two roles — which, on a fresh production install, are **the only two accounts that
+exist**. Authorization said yes; the handler said no.
+
+The console hid it: a failed fetch left state `null`, the same value as "not fetched yet", so the
+screen rendered "loading" forever and the real HTTP error never surfaced.
+
+**Worse, found by the same sweep:** `week.close` is system-admin-only, and a system admin never has
+a branch — so **BR7's Sunday close was unperformable by any real account**, the moment a week's
+entries become immutable. `closeWeekRequest` had no `branchId` field either, so not even a body
+escape hatch. The console rendered the refusal as *silence*: the catch stored the error but the JSX
+knew only `weekStart` and `blockers`, so an error carrying neither fell through to `null`.
+
+**The suite was green throughout** because every test in `week-close.test.ts` seeded a system admin
+*with a branch* — a shape `bootstrap.ts` and `POST /users` both refuse to create — and said so in a
+comment. That is the failure mode worth remembering: a test that constructs an impossible actor
+proves nothing about the system that exists.
+
+Fixed: one `branch-scope.ts` resolver reading `?branchId=` as well as the body (replacing five
+near-identical copies); the RBAC subject is what the caller *asked for*, so a branch manager
+reaching across the fence is refused rather than quietly served his own; a branch picker in the
+admin side rail for organisation-wide roles; screens show the error and a retry, and refetch on
+branch change; the treasury states *why* the system admin has no deposit box rather than rendering
+an empty card. 17 new tests, one per endpoint in both directions, plus four pinning the real
+production-shaped admin through the Sunday close.
+
+---
+
 ## 2026-07-23 — bikes are assigned, not chosen; and a stranded bike can be released
 
 **190 API tests + 290 domain green, 6 guards green, all three Vercel projects redeployed.**
