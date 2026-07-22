@@ -407,6 +407,14 @@ export class MemoryDirectoryRepo implements DirectoryRepo {
   setGrants(rows: RoleGrantRecord[]): void {
     this.grantRows = rows
   }
+  async setGrant(
+    roleKey: RoleGrantRecord['roleKey'],
+    permissionKey: RoleGrantRecord['permissionKey'],
+    scope: RoleGrantRecord['scope'] | null,
+  ): Promise<void> {
+    const rest = this.grantRows.filter((g) => !(g.roleKey === roleKey && g.permissionKey === permissionKey))
+    this.grantRows = scope === null ? rest : [...rest, { roleKey, permissionKey, scope }]
+  }
 
   // ── Fleet management (SRS B) ────────────────────────────────────────────────────────────
   readonly documents = new Map<string, DocumentRecord>()

@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { Deps, DriverRecord, UserRecord } from '@ash/contracts'
 import { createUserRequest, updateUserRequest } from '@ash/contracts'
+import { ALL_PERMISSIONS, ALL_ROLES, DEFAULT_GRANTS } from '@ash/domain'
 import { ServiceError } from './shifts.service.ts'
 
 /**
@@ -187,5 +188,69 @@ export function registerUserRoutes(app: FastifyInstance, deps: Deps): void {
     )
 
     return publicUser(after)
+  })
+
+  // ── The §3 permission matrix, as editable data (SRS A-2) ────────────────────────────────────
+  //
+  // Authorisation reads `role_permissions` on EVERY request, so this screen changes who can do
+  // what without a deploy. Two things must never happen, and both are refused below: emptying the
+  // table (authorisation silently falls back to the hardcoded DEFAULT_GRANTS) and removing the last
+  // `user.manage` grant (nobody could ever open this editor again).
+
+  app.get('/permissions', { config: { permission: 'user.manage' } }, async () => {
+    return { roles: ALL_ROLES, permissions: ALL_PERMISSIONS, grants: await deps.directory.grants() }
+  })
+
+  const setGrantRequest = z.object({
+    roleKey: z.string(),
+    permissionKey: z.string(),
+    scope: z.enum(['own', 'branch', 'all']).nullable(),
+  })
+
+  app.put('/role-permissions', { config: { permission: 'user.manage' } }, async (req) => {
+    const body = setGrantRequest.parse(req.body)
+    if (!(ALL_ROLES as readonly string[]).includes(body.roleKey)) {
+      throw new ServiceError(422, 'unknown_role', { roleKey: body.roleKey })
+    }
+    if (!(ALL_PERMISSIONS as readonly string[]).includes(body.permissionKey)) {
+      throw new ServiceError(422, 'unknown_permission', { permissionKey: body.permissionKey })
+    }
+
+    // If the table is EMPTY, authorisation is currently running on the compiled-in DEFAULT_GRANTS.
+    // Writing a single row would replace that fallback with just that row and silently strip every
+    // other permission in the system — so materialise the defaults first, then edit on top of them.
+    if ((await deps.directory.grants()).length === 0) {
+      for (const perm of ALL_PERMISSIONS) {
+        for (const [role, scope] of Object.entries(DEFAULT_GRANTS[perm] ?? {})) {
+          await deps.directory.setGrant(role as (typeof ALL_ROLES)[number], perm, scope)
+        }
+      }
+    }
+
+    const current = await deps.directory.grants()
+    const before = current.find((g) => g.roleKey === body.roleKey && g.permissionKey === body.permissionKey) ?? null
+    if (body.scope === null) {
+      const remaining = current.filter((g) => !(g.roleKey === body.roleKey && g.permissionKey === body.permissionKey))
+      if (remaining.length === 0) throw new ServiceError(422, 'matrix_would_be_empty')
+      if (!remaining.some((g) => g.permissionKey === 'user.manage')) {
+        throw new ServiceError(422, 'would_lock_out_admins', { hint: 'some role must keep user.manage' })
+      }
+    }
+
+    await deps.directory.setGrant(
+      body.roleKey as (typeof ALL_ROLES)[number],
+      body.permissionKey as (typeof ALL_PERMISSIONS)[number],
+      body.scope,
+    )
+    await audit(
+      req,
+      'role_permissions',
+      `${body.roleKey}:${body.permissionKey}`,
+      null,
+      { scope: body.scope },
+      'UPDATE',
+      { scope: before?.scope ?? null },
+    )
+    return { roleKey: body.roleKey, permissionKey: body.permissionKey, scope: body.scope }
   })
 }

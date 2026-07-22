@@ -42,6 +42,20 @@ export const en: Catalog = {
     updated: 'Account updated',
   },
 
+  permissions: {
+    title: 'Permission matrix',
+    hint: 'Changes here take effect immediately, on every request — no deploy needed.',
+    permission: 'Permission',
+    saved: 'Saved',
+    lockoutRefused: 'Refused: at least one role must keep user management.',
+    emptyRefused: 'Refused: the matrix cannot be emptied.',
+    scopes: {
+      own: 'Own',
+      branch: 'Branch',
+      all: 'All',
+    },
+  },
+
   audit: {
     title: 'Audit trail',
     table: 'Table',

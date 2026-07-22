@@ -466,6 +466,13 @@ export interface DirectoryRepo {
   driver(id: string): Promise<DriverRecord | null>
   vehicle(id: string): Promise<VehicleRecord | null>
   grants(): Promise<RoleGrantRecord[]>
+  /**
+   * Set one cell of the §3 permission matrix (SRS A-2 requires it be editable data, not code).
+   * A `null` scope REMOVES the grant. Authorisation reads this table on every request, and an
+   * EMPTY table silently falls back to the hardcoded DEFAULT_GRANTS — so a caller must never be
+   * allowed to clear the last row.
+   */
+  setGrant(roleKey: RoleKey, permissionKey: PermissionKey, scope: Scope | null): Promise<void>
 
   // ── Fleet management (SRS B) ────────────────────────────────────────────────────────────
   listDrivers(branchId: string): Promise<DriverRecord[]>

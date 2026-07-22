@@ -127,6 +127,22 @@ export class ApiClient {
     )
   }
 
+  // ── The §3 permission matrix, as data (SRS A-2) ─────────────────────────────────────────────
+  permissions() {
+    return this.get<{
+      roles: string[]
+      permissions: string[]
+      grants: Array<{ roleKey: string; permissionKey: string; scope: string }>
+    }>('/permissions')
+  }
+  setGrant(roleKey: string, permissionKey: string, scope: 'own' | 'branch' | 'all' | null) {
+    return this.put<{ roleKey: string; permissionKey: string; scope: string | null }>('/role-permissions', {
+      roleKey,
+      permissionKey,
+      scope,
+    })
+  }
+
   // ── Audit trail (SRS A-5) ───────────────────────────────────────────────────────────────────
   audit(filter: { tableName?: string; recordId?: string; actorId?: string } = {}) {
     const q = new URLSearchParams()

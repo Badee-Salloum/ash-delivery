@@ -342,6 +342,25 @@ export class PgDirectoryRepo implements DirectoryRepo {
     }))
   }
 
+  async setGrant(
+    roleKey: RoleGrantRecord['roleKey'],
+    permissionKey: RoleGrantRecord['permissionKey'],
+    scope: RoleGrantRecord['scope'] | null,
+  ): Promise<void> {
+    if (scope === null) {
+      await this.pool.query('DELETE FROM role_permissions WHERE role_key = $1 AND permission_key = $2', [
+        roleKey,
+        permissionKey,
+      ])
+      return
+    }
+    await this.pool.query(
+      `INSERT INTO role_permissions (role_key, permission_key, scope) VALUES ($1,$2,$3)
+       ON CONFLICT (role_key, permission_key) DO UPDATE SET scope = EXCLUDED.scope`,
+      [roleKey, permissionKey, scope],
+    )
+  }
+
   // ── Fleet management (SRS B) ────────────────────────────────────────────────────────────
 
   async listDrivers(branchId: string): Promise<DriverRecord[]> {
