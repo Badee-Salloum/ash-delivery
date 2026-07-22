@@ -11,6 +11,9 @@ importers:
       '@types/node':
         specifier: ^26.1.1
         version: 26.1.1
+      esbuild:
+        specifier: 0.28.1
+        version: 0.28.1
       typescript:
         specifier: ^5.9.2
         version: 5.9.3
@@ -204,6 +207,9 @@ importers:
       '@ash/testkit':
         specifier: workspace:*
         version: link:../testkit
+      '@neondatabase/serverless':
+        specifier: ^1.1.0
+        version: 1.1.0
       '@types/node':
         specifier: ^26.1.1
         version: 26.1.1
@@ -997,6 +1003,10 @@ packages:
   '@lukeed/ms@2.0.2':
     resolution: {integrity: sha512-9I2Zn6+NJLfaGoz9jN3lpwDgAYvfGeNYdbAIjJOqzs4Tpc+VU3Jqq4IofSUBKajiDS8k9fZIg18/z13mpk1bsA==}
     engines: {node: '>=8'}
+
+  '@neondatabase/serverless@1.1.0':
+    resolution: {integrity: sha512-r3ZZhRjEcfEdKIZnoB1RusNgvHuaBRqfCzV4Gi+5A9yUX0S4HTws/ASWqt13wL4y4I+0rqsWGdA2w7EQXHi3+Q==}
+    engines: {node: '>=19.0.0'}
 
   '@pinojs/redact@0.4.0':
     resolution: {integrity: sha512-k2ENnmBugE/rzQfEcdWHcCY+/FM3VLzH9cYEsbdsoqrvzAKRhUZeRNhAZvB8OitQJ1TBed3yqWtdjzS6wJKBwg==}
@@ -3821,6 +3831,8 @@ snapshots:
       '@jridgewell/sourcemap-codec': 1.5.5
 
   '@lukeed/ms@2.0.2': {}
+
+  '@neondatabase/serverless@1.1.0': {}
 
   '@pinojs/redact@0.4.0': {}
 

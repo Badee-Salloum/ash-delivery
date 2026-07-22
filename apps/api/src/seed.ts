@@ -62,10 +62,16 @@ export function assertSeedAllowed(env: NodeJS.ProcessEnv, force = false): void {
   }
 }
 
-export async function seed(pool: Pool, opts: SeedOptions): Promise<{ br1Difference: Minor }> {
-  const { businessDate, passwordHash } = opts
-  const weekStart = weekStartFor(businessDate)
+/** The stable id of the one Damascus branch — reference data every environment needs. */
+export const DAMASCUS_BRANCH = BRANCH
 
+/**
+ * Reference data that EVERY environment needs — production included: the one branch, the five
+ * roles, and the §3 permission matrix (from the domain's authoritative `ALL_PERMISSIONS` /
+ * `DEFAULT_GRANTS`, so it can never drift from the RBAC the code enforces). No users, no fleet,
+ * no ledger — nothing that would be wrong to have in a live database. Idempotent.
+ */
+export async function seedReferenceData(pool: Pool): Promise<{ branchId: string }> {
   await pool.query(
     `INSERT INTO branches (id, code, name_ar, name_en) VALUES ($1,'DAM','دمشق','Damascus')
      ON CONFLICT (code) DO NOTHING`,
@@ -96,6 +102,26 @@ export async function seed(pool: Pool, opts: SeedOptions): Promise<{ br1Differen
       )
     }
   }
+  return { branchId: BRANCH }
+}
+
+/** Insert one user. Idempotent on username. Shared by the demo seed and the production bootstrap. */
+export async function createUser(
+  pool: Pool,
+  user: { id: string; branchId: string | null; roleKey: string; username: string; fullNameAr: string; passwordHash: string },
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO users (id, branch_id, role_key, username, full_name_ar, password_hash)
+     VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (username) DO NOTHING`,
+    [user.id, user.branchId, user.roleKey, user.username, user.fullNameAr, user.passwordHash],
+  )
+}
+
+export async function seed(pool: Pool, opts: SeedOptions): Promise<{ br1Difference: Minor }> {
+  const { businessDate, passwordHash } = opts
+  const weekStart = weekStartFor(businessDate)
+
+  await seedReferenceData(pool)
 
   const users: Array<[string, string, string, string, string | null]> = [
     [U(1), 'gm', 'general_manager', 'المدير العام', null],
@@ -105,11 +131,7 @@ export async function seed(pool: Pool, opts: SeedOptions): Promise<{ br1Differen
     [U(5), 'driver2', 'driver', 'خالد', BRANCH],
   ]
   for (const [id, username, roleKey, nameAr, branchId] of users) {
-    await pool.query(
-      `INSERT INTO users (id, branch_id, role_key, username, full_name_ar, password_hash)
-       VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (username) DO NOTHING`,
-      [id, branchId, roleKey, username, nameAr, passwordHash],
-    )
+    await createUser(pool, { id, branchId, roleKey, username, fullNameAr: nameAr, passwordHash })
   }
 
   await pool.query(

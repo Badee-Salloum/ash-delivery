@@ -1,7 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": null,
-  "installCommand": "pnpm install --frozen-lockfile",
-  "functions": { "api/index.ts": { "memory": 1024, "maxDuration": 30 } },
+  "installCommand": "pnpm install --frozen-lockfile --prod=false",
+  "buildCommand": "node scripts/build-api.mjs",
+  "functions": { "api/index.mjs": { "memory": 1024, "maxDuration": 30 } },
   "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }]
 }
