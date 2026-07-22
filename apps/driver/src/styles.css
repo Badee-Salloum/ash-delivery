@@ -1,0 +1,27 @@
+@import 'tailwindcss';
+
+/*
+ * RTL-first. Tailwind 4 logical properties are used throughout the components (ps-/pe-/ms-/me-,
+ * start-/end-, text-start/text-end) so a single stylesheet serves both directions — CI fails the
+ * build on any physical utility (ml-/mr-/left-/right-/text-left/text-right).
+ */
+:root {
+  color-scheme: light;
+  --ash-bg: #f8fafc;
+  --ash-ink: #0f172a;
+}
+
+body {
+  margin: 0;
+  font-family: 'IBM Plex Sans Arabic', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  background: var(--ash-bg);
+  color: var(--ash-ink);
+  /* Western digits for money regardless of language (ar-SY-u-nu-latn policy). */
+  font-variant-numeric: tabular-nums;
+}
+
+/* Money and order numbers isolate as bidi runs so an Arabic label never reorders a figure. */
+.num {
+  unicode-bidi: isolate;
+  font-variant-numeric: tabular-nums;
+}

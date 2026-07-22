@@ -220,6 +220,26 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     }
   })
 
+  // ── The driver's own assignment (SRS B-3) ───────────────────────────────────────────────
+  // A driver picks the bike he is actually on today; the server still enforces the binding and
+  // one-live-shift rules on POST /shifts, so the phone can never create an unbacked shift.
+  app.get('/me/assignment', { config: { permission: 'shift.operate', subject: (req) => ({ driverId: req.actor?.driverId ?? null }) } }, async (req, reply) => {
+    if (!req.actor?.driverId) return reply.code(422).send({ error: 'not_a_driver' })
+    const driver = await deps.directory.driver(req.actor.driverId)
+    if (!driver) return reply.code(404).send({ error: 'driver_not_found' })
+    const vehicles = await deps.directory.listVehicles(driver.branchId)
+    const live = await deps.shifts.listLiveForDriver(driver.id)
+    return {
+      driverId: driver.id,
+      branchId: driver.branchId,
+      liveShiftId: live[0]?.id ?? null,
+      liveShiftState: live[0]?.state ?? null,
+      vehicles: vehicles
+        .filter((v) => v.active && v.state === 'ready')
+        .map((v) => ({ id: v.id, code: v.code, state: v.state })),
+    }
+  })
+
   // ── Shifts ──────────────────────────────────────────────────────────────────────────────
   const mediaSubject = async (req: { params: unknown }) => {
     const { mediaId } = z.object({ mediaId: z.string() }).parse(req.params)
