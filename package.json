@@ -8,7 +8,7 @@
   "packageManager": "pnpm@11.3.0",
   "scripts": {
     "test": "pnpm -r test",
-    "typecheck": "tsc -p packages/domain/tsconfig.json && tsc -p packages/contracts/tsconfig.json && tsc -p packages/testkit/tsconfig.json && tsc -p packages/adapters/tsconfig.json && tsc -p packages/db/tsconfig.json && tsc -p apps/api/tsconfig.json",
+    "typecheck": "tsc -p packages/domain/tsconfig.json && tsc -p packages/contracts/tsconfig.json && tsc -p packages/testkit/tsconfig.json && tsc -p packages/adapters/tsconfig.json && tsc -p packages/db/tsconfig.json && tsc -p packages/client/tsconfig.json && tsc -p apps/api/tsconfig.json",
     "check:domain-pure": "node scripts/check-domain-pure.mjs",
     "check:sql": "node scripts/check-sql.mjs",
     "check:wire": "node scripts/check-wire-money.mjs",

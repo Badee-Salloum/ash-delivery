@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".", "allowImportingTsExtensions": true, "noEmit": true,
+    "composite": false, "declaration": false, "declarationMap": false,
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": []
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

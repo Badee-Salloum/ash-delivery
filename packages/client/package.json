@@ -1,0 +1,22 @@
+{
+  "name": "@ash/client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./i18n": "./src/i18n/index.ts"
+  },
+  "comment": "Framework-agnostic client logic: the typed API client, the i18n catalogs, and the pure screen models (order entry, BR1 preview). React imports these; the logic is tested without a DOM.",
+  "dependencies": {
+    "@ash/contracts": "workspace:*",
+    "@ash/domain": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4",
+    "jsdom": "^25.0.1"
+  },
+  "scripts": {
+    "test": "vitest run"
+  }
+}
