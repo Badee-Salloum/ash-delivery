@@ -1,6 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
 import { useApp } from '../app-context.tsx'
-import { Card, Table } from '../ui.tsx'
+import { explainError } from '../errors.ts'
+import { Card, Pending, Table } from '../ui.tsx'
 
 /**
  * The §3 permission matrix as editable DATA (SRS A-2) — the point of storing roles and grants in
@@ -22,6 +23,7 @@ interface Matrix {
 export function Permissions(): ReactNode {
   const { api, t } = useApp()
   const [m, setM] = useState<Matrix | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
 
@@ -29,7 +31,10 @@ export function Permissions(): ReactNode {
     void api
       .permissions()
       .then(setM)
-      .catch(() => setM(null))
+      .catch((e: { error?: string }) => {
+        setM(null)
+        setLoadError(e.error ?? 'error')
+      })
   }, [api])
   useEffect(load, [load])
 
@@ -56,7 +61,17 @@ export function Permissions(): ReactNode {
     }
   }
 
-  if (!m) return <Card>{t.common.loading}</Card>
+  if (!m) {
+    return (
+      <Pending
+        error={loadError}
+        loadingLabel={t.common.loading}
+        errorLabel={explainError(loadError, t)}
+        onRetry={load}
+        retryLabel={t.common.retry}
+      />
+    )
+  }
 
   return (
     <div className="flex flex-col gap-4">

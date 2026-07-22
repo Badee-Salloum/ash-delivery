@@ -1,6 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
 import { useApp } from '../app-context.tsx'
-import { Badge, Button, Card, Money, MoneyInput, Table } from '../ui.tsx'
+import { explainError } from '../errors.ts'
+import { Badge, Button, Card, Money, MoneyInput, Pending, Table } from '../ui.tsx'
 
 interface Review {
   id: string
@@ -41,12 +42,32 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   const [floatText, setFloatText] = useState('')
   const [topupText, setTopupText] = useState('')
 
+  const [loadError, setLoadError] = useState<string | null>(null)
   const load = useCallback(() => {
-    void api.get<Review>(`/shifts/${shiftId}/review`).then(setReview).catch(() => setReview(null))
+    setLoadError(null)
+    void api
+      .get<Review>(`/shifts/${shiftId}/review`)
+      .then(setReview)
+      .catch((e: { error?: string }) => {
+        // Not a spinner: a review that cannot be fetched (the shift was cancelled, or this role
+        // may not see it) has to say so, or the manager waits on a screen that will never fill.
+        setReview(null)
+        setLoadError(e.error ?? 'error')
+      })
   }, [api, shiftId])
   useEffect(load, [load])
 
-  if (!review) return <Card>{t.common.loading}</Card>
+  if (!review) {
+    return (
+      <Pending
+        error={loadError}
+        loadingLabel={t.common.loading}
+        errorLabel={explainError(loadError, t)}
+        onRetry={load}
+        retryLabel={t.common.retry}
+      />
+    )
+  }
 
   const isClose = review.state === 'pending_review'
   const odoDelta =

@@ -251,6 +251,15 @@ export const setFxRequest = z.object({
 
 export const closeWeekRequest = z.object({
   closeDate: calendarDateSchema,
+  /**
+   * Which branch to seal.
+   *
+   * BR7's close is `week.close`, which the §3 matrix grants to the **system admin only** — and a
+   * system admin is organisation-wide, so his session carries no branch. Without this field the
+   * close had no branch channel at all and 422'd for the one role allowed to perform it: the
+   * financial week could never be sealed through the API.
+   */
+  branchId: z.string().min(1).optional(),
 })
 
 export type LoginRequest = z.infer<typeof loginRequest>

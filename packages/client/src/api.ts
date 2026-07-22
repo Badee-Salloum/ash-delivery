@@ -215,6 +215,19 @@ export class ApiClient {
     return this.del<{ ok: boolean }>(`/assignments/${id}`)
   }
 
+  /**
+   * Seal the financial week (BR7).
+   *
+   * `week.close` is system-admin-only, and a system admin is organisation-wide with no branch on
+   * his session — so the branch MUST be named here or the close 422s and the week never seals.
+   */
+  closeWeek(closeDate: string) {
+    return this.post<{ weekStart: string }>('/weeks/close', {
+      closeDate,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+
   /** A day's shifts for the branch, every state — including the ones stuck before `open`. */
   shiftsOfDay(date?: string) {
     return this.get<{

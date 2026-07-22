@@ -534,13 +534,12 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   })
 
   // ── The Sunday close (BR7) — system admin only ──────────────────────────────────────────
-  app.post('/weeks/close', { config: { permission: 'week.close' } }, async (req, reply) => {
+  app.post('/weeks/close', { config: { permission: 'week.close', subject: branchSubject } }, async (req, reply) => {
     const body = closeWeekRequest.parse(req.body)
-    const branchId = req.actor!.branchId
-    if (!branchId) {
-      // The org-wide close fans out to one lock per branch; single-branch today, so require one.
-      return reply.code(422).send({ error: 'branch_required_for_close' })
-    }
+    // The org-wide close fans out to one lock per branch; single-branch today, so the sysadmin
+    // names the one he is sealing. Reading `req.actor.branchId` alone made BR7 unperformable:
+    // `week.close` is system-admin-only and a system admin never has a branch.
+    const branchId = resolveBranchId(req)
 
     // `weekClosedOn` throws on a non-Sunday, and an operator typing the wrong date deserves a
     // clear 422 naming the problem rather than a 500. checkWeekClose reports it as a blocker,

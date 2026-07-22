@@ -73,7 +73,7 @@ export function Treasury(): ReactNode {
     // The API expects the FOLLOWING Sunday; the server validates it, so send today's next Sunday.
     const closeDate = nextSunday(sheet?.businessDate ?? new Date().toISOString().slice(0, 10))
     try {
-      const res = await api.post<{ weekStart: string }>('/weeks/close', { closeDate })
+      const res = await api.closeWeek(closeDate)
       setCloseResult(res)
     } catch (err) {
       setCloseResult(err as { error?: string; blockers?: Array<{ kind: string }> })
@@ -177,6 +177,12 @@ export function Treasury(): ReactNode {
                   <li key={i}>• {b.kind}</li>
                 ))}
               </ul>
+            ) : closeResult?.error ? (
+              // A refusal carrying neither a weekStart nor blockers used to fall through to null:
+              // the sysadmin pressed «إقفال الأحد», nothing changed on screen, and the reason
+              // (branch_required) was never shown. Silence is the worst failure mode for the one
+              // action that makes a week immutable.
+              <p className="mt-2 text-sm font-medium text-red-600">{explainError(closeResult.error, t)}</p>
             ) : null}
           </>
         ) : (

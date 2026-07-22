@@ -60,9 +60,52 @@ describe('who may close the week', () => {
       ['driver1', false],
     ] as const) {
       const token = await h.loginAs(user)
-      const res = await post(token, '/weeks/close', { closeDate: CLOSE_DATE })
+      const res = await post(token, '/weeks/close', { closeDate: CLOSE_DATE, branchId: BRANCH })
       expect(res.statusCode === 403, user).toBe(!allowed)
     }
+  })
+})
+
+/**
+ * The regression that made every other test in this file a lie.
+ *
+ * `week.close` is granted to the system admin ALONE, and a system admin is organisation-wide:
+ * `bootstrap.ts` and `POST /users` both force `branchId = null` for that role, so a branched
+ * sysadmin is a shape production cannot produce. The route nonetheless read the branch off the
+ * session and 422'd — meaning BR7's Sunday close, the moment a week's entries become immutable,
+ * was unperformable by any real account. The suite stayed green only because these tests seeded
+ * an impossible actor with a branch attached.
+ */
+describe('the system admin can close the week he actually is (SRS BR7)', () => {
+  it('has no branch on his session — the production shape, not a test fixture', async () => {
+    const admin = await h.loginAs('sysadmin')
+    const me = await h.app.inject({ method: 'GET', url: '/me', headers: { cookie: h.cookie(admin) } })
+    expect(me.json().branchId).toBeNull()
+  })
+
+  it('names the branch he is sealing and the close proceeds to its real checks', async () => {
+    const admin = await h.loginAs('sysadmin')
+    const res = await post(admin, '/weeks/close', { closeDate: CLOSE_DATE, branchId: BRANCH })
+    // 422 `week_not_closable` — a pre-flight blocker, i.e. the close RAN. The bug returned
+    // `branch_required_for_close` before ever reaching a business rule.
+    expect(res.statusCode).toBe(422)
+    expect(res.json().error).toBe('week_not_closable')
+  })
+
+  it('naming no branch is refused with a reason, not silence', async () => {
+    const admin = await h.loginAs('sysadmin')
+    const res = await post(admin, '/weeks/close', { closeDate: CLOSE_DATE })
+    expect(res.statusCode).toBe(422)
+    expect(res.json().error).toBe('branch_required')
+  })
+
+  it('and a clean week really does seal, driven by that same branch-less admin', async () => {
+    await countEveryDay()
+    await confirmRates()
+    const admin = await h.loginAs('sysadmin')
+    const res = await post(admin, '/weeks/close', { closeDate: CLOSE_DATE, branchId: BRANCH })
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json().weekStart).toBe('2026-07-19')
   })
 })
 
@@ -71,16 +114,8 @@ describe('the pre-flight refuses an unready week', () => {
     // This is the check that was a placeholder until cash counts existed. Without it a week
     // could be sealed with drawers nobody ever opened.
     const admin = await h.loginAs('sysadmin')
-    // sysadmin is org-wide; the close needs a branch, so give the actor one for this test.
-    h.deps.users.seed({
-      id: 'u-sa', branchId: BRANCH, roleKey: 'system_admin', username: 'sysadmin',
-      fullNameAr: 'sysadmin', passwordHash: 'plain:secret', driverId: null,
-      failedAttempts: 0, lockedUntilMs: null, active: true,
-    })
-    const scoped = await h.loginAs('sysadmin')
-    void admin
 
-    const res = await post(scoped, '/weeks/close', { closeDate: CLOSE_DATE })
+    const res = await post(admin, '/weeks/close', { closeDate: CLOSE_DATE, branchId: BRANCH })
     expect(res.statusCode).toBe(422)
     expect(res.json().error).toBe('week_not_closable')
 
@@ -93,33 +128,21 @@ describe('the pre-flight refuses an unready week', () => {
   })
 
   it('refuses to close on any day that is not a Sunday', async () => {
-    h.deps.users.seed({
-      id: 'u-sa', branchId: BRANCH, roleKey: 'system_admin', username: 'sysadmin',
-      fullNameAr: 'sysadmin', passwordHash: 'plain:secret', driverId: null,
-      failedAttempts: 0, lockedUntilMs: null, active: true,
-    })
     const admin = await h.loginAs('sysadmin')
-    const res = await post(admin, '/weeks/close', { closeDate: '2026-07-25' }) // a Saturday
+    const res = await post(admin, '/weeks/close', { closeDate: '2026-07-25', branchId: BRANCH }) // a Saturday
     expect(res.statusCode).toBe(422)
     expect((res.json().blockers as Array<{ kind: string }>)[0]?.kind).toBe('not_a_sunday')
   })
 })
 
 describe('a clean week closes and seals its entries', () => {
-  beforeEach(async () => {
-    h.deps.users.seed({
-      id: 'u-sa', branchId: BRANCH, roleKey: 'system_admin', username: 'sysadmin',
-      fullNameAr: 'sysadmin', passwordHash: 'plain:secret', driverId: null,
-      failedAttempts: 0, lockedUntilMs: null, active: true,
-    })
-  })
 
   it('seals the week of the 19th–25th when closing on the 26th', async () => {
     await countEveryDay()
     await confirmRates()
     const admin = await h.loginAs('sysadmin')
 
-    const res = await post(admin, '/weeks/close', { closeDate: CLOSE_DATE })
+    const res = await post(admin, '/weeks/close', { closeDate: CLOSE_DATE, branchId: BRANCH })
     expect(res.statusCode, res.body).toBe(200)
     expect(res.json().weekStart).toBe('2026-07-19')
     expect(res.json().weekEnd).toBe('2026-07-25')
@@ -138,7 +161,7 @@ describe('a clean week closes and seals its entries', () => {
     await confirmRates()
 
     const admin = await h.loginAs('sysadmin')
-    const res = await post(admin, '/weeks/close', { closeDate: CLOSE_DATE })
+    const res = await post(admin, '/weeks/close', { closeDate: CLOSE_DATE, branchId: BRANCH })
     expect(res.statusCode, res.body).toBe(200)
     expect(res.json().entriesSealed).toBeGreaterThan(0)
 
@@ -152,9 +175,9 @@ describe('a clean week closes and seals its entries', () => {
     await countEveryDay()
     await confirmRates()
     const admin = await h.loginAs('sysadmin')
-    expect((await post(admin, '/weeks/close', { closeDate: CLOSE_DATE })).statusCode).toBe(200)
+    expect((await post(admin, '/weeks/close', { closeDate: CLOSE_DATE, branchId: BRANCH })).statusCode).toBe(200)
 
-    const second = await post(admin, '/weeks/close', { closeDate: CLOSE_DATE })
+    const second = await post(admin, '/weeks/close', { closeDate: CLOSE_DATE, branchId: BRANCH })
     expect(second.statusCode).toBe(422)
     expect((second.json().blockers as Array<{ kind: string }>).map((b) => b.kind)).toContain('already_closed')
   })
