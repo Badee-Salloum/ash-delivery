@@ -12,10 +12,31 @@ export function Treasury(): ReactNode {
   const [counted, setCounted] = useState<Record<string, string>>({})
   const [result, setResult] = useState<{ balanced: boolean; lines: Array<{ fundCode: string; variance: string }> } | null>(null)
   const [closeResult, setCloseResult] = useState<{ error?: string; blockers?: Array<{ kind: string }>; weekStart?: string } | null>(null)
+  const [balances, setBalances] = useState<{ cash: string; wallet: string } | null>(null)
+  const [depositAmt, setDepositAmt] = useState<{ cash: string; wallet: string }>({ cash: '', wallet: '' })
+  const [depositMsg, setDepositMsg] = useState<string | null>(null)
+
+  // Only the branch manager + GM may put money in (the §3 matrix); the sysadmin can see it.
+  const canDeposit = session?.roleKey === 'branch_manager' || session?.roleKey === 'general_manager'
 
   useEffect(() => {
     void api.get<typeof sheet>('/cash-counts/sheet').then(setSheet).catch(() => setSheet(null))
+    void api.treasuryBalances().then(setBalances).catch(() => setBalances(null))
   }, [api])
+
+  async function deposit(target: 'cash' | 'wallet'): Promise<void> {
+    const amount = depositAmt[target]
+    if (!amount) return
+    setDepositMsg(null)
+    try {
+      const res = await api.treasuryDeposit(target, amount)
+      setBalances((b) => (b ? { ...b, [target]: res.balance } : b))
+      setDepositAmt({ ...depositAmt, [target]: '' })
+      setDepositMsg(t.treasury.deposited)
+    } catch (err) {
+      setDepositMsg((err as { error?: string }).error ?? 'error')
+    }
+  }
 
   async function submitCount(): Promise<void> {
     if (!sheet) return
@@ -37,6 +58,35 @@ export function Treasury(): ReactNode {
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      <Card title={t.treasury.branchTreasury} className="lg:col-span-2">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          {(['cash', 'wallet'] as const).map((target) => (
+            <div key={target} className="rounded-lg border border-slate-200 p-3">
+              <div className="text-xs font-semibold text-slate-500">
+                {target === 'cash' ? t.treasury.cashBox : t.treasury.wallet}
+              </div>
+              <div className="mt-1 text-2xl font-bold">
+                {balances ? <Money value={balances[target]} /> : '—'}
+              </div>
+              {canDeposit ? (
+                <div className="mt-3 flex gap-2">
+                  <MoneyInput
+                    value={depositAmt[target]}
+                    onChange={(e) => setDepositAmt({ ...depositAmt, [target]: e.target.value })}
+                    className="w-full"
+                    placeholder={t.treasury.depositAmount}
+                  />
+                  <Button onClick={() => deposit(target)} disabled={!depositAmt[target]}>
+                    {t.treasury.deposit}
+                  </Button>
+                </div>
+              ) : null}
+            </div>
+          ))}
+        </div>
+        {depositMsg ? <p className="mt-3 text-sm font-medium text-emerald-700">{depositMsg}</p> : null}
+      </Card>
+
       <Card title={t.treasury.cashCount}>
         {!sheet ? (
           t.common.loading

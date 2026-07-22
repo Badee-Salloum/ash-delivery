@@ -5,6 +5,7 @@ import type { Deps } from '@ash/contracts'
 import {
   addOrderRequest,
   approveCloseRequest,
+  approveOpenRequest,
   closeWeekRequest,
   createShiftRequest,
   endPackageRequest,
@@ -294,7 +295,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     { config: { permission: 'shift.approve', subject: shiftSubject } },
     async (req) => {
       const { id } = z.object({ id: z.string() }).parse(req.params)
-      const shift = await approveOpen(deps, req.actor!, id)
+      const body = approveOpenRequest.parse(req.body)
+      const shift = await approveOpen(deps, req.actor!, id, body)
       return { id: shift.id, state: shift.state }
     },
   )

@@ -103,7 +103,7 @@ describe('the what-if simulation (F-5)', () => {
       method: 'PUT', url: `/shifts/${id}/start-package`, headers: { cookie: h.cookie(driver) },
       payload: { odometerKm: 1, batteryPercent: 90, floatTranches: [sypStr(100_000)], topupTranches: [sypStr(50_000)] },
     })
-    await post(manager, `/shifts/${id}/approve-open`, {})
+    await post(manager, `/shifts/${id}/approve-open`, { floatTranches: [sypStr(100_000)], topupTranches: [sypStr(50_000)] })
     // 20 orders, all cash for simplicity of the arithmetic.
     for (let i = 1; i <= 20; i++) {
       await post(driver, `/shifts/${id}/orders`, { providerOrderNo: `S-${i}`, payMode: 'electronic', fee: sypStr(5_000), zone: null })

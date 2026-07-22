@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { CashCountLine, CashCountRecord, Deps } from '@ash/contracts'
-import { createCashCountRequest, manualEntryRequest, serializeMoney } from '@ash/contracts'
+import { createCashCountRequest, manualEntryRequest, moneySchema, serializeMoney } from '@ash/contracts'
 import { type Posting, assertBalanced, fundRefFromCode, minor, reverse, weekStartFor } from '@ash/domain'
 import { ServiceError, ensureFxDay, todayFor } from './shifts.service.ts'
 
@@ -211,6 +211,64 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       return reply.code(201).send({ reversalEntryId: entry?.id ?? null, reversalOf: entryId, postingDate })
     },
   )
+
+  // ── Branch treasury: the cash box + wallet, and funding them (SRS E-1 / decision D-5) ──────
+  //
+  // Each branch has an office cash box (`office_cash`) and an office wallet (`office_wallet`) — the
+  // money a manager disburses to drivers as float and top-up. They start empty; the owner/GM tops
+  // them up here. A driver's float debits the box down, so `balance = deposits − floats + returns`;
+  // funding the box is what stops it from silently going negative. Balances are the live ledger sum.
+
+  app.get('/treasury/balances', { config: { permission: 'branch_data.view', subject: ownBranch } }, async (req) => {
+    const branchId = resolveBranch(req)
+    return {
+      cash: serializeMoney(await deps.ledger.fundBalance(branchId, 'office_cash')),
+      wallet: serializeMoney(await deps.ledger.fundBalance(branchId, 'office_wallet')),
+    }
+  })
+
+  const depositRequest = z.object({
+    target: z.enum(['cash', 'wallet']),
+    amount: moneySchema,
+    note: z.string().max(200).optional(),
+  })
+
+  app.post('/treasury/deposit', { config: { permission: 'journal.manual.write', subject: targetBranch } }, async (req, reply) => {
+    const body = depositRequest.parse(req.body)
+    const branchId = resolveBranch(req)
+    if (body.amount <= 0n) throw new ServiceError(422, 'amount_must_be_positive')
+    const officeCode = body.target === 'cash' ? 'office_cash' : 'office_wallet'
+
+    // A deposit increases the office box/wallet (DEBIT) against an owner-funding contra account
+    // (CREDIT), so the ledger stays balanced and the source of the money is recorded. `owner_funding`
+    // is an unrecognised code, which fundRefFromCode maps to a contra cost centre by design.
+    const posting = assertBalanced({
+      eventType: 'manual',
+      occurrenceKey: deps.ids.uuid(),
+      lines: [
+        { fund: fundRefFromCode(officeCode), side: 'D', amount: body.amount },
+        { fund: fundRefFromCode('owner_funding'), side: 'C', amount: body.amount },
+      ],
+    })
+
+    const businessDate = todayFor(deps)
+    const fxDayId = await ensureFxDay(deps, businessDate)
+    const reason = body.note?.trim() || (body.target === 'cash' ? 'deposit to cash box' : 'top up branch wallet')
+    await deps.ledger.post(branchId, [posting], {
+      shiftId: null,
+      businessDate,
+      postingDate: businessDate,
+      weekStartDate: weekStartFor(businessDate),
+      fxDayId,
+      createdBy: req.actor!.userId,
+      reason,
+    })
+
+    return reply.code(201).send({
+      target: body.target,
+      balance: serializeMoney(await deps.ledger.fundBalance(branchId, officeCode)),
+    })
+  })
 }
 
 async function findEntry(deps: Deps, branchId: string, entryId: number) {

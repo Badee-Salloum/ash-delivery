@@ -152,8 +152,6 @@ export async function submitStartPackage(
   input: {
     odometerKm: number
     batteryPercent: number
-    floatTranches: Minor[]
-    topupTranches: Minor[]
   },
 ): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
@@ -161,9 +159,8 @@ export async function submitStartPackage(
     ...shift,
     odoStart: input.odometerKm,
     batteryStart: input.batteryPercent,
-    floatTranches: input.floatTranches,
-    topupTranches: input.topupTranches,
-    // mediaSlotsStart is NOT taken from the caller — it is whatever actually uploaded.
+    // Float and top-up are NOT set here — they are the branch's money, recorded by the manager at
+    // approveOpen. mediaSlotsStart is NOT taken from the caller — it is whatever actually uploaded.
   }
 
   const result = await guard(deps, draft, 'driver_confirm_start', actor, {
@@ -217,42 +214,54 @@ async function notifyBranch(deps: Deps, shift: ShiftRecord, kind: string): Promi
 
 export { notifyBranch }
 
-export async function approveOpen(deps: Deps, actor: Actor, shiftId: string): Promise<ShiftRecord> {
+export async function approveOpen(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: { floatTranches: Minor[]; topupTranches: Minor[] },
+): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
-  const result = await guard(deps, shift, 'manager_approve_open', actor, {
+  // The manager records the float + top-up here (the driver no longer types them). They are the
+  // branch's money, disbursed by the manager, so they become part of the shift at approval time.
+  const withFunds: ShiftRecord = {
+    ...shift,
+    floatTranches: input.floatTranches,
+    topupTranches: input.topupTranches,
+  }
+  const result = await guard(deps, withFunds, 'manager_approve_open', actor, {
     startPackage: {
-      mediaSlots: shift.mediaSlotsStart,
-      batteryPercent: shift.batteryStart,
-      odometerKm: shift.odoStart,
-      floatTotal: sum(shift.floatTranches),
-      topupTotal: sum(shift.topupTranches),
-      driverConfirmedAt: shift.driverConfirmedAt,
+      mediaSlots: withFunds.mediaSlotsStart,
+      batteryPercent: withFunds.batteryStart,
+      odometerKm: withFunds.odoStart,
+      floatTotal: sum(withFunds.floatTranches),
+      topupTotal: sum(withFunds.topupTranches),
+      driverConfirmedAt: withFunds.driverConfirmedAt,
     },
   })
   if (!result.ok) fail(result)
 
   // The float and top-up postings land HERE, at approval — not when the driver typed the
   // amounts. Money moves when a manager says it moved.
-  const fxDayId = await ensureFxDay(deps, shift.businessDate)
+  const fxDayId = await ensureFxDay(deps, withFunds.businessDate)
   await deps.ledger.post(
-    shift.branchId,
+    withFunds.branchId,
     postingsForOpen({
-      driverId: shift.driverId,
-      floatTranches: shift.floatTranches,
-      topupTranches: shift.topupTranches,
+      driverId: withFunds.driverId,
+      floatTranches: withFunds.floatTranches,
+      topupTranches: withFunds.topupTranches,
       orders: [],
     }),
     {
-      shiftId: shift.id,
-      businessDate: shift.businessDate,
+      shiftId: withFunds.id,
+      businessDate: withFunds.businessDate,
       postingDate: todayFor(deps),
-      weekStartDate: shift.weekStartDate,
+      weekStartDate: withFunds.weekStartDate,
       fxDayId,
       createdBy: actor.userId,
     },
   )
 
-  const updated: ShiftRecord = { ...shift, state: result.next }
+  const updated: ShiftRecord = { ...withFunds, state: result.next }
   await deps.shifts.update(updated)
   return updated
 }

@@ -31,11 +31,16 @@ export function ShiftFlow({ assignment }: { assignment: { driverId: string; vehi
       <StartPackage
         assignment={assignment}
         awaiting={phase === 'awaiting'}
-        onOpened={(s) => {
-          setShift(s)
+        onOpened={(id) => {
+          setShift({ id, floatText: '0', topupText: '0' })
           setPhase('awaiting')
         }}
-        onApproved={() => setPhase('orders')}
+        onApproved={(funds) => {
+          // The manager entered the float + top-up at approval; carry them into the order screen so
+          // the live BR1 preview is right.
+          setShift((s) => (s ? { ...s, ...funds } : s))
+          setPhase('orders')
+        }}
       />
     )
   }
@@ -143,15 +148,13 @@ function StartPackage({
 }: {
   assignment: { driverId: string; vehicleId: string; shiftNo: number }
   awaiting: boolean
-  onOpened(shift: ShiftState): void
-  onApproved(): void
+  onOpened(shiftId: string): void
+  onApproved(funds: { floatText: string; topupText: string }): void
 }): ReactNode {
   const { api, t } = useApp()
   const [shiftId, setShiftId] = useState<string | null>(null)
   const [odo, setOdo] = useState('')
   const [battery, setBattery] = useState('')
-  const [floatText, setFloat] = useState('')
-  const [topup, setTopup] = useState('')
   const [odoShot, setOdoShot] = useState(false)
   const [busy, setBusy] = useState(false)
 
@@ -168,25 +171,30 @@ function StartPackage({
     if (!shiftId) return
     setBusy(true)
     try {
+      // The driver submits only the odometer + battery + photo. The cash float and wallet top-up
+      // are the branch's money, entered by the manager at approval.
       await api.put(`/shifts/${shiftId}/start-package`, {
         odometerKm: Number(odo),
         batteryPercent: Number(battery),
-        floatTranches: [floatText || '0'],
-        topupTranches: [topup || '0'],
       })
-      onOpened({ id: shiftId, floatText: floatText || '0', topupText: topup || '0' })
+      onOpened(shiftId)
     } finally {
       setBusy(false)
     }
   }
 
-  // Poll for the branch manager's approval once submitted.
+  // Poll for the branch manager's approval once submitted. On approval, read the float + top-up the
+  // manager recorded so the order screen's live BR1 preview matches the ledger.
   useEffect(() => {
     if (!awaiting || !shiftId) return
     const timer = setInterval(async () => {
       try {
-        const s = await api.get<{ state: string }>(`/shifts/${shiftId}/review`).catch(() => null)
-        if (s?.state === 'open') onApproved()
+        const s = await api
+          .get<{ state: string; startPackage: { floatTotal: string; topupTotal: string } }>(`/shifts/${shiftId}/review`)
+          .catch(() => null)
+        if (s?.state === 'open') {
+          onApproved({ floatText: s.startPackage.floatTotal, topupText: s.startPackage.topupTotal })
+        }
       } catch {
         /* keep polling */
       }
@@ -228,12 +236,6 @@ function StartPackage({
         </Field>
         <Field label={t.shift.battery}>
           <TextInput inputMode="numeric" value={battery} onChange={(e) => setBattery(e.target.value)} />
-        </Field>
-        <Field label={t.shift.cashFloat}>
-          <MoneyInput value={floatText} onChange={(e) => setFloat(e.target.value)} />
-        </Field>
-        <Field label={t.shift.walletTopup}>
-          <MoneyInput value={topup} onChange={(e) => setTopup(e.target.value)} />
         </Field>
       </Card>
     </Screen>

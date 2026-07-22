@@ -48,9 +48,6 @@ export const createShiftRequest = z.object({
 export const startPackageRequest = z.object({
   odometerKm: z.number().int().min(0),
   batteryPercent: z.number().int().min(0).max(100),
-  /** SRS C-5: several tranches per day are legitimate, so this is a list, not a scalar. */
-  floatTranches: z.array(moneySchema).min(0),
-  topupTranches: z.array(moneySchema).min(0),
 })
 
 export const addOrderRequest = z.object({
@@ -76,6 +73,16 @@ export const uploadEvidenceParams = z.object({
   id: z.string().min(1),
   package: z.enum(['start', 'end']),
   slot: z.string().min(1).max(32),
+})
+
+/**
+ * The manager records the cash float and wallet top-up at open-approval — the driver no longer
+ * enters them (they are the branch's money, disbursed by the manager). SRS C-5: several tranches
+ * per day are legitimate, so each is a list, not a scalar.
+ */
+export const approveOpenRequest = z.object({
+  floatTranches: z.array(moneySchema).min(0),
+  topupTranches: z.array(moneySchema).min(0),
 })
 
 export const approveCloseRequest = z.object({
@@ -225,3 +232,4 @@ export type CreateShiftRequest = z.infer<typeof createShiftRequest>
 export type StartPackageRequest = z.infer<typeof startPackageRequest>
 export type AddOrderRequest = z.infer<typeof addOrderRequest>
 export type EndPackageRequest = z.infer<typeof endPackageRequest>
+export type ApproveOpenRequest = z.infer<typeof approveOpenRequest>

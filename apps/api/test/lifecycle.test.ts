@@ -50,8 +50,6 @@ async function openShift(driverToken: string, managerToken: string, vehicleId = 
     payload: {
       odometerKm: 15_320,
       batteryPercent: 95,
-      floatTranches: [sypStr(100_000)],
-      topupTranches: [sypStr(50_000)],
     },
   })
   expect(start.statusCode).toBe(200)
@@ -61,6 +59,7 @@ async function openShift(driverToken: string, managerToken: string, vehicleId = 
     method: 'POST',
     url: `/shifts/${id}/approve-open`,
     headers: { cookie: h.cookie(managerToken) },
+    payload: { floatTranches: [sypStr(100_000)], topupTranches: [sypStr(50_000)] },
   })
   expect(approved.statusCode).toBe(200)
   expect(approved.json().state).toBe('open')
@@ -384,13 +383,11 @@ describe('the pay-mode blind spot, over HTTP', () => {
       await strict.uploadPhoto(driver, id, 'start', 'odometer')
       await strict.app.inject({
         method: 'PUT', url: `/shifts/${id}/start-package`, headers: { cookie: strict.cookie(driver) },
-        payload: {
-          odometerKm: 1, batteryPercent: 90,
-          floatTranches: [sypStr(100_000)], topupTranches: [sypStr(50_000)],
-        },
+        payload: { odometerKm: 1, batteryPercent: 90 },
       })
       await strict.app.inject({
         method: 'POST', url: `/shifts/${id}/approve-open`, headers: { cookie: strict.cookie(manager) },
+        payload: { floatTranches: [sypStr(100_000)], topupTranches: [sypStr(50_000)] },
       })
       for (let i = 1; i <= 20; i++) {
         await strict.app.inject({

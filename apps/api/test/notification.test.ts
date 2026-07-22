@@ -88,7 +88,10 @@ describe('the branch bell', () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
     const shiftId = await submitForOpenApproval()
-    await h.app.inject({ method: 'POST', url: `/shifts/${shiftId}/approve-open`, headers: { cookie: h.cookie(manager) } })
+    await h.app.inject({
+      method: 'POST', url: `/shifts/${shiftId}/approve-open`, headers: { cookie: h.cookie(manager) },
+      payload: { floatTranches: [sypStr(100_000)], topupTranches: [sypStr(50_000)] },
+    })
     await h.app.inject({
       method: 'POST', url: `/shifts/${shiftId}/orders`, headers: { cookie: h.cookie(driver) },
       payload: { providerOrderNo: 'N-1', payMode: 'cash', fee: sypStr(5_000), zone: null },

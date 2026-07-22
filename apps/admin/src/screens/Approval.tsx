@@ -1,6 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
 import { useApp } from '../app-context.tsx'
-import { Badge, Button, Card, Money, Table } from '../ui.tsx'
+import { Badge, Button, Card, Money, MoneyInput, Table } from '../ui.tsx'
 
 interface Review {
   id: string
@@ -36,6 +36,10 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   const [review, setReview] = useState<Review | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // The manager records the cash float + wallet top-up here, at open-approval (the driver no
+  // longer types them). Empty is treated as 0.
+  const [floatText, setFloatText] = useState('')
+  const [topupText, setTopupText] = useState('')
 
   const load = useCallback(() => {
     void api.get<Review>(`/shifts/${shiftId}/review`).then(setReview).catch(() => setReview(null))
@@ -56,7 +60,10 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     setError(null)
     try {
       if (review.state === 'awaiting_open_approval') {
-        await api.post(`/shifts/${review.id}/approve-open`)
+        await api.post(`/shifts/${review.id}/approve-open`, {
+          floatTranches: [floatText || '0'],
+          topupTranches: [topupText || '0'],
+        })
       } else {
         await api.post(`/shifts/${review.id}/approve-close`, { reviewedOrdersHash: review.br1.ordersHash })
       }
@@ -121,8 +128,27 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           <dl className="grid grid-cols-2 gap-2 text-sm">
             <Field label={t.shift.odometer} value={String(review.startPackage.odometerKm ?? '—')} />
             <Field label={t.shift.battery} value={`${review.startPackage.batteryPercent ?? '—'}%`} />
-            <Field label={t.shift.cashFloat} value={review.startPackage.floatTotal} />
-            <Field label={t.shift.walletTopup} value={review.startPackage.topupTotal} />
+            {review.state === 'awaiting_open_approval' ? (
+              <>
+                <div>
+                  <dt className="text-xs text-slate-500">{t.shift.cashFloat}</dt>
+                  <dd className="mt-1">
+                    <MoneyInput value={floatText} onChange={(e) => setFloatText(e.target.value)} className="w-full" />
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-slate-500">{t.shift.walletTopup}</dt>
+                  <dd className="mt-1">
+                    <MoneyInput value={topupText} onChange={(e) => setTopupText(e.target.value)} className="w-full" />
+                  </dd>
+                </div>
+              </>
+            ) : (
+              <>
+                <Field label={t.shift.cashFloat} value={review.startPackage.floatTotal} />
+                <Field label={t.shift.walletTopup} value={review.startPackage.topupTotal} />
+              </>
+            )}
           </dl>
           <PhotoRow shiftId={review.id} pkg="start" slots={review.startPackage.mediaSlots} />
         </Card>

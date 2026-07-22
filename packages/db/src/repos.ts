@@ -63,8 +63,12 @@ function fundTypeOf(fund: Posting['lines'][number]['fund']): string {
  */
 async function ensureFund(client: PoolClient, branchId: string, fund: Posting['lines'][number]['fund']): Promise<string> {
   const code = fundCodeOf(fund)
-  const owner = 'driverId' in fund ? fund.driverId : 'costCenterId' in fund ? fund.costCenterId : null
-  const ownerKind = 'driverId' in fund ? 'driver' : 'costCenterId' in fund ? 'vehicle' : 'none'
+  // A cost centre owned by a VEHICLE carries that vehicle's uuid; a NAMED contra account
+  // ("opening_balance", "owner_funding", "adjustments") has no owner and is owner_kind='none'.
+  // Getting this wrong trips funds_owner_ck: CHECK ((owner_kind='none') = (owner_id IS NULL)).
+  const costUuid = 'costCenterId' in fund ? toUuidOrNull(fund.costCenterId) : null
+  const ownerId = 'driverId' in fund ? fund.driverId : costUuid
+  const ownerKind = 'driverId' in fund ? 'driver' : costUuid !== null ? 'vehicle' : 'none'
 
   const found = await client.query<{ id: string }>(
     'SELECT id FROM funds WHERE branch_id = $1 AND code = $2',
@@ -77,7 +81,7 @@ async function ensureFund(client: PoolClient, branchId: string, fund: Posting['l
      VALUES ($1, $2::fund_type, $3, $4, $5, $5)
      ON CONFLICT (branch_id, code) DO UPDATE SET code = EXCLUDED.code
      RETURNING id`,
-    [branchId, fundTypeOf(fund), ownerKind, owner === null ? null : toUuidOrNull(owner), code],
+    [branchId, fundTypeOf(fund), ownerKind, ownerId, code],
   )
   return inserted.rows[0]!.id
 }

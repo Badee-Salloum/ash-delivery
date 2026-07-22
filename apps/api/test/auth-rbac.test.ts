@@ -180,19 +180,18 @@ describe('RBAC over HTTP (AC #12)', () => {
     await h.uploadPhoto(driver, id, 'start', 'odometer')
     await h.app.inject({
       method: 'PUT', url: `/shifts/${id}/start-package`, headers: { cookie: h.cookie(driver) },
-      payload: {
-        odometerKm: 1, batteryPercent: 90,
-        floatTranches: [sypStr(1_000)], topupTranches: [sypStr(1_000)],
-      },
+      payload: { odometerKm: 1, batteryPercent: 90 },
     })
     const asDriver = await h.app.inject({
       method: 'POST', url: `/shifts/${id}/approve-open`, headers: { cookie: h.cookie(driver) },
+      payload: { floatTranches: [sypStr(1_000)], topupTranches: [sypStr(1_000)] },
     })
     expect(asDriver.statusCode).toBe(403)
     expect(asDriver.json().reason).toBe('no_grant_for_role')
 
     const asManager = await h.app.inject({
       method: 'POST', url: `/shifts/${id}/approve-open`, headers: { cookie: h.cookie(manager) },
+      payload: { floatTranches: [sypStr(1_000)], topupTranches: [sypStr(1_000)] },
     })
     expect(asManager.statusCode).toBe(200)
   })
@@ -270,17 +269,19 @@ describe('assignment rules (SRS B-3)', () => {
 })
 
 describe('money on the wire', () => {
+  // Float/top-up now cross the wire on approve-open (the manager records them), so the money-schema
+  // checks live there.
   it('rejects a JSON number where money is expected', async () => {
     const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
     const created = await h.app.inject({
       method: 'POST', url: '/shifts', headers: { cookie: h.cookie(driver) },
       payload: { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 },
     })
     const res = await h.app.inject({
-      method: 'PUT', url: `/shifts/${created.json().id}/start-package`,
-      headers: { cookie: h.cookie(driver) },
+      method: 'POST', url: `/shifts/${created.json().id}/approve-open`,
+      headers: { cookie: h.cookie(manager) },
       payload: {
-        odometerKm: 1, batteryPercent: 90,
         floatTranches: [100000], // ← a Number, not a decimal string
         topupTranches: [],
       },
@@ -291,15 +292,15 @@ describe('money on the wire', () => {
 
   it('rejects more than two decimal places', async () => {
     const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
     const created = await h.app.inject({
       method: 'POST', url: '/shifts', headers: { cookie: h.cookie(driver) },
       payload: { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 },
     })
     const res = await h.app.inject({
-      method: 'PUT', url: `/shifts/${created.json().id}/start-package`,
-      headers: { cookie: h.cookie(driver) },
+      method: 'POST', url: `/shifts/${created.json().id}/approve-open`,
+      headers: { cookie: h.cookie(manager) },
       payload: {
-        odometerKm: 1, batteryPercent: 90,
         floatTranches: ['100.005'], topupTranches: [],
       },
     })

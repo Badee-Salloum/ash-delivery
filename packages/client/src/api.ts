@@ -112,6 +112,14 @@ export class ApiClient {
     )
   }
 
+  // ── Branch treasury (cash box + wallet) ─────────────────────────────────────────────────────
+  treasuryBalances() {
+    return this.get<{ cash: string; wallet: string }>('/treasury/balances')
+  }
+  treasuryDeposit(target: 'cash' | 'wallet', amount: string, note?: string) {
+    return this.post<{ target: string; balance: string }>('/treasury/deposit', { target, amount, note })
+  }
+
   // ── Notifications ─────────────────────────────────────────────────────────────────────────
   notifications() {
     return this.get<{ unreadCount: number; notifications: Array<{ id: number; kind: string; payload: Record<string, unknown>; read: boolean; createdAt: string }> }>(

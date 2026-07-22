@@ -150,6 +150,12 @@ export const en: Catalog = {
 
   treasury: {
     cashCount: 'Daily cash count',
+    branchTreasury: 'Branch treasury',
+    cashBox: 'Cash box',
+    wallet: 'Wallet',
+    deposit: 'Deposit',
+    depositAmount: 'Amount',
+    deposited: 'Deposited',
     counted: 'Counted',
     computed: 'Computed',
     variance: 'Variance',

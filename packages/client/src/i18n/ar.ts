@@ -151,6 +151,12 @@ export const ar = {
 
   treasury: {
     cashCount: 'الجرد اليومي',
+    branchTreasury: 'خزينة الفرع',
+    cashBox: 'صندوق الكاش',
+    wallet: 'المحفظة',
+    deposit: 'إيداع',
+    depositAmount: 'المبلغ',
+    deposited: 'تم الإيداع',
     counted: 'المعدود',
     computed: 'المحسوب',
     variance: 'الفرق',

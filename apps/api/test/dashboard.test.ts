@@ -31,9 +31,12 @@ async function runCanonicalShift(): Promise<void> {
   await h.uploadPhoto(driver, id, 'start', 'odometer')
   await h.app.inject({
     method: 'PUT', url: `/shifts/${id}/start-package`, headers: { cookie: h.cookie(driver) },
-    payload: { odometerKm: 1, batteryPercent: 95, floatTranches: [sypStr(100_000)], topupTranches: [sypStr(50_000)] },
+    payload: { odometerKm: 1, batteryPercent: 95 },
   })
-  await h.app.inject({ method: 'POST', url: `/shifts/${id}/approve-open`, headers: { cookie: h.cookie(manager) } })
+  await h.app.inject({
+    method: 'POST', url: `/shifts/${id}/approve-open`, headers: { cookie: h.cookie(manager) },
+    payload: { floatTranches: [sypStr(100_000)], topupTranches: [sypStr(50_000)] },
+  })
 
   let n = 0
   const add = async (mode: string, count: number) => {
@@ -110,7 +113,7 @@ describe('the operational dashboard', () => {
     await h.uploadPhoto(driver, created.json().id, 'start', 'odometer')
     await h.app.inject({
       method: 'PUT', url: `/shifts/${created.json().id}/start-package`, headers: { cookie: h.cookie(driver) },
-      payload: { odometerKm: 1, batteryPercent: 90, floatTranches: [sypStr(1_000)], topupTranches: [sypStr(1_000)] },
+      payload: { odometerKm: 1, batteryPercent: 90 },
     })
 
     const manager = await h.loginAs('manager')

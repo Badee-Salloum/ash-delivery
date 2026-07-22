@@ -31,6 +31,41 @@ async function seedOfficeCash(amount: string): Promise<void> {
   })
 }
 
+describe('branch treasury: cash box + wallet deposits (E-1 / D-5)', () => {
+  it('shows the branch cash box + wallet balances (empty at first)', async () => {
+    const manager = await h.loginAs('manager')
+    const res = await get(manager, '/treasury/balances')
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json()).toEqual({ cash: sypStr(0), wallet: sypStr(0) })
+  })
+
+  it('a deposit raises the cash box balance', async () => {
+    const manager = await h.loginAs('manager')
+    const res = await post(manager, '/treasury/deposit', { target: 'cash', amount: sypStr(200_000) })
+    expect(res.statusCode, res.body).toBe(201)
+    expect(res.json().balance).toBe(sypStr(200_000))
+    expect((await get(manager, '/treasury/balances')).json().cash).toBe(sypStr(200_000))
+  })
+
+  it('a wallet top-up raises the wallet balance', async () => {
+    const manager = await h.loginAs('manager')
+    await post(manager, '/treasury/deposit', { target: 'wallet', amount: sypStr(50_000) })
+    expect((await get(manager, '/treasury/balances')).json().wallet).toBe(sypStr(50_000))
+  })
+
+  it('the system admin cannot deposit — money is not his (§3 matrix, D-5)', async () => {
+    const sysadmin = await h.loginAs('sysadmin')
+    const res = await post(sysadmin, '/treasury/deposit', { target: 'cash', amount: sypStr(1_000) })
+    expect(res.statusCode).toBe(403)
+  })
+
+  it('rejects a non-positive amount', async () => {
+    const manager = await h.loginAs('manager')
+    const res = await post(manager, '/treasury/deposit', { target: 'wallet', amount: sypStr(0) })
+    expect(res.statusCode).toBe(422)
+  })
+})
+
 describe('the daily cash count (E-5)', () => {
   it('offers a sheet of what the system believes each fund holds', async () => {
     const manager = await h.loginAs('manager')
