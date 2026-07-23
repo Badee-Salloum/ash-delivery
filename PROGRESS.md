@@ -1,5 +1,57 @@
 # PROGRESS
 
+## 2026-07-23 (latest) — the BMS reader: a profile per battery, and two confirmed faults fixed
+
+**309 domain + 246 API + 27 driver tests green, 6 guards green, migration 0008 applied, all three
+projects redeployed.**
+
+The diagnostics added the round before paid for themselves immediately: the driver's phone reported
+**two different failures**, and they were two different faults rather than one mystery.
+
+**«تعذّر تشغيل القارئ» — the reader died once and was never rebuilt.** `getWorker()`'s catch only
+ever covered *creation*; once created, the cached promise stayed resolved for the whole session, so
+a worker killed later by a wasm abort or an OOM was handed out again on every call and OCR reported
+`unavailable` **forever**. Pressing «إعادة القراءة» could not recover it. The worker is now
+terminated and dropped on any failure — including a timeout, which leaves it chewing on an
+abandoned job — and rebuilt once automatically.
+
+**«لم نتعرّف على أي حقل» — the Arabic app is a CARD GRID and the parser could only read a list.**
+
+```
+   81.48V        0A        0.00W       1        ← one recognised line
+إجمالي الجهد    التيار      الطاقة     الدورات    ← the next
+```
+
+The label and its value are never in the same cell there, so «الدورات» and «إجمالي الجهد» found no
+number at all. `parseBms` now takes real line boxes and pairs a caption with the value on the line
+**above** it by column overlap, which reads the cards and leaves the inline English table working
+unchanged. The screenshot is also white text on saturated cyan, and Tesseract thresholds before it
+recognises — `prepareForOcr` converts to luminance and stretches the 5th–95th percentile, which
+pulls those apart and leaves an already-black-on-white page untouched. `PSM 3` now leads: a card
+grid with a gauge and a nav bar is not the uniform block `PSM 6` assumes.
+
+**A profile per battery**, at the product owner's direction. The packs do not ship with the same
+app and the apps agree on nothing, so a battery records which one it uses: `BMS_PROFILES` in the
+driver app owns the label spellings, layout rule and segmentation; `batteries.bms_profile`
+(migration 0008 — TEXT and unconstrained, so a new profile needs no migration) records the choice;
+the admin fleet screen has a picker. `NULL` means `auto` — every label, both layouts, both modes —
+which works but is the slowest and least certain path.
+
+**One more bug, caught by the new tests rather than in production:** with three labelled values on
+one line (`MOS: 36.9℃  T1: 33.7℃  T2: 33.6℃`) the number search started at the beginning of the
+cell, so T1 read 36.9. It now cuts at the label and looks forward, then backward for the RTL case —
+and it cannot simply delete the label first, because with spaces stripped «t1» and «33.7» fuse into
+`t133.7`.
+
+Also shipped: **«ما قرأه النظام»**, a collapsed disclosure under a failed read showing the text the
+reader actually produced. Any future report of "it didn't fill" now arrives as a diagnosis.
+
+**Honest status:** this is the third round on the BMS reader, and on-device OCR of a coloured,
+right-to-left, card-grid phone UI is at the hard end. Manual entry of all eight figures works and
+the screenshot is the evidence either way — which is exactly what SRS D-5 guarantees.
+
+---
+
 ## 2026-07-23 (latest) — a driver could never finish a shift
 
 **309 domain + 246 API + 15 driver tests green, 6 guards green, all three projects redeployed.**
