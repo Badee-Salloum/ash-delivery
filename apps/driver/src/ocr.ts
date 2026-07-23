@@ -143,7 +143,8 @@ export interface OcrLine {
   /** The line's own box. `y` is what lets a label be paired with the value ABOVE it. */
   y0: number
   y1: number
-  words: Array<{ text: string; x0: number; x1: number }>
+  /** Word boxes: `x` for the column a caption sits under, `y` for how big the glyphs are. */
+  words: Array<{ text: string; x0: number; x1: number; y0: number; y1: number }>
 }
 
 /**
@@ -177,6 +178,8 @@ function linesOf(data: { text?: string; blocks?: unknown }): OcrLine[] {
             text: w.text ?? '',
             x0: w.bbox?.x0 ?? 0,
             x1: w.bbox?.x1 ?? 0,
+            y0: w.bbox?.y0 ?? line.bbox?.y0 ?? 0,
+            y1: w.bbox?.y1 ?? line.bbox?.y1 ?? 0,
           })),
         })
       }
@@ -496,6 +499,30 @@ const normalise = (s: string): string =>
     .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
 
 /**
+ * Fold the characters OCR reliably confuses, so a label still matches when it is misread.
+ *
+ * From a real phone: of «MOS: 36.9℃  T1: 33.7℃  T2: 33.6℃» only **T2** was found. `2` is an
+ * unambiguous glyph; `1` is the most confused character there is (`l`, `I`, `|`) and `O`/`0` is
+ * the second. So `T1` came back as `TI` and `MOS` as `M0S`, and neither matched a label spelled
+ * with the digit.
+ *
+ * Applied ONLY when testing whether a label is present. The mapping is one character to one
+ * character, so an index found in the folded string still points at the same place in the
+ * original — which is what lets the number be extracted from the untouched text.
+ */
+const CONFUSABLE: Readonly<Record<string, string>> = {
+  '0': 'o',
+  '1': 'l',
+  i: 'l',
+  '|': 'l',
+  '!': 'l',
+  '5': 's',
+  '8': 'b',
+}
+
+const fold = (s: string): string => s.replace(/[01i|!58]/g, (c) => CONFUSABLE[c] ?? c)
+
+/**
  * The number belonging to `label` inside `cell`.
  *
  * Searching the whole cell from the start breaks the moment one line carries several labelled
@@ -507,12 +534,15 @@ const normalise = (s: string): string =>
  * Arabic layout, where the value precedes its caption).
  */
 const numberForLabel = (cell: string, label: string): number | null => {
-  const at = cell.indexOf(label)
+  const at = fold(cell).indexOf(fold(label))
   if (at < 0) return null
   const forward = numberIn(cell.slice(at + label.length))
   if (forward !== null) return forward
   return lastNumberIn(cell.slice(0, at))
 }
+
+/** Does this cell mention the label, allowing for the glyphs OCR confuses? */
+const hasLabel = (cell: string, label: string): boolean => fold(cell).includes(fold(label))
 
 const lastNumberIn = (s: string): number | null => {
   const normalised = s.replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660)).replace(/,/g, '')
@@ -663,7 +693,7 @@ export function parseBms(input: readonly OcrLine[] | string, profile: BmsProfile
         const flat = normalise(cell)
         for (const field of profile.fields) {
           if (out[field.key] !== null) continue
-          const label = field.labels.find((l) => flat.includes(l))
+          const label = field.labels.find((l) => hasLabel(flat, l))
           if (label === undefined) continue
         // Take the number from what is LEFT after removing the label. Several labels contain a
         // digit of their own — «Battery T2», «T1» — and reading the first number in the raw cell
@@ -703,8 +733,8 @@ export function parseBms(input: readonly OcrLine[] | string, profile: BmsProfile
     if (pack !== undefined) out.packMillivolts = Math.round(pack * 1000)
   }
 
-  // An unlabelled percentage is still worth having: both apps show exactly one large "100%", and
-  // it is always the state of charge.
+  // An unlabelled percentage is still worth having: both apps show exactly one "100%", and it is
+  // always the state of charge.
   if (out.percent === null) {
     const pct = text.match(/(\d{1,3})\s*%/)
     if (pct) {
@@ -713,7 +743,43 @@ export function parseBms(input: readonly OcrLine[] | string, profile: BmsProfile
     }
   }
 
+  // Last resort, and the one that matters most: the charge is the only field the shift gate
+  // actually requires, and on both apps it is the HEADLINE number — a big figure in a ring, with
+  // the «%» a small superscript that OCR often drops, which is exactly how a phone came back with
+  // voltage, cycles and a temperature but no charge. Size is the signal the layout cannot hide.
+  if (out.percent === null) {
+    const gauge = biggestPercentage(lines)
+    if (gauge !== null) out.percent = gauge
+  }
+
   return out
+}
+
+/**
+ * The state of charge, found by how big it is printed.
+ *
+ * Constrained hard, because "the biggest number" is a blunt instrument: a WHOLE number 0–100 (a
+ * charge is never written 81.48, which rules out the pack voltage), and printed at least 1.6× the
+ * median glyph height on the page, which rules out every figure sitting in an ordinary card.
+ */
+function biggestPercentage(lines: readonly OcrLine[]): number | null {
+  const words = lines.flatMap((l) => l.words)
+  const heights = words.map((w) => w.y1 - w.y0).filter((h) => h > 0).sort((a, b) => a - b)
+  if (heights.length < 4) return null
+  const median = heights[Math.floor(heights.length / 2)]!
+
+  let best: { value: number; height: number } | null = null
+  for (const word of words) {
+    const height = word.y1 - word.y0
+    if (height < median * 1.6) continue
+    // A whole number only: `100`, `85`, and optionally the % the recogniser may have caught.
+    const match = /^(\d{1,3})%?$/.exec(normalise(word.text))
+    if (!match) continue
+    const value = Number(match[1])
+    if (value < 0 || value > 100) continue
+    if (!best || height > best.height) best = { value, height }
+  }
+  return best?.value ?? null
 }
 
 /**
@@ -725,7 +791,7 @@ export function parseBms(input: readonly OcrLine[] | string, profile: BmsProfile
  */
 function valueNearLabel(lines: readonly OcrLine[], labels: readonly string[]): number | null {
   for (const [index, line] of lines.entries()) {
-    const label = labels.find((l) => normalise(line.text).includes(l))
+    const label = labels.find((l) => hasLabel(normalise(line.text), l))
     if (label === undefined) continue
 
     // Where the label sits horizontally. With no word boxes the whole line is the span, which
@@ -749,7 +815,7 @@ function valueNearLabel(lines: readonly OcrLine[], labels: readonly string[]): n
 
 /** The x-range the label occupies, or null when the line carries no word boxes. */
 function spanOfLabel(line: OcrLine, label: string): { x0: number; x1: number } | null {
-  const hits = line.words.filter((w) => label.includes(normalise(w.text)) && normalise(w.text) !== '')
+  const hits = line.words.filter((w) => normalise(w.text) !== '' && fold(label).includes(fold(normalise(w.text))))
   if (hits.length === 0) return null
   return { x0: Math.min(...hits.map((w) => w.x0)), x1: Math.max(...hits.map((w) => w.x1)) }
 }

@@ -143,9 +143,9 @@ describe('the dashboard reader still works, and no longer eats a matching odomet
  * never run once. These tests exercise the shape the recogniser really returns.
  */
 let nextY = 0
-const line = (text: string, words: Array<[string, number, number]> = [], y?: number): OcrLine => {
+const line = (text: string, words: Array<[string, number, number]> = [], y?: number, h = 30): OcrLine => {
   const y0 = y ?? (nextY += 40)
-  return { text, y0, y1: y0 + 30, words: words.map(([w, x0, x1]) => ({ text: w, x0, x1 })) }
+  return { text, y0, y1: y0 + h, words: words.map(([w, x0, x1]) => ({ text: w, x0, x1, y0, y1: y0 + h })) }
 }
 
 describe('lines from the recogniser, not a split of the flat text', () => {
@@ -252,5 +252,80 @@ describe('a profile picks the strategy for its app', () => {
     expect(profileById(null).id).toBe('auto')
     expect(profileById('not-a-profile').id).toBe('auto')
     expect(parseBms(inline, profileById(null)).cycleCount).toBe(8)
+  })
+})
+
+/**
+ * The misreads a real phone actually produced.
+ *
+ * Of «MOS: 36.9℃  T1: 33.7℃  T2: 33.6℃» only **T2** came back. `2` is an unambiguous glyph; `1` is
+ * the most confused character in OCR (`l`, `I`, `|`) and `O`/`0` is the second — so `T1` arrived as
+ * `TI` and `MOS` as `M0S`, and neither matched a label spelled with a digit.
+ */
+describe('labels survive the glyphs OCR confuses', () => {
+  it('reads T1 when the 1 came back as a letter I', () => {
+    expect(parseBms([line('TI: 33.7℃')]).t1Dc).toBe(337)
+    expect(parseBms([line('Tl: 33.7℃')]).t1Dc).toBe(337)
+    expect(parseBms([line('T|: 33.7℃')]).t1Dc).toBe(337)
+  })
+
+  it('reads MOS when the O came back as a zero', () => {
+    expect(parseBms([line('M0S: 36.9℃')]).mosTempDc).toBe(369)
+  })
+
+  it('still reads the ones that were never ambiguous', () => {
+    expect(parseBms([line('T2: 33.6℃')]).t2Dc).toBe(336)
+  })
+
+  it('reads the whole row the phone half-missed', () => {
+    const row = line('M0S: 36.9℃ TI: 33.7℃ T2: 33.6℃', [
+      ['M0S:', 40, 110], ['36.9℃', 115, 210],
+      ['TI:', 300, 340], ['33.7℃', 345, 440],
+      ['T2:', 530, 570], ['33.6℃', 575, 670],
+    ], 800)
+    const r = parseBms([row])
+    expect(r.mosTempDc).toBe(369)
+    expect(r.t1Dc).toBe(337)
+    expect(r.t2Dc).toBe(336)
+  })
+})
+
+/**
+ * The charge is the only field the BR5 gate actually requires, and it is the one the phone missed:
+ * a big number in a ring whose «%» is a small superscript the recogniser drops. Size is the signal
+ * that survives when the symbol and the Arabic caption do not.
+ */
+describe('the charge gauge, found by how big it is printed', () => {
+  const page = (gaugeText: string) => [
+    line(gaugeText, [[gaugeText, 100, 260]], 200, 96),
+    line('81.48V 0A 0.00W 1', [
+      ['81.48V', 40, 150], ['0A', 250, 300], ['0.00W', 420, 520], ['1', 640, 660],
+    ], 600, 24),
+    line('إجمالي الجهد التيار الطاقة الدورات', [
+      ['إجمالي', 40, 100], ['الجهد', 105, 155], ['التيار', 245, 305], ['الطاقة', 420, 490], ['الدورات', 620, 700],
+    ], 640, 24),
+  ]
+
+  it('reads the gauge even when the % was never recognised', () => {
+    expect(parseBms(page('100')).percent).toBe(100)
+  })
+
+  it('reads it when the % did come through', () => {
+    expect(parseBms(page('85%')).percent).toBe(85)
+  })
+
+  it('does not mistake the pack voltage for a charge', () => {
+    // 81.48 is ≤ 100 and would pass a naive "biggest number" rule. A charge is a whole number.
+    expect(parseBms(page('100')).packMillivolts).toBe(81_480)
+    expect(parseBms(page('100')).percent).not.toBe(81)
+  })
+
+  it('does not promote an ordinary card number just because nothing bigger exists', () => {
+    // Every word the same size ⇒ no headline ⇒ no guess. The driver types it, which is honest.
+    const flat = [
+      line('81.48V 0A 0.00W 1', [['81.48V', 40, 150], ['0A', 250, 300], ['0.00W', 420, 520], ['1', 640, 660]], 600, 24),
+      line('إجمالي الجهد التيار الطاقة الدورات', [['إجمالي', 40, 100], ['الجهد', 105, 155], ['التيار', 245, 305], ['الطاقة', 420, 490], ['الدورات', 620, 700]], 640, 24),
+    ]
+    expect(parseBms(flat).percent).toBeNull()
   })
 })
