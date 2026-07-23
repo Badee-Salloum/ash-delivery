@@ -2,6 +2,11 @@ import type {
   AssignmentRecord,
   AssignmentRepo,
   AuditFilter,
+  BatteryReadingRecord,
+  BatteryReadingRepo,
+  BatteryRecord,
+  GovernorateRecord,
+  VehicleTypeRecord,
   AuditRecord,
   AuditRepo,
   BranchRecord,
@@ -197,6 +202,29 @@ export class MemoryShiftRepo implements ShiftRepo {
   }
   async delete(id: string): Promise<void> {
     this.rows.delete(id)
+  }
+}
+
+/**
+ * Per-pack BMS readings (SRS §L seam).
+ *
+ * Keyed exactly like the table's UNIQUE (shift, battery, package): a re-upload after a retake
+ * CORRECTS the reading rather than adding a second one, which is what stops a driver stacking
+ * readings until one of them looks right.
+ */
+export class MemoryBatteryReadingRepo implements BatteryReadingRepo {
+  readonly rows = new Map<string, BatteryReadingRecord>()
+  private key(r: Pick<BatteryReadingRecord, 'shiftId' | 'batteryId' | 'package'>): string {
+    return `${r.shiftId}|${r.batteryId}|${r.package}`
+  }
+  async upsert(reading: BatteryReadingRecord): Promise<void> {
+    this.rows.set(this.key(reading), { ...reading })
+  }
+  async listByShift(shiftId: string): Promise<BatteryReadingRecord[]> {
+    return [...this.rows.values()]
+      .filter((r) => r.shiftId === shiftId)
+      .sort((a, b) => a.package.localeCompare(b.package) || a.slotNo - b.slotNo)
+      .map((r) => ({ ...r }))
   }
 }
 
@@ -478,6 +506,149 @@ export class MemoryDirectoryRepo implements DirectoryRepo {
     this.vehicles.set(vehicle.id, { ...vehicle })
   }
 
+  // ── Geography and the vehicle-numbering scheme ──────────────────────────────────────────
+  readonly governorates = new Map<string, GovernorateRecord>()
+  readonly vehicleTypes = new Map<string, VehicleTypeRecord>()
+
+  async listGovernorates(): Promise<GovernorateRecord[]> {
+    return [...this.governorates.values()].sort((a, b) => a.no - b.no).map((g) => ({ ...g }))
+  }
+  async createGovernorate(governorate: GovernorateRecord): Promise<void> {
+    this.assertFreeNo(this.governorates, governorate, 'governorate')
+    this.governorates.set(governorate.id, { ...governorate })
+  }
+  async updateGovernorate(governorate: GovernorateRecord): Promise<void> {
+    this.assertFreeNo(this.governorates, governorate, 'governorate')
+    this.governorates.set(governorate.id, { ...governorate })
+  }
+  async createBranch(branch: BranchRecord): Promise<void> {
+    this.assertBranchNumberFree(branch)
+    this.branches.set(branch.id, { ...branch })
+  }
+  async updateBranch(branch: BranchRecord): Promise<void> {
+    this.assertBranchNumberFree(branch)
+    this.branches.set(branch.id, { ...branch })
+  }
+
+  /** Mirrors the schema's UNIQUE (governorate_id, branch_no): branch 1 of Damascus is one place. */
+  private assertBranchNumberFree(branch: BranchRecord): void {
+    for (const existing of this.branches.values()) {
+      if (existing.id === branch.id) continue
+      if (existing.governorateId === branch.governorateId && existing.branchNo === branch.branchNo) {
+        throw Object.assign(new Error(`branch number ${branch.branchNo} is taken in that governorate`), {
+          code: 'DUPLICATE_CODE',
+        })
+      }
+      if (existing.code === branch.code) {
+        throw Object.assign(new Error(`branch code ${branch.code} is taken`), { code: 'DUPLICATE_CODE' })
+      }
+    }
+  }
+
+  async listVehicleTypes(): Promise<VehicleTypeRecord[]> {
+    return [...this.vehicleTypes.values()].sort((a, b) => a.typeNo - b.typeNo).map((t) => ({ ...t }))
+  }
+  async createVehicleType(type: VehicleTypeRecord): Promise<void> {
+    for (const t of this.vehicleTypes.values()) {
+      if (t.id !== type.id && (t.typeNo === type.typeNo || t.code === type.code)) {
+        throw Object.assign(new Error(`duplicate vehicle type ${type.code}/${type.typeNo}`), { code: 'DUPLICATE_CODE' })
+      }
+    }
+    this.vehicleTypes.set(type.id, { ...type })
+  }
+
+  /**
+   * Renumbering a type restates every one of its vehicles' codes, here in one step because the
+   * Postgres adapter does it in one transaction. Doing only half of it would leave the stored
+   * codes quietly disagreeing with the scheme that produced them.
+   */
+  async updateVehicleType(
+    type: VehicleTypeRecord,
+    format: (v: { governorateNo: number; branchNo: number; typeNo: number; machineNo: number }) => string,
+  ): Promise<void> {
+    for (const t of this.vehicleTypes.values()) {
+      if (t.id !== type.id && t.typeNo === type.typeNo) {
+        throw Object.assign(new Error(`vehicle type number ${type.typeNo} is taken`), { code: 'DUPLICATE_CODE' })
+      }
+    }
+    this.vehicleTypes.set(type.id, { ...type })
+
+    for (const vehicle of this.vehicles.values()) {
+      if (vehicle.vehicleTypeId !== type.id) continue
+      const branch = this.branches.get(vehicle.branchId)
+      const governorate = branch ? this.governorates.get(branch.governorateId) : undefined
+      if (!branch || !governorate) continue
+      this.vehicles.set(vehicle.id, {
+        ...vehicle,
+        code: format({
+          governorateNo: governorate.no,
+          branchNo: branch.branchNo,
+          typeNo: type.typeNo,
+          machineNo: vehicle.machineNo,
+        }),
+      })
+    }
+  }
+
+  private assertFreeNo(
+    map: Map<string, { id: string; no: number }>,
+    row: { id: string; no: number },
+    what: string,
+  ): void {
+    for (const existing of map.values()) {
+      if (existing.id !== row.id && existing.no === row.no) {
+        throw Object.assign(new Error(`${what} number ${row.no} is taken`), { code: 'DUPLICATE_CODE' })
+      }
+    }
+  }
+
+  // ── Batteries (SRS §L seam) ─────────────────────────────────────────────────────────────
+  readonly batteries = new Map<string, BatteryRecord>()
+
+  async listBatteries(branchId: string): Promise<BatteryRecord[]> {
+    return [...this.batteries.values()].filter((b) => b.branchId === branchId).map((b) => ({ ...b }))
+  }
+  async listBatteriesForVehicle(vehicleId: string): Promise<BatteryRecord[]> {
+    return [...this.batteries.values()]
+      .filter((b) => b.vehicleId === vehicleId && b.active)
+      .sort((a, b) => (a.slotNo ?? 0) - (b.slotNo ?? 0))
+      .map((b) => ({ ...b }))
+  }
+  async battery(id: string): Promise<BatteryRecord | null> {
+    const found = this.batteries.get(id)
+    return found ? { ...found } : null
+  }
+  async createBattery(battery: BatteryRecord): Promise<void> {
+    this.assertBatteryPlacement(battery)
+    this.batteries.set(battery.id, { ...battery })
+  }
+  async updateBattery(battery: BatteryRecord): Promise<void> {
+    this.assertBatteryPlacement(battery)
+    this.batteries.set(battery.id, { ...battery })
+  }
+
+  /** Mirrors the schema: fitted means BOTH vehicle and slot, and one pack per slot. */
+  private assertBatteryPlacement(battery: BatteryRecord): void {
+    if ((battery.vehicleId === null) !== (battery.slotNo === null)) {
+      throw Object.assign(new Error('a battery is fitted to a slot on a bike, or to neither'), {
+        code: 'BATTERY_HALF_FITTED',
+      })
+    }
+    for (const existing of this.batteries.values()) {
+      if (existing.id === battery.id) continue
+      if (battery.serialNo !== null && existing.serialNo === battery.serialNo) {
+        throw Object.assign(new Error(`duplicate battery serial ${battery.serialNo}`), { code: 'DUPLICATE_CODE' })
+      }
+      if (
+        battery.vehicleId !== null &&
+        existing.vehicleId === battery.vehicleId &&
+        existing.slotNo === battery.slotNo
+      ) {
+        throw Object.assign(new Error(`slot ${battery.slotNo} is already taken`), { code: 'BATTERY_SLOT_TAKEN' })
+      }
+    }
+  }
+
   async createDocument(doc: DocumentRecord): Promise<void> {
     this.documents.set(doc.id, { ...doc })
   }
@@ -514,6 +685,7 @@ export interface MemoryDeps extends Deps {
   audit: MemoryAuditRepo
   directory: MemoryDirectoryRepo
   assignments: MemoryAssignmentRepo
+  batteryReadings: MemoryBatteryReadingRepo
 }
 
 export function createMemoryDeps(nowMs: number): MemoryDeps {
@@ -527,6 +699,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     sessions: new MemorySessionRepo(),
     shifts: new MemoryShiftRepo(media),
     assignments: new MemoryAssignmentRepo(),
+    batteryReadings: new MemoryBatteryReadingRepo(),
     orders: new MemoryOrderRepo(),
     ledger,
     expenses: new MemoryExpenseRepo(),

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { Deps, EvidencePackage, MediaRecord } from '@ash/contracts'
-import { REQUIRED_END_SLOTS, REQUIRED_START_SLOTS } from '@ash/domain'
+import { ALL_END_SLOTS, ALL_START_SLOTS } from '@ash/domain'
 import { ServiceError } from './shifts.service.ts'
 
 /**
@@ -21,9 +21,17 @@ import { ServiceError } from './shifts.service.ts'
 export const MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 export const TARGET_COMPRESSED_BYTES = 400 * 1024
 
+/**
+ * Every slot an upload MAY carry — deliberately wider than what a given shift REQUIRES.
+ *
+ * These were the same list, which worked only while every bike was identical. A one-pack bike
+ * does not require `bms_2`, but the vocabulary must still contain it, or a two-pack bike's second
+ * screenshot would be rejected as an unknown slot. Requirement is per-shift and lives in the
+ * domain gate; acceptance is the vocabulary, and lives here.
+ */
 const ALL_SLOTS: Record<EvidencePackage, readonly string[]> = {
-  start: REQUIRED_START_SLOTS,
-  end: REQUIRED_END_SLOTS,
+  start: ALL_START_SLOTS,
+  end: ALL_END_SLOTS,
 }
 
 /** Magic bytes. The declared Content-Type is a client assertion and is not trusted. */

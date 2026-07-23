@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BRANCH, type Harness, OTHER_BRANCH, makeHarness } from './harness.ts'
+import { BRANCH, type Harness, OTHER_BRANCH, VEHICLE_TYPE, makeHarness } from './harness.ts'
 
 /**
  * Organisation-wide roles and the branch they are looking at.
@@ -172,7 +172,7 @@ describe('organisation-wide writes name their branch too', () => {
       method: 'POST',
       url: `/vehicles?branchId=${BRANCH}`,
       headers: { cookie: h.cookie(gm) },
-      payload: { code: 'VEH-Q', vehicleTypeId: 'e_motorbike' },
+      payload: { vehicleTypeId: VEHICLE_TYPE },
     })
     expect(res.statusCode, res.body).toBe(201)
     expect(res.json().branchId).toBe(BRANCH)

@@ -13,6 +13,7 @@ import {
   PgSettingsRepo,
   PgTierRepo,
   PgAssignmentRepo,
+  PgBatteryReadingRepo,
   PgShiftRepo,
   PgWeekLockRepo,
 } from '../src/repos-shift.ts'
@@ -55,13 +56,19 @@ if (!DATABASE_URL) {
       // constraints on every run instead of a freshly-empty database.
       await pool.query(`
         TRUNCATE journal_lines, journal_entries, shift_orders, shift_media, media, float_tranches, expenses, expense_categories, settings, cash_counts, cash_count_lines, tier_rules, notifications,
+                 shift_battery_readings, batteries,
                  shifts, funds, fx_days, week_locks, audit_log, sessions, drivers, vehicles,
-                 vehicle_types, users, branches
+                 vehicle_types, users, branches, governorates
         RESTART IDENTITY CASCADE
       `)
 
       await pool.query(
-        `INSERT INTO branches (id, code, name_ar, name_en) VALUES ($1, 'DAM', 'دمشق', 'Damascus')`,
+        `INSERT INTO governorates (id, no, name_ar, name_en)
+         VALUES ('99999999-9999-9999-9999-999999999999', 1, 'دمشق', 'Damascus')`,
+      )
+      await pool.query(
+        `INSERT INTO branches (id, code, name_ar, name_en, governorate_id, branch_no)
+         VALUES ($1, 'DAM', 'دمشق', 'Damascus', '99999999-9999-9999-9999-999999999999', 1)`,
         [BRANCH],
       )
       await pool.query(
@@ -74,8 +81,8 @@ if (!DATABASE_URL) {
         [USER, BRANCH],
       )
       await pool.query(
-        `INSERT INTO vehicle_types (id, code, name_ar, name_en)
-         VALUES ('66666666-6666-6666-6666-666666666666','e_motorbike','دراجة','E-Motorbike')`,
+        `INSERT INTO vehicle_types (id, code, name_ar, name_en, type_no)
+         VALUES ('66666666-6666-6666-6666-666666666666','e_motorbike','دراجة','E-Motorbike', 1)`,
       )
       await pool.query(
         `INSERT INTO drivers (id, branch_id, code, full_name_ar)
@@ -83,8 +90,8 @@ if (!DATABASE_URL) {
         [BRANCH],
       )
       await pool.query(
-        `INSERT INTO vehicles (id, branch_id, vehicle_type_id, code)
-         VALUES ('88888888-8888-8888-8888-888888888888', $1, '66666666-6666-6666-6666-666666666666','VEH-C')`,
+        `INSERT INTO vehicles (id, branch_id, vehicle_type_id, code, machine_no)
+         VALUES ('88888888-8888-8888-8888-888888888888', $1, '66666666-6666-6666-6666-666666666666','1-1-1-1', 1)`,
         [BRANCH],
       )
       await pool.query(
@@ -117,6 +124,7 @@ if (!DATABASE_URL) {
         users: new PgUserRepo(pool),
         sessions: new PgSessionRepo(pool),
         shifts: new PgShiftRepo(pool),
+        batteryReadings: new PgBatteryReadingRepo(pool),
         assignments: new PgAssignmentRepo(pool),
         orders: new PgOrderRepo(pool),
         ledger: new PgLedgerRepo(pool),

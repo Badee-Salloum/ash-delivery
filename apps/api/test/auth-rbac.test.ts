@@ -255,7 +255,7 @@ describe('assignment rules (SRS B-3)', () => {
 
   it('refuses a vehicle that is not ready', async () => {
     h.deps.directory.vehicles.set(VEHICLE_ID, {
-      id: VEHICLE_ID, branchId: 'branch-damascus', vehicleTypeId: 'e_motorbike',
+      id: VEHICLE_ID, branchId: 'branch-damascus', vehicleTypeId: 'e_motorbike', machineNo: 9, plateNo: null,
       code: 'VEH-1', state: 'maintenance', active: true,
     })
     const driver = await h.loginAs('driver1')

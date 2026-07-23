@@ -14,6 +14,7 @@ import {
   serializeMoney,
   setFxRequest,
   startPackageRequest,
+  putBatteryReadingsRequest,
 } from '@ash/contracts'
 import { addDays, checkWeekClose, dayOfWeek, minor, sum, weekClosedOn, weekStartFor } from '@ash/domain'
 import {
@@ -356,6 +357,54 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     })
     return { ok: true, id: shift.id }
   })
+
+  /**
+   * Record what the driver read off each battery pack's BMS app.
+   *
+   * Separate from the start/end package because the packs are separate assets: one screenshot per
+   * pack, corrected independently, and a retake replaces that pack's reading rather than adding a
+   * second one. `ocrRaw` carries what the OCR produced before the driver touched anything, which
+   * is what makes SRS D-3's "the manual edit AND its difference from the OCR reading" recoverable
+   * later rather than only at the moment of typing.
+   */
+  app.put(
+    '/shifts/:id/battery-readings',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const body = putBatteryReadingsRequest.parse(req.body)
+      const shift = await deps.shifts.findById(id)
+      if (!shift) throw new ServiceError(404, 'shift_not_found')
+
+      // Only packs actually fitted to THIS bike. Without this a driver could attach a reading
+      // from a healthy pack on another machine and satisfy his own bike's gate with it.
+      const fitted = await deps.directory.listBatteriesForVehicle(shift.vehicleId)
+      for (const reading of body.readings) {
+        const battery = fitted.find((b) => b.id === reading.batteryId)
+        if (!battery) {
+          throw new ServiceError(422, 'battery_not_on_this_vehicle', { batteryId: reading.batteryId })
+        }
+        await deps.batteryReadings.upsert({
+          shiftId: shift.id,
+          batteryId: battery.id,
+          package: body.package,
+          slotNo: battery.slotNo ?? 1,
+          percent: reading.percent,
+          packMillivolts: reading.packMillivolts,
+          cycleCount: reading.cycleCount,
+          remainCapacityDah: reading.remainCapacityDah,
+          fullCapacityDah: reading.fullCapacityDah,
+          mosTempDc: reading.mosTempDc,
+          t1Dc: reading.t1Dc,
+          t2Dc: reading.t2Dc,
+          mediaId: null,
+          source: reading.source,
+          ocrRaw: reading.ocrRaw ?? null,
+        })
+      }
+      return { readings: await deps.batteryReadings.listByShift(shift.id) }
+    },
+  )
 
   app.put(
     '/shifts/:id/start-package',

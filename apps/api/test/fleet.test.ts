@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BRANCH, DRIVER_ID, type Harness, OTHER_BRANCH, VEHICLE_ID, makeHarness } from './harness.ts'
+import { BRANCH, DRIVER_ID, type Harness, OTHER_BRANCH, VEHICLE_ID, VEHICLE_TYPE, makeHarness } from './harness.ts'
 
 /**
  * Fleet management (SRS §B). Without these routes the platform cannot be used at all: there
@@ -100,11 +100,41 @@ describe('drivers (B-1)', () => {
 })
 
 describe('vehicles (B-2)', () => {
-  it('creates a vehicle in the ready state', async () => {
+  it('creates a vehicle in the ready state, numbered from where it sits', async () => {
     const manager = await h.loginAs('manager')
-    const res = await post(manager, '/vehicles', { code: 'VEH-9', vehicleTypeId: 'e_motorbike' })
+    const res = await post(manager, '/vehicles', { vehicleTypeId: VEHICLE_TYPE })
     expect(res.statusCode, res.body).toBe(201)
     expect(res.json().state).toBe('ready')
+    // Damascus (1), branch 1, e-motorbike (1) — and machine 3, the lowest free after the two
+    // the harness seeds. The caller never sends a code: it is derived, so a vehicle whose
+    // printed number disagrees with its branch cannot be created.
+    expect(res.json().code).toBe('1-1-1-3')
+    expect(res.json().machineNo).toBe(3)
+  })
+
+  it('refuses an unknown vehicle type by name instead of 500ing', async () => {
+    // This is the production bug: the console sent the literal string 'e_motorbike' for a uuid
+    // foreign key, Postgres raised 22P02, and the UI swallowed the 500 and reported success.
+    const manager = await h.loginAs('manager')
+    const res = await post(manager, '/vehicles', { vehicleTypeId: 'e_motorbike' })
+    expect(res.statusCode).toBe(404)
+    expect(res.json().error).toBe('vehicle_type_not_found')
+  })
+
+  it('previews the next number before the bike exists', async () => {
+    const manager = await h.loginAs('manager')
+    const res = await get(manager, `/vehicles/next-number?vehicleTypeId=${VEHICLE_TYPE}`)
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json()).toEqual({ code: '1-1-1-3', machineNo: 3 })
+  })
+
+  it('an explicit machine number is honoured, and a clash is refused', async () => {
+    const manager = await h.loginAs('manager')
+    expect((await post(manager, '/vehicles', { vehicleTypeId: VEHICLE_TYPE, machineNo: 7 })).json().code).toBe('1-1-1-7')
+
+    const clash = await post(manager, '/vehicles', { vehicleTypeId: VEHICLE_TYPE, machineNo: 7 })
+    expect(clash.statusCode).toBe(409)
+    expect(clash.json().error).toBe('duplicate_vehicle_code')
   })
 
   it('honours the vehicle state machine', async () => {

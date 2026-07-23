@@ -2,8 +2,13 @@ import type {
   AssignmentRecord,
   AssignmentRepo,
   AttachedSlot,
+  BatteryReadingRecord,
+  BatteryReadingRepo,
+  BatteryRecord,
   BranchRecord,
   EvidencePackage,
+  GovernorateRecord,
+  VehicleTypeRecord,
   MediaRecord,
   MediaRepo,
   CashCountRecord,
@@ -293,15 +298,13 @@ export class PgDirectoryRepo implements DirectoryRepo {
 
   async listBranches(): Promise<BranchRecord[]> {
     const { rows } = await this.pool.query<Record<string, unknown>>('SELECT * FROM branches ORDER BY code')
-    return rows.map((r) => ({ id: String(r.id), code: String(r.code), nameAr: String(r.name_ar), nameEn: String(r.name_en) }))
+    return rows.map(toBranch)
   }
 
   async branch(id: string): Promise<BranchRecord | null> {
     const { rows } = await this.pool.query<Record<string, unknown>>('SELECT * FROM branches WHERE id = $1', [id])
     const r = rows[0]
-    return r
-      ? { id: String(r.id), code: String(r.code), nameAr: String(r.name_ar), nameEn: String(r.name_en) }
-      : null
+    return r ? toBranch(r) : null
   }
 
   async driver(id: string): Promise<DriverRecord | null> {
@@ -321,16 +324,7 @@ export class PgDirectoryRepo implements DirectoryRepo {
   async vehicle(id: string): Promise<VehicleRecord | null> {
     const { rows } = await this.pool.query<Record<string, unknown>>('SELECT * FROM vehicles WHERE id = $1', [id])
     const r = rows[0]
-    return r
-      ? {
-          id: String(r.id),
-          branchId: String(r.branch_id),
-          vehicleTypeId: String(r.vehicle_type_id),
-          code: String(r.code),
-          state: r.state as VehicleRecord['state'],
-          active: Boolean(r.active),
-        }
-      : null
+    return r ? toVehicle(r) : null
   }
 
   /**
@@ -412,8 +406,18 @@ export class PgDirectoryRepo implements DirectoryRepo {
   async createVehicle(vehicle: VehicleRecord): Promise<void> {
     try {
       await this.pool.query(
-        'INSERT INTO vehicles (id, branch_id, vehicle_type_id, code, state, active) VALUES ($1,$2,$3,$4,$5,$6)',
-        [vehicle.id, vehicle.branchId, vehicle.vehicleTypeId, vehicle.code, vehicle.state, vehicle.active],
+        `INSERT INTO vehicles (id, branch_id, vehicle_type_id, code, machine_no, plate_no, state, active)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [
+          vehicle.id,
+          vehicle.branchId,
+          vehicle.vehicleTypeId,
+          vehicle.code,
+          vehicle.machineNo,
+          vehicle.plateNo,
+          vehicle.state,
+          vehicle.active,
+        ],
       )
     } catch (err) {
       if (isPgError(err, PG.UNIQUE_VIOLATION)) {
@@ -429,6 +433,181 @@ export class PgDirectoryRepo implements DirectoryRepo {
       vehicle.state,
       vehicle.active,
     ])
+  }
+
+  // -- Geography and the vehicle-numbering scheme -----------------------------------------
+
+  async listGovernorates(): Promise<GovernorateRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>('SELECT * FROM governorates ORDER BY no')
+    return rows.map(toGovernorate)
+  }
+
+  async createGovernorate(g: GovernorateRecord): Promise<void> {
+    await this.uniqueOr(
+      () =>
+        this.pool.query('INSERT INTO governorates (id, no, name_ar, name_en, active) VALUES ($1,$2,$3,$4,$5)', [
+          g.id, g.no, g.nameAr, g.nameEn, g.active,
+        ]),
+      `governorate number ${g.no} is taken`,
+    )
+  }
+
+  async updateGovernorate(g: GovernorateRecord): Promise<void> {
+    await this.uniqueOr(
+      () =>
+        this.pool.query('UPDATE governorates SET no = $2, name_ar = $3, name_en = $4, active = $5 WHERE id = $1', [
+          g.id, g.no, g.nameAr, g.nameEn, g.active,
+        ]),
+      `governorate number ${g.no} is taken`,
+    )
+  }
+
+  async createBranch(b: BranchRecord): Promise<void> {
+    await this.uniqueOr(
+      () =>
+        this.pool.query(
+          'INSERT INTO branches (id, code, name_ar, name_en, governorate_id, branch_no) VALUES ($1,$2,$3,$4,$5,$6)',
+          [b.id, b.code, b.nameAr, b.nameEn, b.governorateId, b.branchNo],
+        ),
+      `branch ${b.code} or number ${b.branchNo} is taken`,
+    )
+  }
+
+  async updateBranch(b: BranchRecord): Promise<void> {
+    await this.uniqueOr(
+      () =>
+        this.pool.query(
+          'UPDATE branches SET name_ar = $2, name_en = $3, governorate_id = $4, branch_no = $5 WHERE id = $1',
+          [b.id, b.nameAr, b.nameEn, b.governorateId, b.branchNo],
+        ),
+      `branch number ${b.branchNo} is taken in that governorate`,
+    )
+  }
+
+  async listVehicleTypes(): Promise<VehicleTypeRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>('SELECT * FROM vehicle_types ORDER BY type_no')
+    return rows.map(toVehicleType)
+  }
+
+  async createVehicleType(t: VehicleTypeRecord): Promise<void> {
+    await this.uniqueOr(
+      () =>
+        this.pool.query(
+          'INSERT INTO vehicle_types (id, code, name_ar, name_en, type_no, active) VALUES ($1,$2,$3,$4,$5,$6)',
+          [t.id, t.code, t.nameAr, t.nameEn, t.typeNo, t.active],
+        ),
+      `vehicle type ${t.code} or number ${t.typeNo} is taken`,
+    )
+  }
+
+  /**
+   * Update a type and restate its vehicles' codes IN ONE TRANSACTION.
+   *
+   * The type number is the third segment of every one of its vehicles' printed numbers. Writing
+   * the new number without restating them would leave `vehicles.code` quietly disagreeing with
+   * the scheme that produced it -- and `code` is what gets typed into a search box and read
+   * aloud over a phone. The formatter is passed in rather than imported so the one true spelling
+   * stays in the pure domain and never leaks into SQL string concatenation.
+   */
+  async updateVehicleType(
+    t: VehicleTypeRecord,
+    format: (v: { governorateNo: number; branchNo: number; typeNo: number; machineNo: number }) => string,
+  ): Promise<void> {
+    await withTransaction(this.pool, {}, async (client) => {
+      try {
+        await client.query(
+          'UPDATE vehicle_types SET code = $2, name_ar = $3, name_en = $4, type_no = $5, active = $6 WHERE id = $1',
+          [t.id, t.code, t.nameAr, t.nameEn, t.typeNo, t.active],
+        )
+      } catch (err) {
+        if (isPgError(err, PG.UNIQUE_VIOLATION)) {
+          throw Object.assign(new Error(`vehicle type number ${t.typeNo} is taken`), { code: 'DUPLICATE_CODE' })
+        }
+        throw err
+      }
+
+      const { rows } = await client.query<Record<string, unknown>>(
+        `SELECT v.id, v.machine_no, b.branch_no, g.no AS governorate_no
+           FROM vehicles v
+           JOIN branches b     ON b.id = v.branch_id
+           JOIN governorates g ON g.id = b.governorate_id
+          WHERE v.vehicle_type_id = $1`,
+        [t.id],
+      )
+      for (const r of rows) {
+        await client.query('UPDATE vehicles SET code = $2 WHERE id = $1', [
+          String(r.id),
+          format({
+            governorateNo: Number(r.governorate_no),
+            branchNo: Number(r.branch_no),
+            typeNo: t.typeNo,
+            machineNo: Number(r.machine_no),
+          }),
+        ])
+      }
+    })
+  }
+
+  // -- Batteries (SRS section L seam) ------------------------------------------------------
+
+  async listBatteries(branchId: string): Promise<BatteryRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM batteries WHERE branch_id = $1 ORDER BY vehicle_id NULLS LAST, slot_no, serial_no',
+      [branchId],
+    )
+    return rows.map(toBattery)
+  }
+
+  /** The packs fitted to one bike, in slot order. Its LENGTH is that bike's battery count. */
+  async listBatteriesForVehicle(vehicleId: string): Promise<BatteryRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM batteries WHERE vehicle_id = $1 AND active ORDER BY slot_no',
+      [vehicleId],
+    )
+    return rows.map(toBattery)
+  }
+
+  async battery(id: string): Promise<BatteryRecord | null> {
+    const { rows } = await this.pool.query<Record<string, unknown>>('SELECT * FROM batteries WHERE id = $1', [id])
+    const r = rows[0]
+    return r ? toBattery(r) : null
+  }
+
+  async createBattery(b: BatteryRecord): Promise<void> {
+    await this.uniqueOr(
+      () =>
+        this.pool.query(
+          `INSERT INTO batteries (id, branch_id, serial_no, bms_mac, capacity_ah, vehicle_id, slot_no, state, active)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [b.id, b.branchId, b.serialNo, b.bmsMac, b.capacityAh, b.vehicleId, b.slotNo, b.state, b.active],
+        ),
+      'that battery serial, or that slot on that bike, is already taken',
+    )
+  }
+
+  async updateBattery(b: BatteryRecord): Promise<void> {
+    await this.uniqueOr(
+      () =>
+        this.pool.query(
+          `UPDATE batteries SET serial_no = $2, bms_mac = $3, capacity_ah = $4,
+                                vehicle_id = $5, slot_no = $6, state = $7, active = $8
+            WHERE id = $1`,
+          [b.id, b.serialNo, b.bmsMac, b.capacityAh, b.vehicleId, b.slotNo, b.state, b.active],
+        ),
+      'that battery serial, or that slot on that bike, is already taken',
+    )
+  }
+
+  /** Turns the schema's UNIQUE violations into the one code every route already handles. */
+  private async uniqueOr(run: () => Promise<unknown>, message: string): Promise<void> {
+    try {
+      await run()
+    } catch (err) {
+      if (isPgError(err, PG.UNIQUE_VIOLATION)) {
+        throw Object.assign(new Error(message), { code: 'DUPLICATE_CODE' })
+      }
+      throw err
+    }
   }
 
   async createDocument(doc: DocumentRecord): Promise<void> {
@@ -475,7 +654,47 @@ const toVehicle = (r: Record<string, unknown>): VehicleRecord => ({
   branchId: String(r.branch_id),
   vehicleTypeId: String(r.vehicle_type_id),
   code: String(r.code),
+  machineNo: Number(r.machine_no),
+  plateNo: (r.plate_no as string | null) ?? null,
   state: r.state as VehicleRecord['state'],
+  active: Boolean(r.active),
+})
+
+const toBranch = (r: Record<string, unknown>): BranchRecord => ({
+  id: String(r.id),
+  code: String(r.code),
+  nameAr: String(r.name_ar),
+  nameEn: String(r.name_en),
+  governorateId: String(r.governorate_id),
+  branchNo: Number(r.branch_no),
+})
+
+const toGovernorate = (r: Record<string, unknown>): GovernorateRecord => ({
+  id: String(r.id),
+  no: Number(r.no),
+  nameAr: String(r.name_ar),
+  nameEn: String(r.name_en),
+  active: Boolean(r.active),
+})
+
+const toVehicleType = (r: Record<string, unknown>): VehicleTypeRecord => ({
+  id: String(r.id),
+  code: String(r.code),
+  nameAr: String(r.name_ar),
+  nameEn: String(r.name_en),
+  typeNo: Number(r.type_no),
+  active: Boolean(r.active),
+})
+
+const toBattery = (r: Record<string, unknown>): BatteryRecord => ({
+  id: String(r.id),
+  branchId: String(r.branch_id),
+  serialNo: (r.serial_no as string | null) ?? null,
+  bmsMac: (r.bms_mac as string | null) ?? null,
+  capacityAh: Number(r.capacity_ah),
+  vehicleId: (r.vehicle_id as string | null) ?? null,
+  slotNo: r.slot_no === null || r.slot_no === undefined ? null : Number(r.slot_no),
+  state: r.state as BatteryRecord['state'],
   active: Boolean(r.active),
 })
 
@@ -992,3 +1211,75 @@ const toAssignment = (r: Record<string, unknown>): AssignmentRecord => ({
   shiftNo: Number(r.shift_no),
   createdBy: (r.created_by as string | null) ?? null,
 })
+
+
+/**
+ * Per-pack BMS readings (SRS section L seam).
+ *
+ * Keyed on the table's UNIQUE (shift, battery, package): a retake CORRECTS the reading in place
+ * rather than adding a second one, so a driver cannot stack readings until one of them looks
+ * right. The first OCR reading is preserved on conflict, because it is the baseline a manual
+ * correction is measured against -- overwriting it would erase the very delta SRS D-3 asks for.
+ */
+export class PgBatteryReadingRepo implements BatteryReadingRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async upsert(r: BatteryReadingRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO shift_battery_readings
+         (shift_id, battery_id, package, percent, pack_millivolts, cycle_count,
+          remain_capacity_dah, full_capacity_dah, mos_temp_dc, t1_dc, t2_dc, media_id, source, ocr_raw)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+       ON CONFLICT (shift_id, battery_id, package) DO UPDATE SET
+         percent = EXCLUDED.percent,
+         pack_millivolts = EXCLUDED.pack_millivolts,
+         cycle_count = EXCLUDED.cycle_count,
+         remain_capacity_dah = EXCLUDED.remain_capacity_dah,
+         full_capacity_dah = EXCLUDED.full_capacity_dah,
+         mos_temp_dc = EXCLUDED.mos_temp_dc,
+         t1_dc = EXCLUDED.t1_dc,
+         t2_dc = EXCLUDED.t2_dc,
+         media_id = EXCLUDED.media_id,
+         source = EXCLUDED.source,
+         ocr_raw = COALESCE(shift_battery_readings.ocr_raw, EXCLUDED.ocr_raw)`,
+      [
+        r.shiftId, r.batteryId, r.package, r.percent, r.packMillivolts, r.cycleCount,
+        r.remainCapacityDah, r.fullCapacityDah, r.mosTempDc, r.t1Dc, r.t2Dc, r.mediaId, r.source,
+        r.ocrRaw === null || r.ocrRaw === undefined ? null : JSON.stringify(r.ocrRaw),
+      ],
+    )
+  }
+
+  async listByShift(shiftId: string): Promise<BatteryReadingRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT r.*, b.slot_no
+         FROM shift_battery_readings r
+         JOIN batteries b ON b.id = r.battery_id
+        WHERE r.shift_id = $1
+        ORDER BY r.package, b.slot_no`,
+      [shiftId],
+    )
+    return rows.map((r) => ({
+      shiftId: String(r.shift_id),
+      batteryId: String(r.battery_id),
+      package: r.package as BatteryReadingRecord['package'],
+      slotNo: Number(r.slot_no ?? 1),
+      percent: numOrNull(r.percent),
+      packMillivolts: numOrNull(r.pack_millivolts),
+      cycleCount: numOrNull(r.cycle_count),
+      remainCapacityDah: numOrNull(r.remain_capacity_dah),
+      fullCapacityDah: numOrNull(r.full_capacity_dah),
+      mosTempDc: numOrNull(r.mos_temp_dc),
+      t1Dc: numOrNull(r.t1_dc),
+      t2Dc: numOrNull(r.t2_dc),
+      mediaId: (r.media_id as string | null) ?? null,
+      source: r.source as BatteryReadingRecord['source'],
+      ocrRaw: r.ocr_raw ?? null,
+    }))
+  }
+}
+
+const numOrNull = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v))

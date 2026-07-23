@@ -26,6 +26,9 @@ const MUST_AUDIT = [
   'funds', 'fx_days', 'week_locks', 'journal_entries', 'journal_lines',
   'cash_counts', 'expenses',
   'shifts', 'shift_orders', 'float_tranches', 'tier_rules',
+  // Renumbering a type restates the printed code of every vehicle of that type; a pack moving
+  // between bikes is an asset transfer; a corrected reading changes evidence already approved.
+  'vehicle_types', 'batteries', 'shift_battery_readings',
 ]
 
 /**
@@ -34,9 +37,9 @@ const MUST_AUDIT = [
  */
 const AUDIT_EXEMPT = {
   branches: 'near-static reference data; changes are rare and visible',
+  governorates: 'near-static reference data; the fourteen are fixed, only their numbers are editable',
   roles: 'reference data; the grants in role_permissions are what carry authority',
   permissions: 'reference data, defined in code',
-  vehicle_types: 'reference data',
   expense_categories: 'reference data',
   sessions: 'high churn; login/logout is covered by login_attempts',
   login_attempts: 'already an append-only audit record in its own right',

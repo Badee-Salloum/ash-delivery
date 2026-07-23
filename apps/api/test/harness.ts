@@ -9,6 +9,9 @@ export const OTHER_BRANCH = 'branch-aleppo'
 export const DRIVER_ID = 'driver-1'
 export const DRIVER2_ID = 'driver-2'
 export const VEHICLE_ID = 'vehicle-1'
+export const VEHICLE_TYPE = 'vtype-e-motorbike'
+export const GOV_DAMASCUS = 'gov-damascus'
+export const GOV_ALEPPO = 'gov-aleppo'
 
 /** 2026-07-21, 08:00 Damascus (UTC+3) — a Tuesday, mid-week, so week logic is unambiguous. */
 export const NOW_MS = Date.UTC(2026, 6, 21, 5, 0, 0)
@@ -42,23 +45,35 @@ export interface Harness {
 export async function makeHarness(opts: { splitGate?: 'advisory' | 'strict' } = {}): Promise<Harness> {
   const deps = createMemoryDeps(NOW_MS)
 
-  deps.directory.branches.set(BRANCH, { id: BRANCH, code: 'DAM', nameAr: 'دمشق', nameEn: 'Damascus' })
-  deps.directory.branches.set(OTHER_BRANCH, { id: OTHER_BRANCH, code: 'ALP', nameAr: 'حلب', nameEn: 'Aleppo' })
+  // Two governorates so a cross-governorate branch number can be exercised: Damascus branch 1 and
+  // Aleppo branch 1 are both legal, because branch numbers are unique WITHIN a governorate.
+  deps.directory.governorates.set(GOV_DAMASCUS, { id: GOV_DAMASCUS, no: 1, nameAr: 'دمشق', nameEn: 'Damascus', active: true })
+  deps.directory.governorates.set(GOV_ALEPPO, { id: GOV_ALEPPO, no: 11, nameAr: 'حلب', nameEn: 'Aleppo', active: true })
+  deps.directory.vehicleTypes.set(VEHICLE_TYPE, {
+    id: VEHICLE_TYPE, code: 'e_motorbike', nameAr: 'دراجة كهربائية', nameEn: 'Electric Motorbike',
+    typeNo: 1, active: true,
+  })
+  deps.directory.branches.set(BRANCH, { id: BRANCH, code: 'DAM', nameAr: 'دمشق', nameEn: 'Damascus', governorateId: GOV_DAMASCUS, branchNo: 1 })
+  deps.directory.branches.set(OTHER_BRANCH, { id: OTHER_BRANCH, code: 'ALP', nameAr: 'حلب', nameEn: 'Aleppo', governorateId: GOV_ALEPPO, branchNo: 1 })
   deps.directory.drivers.set(DRIVER_ID, { id: DRIVER_ID, branchId: BRANCH, code: 'DRV-1', fullNameAr: 'سائق ١', active: true })
   deps.directory.drivers.set(DRIVER2_ID, { id: DRIVER2_ID, branchId: BRANCH, code: 'DRV-2', fullNameAr: 'سائق ٢', active: true })
   deps.directory.vehicles.set(VEHICLE_ID, {
     id: VEHICLE_ID,
     branchId: BRANCH,
-    vehicleTypeId: 'e_motorbike',
-    code: 'VEH-1',
+    vehicleTypeId: VEHICLE_TYPE,
+    code: '1-1-1-1',
+    machineNo: 1,
+    plateNo: null,
     state: 'ready',
     active: true,
   })
   deps.directory.vehicles.set('vehicle-2', {
     id: 'vehicle-2',
     branchId: BRANCH,
-    vehicleTypeId: 'e_motorbike',
-    code: 'VEH-2',
+    vehicleTypeId: VEHICLE_TYPE,
+    code: '1-1-1-2',
+    machineNo: 2,
+    plateNo: null,
     state: 'ready',
     active: true,
   })

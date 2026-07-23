@@ -56,6 +56,42 @@ export const REQUIRED_END_SLOTS = ['dashboard', 'wallet', 'odometer', 'wallet_ze
 export type StartSlot = (typeof REQUIRED_START_SLOTS)[number]
 export type EndSlot = (typeof REQUIRED_END_SLOTS)[number]
 
+/** The most packs one bike can carry — mirrors the `slot_no BETWEEN 1 AND 2` CHECK in 0007. */
+export const MAX_BATTERY_SLOTS = 2
+
+/** The evidence slot for pack `n`'s BMS screenshot: `bms_1`, `bms_2`. */
+export const bmsSlot = (slotNo: number): string => `bms_${slotNo}`
+
+/**
+ * Required evidence, given how many battery packs are actually fitted to the bike.
+ *
+ * This used to be a fixed tuple, which silently assumed every bike is the same machine. A bike
+ * carrying two packs must produce two BMS screenshots or half its charge state is unevidenced —
+ * and the count is not a number anyone typed, it is how many packs the fleet says are fitted.
+ */
+export function requiredStartSlots(batterySlots: number): readonly string[] {
+  return [...REQUIRED_START_SLOTS, ...batterySlotNumbers(batterySlots).map(bmsSlot)]
+}
+
+export function requiredEndSlots(batterySlots: number): readonly string[] {
+  return [...REQUIRED_END_SLOTS, ...batterySlotNumbers(batterySlots).map(bmsSlot)]
+}
+
+/** Every slot name an upload may legitimately carry — the superset, for validating a POST. */
+export const ALL_START_SLOTS: readonly string[] = requiredStartSlots(MAX_BATTERY_SLOTS)
+export const ALL_END_SLOTS: readonly string[] = requiredEndSlots(MAX_BATTERY_SLOTS)
+
+function batterySlotNumbers(batterySlots: number): number[] {
+  const n = Math.max(0, Math.min(MAX_BATTERY_SLOTS, Math.trunc(batterySlots)))
+  return Array.from({ length: n }, (_, i) => i + 1)
+}
+
+/** One pack's reading, as the gate sees it. The full BMS record lives in the adapters. */
+export interface BatteryReading {
+  readonly slotNo: number
+  readonly percent: number | null
+}
+
 export interface StartPackage {
   readonly mediaSlots: readonly string[]
   readonly batteryPercent: number | null
@@ -63,6 +99,9 @@ export interface StartPackage {
   readonly floatTotal: Minor
   readonly topupTotal: Minor
   readonly driverConfirmedAt: string | null
+  /** How many packs are fitted to this bike. 0 keeps pre-battery shifts gating exactly as before. */
+  readonly batterySlots?: number
+  readonly batteryReadings?: readonly BatteryReading[]
 }
 
 export interface EndPackage {
@@ -73,13 +112,35 @@ export interface EndPackage {
   readonly walletDeclared: Minor | null
   readonly orderCount: number
   readonly allOrdersConfirmed: boolean
+  readonly batterySlots?: number
+  readonly batteryReadings?: readonly BatteryReading[]
 }
 
 export type PackageGap =
   | { readonly kind: 'missing_photo'; readonly slot: string }
   | { readonly kind: 'missing_value'; readonly field: string }
+  | { readonly kind: 'missing_battery_reading'; readonly slotNo: number }
   | { readonly kind: 'unconfirmed_orders' }
   | { readonly kind: 'no_orders' }
+
+/**
+ * Which packs have no usable charge reading.
+ *
+ * A row that exists with a null percent counts as missing: the driver uploaded the screenshot and
+ * the OCR came back empty, which is exactly the case a gate must catch rather than wave through.
+ */
+function batteryGaps(pkg: {
+  readonly batterySlots?: number
+  readonly batteryReadings?: readonly BatteryReading[]
+}): PackageGap[] {
+  const readings = pkg.batteryReadings ?? []
+  return batterySlotNumbers(pkg.batterySlots ?? 0)
+    .filter((slotNo) => {
+      const reading = readings.find((r) => r.slotNo === slotNo)
+      return reading === undefined || reading.percent === null
+    })
+    .map((slotNo) => ({ kind: 'missing_battery_reading' as const, slotNo }))
+}
 
 /**
  * What is still missing from the start package. Returned as data so the driver's PWA can show a
@@ -87,9 +148,10 @@ export type PackageGap =
  */
 export function startPackageGaps(pkg: StartPackage): PackageGap[] {
   const gaps: PackageGap[] = []
-  for (const slot of REQUIRED_START_SLOTS) {
+  for (const slot of requiredStartSlots(pkg.batterySlots ?? 0)) {
     if (!pkg.mediaSlots.includes(slot)) gaps.push({ kind: 'missing_photo', slot })
   }
+  gaps.push(...batteryGaps(pkg))
   if (pkg.odometerKm === null) gaps.push({ kind: 'missing_value', field: 'odometerKm' })
   if (pkg.batteryPercent === null) gaps.push({ kind: 'missing_value', field: 'batteryPercent' })
   // A float of zero is legitimate — a driver may start with nothing but a wallet top-up — so
@@ -101,10 +163,14 @@ export function startPackageGaps(pkg: StartPackage): PackageGap[] {
 
 export function endPackageGaps(pkg: EndPackage): PackageGap[] {
   const gaps: PackageGap[] = []
-  for (const slot of REQUIRED_END_SLOTS) {
+  for (const slot of requiredEndSlots(pkg.batterySlots ?? 0)) {
     if (!pkg.mediaSlots.includes(slot)) gaps.push({ kind: 'missing_photo', slot })
   }
+  gaps.push(...batteryGaps(pkg))
   if (pkg.odometerKm === null) gaps.push({ kind: 'missing_value', field: 'odometerKm' })
+  // The end battery was declared but never checked: a driver who left it blank submitted 0 and
+  // the manager was never shown it. A bike handed back at 5% is an operational fact, not a typo.
+  if (pkg.batteryPercent === null) gaps.push({ kind: 'missing_value', field: 'batteryPercent' })
   if (pkg.cashDeclared === null) gaps.push({ kind: 'missing_value', field: 'cashDeclared' })
   if (pkg.walletDeclared === null) gaps.push({ kind: 'missing_value', field: 'walletDeclared' })
   if (pkg.orderCount === 0) gaps.push({ kind: 'no_orders' })

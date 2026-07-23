@@ -73,7 +73,8 @@ export const DAMASCUS_BRANCH = BRANCH
  */
 export async function seedReferenceData(pool: Pool): Promise<{ branchId: string }> {
   await pool.query(
-    `INSERT INTO branches (id, code, name_ar, name_en) VALUES ($1,'DAM','دمشق','Damascus')
+    `INSERT INTO branches (id, code, name_ar, name_en, governorate_id, branch_no)
+     VALUES ($1,'DAM','دمشق','Damascus',(SELECT id FROM governorates WHERE no = 1),1)
      ON CONFLICT (code) DO NOTHING`,
     [BRANCH],
   )
@@ -102,6 +103,18 @@ export async function seedReferenceData(pool: Pool): Promise<{ branchId: string 
       )
     }
   }
+  // A vehicle type is NOT optional reference data: vehicles.vehicle_type_id is NOT NULL, so
+  // without a row here the console's "add vehicle" button cannot work at all. This used to live
+  // only in the demo seed, which refuses to run against production — the reason a live install
+  // had an empty vehicle_types table and a create-vehicle button that reported success while
+  // failing. `type_no` is the third segment of «رقم الآلية»; the sysadmin can renumber it later.
+  await pool.query(
+    `INSERT INTO vehicle_types (id, code, name_ar, name_en, type_no)
+     VALUES ($1,'e_motorbike','دراجة كهربائية','Electric Motorbike',1)
+     ON CONFLICT (code) DO NOTHING`,
+    [VTYPE],
+  )
+
   return { branchId: BRANCH }
 }
 
@@ -135,12 +148,6 @@ export async function seed(pool: Pool, opts: SeedOptions): Promise<{ br1Differen
   }
 
   await pool.query(
-    `INSERT INTO vehicle_types (id, code, name_ar, name_en)
-     VALUES ($1,'e_motorbike','دراجة كهربائية','Electric Motorbike') ON CONFLICT (code) DO NOTHING`,
-    [VTYPE],
-  )
-
-  await pool.query(
     `INSERT INTO drivers (id, branch_id, user_id, code, full_name_ar)
      VALUES ($1,$2,$3,'DRV-001','أحمد'), ($4,$2,$5,'DRV-002','خالد')
      ON CONFLICT (code) DO NOTHING`,
@@ -150,9 +157,10 @@ export async function seed(pool: Pool, opts: SeedOptions): Promise<{ br1Differen
   // Ten electric motorbikes — the client's actual fleet today (SRS س61).
   for (let i = 1; i <= 10; i++) {
     await pool.query(
-      `INSERT INTO vehicles (id, branch_id, vehicle_type_id, code, plate_no, state)
-       VALUES ($1,$2,$3,$4,$5,'ready') ON CONFLICT (code) DO NOTHING`,
-      [V(i), BRANCH, VTYPE, `VEH-${String(i).padStart(3, '0')}`, `DAM-${1000 + i}`],
+      // «رقم الآلية»: governorate 1 (دمشق), branch 1, type 1 (e-motorbike), machine i.
+      `INSERT INTO vehicles (id, branch_id, vehicle_type_id, code, machine_no, plate_no, state)
+       VALUES ($1,$2,$3,$4,$5,$6,'ready') ON CONFLICT (code) DO NOTHING`,
+      [V(i), BRANCH, VTYPE, `1-1-1-${i}`, i, `DAM-${1000 + i}`],
     )
   }
 

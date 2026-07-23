@@ -49,11 +49,85 @@ export interface BlobStore {
 
 // ── Records ───────────────────────────────────────────────────────────────────────────────
 
+export interface GovernorateRecord {
+  id: string
+  /** The first segment of «رقم الآلية». Editable — the client's own numbering wins over ours. */
+  no: number
+  nameAr: string
+  nameEn: string
+  active: boolean
+}
+
 export interface BranchRecord {
   id: string
   code: string
   nameAr: string
   nameEn: string
+  /** The second segment of the vehicle number. Unique within the governorate. */
+  governorateId: string
+  branchNo: number
+}
+
+export interface VehicleTypeRecord {
+  id: string
+  code: string
+  nameAr: string
+  nameEn: string
+  /**
+   * The third segment of the vehicle number, editable by the system admin.
+   *
+   * Editing it restates the printed code of every vehicle of this type — which is why the repo
+   * does both in one transaction, and why `vehicle_types` is audited.
+   */
+  typeNo: number
+  active: boolean
+}
+
+/**
+ * A battery pack: an asset, not an attribute of a bike.
+ *
+ * Packs are the expensive consumable and they move between machines, so they are rows with their
+ * own history. `vehicleId` and `slotNo` are set together or not at all — fitted to a slot, or a
+ * spare on the shelf. The serial and MAC come straight off the BMS app, which is what lets a
+ * shift reading be tied to the pack that was actually photographed.
+ */
+export interface BatteryRecord {
+  id: string
+  branchId: string
+  serialNo: string | null
+  bmsMac: string | null
+  /** Today 30 or 50. Stored as whole amp-hours; the BMS's tenths live on the reading. */
+  capacityAh: number
+  vehicleId: string | null
+  slotNo: number | null
+  state: 'ready' | 'charging' | 'maintenance' | 'retired'
+  active: boolean
+}
+
+/**
+ * What the driver's BMS screenshot said, for one pack at one end of one shift.
+ *
+ * Every physical quantity is a SCALED INTEGER, never a float — millivolts, deci-amp-hours,
+ * deci-Celsius. `ocrRaw` keeps what the OCR actually read before any correction, so SRS D-3's
+ * "log the manual edit WITH its difference from the OCR reading" stays computable at any time
+ * rather than only at the moment of typing.
+ */
+export interface BatteryReadingRecord {
+  shiftId: string
+  batteryId: string
+  package: EvidencePackage
+  slotNo: number
+  percent: number | null
+  packMillivolts: number | null
+  cycleCount: number | null
+  remainCapacityDah: number | null
+  fullCapacityDah: number | null
+  mosTempDc: number | null
+  t1Dc: number | null
+  t2Dc: number | null
+  mediaId: string | null
+  source: 'ocr' | 'manual'
+  ocrRaw: unknown
 }
 
 export interface UserRecord {
@@ -102,7 +176,15 @@ export interface VehicleRecord {
   id: string
   branchId: string
   vehicleTypeId: string
+  /**
+   * The formatted vehicle number, «1-1-1-1» — a WRITTEN column fed by `formatVehicleNumber`,
+   * deliberately not generated: the expression reaches across `branches` and `governorates`,
+   * which a Postgres generated column cannot do. The four components are the source of truth.
+   */
   code: string
+  /** The fourth segment. Unique within (branch, type). */
+  machineNo: number
+  plateNo: string | null
   state: 'ready' | 'charging' | 'maintenance' | 'stopped'
   active: boolean
 }
@@ -511,10 +593,47 @@ export interface DirectoryRepo {
   createVehicle(vehicle: VehicleRecord): Promise<void>
   updateVehicle(vehicle: VehicleRecord): Promise<void>
 
+  // ── Geography and the vehicle-numbering scheme ──────────────────────────────────────────
+  listGovernorates(): Promise<GovernorateRecord[]>
+  createGovernorate(governorate: GovernorateRecord): Promise<void>
+  updateGovernorate(governorate: GovernorateRecord): Promise<void>
+  createBranch(branch: BranchRecord): Promise<void>
+  updateBranch(branch: BranchRecord): Promise<void>
+
+  listVehicleTypes(): Promise<VehicleTypeRecord[]>
+  createVehicleType(type: VehicleTypeRecord): Promise<void>
+  /**
+   * Update a type, restating the `code` of every vehicle of that type IN THE SAME TRANSACTION.
+   *
+   * The type number is a segment of every one of its vehicles' printed numbers. Changing it
+   * without restating them would leave the stored codes quietly wrong — the implementations
+   * therefore take the formatter as an argument rather than reaching into the domain, keeping
+   * the one true spelling in `formatVehicleNumber` and out of SQL.
+   */
+  updateVehicleType(
+    type: VehicleTypeRecord,
+    format: (v: { governorateNo: number; branchNo: number; typeNo: number; machineNo: number }) => string,
+  ): Promise<void>
+
+  // ── Batteries (SRS §L seam) ─────────────────────────────────────────────────────────────
+  listBatteries(branchId: string): Promise<BatteryRecord[]>
+  /** The packs fitted to one bike, in slot order. Its length IS the bike's battery count. */
+  listBatteriesForVehicle(vehicleId: string): Promise<BatteryRecord[]>
+  battery(id: string): Promise<BatteryRecord | null>
+  createBattery(battery: BatteryRecord): Promise<void>
+  updateBattery(battery: BatteryRecord): Promise<void>
+
   createDocument(doc: DocumentRecord): Promise<void>
   listDocuments(owner: { driverId?: string; vehicleId?: string }): Promise<DocumentRecord[]>
   /** Everything expiring on or before `through`, for the morning alert sweep (س37). */
   listExpiringDocuments(branchId: string, through: CalendarDate): Promise<DocumentRecord[]>
+}
+
+/** Per-pack BMS readings for a shift (SRS §L seam, evidence for the BR5 gates). */
+export interface BatteryReadingRepo {
+  /** Replaces the row for (shift, battery, package) — a re-upload corrects, it does not duplicate. */
+  upsert(reading: BatteryReadingRecord): Promise<void>
+  listByShift(shiftId: string): Promise<BatteryReadingRecord[]>
 }
 
 /** Everything the API is handed at construction. One object, so wiring is explicit. */
@@ -526,6 +645,7 @@ export interface Deps {
   sessions: SessionRepo
   shifts: ShiftRepo
   assignments: AssignmentRepo
+  batteryReadings: BatteryReadingRepo
   orders: OrderRepo
   ledger: LedgerRepo
   expenses: ExpenseRepo

@@ -47,7 +47,9 @@ export const createShiftRequest = z.object({
 
 export const startPackageRequest = z.object({
   odometerKm: z.number().int().min(0),
-  batteryPercent: z.number().int().min(0).max(100),
+  // Nullable on purpose. A blank field used to reach the server as `Number('') === 0`, so "the
+  // driver did not answer" was indistinguishable from "the pack is flat". The gate refuses null.
+  batteryPercent: z.number().int().min(0).max(100).nullable(),
 })
 
 export const addOrderRequest = z.object({
@@ -59,7 +61,7 @@ export const addOrderRequest = z.object({
 
 export const endPackageRequest = z.object({
   odometerKm: z.number().int().min(0),
-  batteryPercent: z.number().int().min(0).max(100),
+  batteryPercent: z.number().int().min(0).max(100).nullable(),
   cashDeclared: moneySchema,
   walletDeclared: moneySchema,
 })
@@ -129,9 +131,110 @@ export const updateDriverRequest = z.object({
   active: z.boolean().optional(),
 })
 
+/**
+ * Add a bike.
+ *
+ * `code` is GONE: the number is «governorate-branch-type-machine», derived from the four
+ * components by `formatVehicleNumber`. Letting a caller type it would allow a vehicle whose
+ * printed number disagrees with where it actually sits. `machineNo` is optional — omit it and
+ * the server takes the lowest free number for that (branch, type).
+ */
 export const createVehicleRequest = z.object({
-  code: z.string().min(1).max(32),
   vehicleTypeId: z.string().min(1),
+  machineNo: z.number().int().min(1).max(999).optional(),
+  plateNo: z.string().max(32).nullable().default(null),
+  branchId: z.string().optional(),
+})
+
+export const createGovernorateRequest = z.object({
+  no: z.number().int().min(1).max(99),
+  nameAr: z.string().min(1).max(120),
+  nameEn: z.string().min(1).max(120),
+})
+
+export const updateGovernorateRequest = z.object({
+  no: z.number().int().min(1).max(99).optional(),
+  nameAr: z.string().min(1).max(120).optional(),
+  nameEn: z.string().min(1).max(120).optional(),
+  active: z.boolean().optional(),
+})
+
+export const createBranchRequest = z.object({
+  code: z.string().min(1).max(32),
+  nameAr: z.string().min(1).max(120),
+  nameEn: z.string().min(1).max(120),
+  governorateId: z.string().min(1),
+  branchNo: z.number().int().min(1).max(99),
+})
+
+export const updateBranchRequest = z.object({
+  nameAr: z.string().min(1).max(120).optional(),
+  nameEn: z.string().min(1).max(120).optional(),
+  governorateId: z.string().min(1).optional(),
+  branchNo: z.number().int().min(1).max(99).optional(),
+})
+
+export const createVehicleTypeRequest = z.object({
+  code: z.string().min(1).max(32),
+  nameAr: z.string().min(1).max(120),
+  nameEn: z.string().min(1).max(120),
+  typeNo: z.number().int().min(1).max(99),
+})
+
+/** Changing `typeNo` restates the printed code of every vehicle of this type. */
+export const updateVehicleTypeRequest = z.object({
+  nameAr: z.string().min(1).max(120).optional(),
+  nameEn: z.string().min(1).max(120).optional(),
+  typeNo: z.number().int().min(1).max(99).optional(),
+  active: z.boolean().optional(),
+})
+
+// ── Batteries (SRS §L seam) ───────────────────────────────────────────────────────────────
+
+/** Fitting means BOTH a bike and a slot, or neither — a spare sits on the shelf. */
+export const createBatteryRequest = z.object({
+  serialNo: z.string().max(64).nullable().default(null),
+  bmsMac: z.string().max(32).nullable().default(null),
+  capacityAh: z.number().int().min(1).max(999),
+  vehicleId: z.string().nullable().default(null),
+  slotNo: z.number().int().min(1).max(2).nullable().default(null),
+  branchId: z.string().optional(),
+})
+
+export const updateBatteryRequest = z.object({
+  serialNo: z.string().max(64).nullable().optional(),
+  bmsMac: z.string().max(32).nullable().optional(),
+  capacityAh: z.number().int().min(1).max(999).optional(),
+  vehicleId: z.string().nullable().optional(),
+  slotNo: z.number().int().min(1).max(2).nullable().optional(),
+  state: z.enum(['ready', 'charging', 'maintenance', 'retired']).optional(),
+  active: z.boolean().optional(),
+})
+
+/**
+ * One pack's BMS reading, as read off the app screenshot.
+ *
+ * Scaled INTEGERS, never floats: millivolts, deci-amp-hours, deci-Celsius. `ocrRaw` carries what
+ * the OCR itself produced before the driver touched anything, so SRS D-3's "log the manual edit
+ * WITH its difference from the OCR reading" stays computable later rather than only at typing time.
+ */
+export const batteryReadingRequest = z.object({
+  batteryId: z.string().min(1),
+  percent: z.number().int().min(0).max(100).nullable().default(null),
+  packMillivolts: z.number().int().min(0).max(2_000_000).nullable().default(null),
+  cycleCount: z.number().int().min(0).max(100_000).nullable().default(null),
+  remainCapacityDah: z.number().int().min(0).max(100_000).nullable().default(null),
+  fullCapacityDah: z.number().int().min(0).max(100_000).nullable().default(null),
+  mosTempDc: z.number().int().min(-500).max(2_000).nullable().default(null),
+  t1Dc: z.number().int().min(-500).max(2_000).nullable().default(null),
+  t2Dc: z.number().int().min(-500).max(2_000).nullable().default(null),
+  source: z.enum(['ocr', 'manual']).default('manual'),
+  ocrRaw: z.unknown().optional(),
+})
+
+export const putBatteryReadingsRequest = z.object({
+  package: z.enum(['start', 'end']),
+  readings: z.array(batteryReadingRequest).min(1).max(2),
 })
 
 export const updateVehicleRequest = z.object({

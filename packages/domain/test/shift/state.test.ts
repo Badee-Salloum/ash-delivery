@@ -288,3 +288,96 @@ describe('gap reporting is a checklist, not a boolean', () => {
     expect(gaps).toContainEqual({ kind: 'no_orders' })
   })
 })
+
+/**
+ * Per-pack battery evidence (SRS §L seam).
+ *
+ * The bikes carry one or two packs. A fixed slot tuple silently assumed every machine is the
+ * same, so a two-pack bike could open its shift with half its charge state unevidenced. The
+ * count is not a number anyone types — it is how many packs the fleet says are fitted — so
+ * these tests drive it from `batterySlots` exactly as the service does.
+ */
+describe('battery evidence scales with the bike', () => {
+  const startWith = (over: Partial<StartPackage> = {}): StartPackage => ({
+    mediaSlots: ['odometer'],
+    batteryPercent: 90,
+    odometerKm: 1000,
+    floatTotal: syp(0),
+    topupTotal: syp(0),
+    driverConfirmedAt: null,
+    ...over,
+  })
+
+  it('a bike with no packs on file gates exactly as before', () => {
+    // The default keeps every pre-battery shift, and every existing test, unchanged.
+    expect(startPackageGaps(startWith())).toEqual([])
+  })
+
+  it('a one-pack bike must produce one BMS screenshot and one reading', () => {
+    const missing = startPackageGaps(startWith({ batterySlots: 1 }))
+    expect(missing).toContainEqual({ kind: 'missing_photo', slot: 'bms_1' })
+    expect(missing).toContainEqual({ kind: 'missing_battery_reading', slotNo: 1 })
+
+    const complete = startPackageGaps(
+      startWith({ batterySlots: 1, mediaSlots: ['odometer', 'bms_1'], batteryReadings: [{ slotNo: 1, percent: 100 }] }),
+    )
+    expect(complete).toEqual([])
+  })
+
+  it('a two-pack bike is not satisfied by the first pack alone', () => {
+    const gaps = startPackageGaps(
+      startWith({ batterySlots: 2, mediaSlots: ['odometer', 'bms_1'], batteryReadings: [{ slotNo: 1, percent: 100 }] }),
+    )
+    expect(gaps).toContainEqual({ kind: 'missing_photo', slot: 'bms_2' })
+    expect(gaps).toContainEqual({ kind: 'missing_battery_reading', slotNo: 2 })
+    expect(gaps).not.toContainEqual({ kind: 'missing_battery_reading', slotNo: 1 })
+  })
+
+  it('a one-pack bike is never asked for a second', () => {
+    const gaps = startPackageGaps(
+      startWith({ batterySlots: 1, mediaSlots: ['odometer', 'bms_1'], batteryReadings: [{ slotNo: 1, percent: 100 }] }),
+    )
+    expect(gaps.some((g) => g.kind === 'missing_photo' && g.slot === 'bms_2')).toBe(false)
+  })
+
+  it('an uploaded screenshot the OCR could not read is still a gap', () => {
+    // The photo arriving is not the same as the charge being known. Counting the row as
+    // satisfied would let a null percent through the gate on the strength of a file upload.
+    const gaps = startPackageGaps(
+      startWith({ batterySlots: 1, mediaSlots: ['odometer', 'bms_1'], batteryReadings: [{ slotNo: 1, percent: null }] }),
+    )
+    expect(gaps).toEqual([{ kind: 'missing_battery_reading', slotNo: 1 }])
+  })
+
+  it('the close gate demands the same per-pack evidence', () => {
+    const end: EndPackage = {
+      mediaSlots: ['dashboard', 'wallet', 'odometer', 'wallet_zeroed'],
+      odometerKm: 1100,
+      batteryPercent: 20,
+      cashDeclared: syp(0),
+      walletDeclared: syp(0),
+      orderCount: 1,
+      allOrdersConfirmed: true,
+      batterySlots: 2,
+      batteryReadings: [{ slotNo: 1, percent: 20 }],
+    }
+    const gaps = endPackageGaps(end)
+    expect(gaps).toContainEqual({ kind: 'missing_photo', slot: 'bms_2' })
+    expect(gaps).toContainEqual({ kind: 'missing_battery_reading', slotNo: 2 })
+  })
+
+  it('the end battery is finally gated — it was declared but never checked', () => {
+    // A driver who left it blank submitted 0, and the manager was never shown it. A bike handed
+    // back at 5% is an operational fact, not a typo to be silently normalised away.
+    const gaps = endPackageGaps({
+      mediaSlots: ['dashboard', 'wallet', 'odometer', 'wallet_zeroed'],
+      odometerKm: 1100,
+      batteryPercent: null,
+      cashDeclared: syp(0),
+      walletDeclared: syp(0),
+      orderCount: 1,
+      allOrdersConfirmed: true,
+    })
+    expect(gaps).toContainEqual({ kind: 'missing_value', field: 'batteryPercent' })
+  })
+})

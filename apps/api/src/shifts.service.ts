@@ -7,6 +7,7 @@ import {
   type CalendarDate,
   type Minor,
   type ShiftAction,
+  type BatteryReading,
   type ShiftOrder,
   type TransitionResult,
   DEFAULT_BANDS,
@@ -19,6 +20,7 @@ import {
   minor,
   postingsForApproval,
   postingsForOpen,
+  REQUIRED_END_SLOTS,
   resolveFxDay,
   splitBlock,
   sum,
@@ -178,6 +180,32 @@ export async function cancelShift(deps: Deps, shiftId: string): Promise<ShiftRec
   return shift
 }
 
+/**
+ * The battery facts the BR5 gates need for a shift: how many packs the bike carries, and what was
+ * read off each of them.
+ *
+ * The count is COUNT(*) of the packs actually fitted, never a number anyone typed — a bike whose
+ * second pack was pulled for charging genuinely has one pack today, and the gate should ask for
+ * one screenshot, not two. Both gates call this, so open and close can never disagree about how
+ * many packs the machine has.
+ */
+async function batteryContext(
+  deps: Deps,
+  shift: ShiftRecord,
+  pkg: 'start' | 'end',
+): Promise<{ batterySlots: number; batteryReadings: BatteryReading[] }> {
+  const fitted = await deps.directory.listBatteriesForVehicle(shift.vehicleId)
+  const rows = await deps.batteryReadings.listByShift(shift.id)
+  const forPackage = rows.filter((r) => r.package === pkg)
+  return {
+    batterySlots: fitted.length,
+    batteryReadings: fitted.map((battery, i) => ({
+      slotNo: battery.slotNo ?? i + 1,
+      percent: forPackage.find((r) => r.batteryId === battery.id)?.percent ?? null,
+    })),
+  }
+}
+
 // ── The OPEN gate (BR5) ───────────────────────────────────────────────────────────────────
 
 export async function submitStartPackage(
@@ -186,7 +214,7 @@ export async function submitStartPackage(
   shiftId: string,
   input: {
     odometerKm: number
-    batteryPercent: number
+    batteryPercent: number | null
   },
 ): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
@@ -206,6 +234,7 @@ export async function submitStartPackage(
       floatTotal: sum(draft.floatTranches),
       topupTotal: sum(draft.topupTranches),
       driverConfirmedAt: null,
+      ...(await batteryContext(deps, draft, 'start')),
     },
   })
   if (!result.ok) fail(result)
@@ -271,6 +300,7 @@ export async function approveOpen(
       floatTotal: sum(withFunds.floatTranches),
       topupTotal: sum(withFunds.topupTranches),
       driverConfirmedAt: withFunds.driverConfirmedAt,
+      ...(await batteryContext(deps, withFunds, 'start')),
     },
   })
   if (!result.ok) fail(result)
@@ -320,7 +350,9 @@ export async function addOrder(
     branchId: shift.branchId,
     grants,
     endPackage: {
-      mediaSlots: [...['dashboard', 'wallet', 'odometer', 'wallet_zeroed']],
+      // A SYNTHETIC package: this call only wants `transition`'s permission branch, so it is
+      // deliberately complete. Battery slots are omitted for the same reason.
+      mediaSlots: [...REQUIRED_END_SLOTS],
       odometerKm: 0,
       batteryPercent: 0,
       cashDeclared: minor(0n),
@@ -393,7 +425,7 @@ export async function submitEndPackage(
   shiftId: string,
   input: {
     odometerKm: number
-    batteryPercent: number
+    batteryPercent: number | null
     cashDeclared: Minor
     walletDeclared: Minor
   },
@@ -419,6 +451,7 @@ export async function submitEndPackage(
       walletDeclared: staged.endWalletDeclared,
       orderCount: orderRows.length,
       allOrdersConfirmed: orderRows.every((o) => o.driverConfirmed),
+      ...(await batteryContext(deps, staged, 'end')),
     },
   })
   if (!result.ok) fail(result)
@@ -457,6 +490,7 @@ export async function approveClose(
       walletDeclared: shift.endWalletDeclared,
       orderCount: orderRows.length,
       allOrdersConfirmed: orderRows.every((o) => o.driverConfirmed),
+      ...(await batteryContext(deps, shift, 'end')),
     },
     br1: { balanced: br1.result.balanced, splitBalanced: br1.result.splitBalanced },
     splitGate,
