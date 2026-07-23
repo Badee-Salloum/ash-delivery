@@ -1,5 +1,61 @@
 # PROGRESS
 
+## 2026-07-23 (latest) — the fleet is modelled as machines, not as rows called "vehicle"
+
+**309 domain + 229 API + 15 driver tests green, 6 guards green, migration 0007 applied to
+production, all three projects redeployed.**
+
+The schema described a *vehicle* but not a **machine**. It could not say where a bike sits in the
+organisation, could not say that it carries two battery packs, and had nowhere to put what the
+driver reads off a pack.
+
+**«رقم الآلية»** is now `<governorate>-<branch>-<type>-<machine>` — the first motorbike of the
+first branch in Damascus is `1-1-1-1`. Governorate did not exist anywhere in the repo; branches had
+a text code but no number; `vehicle_types` had neither, and no route, no port method and no UI.
+`vehicles.code` becomes the **written** result of `formatVehicleNumber` — deliberately not a
+generated column, since the expression reaches across `branches` and `governorates`, the same
+reason `business_date` is written. Renumbering a type restates every one of its vehicles' codes in
+one transaction, which is why `vehicle_types` moved from `AUDIT_EXEMPT` to audited.
+
+**Battery packs are rows, not columns.** They are the expensive consumable, they move between
+bikes, and the BMS app shows a serial. How many packs a bike carries is `COUNT(*)` of the packs
+fitted — never a number someone typed, so it cannot disagree with reality, and the BR5 gates read
+the same fact: a two-pack bike cannot open or close on one screenshot.
+
+**Per-shift BMS readings** hold percent, pack voltage, cycle count, capacities and three
+temperatures per pack per end of the shift, as scaled integers (millivolts, deci-Ah, deci-°C),
+never floats. `ocr_raw` keeps what the OCR read before correction, which is what finally makes
+**SRS D-3** — the manual edit *and its difference from the OCR reading* — computable.
+
+**Three things were already broken, and are fixed:**
+
+1. **Adding a vehicle was impossible in production.** The console sent the literal string
+   `'e_motorbike'` for a `uuid` foreign key (Postgres `22P02`), the UI swallowed the 500 and
+   cleared the form as if it had worked, and the production bootstrap never created a
+   `vehicle_types` row at all — that insert lived only in the demo seed, which refuses to run
+   against production. No test caught it because the test adapter is a `Map` with no foreign keys.
+2. **The end-of-shift battery was never gated**, and a blank field reached the server as
+   `Number('') === 0` — "the driver did not answer" was indistinguishable from "the pack is flat".
+   The manager was never shown it either.
+3. **OCR was being fed the compressed image.** `compressImage` caps the long edge at 1280 px and
+   drops quality to 0.4, putting a screenshot's body text under the LSTM's recognition floor. That
+   was the single largest accuracy lever in the whole feature, and it sat upstream of every
+   Tesseract parameter. Also fixed while there: a cached *rejected* worker promise that disabled
+   OCR for a whole session after one transient failure; a 20 s timeout that exceeded the SRS's
+   15 s budget and never cleared its timer; and `compressImage` returning its **largest** encode
+   whenever the 300 KB budget was unreachable.
+
+The BMS reader is genuinely hard and the tests say so: the English app is two-column, so one row
+carries two label/value pairs; the Arabic app prints the value *before* its label; and several
+labels carry a digit of their own — «Battery T2: 32.5C» was being read as 2 °C until the value was
+taken from what remains after removing the label.
+
+**Still open:** OCR accuracy on real phones is a calibration question no unit test answers. The
+parser is pinned against transcriptions of both apps; the recognition itself needs a morning with
+real screenshots on real drivers' handsets.
+
+---
+
 ## 2026-07-23 (later) — the two roles that own the business could not use the app
 
 **207 API tests + 290 domain green, 6 guards green, redeployed.**
