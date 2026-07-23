@@ -4,6 +4,7 @@ import { compressImage, uploadEvidencePath } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { Button, Card, Field, Money, MoneyInput, Screen, TextInput } from '../ui.tsx'
 import { OrderEntry } from './OrderEntry.tsx'
+import { BatteryPanel, type FittedBattery } from './BatteryPanel.tsx'
 
 /**
  * The driver's shift flow: start package → order entry → end package.
@@ -21,7 +22,14 @@ interface ShiftState {
   topupText: string
 }
 
-export function ShiftFlow({ assignment }: { assignment: { driverId: string; vehicleId: string; shiftNo: number } }): ReactNode {
+export function ShiftFlow({
+  assignment,
+  batteries,
+}: {
+  assignment: { driverId: string; vehicleId: string; shiftNo: number }
+  /** The packs fitted to this bike, from `/me/assignment` — the same list the BR5 gate counts. */
+  batteries: readonly FittedBattery[]
+}): ReactNode {
   const { api, t } = useApp()
   const [phase, setPhase] = useState<Phase>('start')
   const [shift, setShift] = useState<ShiftState | null>(null)
@@ -30,6 +38,7 @@ export function ShiftFlow({ assignment }: { assignment: { driverId: string; vehi
     return (
       <StartPackage
         assignment={assignment}
+        batteries={batteries}
         awaiting={phase === 'awaiting'}
         onOpened={(id) => {
           setShift({ id, floatText: '0', topupText: '0' })
@@ -56,7 +65,7 @@ export function ShiftFlow({ assignment }: { assignment: { driverId: string; vehi
     )
   }
   if (phase === 'end' && shift) {
-    return <EndPackage shift={shift} onSubmitted={() => setPhase('done')} />
+    return <EndPackage shift={shift} batteries={batteries} onSubmitted={() => setPhase('done')} />
   }
   return (
     <Screen title={t.app.title}>
@@ -86,14 +95,29 @@ function PhotoSlot({
   label,
   onUploaded,
   onImage,
+  source = 'camera',
 }: {
   shiftId: string
   pkg: 'start' | 'end'
   slot: string
   label: string
   onUploaded(): void
-  /** The compressed image bytes, for on-device OCR. Best-effort — never blocks the upload. */
-  onImage?(bytes: Uint8Array): void
+  /**
+   * The ORIGINAL file, for on-device OCR. Best-effort — never blocks the upload.
+   *
+   * Deliberately not the compressed bytes. `compressImage` caps the long edge at 1280 px and
+   * drops JPEG quality to 0.4, which puts a phone screenshot's body text at roughly 10-13 px of
+   * x-height — below what Tesseract's LSTM can read, with JPEG ringing on exactly the thin,
+   * high-contrast glyphs a BMS readout is made of. The upload still carries the compressed copy;
+   * OCR runs locally, so it costs nothing to give it the real pixels.
+   */
+  onImage?(file: File): void
+  /**
+   * `camera` opens the camera (an odometer is photographed). `gallery` does not — a BMS reading
+   * is a SCREENSHOT the driver already took, and forcing the camera would make him photograph
+   * one phone screen with another.
+   */
+  source?: 'camera' | 'gallery'
 }): ReactNode {
   const { api, t } = useApp()
   const ref = useRef<HTMLInputElement>(null)
@@ -109,7 +133,7 @@ function PhotoSlot({
         })
         setState('done')
         onUploaded()
-        onImage?.(bytes) // fire-and-forget OCR after the upload is safely done
+        onImage?.(file) // fire-and-forget OCR after the upload is safely done
       } catch {
         // The upload is idempotent, so the fix is simply to tap again.
         setState('error')
@@ -133,7 +157,7 @@ function PhotoSlot({
         ref={ref}
         type="file"
         accept="image/*"
-        capture="environment"
+        {...(source === 'camera' ? { capture: 'environment' as const } : {})}
         hidden
         onChange={(e) => {
           const f = e.target.files?.[0]
@@ -146,11 +170,13 @@ function PhotoSlot({
 
 function StartPackage({
   assignment,
+  batteries,
   awaiting,
   onOpened,
   onApproved,
 }: {
   assignment: { driverId: string; vehicleId: string; shiftNo: number }
+  batteries: readonly FittedBattery[]
   awaiting: boolean
   onOpened(shiftId: string): void
   onApproved(funds: { floatText: string; topupText: string }): void
@@ -163,15 +189,19 @@ function StartPackage({
   const [busy, setBusy] = useState(false)
   const [ocrBusy, setOcrBusy] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
+  const [startSlots, setStartSlots] = useState<Set<string>>(new Set())
+  const [batteriesReady, setBatteriesReady] = useState(batteries.length === 0)
 
   // Assisted OCR: read the odometer + battery off the dashboard photo and PRE-FILL the fields the
   // driver would otherwise type. Only fills a field the driver has not already entered, and any
   // failure is silent — the driver just types, exactly as before.
-  const runOcr = useCallback(async (bytes: Uint8Array): Promise<void> => {
+  const runOcr = useCallback(async (file: File): Promise<void> => {
     setOcrBusy(true)
     try {
       const { readDashboard } = await import('../ocr.ts')
-      const reading = await readDashboard(bytes)
+      // The ORIGINAL file, not the compressed upload: 1280 px at q=0.4 puts body text under the
+      // LSTM's recognition floor, and no tesseract parameter recovers from that.
+      const reading = await readDashboard(file)
       if (reading?.odometer != null) setOdo((cur) => (cur === '' ? String(reading.odometer) : cur))
       if (reading?.battery != null) setBattery((cur) => (cur === '' ? String(reading.battery) : cur))
     } finally {
@@ -205,7 +235,9 @@ function StartPackage({
       // are the branch's money, entered by the manager at approval.
       await api.put(`/shifts/${shiftId}/start-package`, {
         odometerKm: Number(odo),
-        batteryPercent: Number(battery),
+        // Blank is NULL, never 0. They used to be the same value on the wire, so "the driver did
+        // not answer" was indistinguishable from "the pack is flat".
+        batteryPercent: battery.trim() === '' ? null : Number(battery),
       })
       onOpened(shiftId)
     } finally {
@@ -259,7 +291,10 @@ function StartPackage({
           pkg="start"
           slot="odometer"
           label={t.shift.odometer}
-          onUploaded={() => setOdoShot(true)}
+          onUploaded={() => {
+            setOdoShot(true)
+            setStartSlots((cur) => new Set(cur).add('odometer'))
+          }}
           onImage={runOcr}
         />
       ) : (
@@ -282,11 +317,38 @@ function StartPackage({
           <TextInput inputMode="numeric" value={battery} onChange={(e) => setBattery(e.target.value)} />
         </Field>
       </Card>
+      {/* One screenshot and one set of numbers per pack fitted — the same count the gate reads. */}
+      {shiftId ? (
+        <BatteryPanel
+          shiftId={shiftId}
+          pkg="start"
+          batteries={batteries}
+          slots={startSlots}
+          PhotoSlot={(props) => (
+            <PhotoSlot
+              {...props}
+              onUploaded={() => {
+                props.onUploaded()
+                setStartSlots((cur) => new Set(cur).add(props.slot))
+              }}
+            />
+          )}
+          onReadingsChanged={setBatteriesReady}
+        />
+      ) : null}
     </Screen>
   )
 }
 
-function EndPackage({ shift, onSubmitted }: { shift: ShiftState; onSubmitted(): void }): ReactNode {
+function EndPackage({
+  shift,
+  batteries,
+  onSubmitted,
+}: {
+  shift: ShiftState
+  batteries: readonly FittedBattery[]
+  onSubmitted(): void
+}): ReactNode {
   const { api, t } = useApp()
   const [cash, setCash] = useState('')
   const [wallet, setWallet] = useState('')
@@ -296,6 +358,7 @@ function EndPackage({ shift, onSubmitted }: { shift: ShiftState; onSubmitted(): 
   const [br1, setBr1] = useState<{ difference: string; balanced: boolean } | null>(null)
   const [busy, setBusy] = useState(false)
 
+  const [batteriesReady, setBatteriesReady] = useState(batteries.length === 0)
   const required = ['dashboard', 'wallet', 'odometer', 'wallet_zeroed']
   const labels: Record<string, string> = {
     dashboard: t.shift.dashboardShot,
@@ -303,14 +366,19 @@ function EndPackage({ shift, onSubmitted }: { shift: ShiftState; onSubmitted(): 
     odometer: t.shift.odometer,
     wallet_zeroed: t.shift.walletZeroed,
   }
-  const ready = required.every((s) => slots.has(s)) && cash !== '' && wallet !== '' && odo !== ''
+  // The end battery is now part of the gate, so the button waits for it too — a shift that
+  // cannot be submitted should not offer a button that pretends otherwise.
+  const ready =
+    required.every((s) => slots.has(s)) && cash !== '' && wallet !== '' && odo !== '' && battery !== '' && batteriesReady
 
   async function submit(): Promise<void> {
     setBusy(true)
     try {
       const res = await api.put<{ br1: { difference: string; balanced: boolean } }>(`/shifts/${shift.id}/end-package`, {
         odometerKm: Number(odo),
-        batteryPercent: Number(battery || '0'),
+        // Blank is NULL, never 0 — `Number('')` used to make an unanswered field look like a flat
+        // pack, and the close gate never checked it at all.
+        batteryPercent: battery.trim() === '' ? null : Number(battery),
         cashDeclared: cash,
         walletDeclared: wallet,
       })
@@ -366,6 +434,23 @@ function EndPackage({ shift, onSubmitted }: { shift: ShiftState; onSubmitted(): 
           <TextInput inputMode="numeric" value={battery} onChange={(e) => setBattery(e.target.value)} />
         </Field>
       </Card>
+      {/* The close gate asks for the same per-pack evidence the open gate did. */}
+      <BatteryPanel
+        shiftId={shift.id}
+        pkg="end"
+        batteries={batteries}
+        slots={slots}
+        PhotoSlot={(props) => (
+          <PhotoSlot
+            {...props}
+            onUploaded={() => {
+              props.onUploaded()
+              setSlots((prev) => new Set(prev).add(props.slot))
+            }}
+          />
+        )}
+        onReadingsChanged={setBatteriesReady}
+      />
     </Screen>
   )
 }

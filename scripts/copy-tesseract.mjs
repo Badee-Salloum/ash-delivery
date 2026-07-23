@@ -15,7 +15,14 @@ import { gzipSync } from 'node:zlib'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const outDir = join(root, 'apps/driver/public/tesseract')
-const TRAINEDDATA_URL = 'https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/eng.traineddata'
+const TESSDATA = 'https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main'
+/**
+ * Both languages. The client uses an English BMS app and an Arabic one, and `eng.traineddata`
+ * cannot read Arabic script at all — its unicharset has no Arabic codepoints, so Arabic labels
+ * come back as Latin noise. `ara` adds roughly 0.7-1 MB gzipped to the first-use download, which
+ * is then cached forever by the service worker's CacheFirst rule for /tesseract/.
+ */
+const LANGS = ['eng', 'ara']
 
 /** Find the first path under a base dir whose full path ends with `suffix`. */
 function findUnder(base, suffix, depth = 6) {
@@ -60,19 +67,23 @@ async function main() {
     console.warn('[tesseract] core dir not found — OCR will fall back to manual entry')
   }
 
-  // 3) The English traineddata (small fast model), gzipped as tesseract.js expects at langPath.
-  const gzPath = join(outDir, 'eng.traineddata.gz')
-  if (existsSync(gzPath)) {
-    console.log('[tesseract] eng.traineddata.gz already present')
-  } else {
+  // 3) The traineddata (small fast models), gzipped as tesseract.js expects at langPath.
+  for (const lang of LANGS) {
+    const gzPath = join(outDir, `${lang}.traineddata.gz`)
+    if (existsSync(gzPath)) {
+      console.log(`[tesseract] ${lang}.traineddata.gz already present`)
+      continue
+    }
     try {
-      const res = await fetch(TRAINEDDATA_URL)
+      const res = await fetch(`${TESSDATA}/${lang}.traineddata`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const bytes = new Uint8Array(await res.arrayBuffer())
       writeFileSync(gzPath, gzipSync(bytes))
-      console.log(`[tesseract] fetched eng.traineddata (${(bytes.length / 1024 / 1024).toFixed(1)} MB) → gz`)
+      console.log(`[tesseract] fetched ${lang}.traineddata (${(bytes.length / 1024 / 1024).toFixed(1)} MB) → gz`)
     } catch (err) {
-      console.warn(`[tesseract] could not fetch traineddata (${(err instanceof Error && err.message) || err}) — OCR degrades to manual entry`)
+      console.warn(
+        `[tesseract] could not fetch ${lang}.traineddata (${(err instanceof Error && err.message) || err}) — OCR degrades to manual entry`,
+      )
     }
   }
   console.log('[tesseract] assets staged in apps/driver/public/tesseract/')

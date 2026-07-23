@@ -15,6 +15,38 @@ export interface ApiError {
   detail?: unknown
 }
 
+/** A battery pack. `vehicleId` and `slotNo` are set together, or it is a spare on the shelf. */
+export interface Battery {
+  id: string
+  branchId: string
+  serialNo: string | null
+  bmsMac: string | null
+  capacityAh: number
+  vehicleId: string | null
+  slotNo: number | null
+  state: 'ready' | 'charging' | 'maintenance' | 'retired'
+  active: boolean
+}
+
+/**
+ * One pack's BMS reading. Scaled INTEGERS, never floats — millivolts, deci-amp-hours,
+ * deci-Celsius — so 83.37 V is 83_370 and 50.0 Ah is 500.
+ */
+export interface BatteryReadingInput {
+  batteryId: string
+  percent: number | null
+  packMillivolts?: number | null
+  cycleCount?: number | null
+  remainCapacityDah?: number | null
+  fullCapacityDah?: number | null
+  mosTempDc?: number | null
+  t1Dc?: number | null
+  t2Dc?: number | null
+  source?: 'ocr' | 'manual'
+  /** What the OCR read BEFORE the driver corrected anything (SRS D-3). */
+  ocrRaw?: unknown
+}
+
 export class ApiClient {
   private readonly baseUrl: string
 
@@ -193,6 +225,76 @@ export class ApiClient {
         occurredAt: string
       }>
     }>(`/audit${qs ? `?${qs}` : ''}`)
+  }
+
+  // -- The fleet: numbering, types, batteries (SRS B-2 / L) ------------------------------------
+  governorates() {
+    return this.get<{ governorates: Array<{ id: string; no: number; nameAr: string; nameEn: string; active: boolean }> }>(
+      '/governorates',
+    )
+  }
+  createGovernorate(body: { no: number; nameAr: string; nameEn: string }) {
+    return this.post<{ id: string }>('/governorates', body)
+  }
+  updateGovernorate(id: string, body: { no?: number; nameAr?: string; nameEn?: string; active?: boolean }) {
+    return this.patch<{ id: string }>(`/governorates/${id}`, body)
+  }
+
+  createBranch(body: { code: string; nameAr: string; nameEn: string; governorateId: string; branchNo: number }) {
+    return this.post<{ id: string }>('/branches', body)
+  }
+  updateBranch(id: string, body: { nameAr?: string; nameEn?: string; governorateId?: string; branchNo?: number }) {
+    return this.patch<{ id: string }>(`/branches/${id}`, body)
+  }
+
+  vehicleTypes() {
+    return this.get<{
+      vehicleTypes: Array<{ id: string; code: string; nameAr: string; nameEn: string; typeNo: number; active: boolean }>
+    }>('/vehicle-types')
+  }
+  createVehicleType(body: { code: string; nameAr: string; nameEn: string; typeNo: number }) {
+    return this.post<{ id: string }>('/vehicle-types', body)
+  }
+  /** Changing `typeNo` restates the printed number of every vehicle of this type. */
+  updateVehicleType(id: string, body: { nameAr?: string; nameEn?: string; typeNo?: number; active?: boolean }) {
+    return this.patch<{ id: string }>(`/vehicle-types/${id}`, body)
+  }
+
+  /** What the next bike of this type would be called — for the live preview on the add form. */
+  nextVehicleNumber(vehicleTypeId: string) {
+    return this.get<{ code: string; machineNo: number }>(
+      `/vehicles/next-number?vehicleTypeId=${encodeURIComponent(vehicleTypeId)}`,
+    )
+  }
+  createVehicle(body: { vehicleTypeId: string; machineNo?: number; plateNo?: string | null }) {
+    return this.post<{ id: string; code: string; machineNo: number }>('/vehicles', {
+      ...body,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+
+  batteries() {
+    return this.get<{ batteries: Battery[] }>('/batteries')
+  }
+  createBattery(body: {
+    capacityAh: number
+    serialNo?: string | null
+    bmsMac?: string | null
+    vehicleId?: string | null
+    slotNo?: number | null
+  }) {
+    return this.post<Battery>('/batteries', { ...body, ...(this.branchId ? { branchId: this.branchId } : {}) })
+  }
+  updateBattery(id: string, body: Partial<Omit<Battery, 'id' | 'branchId'>>) {
+    return this.patch<Battery>(`/batteries/${id}`, body)
+  }
+
+  /** One reading per pack. A retake corrects that pack's row rather than adding a second. */
+  putBatteryReadings(shiftId: string, pkg: 'start' | 'end', readings: BatteryReadingInput[]) {
+    return this.put<{ readings: BatteryReadingInput[] }>(`/shifts/${shiftId}/battery-readings`, {
+      package: pkg,
+      readings,
+    })
   }
 
   // ── Driver ↔ vehicle assignments (B-3) ──────────────────────────────────────────────────────

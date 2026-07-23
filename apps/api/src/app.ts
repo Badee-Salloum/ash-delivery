@@ -267,6 +267,15 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
             code: v.code,
             state: v.state,
             busy: (await deps.shifts.listLiveForVehicle(v.id)).length > 0,
+            // The packs fitted to this bike. The driver has no `branch_data.view`, so this is the
+            // only way his app can know how many BMS screenshots the gate will ask him for — and
+            // it is the SAME list the gate counts, so the checklist cannot disagree with the gate.
+            batteries: (await deps.directory.listBatteriesForVehicle(v.id)).map((b) => ({
+              id: b.id,
+              slotNo: b.slotNo,
+              capacityAh: b.capacityAh,
+              serialNo: b.serialNo,
+            })),
           })),
       ),
     }

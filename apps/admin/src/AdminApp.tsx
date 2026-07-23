@@ -6,12 +6,13 @@ import { Dashboard } from './screens/Dashboard.tsx'
 import { Queue } from './screens/Queue.tsx'
 import { Approval } from './screens/Approval.tsx'
 import { Fleet } from './screens/Fleet.tsx'
+import { FleetConfig } from './screens/FleetConfig.tsx'
 import { Treasury } from './screens/Treasury.tsx'
 import { Accounts } from './screens/Accounts.tsx'
 import { Audit } from './screens/Audit.tsx'
 import { Permissions } from './screens/Permissions.tsx'
 
-type Section = 'dashboard' | 'queue' | 'fleet' | 'treasury' | 'accounts' | 'audit' | 'permissions'
+type Section = 'dashboard' | 'queue' | 'fleet' | 'fleetConfig' | 'treasury' | 'accounts' | 'audit' | 'permissions'
 
 /**
  * The admin console shell: a side rail of sections and a main pane. The approval review takes over
@@ -46,6 +47,9 @@ export function AdminApp(): ReactNode {
     // audit.view is granted to the sysadmin and the GM — the same two roles.
     ...(canManageUsers ? [{ key: 'audit' as const, label: t.audit.title }] : []),
     ...(canManageUsers ? [{ key: 'permissions' as const, label: t.permissions.title }] : []),
+    // The numbering scheme is settings.write — the system admin alone. Renumbering a type or a
+    // branch restates printed vehicle numbers, so it does not belong beside day-to-day fleet work.
+    ...(session.roleKey === 'system_admin' ? [{ key: 'fleetConfig' as const, label: t.fleet.numberingTitle }] : []),
   ]
 
   return (
@@ -124,6 +128,8 @@ export function AdminApp(): ReactNode {
           <Queue onOpen={setOpenShift} />
         ) : section === 'fleet' ? (
           <Fleet />
+        ) : section === 'fleetConfig' ? (
+          <FleetConfig />
         ) : section === 'accounts' ? (
           <Accounts />
         ) : section === 'audit' ? (

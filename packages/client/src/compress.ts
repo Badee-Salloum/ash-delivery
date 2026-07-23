@@ -39,9 +39,14 @@ export async function compressImage(file: Blob, targetBytes = TARGET_BYTES): Pro
   ctx.drawImage(bitmap, 0, 0, width, height)
 
   // Binary search JPEG quality for the largest that fits the budget.
+  //
+  // `best` is seeded with the LOWEST quality, not the highest. Seeded with hi, an image that
+  // cannot reach the budget even at q=0.4 — a dense, noisy screenshot full of text and gridlines
+  // is exactly that — never assigned inside the loop and the function returned the q=0.92 bytes:
+  // the largest encode it produced, from the routine whose whole job is to keep uploads small.
   let lo = 0.4
   let hi = 0.92
-  let best = await encode(canvas, hi)
+  let best = await encode(canvas, lo)
   for (let i = 0; i < 6; i++) {
     const q = (lo + hi) / 2
     const candidate = await encode(canvas, q)

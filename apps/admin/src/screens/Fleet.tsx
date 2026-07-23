@@ -13,7 +13,26 @@ interface Driver {
 interface Vehicle {
   id: string
   code: string
+  vehicleTypeId: string
+  machineNo: number
+  plateNo: string | null
   state: 'ready' | 'charging' | 'maintenance' | 'stopped'
+  active: boolean
+}
+interface VehicleType {
+  id: string
+  nameAr: string
+  nameEn: string
+  typeNo: number
+  active: boolean
+}
+interface Battery {
+  id: string
+  serialNo: string | null
+  capacityAh: number
+  vehicleId: string | null
+  slotNo: number | null
+  state: 'ready' | 'charging' | 'maintenance' | 'retired'
   active: boolean
 }
 interface Assignment {
@@ -40,11 +59,19 @@ const vehTone: Record<string, 'green' | 'sky' | 'amber' | 'slate'> = {
 
 /** Drivers & vehicles (SRS B). Each driver carries his document status; an expired doc blocks him. */
 export function Fleet(): ReactNode {
-  const { api, t, branchId } = useApp()
+  const { api, t, lang, branchId } = useApp()
   const [drivers, setDrivers] = useState<Driver[]>([])
   const [vehicles, setVehicles] = useState<Vehicle[]>([])
   const [newDriver, setNewDriver] = useState({ code: '', fullNameAr: '' })
-  const [newVehicle, setNewVehicle] = useState({ code: '', vehicleTypeId: 'e_motorbike' })
+  const [types, setTypes] = useState<VehicleType[]>([])
+  const [batteries, setBatteries] = useState<Battery[]>([])
+  // The type is CHOSEN, never typed. The old form posted the literal string 'e_motorbike' into a
+  // uuid foreign key, which failed against Postgres every time and reported success.
+  const [newVehicle, setNewVehicle] = useState({ vehicleTypeId: '', plateNo: '' })
+  const [preview, setPreview] = useState<string | null>(null)
+  const [vehicleError, setVehicleError] = useState<string | null>(null)
+  const [newBattery, setNewBattery] = useState({ serialNo: '', capacityAh: '50' })
+  const [batteryError, setBatteryError] = useState<string | null>(null)
   const [assignments, setAssignments] = useState<Assignment[]>([])
   const [assignDate, setAssignDate] = useState('')
   const [pick, setPick] = useState({ driverId: '', vehicleId: '' })
@@ -67,11 +94,32 @@ export function Fleet(): ReactNode {
       .shiftsOfDay(assignDate || undefined)
       .then((r) => setDayShifts(r.shifts))
       .catch(() => setDayShifts([]))
+    void api.vehicleTypes().then((r) => setTypes(r.vehicleTypes)).catch(() => setTypes([]))
+    void api.batteries().then((r) => setBatteries(r.batteries)).catch(() => setBatteries([]))
   }
   useEffect(load, [assignDate, branchId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const nameOfDriver = (id: string): string => drivers.find((d) => d.id === id)?.fullNameAr ?? id.slice(0, 8)
+  const nameOfType = (id: string): string => {
+    const type = types.find((ty) => ty.id === id)
+    return type ? (lang === 'ar' ? type.nameAr : type.nameEn) : '—'
+  }
+  const packsOn = (vehicleId: string): Battery[] =>
+    batteries.filter((b) => b.vehicleId === vehicleId && b.active).sort((a, b) => (a.slotNo ?? 0) - (b.slotNo ?? 0))
   const codeOfVehicle = (id: string): string => vehicles.find((v) => v.id === id)?.code ?? id.slice(0, 8)
+
+  useEffect(() => {
+    if (!newVehicle.vehicleTypeId) {
+      setPreview(null)
+      return
+    }
+    // Asked of the server rather than computed here: a preview that derives the number
+    // differently from the write would be worse than showing no preview at all.
+    void api
+      .nextVehicleNumber(newVehicle.vehicleTypeId)
+      .then((r) => setPreview(r.code))
+      .catch(() => setPreview(null))
+  }, [api, newVehicle.vehicleTypeId, vehicles.length])
 
   /**
    * A shift that never opened still holds its bike, and it never reaches the approval queue. This
@@ -122,23 +170,75 @@ export function Fleet(): ReactNode {
       </Card>
 
       <Card title={t.fleet.vehicles}>
-        <div className="mb-3 flex gap-2">
-          <TextInput placeholder={t.fleet.code} value={newVehicle.code} onChange={(e) => setNewVehicle({ ...newVehicle, code: e.target.value })} className="flex-1" />
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <select
+            className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
+            value={newVehicle.vehicleTypeId}
+            onChange={(e) => setNewVehicle({ ...newVehicle, vehicleTypeId: e.target.value })}
+          >
+            <option value="">{t.fleet.vehicleType}</option>
+            {types
+              .filter((ty) => ty.active)
+              .map((ty) => (
+                <option key={ty.id} value={ty.id}>
+                  {ty.typeNo} — {lang === 'ar' ? ty.nameAr : ty.nameEn}
+                </option>
+              ))}
+          </select>
+          <TextInput
+            placeholder={t.fleet.plateNo}
+            value={newVehicle.plateNo}
+            onChange={(e) => setNewVehicle({ ...newVehicle, plateNo: e.target.value })}
+            className="w-32"
+          />
+          {/* The number is derived, so the operator sees it before committing to it. */}
+          {preview ? (
+            <span className="text-sm text-slate-500">
+              {t.fleet.numberPreview}: <span className="num font-semibold text-brand">{preview}</span>
+            </span>
+          ) : null}
           <Button
             onClick={async () => {
-              await api.post('/vehicles', { ...newVehicle, ...(branchId ? { branchId } : {}) }).catch(() => undefined)
-              setNewVehicle({ code: '', vehicleTypeId: 'e_motorbike' })
+              setVehicleError(null)
+              try {
+                await api.createVehicle({
+                  vehicleTypeId: newVehicle.vehicleTypeId,
+                  plateNo: newVehicle.plateNo || null,
+                })
+                setNewVehicle({ vehicleTypeId: '', plateNo: '' })
+              } catch (err) {
+                const code = (err as { error?: string }).error
+                setVehicleError(code === 'vehicle_type_not_found' ? t.fleet.unknownTypeRefused : (code ?? 'error'))
+              }
               load()
             }}
-            disabled={!newVehicle.code}
+            disabled={!newVehicle.vehicleTypeId}
           >
             +
           </Button>
         </div>
-        <Table head={[t.fleet.code, t.fleet.state, '']}>
+        {vehicleError ? <p className="mb-2 text-sm text-rose-600">{vehicleError}</p> : null}
+        {types.length === 0 ? <p className="mb-2 text-sm text-amber-700">{t.fleet.unknownTypeRefused}</p> : null}
+        <Table head={[t.fleet.vehicleNumber, t.fleet.vehicleType, t.battery.title, t.fleet.state, '']}>
           {vehicles.map((v) => (
             <tr key={v.id}>
-              <td className="px-3 py-1 num">{v.code}</td>
+              <td className="px-3 py-1 num font-semibold">{v.code}</td>
+              <td className="px-3 py-1 text-slate-500">{nameOfType(v.vehicleTypeId)}</td>
+              <td className="px-3 py-1">
+                {/* How many packs this bike carries — the same COUNT the shift gate reads, so what
+                    the manager sees here is exactly what the driver will be asked to photograph. */}
+                {packsOn(v.id).length === 0 ? (
+                  <span className="text-xs text-amber-700">{t.battery.noneFitted}</span>
+                ) : (
+                  <div className="flex flex-wrap gap-1">
+                    {packsOn(v.id).map((b) => (
+                      <Badge key={b.id} tone="sky">
+                        {b.slotNo}: {b.capacityAh}Ah
+                      </Badge>
+                    ))}
+                  </div>
+                )}
+              </td>
               <td className="px-3 py-1">
                 <Badge tone={vehTone[v.state] ?? 'slate'}>{t.fleet.vehicleStates[v.state]}</Badge>
               </td>
@@ -257,6 +357,113 @@ export function Fleet(): ReactNode {
             ))}
           </Table>
         )}
+      </Card>
+
+      {/*
+        Packs are assets, not attributes: they are the expensive consumable, they move between
+        bikes, and the BMS shows a serial. Fitting one means BOTH a bike and a slot — the API
+        refuses half of that, so this form asks for them together.
+      */}
+      <Card title={t.battery.title}>
+        <div className="mb-3 flex flex-wrap gap-2">
+          <TextInput
+            placeholder={t.battery.serial}
+            value={newBattery.serialNo}
+            onChange={(e) => setNewBattery({ ...newBattery, serialNo: e.target.value })}
+            className="flex-1"
+          />
+          <select
+            className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
+            value={newBattery.capacityAh}
+            onChange={(e) => setNewBattery({ ...newBattery, capacityAh: e.target.value })}
+          >
+            {['30', '50'].map((ah) => (
+              <option key={ah} value={ah}>
+                {ah} Ah
+              </option>
+            ))}
+          </select>
+          <Button
+            onClick={async () => {
+              setBatteryError(null)
+              try {
+                await api.createBattery({
+                  serialNo: newBattery.serialNo || null,
+                  capacityAh: Number(newBattery.capacityAh),
+                })
+                setNewBattery({ serialNo: '', capacityAh: '50' })
+              } catch (err) {
+                setBatteryError((err as { error?: string }).error ?? 'error')
+              }
+              load()
+            }}
+          >
+            {t.battery.add}
+          </Button>
+        </div>
+        {batteryError ? <p className="mb-2 text-sm text-rose-600">{batteryError}</p> : null}
+
+        <Table head={[t.battery.serial, t.battery.capacity, t.fleet.vehicles, t.battery.slot, t.fleet.state]}>
+          {batteries.map((b) => (
+            <tr key={b.id}>
+              <td className="px-3 py-1 num text-xs">{b.serialNo ?? '—'}</td>
+              <td className="px-3 py-1 num">{b.capacityAh} Ah</td>
+              <td className="px-3 py-1">
+                <select
+                  className="rounded border border-slate-300 px-2 py-1 text-xs"
+                  value={b.vehicleId ?? ''}
+                  onChange={async (e) => {
+                    setBatteryError(null)
+                    const vehicleId = e.target.value || null
+                    try {
+                      // Fitted means both, spare means neither — send them together or the API
+                      // refuses with battery_half_fitted.
+                      await api.updateBattery(b.id, {
+                        vehicleId,
+                        slotNo: vehicleId === null ? null : (b.slotNo ?? 1),
+                      })
+                    } catch (err) {
+                      setBatteryError((err as { error?: string }).error ?? 'error')
+                    }
+                    load()
+                  }}
+                >
+                  <option value="">{t.battery.spare}</option>
+                  {vehicles.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.code}
+                    </option>
+                  ))}
+                </select>
+              </td>
+              <td className="px-3 py-1">
+                <select
+                  className="rounded border border-slate-300 px-2 py-1 text-xs"
+                  value={b.slotNo ?? ''}
+                  disabled={b.vehicleId === null}
+                  onChange={async (e) => {
+                    setBatteryError(null)
+                    try {
+                      await api.updateBattery(b.id, { slotNo: Number(e.target.value) })
+                    } catch (err) {
+                      setBatteryError((err as { error?: string }).error ?? 'error')
+                    }
+                    load()
+                  }}
+                >
+                  <option value="">—</option>
+                  <option value="1">1</option>
+                  <option value="2">2</option>
+                </select>
+              </td>
+              <td className="px-3 py-1">
+                <Badge tone={b.state === 'ready' ? 'green' : b.state === 'retired' ? 'slate' : 'amber'}>
+                  {t.battery.states[b.state]}
+                </Badge>
+              </td>
+            </tr>
+          ))}
+        </Table>
       </Card>
     </div>
   )

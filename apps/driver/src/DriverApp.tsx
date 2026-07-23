@@ -11,7 +11,14 @@ interface Assignment {
   assigned?: boolean
   liveShiftId: string | null
   liveShiftState: string | null
-  vehicles: Array<{ id: string; code: string; state: string; busy?: boolean }>
+  vehicles: Array<{
+    id: string
+    code: string
+    state: string
+    busy?: boolean
+    /** The packs fitted to this bike — the same list the BR5 gate counts. */
+    batteries?: Array<{ id: string; slotNo: number | null; capacityAh: number; serialNo: string | null }>
+  }>
 }
 
 /**
@@ -110,7 +117,10 @@ export function DriverApp(): ReactNode {
   return (
     <div>
       {bar}
-      <ShiftFlow assignment={{ driverId: session.driverId, vehicleId, shiftNo: 1 }} />
+      <ShiftFlow
+        assignment={{ driverId: session.driverId, vehicleId, shiftNo: 1 }}
+        batteries={assignment?.vehicles.find((v) => v.id === vehicleId)?.batteries ?? []}
+      />
     </div>
   )
 }
