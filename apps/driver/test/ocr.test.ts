@@ -406,3 +406,48 @@ describe('the gauge: value above, caption below', () => {
     expect(parseBms(both).percent).toBe(100)
   })
 })
+
+/**
+ * A gauge whose digits arrive as SEPARATE WORDS.
+ *
+ * Sparse-text mode does no layout analysis and readily returns isolated glyphs one at a time, so
+ * «100» came off a real phone as `1`, `0`, `0`. Taking the first word gave a charge of **1** — a
+ * perfectly plausible number, stored as a real reading, with nothing at all to show it was wrong.
+ * That is the worst kind of failure: not a blank field, a confident lie.
+ */
+describe('a number split across words is rebuilt, not truncated', () => {
+  const split = (glyphs: Array<[string, number, number]>): OcrLine[] => [
+    line('الطاقة المتبقية', [['الطاقة', 120, 190], ['المتبقية', 195, 265]], 260, 24),
+    line(glyphs.map(([g]) => g).join(''), glyphs, 150, 96),
+  ]
+
+  it('reads 100 when it arrives as 1, 0, 0', () => {
+    expect(parseBms(split([['1', 110, 150], ['0', 155, 200], ['0', 205, 250]])).percent).toBe(100)
+  })
+
+  it('reads it with the % as a fourth glyph', () => {
+    expect(parseBms(split([['1', 110, 150], ['0', 155, 200], ['0', 205, 250], ['%', 252, 268]])).percent).toBe(100)
+  })
+
+  it('reads a part charge split the same way', () => {
+    expect(parseBms(split([['4', 110, 150], ['7', 155, 200]])).percent).toBe(47)
+  })
+
+  it('refuses to fuse a label into the number beside it', () => {
+    // «T2» and «33.6» joined blindly would read as two hundred and thirty-three. Only a run that
+    // is nothing BUT a number gets rebuilt.
+    const row = line('T2: 33.6℃', [['T2:', 40, 90], ['33.6℃', 95, 190]], 800, 24)
+    expect(parseBms([row]).t2Dc).toBe(336)
+  })
+
+  it('the size heuristic rebuilds the headline too, rather than reporting 1', () => {
+    // No caption at all, so only the "biggest number on the page" rule can find it.
+    const page = [
+      line('100', [['1', 110, 150], ['0', 155, 200], ['0', 205, 250]], 150, 96),
+      line('81.48V 0A 0.00W 1', [
+        ['81.48V', 40, 150], ['0A', 250, 300], ['0.00W', 420, 520], ['1', 640, 660],
+      ], 600, 24),
+    ]
+    expect(parseBms(page).percent).toBe(100)
+  })
+})

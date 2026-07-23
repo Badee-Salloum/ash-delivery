@@ -823,20 +823,28 @@ export function parseBms(input: readonly OcrLine[] | string, profile: BmsProfile
  * median glyph height on the page, which rules out every figure sitting in an ordinary card.
  */
 function biggestPercentage(lines: readonly OcrLine[]): number | null {
-  const words = lines.flatMap((l) => l.words)
-  const heights = words.map((w) => w.y1 - w.y0).filter((h) => h > 0).sort((a, b) => a - b)
+  const heights = lines
+    .flatMap((l) => l.words)
+    .map((w) => w.y1 - w.y0)
+    .filter((h) => h > 0)
+    .sort((a, b) => a - b)
   if (heights.length < 4) return null
   const median = heights[Math.floor(heights.length / 2)]!
 
   let best: { value: number; height: number } | null = null
-  for (const word of words) {
-    const height = word.y1 - word.y0
-    if (height < median * 1.6) continue
-    // A whole number only: `100`, `85`, and optionally the % the recogniser may have caught.
-    const match = /^(\d{1,3})%?$/.exec(normalise(word.text))
-    if (!match) continue
-    const value = Number(match[1])
-    if (value < 0 || value > 100) continue
+  for (const line of lines) {
+    // Big glyphs on one line, left to right. A gauge's «100» may arrive as three separate words,
+    // so the run is rebuilt before it is read — otherwise the biggest number on the page is `1`.
+    const big = line.words.filter((w) => w.y1 - w.y0 >= median * 1.6).sort((a, b) => a.x0 - b.x0)
+    if (big.length === 0) continue
+
+    const value = joinGlyphs(big)
+    if (value === null) continue
+    // A WHOLE number 0–100: a charge is never written 81.48, which is what keeps the pack voltage
+    // out of this.
+    if (!Number.isInteger(value) || value < 0 || value > 100) continue
+
+    const height = Math.max(...big.map((w) => w.y1 - w.y0))
     if (!best || height > best.height) best = { value, height }
   }
   return best?.value ?? null
@@ -904,11 +912,35 @@ function spanOfLabel(line: OcrLine, label: string): { x0: number; x1: number } |
 /** The first number on `line` whose word overlaps `span`. A null span accepts the whole line. */
 function numberInSpan(line: OcrLine, span: { x0: number; x1: number } | null): number | null {
   if (span === null || line.words.length === 0) return numberIn(line.text)
-  for (const word of line.words) {
-    const overlaps = word.x0 <= span.x1 && word.x1 >= span.x0
-    if (!overlaps) continue
+
+  const overlapping = line.words
+    .filter((w) => w.x0 <= span.x1 && w.x1 >= span.x0)
+    .sort((a, b) => a.x0 - b.x0)
+  if (overlapping.length === 0) return null
+
+  // Sparse-text mode returns isolated glyphs as SEPARATE words, so a gauge reading «100» arrives
+  // as `1`, `0`, `0`. Taking the first word gave a charge of 1 — a plausible number, stored as a
+  // real reading, with nothing to show it was wrong. Digits run left to right even on an RTL page,
+  // so joining by ascending x rebuilds the figure.
+  const joined = joinGlyphs(overlapping)
+  if (joined !== null) return joined
+
+  for (const word of overlapping) {
     const value = numberIn(word.text)
     if (value !== null) return value
   }
   return null
+}
+
+/**
+ * Rebuild one number from a run of words, when the run is nothing BUT a number.
+ *
+ * Guarded on purpose: concatenating indiscriminately would fuse «T2» and «33.6» into `T233.6` and
+ * read a temperature of two hundred and thirty-three. Only a run whose every character belongs to
+ * a number is joined; anything else falls back to reading the words one at a time.
+ */
+function joinGlyphs(words: ReadonlyArray<{ text: string }>): number | null {
+  const text = words.map((w) => normalise(w.text)).join('')
+  if (text === '' || !/^[0-9.,%]+$/.test(text)) return null
+  return numberIn(text)
 }
