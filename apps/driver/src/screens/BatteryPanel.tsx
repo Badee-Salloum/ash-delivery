@@ -212,6 +212,7 @@ export function BatteryPanel({
 
             <OcrStatus
               state={state}
+              missing={FIELDS.filter((f) => state.values[f.key].trim() === '').length}
               onRetry={files[battery.id] ? () => void runOcr(battery, files[battery.id]!) : undefined}
             />
 
@@ -256,48 +257,58 @@ function matchesOcr(state: PackState): boolean {
  * whether to wait, retry, or just type; and a report of "it didn't autofill" arrives with a reason
  * attached.
  */
-function OcrStatus({ state, onRetry }: { state: PackState; onRetry?: (() => void) | undefined }): ReactNode {
+function OcrStatus({
+  state,
+  missing,
+  onRetry,
+}: {
+  state: PackState
+  /** How many figures are still blank. A read is only really done when this is zero. */
+  missing: number
+  onRetry?: (() => void) | undefined
+}): ReactNode {
   const { t } = useApp()
   if (state.outcome === 'idle') return null
 
   if (state.outcome === 'reading') {
     return <p className="text-center text-sm text-slate-400">{t.shift.reading}…</p>
   }
-  if (state.outcome === 'ok') {
-    return (
-      <p className="text-center text-sm font-medium text-emerald-700">
-        {t.battery.ocrOk.replace('{{n}}', String(state.fieldsFound))}
-      </p>
-    )
-  }
 
-  const message =
-    state.outcome === 'timeout'
+  const failed = state.outcome !== 'ok'
+  const message = failed
+    ? state.outcome === 'timeout'
       ? t.battery.ocrTimeout
       : state.outcome === 'unavailable'
         ? t.battery.ocrUnavailable
         : t.battery.ocrNoFields
+    : t.battery.ocrOk.replace('{{n}}', String(state.fieldsFound))
 
   return (
     <div className="flex flex-col gap-2">
-      <p className="text-center text-sm font-medium text-amber-700">{message}</p>
-      {onRetry ? (
-        <Button variant="ghost" onClick={onRetry}>
-          {t.battery.ocrRetry}
-        </Button>
-      ) : null}
+      <p className={`text-center text-sm font-medium ${failed ? 'text-amber-700' : 'text-emerald-700'}`}>{message}</p>
+
       {/*
-        What the reader actually saw. Collapsed, so a driver only meets it if he goes looking —
-        but present, because a report of "it didn't fill" with this attached is a diagnosis, and
-        without it is a guess. It is the difference between one more round and five.
+        Retry and the recognised text are offered whenever anything is still blank — NOT only on
+        total failure, which is what this used to do. Every real read has been a PARTIAL success:
+        three figures found, the charge missing, `outcome === 'ok'`, and an early return that hid
+        both controls. The one case anybody needed to debug was the one case with no diagnostics.
       */}
-      {state.text.trim() !== '' ? (
-        <details className="rounded-lg bg-slate-100 px-3 py-2">
-          <summary className="cursor-pointer text-xs text-slate-500">{t.battery.ocrSawTitle}</summary>
-          <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs text-slate-600">
-            {state.text}
-          </pre>
-        </details>
+      {failed || missing > 0 ? (
+        <>
+          {onRetry ? (
+            <Button variant="ghost" onClick={onRetry}>
+              {t.battery.ocrRetry}
+            </Button>
+          ) : null}
+          <details className="rounded-lg bg-slate-100 px-3 py-2">
+            <summary className="cursor-pointer text-xs text-slate-500">{t.battery.ocrSawTitle}</summary>
+            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-slate-600">
+              {/* An empty result is itself the answer: the glyphs were never recognised, and no
+                  parser change can reach that. Say so rather than rendering nothing. */}
+              {state.text.trim() === '' ? t.battery.ocrSawNothing : state.text}
+            </pre>
+          </details>
+        </>
       ) : null}
     </div>
   )

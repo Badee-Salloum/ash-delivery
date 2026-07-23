@@ -254,6 +254,7 @@ export const en: Catalog = {
     ocrNoFields: 'No field was recognised in the screenshot — type the numbers in',
     ocrRetry: 'Read again',
     ocrSawTitle: 'What the reader saw',
+    ocrSawNothing: 'The reader produced no text from this image at all',
     profile: 'Battery app',
     profileHint: 'Naming the battery app makes reading the screenshot faster and more accurate',
     profiles: { auto: 'Automatic', table_en: 'English table app', cards_ar: 'Arabic card app' },
