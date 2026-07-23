@@ -247,6 +247,7 @@ export const en: Catalog = {
     reading: 'Battery reading',
     bmsShot: 'Battery app screenshot',
     bmsHint: 'Pick the battery app screenshot from your gallery',
+    requiredHint: '* Remaining charge is required to start the shift — the rest is optional',
     ocrOk: 'Read {{n}} fields from the screenshot',
     ocrTimeout: 'Could not read it — it took too long. Type the numbers in',
     ocrUnavailable: 'The reader would not start — type the numbers in',

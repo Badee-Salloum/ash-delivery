@@ -213,7 +213,12 @@ const OCR_MAX_DIMENSION = 2000
  * pulls those apart. A page that is already black on white has nothing to stretch and comes out
  * unchanged, so this is safe for both apps.
  */
-function normaliseContrast(ctx: OffscreenCanvasRenderingContext2D, width: number, height: number): void {
+function normaliseContrast(
+  ctx: OffscreenCanvasRenderingContext2D,
+  width: number,
+  height: number,
+  invert = false,
+): void {
   const image = ctx.getImageData(0, 0, width, height)
   const px = image.data
   const histogram = new Uint32Array(256)
@@ -248,7 +253,8 @@ function normaliseContrast(ctx: OffscreenCanvasRenderingContext2D, width: number
   const scale = 255 / (high - low)
   for (let i = 0; i < px.length; i += 4) {
     const stretched = (px[i]! - low) * scale
-    const level = stretched < 0 ? 0 : stretched > 255 ? 255 : stretched
+    const clamped = stretched < 0 ? 0 : stretched > 255 ? 255 : stretched
+    const level = invert ? 255 - clamped : clamped
     px[i] = level
     px[i + 1] = level
     px[i + 2] = level
@@ -264,7 +270,7 @@ function normaliseContrast(ctx: OffscreenCanvasRenderingContext2D, width: number
  * of. Never upscales — a 1080-wide screenshot is already about right and enlarging costs time for
  * no accuracy. Falls back to the original file wherever canvas is unavailable.
  */
-export async function prepareForOcr(file: Blob): Promise<Blob> {
+export async function prepareForOcr(file: Blob, invert = false): Promise<Blob> {
   if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas !== 'function') return file
   try {
     const bitmap = await createImageBitmap(file)
@@ -275,7 +281,7 @@ export async function prepareForOcr(file: Blob): Promise<Blob> {
     const ctx = canvas.getContext('2d')
     if (!ctx) return file
     ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
-    normaliseContrast(ctx, canvas.width, canvas.height)
+    normaliseContrast(ctx, canvas.width, canvas.height, invert)
     return await canvas.convertToBlob({ type: 'image/png' })
   } catch {
     return file
@@ -572,37 +578,64 @@ export async function readBms(
   const profile = profileById(options.profileId)
   const timeoutMs = options.timeoutMs ?? BMS_TIMEOUT_MS
   const started = now()
+  const source = toBlob(image)
   let text = ''
 
-  try {
-    const prepared = await prepareForOcr(toBlob(image))
-
-    // Each profile names the segmentation modes worth trying, best first. A second pass only
-    // happens when the first found nothing at all, so a page that reads cleanly costs one pass.
-    for (const [attempt, psm] of profile.psm.entries()) {
-      const result = await recognize(
-        prepared,
-        {
-          // Letters are mandatory: without them no label survives, and label-anchored parsing is
-          // not merely unimplemented — it is impossible. An empty whitelist means "no
-          // restriction", which is also what Arabic needs; a whitelist containing Arabic script
-          // is a known source of LSTM garbage.
-          whitelist: '',
-          psm,
-        },
-        timeoutMs,
-      )
-      // Keep the LAST attempt's text: it is what «ما قرأه النظام» shows, and the most recent
-      // attempt is the one whose failure the driver is looking at.
-      text = result.text
-      const reading = parseBms(result.lines, profile)
-      const fieldsFound = Object.values(reading).filter((v) => v !== null).length
-      if (fieldsFound > 0) return { ok: true, reading, fieldsFound, ms: now() - started, text }
-      if (attempt === profile.psm.length - 1) break
+  // Findings are MERGED across passes rather than taken from the first that works, because a page
+  // can need two of them. On the Arabic app everything on the white cards — voltage, cycles,
+  // temperatures — reads on the first pass, and everything on the cyan panel reads on none of
+  // them: light text on a darker background is INVERTED, and Tesseract wants dark on light. The
+  // charge lives on that panel, which is exactly why a phone came back with three fields and no
+  // charge. An inverted pass reads the panel and loses the cards, so neither pass alone is enough.
+  const merged: BmsReading = {
+    percent: null,
+    packMillivolts: null,
+    cycleCount: null,
+    remainCapacityDah: null,
+    fullCapacityDah: null,
+    mosTempDc: null,
+    t1Dc: null,
+    t2Dc: null,
+  }
+  const absorb = (reading: BmsReading): void => {
+    for (const key of Object.keys(merged) as Array<keyof BmsReading>) {
+      if (merged[key] === null && reading[key] !== null) merged[key] = reading[key]
     }
-    return { ok: false, reason: 'no_fields', ms: now() - started, text }
+  }
+  const found = (): number => Object.values(merged).filter((v) => v !== null).length
+
+  try {
+    // Normal first, for every segmentation the profile lists; then inverted, which is only worth
+    // its time when the charge — the one field the shift gate requires — is still missing.
+    const passes: Array<{ psm: number; invert: boolean }> = [
+      ...profile.psm.map((psm) => ({ psm, invert: false })),
+      { psm: profile.psm[0] ?? 3, invert: true },
+      // Sparse text, inverted, as the last word on the charge. PSM 11 does no layout analysis and
+      // simply hunts for text anywhere on the page — which is what a big isolated number inside a
+      // ring is. Page segmentation tends to write that ring off as a graphic and never look in it.
+      { psm: 11, invert: true },
+    ]
+
+    for (const pass of passes) {
+      if (pass.invert && merged.percent !== null) break
+      // A profile's later segmentation modes are a fallback, not a routine second pass: if the
+      // first one already read the page there is nothing to gain and a driver waiting.
+      if (!pass.invert && pass.psm !== passes[0]!.psm && found() > 0) continue
+
+      const prepared = await prepareForOcr(source, pass.invert)
+      const result = await recognize(prepared, { whitelist: '', psm: pass.psm }, timeoutMs)
+      // «ما قرأه النظام» shows the pass that read the most, which is the one worth looking at.
+      if (result.text.length > text.length) text = result.text
+      absorb(parseBms(result.lines, profile))
+      if (found() === Object.keys(merged).length) break
+    }
+
+    if (found() === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text }
+    return { ok: true, reading: merged, fieldsFound: found(), ms: now() - started, text }
   } catch (err) {
     const reason: OcrFailure = err instanceof Error && err.message === 'ocr timeout' ? 'timeout' : 'unavailable'
+    // A pass that timed out after earlier passes succeeded should not throw those findings away.
+    if (found() > 0) return { ok: true, reading: merged, fieldsFound: found(), ms: now() - started, text }
     return { ok: false, reason, ms: now() - started, text }
   }
 }

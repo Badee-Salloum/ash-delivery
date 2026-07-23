@@ -35,7 +35,9 @@ export interface FittedBattery {
 
 /** The fields, in the order a driver reads them off the screen. */
 const FIELDS = [
-  { key: 'percent', label: 'percent', unit: '%', scale: 1, decimals: 0 },
+  // `required` is the shift gate's own rule: a pack with no charge reading cannot open a shift.
+  // Everything below it is pack health — worth having, never worth blocking a driver over.
+  { key: 'percent', label: 'percent', unit: '%', scale: 1, decimals: 0, required: true },
   { key: 'packMillivolts', label: 'voltage', unit: 'V', scale: 1000, decimals: 2 },
   { key: 'cycleCount', label: 'cycles', unit: '', scale: 1, decimals: 0 },
   { key: 'remainCapacityDah', label: 'remainCapacity', unit: 'Ah', scale: 10, decimals: 1 },
@@ -215,8 +217,12 @@ export function BatteryPanel({
 
             <Card className="flex flex-col gap-3">
               <p className="text-sm text-slate-400">{t.battery.bmsHint}</p>
+              <p className="text-xs text-slate-400">{t.battery.requiredHint}</p>
               {FIELDS.map((f) => (
-                <Field key={f.key} label={`${t.battery[f.label]}${f.unit ? ` (${f.unit})` : ''}`}>
+                <Field
+                  key={f.key}
+                  label={`${t.battery[f.label]}${f.unit ? ` (${f.unit})` : ''}${'required' in f ? ' *' : ''}`}
+                >
                   <TextInput
                     inputMode="decimal"
                     value={state.values[f.key]}
