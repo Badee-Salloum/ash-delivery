@@ -42,6 +42,16 @@ export interface ShiftStateView {
   orders: Array<{ providerOrderNo: string; payMode: 'cash' | 'electronic' | 'free'; fee: string; zone: string | null }>
 }
 
+/**
+ * The BMS phone apps a pack can ship with.
+ *
+ * Mirrors BMS_PROFILES in the driver app, which is where the label spellings and layout rules
+ * actually live — this is only the picker's vocabulary. `auto` means nobody has said yet and the
+ * reader tries everything, which works but is the slowest and least certain path.
+ */
+export const BMS_PROFILE_IDS = ['auto', 'table_en', 'cards_ar'] as const
+export type BmsProfileId = (typeof BMS_PROFILE_IDS)[number]
+
 /** A battery pack. `vehicleId` and `slotNo` are set together, or it is a spare on the shelf. */
 export interface Battery {
   id: string
@@ -53,6 +63,7 @@ export interface Battery {
   slotNo: number | null
   state: 'ready' | 'charging' | 'maintenance' | 'retired'
   active: boolean
+  bmsProfile: string | null
 }
 
 /**
@@ -309,6 +320,7 @@ export class ApiClient {
     bmsMac?: string | null
     vehicleId?: string | null
     slotNo?: number | null
+    bmsProfile?: string | null
   }) {
     return this.post<Battery>('/batteries', { ...body, ...(this.branchId ? { branchId: this.branchId } : {}) })
   }

@@ -102,6 +102,11 @@ export interface BatteryRecord {
   slotNo: number | null
   state: 'ready' | 'charging' | 'maintenance' | 'retired'
   active: boolean
+  /**
+   * Which BMS phone app this pack ships with, so the reader knows the label spellings and the
+   * layout to expect. `null` means nobody has said, and the reader tries everything.
+   */
+  bmsProfile: string | null
 }
 
 /**

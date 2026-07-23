@@ -98,6 +98,30 @@ async function getWorker(): Promise<Worker> {
 }
 
 /**
+ * Throw the worker away.
+ *
+ * `getWorker`'s catch only ever covered CREATION. Once creation succeeded the cached promise stayed
+ * resolved for the whole session, so a worker that died afterwards — a wasm abort, an OOM on a
+ * phone with little free memory, an error inside recognize — was handed out again on every
+ * subsequent call, which rejected, and OCR reported "unavailable" forever. Pressing «إعادة القراءة»
+ * could never recover it.
+ *
+ * A timeout leaves the worker in the same state for a different reason: the abandoned job keeps
+ * running inside it, so the next job simply queues behind work nobody is waiting for.
+ */
+async function discardWorker(): Promise<void> {
+  const dying = workerPromise
+  workerPromise = null
+  if (!dying) return
+  try {
+    const worker = await dying
+    await worker.terminate()
+  } catch {
+    // It was already broken; that is why we are here.
+  }
+}
+
+/**
  * Download the models and instantiate the wasm, before any deadline starts counting.
  *
  * First use pulls ~9.6 MB over a Damascus connection. Charging that against the recognition
@@ -113,9 +137,12 @@ export async function warmUpOcr(): Promise<boolean> {
   }
 }
 
-/** One line of recognised text, with the boxes its words came from. */
+/** One line of recognised text, with the boxes it and its words came from. */
 export interface OcrLine {
   text: string
+  /** The line's own box. `y` is what lets a label be paired with the value ABOVE it. */
+  y0: number
+  y1: number
   words: Array<{ text: string; x0: number; x1: number }>
 }
 
@@ -133,14 +160,19 @@ export interface OcrLine {
  */
 function linesOf(data: { text?: string; blocks?: unknown }): OcrLine[] {
   const out: OcrLine[] = []
+  type RawBox = { x0: number; y0: number; x1: number; y1: number }
   const blocks = (data.blocks ?? []) as Array<{
-    paragraphs?: Array<{ lines?: Array<{ text?: string; words?: Array<{ text?: string; bbox?: { x0: number; x1: number } }> }> }>
+    paragraphs?: Array<{
+      lines?: Array<{ text?: string; bbox?: RawBox; words?: Array<{ text?: string; bbox?: RawBox }> }>
+    }>
   }>
   for (const block of blocks) {
     for (const paragraph of block.paragraphs ?? []) {
       for (const line of paragraph.lines ?? []) {
         out.push({
           text: line.text ?? '',
+          y0: line.bbox?.y0 ?? 0,
+          y1: line.bbox?.y1 ?? 0,
           words: (line.words ?? []).map((w) => ({
             text: w.text ?? '',
             x0: w.bbox?.x0 ?? 0,
@@ -150,10 +182,11 @@ function linesOf(data: { text?: string; blocks?: unknown }): OcrLine[] {
       }
     }
   }
-  // No blocks (an older core, or a page with no layout): fall back to the flat text.
+  // No blocks (an older core, or a page with no layout): fall back to the flat text. Vertical
+  // pairing needs boxes, so it simply finds nothing here — the same-line pass still works.
   if (out.length === 0) {
-    for (const line of (data.text ?? '').split(/\r?\n/)) {
-      if (line.trim() !== '') out.push({ text: line, words: [] })
+    for (const [i, line] of (data.text ?? '').split(/\r?\n/).entries()) {
+      if (line.trim() !== '') out.push({ text: line, y0: i * 10, y1: i * 10 + 10, words: [] })
     }
   }
   return out
@@ -168,18 +201,78 @@ function linesOf(data: { text?: string; blocks?: unknown }): OcrLine[] {
  */
 const OCR_MAX_DIMENSION = 2000
 
+/**
+ * Flatten a colourful app screenshot into something Tesseract can binarise.
+ *
+ * It thresholds before it recognises, and a BMS app is white and pale-grey text on a saturated
+ * cyan panel — after a naive greyscale that is bright-on-slightly-less-bright, which thresholds to
+ * a blank page. Converting to luminance and then stretching the 5th–95th percentile to full range
+ * pulls those apart. A page that is already black on white has nothing to stretch and comes out
+ * unchanged, so this is safe for both apps.
+ */
+function normaliseContrast(ctx: OffscreenCanvasRenderingContext2D, width: number, height: number): void {
+  const image = ctx.getImageData(0, 0, width, height)
+  const px = image.data
+  const histogram = new Uint32Array(256)
+
+  for (let i = 0; i < px.length; i += 4) {
+    // Rec. 601 luma — cheap, and closer to perceived brightness than a flat average, which is what
+    // decides whether white-on-cyan survives.
+    const y = (px[i]! * 299 + px[i + 1]! * 587 + px[i + 2]! * 114) / 1000
+    const level = y < 0 ? 0 : y > 255 ? 255 : Math.round(y)
+    px[i] = level
+    px[i + 1] = level
+    px[i + 2] = level
+    histogram[level] = (histogram[level] ?? 0) + 1
+  }
+
+  const total = width * height
+  const percentile = (fraction: number): number => {
+    let seen = 0
+    const target = total * fraction
+    for (let level = 0; level < 256; level++) {
+      seen += histogram[level] ?? 0
+      if (seen >= target) return level
+    }
+    return 255
+  }
+  const low = percentile(0.05)
+  const high = percentile(0.95)
+  // Nothing to gain from stretching an image that already spans the range, and a degenerate
+  // span would amplify noise into solid black.
+  if (high - low < 24) return
+
+  const scale = 255 / (high - low)
+  for (let i = 0; i < px.length; i += 4) {
+    const stretched = (px[i]! - low) * scale
+    const level = stretched < 0 ? 0 : stretched > 255 ? 255 : stretched
+    px[i] = level
+    px[i + 1] = level
+    px[i + 2] = level
+  }
+  ctx.putImageData(image, 0, 0)
+}
+
+/**
+ * Prepare a screenshot for recognition: greyscale, contrast-stretched, and downscaled only if it
+ * is larger than the cap.
+ *
+ * PNG, not JPEG: ringing lands on precisely the thin high-contrast strokes a BMS readout is made
+ * of. Never upscales — a 1080-wide screenshot is already about right and enlarging costs time for
+ * no accuracy. Falls back to the original file wherever canvas is unavailable.
+ */
 export async function prepareForOcr(file: Blob): Promise<Blob> {
   if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas !== 'function') return file
   try {
     const bitmap = await createImageBitmap(file)
     const longest = Math.max(bitmap.width, bitmap.height)
-    if (longest <= OCR_MAX_DIMENSION) return file
+    const scale = longest > OCR_MAX_DIMENSION ? OCR_MAX_DIMENSION / longest : 1
 
-    const scale = OCR_MAX_DIMENSION / longest
     const canvas = new OffscreenCanvas(Math.round(bitmap.width * scale), Math.round(bitmap.height * scale))
     const ctx = canvas.getContext('2d')
     if (!ctx) return file
     ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+    normaliseContrast(ctx, canvas.width, canvas.height)
     return await canvas.convertToBlob({ type: 'image/png' })
   } catch {
     return file
@@ -192,23 +285,22 @@ export async function prepareForOcr(file: Blob): Promise<Blob> {
  * The timeout rejects and clears its own timer. The abandoned `recognize` cannot be cancelled —
  * wasm has no interrupt — but the timer no longer fires unobserved after every successful read.
  */
-async function recognize(
+async function recognizeOnce(
   image: Blob,
   profile: Profile,
   timeoutMs: number,
 ): Promise<{ text: string; lines: OcrLine[] }> {
   const worker = await getWorker()
-  await worker.setParameters({
-    tessedit_char_whitelist: profile.whitelist,
-    tessedit_pageseg_mode: String(profile.psm),
-    preserve_interword_spaces: '1',
-  })
-
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
+    await worker.setParameters({
+      tessedit_char_whitelist: profile.whitelist,
+      tessedit_pageseg_mode: String(profile.psm),
+      preserve_interword_spaces: '1',
+    })
     const result = await Promise.race([
       // `blocks: true` is REQUIRED. The default output is `{ text: true }` and nothing else, which
-      // is why every previous attempt to read line geometry got an empty array.
+      // is why every earlier attempt to read line geometry got an empty array.
       worker.recognize(image, {}, { text: true, blocks: true }),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error('ocr timeout')), timeoutMs)
@@ -216,8 +308,34 @@ async function recognize(
     ])
     const data = (result as { data: { text?: string; blocks?: unknown } }).data
     return { text: data.text ?? '', lines: linesOf(data) }
+  } catch (err) {
+    // Whatever went wrong, this worker is not trustworthy afterwards: a crash leaves it dead, and
+    // a timeout leaves it chewing on a job nobody is waiting for. Drop it either way.
+    await discardWorker()
+    throw err
   } finally {
     if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+/**
+ * Recognise, rebuilding the worker once if the first attempt kills it.
+ *
+ * The retry is here rather than left to the driver because the common case is a single transient
+ * failure, and a driver should not have to understand «إعادة القراءة» to get past one.
+ */
+async function recognize(
+  image: Blob,
+  profile: Profile,
+  timeoutMs: number,
+): Promise<{ text: string; lines: OcrLine[] }> {
+  try {
+    return await recognizeOnce(image, profile, timeoutMs)
+  } catch (err) {
+    // A timeout is a real answer — the page is too slow for the budget — so it is not retried.
+    // Anything else is a broken worker, and the next one is fresh.
+    if (err instanceof Error && err.message === 'ocr timeout') throw err
+    return await recognizeOnce(image, profile, timeoutMs)
   }
 }
 
@@ -284,29 +402,91 @@ export function parseReading(text: string): OcrReading {
 
 // ── The BMS app screenshot ────────────────────────────────────────────────────────────────
 
-/**
- * Every label that can identify a field, in both apps.
- *
- * Matched against a normalised, space-stripped, lowercased line, so `Remain Battery` and
- * `remainbattery` are the same key and an Arabic label survives whatever spacing the OCR invents.
- * Order matters: `remaincapacity` is tried before `batterycapacity` so the more specific label
- * claims its line first.
- */
-const BMS_FIELDS: ReadonlyArray<{
+/** One field the reader knows how to find, and how to turn what it read into what we store. */
+export interface BmsField {
   key: keyof BmsReading
   labels: readonly string[]
   /** The reading as printed → the scaled integer we store. */
   scale: (n: number) => number
   max: number
-}> = [
-  { key: 'remainCapacityDah', labels: ['remaincapacity', 'السعةالمتبقية'], scale: (n) => Math.round(n * 10), max: 100_000 },
-  { key: 'fullCapacityDah', labels: ['batterycapacity', 'fullcapacity', 'السعةالكلية'], scale: (n) => Math.round(n * 10), max: 100_000 },
-  { key: 'percent', labels: ['remainbattery', 'soc', 'الطاقةالمتبقية', 'نسبةالشحن'], scale: (n) => Math.round(n), max: 100 },
-  { key: 'cycleCount', labels: ['cyclecount', 'عددالدورات', 'الدورات'], scale: (n) => Math.round(n), max: 100_000 },
-  { key: 'mosTempDc', labels: ['mostemp', 'حرارةmos', 'mos'], scale: (n) => Math.round(n * 10), max: 2_000 },
-  { key: 't1Dc', labels: ['batteryt1', 't1'], scale: (n) => Math.round(n * 10), max: 2_000 },
-  { key: 't2Dc', labels: ['batteryt2', 't2'], scale: (n) => Math.round(n * 10), max: 2_000 },
+}
+
+/**
+ * A BMS app, described.
+ *
+ * The packs do not all come with the same app, and the apps do not agree on anything: one is a
+ * dense two-column table in English on white, another is a card grid in Arabic on cyan with the
+ * caption UNDER its reading. A single universal parser has to guess at all of it; a named profile
+ * per battery type does not.
+ *
+ * `auto` is what runs when a pack has no profile assigned yet — every label from every profile,
+ * both layout strategies, both segmentation modes. It is the slowest and the least certain, which
+ * is exactly why assigning the real profile is worth doing.
+ */
+export interface BmsProfile {
+  id: string
+  /** Shown in the admin when picking a profile for a battery. */
+  nameAr: string
+  nameEn: string
+  fields: readonly BmsField[]
+  /**
+   * `inline`  label and value share a line — «Cycle Count: 8»
+   * `cards`   value on one line, caption on the next, in columns
+   * `both`    try inline first, then columns
+   */
+  layout: 'inline' | 'cards' | 'both'
+  /** Page segmentation to try, in order. 3 = automatic page, 6 = one uniform block. */
+  psm: readonly number[]
+}
+
+const dah = (n: number): number => Math.round(n * 10)
+const whole = (n: number): number => Math.round(n)
+
+/** Fields shared by every app seen so far; a profile adds its own label spellings on top. */
+const COMMON_FIELDS: readonly BmsField[] = [
+  { key: 'remainCapacityDah', labels: ['remaincapacity', 'السعةالمتبقية'], scale: dah, max: 100_000 },
+  { key: 'fullCapacityDah', labels: ['batterycapacity', 'fullcapacity', 'السعةالكلية'], scale: dah, max: 100_000 },
+  { key: 'percent', labels: ['remainbattery', 'soc', 'الطاقةالمتبقية', 'نسبةالشحن'], scale: whole, max: 100 },
+  { key: 'cycleCount', labels: ['cyclecount', 'عددالدورات', 'الدورات'], scale: whole, max: 100_000 },
+  { key: 'packMillivolts', labels: ['totalvoltage', 'إجماليالجهد', 'الجهدالكلي'], scale: (n) => Math.round(n * 1000), max: 2_000_000 },
+  { key: 'mosTempDc', labels: ['mostemp', 'حرارةmos', 'mos'], scale: dah, max: 2_000 },
+  { key: 't1Dc', labels: ['batteryt1', 't1'], scale: dah, max: 2_000 },
+  { key: 't2Dc', labels: ['batteryt2', 't2'], scale: dah, max: 2_000 },
 ]
+
+export const BMS_PROFILES: readonly BmsProfile[] = [
+  {
+    id: 'auto',
+    nameAr: 'تلقائي',
+    nameEn: 'Automatic',
+    fields: COMMON_FIELDS,
+    layout: 'both',
+    // Automatic page segmentation first: a card grid with a gauge and a nav bar is not one block,
+    // and PSM 6 forces it to be read as though it were.
+    psm: [3, 6],
+  },
+  {
+    // The dark English table: «Remain Battery: 100%   MOS Temp: 33.9C», two columns per row.
+    id: 'table_en',
+    nameAr: 'تطبيق إنجليزي (جدول)',
+    nameEn: 'English table app',
+    fields: COMMON_FIELDS,
+    layout: 'inline',
+    psm: [6, 3],
+  },
+  {
+    // The cyan Arabic app: readings in cards with the caption underneath, right to left.
+    id: 'cards_ar',
+    nameAr: 'تطبيق عربي (بطاقات)',
+    nameEn: 'Arabic card app',
+    fields: COMMON_FIELDS,
+    layout: 'cards',
+    psm: [3, 6],
+  },
+]
+
+export const profileById = (id: string | null | undefined): BmsProfile =>
+  BMS_PROFILES.find((p) => p.id === id) ?? BMS_PROFILES[0]!
 
 const normalise = (s: string): string =>
   s
@@ -314,6 +494,32 @@ const normalise = (s: string): string =>
     .replace(/[\s:_]/g, '')
     // Arabic-Indic digits, in case the app renders numerals in them.
     .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+
+/**
+ * The number belonging to `label` inside `cell`.
+ *
+ * Searching the whole cell from the start breaks the moment one line carries several labelled
+ * values — `MOS: 36.9℃  T1: 33.7℃  T2: 33.6℃` gave T1 a reading of 36.9, because that is simply
+ * the first number in the row. And the label cannot merely be deleted first: with spaces stripped,
+ * «t1» and «33.7» fuse into `t133.7`, which reads as one hundred and thirty-three.
+ *
+ * So: cut at the label, look FORWARD first (a left-to-right «label: value»), then BACKWARD (the
+ * Arabic layout, where the value precedes its caption).
+ */
+const numberForLabel = (cell: string, label: string): number | null => {
+  const at = cell.indexOf(label)
+  if (at < 0) return null
+  const forward = numberIn(cell.slice(at + label.length))
+  if (forward !== null) return forward
+  return lastNumberIn(cell.slice(0, at))
+}
+
+const lastNumberIn = (s: string): number | null => {
+  const normalised = s.replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660)).replace(/,/g, '')
+  const all = [...normalised.matchAll(/-?\d+(?:\.\d+)?/g)]
+  const last = all[all.length - 1]
+  return last ? Number(last[0]) : null
+}
 
 const numberIn = (s: string): number | null => {
   const normalised = s.replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660)).replace(/,/g, '')
@@ -329,30 +535,42 @@ const numberIn = (s: string): number | null => {
  * 10–13 px of x-height — under the LSTM's recognition floor, with ringing on exactly the thin,
  * high-contrast glyphs this depends on. No tesseract parameter compensates for that.
  */
-export async function readBms(image: Blob | Uint8Array, timeoutMs = BMS_TIMEOUT_MS): Promise<OcrOutcome<BmsReading>> {
+export async function readBms(
+  image: Blob | Uint8Array,
+  options: { profileId?: string | null; timeoutMs?: number } = {},
+): Promise<OcrOutcome<BmsReading>> {
+  const profile = profileById(options.profileId)
+  const timeoutMs = options.timeoutMs ?? BMS_TIMEOUT_MS
   const started = now()
   let text = ''
+
   try {
     const prepared = await prepareForOcr(toBlob(image))
-    const result = await recognize(
-      prepared,
-      {
-        // Letters are mandatory: without them no label survives, and label-anchored parsing is not
-        // merely unimplemented — it is impossible. An empty whitelist means "no restriction",
-        // which is also what Arabic needs; a whitelist containing Arabic script is a known source
-        // of LSTM garbage.
-        whitelist: '',
-        // A dense, regular two-column readout. SPARSE_TEXT (11) does no layout analysis and would
-        // scramble the row grouping the pairing depends on; 6 is a uniform block of text.
-        psm: 6,
-      },
-      timeoutMs,
-    )
-    text = result.text
-    const reading = parseBms(result.lines)
-    const fieldsFound = Object.values(reading).filter((v) => v !== null).length
-    if (fieldsFound === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text }
-    return { ok: true, reading, fieldsFound, ms: now() - started, text }
+
+    // Each profile names the segmentation modes worth trying, best first. A second pass only
+    // happens when the first found nothing at all, so a page that reads cleanly costs one pass.
+    for (const [attempt, psm] of profile.psm.entries()) {
+      const result = await recognize(
+        prepared,
+        {
+          // Letters are mandatory: without them no label survives, and label-anchored parsing is
+          // not merely unimplemented — it is impossible. An empty whitelist means "no
+          // restriction", which is also what Arabic needs; a whitelist containing Arabic script
+          // is a known source of LSTM garbage.
+          whitelist: '',
+          psm,
+        },
+        timeoutMs,
+      )
+      // Keep the LAST attempt's text: it is what «ما قرأه النظام» shows, and the most recent
+      // attempt is the one whose failure the driver is looking at.
+      text = result.text
+      const reading = parseBms(result.lines, profile)
+      const fieldsFound = Object.values(reading).filter((v) => v !== null).length
+      if (fieldsFound > 0) return { ok: true, reading, fieldsFound, ms: now() - started, text }
+      if (attempt === profile.psm.length - 1) break
+    }
+    return { ok: false, reason: 'no_fields', ms: now() - started, text }
   } catch (err) {
     const reason: OcrFailure = err instanceof Error && err.message === 'ocr timeout' ? 'timeout' : 'unavailable'
     return { ok: false, reason, ms: now() - started, text }
@@ -408,11 +626,14 @@ function withGutters(line: OcrLine): string {
  * the same cell" is right in both directions — and a line's own box is the only reliable way to
  * know what "the same cell" means.
  */
-export function parseBms(input: readonly OcrLine[] | string): BmsReading {
-  const lines: string[] =
+export function parseBms(input: readonly OcrLine[] | string, profile: BmsProfile = BMS_PROFILES[0]!): BmsReading {
+  const lines: OcrLine[] =
     typeof input === 'string'
-      ? input.split(/\r?\n/).filter((l) => l.trim() !== '')
-      : input.map(withGutters).filter((l) => l.trim() !== '')
+      ? input
+          .split(/\r?\n/)
+          .filter((l) => l.trim() !== '')
+          .map((text, i) => ({ text, y0: i * 10, y1: i * 10 + 10, words: [] }))
+      : input.filter((l) => l.text.trim() !== '')
 
   const out: BmsReading = {
     percent: null,
@@ -424,36 +645,63 @@ export function parseBms(input: readonly OcrLine[] | string): BmsReading {
     t1Dc: null,
     t2Dc: null,
   }
-  const text = lines.join('\n')
+  const text = lines.map((l) => l.text).join('\n')
 
-  for (const line of lines) {
-    for (const cell of columnsOf(line)) {
-      const flat = normalise(cell)
-      for (const field of BMS_FIELDS) {
-        if (out[field.key] !== null) continue
-        const label = field.labels.find((l) => flat.includes(l))
-        if (label === undefined) continue
+  const store = (key: keyof BmsReading, field: BmsField, value: number): void => {
+    const scaled = field.scale(value)
+    // A label matched but the number is impossible — that is a misread, not a reading. Leaving it
+    // null makes the gate ask for it, which is right; storing it would look like an answer.
+    if (scaled < 0 || scaled > field.max) return
+    out[key] = scaled
+  }
+
+  // ── Pass 1: label and value in the same cell ────────────────────────────────────────────
+  // The English app's layout, and the Arabic app's temperature row.
+  if (profile.layout !== 'cards') {
+    for (const line of lines) {
+      for (const cell of columnsOf(withGutters(line))) {
+        const flat = normalise(cell)
+        for (const field of profile.fields) {
+          if (out[field.key] !== null) continue
+          const label = field.labels.find((l) => flat.includes(l))
+          if (label === undefined) continue
         // Take the number from what is LEFT after removing the label. Several labels contain a
         // digit of their own — «Battery T2», «T1» — and reading the first number in the raw cell
         // turned `Battery T2: 32.5C` into a temperature of 2 °C.
-        const value = numberIn(flat.replace(label, ' '))
-        if (value === null) continue
-        const scaled = field.scale(value)
-        // A label matched but the number is impossible — that is a misread, not a reading.
-        // Leaving it null makes the gate ask for it, which is right; storing it would look like
-        // an answer the driver gave.
-        if (scaled < 0 || scaled > field.max) continue
-        out[field.key] = scaled
+          const value = numberForLabel(flat, label)
+          if (value === null) continue
+          store(field.key, field, value)
+        }
       }
+    }
+  }
+
+  // ── Pass 2: the value sits on the line ABOVE (or below) its label ───────────────────────
+  //
+  // The Arabic app is a CARD GRID, not a list: the reading is on one line and its caption on the
+  // next, in columns —
+  //
+  //     81.48V        0A        0.00W       1
+  //   إجمالي الجهد    التيار     الطاقة    الدورات
+  //
+  // so a label and its value are never in the same cell and pass 1 finds nothing at all. Pairing
+  // by column — nearest line vertically, overlapping horizontally — is what reads this layout.
+  if (profile.layout !== 'inline') {
+    for (const field of profile.fields) {
+      if (out[field.key] !== null) continue
+      const found = valueNearLabel(lines, field.labels)
+      if (found !== null) store(field.key, field, found)
     }
   }
 
   // Pack voltage is the one figure both apps show WITHOUT a nearby label — it is the headline
   // number. Take the largest plausible pack voltage on screen (a 20S lithium pack sits around
-  // 60–90 V), which beats anchoring on a label that is not there.
-  const volts = [...text.matchAll(/(\d{2,3}\.\d{1,2})\s*V/gi)].map((m) => Number(m[1]))
-  const pack = volts.filter((v) => v >= 20 && v <= 200).sort((a, b) => b - a)[0]
-  if (pack !== undefined) out.packMillivolts = Math.round(pack * 1000)
+  // 60–90 V), which beats anchoring on a label that may not be there.
+  if (out.packMillivolts === null) {
+    const volts = [...text.matchAll(/(\d{2,3}[.,]\d{1,2})\s*V/gi)].map((m) => Number(m[1]!.replace(',', '.')))
+    const pack = volts.filter((v) => v >= 20 && v <= 200).sort((a, b) => b - a)[0]
+    if (pack !== undefined) out.packMillivolts = Math.round(pack * 1000)
+  }
 
   // An unlabelled percentage is still worth having: both apps show exactly one large "100%", and
   // it is always the state of charge.
@@ -466,4 +714,54 @@ export function parseBms(input: readonly OcrLine[] | string): BmsReading {
   }
 
   return out
+}
+
+/**
+ * Find the number belonging to a label that has none of its own.
+ *
+ * Looks for a cell containing the label, then for the nearest line above or below whose words
+ * overlap that cell horizontally — the column the caption sits under. Above is preferred, because
+ * every card layout seen so far puts the reading on top and the caption beneath it.
+ */
+function valueNearLabel(lines: readonly OcrLine[], labels: readonly string[]): number | null {
+  for (const [index, line] of lines.entries()) {
+    const label = labels.find((l) => normalise(line.text).includes(l))
+    if (label === undefined) continue
+
+    // Where the label sits horizontally. With no word boxes the whole line is the span, which
+    // still works for a single-column layout.
+    const span = spanOfLabel(line, label)
+    const height = Math.max(1, line.y1 - line.y0)
+
+    for (const step of [-1, 1, -2]) {
+      const neighbour = lines[index + step]
+      if (!neighbour) continue
+      // Only an adjacent row: two lines further apart belong to different cards.
+      const gap = Math.abs((neighbour.y0 + neighbour.y1) / 2 - (line.y0 + line.y1) / 2)
+      if (gap > height * 3) continue
+
+      const value = numberInSpan(neighbour, span)
+      if (value !== null) return value
+    }
+  }
+  return null
+}
+
+/** The x-range the label occupies, or null when the line carries no word boxes. */
+function spanOfLabel(line: OcrLine, label: string): { x0: number; x1: number } | null {
+  const hits = line.words.filter((w) => label.includes(normalise(w.text)) && normalise(w.text) !== '')
+  if (hits.length === 0) return null
+  return { x0: Math.min(...hits.map((w) => w.x0)), x1: Math.max(...hits.map((w) => w.x1)) }
+}
+
+/** The first number on `line` whose word overlaps `span`. A null span accepts the whole line. */
+function numberInSpan(line: OcrLine, span: { x0: number; x1: number } | null): number | null {
+  if (span === null || line.words.length === 0) return numberIn(line.text)
+  for (const word of line.words) {
+    const overlaps = word.x0 <= span.x1 && word.x1 >= span.x0
+    if (!overlaps) continue
+    const value = numberIn(word.text)
+    if (value !== null) return value
+  }
+  return null
 }

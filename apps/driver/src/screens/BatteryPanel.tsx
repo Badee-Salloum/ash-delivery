@@ -9,6 +9,8 @@ export interface FittedBattery {
   slotNo: number | null
   capacityAh: number
   serialNo: string | null
+  /** Which BMS app this pack ships with. `null` ⇒ the reader tries every profile it knows. */
+  bmsProfile?: string | null
 }
 
 /**
@@ -63,6 +65,8 @@ interface PackState {
   ocrRaw: unknown
   outcome: 'idle' | 'reading' | 'ok' | 'timeout' | 'unavailable' | 'no_fields'
   fieldsFound: number
+  /** What the reader actually saw, shown behind a tap when it failed. */
+  text: string
 }
 
 const EMPTY: PackState = {
@@ -73,6 +77,7 @@ const EMPTY: PackState = {
   ocrRaw: null,
   outcome: 'idle',
   fieldsFound: 0,
+  text: '',
 }
 
 export function BatteryPanel({
@@ -147,11 +152,13 @@ export function BatteryPanel({
     async (battery: FittedBattery, file: File): Promise<void> => {
       setPacks((cur) => ({ ...cur, [battery.id]: { ...(cur[battery.id] ?? EMPTY), outcome: 'reading' } }))
       const { readBms } = await import('../ocr.ts')
-      const result = await readBms(file)
+      // The pack's own app profile: the right label spellings, layout rule and segmentation for
+      // THIS battery, rather than one reader guessing at every app at once.
+      const result = await readBms(file, { profileId: battery.bmsProfile ?? null })
 
       setPacks((cur) => {
         const prev = cur[battery.id] ?? EMPTY
-        if (!result.ok) return { ...cur, [battery.id]: { ...prev, outcome: result.reason } }
+        if (!result.ok) return { ...cur, [battery.id]: { ...prev, outcome: result.reason, text: result.text } }
 
         // Only fill a field the driver has not already answered — his typing always wins.
         const values = { ...prev.values }
@@ -159,7 +166,13 @@ export function BatteryPanel({
           const read = result.reading[f.key]
           if (values[f.key].trim() === '' && read !== null) values[f.key] = toText(read, f.scale, f.decimals)
         }
-        const next: PackState = { values, ocrRaw: result.reading, outcome: 'ok', fieldsFound: result.fieldsFound }
+        const next: PackState = {
+          values,
+          ocrRaw: result.reading,
+          outcome: 'ok',
+          fieldsFound: result.fieldsFound,
+          text: result.text,
+        }
         void push(battery.id, next)
         return { ...cur, [battery.id]: next }
       })
@@ -266,6 +279,19 @@ function OcrStatus({ state, onRetry }: { state: PackState; onRetry?: (() => void
         <Button variant="ghost" onClick={onRetry}>
           {t.battery.ocrRetry}
         </Button>
+      ) : null}
+      {/*
+        What the reader actually saw. Collapsed, so a driver only meets it if he goes looking —
+        but present, because a report of "it didn't fill" with this attached is a diagnosis, and
+        without it is a guess. It is the difference between one more round and five.
+      */}
+      {state.text.trim() !== '' ? (
+        <details className="rounded-lg bg-slate-100 px-3 py-2">
+          <summary className="cursor-pointer text-xs text-slate-500">{t.battery.ocrSawTitle}</summary>
+          <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs text-slate-600">
+            {state.text}
+          </pre>
+        </details>
       ) : null}
     </div>
   )

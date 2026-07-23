@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { type OcrLine, parseBms, parseReading } from '../src/ocr.ts'
+import { type OcrLine, parseBms, parseReading, profileById } from '../src/ocr.ts'
 
 /**
  * The BMS parser, against text shaped like what Tesseract actually returns for the client's two
@@ -142,10 +142,11 @@ describe('the dashboard reader still works, and no longer eats a matching odomet
  * `data.words`, always got `[]`, and so the geometric pairing written for the Arabic layout had
  * never run once. These tests exercise the shape the recogniser really returns.
  */
-const line = (text: string, words: Array<[string, number, number]> = []): OcrLine => ({
-  text,
-  words: words.map(([w, x0, x1]) => ({ text: w, x0, x1 })),
-})
+let nextY = 0
+const line = (text: string, words: Array<[string, number, number]> = [], y?: number): OcrLine => {
+  const y0 = y ?? (nextY += 40)
+  return { text, y0, y1: y0 + 30, words: words.map(([w, x0, x1]) => ({ text: w, x0, x1 })) }
+}
 
 describe('lines from the recogniser, not a split of the flat text', () => {
   it('reads a single-column line', () => {
@@ -178,5 +179,78 @@ describe('lines from the recogniser, not a split of the flat text', () => {
     // «Battery T2» — the 2 belongs to the label. This read 2 °C before the value was taken from
     // what remains after the label is removed.
     expect(parseBms([line('Battery T2: 32.5C')]).t2Dc).toBe(325)
+  })
+})
+
+/**
+ * The Arabic app is a CARD GRID: the reading sits on one line and its caption on the next, in
+ * columns —
+ *
+ *     81.48V        0A        0.00W       1
+ *   إجمالي الجهد    التيار     الطاقة    الدورات
+ *
+ * so a label and its value are NEVER in the same cell, and the same-line rule that reads the
+ * English table finds absolutely nothing here. This is the layout that returned «لم نتعرّف على أي
+ * حقل» from a real phone.
+ */
+describe('the Arabic card grid — value above, caption below', () => {
+  const cards = [
+    line('81.48V 0A 0.00W 1', [
+      ['81.48V', 40, 150], ['0A', 250, 300], ['0.00W', 420, 520], ['1', 640, 660],
+    ], 400),
+    line('إجمالي الجهد التيار الطاقة الدورات', [
+      ['إجمالي', 40, 100], ['الجهد', 105, 155], ['التيار', 245, 305], ['الطاقة', 420, 490], ['الدورات', 620, 700],
+    ], 450),
+  ]
+
+  it('pairs the cycle count with the number in its own column', () => {
+    expect(parseBms(cards).cycleCount).toBe(1)
+  })
+
+  it('pairs the pack voltage with «إجمالي الجهد»', () => {
+    expect(parseBms(cards).packMillivolts).toBe(81_480)
+  })
+
+  it('does not hand a caption the number from the NEXT column', () => {
+    // «الدورات» sits at x 620-700 and the 1 at 640-660; «الطاقة» sits at 420-490 over 0.00W.
+    // Overlap by column is what keeps the cycle count from becoming 0.
+    expect(parseBms(cards).cycleCount).not.toBe(0)
+  })
+
+  it('reads the gauge, whose caption is also underneath it', () => {
+    const gauge = [
+      line('100%', [['100%', 100, 220]], 100),
+      line('الطاقة المتبقية', [['الطاقة', 100, 170], ['المتبقية', 175, 240]], 150),
+    ]
+    expect(parseBms(gauge).percent).toBe(100)
+  })
+
+  it('reads the inline temperature row on the same screen', () => {
+    const temps = line('MOS: 36.9℃ T1: 33.7℃ T2: 33.6℃', [
+      ['MOS:', 40, 110], ['36.9℃', 115, 210],
+      ['T1:', 300, 340], ['33.7℃', 345, 440],
+      ['T2:', 530, 570], ['33.6℃', 575, 670],
+    ], 800)
+    const r = parseBms([temps])
+    expect(r.mosTempDc).toBe(369)
+    expect(r.t1Dc).toBe(337)
+    expect(r.t2Dc).toBe(336)
+  })
+})
+
+describe('a profile picks the strategy for its app', () => {
+  it('the card profile does not use same-line matching', () => {
+    // `cards_ar` skips pass 1 entirely, so an inline label is NOT read by it. That is the point:
+    // a profile that knows its app does not have to guess at the others.
+    const inline = [line('Cycle Count: 8', [['Cycle', 0, 60], ['Count:', 65, 130], ['8', 135, 150]], 100)]
+    expect(parseBms(inline, profileById('cards_ar')).cycleCount).toBeNull()
+    expect(parseBms(inline, profileById('table_en')).cycleCount).toBe(8)
+  })
+
+  it('an unknown or missing profile falls back to automatic, which tries both', () => {
+    const inline = [line('Cycle Count: 8', [['Cycle', 0, 60], ['Count:', 65, 130], ['8', 135, 150]], 100)]
+    expect(profileById(null).id).toBe('auto')
+    expect(profileById('not-a-profile').id).toBe('auto')
+    expect(parseBms(inline, profileById(null)).cycleCount).toBe(8)
   })
 })

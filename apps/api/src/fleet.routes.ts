@@ -350,6 +350,7 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
       capacityAh: body.capacityAh,
       vehicleId: body.vehicleId,
       slotNo: body.slotNo,
+      bmsProfile: body.bmsProfile,
       state: 'ready',
       active: true,
     }
@@ -372,6 +373,7 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
       ...(body.vehicleId === undefined ? {} : { vehicleId: body.vehicleId }),
       ...(body.slotNo === undefined ? {} : { slotNo: body.slotNo }),
       ...(body.state === undefined ? {} : { state: body.state }),
+      ...(body.bmsProfile === undefined ? {} : { bmsProfile: body.bmsProfile }),
       ...(body.active === undefined ? {} : { active: body.active }),
     }
     assertPlacement(after.vehicleId, after.slotNo)

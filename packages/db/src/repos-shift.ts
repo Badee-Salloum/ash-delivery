@@ -577,9 +577,9 @@ export class PgDirectoryRepo implements DirectoryRepo {
     await this.uniqueOr(
       () =>
         this.pool.query(
-          `INSERT INTO batteries (id, branch_id, serial_no, bms_mac, capacity_ah, vehicle_id, slot_no, state, active)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-          [b.id, b.branchId, b.serialNo, b.bmsMac, b.capacityAh, b.vehicleId, b.slotNo, b.state, b.active],
+          `INSERT INTO batteries (id, branch_id, serial_no, bms_mac, capacity_ah, vehicle_id, slot_no, state, active, bms_profile)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          [b.id, b.branchId, b.serialNo, b.bmsMac, b.capacityAh, b.vehicleId, b.slotNo, b.state, b.active, b.bmsProfile],
         ),
       'that battery serial, or that slot on that bike, is already taken',
     )
@@ -590,9 +590,9 @@ export class PgDirectoryRepo implements DirectoryRepo {
       () =>
         this.pool.query(
           `UPDATE batteries SET serial_no = $2, bms_mac = $3, capacity_ah = $4,
-                                vehicle_id = $5, slot_no = $6, state = $7, active = $8
+                                vehicle_id = $5, slot_no = $6, state = $7, active = $8, bms_profile = $9
             WHERE id = $1`,
-          [b.id, b.serialNo, b.bmsMac, b.capacityAh, b.vehicleId, b.slotNo, b.state, b.active],
+          [b.id, b.serialNo, b.bmsMac, b.capacityAh, b.vehicleId, b.slotNo, b.state, b.active, b.bmsProfile],
         ),
       'that battery serial, or that slot on that bike, is already taken',
     )
@@ -696,6 +696,7 @@ const toBattery = (r: Record<string, unknown>): BatteryRecord => ({
   slotNo: r.slot_no === null || r.slot_no === undefined ? null : Number(r.slot_no),
   state: r.state as BatteryRecord['state'],
   active: Boolean(r.active),
+  bmsProfile: (r.bms_profile as string | null) ?? null,
 })
 
 const toDocument = (r: Record<string, unknown>): DocumentRecord => ({

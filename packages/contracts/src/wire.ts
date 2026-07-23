@@ -198,6 +198,8 @@ export const createBatteryRequest = z.object({
   capacityAh: z.number().int().min(1).max(999),
   vehicleId: z.string().nullable().default(null),
   slotNo: z.number().int().min(1).max(2).nullable().default(null),
+  /** A profile id from the driver app's BMS_PROFILES; unconstrained so a new one needs no deploy. */
+  bmsProfile: z.string().max(32).nullable().default(null),
   branchId: z.string().optional(),
 })
 
@@ -208,6 +210,7 @@ export const updateBatteryRequest = z.object({
   vehicleId: z.string().nullable().optional(),
   slotNo: z.number().int().min(1).max(2).nullable().optional(),
   state: z.enum(['ready', 'charging', 'maintenance', 'retired']).optional(),
+  bmsProfile: z.string().max(32).nullable().optional(),
   active: z.boolean().optional(),
 })
 

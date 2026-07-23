@@ -278,6 +278,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
               slotNo: b.slotNo,
               capacityAh: b.capacityAh,
               serialNo: b.serialNo,
+              // Which BMS app this pack ships with, so the driver's reader uses the right label
+              // spellings and layout rule instead of trying every profile it knows.
+              bmsProfile: b.bmsProfile,
             })),
           })),
       ),

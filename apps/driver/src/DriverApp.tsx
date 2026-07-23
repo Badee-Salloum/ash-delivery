@@ -19,7 +19,13 @@ interface Assignment {
     /** True when the shift holding this bike is the driver's OWN. */
     busyByMe?: boolean
     /** The packs fitted to this bike — the same list the BR5 gate counts. */
-    batteries?: Array<{ id: string; slotNo: number | null; capacityAh: number; serialNo: string | null }>
+    batteries?: Array<{
+      id: string
+      slotNo: number | null
+      capacityAh: number
+      serialNo: string | null
+      bmsProfile?: string | null
+    }>
   }>
 }
 

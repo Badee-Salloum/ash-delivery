@@ -1,4 +1,5 @@
 import { type ReactNode, useEffect, useState } from 'react'
+import { BMS_PROFILE_IDS } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { Badge, Button, Card, Table, TextInput } from '../ui.tsx'
 
@@ -34,6 +35,7 @@ interface Battery {
   slotNo: number | null
   state: 'ready' | 'charging' | 'maintenance' | 'retired'
   active: boolean
+  bmsProfile: string | null
 }
 interface Assignment {
   id: string
@@ -403,11 +405,36 @@ export function Fleet(): ReactNode {
         </div>
         {batteryError ? <p className="mb-2 text-sm text-rose-600">{batteryError}</p> : null}
 
-        <Table head={[t.battery.serial, t.battery.capacity, t.fleet.vehicles, t.battery.slot, t.fleet.state]}>
+        <p className="mb-2 text-xs text-slate-400">{t.battery.profileHint}</p>
+        <Table head={[t.battery.serial, t.battery.capacity, t.battery.profile, t.fleet.vehicles, t.battery.slot, t.fleet.state]}>
           {batteries.map((b) => (
             <tr key={b.id}>
               <td className="px-3 py-1 num text-xs">{b.serialNo ?? '—'}</td>
               <td className="px-3 py-1 num">{b.capacityAh} Ah</td>
+              <td className="px-3 py-1">
+                {/* Which BMS app this pack ships with. The apps agree on nothing — one is an
+                    English table, another an Arabic card grid — so naming it lets the driver's
+                    reader use the right labels and layout instead of guessing at all of them. */}
+                <select
+                  className="rounded border border-slate-300 px-2 py-1 text-xs"
+                  value={b.bmsProfile ?? 'auto'}
+                  onChange={async (e) => {
+                    setBatteryError(null)
+                    try {
+                      await api.updateBattery(b.id, { bmsProfile: e.target.value === 'auto' ? null : e.target.value })
+                    } catch (err) {
+                      setBatteryError((err as { error?: string }).error ?? 'error')
+                    }
+                    load()
+                  }}
+                >
+                  {BMS_PROFILE_IDS.map((id) => (
+                    <option key={id} value={id}>
+                      {t.battery.profiles[id]}
+                    </option>
+                  ))}
+                </select>
+              </td>
               <td className="px-3 py-1">
                 <select
                   className="rounded border border-slate-300 px-2 py-1 text-xs"
