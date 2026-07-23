@@ -850,27 +850,48 @@ function biggestPercentage(lines: readonly OcrLine[]): number | null {
  * every card layout seen so far puts the reading on top and the caption beneath it.
  */
 function valueNearLabel(lines: readonly OcrLine[], labels: readonly string[]): number | null {
-  for (const [index, line] of lines.entries()) {
+  for (const line of lines) {
     const label = labels.find((l) => hasLabel(normalise(line.text), l))
     if (label === undefined) continue
 
     // Where the label sits horizontally. With no word boxes the whole line is the span, which
     // still works for a single-column layout.
     const span = spanOfLabel(line, label)
-    const height = Math.max(1, line.y1 - line.y0)
 
-    for (const step of [-1, 1, -2]) {
-      const neighbour = lines[index + step]
-      if (!neighbour) continue
-      // Only an adjacent row: two lines further apart belong to different cards.
-      const gap = Math.abs((neighbour.y0 + neighbour.y1) / 2 - (line.y0 + line.y1) / 2)
-      if (gap > height * 3) continue
+    // Candidates ranked the way the apps are laid out: the reading ABOVE its caption first — the
+    // product owner's own description of the gauge, «القيمة فوق الكلمة» — then below, then by how
+    // close it is.
+    const candidates = lines
+      .filter((other) => other !== line)
+      .map((other) => ({ other, gap: verticalGap(line, other), above: other.y1 <= line.y0 }))
+      .filter((c) => c.gap <= adjacencyLimit(line, c.other))
+      .sort((a, b) => (a.above === b.above ? a.gap - b.gap : a.above ? -1 : 1))
 
-      const value = numberInSpan(neighbour, span)
+    for (const candidate of candidates) {
+      const value = numberInSpan(candidate.other, span)
       if (value !== null) return value
     }
   }
   return null
+}
+
+/**
+ * The blank space between two lines — EDGE to edge, not centre to centre.
+ *
+ * Centre-to-centre grows with the size of the text, so the gauge — a number printed four times the
+ * height of the caption beneath it — measured as "far away" and was skipped, while two lines of
+ * ordinary card text measured as "close". Edge-to-edge is the thing that actually means adjacent,
+ * whatever size either line is printed at.
+ */
+function verticalGap(a: OcrLine, b: OcrLine): number {
+  if (b.y1 <= a.y0) return a.y0 - b.y1
+  if (b.y0 >= a.y1) return b.y0 - a.y1
+  return 0 // they overlap vertically; nothing sits between them
+}
+
+/** Adjacent means within a line's own height of blank space. Two rows apart is another card. */
+function adjacencyLimit(a: OcrLine, b: OcrLine): number {
+  return Math.max(a.y1 - a.y0, b.y1 - b.y0, 8) * 1.2
 }
 
 /** The x-range the label occupies, or null when the line carries no word boxes. */

@@ -357,3 +357,52 @@ describe('Arabic labels survive their spelling variants', () => {
     expect(parseBms([line('الــدورات 8')]).cycleCount).toBe(8)
   })
 })
+
+/**
+ * The gauge, at the proportions it really has.
+ *
+ * «قيمة الطاقة المتبقية فوق الكلمة وهي 100%» — the reading sits ABOVE its caption, and it is
+ * printed about four times the height. That size difference is what broke the first attempt at
+ * this: the gap was measured centre-to-centre and compared against the CAPTION's height, so a big
+ * number directly above a small word measured as "far away" and was skipped, while two lines of
+ * ordinary card text measured as "close". Edge-to-edge is what actually means adjacent.
+ *
+ * Tesseract's block order on an RTL page is also not guaranteed to run top to bottom, so the lines
+ * here are deliberately given OUT of visual order — neighbours are found by geometry, never by
+ * position in the array.
+ */
+describe('the gauge: value above, caption below', () => {
+  const gaugeAt = (value: string, gaugeY: number, gaugeH: number, labelY: number, labelH: number): OcrLine[] => [
+    // Caption first, value second: the array order is wrong on purpose.
+    line('الطاقة المتبقية', [['الطاقة', 120, 190], ['المتبقية', 195, 265]], labelY, labelH),
+    line(value, [[value, 110, 270]], gaugeY, gaugeH),
+  ]
+
+  it('reads 100 from a gauge four times the caption’s height', () => {
+    expect(parseBms(gaugeAt('100%', 150, 96, 260, 24)).percent).toBe(100)
+  })
+
+  it('reads it when the superscript % was never recognised', () => {
+    expect(parseBms(gaugeAt('100', 150, 96, 260, 24)).percent).toBe(100)
+  })
+
+  it('reads a part-charged pack, where no size heuristic could guess the number', () => {
+    expect(parseBms(gaugeAt('47%', 150, 96, 260, 24)).percent).toBe(47)
+  })
+
+  it('does not reach across a gap far bigger than either line', () => {
+    // A number way up the page belongs to a different card, not to this caption. Written WITHOUT
+    // a «%» on purpose: a lone «100%» anywhere on screen is the charge by a separate and correct
+    // rule, which would mask what this test is actually about.
+    expect(parseBms(gaugeAt('100', 20, 96, 900, 24)).percent).toBeNull()
+  })
+
+  it('pairs with the value ABOVE in preference to one below', () => {
+    const both = [
+      line('100%', [['100%', 110, 270]], 150, 96),
+      line('الطاقة المتبقية', [['الطاقة', 120, 190], ['المتبقية', 195, 265]], 260, 24),
+      line('47', [['47', 110, 270]], 290, 24),
+    ]
+    expect(parseBms(both).percent).toBe(100)
+  })
+})
