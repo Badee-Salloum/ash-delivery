@@ -1,6 +1,52 @@
 # PROGRESS
 
-## 2026-07-23 (latest) — the fleet is modelled as machines, not as rows called "vehicle"
+## 2026-07-23 (latest) — a driver could never finish a shift
+
+**309 domain + 246 API + 15 driver tests green, 6 guards green, all three projects redeployed.**
+
+Reported as "stuck on the vehicle picker". It was three stacked defects, two of them total blockers
+on the core flow — together they mean **the driver app had never been able to complete a shift end
+to end in production.**
+
+**1. The driver polled an endpoint he is forbidden to read.** After submitting his start package
+the app polled `GET /shifts/:id/review` every 4 s waiting for the manager. That route is
+`shift.approve` — branch manager, sysadmin, GM; **never `driver`**, who holds only `shift.operate`
+at scope `own`. Every poll was a 403, the client swallowed it, and the phone sat on
+«بانتظار اعتماد البداية» forever: the manager approved, the shift really opened server-side, and
+the driver never found out. He could never record an order or close a shift.
+
+The root cause was structural — of every shift route, `shift.operate` reached **only writes**.
+There was no endpoint at all by which a driver could read the state of his own shift. Now
+`GET /shifts/:id/state`, scoped by the existing `shiftSubject` so `own` means his and nobody
+else's. It deliberately carries no BR1 causes: that ranked diagnosis is the manager's approval tool
+(BR8). Both screens are now built from one shared snapshot so they cannot drift apart about what a
+shift contains.
+
+**2. A live shift was never resumed.** `/me/assignment` has always reported `liveShiftId` and
+`liveShiftState`; **nothing read either**, and `StartPackage` could only ever *create*. So a driver
+who closed the app, refreshed, or was thrown out by the 403 loop came back to a picker whose every
+option `createShift` refuses with `driver_already_on_shift` — his shift existed, held its bike, and
+was unreachable by the one person who could finish it. The app now resumes: the phase is derived
+from the live state, and the evidence, odometer, the manager's float/top-up and the orders already
+recorded all come back.
+
+**3. His own shift made his own bike look taken.** `busy` ignored whose shift it was, so the driver
+was told «على نوبة الآن» about his own bike with no way to tell and nothing to do. Now `busyByMe`,
+and when every bike genuinely is out the screen says so instead of offering buttons that do
+nothing.
+
+Also: **a driver may discard his own shift while it is still `draft` or `awaiting_open_approval`**
+— nothing has posted to the ledger at those states, and without it every stuck driver waits for
+someone at the office. From `open` onward it stays manager-only, enforced by the same `cancelShift`.
+
+And order entry survives a resume: `provider_order_no` is **globally unique**, so a retyped order is
+a 409 — and `submitOrders` had **no catch at all**, so one rejection took the promise down, the
+phase never advanced, and «تم» silently did nothing. It now posts only what is new and names what
+would not save.
+
+---
+
+## 2026-07-23 — the fleet is modelled as machines, not as rows called "vehicle"
 
 **309 domain + 229 API + 15 driver tests green, 6 guards green, migration 0007 applied to
 production, all three projects redeployed.**
