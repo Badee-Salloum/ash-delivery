@@ -18,13 +18,22 @@ import { Button, Card, Money, MoneyInput, Screen, TextInput } from '../ui.tsx'
  */
 export function OrderEntry({
   shift,
+  initialOrders = [],
   onDone,
 }: {
   shift: { id: string; floatText: string; topupText: string }
+  /**
+   * Orders already recorded on the server, for a resumed shift.
+   *
+   * They must come back: `provider_order_no` is GLOBALLY unique, so a driver who retypes one gets
+   * a 409 he cannot see. Seeding the list also means the live BR1 preview reflects the whole
+   * shift rather than only what he has entered since reopening the app.
+   */
+  initialOrders?: readonly DraftOrder[]
   onDone(orders: DraftOrder[]): void
 }): ReactNode {
   const { t } = useApp()
-  const [orders, setOrders] = useState<DraftOrder[]>([])
+  const [orders, setOrders] = useState<DraftOrder[]>([...initialOrders])
   const [defaultFee, setDefaultFee] = useState('5000')
 
   const problems = useMemo(() => allProblems(orders), [orders])

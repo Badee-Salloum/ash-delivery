@@ -16,6 +16,8 @@ interface Assignment {
     code: string
     state: string
     busy?: boolean
+    /** True when the shift holding this bike is the driver's OWN. */
+    busyByMe?: boolean
     /** The packs fitted to this bike — the same list the BR5 gate counts. */
     batteries?: Array<{ id: string; slotNo: number | null; capacityAh: number; serialNo: string | null }>
   }>
@@ -69,6 +71,32 @@ export function DriverApp(): ReactNode {
     )
   }
 
+  /**
+   * A shift already running is RESUMED, never re-picked.
+   *
+   * `/me/assignment` has always reported `liveShiftId` and `liveShiftState`; nothing read them.
+   * So a driver who closed the app, refreshed, or was thrown out mid-flow came back to a picker
+   * whose every option `createShift` refuses with `driver_already_on_shift` — his shift existed,
+   * held its bike, and was unreachable by the one person who could finish it.
+   */
+  if (assignment?.liveShiftId) {
+    const bike = assignment.vehicles.find((v) => v.busyByMe) ?? null
+    return (
+      <div>
+        {bar}
+        <ShiftFlow
+          assignment={{ driverId: session.driverId, vehicleId: bike?.id ?? '', shiftNo: 1 }}
+          batteries={bike?.batteries ?? []}
+          resume={{ id: assignment.liveShiftId, state: assignment.liveShiftState ?? 'draft' }}
+          onDiscarded={() => {
+            setVehicleId(null)
+            void api.get<Assignment>('/me/assignment').then(setAssignment).catch(() => setAssignment(null))
+          }}
+        />
+      </div>
+    )
+  }
+
   // Bike not yet chosen. When the manager has pre-assigned one (SRS B-3) the server sends exactly
   // that bike and the driver only confirms it; otherwise he picks from the branch's ready list.
   // Either way the server re-checks the binding on shift create, so no pick can produce an
@@ -87,6 +115,12 @@ export function DriverApp(): ReactNode {
             <Card>
               <p className="text-center text-slate-500">{assigned ? '—' : t.shift.noAssignment}</p>
             </Card>
+          ) : assignment.vehicles.every((v) => v.busy === true) ? (
+            // Every option disabled and no explanation is the worst version of this screen: the
+            // driver taps each one in turn and nothing happens. Say it plainly instead.
+            <Card>
+              <p className="text-center font-medium text-amber-700">{t.shift.allVehiclesBusy}</p>
+            </Card>
           ) : (
             <>
               <Card>
@@ -104,7 +138,7 @@ export function DriverApp(): ReactNode {
                   onClick={() => setVehicleId(v.id)}
                 >
                   {t.shift.vehicle} {v.code}
-                  {v.busy === true ? ` — ${t.shift.busyVehicle}` : ''}
+                  {v.busy === true ? ` — ${v.busyByMe === true ? t.shift.yourShiftHere : t.shift.busyVehicle}` : ''}
                 </Button>
               ))}
             </>
@@ -120,6 +154,7 @@ export function DriverApp(): ReactNode {
       <ShiftFlow
         assignment={{ driverId: session.driverId, vehicleId, shiftNo: 1 }}
         batteries={assignment?.vehicles.find((v) => v.id === vehicleId)?.batteries ?? []}
+        onDiscarded={() => setVehicleId(null)}
       />
     </div>
   )

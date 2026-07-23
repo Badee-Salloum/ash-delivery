@@ -267,6 +267,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
             code: v.code,
             state: v.state,
             busy: (await deps.shifts.listLiveForVehicle(v.id)).length > 0,
+            // Whose shift it is matters: a driver told his own bike is «على نوبة الآن» has no way
+            // to tell that the shift blocking him is the one he is supposed to be finishing.
+            busyByMe: (await deps.shifts.listLiveForVehicle(v.id)).some((s) => s.driverId === driver.id),
             // The packs fitted to this bike. The driver has no `branch_data.view`, so this is the
             // only way his app can know how many BMS screenshots the gate will ask him for — and
             // it is the SAME list the gate counts, so the checklist cannot disagree with the gate.
@@ -507,39 +510,39 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     },
   )
 
-  /** The branch manager's review screen (C-7): the numbers, the difference, and why. */
-  app.get(
-    '/shifts/:id/review',
-    { config: { permission: 'shift.approve', subject: shiftSubject } },
-    async (req, reply) => {
-      const { id } = z.object({ id: z.string() }).parse(req.params)
-      const shift = await deps.shifts.findById(id)
-      if (!shift) return reply.code(404).send({ error: 'shift_not_found' })
-      const orders = await deps.orders.listByShift(id)
-      const br1 = await evaluateShift(deps, shift)
-      // Per-pack readings, joined to the packs so the manager sees a slot and a capacity rather
-      // than a uuid. A two-pack bike hands back two of these at each end of the shift.
-      const [readings, fitted] = await Promise.all([
-        deps.batteryReadings.listByShift(id),
-        deps.directory.listBatteriesForVehicle(shift.vehicleId),
-      ])
-      const withPack = (pkg: 'start' | 'end') =>
-        readings
-          .filter((r) => r.package === pkg)
-          .map((r) => {
-            const battery = fitted.find((b) => b.id === r.batteryId)
-            return {
-              ...r,
-              capacityAh: battery?.capacityAh ?? null,
-              serialNo: battery?.serialNo ?? null,
-            }
-          })
-          .sort((a, b) => a.slotNo - b.slotNo)
-      return {
+  /**
+   * Everything both shift screens are built from: the packages, the evidence that arrived, and
+   * the orders. Shared so the driver's view and the manager's view can never drift apart about
+   * what a shift actually contains — they differ only in what is ADDED on top (the manager gets
+   * BR1 and its causes; the driver does not, per BR8).
+   */
+  const shiftSnapshot = async (shiftId: string) => {
+    const shift = await deps.shifts.findById(shiftId)
+    if (!shift) return null
+    // Per-pack readings, joined to the packs so a slot and a capacity are shown rather than a
+    // uuid. A two-pack bike hands back two of these at each end of the shift.
+    const [orders, readings, fitted] = await Promise.all([
+      deps.orders.listByShift(shiftId),
+      deps.batteryReadings.listByShift(shiftId),
+      deps.directory.listBatteriesForVehicle(shift.vehicleId),
+    ])
+    const withPack = (pkg: 'start' | 'end') =>
+      readings
+        .filter((r) => r.package === pkg)
+        .map((r) => {
+          const battery = fitted.find((b) => b.id === r.batteryId)
+          return { ...r, capacityAh: battery?.capacityAh ?? null, serialNo: battery?.serialNo ?? null }
+        })
+        .sort((a, b) => a.slotNo - b.slotNo)
+
+    return {
+      shift,
+      body: {
         id: shift.id,
         state: shift.state,
         driverId: shift.driverId,
         vehicleId: shift.vehicleId,
+        shiftNo: shift.shiftNo,
         businessDate: shift.businessDate,
         startPackage: {
           odometerKm: shift.odoStart,
@@ -563,8 +566,76 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           fee: serializeMoney(o.fee),
           zone: o.zone,
         })),
-        br1: serializeBr1(br1),
-      }
+      },
+    }
+  }
+
+  /**
+   * The DRIVER's read of his own shift.
+   *
+   * Until this existed there was no endpoint at all by which a driver could learn the state of
+   * his own shift: every read was `branch_data.view` or `shift.approve`, neither of which he has.
+   * His app polled the manager's `/review` waiting to be let out of "awaiting approval", got 403
+   * on every poll, swallowed it, and sat there forever — the manager approved, the shift really
+   * opened, and the phone never found out. He could never record an order or close the shift.
+   *
+   * `shift.operate` is granted to the driver at scope `own`, and `shiftSubject` supplies the
+   * shift's own driverId, so this is his shift and nobody else's with no new RBAC concept.
+   */
+  app.get(
+    '/shifts/:id/state',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req, reply) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const snapshot = await shiftSnapshot(id)
+      if (!snapshot) return reply.code(404).send({ error: 'shift_not_found' })
+      // Deliberately no BR1 causes: that ranked diagnosis is the manager's approval tool (BR8).
+      // The driver already gets the difference back from his own end-package submit.
+      return snapshot.body
+    },
+  )
+
+  /**
+   * Discard a shift that never opened — by the driver whose shift it is.
+   *
+   * Same rule and same service as the manager's DELETE: legal only in `draft` and
+   * `awaiting_open_approval`, where nothing has posted to the ledger. A separate route because a
+   * route declares one permission, and widening the manager's would hand every driver the power
+   * to discard anybody's. Without this, a driver who abandons a start screen must wait for
+   * someone at the office before he can work at all.
+   */
+  app.delete(
+    '/shifts/:id/mine',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const shift = await cancelShift(deps, id)
+      await deps.audit.append({
+        tableName: 'shifts',
+        recordId: shift.id,
+        action: 'DELETE',
+        actorId: req.actor?.userId ?? null,
+        actorKind: req.actor ? 'user' : 'system',
+        branchId: shift.branchId,
+        requestId: req.requestId,
+        before: { state: shift.state, driverId: shift.driverId, vehicleId: shift.vehicleId },
+        after: null,
+        occurredAtMs: deps.clock.nowMs(),
+      })
+      return { ok: true, id: shift.id }
+    },
+  )
+
+  /** The branch manager's review screen (C-7): the numbers, the difference, and why. */
+  app.get(
+    '/shifts/:id/review',
+    { config: { permission: 'shift.approve', subject: shiftSubject } },
+    async (req, reply) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const snapshot = await shiftSnapshot(id)
+      if (!snapshot) return reply.code(404).send({ error: 'shift_not_found' })
+      const br1 = await evaluateShift(deps, snapshot.shift)
+      return { ...snapshot.body, br1: serializeBr1(br1) }
     },
   )
 

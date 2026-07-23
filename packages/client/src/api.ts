@@ -15,6 +15,33 @@ export interface ApiError {
   detail?: unknown
 }
 
+/** Everything the driver's app needs to pick a half-finished shift back up where he left it. */
+export interface ShiftStateView {
+  id: string
+  state: 'draft' | 'awaiting_open_approval' | 'open' | 'pending_review' | 'suspended' | 'approved' | 'week_locked'
+  driverId: string
+  vehicleId: string
+  shiftNo: number
+  businessDate: string
+  startPackage: {
+    odometerKm: number | null
+    batteryPercent: number | null
+    floatTotal: string
+    topupTotal: string
+    mediaSlots: string[]
+    batteries: Array<{ batteryId: string; slotNo: number; percent: number | null }>
+  }
+  endPackage: {
+    odometerKm: number | null
+    batteryPercent: number | null
+    cashDeclared: string | null
+    walletDeclared: string | null
+    mediaSlots: string[]
+    batteries: Array<{ batteryId: string; slotNo: number; percent: number | null }>
+  }
+  orders: Array<{ providerOrderNo: string; payMode: 'cash' | 'electronic' | 'free'; fee: string; zone: string | null }>
+}
+
 /** A battery pack. `vehicleId` and `slotNo` are set together, or it is a spare on the shelf. */
 export interface Battery {
   id: string
@@ -336,6 +363,22 @@ export class ApiClient {
       businessDate: string
       shifts: Array<{ id: string; driverId: string; vehicleId: string; shiftNo: number; state: string }>
     }>(`/shifts${date ? `?date=${encodeURIComponent(date)}` : ''}`)
+  }
+
+  /**
+   * The DRIVER's read of his own shift.
+   *
+   * Not `/shifts/:id/review` — that one is `shift.approve` and answers a driver 403 on every call.
+   * The app used to poll it waiting for the manager's approval, swallow the 403, and sit on
+   * "awaiting approval" forever even after the shift had really opened.
+   */
+  shiftState(id: string) {
+    return this.get<ShiftStateView>(`/shifts/${id}/state`)
+  }
+
+  /** Discard a shift of his own that never opened — draft or awaiting approval only. */
+  cancelMyShift(id: string) {
+    return this.del<{ ok: boolean; id: string }>(`/shifts/${id}/mine`)
   }
 
   /** Discard a shift that never opened — see the route: only draft/awaiting_open_approval. */

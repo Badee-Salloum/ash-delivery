@@ -22,23 +22,91 @@ interface ShiftState {
   topupText: string
 }
 
+/** Where a shift already in flight puts the driver back. */
+const PHASE_FOR: Record<string, Phase> = {
+  draft: 'start',
+  awaiting_open_approval: 'awaiting',
+  open: 'orders',
+  // «معلقة» (س29): an incident mid-shift. The data is completed later under the same equation,
+  // so the driver carries on exactly where an open shift would.
+  suspended: 'orders',
+  pending_review: 'done',
+}
+
 export function ShiftFlow({
   assignment,
   batteries,
+  resume,
+  onDiscarded,
 }: {
   assignment: { driverId: string; vehicleId: string; shiftNo: number }
   /** The packs fitted to this bike, from `/me/assignment` — the same list the BR5 gate counts. */
   batteries: readonly FittedBattery[]
+  /** A shift already in flight. Present ⇒ resume it; absent ⇒ this is a fresh start. */
+  resume?: { id: string; state: string }
+  onDiscarded?(): void
 }): ReactNode {
   const { api, t } = useApp()
-  const [phase, setPhase] = useState<Phase>('start')
+  const [phase, setPhase] = useState<Phase>(resume ? (PHASE_FOR[resume.state] ?? 'start') : 'start')
   const [shift, setShift] = useState<ShiftState | null>(null)
+  const [recorded, setRecorded] = useState<DraftOrder[]>([])
+  const [orderError, setOrderError] = useState<string | null>(null)
+  const [loaded, setLoaded] = useState(!resume)
+
+  /**
+   * Pick the shift back up.
+   *
+   * The float and top-up come from the MANAGER's approval, so the order screen's live BR1 preview
+   * would be wrong without them; the orders already recorded must come back because
+   * `provider_order_no` is globally unique and retyping one is a 409 the driver cannot see.
+   */
+  useEffect(() => {
+    if (!resume) return
+    void api
+      .shiftState(resume.id)
+      .then((st) => {
+        setShift({ id: st.id, floatText: st.startPackage.floatTotal, topupText: st.startPackage.topupTotal })
+        setRecorded(
+          st.orders.map((o) => ({
+            // `already-<no>` rather than a random id: the list is rebuilt from the server on every
+            // resume, and a stable key keeps React from remounting rows the driver is editing.
+            localId: `already-${o.providerOrderNo}`,
+            providerOrderNo: o.providerOrderNo,
+            payMode: o.payMode,
+            feeText: o.fee,
+          })),
+        )
+        // Trust the server's state over the one the assignment reported: the manager may have
+        // approved between the two calls.
+        setPhase(PHASE_FOR[st.state] ?? 'start')
+        setLoaded(true)
+      })
+      .catch(() => setLoaded(true)) // fall back to the state /me/assignment reported
+  }, [api, resume])
+
+  const discard = async (): Promise<void> => {
+    if (!resume) return
+    await api.cancelMyShift(resume.id).catch(() => undefined)
+    onDiscarded?.()
+  }
+
+  if (!loaded) {
+    return (
+      <Screen title={t.shift.resumeShift}>
+        <Card>
+          <p className="text-center text-slate-400">{t.common.loading}</p>
+        </Card>
+      </Screen>
+    )
+  }
 
   if (phase === 'start' || phase === 'awaiting') {
     return (
       <StartPackage
         assignment={assignment}
         batteries={batteries}
+        existingShiftId={resume?.id ?? null}
+        onDiscard={resume ? discard : undefined}
         awaiting={phase === 'awaiting'}
         onOpened={(id) => {
           setShift({ id, floatText: '0', topupText: '0' })
@@ -55,13 +123,32 @@ export function ShiftFlow({
   }
   if (phase === 'orders' && shift) {
     return (
+      <>
+        {/* A refused order has to be visible. The driver taps «تم» and, before this, nothing at
+            all happened — the screen simply did not advance and gave him no reason. */}
+        {orderError ? (
+          <Card>
+            <p className="text-center text-sm font-medium text-red-600">{orderError}</p>
+          </Card>
+        ) : null}
       <OrderEntry
         shift={shift}
+        initialOrders={recorded}
         onDone={async (orders) => {
-          await submitOrders(api, shift.id, orders)
+          // Only what is not already on the server: provider_order_no is globally unique, so a
+          // resubmitted order is a 409 — and this used to have no catch at all, so one of them
+          // rejected the promise, `setPhase('end')` never ran, and «تم» silently did nothing.
+          const already = new Set(recorded.map((o) => o.providerOrderNo.trim()))
+          const failed = await submitOrders(api, shift.id, orders.filter((o) => !already.has(o.providerOrderNo.trim())))
+          if (failed.length > 0) {
+            setOrderError(`${t.shift.ordersFailed}: ${failed.join(', ')}`)
+            return
+          }
+          setOrderError(null)
           setPhase('end')
         }}
       />
+      </>
     )
   }
   if (phase === 'end' && shift) {
@@ -76,15 +163,32 @@ export function ShiftFlow({
   )
 }
 
-async function submitOrders(api: ReturnType<typeof useApp>['api'], shiftId: string, orders: DraftOrder[]): Promise<void> {
+/**
+ * Post the orders, returning the numbers that would not save.
+ *
+ * It used to `await` each one with no catch: a single rejection — a duplicate order number is a
+ * 409, and they are GLOBALLY unique — took the whole promise down, the phase never advanced, and
+ * the driver tapped «تم» to no visible effect. Reporting the failures lets the screen say which.
+ */
+async function submitOrders(
+  api: ReturnType<typeof useApp>['api'],
+  shiftId: string,
+  orders: DraftOrder[],
+): Promise<string[]> {
+  const failed: string[] = []
   for (const o of orders) {
-    await api.post(`/shifts/${shiftId}/orders`, {
-      providerOrderNo: o.providerOrderNo.trim(),
-      payMode: o.payMode,
-      fee: o.feeText,
-      zone: null,
-    })
+    try {
+      await api.post(`/shifts/${shiftId}/orders`, {
+        providerOrderNo: o.providerOrderNo.trim(),
+        payMode: o.payMode,
+        fee: o.feeText,
+        zone: null,
+      })
+    } catch {
+      failed.push(o.providerOrderNo.trim())
+    }
   }
+  return failed
 }
 
 /** A camera-capture tile that compresses and uploads, showing progress and a taken/retake state. */
@@ -171,18 +275,23 @@ function PhotoSlot({
 function StartPackage({
   assignment,
   batteries,
+  existingShiftId,
+  onDiscard,
   awaiting,
   onOpened,
   onApproved,
 }: {
   assignment: { driverId: string; vehicleId: string; shiftNo: number }
   batteries: readonly FittedBattery[]
+  /** A draft that already exists. Present ⇒ attach to it; absent ⇒ create one. */
+  existingShiftId?: string | null
+  onDiscard?: (() => Promise<void>) | undefined
   awaiting: boolean
   onOpened(shiftId: string): void
   onApproved(funds: { floatText: string; topupText: string }): void
 }): ReactNode {
   const { api, t } = useApp()
-  const [shiftId, setShiftId] = useState<string | null>(null)
+  const [shiftId, setShiftId] = useState<string | null>(existingShiftId ?? null)
   const [odo, setOdo] = useState('')
   const [battery, setBattery] = useState('')
   const [odoShot, setOdoShot] = useState(false)
@@ -213,6 +322,8 @@ function StartPackage({
   // driver must be TOLD: swallowing it left the camera tile stuck on "loading" with no way to know
   // the bike was already on someone else's shift.
   useEffect(() => {
+    // A shift the driver is RESUMING already exists. Posting again would be refused with
+    // `driver_already_on_shift` — which is exactly the dead end resuming exists to end.
     if (shiftId) return
     void api
       .post<{ id: string }>('/shifts', assignment)
@@ -252,7 +363,10 @@ function StartPackage({
     const timer = setInterval(async () => {
       try {
         const s = await api
-          .get<{ state: string; startPackage: { floatTotal: string; topupTotal: string } }>(`/shifts/${shiftId}/review`)
+          // `/state`, not the manager's `/review`: that one is `shift.approve`, so every poll a
+          // driver made returned 403, was swallowed, and he waited on an approval that had
+          // already happened.
+          .shiftState(shiftId)
           .catch(() => null)
         if (s?.state === 'open') {
           onApproved({ floatText: s.startPackage.floatTotal, topupText: s.startPackage.topupTotal })
@@ -270,6 +384,7 @@ function StartPackage({
         <Card>
           <p className="text-center text-lg font-semibold text-amber-700">{t.shift.states.awaiting_open_approval}…</p>
         </Card>
+        {onDiscard ? <DiscardButton onDiscard={onDiscard} /> : null}
       </Screen>
     )
   }
@@ -308,6 +423,12 @@ function StartPackage({
           )}
         </Card>
       )}
+      {existingShiftId ? (
+        <Card>
+          <p className="text-center text-sm text-slate-500">{t.shift.resumeHint}</p>
+        </Card>
+      ) : null}
+      {onDiscard ? <DiscardButton onDiscard={onDiscard} /> : null}
       {ocrBusy ? <p className="text-center text-sm text-slate-400">{t.shift.reading}…</p> : null}
       <Card className="flex flex-col gap-3">
         <Field label={t.shift.odometer}>
@@ -452,5 +573,51 @@ function EndPackage({
         onReadingsChanged={setBatteriesReady}
       />
     </Screen>
+  )
+}
+
+/**
+ * Abandon a shift that never opened.
+ *
+ * Nothing has posted to the ledger in `draft` or `awaiting_open_approval`, so there is nothing to
+ * reverse — and without this a driver who backs out of a start screen must wait for someone at
+ * the office before he can work at all. The confirm step is there because it releases the bike.
+ */
+function DiscardButton({ onDiscard }: { onDiscard: () => Promise<void> }): ReactNode {
+  const { t } = useApp()
+  const [asking, setAsking] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  if (!asking) {
+    return (
+      <Button variant="ghost" onClick={() => setAsking(true)}>
+        {t.shift.discardShift}
+      </Button>
+    )
+  }
+  return (
+    <Card className="flex flex-col gap-2">
+      <p className="text-center text-sm">{t.shift.discardConfirm}</p>
+      <div className="flex gap-2">
+        <Button
+          variant="danger"
+          className="flex-1"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true)
+            try {
+              await onDiscard()
+            } finally {
+              setBusy(false)
+            }
+          }}
+        >
+          {busy ? t.common.loading : t.shift.discardShift}
+        </Button>
+        <Button variant="ghost" className="flex-1" onClick={() => setAsking(false)}>
+          {t.common.cancel}
+        </Button>
+      </div>
+    </Card>
   )
 }
