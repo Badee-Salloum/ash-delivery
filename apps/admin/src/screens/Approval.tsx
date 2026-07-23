@@ -3,14 +3,40 @@ import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { Badge, Button, Card, Money, MoneyInput, Pending, Table } from '../ui.tsx'
 
+interface BatteryReadingView {
+  batteryId: string
+  slotNo: number
+  percent: number | null
+  packMillivolts: number | null
+  cycleCount: number | null
+  mosTempDc: number | null
+  capacityAh: number | null
+  serialNo: string | null
+  source: 'ocr' | 'manual'
+}
+
 interface Review {
   id: string
   state: string
   driverId: string
   vehicleId: string
   businessDate: string
-  startPackage: { odometerKm: number | null; batteryPercent: number | null; floatTotal: string; topupTotal: string; mediaSlots: string[] }
-  endPackage: { odometerKm: number | null; batteryPercent: number | null; cashDeclared: string | null; walletDeclared: string | null; mediaSlots: string[] }
+  startPackage: {
+    odometerKm: number | null
+    batteryPercent: number | null
+    floatTotal: string
+    topupTotal: string
+    mediaSlots: string[]
+    batteries: BatteryReadingView[]
+  }
+  endPackage: {
+    odometerKm: number | null
+    batteryPercent: number | null
+    cashDeclared: string | null
+    walletDeclared: string | null
+    mediaSlots: string[]
+    batteries: BatteryReadingView[]
+  }
   orders: Array<{ providerOrderNo: string; payMode: string; fee: string; zone: string | null }>
   br1: {
     expectedCash: string
@@ -172,6 +198,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             )}
           </dl>
           <PhotoRow shiftId={review.id} pkg="start" slots={review.startPackage.mediaSlots} />
+          <BatteryReadings readings={review.startPackage.batteries} />
         </Card>
         <Card title={t.shift.endPackage}>
           <dl className="grid grid-cols-2 gap-2 text-sm">
@@ -179,8 +206,15 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             <Field label={t.approval.startVsEnd} value={odoDelta === null ? '—' : `+${odoDelta} كم`} />
             <Field label={t.shift.cashHandover} value={review.endPackage.cashDeclared ?? '—'} />
             <Field label={t.shift.walletBalance} value={review.endPackage.walletDeclared ?? '—'} />
+            {/* The end battery was collected but never shown: a bike handed back at 5% is an
+                operational fact the manager approving the shift should be looking at. */}
+            <Field
+              label={t.shift.battery}
+              value={review.endPackage.batteryPercent === null ? '—' : `${review.endPackage.batteryPercent}%`}
+            />
           </dl>
           <PhotoRow shiftId={review.id} pkg="end" slots={review.endPackage.mediaSlots} />
+          <BatteryReadings readings={review.endPackage.batteries} />
         </Card>
       </div>
 
@@ -234,6 +268,39 @@ function PhotoRow({ shiftId, pkg, slots }: { shiftId: string; pkg: string; slots
         <span key={s} className="rounded bg-slate-100 px-2 py-1 text-xs">
           📷 {s}
         </span>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * What each pack read, at one end of the shift.
+ *
+ * Scaled integers come off the wire — millivolts and deci-Celsius — and are divided only here,
+ * for display. The cycle count is the number worth watching over time: it is what says a pack is
+ * wearing out before it strands a driver.
+ */
+function BatteryReadings({ readings }: { readings: BatteryReadingView[] }): ReactNode {
+  const { t } = useApp()
+  if (readings.length === 0) return null
+  return (
+    <div className="mt-3 flex flex-col gap-2">
+      {readings.map((r) => (
+        <div key={`${r.batteryId}-${r.slotNo}`} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">
+          <div className="flex items-center justify-between">
+            <span className="font-medium">
+              {t.battery.slot} {r.slotNo}
+              {r.capacityAh === null ? '' : ` · ${r.capacityAh}Ah`}
+            </span>
+            <span className="num font-bold">{r.percent === null ? '—' : `${r.percent}%`}</span>
+          </div>
+          <div className="num mt-1 flex flex-wrap gap-x-4 text-xs text-slate-500">
+            {r.packMillivolts === null ? null : <span>{(r.packMillivolts / 1000).toFixed(2)} V</span>}
+            {r.cycleCount === null ? null : <span>{t.battery.cycles}: {r.cycleCount}</span>}
+            {r.mosTempDc === null ? null : <span>{t.battery.mosTemp}: {(r.mosTempDc / 10).toFixed(1)}°C</span>}
+            {r.serialNo === null ? null : <span className="text-slate-400">{r.serialNo}</span>}
+          </div>
+        </div>
       ))}
     </div>
   )

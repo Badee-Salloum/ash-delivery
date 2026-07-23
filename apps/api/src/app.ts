@@ -517,6 +517,24 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       if (!shift) return reply.code(404).send({ error: 'shift_not_found' })
       const orders = await deps.orders.listByShift(id)
       const br1 = await evaluateShift(deps, shift)
+      // Per-pack readings, joined to the packs so the manager sees a slot and a capacity rather
+      // than a uuid. A two-pack bike hands back two of these at each end of the shift.
+      const [readings, fitted] = await Promise.all([
+        deps.batteryReadings.listByShift(id),
+        deps.directory.listBatteriesForVehicle(shift.vehicleId),
+      ])
+      const withPack = (pkg: 'start' | 'end') =>
+        readings
+          .filter((r) => r.package === pkg)
+          .map((r) => {
+            const battery = fitted.find((b) => b.id === r.batteryId)
+            return {
+              ...r,
+              capacityAh: battery?.capacityAh ?? null,
+              serialNo: battery?.serialNo ?? null,
+            }
+          })
+          .sort((a, b) => a.slotNo - b.slotNo)
       return {
         id: shift.id,
         state: shift.state,
@@ -529,6 +547,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           floatTotal: serializeMoney(sum(shift.floatTranches)),
           topupTotal: serializeMoney(sum(shift.topupTranches)),
           mediaSlots: shift.mediaSlotsStart,
+          batteries: withPack('start'),
         },
         endPackage: {
           odometerKm: shift.odoEnd,
@@ -536,6 +555,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           cashDeclared: shift.endCashDeclared === null ? null : serializeMoney(shift.endCashDeclared),
           walletDeclared: shift.endWalletDeclared === null ? null : serializeMoney(shift.endWalletDeclared),
           mediaSlots: shift.mediaSlotsEnd,
+          batteries: withPack('end'),
         },
         orders: orders.map((o) => ({
           providerOrderNo: o.providerOrderNo,

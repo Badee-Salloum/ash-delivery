@@ -166,3 +166,118 @@ describe('battery packs are assets, not attributes', () => {
     expect(res.json().error).toBe('vehicle_has_live_shift')
   })
 })
+
+/**
+ * The gate scales with the machine.
+ *
+ * This is the point of modelling packs as assets: a bike carrying two of them cannot open its
+ * shift on one screenshot, and a bike carrying one is never asked for a second. The count is
+ * COUNT(*) of the packs fitted — the same list the driver's app is handed — so the checklist he
+ * sees and the gate he must pass can never disagree.
+ */
+describe('per-pack BMS evidence gates the shift (SRS §L seam)', () => {
+  const fit = async (token: string, slotNo: number, serialNo: string): Promise<string> =>
+    (
+      await post(token, '/batteries', { capacityAh: 50, serialNo, vehicleId: VEHICLE_ID, slotNo })
+    ).json().id
+
+  const startShift = async (): Promise<{ driver: string; shiftId: string }> => {
+    const driver = await h.loginAs('driver1')
+    const shiftId = (await post(driver, '/shifts', { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 })).json().id
+    return { driver, shiftId }
+  }
+
+  const submitStart = async (driver: string, shiftId: string): Promise<LightMyRequestResponse> =>
+    await h.app.inject({
+      method: 'PUT',
+      url: `/shifts/${shiftId}/start-package`,
+      headers: { cookie: h.cookie(driver) },
+      payload: { odometerKm: 1000, batteryPercent: 90 },
+    })
+
+  it('a one-pack bike needs one screenshot and one reading', async () => {
+    const manager = await h.loginAs('manager')
+    const packId = await fit(manager, 1, 'PACK-1')
+    const { driver, shiftId } = await startShift()
+
+    await h.uploadPhoto(driver, shiftId, 'start', 'odometer')
+    const withoutBms = await submitStart(driver, shiftId)
+    expect(withoutBms.statusCode).toBe(422)
+    expect(withoutBms.json().detail).toContainEqual({ kind: 'missing_photo', slot: 'bms_1' })
+
+    await h.uploadPhoto(driver, shiftId, 'start', 'bms_1')
+    await h.app.inject({
+      method: 'PUT',
+      url: `/shifts/${shiftId}/battery-readings`,
+      headers: { cookie: h.cookie(driver) },
+      payload: { package: 'start', readings: [{ batteryId: packId, percent: 100, source: 'ocr' }] },
+    })
+    expect((await submitStart(driver, shiftId)).statusCode, 'one pack satisfied').toBe(200)
+  })
+
+  it('a TWO-pack bike is not satisfied by the first pack alone', async () => {
+    const manager = await h.loginAs('manager')
+    const first = await fit(manager, 1, 'PACK-1')
+    await fit(manager, 2, 'PACK-2')
+    const { driver, shiftId } = await startShift()
+
+    await h.uploadPhoto(driver, shiftId, 'start', 'odometer')
+    await h.uploadPhoto(driver, shiftId, 'start', 'bms_1')
+    await h.app.inject({
+      method: 'PUT',
+      url: `/shifts/${shiftId}/battery-readings`,
+      headers: { cookie: h.cookie(driver) },
+      payload: { package: 'start', readings: [{ batteryId: first, percent: 100, source: 'ocr' }] },
+    })
+
+    const res = await submitStart(driver, shiftId)
+    expect(res.statusCode).toBe(422)
+    expect(res.json().detail).toContainEqual({ kind: 'missing_photo', slot: 'bms_2' })
+    expect(res.json().detail).toContainEqual({ kind: 'missing_battery_reading', slotNo: 2 })
+  })
+
+  it('a bike with no packs on file gates exactly as it did before', async () => {
+    const { driver, shiftId } = await startShift()
+    await h.uploadPhoto(driver, shiftId, 'start', 'odometer')
+    expect((await submitStart(driver, shiftId)).statusCode).toBe(200)
+  })
+
+  it("a reading from another bike's pack cannot satisfy this bike's gate", async () => {
+    const manager = await h.loginAs('manager')
+    await fit(manager, 1, 'PACK-1')
+    const elsewhere = (
+      await post(manager, '/batteries', { capacityAh: 50, serialNo: 'OTHER', vehicleId: 'vehicle-2', slotNo: 1 })
+    ).json().id
+    const { driver, shiftId } = await startShift()
+
+    const res = await h.app.inject({
+      method: 'PUT',
+      url: `/shifts/${shiftId}/battery-readings`,
+      headers: { cookie: h.cookie(driver) },
+      payload: { package: 'start', readings: [{ batteryId: elsewhere, percent: 100, source: 'ocr' }] },
+    })
+    expect(res.statusCode).toBe(422)
+    expect(res.json().error).toBe('battery_not_on_this_vehicle')
+  })
+
+  it('a retake CORRECTS the reading, and keeps what the OCR originally said (SRS D-3)', async () => {
+    const manager = await h.loginAs('manager')
+    const packId = await fit(manager, 1, 'PACK-1')
+    const { driver, shiftId } = await startShift()
+    const put = async (percent: number, source: 'ocr' | 'manual', ocrRaw?: unknown) =>
+      await h.app.inject({
+        method: 'PUT',
+        url: `/shifts/${shiftId}/battery-readings`,
+        headers: { cookie: h.cookie(driver) },
+        payload: { package: 'start', readings: [{ batteryId: packId, percent, source, ...(ocrRaw ? { ocrRaw } : {}) }] },
+      })
+
+    await put(88, 'ocr', { percent: 88 })
+    const corrected = await put(100, 'manual')
+    expect(corrected.statusCode, corrected.body).toBe(200)
+
+    const rows = corrected.json().readings
+    expect(rows).toHaveLength(1) // corrected in place, not stacked
+    expect(rows[0].percent).toBe(100)
+  })
+})
