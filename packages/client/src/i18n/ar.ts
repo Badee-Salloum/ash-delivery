@@ -6,7 +6,7 @@
  * something a branch manager reads under time pressure.
  */
 export const ar = {
-  app: { title: 'ASH Delivery', tagline: 'منصة التوصيل والإدارة المالية' },
+  app: { title: 'ASH Delivery', tagline: 'منصة التوصيل والإدارة المالية', updateAvailable: 'يتوفر إصدار جديد', updateNow: 'تحديث' },
 
   roles: {
     general_manager: 'المدير العام',
@@ -248,6 +248,11 @@ export const ar = {
     reading: 'قراءة البطارية',
     bmsShot: 'صورة تطبيق البطارية',
     bmsHint: 'اختر سكرينشوت تطبيق البطارية من معرض الصور',
+    ocrOk: 'تمت قراءة {{n}} حقول من الصورة',
+    ocrTimeout: 'تعذّرت القراءة — استغرقت وقتاً طويلاً. أدخل الأرقام يدوياً',
+    ocrUnavailable: 'تعذّر تشغيل القارئ — أدخل الأرقام يدوياً',
+    ocrNoFields: 'لم نتعرّف على أي حقل في الصورة — أدخل الأرقام يدوياً',
+    ocrRetry: 'إعادة القراءة',
     percent: 'الشحن المتبقي',
     voltage: 'الجهد',
     cycles: 'عدد الدورات',

@@ -5,7 +5,7 @@ import type { Catalog } from './ar.ts'
  * missing or extra key a compile error, and `scripts/check-i18n-parity.mjs` re-checks in CI.
  */
 export const en: Catalog = {
-  app: { title: 'ASH Delivery', tagline: 'Delivery & financial operations platform' },
+  app: { title: 'ASH Delivery', tagline: 'Delivery & financial operations platform', updateAvailable: 'A new version is available', updateNow: 'Update' },
 
   roles: {
     general_manager: 'General Manager',
@@ -247,6 +247,11 @@ export const en: Catalog = {
     reading: 'Battery reading',
     bmsShot: 'Battery app screenshot',
     bmsHint: 'Pick the battery app screenshot from your gallery',
+    ocrOk: 'Read {{n}} fields from the screenshot',
+    ocrTimeout: 'Could not read it — it took too long. Type the numbers in',
+    ocrUnavailable: 'The reader would not start — type the numbers in',
+    ocrNoFields: 'No field was recognised in the screenshot — type the numbers in',
+    ocrRetry: 'Read again',
     percent: 'Remaining charge',
     voltage: 'Voltage',
     cycles: 'Cycle count',

@@ -5,6 +5,7 @@ import { useApp } from '../app-context.tsx'
 import { Button, Card, Field, Money, MoneyInput, Screen, TextInput } from '../ui.tsx'
 import { OrderEntry } from './OrderEntry.tsx'
 import { BatteryPanel, type FittedBattery } from './BatteryPanel.tsx'
+import { PhotoSlot } from './PhotoSlot.tsx'
 
 /**
  * The driver's shift flow: start package → order entry → end package.
@@ -191,86 +192,6 @@ async function submitOrders(
   return failed
 }
 
-/** A camera-capture tile that compresses and uploads, showing progress and a taken/retake state. */
-function PhotoSlot({
-  shiftId,
-  pkg,
-  slot,
-  label,
-  onUploaded,
-  onImage,
-  source = 'camera',
-}: {
-  shiftId: string
-  pkg: 'start' | 'end'
-  slot: string
-  label: string
-  onUploaded(): void
-  /**
-   * The ORIGINAL file, for on-device OCR. Best-effort — never blocks the upload.
-   *
-   * Deliberately not the compressed bytes. `compressImage` caps the long edge at 1280 px and
-   * drops JPEG quality to 0.4, which puts a phone screenshot's body text at roughly 10-13 px of
-   * x-height — below what Tesseract's LSTM can read, with JPEG ringing on exactly the thin,
-   * high-contrast glyphs a BMS readout is made of. The upload still carries the compressed copy;
-   * OCR runs locally, so it costs nothing to give it the real pixels.
-   */
-  onImage?(file: File): void
-  /**
-   * `camera` opens the camera (an odometer is photographed). `gallery` does not — a BMS reading
-   * is a SCREENSHOT the driver already took, and forcing the camera would make him photograph
-   * one phone screen with another.
-   */
-  source?: 'camera' | 'gallery'
-}): ReactNode {
-  const { api, t } = useApp()
-  const ref = useRef<HTMLInputElement>(null)
-  const [state, setState] = useState<'idle' | 'working' | 'done' | 'error'>('idle')
-
-  const onPick = useCallback(
-    async (file: File) => {
-      setState('working')
-      try {
-        const { bytes, mimeType } = await compressImage(file)
-        await api.putBytes(uploadEvidencePath(shiftId, pkg, slot), bytes, mimeType, {
-          'x-client-taken-at': String(Date.now()),
-        })
-        setState('done')
-        onUploaded()
-        onImage?.(file) // fire-and-forget OCR after the upload is safely done
-      } catch {
-        // The upload is idempotent, so the fix is simply to tap again.
-        setState('error')
-      }
-    },
-    [api, shiftId, pkg, slot, onUploaded, onImage],
-  )
-
-  return (
-    <button
-      onClick={() => ref.current?.click()}
-      className={`flex min-h-20 items-center justify-between rounded-2xl border-2 border-dashed px-4 ${
-        state === 'done' ? 'border-emerald-400 bg-emerald-50' : 'border-slate-300 bg-white'
-      }`}
-    >
-      <span className="font-medium">{label}</span>
-      <span className="text-sm text-slate-500">
-        {state === 'working' ? t.common.loading : state === 'done' ? '✓' : state === 'error' ? t.common.retake : '📷'}
-      </span>
-      <input
-        ref={ref}
-        type="file"
-        accept="image/*"
-        {...(source === 'camera' ? { capture: 'environment' as const } : {})}
-        hidden
-        onChange={(e) => {
-          const f = e.target.files?.[0]
-          if (f) void onPick(f)
-        }}
-      />
-    </button>
-  )
-}
 
 function StartPackage({
   assignment,
@@ -310,9 +231,13 @@ function StartPackage({
       const { readDashboard } = await import('../ocr.ts')
       // The ORIGINAL file, not the compressed upload: 1280 px at q=0.4 puts body text under the
       // LSTM's recognition floor, and no tesseract parameter recovers from that.
-      const reading = await readDashboard(file)
-      if (reading?.odometer != null) setOdo((cur) => (cur === '' ? String(reading.odometer) : cur))
-      if (reading?.battery != null) setBattery((cur) => (cur === '' ? String(reading.battery) : cur))
+      const result = await readDashboard(file)
+      // A failed read is not silent any more, but the odometer tile has no status line of its own
+      // — the driver simply types, which is what he was going to do anyway.
+      if (!result.ok) return
+      const { odometer, battery: pct } = result.reading
+      if (odometer != null) setOdo((cur) => (cur === '' ? String(odometer) : cur))
+      if (pct != null) setBattery((cur) => (cur === '' ? String(pct) : cur))
     } finally {
       setOcrBusy(false)
     }
@@ -406,9 +331,9 @@ function StartPackage({
           pkg="start"
           slot="odometer"
           label={t.shift.odometer}
-          onUploaded={() => {
+          onUploaded={(slot) => {
             setOdoShot(true)
-            setStartSlots((cur) => new Set(cur).add('odometer'))
+            setStartSlots((cur) => new Set(cur).add(slot))
           }}
           onImage={runOcr}
         />
@@ -445,15 +370,7 @@ function StartPackage({
           pkg="start"
           batteries={batteries}
           slots={startSlots}
-          PhotoSlot={(props) => (
-            <PhotoSlot
-              {...props}
-              onUploaded={() => {
-                props.onUploaded()
-                setStartSlots((cur) => new Set(cur).add(props.slot))
-              }}
-            />
-          )}
+          onSlotUploaded={(slot) => setStartSlots((cur) => new Set(cur).add(slot))}
           onReadingsChanged={setBatteriesReady}
         />
       ) : null}
@@ -538,7 +455,7 @@ function EndPackage({
           pkg="end"
           slot={slot}
           label={labels[slot]!}
-          onUploaded={() => setSlots((prev) => new Set(prev).add(slot))}
+          onUploaded={(uploaded) => setSlots((prev) => new Set(prev).add(uploaded))}
         />
       ))}
       <Card className="flex flex-col gap-3">
@@ -561,15 +478,7 @@ function EndPackage({
         pkg="end"
         batteries={batteries}
         slots={slots}
-        PhotoSlot={(props) => (
-          <PhotoSlot
-            {...props}
-            onUploaded={() => {
-              props.onUploaded()
-              setSlots((prev) => new Set(prev).add(props.slot))
-            }}
-          />
-        )}
+        onSlotUploaded={(slot) => setSlots((prev) => new Set(prev).add(slot))}
         onReadingsChanged={setBatteriesReady}
       />
     </Screen>

@@ -1,7 +1,8 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
 import type { BatteryReadingInput } from '@ash/client'
 import { useApp } from '../app-context.tsx'
-import { Card, Field, TextInput } from '../ui.tsx'
+import { Button, Card, Field, TextInput } from '../ui.tsx'
+import { PhotoSlot } from './PhotoSlot.tsx'
 
 export interface FittedBattery {
   id: string
@@ -21,16 +22,65 @@ export interface FittedBattery {
  * The tile opens the GALLERY, not the camera: a BMS reading is a screenshot the driver already
  * took, and forcing the camera would make him photograph one phone screen with another.
  *
- * OCR pre-fills and the driver corrects. What the OCR read is kept in `ocrRaw` and sent alongside
- * the corrected value, so SRS D-3's "log the manual edit WITH its difference from the OCR reading"
- * is recoverable later rather than only at the moment of typing.
+ * EVERY FIGURE IS TYPEABLE. OCR pre-fills what it can and the driver corrects or completes the
+ * rest. Only the percentage used to be editable, with the health figures shown as a read-only echo
+ * of whatever OCR found — so on any handset where OCR struggled, the cycle count and voltage were
+ * lost even though the screenshot was sitting right there.
+ *
+ * What OCR read is kept in `ocrRaw` and sent alongside the corrected value, so SRS D-3's "log the
+ * manual edit WITH its difference from the OCR reading" is recoverable later.
  */
+
+/** The fields, in the order a driver reads them off the screen. */
+const FIELDS = [
+  { key: 'percent', label: 'percent', unit: '%', scale: 1, decimals: 0 },
+  { key: 'packMillivolts', label: 'voltage', unit: 'V', scale: 1000, decimals: 2 },
+  { key: 'cycleCount', label: 'cycles', unit: '', scale: 1, decimals: 0 },
+  { key: 'remainCapacityDah', label: 'remainCapacity', unit: 'Ah', scale: 10, decimals: 1 },
+  { key: 'fullCapacityDah', label: 'fullCapacity', unit: 'Ah', scale: 10, decimals: 1 },
+  { key: 'mosTempDc', label: 'mosTemp', unit: '°C', scale: 10, decimals: 1 },
+  { key: 't1Dc', label: 'temp1', unit: '°C', scale: 10, decimals: 1 },
+  { key: 't2Dc', label: 'temp2', unit: '°C', scale: 10, decimals: 1 },
+] as const
+
+type FieldKey = (typeof FIELDS)[number]['key']
+
+/** Stored scaled integer → what the driver sees. 83_370 → "83.37". */
+const toText = (stored: number | null, scale: number, decimals: number): string =>
+  stored === null ? '' : (stored / scale).toFixed(decimals).replace(/\.?0+$/, (m) => (decimals === 0 ? '' : m))
+
+/** What the driver typed → the scaled integer. "83.37" → 83_370. Blank is null, never 0. */
+const toStored = (text: string, scale: number): number | null => {
+  const trimmed = text.trim()
+  if (trimmed === '') return null
+  const n = Number(trimmed)
+  return Number.isFinite(n) ? Math.round(n * scale) : null
+}
+
+interface PackState {
+  values: Record<FieldKey, string>
+  /** The OCR reading as produced, before any correction — the D-3 baseline. */
+  ocrRaw: unknown
+  outcome: 'idle' | 'reading' | 'ok' | 'timeout' | 'unavailable' | 'no_fields'
+  fieldsFound: number
+}
+
+const EMPTY: PackState = {
+  values: {
+    percent: '', packMillivolts: '', cycleCount: '', remainCapacityDah: '',
+    fullCapacityDah: '', mosTempDc: '', t1Dc: '', t2Dc: '',
+  },
+  ocrRaw: null,
+  outcome: 'idle',
+  fieldsFound: 0,
+}
+
 export function BatteryPanel({
   shiftId,
   pkg,
   batteries,
   slots,
-  PhotoSlot,
+  onSlotUploaded,
   onReadingsChanged,
 }: {
   shiftId: string
@@ -38,64 +88,81 @@ export function BatteryPanel({
   batteries: readonly FittedBattery[]
   /** Which evidence slots have actually uploaded, so a tile can show its taken state. */
   slots: ReadonlySet<string>
-  PhotoSlot: (props: {
-    shiftId: string
-    pkg: 'start' | 'end'
-    slot: string
-    label: string
-    onUploaded(): void
-    onImage?(file: File): void
-    source?: 'camera' | 'gallery'
-  }) => ReactNode
+  onSlotUploaded(slot: string): void
   onReadingsChanged?(complete: boolean): void
 }): ReactNode {
   const { api, t } = useApp()
-  const [values, setValues] = useState<Record<string, BatteryReadingInput>>({})
-  const [busy, setBusy] = useState<string | null>(null)
+  const [packs, setPacks] = useState<Record<string, PackState>>({})
+  const [files, setFiles] = useState<Record<string, File>>({})
 
   const slotOf = (b: FittedBattery, i: number): number => b.slotNo ?? i + 1
+  const stateOf = (id: string): PackState => packs[id] ?? EMPTY
 
-  const complete = batteries.every((b, i) => {
-    const v = values[b.id]
-    return v?.percent != null && slots.has(`bms_${slotOf(b, i)}`)
-  })
+  const complete = batteries.every((b, i) => stateOf(b.id).values.percent.trim() !== '' && slots.has(`bms_${slotOf(b, i)}`))
   useEffect(() => onReadingsChanged?.(complete), [complete, onReadingsChanged])
 
   /** Push one pack's reading. A retake corrects that pack's row rather than adding a second. */
   const push = useCallback(
-    async (batteryId: string, next: BatteryReadingInput): Promise<void> => {
-      setValues((cur) => ({ ...cur, [batteryId]: next }))
-      if (next.percent == null) return
-      // Every failure is swallowed on purpose: the gate re-reads the stored rows at submit time,
-      // so a dropped write shows up as an honest "reading missing", never as a false success.
-      await api.putBatteryReadings(shiftId, pkg, [next]).catch(() => undefined)
+    async (batteryId: string, state: PackState): Promise<void> => {
+      const percent = toStored(state.values.percent, 1)
+      if (percent === null) return // the gate needs a charge; the rest is optional detail
+
+      const scaled = (key: FieldKey): number | null => {
+        const field = FIELDS.find((f) => f.key === key)!
+        return toStored(state.values[key], field.scale)
+      }
+      const body: BatteryReadingInput = {
+        batteryId,
+        percent,
+        packMillivolts: scaled('packMillivolts'),
+        cycleCount: scaled('cycleCount'),
+        remainCapacityDah: scaled('remainCapacityDah'),
+        fullCapacityDah: scaled('fullCapacityDah'),
+        mosTempDc: scaled('mosTempDc'),
+        t1Dc: scaled('t1Dc'),
+        t2Dc: scaled('t2Dc'),
+        // `ocr` only while every field still holds exactly what the reader produced. The moment
+        // the driver corrects one it is `manual` — which is what makes the ocrRaw delta a real
+        // record of a human disagreeing with the machine (SRS D-3) rather than decoration.
+        source: state.outcome === 'ok' && matchesOcr(state) ? 'ocr' : 'manual',
+        ocrRaw: state.ocrRaw,
+      }
+
+      // Swallowed on purpose: the gate re-reads the stored rows at submit time, so a dropped write
+      // shows up as an honest "reading missing", never as a false success.
+      await api.putBatteryReadings(shiftId, pkg, [body]).catch(() => undefined)
     },
     [api, shiftId, pkg],
   )
 
-  const readBms = useCallback(
+  const setPack = useCallback(
+    (batteryId: string, next: PackState): void => {
+      setPacks((cur) => ({ ...cur, [batteryId]: next }))
+      void push(batteryId, next)
+    },
+    [push],
+  )
+
+  const runOcr = useCallback(
     async (battery: FittedBattery, file: File): Promise<void> => {
-      setBusy(battery.id)
-      try {
-        const { readBms: read } = await import('../ocr.ts')
-        const reading = await read(file)
-        if (!reading) return
-        await push(battery.id, {
-          batteryId: battery.id,
-          percent: reading.percent,
-          packMillivolts: reading.packMillivolts,
-          cycleCount: reading.cycleCount,
-          remainCapacityDah: reading.remainCapacityDah,
-          fullCapacityDah: reading.fullCapacityDah,
-          mosTempDc: reading.mosTempDc,
-          t1Dc: reading.t1Dc,
-          t2Dc: reading.t2Dc,
-          source: 'ocr',
-          ocrRaw: reading,
-        })
-      } finally {
-        setBusy(null)
-      }
+      setPacks((cur) => ({ ...cur, [battery.id]: { ...(cur[battery.id] ?? EMPTY), outcome: 'reading' } }))
+      const { readBms } = await import('../ocr.ts')
+      const result = await readBms(file)
+
+      setPacks((cur) => {
+        const prev = cur[battery.id] ?? EMPTY
+        if (!result.ok) return { ...cur, [battery.id]: { ...prev, outcome: result.reason } }
+
+        // Only fill a field the driver has not already answered — his typing always wins.
+        const values = { ...prev.values }
+        for (const f of FIELDS) {
+          const read = result.reading[f.key]
+          if (values[f.key].trim() === '' && read !== null) values[f.key] = toText(read, f.scale, f.decimals)
+        }
+        const next: PackState = { values, ocrRaw: result.reading, outcome: 'ok', fieldsFound: result.fieldsFound }
+        void push(battery.id, next)
+        return { ...cur, [battery.id]: next }
+      })
     },
     [push],
   )
@@ -112,7 +179,7 @@ export function BatteryPanel({
     <>
       {batteries.map((battery, i) => {
         const slotNo = slotOf(battery, i)
-        const current = values[battery.id]
+        const state = stateOf(battery.id)
         return (
           <div key={battery.id} className="flex flex-col gap-3">
             <PhotoSlot
@@ -120,43 +187,86 @@ export function BatteryPanel({
               pkg={pkg}
               slot={`bms_${slotNo}`}
               label={`${t.battery.bmsShot} ${slotNo} · ${battery.capacityAh}Ah`}
-              onUploaded={() => undefined}
-              onImage={(file) => void readBms(battery, file)}
+              onUploaded={onSlotUploaded}
+              onImage={(file) => {
+                setFiles((cur) => ({ ...cur, [battery.id]: file }))
+                void runOcr(battery, file)
+              }}
               source="gallery"
             />
-            {busy === battery.id ? <p className="text-center text-sm text-slate-400">{t.shift.reading}…</p> : null}
+
+            <OcrStatus
+              state={state}
+              onRetry={files[battery.id] ? () => void runOcr(battery, files[battery.id]!) : undefined}
+            />
+
             <Card className="flex flex-col gap-3">
               <p className="text-sm text-slate-400">{t.battery.bmsHint}</p>
-              <Field label={`${t.battery.percent} — ${t.battery.slot} ${slotNo}`}>
-                <TextInput
-                  inputMode="numeric"
-                  value={current?.percent == null ? '' : String(current.percent)}
-                  onChange={(e) => {
-                    // A blank field is NULL, not 0. Those used to be the same value on the wire,
-                    // so "the driver did not answer" was indistinguishable from "the pack is flat".
-                    const text = e.target.value.trim()
-                    void push(battery.id, {
-                      ...(current ?? { batteryId: battery.id, percent: null }),
-                      batteryId: battery.id,
-                      percent: text === '' ? null : Math.min(100, Number(text)),
-                      source: 'manual',
-                      ocrRaw: current?.ocrRaw,
-                    })
-                  }}
-                />
-              </Field>
-              {current?.cycleCount != null || current?.packMillivolts != null ? (
-                // Read-only echo of what the screenshot said, so the driver can spot a misread
-                // without being asked to retype figures he has no reason to know by heart.
-                <p className="num text-xs text-slate-400">
-                  {current.packMillivolts != null ? `${(current.packMillivolts / 1000).toFixed(2)} V · ` : ''}
-                  {current.cycleCount != null ? `${t.battery.cycles}: ${current.cycleCount}` : ''}
-                </p>
-              ) : null}
+              {FIELDS.map((f) => (
+                <Field key={f.key} label={`${t.battery[f.label]}${f.unit ? ` (${f.unit})` : ''}`}>
+                  <TextInput
+                    inputMode="decimal"
+                    value={state.values[f.key]}
+                    onChange={(e) =>
+                      setPack(battery.id, { ...state, values: { ...state.values, [f.key]: e.target.value } })
+                    }
+                  />
+                </Field>
+              ))}
             </Card>
           </div>
         )
       })}
     </>
+  )
+}
+
+/** True while every filled field still matches exactly what OCR produced. */
+function matchesOcr(state: PackState): boolean {
+  const raw = state.ocrRaw as Record<string, number | null> | null
+  if (!raw) return false
+  return FIELDS.every((f) => state.values[f.key] === toText(raw[f.key] ?? null, f.scale, f.decimals))
+}
+
+/**
+ * What OCR did, in words.
+ *
+ * This is the whole point of the rework. Every failure used to resolve to `null` and the screen
+ * said nothing at all — a missing asset, a dead worker, a timeout and a clean read that matched no
+ * field were indistinguishable, to the driver and to anyone debugging it. Now the driver knows
+ * whether to wait, retry, or just type; and a report of "it didn't autofill" arrives with a reason
+ * attached.
+ */
+function OcrStatus({ state, onRetry }: { state: PackState; onRetry?: (() => void) | undefined }): ReactNode {
+  const { t } = useApp()
+  if (state.outcome === 'idle') return null
+
+  if (state.outcome === 'reading') {
+    return <p className="text-center text-sm text-slate-400">{t.shift.reading}…</p>
+  }
+  if (state.outcome === 'ok') {
+    return (
+      <p className="text-center text-sm font-medium text-emerald-700">
+        {t.battery.ocrOk.replace('{{n}}', String(state.fieldsFound))}
+      </p>
+    )
+  }
+
+  const message =
+    state.outcome === 'timeout'
+      ? t.battery.ocrTimeout
+      : state.outcome === 'unavailable'
+        ? t.battery.ocrUnavailable
+        : t.battery.ocrNoFields
+
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-center text-sm font-medium text-amber-700">{message}</p>
+      {onRetry ? (
+        <Button variant="ghost" onClick={onRetry}>
+          {t.battery.ocrRetry}
+        </Button>
+      ) : null}
+    </div>
   )
 }

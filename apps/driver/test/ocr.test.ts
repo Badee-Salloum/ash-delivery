@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseBms, parseReading } from '../src/ocr.ts'
+import { type OcrLine, parseBms, parseReading } from '../src/ocr.ts'
 
 /**
  * The BMS parser, against text shaped like what Tesseract actually returns for the client's two
@@ -131,5 +131,52 @@ describe('the dashboard reader still works, and no longer eats a matching odomet
     // The old rule compared digit STRINGS, so an odometer of exactly 100 beside a 100% battery
     // was discarded as "the battery again" and a clock reading was offered in its place.
     expect(parseReading('100% 100').odometer).toBe(100)
+  })
+})
+
+/**
+ * The line-based input, which is what `readBms` actually feeds the parser now.
+ *
+ * v7 returns `{ text }` and nothing else unless `blocks` is requested, and it has no top-level
+ * `data.words` — words live at `blocks[].paragraphs[].lines[].words[]`. The old code read
+ * `data.words`, always got `[]`, and so the geometric pairing written for the Arabic layout had
+ * never run once. These tests exercise the shape the recogniser really returns.
+ */
+const line = (text: string, words: Array<[string, number, number]> = []): OcrLine => ({
+  text,
+  words: words.map(([w, x0, x1]) => ({ text: w, x0, x1 })),
+})
+
+describe('lines from the recogniser, not a split of the flat text', () => {
+  it('reads a single-column line', () => {
+    expect(parseBms([line('Cycle Count: 8')]).cycleCount).toBe(8)
+  })
+
+  it('splits a TWO-COLUMN row using the gap between words, not the collapsed spaces', () => {
+    // The recognised line text loses the gutter; only the word boxes still know where it was.
+    // Without it, `MOS Temp` would take the 100 sitting in the left-hand cell.
+    const row = line('Remain Battery: 100% MOS Temp: 33.9C', [
+      ['Remain', 0, 90], ['Battery:', 95, 190], ['100%', 195, 260],
+      ['MOS', 600, 660], ['Temp:', 665, 740], ['33.9C', 745, 820],
+    ])
+    const r = parseBms([row])
+    expect(r.percent).toBe(100)
+    expect(r.mosTempDc).toBe(339)
+  })
+
+  it('handles the Arabic layout, where the value comes BEFORE its label', () => {
+    const r = parseBms([line('100% الطاقة المتبقية'), line('1 الدورات')])
+    expect(r.percent).toBe(100)
+    expect(r.cycleCount).toBe(1)
+  })
+
+  it('still accepts a plain string, so a page with no blocks degrades rather than dies', () => {
+    expect(parseBms('Cycle Count: 8').cycleCount).toBe(8)
+  })
+
+  it('does not let a label’s own digit become the value', () => {
+    // «Battery T2» — the 2 belongs to the label. This read 2 °C before the value was taken from
+    // what remains after the label is removed.
+    expect(parseBms([line('Battery T2: 32.5C')]).t2Dc).toBe(325)
   })
 })

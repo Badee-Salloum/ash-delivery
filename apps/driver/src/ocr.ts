@@ -12,14 +12,18 @@
  *                  Digits-only whitelist, sparse layout, "find the biggest number" heuristics.
  *
  *   readBms        a SCREENSHOT of the battery's BMS app — a dense, regular label/value table.
- *                  Labels are the whole point here: «Cycle Count: 8» is only meaningful if the
- *                  words come through, so the digits-only whitelist that helps the dashboard makes
- *                  this one impossible. It needs letters, a block layout, and per-word boxes so a
- *                  right-to-left Arabic app (value first, label second) can still be paired up.
+ *                  Labels are the whole point: «Cycle Count: 8» means nothing without the words,
+ *                  so the digits-only whitelist that helps the dashboard makes this impossible.
+ *                  It needs letters, a block layout, and real line boxes so a right-to-left
+ *                  Arabic app (value first, label second) can still be paired up.
  *
- * Both are ASSISTED, never automatic: they PRE-FILL fields the driver then corrects, and every
- * path is wrapped so ANY failure resolves to `null` and the screen falls back to manual entry.
- * OCR can only ever help, never block.
+ * Both are ASSISTED, never automatic: they PRE-FILL fields the driver then corrects.
+ *
+ * ── EVERY FAILURE IS REPORTED, NEVER SWALLOWED ────────────────────────────────────────────
+ * These used to return `null` for a missing asset, a dead worker, a timeout and a clean read that
+ * matched nothing — all four alike. The driver watched a spinner stop and nothing happen; nobody,
+ * including whoever was debugging it, could learn which of the four had occurred. An `OcrOutcome`
+ * carries the reason out, so the screen can say "timed out, type them in" instead of going quiet.
  */
 
 export interface OcrReading {
@@ -43,6 +47,19 @@ export interface BmsReading {
   t2Dc: number | null
 }
 
+/** Why a read produced nothing. Each one wants a different response from the driver. */
+export type OcrFailure =
+  /** The worker or its assets would not load — offline on first use, or a wasm OOM. */
+  | 'unavailable'
+  /** Recognition ran past its deadline. On a slow handset this is the common one. */
+  | 'timeout'
+  /** Recognition finished and matched no field at all. The image or the labels are the problem. */
+  | 'no_fields'
+
+export type OcrOutcome<T> =
+  | { ok: true; reading: T; fieldsFound: number; ms: number; text: string }
+  | { ok: false; reason: OcrFailure; ms: number; text: string }
+
 /** Per-purpose parameters. `setParameters` is per-call, so one worker serves both readers. */
 interface Profile {
   whitelist: string
@@ -62,8 +79,8 @@ let workerPromise: Promise<Worker> | null = null
  * disabled OCR for the rest of the app session, silently, with no retry: `??=` never re-runs,
  * because a rejected promise is not null.
  *
- * The language set is `eng+ara` because the client uses both the English and the Arabic BMS app.
- * Arabic costs roughly another 0.7–1 MB on first use, fetched once and then cached forever.
+ * `eng+ara` because the client uses both the English and the Arabic BMS app. Arabic costs roughly
+ * another 0.7 MB on first use, fetched once and then cached forever by the service worker.
  */
 async function getWorker(): Promise<Worker> {
   workerPromise ??= (async () => {
@@ -80,20 +97,106 @@ async function getWorker(): Promise<Worker> {
   return workerPromise
 }
 
-interface OcrWord {
+/**
+ * Download the models and instantiate the wasm, before any deadline starts counting.
+ *
+ * First use pulls ~9.6 MB over a Damascus connection. Charging that against the recognition
+ * timeout made the very first read the one most likely to fail — exactly the read that decides
+ * whether a driver ever trusts the feature. Callers show "preparing, first time only" around this.
+ */
+export async function warmUpOcr(): Promise<boolean> {
+  try {
+    await getWorker()
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** One line of recognised text, with the boxes its words came from. */
+export interface OcrLine {
   text: string
-  bbox: { x0: number; y0: number; x1: number; y1: number }
+  words: Array<{ text: string; x0: number; x1: number }>
 }
 
 /**
- * Recognise with a profile, under a hard deadline.
+ * Pull real lines out of a v7 result.
  *
- * The timeout rejects AND clears its own timer. The abandoned `recognize` cannot be cancelled —
- * wasm has no interrupt — but at least the timer no longer fires unobserved after every successful
- * read. 12 s keeps the whole call inside the SRS's 15 s per-image budget with room for the worker
- * handoff; the old 20 s exceeded it outright.
+ * tesseract.js v7 returns `{ text }` and nothing else unless `blocks` is asked for, and its `Page`
+ * has NO top-level `words` — they live at `blocks[].paragraphs[].lines[].words[]`. Reading
+ * `data.words` (as this module used to) therefore always produced `[]`, so the geometric pairing
+ * written for the Arabic app's right-to-left layout had never executed even once.
+ *
+ * Lines carry their own text and their words carry x-boxes, which is everything the two-column
+ * English layout and the RTL Arabic layout each need — and it beats splitting `data.text`, whose
+ * line breaks in a two-column readout are not to be trusted.
  */
-async function recognize(image: Blob, profile: Profile, timeoutMs: number): Promise<{ text: string; words: OcrWord[] }> {
+function linesOf(data: { text?: string; blocks?: unknown }): OcrLine[] {
+  const out: OcrLine[] = []
+  const blocks = (data.blocks ?? []) as Array<{
+    paragraphs?: Array<{ lines?: Array<{ text?: string; words?: Array<{ text?: string; bbox?: { x0: number; x1: number } }> }> }>
+  }>
+  for (const block of blocks) {
+    for (const paragraph of block.paragraphs ?? []) {
+      for (const line of paragraph.lines ?? []) {
+        out.push({
+          text: line.text ?? '',
+          words: (line.words ?? []).map((w) => ({
+            text: w.text ?? '',
+            x0: w.bbox?.x0 ?? 0,
+            x1: w.bbox?.x1 ?? 0,
+          })),
+        })
+      }
+    }
+  }
+  // No blocks (an older core, or a page with no layout): fall back to the flat text.
+  if (out.length === 0) {
+    for (const line of (data.text ?? '').split(/\r?\n/)) {
+      if (line.trim() !== '') out.push({ text: line, words: [] })
+    }
+  }
+  return out
+}
+
+/**
+ * Shrink a screenshot to something Tesseract can chew, WITHOUT throwing away the glyphs.
+ *
+ * PNG, not JPEG: ringing lands on precisely the thin high-contrast strokes a BMS readout is made
+ * of. And only ever downscale — a 1080-wide screenshot is already about right, and enlarging it
+ * would cost time for no accuracy. Falls back to the original file wherever canvas is unavailable.
+ */
+const OCR_MAX_DIMENSION = 2000
+
+export async function prepareForOcr(file: Blob): Promise<Blob> {
+  if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas !== 'function') return file
+  try {
+    const bitmap = await createImageBitmap(file)
+    const longest = Math.max(bitmap.width, bitmap.height)
+    if (longest <= OCR_MAX_DIMENSION) return file
+
+    const scale = OCR_MAX_DIMENSION / longest
+    const canvas = new OffscreenCanvas(Math.round(bitmap.width * scale), Math.round(bitmap.height * scale))
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return file
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+    return await canvas.convertToBlob({ type: 'image/png' })
+  } catch {
+    return file
+  }
+}
+
+/**
+ * Recognise with a profile, under a deadline that starts AFTER warm-up.
+ *
+ * The timeout rejects and clears its own timer. The abandoned `recognize` cannot be cancelled —
+ * wasm has no interrupt — but the timer no longer fires unobserved after every successful read.
+ */
+async function recognize(
+  image: Blob,
+  profile: Profile,
+  timeoutMs: number,
+): Promise<{ text: string; lines: OcrLine[] }> {
   const worker = await getWorker()
   await worker.setParameters({
     tessedit_char_whitelist: profile.whitelist,
@@ -104,13 +207,15 @@ async function recognize(image: Blob, profile: Profile, timeoutMs: number): Prom
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     const result = await Promise.race([
-      worker.recognize(image),
+      // `blocks: true` is REQUIRED. The default output is `{ text: true }` and nothing else, which
+      // is why every previous attempt to read line geometry got an empty array.
+      worker.recognize(image, {}, { text: true, blocks: true }),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error('ocr timeout')), timeoutMs)
       }),
     ])
-    const data = (result as { data: { text?: string; words?: OcrWord[] } }).data
-    return { text: data.text ?? '', words: data.words ?? [] }
+    const data = (result as { data: { text?: string; blocks?: unknown } }).data
+    return { text: data.text ?? '', lines: linesOf(data) }
   } finally {
     if (timer !== undefined) clearTimeout(timer)
   }
@@ -119,16 +224,36 @@ async function recognize(image: Blob, profile: Profile, timeoutMs: number): Prom
 const toBlob = (image: Blob | Uint8Array): Blob =>
   image instanceof Uint8Array ? new Blob([image as BlobPart], { type: 'image/jpeg' }) : image
 
+/** Wall time without `Date.now()` in a hot path — `performance.now()` where it exists. */
+const now = (): number => (typeof performance === 'object' ? performance.now() : 0)
+
+/**
+ * A dense two-language page is slow work on a cheap Android. 25 s is generous on purpose: the
+ * previous 12 s was set at the same moment the job got several times heavier (full-resolution
+ * image, full layout analysis, two models), and a timeout that fires silently is worse than a
+ * driver waiting a few more seconds for a result he can see.
+ */
+const BMS_TIMEOUT_MS = 25_000
+const DASH_TIMEOUT_MS = 15_000
+
 // ── The e-bike dashboard photo ────────────────────────────────────────────────────────────
 
-/** Battery % + odometer from a dashboard photo. Returns null on ANY failure. */
-export async function readDashboard(image: Blob | Uint8Array, timeoutMs = 12_000): Promise<OcrReading | null> {
+/** Battery % + odometer from a dashboard photo. */
+export async function readDashboard(image: Blob | Uint8Array, timeoutMs = DASH_TIMEOUT_MS): Promise<OcrOutcome<OcrReading>> {
+  const started = now()
+  let text = ''
   try {
     // Digits only, sparse layout: a dash has a handful of large glyphs and no useful words.
-    const { text } = await recognize(toBlob(image), { whitelist: '0123456789%.', psm: 11 }, timeoutMs)
-    return parseReading(text)
-  } catch {
-    return null
+    const prepared = await prepareForOcr(toBlob(image))
+    const result = await recognize(prepared, { whitelist: '0123456789%.', psm: 11 }, timeoutMs)
+    text = result.text
+    const reading = parseReading(text)
+    const fieldsFound = [reading.battery, reading.odometer].filter((v) => v !== null).length
+    if (fieldsFound === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text }
+    return { ok: true, reading, fieldsFound, ms: now() - started, text }
+  } catch (err) {
+    const reason: OcrFailure = err instanceof Error && err.message === 'ocr timeout' ? 'timeout' : 'unavailable'
+    return { ok: false, reason, ms: now() - started, text }
   }
 }
 
@@ -197,17 +322,20 @@ const numberIn = (s: string): number | null => {
 }
 
 /**
- * Read a BMS app screenshot. Returns null on ANY failure — the driver then types the numbers.
+ * Read a BMS app screenshot.
  *
  * Feed this the ORIGINAL file, not the compressed upload. `compressImage` caps the long edge at
  * 1280 px and drops JPEG quality to 0.4, which puts a 1080×2400 screenshot's body text at roughly
  * 10–13 px of x-height — under the LSTM's recognition floor, with ringing on exactly the thin,
  * high-contrast glyphs this depends on. No tesseract parameter compensates for that.
  */
-export async function readBms(image: Blob | Uint8Array, timeoutMs = 12_000): Promise<BmsReading | null> {
+export async function readBms(image: Blob | Uint8Array, timeoutMs = BMS_TIMEOUT_MS): Promise<OcrOutcome<BmsReading>> {
+  const started = now()
+  let text = ''
   try {
-    const { text, words } = await recognize(
-      toBlob(image),
+    const prepared = await prepareForOcr(toBlob(image))
+    const result = await recognize(
+      prepared,
       {
         // Letters are mandatory: without them no label survives, and label-anchored parsing is not
         // merely unimplemented — it is impossible. An empty whitelist means "no restriction",
@@ -215,14 +343,19 @@ export async function readBms(image: Blob | Uint8Array, timeoutMs = 12_000): Pro
         // of LSTM garbage.
         whitelist: '',
         // A dense, regular two-column readout. SPARSE_TEXT (11) does no layout analysis and would
-        // scramble the row grouping the pairing below depends on; 6 is a uniform block of text.
+        // scramble the row grouping the pairing depends on; 6 is a uniform block of text.
         psm: 6,
       },
       timeoutMs,
     )
-    return parseBms(text, words)
-  } catch {
-    return null
+    text = result.text
+    const reading = parseBms(result.lines)
+    const fieldsFound = Object.values(reading).filter((v) => v !== null).length
+    if (fieldsFound === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text }
+    return { ok: true, reading, fieldsFound, ms: now() - started, text }
+  } catch (err) {
+    const reason: OcrFailure = err instanceof Error && err.message === 'ocr timeout' ? 'timeout' : 'unavailable'
+    return { ok: false, reason, ms: now() - started, text }
   }
 }
 
@@ -241,41 +374,45 @@ const columnsOf = (line: string): string[] =>
     .filter((c) => c !== '')
 
 /**
+ * Rebuild a line's column gutter from where its words actually sit.
+ *
+ * Recognised line text collapses a wide gutter to ordinary spaces, which would fuse two columns
+ * into one cell and hand the right-hand field the left-hand field's number. A gap much wider than
+ * a word space is a column boundary, so it is re-inserted as one `columnsOf` can find.
+ */
+function withGutters(line: OcrLine): string {
+  if (line.words.length === 0) return line.text
+  const ordered = [...line.words].sort((a, b) => a.x0 - b.x0)
+  const widths = ordered.map((w) => w.x1 - w.x0).filter((w) => w > 0)
+  // Scale the threshold to the text size rather than hardcoding pixels: the same screenshot at
+  // 1080 px and at 2000 px must split in the same places.
+  const typical = widths.length > 0 ? widths.reduce((a, b) => a + b, 0) / widths.length : 20
+  const gutter = Math.max(24, typical * 1.5)
+
+  let text = ''
+  let prevEnd: number | null = null
+  for (const w of ordered) {
+    if (prevEnd === null) text = w.text
+    else text += (w.x0 - prevEnd > gutter ? '   ' : ' ') + w.text
+    prevEnd = w.x1
+  }
+  return text
+}
+
+/**
  * Pair labels with values.
  *
- * Line-based, then column-based, because both apps put one field per cell. Where word boxes are
- * available the rows are ALSO re-derived geometrically, which is what makes the Arabic app work:
- * it prints the value to the LEFT of its label, so "the number after the label" is wrong while
- * "the number in the same cell" is right in both directions.
+ * Line-based, then column-based, because both apps put one field per cell. Taking LINES from the
+ * recogniser rather than splitting `data.text` is what makes the Arabic app work: it prints the
+ * value to the LEFT of its label, so "the number after the label" is wrong, while "the number in
+ * the same cell" is right in both directions — and a line's own box is the only reliable way to
+ * know what "the same cell" means.
  */
-export function parseBms(text: string, words: readonly OcrWord[] = []): BmsReading {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim() !== '')
-
-  // OCR line breaks in a two-column layout are unreliable; vertical position is not.
-  if (words.length > 0) {
-    const rows = new Map<number, OcrWord[]>()
-    for (const w of words) {
-      if (!w.bbox) continue
-      // 12 px buckets: tight enough to keep two stacked fields apart, loose enough that a
-      // superscript unit stays on its own row.
-      const bucket = Math.round((w.bbox.y0 + w.bbox.y1) / 2 / 12)
-      rows.set(bucket, [...(rows.get(bucket) ?? []), w])
-    }
-    for (const [, row] of [...rows.entries()].sort((a, b) => a[0] - b[0])) {
-      // Rebuild the column gutter from the horizontal gaps, so `columnsOf` can still find it.
-      // Joining every word with one space would fuse two columns into one cell and hand the
-      // right-hand field the left-hand field's number.
-      const ordered = [...row].sort((a, b) => a.bbox.x0 - b.bbox.x0)
-      let text = ''
-      let prevEnd: number | null = null
-      for (const w of ordered) {
-        const gap = prevEnd === null ? 0 : w.bbox.x0 - prevEnd
-        text += prevEnd === null ? w.text : (gap > 40 ? '   ' : ' ') + w.text
-        prevEnd = w.bbox.x1
-      }
-      lines.push(text)
-    }
-  }
+export function parseBms(input: readonly OcrLine[] | string): BmsReading {
+  const lines: string[] =
+    typeof input === 'string'
+      ? input.split(/\r?\n/).filter((l) => l.trim() !== '')
+      : input.map(withGutters).filter((l) => l.trim() !== '')
 
   const out: BmsReading = {
     percent: null,
@@ -287,6 +424,7 @@ export function parseBms(text: string, words: readonly OcrWord[] = []): BmsReadi
     t1Dc: null,
     t2Dc: null,
   }
+  const text = lines.join('\n')
 
   for (const line of lines) {
     for (const cell of columnsOf(line)) {
