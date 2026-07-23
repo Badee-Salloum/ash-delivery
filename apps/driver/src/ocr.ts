@@ -497,12 +497,26 @@ export const BMS_PROFILES: readonly BmsProfile[] = [
 export const profileById = (id: string | null | undefined): BmsProfile =>
   BMS_PROFILES.find((p) => p.id === id) ?? BMS_PROFILES[0]!
 
+/**
+ * Flatten a label or a cell to one canonical spelling.
+ *
+ * The Arabic folding matters as much as the digits do. «الطاقة المتبقية» is written with ة, but
+ * ة/ه, أ/إ/آ/ا and ى/ي are routinely interchanged by writers AND confused by OCR — and a label
+ * that misses by one letter misses entirely. Tatweel (ـ) is decoration and carries no meaning.
+ */
 const normalise = (s: string): string =>
   s
     .toLowerCase()
     .replace(/[\s:_]/g, '')
     // Arabic-Indic digits, in case the app renders numerals in them.
     .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+    .replace(/ـ/g, '') // tatweel — a stretching mark, never part of a word
+    .replace(/[ً-ْ]/g, '') // harakat, which OCR invents and drops at random
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/ؤ/g, 'و')
+    .replace(/ئ/g, 'ي')
 
 /**
  * Fold the characters OCR reliably confuses, so a label still matches when it is misread.
@@ -539,16 +553,29 @@ const fold = (s: string): string => s.replace(/[01i|!58]/g, (c) => CONFUSABLE[c]
  * So: cut at the label, look FORWARD first (a left-to-right «label: value»), then BACKWARD (the
  * Arabic layout, where the value precedes its caption).
  */
+/**
+ * A label reduced to the one spelling everything is compared in.
+ *
+ * BOTH sides must go through this. The field table writes «الطاقة المتبقية» the natural way, with
+ * ة; `normalise` folds a recognised cell's ة to ه. Comparing a raw label against a folded cell
+ * would never match — the label would be correct, the text would be correct, and the reading would
+ * silently be lost.
+ */
+const canon = (label: string): string => fold(normalise(label))
+
 const numberForLabel = (cell: string, label: string): number | null => {
-  const at = fold(cell).indexOf(fold(label))
+  const needle = canon(label)
+  // `cell` is already normalised by the caller, so folding it here keeps both sides in the same
+  // space — and the fold is length-preserving, so the index still points into `cell` itself.
+  const at = fold(cell).indexOf(needle)
   if (at < 0) return null
-  const forward = numberIn(cell.slice(at + label.length))
+  const forward = numberIn(cell.slice(at + needle.length))
   if (forward !== null) return forward
   return lastNumberIn(cell.slice(0, at))
 }
 
-/** Does this cell mention the label, allowing for the glyphs OCR confuses? */
-const hasLabel = (cell: string, label: string): boolean => fold(cell).includes(fold(label))
+/** Does this cell mention the label, allowing for the glyphs and letters OCR confuses? */
+const hasLabel = (cell: string, label: string): boolean => fold(cell).includes(canon(label))
 
 const lastNumberIn = (s: string): number | null => {
   const normalised = s.replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660)).replace(/,/g, '')
@@ -848,7 +875,7 @@ function valueNearLabel(lines: readonly OcrLine[], labels: readonly string[]): n
 
 /** The x-range the label occupies, or null when the line carries no word boxes. */
 function spanOfLabel(line: OcrLine, label: string): { x0: number; x1: number } | null {
-  const hits = line.words.filter((w) => normalise(w.text) !== '' && fold(label).includes(fold(normalise(w.text))))
+  const hits = line.words.filter((w) => canon(w.text) !== '' && canon(label).includes(canon(w.text)))
   if (hits.length === 0) return null
   return { x0: Math.min(...hits.map((w) => w.x0)), x1: Math.max(...hits.map((w) => w.x1)) }
 }

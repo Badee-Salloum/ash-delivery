@@ -329,3 +329,31 @@ describe('the charge gauge, found by how big it is printed', () => {
     expect(parseBms(flat).percent).toBeNull()
   })
 })
+
+/**
+ * «الطاقة المتبقية» is the same reading the form calls the remaining charge — and it is written
+ * with ة, which OCR and writers alike interchange with ه. أ/إ/ا and ى/ي go the same way, and
+ * harakat are invented and dropped at random. A label that misses by one letter misses entirely,
+ * so both sides are folded to one spelling before they are compared.
+ */
+describe('Arabic labels survive their spelling variants', () => {
+  it('reads «الطاقة المتبقية» as the charge', () => {
+    expect(parseBms([line('الطاقة المتبقية 100')]).percent).toBe(100)
+  })
+
+  it('reads it spelled with ه instead of ة', () => {
+    expect(parseBms([line('الطاقه المتبقيه 100')]).percent).toBe(100)
+  })
+
+  it('reads it with harakat the recogniser invented', () => {
+    expect(parseBms([line('الطاقَة المتبقيَة 100')]).percent).toBe(100)
+  })
+
+  it('reads «إجمالي الجهد» with a bare alif', () => {
+    expect(parseBms([line('اجمالي الجهد 81.48')]).packMillivolts).toBe(81_480)
+  })
+
+  it('reads «الدورات» with tatweel stretching', () => {
+    expect(parseBms([line('الــدورات 8')]).cycleCount).toBe(8)
+  })
+})
