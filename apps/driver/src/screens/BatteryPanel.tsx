@@ -49,9 +49,20 @@ const FIELDS = [
 
 type FieldKey = (typeof FIELDS)[number]['key']
 
-/** Stored scaled integer → what the driver sees. 83_370 → "83.37". */
-const toText = (stored: number | null, scale: number, decimals: number): string =>
-  stored === null ? '' : (stored / scale).toFixed(decimals).replace(/\.?0+$/, (m) => (decimals === 0 ? '' : m))
+/**
+ * Stored scaled integer → what the driver sees. 83_370 → "83.37", 500 → "50" (50.0 Ah).
+ *
+ * The trailing-zero trim is ONLY for decimal fields, to turn "50.0" into "50". Its logic used to
+ * be inverted: it stripped trailing zeros from WHOLE numbers and left decimals alone, so a
+ * correctly-read charge of 100 was formatted as "1" — the "100 read as 1" reported from the phone
+ * over four rounds was this line, not the OCR. An integer field is already clean and must be left
+ * exactly as `toFixed(0)` produced it.
+ */
+export const toText = (stored: number | null, scale: number, decimals: number): string => {
+  if (stored === null) return ''
+  const fixed = (stored / scale).toFixed(decimals)
+  return decimals === 0 ? fixed : fixed.replace(/\.?0+$/, '')
+}
 
 /** What the driver typed → the scaled integer. "83.37" → 83_370. Blank is null, never 0. */
 const toStored = (text: string, scale: number): number | null => {
