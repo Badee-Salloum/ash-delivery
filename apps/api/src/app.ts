@@ -13,10 +13,11 @@ import {
   uploadEvidenceParams,
   serializeMoney,
   setFxRequest,
+  updateSettingsRequest,
   startPackageRequest,
   putBatteryReadingsRequest,
 } from '@ash/contracts'
-import { addDays, checkWeekClose, dayOfWeek, minor, sum, weekClosedOn, weekStartFor } from '@ash/domain'
+import { addDays, checkWeekClose, dayOfWeek, minor, resolveFxDay, sum, weekClosedOn, weekStartFor } from '@ash/domain'
 import {
   SESSION_COOKIE,
   SESSION_IDLE_MS,
@@ -675,14 +676,92 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   registerDashboardRoutes(app, deps)
 
   // ── Daily FX (BR6) — system admin only ──────────────────────────────────────────────────
+
+  /** Today's rate, for the settings screen — resolved (a carried-forward rate reads provisional). */
+  app.get('/fx', { config: { permission: 'fx_rate.write' } }, async () => {
+    const today = todayFor(deps)
+    const days = await deps.fx.list()
+    // resolveFxDay throws only when NO rate has ever been entered; the app seeds a provisional
+    // one at boot, so in practice this always resolves.
+    try {
+      const rate = resolveFxDay(days, today)
+      // The FX rate is a bounded integer the wire carries as a number by design (setFxRequest),
+      // NOT a cash-minor amount — so a plain integer here is correct, not a precision hazard.
+      const perUsd = rate.sypMinorPerUsd
+      return { businessDate: today, sypMinorPerUsd: Number(perUsd), provisional: rate.provisional }
+    } catch {
+      return { businessDate: today, sypMinorPerUsd: null, provisional: true }
+    }
+  })
+
   app.put('/fx', { config: { permission: 'fx_rate.write' } }, async (req) => {
     const body = setFxRequest.parse(req.body)
+    const before = (await deps.fx.list()).find((d) => d.businessDate === body.businessDate) ?? null
     const id = await deps.fx.upsert({
       businessDate: body.businessDate,
       sypMinorPerUsd: BigInt(body.sypMinorPerUsd),
       provisional: false,
     })
+    // The rate gates every day's USD figures and the Sunday close, so it is audited like any other
+    // money-adjacent setting — the existing route wrote it without a trail.
+    await deps.audit.append({
+      tableName: 'fx_days',
+      recordId: String(id),
+      action: before ? 'UPDATE' : 'INSERT',
+      actorId: req.actor?.userId ?? null,
+      actorKind: req.actor ? 'user' : 'system',
+      branchId: null,
+      requestId: req.requestId,
+      before: before ? { sypMinorPerUsd: before.sypMinorPerUsd.toString(), provisional: before.provisional } : null,
+      after: { sypMinorPerUsd: body.sypMinorPerUsd, provisional: false },
+      occurredAtMs: deps.clock.nowMs(),
+    })
     return { id, businessDate: body.businessDate }
+  })
+
+  // ── General settings (SRS A-4) — system admin only ──────────────────────────────────────
+
+  /** The receipt ceiling and the kWh price, as decimal strings for the settings screen. */
+  app.get('/settings', { config: { permission: 'settings.write' } }, async () => {
+    const [ceiling, kwh] = await Promise.all([deps.settings.receiptRequiredAbove(''), deps.settings.kwhPriceMinor()])
+    return {
+      receiptCeilingMinor: ceiling === null ? null : serializeMoney(ceiling),
+      kwhPriceMinor: kwh === null ? null : serializeMoney(kwh),
+    }
+  })
+
+  app.put('/settings', { config: { permission: 'settings.write' } }, async (req) => {
+    const body = updateSettingsRequest.parse(req.body)
+    const actorId = req.actor!.userId
+    const written: Record<string, string> = {}
+
+    // A fixed key map — never write an arbitrary key. Money is stored as a STRING of minor units,
+    // matching how PgSettingsRepo.money() reads it back, so a large ceiling keeps its precision.
+    const fields: Array<[keyof typeof body, string]> = [
+      ['receiptCeilingMinor', 'expense.receipt_required_above_minor'],
+      ['kwhPriceMinor', 'vehicle.kwh_price_minor'],
+    ]
+    for (const [field, key] of fields) {
+      const value = body[field]
+      if (value === undefined) continue
+      await deps.settings.set(key, value.toString(), actorId)
+      written[key] = serializeMoney(value)
+    }
+    if (Object.keys(written).length > 0) {
+      await deps.audit.append({
+        tableName: 'settings',
+        recordId: Object.keys(written).join(','),
+        action: 'UPDATE',
+        actorId,
+        actorKind: 'user',
+        branchId: null,
+        requestId: req.requestId,
+        before: null,
+        after: written,
+        occurredAtMs: deps.clock.nowMs(),
+      })
+    }
+    return { updated: Object.keys(written) }
   })
 
   // ── The Sunday close (BR7) — system admin only ──────────────────────────────────────────

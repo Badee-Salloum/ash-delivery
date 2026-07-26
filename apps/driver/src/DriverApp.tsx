@@ -43,6 +43,27 @@ export function DriverApp(): ReactNode {
     void api.get<Assignment>('/me/assignment').then(setAssignment).catch(() => setAssignment(null))
   }, [api, session])
 
+  /**
+   * Absorb the Android/browser Back button while a shift is in flight.
+   *
+   * The app is one URL with no router, so a reflex Back tap — muscle memory on Android — would
+   * bounce a working driver clean out of the app mid-shift. His shift is safe on the server (the
+   * resume path re-fetches it), but the exit looks broken. So while he has a bike selected or a
+   * live shift, we push a sentinel entry and re-push it on every Back, keeping him put. The shift
+   * phases are forward-gated — Back never rewinds a phase; «إلغاء النوبة» is the only way back.
+   * When idle at the picker with no live shift, Back is left alone so he can still leave.
+   */
+  const inFlight = vehicleId !== null || (assignment?.liveShiftId ?? null) !== null
+  useEffect(() => {
+    if (!inFlight) return
+    window.history.pushState({ ashGuard: true }, '')
+    const onPop = (): void => {
+      window.history.pushState({ ashGuard: true }, '')
+    }
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [inFlight])
+
   if (!session) return <Login />
 
   const bar = (

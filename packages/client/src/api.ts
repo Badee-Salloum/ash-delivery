@@ -398,6 +398,23 @@ export class ApiClient {
     return this.del<{ ok: boolean; id: string }>(`/shifts/${id}`)
   }
 
+  // ── Daily FX rate (BR6) & general settings (A-4) — system admin ─────────────────────────────
+  fxRate() {
+    return this.get<{ businessDate: string; sypMinorPerUsd: number | null; provisional: boolean }>('/fx')
+  }
+  /** `sypMinorPerUsd` is SYP MINOR units per USD — 13000 = 130.00 SYP/USD. */
+  setFxRate(businessDate: string, sypMinorPerUsd: number) {
+    return this.put<{ id: number; businessDate: string }>('/fx', { businessDate, sypMinorPerUsd })
+  }
+
+  settings() {
+    return this.get<{ receiptCeilingMinor: string | null; kwhPriceMinor: string | null }>('/settings')
+  }
+  /** Money fields are decimal strings ("50000.00"); only what is sent changes. */
+  updateSettings(body: { receiptCeilingMinor?: string; kwhPriceMinor?: string }) {
+    return this.put<{ updated: string[] }>('/settings', body)
+  }
+
   // ── Branch treasury (cash box + wallet) ─────────────────────────────────────────────────────
   treasuryBalances() {
     return this.get<{ cash: string; wallet: string }>('/treasury/balances')

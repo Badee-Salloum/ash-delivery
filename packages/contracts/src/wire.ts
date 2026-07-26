@@ -355,6 +355,19 @@ export const setFxRequest = z.object({
   sypMinorPerUsd: z.number().int().positive(),
 })
 
+/**
+ * General operating constants (SRS A-4). A FIXED set of known keys — never an arbitrary
+ * key/value write, which would let a typo create a setting nothing reads. Money crosses as a
+ * decimal string (moneySchema) and is stored as minor units, so a large ceiling keeps its
+ * precision through JSON. Every field is optional: only what is sent changes.
+ */
+export const updateSettingsRequest = z.object({
+  /** «سقف الإيصال» — above this an expense/manual entry needs a photographed receipt (G-3 / س52). */
+  receiptCeilingMinor: moneySchema.optional(),
+  /** «سعر الكيلوواط-ساعة» — fixed kWh price for charging cost (G-2 / س64). */
+  kwhPriceMinor: moneySchema.optional(),
+})
+
 export const closeWeekRequest = z.object({
   closeDate: calendarDateSchema,
   /**

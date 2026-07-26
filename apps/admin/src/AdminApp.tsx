@@ -11,8 +11,9 @@ import { Treasury } from './screens/Treasury.tsx'
 import { Accounts } from './screens/Accounts.tsx'
 import { Audit } from './screens/Audit.tsx'
 import { Permissions } from './screens/Permissions.tsx'
+import { Settings } from './screens/Settings.tsx'
 
-type Section = 'dashboard' | 'queue' | 'fleet' | 'fleetConfig' | 'treasury' | 'accounts' | 'audit' | 'permissions'
+type Section = 'dashboard' | 'queue' | 'fleet' | 'fleetConfig' | 'treasury' | 'accounts' | 'audit' | 'permissions' | 'settings'
 
 /**
  * The admin console shell: a side rail of sections and a main pane. The approval review takes over
@@ -23,6 +24,35 @@ export function AdminApp(): ReactNode {
   const [section, setSection] = useState<Section>('dashboard')
   const [openShift, setOpenShift] = useState<string | null>(null)
   const [unread, setUnread] = useState(0)
+
+  /**
+   * Mirror in-app navigation into browser history, so the Back button steps through the console
+   * instead of leaving it.
+   *
+   * There is no router: navigation is `section` + the `openShift` review overlay. Without this a
+   * single Back press exits the whole app — jarring on a tool a manager keeps open all day. Each
+   * navigation pushes a history entry carrying the view; `popstate` restores it, so Back closes
+   * the review first, then walks back through sections.
+   */
+  const view = openShift ? `shift:${openShift}` : section
+  useEffect(() => {
+    if (!session) return
+    if (window.history.state?.view !== view) window.history.pushState({ view }, '')
+  }, [session, view])
+  useEffect(() => {
+    if (!session) return
+    const onPop = (e: PopStateEvent): void => {
+      const target: string = e.state?.view ?? 'dashboard'
+      if (target.startsWith('shift:')) {
+        setOpenShift(target.slice('shift:'.length))
+      } else {
+        setOpenShift(null)
+        setSection(target as Section)
+      }
+    }
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [session])
 
   useEffect(() => {
     if (!session) return
@@ -50,6 +80,8 @@ export function AdminApp(): ReactNode {
     // The numbering scheme is settings.write — the system admin alone. Renumbering a type or a
     // branch restates printed vehicle numbers, so it does not belong beside day-to-day fleet work.
     ...(session.roleKey === 'system_admin' ? [{ key: 'fleetConfig' as const, label: t.fleet.numberingTitle }] : []),
+    // FX rate + general settings are settings.write / fx_rate.write — system admin only.
+    ...(session.roleKey === 'system_admin' ? [{ key: 'settings' as const, label: t.settings.title }] : []),
   ]
 
   return (
@@ -136,6 +168,8 @@ export function AdminApp(): ReactNode {
           <Audit />
         ) : section === 'permissions' ? (
           <Permissions />
+        ) : section === 'settings' ? (
+          <Settings />
         ) : (
           <Treasury />
         )}
