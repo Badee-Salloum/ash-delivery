@@ -55,8 +55,8 @@ export async function makeHarness(opts: { splitGate?: 'advisory' | 'strict' } = 
   })
   deps.directory.branches.set(BRANCH, { id: BRANCH, code: 'DAM', nameAr: 'دمشق', nameEn: 'Damascus', governorateId: GOV_DAMASCUS, branchNo: 1 })
   deps.directory.branches.set(OTHER_BRANCH, { id: OTHER_BRANCH, code: 'ALP', nameAr: 'حلب', nameEn: 'Aleppo', governorateId: GOV_ALEPPO, branchNo: 1 })
-  deps.directory.drivers.set(DRIVER_ID, { id: DRIVER_ID, branchId: BRANCH, code: 'DRV-1', fullNameAr: 'سائق ١', active: true })
-  deps.directory.drivers.set(DRIVER2_ID, { id: DRIVER2_ID, branchId: BRANCH, code: 'DRV-2', fullNameAr: 'سائق ٢', active: true })
+  deps.directory.drivers.set(DRIVER_ID, { id: DRIVER_ID, branchId: BRANCH, code: 'DRV-1', fullNameAr: 'سائق ١', active: true, userId: 'u-d1' })
+  deps.directory.drivers.set(DRIVER2_ID, { id: DRIVER2_ID, branchId: BRANCH, code: 'DRV-2', fullNameAr: 'سائق ٢', active: true, userId: 'u-d2' })
   deps.directory.vehicles.set(VEHICLE_ID, {
     id: VEHICLE_ID,
     branchId: BRANCH,

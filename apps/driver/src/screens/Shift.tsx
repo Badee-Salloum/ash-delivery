@@ -49,6 +49,7 @@ export function ShiftFlow({
   onDiscarded?(): void
 }): ReactNode {
   const { api, t } = useApp()
+  const toast = useToast()
   const [phase, setPhase] = useState<Phase>(resume ? (PHASE_FOR[resume.state] ?? 'start') : 'start')
   const [shift, setShift] = useState<ShiftState | null>(null)
   const [recorded, setRecorded] = useState<DraftOrder[]>([])
@@ -81,6 +82,13 @@ export function ShiftFlow({
         // Trust the server's state over the one the assignment reported: the manager may have
         // approved between the two calls.
         setPhase(PHASE_FOR[st.state] ?? 'start')
+        // C-7: if the manager bounced this shift back for a re-shoot or rejected the close, tell the
+        // driver WHY — otherwise a shift that jumped back a phase looks like a silent glitch.
+        const d = st.lastDecision
+        if (d && (d.decision === 'rephoto_requested' || d.decision === 'rejected')) {
+          const label = d.decision === 'rejected' ? t.shift.closeRejected : t.shift.retakeRequested
+          toast.error(d.notes ? `${label}: ${d.notes}` : label)
+        }
         setLoaded(true)
       })
       .catch(() => setLoaded(true)) // fall back to the state /me/assignment reported

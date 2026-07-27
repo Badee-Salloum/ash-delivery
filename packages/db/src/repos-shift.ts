@@ -27,6 +27,8 @@ import type {
   TierRuleRecord,
   DriverRecord,
   RoleGrantRecord,
+  ShiftDecisionRecord,
+  ShiftDecisionRepo,
   ShiftRecord,
   ShiftRepo,
   VehicleEventRecord,
@@ -1176,6 +1178,40 @@ export class PgNotificationRepo implements NotificationRepo {
       [recipientId],
     )
     return Number(rows[0]?.count ?? '0')
+  }
+}
+
+/** The manager's decision log on a shift (SRS C-7). Append-only; read newest-first. */
+export class PgShiftDecisionRepo implements ShiftDecisionRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async record(decision: Omit<ShiftDecisionRecord, 'id'>): Promise<ShiftDecisionRecord> {
+    const { rows } = await this.pool.query<{ id: string }>(
+      `INSERT INTO shift_decisions (shift_id, gate, decision, notes, decided_by, decided_at)
+       VALUES ($1,$2,$3,$4,$5, to_timestamp($6::double precision / 1000))
+       RETURNING id`,
+      [decision.shiftId, decision.gate, decision.decision, decision.notes, decision.decidedBy, decision.decidedAtMs],
+    )
+    return { ...decision, id: Number(rows[0]!.id) }
+  }
+
+  async listByShift(shiftId: string): Promise<ShiftDecisionRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM shift_decisions WHERE shift_id = $1 ORDER BY decided_at DESC, id DESC',
+      [shiftId],
+    )
+    return rows.map((r) => ({
+      id: Number(r.id),
+      shiftId: String(r.shift_id),
+      gate: r.gate as ShiftDecisionRecord['gate'],
+      decision: r.decision as ShiftDecisionRecord['decision'],
+      notes: (r.notes as string | null) ?? null,
+      decidedBy: String(r.decided_by),
+      decidedAtMs: (r.decided_at as Date).getTime(),
+    }))
   }
 }
 

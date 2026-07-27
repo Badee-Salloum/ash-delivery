@@ -15,6 +15,7 @@ import {
   PgAssignmentRepo,
   PgAttendanceRepo,
   PgBatteryReadingRepo,
+  PgShiftDecisionRepo,
   PgShiftRepo,
   PgVehicleEventRepo,
   PgWeekLockRepo,
@@ -146,6 +147,7 @@ if (!DATABASE_URL) {
         directory: new PgDirectoryRepo(pool),
         vehicleEvents: new PgVehicleEventRepo(pool),
         attendance: new PgAttendanceRepo(pool),
+        decisions: new PgShiftDecisionRepo(pool),
       }
     },
   })

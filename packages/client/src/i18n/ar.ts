@@ -190,6 +190,8 @@ export const ar = {
     walletBalance: 'رصيد المحفظة',
     walletZeroed: 'صورة المحفظة صفراً',
     dashboardShot: 'سكرينشوت الداشبورد',
+    retakeRequested: 'طلب المدير إعادة التصوير',
+    closeRejected: 'رفض المدير إنهاء النوبة',
     slotNames: {
       odometer: 'العداد',
       dashboard: 'الداشبورد',
@@ -454,8 +456,15 @@ export const ar = {
     startVsEnd: 'مقارنة عداد البداية والنهاية',
     approveClose: 'اعتماد الإنهاء',
     requestRetake: 'طلب إعادة تصوير',
+    reject: 'رفض',
     notes: 'ملاحظات',
     noPhotos: 'لا صور',
+    decisionLog: 'سجل القرارات',
+    decisions: {
+      approved: 'اعتُمد',
+      rejected: 'رُفض',
+      rephoto_requested: 'طُلبت إعادة تصوير',
+    },
   },
 
   week: {

@@ -707,6 +707,27 @@ export interface BatteryReadingRepo {
   listByShift(shiftId: string): Promise<BatteryReadingRecord[]>
 }
 
+/**
+ * The manager's decisions on a shift (SRS C-7, «سجل قرارات») — every approve, reject and re-shoot
+ * request, with a note. Append-only; the review screen reads the log so the history of a shift's
+ * gating is visible, and a re-shoot/reject tells the driver WHY.
+ */
+export interface ShiftDecisionRecord {
+  id: number
+  shiftId: string
+  gate: 'open' | 'close'
+  decision: 'approved' | 'rejected' | 'rephoto_requested'
+  notes: string | null
+  decidedBy: string
+  decidedAtMs: number
+}
+
+export interface ShiftDecisionRepo {
+  record(decision: Omit<ShiftDecisionRecord, 'id'>): Promise<ShiftDecisionRecord>
+  /** Newest first, so the log reads top-down from the most recent decision. */
+  listByShift(shiftId: string): Promise<ShiftDecisionRecord[]>
+}
+
 /** Everything the API is handed at construction. One object, so wiring is explicit. */
 export interface Deps {
   clock: Clock
@@ -733,4 +754,5 @@ export interface Deps {
   directory: DirectoryRepo
   vehicleEvents: VehicleEventRepo
   attendance: AttendanceRepo
+  decisions: ShiftDecisionRepo
 }

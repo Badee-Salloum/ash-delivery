@@ -381,6 +381,69 @@ export async function approveOpen(
 
   const updated: ShiftRecord = { ...withFunds, state: result.next }
   await deps.shifts.update(updated)
+  await recordDecision(deps, actor, shiftId, 'open', 'approved', null)
+  return updated
+}
+
+// ── Manager decisions: re-shoot request, reject, and the decision log (C-7) ─────────────────
+
+/** Append one entry to a shift's decision log («سجل قرارات»). */
+async function recordDecision(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  gate: 'open' | 'close',
+  decision: 'approved' | 'rejected' | 'rephoto_requested',
+  notes: string | null,
+): Promise<void> {
+  await deps.decisions.record({ shiftId, gate, decision, notes, decidedBy: actor.userId, decidedAtMs: deps.clock.nowMs() })
+}
+
+/** Tell the driver something happened to his shift — addressed to HIS user id, not the branch. */
+async function notifyDriver(deps: Deps, shift: ShiftRecord, kind: string, notes: string | null): Promise<void> {
+  try {
+    const driver = await deps.directory.driver(shift.driverId)
+    if (!driver?.userId) return
+    await deps.notifications.push({
+      recipientId: driver.userId,
+      branchId: shift.branchId,
+      kind,
+      payload: { shiftId: shift.id, notes },
+      dedupeKey: null,
+      readAtMs: null,
+      createdAtMs: deps.clock.nowMs(),
+    })
+  } catch {
+    // The bell is a convenience, never a precondition.
+  }
+}
+
+/**
+ * The manager sends the package back for a re-shoot (C-7). From `awaiting_open_approval` it returns
+ * to `draft` (re-do the start package); from `pending_review` to `open` (re-do the end package).
+ * The driver is told WHY, and the request is logged.
+ */
+export async function requestRephoto(deps: Deps, actor: Actor, shiftId: string, notes: string | null): Promise<ShiftRecord> {
+  const shift = await mustFind(deps, shiftId)
+  const gate = shift.state === 'pending_review' ? 'close' : 'open'
+  const result = await guard(deps, shift, 'manager_request_rephoto', actor)
+  if (!result.ok) fail(result)
+  const updated: ShiftRecord = { ...shift, state: result.next }
+  await deps.shifts.update(updated)
+  await recordDecision(deps, actor, shiftId, gate, 'rephoto_requested', notes)
+  await notifyDriver(deps, updated, 'shift_rephoto_requested', notes)
+  return updated
+}
+
+/** The manager rejects a close: the shift returns to `open` so the driver can correct and resubmit. */
+export async function rejectClose(deps: Deps, actor: Actor, shiftId: string, notes: string | null): Promise<ShiftRecord> {
+  const shift = await mustFind(deps, shiftId)
+  const result = await guard(deps, shift, 'manager_reject_close', actor)
+  if (!result.ok) fail(result)
+  const updated: ShiftRecord = { ...shift, state: result.next }
+  await deps.shifts.update(updated)
+  await recordDecision(deps, actor, shiftId, 'close', 'rejected', notes)
+  await notifyDriver(deps, updated, 'shift_close_rejected', notes)
   return updated
 }
 
@@ -613,6 +676,7 @@ export async function approveClose(
 
   const updated: ShiftRecord = { ...shift, state: result.next, approvedBy: actor.userId }
   await deps.shifts.update(updated)
+  await recordDecision(deps, actor, shiftId, 'close', 'approved', null)
   return { shift: updated, postings: written.length }
 }
 

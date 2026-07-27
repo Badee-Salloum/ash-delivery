@@ -26,6 +26,8 @@ import type {
   RoleGrantRecord,
   SessionRecord,
   SessionRepo,
+  ShiftDecisionRecord,
+  ShiftDecisionRepo,
   ShiftOrderRecord,
   ShiftRecord,
   ShiftRepo,
@@ -692,6 +694,25 @@ export class MemoryVehicleEventRepo implements VehicleEventRepo {
   }
 }
 
+/** The manager's decision log on a shift (SRS C-7): append-only, read newest-first. */
+export class MemoryShiftDecisionRepo implements ShiftDecisionRepo {
+  readonly rows: ShiftDecisionRecord[] = []
+  private nextId = 1
+
+  async record(decision: Omit<ShiftDecisionRecord, 'id'>): Promise<ShiftDecisionRecord> {
+    const row: ShiftDecisionRecord = { ...decision, id: this.nextId++ }
+    this.rows.push(row)
+    return structuredClone(row)
+  }
+
+  async listByShift(shiftId: string): Promise<ShiftDecisionRecord[]> {
+    return this.rows
+      .filter((r) => r.shiftId === shiftId)
+      .sort((a, b) => b.decidedAtMs - a.decidedAtMs || b.id - a.id)
+      .map((r) => structuredClone(r))
+  }
+}
+
 /** Admin-staff attendance (SRS B-4 / س41): one row per user per day, last-seen bumped on repeat. */
 export class MemoryAttendanceRepo implements AttendanceRepo {
   readonly rows: AttendanceRecord[] = []
@@ -734,6 +755,7 @@ export interface MemoryDeps extends Deps {
   batteryReadings: MemoryBatteryReadingRepo
   vehicleEvents: MemoryVehicleEventRepo
   attendance: MemoryAttendanceRepo
+  decisions: MemoryShiftDecisionRepo
 }
 
 export function createMemoryDeps(nowMs: number): MemoryDeps {
@@ -764,5 +786,6 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     directory: new MemoryDirectoryRepo(),
     vehicleEvents: new MemoryVehicleEventRepo(),
     attendance: new MemoryAttendanceRepo(),
+    decisions: new MemoryShiftDecisionRepo(),
   }
 }

@@ -39,6 +39,7 @@ interface Review {
   }
   orders: Array<{ providerOrderNo: string; payMode: string; fee: string; zone: string | null }>
   media: Array<{ package: 'start' | 'end'; slot: string; mediaId: string }>
+  decisions: Array<{ gate: 'open' | 'close'; decision: 'approved' | 'rejected' | 'rephoto_requested'; notes: string | null; decidedAt: string }>
   br1: {
     expectedCash: string
     expectedWallet: string
@@ -68,6 +69,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   // longer types them). Empty is treated as 0.
   const [floatText, setFloatText] = useState('')
   const [topupText, setTopupText] = useState('')
+  const [notes, setNotes] = useState('') // for a re-shoot request or a reject (C-7)
 
   const [loadError, setLoadError] = useState<string | null>(null)
   const load = useCallback(() => {
@@ -125,6 +127,22 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       } else {
         setError(code ?? 'error')
       }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // C-7: send the package back for a re-shoot (both gates), or reject a close. Both bounce the shift
+  // to the driver, with the note as the reason he sees.
+  async function decide(path: 'request-rephoto' | 'reject-close'): Promise<void> {
+    if (!review) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api.post(`/shifts/${review.id}/${path}`, { notes: notes || null })
+      onDone()
+    } catch (err) {
+      setError((err as { error?: string }).error ?? 'error')
     } finally {
       setBusy(false)
     }
@@ -235,8 +253,36 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         </Table>
       </Card>
 
-      {error ? <p className="text-sm font-medium text-red-600">{error}</p> : null}
-      <div className="sticky bottom-4 flex gap-3">
+      {review.decisions.length > 0 ? (
+        <Card title={t.approval.decisionLog}>
+          <ul className="flex flex-col gap-1 text-sm">
+            {review.decisions.map((d, i) => (
+              <li key={i} className="flex items-center justify-between gap-2 border-b border-slate-100 py-1 last:border-0">
+                <span className="flex items-center gap-2">
+                  <Badge tone={d.decision === 'approved' ? 'green' : d.decision === 'rejected' ? 'red' : 'amber'}>
+                    {t.approval.decisions[d.decision]}
+                  </Badge>
+                  {d.notes ? <span className="text-slate-500">{d.notes}</span> : null}
+                </span>
+                <span className="num text-xs text-slate-400">{new Date(d.decidedAt).toLocaleString()}</span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      ) : null}
+
+      {/* A reason for the re-shoot / reject the driver will see. */}
+      <textarea
+        value={notes}
+        onChange={(e) => setNotes(e.target.value)}
+        placeholder={t.approval.notes}
+        aria-label={t.approval.notes}
+        rows={2}
+        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/15"
+      />
+
+      {error ? <p className="text-sm font-medium text-red-600">{explainError(error, t)}</p> : null}
+      <div className="sticky bottom-4 flex flex-wrap gap-3">
         <Button
           variant="success"
           disabled={busy || (isClose && !review.br1.balanced)}
@@ -245,6 +291,15 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         >
           {isClose ? t.approval.approveClose : t.common.approve}
         </Button>
+        {/* Re-shoot is legal on both gates; reject only on a close. */}
+        <Button variant="ghost" disabled={busy} onClick={() => decide('request-rephoto')}>
+          {t.approval.requestRetake}
+        </Button>
+        {isClose ? (
+          <Button variant="danger" disabled={busy} onClick={() => decide('reject-close')}>
+            {t.approval.reject}
+          </Button>
+        ) : null}
       </div>
     </div>
   )

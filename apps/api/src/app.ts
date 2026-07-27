@@ -48,6 +48,8 @@ import {
   createShift,
   ensureFxDay,
   evaluateShift,
+  rejectClose,
+  requestRephoto,
   submitEndPackage,
   submitStartPackage,
   todayFor,
@@ -607,8 +609,13 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const snapshot = await shiftSnapshot(id)
       if (!snapshot) return reply.code(404).send({ error: 'shift_not_found' })
       // Deliberately no BR1 causes: that ranked diagnosis is the manager's approval tool (BR8).
-      // The driver already gets the difference back from his own end-package submit.
-      return snapshot.body
+      // The driver already gets the difference back from his own end-package submit. But he DOES
+      // get the manager's latest decision, so a bounced shift shows him why (C-7 re-shoot/reject).
+      const [latest] = await deps.decisions.listByShift(id)
+      return {
+        ...snapshot.body,
+        lastDecision: latest ? { decision: latest.decision, notes: latest.notes } : null,
+      }
     },
   )
 
@@ -652,7 +659,17 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const snapshot = await shiftSnapshot(id)
       if (!snapshot) return reply.code(404).send({ error: 'shift_not_found' })
       const br1 = await evaluateShift(deps, snapshot.shift)
-      return { ...snapshot.body, br1: serializeBr1(br1) }
+      const decisions = await deps.decisions.listByShift(id)
+      return {
+        ...snapshot.body,
+        br1: serializeBr1(br1),
+        decisions: decisions.map((d) => ({
+          gate: d.gate,
+          decision: d.decision,
+          notes: d.notes,
+          decidedAt: new Date(d.decidedAtMs).toISOString(),
+        })),
+      }
     },
   )
 
@@ -664,6 +681,30 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const body = approveCloseRequest.parse(req.body)
       const result = await approveClose(deps, req.actor!, id, body.reviewedOrdersHash, opts.splitGate ?? 'advisory')
       return { id: result.shift.id, state: result.shift.state, postings: result.postings }
+    },
+  )
+
+  // C-7: the manager sends the package back for a re-shoot, or rejects a close. Both return the
+  // shift to the driver with a logged reason.
+  const decisionBody = z.object({ notes: z.string().max(2000).nullable().default(null) })
+  app.post(
+    '/shifts/:id/request-rephoto',
+    { config: { permission: 'shift.approve', subject: shiftSubject } },
+    async (req) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const { notes } = decisionBody.parse(req.body ?? {})
+      const shift = await requestRephoto(deps, req.actor!, id, notes)
+      return { id: shift.id, state: shift.state }
+    },
+  )
+  app.post(
+    '/shifts/:id/reject-close',
+    { config: { permission: 'shift.approve', subject: shiftSubject } },
+    async (req) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const { notes } = decisionBody.parse(req.body ?? {})
+      const shift = await rejectClose(deps, req.actor!, id, notes)
+      return { id: shift.id, state: shift.state }
     },
   )
 

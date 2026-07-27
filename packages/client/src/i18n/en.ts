@@ -189,6 +189,8 @@ export const en: Catalog = {
     walletBalance: 'Wallet balance',
     walletZeroed: 'Zeroed-wallet photo',
     dashboardShot: 'Dashboard screenshot',
+    retakeRequested: 'The manager requested a re-shoot',
+    closeRejected: 'The manager rejected the close',
     slotNames: {
       odometer: 'Odometer',
       dashboard: 'Dashboard',
@@ -453,8 +455,15 @@ export const en: Catalog = {
     startVsEnd: 'Start vs end odometer',
     approveClose: 'Approve close',
     requestRetake: 'Request retake',
+    reject: 'Reject',
     notes: 'Notes',
     noPhotos: 'No photos',
+    decisionLog: 'Decision log',
+    decisions: {
+      approved: 'Approved',
+      rejected: 'Rejected',
+      rephoto_requested: 'Re-shoot requested',
+    },
   },
 
   week: {

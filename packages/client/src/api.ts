@@ -40,6 +40,8 @@ export interface ShiftStateView {
     batteries: Array<{ batteryId: string; slotNo: number; percent: number | null }>
   }
   orders: Array<{ providerOrderNo: string; payMode: 'cash' | 'electronic' | 'free'; fee: string; zone: string | null }>
+  /** The manager's latest decision (C-7): present after a re-shoot request / reject, so the driver knows why. */
+  lastDecision?: { decision: 'approved' | 'rejected' | 'rephoto_requested'; notes: string | null } | null
 }
 
 /**
