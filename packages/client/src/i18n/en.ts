@@ -277,6 +277,7 @@ export const en: Catalog = {
       insurance: 'Insurance',
     },
     ownerKinds: { driver: 'Driver', vehicle: 'Vehicle' },
+    noneYet: 'Nothing here yet',
     addDocument: 'Add document',
     issued: 'Issued',
     expires: 'Expires',

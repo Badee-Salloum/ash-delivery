@@ -126,7 +126,7 @@ export function AdminApp(): ReactNode {
               setSection(n.key)
               setOpenShift(null)
             }}
-            className={`flex items-center justify-between rounded-lg px-3 py-2 text-start text-sm font-medium transition-colors ${
+            className={`flex items-center justify-between rounded-lg px-3 py-2 text-start text-sm font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-brand/40 ${
               section === n.key && !openShift ? 'bg-brand text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100'
             }`}
           >
@@ -135,7 +135,10 @@ export function AdminApp(): ReactNode {
           </button>
         ))}
         <div className="mt-auto flex flex-col gap-1 border-t border-slate-100 pt-2">
-          <button onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')} className="rounded-lg px-3 py-2 text-start text-sm text-slate-600 hover:bg-slate-100">
+          <button
+            onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}
+            className="rounded-lg px-3 py-2 text-start text-sm text-slate-600 outline-none hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-brand/40"
+          >
             {lang === 'ar' ? 'English' : 'العربية'}
           </button>
           <button
@@ -150,7 +153,7 @@ export function AdminApp(): ReactNode {
                 setOpenShift(null)
               }
             }}
-            className="rounded-lg px-3 py-2 text-start text-sm font-medium text-red-600 hover:bg-red-50"
+            className="rounded-lg px-3 py-2 text-start text-sm font-medium text-red-600 outline-none hover:bg-red-50 focus-visible:ring-2 focus-visible:ring-brand/40"
           >
             {t.common.logout}
           </button>

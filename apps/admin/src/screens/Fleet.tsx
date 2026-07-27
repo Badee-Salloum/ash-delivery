@@ -3,7 +3,7 @@ import { BMS_PROFILE_IDS, type VehicleEvent } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { useConfirm, useToast } from '../feedback.tsx'
 import { explainError } from '../errors.ts'
-import { Badge, Button, Card, Money, Table, TextInput } from '../ui.tsx'
+import { Badge, Button, Card, Money, Select, Table, TextInput } from '../ui.tsx'
 
 interface Driver {
   id: string
@@ -160,14 +160,14 @@ export function Fleet(): ReactNode {
       <Card title={t.fleet.drivers}>
         <div className="mb-3 flex flex-col gap-2">
           <div className="flex gap-2">
-            <TextInput placeholder={t.fleet.code} value={newDriver.code} onChange={(e) => setNewDriver({ ...newDriver, code: e.target.value })} className="w-28" />
-            <TextInput placeholder={t.fleet.name} value={newDriver.fullNameAr} onChange={(e) => setNewDriver({ ...newDriver, fullNameAr: e.target.value })} className="flex-1" />
+            <TextInput aria-label={t.fleet.code} placeholder={t.fleet.code} value={newDriver.code} onChange={(e) => setNewDriver({ ...newDriver, code: e.target.value })} className="w-28" />
+            <TextInput aria-label={t.fleet.name} placeholder={t.fleet.name} value={newDriver.fullNameAr} onChange={(e) => setNewDriver({ ...newDriver, fullNameAr: e.target.value })} className="flex-1" />
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <TextInput placeholder={t.fleet.nameEn} value={newDriver.fullNameEn} onChange={(e) => setNewDriver({ ...newDriver, fullNameEn: e.target.value })} className="min-w-32 flex-1" />
-            <TextInput placeholder={t.fleet.phone} value={newDriver.phone} onChange={(e) => setNewDriver({ ...newDriver, phone: e.target.value })} className="w-36" />
-            <TextInput type="date" title={t.fleet.hiredOn} value={newDriver.hiredOn} onChange={(e) => setNewDriver({ ...newDriver, hiredOn: e.target.value })} className="w-40" />
-            <TextInput placeholder={t.fleet.nationalId} value={newDriver.nationalId} onChange={(e) => setNewDriver({ ...newDriver, nationalId: e.target.value })} className="w-40" />
+            <TextInput aria-label={t.fleet.nameEn} placeholder={t.fleet.nameEn} value={newDriver.fullNameEn} onChange={(e) => setNewDriver({ ...newDriver, fullNameEn: e.target.value })} className="min-w-32 flex-1" />
+            <TextInput aria-label={t.fleet.phone} placeholder={t.fleet.phone} value={newDriver.phone} onChange={(e) => setNewDriver({ ...newDriver, phone: e.target.value })} className="w-36" />
+            <TextInput aria-label={t.fleet.hiredOn} type="date" title={t.fleet.hiredOn} value={newDriver.hiredOn} onChange={(e) => setNewDriver({ ...newDriver, hiredOn: e.target.value })} className="w-40" />
+            <TextInput aria-label={t.fleet.nationalId} placeholder={t.fleet.nationalId} value={newDriver.nationalId} onChange={(e) => setNewDriver({ ...newDriver, nationalId: e.target.value })} className="w-40" />
             <Button
               onClick={async () => {
                 // Send only the fields that were filled — an empty box means "leave blank", not "".
@@ -191,12 +191,14 @@ export function Fleet(): ReactNode {
                 load()
               }}
               disabled={!newDriver.code || !newDriver.fullNameAr}
+              aria-label={t.fleet.addDriver}
+              title={t.fleet.addDriver}
             >
               +
             </Button>
           </div>
         </div>
-        <Table head={[t.fleet.code, t.fleet.name, t.fleet.documents]}>
+        <Table head={[t.fleet.code, t.fleet.name, t.fleet.documents]} isEmpty={drivers.length === 0} empty={t.fleet.noneYet}>
           {drivers.map((d) => (
             <tr key={d.id}>
               <td className="px-3 py-1 num">{d.code}</td>
@@ -267,13 +269,15 @@ export function Fleet(): ReactNode {
               load()
             }}
             disabled={!newVehicle.vehicleTypeId}
+            aria-label={t.fleet.addVehicle}
+            title={t.fleet.addVehicle}
           >
             +
           </Button>
         </div>
         {vehicleError ? <p className="mb-2 text-sm text-rose-600">{vehicleError}</p> : null}
         {types.length === 0 ? <p className="mb-2 text-sm text-amber-700">{t.fleet.unknownTypeRefused}</p> : null}
-        <Table head={[t.fleet.vehicleNumber, t.fleet.vehicleType, t.battery.title, t.fleet.state, '']}>
+        <Table head={[t.fleet.vehicleNumber, t.fleet.vehicleType, t.battery.title, t.fleet.state, '']} isEmpty={vehicles.length === 0} empty={t.fleet.noneYet}>
           {vehicles.map((v) => (
             <tr key={v.id}>
               <td className="px-3 py-1 num font-semibold">{v.code}</td>
@@ -479,7 +483,7 @@ export function Fleet(): ReactNode {
         {batteryError ? <p className="mb-2 text-sm text-rose-600">{batteryError}</p> : null}
 
         <p className="mb-2 text-xs text-slate-400">{t.battery.profileHint}</p>
-        <Table head={[t.battery.serial, t.battery.capacity, t.battery.profile, t.fleet.vehicles, t.battery.slot, t.fleet.state]}>
+        <Table head={[t.battery.serial, t.battery.capacity, t.battery.profile, t.fleet.vehicles, t.battery.slot, t.fleet.state]} isEmpty={batteries.length === 0} empty={t.fleet.noneYet}>
           {batteries.map((b) => (
             <tr key={b.id}>
               <td className="px-3 py-1 num text-xs">{b.serialNo ?? '—'}</td>
