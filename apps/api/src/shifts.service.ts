@@ -18,8 +18,6 @@ import {
   type BatteryReading,
   type ShiftOrder,
   type TransitionResult,
-  DEFAULT_BANDS,
-  bpsForCount,
   businessDateFor,
   canOpenShift,
   documentStatusOn,
@@ -31,15 +29,15 @@ import {
   postingsForOpen,
   REQUIRED_END_SLOTS,
   resolveFxDay,
-  splitBlock,
+  splitDay,
   sum,
-  totalFees,
   transition,
   trueUp,
   weekStartFor,
 } from '@ash/domain'
 import { fundCodeOf } from '@ash/adapters/memory'
 import { grantsFromRows } from './rbac.ts'
+import { resolveTierRule } from './tier-rule.ts'
 
 export class ServiceError extends Error {
   readonly status: number
@@ -567,17 +565,18 @@ export async function approveClose(
   const todaysOrders = toDomainOrders(orderRows)
   const dayFees = [...priorOrders, ...todaysOrders].map((o) => o.fee)
 
-  const rule = {
-    basis: 'orders' as const,
-    mode: 'whole' as const,
-    vehicleTypeId: null,
-    bands: DEFAULT_BANDS,
-    effectiveFrom: '2026-01-01',
-  }
-  const priorTotals = totalFees(priorOrders.map((o) => o.fee))
+  // The tier rule that actually governs this shift's pay — resolved by business date and vehicle
+  // type (F-3 versioning, F-4 per-type), not a frozen default. `resolveTierRule` falls back to the
+  // F-1 table when nothing is published, so a close is never blocked; published/marginal/per-type
+  // tables now change real pay instead of being dead config.
+  const vehicle = await deps.directory.vehicle(shift.vehicleId)
+  const rule = await resolveTierRule(deps, shift.businessDate, vehicle?.vehicleTypeId ?? null)
+
+  // What the day's earlier shifts were already paid, under the SAME rule — so the true-up is correct
+  // for whole AND marginal modes and for a mid-day band crossing. `splitDay` handles both modes.
   const alreadyPosted =
     priorOrders.length > 0
-      ? splitBlock(priorTotals, bpsForCount(DEFAULT_BANDS, priorOrders.length))
+      ? splitDay(priorOrders.map((o) => o.fee), rule)
       : { driverShare: minor(0n), companyShare: minor(0n), yalagoShare: minor(0n) }
 
   const settlement = trueUp(dayFees, rule, {

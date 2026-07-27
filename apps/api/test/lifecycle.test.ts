@@ -206,6 +206,51 @@ describe('the SRS §2.3 shift, end to end over HTTP', () => {
   })
 })
 
+describe('the tier table drives real pay (F wired into the C close)', () => {
+  it('a published table pays the CONFIGURED rate, not the F-1 default', async () => {
+    // A flat driver-50% table, effective before today — seeded like the go-live bootstrap installs
+    // the F-1 default (the admin publish route refuses a PAST effective date, F-3, so a rule that
+    // already governs today comes from the seed, not a fresh publish).
+    await h.deps.tiers.publish({
+      basis: 'orders',
+      mode: 'whole',
+      vehicleTypeId: null,
+      bands: [{ from: 0, to: null, driverBps: 5000 }],
+      effectiveFrom: '2026-01-01',
+      createdBy: 'u-sa',
+    })
+
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = await openShift(driver, manager)
+    await addTwentyOrders(shiftId, driver)
+    await uploadEnd(shiftId, driver)
+    await h.app.inject({
+      method: 'PUT',
+      url: `/shifts/${shiftId}/end-package`,
+      headers: { cookie: h.cookie(driver) },
+      payload: { odometerKm: 15_412, batteryPercent: 22, cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000) },
+    })
+    const review = await h.app.inject({ method: 'GET', url: `/shifts/${shiftId}/review`, headers: { cookie: h.cookie(manager) } })
+    const hash = review.json().br1.ordersHash
+    const closed = await h.app.inject({
+      method: 'POST',
+      url: `/shifts/${shiftId}/approve-close`,
+      headers: { cookie: h.cookie(manager) },
+      payload: { reviewedOrdersHash: hash },
+    })
+    expect(closed.statusCode, closed.body).toBe(200)
+
+    const balance = (code: string) => h.deps.ledger.fundBalance('branch-damascus', code)
+    // Driver 50% of 100,000 fees = 50,000; Yallago's 20% stays fixed = 20,000; the company absorbs
+    // the rest = 30,000. Under the DEFAULT table (40% at 20 orders) the driver would be 40,000 —
+    // that this figure moved is the whole point: the configured table now changes real pay.
+    expect(await balance(fundCodeOf({ kind: 'driver_share_payable', driverId: DRIVER_ID }))).toBe(-5_000_000n)
+    expect(await balance('company_revenue')).toBe(-3_000_000n)
+    expect(await balance('yalago_income')).toBe(-2_000_000n)
+  })
+})
+
 describe('the gates refuse what BR5 says they must (AC #1, #2)', () => {
   it('will not open without the odometer photo', async () => {
     const driver = await h.loginAs('driver1')

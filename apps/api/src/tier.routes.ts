@@ -1,37 +1,19 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import type { Deps, TierRuleRecord } from '@ash/contracts'
+import type { Deps } from '@ash/contracts'
 import { publishTierRequest, serializeMoney, simulateTierRequest } from '@ash/contracts'
 import {
-  type CalendarDate,
   type ShiftOrder,
   type TierRule,
   DEFAULT_BANDS,
   addDays,
   minor,
-  resolveRule,
   splitDay,
   validateBands,
   TierRuleError,
 } from '@ash/domain'
 import { ServiceError, todayFor } from './shifts.service.ts'
-
-type StoredRule = TierRule & { status: 'active' | 'superseded' | 'withdrawn' }
-
-/**
- * The rule in force on a date, or the client's F-1 default when nothing has been published.
- *
- * `resolveRule` filters on status IN ('active','superseded') and throws when no rule covers the
- * date, so a period before the first publish falls back to the seeded default table rather than
- * failing the whole simulation.
- */
-function ruleInForceOn(rules: readonly StoredRule[], date: CalendarDate): TierRule {
-  try {
-    return resolveRule(rules, date, null)
-  } catch {
-    return { basis: 'orders', mode: 'whole', vehicleTypeId: null, bands: DEFAULT_BANDS, effectiveFrom: '1970-01-01' }
-  }
-}
+import { type StoredRule, asDomainRule, ruleInForceOn } from './tier-rule.ts'
 
 /**
  * The tier engine's admin surface (SRS F-3…F-6).
@@ -41,15 +23,6 @@ function ruleInForceOn(rules: readonly StoredRule[], date: CalendarDate): TierRu
  * screen that changes it, and the simulation that must be run before anyone does.
  */
 export function registerTierRoutes(app: FastifyInstance, deps: Deps): void {
-  const asDomainRule = (r: TierRuleRecord): TierRule & { status: TierRuleRecord['status'] } => ({
-    basis: r.basis,
-    mode: r.mode,
-    vehicleTypeId: r.vehicleTypeId,
-    bands: r.bands,
-    effectiveFrom: r.effectiveFrom,
-    status: r.status,
-  })
-
   /** Everyone who can see branch data can READ the table — a driver's share depends on it. */
   app.get('/tier-rules', { config: { permission: 'branch_data.view', subject: () => ({}) } }, async () => {
     const rows = await deps.tiers.list()
