@@ -3,7 +3,7 @@ import { z } from 'zod'
 import type { Deps, ExpenseCategoryRecord, ExpenseRecord } from '@ash/contracts'
 import { createExpenseCategoryRequest, createExpenseRequest, serializeMoney } from '@ash/contracts'
 import { type Posting, expense as expensePosting, minor, weekStartFor } from '@ash/domain'
-import { ServiceError, ensureFxDay, todayFor } from './shifts.service.ts'
+import { ServiceError, ensureFxDay, recordVehicleEvent, todayFor } from './shifts.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
 
 /**
@@ -125,6 +125,26 @@ export function registerExpenseRoutes(app: FastifyInstance, deps: Deps): void {
       after: { ...record, amount: serializeMoney(record.amount) },
       occurredAtMs: deps.clock.nowMs(),
     })
+
+    // A cost against a vehicle belongs in that vehicle's life log too (س66: «كل الأحداث والكلف»),
+    // linked back to this expense. Defaults to a maintenance entry — a charge-specific cost can be
+    // reclassified via a manual event. Best-effort: the expense + ledger are the record of truth.
+    if (record.vehicleId !== null) {
+      try {
+        await recordVehicleEvent(deps, {
+          vehicleId: record.vehicleId,
+          branchId,
+          kind: 'maintenance',
+          costMinor: record.amount,
+          expenseId: record.id,
+          notes: record.description,
+          businessDate,
+          createdBy: req.actor!.userId,
+        })
+      } catch {
+        // The life-log entry is a convenience; never fail a posted expense over it.
+      }
+    }
 
     return reply.code(201).send({ ...record, amount: serializeMoney(record.amount) })
   })

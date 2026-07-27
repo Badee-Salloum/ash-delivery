@@ -13,8 +13,10 @@ import {
   PgSettingsRepo,
   PgTierRepo,
   PgAssignmentRepo,
+  PgAttendanceRepo,
   PgBatteryReadingRepo,
   PgShiftRepo,
+  PgVehicleEventRepo,
   PgWeekLockRepo,
 } from '../src/repos-shift.ts'
 
@@ -121,6 +123,8 @@ if (!DATABASE_URL) {
         clock: { nowMs: () => Date.UTC(2026, 6, 21, 5, 0, 0), offsetMinutes: () => 180 },
         ids: { uuid: () => crypto.randomUUID(), token: () => 'token' },
         hasher: { hash: async (p: string) => p, verify: async (p: string, h: string) => p === h },
+        // The suite never encrypts (it writes/reads document bytes directly), so a stub suffices.
+        cipher: notYetImplemented('Cipher'),
         users: new PgUserRepo(pool),
         sessions: new PgSessionRepo(pool),
         shifts: new PgShiftRepo(pool),
@@ -140,6 +144,8 @@ if (!DATABASE_URL) {
         weekLocks: new PgWeekLockRepo(pool),
         audit: new PgAuditRepo(pool),
         directory: new PgDirectoryRepo(pool),
+        vehicleEvents: new PgVehicleEventRepo(pool),
+        attendance: new PgAttendanceRepo(pool),
       }
     },
   })

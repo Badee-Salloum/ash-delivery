@@ -221,6 +221,10 @@ export const ar = {
     unknownTypeRefused: 'نوع الآلية غير موجود — أضِفه أولاً',
     code: 'الرمز',
     name: 'الاسم',
+    nameEn: 'الاسم بالإنجليزية',
+    phone: 'الهاتف',
+    hiredOn: 'تاريخ التعيين',
+    nationalId: 'الرقم الوطني',
     state: 'الحالة',
     vehicleStates: { ready: 'جاهزة', charging: 'تشحن', maintenance: 'صيانة', stopped: 'متوقفة' },
     docStatus: {
@@ -230,7 +234,29 @@ export const ar = {
       expired: 'منتهية',
       no_expiry: 'بلا انتهاء',
     },
+    docKinds: {
+      driving_licence: 'رخصة القيادة',
+      national_id: 'الهوية الوطنية',
+      criminal_record: 'السجل العدلي',
+      registration: 'دفتر الآلية',
+      insurance: 'التأمين',
+    },
+    ownerKinds: { driver: 'سائق', vehicle: 'آلية' },
     blocked: 'محظور بسبب وثيقة منتهية',
+    history: 'سجل الآلية',
+    addEvent: 'إضافة حدث',
+    recordEvent: 'تسجيل',
+    noEvents: 'لا أحداث بعد',
+    odometer: 'العداد (كم)',
+    cost: 'الكلفة',
+    notes: 'ملاحظات',
+    eventKinds: {
+      state_change: 'تغيير حالة',
+      maintenance: 'صيانة',
+      incident: 'حادث',
+      charge: 'شحن',
+      odometer_reading: 'قراءة عداد',
+    },
   },
 
   battery: {
@@ -331,6 +357,10 @@ export const ar = {
     openShifts: 'نوبات مفتوحة',
     awaitingApproval: 'بانتظار الاعتماد',
     totalProfit: 'الأرباح الإجمالية',
+    expiringDocuments: 'وثائق قاربت على الانتهاء',
+    noExpiring: 'لا وثائق قاربت على الانتهاء',
+    attendanceToday: 'الحضور اليوم',
+    noAttendance: 'لا حضور مسجَّل اليوم',
   },
 
   approval: {

@@ -1,5 +1,6 @@
 import { LocalDiskBlobStore, S3BlobStore, VercelBlobStore, assertDurableBlobStore } from '@ash/adapters/blob'
 import { MemoryBlobStore, createMemoryDeps } from '@ash/adapters/memory'
+import { cipherFromKey } from '@ash/adapters/crypto'
 import type { BlobStore, Deps } from '@ash/contracts'
 import {
   PgAuditRepo,
@@ -15,9 +16,11 @@ import {
   PgSettingsRepo,
   PgTierRepo,
   PgAssignmentRepo,
+  PgAttendanceRepo,
   PgBatteryReadingRepo,
   PgShiftRepo,
   PgUserRepo,
+  PgVehicleEventRepo,
   PgWeekLockRepo,
   assertBigIntParser,
   createPool,
@@ -68,12 +71,14 @@ export async function buildDeps(config: Config): Promise<BuiltDeps> {
   const clock = new SystemClock(config.TZ_OFFSET_MINUTES)
   const ids = new CryptoIdGen()
   const hasher = new BcryptHasher(config.BCRYPT_ROUNDS)
+  // A parse error here (wrong-length key) stops the boot naming the variable, per config's contract.
+  const cipher = cipherFromKey(config.ENCRYPTION_KEY)
 
   if (!config.DATABASE_URL) {
     // Development only — loadConfig() refuses this combination in production.
     const memory = createMemoryDeps(Date.now())
     return {
-      deps: { ...memory, clock, ids, hasher, blobs },
+      deps: { ...memory, clock, ids, hasher, cipher, blobs },
       dispose: async () => undefined,
     }
   }
@@ -87,6 +92,7 @@ export async function buildDeps(config: Config): Promise<BuiltDeps> {
       clock,
       ids,
       hasher,
+      cipher,
       blobs,
       users: new PgUserRepo(pool),
       sessions: new PgSessionRepo(pool),
@@ -105,6 +111,8 @@ export async function buildDeps(config: Config): Promise<BuiltDeps> {
       weekLocks: new PgWeekLockRepo(pool),
       audit: new PgAuditRepo(pool),
       directory: new PgDirectoryRepo(pool),
+      vehicleEvents: new PgVehicleEventRepo(pool),
+      attendance: new PgAttendanceRepo(pool),
     },
     dispose: () => pool.end(),
   }

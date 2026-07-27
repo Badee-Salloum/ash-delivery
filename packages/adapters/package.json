@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     "./memory": "./src/memory/index.ts",
-    "./blob": "./src/blob/index.ts"
+    "./blob": "./src/blob/index.ts",
+    "./crypto": "./src/crypto.ts"
   },
   "comment": "In-memory implementations of every port. Real Postgres/S3 adapters land beside these; the API cannot tell the difference, which is what makes it testable without Docker.",
   "dependencies": {

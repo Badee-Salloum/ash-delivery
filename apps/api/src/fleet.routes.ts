@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import type { Deps, DocumentRecord, DriverRecord } from '@ash/contracts'
+import type { Deps, DocumentRecord, DriverRecord, VehicleEventRecord } from '@ash/contracts'
 import {
   createAssignmentRequest,
   createBatteryRequest,
@@ -8,8 +8,10 @@ import {
   createDocumentRequest,
   createDriverRequest,
   createGovernorateRequest,
+  createVehicleEventRequest,
   createVehicleRequest,
   createVehicleTypeRequest,
+  serializeMoney,
   updateBatteryRequest,
   updateBranchRequest,
   updateDriverRequest,
@@ -27,13 +29,73 @@ import type {
 } from '@ash/contracts'
 import {
   addDays,
+  alertBandFor,
   canTransitionVehicle,
   documentStatusOn,
   formatVehicleNumber,
   nextMachineNo,
 } from '@ash/domain'
-import { ServiceError, todayFor } from './shifts.service.ts'
+import { ServiceError, recordVehicleEvent, todayFor } from './shifts.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
+
+/** The wire shape of a life-log event: cost serialised as a decimal string, time as ISO. */
+function presentVehicleEvent(e: VehicleEventRecord): Record<string, unknown> {
+  return {
+    id: e.id,
+    vehicleId: e.vehicleId,
+    kind: e.kind,
+    occurredAt: new Date(e.occurredAtMs).toISOString(),
+    businessDate: e.businessDate,
+    odometerKm: e.odometerKm,
+    cost: e.costMinor === null ? null : serializeMoney(e.costMinor),
+    expenseId: e.expenseId,
+    shiftId: e.shiftId,
+    notes: e.notes,
+  }
+}
+
+/**
+ * The wire shape of a driver. Profile fields are exposed; the national ID is returned only as a
+ * masked tail («••••1234») and the ciphertext (`nationalIdEnc`) never crosses the wire or lands in
+ * an audit row. Decryption is best-effort: with no key, or a blob that will not authenticate, the
+ * masked value is simply null rather than an error — the list must still render.
+ */
+function presentDriver(deps: Deps, d: DriverRecord): Record<string, unknown> {
+  const enc = d.nationalIdEnc ?? null
+  let nationalId: string | null = null
+  if (enc && deps.cipher.available) {
+    try {
+      const full = deps.cipher.decrypt(enc)
+      nationalId = full.length <= 4 ? '••••' : `••••${full.slice(-4)}`
+    } catch {
+      nationalId = null
+    }
+  }
+  return {
+    id: d.id,
+    branchId: d.branchId,
+    code: d.code,
+    fullNameAr: d.fullNameAr,
+    fullNameEn: d.fullNameEn ?? null,
+    phone: d.phone ?? null,
+    hiredOn: d.hiredOn ?? null,
+    active: d.active,
+    userId: d.userId ?? null,
+    nationalId,
+  }
+}
+
+/**
+ * Encrypt a national ID for storage. `undefined` (field not sent) leaves the stored value alone;
+ * `null` or blank clears it; a value is encrypted. With no key configured we refuse rather than
+ * write plaintext — a 422 the manager can act on beats a silent confidentiality loss.
+ */
+function encryptNationalId(deps: Deps, nationalId: string | null | undefined): Uint8Array | null | undefined {
+  if (nationalId === undefined) return undefined
+  if (nationalId === null || nationalId.trim() === '') return null
+  if (!deps.cipher.available) throw new ServiceError(422, 'encryption_unavailable')
+  return deps.cipher.encrypt(nationalId.trim())
+}
 
 /**
  * Fleet management (SRS §B): drivers, vehicles and their documents.
@@ -65,7 +127,7 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
         drivers.map(async (d) => {
           const docs = await deps.directory.listDocuments({ driverId: d.id })
           return {
-            ...d,
+            ...presentDriver(deps, d),
             documents: docs.map((doc) => ({
               id: doc.id,
               kind: doc.kind,
@@ -82,7 +144,19 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
   app.post('/drivers', { config: { permission: 'fleet.manage', subject: targetBranch } }, async (req, reply) => {
     const body = createDriverRequest.parse(req.body)
     const branchId = resolveBranch(req)
-    const driver: DriverRecord = { id: deps.ids.uuid(), branchId, ...body, active: true }
+    // Encrypt (or refuse) BEFORE the insert, so a no-key deployment never half-creates a driver.
+    // Conditional spreads keep absent fields absent — `exactOptionalPropertyTypes` forbids `undefined`.
+    const driver: DriverRecord = {
+      id: deps.ids.uuid(),
+      branchId,
+      code: body.code,
+      fullNameAr: body.fullNameAr,
+      active: true,
+      nationalIdEnc: encryptNationalId(deps, body.nationalId) ?? null,
+      ...(body.fullNameEn === undefined ? {} : { fullNameEn: body.fullNameEn }),
+      ...(body.phone === undefined ? {} : { phone: body.phone }),
+      ...(body.hiredOn === undefined ? {} : { hiredOn: body.hiredOn }),
+    }
     try {
       await deps.directory.createDriver(driver)
     } catch (err) {
@@ -91,8 +165,9 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
       }
       throw err
     }
-    await audit(deps, req, 'drivers', driver.id, 'INSERT', null, driver)
-    return reply.code(201).send(driver)
+    const dto = presentDriver(deps, driver)
+    await audit(deps, req, 'drivers', driver.id, 'INSERT', null, dto)
+    return reply.code(201).send(dto)
   })
 
   app.patch('/drivers/:id', { config: { permission: 'fleet.manage', subject: driverSubject(deps) } }, async (req) => {
@@ -101,10 +176,16 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
     const before = await deps.directory.driver(id)
     if (!before) throw new ServiceError(404, 'driver_not_found')
 
+    // Resolve the national ID first so a no-key refusal happens before anything is written.
+    const nationalIdEnc = encryptNationalId(deps, body.nationalId)
     const after: DriverRecord = {
       ...before,
       ...(body.fullNameAr === undefined ? {} : { fullNameAr: body.fullNameAr }),
       ...(body.active === undefined ? {} : { active: body.active }),
+      ...(body.fullNameEn === undefined ? {} : { fullNameEn: body.fullNameEn }),
+      ...(body.phone === undefined ? {} : { phone: body.phone }),
+      ...(body.hiredOn === undefined ? {} : { hiredOn: body.hiredOn }),
+      ...(nationalIdEnc === undefined ? {} : { nationalIdEnc }),
     }
     // Deactivating a driver mid-shift would strand a live shift nobody can close.
     if (before.active && after.active === false) {
@@ -112,8 +193,9 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
       if (live.length > 0) throw new ServiceError(409, 'driver_has_live_shift', { shiftId: live[0]!.id })
     }
     await deps.directory.updateDriver(after)
-    await audit(deps, req, 'drivers', id, 'UPDATE', before, after)
-    return after
+    const afterDto = presentDriver(deps, after)
+    await audit(deps, req, 'drivers', id, 'UPDATE', presentDriver(deps, before), afterDto)
+    return afterDto
   })
 
   // ── Vehicles (B-2) ──────────────────────────────────────────────────────────────────────
@@ -437,7 +519,56 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
     }
     await deps.directory.updateVehicle(after)
     await audit(deps, req, 'vehicles', id, 'UPDATE', before, after)
+
+    // Log the state move to the vehicle's life history (س66). Best-effort: the change itself is
+    // already committed and audited, so a log hiccup must not fail an action that succeeded.
+    if (body.state !== undefined && body.state !== before.state) {
+      try {
+        await recordVehicleEvent(deps, {
+          vehicleId: id,
+          branchId: before.branchId,
+          kind: 'state_change',
+          notes: `${before.state} → ${after.state}`,
+          createdBy: req.actor!.userId,
+        })
+      } catch {
+        // The life log is a convenience; the audit row is the record of truth.
+      }
+    }
     return after
+  })
+
+  // ── Vehicle life log (B-2 / س66) ──────────────────────────────────────────────────────────
+
+  /**
+   * Record a maintenance, incident, charge or odometer event by hand — the manager's entries in
+   * «سجل حياة» the bike. State changes are logged automatically by the PATCH above and are not
+   * accepted here. A cost, if given, is part of the log but is NOT posted to the ledger — a real
+   * expense goes through /expenses (which then also appears here, linked by `expenseId`).
+   */
+  app.post('/vehicles/:id/events', { config: { permission: 'fleet.manage', subject: vehicleSubject(deps) } }, async (req, reply) => {
+    const { id } = z.object({ id: z.string() }).parse(req.params)
+    const body = createVehicleEventRequest.parse(req.body)
+    const vehicle = await deps.directory.vehicle(id)
+    if (!vehicle) throw new ServiceError(404, 'vehicle_not_found')
+
+    const event = await recordVehicleEvent(deps, {
+      vehicleId: id,
+      branchId: vehicle.branchId,
+      kind: body.kind,
+      odometerKm: body.odometerKm,
+      costMinor: body.cost,
+      notes: body.notes,
+      createdBy: req.actor!.userId,
+    })
+    await audit(deps, req, 'vehicle_events', String(event.id), 'INSERT', null, presentVehicleEvent(event))
+    return reply.code(201).send(presentVehicleEvent(event))
+  })
+
+  app.get('/vehicles/:id/events', { config: { permission: 'branch_data.view', subject: vehicleSubject(deps) } }, async (req) => {
+    const { id } = z.object({ id: z.string() }).parse(req.params)
+    const events = await deps.vehicleEvents.listByVehicle(id)
+    return { events: events.map(presentVehicleEvent) }
   })
 
   // ── Driver ↔ vehicle assignments (B-3 / س34) ────────────────────────────────────────────
@@ -528,6 +659,37 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
     const horizon = through ?? addDays(today, 30)
 
     const docs = await deps.directory.listExpiringDocuments(branchId, horizon)
+
+    // No scheduler exists (serverless), so the alert sweep piggybacks on this read: ring the branch
+    // bell once per document per threshold band. The push is idempotent (dedupeKey «docId:band»), so
+    // re-opening the board never rings twice, and it is best-effort — the board must render even if
+    // a push fails. A daily Vercel cron hitting this endpoint would make the alerts proactive.
+    for (const d of docs) {
+      const band = alertBandFor(d.expiresOn, today)
+      if (band === null) continue
+      try {
+        await deps.notifications.push({
+          recipientId: `branch:${branchId}`,
+          branchId,
+          kind: 'document_expiring',
+          payload: {
+            documentId: d.id,
+            kind: d.kind,
+            ownerKind: d.ownerKind,
+            driverId: d.driverId,
+            vehicleId: d.vehicleId,
+            expiresOn: d.expiresOn,
+            band,
+          },
+          dedupeKey: `${d.id}:${band}`,
+          readAtMs: null,
+          createdAtMs: deps.clock.nowMs(),
+        })
+      } catch {
+        // The bell is a convenience, never a precondition for showing the board.
+      }
+    }
+
     return {
       today,
       through: horizon,
@@ -538,6 +700,29 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
         vehicleId: d.vehicleId,
         expiresOn: d.expiresOn,
         status: documentStatusOn(d.expiresOn, today),
+      })),
+    }
+  })
+
+  // ── Admin-staff attendance (B-4 / س41) ──────────────────────────────────────────────────────
+
+  /** Who was present at this branch on a given day, resolved to names, first arrival to last seen. */
+  app.get('/attendance', { config: { permission: 'branch_data.view', subject: ownBranch } }, async (req) => {
+    const branchId = resolveBranch(req)
+    const { date } = z.object({ date: z.string().optional() }).parse(req.query)
+    const businessDate = date ?? todayFor(deps)
+    const [rows, users] = await Promise.all([
+      deps.attendance.listByBranchAndDate(branchId, businessDate),
+      deps.users.list(branchId),
+    ])
+    const nameOf = new Map(users.map((u) => [u.id, u.fullNameAr]))
+    return {
+      date: businessDate,
+      attendance: rows.map((r) => ({
+        userId: r.userId,
+        name: nameOf.get(r.userId) ?? r.userId,
+        firstSeenAt: new Date(r.firstSeenAtMs).toISOString(),
+        lastSeenAt: new Date(r.lastSeenAtMs).toISOString(),
       })),
     }
   })

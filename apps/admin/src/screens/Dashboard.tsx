@@ -1,7 +1,33 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
-import { Card, Money, Pending, Stat } from '../ui.tsx'
+import { Badge, Card, Money, Pending, Stat } from '../ui.tsx'
+
+interface ExpiringDoc {
+  id: string
+  kind: string
+  driverId: string | null
+  vehicleId: string | null
+  expiresOn: string | null
+  status: string
+}
+const statusTone: Record<string, 'amber' | 'red' | 'green' | 'slate'> = {
+  expiring_soon: 'amber',
+  expires_today: 'red',
+  expired: 'red',
+  valid: 'green',
+  no_expiry: 'slate',
+}
+
+interface Attendee {
+  userId: string
+  name: string
+  firstSeenAt: string
+  lastSeenAt: string
+}
+/** «HH:MM» in the viewer's locale — attendance is a time of day, not a full timestamp. */
+const hhmm = (iso: string): string =>
+  new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 
 interface DashboardData {
   businessDate: string
@@ -18,6 +44,8 @@ export function Dashboard(): ReactNode {
   const [data, setData] = useState<DashboardData | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [profit, setProfit] = useState<{ companyShareSyp: string; driverShareSyp: string; yalagoShareSyp: string } | null>(null)
+  const [expiring, setExpiring] = useState<ExpiringDoc[]>([])
+  const [attendance, setAttendance] = useState<Attendee[]>([])
 
   // `branchId` is a dependency: an organisation-wide role picks his branch AFTER the first render,
   // and switching branches must refetch rather than leave last branch's figures on screen.
@@ -37,6 +65,11 @@ export function Dashboard(): ReactNode {
     if (session?.roleKey === 'general_manager') {
       void api.get<typeof profit>('/dashboard/profit').then(setProfit).catch(() => setProfit(null))
     }
+    // The expiry board (س37). Reading it also raises the bell for anything crossing a threshold,
+    // so the alert fires automatically on the default landing screen — no scheduler needed.
+    void api.expiringDocuments().then((r) => setExpiring(r.documents)).catch(() => setExpiring([]))
+    // Today's admin-staff attendance (B-4).
+    void api.attendance().then((r) => setAttendance(r.attendance)).catch(() => setAttendance([]))
   }, [api, session])
 
   useEffect(load, [load, branchId])
@@ -103,6 +136,45 @@ export function Dashboard(): ReactNode {
           </ul>
         </Card>
       </div>
+
+      {expiring.length > 0 ? (
+        <Card title={t.dashboard.expiringDocuments}>
+          <ul className="flex flex-col gap-1 text-sm">
+            {expiring.map((d) => {
+              const owner = d.driverId ? t.fleet.ownerKinds.driver : t.fleet.ownerKinds.vehicle
+              const kind = t.fleet.docKinds[d.kind as keyof typeof t.fleet.docKinds] ?? d.kind
+              return (
+                <li key={d.id} className="flex items-center justify-between gap-2 border-b border-slate-100 py-1 last:border-0">
+                  <span>
+                    <span className="text-slate-400">{owner}</span> · {kind}
+                  </span>
+                  <span className="flex items-center gap-2">
+                    <span className="num text-slate-500">{d.expiresOn}</span>
+                    <Badge tone={statusTone[d.status] ?? 'slate'}>
+                      {t.fleet.docStatus[d.status as keyof typeof t.fleet.docStatus] ?? d.status}
+                    </Badge>
+                  </span>
+                </li>
+              )
+            })}
+          </ul>
+        </Card>
+      ) : null}
+
+      {attendance.length > 0 ? (
+        <Card title={t.dashboard.attendanceToday}>
+          <ul className="flex flex-col gap-1 text-sm">
+            {attendance.map((a) => (
+              <li key={a.userId} className="flex items-center justify-between gap-2 border-b border-slate-100 py-1 last:border-0">
+                <span>{a.name}</span>
+                <span className="num text-slate-500">
+                  {hhmm(a.firstSeenAt)} – {hhmm(a.lastSeenAt)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      ) : null}
     </div>
   )
 }

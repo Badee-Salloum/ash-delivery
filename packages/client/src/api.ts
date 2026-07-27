@@ -66,6 +66,20 @@ export interface Battery {
   bmsProfile: string | null
 }
 
+/** One entry in a vehicle's life log (SRS B-2 / س66). `cost` is a decimal string, or null. */
+export interface VehicleEvent {
+  id: number
+  vehicleId: string
+  kind: string
+  occurredAt: string
+  businessDate: string
+  odometerKm: number | null
+  cost: string | null
+  expenseId: string | null
+  shiftId: string | null
+  notes: string | null
+}
+
 /**
  * One pack's BMS reading. Scaled INTEGERS, never floats — millivolts, deci-amp-hours,
  * deci-Celsius — so 83.37 V is 83_370 and 50.0 Ah is 500.
@@ -438,6 +452,42 @@ export class ApiClient {
   }
   markNotificationRead(id: number) {
     return this.post(`/notifications/${id}/read`)
+  }
+
+  // ── Attendance (SRS B-4 / س41) ────────────────────────────────────────────────────────────
+  attendance(date?: string) {
+    return this.get<{
+      date: string
+      attendance: Array<{ userId: string; name: string; firstSeenAt: string; lastSeenAt: string }>
+    }>(date ? `/attendance?date=${encodeURIComponent(date)}` : '/attendance')
+  }
+
+  // ── Vehicle life log (SRS B-2 / س66) ──────────────────────────────────────────────────────
+  vehicleEvents(vehicleId: string) {
+    return this.get<{ events: VehicleEvent[] }>(`/vehicles/${vehicleId}/events`)
+  }
+  recordVehicleEvent(
+    vehicleId: string,
+    body: { kind: string; odometerKm?: number | null; cost?: string | null; notes?: string | null },
+  ) {
+    return this.post<VehicleEvent>(`/vehicles/${vehicleId}/events`, body)
+  }
+
+  // ── Documents (SRS B-1 / س37) ───────────────────────────────────────────────────────────────
+  /** The expiry board. Reading it also raises the bell for anything crossing a threshold band. */
+  expiringDocuments() {
+    return this.get<{
+      today: string
+      through: string
+      documents: Array<{
+        id: string
+        kind: string
+        driverId: string | null
+        vehicleId: string | null
+        expiresOn: string | null
+        status: string
+      }>
+    }>('/documents/expiring')
   }
 }
 

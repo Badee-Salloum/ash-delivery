@@ -57,7 +57,13 @@ export function AdminApp(): ReactNode {
   useEffect(() => {
     if (!session) return
     const poll = (): void => {
-      void api.notifications().then((n) => setUnread(n.unreadCount)).catch(() => undefined)
+      // The Queue badge counts approval alerts only — the same events the Queue list shows.
+      // Other kinds (e.g. document_expiring) ring the bell but surface on their own screens, so
+      // folding them into this count would make the badge disagree with the list beneath it.
+      void api
+        .notifications()
+        .then((n) => setUnread(n.notifications.filter((x) => !x.read && x.kind.startsWith('shift_awaiting')).length))
+        .catch(() => undefined)
     }
     poll()
     const timer = setInterval(poll, 8000)

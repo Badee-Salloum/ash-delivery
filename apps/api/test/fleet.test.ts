@@ -1,5 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { nullCipher } from '@ash/adapters/crypto'
 import { BRANCH, DRIVER_ID, type Harness, OTHER_BRANCH, VEHICLE_ID, VEHICLE_TYPE, makeHarness } from './harness.ts'
 
 /**
@@ -99,6 +100,68 @@ describe('drivers (B-1)', () => {
   })
 })
 
+describe('driver profile fields (B-1)', () => {
+  const patch = async (token: string, url: string, payload: Payload): Promise<LightMyRequestResponse> =>
+    await h.app.inject({ method: 'PATCH', url, headers: { cookie: h.cookie(token) }, payload })
+
+  it('round-trips phone, English name and hire date on create', async () => {
+    const manager = await h.loginAs('manager')
+    const res = await post(manager, '/drivers', {
+      code: 'DRV-P', fullNameAr: 'مع ملف', fullNameEn: 'Full Profile', phone: '0999123456', hiredOn: '2026-01-15',
+    })
+    expect(res.statusCode, res.body).toBe(201)
+    expect(res.json()).toMatchObject({ fullNameEn: 'Full Profile', phone: '0999123456', hiredOn: '2026-01-15' })
+
+    const listed = (await get(manager, '/drivers')).json().drivers as Array<Record<string, unknown>>
+    expect(listed.find((d) => d.code === 'DRV-P')).toMatchObject({ phone: '0999123456', hiredOn: '2026-01-15' })
+  })
+
+  it('stores the national ID encrypted and returns only a masked tail', async () => {
+    const manager = await h.loginAs('manager')
+    const res = await post(manager, '/drivers', { code: 'DRV-N', fullNameAr: 'رقم وطني', nationalId: '1234567890' })
+    expect(res.statusCode, res.body).toBe(201)
+    // The wire carries a mask, never the number.
+    expect(res.json().nationalId).toBe('••••7890')
+    expect(res.body).not.toContain('1234567890')
+
+    // At rest it is ciphertext (a byte array), not the plaintext.
+    const stored = h.deps.directory.drivers.get(res.json().id)?.nationalIdEnc
+    expect(stored).toBeTruthy()
+    expect(Buffer.from(stored!).toString('utf8')).not.toContain('1234567890')
+  })
+
+  it('a patch changes one field without disturbing the national ID', async () => {
+    const manager = await h.loginAs('manager')
+    const id = (await post(manager, '/drivers', { code: 'DRV-E', fullNameAr: 'تعديل', nationalId: '5556667778' })).json().id
+    const encBefore = Buffer.from(h.deps.directory.drivers.get(id)!.nationalIdEnc!)
+
+    const res = await patch(manager, `/drivers/${id}`, { phone: '0988000111' })
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json().phone).toBe('0988000111')
+    expect(res.json().nationalId).toBe('••••7778') // still on file, untouched
+
+    const encAfter = Buffer.from(h.deps.directory.drivers.get(id)!.nationalIdEnc!)
+    expect(encAfter.equals(encBefore)).toBe(true)
+  })
+
+  it('fails closed when no encryption key is configured', async () => {
+    const manager = await h.loginAs('manager')
+    h.deps.cipher = nullCipher() // simulate a deployment with ENCRYPTION_KEY unset
+    const res = await post(manager, '/drivers', { code: 'DRV-K', fullNameAr: 'بلا مفتاح', nationalId: '1112223334' })
+    expect(res.statusCode).toBe(422)
+    expect(res.json().error).toBe('encryption_unavailable')
+    // And nothing was written — the refusal came before the insert.
+    const listed = (await get(manager, '/drivers')).json().drivers as Array<{ code: string }>
+    expect(listed.some((d) => d.code === 'DRV-K')).toBe(false)
+  })
+
+  it('a driver with no national ID reports it as null, not a mask', async () => {
+    const manager = await h.loginAs('manager')
+    const res = await post(manager, '/drivers', { code: 'DRV-0', fullNameAr: 'بدون' })
+    expect(res.json().nationalId).toBeNull()
+  })
+})
+
 describe('vehicles (B-2)', () => {
   it('creates a vehicle in the ready state, numbered from where it sits', async () => {
     const manager = await h.loginAs('manager')
@@ -193,6 +256,42 @@ describe('documents and expiry (B-1 / س37)', () => {
     expect(drivers.find((d) => d.id === DRIVER_ID)?.blockedByDocuments).toBe(true)
   })
 
+  it('an expired driver document blocks the shift itself, not just the badge', async () => {
+    // The badge was cosmetic until now: createShift fed the gate empty arrays, so a driver whose
+    // licence had lapsed could still start. This is the gate actually refusing — the whole point.
+    const manager = await h.loginAs('manager')
+    await post(manager, '/documents', {
+      ownerKind: 'driver', driverId: DRIVER_ID, kind: 'driving_licence', expiresOn: '2026-07-20',
+    })
+    const driver = await h.loginAs('driver1')
+    const res = await post(driver, '/shifts', { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 })
+    expect(res.statusCode).toBe(409)
+    expect(res.json().error).toBe('cannot_open_shift')
+    expect(res.json().detail).toContain('driver_document_expired')
+  })
+
+  it('an expired VEHICLE document blocks the shift too', async () => {
+    const manager = await h.loginAs('manager')
+    await post(manager, '/documents', {
+      ownerKind: 'vehicle', vehicleId: VEHICLE_ID, kind: 'registration', expiresOn: '2026-07-20',
+    })
+    const driver = await h.loginAs('driver1')
+    const res = await post(driver, '/shifts', { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 })
+    expect(res.statusCode).toBe(409)
+    expect(res.json().detail).toContain('vehicle_document_expired')
+  })
+
+  it('a still-valid document does not block the shift', async () => {
+    // Guards against over-blocking: a document that is merely present, or expiring later, is fine.
+    const manager = await h.loginAs('manager')
+    await post(manager, '/documents', {
+      ownerKind: 'driver', driverId: DRIVER_ID, kind: 'driving_licence', expiresOn: '2027-01-01',
+    })
+    const driver = await h.loginAs('driver1')
+    const res = await post(driver, '/shifts', { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 })
+    expect(res.statusCode, res.body).toBe(201)
+  })
+
   it('refuses a document whose owner fields contradict ownerKind', async () => {
     const manager = await h.loginAs('manager')
     const res = await post(manager, '/documents', {
@@ -220,6 +319,35 @@ describe('documents and expiry (B-1 / س37)', () => {
     const kinds = (res.json().documents as Array<{ kind: string }>).map((d) => d.kind)
     expect(kinds).toContain('national_id')
     expect(kinds).not.toContain('criminal_record') // December is beyond the horizon
+  })
+
+  it('opening the expiry board rings the branch bell once per document per threshold band', async () => {
+    const manager = await h.loginAs('manager')
+    await post(manager, '/documents', {
+      ownerKind: 'driver', driverId: DRIVER_ID, kind: 'driving_licence', expiresOn: '2026-07-26', // 5 days → t-7
+    })
+
+    const rings = (): typeof h.deps.notifications.rows =>
+      h.deps.notifications.rows.filter((r) => r.kind === 'document_expiring')
+
+    await get(manager, '/documents/expiring')
+    expect(rings()).toHaveLength(1)
+    expect(rings()[0]!.recipientId).toBe(`branch:${BRANCH}`)
+    expect(rings()[0]!.dedupeKey).toBe(`${rings()[0]!.payload.documentId}:t-7`)
+
+    // Re-opening the board must not ring again — the bell rings once per band, not per view.
+    await get(manager, '/documents/expiring')
+    expect(rings()).toHaveLength(1)
+  })
+
+  it('does not ring for a document still outside every alert threshold', async () => {
+    const manager = await h.loginAs('manager')
+    // 2026-09-30 is ~71 days out — beyond the 30-day board horizon, so nothing to alert on yet.
+    await post(manager, '/documents', {
+      ownerKind: 'driver', driverId: DRIVER_ID, kind: 'national_id', expiresOn: '2026-09-30',
+    })
+    await get(manager, '/documents/expiring')
+    expect(h.deps.notifications.rows.filter((r) => r.kind === 'document_expiring')).toHaveLength(0)
   })
 })
 

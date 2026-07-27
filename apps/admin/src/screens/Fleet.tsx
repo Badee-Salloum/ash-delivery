@@ -1,12 +1,17 @@
-import { type ReactNode, useEffect, useState } from 'react'
-import { BMS_PROFILE_IDS } from '@ash/client'
+import { type ReactNode, useCallback, useEffect, useState } from 'react'
+import { BMS_PROFILE_IDS, type VehicleEvent } from '@ash/client'
 import { useApp } from '../app-context.tsx'
-import { Badge, Button, Card, Table, TextInput } from '../ui.tsx'
+import { Badge, Button, Card, Money, Table, TextInput } from '../ui.tsx'
 
 interface Driver {
   id: string
   code: string
   fullNameAr: string
+  fullNameEn: string | null
+  phone: string | null
+  hiredOn: string | null
+  /** Masked tail of the national ID («••••1234»), or null when none is on file. */
+  nationalId: string | null
   active: boolean
   blockedByDocuments: boolean
   documents: Array<{ id: string; kind: string; expiresOn: string | null; status: string }>
@@ -64,7 +69,7 @@ export function Fleet(): ReactNode {
   const { api, t, lang, branchId } = useApp()
   const [drivers, setDrivers] = useState<Driver[]>([])
   const [vehicles, setVehicles] = useState<Vehicle[]>([])
-  const [newDriver, setNewDriver] = useState({ code: '', fullNameAr: '' })
+  const [newDriver, setNewDriver] = useState({ code: '', fullNameAr: '', fullNameEn: '', phone: '', hiredOn: '', nationalId: '' })
   const [types, setTypes] = useState<VehicleType[]>([])
   const [batteries, setBatteries] = useState<Battery[]>([])
   // The type is CHOSEN, never typed. The old form posted the literal string 'e_motorbike' into a
@@ -135,19 +140,37 @@ export function Fleet(): ReactNode {
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
       <Card title={t.fleet.drivers}>
-        <div className="mb-3 flex gap-2">
-          <TextInput placeholder={t.fleet.code} value={newDriver.code} onChange={(e) => setNewDriver({ ...newDriver, code: e.target.value })} className="w-28" />
-          <TextInput placeholder={t.fleet.name} value={newDriver.fullNameAr} onChange={(e) => setNewDriver({ ...newDriver, fullNameAr: e.target.value })} className="flex-1" />
-          <Button
-            onClick={async () => {
-              await api.post('/drivers', { ...newDriver, ...(branchId ? { branchId } : {}) }).catch(() => undefined)
-              setNewDriver({ code: '', fullNameAr: '' })
-              load()
-            }}
-            disabled={!newDriver.code || !newDriver.fullNameAr}
-          >
-            +
-          </Button>
+        <div className="mb-3 flex flex-col gap-2">
+          <div className="flex gap-2">
+            <TextInput placeholder={t.fleet.code} value={newDriver.code} onChange={(e) => setNewDriver({ ...newDriver, code: e.target.value })} className="w-28" />
+            <TextInput placeholder={t.fleet.name} value={newDriver.fullNameAr} onChange={(e) => setNewDriver({ ...newDriver, fullNameAr: e.target.value })} className="flex-1" />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <TextInput placeholder={t.fleet.nameEn} value={newDriver.fullNameEn} onChange={(e) => setNewDriver({ ...newDriver, fullNameEn: e.target.value })} className="min-w-32 flex-1" />
+            <TextInput placeholder={t.fleet.phone} value={newDriver.phone} onChange={(e) => setNewDriver({ ...newDriver, phone: e.target.value })} className="w-36" />
+            <TextInput type="date" title={t.fleet.hiredOn} value={newDriver.hiredOn} onChange={(e) => setNewDriver({ ...newDriver, hiredOn: e.target.value })} className="w-40" />
+            <TextInput placeholder={t.fleet.nationalId} value={newDriver.nationalId} onChange={(e) => setNewDriver({ ...newDriver, nationalId: e.target.value })} className="w-40" />
+            <Button
+              onClick={async () => {
+                // Send only the fields that were filled — an empty box means "leave blank", not "".
+                const payload = {
+                  code: newDriver.code,
+                  fullNameAr: newDriver.fullNameAr,
+                  ...(newDriver.fullNameEn ? { fullNameEn: newDriver.fullNameEn } : {}),
+                  ...(newDriver.phone ? { phone: newDriver.phone } : {}),
+                  ...(newDriver.hiredOn ? { hiredOn: newDriver.hiredOn } : {}),
+                  ...(newDriver.nationalId ? { nationalId: newDriver.nationalId } : {}),
+                  ...(branchId ? { branchId } : {}),
+                }
+                await api.post('/drivers', payload).catch(() => undefined)
+                setNewDriver({ code: '', fullNameAr: '', fullNameEn: '', phone: '', hiredOn: '', nationalId: '' })
+                load()
+              }}
+              disabled={!newDriver.code || !newDriver.fullNameAr}
+            >
+              +
+            </Button>
+          </div>
         </div>
         <Table head={[t.fleet.code, t.fleet.name, t.fleet.documents]}>
           {drivers.map((d) => (
@@ -156,6 +179,11 @@ export function Fleet(): ReactNode {
               <td className="px-3 py-1">
                 {d.fullNameAr}
                 {d.blockedByDocuments ? <span className="ms-2"><Badge tone="red">{t.fleet.blocked}</Badge></span> : null}
+                {[d.fullNameEn, d.phone, d.hiredOn, d.nationalId].some(Boolean) ? (
+                  <div className="mt-0.5 text-xs text-slate-400">
+                    {[d.fullNameEn, d.phone, d.hiredOn, d.nationalId].filter(Boolean).join(' · ')}
+                  </div>
+                ) : null}
               </td>
               <td className="px-3 py-1">
                 <div className="flex flex-wrap gap-1">
@@ -276,6 +304,8 @@ export function Fleet(): ReactNode {
           ))}
         </Table>
       </Card>
+
+      <VehicleHistory vehicles={vehicles} />
 
       {/*
         SRS B-3: the bike is bound to the driver BEFORE the shift. Once a row exists here the
@@ -493,5 +523,111 @@ export function Fleet(): ReactNode {
         </Table>
       </Card>
     </div>
+  )
+}
+
+const eventTone: Record<string, 'slate' | 'amber' | 'red' | 'sky' | 'green'> = {
+  state_change: 'slate',
+  maintenance: 'amber',
+  incident: 'red',
+  charge: 'sky',
+  odometer_reading: 'green',
+}
+
+/**
+ * A vehicle's life log (SRS B-2 / س66): its history of state changes, maintenance, incidents,
+ * charges and linked costs, newest first — and a small form to record one by hand. State changes
+ * are logged automatically elsewhere, so they are read here but never offered as something to add.
+ */
+function VehicleHistory({ vehicles }: { vehicles: Vehicle[] }): ReactNode {
+  const { api, t } = useApp()
+  const [vehicleId, setVehicleId] = useState('')
+  const [events, setEvents] = useState<VehicleEvent[]>([])
+  const empty = { kind: 'maintenance', odometerKm: '', cost: '', notes: '' }
+  const [form, setForm] = useState(empty)
+
+  const load = useCallback(() => {
+    if (!vehicleId) {
+      setEvents([])
+      return
+    }
+    void api.vehicleEvents(vehicleId).then((r) => setEvents(r.events)).catch(() => setEvents([]))
+  }, [api, vehicleId])
+  useEffect(load, [load])
+
+  return (
+    <Card title={t.fleet.history}>
+      <select
+        className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
+        value={vehicleId}
+        onChange={(e) => setVehicleId(e.target.value)}
+      >
+        <option value="">—</option>
+        {vehicles.map((v) => (
+          <option key={v.id} value={v.id}>
+            {v.code}
+          </option>
+        ))}
+      </select>
+
+      {vehicleId ? (
+        <>
+          <div className="mt-3 flex flex-wrap items-end gap-2">
+            <select
+              className="rounded border border-slate-300 px-2 py-1.5 text-sm"
+              value={form.kind}
+              onChange={(e) => setForm({ ...form, kind: e.target.value })}
+            >
+              {(['maintenance', 'incident', 'charge', 'odometer_reading'] as const).map((k) => (
+                <option key={k} value={k}>
+                  {t.fleet.eventKinds[k]}
+                </option>
+              ))}
+            </select>
+            <TextInput type="number" placeholder={t.fleet.odometer} value={form.odometerKm} onChange={(e) => setForm({ ...form, odometerKm: e.target.value })} className="w-28" />
+            <TextInput placeholder={t.fleet.cost} value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} className="w-28" />
+            <TextInput placeholder={t.fleet.notes} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} className="min-w-40 flex-1" />
+            <Button
+              onClick={async () => {
+                await api
+                  .recordVehicleEvent(vehicleId, {
+                    kind: form.kind,
+                    odometerKm: form.odometerKm ? Number(form.odometerKm) : null,
+                    cost: form.cost || null,
+                    notes: form.notes || null,
+                  })
+                  .catch(() => undefined)
+                setForm(empty)
+                load()
+              }}
+            >
+              {t.fleet.recordEvent}
+            </Button>
+          </div>
+
+          {events.length === 0 ? (
+            <p className="mt-3 text-sm text-slate-400">{t.fleet.noEvents}</p>
+          ) : (
+            <ul className="mt-3 flex flex-col gap-1 text-sm">
+              {events.map((e) => (
+                <li key={e.id} className="flex items-center justify-between gap-2 border-b border-slate-100 py-1 last:border-0">
+                  <span className="flex items-center gap-2">
+                    <Badge tone={eventTone[e.kind] ?? 'slate'}>
+                      {t.fleet.eventKinds[e.kind as keyof typeof t.fleet.eventKinds] ?? e.kind}
+                    </Badge>
+                    <span>{e.notes}</span>
+                  </span>
+                  <span className="flex items-center gap-3 text-slate-500">
+                    {e.odometerKm !== null ? <span className="num">{e.odometerKm} km</span> : null}
+                    {e.cost !== null ? <Money value={e.cost} /> : null}
+                    <span className="num">{e.businessDate}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      ) : null}
+    </Card>
   )
 }

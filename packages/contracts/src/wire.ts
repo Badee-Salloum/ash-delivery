@@ -94,9 +94,18 @@ export const approveCloseRequest = z.object({
 
 // ── Fleet (SRS B) ─────────────────────────────────────────────────────────────────────────
 
+/** A driver's profile fields (B-1). `nationalId` is plaintext in transit (HTTPS); stored encrypted. */
+export const driverProfileFields = {
+  fullNameEn: z.string().max(120).nullable().optional(),
+  phone: z.string().max(40).nullable().optional(),
+  hiredOn: calendarDateSchema.nullable().optional(),
+  nationalId: z.string().max(64).nullable().optional(),
+}
+
 export const createDriverRequest = z.object({
   code: z.string().min(1).max(32),
   fullNameAr: z.string().min(1).max(120),
+  ...driverProfileFields,
 })
 
 /** Organisation-wide roles have no branch of their own, so writes may name one explicitly. */
@@ -129,6 +138,7 @@ export const createUserRequest = z.object({
 export const updateDriverRequest = z.object({
   fullNameAr: z.string().min(1).max(120).optional(),
   active: z.boolean().optional(),
+  ...driverProfileFields,
 })
 
 /**
@@ -269,6 +279,18 @@ export const createDocumentRequest = z.object({
   issuedOn: calendarDateSchema.nullable().default(null),
   expiresOn: calendarDateSchema.nullable().default(null),
   mediaId: z.string().nullable().default(null),
+})
+
+/**
+ * A manually recorded vehicle life-log event (SRS B-2 / س66). `state_change` is NOT here — that
+ * kind is written automatically when a vehicle's state moves, never typed by hand. `cost` is an
+ * optional decimal-string amount (money on the wire is never a number).
+ */
+export const createVehicleEventRequest = z.object({
+  kind: z.enum(['maintenance', 'incident', 'charge', 'odometer_reading']),
+  odometerKm: z.number().int().nonnegative().nullable().default(null),
+  cost: moneySchema.nullable().default(null),
+  notes: z.string().max(2000).nullable().default(null),
 })
 
 // ── Expenses (SRS G) ──────────────────────────────────────────────────────────────────────

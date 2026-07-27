@@ -40,6 +40,21 @@ export interface PasswordHasher {
   verify(plain: string, hash: string): Promise<boolean>
 }
 
+/**
+ * Authenticated encryption at rest for the handful of PII fields the schema marks encrypted
+ * (a driver's national ID today; `document_no_enc` and the TOTP secret are follow-ups). AES-256-GCM
+ * lives in the adapter, behind this port, so the domain and the routes never touch `node:crypto`.
+ *
+ * `available` is false when no key is configured. Writers must check it and refuse rather than
+ * store plaintext — losing PII confidentiality silently is worse than a loud failure. `decrypt`
+ * throws on a tampered or wrong-key blob; readers treat that as "cannot show it".
+ */
+export interface Cipher {
+  readonly available: boolean
+  encrypt(plaintext: string): Uint8Array
+  decrypt(blob: Uint8Array): string
+}
+
 /** Content-addressed blob storage. Local disk now, S3-compatible later — same interface. */
 export interface BlobStore {
   put(key: string, bytes: Uint8Array, contentType: string): Promise<void>
@@ -175,6 +190,12 @@ export interface DriverRecord {
   active: boolean
   /** The login account that operates as this driver, if one is linked. */
   userId?: string | null
+  /** Profile fields (B-1). Optional so seeds and older callers stay valid. */
+  fullNameEn?: string | null
+  phone?: string | null
+  hiredOn?: CalendarDate | null
+  /** National ID, AES-256-GCM ciphertext. Written encrypted; never returned as plaintext. */
+  nationalIdEnc?: Uint8Array | null
 }
 
 export interface VehicleRecord {
@@ -575,6 +596,51 @@ export interface DocumentRecord {
   supersededBy: string | null
 }
 
+/**
+ * One entry in a vehicle's life log (SRS B-2 / س66) — «سجل حياة يجمع كل الأحداث والكلف»: every
+ * state change, maintenance, incident, charge, odometer reading and linked cost against one bike,
+ * in one timeline. `costMinor` and `expenseId` tie an event to the money it cost.
+ */
+export type VehicleEventKind = 'state_change' | 'maintenance' | 'incident' | 'charge' | 'odometer_reading'
+export interface VehicleEventRecord {
+  id: number
+  vehicleId: string
+  branchId: string
+  kind: VehicleEventKind
+  occurredAtMs: number
+  businessDate: CalendarDate
+  odometerKm: number | null
+  costMinor: Minor | null
+  expenseId: string | null
+  shiftId: string | null
+  notes: string | null
+  createdBy: string | null
+}
+
+export interface VehicleEventRepo {
+  create(event: Omit<VehicleEventRecord, 'id'>): Promise<VehicleEventRecord>
+  /** Newest first, so the timeline reads top-down from the most recent event. */
+  listByVehicle(vehicleId: string, limit?: number): Promise<VehicleEventRecord[]>
+}
+
+/**
+ * Admin-staff attendance (SRS B-4 / س41). «نفس تسجيل الدخول اليومي» — a daily login is the
+ * attendance record: one row per user per business date, first-seen fixed, last-seen bumped.
+ */
+export interface AttendanceRecord {
+  userId: string
+  branchId: string
+  businessDate: CalendarDate
+  firstSeenAtMs: number
+  lastSeenAtMs: number
+}
+
+export interface AttendanceRepo {
+  /** Upsert on (user, business date): insert sets first- and last-seen; a repeat bumps last-seen. */
+  touch(userId: string, branchId: string, businessDate: CalendarDate, atMs: number): Promise<void>
+  listByBranchAndDate(branchId: string, businessDate: CalendarDate): Promise<AttendanceRecord[]>
+}
+
 export interface DirectoryRepo {
   branch(id: string): Promise<BranchRecord | null>
   listBranches(): Promise<BranchRecord[]>
@@ -646,6 +712,7 @@ export interface Deps {
   clock: Clock
   ids: IdGen
   hasher: PasswordHasher
+  cipher: Cipher
   users: UserRepo
   sessions: SessionRepo
   shifts: ShiftRepo
@@ -664,4 +731,6 @@ export interface Deps {
   weekLocks: WeekLockRepo
   audit: AuditRepo
   directory: DirectoryRepo
+  vehicleEvents: VehicleEventRepo
+  attendance: AttendanceRepo
 }

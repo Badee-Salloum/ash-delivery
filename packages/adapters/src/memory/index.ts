@@ -1,6 +1,8 @@
 import type {
   AssignmentRecord,
   AssignmentRepo,
+  AttendanceRecord,
+  AttendanceRepo,
   AuditFilter,
   BatteryReadingRecord,
   BatteryReadingRepo,
@@ -29,11 +31,14 @@ import type {
   ShiftRepo,
   UserRecord,
   UserRepo,
+  VehicleEventRecord,
+  VehicleEventRepo,
   VehicleRecord,
   WeekLockRecord,
   WeekLockRepo,
 } from '@ash/contracts'
 import { type CalendarDate, type FxDay, type Minor, type Posting, isLive, minor } from '@ash/domain'
+import { memoryCipher } from '../crypto.ts'
 import { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 import { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
 import { MemoryCashCountRepo } from './cashcount.ts'
@@ -667,6 +672,47 @@ export class MemoryDirectoryRepo implements DirectoryRepo {
   }
 }
 
+/** The vehicle life log (SRS B-2 / س66): append-only events, read newest-first. */
+export class MemoryVehicleEventRepo implements VehicleEventRepo {
+  readonly rows: VehicleEventRecord[] = []
+  private nextId = 1
+
+  async create(event: Omit<VehicleEventRecord, 'id'>): Promise<VehicleEventRecord> {
+    const row: VehicleEventRecord = { ...event, id: this.nextId++ }
+    this.rows.push(row)
+    return structuredClone(row)
+  }
+
+  async listByVehicle(vehicleId: string, limit = 100): Promise<VehicleEventRecord[]> {
+    return this.rows
+      .filter((r) => r.vehicleId === vehicleId)
+      .sort((a, b) => b.occurredAtMs - a.occurredAtMs || b.id - a.id)
+      .slice(0, limit)
+      .map((r) => structuredClone(r))
+  }
+}
+
+/** Admin-staff attendance (SRS B-4 / س41): one row per user per day, last-seen bumped on repeat. */
+export class MemoryAttendanceRepo implements AttendanceRepo {
+  readonly rows: AttendanceRecord[] = []
+
+  async touch(userId: string, branchId: string, businessDate: CalendarDate, atMs: number): Promise<void> {
+    const existing = this.rows.find((r) => r.userId === userId && r.businessDate === businessDate)
+    if (existing) {
+      existing.lastSeenAtMs = atMs
+      return
+    }
+    this.rows.push({ userId, branchId, businessDate, firstSeenAtMs: atMs, lastSeenAtMs: atMs })
+  }
+
+  async listByBranchAndDate(branchId: string, businessDate: CalendarDate): Promise<AttendanceRecord[]> {
+    return this.rows
+      .filter((r) => r.branchId === branchId && r.businessDate === businessDate)
+      .sort((a, b) => a.firstSeenAtMs - b.firstSeenAtMs)
+      .map((r) => ({ ...r }))
+  }
+}
+
 export interface MemoryDeps extends Deps {
   clock: FixedClock
   media: MemoryMediaRepo
@@ -686,6 +732,8 @@ export interface MemoryDeps extends Deps {
   directory: MemoryDirectoryRepo
   assignments: MemoryAssignmentRepo
   batteryReadings: MemoryBatteryReadingRepo
+  vehicleEvents: MemoryVehicleEventRepo
+  attendance: MemoryAttendanceRepo
 }
 
 export function createMemoryDeps(nowMs: number): MemoryDeps {
@@ -695,6 +743,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     clock: new FixedClock(nowMs),
     ids: new SeqIdGen(),
     hasher: new PlainHasher(),
+    cipher: memoryCipher(),
     users: new MemoryUserRepo(),
     sessions: new MemorySessionRepo(),
     shifts: new MemoryShiftRepo(media),
@@ -713,5 +762,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     weekLocks: new MemoryWeekLockRepo(ledger),
     audit: new MemoryAuditRepo(),
     directory: new MemoryDirectoryRepo(),
+    vehicleEvents: new MemoryVehicleEventRepo(),
+    attendance: new MemoryAttendanceRepo(),
   }
 }

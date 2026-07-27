@@ -46,6 +46,27 @@ export function shouldAlertOn(
   return alertDays.includes(daysUntil(expiresOn, today))
 }
 
+/**
+ * The alert band a document currently sits in, or null when no threshold has been crossed yet.
+ *
+ * `shouldAlertOn` fires only on the EXACT threshold day — correct for a daily cron. With no
+ * scheduler we sweep on-view, so we need a value that is STABLE across a band: the tightest
+ * threshold already reached. Deduping the bell on «docId:band» then rings once per band over the
+ * document's life (T-30, T-14, T-7, T-0, then expired) no matter which days the board is opened —
+ * never the daily nag that trains everyone to ignore it.
+ */
+export function alertBandFor(
+  expiresOn: CalendarDate | null,
+  today: CalendarDate,
+  alertDays: readonly number[] = DEFAULT_ALERT_DAYS,
+): string | null {
+  if (expiresOn === null) return null
+  const remaining = daysUntil(expiresOn, today)
+  if (remaining < 0) return 'expired'
+  const reached = [...alertDays].sort((a, b) => a - b).find((d) => remaining <= d)
+  return reached === undefined ? null : `t-${reached}`
+}
+
 /** A document that is expired blocks assignment; one merely expiring does not. */
 export const blocksAssignment = (status: DocumentStatus): boolean => status === 'expired'
 

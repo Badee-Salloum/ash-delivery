@@ -2,6 +2,8 @@ import type {
   AssignmentRecord,
   AssignmentRepo,
   AttachedSlot,
+  AttendanceRecord,
+  AttendanceRepo,
   BatteryReadingRecord,
   BatteryReadingRepo,
   BatteryRecord,
@@ -27,6 +29,8 @@ import type {
   RoleGrantRecord,
   ShiftRecord,
   ShiftRepo,
+  VehicleEventRecord,
+  VehicleEventRepo,
   VehicleRecord,
   WeekLockRecord,
   WeekLockRepo,
@@ -375,8 +379,20 @@ export class PgDirectoryRepo implements DirectoryRepo {
   async createDriver(driver: DriverRecord): Promise<void> {
     try {
       await this.pool.query(
-        'INSERT INTO drivers (id, branch_id, user_id, code, full_name_ar, active) VALUES ($1,$2,$3,$4,$5,$6)',
-        [driver.id, driver.branchId, driver.userId ?? null, driver.code, driver.fullNameAr, driver.active],
+        `INSERT INTO drivers (id, branch_id, user_id, code, full_name_ar, full_name_en, phone, national_id_enc, hired_on, active)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [
+          driver.id,
+          driver.branchId,
+          driver.userId ?? null,
+          driver.code,
+          driver.fullNameAr,
+          driver.fullNameEn ?? null,
+          driver.phone ?? null,
+          driver.nationalIdEnc ? Buffer.from(driver.nationalIdEnc) : null,
+          driver.hiredOn ?? null,
+          driver.active,
+        ],
       )
     } catch (err) {
       // Same shape the memory adapter throws, so the route handles one case, not two.
@@ -388,11 +404,21 @@ export class PgDirectoryRepo implements DirectoryRepo {
   }
 
   async updateDriver(driver: DriverRecord): Promise<void> {
-    await this.pool.query('UPDATE drivers SET full_name_ar = $2, active = $3 WHERE id = $1', [
-      driver.id,
-      driver.fullNameAr,
-      driver.active,
-    ])
+    // The route hands us the fully merged record, so every profile column is written from it.
+    await this.pool.query(
+      `UPDATE drivers
+          SET full_name_ar = $2, full_name_en = $3, phone = $4, national_id_enc = $5, hired_on = $6, active = $7
+        WHERE id = $1`,
+      [
+        driver.id,
+        driver.fullNameAr,
+        driver.fullNameEn ?? null,
+        driver.phone ?? null,
+        driver.nationalIdEnc ? Buffer.from(driver.nationalIdEnc) : null,
+        driver.hiredOn ?? null,
+        driver.active,
+      ],
+    )
   }
 
   async listVehicles(branchId: string): Promise<VehicleRecord[]> {
@@ -647,6 +673,11 @@ const toDriver = (r: Record<string, unknown>): DriverRecord => ({
   code: String(r.code),
   fullNameAr: String(r.full_name_ar),
   active: Boolean(r.active),
+  userId: (r.user_id as string | null) ?? null,
+  fullNameEn: (r.full_name_en as string | null) ?? null,
+  phone: (r.phone as string | null) ?? null,
+  hiredOn: r.hired_on == null ? null : isoDate(r.hired_on),
+  nationalIdEnc: (r.national_id_enc as Buffer | null) ?? null,
 })
 
 const toVehicle = (r: Record<string, unknown>): VehicleRecord => ({
@@ -1147,6 +1178,96 @@ export class PgNotificationRepo implements NotificationRepo {
     return Number(rows[0]?.count ?? '0')
   }
 }
+
+/** The vehicle life log (SRS B-2 / س66). Append-only; the timeline reads newest-first. */
+export class PgVehicleEventRepo implements VehicleEventRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async create(event: Omit<VehicleEventRecord, 'id'>): Promise<VehicleEventRecord> {
+    const { rows } = await this.pool.query<{ id: string }>(
+      `INSERT INTO vehicle_events
+         (vehicle_id, branch_id, kind, occurred_at, business_date, odometer_km, cost_minor, expense_id, shift_id, notes, created_by)
+       VALUES ($1,$2,$3, to_timestamp($4::double precision / 1000), $5,$6,$7,$8,$9,$10,$11)
+       RETURNING id`,
+      [
+        event.vehicleId,
+        event.branchId,
+        event.kind,
+        event.occurredAtMs,
+        event.businessDate,
+        event.odometerKm,
+        // Money is written as a decimal string, never a float — same rule as every other amount.
+        event.costMinor === null ? null : event.costMinor.toString(),
+        event.expenseId,
+        event.shiftId,
+        event.notes,
+        event.createdBy,
+      ],
+    )
+    return { ...event, id: Number(rows[0]!.id) }
+  }
+
+  async listByVehicle(vehicleId: string, limit = 100): Promise<VehicleEventRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM vehicle_events WHERE vehicle_id = $1 ORDER BY occurred_at DESC, id DESC LIMIT $2',
+      [vehicleId, limit],
+    )
+    return rows.map(toVehicleEvent)
+  }
+}
+
+/** Admin-staff attendance (SRS B-4 / س41): the daily login, upserted once per user per day. */
+export class PgAttendanceRepo implements AttendanceRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async touch(userId: string, branchId: string, businessDate: CalendarDate, atMs: number): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO attendance_days (user_id, branch_id, business_date, first_seen_at, last_seen_at)
+       VALUES ($1,$2,$3, to_timestamp($4::double precision / 1000), to_timestamp($4::double precision / 1000))
+       ON CONFLICT (user_id, business_date)
+       DO UPDATE SET last_seen_at = to_timestamp($4::double precision / 1000)`,
+      [userId, branchId, businessDate, atMs],
+    )
+  }
+
+  async listByBranchAndDate(branchId: string, businessDate: CalendarDate): Promise<AttendanceRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM attendance_days WHERE branch_id = $1 AND business_date = $2 ORDER BY first_seen_at',
+      [branchId, businessDate],
+    )
+    return rows.map(toAttendance)
+  }
+}
+
+const toAttendance = (r: Record<string, unknown>): AttendanceRecord => ({
+  userId: String(r.user_id),
+  branchId: String(r.branch_id),
+  businessDate: isoDate(r.business_date),
+  firstSeenAtMs: (r.first_seen_at as Date).getTime(),
+  lastSeenAtMs: (r.last_seen_at as Date).getTime(),
+})
+
+const toVehicleEvent = (r: Record<string, unknown>): VehicleEventRecord => ({
+  id: Number(r.id),
+  vehicleId: String(r.vehicle_id),
+  branchId: String(r.branch_id),
+  kind: r.kind as VehicleEventRecord['kind'],
+  occurredAtMs: (r.occurred_at as Date).getTime(),
+  businessDate: isoDate(r.business_date),
+  odometerKm: r.odometer_km == null ? null : Number(r.odometer_km),
+  // ::text-then-BigInt, never Number() — a float would silently lose minor units.
+  costMinor: r.cost_minor == null ? null : minor(BigInt(r.cost_minor as string)),
+  expenseId: (r.expense_id as string | null) ?? null,
+  shiftId: (r.shift_id as string | null) ?? null,
+  notes: (r.notes as string | null) ?? null,
+  createdBy: (r.created_by as string | null) ?? null,
+})
 
 const toNotification = (r: Record<string, unknown>): NotificationRecord => ({
   id: Number(r.id),

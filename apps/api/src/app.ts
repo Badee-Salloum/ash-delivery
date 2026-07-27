@@ -88,6 +88,15 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       req.actor = check.actor
       req.sessionToken = token
       req.mfaSatisfied = check.session.mfaSatisfied
+
+      // B-4 (س41): «نفس تسجيل الدخول اليومي» — an admin staffer's daily login IS their attendance.
+      // Drivers are tracked by their shifts, and org-wide roles have no branch to stamp, so only a
+      // branch-scoped non-driver is recorded. Once-a-day upsert; fire-and-forget so it never adds
+      // latency to, or fails, the request it rides on — the next request re-stamps regardless.
+      const actor = check.actor
+      if (actor.branchId && actor.roleKey !== 'driver') {
+        void deps.attendance.touch(actor.userId, actor.branchId, todayFor(deps), deps.clock.nowMs()).catch(() => undefined)
+      }
     }
   })
   app.addHook('preHandler', authorize)

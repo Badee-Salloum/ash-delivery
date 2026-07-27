@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   type AssignmentCheck,
   type VehicleState,
+  alertBandFor,
   canOpenShift,
   canTransitionVehicle,
   daysUntil,
@@ -44,6 +45,22 @@ describe('document expiry (SRS B-1 / س37)', () => {
 
   it('does not alert for a document with no expiry', () => {
     expect(shouldAlertOn(null, TODAY)).toBe(false)
+  })
+
+  it('names a STABLE band per threshold, so an on-view sweep rings once per band, not daily', () => {
+    // Unlike shouldAlertOn (exact-day), alertBandFor holds steady across the whole band — the key
+    // the bell dedupes on. Two dates in the same band share a band id; crossing a threshold changes it.
+    expect(alertBandFor('2026-08-15', TODAY)).toBe('t-30') // 25 days out → within 30
+    expect(alertBandFor('2026-08-10', TODAY)).toBe('t-30') // 20 days out → still t-30 (stable)
+    expect(alertBandFor('2026-08-01', TODAY)).toBe('t-14') // 11 days out → within 14
+    expect(alertBandFor('2026-07-26', TODAY)).toBe('t-7') // 5 days out → within 7
+    expect(alertBandFor('2026-07-21', TODAY)).toBe('t-0') // today
+    expect(alertBandFor('2026-07-19', TODAY)).toBe('expired')
+  })
+
+  it('has no band before the first threshold, or with no expiry', () => {
+    expect(alertBandFor('2026-09-30', TODAY)).toBeNull() // 71 days out — nothing crossed yet
+    expect(alertBandFor(null, TODAY)).toBeNull()
   })
 })
 

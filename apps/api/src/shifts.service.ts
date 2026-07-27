@@ -1,10 +1,18 @@
 import { createHash } from 'node:crypto'
-import type { Deps, ShiftOrderRecord, ShiftRecord } from '@ash/contracts'
+import type {
+  Deps,
+  DocumentRecord,
+  ShiftOrderRecord,
+  ShiftRecord,
+  VehicleEventKind,
+  VehicleEventRecord,
+} from '@ash/contracts'
 import {
   type Actor,
   type Br1Cause,
   type Br1Result,
   type CalendarDate,
+  type DocumentStatus,
   type Minor,
   type ShiftAction,
   type BatteryReading,
@@ -14,6 +22,7 @@ import {
   bpsForCount,
   businessDateFor,
   canOpenShift,
+  documentStatusOn,
   diagnoseBr1,
   evaluateBr1,
   minWalletBalance,
@@ -67,6 +76,42 @@ export function todayFor(deps: Deps): CalendarDate {
   return businessDateFor(deps.clock.nowMs(), deps.clock.offsetMinutes())
 }
 
+/**
+ * Append one entry to a vehicle's life log (SRS B-2 / س66). One place so every call site — a state
+ * change, a linked expense, a manually recorded incident — writes the same shape. `businessDate`
+ * defaults to today but is passed explicitly by callers (like an expense) that carry their own.
+ */
+export async function recordVehicleEvent(
+  deps: Deps,
+  input: {
+    vehicleId: string
+    branchId: string
+    kind: VehicleEventKind
+    createdBy: string | null
+    odometerKm?: number | null
+    costMinor?: Minor | null
+    expenseId?: string | null
+    shiftId?: string | null
+    notes?: string | null
+    businessDate?: CalendarDate
+    occurredAtMs?: number
+  },
+): Promise<VehicleEventRecord> {
+  return deps.vehicleEvents.create({
+    vehicleId: input.vehicleId,
+    branchId: input.branchId,
+    kind: input.kind,
+    occurredAtMs: input.occurredAtMs ?? deps.clock.nowMs(),
+    businessDate: input.businessDate ?? todayFor(deps),
+    odometerKm: input.odometerKm ?? null,
+    costMinor: input.costMinor ?? null,
+    expenseId: input.expenseId ?? null,
+    shiftId: input.shiftId ?? null,
+    notes: input.notes ?? null,
+    createdBy: input.createdBy,
+  })
+}
+
 async function guard(deps: Deps, shift: ShiftRecord, action: ShiftAction, actor: Actor, extra: Record<string, unknown> = {}): Promise<TransitionResult> {
   const grants = grantsFromRows(await deps.directory.grants())
   return transition(shift.state, action, {
@@ -96,17 +141,27 @@ export async function createShift(
   if (!driver || !vehicle) throw new ServiceError(404, 'driver_or_vehicle_not_found')
   if (driver.branchId !== vehicle.branchId) throw new ServiceError(422, 'cross_branch_assignment')
 
-  const [driverLive, vehicleLive] = await Promise.all([
+  const [driverLive, vehicleLive, driverDocs, vehicleDocs] = await Promise.all([
     deps.shifts.listLiveForDriver(driver.id),
     deps.shifts.listLiveForVehicle(vehicle.id),
+    deps.directory.listDocuments({ driverId: driver.id }),
+    deps.directory.listDocuments({ vehicleId: vehicle.id }),
   ])
+
+  // An expired licence or registration must stop the shift at the gate (B-1/B-3, س37). Until now
+  // this fed `canOpenShift` empty arrays, so the block was dead — the one screen that showed the
+  // «مستندات منتهية» badge could still start the shift. `listDocuments` already excludes superseded
+  // (replaced) documents, so a renewed licence never traps its own driver.
+  const today = todayFor(deps)
+  const liveStatuses = (docs: readonly DocumentRecord[]): DocumentStatus[] =>
+    docs.map((d) => documentStatusOn(d.expiresOn, today))
 
   // SRS B-3 (س34): the binding is mandatory, and a vehicle is shared between drivers across
   // shifts (س23) — just never simultaneously.
   const check = canOpenShift({
     vehicleState: vehicle.state,
-    driverDocumentStatuses: [],
-    vehicleDocumentStatuses: [],
+    driverDocumentStatuses: liveStatuses(driverDocs),
+    vehicleDocumentStatuses: liveStatuses(vehicleDocs),
     driverAlreadyLive: driverLive.length > 0,
     vehicleAlreadyLive: vehicleLive.length > 0,
     driverActive: driver.active,
@@ -114,7 +169,7 @@ export async function createShift(
   })
   if (!check.ok) throw new ServiceError(409, 'cannot_open_shift', check.blockers)
 
-  const businessDate = todayFor(deps)
+  const businessDate = today
 
   // SRS B-3: the manager binds the bike to the driver in advance. Two rules, both enforced here
   // rather than only in the UI:

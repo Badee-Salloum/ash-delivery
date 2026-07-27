@@ -160,6 +160,20 @@ assignment. Expiry alerts fire at T-30/14/7/0 and an expired licence blocks assi
 held only on the VPS and in GitHub Actions secrets. **The restic repository password has its own
 custody**, separate from the age key — a backup you cannot decrypt is not a backup.
 
+**`ENCRYPTION_KEY` (PII at rest).** Encrypts a driver's national ID (AES-256-GCM). Generate once:
+
+```bash
+openssl rand -hex 32
+```
+
+It is optional — without it the app still runs, but saving a national ID is refused (it never
+falls back to plaintext). **Back it up separately from the database**: the ciphertext lives in the
+DB, so a backup that also holds the key protects nothing, and losing the key makes stored national
+IDs unrecoverable. Rotating it leaves already-encrypted values unreadable until re-entered (a
+re-encrypt procedure is a follow-up). The same mechanism is intended to wrap the TOTP secret
+(`mfa_secret_enc`) — deferred until it can be exercised against real Postgres, so live 2FA is not
+put at risk by an untested at-rest change.
+
 ---
 
 ## 8. Known operational gaps

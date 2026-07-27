@@ -51,6 +51,13 @@ const schema = z.object({
   S3_FORCE_PATH_STYLE: z.coerce.boolean().default(true),
   /** Injected by linking a Vercel Blob store to the project; required when BLOB_DRIVER=vercel. */
   BLOB_READ_WRITE_TOKEN: z.string().optional(),
+
+  /**
+   * AES-256-GCM key for PII at rest (a driver's national ID). 32 bytes, as 64 hex chars or base64.
+   * Optional: without it the app runs, but storing a national ID fails closed rather than writing
+   * plaintext. Never defaulted — a guessable key is no key. See RUNBOOK for generation.
+   */
+  ENCRYPTION_KEY: z.string().optional(),
 })
 
 export type Config = z.infer<typeof schema>
