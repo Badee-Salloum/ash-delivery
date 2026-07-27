@@ -409,6 +409,50 @@ export function parseReading(text: string): OcrReading {
   return { battery, odometer }
 }
 
+// ── The Yallago wallet screenshot (SRS D-2) ─────────────────────────────────────────────────
+
+/** The wallet balance from the «المحفظة» screenshot, as a money decimal string to pre-fill the field. */
+export async function readWallet(image: Blob | Uint8Array, timeoutMs = DASH_TIMEOUT_MS): Promise<OcrOutcome<{ amountText: string }>> {
+  const started = now()
+  let text = ''
+  try {
+    // White digits on a solid orange card ⇒ invert. Whitelist money digits (both scripts) + the
+    // separator marks + the "SYP" tag; a uniform block reads better than sparse here.
+    const prepared = await prepareForOcr(toBlob(image), true)
+    const result = await recognize(prepared, { whitelist: '0123456789٠١٢٣٤٥٦٧٨٩،٬٫., SYPsyp', psm: 6 }, timeoutMs)
+    text = result.text
+    const amountText = parseWallet(text)
+    if (amountText === null) return { ok: false, reason: 'no_fields', ms: now() - started, text }
+    return { ok: true, reading: { amountText }, fieldsFound: 1, ms: now() - started, text }
+  } catch (err) {
+    const reason: OcrFailure = err instanceof Error && err.message === 'ocr timeout' ? 'timeout' : 'unavailable'
+    return { ok: false, reason, ms: now() - started, text }
+  }
+}
+
+/**
+ * Parse a wallet balance into a money decimal string (`moneySchema`-shaped), or `null` if there is
+ * no number to read. String ops only — never `Number()`/`parseFloat`, which is both wrong for money
+ * and what the wire-money guard bans.
+ *
+ * Money 2-dp rule: a separator followed by exactly one or two digits at the very end is the fraction
+ * (grouping separators always leave 3-digit groups); everything else is integer grouping, dropped.
+ * Sample: «٧٦،٥٠٩٬٥٥ SYP» → "76509.55".
+ */
+export function parseWallet(text: string): string | null {
+  const ascii = text.replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+  // Keep only digits and the separator marks (Arabic comma/thousands/decimal + Latin , .).
+  const cleaned = ascii.replace(/[^0-9،٬٫.,]/g, '')
+  if (cleaned.replace(/[^0-9]/g, '') === '') return null
+  const frac = cleaned.match(/[،٬٫.,](\d{1,2})$/)
+  if (frac) {
+    const intPart = cleaned.slice(0, frac.index).replace(/[^0-9]/g, '')
+    if (intPart === '') return null
+    return `${intPart}.${frac[1]}`
+  }
+  return cleaned.replace(/[^0-9]/g, '')
+}
+
 // ── The BMS app screenshot ────────────────────────────────────────────────────────────────
 
 /** One field the reader knows how to find, and how to turn what it read into what we store. */

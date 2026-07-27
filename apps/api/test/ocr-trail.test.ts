@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness } from './harness.ts'
+import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
 
 /**
  * SRS D-3 trail: the pre-correction OCR values follow the shift to the manager's review, so «the
@@ -63,5 +63,55 @@ describe('OCR D-3 trail — start odometer & battery (readDashboard)', () => {
     expect(start.odometerKm).toBe(15_320)
     expect(start.odometerKmOcr).toBeNull()
     expect(start.batteryPercentOcr).toBeNull()
+  })
+})
+
+async function toOpen(driver: string, manager: string): Promise<string> {
+  const id = await newDraft(driver)
+  await h.uploadPhoto(driver, id, 'start', 'odometer')
+  await put(driver, `/shifts/${id}/start-package`, { odometerKm: 100, batteryPercent: 90 })
+  await post(manager, `/shifts/${id}/approve-open`, { floatTranches: [sypStr(100_000)], topupTranches: [] })
+  return id
+}
+
+describe('OCR D-3 trail — close wallet balance (readWallet)', () => {
+  it('carries the wallet OCR baseline to the review, distinct from the declared balance', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await toOpen(driver, manager)
+    await post(driver, `/shifts/${id}/orders`, { providerOrderNo: 'A-1', payMode: 'cash', fee: sypStr(5_000), zone: null })
+    for (const slot of ['dashboard', 'wallet', 'odometer', 'wallet_zeroed']) await h.uploadPhoto(driver, id, 'end', slot)
+
+    // OCR read 76,509.55 off the wallet screenshot; the driver declared 70,000 — a real edit.
+    const res = await put(driver, `/shifts/${id}/end-package`, {
+      odometerKm: 110,
+      batteryPercent: 50,
+      cashDeclared: sypStr(105_000),
+      walletDeclared: sypStr(70_000),
+      walletDeclaredOcr: '76509.55',
+    })
+    expect(res.statusCode, res.body).toBe(200)
+
+    const end = (await get(manager, `/shifts/${id}/review`)).json().endPackage
+    // Money over the wire is a decimal string, never a JSON number.
+    expect(end.walletDeclared).toBe('70000.00')
+    expect(end.walletDeclaredOcr).toBe('76509.55')
+  })
+
+  it('echoes null when the wallet OCR never ran', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await toOpen(driver, manager)
+    await post(driver, `/shifts/${id}/orders`, { providerOrderNo: 'A-1', payMode: 'cash', fee: sypStr(5_000), zone: null })
+    for (const slot of ['dashboard', 'wallet', 'odometer', 'wallet_zeroed']) await h.uploadPhoto(driver, id, 'end', slot)
+
+    await put(driver, `/shifts/${id}/end-package`, {
+      odometerKm: 110,
+      batteryPercent: 50,
+      cashDeclared: sypStr(105_000),
+      walletDeclared: sypStr(70_000),
+    })
+    const end = (await get(manager, `/shifts/${id}/review`)).json().endPackage
+    expect(end.walletDeclaredOcr).toBeNull()
   })
 })

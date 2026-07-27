@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { type OcrLine, parseBms, parseReading, profileById } from '../src/ocr.ts'
+import { parseMinor } from '@ash/domain'
+import { type OcrLine, parseBms, parseReading, parseWallet, profileById } from '../src/ocr.ts'
 
 /**
  * The BMS parser, against text shaped like what Tesseract actually returns for the client's two
@@ -449,5 +450,24 @@ describe('a number split across words is rebuilt, not truncated', () => {
       ], 600, 24),
     ]
     expect(parseBms(page).percent).toBe(100)
+  })
+})
+
+describe('the Yallago wallet balance (SRS D-2)', () => {
+  it('reads the real sample — white on orange, Arabic-Indic digits, Arabic separators', () => {
+    expect(parseWallet('٧٦،٥٠٩٬٥٥ SYP')).toBe('76509.55')
+    // and it lands on the right minor-unit amount (76,509.55 × 100)
+    expect(parseMinor('76509.55')).toBe(7_650_955n)
+  })
+  it('tolerates a label and Latin separators', () => {
+    expect(parseWallet('المحفظة  76,509.55 SYP')).toBe('76509.55')
+  })
+  it('reads a whole number with no fraction (grouping separators are dropped)', () => {
+    expect(parseWallet('١٢٣٤ SYP')).toBe('1234')
+    expect(parseWallet('1,234 SYP')).toBe('1234')
+  })
+  it('refuses to invent when there is no number', () => {
+    expect(parseWallet('SYP')).toBeNull()
+    expect(parseWallet('المحفظة')).toBeNull()
   })
 })

@@ -723,6 +723,7 @@ export async function submitEndPackage(
     batteryPercent: number | null
     cashDeclared: Minor
     walletDeclared: Minor
+    walletDeclaredOcr?: Minor | null
   },
 ): Promise<{ shift: ShiftRecord; br1: Br1View }> {
   const shift = await mustFind(deps, shiftId)
@@ -734,6 +735,8 @@ export async function submitEndPackage(
     batteryEnd: input.batteryPercent,
     endCashDeclared: input.cashDeclared,
     endWalletDeclared: input.walletDeclared,
+    // SRS D-3: the wallet OCR baseline (readWallet); evidence, not a BR1 input.
+    endWalletDeclaredOcr: input.walletDeclaredOcr ?? null,
     // mediaSlotsEnd likewise comes from uploaded evidence, not from the request.
   }
 

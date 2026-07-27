@@ -431,6 +431,8 @@ function EndPackage({
   const toast = useToast()
   const [cash, setCash] = useState('')
   const [wallet, setWallet] = useState('')
+  // SRS D-3 baseline: what readWallet OCR'd off the wallet screenshot, kept even if the driver edits.
+  const [walletOcr, setWalletOcr] = useState<string | null>(null)
   const [odo, setOdo] = useState('')
   const [battery, setBattery] = useState('')
   const [slots, setSlots] = useState<Set<string>>(new Set())
@@ -460,6 +462,8 @@ function EndPackage({
         batteryPercent: battery.trim() === '' ? null : Number(battery),
         cashDeclared: cash,
         walletDeclared: wallet,
+        // SRS D-3: the wallet OCR baseline (null when readWallet never ran).
+        walletDeclaredOcr: walletOcr,
       })
       setBr1(res.br1)
       if (res.br1.balanced) onSubmitted()
@@ -500,6 +504,20 @@ function EndPackage({
           slot={slot}
           label={labels[slot]!}
           onUploaded={(uploaded) => setSlots((prev) => new Set(prev).add(uploaded))}
+          // SRS D-2: read the wallet balance off its screenshot and pre-fill the field. Only the
+          // wallet slot gets a handler; the others stay pure evidence. Failure is silent — the
+          // driver just types. (Spread so the prop is absent, not `undefined`, on the other slots.)
+          {...(slot === 'wallet'
+            ? {
+                onImage: async (file: File): Promise<void> => {
+                  const { readWallet } = await import('../ocr.ts')
+                  const r = await readWallet(file)
+                  if (!r.ok) return
+                  setWalletOcr((cur) => cur ?? r.reading.amountText)
+                  setWallet((cur) => (cur === '' ? r.reading.amountText : cur))
+                },
+              }
+            : {})}
         />
       ))}
       <Card className="flex flex-col gap-3">
