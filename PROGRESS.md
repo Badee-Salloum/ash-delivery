@@ -1,5 +1,63 @@
 # PROGRESS
 
+## 2026-07-27 — Section C closed: the six modeled-but-unwired gaps in the shift cycle
+
+**311 domain + 291 API + 56 driver + 15 client + 30 adapters tests green, 6 guards green, i18n 21
+sections. No migration — every table already existed. Three projects to redeploy.**
+
+Section C's happy path was fully built and tested; six things were modeled in the domain/DB but
+never wired end to end (plus one new capability the product owner asked for). All six are now live,
+each its own commit with `pnpm check` green.
+
+**Tier at close paid the wrong rate — the single biggest money defect.** `approveClose` hardcoded
+`DEFAULT_BANDS` and never called the resolver, so a published / per-vehicle-type / effective-dated /
+marginal tier table had **no effect on real driver pay**. Now the configured rule is resolved by the
+shift's vehicle type (`resolveTierRule`, sharing one `asDomainRule`+`ruleInForceOn` with the
+simulator), and `alreadyPosted`/`trueUp` use that same rule — so a mid-day band crossing and both
+whole/marginal modes settle correctly. Falls back to the F-1 default if none is in force, so the
+default seed reproduces today's numbers (the canonical §2.3 and every lifecycle test stay green); a
+published 50% table now genuinely pays 50%.
+
+**The manager could not review the evidence.** The whole point of C-7 is matching ground photos to
+numbers, but the review discarded the media ids. It now carries them, and the approval screen shows
+the start/end photos inline with a click-to-enlarge lightbox.
+
+**The manager could only approve.** No retake, no reject, no notes, no log — though the domain
+transitions, the `requestRetake` string and the `shift_decisions` table all existed. Wired:
+`request-rephoto` and `reject-close` return the shift to the driver with a logged, notified reason;
+`approve` writes an `approved` row; the review shows the «سجل القرارات»; the driver sees WHY his
+shift bounced instead of a silent reset.
+
+**«معلقة» never triggered.** A manager now suspends a live shift for a mid-shift incident (C-1);
+the driver resumes it from his phone, or it closes directly under the **same BR1** — a suspension is
+never a way around the zero equation. The driver can't suspend himself (domain: `suspend` =
+`shift.approve`), so he «بلاغ حادثة» rings the branch bell and a manager acts. A new «النوبات
+الجارية» panel is the manager's home for live shifts.
+
+**No second float/top-up mid-day.** The tranche arrays and the
+`(shift_id, event_type, occurrence_key)` idempotency existed, but funds were set once at open and
+never appended — so cash handed over mid-day left the office with no ledger entry. Now a tranche
+posts ONE balanced entry under its own occurrence key (`existingCount + 1`, never re-posting from
+1); BR1's expected end cash/wallet move automatically because the equation sums the arrays.
+
+**Manual orders (new).** A missing order is a cause BR1 ranks at close, but only the operating driver
+could add one and only while `open`. Now a higher-level manager adds a manual order to reconcile a
+shift through `pending_review` — which moves the orders hash, so the staleness guard forces a
+re-review before approval — and a driver past the open window requests one via the branch bell.
+
+**See it in 2 minutes**
+
+```bash
+pnpm check                 # 6 guards + every suite, no Docker
+pnpm --filter @ash/api test -- suspend.test.ts tranche.test.ts decisions.test.ts manual-orders.test.ts
+```
+
+**Honest status:** all code + tests on the memory harness; the Pg paths reuse existing adapters
+under the shared conformance suite. Not yet exercised against Neon in this batch, and the live-shift
+manager flows (suspend, tranche) have not been clicked through a browser here.
+
+---
+
 ## 2026-07-23 (latest) — the BMS reader: a profile per battery, and two confirmed faults fixed
 
 **309 domain + 246 API + 27 driver tests green, 6 guards green, migration 0008 applied, all three
