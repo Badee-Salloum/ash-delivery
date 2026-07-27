@@ -242,6 +242,13 @@ export interface ShiftRecord {
   batteryEnd: number | null
   endCashDeclared: Minor | null
   endWalletDeclared: Minor | null
+  /**
+   * SRS D-3 baselines: the pre-correction OCR values, kept so «the manual edit and its difference
+   * from the OCR reading» stays computable. `null` = OCR did not run (or the driver typed straight).
+   */
+  odoStartOcr: number | null
+  batteryStartOcr: number | null
+  endWalletDeclaredOcr: Minor | null
   driverConfirmedAt: string | null
   equationDiff: Minor | null
   cashDiff: Minor | null

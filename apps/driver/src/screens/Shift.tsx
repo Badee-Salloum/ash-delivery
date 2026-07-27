@@ -241,6 +241,10 @@ function StartPackage({
   const [shiftId, setShiftId] = useState<string | null>(existingShiftId ?? null)
   const [odo, setOdo] = useState('')
   const [battery, setBattery] = useState('')
+  // SRS D-3 baselines: what OCR read, kept even if the driver then edits the field, so the manager
+  // sees «قراءة الآلة ← ما أكّده السائق».
+  const [odoOcr, setOdoOcr] = useState<number | null>(null)
+  const [batteryOcr, setBatteryOcr] = useState<number | null>(null)
   const [odoShot, setOdoShot] = useState(false)
   const [busy, setBusy] = useState(false)
   const [ocrBusy, setOcrBusy] = useState(false)
@@ -262,6 +266,9 @@ function StartPackage({
       // — the driver simply types, which is what he was going to do anyway.
       if (!result.ok) return
       const { odometer, battery: pct } = result.reading
+      // Record the raw read ONCE (the baseline), independent of the later pre-fill/edit.
+      if (odometer != null) setOdoOcr((cur) => cur ?? odometer)
+      if (pct != null) setBatteryOcr((cur) => cur ?? pct)
       if (odometer != null) setOdo((cur) => (cur === '' ? String(odometer) : cur))
       if (pct != null) setBattery((cur) => (cur === '' ? String(pct) : cur))
     } finally {
@@ -300,6 +307,9 @@ function StartPackage({
         // Blank is NULL, never 0. They used to be the same value on the wire, so "the driver did
         // not answer" was indistinguishable from "the pack is flat".
         batteryPercent: battery.trim() === '' ? null : Number(battery),
+        // SRS D-3: the OCR baselines (null when OCR never ran).
+        odometerKmOcr: odoOcr,
+        batteryPercentOcr: batteryOcr,
       })
       onOpened(shiftId)
     } catch (e) {

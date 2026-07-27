@@ -109,7 +109,9 @@ export class PgShiftRepo implements ShiftRepo {
            equation_diff_minor = $11, cash_diff_minor = $12, wallet_diff_minor = $13,
            orders_hash = $14,
            driver_confirmed_at = $15::timestamptz,
-           approved_by = $16
+           approved_by = $16,
+           odo_start_ocr = $17, battery_start_ocr = $18,
+           end_wallet_declared_ocr_minor = $19
          WHERE id = $1`,
         [
           shift.id,
@@ -128,6 +130,9 @@ export class PgShiftRepo implements ShiftRepo {
           shift.ordersHash,
           shift.driverConfirmedAt,
           shift.approvedBy,
+          shift.odoStartOcr,
+          shift.batteryStartOcr,
+          shift.endWalletDeclaredOcr?.toString() ?? null,
         ],
       )
 
@@ -222,6 +227,9 @@ export class PgShiftRepo implements ShiftRepo {
       batteryEnd: r.battery_end === null ? null : Number(r.battery_end),
       endCashDeclared: bigintOrNull(r.end_cash_declared_minor),
       endWalletDeclared: bigintOrNull(r.end_wallet_declared_minor),
+      odoStartOcr: r.odo_start_ocr === null ? null : Number(r.odo_start_ocr),
+      batteryStartOcr: r.battery_start_ocr === null ? null : Number(r.battery_start_ocr),
+      endWalletDeclaredOcr: bigintOrNull(r.end_wallet_declared_ocr_minor),
       driverConfirmedAt: r.driver_confirmed_at === null ? null : (r.driver_confirmed_at as Date).toISOString(),
       equationDiff: bigintOrNull(r.equation_diff_minor),
       cashDiff: bigintOrNull(r.cash_diff_minor),

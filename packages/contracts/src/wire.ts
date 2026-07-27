@@ -50,6 +50,11 @@ export const startPackageRequest = z.object({
   // Nullable on purpose. A blank field used to reach the server as `Number('') === 0`, so "the
   // driver did not answer" was indistinguishable from "the pack is flat". The gate refuses null.
   batteryPercent: z.number().int().min(0).max(100).nullable(),
+  // SRS D-3 baselines: what `readDashboard` OCR'd before the driver confirmed/edited. Plain scaled
+  // integers (not money), so `z.number()` is correct — the wire-money guard only bars it on money names.
+  // `.default(null)` (not `.optional()`) so the field is always present — null when OCR did not run.
+  odometerKmOcr: z.number().int().min(0).nullable().default(null),
+  batteryPercentOcr: z.number().int().min(0).max(100).nullable().default(null),
 })
 
 export const addOrderRequest = z.object({
@@ -64,6 +69,9 @@ export const endPackageRequest = z.object({
   batteryPercent: z.number().int().min(0).max(100).nullable(),
   cashDeclared: moneySchema,
   walletDeclared: moneySchema,
+  // SRS D-3 baseline: what `readWallet` OCR'd off the close wallet screenshot before the driver
+  // confirmed. Money, so it crosses as a decimal string via `moneySchema` — never a JSON number.
+  walletDeclaredOcr: moneySchema.nullable().default(null),
 })
 
 /**

@@ -206,6 +206,9 @@ export async function createShift(
     batteryEnd: null,
     endCashDeclared: null,
     endWalletDeclared: null,
+    odoStartOcr: null,
+    batteryStartOcr: null,
+    endWalletDeclaredOcr: null,
     driverConfirmedAt: null,
     equationDiff: null,
     cashDiff: null,
@@ -271,6 +274,8 @@ export async function submitStartPackage(
   input: {
     odometerKm: number
     batteryPercent: number | null
+    odometerKmOcr?: number | null
+    batteryPercentOcr?: number | null
   },
 ): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
@@ -278,6 +283,10 @@ export async function submitStartPackage(
     ...shift,
     odoStart: input.odometerKm,
     batteryStart: input.batteryPercent,
+    // SRS D-3: the pre-correction OCR reads are evidence, not gate inputs — the guard below reads
+    // the confirmed odoStart/batteryStart, never these.
+    odoStartOcr: input.odometerKmOcr ?? null,
+    batteryStartOcr: input.batteryPercentOcr ?? null,
     // Float and top-up are NOT set here — they are the branch's money, recorded by the manager at
     // approveOpen. mediaSlotsStart is NOT taken from the caller — it is whatever actually uploaded.
   }

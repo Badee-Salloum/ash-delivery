@@ -609,6 +609,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         startPackage: {
           odometerKm: shift.odoStart,
           batteryPercent: shift.batteryStart,
+          // SRS D-3 baselines (readDashboard) — null unless OCR ran and the driver kept/changed it.
+          odometerKmOcr: shift.odoStartOcr,
+          batteryPercentOcr: shift.batteryStartOcr,
           floatTotal: serializeMoney(sum(shift.floatTranches)),
           topupTotal: serializeMoney(sum(shift.topupTranches)),
           mediaSlots: shift.mediaSlotsStart,
@@ -619,6 +622,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           batteryPercent: shift.batteryEnd,
           cashDeclared: shift.endCashDeclared === null ? null : serializeMoney(shift.endCashDeclared),
           walletDeclared: shift.endWalletDeclared === null ? null : serializeMoney(shift.endWalletDeclared),
+          // SRS D-3 baseline (readWallet), money as a decimal string.
+          walletDeclaredOcr: shift.endWalletDeclaredOcr === null ? null : serializeMoney(shift.endWalletDeclaredOcr),
           mediaSlots: shift.mediaSlotsEnd,
           batteries: withPack('end'),
         },

@@ -31,6 +31,8 @@ interface Review {
   startPackage: {
     odometerKm: number | null
     batteryPercent: number | null
+    odometerKmOcr: number | null
+    batteryPercentOcr: number | null
     floatTotal: string
     topupTotal: string
     mediaSlots: string[]
@@ -41,10 +43,11 @@ interface Review {
     batteryPercent: number | null
     cashDeclared: string | null
     walletDeclared: string | null
+    walletDeclaredOcr: string | null
     mediaSlots: string[]
     batteries: BatteryReadingView[]
   }
-  orders: Array<{ providerOrderNo: string; payMode: string; fee: string; zone: string | null }>
+  orders: Array<{ providerOrderNo: string; payMode: string; fee: string; zone: string | null; source?: 'manual' | 'ocr'; feeOcr?: string | null }>
   media: Array<{ package: 'start' | 'end'; slot: string; mediaId: string }>
   decisions: Array<{ gate: 'open' | 'close'; decision: 'approved' | 'rejected' | 'rephoto_requested'; notes: string | null; decidedAt: string }>
   br1: {
@@ -227,6 +230,21 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
               </>
             )}
           </dl>
+          {/* SRS D-3: what the driver changed from the dashboard OCR. */}
+          <OcrDeltaLines
+            deltas={[
+              ...scalarDelta(
+                t.shift.odometer,
+                review.startPackage.odometerKmOcr === null ? null : String(review.startPackage.odometerKmOcr),
+                review.startPackage.odometerKm === null ? null : String(review.startPackage.odometerKm),
+              ),
+              ...scalarDelta(
+                t.shift.battery,
+                review.startPackage.batteryPercentOcr === null ? null : `${review.startPackage.batteryPercentOcr}%`,
+                review.startPackage.batteryPercent === null ? null : `${review.startPackage.batteryPercent}%`,
+              ),
+            ]}
+          />
           <PhotoRow pkg="start" media={review.media} />
           <BatteryReadings readings={review.startPackage.batteries} />
         </Card>
@@ -243,6 +261,8 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
               value={review.endPackage.batteryPercent === null ? '—' : `${review.endPackage.batteryPercent}%`}
             />
           </dl>
+          {/* SRS D-3: what the driver changed from the wallet OCR. */}
+          <OcrDeltaLines deltas={scalarDelta(t.shift.walletBalance, review.endPackage.walletDeclaredOcr, review.endPackage.walletDeclared)} />
           <PhotoRow pkg="end" media={review.media} />
           <BatteryReadings readings={review.endPackage.batteries} />
         </Card>
