@@ -99,6 +99,8 @@ export const en: Catalog = {
     units: { m: 'm', h: 'h', d: 'd' },
     arabic: 'Arabic',
     english: 'English',
+    back: 'Back',
+    remove: 'Remove',
   },
 
   /** API error codes → an actionable message. Unmapped codes fall back to a generic line. */

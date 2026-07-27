@@ -100,6 +100,8 @@ export const ar = {
     units: { m: 'دقيقة', h: 'ساعة', d: 'يوم' },
     arabic: 'بالعربية',
     english: 'بالإنجليزية',
+    back: 'رجوع',
+    remove: 'حذف',
   },
 
   /** API error codes → an actionable message. Unmapped codes fall back to a generic line. */

@@ -132,8 +132,11 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center gap-3">
-        <Button variant="ghost" onClick={onDone}>
-          ←
+        <Button variant="ghost" onClick={onDone} aria-label={t.common.back}>
+          {/* Points toward the inline-start — left in LTR, mirrored to the right in RTL. */}
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true" className="rtl:-scale-x-100">
+            <path d="M15 6l-6 6 6 6" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
         </Button>
         <h1 className="text-xl font-bold">{t.approval.review}</h1>
         <Badge tone="slate">{t.shift.states[review.state as keyof typeof t.shift.states] ?? review.state}</Badge>
@@ -144,7 +147,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         title={t.br1.title}
         className={review.br1.balanced ? 'ring-2 ring-emerald-300' : 'ring-2 ring-red-300'}
       >
-        <div className="grid grid-cols-3 gap-3 text-sm">
+        <div className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-3">
           <Field label={t.br1.expectedCash} value={review.br1.expectedCash} />
           <Field label={t.br1.expectedWallet} value={review.br1.expectedWallet} />
           <Field
@@ -250,7 +253,9 @@ function Field({ label, value, tone }: { label: string; value: string; tone?: 'g
   return (
     <div>
       <dt className="text-xs text-slate-500">{label}</dt>
-      <dd className={`num text-lg font-semibold ${tone === 'green' ? 'text-emerald-700' : tone === 'red' ? 'text-red-700' : ''}`}>
+      {/* dir=ltr: every value here is a figure (money, %, «+12 كم») — numbers read left-to-right in
+          both languages, so this keeps a sign/unit from landing on the wrong side in RTL. */}
+      <dd dir="ltr" className={`num text-lg font-semibold ${tone === 'green' ? 'text-emerald-700' : tone === 'red' ? 'text-red-700' : ''}`}>
         {value}
       </dd>
     </div>

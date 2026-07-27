@@ -49,8 +49,12 @@ export function Queue({ onOpen }: { onOpen(shiftId: string): void }): ReactNode 
             {item.kind.includes('close') ? t.shift.states.pending_review : t.shift.states.awaiting_open_approval}
           </Badge>
           <span className="num text-sm text-slate-500">{item.businessDate}</span>
-          <Button variant="ghost" className="ms-auto" onClick={() => onOpen(item.shiftId)}>
-            {t.approval.review} →
+          <Button variant="ghost" className="ms-auto inline-flex items-center gap-1.5" onClick={() => onOpen(item.shiftId)}>
+            {t.approval.review}
+            {/* Forward chevron — points inline-end, mirrored in RTL. */}
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true" className="rtl:-scale-x-100">
+              <path d="M9 6l6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
           </Button>
         </Card>
       ))}

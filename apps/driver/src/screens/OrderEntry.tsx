@@ -117,7 +117,7 @@ export function OrderEntry({
                 onChange={(e) => update(o.localId, { feeText: e.target.value })}
                 className="flex-1"
               />
-              <Button variant="ghost" onClick={() => remove(o.localId)} className="px-4">
+              <Button variant="ghost" onClick={() => remove(o.localId)} className="px-4" aria-label={t.common.remove}>
                 ×
               </Button>
             </div>
