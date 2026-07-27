@@ -448,6 +448,56 @@ export async function rejectClose(deps: Deps, actor: Actor, shiftId: string, not
   return updated
 }
 
+// ── Suspended / mid-shift incident (C-1, س29) ──────────────────────────────────────────────
+
+/**
+ * A manager suspends a live shift for a mid-shift incident (accident, breakdown, dispute). The
+ * shift enters «معلقة»; it can later `resume`, or close directly — always under the SAME BR1, since
+ * a suspension is never a way around the zero equation. Legal from
+ * draft/awaiting_open_approval/open/pending_review. `suspend` is a manager act (`shift.approve`).
+ */
+export async function suspendShift(deps: Deps, actor: Actor, shiftId: string, notes: string | null): Promise<ShiftRecord> {
+  const shift = await mustFind(deps, shiftId)
+  const result = await guard(deps, shift, 'suspend', actor)
+  if (!result.ok) fail(result)
+  const updated: ShiftRecord = { ...shift, state: result.next }
+  await deps.shifts.update(updated)
+  await notifyDriver(deps, updated, 'shift_suspended', notes)
+  return updated
+}
+
+/** The driver resumes a suspended shift back to `open` when the incident clears (`shift.operate`). */
+export async function resumeShift(deps: Deps, actor: Actor, shiftId: string): Promise<ShiftRecord> {
+  const shift = await mustFind(deps, shiftId)
+  const result = await guard(deps, shift, 'resume', actor)
+  if (!result.ok) fail(result)
+  const updated: ShiftRecord = { ...shift, state: result.next }
+  await deps.shifts.update(updated)
+  return updated
+}
+
+/**
+ * The driver reports a mid-shift incident he can't resolve alone. He can't suspend himself — that's
+ * a manager act — so this rings the branch bell with the note; a manager then suspends via
+ * `suspendShift` or handles it out of band. No new entity, mirroring `requestManualOrder`.
+ */
+export async function reportIncident(deps: Deps, _actor: Actor, shiftId: string, notes: string | null): Promise<void> {
+  const shift = await mustFind(deps, shiftId)
+  try {
+    await deps.notifications.push({
+      recipientId: `branch:${shift.branchId}`,
+      branchId: shift.branchId,
+      kind: 'shift_incident_reported',
+      payload: { shiftId, driverId: shift.driverId, businessDate: shift.businessDate, notes },
+      dedupeKey: null,
+      readAtMs: null,
+      createdAtMs: deps.clock.nowMs(),
+    })
+  } catch {
+    // The bell is a convenience; a failed push must not error the driver's report.
+  }
+}
+
 // ── Orders ────────────────────────────────────────────────────────────────────────────────
 
 export async function addOrder(

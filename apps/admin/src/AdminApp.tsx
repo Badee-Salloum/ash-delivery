@@ -5,6 +5,7 @@ import { type Notif, NotificationBell } from './NotificationBell.tsx'
 import { Login } from './screens/Login.tsx'
 import { Dashboard } from './screens/Dashboard.tsx'
 import { Queue } from './screens/Queue.tsx'
+import { LiveShifts } from './screens/LiveShifts.tsx'
 import { Approval } from './screens/Approval.tsx'
 import { Fleet } from './screens/Fleet.tsx'
 import { FleetConfig } from './screens/FleetConfig.tsx'
@@ -14,7 +15,7 @@ import { Audit } from './screens/Audit.tsx'
 import { Permissions } from './screens/Permissions.tsx'
 import { Settings } from './screens/Settings.tsx'
 
-const SECTIONS = ['dashboard', 'queue', 'fleet', 'fleetConfig', 'treasury', 'accounts', 'audit', 'permissions', 'settings'] as const
+const SECTIONS = ['dashboard', 'queue', 'liveShifts', 'fleet', 'fleetConfig', 'treasury', 'accounts', 'audit', 'permissions', 'settings'] as const
 type Section = (typeof SECTIONS)[number]
 
 /** The view encoded in the URL hash: a section, or `shift:<id>` for the review overlay. */
@@ -89,6 +90,13 @@ export function AdminApp(): ReactNode {
     } else if (n.kind.startsWith('shift_awaiting')) {
       setSection('queue')
       setOpenShift(null)
+    } else if (n.kind === 'manual_order_requested' && typeof n.payload.shiftId === 'string') {
+      // The driver proposed an order — open his shift so the manager can add it (or decline).
+      setOpenShift(n.payload.shiftId)
+    } else if (n.kind === 'shift_incident_reported') {
+      // A mid-shift incident (C-1): the manager acts from the live-shifts panel.
+      setSection('liveShifts')
+      setOpenShift(null)
     } else {
       // document_expiring — the expiry board lives on the dashboard.
       setSection('dashboard')
@@ -104,6 +112,7 @@ export function AdminApp(): ReactNode {
   const nav: Array<{ key: Section; label: string; badge?: number | undefined }> = [
     { key: 'dashboard', label: t.dashboard.title },
     { key: 'queue', label: t.approval.queue, badge: queueUnread || undefined },
+    { key: 'liveShifts', label: t.liveShifts.title },
     { key: 'fleet', label: `${t.fleet.drivers} / ${t.fleet.vehicles}` },
     { key: 'treasury', label: t.treasury.branchTreasury },
     ...(canManageUsers ? [{ key: 'accounts' as const, label: t.accounts.title }] : []),
@@ -224,6 +233,8 @@ export function AdminApp(): ReactNode {
           <Dashboard />
         ) : section === 'queue' ? (
           <Queue onOpen={setOpenShift} />
+        ) : section === 'liveShifts' ? (
+          <LiveShifts />
         ) : section === 'fleet' ? (
           <Fleet />
         ) : section === 'fleetConfig' ? (

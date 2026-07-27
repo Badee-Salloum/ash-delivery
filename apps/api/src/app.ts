@@ -50,9 +50,12 @@ import {
   ensureFxDay,
   evaluateShift,
   rejectClose,
+  reportIncident,
   requestManualOrder,
   requestRephoto,
+  resumeShift,
   submitEndPackage,
+  suspendShift,
   submitStartPackage,
   todayFor,
 } from './shifts.service.ts'
@@ -744,6 +747,39 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const { notes } = decisionBody.parse(req.body ?? {})
       const shift = await rejectClose(deps, req.actor!, id, notes)
       return { id: shift.id, state: shift.state }
+    },
+  )
+
+  // C-1 «معلقة»: a manager suspends a live shift for a mid-shift incident; the driver resumes it
+  // when the incident clears. A suspended shift still closes under the same BR1.
+  app.post(
+    '/shifts/:id/suspend',
+    { config: { permission: 'shift.approve', subject: shiftSubject } },
+    async (req) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const { notes } = decisionBody.parse(req.body ?? {})
+      const shift = await suspendShift(deps, req.actor!, id, notes)
+      return { id: shift.id, state: shift.state }
+    },
+  )
+  app.post(
+    '/shifts/:id/resume',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const shift = await resumeShift(deps, req.actor!, id)
+      return { id: shift.id, state: shift.state }
+    },
+  )
+  // The driver can't suspend himself — he reports the incident to the branch, which rings the bell.
+  app.post(
+    '/shifts/:id/report-incident',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req, reply) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const { notes } = decisionBody.parse(req.body ?? {})
+      await reportIncident(deps, req.actor!, id, notes)
+      return reply.code(202).send({ ok: true })
     },
   )
 

@@ -191,6 +191,10 @@ export const en: Catalog = {
     dashboardShot: 'Dashboard screenshot',
     retakeRequested: 'The manager requested a re-shoot',
     closeRejected: 'The manager rejected the close',
+    reportIncident: 'Report an incident',
+    incidentNote: 'What happened (optional)',
+    incidentReported: 'The branch has been notified',
+    suspendedHint: 'Your shift is on hold after an incident. Resume it when you can carry on — its data is completed later under the same equation.',
     slotNames: {
       odometer: 'Odometer',
       dashboard: 'Dashboard',
@@ -466,6 +470,14 @@ export const en: Catalog = {
       rejected: 'Rejected',
       rephoto_requested: 'Re-shoot requested',
     },
+  },
+
+  liveShifts: {
+    title: 'Live shifts',
+    none: 'No live shifts right now',
+    suspend: 'Suspend shift',
+    incidentNote: 'What happened (optional)',
+    suspendedHint: 'Suspended — the driver resumes it from his phone when he can carry on.',
   },
 
   week: {

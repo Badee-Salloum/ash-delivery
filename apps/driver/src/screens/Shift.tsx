@@ -16,7 +16,7 @@ import { PhotoSlot } from './PhotoSlot.tsx'
  * dropped Wi-Fi connection mid-upload is a re-tap, not a lost photo.
  */
 
-type Phase = 'start' | 'awaiting' | 'orders' | 'end' | 'done'
+type Phase = 'start' | 'awaiting' | 'orders' | 'suspended' | 'end' | 'done'
 
 interface ShiftState {
   id: string
@@ -29,9 +29,9 @@ const PHASE_FOR: Record<string, Phase> = {
   draft: 'start',
   awaiting_open_approval: 'awaiting',
   open: 'orders',
-  // «معلقة» (س29): an incident mid-shift. The data is completed later under the same equation,
-  // so the driver carries on exactly where an open shift would.
-  suspended: 'orders',
+  // «معلقة» (س29): a manager put the shift on hold for a mid-shift incident. The driver sees why
+  // and resumes when it clears; the data is later completed under the same equation.
+  suspended: 'suspended',
   pending_review: 'done',
 }
 
@@ -131,6 +131,9 @@ export function ShiftFlow({
       />
     )
   }
+  if (phase === 'suspended' && shift) {
+    return <SuspendedScreen shiftId={shift.id} onResumed={() => setPhase('orders')} />
+  }
   if (phase === 'orders' && shift) {
     return (
       <>
@@ -158,6 +161,9 @@ export function ShiftFlow({
           setPhase('end')
         }}
       />
+      {/* «بلاغ حادثة» (C-1): the driver can't suspend himself — he flags the incident to the
+          branch, which rings the bell so a manager can put the shift on hold. */}
+      <ReportIncident shiftId={shift.id} />
       </>
     )
   }
@@ -500,6 +506,96 @@ function EndPackage({
         onReadingsChanged={setBatteriesReady}
       />
     </Screen>
+  )
+}
+
+/**
+ * «معلقة» (SRS C-1 / س29): the shift is on hold after a mid-shift incident a manager logged. The
+ * driver sees it's paused — not silently reset — and resumes it himself once he's able to carry on.
+ */
+function SuspendedScreen({ shiftId, onResumed }: { shiftId: string; onResumed: () => void }): ReactNode {
+  const { api, t } = useApp()
+  const toast = useToast()
+  const [busy, setBusy] = useState(false)
+
+  async function resume(): Promise<void> {
+    setBusy(true)
+    try {
+      await api.resumeShift(shiftId)
+      onResumed()
+    } catch (e) {
+      const code = (e as { error?: string }).error
+      toast.error((code && (t.errors as Record<string, string>)[code]) || t.common.actionFailed)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Screen
+      title={t.shift.states.suspended}
+      footer={
+        <Button variant="success" disabled={busy} onClick={resume}>
+          {busy ? t.common.loading : t.shift.resumeShift}
+        </Button>
+      }
+    >
+      <Card>
+        <p className="text-center text-amber-700">{t.shift.suspendedHint}</p>
+      </Card>
+    </Screen>
+  )
+}
+
+/**
+ * «بلاغ حادثة» (SRS C-1): the driver flags a mid-shift incident to the branch. He can't suspend the
+ * shift himself — that's a manager act — so this only rings the branch bell with a note.
+ */
+function ReportIncident({ shiftId }: { shiftId: string }): ReactNode {
+  const { api, t } = useApp()
+  const toast = useToast()
+  const [asking, setAsking] = useState(false)
+  const [note, setNote] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  if (!asking) {
+    return (
+      <Button variant="ghost" onClick={() => setAsking(true)}>
+        {t.shift.reportIncident}
+      </Button>
+    )
+  }
+  return (
+    <Card className="flex flex-col gap-2">
+      <Field label={t.shift.incidentNote}>
+        <TextInput value={note} onChange={(e) => setNote(e.target.value)} />
+      </Field>
+      <div className="flex gap-2">
+        <Button
+          variant="danger"
+          className="flex-1"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true)
+            try {
+              await api.reportIncident(shiftId, note.trim() === '' ? null : note.trim())
+              toast.success(t.shift.incidentReported)
+              setAsking(false)
+              setNote('')
+            } catch {
+              toast.error(t.common.actionFailed)
+            } finally {
+              setBusy(false)
+            }
+          }}
+        >
+          {busy ? t.common.loading : t.shift.reportIncident}
+        </Button>
+        <Button variant="ghost" className="flex-1" onClick={() => setAsking(false)}>
+          {t.common.cancel}
+        </Button>
+      </div>
+    </Card>
   )
 }
 

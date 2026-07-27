@@ -192,6 +192,10 @@ export const ar = {
     dashboardShot: 'سكرينشوت الداشبورد',
     retakeRequested: 'طلب المدير إعادة التصوير',
     closeRejected: 'رفض المدير إنهاء النوبة',
+    reportIncident: 'بلاغ حادثة',
+    incidentNote: 'وصف الحادثة (اختياري)',
+    incidentReported: 'تم إبلاغ الفرع',
+    suspendedHint: 'نوبتك معلَّقة بسبب حادثة. تابعها عندما تصبح جاهزاً — تُكمل بياناتها لاحقاً بنفس المعادلة.',
     slotNames: {
       odometer: 'العداد',
       dashboard: 'الداشبورد',
@@ -467,6 +471,14 @@ export const ar = {
       rejected: 'رُفض',
       rephoto_requested: 'طُلبت إعادة تصوير',
     },
+  },
+
+  liveShifts: {
+    title: 'النوبات الجارية',
+    none: 'لا نوبات جارية الآن',
+    suspend: 'تعليق النوبة',
+    incidentNote: 'وصف الحادثة (اختياري)',
+    suspendedHint: 'معلَّقة — يتابعها السائق من هاتفه عندما يصبح جاهزاً.',
   },
 
   week: {

@@ -485,6 +485,20 @@ export class ApiClient {
     return this.post(`/shifts/${shiftId}/orders/request`, body)
   }
 
+  // ── Suspended / mid-shift incident (SRS C-1 / س29) ────────────────────────────────────────
+  /** A manager suspends a live shift for a mid-shift incident. */
+  suspendShift(shiftId: string, notes?: string | null) {
+    return this.post<{ id: string; state: string }>(`/shifts/${shiftId}/suspend`, { notes: notes ?? null })
+  }
+  /** The driver resumes a suspended shift back to open. */
+  resumeShift(shiftId: string) {
+    return this.post<{ id: string; state: string }>(`/shifts/${shiftId}/resume`)
+  }
+  /** The driver reports a mid-shift incident to the branch (he can't suspend himself). */
+  reportIncident(shiftId: string, notes?: string | null) {
+    return this.post(`/shifts/${shiftId}/report-incident`, { notes: notes ?? null })
+  }
+
   // ── Documents (SRS B-1 / س37) ───────────────────────────────────────────────────────────────
   createDocument(body: {
     ownerKind: 'driver' | 'vehicle'
