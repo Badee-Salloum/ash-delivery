@@ -218,6 +218,8 @@ export const en: Catalog = {
     fee: 'Fee',
     payMode: 'Payment mode',
     addRow: 'Add order',
+    addManual: 'Add manual order',
+    requestManual: 'Request an order',
     count: 'Order count',
     payModes: { cash: 'Cash', electronic: 'Electronic', free: 'Free' },
     problems: {

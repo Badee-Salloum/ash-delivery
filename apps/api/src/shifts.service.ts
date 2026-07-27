@@ -7,6 +7,7 @@ import type {
   VehicleEventKind,
   VehicleEventRecord,
 } from '@ash/contracts'
+import { serializeMoney } from '@ash/contracts'
 import {
   type Actor,
   type Br1Cause,
@@ -499,6 +500,78 @@ export async function addOrder(
     throw err
   }
   return order
+}
+
+/**
+ * A manual order added by a higher-level manager (branch manager / GM) to RECONCILE a shift — the
+ * fix for the "missing order" BR1 ranks at close. Unlike `addOrder` (the driver, only while open),
+ * this is permitted in `open`, `suspended` AND `pending_review`, so a manager can add the order
+ * during the C-7 review; it then changes the orders hash, and the staleness guard forces a
+ * re-review before approval. `driver_confirmed: true` — the manager vouches for it. The route
+ * audits every manual add (who/when), since it moves money into BR1.
+ */
+export async function addManualOrder(
+  deps: Deps,
+  _actor: Actor,
+  shiftId: string,
+  input: { providerOrderNo: string; payMode: ShiftOrder['payMode']; fee: Minor; zone: string | null },
+): Promise<ShiftOrderRecord> {
+  const shift = await mustFind(deps, shiftId)
+  if (shift.state !== 'open' && shift.state !== 'suspended' && shift.state !== 'pending_review') {
+    throw new ServiceError(409, 'shift_not_reconcilable')
+  }
+  const order: ShiftOrderRecord = {
+    id: deps.ids.uuid(),
+    shiftId,
+    providerOrderNo: input.providerOrderNo,
+    payMode: input.payMode,
+    fee: input.fee,
+    zone: input.zone,
+    driverConfirmed: true,
+  }
+  try {
+    await deps.orders.create(order)
+  } catch (err) {
+    if ((err as { code?: string }).code === 'DUPLICATE_ORDER_NO') {
+      throw new ServiceError(409, 'duplicate_order_no', { providerOrderNo: input.providerOrderNo })
+    }
+    throw err
+  }
+  return order
+}
+
+/**
+ * The driver asks a manager to add an order he can no longer add himself (the shift has left the
+ * open window). No new entity: it rings the branch bell with the proposed order, and the manager
+ * adds it via `addManualOrder` or declines.
+ */
+export async function requestManualOrder(
+  deps: Deps,
+  _actor: Actor,
+  shiftId: string,
+  input: { providerOrderNo: string; payMode: ShiftOrder['payMode']; fee: Minor; zone: string | null },
+): Promise<void> {
+  const shift = await mustFind(deps, shiftId)
+  try {
+    await deps.notifications.push({
+      recipientId: `branch:${shift.branchId}`,
+      branchId: shift.branchId,
+      kind: 'manual_order_requested',
+      payload: {
+        shiftId,
+        driverId: shift.driverId,
+        providerOrderNo: input.providerOrderNo,
+        payMode: input.payMode,
+        fee: serializeMoney(input.fee),
+        zone: input.zone,
+      },
+      dedupeKey: `${shiftId}:manual_order_request:${input.providerOrderNo}`,
+      readAtMs: null,
+      createdAtMs: deps.clock.nowMs(),
+    })
+  } catch {
+    // The bell is a convenience; a failed push must not error the driver's request.
+  }
 }
 
 // ── BR1 ───────────────────────────────────────────────────────────────────────────────────

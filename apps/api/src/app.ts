@@ -42,6 +42,7 @@ import { MAX_UPLOAD_BYTES, readEvidence, uploadEvidence } from './media.service.
 import {
   ServiceError,
   addOrder,
+  addManualOrder,
   approveClose,
   approveOpen,
   cancelShift,
@@ -49,6 +50,7 @@ import {
   ensureFxDay,
   evaluateShift,
   rejectClose,
+  requestManualOrder,
   requestRephoto,
   submitEndPackage,
   submitStartPackage,
@@ -463,6 +465,43 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const body = addOrderRequest.parse(req.body)
       const order = await addOrder(deps, req.actor!, id, body)
       return reply.code(201).send({ id: order.id, providerOrderNo: order.providerOrderNo })
+    },
+  )
+
+  // A higher-level manager adds a manual order to reconcile a shift (C-7 «missing order»). Audited,
+  // since it moves money into BR1; permitted through pending_review, forcing a re-review after.
+  app.post(
+    '/shifts/:id/orders/manual',
+    { config: { permission: 'shift.approve', subject: shiftSubject } },
+    async (req, reply) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const body = addOrderRequest.parse(req.body)
+      const order = await addManualOrder(deps, req.actor!, id, body)
+      await deps.audit.append({
+        tableName: 'shift_orders',
+        recordId: order.id,
+        action: 'INSERT',
+        actorId: req.actor!.userId,
+        actorKind: 'user',
+        branchId: req.actor!.branchId,
+        requestId: req.requestId,
+        before: null,
+        after: { ...order, fee: serializeMoney(order.fee), manual: true },
+        occurredAtMs: deps.clock.nowMs(),
+      })
+      return reply.code(201).send({ id: order.id, providerOrderNo: order.providerOrderNo })
+    },
+  )
+
+  // The driver asks a manager to add an order he can no longer add himself — rings the branch bell.
+  app.post(
+    '/shifts/:id/orders/request',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req, reply) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const body = addOrderRequest.parse(req.body)
+      await requestManualOrder(deps, req.actor!, id, body)
+      return reply.code(202).send({ ok: true })
     },
   )
 

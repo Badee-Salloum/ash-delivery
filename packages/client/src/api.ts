@@ -475,6 +475,16 @@ export class ApiClient {
     return this.post<VehicleEvent>(`/vehicles/${vehicleId}/events`, body)
   }
 
+  // ── Manual orders (Section C) ─────────────────────────────────────────────────────────────
+  /** A higher-level manager adds a manual order to reconcile a shift (fixes BR1's «missing order»). */
+  addManualOrder(shiftId: string, body: { providerOrderNo: string; payMode: string; fee: string; zone?: string | null }) {
+    return this.post(`/shifts/${shiftId}/orders/manual`, body)
+  }
+  /** A driver asks a manager to add an order he can no longer add himself. */
+  requestManualOrder(shiftId: string, body: { providerOrderNo: string; payMode: string; fee: string; zone?: string | null }) {
+    return this.post(`/shifts/${shiftId}/orders/request`, body)
+  }
+
   // ── Documents (SRS B-1 / س37) ───────────────────────────────────────────────────────────────
   createDocument(body: {
     ownerKind: 'driver' | 'vehicle'

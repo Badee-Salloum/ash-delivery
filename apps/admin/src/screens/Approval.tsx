@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
-import { Badge, Button, Card, Money, MoneyInput, Pending, Table } from '../ui.tsx'
+import { Badge, Button, Card, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
 
 interface BatteryReadingView {
   batteryId: string
@@ -70,6 +70,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   const [floatText, setFloatText] = useState('')
   const [topupText, setTopupText] = useState('')
   const [notes, setNotes] = useState('') // for a re-shoot request or a reject (C-7)
+  const [manual, setManual] = useState({ providerOrderNo: '', payMode: 'cash', fee: '' }) // manual-order reconcile
 
   const [loadError, setLoadError] = useState<string | null>(null)
   const load = useCallback(() => {
@@ -251,6 +252,55 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             </tr>
           ))}
         </Table>
+
+        {/* Reconcile a «missing order» BR1 flagged: add it manually. Changes the orders hash, so the
+            manager re-reviews before approving. */}
+        <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
+          <TextInput
+            placeholder={t.orders.orderNo}
+            aria-label={t.orders.orderNo}
+            value={manual.providerOrderNo}
+            onChange={(e) => setManual({ ...manual, providerOrderNo: e.target.value })}
+            className="w-32"
+          />
+          <Select
+            aria-label={t.orders.payMode}
+            value={manual.payMode}
+            onChange={(e) => setManual({ ...manual, payMode: e.target.value })}
+          >
+            {(['cash', 'electronic', 'free'] as const).map((m) => (
+              <option key={m} value={m}>
+                {t.orders.payModes[m]}
+              </option>
+            ))}
+          </Select>
+          <MoneyInput
+            placeholder={t.orders.fee}
+            aria-label={t.orders.fee}
+            value={manual.fee}
+            onChange={(e) => setManual({ ...manual, fee: e.target.value })}
+            className="w-28"
+          />
+          <Button
+            variant="ghost"
+            disabled={busy || !manual.providerOrderNo || !manual.fee}
+            onClick={async () => {
+              setBusy(true)
+              setError(null)
+              try {
+                await api.addManualOrder(review.id, { providerOrderNo: manual.providerOrderNo, payMode: manual.payMode, fee: manual.fee, zone: null })
+                setManual({ providerOrderNo: '', payMode: 'cash', fee: '' })
+                load()
+              } catch (err) {
+                setError((err as { error?: string }).error ?? 'error')
+              } finally {
+                setBusy(false)
+              }
+            }}
+          >
+            {t.orders.addManual}
+          </Button>
+        </div>
       </Card>
 
       {review.decisions.length > 0 ? (

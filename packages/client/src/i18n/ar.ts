@@ -219,6 +219,8 @@ export const ar = {
     fee: 'الأجرة',
     payMode: 'نمط الدفع',
     addRow: 'إضافة طلب',
+    addManual: 'إضافة طلب يدوي',
+    requestManual: 'طلب إضافة طلب',
     count: 'عدد الطلبات',
     payModes: { cash: 'كاش', electronic: 'إلكتروني', free: 'مجاني' },
     problems: {
