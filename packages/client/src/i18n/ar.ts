@@ -190,6 +190,14 @@ export const ar = {
     walletBalance: 'رصيد المحفظة',
     walletZeroed: 'صورة المحفظة صفراً',
     dashboardShot: 'سكرينشوت الداشبورد',
+    slotNames: {
+      odometer: 'العداد',
+      dashboard: 'الداشبورد',
+      wallet: 'المحفظة',
+      wallet_zeroed: 'المحفظة صفراً',
+      cash_handover: 'تسليم النقد',
+      battery: 'البطارية',
+    },
     confirmStart: 'تأكيد وبدء النوبة',
     submitEnd: 'إرسال حزمة النهاية',
     states: {
@@ -447,6 +455,7 @@ export const ar = {
     approveClose: 'اعتماد الإنهاء',
     requestRetake: 'طلب إعادة تصوير',
     notes: 'ملاحظات',
+    noPhotos: 'لا صور',
   },
 
   week: {

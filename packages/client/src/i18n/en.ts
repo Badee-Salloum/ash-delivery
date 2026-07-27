@@ -189,6 +189,14 @@ export const en: Catalog = {
     walletBalance: 'Wallet balance',
     walletZeroed: 'Zeroed-wallet photo',
     dashboardShot: 'Dashboard screenshot',
+    slotNames: {
+      odometer: 'Odometer',
+      dashboard: 'Dashboard',
+      wallet: 'Wallet',
+      wallet_zeroed: 'Wallet zeroed',
+      cash_handover: 'Cash handover',
+      battery: 'Battery',
+    },
     confirmStart: 'Confirm & start shift',
     submitEnd: 'Submit end package',
     states: {
@@ -446,6 +454,7 @@ export const en: Catalog = {
     approveClose: 'Approve close',
     requestRetake: 'Request retake',
     notes: 'Notes',
+    noPhotos: 'No photos',
   },
 
   week: {

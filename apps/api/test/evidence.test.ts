@@ -193,6 +193,18 @@ describe('serving evidence', () => {
     expect(res.rawPayload.equals(TINY_JPEG)).toBe(true)
   })
 
+  it('the review carries each slot’s media id, so the C-7 screen can SHOW the photos', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await newShift(driver)
+    const uploaded = await h.uploadPhoto(driver, id, 'start', 'odometer')
+
+    const review = await h.app.inject({ method: 'GET', url: `/shifts/${id}/review`, headers: { cookie: h.cookie(manager) } })
+    expect(review.statusCode, review.body).toBe(200)
+    const media = review.json().media as Array<{ package: string; slot: string; mediaId: string }>
+    expect(media).toContainEqual({ package: 'start', slot: 'odometer', mediaId: uploaded.mediaId })
+  })
+
   it('refuses a manager from another branch — evidence is never on a public path', async () => {
     const driver = await h.loginAs('driver1')
     const other = await h.loginAs('manager2') // Aleppo

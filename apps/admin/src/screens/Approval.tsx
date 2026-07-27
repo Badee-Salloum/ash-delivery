@@ -38,6 +38,7 @@ interface Review {
     batteries: BatteryReadingView[]
   }
   orders: Array<{ providerOrderNo: string; payMode: string; fee: string; zone: string | null }>
+  media: Array<{ package: 'start' | 'end'; slot: string; mediaId: string }>
   br1: {
     expectedCash: string
     expectedWallet: string
@@ -200,7 +201,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
               </>
             )}
           </dl>
-          <PhotoRow shiftId={review.id} pkg="start" slots={review.startPackage.mediaSlots} />
+          <PhotoRow pkg="start" media={review.media} />
           <BatteryReadings readings={review.startPackage.batteries} />
         </Card>
         <Card title={t.shift.endPackage}>
@@ -216,7 +217,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
               value={review.endPackage.batteryPercent === null ? '—' : `${review.endPackage.batteryPercent}%`}
             />
           </dl>
-          <PhotoRow shiftId={review.id} pkg="end" slots={review.endPackage.mediaSlots} />
+          <PhotoRow pkg="end" media={review.media} />
           <BatteryReadings readings={review.endPackage.batteries} />
         </Card>
       </div>
@@ -262,19 +263,41 @@ function Field({ label, value, tone }: { label: string; value: string; tone?: 'g
   )
 }
 
-/** Thumbnails that open the RBAC-checked evidence route. The media id is not on the review yet,
- *  so this lists the slots present; a Bundle-2 nicety wires the id-addressed image endpoint. */
-function PhotoRow({ shiftId, pkg, slots }: { shiftId: string; pkg: string; slots: string[] }): ReactNode {
-  void shiftId
-  void pkg
+/**
+ * The evidence photos for one end of the shift (C-7). Renders each uploaded slot as a thumbnail
+ * from the same-origin, RBAC-checked `/api/media/:id`; a tap opens it full-screen so the manager
+ * can actually read the odometer / dashboard / wallet against the numbers beside it.
+ */
+function PhotoRow({ pkg, media }: { pkg: 'start' | 'end'; media: Review['media'] }): ReactNode {
+  const { t } = useApp()
+  const [zoom, setZoom] = useState<string | null>(null)
+  const shots = media.filter((m) => m.package === pkg)
+  const label = (slot: string): string => t.shift.slotNames[slot as keyof typeof t.shift.slotNames] ?? slot
+
+  if (shots.length === 0) {
+    return <p className="mt-3 text-xs text-slate-400">{t.approval.noPhotos}</p>
+  }
   return (
-    <div className="mt-3 flex flex-wrap gap-2">
-      {slots.map((s) => (
-        <span key={s} className="rounded bg-slate-100 px-2 py-1 text-xs">
-          📷 {s}
-        </span>
-      ))}
-    </div>
+    <>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {shots.map((m) => (
+          <button
+            key={m.slot}
+            onClick={() => setZoom(m.mediaId)}
+            aria-label={label(m.slot)}
+            className="flex flex-col items-center gap-1 rounded-lg border border-slate-200 p-1 outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
+          >
+            <img src={`/api/media/${m.mediaId}`} alt={label(m.slot)} loading="lazy" className="size-24 rounded object-cover" />
+            <span className="text-[10px] text-slate-500">{label(m.slot)}</span>
+          </button>
+        ))}
+      </div>
+      {zoom ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/80 p-4" onClick={() => setZoom(null)}>
+          <img src={`/api/media/${zoom}`} alt="" className="max-h-full max-w-full rounded-lg" />
+        </div>
+      ) : null}
+    </>
   )
 }
 

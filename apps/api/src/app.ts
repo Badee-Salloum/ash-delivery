@@ -534,10 +534,13 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     if (!shift) return null
     // Per-pack readings, joined to the packs so a slot and a capacity are shown rather than a
     // uuid. A two-pack bike hands back two of these at each end of the shift.
-    const [orders, readings, fitted] = await Promise.all([
+    const [orders, readings, fitted, slots] = await Promise.all([
       deps.orders.listByShift(shiftId),
       deps.batteryReadings.listByShift(shiftId),
       deps.directory.listBatteriesForVehicle(shift.vehicleId),
+      // C-7: the review must SHOW the photos, not just their slot names. Each attached slot carries
+      // the media id the RBAC-checked GET /media/:id serves.
+      deps.media.listSlots(shiftId),
     ])
     const withPack = (pkg: 'start' | 'end') =>
       readings
@@ -579,6 +582,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           fee: serializeMoney(o.fee),
           zone: o.zone,
         })),
+        media: slots.map((s) => ({ package: s.package, slot: s.slot, mediaId: s.mediaId })),
       },
     }
   }
