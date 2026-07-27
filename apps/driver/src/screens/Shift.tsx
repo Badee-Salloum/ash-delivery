@@ -1,6 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import type { PayMode } from '@ash/domain'
 import type { DraftOrder } from '@ash/client'
-import { compressImage, uploadEvidencePath } from '@ash/client'
+import { compressImage, nextPayMode, uploadEvidencePath } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
 import { Button, Card, Field, Money, MoneyInput, Screen, TextInput } from '../ui.tsx'
@@ -170,11 +171,20 @@ export function ShiftFlow({
   if (phase === 'end' && shift) {
     return <EndPackage shift={shift} batteries={batteries} onSubmitted={() => setPhase('done')} />
   }
+  const doneShiftId = shift?.id ?? resume?.id ?? null
   return (
     <Screen title={t.app.title}>
       <Card>
         <p className="text-center text-lg font-semibold text-emerald-700">{t.shift.states.pending_review} ✓</p>
       </Card>
+      {/* Submitted, awaiting the manager — the driver can no longer add orders himself. If he
+          realises one is missing he asks a manager to add it (SRS C, manual orders). */}
+      {doneShiftId ? (
+        <>
+          <p className="text-center text-sm text-slate-500">{t.orders.requestManualHint}</p>
+          <RequestOrder shiftId={doneShiftId} />
+        </>
+      ) : null}
     </Screen>
   )
 }
@@ -590,6 +600,86 @@ function ReportIncident({ shiftId }: { shiftId: string }): ReactNode {
           }}
         >
           {busy ? t.common.loading : t.shift.reportIncident}
+        </Button>
+        <Button variant="ghost" className="flex-1" onClick={() => setAsking(false)}>
+          {t.common.cancel}
+        </Button>
+      </div>
+    </Card>
+  )
+}
+
+/**
+ * «طلب إضافة طلب» (SRS C, manual orders): once the driver has submitted his end package he can no
+ * longer add orders himself. If he realises one is missing he sends the branch the proposal — order
+ * no, pay mode, fee — which rings the bell; a manager adds it via the reconcile path or declines.
+ */
+function RequestOrder({ shiftId }: { shiftId: string }): ReactNode {
+  const { api, t } = useApp()
+  const toast = useToast()
+  const [asking, setAsking] = useState(false)
+  const [orderNo, setOrderNo] = useState('')
+  const [payMode, setPayMode] = useState<PayMode>('cash')
+  const [fee, setFee] = useState('5000')
+  const [busy, setBusy] = useState(false)
+
+  const modeLabel: Record<PayMode, string> = {
+    cash: t.orders.payModes.cash,
+    electronic: t.orders.payModes.electronic,
+    free: t.orders.payModes.free,
+  }
+  const modeColor: Record<PayMode, string> = {
+    cash: 'bg-emerald-100 text-emerald-800',
+    electronic: 'bg-sky-100 text-sky-800',
+    free: 'bg-amber-100 text-amber-800',
+  }
+
+  if (!asking) {
+    return (
+      <Button variant="ghost" onClick={() => setAsking(true)}>
+        {t.orders.requestManual}
+      </Button>
+    )
+  }
+  return (
+    <Card className="flex flex-col gap-3">
+      <Field label={t.orders.orderNo}>
+        <TextInput value={orderNo} onChange={(e) => setOrderNo(e.target.value)} />
+      </Field>
+      <Field label={t.orders.payMode}>
+        {/* Same one-tap cycling as the order screen (cash → electronic → free). */}
+        <button
+          type="button"
+          onClick={() => setPayMode((m) => nextPayMode(m))}
+          className={`min-h-11 rounded-2xl px-3 text-sm font-semibold ${modeColor[payMode]}`}
+        >
+          {modeLabel[payMode]}
+        </button>
+      </Field>
+      <Field label={t.orders.fee}>
+        <MoneyInput value={fee} onChange={(e) => setFee(e.target.value)} />
+      </Field>
+      <div className="flex gap-2">
+        <Button
+          variant="success"
+          className="flex-1"
+          disabled={busy || orderNo.trim() === '' || fee.trim() === ''}
+          onClick={async () => {
+            setBusy(true)
+            try {
+              await api.requestManualOrder(shiftId, { providerOrderNo: orderNo.trim(), payMode, fee, zone: null })
+              toast.success(t.orders.requestSent)
+              setAsking(false)
+              setOrderNo('')
+              setFee('5000')
+            } catch {
+              toast.error(t.common.actionFailed)
+            } finally {
+              setBusy(false)
+            }
+          }}
+        >
+          {busy ? t.common.loading : t.orders.requestManual}
         </Button>
         <Button variant="ghost" className="flex-1" onClick={() => setAsking(false)}>
           {t.common.cancel}

@@ -225,6 +225,8 @@ export const ar = {
     addRow: 'إضافة طلب',
     addManual: 'إضافة طلب يدوي',
     requestManual: 'طلب إضافة طلب',
+    requestManualHint: 'نسيت طلباً؟ اطلب من المدير إضافته.',
+    requestSent: 'أُرسل الطلب إلى الفرع',
     count: 'عدد الطلبات',
     payModes: { cash: 'كاش', electronic: 'إلكتروني', free: 'مجاني' },
     problems: {

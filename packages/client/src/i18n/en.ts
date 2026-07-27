@@ -224,6 +224,8 @@ export const en: Catalog = {
     addRow: 'Add order',
     addManual: 'Add manual order',
     requestManual: 'Request an order',
+    requestManualHint: 'Forgot an order? Ask the manager to add it.',
+    requestSent: 'Request sent to the branch',
     count: 'Order count',
     payModes: { cash: 'Cash', electronic: 'Electronic', free: 'Free' },
     problems: {
