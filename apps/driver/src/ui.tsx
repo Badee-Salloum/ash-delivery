@@ -44,7 +44,7 @@ export function Button({
   }
   return (
     <button
-      className={`min-h-14 rounded-2xl px-5 text-lg font-semibold disabled:opacity-40 ${styles[variant]} ${className}`}
+      className={`min-h-14 rounded-2xl px-5 text-lg font-semibold outline-none focus-visible:ring-2 focus-visible:ring-brand/50 disabled:opacity-40 ${styles[variant]} ${className}`}
       {...rest}
     >
       {children}

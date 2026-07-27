@@ -75,8 +75,12 @@ describe('the operational dashboard', () => {
     // 20 orders × 5,000 = 100,000 SYP in fees.
     expect(res.json().revenue.feesSyp).toBe('100000.00')
     expect(res.json().orders.total).toBe(20)
-    expect(res.json().orders.perDriver).toContainEqual({
+    // Enriched with the driver's name/code so the UI shows a driver, not his UUID.
+    const perDriver = res.json().orders.perDriver as Array<Record<string, unknown>>
+    expect(perDriver.find((d) => d.driverId === DRIVER_ID)).toMatchObject({
       driverId: DRIVER_ID,
+      name: 'سائق ١',
+      code: 'DRV-1',
       orders: 20,
       feesSyp: '100000.00',
     })

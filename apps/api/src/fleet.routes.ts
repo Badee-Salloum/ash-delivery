@@ -690,14 +690,24 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
       }
     }
 
+    // Resolve owner names so the board shows the driver/vehicle, not a bare UUID.
+    const [drivers, vehicles] = await Promise.all([
+      deps.directory.listDrivers(branchId),
+      deps.directory.listVehicles(branchId),
+    ])
+    const driverName = new Map(drivers.map((d) => [d.id, d.fullNameAr]))
+    const vehicleCode = new Map(vehicles.map((v) => [v.id, v.code]))
+
     return {
       today,
       through: horizon,
       documents: docs.map((d) => ({
         id: d.id,
         kind: d.kind,
+        ownerKind: d.ownerKind,
         driverId: d.driverId,
         vehicleId: d.vehicleId,
+        ownerName: d.ownerKind === 'driver' ? (driverName.get(d.driverId ?? '') ?? null) : (vehicleCode.get(d.vehicleId ?? '') ?? null),
         expiresOn: d.expiresOn,
         status: documentStatusOn(d.expiresOn, today),
       })),

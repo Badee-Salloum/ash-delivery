@@ -1,6 +1,8 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
 import { BMS_PROFILE_IDS, type VehicleEvent } from '@ash/client'
 import { useApp } from '../app-context.tsx'
+import { useConfirm, useToast } from '../feedback.tsx'
+import { explainError } from '../errors.ts'
 import { Badge, Button, Card, Money, Table, TextInput } from '../ui.tsx'
 
 interface Driver {
@@ -67,6 +69,9 @@ const vehTone: Record<string, 'green' | 'sky' | 'amber' | 'slate'> = {
 /** Drivers & vehicles (SRS B). Each driver carries his document status; an expired doc blocks him. */
 export function Fleet(): ReactNode {
   const { api, t, lang, branchId } = useApp()
+  const toast = useToast()
+  const confirm = useConfirm()
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [drivers, setDrivers] = useState<Driver[]>([])
   const [vehicles, setVehicles] = useState<Vehicle[]>([])
   const [newDriver, setNewDriver] = useState({ code: '', fullNameAr: '', fullNameEn: '', phone: '', hiredOn: '', nationalId: '' })
@@ -86,8 +91,12 @@ export function Fleet(): ReactNode {
   const [dayShifts, setDayShifts] = useState<Array<{ id: string; vehicleId: string; state: string }>>([])
 
   const load = (): void => {
-    void api.get<{ drivers: Driver[] }>('/drivers').then((r) => setDrivers(r.drivers)).catch(() => setDrivers([]))
-    void api.get<{ vehicles: Vehicle[] }>('/vehicles').then((r) => setVehicles(r.vehicles)).catch(() => setVehicles([]))
+    setLoadError(null)
+    // The two core lists distinguish an error from "empty": a failed fetch sets loadError (shown as
+    // a banner) instead of rendering as an empty table, which reads as "there are no drivers".
+    const onLoadFail = (e: { error?: string }): void => setLoadError(e.error ?? 'error')
+    void api.get<{ drivers: Driver[] }>('/drivers').then((r) => setDrivers(r.drivers)).catch(onLoadFail)
+    void api.get<{ vehicles: Vehicle[] }>('/vehicles').then((r) => setVehicles(r.vehicles)).catch(onLoadFail)
     void api
       .assignments(assignDate || undefined)
       .then((r) => {
@@ -138,7 +147,16 @@ export function Fleet(): ReactNode {
     null
 
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+    <div className="flex flex-col gap-4">
+      {loadError ? (
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
+          <span>{explainError(loadError, t)}</span>
+          <Button variant="ghost" onClick={load}>
+            {t.common.retry}
+          </Button>
+        </div>
+      ) : null}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
       <Card title={t.fleet.drivers}>
         <div className="mb-3 flex flex-col gap-2">
           <div className="flex gap-2">
@@ -162,7 +180,13 @@ export function Fleet(): ReactNode {
                   ...(newDriver.nationalId ? { nationalId: newDriver.nationalId } : {}),
                   ...(branchId ? { branchId } : {}),
                 }
-                await api.post('/drivers', payload).catch(() => undefined)
+                try {
+                  await api.post('/drivers', payload)
+                } catch (e) {
+                  toast.error(explainError((e as { error?: string }).error ?? null, t))
+                  return
+                }
+                toast.success(t.common.added)
                 setNewDriver({ code: '', fullNameAr: '', fullNameEn: '', phone: '', hiredOn: '', nationalId: '' })
                 load()
               }}
@@ -189,7 +213,7 @@ export function Fleet(): ReactNode {
                 <div className="flex flex-wrap gap-1">
                   {d.documents.map((doc) => (
                     <Badge key={doc.id} tone={docTone[doc.status] ?? 'slate'}>
-                      {doc.kind}
+                      {t.fleet.docKinds[doc.kind as keyof typeof t.fleet.docKinds] ?? doc.kind}
                     </Badge>
                   ))}
                 </div>
@@ -274,10 +298,15 @@ export function Fleet(): ReactNode {
               </td>
               <td className="px-3 py-1">
                 <select
-                  className="rounded border border-slate-300 px-2 py-1 text-xs"
+                  aria-label={`${t.fleet.state} — ${v.code}`}
+                  className="min-h-9 rounded border border-slate-300 px-2 py-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
                   value={v.state}
                   onChange={async (e) => {
-                    await api.patch(`/vehicles/${v.id}`, { state: e.target.value }).catch(() => undefined)
+                    try {
+                      await api.patch(`/vehicles/${v.id}`, { state: e.target.value })
+                    } catch (err) {
+                      toast.error(explainError((err as { error?: string }).error ?? null, t))
+                    }
                     load()
                   }}
                 >
@@ -292,7 +321,13 @@ export function Fleet(): ReactNode {
                     variant="danger"
                     className="ms-2"
                     onClick={async () => {
-                      await api.cancelShift(strandedShiftFor(v.id)!).catch(() => undefined)
+                      if (!(await confirm({ title: t.fleet.releaseVehicle, body: t.fleet.releaseVehicleConfirm, danger: true }))) return
+                      try {
+                        await api.cancelShift(strandedShiftFor(v.id)!)
+                        toast.success(t.common.saved)
+                      } catch (err) {
+                        toast.error(explainError((err as { error?: string }).error ?? null, t))
+                      }
                       load()
                     }}
                   >
@@ -380,7 +415,13 @@ export function Fleet(): ReactNode {
                   <Button
                     variant="ghost"
                     onClick={async () => {
-                      await api.deleteAssignment(a.id).catch(() => undefined)
+                      if (!(await confirm({ title: t.fleet.unassign, body: t.fleet.unassignConfirm, danger: true }))) return
+                      try {
+                        await api.deleteAssignment(a.id)
+                        toast.success(t.common.deleted)
+                      } catch (err) {
+                        toast.error(explainError((err as { error?: string }).error ?? null, t))
+                      }
                       load()
                     }}
                   >
@@ -524,6 +565,7 @@ export function Fleet(): ReactNode {
           ))}
         </Table>
       </Card>
+      </div>
     </div>
   )
 }
@@ -537,12 +579,24 @@ const eventTone: Record<string, 'slate' | 'amber' | 'red' | 'sky' | 'green'> = {
 }
 
 /**
+ * The auto `state_change` event is stored as English tokens (`ready → charging`). Render it through
+ * the localized state names and a «from … to …» template, so an Arabic log doesn't show raw English
+ * with a bidi-fragile arrow.
+ */
+function stateChangeLabel(notes: string, states: Record<string, string>, template: string): string {
+  const parts = notes.split('→').map((s) => s.trim())
+  const label = (s: string): string => states[s] ?? s
+  return template.replace('{from}', label(parts[0] ?? '')).replace('{to}', label(parts[1] ?? ''))
+}
+
+/**
  * A vehicle's life log (SRS B-2 / س66): its history of state changes, maintenance, incidents,
  * charges and linked costs, newest first — and a small form to record one by hand. State changes
  * are logged automatically elsewhere, so they are read here but never offered as something to add.
  */
 function VehicleHistory({ vehicles }: { vehicles: Vehicle[] }): ReactNode {
   const { api, t } = useApp()
+  const toast = useToast()
   const [vehicleId, setVehicleId] = useState('')
   const [events, setEvents] = useState<VehicleEvent[]>([])
   const empty = { kind: 'maintenance', odometerKm: '', cost: '', notes: '' }
@@ -591,14 +645,18 @@ function VehicleHistory({ vehicles }: { vehicles: Vehicle[] }): ReactNode {
             <TextInput placeholder={t.fleet.notes} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} className="min-w-40 flex-1" />
             <Button
               onClick={async () => {
-                await api
-                  .recordVehicleEvent(vehicleId, {
+                try {
+                  await api.recordVehicleEvent(vehicleId, {
                     kind: form.kind,
                     odometerKm: form.odometerKm ? Number(form.odometerKm) : null,
                     cost: form.cost || null,
                     notes: form.notes || null,
                   })
-                  .catch(() => undefined)
+                } catch (err) {
+                  toast.error(explainError((err as { error?: string }).error ?? null, t))
+                  return
+                }
+                toast.success(t.common.added)
                 setForm(empty)
                 load()
               }}
@@ -617,7 +675,11 @@ function VehicleHistory({ vehicles }: { vehicles: Vehicle[] }): ReactNode {
                     <Badge tone={eventTone[e.kind] ?? 'slate'}>
                       {t.fleet.eventKinds[e.kind as keyof typeof t.fleet.eventKinds] ?? e.kind}
                     </Badge>
-                    <span>{e.notes}</span>
+                    <span>
+                      {e.kind === 'state_change' && e.notes
+                        ? stateChangeLabel(e.notes, t.fleet.vehicleStates, t.fleet.stateChanged)
+                        : e.notes}
+                    </span>
                   </span>
                   <span className="flex items-center gap-3 text-slate-500">
                     {e.odometerKm !== null ? <span className="num">{e.odometerKm} km</span> : null}

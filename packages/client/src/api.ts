@@ -492,6 +492,8 @@ export class ApiClient {
       documents: Array<{
         id: string
         kind: string
+        ownerKind: 'driver' | 'vehicle'
+        ownerName: string | null
         driverId: string | null
         vehicleId: string | null
         expiresOn: string | null

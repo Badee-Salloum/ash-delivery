@@ -6,6 +6,8 @@ import { Badge, Card, Money, Pending, Stat } from '../ui.tsx'
 interface ExpiringDoc {
   id: string
   kind: string
+  ownerKind: 'driver' | 'vehicle'
+  ownerName: string | null
   driverId: string | null
   vehicleId: string | null
   expiresOn: string | null
@@ -32,7 +34,7 @@ const hhmm = (iso: string): string =>
 interface DashboardData {
   businessDate: string
   revenue: { feesSyp: string; feesUsd: string | null; fxProvisional: boolean }
-  orders: { total: number; perDriver: Array<{ driverId: string; orders: number; feesSyp: string }> }
+  orders: { total: number; perDriver: Array<{ driverId: string; name: string; code: string | null; orders: number; feesSyp: string }> }
   companyShareSinceSunday: string
   fleet: { ready: number; charging: number; maintenance: number; stopped: number }
   completeness: { openShifts: number; awaitingApproval: number; missingEndPackage: number; suspended: number }
@@ -105,10 +107,10 @@ export function Dashboard(): ReactNode {
 
       {profit ? (
         <Card title={t.dashboard.totalProfit}>
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <Stat label={t.tiers.driverShare} value={<Money value={profit.driverShareSyp} />} />
-            <Stat label="الشركة" value={<Money value={profit.companyShareSyp} />} />
-            <Stat label="يلاغو" value={<Money value={profit.yalagoShareSyp} />} />
+            <Stat label={t.dashboard.companyShareLabel} value={<Money value={profit.companyShareSyp} />} />
+            <Stat label={t.dashboard.yalagoShareLabel} value={<Money value={profit.yalagoShareSyp} />} />
           </div>
         </Card>
       ) : null}
@@ -123,11 +125,11 @@ export function Dashboard(): ReactNode {
           </div>
         </Card>
 
-        <Card title={t.dashboard.orders}>
+        <Card title={t.dashboard.ordersPerDriver}>
           <ul className="flex flex-col gap-1 text-sm">
             {data.orders.perDriver.map((d) => (
               <li key={d.driverId} className="flex items-center justify-between">
-                <span className="text-slate-500">{d.driverId}</span>
+                <span className="text-slate-600">{d.name}</span>
                 <span>
                   {d.orders} — <Money value={d.feesSyp} />
                 </span>
@@ -141,12 +143,13 @@ export function Dashboard(): ReactNode {
         <Card title={t.dashboard.expiringDocuments}>
           <ul className="flex flex-col gap-1 text-sm">
             {expiring.map((d) => {
-              const owner = d.driverId ? t.fleet.ownerKinds.driver : t.fleet.ownerKinds.vehicle
+              const ownerKindLabel = t.fleet.ownerKinds[d.ownerKind]
               const kind = t.fleet.docKinds[d.kind as keyof typeof t.fleet.docKinds] ?? d.kind
               return (
                 <li key={d.id} className="flex items-center justify-between gap-2 border-b border-slate-100 py-1 last:border-0">
                   <span>
-                    <span className="text-slate-400">{owner}</span> · {kind}
+                    <span className="font-medium">{d.ownerName ?? ownerKindLabel}</span>
+                    <span className="text-slate-400"> · {kind}</span>
                   </span>
                   <span className="flex items-center gap-2">
                     <span className="num text-slate-500">{d.expiresOn}</span>

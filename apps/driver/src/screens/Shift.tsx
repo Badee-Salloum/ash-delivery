@@ -2,6 +2,7 @@ import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import type { DraftOrder } from '@ash/client'
 import { compressImage, uploadEvidencePath } from '@ash/client'
 import { useApp } from '../app-context.tsx'
+import { useToast } from '../feedback.tsx'
 import { Button, Card, Field, Money, MoneyInput, Screen, TextInput } from '../ui.tsx'
 import { OrderEntry } from './OrderEntry.tsx'
 import { BatteryPanel, type FittedBattery } from './BatteryPanel.tsx'
@@ -212,6 +213,7 @@ function StartPackage({
   onApproved(funds: { floatText: string; topupText: string }): void
 }): ReactNode {
   const { api, t } = useApp()
+  const toast = useToast()
   const [shiftId, setShiftId] = useState<string | null>(existingShiftId ?? null)
   const [odo, setOdo] = useState('')
   const [battery, setBattery] = useState('')
@@ -276,6 +278,10 @@ function StartPackage({
         batteryPercent: battery.trim() === '' ? null : Number(battery),
       })
       onOpened(shiftId)
+    } catch (e) {
+      // A driver can't read a console — a failed upload must show on the glass, not vanish.
+      const code = (e as { error?: string }).error
+      toast.error((code && (t.errors as Record<string, string>)[code]) || t.common.actionFailed)
     } finally {
       setBusy(false)
     }
@@ -388,6 +394,7 @@ function EndPackage({
   onSubmitted(): void
 }): ReactNode {
   const { api, t } = useApp()
+  const toast = useToast()
   const [cash, setCash] = useState('')
   const [wallet, setWallet] = useState('')
   const [odo, setOdo] = useState('')
@@ -422,6 +429,9 @@ function EndPackage({
       })
       setBr1(res.br1)
       if (res.br1.balanced) onSubmitted()
+    } catch (e) {
+      const code = (e as { error?: string }).error
+      toast.error((code && (t.errors as Record<string, string>)[code]) || t.common.actionFailed)
     } finally {
       setBusy(false)
     }

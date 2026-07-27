@@ -316,9 +316,11 @@ describe('documents and expiry (B-1 / س37)', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json().today).toBe('2026-07-21')
     expect(res.json().through).toBe('2026-08-20')
-    const kinds = (res.json().documents as Array<{ kind: string }>).map((d) => d.kind)
-    expect(kinds).toContain('national_id')
-    expect(kinds).not.toContain('criminal_record') // December is beyond the horizon
+    const docs = res.json().documents as Array<{ kind: string; ownerName: string | null }>
+    expect(docs.map((d) => d.kind)).toContain('national_id')
+    expect(docs.map((d) => d.kind)).not.toContain('criminal_record') // December is beyond the horizon
+    // Each row carries the owner's name, so the board reads a driver, not a UUID.
+    expect(docs.find((d) => d.kind === 'national_id')?.ownerName).toBe('سائق ١')
   })
 
   it('opening the expiry board rings the branch bell once per document per threshold band', async () => {

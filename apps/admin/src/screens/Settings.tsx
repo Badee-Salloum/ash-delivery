@@ -102,8 +102,15 @@ function FxCard({ fx, canEdit, onSaved }: { fx: Fx; canEdit: boolean; onSaved():
             onClick={async () => {
               setErr(null)
               setMsg(null)
+              // Validate before send: a non-numeric or non-positive rate would post Math.round(NaN),
+              // and this figure restates every USD number for the whole day.
+              const rate = Number(text)
+              if (!Number.isFinite(rate) || rate <= 0) {
+                setErr('invalid_rate')
+                return
+              }
               try {
-                await api.setFxRate(fx.businessDate, Math.round(Number(text) * 100))
+                await api.setFxRate(fx.businessDate, Math.round(rate * 100))
                 setText('')
                 setMsg(t.settings.saved)
                 onSaved()

@@ -1,6 +1,9 @@
-import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from 'react'
+import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes } from 'react'
 
 /** Admin console primitives — desktop/tablet, denser than the driver app, logical properties only. */
+
+/** A shared keyboard-focus ring, applied to every interactive control so tabbing is visible. */
+export const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40'
 
 /**
  * The ASH GROUP mark: a hexagon around an ascending bar chart, navy rising to blue. Drawn in the
@@ -56,7 +59,7 @@ export function Button({
   }
   return (
     <button
-      className={`inline-flex min-h-10 items-center justify-center rounded-lg px-4 text-sm font-semibold transition-colors disabled:opacity-40 ${styles[variant]} ${className}`}
+      className={`inline-flex min-h-10 items-center justify-center rounded-lg px-4 text-sm font-semibold transition-colors disabled:opacity-40 ${FOCUS_RING} ${styles[variant]} ${className}`}
       {...rest}
     >
       {children}
@@ -75,6 +78,54 @@ export function TextInput({ className = '', ...rest }: InputHTMLAttributes<HTMLI
 
 export function MoneyInput({ className = '', ...rest }: InputHTMLAttributes<HTMLInputElement>): ReactNode {
   return <TextInput inputMode="decimal" className={`num text-end ${className}`} {...rest} />
+}
+
+/**
+ * A native `<select>` styled to match `TextInput` — same height, border and focus ring — so inline
+ * form rows stop mixing a 40px input with a 28px raw select. Give it an `aria-label` (or wrap it in
+ * a `Field`) so it has an accessible name.
+ */
+export function Select({ className = '', children, ...rest }: SelectHTMLAttributes<HTMLSelectElement>): ReactNode {
+  return (
+    <select
+      className={`min-h-10 rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none transition-colors focus:border-brand focus:ring-2 focus:ring-brand/15 ${className}`}
+      {...rest}
+    >
+      {children}
+    </select>
+  )
+}
+
+/**
+ * A labelled form field: a real `<label>` (tied to the control via `htmlFor`), an optional hint,
+ * and an error slot. Wrapping inputs/selects in this is what gives ~20 placeholder-only controls a
+ * programmatic name and a place to show validation.
+ */
+export function Field({
+  label,
+  htmlFor,
+  hint,
+  error,
+  children,
+  className = '',
+}: {
+  label: string
+  htmlFor?: string
+  hint?: string
+  error?: string | null
+  children: ReactNode
+  className?: string
+}): ReactNode {
+  return (
+    <div className={`flex flex-col gap-1 ${className}`}>
+      <label htmlFor={htmlFor} className="text-xs font-medium text-slate-500">
+        {label}
+      </label>
+      {children}
+      {hint ? <span className="text-xs text-slate-400">{hint}</span> : null}
+      {error ? <span className="text-xs font-medium text-red-600">{error}</span> : null}
+    </div>
+  )
 }
 
 export function Card({ title, children, className = '' }: { title?: string; children: ReactNode; className?: string }): ReactNode {
@@ -96,7 +147,21 @@ export function Stat({ label, value, sub }: { label: string; value: ReactNode; s
   )
 }
 
-export function Table({ head, children }: { head: string[]; children: ReactNode }): ReactNode {
+/**
+ * A table. Pass `empty` and, when there are no `children` rows, it renders one muted full-width row
+ * instead of a bare header — so an empty list reads as "nothing here yet", not as a broken screen.
+ */
+export function Table({
+  head,
+  children,
+  empty,
+  isEmpty,
+}: {
+  head: string[]
+  children: ReactNode
+  empty?: ReactNode
+  isEmpty?: boolean
+}): ReactNode {
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
@@ -109,7 +174,17 @@ export function Table({ head, children }: { head: string[]; children: ReactNode 
             ))}
           </tr>
         </thead>
-        <tbody className="divide-y divide-slate-100">{children}</tbody>
+        <tbody className="divide-y divide-slate-100">
+          {isEmpty && empty !== undefined ? (
+            <tr>
+              <td colSpan={head.length} className="px-3 py-6 text-center text-slate-400">
+                {empty}
+              </td>
+            </tr>
+          ) : (
+            children
+          )}
+        </tbody>
       </table>
     </div>
   )

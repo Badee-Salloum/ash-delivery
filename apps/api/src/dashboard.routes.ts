@@ -64,6 +64,10 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
       }
     }
 
+    // Names for the per-driver breakdown, so the UI shows a driver, not his UUID.
+    const drivers = await deps.directory.listDrivers(branchId)
+    const driverInfo = new Map(drivers.map((d) => [d.id, { name: d.fullNameAr, code: d.code }]))
+
     // ── Fleet readiness ─────────────────────────────────────────────────────────────────────
     const vehicles = await deps.directory.listVehicles(branchId)
     const fleet = { ready: 0, charging: 0, maintenance: 0, stopped: 0 }
@@ -89,6 +93,8 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
         total: orderTotal,
         perDriver: [...perDriver.entries()].map(([driverId, v]) => ({
           driverId,
+          name: driverInfo.get(driverId)?.name ?? driverId,
+          code: driverInfo.get(driverId)?.code ?? null,
           orders: v.orders,
           feesSyp: serializeMoney(minor(v.fees)),
         })),
