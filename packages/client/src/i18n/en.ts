@@ -466,6 +466,8 @@ export const en: Catalog = {
     reject: 'Reject',
     notes: 'Notes',
     noPhotos: 'No photos',
+    ocrEdited: 'Manually edited',
+    ocrFilled: 'Added by the driver (OCR blank)',
     decisionLog: 'Decision log',
     decisions: {
       approved: 'Approved',

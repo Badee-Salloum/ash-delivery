@@ -1,4 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
+import { type OcrScalar, ocrReadingDelta } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { Badge, Button, Card, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
@@ -9,10 +10,16 @@ interface BatteryReadingView {
   percent: number | null
   packMillivolts: number | null
   cycleCount: number | null
+  remainCapacityDah: number | null
+  fullCapacityDah: number | null
   mosTempDc: number | null
+  t1Dc: number | null
+  t2Dc: number | null
   capacityAh: number | null
   serialNo: string | null
   source: 'ocr' | 'manual'
+  /** The pre-correction OCR reading (SRS D-3 baseline); shape mirrors the scaled-integer fields. */
+  ocrRaw?: unknown
 }
 
 interface Review {
@@ -433,8 +440,71 @@ function BatteryReadings({ readings }: { readings: BatteryReadingView[] }): Reac
             {r.mosTempDc === null ? null : <span>{t.battery.mosTemp}: {(r.mosTempDc / 10).toFixed(1)}°C</span>}
             {r.serialNo === null ? null : <span className="text-slate-400">{r.serialNo}</span>}
           </div>
+          {/* SRS D-3: what the driver changed from the OCR reading. */}
+          <OcrDeltaLines deltas={bmsDeltas(r, t)} />
         </div>
       ))}
     </div>
   )
+}
+
+/** How each scaled-integer BMS field labels + formats for the D-3 delta line. */
+const BMS_FIELDS = ['percent', 'packMillivolts', 'cycleCount', 'remainCapacityDah', 'fullCapacityDah', 'mosTempDc', 't1Dc', 't2Dc'] as const
+type BmsFieldKey = (typeof BMS_FIELDS)[number]
+const bmsFmt: Record<BmsFieldKey, { label: (t: ReturnType<typeof useApp>['t']) => string; show: (v: number) => string }> = {
+  percent: { label: (t) => t.battery.percent, show: (v) => `${v}%` },
+  packMillivolts: { label: (t) => t.battery.voltage, show: (v) => `${(v / 1000).toFixed(2)} V` },
+  cycleCount: { label: (t) => t.battery.cycles, show: (v) => `${v}` },
+  remainCapacityDah: { label: (t) => t.battery.remainCapacity, show: (v) => `${(v / 10).toFixed(1)}Ah` },
+  fullCapacityDah: { label: (t) => t.battery.fullCapacity, show: (v) => `${(v / 10).toFixed(1)}Ah` },
+  mosTempDc: { label: (t) => t.battery.mosTemp, show: (v) => `${(v / 10).toFixed(1)}°C` },
+  t1Dc: { label: (t) => t.battery.temp1, show: (v) => `${(v / 10).toFixed(1)}°C` },
+  t2Dc: { label: (t) => t.battery.temp2, show: (v) => `${(v / 10).toFixed(1)}°C` },
+}
+
+function bmsDeltas(r: BatteryReadingView, t: ReturnType<typeof useApp>['t']): DeltaLine[] {
+  const ocrRaw = (r.ocrRaw ?? null) as Partial<Record<BmsFieldKey, OcrScalar>> | null
+  return ocrReadingDelta(BMS_FIELDS, ocrRaw, r).map((d) => ({
+    label: bmsFmt[d.key].label(t),
+    ocr: d.ocr === null ? null : bmsFmt[d.key].show(d.ocr),
+    confirmed: d.confirmed === null ? '—' : bmsFmt[d.key].show(d.confirmed),
+  }))
+}
+
+interface DeltaLine {
+  label: string
+  /** null = OCR read nothing (driver filled it). */
+  ocr: string | null
+  confirmed: string
+}
+
+/**
+ * The SRS D-3 delta lines: for each field the driver changed from OCR, «label: OCR → confirmed»,
+ * or a "filled by the driver" note when OCR read nothing. Reused by BMS, odometer/battery, wallet
+ * and order-fee. The figure row is `dir="ltr"` because numbers read left-to-right in both languages.
+ */
+function OcrDeltaLines({ deltas }: { deltas: DeltaLine[] }): ReactNode {
+  const { t } = useApp()
+  if (deltas.length === 0) return null
+  return (
+    <div className="mt-1 flex flex-col gap-0.5">
+      {deltas.map((d, i) => (
+        <div key={i} className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500">
+          <Badge tone="amber">{t.approval.ocrEdited}</Badge>
+          {d.ocr === null ? (
+            <span>{d.label}: {t.approval.ocrFilled}</span>
+          ) : (
+            <span dir="ltr" className="num">{d.label}: {d.ocr} → {d.confirmed}</span>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/** A one-field delta (odometer/battery/wallet/fee): [] when OCR was blank-and-unchanged or absent. */
+function scalarDelta(label: string, ocr: string | null, confirmed: string | null): DeltaLine[] {
+  if (ocr === null) return []
+  if (confirmed !== null && ocr === confirmed) return []
+  return [{ label, ocr, confirmed: confirmed ?? '—' }]
 }

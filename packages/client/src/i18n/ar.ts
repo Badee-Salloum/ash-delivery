@@ -467,6 +467,8 @@ export const ar = {
     reject: 'رفض',
     notes: 'ملاحظات',
     noPhotos: 'لا صور',
+    ocrEdited: 'مُعدّل يدوياً',
+    ocrFilled: 'أضافه السائق (لم تقرأه الآلة)',
     decisionLog: 'سجل القرارات',
     decisions: {
       approved: 'اعتُمد',
