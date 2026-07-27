@@ -36,8 +36,11 @@ export function LiveShifts(): ReactNode {
   const [vehicles, setVehicles] = useState<Record<string, VehicleLite>>({})
   const [error, setError] = useState<string | null>(null)
 
-  // Suspend is `shift.approve` — the branch manager and GM hold it; the sysadmin does not.
-  const canApprove = session?.roleKey === 'branch_manager' || session?.roleKey === 'general_manager'
+  // Suspend / tranche are `shift.approve` — held by the branch manager (his branch), the GM and the
+  // system admin (both organisation-wide), per the §3 matrix. UI hiding is not security; the API
+  // enforces the same grant.
+  const canApprove =
+    session?.roleKey === 'branch_manager' || session?.roleKey === 'general_manager' || session?.roleKey === 'system_admin'
 
   const load = useCallback(() => {
     setError(null)
