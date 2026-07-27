@@ -3,7 +3,7 @@ import { BMS_PROFILE_IDS, type VehicleEvent } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { useConfirm, useToast } from '../feedback.tsx'
 import { explainError } from '../errors.ts'
-import { Badge, Button, Card, Money, Select, Table, TextInput } from '../ui.tsx'
+import { Badge, Button, Card, DateField, Money, Select, Table, TextInput } from '../ui.tsx'
 
 interface Driver {
   id: string
@@ -166,7 +166,7 @@ export function Fleet(): ReactNode {
           <div className="flex flex-wrap items-center gap-2">
             <TextInput aria-label={t.fleet.nameEn} placeholder={t.fleet.nameEn} value={newDriver.fullNameEn} onChange={(e) => setNewDriver({ ...newDriver, fullNameEn: e.target.value })} className="min-w-32 flex-1" />
             <TextInput aria-label={t.fleet.phone} placeholder={t.fleet.phone} value={newDriver.phone} onChange={(e) => setNewDriver({ ...newDriver, phone: e.target.value })} className="w-36" />
-            <TextInput aria-label={t.fleet.hiredOn} type="date" title={t.fleet.hiredOn} value={newDriver.hiredOn} onChange={(e) => setNewDriver({ ...newDriver, hiredOn: e.target.value })} className="w-40" />
+            <DateField label={t.fleet.hiredOn} value={newDriver.hiredOn} onChange={(v) => setNewDriver({ ...newDriver, hiredOn: v })} className="w-40" />
             <TextInput aria-label={t.fleet.nationalId} placeholder={t.fleet.nationalId} value={newDriver.nationalId} onChange={(e) => setNewDriver({ ...newDriver, nationalId: e.target.value })} className="w-40" />
             <Button
               onClick={async () => {
@@ -355,8 +355,7 @@ export function Fleet(): ReactNode {
       */}
       <Card title={t.fleet.assignments}>
         <div className="mb-3 flex flex-wrap items-center gap-2">
-          <label className="text-xs text-slate-500">{t.fleet.date}</label>
-          <TextInput type="date" value={assignDate} onChange={(e) => setAssignDate(e.target.value)} className="w-40" />
+          <DateField label={t.fleet.date} value={assignDate} onChange={setAssignDate} className="w-40" />
         </div>
         <div className="mb-3 flex flex-wrap gap-2">
           <select
@@ -771,8 +770,8 @@ function DocumentForm({
           ))}
         </select>
 
-        <TextInput type="date" title={t.fleet.issued} value={form.issuedOn} onChange={(e) => setForm({ ...form, issuedOn: e.target.value })} className="w-40" />
-        <TextInput type="date" title={t.fleet.expires} value={form.expiresOn} onChange={(e) => setForm({ ...form, expiresOn: e.target.value })} className="w-40" />
+        <DateField label={t.fleet.issued} value={form.issuedOn} onChange={(v) => setForm({ ...form, issuedOn: v })} className="w-40" />
+        <DateField label={t.fleet.expires} value={form.expiresOn} onChange={(v) => setForm({ ...form, expiresOn: v })} className="w-40" />
 
         <Button
           disabled={!form.ownerId}

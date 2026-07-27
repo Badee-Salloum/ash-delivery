@@ -14,7 +14,15 @@ import { Audit } from './screens/Audit.tsx'
 import { Permissions } from './screens/Permissions.tsx'
 import { Settings } from './screens/Settings.tsx'
 
-type Section = 'dashboard' | 'queue' | 'fleet' | 'fleetConfig' | 'treasury' | 'accounts' | 'audit' | 'permissions' | 'settings'
+const SECTIONS = ['dashboard', 'queue', 'fleet', 'fleetConfig', 'treasury', 'accounts', 'audit', 'permissions', 'settings'] as const
+type Section = (typeof SECTIONS)[number]
+
+/** The view encoded in the URL hash: a section, or `shift:<id>` for the review overlay. */
+function viewFromHash(): { section: Section; openShift: string | null } {
+  const raw = decodeURIComponent(location.hash.slice(1))
+  if (raw.startsWith('shift:')) return { section: 'dashboard', openShift: raw.slice('shift:'.length) }
+  return { section: (SECTIONS as readonly string[]).includes(raw) ? (raw as Section) : 'dashboard', openShift: null }
+}
 
 /**
  * The admin console shell: a side rail of sections and a main pane. The approval review takes over
@@ -22,38 +30,40 @@ type Section = 'dashboard' | 'queue' | 'fleet' | 'fleetConfig' | 'treasury' | 'a
  */
 export function AdminApp(): ReactNode {
   const { session, t, lang, setLang, api, setSession, branches, branchId, setBranchId } = useApp()
-  const [section, setSection] = useState<Section>('dashboard')
-  const [openShift, setOpenShift] = useState<string | null>(null)
+  // Initialise from the URL hash so a refresh or a shared link restores the view immediately —
+  // before the reflect effect runs, so a deep link is never overwritten by the default.
+  const [section, setSection] = useState<Section>(() => viewFromHash().section)
+  const [openShift, setOpenShift] = useState<string | null>(() => viewFromHash().openShift)
   const [notifs, setNotifs] = useState<Notif[]>([])
   const [navOpen, setNavOpen] = useState(false) // the rail is a drawer below lg
 
   /**
-   * Mirror in-app navigation into browser history, so the Back button steps through the console
-   * instead of leaving it.
-   *
-   * There is no router: navigation is `section` + the `openShift` review overlay. Without this a
-   * single Back press exits the whole app — jarring on a tool a manager keeps open all day. Each
-   * navigation pushes a history entry carrying the view; `popstate` restores it, so Back closes
-   * the review first, then walks back through sections.
+   * Client routing via the URL hash. `view` is the single source of truth (`section`, or
+   * `shift:<id>` for the review overlay); the hash mirrors it, so a refresh or a shared link
+   * restores the view — not always the dashboard — and Back/forward still walk the console instead
+   * of leaving the app. No router dependency: the SPA's catch-all `index.html` fallback is enough.
    */
   const view = openShift ? `shift:${openShift}` : section
   useEffect(() => {
     if (!session) return
-    if (window.history.state?.view !== view) window.history.pushState({ view }, '')
+    if (decodeURIComponent(location.hash.slice(1)) !== view) location.hash = view
   }, [session, view])
   useEffect(() => {
     if (!session) return
-    const onPop = (e: PopStateEvent): void => {
-      const target: string = e.state?.view ?? 'dashboard'
-      if (target.startsWith('shift:')) {
-        setOpenShift(target.slice('shift:'.length))
+    // Back/forward and manual hash edits fire `hashchange`; apply it to state. A `shift:` hash only
+    // toggles the overlay — the section behind it is left as-is, so closing the review returns to
+    // wherever it was opened from (the queue), not the dashboard.
+    const apply = (): void => {
+      const raw = decodeURIComponent(location.hash.slice(1))
+      if (raw.startsWith('shift:')) {
+        setOpenShift(raw.slice('shift:'.length))
       } else {
         setOpenShift(null)
-        setSection(target as Section)
+        setSection((SECTIONS as readonly string[]).includes(raw) ? (raw as Section) : 'dashboard')
       }
     }
-    window.addEventListener('popstate', onPop)
-    return () => window.removeEventListener('popstate', onPop)
+    window.addEventListener('hashchange', apply)
+    return () => window.removeEventListener('hashchange', apply)
   }, [session])
 
   const refreshNotifs = useCallback(() => {

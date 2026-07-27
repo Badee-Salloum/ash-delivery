@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes } from 'react'
+import { type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, useId } from 'react'
 
 /** Admin console primitives — desktop/tablet, denser than the driver app, logical properties only. */
 
@@ -93,6 +93,39 @@ export function Select({ className = '', children, ...rest }: SelectHTMLAttribut
     >
       {children}
     </select>
+  )
+}
+
+/**
+ * A labelled date input. A native `type="date"` in an RTL page mirrors its own segments and can't
+ * be localized, so it is pinned to `dir="ltr"` and `.num` (tabular Western digits) — the value
+ * reads as a stable `YYYY-MM-DD` in both directions — and carries a real, visible label instead of
+ * the `title=` tooltip these fields used to rely on.
+ */
+export function DateField({
+  label,
+  value,
+  onChange,
+  className = '',
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+  className?: string
+}): ReactNode {
+  const id = useId()
+  return (
+    <Field label={label} htmlFor={id} className={className}>
+      <input
+        id={id}
+        type="date"
+        dir="ltr"
+        value={value}
+        aria-label={label}
+        onChange={(e) => onChange(e.target.value)}
+        className="num min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm outline-none transition-colors focus:border-brand focus:ring-2 focus:ring-brand/15"
+      />
+    </Field>
   )
 }
 
