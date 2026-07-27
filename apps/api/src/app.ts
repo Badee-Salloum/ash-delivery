@@ -4,6 +4,7 @@ import { z } from 'zod'
 import type { Deps } from '@ash/contracts'
 import {
   addOrderRequest,
+  addTrancheRequest,
   approveCloseRequest,
   approveOpenRequest,
   closeWeekRequest,
@@ -43,6 +44,7 @@ import {
   ServiceError,
   addOrder,
   addManualOrder,
+  addTranche,
   approveClose,
   approveOpen,
   cancelShift,
@@ -780,6 +782,31 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const { notes } = decisionBody.parse(req.body ?? {})
       await reportIncident(deps, req.actor!, id, notes)
       return reply.code(202).send({ ok: true })
+    },
+  )
+
+  // C-5: a second (or later) cash-float / wallet top-up disbursed mid-day. Branch money the manager
+  // hands the driver, so `shift.approve`. Audited — it moves cash out of the office.
+  app.post(
+    '/shifts/:id/tranche',
+    { config: { permission: 'shift.approve', subject: shiftSubject } },
+    async (req, reply) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const body = addTrancheRequest.parse(req.body)
+      const shift = await addTranche(deps, req.actor!, id, body)
+      await deps.audit.append({
+        tableName: 'shifts',
+        recordId: shift.id,
+        action: 'UPDATE',
+        actorId: req.actor!.userId,
+        actorKind: 'user',
+        branchId: shift.branchId,
+        requestId: req.requestId,
+        before: null,
+        after: { tranche: body.kind, amount: serializeMoney(body.amount) },
+        occurredAtMs: deps.clock.nowMs(),
+      })
+      return reply.code(201).send({ id: shift.id, kind: body.kind })
     },
   )
 

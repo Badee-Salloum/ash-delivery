@@ -92,6 +92,15 @@ export const approveCloseRequest = z.object({
   reviewedOrdersHash: z.string().min(1),
 })
 
+/**
+ * A second (or later) cash-float or wallet top-up disbursed mid-day (SRS C-5). Money the branch
+ * hands the driver after open-approval, posted as one more tranche under its own occurrence key.
+ */
+export const addTrancheRequest = z.object({
+  kind: z.enum(['float', 'topup']),
+  amount: moneySchema,
+})
+
 // ── Fleet (SRS B) ─────────────────────────────────────────────────────────────────────────
 
 /** A driver's profile fields (B-1). `nationalId` is plaintext in transit (HTTPS); stored encrypted. */

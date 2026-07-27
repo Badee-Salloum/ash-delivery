@@ -479,6 +479,11 @@ export const ar = {
     suspend: 'تعليق النوبة',
     incidentNote: 'وصف الحادثة (اختياري)',
     suspendedHint: 'معلَّقة — يتابعها السائق من هاتفه عندما يصبح جاهزاً.',
+    addTranche: 'إضافة عهدة/شحن',
+    kind: 'النوع',
+    float: 'عهدة نقدية',
+    topup: 'شحن محفظة',
+    amount: 'المبلغ',
   },
 
   week: {

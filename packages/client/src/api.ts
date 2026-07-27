@@ -499,6 +499,12 @@ export class ApiClient {
     return this.post(`/shifts/${shiftId}/report-incident`, { notes: notes ?? null })
   }
 
+  // ── Mid-day float / top-up tranche (SRS C-5) ──────────────────────────────────────────────
+  /** A manager disburses a second (or later) cash float or wallet top-up to a live shift. */
+  addTranche(shiftId: string, body: { kind: 'float' | 'topup'; amount: string }) {
+    return this.post<{ id: string; kind: string }>(`/shifts/${shiftId}/tranche`, body)
+  }
+
   // ── Documents (SRS B-1 / س37) ───────────────────────────────────────────────────────────────
   createDocument(body: {
     ownerKind: 'driver' | 'vehicle'

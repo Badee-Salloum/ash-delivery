@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
-import { Badge, Button, Card, Field, Pending, TextInput } from '../ui.tsx'
+import { Badge, Button, Card, Field, MoneyInput, Pending, Select, TextInput } from '../ui.tsx'
 
 interface ShiftRow {
   id: string
@@ -107,8 +107,10 @@ function LiveRow({
   onChanged: () => void
 }): ReactNode {
   const { api, t } = useApp()
-  const [asking, setAsking] = useState(false)
+  const [panel, setPanel] = useState<'none' | 'suspend' | 'tranche'>('none')
   const [note, setNote] = useState('')
+  const [kind, setKind] = useState<'float' | 'topup'>('float')
+  const [amount, setAmount] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
@@ -117,7 +119,7 @@ function LiveRow({
     setErr(null)
     try {
       await api.suspendShift(shift.id, note.trim() === '' ? null : note.trim())
-      setAsking(false)
+      setPanel('none')
       setNote('')
       onChanged()
     } catch (e) {
@@ -127,9 +129,29 @@ function LiveRow({
     }
   }
 
+  const disburse = async (): Promise<void> => {
+    setBusy(true)
+    setErr(null)
+    try {
+      await api.addTranche(shift.id, { kind, amount })
+      setPanel('none')
+      setAmount('')
+      onChanged()
+    } catch (e) {
+      setErr((e as { error?: string }).error ?? 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const toggle = (p: 'suspend' | 'tranche'): void => {
+    setErr(null)
+    setPanel((cur) => (cur === p ? 'none' : p))
+  }
+
   return (
     <Card className="flex flex-col gap-2">
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <Badge tone={shift.state === 'suspended' ? 'amber' : 'green'}>
           {t.shift.states[shift.state as keyof typeof t.shift.states] ?? shift.state}
         </Badge>
@@ -138,13 +160,18 @@ function LiveRow({
           {vehicleCode} · #{shift.shiftNo}
         </span>
         {shift.state === 'open' && canApprove ? (
-          <Button variant="ghost" className="ms-auto" onClick={() => setAsking((v) => !v)}>
-            {t.liveShifts.suspend}
-          </Button>
+          <div className="flex gap-2 ms-auto">
+            <Button variant="ghost" onClick={() => toggle('tranche')}>
+              {t.liveShifts.addTranche}
+            </Button>
+            <Button variant="ghost" onClick={() => toggle('suspend')}>
+              {t.liveShifts.suspend}
+            </Button>
+          </div>
         ) : null}
       </div>
       {shift.state === 'suspended' ? <p className="text-sm text-amber-700">{t.liveShifts.suspendedHint}</p> : null}
-      {asking ? (
+      {panel === 'suspend' ? (
         <div className="flex flex-col gap-2">
           <Field label={t.liveShifts.incidentNote}>
             <TextInput value={note} onChange={(e) => setNote(e.target.value)} />
@@ -154,7 +181,31 @@ function LiveRow({
             <Button variant="danger" className="flex-1" disabled={busy} onClick={suspend}>
               {busy ? t.common.loading : t.liveShifts.suspend}
             </Button>
-            <Button variant="ghost" className="flex-1" onClick={() => setAsking(false)}>
+            <Button variant="ghost" className="flex-1" onClick={() => setPanel('none')}>
+              {t.common.cancel}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+      {panel === 'tranche' ? (
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-wrap gap-2">
+            <Field label={t.liveShifts.kind}>
+              <Select value={kind} onChange={(e) => setKind(e.target.value as 'float' | 'topup')}>
+                <option value="float">{t.liveShifts.float}</option>
+                <option value="topup">{t.liveShifts.topup}</option>
+              </Select>
+            </Field>
+            <Field label={t.liveShifts.amount}>
+              <MoneyInput value={amount} onChange={(e) => setAmount(e.target.value)} />
+            </Field>
+          </div>
+          {err ? <p className="text-sm text-red-600">{explainError(err, t)}</p> : null}
+          <div className="flex gap-2">
+            <Button variant="primary" className="flex-1" disabled={busy || amount.trim() === ''} onClick={disburse}>
+              {busy ? t.common.loading : t.liveShifts.addTranche}
+            </Button>
+            <Button variant="ghost" className="flex-1" onClick={() => setPanel('none')}>
               {t.common.cancel}
             </Button>
           </div>

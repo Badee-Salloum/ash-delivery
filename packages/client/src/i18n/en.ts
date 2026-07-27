@@ -478,6 +478,11 @@ export const en: Catalog = {
     suspend: 'Suspend shift',
     incidentNote: 'What happened (optional)',
     suspendedHint: 'Suspended — the driver resumes it from his phone when he can carry on.',
+    addTranche: 'Add float / top-up',
+    kind: 'Type',
+    float: 'Cash float',
+    topup: 'Wallet top-up',
+    amount: 'Amount',
   },
 
   week: {

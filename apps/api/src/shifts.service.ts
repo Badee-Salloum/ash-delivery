@@ -24,10 +24,12 @@ import {
   documentStatusOn,
   diagnoseBr1,
   evaluateBr1,
+  floatOut,
   minWalletBalance,
   minor,
   postingsForApproval,
   postingsForOpen,
+  walletTopup,
   REQUIRED_END_SLOTS,
   resolveFxDay,
   splitDay,
@@ -496,6 +498,51 @@ export async function reportIncident(deps: Deps, _actor: Actor, shiftId: string,
   } catch {
     // The bell is a convenience; a failed push must not error the driver's report.
   }
+}
+
+// ── Second float / top-up tranche mid-day (C-5) ────────────────────────────────────────────
+
+/**
+ * A second (or later) cash-float or wallet top-up handed to the driver mid-day (SRS C-5). Each
+ * tranche posts ONE balanced entry under its own occurrence key
+ * — `(shift_id, event_type, occurrence_key)` — so a replay is idempotent and the second tranche is
+ * never swallowed by an "idempotent" first. BR1's expected end cash/wallet move automatically,
+ * because the equation sums the tranche arrays. Manager money, so this is `shift.approve` (route).
+ */
+export async function addTranche(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: { kind: 'float' | 'topup'; amount: Minor },
+): Promise<ShiftRecord> {
+  const shift = await mustFind(deps, shiftId)
+  // Money the driver is out with: only while he is live. Not before open, not after review.
+  if (shift.state !== 'open' && shift.state !== 'suspended') {
+    throw new ServiceError(409, 'shift_not_open_for_tranche')
+  }
+  if (input.amount <= minor(0n)) throw new ServiceError(422, 'tranche_amount_must_be_positive')
+
+  const existing = input.kind === 'float' ? shift.floatTranches : shift.topupTranches
+  const trancheNo = existing.length + 1
+  const posting =
+    input.kind === 'float' ? floatOut(shift.driverId, input.amount, trancheNo) : walletTopup(shift.driverId, input.amount, trancheNo)
+
+  const fxDayId = await ensureFxDay(deps, shift.businessDate)
+  await deps.ledger.post(shift.branchId, [posting], {
+    shiftId: shift.id,
+    businessDate: shift.businessDate,
+    postingDate: todayFor(deps),
+    weekStartDate: shift.weekStartDate,
+    fxDayId,
+    createdBy: actor.userId,
+  })
+
+  const updated: ShiftRecord =
+    input.kind === 'float'
+      ? { ...shift, floatTranches: [...shift.floatTranches, input.amount] }
+      : { ...shift, topupTranches: [...shift.topupTranches, input.amount] }
+  await deps.shifts.update(updated)
+  return updated
 }
 
 // ── Orders ────────────────────────────────────────────────────────────────────────────────
