@@ -307,6 +307,8 @@ export function Fleet(): ReactNode {
 
       <VehicleHistory vehicles={vehicles} />
 
+      <DocumentForm drivers={drivers} vehicles={vehicles} onAdded={load} />
+
       {/*
         SRS B-3: the bike is bound to the driver BEFORE the shift. Once a row exists here the
         driver app shows him that bike only, and the API refuses a shift on any other — so this
@@ -628,6 +630,108 @@ function VehicleHistory({ vehicles }: { vehicles: Vehicle[] }): ReactNode {
           )}
         </>
       ) : null}
+    </Card>
+  )
+}
+
+const DRIVER_DOC_KINDS = ['driving_licence', 'national_id', 'criminal_record'] as const
+const VEHICLE_DOC_KINDS = ['registration', 'insurance'] as const
+
+/**
+ * Record a driver or vehicle document with its expiry (SRS B-1/B-2, س37). This is what makes an
+ * expiring/expired document exist — and therefore what makes the expiry board light up and the
+ * shift gate refuse an expired licence. Driver docs then show as badges on the driver's row.
+ */
+function DocumentForm({
+  drivers,
+  vehicles,
+  onAdded,
+}: {
+  drivers: Driver[]
+  vehicles: Vehicle[]
+  onAdded: () => void
+}): ReactNode {
+  const { api, t } = useApp()
+  const empty = { ownerKind: 'driver' as 'driver' | 'vehicle', ownerId: '', kind: 'driving_licence', issuedOn: '', expiresOn: '' }
+  const [form, setForm] = useState(empty)
+  const [err, setErr] = useState<string | null>(null)
+
+  const kinds = form.ownerKind === 'driver' ? DRIVER_DOC_KINDS : VEHICLE_DOC_KINDS
+
+  return (
+    <Card title={t.fleet.documents}>
+      <div className="flex flex-wrap items-end gap-2">
+        <select
+          className="rounded border border-slate-300 px-2 py-1.5 text-sm"
+          value={form.ownerKind}
+          onChange={(e) => {
+            const ownerKind = e.target.value as 'driver' | 'vehicle'
+            // Switching owner resets the picked owner and the kind, since the kind lists differ.
+            setForm({ ...empty, ownerKind, kind: ownerKind === 'driver' ? 'driving_licence' : 'registration' })
+          }}
+        >
+          <option value="driver">{t.fleet.ownerKinds.driver}</option>
+          <option value="vehicle">{t.fleet.ownerKinds.vehicle}</option>
+        </select>
+
+        <select
+          className="rounded border border-slate-300 px-2 py-1.5 text-sm"
+          value={form.ownerId}
+          onChange={(e) => setForm({ ...form, ownerId: e.target.value })}
+        >
+          <option value="">—</option>
+          {form.ownerKind === 'driver'
+            ? drivers.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.code} — {d.fullNameAr}
+                </option>
+              ))
+            : vehicles.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.code}
+                </option>
+              ))}
+        </select>
+
+        <select
+          className="rounded border border-slate-300 px-2 py-1.5 text-sm"
+          value={form.kind}
+          onChange={(e) => setForm({ ...form, kind: e.target.value })}
+        >
+          {kinds.map((k) => (
+            <option key={k} value={k}>
+              {t.fleet.docKinds[k]}
+            </option>
+          ))}
+        </select>
+
+        <TextInput type="date" title={t.fleet.issued} value={form.issuedOn} onChange={(e) => setForm({ ...form, issuedOn: e.target.value })} className="w-40" />
+        <TextInput type="date" title={t.fleet.expires} value={form.expiresOn} onChange={(e) => setForm({ ...form, expiresOn: e.target.value })} className="w-40" />
+
+        <Button
+          disabled={!form.ownerId}
+          onClick={async () => {
+            setErr(null)
+            try {
+              await api.createDocument({
+                ownerKind: form.ownerKind,
+                driverId: form.ownerKind === 'driver' ? form.ownerId : null,
+                vehicleId: form.ownerKind === 'vehicle' ? form.ownerId : null,
+                kind: form.kind,
+                ...(form.issuedOn ? { issuedOn: form.issuedOn } : {}),
+                ...(form.expiresOn ? { expiresOn: form.expiresOn } : {}),
+              })
+              setForm({ ...empty, ownerKind: form.ownerKind, kind: form.kind })
+              onAdded()
+            } catch (e) {
+              setErr((e as { error?: string }).error ?? 'error')
+            }
+          }}
+        >
+          {t.fleet.addDocument}
+        </Button>
+      </div>
+      {err ? <p className="mt-2 text-sm text-rose-600">{err}</p> : null}
     </Card>
   )
 }

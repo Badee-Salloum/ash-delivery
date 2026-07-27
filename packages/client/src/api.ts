@@ -474,6 +474,16 @@ export class ApiClient {
   }
 
   // ── Documents (SRS B-1 / س37) ───────────────────────────────────────────────────────────────
+  createDocument(body: {
+    ownerKind: 'driver' | 'vehicle'
+    driverId?: string | null
+    vehicleId?: string | null
+    kind: string
+    issuedOn?: string | null
+    expiresOn?: string | null
+  }) {
+    return this.post('/documents', { ...body, ...(this.branchId ? { branchId: this.branchId } : {}) })
+  }
   /** The expiry board. Reading it also raises the bell for anything crossing a threshold band. */
   expiringDocuments() {
     return this.get<{
