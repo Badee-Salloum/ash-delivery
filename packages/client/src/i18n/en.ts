@@ -95,6 +95,8 @@ export const en: Catalog = {
     empty: 'None',
     menu: 'Menu',
     notifications: 'Notifications',
+    ago: '{n}{u} ago',
+    units: { m: 'm', h: 'h', d: 'd' },
   },
 
   /** API error codes → an actionable message. Unmapped codes fall back to a generic line. */
@@ -124,6 +126,17 @@ export const en: Catalog = {
     week_not_closable: 'The week can’t be closed yet',
     invalid_request: 'The submitted data isn’t valid',
     invalid_rate: 'Enter a positive numeric rate',
+  },
+
+  notifications: {
+    title: 'Notifications',
+    empty: 'No notifications',
+    markAllRead: 'Mark all read',
+    kinds: {
+      shift_awaiting_open_approval: 'Shift awaiting open approval',
+      shift_awaiting_close_approval: 'Shift awaiting close approval',
+      document_expiring: 'Document nearing expiry',
+    },
   },
 
   auth: {

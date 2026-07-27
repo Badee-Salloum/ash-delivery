@@ -1,6 +1,7 @@
-import { type ReactNode, useEffect, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useState } from 'react'
 import { useApp } from './app-context.tsx'
 import { Badge, Wordmark } from './ui.tsx'
+import { type Notif, NotificationBell } from './NotificationBell.tsx'
 import { Login } from './screens/Login.tsx'
 import { Dashboard } from './screens/Dashboard.tsx'
 import { Queue } from './screens/Queue.tsx'
@@ -23,7 +24,7 @@ export function AdminApp(): ReactNode {
   const { session, t, lang, setLang, api, setSession, branches, branchId, setBranchId } = useApp()
   const [section, setSection] = useState<Section>('dashboard')
   const [openShift, setOpenShift] = useState<string | null>(null)
-  const [unread, setUnread] = useState(0)
+  const [notifs, setNotifs] = useState<Notif[]>([])
   const [navOpen, setNavOpen] = useState(false) // the rail is a drawer below lg
 
   /**
@@ -55,21 +56,36 @@ export function AdminApp(): ReactNode {
     return () => window.removeEventListener('popstate', onPop)
   }, [session])
 
+  const refreshNotifs = useCallback(() => {
+    void api.notifications().then((n) => setNotifs(n.notifications)).catch(() => undefined)
+  }, [api])
   useEffect(() => {
     if (!session) return
-    const poll = (): void => {
-      // The Queue badge counts approval alerts only — the same events the Queue list shows.
-      // Other kinds (e.g. document_expiring) ring the bell but surface on their own screens, so
-      // folding them into this count would make the badge disagree with the list beneath it.
-      void api
-        .notifications()
-        .then((n) => setUnread(n.notifications.filter((x) => !x.read && x.kind.startsWith('shift_awaiting')).length))
-        .catch(() => undefined)
-    }
-    poll()
-    const timer = setInterval(poll, 8000)
+    refreshNotifs()
+    const timer = setInterval(refreshNotifs, 8000)
     return () => clearInterval(timer)
-  }, [api, session])
+  }, [session, refreshNotifs])
+
+  // The Queue badge counts approval alerts only — the same events the Queue list shows. Other kinds
+  // (document_expiring) ring the bell but live on their own screens, so folding them into this count
+  // would make the badge disagree with the list beneath it. The bell shows every kind.
+  const queueUnread = notifs.filter((x) => !x.read && x.kind.startsWith('shift_awaiting')).length
+  const markRead = (id: number): void => {
+    void api.markNotificationRead(id).then(refreshNotifs).catch(() => undefined)
+  }
+  const openNotif = (n: Notif): void => {
+    if (n.kind.startsWith('shift_awaiting') && typeof n.payload.shiftId === 'string') {
+      setOpenShift(n.payload.shiftId)
+    } else if (n.kind.startsWith('shift_awaiting')) {
+      setSection('queue')
+      setOpenShift(null)
+    } else {
+      // document_expiring — the expiry board lives on the dashboard.
+      setSection('dashboard')
+      setOpenShift(null)
+    }
+    setNavOpen(false)
+  }
 
   if (!session) return <Login />
 
@@ -77,7 +93,7 @@ export function AdminApp(): ReactNode {
   const canManageUsers = session.roleKey === 'system_admin' || session.roleKey === 'general_manager'
   const nav: Array<{ key: Section; label: string; badge?: number | undefined }> = [
     { key: 'dashboard', label: t.dashboard.title },
-    { key: 'queue', label: t.approval.queue, badge: unread || undefined },
+    { key: 'queue', label: t.approval.queue, badge: queueUnread || undefined },
     { key: 'fleet', label: `${t.fleet.drivers} / ${t.fleet.vehicles}` },
     { key: 'treasury', label: t.treasury.branchTreasury },
     ...(canManageUsers ? [{ key: 'accounts' as const, label: t.accounts.title }] : []),
@@ -104,7 +120,10 @@ export function AdminApp(): ReactNode {
         }`}
       >
         <div className="mb-5 border-b border-slate-100 px-2 pb-4 pt-1">
-          <Wordmark size={32} />
+          <div className="flex items-start justify-between">
+            <Wordmark size={32} />
+            <NotificationBell notifications={notifs} onMarkRead={markRead} onNavigate={openNotif} />
+          </div>
           <div className="mt-3 inline-block rounded-md bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">
             {t.roles?.[session.roleKey as keyof typeof t.roles] ?? session.roleKey}
           </div>
@@ -184,6 +203,9 @@ export function AdminApp(): ReactNode {
             </svg>
           </button>
           <Wordmark size={26} />
+          <div className="ms-auto">
+            <NotificationBell notifications={notifs} onMarkRead={markRead} onNavigate={openNotif} />
+          </div>
         </div>
         <main className="flex-1 overflow-y-auto p-6">
         {openShift ? (

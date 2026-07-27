@@ -96,6 +96,8 @@ export const ar = {
     empty: 'لا يوجد',
     menu: 'القائمة',
     notifications: 'الإشعارات',
+    ago: 'منذ {n} {u}',
+    units: { m: 'دقيقة', h: 'ساعة', d: 'يوم' },
   },
 
   /** API error codes → an actionable message. Unmapped codes fall back to a generic line. */
@@ -125,6 +127,17 @@ export const ar = {
     week_not_closable: 'لا يمكن إغلاق الأسبوع بعد',
     invalid_request: 'البيانات المُدخلة غير صحيحة',
     invalid_rate: 'أدخل سعراً رقمياً موجباً',
+  },
+
+  notifications: {
+    title: 'الإشعارات',
+    empty: 'لا إشعارات',
+    markAllRead: 'تعليم الكل كمقروء',
+    kinds: {
+      shift_awaiting_open_approval: 'نوبة بانتظار اعتماد الفتح',
+      shift_awaiting_close_approval: 'نوبة بانتظار اعتماد الإنهاء',
+      document_expiring: 'وثيقة قاربت على الانتهاء',
+    },
   },
 
   auth: {
