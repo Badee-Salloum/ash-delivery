@@ -130,8 +130,8 @@ function GovernorateCard({
             onChange={(e) => setDraft({ ...draft, no: e.target.value })}
             className="num w-20"
           />
-          <TextInput placeholder="العربية" value={draft.nameAr} onChange={(e) => setDraft({ ...draft, nameAr: e.target.value })} className="flex-1" />
-          <TextInput placeholder="English" value={draft.nameEn} onChange={(e) => setDraft({ ...draft, nameEn: e.target.value })} className="flex-1" />
+          <TextInput placeholder={t.common.arabic} aria-label={t.common.arabic} value={draft.nameAr} onChange={(e) => setDraft({ ...draft, nameAr: e.target.value })} className="flex-1" />
+          <TextInput placeholder={t.common.english} aria-label={t.common.english} value={draft.nameEn} onChange={(e) => setDraft({ ...draft, nameEn: e.target.value })} className="flex-1" />
           <Button
             disabled={!draft.no || !draft.nameAr || !draft.nameEn}
             onClick={async () => {
@@ -190,10 +190,11 @@ function BranchCard({
       {canEdit ? (
         <div className="mb-3 flex flex-wrap gap-2">
           <TextInput placeholder={t.fleet.code} value={draft.code} onChange={(e) => setDraft({ ...draft, code: e.target.value })} className="w-24" />
-          <TextInput placeholder="العربية" value={draft.nameAr} onChange={(e) => setDraft({ ...draft, nameAr: e.target.value })} className="w-28" />
-          <TextInput placeholder="English" value={draft.nameEn} onChange={(e) => setDraft({ ...draft, nameEn: e.target.value })} className="w-28" />
+          <TextInput placeholder={t.common.arabic} aria-label={t.common.arabic} value={draft.nameAr} onChange={(e) => setDraft({ ...draft, nameAr: e.target.value })} className="w-28" />
+          <TextInput placeholder={t.common.english} aria-label={t.common.english} value={draft.nameEn} onChange={(e) => setDraft({ ...draft, nameEn: e.target.value })} className="w-28" />
           <select
-            className="rounded-lg border border-slate-300 px-2 py-1 text-sm"
+            aria-label={t.fleet.governorate}
+            className="min-h-10 rounded-lg border border-slate-300 px-2 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
             value={draft.governorateId}
             onChange={(e) => setDraft({ ...draft, governorateId: e.target.value })}
           >
@@ -278,8 +279,8 @@ function VehicleTypeCard({
       {canEdit ? (
         <div className="mb-3 flex flex-wrap gap-2">
           <TextInput placeholder={t.fleet.code} value={draft.code} onChange={(e) => setDraft({ ...draft, code: e.target.value })} className="w-32" />
-          <TextInput placeholder="العربية" value={draft.nameAr} onChange={(e) => setDraft({ ...draft, nameAr: e.target.value })} className="flex-1" />
-          <TextInput placeholder="English" value={draft.nameEn} onChange={(e) => setDraft({ ...draft, nameEn: e.target.value })} className="flex-1" />
+          <TextInput placeholder={t.common.arabic} aria-label={t.common.arabic} value={draft.nameAr} onChange={(e) => setDraft({ ...draft, nameAr: e.target.value })} className="flex-1" />
+          <TextInput placeholder={t.common.english} aria-label={t.common.english} value={draft.nameEn} onChange={(e) => setDraft({ ...draft, nameEn: e.target.value })} className="flex-1" />
           <TextInput
             inputMode="numeric"
             placeholder={t.fleet.typeNo}

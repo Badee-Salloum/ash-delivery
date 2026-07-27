@@ -137,7 +137,9 @@ export function Treasury(): ReactNode {
             <Table head={[t.treasury.category, t.treasury.computed, t.treasury.counted]}>
               {sheet.funds.map((f) => (
                 <tr key={f.fundCode}>
-                  <td className="px-3 py-1">{f.fundCode}</td>
+                  <td className="px-3 py-1">
+                    {t.treasury.fundCodes[f.fundCode as keyof typeof t.treasury.fundCodes] ?? f.fundCode}
+                  </td>
                   <td className="px-3 py-1"><Money value={f.computed} /></td>
                   <td className="px-3 py-1">
                     <MoneyInput
@@ -174,7 +176,7 @@ export function Treasury(): ReactNode {
             ) : closeResult?.blockers ? (
               <ul className="mt-2 text-sm text-red-600">
                 {closeResult.blockers.map((b, i) => (
-                  <li key={i}>• {b.kind}</li>
+                  <li key={i}>• {t.treasury.closeBlockers[b.kind as keyof typeof t.treasury.closeBlockers] ?? b.kind}</li>
                 ))}
               </ul>
             ) : closeResult?.error ? (

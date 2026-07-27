@@ -97,6 +97,8 @@ export const en: Catalog = {
     notifications: 'Notifications',
     ago: '{n}{u} ago',
     units: { m: 'm', h: 'h', d: 'd' },
+    arabic: 'Arabic',
+    english: 'English',
   },
 
   /** API error codes → an actionable message. Unmapped codes fall back to a generic line. */
@@ -388,6 +390,19 @@ export const en: Catalog = {
     costCenter: 'Cost centre',
     amount: 'Amount',
     receiptRequired: 'A receipt is required for this amount',
+    fundCodes: {
+      office_cash: 'Office cash box',
+      office_wallet: 'Office wallet',
+    },
+    closeBlockers: {
+      not_a_sunday: 'The week closes on Sunday only',
+      already_closed: 'The week is already closed',
+      unapproved_shifts: 'There are unapproved shifts',
+      missing_cash_counts: 'A cash count is missing on some days',
+      provisional_fx: 'The FX rate is provisional on some days',
+      prior_week_open: 'The prior week isn’t closed yet',
+      trial_balance_not_zero: 'The trial balance isn’t zero',
+    },
   },
 
   tiers: {

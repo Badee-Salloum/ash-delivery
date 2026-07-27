@@ -228,7 +228,8 @@ export function Fleet(): ReactNode {
       <Card title={t.fleet.vehicles}>
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <select
-            className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
+            aria-label={t.fleet.vehicleType}
+            className="min-h-10 rounded-lg border border-slate-300 px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
             value={newVehicle.vehicleTypeId}
             onChange={(e) => setNewVehicle({ ...newVehicle, vehicleTypeId: e.target.value })}
           >
@@ -359,7 +360,8 @@ export function Fleet(): ReactNode {
         </div>
         <div className="mb-3 flex flex-wrap gap-2">
           <select
-            className="rounded border border-slate-300 px-2 py-1 text-sm"
+            aria-label={t.fleet.driver}
+            className="min-h-10 rounded border border-slate-300 px-2 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
             value={pick.driverId}
             onChange={(e) => setPick({ ...pick, driverId: e.target.value })}
           >
@@ -373,7 +375,8 @@ export function Fleet(): ReactNode {
               ))}
           </select>
           <select
-            className="rounded border border-slate-300 px-2 py-1 text-sm"
+            aria-label={t.fleet.vehicles}
+            className="min-h-10 rounded border border-slate-300 px-2 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
             value={pick.vehicleId}
             onChange={(e) => setPick({ ...pick, vehicleId: e.target.value })}
           >
@@ -451,7 +454,8 @@ export function Fleet(): ReactNode {
             className="flex-1"
           />
           <select
-            className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
+            aria-label={t.battery.capacity}
+            className="min-h-10 rounded-lg border border-slate-300 px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
             value={newBattery.capacityAh}
             onChange={(e) => setNewBattery({ ...newBattery, capacityAh: e.target.value })}
           >
@@ -492,7 +496,8 @@ export function Fleet(): ReactNode {
                     English table, another an Arabic card grid — so naming it lets the driver's
                     reader use the right labels and layout instead of guessing at all of them. */}
                 <select
-                  className="rounded border border-slate-300 px-2 py-1 text-xs"
+                  aria-label={`${t.battery.profile} — ${b.serialNo ?? b.capacityAh}`}
+                  className="min-h-9 rounded border border-slate-300 px-2 py-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
                   value={b.bmsProfile ?? 'auto'}
                   onChange={async (e) => {
                     setBatteryError(null)
@@ -513,7 +518,8 @@ export function Fleet(): ReactNode {
               </td>
               <td className="px-3 py-1">
                 <select
-                  className="rounded border border-slate-300 px-2 py-1 text-xs"
+                  aria-label={`${t.fleet.vehicles} — ${b.serialNo ?? b.capacityAh}`}
+                  className="min-h-9 rounded border border-slate-300 px-2 py-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
                   value={b.vehicleId ?? ''}
                   onChange={async (e) => {
                     setBatteryError(null)
@@ -541,7 +547,8 @@ export function Fleet(): ReactNode {
               </td>
               <td className="px-3 py-1">
                 <select
-                  className="rounded border border-slate-300 px-2 py-1 text-xs"
+                  aria-label={`${t.battery.slot} — ${b.serialNo ?? b.capacityAh}`}
+                  className="min-h-9 rounded border border-slate-300 px-2 py-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
                   value={b.slotNo ?? ''}
                   disabled={b.vehicleId === null}
                   onChange={async (e) => {
@@ -617,7 +624,8 @@ function VehicleHistory({ vehicles }: { vehicles: Vehicle[] }): ReactNode {
   return (
     <Card title={t.fleet.history}>
       <select
-        className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
+        aria-label={t.fleet.vehicles}
+        className="min-h-10 rounded-lg border border-slate-300 px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
         value={vehicleId}
         onChange={(e) => setVehicleId(e.target.value)}
       >
@@ -633,7 +641,8 @@ function VehicleHistory({ vehicles }: { vehicles: Vehicle[] }): ReactNode {
         <>
           <div className="mt-3 flex flex-wrap items-end gap-2">
             <select
-              className="rounded border border-slate-300 px-2 py-1.5 text-sm"
+              aria-label={t.fleet.addEvent}
+              className="min-h-10 rounded border border-slate-300 px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
               value={form.kind}
               onChange={(e) => setForm({ ...form, kind: e.target.value })}
             >
@@ -727,7 +736,8 @@ function DocumentForm({
     <Card title={t.fleet.documents}>
       <div className="flex flex-wrap items-end gap-2">
         <select
-          className="rounded border border-slate-300 px-2 py-1.5 text-sm"
+          aria-label={t.fleet.ownerKinds.driver + ' / ' + t.fleet.ownerKinds.vehicle}
+          className="min-h-10 rounded border border-slate-300 px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
           value={form.ownerKind}
           onChange={(e) => {
             const ownerKind = e.target.value as 'driver' | 'vehicle'
@@ -740,7 +750,8 @@ function DocumentForm({
         </select>
 
         <select
-          className="rounded border border-slate-300 px-2 py-1.5 text-sm"
+          aria-label={form.ownerKind === 'driver' ? t.fleet.driver : t.fleet.vehicles}
+          className="min-h-10 rounded border border-slate-300 px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
           value={form.ownerId}
           onChange={(e) => setForm({ ...form, ownerId: e.target.value })}
         >
@@ -759,7 +770,8 @@ function DocumentForm({
         </select>
 
         <select
-          className="rounded border border-slate-300 px-2 py-1.5 text-sm"
+          aria-label={t.fleet.documents}
+          className="min-h-10 rounded border border-slate-300 px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
           value={form.kind}
           onChange={(e) => setForm({ ...form, kind: e.target.value })}
         >

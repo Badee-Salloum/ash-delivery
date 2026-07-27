@@ -98,6 +98,8 @@ export const ar = {
     notifications: 'الإشعارات',
     ago: 'منذ {n} {u}',
     units: { m: 'دقيقة', h: 'ساعة', d: 'يوم' },
+    arabic: 'بالعربية',
+    english: 'بالإنجليزية',
   },
 
   /** API error codes → an actionable message. Unmapped codes fall back to a generic line. */
@@ -389,6 +391,19 @@ export const ar = {
     costCenter: 'مركز الكلفة',
     amount: 'المبلغ',
     receiptRequired: 'إيصال مطلوب لهذا المبلغ',
+    fundCodes: {
+      office_cash: 'صندوق المكتب النقدي',
+      office_wallet: 'محفظة المكتب',
+    },
+    closeBlockers: {
+      not_a_sunday: 'الإقفال يوم الأحد فقط',
+      already_closed: 'الأسبوع مُقفل مسبقاً',
+      unapproved_shifts: 'توجد نوبات غير معتمدة',
+      missing_cash_counts: 'جرد نقدي ناقص لبعض الأيام',
+      provisional_fx: 'سعر صرف مؤقت لبعض الأيام',
+      prior_week_open: 'الأسبوع السابق لم يُقفل بعد',
+      trial_balance_not_zero: 'ميزان المراجعة لا يساوي صفراً',
+    },
   },
 
   tiers: {
