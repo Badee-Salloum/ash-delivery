@@ -17,6 +17,8 @@ export interface DraftOrder {
   payMode: PayMode
   /** As typed, so the field round-trips exactly what the driver sees. */
   feeText: string
+  /** SRS D-1/D-3: the OCR-read fee, set only on rows scanned off «Recent orders» — the baseline. */
+  feeOcrText?: string
 }
 
 export interface OrderEntryState {

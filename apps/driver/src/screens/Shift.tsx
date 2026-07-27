@@ -209,6 +209,9 @@ async function submitOrders(
         payMode: o.payMode,
         fee: o.feeText,
         zone: null,
+        // SRS D-1/D-3: mark rows scanned off «Recent orders», keeping what OCR read as the baseline.
+        source: o.feeOcrText != null ? 'ocr' : 'manual',
+        feeOcr: o.feeOcrText ?? null,
       })
     } catch {
       failed.push(o.providerOrderNo.trim())

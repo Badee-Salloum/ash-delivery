@@ -560,7 +560,7 @@ export async function addOrder(
   deps: Deps,
   actor: Actor,
   shiftId: string,
-  input: { providerOrderNo: string; payMode: ShiftOrder['payMode']; fee: Minor; zone: string | null },
+  input: { providerOrderNo: string; payMode: ShiftOrder['payMode']; fee: Minor; zone: string | null; source?: 'manual' | 'ocr'; feeOcr?: Minor | null },
 ): Promise<ShiftOrderRecord> {
   const shift = await mustFind(deps, shiftId)
   if (shift.state !== 'open' && shift.state !== 'suspended') {
@@ -594,6 +594,9 @@ export async function addOrder(
     fee: input.fee,
     zone: input.zone,
     driverConfirmed: true,
+    // SRS D-1/D-3: 'ocr' when the driver pulled the fee off «Recent orders»; feeOcr is what it read.
+    source: input.source ?? 'manual',
+    feeOcr: input.feeOcr ?? null,
   }
   try {
     await deps.orders.create(order)
@@ -634,6 +637,9 @@ export async function addManualOrder(
     fee: input.fee,
     zone: input.zone,
     driverConfirmed: true,
+    // A manager reconciling by hand vouches for the number — always manual, no OCR baseline.
+    source: 'manual',
+    feeOcr: null,
   }
   try {
     await deps.orders.create(order)

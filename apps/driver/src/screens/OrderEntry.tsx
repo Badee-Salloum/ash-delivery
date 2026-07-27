@@ -1,7 +1,9 @@
-import { type ReactNode, useMemo, useState } from 'react'
+import { type ReactNode, useMemo, useRef, useState } from 'react'
 import type { PayMode } from '@ash/domain'
 import { type DraftOrder, allProblems, isComplete, nextPayMode, previewBr1 } from '@ash/client'
+import type { OcrOrder } from '../ocr.ts'
 import { useApp } from '../app-context.tsx'
+import { useToast } from '../feedback.tsx'
 import { Button, Card, Money, MoneyInput, Screen, TextInput } from '../ui.tsx'
 
 /**
@@ -33,6 +35,7 @@ export function OrderEntry({
   onDone(orders: DraftOrder[]): void
 }): ReactNode {
   const { t } = useApp()
+  const toast = useToast()
   const [orders, setOrders] = useState<DraftOrder[]>([...initialOrders])
   const [defaultFee, setDefaultFee] = useState('5000')
 
@@ -47,6 +50,38 @@ export function OrderEntry({
       ...prev,
       { localId: crypto.randomUUID(), providerOrderNo: '', payMode: 'cash', feeText: defaultFee },
     ])
+
+  // SRS D-1: read the fee list off a «Recent orders» screenshot and append the rows pre-filled. The
+  // screen has no order-id or pay-mode, so the number is auto-keyed from date+time (globally unique,
+  // editable) and the pay-mode defaults to cash for the driver to set. He then curates to this shift.
+  const fileRef = useRef<HTMLInputElement | null>(null)
+  const [scanning, setScanning] = useState(false)
+  const scanOrders = async (file: File): Promise<void> => {
+    setScanning(true)
+    try {
+      const { readOrders } = await import('../ocr.ts')
+      const r = await readOrders(file)
+      if (!r.ok || r.reading.orders.length === 0) {
+        toast.error(t.orders.scanNone)
+        return
+      }
+      setOrders((prev) => [
+        ...prev,
+        ...r.reading.orders.map((s: OcrOrder) => ({
+          localId: crypto.randomUUID(),
+          providerOrderNo: orderKeyFor(s),
+          payMode: 'cash' as PayMode,
+          feeText: s.fee,
+          feeOcrText: s.fee,
+        })),
+      ])
+      toast.success(t.orders.scanned.replace('{n}', String(r.reading.orders.length)))
+    } catch {
+      toast.error(t.common.actionFailed)
+    } finally {
+      setScanning(false)
+    }
+  }
 
   const update = (localId: string, patch: Partial<DraftOrder>): void =>
     setOrders((prev) => prev.map((o) => (o.localId === localId ? { ...o, ...patch } : o)))
@@ -83,10 +118,25 @@ export function OrderEntry({
         </div>
       }
     >
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm text-slate-500">{t.orders.fee}</span>
         <MoneyInput value={defaultFee} onChange={(e) => setDefaultFee(e.target.value)} className="w-28" />
-        <Button variant="ghost" onClick={addRow} className="ms-auto">
+        {/* SRS D-1: scan «Recent orders» from the gallery to pre-fill the fee rows. */}
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0]
+            e.target.value = '' // let the same file be re-picked
+            if (file) void scanOrders(file)
+          }}
+        />
+        <Button variant="ghost" className="ms-auto" disabled={scanning} onClick={() => fileRef.current?.click()}>
+          {scanning ? t.common.loading : t.orders.scanOrders}
+        </Button>
+        <Button variant="ghost" onClick={addRow}>
           + {t.orders.addRow}
         </Button>
       </div>
@@ -136,4 +186,11 @@ export function OrderEntry({
       ) : null}
     </Screen>
   )
+}
+
+/** A globally-unique, editable order key from the order's day + time, e.g. «YAL-20260727-2346». */
+function orderKeyFor(s: OcrOrder): string {
+  const day = (s.dateIso ?? '').replace(/-/g, '')
+  const time = s.time.replace(':', '')
+  return `YAL-${day}-${time}`
 }

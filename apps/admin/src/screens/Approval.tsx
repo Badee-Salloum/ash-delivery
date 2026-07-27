@@ -273,9 +273,16 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           {review.orders.map((o, i) => (
             <tr key={o.providerOrderNo}>
               <td className="px-3 py-1 text-slate-400">{i + 1}</td>
-              <td className="px-3 py-1 num">{o.providerOrderNo}</td>
+              <td className="px-3 py-1 num">
+                {o.providerOrderNo}
+                {o.source === 'ocr' ? <span className="ms-1.5 align-middle"><Badge tone="slate">OCR</Badge></span> : null}
+              </td>
               <td className="px-3 py-1">{t.orders.payModes[o.payMode as keyof typeof t.orders.payModes]}</td>
-              <td className="px-3 py-1"><Money value={o.fee} /></td>
+              <td className="px-3 py-1">
+                <Money value={o.fee} />
+                {/* SRS D-3: a fee the driver changed from what OCR read (money strings compare exact). */}
+                <OcrDeltaLines deltas={scalarDelta(t.orders.fee, o.feeOcr ?? null, o.fee)} />
+              </td>
             </tr>
           ))}
         </Table>

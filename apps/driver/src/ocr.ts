@@ -453,6 +453,84 @@ export function parseWallet(text: string): string | null {
   return cleaned.replace(/[^0-9]/g, '')
 }
 
+// ── The Yallago «Recent orders» screenshot (SRS D-1) ────────────────────────────────────────
+
+export interface OcrOrder {
+  /** The day the order sits under (from a «Monday, 27 July» header), or null if none was read. */
+  dateIso: string | null
+  /** «HH:MM». */
+  time: string
+  /** The delivery fee as a money decimal string (BR1's number). */
+  fee: string
+  /** The dropoff area, best-effort — often absent or a GPS pair. */
+  zone: string | null
+}
+
+const ORDERS_TIMEOUT_MS = 20_000
+const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december']
+
+/** «Monday, 27 July» → «2026-07-27» using the supplied year (the app has a clock; the parser stays pure). */
+function orderDateHeader(line: string, year: number): string | null {
+  const m = line.match(/(\d{1,2})\s+([A-Za-z]{3,})/)
+  if (!m) return null
+  const day = Number(m[1])
+  const month = MONTHS.indexOf(m[2]!.toLowerCase())
+  if (month === -1 || day < 1 || day > 31) return null
+  return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+/**
+ * The order list from a «Recent orders» screenshot: per order the time, the delivery fee (BR1's
+ * number) and the day it belongs to. The screen has no order-id and no pay-mode, so the driver
+ * supplies those; this only pre-fills the fees. Anchored on a `NNN SYP` amount with the time on the
+ * same row (OCR keeps them together — they share a y). Refuses to invent: a row with no readable
+ * fee is dropped.
+ */
+export function parseOrders(text: string, year: number): OcrOrder[] {
+  const out: OcrOrder[] = []
+  let dateIso: string | null = null
+  let pendingTime: string | null = null
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (line === '') continue
+    const dh = orderDateHeader(line, year)
+    if (dh) {
+      dateIso = dh
+      continue
+    }
+    const timeM = line.match(/([0-2]?\d):([0-5]\d)/)
+    const time = timeM ? `${timeM[1]!.padStart(2, '0')}:${timeM[2]}` : null
+    const feeM = line.match(/(\d[\d.,،٬٫]*)\s*SYP/i)
+    const fee = feeM ? parseWallet(feeM[1]!) : null
+    if (fee) {
+      out.push({ dateIso, time: time ?? pendingTime ?? '', fee, zone: null })
+      pendingTime = null
+    } else if (time) {
+      // Time landed on its own line; hold it for the next fee.
+      pendingTime = time
+    }
+  }
+  return out
+}
+
+/** Read the whole order list off a «Recent orders» screenshot (dark text on white). */
+export async function readOrders(image: Blob | Uint8Array, timeoutMs = ORDERS_TIMEOUT_MS): Promise<OcrOutcome<{ orders: OcrOrder[] }>> {
+  const started = now()
+  let text = ''
+  try {
+    const prepared = await prepareForOcr(toBlob(image))
+    // No whitelist (Arabic addresses, «SYP», colons, digits all matter); a list is a uniform block.
+    const result = await recognize(prepared, { whitelist: '', psm: 6 }, timeoutMs)
+    text = result.text
+    const orders = parseOrders(text, new Date().getFullYear())
+    if (orders.length === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text }
+    return { ok: true, reading: { orders }, fieldsFound: orders.length, ms: now() - started, text }
+  } catch (err) {
+    const reason: OcrFailure = err instanceof Error && err.message === 'ocr timeout' ? 'timeout' : 'unavailable'
+    return { ok: false, reason, ms: now() - started, text }
+  }
+}
+
 // ── The BMS app screenshot ────────────────────────────────────────────────────────────────
 
 /** One field the reader knows how to find, and how to turn what it read into what we store. */

@@ -227,6 +227,9 @@ export const ar = {
     requestManual: 'طلب إضافة طلب',
     requestManualHint: 'نسيت طلباً؟ اطلب من المدير إضافته.',
     requestSent: 'أُرسل الطلب إلى الفرع',
+    scanOrders: 'مسح الطلبات',
+    scanned: 'تمت إضافة {n} طلباً — راجِعها واحذف ما ليس من نوبتك',
+    scanNone: 'لم تُقرأ أي طلبات',
     count: 'عدد الطلبات',
     payModes: { cash: 'كاش', electronic: 'إلكتروني', free: 'مجاني' },
     problems: {

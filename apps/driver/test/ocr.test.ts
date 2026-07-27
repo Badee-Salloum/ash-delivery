@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { parseMinor } from '@ash/domain'
-import { type OcrLine, parseBms, parseReading, parseWallet, profileById } from '../src/ocr.ts'
+import { type OcrLine, parseBms, parseOrders, parseReading, parseWallet, profileById } from '../src/ocr.ts'
 
 /**
  * The BMS parser, against text shaped like what Tesseract actually returns for the client's two
@@ -469,5 +469,65 @@ describe('the Yallago wallet balance (SRS D-2)', () => {
   it('refuses to invent when there is no number', () => {
     expect(parseWallet('SYP')).toBeNull()
     expect(parseWallet('المحفظة')).toBeNull()
+  })
+})
+
+/**
+ * The Yallago «Recent orders» list (SRS D-1), transcribed from the owner's two real screenshots.
+ * The parser anchors on a `NNN SYP` amount with the time on the same row and groups by the
+ * «Monday, 27 July» headers. It reads the FEE (BR1's number); there is no order-id or pay-mode on
+ * this screen, so those are the driver's to supply.
+ */
+const RECENT_1 = `
+Recent orders
+Monday, 27 July
+23:46          335 SYP
+A مأكولات الشام - شارع بغداد, موقف السادات
+B جسر النحاس
+23:03          205 SYP
+A تشيكستر, الصالحية
+B (33.4973497958, 36.2750883357)
+21:35          130 SYP
+A مطبخ بيت الكل, القصور
+B شارع بغداد
+21:05          360 SYP
+A عصير أورانج, القصور
+B دخلة مكتب مهند العقاري entrance
+`
+
+const RECENT_2 = `
+Recent orders
+Tuesday, 28 July
+01:47          175 SYP
+A الهجرة و الجوازات
+B شارع بغداد
+00:38          155 SYP
+A امية, الشعلان
+B إبراهيم هنانو
+Monday, 27 July
+23:46          335 SYP
+A مأكولات الشام
+B جسر النحاس
+`
+
+describe('the Yallago «Recent orders» list (SRS D-1)', () => {
+  it('reads the fee list, the times and the day from the first screenshot', () => {
+    const orders = parseOrders(RECENT_1, 2026)
+    expect(orders.map((o) => o.fee)).toEqual(['335', '205', '130', '360'])
+    expect(orders[0]).toMatchObject({ time: '23:46', fee: '335', dateIso: '2026-07-27' })
+    expect(orders.every((o) => o.dateIso === '2026-07-27')).toBe(true)
+  })
+
+  it('tracks the day header switching mid-list', () => {
+    const orders = parseOrders(RECENT_2, 2026)
+    expect(orders.map((o) => o.fee)).toEqual(['175', '155', '335'])
+    expect(orders[0]!.dateIso).toBe('2026-07-28')
+    expect(orders[2]!.dateIso).toBe('2026-07-27') // after the «Monday, 27 July» header
+  })
+
+  it('drops a row with no readable fee and refuses to invent from nothing', () => {
+    expect(parseOrders('Recent orders\nno amounts here at all', 2026)).toEqual([])
+    // a stray time with no fee produces no order
+    expect(parseOrders('12:30 just a time, no SYP', 2026)).toEqual([])
   })
 })

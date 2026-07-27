@@ -265,6 +265,10 @@ export interface ShiftOrderRecord {
   fee: Minor
   zone: string | null
   driverConfirmed: boolean
+  /** SRS D-1: whether the fee came from OCR of «Recent orders» or was typed. */
+  source: 'manual' | 'ocr'
+  /** SRS D-3: the pre-correction OCR fee, so a silently-lowered fee is visible. null = no OCR. */
+  feeOcr: Minor | null
 }
 
 export interface JournalEntryRecord {

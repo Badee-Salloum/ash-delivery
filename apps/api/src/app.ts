@@ -632,6 +632,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           payMode: o.payMode,
           fee: serializeMoney(o.fee),
           zone: o.zone,
+          // SRS D-1/D-3: whether the fee came from OCR, and what OCR read (for the manager's delta).
+          source: o.source,
+          feeOcr: o.feeOcr === null ? null : serializeMoney(o.feeOcr),
         })),
         media: slots.map((s) => ({ package: s.package, slot: s.slot, mediaId: s.mediaId })),
       },

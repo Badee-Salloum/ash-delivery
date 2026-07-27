@@ -253,9 +253,19 @@ export class PgOrderRepo implements OrderRepo {
   async create(order: ShiftOrderRecord): Promise<void> {
     try {
       await this.pool.query(
-        `INSERT INTO shift_orders (id, shift_id, provider_order_no, pay_mode, fee_minor, zone, driver_confirmed)
-         VALUES ($1, $2, $3, $4::pay_mode, $5, $6, $7)`,
-        [order.id, order.shiftId, order.providerOrderNo, order.payMode, order.fee.toString(), order.zone, order.driverConfirmed],
+        `INSERT INTO shift_orders (id, shift_id, provider_order_no, pay_mode, fee_minor, zone, driver_confirmed, source, fee_ocr_minor)
+         VALUES ($1, $2, $3, $4::pay_mode, $5, $6, $7, $8, $9)`,
+        [
+          order.id,
+          order.shiftId,
+          order.providerOrderNo,
+          order.payMode,
+          order.fee.toString(),
+          order.zone,
+          order.driverConfirmed,
+          order.source,
+          order.feeOcr?.toString() ?? null,
+        ],
       )
     } catch (err) {
       if (isPgError(err, PG.UNIQUE_VIOLATION)) {
@@ -269,14 +279,14 @@ export class PgOrderRepo implements OrderRepo {
   }
   async listByShift(shiftId: string): Promise<ShiftOrderRecord[]> {
     const { rows } = await this.pool.query<Record<string, unknown>>(
-      'SELECT id, shift_id, provider_order_no, pay_mode, fee_minor::text AS fee, zone, driver_confirmed FROM shift_orders WHERE shift_id = $1 ORDER BY provider_order_no',
+      'SELECT id, shift_id, provider_order_no, pay_mode, fee_minor::text AS fee, zone, driver_confirmed, source, fee_ocr_minor::text AS fee_ocr FROM shift_orders WHERE shift_id = $1 ORDER BY provider_order_no',
       [shiftId],
     )
     return rows.map(toOrder)
   }
   async findByProviderNo(providerOrderNo: string): Promise<ShiftOrderRecord | null> {
     const { rows } = await this.pool.query<Record<string, unknown>>(
-      'SELECT id, shift_id, provider_order_no, pay_mode, fee_minor::text AS fee, zone, driver_confirmed FROM shift_orders WHERE provider_order_no = $1',
+      'SELECT id, shift_id, provider_order_no, pay_mode, fee_minor::text AS fee, zone, driver_confirmed, source, fee_ocr_minor::text AS fee_ocr FROM shift_orders WHERE provider_order_no = $1',
       [providerOrderNo],
     )
     return rows[0] ? toOrder(rows[0]) : null
@@ -294,6 +304,8 @@ const toOrder = (r: Record<string, unknown>): ShiftOrderRecord => ({
   fee: minor(BigInt(String(r.fee))),
   zone: (r.zone as string | null) ?? null,
   driverConfirmed: Boolean(r.driver_confirmed),
+  source: (r.source as ShiftOrderRecord['source'] | null) ?? 'manual',
+  feeOcr: r.fee_ocr === null || r.fee_ocr === undefined ? null : minor(BigInt(String(r.fee_ocr))),
 })
 
 export class PgFxRepo implements FxRepo {

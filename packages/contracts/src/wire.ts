@@ -62,6 +62,10 @@ export const addOrderRequest = z.object({
   payMode: payModeSchema,
   fee: moneySchema,
   zone: z.string().max(64).nullable().default(null),
+  // SRS D-1/D-3: whether the fee came from the «Recent orders» OCR, and what it read. `feeOcr` is
+  // money, so it crosses as a decimal string via `moneySchema` — never a JSON number.
+  source: z.enum(['manual', 'ocr']).default('manual'),
+  feeOcr: moneySchema.nullable().default(null),
 })
 
 export const endPackageRequest = z.object({

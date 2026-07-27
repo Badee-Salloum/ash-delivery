@@ -226,6 +226,9 @@ export const en: Catalog = {
     requestManual: 'Request an order',
     requestManualHint: 'Forgot an order? Ask the manager to add it.',
     requestSent: 'Request sent to the branch',
+    scanOrders: 'Scan orders',
+    scanned: '{n} orders added — review them and drop any not in this shift',
+    scanNone: 'No orders could be read',
     count: 'Order count',
     payModes: { cash: 'Cash', electronic: 'Electronic', free: 'Free' },
     problems: {

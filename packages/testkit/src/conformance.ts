@@ -157,6 +157,8 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
             fee: syp(5_000),
             zone: null,
             driverConfirmed: true,
+            source: 'manual' as const,
+            feeOcr: null,
           }
           await deps.orders.create(order)
           await expect(deps.orders.create({ ...order, id: 'o-2' })).rejects.toThrow()

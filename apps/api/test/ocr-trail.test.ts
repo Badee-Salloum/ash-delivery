@@ -115,3 +115,40 @@ describe('OCR D-3 trail — close wallet balance (readWallet)', () => {
     expect(end.walletDeclaredOcr).toBeNull()
   })
 })
+
+describe('OCR D-3 trail — order fee (readOrders)', () => {
+  it('marks an OCR-scanned order and carries the fee baseline, distinct from the confirmed fee', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await toOpen(driver, manager)
+
+    // OCR read 335 off «Recent orders»; the driver confirmed 300 — a real edit on a money field.
+    const res = await post(driver, `/shifts/${id}/orders`, {
+      providerOrderNo: 'YAL-20260727-2346',
+      payMode: 'cash',
+      fee: sypStr(300),
+      zone: null,
+      source: 'ocr',
+      feeOcr: sypStr(335),
+    })
+    expect(res.statusCode, res.body).toBe(201)
+
+    const orders = (await get(manager, `/shifts/${id}/review`)).json().orders as Array<{ providerOrderNo: string; source: string; fee: string; feeOcr: string | null }>
+    const o = orders.find((x) => x.providerOrderNo === 'YAL-20260727-2346')!
+    expect(o.source).toBe('ocr')
+    expect(o.fee).toBe('300.00')
+    expect(o.feeOcr).toBe('335.00') // money over the wire is a decimal string
+  })
+
+  it('a typed order defaults to source=manual with no fee baseline', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await toOpen(driver, manager)
+    await post(driver, `/shifts/${id}/orders`, { providerOrderNo: 'TYPED-1', payMode: 'cash', fee: sypStr(5_000), zone: null })
+
+    const orders = (await get(manager, `/shifts/${id}/review`)).json().orders as Array<{ providerOrderNo: string; source: string; feeOcr: string | null }>
+    const o = orders.find((x) => x.providerOrderNo === 'TYPED-1')!
+    expect(o.source).toBe('manual')
+    expect(o.feeOcr).toBeNull()
+  })
+})
