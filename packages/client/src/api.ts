@@ -109,6 +109,28 @@ export interface TierSimResult {
   companyTotalDelta: string
 }
 
+// ── Expenses (SRS G) ────────────────────────────────────────────────────────────────────────
+export interface ExpenseCategoryView {
+  id: string
+  code: string
+  nameAr: string
+  active: boolean
+}
+export interface ExpenseView {
+  id: string
+  branchId: string
+  categoryId: string
+  costCenterKind: 'vehicle' | 'branch' | 'general'
+  vehicleId: string | null
+  /** Decimal string. */
+  amount: string
+  businessDate: string
+  description: string
+  receiptMediaId: string | null
+  journalEntryId: number | null
+  createdBy: string
+}
+
 /**
  * One pack's BMS reading. Scaled INTEGERS, never floats — millivolts, deci-amp-hours,
  * deci-Celsius — so 83.37 V is 83_370 and 50.0 Ah is 500.
@@ -471,6 +493,33 @@ export class ApiClient {
   /** What-if over past approved shifts. Sends the selected branch (a sysadmin has none on his session). */
   simulateTier(body: { basis?: 'orders' | 'revenue'; mode?: 'whole' | 'marginal'; bands: TierBand[]; from: string; to: string }) {
     return this.post<TierSimResult>('/tier-rules/simulate', { ...body, ...(this.branchId ? { branchId: this.branchId } : {}) })
+  }
+
+  // ── Expenses (SRS G) — create is expense.write (BM+GM); categories are settings.write (sysadmin) ──
+  expenseCategories() {
+    return this.get<{ categories: ExpenseCategoryView[] }>('/expense-categories')
+  }
+  createExpenseCategory(body: { code: string; nameAr: string }) {
+    return this.post<ExpenseCategoryView>('/expense-categories', body)
+  }
+  expenses(from?: string, to?: string) {
+    const q = [from && `from=${from}`, to && `to=${to}`].filter(Boolean).join('&')
+    return this.get<{ from: string; to: string; expenses: ExpenseView[]; total: string }>(`/expenses${q ? `?${q}` : ''}`)
+  }
+  expensesByCostCenter(from?: string, to?: string) {
+    const q = [from && `from=${from}`, to && `to=${to}`].filter(Boolean).join('&')
+    return this.get<{ totals: Array<{ costCenterKind: string; vehicleId: string | null; total: string }> }>(`/expenses/by-cost-center${q ? `?${q}` : ''}`)
+  }
+  createExpense(body: {
+    categoryId: string
+    costCenterKind: 'vehicle' | 'branch' | 'general'
+    vehicleId?: string | null
+    amount: string
+    description: string
+    businessDate?: string
+    receiptMediaId?: string | null
+  }) {
+    return this.post<ExpenseView>('/expenses', { ...body, ...(this.branchId ? { branchId: this.branchId } : {}) })
   }
 
   // ── Branch treasury (cash box + wallet) ─────────────────────────────────────────────────────

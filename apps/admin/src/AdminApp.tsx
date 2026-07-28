@@ -11,12 +11,13 @@ import { Fleet } from './screens/Fleet.tsx'
 import { FleetConfig } from './screens/FleetConfig.tsx'
 import { Tiers } from './screens/Tiers.tsx'
 import { Treasury } from './screens/Treasury.tsx'
+import { Expenses } from './screens/Expenses.tsx'
 import { Accounts } from './screens/Accounts.tsx'
 import { Audit } from './screens/Audit.tsx'
 import { Permissions } from './screens/Permissions.tsx'
 import { Settings } from './screens/Settings.tsx'
 
-const SECTIONS = ['dashboard', 'queue', 'liveShifts', 'fleet', 'fleetConfig', 'tiers', 'treasury', 'accounts', 'audit', 'permissions', 'settings'] as const
+const SECTIONS = ['dashboard', 'queue', 'liveShifts', 'fleet', 'fleetConfig', 'tiers', 'treasury', 'expenses', 'accounts', 'audit', 'permissions', 'settings'] as const
 type Section = (typeof SECTIONS)[number]
 
 /** The view encoded in the URL hash: a section, or `shift:<id>` for the review overlay. */
@@ -116,6 +117,7 @@ export function AdminApp(): ReactNode {
     { key: 'liveShifts', label: t.liveShifts.title },
     { key: 'fleet', label: `${t.fleet.drivers} / ${t.fleet.vehicles}` },
     { key: 'treasury', label: t.treasury.branchTreasury },
+    { key: 'expenses', label: t.expenses.title },
     ...(canManageUsers ? [{ key: 'accounts' as const, label: t.accounts.title }] : []),
     // audit.view is granted to the sysadmin and the GM — the same two roles.
     ...(canManageUsers ? [{ key: 'audit' as const, label: t.audit.title }] : []),
@@ -244,6 +246,8 @@ export function AdminApp(): ReactNode {
           <FleetConfig />
         ) : section === 'tiers' ? (
           <Tiers />
+        ) : section === 'expenses' ? (
+          <Expenses />
         ) : section === 'accounts' ? (
           <Accounts />
         ) : section === 'audit' ? (
