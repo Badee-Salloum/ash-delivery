@@ -561,6 +561,12 @@ export const en: Catalog = {
     amount: 'Amount',
   },
 
+  gpsLive: {
+    title: 'Live map',
+    drivers: 'Drivers',
+    none: 'No drivers are reporting a location right now',
+  },
+
   week: {
     close: 'Weekly close',
     closeSunday: 'Sunday close',

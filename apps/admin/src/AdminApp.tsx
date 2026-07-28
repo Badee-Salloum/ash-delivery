@@ -6,6 +6,7 @@ import { Login } from './screens/Login.tsx'
 import { Dashboard } from './screens/Dashboard.tsx'
 import { Queue } from './screens/Queue.tsx'
 import { LiveShifts } from './screens/LiveShifts.tsx'
+import { GpsLive } from './screens/GpsLive.tsx'
 import { Approval } from './screens/Approval.tsx'
 import { Fleet } from './screens/Fleet.tsx'
 import { FleetConfig } from './screens/FleetConfig.tsx'
@@ -17,7 +18,7 @@ import { Audit } from './screens/Audit.tsx'
 import { Permissions } from './screens/Permissions.tsx'
 import { Settings } from './screens/Settings.tsx'
 
-const SECTIONS = ['dashboard', 'queue', 'liveShifts', 'fleet', 'fleetConfig', 'tiers', 'treasury', 'expenses', 'accounts', 'audit', 'permissions', 'settings'] as const
+const SECTIONS = ['dashboard', 'queue', 'liveShifts', 'gpsLive', 'fleet', 'fleetConfig', 'tiers', 'treasury', 'expenses', 'accounts', 'audit', 'permissions', 'settings'] as const
 type Section = (typeof SECTIONS)[number]
 
 /** The view encoded in the URL hash: a section, or `shift:<id>` for the review overlay. */
@@ -115,6 +116,7 @@ export function AdminApp(): ReactNode {
     { key: 'dashboard', label: t.dashboard.title },
     { key: 'queue', label: t.approval.queue, badge: queueUnread || undefined },
     { key: 'liveShifts', label: t.liveShifts.title },
+    { key: 'gpsLive', label: t.gpsLive.title },
     { key: 'fleet', label: `${t.fleet.drivers} / ${t.fleet.vehicles}` },
     { key: 'treasury', label: t.treasury.branchTreasury },
     { key: 'expenses', label: t.expenses.title },
@@ -240,6 +242,8 @@ export function AdminApp(): ReactNode {
           <Queue onOpen={setOpenShift} />
         ) : section === 'liveShifts' ? (
           <LiveShifts />
+        ) : section === 'gpsLive' ? (
+          <GpsLive />
         ) : section === 'fleet' ? (
           <Fleet />
         ) : section === 'fleetConfig' ? (

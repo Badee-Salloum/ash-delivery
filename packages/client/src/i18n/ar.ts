@@ -562,6 +562,12 @@ export const ar = {
     amount: 'المبلغ',
   },
 
+  gpsLive: {
+    title: 'الخريطة الحية',
+    drivers: 'السائقون',
+    none: 'لا سائق يبثّ موقعه الآن',
+  },
+
   week: {
     close: 'الإقفال الأسبوعي',
     closeSunday: 'إقفال الأحد',
