@@ -82,6 +82,33 @@ export interface VehicleEvent {
   notes: string | null
 }
 
+// ── Tier admin (SRS F) ──────────────────────────────────────────────────────────────────────
+export interface TierBand {
+  from: number
+  /** null = the top band, «and above». */
+  to: number | null
+  /** Driver share in basis points (4000 = 40%). */
+  driverBps: number
+}
+export interface TierRuleView {
+  id: number
+  basis: 'orders' | 'revenue'
+  mode: 'whole' | 'marginal'
+  vehicleTypeId: string | null
+  bands: TierBand[]
+  effectiveFrom: string
+  status: 'active' | 'superseded' | 'withdrawn'
+  createdBy: string
+  isDefault: false
+}
+export interface TierSimResult {
+  from: string
+  to: string
+  drivers: Array<{ driverId: string; orders: number; currentDriverShare: string; candidateDriverShare: string; driverDelta: string }>
+  driverTotalDelta: string
+  companyTotalDelta: string
+}
+
 /**
  * One pack's BMS reading. Scaled INTEGERS, never floats — millivolts, deci-amp-hours,
  * deci-Celsius — so 83.37 V is 83_370 and 50.0 Ah is 500.
@@ -429,6 +456,21 @@ export class ApiClient {
   /** Money fields are decimal strings ("50000.00"); only what is sent changes. */
   updateSettings(body: { receiptCeilingMinor?: string; kwhPriceMinor?: string }) {
     return this.put<{ updated: string[] }>('/settings', body)
+  }
+
+  // ── Tier admin (SRS F) — read is branch_data.view; publish/withdraw/simulate are sysadmin only ──
+  tierRules() {
+    return this.get<{ rules: TierRuleView[]; fallback: { bands: TierBand[]; basis: string; mode: string } }>('/tier-rules')
+  }
+  publishTier(body: { basis?: 'orders' | 'revenue'; mode?: 'whole' | 'marginal'; vehicleTypeId?: string | null; bands: TierBand[]; effectiveFrom: string }) {
+    return this.post<TierRuleView>('/tier-rules', body)
+  }
+  withdrawTier(id: number) {
+    return this.post<{ id: number; status: string }>(`/tier-rules/${id}/withdraw`)
+  }
+  /** What-if over past approved shifts. Sends the selected branch (a sysadmin has none on his session). */
+  simulateTier(body: { basis?: 'orders' | 'revenue'; mode?: 'whole' | 'marginal'; bands: TierBand[]; from: string; to: string }) {
+    return this.post<TierSimResult>('/tier-rules/simulate', { ...body, ...(this.branchId ? { branchId: this.branchId } : {}) })
   }
 
   // ── Branch treasury (cash box + wallet) ─────────────────────────────────────────────────────

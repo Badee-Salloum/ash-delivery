@@ -9,13 +9,14 @@ import { LiveShifts } from './screens/LiveShifts.tsx'
 import { Approval } from './screens/Approval.tsx'
 import { Fleet } from './screens/Fleet.tsx'
 import { FleetConfig } from './screens/FleetConfig.tsx'
+import { Tiers } from './screens/Tiers.tsx'
 import { Treasury } from './screens/Treasury.tsx'
 import { Accounts } from './screens/Accounts.tsx'
 import { Audit } from './screens/Audit.tsx'
 import { Permissions } from './screens/Permissions.tsx'
 import { Settings } from './screens/Settings.tsx'
 
-const SECTIONS = ['dashboard', 'queue', 'liveShifts', 'fleet', 'fleetConfig', 'treasury', 'accounts', 'audit', 'permissions', 'settings'] as const
+const SECTIONS = ['dashboard', 'queue', 'liveShifts', 'fleet', 'fleetConfig', 'tiers', 'treasury', 'accounts', 'audit', 'permissions', 'settings'] as const
 type Section = (typeof SECTIONS)[number]
 
 /** The view encoded in the URL hash: a section, or `shift:<id>` for the review overlay. */
@@ -122,6 +123,8 @@ export function AdminApp(): ReactNode {
     // The numbering scheme is settings.write — the system admin alone. Renumbering a type or a
     // branch restates printed vehicle numbers, so it does not belong beside day-to-day fleet work.
     ...(session.roleKey === 'system_admin' ? [{ key: 'fleetConfig' as const, label: t.fleet.numberingTitle }] : []),
+    // Tier tables are tier_rule.write — system admin only (س46, BR8), not even the GM.
+    ...(session.roleKey === 'system_admin' ? [{ key: 'tiers' as const, label: t.tiers.title }] : []),
     // FX rate + general settings are settings.write / fx_rate.write — system admin only.
     ...(session.roleKey === 'system_admin' ? [{ key: 'settings' as const, label: t.settings.title }] : []),
   ]
@@ -239,6 +242,8 @@ export function AdminApp(): ReactNode {
           <Fleet />
         ) : section === 'fleetConfig' ? (
           <FleetConfig />
+        ) : section === 'tiers' ? (
+          <Tiers />
         ) : section === 'accounts' ? (
           <Accounts />
         ) : section === 'audit' ? (
