@@ -1,5 +1,39 @@
 # PROGRESS
 
+## 2026-07-29 — upper-level override for a stuck shift (void + force-close) + a live-map fix
+
+**All suites green (306 API tests incl. 4 new money-critical override cases + a new live-map case),
+6 guards green, migration 0012 applied to Neon, API redeployed.** A driver can leave a shift open
+forever (bike breaks, phone lost). `shift.approve` holders (branch manager + GM + sysadmin) now get
+two escape hatches, and using them surfaced — and fixed — a live-map defect.
+
+**Void (→ `cancelled`).** Reverses the float + top-up via the return recipes and discards the shift's
+orders; for a shift that produced no real deliveries. Money nets to zero (driver + office funds back
+to 0), every posted entry still balances. New terminal `cancelled` state + `manager_force_cancel`
+action; migration 0012 adds the enum value.
+
+**Force-close (→ `approved`).** Settles like a normal close using `postingsForApproval` over the
+*computed* closing balances, then books any declared-vs-expected gap to a `shift_variance` cost
+centre the driver still owes. Leaving a figure blank accepts the expected close (no variance) — this
+is how an admin closes "without the needed data". A 10,000 cash shortfall books exactly 1,000,000
+minor to variance; verified.
+
+**UI.** Void + Force-close panels on «النوبات الجارية», gated `canApprove` (ar/en), force-close
+takes an optional cash / wallet / odometer plus a recorded reason.
+
+**Live-map fix (SRS K).** `/gps/live` returned the latest ping per driver with no shift-state filter,
+so a driver whose shift had ended lingered on the map forever (gps_pings is append-only) — voiding
+the real stranded shift left him stuck on the map. Now filtered to drivers whose latest ping belongs
+to their **current live shift** (new `ShiftRepo.listLiveForBranch`); a ping from an already-ended
+shift is dropped even if the driver has opened a fresh one that has not pinged yet.
+
+**See it in 2 minutes.** Admin → «النوبات الجارية» → on a stuck open shift press **إغلاق قسري**
+(force-close) or **إلغاء النوبة** (void); the row leaves the live set and, for void, its driver drops
+off «الخريطة الحية». (In this session a real stranded shift — driver1, business date 2026-07-28 —
+was voided through the deployed API; `/gps/live` went from one lingering pin to `[]`.)
+
+---
+
 ## 2026-07-28 (later) — a testable platform: the 3 missing Bundle-1 UIs + live GPS tracking
 
 **310 domain + 297 API + 63 driver + 21 client tests green, 6 guards green, migration 0011 applied
