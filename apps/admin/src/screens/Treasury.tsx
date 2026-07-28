@@ -1,7 +1,16 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
+import { formatMinor, minor, parseMinor } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
-import { Button, Card, Money, MoneyInput, Pending, Table } from '../ui.tsx'
+import { Button, Card, Field, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
+
+/** The branch-level funds a manual entry can move (the driver/cost-centre ones need an id suffix). */
+const MANUAL_FUNDS = ['office_cash', 'office_wallet', 'yalago_share', 'company_revenue', 'yalago_income', 'fee_earned'] as const
+interface EntryLine {
+  fundCode: string
+  side: 'D' | 'C'
+  amount: string
+}
 
 /**
  * Treasury (SRS E-5, E-6): the daily cash count and the Sunday close. Both are branch-manager +
@@ -19,6 +28,18 @@ export function Treasury(): ReactNode {
 
   const [sheetError, setSheetError] = useState<string | null>(null)
   const [balanceError, setBalanceError] = useState<string | null>(null)
+
+  // ── Manual entry + reversal (E-3) ────────────────────────────────────────────────────────
+  const [reason, setReason] = useState('')
+  const [lines, setLines] = useState<EntryLine[]>([
+    { fundCode: 'office_cash', side: 'D', amount: '' },
+    { fundCode: 'office_wallet', side: 'C', amount: '' },
+  ])
+  const [manualMsg, setManualMsg] = useState<string | null>(null)
+  const [manualError, setManualError] = useState<string | null>(null)
+  const [revId, setRevId] = useState('')
+  const [revReason, setRevReason] = useState('')
+  const [revMsg, setRevMsg] = useState<string | null>(null)
 
   // Only the branch manager + GM may put money in — `journal.manual.write` in the §3 matrix, and
   // product-owner decision 5. The system admin can SEE the money and not move it; that is
@@ -59,6 +80,53 @@ export function Treasury(): ReactNode {
       setDepositMsg(t.treasury.deposited)
     } catch (err) {
       setDepositMsg((err as { error?: string }).error ?? 'error')
+    }
+  }
+
+  /** Sum one side of the entry in minor units (string math, never Number() on money). */
+  const sideTotal = (side: 'D' | 'C'): string => {
+    let acc = 0n
+    for (const l of lines) {
+      if (l.side !== side || l.amount.trim() === '') continue
+      try {
+        acc += parseMinor(l.amount)
+      } catch {
+        /* a half-typed amount — skip it in the running total */
+      }
+    }
+    return formatMinor(minor(acc))
+  }
+  const entryBalanced = sideTotal('D') === sideTotal('C') && lines.some((l) => l.amount.trim() !== '') && reason.trim() !== ''
+  const setLine = (i: number, patch: Partial<EntryLine>): void => setLines((prev) => prev.map((l, j) => (j === i ? { ...l, ...patch } : l)))
+  const addLine = (): void => setLines((prev) => [...prev, { fundCode: 'office_cash', side: 'D', amount: '' }])
+  const removeLine = (i: number): void => setLines((prev) => prev.filter((_, j) => j !== i))
+
+  async function postManual(): Promise<void> {
+    setManualMsg(null)
+    setManualError(null)
+    try {
+      await api.manualEntry({ reason, lines: lines.filter((l) => l.amount.trim() !== '') })
+      setManualMsg(t.treasury.posted)
+      setReason('')
+      setLines([
+        { fundCode: 'office_cash', side: 'D', amount: '' },
+        { fundCode: 'office_wallet', side: 'C', amount: '' },
+      ])
+      load()
+    } catch (err) {
+      setManualError((err as { error?: string }).error ?? 'error')
+    }
+  }
+  async function doReverse(): Promise<void> {
+    setRevMsg(null)
+    try {
+      await api.reverseEntry(Number(revId), revReason)
+      setRevMsg(t.treasury.reversed)
+      setRevId('')
+      setRevReason('')
+      load()
+    } catch (err) {
+      setRevMsg(explainError((err as { error?: string }).error ?? 'error', t))
     }
   }
 
@@ -191,6 +259,75 @@ export function Treasury(): ReactNode {
           <p className="text-sm text-slate-400">{t.week.closeSunday} — {t.common.no}</p>
         )}
       </Card>
+
+      {/* E-3: controlled manual entry + the BR7 visible dated reversal (branch manager + GM). */}
+      {canDeposit ? (
+        <Card title={t.treasury.manualEntry} className="lg:col-span-2">
+          <div className="flex flex-col gap-3">
+            <Field label={t.treasury.reason}>
+              <TextInput value={reason} onChange={(e) => setReason(e.target.value)} />
+            </Field>
+            <Table head={[t.treasury.fund, t.treasury.side, t.treasury.amount, '']}>
+              {lines.map((l, i) => (
+                <tr key={i}>
+                  <td className="px-2 py-1">
+                    <Select value={l.fundCode} onChange={(e) => setLine(i, { fundCode: e.target.value })} aria-label={t.treasury.fund}>
+                      {MANUAL_FUNDS.map((f) => (
+                        <option key={f} value={f}>
+                          {t.treasury.fundCodes[f as keyof typeof t.treasury.fundCodes] ?? f}
+                        </option>
+                      ))}
+                    </Select>
+                  </td>
+                  <td className="px-2 py-1">
+                    <Select value={l.side} onChange={(e) => setLine(i, { side: e.target.value as 'D' | 'C' })} aria-label={t.treasury.side}>
+                      <option value="D">{t.treasury.debit}</option>
+                      <option value="C">{t.treasury.credit}</option>
+                    </Select>
+                  </td>
+                  <td className="px-2 py-1">
+                    <MoneyInput value={l.amount} onChange={(e) => setLine(i, { amount: e.target.value })} className="w-32" aria-label={t.treasury.amount} />
+                  </td>
+                  <td className="px-2 py-1">
+                    {lines.length > 2 ? (
+                      <Button variant="ghost" onClick={() => removeLine(i)} aria-label={t.common.remove}>
+                        ×
+                      </Button>
+                    ) : null}
+                  </td>
+                </tr>
+              ))}
+            </Table>
+            <div className="flex items-center gap-3">
+              <Button variant="ghost" onClick={addLine}>
+                + {t.treasury.addLine}
+              </Button>
+              <span className="num ms-auto text-xs text-slate-500" dir="ltr">
+                D <Money value={sideTotal('D')} /> · C <Money value={sideTotal('C')} />
+                {entryBalanced ? '' : ` · ${t.treasury.unbalanced}`}
+              </span>
+            </div>
+            {manualError ? <p className="text-sm text-red-600">{explainError(manualError, t)}</p> : null}
+            {manualMsg ? <p className="text-sm font-medium text-emerald-700">{manualMsg}</p> : null}
+            <Button variant="primary" className="self-start" disabled={!entryBalanced} onClick={postManual}>
+              {t.treasury.post}
+            </Button>
+
+            <div className="mt-1 flex flex-wrap items-end gap-2 border-t border-slate-100 pt-3">
+              <Field label={t.treasury.entryId}>
+                <TextInput inputMode="numeric" value={revId} onChange={(e) => setRevId(e.target.value)} className="w-24" />
+              </Field>
+              <Field label={t.treasury.reason} className="min-w-48 flex-1">
+                <TextInput value={revReason} onChange={(e) => setRevReason(e.target.value)} />
+              </Field>
+              <Button variant="danger" disabled={revId.trim() === '' || revReason.trim() === ''} onClick={doReverse}>
+                {t.treasury.reverse}
+              </Button>
+            </div>
+            {revMsg ? <p className="text-sm text-slate-600">{revMsg}</p> : null}
+          </div>
+        </Card>
+      ) : null}
     </div>
   )
 }

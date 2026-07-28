@@ -537,6 +537,18 @@ export class ApiClient {
     })
   }
 
+  // ── Manual journal entry + BR7 correction (SRS E-3) — branch manager + GM ───────────────────
+  manualEntry(body: { reason: string; lines: Array<{ fundCode: string; side: 'D' | 'C'; amount: string }>; businessDate?: string; evidenceMediaId?: string | null }) {
+    return this.post<{ entryId: number | null; businessDate: string; reason: string }>('/journal/manual', { ...body, ...(this.branchId ? { branchId: this.branchId } : {}) })
+  }
+  /** BR7: a visible dated reversal of a posted entry (a locked week is never edited in place). */
+  reverseEntry(entryId: number, reason: string) {
+    return this.post<{ reversalEntryId: number; reversalOf: number; postingDate: string }>(`/journal/${entryId}/reverse`, {
+      reason,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+
   // ── Notifications ─────────────────────────────────────────────────────────────────────────
   notifications() {
     return this.get<{ unreadCount: number; notifications: Array<{ id: number; kind: string; payload: Record<string, unknown>; read: boolean; createdAt: string }> }>(
