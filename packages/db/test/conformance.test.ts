@@ -16,6 +16,7 @@ import {
   PgAttendanceRepo,
   PgBatteryReadingRepo,
   PgShiftDecisionRepo,
+  PgGpsPingRepo,
   PgShiftRepo,
   PgVehicleEventRepo,
   PgWeekLockRepo,
@@ -59,7 +60,7 @@ if (!DATABASE_URL) {
       // constraints on every run instead of a freshly-empty database.
       await pool.query(`
         TRUNCATE journal_lines, journal_entries, shift_orders, shift_media, media, float_tranches, expenses, expense_categories, settings, cash_counts, cash_count_lines, tier_rules, notifications,
-                 shift_battery_readings, batteries,
+                 shift_battery_readings, gps_pings, batteries,
                  shifts, funds, fx_days, week_locks, audit_log, sessions, drivers, vehicles,
                  vehicle_types, users, branches, governorates
         RESTART IDENTITY CASCADE
@@ -148,6 +149,7 @@ if (!DATABASE_URL) {
         vehicleEvents: new PgVehicleEventRepo(pool),
         attendance: new PgAttendanceRepo(pool),
         decisions: new PgShiftDecisionRepo(pool),
+        gps: new PgGpsPingRepo(pool),
       }
     },
   })

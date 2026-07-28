@@ -53,6 +53,7 @@ const AUDIT_EXEMPT = {
   cash_count_lines: 'sealed with a sha256 proof on the parent cash_count',
   driver_day_shares: 'a derived projection of audited journal entries',
   fx_rate_versions: 'append-only supersession history',
+  gps_pings: 'high-volume append-only telemetry (SRS K); auditing every ping would dwarf the audit log',
   audit_log: 'the audit log itself',
 }
 

@@ -113,6 +113,18 @@ export const addTrancheRequest = z.object({
   amount: moneySchema,
 })
 
+/**
+ * One live GPS fix from the driver's phone while a shift is open (SRS K). lat/lng/accuracy are plain
+ * numbers — coordinates, not money — so `z.number()` is correct here.
+ */
+export const gpsPingRequest = z.object({
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+  accuracyM: z.number().min(0).nullable().default(null),
+  /** The phone's own clock in ms; the server stamps its own receive time. */
+  capturedAtMs: z.number().int(),
+})
+
 // ── Fleet (SRS B) ─────────────────────────────────────────────────────────────────────────
 
 /** A driver's profile fields (B-1). `nationalId` is plaintext in transit (HTTPS); stored encrypted. */

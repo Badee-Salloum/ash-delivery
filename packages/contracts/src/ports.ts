@@ -739,6 +739,29 @@ export interface ShiftDecisionRepo {
   listByShift(shiftId: string): Promise<ShiftDecisionRecord[]>
 }
 
+/** A single GPS fix from the driver's phone while a shift is open (SRS K). Telemetry, not money. */
+export interface GpsPingRecord {
+  id: number
+  shiftId: string
+  driverId: string
+  branchId: string
+  lat: number
+  lng: number
+  accuracyM: number | null
+  /** The phone's own clock (ms). */
+  capturedAtMs: number
+  /** Server receive time (ms), stamped by the clock — a skewed phone can't rewrite it. */
+  receivedAtMs: number
+}
+
+export interface GpsPingRepo {
+  append(ping: Omit<GpsPingRecord, 'id'>): Promise<void>
+  /** The most recent fix per driver in the branch — what the live map draws. */
+  latestPerDriverForBranch(branchId: string): Promise<GpsPingRecord[]>
+  /** A shift's whole trail, oldest first (for the route view). */
+  listForShift(shiftId: string): Promise<GpsPingRecord[]>
+}
+
 /** Everything the API is handed at construction. One object, so wiring is explicit. */
 export interface Deps {
   clock: Clock
@@ -766,4 +789,5 @@ export interface Deps {
   vehicleEvents: VehicleEventRepo
   attendance: AttendanceRepo
   decisions: ShiftDecisionRepo
+  gps: GpsPingRepo
 }

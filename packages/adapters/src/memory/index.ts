@@ -28,6 +28,8 @@ import type {
   SessionRepo,
   ShiftDecisionRecord,
   ShiftDecisionRepo,
+  GpsPingRecord,
+  GpsPingRepo,
   ShiftOrderRecord,
   ShiftRecord,
   ShiftRepo,
@@ -713,6 +715,37 @@ export class MemoryShiftDecisionRepo implements ShiftDecisionRepo {
   }
 }
 
+/** Live GPS pings (SRS K): append-only telemetry; the live map reads the latest per driver. */
+export class MemoryGpsPingRepo implements GpsPingRepo {
+  readonly rows: GpsPingRecord[] = []
+  private nextId = 1
+
+  async append(ping: Omit<GpsPingRecord, 'id'>): Promise<void> {
+    this.rows.push({ ...ping, id: this.nextId++ })
+  }
+
+  async latestPerDriverForBranch(branchId: string): Promise<GpsPingRecord[]> {
+    const latest = new Map<string, GpsPingRecord>()
+    for (const r of this.rows) {
+      if (r.branchId !== branchId) continue
+      const seen = latest.get(r.driverId)
+      // Tie-break on id (insertion order) so a fixed clock still resolves the newest — the Pg repo
+      // does the same with `ORDER BY received_at DESC, id DESC`.
+      if (!seen || r.receivedAtMs > seen.receivedAtMs || (r.receivedAtMs === seen.receivedAtMs && r.id > seen.id)) {
+        latest.set(r.driverId, r)
+      }
+    }
+    return [...latest.values()].map((r) => structuredClone(r))
+  }
+
+  async listForShift(shiftId: string): Promise<GpsPingRecord[]> {
+    return this.rows
+      .filter((r) => r.shiftId === shiftId)
+      .sort((a, b) => a.receivedAtMs - b.receivedAtMs || a.id - b.id)
+      .map((r) => structuredClone(r))
+  }
+}
+
 /** Admin-staff attendance (SRS B-4 / س41): one row per user per day, last-seen bumped on repeat. */
 export class MemoryAttendanceRepo implements AttendanceRepo {
   readonly rows: AttendanceRecord[] = []
@@ -756,6 +789,7 @@ export interface MemoryDeps extends Deps {
   vehicleEvents: MemoryVehicleEventRepo
   attendance: MemoryAttendanceRepo
   decisions: MemoryShiftDecisionRepo
+  gps: MemoryGpsPingRepo
 }
 
 export function createMemoryDeps(nowMs: number): MemoryDeps {
@@ -787,5 +821,6 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     vehicleEvents: new MemoryVehicleEventRepo(),
     attendance: new MemoryAttendanceRepo(),
     decisions: new MemoryShiftDecisionRepo(),
+    gps: new MemoryGpsPingRepo(),
   }
 }

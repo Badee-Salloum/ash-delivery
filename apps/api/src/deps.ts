@@ -19,6 +19,7 @@ import {
   PgAttendanceRepo,
   PgBatteryReadingRepo,
   PgShiftDecisionRepo,
+  PgGpsPingRepo,
   PgShiftRepo,
   PgUserRepo,
   PgVehicleEventRepo,
@@ -115,6 +116,7 @@ export async function buildDeps(config: Config): Promise<BuiltDeps> {
       vehicleEvents: new PgVehicleEventRepo(pool),
       attendance: new PgAttendanceRepo(pool),
       decisions: new PgShiftDecisionRepo(pool),
+      gps: new PgGpsPingRepo(pool),
     },
     dispose: () => pool.end(),
   }

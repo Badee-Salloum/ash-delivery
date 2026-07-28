@@ -109,6 +109,16 @@ export interface TierSimResult {
   companyTotalDelta: string
 }
 
+// ── Live GPS (SRS K) ────────────────────────────────────────────────────────────────────────
+export interface GpsLiveDriver {
+  driverId: string
+  lat: number
+  lng: number
+  accuracyM: number | null
+  capturedAt: string
+  receivedAt: string
+}
+
 // ── Expenses (SRS G) ────────────────────────────────────────────────────────────────────────
 export interface ExpenseCategoryView {
   id: string
@@ -606,6 +616,16 @@ export class ApiClient {
   /** A manager disburses a second (or later) cash float or wallet top-up to a live shift. */
   addTranche(shiftId: string, body: { kind: 'float' | 'topup'; amount: string }) {
     return this.post<{ id: string; kind: string }>(`/shifts/${shiftId}/tranche`, body)
+  }
+
+  // ── Live GPS (SRS K) ────────────────────────────────────────────────────────────────────────
+  /** The driver's phone posts a location fix while his shift is open (foreground-only). */
+  sendGps(shiftId: string, body: { lat: number; lng: number; accuracyM: number | null; capturedAtMs: number }) {
+    return this.post(`/shifts/${shiftId}/gps`, body)
+  }
+  /** The manager's live map: the latest fix per driver in the selected branch. */
+  gpsLive() {
+    return this.get<{ drivers: GpsLiveDriver[] }>('/gps/live')
   }
 
   // ── Documents (SRS B-1 / س37) ───────────────────────────────────────────────────────────────

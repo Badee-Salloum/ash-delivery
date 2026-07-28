@@ -29,6 +29,8 @@ import type {
   RoleGrantRecord,
   ShiftDecisionRecord,
   ShiftDecisionRepo,
+  GpsPingRecord,
+  GpsPingRepo,
   ShiftRecord,
   ShiftRepo,
   VehicleEventRecord,
@@ -1222,6 +1224,51 @@ export class PgShiftDecisionRepo implements ShiftDecisionRepo {
     }))
   }
 }
+
+/** Live GPS pings (SRS K): append-only telemetry; the live map reads the latest fix per driver. */
+export class PgGpsPingRepo implements GpsPingRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async append(ping: Omit<GpsPingRecord, 'id'>): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO gps_pings (shift_id, driver_id, branch_id, lat, lng, accuracy_m, captured_at, received_at)
+       VALUES ($1,$2,$3,$4,$5,$6, to_timestamp($7::double precision / 1000), to_timestamp($8::double precision / 1000))`,
+      [ping.shiftId, ping.driverId, ping.branchId, ping.lat, ping.lng, ping.accuracyM, ping.capturedAtMs, ping.receivedAtMs],
+    )
+  }
+
+  async latestPerDriverForBranch(branchId: string): Promise<GpsPingRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT DISTINCT ON (driver_id) * FROM gps_pings
+       WHERE branch_id = $1 ORDER BY driver_id, received_at DESC, id DESC`,
+      [branchId],
+    )
+    return rows.map(toGpsPing)
+  }
+
+  async listForShift(shiftId: string): Promise<GpsPingRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM gps_pings WHERE shift_id = $1 ORDER BY received_at ASC, id ASC',
+      [shiftId],
+    )
+    return rows.map(toGpsPing)
+  }
+}
+
+const toGpsPing = (r: Record<string, unknown>): GpsPingRecord => ({
+  id: Number(r.id),
+  shiftId: String(r.shift_id),
+  driverId: String(r.driver_id),
+  branchId: String(r.branch_id),
+  lat: Number(r.lat),
+  lng: Number(r.lng),
+  accuracyM: r.accuracy_m === null ? null : Number(r.accuracy_m),
+  capturedAtMs: (r.captured_at as Date).getTime(),
+  receivedAtMs: (r.received_at as Date).getTime(),
+})
 
 /** The vehicle life log (SRS B-2 / س66). Append-only; the timeline reads newest-first. */
 export class PgVehicleEventRepo implements VehicleEventRepo {

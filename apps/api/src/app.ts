@@ -5,6 +5,7 @@ import type { Deps } from '@ash/contracts'
 import {
   addOrderRequest,
   addTrancheRequest,
+  gpsPingRequest,
   approveCloseRequest,
   approveOpenRequest,
   closeWeekRequest,
@@ -792,6 +793,46 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       return reply.code(202).send({ ok: true })
     },
   )
+
+  // ── Live GPS (SRS K) — the driver's phone streams its location while the shift is open ────────
+  // Ingest: the driver's own shift (shift.operate). The server stamps received_at, so a skewed
+  // phone clock can't rewrite when the office actually saw him.
+  app.post(
+    '/shifts/:id/gps',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req, reply) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const body = gpsPingRequest.parse(req.body)
+      const shift = await deps.shifts.findById(id)
+      if (!shift) return reply.code(404).send({ error: 'shift_not_found' })
+      await deps.gps.append({
+        shiftId: shift.id,
+        driverId: shift.driverId,
+        branchId: shift.branchId,
+        lat: body.lat,
+        lng: body.lng,
+        accuracyM: body.accuracyM,
+        capturedAtMs: body.capturedAtMs,
+        receivedAtMs: deps.clock.nowMs(),
+      })
+      return reply.code(202).send({ ok: true })
+    },
+  )
+  // The manager's live map: the latest fix per driver in the branch (gps.view — BM/GM/sysadmin).
+  app.get('/gps/live', { config: { permission: 'gps.view', subject: branchSubject } }, async (req) => {
+    const branchId = resolveBranchId(req)
+    const pings = await deps.gps.latestPerDriverForBranch(branchId)
+    return {
+      drivers: pings.map((p) => ({
+        driverId: p.driverId,
+        lat: p.lat,
+        lng: p.lng,
+        accuracyM: p.accuracyM,
+        capturedAt: new Date(p.capturedAtMs).toISOString(),
+        receivedAt: new Date(p.receivedAtMs).toISOString(),
+      })),
+    }
+  })
 
   // C-5: a second (or later) cash-float / wallet top-up disbursed mid-day. Branch money the manager
   // hands the driver, so `shift.approve`. Audited — it moves cash out of the office.
