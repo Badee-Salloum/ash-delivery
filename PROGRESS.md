@@ -1,5 +1,41 @@
 # PROGRESS
 
+## 2026-07-28 (later) — a testable platform: the 3 missing Bundle-1 UIs + live GPS tracking
+
+**310 domain + 297 API + 63 driver + 21 client tests green, 6 guards green, migration 0011 applied
+to Neon, all three projects redeployed.** An audit found three in-scope Bundle-1 sections were
+backend-complete but had **no admin UI** — reachable only by raw API call. All three are now
+screens, and live GPS tracking (SRS K) is built end to end, so the whole platform is manually
+testable.
+
+**F — tier admin.** The engine is money-critical (close pay resolves the configured rule) but a
+sysadmin couldn't publish a table or flip whole/marginal, so close silently ran the default F-1
+fallback. Now `Tiers.tsx` (sysadmin-only): list active/superseded tables, a bands editor (share as
+%, converted to bps), effective-dated publish, withdraw, and the read-only what-if simulator
+(per-driver Δ + company impact).
+
+**G — expenses.** An entire priced section with no way to use it. Now `Expenses.tsx`: a create form
+(category · cost-centre · vehicle · amount · description) gated to BM+GM, a date-range list + total,
+and a sysadmin-only category manager.
+
+**E-3 — manual entry + BR7 correction.** Folded into Treasury: a manual journal entry with a
+fund/side/amount line editor and a live D-vs-C running total (bigint string math, never `Number()`
+on money) that gates the post; and the visible dated reversal (`POST /journal/:id/reverse`).
+
+**K — live GPS tracking.** While the shift is open the driver's phone streams its location: a
+`use-gps-beacon` hook runs `watchPosition` + a Screen Wake Lock and POSTs the latest fix every **15
+s** to `/shifts/:id/gps` (server stamps `received_at`, so a skewed phone can't rewrite when it was
+seen). Migration 0011 adds `gps_pings` (audit-exempt telemetry); the manager watches a **Leaflet +
+OpenStreetMap live map** (`/gps/live`, latest fix per driver, polled every 10 s). Foreground-only —
+a PWA can't track in the background; true pocket/screen-off tracking is the deferred native-wrapper
+or hardware-tracker route. `gps.view` (already in the matrix) gets its first consumer.
+
+**Honest status.** GPS is foreground-only by the PWA's nature. The BR1-vs-Yallago-wallet calibration
+(one real shift) and the production-hardening items (Neon guard run, MFA-at-rest, backups, A-4
+ceilings) remain the next phase before relying on this for daily cash.
+
+---
+
 ## 2026-07-28 — Section D: the D-3 loop finished, plus wallet (D-2) and order-list (D-1) OCR
 
 **311 domain + 297 API + 63 driver + 21 client + 30 adapters tests green, 6 guards green, migration
