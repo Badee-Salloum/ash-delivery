@@ -872,16 +872,27 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   // The manager's live map: the latest fix per driver in the branch (gps.view — BM/GM/sysadmin).
   app.get('/gps/live', { config: { permission: 'gps.view', subject: branchSubject } }, async (req) => {
     const branchId = resolveBranchId(req)
-    const pings = await deps.gps.latestPerDriverForBranch(branchId)
+    // The live map is "who is out RIGHT NOW", so a ping only counts while its shift is live. Without
+    // this a driver whose shift closed — or was force-closed / voided as a stuck shift — would linger
+    // on the map at his last-known spot forever (gps_pings is append-only). Keyed on the shift id, not
+    // just the driver, so a stale ping from an already-ended shift is dropped even when the driver has
+    // since opened a fresh one that has not pinged yet.
+    const [pings, liveShifts] = await Promise.all([
+      deps.gps.latestPerDriverForBranch(branchId),
+      deps.shifts.listLiveForBranch(branchId),
+    ])
+    const liveShiftByDriver = new Map(liveShifts.map((s) => [s.driverId, s.id]))
     return {
-      drivers: pings.map((p) => ({
-        driverId: p.driverId,
-        lat: p.lat,
-        lng: p.lng,
-        accuracyM: p.accuracyM,
-        capturedAt: new Date(p.capturedAtMs).toISOString(),
-        receivedAt: new Date(p.receivedAtMs).toISOString(),
-      })),
+      drivers: pings
+        .filter((p) => liveShiftByDriver.get(p.driverId) === p.shiftId)
+        .map((p) => ({
+          driverId: p.driverId,
+          lat: p.lat,
+          lng: p.lng,
+          accuracyM: p.accuracyM,
+          capturedAt: new Date(p.capturedAtMs).toISOString(),
+          receivedAt: new Date(p.receivedAtMs).toISOString(),
+        })),
     }
   })
 

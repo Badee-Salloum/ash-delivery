@@ -69,6 +69,24 @@ describe('live GPS (SRS K)', () => {
     expect(live.find((x) => x.driverId === DRIVER_ID)!.lat).toBeCloseTo(33.6)
   })
 
+  it('drops a driver off the live map once his shift ends — a voided stuck shift no longer lingers', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await toOpen(driver, manager)
+    await post(driver, `/shifts/${id}/gps`, { lat: 33.5, lng: 36.2, accuracyM: null, capturedAtMs: 1_000 })
+
+    // While the shift is live he is on the map.
+    let live = (await get(manager, '/gps/live')).json().drivers as LiveDriver[]
+    expect(live.find((x) => x.driverId === DRIVER_ID)).toBeDefined()
+
+    // End the shift (upper-level void). His last ping stays in gps_pings, but he must leave the map.
+    expect((await post(manager, `/shifts/${id}/void`, { reason: 'stuck shift' })).statusCode).toBe(200)
+    expect(h.deps.gps.rows.some((p) => p.shiftId === id)).toBe(true) // the ping is still there…
+
+    live = (await get(manager, '/gps/live')).json().drivers as LiveDriver[]
+    expect(live.find((x) => x.driverId === DRIVER_ID)).toBeUndefined() // …but he is off the map
+  })
+
   it('a driver may not post to another driver’s shift (403)', async () => {
     const driver = await h.loginAs('driver1')
     const driver2 = await h.loginAs('driver2')

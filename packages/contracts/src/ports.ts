@@ -341,6 +341,9 @@ export interface ShiftRepo {
   update(shift: ShiftRecord): Promise<void>
   listLiveForDriver(driverId: string): Promise<ShiftRecord[]>
   listLiveForVehicle(vehicleId: string): Promise<ShiftRecord[]>
+  /** Every shift currently out working in the branch, across dates — one may have opened yesterday
+   *  and never closed. Backs the live map: only a driver on a live shift belongs on it. */
+  listLiveForBranch(branchId: string): Promise<ShiftRecord[]>
   /**
    * Remove a shift that never opened. Only legal for `draft` / `awaiting_open_approval`, which
    * have posted nothing to the ledger — it is how a mistakenly started shift releases the bike and

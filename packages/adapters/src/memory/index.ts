@@ -201,6 +201,9 @@ export class MemoryShiftRepo implements ShiftRepo {
   async listLiveForVehicle(vehicleId: string): Promise<ShiftRecord[]> {
     return [...this.rows.values()].filter((s) => s.vehicleId === vehicleId && isLive(s.state))
   }
+  async listLiveForBranch(branchId: string): Promise<ShiftRecord[]> {
+    return [...this.rows.values()].filter((s) => s.branchId === branchId && isLive(s.state))
+  }
   async listByBranchAndDate(branchId: string, businessDate: CalendarDate): Promise<ShiftRecord[]> {
     return [...this.rows.values()].filter((s) => s.branchId === branchId && s.businessDate === businessDate)
   }

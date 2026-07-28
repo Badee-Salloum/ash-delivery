@@ -172,6 +172,10 @@ export class PgShiftRepo implements ShiftRepo {
     return this.load('s.vehicle_id = $1 AND s.state = ANY($2::shift_state[])', [vehicleId, LIVE_STATES])
   }
 
+  async listLiveForBranch(branchId: string): Promise<ShiftRecord[]> {
+    return this.load('s.branch_id = $1 AND s.state = ANY($2::shift_state[])', [branchId, LIVE_STATES])
+  }
+
   async listByBranchAndDate(branchId: string, businessDate: CalendarDate): Promise<ShiftRecord[]> {
     return this.load('s.branch_id = $1 AND s.business_date = $2', [branchId, businessDate])
   }
