@@ -4,6 +4,7 @@ import type { DraftOrder } from '@ash/client'
 import { compressImage, nextPayMode, uploadEvidencePath } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
+import { useGpsBeacon } from '../use-gps-beacon.ts'
 import { Button, Card, Field, Money, MoneyInput, Screen, TextInput } from '../ui.tsx'
 import { OrderEntry } from './OrderEntry.tsx'
 import { BatteryPanel, type FittedBattery } from './BatteryPanel.tsx'
@@ -165,6 +166,8 @@ export function ShiftFlow({
       {/* «بلاغ حادثة» (C-1): the driver can't suspend himself — he flags the incident to the
           branch, which rings the bell so a manager can put the shift on hold. */}
       <ReportIncident shiftId={shift.id} />
+      {/* SRS K: stream location while the shift is open (foreground-only). */}
+      <GpsBeacon shiftId={shift.id} />
       </>
     )
   }
@@ -721,6 +724,20 @@ function RequestOrder({ shiftId }: { shiftId: string }): ReactNode {
         </Button>
       </div>
     </Card>
+  )
+}
+
+/**
+ * The live-GPS indicator. Mounting it starts the beacon (SRS K); unmounting — when the shift leaves
+ * the open/orders phase — stops it. Foreground-only, per the PWA limitation.
+ */
+function GpsBeacon({ shiftId }: { shiftId: string }): ReactNode {
+  const { t } = useApp()
+  const { tracking } = useGpsBeacon(shiftId)
+  return (
+    <p className={`text-center text-xs ${tracking ? 'text-emerald-600' : 'text-slate-400'}`}>
+      {tracking ? t.shift.tracking : t.shift.trackingOff}
+    </p>
   )
 }
 

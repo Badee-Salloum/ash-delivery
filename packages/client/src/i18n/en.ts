@@ -200,6 +200,8 @@ export const en: Catalog = {
     reportIncident: 'Report an incident',
     incidentNote: 'What happened (optional)',
     incidentReported: 'The branch has been notified',
+    tracking: '📍 Location tracking on',
+    trackingOff: 'Location off',
     suspendedHint: 'Your shift is on hold after an incident. Resume it when you can carry on — its data is completed later under the same equation.',
     slotNames: {
       odometer: 'Odometer',

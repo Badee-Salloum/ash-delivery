@@ -201,6 +201,8 @@ export const ar = {
     reportIncident: 'بلاغ حادثة',
     incidentNote: 'وصف الحادثة (اختياري)',
     incidentReported: 'تم إبلاغ الفرع',
+    tracking: '📍 التتبّع مُفعّل',
+    trackingOff: 'الموقع متوقف',
     suspendedHint: 'نوبتك معلَّقة بسبب حادثة. تابعها عندما تصبح جاهزاً — تُكمل بياناتها لاحقاً بنفس المعادلة.',
     slotNames: {
       odometer: 'العداد',
