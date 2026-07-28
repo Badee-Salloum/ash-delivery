@@ -1,5 +1,52 @@
 # PROGRESS
 
+## 2026-07-28 — Section D: the D-3 loop finished, plus wallet (D-2) and order-list (D-1) OCR
+
+**311 domain + 297 API + 63 driver + 21 client + 30 adapters tests green, 6 guards green, migration
+0010 applied to Neon, all three projects redeployed.** Section D is Bundle-2/deferred; the assisted
+on-device reader already over-delivered on the «drivers type, photos are evidence» bridge (D-5). This
+round makes **D-3** real end to end and adds two readers the client's real screenshots unblocked.
+
+**D-3 — «any manual edit is logged with its difference from the OCR reading» (acceptance #10).** The
+BMS packs already captured that baseline (`ocr_raw`, preserved across retakes) but it was **never
+shown**. Now a pure `ocrReadingDelta` (in `@ash/client`) drives an «مُعدّل يدوياً» badge + per-field
+«OCR → confirmed» lines on the manager's review, for the BMS packs and — newly trailed — the start
+odometer/battery, the close wallet, and each order fee. Migration 0010 adds the four nullable
+baseline columns (`shifts.odo_start_ocr`/`battery_start_ocr`/`end_wallet_declared_ocr_minor`,
+`shift_orders.fee_ocr_minor`); the odometer/battery are plain integers, the wallet and fee are money
+that crosses the wire as decimal strings (wire-money guard clean).
+
+**D-2 — wallet OCR at close.** Given the real Yallago wallet screen (76,509.55 SYP, white on orange,
+Arabic-Indic digits), `readWallet` + a pure `parseWallet` pre-fill `walletDeclared` from the wallet
+screenshot. The money 2-dp rule (a separator + 1–2 trailing digits is the fraction; grouping is
+dropped) and Arabic-digit folding are pinned to that exact sample. String ops only — never `Number()`.
+
+**D-1 — order-list OCR.** The «Recent orders» screen (owner-confirmed: the `NNN SYP` figure is the
+delivery fee, BR1's number) is scanned by `readOrders`/`parseOrders`: it anchors each order on a
+`NNN SYP` amount with the time on the same row, tracks the «Monday, 27 July» day headers, and drops a
+row with no readable fee. A «مسح الطلبات» button on the order screen turns the screenshot into
+pre-filled fee rows (auto key `YAL-YYYYMMDD-HHMM`, pay-mode = cash); the driver sets pay-mode, drops
+other-day rows and confirms — the existing dup detection, live BR1 preview and submit path unchanged.
+The screen carries no order-id or pay-mode, so those stay the driver's; OCR fills only the fees. This
+activates the long-dormant `shift_orders.source` seam and adds the fee's D-3 baseline, so a silently
+lowered OCR'd fee is now visible to the manager.
+
+**Honest status.** The parsers are pinned to the owner's real screenshots; on-device *recognition*
+accuracy on live phones is still the manual calibration the SRS D-4 asks for — the readers degrade to
+manual entry on any failure, exactly as D-5 guarantees. Only the wallet + «Recent orders» samples
+exist, so odometer/dashboard recognition calibration, per-field confidence (D-4) and server-side OCR
+stay out of scope.
+
+**See it in 2 minutes**
+
+```bash
+pnpm check
+pnpm --filter @ash/driver test -- ocr.test.ts     # parseWallet + parseOrders on the real samples
+pnpm --filter @ash/api test -- ocr-trail.test.ts   # the D-3 baselines reaching the review
+```
+
+---
+
 ## 2026-07-27 — Section C closed: the six modeled-but-unwired gaps in the shift cycle
 
 **311 domain + 291 API + 56 driver + 15 client + 30 adapters tests green, 6 guards green, i18n 21
