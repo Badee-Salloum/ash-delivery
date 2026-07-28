@@ -15,20 +15,24 @@ import {
   type CalendarDate,
   type DocumentStatus,
   type Minor,
+  type Posting,
   type ShiftAction,
   type BatteryReading,
   type ShiftOrder,
   type TransitionResult,
   businessDateFor,
   canOpenShift,
+  closingBalances,
   documentStatusOn,
   diagnoseBr1,
   evaluateBr1,
   floatOut,
+  floatReturn,
   minWalletBalance,
   minor,
   postingsForApproval,
   postingsForOpen,
+  walletReturn,
   walletTopup,
   REQUIRED_END_SLOTS,
   resolveFxDay,
@@ -866,6 +870,146 @@ export async function approveClose(
   await deps.shifts.update(updated)
   await recordDecision(deps, actor, shiftId, 'close', 'approved', null)
   return { shift: updated, postings: written.length }
+}
+
+// ── Upper-level override: void / force-close a stuck shift (SRS ops escape hatch) ───────────
+
+/**
+ * VOID a shift the driver can't finish (`manager_force_cancel`, shift.approve). The float + top-up
+ * were disbursed to the driver at open; here they are returned to the office so the ledger nets to
+ * zero, the recorded orders are discarded (their fee/split only ever posts at approve-close, so
+ * there's nothing to reverse there), and the shift ends `cancelled` — terminal, bike released,
+ * never counted. Audited with a reason at the route. For test/abandoned/erroneous shifts.
+ */
+export async function voidShift(deps: Deps, actor: Actor, shiftId: string, reason: string): Promise<ShiftRecord> {
+  const shift = await mustFind(deps, shiftId)
+  const result = await guard(deps, shift, 'manager_force_cancel', actor)
+  if (!result.ok) fail(result)
+
+  const postings: Posting[] = []
+  const floatTotal = sum(shift.floatTranches)
+  const topupTotal = sum(shift.topupTranches)
+  if (floatTotal > minor(0n)) postings.push(floatReturn(shift.driverId, floatTotal))
+  if (topupTotal > minor(0n)) postings.push(walletReturn(shift.driverId, topupTotal))
+  if (postings.length > 0) {
+    const fxDayId = await ensureFxDay(deps, shift.businessDate)
+    await deps.ledger.post(shift.branchId, postings, {
+      shiftId: shift.id,
+      businessDate: shift.businessDate,
+      postingDate: todayFor(deps),
+      weekStartDate: shift.weekStartDate,
+      fxDayId,
+      createdBy: actor.userId,
+      reason,
+    })
+  }
+
+  for (const o of await deps.orders.listByShift(shiftId)) await deps.orders.delete(o.id)
+
+  const updated: ShiftRecord = { ...shift, state: result.next }
+  await deps.shifts.update(updated)
+  return updated
+}
+
+/** Shared with approveClose: the tier-resolved day-level split delta for this shift. */
+async function shiftSplitFor(deps: Deps, shift: ShiftRecord, todaysOrders: ShiftOrder[]): Promise<{ driverShare: Minor; companyShare: Minor; yalagoShare: Minor }> {
+  const priorShifts = await deps.shifts.listApprovedForDriverOnDate(shift.driverId, shift.businessDate)
+  const priorOrders: ShiftOrder[] = []
+  for (const prior of priorShifts) {
+    if (prior.id === shift.id) continue
+    priorOrders.push(...toDomainOrders(await deps.orders.listByShift(prior.id)))
+  }
+  const dayFees = [...priorOrders, ...todaysOrders].map((o) => o.fee)
+  const vehicle = await deps.directory.vehicle(shift.vehicleId)
+  const rule = await resolveTierRule(deps, shift.businessDate, vehicle?.vehicleTypeId ?? null)
+  const alreadyPosted =
+    priorOrders.length > 0
+      ? splitDay(priorOrders.map((o) => o.fee), rule)
+      : { driverShare: minor(0n), companyShare: minor(0n), yalagoShare: minor(0n) }
+  const s = trueUp(dayFees, rule, { driver: alreadyPosted.driverShare, company: alreadyPosted.companyShare, yalago: alreadyPosted.yalagoShare })
+  return { driverShare: s.driverDelta, companyShare: s.companyDelta, yalagoShare: s.yalagoDelta }
+}
+
+/**
+ * FORCE-CLOSE a shift the driver can't finish (`manager_force_close`, shift.approve). It posts the
+ * SAME approval postings as a normal close (order splits + the returns that zero the driver funds),
+ * but bypasses the BR5/BR1 gate. The admin may supply the end figures he actually knows; the gap
+ * between what the driver returned (declared) and what the equation expected lands in a
+ * `shift_variance` cost centre so the books reflect reality — a shortfall the driver owes, or a
+ * surplus — instead of the close being blocked. State → `approved`. Audited with a reason.
+ */
+export async function forceClose(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: { odometerKm?: number | null; cashDeclared?: Minor | null; walletDeclared?: Minor | null; reason: string },
+): Promise<{ shift: ShiftRecord; postings: number }> {
+  const shift = await mustFind(deps, shiftId)
+  const result = await guard(deps, shift, 'manager_force_close', actor)
+  if (!result.ok) fail(result)
+
+  const orderRows = await deps.orders.listByShift(shiftId)
+  const todaysOrders = toDomainOrders(orderRows)
+  const shiftInput = { driverId: shift.driverId, floatTranches: shift.floatTranches, topupTranches: shift.topupTranches, orders: todaysOrders }
+
+  const shiftSplit = await shiftSplitFor(deps, shift, todaysOrders)
+  const postings: Posting[] = postingsForApproval(shiftInput, shiftSplit)
+
+  // Variance: postingsForApproval returned the COMPUTED balances to the office. If the admin says
+  // the driver actually handed over a different amount, move the difference to the shift_variance
+  // cost centre so office_cash/office_wallet reflect what really came in. `null`/omitted ⇒ assume a
+  // full, clean return (no variance).
+  const expected = closingBalances(shiftInput)
+  const cashDeclared = input.cashDeclared ?? shift.endCashDeclared ?? expected.endCash
+  const walletDeclared = input.walletDeclared ?? shift.endWalletDeclared ?? expected.endWallet
+  const variance = `shift_variance:${shift.branchId}`
+  postings.push(...variancePosting('office_cash', variance, expected.endCash - cashDeclared, `fc-cash-${shift.id}`))
+  postings.push(...variancePosting('office_wallet', variance, expected.endWallet - walletDeclared, `fc-wallet-${shift.id}`))
+
+  const fxDayId = await ensureFxDay(deps, shift.businessDate)
+  const written = await deps.ledger.post(shift.branchId, postings, {
+    shiftId: shift.id,
+    businessDate: shift.businessDate,
+    postingDate: todayFor(deps),
+    weekStartDate: shift.weekStartDate,
+    fxDayId,
+    createdBy: actor.userId,
+    reason: input.reason,
+  })
+
+  const br1 = await evaluateShift(deps, { ...shift, endCashDeclared: cashDeclared, endWalletDeclared: walletDeclared })
+  const updated: ShiftRecord = {
+    ...shift,
+    state: result.next,
+    approvedBy: actor.userId,
+    odoEnd: input.odometerKm ?? shift.odoEnd,
+    endCashDeclared: cashDeclared,
+    endWalletDeclared: walletDeclared,
+    equationDiff: br1.result.scalarDiff,
+    cashDiff: br1.result.cashDiff,
+    walletDiff: br1.result.walletDiff,
+    ordersHash: br1.ordersHash,
+  }
+  await deps.shifts.update(updated)
+  await recordDecision(deps, actor, shiftId, 'close', 'approved', input.reason)
+  return { shift: updated, postings: written.length }
+}
+
+/**
+ * One balancing posting moving `delta` between an office fund and the variance cost centre. `delta`
+ * is a signed value (`expected − declared`); positive means the office is short that much (a
+ * receivable / loss to variance), negative a surplus. Empty when there's no gap.
+ */
+function variancePosting(office: 'office_cash' | 'office_wallet', costCenterId: string, delta: bigint, occurrenceKey: string): Posting[] {
+  if (delta === 0n) return []
+  const amount = minor(delta > 0n ? delta : -delta)
+  const varFund = { kind: 'cost_center' as const, costCenterId }
+  const officeFund = { kind: office } as const
+  const lines =
+    delta > 0n
+      ? [{ fund: varFund, side: 'D' as const, amount }, { fund: officeFund, side: 'C' as const, amount }]
+      : [{ fund: officeFund, side: 'D' as const, amount }, { fund: varFund, side: 'C' as const, amount }]
+  return [{ eventType: 'manual', occurrenceKey, lines }]
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────────────────

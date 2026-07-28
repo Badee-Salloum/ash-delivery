@@ -559,6 +559,16 @@ export const en: Catalog = {
     float: 'Cash float',
     topup: 'Wallet top-up',
     amount: 'Amount',
+    forceClose: 'Force-close',
+    forceCloseHint:
+      'Close a stuck shift the driver never finished. Leave a figure blank to accept the expected close; any gap you enter is booked to a variance the driver still owes.',
+    void: 'Void shift',
+    voidHint: 'Cancels the shift, reverses the float and top-up, and discards its orders. Use only when the shift produced no real deliveries.',
+    overrideReason: 'Reason (recorded)',
+    cashDeclared: 'Cash handed over',
+    walletDeclared: 'Wallet balance',
+    expectedPlaceholder: 'expected',
+    odometerKm: 'Odometer (km)',
   },
 
   gpsLive: {

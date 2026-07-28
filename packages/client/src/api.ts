@@ -618,6 +618,16 @@ export class ApiClient {
     return this.post<{ id: string; kind: string }>(`/shifts/${shiftId}/tranche`, body)
   }
 
+  // ── Upper-level shift override (stuck shift) ────────────────────────────────────────────────
+  /** Void a stuck shift: reverse the float/top-up, discard orders, mark it cancelled. */
+  voidShift(shiftId: string, reason: string) {
+    return this.post<{ id: string; state: string }>(`/shifts/${shiftId}/void`, { reason })
+  }
+  /** Force-close a stuck shift, settling any declared-vs-expected gap to a variance. */
+  forceCloseShift(shiftId: string, body: { reason: string; odometerKm?: number | null; cashDeclared?: string | null; walletDeclared?: string | null }) {
+    return this.post<{ id: string; state: string; postings: number }>(`/shifts/${shiftId}/force-close`, body)
+  }
+
   // ── Live GPS (SRS K) ────────────────────────────────────────────────────────────────────────
   /** The driver's phone posts a location fix while his shift is open (foreground-only). */
   sendGps(shiftId: string, body: { lat: number; lng: number; accuracyM: number | null; capturedAtMs: number }) {

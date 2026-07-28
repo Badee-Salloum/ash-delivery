@@ -267,6 +267,31 @@ describe('occupancy', () => {
     expect(['draft', 'awaiting_open_approval', 'open', 'pending_review', 'suspended'].every((s) => isLive(s as ShiftState))).toBe(true)
     expect(isLive('approved')).toBe(false)
     expect(isLive('week_locked')).toBe(false)
+    expect(isLive('cancelled')).toBe(false)
+  })
+})
+
+describe('upper-level overrides for a stuck shift', () => {
+  it('force-cancels any live state to cancelled (no gate — that is the point)', () => {
+    for (const from of ['open', 'suspended', 'pending_review'] as ShiftState[]) {
+      expect(transition(from, 'manager_force_cancel', ctx())).toEqual({ ok: true, next: 'cancelled' })
+    }
+  })
+
+  it('force-closes any live state to approved', () => {
+    for (const from of ['open', 'suspended', 'pending_review'] as ShiftState[]) {
+      expect(transition(from, 'manager_force_close', ctx())).toEqual({ ok: true, next: 'approved' })
+    }
+  })
+
+  it('both require shift.approve — a driver is refused', () => {
+    expect(transition('open', 'manager_force_cancel', ctx({ actor: actor('driver') }))).toMatchObject({ ok: false, reason: 'forbidden' })
+    expect(transition('open', 'manager_force_close', ctx({ actor: actor('driver') }))).toMatchObject({ ok: false, reason: 'forbidden' })
+  })
+
+  it('cancelled is terminal', () => {
+    expect(transition('cancelled', 'resume', ctx({ actor: actor('driver') }))).toMatchObject({ ok: false, reason: 'illegal_transition' })
+    expect(transition('cancelled', 'manager_force_close', ctx())).toMatchObject({ ok: false, reason: 'illegal_transition' })
   })
 })
 

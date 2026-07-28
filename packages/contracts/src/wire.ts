@@ -104,6 +104,14 @@ export const approveCloseRequest = z.object({
   reviewedOrdersHash: z.string().min(1),
 })
 
+/** Upper-level force-close of a stuck shift: a reason + whatever end figures the admin actually has. */
+export const forceCloseRequest = z.object({
+  reason: z.string().min(1).max(500),
+  odometerKm: z.number().int().min(0).nullable().default(null),
+  cashDeclared: moneySchema.nullable().default(null),
+  walletDeclared: moneySchema.nullable().default(null),
+})
+
 /**
  * A second (or later) cash-float or wallet top-up disbursed mid-day (SRS C-5). Money the branch
  * hands the driver after open-approval, posted as one more tranche under its own occurrence key.

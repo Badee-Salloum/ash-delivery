@@ -7,6 +7,7 @@ import {
   addTrancheRequest,
   gpsPingRequest,
   approveCloseRequest,
+  forceCloseRequest,
   approveOpenRequest,
   closeWeekRequest,
   createShiftRequest,
@@ -59,6 +60,8 @@ import {
   resumeShift,
   submitEndPackage,
   suspendShift,
+  voidShift,
+  forceClose,
   submitStartPackage,
   todayFor,
 } from './shifts.service.ts'
@@ -791,6 +794,54 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const { notes } = decisionBody.parse(req.body ?? {})
       await reportIncident(deps, req.actor!, id, notes)
       return reply.code(202).send({ ok: true })
+    },
+  )
+
+  // Upper-level override for a stuck shift (shift.approve). VOID reverses the float/top-up and
+  // discards the orders → cancelled; FORCE-CLOSE settles it (order splits + a shift_variance for any
+  // declared-vs-expected gap) → approved. Both audited with a mandatory reason.
+  app.post(
+    '/shifts/:id/void',
+    { config: { permission: 'shift.approve', subject: shiftSubject } },
+    async (req) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const { reason } = z.object({ reason: z.string().min(1).max(500) }).parse(req.body)
+      const shift = await voidShift(deps, req.actor!, id, reason)
+      await deps.audit.append({
+        tableName: 'shifts',
+        recordId: shift.id,
+        action: 'UPDATE',
+        actorId: req.actor!.userId,
+        actorKind: 'user',
+        branchId: shift.branchId,
+        requestId: req.requestId,
+        before: null,
+        after: { state: shift.state, reason, voided: true },
+        occurredAtMs: deps.clock.nowMs(),
+      })
+      return { id: shift.id, state: shift.state }
+    },
+  )
+  app.post(
+    '/shifts/:id/force-close',
+    { config: { permission: 'shift.approve', subject: shiftSubject } },
+    async (req) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const body = forceCloseRequest.parse(req.body)
+      const result = await forceClose(deps, req.actor!, id, body)
+      await deps.audit.append({
+        tableName: 'shifts',
+        recordId: result.shift.id,
+        action: 'UPDATE',
+        actorId: req.actor!.userId,
+        actorKind: 'user',
+        branchId: result.shift.branchId,
+        requestId: req.requestId,
+        before: null,
+        after: { state: result.shift.state, reason: body.reason, forced: true },
+        occurredAtMs: deps.clock.nowMs(),
+      })
+      return { id: result.shift.id, state: result.shift.state, postings: result.postings }
     },
   )
 

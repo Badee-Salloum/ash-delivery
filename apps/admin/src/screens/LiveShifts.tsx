@@ -110,10 +110,14 @@ function LiveRow({
   onChanged: () => void
 }): ReactNode {
   const { api, t } = useApp()
-  const [panel, setPanel] = useState<'none' | 'suspend' | 'tranche'>('none')
+  const [panel, setPanel] = useState<'none' | 'suspend' | 'tranche' | 'void' | 'forceClose'>('none')
   const [note, setNote] = useState('')
   const [kind, setKind] = useState<'float' | 'topup'>('float')
   const [amount, setAmount] = useState('')
+  const [reason, setReason] = useState('')
+  const [odometerKm, setOdometerKm] = useState('')
+  const [cashDeclared, setCashDeclared] = useState('')
+  const [walletDeclared, setWalletDeclared] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
@@ -147,7 +151,45 @@ function LiveRow({
     }
   }
 
-  const toggle = (p: 'suspend' | 'tranche'): void => {
+  const voidShift = async (): Promise<void> => {
+    setBusy(true)
+    setErr(null)
+    try {
+      await api.voidShift(shift.id, reason.trim())
+      setPanel('none')
+      setReason('')
+      onChanged()
+    } catch (e) {
+      setErr((e as { error?: string }).error ?? 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const forceClose = async (): Promise<void> => {
+    setBusy(true)
+    setErr(null)
+    try {
+      await api.forceCloseShift(shift.id, {
+        reason: reason.trim(),
+        odometerKm: odometerKm.trim() === '' ? null : Number(odometerKm),
+        cashDeclared: cashDeclared.trim() === '' ? null : cashDeclared,
+        walletDeclared: walletDeclared.trim() === '' ? null : walletDeclared,
+      })
+      setPanel('none')
+      setReason('')
+      setOdometerKm('')
+      setCashDeclared('')
+      setWalletDeclared('')
+      onChanged()
+    } catch (e) {
+      setErr((e as { error?: string }).error ?? 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const toggle = (p: 'suspend' | 'tranche' | 'void' | 'forceClose'): void => {
     setErr(null)
     setPanel((cur) => (cur === p ? 'none' : p))
   }
@@ -162,13 +204,23 @@ function LiveRow({
         <span className="num text-sm text-slate-500">
           {vehicleCode} · #{shift.shiftNo}
         </span>
-        {shift.state === 'open' && canApprove ? (
-          <div className="flex gap-2 ms-auto">
-            <Button variant="ghost" onClick={() => toggle('tranche')}>
-              {t.liveShifts.addTranche}
+        {canApprove ? (
+          <div className="flex flex-wrap gap-2 ms-auto">
+            {shift.state === 'open' ? (
+              <>
+                <Button variant="ghost" onClick={() => toggle('tranche')}>
+                  {t.liveShifts.addTranche}
+                </Button>
+                <Button variant="ghost" onClick={() => toggle('suspend')}>
+                  {t.liveShifts.suspend}
+                </Button>
+              </>
+            ) : null}
+            <Button variant="ghost" onClick={() => toggle('forceClose')}>
+              {t.liveShifts.forceClose}
             </Button>
-            <Button variant="ghost" onClick={() => toggle('suspend')}>
-              {t.liveShifts.suspend}
+            <Button variant="ghost" onClick={() => toggle('void')}>
+              {t.liveShifts.void}
             </Button>
           </div>
         ) : null}
@@ -207,6 +259,51 @@ function LiveRow({
           <div className="flex gap-2">
             <Button variant="primary" className="flex-1" disabled={busy || amount.trim() === ''} onClick={disburse}>
               {busy ? t.common.loading : t.liveShifts.addTranche}
+            </Button>
+            <Button variant="ghost" className="flex-1" onClick={() => setPanel('none')}>
+              {t.common.cancel}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+      {panel === 'forceClose' ? (
+        <div className="flex flex-col gap-2 border-t border-slate-200 pt-2">
+          <p className="text-sm text-slate-600">{t.liveShifts.forceCloseHint}</p>
+          <Field label={t.liveShifts.overrideReason}>
+            <TextInput value={reason} onChange={(e) => setReason(e.target.value)} />
+          </Field>
+          <div className="flex flex-wrap gap-2">
+            <Field label={t.liveShifts.cashDeclared}>
+              <MoneyInput value={cashDeclared} onChange={(e) => setCashDeclared(e.target.value)} placeholder={t.liveShifts.expectedPlaceholder} />
+            </Field>
+            <Field label={t.liveShifts.walletDeclared}>
+              <MoneyInput value={walletDeclared} onChange={(e) => setWalletDeclared(e.target.value)} placeholder={t.liveShifts.expectedPlaceholder} />
+            </Field>
+            <Field label={t.liveShifts.odometerKm}>
+              <TextInput inputMode="numeric" value={odometerKm} onChange={(e) => setOdometerKm(e.target.value)} />
+            </Field>
+          </div>
+          {err ? <p className="text-sm text-red-600">{explainError(err, t)}</p> : null}
+          <div className="flex gap-2">
+            <Button variant="danger" className="flex-1" disabled={busy || reason.trim() === ''} onClick={forceClose}>
+              {busy ? t.common.loading : t.liveShifts.forceClose}
+            </Button>
+            <Button variant="ghost" className="flex-1" onClick={() => setPanel('none')}>
+              {t.common.cancel}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+      {panel === 'void' ? (
+        <div className="flex flex-col gap-2 border-t border-slate-200 pt-2">
+          <p className="text-sm text-red-700">{t.liveShifts.voidHint}</p>
+          <Field label={t.liveShifts.overrideReason}>
+            <TextInput value={reason} onChange={(e) => setReason(e.target.value)} />
+          </Field>
+          {err ? <p className="text-sm text-red-600">{explainError(err, t)}</p> : null}
+          <div className="flex gap-2">
+            <Button variant="danger" className="flex-1" disabled={busy || reason.trim() === ''} onClick={voidShift}>
+              {busy ? t.common.loading : t.liveShifts.void}
             </Button>
             <Button variant="ghost" className="flex-1" onClick={() => setPanel('none')}>
               {t.common.cancel}

@@ -23,6 +23,9 @@ export type ShiftState =
   | 'approved'
   | 'suspended'
   | 'week_locked'
+  // An upper-level account voided a stuck shift: the float/top-up were returned to the office and
+  // the orders discarded. Terminal, does not occupy the bike, never counts toward tier or the week.
+  | 'cancelled'
 
 export type ShiftAction =
   | 'driver_confirm_start'
@@ -34,6 +37,10 @@ export type ShiftAction =
   | 'suspend'
   | 'resume'
   | 'week_lock'
+  // Upper-level overrides for a shift the driver can't finish (SRS ops escape hatch). No BR5/BR1
+  // gate — the whole point is to resolve a shift that can't satisfy them — but audited + reasoned.
+  | 'manager_force_cancel'
+  | 'manager_force_close'
 
 /** Which permission each action requires. Checked server-side; UI hiding is not security. */
 export const ACTION_PERMISSION: Readonly<Record<ShiftAction, PermissionKey>> = {
@@ -46,6 +53,8 @@ export const ACTION_PERMISSION: Readonly<Record<ShiftAction, PermissionKey>> = {
   suspend: 'shift.approve',
   resume: 'shift.operate',
   week_lock: 'week.close',
+  manager_force_cancel: 'shift.approve',
+  manager_force_close: 'shift.approve',
 }
 
 /** Evidence slots each package requires (SRS C-2, C-3). */
@@ -228,18 +237,21 @@ const EDGES: Readonly<Record<ShiftState, Partial<Record<ShiftAction, ShiftState>
     manager_request_rephoto: 'draft',
     suspend: 'suspended',
   },
-  open: { driver_submit_end: 'pending_review', suspend: 'suspended' },
+  open: { driver_submit_end: 'pending_review', suspend: 'suspended', manager_force_cancel: 'cancelled', manager_force_close: 'approved' },
   pending_review: {
     manager_approve_close: 'approved',
     manager_reject_close: 'open',
     manager_request_rephoto: 'open',
     suspend: 'suspended',
+    manager_force_cancel: 'cancelled',
+    manager_force_close: 'approved',
   },
   // «معلقة» (س29): an incident mid-shift. Data is completed later and the shift closes under
   // exactly the same equation — a suspended shift is never a way around BR1.
-  suspended: { resume: 'open', driver_submit_end: 'pending_review' },
+  suspended: { resume: 'open', driver_submit_end: 'pending_review', manager_force_cancel: 'cancelled', manager_force_close: 'approved' },
   approved: { week_lock: 'week_locked' },
   week_locked: {},
+  cancelled: {},
 }
 
 export function transition(
