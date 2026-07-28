@@ -21,7 +21,7 @@ afterEach(async () => {
 })
 
 const START_MEDIA = ['odometer']
-const END_MEDIA = ['dashboard', 'wallet', 'odometer', 'wallet_zeroed']
+const END_MEDIA = ['dashboard', 'wallet', 'odometer']
 
 /** Evidence is now REAL: the gates read what was uploaded, not what the client claimed. */
 async function uploadStart(shiftId: string, token: string) {

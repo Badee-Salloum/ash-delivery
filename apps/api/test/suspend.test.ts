@@ -43,7 +43,7 @@ async function addOrders(driver: string, id: string, payMode: string, count: num
 
 /** The SRS §2.3 balanced end package (160,000 cash · 70,000 wallet) after 12 cash / 6 electronic / 2 free. */
 async function submitBalancedEnd(driver: string, id: string): Promise<LightMyRequestResponse> {
-  for (const slot of ['dashboard', 'wallet', 'odometer', 'wallet_zeroed']) await h.uploadPhoto(driver, id, 'end', slot)
+  for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
   return await put(driver, `/shifts/${id}/end-package`, {
     odometerKm: 15_412,
     batteryPercent: 22,

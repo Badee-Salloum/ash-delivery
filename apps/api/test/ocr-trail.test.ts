@@ -80,7 +80,7 @@ describe('OCR D-3 trail — close wallet balance (readWallet)', () => {
     const manager = await h.loginAs('manager')
     const id = await toOpen(driver, manager)
     await post(driver, `/shifts/${id}/orders`, { providerOrderNo: 'A-1', payMode: 'cash', fee: sypStr(5_000), zone: null })
-    for (const slot of ['dashboard', 'wallet', 'odometer', 'wallet_zeroed']) await h.uploadPhoto(driver, id, 'end', slot)
+    for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
 
     // OCR read 76,509.55 off the wallet screenshot; the driver declared 70,000 — a real edit.
     const res = await put(driver, `/shifts/${id}/end-package`, {
@@ -103,7 +103,7 @@ describe('OCR D-3 trail — close wallet balance (readWallet)', () => {
     const manager = await h.loginAs('manager')
     const id = await toOpen(driver, manager)
     await post(driver, `/shifts/${id}/orders`, { providerOrderNo: 'A-1', payMode: 'cash', fee: sypStr(5_000), zone: null })
-    for (const slot of ['dashboard', 'wallet', 'odometer', 'wallet_zeroed']) await h.uploadPhoto(driver, id, 'end', slot)
+    for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
 
     await put(driver, `/shifts/${id}/end-package`, {
       odometerKm: 110,

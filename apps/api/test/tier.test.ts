@@ -108,7 +108,7 @@ describe('the what-if simulation (F-5)', () => {
     for (let i = 1; i <= 20; i++) {
       await post(driver, `/shifts/${id}/orders`, { providerOrderNo: `S-${i}`, payMode: 'electronic', fee: sypStr(5_000), zone: null })
     }
-    for (const slot of ['dashboard', 'wallet', 'odometer', 'wallet_zeroed']) await h.uploadPhoto(driver, id, 'end', slot)
+    for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
     const endCash = sypStr(100_000)
     const endWallet = sypStr(50_000 + 20 * 4_000) // topup + 20 electronic blocks
     await h.app.inject({

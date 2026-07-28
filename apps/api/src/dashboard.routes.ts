@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { type Deps, type ShiftRecord, serializeMoney } from '@ash/contracts'
-import { isLive, minor, toUsdMinor, weekStartFor } from '@ash/domain'
+import { REQUIRED_END_SLOTS, isLive, minor, toUsdMinor, weekStartFor } from '@ash/domain'
 import { todayFor } from './shifts.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
 
@@ -146,6 +146,6 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
 }
 
 function hasCompleteEndPackage(shift: ShiftRecord): boolean {
-  const required = ['dashboard', 'wallet', 'odometer', 'wallet_zeroed']
-  return required.every((slot) => shift.mediaSlotsEnd.includes(slot))
+  // One source of truth with the BR5 close gate, so this can never drift from what's required.
+  return REQUIRED_END_SLOTS.every((slot) => shift.mediaSlotsEnd.includes(slot))
 }

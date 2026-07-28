@@ -50,8 +50,12 @@ export const ACTION_PERMISSION: Readonly<Record<ShiftAction, PermissionKey>> = {
 
 /** Evidence slots each package requires (SRS C-2, C-3). */
 export const REQUIRED_START_SLOTS = ['odometer'] as const
-/** `wallet_zeroed` exists because the wallet is returned daily like the float (decision D-4). */
-export const REQUIRED_END_SLOTS = ['dashboard', 'wallet', 'odometer', 'wallet_zeroed'] as const
+/**
+ * The wallet is still returned/zeroed daily like the float (decision D-4), but the product owner
+ * dropped the separate `wallet_zeroed` proof photo at close — the wallet-balance screenshot is the
+ * evidence. So the close package is the dashboard screenshot, the wallet screenshot and the odometer.
+ */
+export const REQUIRED_END_SLOTS = ['dashboard', 'wallet', 'odometer'] as const
 
 export type StartSlot = (typeof REQUIRED_START_SLOTS)[number]
 export type EndSlot = (typeof REQUIRED_END_SLOTS)[number]

@@ -31,7 +31,7 @@ async function toPendingReview(driver: string, manager: string): Promise<string>
   const open = await post(manager, `/shifts/${id}/approve-open`, { floatTranches: [sypStr(100_000)], topupTranches: [] })
   expect(open.statusCode, open.body).toBe(200)
   await post(driver, `/shifts/${id}/orders`, { providerOrderNo: 'A-1', payMode: 'cash', fee: sypStr(5_000), zone: null })
-  for (const slot of ['dashboard', 'wallet', 'odometer', 'wallet_zeroed']) await h.uploadPhoto(driver, id, 'end', slot)
+  for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
   const end = await put(driver, `/shifts/${id}/end-package`, { odometerKm: 110, batteryPercent: 50, cashDeclared: sypStr(100_000), walletDeclared: sypStr(0) })
   expect(end.statusCode, end.body).toBe(200)
   expect(end.json().state).toBe('pending_review')

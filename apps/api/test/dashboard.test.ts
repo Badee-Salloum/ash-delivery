@@ -52,7 +52,7 @@ async function runCanonicalShift(): Promise<void> {
   await add('electronic', 6)
   await add('free', 2)
 
-  for (const slot of ['dashboard', 'wallet', 'odometer', 'wallet_zeroed']) await h.uploadPhoto(driver, id, 'end', slot)
+  for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
   await h.app.inject({
     method: 'PUT', url: `/shifts/${id}/end-package`, headers: { cookie: h.cookie(driver) },
     payload: { odometerKm: 92, batteryPercent: 22, cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000) },

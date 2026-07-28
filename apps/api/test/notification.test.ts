@@ -96,7 +96,7 @@ describe('the branch bell', () => {
       method: 'POST', url: `/shifts/${shiftId}/orders`, headers: { cookie: h.cookie(driver) },
       payload: { providerOrderNo: 'N-1', payMode: 'cash', fee: sypStr(5_000), zone: null },
     })
-    for (const slot of ['dashboard', 'wallet', 'odometer', 'wallet_zeroed']) await h.uploadPhoto(driver, shiftId, 'end', slot)
+    for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, shiftId, 'end', slot)
     await h.app.inject({
       method: 'PUT', url: `/shifts/${shiftId}/end-package`, headers: { cookie: h.cookie(driver) },
       payload: { odometerKm: 5, batteryPercent: 40, cashDeclared: sypStr(6_000), walletDeclared: sypStr(0) },

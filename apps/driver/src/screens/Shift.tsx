@@ -443,13 +443,16 @@ function EndPackage({
   const [busy, setBusy] = useState(false)
 
   const [batteriesReady, setBatteriesReady] = useState(batteries.length === 0)
-  const required = ['dashboard', 'wallet', 'odometer', 'wallet_zeroed']
+  // The zeroed-wallet photo was dropped (product owner) — the wallet screenshot is the evidence.
+  const required = ['dashboard', 'wallet', 'odometer']
   const labels: Record<string, string> = {
     dashboard: t.shift.dashboardShot,
     wallet: t.shift.walletBalance,
     odometer: t.shift.odometer,
-    wallet_zeroed: t.shift.walletZeroed,
   }
+  // The dashboard and wallet are SCREENSHOTS the driver already has in his gallery, not things to
+  // photograph with the camera; the odometer is a real photo of the bike.
+  const gallery = new Set(['dashboard', 'wallet'])
   // The end battery is now part of the gate, so the button waits for it too — a shift that
   // cannot be submitted should not offer a button that pretends otherwise.
   const ready =
@@ -506,6 +509,7 @@ function EndPackage({
           pkg="end"
           slot={slot}
           label={labels[slot]!}
+          source={gallery.has(slot) ? 'gallery' : 'camera'}
           onUploaded={(uploaded) => setSlots((prev) => new Set(prev).add(uploaded))}
           // SRS D-2: read the wallet balance off its screenshot and pre-fill the field. Only the
           // wallet slot gets a handler; the others stay pure evidence. Failure is silent — the

@@ -52,7 +52,7 @@ async function addTwentyOrders(driver: string, id: string): Promise<void> {
 }
 
 async function submitEnd(driver: string, id: string, cash: number, wallet: number): Promise<LightMyRequestResponse> {
-  for (const slot of ['dashboard', 'wallet', 'odometer', 'wallet_zeroed']) await h.uploadPhoto(driver, id, 'end', slot)
+  for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
   return await put(driver, `/shifts/${id}/end-package`, {
     odometerKm: 15_412,
     batteryPercent: 22,

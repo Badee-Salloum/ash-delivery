@@ -36,7 +36,7 @@ const completeStart = (over: Partial<StartPackage> = {}): StartPackage => ({
 })
 
 const completeEnd = (over: Partial<EndPackage> = {}): EndPackage => ({
-  mediaSlots: ['dashboard', 'wallet', 'odometer', 'wallet_zeroed'],
+  mediaSlots: ['dashboard', 'wallet', 'odometer'],
   odometerKm: 15_412,
   batteryPercent: 18,
   cashDeclared: syp(160_000),
@@ -119,10 +119,10 @@ describe('the CLOSE gate (BR5, AC #2)', () => {
       .toEqual({ ok: false, reason: 'br1_not_zero' })
   })
 
-  it.each(['dashboard', 'wallet', 'odometer', 'wallet_zeroed'])('refuses without the %s photo', (slot) => {
+  it.each(['dashboard', 'wallet', 'odometer'])('refuses without the %s photo', (slot) => {
     const result = transition('pending_review', 'manager_approve_close',
       ctx({
-        endPackage: completeEnd({ mediaSlots: ['dashboard', 'wallet', 'odometer', 'wallet_zeroed'].filter((s) => s !== slot) }),
+        endPackage: completeEnd({ mediaSlots: ['dashboard', 'wallet', 'odometer'].filter((s) => s !== slot) }),
         br1: { balanced: true, splitBalanced: true },
       }))
     expect(result).toMatchObject({ ok: false, reason: 'end_package_incomplete' })
@@ -284,7 +284,7 @@ describe('gap reporting is a checklist, not a boolean', () => {
       mediaSlots: [], odometerKm: null, batteryPercent: null,
       cashDeclared: null, walletDeclared: null, orderCount: 0, allOrdersConfirmed: false,
     })
-    expect(gaps.filter((g) => g.kind === 'missing_photo')).toHaveLength(4)
+    expect(gaps.filter((g) => g.kind === 'missing_photo')).toHaveLength(3) // dashboard, wallet, odometer
     expect(gaps).toContainEqual({ kind: 'no_orders' })
   })
 })
@@ -351,7 +351,7 @@ describe('battery evidence scales with the bike', () => {
 
   it('the close gate demands the same per-pack evidence', () => {
     const end: EndPackage = {
-      mediaSlots: ['dashboard', 'wallet', 'odometer', 'wallet_zeroed'],
+      mediaSlots: ['dashboard', 'wallet', 'odometer'],
       odometerKm: 1100,
       batteryPercent: 20,
       cashDeclared: syp(0),
@@ -370,7 +370,7 @@ describe('battery evidence scales with the bike', () => {
     // A driver who left it blank submitted 0, and the manager was never shown it. A bike handed
     // back at 5% is an operational fact, not a typo to be silently normalised away.
     const gaps = endPackageGaps({
-      mediaSlots: ['dashboard', 'wallet', 'odometer', 'wallet_zeroed'],
+      mediaSlots: ['dashboard', 'wallet', 'odometer'],
       odometerKm: 1100,
       batteryPercent: null,
       cashDeclared: syp(0),
