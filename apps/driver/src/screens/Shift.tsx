@@ -8,6 +8,7 @@ import { useGpsBeacon } from '../use-gps-beacon.ts'
 import { Button, Card, Field, Money, MoneyInput, Screen, TextInput } from '../ui.tsx'
 import { OrderEntry } from './OrderEntry.tsx'
 import { BatteryPanel, type FittedBattery } from './BatteryPanel.tsx'
+import { BatterySwap, type SpareBattery } from './BatterySwap.tsx'
 import { PhotoSlot } from './PhotoSlot.tsx'
 
 /**
@@ -40,12 +41,15 @@ const PHASE_FOR: Record<string, Phase> = {
 export function ShiftFlow({
   assignment,
   batteries,
+  spares = [],
   resume,
   onDiscarded,
 }: {
   assignment: { driverId: string; vehicleId: string; shiftNo: number }
   /** The packs fitted to this bike, from `/me/assignment` — the same list the BR5 gate counts. */
   batteries: readonly FittedBattery[]
+  /** Ready spares on the branch shelf, for a mid-shift swap (SRS §L seam). */
+  spares?: readonly SpareBattery[]
   /** A shift already in flight. Present ⇒ resume it; absent ⇒ this is a fresh start. */
   resume?: { id: string; state: string }
   onDiscarded?(): void
@@ -53,6 +57,9 @@ export function ShiftFlow({
   const { api, t } = useApp()
   const toast = useToast()
   const [phase, setPhase] = useState<Phase>(resume ? (PHASE_FOR[resume.state] ?? 'start') : 'start')
+  // The fitted set can change mid-shift when the driver swaps a pack, so it lives in state: the
+  // swap panel hands back the new fitment and the close screen then reads THAT, not the old pack.
+  const [fitted, setFitted] = useState<readonly FittedBattery[]>(batteries)
   const [shift, setShift] = useState<ShiftState | null>(null)
   const [recorded, setRecorded] = useState<DraftOrder[]>([])
   const [orderError, setOrderError] = useState<string | null>(null)
@@ -96,12 +103,6 @@ export function ShiftFlow({
       .catch(() => setLoaded(true)) // fall back to the state /me/assignment reported
   }, [api, resume])
 
-  const discard = async (): Promise<void> => {
-    if (!resume) return
-    await api.cancelMyShift(resume.id).catch(() => undefined)
-    onDiscarded?.()
-  }
-
   if (!loaded) {
     return (
       <Screen title={t.shift.resumeShift}>
@@ -116,9 +117,9 @@ export function ShiftFlow({
     return (
       <StartPackage
         assignment={assignment}
-        batteries={batteries}
+        batteries={fitted}
         existingShiftId={resume?.id ?? null}
-        onDiscard={resume ? discard : undefined}
+        onDiscarded={onDiscarded}
         awaiting={phase === 'awaiting'}
         onOpened={(id) => {
           setShift({ id, floatText: '0', topupText: '0' })
@@ -163,6 +164,9 @@ export function ShiftFlow({
           setPhase('end')
         }}
       />
+      {/* «تبديل بطارية» (SRS §L seam): at a charging stop the driver swaps a depleted pack for a
+          charged spare; both packs' readings are captured and the bike is re-fitted. */}
+      <BatterySwap shiftId={shift.id} fitted={fitted} spares={spares} onSwapped={setFitted} />
       {/* «بلاغ حادثة» (C-1): the driver can't suspend himself — he flags the incident to the
           branch, which rings the bell so a manager can put the shift on hold. */}
       <ReportIncident shiftId={shift.id} />
@@ -172,7 +176,7 @@ export function ShiftFlow({
     )
   }
   if (phase === 'end' && shift) {
-    return <EndPackage shift={shift} batteries={batteries} onSubmitted={() => setPhase('done')} />
+    return <EndPackage shift={shift} batteries={fitted} onSubmitted={() => setPhase('done')} />
   }
   const doneShiftId = shift?.id ?? resume?.id ?? null
   return (
@@ -228,7 +232,7 @@ function StartPackage({
   assignment,
   batteries,
   existingShiftId,
-  onDiscard,
+  onDiscarded,
   awaiting,
   onOpened,
   onApproved,
@@ -237,7 +241,8 @@ function StartPackage({
   batteries: readonly FittedBattery[]
   /** A draft that already exists. Present ⇒ attach to it; absent ⇒ create one. */
   existingShiftId?: string | null
-  onDiscard?: (() => Promise<void>) | undefined
+  /** Called after the draft is cancelled, to return to bike selection. */
+  onDiscarded?: (() => void) | undefined
   awaiting: boolean
   onOpened(shiftId: string): void
   onApproved(funds: { floatText: string; topupText: string }): void
@@ -349,18 +354,30 @@ function StartPackage({
     return () => clearInterval(timer)
   }, [awaiting, shiftId, api, onApproved])
 
+  // Back out of a fresh (or resumed-but-unopened) shift. The draft it created holds the bike and
+  // nothing has posted yet, so cancelling it releases the bike and returns to selection — the only
+  // way «العودة من هنا» before the manager opens the shift.
+  const discardSelf = async (): Promise<void> => {
+    if (!shiftId) return
+    await api.cancelMyShift(shiftId).catch(() => undefined)
+    onDiscarded?.()
+  }
+
   if (awaiting) {
     return (
       <Screen title={t.shift.startPackage}>
         <Card>
           <p className="text-center text-lg font-semibold text-amber-700">{t.shift.states.awaiting_open_approval}…</p>
         </Card>
-        {onDiscard ? <DiscardButton onDiscard={onDiscard} /> : null}
+        {shiftId ? <DiscardButton onDiscard={discardSelf} /> : null}
       </Screen>
     )
   }
 
-  const ready = shiftId !== null && odoShot && odo !== '' && battery !== ''
+  // `batteriesReady` gates too, matching the close screen and the server BR5 gate: a driver can't
+  // confirm start until every fitted pack's required reading is in (was start-only before, so a
+  // two-pack bike could open with one pack's BMS blank and only fail at the manager's approval).
+  const ready = shiftId !== null && odoShot && odo !== '' && battery !== '' && batteriesReady
 
   return (
     <Screen
@@ -399,7 +416,7 @@ function StartPackage({
           <p className="text-center text-sm text-slate-500">{t.shift.resumeHint}</p>
         </Card>
       ) : null}
-      {onDiscard ? <DiscardButton onDiscard={onDiscard} /> : null}
+      {shiftId ? <DiscardButton onDiscard={discardSelf} /> : null}
       {ocrBusy ? <p className="text-center text-sm text-slate-400">{t.shift.reading}…</p> : null}
       <Card className="flex flex-col gap-3">
         <Field label={t.shift.odometer}>

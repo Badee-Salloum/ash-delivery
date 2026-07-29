@@ -40,6 +40,16 @@ export interface ShiftStateView {
     batteries: Array<{ batteryId: string; slotNo: number; percent: number | null }>
   }
   orders: Array<{ providerOrderNo: string; payMode: 'cash' | 'electronic' | 'free'; fee: string; zone: string | null }>
+  /** Mid-shift battery swaps (SRS §L seam): the pack on `slotNo` came off, another went on. */
+  batterySwaps?: Array<{
+    seqNo: number
+    slotNo: number
+    occurredAt: string
+    outSerial: string | null
+    inSerial: string | null
+    outPercent: number | null
+    inPercent: number | null
+  }>
   /** The manager's latest decision (C-7): present after a re-shoot request / reject, so the driver knows why. */
   lastDecision?: { decision: 'approved' | 'rejected' | 'rephoto_requested'; notes: string | null } | null
 }
@@ -362,14 +372,26 @@ export class ApiClient {
 
   vehicleTypes() {
     return this.get<{
-      vehicleTypes: Array<{ id: string; code: string; nameAr: string; nameEn: string; typeNo: number; active: boolean }>
+      vehicleTypes: Array<{
+        id: string
+        code: string
+        nameAr: string
+        nameEn: string
+        typeNo: number
+        /** Max packs a machine of this type may carry — the ceiling, not the count. */
+        batterySlots: number
+        active: boolean
+      }>
     }>('/vehicle-types')
   }
-  createVehicleType(body: { code: string; nameAr: string; nameEn: string; typeNo: number }) {
+  createVehicleType(body: { code: string; nameAr: string; nameEn: string; typeNo: number; batterySlots?: number }) {
     return this.post<{ id: string }>('/vehicle-types', body)
   }
   /** Changing `typeNo` restates the printed number of every vehicle of this type. */
-  updateVehicleType(id: string, body: { nameAr?: string; nameEn?: string; typeNo?: number; active?: boolean }) {
+  updateVehicleType(
+    id: string,
+    body: { nameAr?: string; nameEn?: string; typeNo?: number; batterySlots?: number; active?: boolean },
+  ) {
     return this.patch<{ id: string }>(`/vehicle-types/${id}`, body)
   }
 
@@ -409,6 +431,34 @@ export class ApiClient {
       package: pkg,
       readings,
     })
+  }
+
+  /**
+   * Record a mid-shift battery swap (SRS §L seam): the pack on `slotNo` comes off, `inBatteryId`
+   * (a charged spare) goes on. Both packs' BMS readings are captured; the server re-fits the bike.
+   */
+  swapBattery(
+    shiftId: string,
+    body: {
+      slotNo: number
+      inBatteryId: string
+      outReading: Omit<BatteryReadingInput, 'batteryId'>
+      inReading: Omit<BatteryReadingInput, 'batteryId'>
+    },
+  ) {
+    return this.post<{
+      swap: { id: string; seqNo: number; slotNo: number }
+      readings: BatteryReadingInput[]
+      /** The bike's fitted set AFTER the swap — the driver app takes this back so the close screen
+       *  asks for the pack now on the bike, not the one that just came off. */
+      batteries: Array<{
+        id: string
+        slotNo: number | null
+        capacityAh: number
+        serialNo: string | null
+        bmsProfile?: string | null
+      }>
+    }>(`/shifts/${shiftId}/battery-swap`, body)
   }
 
   // ── Driver ↔ vehicle assignments (B-3) ──────────────────────────────────────────────────────

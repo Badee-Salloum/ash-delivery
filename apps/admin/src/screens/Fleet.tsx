@@ -32,6 +32,8 @@ interface VehicleType {
   nameAr: string
   nameEn: string
   typeNo: number
+  /** Max packs a machine of this type may carry — the configurable ceiling. */
+  batterySlots: number
   active: boolean
 }
 interface Battery {
@@ -123,6 +125,11 @@ export function Fleet(): ReactNode {
   const packsOn = (vehicleId: string): Battery[] =>
     batteries.filter((b) => b.vehicleId === vehicleId && b.active).sort((a, b) => (a.slotNo ?? 0) - (b.slotNo ?? 0))
   const codeOfVehicle = (id: string): string => vehicles.find((v) => v.id === id)?.code ?? id.slice(0, 8)
+  /** How many slots a bike offers — its type's configurable ceiling (default 2 if unknown). */
+  const maxSlotsFor = (vehicleId: string | null): number => {
+    const vehicle = vehicles.find((v) => v.id === vehicleId)
+    return types.find((ty) => ty.id === vehicle?.vehicleTypeId)?.batterySlots ?? 2
+  }
 
   useEffect(() => {
     if (!newVehicle.vehicleTypeId) {
@@ -562,8 +569,11 @@ export function Fleet(): ReactNode {
                   }}
                 >
                   <option value="">—</option>
-                  <option value="1">1</option>
-                  <option value="2">2</option>
+                  {Array.from({ length: maxSlotsFor(b.vehicleId) }, (_, i) => i + 1).map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
                 </select>
               </td>
               <td className="px-3 py-1">

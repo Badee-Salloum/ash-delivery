@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto'
 import type {
+  BatteryReadingFields,
+  BatteryReadingRecord,
+  BatteryRecord,
+  BatterySwapRecord,
   Deps,
   DocumentRecord,
   ShiftOrderRecord,
@@ -556,6 +560,101 @@ export async function addTranche(
       : { ...shift, topupTranches: [...shift.topupTranches, input.amount] }
   await deps.shifts.update(updated)
   return updated
+}
+
+// ── Mid-shift battery swap (SRS §L seam) ────────────────────────────────────────────────────
+
+/**
+ * The driver swapped a depleted pack for a charged spare at a charging stop (new scope beyond the
+ * SRS's single «نسبة البطارية»; section L is deferred). Both packs' BMS readings are captured — the
+ * outgoing pack's FINAL state and the incoming pack's FIRST — the bike is re-fitted (old pack → a
+ * charging spare, new pack → the slot), and the swap is logged. No money moves, so BR1 and the
+ * close equation are untouched. `shift.operate` on his own live shift (route), like adding an order.
+ *
+ * Ordering matters: the outgoing pack is cleared from `(vehicle, slot)` BEFORE the incoming pack
+ * takes it, or the `batteries_slot_uq (vehicle_id, slot_no)` index would reject the second write.
+ */
+export async function swapBattery(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: { slotNo: number; inBatteryId: string; outReading: BatteryReadingFields; inReading: BatteryReadingFields },
+): Promise<{ swap: BatterySwapRecord; readings: BatteryReadingRecord[]; fitted: BatteryRecord[] }> {
+  const shift = await mustFind(deps, shiftId)
+  if (shift.state !== 'open' && shift.state !== 'suspended') {
+    throw new ServiceError(409, 'shift_not_open_for_swap')
+  }
+
+  // The pack fitted to this bike at that slot right now is the one coming off.
+  const fitted = await deps.directory.listBatteriesForVehicle(shift.vehicleId)
+  const outgoing = fitted.find((b) => b.slotNo === input.slotNo)
+  if (!outgoing) throw new ServiceError(422, 'slot_not_fitted', { slotNo: input.slotNo })
+
+  // The pack going on must be a READY SPARE in the same branch — on the shelf, not on another bike.
+  const incoming = await deps.directory.battery(input.inBatteryId)
+  if (!incoming || !incoming.active || incoming.branchId !== shift.branchId) {
+    throw new ServiceError(404, 'battery_not_found', { batteryId: input.inBatteryId })
+  }
+  if (incoming.id === outgoing.id) throw new ServiceError(422, 'same_battery')
+  if (incoming.vehicleId !== null || incoming.state !== 'ready') {
+    throw new ServiceError(422, 'spare_not_available', { batteryId: incoming.id, state: incoming.state })
+  }
+
+  const seqNo = (await deps.batterySwaps.listByShift(shift.id)).length + 1
+  const swap: BatterySwapRecord = {
+    id: deps.ids.uuid(),
+    shiftId: shift.id,
+    seqNo,
+    slotNo: input.slotNo,
+    outBatteryId: outgoing.id,
+    inBatteryId: incoming.id,
+    occurredAtMs: deps.clock.nowMs(),
+    createdBy: actor.userId,
+  }
+  await deps.batterySwaps.create(swap)
+
+  await deps.batteryReadings.upsert(swapReading(shift.id, outgoing.id, 'swap_out', input.slotNo, swap.id, input.outReading))
+  await deps.batteryReadings.upsert(swapReading(shift.id, incoming.id, 'swap_in', input.slotNo, swap.id, input.inReading))
+
+  // Re-fit: outgoing to the shelf to charge, then incoming into the freed slot.
+  await deps.directory.updateBattery({ ...outgoing, vehicleId: null, slotNo: null, state: 'charging' })
+  await deps.directory.updateBattery({ ...incoming, vehicleId: shift.vehicleId, slotNo: input.slotNo, state: 'ready' })
+
+  return {
+    swap,
+    readings: await deps.batteryReadings.listByShift(shift.id),
+    // The bike's fitted set changed. The driver app MUST take this back, or its close screen would
+    // still ask for the pack that just came off and reject the reading for the one now on.
+    fitted: await deps.directory.listBatteriesForVehicle(shift.vehicleId),
+  }
+}
+
+function swapReading(
+  shiftId: string,
+  batteryId: string,
+  pkg: 'swap_out' | 'swap_in',
+  slotNo: number,
+  batterySwapId: string,
+  r: BatteryReadingFields,
+): BatteryReadingRecord {
+  return {
+    shiftId,
+    batteryId,
+    package: pkg,
+    slotNo,
+    percent: r.percent,
+    packMillivolts: r.packMillivolts,
+    cycleCount: r.cycleCount,
+    remainCapacityDah: r.remainCapacityDah,
+    fullCapacityDah: r.fullCapacityDah,
+    mosTempDc: r.mosTempDc,
+    t1Dc: r.t1Dc,
+    t2Dc: r.t2Dc,
+    mediaId: null,
+    source: r.source,
+    ocrRaw: r.ocrRaw ?? null,
+    batterySwapId,
+  }
 }
 
 // ── Orders ────────────────────────────────────────────────────────────────────────────────

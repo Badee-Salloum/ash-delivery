@@ -28,6 +28,7 @@ import type {
   VehicleTypeRecord,
 } from '@ash/contracts'
 import {
+  MAX_BATTERY_SLOTS,
   addDays,
   alertBandFor,
   canTransitionVehicle,
@@ -403,6 +404,7 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
       ...(body.nameAr === undefined ? {} : { nameAr: body.nameAr }),
       ...(body.nameEn === undefined ? {} : { nameEn: body.nameEn }),
       ...(body.typeNo === undefined ? {} : { typeNo: body.typeNo }),
+      ...(body.batterySlots === undefined ? {} : { batterySlots: body.batterySlots }),
       ...(body.active === undefined ? {} : { active: body.active }),
     }
     await createOrConflict(
@@ -423,6 +425,7 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
     const body = createBatteryRequest.parse(req.body)
     const branchId = resolveBranch(req)
     assertPlacement(body.vehicleId, body.slotNo)
+    await assertSlotWithinType(body.vehicleId, body.slotNo)
 
     const battery: BatteryRecord = {
       id: deps.ids.uuid(),
@@ -459,6 +462,7 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
       ...(body.active === undefined ? {} : { active: body.active }),
     }
     assertPlacement(after.vehicleId, after.slotNo)
+    await assertSlotWithinType(after.vehicleId, after.slotNo)
 
     // Pulling a pack off a bike mid-shift would leave the close gate demanding a screenshot for
     // a pack that is no longer there — and the shift could never be submitted.
@@ -479,6 +483,20 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
         hint: 'send both vehicleId and slotNo to fit a pack, or neither to leave it a spare',
       })
     }
+  }
+
+  /**
+   * The real per-type pack ceiling, enforced here because a CHECK constraint cannot reach across
+   * from `batteries` to the bike's `vehicle_type`. `slot_no` is capped in SQL only by the generous
+   * hard backstop (1..8); a bike may hold no more packs than its type's `batterySlots`.
+   */
+  async function assertSlotWithinType(vehicleId: string | null, slotNo: number | null): Promise<void> {
+    if (vehicleId === null || slotNo === null) return
+    const vehicle = await deps.directory.vehicle(vehicleId)
+    if (!vehicle) throw new ServiceError(404, 'vehicle_not_found')
+    const type = (await deps.directory.listVehicleTypes()).find((t) => t.id === vehicle.vehicleTypeId)
+    const max = type?.batterySlots ?? MAX_BATTERY_SLOTS
+    if (slotNo > max) throw new ServiceError(422, 'slot_out_of_range', { slotNo, max })
   }
 
   /** Both adapters raise DUPLICATE_CODE, so the route handles one case rather than two. */

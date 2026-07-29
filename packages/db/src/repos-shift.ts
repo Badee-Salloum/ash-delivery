@@ -7,6 +7,8 @@ import type {
   BatteryReadingRecord,
   BatteryReadingRepo,
   BatteryRecord,
+  BatterySwapRecord,
+  BatterySwapRepo,
   BranchRecord,
   EvidencePackage,
   GovernorateRecord,
@@ -535,8 +537,8 @@ export class PgDirectoryRepo implements DirectoryRepo {
     await this.uniqueOr(
       () =>
         this.pool.query(
-          'INSERT INTO vehicle_types (id, code, name_ar, name_en, type_no, active) VALUES ($1,$2,$3,$4,$5,$6)',
-          [t.id, t.code, t.nameAr, t.nameEn, t.typeNo, t.active],
+          'INSERT INTO vehicle_types (id, code, name_ar, name_en, type_no, battery_slots, active) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+          [t.id, t.code, t.nameAr, t.nameEn, t.typeNo, t.batterySlots, t.active],
         ),
       `vehicle type ${t.code} or number ${t.typeNo} is taken`,
     )
@@ -558,8 +560,8 @@ export class PgDirectoryRepo implements DirectoryRepo {
     await withTransaction(this.pool, {}, async (client) => {
       try {
         await client.query(
-          'UPDATE vehicle_types SET code = $2, name_ar = $3, name_en = $4, type_no = $5, active = $6 WHERE id = $1',
-          [t.id, t.code, t.nameAr, t.nameEn, t.typeNo, t.active],
+          'UPDATE vehicle_types SET code = $2, name_ar = $3, name_en = $4, type_no = $5, battery_slots = $6, active = $7 WHERE id = $1',
+          [t.id, t.code, t.nameAr, t.nameEn, t.typeNo, t.batterySlots, t.active],
         )
       } catch (err) {
         if (isPgError(err, PG.UNIQUE_VIOLATION)) {
@@ -730,6 +732,7 @@ const toVehicleType = (r: Record<string, unknown>): VehicleTypeRecord => ({
   nameAr: String(r.name_ar),
   nameEn: String(r.name_en),
   typeNo: Number(r.type_no),
+  batterySlots: Number(r.battery_slots),
   active: Boolean(r.active),
 })
 
@@ -1452,8 +1455,8 @@ export class PgBatteryReadingRepo implements BatteryReadingRepo {
     await this.pool.query(
       `INSERT INTO shift_battery_readings
          (shift_id, battery_id, package, percent, pack_millivolts, cycle_count,
-          remain_capacity_dah, full_capacity_dah, mos_temp_dc, t1_dc, t2_dc, media_id, source, ocr_raw)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+          remain_capacity_dah, full_capacity_dah, mos_temp_dc, t1_dc, t2_dc, media_id, source, ocr_raw, battery_swap_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
        ON CONFLICT (shift_id, battery_id, package) DO UPDATE SET
          percent = EXCLUDED.percent,
          pack_millivolts = EXCLUDED.pack_millivolts,
@@ -1465,11 +1468,13 @@ export class PgBatteryReadingRepo implements BatteryReadingRepo {
          t2_dc = EXCLUDED.t2_dc,
          media_id = EXCLUDED.media_id,
          source = EXCLUDED.source,
-         ocr_raw = COALESCE(shift_battery_readings.ocr_raw, EXCLUDED.ocr_raw)`,
+         ocr_raw = COALESCE(shift_battery_readings.ocr_raw, EXCLUDED.ocr_raw),
+         battery_swap_id = COALESCE(EXCLUDED.battery_swap_id, shift_battery_readings.battery_swap_id)`,
       [
         r.shiftId, r.batteryId, r.package, r.percent, r.packMillivolts, r.cycleCount,
         r.remainCapacityDah, r.fullCapacityDah, r.mosTempDc, r.t1Dc, r.t2Dc, r.mediaId, r.source,
         r.ocrRaw === null || r.ocrRaw === undefined ? null : JSON.stringify(r.ocrRaw),
+        r.batterySwapId,
       ],
     )
   }
@@ -1499,6 +1504,40 @@ export class PgBatteryReadingRepo implements BatteryReadingRepo {
       mediaId: (r.media_id as string | null) ?? null,
       source: r.source as BatteryReadingRecord['source'],
       ocrRaw: r.ocr_raw ?? null,
+      batterySwapId: (r.battery_swap_id as string | null) ?? null,
+    }))
+  }
+}
+
+/** The mid-shift battery-swap event log (SRS §L seam). Append-only, one row per swap per shift. */
+export class PgBatterySwapRepo implements BatterySwapRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async create(s: BatterySwapRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO battery_swaps (id, shift_id, seq_no, slot_no, out_battery_id, in_battery_id, occurred_at, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,to_timestamp($7 / 1000.0),$8)`,
+      [s.id, s.shiftId, s.seqNo, s.slotNo, s.outBatteryId, s.inBatteryId, s.occurredAtMs, s.createdBy],
+    )
+  }
+
+  async listByShift(shiftId: string): Promise<BatterySwapRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM battery_swaps WHERE shift_id = $1 ORDER BY seq_no',
+      [shiftId],
+    )
+    return rows.map((r) => ({
+      id: String(r.id),
+      shiftId: String(r.shift_id),
+      seqNo: Number(r.seq_no),
+      slotNo: Number(r.slot_no),
+      outBatteryId: String(r.out_battery_id),
+      inBatteryId: String(r.in_battery_id),
+      occurredAtMs: new Date(r.occurred_at as string).getTime(),
+      createdBy: (r.created_by as string | null) ?? null,
     }))
   }
 }

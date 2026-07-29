@@ -54,6 +54,7 @@ const AUDIT_EXEMPT = {
   driver_day_shares: 'a derived projection of audited journal entries',
   fx_rate_versions: 'append-only supersession history',
   gps_pings: 'high-volume append-only telemetry (SRS K); auditing every ping would dwarf the audit log',
+  battery_swaps: 'append-only event log; its substance — the pack fitment change on batteries and the swap_out/swap_in readings — is already audited, and the route appends an explicit audit row',
   audit_log: 'the audit log itself',
 }
 

@@ -19,6 +19,7 @@ import {
   updateSettingsRequest,
   startPackageRequest,
   putBatteryReadingsRequest,
+  batterySwapRequest,
 } from '@ash/contracts'
 import { addDays, checkWeekClose, dayOfWeek, minor, resolveFxDay, sum, weekClosedOn, weekStartFor } from '@ash/domain'
 import {
@@ -60,6 +61,7 @@ import {
   resumeShift,
   submitEndPackage,
   suspendShift,
+  swapBattery,
   voidShift,
   forceClose,
   submitStartPackage,
@@ -307,6 +309,11 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
             })),
           })),
       ),
+      // Ready spares on the branch shelf (not fitted to any bike), so the driver can pick one when
+      // he swaps a depleted pack mid-shift (SRS §L seam). Same fields as the fitted packs above.
+      spareBatteries: (await deps.directory.listBatteries(driver.branchId))
+        .filter((b) => b.vehicleId === null && b.state === 'ready' && b.active)
+        .map((b) => ({ id: b.id, slotNo: b.slotNo, capacityAh: b.capacityAh, serialNo: b.serialNo, bmsProfile: b.bmsProfile })),
     }
   })
 
@@ -438,9 +445,54 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           mediaId: null,
           source: reading.source,
           ocrRaw: reading.ocrRaw ?? null,
+          batterySwapId: null,
         })
       }
       return { readings: await deps.batteryReadings.listByShift(shift.id) }
+    },
+  )
+
+  /**
+   * A mid-shift battery swap (SRS §L seam). The driver traded a depleted pack for a charged spare;
+   * both readings are captured and the bike re-fitted. `shift.operate` (his own live shift). Audited
+   * — it moves an asset between the bike and the shelf.
+   */
+  app.post(
+    '/shifts/:id/battery-swap',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req, reply) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const body = batterySwapRequest.parse(req.body)
+      const result = await swapBattery(deps, req.actor!, id, body)
+      await deps.audit.append({
+        tableName: 'battery_swaps',
+        recordId: result.swap.id,
+        action: 'INSERT',
+        actorId: req.actor!.userId,
+        actorKind: 'user',
+        branchId: req.actor!.branchId,
+        requestId: req.requestId,
+        before: null,
+        after: {
+          slotNo: result.swap.slotNo,
+          outBatteryId: result.swap.outBatteryId,
+          inBatteryId: result.swap.inBatteryId,
+        },
+        occurredAtMs: deps.clock.nowMs(),
+      })
+      return reply.code(201).send({
+        swap: { id: result.swap.id, seqNo: result.swap.seqNo, slotNo: result.swap.slotNo },
+        readings: result.readings,
+        // The refreshed fitted set, in the driver-app FittedBattery shape, so the close screen asks
+        // for the pack now on the bike, not the one that just came off.
+        batteries: result.fitted.map((b) => ({
+          id: b.id,
+          slotNo: b.slotNo,
+          capacityAh: b.capacityAh,
+          serialNo: b.serialNo,
+          bmsProfile: b.bmsProfile,
+        })),
+      })
     },
   )
 
@@ -584,13 +636,17 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     if (!shift) return null
     // Per-pack readings, joined to the packs so a slot and a capacity are shown rather than a
     // uuid. A two-pack bike hands back two of these at each end of the shift.
-    const [orders, readings, fitted, slots] = await Promise.all([
+    const [orders, readings, fitted, slots, swaps, allBatteries] = await Promise.all([
       deps.orders.listByShift(shiftId),
       deps.batteryReadings.listByShift(shiftId),
       deps.directory.listBatteriesForVehicle(shift.vehicleId),
       // C-7: the review must SHOW the photos, not just their slot names. Each attached slot carries
       // the media id the RBAC-checked GET /media/:id serves.
       deps.media.listSlots(shiftId),
+      deps.batterySwaps.listByShift(shiftId),
+      // Serials for BOTH packs of every swap — the outgoing one is no longer fitted, so it is not in
+      // `fitted`; it has to be resolved off the branch's full battery list.
+      deps.directory.listBatteries(shift.branchId),
     ])
     const withPack = (pkg: 'start' | 'end') =>
       readings
@@ -600,6 +656,20 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           return { ...r, capacityAh: battery?.capacityAh ?? null, serialNo: battery?.serialNo ?? null }
         })
         .sort((a, b) => a.slotNo - b.slotNo)
+
+    // Mid-shift swaps (SRS §L seam), resolved to serials + each pack's captured percent.
+    const serialById = new Map(allBatteries.map((b) => [b.id, b.serialNo]))
+    const swapPercent = (pkg: 'swap_out' | 'swap_in', batteryId: string): number | null =>
+      readings.find((r) => r.package === pkg && r.batteryId === batteryId)?.percent ?? null
+    const batterySwaps = swaps.map((s) => ({
+      seqNo: s.seqNo,
+      slotNo: s.slotNo,
+      occurredAt: new Date(s.occurredAtMs).toISOString(),
+      outSerial: serialById.get(s.outBatteryId) ?? null,
+      inSerial: serialById.get(s.inBatteryId) ?? null,
+      outPercent: swapPercent('swap_out', s.outBatteryId),
+      inPercent: swapPercent('swap_in', s.inBatteryId),
+    }))
 
     return {
       shift,
@@ -641,6 +711,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           feeOcr: o.feeOcr === null ? null : serializeMoney(o.feeOcr),
         })),
         media: slots.map((s) => ({ package: s.package, slot: s.slot, mediaId: s.mediaId })),
+        batterySwaps,
       },
     }
   }

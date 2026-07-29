@@ -27,6 +27,14 @@ interface Assignment {
       bmsProfile?: string | null
     }>
   }>
+  /** Ready spares on the branch shelf, for a mid-shift battery swap (SRS §L seam). */
+  spareBatteries?: Array<{
+    id: string
+    slotNo: number | null
+    capacityAh: number
+    serialNo: string | null
+    bmsProfile?: string | null
+  }>
 }
 
 /**
@@ -114,6 +122,7 @@ export function DriverApp(): ReactNode {
         <ShiftFlow
           assignment={{ driverId: session.driverId, vehicleId: bike?.id ?? '', shiftNo: 1 }}
           batteries={bike?.batteries ?? []}
+          spares={assignment.spareBatteries ?? []}
           resume={{ id: assignment.liveShiftId, state: assignment.liveShiftState ?? 'draft' }}
           onDiscarded={() => {
             setVehicleId(null)
@@ -181,6 +190,7 @@ export function DriverApp(): ReactNode {
       <ShiftFlow
         assignment={{ driverId: session.driverId, vehicleId, shiftNo: 1 }}
         batteries={assignment?.vehicles.find((v) => v.id === vehicleId)?.batteries ?? []}
+        spares={assignment?.spareBatteries ?? []}
         onDiscarded={() => setVehicleId(null)}
       />
     </div>

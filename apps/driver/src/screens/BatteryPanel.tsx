@@ -33,8 +33,8 @@ export interface FittedBattery {
  * manual edit WITH its difference from the OCR reading" is recoverable later.
  */
 
-/** The fields, in the order a driver reads them off the screen. */
-const FIELDS = [
+/** The fields, in the order a driver reads them off the screen. Shared with the swap panel. */
+export const FIELDS = [
   // `required` is the shift gate's own rule: a pack with no charge reading cannot open a shift.
   // Everything below it is pack health — worth having, never worth blocking a driver over.
   { key: 'percent', label: 'percent', unit: '%', scale: 1, decimals: 0, required: true },
@@ -65,7 +65,7 @@ export const toText = (stored: number | null, scale: number, decimals: number): 
 }
 
 /** What the driver typed → the scaled integer. "83.37" → 83_370. Blank is null, never 0. */
-const toStored = (text: string, scale: number): number | null => {
+export const toStored = (text: string, scale: number): number | null => {
   const trimmed = text.trim()
   if (trimmed === '') return null
   const n = Number(trimmed)

@@ -24,6 +24,8 @@ interface VehicleType {
   nameAr: string
   nameEn: string
   typeNo: number
+  /** Max packs a machine of this type may carry — the configurable ceiling. */
+  batterySlots: number
   active: boolean
 }
 
@@ -272,7 +274,7 @@ function VehicleTypeCard({
   run: Runner
 }): ReactNode {
   const { api, t } = useApp()
-  const [draft, setDraft] = useState({ code: '', nameAr: '', nameEn: '', typeNo: '' })
+  const [draft, setDraft] = useState({ code: '', nameAr: '', nameEn: '', typeNo: '', batterySlots: '2' })
 
   return (
     <Card title={t.fleet.vehicleType}>
@@ -288,6 +290,14 @@ function VehicleTypeCard({
             onChange={(e) => setDraft({ ...draft, typeNo: e.target.value })}
             className="num w-20"
           />
+          <TextInput
+            inputMode="numeric"
+            placeholder={t.fleet.batterySlots}
+            aria-label={t.fleet.batterySlots}
+            value={draft.batterySlots}
+            onChange={(e) => setDraft({ ...draft, batterySlots: e.target.value })}
+            className="num w-24"
+          />
           <Button
             disabled={!draft.code || !draft.nameAr || !draft.nameEn || !draft.typeNo}
             onClick={async () => {
@@ -298,10 +308,11 @@ function VehicleTypeCard({
                     nameAr: draft.nameAr,
                     nameEn: draft.nameEn,
                     typeNo: Number(draft.typeNo),
+                    batterySlots: draft.batterySlots.trim() === '' ? 2 : Number(draft.batterySlots),
                   }),
                 t.accounts.created,
               )
-              setDraft({ code: '', nameAr: '', nameEn: '', typeNo: '' })
+              setDraft({ code: '', nameAr: '', nameEn: '', typeNo: '', batterySlots: '2' })
             }}
           >
             {t.fleet.addType}
@@ -311,7 +322,7 @@ function VehicleTypeCard({
       {/* Said before the control is used, not after: this edit rewrites printed numbers. */}
       <p className="mb-2 text-xs text-amber-700">{t.fleet.typeNoHint}</p>
 
-      <Table head={[t.fleet.typeNo, t.fleet.vehicleType, t.fleet.code, '']}>
+      <Table head={[t.fleet.typeNo, t.fleet.vehicleType, t.fleet.code, t.fleet.batterySlots, '']}>
         {types.map((ty) => (
           <tr key={ty.id}>
             <td className="px-3 py-1 num font-semibold">{ty.typeNo}</td>
@@ -324,6 +335,17 @@ function VehicleTypeCard({
               )}
             </td>
             <td className="px-3 py-1 text-slate-400">{ty.code}</td>
+            <td className="px-3 py-1">
+              {canEdit ? (
+                <NumberEdit
+                  value={ty.batterySlots}
+                  onSave={(batterySlots) => run(() => api.updateVehicleType(ty.id, { batterySlots }), t.accounts.updated)}
+                  label={t.common.save}
+                />
+              ) : (
+                <span className="num">{ty.batterySlots}</span>
+              )}
+            </td>
             <td className="px-3 py-1">
               {canEdit ? (
                 <NumberEdit

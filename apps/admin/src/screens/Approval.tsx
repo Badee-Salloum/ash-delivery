@@ -48,6 +48,15 @@ interface Review {
     batteries: BatteryReadingView[]
   }
   orders: Array<{ providerOrderNo: string; payMode: string; fee: string; zone: string | null; source?: 'manual' | 'ocr'; feeOcr?: string | null }>
+  batterySwaps?: Array<{
+    seqNo: number
+    slotNo: number
+    occurredAt: string
+    outSerial: string | null
+    inSerial: string | null
+    outPercent: number | null
+    inPercent: number | null
+  }>
   media: Array<{ package: 'start' | 'end'; slot: string; mediaId: string }>
   decisions: Array<{ gate: 'open' | 'close'; decision: 'approved' | 'rejected' | 'rephoto_requested'; notes: string | null; decidedAt: string }>
   br1: {
@@ -267,6 +276,26 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           <BatteryReadings readings={review.endPackage.batteries} />
         </Card>
       </div>
+
+      {/* Mid-shift battery swaps (SRS §L seam): the pack on a slot came off, a charged spare went on. */}
+      {review.batterySwaps && review.batterySwaps.length > 0 ? (
+        <Card title={t.battery.swap.title}>
+          <Table head={['#', t.battery.swap.slot, t.battery.swap.outReading, t.battery.swap.inReading]}>
+            {review.batterySwaps.map((s) => (
+              <tr key={s.seqNo}>
+                <td className="px-3 py-1 num text-slate-500">{s.seqNo}</td>
+                <td className="px-3 py-1 num">{t.battery.swap.slotLabel.replace('{{n}}', String(s.slotNo))}</td>
+                <td className="px-3 py-1 num">
+                  {s.outSerial ?? '—'} · {s.outPercent ?? '—'}%
+                </td>
+                <td className="px-3 py-1 num">
+                  {s.inSerial ?? '—'} · {s.inPercent ?? '—'}%
+                </td>
+              </tr>
+            ))}
+          </Table>
+        </Card>
+      ) : null}
 
       <Card title={`${t.orders.title} — ${review.orders.length}`}>
         <Table head={['#', t.orders.orderNo, t.orders.payMode, t.orders.fee]}>

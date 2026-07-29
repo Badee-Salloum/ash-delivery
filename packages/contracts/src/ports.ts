@@ -95,6 +95,12 @@ export interface VehicleTypeRecord {
    * does both in one transaction, and why `vehicle_types` is audited.
    */
   typeNo: number
+  /**
+   * The maximum battery packs a machine of this type may carry (configurable, sysadmin-set). The
+   * ceiling, not the count: a bike's actual pack count is `COUNT(*)` of the packs fitted to it. The
+   * per-bike `slot_no` is validated against this app-side (a cross-table CHECK cannot).
+   */
+  batterySlots: number
   active: boolean
 }
 
@@ -132,10 +138,17 @@ export interface BatteryRecord {
  * "log the manual edit WITH its difference from the OCR reading" stays computable at any time
  * rather than only at the moment of typing.
  */
+/**
+ * When a pack reading was taken. `start`/`end` are the two shift gates; `swap_out`/`swap_in` are
+ * the two halves of a mid-shift swap — the final reading of the pack coming off and the first
+ * reading of the pack going on. Distinct from `EvidencePackage` (media slots), which has no swap.
+ */
+export type BatteryReadingPackage = 'start' | 'end' | 'swap_out' | 'swap_in'
+
 export interface BatteryReadingRecord {
   shiftId: string
   batteryId: string
-  package: EvidencePackage
+  package: BatteryReadingPackage
   slotNo: number
   percent: number | null
   packMillivolts: number | null
@@ -148,6 +161,24 @@ export interface BatteryReadingRecord {
   mediaId: string | null
   source: 'ocr' | 'manual'
   ocrRaw: unknown
+  /** The mid-shift swap this reading belongs to; null for the ordinary start/end readings. */
+  batterySwapId: string | null
+}
+
+/**
+ * A mid-shift battery swap (SRS §L seam): the driver traded a depleted pack for a charged spare
+ * at a charging stop. One row per swap, discriminated per shift by `seqNo` (like a float tranche).
+ * The pack fitment change itself lives on `batteries` and is audited there; this is the event log.
+ */
+export interface BatterySwapRecord {
+  id: string
+  shiftId: string
+  seqNo: number
+  slotNo: number
+  outBatteryId: string
+  inBatteryId: string
+  occurredAtMs: number
+  createdBy: string | null
 }
 
 export interface UserRecord {
@@ -721,6 +752,13 @@ export interface BatteryReadingRepo {
   listByShift(shiftId: string): Promise<BatteryReadingRecord[]>
 }
 
+/** The mid-shift battery-swap event log (SRS §L seam). Append-only, one row per swap per shift. */
+export interface BatterySwapRepo {
+  create(swap: BatterySwapRecord): Promise<void>
+  /** Every swap on a shift, in the order they happened. Length + max seqNo drive the next seqNo. */
+  listByShift(shiftId: string): Promise<BatterySwapRecord[]>
+}
+
 /**
  * The manager's decisions on a shift (SRS C-7, «سجل قرارات») — every approve, reject and re-shoot
  * request, with a note. Append-only; the review screen reads the log so the history of a shift's
@@ -776,6 +814,7 @@ export interface Deps {
   shifts: ShiftRepo
   assignments: AssignmentRepo
   batteryReadings: BatteryReadingRepo
+  batterySwaps: BatterySwapRepo
   orders: OrderRepo
   ledger: LedgerRepo
   expenses: ExpenseRepo

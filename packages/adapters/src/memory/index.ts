@@ -7,6 +7,8 @@ import type {
   BatteryReadingRecord,
   BatteryReadingRepo,
   BatteryRecord,
+  BatterySwapRecord,
+  BatterySwapRepo,
   GovernorateRecord,
   VehicleTypeRecord,
   AuditRecord,
@@ -236,6 +238,20 @@ export class MemoryBatteryReadingRepo implements BatteryReadingRepo {
     return [...this.rows.values()]
       .filter((r) => r.shiftId === shiftId)
       .sort((a, b) => a.package.localeCompare(b.package) || a.slotNo - b.slotNo)
+      .map((r) => ({ ...r }))
+  }
+}
+
+/** The mid-shift battery-swap event log (SRS §L seam). Append-only, ordered by seq_no per shift. */
+export class MemoryBatterySwapRepo implements BatterySwapRepo {
+  readonly rows: BatterySwapRecord[] = []
+  async create(swap: BatterySwapRecord): Promise<void> {
+    this.rows.push({ ...swap })
+  }
+  async listByShift(shiftId: string): Promise<BatterySwapRecord[]> {
+    return this.rows
+      .filter((r) => r.shiftId === shiftId)
+      .sort((a, b) => a.seqNo - b.seqNo)
       .map((r) => ({ ...r }))
   }
 }
@@ -789,6 +805,7 @@ export interface MemoryDeps extends Deps {
   directory: MemoryDirectoryRepo
   assignments: MemoryAssignmentRepo
   batteryReadings: MemoryBatteryReadingRepo
+  batterySwaps: MemoryBatterySwapRepo
   vehicleEvents: MemoryVehicleEventRepo
   attendance: MemoryAttendanceRepo
   decisions: MemoryShiftDecisionRepo
@@ -808,6 +825,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     shifts: new MemoryShiftRepo(media),
     assignments: new MemoryAssignmentRepo(),
     batteryReadings: new MemoryBatteryReadingRepo(),
+    batterySwaps: new MemoryBatterySwapRepo(),
     orders: new MemoryOrderRepo(),
     ledger,
     expenses: new MemoryExpenseRepo(),

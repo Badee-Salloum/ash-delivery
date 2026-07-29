@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { type Minor, formatMinor, parseMinor } from '@ash/domain'
+import { MAX_BATTERY_SLOTS, type Minor, formatMinor, parseMinor } from '@ash/domain'
 
 /**
  * Wire schemas.
@@ -230,6 +230,8 @@ export const createVehicleTypeRequest = z.object({
   nameAr: z.string().min(1).max(120),
   nameEn: z.string().min(1).max(120),
   typeNo: z.number().int().min(1).max(99),
+  /** Max packs a machine of this type may carry; the ceiling, not the count. Default 2. */
+  batterySlots: z.number().int().min(1).max(MAX_BATTERY_SLOTS).default(2),
 })
 
 /** Changing `typeNo` restates the printed code of every vehicle of this type. */
@@ -237,6 +239,7 @@ export const updateVehicleTypeRequest = z.object({
   nameAr: z.string().min(1).max(120).optional(),
   nameEn: z.string().min(1).max(120).optional(),
   typeNo: z.number().int().min(1).max(99).optional(),
+  batterySlots: z.number().int().min(1).max(MAX_BATTERY_SLOTS).optional(),
   active: z.boolean().optional(),
 })
 
@@ -248,7 +251,7 @@ export const createBatteryRequest = z.object({
   bmsMac: z.string().max(32).nullable().default(null),
   capacityAh: z.number().int().min(1).max(999),
   vehicleId: z.string().nullable().default(null),
-  slotNo: z.number().int().min(1).max(2).nullable().default(null),
+  slotNo: z.number().int().min(1).max(MAX_BATTERY_SLOTS).nullable().default(null),
   /** A profile id from the driver app's BMS_PROFILES; unconstrained so a new one needs no deploy. */
   bmsProfile: z.string().max(32).nullable().default(null),
   branchId: z.string().optional(),
@@ -259,7 +262,7 @@ export const updateBatteryRequest = z.object({
   bmsMac: z.string().max(32).nullable().optional(),
   capacityAh: z.number().int().min(1).max(999).optional(),
   vehicleId: z.string().nullable().optional(),
-  slotNo: z.number().int().min(1).max(2).nullable().optional(),
+  slotNo: z.number().int().min(1).max(MAX_BATTERY_SLOTS).nullable().optional(),
   state: z.enum(['ready', 'charging', 'maintenance', 'retired']).optional(),
   bmsProfile: z.string().max(32).nullable().optional(),
   active: z.boolean().optional(),
@@ -272,8 +275,8 @@ export const updateBatteryRequest = z.object({
  * the OCR itself produced before the driver touched anything, so SRS D-3's "log the manual edit
  * WITH its difference from the OCR reading" stays computable later rather than only at typing time.
  */
-export const batteryReadingRequest = z.object({
-  batteryId: z.string().min(1),
+/** The BMS quantities alone, without the pack id — shared by shift readings and swap readings. */
+export const batteryReadingFields = z.object({
   percent: z.number().int().min(0).max(100).nullable().default(null),
   packMillivolts: z.number().int().min(0).max(2_000_000).nullable().default(null),
   cycleCount: z.number().int().min(0).max(100_000).nullable().default(null),
@@ -286,9 +289,27 @@ export const batteryReadingRequest = z.object({
   ocrRaw: z.unknown().optional(),
 })
 
+export type BatteryReadingFields = z.infer<typeof batteryReadingFields>
+
+export const batteryReadingRequest = batteryReadingFields.extend({
+  batteryId: z.string().min(1),
+})
+
 export const putBatteryReadingsRequest = z.object({
   package: z.enum(['start', 'end']),
-  readings: z.array(batteryReadingRequest).min(1).max(2),
+  readings: z.array(batteryReadingRequest).min(1).max(MAX_BATTERY_SLOTS),
+})
+
+/**
+ * A mid-shift battery swap (SRS §L seam): at a charging stop the driver takes the pack off `slotNo`
+ * and fits `inBatteryId` (a charged spare). Both packs' BMS readings are captured — the outgoing
+ * pack's final state and the incoming pack's first — so per-pack health history is unbroken.
+ */
+export const batterySwapRequest = z.object({
+  slotNo: z.number().int().min(1).max(MAX_BATTERY_SLOTS),
+  inBatteryId: z.string().min(1),
+  outReading: batteryReadingFields,
+  inReading: batteryReadingFields,
 })
 
 export const updateVehicleRequest = z.object({

@@ -69,8 +69,13 @@ export const REQUIRED_END_SLOTS = ['dashboard', 'wallet', 'odometer'] as const
 export type StartSlot = (typeof REQUIRED_START_SLOTS)[number]
 export type EndSlot = (typeof REQUIRED_END_SLOTS)[number]
 
-/** The most packs one bike can carry — mirrors the `slot_no BETWEEN 1 AND 2` CHECK in 0007. */
-export const MAX_BATTERY_SLOTS = 2
+/**
+ * The absolute hard ceiling on packs per bike — mirrors the `slot_no BETWEEN 1 AND 8` backstop in
+ * 0013. It bounds slot enumeration and the upload-validation superset only; the REAL product limit
+ * is the configurable per-vehicle-type `battery_slots` (≤ this), enforced app-side, and the actual
+ * per-bike count is derived (COUNT of fitted packs). Raised from 2 once bikes carried three packs.
+ */
+export const MAX_BATTERY_SLOTS = 8
 
 /** The evidence slot for pack `n`'s BMS screenshot: `bms_1`, `bms_2`. */
 export const bmsSlot = (slotNo: number): string => `bms_${slotNo}`
