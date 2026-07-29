@@ -1,5 +1,42 @@
 # PROGRESS
 
+## 2026-07-29 (later) — batteries: back/cancel on start, two-or-more packs, mid-shift swap
+
+**All suites green (api 30 files incl. 6 new swap/ceiling tests), 6 guards green, migration 0013
+applied to Neon.** Three things the owner hit on the driver's start screen while walking the live
+test — a UX dead-end and two battery-model gaps.
+
+**Back / cancel on the start screen.** A fresh open created a draft that held the bike with no way
+out (Back is trapped, and the «إلغاء النوبة» discard was gated to the *resume* case only). Now
+`StartPackage` owns discard: it shows whenever a cancellable draft exists (`draft`/
+`awaiting_open_approval`) and reuses `cancelMyShift`. The start confirm-gate also now waits on every
+fitted pack's reading, matching the close screen and the server BR5 gate.
+
+**Two OR MORE packs per bike.** The 2-pack model existed but was hard-capped at `slot_no BETWEEN 1
+AND 2`. `vehicle_types` gains a **configurable `battery_slots`** (the ceiling — default 2,
+e_motorbike = 3); the per-bike count stays derived (`COUNT(*)` of fitted packs). The SQL cap loosens
+to a 1..8 backstop and `MAX_BATTERY_SLOTS` rises to 8; the real per-type limit is enforced app-side
+(`slot_out_of_range`). Sysadmin sets it on FleetConfig; the fit-slot picker follows it.
+
+**Mid-shift battery swap (SRS §L seam — new scope, owner-approved).** A driver-recorded event on an
+open shift: pick the slot + a ready spare, capture **both** packs' BMS readings (`swap_out` final,
+`swap_in` first), and the server re-fits the bike (old → charging spare, new → the slot) and logs
+it in `battery_swaps`. **No money moves** — BR1 and the shift state machine are untouched; it mirrors
+`addTranche` (C-5), not a transition. The refreshed fitted set flows back to the driver app so the
+close gate asks for the pack now on the bike. The manager's review lists each swap (slot, out→in
+serials, both percents).
+
+**See it in 2 minutes.** Driver PWA: on a fresh open, a back/cancel now releases the bike. Admin →
+FleetConfig: set e_motorbike to 3 packs, fit three; fitting slot 4 is refused. Driver, mid-shift:
+«تبديل بطارية» → pick a slot + spare → scan/enter both BMS readings → the manager's review shows the
+swap and the bike's fitted set updates.
+
+**Honest status.** New scope beyond the SRS (section-L-adjacent): this captures readings and moves
+the asset, it does not yet compute health trends. A swap needs a registered *ready spare* in the
+branch (register spares on the Fleet screen first).
+
+---
+
 ## 2026-07-29 — upper-level override for a stuck shift (void + force-close) + a live-map fix
 
 **All suites green (306 API tests incl. 4 new money-critical override cases + a new live-map case),
