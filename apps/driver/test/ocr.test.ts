@@ -397,6 +397,21 @@ Detail Logs Count: 208       Time Enter Sleep: 86466`
     expect(parseBms(AR_CARDS, profileById('cards_ar')).percent).toBe(100)
   })
 
+  it('reads «الدورات» — the count sits ABOVE its caption, pairable only by column', () => {
+    // The card row and its captions, with the word boxes the recogniser really returns. Flat text
+    // cannot express this layout at all: the value and its label are never on the same line, so
+    // the count is found by the column they share. `1` is the cycle count of the client's pack.
+    const cards: OcrLine[] = [
+      line('81.48V OA 0.00W 1', [
+        ['81.48V', 40, 150], ['OA', 250, 300], ['0.00W', 420, 520], ['1', 640, 660],
+      ], 560, 26),
+      line('الدورات الطاقة التيار إجماليالجهد', [
+        ['الدورات', 620, 700], ['الطاقة', 420, 490], ['التيار', 245, 305], ['إجماليالجهد', 40, 155],
+      ], 600, 24),
+    ]
+    expect(parseBms(cards, profileById('cards_ar')).cycleCount).toBe(1)
+  })
+
   it('never reports the charge as 1 — a truncated «100» is the misread a driver was shown', () => {
     // The inverted pass of the same screenshot yielded a lone big «1». One digit beside a guessed
     // percent sign is indistinguishable from a three-digit number that lost two glyphs.

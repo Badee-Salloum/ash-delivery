@@ -89,6 +89,38 @@ async function prepare(file, invert) {
   return canvas.toBuffer('image/png')
 }
 
+/**
+ * The same line/word boxes `linesOf` builds inside the reader. v7 hides them at
+ * `blocks[].paragraphs[].lines[].words[]`, and they are what the card-grid pairing runs on.
+ */
+function linesOf(data) {
+  const out = []
+  for (const block of data.blocks ?? []) {
+    for (const paragraph of block.paragraphs ?? []) {
+      for (const line of paragraph.lines ?? []) {
+        out.push({
+          text: line.text ?? '',
+          y0: line.bbox?.y0 ?? 0,
+          y1: line.bbox?.y1 ?? 0,
+          words: (line.words ?? []).map((w) => ({
+            text: w.text ?? '',
+            x0: w.bbox?.x0 ?? 0,
+            x1: w.bbox?.x1 ?? 0,
+            y0: w.bbox?.y0 ?? line.bbox?.y0 ?? 0,
+            y1: w.bbox?.y1 ?? line.bbox?.y1 ?? 0,
+          })),
+        })
+      }
+    }
+  }
+  if (out.length === 0) {
+    for (const [i, line] of (data.text ?? '').split(/\r?\n/).entries()) {
+      if (line.trim() !== '') out.push({ text: line, y0: i * 10, y1: i * 10 + 10, words: [] })
+    }
+  }
+  return out
+}
+
 const present = readdirSync(fixtures).filter((f) => /\.(jpe?g|png)$/i.test(f))
 if (present.length === 0) {
   console.error(`no fixtures in ${fixtures}`)
@@ -113,19 +145,34 @@ for (const fixture of FIXTURES) {
 
     for (const psm of [6, 3, 11]) {
       await worker.setParameters({ tessedit_pageseg_mode: String(psm), preserve_interword_spaces: '1' })
-      const { data } = await worker.recognize(image)
+      // `blocks: true`, exactly as readBms asks for it. The Arabic app is a CARD GRID whose value
+      // sits above its caption, so it can only be paired by column geometry — feeding the parser
+      // the flat text (which is what this script did at first) silently withholds the very input
+      // «الدورات» needs, and reports a null the real app would not produce.
+      const { data } = await worker.recognize(image, {}, { text: true, blocks: true })
       const text = data.text ?? ''
       const read =
-        fixture.kind === 'bms' ? parseBms(text, profileById(fixture.profile)) : parseReading(text)
+        fixture.kind === 'bms' ? parseBms(linesOf(data), profileById(fixture.profile)) : parseReading(text)
       const wrong = Object.entries(read).some(
         ([key, value]) => value !== null && value !== fixture.expect[key],
       )
+      // Every field this pass got exactly right — so the run as a whole can be judged on whether
+      // ANY pass reads each figure, not merely on nobody being wrong. A reader that is silently
+      // blank everywhere would otherwise look like a pass.
+      for (const [key, value] of Object.entries(read)) {
+        if (value !== null && value === fixture.expect[key]) (fixture.readBy ??= new Set()).add(key)
+      }
       console.log(
         `  ${variant.padEnd(19)} psm ${String(psm).padEnd(3)} ${JSON.stringify(read)}${wrong ? '   ← WRONG (worse than blank)' : ''}`,
       )
       if (wrong) failures++
     }
   }
+
+  // What no pass could read. Reported, not failed: the dashboard genuinely cannot be read through
+  // that glare, and pretending otherwise would only invite a guess.
+  const unread = Object.keys(fixture.expect).filter((key) => !fixture.readBy?.has(key))
+  if (unread.length > 0) console.log(`  → never read by any pass: ${unread.join(', ')} (driver types these)`)
 }
 await worker.terminate()
 
