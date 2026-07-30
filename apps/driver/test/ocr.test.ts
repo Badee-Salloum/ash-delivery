@@ -352,6 +352,78 @@ describe('a number split across words is rebuilt, not truncated', () => {
   })
 })
 
+/**
+ * The real recognitions, captured from the client's own three screenshots.
+ *
+ * Everything else in this file is text SHAPED like what a recogniser returns. These are what
+ * tesseract actually produced, verbatim, via `node scripts/ocr-calibrate.mjs` — including the
+ * mangling that made the reader fill wrong numbers on a real phone: the «%» arriving as «°» or
+ * «/», and «ODO 02611 km» arriving as «ono B48 km». Re-run that script to regenerate them.
+ *
+ * The rule these pin: a blank field is a driver typing; a WRONG field is a lie he might submit.
+ */
+describe('the real screenshots, as tesseract actually read them', () => {
+  // The dark English table app at psm 6 — «Remain Battery: 100°» (the % lost) and «Cycle Count: 8»
+  // sharing its row with «Cycle Capacity: 436.8”».
+  const EN_TABLE = `Charge: ON         Discharge: ON          Balance: OFF
+83.37      0.00
+Battery Power: 2."           Ave. Cell Volt.: 4.169"
+Battery Capacity: 50.0”           Cell Volt. Diff.: 9.966"
+Remain Capacity: 50.0"        Balance Curr.: @. 200°
+Remain Battery: 100°             MOS Temp.: 33.9"
+Cycle Count: 8            Cycle Capacity: 436.8”
+Battery T2: 32.5         Time Emerg.: 8
+Detail Logs Count: 208       Time Enter Sleep: 86466`
+
+  it('reads the English app’s charge and cycles — the «%» came back as «°»', () => {
+    const r = parseBms(EN_TABLE, profileById('table_en'))
+    expect(r.percent).toBe(100)
+    expect(r.cycleCount).toBe(8)
+  })
+
+  it('does not let «Cycle Capacity: 436.8» become the cycle count', () => {
+    // Same row, one column over. A decimal is never a count, which is what refuses it.
+    expect(parseBms(EN_TABLE, profileById('table_en')).cycleCount).not.toBe(4368)
+  })
+
+  // The cyan Arabic card app, contrast-stretched at psm 6: the gauge's «%» came back as «/».
+  const AR_CARDS = ` إيقاف © :حالة التسخين       |     100/
+ مفوح © 'حالة   الموازنة     1      0|
+81.48V         OA         0.00W          1
+            الدورات              الطاقة          التيار إجماليالجهد
+    12660 60- 105:36,96 2ج ©:الوحدة`
+
+  it('reads the Arabic gauge’s 100 — the «%» came back as «/»', () => {
+    expect(parseBms(AR_CARDS, profileById('cards_ar')).percent).toBe(100)
+  })
+
+  it('never reports the charge as 1 — a truncated «100» is the misread a driver was shown', () => {
+    // The inverted pass of the same screenshot yielded a lone big «1». One digit beside a guessed
+    // percent sign is indistinguishable from a three-digit number that lost two glyphs.
+    expect(parseBms('1/ 0| 1', profileById('cards_ar')).percent).toBeNull()
+  })
+
+  it('never scavenges a temperature into the cycle count', () => {
+    // «36.9°C» in a neighbouring cell rounded to 37 cycles, and 36 906 at another segmentation.
+    const r = parseBms(AR_CARDS, profileById('cards_ar'))
+    expect(r.cycleCount === null || r.cycleCount === 1).toBe(true)
+  })
+
+  it('refuses to invent an odometer from the glare-covered dash', () => {
+    // «ODO 02611 km» through glass, outdoors. The old rule offered 48 as a distance.
+    expect(parseReading('2\nMODE A\n4 ١              8\n1 Deepa\nono B48 km').odometer).toBeNull()
+  })
+
+  it('still reads a dash that IS legible', () => {
+    expect(parseReading('ODO 02611 km').odometer).toBe(2611)
+  })
+
+  it('never mistakes the clock for the odometer', () => {
+    // «1 00:00» is a time. Digits either side of a colon are not a distance.
+    expect(parseReading('MODE 1 00:00').odometer).toBeNull()
+  })
+})
+
 describe('the Yallago wallet balance (SRS D-2)', () => {
   it('reads the real sample — white on orange, Arabic-Indic digits, Arabic separators', () => {
     expect(parseWallet('٧٦،٥٠٩٬٥٥ SYP')).toBe('76509.55')

@@ -382,25 +382,51 @@ export async function readDashboard(image: Blob | Uint8Array, timeoutMs = DASH_T
 /**
  * Pull the odometer km out of the recognised text — the ONLY thing read off the dash now.
  *
- * The odometer is the longest run of digits: on an e-bike dash it is the largest figure (speed,
- * trip and clock are all shorter), so it is a good-enough first guess for the driver to fix. The
- * `%` figure is still located, but only to SKIP it — an odometer that happens to read 100 beside a
- * 100% battery must not be discarded as "the battery again" and replaced by a clock or trip meter.
+ * A photographed dash is the hardest target in this app by a distance: it is a low-contrast LCD
+ * behind glass, shot outdoors, carrying the sky and the rider's own reflection. On the client's own
+ * photo the recogniser returned `ono B48 km` for «ODO 02611 km» — the label survived, the digits did
+ * not. The old rule («the longest run of digits») then read that as an odometer of **48**: a
+ * plausible, confident, wrong number that a driver could submit without noticing.
+ *
+ * So the bar is deliberately high, and a read that cannot clear it returns NULL — the driver types
+ * the number, which is what he did before this feature existed, and the photo remains the evidence:
+ *  • at least MIN_ODOMETER_DIGITS digits — a real odometer is never one or two;
+ *  • never a clock («1 00:00» is not 100 km), so a run touching a `:` is rejected;
+ *  • a battery percentage is skipped by POSITION, so an odometer that happens to equal the charge
+ *    is not discarded as "the battery again".
+ * A run on the `ODO`-labelled line wins over a longer one elsewhere, since that label is the most
+ * reliably recognised thing on the panel.
  */
+const MIN_ODOMETER_DIGITS = 3
+
 export function parseReading(text: string): OcrReading {
-  const batteryMatch = text.match(/(\d{1,3})\s*%/)
+  const batteryAt = text.match(/(\d{1,3})\s*%/)?.index
 
-  // Compare by POSITION, not by digit string.
-  const skipAt = batteryMatch?.index
-  let odometer: number | null = null
-  let longest = ''
-  for (const m of text.matchAll(/\d+/g)) {
-    if (skipAt !== undefined && m.index === skipAt) continue
-    if (m[0].length > longest.length) longest = m[0]
+  const bestOn = (haystack: string): string => {
+    let longest = ''
+    for (const m of haystack.matchAll(/\d+/g)) {
+      // A clock reads as digits either side of a colon; neither half is a distance.
+      const before = haystack[m.index - 1]
+      const after = haystack[m.index + m[0].length]
+      if (before === ':' || after === ':') continue
+      // Skip the charge itself, compared by position rather than by digit string.
+      if (batteryAt !== undefined && haystack === text && m.index === batteryAt) continue
+      if (m[0].length > longest.length) longest = m[0]
+    }
+    return longest
   }
-  if (longest) odometer = Number(longest)
 
-  return { odometer }
+  // The «ODO» row first — even a mangled label («ono», «obo», «0D0») pins the right line.
+  const odoLine = text
+    .split(/\r?\n/)
+    .find((line) => /\b[o0][dbn][o0]\b/i.test(line) || /ODO/i.test(line))
+  const candidate = (odoLine !== undefined ? bestOn(odoLine) : '') || bestOn(text)
+
+  // `000` clears the digit-count bar but reads as zero, and a bike that has travelled no distance
+  // at all is not a reading anybody needs pre-filled — the calibration script produced exactly that
+  // from the glare. Blank, and the driver types it.
+  const value = candidate.length >= MIN_ODOMETER_DIGITS ? Number(candidate) : null
+  return { odometer: value === null || value <= 0 ? null : value }
 }
 
 // ── The Yallago wallet screenshot (SRS D-2) ─────────────────────────────────────────────────
@@ -573,7 +599,11 @@ const whole = (n: number): number => Math.round(n)
  */
 const COMMON_FIELDS: readonly BmsField[] = [
   { key: 'percent', labels: ['remainbattery', 'soc', 'الطاقةالمتبقية', 'نسبةالشحن'], scale: whole, max: 100 },
-  { key: 'cycleCount', labels: ['cyclecount', 'عددالدورات', 'الدورات'], scale: whole, max: 100_000 },
+  // 5 000, not 100 000: a lithium pack is worn out by ~2 000 cycles, so a five-figure "count" is
+  // always a misread. The calibration script caught a temperature row parsed as 36 906 cycles — in
+  // range under the old cap, absurd on a battery, and indistinguishable from a real answer once
+  // stored. A tighter bound turns that into a blank the driver fills.
+  { key: 'cycleCount', labels: ['cyclecount', 'عددالدورات', 'الدورات'], scale: whole, max: 5_000 },
 ]
 
 export const BMS_PROFILES: readonly BmsProfile[] = [
@@ -583,9 +613,12 @@ export const BMS_PROFILES: readonly BmsProfile[] = [
     nameEn: 'Automatic',
     fields: COMMON_FIELDS,
     layout: 'both',
-    // Automatic page segmentation first: a card grid with a gauge and a nav bar is not one block,
-    // and PSM 6 forces it to be read as though it were.
-    psm: [3, 6],
+    // PSM 6 FIRST, measured against the client's own two screenshots: at psm 6 the English table
+    // yields «Remain Battery: 100» and «Cycle Count: 8», and the cyan Arabic app's gauge yields
+    // «100»; at psm 3 the cycle count disappears from both. Automatic segmentation used to run
+    // first here, which is why an unpinned pack — every pack, by default — read the page with the
+    // worse of the two and filled confident wrong numbers.
+    psm: [6, 3],
   },
   {
     // The dark English table: «Remain Battery: 100%   MOS Temp: 33.9C», two columns per row.
@@ -832,6 +865,11 @@ export function parseBms(input: readonly OcrLine[] | string, profile: BmsProfile
   const text = lines.map((l) => l.text).join('\n')
 
   const store = (key: keyof BmsReading, field: BmsField, value: number): void => {
+    // BOTH figures are counts, never fractions: a charge is «100», a cycle count is «8». A value
+    // that arrived with a decimal point is therefore not this field's number — it is a neighbouring
+    // temperature or voltage that the layout pairing reached by mistake. Rounding it (33.7 → 34)
+    // was how «عدد الدورات» came back as a plausible, confident, WRONG reading on a real phone.
+    if (!Number.isInteger(value)) return
     const scaled = field.scale(value)
     // A label matched but the number is impossible — that is a misread, not a reading. Leaving it
     // null makes the gate ask for it, which is right; storing it would look like an answer.
@@ -880,13 +918,13 @@ export function parseBms(input: readonly OcrLine[] | string, profile: BmsProfile
 
   // An unlabelled percentage is still worth having: both apps show exactly one "100%", and it is
   // always the state of charge.
-  if (out.percent === null) {
-    const pct = text.match(/(\d{1,3})\s*%/)
-    if (pct) {
-      const n = Number(pct[1])
-      if (n >= 0 && n <= 100) out.percent = n
-    }
-  }
+  //
+  // The «%» is one of the LEAST reliable glyphs on these screens: on the client's own cyan app the
+  // gauge came back as «100/» at one segmentation and «100*» at another, and on the dark English
+  // app as «100°». A rule anchored on a literal `%` therefore found no charge on any of them — the
+  // one field the gate requires. PERCENT_SIGN accepts the glyphs it is actually mistaken for; the
+  // 0–100 range check below is what keeps that tolerance from turning noise into a reading.
+  if (out.percent === null) out.percent = unlabelledCharge(text)
 
   // Last resort, and the one that matters most: the charge is the only field the shift gate
   // actually requires, and on both apps it is the HEADLINE number — a big figure in a ring, with
@@ -894,10 +932,42 @@ export function parseBms(input: readonly OcrLine[] | string, profile: BmsProfile
   // voltage, cycles and a temperature but no charge. Size is the signal the layout cannot hide.
   if (out.percent === null) {
     const gauge = biggestPercentage(lines)
-    if (gauge !== null) out.percent = gauge
+    // A SINGLE big digit is refused here, and that refusal is the whole point: «100» in a ring
+    // whose other two glyphs were lost reads as «1», which is what a driver was actually shown for
+    // a full pack. A one-digit gauge is indistinguishable from a truncated three-digit one, so it
+    // is not offered at all — a pack under 10% is rare, and the driver types it.
+    if (gauge !== null && gauge >= 10) out.percent = gauge
   }
 
   return out
+}
+
+/**
+ * A charge worth offering. Zero is excluded on purpose: a genuinely flat pack cannot start a shift
+ * anyway, while a «0» scavenged from noise is one of the commonest misreads — so it is left blank
+ * for the driver rather than pre-filled with an answer that looks deliberate.
+ */
+const plausibleCharge = (n: number): boolean => Number.isInteger(n) && n > 0 && n <= 100
+
+/**
+ * The charge from an unlabelled «NN%», at two levels of trust.
+ *
+ * A real «%» or «٪» is unambiguous: whatever whole number precedes it is the charge, 1–100.
+ *
+ * The other glyphs are GUESSES. Measured, not assumed: the cyan Arabic app's gauge came back as
+ * «100/» at one segmentation and «100*» at another, and the dark English app's «Remain Battery:
+ * 100%» as «100°» — so refusing them loses the one field the gate requires. But accepting them
+ * cheaply is how «1/» in a row of noise became a 1% charge for a pack that was full. A guessed
+ * percent sign therefore has to carry a TWO-DIGIT number, which is exactly the shape a truncated
+ * «100» cannot fake. A pack under 10% is rare; the driver types it.
+ */
+function unlabelledCharge(text: string): number | null {
+  const certain = text.match(/(?<![\d.,])(\d{1,3})\s*[%٪]/)
+  if (certain && plausibleCharge(Number(certain[1]))) return Number(certain[1])
+
+  const guessed = text.match(/(?<![\d.,])(\d{2,3})\s*[°*/]/)
+  if (guessed && plausibleCharge(Number(guessed[1]))) return Number(guessed[1])
+  return null
 }
 
 /**

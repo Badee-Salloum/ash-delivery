@@ -289,28 +289,32 @@ function OcrStatus({
       <p className={`text-center text-sm font-medium ${failed ? 'text-amber-700' : 'text-emerald-700'}`}>{message}</p>
 
       {/*
-        Retry and the recognised text are offered whenever anything is still blank — NOT only on
-        total failure, which is what this used to do. Every real read has been a PARTIAL success:
-        three figures found, the charge missing, `outcome === 'ok'`, and an early return that hid
-        both controls. The one case anybody needed to debug was the one case with no diagnostics.
+        Retry is offered whenever anything is still blank — NOT only on total failure. Every real
+        read has been a PARTIAL success: figures found, the charge missing, `outcome === 'ok'`, and
+        an early return that hid the control. The one case anybody needed was the one with none.
       */}
       {failed || missing > 0 ? (
-        <>
-          {onRetry ? (
-            <Button variant="ghost" onClick={onRetry}>
-              {t.battery.ocrRetry}
-            </Button>
-          ) : null}
-          <details className="rounded-lg bg-slate-100 px-3 py-2">
-            <summary className="cursor-pointer text-xs text-slate-500">{t.battery.ocrSawTitle}</summary>
-            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-slate-600">
-              {/* An empty result is itself the answer: the glyphs were never recognised, and no
-                  parser change can reach that. Say so rather than rendering nothing. */}
-              {state.text.trim() === '' ? t.battery.ocrSawNothing : state.text}
-            </pre>
-          </details>
-        </>
+        onRetry ? (
+          <Button variant="ghost" onClick={onRetry}>
+            {t.battery.ocrRetry}
+          </Button>
+        ) : null
       ) : null}
+
+      {/*
+        The recognised text is ALWAYS available, not only when the read failed. A read that succeeds
+        with the WRONG number looks identical to a right one on the glass, and it is the dangerous
+        case — so the evidence for what the machine actually saw cannot be hidden behind failure.
+        Collapsed, so it costs a driver nothing, and one tap for whoever is diagnosing a bad field.
+      */}
+      <details className="rounded-lg bg-slate-100 px-3 py-2">
+        <summary className="cursor-pointer text-xs text-slate-500">{t.battery.ocrSawTitle}</summary>
+        <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-slate-600">
+          {/* An empty result is itself the answer: the glyphs were never recognised, and no
+              parser change can reach that. Say so rather than rendering nothing. */}
+          {state.text.trim() === '' ? t.battery.ocrSawNothing : state.text}
+        </pre>
+      </details>
     </div>
   )
 }
