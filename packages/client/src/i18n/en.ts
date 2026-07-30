@@ -127,6 +127,8 @@ export const en: Catalog = {
     cost_center_vehicle_mismatch: 'A vehicle cost centre needs a vehicle',
     battery_slot_taken: 'That slot is taken by another battery',
     battery_half_fitted: 'Set both the vehicle and the slot together',
+    duplicate_battery: 'That serial belongs to another battery',
+    slot_out_of_range: 'The slot number is above this type’s battery count',
     week_not_closable: 'The week can’t be closed yet',
     invalid_request: 'The submitted data isn’t valid',
     invalid_rate: 'Enter a positive numeric rate',

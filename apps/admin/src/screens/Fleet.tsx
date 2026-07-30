@@ -130,6 +130,16 @@ export function Fleet(): ReactNode {
     const vehicle = vehicles.find((v) => v.id === vehicleId)
     return types.find((ty) => ty.id === vehicle?.vehicleTypeId)?.batterySlots ?? 2
   }
+  /**
+   * The lowest free slot on a bike, so fitting a spare lands beside the pack already there instead
+   * of colliding with slot 1. Without this, fitting a second pack always defaulted to slot 1 —
+   * taken — and failed, so a two-pack bike could not be assembled from the UI at all.
+   */
+  const firstFreeSlot = (vehicleId: string, exceptBatteryId: string): number => {
+    const taken = new Set(packsOn(vehicleId).filter((p) => p.id !== exceptBatteryId).map((p) => p.slotNo))
+    for (let n = 1; n <= maxSlotsFor(vehicleId); n++) if (!taken.has(n)) return n
+    return maxSlotsFor(vehicleId) // all full — the API refuses with battery_slot_taken, shown below
+  }
 
   useEffect(() => {
     if (!newVehicle.vehicleTypeId) {
@@ -490,7 +500,7 @@ export function Fleet(): ReactNode {
             {t.battery.add}
           </Button>
         </div>
-        {batteryError ? <p className="mb-2 text-sm text-rose-600">{batteryError}</p> : null}
+        {batteryError ? <p className="mb-2 text-sm text-rose-600">{explainError(batteryError, t)}</p> : null}
 
         <p className="mb-2 text-xs text-slate-400">{t.battery.profileHint}</p>
         <Table head={[t.battery.serial, t.battery.capacity, t.battery.profile, t.fleet.vehicles, t.battery.slot, t.fleet.state]} isEmpty={batteries.length === 0} empty={t.fleet.noneYet}>
@@ -533,10 +543,11 @@ export function Fleet(): ReactNode {
                     const vehicleId = e.target.value || null
                     try {
                       // Fitted means both, spare means neither — send them together or the API
-                      // refuses with battery_half_fitted.
+                      // refuses with battery_half_fitted. Land on the first FREE slot so a second
+                      // pack goes beside the first instead of colliding with slot 1.
                       await api.updateBattery(b.id, {
                         vehicleId,
-                        slotNo: vehicleId === null ? null : (b.slotNo ?? 1),
+                        slotNo: vehicleId === null ? null : firstFreeSlot(vehicleId, b.id),
                       })
                     } catch (err) {
                       setBatteryError((err as { error?: string }).error ?? 'error')

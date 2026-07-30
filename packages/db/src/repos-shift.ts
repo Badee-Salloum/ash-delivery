@@ -618,28 +618,43 @@ export class PgDirectoryRepo implements DirectoryRepo {
   }
 
   async createBattery(b: BatteryRecord): Promise<void> {
-    await this.uniqueOr(
-      () =>
-        this.pool.query(
-          `INSERT INTO batteries (id, branch_id, serial_no, bms_mac, capacity_ah, vehicle_id, slot_no, state, active, bms_profile)
+    await this.batteryUniqueOr(() =>
+      this.pool.query(
+        `INSERT INTO batteries (id, branch_id, serial_no, bms_mac, capacity_ah, vehicle_id, slot_no, state, active, bms_profile)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-          [b.id, b.branchId, b.serialNo, b.bmsMac, b.capacityAh, b.vehicleId, b.slotNo, b.state, b.active, b.bmsProfile],
-        ),
-      'that battery serial, or that slot on that bike, is already taken',
+        [b.id, b.branchId, b.serialNo, b.bmsMac, b.capacityAh, b.vehicleId, b.slotNo, b.state, b.active, b.bmsProfile],
+      ),
     )
   }
 
   async updateBattery(b: BatteryRecord): Promise<void> {
-    await this.uniqueOr(
-      () =>
-        this.pool.query(
-          `UPDATE batteries SET serial_no = $2, bms_mac = $3, capacity_ah = $4,
+    await this.batteryUniqueOr(() =>
+      this.pool.query(
+        `UPDATE batteries SET serial_no = $2, bms_mac = $3, capacity_ah = $4,
                                 vehicle_id = $5, slot_no = $6, state = $7, active = $8, bms_profile = $9
             WHERE id = $1`,
-          [b.id, b.serialNo, b.bmsMac, b.capacityAh, b.vehicleId, b.slotNo, b.state, b.active, b.bmsProfile],
-        ),
-      'that battery serial, or that slot on that bike, is already taken',
+        [b.id, b.serialNo, b.bmsMac, b.capacityAh, b.vehicleId, b.slotNo, b.state, b.active, b.bmsProfile],
+      ),
     )
+  }
+
+  /**
+   * A UNIQUE violation on a battery is one of two very different things. The partial index on
+   * `(vehicle_id, slot_no)` is a SLOT clash — fitting a second pack where one already sits — while
+   * the serial UNIQUE is a genuine duplicate pack. Reporting both as "duplicate battery" is what made
+   * fitting a second pack read as "duplicate_battery" in the console; keep them apart by constraint.
+   */
+  private async batteryUniqueOr(run: () => Promise<unknown>): Promise<void> {
+    try {
+      await run()
+    } catch (err) {
+      if (isPgError(err, PG.UNIQUE_VIOLATION)) {
+        const constraint = (err as { constraint?: string }).constraint
+        const code = constraint === 'batteries_slot_uq' ? 'BATTERY_SLOT_TAKEN' : 'DUPLICATE_CODE'
+        throw Object.assign(new Error(constraint ?? 'battery unique violation'), { code })
+      }
+      throw err
+    }
   }
 
   /** Turns the schema's UNIQUE violations into the one code every route already handles. */

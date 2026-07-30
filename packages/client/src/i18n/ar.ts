@@ -128,6 +128,8 @@ export const ar = {
     cost_center_vehicle_mismatch: 'مركز الكلفة «آلية» يحتاج تحديد آلية',
     battery_slot_taken: 'الخانة مشغولة ببطارية أخرى',
     battery_half_fitted: 'حدّد الآلية والخانة معاً',
+    duplicate_battery: 'الرقم التسلسلي مستخدم لبطارية أخرى',
+    slot_out_of_range: 'رقم الخانة يتجاوز عدد بطاريات هذا النوع',
     week_not_closable: 'لا يمكن إغلاق الأسبوع بعد',
     invalid_request: 'البيانات المُدخلة غير صحيحة',
     invalid_rate: 'أدخل سعراً رقمياً موجباً',

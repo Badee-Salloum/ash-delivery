@@ -134,6 +134,9 @@ describe('battery packs are assets, not attributes', () => {
 
     const clash = await post(manager, '/batteries', pack({ serialNo: 'OTHER-SERIAL', vehicleId: VEHICLE_ID, slotNo: 1 }))
     expect(clash.statusCode).toBe(409)
+    // A SLOT clash is reported as such, not as a duplicate serial — the two are different problems
+    // and the console shows different guidance.
+    expect(clash.json().error).toBe('battery_slot_taken')
   })
 
   it('a serial is unique, because it is what ties a screenshot to a pack', async () => {
