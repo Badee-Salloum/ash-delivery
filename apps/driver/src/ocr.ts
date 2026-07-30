@@ -636,7 +636,10 @@ export const BMS_PROFILES: readonly BmsProfile[] = [
     nameEn: 'Arabic card app',
     fields: COMMON_FIELDS,
     layout: 'cards',
-    psm: [3, 6],
+    // 6 before 3, measured on the client's own screenshot: psm 6 reads the gauge AND «الدورات»,
+    // psm 3 reads neither. Automatic segmentation used to go first — it costs a whole recognition
+    // pass on a phone to learn nothing, and it is the pass this app is worst served by.
+    psm: [6, 3],
   },
 ]
 
@@ -779,18 +782,24 @@ export async function readBms(
       { psm: 11, invert: true },
     ]
 
+    const complete = (): boolean => merged.percent !== null && merged.cycleCount !== null
+
     for (const pass of passes) {
+      // The inverted passes exist to rescue the CHARGE off a dark panel; once it is in hand they
+      // are not worth a driver's seconds.
       if (pass.invert && merged.percent !== null) break
-      // A profile's later segmentation modes are a fallback, not a routine second pass: if the
-      // first one already read the page there is nothing to gain and a driver waiting.
-      if (!pass.invert && pass.psm !== passes[0]!.psm && found() > 0) continue
+      // A profile's later segmentation modes are a fallback, not a routine second pass — but only
+      // a COMPLETE read earns skipping them. This used to stop at "found anything", so a first
+      // pass that produced the charge alone suppressed the pass that would have produced the cycle
+      // count too, and the field stayed empty with a perfectly good reading one segmentation away.
+      if (!pass.invert && pass.psm !== passes[0]!.psm && complete()) continue
 
       const prepared = await prepareForOcr(source, pass.invert)
       const result = await recognize(prepared, { whitelist: '', psm: pass.psm }, timeoutMs)
       // «ما قرأه النظام» shows the pass that read the most, which is the one worth looking at.
       if (result.text.length > text.length) text = result.text
       absorb(parseBms(result.lines, profile))
-      if (found() === Object.keys(merged).length) break
+      if (complete()) break
     }
 
     if (found() === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text }
