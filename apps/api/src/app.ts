@@ -55,8 +55,8 @@ import {
   ensureFxDay,
   evaluateShift,
   rejectClose,
+  rejectOpen,
   reportIncident,
-  requestManualOrder,
   requestRephoto,
   resumeShift,
   submitEndPackage,
@@ -518,12 +518,18 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     },
   )
 
+  /**
+   * The driver records his own YALLAGO deliveries, off the «Recent orders» list he scans at the end
+   * of his shift. A MANUAL job — the branch's own work, priced by hand — is a manager's to enter
+   * (`/orders/manual`): letting it in here would let a driver write his own share.
+   */
   app.post(
     '/shifts/:id/orders',
     { config: { permission: 'shift.operate', subject: shiftSubject } },
     async (req, reply) => {
       const { id } = z.object({ id: z.string() }).parse(req.params)
       const body = addOrderRequest.parse(req.body)
+      if (body.kind === 'manual') throw new ServiceError(403, 'manual_order_is_manager_only')
       const order = await addOrder(deps, req.actor!, id, body)
       return reply.code(201).send({ id: order.id, providerOrderNo: order.providerOrderNo })
     },
@@ -538,31 +544,28 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const { id } = z.object({ id: z.string() }).parse(req.params)
       const body = addOrderRequest.parse(req.body)
       const order = await addManualOrder(deps, req.actor!, id, body)
+      const shift = await deps.shifts.findById(id)
       await deps.audit.append({
         tableName: 'shift_orders',
         recordId: order.id,
         action: 'INSERT',
         actorId: req.actor!.userId,
         actorKind: 'user',
-        branchId: req.actor!.branchId,
+        // The SHIFT's branch, not the actor's: a GM/sysadmin has none, and an audit row filed
+        // against `null` is invisible to every branch-scoped read of the log.
+        branchId: shift?.branchId ?? req.actor!.branchId,
         requestId: req.requestId,
         before: null,
-        after: { ...order, fee: serializeMoney(order.fee), manual: true },
+        after: {
+          ...order,
+          fee: serializeMoney(order.fee),
+          driverShare: order.driverShare === null ? null : serializeMoney(order.driverShare),
+          companyShare: order.companyShare === null ? null : serializeMoney(order.companyShare),
+          manual: true,
+        },
         occurredAtMs: deps.clock.nowMs(),
       })
       return reply.code(201).send({ id: order.id, providerOrderNo: order.providerOrderNo })
-    },
-  )
-
-  // The driver asks a manager to add an order he can no longer add himself — rings the branch bell.
-  app.post(
-    '/shifts/:id/orders/request',
-    { config: { permission: 'shift.operate', subject: shiftSubject } },
-    async (req, reply) => {
-      const { id } = z.object({ id: z.string() }).parse(req.params)
-      const body = addOrderRequest.parse(req.body)
-      await requestManualOrder(deps, req.actor!, id, body)
-      return reply.code(202).send({ ok: true })
     },
   )
 
@@ -709,6 +712,12 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           // SRS D-1/D-3: whether the fee came from OCR, and what OCR read (for the manager's delta).
           source: o.source,
           feeOcr: o.feeOcr === null ? null : serializeMoney(o.feeOcr),
+          // A manual job's agreed split, route and note — the numbers the manager signs for.
+          kind: o.kind,
+          driverShare: o.driverShare === null ? null : serializeMoney(o.driverShare),
+          companyShare: o.companyShare === null ? null : serializeMoney(o.companyShare),
+          notes: o.notes,
+          points: o.points,
         })),
         media: slots.map((s) => ({ package: s.package, slot: s.slot, mediaId: s.mediaId })),
         batterySwaps,
@@ -831,6 +840,18 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const { id } = z.object({ id: z.string() }).parse(req.params)
       const { notes } = decisionBody.parse(req.body ?? {})
       const shift = await rejectClose(deps, req.actor!, id, notes)
+      return { id: shift.id, state: shift.state }
+    },
+  )
+  /** Refuse a shift at the OPEN gate, sending it back to the driver with a recorded reason. To
+   *  refuse it outright instead, `POST /shifts/:id/void` now reaches this state too. */
+  app.post(
+    '/shifts/:id/reject-open',
+    { config: { permission: 'shift.approve', subject: shiftSubject } },
+    async (req) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const { notes } = decisionBody.parse(req.body ?? {})
+      const shift = await rejectOpen(deps, req.actor!, id, notes)
       return { id: shift.id, state: shift.state }
     },
   )

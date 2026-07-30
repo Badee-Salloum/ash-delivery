@@ -1,7 +1,7 @@
 import { type Minor, add, minor, sub, sum } from '../money/minor.ts'
-import { type FeeTotals, type Rounding, orderBlock, totalFees, yalagoCut } from '../money/allocate.ts'
+import { type FeeTotals, type Rounding } from '../money/allocate.ts'
 import type { BlockSplit } from '../money/allocate.ts'
-import type { PayMode, ShiftOrder } from '../br1/equation.ts'
+import { type PayMode, type ShiftOrder, orderNetBlock, orderYalagoCut, totalFeesOfOrders } from '../br1/equation.ts'
 
 /**
  * The posting recipes: every way money is allowed to move.
@@ -207,9 +207,16 @@ export function orderFee(driverId: string, order: ShiftOrder): Posting {
   })
 }
 
-/** BR2 — Yallago's 20%, deducted from the wallet the moment the order completes. */
+/**
+ * BR2 — Yallago's 20%, deducted from the wallet the moment the order completes.
+ *
+ * A MANUAL order gets a zero cut: it is the branch's own job and Yallago never saw it, so charging
+ * them a share would take money out of the driver's wallet and hand it to a party with no claim.
+ * The posting is still emitted (balanced, at zero) so every order has one and replays stay keyed
+ * the same way.
+ */
 export function yalagoCutPosting(driverId: string, order: ShiftOrder, rounding: Rounding = 'floor'): Posting {
-  const cut = yalagoCut(order.fee, rounding)
+  const cut = orderYalagoCut(order, rounding)
   return assertBalanced({
     eventType: 'yalago_cut',
     occurrenceKey: order.orderNo,
@@ -298,15 +305,14 @@ export function postingsForOpen(input: ShiftPostingInput): Posting[] {
  */
 export function postingsForApproval(input: ShiftPostingInput, split: BlockSplit): Posting[] {
   const rounding = input.rounding ?? 'floor'
-  const totals = totalFees(
-    input.orders.map((o) => o.fee),
-    rounding,
-  )
+  // Per ORDER, not per fee: a manual job carries no Yallago cut, and totalling the bare fees would
+  // charge one anyway — leaving `shareSplit` unable to exhaust `fee_earned` and throwing.
+  const totals = totalFeesOfOrders(input.orders, rounding)
 
   const postings: Posting[] = []
   for (const order of input.orders) {
     if (order.fee > 0n) postings.push(orderFee(input.driverId, order))
-    if (yalagoCut(order.fee, rounding) > 0n) postings.push(yalagoCutPosting(input.driverId, order, rounding))
+    if (orderYalagoCut(order, rounding) > 0n) postings.push(yalagoCutPosting(input.driverId, order, rounding))
   }
   if (totals.feeTotal > 0n) postings.push(shareSplit(input.driverId, totals, split))
 
@@ -330,8 +336,9 @@ export function closingBalances(input: ShiftPostingInput): ClosingBalances {
     sum(input.floatTranches),
     sum(input.orders.filter((o) => o.payMode === 'cash').map((o) => o.fee)),
   )
-  const walletIn = sum(input.orders.filter((o) => o.payMode !== 'cash').map((o) => orderBlock(o.fee, rounding)))
-  const walletOut = sum(input.orders.filter((o) => o.payMode === 'cash').map((o) => yalagoCut(o.fee, rounding)))
+  // Per ORDER — a manual job's block is its whole fee, and it takes nothing out of the wallet.
+  const walletIn = sum(input.orders.filter((o) => o.payMode !== 'cash').map((o) => orderNetBlock(o, rounding)))
+  const walletOut = sum(input.orders.filter((o) => o.payMode === 'cash').map((o) => orderYalagoCut(o, rounding)))
   return { endCash, endWallet: sub(add(sum(input.topupTranches), walletIn), walletOut) }
 }
 
@@ -355,8 +362,8 @@ export function minWalletBalance(input: ShiftPostingInput): Minor {
   for (const order of input.orders) {
     balance =
       order.payMode === 'cash'
-        ? sub(balance, yalagoCut(order.fee, rounding))
-        : add(balance, orderBlock(order.fee, rounding))
+        ? sub(balance, orderYalagoCut(order, rounding))
+        : add(balance, orderNetBlock(order, rounding))
     if (balance < lowest) lowest = balance
   }
   return lowest

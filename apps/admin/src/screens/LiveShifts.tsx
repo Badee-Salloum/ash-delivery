@@ -21,7 +21,16 @@ interface VehicleLite {
   code: string
 }
 
-/** The live-shift set a manager can act on: out working, or on hold. */
+/**
+ * The shifts that are out working right now: running, or on hold.
+ *
+ * DELIBERATELY narrower than the domain's `LIVE_STATES`, which also counts `draft`,
+ * `awaiting_open_approval` and `pending_review` — that set answers "does this shift still occupy
+ * its bike and driver", which is the right question for the GPS map and the assignment guards. This
+ * screen answers a different one: "who is out on the road and can I act on him". A shift waiting for
+ * a signature belongs in «قائمة الاعتماد», and listing it here as well would put the same shift in
+ * two places with two different meanings.
+ */
 const LIVE_STATES = new Set(['open', 'suspended'])
 
 /**

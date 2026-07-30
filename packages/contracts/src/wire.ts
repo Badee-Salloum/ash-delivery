@@ -57,6 +57,18 @@ export const startPackageRequest = z.object({
   batteryPercentOcr: z.number().int().min(0).max(100).nullable().default(null),
 })
 
+/**
+ * One point on a manual order's route. `label` is what a human would say — «مطعم الشام، شارع بغداد»
+ * — and is always required; the pin is optional, because most jobs are described by name and nobody
+ * should be forced onto a map to record one. `lat`/`lng` are plain numbers: coordinates, not money.
+ */
+export const orderPointRequest = z.object({
+  role: z.enum(['start', 'stop', 'end']),
+  label: z.string().min(1).max(200),
+  lat: z.number().min(-90).max(90).nullable().default(null),
+  lng: z.number().min(-180).max(180).nullable().default(null),
+})
+
 export const addOrderRequest = z.object({
   providerOrderNo: z.string().min(1).max(64),
   payMode: payModeSchema,
@@ -66,6 +78,18 @@ export const addOrderRequest = z.object({
   // money, so it crosses as a decimal string via `moneySchema` — never a JSON number.
   source: z.enum(['manual', 'ocr']).default('manual'),
   feeOcr: moneySchema.nullable().default(null),
+  /** `yallago` (their delivery) or `manual` (a job the branch took itself). */
+  kind: z.enum(['yallago', 'manual']).default('yallago'),
+  /**
+   * Manual orders only — the agreed split, as money (a decimal string, never a JSON number: a share
+   * must not pass through IEEE-754 on its way in). The server refuses a manual order whose two
+   * shares do not add up to its fee exactly, which is what keeps the ledger able to close.
+   */
+  driverShare: moneySchema.nullable().default(null),
+  companyShare: moneySchema.nullable().default(null),
+  notes: z.string().max(2000).nullable().default(null),
+  /** Start, end, and any stops between. Empty for a Yallago order. */
+  points: z.array(orderPointRequest).max(20).default([]),
 })
 
 export const endPackageRequest = z.object({

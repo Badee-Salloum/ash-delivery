@@ -159,6 +159,12 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
             driverConfirmed: true,
             source: 'manual' as const,
             feeOcr: null,
+            kind: 'yallago' as const,
+            driverShare: null,
+            companyShare: null,
+            notes: null,
+            createdBy: null,
+            points: [],
           }
           await deps.orders.create(order)
           await expect(deps.orders.create({ ...order, id: 'o-2' })).rejects.toThrow()

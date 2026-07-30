@@ -34,6 +34,10 @@ export type ShiftAction =
   | 'driver_submit_end'
   | 'manager_approve_close'
   | 'manager_reject_close'
+  // Refusing a shift at the OPEN gate, sending it back to the driver to redo. Distinct from
+  // `manager_request_rephoto` (which asks for a better photo of the same package) in intent and in
+  // the decision log: this one says the shift itself was not acceptable, with a reason.
+  | 'manager_reject_open'
   | 'suspend'
   | 'resume'
   | 'week_lock'
@@ -50,6 +54,7 @@ export const ACTION_PERMISSION: Readonly<Record<ShiftAction, PermissionKey>> = {
   driver_submit_end: 'shift.operate',
   manager_approve_close: 'shift.approve',
   manager_reject_close: 'shift.approve',
+  manager_reject_open: 'shift.approve',
   suspend: 'shift.approve',
   resume: 'shift.operate',
   week_lock: 'week.close',
@@ -239,6 +244,12 @@ const EDGES: Readonly<Record<ShiftState, Partial<Record<ShiftAction, ShiftState>
   awaiting_open_approval: {
     manager_approve_open: 'open',
     manager_request_rephoto: 'draft',
+    // Refused, and sent back for the driver to redo. Nothing has posted at this state, so there is
+    // nothing to reverse — the shift simply returns to his hands with a recorded reason.
+    manager_reject_open: 'draft',
+    // Refused outright. The bike is released and the shift is closed as cancelled rather than
+    // hard-deleted, so the refusal keeps its reason, its decision-log entry and its audit row.
+    manager_force_cancel: 'cancelled',
     suspend: 'suspended',
   },
   open: { driver_submit_end: 'pending_review', suspend: 'suspended', manager_force_cancel: 'cancelled', manager_force_close: 'approved' },

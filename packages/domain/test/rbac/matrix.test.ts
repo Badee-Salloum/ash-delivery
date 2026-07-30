@@ -49,7 +49,8 @@ const SRS_MATRIX: Record<PermissionKey, Partial<Record<RoleKey, Scope>>> = {
   // «رؤية بيانات الفرع كاملة»: BM ✓ (فرعه), sysadmin ✓, GM ✓
   'branch_data.view': { branch_manager: 'branch', system_admin: 'all', general_manager: 'all' },
   // «التتبع الحي GPS»: BM ✓ (فرعه), sysadmin ✓, GM ✓
-  'gps.view': { branch_manager: 'branch', system_admin: 'all', general_manager: 'all' },
+  // Live tracking is upper-level only (owner's decision) — the branch manager has no gps.view.
+  'gps.view': { system_admin: 'all', general_manager: 'all' },
   // «إدارة المستخدمين والصلاحيات»: sysadmin ✓, GM ✓
   'user.manage': { system_admin: 'all', general_manager: 'all' },
   // BR8: the driver sees his own shifts and dues

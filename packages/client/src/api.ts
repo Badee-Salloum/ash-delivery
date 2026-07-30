@@ -638,14 +638,28 @@ export class ApiClient {
     return this.post<VehicleEvent>(`/vehicles/${vehicleId}/events`, body)
   }
 
-  // ── Manual orders (Section C) ─────────────────────────────────────────────────────────────
-  /** A higher-level manager adds a manual order to reconcile a shift (fixes BR1's «missing order»). */
-  addManualOrder(shiftId: string, body: { providerOrderNo: string; payMode: string; fee: string; zone?: string | null }) {
+  // ── Orders a manager enters (Section C) ───────────────────────────────────────────────────
+  /**
+   * A manager adds an order on a driver's shift — either a Yallago delivery he is reconciling
+   * (BR1's «missing order»), or a MANUAL job: the branch's own work, which carries no Yallago cut
+   * and whose two shares are typed rather than derived from the day's band. For a manual order the
+   * server refuses anything where `driverShare + companyShare !== fee`.
+   */
+  addManualOrder(
+    shiftId: string,
+    body: {
+      providerOrderNo: string
+      payMode: string
+      fee: string
+      zone?: string | null
+      kind?: 'yallago' | 'manual'
+      driverShare?: string | null
+      companyShare?: string | null
+      notes?: string | null
+      points?: Array<{ role: 'start' | 'stop' | 'end'; label: string; lat?: number | null; lng?: number | null }>
+    },
+  ) {
     return this.post(`/shifts/${shiftId}/orders/manual`, body)
-  }
-  /** A driver asks a manager to add an order he can no longer add himself. */
-  requestManualOrder(shiftId: string, body: { providerOrderNo: string; payMode: string; fee: string; zone?: string | null }) {
-    return this.post(`/shifts/${shiftId}/orders/request`, body)
   }
 
   // ── Suspended / mid-shift incident (SRS C-1 / س29) ────────────────────────────────────────

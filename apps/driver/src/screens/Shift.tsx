@@ -19,7 +19,11 @@ import { PhotoSlot } from './PhotoSlot.tsx'
  * dropped Wi-Fi connection mid-upload is a re-tap, not a lost photo.
  */
 
-type Phase = 'start' | 'awaiting' | 'orders' | 'suspended' | 'end' | 'done'
+/**
+ * `orders` is the RUNNING shift — no longer order entry. Closing is two steps: `closeOrders` (scan
+ * the day's Yallago deliveries) then `end` (the closing package and BR1).
+ */
+type Phase = 'start' | 'awaiting' | 'orders' | 'suspended' | 'closeOrders' | 'end' | 'done'
 
 interface ShiftState {
   id: string
@@ -137,7 +141,36 @@ export function ShiftFlow({
   if (phase === 'suspended' && shift) {
     return <SuspendedScreen shiftId={shift.id} onResumed={() => setPhase('orders')} />
   }
+  // The shift is RUNNING. No order entry here: the driver records his Yallago deliveries in one go
+  // when he closes, by scanning the «Recent orders» list off his phone — which is how he reads them
+  // anyway, and it stops a long shift being punctuated by typing. What he needs while out is the
+  // battery, a way to flag an incident, and the beacon.
   if (phase === 'orders' && shift) {
+    return (
+      <Screen
+        title={t.shift.running}
+        footer={
+          <Button variant="success" onClick={() => setPhase('closeOrders')}>
+            {t.shift.finishShift}
+          </Button>
+        }
+      >
+        <Card>
+          <p className="text-center text-sm text-slate-500">{t.shift.runningHint}</p>
+        </Card>
+        {/* «تبديل بطارية» (SRS §L seam): at a charging stop the driver swaps a depleted pack for a
+            charged spare; both packs' readings are captured and the bike is re-fitted. */}
+        <BatterySwap shiftId={shift.id} fitted={fitted} spares={spares} onSwapped={setFitted} />
+        {/* «بلاغ حادثة» (C-1): the driver can't suspend himself — he flags the incident to the
+            branch, which rings the bell so a manager can put the shift on hold. */}
+        <ReportIncident shiftId={shift.id} />
+        {/* SRS K: stream location while the shift is open (foreground-only). */}
+        <GpsBeacon shiftId={shift.id} />
+      </Screen>
+    )
+  }
+  // Closing, step one: the orders. Scanned or typed now, at the end, as the owner asked.
+  if (phase === 'closeOrders' && shift) {
     return (
       <>
         {/* A refused order has to be visible. The driver taps «تم» and, before this, nothing at
@@ -147,51 +180,39 @@ export function ShiftFlow({
             <p className="text-center text-sm font-medium text-red-600">{orderError}</p>
           </Card>
         ) : null}
-      <OrderEntry
-        shift={shift}
-        initialOrders={recorded}
-        onDone={async (orders) => {
-          // Only what is not already on the server: provider_order_no is globally unique, so a
-          // resubmitted order is a 409 — and this used to have no catch at all, so one of them
-          // rejected the promise, `setPhase('end')` never ran, and «تم» silently did nothing.
-          const already = new Set(recorded.map((o) => o.providerOrderNo.trim()))
-          const failed = await submitOrders(api, shift.id, orders.filter((o) => !already.has(o.providerOrderNo.trim())))
-          if (failed.length > 0) {
-            setOrderError(`${t.shift.ordersFailed}: ${failed.join(', ')}`)
-            return
-          }
-          setOrderError(null)
-          setPhase('end')
-        }}
-      />
-      {/* «تبديل بطارية» (SRS §L seam): at a charging stop the driver swaps a depleted pack for a
-          charged spare; both packs' readings are captured and the bike is re-fitted. */}
-      <BatterySwap shiftId={shift.id} fitted={fitted} spares={spares} onSwapped={setFitted} />
-      {/* «بلاغ حادثة» (C-1): the driver can't suspend himself — he flags the incident to the
-          branch, which rings the bell so a manager can put the shift on hold. */}
-      <ReportIncident shiftId={shift.id} />
-      {/* SRS K: stream location while the shift is open (foreground-only). */}
-      <GpsBeacon shiftId={shift.id} />
+        <OrderEntry
+          shift={shift}
+          initialOrders={recorded}
+          onDone={async (orders) => {
+            // Only what is not already on the server: provider_order_no is globally unique, so a
+            // resubmitted order is a 409 — and this used to have no catch at all, so one of them
+            // rejected the promise, `setPhase('end')` never ran, and «تم» silently did nothing.
+            const already = new Set(recorded.map((o) => o.providerOrderNo.trim()))
+            const failed = await submitOrders(api, shift.id, orders.filter((o) => !already.has(o.providerOrderNo.trim())))
+            if (failed.length > 0) {
+              setOrderError(`${t.shift.ordersFailed}: ${failed.join(', ')}`)
+              return
+            }
+            setOrderError(null)
+            setPhase('end')
+          }}
+        />
       </>
     )
   }
   if (phase === 'end' && shift) {
     return <EndPackage shift={shift} batteries={fitted} onSubmitted={() => setPhase('done')} />
   }
-  const doneShiftId = shift?.id ?? resume?.id ?? null
   return (
     <Screen title={t.app.title}>
       <Card>
         <p className="text-center text-lg font-semibold text-emerald-700">{t.shift.states.pending_review} ✓</p>
       </Card>
-      {/* Submitted, awaiting the manager — the driver can no longer add orders himself. If he
-          realises one is missing he asks a manager to add it (SRS C, manual orders). */}
-      {doneShiftId ? (
-        <>
-          <p className="text-center text-sm text-slate-500">{t.orders.requestManualHint}</p>
-          <RequestOrder shiftId={doneShiftId} />
-        </>
-      ) : null}
+      {/* Submitted, awaiting the manager. A missing order is now the manager's to add from the
+          review — the driver no longer proposes one. */}
+      <Card>
+        <p className="text-center text-sm text-slate-500">{t.shift.awaitingManager}</p>
+      </Card>
     </Screen>
   )
 }
@@ -650,87 +671,6 @@ function ReportIncident({ shiftId }: { shiftId: string }): ReactNode {
     </Card>
   )
 }
-
-/**
- * «طلب إضافة طلب» (SRS C, manual orders): once the driver has submitted his end package he can no
- * longer add orders himself. If he realises one is missing he sends the branch the proposal — order
- * no, pay mode, fee — which rings the bell; a manager adds it via the reconcile path or declines.
- */
-function RequestOrder({ shiftId }: { shiftId: string }): ReactNode {
-  const { api, t } = useApp()
-  const toast = useToast()
-  const [asking, setAsking] = useState(false)
-  const [orderNo, setOrderNo] = useState('')
-  const [payMode, setPayMode] = useState<PayMode>('cash')
-  const [fee, setFee] = useState('5000')
-  const [busy, setBusy] = useState(false)
-
-  const modeLabel: Record<PayMode, string> = {
-    cash: t.orders.payModes.cash,
-    electronic: t.orders.payModes.electronic,
-    free: t.orders.payModes.free,
-  }
-  const modeColor: Record<PayMode, string> = {
-    cash: 'bg-emerald-100 text-emerald-800',
-    electronic: 'bg-sky-100 text-sky-800',
-    free: 'bg-amber-100 text-amber-800',
-  }
-
-  if (!asking) {
-    return (
-      <Button variant="ghost" onClick={() => setAsking(true)}>
-        {t.orders.requestManual}
-      </Button>
-    )
-  }
-  return (
-    <Card className="flex flex-col gap-3">
-      <Field label={t.orders.orderNo}>
-        <TextInput value={orderNo} onChange={(e) => setOrderNo(e.target.value)} />
-      </Field>
-      <Field label={t.orders.payMode}>
-        {/* Same one-tap cycling as the order screen (cash → electronic → free). */}
-        <button
-          type="button"
-          onClick={() => setPayMode((m) => nextPayMode(m))}
-          className={`min-h-11 rounded-2xl px-3 text-sm font-semibold ${modeColor[payMode]}`}
-        >
-          {modeLabel[payMode]}
-        </button>
-      </Field>
-      <Field label={t.orders.fee}>
-        <MoneyInput value={fee} onChange={(e) => setFee(e.target.value)} />
-      </Field>
-      <div className="flex gap-2">
-        <Button
-          variant="success"
-          className="flex-1"
-          disabled={busy || orderNo.trim() === '' || fee.trim() === ''}
-          onClick={async () => {
-            setBusy(true)
-            try {
-              await api.requestManualOrder(shiftId, { providerOrderNo: orderNo.trim(), payMode, fee, zone: null })
-              toast.success(t.orders.requestSent)
-              setAsking(false)
-              setOrderNo('')
-              setFee('5000')
-            } catch {
-              toast.error(t.common.actionFailed)
-            } finally {
-              setBusy(false)
-            }
-          }}
-        >
-          {busy ? t.common.loading : t.orders.requestManual}
-        </Button>
-        <Button variant="ghost" className="flex-1" onClick={() => setAsking(false)}>
-          {t.common.cancel}
-        </Button>
-      </div>
-    </Card>
-  )
-}
-
 /**
  * The live-GPS indicator. Mounting it starts the beacon (SRS K); unmounting — when the shift leaves
  * the open/orders phase — stops it. Foreground-only, per the PWA limitation.

@@ -5,6 +5,7 @@ import type {
   BatteryRecord,
   BatterySwapRecord,
   Deps,
+  OrderPointRecord,
   DocumentRecord,
   ShiftOrderRecord,
   ShiftRecord,
@@ -24,6 +25,7 @@ import {
   type BatteryReading,
   type ShiftOrder,
   type TransitionResult,
+  add,
   businessDateFor,
   canOpenShift,
   closingBalances,
@@ -73,13 +75,24 @@ export class ServiceError extends Error {
 export function ordersHash(orders: readonly ShiftOrderRecord[]): string {
   const canonical = [...orders]
     .sort((a, b) => (a.providerOrderNo < b.providerOrderNo ? -1 : 1))
-    .map((o) => `${o.providerOrderNo}|${o.payMode}|${o.fee}`)
+    // The kind and the typed shares are hashed too: they decide the money as much as the fee does,
+    // so a manager must not be able to approve against a split he never reviewed.
+    .map((o) => `${o.providerOrderNo}|${o.payMode}|${o.fee}|${o.kind}|${o.driverShare ?? ''}|${o.companyShare ?? ''}`)
     .join(';')
   return createHash('sha256').update(canonical).digest('hex').slice(0, 32)
 }
 
 const toDomainOrders = (rows: readonly ShiftOrderRecord[]): ShiftOrder[] =>
-  rows.map((o) => ({ orderNo: o.providerOrderNo, payMode: o.payMode, fee: o.fee }))
+  rows.map((o) => ({ orderNo: o.providerOrderNo, payMode: o.payMode, fee: o.fee, kind: o.kind }))
+
+/** What the manual jobs on one shift pay out, as typed and already validated to equal their fees. */
+const manualShareTotals = (rows: readonly ShiftOrderRecord[]): { driverShare: Minor; companyShare: Minor } => {
+  const manual = rows.filter((o) => o.kind === 'manual')
+  return {
+    driverShare: sum(manual.map((o) => o.driverShare ?? minor(0n))),
+    companyShare: sum(manual.map((o) => o.companyShare ?? minor(0n))),
+  }
+}
 
 export function todayFor(deps: Deps): CalendarDate {
   return businessDateFor(deps.clock.nowMs(), deps.clock.offsetMinutes())
@@ -455,6 +468,26 @@ export async function requestRephoto(deps: Deps, actor: Actor, shiftId: string, 
   return updated
 }
 
+/**
+ * The manager refuses a shift at the OPEN gate: it returns to `draft` for the driver to redo.
+ *
+ * Distinct from a re-shoot request, which asks for a better photograph of the same package. This
+ * says the shift itself was not acceptable — and until now there was no way to say it: the only
+ * kill-path at this gate hard-DELETED the row, so the driver was never told why and nothing was
+ * left to look at afterwards. Nothing has posted at `awaiting_open_approval`, so there is nothing
+ * to reverse; the reason and the decision-log entry are the whole point.
+ */
+export async function rejectOpen(deps: Deps, actor: Actor, shiftId: string, notes: string | null): Promise<ShiftRecord> {
+  const shift = await mustFind(deps, shiftId)
+  const result = await guard(deps, shift, 'manager_reject_open', actor)
+  if (!result.ok) fail(result)
+  const updated: ShiftRecord = { ...shift, state: result.next }
+  await deps.shifts.update(updated)
+  await recordDecision(deps, actor, shiftId, 'open', 'rejected', notes)
+  await notifyDriver(deps, updated, 'shift_open_rejected', notes)
+  return updated
+}
+
 /** The manager rejects a close: the shift returns to `open` so the driver can correct and resubmit. */
 export async function rejectClose(deps: Deps, actor: Actor, shiftId: string, notes: string | null): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
@@ -700,6 +733,15 @@ export async function addOrder(
     // SRS D-1/D-3: 'ocr' when the driver pulled the fee off «Recent orders»; feeOcr is what it read.
     source: input.source ?? 'manual',
     feeOcr: input.feeOcr ?? null,
+    // What the driver records is always a Yallago delivery — he scans his own «Recent orders» list.
+    // A MANUAL job is the branch's, and only a manager may enter one (`addManualOrder`); allowing it
+    // here would let a driver write his own share.
+    kind: 'yallago',
+    driverShare: null,
+    companyShare: null,
+    notes: null,
+    createdBy: actor.userId,
+    points: [],
   }
   try {
     await deps.orders.create(order)
@@ -724,14 +766,49 @@ export async function addOrder(
  */
 export async function addManualOrder(
   deps: Deps,
-  _actor: Actor,
+  actor: Actor,
   shiftId: string,
-  input: { providerOrderNo: string; payMode: ShiftOrder['payMode']; fee: Minor; zone: string | null },
+  input: {
+    providerOrderNo: string
+    payMode: ShiftOrder['payMode']
+    fee: Minor
+    zone: string | null
+    kind?: 'yallago' | 'manual'
+    driverShare?: Minor | null
+    companyShare?: Minor | null
+    notes?: string | null
+    points?: readonly OrderPointRecord[]
+  },
 ): Promise<ShiftOrderRecord> {
   const shift = await mustFind(deps, shiftId)
   if (shift.state !== 'open' && shift.state !== 'suspended' && shift.state !== 'pending_review') {
     throw new ServiceError(409, 'shift_not_reconcilable')
   }
+  const kind = input.kind ?? 'yallago'
+  const driverShare = input.driverShare ?? null
+  const companyShare = input.companyShare ?? null
+
+  if (kind === 'manual') {
+    // The invariant the whole manual-order design rests on. `shareSplit` must close `fee_earned`
+    // exactly (driver + company + yallago === feeTotal); a manual order contributes no Yallago cut,
+    // so its two shares ARE its fee. Let them disagree by one minor unit and the approval posting
+    // throws — at close, in front of a manager, with no way to fix it but editing the database.
+    if (driverShare === null || companyShare === null) {
+      throw new ServiceError(422, 'manual_order_shares_required')
+    }
+    if (add(driverShare, companyShare) !== input.fee) {
+      throw new ServiceError(422, 'manual_order_shares_mismatch', {
+        fee: serializeMoney(input.fee),
+        driverShare: serializeMoney(driverShare),
+        companyShare: serializeMoney(companyShare),
+      })
+    }
+  } else if (driverShare !== null || companyShare !== null) {
+    // A Yallago order's split belongs to the DAY's tier band, computed at approval. Storing one on
+    // the order would be quietly overwritten by the true-up that restates earlier shifts.
+    throw new ServiceError(422, 'yallago_order_takes_no_shares')
+  }
+
   const order: ShiftOrderRecord = {
     id: deps.ids.uuid(),
     shiftId,
@@ -743,6 +820,12 @@ export async function addManualOrder(
     // A manager reconciling by hand vouches for the number — always manual, no OCR baseline.
     source: 'manual',
     feeOcr: null,
+    kind,
+    driverShare,
+    companyShare,
+    notes: input.notes ?? null,
+    createdBy: actor.userId,
+    points: input.points ?? [],
   }
   try {
     await deps.orders.create(order)
@@ -755,39 +838,10 @@ export async function addManualOrder(
   return order
 }
 
-/**
- * The driver asks a manager to add an order he can no longer add himself (the shift has left the
- * open window). No new entity: it rings the branch bell with the proposed order, and the manager
- * adds it via `addManualOrder` or declines.
- */
-export async function requestManualOrder(
-  deps: Deps,
-  _actor: Actor,
-  shiftId: string,
-  input: { providerOrderNo: string; payMode: ShiftOrder['payMode']; fee: Minor; zone: string | null },
-): Promise<void> {
-  const shift = await mustFind(deps, shiftId)
-  try {
-    await deps.notifications.push({
-      recipientId: `branch:${shift.branchId}`,
-      branchId: shift.branchId,
-      kind: 'manual_order_requested',
-      payload: {
-        shiftId,
-        driverId: shift.driverId,
-        providerOrderNo: input.providerOrderNo,
-        payMode: input.payMode,
-        fee: serializeMoney(input.fee),
-        zone: input.zone,
-      },
-      dedupeKey: `${shiftId}:manual_order_request:${input.providerOrderNo}`,
-      readAtMs: null,
-      createdAtMs: deps.clock.nowMs(),
-    })
-  } catch {
-    // The bell is a convenience; a failed push must not error the driver's request.
-  }
-}
+// `requestManualOrder` lived here: the driver proposing an order for a manager to enter. A manual
+// job is now the branch's own work, priced by a manager with shares he agrees — not something a
+// driver proposes — so the request channel and its bell went with it (owner's decision). His own
+// Yallago deliveries he still records himself, by scanning them at the end of the shift.
 
 // ── BR1 ───────────────────────────────────────────────────────────────────────────────────
 
@@ -917,7 +971,10 @@ export async function approveClose(
     priorOrders.push(...toDomainOrders(await deps.orders.listByShift(prior.id)))
   }
   const todaysOrders = toDomainOrders(orderRows)
-  const dayFees = [...priorOrders, ...todaysOrders].map((o) => o.fee)
+  // ONLY Yallago's deliveries choose the band and feed the true-up. A manual job is the branch's
+  // own, priced by hand: counting it would lift the driver's percentage on Yallago work he did not
+  // do, and totalling its fee here would have the tier try to split money that is already split.
+  const dayFees = [...priorOrders, ...todaysOrders].filter((o) => o.kind !== 'manual').map((o) => o.fee)
 
   // The tier rule that actually governs this shift's pay — resolved by business date and vehicle
   // type (F-3 versioning, F-4 per-type), not a frozen default. `resolveTierRule` falls back to the
@@ -928,9 +985,10 @@ export async function approveClose(
 
   // What the day's earlier shifts were already paid, under the SAME rule — so the true-up is correct
   // for whole AND marginal modes and for a mid-day band crossing. `splitDay` handles both modes.
+  const priorYallagoFees = priorOrders.filter((o) => o.kind !== 'manual').map((o) => o.fee)
   const alreadyPosted =
-    priorOrders.length > 0
-      ? splitDay(priorOrders.map((o) => o.fee), rule)
+    priorYallagoFees.length > 0
+      ? splitDay(priorYallagoFees, rule)
       : { driverShare: minor(0n), companyShare: minor(0n), yalagoShare: minor(0n) }
 
   const settlement = trueUp(dayFees, rule, {
@@ -939,9 +997,14 @@ export async function approveClose(
     yalago: alreadyPosted.yalagoShare,
   })
 
+  // The tier settles Yallago's work; the manual jobs on THIS shift carry the shares a manager typed
+  // and validated (driverShare + companyShare === fee). Adding them here is what lets `shareSplit`
+  // exhaust `fee_earned` across both kinds — the postings total every order's fee, so the split must
+  // account for every order's fee too. Prior shifts' manual orders were settled at their own close.
+  const manual = manualShareTotals(orderRows)
   const shiftSplit = {
-    driverShare: settlement.driverDelta,
-    companyShare: settlement.companyDelta,
+    driverShare: add(settlement.driverDelta, manual.driverShare),
+    companyShare: add(settlement.companyDelta, manual.companyShare),
     yalagoShare: settlement.yalagoDelta,
   }
 
@@ -1018,15 +1081,23 @@ async function shiftSplitFor(deps: Deps, shift: ShiftRecord, todaysOrders: Shift
     if (prior.id === shift.id) continue
     priorOrders.push(...toDomainOrders(await deps.orders.listByShift(prior.id)))
   }
-  const dayFees = [...priorOrders, ...todaysOrders].map((o) => o.fee)
+  // Yallago's deliveries alone choose the band and feed the true-up — see approveClose.
+  const dayFees = [...priorOrders, ...todaysOrders].filter((o) => o.kind !== 'manual').map((o) => o.fee)
   const vehicle = await deps.directory.vehicle(shift.vehicleId)
   const rule = await resolveTierRule(deps, shift.businessDate, vehicle?.vehicleTypeId ?? null)
+  const priorYallagoFees = priorOrders.filter((o) => o.kind !== 'manual').map((o) => o.fee)
   const alreadyPosted =
-    priorOrders.length > 0
-      ? splitDay(priorOrders.map((o) => o.fee), rule)
+    priorYallagoFees.length > 0
+      ? splitDay(priorYallagoFees, rule)
       : { driverShare: minor(0n), companyShare: minor(0n), yalagoShare: minor(0n) }
   const s = trueUp(dayFees, rule, { driver: alreadyPosted.driverShare, company: alreadyPosted.companyShare, yalago: alreadyPosted.yalagoShare })
-  return { driverShare: s.driverDelta, companyShare: s.companyDelta, yalagoShare: s.yalagoDelta }
+  // Plus this shift's manual jobs, whose shares were typed and validated against their fees.
+  const manual = manualShareTotals(await deps.orders.listByShift(shift.id))
+  return {
+    driverShare: add(s.driverDelta, manual.driverShare),
+    companyShare: add(s.companyDelta, manual.companyShare),
+    yalagoShare: s.yalagoDelta,
+  }
 }
 
 /**

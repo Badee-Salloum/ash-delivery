@@ -57,16 +57,75 @@ describe('manual orders', () => {
     expect(audited.some((a) => a.actorId === 'u-bm')).toBe(true)
   })
 
-  it('a driver requests a manual order — the branch bell rings with the proposal', async () => {
+  it('a MANUAL job records its own shares, route and note — and no Yallago cut', async () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
     const id = await toPendingReview(driver, manager)
 
-    const res = await post(driver, `/shifts/${id}/orders/request`, { providerOrderNo: 'FORGOT-3', payMode: 'electronic', fee: sypStr(5_000), zone: null })
-    expect(res.statusCode, res.body).toBe(202)
+    const res = await post(manager, `/shifts/${id}/orders/manual`, {
+      providerOrderNo: 'MAN-1',
+      payMode: 'cash',
+      fee: sypStr(10_000),
+      zone: null,
+      kind: 'manual',
+      driverShare: sypStr(4_000),
+      companyShare: sypStr(6_000),
+      notes: 'زبون دائم',
+      points: [
+        { role: 'start', label: 'مطعم الشام', lat: 33.5138, lng: 36.2765 },
+        { role: 'stop', label: 'شارع بغداد', lat: null, lng: null },
+        { role: 'end', label: 'جسر النحاس', lat: null, lng: null },
+      ],
+    })
+    expect(res.statusCode, res.body).toBe(201)
 
-    const note = h.deps.notifications.rows.find((n) => n.kind === 'manual_order_requested' && n.recipientId === 'branch:branch-damascus')
-    expect(note?.payload).toMatchObject({ shiftId: id, providerOrderNo: 'FORGOT-3', fee: sypStr(5_000) })
+    const order = (await h.deps.orders.listByShift(id)).find((o) => o.providerOrderNo === 'MAN-1')!
+    expect(order.kind).toBe('manual')
+    expect(order.driverShare).toBe(400_000n)
+    expect(order.companyShare).toBe(600_000n)
+    expect(order.notes).toBe('زبون دائم')
+    expect(order.points.map((p) => p.label)).toEqual(['مطعم الشام', 'شارع بغداد', 'جسر النحاس'])
+    // The pin is optional: the first point carries one, the rest are named only.
+    expect(order.points[0]!.lat).toBeCloseTo(33.5138)
+    expect(order.points[1]!.lat).toBeNull()
+  })
+
+  it('refuses a manual job whose shares do not add up to its value', async () => {
+    // The invariant the ledger rests on. Off by one minor unit and the approval posting could not
+    // exhaust `fee_earned` — which would fail the close, in front of a manager, with no way out.
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await toPendingReview(driver, manager)
+
+    const res = await post(manager, `/shifts/${id}/orders/manual`, {
+      providerOrderNo: 'MAN-BAD',
+      payMode: 'cash',
+      fee: sypStr(10_000),
+      zone: null,
+      kind: 'manual',
+      driverShare: sypStr(4_000),
+      companyShare: sypStr(5_000), // 9,000 ≠ 10,000
+    })
+    expect(res.statusCode).toBe(422)
+    expect(res.json().error).toBe('manual_order_shares_mismatch')
+  })
+
+  it('a driver may not record a manual job — only his own Yallago deliveries', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await toPendingReview(driver, manager)
+
+    const res = await post(driver, `/shifts/${id}/orders`, {
+      providerOrderNo: 'MAN-SNEAK',
+      payMode: 'cash',
+      fee: sypStr(10_000),
+      zone: null,
+      kind: 'manual',
+      driverShare: sypStr(9_000),
+      companyShare: sypStr(1_000),
+    })
+    expect(res.statusCode).toBe(403)
+    expect(res.json().error).toBe('manual_order_is_manager_only')
   })
 
   it('a driver may not add a manager manual order; a duplicate order number is refused', async () => {

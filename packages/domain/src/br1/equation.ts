@@ -1,13 +1,55 @@
-import { type Minor, add, isZero, minor, sub } from '../money/minor.ts'
-import { type FeeTotals, type Rounding, orderBlock, totalFees, yalagoCut } from '../money/allocate.ts'
+import { type Minor, add, isZero, minor, sub, sum } from '../money/minor.ts'
+import { type FeeTotals, type Rounding, yalagoCut } from '../money/allocate.ts'
 
 /** BR3 — every order is exactly one of these three. */
 export type PayMode = 'cash' | 'electronic' | 'free'
+
+/**
+ * Where an order came from, which decides how its money is cut up.
+ *
+ * `yallago` — a delivery Yallago handed us. Their 20% leaves instantly (BR2) and the remaining
+ * block is split driver-vs-company at the DAY's tier band (BR4/F-1).
+ *
+ * `manual` — a job the branch took itself, entered by a manager. Yallago is not involved, so there
+ * is no 20% cut and the daily band does not apply to it: the driver's and the company's shares are
+ * entered by hand and must add up to the fee exactly.
+ */
+export type OrderKind = 'yallago' | 'manual'
 
 export interface ShiftOrder {
   readonly orderNo: string
   readonly payMode: PayMode
   readonly fee: Minor
+  /** Absent means `yallago` — every order was one before manual orders existed. */
+  readonly kind?: OrderKind
+  /** Manual orders only: the hand-entered split. `driverShare + companyShare === fee`, exactly. */
+  readonly driverShare?: Minor
+  readonly companyShare?: Minor
+}
+
+export const isManualOrder = (order: ShiftOrder): boolean => order.kind === 'manual'
+
+/** Yallago's cut of one order — zero for a manual job, which they never touched. */
+export const orderYalagoCut = (order: ShiftOrder, rounding: Rounding = 'floor'): Minor =>
+  isManualOrder(order) ? minor(0n) : yalagoCut(order.fee, rounding)
+
+/** What lands with the driver from one order: the fee less whatever Yallago took. */
+export const orderNetBlock = (order: ShiftOrder, rounding: Rounding = 'floor'): Minor =>
+  sub(order.fee, orderYalagoCut(order, rounding))
+
+/**
+ * The three BR1 fee terms across a mixed set of orders.
+ *
+ * `totalFees` sums a list of bare fees and charges Yallago on every one of them. That is right when
+ * every order is Yallago's, and wrong the moment a manual job is in the list — it would invent a
+ * 20% cut for a delivery Yallago never saw and put BR1 out by that amount. This walks the orders
+ * instead, so each one is charged (or not) according to its own kind. `blockTotal` stays a
+ * RESIDUAL — see the boxed comment in money/allocate.ts.
+ */
+export function totalFeesOfOrders(orders: readonly ShiftOrder[], rounding: Rounding = 'floor'): FeeTotals {
+  const feeTotal = sum(orders.map((o) => o.fee))
+  const yalagoTotal = sum(orders.map((o) => orderYalagoCut(o, rounding)))
+  return { feeTotal, yalagoTotal, blockTotal: sub(feeTotal, yalagoTotal) }
 }
 
 export interface Br1Input {
@@ -65,24 +107,24 @@ export interface Br1Result {
  */
 export function evaluateBr1(input: Br1Input): Br1Result {
   const rounding = input.rounding ?? 'floor'
-  const totals = totalFees(
-    input.orders.map((o) => o.fee),
-    rounding,
-  )
+  const totals = totalFeesOfOrders(input.orders, rounding)
 
   let cashFromOrders = 0n
   let walletFromOrders = 0n
   for (const order of input.orders) {
+    // Zero for a manual job — Yallago never touched it, so nothing leaves the wallet for them and
+    // the whole fee is the driver's block.
+    const cut = orderYalagoCut(order, rounding)
     switch (order.payMode) {
       case 'cash':
         // Collects the fee in cash; Yallago takes its 20% out of the wallet instantly (BR2).
         cashFromOrders += order.fee
-        walletFromOrders -= yalagoCut(order.fee, rounding)
+        walletFromOrders -= cut
         break
       case 'electronic':
       case 'free':
-        // Nothing collected in cash; the 80% block lands in the wallet.
-        walletFromOrders += orderBlock(order.fee, rounding)
+        // Nothing collected in cash; the block (fee less Yallago's cut) lands in the wallet.
+        walletFromOrders += sub(order.fee, cut)
         break
     }
   }

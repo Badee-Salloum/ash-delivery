@@ -1,8 +1,14 @@
-import { type ReactNode, useCallback, useEffect, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import L, { type CircleMarker, type LeafletMouseEvent, type Map as LeafletMap } from 'leaflet'
+import 'leaflet/dist/leaflet.css'
 import { type OcrScalar, ocrReadingDelta } from '@ash/client'
+import { formatMinor, parseMinor, sub } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { Badge, Button, Card, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
+
+/** Where the map opens when no point has been pinned yet. */
+const DAMASCUS: readonly [number, number] = [33.5138, 36.2765]
 
 interface BatteryReadingView {
   batteryId: string
@@ -41,7 +47,19 @@ interface Review {
     mediaSlots: string[]
     batteries: BatteryReadingView[]
   }
-  orders: Array<{ providerOrderNo: string; payMode: string; fee: string; zone: string | null; source?: 'manual' | 'ocr'; feeOcr?: string | null }>
+  orders: Array<{
+    providerOrderNo: string
+    payMode: string
+    fee: string
+    zone: string | null
+    source?: 'manual' | 'ocr'
+    feeOcr?: string | null
+    kind?: 'yallago' | 'manual'
+    driverShare?: string | null
+    companyShare?: string | null
+    notes?: string | null
+    points?: Array<{ role: string; label: string; lat: number | null; lng: number | null }>
+  }>
   batterySwaps?: Array<{
     seqNo: number
     slotNo: number
@@ -146,14 +164,35 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     }
   }
 
-  // C-7: send the package back for a re-shoot (both gates), or reject a close. Both bounce the shift
-  // to the driver, with the note as the reason he sees.
-  async function decide(path: 'request-rephoto' | 'reject-close'): Promise<void> {
+  // C-7: send the package back for a re-shoot (both gates), or reject the shift — at the close gate
+  // (`reject-close`) or at the open gate (`reject-open`). All of them bounce the shift to the driver
+  // with the note as the reason he sees. To refuse an unopened shift OUTRIGHT rather than send it
+  // back, `refuse()` below voids it instead.
+  async function decide(path: 'request-rephoto' | 'reject-close' | 'reject-open'): Promise<void> {
     if (!review) return
     setBusy(true)
     setError(null)
     try {
       await api.post(`/shifts/${review.id}/${path}`, { notes: notes || null })
+      onDone()
+    } catch (err) {
+      setError((err as { error?: string }).error ?? 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * Refuse an unopened shift outright: it is cancelled, not returned. The bike is released and the
+   * driver must start again. Voiding rather than deleting keeps the reason, the decision and the
+   * audit row — nothing has posted at this gate, so its money reversals are no-ops.
+   */
+  async function refuse(): Promise<void> {
+    if (!review) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api.voidShift(review.id, notes.trim() === '' ? '—' : notes.trim())
       onDone()
     } catch (err) {
       setError((err as { error?: string }).error ?? 'error')
@@ -291,59 +330,27 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                 <Money value={o.fee} />
                 {/* SRS D-3: a fee the driver changed from what OCR read (money strings compare exact). */}
                 <OcrDeltaLines deltas={scalarDelta(t.orders.fee, o.feeOcr ?? null, o.fee)} />
+                {/* A manual job carries its agreed split and its route with it — the numbers a
+                    manager is signing for are not derivable from the fee alone. */}
+                {o.kind === 'manual' ? (
+                  <div className="mt-1 flex flex-col gap-0.5 text-xs text-slate-500">
+                    <span className="num">
+                      {t.orders.driverShare}: {o.driverShare ?? '—'} · {t.orders.companyShare}: {o.companyShare ?? '—'}
+                    </span>
+                    {o.points && o.points.length > 0 ? (
+                      <span>
+                        {t.orders.route}: {o.points.map((p) => p.label).join(' ← ')}
+                      </span>
+                    ) : null}
+                    {o.notes ? <span>{o.notes}</span> : null}
+                  </div>
+                ) : null}
               </td>
             </tr>
           ))}
         </Table>
 
-        {/* Reconcile a «missing order» BR1 flagged: add it manually. Changes the orders hash, so the
-            manager re-reviews before approving. */}
-        <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
-          <TextInput
-            placeholder={t.orders.orderNo}
-            aria-label={t.orders.orderNo}
-            value={manual.providerOrderNo}
-            onChange={(e) => setManual({ ...manual, providerOrderNo: e.target.value })}
-            className="w-32"
-          />
-          <Select
-            aria-label={t.orders.payMode}
-            value={manual.payMode}
-            onChange={(e) => setManual({ ...manual, payMode: e.target.value })}
-          >
-            {(['cash', 'electronic', 'free'] as const).map((m) => (
-              <option key={m} value={m}>
-                {t.orders.payModes[m]}
-              </option>
-            ))}
-          </Select>
-          <MoneyInput
-            placeholder={t.orders.fee}
-            aria-label={t.orders.fee}
-            value={manual.fee}
-            onChange={(e) => setManual({ ...manual, fee: e.target.value })}
-            className="w-28"
-          />
-          <Button
-            variant="ghost"
-            disabled={busy || !manual.providerOrderNo || !manual.fee}
-            onClick={async () => {
-              setBusy(true)
-              setError(null)
-              try {
-                await api.addManualOrder(review.id, { providerOrderNo: manual.providerOrderNo, payMode: manual.payMode, fee: manual.fee, zone: null })
-                setManual({ providerOrderNo: '', payMode: 'cash', fee: '' })
-                load()
-              } catch (err) {
-                setError((err as { error?: string }).error ?? 'error')
-              } finally {
-                setBusy(false)
-              }
-            }}
-          >
-            {t.orders.addManual}
-          </Button>
-        </div>
+        <AddOrderForm shiftId={review.id} onAdded={load} />
       </Card>
 
       {review.decisions.length > 0 ? (
@@ -384,7 +391,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         >
           {isClose ? t.approval.approveClose : t.common.approve}
         </Button>
-        {/* Re-shoot is legal on both gates; reject only on a close. */}
+        {/* Re-shoot is legal on both gates. */}
         <Button variant="ghost" disabled={busy} onClick={() => decide('request-rephoto')}>
           {t.approval.requestRetake}
         </Button>
@@ -392,9 +399,283 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           <Button variant="danger" disabled={busy} onClick={() => decide('reject-close')}>
             {t.approval.reject}
           </Button>
-        ) : null}
+        ) : (
+          <>
+            {/* At the open gate the manager chooses: send it back to be redone, or refuse it
+                outright — which cancels the shift and frees the bike. */}
+            <Button variant="ghost" disabled={busy} onClick={() => decide('reject-open')}>
+              {t.approval.sendBack}
+            </Button>
+            <Button variant="danger" disabled={busy} onClick={refuse}>
+              {t.approval.refuse}
+            </Button>
+          </>
+        )}
       </div>
     </div>
+  )
+}
+
+interface PointDraft {
+  role: 'start' | 'stop' | 'end'
+  label: string
+  lat: number | null
+  lng: number | null
+}
+
+/**
+ * Add an order to a shift, of either kind.
+ *
+ * A YALLAGO order is a reconciliation — the «missing order» BR1 ranked — and needs only its number,
+ * pay mode and fee; its split is the day's tier band, computed at approval.
+ *
+ * A MANUAL order is the branch's own job. Yallago takes nothing from it, so the fee is divided
+ * between the driver and the company by agreement, and BOTH shares are typed. They must add up to
+ * the fee exactly: the server refuses anything else, because the approval posting has to exhaust
+ * the fee and a one-unit disagreement would fail the close in front of a manager with no way out.
+ * The form therefore does that arithmetic in front of him — type the driver's share and the
+ * company's is what remains — and says so if it does not add up.
+ *
+ * Adding either kind changes the orders hash, so a manager who was mid-review must look again
+ * before he can approve.
+ */
+function AddOrderForm({ shiftId, onAdded }: { shiftId: string; onAdded(): void }): ReactNode {
+  const { api, t } = useApp()
+  const [kind, setKind] = useState<'yallago' | 'manual'>('yallago')
+  const [orderNo, setOrderNo] = useState('')
+  const [payMode, setPayMode] = useState('cash')
+  const [fee, setFee] = useState('')
+  const [driverShare, setDriverShare] = useState('')
+  const [notes, setNotes] = useState('')
+  const [points, setPoints] = useState<PointDraft[]>([
+    { role: 'start', label: '', lat: null, lng: null },
+    { role: 'end', label: '', lat: null, lng: null },
+  ])
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // The company takes what the driver does not. Money is decimal strings on the wire, so this is
+  // done in minor units and formatted back — never with a float.
+  const companyShare = ((): string | null => {
+    if (fee.trim() === '' || driverShare.trim() === '') return null
+    try {
+      const rest = sub(parseMinor(fee), parseMinor(driverShare))
+      return rest < 0n ? null : formatMinor(rest)
+    } catch {
+      return null
+    }
+  })()
+
+  const isManual = kind === 'manual'
+  const routeComplete = points.every((p) => p.label.trim() !== '')
+  const ready =
+    orderNo.trim() !== '' &&
+    fee.trim() !== '' &&
+    (!isManual || (driverShare.trim() !== '' && companyShare !== null && routeComplete))
+
+  const setPoint = (i: number, patch: Partial<PointDraft>): void =>
+    setPoints((cur) => cur.map((p, j) => (j === i ? { ...p, ...patch } : p)))
+
+  const submit = async (): Promise<void> => {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.addManualOrder(shiftId, {
+        providerOrderNo: orderNo.trim(),
+        payMode,
+        fee,
+        zone: null,
+        kind,
+        ...(isManual
+          ? {
+              driverShare,
+              companyShare,
+              notes: notes.trim() === '' ? null : notes.trim(),
+              points: points.map((p) => ({ role: p.role, label: p.label.trim(), lat: p.lat, lng: p.lng })),
+            }
+          : {}),
+      })
+      setOrderNo('')
+      setFee('')
+      setDriverShare('')
+      setNotes('')
+      setPoints([
+        { role: 'start', label: '', lat: null, lng: null },
+        { role: 'end', label: '', lat: null, lng: null },
+      ])
+      onAdded()
+    } catch (err) {
+      setError((err as { error?: string }).error ?? 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-3 flex flex-col gap-3 border-t border-slate-100 pt-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <Select aria-label={t.orders.kind} value={kind} onChange={(e) => setKind(e.target.value as 'yallago' | 'manual')}>
+          <option value="yallago">{t.orders.kinds.yallago}</option>
+          <option value="manual">{t.orders.kinds.manual}</option>
+        </Select>
+        <TextInput
+          placeholder={t.orders.orderNo}
+          aria-label={t.orders.orderNo}
+          value={orderNo}
+          onChange={(e) => setOrderNo(e.target.value)}
+          className="w-32"
+        />
+        <Select aria-label={t.orders.payMode} value={payMode} onChange={(e) => setPayMode(e.target.value)}>
+          {(['cash', 'electronic', 'free'] as const).map((m) => (
+            <option key={m} value={m}>
+              {t.orders.payModes[m]}
+            </option>
+          ))}
+        </Select>
+        <MoneyInput
+          placeholder={t.orders.fee}
+          aria-label={t.orders.fee}
+          value={fee}
+          onChange={(e) => setFee(e.target.value)}
+          className="w-28"
+        />
+      </div>
+
+      {isManual ? (
+        <>
+          {/* The two shares. Yallago has no claim on this job, so the fee divides in two. */}
+          <div className="flex flex-wrap items-center gap-2">
+            <MoneyInput
+              placeholder={t.orders.driverShare}
+              aria-label={t.orders.driverShare}
+              value={driverShare}
+              onChange={(e) => setDriverShare(e.target.value)}
+              className="w-32"
+            />
+            <span className="text-sm text-slate-500">
+              {t.orders.companyShare}: <span className="num">{companyShare ?? '—'}</span>
+            </span>
+            {fee.trim() !== '' && driverShare.trim() !== '' && companyShare === null ? (
+              <span className="text-sm font-medium text-red-600">{t.orders.sharesMismatch}</span>
+            ) : null}
+          </div>
+
+          {/* Where it went. The written place is what people actually say; the pin is optional. */}
+          <div className="flex flex-col gap-2">
+            {points.map((p, i) => (
+              <div key={i} className="flex flex-wrap items-center gap-2">
+                <span className="w-16 text-xs text-slate-500">{t.orders.pointRoles[p.role]}</span>
+                <TextInput
+                  placeholder={t.orders.pointLabel}
+                  aria-label={`${t.orders.pointRoles[p.role]} — ${t.orders.pointLabel}`}
+                  value={p.label}
+                  onChange={(e) => setPoint(i, { label: e.target.value })}
+                  className="min-w-48 flex-1"
+                />
+                <MapPin
+                  lat={p.lat}
+                  lng={p.lng}
+                  onPick={(lat, lng) => setPoint(i, { lat, lng })}
+                  onClear={() => setPoint(i, { lat: null, lng: null })}
+                />
+                {p.role === 'stop' ? (
+                  <Button variant="ghost" onClick={() => setPoints((cur) => cur.filter((_, j) => j !== i))}>
+                    ×
+                  </Button>
+                ) : null}
+              </div>
+            ))}
+            <div>
+              <Button
+                variant="ghost"
+                onClick={() =>
+                  // A stop always goes BEFORE the end, so the route reads start → stops → end.
+                  setPoints((cur) => [...cur.slice(0, -1), { role: 'stop', label: '', lat: null, lng: null }, cur[cur.length - 1]!])
+                }
+              >
+                {t.orders.addStop}
+              </Button>
+            </div>
+          </div>
+
+          <TextInput
+            placeholder={t.orders.notes}
+            aria-label={t.orders.notes}
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+          />
+        </>
+      ) : null}
+
+      {error ? <p className="text-sm font-medium text-red-600">{explainError(error, t)}</p> : null}
+      <div>
+        <Button variant="ghost" disabled={busy || !ready} onClick={submit}>
+          {isManual ? t.orders.addManualJob : t.orders.addManual}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * An optional pin for one point.
+ *
+ * Most jobs are described by name — «مطعم الشام، شارع بغداد» — and forcing a map on every one would
+ * slow the manager down for nothing. So the map opens only when he wants it, and closes as soon as
+ * he has clicked. Leaflet is already a dependency here (the live map); `circleMarker` avoids the
+ * marker-image problem that bites every bundled Leaflet build.
+ */
+function MapPin({
+  lat,
+  lng,
+  onPick,
+  onClear,
+}: {
+  lat: number | null
+  lng: number | null
+  onPick(lat: number, lng: number): void
+  onClear(): void
+}): ReactNode {
+  const { t } = useApp()
+  const [open, setOpen] = useState(false)
+  const host = useRef<HTMLDivElement | null>(null)
+  const map = useRef<LeafletMap | null>(null)
+  const marker = useRef<CircleMarker | null>(null)
+
+  useEffect(() => {
+    if (!open || !host.current || map.current) return
+    const m = L.map(host.current).setView([lat ?? DAMASCUS[0], lng ?? DAMASCUS[1]], lat === null ? 12 : 16)
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(m)
+    if (lat !== null && lng !== null) {
+      marker.current = L.circleMarker([lat, lng], { radius: 8, color: '#1e3a8a', fillOpacity: 0.9 }).addTo(m)
+    }
+    m.on('click', (e: LeafletMouseEvent) => {
+      const { lat: y, lng: x } = e.latlng
+      marker.current?.remove()
+      marker.current = L.circleMarker([y, x], { radius: 8, color: '#1e3a8a', fillOpacity: 0.9 }).addTo(m)
+      onPick(Number(y.toFixed(6)), Number(x.toFixed(6)))
+    })
+    map.current = m
+    return () => {
+      m.remove()
+      map.current = null
+      marker.current = null
+    }
+  }, [open, lat, lng, onPick])
+
+  const pinned = lat !== null && lng !== null
+  return (
+    <>
+      <Button variant="ghost" onClick={() => setOpen((v) => !v)}>
+        {pinned ? `📍 ${lat!.toFixed(4)}, ${lng!.toFixed(4)}` : t.orders.pinOnMap}
+      </Button>
+      {pinned ? (
+        <Button variant="ghost" onClick={onClear}>
+          ×
+        </Button>
+      ) : null}
+      {open ? <div ref={host} className="h-64 w-full rounded-lg" /> : null}
+    </>
   )
 }
 

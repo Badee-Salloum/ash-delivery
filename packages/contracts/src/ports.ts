@@ -2,6 +2,7 @@ import type {
   CalendarDate,
   FxDay,
   Minor,
+  OrderKind,
   PayMode,
   Posting,
   RoleKey,
@@ -300,6 +301,28 @@ export interface ShiftOrderRecord {
   source: 'manual' | 'ocr'
   /** SRS D-3: the pre-correction OCR fee, so a silently-lowered fee is visible. null = no OCR. */
   feeOcr: Minor | null
+  /** `yallago` (their delivery — 20% cut, day's tier band) or `manual` (a job the branch took). */
+  kind: OrderKind
+  /**
+   * Manual orders only, and `driverShare + companyShare === fee` exactly. NULL on a Yallago order,
+   * whose split is a property of the DAY's band and is computed at approval rather than stored —
+   * storing it per order would fight the true-up that restates earlier shifts (BR4, decision #6).
+   */
+  driverShare: Minor | null
+  companyShare: Minor | null
+  notes: string | null
+  /** Who entered it. A manual order is a manager's act; a Yallago one comes off the driver's scan. */
+  createdBy: string | null
+  /** The route: start, any stops, end. Empty for a Yallago order. */
+  points: readonly OrderPointRecord[]
+}
+
+/** One point on a manual order's route. The written place is required; the map pin is optional. */
+export interface OrderPointRecord {
+  role: 'start' | 'stop' | 'end'
+  label: string
+  lat: number | null
+  lng: number | null
 }
 
 export interface JournalEntryRecord {

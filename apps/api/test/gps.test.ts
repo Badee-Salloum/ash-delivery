@@ -1,10 +1,11 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
+import { BRANCH, DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
 
 /**
  * Live GPS tracking (SRS K). While a shift is open the driver's phone posts location fixes to his
- * OWN shift (shift.operate); the manager's live map reads the latest fix per driver (gps.view).
+ * OWN shift (shift.operate); the live map reads the latest fix per driver (gps.view) — which is a
+ * GM / system-admin view, not a branch manager's.
  */
 
 let h: Harness
@@ -40,6 +41,7 @@ describe('live GPS (SRS K)', () => {
   it('a driver posts a ping to his open shift; the manager sees it on the live map', async () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
+    const gm = await h.loginAs('gm')
     const id = await toOpen(driver, manager)
 
     const res = await post(driver, `/shifts/${id}/gps`, { lat: 33.5138, lng: 36.2765, accuracyM: 12, capturedAtMs: 1_000 })
@@ -50,7 +52,7 @@ describe('live GPS (SRS K)', () => {
     expect(ping?.driverId).toBe(DRIVER_ID)
     expect(ping?.receivedAtMs).toBe(h.deps.clock.nowMs())
 
-    const live = (await get(manager, '/gps/live')).json().drivers as LiveDriver[]
+    const live = (await get(gm, `/gps/live?branchId=${BRANCH}`)).json().drivers as LiveDriver[]
     const d = live.find((x) => x.driverId === DRIVER_ID)!
     expect(d.lat).toBeCloseTo(33.5138)
     expect(d.lng).toBeCloseTo(36.2765)
@@ -59,12 +61,13 @@ describe('live GPS (SRS K)', () => {
   it('the live map shows the LATEST fix per driver', async () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
+    const gm = await h.loginAs('gm')
     const id = await toOpen(driver, manager)
 
     await post(driver, `/shifts/${id}/gps`, { lat: 33.5, lng: 36.2, accuracyM: null, capturedAtMs: 1_000 })
     await post(driver, `/shifts/${id}/gps`, { lat: 33.6, lng: 36.3, accuracyM: null, capturedAtMs: 2_000 })
 
-    const live = (await get(manager, '/gps/live')).json().drivers as LiveDriver[]
+    const live = (await get(gm, `/gps/live?branchId=${BRANCH}`)).json().drivers as LiveDriver[]
     expect(live.filter((x) => x.driverId === DRIVER_ID)).toHaveLength(1)
     expect(live.find((x) => x.driverId === DRIVER_ID)!.lat).toBeCloseTo(33.6)
   })
@@ -72,18 +75,19 @@ describe('live GPS (SRS K)', () => {
   it('drops a driver off the live map once his shift ends — a voided stuck shift no longer lingers', async () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
+    const gm = await h.loginAs('gm')
     const id = await toOpen(driver, manager)
     await post(driver, `/shifts/${id}/gps`, { lat: 33.5, lng: 36.2, accuracyM: null, capturedAtMs: 1_000 })
 
     // While the shift is live he is on the map.
-    let live = (await get(manager, '/gps/live')).json().drivers as LiveDriver[]
+    let live = (await get(gm, `/gps/live?branchId=${BRANCH}`)).json().drivers as LiveDriver[]
     expect(live.find((x) => x.driverId === DRIVER_ID)).toBeDefined()
 
     // End the shift (upper-level void). His last ping stays in gps_pings, but he must leave the map.
     expect((await post(manager, `/shifts/${id}/void`, { reason: 'stuck shift' })).statusCode).toBe(200)
     expect(h.deps.gps.rows.some((p) => p.shiftId === id)).toBe(true) // the ping is still there…
 
-    live = (await get(manager, '/gps/live')).json().drivers as LiveDriver[]
+    live = (await get(gm, `/gps/live?branchId=${BRANCH}`)).json().drivers as LiveDriver[]
     expect(live.find((x) => x.driverId === DRIVER_ID)).toBeUndefined() // …but he is off the map
   })
 
@@ -100,5 +104,12 @@ describe('live GPS (SRS K)', () => {
   it('the live map requires gps.view — a driver is refused', async () => {
     const driver = await h.loginAs('driver1')
     expect((await get(driver, '/gps/live')).statusCode).toBe(403)
+  })
+
+  it('a BRANCH MANAGER is refused too — live tracking is an upper-level view', async () => {
+    // The owner's decision: a branch manager runs his branch from the shift screens, not by
+    // watching where each driver is standing. Enforced by the grant, not by hiding a menu item.
+    const manager = await h.loginAs('manager')
+    expect((await get(manager, '/gps/live')).statusCode).toBe(403)
   })
 })

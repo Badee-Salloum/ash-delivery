@@ -252,21 +252,37 @@ export class PgOrderRepo implements OrderRepo {
   }
   async create(order: ShiftOrderRecord): Promise<void> {
     try {
-      await this.pool.query(
-        `INSERT INTO shift_orders (id, shift_id, provider_order_no, pay_mode, fee_minor, zone, driver_confirmed, source, fee_ocr_minor)
-         VALUES ($1, $2, $3, $4::pay_mode, $5, $6, $7, $8, $9)`,
-        [
-          order.id,
-          order.shiftId,
-          order.providerOrderNo,
-          order.payMode,
-          order.fee.toString(),
-          order.zone,
-          order.driverConfirmed,
-          order.source,
-          order.feeOcr?.toString() ?? null,
-        ],
-      )
+      // The order and its route go in together: a manual job whose points failed to write would be
+      // a delivery from nowhere to nowhere, and the manager would have no way to see it went wrong.
+      await withTransaction(this.pool, {}, async (client) => {
+        await client.query(
+          `INSERT INTO shift_orders (id, shift_id, provider_order_no, pay_mode, fee_minor, zone, driver_confirmed,
+                                     source, fee_ocr_minor, kind, driver_share_minor, company_share_minor, notes, created_by)
+           VALUES ($1, $2, $3, $4::pay_mode, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+          [
+            order.id,
+            order.shiftId,
+            order.providerOrderNo,
+            order.payMode,
+            order.fee.toString(),
+            order.zone,
+            order.driverConfirmed,
+            order.source,
+            order.feeOcr?.toString() ?? null,
+            order.kind,
+            order.driverShare?.toString() ?? null,
+            order.companyShare?.toString() ?? null,
+            order.notes,
+            order.createdBy,
+          ],
+        )
+        for (const [i, point] of order.points.entries()) {
+          await client.query(
+            `INSERT INTO shift_order_points (order_id, seq, role, label, lat, lng) VALUES ($1,$2,$3,$4,$5,$6)`,
+            [order.id, i + 1, point.role, point.label, point.lat, point.lng],
+          )
+        }
+      })
     } catch (err) {
       if (isPgError(err, PG.UNIQUE_VIOLATION)) {
         // Same shape the memory adapter throws, so callers handle one case, not two.
@@ -279,14 +295,14 @@ export class PgOrderRepo implements OrderRepo {
   }
   async listByShift(shiftId: string): Promise<ShiftOrderRecord[]> {
     const { rows } = await this.pool.query<Record<string, unknown>>(
-      'SELECT id, shift_id, provider_order_no, pay_mode, fee_minor::text AS fee, zone, driver_confirmed, source, fee_ocr_minor::text AS fee_ocr FROM shift_orders WHERE shift_id = $1 ORDER BY provider_order_no',
+      `${ORDER_COLUMNS} WHERE shift_id = $1 ORDER BY provider_order_no`,
       [shiftId],
     )
     return rows.map(toOrder)
   }
   async findByProviderNo(providerOrderNo: string): Promise<ShiftOrderRecord | null> {
     const { rows } = await this.pool.query<Record<string, unknown>>(
-      'SELECT id, shift_id, provider_order_no, pay_mode, fee_minor::text AS fee, zone, driver_confirmed, source, fee_ocr_minor::text AS fee_ocr FROM shift_orders WHERE provider_order_no = $1',
+      `${ORDER_COLUMNS} WHERE provider_order_no = $1`,
       [providerOrderNo],
     )
     return rows[0] ? toOrder(rows[0]) : null
@@ -295,6 +311,26 @@ export class PgOrderRepo implements OrderRepo {
     await this.pool.query('DELETE FROM shift_orders WHERE id = $1', [id])
   }
 }
+
+/**
+ * The order columns, with its route folded in as JSON.
+ *
+ * A lateral aggregate rather than a second round-trip per order: the review screen lists a whole
+ * shift's orders at once, and N+1 queries for points nobody pinned would be the slowest part of it.
+ */
+const ORDER_COLUMNS = `
+  SELECT o.id, o.shift_id, o.provider_order_no, o.pay_mode, o.fee_minor::text AS fee, o.zone,
+         o.driver_confirmed, o.source, o.fee_ocr_minor::text AS fee_ocr, o.kind,
+         o.driver_share_minor::text  AS driver_share,
+         o.company_share_minor::text AS company_share,
+         o.notes, o.created_by,
+         COALESCE(
+           (SELECT json_agg(json_build_object('role', p.role, 'label', p.label, 'lat', p.lat, 'lng', p.lng)
+                            ORDER BY p.seq)
+              FROM shift_order_points p WHERE p.order_id = o.id),
+           '[]'::json
+         ) AS points
+    FROM shift_orders o`
 
 const toOrder = (r: Record<string, unknown>): ShiftOrderRecord => ({
   id: String(r.id),
@@ -306,6 +342,13 @@ const toOrder = (r: Record<string, unknown>): ShiftOrderRecord => ({
   driverConfirmed: Boolean(r.driver_confirmed),
   source: (r.source as ShiftOrderRecord['source'] | null) ?? 'manual',
   feeOcr: r.fee_ocr === null || r.fee_ocr === undefined ? null : minor(BigInt(String(r.fee_ocr))),
+  kind: (r.kind as ShiftOrderRecord['kind'] | null) ?? 'yallago',
+  driverShare: r.driver_share === null || r.driver_share === undefined ? null : minor(BigInt(String(r.driver_share))),
+  companyShare:
+    r.company_share === null || r.company_share === undefined ? null : minor(BigInt(String(r.company_share))),
+  notes: (r.notes as string | null) ?? null,
+  createdBy: (r.created_by as string | null) ?? null,
+  points: (r.points as ShiftOrderRecord['points'] | null) ?? [],
 })
 
 export class PgFxRepo implements FxRepo {

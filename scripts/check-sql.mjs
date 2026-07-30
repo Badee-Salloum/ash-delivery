@@ -29,6 +29,8 @@ const MUST_AUDIT = [
   // Renumbering a type restates the printed code of every vehicle of that type; a pack moving
   // between bikes is an asset transfer; a corrected reading changes evidence already approved.
   'vehicle_types', 'batteries', 'shift_battery_readings',
+  // Where a manual order went — part of the evidence a manager approves a shift against.
+  'shift_order_points',
 ]
 
 /**

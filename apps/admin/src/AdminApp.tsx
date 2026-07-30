@@ -4,7 +4,7 @@ import { Badge, Wordmark } from './ui.tsx'
 import { type Notif, NotificationBell } from './NotificationBell.tsx'
 import { Login } from './screens/Login.tsx'
 import { Dashboard } from './screens/Dashboard.tsx'
-import { Queue } from './screens/Queue.tsx'
+import { AWAITING_STATES, Queue } from './screens/Queue.tsx'
 import { LiveShifts } from './screens/LiveShifts.tsx'
 import { GpsLive } from './screens/GpsLive.tsx'
 import { Approval } from './screens/Approval.tsx'
@@ -39,6 +39,7 @@ export function AdminApp(): ReactNode {
   const [section, setSection] = useState<Section>(() => viewFromHash().section)
   const [openShift, setOpenShift] = useState<string | null>(() => viewFromHash().openShift)
   const [notifs, setNotifs] = useState<Notif[]>([])
+  const [queueCount, setQueueCount] = useState(0)
   const [navOpen, setNavOpen] = useState(false) // the rail is a drawer below lg
 
   /**
@@ -80,10 +81,23 @@ export function AdminApp(): ReactNode {
     return () => clearInterval(timer)
   }, [session, refreshNotifs])
 
-  // The Queue badge counts approval alerts only — the same events the Queue list shows. Other kinds
-  // (document_expiring) ring the bell but live on their own screens, so folding them into this count
-  // would make the badge disagree with the list beneath it. The bell shows every kind.
-  const queueUnread = notifs.filter((x) => !x.read && x.kind.startsWith('shift_awaiting')).length
+  // The Queue badge counts the shifts the Queue list actually shows — the ones really waiting for a
+  // signature — NOT unread bell rows. A bell row is pushed once and never cleared, so counting them
+  // left the badge stuck at yesterday's number long after every shift was approved, and left an
+  // upper-level manager (who receives no branch bell at all) on a permanent zero. Same source as
+  // the list means the two can never disagree.
+  const refreshQueue = useCallback(() => {
+    void api
+      .get<{ shifts: Array<{ state: string }> }>('/shifts')
+      .then((r) => setQueueCount(r.shifts.filter((s) => AWAITING_STATES.has(s.state)).length))
+      .catch(() => setQueueCount(0))
+  }, [api])
+  useEffect(() => {
+    if (!session) return
+    refreshQueue()
+    const timer = setInterval(refreshQueue, 8000)
+    return () => clearInterval(timer)
+  }, [session, refreshQueue, branchId])
   const markRead = (id: number): void => {
     void api.markNotificationRead(id).then(refreshNotifs).catch(() => undefined)
   }
@@ -112,11 +126,15 @@ export function AdminApp(): ReactNode {
 
   // Account management is a sysadmin/GM permission (user.manage), so the tab only shows for them.
   const canManageUsers = session.roleKey === 'system_admin' || session.roleKey === 'general_manager'
+  // gps.view — the same two roles; the branch manager no longer has it.
+  const canSeeMap = canManageUsers
   const nav: Array<{ key: Section; label: string; badge?: number | undefined }> = [
     { key: 'dashboard', label: t.dashboard.title },
-    { key: 'queue', label: t.approval.queue, badge: queueUnread || undefined },
+    { key: 'queue', label: t.approval.queue, badge: queueCount || undefined },
     { key: 'liveShifts', label: t.liveShifts.title },
-    { key: 'gpsLive', label: t.gpsLive.title },
+    // The live map is gps.view — the GM and the system admin only. The branch manager runs his
+    // branch from the shift screens. (The API enforces it too; this only stops offering a 403.)
+    ...(canSeeMap ? [{ key: 'gpsLive' as const, label: t.gpsLive.title }] : []),
     { key: 'fleet', label: `${t.fleet.drivers} / ${t.fleet.vehicles}` },
     { key: 'treasury', label: t.treasury.branchTreasury },
     { key: 'expenses', label: t.expenses.title },
