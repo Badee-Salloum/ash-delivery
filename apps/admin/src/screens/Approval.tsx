@@ -131,6 +131,16 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   }
 
   const isClose = review.state === 'pending_review'
+  /**
+   * Is this shift actually AT a gate, waiting for a signature?
+   *
+   * The screen is now reachable for a RUNNING shift too — that is how a manager records an order on
+   * a driver who is still out — and none of the gate controls make sense there, several are
+   * actively dangerous: the approve button would post an illegal transition, and «رفض نهائي» voids,
+   * which IS a legal edge from `open` and would cancel a live shift and throw away its orders on one
+   * click. So on a running shift the screen is a read-only view plus the order form.
+   */
+  const atGate = review.state === 'awaiting_open_approval' || review.state === 'pending_review'
   const odoDelta =
     review.startPackage.odometerKm !== null && review.endPackage.odometerKm !== null
       ? review.endPackage.odometerKm - review.startPackage.odometerKm
@@ -214,7 +224,11 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         <Badge tone="slate">{t.shift.states[review.state as keyof typeof t.shift.states] ?? review.state}</Badge>
       </div>
 
-      {/* ── The BR1 panel, pinned first — it is what the decision hinges on ─────────────── */}
+      {/* ── The BR1 panel, pinned first — it is what the decision hinges on ───────────────
+          Only once the shift is AT a gate. Mid-shift the driver has declared no closing cash or
+          wallet yet, those nulls are read as zero, and the panel would show an alarming red
+          difference the size of the whole float for a shift that is simply still running. */}
+      {atGate ? (
       <Card
         title={t.br1.title}
         className={review.br1.balanced ? 'ring-2 ring-emerald-300' : 'ring-2 ring-red-300'}
@@ -243,6 +257,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           </div>
         ) : null}
       </Card>
+      ) : null}
 
       {/* ── Start vs end, side by side — the odometer delta is the anti-fraud read ──────── */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -371,47 +386,53 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         </Card>
       ) : null}
 
-      {/* A reason for the re-shoot / reject the driver will see. */}
-      <textarea
-        value={notes}
-        onChange={(e) => setNotes(e.target.value)}
-        placeholder={t.approval.notes}
-        aria-label={t.approval.notes}
-        rows={2}
-        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/15"
-      />
+      {/* A reason for the re-shoot / reject the driver will see — only where a decision is taken. */}
+      {atGate ? (
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder={t.approval.notes}
+          aria-label={t.approval.notes}
+          rows={2}
+          className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/15"
+        />
+      ) : null}
 
       {error ? <p className="text-sm font-medium text-red-600">{explainError(error, t)}</p> : null}
-      <div className="sticky bottom-4 flex flex-wrap gap-3">
-        <Button
-          variant="success"
-          disabled={busy || (isClose && !review.br1.balanced)}
-          onClick={approve}
-          className="flex-1"
-        >
-          {isClose ? t.approval.approveClose : t.common.approve}
-        </Button>
-        {/* Re-shoot is legal on both gates. */}
-        <Button variant="ghost" disabled={busy} onClick={() => decide('request-rephoto')}>
-          {t.approval.requestRetake}
-        </Button>
-        {isClose ? (
-          <Button variant="danger" disabled={busy} onClick={() => decide('reject-close')}>
-            {t.approval.reject}
+      {/* No gate controls on a running shift — see `atGate`. The manager acts on a live shift from
+          «النوبات الجارية» (suspend, force-close, void), each of which asks for a reason first. */}
+      {atGate ? (
+        <div className="sticky bottom-4 flex flex-wrap gap-3">
+          <Button
+            variant="success"
+            disabled={busy || (isClose && !review.br1.balanced)}
+            onClick={approve}
+            className="flex-1"
+          >
+            {isClose ? t.approval.approveClose : t.common.approve}
           </Button>
-        ) : (
-          <>
-            {/* At the open gate the manager chooses: send it back to be redone, or refuse it
-                outright — which cancels the shift and frees the bike. */}
-            <Button variant="ghost" disabled={busy} onClick={() => decide('reject-open')}>
-              {t.approval.sendBack}
+          {/* Re-shoot is legal on both gates. */}
+          <Button variant="ghost" disabled={busy} onClick={() => decide('request-rephoto')}>
+            {t.approval.requestRetake}
+          </Button>
+          {isClose ? (
+            <Button variant="danger" disabled={busy} onClick={() => decide('reject-close')}>
+              {t.approval.reject}
             </Button>
-            <Button variant="danger" disabled={busy} onClick={refuse}>
-              {t.approval.refuse}
-            </Button>
-          </>
-        )}
-      </div>
+          ) : (
+            <>
+              {/* At the open gate the manager chooses: send it back to be redone, or refuse it
+                  outright — which cancels the shift and frees the bike. */}
+              <Button variant="ghost" disabled={busy} onClick={() => decide('reject-open')}>
+                {t.approval.sendBack}
+              </Button>
+              <Button variant="danger" disabled={busy} onClick={refuse}>
+                {t.approval.refuse}
+              </Button>
+            </>
+          )}
+        </div>
+      ) : null}
     </div>
   )
 }

@@ -676,13 +676,12 @@ function ReportIncident({ shiftId }: { shiftId: string }): ReactNode {
  * the open/orders phase — stops it. Foreground-only, per the PWA limitation.
  */
 function GpsBeacon({ shiftId }: { shiftId: string }): ReactNode {
-  const { t } = useApp()
-  const { tracking } = useGpsBeacon(shiftId)
-  return (
-    <p className={`text-center text-xs ${tracking ? 'text-emerald-600' : 'text-slate-400'}`}>
-      {tracking ? t.shift.tracking : t.shift.trackingOff}
-    </p>
-  )
+  // Runs the beacon and renders NOTHING. The driver used to be shown a live «التتبع يعمل / متوقف»
+  // line; the owner does not want the tracking state on his screen. Mounting still starts it and
+  // unmounting still stops it, so behaviour is unchanged — only the readout is gone. The location
+  // permission the browser itself asks for is the driver's real notice, and consent was given.
+  useGpsBeacon(shiftId)
+  return null
 }
 
 /**

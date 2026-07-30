@@ -259,7 +259,7 @@ export function AdminApp(): ReactNode {
         ) : section === 'queue' ? (
           <Queue onOpen={setOpenShift} />
         ) : section === 'liveShifts' ? (
-          <LiveShifts />
+          <LiveShifts onOpen={setOpenShift} />
         ) : section === 'gpsLive' ? (
           <GpsLive />
         ) : section === 'fleet' ? (

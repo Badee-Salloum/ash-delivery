@@ -9,6 +9,12 @@ interface ShiftRow {
   vehicleId: string
   shiftNo: number
   state: string
+  /** Enough to judge a running shift without opening it. */
+  businessDate?: string
+  odometerStart?: number | null
+  floatTotal?: string
+  topupTotal?: string
+  orderCount?: number
 }
 interface DriverLite {
   id: string
@@ -38,7 +44,7 @@ const LIVE_STATES = new Set(['open', 'suspended'])
  * (SRS C-1 / س29) here; the driver resumes it himself from his phone once he can carry on. A
  * suspended shift still closes under the same BR1 — suspension is never a way around the equation.
  */
-export function LiveShifts(): ReactNode {
+export function LiveShifts({ onOpen }: { onOpen(shiftId: string): void }): ReactNode {
   const { api, t, lang, session, branchId } = useApp()
   const [rows, setRows] = useState<ShiftRow[] | null>(null)
   const [drivers, setDrivers] = useState<Record<string, DriverLite>>({})
@@ -54,7 +60,10 @@ export function LiveShifts(): ReactNode {
   const load = useCallback(() => {
     setError(null)
     void api
-      .get<{ shifts: ShiftRow[] }>('/shifts')
+      // `live=1`: who is out RIGHT NOW, regardless of business date — a shift that opened before
+      // midnight and is still running is exactly the one a manager needs to reach, and the
+      // date-filtered list dropped it.
+      .get<{ shifts: ShiftRow[] }>('/shifts?live=1')
       .then((r) => setRows(r.shifts.filter((s) => LIVE_STATES.has(s.state))))
       .catch((e: { error?: string }) => {
         setRows([])
@@ -99,7 +108,15 @@ export function LiveShifts(): ReactNode {
   return (
     <div className="flex flex-col gap-2">
       {rows.map((s) => (
-        <LiveRow key={s.id} shift={s} driverName={driverName(s.driverId)} vehicleCode={vehicleCode(s.vehicleId)} canApprove={canApprove} onChanged={load} />
+        <LiveRow
+          key={s.id}
+          shift={s}
+          driverName={driverName(s.driverId)}
+          vehicleCode={vehicleCode(s.vehicleId)}
+          canApprove={canApprove}
+          onChanged={load}
+          onOpen={onOpen}
+        />
       ))}
     </div>
   )
@@ -111,12 +128,14 @@ function LiveRow({
   vehicleCode,
   canApprove,
   onChanged,
+  onOpen,
 }: {
   shift: ShiftRow
   driverName: string
   vehicleCode: string
   canApprove: boolean
   onChanged: () => void
+  onOpen(shiftId: string): void
 }): ReactNode {
   const { api, t } = useApp()
   const [panel, setPanel] = useState<'none' | 'suspend' | 'tranche' | 'void' | 'forceClose'>('none')
@@ -215,6 +234,12 @@ function LiveRow({
         </span>
         {canApprove ? (
           <div className="flex flex-wrap gap-2 ms-auto">
+            {/* Opens the shift's own screen — where a manager records an order on a driver who is
+                still out. It was reachable only from the approval queue, so a running shift could
+                not be touched at all. */}
+            <Button variant="ghost" onClick={() => onOpen(shift.id)}>
+              {t.liveShifts.openShift}
+            </Button>
             {shift.state === 'open' ? (
               <>
                 <Button variant="ghost" onClick={() => toggle('tranche')}>
@@ -233,6 +258,24 @@ function LiveRow({
             </Button>
           </div>
         ) : null}
+      </div>
+      {/* What the manager wants at a glance: the branch money the driver is carrying, how much work
+          is on the shift so far, and the odometer he left on. A shift that opened yesterday and is
+          still running shows its own date, so «جارية منذ أمس» is visible rather than surprising. */}
+      <div className="num flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+        <span>
+          {t.shift.cashFloat}: {shift.floatTotal ?? '—'}
+        </span>
+        <span>
+          {t.shift.walletTopup}: {shift.topupTotal ?? '—'}
+        </span>
+        <span>
+          {t.orders.title}: {shift.orderCount ?? 0}
+        </span>
+        <span>
+          {t.shift.odometer}: {shift.odometerStart ?? '—'}
+        </span>
+        {shift.businessDate ? <span className="text-slate-400">{shift.businessDate}</span> : null}
       </div>
       {shift.state === 'suspended' ? <p className="text-sm text-amber-700">{t.liveShifts.suspendedHint}</p> : null}
       {panel === 'suspend' ? (

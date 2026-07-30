@@ -341,19 +341,35 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     '/shifts',
     { config: { permission: 'branch_data.view', subject: branchSubject } },
     async (req) => {
-      const { date } = z.object({ date: z.string().optional() }).parse(req.query)
+      const { date, live } = z.object({ date: z.string().optional(), live: z.string().optional() }).parse(req.query)
       const target = resolveBranchId(req)
       const businessDate = date ?? todayFor(deps)
-      const shifts = await deps.shifts.listByBranchAndDate(target, businessDate)
+      // `?live=1` asks "who is out RIGHT NOW", which is NOT a question about today's date: a shift
+      // that opened before midnight and is still running belongs to yesterday's business date, and
+      // the date-filtered list dropped it — the bike looked free and the shift unreachable from the
+      // live screen. `listLiveForBranch` is the same date-independent read the GPS map uses.
+      const shifts = live === '1'
+        ? await deps.shifts.listLiveForBranch(target)
+        : await deps.shifts.listByBranchAndDate(target, businessDate)
       return {
         businessDate,
-        shifts: shifts.map((s) => ({
-          id: s.id,
-          driverId: s.driverId,
-          vehicleId: s.vehicleId,
-          shiftNo: s.shiftNo,
-          state: s.state,
-        })),
+        shifts: await Promise.all(
+          shifts.map(async (s) => ({
+            id: s.id,
+            driverId: s.driverId,
+            vehicleId: s.vehicleId,
+            shiftNo: s.shiftNo,
+            state: s.state,
+            // Enough for a manager to judge a running shift at a glance without opening it: the
+            // odometer he started on, the branch money he is carrying, and how much work is on the
+            // shift so far. Money crosses as decimal strings, never JSON numbers.
+            businessDate: s.businessDate,
+            odometerStart: s.odoStart,
+            floatTotal: serializeMoney(sum(s.floatTranches)),
+            topupTotal: serializeMoney(sum(s.topupTranches)),
+            orderCount: (await deps.orders.listByShift(s.id)).length,
+          })),
+        ),
       }
     },
   )

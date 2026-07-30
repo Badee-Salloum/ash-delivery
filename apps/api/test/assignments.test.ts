@@ -157,6 +157,36 @@ describe('releasing a shift that never opened', () => {
     expect((await startShift(driver2, DRIVER2_ID, VEHICLE_ID)).statusCode).toBe(201)
   })
 
+  it('`?live=1` answers "who is out now", ignoring the business date', async () => {
+    // «النوبات الجارية» asks a question about NOW, not about today's date. A shift that opened
+    // before midnight is still running under YESTERDAY's business date, and the date-filtered list
+    // dropped it — the bike looked free and the shift was unreachable from the live screen.
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = (await startShift(driver, DRIVER_ID, VEHICLE_ID)).json().id as string
+
+    // Backdate it, exactly as a shift that ran through the rollover would be.
+    const shift = (await h.deps.shifts.findById(shiftId))!
+    await h.deps.shifts.update({ ...shift, businessDate: '2026-07-01', state: 'open' })
+
+    expect((await get(manager, '/shifts')).json().shifts).toEqual([]) // today's list: gone
+    const live = (await get(manager, '/shifts?live=1')).json().shifts as Array<{ id: string; businessDate: string }>
+    expect(live.map((s) => s.id)).toEqual([shiftId])
+    expect(live[0]!.businessDate).toBe('2026-07-01') // and it says which day it belongs to
+  })
+
+  it('the live list carries what a manager judges a running shift by', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = (await startShift(driver, DRIVER_ID, VEHICLE_ID)).json().id as string
+    const shift = (await h.deps.shifts.findById(shiftId))!
+    await h.deps.shifts.update({ ...shift, state: 'open', odoStart: 1_234 })
+
+    const row = (await get(manager, '/shifts?live=1')).json().shifts[0] as Record<string, unknown>
+    // Money as decimal strings, never JSON numbers; the order count is what he has recorded so far.
+    expect(row).toMatchObject({ id: shiftId, odometerStart: 1_234, orderCount: 0, floatTotal: '0.00', topupTotal: '0.00' })
+  })
+
   it('the cancellation is audited', async () => {
     const driver1 = await h.loginAs('driver1')
     const shiftId = (await startShift(driver1, DRIVER_ID, VEHICLE_ID)).json().id
