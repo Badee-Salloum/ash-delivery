@@ -34,30 +34,13 @@ describe('the English BMS app', () => {
     expect(r.percent).toBe(100)
   })
 
-  it('scales capacities to deci-amp-hours, never a float', () => {
-    expect(r.remainCapacityDah).toBe(500) // 50.0 Ah
-    expect(r.fullCapacityDah).toBe(500)
-    expect(Number.isInteger(r.remainCapacityDah)).toBe(true)
-  })
-
   it('reads the cycle count — the number that says how tired the pack is', () => {
     expect(r.cycleCount).toBe(8)
   })
 
-  it('takes the pack voltage, not a cell voltage', () => {
-    // 4.169 V is a CELL; 83.37 V is the pack. Picking the first voltage on screen would be wrong
-    // by a factor of twenty.
-    expect(r.packMillivolts).toBe(83_370)
-  })
-
-  it('scales temperatures to deci-Celsius', () => {
-    expect(r.mosTempDc).toBe(339) // 33.9 °C
-    expect(r.t2Dc).toBe(325) // 32.5 °C
-  })
-
-  it('does not mistake Cycle Capacity for the pack capacity', () => {
-    // 436.8 Ah appears on the same screen and is not a capacity reading at all.
-    expect(r.fullCapacityDah).not.toBe(4368)
+  it('does not mistake Cycle Capacity for the cycle count', () => {
+    // «Cycle Capacity: 436.8Ah» sits on the same row as «Cycle Count: 8»; the count is 8, not 436.
+    expect(r.cycleCount).toBe(8)
   })
 })
 
@@ -84,10 +67,6 @@ describe('the Arabic BMS app (value first, label second)', () => {
     expect(r.percent).toBe(100)
   })
 
-  it('finds the pack voltage', () => {
-    expect(r.packMillivolts).toBe(81_480)
-  })
-
   it('finds the cycle count from the Arabic label', () => {
     expect(r.cycleCount).toBe(1)
   })
@@ -96,16 +75,7 @@ describe('the Arabic BMS app (value first, label second)', () => {
 describe('it refuses to invent a reading', () => {
   it('returns nulls for text that contains no BMS fields at all', () => {
     const r = parseBms('the quick brown fox\nno numbers here')
-    expect(r).toEqual({
-      percent: null,
-      packMillivolts: null,
-      cycleCount: null,
-      remainCapacityDah: null,
-      fullCapacityDah: null,
-      mosTempDc: null,
-      t1Dc: null,
-      t2Dc: null,
-    })
+    expect(r).toEqual({ percent: null, cycleCount: null })
   })
 
   it('drops an impossible value rather than storing it', () => {
@@ -114,18 +84,14 @@ describe('it refuses to invent a reading', () => {
     expect(parseBms('Remain Battery: 900%').percent).toBeNull()
   })
 
-  it('ignores a cell voltage masquerading as a pack voltage', () => {
-    expect(parseBms('Ave. Cell Volt.: 4.169V').packMillivolts).toBeNull()
-  })
-
   it('reads Arabic-Indic numerals, in case the app renders them', () => {
     expect(parseBms('Cycle Count: ٨').cycleCount).toBe(8)
   })
 })
 
-describe('the dashboard reader still works, and no longer eats a matching odometer', () => {
-  it('reads battery and odometer', () => {
-    expect(parseReading('85% 12345')).toEqual({ battery: 85, odometer: 12345 })
+describe('the dashboard reader reads only the odometer km', () => {
+  it('reads the odometer and ignores the battery %', () => {
+    expect(parseReading('85% 12345')).toEqual({ odometer: 12345 })
   })
 
   it('keeps an odometer that happens to equal the battery number', () => {
@@ -156,14 +122,14 @@ describe('lines from the recogniser, not a split of the flat text', () => {
 
   it('splits a TWO-COLUMN row using the gap between words, not the collapsed spaces', () => {
     // The recognised line text loses the gutter; only the word boxes still know where it was.
-    // Without it, `MOS Temp` would take the 100 sitting in the left-hand cell.
-    const row = line('Remain Battery: 100% MOS Temp: 33.9C', [
+    // Without it, `Cycle Count` would take the 100 sitting in the left-hand cell.
+    const row = line('Remain Battery: 100% Cycle Count: 8', [
       ['Remain', 0, 90], ['Battery:', 95, 190], ['100%', 195, 260],
-      ['MOS', 600, 660], ['Temp:', 665, 740], ['33.9C', 745, 820],
+      ['Cycle', 600, 660], ['Count:', 665, 740], ['8', 745, 780],
     ])
     const r = parseBms([row])
     expect(r.percent).toBe(100)
-    expect(r.mosTempDc).toBe(339)
+    expect(r.cycleCount).toBe(8)
   })
 
   it('handles the Arabic layout, where the value comes BEFORE its label', () => {
@@ -174,12 +140,6 @@ describe('lines from the recogniser, not a split of the flat text', () => {
 
   it('still accepts a plain string, so a page with no blocks degrades rather than dies', () => {
     expect(parseBms('Cycle Count: 8').cycleCount).toBe(8)
-  })
-
-  it('does not let a label’s own digit become the value', () => {
-    // «Battery T2» — the 2 belongs to the label. This read 2 °C before the value was taken from
-    // what remains after the label is removed.
-    expect(parseBms([line('Battery T2: 32.5C')]).t2Dc).toBe(325)
   })
 })
 
@@ -208,10 +168,6 @@ describe('the Arabic card grid — value above, caption below', () => {
     expect(parseBms(cards).cycleCount).toBe(1)
   })
 
-  it('pairs the pack voltage with «إجمالي الجهد»', () => {
-    expect(parseBms(cards).packMillivolts).toBe(81_480)
-  })
-
   it('does not hand a caption the number from the NEXT column', () => {
     // «الدورات» sits at x 620-700 and the 1 at 640-660; «الطاقة» sits at 420-490 over 0.00W.
     // Overlap by column is what keeps the cycle count from becoming 0.
@@ -224,18 +180,6 @@ describe('the Arabic card grid — value above, caption below', () => {
       line('الطاقة المتبقية', [['الطاقة', 100, 170], ['المتبقية', 175, 240]], 150),
     ]
     expect(parseBms(gauge).percent).toBe(100)
-  })
-
-  it('reads the inline temperature row on the same screen', () => {
-    const temps = line('MOS: 36.9℃ T1: 33.7℃ T2: 33.6℃', [
-      ['MOS:', 40, 110], ['36.9℃', 115, 210],
-      ['T1:', 300, 340], ['33.7℃', 345, 440],
-      ['T2:', 530, 570], ['33.6℃', 575, 670],
-    ], 800)
-    const r = parseBms([temps])
-    expect(r.mosTempDc).toBe(369)
-    expect(r.t1Dc).toBe(337)
-    expect(r.t2Dc).toBe(336)
   })
 })
 
@@ -253,41 +197,6 @@ describe('a profile picks the strategy for its app', () => {
     expect(profileById(null).id).toBe('auto')
     expect(profileById('not-a-profile').id).toBe('auto')
     expect(parseBms(inline, profileById(null)).cycleCount).toBe(8)
-  })
-})
-
-/**
- * The misreads a real phone actually produced.
- *
- * Of «MOS: 36.9℃  T1: 33.7℃  T2: 33.6℃» only **T2** came back. `2` is an unambiguous glyph; `1` is
- * the most confused character in OCR (`l`, `I`, `|`) and `O`/`0` is the second — so `T1` arrived as
- * `TI` and `MOS` as `M0S`, and neither matched a label spelled with a digit.
- */
-describe('labels survive the glyphs OCR confuses', () => {
-  it('reads T1 when the 1 came back as a letter I', () => {
-    expect(parseBms([line('TI: 33.7℃')]).t1Dc).toBe(337)
-    expect(parseBms([line('Tl: 33.7℃')]).t1Dc).toBe(337)
-    expect(parseBms([line('T|: 33.7℃')]).t1Dc).toBe(337)
-  })
-
-  it('reads MOS when the O came back as a zero', () => {
-    expect(parseBms([line('M0S: 36.9℃')]).mosTempDc).toBe(369)
-  })
-
-  it('still reads the ones that were never ambiguous', () => {
-    expect(parseBms([line('T2: 33.6℃')]).t2Dc).toBe(336)
-  })
-
-  it('reads the whole row the phone half-missed', () => {
-    const row = line('M0S: 36.9℃ TI: 33.7℃ T2: 33.6℃', [
-      ['M0S:', 40, 110], ['36.9℃', 115, 210],
-      ['TI:', 300, 340], ['33.7℃', 345, 440],
-      ['T2:', 530, 570], ['33.6℃', 575, 670],
-    ], 800)
-    const r = parseBms([row])
-    expect(r.mosTempDc).toBe(369)
-    expect(r.t1Dc).toBe(337)
-    expect(r.t2Dc).toBe(336)
   })
 })
 
@@ -316,8 +225,9 @@ describe('the charge gauge, found by how big it is printed', () => {
   })
 
   it('does not mistake the pack voltage for a charge', () => {
-    // 81.48 is ≤ 100 and would pass a naive "biggest number" rule. A charge is a whole number.
-    expect(parseBms(page('100')).packMillivolts).toBe(81_480)
+    // 81.48 is ≤ 100 and would pass a naive "biggest number" rule. A charge is a whole number, so
+    // the fractional pack voltage on screen must never become the state of charge.
+    expect(parseBms(page('100')).percent).toBe(100)
     expect(parseBms(page('100')).percent).not.toBe(81)
   })
 
@@ -348,10 +258,6 @@ describe('Arabic labels survive their spelling variants', () => {
 
   it('reads it with harakat the recogniser invented', () => {
     expect(parseBms([line('الطاقَة المتبقيَة 100')]).percent).toBe(100)
-  })
-
-  it('reads «إجمالي الجهد» with a bare alif', () => {
-    expect(parseBms([line('اجمالي الجهد 81.48')]).packMillivolts).toBe(81_480)
   })
 
   it('reads «الدورات» with tatweel stretching', () => {
@@ -432,13 +338,6 @@ describe('a number split across words is rebuilt, not truncated', () => {
 
   it('reads a part charge split the same way', () => {
     expect(parseBms(split([['4', 110, 150], ['7', 155, 200]])).percent).toBe(47)
-  })
-
-  it('refuses to fuse a label into the number beside it', () => {
-    // «T2» and «33.6» joined blindly would read as two hundred and thirty-three. Only a run that
-    // is nothing BUT a number gets rebuilt.
-    const row = line('T2: 33.6℃', [['T2:', 40, 90], ['33.6℃', 95, 190]], 800, 24)
-    expect(parseBms([row]).t2Dc).toBe(336)
   })
 
   it('the size heuristic rebuilds the headline too, rather than reporting 1', () => {

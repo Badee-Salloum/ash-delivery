@@ -251,11 +251,9 @@ function StartPackage({
   const toast = useToast()
   const [shiftId, setShiftId] = useState<string | null>(existingShiftId ?? null)
   const [odo, setOdo] = useState('')
-  const [battery, setBattery] = useState('')
-  // SRS D-3 baselines: what OCR read, kept even if the driver then edits the field, so the manager
-  // sees «قراءة الآلة ← ما أكّده السائق».
+  // SRS D-3 baseline: what OCR read for the odometer, kept even if the driver then edits it, so the
+  // manager sees «قراءة الآلة ← ما أكّده السائق».
   const [odoOcr, setOdoOcr] = useState<number | null>(null)
-  const [batteryOcr, setBatteryOcr] = useState<number | null>(null)
   const [odoShot, setOdoShot] = useState(false)
   const [busy, setBusy] = useState(false)
   const [ocrBusy, setOcrBusy] = useState(false)
@@ -263,9 +261,9 @@ function StartPackage({
   const [startSlots, setStartSlots] = useState<Set<string>>(new Set())
   const [batteriesReady, setBatteriesReady] = useState(batteries.length === 0)
 
-  // Assisted OCR: read the odometer + battery off the dashboard photo and PRE-FILL the fields the
-  // driver would otherwise type. Only fills a field the driver has not already entered, and any
-  // failure is silent — the driver just types, exactly as before.
+  // Assisted OCR: read the ODOMETER off the dashboard photo and pre-fill the km field the driver
+  // would otherwise type. Only fills it when he has not already, and any failure is silent — the
+  // driver just types. Charge is read per pack in the battery panel, not off the dash.
   const runOcr = useCallback(async (file: File): Promise<void> => {
     setOcrBusy(true)
     try {
@@ -276,12 +274,10 @@ function StartPackage({
       // A failed read is not silent any more, but the odometer tile has no status line of its own
       // — the driver simply types, which is what he was going to do anyway.
       if (!result.ok) return
-      const { odometer, battery: pct } = result.reading
+      const { odometer } = result.reading
       // Record the raw read ONCE (the baseline), independent of the later pre-fill/edit.
       if (odometer != null) setOdoOcr((cur) => cur ?? odometer)
-      if (pct != null) setBatteryOcr((cur) => cur ?? pct)
       if (odometer != null) setOdo((cur) => (cur === '' ? String(odometer) : cur))
-      if (pct != null) setBattery((cur) => (cur === '' ? String(pct) : cur))
     } finally {
       setOcrBusy(false)
     }
@@ -311,16 +307,15 @@ function StartPackage({
     if (!shiftId) return
     setBusy(true)
     try {
-      // The driver submits only the odometer + battery + photo. The cash float and wallet top-up
-      // are the branch's money, entered by the manager at approval.
+      // The driver submits only the odometer + photo. The cash float and wallet top-up are the
+      // branch's money, entered by the manager at approval. Charge is captured per pack, so the
+      // bike-level battery % is gone (sent null — the column stays a nullable seam).
       await api.put(`/shifts/${shiftId}/start-package`, {
         odometerKm: Number(odo),
-        // Blank is NULL, never 0. They used to be the same value on the wire, so "the driver did
-        // not answer" was indistinguishable from "the pack is flat".
-        batteryPercent: battery.trim() === '' ? null : Number(battery),
-        // SRS D-3: the OCR baselines (null when OCR never ran).
+        batteryPercent: null,
+        // SRS D-3: the odometer OCR baseline (null when OCR never ran).
         odometerKmOcr: odoOcr,
-        batteryPercentOcr: batteryOcr,
+        batteryPercentOcr: null,
       })
       onOpened(shiftId)
     } catch (e) {
@@ -375,9 +370,9 @@ function StartPackage({
   }
 
   // `batteriesReady` gates too, matching the close screen and the server BR5 gate: a driver can't
-  // confirm start until every fitted pack's required reading is in (was start-only before, so a
-  // two-pack bike could open with one pack's BMS blank and only fail at the manager's approval).
-  const ready = shiftId !== null && odoShot && odo !== '' && battery !== '' && batteriesReady
+  // confirm start until every fitted pack's required reading is in — the pack charges ARE the
+  // battery state now, so there is no separate bike-level battery field to fill.
+  const ready = shiftId !== null && odoShot && odo !== '' && batteriesReady
 
   return (
     <Screen
@@ -422,9 +417,6 @@ function StartPackage({
         <Field label={t.shift.odometer}>
           <TextInput inputMode="numeric" value={odo} onChange={(e) => setOdo(e.target.value)} />
         </Field>
-        <Field label={t.shift.battery}>
-          <TextInput inputMode="numeric" value={battery} onChange={(e) => setBattery(e.target.value)} />
-        </Field>
       </Card>
       {/* One screenshot and one set of numbers per pack fitted — the same count the gate reads. */}
       {shiftId ? (
@@ -457,7 +449,6 @@ function EndPackage({
   // SRS D-3 baseline: what readWallet OCR'd off the wallet screenshot, kept even if the driver edits.
   const [walletOcr, setWalletOcr] = useState<string | null>(null)
   const [odo, setOdo] = useState('')
-  const [battery, setBattery] = useState('')
   const [slots, setSlots] = useState<Set<string>>(new Set())
   const [br1, setBr1] = useState<{ difference: string; balanced: boolean } | null>(null)
   const [busy, setBusy] = useState(false)
@@ -473,19 +464,18 @@ function EndPackage({
   // The dashboard and wallet are SCREENSHOTS the driver already has in his gallery, not things to
   // photograph with the camera; the odometer is a real photo of the bike.
   const gallery = new Set(['dashboard', 'wallet'])
-  // The end battery is now part of the gate, so the button waits for it too — a shift that
-  // cannot be submitted should not offer a button that pretends otherwise.
+  // Each fitted pack's closing charge gates the button (batteriesReady), matching the server. The
+  // bike-level battery field is gone — charge is tracked per pack.
   const ready =
-    required.every((s) => slots.has(s)) && cash !== '' && wallet !== '' && odo !== '' && battery !== '' && batteriesReady
+    required.every((s) => slots.has(s)) && cash !== '' && wallet !== '' && odo !== '' && batteriesReady
 
   async function submit(): Promise<void> {
     setBusy(true)
     try {
       const res = await api.put<{ br1: { difference: string; balanced: boolean } }>(`/shifts/${shift.id}/end-package`, {
         odometerKm: Number(odo),
-        // Blank is NULL, never 0 — `Number('')` used to make an unanswered field look like a flat
-        // pack, and the close gate never checked it at all.
-        batteryPercent: battery.trim() === '' ? null : Number(battery),
+        // Bike-level battery % is gone — charge is captured per pack. Sent null (nullable seam).
+        batteryPercent: null,
         cashDeclared: cash,
         walletDeclared: wallet,
         // SRS D-3: the wallet OCR baseline (null when readWallet never ran).
@@ -556,9 +546,6 @@ function EndPackage({
         </Field>
         <Field label={t.shift.odometer}>
           <TextInput inputMode="numeric" value={odo} onChange={(e) => setOdo(e.target.value)} />
-        </Field>
-        <Field label={t.shift.battery}>
-          <TextInput inputMode="numeric" value={battery} onChange={(e) => setBattery(e.target.value)} />
         </Field>
       </Card>
       {/* The close gate asks for the same per-pack evidence the open gate did. */}

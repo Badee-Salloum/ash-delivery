@@ -33,18 +33,15 @@ export interface FittedBattery {
  * manual edit WITH its difference from the OCR reading" is recoverable later.
  */
 
-/** The fields, in the order a driver reads them off the screen. Shared with the swap panel. */
+/**
+ * The two figures captured per pack, in the order a driver reads them off the screen. Shared with
+ * the swap panel. The product tracks only the remaining charge (which the shift gate requires) and
+ * the lifetime cycle count; voltage / capacity / temperatures are no longer captured.
+ */
 export const FIELDS = [
   // `required` is the shift gate's own rule: a pack with no charge reading cannot open a shift.
-  // Everything below it is pack health — worth having, never worth blocking a driver over.
   { key: 'percent', label: 'percent', unit: '%', scale: 1, decimals: 0, required: true },
-  { key: 'packMillivolts', label: 'voltage', unit: 'V', scale: 1000, decimals: 2 },
   { key: 'cycleCount', label: 'cycles', unit: '', scale: 1, decimals: 0 },
-  { key: 'remainCapacityDah', label: 'remainCapacity', unit: 'Ah', scale: 10, decimals: 1 },
-  { key: 'fullCapacityDah', label: 'fullCapacity', unit: 'Ah', scale: 10, decimals: 1 },
-  { key: 'mosTempDc', label: 'mosTemp', unit: '°C', scale: 10, decimals: 1 },
-  { key: 't1Dc', label: 'temp1', unit: '°C', scale: 10, decimals: 1 },
-  { key: 't2Dc', label: 'temp2', unit: '°C', scale: 10, decimals: 1 },
 ] as const
 
 type FieldKey = (typeof FIELDS)[number]['key']
@@ -83,10 +80,7 @@ interface PackState {
 }
 
 const EMPTY: PackState = {
-  values: {
-    percent: '', packMillivolts: '', cycleCount: '', remainCapacityDah: '',
-    fullCapacityDah: '', mosTempDc: '', t1Dc: '', t2Dc: '',
-  },
+  values: { percent: '', cycleCount: '' },
   ocrRaw: null,
   outcome: 'idle',
   fieldsFound: 0,
@@ -132,13 +126,9 @@ export function BatteryPanel({
       const body: BatteryReadingInput = {
         batteryId,
         percent,
-        packMillivolts: scaled('packMillivolts'),
         cycleCount: scaled('cycleCount'),
-        remainCapacityDah: scaled('remainCapacityDah'),
-        fullCapacityDah: scaled('fullCapacityDah'),
-        mosTempDc: scaled('mosTempDc'),
-        t1Dc: scaled('t1Dc'),
-        t2Dc: scaled('t2Dc'),
+        // Voltage / capacity / temperatures are no longer captured; they stay nullable seams on the
+        // wire and default to null when omitted.
         // `ocr` only while every field still holds exactly what the reader produced. The moment
         // the driver corrects one it is `manual` — which is what makes the ocrRaw delta a real
         // record of a human disagreeing with the machine (SRS D-3) rather than decoration.

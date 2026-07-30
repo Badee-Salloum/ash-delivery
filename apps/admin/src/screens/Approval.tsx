@@ -8,17 +8,11 @@ interface BatteryReadingView {
   batteryId: string
   slotNo: number
   percent: number | null
-  packMillivolts: number | null
   cycleCount: number | null
-  remainCapacityDah: number | null
-  fullCapacityDah: number | null
-  mosTempDc: number | null
-  t1Dc: number | null
-  t2Dc: number | null
   capacityAh: number | null
   serialNo: string | null
   source: 'ocr' | 'manual'
-  /** The pre-correction OCR reading (SRS D-3 baseline); shape mirrors the scaled-integer fields. */
+  /** The pre-correction OCR reading (SRS D-3 baseline); charge + cycles only now. */
   ocrRaw?: unknown
 }
 
@@ -216,7 +210,6 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         <Card title={t.shift.startPackage}>
           <dl className="grid grid-cols-2 gap-2 text-sm">
             <Field label={t.shift.odometer} value={String(review.startPackage.odometerKm ?? '—')} />
-            <Field label={t.shift.battery} value={`${review.startPackage.batteryPercent ?? '—'}%`} />
             {review.state === 'awaiting_open_approval' ? (
               <>
                 <div>
@@ -239,20 +232,13 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
               </>
             )}
           </dl>
-          {/* SRS D-3: what the driver changed from the dashboard OCR. */}
+          {/* SRS D-3: what the driver changed from the dashboard OCR (odometer only now). */}
           <OcrDeltaLines
-            deltas={[
-              ...scalarDelta(
-                t.shift.odometer,
-                review.startPackage.odometerKmOcr === null ? null : String(review.startPackage.odometerKmOcr),
-                review.startPackage.odometerKm === null ? null : String(review.startPackage.odometerKm),
-              ),
-              ...scalarDelta(
-                t.shift.battery,
-                review.startPackage.batteryPercentOcr === null ? null : `${review.startPackage.batteryPercentOcr}%`,
-                review.startPackage.batteryPercent === null ? null : `${review.startPackage.batteryPercent}%`,
-              ),
-            ]}
+            deltas={scalarDelta(
+              t.shift.odometer,
+              review.startPackage.odometerKmOcr === null ? null : String(review.startPackage.odometerKmOcr),
+              review.startPackage.odometerKm === null ? null : String(review.startPackage.odometerKm),
+            )}
           />
           <PhotoRow pkg="start" media={review.media} />
           <BatteryReadings readings={review.startPackage.batteries} />
@@ -263,12 +249,6 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             <Field label={t.approval.startVsEnd} value={odoDelta === null ? '—' : `+${odoDelta} كم`} />
             <Field label={t.shift.cashHandover} value={review.endPackage.cashDeclared ?? '—'} />
             <Field label={t.shift.walletBalance} value={review.endPackage.walletDeclared ?? '—'} />
-            {/* The end battery was collected but never shown: a bike handed back at 5% is an
-                operational fact the manager approving the shift should be looking at. */}
-            <Field
-              label={t.shift.battery}
-              value={review.endPackage.batteryPercent === null ? '—' : `${review.endPackage.batteryPercent}%`}
-            />
           </dl>
           {/* SRS D-3: what the driver changed from the wallet OCR. */}
           <OcrDeltaLines deltas={scalarDelta(t.shift.walletBalance, review.endPackage.walletDeclaredOcr, review.endPackage.walletDeclared)} />
@@ -491,9 +471,7 @@ function BatteryReadings({ readings }: { readings: BatteryReadingView[] }): Reac
             <span className="num font-bold">{r.percent === null ? '—' : `${r.percent}%`}</span>
           </div>
           <div className="num mt-1 flex flex-wrap gap-x-4 text-xs text-slate-500">
-            {r.packMillivolts === null ? null : <span>{(r.packMillivolts / 1000).toFixed(2)} V</span>}
             {r.cycleCount === null ? null : <span>{t.battery.cycles}: {r.cycleCount}</span>}
-            {r.mosTempDc === null ? null : <span>{t.battery.mosTemp}: {(r.mosTempDc / 10).toFixed(1)}°C</span>}
             {r.serialNo === null ? null : <span className="text-slate-400">{r.serialNo}</span>}
           </div>
           {/* SRS D-3: what the driver changed from the OCR reading. */}
@@ -504,18 +482,12 @@ function BatteryReadings({ readings }: { readings: BatteryReadingView[] }): Reac
   )
 }
 
-/** How each scaled-integer BMS field labels + formats for the D-3 delta line. */
-const BMS_FIELDS = ['percent', 'packMillivolts', 'cycleCount', 'remainCapacityDah', 'fullCapacityDah', 'mosTempDc', 't1Dc', 't2Dc'] as const
+/** How each scaled-integer BMS field labels + formats for the D-3 delta line — charge + cycles. */
+const BMS_FIELDS = ['percent', 'cycleCount'] as const
 type BmsFieldKey = (typeof BMS_FIELDS)[number]
 const bmsFmt: Record<BmsFieldKey, { label: (t: ReturnType<typeof useApp>['t']) => string; show: (v: number) => string }> = {
   percent: { label: (t) => t.battery.percent, show: (v) => `${v}%` },
-  packMillivolts: { label: (t) => t.battery.voltage, show: (v) => `${(v / 1000).toFixed(2)} V` },
   cycleCount: { label: (t) => t.battery.cycles, show: (v) => `${v}` },
-  remainCapacityDah: { label: (t) => t.battery.remainCapacity, show: (v) => `${(v / 10).toFixed(1)}Ah` },
-  fullCapacityDah: { label: (t) => t.battery.fullCapacity, show: (v) => `${(v / 10).toFixed(1)}Ah` },
-  mosTempDc: { label: (t) => t.battery.mosTemp, show: (v) => `${(v / 10).toFixed(1)}°C` },
-  t1Dc: { label: (t) => t.battery.temp1, show: (v) => `${(v / 10).toFixed(1)}°C` },
-  t2Dc: { label: (t) => t.battery.temp2, show: (v) => `${(v / 10).toFixed(1)}°C` },
 }
 
 function bmsDeltas(r: BatteryReadingView, t: ReturnType<typeof useApp>['t']): DeltaLine[] {

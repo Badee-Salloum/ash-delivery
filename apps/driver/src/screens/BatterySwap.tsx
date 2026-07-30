@@ -16,9 +16,9 @@ export interface SpareBattery {
 }
 
 type Vals = Record<string, string>
-const EMPTY: Vals = { percent: '', packMillivolts: '', cycleCount: '', remainCapacityDah: '', fullCapacityDah: '', mosTempDc: '', t1Dc: '', t2Dc: '' }
+const EMPTY: Vals = { percent: '', cycleCount: '' }
 
-/** One pack's reading, built from the typed (or scanned) fields. */
+/** One pack's reading, built from the typed (or scanned) fields — charge + cycles only. */
 function readingOf(vals: Vals, ocrRaw: unknown): Reading {
   const scaled = (key: string): number | null => {
     const field = FIELDS.find((f) => f.key === key)!
@@ -26,13 +26,7 @@ function readingOf(vals: Vals, ocrRaw: unknown): Reading {
   }
   return {
     percent: scaled('percent'),
-    packMillivolts: scaled('packMillivolts'),
     cycleCount: scaled('cycleCount'),
-    remainCapacityDah: scaled('remainCapacityDah'),
-    fullCapacityDah: scaled('fullCapacityDah'),
-    mosTempDc: scaled('mosTempDc'),
-    t1Dc: scaled('t1Dc'),
-    t2Dc: scaled('t2Dc'),
     source: ocrRaw ? 'ocr' : 'manual',
     ocrRaw: ocrRaw ?? undefined,
   }

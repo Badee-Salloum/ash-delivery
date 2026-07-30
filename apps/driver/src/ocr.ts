@@ -27,24 +27,19 @@
  */
 
 export interface OcrReading {
-  battery: number | null
   odometer: number | null
 }
 
 /**
- * A BMS readout. Scaled INTEGERS, never floats — millivolts, deci-amp-hours, deci-Celsius — so
- * 83.37 V is 83_370 and 50.0 Ah is 500. Same reasoning as money: a value that gates whether a bike
- * is fit to ride should not be carried by IEEE-754.
+ * A BMS readout — only the two figures the operation tracks per pack: the remaining charge and the
+ * lifetime charge cycles. Scaled INTEGERS, never floats (the cycle count is whole; the percent is
+ * whole), same reasoning as money — a value that gates whether a bike is fit to ride is not carried
+ * by IEEE-754. Voltage / capacity / temperatures used to be read here too; the product now captures
+ * only charge + cycles, so the reader stops hunting for the rest.
  */
 export interface BmsReading {
   percent: number | null
-  packMillivolts: number | null
   cycleCount: number | null
-  remainCapacityDah: number | null
-  fullCapacityDah: number | null
-  mosTempDc: number | null
-  t1Dc: number | null
-  t2Dc: number | null
 }
 
 /** Why a read produced nothing. Each one wants a different response from the driver. */
@@ -365,7 +360,7 @@ const DASH_TIMEOUT_MS = 15_000
 
 // ── The e-bike dashboard photo ────────────────────────────────────────────────────────────
 
-/** Battery % + odometer from a dashboard photo. */
+/** The odometer km from a dashboard photo — the only figure read off the dash. */
 export async function readDashboard(image: Blob | Uint8Array, timeoutMs = DASH_TIMEOUT_MS): Promise<OcrOutcome<OcrReading>> {
   const started = now()
   let text = ''
@@ -375,7 +370,7 @@ export async function readDashboard(image: Blob | Uint8Array, timeoutMs = DASH_T
     const result = await recognize(prepared, { whitelist: '0123456789%.', psm: 11 }, timeoutMs)
     text = result.text
     const reading = parseReading(text)
-    const fieldsFound = [reading.battery, reading.odometer].filter((v) => v !== null).length
+    const fieldsFound = reading.odometer !== null ? 1 : 0
     if (fieldsFound === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text }
     return { ok: true, reading, fieldsFound, ms: now() - started, text }
   } catch (err) {
@@ -385,18 +380,17 @@ export async function readDashboard(image: Blob | Uint8Array, timeoutMs = DASH_T
 }
 
 /**
- * Pull the two numbers out of the recognised text.
- * - battery: the number just before a `%`, clamped to 0–100.
- * - odometer: the longest run of digits — on an e-bike dash the odometer is the largest figure
- *   (speed/trip/clock are all shorter), so this is a good-enough first guess for the driver to fix.
+ * Pull the odometer km out of the recognised text — the ONLY thing read off the dash now.
+ *
+ * The odometer is the longest run of digits: on an e-bike dash it is the largest figure (speed,
+ * trip and clock are all shorter), so it is a good-enough first guess for the driver to fix. The
+ * `%` figure is still located, but only to SKIP it — an odometer that happens to read 100 beside a
+ * 100% battery must not be discarded as "the battery again" and replaced by a clock or trip meter.
  */
 export function parseReading(text: string): OcrReading {
   const batteryMatch = text.match(/(\d{1,3})\s*%/)
-  const battery = batteryMatch ? Math.min(100, Number(batteryMatch[1])) : null
 
-  // Compare by POSITION, not by digit string. An odometer that happens to read 100 beside a 100%
-  // battery used to be discarded as "the battery again", and the next-longest run — a clock or a
-  // trip meter — was offered in its place.
+  // Compare by POSITION, not by digit string.
   const skipAt = batteryMatch?.index
   let odometer: number | null = null
   let longest = ''
@@ -406,7 +400,7 @@ export function parseReading(text: string): OcrReading {
   }
   if (longest) odometer = Number(longest)
 
-  return { battery, odometer }
+  return { odometer }
 }
 
 // ── The Yallago wallet screenshot (SRS D-2) ─────────────────────────────────────────────────
@@ -570,19 +564,16 @@ export interface BmsProfile {
   psm: readonly number[]
 }
 
-const dah = (n: number): number => Math.round(n * 10)
 const whole = (n: number): number => Math.round(n)
 
-/** Fields shared by every app seen so far; a profile adds its own label spellings on top. */
+/**
+ * The two figures the reader looks for — the remaining charge and the lifetime cycle count. Every
+ * app spells them differently, so each carries its known label spellings. Voltage / capacity /
+ * temperatures were read here once; the product now tracks only charge + cycles per pack.
+ */
 const COMMON_FIELDS: readonly BmsField[] = [
-  { key: 'remainCapacityDah', labels: ['remaincapacity', 'السعةالمتبقية'], scale: dah, max: 100_000 },
-  { key: 'fullCapacityDah', labels: ['batterycapacity', 'fullcapacity', 'السعةالكلية'], scale: dah, max: 100_000 },
   { key: 'percent', labels: ['remainbattery', 'soc', 'الطاقةالمتبقية', 'نسبةالشحن'], scale: whole, max: 100 },
   { key: 'cycleCount', labels: ['cyclecount', 'عددالدورات', 'الدورات'], scale: whole, max: 100_000 },
-  { key: 'packMillivolts', labels: ['totalvoltage', 'إجماليالجهد', 'الجهدالكلي'], scale: (n) => Math.round(n * 1000), max: 2_000_000 },
-  { key: 'mosTempDc', labels: ['mostemp', 'حرارةmos', 'mos'], scale: dah, max: 2_000 },
-  { key: 't1Dc', labels: ['batteryt1', 't1'], scale: dah, max: 2_000 },
-  { key: 't2Dc', labels: ['batteryt2', 't2'], scale: dah, max: 2_000 },
 ]
 
 export const BMS_PROFILES: readonly BmsProfile[] = [
@@ -731,21 +722,11 @@ export async function readBms(
   let text = ''
 
   // Findings are MERGED across passes rather than taken from the first that works, because a page
-  // can need two of them. On the Arabic app everything on the white cards — voltage, cycles,
-  // temperatures — reads on the first pass, and everything on the cyan panel reads on none of
-  // them: light text on a darker background is INVERTED, and Tesseract wants dark on light. The
-  // charge lives on that panel, which is exactly why a phone came back with three fields and no
-  // charge. An inverted pass reads the panel and loses the cards, so neither pass alone is enough.
-  const merged: BmsReading = {
-    percent: null,
-    packMillivolts: null,
-    cycleCount: null,
-    remainCapacityDah: null,
-    fullCapacityDah: null,
-    mosTempDc: null,
-    t1Dc: null,
-    t2Dc: null,
-  }
+  // can need two of them. On the Arabic app the cycle count reads on the first pass, and the charge
+  // reads on none of them: it lives on the cyan panel where light text on a darker background is
+  // INVERTED, and Tesseract wants dark on light. An inverted pass reads the panel and loses the
+  // cards, so neither pass alone is enough.
+  const merged: BmsReading = { percent: null, cycleCount: null }
   const absorb = (reading: BmsReading): void => {
     for (const key of Object.keys(merged) as Array<keyof BmsReading>) {
       if (merged[key] === null && reading[key] !== null) merged[key] = reading[key]
@@ -847,16 +828,7 @@ export function parseBms(input: readonly OcrLine[] | string, profile: BmsProfile
           .map((text, i) => ({ text, y0: i * 10, y1: i * 10 + 10, words: [] }))
       : input.filter((l) => l.text.trim() !== '')
 
-  const out: BmsReading = {
-    percent: null,
-    packMillivolts: null,
-    cycleCount: null,
-    remainCapacityDah: null,
-    fullCapacityDah: null,
-    mosTempDc: null,
-    t1Dc: null,
-    t2Dc: null,
-  }
+  const out: BmsReading = { percent: null, cycleCount: null }
   const text = lines.map((l) => l.text).join('\n')
 
   const store = (key: keyof BmsReading, field: BmsField, value: number): void => {
@@ -904,15 +876,6 @@ export function parseBms(input: readonly OcrLine[] | string, profile: BmsProfile
       const found = valueNearLabel(lines, field.labels)
       if (found !== null) store(field.key, field, found)
     }
-  }
-
-  // Pack voltage is the one figure both apps show WITHOUT a nearby label — it is the headline
-  // number. Take the largest plausible pack voltage on screen (a 20S lithium pack sits around
-  // 60–90 V), which beats anchoring on a label that may not be there.
-  if (out.packMillivolts === null) {
-    const volts = [...text.matchAll(/(\d{2,3}[.,]\d{1,2})\s*V/gi)].map((m) => Number(m[1]!.replace(',', '.')))
-    const pack = volts.filter((v) => v >= 20 && v <= 200).sort((a, b) => b - a)[0]
-    if (pack !== undefined) out.packMillivolts = Math.round(pack * 1000)
   }
 
   // An unlabelled percentage is still worth having: both apps show exactly one "100%", and it is

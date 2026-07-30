@@ -171,7 +171,8 @@ export function startPackageGaps(pkg: StartPackage): PackageGap[] {
   }
   gaps.push(...batteryGaps(pkg))
   if (pkg.odometerKm === null) gaps.push({ kind: 'missing_value', field: 'odometerKm' })
-  if (pkg.batteryPercent === null) gaps.push({ kind: 'missing_value', field: 'batteryPercent' })
+  // No bike-level battery check: charge is tracked PER PACK now (batteryGaps above), so a fitted
+  // pack with no reading is what blocks the gate, not a separate whole-bike percentage.
   // A float of zero is legitimate — a driver may start with nothing but a wallet top-up — so
   // the check is "was an amount recorded", not "is it greater than zero".
   if (pkg.floatTotal < 0n) gaps.push({ kind: 'missing_value', field: 'floatTotal' })
@@ -186,9 +187,7 @@ export function endPackageGaps(pkg: EndPackage): PackageGap[] {
   }
   gaps.push(...batteryGaps(pkg))
   if (pkg.odometerKm === null) gaps.push({ kind: 'missing_value', field: 'odometerKm' })
-  // The end battery was declared but never checked: a driver who left it blank submitted 0 and
-  // the manager was never shown it. A bike handed back at 5% is an operational fact, not a typo.
-  if (pkg.batteryPercent === null) gaps.push({ kind: 'missing_value', field: 'batteryPercent' })
+  // Closing charge is tracked per pack (batteryGaps above), not as a whole-bike percentage.
   if (pkg.cashDeclared === null) gaps.push({ kind: 'missing_value', field: 'cashDeclared' })
   if (pkg.walletDeclared === null) gaps.push({ kind: 'missing_value', field: 'walletDeclared' })
   if (pkg.orderCount === 0) gaps.push({ kind: 'no_orders' })

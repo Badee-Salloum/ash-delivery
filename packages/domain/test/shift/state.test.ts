@@ -81,12 +81,6 @@ describe('the OPEN gate (BR5, AC #1)', () => {
     expect(result.ok === false && result.gaps).toContainEqual({ kind: 'missing_photo', slot: 'odometer' })
   })
 
-  it('refuses to confirm without the battery percentage', () => {
-    const result = transition('draft', 'driver_confirm_start',
-      ctx({ actor: actor('driver'), startPackage: completeStart({ batteryPercent: null, driverConfirmedAt: null }) }))
-    expect(result).toMatchObject({ ok: false, reason: 'start_package_incomplete' })
-  })
-
   it('refuses manager approval when the driver has not confirmed — the manager is the SECOND signature', () => {
     const result = transition('awaiting_open_approval', 'manager_approve_open',
       ctx({ startPackage: completeStart({ driverConfirmedAt: null }) }))
@@ -301,7 +295,9 @@ describe('gap reporting is a checklist, not a boolean', () => {
       mediaSlots: [], batteryPercent: null, odometerKm: null,
       floatTotal: syp(0), topupTotal: syp(0), driverConfirmedAt: null,
     })
-    expect(gaps).toHaveLength(3)
+    // The odometer photo and the odometer value — the bike-level battery % is no longer gated
+    // (charge is per pack), and a float/top-up of zero is legitimate.
+    expect(gaps).toHaveLength(2)
   })
 
   it('lists every missing end item at once', () => {
@@ -391,9 +387,10 @@ describe('battery evidence scales with the bike', () => {
     expect(gaps).toContainEqual({ kind: 'missing_battery_reading', slotNo: 2 })
   })
 
-  it('the end battery is finally gated — it was declared but never checked', () => {
-    // A driver who left it blank submitted 0, and the manager was never shown it. A bike handed
-    // back at 5% is an operational fact, not a typo to be silently normalised away.
+  it('no longer gates a bike-level battery — charge is tracked per pack now', () => {
+    // The whole-bike battery % was dropped: a fitted pack with no reading is what blocks the gate
+    // (see the per-pack battery tests), not a separate whole-bike percentage. A close with no
+    // bike-level battery, but everything else present, is complete.
     const gaps = endPackageGaps({
       mediaSlots: ['dashboard', 'wallet', 'odometer'],
       odometerKm: 1100,
@@ -403,6 +400,6 @@ describe('battery evidence scales with the bike', () => {
       orderCount: 1,
       allOrdersConfirmed: true,
     })
-    expect(gaps).toContainEqual({ kind: 'missing_value', field: 'batteryPercent' })
+    expect(gaps).toEqual([])
   })
 })
