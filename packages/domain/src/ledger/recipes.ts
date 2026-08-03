@@ -1,7 +1,7 @@
 import { type Minor, add, minor, sub, sum } from '../money/minor.ts'
 import { type FeeTotals, type Rounding } from '../money/allocate.ts'
 import type { BlockSplit } from '../money/allocate.ts'
-import { type PayMode, type ShiftOrder, orderNetBlock, orderYalagoCut, totalFeesOfOrders } from '../br1/equation.ts'
+import { type PayMode, type ShiftOrder, orderWalletAmount, orderYalagoCut, totalFeesOfOrders } from '../br1/equation.ts'
 
 /**
  * The posting recipes: every way money is allowed to move.
@@ -284,6 +284,8 @@ export interface ShiftPostingInput {
   readonly floatTranches: readonly Minor[]
   readonly topupTranches: readonly Minor[]
   readonly orders: readonly ShiftOrder[]
+  /** Wallet movements no order explains (incentive, top-up, withdrawal) — same term BR1 uses. */
+  readonly walletAdjustments?: readonly Minor[]
   readonly rounding?: Rounding
 }
 
@@ -332,14 +334,16 @@ export interface ClosingBalances {
 /** What the driver's two funds hold at close, before the returns. Mirrors BR1's expectations. */
 export function closingBalances(input: ShiftPostingInput): ClosingBalances {
   const rounding = input.rounding ?? 'floor'
+  // The same one rule BR1 uses: what did NOT reach the wallet is in his hand, and what did reach it
+  // is there less Yallago's cut. Mirrors `evaluateBr1` exactly — these two must never drift, or the
+  // ledger would return a different amount from the one the equation just balanced.
   const endCash = add(
     sum(input.floatTranches),
-    sum(input.orders.filter((o) => o.payMode === 'cash').map((o) => o.fee)),
+    sum(input.orders.map((o) => sub(o.fee, orderWalletAmount(o)))),
   )
-  // Per ORDER — a manual job's block is its whole fee, and it takes nothing out of the wallet.
-  const walletIn = sum(input.orders.filter((o) => o.payMode !== 'cash').map((o) => orderNetBlock(o, rounding)))
-  const walletOut = sum(input.orders.filter((o) => o.payMode === 'cash').map((o) => orderYalagoCut(o, rounding)))
-  return { endCash, endWallet: sub(add(sum(input.topupTranches), walletIn), walletOut) }
+  const walletFromOrders = sum(input.orders.map((o) => sub(orderWalletAmount(o), orderYalagoCut(o, rounding))))
+  const adjustments = sum(input.walletAdjustments ?? [])
+  return { endCash, endWallet: add(add(sum(input.topupTranches), walletFromOrders), adjustments) }
 }
 
 /**
@@ -360,10 +364,7 @@ export function minWalletBalance(input: ShiftPostingInput): Minor {
   let balance = sum(input.topupTranches)
   let lowest = balance
   for (const order of input.orders) {
-    balance =
-      order.payMode === 'cash'
-        ? sub(balance, orderYalagoCut(order, rounding))
-        : add(balance, orderNetBlock(order, rounding))
+    balance = add(balance, sub(orderWalletAmount(order), orderYalagoCut(order, rounding)))
     if (balance < lowest) lowest = balance
   }
   return lowest

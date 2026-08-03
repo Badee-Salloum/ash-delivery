@@ -25,9 +25,39 @@ export interface ShiftOrder {
   /** Manual orders only: the hand-entered split. `driverShare + companyShare === fee`, exactly. */
   readonly driverShare?: Minor
   readonly companyShare?: Minor
+  /**
+   * How much of this order's fee actually reached the WALLET (0 ≤ walletAmount ≤ fee).
+   *
+   * `payMode` treats an order as all-cash or all-wallet, and the client's real payments log shows
+   * that is not how it works: a customer can settle part of an order electronically and hand over
+   * the rest, so only PART of the 80% lands in the wallet. This is the measured amount, read off
+   * the log, and it makes the three modes two endpoints of one continuum:
+   *
+   *     walletAmount = 0    ⇒ exactly today's `cash`
+   *     walletAmount = fee  ⇒ exactly today's `electronic` / `free`
+   *
+   * Absent means "nobody measured it" and `orderWalletAmount` falls back to the pay mode, so every
+   * shift recorded before the log was read keeps its old arithmetic to the minor unit.
+   */
+  readonly walletAmount?: Minor
 }
 
 export const isManualOrder = (order: ShiftOrder): boolean => order.kind === 'manual'
+
+/**
+ * How much of the fee arrived in the wallet.
+ *
+ * The measurement when there is one; otherwise what the pay mode implies. Clamped into `[0, fee]`
+ * because a reading outside it is a misread, and letting it through would put money into BR1 that
+ * the order never carried.
+ */
+export const orderWalletAmount = (order: ShiftOrder): Minor => {
+  if (order.walletAmount === undefined) {
+    return order.payMode === 'cash' ? minor(0n) : order.fee
+  }
+  if (order.walletAmount < 0n) return minor(0n)
+  return order.walletAmount > order.fee ? order.fee : order.walletAmount
+}
 
 /** Yallago's cut of one order — zero for a manual job, which they never touched. */
 export const orderYalagoCut = (order: ShiftOrder, rounding: Rounding = 'floor'): Minor =>
@@ -61,6 +91,11 @@ export interface Br1Input {
   readonly endCashDeclared: Minor
   readonly endWalletDeclared: Minor
   readonly orders: readonly ShiftOrder[]
+  /**
+   * Signed wallet movements that no order explains — an incentive, a top-up, a withdrawal — read
+   * off the payments log. Positive raises the wallet, negative lowers it.
+   */
+  readonly walletAdjustments?: readonly Minor[]
   readonly rounding?: Rounding
 }
 
@@ -115,19 +150,18 @@ export function evaluateBr1(input: Br1Input): Br1Result {
     // Zero for a manual job — Yallago never touched it, so nothing leaves the wallet for them and
     // the whole fee is the driver's block.
     const cut = orderYalagoCut(order, rounding)
-    switch (order.payMode) {
-      case 'cash':
-        // Collects the fee in cash; Yallago takes its 20% out of the wallet instantly (BR2).
-        cashFromOrders += order.fee
-        walletFromOrders -= cut
-        break
-      case 'electronic':
-      case 'free':
-        // Nothing collected in cash; the block (fee less Yallago's cut) lands in the wallet.
-        walletFromOrders += sub(order.fee, cut)
-        break
-    }
+    // What actually reached the wallet; the rest of the fee he collected in his hand. One rule for
+    // every order, replacing the three-way switch: an all-cash order has `wallet = 0` and an all-
+    // electronic one has `wallet = fee`, so both come out exactly as they did before, and a part-
+    // paid order — which the pay modes could not express at all — now comes out right too.
+    const inWallet = orderWalletAmount(order)
+    cashFromOrders += sub(order.fee, inWallet)
+    walletFromOrders += sub(inWallet, cut)
   }
+  // Wallet movements that belong to no order at all: an incentive Yallago paid, a top-up, a
+  // withdrawal. Without them the equation reports their sum as a discrepancy and blames the driver
+  // for money the app moved on its own.
+  for (const adjustment of input.walletAdjustments ?? []) walletFromOrders += adjustment
 
   const expectedCash = add(input.floatTotal, minor(cashFromOrders))
   const expectedWallet = add(input.topupTotal, minor(walletFromOrders))

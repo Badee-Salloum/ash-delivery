@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { parseMinor } from '@ash/domain'
-import { type OcrLine, parseBms, parseOrders, parseReading, parseWallet, profileById } from '../src/ocr.ts'
+import { type OcrLine, parseBms, parseOrders, parsePaymentsLog, parseReading, parseWallet, profileById } from '../src/ocr.ts'
 
 /**
  * The BMS parser, against text shaped like what Tesseract actually returns for the client's two
@@ -436,6 +436,122 @@ Detail Logs Count: 208       Time Enter Sleep: 86466`
   it('never mistakes the clock for the odometer', () => {
     // «1 00:00» is a time. Digits either side of a colon are not a distance.
     expect(parseReading('MODE 1 00:00').odometer).toBeNull()
+  })
+})
+
+/**
+ * The ARABIC «الطلبات الحديثة» screen, transcribed from the client's own screenshot.
+ *
+ * The reader was written for the English build and could not read one row of this: the fee regex
+ * needs a leading ASCII digit, the date header wants Latin letters against an English month table,
+ * and «م»/«ص» went unread — so an afternoon order and a morning one collapsed onto the same time
+ * and then onto the same generated order key.
+ */
+const RECENT_AR = `
+الطلبات الحديثة
+الأربعاء, ٢٩ يوليو
+٤٩٥ SYP          ٦:١٠ م
+A دجاج كزتاكي, كفرسوسة, دامسكينو مول - (KFC)
+B المدخل مدخل أرضي
+١٨٠ SYP          ٤:٥٤ م
+A الميدان, F8Q2+H8H
+B كيم إيل سونغ, G72F+7M8
+٤٠٠ SYP          ٣:٤٨ م
+A الوليد بن عبد الملك
+محطة واحدة (١)
+B شركة رامي لاجهزة اطفاء الحريق
+١٤٠ SYP          ٢:٤٨ م
+A Al Mazzeh
+B بناء المحافظة Fayez Mansour 5
+١٦٥ SYP          ١١:٥٤ ص
+A مطعم السحلول, الطلياني
+B Rasheed Karame
+`
+
+describe('the Arabic «الطلبات الحديثة» screen', () => {
+  const orders = parseOrders(RECENT_AR, 2026)
+
+  it('reads every fee, in Arabic-Indic digits', () => {
+    expect(orders.map((o) => o.fee)).toEqual(['495', '180', '400', '140', '165'])
+  })
+
+  it('reads the Arabic date header «٢٩ يوليو»', () => {
+    expect(orders.every((o) => o.dateIso === '2026-07-29')).toBe(true)
+  })
+
+  it('converts «م» to the afternoon and leaves «ص» alone', () => {
+    // Without this, ٦:١٠ م and ٦:١٠ ص are the same string — and the driver's app keys an order by
+    // its time, so two real orders would become one.
+    expect(orders[0]!.time).toBe('18:10') // ٦:١٠ م
+    expect(orders[1]!.time).toBe('16:54') // ٤:٥٤ م
+    expect(orders[4]!.time).toBe('11:54') // ١١:٥٤ ص — morning, unchanged
+  })
+
+  it('also accepts the Levantine month names a Syrian build may show', () => {
+    expect(parseOrders('٢٩ تموز\n٤٩٥ SYP ٦:١٠ م', 2026)[0]!.dateIso).toBe('2026-07-29')
+    expect(parseOrders('٣ كانون الثاني\n١٠٠ SYP ١:٠٠ م', 2026)[0]!.dateIso).toBe('2026-01-03')
+  })
+
+  it('reads the amount when RTL puts «SYP» first', () => {
+    expect(parseOrders('SYP ٤٩٥          ٦:١٠ م', 2026)[0]!.fee).toBe('495')
+  })
+
+  it('still reads the English screen exactly as before', () => {
+    const en = parseOrders('Monday, 27 July\n23:46          335 SYP', 2026)
+    expect(en[0]).toMatchObject({ fee: '335', time: '23:46', dateIso: '2026-07-27' })
+  })
+})
+
+/**
+ * The «سجل المدفوعات» log, transcribed from the same screenshot. Each cash order leaves Yallago's
+ * 20% here at the order's own minute (٤٩٥→−٩٩, ١٨٠→−٣٦, ٤٠٠→−٨٠), and the positive rows are the
+ * electronically-paid part of an order or an incentive — which is why the matcher must ask rather
+ * than assume.
+ */
+const PAYMENTS_AR = `
+سجل المدفوعات
+يوليو
+−١٤٤٫١٥ SYP        ٧:٢٩ م
++١٨٥ SYP           ٦:١٠ م
+−٩٩ SYP            ٦:١٠ م
+−٣٦ SYP            ٤:٥٤ م
+−٨٠ SYP            ٣:٤٨ م
++١٥٫٩٠ SYP         ١١:٥٤ ص
+−٣٣ SYP            ١١:٥٤ ص
+`
+
+describe('the Arabic «سجل المدفوعات» log', () => {
+  const rows = parsePaymentsLog(PAYMENTS_AR)
+
+  it('reads every row with its sign and its time', () => {
+    expect(rows).toEqual([
+      { amount: '-144.15', time: '19:29' },
+      { amount: '185', time: '18:10' },
+      { amount: '-99', time: '18:10' },
+      { amount: '-36', time: '16:54' },
+      { amount: '-80', time: '15:48' },
+      { amount: '15.90', time: '11:54' },
+      { amount: '-33', time: '11:54' },
+    ])
+  })
+
+  it('keeps the ٫ decimal apart from the ٬ thousands mark', () => {
+    expect(parsePaymentsLog('−١٬٢٣٤٫٥٠ SYP ٣:٠٠ م')[0]!.amount).toBe('-1234.50')
+  })
+
+  it('accepts the shapes the recogniser returns for «−»', () => {
+    for (const dash of ['-', '−', '–', '—', '~']) {
+      expect(parsePaymentsLog(`${dash}٨٠ SYP ٣:٤٨ م`)[0]!.amount).toBe('-80')
+    }
+  })
+
+  it('refuses a row with no sign — a bare number here is as likely a clock as money', () => {
+    expect(parsePaymentsLog('٨٠ SYP ٣:٤٨ م')).toEqual([])
+    expect(parsePaymentsLog('سجل المدفوعات\nيوليو')).toEqual([])
+  })
+
+  it('reads a row whose clock was lost, rather than dropping the money', () => {
+    expect(parsePaymentsLog('−٨٠ SYP')).toEqual([{ amount: '-80', time: '' }])
   })
 })
 

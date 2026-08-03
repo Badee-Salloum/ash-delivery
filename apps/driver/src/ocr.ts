@@ -489,14 +489,93 @@ export interface OcrOrder {
 const ORDERS_TIMEOUT_MS = 20_000
 const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december']
 
-/** «Monday, 27 July» → «2026-07-27» using the supplied year (the app has a clock; the parser stays pure). */
+/**
+ * The same twelve months in Arabic, in BOTH namings the region uses: the transliterated Gregorian
+ * set the Yallago app shows («يوليو») and the Levantine set a Syrian build may show instead
+ * («تموز»). Index is the month number − 1, so either table answers the same question.
+ */
+const MONTHS_AR = [
+  ['يناير', 'كانونالثاني'],
+  ['فبراير', 'شباط'],
+  ['مارس', 'اذار', 'آذار'],
+  ['ابريل', 'أبريل', 'نيسان'],
+  ['مايو', 'ايار', 'أيار'],
+  ['يونيو', 'حزيران'],
+  ['يوليو', 'تموز'],
+  ['اغسطس', 'أغسطس', 'اب', 'آب'],
+  ['سبتمبر', 'ايلول', 'أيلول'],
+  ['اكتوبر', 'أكتوبر', 'تشرينالاول', 'تشرينالأول'],
+  ['نوفمبر', 'تشرينالثاني'],
+  ['ديسمبر', 'كانونالاول', 'كانونالأول'],
+]
+
+/** Arabic-Indic (٠-٩) and extended/Persian (۰-۹) digits → ASCII. Both appear on Android builds. */
+export const asciiDigits = (s: string): string =>
+  s
+    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+
+/** Fold an Arabic word to one spelling so a month matches despite hamza, ta-marbuta and spacing. */
+const foldAr = (s: string): string =>
+  s
+    .replace(/[\s‏‎_]/g, '')
+    .replace(/ـ/g, '')
+    .replace(/[ً-ْ]/g, '')
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+
+/**
+ * «Monday, 27 July» or «الأربعاء, ٢٩ يوليو» → «2026-07-29», using the supplied year (the app has a
+ * clock; the parser stays pure).
+ *
+ * The weekday is ignored in both languages — it carries no information the day number does not, and
+ * demanding it would be one more thing to misread.
+ */
 function orderDateHeader(line: string, year: number): string | null {
-  const m = line.match(/(\d{1,2})\s+([A-Za-z]{3,})/)
+  const ascii = asciiDigits(line)
+  const en = ascii.match(/(\d{1,2})\s+([A-Za-z]{3,})/)
+  if (en) {
+    const day = Number(en[1])
+    const month = MONTHS.indexOf(en[2]!.toLowerCase())
+    if (month !== -1 && day >= 1 && day <= 31) {
+      return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+    }
+  }
+  // Arabic: «٢٩ يوليو». The day may precede or follow the month name depending on how the RTL line
+  // was serialised, so the number is taken from the line and the month matched anywhere in it.
+  const folded = foldAr(ascii)
+  const monthIndex = MONTHS_AR.findIndex((names) => names.some((n) => folded.includes(foldAr(n))))
+  if (monthIndex === -1) return null
+  const dayM = folded.match(/(\d{1,2})/)
+  if (!dayM) return null
+  const day = Number(dayM[1])
+  if (day < 1 || day > 31) return null
+  return `${year}-${String(monthIndex + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+/**
+ * «٦:١٠ م» → «18:10»; «11:54 ص» → «11:54»; «23:46» → «23:46».
+ *
+ * The Arabic screens are 12-hour with «م»/«ص», and without the conversion an afternoon order and a
+ * morning one collapse onto the same time — which then collides in the order key the driver's app
+ * generates from it, so two real orders become one.
+ */
+export function parseClock(line: string): string | null {
+  const ascii = asciiDigits(line)
+  // ONLY a real colon separates a clock. Accepting the decimal marks too — «٫» or «.» — makes the
+  // amount itself look like a time: «−١٤٤٫١٥ SYP … ٧:٢٩ م» matched «4٫15» first and reported 16:15
+  // for a row that happened at 19:29. A separator the recogniser mangled must leave the time BLANK,
+  // which the matcher can see, rather than a plausible wrong one, which it cannot.
+  const m = ascii.match(/([0-2]?\d)\s*:\s*([0-5]\d)/)
   if (!m) return null
-  const day = Number(m[1])
-  const month = MONTHS.indexOf(m[2]!.toLowerCase())
-  if (month === -1 || day < 1 || day > 31) return null
-  return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+  let hour = Number(m[1])
+  if (hour > 23) return null
+  const pm = /م(?![ا-ي])/.test(line) || /\bPM\b/i.test(line)
+  const am = /ص(?![ا-ي])/.test(line) || /\bAM\b/i.test(line)
+  if (pm && hour < 12) hour += 12
+  if (am && hour === 12) hour = 0
+  return `${String(hour).padStart(2, '0')}:${m[2]}`
 }
 
 /**
@@ -510,7 +589,7 @@ export function parseOrders(text: string, year: number): OcrOrder[] {
   const out: OcrOrder[] = []
   let dateIso: string | null = null
   let pendingTime: string | null = null
-  for (const raw of text.split('\n')) {
+  for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim()
     if (line === '') continue
     const dh = orderDateHeader(line, year)
@@ -518,10 +597,8 @@ export function parseOrders(text: string, year: number): OcrOrder[] {
       dateIso = dh
       continue
     }
-    const timeM = line.match(/([0-2]?\d):([0-5]\d)/)
-    const time = timeM ? `${timeM[1]!.padStart(2, '0')}:${timeM[2]}` : null
-    const feeM = line.match(/(\d[\d.,،٬٫]*)\s*SYP/i)
-    const fee = feeM ? parseWallet(feeM[1]!) : null
+    const time = parseClock(line)
+    const fee = feeOnLine(line)
     if (fee) {
       out.push({ dateIso, time: time ?? pendingTime ?? '', fee, zone: null })
       pendingTime = null
@@ -533,18 +610,110 @@ export function parseOrders(text: string, year: number): OcrOrder[] {
   return out
 }
 
-/** Read the whole order list off a «Recent orders» screenshot (dark text on white). */
+/**
+ * The `NNN SYP` amount on one row, in either language and either word order.
+ *
+ * The digits are folded to ASCII first, because the Arabic build writes «٤٩٥ SYP» and a regex
+ * anchored on `\d` — which is ASCII-only in JavaScript under every flag — matches none of it. And
+ * the amount may sit on EITHER side of «SYP»: an RTL line can be serialised as «SYP ٤٩٥», so
+ * demanding number-then-currency silently drops every row on the Arabic screen.
+ */
+function feeOnLine(line: string): string | null {
+  const ascii = asciiDigits(line)
+  const after = ascii.match(/(\d[\d.,،٬٫٫٬]*)\s*SYP/i)
+  if (after) return parseWallet(after[1]!)
+  const before = ascii.match(/SYP\s*(\d[\d.,،٬٫٫٬]*)/i)
+  return before ? parseWallet(before[1]!) : null
+}
+
+/** Read the whole order list off a «Recent orders» / «الطلبات الحديثة» screenshot. */
 export async function readOrders(image: Blob | Uint8Array, timeoutMs = ORDERS_TIMEOUT_MS): Promise<OcrOutcome<{ orders: OcrOrder[] }>> {
   const started = now()
   let text = ''
   try {
-    const prepared = await prepareForOcr(toBlob(image))
-    // No whitelist (Arabic addresses, «SYP», colons, digits all matter); a list is a uniform block.
-    const result = await recognize(prepared, { whitelist: '', psm: 6 }, timeoutMs)
-    text = result.text
-    const orders = parseOrders(text, new Date().getFullYear())
-    if (orders.length === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text }
-    return { ok: true, reading: { orders }, fieldsFound: orders.length, ms: now() - started, text }
+    // The English build is dark-on-white and the Arabic one is light-on-dark, and there is no way
+    // to know which arrived. Both are tried; the pass that finds more rows wins.
+    let best: OcrOrder[] = []
+    for (const invert of [false, true]) {
+      const prepared = await prepareForOcr(toBlob(image), invert)
+      // No whitelist (Arabic addresses, «SYP», colons, digits all matter); a list is a uniform block.
+      const result = await recognize(prepared, { whitelist: '', psm: 6 }, timeoutMs)
+      if (result.text.length > text.length) text = result.text
+      const orders = parseOrders(result.text, new Date().getFullYear())
+      if (orders.length > best.length) best = orders
+      if (best.length > 0 && !invert) break // the usual case: the first pass read it
+    }
+    if (best.length === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text }
+    return { ok: true, reading: { orders: best }, fieldsFound: best.length, ms: now() - started, text }
+  } catch (err) {
+    const reason: OcrFailure = err instanceof Error && err.message === 'ocr timeout' ? 'timeout' : 'unavailable'
+    return { ok: false, reason, ms: now() - started, text }
+  }
+}
+
+// ── The Yallago payments log «سجل المدفوعات» ───────────────────────────────────────────────
+//
+// A LOG, not a balance — and that difference is why `parseWallet` must never be pointed at it.
+// `parseWallet` collapses a whole page to one number: it strips newlines and signs and welds every
+// row's digits (and every clock's digits) into a single run, then returns `ok` with a confident
+// wrong answer. It cannot even fail. A log has to be read the opposite way: row by row, each with
+// its own SIGN, amount and time, and rows it cannot read must simply not appear.
+
+export interface WalletMovement {
+  /** Signed money as a decimal string: «-80», «107.50». Negative = left the wallet. */
+  readonly amount: string
+  /** «HH:MM», 24-hour, or '' when the row's clock was not readable. */
+  readonly time: string
+}
+
+/**
+ * One row per movement, in screen order.
+ *
+ * A row counts only if it has BOTH a sign and an `SYP` amount. That is deliberately strict: an
+ * unsigned number on this screen is as likely to be a clock, a date or a balance as it is money,
+ * and a wrong row here becomes a wrong wallet in BR1. The «−» the app draws is U+2212, not a
+ * hyphen, and Tesseract also returns it as «~» or «—» often enough to accept all of them.
+ */
+export function parsePaymentsLog(text: string): WalletMovement[] {
+  const out: WalletMovement[] = []
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (line === '') continue
+    const ascii = asciiDigits(line)
+    // The sign sits at the START of the amount on this screen, in both directions of the RTL run.
+    const m =
+      ascii.match(/([+\-−–—~])\s*(\d[\d.,،٬٫]*)\s*SYP/i) ?? ascii.match(/SYP\s*([+\-−–—~])\s*(\d[\d.,،٬٫]*)/i)
+    if (!m) continue
+    const magnitude = parseWallet(m[2]!)
+    if (magnitude === null) continue
+    const negative = m[1] !== '+'
+    out.push({ amount: negative ? `-${magnitude}` : magnitude, time: parseClock(line) ?? '' })
+  }
+  return out
+}
+
+const WALLET_LOG_TIMEOUT_MS = 20_000
+
+/** Read every movement off a «سجل المدفوعات» screenshot (light text on a dark page). */
+export async function readPaymentsLog(
+  image: Blob | Uint8Array,
+  timeoutMs = WALLET_LOG_TIMEOUT_MS,
+): Promise<OcrOutcome<{ movements: WalletMovement[] }>> {
+  const started = now()
+  let text = ''
+  try {
+    let best: WalletMovement[] = []
+    // Inverted FIRST: this screen is white-on-black, which Tesseract binarises poorly the other way.
+    for (const invert of [true, false]) {
+      const prepared = await prepareForOcr(toBlob(image), invert)
+      const result = await recognize(prepared, { whitelist: '', psm: 6 }, timeoutMs)
+      if (result.text.length > text.length) text = result.text
+      const movements = parsePaymentsLog(result.text)
+      if (movements.length > best.length) best = movements
+      if (best.length > 0 && invert) break
+    }
+    if (best.length === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text }
+    return { ok: true, reading: { movements: best }, fieldsFound: best.length, ms: now() - started, text }
   } catch (err) {
     const reason: OcrFailure = err instanceof Error && err.message === 'ocr timeout' ? 'timeout' : 'unavailable'
     return { ok: false, reason, ms: now() - started, text }
