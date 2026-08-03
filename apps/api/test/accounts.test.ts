@@ -136,3 +136,48 @@ describe('accounts (SRS A-2)', () => {
     for (const u of users) expect(u).not.toHaveProperty('passwordHash')
   })
 })
+
+/**
+ * A branch manager's account was created as `Ali_Dandah` with an ARABIC KASRA (U+0650) in front of
+ * it — what Shift+A produces while the Arabic keyboard layout is on. The mark is invisible and
+ * zero-width, so the username looked right everywhere in the admin, but login is an exact match and
+ * the account could never reach its password check. Nobody could see why.
+ */
+const KASRA = 'ِ'
+
+describe('a username carrying what a keyboard layout left behind', () => {
+  it('cannot be created with an invisible mark in it — it is stored as typed, not as pressed', async () => {
+    const sa = await h.loginAs('sysadmin')
+    const res = await post(sa, '/users', account({ username: `${KASRA}Ali_Dandah` }))
+    expect(res.statusCode, res.body).toBe(201)
+
+    const users = (await get(sa, '/users')).json().users as Array<{ username: string }>
+    expect(users.map((u) => u.username)).toContain('Ali_Dandah')
+    // And it logs in under the name a person can actually type.
+    expect((await login('Ali_Dandah', 'password1234')).statusCode).toBe(200)
+  })
+
+  it('refuses a name that is only long enough because of marks nobody can see', async () => {
+    const sa = await h.loginAs('sysadmin')
+    expect((await post(sa, '/users', account({ username: `a${KASRA}${KASRA}${KASRA}` }))).statusCode).toBe(400)
+  })
+
+  it('lets an account ALREADY stored with the mark log in under its typed name', async () => {
+    // The account as it exists in production today — created before the rule above.
+    h.deps.users.seed({
+      id: 'u-dandah',
+      roleKey: 'branch_manager',
+      username: `${KASRA}Ali_Dandah`,
+      branchId: BRANCH,
+      driverId: null,
+      fullNameAr: 'علي دندة',
+      passwordHash: 'plain:secret',
+      failedAttempts: 0,
+      lockedUntilMs: null,
+      active: true,
+    })
+    expect((await login('Ali_Dandah', 'secret')).statusCode).toBe(200)
+    // A wrong password is still a wrong password — the fallback finds the account, nothing more.
+    expect((await login('Ali_Dandah', 'wrongpassword')).statusCode).toBe(401)
+  })
+})

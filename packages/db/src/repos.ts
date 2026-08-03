@@ -12,6 +12,7 @@ import type {
   UserRecord,
   UserRepo,
 } from '@ash/contracts'
+import { normalizeUsername } from '@ash/contracts'
 import { type CalendarDate, type FxDay, type Minor, type Posting, minor } from '@ash/domain'
 import { PG, type Pool, type PoolClient, isPgError, withTransaction } from './pool.ts'
 
@@ -437,7 +438,26 @@ export class PgUserRepo implements UserRepo {
     this.pool = pool
   }
   async findByUsername(username: string): Promise<UserRecord | null> {
-    return this.one('username = $1', [username])
+    const exact = await this.one('username = $1', [username])
+    if (exact) return exact
+
+    /*
+     * Nothing matched literally. Before giving up, look for an account whose STORED name carries
+     * characters that cannot be typed back — the invisible Arabic kasra a wrong keyboard layout
+     * leaves in front of a name, a zero-width joiner pasted in from elsewhere. Such an account
+     * looks perfectly normal in the admin and is impossible to log into, and the person locked out
+     * has no way to see why.
+     *
+     * This runs only on a miss, and it is NOT fuzzy matching: the caller's input is already
+     * normalised, so this compares two normalised forms for equality. If more than one account
+     * normalises to the same name the request is refused rather than resolved to a guess —
+     * authentication must never pick which of two people you meant.
+     */
+    const wanted = normalizeUsername(username)
+    if (wanted === '') return null
+    const { rows } = await this.pool.query<{ username: string }>('SELECT username FROM users')
+    const matches = rows.map((r) => r.username).filter((u) => u !== username && normalizeUsername(u) === wanted)
+    return matches.length === 1 ? this.one('username = $1', [matches[0]]) : null
   }
   async findById(id: string): Promise<UserRecord | null> {
     return this.one('u.id = $1', [id])

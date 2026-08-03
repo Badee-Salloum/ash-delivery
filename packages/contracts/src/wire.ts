@@ -24,8 +24,30 @@ export const payModeSchema = z.enum(['cash', 'electronic', 'free'])
 
 // ── Auth ──────────────────────────────────────────────────────────────────────────────────
 
+/**
+ * A username as it can actually be typed back.
+ *
+ * This exists because of a real account nobody could log into. It was created as `Ali_Dandah` with
+ * the ARABIC KASRA (U+0650) in front of it — what Shift+A produces while the Arabic keyboard layout
+ * is on. The mark is invisible and zero-width, so the username looked correct in every list in the
+ * admin, but the login lookup is an exact match: the name on the screen and the name in the
+ * database were different strings, and the account could never even reach its password check.
+ *
+ * In an Arabic-first product where every operator switches layouts all day, this will happen again.
+ * So: NFKC first, so compatibility forms settle; then drop combining marks (`\p{M}` — the stray
+ * kasra, fatha, shadda) and format characters (`\p{Cf}` — zero-width joiners, RTL/LTR marks, BOM),
+ * none of which a person can see or reproduce; then trim.
+ *
+ * Deliberately NOT case folding. Lower-casing here would let two existing accounts collide, and
+ * quietly changing which account a name resolves to is not something authentication should do.
+ */
+export const normalizeUsername = (raw: string): string => raw.normalize('NFKC').replace(/[\p{M}\p{Cf}]/gu, '').trim()
+
 export const loginRequest = z.object({
-  username: z.string().min(1).max(64),
+  // Normalised on the way in, so an invisible mark the operator cannot see — and cannot delete,
+  // because backspace over a zero-width character looks like nothing happening — is not the reason
+  // a correct password is refused.
+  username: z.string().min(1).max(64).transform(normalizeUsername),
   password: z.string().min(1).max(256),
 })
 
@@ -202,7 +224,13 @@ export const updateUserRequest = z.object({
 
 /** Create a login account. A driver-role account also gets a linked driver record. */
 export const createUserRequest = z.object({
-  username: z.string().min(3).max(40),
+  // Normalised BEFORE the length check, so a name that is only long enough because of invisible
+  // marks is refused rather than stored — an account created with one is an account nobody can use.
+  username: z
+    .string()
+    .max(40)
+    .transform(normalizeUsername)
+    .refine((u) => u.length >= 3, { message: 'username must be at least 3 usable characters' }),
   password: z.string().min(8).max(200),
   roleKey: z.enum(['driver', 'branch_manager', 'system_admin', 'general_manager', 'accountant']),
   fullNameAr: z.string().min(1).max(120),

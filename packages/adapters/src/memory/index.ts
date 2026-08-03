@@ -43,6 +43,7 @@ import type {
   WeekLockRecord,
   WeekLockRepo,
 } from '@ash/contracts'
+import { normalizeUsername } from '@ash/contracts'
 import { type CalendarDate, type FxDay, type Minor, type Posting, isLive, minor } from '@ash/domain'
 import { memoryCipher } from '../crypto.ts'
 import { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
@@ -119,7 +120,13 @@ export class MemoryUserRepo implements UserRepo {
   }
   async findByUsername(username: string): Promise<UserRecord | null> {
     for (const u of this.rows.values()) if (u.username === username) return { ...u }
-    return null
+    // Same rule as PgUserRepo: an account whose stored name carries characters that cannot be
+    // typed back (an invisible kasra from the Arabic layout, a zero-width joiner) is still
+    // reachable — but only when exactly ONE account normalises to what was asked for.
+    const wanted = normalizeUsername(username)
+    if (wanted === '') return null
+    const matches = [...this.rows.values()].filter((u) => normalizeUsername(u.username) === wanted)
+    return matches.length === 1 ? { ...matches[0]! } : null
   }
   async findById(id: string): Promise<UserRecord | null> {
     const u = this.rows.get(id)
