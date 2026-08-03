@@ -255,6 +255,8 @@ export const ar = {
     scanOrders: 'مسح الطلبات',
     scanned: 'تمت إضافة {n} طلباً — راجِعها واحذف ما ليس من نوبتك',
     scanNone: 'لم تُقرأ أي طلبات',
+    /** A row already sent to the server: shown, not editable — a mistake is the manager's to fix. */
+    sent: 'مُرسَل',
     count: 'عدد الطلبات',
     payModes: { cash: 'كاش', electronic: 'إلكتروني', free: 'مجاني' },
     problems: {

@@ -6,6 +6,7 @@ import {
   nextPayMode,
   previewBr1,
   toApiPayloads,
+  unsentOrders,
   validateRow,
 } from '../src/order-entry.ts'
 
@@ -126,5 +127,36 @@ describe('API payloads', () => {
   it('trims order numbers and carries the fee text verbatim', () => {
     const payloads = toApiPayloads([row({ providerOrderNo: '  YAL-9  ', feeText: '5000.00' })])
     expect(payloads[0]).toEqual({ providerOrderNo: 'YAL-9', payMode: 'cash', fee: '5000.00', zone: null })
+  })
+})
+
+/**
+ * The driver can step back out of the closing package to add a delivery he forgot, so this list is
+ * submitted more than once. Every row already on the server must be filtered out of the second
+ * submit: `provider_order_no` is globally unique, and a 409 here shows up as "my orders failed" on
+ * a list where nothing is wrong and no amount of retrying will clear it.
+ */
+describe('re-submitting the list after stepping back', () => {
+  it('sends nothing when every row is already recorded', () => {
+    const orders = [row({ providerOrderNo: 'YAL-1', recorded: true }), row({ providerOrderNo: 'YAL-2', recorded: true })]
+    expect(unsentOrders(orders, orders)).toEqual([])
+  })
+
+  it('sends only the order added after coming back', () => {
+    const sent = [row({ providerOrderNo: 'YAL-1', recorded: true })]
+    const added = row({ providerOrderNo: 'YAL-2' })
+    expect(unsentOrders([...sent, added], sent).map((o) => o.providerOrderNo)).toEqual(['YAL-2'])
+  })
+
+  it('still filters a row the server holds but that is not yet flagged', () => {
+    // The window between the resumed list arriving and its rows being marked. The flag alone would
+    // let these through, and every one of them would come back a 409.
+    const onServer = [row({ providerOrderNo: 'YAL-1' })]
+    expect(unsentOrders([row({ providerOrderNo: ' YAL-1 ' })], onServer)).toEqual([])
+  })
+
+  it('sends everything on a first submit, with nothing recorded yet', () => {
+    const orders = [row({ providerOrderNo: 'YAL-1' }), row({ providerOrderNo: 'YAL-2' })]
+    expect(unsentOrders(orders)).toHaveLength(2)
   })
 })

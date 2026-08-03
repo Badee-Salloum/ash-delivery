@@ -90,11 +90,41 @@ export function Card({ children, className = '' }: { children: ReactNode; classN
   return <div className={`rounded-3xl bg-white p-4 shadow-sm ${className}`}>{children}</div>
 }
 
-export function Screen({ title, children, footer }: { title: string; children: ReactNode; footer?: ReactNode }): ReactNode {
+export function Screen({
+  title,
+  children,
+  footer,
+  back,
+}: {
+  title: string
+  children: ReactNode
+  footer?: ReactNode
+  /**
+   * The way out of this screen. It sits in the STICKY header, not in the body: the closing package
+   * is a long scroll, and a control the driver has to scroll back up to find is one he does not
+   * have. It replaces the logo — a sub-screen is not the place for branding.
+   *
+   * Passed only where going back is genuinely safe. A screen that cannot undo what it has already
+   * sent must not offer to.
+   */
+  back?: { label: string; onBack(): void }
+}): ReactNode {
   return (
     <div className="mx-auto flex min-h-dvh max-w-md flex-col">
       <header className="sticky top-0 z-10 flex items-center gap-2.5 bg-brand px-4 py-3 text-white">
-        <Logo size={26} className="text-white" />
+        {back ? (
+          <button
+            type="button"
+            onClick={back.onBack}
+            // -ms-2 pulls it to the header's own padding so the tap target reaches the screen edge,
+            // where a thumb lands, without moving the title.
+            className="-ms-2 min-h-11 rounded-xl bg-white/10 px-3 text-sm font-semibold active:bg-white/25"
+          >
+            {back.label}
+          </button>
+        ) : (
+          <Logo size={26} className="text-white" />
+        )}
         <h1 className="text-xl font-bold">{title}</h1>
       </header>
       <main className="flex flex-1 flex-col gap-4 p-4 pb-28">{children}</main>

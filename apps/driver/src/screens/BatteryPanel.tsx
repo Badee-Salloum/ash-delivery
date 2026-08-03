@@ -69,7 +69,7 @@ export const toStored = (text: string, scale: number): number | null => {
   return Number.isFinite(n) ? Math.round(n * scale) : null
 }
 
-interface PackState {
+export interface PackState {
   values: Record<FieldKey, string>
   /** The OCR reading as produced, before any correction — the D-3 baseline. */
   ocrRaw: unknown
@@ -94,6 +94,8 @@ export function BatteryPanel({
   slots,
   onSlotUploaded,
   onReadingsChanged,
+  initialPacks,
+  onPacksChanged,
 }: {
   shiftId: string
   pkg: 'start' | 'end'
@@ -102,9 +104,20 @@ export function BatteryPanel({
   slots: ReadonlySet<string>
   onSlotUploaded(slot: string): void
   onReadingsChanged?(complete: boolean): void
+  /**
+   * Readings to start from, when the caller kept them across the screen being left and re-entered.
+   *
+   * Every reading is pushed to the server as it is typed, so nothing was ever LOST on unmount — but
+   * the fields came back blank and `complete` came back false, so the driver had to retype numbers
+   * the system already held before it would let him submit. Omitted ⇒ the panel starts empty.
+   */
+  initialPacks?: Record<string, PackState>
+  /** Hand the readings back so they can outlive this mount. Must be a stable callback. */
+  onPacksChanged?(packs: Record<string, PackState>): void
 }): ReactNode {
   const { api, t } = useApp()
-  const [packs, setPacks] = useState<Record<string, PackState>>({})
+  const [packs, setPacks] = useState<Record<string, PackState>>(() => initialPacks ?? {})
+  useEffect(() => onPacksChanged?.(packs), [packs, onPacksChanged])
   const [files, setFiles] = useState<Record<string, File>>({})
 
   const slotOf = (b: FittedBattery, i: number): number => b.slotNo ?? i + 1
@@ -203,6 +216,9 @@ export function BatteryPanel({
               pkg={pkg}
               slot={`bms_${slotNo}`}
               label={`${t.battery.bmsShot} ${slotNo} · ${battery.capacityAh}Ah`}
+              // Ticked already when the caller kept the slot across a remount — same reason the
+              // readings are restored: nothing was lost, only forgotten by the screen.
+              uploaded={slots.has(`bms_${slotNo}`)}
               onUploaded={onSlotUploaded}
               onImage={(file) => {
                 setFiles((cur) => ({ ...cur, [battery.id]: file }))

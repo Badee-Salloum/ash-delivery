@@ -22,6 +22,7 @@ export function OrderEntry({
   shift,
   initialOrders = [],
   onDone,
+  onBack,
 }: {
   shift: { id: string; floatText: string; topupText: string }
   /**
@@ -33,6 +34,8 @@ export function OrderEntry({
    */
   initialOrders?: readonly DraftOrder[]
   onDone(orders: DraftOrder[]): void
+  /** Back to the running shift. Nothing here has been sent yet, so leaving costs nothing. */
+  onBack?(): void
 }): ReactNode {
   const { t } = useApp()
   const toast = useToast()
@@ -102,6 +105,7 @@ export function OrderEntry({
   return (
     <Screen
       title={`${t.orders.title} — ${orders.length}`}
+      {...(onBack ? { back: { label: t.common.back, onBack } } : {})}
       footer={
         <div className="flex flex-col gap-2">
           {preview ? (
@@ -143,8 +147,12 @@ export function OrderEntry({
 
       {orders.map((o, i) => {
         const problem = problems.get(o.localId)
+        // Already on the server. The driver may come back to this list — to add a delivery he
+        // forgot — but he cannot un-send one, so the row is read-only rather than an edit that
+        // silently does nothing and leaves his BR1 preview disagreeing with the server's.
+        const sent = o.recorded === true
         return (
-          <Card key={o.localId} className={problem ? 'ring-2 ring-red-300' : ''}>
+          <Card key={o.localId} className={problem ? 'ring-2 ring-red-300' : sent ? 'opacity-70' : ''}>
             <div className="flex items-center gap-2">
               <span className="w-6 text-center text-sm text-slate-400">{i + 1}</span>
               <TextInput
@@ -153,9 +161,11 @@ export function OrderEntry({
                 placeholder={t.orders.orderNo}
                 inputMode="numeric"
                 className="flex-1"
+                disabled={sent}
               />
               <button
                 onClick={() => update(o.localId, { payMode: nextPayMode(o.payMode) })}
+                disabled={sent}
                 className={`min-h-14 rounded-2xl px-3 text-sm font-semibold ${modeColor[o.payMode]}`}
               >
                 {modeLabel[o.payMode]}
@@ -166,10 +176,15 @@ export function OrderEntry({
                 value={o.feeText}
                 onChange={(e) => update(o.localId, { feeText: e.target.value })}
                 className="flex-1"
+                disabled={sent}
               />
-              <Button variant="ghost" onClick={() => remove(o.localId)} className="px-4" aria-label={t.common.remove}>
-                ×
-              </Button>
+              {sent ? (
+                <span className="px-2 text-sm font-medium text-slate-400">{t.orders.sent}</span>
+              ) : (
+                <Button variant="ghost" onClick={() => remove(o.localId)} className="px-4" aria-label={t.common.remove}>
+                  ×
+                </Button>
+              )}
             </div>
             {problem ? (
               <p className="mt-1 text-sm font-medium text-red-600">

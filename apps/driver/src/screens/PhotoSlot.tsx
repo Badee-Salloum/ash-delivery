@@ -34,12 +34,30 @@ export interface PhotoSlotProps {
    * phone screen with another.
    */
   source?: 'camera' | 'gallery'
+  /**
+   * This slot was already uploaded before this mount, so the tile comes back TICKED.
+   *
+   * The driver can leave the closing package and return to it. Without this the tiles all reset to
+   * 📷 while the submit button stayed enabled — the screen telling him, at the same time, that his
+   * photos were missing and that he could submit. Read once, at mount: after that the tile's own
+   * upload is the authority on its state.
+   */
+  uploaded?: boolean
 }
 
-export function PhotoSlot({ shiftId, pkg, slot, label, onUploaded, onImage, source = 'camera' }: PhotoSlotProps): ReactNode {
+export function PhotoSlot({
+  shiftId,
+  pkg,
+  slot,
+  label,
+  onUploaded,
+  onImage,
+  source = 'camera',
+  uploaded = false,
+}: PhotoSlotProps): ReactNode {
   const { api, t } = useApp()
   const ref = useRef<HTMLInputElement>(null)
-  const [state, setState] = useState<'idle' | 'working' | 'done' | 'error'>('idle')
+  const [state, setState] = useState<'idle' | 'working' | 'done' | 'error'>(uploaded ? 'done' : 'idle')
 
   const onPick = useCallback(
     async (file: File) => {

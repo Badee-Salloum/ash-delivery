@@ -19,6 +19,16 @@ export interface DraftOrder {
   feeText: string
   /** SRS D-1/D-3: the OCR-read fee, set only on rows scanned off «Recent orders» — the baseline. */
   feeOcrText?: string
+  /**
+   * Already posted to the server.
+   *
+   * There is no way for a driver to take an order back: `provider_order_no` is globally unique and
+   * no delete endpoint exists — by design, since an order is money. So a recorded row is shown but
+   * not editable, and a mistake in one is a manager's to correct at the review. Editing it locally
+   * changed nothing on the server and quietly desynchronised the BR1 preview from the figure the
+   * server would compute.
+   */
+  recorded?: boolean
 }
 
 export interface OrderEntryState {
@@ -72,6 +82,23 @@ export function allProblems(orders: readonly DraftOrder[]): Map<string, RowProbl
 
 export const isComplete = (orders: readonly DraftOrder[]): boolean =>
   orders.length > 0 && allProblems(orders).size === 0
+
+/**
+ * What a submit should actually SEND: the rows not already on the server.
+ *
+ * The driver can leave the closing package and come back to this list to add a delivery he forgot,
+ * so «تم» runs a second time over a list whose earlier rows are already posted. `provider_order_no`
+ * is globally unique, so re-sending one is a 409 — and a 409 here reads to the driver as "my orders
+ * failed", on a list where nothing is wrong and nothing he can do will clear it.
+ *
+ * Two signals, deliberately: the `recorded` flag, and the order numbers already known. The flag
+ * alone would miss the window where the resumed rows have loaded into the list but not yet been
+ * marked, and that window ends in exactly the 409 above.
+ */
+export function unsentOrders(orders: readonly DraftOrder[], alreadySent: readonly DraftOrder[] = []): DraftOrder[] {
+  const sent = new Set(alreadySent.map((o) => o.providerOrderNo.trim()))
+  return orders.filter((o) => o.recorded !== true && !sent.has(o.providerOrderNo.trim()))
+}
 
 /** Cycle a pay mode with one tap: cash → electronic → free → cash. */
 export function nextPayMode(mode: PayMode): PayMode {

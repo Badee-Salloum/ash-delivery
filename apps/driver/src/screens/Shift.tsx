@@ -1,13 +1,13 @@
-import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import { type Dispatch, type ReactNode, type SetStateAction, useCallback, useEffect, useRef, useState } from 'react'
 import type { PayMode } from '@ash/domain'
 import type { DraftOrder } from '@ash/client'
-import { compressImage, nextPayMode, uploadEvidencePath } from '@ash/client'
+import { compressImage, nextPayMode, unsentOrders, uploadEvidencePath } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
 import { useGpsBeacon } from '../use-gps-beacon.ts'
 import { Button, Card, Field, Money, MoneyInput, Screen, TextInput } from '../ui.tsx'
 import { OrderEntry } from './OrderEntry.tsx'
-import { BatteryPanel, type FittedBattery } from './BatteryPanel.tsx'
+import { BatteryPanel, type FittedBattery, type PackState } from './BatteryPanel.tsx'
 import { BatterySwap, type SpareBattery } from './BatterySwap.tsx'
 import { PhotoSlot } from './PhotoSlot.tsx'
 
@@ -29,6 +29,41 @@ interface ShiftState {
   id: string
   floatText: string
   topupText: string
+}
+
+/** What the payments-log reader made of «سجل المدفوعات», said out loud rather than left silent. */
+type LogState = { kind: 'idle' | 'reading' | 'failed' } | { kind: 'read'; rows: number }
+
+/**
+ * The closing package while it is being filled in.
+ *
+ * It lives in `ShiftFlow`, not inside `EndPackage`, because the driver can now step BACK out of the
+ * close — and a back button that costs him four re-uploaded screenshots and every typed figure is a
+ * trap, not a way out. Nothing here was ever lost on unmount (photos upload immediately, battery
+ * readings are pushed as they are typed); it was the *screen* that forgot, and then refused to
+ * submit until he retyped what the server already had.
+ */
+interface EndDraft {
+  cash: string
+  wallet: string
+  /** What `readWallet` OCR'd, kept even if the driver edits the field (SRS D-3 baseline). */
+  walletOcr: string | null
+  odo: string
+  /** Evidence slots already uploaded, so the tiles come back showing their taken state. */
+  slots: ReadonlySet<string>
+  log: LogState
+  /** Per-pack BMS readings, so the charge fields come back filled and the gate stays satisfied. */
+  packs: Record<string, PackState>
+}
+
+const EMPTY_END_DRAFT: EndDraft = {
+  cash: '',
+  wallet: '',
+  walletOcr: null,
+  odo: '',
+  slots: new Set(),
+  log: { kind: 'idle' },
+  packs: {},
 }
 
 /** Where a shift already in flight puts the driver back. */
@@ -68,6 +103,7 @@ export function ShiftFlow({
   const [recorded, setRecorded] = useState<DraftOrder[]>([])
   const [orderError, setOrderError] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(!resume)
+  const [endDraft, setEndDraft] = useState<EndDraft>(EMPTY_END_DRAFT)
 
   /**
    * Pick the shift back up.
@@ -90,6 +126,9 @@ export function ShiftFlow({
             providerOrderNo: o.providerOrderNo,
             payMode: o.payMode,
             feeText: o.fee,
+            // On the server already — shown, not editable. Editing one used to change nothing there
+            // while quietly moving the driver's own BR1 preview away from the server's figure.
+            recorded: true,
           })),
         )
         // Trust the server's state over the one the assignment reported: the manager may have
@@ -183,12 +222,24 @@ export function ShiftFlow({
         <OrderEntry
           shift={shift}
           initialOrders={recorded}
+          // Nothing has been sent from this screen yet, so backing out of it costs nothing — and
+          // «إنهاء النوبة» is one tap away from a driver who has not finished working.
+          onBack={() => setPhase('orders')}
           onDone={async (orders) => {
             // Only what is not already on the server: provider_order_no is globally unique, so a
             // resubmitted order is a 409 — and this used to have no catch at all, so one of them
             // rejected the promise, `setPhase('end')` never ran, and «تم» silently did nothing.
-            const already = new Set(recorded.map((o) => o.providerOrderNo.trim()))
-            const failed = await submitOrders(api, shift.id, orders.filter((o) => !already.has(o.providerOrderNo.trim())))
+            const { sent, failed } = await submitOrders(api, shift.id, unsentOrders(orders, recorded))
+            // Record what LANDED before deciding anything else — including on a partial failure,
+            // where the retry would otherwise re-post rows that saved fine and 409 on all of them.
+            // This is also what makes the step back from the closing package safe: the list comes
+            // back complete and locked, so returning here re-sends nothing and adds only what is new.
+            const landed = new Set(sent)
+            setRecorded(
+              orders
+                .filter((o) => o.recorded === true || landed.has(o.providerOrderNo.trim()))
+                .map((o) => ({ ...o, recorded: true })),
+            )
             if (failed.length > 0) {
               setOrderError(`${t.shift.ordersFailed}: ${failed.join(', ')}`)
               return
@@ -201,7 +252,18 @@ export function ShiftFlow({
     )
   }
   if (phase === 'end' && shift) {
-    return <EndPackage shift={shift} batteries={fitted} onSubmitted={() => setPhase('done')} />
+    return (
+      <EndPackage
+        shift={shift}
+        batteries={fitted}
+        draft={endDraft}
+        onDraft={setEndDraft}
+        // Back to the order list — the reason a driver leaves this screen is a delivery he forgot,
+        // and that is where he adds it. The package he has filled in so far survives the trip.
+        onBack={() => setPhase('closeOrders')}
+        onSubmitted={() => setPhase('done')}
+      />
+    )
   }
   return (
     <Screen title={t.app.title}>
@@ -218,22 +280,29 @@ export function ShiftFlow({
 }
 
 /**
- * Post the orders, returning the numbers that would not save.
+ * Post the orders, reporting BOTH what saved and what would not.
  *
  * It used to `await` each one with no catch: a single rejection — a duplicate order number is a
  * 409, and they are GLOBALLY unique — took the whole promise down, the phase never advanced, and
  * the driver tapped «تم» to no visible effect. Reporting the failures lets the screen say which.
+ *
+ * `sent` matters just as much on a PARTIAL failure. The rows before the one that failed are on the
+ * server; if the caller forgets them, the driver's retry posts them a second time, every one comes
+ * back a 409, and the list of "failed" orders grows on each attempt until nothing he can do will
+ * clear it — a deadlock built out of orders that all saved perfectly the first time.
  */
 async function submitOrders(
   api: ReturnType<typeof useApp>['api'],
   shiftId: string,
   orders: DraftOrder[],
-): Promise<string[]> {
+): Promise<{ sent: string[]; failed: string[] }> {
+  const sent: string[] = []
   const failed: string[] = []
   for (const o of orders) {
+    const no = o.providerOrderNo.trim()
     try {
       await api.post(`/shifts/${shiftId}/orders`, {
-        providerOrderNo: o.providerOrderNo.trim(),
+        providerOrderNo: no,
         payMode: o.payMode,
         fee: o.feeText,
         zone: null,
@@ -241,11 +310,12 @@ async function submitOrders(
         source: o.feeOcrText != null ? 'ocr' : 'manual',
         feeOcr: o.feeOcrText ?? null,
       })
+      sent.push(no)
     } catch {
-      failed.push(o.providerOrderNo.trim())
+      failed.push(no)
     }
   }
-  return failed
+  return { sent, failed }
 }
 
 
@@ -457,27 +527,33 @@ function StartPackage({
 function EndPackage({
   shift,
   batteries,
+  draft,
+  onDraft,
+  onBack,
   onSubmitted,
 }: {
   shift: ShiftState
   batteries: readonly FittedBattery[]
+  /** Held by the caller so the package survives a step back to the order list. See `EndDraft`. */
+  draft: EndDraft
+  onDraft: Dispatch<SetStateAction<EndDraft>>
+  onBack?(): void
   onSubmitted(): void
 }): ReactNode {
   const { api, t } = useApp()
   const toast = useToast()
-  const [cash, setCash] = useState('')
-  const [wallet, setWallet] = useState('')
-  // SRS D-3 baseline: what readWallet OCR'd off the wallet screenshot, kept even if the driver edits.
-  const [walletOcr, setWalletOcr] = useState<string | null>(null)
-  const [odo, setOdo] = useState('')
-  const [slots, setSlots] = useState<Set<string>>(new Set())
+  const { cash, wallet, walletOcr, odo, slots, log: logState } = draft
+  const patch = useCallback((p: Partial<EndDraft>): void => onDraft((d) => ({ ...d, ...p })), [onDraft])
+  // Stable, and a no-op update when the readings are unchanged — an unstable callback here would
+  // loop the panel's notify-effect against this state.
+  const onPacksChanged = useCallback(
+    (packs: Record<string, PackState>): void => onDraft((d) => (d.packs === packs ? d : { ...d, packs })),
+    [onDraft],
+  )
   const [br1, setBr1] = useState<{ difference: string; balanced: boolean } | null>(null)
   const [busy, setBusy] = useState(false)
 
   const [batteriesReady, setBatteriesReady] = useState(batteries.length === 0)
-  const [logState, setLogState] = useState<{ kind: 'idle' | 'reading' | 'failed' } | { kind: 'read'; rows: number }>({
-    kind: 'idle',
-  })
   // The zeroed-wallet photo was dropped (product owner) — the wallet screenshot is the evidence.
   // «سجل المدفوعات» joins them: the balance screen says what the wallet HOLDS, the log says what
   // MOVED, and only the log can tell a cash order from a part-electronic one (each order leaves
@@ -524,6 +600,7 @@ function EndPackage({
   return (
     <Screen
       title={t.shift.endPackage}
+      {...(onBack ? { back: { label: t.common.back, onBack } } : {})}
       footer={
         <div className="flex flex-col gap-2">
           {br1 ? (
@@ -550,7 +627,8 @@ function EndPackage({
           slot={slot}
           label={labels[slot]!}
           source={gallery.has(slot) ? 'gallery' : 'camera'}
-          onUploaded={(uploaded) => setSlots((prev) => new Set(prev).add(uploaded))}
+          uploaded={slots.has(slot)}
+          onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
           // SRS D-2: read the wallet balance off its screenshot and pre-fill the field; and read the
           // payments log, which is what tells a cash order from a part-electronic one. Both are
           // ASSISTED — a failed read leaves the field for the driver, and the manager can correct it
@@ -561,18 +639,23 @@ function EndPackage({
                   const { readWallet } = await import('../ocr.ts')
                   const r = await readWallet(file)
                   if (!r.ok) return
-                  setWalletOcr((cur) => cur ?? r.reading.amountText)
-                  setWallet((cur) => (cur === '' ? r.reading.amountText : cur))
+                  onDraft((d) => ({
+                    ...d,
+                    // The FIRST read is the baseline and stays it; the field is only pre-filled
+                    // while the driver has not answered — his typing always wins.
+                    walletOcr: d.walletOcr ?? r.reading.amountText,
+                    wallet: d.wallet === '' ? r.reading.amountText : d.wallet,
+                  }))
                 },
               }
             : {})}
           {...(slot === 'payments_log'
             ? {
                 onImage: async (file: File): Promise<void> => {
-                  setLogState({ kind: 'reading' })
+                  patch({ log: { kind: 'reading' } })
                   const { readPaymentsLog } = await import('../ocr.ts')
                   const r = await readPaymentsLog(file).catch(() => null)
-                  setLogState(r?.ok ? { kind: 'read', rows: r.reading.movements.length } : { kind: 'failed' })
+                  patch({ log: r?.ok ? { kind: 'read', rows: r.reading.movements.length } : { kind: 'failed' } })
                 },
               }
             : {})}
@@ -588,13 +671,13 @@ function EndPackage({
       {logState.kind === 'failed' ? <p className="text-center text-sm text-amber-700">{t.shift.logUnread}</p> : null}
       <Card className="flex flex-col gap-3">
         <Field label={t.shift.cashHandover}>
-          <MoneyInput value={cash} onChange={(e) => setCash(e.target.value)} />
+          <MoneyInput value={cash} onChange={(e) => patch({ cash: e.target.value })} />
         </Field>
         <Field label={t.shift.walletBalance}>
-          <MoneyInput value={wallet} onChange={(e) => setWallet(e.target.value)} />
+          <MoneyInput value={wallet} onChange={(e) => patch({ wallet: e.target.value })} />
         </Field>
         <Field label={t.shift.odometer}>
-          <TextInput inputMode="numeric" value={odo} onChange={(e) => setOdo(e.target.value)} />
+          <TextInput inputMode="numeric" value={odo} onChange={(e) => patch({ odo: e.target.value })} />
         </Field>
       </Card>
       {/* The close gate asks for the same per-pack evidence the open gate did. */}
@@ -603,8 +686,10 @@ function EndPackage({
         pkg="end"
         batteries={batteries}
         slots={slots}
-        onSlotUploaded={(slot) => setSlots((prev) => new Set(prev).add(slot))}
+        onSlotUploaded={(slot) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(slot) }))}
         onReadingsChanged={setBatteriesReady}
+        initialPacks={draft.packs}
+        onPacksChanged={onPacksChanged}
       />
     </Screen>
   )

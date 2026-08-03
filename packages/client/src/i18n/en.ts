@@ -254,6 +254,8 @@ export const en: Catalog = {
     scanOrders: 'Scan orders',
     scanned: '{n} orders added — review them and drop any not in this shift',
     scanNone: 'No orders could be read',
+    /** A row already sent to the server: shown, not editable — a mistake is the manager's to fix. */
+    sent: 'Sent',
     count: 'Order count',
     payModes: { cash: 'Cash', electronic: 'Electronic', free: 'Free' },
     problems: {
