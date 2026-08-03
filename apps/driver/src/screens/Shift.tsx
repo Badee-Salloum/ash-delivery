@@ -475,16 +475,25 @@ function EndPackage({
   const [busy, setBusy] = useState(false)
 
   const [batteriesReady, setBatteriesReady] = useState(batteries.length === 0)
+  const [logState, setLogState] = useState<{ kind: 'idle' | 'reading' | 'failed' } | { kind: 'read'; rows: number }>({
+    kind: 'idle',
+  })
   // The zeroed-wallet photo was dropped (product owner) — the wallet screenshot is the evidence.
+  // «سجل المدفوعات» joins them: the balance screen says what the wallet HOLDS, the log says what
+  // MOVED, and only the log can tell a cash order from a part-electronic one (each order leaves
+  // Yallago's 20% in it at its own minute). It is evidence, not a gate — a driver whose log will
+  // not photograph must still be able to close, and the manager reconciles from the balance.
   const required = ['dashboard', 'wallet', 'odometer']
   const labels: Record<string, string> = {
     dashboard: t.shift.dashboardShot,
     wallet: t.shift.walletBalance,
     odometer: t.shift.odometer,
+    payments_log: t.shift.paymentsLog,
   }
-  // The dashboard and wallet are SCREENSHOTS the driver already has in his gallery, not things to
-  // photograph with the camera; the odometer is a real photo of the bike.
-  const gallery = new Set(['dashboard', 'wallet'])
+  const shown = [...required, 'payments_log']
+  // The dashboard, wallet and log are SCREENSHOTS the driver already has in his gallery, not things
+  // to photograph with the camera; the odometer is a real photo of the bike.
+  const gallery = new Set(['dashboard', 'wallet', 'payments_log'])
   // Each fitted pack's closing charge gates the button (batteriesReady), matching the server. The
   // bike-level battery field is gone — charge is tracked per pack.
   const ready =
@@ -533,7 +542,7 @@ function EndPackage({
         </div>
       }
     >
-      {required.map((slot) => (
+      {shown.map((slot) => (
         <PhotoSlot
           key={slot}
           shiftId={shift.id}
@@ -542,9 +551,10 @@ function EndPackage({
           label={labels[slot]!}
           source={gallery.has(slot) ? 'gallery' : 'camera'}
           onUploaded={(uploaded) => setSlots((prev) => new Set(prev).add(uploaded))}
-          // SRS D-2: read the wallet balance off its screenshot and pre-fill the field. Only the
-          // wallet slot gets a handler; the others stay pure evidence. Failure is silent — the
-          // driver just types. (Spread so the prop is absent, not `undefined`, on the other slots.)
+          // SRS D-2: read the wallet balance off its screenshot and pre-fill the field; and read the
+          // payments log, which is what tells a cash order from a part-electronic one. Both are
+          // ASSISTED — a failed read leaves the field for the driver, and the manager can correct it
+          // at the review. (Spread so the prop is absent, not `undefined`, on the other slots.)
           {...(slot === 'wallet'
             ? {
                 onImage: async (file: File): Promise<void> => {
@@ -556,8 +566,26 @@ function EndPackage({
                 },
               }
             : {})}
+          {...(slot === 'payments_log'
+            ? {
+                onImage: async (file: File): Promise<void> => {
+                  setLogState({ kind: 'reading' })
+                  const { readPaymentsLog } = await import('../ocr.ts')
+                  const r = await readPaymentsLog(file).catch(() => null)
+                  setLogState(r?.ok ? { kind: 'read', rows: r.reading.movements.length } : { kind: 'failed' })
+                },
+              }
+            : {})}
         />
       ))}
+      {/* What the log gave us. Said out loud because it is the difference between a wallet figure
+          the system corroborated and one nobody checked — and because a silent reader is how a
+          driver ends up believing a screenshot was understood when it was not. */}
+      {logState.kind === 'reading' ? <p className="text-center text-sm text-slate-400">{t.shift.reading}…</p> : null}
+      {logState.kind === 'read' ? (
+        <p className="text-center text-sm text-emerald-700">{t.shift.logRead.replace('{n}', String(logState.rows))}</p>
+      ) : null}
+      {logState.kind === 'failed' ? <p className="text-center text-sm text-amber-700">{t.shift.logUnread}</p> : null}
       <Card className="flex flex-col gap-3">
         <Field label={t.shift.cashHandover}>
           <MoneyInput value={cash} onChange={(e) => setCash(e.target.value)} />

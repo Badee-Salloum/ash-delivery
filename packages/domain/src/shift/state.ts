@@ -100,9 +100,18 @@ export function requiredEndSlots(batterySlots: number): readonly string[] {
   return [...REQUIRED_END_SLOTS, ...batterySlotNumbers(batterySlots).map(bmsSlot)]
 }
 
+/**
+ * «سجل المدفوعات» — the wallet's payments log. Evidence, and the only screen that says what actually
+ * MOVED in the wallet (each order leaves Yallago's 20% in it at its own minute, which is how a cash
+ * order is told from a part-electronic one). Deliberately NOT in `REQUIRED_END_SLOTS`: a driver
+ * whose log will not photograph must still be able to close, and the manager reconciles from the
+ * balance screenshot instead. Uploadable, never blocking.
+ */
+export const PAYMENTS_LOG_SLOT = 'payments_log'
+
 /** Every slot name an upload may legitimately carry — the superset, for validating a POST. */
 export const ALL_START_SLOTS: readonly string[] = requiredStartSlots(MAX_BATTERY_SLOTS)
-export const ALL_END_SLOTS: readonly string[] = requiredEndSlots(MAX_BATTERY_SLOTS)
+export const ALL_END_SLOTS: readonly string[] = [...requiredEndSlots(MAX_BATTERY_SLOTS), PAYMENTS_LOG_SLOT]
 
 function batterySlotNumbers(batterySlots: number): number[] {
   const n = Math.max(0, Math.min(MAX_BATTERY_SLOTS, Math.trunc(batterySlots)))
