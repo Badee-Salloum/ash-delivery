@@ -27,6 +27,7 @@ import {
   type TransitionResult,
   add,
   businessDateFor,
+  can,
   canOpenShift,
   closingBalances,
   documentStatusOn,
@@ -929,6 +930,59 @@ export async function submitEndPackage(
   await deps.shifts.update(updated)
   await notifyBranch(deps, updated, 'shift_awaiting_close_approval')
   return { shift: updated, br1 }
+}
+
+/**
+ * The manager corrects a closing figure during the review, WITHOUT approving.
+ *
+ * The driver's close is increasingly read off screenshots rather than typed, and a reader that
+ * misses leaves a figure wrong or missing with nobody able to fix it: the review screen was
+ * read-only, so the only ways out were bouncing the shift back to the driver or force-closing it —
+ * and force-close bypasses BR1 entirely, which is far too blunt a tool for a mistyped odometer.
+ *
+ * This changes only what the manager passes, re-evaluates BR1 against it, and LEAVES THE SHIFT IN
+ * `pending_review`. The close gate still has to pass on its own afterwards, so correcting a figure
+ * can never become a way around the equation — only a way to give it the right numbers. Audited at
+ * the route, because it moves BR1.
+ */
+export async function reviseCloseFigures(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: { odometerKm?: number | null; cashDeclared?: Minor | null; walletDeclared?: Minor | null },
+): Promise<{ shift: ShiftRecord; br1: Br1View; before: ShiftRecord }> {
+  const shift = await mustFind(deps, shiftId)
+  if (shift.state !== 'pending_review') throw new ServiceError(409, 'shift_not_under_review')
+
+  // `can` rather than `transition`: this is not a state change, so there is no edge to walk — but
+  // it is still a `shift.approve` act and must be checked as one, on the SHIFT's branch.
+  const grants = grantsFromRows(await deps.directory.grants())
+  const decision = can(
+    actor,
+    'shift.approve',
+    { driverId: shift.driverId, branchId: shift.branchId, ownerUserId: null },
+    grants,
+  )
+  if (!decision.allowed) throw new ServiceError(403, 'forbidden')
+
+  const staged: ShiftRecord = {
+    ...shift,
+    ...(input.odometerKm === undefined || input.odometerKm === null ? {} : { odoEnd: input.odometerKm }),
+    ...(input.cashDeclared === undefined || input.cashDeclared === null ? {} : { endCashDeclared: input.cashDeclared }),
+    ...(input.walletDeclared === undefined || input.walletDeclared === null
+      ? {}
+      : { endWalletDeclared: input.walletDeclared }),
+  }
+  const br1 = await evaluateShift(deps, staged)
+  const updated: ShiftRecord = {
+    ...staged,
+    equationDiff: br1.result.scalarDiff,
+    cashDiff: br1.result.cashDiff,
+    walletDiff: br1.result.walletDiff,
+    ordersHash: br1.ordersHash,
+  }
+  await deps.shifts.update(updated)
+  return { shift: updated, br1, before: shift }
 }
 
 export async function approveClose(

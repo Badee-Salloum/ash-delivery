@@ -92,3 +92,53 @@ describe('manager decisions (C-7)', () => {
     expect((await post(driver, `/shifts/${id}/reject-close`, { notes: 'x' })).statusCode).toBe(403)
   })
 })
+
+/**
+ * The manager corrects a closing figure at the review.
+ *
+ * The close is read off the driver's screenshots rather than typed, so a reader that misses used to
+ * leave the manager with only two blunt tools: bounce the whole shift back to the driver, or
+ * force-close it — which bypasses BR1 entirely. Neither is the right answer to one wrong odometer.
+ */
+describe('revising the closing figures (C-7)', () => {
+  it('re-runs BR1 against the corrected figure and leaves the shift UNDER REVIEW', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await toPendingReview(driver, manager)
+
+    // The shift has a 100,000 float and one 5,000 cash order, so the equation expects 105,000 in
+    // cash; the driver declared 100,000. Correcting the figure moves the cash difference to zero.
+    const fixed = await post(manager, `/shifts/${id}/close-figures`, { cashDeclared: sypStr(105_000) })
+    expect(fixed.statusCode, fixed.body).toBe(200)
+    expect(fixed.json().state).toBe('pending_review') // it supplies numbers; it does NOT approve
+    expect(fixed.json().br1.cashDifference).toBe('0.00')
+
+    const shift = (await h.deps.shifts.findById(id))!
+    expect(shift.endCashDeclared).toBe(10_500_000n)
+    expect(shift.state).toBe('pending_review')
+  })
+
+  it('corrects the odometer without touching the money', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await toPendingReview(driver, manager)
+    const before = (await h.deps.shifts.findById(id))!
+
+    expect((await post(manager, `/shifts/${id}/close-figures`, { odometerKm: 1_234 })).statusCode).toBe(200)
+    const after = (await h.deps.shifts.findById(id))!
+    expect(after.odoEnd).toBe(1_234)
+    expect(after.endCashDeclared).toBe(before.endCashDeclared) // omitted fields are left alone
+  })
+
+  it('is audited, and a driver may not do it', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await toPendingReview(driver, manager)
+
+    expect((await post(driver, `/shifts/${id}/close-figures`, { odometerKm: 9_999 })).statusCode).toBe(403)
+    expect((await post(manager, `/shifts/${id}/close-figures`, { odometerKm: 1_234 })).statusCode).toBe(200)
+
+    const audited = await h.deps.audit.list({ tableName: 'shifts', recordId: id })
+    expect(audited.some((a) => (a.after as { revisedByManager?: boolean })?.revisedByManager === true)).toBe(true)
+  })
+})

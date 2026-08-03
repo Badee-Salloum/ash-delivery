@@ -304,6 +304,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             <Field label={t.shift.cashHandover} value={review.endPackage.cashDeclared ?? '—'} />
             <Field label={t.shift.walletBalance} value={review.endPackage.walletDeclared ?? '—'} />
           </dl>
+          {isClose ? <ReviseFigures shiftId={review.id} review={review} onRevised={load} /> : null}
           {/* SRS D-3: what the driver changed from the wallet OCR. */}
           <OcrDeltaLines deltas={scalarDelta(t.shift.walletBalance, review.endPackage.walletDeclaredOcr, review.endPackage.walletDeclared)} />
           <PhotoRow pkg="end" media={review.media} />
@@ -433,6 +434,100 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           )}
         </div>
       ) : null}
+    </div>
+  )
+}
+
+/**
+ * Correct a closing figure the driver's screenshots could not give us.
+ *
+ * The close is read off the phone rather than typed, so a reader that misses used to leave the
+ * manager with two blunt instruments and nothing in between: bounce the whole shift back to the
+ * driver, or force-close it — which bypasses BR1 altogether. Neither is the right answer to one
+ * wrong odometer. Saving here re-runs the equation and leaves the shift under review, so the close
+ * gate still has to pass on its own merits afterwards.
+ */
+function ReviseFigures({
+  shiftId,
+  review,
+  onRevised,
+}: {
+  shiftId: string
+  review: { endPackage: { odometerKm: number | null; cashDeclared: string | null; walletDeclared: string | null } }
+  onRevised(): void
+}): ReactNode {
+  const { api, t } = useApp()
+  const [open, setOpen] = useState(false)
+  const [odo, setOdo] = useState(String(review.endPackage.odometerKm ?? ''))
+  const [cash, setCash] = useState(review.endPackage.cashDeclared ?? '')
+  const [wallet, setWallet] = useState(review.endPackage.walletDeclared ?? '')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  if (!open) {
+    return (
+      <div className="mt-2">
+        <Button variant="ghost" onClick={() => setOpen(true)}>
+          {t.approval.reviseFigures}
+        </Button>
+      </div>
+    )
+  }
+
+  const save = async (): Promise<void> => {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.post(`/shifts/${shiftId}/close-figures`, {
+        odometerKm: odo.trim() === '' ? null : Number(odo),
+        cashDeclared: cash.trim() === '' ? null : cash,
+        walletDeclared: wallet.trim() === '' ? null : wallet,
+      })
+      setOpen(false)
+      onRevised()
+    } catch (err) {
+      setError((err as { error?: string }).error ?? 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-2 flex flex-col gap-2 border-t border-slate-100 pt-2">
+      <p className="text-xs text-slate-500">{t.approval.reviseHint}</p>
+      <div className="flex flex-wrap items-center gap-2">
+        <TextInput
+          inputMode="numeric"
+          aria-label={t.shift.odometer}
+          placeholder={t.shift.odometer}
+          value={odo}
+          onChange={(e) => setOdo(e.target.value)}
+          className="w-28"
+        />
+        <MoneyInput
+          aria-label={t.shift.cashHandover}
+          placeholder={t.shift.cashHandover}
+          value={cash}
+          onChange={(e) => setCash(e.target.value)}
+          className="w-32"
+        />
+        <MoneyInput
+          aria-label={t.shift.walletBalance}
+          placeholder={t.shift.walletBalance}
+          value={wallet}
+          onChange={(e) => setWallet(e.target.value)}
+          className="w-32"
+        />
+      </div>
+      {error ? <p className="text-sm font-medium text-red-600">{explainError(error, t)}</p> : null}
+      <div className="flex gap-2">
+        <Button variant="primary" disabled={busy} onClick={save}>
+          {busy ? t.common.loading : t.common.save}
+        </Button>
+        <Button variant="ghost" onClick={() => setOpen(false)}>
+          {t.common.cancel}
+        </Button>
+      </div>
     </div>
   )
 }

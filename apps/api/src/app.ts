@@ -20,6 +20,7 @@ import {
   startPackageRequest,
   putBatteryReadingsRequest,
   batterySwapRequest,
+  closeFiguresRequest,
 } from '@ash/contracts'
 import { addDays, checkWeekClose, dayOfWeek, minor, resolveFxDay, sum, weekClosedOn, weekStartFor } from '@ash/domain'
 import {
@@ -55,6 +56,7 @@ import {
   ensureFxDay,
   evaluateShift,
   rejectClose,
+  reviseCloseFigures,
   rejectOpen,
   reportIncident,
   requestRephoto,
@@ -859,6 +861,43 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       return { id: shift.id, state: shift.state }
     },
   )
+  /**
+   * Correct a closing figure during the review, without approving and without bouncing the shift
+   * back to the driver. The close gate still has to pass afterwards, so this gives BR1 the right
+   * numbers — it is not a way around it. Audited: it moves the equation.
+   */
+  app.post(
+    '/shifts/:id/close-figures',
+    { config: { permission: 'shift.approve', subject: shiftSubject } },
+    async (req) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const body = closeFiguresRequest.parse(req.body)
+      const { shift, br1, before } = await reviseCloseFigures(deps, req.actor!, id, body)
+      await deps.audit.append({
+        tableName: 'shifts',
+        recordId: shift.id,
+        action: 'UPDATE',
+        actorId: req.actor!.userId,
+        actorKind: 'user',
+        branchId: shift.branchId,
+        requestId: req.requestId,
+        before: {
+          odometerKm: before.odoEnd,
+          cashDeclared: before.endCashDeclared === null ? null : serializeMoney(before.endCashDeclared),
+          walletDeclared: before.endWalletDeclared === null ? null : serializeMoney(before.endWalletDeclared),
+        },
+        after: {
+          odometerKm: shift.odoEnd,
+          cashDeclared: shift.endCashDeclared === null ? null : serializeMoney(shift.endCashDeclared),
+          walletDeclared: shift.endWalletDeclared === null ? null : serializeMoney(shift.endWalletDeclared),
+          revisedByManager: true,
+        },
+        occurredAtMs: deps.clock.nowMs(),
+      })
+      return { id: shift.id, state: shift.state, br1: serializeBr1(br1) }
+    },
+  )
+
   /** Refuse a shift at the OPEN gate, sending it back to the driver with a recorded reason. To
    *  refuse it outright instead, `POST /shifts/:id/void` now reaches this state too. */
   app.post(

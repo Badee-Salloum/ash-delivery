@@ -560,6 +560,8 @@ export const en: Catalog = {
     requestRetake: 'Request retake',
     reject: 'Reject',
     sendBack: 'Send back to driver',
+    reviseFigures: 'Correct the closing figures',
+    reviseHint: 'Fix whatever the screenshots could not give us. The equation is re-run; the decision stays yours.',
     refuse: 'Refuse outright',
     notes: 'Notes',
     noPhotos: 'No photos',

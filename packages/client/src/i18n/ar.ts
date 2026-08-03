@@ -562,6 +562,8 @@ export const ar = {
     requestRetake: 'طلب إعادة تصوير',
     reject: 'رفض',
     sendBack: 'إعادة للسائق',
+    reviseFigures: 'تصحيح أرقام الإغلاق',
+    reviseHint: 'صحّح ما لم تقرأه الصور. تُعاد المعادلة الصفرية ويبقى القرار لك.',
     refuse: 'رفض نهائي',
     notes: 'ملاحظات',
     noPhotos: 'لا صور',

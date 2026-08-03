@@ -92,6 +92,16 @@ export const addOrderRequest = z.object({
   points: z.array(orderPointRequest).max(20).default([]),
 })
 
+/**
+ * A manager correcting a closing figure at the review. Every field optional: he sends the one he is
+ * fixing and leaves the rest alone. Money as decimal strings, never JSON numbers.
+ */
+export const closeFiguresRequest = z.object({
+  odometerKm: z.number().int().min(0).nullable().default(null),
+  cashDeclared: moneySchema.nullable().default(null),
+  walletDeclared: moneySchema.nullable().default(null),
+})
+
 export const endPackageRequest = z.object({
   odometerKm: z.number().int().min(0),
   batteryPercent: z.number().int().min(0).max(100).nullable(),
