@@ -1,5 +1,54 @@
 # PROGRESS
 
+## 2026-08-08 — the digits are read, and an order stops pretending to have a number
+
+**All suites green (domain 327, client 53, adapters 34, driver 87, api 348), 6 guards green. API and
+driver deployed and verified** (`/health` 200, driver serving `index-CnrEOCyl.js`). Five commits.
+
+**The 🔴 STOP of 2026-08-07 is lifted.** The replacement reader that was "proven and waiting" is now
+in the app and reading real screenshots. Tesseract is still used for LAYOUT only — it anchors each
+row on «SYP», which it reads 11/11 because it is ASCII — and the ink to the left of that anchor is
+segmented and classified against harvested templates. Measured on the owner's own screenshots,
+end to end through `readOrders`:
+
+```
+rows 34   read 30   refused 4   WRONG 0
+```
+
+**Zero wrong is the number that matters**, and it is bought by two gates, not one. A distance
+threshold alone is unsafe: out-of-vocabulary ink scores as low as 0.35, *below* the worst CORRECT
+match at 0.47 — the populations overlap the wrong way round, so no threshold separates them.
+Shipping the **margin** between the best and second-best class alongside the distance is what makes
+refusal reliable; adversarial verification of the pair recorded no accepted-but-wrong reading. All
+four refusals here are the same honest hesitation between «٢» and «٣» at a margin under 0.10. The
+driver types those four.
+
+Three defects found along the way, each of which had been quietly producing garbage: a fixed-offset
+threshold **merged adjacent glyphs** (Otsu fixed it, 14 → 28 rows); row hairlines were being
+**classified as digits** (a 10-character amount arriving as 13 shapes); and `/SYP/i` matched inside
+other words, so a **three-row page reported «20 صفوف»**.
+
+**An order is its value, its route and its clock — it has no number.** «الطلبات الحديثة» does not
+display one, so nothing invents one any more; the old `YAL-<date>-<HHMM>` key gave two deliveries in
+the same minute the same globally-unique `provider_order_no` and silently dropped the second.
+Point A and point B come from **Tesseract's own text**, which is not a compromise: its failure is
+confined to Arabic-Indic *digits*, while the two place lines are Arabic *words* tagged with a Latin
+«A»/«B». They are stored as the order's ROUTE on `shift_order_points`, the table manual orders
+already use, so the manager's review renders them with existing machinery and the schema needed
+nothing. The driver's row shows clock and route under the fee — with no number, that line is the
+only thing on a row a person can recognise as a delivery he made.
+
+**Honest status.** The harness measures the AMOUNT. The clock and the route are not in it yet, and
+the clock is the weaker of the two — adjacent minute digits merge in that screen's smaller font.
+Folder-4 screens at font sizes with no harvested templates still read poorly. Typing stays
+first-class on every field; the reader appends, it does not replace. `minWalletBalance` still walks
+orders only (carried over, still not fixed).
+
+**See it in 2 minutes.** Driver → «إنهاء النوبة» → pick a dashboard screenshot: the rows fill in
+with their fees, and each shows its time and «A ← B» beneath. Uncheck what is not this shift's.
+
+---
+
 ## 2026-08-07 (later) — the operations list: one close screen, and a checkbox that decides money
 
 **All suites green (domain 327, client 45, adapters 34, driver 76, api 348), 6 guards green,
