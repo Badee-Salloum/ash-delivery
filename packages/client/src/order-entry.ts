@@ -147,9 +147,13 @@ export interface ScannedMovementRow {
 export const orderKeyFor = (s: ScannedOrderRow, ordinal = 1): string => {
   const day = (s.dateIso ?? '').replace(/-/g, '')
   const time = s.time.replace(':', '')
-  // Two deliveries genuinely can land in the same minute, and without the ordinal the second one
-  // silently takes the first one's key — one of the two orders then vanishes from the day.
-  return ordinal <= 1 ? `YAL-${day}-${time}` : `YAL-${day}-${time}-${ordinal}`
+  // With no clock, the day-and-time key degenerates to «YAL--» for EVERY row — one meaningless
+  // number the driver cannot match against anything, and the same one on every order. The fee at
+  // least names the row he is looking at. It is still his to correct, and the field is editable.
+  const stem = day === '' && time === '' ? `F${s.fee.replace(/[^\d.]/g, '')}` : `${day}-${time}`
+  // Two deliveries genuinely can land in the same minute — or carry the same fee — and without the
+  // ordinal the second one silently takes the first one's key and vanishes from the day.
+  return ordinal <= 1 ? `YAL-${stem}` : `YAL-${stem}-${ordinal}`
 }
 
 /**
@@ -168,13 +172,15 @@ export function mergeScannedOrders(
   const added: DraftOrder[] = []
   for (const row of scanned) {
     // Walk the ordinal up until the key is free — that both de-duplicates the overlap and gives a
-    // genuine second order in the same minute a key of its own.
+    // genuine second order the same fee, or the same minute, a key of its own.
     let ordinal = 1
     let key = orderKeyFor(row, ordinal)
     let duplicate = false
     while (taken.has(key)) {
-      // Same minute AND same fee as one already held: this is the overlap, not a new delivery.
-      const twin = [...existing, ...added].find((o) => o.providerOrderNo === key)
+      // The overlap test is against what was ALREADY HELD, never against rows added by this same
+      // scan. One page is one set of observations: if it lists «١٢٠» twice then two deliveries
+      // cost 120, and treating the second as a repeat of the first silently loses one of them.
+      const twin = existing.find((o) => o.providerOrderNo === key)
       if (twin && twin.feeText === row.fee) {
         duplicate = true
         break

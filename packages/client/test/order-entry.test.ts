@@ -168,6 +168,19 @@ describe('merging a scanned page into the list', () => {
     expect(mergeScannedOrders(first, [scan('18:06', '235')], id)).toEqual([])
   })
 
+  it('names a row by its fee when the clock could not be read', () => {
+    // The glyph reader reads the AMOUNT and not yet the clock, so this is the live path. Keyed on
+    // day+time it degenerated to «YAL--» for every row: one meaningless number, the same on every
+    // order, which the merge then treats as one order and the driver cannot match to anything.
+    const noClock = [
+      { dateIso: null, time: '', fee: '235' },
+      { dateIso: null, time: '', fee: '120' },
+      { dateIso: null, time: '', fee: '235' },
+    ]
+    const added = mergeScannedOrders([], noClock, id)
+    expect(added.map((o) => o.providerOrderNo)).toEqual(['YAL-F235', 'YAL-F120', 'YAL-F235-2'])
+  })
+
   it('carries the OCR fee as the D-3 baseline and defaults the mode to cash', () => {
     // The dashboard screen carries no pay mode. Cash is the safe default because it is the mode
     // that expects the driver to be HOLDING the money — the easiest claim to check.

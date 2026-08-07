@@ -741,9 +741,12 @@ async function readAmountsByGlyph(
   if (!prepared) return { amounts: [], rows: 0, text: '' }
 
   const result = await recognize(prepared.blob, { whitelist: '', psm: 6 }, timeoutMs)
+  // The word must BE «SYP», not merely contain it. `/SYP/` matched Tesseract's junk words too, and
+  // on an Arabic page it emits plenty: a three-row screen reported twenty-one rows, so the driver
+  // was told twenty of them went unread when only two had.
   const anchors = result.lines
     .flatMap((l) => l.words)
-    .filter((w) => /SYP/i.test(w.text))
+    .filter((w) => /^[^A-Za-z]{0,2}syp[^A-Za-z]{0,2}$/i.test(w.text.trim()))
     .sort((a, b) => a.y0 - b.y0)
   if (anchors.length === 0) return { amounts: [], rows: 0, text: result.text }
 
