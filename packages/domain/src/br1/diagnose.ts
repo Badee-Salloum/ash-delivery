@@ -15,6 +15,7 @@ export type Br1CauseCode =
   | 'unrecorded_topup_tranche'
   | 'cash_handover_mismatch'
   | 'wallet_reading_mismatch'
+  | 'ambiguous_wallet_credit'
   | 'unexplained'
 
 export interface Br1Cause {
@@ -61,7 +62,20 @@ function modalFee(orders: readonly ShiftOrder[]): Minor | undefined {
  * The only genuinely ambiguous pair is "missing electronic order" vs "unrecorded top-up" —
  * both are (0, +x, +x). We report both and let the fee coincidence break the tie.
  */
-export function diagnoseBr1(result: Br1Result, orders: readonly ShiftOrder[], rounding: Rounding = 'floor'): Br1Cause[] {
+export function diagnoseBr1(
+  result: Br1Result,
+  orders: readonly ShiftOrder[],
+  rounding: Rounding = 'floor',
+  /**
+   * Credits at an order's minute that nobody has yet classified.
+   *
+   * A credit like this is either that order's electronic part or an unrelated incentive, and the
+   * two readings agree on the wallet exactly while differing on the CASH by the credit. So when the
+   * shift misses zero by one of them, the difference has a name and points at a row — rather than
+   * leaving a manager to hunt for a discrepancy the machine already knows the shape of.
+   */
+  ambiguousCredits: readonly Minor[] = [],
+): Br1Cause[] {
   const { scalarDiff, cashDiff, walletDiff } = result
 
   if (isZero(scalarDiff) && isZero(cashDiff) && isZero(walletDiff)) {
@@ -69,6 +83,27 @@ export function diagnoseBr1(result: Br1Result, orders: readonly ShiftOrder[], ro
   }
 
   const causes: Br1Cause[] = []
+
+  // Before anything else: does the whole difference equal an unresolved credit, or their sum? That
+  // is the cheapest question with the most actionable answer, and one tap settles it.
+  if (ambiguousCredits.length > 0 && !isZero(scalarDiff)) {
+    const target = abs(scalarDiff)
+    const total = ambiguousCredits.reduce((a, b) => minor(a + b), minor(0n))
+    const single = ambiguousCredits.find((c) => abs(c) === target)
+    if (single !== undefined || abs(total) === target) {
+      causes.push({
+        code: 'ambiguous_wallet_credit',
+        confidence: 'high',
+        amount: target,
+        candidateOrderNos: [],
+        detail: {
+          amount: formatMinor(target),
+          credits: String(ambiguousCredits.length),
+          matched: single === undefined ? 'sum' : 'single',
+        },
+      })
+    }
+  }
   const fee = modalFee(orders)
   const usualBlock = fee === undefined ? undefined : orderBlock(fee, rounding)
 

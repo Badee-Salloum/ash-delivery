@@ -127,6 +127,48 @@ describe('the pay-mode blind spot', () => {
     // Every electronic/free order at that fee is a suspect.
     expect(causes[0]?.candidateOrderNos.length).toBe(9)
   })
+
+  /**
+   * A credit at an order's minute is either that order's electronic part or an unrelated incentive.
+   * The two readings agree on the wallet exactly and differ on the CASH by the credit, so a shift
+   * left unresolved misses zero by precisely that amount — which the diagnosis can therefore NAME
+   * instead of leaving a manager to hunt for it.
+   */
+  it('names an unresolved wallet credit when the difference is exactly one', () => {
+    const shift = orders(12, 6, 2)
+    // A 5,000 credit landed at an order's minute and is still unclassified, so it is being read as
+    // a SEPARATE incentive: the model therefore expects the customer to have paid that order's fee
+    // in cash. He did not — he paid it electronically — so the driver is 5,000 light in the hand
+    // and the wallet agrees to the minor unit. That signature is unmistakable.
+    const r = evaluateBr1({
+      floatTotal: syp(100_000),
+      topupTotal: syp(50_000),
+      endCashDeclared: syp(155_000),
+      endWalletDeclared: syp(75_000),
+      orders: shift,
+      walletAdjustments: [syp(5_000)],
+    })
+    expect(r.cashDiff).toBe(-syp(5_000))
+    expect(r.walletDiff).toBe(0n)
+
+    const causes = diagnoseBr1(r, shift, 'floor', [syp(5_000)])
+    expect(causes[0]?.code).toBe('ambiguous_wallet_credit')
+    expect(causes[0]?.amount).toBe(syp(5_000))
+    expect(causes[0]?.detail.matched).toBe('single')
+  })
+
+  it('stays quiet when the difference is nothing like the credit', () => {
+    const shift = orders(12, 6, 2)
+    const r = evaluateBr1({
+      floatTotal: syp(100_000),
+      topupTotal: syp(50_000),
+      endCashDeclared: syp(100_000),
+      endWalletDeclared: syp(75_000),
+      orders: shift,
+      walletAdjustments: [syp(5_000)],
+    })
+    expect(diagnoseBr1(r, shift, 'floor', [syp(5_000)]).map((c) => c.code)).not.toContain('ambiguous_wallet_credit')
+  })
 })
 
 describe('difference breakdown — the arithmetic signatures are distinguishable', () => {

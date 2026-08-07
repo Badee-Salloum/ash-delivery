@@ -59,6 +59,19 @@ interface Review {
     companyShare?: string | null
     notes?: string | null
     points?: Array<{ role: string; label: string; lat: number | null; lng: number | null }>
+    /** Checked. Unchecked rows are still listed — a row hidden here is a row nobody can put back. */
+    included?: boolean
+    walletAmount?: string | null
+    occurredMinute?: string | null
+  }>
+  /** «سجل المدفوعات» as read. Only the rows no order explains are a term in BR1. */
+  movements: Array<{
+    id: string
+    amount: string
+    occurredMinute: string
+    role: 'yalago_cut' | 'order_credit' | 'unmatched'
+    ambiguous: boolean
+    included: boolean
   }>
   batterySwaps?: Array<{
     seqNo: number
@@ -141,6 +154,8 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
    * click. So on a running shift the screen is a read-only view plus the order form.
    */
   const atGate = review.state === 'awaiting_open_approval' || review.state === 'pending_review'
+  /** The CLOSE gate specifically: the operations only exist to be revised while a shift is here. */
+  const underReview = review.state === 'pending_review'
   const odoDelta =
     review.startPackage.odometerKm !== null && review.endPackage.odometerKm !== null
       ? review.endPackage.odometerKm - review.startPackage.odometerKm
@@ -169,6 +184,27 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       } else {
         setError(code ?? 'error')
       }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * Change what counts, without approving and without bouncing the shift back to the driver.
+   *
+   * Reloads afterwards rather than patching state locally, because the response changes BR1 and the
+   * review hash — and approving against a hash this screen no longer shows is precisely what
+   * `orders_changed_since_review` exists to prevent.
+   */
+  async function reviseOps(body: Record<string, unknown>): Promise<void> {
+    if (!review) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api.post(`/shifts/${review.id}/operations/revise`, body)
+      load()
+    } catch (err) {
+      setError((err as { error?: string }).error ?? 'error')
     } finally {
       setBusy(false)
     }
@@ -333,17 +369,38 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       ) : null}
 
       <Card title={`${t.orders.title} — ${review.orders.length}`}>
-        <Table head={['#', t.orders.orderNo, t.orders.payMode, t.orders.fee]}>
+        <Table head={['', '#', t.orders.orderNo, t.orders.payMode, t.orders.fee]}>
           {review.orders.map((o, i) => (
-            <tr key={o.providerOrderNo}>
+            <tr key={o.providerOrderNo} className={o.included === false ? 'opacity-60' : ''}>
+              {/* Every operation shows, checked or not, and an excluded row keeps its PLACE —
+                  hiding it or moving it to the bottom is how a manager stops noticing it. */}
+              <td className="px-3 py-1">
+                <input
+                  type="checkbox"
+                  checked={o.included !== false}
+                  disabled={!underReview || busy}
+                  onChange={(e) => void reviseOps({ orders: [{ providerOrderNo: o.providerOrderNo, included: e.target.checked }] })}
+                  aria-label={t.orders.included}
+                  className="size-5 accent-emerald-600"
+                />
+              </td>
               <td className="px-3 py-1 text-slate-400">{i + 1}</td>
               <td className="px-3 py-1 num">
                 {o.providerOrderNo}
                 {o.source === 'ocr' ? <span className="ms-1.5 align-middle"><Badge tone="slate">OCR</Badge></span> : null}
+                {o.included === false ? <span className="ms-1.5 align-middle"><Badge tone="slate">{t.orders.excluded}</Badge></span> : null}
               </td>
               <td className="px-3 py-1">{t.orders.payModes[o.payMode as keyof typeof t.orders.payModes]}</td>
               <td className="px-3 py-1">
                 <Money value={o.fee} />
+                {/* What the payments log measured actually reached the wallet. Its absence is not a
+                    gap — it means nobody measured it and the pay mode decides, as it always did. */}
+                {o.walletAmount ? (
+                  <div className="num text-xs text-slate-500">
+                    {t.orders.toWallet}: {o.walletAmount}
+                    {o.occurredMinute ? ` · ${o.occurredMinute}` : ''}
+                  </div>
+                ) : null}
                 {/* SRS D-3: a fee the driver changed from what OCR read (money strings compare exact). */}
                 <OcrDeltaLines deltas={scalarDelta(t.orders.fee, o.feeOcr ?? null, o.fee)} />
                 {/* A manual job carries its agreed split and its route with it — the numbers a
@@ -365,6 +422,71 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             </tr>
           ))}
         </Table>
+
+        {/* «سجل المدفوعات» — what the wallet actually did, beside what the orders imply it should
+            have. Only the rows no order explains are a term in BR1; the others are corroboration. */}
+        {review.movements.length > 0 ? (
+          <div className="mt-4">
+            <p className="mb-1 text-sm font-semibold">{t.shift.paymentsLog}</p>
+            <Table head={['', t.orders.time, t.orders.fee, '']}>
+              {review.movements.map((m) => (
+                <tr key={m.id} className={m.included === false ? 'opacity-60' : ''}>
+                  <td className="px-3 py-1">
+                    <input
+                      type="checkbox"
+                      checked={m.included !== false}
+                      disabled={!underReview || busy}
+                      onChange={(e) => void reviseOps({ movements: [{ id: m.id, included: e.target.checked }] })}
+                      aria-label={t.orders.included}
+                      className="size-5 accent-emerald-600"
+                    />
+                  </td>
+                  <td className="num px-3 py-1 text-slate-500">{m.occurredMinute || '—'}</td>
+                  <td className="num px-3 py-1">
+                    <Money value={m.amount} />
+                  </td>
+                  <td className="px-3 py-1 text-xs">
+                    {/*
+                      The one question no machine may answer. A credit landing at an order's minute
+                      is either that order's electronic part or an unrelated incentive, and the two
+                      readings agree on the wallet to the minor unit while differing on the CASH by
+                      exactly the credit — so BR1 catches a wrong choice, and no second gate is
+                      needed. Offered only where the reader actually flagged the doubt.
+                    */}
+                    {m.ambiguous ? (
+                      <div className="flex flex-wrap items-center gap-1">
+                        <Button
+                          variant="ghost"
+                          disabled={!underReview || busy}
+                          onClick={() =>
+                            void reviseOps({ movements: [{ id: m.id, role: 'order_credit', ambiguous: false }] })
+                          }
+                        >
+                          {t.orders.partOfOrder}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          disabled={!underReview || busy}
+                          onClick={() =>
+                            void reviseOps({
+                              movements: [{ id: m.id, role: 'unmatched', providerOrderNo: null, ambiguous: false }],
+                            })
+                          }
+                        >
+                          {t.orders.separateIncentive}
+                        </Button>
+                      </div>
+                    ) : (
+                      <span className="text-slate-400">
+                        {m.role === 'unmatched' ? t.orders.unexplained : t.orders.explainedByOrder}
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </Table>
+          </div>
+        ) : null}
 
         <AddOrderForm shiftId={review.id} onAdded={load} />
       </Card>

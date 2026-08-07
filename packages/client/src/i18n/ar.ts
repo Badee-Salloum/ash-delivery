@@ -271,6 +271,11 @@ export const ar = {
     toWallet: 'إلى المحفظة',
     explainedByOrder: 'مرتبطة بطلب',
     unexplained: 'لا يقابلها طلب',
+    excluded: 'مستبعدة',
+    time: 'الوقت',
+    /** The one question no machine may answer — see the ambiguous-credit control. */
+    partOfOrder: 'جزء من الطلب',
+    separateIncentive: 'حافز منفصل',
     count: 'عدد الطلبات',
     payModes: { cash: 'كاش', electronic: 'إلكتروني', free: 'مجاني' },
     problems: {
@@ -296,6 +301,8 @@ export const ar = {
       unrecorded_topup_tranche: 'دفعة شحن محفظة غير مسجلة',
       cash_handover_mismatch: 'فرق في النقد المسلَّم',
       wallet_reading_mismatch: 'فرق في قراءة المحفظة',
+      /** The difference equals a credit nobody has classified yet — one tap settles it. */
+      ambiguous_wallet_credit: 'مبلغ وارد للمحفظة لم يُحدَّد: جزء من الطلب أم حافز منفصل؟',
       unexplained: 'فرق غير مفسَّر',
     },
   },

@@ -939,7 +939,14 @@ export async function evaluateShift(deps: Deps, shift: ShiftRecord): Promise<Br1
   })
   return {
     result,
-    causes: diagnoseBr1(result, orders),
+    causes: diagnoseBr1(
+      result,
+      orders,
+      'floor',
+      // A credit still flagged ambiguous is the likeliest single explanation for a difference, and
+      // the only one a manager can settle with one tap.
+      movementRows.filter((m) => m.ambiguous && m.included).map((m) => m.amount),
+    ),
     // The trough the wallet reaches mid-shift still walks the ORDERS only: a movement carries a
     // minute but the orders do not carry a sequence, so interleaving them would be guesswork.
     // It therefore under-reports once adjustments are real — noted rather than faked.

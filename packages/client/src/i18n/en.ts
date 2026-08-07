@@ -270,6 +270,11 @@ export const en: Catalog = {
     toWallet: 'To wallet',
     explainedByOrder: 'Matched to an order',
     unexplained: 'No order explains it',
+    excluded: 'Excluded',
+    time: 'Time',
+    /** The one question no machine may answer — see the ambiguous-credit control. */
+    partOfOrder: 'Part of the order',
+    separateIncentive: 'Separate incentive',
     count: 'Order count',
     payModes: { cash: 'Cash', electronic: 'Electronic', free: 'Free' },
     problems: {
@@ -295,6 +300,8 @@ export const en: Catalog = {
       unrecorded_topup_tranche: 'An unrecorded wallet top-up',
       cash_handover_mismatch: 'Cash handover mismatch',
       wallet_reading_mismatch: 'Wallet reading mismatch',
+      /** The difference equals a credit nobody has classified yet — one tap settles it. */
+      ambiguous_wallet_credit: 'A wallet credit is unclassified: part of the order, or a separate incentive?',
       unexplained: 'Unexplained difference',
     },
   },
