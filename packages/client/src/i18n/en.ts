@@ -138,6 +138,8 @@ export const en: Catalog = {
     evidence_required: 'Amount is over the ceiling — evidence is required',
     entry_not_found: 'Entry not found',
     entry_not_balanced: 'The entry doesn’t balance (debits must equal credits)',
+    /** The orders screen scrolls back into previous days — this row belongs to one of them. */
+    order_belongs_to_other_shift: 'This order is already on an earlier shift — uncheck it',
   },
 
   notifications: {
@@ -260,8 +262,14 @@ export const en: Catalog = {
     scanOrders: 'Scan orders',
     scanned: '{n} orders added — review them and drop any not in this shift',
     scanNone: 'No orders could be read',
-    /** A row already sent to the server: shown, not editable — a mistake is the manager's to fix. */
+    /** A row already sent to the server. */
     sent: 'Sent',
+    /** The checkbox: an unchecked operation stays with the shift and out of the money. */
+    included: 'Counted',
+    /** What the payments log says actually reached the wallet from this order's fee. */
+    toWallet: 'To wallet',
+    explainedByOrder: 'Matched to an order',
+    unexplained: 'No order explains it',
     count: 'Order count',
     payModes: { cash: 'Cash', electronic: 'Electronic', free: 'Free' },
     problems: {

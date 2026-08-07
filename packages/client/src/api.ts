@@ -39,7 +39,27 @@ export interface ShiftStateView {
     mediaSlots: string[]
     batteries: Array<{ batteryId: string; slotNo: number; percent: number | null }>
   }
-  orders: Array<{ providerOrderNo: string; payMode: 'cash' | 'electronic' | 'free'; fee: string; zone: string | null }>
+  orders: Array<{
+    providerOrderNo: string
+    payMode: 'cash' | 'electronic' | 'free'
+    fee: string
+    zone: string | null
+    /** Checked. Unchecked rows still come back: whoever closes the shift must see all of them. */
+    included: boolean
+    /** What the payments log says reached the wallet. `null` = unmeasured, the pay mode decides. */
+    walletAmount: string | null
+    occurredMinute: string | null
+  }>
+  /** «سجل المدفوعات» as read — what the wallet actually did, beside what the orders imply. */
+  movements: Array<{
+    id: string
+    /** SIGNED money: negative left the wallet. */
+    amount: string
+    occurredMinute: string
+    role: 'yalago_cut' | 'order_credit' | 'unmatched'
+    ambiguous: boolean
+    included: boolean
+  }>
   /** Mid-shift battery swaps (SRS §L seam): the pack on `slotNo` came off, another went on. */
   batterySwaps?: Array<{
     seqNo: number

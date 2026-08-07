@@ -9,13 +9,13 @@ import {
   useState,
 } from 'react'
 import { MAX_PAGE_SLOTS, PAYMENTS_LOG_SLOT, type PayMode, pageSlot } from '@ash/domain'
-import type { DraftOrder } from '@ash/client'
-import { compressImage, nextPayMode, splitSlot, unsentOrders, uploadEvidencePath } from '@ash/client'
+import type { DraftMovement, DraftOrder } from '@ash/client'
+import { allProblems, compressImage, previewBr1, splitSlot, uploadEvidencePath } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
 import { useGpsBeacon } from '../use-gps-beacon.ts'
 import { Button, Card, Field, Money, MoneyInput, Screen, TextInput } from '../ui.tsx'
-import { OrderEntry } from './OrderEntry.tsx'
+import { OperationsList } from './OrderEntry.tsx'
 import { BatteryPanel, type FittedBattery, type PackState } from './BatteryPanel.tsx'
 import { BatterySwap, type SpareBattery } from './BatterySwap.tsx'
 import { PhotoSlot } from './PhotoSlot.tsx'
@@ -32,7 +32,7 @@ import { PhotoSlot } from './PhotoSlot.tsx'
  * `orders` is the RUNNING shift — no longer order entry. Closing is two steps: `closeOrders` (scan
  * the day's Yallago deliveries) then `end` (the closing package and BR1).
  */
-type Phase = 'start' | 'awaiting' | 'orders' | 'suspended' | 'closeOrders' | 'end' | 'done'
+type Phase = 'start' | 'awaiting' | 'orders' | 'suspended' | 'end' | 'done'
 
 interface ShiftState {
   id: string
@@ -75,6 +75,10 @@ interface EndDraft {
   logPages: number
   /** Movements read off each log page, so the total is the whole log and not just the last page. */
   logRows: Record<string, number>
+  /** The operations list itself — the orders and the wallet rows, with their checkboxes. */
+  orders: DraftOrder[]
+  movements: DraftMovement[]
+  opsError: string | null
 }
 
 const EMPTY_END_DRAFT: EndDraft = {
@@ -88,6 +92,9 @@ const EMPTY_END_DRAFT: EndDraft = {
   dashboardPages: 1,
   logPages: 1,
   logRows: {},
+  orders: [],
+  movements: [],
+  opsError: null,
 }
 
 /** Where a shift already in flight puts the driver back. */
@@ -124,8 +131,6 @@ export function ShiftFlow({
   // swap panel hands back the new fitment and the close screen then reads THAT, not the old pack.
   const [fitted, setFitted] = useState<readonly FittedBattery[]>(batteries)
   const [shift, setShift] = useState<ShiftState | null>(null)
-  const [recorded, setRecorded] = useState<DraftOrder[]>([])
-  const [orderError, setOrderError] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(!resume)
   const [endDraft, setEndDraft] = useState<EndDraft>(EMPTY_END_DRAFT)
 
@@ -142,19 +147,32 @@ export function ShiftFlow({
       .shiftState(resume.id)
       .then((st) => {
         setShift({ id: st.id, floatText: st.startPackage.floatTotal, topupText: st.startPackage.topupTotal })
-        setRecorded(
-          st.orders.map((o) => ({
+        // The operations already stored come back INTO the draft, checkboxes and all. They are
+        // editable now: the submit upserts, so correcting a sent row is a correction rather than
+        // the 409 it used to be.
+        setEndDraft((d) => ({
+          ...d,
+          orders: st.orders.map((o) => ({
             // `already-<no>` rather than a random id: the list is rebuilt from the server on every
             // resume, and a stable key keeps React from remounting rows the driver is editing.
             localId: `already-${o.providerOrderNo}`,
             providerOrderNo: o.providerOrderNo,
             payMode: o.payMode,
             feeText: o.fee,
-            // On the server already — shown, not editable. Editing one used to change nothing there
-            // while quietly moving the driver's own BR1 preview away from the server's figure.
             recorded: true,
+            included: o.included,
+            walletAmountText: o.walletAmount ?? '',
+            timeText: o.occurredMinute ?? '',
           })),
-        )
+          movements: (st.movements ?? []).map((m) => ({
+            localId: `already-${m.id}`,
+            amountText: m.amount,
+            timeText: m.occurredMinute,
+            included: m.included,
+            role: m.role,
+            ambiguous: m.ambiguous,
+          })),
+        }))
         // Trust the server's state over the one the assignment reported: the manager may have
         // approved between the two calls.
         setPhase(PHASE_FOR[st.state] ?? 'start')
@@ -213,7 +231,7 @@ export function ShiftFlow({
       <Screen
         title={t.shift.running}
         footer={
-          <Button variant="success" onClick={() => setPhase('closeOrders')}>
+          <Button variant="success" onClick={() => setPhase('end')}>
             {t.shift.finishShift}
           </Button>
         }
@@ -232,49 +250,6 @@ export function ShiftFlow({
       </Screen>
     )
   }
-  // Closing, step one: the orders. Scanned or typed now, at the end, as the owner asked.
-  if (phase === 'closeOrders' && shift) {
-    return (
-      <>
-        {/* A refused order has to be visible. The driver taps «تم» and, before this, nothing at
-            all happened — the screen simply did not advance and gave him no reason. */}
-        {orderError ? (
-          <Card>
-            <p className="text-center text-sm font-medium text-red-600">{orderError}</p>
-          </Card>
-        ) : null}
-        <OrderEntry
-          shift={shift}
-          initialOrders={recorded}
-          // Nothing has been sent from this screen yet, so backing out of it costs nothing — and
-          // «إنهاء النوبة» is one tap away from a driver who has not finished working.
-          onBack={() => setPhase('orders')}
-          onDone={async (orders) => {
-            // Only what is not already on the server: provider_order_no is globally unique, so a
-            // resubmitted order is a 409 — and this used to have no catch at all, so one of them
-            // rejected the promise, `setPhase('end')` never ran, and «تم» silently did nothing.
-            const { sent, failed } = await submitOrders(api, shift.id, unsentOrders(orders, recorded))
-            // Record what LANDED before deciding anything else — including on a partial failure,
-            // where the retry would otherwise re-post rows that saved fine and 409 on all of them.
-            // This is also what makes the step back from the closing package safe: the list comes
-            // back complete and locked, so returning here re-sends nothing and adds only what is new.
-            const landed = new Set(sent)
-            setRecorded(
-              orders
-                .filter((o) => o.recorded === true || landed.has(o.providerOrderNo.trim()))
-                .map((o) => ({ ...o, recorded: true })),
-            )
-            if (failed.length > 0) {
-              setOrderError(`${t.shift.ordersFailed}: ${failed.join(', ')}`)
-              return
-            }
-            setOrderError(null)
-            setPhase('end')
-          }}
-        />
-      </>
-    )
-  }
   if (phase === 'end' && shift) {
     return (
       <EndPackage
@@ -282,9 +257,9 @@ export function ShiftFlow({
         batteries={fitted}
         draft={endDraft}
         onDraft={setEndDraft}
-        // Back to the order list — the reason a driver leaves this screen is a delivery he forgot,
-        // and that is where he adds it. The package he has filled in so far survives the trip.
-        onBack={() => setPhase('closeOrders')}
+        // Back to the running shift. The operations list now lives ON this screen, so there is no
+        // intermediate step to return to — and the package survives the trip either way.
+        onBack={() => setPhase('orders')}
         onSubmitted={() => setPhase('done')}
       />
     )
@@ -613,12 +588,65 @@ function EndPackage({
   const gallery = new Set(['dashboard', 'wallet', PAYMENTS_LOG_SLOT])
   // Each fitted pack's closing charge gates the button (batteriesReady), matching the server. The
   // bike-level battery field is gone — charge is tracked per pack.
+  // The close gate counts the shift's ORDERS, checked or not — see `endPackageGaps`. Deliberately
+  // the total and not the checked count: a driver who unchecks everything would otherwise be
+  // refused submission, and every tool that could rescue him needs the shift to reach review first.
+  const named = draft.orders.filter((o) => o.providerOrderNo.trim() !== '').length
   const ready =
-    required.every((s) => slots.has(s)) && cash !== '' && wallet !== '' && odo !== '' && batteriesReady
+    required.every((s) => slots.has(s)) &&
+    cash !== '' &&
+    wallet !== '' &&
+    odo !== '' &&
+    batteriesReady &&
+    named > 0 &&
+    allProblems(draft.orders).size === 0
 
+  const preview = previewBr1({
+    floatText: shift.floatText,
+    topupText: shift.topupText,
+    orders: draft.orders,
+    movements: draft.movements,
+    // Spread so the keys are ABSENT rather than undefined: the preview shows a difference only
+    // once BOTH declared figures exist, and an explicit `undefined` would satisfy that check.
+    ...(cash === '' || wallet === '' ? {} : { declaredCashText: cash, declaredWalletText: wallet }),
+  })
+
+  /**
+   * The operations first, then the package.
+   *
+   * In that order because the close gate counts the shift's orders: sending the package first would
+   * be refused for having none. The whole list goes every time — the server upserts the orders and
+   * merges the movements, so re-sending is a no-op rather than a wall of duplicate-key errors.
+   */
   async function submit(): Promise<void> {
     setBusy(true)
     try {
+      await api.put(`/shifts/${shift.id}/operations`, {
+        orders: draft.orders
+          .filter((o) => o.providerOrderNo.trim() !== '')
+          .map((o) => ({
+            providerOrderNo: o.providerOrderNo.trim(),
+            payMode: o.payMode,
+            fee: o.feeText,
+            zone: null,
+            // SRS D-1/D-3: mark rows scanned off «الطلبات الحديثة», keeping what OCR read.
+            source: o.feeOcrText != null ? 'ocr' : 'manual',
+            feeOcr: o.feeOcrText ?? null,
+            included: o.included !== false,
+            walletAmount: o.walletAmountText ? o.walletAmountText : null,
+            occurredMinute: o.timeText ? o.timeText : null,
+          })),
+        movements: draft.movements.map((m) => ({
+          amount: m.amountText,
+          occurredMinute: m.timeText,
+          role: m.role ?? 'unmatched',
+          providerOrderNo: m.providerOrderNo ?? null,
+          ambiguous: m.ambiguous ?? false,
+          included: m.included !== false,
+        })),
+      })
+      patch({ opsError: null })
+
       const res = await api.put<{ br1: { difference: string; balanced: boolean } }>(`/shifts/${shift.id}/end-package`, {
         odometerKm: Number(odo),
         // Bike-level battery % is gone — charge is captured per pack. Sent null (nullable seam).
@@ -631,8 +659,16 @@ function EndPackage({
       setBr1(res.br1)
       if (res.br1.balanced) onSubmitted()
     } catch (e) {
-      const code = (e as { error?: string }).error
-      toast.error((code && (t.errors as Record<string, string>)[code]) || t.common.actionFailed)
+      const err = e as { error?: string; detail?: { providerOrderNo?: string; businessDate?: string } }
+      // The one failure a driver can actually act on: a row he scrolled too far back to reach.
+      // «تعذّر الحفظ» tells him nothing; the order number and the day tell him which to uncheck.
+      if (err.error === 'order_belongs_to_other_shift') {
+        const no = err.detail?.providerOrderNo ?? ''
+        const day = err.detail?.businessDate ?? ''
+        patch({ opsError: `${t.errors.order_belongs_to_other_shift}: ${no} (${day})` })
+        return
+      }
+      toast.error((err.error && (t.errors as Record<string, string>)[err.error]) || t.common.actionFailed)
     } finally {
       setBusy(false)
     }
@@ -644,6 +680,16 @@ function EndPackage({
       {...(onBack ? { back: { label: t.common.back, onBack } } : {})}
       footer={
         <div className="flex flex-col gap-2">
+          {/* The equation LIVE, before he submits — so a wrong pay mode or a missing operation is
+              visible while he can still fix it, rather than discovered by the manager. */}
+          {preview ? (
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-slate-500">{t.br1.expectedCash}</span>
+              <Money value={preview.expectedCashText} className="font-semibold" />
+              <span className="text-slate-500">{t.br1.expectedWallet}</span>
+              <Money value={preview.expectedWalletText} className="font-semibold" />
+            </div>
+          ) : null}
           {br1 ? (
             <div
               className={`flex items-center justify-between rounded-2xl px-4 py-2 ${
@@ -736,6 +782,18 @@ function EndPackage({
         <p className="text-center text-sm text-emerald-700">{t.shift.logRead.replace('{n}', String(logState.rows))}</p>
       ) : null}
       {logState.kind === 'failed' ? <p className="text-center text-sm text-amber-700">{t.shift.logUnread}</p> : null}
+      {/* THE list: every operation of the shift, with the checkbox that decides what counts. */}
+      {draft.opsError ? (
+        <Card>
+          <p className="text-center text-sm font-medium text-red-600">{draft.opsError}</p>
+        </Card>
+      ) : null}
+      <OperationsList
+        orders={draft.orders}
+        movements={draft.movements}
+        onOrders={(orders) => onDraft((d) => ({ ...d, orders }))}
+        onMovements={(movements) => onDraft((d) => ({ ...d, movements }))}
+      />
       <Card className="flex flex-col gap-3">
         <Field label={t.shift.cashHandover}>
           <MoneyInput value={cash} onChange={(e) => patch({ cash: e.target.value })} />

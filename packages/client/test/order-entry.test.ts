@@ -131,6 +131,51 @@ describe('API payloads', () => {
 })
 
 /**
+ * What the list does with the checkbox and the measured wallet amount — the two things that decide
+ * money on the driver's own screen, and which must agree with the server's arithmetic exactly.
+ */
+describe('the live preview of the operations list', () => {
+  const base = { floatText: '0', topupText: '0' }
+
+  it('degrades to EXACTLY today’s arithmetic when nothing is measured', () => {
+    // The property to protect, because it is what production actually looks like until the glyph
+    // reader lands: no movements, no wallet amounts, every row checked.
+    const orders = [row({ providerOrderNo: 'A', feeText: '5000' }), row({ providerOrderNo: 'B', payMode: 'electronic', feeText: '5000' })]
+    const p = previewBr1({ ...base, orders, movements: [] })!
+    expect(p.expectedCashText).toBe('5000.00')
+    // BR2 takes the 20% out of the WALLET for every mode alike, so the cash order costs the wallet
+    // 1,000 while putting nothing in: −1,000 + (5,000 − 1,000) = 3,000.
+    expect(p.expectedWalletText).toBe('3000.00')
+    expect(previewBr1({ ...base, orders })).toEqual(p)
+  })
+
+  it('drops an unchecked row from the equation', () => {
+    const orders = [row({ providerOrderNo: 'A', feeText: '5000' }), row({ providerOrderNo: 'B', feeText: '5000', included: false })]
+    expect(previewBr1({ ...base, orders })!.expectedCashText).toBe('5000.00')
+  })
+
+  it('splits a part-paid order between hand and wallet', () => {
+    const orders = [row({ providerOrderNo: 'A', feeText: '5000', walletAmountText: '2000' })]
+    const p = previewBr1({ ...base, orders })!
+    expect(p.expectedCashText).toBe('3000.00')
+    expect(p.expectedWalletText).toBe('1000.00')
+  })
+
+  it('adds only the movements no order explains, and keeps their SIGN', () => {
+    const orders = [row({ providerOrderNo: 'A', feeText: '5000' })]
+    const movements = [
+      { localId: '1', amountText: '-1000', timeText: '18:06', role: 'yalago_cut' as const },
+      { localId: '2', amountText: '300', timeText: '09:24' },
+      { localId: '3', amountText: '-50', timeText: '11:00' },
+      { localId: '4', amountText: '900', timeText: '12:00', included: false },
+    ]
+    // The logged cut is corroboration and never a second deduction; the excluded row is data only.
+    // 0 topup − 1,000 of Yallago's derived cut + 300 − 50 = −750.
+    expect(previewBr1({ ...base, orders, movements })!.expectedWalletText).toBe('-750.00')
+  })
+})
+
+/**
  * The driver can step back out of the closing package to add a delivery he forgot, so this list is
  * submitted more than once. Every row already on the server must be filtered out of the second
  * submit: `provider_order_no` is globally unique, and a 409 here shows up as "my orders failed" on

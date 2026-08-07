@@ -139,6 +139,8 @@ export const ar = {
     evidence_required: 'المبلغ يتجاوز السقف — الإثبات مطلوب',
     entry_not_found: 'القيد غير موجود',
     entry_not_balanced: 'القيد غير متوازن (المدين يساوي الدائن)',
+    /** The orders screen scrolls back into previous days — this row belongs to one of them. */
+    order_belongs_to_other_shift: 'هذا الطلب مسجَّل في نوبة سابقة — أزِل تحديده',
   },
 
   notifications: {
@@ -261,8 +263,14 @@ export const ar = {
     scanOrders: 'مسح الطلبات',
     scanned: 'تمت إضافة {n} طلباً — راجِعها واحذف ما ليس من نوبتك',
     scanNone: 'لم تُقرأ أي طلبات',
-    /** A row already sent to the server: shown, not editable — a mistake is the manager's to fix. */
+    /** A row already sent to the server. */
     sent: 'مُرسَل',
+    /** The checkbox: an unchecked operation stays with the shift and out of the money. */
+    included: 'محسوبة',
+    /** What «سجل المدفوعات» says actually reached the wallet from this order's fee. */
+    toWallet: 'إلى المحفظة',
+    explainedByOrder: 'مرتبطة بطلب',
+    unexplained: 'لا يقابلها طلب',
     count: 'عدد الطلبات',
     payModes: { cash: 'كاش', electronic: 'إلكتروني', free: 'مجاني' },
     problems: {

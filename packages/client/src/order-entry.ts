@@ -29,6 +29,29 @@ export interface DraftOrder {
    * server would compute.
    */
   recorded?: boolean
+  /**
+   * Checked. The screenshots overlap and scroll back into previous days, so a read list always
+   * contains rows that are not this shift's — unchecking one keeps it with the shift and out of the
+   * money. Absent means checked: every row typed by hand is one the driver is asserting.
+   */
+  included?: boolean
+  /** How much of the fee reached the wallet, as typed/measured. '' = unmeasured, the mode decides. */
+  walletAmountText?: string
+  /** «HH:MM» off the dashboard — what a payments-log row is paired to. */
+  timeText?: string
+}
+
+/** A «سجل المدفوعات» row as the driver's list holds it, before the server gives it an identity. */
+export interface DraftMovement {
+  localId: string
+  /** SIGNED money as typed: «-99», «107.50». Negative left the wallet. */
+  amountText: string
+  timeText: string
+  included?: boolean
+  /** Which order it answers to, by number, when the matcher paired them. */
+  providerOrderNo?: string | null
+  role?: 'yalago_cut' | 'order_credit' | 'unmatched'
+  ambiguous?: boolean
 }
 
 export interface OrderEntryState {
@@ -124,6 +147,8 @@ export function previewBr1(input: {
   floatText: string
   topupText: string
   orders: readonly DraftOrder[]
+  /** The wallet's own rows. Only the ones no order explains reach the equation — see `movementsTerm`. */
+  movements?: readonly DraftMovement[]
   declaredCashText?: string
   declaredWalletText?: string
 }): Br1Preview | null {
@@ -136,9 +161,21 @@ export function previewBr1(input: {
     return null
   }
 
-  // Only valid rows contribute — a half-typed row must not make the preview flicker to nonsense.
-  const valid = input.orders.filter((_, i) => validateRow(input.orders, i) === null)
-  const orders = valid.map((o) => ({ orderNo: o.providerOrderNo, payMode: o.payMode, fee: safeFee(o.feeText) }))
+  // Only valid rows contribute — a half-typed row must not make the preview flicker to nonsense —
+  // and only CHECKED ones, mirroring `includedOrders` on the server so the driver's own preview and
+  // the figure the manager will see are the same arithmetic.
+  const valid = input.orders.filter((o, i) => o.included !== false && validateRow(input.orders, i) === null)
+  const orders = valid.map((o) => ({
+    orderNo: o.providerOrderNo,
+    payMode: o.payMode,
+    fee: safeFee(o.feeText),
+    ...(o.walletAmountText ? { walletAmount: safeFee(o.walletAmountText) } : {}),
+  }))
+  // The same three-way rule the server uses: a logged Yallago cut is corroboration and an order's
+  // credit is already inside its `walletAmount`, so only the unexplained rows are a term here.
+  const walletAdjustments = (input.movements ?? [])
+    .filter((m) => m.included !== false && (m.role ?? 'unmatched') === 'unmatched')
+    .map((m) => safeSigned(m.amountText))
 
   const hasDeclared = input.declaredCashText !== undefined && input.declaredWalletText !== undefined
   const declaredCash = hasDeclared ? safeFee(input.declaredCashText!) : minor(0n)
@@ -150,6 +187,7 @@ export function previewBr1(input: {
     endCashDeclared: declaredCash,
     endWalletDeclared: declaredWallet,
     orders,
+    walletAdjustments,
   })
 
   return {
@@ -169,6 +207,20 @@ function safeFee(text: string): Minor {
   } catch {
     return minor(0n)
   }
+}
+
+/**
+ * A movement's amount, SIGN AND ALL.
+ *
+ * `safeFee` floors at zero because a fee cannot be negative. A movement can: money leaves the
+ * wallet as often as it arrives, and clamping a withdrawal to zero would quietly drop it out of
+ * the preview and make the driver's screen disagree with the server by exactly its value.
+ */
+function safeSigned(text: string): Minor {
+  const trimmed = (text || '0').trim()
+  const negative = trimmed.startsWith('-') || trimmed.startsWith('−')
+  const magnitude = safeFee(trimmed.replace(/^[-−+]/, ''))
+  return negative ? minor(-magnitude) : magnitude
 }
 
 function format(m: Minor): string {
