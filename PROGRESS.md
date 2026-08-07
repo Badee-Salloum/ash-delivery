@@ -1,5 +1,77 @@
 # PROGRESS
 
+## 2026-08-07 — the close from screenshots, a way back out of it, and the digits problem
+
+**All suites green (domain 317, client 34, adapters 30, driver 76, api 325), 6 guards green.**
+Driver PWA and API deployed and verified. Five threads, and one of them ends in a deliberate stop.
+
+**BR1 measures the wallet now, it does not classify it.** `payMode` forced every order to be
+all-cash or all-wallet; the owner's payments log proves it is neither. An order now carries the
+amount that actually reached the wallet — `cash += fee − W`, `wallet += W − cut` — with `W = 0`
+reproducing today's cash order and `W = fee` today's electronic, both proved by property test.
+`(fee−W) + (W−cut) = fee−cut`, so the 80% block, the tier band, BR4 and the ledger cannot move
+however the money splits. Wallet movements no order explains get their own term, so BR1 stops
+blaming the driver for money the app moved on its own. A pure matcher pairs orders to log rows by
+minute, confirms Yallago's 20%, and **refuses to decide** the ambiguous credits.
+
+**A manager can correct a closing figure at review** (`POST /shifts/:id/close-figures`) without
+approving or bouncing the shift — the safety net everything else here depends on.
+
+**A way back out of the close.** «إنهاء النوبة» was a one-way door: no way back to a running shift,
+none to the order list after remembering a delivery. Both closing screens now carry a back control
+in the sticky header, and the closing package survives the trip — photos, typed figures and battery
+readings are all preserved, because a back button that costs four re-uploaded screenshots is a trap.
+An order already sent is now shown locked («مُرسَل») rather than offering an edit that changes
+nothing on the server. Fixed a pre-existing deadlock this made routine: on a partial submit failure
+the rows that saved were never remembered, so every retry re-posted them, all 409'd, and the failure
+list grew until nothing the driver could do would clear it.
+
+**An account nobody could log into.** `Ali_Dandah` was stored as U+0650 ARABIC KASRA + `Ali_Dandah`
+— what Shift+A produces with the Arabic keyboard layout on. Invisible, so the name looked right
+everywhere; login is an exact match, so it never reached its password check. Usernames are now
+normalised at login and at creation, and the lookup falls back (on a miss only, and only when
+exactly one account matches) so the existing row is reachable without editing it.
+
+### 🔴 STOPPED, BY AGREEMENT: reading the two Yallago screens
+
+**Tesseract cannot read Arabic-Indic digits, and no bundle fixes it.** `tessdata_fast` (shipped),
+`tessdata` standard, `script/Arabic` all score 0/11 on the known amounts; `tessdata_best` will not
+run at all — its float kernels are missing from tesseract.js's WASM core. Tried every
+page-segmentation mode, raw/stretched/inverted, the amount column at 4x and a single amount at 5x.
+«٥٢» reads «oY», «٩٥» reads «40», and fatally «٢» and «٣» BOTH read «Y» while «١» and «٦» both read
+«\». No table recovers −26 from −36. The app cannot be switched to Western digits — that would mean
+changing the whole phone's language.
+
+**The parsers were serving that debris as money** — ٥٢ became −07, ١٥٣ became +017, and two rows of
+three were offered as «11» and «11» for fees of 120 and 235. Now a list amount must be digits only
+with no leading zero, and a page is offered only if it accounts for ~every row carrying the
+currency. No pass on any fixture produces a wrong value; both screens report honestly that they
+could not be read. This also exposed a real bug: the row is «٢٣٥ SYP … ٦:٠٦ م» flattened onto one
+line, so the RTL pattern `SYP <number>` was matching the **hour** — a fee of 235 read as 6.
+
+**The replacement is proven and waiting.** Tesseract finds «SYP» perfectly (11/11, every pass — it
+is ASCII), so it is used for LAYOUT only: it anchors the row, gives the font size in its own cap
+height, and the amount is the ink to its left. `scripts/glyph-lab.mjs` segments and classifies those
+glyphs: **34/34 rows segmented exactly** (two screens, two scales, including «−١٬١٥٥٫٦٥» into all
+nine pieces) and **118/118 correct under leave-one-out**, worst correct match 0.361 so a refusal
+threshold has room.
+
+**To resume, at the live test:** collect several days of both screens from the driver's phone, drop
+them in `apps/driver/test/fixtures/ocr/`, add their amounts to `TRUTH` in `scripts/glyph-lab.mjs`,
+and run it — it reports which characters are still unseen. Today «٨» appears in **no amount**
+(it exists only inside the date «٠٨/٠٤», in a smaller font) and «٩» and the thousands mark have one
+sample each. Once the alphabet is covered, wire the classifier into `readOrders` /
+`readPaymentsLog` and the driver's typed odometer / wallet / order fields can go. **They stay until
+then** — the close gate needs at least one order, so a reader that returns nothing would leave a
+shift nobody can submit, not the driver and not the manager.
+
+**Open question for the owner.** The log carries negatives that are nobody's 20% — −165.50, −177,
+−22 — each at an order's minute, and at no consistent ratio to the fee. Best reading: the goods
+value the wallet paid the merchant. If so they are normal and get modelled; if not, they will land
+in BR1 as an unexplained wallet difference.
+
+---
+
 ## 2026-07-29 (later) — batteries: back/cancel on start, two-or-more packs, mid-shift swap
 
 **All suites green (api 30 files incl. 6 new swap/ceiling tests), 6 guards green, migration 0013
