@@ -49,7 +49,7 @@ interface ShiftState {
 }
 
 /** What the payments-log reader made of «سجل المدفوعات», said out loud rather than left silent. */
-type LogState = { kind: 'idle' | 'reading' | 'failed' } | { kind: 'read'; rows: number }
+type LogState = { kind: 'idle' | 'reading' | 'failed' } | { kind: 'read'; rows: number; refused: number }
 
 /**
  * The closing package while it is being filled in.
@@ -772,8 +772,13 @@ function EndPackage({
                     if (!r?.ok) return { ...d, dash: { kind: 'failed' } }
                     const added = mergeScannedOrders(d.orders, r.reading.orders, () => crypto.randomUUID())
                     // NEW rows, not rows on the page: a page that fully overlaps reads 0, which is
-                    // the truth — nothing was added — and not a failure.
-                    return { ...d, orders: [...d.orders, ...added], dash: { kind: 'read', rows: added.length } }
+                    // the truth — nothing was added — and not a failure. `refused` is what the
+                    // reader saw but would not vouch for, and it is the driver's to type.
+                    return {
+                      ...d,
+                      orders: [...d.orders, ...added],
+                      dash: { kind: 'read', rows: added.length, refused: Math.max(0, (r.rowsSeen ?? 0) - r.fieldsFound) },
+                    }
                   })
                 },
               }
@@ -790,7 +795,11 @@ function EndPackage({
                     return {
                       ...d,
                       movements: [...d.movements, ...added],
-                      log: { kind: 'read', rows: added.length },
+                      log: {
+                        kind: 'read',
+                        rows: added.length,
+                        refused: Math.max(0, (r.rowsSeen ?? 0) - r.fieldsFound),
+                      },
                     }
                   })
                 },
@@ -860,7 +869,16 @@ function ReadStatus({ state }: { state: LogState }): ReactNode {
   // Checked POSITIVELY for `read`: the other member's `kind` is a union of three literals, and
   // narrowing a union by eliminating them one at a time does not reduce to the member with `rows`.
   if (state.kind === 'read') {
-    return <p className="text-center text-sm text-emerald-700">{t.shift.readAdded.replace('{n}', String(state.rows))}</p>
+    return (
+      <p className="text-center text-sm text-emerald-700">
+        {t.shift.readAdded.replace('{n}', String(state.rows))}
+        {/* The rows the reader SAW and would not vouch for. Silence here would let the driver
+            believe the page was fully read and submit a day that is short by those rows. */}
+        {state.refused > 0 ? (
+          <span className="text-amber-700"> · {t.shift.readRefused.replace('{n}', String(state.refused))}</span>
+        ) : null}
+      </p>
+    )
   }
   if (state.kind === 'reading') return <p className="text-center text-sm text-slate-400">{t.shift.reading}…</p>
   if (state.kind === 'failed') return <p className="text-center text-sm text-amber-700">{t.shift.readUnread}</p>

@@ -204,6 +204,8 @@ export const en: Catalog = {
     /** «0 operations» is a real answer — the page had nothing new — not the same as a failed read. */
     readAdded: '{n} operations added from this image',
     readUnread: 'This image could not be read — enter the operations by hand',
+    /** Rows the reader saw but would not vouch for. Silence here hides a short day. */
+    readRefused: '{n} rows were not read confidently — enter them by hand',
     retakeRequested: 'The manager requested a re-shoot',
     closeRejected: 'The manager rejected the close',
     reportIncident: 'Report an incident',

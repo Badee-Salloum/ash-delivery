@@ -205,6 +205,8 @@ export const ar = {
     /** «٠ عملية» is a real answer — the page had nothing new — and not the same as a failed read. */
     readAdded: 'أُضيفت {n} عملية من هذه الصورة',
     readUnread: 'تعذّرت قراءة هذه الصورة — أدخِل العمليات يدوياً',
+    /** Rows the reader saw but would not vouch for. Silence here hides a short day. */
+    readRefused: '{n} صفوف لم تُقرأ بثقة — أدخِلها يدوياً',
     retakeRequested: 'طلب المدير إعادة التصوير',
     closeRejected: 'رفض المدير إنهاء النوبة',
     reportIncident: 'بلاغ حادثة',
