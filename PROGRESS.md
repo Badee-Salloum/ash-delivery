@@ -1,5 +1,56 @@
 # PROGRESS
 
+## 2026-08-07 (later) — the operations list: one close screen, and a checkbox that decides money
+
+**All suites green (domain 327, client 45, adapters 34, driver 76, api 348), 6 guards green,
+migration 0015 applied to Neon, all three apps deployed and verified.** Eight staged commits.
+
+**Two dormant ledger defects, fixed FIRST.** `orderFee` posted the whole fee to ONE fund chosen by
+`payMode` while `closingBalances` split the same order by `orderWalletAmount` — they agreed only
+while nothing measured the wallet. And `walletAdjustments` were added into `endWallet` with no
+posting ever debiting them. Both were harmless only because the API never populated either field,
+and this feature populates exactly those two. Verified by reverting each: both properties fail
+(`expected 1n to be 0n`, then `expected 0n to be -1n` — precisely the −Σadjustments symptom).
+The property arbitraries were extended, because they had been silently vacuous about the only case
+that matters.
+
+**A scrollable screen is several images.** «الطلبات الحديثة» and «سجل المدفوعات» both scroll, so
+both are now up to 8 pages. Page 1 keeps the BARE slot name, so no data migration and no alias
+table: `dashboard` simply IS page 1. `requiredEndSlots` is untouched, so an extra page can never
+become a `missing_photo`.
+
+**One close screen.** The separate «الطلبات» step is gone; uploading, reviewing what was read, and
+closing all happen on «حزمة النهاية». Orders and wallet rows are ONE list, because that is how the
+day happened — an order and the 20% Yallago took for it are one event seen on two screens.
+
+**The checkbox.** Unchecked = stored, visible to everyone, and out of BR1, the tier band and the
+ledger. Filtering happens at `toDomainOrders`, so `packages/domain` never learns what "excluded"
+means. `ordersHash` now covers `included`, `walletAmount` and the movements — each changes the
+posted money without touching any previously-hashed field, and a movement can do it with every
+order untouched.
+
+**Three disjoint roles guard the double count:** a logged `yalago_cut` NEVER enters BR1 (the
+equation derives it from the fee — the block is a residual), an `order_credit` is already inside
+its order's `walletAmount`, and only `unmatched` rows are summed into `walletAdjustments`.
+
+**The ambiguous credit.** A credit at an order's minute is either that order's electronic part or an
+unrelated incentive; the two readings agree on the wallet exactly and differ on the CASH by exactly
+the credit. So BR1 already catches a wrong choice — no second gate — and the manager gets a two-way
+control plus a named cause, `ambiguous_wallet_credit`, that points at the row.
+
+**See it in 2 minutes.** Driver: «إنهاء النوبة» → one screen with the operations list, «+ صورة
+أخرى» under each scrollable screen, a checkbox per row, and the live equation in the footer.
+Manager review: every operation checked and unchecked, excluded rows dimmed and badged «مستبعدة» in
+place, and «جزء من الطلب» / «حافز منفصل» where the reader flagged doubt.
+
+**Honest status.** The OCR still cannot read Arabic-Indic digits, so in production this list is
+filled in BY HAND until the glyph reader lands — the scan buttons only append. A client test pins
+that with no movements and no measured wallet amounts the preview is exactly today's arithmetic.
+`minWalletBalance` still walks orders only and will under-report the mid-shift trough now that
+adjustments are real; noted, not fixed. Audit volume: a 60-row log is 60 audited inserts per submit.
+
+---
+
 ## 2026-08-07 — the close from screenshots, a way back out of it, and the digits problem
 
 **All suites green (domain 317, client 34, adapters 30, driver 76, api 325), 6 guards green.**
