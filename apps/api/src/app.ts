@@ -67,6 +67,7 @@ import {
   voidShift,
   forceClose,
   submitStartPackage,
+  includedOrders,
   todayFor,
 } from './shifts.service.ts'
 
@@ -369,7 +370,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
             odometerStart: s.odoStart,
             floatTotal: serializeMoney(sum(s.floatTranches)),
             topupTotal: serializeMoney(sum(s.topupTranches)),
-            orderCount: (await deps.orders.listByShift(s.id)).length,
+            // How much work COUNTS on the shift. An unchecked operation is stored and visible but
+            // is out of the money, so counting it here would tell the manager a shift is worth
+            // more than the approval will post.
+            orderCount: includedOrders(await deps.orders.listByShift(s.id)).length,
           })),
         ),
       }
@@ -657,8 +661,11 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     if (!shift) return null
     // Per-pack readings, joined to the packs so a slot and a capacity are shown rather than a
     // uuid. A two-pack bike hands back two of these at each end of the shift.
-    const [orders, readings, fitted, slots, swaps, allBatteries] = await Promise.all([
+    const [orders, movements, readings, fitted, slots, swaps, allBatteries] = await Promise.all([
       deps.orders.listByShift(shiftId),
+      // Every movement, checked and unchecked — the owner's rule is that whoever closes the shift
+      // sees ALL of them. Fetched HERE so the driver's view and the manager's cannot disagree.
+      deps.movements.listByShift(shiftId),
       deps.batteryReadings.listByShift(shiftId),
       deps.directory.listBatteriesForVehicle(shift.vehicleId),
       // C-7: the review must SHOW the photos, not just their slot names. Each attached slot carries
@@ -736,6 +743,25 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           companyShare: o.companyShare === null ? null : serializeMoney(o.companyShare),
           notes: o.notes,
           points: o.points,
+          // The checkbox, what the log measured, and the minute it is paired on. `included` goes to
+          // BOTH views deliberately: whoever closes the shift must see every operation, checked or
+          // not — an excluded row hidden from one of the two screens is a row nobody can put back.
+          included: o.included,
+          walletAmount: o.walletAmount === null ? null : serializeMoney(o.walletAmount),
+          occurredMinute: o.occurredMinute,
+        })),
+        // «سجل المدفوعات» as read: what the wallet actually did, beside what the orders imply.
+        movements: movements.map((m) => ({
+          id: m.id,
+          amount: serializeMoney(m.amount),
+          occurredMinute: m.occurredMinute,
+          seq: m.seq,
+          orderId: m.orderId,
+          role: m.role,
+          ambiguous: m.ambiguous,
+          included: m.included,
+          source: m.source,
+          notes: m.notes,
         })),
         media: slots.map((s) => ({ package: s.package, slot: s.slot, mediaId: s.mediaId })),
         batterySwaps,

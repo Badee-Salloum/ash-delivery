@@ -8,6 +8,7 @@ import type {
   OrderPointRecord,
   DocumentRecord,
   ShiftOrderRecord,
+  WalletMovementRecord,
   ShiftRecord,
   VehicleEventKind,
   VehicleEventRecord,
@@ -73,22 +74,72 @@ export class ServiceError extends Error {
  * hash is re-checked inside the approval path so that becomes a 409 instead of a silent
  * discrepancy.
  */
-export function ordersHash(orders: readonly ShiftOrderRecord[]): string {
-  const canonical = [...orders]
+export function ordersHash(
+  orders: readonly ShiftOrderRecord[],
+  movements: readonly WalletMovementRecord[] = [],
+): string {
+  const orderPart = [...orders]
     .sort((a, b) => (a.providerOrderNo < b.providerOrderNo ? -1 : 1))
     // The kind and the typed shares are hashed too: they decide the money as much as the fee does,
-    // so a manager must not be able to approve against a split he never reviewed.
-    .map((o) => `${o.providerOrderNo}|${o.payMode}|${o.fee}|${o.kind}|${o.driverShare ?? ''}|${o.companyShare ?? ''}`)
+    // so a manager must not be able to approve against a split he never reviewed. `included` and
+    // `walletAmount` are here for exactly the same reason and neither touches any older field:
+    // unchecking a row removes it from BR1, the tier band and the ledger outright, and the measured
+    // wallet amount moves money between the cash and wallet sides.
+    .map(
+      (o) =>
+        `${o.providerOrderNo}|${o.payMode}|${o.fee}|${o.kind}|${o.driverShare ?? ''}|${o.companyShare ?? ''}` +
+        `|${o.included ? 1 : 0}|${o.walletAmount ?? ''}`,
+    )
     .join(';')
-  return createHash('sha256').update(canonical).digest('hex').slice(0, 32)
+  // The movements are hashed as well, because toggling one changes `walletAdjustments` — hence BR1,
+  // hence the postings — with every order left untouched. A digest that could not see that would
+  // let the approval post against a wallet the manager never reviewed.
+  const movementPart = [...movements]
+    .sort((a, b) => (a.id < b.id ? -1 : 1))
+    .map((m) => `${m.occurredMinute}|${m.amount}|${m.seq}|${m.role}|${m.orderId ?? ''}|${m.included ? 1 : 0}`)
+    .join(';')
+  return createHash('sha256').update(`${orderPart}#${movementPart}`).digest('hex').slice(0, 32)
 }
 
+/**
+ * The orders that count.
+ *
+ * An unchecked row stays with the shift and stays visible to everyone, but it is out of the money
+ * entirely — BR1, the tier band and the ledger. Filtering HERE, at the single point where records
+ * become domain values, is what keeps `packages/domain` from having to learn what "excluded" means
+ * and keeps the rule from drifting across the several places that ask for a shift's orders.
+ */
+export const includedOrders = (rows: readonly ShiftOrderRecord[]): ShiftOrderRecord[] =>
+  rows.filter((o) => o.included)
+
 const toDomainOrders = (rows: readonly ShiftOrderRecord[]): ShiftOrder[] =>
-  rows.map((o) => ({ orderNo: o.providerOrderNo, payMode: o.payMode, fee: o.fee, kind: o.kind }))
+  includedOrders(rows).map((o) => ({
+    orderNo: o.providerOrderNo,
+    payMode: o.payMode,
+    fee: o.fee,
+    kind: o.kind,
+    // `?? undefined`, not `?? null`: absent means "nobody measured it" and `orderWalletAmount`
+    // falls back to the pay mode, which is what every shift closed before the log was read did.
+    ...(o.walletAmount === null ? {} : { walletAmount: o.walletAmount }),
+  }))
+
+/**
+ * The wallet movements BR1 may add — and ONLY those.
+ *
+ * A `yalago_cut` row is corroboration, never an input: the equation derives the cut from the fee
+ * because the 80% block is a residual, so adding the logged one would charge it twice. An
+ * `order_credit` is already inside its order's `walletAmount`. That leaves the rows no order
+ * explains, which are the very thing this term exists for — an incentive, a merchant paid, a
+ * withdrawal — money the wallet moved on its own that BR1 would otherwise blame on the driver.
+ */
+const toWalletAdjustments = (rows: readonly WalletMovementRecord[]): Minor[] =>
+  rows.filter((m) => m.included && m.role === 'unmatched').map((m) => m.amount)
 
 /** What the manual jobs on one shift pay out, as typed and already validated to equal their fees. */
 const manualShareTotals = (rows: readonly ShiftOrderRecord[]): { driverShare: Minor; companyShare: Minor } => {
-  const manual = rows.filter((o) => o.kind === 'manual')
+  // Excluded first: an excluded manual order's shares would still be handed to `shareSplit`, which
+  // would then fail to exhaust `fee_earned` and throw — in front of a manager, at approval.
+  const manual = includedOrders(rows).filter((o) => o.kind === 'manual')
   return {
     driverShare: sum(manual.map((o) => o.driverShare ?? minor(0n))),
     companyShare: sum(manual.map((o) => o.companyShare ?? minor(0n))),
@@ -875,24 +926,30 @@ export interface Br1View {
 
 export async function evaluateShift(deps: Deps, shift: ShiftRecord): Promise<Br1View> {
   const orderRows = await deps.orders.listByShift(shift.id)
+  const movementRows = await deps.movements.listByShift(shift.id)
   const orders = toDomainOrders(orderRows)
+  const walletAdjustments = toWalletAdjustments(movementRows)
   const result = evaluateBr1({
     floatTotal: sum(shift.floatTranches),
     topupTotal: sum(shift.topupTranches),
     endCashDeclared: shift.endCashDeclared ?? minor(0n),
     endWalletDeclared: shift.endWalletDeclared ?? minor(0n),
     orders,
+    walletAdjustments,
   })
   return {
     result,
     causes: diagnoseBr1(result, orders),
+    // The trough the wallet reaches mid-shift still walks the ORDERS only: a movement carries a
+    // minute but the orders do not carry a sequence, so interleaving them would be guesswork.
+    // It therefore under-reports once adjustments are real — noted rather than faked.
     minWallet: minWalletBalance({
       driverId: shift.driverId,
       floatTranches: shift.floatTranches,
       topupTranches: shift.topupTranches,
       orders,
     }),
-    ordersHash: ordersHash(orderRows),
+    ordersHash: ordersHash(orderRows, movementRows),
   }
 }
 
@@ -1086,9 +1143,13 @@ export async function approveClose(
   const postings = postingsForApproval(
     {
       driverId: shift.driverId,
+      branchId: shift.branchId,
       floatTranches: shift.floatTranches,
       topupTranches: shift.topupTranches,
       orders: todaysOrders,
+      // The SAME list BR1 just balanced against. If these two ever diverged the ledger would
+      // return a wallet different from the one the equation approved.
+      walletAdjustments: toWalletAdjustments(await deps.movements.listByShift(shiftId)),
     },
     shiftSplit,
   )
@@ -1140,6 +1201,9 @@ export async function voidShift(deps: Deps, actor: Actor, shiftId: string, reaso
     })
   }
 
+  // The movements go with the orders. A voided shift keeping its wallet rows would leave the
+  // branch's books carrying adjustments for a shift that is defined never to have counted.
+  await deps.movements.deleteByShift(shiftId)
   for (const o of await deps.orders.listByShift(shiftId)) await deps.orders.delete(o.id)
 
   const updated: ShiftRecord = { ...shift, state: result.next }
@@ -1194,7 +1258,16 @@ export async function forceClose(
 
   const orderRows = await deps.orders.listByShift(shiftId)
   const todaysOrders = toDomainOrders(orderRows)
-  const shiftInput = { driverId: shift.driverId, floatTranches: shift.floatTranches, topupTranches: shift.topupTranches, orders: todaysOrders }
+  const shiftInput = {
+    driverId: shift.driverId,
+    branchId: shift.branchId,
+    floatTranches: shift.floatTranches,
+    topupTranches: shift.topupTranches,
+    orders: todaysOrders,
+    // A force-close still posts the wallet the shift actually had; `closingBalances` below reads
+    // the same input, so the variance it computes is against the real expectation, not a partial one.
+    walletAdjustments: toWalletAdjustments(await deps.movements.listByShift(shiftId)),
+  }
 
   const shiftSplit = await shiftSplitFor(deps, shift, todaysOrders)
   const postings: Posting[] = postingsForApproval(shiftInput, shiftSplit)

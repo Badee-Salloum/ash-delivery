@@ -12,7 +12,7 @@ import {
   validateBands,
   TierRuleError,
 } from '@ash/domain'
-import { ServiceError, todayFor } from './shifts.service.ts'
+import { ServiceError, includedOrders, todayFor } from './shifts.service.ts'
 import { type StoredRule, asDomainRule, ruleInForceOn } from './tier-rule.ts'
 
 /**
@@ -123,7 +123,9 @@ export function registerTierRoutes(app: FastifyInstance, deps: Deps): void {
       // The tier basis is the DAY, so orders are gathered per driver across all his shifts.
       const byDriver = new Map<string, ShiftOrder[]>()
       for (const shift of approved) {
-        const orders = await deps.orders.listByShift(shift.id)
+        // Simulation must see the same orders the real split saw, or the preview a sysadmin
+        // publishes a rule against differs from the pay that rule will actually produce.
+        const orders = includedOrders(await deps.orders.listByShift(shift.id))
         const list = byDriver.get(shift.driverId) ?? []
         list.push(...orders.map((o) => ({ orderNo: o.providerOrderNo, payMode: o.payMode, fee: o.fee })))
         byDriver.set(shift.driverId, list)

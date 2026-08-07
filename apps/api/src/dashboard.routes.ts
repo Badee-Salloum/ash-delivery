@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { type Deps, type ShiftRecord, serializeMoney } from '@ash/contracts'
 import { REQUIRED_END_SLOTS, isLive, minor, toUsdMinor, weekStartFor } from '@ash/domain'
-import { todayFor } from './shifts.service.ts'
+import { includedOrders, todayFor } from './shifts.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
 
 /**
@@ -36,7 +36,10 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     let orderTotal = 0
     for (const shift of shifts) {
       if (shift.state !== 'approved' && shift.state !== 'week_locked') continue
-      const orders = await deps.orders.listByShift(shift.id)
+      // What the shift was APPROVED on: an operation the driver unchecked never entered BR1, the
+      // tier band or the ledger, so counting it here would make the dashboard's revenue disagree
+      // with the books it is supposed to summarise.
+      const orders = includedOrders(await deps.orders.listByShift(shift.id))
       const driverFees = orders.reduce((acc, o) => acc + o.fee, 0n)
       const acc = perDriver.get(shift.driverId) ?? { orders: 0, fees: 0n }
       acc.orders += orders.length
