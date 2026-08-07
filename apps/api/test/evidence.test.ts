@@ -159,6 +159,34 @@ describe('upload behaviour', () => {
     expect(res.json().error).toBe('unknown_evidence_slot')
   })
 
+  it('accepts the later pages of a scrollable screen, and only up to the ceiling', async () => {
+    // «الطلبات الحديثة» and «سجل المدفوعات» both scroll. A day arrives as several images, and each
+    // page is its own slot — so they accumulate instead of replacing one another.
+    const driver = await h.loginAs('driver1')
+    const id = await newShift(driver)
+    for (const slot of ['dashboard', 'dashboard_2', 'payments_log_3']) {
+      const res = await h.app.inject({
+        method: 'PUT',
+        url: `/shifts/${id}/media/end/${slot}`,
+        headers: { cookie: h.cookie(driver), 'content-type': 'image/jpeg' },
+        payload: TINY_JPEG,
+      })
+      expect(res.statusCode, `${slot}: ${res.body}`).toBe(201)
+    }
+    const slots = (await h.deps.media.listSlots(id)).map((s) => s.slot)
+    expect(slots).toEqual(expect.arrayContaining(['dashboard', 'dashboard_2', 'payments_log_3']))
+
+    // Past the ceiling is not a slot at all.
+    const tooFar = await h.app.inject({
+      method: 'PUT',
+      url: `/shifts/${id}/media/end/dashboard_9`,
+      headers: { cookie: h.cookie(driver), 'content-type': 'image/jpeg' },
+      payload: TINY_JPEG,
+    })
+    expect(tooFar.statusCode).toBe(422)
+    expect(tooFar.json().error).toBe('unknown_evidence_slot')
+  })
+
   it('a re-shoot REPLACES the slot — the manager never sees two odometer photos', async () => {
     const driver = await h.loginAs('driver1')
     const id = await newShift(driver)

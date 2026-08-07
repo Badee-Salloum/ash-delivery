@@ -199,12 +199,16 @@ export const en: Catalog = {
     paymentsLog: 'Payments log',
     logRead: 'Read {n} movements from the payments log',
     logUnread: 'The payments log could not be read — the manager will review it',
+    /** Both the orders list and the payments log scroll: one screenshot rarely holds a whole day. */
+    addPage: 'Another image',
     retakeRequested: 'The manager requested a re-shoot',
     closeRejected: 'The manager rejected the close',
     reportIncident: 'Report an incident',
     incidentNote: 'What happened (optional)',
     incidentReported: 'The branch has been notified',
     suspendedHint: 'Your shift is on hold after an incident. Resume it when you can carry on — its data is completed later under the same equation.',
+    // Base names only. A page number ("Dashboard 2") and a battery slot ("Battery 1") are appended
+    // by `slotLabel`, so eight pages of two screens plus eight packs do not become 24 keys here.
     slotNames: {
       odometer: 'Odometer',
       dashboard: 'Dashboard',
@@ -212,6 +216,8 @@ export const en: Catalog = {
       wallet_zeroed: 'Wallet zeroed',
       cash_handover: 'Cash handover',
       battery: 'Battery',
+      payments_log: 'Payments log',
+      bms: 'Battery',
     },
     confirmStart: 'Confirm & start shift',
     running: 'Shift running',

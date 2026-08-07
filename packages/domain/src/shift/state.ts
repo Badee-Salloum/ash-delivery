@@ -109,9 +109,44 @@ export function requiredEndSlots(batterySlots: number): readonly string[] {
  */
 export const PAYMENTS_LOG_SLOT = 'payments_log'
 
+/**
+ * How many images ONE scrollable screen may be photographed in.
+ *
+ * Both «الطلبات الحديثة» and «سجل المدفوعات» scroll, and a day rarely fits in one screenful — a
+ * single screenshot silently truncates the list, which on the log means truncating the only
+ * measurement of how much of each fee reached the wallet. Eight matches `MAX_BATTERY_SLOTS`, and
+ * staying single-digit keeps the plain text sort in `listSlots` («ORDER BY slot») in page order:
+ * `dashboard_10` would sort before `dashboard_2`.
+ */
+export const MAX_PAGE_SLOTS = 8
+
+/**
+ * Page `n` of a scrollable screen: `dashboard`, `dashboard_2`, `dashboard_3`, …
+ *
+ * Page 1 keeps the BARE name. That is what makes this change need no data migration and no alias
+ * table: every row already written with slot `dashboard`, every `mediaSlotsEnd` array and
+ * `REQUIRED_END_SLOTS` itself are all still correct, because the un-numbered name simply *is*
+ * page 1 under the new scheme.
+ */
+export const pageSlot = (base: string, page: number): string => (page <= 1 ? base : `${base}_${page}`)
+
+/** Pages 2…N of a scrollable screen — the optional extras, never required. */
+const extraPages = (base: string): string[] =>
+  Array.from({ length: MAX_PAGE_SLOTS - 1 }, (_, i) => pageSlot(base, i + 2))
+
+/** The screens that may arrive as several images. */
+export const DASHBOARD_SLOT = 'dashboard'
+
 /** Every slot name an upload may legitimately carry — the superset, for validating a POST. */
 export const ALL_START_SLOTS: readonly string[] = requiredStartSlots(MAX_BATTERY_SLOTS)
-export const ALL_END_SLOTS: readonly string[] = [...requiredEndSlots(MAX_BATTERY_SLOTS), PAYMENTS_LOG_SLOT]
+export const ALL_END_SLOTS: readonly string[] = [
+  ...requiredEndSlots(MAX_BATTERY_SLOTS),
+  PAYMENTS_LOG_SLOT,
+  // Extra pages are acceptance vocabulary only. `requiredEndSlots` is untouched, so no extra page
+  // can ever become a `missing_photo` — one dashboard image stays the requirement.
+  ...extraPages(DASHBOARD_SLOT),
+  ...extraPages(PAYMENTS_LOG_SLOT),
+]
 
 function batterySlotNumbers(batterySlots: number): number[] {
   const n = Math.max(0, Math.min(MAX_BATTERY_SLOTS, Math.trunc(batterySlots)))

@@ -1,7 +1,16 @@
-import { type Dispatch, type ReactNode, type SetStateAction, useCallback, useEffect, useRef, useState } from 'react'
-import type { PayMode } from '@ash/domain'
+import {
+  type Dispatch,
+  Fragment,
+  type ReactNode,
+  type SetStateAction,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from 'react'
+import { MAX_PAGE_SLOTS, PAYMENTS_LOG_SLOT, type PayMode, pageSlot } from '@ash/domain'
 import type { DraftOrder } from '@ash/client'
-import { compressImage, nextPayMode, unsentOrders, uploadEvidencePath } from '@ash/client'
+import { compressImage, nextPayMode, splitSlot, unsentOrders, uploadEvidencePath } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
 import { useGpsBeacon } from '../use-gps-beacon.ts'
@@ -54,6 +63,18 @@ interface EndDraft {
   log: LogState
   /** Per-pack BMS readings, so the charge fields come back filled and the gate stays satisfied. */
   packs: Record<string, PackState>
+  /**
+   * How many tiles each scrollable screen is showing.
+   *
+   * «الطلبات الحديثة» and «سجل المدفوعات» both scroll, and a day rarely fits one screenful — one
+   * screenshot silently truncates the list, and on the log that means truncating the only
+   * measurement of how much of each fee reached the wallet. Page 1 keeps the bare slot name, so
+   * these counts start at 1 and every shift that was ever closed stays readable.
+   */
+  dashboardPages: number
+  logPages: number
+  /** Movements read off each log page, so the total is the whole log and not just the last page. */
+  logRows: Record<string, number>
 }
 
 const EMPTY_END_DRAFT: EndDraft = {
@@ -64,6 +85,9 @@ const EMPTY_END_DRAFT: EndDraft = {
   slots: new Set(),
   log: { kind: 'idle' },
   packs: {},
+  dashboardPages: 1,
+  logPages: 1,
+  logRows: {},
 }
 
 /** Where a shift already in flight puts the driver back. */
@@ -566,10 +590,27 @@ function EndPackage({
     odometer: t.shift.odometer,
     payments_log: t.shift.paymentsLog,
   }
-  const shown = [...required, 'payments_log']
+  /**
+   * The tiles, in order, with the extra PAGES of the two scrollable screens sitting under page 1.
+   *
+   * Only page 1 of the dashboard is required (`required` is unchanged, and so is the server gate):
+   * a short day genuinely fits one screenful, and demanding a second would be demanding a
+   * screenshot of nothing.
+   */
+  const shown = [
+    ...Array.from({ length: draft.dashboardPages }, (_, i) => pageSlot('dashboard', i + 1)),
+    'wallet',
+    'odometer',
+    ...Array.from({ length: draft.logPages }, (_, i) => pageSlot(PAYMENTS_LOG_SLOT, i + 1)),
+  ]
+  const labelOf = (slot: string): string => {
+    const { base, n } = splitSlot(slot)
+    const name = labels[base] ?? slot
+    return n === 1 ? name : `${name} ${n}`
+  }
   // The dashboard, wallet and log are SCREENSHOTS the driver already has in his gallery, not things
   // to photograph with the camera; the odometer is a real photo of the bike.
-  const gallery = new Set(['dashboard', 'wallet', 'payments_log'])
+  const gallery = new Set(['dashboard', 'wallet', PAYMENTS_LOG_SLOT])
   // Each fitted pack's closing charge gates the button (batteriesReady), matching the server. The
   // bike-level battery field is gone — charge is tracked per pack.
   const ready =
@@ -619,14 +660,26 @@ function EndPackage({
         </div>
       }
     >
-      {shown.map((slot) => (
+      {shown.map((slot) => {
+        const { base, n } = splitSlot(slot)
+        // «+ صورة أخرى» sits under the LAST page of each scrollable screen, and only once that page
+        // actually holds an image — otherwise a tap adds an empty tile, and a wall of empty tiles
+        // reads as a longer list of things the driver still owes.
+        const lastPage =
+          (base === 'dashboard' && n === draft.dashboardPages && n < MAX_PAGE_SLOTS) ||
+          (base === PAYMENTS_LOG_SLOT && n === draft.logPages && n < MAX_PAGE_SLOTS)
+        const addPage = (): void =>
+          onDraft((d) =>
+            base === 'dashboard' ? { ...d, dashboardPages: d.dashboardPages + 1 } : { ...d, logPages: d.logPages + 1 },
+          )
+        return (
+          <Fragment key={slot}>
         <PhotoSlot
-          key={slot}
           shiftId={shift.id}
           pkg="end"
           slot={slot}
-          label={labels[slot]!}
-          source={gallery.has(slot) ? 'gallery' : 'camera'}
+          label={labelOf(slot)}
+          source={gallery.has(splitSlot(slot).base) ? 'gallery' : 'camera'}
           uploaded={slots.has(slot)}
           onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
           // SRS D-2: read the wallet balance off its screenshot and pre-fill the field; and read the
@@ -649,18 +702,32 @@ function EndPackage({
                 },
               }
             : {})}
-          {...(slot === 'payments_log'
+          {...(splitSlot(slot).base === PAYMENTS_LOG_SLOT
             ? {
                 onImage: async (file: File): Promise<void> => {
                   patch({ log: { kind: 'reading' } })
                   const { readPaymentsLog } = await import('../ocr.ts')
                   const r = await readPaymentsLog(file).catch(() => null)
-                  patch({ log: r?.ok ? { kind: 'read', rows: r.reading.movements.length } : { kind: 'failed' } })
+                  // Per PAGE, then totalled. Reporting only the last page read would say «قُرئت ٥
+                  // حركة» after a second screenshot when the first had eleven — the driver would
+                  // reasonably conclude the app had forgotten the page he just gave it.
+                  onDraft((d) => {
+                    const rows = r?.ok ? { ...d.logRows, [slot]: r.reading.movements.length } : d.logRows
+                    const total = Object.values(rows).reduce((a, b) => a + b, 0)
+                    return { ...d, logRows: rows, log: r?.ok ? { kind: 'read', rows: total } : { kind: 'failed' } }
+                  })
                 },
               }
             : {})}
         />
-      ))}
+            {lastPage && slots.has(slot) ? (
+              <Button variant="ghost" onClick={addPage}>
+                + {t.shift.addPage}
+              </Button>
+            ) : null}
+          </Fragment>
+        )
+      })}
       {/* What the log gave us. Said out loud because it is the difference between a wallet figure
           the system corroborated and one nobody checked — and because a silent reader is how a
           driver ends up believing a screenshot was understood when it was not. */}

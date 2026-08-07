@@ -2,13 +2,18 @@ import { describe, expect, it } from 'vitest'
 import { minor } from '../../src/money/minor.ts'
 import type { Actor, RoleKey } from '../../src/rbac/can.ts'
 import {
+  ALL_END_SLOTS,
   type EndPackage,
+  MAX_PAGE_SLOTS,
+  REQUIRED_END_SLOTS,
   type ShiftAction,
   type ShiftState,
   type StartPackage,
   type TransitionContext,
   endPackageGaps,
   isLive,
+  pageSlot,
+  requiredEndSlots,
   startPackageGaps,
   transition,
 } from '../../src/shift/state.ts'
@@ -385,6 +390,33 @@ describe('battery evidence scales with the bike', () => {
     const gaps = endPackageGaps(end)
     expect(gaps).toContainEqual({ kind: 'missing_photo', slot: 'bms_2' })
     expect(gaps).toContainEqual({ kind: 'missing_battery_reading', slotNo: 2 })
+  })
+
+  it('accepts the extra pages of a scrollable screen without ever requiring one', () => {
+    // «الطلبات الحديثة» and «سجل المدفوعات» both scroll, so a day arrives as several images. The
+    // vocabulary must accept them; the GATE must not ask for them — a short day genuinely fits one
+    // screenful, and demanding a second would be demanding a screenshot of nothing.
+    expect(ALL_END_SLOTS).toContain('dashboard_2')
+    expect(ALL_END_SLOTS).toContain('payments_log_4')
+    expect(ALL_END_SLOTS).not.toContain(`dashboard_${MAX_PAGE_SLOTS + 1}`)
+    expect(requiredEndSlots(0)).not.toContain('dashboard_2')
+
+    const oneImage = endPackageGaps({
+      mediaSlots: ['dashboard', 'wallet', 'odometer'],
+      odometerKm: 1100,
+      batteryPercent: null,
+      cashDeclared: syp(0),
+      walletDeclared: syp(0),
+      orderCount: 1,
+      allOrdersConfirmed: true,
+    })
+    expect(oneImage).toEqual([])
+  })
+
+  it('keeps the un-numbered name as page one, so every shift already closed still reads', () => {
+    expect(pageSlot('dashboard', 1)).toBe('dashboard')
+    expect(pageSlot('dashboard', 2)).toBe('dashboard_2')
+    expect(REQUIRED_END_SLOTS).toContain('dashboard')
   })
 
   it('no longer gates a bike-level battery — charge is tracked per pack now', () => {

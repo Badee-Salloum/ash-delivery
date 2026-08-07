@@ -200,12 +200,16 @@ export const ar = {
     paymentsLog: 'سجل المدفوعات',
     logRead: 'قُرئت {n} حركة من سجل المدفوعات',
     logUnread: 'تعذّرت قراءة سجل المدفوعات — سيراجعه المدير',
+    /** Both «الطلبات الحديثة» and «سجل المدفوعات» scroll: one screenshot rarely holds a whole day. */
+    addPage: 'صورة أخرى',
     retakeRequested: 'طلب المدير إعادة التصوير',
     closeRejected: 'رفض المدير إنهاء النوبة',
     reportIncident: 'بلاغ حادثة',
     incidentNote: 'وصف الحادثة (اختياري)',
     incidentReported: 'تم إبلاغ الفرع',
     suspendedHint: 'نوبتك معلَّقة بسبب حادثة. تابعها عندما تصبح جاهزاً — تُكمل بياناتها لاحقاً بنفس المعادلة.',
+    // Base names only. A page number («الداشبورد ٢») and a battery slot («البطارية ١») are appended
+    // by `slotLabel`, so eight pages of two screens plus eight packs do not become 24 keys here.
     slotNames: {
       odometer: 'العداد',
       dashboard: 'الداشبورد',
@@ -213,6 +217,8 @@ export const ar = {
       wallet_zeroed: 'المحفظة صفراً',
       cash_handover: 'تسليم النقد',
       battery: 'البطارية',
+      payments_log: 'سجل المدفوعات',
+      bms: 'البطارية',
     },
     confirmStart: 'تأكيد وبدء النوبة',
     running: 'النوبة جارية',

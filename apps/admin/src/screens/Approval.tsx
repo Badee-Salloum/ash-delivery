@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import L, { type CircleMarker, type LeafletMouseEvent, type Map as LeafletMap } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { type OcrScalar, ocrReadingDelta } from '@ash/client'
+import { type OcrScalar, ocrReadingDelta, slotLabel, splitSlot } from '@ash/client'
 import { formatMinor, parseMinor, sub } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
@@ -814,10 +814,21 @@ function Field({ label, value, tone }: { label: string; value: string; tone?: 'g
  * can actually read the odometer / dashboard / wallet against the numbers beside it.
  */
 function PhotoRow({ pkg, media }: { pkg: 'start' | 'end'; media: Review['media'] }): ReactNode {
-  const { t } = useApp()
+  const { t, lang } = useApp()
   const [zoom, setZoom] = useState<string | null>(null)
-  const shots = media.filter((m) => m.package === pkg)
-  const label = (slot: string): string => t.shift.slotNames[slot as keyof typeof t.shift.slotNames] ?? slot
+  // Grouped and page-ordered: a scrollable screen now arrives as several images, and «الداشبورد ٣»
+  // sitting between a battery and the odometer tells the manager nothing about which day it covers.
+  const shots = media
+    .filter((m) => m.package === pkg)
+    .slice()
+    .sort((a, b) => {
+      const A = splitSlot(a.slot)
+      const B = splitSlot(b.slot)
+      return A.base === B.base ? A.n - B.n : A.base.localeCompare(B.base)
+    })
+  // `slotLabel` rather than a bare lookup: `payments_log` and every `bms_*` have been rendering as
+  // raw keys here since those slots existed, because the catalogue only holds un-numbered names.
+  const label = (slot: string): string => slotLabel(slot, t.shift.slotNames, lang)
 
   if (shots.length === 0) {
     return <p className="mt-3 text-xs text-slate-400">{t.approval.noPhotos}</p>
