@@ -208,6 +208,23 @@ function stretch(mask: Mask, x0: number, y0: number, x1: number, y1: number): Ui
   return bits
 }
 
+/**
+ * Throw away the RULES — the hairlines the app draws between rows.
+ *
+ * They are ink, they fall inside the band around a row, and they are shaped nothing like a glyph:
+ * one spans most of the screen. Left in, they were classified as digits and «−٢٬٠٦٧٫٣٠» came back
+ * with thirteen shapes for its ten characters, which then poisoned the group's own metrics as well.
+ *
+ * The test is width against the TALLEST glyph present, so it needs no pixel constant and survives
+ * any screen size. The widest thing an amount contains is the minus sign, and even that is well
+ * under twice the height of the digits beside it.
+ */
+export function withoutRules(comps: readonly Component[]): Component[] {
+  if (comps.length === 0) return []
+  const tallest = Math.max(...comps.map((c) => c.y1 - c.y0 + 1))
+  return comps.filter((c) => c.x1 - c.x0 + 1 <= tallest * 3)
+}
+
 export function groupMetrics(comps: readonly Component[]): GroupMetrics {
   if (comps.length === 0) return { tallest: 1, top: 0, height: 1 }
   let tallest = 1
@@ -273,22 +290,25 @@ const MIN_MARGIN = 0.1
 /**
  * Classes whose templates are not yet backed by enough DISTINCT renderings to be trusted with money.
  *
- * «٨» is the reason this exists: it appears in no amount on the sampled day, so its template comes
- * entirely from the date «٠٨/٠٤» — twenty-two rows of the same two renderings, at a smaller size
- * than any amount. Two independent reviews reached the same conclusion: the decisive test has not
- * been run, and until a real amount containing an «٨» is photographed it cannot be. «٩» is barely
- * better — one amount-font sample and two renderings in all.
+ * IT IS NOW EMPTY, and the history is worth keeping because it is how the set is meant to be used.
  *
- * The separator marks were quarantined too, and are not any more. Against the real screenshots they
- * matched at scores of 0.03 and 0.00 with margins of 0.47 and 0.55 — an order of magnitude clear of
- * what the gate demands — while the dangerous direction, a trailing zero mistaken for a decimal
- * point, was independently refused on score. The gate is doing that work; the quarantine was only
- * costing two rows that the reader in fact knew perfectly.
+ * «٨» was quarantined because it appeared in no amount on the first sampled day: its template came
+ * entirely from the date «٠٨/٠٤», twenty-two rows of the same two renderings, at a smaller size
+ * than any amount. Two independent reviews said the same thing — the decisive test could not be
+ * run on that data. A second batch of screenshots settled it: «−١٬٨٣٦», «+٨٧٫٥٠» and «−٤٨» were
+ * each read correctly, at scores of 0.19–0.21 with margins of 0.18–0.21, on images the templates
+ * had never seen. Twice the margin the gate demands, from a template learnt at another size. «٩»
+ * cleared the same bar on the same batch.
  *
- * A quarantined class is never ANSWERED: the glyph is refused and the driver types that row. Delete
- * an entry the moment real screenshots carry it, then re-harvest and regenerate the templates.
+ * The separator marks were here too, and left for the same reason: they matched at 0.03 and 0.00
+ * with margins of 0.47 and 0.55, while the dangerous direction — a trailing zero mistaken for a
+ * decimal point — was independently refused on score. The gate was doing that work.
+ *
+ * A quarantined class is never ANSWERED: the glyph is refused and the driver types that row. Put a
+ * class back the moment a new screen makes its template doubtful, and take it out only against
+ * evidence from screenshots the templates were not built from.
  */
-export const UNVALIDATED: ReadonlySet<string> = new Set(['8', '9'])
+export const UNVALIDATED: ReadonlySet<string> = new Set<string>()
 
 export interface Template {
   readonly label: string
@@ -366,7 +386,7 @@ export function classifyGlyph(f: GlyphFeatures, templates: readonly Template[]):
  * order of magnitude. A row the reader will not vouch for entirely, it does not offer at all.
  */
 export function readGlyphRow(mask: Mask, box: Box, templates: readonly Template[]): string | null {
-  const comps = componentsIn(mask, box)
+  const comps = withoutRules(componentsIn(mask, box))
   if (comps.length === 0) return null
   const group = groupMetrics(comps)
   let out = ''

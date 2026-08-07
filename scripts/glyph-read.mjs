@@ -23,7 +23,7 @@ const fixtures = join(driver, 'test', 'fixtures', 'ocr')
 const from = (s) => import(pathToFileURL(createRequire(join(driver, 'package.json')).resolve(s)).href)
 const { createCanvas, loadImage } = await from('@napi-rs/canvas')
 const { createWorker, OEM } = await from('tesseract.js')
-const { componentsIn, featuresOf, groupMetrics, maskFromPixels, readGlyphRow, unpackTemplates, nearestTemplate, classifyGlyph } =
+const { componentsIn, featuresOf, groupMetrics, maskFromPixels, readGlyphRow, unpackTemplates, nearestTemplate, classifyGlyph, withoutRules } =
   await import(pathToFileURL(join(driver, 'src', 'glyphs.ts')).href)
 const { GLYPH_TEMPLATES } = await import(pathToFileURL(join(driver, 'src', 'glyph-templates.ts')).href)
 
@@ -79,7 +79,7 @@ for (const [file, truth] of Object.entries(TRUTH)) {
     if (got === null) {
       refused++
       // Say WHY, per glyph — a refusal nobody can explain is a refusal nobody can fix.
-      const comps = componentsIn(mask, box)
+      const comps = withoutRules(componentsIn(mask, box))
       const group = groupMetrics(comps)
       const why = comps
         .map((c) => {

@@ -773,27 +773,11 @@ export async function readOrders(image: Blob | Uint8Array, timeoutMs = ORDERS_TI
   const started = now()
   let text = ''
   try {
-    // The GLYPH reader first, because it is the only one that works on these screens. Tesseract's
-    // own text is tried afterwards purely for a Western-digit build of the app, where it does read.
-    const byGlyph = await readAmountsByGlyph(image, timeoutMs)
-    text = byGlyph.text
-    const glyphOrders = byGlyph.amounts
-      .filter((a): a is string => a !== null)
-      .map((fee) => ({ dateIso: null, time: '', fee, zone: null }))
-    if (glyphOrders.length > 0) {
-      return {
-        ok: true,
-        reading: { orders: glyphOrders },
-        // How many of how many: a page where four rows of thirty-four were refused is a good read
-        // with four rows to type, and saying «٣٠» without the «٣٤» hides the four.
-        fieldsFound: glyphOrders.length,
-        rowsSeen: byGlyph.rows,
-        ms: now() - started,
-        text,
-      }
-    }
-
-    // Fallback: a build of the app that renders Western digits, which Tesseract reads properly.
+    // TESSERACT'S OWN TEXT FIRST. The app also runs in English, and that build prints WESTERN
+    // digits, which Tesseract reads properly — «−1,432.40 SYP» comes straight out of the text.
+    // The glyph reader has templates for Arabic-Indic shapes only, so pointing it at a Western
+    // build produces confident nonsense. Whichever script is on screen, the cheap correct reader
+    // is tried before the specialised one, and `readIsCoherent` decides whether it succeeded.
     let best: OcrOrder[] = []
     for (const invert of [false, true]) {
       const prepared = await prepareForOcr(toBlob(image), invert)
@@ -807,10 +791,27 @@ export async function readOrders(image: Blob | Uint8Array, timeoutMs = ORDERS_TI
     // Not merely "did anything parse" — did enough of the page parse to be believed. See
     // `readIsCoherent`: on the Arabic-Indic screens the models transliterate the digits, and a
     // handful of rows surviving that is luck, not a read.
-    if (best.length === 0 || !readIsCoherent(text, best.length)) {
-      return { ok: false, reason: 'no_fields', ms: now() - started, text }
+    if (best.length > 0 && readIsCoherent(text, best.length)) {
+      return { ok: true, reading: { orders: best }, fieldsFound: best.length, ms: now() - started, text }
     }
-    return { ok: true, reading: { orders: best }, fieldsFound: best.length, ms: now() - started, text }
+
+    // Arabic-Indic, then: read the shapes ourselves.
+    const byGlyph = await readAmountsByGlyph(image, timeoutMs)
+    if (byGlyph.text.length > text.length) text = byGlyph.text
+    const glyphOrders = byGlyph.amounts
+      .filter((a): a is string => a !== null)
+      .map((fee) => ({ dateIso: null, time: '', fee, zone: null }))
+    if (glyphOrders.length === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text }
+    return {
+      ok: true,
+      reading: { orders: glyphOrders },
+      // How many of how many: a page where four rows of thirty-four were refused is a good read
+      // with four rows to type, and saying «٣٠» without the «٣٤» hides the four.
+      fieldsFound: glyphOrders.length,
+      rowsSeen: byGlyph.rows,
+      ms: now() - started,
+      text,
+    }
   } catch (err) {
     const reason: OcrFailure = err instanceof Error && err.message === 'ocr timeout' ? 'timeout' : 'unavailable'
     return { ok: false, reason, ms: now() - started, text }
@@ -868,29 +869,8 @@ export async function readPaymentsLog(
   const started = now()
   let text = ''
   try {
-    // The glyph reader again, and here the sign is part of the amount: «−» and «+» are glyphs in
-    // the alphabet like any other, so a movement comes back already signed.
-    const byGlyph = await readAmountsByGlyph(image, timeoutMs)
-    text = byGlyph.text
-    const glyphMovements = byGlyph.amounts
-      .filter((a): a is string => a !== null)
-      .map((raw) => {
-        const negative = raw.startsWith('-')
-        const magnitude = listAmount(raw.replace(/^[-+]/, ''))
-        return magnitude === null ? null : { amount: negative ? `-${magnitude}` : magnitude, time: '' }
-      })
-      .filter((m): m is WalletMovement => m !== null)
-    if (glyphMovements.length > 0) {
-      return {
-        ok: true,
-        reading: { movements: glyphMovements },
-        fieldsFound: glyphMovements.length,
-        rowsSeen: byGlyph.rows,
-        ms: now() - started,
-        text,
-      }
-    }
-
+    // Tesseract's text first, for the same reason as the orders screen: the English build prints
+    // Western digits and reads perfectly, and the glyph templates would answer nonsense for them.
     let best: WalletMovement[] = []
     // Inverted FIRST: this screen is white-on-black, which Tesseract binarises poorly the other way.
     for (const invert of [true, false]) {
@@ -901,10 +881,31 @@ export async function readPaymentsLog(
       if (movements.length > best.length) best = movements
       if (best.length > 0 && invert) break
     }
-    if (best.length === 0 || !readIsCoherent(text, best.length)) {
-      return { ok: false, reason: 'no_fields', ms: now() - started, text }
+    if (best.length > 0 && readIsCoherent(text, best.length)) {
+      return { ok: true, reading: { movements: best }, fieldsFound: best.length, ms: now() - started, text }
     }
-    return { ok: true, reading: { movements: best }, fieldsFound: best.length, ms: now() - started, text }
+
+    // Arabic-Indic. The sign is a glyph in the alphabet like any other, so a movement comes back
+    // already signed and «−» never has to be inferred from anything.
+    const byGlyph = await readAmountsByGlyph(image, timeoutMs)
+    if (byGlyph.text.length > text.length) text = byGlyph.text
+    const glyphMovements = byGlyph.amounts
+      .filter((a): a is string => a !== null)
+      .map((raw) => {
+        const negative = raw.startsWith('-')
+        const magnitude = listAmount(raw.replace(/^[-+]/, ''))
+        return magnitude === null ? null : { amount: negative ? `-${magnitude}` : magnitude, time: '' }
+      })
+      .filter((m): m is WalletMovement => m !== null)
+    if (glyphMovements.length === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text }
+    return {
+      ok: true,
+      reading: { movements: glyphMovements },
+      fieldsFound: glyphMovements.length,
+      rowsSeen: byGlyph.rows,
+      ms: now() - started,
+      text,
+    }
   } catch (err) {
     const reason: OcrFailure = err instanceof Error && err.message === 'ocr timeout' ? 'timeout' : 'unavailable'
     return { ok: false, reason, ms: now() - started, text }
