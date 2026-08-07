@@ -14,6 +14,7 @@ import {
   isFund,
   closingBalances,
   minWalletBalance,
+  orderFee,
   postingsForApproval,
   postingsForOpen,
   reverse,
@@ -21,6 +22,7 @@ import {
 
 const syp = (n: number) => minor(BigInt(n) * 100n)
 const DRIVER = 'driver-1'
+const BRANCH = 'branch-1'
 
 function orders(cash: number, electronic: number, free: number, fee: Minor): ShiftOrder[] {
   const out: ShiftOrder[] = []
@@ -248,12 +250,112 @@ describe('corrections (BR7)', () => {
   })
 })
 
+/**
+ * An order settled PARTLY in cash and partly through the wallet — what the client's real payments
+ * log shows, and what `payMode` cannot express.
+ */
+describe('an order the customer paid partly in cash', () => {
+  const FEE = syp(1_000)
+  const IN_WALLET = syp(300)
+  const order: ShiftOrder = { orderNo: 'PART-1', payMode: 'cash', fee: FEE, walletAmount: IN_WALLET }
+
+  it('debits BOTH funds, and the two debits sum to exactly the fee', () => {
+    const p = orderFee(DRIVER, order)
+    expect(balanceOf([p], isFund('driver_wallet'))).toBe(IN_WALLET)
+    expect(balanceOf([p], isFund('driver_cash'))).toBe(syp(700))
+    expect(debitsOf(p)).toBe(FEE)
+  })
+
+  it('posts exactly one line when nothing was measured — the pre-log shape is untouched', () => {
+    const plain: ShiftOrder = { orderNo: 'CASH-1', payMode: 'cash', fee: FEE }
+    expect(orderFee(DRIVER, plain).lines.filter((l) => l.side === 'D')).toHaveLength(1)
+  })
+
+  it('leaves both driver funds at zero once the day is returned', () => {
+    const input = { driverId: DRIVER, branchId: BRANCH, floatTranches: [], topupTranches: [], orders: [order] }
+    const totals = totalFees([FEE])
+    const all = [...postingsForOpen(input), ...postingsForApproval(input, splitBlock(totals, 4_000))]
+    expect(balanceOf(all, isFund('driver_cash'))).toBe(0n)
+    expect(balanceOf(all, isFund('driver_wallet'))).toBe(0n)
+    expect(balanceOf(all, isFund('fee_earned'))).toBe(0n)
+  })
+})
+
+/**
+ * The ambiguity the reader refuses to resolve, stated as arithmetic so it stops being folklore.
+ *
+ * A credit landing at an order's minute is either that order's electronic part or an unrelated
+ * incentive. The two readings agree on the wallet to the minor unit and disagree on the CASH by
+ * exactly the credit — which is why BR1 catches a wrong guess, and why no second gate is needed.
+ */
+describe('a credit at an order’s minute: part of the order, or a separate incentive', () => {
+  const FEE = syp(765)
+  const CREDIT = syp(153)
+  const base = { floatTotal: minor(0n), topupTotal: minor(0n), endCashDeclared: minor(0n), endWalletDeclared: minor(0n) }
+
+  const asPartOfOrder = evaluateBr1({
+    ...base,
+    orders: [{ orderNo: 'A', payMode: 'cash', fee: FEE, walletAmount: CREDIT }],
+  })
+  const asSeparateIncentive = evaluateBr1({
+    ...base,
+    orders: [{ orderNo: 'A', payMode: 'cash', fee: FEE }],
+    walletAdjustments: [CREDIT],
+  })
+
+  it('agrees on the wallet exactly', () => {
+    expect(asPartOfOrder.expectedWallet).toBe(asSeparateIncentive.expectedWallet)
+  })
+
+  it('disagrees on the cash by exactly the credit — so a wrong guess misses zero by it', () => {
+    expect(asSeparateIncentive.expectedCash - asPartOfOrder.expectedCash).toBe(CREDIT)
+  })
+
+  it('and the ledger follows the equation under either reading', () => {
+    for (const [orders, walletAdjustments] of [
+      [[{ orderNo: 'A', payMode: 'cash' as const, fee: FEE, walletAmount: CREDIT }], []],
+      [[{ orderNo: 'A', payMode: 'cash' as const, fee: FEE }], [CREDIT]],
+    ] as const) {
+      const input = { driverId: DRIVER, branchId: BRANCH, floatTranches: [], topupTranches: [], orders, walletAdjustments }
+      const totals = totalFees([FEE])
+      const beforeReturns = [
+        ...postingsForOpen(input),
+        ...postingsForApproval(input, splitBlock(totals, 4_000)).filter((p) => !p.eventType.endsWith('_return')),
+      ]
+      const br1 = evaluateBr1({ ...base, orders, walletAdjustments })
+      expect(balanceOf(beforeReturns, isFund('driver_cash'))).toBe(br1.expectedCash)
+      expect(balanceOf(beforeReturns, isFund('driver_wallet'))).toBe(br1.expectedWallet)
+    }
+  })
+})
+
 describe('property: every posting balances under random event streams (brief §5a, AC #5)', () => {
   const payMode = fc.constantFrom<PayMode>('cash', 'electronic', 'free')
   // Fees deliberately not divisible by 5, so the 20% cut does not divide evenly.
   const fee = fc.integer({ min: 1, max: 2_000_000 }).map((n) => minor(BigInt(n)))
-  const orderArb = fc.record({ orderNo: fc.uuid(), payMode, fee })
+  /**
+   * Half the orders carry a MEASURED `walletAmount`, anywhere in `[0, fee]`.
+   *
+   * Without this the two properties below were vacuous about the case that matters: while every
+   * generated order was all-cash or all-wallet, `orderFee`'s single debit and `closingBalances`'
+   * split agreed by accident, and a part-paid order — the whole reason `walletAmount` exists —
+   * stranded money in `driver_cash` with nothing to catch it. The other half stays unmeasured, so
+   * the pre-log shape keeps its own coverage.
+   */
+  const orderArb = fc.record({ orderNo: fc.uuid(), payMode, fee }).chain((o) =>
+    fc.oneof(
+      fc.constant(o as ShiftOrder),
+      fc
+        .integer({ min: 0, max: Number(o.fee) })
+        .map((w): ShiftOrder => ({ ...o, walletAmount: minor(BigInt(w)) })),
+    ),
+  )
   const tranche = fc.integer({ min: 1, max: 50_000_000 }).map((n) => minor(BigInt(n)))
+  /** A wallet movement no order explains. SIGNED: an incentive arrives, a withdrawal leaves. */
+  const adjustment = fc
+    .integer({ min: -5_000_000, max: 5_000_000 })
+    .filter((n) => n !== 0)
+    .map((n) => minor(BigInt(n)))
 
   it('holds for any mix of modes, fees and tranche counts', () => {
     fc.assert(
@@ -261,12 +363,20 @@ describe('property: every posting balances under random event streams (brief §5
         fc.array(tranche, { minLength: 0, maxLength: 4 }),
         fc.array(tranche, { minLength: 0, maxLength: 4 }),
         fc.array(orderArb, { minLength: 0, maxLength: 40 }),
-        (floatTranches, topupTranches, rawOrders) => {
+        fc.array(adjustment, { minLength: 0, maxLength: 6 }),
+        (floatTranches, topupTranches, rawOrders, walletAdjustments) => {
           // Order numbers must be unique — they are the idempotency key.
           const seen = new Set<string>()
           const orderList = rawOrders.filter((o) => !seen.has(o.orderNo) && seen.add(o.orderNo))
 
-          const input = { driverId: DRIVER, floatTranches, topupTranches, orders: orderList }
+          const input = {
+            driverId: DRIVER,
+            branchId: BRANCH,
+            floatTranches,
+            topupTranches,
+            orders: orderList,
+            walletAdjustments,
+          }
           const totals = totalFees(orderList.map((o) => o.fee))
           const split = splitBlock(totals, bpsForCount(DEFAULT_BANDS, orderList.length))
           const all = [...postingsForOpen(input), ...postingsForApproval(input, split)]
@@ -290,11 +400,19 @@ describe('property: every posting balances under random event streams (brief §5
         fc.array(tranche, { minLength: 0, maxLength: 3 }),
         fc.array(tranche, { minLength: 0, maxLength: 3 }),
         fc.array(orderArb, { minLength: 0, maxLength: 30 }),
-        (floatTranches, topupTranches, rawOrders) => {
+        fc.array(adjustment, { minLength: 0, maxLength: 6 }),
+        (floatTranches, topupTranches, rawOrders, walletAdjustments) => {
           const seen = new Set<string>()
           const orderList = rawOrders.filter((o) => !seen.has(o.orderNo) && seen.add(o.orderNo))
 
-          const input = { driverId: DRIVER, floatTranches, topupTranches, orders: orderList }
+          const input = {
+            driverId: DRIVER,
+            branchId: BRANCH,
+            floatTranches,
+            topupTranches,
+            orders: orderList,
+            walletAdjustments,
+          }
           const totals = totalFees(orderList.map((o) => o.fee))
           const split = splitBlock(totals, bpsForCount(DEFAULT_BANDS, orderList.length))
           const beforeReturns = [
@@ -308,6 +426,7 @@ describe('property: every posting balances under random event streams (brief §5
             endCashDeclared: minor(0n),
             endWalletDeclared: minor(0n),
             orders: orderList,
+            walletAdjustments,
           })
 
           expect(balanceOf(beforeReturns, isFund('driver_cash'))).toBe(br1.expectedCash)

@@ -38,6 +38,7 @@ export type LedgerEvent =
   | 'wallet_topup'
   | 'order_fee'
   | 'yalago_cut'
+  | 'wallet_adjustment'
   | 'share_split'
   | 'float_return'
   | 'wallet_return'
@@ -185,26 +186,31 @@ export function walletReturn(driverId: string, amount: Minor): Posting {
 
 // ── Order postings (BR3) ──────────────────────────────────────────────────────────────────
 
-/** Which fund physically receives the fee, by payment mode. */
-function receivingFund(payMode: PayMode, driverId: string): FundRef {
-  return payMode === 'cash'
-    ? { kind: 'driver_cash', driverId }
-    : { kind: 'driver_wallet', driverId }
-}
-
 /**
- * Fee revenue for one order. Debits whichever asset received it, credits `fee_earned`.
- * `yalagoCutPosting` then removes Yallago's 20% from the wallet, for every mode alike.
+ * Fee revenue for one order, split across the two funds that actually received it.
+ *
+ * This used to debit the WHOLE fee to one fund chosen by `payMode`, while `closingBalances` below
+ * split the same order by `orderWalletAmount`. The two agreed only while `walletAmount` was never
+ * measured. The moment it is — a customer settles part of an order electronically and hands over
+ * the rest — the one-fund posting strands `fee − walletAmount` in `driver_cash` and drives
+ * `driver_wallet` negative by the same amount, so `postingsForApproval` no longer leaves the
+ * driver's funds at zero. The two must use ONE rule, and this is it:
+ *
+ *     driver_wallet  ← orderWalletAmount(order)
+ *     driver_cash    ← fee − orderWalletAmount(order)
+ *
+ * With `walletAmount` absent, `orderWalletAmount` falls back to the pay mode and one of the two
+ * lines is zero and is omitted — so every order recorded before the log was read posts exactly the
+ * single line it posted before, to the minor unit.
  */
 export function orderFee(driverId: string, order: ShiftOrder): Posting {
-  return assertBalanced({
-    eventType: 'order_fee',
-    occurrenceKey: order.orderNo,
-    lines: [
-      D(receivingFund(order.payMode, driverId), order.fee, `fee_${order.payMode}`),
-      C({ kind: 'fee_earned' }, order.fee),
-    ],
-  })
+  const inWallet = orderWalletAmount(order)
+  const inHand = sub(order.fee, inWallet)
+  const lines: PostingLine[] = []
+  if (inWallet > 0n) lines.push(D({ kind: 'driver_wallet', driverId }, inWallet, 'fee_wallet'))
+  if (inHand > 0n) lines.push(D({ kind: 'driver_cash', driverId }, inHand, 'fee_cash'))
+  lines.push(C({ kind: 'fee_earned' }, order.fee))
+  return assertBalanced({ eventType: 'order_fee', occurrenceKey: order.orderNo, lines })
 }
 
 /**
@@ -222,6 +228,39 @@ export function yalagoCutPosting(driverId: string, order: ShiftOrder, rounding: 
     occurrenceKey: order.orderNo,
     lines: [D({ kind: 'yalago_share' }, cut), C({ kind: 'driver_wallet', driverId }, cut)],
   })
+}
+
+/**
+ * A wallet movement that belongs to no order — an incentive, a merchant payment, a top-up the
+ * office did not make, a withdrawal.
+ *
+ * `closingBalances` has always added these into `endWallet`, and `walletReturn` credits that back —
+ * but nothing ever DEBITED the wallet for them, so wiring adjustments in without this recipe would
+ * leave `driver_wallet` at exactly −Σadjustments. They were harmless only while nothing populated
+ * the term.
+ *
+ * The counterparty is a COST CENTRE, deliberately, and not `company_revenue` or `yalago_income`:
+ * nobody has yet decided whose money an incentive is, and posting it to a named party would be this
+ * system asserting an answer it does not have. `forceClose` already uses the same escape hatch for
+ * an unexplained gap. The books balance, the amount stays visible under its own code, and the
+ * accounting engine reclassifies it later — which is exactly what the owner said the operations
+ * list is for.
+ *
+ * `amount` is SIGNED, because a movement is not a balance: negative left the wallet.
+ */
+export function walletAdjustment(
+  driverId: string,
+  branchId: string,
+  amount: Minor,
+  occurrenceKey: string,
+): Posting {
+  const magnitude = amount < 0n ? minor(-amount) : amount
+  const centre: FundRef = { kind: 'cost_center', costCenterId: `wallet_adjustment:${branchId}` }
+  const lines: PostingLine[] =
+    amount >= 0n
+      ? [D({ kind: 'driver_wallet', driverId }, magnitude, 'wallet_adjustment'), C(centre, magnitude)]
+      : [D(centre, magnitude), C({ kind: 'driver_wallet', driverId }, magnitude, 'wallet_adjustment')]
+  return assertBalanced({ eventType: 'wallet_adjustment', occurrenceKey, lines })
 }
 
 // ── Approval posting (BR4) ────────────────────────────────────────────────────────────────
@@ -281,6 +320,8 @@ export function reverse(posting: Posting, occurrenceKey: string): Posting {
 
 export interface ShiftPostingInput {
   readonly driverId: string
+  /** Whose books the unexplained wallet movements land in. Only needed when there are any. */
+  readonly branchId?: string
   readonly floatTranches: readonly Minor[]
   readonly topupTranches: readonly Minor[]
   readonly orders: readonly ShiftOrder[]
@@ -317,6 +358,17 @@ export function postingsForApproval(input: ShiftPostingInput, split: BlockSplit)
     if (orderYalagoCut(order, rounding) > 0n) postings.push(yalagoCutPosting(input.driverId, order, rounding))
   }
   if (totals.feeTotal > 0n) postings.push(shareSplit(input.driverId, totals, split))
+
+  // Every unexplained wallet movement gets its own posting, in the SAME order `closingBalances`
+  // sums them, so the wallet the ledger holds and the wallet BR1 expects are built from one list.
+  // Without these the return below credits a wallet nothing ever debited.
+  const adjustments = input.walletAdjustments ?? []
+  if (adjustments.length > 0 && input.branchId === undefined) {
+    throw new RangeError('wallet adjustments need a branchId: their counterparty is a branch cost centre')
+  }
+  adjustments.forEach((amount, i) => {
+    if (amount !== 0n) postings.push(walletAdjustment(input.driverId, input.branchId!, amount, String(i + 1)))
+  })
 
   // Both are returned in full at end of day (D-4), leaving both driver funds at exactly zero.
   const { endCash, endWallet } = closingBalances(input)
