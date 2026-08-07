@@ -697,7 +697,17 @@ export async function addOrder(
   deps: Deps,
   actor: Actor,
   shiftId: string,
-  input: { providerOrderNo: string; payMode: ShiftOrder['payMode']; fee: Minor; zone: string | null; source?: 'manual' | 'ocr'; feeOcr?: Minor | null },
+  input: {
+    providerOrderNo: string
+    payMode: ShiftOrder['payMode']
+    fee: Minor
+    zone: string | null
+    source?: 'manual' | 'ocr'
+    feeOcr?: Minor | null
+    included?: boolean
+    walletAmount?: Minor | null
+    occurredMinute?: string | null
+  },
 ): Promise<ShiftOrderRecord> {
   const shift = await mustFind(deps, shiftId)
   if (shift.state !== 'open' && shift.state !== 'suspended') {
@@ -743,6 +753,9 @@ export async function addOrder(
     notes: null,
     createdBy: actor.userId,
     points: [],
+    included: input.included ?? true,
+    walletAmount: input.walletAmount ?? null,
+    occurredMinute: input.occurredMinute ?? null,
   }
   try {
     await deps.orders.create(order)
@@ -779,6 +792,8 @@ export async function addManualOrder(
     companyShare?: Minor | null
     notes?: string | null
     points?: readonly OrderPointRecord[]
+    walletAmount?: Minor | null
+    occurredMinute?: string | null
   },
 ): Promise<ShiftOrderRecord> {
   const shift = await mustFind(deps, shiftId)
@@ -827,6 +842,11 @@ export async function addManualOrder(
     notes: input.notes ?? null,
     createdBy: actor.userId,
     points: input.points ?? [],
+    // A manager adding an order by hand is asserting it belongs to this shift; that is the whole
+    // point of the act. The measured wallet amount is the payments log's business, not his.
+    included: true,
+    walletAmount: input.walletAmount ?? null,
+    occurredMinute: input.occurredMinute ?? null,
   }
   try {
     await deps.orders.create(order)

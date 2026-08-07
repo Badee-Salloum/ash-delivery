@@ -315,6 +315,64 @@ export interface ShiftOrderRecord {
   createdBy: string | null
   /** The route: start, any stops, end. Empty for a Yallago order. */
   points: readonly OrderPointRecord[]
+  /**
+   * Checked at close. `false` keeps the row with the shift and shows it to everyone, but takes it
+   * out of BR1, the tier band and the ledger — data, not money. Screenshots overlap and show
+   * previous days, so a read list always contains rows that are not this shift's.
+   */
+  included: boolean
+  /**
+   * How much of this fee reached the WALLET, measured off «سجل المدفوعات». `null` means nobody
+   * measured it and the pay mode decides, exactly as before the log was ever read.
+   */
+  walletAmount: Minor | null
+  /** «HH:MM» off the dashboard — what a log row is paired to. `null` when the clock was illegible. */
+  occurredMinute: string | null
+}
+
+/** What a movement IS, which decides how BR1 may use it. See `WalletMovementRecord.role`. */
+export type WalletMovementRole = 'yalago_cut' | 'order_credit' | 'unmatched'
+
+/**
+ * One row of «سجل المدفوعات» — what the wallet actually did, as opposed to what the orders imply.
+ *
+ * The three roles are disjoint and that is the whole defence against counting money twice:
+ * `yalago_cut` never enters BR1 (the equation derives the cut from the fee, because the 80% block
+ * is a residual); `order_credit` becomes its order's `walletAmount` and is already inside the
+ * order's arithmetic; only `unmatched` rows are summed into BR1's `walletAdjustments`.
+ */
+export interface WalletMovementRecord {
+  id: string
+  shiftId: string
+  /** SIGNED: negative left the wallet, positive arrived. A movement, not a balance. */
+  amount: Minor
+  /** «HH:MM», or '' when the row's clock was not legible. */
+  occurredMinute: string
+  /** Ordinal among rows sharing (shift, minute, amount) — assigned server-side, never by a client. */
+  seq: number
+  orderId: string | null
+  role: WalletMovementRole
+  /** Nobody has yet said whether a credit at an order's minute belongs to that order. */
+  ambiguous: boolean
+  included: boolean
+  source: 'ocr' | 'manual'
+  mediaId: string | null
+  notes: string | null
+  createdBy: string | null
+}
+
+/** A movement as it arrives from a screenshot, before the server gives it an identity. */
+export interface WalletMovementInput {
+  amount: Minor
+  occurredMinute: string
+  orderId?: string | null
+  role?: WalletMovementRole
+  ambiguous?: boolean
+  included?: boolean
+  source?: 'ocr' | 'manual'
+  mediaId?: string | null
+  notes?: string | null
+  createdBy?: string | null
 }
 
 /** One point on a manual order's route. The written place is required; the map pin is optional. */
@@ -432,9 +490,38 @@ export interface AssignmentRepo {
 
 export interface OrderRepo {
   create(order: ShiftOrderRecord): Promise<void>
+  /**
+   * Update the mutable fields of an order that is already stored — the checkbox, the measured
+   * wallet amount, the fee, the pay mode, the minute.
+   *
+   * The driver submits his whole list, and overlapping screenshots mean he submits rows the server
+   * already holds. Without this every re-read was a 409 on `provider_order_no` (globally unique)
+   * and an already-sent row could never be corrected at all; the only remedy was a manager adding
+   * a compensating order. Identity — the shift and the order number — is never changed here.
+   */
+  update(order: ShiftOrderRecord): Promise<void>
   listByShift(shiftId: string): Promise<ShiftOrderRecord[]>
   findByProviderNo(providerOrderNo: string): Promise<ShiftOrderRecord | null>
   delete(id: string): Promise<void>
+}
+
+export interface WalletMovementRepo {
+  listByShift(shiftId: string): Promise<WalletMovementRecord[]>
+  /**
+   * Merge a page of freshly-read movements into what the shift already holds.
+   *
+   * Two screenshots of one scrolling log overlap, so the same rows arrive twice and re-uploading a
+   * page must add nothing. Implementations count what already exists per `(minute, amount)` and
+   * insert only the SURPLUS, numbering it from there — so a second page contributes exactly its
+   * genuinely new rows. Returns what was inserted.
+   */
+  merge(shiftId: string, movements: readonly WalletMovementInput[]): Promise<WalletMovementRecord[]>
+  /** Change what a movement IS, or whether it counts. Never its amount — that is what was read. */
+  update(
+    id: string,
+    patch: { role?: WalletMovementRole; orderId?: string | null; included?: boolean; ambiguous?: boolean },
+  ): Promise<void>
+  deleteByShift(shiftId: string): Promise<void>
 }
 
 export interface LedgerRepo {
@@ -839,6 +926,8 @@ export interface Deps {
   batteryReadings: BatteryReadingRepo
   batterySwaps: BatterySwapRepo
   orders: OrderRepo
+  /** «سجل المدفوعات» — what the wallet actually did, beside what the orders imply it should have. */
+  movements: WalletMovementRepo
   ledger: LedgerRepo
   expenses: ExpenseRepo
   cashCounts: CashCountRepo

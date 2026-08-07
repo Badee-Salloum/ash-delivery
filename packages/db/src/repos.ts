@@ -11,6 +11,10 @@ import type {
   ShiftOrderRecord,
   UserRecord,
   UserRepo,
+  WalletMovementInput,
+  WalletMovementRecord,
+  WalletMovementRepo,
+  WalletMovementRole,
 } from '@ash/contracts'
 import { normalizeUsername } from '@ash/contracts'
 import { type CalendarDate, type FxDay, type Minor, type Posting, minor } from '@ash/domain'
@@ -258,8 +262,9 @@ export class PgOrderRepo implements OrderRepo {
       await withTransaction(this.pool, {}, async (client) => {
         await client.query(
           `INSERT INTO shift_orders (id, shift_id, provider_order_no, pay_mode, fee_minor, zone, driver_confirmed,
-                                     source, fee_ocr_minor, kind, driver_share_minor, company_share_minor, notes, created_by)
-           VALUES ($1, $2, $3, $4::pay_mode, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+                                     source, fee_ocr_minor, kind, driver_share_minor, company_share_minor, notes, created_by,
+                                     included, wallet_amount_minor, occurred_minute)
+           VALUES ($1, $2, $3, $4::pay_mode, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
           [
             order.id,
             order.shiftId,
@@ -275,6 +280,9 @@ export class PgOrderRepo implements OrderRepo {
             order.companyShare?.toString() ?? null,
             order.notes,
             order.createdBy,
+            order.included,
+            order.walletAmount?.toString() ?? null,
+            order.occurredMinute,
           ],
         )
         for (const [i, point] of order.points.entries()) {
@@ -293,6 +301,27 @@ export class PgOrderRepo implements OrderRepo {
       }
       throw err
     }
+  }
+  /** Identity — the shift and the order number — is never touched; only what a human may correct. */
+  async update(order: ShiftOrderRecord): Promise<void> {
+    await this.pool.query(
+      `UPDATE shift_orders
+          SET pay_mode = $2::pay_mode, fee_minor = $3, zone = $4, source = $5, fee_ocr_minor = $6,
+              notes = $7, included = $8, wallet_amount_minor = $9, occurred_minute = $10
+        WHERE id = $1`,
+      [
+        order.id,
+        order.payMode,
+        order.fee.toString(),
+        order.zone,
+        order.source,
+        order.feeOcr?.toString() ?? null,
+        order.notes,
+        order.included,
+        order.walletAmount?.toString() ?? null,
+        order.occurredMinute,
+      ],
+    )
   }
   async listByShift(shiftId: string): Promise<ShiftOrderRecord[]> {
     const { rows } = await this.pool.query<Record<string, unknown>>(
@@ -324,7 +353,7 @@ const ORDER_COLUMNS = `
          o.driver_confirmed, o.source, o.fee_ocr_minor::text AS fee_ocr, o.kind,
          o.driver_share_minor::text  AS driver_share,
          o.company_share_minor::text AS company_share,
-         o.notes, o.created_by,
+         o.notes, o.created_by, o.included, o.wallet_amount_minor::text AS wallet_amount, o.occurred_minute,
          COALESCE(
            (SELECT json_agg(json_build_object('role', p.role, 'label', p.label, 'lat', p.lat, 'lng', p.lng)
                             ORDER BY p.seq)
@@ -350,6 +379,136 @@ const toOrder = (r: Record<string, unknown>): ShiftOrderRecord => ({
   notes: (r.notes as string | null) ?? null,
   createdBy: (r.created_by as string | null) ?? null,
   points: (r.points as ShiftOrderRecord['points'] | null) ?? [],
+  // `?? true` and `?? null` are the pre-0015 meanings: every order recorded before the operations
+  // list existed was counted, and none of them had a measured wallet amount.
+  included: (r.included as boolean | null) ?? true,
+  walletAmount:
+    r.wallet_amount === null || r.wallet_amount === undefined ? null : minor(BigInt(String(r.wallet_amount))),
+  occurredMinute: (r.occurred_minute as string | null) ?? null,
+})
+
+/**
+ * The wallet's own rows, merged page by page.
+ *
+ * `merge` is the interesting one: two screenshots of one scrolling log overlap, so the same rows
+ * arrive twice and re-uploading a page must add nothing. It counts what is already stored for each
+ * `(minute, amount)` and inserts only the surplus, numbering from there.
+ */
+export class PgWalletMovementRepo implements WalletMovementRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async listByShift(shiftId: string): Promise<WalletMovementRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `${MOVEMENT_COLUMNS} WHERE shift_id = $1 ORDER BY occurred_minute, amount_minor, seq`,
+      [shiftId],
+    )
+    return rows.map(toMovement)
+  }
+
+  async merge(shiftId: string, movements: readonly WalletMovementInput[]): Promise<WalletMovementRecord[]> {
+    if (movements.length === 0) return []
+    return withTransaction(this.pool, {}, async (client) => {
+      // One locked read of the existing tallies, inside the transaction, so two pages uploaded at
+      // once cannot both decide they are the surplus.
+      const { rows: existing } = await client.query<{ occurred_minute: string; amount_minor: string; n: string }>(
+        `SELECT occurred_minute, amount_minor::text AS amount_minor, COUNT(*)::text AS n
+           FROM shift_wallet_movements WHERE shift_id = $1
+          GROUP BY occurred_minute, amount_minor
+          FOR UPDATE`,
+        [shiftId],
+      )
+      const tally = new Map<string, number>()
+      for (const r of existing) tally.set(`${r.occurred_minute}|${r.amount_minor}`, Number(r.n))
+
+      const written: WalletMovementRecord[] = []
+      for (const m of movements) {
+        const key = `${m.occurredMinute}|${m.amount.toString()}`
+        const already = tally.get(key) ?? 0
+        // The page re-showed a row we already hold: consume one and write nothing.
+        if (already > 0) {
+          tally.set(key, already - 1)
+          continue
+        }
+        const { rows } = await client.query<Record<string, unknown>>(
+          `INSERT INTO shift_wallet_movements
+             (shift_id, amount_minor, occurred_minute, seq, order_id, role, ambiguous, included, source, media_id, notes, created_by)
+           VALUES ($1,$2,$3,
+                   (SELECT COALESCE(MAX(seq),0)+1 FROM shift_wallet_movements
+                     WHERE shift_id = $1 AND occurred_minute = $3 AND amount_minor = $2),
+                   $4,$5,$6,$7,$8,$9,$10,$11)
+           RETURNING id, shift_id, amount_minor::text AS amount, occurred_minute, seq, order_id, role,
+                     ambiguous, included, source, media_id, notes, created_by`,
+          [
+            shiftId,
+            m.amount.toString(),
+            m.occurredMinute,
+            m.orderId ?? null,
+            m.role ?? 'unmatched',
+            m.ambiguous ?? false,
+            m.included ?? true,
+            m.source ?? 'ocr',
+            m.mediaId ?? null,
+            m.notes ?? null,
+            m.createdBy ?? null,
+          ],
+        )
+        written.push(toMovement(rows[0]!))
+      }
+      return written
+    })
+  }
+
+  async update(
+    id: string,
+    patch: { role?: WalletMovementRole; orderId?: string | null; included?: boolean; ambiguous?: boolean },
+  ): Promise<void> {
+    await this.pool.query(
+      `UPDATE shift_wallet_movements
+          SET role      = COALESCE($2, role),
+              order_id  = CASE WHEN $3::boolean THEN $4 ELSE order_id END,
+              included  = COALESCE($5, included),
+              ambiguous = COALESCE($6, ambiguous)
+        WHERE id = $1`,
+      [
+        id,
+        patch.role ?? null,
+        // A null orderId is a real value — «this credit belongs to no order» — so it cannot be
+        // expressed by COALESCE, which cannot tell "set to null" from "leave alone".
+        Object.hasOwn(patch, 'orderId'),
+        patch.orderId ?? null,
+        patch.included ?? null,
+        patch.ambiguous ?? null,
+      ],
+    )
+  }
+
+  async deleteByShift(shiftId: string): Promise<void> {
+    await this.pool.query('DELETE FROM shift_wallet_movements WHERE shift_id = $1', [shiftId])
+  }
+}
+
+const MOVEMENT_COLUMNS = `
+  SELECT id, shift_id, amount_minor::text AS amount, occurred_minute, seq, order_id, role,
+         ambiguous, included, source, media_id, notes, created_by
+    FROM shift_wallet_movements`
+
+const toMovement = (r: Record<string, unknown>): WalletMovementRecord => ({
+  id: String(r.id),
+  shiftId: String(r.shift_id),
+  amount: minor(BigInt(String(r.amount))),
+  occurredMinute: String(r.occurred_minute ?? ''),
+  seq: Number(r.seq),
+  orderId: (r.order_id as string | null) ?? null,
+  role: r.role as WalletMovementRecord['role'],
+  ambiguous: Boolean(r.ambiguous),
+  included: Boolean(r.included),
+  source: (r.source as WalletMovementRecord['source'] | null) ?? 'ocr',
+  mediaId: (r.media_id as string | null) ?? null,
+  notes: (r.notes as string | null) ?? null,
+  createdBy: (r.created_by as string | null) ?? null,
 })
 
 export class PgFxRepo implements FxRepo {

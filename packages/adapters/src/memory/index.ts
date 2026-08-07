@@ -40,6 +40,10 @@ import type {
   VehicleEventRecord,
   VehicleEventRepo,
   VehicleRecord,
+  WalletMovementInput,
+  WalletMovementRecord,
+  WalletMovementRepo,
+  WalletMovementRole,
   WeekLockRecord,
   WeekLockRepo,
 } from '@ash/contracts'
@@ -300,6 +304,23 @@ export class MemoryOrderRepo implements OrderRepo {
     }
     this.rows.set(order.id, { ...order })
   }
+  /** Identity is never changed — only what a human may correct. Mirrors `PgOrderRepo.update`. */
+  async update(order: ShiftOrderRecord): Promise<void> {
+    const existing = this.rows.get(order.id)
+    if (!existing) return
+    this.rows.set(order.id, {
+      ...existing,
+      payMode: order.payMode,
+      fee: order.fee,
+      zone: order.zone,
+      source: order.source,
+      feeOcr: order.feeOcr,
+      notes: order.notes,
+      included: order.included,
+      walletAmount: order.walletAmount,
+      occurredMinute: order.occurredMinute,
+    })
+  }
   async listByShift(shiftId: string): Promise<ShiftOrderRecord[]> {
     return [...this.rows.values()].filter((o) => o.shiftId === shiftId)
   }
@@ -309,6 +330,87 @@ export class MemoryOrderRepo implements OrderRepo {
   }
   async delete(id: string): Promise<void> {
     this.rows.delete(id)
+  }
+}
+
+export class MemoryWalletMovementRepo implements WalletMovementRepo {
+  readonly rows = new Map<string, WalletMovementRecord>()
+  private nextId = 1
+
+  async listByShift(shiftId: string): Promise<WalletMovementRecord[]> {
+    return [...this.rows.values()]
+      .filter((m) => m.shiftId === shiftId)
+      .sort((a, b) => {
+        if (a.occurredMinute !== b.occurredMinute) return a.occurredMinute.localeCompare(b.occurredMinute)
+        // Compared as bigints. `Number(a.amount - b.amount)` would order correctly today and lose
+        // precision on a large enough difference — and money never becomes a float here, ever.
+        if (a.amount !== b.amount) return a.amount < b.amount ? -1 : 1
+        return a.seq - b.seq
+      })
+      .map((m) => ({ ...m }))
+  }
+
+  /** The same multiset merge the database does: consume a match, insert only the surplus. */
+  async merge(shiftId: string, movements: readonly WalletMovementInput[]): Promise<WalletMovementRecord[]> {
+    const tally = new Map<string, number>()
+    for (const m of this.rows.values()) {
+      if (m.shiftId !== shiftId) continue
+      const key = `${m.occurredMinute}|${m.amount.toString()}`
+      tally.set(key, (tally.get(key) ?? 0) + 1)
+    }
+    const written: WalletMovementRecord[] = []
+    for (const input of movements) {
+      const key = `${input.occurredMinute}|${input.amount.toString()}`
+      const already = tally.get(key) ?? 0
+      if (already > 0) {
+        tally.set(key, already - 1)
+        continue
+      }
+      let maxSeq = 0
+      for (const m of this.rows.values()) {
+        if (m.shiftId === shiftId && m.occurredMinute === input.occurredMinute && m.amount === input.amount) {
+          maxSeq = Math.max(maxSeq, m.seq)
+        }
+      }
+      const row: WalletMovementRecord = {
+        id: `wm-${this.nextId++}`,
+        shiftId,
+        amount: input.amount,
+        occurredMinute: input.occurredMinute,
+        seq: maxSeq + 1,
+        orderId: input.orderId ?? null,
+        role: input.role ?? 'unmatched',
+        ambiguous: input.ambiguous ?? false,
+        included: input.included ?? true,
+        source: input.source ?? 'ocr',
+        mediaId: input.mediaId ?? null,
+        notes: input.notes ?? null,
+        createdBy: input.createdBy ?? null,
+      }
+      this.rows.set(row.id, row)
+      written.push({ ...row })
+    }
+    return written
+  }
+
+  async update(
+    id: string,
+    patch: { role?: WalletMovementRole; orderId?: string | null; included?: boolean; ambiguous?: boolean },
+  ): Promise<void> {
+    const row = this.rows.get(id)
+    if (!row) return
+    this.rows.set(id, {
+      ...row,
+      role: patch.role ?? row.role,
+      // `orderId: null` is a real instruction — «belongs to no order» — so presence decides, not truthiness.
+      orderId: Object.hasOwn(patch, 'orderId') ? (patch.orderId ?? null) : row.orderId,
+      included: patch.included ?? row.included,
+      ambiguous: patch.ambiguous ?? row.ambiguous,
+    })
+  }
+
+  async deleteByShift(shiftId: string): Promise<void> {
+    for (const [id, m] of this.rows) if (m.shiftId === shiftId) this.rows.delete(id)
   }
 }
 
@@ -834,6 +936,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     batteryReadings: new MemoryBatteryReadingRepo(),
     batterySwaps: new MemoryBatterySwapRepo(),
     orders: new MemoryOrderRepo(),
+    movements: new MemoryWalletMovementRepo(),
     ledger,
     expenses: new MemoryExpenseRepo(),
     cashCounts: new MemoryCashCountRepo(),

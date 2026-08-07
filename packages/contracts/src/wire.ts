@@ -112,6 +112,23 @@ export const addOrderRequest = z.object({
   notes: z.string().max(2000).nullable().default(null),
   /** Start, end, and any stops between. Empty for a Yallago order. */
   points: z.array(orderPointRequest).max(20).default([]),
+  /**
+   * Checked at close. `false` keeps the order with the shift but takes it out of BR1, the tier
+   * band and the ledger — the screenshots overlap and show previous days, so a read list always
+   * contains rows that are not this shift's.
+   */
+  included: z.boolean().default(true),
+  /**
+   * How much of this fee reached the WALLET, measured off «سجل المدفوعات». Money, so it crosses as
+   * a decimal string — never a JSON number. `null` means unmeasured and the pay mode decides.
+   */
+  walletAmount: moneySchema.nullable().default(null),
+  /** «HH:MM» off the dashboard: what a log row is paired to. */
+  occurredMinute: z
+    .string()
+    .regex(/^[0-2]\d:[0-5]\d$/)
+    .nullable()
+    .default(null),
 })
 
 /**

@@ -3,7 +3,7 @@ import type { Deps } from '@ash/contracts'
 import { runConformanceSuite } from '@ash/testkit/conformance'
 import { assertBigIntParser, createPool } from '../src/pool.ts'
 import { migrate } from '../src/migrate.ts'
-import { PgAuditRepo, PgFxRepo, PgLedgerRepo, PgOrderRepo, PgSessionRepo, PgUserRepo } from '../src/repos.ts'
+import { PgAuditRepo, PgFxRepo, PgLedgerRepo, PgOrderRepo, PgSessionRepo, PgWalletMovementRepo, PgUserRepo } from '../src/repos.ts'
 import {
   PgCashCountRepo,
   PgNotificationRepo,
@@ -135,6 +135,7 @@ if (!DATABASE_URL) {
         batterySwaps: new PgBatterySwapRepo(pool),
         assignments: new PgAssignmentRepo(pool),
         orders: new PgOrderRepo(pool),
+        movements: new PgWalletMovementRepo(pool),
         ledger: new PgLedgerRepo(pool),
         expenses: new PgExpenseRepo(pool),
         cashCounts: new PgCashCountRepo(pool),

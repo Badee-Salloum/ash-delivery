@@ -165,9 +165,68 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
             notes: null,
             createdBy: null,
             points: [],
+            included: true,
+            walletAmount: null,
+            occurredMinute: null,
           }
           await deps.orders.create(order)
           await expect(deps.orders.create({ ...order, id: 'o-2' })).rejects.toThrow()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+    })
+
+    /**
+     * Two screenshots of one scrolling log overlap, so the same rows arrive twice. Both adapters
+     * must merge them identically or a test passes against a laxer rule than production runs.
+     */
+    describe('wallet movements', () => {
+      const move = (amount: number, occurredMinute: string) => ({ amount: syp(amount), occurredMinute })
+
+      it('re-reading a page adds nothing', async () => {
+        const deps = await fresh()
+        try {
+          const page = [move(-47, '18:06'), move(153, '17:42'), move(-42, '17:42')]
+          expect(await deps.movements.merge(SHIFT, page)).toHaveLength(3)
+          expect(await deps.movements.merge(SHIFT, page)).toHaveLength(0)
+          expect(await deps.movements.listByShift(SHIFT)).toHaveLength(3)
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('a second page contributes only its genuinely new rows', async () => {
+        const deps = await fresh()
+        try {
+          await deps.movements.merge(SHIFT, [move(-47, '18:06'), move(153, '17:42')])
+          // The overlap: the first row was already read off page one, the second is new.
+          const added = await deps.movements.merge(SHIFT, [move(153, '17:42'), move(-24, '13:10')])
+          expect(added.map((m) => m.amount)).toEqual([syp(-24)])
+          expect(await deps.movements.listByShift(SHIFT)).toHaveLength(3)
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('keeps two genuinely identical movements in the same minute, numbered apart', async () => {
+        const deps = await fresh()
+        try {
+          const both = await deps.movements.merge(SHIFT, [move(-24, '13:10'), move(-24, '13:10')])
+          expect(both.map((m) => m.seq)).toEqual([1, 2])
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('can unlink a movement from its order — null is an instruction, not an omission', async () => {
+        const deps = await fresh()
+        try {
+          const [row] = await deps.movements.merge(SHIFT, [{ ...move(153, '17:42'), orderId: null }])
+          await deps.movements.update(row!.id, { role: 'unmatched', orderId: null, included: false })
+          const after = (await deps.movements.listByShift(SHIFT))[0]!
+          expect(after.included).toBe(false)
+          expect(after.orderId).toBeNull()
         } finally {
           await ctx.cleanup?.(deps)
         }
