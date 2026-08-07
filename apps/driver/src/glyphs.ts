@@ -82,21 +82,43 @@ export function maskFromPixels(rgba: Uint8ClampedArray | Uint8Array, width: numb
     luma[i] = level
     histogram[level]!++
   }
-  // The median, not the mean: a page that is mostly white with a black header has a mean pulled
-  // somewhere between the two, and a threshold there is ink everywhere or nowhere.
-  let seen = 0
-  let median = 128
+  // Otsu, not a fixed offset from the median.
+  //
+  // The offset version merged glyphs, and merging is not a cosmetic problem: «−١٧٧» came back as
+  // three shapes instead of four, and a reader that silently loses a digit is worse than one that
+  // reads nothing. A page of black text on white has a strongly bimodal histogram, and the
+  // threshold that minimises within-class variance sits in the valley between the two peaks —
+  // where the strokes keep their true width — instead of part-way up the page's own slope.
+  let total = 0
+  for (let level = 0; level < 256; level++) total += level * histogram[level]!
+  let sumBackground = 0
+  let countBackground = 0
+  let best = 0
+  let bestVariance = -1
   for (let level = 0; level < 256; level++) {
-    seen += histogram[level]!
-    if (seen >= n / 2) {
-      median = level
-      break
+    countBackground += histogram[level]!
+    if (countBackground === 0) continue
+    const countForeground = n - countBackground
+    if (countForeground === 0) break
+    sumBackground += level * histogram[level]!
+    const meanBackground = sumBackground / countBackground
+    const meanForeground = (total - sumBackground) / countForeground
+    const between = countBackground * countForeground * (meanBackground - meanForeground) ** 2
+    if (between > bestVariance) {
+      bestVariance = between
+      best = level
     }
   }
-  const darkOnLight = median > 127
-  const cut = darkOnLight ? median - 40 : median + 40
+
+  // Which side of the cut is the ink: whichever side has FEWER pixels. Text is a minority of any
+  // page, in either theme, and assuming dark-on-light returns a confidently empty page on the
+  // dark-theme build of the same app.
+  let below = 0
+  for (let level = 0; level <= best; level++) below += histogram[level]!
+  const inkIsDark = below <= n - below
+
   const data = new Uint8Array(n)
-  for (let i = 0; i < n; i++) data[i] = (darkOnLight ? luma[i]! < cut : luma[i]! > cut) ? 1 : 0
+  for (let i = 0; i < n; i++) data[i] = (inkIsDark ? luma[i]! <= best : luma[i]! > best) ? 1 : 0
   return { data, width, height }
 }
 
@@ -208,4 +230,150 @@ export function featuresOf(c: Component, group: GroupMetrics): GlyphFeatures {
     relH: h / group.tallest,
     relY: ((c.y0 + c.y1) / 2 - group.top) / group.height,
   }
+}
+
+// ── Naming a glyph ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Weights, and why they are what they are.
+ *
+ * Shape carries an implicit 1; the three scalars are corrections. Aspect is scored on the LOG
+ * ratio, never the raw difference: raw aspect spans 0.28 to 5.33, so a raw term would let the
+ * dash's 5.16 swamp every distinction among the digits, which sit between 0.3 and 0.8. In log
+ * space the dot-versus-dash gap is 1.83 while the worst same-class drift across font sizes is
+ * 0.131 — a factor of fourteen.
+ *
+ * `relH` and `relY` are deliberately the smallest, because they are not font-invariant so much as
+ * GROUP-CONTEXT features: in the date «٠٨/٠٤» the tallest thing is the slash, so every digit there
+ * measures ~0.75, while in an amount the tallest thing is a digit and they measure ~0.9. Weighting
+ * them heavily buys a beautiful same-font score and collapses across font sizes — which is the one
+ * thing this reader must not do, since «٨» is learnt entirely at one size.
+ */
+const W_ASPECT = 0.35
+const W_RELH = 0.25
+const W_RELY = 0.15
+
+/**
+ * The two conditions a reading must satisfy, and they are NOT interchangeable.
+ *
+ * A score alone does not mean recognition — it means "nothing else is nearby". Measured against
+ * ink whose class is missing from the templates entirely, the best score runs as low as 0.35,
+ * BELOW the worst score of a correct answer: no score threshold can separate them, because the
+ * two populations overlap the wrong way round. That is precisely the shape of «−٥٢ read as −07».
+ *
+ * The MARGIN is what carries the safety. A glyph the templates genuinely know sits far from its
+ * runner-up; ink they do not know sits between two equally poor guesses. Under adversarial
+ * re-measurement the pair below produced zero accepted-but-wrong answers across a
+ * production-difficulty cross-font split, a six-thousand-context sweep and 2–10% pixel noise.
+ * It costs roughly one correct glyph in seven. On money that is the right side of the trade.
+ */
+const MAX_SCORE = 0.47
+const MIN_MARGIN = 0.1
+
+/**
+ * Classes whose templates are not yet backed by enough DISTINCT renderings to be trusted with money.
+ *
+ * «٨» is the reason this exists: it appears in no amount on the sampled day, so its template comes
+ * entirely from the date «٠٨/٠٤» — twenty-two rows of the same two renderings, at a smaller size
+ * than any amount. Two independent reviews reached the same conclusion: the decisive test has not
+ * been run, and until a real amount containing an «٨» is photographed it cannot be. «٩» is barely
+ * better — one amount-font sample and two renderings in all.
+ *
+ * The separator marks were quarantined too, and are not any more. Against the real screenshots they
+ * matched at scores of 0.03 and 0.00 with margins of 0.47 and 0.55 — an order of magnitude clear of
+ * what the gate demands — while the dangerous direction, a trailing zero mistaken for a decimal
+ * point, was independently refused on score. The gate is doing that work; the quarantine was only
+ * costing two rows that the reader in fact knew perfectly.
+ *
+ * A quarantined class is never ANSWERED: the glyph is refused and the driver types that row. Delete
+ * an entry the moment real screenshots carry it, then re-harvest and regenerate the templates.
+ */
+export const UNVALIDATED: ReadonlySet<string> = new Set(['8', '9'])
+
+export interface Template {
+  readonly label: string
+  readonly bits: Uint8Array
+  readonly logAspect: number
+  readonly relH: number
+  readonly relY: number
+}
+
+/** Unpack the shipped hex form — four pixels per hex digit — into a grid. */
+export function unpackTemplates(
+  raw: readonly { label: string; hex: string; aspect: number; relH: number; relY: number }[],
+): Template[] {
+  return raw.map((t) => {
+    const bits = new Uint8Array(GW * GH)
+    for (let i = 0; i < t.hex.length; i++) {
+      const nibble = parseInt(t.hex[i]!, 16)
+      for (let b = 0; b < 4; b++) bits[i * 4 + b] = (nibble >> (3 - b)) & 1
+    }
+    return { label: t.label, bits, logAspect: Math.log(t.aspect), relH: t.relH, relY: t.relY }
+  })
+}
+
+export interface Reading {
+  readonly label: string
+  readonly score: number
+  readonly runnerUp: string | null
+  readonly margin: number
+}
+
+/** The nearest template, with the runner-up — the runner-up is what makes refusal possible. */
+export function nearestTemplate(f: GlyphFeatures, templates: readonly Template[]): Reading | null {
+  if (templates.length === 0) return null
+  const logAspect = Math.log(f.aspect)
+  let best: Template | null = null
+  let bestScore = Infinity
+  let secondLabel: string | null = null
+  let secondScore = Infinity
+  for (const t of templates) {
+    let differing = 0
+    for (let i = 0; i < t.bits.length; i++) if (f.bits[i] !== t.bits[i]) differing++
+    const score =
+      differing / (GW * GH) +
+      W_ASPECT * Math.abs(logAspect - t.logAspect) +
+      W_RELH * Math.abs(f.relH - t.relH) +
+      W_RELY * Math.abs(f.relY - t.relY)
+    if (score < bestScore) {
+      secondScore = bestScore
+      secondLabel = best?.label ?? null
+      bestScore = score
+      best = t
+    } else if (score < secondScore) {
+      secondScore = score
+      secondLabel = t.label
+    }
+  }
+  if (!best) return null
+  return { label: best.label, score: bestScore, runnerUp: secondLabel, margin: secondScore - bestScore }
+}
+
+/** The name of a glyph, or `null` — which means "type this one", never "here is my best guess". */
+export function classifyGlyph(f: GlyphFeatures, templates: readonly Template[]): Reading | null {
+  const r = nearestTemplate(f, templates)
+  if (!r) return null
+  if (r.score >= MAX_SCORE || r.margin <= MIN_MARGIN) return null
+  if (UNVALIDATED.has(r.label)) return null
+  return r
+}
+
+/**
+ * Every glyph in a box, read left to right — or `null` if ANY of them was refused.
+ *
+ * All or nothing per row, deliberately. Half an amount is not a smaller amount, it is a different
+ * one: dropping a refused glyph from «١٦٥» yields «١٦», which is a plausible fee and wrong by an
+ * order of magnitude. A row the reader will not vouch for entirely, it does not offer at all.
+ */
+export function readGlyphRow(mask: Mask, box: Box, templates: readonly Template[]): string | null {
+  const comps = componentsIn(mask, box)
+  if (comps.length === 0) return null
+  const group = groupMetrics(comps)
+  let out = ''
+  for (const c of comps) {
+    const r = classifyGlyph(featuresOf(c, group), templates)
+    if (!r) return null
+    out += r.label
+  }
+  return out
 }
