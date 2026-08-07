@@ -21,41 +21,61 @@ for (const s of data.samples) {
   byLabel.get(s.label).push(s)
 }
 
-const rows = []
-for (const [label, group] of [...byLabel.entries()].sort()) {
-  const acc = new Float64Array(data.gw * data.gh)
-  let aspect = 0
-  let relH = 0
-  let relY = 0
-  for (const s of group) {
-    for (let i = 0; i < acc.length; i++) acc[i] += s.bits[i]
-    aspect += s.aspect
-    relH += s.relH
-    relY += s.relY
+/** Build one averaged template per class from whichever samples the caller chose. */
+function buildRows(pick) {
+  const rows = []
+  for (const [label, all] of [...byLabel.entries()].sort()) {
+    const group = pick(all)
+    if (group.length === 0) continue
+    const acc = new Float64Array(data.gw * data.gh)
+    let aspect = 0
+    let relH = 0
+    let relY = 0
+    for (const s of group) {
+      for (let i = 0; i < acc.length; i++) acc[i] += s.bits[i]
+      aspect += s.aspect
+      relH += s.relH
+      relY += s.relY
+    }
+    const n = group.length
+    let hex = ''
+    for (let i = 0; i < acc.length; i += 4) {
+      let nibble = 0
+      for (let b = 0; b < 4; b++) if ((acc[i + b] ?? 0) / n >= 0.5) nibble |= 1 << (3 - b)
+      hex += nibble.toString(16)
+    }
+    rows.push({
+      label,
+      n,
+      distinct: new Set(group.map((s) => s.bits.join(''))).size,
+      fonts: [...new Set(group.map((s) => s.font))].sort().join('+'),
+      hex,
+      aspect: +(aspect / n).toFixed(4),
+      relH: +(relH / n).toFixed(4),
+      relY: +(relY / n).toFixed(4),
+    })
   }
-  const n = group.length
-  let hex = ''
-  for (let i = 0; i < acc.length; i += 4) {
-    let nibble = 0
-    for (let b = 0; b < 4; b++) if ((acc[i + b] ?? 0) / n >= 0.5) nibble |= 1 << (3 - b)
-    hex += nibble.toString(16)
-  }
-  // How many DISTINCT renderings stand behind this class. The count of samples flatters it badly:
-  // the same date «٠٨/٠٤» is reprinted on 22 rows, so «٨» is 22 samples but ~2 real glyphs.
-  const distinct = new Set(group.map((s) => s.bits.join(''))).size
-  rows.push({
-    label,
-    n,
-    distinct,
-    fonts: [...new Set(group.map((s) => s.font))].sort().join('+'),
-    hex,
-    aspect: +(aspect / n).toFixed(4),
-    relH: +(relH / n).toFixed(4),
-    relY: +(relY / n).toFixed(4),
-  })
+  return rows
 }
 
-const body = rows
+/*
+ * TWO SETS, because these are averaged prototypes and the two screens are printed at different
+ * sizes. Pooling them blurs both: harvesting the clock dropped the amounts from 31 rows to 26 with
+ * nothing read wrongly — the prototypes had merely drifted between the two renderings and lost
+ * margin — and sharpening them back for the amounts then made the clock unreadable outright.
+ * Each region is scored against prototypes drawn from its own font, and a class with too few
+ * samples there falls back to everything, which is how «٨» reaches the amounts at all.
+ */
+const amountRows = buildRows((all) => {
+  const own = all.filter((s) => s.font === 'amount')
+  return own.length >= 3 ? own : all
+})
+const clockRows = buildRows((all) => {
+  const own = all.filter((s) => s.font === 'date')
+  return own.length >= 3 ? own : all
+})
+
+const bodyOf = (rows) => rows
   .map(
     (r) =>
       `  // ${String(r.n).padStart(3)} samples, ${String(r.distinct).padStart(2)} distinct, ${r.fonts}\n` +
@@ -86,11 +106,16 @@ export interface GlyphTemplate {
 }
 
 export const GLYPH_TEMPLATES: readonly GlyphTemplate[] = [
-${body}
+${bodyOf(amountRows)}
+]
+
+/** The smaller font of the clock-and-date column. Same classes, prototypes drawn from that font. */
+export const CLOCK_TEMPLATES: readonly GlyphTemplate[] = [
+${bodyOf(clockRows)}
 ]
 `
 
 const out = join(root, 'apps/driver/src/glyph-templates.ts')
 writeFileSync(out, file)
-console.log(`${rows.length} templates → ${out}`)
-for (const r of rows) console.log(`  ${r.label}  n=${String(r.n).padStart(3)}  distinct=${String(r.distinct).padStart(2)}  ${r.fonts}`)
+console.log(`${amountRows.length} amount + ${clockRows.length} clock templates → ${out}`)
+for (const r of clockRows) console.log(`  clock ${r.label}  n=${String(r.n).padStart(3)}  distinct=${String(r.distinct).padStart(2)}  ${r.fonts}`)

@@ -59,6 +59,33 @@ const CLUSTERS = {
   'log-0804-b.jpg': { date: '08/04', lastRowsDate: { count: 2, date: '08/03' }, rows: 11, hours: { 6: '9', 7: '9' } },
 }
 
+/**
+ * The WHOLE right-hand cluster of each row, glyph by glyph, left to right.
+ *
+ * It reads «م  H:MM  MM/DD» on the log and «م  H:MM» on the orders screen, so the labels are the
+ * marker, then the time including its colon, then the date. This is what teaches the alphabet the
+ * COLON and the two half-day marks — «م» and «ص» — which the amounts never contain and without
+ * which an order has no identity but the fee somebody happened to charge.
+ *
+ * A row whose glyph count does not match its label count is REPORTED and skipped, never guessed
+ * at: a mislabelled colon poisons every time the reader will ever produce.
+ */
+const TIME_CLUSTERS = {
+  'log-0804-a.jpg': [
+    ['م', '6:06'], ['م', '6:06'], ['م', '5:42'], ['م', '5:42'], ['م', '5:22'], ['م', '5:22'],
+    ['م', '5:07'], ['م', '5:07'], ['م', '4:50'], ['م', '4:16'], ['م', '4:16'],
+  ],
+  'log-0804-b.jpg': [
+    ['م', '3:51'], ['م', '3:51'], ['م', '3:19'], ['م', '1:39'], ['م', '1:39'], ['م', '1:10'],
+    ['ص', '9:24'], ['ص', '9:24'], ['ص', '3:23'], ['م', '6:33'], ['م', '6:29'],
+  ],
+  // The orders screen carries no date per row — it sits in a header above the day's rows — so the
+  // cluster is the marker and the time alone. The cancelled 3:22 row has no «SYP» and no anchor.
+  'orders-0804-a.jpg': [['م', '6:06'], ['م', '5:42'], ['م', '5:22'], ['م', '5:07'], ['م', '4:50']],
+  'orders-0804-b.jpg': [['م', '4:16'], ['م', '3:51'], ['م', '3:19'], ['م', '1:39']],
+  'orders-0804-c.jpg': [['م', '3:19'], ['م', '1:39'], ['م', '1:10']],
+}
+
 const worker = await createWorker(['eng'], OEM.LSTM_ONLY, { langPath: join(driver, 'public', 'tesseract'), gzip: true })
 await worker.setParameters({ tessedit_pageseg_mode: '6', preserve_interword_spaces: '1' })
 
@@ -182,19 +209,20 @@ for (const [file, amounts] of Object.entries(AMOUNTS)) {
       console.log(`!! ${file} row ${i} «${amounts[i]}»: ${comps.length} glyphs, expected ${want.length}`)
     }
 
-    // ── The date, to the RIGHT — the only place «٨» is written at all ─────────────────────
-    if (!cluster) return
+    // ── The cluster to the RIGHT: the marker, the time, and (on the log) the date ─────────
+    const timeRow = TIME_CLUSTERS[file]?.[i]
+    if (!timeRow) return
     const right = componentsIn(grey, a.x1 + 4, top, Math.min(img.width, a.x1 + Math.round(unit * 26)), bottom)
-    if (right.length < 6) return
-    const late = cluster.lastRowsDate && i >= cluster.rows - cluster.lastRowsDate.count
-    const dateLabels = [...(late ? cluster.lastRowsDate.date : cluster.date)]
-    const dateComps = right.slice(-dateLabels.length)
+    if (right.length === 0) return
+    const late = cluster?.lastRowsDate && i >= cluster.rows - cluster.lastRowsDate.count
+    const dateStr = cluster ? (late ? cluster.lastRowsDate.date : cluster.date) : ''
+    const labels = [timeRow[0], ...timeRow[1], ...dateStr]
+    if (right.length !== labels.length) {
+      console.log(`!! ${file} row ${i} cluster «${labels.join('')}»: ${right.length} glyphs, expected ${labels.length}`)
+      return
+    }
     const group = groupOf(right)
-    dateComps.forEach((c, j) => samples.push({ label: dateLabels[j], font: 'date', file, ...featuresOf(c, group) }))
-
-    // The hour digit sits immediately after «م», which is the leftmost component of the cluster.
-    const hour = cluster.hours?.[i]
-    if (hour && right[1]) samples.push({ label: hour, font: 'date', file, ...featuresOf(right[1], group) })
+    right.forEach((c, j) => samples.push({ label: labels[j], font: 'date', file, ...featuresOf(c, group) }))
   })
 }
 await worker.terminate()
@@ -204,7 +232,7 @@ for (const s of samples) byClass.set(s.label, (byClass.get(s.label) ?? 0) + 1)
 console.log(`\namount rows fully segmented: ${rowsUsable}/${rowsSeen}`)
 console.log(`glyphs harvested: ${samples.length}`)
 console.log('\nclass  n   (a = amount font, d = date font)')
-for (const label of [...'0123456789', '-', '+', '.', ',', '/']) {
+for (const label of [...'0123456789', '-', '+', '.', ',', '/', ':', 'م', 'ص']) {
   const a = samples.filter((s) => s.label === label && s.font === 'amount').length
   const d = samples.filter((s) => s.label === label && s.font === 'date').length
   const flag = a + d === 0 ? '   NEVER SEEN' : a + d < 3 ? '   thin' : ''

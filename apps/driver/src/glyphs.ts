@@ -385,15 +385,34 @@ export function classifyGlyph(f: GlyphFeatures, templates: readonly Template[]):
  * one: dropping a refused glyph from «١٦٥» yields «١٦», which is a plausible fee and wrong by an
  * order of magnitude. A row the reader will not vouch for entirely, it does not offer at all.
  */
-export function readGlyphRow(mask: Mask, box: Box, templates: readonly Template[]): string | null {
+export function readGlyphRow(
+  mask: Mask,
+  box: Box,
+  templates: readonly Template[],
+  alphabet: ReadonlySet<string> = AMOUNT_ALPHABET,
+): string | null {
+  const usable = templates.filter((t) => alphabet.has(t.label))
   const comps = withoutRules(componentsIn(mask, box))
   if (comps.length === 0) return null
   const group = groupMetrics(comps)
   let out = ''
   for (const c of comps) {
-    const r = classifyGlyph(featuresOf(c, group), templates)
+    const r = classifyGlyph(featuresOf(c, group), usable)
     if (!r) return null
     out += r.label
   }
   return out
 }
+
+/**
+ * What a given region is ALLOWED to contain, and why it is worth restricting.
+ *
+ * An amount never holds a colon or a half-day mark; a clock never holds a minus or a decimal
+ * point. Letting every template compete everywhere cost real reads — teaching the alphabet «:»,
+ * «م» and «ص» for the clock immediately dropped the amounts from 31 rows to 24, because a zero
+ * and a colon's dot are close enough to eat each other's MARGIN even though neither was ever
+ * wrong. Scoring a region against only the glyphs that can appear in it restores that margin, and
+ * it is not a trick: it is the same grammatical fact a person uses without noticing.
+ */
+export const AMOUNT_ALPHABET: ReadonlySet<string> = new Set([...'0123456789', '-', '+', '.', ','])
+export const CLOCK_ALPHABET: ReadonlySet<string> = new Set([...'0123456789', ':', '/', 'م', 'ص'])

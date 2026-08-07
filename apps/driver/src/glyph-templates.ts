@@ -29,26 +29,72 @@ export const GLYPH_TEMPLATES: readonly GlyphTemplate[] = [
   { label: '-', hex: 'ffffffffffffffffffffffffffffffffffffffffffffffff', aspect: 5.1556, relH: 0.1678, relY: 0.6054, distinct: 2 },
   //   2 samples,  2 distinct, amount
   { label: '.', hex: '1f81f81f8ffffffffffff1ff1ff1ff0380381f81f8fc0fc0', aspect: 0.5714, relH: 0.4118, relY: 0.8421, distinct: 2 },
-  //  22 samples,  3 distinct, date
-  { label: '/', hex: '00100700700e00e00e0380380300700701c01c0180380380', aspect: 0.4652, relH: 1, relY: 0.4391, distinct: 3 },
-  //  58 samples,  8 distinct, amount+date
-  { label: '0', hex: '0f00f00f00f0ffffffffffffffffffffffff0f00f00f00f0', aspect: 0.769, relH: 0.2463, relY: 0.4485, distinct: 8 },
+  //  17 samples,  2 distinct, date
+  { label: '/', hex: '00100700700600e0080380380300700701c01c0180380380', aspect: 0.4706, relH: 1, relY: 0.4389, distinct: 2 },
+  //  14 samples,  7 distinct, amount
+  { label: '0', hex: '1f81f81f81f8fffffffffffffffffffffffffff038038038', aspect: 0.8286, relH: 0.2809, relY: 0.5642, distinct: 7 },
   //  17 samples, 13 distinct, amount
   { label: '1', hex: 'f80f80fc0ff01f01fc1fc07c07c07c00f00f00f00f00c00c', aspect: 0.3036, relH: 0.9866, relY: 0.4727, distinct: 13 },
   //  19 samples, 13 distinct, amount
   { label: '2', hex: 'e01e01e03f0f3fe3fe3c01c01c01c00c00e00e00e00c00c0', aspect: 0.5212, relH: 0.9834, relY: 0.4931, distinct: 13 },
-  //  12 samples, 11 distinct, amount+date
-  { label: '3', hex: 'e11e19e1bfbf3fe3f03801801801801800c00c0080080080', aspect: 0.6718, relH: 0.9205, relY: 0.4609, distinct: 11 },
-  //  27 samples,  3 distinct, amount+date
-  { label: '4', hex: '0300303c0f00c00c00c00fc03f00c03003003003003ff3ff', aspect: 0.4783, relH: 0.8257, relY: 0.3739, distinct: 3 },
+  //  10 samples, 10 distinct, amount
+  { label: '3', hex: 'e11e19f1bfbf3fe3f03801801801801c00c00c00c0080080', aspect: 0.6728, relH: 0.9634, relY: 0.4828, distinct: 10 },
+  //   7 samples,  1 distinct, amount
+  { label: '4', hex: '0300f01c0380300200fc03f00f00400c01001001801ff0fe', aspect: 0.5263, relH: 1, relY: 0.5, distinct: 1 },
   //  15 samples, 12 distinct, amount
   { label: '5', hex: '0300300fc1fe31e20ee02c03c03c03c03c02e0effeffc1e0', aspect: 0.6247, relH: 0.8511, relY: 0.452, distinct: 12 },
   //   5 samples,  3 distinct, amount
   { label: '6', hex: 'ffcffc0fc00c00c00c00c00c00c00c00c006006006007003', aspect: 0.6462, relH: 0.9656, relY: 0.4613, distinct: 3 },
   //   7 samples,  7 distinct, amount
   { label: '7', hex: '000e01e0370370638638618c1cc0cc0c8078078070030030', aspect: 0.7425, relH: 0.9699, relY: 0.5, distinct: 7 },
-  //  22 samples,  2 distinct, date
-  { label: '8', hex: '0200200300f00d00d00dc1dc10e10e10e303203203e03001', aspect: 0.75, relH: 0.7059, relY: 0.3568, distinct: 2 },
-  //   3 samples,  2 distinct, amount+date
-  { label: '9', hex: '0e00e03f8c38c18c18fd83f801e01e01e01e006006007007', aspect: 0.5926, relH: 0.8039, relY: 0.3454, distinct: 2 },
+  //  17 samples,  1 distinct, date
+  { label: '8', hex: '0200200300f00d00d00dc1dc10e10e10e303203203e03001', aspect: 0.75, relH: 0.7059, relY: 0.3566, distinct: 1 },
+  //   8 samples,  6 distinct, amount+date
+  { label: '9', hex: '0e00e03f8c38c1ee1efde3fe01e00e00e00e006007007007', aspect: 0.5548, relH: 0.8897, relY: 0.322, distinct: 6 },
+  //  24 samples,  9 distinct, date
+  { label: ':', hex: '0f00f00f00f00f00f0fffffffffffffff0f00f00f00f00f0', aspect: 0.9007, relH: 0.3581, relY: 0.2956, distinct: 9 },
+  //   3 samples,  2 distinct, date
+  { label: 'ص', hex: '00200200700904905007107e47c47c400c004404c0780300', aspect: 1.5714, relH: 0.8235, relY: 0.6389, distinct: 2 },
+  //  21 samples, 10 distinct, date
+  { label: 'م', hex: '0200201f011c00e00f0ff3fe200200e00200200200200200', aspect: 0.6973, relH: 0.7941, relY: 0.6174, distinct: 10 },
+]
+
+/** The smaller font of the clock-and-date column. Same classes, prototypes drawn from that font. */
+export const CLOCK_TEMPLATES: readonly GlyphTemplate[] = [
+  //   7 samples,  1 distinct, amount
+  { label: '+', hex: '070070070070070070070fffffffff070070070070070070', aspect: 0.9412, relH: 0.9683, relY: 0.582, distinct: 1 },
+  //   1 samples,  1 distinct, amount
+  { label: ',', hex: '0070070071f81f8fc0fc0e00e00e00fc0fc0ff8ff8ff8ff8', aspect: 0.5714, relH: 0.4118, relY: 0.6842, distinct: 1 },
+  //  15 samples,  2 distinct, amount
+  { label: '-', hex: 'ffffffffffffffffffffffffffffffffffffffffffffffff', aspect: 5.1556, relH: 0.1678, relY: 0.6054, distinct: 2 },
+  //   2 samples,  2 distinct, amount
+  { label: '.', hex: '1f81f81f8ffffffffffff1ff1ff1ff0380381f81f8fc0fc0', aspect: 0.5714, relH: 0.4118, relY: 0.8421, distinct: 2 },
+  //  17 samples,  2 distinct, date
+  { label: '/', hex: '00100700700600e0080380380300700701c01c0180380380', aspect: 0.4706, relH: 1, relY: 0.4389, distinct: 2 },
+  //  39 samples,  1 distinct, date
+  { label: '0', hex: '0f00f00f00f0ffffffffffffffffffffffff0f00f00f00f0', aspect: 0.75, relH: 0.2353, relY: 0.411, distinct: 1 },
+  //  12 samples,  5 distinct, date
+  { label: '1', hex: 'f00f00ff0ff00ff0ff0ff0ff00f00f00f00f00f00f00f00f', aspect: 0.2525, relH: 0.6904, relY: 0.4288, distinct: 5 },
+  //  12 samples,  6 distinct, date
+  { label: '2', hex: 'c03c03f07ffe3fe3fc3c03c00c00c00c00c00c00c00c00c0', aspect: 0.5443, relH: 0.7683, relY: 0.35, distinct: 6 },
+  //  10 samples,  8 distinct, date
+  { label: '3', hex: 'c31c31e3ffff3fe3f03803801801801801c01c01c01c01c0', aspect: 0.6094, relH: 0.6935, relY: 0.4427, distinct: 8 },
+  //  24 samples,  4 distinct, date
+  { label: '4', hex: '0300303c0f00c00c00c00fc03f00c03003003003003ff3ff', aspect: 0.4904, relH: 0.7412, relY: 0.3186, distinct: 4 },
+  //  11 samples,  6 distinct, date
+  { label: '5', hex: '0fc0fc3ff3ff30f303303c03c03c03c03c03f0fffcffc0f0', aspect: 0.676, relH: 0.5845, relY: 0.3421, distinct: 6 },
+  //   6 samples,  2 distinct, date
+  { label: '6', hex: 'c00c00ffeffe00600600601e006006006006007007007001', aspect: 0.5385, relH: 0.7647, relY: 0.3333, distinct: 2 },
+  //   9 samples,  8 distinct, amount+date
+  { label: '7', hex: 'c01e01e0170330230238618e1cc0cc0cc0f8070070030020', aspect: 0.7442, relH: 0.9112, relY: 0.4649, distinct: 8 },
+  //  17 samples,  1 distinct, date
+  { label: '8', hex: '0200200300f00d00d00dc1dc10e10e10e303203203e03001', aspect: 0.75, relH: 0.7059, relY: 0.3566, distinct: 1 },
+  //   7 samples,  5 distinct, date
+  { label: '9', hex: '0e00e03f8c38c1ec1efde3fe01e006006006006007001001', aspect: 0.5467, relH: 0.8739, relY: 0.3073, distinct: 5 },
+  //  24 samples,  9 distinct, date
+  { label: ':', hex: '0f00f00f00f00f00f0fffffffffffffff0f00f00f00f00f0', aspect: 0.9007, relH: 0.3581, relY: 0.2956, distinct: 9 },
+  //   3 samples,  2 distinct, date
+  { label: 'ص', hex: '00200200700904905007107e47c47c400c004404c0780300', aspect: 1.5714, relH: 0.8235, relY: 0.6389, distinct: 2 },
+  //  21 samples, 10 distinct, date
+  { label: 'م', hex: '0200201f011c00e00f0ff3fe200200e00200200200200200', aspect: 0.6973, relH: 0.7941, relY: 0.6174, distinct: 10 },
 ]

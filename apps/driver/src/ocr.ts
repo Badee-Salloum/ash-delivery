@@ -27,7 +27,8 @@
  */
 // Statically imported, unlike tesseract.js: this is a few kilobytes of pure arithmetic with no
 // wasm behind it, and the amounts cannot be read without it.
-import { maskFromPixels, readGlyphRow, unpackTemplates } from './glyphs.ts'
+import { CLOCK_ALPHABET, maskFromPixels, readGlyphRow, unpackTemplates } from './glyphs.ts'
+import { CLOCK_TEMPLATES } from './glyph-templates.ts'
 import { GLYPH_TEMPLATES } from './glyph-templates.ts'
 
 export interface OcrReading {
@@ -736,9 +737,9 @@ function feeOnLine(line: string): string | null {
 async function readAmountsByGlyph(
   image: Blob | Uint8Array,
   timeoutMs: number,
-): Promise<{ amounts: (string | null)[]; rows: number; text: string }> {
+): Promise<{ amounts: (string | null)[]; clocks: { time: string; dateIso: string | null }[]; rows: number; text: string }> {
   const prepared = await prepareWithPixels(toBlob(image))
-  if (!prepared) return { amounts: [], rows: 0, text: '' }
+  if (!prepared) return { amounts: [], clocks: [], rows: 0, text: '' }
 
   const result = await recognize(prepared.blob, { whitelist: '', psm: 6 }, timeoutMs)
   // The word must BE «SYP», not merely contain it. `/SYP/` matched Tesseract's junk words too, and
@@ -748,10 +749,49 @@ async function readAmountsByGlyph(
     .flatMap((l) => l.words)
     .filter((w) => /^[^A-Za-z]{0,2}syp[^A-Za-z]{0,2}$/i.test(w.text.trim()))
     .sort((a, b) => a.y0 - b.y0)
-  if (anchors.length === 0) return { amounts: [], rows: 0, text: result.text }
+  if (anchors.length === 0) return { amounts: [], clocks: [], rows: 0, text: result.text }
 
   const mask = maskFromPixels(prepared.pixels, prepared.width, prepared.height)
   const templates = unpackTemplates(GLYPH_TEMPLATES)
+  // The clock is printed smaller than the amounts, so it is scored against prototypes drawn from
+  // its own font — one shared set blurred both and cost real reads on each.
+  const clockTemplates = unpackTemplates(CLOCK_TEMPLATES)
+
+  /**
+   * The clock, and on the log the date, from the cluster to the RIGHT of «SYP».
+   *
+   * This is what gives an order an IDENTITY. The screen carries no order number anywhere — the
+   * previous key was invented from the fee, which is not a name, it is a coincidence — and two
+   * deliveries at the same price on one day were indistinguishable. «م ٣:١٩ ٠٨/٠٤» is the row.
+   */
+  const clockAt = (a: { x0: number; x1: number; y0: number; y1: number }): { time: string; dateIso: string | null } => {
+    const unit = a.y1 - a.y0
+    const pad = Math.round(unit * 0.45)
+    const raw = readGlyphRow(
+      mask,
+      {
+        x0: a.x1 + 4,
+        y0: Math.max(0, a.y0 - pad),
+        x1: Math.min(prepared.width, a.x1 + Math.round(unit * 26)),
+        y1: Math.min(prepared.height, a.y1 + pad),
+      },
+      clockTemplates,
+      CLOCK_ALPHABET,
+    )
+    const m = raw?.match(/^([مص])(\d{1,2}):([0-5]\d)(?:(\d{2})\/(\d{2}))?$/)
+    if (!m) return { time: '', dateIso: null }
+    // «م» is the afternoon and «ص» the morning; twelve is the hour that moves, in both directions.
+    let hour = Number(m[2])
+    if (m[1] === 'م' && hour < 12) hour += 12
+    if (m[1] === 'ص' && hour === 12) hour = 0
+    const time = `${String(hour).padStart(2, '0')}:${m[3]}`
+    // The log writes MM/DD. The year is not on the screen at all, so it comes from the clock the
+    // phone already has — the driver is photographing today's work, not an archive.
+    const dateIso = m[4] && m[5] ? `${new Date().getFullYear()}-${m[4]}-${m[5]}` : null
+    return { time, dateIso }
+  }
+
+  const clocks = anchors.map(clockAt)
   const amounts = anchors.map((a) => {
     // «SYP»'s own cap height IS the font size, handed over for free — the band and the reach to
     // the left are both measured in it, so the same numbers work at any screenshot resolution.
@@ -768,7 +808,7 @@ async function readAmountsByGlyph(
       templates,
     )
   })
-  return { amounts, rows: anchors.length, text: result.text }
+  return { amounts, clocks, rows: anchors.length, text: result.text }
 }
 
 /** Read the whole order list off a «Recent orders» / «الطلبات الحديثة» screenshot. */
@@ -801,9 +841,12 @@ export async function readOrders(image: Blob | Uint8Array, timeoutMs = ORDERS_TI
     // Arabic-Indic, then: read the shapes ourselves.
     const byGlyph = await readAmountsByGlyph(image, timeoutMs)
     if (byGlyph.text.length > text.length) text = byGlyph.text
+    // Each order carries the clock it happened at, which is the only identity the screen offers —
+    // it has no order number anywhere on it.
     const glyphOrders = byGlyph.amounts
-      .filter((a): a is string => a !== null)
-      .map((fee) => ({ dateIso: null, time: '', fee, zone: null }))
+      .map((fee, i) => ({ fee, clock: byGlyph.clocks[i] }))
+      .filter((r): r is { fee: string; clock: { time: string; dateIso: string | null } } => r.fee !== null)
+      .map((r) => ({ dateIso: r.clock?.dateIso ?? null, time: r.clock?.time ?? '', fee: r.fee, zone: null }))
     if (glyphOrders.length === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text }
     return {
       ok: true,
@@ -893,11 +936,15 @@ export async function readPaymentsLog(
     const byGlyph = await readAmountsByGlyph(image, timeoutMs)
     if (byGlyph.text.length > text.length) text = byGlyph.text
     const glyphMovements = byGlyph.amounts
-      .filter((a): a is string => a !== null)
-      .map((raw) => {
+      .map((raw, i) => {
+        if (raw === null) return null
         const negative = raw.startsWith('-')
         const magnitude = listAmount(raw.replace(/^[-+]/, ''))
-        return magnitude === null ? null : { amount: negative ? `-${magnitude}` : magnitude, time: '' }
+        // The clock is what pairs a movement to the order it belongs to — «سجل المدفوعات» and
+        // «الطلبات الحديثة» share nothing else, and the 20% cut lands at its order's own minute.
+        return magnitude === null
+          ? null
+          : { amount: negative ? `-${magnitude}` : magnitude, time: byGlyph.clocks[i]?.time ?? '' }
       })
       .filter((m): m is WalletMovement => m !== null)
     if (glyphMovements.length === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text }
