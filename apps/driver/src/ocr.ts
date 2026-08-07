@@ -266,7 +266,21 @@ function normaliseContrast(
  * no accuracy. Falls back to the original file wherever canvas is unavailable.
  */
 export async function prepareForOcr(file: Blob, invert = false): Promise<Blob> {
-  if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas !== 'function') return file
+  return (await prepareWithPixels(file, invert))?.blob ?? file
+}
+
+/**
+ * The same preparation, but handing back the PIXELS as well as the image.
+ *
+ * The glyph reader needs both, and they must be the same image: Tesseract reports word boxes in
+ * the coordinates of whatever it was given, so measuring ink from the original file while locating
+ * «SYP» in a downscaled copy would read the ink beside the wrong row. One canvas, two outputs.
+ */
+export async function prepareWithPixels(
+  file: Blob,
+  invert = false,
+): Promise<{ blob: Blob; pixels: Uint8ClampedArray; width: number; height: number } | null> {
+  if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas !== 'function') return null
   try {
     const bitmap = await createImageBitmap(file)
     const longest = Math.max(bitmap.width, bitmap.height)
@@ -274,12 +288,18 @@ export async function prepareForOcr(file: Blob, invert = false): Promise<Blob> {
 
     const canvas = new OffscreenCanvas(Math.round(bitmap.width * scale), Math.round(bitmap.height * scale))
     const ctx = canvas.getContext('2d')
-    if (!ctx) return file
+    if (!ctx) return null
     ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
     normaliseContrast(ctx, canvas.width, canvas.height, invert)
-    return await canvas.convertToBlob({ type: 'image/png' })
+    const image = ctx.getImageData(0, 0, canvas.width, canvas.height)
+    return {
+      blob: await canvas.convertToBlob({ type: 'image/png' }),
+      pixels: image.data,
+      width: canvas.width,
+      height: canvas.height,
+    }
   } catch {
-    return file
+    return null
   }
 }
 
