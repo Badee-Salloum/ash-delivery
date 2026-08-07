@@ -21,6 +21,8 @@ import {
   putBatteryReadingsRequest,
   batterySwapRequest,
   closeFiguresRequest,
+  operationsRequest,
+  reviseOperationsRequest,
 } from '@ash/contracts'
 import { addDays, checkWeekClose, dayOfWeek, minor, resolveFxDay, sum, weekClosedOn, weekStartFor } from '@ash/domain'
 import {
@@ -57,6 +59,8 @@ import {
   evaluateShift,
   rejectClose,
   reviseCloseFigures,
+  reviseOperations,
+  submitOperations,
   rejectOpen,
   reportIncident,
   requestRephoto,
@@ -918,6 +922,55 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           walletDeclared: shift.endWalletDeclared === null ? null : serializeMoney(shift.endWalletDeclared),
           revisedByManager: true,
         },
+        occurredAtMs: deps.clock.nowMs(),
+      })
+      return { id: shift.id, state: shift.state, br1: serializeBr1(br1) }
+    },
+  )
+
+  /**
+   * The driver submits his whole operations list, read off his screenshots.
+   *
+   * Idempotent by construction: the orders upsert on `(shift, provider_order_no)` and the movements
+   * merge as a multiset, so re-reading an overlapping page adds nothing and stepping back into the
+   * close to add one delivery sends the whole list again safely.
+   */
+  app.put(
+    '/shifts/:id/operations',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const body = operationsRequest.parse(req.body)
+      const { br1 } = await submitOperations(deps, req.actor!, id, body)
+      return { id, br1: serializeBr1(br1) }
+    },
+  )
+
+  /**
+   * The manager changes what counts, during the review, without approving.
+   *
+   * The driver curates the list at close — but he is reading a screenshot at the end of a long day,
+   * so the manager must be able to put a row back, take one out, or say whether a credit belongs to
+   * its order. The shift stays `pending_review` and the close gate still has to pass afterwards.
+   * Audited: every one of these moves BR1.
+   */
+  app.post(
+    '/shifts/:id/operations/revise',
+    { config: { permission: 'shift.approve', subject: shiftSubject } },
+    async (req) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const body = reviseOperationsRequest.parse(req.body)
+      const { shift, br1, before } = await reviseOperations(deps, req.actor!, id, body)
+      await deps.audit.append({
+        tableName: 'shifts',
+        recordId: shift.id,
+        action: 'UPDATE',
+        actorId: req.actor!.userId,
+        actorKind: 'user',
+        branchId: shift.branchId,
+        requestId: req.requestId,
+        before: { ordersHash: before.ordersHash },
+        after: { ordersHash: shift.ordersHash, revisedByManager: true, ...body },
         occurredAtMs: deps.clock.nowMs(),
       })
       return { id: shift.id, state: shift.state, br1: serializeBr1(br1) }

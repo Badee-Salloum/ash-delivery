@@ -1062,6 +1062,216 @@ export async function reviseCloseFigures(
   return { shift: updated, br1, before: shift }
 }
 
+// ── The operations of a shift (the driver's close, read off his screenshots) ────────────────
+
+export interface OperationsInput {
+  orders: readonly {
+    providerOrderNo: string
+    payMode: ShiftOrder['payMode']
+    fee: Minor
+    zone?: string | null
+    source?: 'manual' | 'ocr'
+    feeOcr?: Minor | null
+    included?: boolean
+    walletAmount?: Minor | null
+    occurredMinute?: string | null
+  }[]
+  movements: readonly {
+    amount: Minor
+    occurredMinute: string
+    role?: 'yalago_cut' | 'order_credit' | 'unmatched'
+    providerOrderNo?: string | null
+    ambiguous?: boolean
+    included?: boolean
+    notes?: string | null
+  }[]
+}
+
+/**
+ * The driver submits his whole operations list.
+ *
+ * UPSERT, not insert. The list is read off overlapping screenshots and is submitted more than once —
+ * he steps back out of the close to add a delivery he forgot, or re-reads a page. Inserting meant
+ * every re-read was a 409 on the globally-unique `provider_order_no`, and an already-sent row could
+ * never be corrected at all: the only remedy was a manager adding a compensating order.
+ *
+ * Rows already on the server but ABSENT from the payload are left alone, never deleted. With
+ * `included` there is no longer any need to delete an order to undo it — which is exactly why no
+ * order DELETE should ever be added. An order is money; it is unchecked, not erased.
+ */
+export async function submitOperations(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: OperationsInput,
+): Promise<{ shift: ShiftRecord; br1: Br1View }> {
+  const shift = await mustFind(deps, shiftId)
+  if (shift.state !== 'open' && shift.state !== 'suspended') throw new ServiceError(409, 'shift_not_open')
+
+  const grants = grantsFromRows(await deps.directory.grants())
+  const decision = can(
+    actor,
+    'shift.operate',
+    { driverId: shift.driverId, branchId: shift.branchId, ownerUserId: null },
+    grants,
+  )
+  if (!decision.allowed) throw new ServiceError(403, 'forbidden')
+
+  const existing = await deps.orders.listByShift(shiftId)
+  const byNo = new Map(existing.map((o) => [o.providerOrderNo, o]))
+
+  for (const row of input.orders) {
+    const current = byNo.get(row.providerOrderNo)
+    if (current) {
+      await deps.orders.update({
+        ...current,
+        payMode: row.payMode,
+        fee: row.fee,
+        zone: row.zone ?? current.zone,
+        source: row.source ?? current.source,
+        feeOcr: row.feeOcr ?? current.feeOcr,
+        included: row.included ?? current.included,
+        walletAmount: row.walletAmount ?? null,
+        occurredMinute: row.occurredMinute ?? current.occurredMinute,
+      })
+      continue
+    }
+    // The dashboard list scrolls back through PREVIOUS DAYS, so reading further pulls in orders
+    // already recorded on an earlier shift. That must say which shift owns it — «هذا الطلب مسجّل في
+    // نوبة سابقة» — rather than the blanket "some orders could not be saved" it used to produce.
+    const elsewhere = await deps.orders.findByProviderNo(row.providerOrderNo)
+    if (elsewhere) {
+      const owner = await deps.shifts.findById(elsewhere.shiftId)
+      throw new ServiceError(409, 'order_belongs_to_other_shift', {
+        providerOrderNo: row.providerOrderNo,
+        shiftId: elsewhere.shiftId,
+        businessDate: owner?.businessDate ?? null,
+      })
+    }
+    await deps.orders.create({
+      id: deps.ids.uuid(),
+      shiftId,
+      providerOrderNo: row.providerOrderNo,
+      payMode: row.payMode,
+      fee: row.fee,
+      zone: row.zone ?? null,
+      driverConfirmed: true,
+      source: row.source ?? 'manual',
+      feeOcr: row.feeOcr ?? null,
+      // A driver's own list is always Yallago's work. A manual job is the branch's and only a
+      // manager may price one — letting it in here would let a driver write his own share.
+      kind: 'yallago',
+      driverShare: null,
+      companyShare: null,
+      notes: null,
+      createdBy: actor.userId,
+      points: [],
+      included: row.included ?? true,
+      walletAmount: row.walletAmount ?? null,
+      occurredMinute: row.occurredMinute ?? null,
+    })
+  }
+
+  // Resolve each movement's order AFTER the orders exist, so a page submitted in one go can link
+  // its rows to orders created by the same call.
+  const saved = new Map((await deps.orders.listByShift(shiftId)).map((o) => [o.providerOrderNo, o.id]))
+  await deps.movements.merge(
+    shiftId,
+    input.movements.map((m) => ({
+      amount: m.amount,
+      occurredMinute: m.occurredMinute,
+      orderId: m.providerOrderNo ? (saved.get(m.providerOrderNo) ?? null) : null,
+      role: m.role ?? 'unmatched',
+      ambiguous: m.ambiguous ?? false,
+      included: m.included ?? true,
+      source: 'ocr' as const,
+      notes: m.notes ?? null,
+      createdBy: actor.userId,
+    })),
+  )
+
+  const br1 = await evaluateShift(deps, shift)
+  return { shift, br1 }
+}
+
+/**
+ * The manager changes what counts, during the review, WITHOUT approving.
+ *
+ * Same shape as `reviseCloseFigures` and for the same reason: the driver curates the list at close,
+ * but he is reading it off a screenshot at the end of a long day, and the manager must be able to
+ * put a row back — or take one out — without bouncing the shift or force-closing it. The state stays
+ * `pending_review`, so the close gate still has to pass on its own afterwards.
+ */
+export async function reviseOperations(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  // `| undefined` spelled out on every optional: `exactOptionalPropertyTypes` is on, and Zod's
+  // parsed shape carries the explicit undefined that an omitted key produces.
+  input: {
+    orders?: readonly { providerOrderNo: string; included?: boolean | undefined; walletAmount?: Minor | null | undefined }[]
+    movements?: readonly {
+      id: string
+      included?: boolean | undefined
+      role?: 'yalago_cut' | 'order_credit' | 'unmatched' | undefined
+      providerOrderNo?: string | null | undefined
+      ambiguous?: boolean | undefined
+    }[]
+  },
+): Promise<{ shift: ShiftRecord; br1: Br1View; before: ShiftRecord }> {
+  const shift = await mustFind(deps, shiftId)
+  if (shift.state !== 'pending_review') throw new ServiceError(409, 'shift_not_under_review')
+
+  const grants = grantsFromRows(await deps.directory.grants())
+  const decision = can(
+    actor,
+    'shift.approve',
+    { driverId: shift.driverId, branchId: shift.branchId, ownerUserId: null },
+    grants,
+  )
+  if (!decision.allowed) throw new ServiceError(403, 'forbidden')
+
+  const rows = await deps.orders.listByShift(shiftId)
+  const byNo = new Map(rows.map((o) => [o.providerOrderNo, o]))
+  for (const patch of input.orders ?? []) {
+    const current = byNo.get(patch.providerOrderNo)
+    if (!current) throw new ServiceError(404, 'order_not_found', { providerOrderNo: patch.providerOrderNo })
+    await deps.orders.update({
+      ...current,
+      included: patch.included ?? current.included,
+      // `undefined` leaves it alone; an explicit `null` clears a measurement the manager rejects.
+      walletAmount: patch.walletAmount === undefined ? current.walletAmount : patch.walletAmount,
+    })
+  }
+
+  const known = new Set((await deps.movements.listByShift(shiftId)).map((m) => m.id))
+  const orderIds = new Map(rows.map((o) => [o.providerOrderNo, o.id]))
+  for (const patch of input.movements ?? []) {
+    if (!known.has(patch.id)) throw new ServiceError(404, 'movement_not_found', { id: patch.id })
+    await deps.movements.update(patch.id, {
+      ...(patch.included === undefined ? {} : { included: patch.included }),
+      ...(patch.role === undefined ? {} : { role: patch.role }),
+      ...(patch.ambiguous === undefined ? {} : { ambiguous: patch.ambiguous }),
+      // Presence decides, because `null` is a real instruction here: «this credit belongs to no
+      // order», which is the whole resolution of an ambiguous row.
+      ...(patch.providerOrderNo === undefined
+        ? {}
+        : { orderId: patch.providerOrderNo === null ? null : (orderIds.get(patch.providerOrderNo) ?? null) }),
+    })
+  }
+
+  const br1 = await evaluateShift(deps, shift)
+  const updated: ShiftRecord = {
+    ...shift,
+    equationDiff: br1.result.scalarDiff,
+    cashDiff: br1.result.cashDiff,
+    walletDiff: br1.result.walletDiff,
+    ordersHash: br1.ordersHash,
+  }
+  await deps.shifts.update(updated)
+  return { shift: updated, br1, before: shift }
+}
+
 export async function approveClose(
   deps: Deps,
   actor: Actor,

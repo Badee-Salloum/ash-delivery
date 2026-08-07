@@ -141,6 +141,79 @@ export const closeFiguresRequest = z.object({
   walletDeclared: moneySchema.nullable().default(null),
 })
 
+/** «HH:MM» as read off a screenshot. `''` on a movement means the clock was not legible. */
+const minuteSchema = z.string().regex(/^[0-2]\d:[0-5]\d$/)
+
+const movementRole = z.enum(['yalago_cut', 'order_credit', 'unmatched'])
+
+/**
+ * The driver's whole operations list: what he delivered, and what his wallet did.
+ *
+ * Submitted more than once — he re-reads an overlapping page, or steps back into the close to add a
+ * delivery he forgot — so the server upserts the orders and merges the movements rather than
+ * inserting. `amount` is SIGNED money and crosses as a decimal string, never a JSON number.
+ */
+export const operationsRequest = z.object({
+  orders: z
+    .array(
+      z.object({
+        providerOrderNo: z.string().min(1).max(64),
+        payMode: payModeSchema,
+        fee: moneySchema,
+        zone: z.string().max(64).nullable().default(null),
+        source: z.enum(['manual', 'ocr']).default('manual'),
+        feeOcr: moneySchema.nullable().default(null),
+        included: z.boolean().default(true),
+        walletAmount: moneySchema.nullable().default(null),
+        occurredMinute: minuteSchema.nullable().default(null),
+      }),
+    )
+    .max(400)
+    .default([]),
+  movements: z
+    .array(
+      z.object({
+        amount: moneySchema,
+        occurredMinute: z.union([minuteSchema, z.literal('')]).default(''),
+        role: movementRole.default('unmatched'),
+        /** The order this belongs to, by its number — resolved to an id server-side. */
+        providerOrderNo: z.string().max(64).nullable().default(null),
+        ambiguous: z.boolean().default(false),
+        included: z.boolean().default(true),
+        notes: z.string().max(2000).nullable().default(null),
+      }),
+    )
+    .max(400)
+    .default([]),
+})
+
+/** The manager changing what counts, during the review. Everything is optional: a patch, not a put. */
+export const reviseOperationsRequest = z.object({
+  orders: z
+    .array(
+      z.object({
+        providerOrderNo: z.string().min(1).max(64),
+        included: z.boolean().optional(),
+        walletAmount: moneySchema.nullable().optional(),
+      }),
+    )
+    .max(400)
+    .default([]),
+  movements: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        included: z.boolean().optional(),
+        role: movementRole.optional(),
+        // `null` is a real instruction — «belongs to no order» — so this is nullable AND optional.
+        providerOrderNo: z.string().max(64).nullable().optional(),
+        ambiguous: z.boolean().optional(),
+      }),
+    )
+    .max(400)
+    .default([]),
+})
+
 export const endPackageRequest = z.object({
   odometerKm: z.number().int().min(0),
   batteryPercent: z.number().int().min(0).max(100).nullable(),

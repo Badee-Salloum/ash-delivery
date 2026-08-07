@@ -2,7 +2,7 @@ import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { fundCodeOf } from '@ash/adapters/memory'
 import { minor } from '@ash/domain'
-import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
+import { DRIVER2_ID, DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
 
 /**
  * The operations of a shift: what was delivered, what the wallet actually did, and which of it
@@ -251,6 +251,161 @@ describe('what the wallet did on its own', () => {
     const stale = await post(manager, `/shifts/${id}/approve-close`, { reviewedOrdersHash: reviewed })
     expect(stale.statusCode, stale.body).toBe(409)
     expect(stale.json().error).toBe('orders_changed_since_review')
+  })
+})
+
+describe('submitting the list', () => {
+  const list = {
+    orders: [
+      { providerOrderNo: 'YAL-A', payMode: 'cash', fee: sypStr(5_000), occurredMinute: '18:06' },
+      { providerOrderNo: 'YAL-B', payMode: 'cash', fee: sypStr(5_000), occurredMinute: '17:42' },
+    ],
+    movements: [
+      { amount: sypStr(-1_000), occurredMinute: '18:06', role: 'yalago_cut', providerOrderNo: 'YAL-A' },
+      { amount: sypStr(300), occurredMinute: '09:24' },
+    ],
+  }
+
+  it('sending the same list twice changes nothing', async () => {
+    // The screenshots overlap and the driver steps back into the close to add one delivery, so the
+    // whole list is submitted again. Inserting would 409 on every row that already exists.
+    const { id, driver } = await openWithOrders(0)
+    expect((await put(driver, `/shifts/${id}/operations`, list)).statusCode).toBe(200)
+    const once = await h.deps.orders.listByShift(id)
+    expect((await put(driver, `/shifts/${id}/operations`, list)).statusCode).toBe(200)
+
+    expect(await h.deps.orders.listByShift(id)).toHaveLength(once.length)
+    expect(await h.deps.movements.listByShift(id)).toHaveLength(2)
+  })
+
+  it('corrects a row already on the server instead of refusing it', async () => {
+    const { id, driver } = await openWithOrders(0)
+    await put(driver, `/shifts/${id}/operations`, list)
+    const fixed = {
+      ...list,
+      orders: [{ ...list.orders[0]!, fee: sypStr(7_000), included: false }, list.orders[1]!],
+      movements: [],
+    }
+    expect((await put(driver, `/shifts/${id}/operations`, fixed)).statusCode).toBe(200)
+
+    const row = (await h.deps.orders.listByShift(id)).find((o) => o.providerOrderNo === 'YAL-A')!
+    expect(row.fee).toBe(minor(7_000_00n))
+    expect(row.included).toBe(false)
+  })
+
+  it('names the shift that already owns an order, rather than failing blankly', async () => {
+    // The dashboard list scrolls back through previous days, so reading further pulls in rows
+    // already recorded on an earlier shift. «تعذّر حفظ بعض الطلبات» tells the driver nothing.
+    const first = await openWithOrders(0)
+    await put(first.driver, `/shifts/${first.id}/operations`, { orders: list.orders, movements: [] })
+    await put(first.driver, `/shifts/${first.id}/end-package`, {
+      odometerKm: 200,
+      batteryPercent: null,
+      cashDeclared: sypStr(110_000),
+      walletDeclared: sypStr(48_000),
+    })
+
+    const driver2 = await h.loginAs('driver2')
+    const second = (
+      await post(driver2, '/shifts', { driverId: DRIVER2_ID, vehicleId: 'vehicle-2', shiftNo: 1 })
+    ).json().id as string
+    await h.uploadPhoto(driver2, second, 'start', 'odometer')
+    await put(driver2, `/shifts/${second}/start-package`, { odometerKm: 100, batteryPercent: 90 })
+    const manager = await h.loginAs('manager')
+    const opened = await post(manager, `/shifts/${second}/approve-open`, {
+      floatTranches: [sypStr(10_000)],
+      topupTranches: [sypStr(10_000)],
+    })
+    expect(opened.statusCode, opened.body).toBe(200)
+
+    const clash = await put(driver2, `/shifts/${second}/operations`, { orders: [list.orders[0]!], movements: [] })
+    expect(clash.statusCode).toBe(409)
+    expect(clash.json().error).toBe('order_belongs_to_other_shift')
+    expect(clash.json().detail.shiftId).toBe(first.id)
+  })
+
+  it('links a movement to an order created in the very same call', async () => {
+    const { id, driver } = await openWithOrders(0)
+    await put(driver, `/shifts/${id}/operations`, list)
+    const cut = (await h.deps.movements.listByShift(id)).find((m) => m.role === 'yalago_cut')!
+    const order = (await h.deps.orders.listByShift(id)).find((o) => o.providerOrderNo === 'YAL-A')!
+    expect(cut.orderId).toBe(order.id)
+  })
+
+  it('is refused once the shift has left the driver’s hands', async () => {
+    const { id, driver } = await openWithOrders(1)
+    await put(driver, `/shifts/${id}/end-package`, {
+      odometerKm: 200,
+      batteryPercent: null,
+      cashDeclared: sypStr(105_000),
+      walletDeclared: sypStr(49_000),
+    })
+    expect((await put(driver, `/shifts/${id}/operations`, list)).statusCode).toBe(409)
+  })
+})
+
+describe('the manager revising the list at review', () => {
+  const closed = async (): Promise<{ id: string; driver: string; manager: string }> => {
+    const s = await openWithOrders(3)
+    await put(s.driver, `/shifts/${s.id}/end-package`, {
+      odometerKm: 200,
+      batteryPercent: null,
+      cashDeclared: sypStr(115_000),
+      walletDeclared: sypStr(47_000),
+    })
+    return s
+  }
+
+  it('puts a row back without approving or bouncing the shift', async () => {
+    const { id, manager } = await closed()
+    await exclude(id, 'YAL-2')
+    const res = await post(manager, `/shifts/${id}/operations/revise`, {
+      orders: [{ providerOrderNo: 'YAL-2', included: true }],
+    })
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json().state).toBe('pending_review')
+    expect(res.json().br1.difference).toBe('0.00')
+  })
+
+  it('resolves an ambiguous credit by unlinking it from its order', async () => {
+    const { id, manager } = await closed()
+    const [credit] = await h.deps.movements.merge(id, [
+      { amount: minor(300_00n), occurredMinute: '18:06', role: 'order_credit', ambiguous: true },
+    ])
+    const res = await post(manager, `/shifts/${id}/operations/revise`, {
+      movements: [{ id: credit!.id, role: 'unmatched', providerOrderNo: null, ambiguous: false }],
+    })
+    expect(res.statusCode, res.body).toBe(200)
+    const after = (await h.deps.movements.listByShift(id))[0]!
+    expect(after.role).toBe('unmatched')
+    expect(after.orderId).toBeNull()
+    expect(after.ambiguous).toBe(false)
+  })
+
+  it('is a manager’s act, not a driver’s', async () => {
+    const { id, driver } = await closed()
+    const res = await post(driver, `/shifts/${id}/operations/revise`, {
+      orders: [{ providerOrderNo: 'YAL-1', included: false }],
+    })
+    expect(res.statusCode).toBe(403)
+  })
+
+  it('refuses outside the review', async () => {
+    const { id, manager } = await openWithOrders(1)
+    const res = await post(manager, `/shifts/${id}/operations/revise`, {
+      orders: [{ providerOrderNo: 'YAL-1', included: false }],
+    })
+    expect(res.statusCode).toBe(409)
+    expect(res.json().error).toBe('shift_not_under_review')
+  })
+
+  it('is audited — it moves the equation', async () => {
+    const { id, manager } = await closed()
+    await post(manager, `/shifts/${id}/operations/revise`, {
+      orders: [{ providerOrderNo: 'YAL-1', included: false }],
+    })
+    const trail = await h.deps.audit.list({ tableName: 'shifts', recordId: id })
+    expect(trail.some((a) => (a.after as Record<string, unknown>)?.revisedByManager === true)).toBe(true)
   })
 })
 
