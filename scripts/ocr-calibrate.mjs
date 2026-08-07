@@ -35,14 +35,51 @@ const FIXTURES = [
   { file: 'bms-table-en.jpg', kind: 'bms', profile: 'table_en', expect: { percent: 100, cycleCount: 8 } },
   { file: 'bms-cards-ar.jpg', kind: 'bms', profile: 'cards_ar', expect: { percent: 100, cycleCount: 1 } },
   { file: 'dash-odometer.jpg', kind: 'dash', expect: { odometer: 2611 } },
+
+  /*
+   * Tuesday 4 August, one driver's whole day, read off the phone at full resolution — the first
+   * sample of these two screens that is legible at all (the earlier set came through WhatsApp at
+   * 482 px, where the digits are simply not in the pixels).
+   *
+   * Every order's Yallago cut is in the log at the SAME MINUTE and is exactly 20% of the fee, which
+   * is what the matcher pairs on. The 3:22pm order is «تم إلغاؤه» — cancelled — and moves no money
+   * at all: it must not appear as an order, and no log row answers to it.
+   */
+  { file: 'orders-0804-a.jpg', kind: 'orders', expect: { fees: ['235', '210', '130', '135', '170'] } },
+  { file: 'orders-0804-b.jpg', kind: 'orders', expect: { fees: ['260', '135', '120', '235'] } },
+  { file: 'orders-0804-c.jpg', kind: 'orders', expect: { fees: ['120', '235', '120'] } },
+  {
+    file: 'log-0804-a.jpg',
+    kind: 'log',
+    expect: { amounts: ['-165.50', '-47', '153', '-42', '-22', '-26', '95', '-27', '-34', '215', '-52'] },
+  },
+  {
+    file: 'log-0804-b.jpg',
+    kind: 'log',
+    expect: { amounts: ['-177', '-27', '-24', '100', '-47', '-24', '250', '130', '300', '-1155.65', '-416'] },
+  },
 ]
+
+/** Fees / signed amounts the pass got, as a multiset comparison against the truth above. */
+function scoreList(got, want) {
+  const remaining = [...want]
+  const spurious = []
+  for (const g of got) {
+    const at = remaining.indexOf(g)
+    if (at === -1) spurious.push(g)
+    else remaining.splice(at, 1)
+  }
+  return { missed: remaining, spurious }
+}
 
 // file:// URLs, not bare paths — a Windows absolute path is not a valid ESM specifier. The two
 // libraries are the DRIVER's dependencies (this script lives at the repo root), so they are
 // resolved from there rather than from here.
 const from = (specifier) => import(pathToFileURL(createRequire(join(driver, 'package.json')).resolve(specifier)).href)
 
-const { parseBms, parseReading, profileById } = await import(pathToFileURL(join(driver, 'src', 'ocr.ts')).href)
+const { parseBms, parseOrders, parsePaymentsLog, parseReading, profileById, readIsCoherent } = await import(
+  pathToFileURL(join(driver, 'src', 'ocr.ts')).href
+)
 const { createCanvas, loadImage } = await from('@napi-rs/canvas')
 const { createWorker, OEM } = await from('tesseract.js')
 
@@ -151,8 +188,33 @@ for (const fixture of FIXTURES) {
       // «الدورات» needs, and reports a null the real app would not produce.
       const { data } = await worker.recognize(image, {}, { text: true, blocks: true })
       const text = data.text ?? ''
-      const read =
-        fixture.kind === 'bms' ? parseBms(linesOf(data), profileById(fixture.profile)) : parseReading(text)
+
+      // The two LIST screens are scored as multisets, not field-by-field: what matters is which
+      // rows were read and, far more, which rows were INVENTED. A spurious fee is money BR1 will
+      // demand the driver account for, out of a screenshot nobody re-reads.
+      if (fixture.kind === 'orders' || fixture.kind === 'log') {
+        const got =
+          fixture.kind === 'orders'
+            ? parseOrders(text, 2026).map((o) => o.fee)
+            : parsePaymentsLog(text).map((m) => m.amount)
+        const want = fixture.expect.fees ?? fixture.expect.amounts
+        const { missed, spurious } = scoreList(got, want)
+        if (missed.length === 0 && spurious.length === 0) (fixture.readBy ??= new Set()).add('rows')
+        // What the READER would do with this pass. A pass that parses three rows out of eleven is
+        // refused wholesale, so those three never reach a field — that is the difference between a
+        // wrong number in BR1 and an honest "could not read".
+        const offered = readIsCoherent(text, got.length)
+        if (spurious.length > 0 && offered) failures++
+        console.log(
+          `  ${variant.padEnd(19)} psm ${String(psm).padEnd(3)} ${got.length}/${want.length} rows` +
+            `${offered ? '' : '  [refused: incoherent]'}` +
+            `${missed.length ? `  missed ${missed.length}` : ''}` +
+            `${spurious.length ? `   ${offered ? '← INVENTED' : 'debris'} ${JSON.stringify(spurious)}` : ''}`,
+        )
+        continue
+      }
+
+      const read = fixture.kind === 'bms' ? parseBms(linesOf(data), profileById(fixture.profile)) : parseReading(text)
       const wrong = Object.entries(read).some(
         ([key, value]) => value !== null && value !== fixture.expect[key],
       )
@@ -171,7 +233,12 @@ for (const fixture of FIXTURES) {
 
   // What no pass could read. Reported, not failed: the dashboard genuinely cannot be read through
   // that glare, and pretending otherwise would only invite a guess.
-  const unread = Object.keys(fixture.expect).filter((key) => !fixture.readBy?.has(key))
+  const unread =
+    fixture.kind === 'orders' || fixture.kind === 'log'
+      ? fixture.readBy?.has('rows')
+        ? []
+        : ['every row exactly']
+      : Object.keys(fixture.expect).filter((key) => !fixture.readBy?.has(key))
   if (unread.length > 0) console.log(`  → never read by any pass: ${unread.join(', ')} (driver types these)`)
 }
 await worker.terminate()

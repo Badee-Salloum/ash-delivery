@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { parseMinor } from '@ash/domain'
-import { type OcrLine, parseBms, parseOrders, parsePaymentsLog, parseReading, parseWallet, profileById } from '../src/ocr.ts'
+import {
+  type OcrLine,
+  moneyRowCount,
+  parseBms,
+  parseOrders,
+  parsePaymentsLog,
+  parseReading,
+  parseWallet,
+  profileById,
+  readIsCoherent,
+} from '../src/ocr.ts'
 
 /**
  * The BMS parser, against text shaped like what Tesseract actually returns for the client's two
@@ -552,6 +562,81 @@ describe('the Arabic «سجل المدفوعات» log', () => {
 
   it('reads a row whose clock was lost, rather than dropping the money', () => {
     expect(parsePaymentsLog('−٨٠ SYP')).toEqual([{ amount: '-80', time: '' }])
+  })
+})
+
+/**
+ * What tesseract ACTUALLY returned for the 4 August log, at full phone resolution, through every
+ * combination of language, page-segmentation mode and preprocessing this repo has (see
+ * `scripts/ocr-calibrate.mjs`, fixtures `log-0804-*.jpg`).
+ *
+ * The bundled `ara`/`eng` models do not read Arabic-Indic digits — they transliterate them into
+ * Latin lookalikes, and the mapping is not even injective: ٢ and ٣ both come back as «Y»/«¥», ١ and
+ * ٦ both as «\»/«1». No table recovers −26 from −36. Meanwhile «SYP» — plain ASCII — was read
+ * correctly on all eleven rows, so the image, the contrast and the layout are all fine.
+ *
+ * These tests exist so the DEBRIS can never again be served as money. It once was: «٥٢» came back
+ * as «07» and «٩٥» as «40», and the forgiving parser turned both into confident numbers.
+ */
+const TRANSLITERATED_LOG = [
+  '—\\10,0- SYP',
+  '—tV SYP',
+  '+\\0Y SYP',
+  '-07 SYP', // ٥٢ — debris that happens to be ASCII digits, and the old parser believed it
+  '—YY SYP',
+  '-Y\\ SYP',
+  '+40 SYP', // ٩٥ — plausible, wrong, and unrecoverable
+  '-YV SYP',
+  '—¥t SYP',
+  '+Y\\0 SYP',
+  '—oY SYP',
+].join('\n')
+
+describe('a page the recogniser could not read is not a page it half read', () => {
+  it('refuses an amount welded to transliteration debris', () => {
+    // «—tV SYP» carries no digits at all; «-Y\ SYP» none either. Nothing may be salvaged from them.
+    expect(parsePaymentsLog('—tV SYP')).toEqual([])
+    expect(parsePaymentsLog('-Y\\ SYP')).toEqual([])
+    expect(parseOrders('—¥t SYP ٣:٥١ م', 2026)).toEqual([])
+  })
+
+  it('refuses a leading zero — neither screen has ever shown «07 SYP»', () => {
+    expect(parsePaymentsLog('-07 SYP ٦:٠٦ م')).toEqual([])
+    expect(parseOrders('017 SYP ٥:٤٢ م', 2026)).toEqual([])
+    // A genuine sub-unit amount is still read: the rule is a leading zero before another DIGIT.
+    expect(parsePaymentsLog('−٠٫٥٠ SYP')[0]!.amount).toBe('-0.50')
+  })
+
+  it('does not read the CLOCK as the fee — the row carries both, on one line', () => {
+    // «٢٣٥ SYP  ٦:٠٦ م» as the recogniser flattens it. This returned a fee of 6 before, and only a
+    // screenshot whose real fee was unreadable ever exposed it.
+    expect(parseOrders('SYP ٦:٠٦ م', 2026)).toEqual([])
+    expect(parseOrders('٢٣٥ SYP ٦:٠٦ م', 2026)).toEqual([
+      { dateIso: null, time: '18:06', fee: '235', zone: null },
+    ])
+  })
+
+  it('will not offer eleven rows on the strength of the two that survived', () => {
+    const salvaged = parsePaymentsLog(TRANSLITERATED_LOG)
+    expect(salvaged.length).toBeLessThan(3) // only the ASCII-looking debris gets even this far
+    // …and the reader throws away even those, because they cannot account for the page.
+    expect(readIsCoherent(TRANSLITERATED_LOG, salvaged.length)).toBe(false)
+  })
+
+  it('accepts a page it genuinely read', () => {
+    const clean = ['−٨٠ SYP ٣:٤٨ م', '+١٨٥ SYP ٦:١٠ م', '−٩٩ SYP ٦:١٠ م'].join('\n')
+    const rows = parsePaymentsLog(clean)
+    expect(rows).toHaveLength(3)
+    expect(readIsCoherent(clean, rows.length)).toBe(true)
+  })
+
+  it('counts the rows that claim to be money, read or not', () => {
+    expect(moneyRowCount(TRANSLITERATED_LOG)).toBe(11)
+    expect(moneyRowCount('سجل المدفوعات\n٤ أغسطس')).toBe(0)
+  })
+
+  it('says nothing at all when there was nothing to read — no rows, no refusal', () => {
+    expect(readIsCoherent('سجل المدفوعات', 0)).toBe(true)
   })
 })
 

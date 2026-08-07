@@ -473,6 +473,54 @@ export function parseWallet(text: string): string | null {
   return cleaned.replace(/[^0-9]/g, '')
 }
 
+/**
+ * A row's amount, or nothing — the strict form used by the two LIST screens.
+ *
+ * `parseWallet` is forgiving by design: it is pointed at a balance the driver can see and correct.
+ * A row in a list is different. Calibration against real screenshots showed the bundled `ara`/`eng`
+ * models transliterate Arabic-Indic digits into Latin lookalikes — «٥٢» came back as «oY», «٩٥» as
+ * «40» — and where that debris happened to contain ASCII digits, the forgiving parser turned it
+ * into a confident number: −52 read as −07, +153 as +017. Money invented out of noise.
+ *
+ * So: the token must be digits and separators ONLY, and must not carry a leading zero. Neither
+ * screen ever shows «07 SYP», and a leading zero is the clearest signature of a glyph that was
+ * guessed rather than read.
+ */
+function listAmount(token: string): string | null {
+  const ascii = asciiDigits(token)
+  if (!/^\d[\d.,،٬٫]*$/.test(ascii)) return null
+  if (/^0\d/.test(ascii)) return null
+  return parseWallet(ascii)
+}
+
+/**
+ * How many rows on this page CLAIM to be money — they carry the currency — whether or not their
+ * amount could be read.
+ *
+ * The reader needs this to tell a partly-successful read from a failed one that got lucky. Three
+ * amounts parsed out of eleven rows is not a page two-thirds read; it is a page that was not read,
+ * where three pieces of debris happened to look numeric. Pre-filling BR1 from those three is worse
+ * than pre-filling nothing, because nobody re-reads a field the machine has already answered.
+ */
+export const moneyRowCount = (text: string): number =>
+  text.split(/\r?\n/).filter((line) => /SYP/i.test(line)).length
+
+/**
+ * A read is only offered when it accounts for ALMOST EVERY row it can see.
+ *
+ * The bar is this high because of what the alternative looks like. On the real screenshots a
+ * lenient bar let two rows out of three through on the orders list, and those two were «11» and
+ * «11» for fees of 120 and 235 — a page nobody read, presented as a page mostly read. One row the
+ * reader cannot account for means the page is not being read, it is being guessed at, and the
+ * remedy (re-shoot it, or type three numbers) costs the driver far less than a wrong fee costs
+ * everyone at the review.
+ */
+export const READ_COHERENCE = 0.9
+export const readIsCoherent = (text: string, parsed: number): boolean => {
+  const claimed = moneyRowCount(text)
+  return claimed === 0 || parsed >= claimed * READ_COHERENCE
+}
+
 // ── The Yallago «Recent orders» screenshot (SRS D-1) ────────────────────────────────────────
 
 export interface OcrOrder {
@@ -620,10 +668,18 @@ export function parseOrders(text: string, year: number): OcrOrder[] {
  */
 function feeOnLine(line: string): string | null {
   const ascii = asciiDigits(line)
-  const after = ascii.match(/(\d[\d.,،٬٫٫٬]*)\s*SYP/i)
-  if (after) return parseWallet(after[1]!)
-  const before = ascii.match(/SYP\s*(\d[\d.,،٬٫٫٬]*)/i)
-  return before ? parseWallet(before[1]!) : null
+  /*
+   * The amount must be bounded, and it must not be part of the CLOCK.
+   *
+   * The row is «٢٣٥ SYP … ٦:٠٦ م» and the recogniser puts both on one line, so the RTL form
+   * `SYP <number>` happily matched the hour: a fee of 235 was read as 6. It only surfaced once a
+   * screenshot arrived whose fee could not be read at all — until then the fee matched first and
+   * hid it. A colon on either side means a time, and a time is not money.
+   */
+  const after = ascii.match(/(?:^|[^\w.,:])([\d.,،٬٫]+)\s*SYP/i)
+  if (after) return listAmount(after[1]!)
+  const before = ascii.match(/SYP\s*([\d.,،٬٫]+)(?![\w:])/i)
+  return before ? listAmount(before[1]!) : null
 }
 
 /** Read the whole order list off a «Recent orders» / «الطلبات الحديثة» screenshot. */
@@ -643,7 +699,12 @@ export async function readOrders(image: Blob | Uint8Array, timeoutMs = ORDERS_TI
       if (orders.length > best.length) best = orders
       if (best.length > 0 && !invert) break // the usual case: the first pass read it
     }
-    if (best.length === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text }
+    // Not merely "did anything parse" — did enough of the page parse to be believed. See
+    // `readIsCoherent`: on the Arabic-Indic screens the models transliterate the digits, and a
+    // handful of rows surviving that is luck, not a read.
+    if (best.length === 0 || !readIsCoherent(text, best.length)) {
+      return { ok: false, reason: 'no_fields', ms: now() - started, text }
+    }
     return { ok: true, reading: { orders: best }, fieldsFound: best.length, ms: now() - started, text }
   } catch (err) {
     const reason: OcrFailure = err instanceof Error && err.message === 'ocr timeout' ? 'timeout' : 'unavailable'
@@ -682,9 +743,9 @@ export function parsePaymentsLog(text: string): WalletMovement[] {
     const ascii = asciiDigits(line)
     // The sign sits at the START of the amount on this screen, in both directions of the RTL run.
     const m =
-      ascii.match(/([+\-−–—~])\s*(\d[\d.,،٬٫]*)\s*SYP/i) ?? ascii.match(/SYP\s*([+\-−–—~])\s*(\d[\d.,،٬٫]*)/i)
+      ascii.match(/([+\-−–—~])\s*([\d.,،٬٫]+)\s*SYP/i) ?? ascii.match(/SYP\s*([+\-−–—~])\s*([\d.,،٬٫]+)(?![\w:])/i)
     if (!m) continue
-    const magnitude = parseWallet(m[2]!)
+    const magnitude = listAmount(m[2]!)
     if (magnitude === null) continue
     const negative = m[1] !== '+'
     out.push({ amount: negative ? `-${magnitude}` : magnitude, time: parseClock(line) ?? '' })
@@ -712,7 +773,9 @@ export async function readPaymentsLog(
       if (movements.length > best.length) best = movements
       if (best.length > 0 && invert) break
     }
-    if (best.length === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text }
+    if (best.length === 0 || !readIsCoherent(text, best.length)) {
+      return { ok: false, reason: 'no_fields', ms: now() - started, text }
+    }
     return { ok: true, reading: { movements: best }, fieldsFound: best.length, ms: now() - started, text }
   } catch (err) {
     const reason: OcrFailure = err instanceof Error && err.message === 'ocr timeout' ? 'timeout' : 'unavailable'
