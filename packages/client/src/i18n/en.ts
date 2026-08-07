@@ -245,7 +245,9 @@ export const en: Catalog = {
 
   orders: {
     title: 'Orders',
-    orderNo: 'Order no.',
+orderNo: 'Order no.',
+    /** A row the driver added himself: no screenshot, so no clock and no route to show. */
+    manualRow: 'Added by hand',
     fee: 'Fee',
     payMode: 'Payment mode',
     addRow: 'Add order',

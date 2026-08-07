@@ -144,22 +144,19 @@ export interface ScannedMovementRow {
 }
 
 /**
- * A globally-unique, editable order key from the order's day and time.
+ * The order's identity ON THE WIRE. Opaque, and unique for all time.
  *
- * The dashboard screen carries no order id, so one has to be made. Day+time is unique in practice
- * and readable by a human comparing it against the screenshot, which a random id would not be.
+ * `shift_orders.provider_order_no` is UNIQUE across the whole table — not per shift, not per driver,
+ * not per day. So any key derived from what the screen SHOWS is a collision waiting to happen: two
+ * bikes delivering in the same minute both produce «YAL-20260804-1806», and the second 120-lira fee
+ * ever scanned without a clock produces the same «YAL-F120» as the first one, on another day, for
+ * another driver. The loser is a 409 nobody can see, nobody can clear, and nobody caused. At ten
+ * bikes that is a weekly event; at a hundred it is constant.
+ *
+ * So the key comes from the ROW's own id, which is a UUID. Nothing reads it and nothing types it:
+ * an order is known by its value, its route and its clock — which is what the screen has.
  */
-export const orderKeyFor = (s: ScannedOrderRow, ordinal = 1): string => {
-  const day = (s.dateIso ?? '').replace(/-/g, '')
-  const time = s.time.replace(':', '')
-  // With no clock, the day-and-time key degenerates to «YAL--» for EVERY row — one meaningless
-  // number the driver cannot match against anything, and the same one on every order. The fee at
-  // least names the row he is looking at. It is still his to correct, and the field is editable.
-  const stem = day === '' && time === '' ? `F${s.fee.replace(/[^\d.]/g, '')}` : `${day}-${time}`
-  // Two deliveries genuinely can land in the same minute — or carry the same fee — and without the
-  // ordinal the second one silently takes the first one's key and vanishes from the day.
-  return ordinal <= 1 ? `YAL-${stem}` : `YAL-${stem}-${ordinal}`
-}
+export const newOrderKey = (localId: string): string => `YAL-${localId}`
 
 /**
  * Append what a dashboard screenshot read, skipping what the list already holds.
@@ -167,37 +164,36 @@ export const orderKeyFor = (s: ScannedOrderRow, ordinal = 1): string => {
  * The screen scrolls, so it is photographed in several OVERLAPPING images: page two re-shows the
  * bottom of page one. Appending blindly would double every order in the overlap, and the driver
  * would have to spot and uncheck each duplicate himself.
+ *
+ * A MULTISET merge on the minute and the fee — what the screen actually shows — exactly as the
+ * payments log is merged. Only the SURPLUS of each (minute, fee) is new, because two deliveries
+ * genuinely can share both: matching on distinct values would silently drop the second one, and
+ * that is a delivery the driver was paid for and the system never counted.
  */
 export function mergeScannedOrders(
   existing: readonly DraftOrder[],
   scanned: readonly ScannedOrderRow[],
   newId: () => string,
 ): DraftOrder[] {
-  const taken = new Set(existing.map((o) => o.providerOrderNo))
+  const tally = new Map<string, number>()
+  for (const o of existing) {
+    const key = `${o.timeText ?? ''}|${o.feeText}`
+    tally.set(key, (tally.get(key) ?? 0) + 1)
+  }
   const added: DraftOrder[] = []
   for (const row of scanned) {
-    // Walk the ordinal up until the key is free — that both de-duplicates the overlap and gives a
-    // genuine second order the same fee, or the same minute, a key of its own.
-    let ordinal = 1
-    let key = orderKeyFor(row, ordinal)
-    let duplicate = false
-    while (taken.has(key)) {
-      // The overlap test is against what was ALREADY HELD, never against rows added by this same
-      // scan. One page is one set of observations: if it lists «١٢٠» twice then two deliveries
-      // cost 120, and treating the second as a repeat of the first silently loses one of them.
-      const twin = existing.find((o) => o.providerOrderNo === key)
-      if (twin && twin.feeText === row.fee) {
-        duplicate = true
-        break
-      }
-      ordinal += 1
-      key = orderKeyFor(row, ordinal)
+    const key = `${row.time}|${row.fee}`
+    const already = tally.get(key) ?? 0
+    // Counted against what was ALREADY HELD, never against rows added by this same scan. One page
+    // is one set of observations: if it lists «١٢٠» twice then two deliveries cost 120.
+    if (already > 0) {
+      tally.set(key, already - 1)
+      continue
     }
-    if (duplicate) continue
-    taken.add(key)
+    const localId = newId()
     added.push({
-      localId: newId(),
-      providerOrderNo: key,
+      localId,
+      providerOrderNo: newOrderKey(localId),
       // The screen carries no pay mode; cash is the safe default because it is the mode that
       // expects the driver to be HOLDING the money, which is the claim easiest to check.
       payMode: 'cash',

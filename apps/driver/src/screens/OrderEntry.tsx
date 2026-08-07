@@ -1,8 +1,8 @@
 import { type ReactNode, useMemo, useState } from 'react'
 import type { PayMode } from '@ash/domain'
-import { type DraftMovement, type DraftOrder, allProblems, nextPayMode } from '@ash/client'
+import { type DraftMovement, type DraftOrder, allProblems, newOrderKey, nextPayMode } from '@ash/client'
 import { useApp } from '../app-context.tsx'
-import { Button, Card, Money, MoneyInput, TextInput } from '../ui.tsx'
+import { Button, Card, Money, MoneyInput } from '../ui.tsx'
 
 /**
  * THE list. Every operation of the shift — what was delivered, and what the wallet did — with a
@@ -17,8 +17,12 @@ import { Button, Card, Money, MoneyInput, TextInput } from '../ui.tsx'
  * contains rows that are not this shift's. Unchecking one keeps it stored and visible and takes it
  * out of the money.
  *
- * EVERY ROW IS TYPEABLE, and that is not a fallback. Tesseract cannot read Arabic-Indic digits at
- * all (see scripts/glyph-lab.mjs), so until the glyph reader lands this list is filled in by hand.
+ * AN ORDER HAS NO NUMBER. «الطلبات الحديثة» does not display one, so the system stopped inventing
+ * one: a row is its value, its route and its clock. The wire still needs a unique key, but that is
+ * machinery — generated, never shown, never typed. See `newOrderKey`.
+ *
+ * EVERY ROW IS TYPEABLE, and that is not a fallback. The reader refuses a glyph it is not sure of
+ * rather than guessing, so some rows arrive empty by design.
  *
  * There is no scan button here. A screenshot is picked ONCE, on its own tile above, and reading is
  * something that happens to an image the driver has already handed over — asking him to go back to
@@ -40,11 +44,15 @@ export function OperationsList({
 
   const problems = useMemo(() => allProblems(orders), [orders])
 
-  const addRow = (): void =>
+  const addRow = (): void => {
+    // The key is machinery, generated here and never shown: `provider_order_no` is globally unique,
+    // so it cannot be left empty and must not be anything two rows could ever arrive at.
+    const localId = crypto.randomUUID()
     onOrders([
       ...orders,
-      { localId: crypto.randomUUID(), providerOrderNo: '', payMode: 'cash', feeText: defaultFee, included: true },
+      { localId, providerOrderNo: newOrderKey(localId), payMode: 'cash', feeText: defaultFee, included: true },
     ])
+  }
 
   const update = (localId: string, patch: Partial<DraftOrder>): void =>
     onOrders(orders.map((o) => (o.localId === localId ? { ...o, ...patch } : o)))
@@ -97,13 +105,21 @@ export function OperationsList({
                 className="size-6 shrink-0 accent-emerald-600"
               />
               <span className="w-5 text-center text-sm text-slate-400">{i + 1}</span>
-              <TextInput
-                value={o.providerOrderNo}
-                onChange={(e) => update(o.localId, { providerOrderNo: e.target.value })}
-                placeholder={t.orders.orderNo}
-                inputMode="numeric"
-                className="flex-1"
-              />
+              {/* WHAT THE ROW IS. There is no order number — «الطلبات الحديثة» does not show one, so
+                  the system stopped inventing one. The clock and the route are what a driver can
+                  match against the screenshot in front of him. */}
+              <div className="min-w-0 flex-1">
+                {o.timeText || o.pointA || o.pointB ? (
+                  <>
+                    {o.timeText ? <span className="num text-sm font-semibold">{o.timeText}</span> : null}
+                    <p className="truncate text-xs text-slate-500">
+                      {o.pointA ?? '—'} ← {o.pointB ?? '—'}
+                    </p>
+                  </>
+                ) : (
+                  <span className="text-sm text-slate-400">{t.orders.manualRow}</span>
+                )}
+              </div>
               <button
                 onClick={() => update(o.localId, { payMode: nextPayMode(o.payMode) })}
                 className={`min-h-14 rounded-2xl px-3 text-sm font-semibold ${modeColor[o.payMode]}`}
@@ -131,14 +147,6 @@ export function OperationsList({
                 ×
               </Button>
             </div>
-            {/* Where it went, and when. The screen has no order number, so this is how a driver
-                recognises the row he is looking at. */}
-            {o.pointA || o.pointB || o.timeText ? (
-              <p className="mt-1 truncate text-xs text-slate-500">
-                {o.timeText ? <span className="num">{o.timeText} · </span> : null}
-                {o.pointA ?? '—'} ← {o.pointB ?? '—'}
-              </p>
-            ) : null}
             {problem ? (
               <p className="mt-1 text-sm font-medium text-red-600">
                 {t.orders.problems[problem.kind]}

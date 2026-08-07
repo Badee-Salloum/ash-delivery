@@ -369,7 +369,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       ) : null}
 
       <Card title={`${t.orders.title} — ${review.orders.length}`}>
-        <Table head={['', '#', t.orders.orderNo, t.orders.payMode, t.orders.fee]}>
+        <Table head={['', '#', t.orders.route, t.orders.payMode, t.orders.fee]}>
           {review.orders.map((o, i) => (
             <tr key={o.providerOrderNo} className={o.included === false ? 'opacity-60' : ''}>
               {/* Every operation shows, checked or not, and an excluded row keeps its PLACE —
@@ -385,10 +385,19 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                 />
               </td>
               <td className="px-3 py-1 text-slate-400">{i + 1}</td>
-              <td className="px-3 py-1 num">
-                {o.providerOrderNo}
+              {/* WHAT THE ORDER IS. Not `providerOrderNo` — that is a generated key, unique and
+                  meaningless, and printing it here told the manager nothing he could check against
+                  the driver's screenshot. The clock and the two places are what both of them see. */}
+              <td className="px-3 py-1">
+                <span className="num">{o.occurredMinute ?? '—'}</span>
                 {o.source === 'ocr' ? <span className="ms-1.5 align-middle"><Badge tone="slate">OCR</Badge></span> : null}
                 {o.included === false ? <span className="ms-1.5 align-middle"><Badge tone="slate">{t.orders.excluded}</Badge></span> : null}
+                {(o.points ?? []).length > 0 ? (
+                  <div className="text-xs text-slate-500">
+                    {(o.points ?? []).find((p) => p.role === 'start')?.label ?? '—'} ←{' '}
+                    {(o.points ?? []).find((p) => p.role === 'end')?.label ?? '—'}
+                  </div>
+                ) : null}
               </td>
               <td className="px-3 py-1">{t.orders.payModes[o.payMode as keyof typeof t.orders.payModes]}</td>
               <td className="px-3 py-1">

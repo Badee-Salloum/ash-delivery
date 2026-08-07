@@ -246,7 +246,9 @@ export const ar = {
 
   orders: {
     title: 'الطلبات',
-    orderNo: 'رقم الطلب',
+orderNo: 'رقم الطلب',
+    /** A row the driver added himself: no screenshot, so no clock and no route to show. */
+    manualRow: 'طلب مُضاف يدوياً',
     fee: 'الأجرة',
     payMode: 'نمط الدفع',
     addRow: 'إضافة طلب',

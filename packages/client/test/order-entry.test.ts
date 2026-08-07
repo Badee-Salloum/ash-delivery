@@ -168,17 +168,57 @@ describe('merging a scanned page into the list', () => {
     expect(mergeScannedOrders(first, [scan('18:06', '235')], id)).toEqual([])
   })
 
-  it('names a row by its fee when the clock could not be read', () => {
-    // The glyph reader reads the AMOUNT and not yet the clock, so this is the live path. Keyed on
-    // day+time it degenerated to «YAL--» for every row: one meaningless number, the same on every
-    // order, which the merge then treats as one order and the driver cannot match to anything.
+  it('keeps two deliveries that share a minute AND a fee — a multiset, not a set', () => {
+    // One page listing «١٢٠» twice means two deliveries cost 120. The old key walked an ordinal to
+    // separate them; the merge now counts, which is the same answer without a derived key.
+    const page = [scan('18:06', '120'), scan('18:06', '120')]
+    expect(mergeScannedOrders([], page, id)).toHaveLength(2)
+    // …and a second page re-showing only ONE of them consumes one and adds nothing.
+    const held = mergeScannedOrders([], page, id)
+    expect(mergeScannedOrders(held, [scan('18:06', '120')], id)).toEqual([])
+  })
+
+  it('dedupes on the minute and the fee even when the clock could not be read', () => {
+    // The live path while the reader still refuses some clocks. Every row has time ''; the fee is
+    // then the only thing separating them, and the count is what keeps both 235s.
     const noClock = [
       { dateIso: null, time: '', fee: '235' },
       { dateIso: null, time: '', fee: '120' },
       { dateIso: null, time: '', fee: '235' },
     ]
     const added = mergeScannedOrders([], noClock, id)
-    expect(added.map((o) => o.providerOrderNo)).toEqual(['YAL-F235', 'YAL-F120', 'YAL-F235-2'])
+    expect(added.map((o) => o.feeText)).toEqual(['235', '120', '235'])
+    expect(mergeScannedOrders(added, noClock, id)).toEqual([])
+  })
+
+  /**
+   * `shift_orders.provider_order_no` is UNIQUE over the WHOLE TABLE — not per shift, not per driver,
+   * not per day. Every key that was ever derived from what the screen shows therefore collides
+   * between drivers and between days, and the loser is a 409 nobody can see or clear.
+   */
+  it('never derives the wire key from anything two orders could share', () => {
+    const day = [scan('18:06', '120')]
+    // Two bikes, same minute, same fee, same day — the exact case ten of them make weekly.
+    const bikeOne = mergeScannedOrders([], day, id)
+    const bikeTwo = mergeScannedOrders([], day, id)
+    expect(bikeOne[0]!.providerOrderNo).not.toBe(bikeTwo[0]!.providerOrderNo)
+
+    // And with no clock at all, where the fee used to become the key outright.
+    const noClock = [{ dateIso: null, time: '', fee: '120' }]
+    expect(mergeScannedOrders([], noClock, id)[0]!.providerOrderNo).not.toBe(
+      mergeScannedOrders([], noClock, id)[0]!.providerOrderNo,
+    )
+  })
+
+  it('gives every row a key the wire will accept', () => {
+    // NOT NULL, min(1), max(64) — and generated, so an empty one is a bug rather than a typo.
+    const rows = mergeScannedOrders([], [scan('18:06', '235'), { dateIso: null, time: '', fee: '120' }], () =>
+      crypto.randomUUID(),
+    )
+    for (const r of rows) {
+      expect(r.providerOrderNo.trim().length).toBeGreaterThan(0)
+      expect(r.providerOrderNo.length).toBeLessThanOrEqual(64)
+    }
   })
 
   it('carries the OCR fee as the D-3 baseline and defaults the mode to cash', () => {
