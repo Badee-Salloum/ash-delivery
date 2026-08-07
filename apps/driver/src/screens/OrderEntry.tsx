@@ -131,6 +131,14 @@ export function OperationsList({
                 ×
               </Button>
             </div>
+            {/* Where it went, and when. The screen has no order number, so this is how a driver
+                recognises the row he is looking at. */}
+            {o.pointA || o.pointB || o.timeText ? (
+              <p className="mt-1 truncate text-xs text-slate-500">
+                {o.timeText ? <span className="num">{o.timeText} · </span> : null}
+                {o.pointA ?? '—'} ← {o.pointB ?? '—'}
+              </p>
+            ) : null}
             {problem ? (
               <p className="mt-1 text-sm font-medium text-red-600">
                 {t.orders.problems[problem.kind]}

@@ -39,6 +39,9 @@ export interface DraftOrder {
   walletAmountText?: string
   /** «HH:MM» off the dashboard — what a payments-log row is paired to. */
   timeText?: string
+  /** Where it went: «A» the pickup, «B» the dropoff, as the screen wrote them. */
+  pointA?: string | null
+  pointB?: string | null
 }
 
 /** A «سجل المدفوعات» row as the driver's list holds it, before the server gives it an identity. */
@@ -130,6 +133,8 @@ export interface ScannedOrderRow {
   dateIso: string | null
   time: string
   fee: string
+  pointA?: string | null
+  pointB?: string | null
 }
 
 /** One row as the payments-log reader produced it. `amount` is signed. */
@@ -200,6 +205,8 @@ export function mergeScannedOrders(
       feeOcrText: row.fee,
       timeText: row.time,
       included: true,
+      pointA: row.pointA ?? null,
+      pointB: row.pointB ?? null,
     })
   }
   return added

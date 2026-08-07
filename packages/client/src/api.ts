@@ -49,6 +49,8 @@ export interface ShiftStateView {
     /** What the payments log says reached the wallet. `null` = unmeasured, the pay mode decides. */
     walletAmount: string | null
     occurredMinute: string | null
+    /** «A» the pickup, «B» the dropoff — the order has no number, so this is how it is known. */
+    points?: Array<{ role: string; label: string; lat: number | null; lng: number | null }>
   }>
   /** «سجل المدفوعات» as read — what the wallet actually did, beside what the orders imply. */
   movements: Array<{

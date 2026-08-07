@@ -1082,6 +1082,8 @@ export interface OperationsInput {
     included?: boolean
     walletAmount?: Minor | null
     occurredMinute?: string | null
+    pointA?: string | null
+    pointB?: string | null
   }[]
   movements: readonly {
     amount: Minor
@@ -1172,7 +1174,12 @@ export async function submitOperations(
       companyShare: null,
       notes: null,
       createdBy: actor.userId,
-      points: [],
+      // «A» the pickup, «B» the dropoff, exactly as the screen wrote them. The route is what makes
+      // an order recognisable to a person at the review — it has no order number to go by.
+      points: [
+        ...(row.pointA ? [{ role: 'start' as const, label: row.pointA, lat: null, lng: null }] : []),
+        ...(row.pointB ? [{ role: 'end' as const, label: row.pointB, lat: null, lng: null }] : []),
+      ],
       included: row.included ?? true,
       walletAmount: row.walletAmount ?? null,
       occurredMinute: row.occurredMinute ?? null,

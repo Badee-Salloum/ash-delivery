@@ -174,6 +174,10 @@ export function ShiftFlow({
             included: o.included,
             walletAmountText: o.walletAmount ?? '',
             timeText: o.occurredMinute ?? '',
+            // «A» و«B» come back from the stored route, so a resumed shift still shows where each
+            // order went — the only thing on the row a person can recognise.
+            pointA: o.points?.find((p) => p.role === 'start')?.label ?? null,
+            pointB: o.points?.find((p) => p.role === 'end')?.label ?? null,
           })),
           movements: (st.movements ?? []).map((m) => ({
             localId: `already-${m.id}`,
@@ -646,6 +650,8 @@ function EndPackage({
             included: o.included !== false,
             walletAmount: o.walletAmountText ? o.walletAmountText : null,
             occurredMinute: o.timeText ? o.timeText : null,
+            pointA: o.pointA ?? null,
+            pointB: o.pointB ?? null,
           })),
         movements: draft.movements.map((m) => ({
           amount: m.amountText,

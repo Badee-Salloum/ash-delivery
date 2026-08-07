@@ -166,6 +166,15 @@ export const operationsRequest = z.object({
         included: z.boolean().default(true),
         walletAmount: moneySchema.nullable().default(null),
         occurredMinute: minuteSchema.nullable().default(null),
+        /**
+         * Where it went: «A» the pickup, «B» the dropoff.
+         *
+         * The orders screen carries NO order number, so the value, the clock and this route are
+         * everything an order actually is — and the route is the only part of it a human reading
+         * the review can recognise as a real delivery.
+         */
+        pointA: z.string().max(200).nullable().default(null),
+        pointB: z.string().max(200).nullable().default(null),
       }),
     )
     .max(400)

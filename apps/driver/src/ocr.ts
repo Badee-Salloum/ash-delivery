@@ -571,6 +571,15 @@ export interface OcrOrder {
   fee: string
   /** The dropoff area, best-effort — often absent or a GPS pair. */
   zone: string | null
+  /**
+   * Where the order went: «A» the pickup, «B» the dropoff, as written on the screen.
+   *
+   * These come from Tesseract's own text, not the glyph reader — its failure is confined to
+   * Arabic-Indic DIGITS, and a place name is Arabic words, which it reads well. The screen has no
+   * order number, so the value, the clock and this route are everything an order actually is.
+   */
+  pointA?: string | null
+  pointB?: string | null
 }
 
 const ORDERS_TIMEOUT_MS = 20_000
@@ -737,9 +746,9 @@ function feeOnLine(line: string): string | null {
 async function readAmountsByGlyph(
   image: Blob | Uint8Array,
   timeoutMs: number,
-): Promise<{ amounts: (string | null)[]; clocks: { time: string; dateIso: string | null }[]; rows: number; text: string }> {
+): Promise<{ amounts: (string | null)[]; clocks: { time: string; dateIso: string | null }[]; routes: { pointA: string | null; pointB: string | null }[]; rows: number; text: string }> {
   const prepared = await prepareWithPixels(toBlob(image))
-  if (!prepared) return { amounts: [], clocks: [], rows: 0, text: '' }
+  if (!prepared) return { amounts: [], clocks: [], routes: [], rows: 0, text: '' }
 
   const result = await recognize(prepared.blob, { whitelist: '', psm: 6 }, timeoutMs)
   // The word must BE «SYP», not merely contain it. `/SYP/` matched Tesseract's junk words too, and
@@ -749,7 +758,7 @@ async function readAmountsByGlyph(
     .flatMap((l) => l.words)
     .filter((w) => /^[^A-Za-z]{0,2}syp[^A-Za-z]{0,2}$/i.test(w.text.trim()))
     .sort((a, b) => a.y0 - b.y0)
-  if (anchors.length === 0) return { amounts: [], clocks: [], rows: 0, text: result.text }
+  if (anchors.length === 0) return { amounts: [], clocks: [], routes: [], rows: 0, text: result.text }
 
   const mask = maskFromPixels(prepared.pixels, prepared.width, prepared.height)
   const templates = unpackTemplates(GLYPH_TEMPLATES)
@@ -792,6 +801,37 @@ async function readAmountsByGlyph(
   }
 
   const clocks = anchors.map(clockAt)
+
+  /**
+   * The route: «A» the pickup, «B» the dropoff, taken from Tesseract's OWN text.
+   *
+   * This is the one part of the screen it reads well. Its failure is confined to Arabic-Indic
+   * DIGITS — the letters it handles fine — and the two place lines are Arabic words, printed under
+   * their order and tagged with a Latin «A» and «B» that it reads as reliably as it reads «SYP».
+   * So an order records where it went without anyone typing an address at eleven at night.
+   */
+  const routeAt = (index: number): { pointA: string | null; pointB: string | null } => {
+    const from = anchors[index]!.y1
+    // Everything down to the NEXT order's row belongs to this one.
+    const to = anchors[index + 1]?.y0 ?? Infinity
+    const label = (marker: string): string | null => {
+      for (const line of result.lines) {
+        if (line.y0 < from || line.y0 >= to) continue
+        const words = line.words.filter((w) => w.text.trim() !== '')
+        const at = words.findIndex((w) => w.text.trim() === marker)
+        if (at === -1) continue
+        // The badge sits at the START of the line in reading order; on this RTL screen that is its
+        // right-hand end, so the place is whichever side has words on it.
+        const before = words.slice(0, at)
+        const after = words.slice(at + 1)
+        const text = (before.length >= after.length ? before : after).map((w) => w.text).join(' ').trim()
+        if (text !== '') return text.slice(0, 120)
+      }
+      return null
+    }
+    return { pointA: label('A'), pointB: label('B') }
+  }
+  const routes = anchors.map((_, i) => routeAt(i))
   const amounts = anchors.map((a) => {
     // «SYP»'s own cap height IS the font size, handed over for free — the band and the reach to
     // the left are both measured in it, so the same numbers work at any screenshot resolution.
@@ -808,7 +848,7 @@ async function readAmountsByGlyph(
       templates,
     )
   })
-  return { amounts, clocks, rows: anchors.length, text: result.text }
+  return { amounts, clocks, routes, rows: anchors.length, text: result.text }
 }
 
 /** Read the whole order list off a «Recent orders» / «الطلبات الحديثة» screenshot. */
@@ -844,9 +884,9 @@ export async function readOrders(image: Blob | Uint8Array, timeoutMs = ORDERS_TI
     // Each order carries the clock it happened at, which is the only identity the screen offers —
     // it has no order number anywhere on it.
     const glyphOrders = byGlyph.amounts
-      .map((fee, i) => ({ fee, clock: byGlyph.clocks[i] }))
-      .filter((r): r is { fee: string; clock: { time: string; dateIso: string | null } } => r.fee !== null)
-      .map((r) => ({ dateIso: r.clock?.dateIso ?? null, time: r.clock?.time ?? '', fee: r.fee, zone: null }))
+      .map((fee, i) => ({ fee, clock: byGlyph.clocks[i], route: byGlyph.routes[i] }))
+      .filter((r): r is { fee: string; clock: { time: string; dateIso: string | null }; route: { pointA: string | null; pointB: string | null } } => r.fee !== null)
+      .map((r, i) => ({ dateIso: r.clock?.dateIso ?? null, time: r.clock?.time ?? '', fee: r.fee, zone: null, pointA: r.route?.pointA ?? null, pointB: r.route?.pointB ?? null }))
     if (glyphOrders.length === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text }
     return {
       ok: true,
