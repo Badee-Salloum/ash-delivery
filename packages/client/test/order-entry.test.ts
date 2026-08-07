@@ -3,6 +3,8 @@ import {
   type DraftOrder,
   allProblems,
   isComplete,
+  mergeScannedMovements,
+  mergeScannedOrders,
   nextPayMode,
   previewBr1,
   toApiPayloads,
@@ -127,6 +129,77 @@ describe('API payloads', () => {
   it('trims order numbers and carries the fee text verbatim', () => {
     const payloads = toApiPayloads([row({ providerOrderNo: '  YAL-9  ', feeText: '5000.00' })])
     expect(payloads[0]).toEqual({ providerOrderNo: 'YAL-9', payMode: 'cash', fee: '5000.00', zone: null })
+  })
+})
+
+/**
+ * Folding a screenshot into a list that already has rows.
+ *
+ * Both screens scroll, so each arrives as several OVERLAPPING images: page two re-shows the bottom
+ * of page one. Appending blindly doubles every row in the overlap and leaves the driver to find and
+ * uncheck each duplicate himself — on a phone, at the end of a shift.
+ */
+describe('merging a scanned page into the list', () => {
+  let n = 0
+  const id = (): string => `id-${++n}`
+  const scan = (time: string, fee: string) => ({ dateIso: '2026-08-04', time, fee })
+
+  it('adds each order once across two overlapping pages', () => {
+    const pageOne = [scan('18:06', '235'), scan('17:42', '210'), scan('17:22', '130')]
+    const first = mergeScannedOrders([], pageOne, id)
+    expect(first).toHaveLength(3)
+
+    // Page two re-shows the last two of page one and brings two genuinely new ones.
+    const pageTwo = [scan('17:42', '210'), scan('17:22', '130'), scan('17:07', '135'), scan('16:50', '170')]
+    const second = mergeScannedOrders(first, pageTwo, id)
+    expect(second.map((o) => o.feeText)).toEqual(['135', '170'])
+  })
+
+  it('keeps a genuine second delivery in the same minute, under its own key', () => {
+    // Same minute, DIFFERENT fee — two real orders. `YAL-<date>-<HHMM>` alone gives them the same
+    // key, and since provider_order_no is globally unique the second one silently vanishes.
+    const both = mergeScannedOrders([], [scan('18:06', '235'), scan('18:06', '120')], id)
+    expect(both).toHaveLength(2)
+    expect(new Set(both.map((o) => o.providerOrderNo)).size).toBe(2)
+  })
+
+  it('treats same minute AND same fee as the overlap, not a second delivery', () => {
+    const first = mergeScannedOrders([], [scan('18:06', '235')], id)
+    expect(mergeScannedOrders(first, [scan('18:06', '235')], id)).toEqual([])
+  })
+
+  it('carries the OCR fee as the D-3 baseline and defaults the mode to cash', () => {
+    // The dashboard screen carries no pay mode. Cash is the safe default because it is the mode
+    // that expects the driver to be HOLDING the money — the easiest claim to check.
+    const [row] = mergeScannedOrders([], [scan('18:06', '235')], id)
+    expect(row!.payMode).toBe('cash')
+    expect(row!.feeOcrText).toBe('235')
+    expect(row!.timeText).toBe('18:06')
+    expect(row!.included).toBe(true)
+  })
+
+  it('re-reading a log page adds nothing', () => {
+    const page = [
+      { amount: '-47', time: '18:06' },
+      { amount: '153', time: '17:42' },
+    ]
+    const first = mergeScannedMovements([], page, id)
+    expect(first).toHaveLength(2)
+    expect(mergeScannedMovements(first, page, id)).toEqual([])
+  })
+
+  it('keeps two identical amounts in one minute — both are real', () => {
+    // A multiset merge, mirroring the server's. Matching by value alone would discard the second
+    // of two genuine −24 cuts.
+    const both = mergeScannedMovements([], [{ amount: '-24', time: '13:10' }, { amount: '-24', time: '13:10' }], id)
+    expect(both).toHaveLength(2)
+    // …and a page re-showing only ONE of them consumes one, leaving nothing new.
+    expect(mergeScannedMovements(both, [{ amount: '-24', time: '13:10' }], id)).toEqual([])
+  })
+
+  it('keeps the sign — a withdrawal is not a credit', () => {
+    const [row] = mergeScannedMovements([], [{ amount: '-1155.65', time: '18:33' }], id)
+    expect(row!.amountText).toBe('-1155.65')
   })
 })
 

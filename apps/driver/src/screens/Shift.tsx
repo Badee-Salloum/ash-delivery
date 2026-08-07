@@ -10,7 +10,15 @@ import {
 } from 'react'
 import { MAX_PAGE_SLOTS, PAYMENTS_LOG_SLOT, type PayMode, pageSlot } from '@ash/domain'
 import type { DraftMovement, DraftOrder } from '@ash/client'
-import { allProblems, compressImage, previewBr1, splitSlot, uploadEvidencePath } from '@ash/client'
+import {
+  allProblems,
+  compressImage,
+  mergeScannedMovements,
+  mergeScannedOrders,
+  previewBr1,
+  splitSlot,
+  uploadEvidencePath,
+} from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
 import { useGpsBeacon } from '../use-gps-beacon.ts'
@@ -73,8 +81,11 @@ interface EndDraft {
    */
   dashboardPages: number
   logPages: number
-  /** Movements read off each log page, so the total is the whole log and not just the last page. */
-  logRows: Record<string, number>
+  /**
+   * What each screen's last read did. Two screens, two answers, two status lines — a per-page
+   * tally is no longer needed now that each read reports what it ADDED rather than what it saw.
+   */
+  dash: LogState
   /** The operations list itself — the orders and the wallet rows, with their checkboxes. */
   orders: DraftOrder[]
   movements: DraftMovement[]
@@ -91,7 +102,7 @@ const EMPTY_END_DRAFT: EndDraft = {
   packs: {},
   dashboardPages: 1,
   logPages: 1,
-  logRows: {},
+  dash: { kind: 'idle' },
   orders: [],
   movements: [],
   opsError: null,
@@ -748,19 +759,39 @@ function EndPackage({
                 },
               }
             : {})}
+          // The dashboard tile IS the order scan. One pick: the image is the evidence AND the thing
+          // that was read. Its rows are APPENDED, never replacing what is already listed — the
+          // screen scrolls, so page two re-shows the bottom of page one.
+          {...(splitSlot(slot).base === 'dashboard'
+            ? {
+                onImage: async (file: File): Promise<void> => {
+                  patch({ dash: { kind: 'reading' } })
+                  const { readOrders } = await import('../ocr.ts')
+                  const r = await readOrders(file).catch(() => null)
+                  onDraft((d) => {
+                    if (!r?.ok) return { ...d, dash: { kind: 'failed' } }
+                    const added = mergeScannedOrders(d.orders, r.reading.orders, () => crypto.randomUUID())
+                    // NEW rows, not rows on the page: a page that fully overlaps reads 0, which is
+                    // the truth — nothing was added — and not a failure.
+                    return { ...d, orders: [...d.orders, ...added], dash: { kind: 'read', rows: added.length } }
+                  })
+                },
+              }
+            : {})}
           {...(splitSlot(slot).base === PAYMENTS_LOG_SLOT
             ? {
                 onImage: async (file: File): Promise<void> => {
                   patch({ log: { kind: 'reading' } })
                   const { readPaymentsLog } = await import('../ocr.ts')
                   const r = await readPaymentsLog(file).catch(() => null)
-                  // Per PAGE, then totalled. Reporting only the last page read would say «قُرئت ٥
-                  // حركة» after a second screenshot when the first had eleven — the driver would
-                  // reasonably conclude the app had forgotten the page he just gave it.
                   onDraft((d) => {
-                    const rows = r?.ok ? { ...d.logRows, [slot]: r.reading.movements.length } : d.logRows
-                    const total = Object.values(rows).reduce((a, b) => a + b, 0)
-                    return { ...d, logRows: rows, log: r?.ok ? { kind: 'read', rows: total } : { kind: 'failed' } }
+                    if (!r?.ok) return { ...d, log: { kind: 'failed' } }
+                    const added = mergeScannedMovements(d.movements, r.reading.movements, () => crypto.randomUUID())
+                    return {
+                      ...d,
+                      movements: [...d.movements, ...added],
+                      log: { kind: 'read', rows: added.length },
+                    }
                   })
                 },
               }
@@ -771,17 +802,13 @@ function EndPackage({
                 + {t.shift.addPage}
               </Button>
             ) : null}
+            {/* What THIS screen's read did, under its own tiles. A toast would say it once and
+                vanish; whether a screenshot was understood is a state the driver keeps needing
+                while he decides what he still has to type. */}
+            {lastPage ? <ReadStatus state={base === 'dashboard' ? draft.dash : logState} /> : null}
           </Fragment>
         )
       })}
-      {/* What the log gave us. Said out loud because it is the difference between a wallet figure
-          the system corroborated and one nobody checked — and because a silent reader is how a
-          driver ends up believing a screenshot was understood when it was not. */}
-      {logState.kind === 'reading' ? <p className="text-center text-sm text-slate-400">{t.shift.reading}…</p> : null}
-      {logState.kind === 'read' ? (
-        <p className="text-center text-sm text-emerald-700">{t.shift.logRead.replace('{n}', String(logState.rows))}</p>
-      ) : null}
-      {logState.kind === 'failed' ? <p className="text-center text-sm text-amber-700">{t.shift.logUnread}</p> : null}
       {/* THE list: every operation of the shift, with the checkbox that decides what counts. */}
       {draft.opsError ? (
         <Card>
@@ -818,6 +845,26 @@ function EndPackage({
       />
     </Screen>
   )
+}
+
+/**
+ * What a screenshot's reader made of it — said out loud, and left on screen.
+ *
+ * A silent reader is how a driver ends up believing a screenshot was understood when it was not,
+ * and «قُرئت ٠ عملية» is a different statement from «تعذّرت القراءة»: the first means the page
+ * added nothing because it had nothing new on it, the second means the digits could not be read at
+ * all and the rows have to be typed. Both are true answers and the driver acts differently on each.
+ */
+function ReadStatus({ state }: { state: LogState }): ReactNode {
+  const { t } = useApp()
+  // Checked POSITIVELY for `read`: the other member's `kind` is a union of three literals, and
+  // narrowing a union by eliminating them one at a time does not reduce to the member with `rows`.
+  if (state.kind === 'read') {
+    return <p className="text-center text-sm text-emerald-700">{t.shift.readAdded.replace('{n}', String(state.rows))}</p>
+  }
+  if (state.kind === 'reading') return <p className="text-center text-sm text-slate-400">{t.shift.reading}…</p>
+  if (state.kind === 'failed') return <p className="text-center text-sm text-amber-700">{t.shift.readUnread}</p>
+  return null
 }
 
 /**

@@ -123,6 +123,112 @@ export function unsentOrders(orders: readonly DraftOrder[], alreadySent: readonl
   return orders.filter((o) => o.recorded !== true && !sent.has(o.providerOrderNo.trim()))
 }
 
+// ── Folding a screenshot into the list ──────────────────────────────────────────────────────
+
+/** One row as the orders reader produced it. */
+export interface ScannedOrderRow {
+  dateIso: string | null
+  time: string
+  fee: string
+}
+
+/** One row as the payments-log reader produced it. `amount` is signed. */
+export interface ScannedMovementRow {
+  amount: string
+  time: string
+}
+
+/**
+ * A globally-unique, editable order key from the order's day and time.
+ *
+ * The dashboard screen carries no order id, so one has to be made. Day+time is unique in practice
+ * and readable by a human comparing it against the screenshot, which a random id would not be.
+ */
+export const orderKeyFor = (s: ScannedOrderRow, ordinal = 1): string => {
+  const day = (s.dateIso ?? '').replace(/-/g, '')
+  const time = s.time.replace(':', '')
+  // Two deliveries genuinely can land in the same minute, and without the ordinal the second one
+  // silently takes the first one's key — one of the two orders then vanishes from the day.
+  return ordinal <= 1 ? `YAL-${day}-${time}` : `YAL-${day}-${time}-${ordinal}`
+}
+
+/**
+ * Append what a dashboard screenshot read, skipping what the list already holds.
+ *
+ * The screen scrolls, so it is photographed in several OVERLAPPING images: page two re-shows the
+ * bottom of page one. Appending blindly would double every order in the overlap, and the driver
+ * would have to spot and uncheck each duplicate himself.
+ */
+export function mergeScannedOrders(
+  existing: readonly DraftOrder[],
+  scanned: readonly ScannedOrderRow[],
+  newId: () => string,
+): DraftOrder[] {
+  const taken = new Set(existing.map((o) => o.providerOrderNo))
+  const added: DraftOrder[] = []
+  for (const row of scanned) {
+    // Walk the ordinal up until the key is free — that both de-duplicates the overlap and gives a
+    // genuine second order in the same minute a key of its own.
+    let ordinal = 1
+    let key = orderKeyFor(row, ordinal)
+    let duplicate = false
+    while (taken.has(key)) {
+      // Same minute AND same fee as one already held: this is the overlap, not a new delivery.
+      const twin = [...existing, ...added].find((o) => o.providerOrderNo === key)
+      if (twin && twin.feeText === row.fee) {
+        duplicate = true
+        break
+      }
+      ordinal += 1
+      key = orderKeyFor(row, ordinal)
+    }
+    if (duplicate) continue
+    taken.add(key)
+    added.push({
+      localId: newId(),
+      providerOrderNo: key,
+      // The screen carries no pay mode; cash is the safe default because it is the mode that
+      // expects the driver to be HOLDING the money, which is the claim easiest to check.
+      payMode: 'cash',
+      feeText: row.fee,
+      feeOcrText: row.fee,
+      timeText: row.time,
+      included: true,
+    })
+  }
+  return added
+}
+
+/**
+ * Append what a payments-log screenshot read, skipping what the list already holds.
+ *
+ * A MULTISET merge, mirroring the server's: a minute genuinely can hold two identical amounts, so
+ * only the surplus of each (minute, amount) is new. Matching by value alone would silently discard
+ * the second of two real 24-lira cuts.
+ */
+export function mergeScannedMovements(
+  existing: readonly DraftMovement[],
+  scanned: readonly ScannedMovementRow[],
+  newId: () => string,
+): DraftMovement[] {
+  const tally = new Map<string, number>()
+  for (const m of existing) {
+    const key = `${m.timeText}|${m.amountText}`
+    tally.set(key, (tally.get(key) ?? 0) + 1)
+  }
+  const added: DraftMovement[] = []
+  for (const row of scanned) {
+    const key = `${row.time}|${row.amount}`
+    const already = tally.get(key) ?? 0
+    if (already > 0) {
+      tally.set(key, already - 1)
+      continue
+    }
+    added.push({ localId: newId(), amountText: row.amount, timeText: row.time, included: true })
+  }
+  return added
+}
+
 /** Cycle a pay mode with one tap: cash → electronic → free → cash. */
 export function nextPayMode(mode: PayMode): PayMode {
   return mode === 'cash' ? 'electronic' : mode === 'electronic' ? 'free' : 'cash'

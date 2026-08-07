@@ -1,9 +1,7 @@
-import { type ReactNode, useMemo, useRef, useState } from 'react'
+import { type ReactNode, useMemo, useState } from 'react'
 import type { PayMode } from '@ash/domain'
 import { type DraftMovement, type DraftOrder, allProblems, nextPayMode } from '@ash/client'
-import type { OcrOrder } from '../ocr.ts'
 import { useApp } from '../app-context.tsx'
-import { useToast } from '../feedback.tsx'
 import { Button, Card, Money, MoneyInput, TextInput } from '../ui.tsx'
 
 /**
@@ -20,8 +18,11 @@ import { Button, Card, Money, MoneyInput, TextInput } from '../ui.tsx'
  * out of the money.
  *
  * EVERY ROW IS TYPEABLE, and that is not a fallback. Tesseract cannot read Arabic-Indic digits at
- * all (see scripts/glyph-lab.mjs), so until the glyph reader lands this list is filled in by hand,
- * and the scan buttons only ever APPEND to it.
+ * all (see scripts/glyph-lab.mjs), so until the glyph reader lands this list is filled in by hand.
+ *
+ * There is no scan button here. A screenshot is picked ONCE, on its own tile above, and reading is
+ * something that happens to an image the driver has already handed over — asking him to go back to
+ * the gallery for the same picture a second time was the whole complaint.
  */
 export function OperationsList({
   orders,
@@ -35,7 +36,6 @@ export function OperationsList({
   onMovements(next: DraftMovement[]): void
 }): ReactNode {
   const { t } = useApp()
-  const toast = useToast()
   const [defaultFee, setDefaultFee] = useState('5000')
 
   const problems = useMemo(() => allProblems(orders), [orders])
@@ -50,77 +50,6 @@ export function OperationsList({
     onOrders(orders.map((o) => (o.localId === localId ? { ...o, ...patch } : o)))
 
   const remove = (localId: string): void => onOrders(orders.filter((o) => o.localId !== localId))
-
-  // SRS D-1: read the fee list off a «الطلبات الحديثة» screenshot and APPEND the rows. The screen
-  // carries no order id and no pay mode, so the number is keyed from date+time (unique, editable)
-  // and the mode defaults to cash for the driver to set.
-  const orderFile = useRef<HTMLInputElement | null>(null)
-  const logFile = useRef<HTMLInputElement | null>(null)
-  const [scanning, setScanning] = useState<'orders' | 'log' | null>(null)
-
-  const scanOrders = async (file: File): Promise<void> => {
-    setScanning('orders')
-    try {
-      const { readOrders } = await import('../ocr.ts')
-      const r = await readOrders(file)
-      if (!r.ok || r.reading.orders.length === 0) {
-        toast.error(t.orders.scanNone)
-        return
-      }
-      // Only rows this list does not already hold: pages overlap, and re-reading one must not
-      // double every order on it.
-      const seen = new Set(orders.map((o) => o.providerOrderNo))
-      const fresh = r.reading.orders
-        .map((s: OcrOrder) => ({
-          localId: crypto.randomUUID(),
-          providerOrderNo: orderKeyFor(s),
-          payMode: 'cash' as PayMode,
-          feeText: s.fee,
-          feeOcrText: s.fee,
-          timeText: s.time,
-          included: true,
-        }))
-        .filter((o) => !seen.has(o.providerOrderNo))
-      onOrders([...orders, ...fresh])
-      toast.success(t.orders.scanned.replace('{n}', String(fresh.length)))
-    } catch {
-      toast.error(t.common.actionFailed)
-    } finally {
-      setScanning(null)
-    }
-  }
-
-  const scanLog = async (file: File): Promise<void> => {
-    setScanning('log')
-    try {
-      const { readPaymentsLog } = await import('../ocr.ts')
-      const r = await readPaymentsLog(file)
-      if (!r.ok || r.reading.movements.length === 0) {
-        toast.error(t.shift.logUnread)
-        return
-      }
-      // Multiset append, mirroring the server's merge: a minute genuinely can hold two identical
-      // amounts, so only the SURPLUS of each (minute, amount) is new.
-      const tally = new Map<string, number>()
-      for (const m of movements) tally.set(`${m.timeText}|${m.amountText}`, (tally.get(`${m.timeText}|${m.amountText}`) ?? 0) + 1)
-      const fresh: DraftMovement[] = []
-      for (const m of r.reading.movements) {
-        const key = `${m.time}|${m.amount}`
-        const already = tally.get(key) ?? 0
-        if (already > 0) {
-          tally.set(key, already - 1)
-          continue
-        }
-        fresh.push({ localId: crypto.randomUUID(), amountText: m.amount, timeText: m.time, included: true })
-      }
-      onMovements([...movements, ...fresh])
-      toast.success(t.shift.logRead.replace('{n}', String(fresh.length)))
-    } catch {
-      toast.error(t.common.actionFailed)
-    } finally {
-      setScanning(null)
-    }
-  }
 
   const modeLabel: Record<PayMode, string> = {
     cash: t.orders.payModes.cash,
@@ -137,38 +66,13 @@ export function OperationsList({
 
   return (
     <>
+      {/* No scan buttons here. The screenshots are picked ONCE, on their own tiles above, and
+          reading is something that happens to an image the driver has already handed over — not a
+          second trip to the gallery for the same picture. */}
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm font-semibold">
           {t.orders.title} — {checkedCount}/{orders.length}
         </span>
-        <input
-          ref={orderFile}
-          type="file"
-          accept="image/*"
-          className="hidden"
-          onChange={(e) => {
-            const file = e.target.files?.[0]
-            e.target.value = '' // let the same file be re-picked
-            if (file) void scanOrders(file)
-          }}
-        />
-        <input
-          ref={logFile}
-          type="file"
-          accept="image/*"
-          className="hidden"
-          onChange={(e) => {
-            const file = e.target.files?.[0]
-            e.target.value = ''
-            if (file) void scanLog(file)
-          }}
-        />
-        <Button variant="ghost" className="ms-auto" disabled={scanning !== null} onClick={() => orderFile.current?.click()}>
-          {scanning === 'orders' ? t.common.loading : t.orders.scanOrders}
-        </Button>
-        <Button variant="ghost" disabled={scanning !== null} onClick={() => logFile.current?.click()}>
-          {scanning === 'log' ? t.common.loading : t.shift.paymentsLog}
-        </Button>
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm text-slate-500">{t.orders.fee}</span>
@@ -274,9 +178,3 @@ export function OperationsList({
   )
 }
 
-/** A globally-unique, editable order key from the order's day + time, e.g. «YAL-20260727-2346». */
-function orderKeyFor(s: OcrOrder): string {
-  const day = (s.dateIso ?? '').replace(/-/g, '')
-  const time = s.time.replace(':', '')
-  return `YAL-${day}-${time}`
-}

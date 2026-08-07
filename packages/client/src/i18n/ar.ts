@@ -200,10 +200,11 @@ export const ar = {
     walletZeroed: 'صورة المحفظة صفراً',
     dashboardShot: 'سكرينشوت الداشبورد',
     paymentsLog: 'سجل المدفوعات',
-    logRead: 'قُرئت {n} حركة من سجل المدفوعات',
-    logUnread: 'تعذّرت قراءة سجل المدفوعات — سيراجعه المدير',
-    /** Both «الطلبات الحديثة» and «سجل المدفوعات» scroll: one screenshot rarely holds a whole day. */
+    /** Both «الطلبات الحديثة» و«سجل المدفوعات» scroll: one screenshot rarely holds a whole day. */
     addPage: 'صورة أخرى',
+    /** «٠ عملية» is a real answer — the page had nothing new — and not the same as a failed read. */
+    readAdded: 'أُضيفت {n} عملية من هذه الصورة',
+    readUnread: 'تعذّرت قراءة هذه الصورة — أدخِل العمليات يدوياً',
     retakeRequested: 'طلب المدير إعادة التصوير',
     closeRejected: 'رفض المدير إنهاء النوبة',
     reportIncident: 'بلاغ حادثة',
@@ -260,9 +261,6 @@ export const ar = {
     pinOnMap: 'تحديد على الخريطة',
     notes: 'ملاحظات',
     route: 'المسار',
-    scanOrders: 'مسح الطلبات',
-    scanned: 'تمت إضافة {n} طلباً — راجِعها واحذف ما ليس من نوبتك',
-    scanNone: 'لم تُقرأ أي طلبات',
     /** A row already sent to the server. */
     sent: 'مُرسَل',
     /** The checkbox: an unchecked operation stays with the shift and out of the money. */

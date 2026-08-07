@@ -199,10 +199,11 @@ export const en: Catalog = {
     walletZeroed: 'Zeroed-wallet photo',
     dashboardShot: 'Dashboard screenshot',
     paymentsLog: 'Payments log',
-    logRead: 'Read {n} movements from the payments log',
-    logUnread: 'The payments log could not be read — the manager will review it',
     /** Both the orders list and the payments log scroll: one screenshot rarely holds a whole day. */
     addPage: 'Another image',
+    /** «0 operations» is a real answer — the page had nothing new — not the same as a failed read. */
+    readAdded: '{n} operations added from this image',
+    readUnread: 'This image could not be read — enter the operations by hand',
     retakeRequested: 'The manager requested a re-shoot',
     closeRejected: 'The manager rejected the close',
     reportIncident: 'Report an incident',
@@ -259,9 +260,6 @@ export const en: Catalog = {
     pinOnMap: 'Pin on map',
     notes: 'Notes',
     route: 'Route',
-    scanOrders: 'Scan orders',
-    scanned: '{n} orders added — review them and drop any not in this shift',
-    scanNone: 'No orders could be read',
     /** A row already sent to the server. */
     sent: 'Sent',
     /** The checkbox: an unchecked operation stays with the shift and out of the money. */
