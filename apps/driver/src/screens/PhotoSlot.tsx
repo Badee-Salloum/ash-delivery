@@ -58,10 +58,18 @@ export function PhotoSlot({
   const { api, t } = useApp()
   const ref = useRef<HTMLInputElement>(null)
   const [state, setState] = useState<'idle' | 'working' | 'done' | 'error'>(uploaded ? 'done' : 'idle')
+  /** The file already picked, so a failed upload is one tap — not another trip to the gallery. */
+  const [picked, setPicked] = useState<File | null>(null)
 
   const onPick = useCallback(
     async (file: File) => {
+      setPicked(file)
       setState('working')
+      // READ FIRST, UPLOAD SECOND. Tesseract runs entirely on-device, so reading is the one part
+      // of this that never needed the network — and it used to be gated behind the upload. On 2G
+      // at the end of a shift the upload failed, `onImage` was never reached, and the driver
+      // hand-typed thirty orders the phone could have read while standing still.
+      onImage?.(file)
       try {
         const { bytes, mimeType } = await compressImage(file)
         await api.putBytes(uploadEvidencePath(shiftId, pkg, slot), bytes, mimeType, {
@@ -69,9 +77,8 @@ export function PhotoSlot({
         })
         setState('done')
         onUploaded(slot)
-        onImage?.(file) // fire-and-forget OCR after the upload is safely done
       } catch {
-        // The upload is idempotent, so the fix is simply to tap again.
+        // The upload is idempotent, so the fix is simply to tap again — with the same file.
         setState('error')
       }
     },
@@ -80,14 +87,27 @@ export function PhotoSlot({
 
   return (
     <button
-      onClick={() => ref.current?.click()}
+      // A failed upload retries the file already in hand; only an untouched tile opens the picker.
+      onClick={() => (state === 'error' && picked ? void onPick(picked) : ref.current?.click())}
       className={`flex min-h-20 items-center justify-between rounded-2xl border-2 border-dashed px-4 ${
-        state === 'done' ? 'border-emerald-400 bg-emerald-50' : 'border-slate-300 bg-white'
+        state === 'done'
+          ? 'border-emerald-400 bg-emerald-50'
+          : state === 'error'
+            ? 'border-red-400 bg-red-50'
+            : 'border-slate-300 bg-white'
       }`}
     >
       <span className="font-medium">{label}</span>
-      <span className="text-sm text-slate-500">
-        {state === 'working' ? t.common.loading : state === 'done' ? '✓' : state === 'error' ? t.common.retake : '📷'}
+      {/* An error used to keep the same grey dashed border and swap the 📷 for grey 14px text —
+          in sunlight that reads as "not done yet" at best and as "done" at worst. */}
+      <span className={`text-sm ${state === 'error' ? 'font-medium text-red-700' : 'text-slate-600'}`}>
+        {state === 'working'
+          ? t.common.loading
+          : state === 'done'
+            ? '✓'
+            : state === 'error'
+              ? t.shift.uploadFailed
+              : '📷'}
       </span>
       <input
         ref={ref}

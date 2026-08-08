@@ -1,5 +1,7 @@
 import { type ReactNode, useEffect, useState } from 'react'
 import { useApp } from '../app-context.tsx'
+import { explainError } from '../errors.ts'
+import { useConfirm } from '../feedback.tsx'
 import { Badge, Button, Card, Table, TextInput } from '../ui.tsx'
 
 /**
@@ -28,6 +30,7 @@ const BRANCH_SCOPED = new Set(['driver', 'branch_manager'])
 
 export function Accounts(): ReactNode {
   const { api, t, lang } = useApp()
+  const confirm = useConfirm()
   const [accounts, setAccounts] = useState<Account[]>([])
   const [branches, setBranches] = useState<Branch[]>([])
   const [form, setForm] = useState({ username: '', password: '', fullNameAr: '', roleKey: 'branch_manager', branchId: '' })
@@ -153,7 +156,7 @@ export function Accounts(): ReactNode {
           <label className="flex flex-col gap-1">
             <span className="text-xs font-semibold text-slate-500">{t.accounts.password}</span>
             <TextInput
-              type="text"
+              type="password"
               value={form.password}
               onChange={(e) => setForm({ ...form, password: e.target.value })}
               placeholder={t.accounts.passwordHint}
@@ -183,7 +186,7 @@ export function Accounts(): ReactNode {
             {busy ? t.common.loading : t.accounts.create}
           </Button>
           {ok ? <span className="text-sm font-medium text-emerald-600">{ok}</span> : null}
-          {error ? <span className="text-sm font-medium text-red-600">{error}</span> : null}
+          {error ? <span className="text-sm font-medium text-red-600">{explainError(error, t)}</span> : null}
         </div>
       </Card>
 
@@ -277,7 +280,22 @@ export function Accounts(): ReactNode {
                       </Button>
                       <Button
                         variant={a.active ? 'danger' : 'success'}
-                        onClick={() => void rowAction(() => api.updateUser(a.id, { active: !a.active }))}
+                        onClick={() =>
+                          void (async () => {
+                            // Deactivating takes away someone's ability to sign in — a driver
+                            // mid-shift, or the last admin. One click, no question, until now.
+                            if (a.active) {
+                              const ok = await confirm({
+                                title: t.accounts.confirmDeactivateTitle,
+                                body: a.username,
+                                confirmLabel: t.accounts.deactivate,
+                                danger: true,
+                              })
+                              if (!ok) return
+                            }
+                            await rowAction(() => api.updateUser(a.id, { active: !a.active }))
+                          })()
+                        }
                       >
                         {a.active ? t.accounts.deactivate : t.accounts.activate}
                       </Button>

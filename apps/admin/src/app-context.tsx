@@ -31,6 +31,8 @@ interface AppContextValue {
   session: Session | null
   setSession(session: Session | null): void
   refreshSession(): Promise<void>
+  /** The session lapsed mid-use — the login screen says so instead of appearing from nowhere. */
+  sessionExpired: boolean
   /** Branches an organisation-wide role may choose between. Empty for a branch-scoped role. */
   branches: Branch[]
   /** The branch every branch-scoped read is currently pointed at. */
@@ -52,6 +54,31 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     document.documentElement.lang = next
     document.documentElement.dir = dir(next)
   }, [])
+
+
+  /**
+   * The session lapsed while the app was open.
+   *
+   * Set by the API client's 401 hook, cleared the moment a fresh sign-in succeeds. It exists so
+   * the login screen can say WHY it is being shown: without it a driver mid-shift, or a manager
+   * mid-approval, is dropped onto a sign-in form with no explanation and no idea whether he lost
+   * his work.
+   */
+  const [sessionExpired, setSessionExpired] = useState(false)
+
+  useEffect(() => {
+    api.onUnauthorized = (): void => {
+      // Guard on the CURRENT session via the setter: a 401 on a page that was already signed out
+      // (a stale poll, a race on load) must not raise the expiry notice.
+      setSession((current) => {
+        if (current) setSessionExpired(true)
+        return null
+      })
+    }
+    return () => {
+      api.onUnauthorized = null
+    }
+  }, [api])
 
   // Keep <html dir/lang> in step with the chosen language — the whole layout is RTL by default.
   useEffect(() => {
@@ -124,6 +151,7 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     session,
     setSession,
     refreshSession,
+    sessionExpired,
     branches,
     branchId,
     setBranchId,

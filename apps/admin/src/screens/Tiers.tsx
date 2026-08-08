@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
 import type { TierBand, TierRuleView, TierSimResult } from '@ash/client'
 import { useApp } from '../app-context.tsx'
-import { useToast } from '../feedback.tsx'
+import { useConfirm, useToast } from '../feedback.tsx'
 import { explainError } from '../errors.ts'
 import { Badge, Button, Card, DateField, Field, Money, Pending, Select, Table, TextInput } from '../ui.tsx'
 
@@ -30,6 +30,7 @@ const DEFAULT_FORM: BandForm[] = [
 export function Tiers(): ReactNode {
   const { api, t } = useApp()
   const toast = useToast()
+  const confirm = useConfirm()
   const [rules, setRules] = useState<TierRuleView[] | null>(null)
   const [fallback, setFallback] = useState<{ bands: TierBand[] } | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -69,6 +70,13 @@ export function Tiers(): ReactNode {
   const removeBand = (i: number): void => setBands((prev) => prev.filter((_, j) => j !== i))
 
   const publish = async (): Promise<void> => {
+    // A published table restates every driver's share from its effective date. It was one click.
+    const ok = await confirm({
+      title: t.tiers.confirmPublishTitle,
+      body: `${t.tiers.effectiveFrom}: ${effectiveFrom}`,
+      confirmLabel: t.tiers.publish,
+    })
+    if (!ok) return
     setBusy(true)
     setFormError(null)
     try {
@@ -83,6 +91,8 @@ export function Tiers(): ReactNode {
     }
   }
   const withdraw = async (id: number): Promise<void> => {
+    const ok = await confirm({ title: t.tiers.confirmWithdrawTitle, confirmLabel: t.tiers.withdraw, danger: true })
+    if (!ok) return
     try {
       await api.withdrawTier(id)
       toast.success(t.tiers.withdrawn)

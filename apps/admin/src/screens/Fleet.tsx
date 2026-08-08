@@ -293,7 +293,7 @@ export function Fleet(): ReactNode {
             +
           </Button>
         </div>
-        {vehicleError ? <p className="mb-2 text-sm text-rose-600">{vehicleError}</p> : null}
+        {vehicleError ? <p className="mb-2 text-sm text-rose-600">{explainError(vehicleError, t)}</p> : null}
         {types.length === 0 ? <p className="mb-2 text-sm text-amber-700">{t.fleet.unknownTypeRefused}</p> : null}
         <Table head={[t.fleet.vehicleNumber, t.fleet.vehicleType, t.battery.title, t.fleet.state, '']} isEmpty={vehicles.length === 0} empty={t.fleet.noneYet}>
           {vehicles.map((v) => (
@@ -425,7 +425,7 @@ export function Fleet(): ReactNode {
             {t.fleet.assign}
           </Button>
         </div>
-        {assignError ? <p className="mb-2 text-sm text-rose-600">{assignError}</p> : null}
+        {assignError ? <p className="mb-2 text-sm text-rose-600">{explainError(assignError, t)}</p> : null}
         {assignments.length === 0 ? (
           <p className="py-2 text-sm text-slate-500">{t.fleet.noAssignments}</p>
         ) : (
@@ -829,7 +829,7 @@ function DocumentForm({
           {t.fleet.addDocument}
         </Button>
       </div>
-      {err ? <p className="mt-2 text-sm text-rose-600">{err}</p> : null}
+      {err ? <p className="mt-2 text-sm text-rose-600">{explainError(err, t)}</p> : null}
     </Card>
   )
 }

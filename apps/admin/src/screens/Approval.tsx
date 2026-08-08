@@ -1,10 +1,11 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import L, { type CircleMarker, type LeafletMouseEvent, type Map as LeafletMap } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { type OcrScalar, ocrReadingDelta, slotLabel, splitSlot } from '@ash/client'
+import { type OcrScalar, br1Verdict, ocrReadingDelta, slotLabel, splitSlot } from '@ash/client'
 import { formatMinor, parseMinor, sub } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
+import { useConfirm, useToast } from '../feedback.tsx'
 import { Badge, Button, Card, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
 
 /** Where the map opens when no point has been pinned yet. */
@@ -27,6 +28,7 @@ interface Review {
   state: string
   driverId: string
   vehicleId: string
+  shiftNo: number
   businessDate: string
   startPackage: {
     odometerKm: number | null
@@ -107,7 +109,9 @@ interface Review {
  * decide, in one view.
  */
 export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void }): ReactNode {
-  const { api, t } = useApp()
+  const { api, t, lang } = useApp()
+  const toast = useToast()
+  const confirm = useConfirm()
   const [review, setReview] = useState<Review | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -117,6 +121,14 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   const [topupText, setTopupText] = useState('')
   const [notes, setNotes] = useState('') // for a re-shoot request or a reject (C-7)
   const [manual, setManual] = useState({ providerOrderNo: '', payMode: 'cash', fee: '' }) // manual-order reconcile
+  /**
+   * WHOSE shift this is.
+   *
+   * The payload has carried `driverId`/`vehicleId` all along and the screen rendered neither, so a
+   * manager working through a queue — or arriving from a bell notification or a #shift: deep link
+   * — signed off real cash on a page headed only «مراجعة النوبة». Same lookup Queue.tsx does.
+   */
+  const [who, setWho] = useState<{ driver: string | null; vehicle: string | null }>({ driver: null, vehicle: null })
 
   const [loadError, setLoadError] = useState<string | null>(null)
   const load = useCallback(() => {
@@ -132,6 +144,21 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       })
   }, [api, shiftId])
   useEffect(load, [load])
+
+  useEffect(() => {
+    if (!review) return
+    void api
+      .get<{ drivers: Array<{ id: string; fullNameAr: string; fullNameEn: string | null }> }>('/drivers')
+      .then((r) => {
+        const d = r.drivers.find((x) => x.id === review.driverId)
+        setWho((w) => ({ ...w, driver: d ? ((lang === 'en' ? d.fullNameEn : null) ?? d.fullNameAr) : null }))
+      })
+      .catch(() => undefined)
+    void api
+      .get<{ vehicles: Array<{ id: string; code: string }> }>('/vehicles')
+      .then((r) => setWho((w) => ({ ...w, vehicle: r.vehicles.find((x) => x.id === review.vehicleId)?.code ?? null })))
+      .catch(() => undefined)
+  }, [api, lang, review?.driverId, review?.vehicleId])
 
   if (!review) {
     return (
@@ -163,12 +190,41 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       ? review.endPackage.odometerKm - review.startPackage.odometerKm
       : null
 
+  /**
+   * What the equation actually says — and THE SCALAR ALONE DOES NOT SAY IT.
+   *
+   * `difference` is blind to a pay-mode error: flip one order cash↔electronic and it stays exactly
+   * zero while the cash is short by the fee and the wallet is over by the same amount. The server
+   * has always sent `splitBalanced` for precisely this, and this screen read `balanced` only — so
+   * the one case the zero-sum equation exists to catch was the one it painted green, with a live
+   * approve button. Three states now, not two, and the middle one is a warning the manager must
+   * see rather than a colour he might not.
+   */
+  const { verdict: br1State } = br1Verdict(review.br1)
+  const verdict =
+    br1State === 'not_balanced'
+      ? { tone: 'red' as const, label: t.br1.notBalanced }
+      : br1State === 'split_off'
+        ? { tone: 'amber' as const, label: t.br1.splitOff }
+        : { tone: 'green' as const, label: t.br1.balanced }
+
   async function approve(): Promise<void> {
     if (!review) return
+    const opening = review.state === 'awaiting_open_approval'
+    // Money leaves the office on this click, in an amount typed into two boxes that silently
+    // default to zero. It is read back to the manager before it is committed.
+    if (opening) {
+      const ok = await confirm({
+        title: t.approval.confirmOpenTitle,
+        body: `${who.driver ?? ''} · ${t.shift.cashFloat}: ${floatText || '0'} · ${t.shift.walletTopup}: ${topupText || '0'}`,
+        confirmLabel: t.common.approve,
+      })
+      if (!ok) return
+    }
     setBusy(true)
     setError(null)
     try {
-      if (review.state === 'awaiting_open_approval') {
+      if (opening) {
         await api.post(`/shifts/${review.id}/approve-open`, {
           floatTranches: [floatText || '0'],
           topupTranches: [topupText || '0'],
@@ -176,6 +232,9 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       } else {
         await api.post(`/shifts/${review.id}/approve-close`, { reviewedOrdersHash: review.br1.ordersHash })
       }
+      // SAY SO. The screen used to simply vanish back to the queue, which is the most common
+      // "did that actually work?" moment in the product and it had no answer.
+      toast.success(`${t.approval.approved}${who.driver ? ` — ${who.driver}` : ''}`)
       onDone()
     } catch (err) {
       // 409 = orders changed since this screen loaded; reload so the manager reviews the truth.
@@ -204,6 +263,9 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     setError(null)
     try {
       await api.post(`/shifts/${review.id}/operations/revise`, body)
+      // The checkbox that just moved re-ran the whole equation, and the verdict is a card away.
+      // Unannounced, the manager sees a flicker and a changed colour without knowing he caused it.
+      toast.success(t.approval.recomputed)
       load()
     } catch (err) {
       setError((err as { error?: string }).error ?? 'error')
@@ -222,6 +284,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     setError(null)
     try {
       await api.post(`/shifts/${review.id}/${path}`, { notes: notes || null })
+      toast.success(path === 'request-rephoto' ? t.approval.rephotoSent : t.approval.sentBack)
       onDone()
     } catch (err) {
       setError((err as { error?: string }).error ?? 'error')
@@ -237,10 +300,24 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
    */
   async function refuse(): Promise<void> {
     if (!review) return
+    // A REASON, not «—». This writes the permanent audit row for cancelling a driver's shift, and
+    // the identical action in LiveShifts has always demanded one; here it defaulted to a dash.
+    if (notes.trim() === '') {
+      setError('void_reason_required')
+      return
+    }
+    const ok = await confirm({
+      title: t.approval.confirmVoidTitle,
+      body: `${who.driver ?? ''} ${who.vehicle ?? ''} — ${t.approval.confirmVoidBody}`,
+      confirmLabel: t.approval.refuse,
+      danger: true,
+    })
+    if (!ok) return
     setBusy(true)
     setError(null)
     try {
-      await api.voidShift(review.id, notes.trim() === '' ? '—' : notes.trim())
+      await api.voidShift(review.id, notes.trim())
+      toast.success(t.approval.voided)
       onDone()
     } catch (err) {
       setError((err as { error?: string }).error ?? 'error')
@@ -258,7 +335,18 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             <path d="M15 6l-6 6 6 6" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </Button>
-        <h1 className="text-xl font-bold">{t.approval.review}</h1>
+        {/* WHOSE shift. The payload has always carried the driver and the vehicle and the screen
+            showed neither, so a manager working a queue signed off real cash on a page headed
+            «مراجعة النوبة» and nothing else. */}
+        <div className="min-w-0">
+          <h1 className="truncate text-xl font-bold">
+            {who.driver ?? t.approval.review}
+            {who.vehicle ? <span className="num ms-2 text-base font-medium text-slate-500">{who.vehicle}</span> : null}
+          </h1>
+          <p className="num text-sm text-slate-600">
+            {review.businessDate} · #{review.shiftNo}
+          </p>
+        </div>
         <Badge tone="slate">{t.shift.states[review.state as keyof typeof t.shift.states] ?? review.state}</Badge>
       </div>
 
@@ -269,26 +357,94 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       {atGate ? (
       <Card
         title={t.br1.title}
-        className={review.br1.balanced ? 'ring-2 ring-emerald-300' : 'ring-2 ring-red-300'}
+        /* STICKY. A real review means scrolling through two packages, the photos, the batteries
+           and an unbounded orders list; unpinned, the equation is far off-screen by the time the
+           manager reaches the approve bar, and he signs from memory. */
+        className={`sticky top-2 z-10 ${verdict.tone === 'green' ? 'ring-2 ring-emerald-300' : verdict.tone === 'amber' ? 'ring-2 ring-amber-400' : 'ring-2 ring-red-300'}`}
       >
-        <div className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-3">
-          <Field label={t.br1.expectedCash} value={review.br1.expectedCash} />
-          <Field label={t.br1.expectedWallet} value={review.br1.expectedWallet} />
-          <Field
-            label={t.common.difference}
-            value={review.br1.difference}
-            tone={review.br1.balanced ? 'green' : 'red'}
-          />
+        {/* THE VERDICT, IN WORDS. It was a 2px ring and nothing else — invisible to a colour-blind
+            manager and easy to misread at a glance on the screen that signs off real cash. */}
+        <p
+          className={`text-lg font-bold ${verdict.tone === 'green' ? 'text-emerald-700' : verdict.tone === 'amber' ? 'text-amber-800' : 'text-red-700'}`}
+        >
+          {verdict.label}
+        </p>
+        {verdict.tone === 'amber' ? <p className="mt-1 text-sm text-amber-800">{t.br1.splitHint}</p> : null}
+
+        {/* Expected against DECLARED, per leg, with the difference beside it. The declared figures
+            used to live three cards below, so the manager had to hold two numbers in his head and
+            subtract them himself — on the screen whose entire job is that subtraction. */}
+        <div className="mt-3 overflow-x-auto">
+          <table className="w-full min-w-[28rem] text-sm">
+            <thead>
+              <tr className="text-xs text-slate-500">
+                <th className="p-1 text-start font-medium"> </th>
+                <th className="p-1 text-end font-medium">{t.br1.expected}</th>
+                <th className="p-1 text-end font-medium">{t.br1.declared}</th>
+                <th className="p-1 text-end font-medium">{t.common.difference}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                {
+                  key: 'cash',
+                  label: t.shift.cashHandover,
+                  expected: review.br1.expectedCash,
+                  declared: review.endPackage.cashDeclared,
+                  diff: review.br1.cashDifference,
+                },
+                {
+                  key: 'wallet',
+                  label: t.shift.walletBalance,
+                  expected: review.br1.expectedWallet,
+                  declared: review.endPackage.walletDeclared,
+                  diff: review.br1.walletDifference,
+                },
+              ].map((leg) => {
+                const off = parseMinor(leg.diff || '0') !== 0n
+                return (
+                  <tr key={leg.key} className="border-t border-slate-100">
+                    <td className="p-1 text-slate-600">{leg.label}</td>
+                    <td className="num p-1 text-end" dir="ltr">
+                      {leg.expected}
+                    </td>
+                    <td className="num p-1 text-end" dir="ltr">
+                      {leg.declared ?? '—'}
+                    </td>
+                    <td className={`num p-1 text-end font-semibold ${off ? 'text-red-700' : 'text-slate-500'}`} dir="ltr">
+                      {leg.diff}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
         </div>
+
+        {/* The net difference, biggest thing on the screen — it is the number that decides. */}
+        <div className="mt-3 flex items-baseline justify-between border-t border-slate-100 pt-3">
+          <span className="text-sm text-slate-600">{t.common.difference}</span>
+          <span
+            dir="ltr"
+            className={`num text-3xl font-bold ${review.br1.balanced ? 'text-emerald-700' : 'text-red-700'}`}
+          >
+            {review.br1.difference}
+          </span>
+        </div>
+
         {!review.br1.balanced || !review.br1.splitBalanced ? (
           <div className="mt-3 flex flex-col gap-1">
             {review.br1.causes.map((c, i) => (
               <div key={i} className="flex items-center gap-2 text-sm">
-                <Badge tone={c.confidence === 'high' ? 'red' : 'amber'}>{c.confidence}</Badge>
+                <Badge tone={c.confidence === 'high' ? 'red' : c.confidence === 'medium' ? 'amber' : 'slate'}>
+                  {t.br1.confidence[c.confidence as keyof typeof t.br1.confidence] ?? c.confidence}
+                </Badge>
                 <span>{t.br1.cause[c.code as keyof typeof t.br1.cause] ?? c.code}</span>
-                <Money value={c.amount} className="ms-auto text-slate-500" />
+                <Money value={c.amount} className="ms-auto text-base font-semibold" />
                 {c.candidateOrderNos.length > 0 ? (
-                  <span className="text-xs text-slate-400">({c.candidateOrderNos.slice(0, 3).join(', ')})</span>
+                  <span className="text-xs text-slate-500">
+                    ({c.candidateOrderNos.length} {t.orders.title})
+                  </span>
                 ) : null}
               </div>
             ))}
@@ -536,35 +692,40 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       {/* No gate controls on a running shift — see `atGate`. The manager acts on a live shift from
           «النوبات الجارية» (suspend, force-close, void), each of which asks for a reason first. */}
       {atGate ? (
-        <div className="sticky bottom-4 flex flex-wrap gap-3">
-          <Button
-            variant="success"
-            disabled={busy || (isClose && !review.br1.balanced)}
-            onClick={approve}
-            className="flex-1"
-          >
-            {isClose ? t.approval.approveClose : t.common.approve}
-          </Button>
-          {/* Re-shoot is legal on both gates. */}
-          <Button variant="ghost" disabled={busy} onClick={() => decide('request-rephoto')}>
-            {t.approval.requestRetake}
-          </Button>
-          {isClose ? (
-            <Button variant="danger" disabled={busy} onClick={() => decide('reject-close')}>
-              {t.approval.reject}
+        /* A BACKDROP. Rows and photos used to scroll visibly through the gaps between the
+           buttons, and on a narrow window the wrapped rows overlapped the content beneath. */
+        <div className="sticky bottom-0 -mx-4 border-t border-slate-200 bg-white/95 px-4 py-3 backdrop-blur">
+          {/* WHY the button is dead. A 40%-opacity ghost with no explanation is how a manager
+              concludes the console is broken and goes looking for a way around the gate. */}
+          {isClose && !review.br1.balanced ? (
+            <p className="mb-2 text-sm font-medium text-red-700">{t.approval.cannotApproveUnbalanced}</p>
+          ) : null}
+          <div className="flex flex-wrap gap-3">
+            <Button
+              variant="success"
+              disabled={busy || (isClose && !review.br1.balanced)}
+              onClick={approve}
+              className="flex-1"
+            >
+              {isClose ? t.approval.approveClose : t.common.approve}
             </Button>
-          ) : (
-            <>
-              {/* At the open gate the manager chooses: send it back to be redone, or refuse it
-                  outright — which cancels the shift and frees the bike. */}
-              <Button variant="ghost" disabled={busy} onClick={() => decide('reject-open')}>
-                {t.approval.sendBack}
-              </Button>
+            {/* Re-shoot is legal on both gates. */}
+            <Button variant="ghost" disabled={busy} onClick={() => decide('request-rephoto')}>
+              {t.approval.requestRetake}
+            </Button>
+            {/* BOTH reject paths return the shift to the driver, so both are labelled «إعادة
+                للسائق» and neither is red. Red is now reserved for the one action that destroys
+                a shift — the manager used to learn «رفض» = send back at one gate and meet
+                «رفض نهائي» = void at the other, one word apart. */}
+            <Button variant="ghost" disabled={busy} onClick={() => decide(isClose ? 'reject-close' : 'reject-open')}>
+              {t.approval.sendBack}
+            </Button>
+            {isClose ? null : (
               <Button variant="danger" disabled={busy} onClick={refuse}>
                 {t.approval.refuse}
               </Button>
-            </>
-          )}
+            )}
+          </div>
         </div>
       ) : null}
     </div>

@@ -78,7 +78,7 @@ export function Permissions(): ReactNode {
       <h1 className="text-xl font-bold text-slate-800">{t.permissions.title}</h1>
       <p className="text-sm text-slate-500">{t.permissions.hint}</p>
       {msg ? <p className="text-sm font-medium text-emerald-700">{msg}</p> : null}
-      {err ? <p className="text-sm font-medium text-red-600">{err}</p> : null}
+      {err ? <p className="text-sm font-medium text-red-600">{explainError(err, t)}</p> : null}
 
       <Card>
         <Table head={[t.permissions.permission, ...m.roles.map((r) => t.roles[r as keyof typeof t.roles] ?? r)]}>

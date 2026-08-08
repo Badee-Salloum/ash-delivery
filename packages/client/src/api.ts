@@ -208,6 +208,16 @@ export class ApiClient {
    */
   branchId: string | null = null
 
+  /**
+   * Called once when the server says the session is gone.
+   *
+   * Without it a lapsed cookie is indistinguishable from a broken app: every read fails with
+   * «تعذّر تحميل البيانات», every photo tile turns grey, the approval poll silently no-ops
+   * forever — and the screen still shows the user signed in. He has no way to learn that the one
+   * thing he needs to do is sign in again. Set by each app at construction.
+   */
+  onUnauthorized: (() => void) | null = null
+
   constructor(baseUrl = '/api') {
     this.baseUrl = baseUrl.replace(/\/$/, '')
   }
@@ -245,6 +255,11 @@ export class ApiClient {
 
     if (!res.ok) {
       const err = (json ?? {}) as { error?: string; detail?: unknown }
+      // The session, not this request, is what failed. Announced once so the app can drop to the
+      // login screen; the error still throws, because the caller's own state is still wrong.
+      // `login` itself answers 401 on a bad password — that is a failed ATTEMPT, not a lapsed
+      // session, and signing the user out of a screen he is not signed in to helps nobody.
+      if (res.status === 401 && !path.endsWith('/auth/login')) this.onUnauthorized?.()
       throw { status: res.status, error: err.error ?? 'unknown', detail: err.detail } satisfies ApiError
     }
     return json as T

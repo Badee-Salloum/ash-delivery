@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   type DraftOrder,
   allProblems,
+  br1Verdict,
   isComplete,
   mergeScannedMovements,
   mergeScannedOrders,
@@ -359,5 +360,37 @@ describe('merging across days', () => {
     // that has one, and collapsing them loses a delivery.
     const undated = mergeScannedOrders([], [{ dateIso: null, time: '13:10', fee: '120' }], id)
     expect(mergeScannedOrders(undated, [on('2026-08-06', '13:10', '120')], id)).toHaveLength(1)
+  })
+})
+
+/**
+ * The verdict a manager signs against.
+ *
+ * The scalar difference is blind to a pay-mode error — flip one order cash↔electronic and it stays
+ * exactly 0 while cash is short by the fee and the wallet is over by it. The approval screen used
+ * to render `balanced` alone, so the single case the equation exists to catch was the one it
+ * showed in green with a live approve button.
+ */
+describe('reading the BR1 verdict', () => {
+  it('is balanced only when BOTH the total and the two legs agree', () => {
+    expect(br1Verdict({ balanced: true, splitBalanced: true })).toEqual({ verdict: 'balanced', off: false })
+  })
+
+  it('flags the equal-and-opposite swap that the total cannot see', () => {
+    expect(br1Verdict({ balanced: true, splitBalanced: false })).toEqual({ verdict: 'split_off', off: true })
+  })
+
+  it('a wrong total is wrong whatever the legs say', () => {
+    expect(br1Verdict({ balanced: false, splitBalanced: true })).toEqual({ verdict: 'not_balanced', off: true })
+    expect(br1Verdict({ balanced: false, splitBalanced: false })).toEqual({ verdict: 'not_balanced', off: true })
+  })
+
+  it('never reports a shift as clean while anything is off', () => {
+    for (const balanced of [true, false]) {
+      for (const splitBalanced of [true, false]) {
+        const r = br1Verdict({ balanced, splitBalanced })
+        expect(r.off).toBe(!(balanced && splitBalanced))
+      }
+    }
   })
 })

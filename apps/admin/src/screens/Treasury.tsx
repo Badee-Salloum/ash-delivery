@@ -1,6 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
 import { formatMinor, minor, parseMinor } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
+import { useConfirm, useToast } from '../feedback.tsx'
 import { explainError } from '../errors.ts'
 import { Button, Card, Field, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
 
@@ -18,6 +19,8 @@ interface EntryLine {
  */
 export function Treasury(): ReactNode {
   const { api, t, session, branchId } = useApp()
+  const toast = useToast()
+  const confirm = useConfirm()
   const [sheet, setSheet] = useState<{ businessDate: string; alreadyCounted: boolean; funds: Array<{ fundCode: string; computed: string }> } | null>(null)
   const [counted, setCounted] = useState<Record<string, string>>({})
   const [result, setResult] = useState<{ balanced: boolean; lines: Array<{ fundCode: string; variance: string }> } | null>(null)
@@ -79,7 +82,11 @@ export function Treasury(): ReactNode {
       setDepositAmt({ ...depositAmt, [target]: '' })
       setDepositMsg(t.treasury.deposited)
     } catch (err) {
-      setDepositMsg((err as { error?: string }).error ?? 'error')
+      // It used to set the SAME state as success, which renders in emerald — so a rejected
+      // deposit printed «forbidden» in green under the cash box and the manager believed the
+      // money had gone in.
+      setDepositMsg(null)
+      toast.error(explainError((err as { error?: string }).error ?? 'error', t))
     }
   }
 
@@ -133,13 +140,27 @@ export function Treasury(): ReactNode {
   async function submitCount(): Promise<void> {
     if (!sheet) return
     const lines = sheet.funds.map((f) => ({ fundCode: f.fundCode, counted: counted[f.fundCode] || '0', resolution: null }))
-    const res = await api.post<typeof result>('/cash-counts', { lines }).catch(() => null)
-    if (res) setResult(res)
+    // Swallowed before: the manager typed the day's counted cash, pressed «تأكيد», and nothing
+    // whatsoever happened — no error, no result — on the seal of the cash box.
+    try {
+      setResult(await api.post<typeof result>('/cash-counts', { lines }))
+    } catch (err) {
+      toast.error(explainError((err as { error?: string }).error ?? 'error', t))
+    }
   }
 
   async function closeWeek(): Promise<void> {
     // The API expects the FOLLOWING Sunday; the server validates it, so send today's next Sunday.
     const closeDate = nextSunday(sheet?.businessDate ?? new Date().toISOString().slice(0, 10))
+    // BR7 seals the week: every entry inside it becomes immutable and corrections after this are
+    // dated correction entries only. It was a bare red button with no question asked.
+    const ok = await confirm({
+      title: t.week.confirmCloseTitle,
+      body: `${t.week.closeSunday} ${closeDate} — ${t.week.confirmCloseBody}`,
+      confirmLabel: t.week.closeSunday,
+      danger: true,
+    })
+    if (!ok) return
     try {
       const res = await api.closeWeek(closeDate)
       setCloseResult(res)

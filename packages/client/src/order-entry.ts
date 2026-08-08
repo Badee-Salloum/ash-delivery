@@ -360,3 +360,23 @@ function format(m: Minor): string {
 export function toApiPayloads(orders: readonly DraftOrder[]): Array<{ providerOrderNo: string; payMode: PayMode; fee: string; zone: null }> {
   return orders.map((o) => ({ providerOrderNo: o.providerOrderNo.trim(), payMode: o.payMode, fee: o.feeText, zone: null }))
 }
+
+/**
+ * What the zero equation actually says, in three states rather than two.
+ *
+ * `scalarDiff` alone is blind to a pay-mode error. Flip one order cash↔electronic and it stays
+ * exactly zero while the cash is short by the fee and the wallet is over by the same amount — the
+ * one failure the equation exists to catch, reported as perfect. The domain has always returned
+ * `splitBalanced` for this; the approval screen read `balanced` only, painted the ring green and
+ * left the approve button live.
+ *
+ * `off` is what a UI must gate on: it is true whenever the manager should not sign without looking
+ * further, whichever of the two ways the shift is wrong.
+ */
+export type Br1Verdict = 'balanced' | 'split_off' | 'not_balanced'
+
+export function br1Verdict(r: { balanced: boolean; splitBalanced: boolean }): { verdict: Br1Verdict; off: boolean } {
+  if (!r.balanced) return { verdict: 'not_balanced', off: true }
+  if (!r.splitBalanced) return { verdict: 'split_off', off: true }
+  return { verdict: 'balanced', off: false }
+}

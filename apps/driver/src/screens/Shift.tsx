@@ -145,6 +145,9 @@ export function ShiftFlow({
   const [fitted, setFitted] = useState<readonly FittedBattery[]>(batteries)
   const [shift, setShift] = useState<ShiftState | null>(null)
   const [loaded, setLoaded] = useState(!resume)
+  /** The resume fetch failed — shown as a retry, never as a phase we cannot actually render. */
+  const [resumeFailed, setResumeFailed] = useState(false)
+  const [reloadKey, setReloadKey] = useState(0)
   const [endDraft, setEndDraft] = useState<EndDraft>(EMPTY_END_DRAFT)
 
   /**
@@ -170,6 +173,25 @@ export function ShiftFlow({
         // the 409 it used to be.
         setEndDraft((d) => ({
           ...d,
+          /*
+           * EVERYTHING THE SERVER ALREADY HOLDS COMES BACK, not just the orders.
+           *
+           * A cheap Android evicts a browser tab as a matter of course, and this app is used
+           * outdoors for hours. On reopen the driver used to face empty photo tiles and blank
+           * cash/wallet/odometer/battery fields — and a submit gate that refused him until he
+           * re-shot and retyped every one of them, all of which the server had the whole time.
+           * The typed figures are only overwritten while they are still blank, so a resume can
+           * never clobber something he is in the middle of correcting.
+           */
+          slots: new Set(st.endPackage.mediaSlots),
+          cash: d.cash || (st.endPackage.cashDeclared ?? ''),
+          wallet: d.wallet || (st.endPackage.walletDeclared ?? ''),
+          odo: d.odo || (st.endPackage.odometerKm === null ? '' : String(st.endPackage.odometerKm)),
+          packs: Object.fromEntries(
+            st.endPackage.batteries
+              .filter((b) => b.percent !== null)
+              .map((b) => [b.batteryId, { ...(d.packs[b.batteryId] ?? {}), percent: String(b.percent) }]),
+          ) as EndDraft['packs'],
           orders: st.orders.map((o) => ({
             // `already-<no>` rather than a random id: the list is rebuilt from the server on every
             // resume, and a stable key keeps React from remounting rows the driver is editing.
@@ -206,16 +228,36 @@ export function ShiftFlow({
           const label = d.decision === 'rejected' ? t.shift.closeRejected : t.shift.retakeRequested
           toast.error(d.notes ? `${label}: ${d.notes}` : label)
         }
+        setResumeFailed(false)
         setLoaded(true)
       })
-      .catch(() => setLoaded(true)) // fall back to the state /me/assignment reported
-  }, [api, resume])
+      .catch(() => {
+        // NOT a silent fall-through. `phase` came from /me/assignment, but `shift` is still null,
+        // so every guarded branch below used to miss and land on the final «✓ بانتظار المراجعة»
+        // screen — telling a driver whose shift is still running that he had finished it.
+        setResumeFailed(true)
+        setLoaded(true)
+      })
+  }, [api, resume, reloadKey])
 
   if (!loaded) {
     return (
       <Screen title={t.shift.resumeShift}>
         <Card>
-          <p className="text-center text-slate-400">{t.common.loading}</p>
+          <p className="text-center text-slate-600">{t.common.loading}</p>
+        </Card>
+      </Screen>
+    )
+  }
+
+  // The state could not be fetched. Say so and offer the retry, rather than guessing at a phase
+  // whose data we do not have.
+  if (resumeFailed && phase !== 'done') {
+    return (
+      <Screen title={t.shift.resumeShift}>
+        <Card className="flex flex-col gap-3">
+          <p className="text-center text-sm font-medium text-red-600">{t.shift.resumeFailed}</p>
+          <Button onClick={() => setReloadKey((k) => k + 1)}>{t.common.retry}</Button>
         </Card>
       </Screen>
     )
@@ -494,15 +536,29 @@ function StartPackage({
   // `batteriesReady` gates too, matching the close screen and the server BR5 gate: a driver can't
   // confirm start until every fitted pack's required reading is in — the pack charges ARE the
   // battery state now, so there is no separate bike-level battery field to fill.
-  const ready = shiftId !== null && odoShot && odo !== '' && batteriesReady
+  // Same rule as the close gate: the list IS the gate, so what is disabled and what is explained
+  // can never drift apart.
+  const missing: string[] = [
+    ...(odoShot ? [] : [t.shift.odometerShot]),
+    ...(odo === '' ? [t.shift.odometer] : []),
+    ...(batteriesReady ? [] : [t.battery.percent]),
+  ]
+  const ready = shiftId !== null && missing.length === 0
 
   return (
     <Screen
       title={t.shift.startPackage}
       footer={
-        <Button variant="success" disabled={!ready || busy} onClick={confirm}>
-          {busy ? t.common.loading : t.shift.confirmStart}
-        </Button>
+        <div className="flex flex-col gap-2">
+          {!ready && missing.length > 0 ? (
+            <p className="text-sm font-medium text-amber-800">
+              {t.shift.stillMissing} {missing.join(' · ')}
+            </p>
+          ) : null}
+          <Button variant="success" disabled={!ready || busy} onClick={confirm}>
+            {busy ? t.common.loading : t.shift.confirmStart}
+          </Button>
+        </div>
       }
     >
       {shiftId ? (
@@ -624,14 +680,29 @@ function EndPackage({
   // the total and not the checked count: a driver who unchecks everything would otherwise be
   // refused submission, and every tool that could rescue him needs the shift to reach review first.
   const named = draft.orders.filter((o) => o.providerOrderNo.trim() !== '').length
-  const ready =
-    required.every((s) => slots.has(s)) &&
-    cash !== '' &&
-    wallet !== '' &&
-    odo !== '' &&
-    batteriesReady &&
-    named > 0 &&
-    allProblems(draft.orders).size === 0
+  /**
+   * WHAT IS STILL MISSING, named — instead of one grey button and no explanation.
+   *
+   * Seven independent conditions used to collapse into a single `disabled`, at the bottom of a
+   * page several thousand pixels long. The driver's worst moment in the product was standing at
+   * the branch at the end of a shift, everything apparently filled in, tapping a dead button that
+   * said nothing about the blank battery field or the one bad fee twenty rows up.
+   *
+   * The list IS the gate: `ready` is now "nothing missing", so the two can never drift apart.
+   */
+  const missing: string[] = [
+    ...required.filter((s) => !slots.has(s)).map(labelOf),
+    ...(cash === '' ? [t.shift.cashHandover] : []),
+    ...(wallet === '' ? [t.shift.walletBalance] : []),
+    ...(odo === '' ? [t.shift.odometer] : []),
+    ...(batteriesReady ? [] : [t.battery.percent]),
+    ...(named === 0 ? [t.orders.title] : []),
+    ...(allProblems(draft.orders).size > 0 ? [t.shift.fixOrderRows] : []),
+    // A read in flight is a reason to WAIT, not a thing to go and fix — but submitting through it
+    // silently drops every order it was about to add, which is the shift closing short.
+    ...(draft.dash.kind === 'reading' || draft.log.kind === 'reading' ? [t.shift.reading] : []),
+  ]
+  const ready = missing.length === 0
 
   const preview = previewBr1({
     floatText: shift.floatText,
@@ -700,7 +771,20 @@ function EndPackage({
       if (err.error === 'order_belongs_to_other_shift') {
         const no = err.detail?.providerOrderNo ?? ''
         const day = err.detail?.businessDate ?? ''
-        patch({ opsError: `${t.errors.order_belongs_to_other_shift}: ${no} (${day})` })
+        // NAME IT THE WAY THE SCREEN DOES. The server answers with `provider_order_no`, which is
+        // a generated UUID the list deliberately never shows — telling the driver to uncheck
+        // «YAL-3f9a…» pointed him at forty characters that appear on none of his thirty rows.
+        // He recognises a delivery by its clock, its route and its fee, so that is what he is told.
+        const row = draft.orders.find((o) => o.providerOrderNo.trim() === no)
+        const named = row
+          ? [row.timeText, row.pointA, row.feeText].filter((x) => x !== undefined && x !== null && x !== '').join(' · ')
+          : no
+        const message = `${t.errors.order_belongs_to_other_shift}: ${named}${day ? ` (${day})` : ''}`
+        patch({ opsError: message })
+        // The error card sits above a list that sits below ten photo tiles, and the driver tapping
+        // submit is pinned to the footer at the bottom of a very long page. Unannounced, the
+        // button simply greys and comes back and he taps it again, and again.
+        toast.error(message)
         return
       }
       toast.error((err.error && (t.errors as Record<string, string>)[err.error]) || t.common.actionFailed)
@@ -717,13 +801,37 @@ function EndPackage({
         <div className="flex flex-col gap-2">
           {/* The equation LIVE, before he submits — so a wrong pay mode or a missing operation is
               visible while he can still fix it, rather than discovered by the manager. */}
+          {/* Grouped in PAIRS. Four items spread edge-to-edge by `justify-between` left it
+              genuinely ambiguous which figure belonged to which label — on the money readout. */}
           {preview ? (
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-slate-500">{t.br1.expectedCash}</span>
-              <Money value={preview.expectedCashText} className="font-semibold" />
-              <span className="text-slate-500">{t.br1.expectedWallet}</span>
-              <Money value={preview.expectedWalletText} className="font-semibold" />
+            <div className="grid grid-cols-2 gap-x-4 text-sm">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="text-slate-600">{t.br1.expectedCash}</span>
+                <Money value={preview.expectedCashText} className="font-semibold" />
+              </div>
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="text-slate-600">{t.br1.expectedWallet}</span>
+                <Money value={preview.expectedWalletText} className="font-semibold" />
+              </div>
+              {/* The difference, the moment both declared figures exist — it was computed all
+                  along and never shown, so the driver first learned of a gap after submitting. */}
+              {preview.differenceText !== null ? (
+                <div className="col-span-2 flex items-baseline justify-between gap-2 border-t border-slate-200 pt-1">
+                  <span className="text-slate-600">{t.common.difference}</span>
+                  <Money
+                    value={preview.differenceText}
+                    className={`font-bold ${preview.balanced ? 'text-emerald-700' : 'text-red-700'}`}
+                  />
+                </div>
+              ) : null}
             </div>
+          ) : null}
+          {/* NAMED, not merely absent. Tapping the footer's dead button is how a driver concludes
+              the app is broken; this says which thing to go and do. */}
+          {!ready && missing.length > 0 ? (
+            <p className="text-sm font-medium text-amber-800">
+              {t.shift.stillMissing} {missing.join(' · ')}
+            </p>
           ) : null}
           {br1 ? (
             <div

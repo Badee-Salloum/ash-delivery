@@ -7,7 +7,7 @@ import { Button, Card, Field, Screen, TextInput } from '../ui.tsx'
  * shared or modest Android phone. Admin 2FA lives in the admin console.
  */
 export function Login(): ReactNode {
-  const { api, t, refreshSession } = useApp()
+  const { api, t, refreshSession, sessionExpired } = useApp()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -49,6 +49,11 @@ export function Login(): ReactNode {
               onChange={(e) => setPassword(e.target.value)}
             />
           </Field>
+          {/* WHY this form appeared. A lapsed cookie used to drop a driver mid-shift onto a bare
+              sign-in screen with no explanation — indistinguishable from a broken app. */}
+          {sessionExpired && !error ? (
+            <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800">{t.auth.sessionExpired}</p>
+          ) : null}
           {error ? <p className="text-sm font-medium text-red-600">{error}</p> : null}
           <Button type="submit" disabled={busy || !username || !password}>
             {busy ? t.common.loading : t.auth.signIn}
