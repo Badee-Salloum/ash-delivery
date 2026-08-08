@@ -39,6 +39,14 @@ export interface DraftOrder {
   walletAmountText?: string
   /** «HH:MM» off the dashboard — what a payments-log row is paired to. */
   timeText?: string
+  /**
+   * «YYYY-MM-DD» from the screen's own day header, when one could be read.
+   *
+   * NOT the shift's day. «الطلبات الحديثة» scrolls back through previous days, so a list read at
+   * close routinely holds yesterday's orders — and until this was shown, the only thing standing
+   * between them and the shift's money was the driver noticing.
+   */
+  dateText?: string
   /** Where it went: «A» the pickup, «B» the dropoff, as the screen wrote them. */
   pointA?: string | null
   pointB?: string | null
@@ -175,14 +183,16 @@ export function mergeScannedOrders(
   scanned: readonly ScannedOrderRow[],
   newId: () => string,
 ): DraftOrder[] {
+  // The DAY is part of the key. Without it a 120-lira delivery at 13:10 yesterday and another at
+  // 13:10 today are one row, and scanning the second page silently swallows one of them.
   const tally = new Map<string, number>()
   for (const o of existing) {
-    const key = `${o.timeText ?? ''}|${o.feeText}`
+    const key = `${o.dateText ?? ''}|${o.timeText ?? ''}|${o.feeText}`
     tally.set(key, (tally.get(key) ?? 0) + 1)
   }
   const added: DraftOrder[] = []
   for (const row of scanned) {
-    const key = `${row.time}|${row.fee}`
+    const key = `${row.dateIso ?? ''}|${row.time}|${row.fee}`
     const already = tally.get(key) ?? 0
     // Counted against what was ALREADY HELD, never against rows added by this same scan. One page
     // is one set of observations: if it lists «١٢٠» twice then two deliveries cost 120.
@@ -200,6 +210,7 @@ export function mergeScannedOrders(
       feeText: row.fee,
       feeOcrText: row.fee,
       timeText: row.time,
+      dateText: row.dateIso ?? '',
       included: true,
       pointA: row.pointA ?? null,
       pointB: row.pointB ?? null,

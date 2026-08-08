@@ -31,11 +31,14 @@ import { Button, Card, Money, MoneyInput } from '../ui.tsx'
 export function OperationsList({
   orders,
   movements,
+  today,
   onOrders,
   onMovements,
 }: {
   orders: readonly DraftOrder[]
   movements: readonly DraftMovement[]
+  /** The shift's own business date, «YYYY-MM-DD» — what a row's date is flagged against. */
+  today?: string
   onOrders(next: DraftOrder[]): void
   onMovements(next: DraftMovement[]): void
 }): ReactNode {
@@ -71,6 +74,8 @@ export function OperationsList({
   }
 
   const checkedCount = orders.filter((o) => o.included !== false).length
+  // «YYYY-MM-DD» → «DD/MM», which is how the date is written on the screen being copied.
+  const dayMonth = (iso: string): string => `${iso.slice(8, 10)}/${iso.slice(5, 7)}`
 
   return (
     <>
@@ -109,9 +114,20 @@ export function OperationsList({
                   the system stopped inventing one. The clock and the route are what a driver can
                   match against the screenshot in front of him. */}
               <div className="min-w-0 flex-1">
-                {o.timeText || o.pointA || o.pointB ? (
+                {o.timeText || o.dateText || o.pointA || o.pointB ? (
                   <>
-                    {o.timeText ? <span className="num text-sm font-semibold">{o.timeText}</span> : null}
+                    <span className="num text-sm font-semibold">
+                      {o.dateText ? dayMonth(o.dateText) : ''}
+                      {o.dateText && o.timeText ? ' · ' : ''}
+                      {o.timeText ?? ''}
+                    </span>
+                    {/* The list scrolls back through previous days, so a row from ANOTHER day is
+                        the one thing a driver most needs to see before he leaves it checked. */}
+                    {o.dateText && o.dateText !== today ? (
+                      <span className="ms-1.5 rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-800">
+                        {t.orders.otherDay}
+                      </span>
+                    ) : null}
                     <p className="truncate text-xs text-slate-500">
                       {o.pointA ?? '—'} ← {o.pointB ?? '—'}
                     </p>

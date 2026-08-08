@@ -21,80 +21,146 @@ export interface GlyphTemplate {
 }
 
 export const GLYPH_TEMPLATES: readonly GlyphTemplate[] = [
-  //   7 samples,  1 distinct, amount
-  { label: '+', hex: '070070070070070070070fffffffff070070070070070070', aspect: 0.9412, relH: 0.9683, relY: 0.582, distinct: 1 },
+  //   5 samples,  1 distinct, amount
+  { label: '+', hex: '070070070070070070070fffffffff070070070070070070', aspect: 0.9412, relH: 0.9667, relY: 0.5832, distinct: 1 },
   //   1 samples,  1 distinct, amount
   { label: ',', hex: '0070070071f81f8fc0fc0e00e00e00fc0fc0ff8ff8ff8ff8', aspect: 0.5714, relH: 0.4118, relY: 0.6842, distinct: 1 },
-  //  15 samples,  2 distinct, amount
-  { label: '-', hex: 'ffffffffffffffffffffffffffffffffffffffffffffffff', aspect: 5.1556, relH: 0.1678, relY: 0.6054, distinct: 2 },
-  //   2 samples,  2 distinct, amount
-  { label: '.', hex: '1f81f81f8ffffffffffff1ff1ff1ff0380381f81f8fc0fc0', aspect: 0.5714, relH: 0.4118, relY: 0.8421, distinct: 2 },
-  //  17 samples,  2 distinct, date
-  { label: '/', hex: '00100700700600e0080380380300700701c01c0180380380', aspect: 0.4706, relH: 1, relY: 0.4389, distinct: 2 },
+  //   8 samples,  1 distinct, amount
+  { label: '-', hex: 'ffffffffffffffffffffffffffffffffffffffffffffffff', aspect: 5, relH: 0.1695, relY: 0.6075, distinct: 1 },
+  //   6 samples,  1 distinct, amount
+  { label: '-', hex: '7ff7ff7ff7ff7ff7ff7ff7ff7ff7ff7fffffffffffffffff', aspect: 5.3333, relH: 0.1672, relY: 0.6016, distinct: 1 },
+  //   1 samples,  1 distinct, amount
+  { label: '.', hex: '1f81f81f8ff8ff8ffffff1ff1ff1ff0380381f81f8fc0fc0', aspect: 0.5714, relH: 0.4118, relY: 0.8421, distinct: 1 },
+  //   1 samples,  1 distinct, amount
+  { label: '.', hex: '1f81f81f8ffffffffffff03f03f03f0380381f81f8fc0fc0', aspect: 0.5714, relH: 0.4118, relY: 0.8421, distinct: 1 },
+  //  11 samples,  1 distinct, date
+  { label: '/', hex: '00100700700600e0080380380300700701c01c0180380380', aspect: 0.4706, relH: 1, relY: 0.4402, distinct: 1 },
+  //   9 samples,  1 distinct, date
+  { label: '/', hex: '00100700700e00e00e0380380300700701c01c0180380380', aspect: 0.4706, relH: 1, relY: 0.4392, distinct: 1 },
+  //   2 samples,  1 distinct, date
+  { label: '/', hex: '00100700701e01e01e0380380200e00e03c03c0300f00f00', aspect: 0.4118, relH: 1, relY: 0.4327, distinct: 1 },
   //  14 samples,  7 distinct, amount
-  { label: '0', hex: '1f81f81f81f8fffffffffffffffffffffffffff038038038', aspect: 0.8286, relH: 0.2809, relY: 0.5642, distinct: 7 },
-  //  17 samples, 13 distinct, amount
-  { label: '1', hex: 'f80f80fc0ff01f01fc1fc07c07c07c00f00f00f00f00c00c', aspect: 0.3036, relH: 0.9866, relY: 0.4727, distinct: 13 },
-  //  19 samples, 13 distinct, amount
-  { label: '2', hex: 'e01e01e03f0f3fe3fe3c01c01c01c00c00e00e00e00c00c0', aspect: 0.5212, relH: 0.9834, relY: 0.4931, distinct: 13 },
-  //  10 samples, 10 distinct, amount
-  { label: '3', hex: 'e11e19f1bfbf3fe3f03801801801801c00c00c00c0080080', aspect: 0.6728, relH: 0.9634, relY: 0.4828, distinct: 10 },
-  //   7 samples,  1 distinct, amount
+  { label: '0', hex: '1f81f81f81f8fffffffffffffffffffffffffff038038038', aspect: 0.894, relH: 0.3027, relY: 0.5695, distinct: 7 },
+  //   3 samples,  2 distinct, amount
+  { label: '0', hex: '0f00f00f00f0ffffffffffffffffffffffffffffffffffff', aspect: 0.8333, relH: 0.2619, relY: 0.5897, distinct: 2 },
+  //   2 samples,  2 distinct, amount
+  { label: '0', hex: 'ffffffffffffffffffffffffffffffffffff0f00f00f00f0', aspect: 0.75, relH: 0.2667, relY: 0.6071, distinct: 2 },
+  //  11 samples,  8 distinct, amount
+  { label: '1', hex: 'f80f80ff0ff01f01fc1fc07c07c07c00f00f00f00f00c00c', aspect: 0.3133, relH: 0.9854, relY: 0.4545, distinct: 8 },
+  //   7 samples,  6 distinct, amount
+  { label: '1', hex: 'e00e00fc0fc0fc0ff81f81f81f81f803f03f03f03f038038', aspect: 0.2959, relH: 0.9905, relY: 0.5051, distinct: 6 },
+  //   3 samples,  2 distinct, amount
+  { label: '1', hex: '180ff0ff01fc1fc07c07f07f00f00f00f00f00f00f003003', aspect: 0.2941, relH: 1, relY: 0.5, distinct: 2 },
+  //  16 samples, 11 distinct, amount
+  { label: '2', hex: 'e01e01e03f0f3fe3fe3c01c01c01c00e00e00e00e00c00c0', aspect: 0.5142, relH: 0.9803, relY: 0.4918, distinct: 11 },
+  //   3 samples,  2 distinct, amount
+  { label: '2', hex: '201201e01f873ff3fe1c01c01c01c01c0040040040040040', aspect: 0.5587, relH: 1, relY: 0.5, distinct: 2 },
+  //  11 samples, 10 distinct, amount
+  { label: '3', hex: 'e13e1be1b7be3fe3e0380180180180180080080080080080', aspect: 0.6885, relH: 0.9789, relY: 0.4844, distinct: 10 },
+  //   3 samples,  3 distinct, amount
+  { label: '3', hex: 'c11c11e11f3fffe3e03003001001c01c01c01c01c0100100', aspect: 0.6593, relH: 0.9556, relY: 0.5, distinct: 3 },
+  //   5 samples,  1 distinct, amount
   { label: '4', hex: '0300f01c0380300200fc03f00f00400c01001001801ff0fe', aspect: 0.5263, relH: 1, relY: 0.5, distinct: 1 },
-  //  15 samples, 12 distinct, amount
-  { label: '5', hex: '0300300fc1fe31e20ee02c03c03c03c03c02e0effeffc1e0', aspect: 0.6247, relH: 0.8511, relY: 0.452, distinct: 12 },
-  //   5 samples,  3 distinct, amount
-  { label: '6', hex: 'ffcffc0fc00c00c00c00c00c00c00c00c006006006007003', aspect: 0.6462, relH: 0.9656, relY: 0.4613, distinct: 3 },
-  //   7 samples,  7 distinct, amount
-  { label: '7', hex: '000e01e0370370638638618c1cc0cc0c8078078070030030', aspect: 0.7425, relH: 0.9699, relY: 0.5, distinct: 7 },
-  //  17 samples,  1 distinct, date
-  { label: '8', hex: '0200200300f00d00d00dc1dc10e10e10e303203203e03001', aspect: 0.75, relH: 0.7059, relY: 0.3566, distinct: 1 },
-  //   8 samples,  6 distinct, amount+date
-  { label: '9', hex: '0e00e03f8c38c1ee1efde3fe01e00e00e00e006007007007', aspect: 0.5548, relH: 0.8897, relY: 0.322, distinct: 6 },
-  //  24 samples,  9 distinct, date
-  { label: ':', hex: '0f00f00f00f00f00f0fffffffffffffff0f00f00f00f00f0', aspect: 0.9007, relH: 0.3581, relY: 0.2956, distinct: 9 },
+  //  14 samples, 11 distinct, amount
+  { label: '5', hex: '0300300fc1fe31e20ee02c03c03c03c03c02e0effeffc1e0', aspect: 0.6218, relH: 0.8507, relY: 0.4486, distinct: 11 },
+  //   4 samples,  3 distinct, amount
+  { label: '5', hex: '0fc0fc0fe1de10f303303203201e01e01e01e033de3fe1f0', aspect: 0.6859, relH: 0.7878, relY: 0.5, distinct: 3 },
+  //   4 samples,  2 distinct, amount
+  { label: '6', hex: 'ffcffc0fc00c00c00c00c00c00c00c00c006006006007003', aspect: 0.6471, relH: 0.9737, relY: 0.4605, distinct: 2 },
+  //   3 samples,  3 distinct, amount
+  { label: '7', hex: '801c03c03e0360670630430c38c1881980d80d00f0070060', aspect: 0.7059, relH: 0.9649, relY: 0.5, distinct: 3 },
+  //   3 samples,  3 distinct, amount
+  { label: '7', hex: '400e016017013033833831861c60c40cc06c068078038030', aspect: 0.7647, relH: 0.9649, relY: 0.5, distinct: 3 },
+  //   2 samples,  2 distinct, amount
+  { label: '7', hex: '601e01f037037873863861cc1cc0cc0c80f8078070070030', aspect: 0.7752, relH: 1, relY: 0.5, distinct: 2 },
+  //  20 samples,  1 distinct, date
+  { label: '8', hex: '0200200300f00d00d00dc1dc10e10e10e303203203e03001', aspect: 0.75, relH: 0.7059, relY: 0.3573, distinct: 1 },
+  //   8 samples,  3 distinct, amount+date
+  { label: '9', hex: '0e00e03f8c38c18c18fd83f801e01e01e01e006006007007', aspect: 0.5868, relH: 0.7544, relY: 0.3185, distinct: 3 },
+  //   2 samples,  2 distinct, date
+  { label: '9', hex: '3f83f8ff8c1ec1efdefdeffe0fe006006006006007001001', aspect: 0.5385, relH: 0.8667, relY: 0.3, distinct: 2 },
+  //   2 samples,  2 distinct, date
+  { label: '9', hex: '0e00e03f8ff8c1ef1effeffe006006006006007007001001', aspect: 0.5, relH: 0.9333, relY: 0.3173, distinct: 2 },
+  //  32 samples,  9 distinct, date
+  { label: ':', hex: '0f00f0ffffff0f0000000000000000000000000ff0ff0ff0', aspect: 0.2841, relH: 0.6327, relY: 0.4639, distinct: 9 },
+  //   8 samples,  5 distinct, date
+  { label: ':', hex: 'fffffffff000000000000000000000000000000000ffffff', aspect: 0.1886, relH: 0.7026, relY: 0.4521, distinct: 5 },
   //   3 samples,  2 distinct, date
   { label: 'ص', hex: '00200200700904905007107e47c47c400c004404c0780300', aspect: 1.5714, relH: 0.8235, relY: 0.6389, distinct: 2 },
-  //  21 samples, 10 distinct, date
-  { label: 'م', hex: '0200201f011c00e00f0ff3fe200200e00200200200200200', aspect: 0.6973, relH: 0.7941, relY: 0.6174, distinct: 10 },
+  //  20 samples,  6 distinct, date
+  { label: 'م', hex: '0200201f011c00e00f0ff3fe200200e00200200200200200', aspect: 0.63, relH: 0.8588, relY: 0.6376, distinct: 6 },
+  //  10 samples,  9 distinct, date
+  { label: 'م', hex: '1f01f03f021c00e00f3ffffec00c00c00c00c00c00c00c00', aspect: 0.58, relH: 0.9765, relY: 0.6425, distinct: 9 },
+  //   6 samples,  6 distinct, date
+  { label: 'م', hex: '0f01f811c20e0070033ff3c0c00c00c00e00200200200200', aspect: 0.5851, relH: 1, relY: 0.6401, distinct: 6 },
 ]
 
 /** The smaller font of the clock-and-date column. Same classes, prototypes drawn from that font. */
 export const CLOCK_TEMPLATES: readonly GlyphTemplate[] = [
-  //   7 samples,  1 distinct, amount
-  { label: '+', hex: '070070070070070070070fffffffff070070070070070070', aspect: 0.9412, relH: 0.9683, relY: 0.582, distinct: 1 },
+  //   5 samples,  1 distinct, amount
+  { label: '+', hex: '070070070070070070070fffffffff070070070070070070', aspect: 0.9412, relH: 0.9667, relY: 0.5832, distinct: 1 },
   //   1 samples,  1 distinct, amount
   { label: ',', hex: '0070070071f81f8fc0fc0e00e00e00fc0fc0ff8ff8ff8ff8', aspect: 0.5714, relH: 0.4118, relY: 0.6842, distinct: 1 },
-  //  15 samples,  2 distinct, amount
-  { label: '-', hex: 'ffffffffffffffffffffffffffffffffffffffffffffffff', aspect: 5.1556, relH: 0.1678, relY: 0.6054, distinct: 2 },
-  //   2 samples,  2 distinct, amount
-  { label: '.', hex: '1f81f81f8ffffffffffff1ff1ff1ff0380381f81f8fc0fc0', aspect: 0.5714, relH: 0.4118, relY: 0.8421, distinct: 2 },
-  //  17 samples,  2 distinct, date
-  { label: '/', hex: '00100700700600e0080380380300700701c01c0180380380', aspect: 0.4706, relH: 1, relY: 0.4389, distinct: 2 },
-  //  39 samples,  1 distinct, date
-  { label: '0', hex: '0f00f00f00f0ffffffffffffffffffffffff0f00f00f00f0', aspect: 0.75, relH: 0.2353, relY: 0.411, distinct: 1 },
-  //  12 samples,  5 distinct, date
-  { label: '1', hex: 'f00f00ff0ff00ff0ff0ff0ff00f00f00f00f00f00f00f00f', aspect: 0.2525, relH: 0.6904, relY: 0.4288, distinct: 5 },
-  //  12 samples,  6 distinct, date
-  { label: '2', hex: 'c03c03f07ffe3fe3fc3c03c00c00c00c00c00c00c00c00c0', aspect: 0.5443, relH: 0.7683, relY: 0.35, distinct: 6 },
-  //  10 samples,  8 distinct, date
-  { label: '3', hex: 'c31c31e3ffff3fe3f03803801801801801c01c01c01c01c0', aspect: 0.6094, relH: 0.6935, relY: 0.4427, distinct: 8 },
-  //  24 samples,  4 distinct, date
-  { label: '4', hex: '0300303c0f00c00c00c00fc03f00c03003003003003ff3ff', aspect: 0.4904, relH: 0.7412, relY: 0.3186, distinct: 4 },
-  //  11 samples,  6 distinct, date
-  { label: '5', hex: '0fc0fc3ff3ff30f303303c03c03c03c03c03f0fffcffc0f0', aspect: 0.676, relH: 0.5845, relY: 0.3421, distinct: 6 },
-  //   6 samples,  2 distinct, date
-  { label: '6', hex: 'c00c00ffeffe00600600601e006006006006007007007001', aspect: 0.5385, relH: 0.7647, relY: 0.3333, distinct: 2 },
-  //   9 samples,  8 distinct, amount+date
-  { label: '7', hex: 'c01e01e0170330230238618e1cc0cc0cc0f8070070030020', aspect: 0.7442, relH: 0.9112, relY: 0.4649, distinct: 8 },
-  //  17 samples,  1 distinct, date
-  { label: '8', hex: '0200200300f00d00d00dc1dc10e10e10e303203203e03001', aspect: 0.75, relH: 0.7059, relY: 0.3566, distinct: 1 },
-  //   7 samples,  5 distinct, date
-  { label: '9', hex: '0e00e03f8c38c1ec1efde3fe01e006006006006007001001', aspect: 0.5467, relH: 0.8739, relY: 0.3073, distinct: 5 },
-  //  24 samples,  9 distinct, date
-  { label: ':', hex: '0f00f00f00f00f00f0fffffffffffffff0f00f00f00f00f0', aspect: 0.9007, relH: 0.3581, relY: 0.2956, distinct: 9 },
+  //   8 samples,  1 distinct, amount
+  { label: '-', hex: 'ffffffffffffffffffffffffffffffffffffffffffffffff', aspect: 5, relH: 0.1695, relY: 0.6075, distinct: 1 },
+  //   6 samples,  1 distinct, amount
+  { label: '-', hex: '7ff7ff7ff7ff7ff7ff7ff7ff7ff7ff7fffffffffffffffff', aspect: 5.3333, relH: 0.1672, relY: 0.6016, distinct: 1 },
+  //   1 samples,  1 distinct, amount
+  { label: '.', hex: '1f81f81f8ff8ff8ffffff1ff1ff1ff0380381f81f8fc0fc0', aspect: 0.5714, relH: 0.4118, relY: 0.8421, distinct: 1 },
+  //   1 samples,  1 distinct, amount
+  { label: '.', hex: '1f81f81f8ffffffffffff03f03f03f0380381f81f8fc0fc0', aspect: 0.5714, relH: 0.4118, relY: 0.8421, distinct: 1 },
+  //  11 samples,  1 distinct, date
+  { label: '/', hex: '00100700700600e0080380380300700701c01c0180380380', aspect: 0.4706, relH: 1, relY: 0.4402, distinct: 1 },
+  //   9 samples,  1 distinct, date
+  { label: '/', hex: '00100700700e00e00e0380380300700701c01c0180380380', aspect: 0.4706, relH: 1, relY: 0.4392, distinct: 1 },
+  //   2 samples,  1 distinct, date
+  { label: '/', hex: '00100700701e01e01e0380380200e00e03c03c0300f00f00', aspect: 0.4118, relH: 1, relY: 0.4327, distinct: 1 },
+  //  50 samples,  1 distinct, date
+  { label: '0', hex: '0f00f00f00f0ffffffffffffffffffffffff0f00f00f00f0', aspect: 0.75, relH: 0.2353, relY: 0.4114, distinct: 1 },
+  //   3 samples,  3 distinct, date
+  { label: '0', hex: '0ff0ff0ff0ff0ff0ffffffffffffffffffffffffffffffff', aspect: 1, relH: 0.1958, relY: 0.3728, distinct: 3 },
+  //  14 samples,  5 distinct, date
+  { label: '1', hex: 'f00f00ff0ff00ff0ff0ff0ff00f00f00f00f00f00f00f00f', aspect: 0.2473, relH: 0.7531, relY: 0.3455, distinct: 5 },
+  //  14 samples,  8 distinct, date
+  { label: '1', hex: 'fc0fc0fc0fc01f81f81f803f03f03f03f03f03f03f007007', aspect: 0.2918, relH: 0.8342, relY: 0.3229, distinct: 8 },
+  //  11 samples,  4 distinct, date
+  { label: '2', hex: 'c07c07f06ffe3fc3fc3c03c00c00c00c00c00c00c00c00c0', aspect: 0.549, relH: 0.7205, relY: 0.3601, distinct: 4 },
+  //   6 samples,  5 distinct, date
+  { label: '2', hex: 'c01e01f01f87fff3fe3f81e01c01c01c01c0040040040040', aspect: 0.5372, relH: 0.8663, relY: 0.3102, distinct: 5 },
+  //  15 samples,  7 distinct, date
+  { label: '3', hex: 'c31c31e3ffff3f83f8380380180180180180180180180180', aspect: 0.6788, relH: 0.7373, relY: 0.3448, distinct: 7 },
+  //  25 samples,  3 distinct, date
+  { label: '4', hex: '0300303c0f00c00c00c00fc03f00c03003003003003ff3ff', aspect: 0.4615, relH: 0.7647, relY: 0.3305, distinct: 3 },
+  //   2 samples,  1 distinct, date
+  { label: '4', hex: '0180180e03c0300f00f003e00f80200c00c00c00c00ff0ff', aspect: 0.5385, relH: 0.7647, relY: 0.3333, distinct: 1 },
+  //   4 samples,  4 distinct, date
+  { label: '4', hex: '0200203e03c0e00f00fe03e00e00e00c00c03003003ff0ff', aspect: 0.5074, relH: 0.9237, relY: 0.3271, distinct: 4 },
+  //  16 samples, 10 distinct, date
+  { label: '5', hex: '0fc0fc3ff3ff30f303f03c03c03c03c03c03f0fffcffc3f0', aspect: 0.604, relH: 0.6413, relY: 0.3423, distinct: 10 },
+  //   8 samples,  2 distinct, date
+  { label: '6', hex: 'c00c00ffeffe00600600601e006006006006007007007001', aspect: 0.5385, relH: 0.7647, relY: 0.3311, distinct: 2 },
+  //   4 samples,  3 distinct, date
+  { label: '6', hex: 'ffcffc3fc00c00c00c00c00c00c00e00e00e006007003003', aspect: 0.6394, relH: 0.8273, relY: 0.3, distinct: 3 },
+  //   2 samples,  1 distinct, date
+  { label: '7', hex: 'e01e01e013033023021ce1ce0cc0cc0ec0f0030030030020', aspect: 0.75, relH: 0.7059, relY: 0.3421, distinct: 1 },
+  //  20 samples,  1 distinct, date
+  { label: '8', hex: '0200200300f00d00d00dc1dc10e10e10e303203203e03001', aspect: 0.75, relH: 0.7059, relY: 0.3573, distinct: 1 },
+  //   7 samples,  2 distinct, date
+  { label: '9', hex: '0e00e03f8c38c18c18fd83f801e01e01e01e006006007007', aspect: 0.5833, relH: 0.7193, relY: 0.3033, distinct: 2 },
+  //   2 samples,  2 distinct, date
+  { label: '9', hex: '3f83f8ff8c1ec1efdefdeffe0fe006006006006007001001', aspect: 0.5385, relH: 0.8667, relY: 0.3, distinct: 2 },
+  //   2 samples,  2 distinct, date
+  { label: '9', hex: '0e00e03f8ff8c1ef1effeffe006006006006007007001001', aspect: 0.5, relH: 0.9333, relY: 0.3173, distinct: 2 },
+  //  32 samples,  9 distinct, date
+  { label: ':', hex: '0f00f0ffffff0f0000000000000000000000000ff0ff0ff0', aspect: 0.2841, relH: 0.6327, relY: 0.4639, distinct: 9 },
+  //   8 samples,  5 distinct, date
+  { label: ':', hex: 'fffffffff000000000000000000000000000000000ffffff', aspect: 0.1886, relH: 0.7026, relY: 0.4521, distinct: 5 },
   //   3 samples,  2 distinct, date
   { label: 'ص', hex: '00200200700904905007107e47c47c400c004404c0780300', aspect: 1.5714, relH: 0.8235, relY: 0.6389, distinct: 2 },
-  //  21 samples, 10 distinct, date
-  { label: 'م', hex: '0200201f011c00e00f0ff3fe200200e00200200200200200', aspect: 0.6973, relH: 0.7941, relY: 0.6174, distinct: 10 },
+  //  20 samples,  6 distinct, date
+  { label: 'م', hex: '0200201f011c00e00f0ff3fe200200e00200200200200200', aspect: 0.63, relH: 0.8588, relY: 0.6376, distinct: 6 },
+  //  10 samples,  9 distinct, date
+  { label: 'م', hex: '1f01f03f021c00e00f3ffffec00c00c00c00c00c00c00c00', aspect: 0.58, relH: 0.9765, relY: 0.6425, distinct: 9 },
+  //   6 samples,  6 distinct, date
+  { label: 'م', hex: '0f01f811c20e0070033ff3c0c00c00c00e00200200200200', aspect: 0.5851, relH: 1, relY: 0.6401, distinct: 6 },
 ]

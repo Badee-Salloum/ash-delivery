@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { type Mask, componentsIn, featuresOf, groupMetrics, maskFromPixels } from '../src/glyphs.ts'
+import {
+  type Mask,
+  componentsIn,
+  featuresOf,
+  groupMetrics,
+  maskFromPixels,
+  mergeStacked,
+  readDigitRun,
+  unpackTemplates,
+} from '../src/glyphs.ts'
 
 /**
  * The segmenter, tested on hand-built masks rather than photographs.
@@ -157,5 +166,81 @@ describe('deciding which way round the ink is', () => {
     // Assuming one polarity is how a reader returns a confidently empty page on half the phones.
     const m = maskFromPixels(px([5, 5, 250, 5, 5, 5]), 6, 1)
     expect(Array.from(m.data)).toEqual([0, 0, 1, 0, 0, 0])
+  })
+})
+
+/**
+ * Rejoining what one glyph was printed in two pieces of.
+ *
+ * The colon prints as two disjoint dots, and at the dashboard's smallest scale each dot is three
+ * or four ink pixels. Both facts cost real reads: `MIN_PIXELS` at 5 discarded the dots outright,
+ * and once they survived they arrived as two components where the templates expect one.
+ */
+describe('stacked pieces of one glyph', () => {
+  it('joins two dots standing one above the other', () => {
+    const m = mask([
+      '.##.',
+      '.##.',
+      '....',
+      '....',
+      '.##.',
+      '.##.',
+    ])
+    expect(componentsIn(m, ALL(m))).toHaveLength(2)
+    const joined = mergeStacked(m, componentsIn(m, ALL(m)))
+    expect(joined).toHaveLength(1)
+    expect(joined[0]).toMatchObject({ x0: 1, y0: 0, x1: 2, y1: 5 })
+  })
+
+  it('leaves NEIGHBOURS alone — two digits side by side share no columns', () => {
+    const m = mask([
+      '###..###',
+      '#.#..#.#',
+      '###..###',
+    ])
+    expect(mergeStacked(m, componentsIn(m, ALL(m)))).toHaveLength(2)
+  })
+
+  it('leaves a tail that merely UNDERHANGS its neighbour alone', () => {
+    // «م» sweeps below the digit beside it. Overlapping columns are not enough: stacked pieces of
+    // one glyph are vertically DISJOINT, and merging these two made the clock unreadable.
+    const m = mask([
+      '..###',
+      '..###',
+      '#####',
+      '###..',
+    ])
+    const comps = componentsIn(m, ALL(m))
+    expect(mergeStacked(m, comps)).toHaveLength(comps.length)
+  })
+})
+
+/**
+ * The day number of a date header, which shares its line with the month and weekday words.
+ *
+ * Letters are in no digit template, so they refuse — and that refusal is what DELIMITS the digits.
+ * The rule is one contiguous run of one or two: anything else means the box held something the
+ * reader does not understand, and a date is not worth guessing at.
+ */
+describe('reading a digit run out of a mixed line', () => {
+  const digits = unpackTemplates([
+    // A crude «1» and «6» — enough to be nearest-matched, since the test is about RUNS, not shapes.
+    { label: '1', hex: '0c00c00c00c00c00c00c00c00c00c00c0', aspect: 0.4, relH: 1, relY: 0.5, distinct: 1 },
+  ])
+  const ALPHABET = new Set(['1'])
+
+  it('refuses when the digits do not form one run', () => {
+    // Two separated marks with unreadable ink between them: two runs, so nothing is offered.
+    const m = mask([
+      '.#...##...#.',
+      '.#...##...#.',
+      '.#...##...#.',
+    ])
+    expect(readDigitRun(m, ALL(m), digits, ALPHABET)).toBe(null)
+  })
+
+  it('refuses an empty box rather than returning an empty string', () => {
+    const m = mask(['....', '....'])
+    expect(readDigitRun(m, ALL(m), digits, ALPHABET)).toBe(null)
   })
 })

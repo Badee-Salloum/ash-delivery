@@ -27,7 +27,7 @@
  */
 // Statically imported, unlike tesseract.js: this is a few kilobytes of pure arithmetic with no
 // wasm behind it, and the amounts cannot be read without it.
-import { CLOCK_ALPHABET, maskFromPixels, readGlyphRow, unpackTemplates } from './glyphs.ts'
+import { type Box, CLOCK_ALPHABET, type Mask, maskFromPixels, readDigitRun, readGlyphRow, type Template, unpackTemplates } from './glyphs.ts'
 import { CLOCK_TEMPLATES } from './glyph-templates.ts'
 import { GLYPH_TEMPLATES } from './glyph-templates.ts'
 
@@ -630,10 +630,12 @@ const foldAr = (s: string): string =>
  */
 function orderDateHeader(line: string, year: number): string | null {
   const ascii = asciiDigits(line)
-  const en = ascii.match(/(\d{1,2})\s+([A-Za-z]{3,})/)
+  // Both English orders: «27 July» and — what the dark-theme build actually prints — «August 6».
+  const en = ascii.match(/(\d{1,2})\s+([A-Za-z]{3,})/) ?? ascii.match(/([A-Za-z]{3,})[,\s]+(\d{1,2})\b/)
   if (en) {
-    const day = Number(en[1])
-    const month = MONTHS.indexOf(en[2]!.toLowerCase())
+    const [a, b] = [en[1]!, en[2]!]
+    const day = Number(/^\d/.test(a) ? a : b)
+    const month = MONTHS.indexOf((/^\d/.test(a) ? b : a).toLowerCase())
     if (month !== -1 && day >= 1 && day <= 31) {
       return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
     }
@@ -672,6 +674,260 @@ export function parseClock(line: string): string | null {
   if (pm && hour < 12) hour += 12
   if (am && hour === 12) hour = 0
   return `${String(hour).padStart(2, '0')}:${m[2]}`
+}
+
+/** The weekday names as the Arabic screen writes them, folded; index = JS `Date#getDay()`. */
+const WEEKDAYS_AR = ['الاحد', 'الاثنين', 'الثلاثاء', 'الاربعاء', 'الخميس', 'الجمعه', 'السبت']
+const WEEKDAYS_EN = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
+
+/** The weekday a header line names, in either language — or -1 when none is legible. */
+const weekdayOnLine = (text: string): number => {
+  const tokens = foldedTokens(text)
+  const ar = WEEKDAYS_AR.findIndex((n) => tokens.includes(n))
+  if (ar !== -1) return ar
+  const lower = text.toLowerCase()
+  return WEEKDAYS_EN.findIndex((n) => lower.includes(n))
+}
+
+/** A day-of-month is digits and nothing else — no separators, no half-day marks. */
+const DAY_ALPHABET: ReadonlySet<string> = new Set([...'0123456789'])
+
+// ── The glyph reader's row geometry, pure and shared with the measurement harness ──────────
+//
+// «SYP»'s own cap height IS the font size, handed over for free — every band and reach is
+// measured in it, so the same numbers work at any screenshot resolution. These are exported so
+// scripts/glyph-read.mjs measures EXACTLY the boxes the app reads, not a near-copy that drifts.
+
+type AnchorBox = { x0: number; x1: number; y0: number; y1: number }
+
+/** The amount: the ink immediately LEFT of «SYP», up to 12 cap-heights away. */
+export const amountBoxFor = (a: AnchorBox, height: number): Box => {
+  const unit = a.y1 - a.y0
+  const pad = Math.round(unit * 0.45)
+  return {
+    x0: Math.max(0, a.x0 - Math.round(unit * 12)),
+    y0: Math.max(0, a.y0 - pad),
+    x1: a.x0 - 4,
+    y1: Math.min(height, a.y1 + pad),
+  }
+}
+
+/** The clock cluster: everything RIGHT of «SYP» on the same band — «م H:MM», plus «MM/DD» on the log. */
+export const clockBoxFor = (a: AnchorBox, width: number, height: number): Box => {
+  const unit = a.y1 - a.y0
+  const pad = Math.round(unit * 0.45)
+  return {
+    x0: a.x1 + 4,
+    y0: Math.max(0, a.y0 - pad),
+    x1: Math.min(width, a.x1 + Math.round(unit * 26)),
+    y1: Math.min(height, a.y1 + pad),
+  }
+}
+
+/**
+ * «م3:19» → 15:19; «ص9:24 08/04» → 09:24 on 4 August. The whole cluster must parse or nothing is
+ * offered — extra ink in the band means the reader was looking at something else too.
+ */
+export function parseGlyphClock(raw: string | null, year: number): { time: string; dateIso: string | null } {
+  const m = raw?.match(/^([مص])(\d{1,2}):([0-5]\d)(?:(\d{2})\/(\d{2}))?$/)
+  if (!m) return { time: '', dateIso: null }
+  // «م» is the afternoon and «ص» the morning; twelve is the hour that moves, in both directions.
+  let hour = Number(m[2])
+  if (hour > 12) return { time: '', dateIso: null }
+  if (m[1] === 'م' && hour < 12) hour += 12
+  if (m[1] === 'ص' && hour === 12) hour = 0
+  const time = `${String(hour).padStart(2, '0')}:${m[3]}`
+  // The log writes MM/DD. The year is not on the screen at all, so it comes from the clock the
+  // phone already has — the driver is photographing today's work, not an archive.
+  const dateIso = m[4] && m[5] ? `${year}-${m[4]}-${m[5]}` : null
+  return { time, dateIso }
+}
+
+/**
+ * The tokens of a line, folded and stripped of the junk OCR glues to their edges — punctuation,
+ * RTL marks, and stray Latin or digits («1أغسطس» is the month word with the day's «٦» misread
+ * into it). Matching months and weekdays happens on these, and on WHOLE TOKENS only: substring
+ * matching classified «مقابل مشفى العين» as a date header, because «اب» — August's short form —
+ * hides inside ordinary Arabic words, and the header cut then beheaded the route under it.
+ */
+const foldedTokens = (text: string): string[] =>
+  text
+    .split(/\s+/)
+    .map((t) => foldAr(t).replace(/^[^ء-ي]+|[^ء-ي]+$/g, ''))
+    .filter((t) => t !== '')
+
+const monthOnLine = (text: string): number => {
+  const tokens = foldedTokens(text)
+  const ar = MONTHS_AR.findIndex((names) => names.some((n) => tokens.includes(foldAr(n))))
+  if (ar !== -1) return ar
+  const lower = text.toLowerCase()
+  return MONTHS.findIndex((m) => lower.includes(m))
+}
+
+/**
+ * A line that announces a new day — «الخميس, ٦ أغسطس» / «Thursday, August 6».
+ *
+ * Even when the day NUMBER is unreadable the line still matters: it CUTS the page. Rows below it
+ * belong to another day, and a place line never crosses it.
+ */
+export const isHeaderLine = (text: string): boolean => monthOnLine(text) !== -1
+
+/** «تم إلغاؤه» / «Cancelled» — the card below this line is not a delivery and has no anchor. */
+export const isCancelLine = (text: string): boolean => /الغا/.test(foldAr(text)) || /cancel/i.test(text)
+
+/**
+ * The «SYP» anchor words of a page.
+ *
+ * Two rules, each bought with a measured failure:
+ *
+ * 1. The word's LATIN LETTERS must be exactly «syp» — not merely contain it (junk transliteration
+ *    once made a three-row page report «20 صفوف»), and not the earlier boundary regex either: the
+ *    Arabic model glues RTL marks and neighbouring characters onto the word, and «SYP‎م» must
+ *    still anchor its row or the row silently vanishes.
+ * 2. The candidates must AGREE GEOMETRICALLY. Every real anchor on a page is the same word in the
+ *    same font, so its height matches the median; a mangled Arabic cluster that happens to strip
+ *    to «syp» sits at a different scale. One such impostor shifted every amount on a log page down
+ *    a row — the fee of one order offered as the fee of the next.
+ */
+export const anchorsIn = (lines: readonly OcrLine[]): Array<{ text: string; x0: number; x1: number; y0: number; y1: number }> => {
+  const candidates = lines
+    .flatMap((l) => l.words)
+    .filter((w) => w.text.replace(/[^A-Za-z]/g, '').toLowerCase() === 'syp')
+    .sort((a, b) => a.y0 - b.y0)
+  if (candidates.length <= 1) return candidates
+  const heights = candidates.map((w) => w.y1 - w.y0).sort((a, b) => a - b)
+  const median = heights[Math.floor(heights.length / 2)]!
+  return candidates.filter((w) => {
+    const h = w.y1 - w.y0
+    return h >= median * 0.6 && h <= median * 1.6
+  })
+}
+
+/**
+ * The route of every order on the page: «A» the pickup, «B» the dropoff, from Tesseract's OWN text.
+ *
+ * That is not a compromise. Its failure is confined to Arabic-Indic DIGITS; the place lines are
+ * Arabic WORDS, which it reads as reliably as it reads «SYP». The layout does the splitting, not
+ * the badge letters: a card is the lines below its price row, cut at the next order, a day header,
+ * a cancelled card, or a vertical gap wider than lines within a card ever have. The «A» place may
+ * wrap onto several lines; «B» is always the final single line — a plus-code, a coordinate pair,
+ * or a street. Where Tesseract DID read a standalone «B» badge, that line starts the B block and
+ * overrides the last-line rule.
+ */
+export function routesFor(
+  lines: readonly OcrLine[],
+  anchors: readonly { x0: number; x1: number; y0: number; y1: number }[],
+): Array<{ pointA: string | null; pointB: string | null }> {
+  const sorted = [...lines].sort((x, y) => x.y0 - y.y0)
+  return anchors.map((a, i) => {
+    const unit = Math.max(1, a.y1 - a.y0)
+    const from = a.y1 - Math.round(unit * 0.2)
+    const to = anchors[i + 1]?.y0 ?? Infinity
+
+    const band: Array<{ text: string; hasB: boolean }> = []
+    let prevY1 = a.y1
+    let first = true
+    for (const line of sorted) {
+      if (line.y0 < from || line.y0 >= to) continue
+      if (isHeaderLine(line.text) || isCancelLine(line.text)) break
+      // Lines within a card sit tight. A wide gap means the card ended and whatever follows is
+      // another card's fragment or page chrome — without this, the LAST card on a screenshot
+      // swept up the navigation bar and called it a dropoff. The card's own padding between the
+      // price row and the first place line is wider than between place lines, hence two limits.
+      if (line.y0 - prevY1 > unit * (first ? 4 : 3)) break
+      first = false
+      prevY1 = Math.max(prevY1, line.y1)
+      const words = line.words.filter((w) => w.text.trim() !== '')
+      const hasB = words.some((w) => w.text.trim() === 'B')
+      const text = words
+        .filter((w) => !/^[ABab]$/.test(w.text.trim()))
+        .map((w) => w.text.trim())
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+      if (text !== '') band.push({ text, hasB })
+    }
+    if (band.length === 0) return { pointA: null, pointB: null }
+
+    const bAt = band.findIndex((l) => l.hasB)
+    const cut = bAt !== -1 ? bAt : band.length - 1
+    const joined = (part: ReadonlyArray<{ text: string }>): string | null =>
+      part.length === 0 ? null : part.map((l) => l.text).join(' ').slice(0, 120)
+    // A single line with no read badge is the A place of a card whose bottom the screenshot cut.
+    if (bAt === -1 && band.length === 1) return { pointA: joined(band), pointB: null }
+    return { pointA: joined(band.slice(0, cut)), pointB: joined(band.slice(cut)) }
+  })
+}
+
+/**
+ * The day headers of a page, in order, with their dates where a date could be READ.
+ *
+ * `readDay` supplies the day number for the Arabic headers — Tesseract garbles Arabic-Indic
+ * digits, so the caller reads the span between the month word and the weekday word off the pixels
+ * (or, in tests, fakes it). The weekday word, when legible, must AGREE with the computed date:
+ * a date that claims Thursday on a line that says Friday is refused, not offered.
+ */
+export function headerDatesIn(
+  lines: readonly OcrLine[],
+  year: number,
+  today: Date,
+  readDay: (box: { x0: number; y0: number; x1: number; y1: number }) => string | null,
+): Array<{ y0: number; dateIso: string | null }> {
+  const token = (s: string): string => foldAr(s).replace(/^[^ء-ي]+|[^ء-ي]+$/g, '')
+  const out: Array<{ y0: number; dateIso: string | null }> = []
+  for (const line of lines) {
+    if (!isHeaderLine(line.text)) continue
+    let dateIso = orderDateHeader(line.text, year)
+    if (!dateIso) {
+      // Whole-token matching, tolerant only at the edges: OCR glues the misread day digit onto
+      // the month word itself — «1أغسطس» — so the month word's own BOX contains the day's ink.
+      const monthIndex = MONTHS_AR.findIndex((names) => names.some((n) => foldedTokens(line.text).includes(foldAr(n))))
+      const monthWord = line.words.find((w) => MONTHS_AR.some((names) => names.some((n) => token(w.text) === foldAr(n))))
+      // The weekday word is REQUIRED, not a bonus: it is the only independent check on a day
+      // number read off the pixels. Measured without it, a «٦» whose hook printed faintly was
+      // accepted as «1» and five orders were dated the 1st — the checksum is what makes a
+      // glyph-read date safe to store. No legible weekday, no date; the header still cuts.
+      const weekdayWord = line.words.find((w) => WEEKDAYS_AR.includes(token(w.text)))
+      if (monthIndex !== -1 && monthWord && weekdayWord && weekdayWord.x0 > monthWord.x1) {
+        // RTL: the weekday is rightmost, the month leftmost, the day number BETWEEN them — and
+        // Tesseract does emit it as its own word, garbled to «؟» or «1» but correctly boxed.
+        // Read that box: it is a handful of pixels wide and contains nothing else. Only if no
+        // such word survives does this fall back to the whole span, where the month's letters
+        // have to delimit the digits themselves.
+        const dayWord = line.words.find((w) => w.x0 >= monthWord.x1 && w.x1 <= weekdayWord.x0 && w.x1 > w.x0)
+        const span = dayWord
+          ? { x0: dayWord.x0 - 2, y0: dayWord.y0 - 2, x1: dayWord.x1 + 2, y1: dayWord.y1 + 2 }
+          : { x0: monthWord.x1, y0: monthWord.y0 - 2, x1: weekdayWord.x0, y1: monthWord.y1 + 2 }
+        const raw = readDay(span)
+        const day = raw !== null && /^\d{1,2}$/.test(raw) ? Number(raw) : null
+        if (day !== null && day >= 1 && day <= 31) {
+          const candidate = `${year}-${String(monthIndex + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+          const weekdaySeen = WEEKDAYS_AR.indexOf(token(weekdayWord.text))
+          if (new Date(`${candidate}T12:00:00`).getDay() === weekdaySeen) dateIso = candidate
+        }
+      }
+    }
+    if (dateIso !== null) {
+      // The weekday is the CHECKSUM on the whole header, whichever way the date was read. The
+      // Arabic text path has no other guard at all: a garbled «٦» that leaves a stray «1» in the
+      // line becomes the 1st of the month, and the only thing that catches it is that the line
+      // says «الخميس» and the 1st is not a Thursday. The screen never prints the YEAR, so a
+      // mismatch first tries last year — a January screenshot still showing «٣١ ديسمبر» — and a
+      // date that lands in the future is refused outright.
+      const getDay = (iso: string): number => new Date(`${iso}T12:00:00`).getDay()
+      const weekday = weekdayOnLine(line.text)
+      if (weekday !== -1 && getDay(dateIso) !== weekday) {
+        const lastYear = `${year - 1}${dateIso.slice(4)}`
+        dateIso = getDay(lastYear) === weekday ? lastYear : null
+      }
+      if (dateIso !== null && new Date(`${dateIso}T12:00:00`).getTime() > today.getTime() + 86_400_000) {
+        const lastYear = `${year - 1}${dateIso.slice(4)}`
+        dateIso = weekday === -1 && new Date(`${lastYear}T12:00:00`).getTime() <= today.getTime() ? lastYear : null
+      }
+    }
+    out.push({ y0: line.y0, dateIso })
+  }
+  return out.sort((a, b) => a.y0 - b.y0)
 }
 
 /**
@@ -754,10 +1010,7 @@ async function readAmountsByGlyph(
   // The word must BE «SYP», not merely contain it. `/SYP/` matched Tesseract's junk words too, and
   // on an Arabic page it emits plenty: a three-row screen reported twenty-one rows, so the driver
   // was told twenty of them went unread when only two had.
-  const anchors = result.lines
-    .flatMap((l) => l.words)
-    .filter((w) => /^[^A-Za-z]{0,2}syp[^A-Za-z]{0,2}$/i.test(w.text.trim()))
-    .sort((a, b) => a.y0 - b.y0)
+  const anchors = anchorsIn(result.lines)
   if (anchors.length === 0) return { amounts: [], clocks: [], routes: [], rows: 0, text: result.text }
 
   const mask = maskFromPixels(prepared.pixels, prepared.width, prepared.height)
@@ -773,82 +1026,42 @@ async function readAmountsByGlyph(
    * previous key was invented from the fee, which is not a name, it is a coincidence — and two
    * deliveries at the same price on one day were indistinguishable. «م ٣:١٩ ٠٨/٠٤» is the row.
    */
-  const clockAt = (a: { x0: number; x1: number; y0: number; y1: number }): { time: string; dateIso: string | null } => {
-    const unit = a.y1 - a.y0
-    const pad = Math.round(unit * 0.45)
-    const raw = readGlyphRow(
-      mask,
-      {
-        x0: a.x1 + 4,
-        y0: Math.max(0, a.y0 - pad),
-        x1: Math.min(prepared.width, a.x1 + Math.round(unit * 26)),
-        y1: Math.min(prepared.height, a.y1 + pad),
-      },
-      clockTemplates,
-      CLOCK_ALPHABET,
+  const clockAt = (a: { x0: number; x1: number; y0: number; y1: number }): { time: string; dateIso: string | null } =>
+    parseGlyphClock(
+      readGlyphRow(mask, clockBoxFor(a, prepared.width, prepared.height), clockTemplates, CLOCK_ALPHABET),
+      new Date().getFullYear(),
     )
-    const m = raw?.match(/^([مص])(\d{1,2}):([0-5]\d)(?:(\d{2})\/(\d{2}))?$/)
-    if (!m) return { time: '', dateIso: null }
-    // «م» is the afternoon and «ص» the morning; twelve is the hour that moves, in both directions.
-    let hour = Number(m[2])
-    if (m[1] === 'م' && hour < 12) hour += 12
-    if (m[1] === 'ص' && hour === 12) hour = 0
-    const time = `${String(hour).padStart(2, '0')}:${m[3]}`
-    // The log writes MM/DD. The year is not on the screen at all, so it comes from the clock the
-    // phone already has — the driver is photographing today's work, not an archive.
-    const dateIso = m[4] && m[5] ? `${new Date().getFullYear()}-${m[4]}-${m[5]}` : null
-    return { time, dateIso }
-  }
 
   const clocks = anchors.map(clockAt)
 
   /**
-   * The route: «A» the pickup, «B» the dropoff, taken from Tesseract's OWN text.
+   * The day each row belongs to, from the «الخميس, ٦ أغسطس» headers between the day groups.
    *
-   * This is the one part of the screen it reads well. Its failure is confined to Arabic-Indic
-   * DIGITS — the letters it handles fine — and the two place lines are Arabic words, printed under
-   * their order and tagged with a Latin «A» and «B» that it reads as reliably as it reads «SYP».
-   * So an order records where it went without anyone typing an address at eleven at night.
+   * Tesseract reads the header's Arabic WORDS; the day NUMBER is Arabic-Indic, so it is read off
+   * the pixels — the span between the month word and the weekday word, against the clock-font
+   * templates. A row's date is the nearest header ABOVE it; rows above the first header belong to
+   * a newer day whose header scrolled off-screen, and get no date rather than a guessed one.
    */
-  const routeAt = (index: number): { pointA: string | null; pointB: string | null } => {
-    const from = anchors[index]!.y1
-    // Everything down to the NEXT order's row belongs to this one.
-    const to = anchors[index + 1]?.y0 ?? Infinity
-    const label = (marker: string): string | null => {
-      for (const line of result.lines) {
-        if (line.y0 < from || line.y0 >= to) continue
-        const words = line.words.filter((w) => w.text.trim() !== '')
-        const at = words.findIndex((w) => w.text.trim() === marker)
-        if (at === -1) continue
-        // The badge sits at the START of the line in reading order; on this RTL screen that is its
-        // right-hand end, so the place is whichever side has words on it.
-        const before = words.slice(0, at)
-        const after = words.slice(at + 1)
-        const text = (before.length >= after.length ? before : after).map((w) => w.text).join(' ').trim()
-        if (text !== '') return text.slice(0, 120)
-      }
-      return null
-    }
-    return { pointA: label('A'), pointB: label('B') }
+  const headers = headerDatesIn(result.lines, new Date().getFullYear(), new Date(), (box) =>
+    readDigitRun(mask, box, clockTemplates, DAY_ALPHABET),
+  )
+  const dateFor = (a: { y0: number }): string | null => {
+    let seen: string | null = null
+    for (const h of headers) if (h.y0 < a.y0 && h.dateIso !== null) seen = h.dateIso
+    return seen
   }
-  const routes = anchors.map((_, i) => routeAt(i))
-  const amounts = anchors.map((a) => {
-    // «SYP»'s own cap height IS the font size, handed over for free — the band and the reach to
-    // the left are both measured in it, so the same numbers work at any screenshot resolution.
-    const unit = a.y1 - a.y0
-    const pad = Math.round(unit * 0.45)
-    return readGlyphRow(
-      mask,
-      {
-        x0: Math.max(0, a.x0 - Math.round(unit * 12)),
-        y0: Math.max(0, a.y0 - pad),
-        x1: a.x0 - 4,
-        y1: Math.min(prepared.height, a.y1 + pad),
-      },
-      templates,
-    )
-  })
-  return { amounts, clocks, routes, rows: anchors.length, text: result.text }
+
+  const routes = routesFor(result.lines, anchors)
+  const amounts = anchors.map((a) => readGlyphRow(mask, amountBoxFor(a, prepared.height), templates))
+  return {
+    amounts,
+    // A clock that carried its own date (the log's «MM/DD») keeps it; the orders screen prints no
+    // date per row, so the day comes from the header the row sits under.
+    clocks: clocks.map((c, i) => ({ time: c.time, dateIso: c.dateIso ?? dateFor(anchors[i]!) })),
+    routes,
+    rows: anchors.length,
+    text: result.text,
+  }
 }
 
 /** Read the whole order list off a «Recent orders» / «الطلبات الحديثة» screenshot. */
@@ -862,19 +1075,31 @@ export async function readOrders(image: Blob | Uint8Array, timeoutMs = ORDERS_TI
     // build produces confident nonsense. Whichever script is on screen, the cheap correct reader
     // is tried before the specialised one, and `readIsCoherent` decides whether it succeeded.
     let best: OcrOrder[] = []
+    let bestLines: OcrLine[] = []
     for (const invert of [false, true]) {
       const prepared = await prepareForOcr(toBlob(image), invert)
       // No whitelist (Arabic addresses, «SYP», colons, digits all matter); a list is a uniform block.
       const result = await recognize(prepared, { whitelist: '', psm: 6 }, timeoutMs)
       if (result.text.length > text.length) text = result.text
       const orders = parseOrders(result.text, new Date().getFullYear())
-      if (orders.length > best.length) best = orders
+      if (orders.length > best.length) {
+        best = orders
+        bestLines = result.lines
+      }
       if (best.length > 0 && !invert) break // the usual case: the first pass read it
     }
     // Not merely "did anything parse" — did enough of the page parse to be believed. See
     // `readIsCoherent`: on the Arabic-Indic screens the models transliterate the digits, and a
     // handful of rows surviving that is luck, not a read.
     if (best.length > 0 && readIsCoherent(text, best.length)) {
+      // The text gave the fees, times and dates; the line GEOMETRY gives the routes. Zipped by
+      // index only when the anchor count matches the parsed rows — a mismatched page keeps its
+      // fees and simply goes without routes, rather than pinning them to the wrong orders.
+      const anchors = anchorsIn(bestLines)
+      if (anchors.length === best.length) {
+        const routes = routesFor(bestLines, anchors)
+        best = best.map((o, i) => ({ ...o, pointA: routes[i]?.pointA ?? null, pointB: routes[i]?.pointB ?? null }))
+      }
       return { ok: true, reading: { orders: best }, fieldsFound: best.length, ms: now() - started, text }
     }
 

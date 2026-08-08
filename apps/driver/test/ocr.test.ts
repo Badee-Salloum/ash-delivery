@@ -10,6 +10,9 @@ import {
   parseWallet,
   profileById,
   readIsCoherent,
+  routesFor,
+  headerDatesIn,
+  isHeaderLine,
 } from '../src/ocr.ts'
 
 /**
@@ -716,5 +719,133 @@ describe('the Yallago «Recent orders» list (SRS D-1)', () => {
     expect(parseOrders('Recent orders\nno amounts here at all', 2026)).toEqual([])
     // a stray time with no fee produces no order
     expect(parseOrders('12:30 just a time, no SYP', 2026)).toEqual([])
+  })
+})
+
+/**
+ * The route: where an order started and where it ended.
+ *
+ * The layout does the splitting, not the badge letters. On the real phone Tesseract almost never
+ * emits a standalone «A» or «B» — the earlier reader demanded exactly that, so every order came
+ * back with no route at all. A card is the lines below its price row; the last one is B and
+ * whatever precedes it is A, however many lines the address wrapped onto.
+ */
+describe('reading the route off the layout', () => {
+  const line = (text: string, y0: number, words?: string[]): OcrLine => ({
+    text,
+    y0,
+    y1: y0 + 20,
+    words: (words ?? text.split(' ')).map((w, i) => ({ text: w, x0: i * 40, x1: i * 40 + 35, y0, y1: y0 + 20 })),
+  })
+  const anchor = (y0: number) => ({ x0: 10, x1: 60, y0, y1: y0 + 20 })
+
+  it('takes the last line as B and everything above it as A', () => {
+    const routes = routesFor(
+      [line('مأكولات الشام شارع بغداد', 130), line('موقف السادات', 160), line('الحارة الجديدة', 190)],
+      [anchor(100)],
+    )
+    expect(routes[0]!.pointA).toBe('مأكولات الشام شارع بغداد موقف السادات')
+    expect(routes[0]!.pointB).toBe('الحارة الجديدة')
+  })
+
+  it('honours a «B» badge Tesseract DID read, wherever it falls', () => {
+    const routes = routesFor(
+      [line('صيدلية سلمى', 130), line('B المدخل جامع الرحمن', 160), line('الوليد بن عبد الملك', 190)],
+      [anchor(100)],
+    )
+    expect(routes[0]!.pointA).toBe('صيدلية سلمى')
+    expect(routes[0]!.pointB).toBe('المدخل جامع الرحمن الوليد بن عبد الملك')
+  })
+
+  it('stops at the next order — a card never borrows the one below it', () => {
+    const routes = routesFor([line('مطعم أول', 130), line('وجهة أولى', 160), line('مطعم ثانٍ', 320)], [anchor(100), anchor(290)])
+    expect(routes[0]!.pointA).toBe('مطعم أول')
+    expect(routes[0]!.pointB).toBe('وجهة أولى')
+  })
+
+  it('stops at a CANCELLED card standing between two orders', () => {
+    // «تم إلغاؤه» carries no «SYP», so it has no anchor of its own and sits inside the previous
+    // order's band. Left in, another delivery's addresses become this order's route.
+    const routes = routesFor(
+      [line('عالم الدجاج', 130), line('جادة عارف الشهابي', 160), line('تم إلغاؤه', 190), line('كراج البولمان', 220)],
+      [anchor(100)],
+    )
+    expect(routes[0]!.pointA).toBe('عالم الدجاج')
+    expect(routes[0]!.pointB).toBe('جادة عارف الشهابي')
+  })
+
+  it('stops at a day header standing between two orders', () => {
+    const routes = routesFor([line('مطعم', 130), line('وجهة', 160), line('الأربعاء, ٥ أغسطس', 190), line('مطعم آخر', 220)], [anchor(100)])
+    expect(routes[0]!.pointB).toBe('وجهة')
+  })
+
+  it('stops at a wide gap — the page chrome below the last card is not a dropoff', () => {
+    const routes = routesFor([line('مطعم', 130), line('وجهة', 160), line('١٢:٣٤ ⌂ ≡', 900)], [anchor(100)])
+    expect(routes[0]!.pointB).toBe('وجهة')
+  })
+
+  it('gives a card cut off by the screen edge its A and no B', () => {
+    expect(routesFor([line('Abou Roummaneh', 130)], [anchor(100)])[0]).toEqual({ pointA: 'Abou Roummaneh', pointB: null })
+  })
+
+  it('reports null rather than empty when the card is not on the page at all', () => {
+    expect(routesFor([], [anchor(100)])[0]).toEqual({ pointA: null, pointB: null })
+  })
+})
+
+/**
+ * The day header, and the weekday that has to agree with it.
+ *
+ * The day NUMBER is Arabic-Indic, so Tesseract garbles it and it is read off the pixels instead —
+ * which means it needs a checksum, and the line supplies one. Measured without it, a «٦» whose
+ * hook printed faintly was accepted as «1» and five orders were filed on the 1st.
+ */
+describe('reading the day a group of orders belongs to', () => {
+  const header = (text: string, y0 = 100): OcrLine => ({
+    text,
+    y0,
+    y1: y0 + 20,
+    // RTL: the weekday is rightmost, the month leftmost, the day between them.
+    words: [
+      { text: 'الخميس,', x0: 200, x1: 260, y0, y1: y0 + 20 },
+      { text: '؟', x0: 170, x1: 180, y0, y1: y0 + 20 },
+      { text: 'أغسطس', x0: 100, x1: 160, y0, y1: y0 + 20 },
+    ],
+  })
+  const AUG_2026 = new Date('2026-08-20T12:00:00')
+
+  it('reads the day off the pixels when the weekday agrees', () => {
+    // Tesseract renders the Arabic-Indic «٦» as «؟» — the day is unreadable in the TEXT, which is
+    // the whole reason it is cut out of the pixels. 6 August 2026 is a Thursday, so it stands.
+    expect(headerDatesIn([header('الخميس, ؟أغسطس')], 2026, AUG_2026, () => '6')[0]!.dateIso).toBe('2026-08-06')
+  })
+
+  it('REFUSES a day the weekday contradicts', () => {
+    // 1 August 2026 is a Saturday, not a Thursday — exactly the misread that shipped.
+    expect(headerDatesIn([header('الخميس, ؟أغسطس')], 2026, AUG_2026, () => '1')[0]!.dateIso).toBe(null)
+  })
+
+  it('refuses when no day could be read, but still reports the header as a CUT', () => {
+    const out = headerDatesIn([header('الخميس, ؟أغسطس')], 2026, AUG_2026, () => null)
+    expect(out).toHaveLength(1)
+    expect(out[0]!.dateIso).toBe(null)
+  })
+
+  it('reads an English header from its text, no pixels needed', () => {
+    const line: OcrLine = { text: 'Thursday, August 6', y0: 100, y1: 120, words: [] }
+    expect(headerDatesIn([line], 2026, AUG_2026, () => null)[0]!.dateIso).toBe('2026-08-06')
+  })
+
+  it('rolls back a year when the weekday says so — a January screenshot showing «٣١ ديسمبر»', () => {
+    const line: OcrLine = { text: 'Wednesday, December 31', y0: 100, y1: 120, words: [] }
+    // 31 Dec 2025 was a Wednesday; 31 Dec 2026 is a Thursday.
+    expect(headerDatesIn([line], 2026, new Date('2026-01-02T12:00:00'), () => null)[0]!.dateIso).toBe('2025-12-31')
+  })
+
+  it('is not fooled by «اب» hiding inside an ordinary word', () => {
+    // August's short form is a substring of half the Arabic language. Matching on substrings made
+    // «مقابل مشفى العين» a date header, and the cut beheaded the route under it.
+    expect(isHeaderLine('بروستد القصور ماكس, مقابل مشفى العين')).toBe(false)
+    expect(isHeaderLine('الثلاثاء, ٤ أغسطس')).toBe(true)
   })
 })

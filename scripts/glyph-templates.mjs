@@ -21,39 +21,89 @@ for (const s of data.samples) {
   byLabel.get(s.label).push(s)
 }
 
-/** Build one averaged template per class from whichever samples the caller chose. */
+/** Fraction of grid cells on which two samples disagree. */
+function bitDistance(a, b) {
+  let d = 0
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) d++
+  return d / a.length
+}
+
+/**
+ * Split a class's samples into up to `MAX_SUBS` clusters of genuinely similar renderings.
+ *
+ * ONE averaged prototype per class was measurably too few: the same digit is printed at three
+ * display scales now, and averaging «٣»'s two top humps across scales blurred it toward «٢» —
+ * every remaining refusal was that pair at a margin the blur itself had eaten. Greedy
+ * agglomerative merging (closest pair first) keeps each scale's rendering sharp; the classifier
+ * simply meets more than one «٣» and matches whichever this screen prints.
+ */
+const MAX_SUBS = 3
+
+function clusterSamples(group) {
+  let clusters = group.map((s) => [s])
+  const meanBits = (c) => {
+    const acc = new Float64Array(data.gw * data.gh)
+    for (const s of c) for (let i = 0; i < acc.length; i++) acc[i] += s.bits[i]
+    return Array.from(acc, (v) => (v / c.length >= 0.5 ? 1 : 0))
+  }
+  while (clusters.length > MAX_SUBS) {
+    let bi = 0
+    let bj = 1
+    let bd = Infinity
+    const means = clusters.map(meanBits)
+    for (let i = 0; i < clusters.length; i++)
+      for (let j = i + 1; j < clusters.length; j++) {
+        const d = bitDistance(means[i], means[j])
+        if (d < bd) {
+          bd = d
+          bi = i
+          bj = j
+        }
+      }
+    clusters[bi] = [...clusters[bi], ...clusters[bj]]
+    clusters.splice(bj, 1)
+  }
+  // A cluster of one sample is a single sighting, not a rendering — it may be noise. Keep it only
+  // when the class is thin overall (better one real sighting than no template at all).
+  const solid = clusters.filter((c) => c.length >= 2)
+  return solid.length > 0 ? solid : clusters
+}
+
+/** Build up to MAX_SUBS averaged templates per class from whichever samples the caller chose. */
 function buildRows(pick) {
   const rows = []
   for (const [label, all] of [...byLabel.entries()].sort()) {
     const group = pick(all)
     if (group.length === 0) continue
-    const acc = new Float64Array(data.gw * data.gh)
-    let aspect = 0
-    let relH = 0
-    let relY = 0
-    for (const s of group) {
-      for (let i = 0; i < acc.length; i++) acc[i] += s.bits[i]
-      aspect += s.aspect
-      relH += s.relH
-      relY += s.relY
+    for (const cluster of clusterSamples(group)) {
+      const acc = new Float64Array(data.gw * data.gh)
+      let aspect = 0
+      let relH = 0
+      let relY = 0
+      for (const s of cluster) {
+        for (let i = 0; i < acc.length; i++) acc[i] += s.bits[i]
+        aspect += s.aspect
+        relH += s.relH
+        relY += s.relY
+      }
+      const n = cluster.length
+      let hex = ''
+      for (let i = 0; i < acc.length; i += 4) {
+        let nibble = 0
+        for (let b = 0; b < 4; b++) if ((acc[i + b] ?? 0) / n >= 0.5) nibble |= 1 << (3 - b)
+        hex += nibble.toString(16)
+      }
+      rows.push({
+        label,
+        n,
+        distinct: new Set(cluster.map((s) => s.bits.join(''))).size,
+        fonts: [...new Set(cluster.map((s) => s.font))].sort().join('+'),
+        hex,
+        aspect: +(aspect / n).toFixed(4),
+        relH: +(relH / n).toFixed(4),
+        relY: +(relY / n).toFixed(4),
+      })
     }
-    const n = group.length
-    let hex = ''
-    for (let i = 0; i < acc.length; i += 4) {
-      let nibble = 0
-      for (let b = 0; b < 4; b++) if ((acc[i + b] ?? 0) / n >= 0.5) nibble |= 1 << (3 - b)
-      hex += nibble.toString(16)
-    }
-    rows.push({
-      label,
-      n,
-      distinct: new Set(group.map((s) => s.bits.join(''))).size,
-      fonts: [...new Set(group.map((s) => s.font))].sort().join('+'),
-      hex,
-      aspect: +(aspect / n).toFixed(4),
-      relH: +(relH / n).toFixed(4),
-      relY: +(relY / n).toFixed(4),
-    })
   }
   return rows
 }

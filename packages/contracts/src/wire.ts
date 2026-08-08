@@ -143,6 +143,8 @@ export const closeFiguresRequest = z.object({
 
 /** «HH:MM» as read off a screenshot. `''` on a movement means the clock was not legible. */
 const minuteSchema = z.string().regex(/^[0-2]\d:[0-5]\d$/)
+/** «YYYY-MM-DD», the day PRINTED on the screen — already local, never converted. */
+const isoDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
 
 const movementRole = z.enum(['yalago_cut', 'order_credit', 'unmatched'])
 
@@ -166,6 +168,8 @@ export const operationsRequest = z.object({
         included: z.boolean().default(true),
         walletAmount: moneySchema.nullable().default(null),
         occurredMinute: minuteSchema.nullable().default(null),
+        // The day the SCREEN says, which is not always the shift's day: the list scrolls back.
+        occurredDate: isoDateSchema.nullable().default(null),
         /**
          * Where it went: «A» the pickup, «B» the dropoff.
          *

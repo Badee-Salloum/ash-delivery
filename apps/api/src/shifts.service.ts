@@ -807,6 +807,7 @@ export async function addOrder(
     included: input.included ?? true,
     walletAmount: input.walletAmount ?? null,
     occurredMinute: input.occurredMinute ?? null,
+    occurredDate: null,
   }
   try {
     await deps.orders.create(order)
@@ -898,6 +899,7 @@ export async function addManualOrder(
     included: true,
     walletAmount: input.walletAmount ?? null,
     occurredMinute: input.occurredMinute ?? null,
+    occurredDate: null,
   }
   try {
     await deps.orders.create(order)
@@ -1082,6 +1084,7 @@ export interface OperationsInput {
     included?: boolean
     walletAmount?: Minor | null
     occurredMinute?: string | null
+    occurredDate?: string | null
     pointA?: string | null
     pointB?: string | null
   }[]
@@ -1142,7 +1145,18 @@ export async function submitOperations(
         included: row.included ?? current.included,
         walletAmount: row.walletAmount ?? null,
         occurredMinute: row.occurredMinute ?? current.occurredMinute,
+        occurredDate: row.occurredDate ?? current.occurredDate,
       })
+      // BACKFILL the route, never overwrite it. An order submitted before the reader could read
+      // routes has none stored, and re-submitting the shift is the only chance it will ever get
+      // one; but a route already on the record may have been corrected by a manager, and a
+      // re-read screenshot must not undo that.
+      if ((row.pointA || row.pointB) && current.points.length === 0) {
+        await deps.orders.replacePoints(current.id, [
+          ...(row.pointA ? [{ role: 'start' as const, label: row.pointA, lat: null, lng: null }] : []),
+          ...(row.pointB ? [{ role: 'end' as const, label: row.pointB, lat: null, lng: null }] : []),
+        ])
+      }
       continue
     }
     // The dashboard list scrolls back through PREVIOUS DAYS, so reading further pulls in orders
@@ -1183,6 +1197,7 @@ export async function submitOperations(
       included: row.included ?? true,
       walletAmount: row.walletAmount ?? null,
       occurredMinute: row.occurredMinute ?? null,
+      occurredDate: row.occurredDate ?? null,
     })
   }
 

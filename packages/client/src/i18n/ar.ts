@@ -203,9 +203,12 @@ export const ar = {
     /** Both «الطلبات الحديثة» و«سجل المدفوعات» scroll: one screenshot rarely holds a whole day. */
     addPage: 'صورة أخرى',
     /** «٠ عملية» is a real answer — the page had nothing new — and not the same as a failed read. */
+    /** Arabic counts ONE differently from many; «1 صفوف» reads as broken software. */
+    readAddedOne: 'أُضيفت عملية واحدة من هذه الصورة',
     readAdded: 'أُضيفت {n} عملية من هذه الصورة',
     readUnread: 'تعذّرت قراءة هذه الصورة — أدخِل العمليات يدوياً',
     /** Rows the reader saw but would not vouch for. Silence here hides a short day. */
+    readRefusedOne: 'صف واحد لم يُقرأ بثقة — أدخِله يدوياً',
     readRefused: '{n} صفوف لم تُقرأ بثقة — أدخِلها يدوياً',
     retakeRequested: 'طلب المدير إعادة التصوير',
     closeRejected: 'رفض المدير إنهاء النوبة',
@@ -249,6 +252,8 @@ export const ar = {
 orderNo: 'رقم الطلب',
     /** A row the driver added himself: no screenshot, so no clock and no route to show. */
     manualRow: 'طلب مُضاف يدوياً',
+    /** The row's own date is not the shift's day — the list scrolls back through previous days. */
+    otherDay: 'يوم آخر',
     fee: 'الأجرة',
     payMode: 'نمط الدفع',
     addRow: 'إضافة طلب',

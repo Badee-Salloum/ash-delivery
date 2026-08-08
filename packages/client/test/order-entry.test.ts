@@ -331,3 +331,33 @@ describe('re-submitting the list after stepping back', () => {
     expect(unsentOrders(orders)).toHaveLength(2)
   })
 })
+
+/**
+ * The DAY belongs in the merge key.
+ *
+ * «الطلبات الحديثة» scrolls back through previous days, so one screenshot routinely shows two of
+ * them — and a delivery repeats its fee and its minute across days far more often than within one.
+ */
+describe('merging across days', () => {
+  let n = 0
+  const id = (): string => `day-${++n}`
+  const on = (dateIso: string, time: string, fee: string) => ({ dateIso, time, fee })
+
+  it(`keeps yesterday's 13:10 apart from today's`, () => {
+    const both = mergeScannedOrders([], [on('2026-08-06', '13:10', '120'), on('2026-08-05', '13:10', '120')], id)
+    expect(both).toHaveLength(2)
+    expect(both.map((o) => o.dateText)).toEqual(['2026-08-06', '2026-08-05'])
+  })
+
+  it('still treats a genuine overlap as one row', () => {
+    const first = mergeScannedOrders([], [on('2026-08-06', '13:10', '120')], id)
+    expect(mergeScannedOrders(first, [on('2026-08-06', '13:10', '120')], id)).toEqual([])
+  })
+
+  it('does not merge a dated row into an undated one', () => {
+    // A page whose header scrolled off gives no date. It is a DIFFERENT observation from a row
+    // that has one, and collapsing them loses a delivery.
+    const undated = mergeScannedOrders([], [{ dateIso: null, time: '13:10', fee: '120' }], id)
+    expect(mergeScannedOrders(undated, [on('2026-08-06', '13:10', '120')], id)).toHaveLength(1)
+  })
+})

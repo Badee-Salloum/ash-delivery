@@ -753,6 +753,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           included: o.included,
           walletAmount: o.walletAmount === null ? null : serializeMoney(o.walletAmount),
           occurredMinute: o.occurredMinute,
+          // The DAY the screen said, which is not always the shift's day — the list scrolls back.
+          occurredDate: o.occurredDate,
         })),
         // «سجل المدفوعات» as read: what the wallet actually did, beside what the orders imply.
         movements: movements.map((m) => ({

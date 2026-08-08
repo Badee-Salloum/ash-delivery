@@ -328,6 +328,14 @@ export interface ShiftOrderRecord {
   walletAmount: Minor | null
   /** «HH:MM» off the dashboard — what a log row is paired to. `null` when the clock was illegible. */
   occurredMinute: string | null
+  /**
+   * The DAY the order screen says it happened («الخميس, ٦ أغسطس»), as `YYYY-MM-DD`.
+   *
+   * Not the shift's day: «الطلبات الحديثة» scrolls back through previous days, so a list read at
+   * close routinely contains yesterday's orders. `null` when no header was legible — the day
+   * number is Arabic-Indic and is only accepted when the weekday printed beside it agrees.
+   */
+  occurredDate: string | null
 }
 
 /** What a movement IS, which decides how BR1 may use it. See `WalletMovementRecord.role`. */
@@ -500,6 +508,15 @@ export interface OrderRepo {
    * a compensating order. Identity — the shift and the order number — is never changed here.
    */
   update(order: ShiftOrderRecord): Promise<void>
+  /**
+   * Replace an order's route — «A» the pickup, «B» the dropoff.
+   *
+   * Separate from `update` because the route is a child table, and because it is written under a
+   * different rule: `update` overwrites what a human may correct, while the route is BACKFILLED
+   * only onto orders that have none. An order stored before the reader could read routes is the
+   * case this exists for; a route a manager has already fixed must survive a re-read.
+   */
+  replacePoints(orderId: string, points: readonly OrderPointRecord[]): Promise<void>
   listByShift(shiftId: string): Promise<ShiftOrderRecord[]>
   findByProviderNo(providerOrderNo: string): Promise<ShiftOrderRecord | null>
   delete(id: string): Promise<void>

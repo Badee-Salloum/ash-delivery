@@ -122,8 +122,12 @@ export function maskFromPixels(rgba: Uint8ClampedArray | Uint8Array, width: numb
   return { data, width, height }
 }
 
-/** Ink pixels smaller than this are speckle — but «٠» is a 3×3 dot, so the floor stays low. */
-const MIN_PIXELS = 5
+/**
+ * Ink pixels smaller than this are speckle. It was 5, and 5 was measurably too high: at the
+ * dashboard's smallest scale a colon dot and «٠» carry only 3–4 ink pixels, so «6:06» segmented
+ * as four shapes and every such clock was refused. True speckle on these screens is 1–2 px.
+ */
+const MIN_PIXELS = 3
 
 /**
  * Connected components (8-neighbour) inside a box, ordered left to right.
@@ -339,34 +343,42 @@ export interface Reading {
   readonly margin: number
 }
 
-/** The nearest template, with the runner-up — the runner-up is what makes refusal possible. */
+/**
+ * The nearest template, with the runner-up — the runner-up is what makes refusal possible.
+ *
+ * A label may ship SEVERAL sub-templates now (one per rendering scale), so the runner-up is the
+ * nearest template of a DIFFERENT label. Two «٣»s standing close together is confirmation, not
+ * ambiguity — the margin question is always "how far is the nearest other ANSWER".
+ */
 export function nearestTemplate(f: GlyphFeatures, templates: readonly Template[]): Reading | null {
   if (templates.length === 0) return null
   const logAspect = Math.log(f.aspect)
-  let best: Template | null = null
-  let bestScore = Infinity
-  let secondLabel: string | null = null
-  let secondScore = Infinity
-  for (const t of templates) {
+  const scored = templates.map((t) => {
     let differing = 0
     for (let i = 0; i < t.bits.length; i++) if (f.bits[i] !== t.bits[i]) differing++
-    const score =
-      differing / (GW * GH) +
-      W_ASPECT * Math.abs(logAspect - t.logAspect) +
-      W_RELH * Math.abs(f.relH - t.relH) +
-      W_RELY * Math.abs(f.relY - t.relY)
-    if (score < bestScore) {
-      secondScore = bestScore
-      secondLabel = best?.label ?? null
-      bestScore = score
-      best = t
-    } else if (score < secondScore) {
-      secondScore = score
-      secondLabel = t.label
+    return {
+      t,
+      score:
+        differing / (GW * GH) +
+        W_ASPECT * Math.abs(logAspect - t.logAspect) +
+        W_RELH * Math.abs(f.relH - t.relH) +
+        W_RELY * Math.abs(f.relY - t.relY),
     }
-  }
+  })
+  let best: { t: Template; score: number } | null = null
+  for (const s of scored) if (!best || s.score < best.score) best = s
   if (!best) return null
-  return { label: best.label, score: bestScore, runnerUp: secondLabel, margin: secondScore - bestScore }
+  let second: { t: Template; score: number } | null = null
+  for (const s of scored) {
+    if (s.t.label === best.t.label) continue
+    if (!second || s.score < second.score) second = s
+  }
+  return {
+    label: best.t.label,
+    score: best.score,
+    runnerUp: second?.t.label ?? null,
+    margin: (second?.score ?? Infinity) - best.score,
+  }
 }
 
 /** The name of a glyph, or `null` — which means "type this one", never "here is my best guess". */
@@ -379,11 +391,70 @@ export function classifyGlyph(f: GlyphFeatures, templates: readonly Template[]):
 }
 
 /**
+ * Rejoin the pieces of a glyph that prints in vertically separated parts.
+ *
+ * In the smaller fonts the COLON's two dots are disjoint components, and no template matches half
+ * a colon — the row refused wholesale. Two components whose x-ranges overlap almost entirely are
+ * stacked pieces of one glyph, never neighbours: adjacent glyphs sit side by side and share no
+ * columns. The merged bits are re-sampled from the mask over the union box.
+ */
+export function mergeStacked(mask: Mask, comps: readonly Component[]): Component[] {
+  const out: Component[] = []
+  for (const c of [...comps].sort((a, b) => a.x0 - b.x0)) {
+    const prev = out[out.length - 1]
+    if (prev) {
+      const overlap = Math.min(prev.x1, c.x1) - Math.max(prev.x0, c.x0) + 1
+      const narrower = Math.min(prev.x1 - prev.x0, c.x1 - c.x0) + 1
+      // STACKED means one above the other: the y-ranges must be (nearly) disjoint. Without this,
+      // «م»'s tail sweeping under its neighbour merges two genuine glyphs into an unreadable one.
+      const yOverlap = Math.min(prev.y1, c.y1) - Math.max(prev.y0, c.y0) + 1
+      const shorter = Math.min(prev.y1 - prev.y0, c.y1 - c.y0) + 1
+      if (overlap >= narrower * 0.6 && yOverlap <= shorter * 0.3) {
+        const x0 = Math.min(prev.x0, c.x0)
+        const y0 = Math.min(prev.y0, c.y0)
+        const x1 = Math.max(prev.x1, c.x1)
+        const y1 = Math.max(prev.y1, c.y1)
+        out[out.length - 1] = { x0, y0, x1, y1, pixels: prev.pixels + c.pixels, bits: stretch(mask, x0, y0, x1, y1) }
+        continue
+      }
+    }
+    out.push(c)
+  }
+  return out
+}
+
+/**
+ * The column with the least ink in the middle of a suspiciously wide component — where two
+ * adjacent digits touched. Only meaningful on a component that already failed classification.
+ */
+function valleyColumn(mask: Mask, c: Component): number | null {
+  const w = c.x1 - c.x0 + 1
+  const from = c.x0 + Math.round(w * 0.3)
+  const to = c.x0 + Math.round(w * 0.7)
+  let bestX: number | null = null
+  let bestInk = Infinity
+  for (let x = from; x <= to; x++) {
+    let ink = 0
+    for (let y = c.y0; y <= c.y1; y++) ink += mask.data[y * mask.width + x] ?? 0
+    if (ink < bestInk) {
+      bestInk = ink
+      bestX = x
+    }
+  }
+  return bestX
+}
+
+/**
  * Every glyph in a box, read left to right — or `null` if ANY of them was refused.
  *
  * All or nothing per row, deliberately. Half an amount is not a smaller amount, it is a different
  * one: dropping a refused glyph from «١٦٥» yields «١٦», which is a plausible fee and wrong by an
  * order of magnitude. A row the reader will not vouch for entirely, it does not offer at all.
+ *
+ * A component the classifier REFUSES gets one more chance if it is wide enough to be two digits
+ * that touched — the small fonts merge adjacent minute digits routinely. It is split at its
+ * thinnest middle column and accepted only if EVERY resulting piece independently clears the full
+ * gates. A refusal can become a read this way; a read can never change, so zero-wrong holds.
  */
 export function readGlyphRow(
   mask: Mask,
@@ -392,16 +463,80 @@ export function readGlyphRow(
   alphabet: ReadonlySet<string> = AMOUNT_ALPHABET,
 ): string | null {
   const usable = templates.filter((t) => alphabet.has(t.label))
-  const comps = withoutRules(componentsIn(mask, box))
+  const comps = mergeStacked(mask, withoutRules(componentsIn(mask, box)))
   if (comps.length === 0) return null
   const group = groupMetrics(comps)
+
+  const readComponent = (c: Component, depth: number): string | null => {
+    const r = classifyGlyph(featuresOf(c, group), usable)
+    if (r) return r.label
+    if (depth >= 2) return null
+    const w = c.x1 - c.x0 + 1
+    const h = c.y1 - c.y0 + 1
+    if (w / h < 0.75) return null
+    const cut = valleyColumn(mask, c)
+    if (cut === null || cut <= c.x0 || cut >= c.x1) return null
+    let out = ''
+    for (const half of [
+      componentsIn(mask, { x0: c.x0, y0: c.y0, x1: cut, y1: c.y1 + 1 }),
+      componentsIn(mask, { x0: cut, y0: c.y0, x1: c.x1 + 1, y1: c.y1 + 1 }),
+    ]) {
+      if (half.length === 0) return null
+      for (const piece of half) {
+        const label = readComponent(piece, depth + 1)
+        if (label === null) return null
+        out += label
+      }
+    }
+    return out
+  }
+
   let out = ''
   for (const c of comps) {
-    const r = classifyGlyph(featuresOf(c, group), usable)
-    if (!r) return null
-    out += r.label
+    const label = readComponent(c, 0)
+    if (label === null) return null
+    out += label
   }
   return out
+}
+
+/**
+ * The one RUN of digits inside a box that also contains other ink — the day number of a date
+ * header, whose month word Tesseract may have glued to it.
+ *
+ * Every component is offered to the classifier; letters refuse (they are in no digit template)
+ * and thereby DELIMIT: the digits that read must form exactly one contiguous run of one or two,
+ * or nothing is offered. The caller must hold an independent checksum — for a date header, the
+ * weekday word — because a stray stroke reading as «١» beside a real digit shifts the day by
+ * tens, and the weekday is what catches it (a ±10·d day shift never lands on the same weekday).
+ */
+export function readDigitRun(
+  mask: Mask,
+  box: Box,
+  templates: readonly Template[],
+  alphabet: ReadonlySet<string>,
+): string | null {
+  const usable = templates.filter((t) => alphabet.has(t.label))
+  const comps = mergeStacked(mask, withoutRules(componentsIn(mask, box)))
+  if (comps.length === 0) return null
+  const group = groupMetrics(comps)
+  const runs: string[][] = []
+  let current: string[] | null = null
+  for (const c of comps) {
+    const r = classifyGlyph(featuresOf(c, group), usable)
+    if (r) {
+      if (current === null) {
+        current = []
+        runs.push(current)
+      }
+      current.push(r.label)
+    } else {
+      current = null
+    }
+  }
+  if (runs.length !== 1) return null
+  const run = runs[0]!
+  return run.length >= 1 && run.length <= 2 ? run.join('') : null
 }
 
 /**

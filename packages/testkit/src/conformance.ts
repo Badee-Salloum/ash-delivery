@@ -168,6 +168,7 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
             included: true,
             walletAmount: null,
             occurredMinute: null,
+            occurredDate: null,
           }
           await deps.orders.create(order)
           await expect(deps.orders.create({ ...order, id: 'o-2' })).rejects.toThrow()

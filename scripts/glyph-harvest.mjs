@@ -31,7 +31,7 @@ const { createWorker, OEM } = await from('tesseract.js')
 export const GW = 12
 export const GH = 16
 const INK = 170
-const MIN_PIXELS = 5
+const MIN_PIXELS = 3
 
 /**
  * The amounts, top to bottom, exactly as drawn — the thousands mark included.
@@ -43,6 +43,11 @@ const AMOUNTS = {
   'orders-0804-a.jpg': ['235', '210', '130', '135', '170'],
   'orders-0804-b.jpg': ['260', '135', '120', '235'],
   'orders-0804-c.jpg': ['120', '235', '120'],
+  // Folder 4: the same Yallago face at two other display scales. The features are scale-free, so
+  // these pool with the 0804 samples — and they are rich in «٢» and «٣», the pair whose thin
+  // margin causes every refusal the reader currently makes.
+  'orders-0806-lg.jpg': ['170', '130', '330', '525', '135'],
+  'orders-0807-sm.jpg': ['275', '345', '165', '300'],
 }
 
 /**
@@ -84,6 +89,8 @@ const TIME_CLUSTERS = {
   'orders-0804-a.jpg': [['م', '6:06'], ['م', '5:42'], ['م', '5:22'], ['م', '5:07'], ['م', '4:50']],
   'orders-0804-b.jpg': [['م', '4:16'], ['م', '3:51'], ['م', '3:19'], ['م', '1:39']],
   'orders-0804-c.jpg': [['م', '3:19'], ['م', '1:39'], ['م', '1:10']],
+  'orders-0806-lg.jpg': [['م', '1:55'], ['م', '1:36'], ['م', '12:56'], ['م', '12:22'], ['ص', '11:14']],
+  'orders-0807-sm.jpg': [['م', '1:57'], ['م', '12:59'], ['م', '12:21'], ['ص', '11:53']],
 }
 
 const worker = await createWorker(['eng'], OEM.LSTM_ONLY, { langPath: join(driver, 'public', 'tesseract'), gzip: true })
@@ -131,7 +138,35 @@ function componentsIn(grey, x0, y0, x1, y1) {
       if (n >= MIN_PIXELS) out.push({ minX, maxX, minY, maxY, ink, w })
     }
   }
-  return out.sort((a, b) => a.minX - b.minX)
+  return mergeStacked(out.sort((a, b) => a.minX - b.minX))
+}
+
+/**
+ * Rejoin stacked pieces of one glyph — the smaller fonts print the colon as two disjoint dots.
+ * Mirrors `mergeStacked` in apps/driver/src/glyphs.ts; `ink` spans the whole region, so the
+ * widened bounding box samples both pieces without any copying.
+ */
+function mergeStacked(comps) {
+  const out = []
+  for (const c of comps) {
+    const prev = out[out.length - 1]
+    if (prev) {
+      const overlap = Math.min(prev.maxX, c.maxX) - Math.max(prev.minX, c.minX) + 1
+      const narrower = Math.min(prev.maxX - prev.minX, c.maxX - c.minX) + 1
+      // Stacked means vertically disjoint — «م»'s tail under a digit must NOT merge them.
+      const yOverlap = Math.min(prev.maxY, c.maxY) - Math.max(prev.minY, c.minY) + 1
+      const shorter = Math.min(prev.maxY - prev.minY, c.maxY - c.minY) + 1
+      if (overlap >= narrower * 0.6 && yOverlap <= shorter * 0.3) {
+        prev.minX = Math.min(prev.minX, c.minX)
+        prev.maxX = Math.max(prev.maxX, c.maxX)
+        prev.minY = Math.min(prev.minY, c.minY)
+        prev.maxY = Math.max(prev.maxY, c.maxY)
+        continue
+      }
+    }
+    out.push(c)
+  }
+  return out
 }
 
 /**

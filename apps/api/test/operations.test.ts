@@ -447,3 +447,92 @@ describe('an order the customer paid partly in cash', () => {
     expect(order.occurredMinute).toBe('18:06')
   })
 })
+
+/**
+ * The route and the day an order carries — what identifies it, now that nothing invents a number.
+ *
+ * «الطلبات الحديثة» prints no order number. It prints a fee, two places and a clock, under a day
+ * header. All four are read from the screenshot and all four are stored; the wire key is a UUID
+ * nobody reads. These tests pin the two that can go wrong SILENTLY.
+ */
+describe('what a scanned order records', () => {
+  it('stores the route as the order\u2019s points and the day the screen said', async () => {
+    const { id, driver } = await openWithOrders(0)
+    const r = await put(driver, `/shifts/${id}/operations`, {
+      orders: [
+        {
+          providerOrderNo: 'YAL-route-1',
+          payMode: 'cash',
+          fee: sypStr(5_000),
+          occurredMinute: '15:19',
+          occurredDate: '2026-08-06',
+          pointA: 'صيدلية سلمى الوليد بن عبد الملك',
+          pointB: 'المدخل جامع الرحمن',
+        },
+      ],
+      movements: [],
+    })
+    expect(r.statusCode, r.body).toBe(200)
+    const stored = (await h.deps.orders.listByShift(id)).find((o) => o.providerOrderNo === 'YAL-route-1')!
+    expect(stored.occurredDate).toBe('2026-08-06')
+    expect(stored.points.map((p) => [p.role, p.label])).toEqual([
+      ['start', 'صيدلية سلمى الوليد بن عبد الملك'],
+      ['end', 'المدخل جامع الرحمن'],
+    ])
+  })
+
+  it('BACKFILLS a route onto an order stored without one', async () => {
+    // Every order recorded before the reader could read routes has none, and re-submitting the
+    // shift is the only chance it will ever get one. Without this the UPDATE path dropped
+    // pointA/pointB on the floor and a fixed reader could never repair a single old row.
+    const { id, driver } = await openWithOrders(0)
+    const send = async (points: Record<string, unknown>): Promise<LightMyRequestResponse> =>
+      await put(driver, `/shifts/${id}/operations`, {
+        orders: [{ providerOrderNo: 'YAL-backfill', payMode: 'cash', fee: sypStr(5_000), ...points }],
+        movements: [],
+      })
+    await send({})
+    expect((await h.deps.orders.listByShift(id))[0]!.points).toEqual([])
+
+    await send({ pointA: 'مطعم الربيع', pointB: 'الشيخ سعد' })
+    expect((await h.deps.orders.listByShift(id))[0]!.points.map((p) => p.label)).toEqual(['مطعم الربيع', 'الشيخ سعد'])
+  })
+
+  it('never OVERWRITES a route already stored — a manager\u2019s correction survives a re-read', async () => {
+    const { id, driver } = await openWithOrders(0)
+    const send = async (points: Record<string, unknown>): Promise<LightMyRequestResponse> =>
+      await put(driver, `/shifts/${id}/operations`, {
+        orders: [{ providerOrderNo: 'YAL-keep', payMode: 'cash', fee: sypStr(5_000), ...points }],
+        movements: [],
+      })
+    await send({ pointA: 'المكان الصحيح', pointB: 'الوجهة الصحيحة' })
+    await send({ pointA: 'قراءة مشوّشة', pointB: 'قراءة مشوّشة' })
+    expect((await h.deps.orders.listByShift(id))[0]!.points.map((p) => p.label)).toEqual([
+      'المكان الصحيح',
+      'الوجهة الصحيحة',
+    ])
+  })
+
+  it('shows the day and the route on the review, where the manager decides', async () => {
+    const { id, driver, manager } = await openWithOrders(0)
+    await put(driver, `/shifts/${id}/operations`, {
+      orders: [
+        {
+          providerOrderNo: 'YAL-review',
+          payMode: 'cash',
+          fee: sypStr(5_000),
+          occurredMinute: '13:10',
+          occurredDate: '2026-08-05',
+          pointA: 'عمر الخيام',
+          pointB: 'الشيخ سعد',
+        },
+      ],
+      movements: [],
+    })
+    const view = (await get(manager, `/shifts/${id}/review`)).json() as {
+      orders: Array<{ occurredDate: string | null; points: Array<{ role: string; label: string }> }>
+    }
+    expect(view.orders[0]!.occurredDate).toBe('2026-08-05')
+    expect(view.orders[0]!.points.map((p) => p.label)).toEqual(['عمر الخيام', 'الشيخ سعد'])
+  })
+})

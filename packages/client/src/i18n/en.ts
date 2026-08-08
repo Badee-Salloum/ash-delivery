@@ -202,9 +202,12 @@ export const en: Catalog = {
     /** Both the orders list and the payments log scroll: one screenshot rarely holds a whole day. */
     addPage: 'Another image',
     /** «0 operations» is a real answer — the page had nothing new — not the same as a failed read. */
+    /** Arabic counts ONE differently from many; «1 صفوف» reads as broken software. */
+    readAddedOne: 'Added 1 operation from this image',
     readAdded: '{n} operations added from this image',
     readUnread: 'This image could not be read — enter the operations by hand',
     /** Rows the reader saw but would not vouch for. Silence here hides a short day. */
+    readRefusedOne: '1 row was not read confidently — enter it by hand',
     readRefused: '{n} rows were not read confidently — enter them by hand',
     retakeRequested: 'The manager requested a re-shoot',
     closeRejected: 'The manager rejected the close',
@@ -248,6 +251,8 @@ export const en: Catalog = {
 orderNo: 'Order no.',
     /** A row the driver added himself: no screenshot, so no clock and no route to show. */
     manualRow: 'Added by hand',
+    /** The row's own date is not the shift's day — the list scrolls back through previous days. */
+    otherDay: 'Another day',
     fee: 'Fee',
     payMode: 'Payment mode',
     addRow: 'Add order',

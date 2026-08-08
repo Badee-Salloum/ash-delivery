@@ -46,6 +46,8 @@ interface ShiftState {
   id: string
   floatText: string
   topupText: string
+  /** The shift's own day — what a scanned row's date is compared against. */
+  businessDate: string
 }
 
 /** What the payments-log reader made of «سجل المدفوعات», said out loud rather than left silent. */
@@ -157,7 +159,12 @@ export function ShiftFlow({
     void api
       .shiftState(resume.id)
       .then((st) => {
-        setShift({ id: st.id, floatText: st.startPackage.floatTotal, topupText: st.startPackage.topupTotal })
+        setShift({
+          id: st.id,
+          floatText: st.startPackage.floatTotal,
+          topupText: st.startPackage.topupTotal,
+          businessDate: st.businessDate,
+        })
         // The operations already stored come back INTO the draft, checkboxes and all. They are
         // editable now: the submit upserts, so correcting a sent row is a correction rather than
         // the 409 it used to be.
@@ -174,6 +181,7 @@ export function ShiftFlow({
             included: o.included,
             walletAmountText: o.walletAmount ?? '',
             timeText: o.occurredMinute ?? '',
+            dateText: o.occurredDate ?? '',
             // «A» و«B» come back from the stored route, so a resumed shift still shows where each
             // order went — the only thing on the row a person can recognise.
             pointA: o.points?.find((p) => p.role === 'start')?.label ?? null,
@@ -222,7 +230,7 @@ export function ShiftFlow({
         onDiscarded={onDiscarded}
         awaiting={phase === 'awaiting'}
         onOpened={(id) => {
-          setShift({ id, floatText: '0', topupText: '0' })
+          setShift({ id, floatText: '0', topupText: '0', businessDate: '' })
           setPhase('awaiting')
         }}
         onApproved={(funds) => {
@@ -650,6 +658,7 @@ function EndPackage({
             included: o.included !== false,
             walletAmount: o.walletAmountText ? o.walletAmountText : null,
             occurredMinute: o.timeText ? o.timeText : null,
+            occurredDate: o.dateText ? o.dateText : null,
             pointA: o.pointA ?? null,
             pointB: o.pointB ?? null,
           })),
@@ -833,6 +842,7 @@ function EndPackage({
       <OperationsList
         orders={draft.orders}
         movements={draft.movements}
+        today={shift.businessDate}
         onOrders={(orders) => onDraft((d) => ({ ...d, orders }))}
         onMovements={(movements) => onDraft((d) => ({ ...d, movements }))}
       />

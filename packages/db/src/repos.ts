@@ -8,6 +8,7 @@ import type {
   OrderRepo,
   SessionRecord,
   SessionRepo,
+  OrderPointRecord,
   ShiftOrderRecord,
   UserRecord,
   UserRepo,
@@ -263,8 +264,8 @@ export class PgOrderRepo implements OrderRepo {
         await client.query(
           `INSERT INTO shift_orders (id, shift_id, provider_order_no, pay_mode, fee_minor, zone, driver_confirmed,
                                      source, fee_ocr_minor, kind, driver_share_minor, company_share_minor, notes, created_by,
-                                     included, wallet_amount_minor, occurred_minute)
-           VALUES ($1, $2, $3, $4::pay_mode, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+                                     included, wallet_amount_minor, occurred_minute, occurred_date)
+           VALUES ($1, $2, $3, $4::pay_mode, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
           [
             order.id,
             order.shiftId,
@@ -283,6 +284,7 @@ export class PgOrderRepo implements OrderRepo {
             order.included,
             order.walletAmount?.toString() ?? null,
             order.occurredMinute,
+            order.occurredDate,
           ],
         )
         for (const [i, point] of order.points.entries()) {
@@ -307,7 +309,8 @@ export class PgOrderRepo implements OrderRepo {
     await this.pool.query(
       `UPDATE shift_orders
           SET pay_mode = $2::pay_mode, fee_minor = $3, zone = $4, source = $5, fee_ocr_minor = $6,
-              notes = $7, included = $8, wallet_amount_minor = $9, occurred_minute = $10
+              notes = $7, included = $8, wallet_amount_minor = $9, occurred_minute = $10,
+              occurred_date = $11
         WHERE id = $1`,
       [
         order.id,
@@ -320,6 +323,7 @@ export class PgOrderRepo implements OrderRepo {
         order.included,
         order.walletAmount?.toString() ?? null,
         order.occurredMinute,
+        order.occurredDate,
       ],
     )
   }
@@ -336,6 +340,18 @@ export class PgOrderRepo implements OrderRepo {
       [providerOrderNo],
     )
     return rows[0] ? toOrder(rows[0]) : null
+  }
+  /** One transaction: an order must never be seen with half a route. */
+  async replacePoints(orderId: string, points: readonly OrderPointRecord[]): Promise<void> {
+    await withTransaction(this.pool, {}, async (client) => {
+      await client.query('DELETE FROM shift_order_points WHERE order_id = $1', [orderId])
+      for (const [i, point] of points.entries()) {
+        await client.query(
+          `INSERT INTO shift_order_points (order_id, seq, role, label, lat, lng) VALUES ($1,$2,$3,$4,$5,$6)`,
+          [orderId, i + 1, point.role, point.label, point.lat, point.lng],
+        )
+      }
+    })
   }
   async delete(id: string): Promise<void> {
     await this.pool.query('DELETE FROM shift_orders WHERE id = $1', [id])
@@ -354,6 +370,7 @@ const ORDER_COLUMNS = `
          o.driver_share_minor::text  AS driver_share,
          o.company_share_minor::text AS company_share,
          o.notes, o.created_by, o.included, o.wallet_amount_minor::text AS wallet_amount, o.occurred_minute,
+         to_char(o.occurred_date, 'YYYY-MM-DD') AS occurred_date,
          COALESCE(
            (SELECT json_agg(json_build_object('role', p.role, 'label', p.label, 'lat', p.lat, 'lng', p.lng)
                             ORDER BY p.seq)
@@ -385,6 +402,9 @@ const toOrder = (r: Record<string, unknown>): ShiftOrderRecord => ({
   walletAmount:
     r.wallet_amount === null || r.wallet_amount === undefined ? null : minor(BigInt(String(r.wallet_amount))),
   occurredMinute: (r.occurred_minute as string | null) ?? null,
+  // Formatted in SQL, never via the JS Date: a timezone conversion here moves a late-evening
+  // order to the next day, which is the whole failure this column exists to make visible.
+  occurredDate: (r.occurred_date as string | null) ?? null,
 })
 
 /**

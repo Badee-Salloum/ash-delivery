@@ -49,6 +49,8 @@ export interface ShiftStateView {
     /** What the payments log says reached the wallet. `null` = unmeasured, the pay mode decides. */
     walletAmount: string | null
     occurredMinute: string | null
+    /** «الخميس, ٦ أغسطس» — the day the SCREEN said, which is not always the shift's own day. */
+    occurredDate?: string | null
     /** «A» the pickup, «B» the dropoff — the order has no number, so this is how it is known. */
     points?: Array<{ role: string; label: string; lat: number | null; lng: number | null }>
   }>

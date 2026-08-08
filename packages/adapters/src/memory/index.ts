@@ -32,6 +32,7 @@ import type {
   ShiftDecisionRepo,
   GpsPingRecord,
   GpsPingRepo,
+  OrderPointRecord,
   ShiftOrderRecord,
   ShiftRecord,
   ShiftRepo,
@@ -319,7 +320,13 @@ export class MemoryOrderRepo implements OrderRepo {
       included: order.included,
       walletAmount: order.walletAmount,
       occurredMinute: order.occurredMinute,
+      occurredDate: order.occurredDate,
     })
+  }
+  async replacePoints(orderId: string, points: readonly OrderPointRecord[]): Promise<void> {
+    const existing = this.rows.get(orderId)
+    if (!existing) return
+    this.rows.set(orderId, { ...existing, points: points.map((p) => ({ ...p })) })
   }
   async listByShift(shiftId: string): Promise<ShiftOrderRecord[]> {
     return [...this.rows.values()].filter((o) => o.shiftId === shiftId)

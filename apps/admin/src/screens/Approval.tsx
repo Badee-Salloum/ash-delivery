@@ -63,6 +63,8 @@ interface Review {
     included?: boolean
     walletAmount?: string | null
     occurredMinute?: string | null
+    /** The day the SCREEN said — not always the shift's day, because the list scrolls back. */
+    occurredDate?: string | null
   }>
   /** «سجل المدفوعات» as read. Only the rows no order explains are a term in BR1. */
   movements: Array<{
