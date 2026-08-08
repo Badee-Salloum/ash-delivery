@@ -323,6 +323,35 @@ export async function prepareWithPixels(
 }
 
 /**
+ * Cut a horizontal band out of an already-prepared image, as its own PNG.
+ *
+ * For re-reading one card that the full-page pass lost. Given to `recognize` on its own the band
+ * is a small, simple picture, and the layout analyser is far more willing to find lines in it than
+ * in a dense two-language page — which is exactly the failure being repaired.
+ */
+async function bandBlob(
+  pixels: Uint8ClampedArray,
+  width: number,
+  y0: number,
+  y1: number,
+): Promise<Blob | null> {
+  if (typeof OffscreenCanvas !== 'function') return null
+  const top = Math.max(0, Math.floor(y0))
+  const height = Math.min(Math.ceil(y1), Math.floor(pixels.length / 4 / width)) - top
+  if (height <= 0) return null
+  try {
+    const canvas = new OffscreenCanvas(width, height)
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    const slice = new ImageData(pixels.slice(top * width * 4, (top + height) * width * 4), width, height)
+    ctx.putImageData(slice, 0, 0)
+    return await canvas.convertToBlob({ type: 'image/png' })
+  } catch {
+    return null
+  }
+}
+
+/**
  * Recognise with a profile, under a deadline that starts AFTER warm-up.
  *
  * The timeout rejects and clears its own timer. The abandoned `recognize` cannot be cancelled —
@@ -776,6 +805,29 @@ export const isHeaderLine = (text: string): boolean => monthOnLine(text) !== -1
 export const isCancelLine = (text: string): boolean => /الغا/.test(foldAr(text)) || /cancel/i.test(text)
 
 /**
+ * Is this token the «A»/«B» BADGE rather than part of the place name?
+ *
+ * The badges are coloured circles with a letter in them, and Tesseract renders them as whatever it
+ * feels like: «©», «@», «&», «CA]», «[A]», «EP», «(P». The reader used to strip only a bare «A» or
+ * «B», so every one of those survived and was glued onto the address — «صيدلية سلمى الوليد بن عبد
+ * الملك ©», «عمر الخيام[ CA».
+ *
+ * The test is what a badge CANNOT be: it carries no Arabic letter and at most two Latin ones, with
+ * punctuation around them ignored. That admits every rendering above and refuses every real label
+ * on the sample screens — «F8Q6», «P92», «G6W9», «Baghdad», «33.518726», «تشيلي» — because a real
+ * label is either Arabic or longer.
+ */
+export const isBadgeToken = (text: string): boolean => {
+  const t = text.trim()
+  if (t === '') return false
+  if (/[؀-ۿ]/.test(t)) return false
+  return /^[^\p{L}\p{N}]*[A-Za-z]{0,2}[^\p{L}\p{N}]*$/u.test(t)
+}
+
+/** A badge whose one legible letter is «B» — the dropoff, wherever the layout put it. */
+const isBadgeB = (text: string): boolean => isBadgeToken(text) && /^[^\p{L}]*[Bb][^\p{L}]*$/u.test(text.trim())
+
+/**
  * The «SYP» anchor words of a page.
  *
  * Two rules, each bought with a measured failure:
@@ -838,9 +890,13 @@ export function routesFor(
       first = false
       prevY1 = Math.max(prevY1, line.y1)
       const words = line.words.filter((w) => w.text.trim() !== '')
-      const hasB = words.some((w) => w.text.trim() === 'B')
+      const hasB = words.some((w) => isBadgeB(w.text))
+      // Stripped WHEREVER it lands, not just at the ends. The badge is supposed to sit at the
+      // line's right-hand edge, but on a mixed Arabic/Latin line the recogniser reorders freely
+      // and drops it in the middle — «Glass (P الصوفانية», «G6HF RVH,) المدخل». A one- or
+      // two-letter Latin token inside a Damascus address is never the address.
       const text = words
-        .filter((w) => !/^[ABab]$/.test(w.text.trim()))
+        .filter((w) => !isBadgeToken(w.text))
         .map((w) => w.text.trim())
         .join(' ')
         .replace(/\s+/g, ' ')
@@ -1052,6 +1108,50 @@ async function readAmountsByGlyph(
   }
 
   const routes = routesFor(result.lines, anchors)
+
+  /*
+   * SECOND LOOK at a card whose places the full-page pass lost.
+   *
+   * On a dense two-language screen the layout analyser sometimes emits no line at all for a
+   * dropoff — «عمر الخيام» came through and «الشيخ سعد» simply was not in the output, so the row
+   * showed a delivery to nowhere. Read alone, that band is a small simple picture and the same
+   * engine finds the line without difficulty.
+   *
+   * Strictly bounded: only where B is missing AND the card has the vertical room to hold a line
+   * that was not read, and never more than three per screenshot — a page that failed everywhere
+   * is a page to type, not one to spend a minute of a driver's evening re-reading.
+   */
+  const MAX_RETRIES = 3
+  let retries = 0
+  for (const [i, route] of routes.entries()) {
+    if (retries >= MAX_RETRIES) break
+    if (route.pointB !== null) continue
+    const a = anchors[i]!
+    const unit = Math.max(1, a.y1 - a.y0)
+    const bottom = anchors[i + 1]?.y0 ?? Math.min(prepared.height, a.y1 + Math.round(unit * 9))
+    // Room for at least two place lines below the price row, or there is nothing to recover.
+    if (bottom - a.y1 < unit * 3) continue
+    retries++
+    const band = await bandBlob(prepared.pixels, prepared.width, a.y1, bottom)
+    if (!band) continue
+    // `psm: 4` — a single column of text of variable sizes, which is what one card is.
+    const again = await recognize(band, { whitelist: '', psm: 4 }, timeoutMs).catch(() => null)
+    if (!again) continue
+    // The band's own coordinates are relative to its top; shift them back so `routesFor` sees the
+    // same geometry it would have on the whole page, and re-run it for this ONE anchor.
+    const shifted = again.lines.map((l) => ({
+      ...l,
+      y0: l.y0 + a.y1,
+      y1: l.y1 + a.y1,
+      words: l.words.map((w) => ({ ...w, y0: w.y0 + a.y1, y1: w.y1 + a.y1 })),
+    }))
+    const [recovered] = routesFor(shifted, [a])
+    // Only ever an IMPROVEMENT, and only of the MISSING half. The first pass's pickup is kept:
+    // read alone the band recognises the same line differently — «عمر الخيام» came back as «jac
+    // الخيام» — and replacing a good label with a worse one is not a repair.
+    if (recovered?.pointB) routes[i] = { pointA: route.pointA ?? recovered.pointA, pointB: recovered.pointB }
+  }
+
   const amounts = anchors.map((a) => readGlyphRow(mask, amountBoxFor(a, prepared.height), templates))
   return {
     amounts,

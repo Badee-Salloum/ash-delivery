@@ -358,7 +358,12 @@ function StartPackage({
   onDiscarded?: (() => void) | undefined
   awaiting: boolean
   onOpened(shiftId: string): void
-  onApproved(funds: { floatText: string; topupText: string }): void
+  /**
+   * The manager approved. Carries the shift's OWN DAY as well as the money: the poller already has
+   * it in hand, and without it the operations list compares every scanned row's date against an
+   * empty string and stamps «يوم آخر» on all of them.
+   */
+  onApproved(funds: { floatText: string; topupText: string; businessDate: string }): void
 }): ReactNode {
   const { api, t } = useApp()
   const toast = useToast()
@@ -453,7 +458,11 @@ function StartPackage({
           .shiftState(shiftId)
           .catch(() => null)
         if (s?.state === 'open') {
-          onApproved({ floatText: s.startPackage.floatTotal, topupText: s.startPackage.topupTotal })
+          onApproved({
+            floatText: s.startPackage.floatTotal,
+            topupText: s.startPackage.topupTotal,
+            businessDate: s.businessDate,
+          })
         }
       } catch {
         /* keep polling */

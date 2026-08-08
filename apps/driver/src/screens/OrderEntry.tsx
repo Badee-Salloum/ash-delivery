@@ -122,15 +122,22 @@ export function OperationsList({
                       {o.timeText ?? ''}
                     </span>
                     {/* The list scrolls back through previous days, so a row from ANOTHER day is
-                        the one thing a driver most needs to see before he leaves it checked. */}
-                    {o.dateText && o.dateText !== today ? (
+                        the one thing a driver most needs to see before he leaves it checked.
+                        `today` must be KNOWN: compared against an empty string every dated row
+                        differs, which stamped the badge on the whole list and taught the driver to
+                        ignore it — the exact opposite of what it is for. */}
+                    {today && o.dateText && o.dateText !== today ? (
                       <span className="ms-1.5 rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-800">
                         {t.orders.otherDay}
                       </span>
                     ) : null}
-                    <p className="truncate text-xs text-slate-500">
-                      {o.pointA ?? '—'} ← {o.pointB ?? '—'}
-                    </p>
+                    {/* One arrow only when there are two places. A lone «عمر الخيام ← —» reads as
+                        a delivery to nowhere; it means the screen's second line went unread. */}
+                    {o.pointA || o.pointB ? (
+                      <p className="truncate text-xs text-slate-500">
+                        {o.pointA && o.pointB ? `${o.pointA} ← ${o.pointB}` : (o.pointA ?? o.pointB)}
+                      </p>
+                    ) : null}
                   </>
                 ) : (
                   <span className="text-sm text-slate-400">{t.orders.manualRow}</span>

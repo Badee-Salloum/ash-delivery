@@ -12,6 +12,7 @@ import {
   readIsCoherent,
   routesFor,
   headerDatesIn,
+  isBadgeToken,
   isHeaderLine,
 } from '../src/ocr.ts'
 
@@ -847,5 +848,56 @@ describe('reading the day a group of orders belongs to', () => {
     // «مقابل مشفى العين» a date header, and the cut beheaded the route under it.
     expect(isHeaderLine('بروستد القصور ماكس, مقابل مشفى العين')).toBe(false)
     expect(isHeaderLine('الثلاثاء, ٤ أغسطس')).toBe(true)
+  })
+})
+
+/**
+ * The «A»/«B» badge, and telling it apart from a place name.
+ *
+ * The badges are coloured circles with a letter inside, and the recogniser renders them as
+ * whatever it likes: «©», «@», «CA]», «EP». Stripping only a bare «A» or «B» left every one of
+ * those glued onto the address the driver reads — «صيدلية سلمى الوليد بن عبد الملك ©».
+ */
+describe('the badge, and what is not a badge', () => {
+  it('recognises the renderings the real phone produces', () => {
+    for (const t of ['©', '@', '&', 'A', 'B', 'CA]', '[A]', 'EP', '(P', '@)', ')', 'a', 'b']) {
+      expect(isBadgeToken(t), t).toBe(true)
+    }
+  })
+
+  it('never mistakes a real place for one', () => {
+    // Every one of these is a label from the sample screens. A single false positive here deletes
+    // a piece of an address the driver then cannot recognise.
+    for (const t of ['F8Q6', 'P92', 'G6W9', 'Baghdad', 'Qaboun', '33.518726', '30,', 'تشيلي', 'الشيخ', 'Ball']) {
+      expect(isBadgeToken(t), t).toBe(false)
+    }
+  })
+})
+
+describe('stripping the badge out of a route label', () => {
+  const line = (text: string, y0: number): OcrLine => ({
+    text,
+    y0,
+    y1: y0 + 20,
+    words: text.split(' ').map((w, i) => ({ text: w, x0: i * 40, x1: i * 40 + 35, y0, y1: y0 + 20 })),
+  })
+  const anchor = (y0: number) => ({ x0: 10, x1: 60, y0, y1: y0 + 20 })
+
+  it('removes it wherever the recogniser put it', () => {
+    // Trailing on one line, embedded on the other — both happen on the real screens.
+    const routes = routesFor([line('صيدلية سلمى الوليد بن عبد الملك ©', 130), line('Glass (P الصوفانية القصاع', 160)], [anchor(100)])
+    expect(routes[0]!.pointA).toBe('صيدلية سلمى الوليد بن عبد الملك')
+    expect(routes[0]!.pointB).toBe('Glass الصوفانية القصاع')
+  })
+
+  it('a badge that DID read as «B» still splits the card, bracket and all', () => {
+    const routes = routesFor([line('مطعم الربيع المزة', 130), line('[B] الشيخ سعد', 160), line('المدخل', 190)], [anchor(100)])
+    expect(routes[0]!.pointA).toBe('مطعم الربيع المزة')
+    expect(routes[0]!.pointB).toBe('الشيخ سعد المدخل')
+  })
+
+  it('keeps a label that is nothing but a plus-code', () => {
+    const routes = routesFor([line('معجنات الصوفانية القصاع', 130), line('F8Q6 P92 ©', 160)], [anchor(100)])
+    expect(routes[0]!.pointB).toBe('F8Q6 P92')
   })
 })

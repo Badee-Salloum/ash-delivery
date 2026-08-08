@@ -194,6 +194,38 @@ for (const [file, truth] of Object.entries(TRUTH)) {
       return seen
     }
     const routes = ocr.routesFor(lines, anchors)
+
+    // The SECOND LOOK, mirroring `readAmountsByGlyph`: a card whose dropoff line the full-page
+    // pass never emitted is re-read on its own, where the layout analyser copes. Measured here
+    // because an unmeasured recovery path is one that quietly stops working.
+    let retries = 0
+    for (const [i, route] of routes.entries()) {
+      if (retries >= 3 || route.pointB !== null) continue
+      const a = anchors[i]
+      const unit = Math.max(1, a.y1 - a.y0)
+      const bottom = anchors[i + 1]?.y0 ?? Math.min(img.height, a.y1 + Math.round(unit * 9))
+      if (bottom - a.y1 < unit * 3) continue
+      retries++
+      const band = createCanvas(img.width, bottom - a.y1)
+      band.getContext('2d').drawImage(img, 0, -a.y1)
+      // «psm 4» — one column of text at varying sizes, which is what a single card is. Without
+      // the switch the band is re-read as a uniform block (psm 6) and yields the same one line.
+      await worker.setParameters({ tessedit_pageseg_mode: '4' })
+      const { data: again } = await worker.recognize(band.toBuffer('image/png'), {}, { text: true, blocks: true })
+      await worker.setParameters({ tessedit_pageseg_mode: '6' })
+      const shifted = linesOf(again).map((l) => ({
+        ...l,
+        y0: l.y0 + a.y1,
+        y1: l.y1 + a.y1,
+        words: l.words.map((w) => ({ ...w, y0: w.y0 + a.y1, y1: w.y1 + a.y1 })),
+      }))
+      const [recovered] = ocr.routesFor(shifted, [a])
+      if (recovered?.pointB) {
+        routes[i] = { pointA: route.pointA ?? recovered.pointA, pointB: recovered.pointB }
+        console.log(`  (recovered row ${i} dropoff on a second pass)`)
+      }
+    }
+
     rows = anchors.map((a, i) => {
       const fee = g.readGlyphRow(mask, ocr.amountBoxFor(a, img.height), templates)
       const clock = ocr.parseGlyphClock(g.readGlyphRow(mask, ocr.clockBoxFor(a, img.width, img.height), clockTemplates, g.CLOCK_ALPHABET), YEAR)
