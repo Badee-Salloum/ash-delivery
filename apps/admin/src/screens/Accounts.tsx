@@ -177,7 +177,7 @@ export function Accounts(): ReactNode {
                   </option>
                 ))}
               </select>
-              <span className="text-xs text-slate-400">{t.accounts.branchHint}</span>
+              <span className="text-xs text-slate-600">{t.accounts.branchHint}</span>
             </label>
           ) : null}
         </div>

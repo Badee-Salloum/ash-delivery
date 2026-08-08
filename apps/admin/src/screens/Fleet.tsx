@@ -223,7 +223,7 @@ export function Fleet(): ReactNode {
                 {d.fullNameAr}
                 {d.blockedByDocuments ? <span className="ms-2"><Badge tone="red">{t.fleet.blocked}</Badge></span> : null}
                 {[d.fullNameEn, d.phone, d.hiredOn, d.nationalId].some(Boolean) ? (
-                  <div className="mt-0.5 text-xs text-slate-400">
+                  <div className="mt-0.5 text-xs text-slate-600">
                     {[d.fullNameEn, d.phone, d.hiredOn, d.nationalId].filter(Boolean).join(' · ')}
                   </div>
                 ) : null}
@@ -502,7 +502,7 @@ export function Fleet(): ReactNode {
         </div>
         {batteryError ? <p className="mb-2 text-sm text-rose-600">{explainError(batteryError, t)}</p> : null}
 
-        <p className="mb-2 text-xs text-slate-400">{t.battery.profileHint}</p>
+        <p className="mb-2 text-xs text-slate-600">{t.battery.profileHint}</p>
         <Table head={[t.battery.serial, t.battery.capacity, t.battery.profile, t.fleet.vehicles, t.battery.slot, t.fleet.state]} isEmpty={batteries.length === 0} empty={t.fleet.noneYet}>
           {batteries.map((b) => (
             <tr key={b.id}>
@@ -699,7 +699,7 @@ function VehicleHistory({ vehicles }: { vehicles: Vehicle[] }): ReactNode {
           </div>
 
           {events.length === 0 ? (
-            <p className="mt-3 text-sm text-slate-400">{t.fleet.noEvents}</p>
+            <p className="mt-3 text-sm text-slate-600">{t.fleet.noEvents}</p>
           ) : (
             <ul className="mt-3 flex flex-col gap-1 text-sm">
               {events.map((e) => (

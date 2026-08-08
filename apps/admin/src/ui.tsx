@@ -159,7 +159,7 @@ export function Field({
         {label}
       </label>
       {children}
-      {hint ? <span className="text-xs text-slate-400">{hint}</span> : null}
+      {hint ? <span className="text-xs text-slate-600">{hint}</span> : null}
       {error ? <span className="text-xs font-medium text-red-600">{error}</span> : null}
     </div>
   )
@@ -233,7 +233,7 @@ export function Table({
         <tbody className="divide-y divide-slate-100">
           {isEmpty && empty !== undefined ? (
             <tr>
-              <td colSpan={head.length} className="px-3 py-6 text-center text-slate-400">
+              <td colSpan={head.length} className="px-3 py-6 text-center text-slate-600">
                 {empty}
               </td>
             </tr>
@@ -281,14 +281,14 @@ export function Pending({
   if (!error) {
     return (
       <Card>
-        <p className="py-6 text-center text-slate-400">{loadingLabel}</p>
+        <p className="py-6 text-center text-slate-600">{loadingLabel}</p>
       </Card>
     )
   }
   return (
     <Card>
       <p className="text-center font-medium text-red-600">{errorLabel}</p>
-      <p className="mt-1 text-center text-xs text-slate-400">{error}</p>
+      <p className="mt-1 text-center text-xs text-slate-600">{error}</p>
       {onRetry ? (
         <div className="mt-3 flex justify-center">
           <Button variant="ghost" onClick={onRetry}>

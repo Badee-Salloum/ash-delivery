@@ -156,6 +156,9 @@ export const en: Catalog = {
       shift_awaiting_open_approval: 'Shift awaiting open approval',
       shift_awaiting_close_approval: 'Shift awaiting close approval',
       document_expiring: 'Document nearing expiry',
+      /** Emitted by shifts.service; the bell used to print the raw Latin key. */
+      shift_incident_reported: 'Incident reported by a driver',
+      manual_order_requested: 'Manual order awaiting pricing',
     },
   },
 
@@ -179,6 +182,9 @@ export const en: Catalog = {
     vehicle: 'Vehicle',
     shiftNo: 'Shift number',
     startPackage: 'Start package',
+    /** What the DRIVER sees. The SRS nouns stay for the manager's console and the reports. */
+    startShift: 'Start shift',
+    endShift: 'Finish shift',
     reading: 'Reading the photo',
     readingMayTake: '(may take 20 seconds)',
     busyVehicle: 'On a shift now',
@@ -201,6 +207,7 @@ export const en: Catalog = {
     },
     endPackage: 'End package',
     odometer: 'Odometer',
+    km: 'km',
     cashFloat: 'Cash float',
     walletTopup: 'Wallet top-up',
     cashHandover: 'Cash handed over',
@@ -211,13 +218,25 @@ export const en: Catalog = {
     /** Both the orders list and the payments log scroll: one screenshot rarely holds a whole day. */
     addPage: 'Another image',
     /** «0 operations» is a real answer — the page had nothing new — not the same as a failed read. */
-    /** Arabic counts ONE differently from many; «1 صفوف» reads as broken software. */
-    readAddedOne: 'Added 1 operation from this image',
-    readAdded: '{n} operations added from this image',
+    /** English collapses to one/other; the same call site serves both languages. */
+    readAdded: {
+      zero: 'Nothing was added from this image',
+      one: 'Added 1 operation from this image',
+      // English has no dual and no small-plural; these exist so the catalogues share a shape.
+      two: 'Added {n} operations from this image',
+      few: 'Added {n} operations from this image',
+      many: 'Added {n} operations from this image',
+      other: 'Added {n} operations from this image',
+    },
     readUnread: 'This image could not be read — enter the operations by hand',
     /** Rows the reader saw but would not vouch for. Silence here hides a short day. */
-    readRefusedOne: '1 row was not read confidently — enter it by hand',
-    readRefused: '{n} rows were not read confidently — enter them by hand',
+    readRefused: {
+      one: '1 row was not read confidently — enter it by hand',
+      two: '{n} rows were not read confidently — enter them by hand',
+      few: '{n} rows were not read confidently — enter them by hand',
+      many: '{n} rows were not read confidently — enter them by hand',
+      other: '{n} rows were not read confidently — enter them by hand',
+    },
     retakeRequested: 'The manager requested a re-shoot',
     closeRejected: 'The manager rejected the close',
     reportIncident: 'Report an incident',
@@ -249,7 +268,7 @@ export const en: Catalog = {
     awaitingManager: 'Waiting for the manager. If an order is missing, he adds it from the review.',
     waitingFor: 'Waiting for the manager for',
     startAnother: 'Start another shift',
-    submitEnd: 'Submit end package',
+    submitEnd: 'Finish and hand over',
     states: {
       draft: 'Draft',
       awaiting_open_approval: 'Awaiting open approval',
@@ -308,8 +327,8 @@ orderNo: 'Order no.',
     count: 'Order count',
     payModes: { cash: 'Cash', electronic: 'Electronic', free: 'Free' },
     problems: {
-      empty_order_no: 'Order number is required',
-      duplicate_order_no: 'Duplicate order number',
+      empty_order_no: 'Incomplete row — re-read the image or remove it',
+      duplicate_order_no: 'This row is a duplicate',
       bad_fee: 'Invalid fee',
       negative_fee: 'Fee cannot be negative',
     },
@@ -440,7 +459,7 @@ orderNo: 'Order no.',
     bmsShot: 'Battery app screenshot',
     bmsHint: 'Pick the battery app screenshot from your gallery',
     requiredHint: '* Remaining charge is required to start the shift — the rest is optional',
-    ocrOk: 'Read {{n}} fields from the screenshot',
+    ocrOk: { one: 'Read 1 field from the image', two: 'Read {n} fields from the image', other: 'Read {n} fields from the image' },
     ocrTimeout: 'Could not read it — it took too long. Type the numbers in',
     ocrUnavailable: 'The reader would not start — type the numbers in',
     ocrNoFields: 'No field was recognised in the screenshot — type the numbers in',
@@ -620,7 +639,7 @@ orderNo: 'Order no.',
     queueEmpty: 'Nothing waiting for your approval — all clear ✓',
     review: 'Shift review',
     sideBySide: 'Photos and numbers',
-    startVsEnd: 'Start vs end odometer',
+    startVsEnd: 'Distance covered',
     approveClose: 'Approve close',
     /** Announced after a decision — the console used to just vanish back to the queue. */
     approved: 'Approved',

@@ -206,7 +206,7 @@ function MoneySetting({
   return (
     <div className="rounded-lg border border-slate-200 p-3">
       <div className="text-xs font-semibold text-slate-500">{label}</div>
-      {hint ? <div className="mt-0.5 text-xs text-slate-400">{hint}</div> : null}
+      {hint ? <div className="mt-0.5 text-xs text-slate-600">{hint}</div> : null}
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <span className="num text-lg font-bold">{current ?? '—'}</span>
         {canEdit ? (

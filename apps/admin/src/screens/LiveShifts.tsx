@@ -100,7 +100,7 @@ export function LiveShifts({ onOpen }: { onOpen(shiftId: string): void }): React
   if (rows.length === 0) {
     return (
       <Card>
-        <p className="py-8 text-center text-slate-400">{t.liveShifts.none}</p>
+        <p className="py-8 text-center text-slate-600">{t.liveShifts.none}</p>
       </Card>
     )
   }
@@ -275,7 +275,7 @@ function LiveRow({
         <span>
           {t.shift.odometer}: {shift.odometerStart ?? '—'}
         </span>
-        {shift.businessDate ? <span className="text-slate-400">{shift.businessDate}</span> : null}
+        {shift.businessDate ? <span className="text-slate-600">{shift.businessDate}</span> : null}
       </div>
       {shift.state === 'suspended' ? <p className="text-sm text-amber-700">{t.liveShifts.suspendedHint}</p> : null}
       {panel === 'suspend' ? (

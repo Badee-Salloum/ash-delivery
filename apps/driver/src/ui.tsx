@@ -66,7 +66,7 @@ export function Field({
     <label className="flex flex-col gap-1">
       <span className="text-sm font-medium text-slate-600">{label}</span>
       {children}
-      {hint ? <span className="text-xs text-slate-400">{hint}</span> : null}
+      {hint ? <span className="text-xs text-slate-600">{hint}</span> : null}
     </label>
   )
 }

@@ -110,7 +110,7 @@ export function BatterySwap({
   return (
     <Card className="flex flex-col gap-3">
       <p className="text-sm font-medium">{t.battery.swap.title}</p>
-      <p className="text-xs text-slate-400">{t.battery.swap.hint}</p>
+      <p className="text-xs text-slate-600">{t.battery.swap.hint}</p>
 
       <Field label={t.battery.swap.slot}>
         <BareSelect value={slotNo} onChange={setSlotNo}>

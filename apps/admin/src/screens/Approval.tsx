@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import L, { type CircleMarker, type LeafletMouseEvent, type Map as LeafletMap } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { type OcrScalar, br1Verdict, ocrReadingDelta, slotLabel, splitSlot } from '@ash/client'
+import { type OcrScalar, br1Verdict, ocrReadingDelta, slotLabel, splitSlot, formatDateTime } from '@ash/client'
 import { formatMinor, parseMinor, sub } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
@@ -494,7 +494,14 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         <Card title={t.shift.endPackage}>
           <dl className="grid grid-cols-2 gap-2 text-sm">
             <Field label={t.shift.odometer} value={String(review.endPackage.odometerKm ?? '—')} />
-            <Field label={t.approval.startVsEnd} value={odoDelta === null ? '—' : `+${odoDelta} كم`} />
+            {/* The sign was unconditional, so a tampered end-odometer rendered as «+-5 كم»; and the
+                unit was a literal in the TSX, unreachable by the English catalogue. A delta that is
+                zero or negative is the anti-fraud read failing, so it is coloured. */}
+            <Field
+              label={t.approval.startVsEnd}
+              value={odoDelta === null ? '—' : `${odoDelta} ${t.shift.km}`}
+              {...(odoDelta !== null && odoDelta <= 0 ? { tone: 'red' as const } : {})}
+            />
             <Field label={t.shift.cashHandover} value={review.endPackage.cashDeclared ?? '—'} />
             <Field label={t.shift.walletBalance} value={review.endPackage.walletDeclared ?? '—'} />
           </dl>
@@ -542,7 +549,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                   className="size-5 accent-emerald-600"
                 />
               </td>
-              <td className="px-3 py-1 text-slate-400">{i + 1}</td>
+              <td className="px-3 py-1 text-slate-600">{i + 1}</td>
               {/* WHAT THE ORDER IS. Not `providerOrderNo` — that is a generated key, unique and
                   meaningless, and printing it here told the manager nothing he could check against
                   the driver's screenshot. The clock and the two places are what both of them see. */}
@@ -644,7 +651,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                         </Button>
                       </div>
                     ) : (
-                      <span className="text-slate-400">
+                      <span className="text-slate-600">
                         {m.role === 'unmatched' ? t.orders.unexplained : t.orders.explainedByOrder}
                       </span>
                     )}
@@ -669,7 +676,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                   </Badge>
                   {d.notes ? <span className="text-slate-500">{d.notes}</span> : null}
                 </span>
-                <span className="num text-xs text-slate-400">{new Date(d.decidedAt).toLocaleString()}</span>
+                <span className="num text-xs text-slate-600">{formatDateTime(d.decidedAt, lang)}</span>
               </li>
             ))}
           </ul>
@@ -1270,7 +1277,7 @@ function BatteryReadings({ readings }: { readings: BatteryReadingView[] }): Reac
           </div>
           <div className="num mt-1 flex flex-wrap gap-x-4 text-xs text-slate-500">
             {r.cycleCount === null ? null : <span>{t.battery.cycles}: {r.cycleCount}</span>}
-            {r.serialNo === null ? null : <span className="text-slate-400">{r.serialNo}</span>}
+            {r.serialNo === null ? null : <span className="text-slate-600">{r.serialNo}</span>}
           </div>
           {/* SRS D-3: what the driver changed from the OCR reading. */}
           <OcrDeltaLines deltas={bmsDeltas(r, t)} />

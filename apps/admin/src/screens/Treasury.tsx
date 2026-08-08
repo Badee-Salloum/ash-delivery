@@ -202,7 +202,7 @@ export function Treasury(): ReactNode {
               ) : (
                 // Deliberate, not an oversight: `journal.manual.write` is branch manager + GM only.
                 // Saying so beats an empty card the system admin reads as a broken screen.
-                <p className="mt-3 text-xs text-slate-400">{t.treasury.depositRoleHint}</p>
+                <p className="mt-3 text-xs text-slate-600">{t.treasury.depositRoleHint}</p>
               )}
             </div>
           ))}
@@ -277,7 +277,7 @@ export function Treasury(): ReactNode {
             ) : null}
           </>
         ) : (
-          <p className="text-sm text-slate-400">{t.week.closeSunday} — {t.common.no}</p>
+          <p className="text-sm text-slate-600">{t.week.closeSunday} — {t.common.no}</p>
         )}
       </Card>
 

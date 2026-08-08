@@ -1,5 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
-import type { BatteryReadingInput } from '@ash/client'
+import { type BatteryReadingInput, plural } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { Button, Card, Field, TextInput } from '../ui.tsx'
 import { PhotoSlot } from './PhotoSlot.tsx'
@@ -234,8 +234,8 @@ export function BatteryPanel({
             />
 
             <Card className="flex flex-col gap-3">
-              <p className="text-sm text-slate-400">{t.battery.bmsHint}</p>
-              <p className="text-xs text-slate-400">{t.battery.requiredHint}</p>
+              <p className="text-sm text-slate-600">{t.battery.bmsHint}</p>
+              <p className="text-xs text-slate-600">{t.battery.requiredHint}</p>
               {FIELDS.map((f) => (
                 <Field
                   key={f.key}
@@ -284,11 +284,11 @@ function OcrStatus({
   missing: number
   onRetry?: (() => void) | undefined
 }): ReactNode {
-  const { t } = useApp()
+  const { t, lang } = useApp()
   if (state.outcome === 'idle') return null
 
   if (state.outcome === 'reading') {
-    return <p className="text-center text-sm text-slate-400">{t.shift.reading}…</p>
+    return <p className="text-center text-sm text-slate-600">{t.shift.reading}…</p>
   }
 
   const failed = state.outcome !== 'ok'
@@ -298,7 +298,7 @@ function OcrStatus({
       : state.outcome === 'unavailable'
         ? t.battery.ocrUnavailable
         : t.battery.ocrNoFields
-    : t.battery.ocrOk.replace('{{n}}', String(state.fieldsFound))
+    : plural(state.fieldsFound, t.battery.ocrOk, lang)
 
   return (
     <div className="flex flex-col gap-2">

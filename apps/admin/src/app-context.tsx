@@ -44,13 +44,30 @@ const AppContext = createContext<AppContextValue | null>(null)
 
 export function AppProvider({ children }: { children: ReactNode }): ReactNode {
   const api = useMemo(() => new ApiClient('/api'), [])
-  const [lang, setLangState] = useState<Lang>('ar')
+  /**
+   * REMEMBERED. A single mis-tap on the 12px header control flipped the whole app to English
+   * mid-shift, and because nothing persisted the choice, reloading silently undid it — so the
+   * driver could neither keep the change nor understand why it went away.
+   */
+  const [lang, setLangState] = useState<Lang>(() => {
+    try {
+      const saved = localStorage.getItem('ash.lang')
+      return saved === 'en' || saved === 'ar' ? saved : 'ar'
+    } catch {
+      return 'ar' // private mode, or storage disabled — the default is the right answer anyway
+    }
+  })
   const [session, setSession] = useState<Session | null>(null)
   const [branches, setBranches] = useState<Branch[]>([])
   const [branchId, setBranchIdState] = useState<string | null>(null)
 
   const setLang = useCallback((next: Lang) => {
     setLangState(next)
+    try {
+      localStorage.setItem('ash.lang', next)
+    } catch {
+      /* storage disabled — the choice still holds for this session */
+    }
     document.documentElement.lang = next
     document.documentElement.dir = dir(next)
   }, [])
@@ -90,6 +107,7 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     try {
       const me = await api.me()
       setSession(me)
+      setSessionExpired(false)
     } catch {
       setSession(null)
     }

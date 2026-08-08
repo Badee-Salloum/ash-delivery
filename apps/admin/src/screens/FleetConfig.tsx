@@ -235,7 +235,7 @@ function BranchCard({
           </Button>
         </div>
       ) : null}
-      <p className="mb-2 text-xs text-slate-400">{t.fleet.branchNoHint}</p>
+      <p className="mb-2 text-xs text-slate-600">{t.fleet.branchNoHint}</p>
 
       <Table head={[t.fleet.vehicleNumber, t.accounts.branch, t.fleet.governorate, '']}>
         {branches.map((b) => (
@@ -334,7 +334,7 @@ function VehicleTypeCard({
                 </span>
               )}
             </td>
-            <td className="px-3 py-1 text-slate-400">{ty.code}</td>
+            <td className="px-3 py-1 text-slate-600">{ty.code}</td>
             <td className="px-3 py-1">
               {canEdit ? (
                 <NumberEdit

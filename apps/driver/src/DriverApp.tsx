@@ -180,7 +180,7 @@ export function DriverApp(): ReactNode {
         <Screen title={t.shift.myAssignment}>
           {assignment === null ? (
             <Card>
-              <p className="text-center text-slate-400">{t.common.loading}</p>
+              <p className="text-center text-slate-600">{t.common.loading}</p>
             </Card>
           ) : assignment.vehicles.length === 0 ? (
             <Card>

@@ -150,7 +150,7 @@ export function Dashboard(): ReactNode {
                 <li key={d.id} className="flex items-center justify-between gap-2 border-b border-slate-100 py-1 last:border-0">
                   <span>
                     <span className="font-medium">{d.ownerName ?? ownerKindLabel}</span>
-                    <span className="text-slate-400"> · {kind}</span>
+                    <span className="text-slate-600"> · {kind}</span>
                   </span>
                   <span className="flex items-center gap-2">
                     <span className="num text-slate-500">{d.expiresOn}</span>

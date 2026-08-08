@@ -1,4 +1,5 @@
 import { Fragment, type ReactNode, useCallback, useEffect, useState } from 'react'
+import { formatDateTime } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { Badge, Button, Card, Table, TextInput } from '../ui.tsx'
 
@@ -23,7 +24,7 @@ interface AuditRow {
 }
 
 export function Audit(): ReactNode {
-  const { api, t } = useApp()
+  const { api, t, lang } = useApp()
   const [rows, setRows] = useState<AuditRow[]>([])
   const [tableName, setTableName] = useState('')
   const [recordId, setRecordId] = useState('')
@@ -85,7 +86,7 @@ export function Audit(): ReactNode {
           {rows.map((r) => (
             <Fragment key={r.id}>
               <tr>
-                <td className="num px-3 py-2 text-xs">{r.occurredAt.replace('T', ' ').slice(0, 19)}</td>
+                <td className="num px-3 py-2 text-xs">{formatDateTime(r.occurredAt, lang)}</td>
                 <td className="px-3 py-2">{r.tableName}</td>
                 <td className="num px-3 py-2 text-xs">{r.recordId.slice(0, 12)}</td>
                 <td className="px-3 py-2">

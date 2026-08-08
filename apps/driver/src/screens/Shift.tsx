@@ -13,6 +13,7 @@ import type { DraftMovement, DraftOrder } from '@ash/client'
 import {
   allProblems,
   compressImage,
+  plural,
   mergeScannedMovements,
   mergeScannedOrders,
   previewBr1,
@@ -548,7 +549,7 @@ function StartPackage({
 
   if (awaiting) {
     return (
-      <Screen title={t.shift.startPackage}>
+      <Screen title={t.shift.startShift}>
         {/* A WAIT WITH INFORMATION IN IT. This was one amber line and nothing else: no sign the
             manager had been told, no elapsed time, no evidence the check was still running — and
             if the poll was failing (no signal) the screen looked exactly the same as a healthy
@@ -581,7 +582,7 @@ function StartPackage({
 
   return (
     <Screen
-      title={t.shift.startPackage}
+      title={t.shift.startShift}
       footer={
         <div className="flex flex-col gap-2">
           {!ready && missing.length > 0 ? (
@@ -614,7 +615,7 @@ function StartPackage({
               {t.shift.cannotStart[createError as keyof typeof t.shift.cannotStart] ?? createError}
             </p>
           ) : (
-            <p className="text-center text-slate-400">{t.common.loading}</p>
+            <p className="text-center text-slate-600">{t.common.loading}</p>
           )}
         </Card>
       )}
@@ -624,7 +625,7 @@ function StartPackage({
         </Card>
       ) : null}
       {shiftId ? <DiscardButton onDiscard={discardSelf} /> : null}
-      {ocrBusy ? <p className="text-center text-sm text-slate-400">{t.shift.reading}…</p> : null}
+      {ocrBusy ? <p className="text-center text-sm text-slate-600">{t.shift.reading}…</p> : null}
       <Card className="flex flex-col gap-3">
         <Field label={t.shift.odometer}>
           <TextInput inputMode="numeric" value={odo} onChange={(e) => setOdo(e.target.value)} />
@@ -829,7 +830,7 @@ function EndPackage({
 
   return (
     <Screen
-      title={t.shift.endPackage}
+      title={t.shift.endShift}
       {...(onBack ? { back: { label: t.common.back, onBack } } : {})}
       footer={
         <div className="flex flex-col gap-2">
@@ -1032,17 +1033,17 @@ function EndPackage({
  * all and the rows have to be typed. Both are true answers and the driver acts differently on each.
  */
 function ReadStatus({ state }: { state: LogState }): ReactNode {
-  const { t } = useApp()
+  const { t, lang } = useApp()
   // Checked POSITIVELY for `read`: the other member's `kind` is a union of three literals, and
   // narrowing a union by eliminating them one at a time does not reduce to the member with `rows`.
   if (state.kind === 'read') {
     return (
       <p className="text-center text-sm text-emerald-700">
-        {t.shift.readAdded.replace('{n}', String(state.rows))}
+        {plural(state.rows, t.shift.readAdded, lang)}
         {/* The rows the reader SAW and would not vouch for. Silence here would let the driver
             believe the page was fully read and submit a day that is short by those rows. */}
         {state.refused > 0 ? (
-          <span className="text-amber-700"> · {t.shift.readRefused.replace('{n}', String(state.refused))}</span>
+          <span className="text-amber-800"> · {plural(state.refused, t.shift.readRefused, lang)}</span>
         ) : null}
       </p>
     )

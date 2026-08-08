@@ -99,7 +99,7 @@ export function GpsLive(): ReactNode {
       </Card>
       <Card title={t.gpsLive.drivers}>
         {drivers.length === 0 ? (
-          <p className="py-6 text-center text-slate-400">{t.gpsLive.none}</p>
+          <p className="py-6 text-center text-slate-600">{t.gpsLive.none}</p>
         ) : (
           <ul className="flex flex-col gap-1 text-sm">
             {drivers.map((d) => (
@@ -109,7 +109,7 @@ export function GpsLive(): ReactNode {
                   {d.lat.toFixed(5)}, {d.lng.toFixed(5)}
                 </span>
                 {d.accuracyM !== null ? <Badge tone="slate">±{Math.round(d.accuracyM)}m</Badge> : null}
-                <span className="num ms-auto text-xs text-slate-400">{new Date(d.receivedAt).toLocaleTimeString()}</span>
+                <span className="num ms-auto text-xs text-slate-600">{new Date(d.receivedAt).toLocaleTimeString()}</span>
               </li>
             ))}
           </ul>

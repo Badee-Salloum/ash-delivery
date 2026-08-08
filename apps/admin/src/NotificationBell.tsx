@@ -74,7 +74,7 @@ export function NotificationBell({
         <div className="absolute end-0 top-full z-50 mt-2 max-h-96 w-72 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl">
           <div className="px-3 py-2 text-xs font-bold text-slate-500">{t.notifications.title}</div>
           {notifications.length === 0 ? (
-            <p className="px-3 py-4 text-center text-sm text-slate-400">{t.notifications.empty}</p>
+            <p className="px-3 py-4 text-center text-sm text-slate-600">{t.notifications.empty}</p>
           ) : (
             notifications.slice(0, 20).map((n) => (
               <button
@@ -92,7 +92,7 @@ export function NotificationBell({
                   {n.read ? null : <span className="inline-block size-2 rounded-full bg-red-500" aria-hidden="true" />}
                   {label(n.kind)}
                 </span>
-                <span className="text-xs font-normal text-slate-400">{relTime(n.createdAt, nowMs, ago)}</span>
+                <span className="text-xs font-normal text-slate-600">{relTime(n.createdAt, nowMs, ago)}</span>
               </button>
             ))
           )}
