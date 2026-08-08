@@ -273,3 +273,18 @@ if (wrong > 0) {
   process.exit(1)
 }
 console.log('\nNo field was read wrongly.')
+
+/*
+ * THE FLOOR. Zero-wrong was the only rule, and it is satisfied by a reader that refuses
+ * everything: refusing is safe, and safe is not the same as useful. These are what the reader
+ * achieves today, and a change that reads fewer has to say so out loud rather than pass quietly.
+ *
+ * Raise them when a change earns it. Lowering one is a decision, not a fix — write down why.
+ */
+const MIN_READS = { fee: 44, clock: 43, date: 44, route: 38 }
+const short = Object.entries(MIN_READS).filter(([field, floor]) => tally[field].read < floor)
+if (short.length > 0) {
+  for (const [field, floor] of short) console.log(`REGRESSION: ${field} read ${tally[field].read}, floor is ${floor}`)
+  process.exit(1)
+}
+console.log(`Floors held: ${Object.entries(MIN_READS).map(([f, n]) => `${f}≥${n}`).join('  ')}`)

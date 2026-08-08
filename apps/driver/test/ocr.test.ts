@@ -901,3 +901,45 @@ describe('stripping the badge out of a route label', () => {
     expect(routes[0]!.pointB).toBe('F8Q6 P92')
   })
 })
+
+/**
+ * Two readings of one header, and the weekday choosing between them.
+ *
+ * Tesseract's text and the pixel reader disagree about the day, and the text is not even
+ * trustworthy enough to try FIRST: on «الخميس, ٦ أغسطس» it emits «الخميس, 1أغسطس», and «1» is a
+ * perfectly valid day, so the text answer was taken and the pixel reader — which had «٦» at more
+ * than twice the margin it needed — was never asked. The checksum then correctly threw the date
+ * away, and five orders lost a date that had been legible all along.
+ */
+describe('when the header text and the pixels disagree', () => {
+  const garbled = (y0 = 100): OcrLine => ({
+    text: 'الخميس, 1أغسطس',
+    y0,
+    y1: y0 + 20,
+    words: [
+      { text: 'الخميس,', x0: 200, x1: 260, y0, y1: y0 + 20 },
+      { text: '1', x0: 170, x1: 180, y0, y1: y0 + 20 },
+      { text: 'أغسطس', x0: 100, x1: 160, y0, y1: y0 + 20 },
+    ],
+  })
+  const AUG_2026 = new Date('2026-08-20T12:00:00')
+
+  it('takes the pixel reading when the text reading fails the weekday', () => {
+    // 6 August 2026 is a Thursday; the 1st is a Saturday. The text says «1», the pixels say «6».
+    expect(headerDatesIn([garbled()], 2026, AUG_2026, () => '6')[0]!.dateIso).toBe('2026-08-06')
+  })
+
+  it('refuses when BOTH readings fail it, rather than preferring either', () => {
+    expect(headerDatesIn([garbled()], 2026, AUG_2026, () => '3')[0]!.dateIso).toBe(null)
+  })
+
+  it('still refuses a pixel reading with no weekday to check it against', () => {
+    const noWeekday: OcrLine = {
+      text: 'أغسطس',
+      y0: 100,
+      y1: 120,
+      words: [{ text: 'أغسطس', x0: 100, x1: 160, y0: 100, y1: 120 }],
+    }
+    expect(headerDatesIn([noWeekday], 2026, AUG_2026, () => '6')[0]!.dateIso).toBe(null)
+  })
+})

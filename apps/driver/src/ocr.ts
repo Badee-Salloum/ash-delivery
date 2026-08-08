@@ -933,54 +933,72 @@ export function headerDatesIn(
   const out: Array<{ y0: number; dateIso: string | null }> = []
   for (const line of lines) {
     if (!isHeaderLine(line.text)) continue
-    let dateIso = orderDateHeader(line.text, year)
-    if (!dateIso) {
+
+    /*
+     * TWO readings of the same header, and the weekday decides between them.
+     *
+     * The TEXT reading is what Tesseract made of the line; the PIXEL reading cuts the day number
+     * out of the image and classifies it against the templates. Neither is trustworthy alone, and
+     * — this was the bug — the text reading is not even trustworthy ENOUGH TO TRY FIRST. On
+     * «الخميس, ٦ أغسطس» Tesseract emits «الخميس, 1أغسطس»: the garbled «١» is a perfectly valid
+     * day, so the text path answered «1 August» and the pixel reader, which had «٦» at a margin of
+     * 0.27, was never consulted. The checksum then correctly rejected 1 August — a Saturday, not a
+     * Thursday — and five orders lost their date to a reading that was available all along.
+     *
+     * So both are computed and the FIRST that agrees with the weekday word wins.
+     */
+    const getDay = (iso: string): number => new Date(`${iso}T12:00:00`).getDay()
+    const weekday = weekdayOnLine(line.text)
+
+    const fromPixels = (): string | null => {
       // Whole-token matching, tolerant only at the edges: OCR glues the misread day digit onto
       // the month word itself — «1أغسطس» — so the month word's own BOX contains the day's ink.
       const monthIndex = MONTHS_AR.findIndex((names) => names.some((n) => foldedTokens(line.text).includes(foldAr(n))))
       const monthWord = line.words.find((w) => MONTHS_AR.some((names) => names.some((n) => token(w.text) === foldAr(n))))
-      // The weekday word is REQUIRED, not a bonus: it is the only independent check on a day
-      // number read off the pixels. Measured without it, a «٦» whose hook printed faintly was
-      // accepted as «1» and five orders were dated the 1st — the checksum is what makes a
-      // glyph-read date safe to store. No legible weekday, no date; the header still cuts.
       const weekdayWord = line.words.find((w) => WEEKDAYS_AR.includes(token(w.text)))
-      if (monthIndex !== -1 && monthWord && weekdayWord && weekdayWord.x0 > monthWord.x1) {
-        // RTL: the weekday is rightmost, the month leftmost, the day number BETWEEN them — and
-        // Tesseract does emit it as its own word, garbled to «؟» or «1» but correctly boxed.
-        // Read that box: it is a handful of pixels wide and contains nothing else. Only if no
-        // such word survives does this fall back to the whole span, where the month's letters
-        // have to delimit the digits themselves.
-        const dayWord = line.words.find((w) => w.x0 >= monthWord.x1 && w.x1 <= weekdayWord.x0 && w.x1 > w.x0)
-        const span = dayWord
-          ? { x0: dayWord.x0 - 2, y0: dayWord.y0 - 2, x1: dayWord.x1 + 2, y1: dayWord.y1 + 2 }
-          : { x0: monthWord.x1, y0: monthWord.y0 - 2, x1: weekdayWord.x0, y1: monthWord.y1 + 2 }
-        const raw = readDay(span)
-        const day = raw !== null && /^\d{1,2}$/.test(raw) ? Number(raw) : null
-        if (day !== null && day >= 1 && day <= 31) {
-          const candidate = `${year}-${String(monthIndex + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
-          const weekdaySeen = WEEKDAYS_AR.indexOf(token(weekdayWord.text))
-          if (new Date(`${candidate}T12:00:00`).getDay() === weekdaySeen) dateIso = candidate
-        }
-      }
+      if (monthIndex === -1 || !monthWord || !weekdayWord || weekdayWord.x0 <= monthWord.x1) return null
+      // RTL: the weekday is rightmost, the month leftmost, the day number BETWEEN them — and
+      // Tesseract does emit it as its own word, garbled to «؟» or «1» but correctly boxed.
+      // Read that box: it is a handful of pixels wide and contains nothing else. Only if no such
+      // word survives does this fall back to the whole span, where the month's letters have to
+      // delimit the digits themselves.
+      const dayWord = line.words.find((w) => w.x0 >= monthWord.x1 && w.x1 <= weekdayWord.x0 && w.x1 > w.x0)
+      const span = dayWord
+        ? { x0: dayWord.x0 - 2, y0: dayWord.y0 - 2, x1: dayWord.x1 + 2, y1: dayWord.y1 + 2 }
+        : { x0: monthWord.x1, y0: monthWord.y0 - 2, x1: weekdayWord.x0, y1: monthWord.y1 + 2 }
+      const raw = readDay(span)
+      const day = raw !== null && /^\d{1,2}$/.test(raw) ? Number(raw) : null
+      if (day === null || day < 1 || day > 31) return null
+      return `${year}-${String(monthIndex + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
     }
-    if (dateIso !== null) {
-      // The weekday is the CHECKSUM on the whole header, whichever way the date was read. The
-      // Arabic text path has no other guard at all: a garbled «٦» that leaves a stray «1» in the
-      // line becomes the 1st of the month, and the only thing that catches it is that the line
-      // says «الخميس» and the 1st is not a Thursday. The screen never prints the YEAR, so a
-      // mismatch first tries last year — a January screenshot still showing «٣١ ديسمبر» — and a
-      // date that lands in the future is refused outright.
-      const getDay = (iso: string): number => new Date(`${iso}T12:00:00`).getDay()
-      const weekday = weekdayOnLine(line.text)
-      if (weekday !== -1 && getDay(dateIso) !== weekday) {
-        const lastYear = `${year - 1}${dateIso.slice(4)}`
-        dateIso = getDay(lastYear) === weekday ? lastYear : null
+
+    /**
+     * A candidate survives only if the weekday PRINTED on the line agrees with it. The screen
+     * never prints the year, so a mismatch tries last year too — a January screenshot still
+     * showing «٣١ ديسمبر» — and a date landing in the future is refused outright.
+     *
+     * With no legible weekday there is no checksum, and a date read off Arabic-Indic pixels
+     * without one is a guess: only the TEXT reading is allowed through unchecked, because it is
+     * the Latin-script path where the digits were never in doubt.
+     */
+    const settle = (candidate: string | null, checked: boolean): string | null => {
+      if (candidate === null) return null
+      let iso = candidate
+      if (weekday !== -1 && getDay(iso) !== weekday) {
+        const lastYear = `${year - 1}${iso.slice(4)}`
+        if (getDay(lastYear) !== weekday) return null
+        iso = lastYear
+      } else if (weekday === -1 && checked) {
+        return null
       }
-      if (dateIso !== null && new Date(`${dateIso}T12:00:00`).getTime() > today.getTime() + 86_400_000) {
-        const lastYear = `${year - 1}${dateIso.slice(4)}`
-        dateIso = weekday === -1 && new Date(`${lastYear}T12:00:00`).getTime() <= today.getTime() ? lastYear : null
+      if (new Date(`${iso}T12:00:00`).getTime() > today.getTime() + 86_400_000) {
+        const lastYear = `${year - 1}${iso.slice(4)}`
+        return weekday === -1 && new Date(`${lastYear}T12:00:00`).getTime() <= today.getTime() ? lastYear : null
       }
+      return iso
     }
+
+    const dateIso = settle(orderDateHeader(line.text, year), false) ?? settle(fromPixels(), true)
     out.push({ y0: line.y0, dateIso })
   }
   return out.sort((a, b) => a.y0 - b.y0)

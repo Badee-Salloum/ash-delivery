@@ -31,31 +31,43 @@ function bitDistance(a, b) {
 /**
  * Split a class's samples into up to `MAX_SUBS` clusters of genuinely similar renderings.
  *
- * ONE averaged prototype per class was measurably too few: the same digit is printed at three
- * display scales now, and averaging «٣»'s two top humps across scales blurred it toward «٢» —
- * every remaining refusal was that pair at a margin the blur itself had eaten. Greedy
- * agglomerative merging (closest pair first) keeps each scale's rendering sharp; the classifier
- * simply meets more than one «٣» and matches whichever this screen prints.
+ * ONE averaged prototype per class is measurably too few: the same digit is printed at several
+ * display scales, and averaging «٣»'s two top humps across scales blurs it toward «٢» — a real
+ * «٣» then lands almost equally far from the blurred «٣» and the sharper «٢», the margin
+ * collapses to 0.002, and the reader refuses a glyph it has ample evidence for.
+ *
+ * TWO PROPERTIES ARE LOAD-BEARING, and the first version of this had neither.
+ *
+ * AVERAGE LINKAGE, not the distance between recomputed cluster MEANS. Mean-linkage is
+ * rich-get-richer: each round the big cluster's mean sits nearest everything, so it swallows the
+ * next sample, and «٣»'s seventeen samples across nine distinct renderings collapsed to
+ * «15, 1, 1» while «٢» kept a balanced «11, 6». That asymmetry IS the starved margin.
+ *
+ * NO SAMPLE IS EVER DISCARDED. The earlier code dropped clusters of one as "a single sighting,
+ * maybe noise" — and the two it dropped from «٣» were the sharp renderings, the ones furthest
+ * from the blur, which is exactly why they were still alone. A rendering the screen produces once
+ * is a rendering the screen produces.
  */
-const MAX_SUBS = 3
+const MAX_SUBS = 6
 
 function clusterSamples(group) {
-  let clusters = group.map((s) => [s])
-  const meanBits = (c) => {
-    const acc = new Float64Array(data.gw * data.gh)
-    for (const s of c) for (let i = 0; i < acc.length; i++) acc[i] += s.bits[i]
-    return Array.from(acc, (v) => (v / c.length >= 0.5 ? 1 : 0))
+  const clusters = group.map((s) => [s])
+  // Pairwise distances between SAMPLES, computed once; average linkage is their mean across the
+  // two clusters, which no amount of merging can distort the way a recomputed mean can.
+  const between = (a, b) => {
+    let total = 0
+    for (const x of a) for (const y of b) total += bitDistance(x.bits, y.bits)
+    return total / (a.length * b.length)
   }
   while (clusters.length > MAX_SUBS) {
     let bi = 0
     let bj = 1
-    let bd = Infinity
-    const means = clusters.map(meanBits)
+    let best = Infinity
     for (let i = 0; i < clusters.length; i++)
       for (let j = i + 1; j < clusters.length; j++) {
-        const d = bitDistance(means[i], means[j])
-        if (d < bd) {
-          bd = d
+        const d = between(clusters[i], clusters[j])
+        if (d < best) {
+          best = d
           bi = i
           bj = j
         }
@@ -63,10 +75,7 @@ function clusterSamples(group) {
     clusters[bi] = [...clusters[bi], ...clusters[bj]]
     clusters.splice(bj, 1)
   }
-  // A cluster of one sample is a single sighting, not a rendering — it may be noise. Keep it only
-  // when the class is thin overall (better one real sighting than no template at all).
-  const solid = clusters.filter((c) => c.length >= 2)
-  return solid.length > 0 ? solid : clusters
+  return clusters
 }
 
 /** Build up to MAX_SUBS averaged templates per class from whichever samples the caller chose. */
