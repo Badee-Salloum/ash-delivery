@@ -35,3 +35,26 @@ body {
   unicode-bidi: isolate;
   font-variant-numeric: tabular-nums;
 }
+
+/*
+ * The indeterminate bar under a running read.
+ *
+ * A screenshot takes 20–40 seconds to read on a cheap Android and the tile above it has already
+ * ticked for its upload, so without motion on the screen the driver believes the work is done and
+ * submits a shift short by every row the reader was about to add. Honoured `prefers-reduced-motion`:
+ * the bar simply sits still, and the text beside it still says what is happening.
+ */
+@keyframes ash-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate-\[ash-slide_1\.2s_ease-in-out_infinite\] {
+    animation: none;
+    width: 100%;
+  }
+}

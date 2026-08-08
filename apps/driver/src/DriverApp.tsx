@@ -43,6 +43,19 @@ interface Assignment {
  */
 export function DriverApp(): ReactNode {
   const { session, t, lang, setLang, api, setSession } = useApp()
+  /** Whether the phone thinks it has a network. Cheap, and the difference between "the app is
+      broken" and "wait until you are back in range". */
+  const [online, setOnline] = useState(navigator.onLine)
+  useEffect(() => {
+    const up = (): void => setOnline(true)
+    const down = (): void => setOnline(false)
+    window.addEventListener('online', up)
+    window.addEventListener('offline', down)
+    return () => {
+      window.removeEventListener('online', up)
+      window.removeEventListener('offline', down)
+    }
+  }, [])
   const [assignment, setAssignment] = useState<Assignment | null>(null)
   const [vehicleId, setVehicleId] = useState<string | null>(null)
 
@@ -75,22 +88,44 @@ export function DriverApp(): ReactNode {
   if (!session) return <Login />
 
   const bar = (
-    <div className="flex items-center justify-between bg-brand-700 px-4 py-2 text-xs text-white/80">
-      <button onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}>{lang === 'ar' ? 'EN' : 'ع'}</button>
-      <button
-        onClick={async () => {
-          try {
-            await api.logout()
-          } finally {
-            // Always clear the session locally, even if the network call fails.
-            setVehicleId(null)
-            setSession(null)
-          }
-        }}
-      >
-        {t.common.logout}
-      </button>
-    </div>
+    <>
+      {/* OFFLINE, SAID OUT LOUD. The service worker precaches the shell, so with no signal the app
+          loads and looks perfectly healthy — buttons enabled, tiles tappable — and then every tap
+          ends in «تعذّر تنفيذ العملية». A driver cannot tell a dead network from a broken app or a
+          rejected shift, and the three call for completely different things. */}
+      {!online ? (
+        <div role="status" className="bg-amber-500 px-4 py-2 text-center text-sm font-semibold text-white">
+          {t.common.offline}
+        </div>
+      ) : null}
+      <div className="flex items-center justify-between bg-brand-700 px-2 py-1 text-xs text-white/80">
+        {/* 44px targets with names. Two unlabelled 12px glyphs at the top of every screen, one of
+            which flipped the whole app to English mid-shift and the other of which signed the
+            driver out — neither asking, both a mis-tap away. */}
+        <button
+          onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}
+          aria-label={lang === 'ar' ? 'English' : 'العربية'}
+          className="min-h-11 rounded-lg px-3 font-semibold active:bg-white/20"
+        >
+          {lang === 'ar' ? 'EN' : 'ع'}
+        </button>
+        <button
+          onClick={async () => {
+            if (!window.confirm(t.common.confirmLogout)) return
+            try {
+              await api.logout()
+            } finally {
+              // Always clear the session locally, even if the network call fails.
+              setVehicleId(null)
+              setSession(null)
+            }
+          }}
+          className="min-h-11 rounded-lg px-3 font-semibold active:bg-white/20"
+        >
+          {t.common.logout}
+        </button>
+      </div>
+    </>
   )
 
   if (!session.driverId) {

@@ -102,6 +102,7 @@ export function Dashboard(): ReactNode {
           label={t.dashboard.awaitingApproval}
           value={data.completeness.awaitingApproval}
           sub={`${t.dashboard.openShifts}: ${data.completeness.openShifts}`}
+          href="#queue"
         />
       </div>
 

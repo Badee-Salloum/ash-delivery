@@ -3,6 +3,7 @@ import {
   type DraftOrder,
   allProblems,
   br1Verdict,
+  groupThousands,
   isComplete,
   mergeScannedMovements,
   mergeScannedOrders,
@@ -392,5 +393,25 @@ describe('reading the BR1 verdict', () => {
         expect(r.off).toBe(!(balanced && splitBalanced))
       }
     }
+  })
+})
+
+describe('grouping money for the eye', () => {
+  it('separates thousands and keeps the minor units', () => {
+    expect(groupThousands('1500000.00')).toBe('1,500,000.00')
+    expect(groupThousands('150000.00')).toBe('150,000.00')
+    expect(groupThousands('999.99')).toBe('999.99')
+  })
+
+  it('keeps the sign, which is what tells money-out from money-in', () => {
+    expect(groupThousands('-1155.65')).toBe('-1,155.65')
+    expect(groupThousands('+87.50')).toBe('+87.50')
+  })
+
+  it('returns anything it does not recognise untouched, never a mangled figure', () => {
+    // A half-typed field must not become something that looks like a different number.
+    expect(groupThousands('')).toBe('')
+    expect(groupThousands('abc')).toBe('abc')
+    expect(groupThousands('1,500.00')).toBe('1,500.00')
   })
 })

@@ -380,3 +380,17 @@ export function br1Verdict(r: { balanced: boolean; splitBalanced: boolean }): { 
   if (!r.splitBalanced) return { verdict: 'split_off', off: true }
   return { verdict: 'balanced', off: false }
 }
+
+/**
+ * Group the thousands of a money string for DISPLAY only.
+ *
+ * «1500000.00» against «150000.00» is read by counting zeros — at the exact moment a manager is
+ * deciding whether a shift balances, in a currency where one day's fees run to seven digits. The
+ * wire string is never touched: this returns a new string for the screen, and every parse still
+ * happens on the original.
+ */
+export function groupThousands(money: string): string {
+  const m = money.trim().match(/^([-+−]?)(\d+)(\.\d+)?$/)
+  if (!m) return money
+  return `${m[1]}${m[2]!.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}${m[3] ?? ''}`
+}

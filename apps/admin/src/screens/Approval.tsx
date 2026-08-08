@@ -1125,8 +1125,9 @@ function PhotoRow({ pkg, media }: { pkg: 'start' | 'end'; media: Review['media']
   const label = (slot: string): string => slotLabel(slot, t.shift.slotNames, lang)
 
   if (shots.length === 0) {
-    return <p className="mt-3 text-xs text-slate-400">{t.approval.noPhotos}</p>
+    return <p className="mt-3 text-sm text-slate-500">{t.approval.noPhotos}</p>
   }
+  const at = shots.findIndex((m) => m.mediaId === zoom)
   return (
     <>
       <div className="mt-3 flex flex-wrap gap-2">
@@ -1137,17 +1138,112 @@ function PhotoRow({ pkg, media }: { pkg: 'start' | 'end'; media: Review['media']
             aria-label={label(m.slot)}
             className="flex flex-col items-center gap-1 rounded-lg border border-slate-200 p-1 outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
           >
-            <img src={`/api/media/${m.mediaId}`} alt={label(m.slot)} loading="lazy" className="size-24 rounded object-cover" />
-            <span className="text-[10px] text-slate-500">{label(m.slot)}</span>
+            {/* `object-contain`, not `object-cover`: a cover-cropped 96px thumbnail of an odometer
+                shows the middle of the dial and none of the digits. */}
+            <img
+              src={`/api/media/${m.mediaId}`}
+              alt={label(m.slot)}
+              loading="lazy"
+              className="size-24 rounded bg-slate-100 object-contain"
+            />
+            <span className="text-[10px] text-slate-600">{label(m.slot)}</span>
           </button>
         ))}
       </div>
       {zoom ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/80 p-4" onClick={() => setZoom(null)}>
-          <img src={`/api/media/${zoom}`} alt="" className="max-h-full max-w-full rounded-lg" />
-        </div>
+        <Lightbox
+          shots={shots}
+          index={at === -1 ? 0 : at}
+          label={label}
+          onIndex={(i) => setZoom(shots[i]?.mediaId ?? null)}
+          onClose={() => setZoom(null)}
+        />
       ) : null}
     </>
+  )
+}
+
+/**
+ * The evidence viewer — the screen's stated anti-fraud read actually being performable.
+ *
+ * It was an `<img>` fitted to the viewport inside a div that closed on any click. No zoom, so an
+ * odometer photographed at an angle could not be read at all; no keyboard, so no Esc and no way to
+ * step between shots; no caption, so nothing said which slot you were looking at; and clicking the
+ * image itself dismissed it. Comparing the start odometer against the end one — the whole point —
+ * meant open, close, scroll, open, and holding five digits in your head.
+ */
+function Lightbox({
+  shots,
+  index,
+  label,
+  onIndex,
+  onClose,
+}: {
+  shots: Review['media']
+  index: number
+  label(slot: string): string
+  onIndex(i: number): void
+  onClose(): void
+}): ReactNode {
+  const { t } = useApp()
+  const [scale, setScale] = useState(1)
+  const shot = shots[index]
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose()
+      // The chevrons follow reading order; the ARRAY does not, so both keys are mapped plainly.
+      if (e.key === 'ArrowRight') onIndex(Math.min(shots.length - 1, index + 1))
+      if (e.key === 'ArrowLeft') onIndex(Math.max(0, index - 1))
+      if (e.key === '+' || e.key === '=') setScale((s) => Math.min(6, s + 0.5))
+      if (e.key === '-') setScale((s) => Math.max(1, s - 0.5))
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [index, shots.length, onIndex, onClose])
+
+  // A new shot starts unzoomed, or the next photo opens showing a corner of itself.
+  useEffect(() => setScale(1), [index])
+  if (!shot) return null
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col bg-slate-900/90" role="dialog" aria-modal="true">
+      <div className="flex items-center gap-3 p-3 text-white">
+        <span className="font-semibold">{label(shot.slot)}</span>
+        <span className="num text-sm text-white/70">
+          {index + 1}/{shots.length}
+        </span>
+        <div className="ms-auto flex items-center gap-2">
+          <Button variant="ghost" onClick={() => setScale((s) => Math.max(1, s - 0.5))} aria-label="−">
+            −
+          </Button>
+          <span className="num w-12 text-center text-sm">{Math.round(scale * 100)}%</span>
+          <Button variant="ghost" onClick={() => setScale((s) => Math.min(6, s + 0.5))} aria-label="+">
+            +
+          </Button>
+          <Button variant="ghost" onClick={onClose}>
+            {t.common.close}
+          </Button>
+        </div>
+      </div>
+      {/* Scrolls when zoomed, so a magnified odometer can actually be panned to its digits. */}
+      <div className="flex-1 overflow-auto p-3">
+        <img
+          src={`/api/media/${shot.mediaId}`}
+          alt={label(shot.slot)}
+          className="mx-auto origin-top rounded-lg"
+          style={{ width: `${scale * 100}%`, maxWidth: scale === 1 ? '100%' : 'none' }}
+        />
+      </div>
+      <div className="flex items-center justify-between p-3">
+        <Button variant="ghost" disabled={index === 0} onClick={() => onIndex(index - 1)}>
+          ‹
+        </Button>
+        <Button variant="ghost" disabled={index === shots.length - 1} onClick={() => onIndex(index + 1)}>
+          ›
+        </Button>
+      </div>
+    </div>
   )
 }
 

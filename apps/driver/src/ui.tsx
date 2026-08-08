@@ -1,4 +1,5 @@
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from 'react'
+import { groupThousands } from '@ash/client'
 
 /**
  * The driver PWA's own primitives — hand-written Tailwind, no component library. The whole app
@@ -26,8 +27,8 @@ export function Logo({ size = 40, className = '' }: { size?: number; className?:
 
 export function Money({ value, className = '' }: { value: string; className?: string }): ReactNode {
   // `.num` isolates the run and forces Western tabular digits, so a figure never reorders inside
-  // an Arabic sentence.
-  return <span className={`num ${className}`}>{value}</span>
+  // an Arabic sentence; grouping is display-only, so the wire string is never altered.
+  return <span className={`num ${className}`}>{groupThousands(value)}</span>
 }
 
 export function Button({
@@ -127,9 +128,17 @@ export function Screen({
         )}
         <h1 className="text-xl font-bold">{title}</h1>
       </header>
-      <main className="flex flex-1 flex-col gap-4 p-4 pb-28">{children}</main>
+      {/* pb-44 rather than pb-28: the footer GROWS — the BR1 banner, the «ناقص» checklist and the
+          live difference all live in it — and at 112px it began covering the last battery field. */}
+      <main className="flex flex-1 flex-col gap-4 p-4 pb-44">{children}</main>
       {footer ? (
-        <footer className="fixed inset-x-0 bottom-0 mx-auto max-w-md border-t border-slate-200 bg-white/95 p-3 backdrop-blur">
+        /* viewport-fit=cover is set in index.html, so on a gesture-navigation Android the bottom of
+           the primary button sat UNDER the home indicator: the driver's tap dismissed the app
+           instead of submitting his shift. */
+        <footer
+          className="fixed inset-x-0 bottom-0 mx-auto max-w-md border-t border-slate-200 bg-white/95 p-3 backdrop-blur"
+          style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
+        >
           {footer}
         </footer>
       ) : null}

@@ -35,7 +35,14 @@ export function ToastProvider({ children }: { children: ReactNode }): ReactNode 
   return (
     <ToastCtx.Provider value={api}>
       {children}
-      <div aria-live="polite" className="pointer-events-none fixed inset-x-0 bottom-0 z-50 flex flex-col items-center gap-2 p-4">
+      {/* ABOVE the footer. Both were fixed to bottom-0, so a failed submit put a red banner on top
+          of the submit button for six seconds — the driver read "action failed", reached to retry,
+          and tapped the toast instead. */}
+      <div
+        aria-live="polite"
+        className="pointer-events-none fixed inset-x-0 bottom-0 z-50 flex flex-col items-center gap-2 p-4"
+        style={{ paddingBottom: 'calc(6rem + env(safe-area-inset-bottom))' }}
+      >
         {toasts.map((toast) => (
           <div
             key={toast.id}

@@ -9,6 +9,10 @@ interface ShiftRow {
   vehicleId: string
   shiftNo: number
   state: string
+  /** All already on the wire from GET /shifts and, until now, all thrown away by this screen. */
+  businessDate?: string
+  orderCount?: number
+  floatTotal?: string
 }
 interface DriverLite {
   id: string
@@ -51,7 +55,25 @@ export function Queue({ onOpen }: { onOpen(shiftId: string): void }): ReactNode 
     setError(null)
     void api
       .get<{ shifts: ShiftRow[] }>('/shifts')
-      .then((r) => setRows(r.shifts.filter((s) => AWAITING_STATES.has(s.state))))
+      .then((r) =>
+        setRows(
+          r.shifts
+            .filter((s) => AWAITING_STATES.has(s.state))
+            /*
+             * OPENS FIRST, THEN OLDEST.
+             *
+             * An open gate means a driver is standing at the branch unable to start; a close can
+             * wait ten minutes. And with eight shifts pending, unsorted, a manager could not tell
+             * which had been waiting since six in the morning — so he opened them one at a time to
+             * find out. The list arrived in whatever order the query returned.
+             */
+            .sort((a, b) => {
+              const rank = (x: ShiftRow): number => (x.state === 'awaiting_open_approval' ? 0 : 1)
+              if (rank(a) !== rank(b)) return rank(a) - rank(b)
+              return (a.businessDate ?? '').localeCompare(b.businessDate ?? '')
+            }),
+        ),
+      )
       .catch((e: { error?: string }) => {
         setRows([])
         setError(e.error ?? 'error')
@@ -88,7 +110,7 @@ export function Queue({ onOpen }: { onOpen(shiftId: string): void }): ReactNode 
   if (rows.length === 0) {
     return (
       <Card>
-        <p className="py-8 text-center text-slate-400">{t.approval.queue}: —</p>
+        <p className="py-8 text-center text-slate-600">{t.approval.queueEmpty}</p>
       </Card>
     )
   }
@@ -109,9 +131,17 @@ export function Queue({ onOpen }: { onOpen(shiftId: string): void }): ReactNode 
             {t.shift.states[s.state as keyof typeof t.shift.states] ?? s.state}
           </Badge>
           <span className="font-medium">{driverName(s.driverId)}</span>
-          <span className="num text-sm text-slate-500">
+          <span className="num text-sm text-slate-600">
             {vehicleCode(s.vehicleId)} · #{s.shiftNo}
+            {s.businessDate ? ` · ${s.businessDate}` : ''}
           </span>
+          {/* How much work is on it — the difference between a two-order shift and a thirty-order
+              one, which is the whole of "which of these should I open first". */}
+          {s.state === 'pending_review' && s.orderCount !== undefined ? (
+            <span className="num text-sm text-slate-600">
+              {t.orders.title}: {s.orderCount}
+            </span>
+          ) : null}
           <Button variant="ghost" className="ms-auto inline-flex items-center gap-1.5" onClick={() => onOpen(s.id)}>
             {t.approval.review}
             {/* Forward chevron — points inline-end, mirrored in RTL. */}

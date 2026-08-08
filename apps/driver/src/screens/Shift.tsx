@@ -301,8 +301,20 @@ export function ShiftFlow({
           </Button>
         }
       >
+        {/* WHAT HE IS CARRYING. For six hours the running screen showed three controls and no
+            state at all — no float, no top-up, no order count — while the driver held the branch's
+            money, which is the very figure he will be reconciled against at close. Both were in
+            state already and used only for the closing preview. */}
         <Card>
-          <p className="text-center text-sm text-slate-500">{t.shift.runningHint}</p>
+          <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+            <span className="text-sm text-slate-600">{t.shift.cashFloat}</span>
+            <Money value={shift.floatText} className="font-semibold" />
+            <span className="text-sm text-slate-600">{t.shift.walletTopup}</span>
+            <Money value={shift.topupText} className="font-semibold" />
+          </div>
+        </Card>
+        <Card>
+          <p className="text-center text-sm text-slate-600">{t.shift.runningHint}</p>
         </Card>
         {/* «تبديل بطارية» (SRS §L seam): at a charging stop the driver swaps a depleted pack for a
             charged spare; both packs' readings are captured and the bike is re-fitted. */}
@@ -337,8 +349,12 @@ export function ShiftFlow({
       {/* Submitted, awaiting the manager. A missing order is now the manager's to add from the
           review — the driver no longer proposes one. */}
       <Card>
-        <p className="text-center text-sm text-slate-500">{t.shift.awaitingManager}</p>
+        <p className="text-center text-sm text-slate-600">{t.shift.awaitingManager}</p>
       </Card>
+      {/* A WAY ON. This app is used twice a day and the close used to end in a cul-de-sac: two
+          static cards, and the driver's only exits were the small «تسجيل الخروج» at the very top
+          or killing the app. */}
+      {onDiscarded ? <Button onClick={onDiscarded}>{t.shift.startAnother}</Button> : null}
     </Screen>
   )
 }
@@ -487,6 +503,14 @@ function StartPackage({
     }
   }
 
+  /** How long he has been standing at the branch waiting — so the screen is visibly alive. */
+  const [waitedSec, setWaitedSec] = useState(0)
+  useEffect(() => {
+    if (!awaiting) return
+    const timer = setInterval(() => setWaitedSec((s) => s + 1), 1000)
+    return () => clearInterval(timer)
+  }, [awaiting])
+
   // Poll for the branch manager's approval once submitted. On approval, read the float + top-up the
   // manager recorded so the order screen's live BR1 preview matches the ledger.
   useEffect(() => {
@@ -525,8 +549,18 @@ function StartPackage({
   if (awaiting) {
     return (
       <Screen title={t.shift.startPackage}>
-        <Card>
+        {/* A WAIT WITH INFORMATION IN IT. This was one amber line and nothing else: no sign the
+            manager had been told, no elapsed time, no evidence the check was still running — and
+            if the poll was failing (no signal) the screen looked exactly the same as a healthy
+            wait, forever. The only labelled way out was the destructive one. */}
+        <Card className="flex flex-col gap-2">
           <p className="text-center text-lg font-semibold text-amber-700">{t.shift.states.awaiting_open_approval}…</p>
+          <p className="num text-center text-sm text-slate-600">
+            {t.shift.waitingFor} {Math.floor(waitedSec / 60)}:{String(waitedSec % 60).padStart(2, '0')}
+          </p>
+          <div className="h-1.5 overflow-hidden rounded-full bg-slate-200">
+            <div className="h-full w-1/3 animate-[ash-slide_1.2s_ease-in-out_infinite] rounded-full bg-amber-500" />
+          </div>
         </Card>
         {shiftId ? <DiscardButton onDiscard={discardSelf} /> : null}
       </Screen>
@@ -1013,8 +1047,27 @@ function ReadStatus({ state }: { state: LogState }): ReactNode {
       </p>
     )
   }
-  if (state.kind === 'reading') return <p className="text-center text-sm text-slate-400">{t.shift.reading}…</p>
-  if (state.kind === 'failed') return <p className="text-center text-sm text-amber-700">{t.shift.readUnread}</p>
+  if (state.kind === 'reading') {
+    /*
+     * A READ TAKES 20–40 SECONDS on a cheap Android, and it was one line of `text-slate-400` —
+     * 2.6:1 against white, which is to say invisible in Damascus daylight. Meanwhile the tile
+     * above had already flipped to ✓ for its upload, so the driver reasonably concluded the work
+     * was done, scrolled past, and submitted a shift short by everything the reader was about to
+     * add. An indeterminate bar is honest here: Tesseract's progress covers only its own pass,
+     * and the glyph reader that follows it reports nothing.
+     */
+    return (
+      <div className="flex flex-col gap-1" role="status">
+        <p className="text-center text-sm font-medium text-slate-700">
+          {t.shift.reading}… <span className="text-slate-600">{t.shift.readingMayTake}</span>
+        </p>
+        <div className="h-1.5 overflow-hidden rounded-full bg-slate-200">
+          <div className="h-full w-1/3 animate-[ash-slide_1.2s_ease-in-out_infinite] rounded-full bg-brand" />
+        </div>
+      </div>
+    )
+  }
+  if (state.kind === 'failed') return <p className="text-center text-sm font-medium text-amber-800">{t.shift.readUnread}</p>
   return null
 }
 

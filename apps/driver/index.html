@@ -3,10 +3,31 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!-- Paints the Android status bar in the app's own navy instead of leaving it white. -->
+    <meta name="theme-color" content="#1b2a5c" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
     <title>ASH Delivery — السائق</title>
+    <style>
+      /* The FIRST thing a driver sees, twice a day, on a cheap phone over a slow connection.
+         It used to be a blank white screen for several seconds with nothing at all on it. Inline
+         because anything else is another request before the first paint. */
+      #root:empty::after {
+        content: 'ASH';
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #eef1f8;
+        color: #1b2a5c;
+        font: bold 2rem/1 system-ui, sans-serif;
+        letter-spacing: 0.1em;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
+    <noscript>يحتاج هذا التطبيق إلى تفعيل JavaScript.</noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

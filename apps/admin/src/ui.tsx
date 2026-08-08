@@ -1,4 +1,5 @@
 import { type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, useId } from 'react'
+import { groupThousands } from '@ash/client'
 
 /** Admin console primitives — desktop/tablet, denser than the driver app, logical properties only. */
 
@@ -42,7 +43,10 @@ export function Wordmark({ size = 34 }: { size?: number }): ReactNode {
 }
 
 export function Money({ value, className = '' }: { value: string; className?: string }): ReactNode {
-  return <span className={`num ${className}`}>{value}</span>
+  // GROUPED. Seven-digit figures were read by counting zeros — «1500000.00» against «150000.00» —
+  // at the moment a manager decides whether a shift balances. Display only: the wire string the
+  // caller holds is untouched, and every parse still happens on that.
+  return <span className={`num ${className}`}>{groupThousands(value)}</span>
 }
 
 export function Button({
@@ -170,13 +174,32 @@ export function Card({ title, children, className = '' }: { title?: string; chil
   )
 }
 
-export function Stat({ label, value, sub }: { label: string; value: ReactNode; sub?: ReactNode }): ReactNode {
-  return (
-    <div className="rounded-xl bg-white p-4 shadow-sm">
-      <div className="text-xs font-medium text-slate-500">{label}</div>
+export function Stat({
+  label,
+  value,
+  sub,
+  href,
+}: {
+  label: string
+  value: ReactNode
+  sub?: ReactNode
+  /** Makes the tile a link. A count of work waiting for YOU that cannot be acted on is a tease. */
+  href?: string
+}): ReactNode {
+  const body = (
+    <>
+      <div className="text-xs font-medium text-slate-600">{label}</div>
       <div className="mt-1 text-2xl font-bold">{value}</div>
-      {sub ? <div className="mt-1 text-xs text-slate-400">{sub}</div> : null}
-    </div>
+      {sub ? <div className="mt-1 text-xs text-slate-500">{sub}</div> : null}
+    </>
+  )
+  const cls = 'block rounded-xl bg-white p-4 shadow-sm'
+  return href ? (
+    <a href={href} className={`${cls} transition hover:shadow-md focus-visible:ring-2 focus-visible:ring-brand/40`}>
+      {body}
+    </a>
+  ) : (
+    <div className={cls}>{body}</div>
   )
 }
 
