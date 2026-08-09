@@ -1,5 +1,78 @@
 # PROGRESS
 
+## 2026-08-09 — a backup that has been restored from, and four ways the ledger could lose money
+
+A full three-way review (money, security, operations) of the whole platform. The UI work of the
+previous three days was real, but this is what it was sitting on top of.
+
+**All suites green (domain 327, client 76, driver 114, adapters 36, api 355), 6 guards green,
+migration 0017 applied to Neon, API + admin deployed and verified.** Two commits.
+
+**The system had no backup.** `infra/scripts/backup-loop.sh` (restic) belongs to a docker-compose
+stack that is not deployed — production is Vercel + Neon — and the "scheduled `pg_dump`" that
+`DEPLOY-VERCEL-NEON.md` promised did not exist in any form: no cron, no `crons` key, nothing.
+`scripts/backup-db.mjs` and `scripts/restore-db.mjs` now exist and, more to the point, **the restore
+has been run**. Every value is cast to text in SQL and stored as a JSON string, because money is
+`bigint` and a JSON number is an IEEE double — a backup that quietly rounds the ledger is worse than
+none.
+
+**The rehearsal is the deliverable, and it found four defects in the restore that no amount of
+reading would have.** Identity columns rejected explicit ids until `OVERRIDING SYSTEM VALUE`; the
+audit triggers fired on the load and collided with the rows being loaded; the deferred balance
+trigger checked per row instead of at COMMIT; and sequences were left behind the restored data, so
+the first insert after a restore would have collided. Each was fixed and re-verified.
+**Measured RTO ≈ 3 min 20 s** at current scale, recorded in `RUNBOOK.md` where it said "not yet
+measured" — with the honest warning attached that the loader sustains ~8 rows/sec over HTTPS from
+Damascus, which misses SRS §7's four-hour RTO at roughly a million rows.
+
+**Then four money defects, each verified in the source before a line was written, and each now
+pinned by a regression test proven to fail with its fix reverted.**
+
+*The ledger's idempotency guard poisoned its own transaction.* `PgLedgerRepo.post` caught a unique
+violation and `continue`d — inside a plain `BEGIN…COMMIT`. In PostgreSQL a statement error aborts
+the whole transaction: every later statement fails `25P02`, and **`COMMIT` on an aborted block
+silently rolls back while reporting success**. So a re-approved shift either 500'd on the next
+posting, or committed nothing while `post()` returned the rows it believed it had written. Now
+`ON CONFLICT DO NOTHING RETURNING id`, with an empty `rows` as the replay signal. Nothing could see
+this: `MemoryLedgerRepo` implements `continue` correctly because an array has no transaction to
+poison, and the conformance suite only ever posted one posting per call — exactly the shape where
+the difference cannot appear. It now posts a batch mixing a replay with new postings, against both
+adapters.
+
+*A double-tapped tranche disbursed twice.* The occurrence key was `tranches.length + 1`, recomputed
+per request, so a sequential retry was not a replay — it was tranche #2. SRS C-5 genuinely allows
+several tranches a day and the amounts may be identical, so the server cannot tell them apart; only
+the caller can. The wire now carries an `occurrenceKey` that the admin console mints per intended
+disbursement and clears **only on success**, so a retry after a timeout — the case where the server
+may well have committed — posts nothing.
+
+*The idempotency index only covered shifts.* It was partial, `WHERE shift_id IS NOT NULL`, so
+deposits, manual entries, expenses and journal **reversals** had no replay guard at all. The
+reversal route is the worst of them: its key is deterministic, written by someone who plainly
+expected this index to catch a replay. Migration 0017 makes it total over
+`COALESCE(shift_id::text,'')` — NULLs are distinct in a unique index, so a partial index on `IS NULL`
+would have guarded nothing.
+
+*A week could seal with unapproved shifts inside it.* `unapprovedShiftCount` was fed by a
+single-**day** query on the week's Sunday, so Monday–Saturday were invisible. Approving such a shift
+after the seal posts ~25 entries into a sealed week with `week_lock_id = NULL`, which can never be
+locked, because `week_locks_no_reopen` refuses to re-stamp `closed_at`. The old suite could not
+catch it: the harness clock sits on Tuesday, so every shift the tests create lands on the one day
+the query looked at.
+
+**What this review found that is still open.** No git remote — GitHub refuses to create repositories
+for this account under trade-control restrictions, so the code exists on one machine and
+`.github/workflows/*` has never executed once. Evidence photos still have exactly one copy. And the
+security pass is not started: 2FA enrolment can be overwritten with only a password, `GET /audit`
+returns password hashes and plaintext TOTP secrets, there is no rate limiting and no helmet, and
+there are three cross-branch write holes.
+
+**See it in 2 minutes.** `node scripts/backup-db.mjs` writes `backups/<stamp>/` with a manifest and
+one gzipped JSONL per table; `node scripts/restore-db.mjs <dir> --to <scratch-branch-url>` puts it
+back and refuses outright if the target's migration ledger differs from the backup's.
+
+---
+
 ## 2026-08-08 — the digits are read, and an order stops pretending to have a number
 
 **All suites green (domain 327, client 53, adapters 34, driver 87, api 348), 6 guards green. API and
