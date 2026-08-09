@@ -1,4 +1,4 @@
-import { type ReactNode, useCallback, useEffect, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useState, useRef } from 'react'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { Badge, Button, Card, Field, MoneyInput, Pending, Select, TextInput } from '../ui.tsx'
@@ -142,6 +142,8 @@ function LiveRow({
   const [note, setNote] = useState('')
   const [kind, setKind] = useState<'float' | 'topup'>('float')
   const [amount, setAmount] = useState('')
+  /** Survives re-renders and failed attempts; cleared only once the money is actually out. */
+  const trancheKey = useRef<string | null>(null)
   const [reason, setReason] = useState('')
   const [odometerKm, setOdometerKm] = useState('')
   const [cashDeclared, setCashDeclared] = useState('')
@@ -167,8 +169,21 @@ function LiveRow({
   const disburse = async (): Promise<void> => {
     setBusy(true)
     setErr(null)
+    /*
+     * ONE KEY PER INTENDED DISBURSEMENT, minted here and REUSED on every retry of it.
+     *
+     * The server cannot tell a second tranche from a repeated one — SRS C-5 allows several a day
+     * and the amounts may be identical — so it used to key the ledger on `tranches.length + 1`,
+     * recomputed per request. A double tap on a slow office connection was therefore tranche #2:
+     * twice the cash out, and BR1 then expecting money back the driver never received.
+     *
+     * The key is cleared only when a disbursement SUCCEEDS, so a retry after a timeout — the case
+     * where the server may well have committed already — carries the same key and posts nothing.
+     */
+    const key = (trancheKey.current ??= crypto.randomUUID())
     try {
-      await api.addTranche(shift.id, { kind, amount })
+      await api.addTranche(shift.id, { kind, amount, occurrenceKey: key })
+      trancheKey.current = null
       setPanel('none')
       setAmount('')
       onChanged()

@@ -221,6 +221,10 @@ export class MemoryShiftRepo implements ShiftRepo {
   async listByBranchAndDate(branchId: string, businessDate: CalendarDate): Promise<ShiftRecord[]> {
     return [...this.rows.values()].filter((s) => s.branchId === branchId && s.businessDate === businessDate)
   }
+
+  async listByBranchAndDateRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftRecord[]> {
+    return [...this.rows.values()].filter((s) => s.branchId === branchId && s.businessDate >= from && s.businessDate <= to)
+  }
   async listApprovedForDriverOnDate(driverId: string, businessDate: CalendarDate): Promise<ShiftRecord[]> {
     return [...this.rows.values()].filter(
       (s) => s.driverId === driverId && s.businessDate === businessDate && (s.state === 'approved' || s.state === 'week_locked'),

@@ -717,7 +717,7 @@ export class ApiClient {
 
   // ── Mid-day float / top-up tranche (SRS C-5) ──────────────────────────────────────────────
   /** A manager disburses a second (or later) cash float or wallet top-up to a live shift. */
-  addTranche(shiftId: string, body: { kind: 'float' | 'topup'; amount: string }) {
+  addTranche(shiftId: string, body: { kind: 'float' | 'topup'; amount: string; occurrenceKey?: string }) {
     return this.post<{ id: string; kind: string }>(`/shifts/${shiftId}/tranche`, body)
   }
 

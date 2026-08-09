@@ -1284,7 +1284,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     }
 
     const { start, end } = weekClosedOn(body.closeDate)
-    const shifts = await deps.shifts.listByBranchAndDate(branchId, start)
+    // The WHOLE week, not the Sunday. A single-day query left Monday-to-Saturday invisible, so a
+    // week could seal with a shift still in review — and approving it afterwards posted entries
+    // into the sealed week with week_lock_id = NULL, which nothing can ever lock.
+    const shifts = await deps.shifts.listByBranchAndDateRange(branchId, start, end)
     const closedStarts = await deps.weekLocks.listClosedStarts(branchId)
     const existing = await deps.weekLocks.find(branchId, start)
 

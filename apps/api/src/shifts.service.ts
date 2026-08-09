@@ -615,7 +615,7 @@ export async function addTranche(
   deps: Deps,
   actor: Actor,
   shiftId: string,
-  input: { kind: 'float' | 'topup'; amount: Minor },
+  input: { kind: 'float' | 'topup'; amount: Minor; occurrenceKey?: string | undefined },
 ): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
   // Money the driver is out with: only while he is live. Not before open, not after review.
@@ -626,8 +626,15 @@ export async function addTranche(
 
   const existing = input.kind === 'float' ? shift.floatTranches : shift.topupTranches
   const trancheNo = existing.length + 1
+  /*
+   * The CLIENT's key when it sent one. The ordinal is not an idempotency key: it is recomputed
+   * from the current row on every request, so a retry lands on the next number and disburses
+   * again. SRS C-5 genuinely allows several tranches a day, so the server cannot tell a second
+   * disbursement from a repeated one — only the caller knows, and now it says.
+   */
+  const key = input.occurrenceKey ?? String(trancheNo)
   const posting =
-    input.kind === 'float' ? floatOut(shift.driverId, input.amount, trancheNo) : walletTopup(shift.driverId, input.amount, trancheNo)
+    input.kind === 'float' ? floatOut(shift.driverId, input.amount, key) : walletTopup(shift.driverId, input.amount, key)
 
   const fxDayId = await ensureFxDay(deps, shift.businessDate)
   await deps.ledger.post(shift.branchId, [posting], {

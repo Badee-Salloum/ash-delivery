@@ -137,3 +137,53 @@ describe('mid-day tranche (C-5)', () => {
     expect(res.json().error).toBe('shift_not_open_for_tranche')
   })
 })
+
+/**
+ * The retry that used to hand out the cash twice.
+ *
+ * The occurrence key was derived from `tranches.length + 1`, recomputed on every request — so a
+ * SEQUENTIAL retry was never a replay, it was tranche #2. The manager taps twice on a slow office
+ * connection, or the app retries a request that timed out after the server committed, and the
+ * driver is debited 100,000 for 50,000 he received once. BR1 then expects money back that was
+ * never handed over, and the shift cannot be closed at all.
+ *
+ * SRS C-5 genuinely allows several tranches a day, so the server cannot tell a second
+ * disbursement from a repeated one by looking at the amount. Only the caller knows. So the caller
+ * says, with a key it mints once per intended disbursement and reuses on every retry.
+ */
+describe('a tranche sent twice', () => {
+  beforeEach(() => {
+    seq = 0
+  })
+
+  it('disburses ONCE when the client sends the same occurrenceKey', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await openShift(driver, manager)
+
+    const body = { kind: 'float', amount: sypStr(50_000), occurrenceKey: 'tap-abc123' }
+    const first = await post(manager, `/shifts/${id}/tranche`, body)
+    const retry = await post(manager, `/shifts/${id}/tranche`, body)
+    expect(first.statusCode, first.body).toBe(201)
+    expect(retry.statusCode, retry.body).toBe(201) // idempotent, not an error
+
+    const floats = h.deps.ledger.entries.filter((e) => e.eventType === 'float_out')
+    // Open posted one; the tapped disbursement posted one, however many times it was sent.
+    expect(floats).toHaveLength(2)
+    // 100,000 at open + 50,000 once. 200,000 here would be the driver owing money he never got.
+    expect(await cashOf(DRIVER_ID)).toBe(15_000_000n)
+  })
+
+  it('still allows a genuine SECOND tranche under its own key', async () => {
+    // The fix must not break C-5: two real disbursements are two keys, and both must post.
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await openShift(driver, manager)
+
+    await post(manager, `/shifts/${id}/tranche`, { kind: 'float', amount: sypStr(50_000), occurrenceKey: 'tap-1' })
+    await post(manager, `/shifts/${id}/tranche`, { kind: 'float', amount: sypStr(30_000), occurrenceKey: 'tap-2' })
+
+    expect(h.deps.ledger.entries.filter((e) => e.eventType === 'float_out')).toHaveLength(3)
+    expect(await cashOf(DRIVER_ID)).toBe(18_000_000n) // 100,000 + 50,000 + 30,000
+  })
+})

@@ -471,6 +471,16 @@ export interface ShiftRepo {
    */
   delete(id: string): Promise<void>
   listByBranchAndDate(branchId: string, businessDate: CalendarDate): Promise<ShiftRecord[]>
+  /**
+   * Every shift in a DATE RANGE — what a week close has to look at.
+   *
+   * The close used to call `listByBranchAndDate(branchId, start)`, a single-DAY query, so
+   * `unapprovedShiftCount` only ever saw the week's Sunday and Monday-to-Saturday were invisible.
+   * A week sealed with a shift still in review; approving it afterwards posted entries into the
+   * sealed week carrying `week_lock_id = NULL`, permanently unlockable — `fin_seal_week` cannot
+   * be re-run, because `week_locks_no_reopen` refuses to re-stamp `closed_at`.
+   */
+  listByBranchAndDateRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftRecord[]>
   listApprovedForDriverOnDate(driverId: string, businessDate: CalendarDate): Promise<ShiftRecord[]>
 }
 

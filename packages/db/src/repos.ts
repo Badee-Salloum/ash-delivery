@@ -120,34 +120,52 @@ export class PgLedgerRepo implements LedgerRepo {
         for (const l of posting.lines) (l.side === 'D' ? (d += l.amount) : (c += l.amount))
         if (d !== c) throw new Error(`unbalanced posting ${posting.eventType}: D ${d} <> C ${c}`)
 
-        let entryId: number
-        try {
-          const res = await client.query<{ id: string }>(
-            `INSERT INTO journal_entries
-               (branch_id, event_type, shift_id, occurrence_key, business_date, posting_date,
-                week_start_date, fx_day_id, reason, created_by)
-             VALUES ($1, $2::ledger_event, $3, $4, $5, $6, $7, $8, $9, $10)
-             RETURNING id`,
-            [
-              branchId,
-              posting.eventType,
-              meta.shiftId,
-              posting.occurrenceKey,
-              meta.businessDate,
-              meta.postingDate,
-              meta.weekStartDate,
-              meta.fxDayId,
-              meta.reason ?? null,
-              meta.createdBy,
-            ],
-          )
-          entryId = Number(res.rows[0]!.id)
-        } catch (err) {
-          // The idempotency index did its job: this exact event already posted. Writing nothing
-          // and carrying on is the whole point — a retried approval must not double-post.
-          if (isPgError(err, PG.UNIQUE_VIOLATION)) continue
-          throw err
-        }
+        /*
+         * ON CONFLICT DO NOTHING, not a caught unique violation.
+         *
+         * This used to `try { INSERT } catch (23505) { continue }`. In PostgreSQL a statement
+         * error ABORTS THE WHOLE TRANSACTION: every later statement fails with 25P02, and — the
+         * part that made it dangerous — `COMMIT` on an aborted block silently performs a ROLLBACK
+         * and reports success. Catching the error does not recover the transaction; only
+         * `ROLLBACK TO SAVEPOINT` would, and `withTransaction` opens none.
+         *
+         * So a replayed approval had two failure modes, both real. If the duplicate came first,
+         * the NEXT posting raised 25P02, which is not a unique violation, so it was rethrown and
+         * the manager got a 500 on a shift that could then never be approved. If the duplicate
+         * came later, everything before it was rolled back while this function still RETURNED the
+         * rows it believed it had written — money reported as posted that was not.
+         *
+         * Neither was visible in tests: `MemoryLedgerRepo` implements the `continue` correctly
+         * because an array has no transaction to poison, and the Postgres conformance suite only
+         * ever posted one posting per call — precisely the case where the difference cannot show.
+         *
+         * An empty `rows` is now the replay signal, no exception is raised, and the transaction
+         * stays healthy. `DO NOTHING` with no conflict target covers the idempotency index.
+         */
+        const res = await client.query<{ id: string }>(
+          `INSERT INTO journal_entries
+             (branch_id, event_type, shift_id, occurrence_key, business_date, posting_date,
+              week_start_date, fx_day_id, reason, created_by)
+           VALUES ($1, $2::ledger_event, $3, $4, $5, $6, $7, $8, $9, $10)
+           ON CONFLICT DO NOTHING
+           RETURNING id`,
+          [
+            branchId,
+            posting.eventType,
+            meta.shiftId,
+            posting.occurrenceKey,
+            meta.businessDate,
+            meta.postingDate,
+            meta.weekStartDate,
+            meta.fxDayId,
+            meta.reason ?? null,
+            meta.createdBy,
+          ],
+        )
+        // Already posted. Writing nothing and carrying on is the whole point — a retried
+        // approval must not double-post — and now the rest of the batch still posts.
+        if (res.rows.length === 0) continue
+        const entryId = Number(res.rows[0]!.id)
 
         for (const line of posting.lines) {
           const fundId = await ensureFund(client, branchId, line.fund)

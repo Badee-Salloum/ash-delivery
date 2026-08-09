@@ -278,6 +278,19 @@ export const forceCloseRequest = z.object({
 export const addTrancheRequest = z.object({
   kind: z.enum(['float', 'topup']),
   amount: moneySchema,
+  /**
+   * ONE KEY PER INTENDED DISBURSEMENT, minted by the client before it first sends.
+   *
+   * Without it the server derived the ledger's occurrence key from `tranches.length + 1`, so a
+   * SEQUENTIAL retry — the manager tapping twice on a slow office connection, or the app retrying
+   * a timed-out request — was not a replay at all: it was tranche #2. Two entries, twice the cash
+   * out of `office_cash`, and BR1 then expecting the driver to return money he never received,
+   * which makes the shift unclosable.
+   *
+   * Optional so an older client still posts; when absent the old ordinal is used and the old risk
+   * remains, which is why the admin console always sends one.
+   */
+  occurrenceKey: z.string().min(1).max(64).optional(),
 })
 
 /**

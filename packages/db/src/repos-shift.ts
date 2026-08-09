@@ -182,6 +182,10 @@ export class PgShiftRepo implements ShiftRepo {
     return this.load('s.branch_id = $1 AND s.business_date = $2', [branchId, businessDate])
   }
 
+  async listByBranchAndDateRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftRecord[]> {
+    return this.load('s.branch_id = $1 AND s.business_date BETWEEN $2 AND $3', [branchId, from, to])
+  }
+
   /** Only ever called for a shift that never opened; the route enforces that. */
   async delete(id: string): Promise<void> {
     await this.pool.query('DELETE FROM shifts WHERE id = $1', [id])

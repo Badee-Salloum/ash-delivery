@@ -182,3 +182,46 @@ describe('a clean week closes and seals its entries', () => {
     expect((second.json().blockers as Array<{ kind: string }>).map((b) => b.kind)).toContain('already_closed')
   })
 })
+
+/**
+ * The week that sealed with an unapproved shift inside it.
+ *
+ * `unapprovedShiftCount` was fed by `listByBranchAndDate(branchId, start)` — a single-DAY query on
+ * the week's Sunday. Monday through Saturday were invisible, so a shift left in review on the
+ * Wednesday raised no blocker at all. The week sealed; `fin_seal_week` stamped every entry that
+ * existed; and when the manager approved that Wednesday shift the next morning it posted about
+ * twenty-five entries INTO the sealed week carrying `week_lock_id = NULL`. Those can never be
+ * locked — `week_locks_no_reopen` refuses to re-stamp `closed_at` — so the sealed week's trial
+ * balance, driver payables and company revenue all move after the seal, permanently.
+ *
+ * The old test suite could not catch this: the harness clock sits on Tuesday the 21st, so `start`
+ * is the 19th and every shift the tests create lands on it. The bug was invisible precisely
+ * because the fixture happened to use the one day the query looked at.
+ */
+describe('a shift left unapproved on a weekday', () => {
+  /** A shift in review on the WEDNESDAY — a day the old single-day query never looked at. */
+  async function shiftInReviewOn(businessDate: string): Promise<void> {
+    const [any] = [...h.deps.shifts.rows.values()]
+    await h.deps.shifts.create({
+      ...(any ?? ({} as never)),
+      id: `00000000-0000-4000-8000-weekday0001`,
+      branchId: BRANCH,
+      businessDate,
+      weekStartDate: '2026-07-19',
+      state: 'pending_review',
+    })
+  }
+
+  it('blocks the close, on a day the Sunday-only query could not see', async () => {
+    await countEveryDay()
+    await confirmRates()
+    await shiftInReviewOn('2026-07-22') // Wednesday
+
+    const admin = await h.loginAs('sysadmin')
+    const res = await post(admin, '/weeks/close', { closeDate: CLOSE_DATE, branchId: BRANCH })
+
+    expect(res.statusCode, res.body).toBe(422)
+    expect(res.json().error).toBe('week_not_closable')
+    expect(JSON.stringify(res.json())).toMatch(/unapproved/i)
+  })
+})

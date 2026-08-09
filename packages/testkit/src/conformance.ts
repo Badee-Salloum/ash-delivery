@@ -90,6 +90,57 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           await ctx.cleanup?.(deps)
         }
       })
+
+      /**
+       * A BATCH WHERE ONLY SOME POSTINGS ARE REPLAYS — the case an approval actually retries.
+       *
+       * Every test above posts ONE posting per call, which is exactly the shape that cannot see
+       * the defect this pins. The Postgres adapter used to `try { INSERT } catch (23505)
+       * { continue }`, and in PostgreSQL a statement error aborts the WHOLE transaction: the next
+       * posting failed with 25P02, and `COMMIT` on an aborted block silently rolls back while
+       * reporting success. So a re-approved shift either 500'd on the second posting or wrote
+       * nothing at all while `post()` returned the rows it believed it had written.
+       *
+       * The in-memory adapter was always correct here — an array has no transaction to poison —
+       * which is why thirty API test files were blind to it. Running this against BOTH is the
+       * whole point of a conformance suite.
+       */
+      it('a batch mixing a replay with new postings still writes the new ones', async () => {
+        const deps = await fresh()
+        try {
+          await deps.ledger.post(BRANCH, [transfer('1', syp(10_000))], META)
+
+          // '1' is already posted; '2' and '3' are not. The replay is FIRST, so an aborted
+          // transaction would take the other two down with it.
+          const written = await deps.ledger.post(
+            BRANCH,
+            [transfer('1', syp(10_000)), transfer('2', syp(20_000)), transfer('3', syp(30_000))],
+            META,
+          )
+
+          expect(written).toHaveLength(2)
+          expect(await deps.ledger.listByShift(SHIFT)).toHaveLength(3)
+          // 10 + 20 + 30, with the replay contributing nothing: the figure is wrong in BOTH
+          // failure modes — 10,000 if everything rolled back, 70,000 if the replay double-posted.
+          expect(await deps.ledger.fundBalance(BRANCH, 'driver_cash:driver-1')).toBe(syp(60_000))
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('what post() RETURNS is what was actually committed', async () => {
+        // The silent half of the same defect: rows reported as written that a rolled-back
+        // transaction never kept. Whatever comes back must be readable afterwards.
+        const deps = await fresh()
+        try {
+          await deps.ledger.post(BRANCH, [transfer('1')], META)
+          const written = await deps.ledger.post(BRANCH, [transfer('1'), transfer('2')], META)
+          const stored = await deps.ledger.listByShift(SHIFT)
+          for (const w of written) expect(stored.some((s) => s.id === w.id)).toBe(true)
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
     })
 
     describe('double-entry balance', () => {

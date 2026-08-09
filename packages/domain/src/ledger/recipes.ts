@@ -128,19 +128,23 @@ const C = (fund: FundRef, amount: Minor, role?: string): PostingLine =>
 // ── Gate postings ─────────────────────────────────────────────────────────────────────────
 
 /** Cash float handed to the driver at open. One posting per tranche (C-5). */
-export function floatOut(driverId: string, amount: Minor, trancheNo = 1): Posting {
+export function floatOut(driverId: string, amount: Minor, tranche: string | number = 1): Posting {
   return assertBalanced({
     eventType: 'float_out',
-    occurrenceKey: String(trancheNo),
+    // A KEY, not an ordinal. An ordinal is recomputed from the current row on every request, so a
+    // retried disbursement lands on the next number and hands out the cash twice; only the caller
+    // knows whether this is a second tranche (SRS C-5 allows several) or the same one again.
+    occurrenceKey: String(tranche),
     lines: [D({ kind: 'driver_cash', driverId }, amount), C({ kind: 'office_cash' }, amount)],
   })
 }
 
 /** Wallet top-up at open. One posting per tranche (C-5). */
-export function walletTopup(driverId: string, amount: Minor, trancheNo = 1): Posting {
+export function walletTopup(driverId: string, amount: Minor, tranche: string | number = 1): Posting {
   return assertBalanced({
     eventType: 'wallet_topup',
-    occurrenceKey: String(trancheNo),
+    /** See {@link floatOut}: the caller's key, because only the caller can tell a retry apart. */
+    occurrenceKey: String(tranche),
     lines: [D({ kind: 'driver_wallet', driverId }, amount), C({ kind: 'office_wallet' }, amount)],
   })
 }
