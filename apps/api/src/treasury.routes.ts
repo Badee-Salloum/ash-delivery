@@ -3,8 +3,8 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { CashCountLine, CashCountRecord, Deps } from '@ash/contracts'
 import { createCashCountRequest, manualEntryRequest, moneySchema, serializeMoney } from '@ash/contracts'
-import { type Posting, assertBalanced, fundRefFromCode, minor, reverse, weekStartFor } from '@ash/domain'
-import { ServiceError, ensureFxDay, todayFor } from './shifts.service.ts'
+import { type Posting, assertBalanced, fundRefFromCode, isDateLocked, minor, reverse, weekStartFor } from '@ash/domain'
+import { ServiceError, assertWeekOpen, ensureFxDay, todayFor } from './shifts.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
 
 /**
@@ -45,6 +45,9 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     const body = createCashCountRequest.parse(req.body)
     const branchId = resolveBranch(req)
     const businessDate = body.businessDate ?? todayFor(deps)
+    // Not a ledger entry, but a sealed day's count is part of what the seal certified (E-5 is a
+    // close blocker). Back-dating one into a closed week rewrites evidence for a settled period.
+    await assertWeekOpen(deps, branchId, businessDate)
 
     const lines: CashCountLine[] = []
     for (const line of body.lines) {
@@ -145,6 +148,9 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     })
 
     const businessDate = body.businessDate ?? todayFor(deps)
+    // BR7. `businessDate` is client-supplied here, so this is the route a manual entry would use to
+    // walk straight into a week the sysadmin already sealed.
+    await assertWeekOpen(deps, branchId, businessDate)
     const fxDayId = await ensureFxDay(deps, businessDate)
     const [entry] = await deps.ledger.post(branchId, [posting], {
       shiftId: null,
@@ -192,19 +198,43 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
 
       // The correction posts on TODAY's date while keeping the original business date, so the
       // day it belongs to and the day it was fixed are both visible.
+      //
+      // UNLESS the original's week has been sealed. The comment above this route asserts «a locked
+      // week is NEVER edited — the database refuses it twice over», and until migration 0018 that
+      // was simply not true of an INSERT: both of 0006's guards key off `week_lock_id`, which is
+      // NULL on a new row. Copying `original.businessDate` here would have put the correction back
+      // inside the sealed week, moving totals the owner already has a printed report for.
+      //
+      // So a correction against a sealed week is re-homed into the current open week, whole: both
+      // dates and the FX day move together, because BR6 applies one rate to a whole day and a
+      // correction booked today is today's transaction. That IS SRS E-6's «قيد ظاهر مؤرَّخ» — a
+      // visible, dated correction entry — and it is ordinary prior-period accounting: you do not
+      // un-earn revenue inside a closed period, you book the correction in the open one. The link
+      // back is not lost: `reversal-of-<id>` is the occurrence key, and the reason is required.
       const postingDate = todayFor(deps)
-      const fxDayId = await ensureFxDay(deps, original.businessDate)
+      const closed = await deps.weekLocks.listClosedStarts(branchId)
+      const sealed = isDateLocked(original.businessDate, closed)
+      // Re-homing needs somewhere open to land. In production today's week always is — the close
+      // route only ever seals the week BEFORE the closing Sunday — but nothing in `checkWeekClose`
+      // actually forbids sealing a week that has not ended, so this is checked rather than assumed.
+      // Silently posting into a sealed week is the one outcome that must not happen.
+      if (sealed) await assertWeekOpen(deps, branchId, postingDate)
+      const businessDate = sealed ? postingDate : original.businessDate
+      const weekStartDate = sealed ? weekStartFor(postingDate) : original.weekStartDate
+      const fxDayId = await ensureFxDay(deps, businessDate)
       const [entry] = await deps.ledger.post(branchId, [posting], {
         shiftId: null,
-        businessDate: original.businessDate,
+        businessDate,
         postingDate,
-        weekStartDate: original.weekStartDate,
+        weekStartDate,
         fxDayId,
         createdBy: req.actor!.userId,
         reason,
       })
 
-      return reply.code(201).send({ reversalEntryId: entry?.id ?? null, reversalOf: entryId, postingDate })
+      return reply
+        .code(201)
+        .send({ reversalEntryId: entry?.id ?? null, reversalOf: entryId, postingDate, businessDate, rehomed: sealed })
     },
   )
 

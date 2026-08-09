@@ -36,6 +36,7 @@ import {
   evaluateBr1,
   floatOut,
   floatReturn,
+  isDateLocked,
   minWalletBalance,
   minor,
   postingsForApproval,
@@ -146,8 +147,76 @@ const manualShareTotals = (rows: readonly ShiftOrderRecord[]): { driverShare: Mi
   }
 }
 
+/**
+ * What the day's earlier shifts were ACTUALLY paid — read back out of the ledger, never recomputed.
+ *
+ * This is `trueUp`'s `alreadyPosted`, and the difference matters. It used to be
+ * `splitDay(priorYallagoFees, rule)` where `rule` is the one resolved for THIS shift — its business
+ * date and **its vehicle's type**. F-4 makes tier tables per vehicle type, so a driver who takes a
+ * bike in the morning and a car in the evening has his morning re-priced under the evening's table,
+ * and the delta is the difference between two numbers that were never both true. Measured on the
+ * real HTTP stack: 12 orders on a bike (35% table) then 10 on a car (flat 50% table) leaves the
+ * driver **900,000 minor units — 9,000 new SYP — short**, and the company over-credited by exactly
+ * the same, on one driver, on one day. A rule republished between two approvals does it too.
+ *
+ * The ledger is the only record of what was actually paid, so it is what we read. Summing the
+ * `share_split` roles across the day's earlier shifts — signed by side, so a `correction` reversal
+ * nets itself out — gives what those shifts credited each party. The manual jobs come back off:
+ * their shares are per-order money a manager typed, folded into the same credit lines at approval,
+ * and the tier never allocated them.
+ *
+ * `driver_day_shares` would be the other place to keep this. It stays unwritten deliberately: it
+ * would be a second record of the same fact, and two records of one fact eventually disagree. It is
+ * a reporting projection for Bundle 2, not the source of truth.
+ */
+async function postedDayShares(
+  deps: Deps,
+  priorShifts: readonly ShiftRecord[],
+): Promise<{ driver: Minor; company: Minor; yalago: Minor }> {
+  let driver = 0n
+  let company = 0n
+  let yalago = 0n
+  for (const prior of priorShifts) {
+    for (const entry of await deps.ledger.listByShift(prior.id)) {
+      for (const line of entry.lines) {
+        // These three funds are credit-side: a credit pays the party, a debit takes it back.
+        const signed = line.side === 'C' ? line.amount : -line.amount
+        if (line.role === 'driver_share') driver += signed
+        else if (line.role === 'company_share') company += signed
+        else if (line.role === 'yalago_share') yalago += signed
+      }
+    }
+    const manual = manualShareTotals(await deps.orders.listByShift(prior.id))
+    driver -= manual.driverShare
+    company -= manual.companyShare
+  }
+  return { driver: minor(driver), company: minor(company), yalago: minor(yalago) }
+}
+
 export function todayFor(deps: Deps): CalendarDate {
   return businessDateFor(deps.clock.nowMs(), deps.clock.offsetMinutes())
+}
+
+/**
+ * BR7's gate on every ledger write: a sealed week takes no new postings.
+ *
+ * Migration 0018 enforces this in the database, which is the guard that matters — it survives the
+ * psql session someone opens at 2am, and it is where the invariant belongs. This is the other half:
+ * it turns a 25006 into a 409 with a cause the UI can name, instead of letting the manager who
+ * back-dated an expense by one day see «خطأ داخلي».
+ *
+ * `isDateLocked` has existed in the domain since the week module was written and had no caller at
+ * all — the check it describes was never performed anywhere. This is that caller.
+ */
+export async function assertWeekOpen(
+  deps: Deps,
+  branchId: string,
+  businessDate: CalendarDate,
+): Promise<void> {
+  const closed = await deps.weekLocks.listClosedStarts(branchId)
+  if (isDateLocked(businessDate, closed)) {
+    throw new ServiceError(409, 'week_locked', { businessDate, weekStart: weekStartFor(businessDate) })
+  }
 }
 
 /**
@@ -1360,19 +1429,12 @@ export async function approveClose(
   const vehicle = await deps.directory.vehicle(shift.vehicleId)
   const rule = await resolveTierRule(deps, shift.businessDate, vehicle?.vehicleTypeId ?? null)
 
-  // What the day's earlier shifts were already paid, under the SAME rule — so the true-up is correct
-  // for whole AND marginal modes and for a mid-day band crossing. `splitDay` handles both modes.
-  const priorYallagoFees = priorOrders.filter((o) => o.kind !== 'manual').map((o) => o.fee)
-  const alreadyPosted =
-    priorYallagoFees.length > 0
-      ? splitDay(priorYallagoFees, rule)
-      : { driverShare: minor(0n), companyShare: minor(0n), yalagoShare: minor(0n) }
+  // What the day's earlier shifts were already paid — READ from the ledger, never recomputed under
+  // this shift's rule. See `postedDayShares`: recomputing mis-pays a driver who changed vehicle type
+  // mid-day, or whose tier rule was republished between two approvals.
+  const alreadyPosted = await postedDayShares(deps, priorShifts.filter((s) => s.id !== shift.id))
 
-  const settlement = trueUp(dayFees, rule, {
-    driver: alreadyPosted.driverShare,
-    company: alreadyPosted.companyShare,
-    yalago: alreadyPosted.yalagoShare,
-  })
+  const settlement = trueUp(dayFees, rule, alreadyPosted)
 
   // The tier settles Yallago's work; the manual jobs on THIS shift carry the shares a manager typed
   // and validated (driverShare + companyShare === fee). Adding them here is what lets `shareSplit`
@@ -1469,12 +1531,10 @@ async function shiftSplitFor(deps: Deps, shift: ShiftRecord, todaysOrders: Shift
   const dayFees = [...priorOrders, ...todaysOrders].filter((o) => o.kind !== 'manual').map((o) => o.fee)
   const vehicle = await deps.directory.vehicle(shift.vehicleId)
   const rule = await resolveTierRule(deps, shift.businessDate, vehicle?.vehicleTypeId ?? null)
-  const priorYallagoFees = priorOrders.filter((o) => o.kind !== 'manual').map((o) => o.fee)
-  const alreadyPosted =
-    priorYallagoFees.length > 0
-      ? splitDay(priorYallagoFees, rule)
-      : { driverShare: minor(0n), companyShare: minor(0n), yalagoShare: minor(0n) }
-  const s = trueUp(dayFees, rule, { driver: alreadyPosted.driverShare, company: alreadyPosted.companyShare, yalago: alreadyPosted.yalagoShare })
+  // Read what was paid, do not recompute it — the same reason as approveClose. A force-close on the
+  // second shift of a mixed-vehicle day would otherwise mis-pay exactly as a normal close did.
+  const alreadyPosted = await postedDayShares(deps, priorShifts.filter((p) => p.id !== shift.id))
+  const s = trueUp(dayFees, rule, alreadyPosted)
   // Plus this shift's manual jobs, whose shares were typed and validated against their fees.
   const manual = manualShareTotals(await deps.orders.listByShift(shift.id))
   return {

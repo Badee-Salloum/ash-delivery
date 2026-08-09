@@ -276,6 +276,36 @@ export function walletAdjustment(
  * `splitBlock()` guarantees driver + company + yalago === feeTotal exactly, for arbitrary
  * integer fees. That is the same exhaustiveness invariant acceptance criterion #5 asks for, and
  * it is why the company holds the rounding remainder rather than anyone else (BR4).
+ *
+ * ── A share may be NEGATIVE, and on an ordinary day it IS ────────────────────────────────
+ * The caller does not hand this function a day's shares. It hands it the day's `trueUp` DELTAS,
+ * which are `sub()` of two allocations and therefore SIGNED — because decision D-6 makes the tier
+ * band a property of the whole day, so a later shift restates the earlier ones («تسوية شريحة اليوم»).
+ *
+ * In **whole-amount mode** — the configured default — the company's delta goes negative on every
+ * band crossing, by construction. Yallago's 20% is fixed and the driver's percentage rises, so the
+ * company's percentage is what falls, and BR4 says exactly that: *tier changes come only out of the
+ * company's side*. A driver on 14 orders at 5,000 crossing to 15:
+ *
+ *     prior  driver 24,500  company 31,500  yalago 14,000   (35%)
+ *     day    driver 30,000  company 30,000  yalago 15,000   (40%)
+ *     delta         +5,500          −1,500          +1,000
+ *
+ * Dropping a non-positive line left debits and credits unequal by that amount — `D 500000 <> C
+ * 650000` — and `assertBalanced` threw `UnbalancedPostingError`. That is a 500 in the branch
+ * manager's face at approval, on the second shift of any day that crosses a band: precisely the
+ * case the whole day-tier true-up exists to handle, and the shift could not be approved at all.
+ * Marginal mode never produces a negative delta, which is why the mode switch hid this.
+ *
+ * A negative share is a **debit of that account**, not a line to be dropped. All three are
+ * naturally credit-side — `driver_share_payable` is a liability, `company_revenue` and
+ * `yalago_income` are revenue — so debiting one is "give back what was over-credited", which is the
+ * arithmetic meaning of a downward restatement. The three still sum to `feeTotal` (asserted above),
+ * so moving −d out of the credit column and +|d| into the debit column changes both totals by the
+ * same |d| and the posting stays balanced by construction.
+ *
+ * A ZERO share is omitted, and must be: `assertBalanced` requires every amount to be strictly
+ * positive, because direction is carried by `side` and a zero has no direction to carry.
  */
 export function shareSplit(driverId: string, totals: FeeTotals, split: BlockSplit, occurrenceKey = '1'): Posting {
   const allocated = add(add(split.driverShare, split.companyShare), split.yalagoShare)
@@ -284,12 +314,18 @@ export function shareSplit(driverId: string, totals: FeeTotals, split: BlockSpli
       `share split does not exhaust the fee total: ${allocated} allocated vs ${totals.feeTotal} earned`,
     )
   }
-  const lines: PostingLine[] = [D({ kind: 'fee_earned' }, totals.feeTotal)]
-  if (split.driverShare > 0n) {
-    lines.push(C({ kind: 'driver_share_payable', driverId }, split.driverShare, 'driver_share'))
+  const lines: PostingLine[] = []
+  // A restatement that adds no new fees is a real posting — shares move between parties while
+  // `fee_earned` does not. `postingsForApproval` never calls with zero today, but a zero-amount
+  // debit is not a line this ledger is allowed to hold, so it is omitted rather than pushed.
+  if (totals.feeTotal > 0n) lines.push(D({ kind: 'fee_earned' }, totals.feeTotal))
+  const share = (fund: FundRef, amount: Minor, role: string): void => {
+    if (amount > 0n) lines.push(C(fund, amount, role))
+    else if (amount < 0n) lines.push(D(fund, minor(-amount), role))
   }
-  if (split.companyShare > 0n) lines.push(C({ kind: 'company_revenue' }, split.companyShare, 'company_share'))
-  if (split.yalagoShare > 0n) lines.push(C({ kind: 'yalago_income' }, split.yalagoShare, 'yalago_share'))
+  share({ kind: 'driver_share_payable', driverId }, split.driverShare, 'driver_share')
+  share({ kind: 'company_revenue' }, split.companyShare, 'company_share')
+  share({ kind: 'yalago_income' }, split.yalagoShare, 'yalago_share')
   return assertBalanced({ eventType: 'share_split', occurrenceKey, lines })
 }
 

@@ -3,7 +3,7 @@ import { z } from 'zod'
 import type { Deps, ExpenseCategoryRecord, ExpenseRecord } from '@ash/contracts'
 import { createExpenseCategoryRequest, createExpenseRequest, serializeMoney } from '@ash/contracts'
 import { type Posting, expense as expensePosting, minor, weekStartFor } from '@ash/domain'
-import { ServiceError, ensureFxDay, recordVehicleEvent, todayFor } from './shifts.service.ts'
+import { ServiceError, assertWeekOpen, ensureFxDay, recordVehicleEvent, todayFor } from './shifts.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
 
 /**
@@ -81,6 +81,9 @@ export function registerExpenseRoutes(app: FastifyInstance, deps: Deps): void {
     }
 
     const businessDate = body.businessDate ?? todayFor(deps)
+    // BR7. The likeliest real path into a sealed week in the whole system: a manager remembering
+    // Thursday's charging bill on Monday, and back-dating it because the form lets him.
+    await assertWeekOpen(deps, branchId, businessDate)
     const record: ExpenseRecord = {
       id: deps.ids.uuid(),
       branchId,

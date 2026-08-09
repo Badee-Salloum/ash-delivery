@@ -130,6 +130,15 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     if (err instanceof z.ZodError) {
       return reply.code(400).send({ error: 'invalid_request', detail: err.issues })
     }
+    // The week-lock guards (migrations 0006 and 0018) raise 25006. Migration 0006's own comment has
+    // always said «the application maps it to a 409» — it did not, so a week-lock refusal surfaced
+    // as «خطأ داخلي» and looked like a bug in the system rather than the rule doing its job. The
+    // application checks these cases itself and answers 409 first; this is the backstop for any
+    // write path that forgets to, and it must not be a 500 when it fires.
+    if (typeof (err as { code?: string }).code === 'string' && (err as { code: string }).code === '25006') {
+      req.log.warn({ err }, 'refused: sealed week')
+      return reply.code(409).send({ error: 'week_locked', detail: null })
+    }
     req.log.error({ err }, 'unhandled error')
     return reply.code(500).send({ error: 'internal_error' })
   })
