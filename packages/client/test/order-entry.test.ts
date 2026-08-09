@@ -3,6 +3,7 @@ import {
   type DraftOrder,
   allProblems,
   br1Verdict,
+  driverPhaseFor,
   groupThousands,
   isComplete,
   mergeScannedMovements,
@@ -413,5 +414,44 @@ describe('grouping money for the eye', () => {
     expect(groupThousands('')).toBe('')
     expect(groupThousands('abc')).toBe('abc')
     expect(groupThousands('1,500.00')).toBe('1,500.00')
+  })
+})
+
+/**
+ * Following the server while a shift is in flight.
+ *
+ * Reported from the field: «بالرغم من الغاء النوبة من عند المدير لم تنهى بشكل تلقائي عند السائق».
+ */
+describe('what the driver screen does when the shift changes under him', () => {
+  it('ends the shift on the phone when the manager cancels it', () => {
+    for (const current of ['orders', 'end', 'suspended'] as const) {
+      expect(driverPhaseFor('cancelled', current)).toEqual({ gone: 'cancelled', phase: null })
+    }
+  })
+
+  it('treats a manager force-close as finished, not as cancelled', () => {
+    // Different outcomes for the driver: one means his work is void, the other that it is done.
+    expect(driverPhaseFor('approved', 'orders')).toEqual({ gone: 'closed', phase: 'done' })
+    expect(driverPhaseFor('week_locked', 'end')).toEqual({ gone: 'closed', phase: 'done' })
+  })
+
+  it('follows a suspend, and follows the resume back', () => {
+    expect(driverPhaseFor('suspended', 'orders').phase).toBe('suspended')
+    expect(driverPhaseFor('suspended', 'end').phase).toBe('suspended')
+    expect(driverPhaseFor('open', 'suspended').phase).toBe('orders')
+  })
+
+  it('NEVER drags him backwards out of the screen he is working in', () => {
+    // The server says `open` for the whole close: he moves himself from the running screen to the
+    // closing package, and a poll that "corrected" him would throw away everything he had typed.
+    expect(driverPhaseFor('open', 'end').phase).toBe(null)
+    expect(driverPhaseFor('open', 'orders').phase).toBe(null)
+    expect(driverPhaseFor('draft', 'orders').phase).toBe(null)
+  })
+
+  it('moves to the done screen once the close is actually submitted', () => {
+    expect(driverPhaseFor('pending_review', 'end').phase).toBe('done')
+    // …but a shift already showing done is left alone rather than re-announced.
+    expect(driverPhaseFor('pending_review', 'done').phase).toBe(null)
   })
 })

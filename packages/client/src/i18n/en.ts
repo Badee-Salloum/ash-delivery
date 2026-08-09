@@ -239,6 +239,9 @@ export const en: Catalog = {
     },
     retakeRequested: 'The manager requested a re-shoot',
     closeRejected: 'The manager rejected the close',
+    /** The manager acted on the shift while the driver was still working it. */
+    cancelledByManager: 'The manager cancelled this shift',
+    closedByManager: 'The manager closed this shift',
     reportIncident: 'Report an incident',
     incidentNote: 'What happened (optional)',
     incidentReported: 'The branch has been notified',

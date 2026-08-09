@@ -13,6 +13,7 @@ import type { DraftMovement, DraftOrder } from '@ash/client'
 import {
   allProblems,
   compressImage,
+  driverPhaseFor,
   plural,
   mergeScannedMovements,
   mergeScannedOrders,
@@ -152,6 +153,61 @@ export function ShiftFlow({
   const [endDraft, setEndDraft] = useState<EndDraft>(EMPTY_END_DRAFT)
 
   /**
+   * WHAT THE SERVER SAYS THE SHIFT IS NOW — applied to the screen the driver is looking at.
+   *
+   * The app asked once, on mount, and then never again. So a manager could cancel a shift, suspend
+   * it or force-close it and the driver's phone would go on showing «جارية» for the rest of the
+   * day: he keeps delivering against a shift that no longer exists and finds out when his close is
+   * refused. A reload always corrected it — `/me/assignment` reports only LIVE_STATES — which is
+   * exactly why nobody noticed: the one person who never reloads is the driver mid-shift.
+   *
+   * Returns true when the shift is GONE and this component should stop caring about it.
+   */
+  // The phase as a ref so the watcher can READ it without being rebuilt on every phase change —
+  // and so the decision is never taken inside a state updater, which React may run twice.
+  const phaseRef = useRef(phase)
+  phaseRef.current = phase
+
+  const applyServerState = useCallback(
+    (state: string): boolean => {
+      // The decision itself is pure and tested (`driverPhaseFor`), so the screen and the rule
+      // cannot drift; this only carries out what it decides.
+      const { gone, phase: next } = driverPhaseFor(state, phaseRef.current)
+      if (next) setPhase(next)
+      if (gone === 'cancelled') {
+        toast.error(t.shift.cancelledByManager)
+        onDiscarded?.()
+        return true
+      }
+      if (gone === 'closed') {
+        toast.success(t.shift.closedByManager)
+        return true
+      }
+      return false
+    },
+    [toast, t, onDiscarded],
+  )
+
+  /**
+   * Poll while the shift is in flight.
+   *
+   * Twenty seconds: a cancellation the driver learns about a minute late is a minute of deliveries
+   * recorded against nothing, and the request is one row.
+   */
+  useEffect(() => {
+    const watching = phase === 'orders' || phase === 'end' || phase === 'suspended'
+    if (!watching || !shift) return
+    const timer = setInterval(() => {
+      void api
+        .shiftState(shift.id)
+        .then((st) => applyServerState(st.state))
+        // Swallowed: a dropped poll is a network blip, and the offline banner already says so.
+        .catch(() => undefined)
+    }, 20_000)
+    return () => clearInterval(timer)
+  }, [api, phase, shift, applyServerState])
+
+  /**
    * Pick the shift back up.
    *
    * The float and top-up come from the MANAGER's approval, so the order screen's live BR1 preview
@@ -220,8 +276,10 @@ export function ShiftFlow({
           })),
         }))
         // Trust the server's state over the one the assignment reported: the manager may have
-        // approved between the two calls.
-        setPhase(PHASE_FOR[st.state] ?? 'start')
+        // approved between the two calls. A shift that is no longer LIVE goes through the same
+        // rule as the watcher — landing on «بدء النوبة» for a shift the manager cancelled is how
+        // a driver ends up photographing an odometer for a shift that cannot accept it.
+        if (!applyServerState(st.state)) setPhase(PHASE_FOR[st.state] ?? 'start')
         // C-7: if the manager bounced this shift back for a re-shoot or rejected the close, tell the
         // driver WHY — otherwise a shift that jumped back a phase looks like a silent glitch.
         const d = st.lastDecision

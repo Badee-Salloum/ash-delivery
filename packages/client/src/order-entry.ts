@@ -394,3 +394,30 @@ export function groupThousands(money: string): string {
   if (!m) return money
   return `${m[1]}${m[2]!.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}${m[3] ?? ''}`
 }
+
+/**
+ * What a driver's screen should do when the server reports the shift's state.
+ *
+ * The driver app asked the server once, on mount, and never again — so a manager could cancel a
+ * shift and the phone would go on showing «جارية» for the rest of the day, the driver delivering
+ * against something that no longer exists. Reloading always fixed it, which is exactly why it went
+ * unnoticed: the one person who never reloads is a driver mid-shift.
+ *
+ * `gone` means the shift is over and the screen must stop showing it. `phase` is the screen to move
+ * to, or `null` to leave him where he is — the server still says `open` while he is filling in the
+ * closing package, and dragging him backwards out of it would lose his work.
+ */
+export type DriverPhase = 'start' | 'awaiting' | 'orders' | 'suspended' | 'end' | 'done'
+
+export function driverPhaseFor(
+  serverState: string,
+  current: DriverPhase,
+): { gone: 'cancelled' | 'closed' | null; phase: DriverPhase | null } {
+  if (serverState === 'cancelled') return { gone: 'cancelled', phase: null }
+  // Force-closed by the manager from «النوبات الجارية»: finished, and nothing is owed.
+  if (serverState === 'approved' || serverState === 'week_locked') return { gone: 'closed', phase: 'done' }
+  if (serverState === 'suspended' && (current === 'orders' || current === 'end')) return { gone: null, phase: 'suspended' }
+  if (serverState === 'open' && current === 'suspended') return { gone: null, phase: 'orders' }
+  if (serverState === 'pending_review' && (current === 'orders' || current === 'end')) return { gone: null, phase: 'done' }
+  return { gone: null, phase: null }
+}

@@ -239,6 +239,9 @@ export const ar = {
     },
     retakeRequested: 'طلب المدير إعادة التصوير',
     closeRejected: 'رفض المدير إنهاء النوبة',
+    /** The manager acted on the shift while the driver was still working it. */
+    cancelledByManager: 'أُلغيت النوبة من قِبل المدير',
+    closedByManager: 'أنهى المدير النوبة',
     reportIncident: 'بلاغ حادثة',
     incidentNote: 'وصف الحادثة (اختياري)',
     incidentReported: 'تم إبلاغ الفرع',
