@@ -71,6 +71,53 @@ there are three cross-branch write holes.
 one gzipped JSONL per table; `node scripts/restore-db.mjs <dir> --to <scratch-branch-url>` puts it
 back and refuses outright if the target's migration ledger differs from the backup's.
 
+### Later the same day — the three defects the plan called "lower severity", and was wrong about
+
+Migration 0018 applied and verified in production; API deployed. Suites: domain **333**, client 76,
+driver 114, adapters 36, api **368**, 6 guards, 18 migrations. Production is still pre-live — 11
+entries, 0 approved shifts, 0 sealed weeks — so all three were **latent, with no data to repair**.
+That was checked against Neon first, not assumed.
+
+**A band crossing made the second shift of the day unapprovable.** `shareSplit` pushed a share line
+only `if (share > 0n)`, but its caller hands it `trueUp` **deltas**, which are signed. In
+whole-amount mode — the configured default — the company's delta is negative on *every* band
+crossing, by construction: Yallago's 20% is fixed and the driver's percentage rises, so the
+company's is what falls. That is BR4 as arithmetic. The dropped line left `D 500000 <> C 650000`,
+`assertBalanced` threw, and the manager got a 500 at «اعتماد الإغلاق» — on the exact case the whole
+day-tier true-up exists to handle. Nothing posted, so the shift sat in review with the driver's cash
+still on the books as his; retry 500, force-close 500, and only `voidShift` "worked", by deleting
+the order. A negative share is a **debit** of that account, not a line to drop. Marginal mode never
+goes negative, which is precisely why 327 green domain tests never saw it.
+
+**The tier true-up recomputed what was already paid instead of reading it.** `alreadyPosted` was
+`splitDay(priorFees, rule)` where `rule` belongs to *this* shift — its date and **its vehicle's
+type**. F-4 tables are per vehicle type, so a bike in the morning and a car in the evening re-prices
+the morning under the evening's table. Measured through the real HTTP stack: the driver ends
+**9,000 new SYP short**, the company over-credited by exactly the same, one driver, one day; reverse
+the shifts and he is over-paid by 9,000 instead. The day settles at **4,181 bps — a rate in no
+published table**. No balance check can see it: every entry balances and the deltas still sum to the
+shift's fee. It is silently the wrong split of a correct total. Now read from the **ledger**, the
+only record of what was actually paid. `driver_day_shares` stays unwritten on purpose — a second
+record of one fact eventually disagrees with the first.
+
+**A sealed week accepted new postings.** 0006's two immutability guards both key off
+`week_lock_id`, which only `fin_seal_week()` writes, by UPDATE, at seal time — so a *new* row
+carries NULL and `IF v_week_lock_id IS NULL THEN RETURN` waved every INSERT through. Unrepairable,
+too: `fin_seal_week` stamps only what exists at seal time and `week_locks_no_reopen` refuses to
+re-close. Three routes reach it with a **client-supplied date** — expenses, manual entries, cash
+counts — and the manager who back-dates Thursday's charging bill on Monday is the whole exploit. The
+reversal route was sharpest: its own comment asserts «a locked week is NEVER edited — the database
+refuses it twice over», and it copied the original's dates straight back inside the seal. A
+correction against a sealed week is now re-homed whole into the current open week, which is SRS
+E-6's «قيد ظاهر مؤرَّخ» and ordinary prior-period accounting. Guarded at both layers: migration 0018
+refuses the INSERT (25006), and `assertWeekOpen` answers 409 first. `isDateLocked` had sat in the
+domain since the week module was written **with no caller at all** — the check it describes was
+never once performed.
+
+**One question for the product owner, deliberately not answered here:** when a driver works one day
+on two vehicle types with different tier tables, **which table governs the day?** The fix makes the
+system pay what it says it pays under either answer; it does not pick one.
+
 ---
 
 ## 2026-08-08 — the digits are read, and an order stops pretending to have a number
