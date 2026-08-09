@@ -129,22 +129,78 @@ docker compose -p ash-prod --env-file .env.prod -f infra/compose/docker-compose.
 migration, confirm the new schema is still compatible with the older image — additive changes
 usually are, a dropped or renamed column is not.
 
+### Backing up (Vercel + Neon — the live platform)
+
+The restic block below belongs to the docker-compose stack, which is **not deployed**. Production
+is Vercel + Neon, and `pg_dump`/`psql` are not installed on the operator's machine — nor would
+they work: on the Damascus network port 5432 is reset by the geo-block after about twenty seconds.
+The backup therefore goes over the same `@neondatabase/serverless` HTTPS path the migrations use.
+
+```bash
+# Always the DIRECT endpoint — drop "-pooler" from the host.
+DATABASE_URL='postgresql://…' node scripts/backup-db.mjs        # → backups/<ISO stamp>/
+```
+
+Writes one gzipped JSONL file per table plus a `manifest.json` recording the migration ledger,
+per-table row counts, column types and the foreign-key graph. **Every value is carried as a
+string**: `bigint` is the money type here and a JSON number is an IEEE double, so a single
+`to_jsonb()` would silently round any amount above 2^53 minor units.
+
+**The schema is deliberately NOT in the backup.** It lives in `packages/db/migrations` under
+checksum, in version control. A restore is therefore: empty database → `pnpm migrate` → load.
+
+⚠ **Off-site copy is still owed.** `backups/` is git-ignored and lives on one laptop; a backup on
+the same machine as the only checkout is not a backup. And the **evidence photos in Vercel Blob
+have no copy at all** — they are the record behind every approved shift.
+
 ### Restoring
 
 ```bash
-restic snapshots --tag db
-restic dump <snapshot> ash-<stamp>.dump > /tmp/restore.dump
-# Restore into a THROWAWAY database first and foot the trial balance before touching production.
-createdb ash_restore && pg_restore -d ash_restore /tmp/restore.dump
-psql -d ash_restore -c "SELECT SUM(CASE WHEN side='D' THEN amount_minor ELSE -amount_minor END) FROM journal_lines;"
-# Expect exactly 0.
+# 1. An empty target, at the commit whose migrations match the backup.
+DATABASE_URL='<target>' pnpm migrate
+# 2. Load. It refuses if the target schema differs, or if it already holds rows without --yes.
+DATABASE_URL='<target>' node scripts/restore-db.mjs backups/<stamp> --yes
 ```
 
-**The restore rehearsal is a deliverable, not a formality.** It must be run by hand once before
-go-live and **timed**, and the measured number written here. If it exceeds the SRS's 4-hour RTO,
-the client is told in writing rather than the figure being left as fiction.
+Then foot the trial balance before trusting it — expect exactly `0`:
 
-> Measured RTO: **not yet measured.**
+```sql
+SELECT SUM(CASE WHEN side='D' THEN amount_minor ELSE -amount_minor END) FROM journal_lines;
+```
+
+**Rehearsed 2026-08-09** against a scratch database on the live Neon project. The rehearsal was
+not a formality: it found four defects that would each have surfaced only during a real disaster.
+
+| | |
+| --- | --- |
+| `pnpm migrate` (16 migrations, empty DB) | **26 s** |
+| Load 1,196 rows across 44 tables | **154 s** |
+| Verification (trial balance, fingerprints, sequences) | ~20 s |
+| **Measured RTO** | **≈ 3 min 20 s** for 1,196 rows |
+
+Verified identical to production on: trial balance, sum of debits, an entry×line fingerprint over
+every posting, float-tranche total, user, shift and media fingerprints, and every sequence — then
+proved the restored database accepts writes and that its audit and deferred-balance triggers came
+back armed (28 user triggers, 0 disabled, matching production exactly).
+
+**What the rehearsal found, none of which was theory:**
+1. `GENERATED ALWAYS AS IDENTITY` rejects an explicit id — the load died on `journal_entries`.
+   Fixed with `OVERRIDING SYSTEM VALUE`, which is required to reproduce ids the foreign keys need.
+2. The audit triggers fired on the restore's own inserts and collided with the audit rows being
+   restored.
+3. `journal_lines_balanced` is `DEFERRABLE INITIALLY DEFERRED`, and the HTTP driver has no
+   persistent session — so it checked after **each line** and rejected the first line of every
+   two-line entry. The ledger was unrestorable until triggers were disabled for the load.
+4. Sequences were not reset, because the reset query matched `serial` columns (`deptype='a'`) and
+   every id here is an identity column (`deptype='i'`). The restore read perfectly and the **first
+   write** would have collided on the primary key.
+
+> ⚠ **RTO SCALES BADLY AND THIS IS NOT YET SOLVED.** 1,196 rows is a test fleet. The first
+> rehearsal ran one INSERT per row — about three rows a second — which batching improved to
+> roughly eight. A hundred bikes at twenty orders a day reaches ~1M rows within a year, and at
+> this rate that is **over 30 hours** against the SRS's **4-hour RTO**. Before the fleet grows,
+> the loader needs `COPY` over a real TCP session, or a Neon branch/PITR restore instead of a
+> logical one. **The client is to be told this in writing rather than the figure left as fiction.**
 
 ## 6. Onboarding a driver or vehicle ⚠ NOT YET BUILT — M1
 
