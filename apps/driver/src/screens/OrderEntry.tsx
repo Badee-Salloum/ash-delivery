@@ -158,12 +158,27 @@ export function OperationsList({
                 <div className="min-w-0 flex-1">
                   {o.timeText || o.dateText || o.pointA || o.pointB ? (
                     <>
-                      <span className="num text-base font-semibold">{o.timeText || dayMonth(o.dateText ?? '')}</span>
+                      <span className="num text-base font-semibold">
+                        {o.timeText || dayMonth(o.dateText ?? '') || t.orders.cancelledCard}
+                      </span>
+                      {o.cancelled ? (
+                        <span className="ms-2 rounded-md bg-rose-100 px-1.5 py-0.5 text-xs font-semibold text-rose-700">
+                          {t.orders.cancelledCard}
+                        </span>
+                      ) : null}
                       {/* One arrow only when there are two places. A lone «عمر الخيام ← —» reads as
-                          a delivery to nowhere; it means the screen's second line went unread. */}
+                          a delivery to nowhere; it means the screen's second line went unread.
+                          Each endpoint is its own bidi island: an Arabic place beside a Latin one
+                          otherwise drags the arrow across and the card reads back to front. */}
                       {o.pointA || o.pointB ? (
                         <p className="truncate text-sm text-slate-600">
-                          {o.pointA && o.pointB ? `${o.pointA} ← ${o.pointB}` : (o.pointA ?? o.pointB)}
+                          {o.pointA && o.pointB ? (
+                            <>
+                              <bdi>{o.pointA}</bdi> ← <bdi>{o.pointB}</bdi>
+                            </>
+                          ) : (
+                            <bdi>{o.pointA ?? o.pointB}</bdi>
+                          )}
                         </p>
                       ) : null}
                     </>
@@ -173,6 +188,14 @@ export function OperationsList({
                 </div>
               </label>
 
+              {/* A cancelled order costs nothing and is asking for nothing, so while it stays
+                  unchecked it shows no pay mode and no money boxes — six controls that would all
+                  be answering a question nobody asked. Ticking it says «I was paid for this one
+                  anyway», and the full row appears to be filled in like any other. */}
+              {o.cancelled && off ? (
+                <p className="mt-2 text-sm text-slate-500">{t.orders.cancelledHint}</p>
+              ) : (
+                <>
               {/* THREE OPTIONS, VISIBLE. It used to be one chip that cycled on tap with nothing
                   saying so: the driver read «كاش» as a label and never touched it — which IS
                   `pay_mode_misclassified`, the commonest cause BR1 reports — or tapped once too
@@ -198,7 +221,15 @@ export function OperationsList({
               <div className="mt-2 flex items-end gap-2">
                 <label className="flex flex-1 flex-col gap-0.5">
                   <span className="text-xs font-medium text-slate-600">{t.orders.fee}</span>
-                  <MoneyInput value={o.feeText} onChange={(e) => update(o.localId, { feeText: e.target.value })} />
+                  {/* A refused fee arrives EMPTY and ringed, because the reader would not vouch for
+                      it. That is the whole bargain: it never guesses, and the one number it could
+                      not read is the one the driver is asked for. */}
+                  <MoneyInput
+                    value={o.feeText}
+                    onChange={(e) => update(o.localId, { feeText: e.target.value })}
+                    autoFocus={false}
+                    className={problem?.kind === 'empty_fee' ? 'ring-2 ring-red-400' : undefined}
+                  />
                 </label>
                 <label className="flex w-32 flex-col gap-0.5">
                   <span className="text-xs font-medium text-slate-600">{t.orders.toWallet}</span>
@@ -208,6 +239,8 @@ export function OperationsList({
                   />
                 </label>
               </div>
+                </>
+              )}
               {problem ? <p className="mt-1 text-sm font-medium text-red-600">{t.orders.problems[problem.kind]}</p> : null}
             </Card>
           </Fragment>

@@ -20,6 +20,22 @@ export interface DraftOrder {
   /** SRS D-1/D-3: the OCR-read fee, set only on rows scanned off «Recent orders» — the baseline. */
   feeOcrText?: string
   /**
+   * Scanned, but the reader REFUSED its fee — so `feeText` starts empty and there is no OCR
+   * baseline. Distinct from a hand-added row: this one's clock and route came off a screenshot.
+   *
+   * It exists for de-duplication. Once the driver types the fee, the row looks exactly like a
+   * successfully-read one, and re-scanning the overlapping page would otherwise add a second copy.
+   */
+  feeRefused?: boolean
+  /**
+   * A «تم إلغاؤه» card carved off the screenshot. Arrives unchecked and priceless.
+   *
+   * Kept rather than dropped because a cancelled delivery is not always a free one — the driver may
+   * still have been paid something — so he can check it and type what he got. Left unchecked it
+   * never reaches the wire.
+   */
+  cancelled?: boolean
+  /**
    * Already posted to the server.
    *
    * There is no way for a driver to take an order back: `provider_order_no` is globally unique and
@@ -80,6 +96,7 @@ export type RowProblem =
   | { kind: 'duplicate_order_no'; firstIndex: number }
   | { kind: 'bad_fee' }
   | { kind: 'negative_fee' }
+  | { kind: 'empty_fee' }
 
 /** Validate one row in the context of all rows (duplicates need the whole list). */
 export function validateRow(orders: readonly DraftOrder[], index: number): RowProblem | null {
@@ -95,6 +112,16 @@ export function validateRow(orders: readonly DraftOrder[], index: number): RowPr
   )
   if (firstIndex !== -1 && firstIndex < index) return { kind: 'duplicate_order_no', firstIndex }
 
+  // A row the driver is NOT claiming needs no price. That is what carries an unchecked cancelled
+  // card, and an unchecked refused row he decided was not this shift's: both leave the list without
+  // ever being priced, and `submittableOrders` keeps them off the wire entirely.
+  if (row.included === false) return null
+
+  // Refused by the reader and not yet typed. This is the whole point of showing refused rows: an
+  // empty fee the driver is claiming must stop the close, exactly as a wrong one would — otherwise
+  // a surfaced row is no better than the silently-dropped row it replaced.
+  if (row.feeText.trim() === '') return { kind: 'empty_fee' }
+
   let fee: Minor
   try {
     fee = parseMinor(row.feeText)
@@ -103,6 +130,21 @@ export function validateRow(orders: readonly DraftOrder[], index: number): RowPr
   }
   if (fee < 0n) return { kind: 'negative_fee' }
   return null
+}
+
+/**
+ * The rows that may go to the server.
+ *
+ * Two kinds never do, and both are new: a card the driver left unchecked with no price at all —
+ * a cancelled order, or a refused row he judged was not this shift's. `moneySchema` rejects an
+ * empty fee, so sending one would 400 the WHOLE request and lose every good row with it. They stay
+ * in the list, visible, and the screenshot remains the evidence they existed.
+ *
+ * An unchecked row WITH a fee still travels, exactly as before: `included: false` is a statement
+ * about which shift's money it is, and the manager sees it at the review.
+ */
+export function submittableOrders(orders: readonly DraftOrder[]): DraftOrder[] {
+  return orders.filter((o) => !(o.included === false && o.feeText.trim() === ''))
 }
 
 export function allProblems(orders: readonly DraftOrder[]): Map<string, RowProblem> {
@@ -140,9 +182,18 @@ export function unsentOrders(orders: readonly DraftOrder[], alreadySent: readonl
 export interface ScannedOrderRow {
   dateIso: string | null
   time: string
-  fee: string
+  /**
+   * Null when the reader REFUSED this row's fee.
+   *
+   * The row still arrives, because the screenshot proves the delivery happened even when it cannot
+   * price it. It becomes a card with an empty «الأجرة» for the driver to type — which is strictly
+   * better than the delivery vanishing, which is what used to happen.
+   */
+  fee: string | null
   pointA?: string | null
   pointB?: string | null
+  /** A “تم إلغاؤه” card: no fee on screen, and normally no money either. */
+  cancelled?: boolean
 }
 
 /** One row as the payments-log reader produced it. `amount` is signed. */
@@ -185,14 +236,27 @@ export function mergeScannedOrders(
 ): DraftOrder[] {
   // The DAY is part of the key. Without it a 120-lira delivery at 13:10 yesterday and another at
   // 13:10 today are one row, and scanning the second page silently swallows one of them.
+  //
+  // The fee in the key is the fee as SCANNED, never as edited. A row is identified by what the
+  // screen said, and the driver correcting a misread «١٦» to «١٦٥» does not make it a different
+  // delivery — keying on `feeText` meant re-scanning the overlap after any correction added a
+  // duplicate. A REFUSED row therefore keys on an empty fee and keeps doing so after it is typed
+  // into, which is what lets it survive a rescan.
+  const keyOf = (o: DraftOrder): string => {
+    const fee = o.cancelled === true ? '' : o.feeRefused === true ? '' : (o.feeOcrText ?? o.feeText)
+    const head = o.cancelled === true ? 'C' : ''
+    return `${head}|${o.dateText ?? ''}|${o.timeText ?? ''}|${fee}|${cardKey(o.pointA, o.pointB, o.cancelled === true)}`
+  }
   const tally = new Map<string, number>()
   for (const o of existing) {
-    const key = `${o.dateText ?? ''}|${o.timeText ?? ''}|${o.feeText}`
+    const key = keyOf(o)
     tally.set(key, (tally.get(key) ?? 0) + 1)
   }
   const added: DraftOrder[] = []
   for (const row of scanned) {
-    const key = `${row.dateIso ?? ''}|${row.time}|${row.fee}`
+    const cancelled = row.cancelled === true
+    // A cancelled card has no clock and no fee — its route is the only identity it has.
+    const key = `${cancelled ? 'C' : ''}|${row.dateIso ?? ''}|${cancelled ? '' : row.time}|${row.fee ?? ''}|${cardKey(row.pointA, row.pointB, cancelled)}`
     const already = tally.get(key) ?? 0
     // Counted against what was ALREADY HELD, never against rows added by this same scan. One page
     // is one set of observations: if it lists «١٢٠» twice then two deliveries cost 120.
@@ -207,17 +271,34 @@ export function mergeScannedOrders(
       // The screen carries no pay mode; cash is the safe default because it is the mode that
       // expects the driver to be HOLDING the money, which is the claim easiest to check.
       payMode: 'cash',
-      feeText: row.fee,
-      feeOcrText: row.fee,
+      feeText: row.fee ?? '',
+      // `feeOcrText` is the OCR BASELINE the manager's review compares against. A refused row has
+      // no baseline — the reader read nothing — so the key is OMITTED rather than set to ''. That
+      // is also what makes the row submit as `source: 'manual'`, which is the truth about it.
+      ...(row.fee !== null ? { feeOcrText: row.fee } : { feeRefused: true }),
+      ...(cancelled ? { cancelled: true } : {}),
       timeText: row.time,
       dateText: row.dateIso ?? '',
-      included: true,
+      // A cancelled card arrives UNCHECKED: it is normally not money. The driver checks it only if
+      // he was in fact paid for it, and then types what he got.
+      included: !cancelled,
       pointA: row.pointA ?? null,
       pointB: row.pointB ?? null,
     })
   }
   return added
 }
+
+/**
+ * The route, reduced to something stable enough to identify a card that has no clock and no fee.
+ *
+ * Only cancelled cards need it: every other row is identified by its minute and its value. Two
+ * genuinely different cancelled orders to the same pair of addresses collapse into one, which is
+ * the safe direction — a cancelled order is not money, and the alternative (a fresh copy on every
+ * rescan of an overlapping page) is a list the driver has to clean by hand.
+ */
+const cardKey = (a: string | null | undefined, b: string | null | undefined, cancelled: boolean): string =>
+  cancelled ? `${(a ?? '').slice(0, 24)}→${(b ?? '').slice(0, 24)}` : ''
 
 /**
  * Append what a payments-log screenshot read, skipping what the list already holds.

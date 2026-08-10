@@ -227,14 +227,20 @@ const OCR_MAX_DIMENSION = 2000
  * pulls those apart. A page that is already black on white has nothing to stretch and comes out
  * unchanged, so this is safe for both apps.
  */
-function normaliseContrast(
-  ctx: OffscreenCanvasRenderingContext2D,
-  width: number,
-  height: number,
-  invert = false,
-): void {
-  const image = ctx.getImageData(0, 0, width, height)
-  const px = image.data
+/**
+ * The contrast stretch, as pure arithmetic over RGBA bytes — no canvas, no DOM.
+ *
+ * Extracted so the CALIBRATION HARNESS can apply it. That is not tidiness: `scripts/glyph-read.mjs`
+ * measured raw fixture pixels while the app measured downscaled, contrast-stretched ones, so the
+ * harness had never once seen the input the app actually reads. It reported zero wrong on the very
+ * screenshots whose full-resolution originals produced «1105» on a driver's phone, and both numbers
+ * were honest — they were measuring different images.
+ *
+ * Mutates `px` in place. Returns whether it stretched: a span narrower than 24 levels is left
+ * completely alone, INCLUDING the greyscale conversion, because amplifying a flat image turns noise
+ * into solid black. The caller must not write the buffer back when this returns false.
+ */
+export function stretchContrast(px: Uint8ClampedArray, width: number, height: number, invert = false): boolean {
   const histogram = new Uint32Array(256)
 
   for (let i = 0; i < px.length; i += 4) {
@@ -262,7 +268,7 @@ function normaliseContrast(
   const high = percentile(0.95)
   // Nothing to gain from stretching an image that already spans the range, and a degenerate
   // span would amplify noise into solid black.
-  if (high - low < 24) return
+  if (high - low < 24) return false
 
   const scale = 255 / (high - low)
   for (let i = 0; i < px.length; i += 4) {
@@ -273,7 +279,17 @@ function normaliseContrast(
     px[i + 1] = level
     px[i + 2] = level
   }
-  ctx.putImageData(image, 0, 0)
+  return true
+}
+
+function normaliseContrast(
+  ctx: OffscreenCanvasRenderingContext2D,
+  width: number,
+  height: number,
+  invert = false,
+): void {
+  const image = ctx.getImageData(0, 0, width, height)
+  if (stretchContrast(image.data, width, height, invert)) ctx.putImageData(image, 0, 0)
 }
 
 /**
@@ -284,8 +300,8 @@ function normaliseContrast(
  * of. Never upscales — a 1080-wide screenshot is already about right and enlarging costs time for
  * no accuracy. Falls back to the original file wherever canvas is unavailable.
  */
-export async function prepareForOcr(file: Blob, invert = false): Promise<Blob> {
-  return (await prepareWithPixels(file, invert))?.blob ?? file
+export async function prepareForOcr(file: Blob, invert = false, stretch = true): Promise<Blob> {
+  return (await prepareWithPixels(file, invert, stretch))?.blob ?? file
 }
 
 /**
@@ -298,6 +314,7 @@ export async function prepareForOcr(file: Blob, invert = false): Promise<Blob> {
 export async function prepareWithPixels(
   file: Blob,
   invert = false,
+  stretch = true,
 ): Promise<{ blob: Blob; pixels: Uint8ClampedArray; width: number; height: number } | null> {
   if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas !== 'function') return null
   try {
@@ -309,7 +326,7 @@ export async function prepareWithPixels(
     const ctx = canvas.getContext('2d')
     if (!ctx) return null
     ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
-    normaliseContrast(ctx, canvas.width, canvas.height, invert)
+    if (stretch || invert) normaliseContrast(ctx, canvas.width, canvas.height, invert)
     const image = ctx.getImageData(0, 0, canvas.width, canvas.height)
     return {
       blob: await canvas.convertToBlob({ type: 'image/png' }),
@@ -562,6 +579,26 @@ function listAmount(token: string): string | null {
 }
 
 /**
+ * The same guard, applied to a GLYPH-read fee before it is ever offered as money.
+ *
+ * `readPaymentsLog` has always put its glyph output through `listAmount` (see the movements branch
+ * below); `readOrders` did not. That asymmetry is how «1105» reached a driver's fee field — the
+ * orders path returned the classifier's raw concatenation verbatim, with no rule about what a fee
+ * may even look like. The rules cost nothing and refuse the shapes a mis-segmentation produces:
+ * a leading zero, a stray sign, an alphabet character that is not a digit or a separator.
+ *
+ * Deliberately NOT a length or range cap. «١٬١٠٥» is a real fare, and a rule that says "fees have
+ * three digits" would refuse a real one the day the fleet raises prices. The structural invariant
+ * in `readGlyphRow` — one component, one character — is what bounds the digits; this bounds the
+ * shape.
+ */
+export function glyphListFee(raw: string | null): string | null {
+  if (raw === null) return null
+  if (/^[-+]/.test(raw)) return null
+  return listAmount(raw)
+}
+
+/**
  * How many rows on this page CLAIM to be money — they carry the currency — whether or not their
  * amount could be read.
  *
@@ -596,8 +633,14 @@ export interface OcrOrder {
   dateIso: string | null
   /** «HH:MM». */
   time: string
-  /** The delivery fee as a money decimal string (BR1's number). */
-  fee: string
+  /**
+   * The delivery fee as a money decimal string (BR1's number), or **null when it was refused**.
+   *
+   * Null is not a failure to report — it is the reader saying "this delivery happened, and I will
+   * not guess what it cost". The row still carries its clock and route, so the driver gets a card
+   * with an empty fee field to type into instead of a delivery that silently never appeared.
+   */
+  fee: string | null
   /** The dropoff area, best-effort — often absent or a GPS pair. */
   zone: string | null
   /**
@@ -609,6 +652,13 @@ export interface OcrOrder {
    */
   pointA?: string | null
   pointB?: string | null
+  /**
+   * A «تم إلغاؤه» card: cancelled on the screen, so it has no price and no clock — only its route.
+   *
+   * It is reported rather than skipped so the driver can see the reader accounted for it, and check
+   * it if he was paid something anyway.
+   */
+  cancelled?: boolean
 }
 
 const ORDERS_TIMEOUT_MS = 20_000
@@ -654,10 +704,29 @@ const foldAr = (s: string): string =>
  * «Monday, 27 July» or «الأربعاء, ٢٩ يوليو» → «2026-07-29», using the supplied year (the app has a
  * clock; the parser stays pure).
  *
- * The weekday is ignored in both languages — it carries no information the day number does not, and
- * demanding it would be one more thing to misread.
+ * When the line also NAMES its weekday, that name is used as a checksum on the day number.
+ *
+ * It used to be ignored, on the reasoning that it carries no information the day number does not.
+ * That is true only while the day number is right. On the dark-theme English screenshot «Thursday,
+ * August 6» the day came back as 9, and with nothing to contradict it three orders were filed under
+ * a day they did not happen on — which moves them across the daily tier band, and can move them
+ * across the Sunday that seals the week. The weekday is the one thing on the line that can catch
+ * exactly that, and it is free.
+ *
+ * A mismatch tries LAST year before refusing — a January screenshot still showing «٣١ ديسمبر» is a
+ * real page, not a misread. When no weekday is legible there is no checksum and the day number
+ * stands, which is the same bargain as before.
  */
 function orderDateHeader(line: string, year: number): string | null {
+  const iso = orderDateDigits(line, year)
+  if (iso === null) return null
+  const weekday = weekdayOnLine(line)
+  if (weekday === -1 || new Date(`${iso}T12:00:00`).getDay() === weekday) return iso
+  const lastYear = `${year - 1}${iso.slice(4)}`
+  return new Date(`${lastYear}T12:00:00`).getDay() === weekday ? lastYear : null
+}
+
+function orderDateDigits(line: string, year: number): string | null {
   const ascii = asciiDigits(line)
   // Both English orders: «27 July» and — what the dark-theme build actually prints — «August 6».
   const en = ascii.match(/(\d{1,2})\s+([A-Za-z]{3,})/) ?? ascii.match(/([A-Za-z]{3,})[,\s]+(\d{1,2})\b/)
@@ -801,8 +870,16 @@ const monthOnLine = (text: string): number => {
  */
 export const isHeaderLine = (text: string): boolean => monthOnLine(text) !== -1
 
-/** «تم إلغاؤه» / «Cancelled» — the card below this line is not a delivery and has no anchor. */
-export const isCancelLine = (text: string): boolean => /الغا/.test(foldAr(text)) || /cancel/i.test(text)
+/**
+ * «تم إلغاؤه» / «Cancelled» — the card below this line is not a delivery and has no anchor.
+ *
+ * `foldAr` has already mapped «إ»→«ا» and stripped tatweel and spacing, so «تم إلغاؤه» arrives as
+ * «تمالغاؤه». The extra stems catch the forms the same word takes when the recogniser drops a
+ * letter or the app words it differently — «ملغاة», «ملغي», «إلغاء» — because everything downstream
+ * depends on this ONE line being recognised: miss it and the cancelled card's address is silently
+ * attached to the order above as its dropoff.
+ */
+export const isCancelLine = (text: string): boolean => /الغا|الغي|ملغ|لغاء/.test(foldAr(text)) || /cancel/i.test(text)
 
 /**
  * Is this token the «A»/«B» BADGE rather than part of the place name?
@@ -816,12 +893,20 @@ export const isCancelLine = (text: string): boolean => /الغا/.test(foldAr(te
  * punctuation around them ignored. That admits every rendering above and refuses every real label
  * on the sample screens — «F8Q6», «P92», «G6W9», «Baghdad», «33.518726», «تشيلي» — because a real
  * label is either Arabic or longer.
+ *
+ * With one exception, added after «Al» and «St» started disappearing from English addresses: a bare
+ * TWO-letter token counts as a badge only when both letters are capitals. A badge is a single
+ * capital in a circle, so every real rendering of one («EP», «CA», «(P») is upper-case; «Al Jalaa»
+ * and «St Michel» are not, and losing that word leaves an address that names the wrong place.
+ * A one-letter token stays a badge whatever its case — no address is one letter.
  */
 export const isBadgeToken = (text: string): boolean => {
   const t = text.trim()
   if (t === '') return false
   if (/[؀-ۿ]/.test(t)) return false
-  return /^[^\p{L}\p{N}]*[A-Za-z]{0,2}[^\p{L}\p{N}]*$/u.test(t)
+  if (!/^[^\p{L}\p{N}]*[A-Za-z]{0,2}[^\p{L}\p{N}]*$/u.test(t)) return false
+  const letters = t.replace(/[^A-Za-z]/g, '')
+  return letters.length < 2 || letters === letters.toUpperCase()
 }
 
 /** A badge whose one legible letter is «B» — the dropoff, wherever the layout put it. */
@@ -871,48 +956,130 @@ export function routesFor(
   anchors: readonly { x0: number; x1: number; y0: number; y1: number }[],
 ): Array<{ pointA: string | null; pointB: string | null }> {
   const sorted = [...lines].sort((x, y) => x.y0 - y.y0)
-  return anchors.map((a, i) => {
-    const unit = Math.max(1, a.y1 - a.y0)
-    const from = a.y1 - Math.round(unit * 0.2)
-    const to = anchors[i + 1]?.y0 ?? Infinity
+  return anchors.map((a, i) =>
+    routeOfBand(bandBelow(sorted, a.y1, Math.max(1, a.y1 - a.y0), anchors[i + 1]?.y0 ?? Infinity)),
+  )
+}
 
-    const band: Array<{ text: string; hasB: boolean }> = []
-    let prevY1 = a.y1
-    let first = true
-    for (const line of sorted) {
-      if (line.y0 < from || line.y0 >= to) continue
-      if (isHeaderLine(line.text) || isCancelLine(line.text)) break
-      // Lines within a card sit tight. A wide gap means the card ended and whatever follows is
-      // another card's fragment or page chrome — without this, the LAST card on a screenshot
-      // swept up the navigation bar and called it a dropoff. The card's own padding between the
-      // price row and the first place line is wider than between place lines, hence two limits.
-      if (line.y0 - prevY1 > unit * (first ? 4 : 3)) break
-      first = false
-      prevY1 = Math.max(prevY1, line.y1)
-      const words = line.words.filter((w) => w.text.trim() !== '')
-      const hasB = words.some((w) => isBadgeB(w.text))
-      // Stripped WHEREVER it lands, not just at the ends. The badge is supposed to sit at the
-      // line's right-hand edge, but on a mixed Arabic/Latin line the recogniser reorders freely
-      // and drops it in the middle — «Glass (P الصوفانية», «G6HF RVH,) المدخل». A one- or
-      // two-letter Latin token inside a Damascus address is never the address.
-      const text = words
+/** One card's place lines: everything below `y1` until the card demonstrably ends. */
+function bandBelow(
+  sorted: readonly OcrLine[],
+  y1: number,
+  unit: number,
+  to: number,
+): Array<{ text: string; hasB: boolean }> {
+  const from = y1 - Math.round(unit * 0.2)
+  const band: Array<{ text: string; hasB: boolean }> = []
+  let prevY1 = y1
+  let first = true
+  for (const line of sorted) {
+    if (line.y0 < from || line.y0 >= to) continue
+    if (isHeaderLine(line.text) || isCancelLine(line.text)) break
+    // Lines within a card sit tight. A wide gap means the card ended and whatever follows is
+    // another card's fragment or page chrome — without this, the LAST card on a screenshot
+    // swept up the navigation bar and called it a dropoff. The card's own padding between the
+    // price row and the first place line is wider than between place lines, hence two limits.
+    if (line.y0 - prevY1 > unit * (first ? 4 : 3)) break
+    first = false
+    prevY1 = Math.max(prevY1, line.y1)
+    const words = line.words.filter((w) => w.text.trim() !== '')
+    const hasB = words.some((w) => isBadgeB(w.text))
+    // Stripped WHEREVER it lands, not just at the ends. The badge is supposed to sit at the
+    // line's right-hand edge, but on a mixed Arabic/Latin line the recogniser reorders freely
+    // and drops it in the middle — «Glass (P الصوفانية», «G6HF RVH,) المدخل». A one- or
+    // two-letter Latin token inside a Damascus address is never the address.
+    const text = trimEdgeNoise(
+      words
         .filter((w) => !isBadgeToken(w.text))
         .map((w) => w.text.trim())
         .join(' ')
         .replace(/\s+/g, ' ')
-        .trim()
-      if (text !== '') band.push({ text, hasB })
-    }
-    if (band.length === 0) return { pointA: null, pointB: null }
+        .trim(),
+    )
+    if (text !== '') band.push({ text, hasB })
+  }
+  return band
+}
 
-    const bAt = band.findIndex((l) => l.hasB)
-    const cut = bAt !== -1 ? bAt : band.length - 1
-    const joined = (part: ReadonlyArray<{ text: string }>): string | null =>
-      part.length === 0 ? null : part.map((l) => l.text).join(' ').slice(0, 120)
-    // A single line with no read badge is the A place of a card whose bottom the screenshot cut.
-    if (bAt === -1 && band.length === 1) return { pointA: joined(band), pointB: null }
-    return { pointA: joined(band.slice(0, cut)), pointB: joined(band.slice(cut)) }
-  })
+/**
+ * Leading/trailing punctuation debris the recogniser leaves on a bidirectional line.
+ *
+ * «المدخل الاول» came back as «!المد» — the «!» is not in the address, it is the RTL run's edge
+ * rendered as ink. Stripping it changes no real label: no Damascus address begins or ends with
+ * ASCII punctuation. The interior is left alone, where a real «,» or «-» separates a place from
+ * its district.
+ */
+const trimEdgeNoise = (text: string): string => text.replace(/^[^\p{L}\p{N}(]+/u, '').replace(/[^\p{L}\p{N})]+$/u, '')
+
+const isLatinWord = (token: string): boolean => /^[A-Za-z]+$/.test(token)
+const hasArabic = (text: string): boolean => /[؀-ۿ]/.test(text)
+
+/** Split one card's band into pickup and dropoff. */
+function routeOfBand(band: ReadonlyArray<{ text: string; hasB: boolean }>): { pointA: string | null; pointB: string | null } {
+  if (band.length === 0) return { pointA: null, pointB: null }
+
+  const joined = (part: ReadonlyArray<{ text: string }>): string | null =>
+    part.length === 0 ? null : part.map((l) => l.text).join(' ').slice(0, 120)
+
+  const bAt = band.findIndex((l) => l.hasB)
+  // A single line with no read badge is the A place of a card whose bottom the screenshot cut.
+  if (bAt === -1 && band.length === 1) return { pointA: joined(band), pointB: null }
+
+  // ── A's own name, wrapped, is not a destination ──────────────────────────────────────────
+  //
+  // With no «B» badge read, the last line is taken as the dropoff. That is right for «المدخل
+  // الاول» and for a plus-code, and wrong for a pickup whose LATIN name wrapped: «القصور, ساحة
+  // القصور, Crispy Way» broke after «Crispy», and the driver's card announced he had delivered to
+  // «Way». A destination is not one bare English word continuing an English word on the line above.
+  //
+  // Narrow on purpose. It fires only when the band is otherwise Arabic (so the card is an Arabic
+  // one), the last line is nothing but Latin letters, and the line above ENDS in a Latin word — the
+  // signature of a wrap. «Baghdad Avenue» under an Arabic pickup keeps its B (the line above ends
+  // Arabic); a GPS pair or plus-code keeps it (they carry digits); an all-Latin card keeps it (no
+  // Arabic line). When it fires, B is null rather than a guess, and the psm-4 second look gets its
+  // chance to find the real one.
+  if (bAt === -1 && band.length >= 2) {
+    const last = band[band.length - 1]!.text
+    const prev = band[band.length - 2]!.text
+    const prevTail = prev.split(/\s+/).filter((t) => t !== '').pop() ?? ''
+    const bandIsArabic = band.slice(0, -1).some((l) => hasArabic(l.text))
+    if (bandIsArabic && last.split(/\s+/).every(isLatinWord) && isLatinWord(prevTail)) {
+      return { pointA: joined(band), pointB: null }
+    }
+  }
+
+  const cut = bAt !== -1 ? bAt : band.length - 1
+  return { pointA: joined(band.slice(0, cut)), pointB: joined(band.slice(cut)) }
+}
+
+/**
+ * The «تم إلغاؤه» cards on a page — deliveries that were cancelled, which carry no price and so no
+ * «SYP» anchor and no row of their own.
+ *
+ * They were invisible. Nothing counted them, nothing showed them, and the only code that knew they
+ * existed was the `isCancelLine` break inside the band walk — so a cancelled card was a hole in the
+ * page that the reader stepped over. That is mostly harmless and occasionally not: when the chip is
+ * garbled the break never fires and the cancelled card's address becomes the PREVIOUS order's
+ * dropoff, which is a real order pointed at a place it never went.
+ *
+ * Carved with the same rules a priced card uses, so the two agree by construction: the band is the
+ * lines below the chip, stopping at the next anchor, the next day header, another chip, or a gap.
+ */
+export function cancelledCardsIn(
+  lines: readonly OcrLine[],
+  anchors: readonly { y0: number; y1: number }[],
+): Array<{ y0: number; pointA: string | null; pointB: string | null }> {
+  const sorted = [...lines].sort((x, y) => x.y0 - y.y0)
+  const out: Array<{ y0: number; pointA: string | null; pointB: string | null }> = []
+  for (const line of sorted) {
+    if (!isCancelLine(line.text)) continue
+    const unit = Math.max(1, line.y1 - line.y0)
+    const nextAnchor = anchors.find((a) => a.y0 >= line.y1)?.y0 ?? Infinity
+    const route = routeOfBand(bandBelow(sorted, line.y1, unit, nextAnchor))
+    if (route.pointA === null && route.pointB === null) continue
+    out.push({ y0: line.y0, ...route })
+  }
+  return out
 }
 
 /**
@@ -977,9 +1144,17 @@ export function headerDatesIn(
      * never prints the year, so a mismatch tries last year too — a January screenshot still
      * showing «٣١ ديسمبر» — and a date landing in the future is refused outright.
      *
-     * With no legible weekday there is no checksum, and a date read off Arabic-Indic pixels
-     * without one is a guess: only the TEXT reading is allowed through unchecked, because it is
-     * the Latin-script path where the digits were never in doubt.
+     * With no legible weekday there is no checksum, and a date without a checksum is a guess —
+     * from EITHER path.
+     *
+     * The text reading used to be exempt, on the reasoning that Latin digits were never in doubt.
+     * They were: on the dark-theme English screenshot «Thursday, August 6» came back with an
+     * unreadable weekday and the day as 9, and the guess was accepted because nothing was left to
+     * contradict it. Three orders moved to a day they did not happen on — which moves them across
+     * the daily tier band, and can move them across the Sunday that seals the week.
+     *
+     * So both paths are checked now. A header whose weekday cannot be read yields no date, the
+     * rows below it keep the shift's own day, and the driver sees that plainly.
      */
     const settle = (candidate: string | null, checked: boolean): string | null => {
       if (candidate === null) return null
@@ -998,7 +1173,7 @@ export function headerDatesIn(
       return iso
     }
 
-    const dateIso = settle(orderDateHeader(line.text, year), false) ?? settle(fromPixels(), true)
+    const dateIso = settle(orderDateHeader(line.text, year), true) ?? settle(fromPixels(), true)
     out.push({ y0: line.y0, dateIso })
   }
   return out.sort((a, b) => a.y0 - b.y0)
@@ -1076,16 +1251,16 @@ function feeOnLine(line: string): string | null {
 async function readAmountsByGlyph(
   image: Blob | Uint8Array,
   timeoutMs: number,
-): Promise<{ amounts: (string | null)[]; clocks: { time: string; dateIso: string | null }[]; routes: { pointA: string | null; pointB: string | null }[]; rows: number; text: string }> {
-  const prepared = await prepareWithPixels(toBlob(image))
-  if (!prepared) return { amounts: [], clocks: [], routes: [], rows: 0, text: '' }
+): Promise<{ amounts: (string | null)[]; clocks: { time: string; dateIso: string | null }[]; routes: { pointA: string | null; pointB: string | null }[]; cancelled: { dateIso: string | null; pointA: string | null; pointB: string | null }[]; rows: number; text: string }> {
+  const prepared = await prepareWithPixels(toBlob(image), false, false)
+  if (!prepared) return { amounts: [], clocks: [], routes: [], cancelled: [], rows: 0, text: '' }
 
   const result = await recognize(prepared.blob, { whitelist: '', psm: 6 }, timeoutMs)
   // The word must BE «SYP», not merely contain it. `/SYP/` matched Tesseract's junk words too, and
   // on an Arabic page it emits plenty: a three-row screen reported twenty-one rows, so the driver
   // was told twenty of them went unread when only two had.
   const anchors = anchorsIn(result.lines)
-  if (anchors.length === 0) return { amounts: [], clocks: [], routes: [], rows: 0, text: result.text }
+  if (anchors.length === 0) return { amounts: [], clocks: [], routes: [], cancelled: [], rows: 0, text: result.text }
 
   const mask = maskFromPixels(prepared.pixels, prepared.width, prepared.height)
   const templates = unpackTemplates(GLYPH_TEMPLATES)
@@ -1177,6 +1352,12 @@ async function readAmountsByGlyph(
     // date per row, so the day comes from the header the row sits under.
     clocks: clocks.map((c, i) => ({ time: c.time, dateIso: c.dateIso ?? dateFor(anchors[i]!) })),
     routes,
+    // The cancelled cards, carved with the same band rules — see cancelledCardsIn.
+    cancelled: cancelledCardsIn(result.lines, anchors).map((c) => ({
+      dateIso: dateFor({ y0: c.y0 }),
+      pointA: c.pointA,
+      pointB: c.pointB,
+    })),
     rows: anchors.length,
     text: result.text,
   }
@@ -1195,7 +1376,7 @@ export async function readOrders(image: Blob | Uint8Array, timeoutMs = ORDERS_TI
     let best: OcrOrder[] = []
     let bestLines: OcrLine[] = []
     for (const invert of [false, true]) {
-      const prepared = await prepareForOcr(toBlob(image), invert)
+      const prepared = await prepareForOcr(toBlob(image), invert, false)
       // No whitelist (Arabic addresses, «SYP», colons, digits all matter); a list is a uniform block.
       const result = await recognize(prepared, { whitelist: '', psm: 6 }, timeoutMs)
       if (result.text.length > text.length) text = result.text
@@ -1226,17 +1407,51 @@ export async function readOrders(image: Blob | Uint8Array, timeoutMs = ORDERS_TI
     if (byGlyph.text.length > text.length) text = byGlyph.text
     // Each order carries the clock it happened at, which is the only identity the screen offers —
     // it has no order number anywhere on it.
-    const glyphOrders = byGlyph.amounts
-      .map((fee, i) => ({ fee, clock: byGlyph.clocks[i], route: byGlyph.routes[i] }))
-      .filter((r): r is { fee: string; clock: { time: string; dateIso: string | null }; route: { pointA: string | null; pointB: string | null } } => r.fee !== null)
-      .map((r, i) => ({ dateIso: r.clock?.dateIso ?? null, time: r.clock?.time ?? '', fee: r.fee, zone: null, pointA: r.route?.pointA ?? null, pointB: r.route?.pointB ?? null }))
-    if (glyphOrders.length === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text }
+    const glyphRows = byGlyph.amounts.map((raw, i) => {
+      const clock = byGlyph.clocks[i]
+      const route = byGlyph.routes[i]
+      return {
+        dateIso: clock?.dateIso ?? null,
+        time: clock?.time ?? '',
+        // A fee the classifier refused, or one whose SHAPE is not a fee, becomes null — not a
+        // dropped row. See below for why the row still travels.
+        fee: glyphListFee(raw),
+        zone: null,
+        pointA: route?.pointA ?? null,
+        pointB: route?.pointB ?? null,
+      }
+    })
+    // A refused fee used to delete its whole row, silently. The driver saw «N refused» under the
+    // tile and had no way to know WHICH deliveries were missing — on the owner's own test the
+    // ٥:٤٢ order simply was not there, and nothing on screen said so. A row the reader could not
+    // price is still a delivery it can PROVE happened: it has the clock and the route off the same
+    // screenshot. So it travels with `fee: null` and arrives as a card with an empty fee field.
+    //
+    // The one exception is a row with no identity at all — no clock, no route, nothing but a
+    // refused number. That cannot be de-duplicated against anything, so re-scanning the same page
+    // would add it again every time. It stays counted in `rowsSeen` and shown only as «N refused».
+    const glyphOrders: OcrOrder[] = glyphRows.filter((r) => r.fee !== null || r.time !== '' || r.pointA !== null || r.pointB !== null)
+    const priced = glyphRows.filter((r) => r.fee !== null).length
+    const cancelledCards: OcrOrder[] = byGlyph.cancelled.map((c) => ({
+      dateIso: c.dateIso,
+      time: '',
+      fee: null,
+      zone: null,
+      pointA: c.pointA,
+      pointB: c.pointB,
+      cancelled: true,
+    }))
+    if (glyphOrders.length === 0 && cancelledCards.length === 0) {
+      return { ok: false, reason: 'no_fields', ms: now() - started, text }
+    }
     return {
       ok: true,
-      reading: { orders: glyphOrders },
+      reading: { orders: [...glyphOrders, ...cancelledCards] },
       // How many of how many: a page where four rows of thirty-four were refused is a good read
-      // with four rows to type, and saying «٣٠» without the «٣٤» hides the four.
-      fieldsFound: glyphOrders.length,
+      // with four rows to type, and saying «٣٠» without the «٣٤» hides the four. `fieldsFound`
+      // counts rows whose FEE was read, so the refused counter keeps meaning "still needs a number"
+      // now that refused rows are visible cards rather than absences.
+      fieldsFound: priced,
       rowsSeen: byGlyph.rows,
       ms: now() - started,
       text,
@@ -1303,7 +1518,7 @@ export async function readPaymentsLog(
     let best: WalletMovement[] = []
     // Inverted FIRST: this screen is white-on-black, which Tesseract binarises poorly the other way.
     for (const invert of [true, false]) {
-      const prepared = await prepareForOcr(toBlob(image), invert)
+      const prepared = await prepareForOcr(toBlob(image), invert, false)
       const result = await recognize(prepared, { whitelist: '', psm: 6 }, timeoutMs)
       if (result.text.length > text.length) text = result.text
       const movements = parsePaymentsLog(result.text)

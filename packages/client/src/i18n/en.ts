@@ -334,7 +334,10 @@ orderNo: 'Order no.',
       duplicate_order_no: 'This row is a duplicate',
       bad_fee: 'Invalid fee',
       negative_fee: 'Fee cannot be negative',
+      empty_fee: 'Enter the fee',
     },
+    cancelledCard: 'Cancelled',
+    cancelledHint: 'Cancelled order — if you were paid for it, tick it and type the fee',
   },
 
   br1: {

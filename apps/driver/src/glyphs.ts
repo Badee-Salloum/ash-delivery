@@ -385,6 +385,11 @@ export function nearestTemplate(f: GlyphFeatures, templates: readonly Template[]
 export function classifyGlyph(f: GlyphFeatures, templates: readonly Template[]): Reading | null {
   const r = nearestTemplate(f, templates)
   if (!r) return null
+  // A NaN defeats BOTH gates at once: `NaN >= MAX_SCORE` is false and `NaN <= MIN_MARGIN` is false,
+  // so an unscoreable glyph would be accepted with apparent maximum confidence. Nothing in the
+  // shipped templates produces one today — this is a floor, not a fix — but "the score was not a
+  // number" has to read as refusal, like every other thing this classifier is unsure of.
+  if (!Number.isFinite(r.score) || Number.isNaN(r.margin)) return null
   if (r.score >= MAX_SCORE || r.margin <= MIN_MARGIN) return null
   if (UNVALIDATED.has(r.label)) return null
   return r
@@ -424,37 +429,35 @@ export function mergeStacked(mask: Mask, comps: readonly Component[]): Component
 }
 
 /**
- * The column with the least ink in the middle of a suspiciously wide component — where two
- * adjacent digits touched. Only meaningful on a component that already failed classification.
- */
-function valleyColumn(mask: Mask, c: Component): number | null {
-  const w = c.x1 - c.x0 + 1
-  const from = c.x0 + Math.round(w * 0.3)
-  const to = c.x0 + Math.round(w * 0.7)
-  let bestX: number | null = null
-  let bestInk = Infinity
-  for (let x = from; x <= to; x++) {
-    let ink = 0
-    for (let y = c.y0; y <= c.y1; y++) ink += mask.data[y * mask.width + x] ?? 0
-    if (ink < bestInk) {
-      bestInk = ink
-      bestX = x
-    }
-  }
-  return bestX
-}
-
-/**
  * Every glyph in a box, read left to right — or `null` if ANY of them was refused.
  *
  * All or nothing per row, deliberately. Half an amount is not a smaller amount, it is a different
  * one: dropping a refused glyph from «١٦٥» yields «١٦», which is a plausible fee and wrong by an
  * order of magnitude. A row the reader will not vouch for entirely, it does not offer at all.
  *
- * A component the classifier REFUSES gets one more chance if it is wide enough to be two digits
- * that touched — the small fonts merge adjacent minute digits routinely. It is split at its
- * thinnest middle column and accepted only if EVERY resulting piece independently clears the full
- * gates. A refusal can become a read this way; a read can never change, so zero-wrong holds.
+ * ── ONE COMPONENT, ONE CHARACTER. The invariant this function now guarantees ─────────────────
+ *
+ * `out.length === comps.length`, always. That is not a comment, it is the whole safety argument,
+ * and it is why the returned string can be trusted to describe the ink that is actually there.
+ *
+ * It was not true before. A refused component used to get a second chance: split at its thinnest
+ * middle column, each half re-segmented, and EVERY resulting piece read and concatenated —
+ * recursively, twice deep. Nothing bounded the output length against the component count, so one
+ * refused glyph could legally emit two, three, four characters.
+ *
+ * That is how a real ٢٣٥ SYP fare was accepted as «1105» on a driver's phone. The gates could not
+ * catch it and no tightening of them ever could: a split fragment is scored against the WHOLE
+ * ROW's metrics, so a full-height narrow shard has relH ≈ 1 and relY ≈ 0.5 — the exact feature
+ * profile of «١» — and it sits genuinely far from every other class, which means `MIN_MARGIN`, the
+ * gate whose entire job is to catch an ambiguous glyph, sees a supremely confident one. The margin
+ * gate cannot fire on a shard. Only structure can refuse it, so structure does.
+ *
+ * The split was introduced for merged adjacent minute digits in the small clock font, and measured
+ * before removal across all eight fixtures: **3 refusals attempted a split, and it produced 0 of
+ * the 44 fee reads and 0 of the 43 clock reads.** It earned nothing and could cost a driver's pay.
+ * If a future screenshot genuinely needs merged-digit recovery, reintroduce it with the
+ * one-component-one-character invariant designed in — a hard 2-leaf cap, fragment-local metrics,
+ * and its own tighter gates — and with a fixture that proves it is needed.
  */
 export function readGlyphRow(
   mask: Mask,
@@ -467,38 +470,15 @@ export function readGlyphRow(
   if (comps.length === 0) return null
   const group = groupMetrics(comps)
 
-  const readComponent = (c: Component, depth: number): string | null => {
-    const r = classifyGlyph(featuresOf(c, group), usable)
-    if (r) return r.label
-    if (depth >= 2) return null
-    const w = c.x1 - c.x0 + 1
-    const h = c.y1 - c.y0 + 1
-    if (w / h < 0.75) return null
-    const cut = valleyColumn(mask, c)
-    if (cut === null || cut <= c.x0 || cut >= c.x1) return null
-    let out = ''
-    for (const half of [
-      componentsIn(mask, { x0: c.x0, y0: c.y0, x1: cut, y1: c.y1 + 1 }),
-      componentsIn(mask, { x0: cut, y0: c.y0, x1: c.x1 + 1, y1: c.y1 + 1 }),
-    ]) {
-      if (half.length === 0) return null
-      for (const piece of half) {
-        const label = readComponent(piece, depth + 1)
-        if (label === null) return null
-        out += label
-      }
-    }
-    return out
-  }
-
   let out = ''
   for (const c of comps) {
-    const label = readComponent(c, 0)
-    if (label === null) return null
-    out += label
+    const r = classifyGlyph(featuresOf(c, group), usable)
+    if (!r) return null
+    out += r.label
   }
   return out
 }
+
 
 /**
  * The one RUN of digits inside a box that also contains other ink — the day number of a date

@@ -19,6 +19,7 @@ import {
   mergeScannedOrders,
   previewBr1,
   splitSlot,
+  submittableOrders,
   uploadEvidencePath,
 } from '@ash/client'
 import { useApp } from '../app-context.tsx'
@@ -818,7 +819,10 @@ function EndPackage({
     setBusy(true)
     try {
       await api.put(`/shifts/${shift.id}/operations`, {
-        orders: draft.orders
+        // A row the driver left unchecked with NO price never travels: `moneySchema` refuses an
+        // empty fee and would 400 the whole request, losing every good row with it. That is a
+        // cancelled card he was not paid for, or a refused row he judged was not this shift's.
+        orders: submittableOrders(draft.orders)
           .filter((o) => o.providerOrderNo.trim() !== '')
           .map((o) => ({
             providerOrderNo: o.providerOrderNo.trim(),

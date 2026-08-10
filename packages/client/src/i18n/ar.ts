@@ -334,7 +334,10 @@ orderNo: 'رقم الطلب',
       duplicate_order_no: 'هذا الصف مكرر',
       bad_fee: 'أجرة غير صالحة',
       negative_fee: 'الأجرة لا يمكن أن تكون سالبة',
+      empty_fee: 'أدخِل الأجرة',
     },
+    cancelledCard: 'ملغاة',
+    cancelledHint: 'طلب ملغى — إن استلمت أجرة عليه، فعّله واكتبها',
   },
 
   br1: {
