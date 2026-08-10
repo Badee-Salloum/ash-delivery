@@ -131,6 +131,9 @@ export function OperationsList({
       {sorted.map((o, i) => {
         const problem = problems.get(o.localId)
         const off = o.included === false
+        // A dropped pin is named, not printed: its coordinates are Arabic-Indic digits Tesseract
+        // renders as debris, so the screen says what the card actually shows — a map location.
+        const dropoff = o.pointBIsPin === true ? t.orders.mapPin : o.pointB
         const otherDay = Boolean(today && o.dateText && o.dateText !== today)
         const prev = sorted[i - 1]
         // A day header wherever the date changes — so «أمس» is a block the driver can see and act
@@ -170,14 +173,14 @@ export function OperationsList({
                           a delivery to nowhere; it means the screen's second line went unread.
                           Each endpoint is its own bidi island: an Arabic place beside a Latin one
                           otherwise drags the arrow across and the card reads back to front. */}
-                      {o.pointA || o.pointB ? (
+                      {o.pointA || dropoff ? (
                         <p className="truncate text-sm text-slate-600">
-                          {o.pointA && o.pointB ? (
+                          {o.pointA && dropoff ? (
                             <>
-                              <bdi>{o.pointA}</bdi> ← <bdi>{o.pointB}</bdi>
+                              <bdi>{o.pointA}</bdi> ← <bdi>{dropoff}</bdi>
                             </>
                           ) : (
-                            <bdi>{o.pointA ?? o.pointB}</bdi>
+                            <bdi>{o.pointA ?? dropoff}</bdi>
                           )}
                         </p>
                       ) : null}

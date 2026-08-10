@@ -36,6 +36,14 @@ export interface DraftOrder {
    */
   cancelled?: boolean
   /**
+   * The screen showed COORDINATES for the dropoff instead of a place — the customer dropped a pin.
+   *
+   * Kept as a flag rather than as text because the coordinates are Arabic-Indic digits Tesseract
+   * cannot read; printing what it returns would be printing debris. The UI says «موقع على الخريطة»,
+   * which is what the screen actually means.
+   */
+  pointBIsPin?: boolean
+  /**
    * Already posted to the server.
    *
    * There is no way for a driver to take an order back: `provider_order_no` is globally unique and
@@ -192,6 +200,8 @@ export interface ScannedOrderRow {
   fee: string | null
   pointA?: string | null
   pointB?: string | null
+  /** The dropoff was a dropped PIN, not a place name — its coordinates are not readable text. */
+  pointBIsPin?: boolean
   /** A “تم إلغاؤه” card: no fee on screen, and normally no money either. */
   cancelled?: boolean
 }
@@ -284,6 +294,7 @@ export function mergeScannedOrders(
       included: !cancelled,
       pointA: row.pointA ?? null,
       pointB: row.pointB ?? null,
+      ...(row.pointBIsPin === true ? { pointBIsPin: true } : {}),
     })
   }
   return added

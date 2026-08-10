@@ -54,7 +54,7 @@ interface ShiftState {
 }
 
 /** What the payments-log reader made of «سجل المدفوعات», said out loud rather than left silent. */
-type LogState = { kind: 'idle' | 'reading' | 'failed' } | { kind: 'read'; rows: number; refused: number }
+type LogState = { kind: 'idle' | 'reading' | 'failed' } | { kind: 'read'; rows: number; refused: number; cutOff?: number }
 
 /**
  * The closing package while it is being filled in.
@@ -785,7 +785,10 @@ function EndPackage({
    * The list IS the gate: `ready` is now "nothing missing", so the two can never drift apart.
    */
   const missing: string[] = [
-    ...required.filter((s) => !slots.has(s)).map(labelOf),
+    // A missing PHOTO and a missing NUMBER are different jobs, and the catalogue gives «العداد» to
+    // both — so the footer read «العداد · … · العداد» and the driver had no way to tell which one
+    // he still owed, or that he owed two things at all. The photo is named as a photo.
+    ...required.filter((s) => !slots.has(s)).map((s) => `${t.shift.photoOf} ${labelOf(s)}`),
     ...(cash === '' ? [t.shift.cashHandover] : []),
     ...(wallet === '' ? [t.shift.walletBalance] : []),
     ...(odo === '' ? [t.shift.odometer] : []),
@@ -1006,7 +1009,7 @@ function EndPackage({
                     return {
                       ...d,
                       orders: [...d.orders, ...added],
-                      dash: { kind: 'read', rows: added.length, refused: Math.max(0, (r.rowsSeen ?? 0) - r.fieldsFound) },
+                      dash: { kind: 'read', rows: added.length, refused: Math.max(0, (r.rowsSeen ?? 0) - r.fieldsFound), cutOff: r.cutOff ?? 0 },
                     }
                   })
                 },
@@ -1106,6 +1109,11 @@ function ReadStatus({ state }: { state: LogState }): ReactNode {
             believe the page was fully read and submit a day that is short by those rows. */}
         {state.refused > 0 ? (
           <span className="text-amber-800"> · {plural(state.refused, t.shift.readRefused, lang)}</span>
+        ) : null}
+        {/* A card the screen sliced in half is NOT offered — its places would be a guess. Saying so
+            is the whole difference between withholding a row and losing one. */}
+        {(state.cutOff ?? 0) > 0 ? (
+          <span className="text-amber-800"> · {plural(state.cutOff!, t.shift.readCutOff, lang)}</span>
         ) : null}
       </p>
     )

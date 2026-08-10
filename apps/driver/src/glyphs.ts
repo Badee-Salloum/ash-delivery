@@ -130,6 +130,129 @@ export function maskFromPixels(rgba: Uint8ClampedArray | Uint8Array, width: numb
 const MIN_PIXELS = 3
 
 /**
+ * The «SYP» cap height every screenshot is resampled to before its glyphs are cut out.
+ *
+ * THE SCALE THE TEMPLATES ACTUALLY KNOW. Measured over the harvested fixtures, the anchor word is
+ * 17–23 pixels tall; the bank has never seen ink at any other density. A real 1080×2400 phone
+ * screenshot puts it at 32 — half again as large as anything learnt — and that, not bad luck, is
+ * why a fare misread in the field while the same screen read perfectly on a desk: the desk copies
+ * had been recompressed to 562×1280 on their way through a chat app, which happened to land them
+ * inside the calibrated range.
+ *
+ * The feature vector is scale-free (`aspect`, `relH`, `relY`, and a 12×16 stretch), so it was
+ * believed the reader was too. It is not, because SEGMENTATION happens first and segmentation is
+ * pixel-density work: Otsu picks a different cut, a hairline join survives at one density and
+ * breaks at another, and `MIN_PIXELS` means something different when a stroke is two pixels wide
+ * instead of four. Scale-free features cannot rescue a glyph that arrived as two components.
+ *
+ * So the pixels are brought to the templates rather than the other way round. 20 sits in the middle
+ * of the harvested range; it is not tuned to any single fixture.
+ */
+export const CANON_CAP_HEIGHT = 20
+
+/**
+ * The band of «SYP» cap heights the template bank was actually harvested across.
+ *
+ * Measured, not guessed: 17 (orders-0807-sm), 18–19 (the three 0804 order screens), 22
+ * (orders-0806-lg) and 23 (both payments logs). Ink anywhere in this band is ink the classifier has
+ * seen before.
+ */
+const LEARNT_CAP_MIN = 17
+const LEARNT_CAP_MAX = 23
+
+/**
+ * How much to resample a screenshot whose «SYP» is `capHeight` tall — 1 to leave it alone.
+ *
+ * Inside the learnt band, LEAVE IT ALONE. Resampling is not free: it softens edges that Otsu then
+ * thresholds differently, and forcing every image onto one exact height cost 8 fee reads and 20
+ * clock reads on the fixtures — it degraded ink the templates already knew in order to make a
+ * number match. The band is the honest statement of what has been learnt, so it is the thing to
+ * respect.
+ *
+ * Outside it, resample to the MIDDLE of the band rather than to the nearest edge: a phone at 32 is
+ * far enough away that the edge is no safer than the centre, and the centre is where the bank is
+ * densest.
+ */
+export function canonFactorFor(capHeight: number): number {
+  if (!Number.isFinite(capHeight) || capHeight <= 0) return 1
+  if (capHeight >= LEARNT_CAP_MIN && capHeight <= LEARNT_CAP_MAX) return 1
+  return CANON_CAP_HEIGHT / capHeight
+}
+
+/**
+ * Resample RGBA pixels by `factor`, area-averaging down and bilinear up.
+ *
+ * Pure, so the reader can normalise scale without a canvas and stay testable without a DOM. The
+ * downscale path is the one that matters — a phone screenshot is always LARGER than the calibrated
+ * scale — and it must average rather than sample, because dropping pixels off a one-pixel-wide
+ * stroke deletes the stroke and turns «٥» into something with a hole in it.
+ */
+export function resampleRgba(
+  rgba: Uint8ClampedArray | Uint8Array,
+  width: number,
+  height: number,
+  factor: number,
+): { data: Uint8ClampedArray; width: number; height: number } {
+  const w = Math.max(1, Math.round(width * factor))
+  const h = Math.max(1, Math.round(height * factor))
+  const out = new Uint8ClampedArray(w * h * 4)
+  const sx = width / w
+  const sy = height / h
+
+  if (factor < 1) {
+    // Area average: every destination pixel is the mean of the source box it covers.
+    for (let y = 0; y < h; y++) {
+      const y0 = Math.floor(y * sy)
+      const y1 = Math.min(height, Math.max(y0 + 1, Math.floor((y + 1) * sy)))
+      for (let x = 0; x < w; x++) {
+        const x0 = Math.floor(x * sx)
+        const x1 = Math.min(width, Math.max(x0 + 1, Math.floor((x + 1) * sx)))
+        let r = 0
+        let g = 0
+        let b = 0
+        let n = 0
+        for (let yy = y0; yy < y1; yy++) {
+          for (let xx = x0; xx < x1; xx++) {
+            const p = (yy * width + xx) * 4
+            r += rgba[p]!
+            g += rgba[p + 1]!
+            b += rgba[p + 2]!
+            n++
+          }
+        }
+        const q = (y * w + x) * 4
+        out[q] = r / n
+        out[q + 1] = g / n
+        out[q + 2] = b / n
+        out[q + 3] = 255
+      }
+    }
+    return { data: out, width: w, height: h }
+  }
+
+  for (let y = 0; y < h; y++) {
+    const fy = Math.min(height - 1, y * sy)
+    const y0 = Math.floor(fy)
+    const y1 = Math.min(height - 1, y0 + 1)
+    const wy = fy - y0
+    for (let x = 0; x < w; x++) {
+      const fx = Math.min(width - 1, x * sx)
+      const x0 = Math.floor(fx)
+      const x1 = Math.min(width - 1, x0 + 1)
+      const wx = fx - x0
+      const q = (y * w + x) * 4
+      for (let c = 0; c < 3; c++) {
+        const a = rgba[(y0 * width + x0) * 4 + c]! * (1 - wx) + rgba[(y0 * width + x1) * 4 + c]! * wx
+        const b = rgba[(y1 * width + x0) * 4 + c]! * (1 - wx) + rgba[(y1 * width + x1) * 4 + c]! * wx
+        out[q + c] = a * (1 - wy) + b * wy
+      }
+      out[q + 3] = 255
+    }
+  }
+  return { data: out, width: w, height: h }
+}
+
+/**
  * Connected components (8-neighbour) inside a box, ordered left to right.
  *
  * Iterative, never recursive: a long dash on a high-resolution screenshot is thousands of pixels,

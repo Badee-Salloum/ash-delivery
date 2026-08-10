@@ -27,7 +27,7 @@
  */
 // Statically imported, unlike tesseract.js: this is a few kilobytes of pure arithmetic with no
 // wasm behind it, and the amounts cannot be read without it.
-import { type Box, CLOCK_ALPHABET, type Mask, maskFromPixels, readDigitRun, readGlyphRow, type Template, unpackTemplates } from './glyphs.ts'
+import { type Box, CANON_CAP_HEIGHT, canonFactorFor, CLOCK_ALPHABET, type Mask, maskFromPixels, readDigitRun, readGlyphRow, resampleRgba, type Template, unpackTemplates } from './glyphs.ts'
 import { CLOCK_TEMPLATES } from './glyph-templates.ts'
 import { GLYPH_TEMPLATES } from './glyph-templates.ts'
 
@@ -69,6 +69,18 @@ export type OcrOutcome<T> =
        * the four the driver still owes.
        */
       rowsSeen?: number
+      /**
+       * Cards the bottom of the screen sliced in half, which are NOT offered.
+       *
+       * Their fee and clock read fine — those sit on the fully-drawn price row — but their place
+       * lines are half-rendered, and a half-rendered line is read as something confident and wrong
+       * («جامع الحمود Al Beirouni Street» → «Al Dajeniin; Ctraat innttc.|. نكم»). Offering the row
+       * would point a real delivery at a place it never went, so it is withheld.
+       *
+       * Reported, never silent: the driver is told to add that one by hand. Usually the next
+       * screenshot shows the same card whole and it arrives by itself.
+       */
+      cutOff?: number
       ms: number
       text: string
     }
@@ -954,11 +966,19 @@ export const anchorsIn = (lines: readonly OcrLine[]): Array<{ text: string; x0: 
 export function routesFor(
   lines: readonly OcrLine[],
   anchors: readonly { x0: number; x1: number; y0: number; y1: number }[],
-): Array<{ pointA: string | null; pointB: string | null }> {
+): Array<{ pointA: string | null; pointB: string | null; pointBIsPin?: boolean }> {
   const sorted = [...lines].sort((x, y) => x.y0 - y.y0)
   return anchors.map((a, i) =>
     routeOfBand(bandBelow(sorted, a.y1, Math.max(1, a.y1 - a.y0), anchors[i + 1]?.y0 ?? Infinity)),
   )
+}
+
+interface BandLine {
+  readonly text: string
+  readonly hasB: boolean
+  /** Kept so a caller can tell a whole line from one the screen cut in half. */
+  readonly y0: number
+  readonly y1: number
 }
 
 /** One card's place lines: everything below `y1` until the card demonstrably ends. */
@@ -967,9 +987,9 @@ function bandBelow(
   y1: number,
   unit: number,
   to: number,
-): Array<{ text: string; hasB: boolean }> {
+): BandLine[] {
   const from = y1 - Math.round(unit * 0.2)
-  const band: Array<{ text: string; hasB: boolean }> = []
+  const band: BandLine[] = []
   let prevY1 = y1
   let first = true
   for (const line of sorted) {
@@ -988,17 +1008,57 @@ function bandBelow(
     // line's right-hand edge, but on a mixed Arabic/Latin line the recogniser reorders freely
     // and drops it in the middle — «Glass (P الصوفانية», «G6HF RVH,) المدخل». A one- or
     // two-letter Latin token inside a Damascus address is never the address.
+    const kept = words.filter((w) => !isBadgeToken(w.text))
+    // Only strip Latin scraps where there is Arabic for them to be scraps OF.
+    const arabicHere = kept.some((w) => hasArabic(w.text))
     const text = trimEdgeNoise(
-      words
-        .filter((w) => !isBadgeToken(w.text))
+      kept
+        .filter((w) => !(arabicHere && isLatinScrap(w.text)))
         .map((w) => w.text.trim())
         .join(' ')
         .replace(/\s+/g, ' ')
         .trim(),
     )
-    if (text !== '') band.push({ text, hasB })
+    if (text !== '') band.push({ text, hasB, y0: line.y0, y1: line.y1 })
   }
   return band
+}
+
+/**
+ * Is this card only HALF ON THE SCREEN?
+ *
+ * The last card of a screenshot is nearly always sliced by the bottom of the phone's screen, and a
+ * sliced line is not a line: half its ink is missing, so Tesseract returns whatever the surviving
+ * strokes resemble. «جامع الحمود Al Beirouni Street» came back as «Al Dajeniin; Ctraat innttc.|.
+ * نكم», and «إنكليزي» as «انكلنء» — confident, and nowhere near right.
+ *
+ * The fee and the clock of such a card are usually FINE, because they sit on the price row at the
+ * top of the card, fully rendered. Only the places below are cut. So this is not detectable from
+ * the text — it is detectable from the geometry, which is why the band carries its coordinates.
+ *
+ * Two signals, either one enough:
+ *   • the band's last line runs into the bottom edge of the image, or
+ *   • that line is markedly shorter than the row's own «SYP» cap height — the signature of a line
+ *     whose lower half was never drawn.
+ */
+export function isTruncatedBand(band: readonly BandLine[], unit: number, imageHeight: number): boolean {
+  const last = band[band.length - 1]
+  if (!last) return false
+  if (last.y1 >= imageHeight - Math.round(unit * 0.5)) return true
+  return last.y1 - last.y0 < unit * 0.6
+}
+
+/** Which cards on this page are sliced by the bottom of the screen. Same shape as `routesFor`. */
+export function truncatedCards(
+  lines: readonly OcrLine[],
+  anchors: readonly { y0: number; y1: number }[],
+  imageHeight: number,
+): boolean[] {
+  const sorted = [...lines].sort((x, y) => x.y0 - y.y0)
+  return anchors.map((a, i) => {
+    const unit = Math.max(1, a.y1 - a.y0)
+    return isTruncatedBand(bandBelow(sorted, a.y1, unit, anchors[i + 1]?.y0 ?? Infinity), unit, imageHeight)
+  })
 }
 
 /**
@@ -1011,11 +1071,62 @@ function bandBelow(
  */
 const trimEdgeNoise = (text: string): string => text.replace(/^[^\p{L}\p{N}(]+/u, '').replace(/[^\p{L}\p{N})]+$/u, '')
 
+/**
+ * A short lower-case Latin scrap sitting inside an Arabic address is not part of the address.
+ *
+ * When the recogniser meets an Arabic word it cannot resolve it sometimes emits a Latin lookalike of
+ * the strokes: «عالم» came back as «alle», and «جابر» as «ve». Left in, they are printed to the
+ * driver as though they were part of the place name — «الجلاء alle ,الدجاج» — which reads as
+ * corruption and makes the whole label look untrustworthy, including the parts that are right.
+ *
+ * The tell is CASE. Every real Latin name on these screens is capitalised — «Baghdad», «Crispy»,
+ * «Chicken World», «Abou Roummaneh», «Al Jalaa» — while every scrap the recogniser invents comes
+ * back lower-case: «alle», «ve», «gale», «gil», «ate», «ssl». So a short all-lower-case token, on a
+ * line that also carries Arabic, is debris; anything capitalised is a name and is kept.
+ */
+const isLatinScrap = (token: string): boolean => /^[a-z]{1,5}$/.test(token.replace(/[^A-Za-z]/g, ''))
+
 const isLatinWord = (token: string): boolean => /^[A-Za-z]+$/.test(token)
 const hasArabic = (text: string): boolean => /[؀-ۿ]/.test(text)
 
+/**
+ * A destination that is a DROPPED PIN rather than a place — «(٣٦٫٢٩٦٩٨٧٥٠٦٧, ٣٣٫٥١٥٧٧٥٠٠٢)».
+ *
+ * The customer placed a marker on the map instead of typing an address, so the screen prints a
+ * coordinate pair in Arabic-Indic digits. Tesseract cannot read those digits — that is the entire
+ * reason the glyph reader exists — so what comes back is debris: «(YLYATAAVO-AV ¥Y,cloWvo--¥)».
+ *
+ * Reading the digits properly is not possible with today's templates: the line contains «(», «)»
+ * and the Arabic comma «،» (U+060C — a different glyph from the thousands mark the «,» template was
+ * harvested from), none of which have a template, and `readGlyphRow` refuses a whole row if any one
+ * component is unclassifiable. Adding them means new harvest work for a field a driver reads off
+ * the map anyway.
+ *
+ * So the line is RECOGNISED rather than read. Saying «موقع على الخريطة» is not a placeholder — it is
+ * exactly what the screen says, and it is true. Printing the debris would not be.
+ *
+ * The test is structural, and deliberately NOT a digit count — that was tried and it fails, because
+ * Tesseract renders the Arabic-Indic digits as Latin LETTERS: «(٣٦٫٢٩٦٩…)» arrives as
+ * «(YLYATAAVO-AV ¥Y,cloWvo--¥)», which is 70% alphabetic. What survives the garbling is the SHAPE —
+ * the brackets the coordinate pair is printed inside, and the complete absence of Arabic.
+ *
+ * A real address is never bracketed and always brings Arabic letters, so it cannot match; a Latin
+ * address («Baghdad Avenue») and a plus-code («G6HF RVH») are not bracketed either.
+ */
+export const isCoordinateLine = (text: string): boolean => {
+  const t = text.trim()
+  if (t.length < 8) return false
+  if (!/^[([]/.test(t) || !/[)\]]$/.test(t)) return false
+  if (hasArabic(t.replace(/[٠-٩٫٬،]/g, ''))) return false
+  // ONLY when the digits did not survive. The English build of the same app prints its coordinates
+  // in WESTERN digits, which Tesseract reads perfectly — «(33.518726, 36.276…)» is a real, useful
+  // dropoff and replacing it with «map location» would be throwing away a good read. A run of four
+  // or more digits anywhere is proof something numeric came through; its absence is proof of debris.
+  return !/\d{4,}/.test(t)
+}
+
 /** Split one card's band into pickup and dropoff. */
-function routeOfBand(band: ReadonlyArray<{ text: string; hasB: boolean }>): { pointA: string | null; pointB: string | null } {
+function routeOfBand(band: ReadonlyArray<BandLine>): { pointA: string | null; pointB: string | null; pointBIsPin?: boolean } {
   if (band.length === 0) return { pointA: null, pointB: null }
 
   const joined = (part: ReadonlyArray<{ text: string }>): string | null =>
@@ -1049,7 +1160,15 @@ function routeOfBand(band: ReadonlyArray<{ text: string; hasB: boolean }>): { po
   }
 
   const cut = bAt !== -1 ? bAt : band.length - 1
-  return { pointA: joined(band.slice(0, cut)), pointB: joined(band.slice(cut)) }
+  const pointA = joined(band.slice(0, cut))
+  const pointB = joined(band.slice(cut))
+  // A dropped pin is reported as a pin, never as the debris its digits become. See isCoordinateLine.
+  if (pointB !== null && isCoordinateLine(pointB)) return { pointA, pointB: null, pointBIsPin: true }
+  // A dropoff that is NOTHING BUT a lower-case Latin scrap is not a place — «إنكليزي» came back as
+  // «ssl». Alone on its line there is no Arabic beside it to mark it as debris, so it survives the
+  // token filter and would be printed as the destination. Saying nothing is the honest answer.
+  if (pointB !== null && isLatinScrap(pointB)) return { pointA, pointB: null }
+  return { pointA, pointB }
 }
 
 /**
@@ -1251,18 +1370,48 @@ function feeOnLine(line: string): string | null {
 async function readAmountsByGlyph(
   image: Blob | Uint8Array,
   timeoutMs: number,
-): Promise<{ amounts: (string | null)[]; clocks: { time: string; dateIso: string | null }[]; routes: { pointA: string | null; pointB: string | null }[]; cancelled: { dateIso: string | null; pointA: string | null; pointB: string | null }[]; rows: number; text: string }> {
+): Promise<{ amounts: (string | null)[]; clocks: { time: string; dateIso: string | null }[]; routes: { pointA: string | null; pointB: string | null; pointBIsPin?: boolean }[]; truncated: boolean[]; cancelled: { dateIso: string | null; pointA: string | null; pointB: string | null }[]; rows: number; text: string }> {
   const prepared = await prepareWithPixels(toBlob(image), false, false)
-  if (!prepared) return { amounts: [], clocks: [], routes: [], cancelled: [], rows: 0, text: '' }
+  if (!prepared) return { amounts: [], clocks: [], routes: [], truncated: [], cancelled: [], rows: 0, text: '' }
 
   const result = await recognize(prepared.blob, { whitelist: '', psm: 6 }, timeoutMs)
   // The word must BE «SYP», not merely contain it. `/SYP/` matched Tesseract's junk words too, and
   // on an Arabic page it emits plenty: a three-row screen reported twenty-one rows, so the driver
   // was told twenty of them went unread when only two had.
   const anchors = anchorsIn(result.lines)
-  if (anchors.length === 0) return { amounts: [], clocks: [], routes: [], cancelled: [], rows: 0, text: result.text }
+  if (anchors.length === 0) return { amounts: [], clocks: [], routes: [], truncated: [], cancelled: [], rows: 0, text: result.text }
 
-  const mask = maskFromPixels(prepared.pixels, prepared.width, prepared.height)
+  /*
+   * ── BRING THE PIXELS TO THE SCALE THE TEMPLATES KNOW ──────────────────────────────────────
+   *
+   * Tesseract has already found the rows, and the height of the «SYP» word it found IS the screen's
+   * font size, measured on this exact screenshot. The templates were learnt at a cap height of
+   * 17–23; a 1080×2400 phone puts it at 32. Segmenting at 32 and classifying against 20 is what
+   * misread a fare in the field — see CANON_CAP_HEIGHT for why scale-free features do not save it.
+   *
+   * So the image is resampled once, by the ratio between the two, and every box is scaled with it.
+   * The anchors keep their meaning because they are scaled by the same number. Left alone within
+   * 10%: resampling costs a little sharpness and there is nothing to buy with it near 1.
+   */
+  const capHeights = anchors.map((a) => a.y1 - a.y0).sort((x, y) => x - y)
+  const capHeight = capHeights[Math.floor(capHeights.length / 2)] ?? CANON_CAP_HEIGHT
+  const factor = canonFactorFor(capHeight)
+  const rescale = factor !== 1
+  const canon = rescale
+    ? resampleRgba(prepared.pixels, prepared.width, prepared.height, factor)
+    : { data: prepared.pixels, width: prepared.width, height: prepared.height }
+  const scaleBox = <T extends { x0: number; x1: number; y0: number; y1: number }>(a: T): T =>
+    rescale
+      ? ({
+          ...a,
+          x0: Math.round(a.x0 * factor),
+          x1: Math.round(a.x1 * factor),
+          y0: Math.round(a.y0 * factor),
+          y1: Math.round(a.y1 * factor),
+        } as T)
+      : a
+
+  const mask = maskFromPixels(canon.data, canon.width, canon.height)
   const templates = unpackTemplates(GLYPH_TEMPLATES)
   // The clock is printed smaller than the amounts, so it is scored against prototypes drawn from
   // its own font — one shared set blurred both and cost real reads on each.
@@ -1277,7 +1426,7 @@ async function readAmountsByGlyph(
    */
   const clockAt = (a: { x0: number; x1: number; y0: number; y1: number }): { time: string; dateIso: string | null } =>
     parseGlyphClock(
-      readGlyphRow(mask, clockBoxFor(a, prepared.width, prepared.height), clockTemplates, CLOCK_ALPHABET),
+      readGlyphRow(mask, clockBoxFor(scaleBox(a), canon.width, canon.height), clockTemplates, CLOCK_ALPHABET),
       new Date().getFullYear(),
     )
 
@@ -1292,7 +1441,7 @@ async function readAmountsByGlyph(
    * a newer day whose header scrolled off-screen, and get no date rather than a guessed one.
    */
   const headers = headerDatesIn(result.lines, new Date().getFullYear(), new Date(), (box) =>
-    readDigitRun(mask, box, clockTemplates, DAY_ALPHABET),
+    readDigitRun(mask, scaleBox(box), clockTemplates, DAY_ALPHABET),
   )
   const dateFor = (a: { y0: number }): string | null => {
     let seen: string | null = null
@@ -1301,6 +1450,8 @@ async function readAmountsByGlyph(
   }
 
   const routes = routesFor(result.lines, anchors)
+  // Which of these cards the screen sliced in half. Geometry, not text — see isTruncatedBand.
+  const truncated = truncatedCards(result.lines, anchors, prepared.height)
 
   /*
    * SECOND LOOK at a card whose places the full-page pass lost.
@@ -1345,13 +1496,14 @@ async function readAmountsByGlyph(
     if (recovered?.pointB) routes[i] = { pointA: route.pointA ?? recovered.pointA, pointB: recovered.pointB }
   }
 
-  const amounts = anchors.map((a) => readGlyphRow(mask, amountBoxFor(a, prepared.height), templates))
+  const amounts = anchors.map((a) => readGlyphRow(mask, amountBoxFor(scaleBox(a), canon.height), templates))
   return {
     amounts,
     // A clock that carried its own date (the log's «MM/DD») keeps it; the orders screen prints no
     // date per row, so the day comes from the header the row sits under.
     clocks: clocks.map((c, i) => ({ time: c.time, dateIso: c.dateIso ?? dateFor(anchors[i]!) })),
     routes,
+    truncated,
     // The cancelled cards, carved with the same band rules — see cancelledCardsIn.
     cancelled: cancelledCardsIn(result.lines, anchors).map((c) => ({
       dateIso: dateFor({ y0: c.y0 }),
@@ -1411,6 +1563,7 @@ export async function readOrders(image: Blob | Uint8Array, timeoutMs = ORDERS_TI
       const clock = byGlyph.clocks[i]
       const route = byGlyph.routes[i]
       return {
+        cutOff: byGlyph.truncated[i] === true,
         dateIso: clock?.dateIso ?? null,
         time: clock?.time ?? '',
         // A fee the classifier refused, or one whose SHAPE is not a fee, becomes null — not a
@@ -1430,8 +1583,15 @@ export async function readOrders(image: Blob | Uint8Array, timeoutMs = ORDERS_TI
     // The one exception is a row with no identity at all — no clock, no route, nothing but a
     // refused number. That cannot be de-duplicated against anything, so re-scanning the same page
     // would add it again every time. It stays counted in `rowsSeen` and shown only as «N refused».
-    const glyphOrders: OcrOrder[] = glyphRows.filter((r) => r.fee !== null || r.time !== '' || r.pointA !== null || r.pointB !== null)
-    const priced = glyphRows.filter((r) => r.fee !== null).length
+    // A card the screen sliced in half is withheld entirely — its places are a guess. Counted and
+    // announced, never silently dropped: the driver adds that one by hand, and on a page that
+    // overlaps the next one it usually arrives whole from there anyway.
+    const cutOff = glyphRows.filter((r) => r.cutOff).length
+    const whole = glyphRows.filter((r) => !r.cutOff)
+    const glyphOrders: OcrOrder[] = whole
+      .filter((r) => r.fee !== null || r.time !== '' || r.pointA !== null || r.pointB !== null)
+      .map(({ cutOff: _cutOff, ...row }) => row)
+    const priced = whole.filter((r) => r.fee !== null).length
     const cancelledCards: OcrOrder[] = byGlyph.cancelled.map((c) => ({
       dateIso: c.dateIso,
       time: '',
@@ -1453,6 +1613,7 @@ export async function readOrders(image: Blob | Uint8Array, timeoutMs = ORDERS_TI
       // now that refused rows are visible cards rather than absences.
       fieldsFound: priced,
       rowsSeen: byGlyph.rows,
+      cutOff,
       ms: now() - started,
       text,
     }

@@ -230,6 +230,14 @@ export const en: Catalog = {
     },
     readUnread: 'This image could not be read — enter the operations by hand',
     /** Rows the reader saw but would not vouch for. Silence here hides a short day. */
+    readCutOff: {
+      one: 'card cut off at the bottom — add it by hand',
+      two: 'cards cut off at the bottom — add them by hand',
+      few: 'cards cut off at the bottom — add them by hand',
+      many: 'cards cut off at the bottom — add them by hand',
+      other: 'cards cut off at the bottom — add them by hand',
+    },
+    photoOf: 'photo of',
     readRefused: {
       one: '1 row was not read confidently — enter it by hand',
       two: '{n} rows were not read confidently — enter them by hand',
@@ -337,6 +345,7 @@ orderNo: 'Order no.',
       empty_fee: 'Enter the fee',
     },
     cancelledCard: 'Cancelled',
+    mapPin: 'Map location',
     cancelledHint: 'Cancelled order — if you were paid for it, tick it and type the fee',
   },
 

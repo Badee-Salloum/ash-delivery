@@ -15,21 +15,24 @@
  *
  * ── READ THIS BEFORE TRUSTING A GREEN RUN ────────────────────────────────────────────────────
  *
- * A pass here means the reader is correct AT THE FIXTURES' OWN SCALE. It is not a statement about
- * a phone. `node scripts/glyph-read.mjs --scale=1.25` re-runs everything on an upscaled copy, and
- * TODAY THAT FAILS: «١٢٠» reads «11», «٢٣٥» reads «1710», «١٢٠» reads «111». The one-component-
- * one-character invariant holds throughout — those are not manufactured digits, they are genuine
- * MISCLASSIFICATIONS, because the template bank was harvested at two or three display sizes and at
- * any other size a thin stroke's nearest neighbour is «١», confidently and with a wide margin.
+ * A pass here means the reader is correct AT THE FIXTURES' OWN SCALE. It is not a statement about a
+ * phone, and the difference is measurable: Tesseract reports the «SYP» cap height as 17–23 px on
+ * every fixture the templates were harvested from, and 32 px on a real 1080×2400 screenshot. The
+ * bank has never seen ink at that density. Scale-free FEATURES do not save it, because segmentation
+ * runs first and segmentation is pixel-density work — which is why `canonFactorFor` now resamples
+ * out-of-band screenshots down into the learnt band before any glyph is cut out.
  *
- * That is the same gap that produced the field failure, and no gate tuning or geometric guard
- * closes it — a digit-height agreement rule was tried and rejected, costing 18 correct reads while
- * catching none of the three. The fix is templates harvested at the scale a phone actually
- * produces, which needs the ORIGINAL full-resolution screenshots: every fixture here is a
- * Telegram-recompressed copy roughly 1080 wide.
+ * `--scale N` re-runs everything on a resampled copy, and IT STILL FAILS. Read that carefully
+ * before believing it: at 1.25× the failing file's cap height is ~22, INSIDE the learnt band, so no
+ * normalisation happens and the ink is simply blurrier than any real screenshot — an upscaled
+ * compressed JPEG is soft in a way a native capture never is. The sweep therefore measures BLUR as
+ * much as SIZE, and is a pessimistic proxy, not a verdict on the phone.
  *
- * So: `pnpm check:glyphs` guards against regression at the calibrated scale. `pnpm glyphs:scales`
- * is the RELEASE GATE for trusting the reader on a new phone, and it is not passing yet.
+ * What it does prove is that the reader has no margin against degraded ink, and that is real. The
+ * honest gate remains an original full-resolution Arabic screenshot, which no fixture here is:
+ * every one arrived through a chat app's photo compression at roughly 562–720 px wide. Until one
+ * exists, `pnpm check:glyphs` guards the calibrated scale and nothing here licenses the sentence
+ * "the reader is correct on a phone".
  *
  * Route truth is a SUBSTRING the read label must contain (Tesseract's Arabic spelling wobbles at
  * the edges of a line; the middle is stable). `null` route truth means "not checkable here" — a
@@ -101,9 +104,11 @@ const TRUTH = {
       ['210', '17:42', '2026-08-04', 'بروستد القصور', 'جابر ابن حيان'],
       ['130', '17:22', '2026-08-04', 'القصور', 'المدخل الاول'],
       ['135', '17:07', '2026-08-04', 'سناك الرواد', 'Baghdad'],
-      // The bottom card is cut by the screen edge; its B line is half a glyph tall.
-      ['170', '16:50', '2026-08-04', 'Roummaneh', null],
+      // The bottom card is cut by the screen edge; its B line is half a glyph tall, so the app
+      // WITHHOLDS the whole card and tells the driver to add it. Fee and clock still read.
+      ['170', '16:50', '2026-08-04', null, null],
     ],
+    cutOff: [4],
   },
   'orders-0804-b.jpg': {
     rows: [
@@ -112,8 +117,11 @@ const TRUTH = {
       // «تم إلغاؤه» card sits inside this row's band and must NOT leak into it (unit-tested).
       ['135', '15:51', '2026-08-04', 'مأكولات الشام', null],
       ['120', '15:19', '2026-08-04', 'صيدلية سلمى', 'جامع الرحمن'],
-      ['235', '13:39', '2026-08-04', 'فلافل الراعي', null],
+      // Also sliced by the screen edge — «إنكليزي» comes back «انكلنء». Withheld; the same order
+      // appears whole on orders-0804-c.jpg, which is where it actually gets added from.
+      ['235', '13:39', '2026-08-04', null, null],
     ],
+    cutOff: [3],
   },
   'orders-0804-c.jpg': {
     rows: [
@@ -188,13 +196,29 @@ function linesOf(data) {
 const anchorsIn = ocr.anchorsIn
 
 const tally = { fee: { read: 0, refused: 0, wrong: 0 }, clock: { read: 0, refused: 0, wrong: 0 }, date: { read: 0, refused: 0, wrong: 0 }, route: { read: 0, refused: 0, wrong: 0 } }
+/**
+ * Arabic spelling that differs only in orthography is the SAME WORD.
+ *
+ * «إنكليزى» and «إنكليزي» differ by one letter — alef maqsura for ya — and Yallago's own screen is
+ * not consistent about it either. Scoring that as a wrong route says the reader failed when it read
+ * the word correctly, which buries the failures that are real. Mirrors the reader's own `foldAr`.
+ */
+const foldAr = (t) =>
+  t
+    .replace(/[ً-ْـ‎‏]/g, '')
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/\s+/g, ' ')
+    .trim()
+
 const judge = (field, want, got, contains = false) => {
   if (want === null || want === undefined) return ''
   if (got === null || got === '' || got === undefined) {
     tally[field].refused++
     return `${field} REFUSED`
   }
-  const ok = contains ? got.includes(want) : got === want
+  const ok = contains ? foldAr(got).includes(foldAr(want)) : got === want
   if (ok) {
     tally[field].read++
     return ''
@@ -271,7 +295,20 @@ for (const [file, truth] of Object.entries(TRUTH)) {
 
   const lines = linesOf(data)
   const anchors = anchorsIn(lines)
-  const mask = g.maskFromPixels(img.px, img.width, img.height)
+  // The same scale normalisation readAmountsByGlyph performs: bring the pixels to the cap height
+  // the templates were learnt at, and scale every box by the same ratio. Without this the harness
+  // would once again be measuring a reader that does not ship.
+  const capHeights = anchors.map((a) => a.y1 - a.y0).sort((x, y) => x - y)
+  const capHeight = capHeights[Math.floor(capHeights.length / 2)] ?? g.CANON_CAP_HEIGHT
+  const factor = g.canonFactorFor(capHeight)
+  const rescale = factor !== 1
+  const canon = rescale ? g.resampleRgba(img.px, img.width, img.height, factor) : { data: img.px, width: img.width, height: img.height }
+  const scaleBox = (a) => (rescale ? { ...a, x0: Math.round(a.x0 * factor), x1: Math.round(a.x1 * factor), y0: Math.round(a.y0 * factor), y1: Math.round(a.y1 * factor) } : a)
+  const mask = g.maskFromPixels(canon.data, canon.width, canon.height)
+  // Which cards the bottom of the screen sliced in half. The app WITHHOLDS these — their places
+  // are half-rendered and read as something confident and wrong — so the harness has to know
+  // which they are, or it scores a route no driver is ever shown and calls the result green.
+  const cutOff = ocr.truncatedCards(lines, anchors, img.height)
 
   // ── readOrders' decision, replicated: text first, coherence-gated; glyph otherwise ─────────
   const parsed = best
@@ -279,10 +316,14 @@ for (const [file, truth] of Object.entries(TRUTH)) {
 
   let rows
   if (textWins) {
-    const routes = anchors.length === parsed.length ? ocr.routesFor(lines, anchors) : parsed.map(() => ({ pointA: null, pointB: null }))
-    rows = parsed.map((o, i) => ({ fee: o.fee, time: o.time, dateIso: o.dateIso, ...routes[i] }))
+    // Routes and cut-off flags are anchor-indexed; they only line up with the parsed rows when
+    // the two counts agree. When they do not, the page keeps its fees and goes without routes
+    // rather than pinning one card's places to another card.
+    const aligned = anchors.length === parsed.length
+    const routes = aligned ? ocr.routesFor(lines, anchors) : parsed.map(() => ({ pointA: null, pointB: null }))
+    rows = parsed.map((o, i) => ({ fee: o.fee, time: o.time, dateIso: o.dateIso, ...routes[i], cutOff: aligned && cutOff[i] === true }))
   } else {
-    const headers = ocr.headerDatesIn(lines, YEAR, TODAY, (box) => g.readDigitRun(mask, box, clockTemplates, new Set([...'0123456789'])))
+    const headers = ocr.headerDatesIn(lines, YEAR, TODAY, (box) => g.readDigitRun(mask, scaleBox(box), clockTemplates, new Set([...'0123456789'])))
     const dateFor = (a) => {
       let seen = null
       for (const h of headers) if (h.y0 < a.y0 && h.dateIso !== null) seen = h.dateIso
@@ -326,7 +367,7 @@ for (const [file, truth] of Object.entries(TRUTH)) {
       // `readOrders` refuses a signed value outright (an order fee is never negative), while
       // `readPaymentsLog` splits the sign off and validates the magnitude. Using the orders rule on a
       // log row refuses every «-165.50» on the page — which is a bug in the measurement, not the reader.
-      const rawFee = g.readGlyphRow(mask, ocr.amountBoxFor(a, img.height), templates)
+      const rawFee = g.readGlyphRow(mask, ocr.amountBoxFor(scaleBox(a), canon.height), templates)
       const fee = isLog
         ? (() => {
             if (rawFee === null) return null
@@ -335,8 +376,8 @@ for (const [file, truth] of Object.entries(TRUTH)) {
             return magnitude === null ? null : negative ? `-${magnitude}` : `+${magnitude}`
           })()
         : ocr.glyphListFee(rawFee)
-      const clock = ocr.parseGlyphClock(g.readGlyphRow(mask, ocr.clockBoxFor(a, img.width, img.height), clockTemplates, g.CLOCK_ALPHABET), YEAR)
-      return { fee, time: clock.time, dateIso: clock.dateIso ?? dateFor(a), ...routes[i] }
+      const clock = ocr.parseGlyphClock(g.readGlyphRow(mask, ocr.clockBoxFor(scaleBox(a), canon.width, canon.height), clockTemplates, g.CLOCK_ALPHABET), YEAR)
+      return { fee, time: clock.time, dateIso: clock.dateIso ?? dateFor(a), ...routes[i], cutOff: cutOff[i] === true }
     })
   }
 
@@ -358,12 +399,21 @@ for (const [file, truth] of Object.entries(TRUTH)) {
   }
   rows.forEach((r, i) => {
     const [fee, time, date, a, b] = truth.rows[i]
+    // A card the screen sliced in half is WITHHELD by the app, so its route is never shown to
+    // anyone and must not be scored as though it were. Its fee and clock still are — those sit on
+    // the fully-drawn price row, and the whole reason the card is withheld rather than deleted is
+    // that they read correctly. The expectation is written per file, so a card that silently stops
+    // being detected as cut-off shows up as a route wrong instead of passing quietly.
+    const expectedCut = (truth.cutOff ?? []).includes(i)
+    if (r.cutOff !== expectedCut) {
+      console.log(`  row ${String(i).padStart(2)}  CUT-OFF MISMATCH — expected ${expectedCut}, got ${r.cutOff}`)
+      tally.route.wrong++
+    }
     const notes = [
       judge('fee', fee, r.fee),
       judge('clock', time, r.time),
       judge('date', date, r.dateIso),
-      judge('route', a, r.pointA, true),
-      judge('route', b, r.pointB, true),
+      ...(r.cutOff ? [] : [judge('route', a, r.pointA, true), judge('route', b, r.pointB, true)]),
     ].filter((n) => n !== '')
     console.log(`  row ${String(i).padStart(2)}  ${fee.padEnd(9)} ${r.fee === fee ? 'ok' : (r.fee ?? '—')}  ${time} ${r.time === time ? 'ok' : (r.time || '—')}  ${notes.length > 0 ? notes.join(' · ') : ''}`)
   })
@@ -389,7 +439,11 @@ for (const [field, t] of Object.entries(tally)) {
  *
  * The ceiling is a ratchet: it may only ever be lowered. If a change makes labels worse this fails.
  */
-const KNOWN_LABEL_WRONG = { date: 4, route: 5 }
+// Ratchet, lowered as each is fixed — it may only ever fall. Route came down from 5: «ssl» and a
+// coordinate pair are no longer printed as destinations, and «إنكليزى» is no longer scored wrong
+// for spelling «إنكليزي» with an alef maqsura. The 3 that remain are genuine partial Arabic
+// reads («شارع جابر ابن» for «جابر ابن حيان»), which need the original screenshots to improve.
+const KNOWN_LABEL_WRONG = { date: 4, route: 3 }
 const money = tally.fee.wrong + tally.clock.wrong
 if (money > 0) {
   console.log(`\n${money} MONEY FIELD(S) READ WRONGLY — the reader may not ship like this.`)
@@ -402,7 +456,6 @@ if (worse.length > 0) {
 }
 const labels = tally.date.wrong + tally.route.wrong
 console.log(`\nMoney: 0 wrong (fee, clock). Labels: ${labels} wrong — known, ceiling ${KNOWN_LABEL_WRONG.date + KNOWN_LABEL_WRONG.route}, needs the original screenshots.`)
-console.log('\nNo field was read wrongly.')
 
 /*
  * THE FLOOR. Zero-wrong was the only rule, and it is satisfied by a reader that refuses
@@ -415,7 +468,10 @@ console.log('\nNo field was read wrongly.')
 // the app really reads. The old numbers (fee 44, clock 43, date 44, route 38) described an image
 // no phone has ever produced. Fees and clocks are HIGHER now; dates are lower because a day
 // number whose weekday cannot be read is refused rather than guessed.
-const MIN_READS = { fee: 46, clock: 45, date: 28, route: 41 }
+// Route falls from 41 to 40 because two cards the screen slices in half are now WITHHELD rather
+// than routed — their four route fields are no longer scored, and two genuine reads on the other
+// cards replaced them. A lower number here is the reader offering less and being right more.
+const MIN_READS = { fee: 46, clock: 45, date: 28, route: 40 }
 const short = Object.entries(MIN_READS).filter(([field, floor]) => tally[field].read < floor)
 if (short.length > 0) {
   for (const [field, floor] of short) console.log(`REGRESSION: ${field} read ${tally[field].read}, floor is ${floor}`)

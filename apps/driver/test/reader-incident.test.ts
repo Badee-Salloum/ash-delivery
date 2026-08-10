@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { type OcrLine, cancelledCardsIn, glyphListFee, isBadgeToken, isCancelLine, routesFor } from '../src/ocr.ts'
+import { type OcrLine, cancelledCardsIn, glyphListFee, isBadgeToken, isCancelLine, isCoordinateLine, routesFor, truncatedCards } from '../src/ocr.ts'
 
 /**
  * The Aug-4 live test, encoded.
@@ -163,5 +163,84 @@ describe('the cancelled card is carved, not stepped over', () => {
 
   it('reports nothing when the chip has no addresses under it', () => {
     expect(cancelledCardsIn([line('تم إلغاؤه', 100)], [])).toHaveLength(0)
+  })
+})
+
+/**
+ * The SECOND live run, on the same three screenshots — after the fees were already correct.
+ *
+ * What it found: the last card of a page is sliced by the bottom of the phone's screen, and a
+ * sliced line is read as something confident and wrong («جامع الحمود Al Beirouni Street» →
+ * «Al Dajeniin; Ctraat innttc.|. نكم», «إنكليزي» → «انكلنء»). Its FEE and CLOCK are fine — those sit
+ * on the fully-drawn price row — which is exactly why the card had to be withheld rather than
+ * trusted: everything about it looks healthy except the part that is a guess.
+ *
+ * Worth recording: the A/B pair was NOT inverted, though the PDF of that run appears to show it.
+ * That was bidi text extraction reversing the segments of a line whose point A is pure Latin — the
+ * same artifact turns «Baghdad Avenue» into «Avenue Baghdad» on a card that read perfectly. The
+ * reader was right; the report was not. No fix was made for a bug that did not exist.
+ */
+describe('a card the screen sliced in half', () => {
+  const tall = 1280
+
+  it('is detected when its last line runs into the bottom edge', () => {
+    const lines = [line('Abou Roummaneh', 1210), line('Al Dajeniin; Ctraat innttc.|.', 1260)]
+    expect(truncatedCards(lines, [{ y0: 1174, y1: 1193 }], tall)).toEqual([true])
+  })
+
+  it('is detected when its last line is too short to be whole', () => {
+    // Half a line of text is half as tall as the row's own «SYP» cap height.
+    const half: OcrLine = { text: 'جامع الحمود', y0: 1100, y1: 1108, words: [{ text: 'جامع الحمود', x0: 0, x1: 80, y0: 1100, y1: 1108 }] }
+    expect(truncatedCards([line('Abou Roummaneh', 1060), half], [{ y0: 1020, y1: 1040 }], tall)).toEqual([true])
+  })
+
+  it('leaves a whole card alone', () => {
+    const lines = [line('مأكولات الشام شارع بغداد', 130), line('الحارة الجديدة', 160)]
+    expect(truncatedCards(lines, [{ y0: 100, y1: 118 }], tall)).toEqual([false])
+  })
+})
+
+describe('a dropoff the reader will not vouch for is not printed', () => {
+  it('names a dropped pin instead of the debris its digits become', () => {
+    // Arabic-Indic coordinates: Tesseract returns «(YLYATAAVO-AV ¥Y,cloWvo--¥)» for «(٣٦٫٢٩…)».
+    expect(isCoordinateLine('(YLYATAAVO-AV ¥Y,cloWvo--¥)')).toBe(true)
+  })
+
+  it('keeps coordinates the ENGLISH build prints in readable digits', () => {
+    // Same screen, Latin digits, read correctly — replacing this with «map location» would be
+    // throwing away a good read.
+    expect(isCoordinateLine('(33.518726, 36.276112)')).toBe(false)
+  })
+
+  it('never mistakes a real address for a pin', () => {
+    expect(isCoordinateLine('المدخل جامع الرحمن')).toBe(false)
+    expect(isCoordinateLine('Baghdad Avenue')).toBe(false)
+    expect(isCoordinateLine('G6HF RVH')).toBe(false)
+  })
+
+  it('refuses a dropoff that is nothing but a lower-case Latin scrap', () => {
+    // «إنكليزي» came back as «ssl». Alone on its line there is no Arabic beside it to mark it as
+    // debris, so it would have been printed as the destination.
+    const routes = routesFor([line('مطعم الربيع, الزهراء', 130), line('ssl', 160)], [anchor(100)])
+    expect(routes[0]!.pointB).toBeNull()
+  })
+})
+
+describe('Latin scraps invented out of Arabic strokes', () => {
+  it('drops a lower-case scrap sitting inside an Arabic address', () => {
+    // «عالم» came back as «alle», «جابر» as «ve» — printed, they read as corruption.
+    const routes = routesFor([line('alle الدجاج, اوتستراد المزة', 130), line('جادة عارف الشهابي', 160)], [anchor(100)])
+    expect(routes[0]!.pointA).not.toContain('alle')
+    expect(routes[0]!.pointA).toContain('الدجاج')
+  })
+
+  it('keeps a CAPITALISED Latin name on the same line — that is a real name', () => {
+    const routes = routesFor([line('Chicken World الدجاج, اوتستراد المزة', 130), line('جادة عارف', 160)], [anchor(100)])
+    expect(routes[0]!.pointA).toContain('Chicken World')
+  })
+
+  it('keeps every token on a card with no Arabic at all', () => {
+    const routes = routesFor([line('Abou Roummaneh', 130), line('Al Beirouni Street', 160)], [anchor(100)])
+    expect(routes[0]!.pointB).toBe('Al Beirouni Street')
   })
 })
