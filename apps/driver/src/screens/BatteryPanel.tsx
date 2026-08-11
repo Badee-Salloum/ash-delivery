@@ -3,6 +3,7 @@ import { type BatteryReadingInput, checkStartBattery, plural } from '@ash/client
 import { useApp } from '../app-context.tsx'
 import { Button, Card, Field, TextInput } from '../ui.tsx'
 import { PhotoSlot } from './PhotoSlot.tsx'
+import { SourceMark, sourceOf } from './ReadingSource.tsx'
 
 export interface FittedBattery {
   id: string
@@ -297,6 +298,16 @@ export function BatteryPanel({
                       onChange={(e) =>
                         setPack(battery.id, { ...state, values: { ...state.values, [f.key]: e.target.value } })
                       }
+                    />
+                    {/* PER FIELD, not per pack. `matchesOcr` is all-or-nothing, so correcting the
+                        cycle count silently reclassified a perfectly-read charge as «manual» — the
+                        driver could never see which of the two the machine had actually produced. */}
+                    <SourceMark
+                      source={sourceOf({
+                        ocrValue: (state.ocrRaw as Record<string, unknown> | null)?.[f.key] ?? null,
+                        hadImage: files[battery.id] !== undefined || state.outcome !== 'idle',
+                        value: state.values[f.key],
+                      })}
                     />
                   </Field>
                 ))}

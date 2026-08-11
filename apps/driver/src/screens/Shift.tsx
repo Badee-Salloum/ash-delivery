@@ -32,6 +32,7 @@ import { OperationsList } from './OrderEntry.tsx'
 import { BatteryPanel, type FittedBattery, type PackState } from './BatteryPanel.tsx'
 import { BatterySwap, type SpareBattery } from './BatterySwap.tsx'
 import { PhotoSlot } from './PhotoSlot.tsx'
+import { SourceMark, sourceOf } from './ReadingSource.tsx'
 
 /**
  * The driver's shift flow: start package → order entry → end package.
@@ -720,6 +721,10 @@ function StartPackage({
         <Field label={t.shift.odometer}>
           <TextInput inputMode="numeric" value={odo} onChange={(e) => setOdo(e.target.value)} />
         </Field>
+        {/* WHERE THIS NUMBER CAME FROM. Captured on every shift as the D-3 baseline and shown
+            nowhere until now, so a pre-filled OCR odometer and one typed from memory looked
+            identical. This reader was wrong three times out of three on real shifts. */}
+        <SourceMark source={sourceOf({ ocrValue: odoOcr, hadImage: odoStrip !== null, value: odo })} />
       </Card>
       {/* One screenshot and one set of numbers per pack fitted — the same count the gate reads. */}
       {shiftId ? (
@@ -1128,9 +1133,13 @@ function EndPackage({
         <Field label={t.shift.walletBalance}>
           <MoneyInput value={wallet} onChange={(e) => patch({ wallet: e.target.value })} />
         </Field>
+        <SourceMark source={sourceOf({ ocrValue: walletOcr, hadImage: draft.walletStrip !== null, value: wallet })} />
         <Field label={t.shift.odometer}>
           <TextInput inputMode="numeric" value={odo} onChange={(e) => patch({ odo: e.target.value })} />
         </Field>
+        {/* The closing odometer has no reader at all today, so this reads «أضفتها بنفسك» — which is
+            true, and worth saying rather than leaving the driver to assume the app checked it. */}
+        <SourceMark source={sourceOf({ ocrValue: null, hadImage: draft.odoStrip !== null, value: odo })} />
         {/* Checked against the number this very shift opened on, which is the only thing that makes
             «6900» after «6948» visibly wrong. Asked, never refused: a bike really can be carried on
             a truck, and refusing would teach him to type whatever gets past it. */}
