@@ -289,6 +289,56 @@ export class PgOrderRepo implements OrderRepo {
     )
   }
 
+  async recordShiftOcrSample(input: {
+    shiftId: string
+    package: 'start' | 'end'
+    kind: 'wallet' | 'odometer'
+    source: 'ocr' | 'refused'
+    stripPng: Uint8Array
+  }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO ocr_samples (kind, shift_id, package, source, strip_png)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (shift_id, package, kind) WHERE kind <> 'fee' DO NOTHING`,
+      [input.kind, input.shiftId, input.package, input.source, Buffer.from(input.stripPng)],
+    )
+  }
+
+  async listOcrSamples(kind: 'fee' | 'wallet' | 'odometer'): Promise<
+    Array<{
+      id: string
+      kind: string
+      shiftOrderId: string | null
+      shiftId: string | null
+      package: string | null
+      source: 'ocr' | 'refused'
+      stripPng: Uint8Array
+    }>
+  > {
+    // `ocr_fee_samples` (0019) is still the home of fee strips; 0022 covers the rest. Reading both
+    // here keeps the export one call rather than making every caller know the history.
+    const { rows } =
+      kind === 'fee'
+        ? await this.pool.query<Record<string, unknown>>(
+            `SELECT id::text, 'fee' AS kind, shift_order_id, NULL::uuid AS shift_id, NULL::text AS package,
+                    source, strip_png FROM ocr_fee_samples ORDER BY id`,
+          )
+        : await this.pool.query<Record<string, unknown>>(
+            `SELECT id::text, kind, shift_order_id, shift_id, package, source, strip_png
+               FROM ocr_samples WHERE kind = $1 ORDER BY id`,
+            [kind],
+          )
+    return rows.map((r) => ({
+      id: String(r.id),
+      kind: String(r.kind),
+      shiftOrderId: (r.shift_order_id as string | null) ?? null,
+      shiftId: (r.shift_id as string | null) ?? null,
+      package: (r.package as string | null) ?? null,
+      source: r.source as 'ocr' | 'refused',
+      stripPng: new Uint8Array(r.strip_png as Buffer),
+    }))
+  }
+
   async create(order: ShiftOrderRecord): Promise<void> {
     try {
       // The order and its route go in together: a manual job whose points failed to write would be

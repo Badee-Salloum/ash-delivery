@@ -79,6 +79,10 @@ interface EndDraft {
   wallet: string
   /** What `readWallet` OCR'd, kept even if the driver edits the field (SRS D-3 baseline). */
   walletOcr: string | null
+  /** The wallet screen as the reader worked on it — training material. */
+  walletStrip: string | null
+  /** The closing dashboard as the reader worked on it. */
+  odoStrip: string | null
   odo: string
   /** Evidence slots already uploaded, so the tiles come back showing their taken state. */
   slots: ReadonlySet<string>
@@ -110,6 +114,8 @@ const EMPTY_END_DRAFT: EndDraft = {
   cash: '',
   wallet: '',
   walletOcr: null,
+  walletStrip: null,
+  odoStrip: null,
   odo: '',
   slots: new Set(),
   log: { kind: 'idle' },
@@ -503,6 +509,14 @@ function StartPackage({
   // SRS D-3 baseline: what OCR read for the odometer, kept even if the driver then edits it, so the
   // manager sees «قراءة الآلة ← ما أكّده السائق».
   const [odoOcr, setOdoOcr] = useState<number | null>(null)
+  /**
+   * The dashboard as the reader worked on it — training material, kept whether it read or refused.
+   *
+   * Measured on three real shifts this reader was wrong three times out of three, and every
+   * correction was thrown away. A refusal is the MORE valuable sample: it is the case it is
+   * currently getting wrong, about to be labelled by the driver typing the right number.
+   */
+  const [odoStrip, setOdoStrip] = useState<string | null>(null)
   const [odoShot, setOdoShot] = useState(false)
   const [busy, setBusy] = useState(false)
   const [ocrBusy, setOcrBusy] = useState(false)
@@ -520,6 +534,8 @@ function StartPackage({
       // The ORIGINAL file, not the compressed upload: 1280 px at q=0.4 puts body text under the
       // LSTM's recognition floor, and no tesseract parameter recovers from that.
       const result = await readDashboard(file)
+      // The picture it worked from, kept either way — see `odoStrip`.
+      setOdoStrip((cur) => cur ?? result.sample ?? null)
       // A failed read is not silent any more, but the odometer tile has no status line of its own
       // — the driver simply types, which is what he was going to do anyway.
       if (!result.ok) return
@@ -565,6 +581,8 @@ function StartPackage({
         // SRS D-3: the odometer OCR baseline (null when OCR never ran).
         odometerKmOcr: odoOcr,
         batteryPercentOcr: null,
+        // What the reader was looking at, so the correction he just made becomes an example.
+        odometerStrip: odoStrip,
       })
       onOpened(shiftId)
     } catch (e) {
@@ -878,6 +896,9 @@ function EndPackage({
         walletDeclared: wallet,
         // SRS D-3: the wallet OCR baseline (null when readWallet never ran).
         walletDeclaredOcr: walletOcr,
+        // The pictures both closing readers worked from, so the driver's corrections become examples.
+        walletStrip: draft.walletStrip,
+        odometerStrip: draft.odoStrip,
       })
       setBr1(res.br1)
       if (res.br1.balanced) onSubmitted()
@@ -1007,6 +1028,8 @@ function EndPackage({
                 onImage: async (file: File): Promise<void> => {
                   const { readWallet } = await import('../ocr.ts')
                   const r = await readWallet(file)
+                  // Kept whether it read or refused — the refusal is the better example.
+                  onDraft((d) => ({ ...d, walletStrip: d.walletStrip ?? r.sample ?? null }))
                   if (!r.ok) return
                   onDraft((d) => ({
                     ...d,

@@ -318,6 +318,65 @@ export class MemoryOrderRepo implements OrderRepo {
     this.ocrSamples.push({ shiftOrderId, source, bytes: stripPng.length })
   }
 
+  /** Shift-scoped samples: the wallet, the payments log, the odometer. */
+  readonly shiftOcrSamples: Array<{
+    shiftId: string
+    package: 'start' | 'end'
+    kind: 'wallet' | 'odometer'
+    source: 'ocr' | 'refused'
+    bytes: number
+  }> = []
+
+  async recordShiftOcrSample(input: {
+    shiftId: string
+    package: 'start' | 'end'
+    kind: 'wallet' | 'odometer'
+    source: 'ocr' | 'refused'
+    stripPng: Uint8Array
+  }): Promise<void> {
+    // Mirrors the partial unique index: one sample per (shift, package, reader).
+    const already = this.shiftOcrSamples.some(
+      (x) => x.shiftId === input.shiftId && x.package === input.package && x.kind === input.kind,
+    )
+    if (already) return
+    this.shiftOcrSamples.push({ ...input, bytes: input.stripPng.length })
+  }
+
+  async listOcrSamples(kind: 'fee' | 'wallet' | 'odometer'): Promise<
+    Array<{
+      id: string
+      kind: string
+      shiftOrderId: string | null
+      shiftId: string | null
+      package: string | null
+      source: 'ocr' | 'refused'
+      stripPng: Uint8Array
+    }>
+  > {
+    if (kind === 'fee') {
+      return this.ocrSamples.map((x, i) => ({
+        id: String(i + 1),
+        kind: 'fee',
+        shiftOrderId: x.shiftOrderId,
+        shiftId: null,
+        package: null,
+        source: x.source,
+        stripPng: new Uint8Array(x.bytes),
+      }))
+    }
+    return this.shiftOcrSamples
+      .filter((x) => x.kind === kind)
+      .map((x, i) => ({
+        id: String(i + 1),
+        kind: x.kind,
+        shiftOrderId: null,
+        shiftId: x.shiftId,
+        package: x.package,
+        source: x.source,
+        stripPng: new Uint8Array(x.bytes),
+      }))
+  }
+
   async create(order: ShiftOrderRecord): Promise<void> {
     // The database has a GLOBAL unique index on provider_order_no; mirror it here so a test
     // cannot pass against a laxer rule than production enforces.

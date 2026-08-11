@@ -564,6 +564,40 @@ export interface OrderRepo {
    */
   recordOcrSample(shiftOrderId: string, source: 'ocr' | 'refused', stripPng: Uint8Array): Promise<void>
   /**
+   * The same thing for the readings that belong to a SHIFT rather than an order — the wallet
+   * balance, the payments log, the odometer.
+   *
+   * `kind` is the name of a code path, not a foreign key. The odometer's strip is deliberately a
+   * WIDER region than the others: its reader does not misread digits, it reads the wrong number on
+   * the dashboard, so a narrow crop would faithfully preserve the mistake.
+   *
+   * Best-effort by contract, exactly like the fee one: a lost sample costs a future model one
+   * example; a thrown error costs a driver his shift.
+   */
+  recordShiftOcrSample(input: {
+    shiftId: string
+    package: 'start' | 'end'
+    kind: 'wallet' | 'odometer'
+    source: 'ocr' | 'refused'
+    stripPng: Uint8Array
+  }): Promise<void>
+  /**
+   * Every sample of a kind, for the training export. Read-only and deliberately unjoined: the
+   * ground truth is fetched separately from the owning row, so this table can never disagree with
+   * the money.
+   */
+  listOcrSamples(kind: 'fee' | 'wallet' | 'odometer'): Promise<
+    Array<{
+      id: string
+      kind: string
+      shiftOrderId: string | null
+      shiftId: string | null
+      package: string | null
+      source: 'ocr' | 'refused'
+      stripPng: Uint8Array
+    }>
+  >
+  /**
    * Update the mutable fields of an order that is already stored — the checkbox, the measured
    * wallet amount, the fee, the pay mode, the minute.
    *

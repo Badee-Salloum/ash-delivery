@@ -433,6 +433,8 @@ export async function submitStartPackage(
     batteryPercent: number | null
     odometerKmOcr?: number | null
     batteryPercentOcr?: number | null
+    /** The dashboard as the reader saw it — training material, never evidence. */
+    odometerStrip?: string | null
   },
 ): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
@@ -467,6 +469,9 @@ export async function submitStartPackage(
     driverConfirmedAt: new Date(deps.clock.nowMs()).toISOString(),
   }
   await deps.shifts.update(updated)
+  // The dashboard as the reader saw it, beside what it made of it. The driver's confirmed odometer
+  // becomes the ground truth at export — joined from the shift, never copied here.
+  await keepShiftOcrSample(deps, updated.id, 'start', 'odometer', input.odometerStrip, input.odometerKmOcr)
   await notifyBranch(deps, updated, 'shift_awaiting_open_approval')
   return updated
 }
@@ -1070,6 +1075,8 @@ export async function submitEndPackage(
     cashDeclared: Minor
     walletDeclared: Minor
     walletDeclaredOcr?: Minor | null
+    odometerStrip?: string | null
+    walletStrip?: string | null
   },
 ): Promise<{ shift: ShiftRecord; br1: Br1View }> {
   const shift = await mustFind(deps, shiftId)
@@ -1110,6 +1117,18 @@ export async function submitEndPackage(
     ordersHash: br1.ordersHash,
   }
   await deps.shifts.update(updated)
+  // Both closing readers, with what each made of the picture it was handed. The driver's confirmed
+  // figures become the ground truth at export — joined from the shift, never copied here.
+  await keepShiftOcrSample(deps, updated.id, 'end', 'odometer', input.odometerStrip, input.odometerKm)
+  await keepShiftOcrSample(
+    deps,
+    updated.id,
+    'end',
+    'wallet',
+    input.walletStrip,
+    // `Minor` is a bigint; the keeper only asks whether the reader produced anything at all.
+    input.walletDeclaredOcr === null || input.walletDeclaredOcr === undefined ? null : String(input.walletDeclaredOcr),
+  )
   await notifyBranch(deps, updated, 'shift_awaiting_close_approval')
   return { shift: updated, br1 }
 }
@@ -1246,6 +1265,42 @@ async function keepOcrSample(
     await deps.orders.recordOcrSample(orderId, source, bytes)
   } catch {
     // A lost sample costs a future model one example. A thrown error would cost a driver his shift.
+  }
+}
+
+/**
+ * The same, for the readings that belong to a SHIFT rather than an order.
+ *
+ * `source` is derived rather than declared: the reader either produced a number or it did not, and
+ * the caller already knows which. A refusal is the more valuable of the two — the image it could not
+ * read, beside the figure the driver then typed, is exactly the case it is getting wrong.
+ *
+ * Best-effort, exactly like the fee one: a lost sample costs a future model one example; a thrown
+ * error costs a driver his shift.
+ */
+async function keepShiftOcrSample(
+  deps: Deps,
+  shiftId: string,
+  pkg: 'start' | 'end',
+  kind: 'wallet' | 'odometer',
+  strip: string | null | undefined,
+  read: number | string | null | undefined,
+): Promise<void> {
+  if (!strip) return
+  const base64 = strip.replace(/^data:image\/png;base64,/, '')
+  if (base64 === strip) return // not the data URL the app produces; ignore rather than store junk
+  try {
+    const bytes = Buffer.from(base64, 'base64')
+    if (bytes.length === 0 || bytes.length > 262144) return
+    await deps.orders.recordShiftOcrSample({
+      shiftId,
+      package: pkg,
+      kind,
+      source: read === null || read === undefined ? 'refused' : 'ocr',
+      stripPng: bytes,
+    })
+  } catch {
+    // Deliberately swallowed — see above.
   }
 }
 

@@ -91,6 +91,14 @@ export const startPackageRequest = z.object({
   // `.default(null)` (not `.optional()`) so the field is always present — null when OCR did not run.
   odometerKmOcr: z.number().int().min(0).nullable().default(null),
   batteryPercentOcr: z.number().int().min(0).max(100).nullable().default(null),
+  /**
+   * The dashboard as the reader saw it — TRAINING DATA, deliberately not evidence.
+   *
+   * A wider region than the fee strips on purpose: this reader's failure is not a misread digit but
+   * a wrong CHOICE of number (it answered 200 for 6948), so a tight crop would preserve the mistake.
+   * 256 KB ceiling; the prepared image is typically 15–40 KB.
+   */
+  odometerStrip: z.string().max(262144).nullable().default(null),
 })
 
 /**
@@ -301,6 +309,10 @@ export const endPackageRequest = z.object({
    * number, which is the one thing this system must never do.
    */
   walletDeclaredOcr: moneySchema.nullable().catch(null).default(null),
+  /** The wallet screen as the reader saw it — training data, same rules as `odometerStrip`. */
+  walletStrip: z.string().max(262144).nullable().default(null),
+  /** The closing dashboard as the reader saw it. */
+  odometerStrip: z.string().max(262144).nullable().default(null),
 })
 
 /**

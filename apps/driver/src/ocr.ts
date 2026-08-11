@@ -83,8 +83,19 @@ export type OcrOutcome<T> =
       cutOff?: number
       ms: number
       text: string
+      /**
+       * The pixels the reader actually worked from, as a PNG data URL — training material.
+       *
+       * Present on success AND on failure, deliberately. An image the reader could not read, beside
+       * the number the driver then typed, is the most valuable example there is: it is the case it
+       * is currently getting wrong, labelled by a human.
+       *
+       * Cut from the PREPARED copy, never the evidence one — evidence is compressed to ~300 KB /
+       * 1280 px / q0.4, which destroys the strokes a model would learn from.
+       */
+      sample?: string | null
     }
-  | { ok: false; reason: OcrFailure; ms: number; text: string }
+  | { ok: false; reason: OcrFailure; ms: number; text: string; sample?: string | null }
 
 /** Per-purpose parameters. `setParameters` is per-call, so one worker serves both readers. */
 interface Profile {
@@ -525,12 +536,26 @@ export async function readDashboard(image: Blob | Uint8Array, timeoutMs = DASH_T
   try {
     // Digits only, sparse layout: a dash has a handful of large glyphs and no useful words.
     const prepared = await prepareForOcr(toBlob(image))
+    /*
+     * THE WHOLE PREPARED DASH IS THE SAMPLE, not a strip.
+     *
+     * Measured on three real shifts this reader was wrong three times out of three: it answered 200
+     * for 6948 and 229 for 5426. Neither is a misread digit — they are DIFFERENT NUMBERS on the
+     * dashboard (a trip meter, a voltage). Cropping tightly around what it chose would preserve the
+     * mistake perfectly, so the sample has to be everything it had to choose from.
+     *
+     * The prepared copy, not the evidence copy: evidence is compressed to ~300 KB / 1280 px / q0.4,
+     * which is what destroys the strokes a model would learn from.
+     */
+    const sample = await asDataUrl(prepared)
     const result = await recognize(prepared, { whitelist: '0123456789%.', psm: 11 }, timeoutMs)
     text = result.text
     const reading = parseReading(text)
     const fieldsFound = reading.odometer !== null ? 1 : 0
-    if (fieldsFound === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text }
-    return { ok: true, reading, fieldsFound, ms: now() - started, text }
+    // A REFUSAL IS THE MOST VALUABLE SAMPLE. The image it could not read, beside the number the
+    // driver then typed, is exactly the example it needs — so the sample rides on the failure too.
+    if (fieldsFound === 0) return { ok: false, reason: 'no_fields', ms: now() - started, text, sample }
+    return { ok: true, reading, fieldsFound, ms: now() - started, text, sample }
   } catch (err) {
     const reason: OcrFailure = err instanceof Error && err.message === 'ocr timeout' ? 'timeout' : 'unavailable'
     return { ok: false, reason, ms: now() - started, text }
@@ -597,11 +622,12 @@ export async function readWallet(image: Blob | Uint8Array, timeoutMs = DASH_TIME
     // White digits on a solid orange card ⇒ invert. Whitelist money digits (both scripts) + the
     // separator marks + the "SYP" tag; a uniform block reads better than sparse here.
     const prepared = await prepareForOcr(toBlob(image), true)
+    const sample = await asDataUrl(prepared)
     const result = await recognize(prepared, { whitelist: '0123456789٠١٢٣٤٥٦٧٨٩،٬٫., SYPsyp', psm: 6 }, timeoutMs)
     text = result.text
     const amountText = parseWallet(text)
-    if (amountText === null) return { ok: false, reason: 'no_fields', ms: now() - started, text }
-    return { ok: true, reading: { amountText }, fieldsFound: 1, ms: now() - started, text }
+    if (amountText === null) return { ok: false, reason: 'no_fields', ms: now() - started, text, sample }
+    return { ok: true, reading: { amountText }, fieldsFound: 1, ms: now() - started, text, sample }
   } catch (err) {
     const reason: OcrFailure = err instanceof Error && err.message === 'ocr timeout' ? 'timeout' : 'unavailable'
     return { ok: false, reason, ms: now() - started, text }
