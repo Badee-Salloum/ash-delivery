@@ -227,6 +227,25 @@ export const reviseOperationsRequest = z.object({
         providerOrderNo: z.string().min(1).max(64),
         included: z.boolean().optional(),
         walletAmount: moneySchema.nullable().optional(),
+        /**
+         * The fee, corrected by the manager.
+         *
+         * He is the one verifying against the cash in his hand, and until now his only move against
+         * a fee he disbelieved was to exclude the whole delivery — throwing away a real order to
+         * fix one wrong number. Correcting it also turns the stored value from «what the driver
+         * typed» into «what a manager verified», which is a materially better label for the OCR
+         * training samples that join it.
+         *
+         * Every change is already attributed: the `audit_shift_orders` trigger writes before/after
+         * with the actor from the transaction GUC, and the edit moves `orders_hash`, so the
+         * staleness guard forces a fresh review before the ledger can be posted.
+         *
+         * Refused below zero. `moneySchema` allows a sign because `walletAmount` genuinely needs
+         * one, but a delivery fee does not: a negative fee flips Yallago's 20% cut into a credit
+         * and lets BR1 be satisfied by arithmetic that describes nothing that happened. (The
+         * driver's own `addOrderRequest.fee` is still unguarded — a separate, older gap.)
+         */
+        fee: moneySchema.refine((v) => v >= 0n, 'fee cannot be negative').optional(),
       }),
     )
     .max(400)

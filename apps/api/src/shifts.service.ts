@@ -1369,7 +1369,12 @@ export async function reviseOperations(
   // `| undefined` spelled out on every optional: `exactOptionalPropertyTypes` is on, and Zod's
   // parsed shape carries the explicit undefined that an omitted key produces.
   input: {
-    orders?: readonly { providerOrderNo: string; included?: boolean | undefined; walletAmount?: Minor | null | undefined }[]
+    orders?: readonly {
+      providerOrderNo: string
+      included?: boolean | undefined
+      walletAmount?: Minor | null | undefined
+      fee?: Minor | undefined
+    }[]
     movements?: readonly {
       id: string
       included?: boolean | undefined
@@ -1399,6 +1404,11 @@ export async function reviseOperations(
     await deps.orders.update({
       ...current,
       included: patch.included ?? current.included,
+      // The manager's own correction. He verifies against the cash in his hand, so he is the one
+      // placed to say what a fee actually was — and until now his only move against a wrong one was
+      // to exclude the whole delivery. The audit trigger attributes the change, and it moves
+      // `orders_hash`, so he cannot approve figures he has not re-read.
+      fee: patch.fee ?? current.fee,
       // `undefined` leaves it alone; an explicit `null` clears a measurement the manager rejects.
       walletAmount: patch.walletAmount === undefined ? current.walletAmount : patch.walletAmount,
     })
