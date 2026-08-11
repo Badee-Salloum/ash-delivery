@@ -164,6 +164,36 @@ export function allProblems(orders: readonly DraftOrder[]): Map<string, RowProbl
   return out
 }
 
+/**
+ * The fees already on this shift, most-used first — tap targets for a row the reader refused.
+ *
+ * The reader is right about the money it reads; what it costs the driver is the handful of empty
+ * boxes it honestly declines. Typing «١٣٠» on a phone at the end of a shift is slower than it
+ * sounds, and Yallago's fares repeat hard — 120, 130, 135, 170, 235 all day. Offering what is
+ * already on his own list turns a refusal into one tap, which is the cheapest way to make the
+ * remaining failures stop mattering.
+ *
+ * Drawn from the shift itself, so it needs no configuration and follows a price change by itself.
+ * Ties break toward the LARGER fee: understating is the error that costs the driver money.
+ */
+export function frequentFees(orders: readonly DraftOrder[], limit = 5): string[] {
+  const seen = new Map<string, number>()
+  for (const o of orders) {
+    const fee = o.feeText.trim()
+    if (fee === '' || o.cancelled === true) continue
+    try {
+      if (parseMinor(fee) <= 0n) continue
+    } catch {
+      continue
+    }
+    seen.set(fee, (seen.get(fee) ?? 0) + 1)
+  }
+  return [...seen.entries()]
+    .sort((a, b) => b[1] - a[1] || Number(b[0]) - Number(a[0]))
+    .slice(0, limit)
+    .map(([fee]) => fee)
+}
+
 export const isComplete = (orders: readonly DraftOrder[]): boolean =>
   orders.length > 0 && allProblems(orders).size === 0
 
@@ -228,6 +258,72 @@ export interface ScannedMovementRow {
 export const newOrderKey = (localId: string): string => `YAL-${localId}`
 
 /**
+ * A row's identity, from what the SCREEN said rather than what the driver later typed.
+ *
+ * The fee here is the fee as SCANNED. A row is identified by what was on the screen, and the driver
+ * correcting a misread «١٦» to «١٦٥» does not make it a different delivery — keying on the edited
+ * text meant re-scanning the overlap after any correction added a duplicate. A REFUSED row keys on
+ * an empty fee and keeps doing so after it is typed into, which is what lets it survive a rescan.
+ *
+ * The DAY is part of it. Without it a 120-lira delivery at 13:10 yesterday and another at 13:10
+ * today are one row, and scanning the second page silently swallows one of them.
+ */
+const keyOf = (o: DraftOrder): string => {
+  const fee = o.cancelled === true ? '' : o.feeRefused === true ? '' : (o.feeOcrText ?? o.feeText)
+  const head = o.cancelled === true ? 'C' : ''
+  return `${head}|${o.dateText ?? ''}|${o.timeText ?? ''}|${fee}|${cardKey(o.pointA, o.pointB, o.cancelled === true)}`
+}
+
+/** The same identity, computed from a freshly scanned row. Kept beside `keyOf` so they cannot drift. */
+const scannedKey = (row: ScannedOrderRow): string => {
+  const cancelled = row.cancelled === true
+  // A cancelled card has no clock and no fee — its route is the only identity it has.
+  return `${cancelled ? 'C' : ''}|${row.dateIso ?? ''}|${cancelled ? '' : row.time}|${row.fee ?? ''}|${cardKey(row.pointA, row.pointB, cancelled)}`
+}
+
+/**
+ * A card the screen cut in half, HEALED by the page that shows it whole.
+ *
+ * The screenshots overlap, so the delivery sliced off the bottom of one page is usually complete at
+ * the top of the next. Its fee and clock were already right — those sit on the fully-drawn price
+ * row — but its route was withheld, and the second sighting was then de-duplicated away and its
+ * addresses thrown out with it. The driver saw a delivery to nowhere and no way to fix it.
+ *
+ * Deliberately narrow: a route is filled in ONLY where the row has none. An existing route is never
+ * overwritten, and the FEE is never upgraded at all. The key is specific — day, minute and scanned
+ * fee — but two deliveries genuinely can share a minute, and handing a read fee to the wrong row is
+ * exactly the accepted-wrong failure this whole effort exists to prevent. A route is not money.
+ *
+ * Returns the patches to apply; `mergeScannedOrders` still decides what to append.
+ */
+export function healCutOffRoutes(
+  existing: readonly DraftOrder[],
+  scanned: readonly ScannedOrderRow[],
+): Array<{ localId: string; pointA: string | null; pointB: string | null }> {
+  const blank = new Map<string, DraftOrder[]>()
+  for (const o of existing) {
+    if (o.pointA != null || o.pointB != null) continue
+    const key = keyOf(o)
+    const bucket = blank.get(key)
+    if (bucket) bucket.push(o)
+    else blank.set(key, [o])
+  }
+  if (blank.size === 0) return []
+
+  const out: Array<{ localId: string; pointA: string | null; pointB: string | null }> = []
+  for (const row of scanned) {
+    if (row.pointA == null && row.pointB == null) continue
+    const bucket = blank.get(scannedKey(row))
+    // One sighting heals one row: shift it out so a page listing the same delivery twice cannot
+    // write the same addresses over two different rows.
+    const target = bucket?.shift()
+    if (!target) continue
+    out.push({ localId: target.localId, pointA: row.pointA ?? null, pointB: row.pointB ?? null })
+  }
+  return out
+}
+
+/**
  * Append what a dashboard screenshot read, skipping what the list already holds.
  *
  * The screen scrolls, so it is photographed in several OVERLAPPING images: page two re-shows the
@@ -252,11 +348,6 @@ export function mergeScannedOrders(
   // delivery — keying on `feeText` meant re-scanning the overlap after any correction added a
   // duplicate. A REFUSED row therefore keys on an empty fee and keeps doing so after it is typed
   // into, which is what lets it survive a rescan.
-  const keyOf = (o: DraftOrder): string => {
-    const fee = o.cancelled === true ? '' : o.feeRefused === true ? '' : (o.feeOcrText ?? o.feeText)
-    const head = o.cancelled === true ? 'C' : ''
-    return `${head}|${o.dateText ?? ''}|${o.timeText ?? ''}|${fee}|${cardKey(o.pointA, o.pointB, o.cancelled === true)}`
-  }
   const tally = new Map<string, number>()
   for (const o of existing) {
     const key = keyOf(o)
@@ -265,8 +356,7 @@ export function mergeScannedOrders(
   const added: DraftOrder[] = []
   for (const row of scanned) {
     const cancelled = row.cancelled === true
-    // A cancelled card has no clock and no fee — its route is the only identity it has.
-    const key = `${cancelled ? 'C' : ''}|${row.dateIso ?? ''}|${cancelled ? '' : row.time}|${row.fee ?? ''}|${cardKey(row.pointA, row.pointB, cancelled)}`
+    const key = scannedKey(row)
     const already = tally.get(key) ?? 0
     // Counted against what was ALREADY HELD, never against rows added by this same scan. One page
     // is one set of observations: if it lists «١٢٠» twice then two deliveries cost 120.

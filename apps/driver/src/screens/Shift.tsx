@@ -16,6 +16,7 @@ import {
   driverPhaseFor,
   plural,
   mergeScannedMovements,
+  healCutOffRoutes,
   mergeScannedOrders,
   previewBr1,
   splitSlot,
@@ -1013,12 +1014,17 @@ function EndPackage({
                   onDraft((d) => {
                     if (!r?.ok) return { ...d, dash: { kind: 'failed' } }
                     const added = mergeScannedOrders(d.orders, r.reading.orders, () => crypto.randomUUID())
+                    // A card sliced off the bottom of the previous page is usually whole at the
+                    // top of this one. Its second sighting is de-duplicated away, so without this
+                    // its addresses go with it and the row keeps showing a delivery to nowhere.
+                    const healed = healCutOffRoutes(d.orders, r.reading.orders)
+                    const patch = new Map(healed.map((h) => [h.localId, h]))
                     // NEW rows, not rows on the page: a page that fully overlaps reads 0, which is
                     // the truth — nothing was added — and not a failure. `refused` is what the
                     // reader saw but would not vouch for, and it is the driver's to type.
                     return {
                       ...d,
-                      orders: [...d.orders, ...added],
+                      orders: [...d.orders.map((o) => { const h = patch.get(o.localId); return h ? { ...o, pointA: h.pointA, pointB: h.pointB } : o }), ...added],
                       dash: { kind: 'read', rows: added.length, refused: Math.max(0, (r.rowsSeen ?? 0) - r.fieldsFound), cutOff: r.cutOff ?? 0 },
                     }
                   })

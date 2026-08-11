@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   type DraftOrder,
   allProblems,
+  frequentFees,
+  healCutOffRoutes,
   mergeScannedOrders,
   previewBr1,
   submittableOrders,
@@ -218,5 +220,91 @@ describe('the equation catches a misread fee', () => {
     })!
     expect(p.balanced).toBe(false)
     expect(p.suspectLocalIds).toEqual([])
+  })
+})
+
+/**
+ * The card the screen sliced in half, healed by the page that shows it whole.
+ *
+ * Screenshots overlap, so a delivery cut off at the bottom of one page is usually complete at the
+ * top of the next. Its fee and clock were right all along — those sit on the fully-drawn price row
+ * — but its route was withheld, and the second sighting was then de-duplicated away and its
+ * addresses thrown out with it.
+ */
+describe('a cut-off card heals on the next page', () => {
+  const cut = (): DraftOrder => ({
+    localId: 'c1',
+    providerOrderNo: 'YAL-c1',
+    payMode: 'cash',
+    feeText: '170',
+    feeOcrText: '170',
+    timeText: '16:50',
+    dateText: '2026-08-04',
+    included: true,
+    pointA: null,
+    pointB: null,
+  })
+  const whole = { dateIso: '2026-08-04', time: '16:50', fee: '170', pointA: 'Abou Roummaneh', pointB: 'Al Beirouni Street' }
+
+  it('fills in the route the sliced page could not read', () => {
+    expect(healCutOffRoutes([cut()], [whole])).toEqual([
+      { localId: 'c1', pointA: 'Abou Roummaneh', pointB: 'Al Beirouni Street' },
+    ])
+  })
+
+  it('still adds nothing — the delivery is the same one, not a second', () => {
+    expect(mergeScannedOrders([cut()], [whole], id)).toEqual([])
+  })
+
+  it('NEVER overwrites a route the row already has', () => {
+    const has = { ...cut(), pointA: 'مأكولات الشام', pointB: 'الحارة الجديدة' }
+    expect(healCutOffRoutes([has], [whole])).toEqual([])
+  })
+
+  it('never touches the FEE — a route is not money', () => {
+    const patches = healCutOffRoutes([cut()], [{ ...whole, fee: '170' }])
+    expect(patches[0]).not.toHaveProperty('feeText')
+    expect(Object.keys(patches[0]!).sort()).toEqual(['localId', 'pointA', 'pointB'])
+  })
+
+  it('heals one row per sighting, so a page listing it twice cannot write over two rows', () => {
+    const two = [cut(), { ...cut(), localId: 'c2', providerOrderNo: 'YAL-c2' }]
+    expect(healCutOffRoutes(two, [whole])).toHaveLength(1)
+    expect(healCutOffRoutes(two, [whole, whole])).toHaveLength(2)
+  })
+
+  it('does not heal a DIFFERENT delivery that happens to have no route', () => {
+    const other = { ...cut(), timeText: '13:10', feeOcrText: '120', feeText: '120' }
+    expect(healCutOffRoutes([other], [whole])).toEqual([])
+  })
+})
+
+describe('the fees already on this shift, offered as taps', () => {
+  const row = (fee: string, over: Partial<DraftOrder> = {}): DraftOrder => ({
+    localId: `f${fee}${Math.random()}`,
+    providerOrderNo: 'YAL-x',
+    payMode: 'cash',
+    feeText: fee,
+    ...over,
+  })
+
+  it('puts the most-used fee first', () => {
+    expect(frequentFees([row('130'), row('235'), row('130'), row('130'), row('235')])).toEqual(['130', '235'])
+  })
+
+  it('breaks a tie toward the LARGER fee — understating is what costs the driver money', () => {
+    expect(frequentFees([row('120'), row('235')])).toEqual(['235', '120'])
+  })
+
+  it('ignores empty, zero and cancelled rows — none of them is a fee anyone charged', () => {
+    expect(frequentFees([row(''), row('0'), row('200', { cancelled: true }), row('170')])).toEqual(['170'])
+  })
+
+  it('ignores a half-typed fee rather than offering nonsense back', () => {
+    expect(frequentFees([row('abc'), row('170')])).toEqual(['170'])
+  })
+
+  it('offers nothing on an empty shift', () => {
+    expect(frequentFees([])).toEqual([])
   })
 })

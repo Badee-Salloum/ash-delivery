@@ -1,6 +1,6 @@
 import { Fragment, type ReactNode, useMemo, useState } from 'react'
 import type { PayMode } from '@ash/domain'
-import { type DraftMovement, type DraftOrder, allProblems, newOrderKey } from '@ash/client'
+import { type DraftMovement, type DraftOrder, allProblems, frequentFees, newOrderKey } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { Button, Card, Money, MoneyInput } from '../ui.tsx'
 
@@ -46,6 +46,8 @@ export function OperationsList({
   const [defaultFee, setDefaultFee] = useState('5000')
 
   const problems = useMemo(() => allProblems(orders), [orders])
+  // The fees already on this shift — what a refused row is most likely to be.
+  const chips = useMemo(() => frequentFees(orders), [orders])
 
   const addRow = (): void => {
     // The key is machinery, generated here and never shown: `provider_order_no` is globally unique,
@@ -233,6 +235,21 @@ export function OperationsList({
                     autoFocus={false}
                     className={problem?.kind === 'empty_fee' ? 'ring-2 ring-red-400' : undefined}
                   />
+                  {/* One tap instead of a keyboard. Only on a row that has no fee yet — on a row
+                      that already has one these would be six ways to change it by accident. */}
+                  {o.feeText.trim() === '' && chips.length > 0 ? (
+                    <span className="mt-1 flex flex-wrap gap-1">
+                      {chips.map((fee) => (
+                        <button
+                          key={fee}
+                          onClick={() => update(o.localId, { feeText: fee })}
+                          className="num min-h-11 rounded-xl bg-slate-100 px-3 text-sm font-semibold text-slate-700"
+                        >
+                          {fee}
+                        </button>
+                      ))}
+                    </span>
+                  ) : null}
                 </label>
                 <label className="flex w-32 flex-col gap-0.5">
                   <span className="text-xs font-medium text-slate-600">{t.orders.toWallet}</span>
