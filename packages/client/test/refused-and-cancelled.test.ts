@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest'
 import {
   type DraftOrder,
   allProblems,
+  feeSourceOf,
   frequentFees,
   healCutOffRoutes,
   mergeScannedOrders,
   previewBr1,
   submittableOrders,
   validateRow,
+  workedTotalText,
 } from '../src/order-entry.ts'
 
 /**
@@ -306,5 +308,61 @@ describe('the fees already on this shift, offered as taps', () => {
 
   it('offers nothing on an empty shift', () => {
     expect(frequentFees([])).toEqual([])
+  })
+})
+
+/**
+ * The two things the compact screen is built on: what he worked, and where each number came from.
+ */
+describe('what the driver worked', () => {
+  const row = (fee: string, over: Partial<DraftOrder> = {}): DraftOrder => ({
+    localId: `w${fee}${Math.random()}`,
+    providerOrderNo: 'YAL-w',
+    payMode: 'cash',
+    feeText: fee,
+    ...over,
+  })
+
+  it('adds up the fees he is claiming', () => {
+    expect(workedTotalText([row('235'), row('210'), row('130')])).toBe('575.00')
+  })
+
+  it('leaves out a row he unchecked — that is what unchecking means', () => {
+    expect(workedTotalText([row('235'), row('210', { included: false })])).toBe('235.00')
+  })
+
+  it('ignores a half-typed fee instead of throwing — this is a live display', () => {
+    expect(workedTotalText([row('235'), row('abc'), row('')])).toBe('235.00')
+  })
+
+  it('is zero on an empty shift', () => {
+    expect(workedTotalText([])).toBe('0.00')
+  })
+
+  it('matches the term BR1 multiplies by 0.80', () => {
+    // Ten real deliveries from the Aug-4 screenshots.
+    const fees = ['235', '210', '130', '135', '170', '260', '120', '235', '120', '135']
+    expect(workedTotalText(fees.map((f) => row(f)))).toBe('1750.00')
+  })
+})
+
+describe('where a fee came from', () => {
+  const base = { localId: 'x', providerOrderNo: 'YAL-x', payMode: 'cash' as const }
+
+  it('«read» when the reader produced it', () => {
+    expect(feeSourceOf({ ...base, feeText: '235', feeOcrText: '235' })).toBe('read')
+  })
+
+  it('«refused» when the reader saw the row and declined — he typed over its admission', () => {
+    expect(feeSourceOf({ ...base, feeText: '210', feeRefused: true })).toBe('refused')
+  })
+
+  it('«typed» when there was no screenshot behind it at all', () => {
+    expect(feeSourceOf({ ...base, feeText: '130' })).toBe('typed')
+  })
+
+  it('stays «read» after the driver corrects it — the baseline is what he corrected', () => {
+    // The correction is the point: the pair (what it read, what he says) is the training label.
+    expect(feeSourceOf({ ...base, feeText: '235', feeOcrText: '1105' })).toBe('read')
   })
 })

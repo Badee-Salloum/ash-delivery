@@ -2,7 +2,7 @@ import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import L, { type CircleMarker, type LeafletMouseEvent, type Map as LeafletMap } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { type OcrScalar, br1Verdict, ocrReadingDelta, slotLabel, splitSlot, formatDateTime } from '@ash/client'
-import { formatMinor, parseMinor, sub } from '@ash/domain'
+import { add, formatMinor, parseMinor, sub } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { useConfirm, useToast } from '../feedback.tsx'
@@ -386,19 +386,20 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             </thead>
             <tbody>
               {[
+                // ONE ROW, NOT TWO. The per-leg split needed a pay mode on every delivery to know
+                // what SHOULD be in cash versus the wallet, and BR3 was retired (decision 8). The
+                // expected figures are now computed as though everything were cash, so showing them
+                // per leg would paint an honest shift red. The total is what the equation actually
+                // knows, and both halves remain independently evidenced — the wallet by its
+                // photographed balance, the cash by the count at the branch.
                 {
-                  key: 'cash',
-                  label: t.shift.cashHandover,
-                  expected: review.br1.expectedCash,
-                  declared: review.endPackage.cashDeclared,
-                  diff: review.br1.cashDifference,
-                },
-                {
-                  key: 'wallet',
-                  label: t.shift.walletBalance,
-                  expected: review.br1.expectedWallet,
-                  declared: review.endPackage.walletDeclared,
-                  diff: review.br1.walletDifference,
+                  key: 'total',
+                  label: t.br1.expected,
+                  expected: formatMinor(add(parseMinor(review.br1.expectedCash), parseMinor(review.br1.expectedWallet))),
+                  declared: formatMinor(
+                    add(parseMinor(review.endPackage.cashDeclared || '0'), parseMinor(review.endPackage.walletDeclared || '0')),
+                  ),
+                  diff: review.br1.difference,
                 },
               ].map((leg) => {
                 const off = parseMinor(leg.diff || '0') !== 0n

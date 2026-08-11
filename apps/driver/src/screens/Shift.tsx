@@ -908,19 +908,20 @@ function EndPackage({
       {...(onBack ? { back: { label: t.common.back, onBack } } : {})}
       footer={
         <div className="flex flex-col gap-2">
-          {/* The equation LIVE, before he submits — so a wrong pay mode or a missing operation is
-              visible while he can still fix it, rather than discovered by the manager. */}
-          {/* Grouped in PAIRS. Four items spread edge-to-edge by `justify-between` left it
-              genuinely ambiguous which figure belonged to which label — on the money readout. */}
+          {/* The equation LIVE, before he submits — so a missing operation is visible while he can
+              still fix it, rather than discovered by the manager.
+
+              THE TOTAL, NOT THE SPLIT. With pay mode no longer collected (SRS BR3 retired), what
+              lands in cash versus wallet cannot be predicted — only their sum. Showing a confident
+              «expected cash» computed as though every delivery were cash would be a number the app
+              cannot actually know, which is the one failure this project spends its effort avoiding.
+              What remains is the equation the owner described: cash + wallet against float + topup
+              + 80% of the fees. */}
           {preview ? (
             <div className="grid grid-cols-2 gap-x-4 text-sm">
-              <div className="flex items-baseline justify-between gap-2">
-                <span className="text-slate-600">{t.br1.expectedCash}</span>
-                <Money value={preview.expectedCashText} className="font-semibold" />
-              </div>
-              <div className="flex items-baseline justify-between gap-2">
-                <span className="text-slate-600">{t.br1.expectedWallet}</span>
-                <Money value={preview.expectedWalletText} className="font-semibold" />
+              <div className="col-span-2 flex items-baseline justify-between gap-2">
+                <span className="text-slate-600">{t.br1.expected}</span>
+                <Money value={preview.expectedTotalText} className="font-semibold" />
               </div>
               {/* The difference, the moment both declared figures exist — it was computed all
                   along and never shown, so the driver first learned of a gap after submitting. */}
@@ -1084,6 +1085,9 @@ function EndPackage({
         orders={draft.orders}
         movements={draft.movements}
         today={shift.businessDate}
+        // BR1 already works out which rows to doubt; the screen used to compute that list and then
+        // append a generic sentence instead of pointing at the blocks it meant.
+        suspectLocalIds={preview?.suspectLocalIds ?? []}
         onOrders={(orders) => onDraft((d) => ({ ...d, orders }))}
         onMovements={(movements) => onDraft((d) => ({ ...d, movements }))}
       />

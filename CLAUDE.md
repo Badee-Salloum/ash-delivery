@@ -35,7 +35,9 @@ float 100,000 + topup 50,000 (new SYP); 20 orders × 5,000 fee (12 cash, 6 elect
 wallet (which the company tops up). The weekly Yallago PDF is a Bundle-2 audit artifact, never a
 settlement mechanism.
 
-**BR3 — three payment modes per order**, captured per order:
+**BR3 — three payment modes per order** — ⚠️ **RETIRED at the driver's screen (decision 8).** The
+modes remain in the schema and on the wire, every order defaulting to `cash`; nothing asks for them
+and nothing depends on them being right:
 - `cash`: driver collects goods value + fee in cash; wallet −20% of fee (instant Yallago cut)
 - `electronic`: nothing collected in cash; order counterpart lands in wallet (net +80% of fee)
 - `free` (Yallago promo): wallet +80% of fee, funded by Yallago
@@ -78,6 +80,7 @@ exist as a config switch.
 | 5 | Manual entries & expenses: **branch manager ✓ + general manager ✓, sysadmin ✗** (SRS §3 matrix wins over the narrower E-3 prose). Stored as data. |
 | 6 | Tier band is computed over the **whole day**, with a visible «تسوية شريحة اليوم» true-up restating earlier shifts when a later one crosses a band. |
 | 7 | Commercial scope re-cut: **Bundle 1a** = SRS A–G as priced; **Bundle 1b** = production readiness, separately priced. |
+| 8 | **Pay mode is no longer collected** (SRS BR3 retired at the UI). The owner: *"we won't check each delivery how it got paid; we just check how much extra money we have in the wallet and the cash and compare to what he already worked."* BR1's scalar is blind to pay mode by construction — that is why `cashDiff`/`walletDiff` exist beside it — so the only thing lost is the ability to PREDICT the split, and the split was corroboration rather than a control: the wallet is evidenced by a photographed Yallago balance and the cash by a count at the branch. What remains is `cash + wallet == float + topup + 0.80 × Σfees`. `pay_mode` stays in the schema and on the wire defaulted to `cash`, so restoring the split later is a UI change, not a migration. `br1_split_gate` stays `advisory`. The driver's screen shows **the total only** — an expected-cash figure computed as though every delivery were cash would be a number the app cannot know. |
 
 ---
 

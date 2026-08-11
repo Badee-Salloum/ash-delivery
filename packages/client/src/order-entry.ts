@@ -1,4 +1,4 @@
-import { type Minor, type PayMode, evaluateBr1, minor, parseMinor } from '@ash/domain'
+import { type Minor, type PayMode, WALLET_LOG_FEEDS_BR1, evaluateBr1, minor, parseMinor } from '@ash/domain'
 
 /**
  * The driver's order-entry model — the single most-used screen in the product, and the one that
@@ -200,6 +200,51 @@ export function frequentFees(orders: readonly DraftOrder[], limit = 5): string[]
     .sort((a, b) => b[1] - a[1] || Number(b[0]) - Number(a[0]))
     .slice(0, limit)
     .map(([fee]) => fee)
+}
+
+/**
+ * WHERE A FEE CAME FROM. Three answers, and one field already separates all three.
+ *
+ * The driver has never been told which numbers on his screen the app guessed and which he typed —
+ * provenance is captured, shipped, and shown only to the manager. That is backwards: he is the one
+ * who can still check it against the screen in his hand.
+ *
+ *   'read'     the reader produced this fee     → `feeOcrText` holds what it said
+ *   'refused'  the reader saw the row and declined → he typed it, over a machine's admission
+ *   'typed'    no screenshot behind it at all   → he added the row himself
+ */
+export type FeeSource = 'read' | 'refused' | 'typed'
+
+export const feeSourceOf = (o: DraftOrder): FeeSource =>
+  o.feeOcrText != null ? 'read' : o.feeRefused === true ? 'refused' : 'typed'
+
+/**
+ * WHAT HE WORKED — the fees of the deliveries he is claiming, added up.
+ *
+ * The one number the driver actually wants at a glance, and the screen never showed it: he could
+ * see ten rows and the count, but not the day's own total. It is also the term BR1 multiplies by
+ * 0.80, so seeing it move as rows are checked and unchecked makes the equation legible instead of
+ * mysterious.
+ *
+ * Only CHECKED rows count, matching `previewBr1` and the server: an unchecked row is one he is not
+ * claiming. A malformed fee contributes nothing rather than throwing — the total is a live display
+ * on a screen where a half-typed number is normal.
+ *
+ * Returns a DECIMAL STRING, like every other money value this module hands the UI (`expectedCashText`
+ * and the rest). Minor units are the arithmetic; the string is what a screen renders.
+ */
+export function workedTotalText(orders: readonly DraftOrder[]): string {
+  let sum = minor(0n)
+  for (const o of orders) {
+    if (o.included === false) continue
+    try {
+      const fee = parseMinor(o.feeText || '0')
+      if (fee > 0n) sum = minor(sum + fee)
+    } catch {
+      // A row mid-typing is not an error here; it simply has nothing to add yet.
+    }
+  }
+  return format(sum)
 }
 
 export const isComplete = (orders: readonly DraftOrder[]): boolean =>
@@ -513,11 +558,18 @@ export function previewBr1(input: {
     fee: safeFee(o.feeText),
     ...(o.walletAmountText ? { walletAmount: safeFee(o.walletAmountText) } : {}),
   }))
-  // The same three-way rule the server uses: a logged Yallago cut is corroboration and an order's
-  // credit is already inside its `walletAmount`, so only the unexplained rows are a term here.
-  const walletAdjustments = (input.movements ?? [])
-    .filter((m) => m.included !== false && (m.role ?? 'unmatched') === 'unmatched')
-    .map((m) => safeSigned(m.amountText))
+  // The payments log is EVIDENCE AND TRAINING DATA, not a term in the equation — owner's decision.
+  // It is still scanned, still shown, still stored; it simply does not move anyone's money while the
+  // reader that produces it is unproven. See WALLET_LOG_FEEDS_BR1 for what restoring it costs.
+  //
+  // The rule it replaces, kept because it is what gets restored: a logged Yallago cut is
+  // corroboration and an order's credit is already inside its `walletAmount`, so only the
+  // UNMATCHED rows were ever a term here.
+  const walletAdjustments = WALLET_LOG_FEEDS_BR1
+    ? (input.movements ?? [])
+        .filter((m) => m.included !== false && (m.role ?? 'unmatched') === 'unmatched')
+        .map((m) => safeSigned(m.amountText))
+    : []
 
   const hasDeclared = input.declaredCashText !== undefined && input.declaredWalletText !== undefined
   const declaredCash = hasDeclared ? safeFee(input.declaredCashText!) : minor(0n)
@@ -602,7 +654,17 @@ export type Br1Verdict = 'balanced' | 'split_off' | 'not_balanced'
 
 export function br1Verdict(r: { balanced: boolean; splitBalanced: boolean }): { verdict: Br1Verdict; off: boolean } {
   if (!r.balanced) return { verdict: 'not_balanced', off: true }
-  if (!r.splitBalanced) return { verdict: 'split_off', off: true }
+  // `split_off` is no longer reachable in practice, and deliberately so.
+  //
+  // It meant "the total is right but the money is in the wrong pocket" — which could only be known
+  // because every delivery carried a pay mode. Pay mode is no longer collected (SRS BR3 retired,
+  // decision 8), so `expectedCash` and `expectedWallet` are computed as though everything were
+  // cash: on a perfectly correct shift where the driver took some electronically they disagree by
+  // exactly the amount that moved, and the split would fire amber on every honest close.
+  //
+  // The branch stays rather than being deleted: `splitBalanced` is still computed and still true
+  // whenever the modes ARE right, so restoring the split later means restoring the input, not
+  // rewriting this. It is simply never a warning while the input is a constant.
   return { verdict: 'balanced', off: false }
 }
 

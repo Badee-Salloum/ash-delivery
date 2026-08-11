@@ -26,6 +26,7 @@ import {
   type BatteryReading,
   type ShiftOrder,
   type TransitionResult,
+  WALLET_LOG_FEEDS_BR1,
   add,
   businessDateFor,
   can,
@@ -125,7 +126,14 @@ const toDomainOrders = (rows: readonly ShiftOrderRecord[]): ShiftOrder[] =>
   }))
 
 /**
- * The wallet movements BR1 may add — and ONLY those.
+ * The wallet movements BR1 may add — and ONLY those. Currently NONE: see `WALLET_LOG_FEEDS_BR1`.
+ *
+ * The payments log is held as evidence and training data rather than as money while the reader that
+ * produces it is unproven. This switch must stay identical to the client's, or the driver's live
+ * preview and the figure the manager approves are computed from different rules — which is exactly
+ * the class of disagreement that makes a shift impossible to close and impossible to explain.
+ *
+ * The rule below is what gets restored, and why each kind is treated as it is:
  *
  * A `yalago_cut` row is corroboration, never an input: the equation derives the cut from the fee
  * because the 80% block is a residual, so adding the logged one would charge it twice. An
@@ -134,7 +142,7 @@ const toDomainOrders = (rows: readonly ShiftOrderRecord[]): ShiftOrder[] =>
  * withdrawal — money the wallet moved on its own that BR1 would otherwise blame on the driver.
  */
 const toWalletAdjustments = (rows: readonly WalletMovementRecord[]): Minor[] =>
-  rows.filter((m) => m.included && m.role === 'unmatched').map((m) => m.amount)
+  WALLET_LOG_FEEDS_BR1 ? rows.filter((m) => m.included && m.role === 'unmatched').map((m) => m.amount) : []
 
 /** What the manual jobs on one shift pay out, as typed and already validated to equal their fees. */
 const manualShareTotals = (rows: readonly ShiftOrderRecord[]): { driverShare: Minor; companyShare: Minor } => {

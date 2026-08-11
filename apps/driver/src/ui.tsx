@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from 'react'
 import { groupThousands } from '@ash/client'
 
@@ -89,6 +90,84 @@ export function MoneyInput({ className = '', ...rest }: InputHTMLAttributes<HTML
 
 export function Card({ children, className = '' }: { children: ReactNode; className?: string }): ReactNode {
   return <div className={`rounded-3xl bg-white p-4 shadow-sm ${className}`}>{children}</div>
+}
+
+/**
+ * A panel that rises from the BOTTOM of the screen — the driver app's first and only overlay.
+ *
+ * Until now this app had no dialog of any kind; its one blocking prompt was `window.confirm` for
+ * logout. The operations list needed one, because a delivery cannot be both a small block in a grid
+ * AND carry its route, its fee editor and its provenance inline. The block is the summary; this is
+ * where the detail lives.
+ *
+ * BOTTOM, not centre, for two reasons. It is where a thumb already is on a phone held one-handed,
+ * and `translate-y` is direction-neutral — a side drawer needs paired `ltr:`/`rtl:` transforms and
+ * this app is Arabic-first. It also clears the home indicator the same way `Screen`'s footer does;
+ * without that the primary button sits under a gesture bar and the tap dismisses the app.
+ *
+ * Closing is deliberately easy — backdrop, Escape, and the button — because nothing here is
+ * destructive: every edit has already been applied to the row as it was typed.
+ */
+export function Sheet({
+  title,
+  open,
+  onClose,
+  children,
+  footer,
+}: {
+  title: string
+  open: boolean
+  onClose(): void
+  children: ReactNode
+  footer?: ReactNode
+}): ReactNode {
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    // The page behind must not scroll under the sheet — on a phone that reads as the app losing
+    // its place, and the driver comes back to a list scrolled somewhere else.
+    const previous = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.body.style.overflow = previous
+    }
+  }, [open, onClose])
+
+  if (!open) return null
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col justify-end bg-slate-900/40" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        // Stop a tap inside the panel from reaching the backdrop's close handler.
+        onClick={(e) => e.stopPropagation()}
+        className="mx-auto max-h-[85dvh] w-full max-w-md overflow-y-auto rounded-t-3xl bg-white p-4"
+        style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}
+      >
+        {/* The grab handle is decorative, but it is the thing that makes a panel read as draggable-
+            from-the-bottom rather than as an error that appeared. */}
+        <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-slate-300" />
+        <div className="flex items-center gap-2">
+          <h2 className="flex-1 text-lg font-bold">{title}</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={title}
+            className="min-h-11 rounded-xl bg-slate-100 px-4 text-sm font-semibold text-slate-700 active:bg-slate-200"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="mt-3 flex flex-col gap-3">{children}</div>
+        {footer ? <div className="mt-4">{footer}</div> : null}
+      </div>
+    </div>
+  )
 }
 
 export function Screen({

@@ -90,6 +90,22 @@ These were genuine conflicts or real-money questions, and were asked, not defaul
 3. Manual entries: SRS E-3 vs. the §3 matrix — an internal SRS conflict → **answered** (D-5).
 4. Two shifts in one day: whole-day band vs. per-shift → **answered** (D-6).
 5. The 19-day contract vs. a realistic 40–56 days → **answered** (D-7).
+6. **SRS BR3 — pay mode per order.** The SRS mandates capturing `cash`/`electronic`/`free` on every
+   delivery; the owner asked for it to be removed from the driver's screen → **answered** (D-8):
+   remove it, and record the change rather than let the SRS and the code disagree in silence.
+
+   What was weighed before implementing it: BR1's scalar equation is blind to pay mode *by
+   construction* — flip an order cash↔electronic and `scalarDiff` stays exactly zero while
+   `cashDiff` and `walletDiff` move by ±fee, which is precisely why the code returns three
+   differences and not one. So the mode buys the ability to PREDICT the split between the driver's
+   cash and his wallet, and nothing else. Both halves are already evidenced independently: the
+   wallet by a photographed Yallago balance, the cash by a count at the branch. The split was
+   corroboration, not a control.
+
+   Cost accepted: a driver who has money in the wrong place is no longer contradicted by the
+   equation, only by the two photographs. Kept cheap to reverse — `pay_mode` remains in the schema
+   and on the wire, defaulted to `cash`, so nothing migrates and restoring the split is a UI change.
+   `br1_split_gate` stays `advisory`, which was already its default.
 
 ## New question raised by the code, for the same conversation
 

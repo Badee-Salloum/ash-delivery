@@ -374,12 +374,17 @@ describe('merging across days', () => {
  * showed in green with a live approve button.
  */
 describe('reading the BR1 verdict', () => {
-  it('is balanced only when BOTH the total and the two legs agree', () => {
+  it('is balanced when the total agrees', () => {
     expect(br1Verdict({ balanced: true, splitBalanced: true })).toEqual({ verdict: 'balanced', off: false })
   })
 
-  it('flags the equal-and-opposite swap that the total cannot see', () => {
-    expect(br1Verdict({ balanced: true, splitBalanced: false })).toEqual({ verdict: 'split_off', off: true })
+  it('no longer flags the equal-and-opposite swap — there is no pay mode left to contradict', () => {
+    // This used to warn amber: the total is right but the money is in the wrong pocket. Knowing
+    // that required a pay mode on every delivery, and the owner retired BR3 (decision 8). With the
+    // input gone, `expectedCash` is computed as though everything were cash, so on a perfectly
+    // honest shift where the driver took some electronically the legs disagree by exactly the
+    // amount that moved — and the warning would fire on every correct close.
+    expect(br1Verdict({ balanced: true, splitBalanced: false })).toEqual({ verdict: 'balanced', off: false })
   })
 
   it('a wrong total is wrong whatever the legs say', () => {
@@ -387,11 +392,13 @@ describe('reading the BR1 verdict', () => {
     expect(br1Verdict({ balanced: false, splitBalanced: false })).toEqual({ verdict: 'not_balanced', off: true })
   })
 
-  it('never reports a shift as clean while anything is off', () => {
+  it('never reports a shift as clean while THE TOTAL is off', () => {
+    // The invariant used to be "clean only if both the total and the split agree". The split is no
+    // longer an input the system has — pay mode was retired (decision 8) — so the honest invariant
+    // is about the one number that is still computed from something real.
     for (const balanced of [true, false]) {
       for (const splitBalanced of [true, false]) {
-        const r = br1Verdict({ balanced, splitBalanced })
-        expect(r.off).toBe(!(balanced && splitBalanced))
+        expect(br1Verdict({ balanced, splitBalanced }).off).toBe(!balanced)
       }
     }
   })

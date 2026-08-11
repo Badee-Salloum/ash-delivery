@@ -1,8 +1,16 @@
-import { Fragment, type ReactNode, useMemo, useState } from 'react'
-import type { PayMode } from '@ash/domain'
-import { type DraftMovement, type DraftOrder, allProblems, frequentFees, newOrderKey } from '@ash/client'
+import { type ReactNode, useMemo, useState } from 'react'
+import {
+  type DraftMovement,
+  type DraftOrder,
+  allProblems,
+  feeSourceOf,
+  frequentFees,
+  groupThousands,
+  newOrderKey,
+  workedTotalText,
+} from '@ash/client'
 import { useApp } from '../app-context.tsx'
-import { Button, Card, Money, MoneyInput } from '../ui.tsx'
+import { Button, Card, Money, MoneyInput, Sheet } from '../ui.tsx'
 
 /**
  * THE list. Every operation of the shift — what was delivered, and what the wallet did — with a
@@ -11,6 +19,14 @@ import { Button, Card, Money, MoneyInput } from '../ui.tsx'
  * It is one list rather than two because that is how the day happened: an order and the 20% Yallago
  * took for it are one event seen on two screens, and pairing them by minute is what lets the system
  * say how much of a fee actually reached the wallet instead of guessing from a pay mode.
+ *
+ * PAY MODE IS GONE, by the owner's decision (SRS BR3 retired — see CLAUDE.md). The three buttons
+ * were most of a card's height and asked the driver to classify every delivery so the app could
+ * predict the split between his cash and his wallet. The split was never a control: BR1's scalar is
+ * blind to pay mode by construction, and both halves are independently evidenced — the wallet by a
+ * photographed Yallago balance, the cash by a count at the branch. What survives is the equation
+ * that matters, «cash + wallet == float + topup + 80% of the fees», and the driver is asked for one
+ * thing per delivery instead of four. `payMode` is still sent as `cash` so nothing migrates.
  *
  * The CHECKBOX is the point, and its ergonomics used to be inverted. The safe, reversible action —
  * unchecking a row that is not this shift's — was a 24-pixel box a gloved thumb misses, while the
@@ -32,6 +48,7 @@ export function OperationsList({
   orders,
   movements,
   today,
+  suspectLocalIds,
   onOrders,
   onMovements,
 }: {
@@ -39,13 +56,31 @@ export function OperationsList({
   movements: readonly DraftMovement[]
   /** The shift's own business date, «YYYY-MM-DD» — what a row's date is flagged against. */
   today?: string
+  /**
+   * The rows BR1 says to check first — the ones a machine read, when the shift does not balance.
+   * `previewBr1` has always computed this and the screen threw it away, appending a generic
+   * sentence instead of pointing at the blocks it means.
+   */
+  suspectLocalIds?: readonly string[]
   onOrders(next: DraftOrder[]): void
   onMovements(next: DraftMovement[]): void
 }): ReactNode {
   const { t } = useApp()
   const [defaultFee, setDefaultFee] = useState('5000')
 
+  /** Which delivery's panel is open. One at a time: this is a phone. */
+  const [openId, setOpenId] = useState<string | null>(null)
+
   const problems = useMemo(() => allProblems(orders), [orders])
+  const suspects = useMemo(() => new Set(suspectLocalIds ?? []), [suspectLocalIds])
+  /** What he worked — the fees he is claiming, added up. See `workedTotal`. */
+  const worked = useMemo(() => workedTotalText(orders), [orders])
+  const open = openId === null ? null : (orders.find((o) => o.localId === openId) ?? null)
+  const openProblem = open ? problems.get(open.localId) : undefined
+  const openSource = open ? feeSourceOf(open) : 'typed'
+  // A dropped pin is named, not printed: its coordinates are Arabic-Indic digits Tesseract
+  // renders as debris, so the panel says what the card actually shows — a map location.
+  const openDropoff = open ? (open.pointBIsPin === true ? t.orders.mapPin : open.pointB) : null
   // The fees already on this shift — what a refused row is most likely to be.
   const chips = useMemo(() => frequentFees(orders), [orders])
 
@@ -62,18 +97,14 @@ export function OperationsList({
   const update = (localId: string, patch: Partial<DraftOrder>): void =>
     onOrders(orders.map((o) => (o.localId === localId ? { ...o, ...patch } : o)))
 
-  const modeLabel: Record<PayMode, string> = {
-    cash: t.orders.payModes.cash,
-    electronic: t.orders.payModes.electronic,
-    free: t.orders.payModes.free,
-  }
-  /* Amber is the app's WARNING colour — «يوم آخر», a failed read, a suspended shift. Giving it to
-     «مجاني» as well taught the driver that a perfectly ordinary promo order was something wrong.
-     Pay modes get their own neutral family and amber goes back to meaning "look at this". */
-  const modeColor: Record<PayMode, string> = {
-    cash: 'bg-emerald-100 text-emerald-800',
-    electronic: 'bg-sky-100 text-sky-800',
-    free: 'bg-violet-100 text-violet-800',
+  /**
+   * The provenance mark on a block. Tiny by design — it answers "did the app guess this?" at a
+   * glance, and the panel behind the block spells it out in words and shows the pixels.
+   */
+  const sourceMark: Record<'read' | 'refused' | 'typed', string> = {
+    read: '◍',
+    refused: '◌',
+    typed: '✎',
   }
 
   const checkedCount = orders.filter((o) => o.included !== false).length
@@ -123,6 +154,12 @@ export function OperationsList({
         <span className="text-sm font-semibold">
           {t.orders.countedOf.replace('{n}', String(checkedCount)).replace('{total}', String(orders.length))}
         </span>
+        {/* WHAT HE WORKED. The screen showed him ten rows and a count but never the day's own
+            total — the one number he actually wants, and the term BR1 multiplies by 0.80. It sits
+            in the bar that is already sticky, so it follows him down the list. */}
+        <span className="text-sm text-slate-600">
+          {t.orders.workedTotal} <Money value={worked} className="font-bold text-slate-900" />
+        </span>
         {otherDayRows.length > 0 ? (
           <Button variant="ghost" className="ms-auto min-h-11 px-3 py-1 text-sm" onClick={excludeOtherDays}>
             {t.orders.excludeOtherDays.replace('{n}', String(otherDayRows.length))}
@@ -130,142 +167,149 @@ export function OperationsList({
         ) : null}
       </div>
 
-      {sorted.map((o, i) => {
-        const problem = problems.get(o.localId)
-        const off = o.included === false
-        // A dropped pin is named, not printed: its coordinates are Arabic-Indic digits Tesseract
-        // renders as debris, so the screen says what the card actually shows — a map location.
-        const dropoff = o.pointBIsPin === true ? t.orders.mapPin : o.pointB
-        const otherDay = Boolean(today && o.dateText && o.dateText !== today)
-        const prev = sorted[i - 1]
-        // A day header wherever the date changes — so «أمس» is a block the driver can see and act
-        // on, instead of rows he has to notice one at a time.
-        const newDay = o.dateText && o.dateText !== (prev?.dateText ?? null)
-        return (
-          <Fragment key={o.localId}>
-            {newDay ? (
-              <p className="num mt-2 text-sm font-semibold text-slate-600">
-                {dayMonth(o.dateText!)}
-                {otherDay ? <span className="ms-2 text-xs font-medium text-amber-800">{t.orders.otherDay}</span> : null}
+      {/* ── THE GRID ────────────────────────────────────────────────────────────────────────
+          A delivery was a 226px card, so TWO were visible at once on a 360x820 phone and a
+          thirty-order day was seven thousand pixels of scrolling. Nine tenths of that height was
+          controls the driver rarely touched. A block is the time and the fee — the two things he
+          reads off the screen in his hand — and about two dozen fit where two used to.
+          Everything else moved into the panel behind a tap. */}
+      <div className="grid grid-cols-3 gap-2">
+        {sorted.map((o) => {
+          const problem = problems.get(o.localId)
+          const off = o.included === false
+          const otherDay = Boolean(today && o.dateText && o.dateText !== today)
+          const suspect = suspects.has(o.localId)
+          const source = feeSourceOf(o)
+          return (
+            <button
+              key={o.localId}
+              type="button"
+              onClick={() => setOpenId(o.localId)}
+              aria-label={`${o.timeText || dayMonth(o.dateText ?? '')} ${o.feeText}`}
+              className={[
+                'relative flex min-h-[72px] flex-col items-center justify-center rounded-2xl border-2 px-1 py-2',
+                // The border carries the state, exactly as PhotoSlot's tile does — red needs
+                // answering, rose was cancelled, amber is another day, emerald is simply fine.
+                problem
+                  ? 'border-red-400 bg-red-50'
+                  : o.cancelled
+                    ? 'border-rose-300 bg-rose-50'
+                    : otherDay
+                      ? 'border-amber-400 bg-amber-50'
+                      : suspect
+                        ? 'border-amber-300 bg-white'
+                        : 'border-slate-200 bg-white',
+                off ? 'opacity-50' : '',
+              ].join(' ')}
+            >
+              {/* Unchecked is shown by a hollow tick rather than a checkbox: at this size a real
+                  checkbox is a 24px target beside a 104px one, and the thumb finds the wrong one. */}
+              <span className="absolute end-1 top-1 text-xs" aria-hidden>
+                {off ? '○' : '✓'}
+              </span>
+              <span className="num text-xs font-semibold text-slate-500">
+                {o.timeText || dayMonth(o.dateText ?? '') || '—'}
+              </span>
+              <span className={`num text-lg font-bold ${o.feeText.trim() === '' ? 'text-red-600' : ''}`}>
+                {o.feeText.trim() === '' ? '؟' : groupThousands(o.feeText)}
+              </span>
+              {/* WHERE THIS NUMBER CAME FROM — the driver has never been told. A machine-read fee
+                  and one he typed himself look identical today, and he is the only person who can
+                  still check it against the screen in his hand. */}
+              <span className="text-[10px] leading-none text-slate-400">{sourceMark[source]}</span>
+            </button>
+          )
+        })}
+      </div>
+
+      {/* ── THE PANEL BEHIND A BLOCK ────────────────────────────────────────────────────────
+          Everything the tall card used to show inline, on one delivery at a time: where it went,
+          what it cost, whether it counts, and — new — where the number came from. */}
+      <Sheet
+        title={t.orders.editFee}
+        open={open !== null}
+        onClose={() => setOpenId(null)}
+        footer={
+          <Button variant="primary" className="w-full" onClick={() => setOpenId(null)}>
+            {t.common.confirm}
+          </Button>
+        }
+      >
+        {open ? (
+          <>
+            <p className="num text-sm font-semibold text-slate-600">
+              {open.timeText || dayMonth(open.dateText ?? '')}
+              {open.cancelled ? (
+                <span className="ms-2 rounded-md bg-rose-100 px-1.5 py-0.5 text-xs font-semibold text-rose-700">
+                  {t.orders.cancelledCard}
+                </span>
+              ) : null}
+            </p>
+            {open.pointA || openDropoff ? (
+              <p className="text-sm text-slate-600">
+                {open.pointA && openDropoff ? (
+                  <>
+                    <bdi>{open.pointA}</bdi> ← <bdi>{openDropoff}</bdi>
+                  </>
+                ) : (
+                  <bdi>{open.pointA ?? openDropoff}</bdi>
+                )}
               </p>
             ) : null}
-            <Card className={problem ? 'ring-2 ring-red-300' : off ? 'opacity-60' : ''}>
-              {/* THE WHOLE ROW IS THE CHECKBOX. A 24px target on a phone, outdoors, in gloves, is
-                  how a real delivery gets excluded from a driver's pay by accident. */}
-              <label className="flex min-h-14 cursor-pointer items-center gap-3">
-                <input
-                  type="checkbox"
-                  checked={!off}
-                  onChange={(e) => update(o.localId, { included: e.target.checked })}
-                  aria-label={t.orders.included}
-                  className="size-7 shrink-0 accent-emerald-600"
-                />
-                <div className="min-w-0 flex-1">
-                  {o.timeText || o.dateText || o.pointA || o.pointB ? (
-                    <>
-                      <span className="num text-base font-semibold">
-                        {o.timeText || dayMonth(o.dateText ?? '') || t.orders.cancelledCard}
-                      </span>
-                      {o.cancelled ? (
-                        <span className="ms-2 rounded-md bg-rose-100 px-1.5 py-0.5 text-xs font-semibold text-rose-700">
-                          {t.orders.cancelledCard}
-                        </span>
-                      ) : null}
-                      {/* One arrow only when there are two places. A lone «عمر الخيام ← —» reads as
-                          a delivery to nowhere; it means the screen's second line went unread.
-                          Each endpoint is its own bidi island: an Arabic place beside a Latin one
-                          otherwise drags the arrow across and the card reads back to front. */}
-                      {o.pointA || dropoff ? (
-                        <p className="truncate text-sm text-slate-600">
-                          {o.pointA && dropoff ? (
-                            <>
-                              <bdi>{o.pointA}</bdi> ← <bdi>{dropoff}</bdi>
-                            </>
-                          ) : (
-                            <bdi>{o.pointA ?? dropoff}</bdi>
-                          )}
-                        </p>
-                      ) : null}
-                    </>
-                  ) : (
-                    <span className="text-sm text-slate-500">{t.orders.manualRow}</span>
-                  )}
-                </div>
-              </label>
 
-              {/* A cancelled order costs nothing and is asking for nothing, so while it stays
-                  unchecked it shows no pay mode and no money boxes — six controls that would all
-                  be answering a question nobody asked. Ticking it says «I was paid for this one
-                  anyway», and the full row appears to be filled in like any other. */}
-              {o.cancelled && off ? (
-                <p className="mt-2 text-sm text-slate-500">{t.orders.cancelledHint}</p>
-              ) : (
-                <>
-              {/* THREE OPTIONS, VISIBLE. It used to be one chip that cycled on tap with nothing
-                  saying so: the driver read «كاش» as a label and never touched it — which IS
-                  `pay_mode_misclassified`, the commonest cause BR1 reports — or tapped once too
-                  often and landed on «مجاني», silently zeroing what the order contributes. */}
-              <div className="mt-2 flex gap-1" role="group" aria-label={t.orders.payMode}>
-                {(['cash', 'electronic', 'free'] as const).map((mode) => (
+            <label className="flex flex-col gap-1">
+              <span className="text-sm font-medium text-slate-600">{t.orders.feeWrong}</span>
+              <MoneyInput
+                value={open.feeText}
+                onChange={(e) => update(open.localId, { feeText: e.target.value })}
+                className={openProblem?.kind === 'empty_fee' ? 'ring-2 ring-red-400' : undefined}
+              />
+            </label>
+            {chips.length > 0 ? (
+              <div className="flex flex-wrap gap-1">
+                {chips.map((fee) => (
                   <button
-                    key={mode}
-                    onClick={() => update(o.localId, { payMode: mode })}
-                    aria-pressed={o.payMode === mode}
-                    className={`min-h-12 flex-1 rounded-xl px-2 text-sm font-semibold ${
-                      o.payMode === mode ? modeColor[mode] : 'bg-slate-100 text-slate-500'
-                    }`}
+                    key={fee}
+                    type="button"
+                    onClick={() => update(open.localId, { feeText: fee })}
+                    className="num min-h-11 rounded-xl bg-slate-100 px-3 text-sm font-semibold text-slate-700"
                   >
-                    {modeLabel[mode]}
+                    {fee}
                   </button>
                 ))}
               </div>
+            ) : null}
+            {openProblem ? (
+              <p className="text-sm font-medium text-red-600">{t.orders.problems[openProblem.kind]}</p>
+            ) : null}
 
-              {/* LABELLED. Two identical white boxes, told apart only by a placeholder that vanishes
-                  the moment the log fills it in, across thirty rows — and they are the two figures
-                  that decide whether the driver is short. */}
-              <div className="mt-2 flex items-end gap-2">
-                <label className="flex flex-1 flex-col gap-0.5">
-                  <span className="text-xs font-medium text-slate-600">{t.orders.fee}</span>
-                  {/* A refused fee arrives EMPTY and ringed, because the reader would not vouch for
-                      it. That is the whole bargain: it never guesses, and the one number it could
-                      not read is the one the driver is asked for. */}
-                  <MoneyInput
-                    value={o.feeText}
-                    onChange={(e) => update(o.localId, { feeText: e.target.value })}
-                    autoFocus={false}
-                    className={problem?.kind === 'empty_fee' ? 'ring-2 ring-red-400' : undefined}
-                  />
-                  {/* One tap instead of a keyboard. Only on a row that has no fee yet — on a row
-                      that already has one these would be six ways to change it by accident. */}
-                  {o.feeText.trim() === '' && chips.length > 0 ? (
-                    <span className="mt-1 flex flex-wrap gap-1">
-                      {chips.map((fee) => (
-                        <button
-                          key={fee}
-                          onClick={() => update(o.localId, { feeText: fee })}
-                          className="num min-h-11 rounded-xl bg-slate-100 px-3 text-sm font-semibold text-slate-700"
-                        >
-                          {fee}
-                        </button>
-                      ))}
-                    </span>
-                  ) : null}
-                </label>
-                <label className="flex w-32 flex-col gap-0.5">
-                  <span className="text-xs font-medium text-slate-600">{t.orders.toWallet}</span>
-                  <MoneyInput
-                    value={o.walletAmountText ?? ''}
-                    onChange={(e) => update(o.localId, { walletAmountText: e.target.value })}
-                  />
-                </label>
-              </div>
+            {/* WHERE THE NUMBER CAME FROM, in words — and, when the app read it, the very pixels it
+                read. The strip is cut losslessly from the original screenshot at read time, so this
+                is not an approximation of the evidence, it IS the evidence, and it needs no network. */}
+            <div className="rounded-2xl bg-slate-50 p-3">
+              <p className="text-xs font-medium text-slate-600">
+                {openSource === 'read' ? t.orders.sourceRead : openSource === 'refused' ? t.orders.sourceRefused : t.orders.sourceTyped}
+              </p>
+              {open.feeStrip ? (
+                <>
+                  <p className="mt-1 text-[10px] text-slate-500">{t.orders.ocrSaw}</p>
+                  <img src={open.feeStrip} alt={t.orders.ocrSaw} className="mt-1 max-w-full rounded-lg bg-white" />
                 </>
-              )}
-              {problem ? <p className="mt-1 text-sm font-medium text-red-600">{t.orders.problems[problem.kind]}</p> : null}
-            </Card>
-          </Fragment>
-        )
-      })}
+              ) : null}
+            </div>
+
+            <label className="flex min-h-14 cursor-pointer items-center gap-3">
+              <input
+                type="checkbox"
+                checked={open.included !== false}
+                onChange={(e) => update(open.localId, { included: e.target.checked })}
+                className="size-7 shrink-0 accent-emerald-600"
+              />
+              <span className="text-sm">{t.orders.countInShift}</span>
+            </label>
+          </>
+        ) : null}
+      </Sheet>
 
       {orders.length === 0 ? <p className="py-6 text-center text-slate-500">{t.orders.addRow} ↑</p> : null}
 
