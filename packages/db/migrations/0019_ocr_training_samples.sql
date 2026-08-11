@@ -39,9 +39,7 @@ CREATE TABLE ocr_fee_samples (
 );
 
 COMMENT ON TABLE ocr_fee_samples IS
-  'Training samples for the glyph reader: the fee''s own pixels beside what OCR made of them. The '
-  'approved value is joined from shift_orders.fee_minor at export time — never copied here, so this '
-  'table can never disagree with the money.';
+  'Training samples for the glyph reader: the fee''s own pixels beside what OCR made of them. The approved value is joined from shift_orders.fee_minor at export time — never copied here, so this table can never disagree with the money.';
 
 -- The export is always "samples whose order has since been approved", because an unapproved fee is
 -- not yet ground truth.
