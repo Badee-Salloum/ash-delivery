@@ -130,6 +130,18 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
    */
   const [who, setWho] = useState<{ driver: string | null; vehicle: string | null }>({ driver: null, vehicle: null })
 
+  /**
+   * Which orders the table shows — see `flagged()` below for what "worth attention" means.
+   *
+   * It lives UP HERE, with every other hook, because everything below the `if (!review)` guard runs
+   * only on the renders where the review has arrived. Declared next to its logic — which is where I
+   * first put it — this is a `useState` the first render does not reach and the second one does, so
+   * React counts one more hook than last time, throws #310, and unmounts the tree: a blank page on
+   * the screen that approves cash. There is no error boundary to catch it (see main.tsx), so the
+   * whole app goes white. Hooks stay above the guard, unconditionally.
+   */
+  const [showAllOrders, setShowAllOrders] = useState(false)
+
   const [loadError, setLoadError] = useState<string | null>(null)
   const load = useCallback(() => {
     setLoadError(null)
@@ -184,7 +196,6 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
    */
   const flagged = (o: Review['orders'][number]): boolean =>
     o.source === 'ocr' || o.included === false || o.kind === 'manual' || (o.feeOcr != null && o.feeOcr !== o.fee)
-  const [showAllOrders, setShowAllOrders] = useState(false)
   const shownOrders = showAllOrders ? review.orders : review.orders.filter(flagged)
   const hiddenOrders = showAllOrders ? [] : review.orders.filter((o) => !flagged(o))
   const hiddenTotal = formatMinor(
