@@ -229,6 +229,7 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
       code,
       machineNo,
       plateNo: body.plateNo,
+      groundNo: body.groundNo,
       state: 'ready',
       active: true,
     }
@@ -436,6 +437,7 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
       vehicleId: body.vehicleId,
       slotNo: body.slotNo,
       bmsProfile: body.bmsProfile,
+      groundNo: body.groundNo,
       state: 'ready',
       active: true,
     }
@@ -460,6 +462,7 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
       ...(body.state === undefined ? {} : { state: body.state }),
       ...(body.bmsProfile === undefined ? {} : { bmsProfile: body.bmsProfile }),
       ...(body.active === undefined ? {} : { active: body.active }),
+      ...(body.groundNo === undefined ? {} : { groundNo: body.groundNo }),
     }
     assertPlacement(after.vehicleId, after.slotNo)
     await assertSlotWithinType(after.vehicleId, after.slotNo)
@@ -474,6 +477,66 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
     await createOrConflict(() => deps.directory.updateBattery(after), 'duplicate_battery')
     await audit(deps, req, 'batteries', id, 'UPDATE', before, after)
     return after
+  })
+
+  /**
+   * Delete a pack recorded by mistake.
+   *
+   * "Delete" means two different things to a manager and only one of them is this. A pack entered
+   * twice, or with the wrong capacity before anyone used it, should leave no trace — that is here.
+   * A pack that has DIED is not deleted: it is `state = 'retired'`, because its readings are the
+   * evidence behind shifts that have already posted money, and `shift_battery_readings` and
+   * `battery_swaps` reference it. Removing it would either fail at the foreign key or take history
+   * with it, so the refusal names the alternative rather than leaving him guessing.
+   */
+  app.delete('/batteries/:id', { config: { permission: 'fleet.manage', subject: batterySubject(deps) } }, async (req, reply) => {
+    const { id } = z.object({ id: z.string() }).parse(req.params)
+    const before = await deps.directory.battery(id)
+    if (!before) throw new ServiceError(404, 'battery_not_found')
+
+    if ((await deps.batteryReadings.existsForBattery(id)) || (await deps.batterySwaps.existsForBattery(id))) {
+      throw new ServiceError(409, 'battery_has_history')
+    }
+    // Fitted to a bike that is out right now: pulling the row would leave the close gate asking for
+    // a screenshot of a pack that no longer exists, and the shift could never be submitted.
+    if (before.vehicleId !== null) {
+      const live = await deps.shifts.listLiveForVehicle(before.vehicleId)
+      if (live.length > 0) throw new ServiceError(409, 'vehicle_has_live_shift', { shiftId: live[0]!.id })
+    }
+
+    await deps.directory.deleteBattery(id)
+    await audit(deps, req, 'batteries', id, 'DELETE', before, null)
+    return reply.code(204).send()
+  })
+
+  /**
+   * Delete a bike recorded by mistake. Same rule as the pack above, same reason.
+   *
+   * A bike that has carried even one shift is referenced by `shifts.vehicle_id`, which is NOT NULL
+   * and does not cascade — the money hangs off those rows. Taking a real bike out of the fleet is
+   * `state = 'stopped'` / `active = false`, which is what the refusal says.
+   */
+  app.delete('/vehicles/:id', { config: { permission: 'fleet.manage', subject: vehicleSubject(deps) } }, async (req, reply) => {
+    const { id } = z.object({ id: z.string() }).parse(req.params)
+    const before = await deps.directory.vehicle(id)
+    if (!before) throw new ServiceError(404, 'vehicle_not_found')
+
+    if (await deps.shifts.existsForVehicle(id)) throw new ServiceError(409, 'vehicle_has_history')
+    // Packs still fitted would be orphaned by the delete — `batteries.vehicle_id` has no cascade,
+    // and silently unfitting them would move assets the manager did not ask to move.
+    const fitted = await deps.directory.listBatteriesForVehicle(id)
+    if (fitted.length > 0) throw new ServiceError(409, 'vehicle_has_batteries', { count: fitted.length })
+
+    try {
+      await deps.directory.deleteVehicle(id)
+    } catch (err) {
+      // The database is the authority: anything else still pointing here (an expense, a life-log
+      // entry) refuses the delete rather than surfacing as an internal error.
+      if ((err as { code?: string }).code === 'HAS_HISTORY') throw new ServiceError(409, 'vehicle_has_history')
+      throw err
+    }
+    await audit(deps, req, 'vehicles', id, 'DELETE', before, null)
+    return reply.code(204).send()
   })
 
   /** Mirrors the schema CHECK: fitted means BOTH a bike and a slot, or neither. */
@@ -534,6 +597,9 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
       ...before,
       ...(body.state === undefined ? {} : { state: body.state }),
       ...(body.active === undefined ? {} : { active: body.active }),
+      // An explicit null CLEARS the marking; an omitted key leaves it alone. The two are different
+      // answers — "this bike carries no legible number" is a fact, not a blank.
+      ...(body.groundNo === undefined ? {} : { groundNo: body.groundNo }),
     }
     await deps.directory.updateVehicle(after)
     await audit(deps, req, 'vehicles', id, 'UPDATE', before, after)

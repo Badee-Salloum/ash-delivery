@@ -36,7 +36,7 @@ beforeEach(async () => {
   })
   h.deps.directory.vehicles.set(CAR_VEHICLE, {
     id: CAR_VEHICLE, branchId: BRANCH, vehicleTypeId: CAR_TYPE,
-    code: '1-1-2-1', machineNo: 1, plateNo: null, state: 'ready', active: true,
+    code: '1-1-2-1', machineNo: 1, plateNo: null, groundNo: null, state: 'ready', active: true,
   })
 })
 afterEach(async () => {

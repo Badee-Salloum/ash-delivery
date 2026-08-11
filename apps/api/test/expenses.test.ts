@@ -93,6 +93,7 @@ describe('recording an expense', () => {
     const manager = await h.loginAs('manager')
     h.deps.directory.vehicles.set('veh-aleppo', {
       id: 'veh-aleppo', branchId: OTHER_BRANCH, vehicleTypeId: 'e_motorbike', machineNo: 9, plateNo: null,
+      groundNo: null,
       code: 'ALP-1', state: 'ready', active: true,
     })
     const res = await post(manager, '/expenses', expense({ costCenterKind: 'vehicle', vehicleId: 'veh-aleppo' }))

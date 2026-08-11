@@ -438,6 +438,8 @@ export const createVehicleRequest = z.object({
   vehicleTypeId: z.string().min(1),
   machineNo: z.number().int().min(1).max(999).optional(),
   plateNo: z.string().max(32).nullable().default(null),
+  /** «الرقم التمييزي على الأرض» — what is marked on the machine, as a driver reads it in the yard. */
+  groundNo: z.string().max(32).nullable().default(null),
   branchId: z.string().optional(),
 })
 
@@ -498,6 +500,8 @@ export const createBatteryRequest = z.object({
   slotNo: z.number().int().min(1).max(MAX_BATTERY_SLOTS).nullable().default(null),
   /** A profile id from the driver app's BMS_PROFILES; unconstrained so a new one needs no deploy. */
   bmsProfile: z.string().max(32).nullable().default(null),
+  /** «الرقم التمييزي» — what is marked on the pack, as staff read it at the shelf. */
+  groundNo: z.string().max(32).nullable().default(null),
   branchId: z.string().optional(),
 })
 
@@ -510,6 +514,8 @@ export const updateBatteryRequest = z.object({
   state: z.enum(['ready', 'charging', 'maintenance', 'retired']).optional(),
   bmsProfile: z.string().max(32).nullable().optional(),
   active: z.boolean().optional(),
+  /** Correctable, and an explicit null is the honest record of a pack carrying no legible number. */
+  groundNo: z.string().max(32).nullable().optional(),
 })
 
 /**
@@ -560,6 +566,12 @@ export const updateVehicleRequest = z.object({
   /** «جاهزة/تشحن/صيانة/متوقفة» — only a `ready` vehicle may start a shift. */
   state: z.enum(['ready', 'charging', 'maintenance', 'stopped']).optional(),
   active: z.boolean().optional(),
+  /**
+   * The marking on the machine. Correctable, because paint wears off and bikes get re-marked — and
+   * an explicit `null` is the honest record of a bike carrying no legible number, not a blank to be
+   * confused with "unchanged". Omitting the key leaves it alone; sending null clears it.
+   */
+  groundNo: z.string().max(32).nullable().optional(),
 })
 
 /**

@@ -215,6 +215,9 @@ export class MemoryShiftRepo implements ShiftRepo {
   async listLiveForVehicle(vehicleId: string): Promise<ShiftRecord[]> {
     return [...this.rows.values()].filter((s) => s.vehicleId === vehicleId && isLive(s.state))
   }
+  async existsForVehicle(vehicleId: string): Promise<boolean> {
+    return [...this.rows.values()].some((s) => s.vehicleId === vehicleId)
+  }
   async listLiveForBranch(branchId: string): Promise<ShiftRecord[]> {
     return [...this.rows.values()].filter((s) => s.branchId === branchId && isLive(s.state))
   }
@@ -259,6 +262,9 @@ export class MemoryBatteryReadingRepo implements BatteryReadingRepo {
       .sort((a, b) => a.package.localeCompare(b.package) || a.slotNo - b.slotNo)
       .map((r) => ({ ...r }))
   }
+  async existsForBattery(batteryId: string): Promise<boolean> {
+    return [...this.rows.values()].some((r) => r.batteryId === batteryId)
+  }
 }
 
 /** The mid-shift battery-swap event log (SRS §L seam). Append-only, ordered by seq_no per shift. */
@@ -266,6 +272,9 @@ export class MemoryBatterySwapRepo implements BatterySwapRepo {
   readonly rows: BatterySwapRecord[] = []
   async create(swap: BatterySwapRecord): Promise<void> {
     this.rows.push({ ...swap })
+  }
+  async existsForBattery(batteryId: string): Promise<boolean> {
+    return this.rows.some((r) => r.outBatteryId === batteryId || r.inBatteryId === batteryId)
   }
   async listByShift(shiftId: string): Promise<BatterySwapRecord[]> {
     return this.rows
@@ -777,6 +786,12 @@ export class MemoryDirectoryRepo implements DirectoryRepo {
   async battery(id: string): Promise<BatteryRecord | null> {
     const found = this.batteries.get(id)
     return found ? { ...found } : null
+  }
+  async deleteVehicle(id: string): Promise<void> {
+    this.vehicles.delete(id)
+  }
+  async deleteBattery(id: string): Promise<void> {
+    this.batteries.delete(id)
   }
   async createBattery(battery: BatteryRecord): Promise<void> {
     this.assertBatteryPlacement(battery)

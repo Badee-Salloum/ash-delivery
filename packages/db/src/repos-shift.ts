@@ -182,6 +182,11 @@ export class PgShiftRepo implements ShiftRepo {
     return this.load('s.branch_id = $1 AND s.state = ANY($2::shift_state[])', [branchId, AWAITING_DECISION_STATES])
   }
 
+  async existsForVehicle(vehicleId: string): Promise<boolean> {
+    const { rows } = await this.pool.query('SELECT 1 FROM shifts WHERE vehicle_id = $1 LIMIT 1', [vehicleId])
+    return rows.length > 0
+  }
+
   async listByBranchAndDate(branchId: string, businessDate: CalendarDate): Promise<ShiftRecord[]> {
     return this.load('s.branch_id = $1 AND s.business_date = $2', [branchId, businessDate])
   }
@@ -458,8 +463,8 @@ export class PgDirectoryRepo implements DirectoryRepo {
   async createVehicle(vehicle: VehicleRecord): Promise<void> {
     try {
       await this.pool.query(
-        `INSERT INTO vehicles (id, branch_id, vehicle_type_id, code, machine_no, plate_no, state, active)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        `INSERT INTO vehicles (id, branch_id, vehicle_type_id, code, machine_no, plate_no, ground_no, state, active)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
         [
           vehicle.id,
           vehicle.branchId,
@@ -467,6 +472,7 @@ export class PgDirectoryRepo implements DirectoryRepo {
           vehicle.code,
           vehicle.machineNo,
           vehicle.plateNo,
+          vehicle.groundNo,
           vehicle.state,
           vehicle.active,
         ],
@@ -479,11 +485,41 @@ export class PgDirectoryRepo implements DirectoryRepo {
     }
   }
 
+  /**
+   * Delete a vehicle, or refuse because something real points at it.
+   *
+   * The FK check is the authority, not a pre-count: `shifts`, `expenses` and the vehicle life log
+   * all reference this row without a cascade, and a pre-count race could still hit the constraint.
+   * Catching 23503 means the refusal is exactly as strict as the database is.
+   */
+  async deleteVehicle(id: string): Promise<void> {
+    try {
+      await this.pool.query('DELETE FROM vehicles WHERE id = $1', [id])
+    } catch (err) {
+      if (isPgError(err, PG.FOREIGN_KEY_VIOLATION)) {
+        throw Object.assign(new Error(`vehicle ${id} has history`), { code: 'HAS_HISTORY' })
+      }
+      throw err
+    }
+  }
+
+  async deleteBattery(id: string): Promise<void> {
+    try {
+      await this.pool.query('DELETE FROM batteries WHERE id = $1', [id])
+    } catch (err) {
+      if (isPgError(err, PG.FOREIGN_KEY_VIOLATION)) {
+        throw Object.assign(new Error(`battery ${id} has history`), { code: 'HAS_HISTORY' })
+      }
+      throw err
+    }
+  }
+
   async updateVehicle(vehicle: VehicleRecord): Promise<void> {
-    await this.pool.query('UPDATE vehicles SET state = $2, active = $3 WHERE id = $1', [
+    await this.pool.query('UPDATE vehicles SET state = $2, active = $3, ground_no = $4 WHERE id = $1', [
       vehicle.id,
       vehicle.state,
       vehicle.active,
+      vehicle.groundNo,
     ])
   }
 
@@ -628,9 +664,9 @@ export class PgDirectoryRepo implements DirectoryRepo {
   async createBattery(b: BatteryRecord): Promise<void> {
     await this.batteryUniqueOr(() =>
       this.pool.query(
-        `INSERT INTO batteries (id, branch_id, serial_no, bms_mac, capacity_ah, vehicle_id, slot_no, state, active, bms_profile)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-        [b.id, b.branchId, b.serialNo, b.bmsMac, b.capacityAh, b.vehicleId, b.slotNo, b.state, b.active, b.bmsProfile],
+        `INSERT INTO batteries (id, branch_id, serial_no, bms_mac, capacity_ah, vehicle_id, slot_no, state, active, bms_profile, ground_no)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        [b.id, b.branchId, b.serialNo, b.bmsMac, b.capacityAh, b.vehicleId, b.slotNo, b.state, b.active, b.bmsProfile, b.groundNo],
       ),
     )
   }
@@ -639,9 +675,10 @@ export class PgDirectoryRepo implements DirectoryRepo {
     await this.batteryUniqueOr(() =>
       this.pool.query(
         `UPDATE batteries SET serial_no = $2, bms_mac = $3, capacity_ah = $4,
-                                vehicle_id = $5, slot_no = $6, state = $7, active = $8, bms_profile = $9
+                                vehicle_id = $5, slot_no = $6, state = $7, active = $8, bms_profile = $9,
+                                ground_no = $10
             WHERE id = $1`,
-        [b.id, b.serialNo, b.bmsMac, b.capacityAh, b.vehicleId, b.slotNo, b.state, b.active, b.bmsProfile],
+        [b.id, b.serialNo, b.bmsMac, b.capacityAh, b.vehicleId, b.slotNo, b.state, b.active, b.bmsProfile, b.groundNo],
       ),
     )
   }
@@ -728,6 +765,7 @@ const toVehicle = (r: Record<string, unknown>): VehicleRecord => ({
   code: String(r.code),
   machineNo: Number(r.machine_no),
   plateNo: (r.plate_no as string | null) ?? null,
+  groundNo: (r.ground_no as string | null) ?? null,
   state: r.state as VehicleRecord['state'],
   active: Boolean(r.active),
 })
@@ -770,6 +808,7 @@ const toBattery = (r: Record<string, unknown>): BatteryRecord => ({
   state: r.state as BatteryRecord['state'],
   active: Boolean(r.active),
   bmsProfile: (r.bms_profile as string | null) ?? null,
+  groundNo: (r.ground_no as string | null) ?? null,
 })
 
 const toDocument = (r: Record<string, unknown>): DocumentRecord => ({
@@ -1530,6 +1569,13 @@ export class PgBatteryReadingRepo implements BatteryReadingRepo {
       batterySwapId: (r.battery_swap_id as string | null) ?? null,
     }))
   }
+
+  async existsForBattery(batteryId: string): Promise<boolean> {
+    const { rows } = await this.pool.query('SELECT 1 FROM shift_battery_readings WHERE battery_id = $1 LIMIT 1', [
+      batteryId,
+    ])
+    return rows.length > 0
+  }
 }
 
 /** The mid-shift battery-swap event log (SRS §L seam). Append-only, one row per swap per shift. */
@@ -1545,6 +1591,14 @@ export class PgBatterySwapRepo implements BatterySwapRepo {
        VALUES ($1,$2,$3,$4,$5,$6,to_timestamp($7 / 1000.0),$8)`,
       [s.id, s.shiftId, s.seqNo, s.slotNo, s.outBatteryId, s.inBatteryId, s.occurredAtMs, s.createdBy],
     )
+  }
+
+  async existsForBattery(batteryId: string): Promise<boolean> {
+    const { rows } = await this.pool.query(
+      'SELECT 1 FROM battery_swaps WHERE out_battery_id = $1 OR in_battery_id = $1 LIMIT 1',
+      [batteryId],
+    )
+    return rows.length > 0
   }
 
   async listByShift(shiftId: string): Promise<BatterySwapRecord[]> {

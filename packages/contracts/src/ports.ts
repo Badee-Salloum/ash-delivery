@@ -129,6 +129,16 @@ export interface BatteryRecord {
    * layout to expect. `null` means nobody has said, and the reader tries everything.
    */
   bmsProfile: string | null
+  /**
+   * The number painted on the pack — «الرقم التمييزي» for a battery.
+   *
+   * `serialNo` and `bmsMac` come off the BMS phone app: long, OCR-transcribed, and legible only by
+   * pairing over Bluetooth. Neither is any use to somebody holding two packs at a charging shelf,
+   * and packs are the expensive consumable that moves between machines — a swap recorded against
+   * the wrong pack puts one battery's history on another. Same rules as the vehicle's: nullable,
+   * not unique, never joined on.
+   */
+  groundNo: string | null
 }
 
 /**
@@ -243,6 +253,19 @@ export interface VehicleRecord {
   /** The fourth segment. Unique within (branch, type). */
   machineNo: number
   plateNo: string | null
+  /**
+   * The number painted on the machine — «الرقم التمييزي على الأرض».
+   *
+   * Neither `code` nor `plateNo` is what a driver can read in the yard: `code` describes where the
+   * bike sits in the fleet and nobody paints it on a mudguard, and an electric motorbike in Damascus
+   * often has no plate at all. This is the marking the branch actually puts on its machines and the
+   * one a driver is given when he is sent to take a particular bike.
+   *
+   * Nullable and NOT unique, deliberately: a human marking that has not been applied yet is honestly
+   * described by `null`, and a uniqueness refusal at the moment a manager records a real bike only
+   * teaches him to type something false to get past it. `code` stays the identity the system joins on.
+   */
+  groundNo: string | null
   state: 'ready' | 'charging' | 'maintenance' | 'stopped'
   active: boolean
 }
@@ -461,6 +484,15 @@ export interface ShiftRepo {
   update(shift: ShiftRecord): Promise<void>
   listLiveForDriver(driverId: string): Promise<ShiftRecord[]>
   listLiveForVehicle(vehicleId: string): Promise<ShiftRecord[]>
+  /**
+   * Has this bike ever carried a shift, live or long finished?
+   *
+   * The question a delete has to ask. `listLiveForVehicle` answers "is it busy now", which is a
+   * different thing: a bike that finished twenty approved shifts last month is not busy and must
+   * still never be deleted — `shifts.vehicle_id` is NOT NULL with no cascade, and the money hangs
+   * off those rows.
+   */
+  existsForVehicle(vehicleId: string): Promise<boolean>
   /** Every shift currently out working in the branch, across dates — one may have opened yesterday
    *  and never closed. Backs the live map: only a driver on a live shift belongs on it. */
   listLiveForBranch(branchId: string): Promise<ShiftRecord[]>
@@ -866,6 +898,19 @@ export interface DirectoryRepo {
   listVehicles(branchId: string): Promise<VehicleRecord[]>
   createVehicle(vehicle: VehicleRecord): Promise<void>
   updateVehicle(vehicle: VehicleRecord): Promise<void>
+  /**
+   * Remove a vehicle that was never used.
+   *
+   * Deliberately narrow. A bike that has carried a shift is referenced by rows the ledger and the
+   * audit depend on — `shifts.vehicle_id` is NOT NULL with no cascade — so deleting it either fails
+   * at the foreign key or, worse, would take money history with it. What a manager actually wants
+   * when he says "delete" is one of two different things: get rid of a bike recorded by MISTAKE, or
+   * take a real bike out of the fleet. The first is this; the second is `state = 'stopped'` /
+   * `active = false`, which keeps the history intact and is what the caller is told to use.
+   *
+   * Throws `{ code: 'HAS_HISTORY' }` rather than letting a 23503 surface as an internal error.
+   */
+  deleteVehicle(id: string): Promise<void>
 
   // ── Geography and the vehicle-numbering scheme ──────────────────────────────────────────
   listGovernorates(): Promise<GovernorateRecord[]>
@@ -896,6 +941,12 @@ export interface DirectoryRepo {
   battery(id: string): Promise<BatteryRecord | null>
   createBattery(battery: BatteryRecord): Promise<void>
   updateBattery(battery: BatteryRecord): Promise<void>
+  /**
+   * Remove a pack that was never read or swapped. Same rule, same reason as `deleteVehicle`: a pack
+   * with readings is referenced by `shift_battery_readings` and `battery_swaps`, which are evidence.
+   * A worn-out pack is `state = 'retired'`, not a hole in the history.
+   */
+  deleteBattery(id: string): Promise<void>
 
   createDocument(doc: DocumentRecord): Promise<void>
   listDocuments(owner: { driverId?: string; vehicleId?: string }): Promise<DocumentRecord[]>
@@ -908,6 +959,8 @@ export interface BatteryReadingRepo {
   /** Replaces the row for (shift, battery, package) — a re-upload corrects, it does not duplicate. */
   upsert(reading: BatteryReadingRecord): Promise<void>
   listByShift(shiftId: string): Promise<BatteryReadingRecord[]>
+  /** Has this pack ever been read? Asked before a delete — a pack with readings is evidence. */
+  existsForBattery(batteryId: string): Promise<boolean>
 }
 
 /** The mid-shift battery-swap event log (SRS §L seam). Append-only, one row per swap per shift. */
@@ -915,6 +968,8 @@ export interface BatterySwapRepo {
   create(swap: BatterySwapRecord): Promise<void>
   /** Every swap on a shift, in the order they happened. Length + max seqNo drive the next seqNo. */
   listByShift(shiftId: string): Promise<BatterySwapRecord[]>
+  /** Has this pack been on either side of a swap? Asked before a delete. */
+  existsForBattery(batteryId: string): Promise<boolean>
 }
 
 /**

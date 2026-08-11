@@ -306,6 +306,11 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           .map(async (v) => ({
             id: v.id,
             code: v.code,
+            // The number ON THE MACHINE. `code` says where the bike sits in the fleet — it is not
+            // painted anywhere, so a driver sent to take «رقم ٤» had to hold the mapping in his
+            // head. Getting that wrong means the odometer, the battery and the entire start package
+            // belong to a bike nobody rode.
+            groundNo: v.groundNo,
             state: v.state,
             busy: (await deps.shifts.listLiveForVehicle(v.id)).length > 0,
             // Whose shift it is matters: a driver told his own bike is «على نوبة الآن» has no way
@@ -318,6 +323,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
               id: b.id,
               slotNo: b.slotNo,
               capacityAh: b.capacityAh,
+              // The marking on the pack. A slot number says which socket, not which battery.
+              groundNo: b.groundNo,
               serialNo: b.serialNo,
               // Which BMS app this pack ships with, so the driver's reader uses the right label
               // spellings and layout rule instead of trying every profile it knows.
@@ -329,7 +336,16 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       // he swaps a depleted pack mid-shift (SRS §L seam). Same fields as the fitted packs above.
       spareBatteries: (await deps.directory.listBatteries(driver.branchId))
         .filter((b) => b.vehicleId === null && b.state === 'ready' && b.active)
-        .map((b) => ({ id: b.id, slotNo: b.slotNo, capacityAh: b.capacityAh, serialNo: b.serialNo, bmsProfile: b.bmsProfile })),
+        // `groundNo` matters MOST here: choosing a spare off the shelf is the moment a man is
+        // holding two packs that look identical.
+        .map((b) => ({
+          id: b.id,
+          slotNo: b.slotNo,
+          capacityAh: b.capacityAh,
+          groundNo: b.groundNo,
+          serialNo: b.serialNo,
+          bmsProfile: b.bmsProfile,
+        })),
     }
   })
 

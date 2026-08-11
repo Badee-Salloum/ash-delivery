@@ -14,6 +14,8 @@ interface Assignment {
   vehicles: Array<{
     id: string
     code: string
+    /** «الرقم التمييزي على الأرض» — what is marked on the machine, null when it carries no number. */
+    groundNo?: string | null
     state: string
     busy?: boolean
     /** True when the shift holding this bike is the driver's OWN. */
@@ -23,6 +25,7 @@ interface Assignment {
       id: string
       slotNo: number | null
       capacityAh: number
+      groundNo?: string | null
       serialNo: string | null
       bmsProfile?: string | null
     }>
@@ -32,6 +35,7 @@ interface Assignment {
     id: string
     slotNo: number | null
     capacityAh: number
+    groundNo?: string | null
     serialNo: string | null
     bmsProfile?: string | null
   }>
@@ -208,8 +212,21 @@ export function DriverApp(): ReactNode {
                   disabled={v.busy === true}
                   onClick={() => setVehicleId(v.id)}
                 >
-                  {t.shift.vehicle} {v.code}
-                  {v.busy === true ? ` — ${v.busyByMe === true ? t.shift.yourShiftHere : t.shift.busyVehicle}` : ''}
+                  {/* THE NUMBER HE CAN READ ON THE BIKE FIRST, and the fleet code under it. He is
+                      standing in front of ten machines: the marking is what tells them apart, and
+                      «1-1-1-4» is not written on any of them. When a bike carries no marking the
+                      code stands alone rather than leaving a gap where a number should be. */}
+                  <span className="flex flex-col items-center leading-tight">
+                    <span>
+                      {v.groundNo == null || v.groundNo === ''
+                        ? `${t.shift.vehicle} ${v.code}`
+                        : `${t.shift.vehicle} ${v.groundNo}`}
+                      {v.busy === true ? ` — ${v.busyByMe === true ? t.shift.yourShiftHere : t.shift.busyVehicle}` : ''}
+                    </span>
+                    {v.groundNo == null || v.groundNo === '' ? null : (
+                      <span className="num text-xs font-normal opacity-70">{v.code}</span>
+                    )}
+                  </span>
                 </Button>
               ))}
             </>

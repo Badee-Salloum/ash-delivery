@@ -64,6 +64,7 @@ export async function makeHarness(opts: { splitGate?: 'advisory' | 'strict' } = 
     code: '1-1-1-1',
     machineNo: 1,
     plateNo: null,
+    groundNo: null,
     state: 'ready',
     active: true,
   })
@@ -74,6 +75,7 @@ export async function makeHarness(opts: { splitGate?: 'advisory' | 'strict' } = 
     code: '1-1-1-2',
     machineNo: 2,
     plateNo: null,
+    groundNo: null,
     state: 'ready',
     active: true,
   })

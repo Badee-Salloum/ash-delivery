@@ -120,6 +120,14 @@ export const ar = {
     encryption_unavailable: 'تعذّر حفظ الرقم الوطني — مفتاح التشفير غير مُهيّأ',
     document_owner_mismatch: 'نوع المالك لا يطابق الحقول المُدخلة',
     vehicle_has_live_shift: 'الآلية على نوبة جارية',
+    /**
+     * The refusal has to NAME THE ALTERNATIVE. A manager who is told only «لا يمكن الحذف» tries
+     * again, then asks someone to do it in the database — and a bike carrying approved shifts is
+     * exactly the row whose removal would take money history with it.
+     */
+    vehicle_has_history: 'للآلية سجل نوبات — لا تُحذف. أوقفها بدل ذلك (الحالة: متوقفة)',
+    vehicle_has_batteries: 'الآلية عليها بطاريات مركّبة — افصلها أولاً',
+    battery_has_history: 'للبطارية قراءات مسجّلة — لا تُحذف. اجعل حالتها «مسحوبة» بدل ذلك',
     driver_has_live_shift: 'السائق على نوبة جارية',
     illegal_vehicle_transition: 'انتقال حالة غير مسموح',
     vehicle_not_found: 'الآلية غير موجودة',
@@ -416,6 +424,11 @@ orderNo: 'رقم الطلب',
     numberPreview: 'الرقم الذي سيُمنح',
     machineNo: 'رقم الآلة',
     plateNo: 'رقم اللوحة',
+    /**
+     * The number marked on the machine itself. Neither «رقم الآلية» (derived from where the bike
+     * sits) nor the plate is what a driver reads in the yard — this is.
+     */
+    groundNo: 'الرقم على الأرض',
     vehicleType: 'نوع الآلية',
     addType: 'إضافة نوع آلية',
     typeNo: 'رقم النوع',
@@ -462,6 +475,8 @@ orderNo: 'رقم الطلب',
     addEvent: 'إضافة حدث',
     recordEvent: 'تسجيل',
     stateChanged: 'من {from} إلى {to}',
+    deleteVehicleConfirm: 'يُحذف نهائياً — للآليات التي أُدخلت بالخطأ فقط. الآلية التي عملت نوبات لا تُحذف (أوقفها بدل ذلك). متابعة؟',
+    deleteBatteryConfirm: 'تُحذف نهائياً — للبطاريات التي أُدخلت بالخطأ فقط. البطارية التي لها قراءات لا تُحذف (اجعلها «مسحوبة»). متابعة؟',
     releaseVehicleConfirm: 'سيُلغى بدء النوبة على هذه الآلية ويُحرَّرها. متابعة؟',
     unassignConfirm: 'سيُلغى إسناد هذه الآلية لهذا السائق اليوم. متابعة؟',
     noEvents: 'لا أحداث بعد',

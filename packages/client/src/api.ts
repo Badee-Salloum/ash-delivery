@@ -100,6 +100,8 @@ export interface Battery {
   state: 'ready' | 'charging' | 'maintenance' | 'retired'
   active: boolean
   bmsProfile: string | null
+  /** «الرقم التمييزي» — the number marked on the pack, as staff read it at the shelf. */
+  groundNo: string | null
 }
 
 /** One entry in a vehicle's life log (SRS B-2 / س66). `cost` is a decimal string, or null. */
@@ -440,7 +442,7 @@ export class ApiClient {
       `/vehicles/next-number?vehicleTypeId=${encodeURIComponent(vehicleTypeId)}`,
     )
   }
-  createVehicle(body: { vehicleTypeId: string; machineNo?: number; plateNo?: string | null }) {
+  createVehicle(body: { vehicleTypeId: string; machineNo?: number; plateNo?: string | null; groundNo?: string | null }) {
     return this.post<{ id: string; code: string; machineNo: number }>('/vehicles', {
       ...body,
       ...(this.branchId ? { branchId: this.branchId } : {}),

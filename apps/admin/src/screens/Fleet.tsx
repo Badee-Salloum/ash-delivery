@@ -24,6 +24,8 @@ interface Vehicle {
   vehicleTypeId: string
   machineNo: number
   plateNo: string | null
+  /** «الرقم التمييزي على الأرض» — the marking on the machine, as a driver reads it in the yard. */
+  groundNo: string | null
   state: 'ready' | 'charging' | 'maintenance' | 'stopped'
   active: boolean
 }
@@ -45,6 +47,8 @@ interface Battery {
   state: 'ready' | 'charging' | 'maintenance' | 'retired'
   active: boolean
   bmsProfile: string | null
+  /** «الرقم التمييزي» — the number marked on the pack, as staff read it at the shelf. */
+  groundNo: string | null
 }
 interface Assignment {
   id: string
@@ -81,7 +85,7 @@ export function Fleet(): ReactNode {
   const [batteries, setBatteries] = useState<Battery[]>([])
   // The type is CHOSEN, never typed. The old form posted the literal string 'e_motorbike' into a
   // uuid foreign key, which failed against Postgres every time and reported success.
-  const [newVehicle, setNewVehicle] = useState({ vehicleTypeId: '', plateNo: '' })
+  const [newVehicle, setNewVehicle] = useState({ vehicleTypeId: '', plateNo: '', groundNo: '' })
   const [preview, setPreview] = useState<string | null>(null)
   const [vehicleError, setVehicleError] = useState<string | null>(null)
   const [newBattery, setNewBattery] = useState({ serialNo: '', capacityAh: '50' })
@@ -265,6 +269,13 @@ export function Fleet(): ReactNode {
             onChange={(e) => setNewVehicle({ ...newVehicle, plateNo: e.target.value })}
             className="w-32"
           />
+          {/* The marking on the machine — what the driver is told when he is sent to take a bike. */}
+          <TextInput
+            placeholder={t.fleet.groundNo}
+            value={newVehicle.groundNo}
+            onChange={(e) => setNewVehicle({ ...newVehicle, groundNo: e.target.value })}
+            className="w-28"
+          />
           {/* The number is derived, so the operator sees it before committing to it. */}
           {preview ? (
             <span className="text-sm text-slate-500">
@@ -278,8 +289,9 @@ export function Fleet(): ReactNode {
                 await api.createVehicle({
                   vehicleTypeId: newVehicle.vehicleTypeId,
                   plateNo: newVehicle.plateNo || null,
+                  groundNo: newVehicle.groundNo || null,
                 })
-                setNewVehicle({ vehicleTypeId: '', plateNo: '' })
+                setNewVehicle({ vehicleTypeId: '', plateNo: '', groundNo: '' })
               } catch (err) {
                 const code = (err as { error?: string }).error
                 setVehicleError(code === 'vehicle_type_not_found' ? t.fleet.unknownTypeRefused : (code ?? 'error'))
@@ -295,10 +307,35 @@ export function Fleet(): ReactNode {
         </div>
         {vehicleError ? <p className="mb-2 text-sm text-rose-600">{explainError(vehicleError, t)}</p> : null}
         {types.length === 0 ? <p className="mb-2 text-sm text-amber-700">{t.fleet.unknownTypeRefused}</p> : null}
-        <Table head={[t.fleet.vehicleNumber, t.fleet.vehicleType, t.battery.title, t.fleet.state, '']} isEmpty={vehicles.length === 0} empty={t.fleet.noneYet}>
+        <Table
+          head={[t.fleet.vehicleNumber, t.fleet.groundNo, t.fleet.vehicleType, t.battery.title, t.fleet.state, '']}
+          isEmpty={vehicles.length === 0}
+          empty={t.fleet.noneYet}
+        >
           {vehicles.map((v) => (
             <tr key={v.id}>
               <td className="px-3 py-1 num font-semibold">{v.code}</td>
+              {/* Editable in place: paint wears off and bikes get re-marked, and the number is only
+                  useful while it matches what is actually on the machine. Blanking it is a real
+                  answer — «this bike carries no legible number» — so an empty field clears it. */}
+              <td className="px-3 py-1">
+                <TextInput
+                  aria-label={`${t.fleet.groundNo} — ${v.code}`}
+                  defaultValue={v.groundNo ?? ''}
+                  placeholder="—"
+                  className="w-20 num"
+                  onBlur={async (e) => {
+                    const next = e.target.value.trim() === '' ? null : e.target.value.trim()
+                    if (next === (v.groundNo ?? null)) return
+                    try {
+                      await api.patch(`/vehicles/${v.id}`, { groundNo: next })
+                    } catch (err) {
+                      toast.error(explainError((err as { error?: string }).error ?? null, t))
+                    }
+                    load()
+                  }}
+                />
+              </td>
               <td className="px-3 py-1 text-slate-500">{nameOfType(v.vehicleTypeId)}</td>
               <td className="px-3 py-1">
                 {/* How many packs this bike carries — the same COUNT the shift gate reads, so what
@@ -338,6 +375,36 @@ export function Fleet(): ReactNode {
                     </option>
                   ))}
                 </select>
+                {/* Delete is for a bike recorded BY MISTAKE. A bike that has carried a shift is
+                    refused by the server with a message naming the alternative — stop it — because
+                    its rows are what approved money hangs off. The button is offered regardless of
+                    what we think we know here: the server is the authority, and hiding it would
+                    leave a manager who typed a duplicate with no way out. */}
+                <Button
+                  variant="danger"
+                  className="ms-2"
+                  aria-label={`${t.common.remove} — ${v.code}`}
+                  onClick={async () => {
+                    if (
+                      !(await confirm({
+                        title: `${t.common.remove} — ${v.groundNo ?? v.code}`,
+                        body: t.fleet.deleteVehicleConfirm,
+                        danger: true,
+                      }))
+                    ) {
+                      return
+                    }
+                    try {
+                      await api.del(`/vehicles/${v.id}`)
+                      toast.success(t.common.deleted)
+                    } catch (err) {
+                      toast.error(explainError((err as { error?: string }).error ?? null, t))
+                    }
+                    load()
+                  }}
+                >
+                  {t.common.remove}
+                </Button>
                 {strandedShiftFor(v.id) ? (
                   <Button
                     variant="danger"
@@ -503,9 +570,42 @@ export function Fleet(): ReactNode {
         {batteryError ? <p className="mb-2 text-sm text-rose-600">{explainError(batteryError, t)}</p> : null}
 
         <p className="mb-2 text-xs text-slate-600">{t.battery.profileHint}</p>
-        <Table head={[t.battery.serial, t.battery.capacity, t.battery.profile, t.fleet.vehicles, t.battery.slot, t.fleet.state]} isEmpty={batteries.length === 0} empty={t.fleet.noneYet}>
+        <Table
+          head={[
+            t.fleet.groundNo,
+            t.battery.serial,
+            t.battery.capacity,
+            t.battery.profile,
+            t.fleet.vehicles,
+            t.battery.slot,
+            t.fleet.state,
+            '',
+          ]}
+          isEmpty={batteries.length === 0}
+          empty={t.fleet.noneYet}
+        >
           {batteries.map((b) => (
             <tr key={b.id}>
+              {/* FIRST, before the serial. The serial comes off the BMS app — long, and readable
+                  only by pairing to the pack. This is the number written on the pack in the hand. */}
+              <td className="px-3 py-1">
+                <TextInput
+                  aria-label={`${t.fleet.groundNo} — ${b.serialNo ?? b.capacityAh}`}
+                  defaultValue={b.groundNo ?? ''}
+                  placeholder="—"
+                  className="w-20 num"
+                  onBlur={async (e) => {
+                    const next = e.target.value.trim() === '' ? null : e.target.value.trim()
+                    if (next === (b.groundNo ?? null)) return
+                    try {
+                      await api.updateBattery(b.id, { groundNo: next })
+                    } catch (err) {
+                      setBatteryError((err as { error?: string }).error ?? 'error')
+                    }
+                    load()
+                  }}
+                />
+              </td>
               <td className="px-3 py-1 num text-xs">{b.serialNo ?? '—'}</td>
               <td className="px-3 py-1 num">{b.capacityAh} Ah</td>
               <td className="px-3 py-1">
@@ -591,6 +691,36 @@ export function Fleet(): ReactNode {
                 <Badge tone={b.state === 'ready' ? 'green' : b.state === 'retired' ? 'slate' : 'amber'}>
                   {t.battery.states[b.state]}
                 </Badge>
+              </td>
+              {/* A pack entered twice, or with the wrong capacity before anyone used it, should
+                  leave no trace. One with readings is refused by the server, which names «مسحوبة»
+                  as the thing he actually wants — a dead pack is retired, not erased. */}
+              <td className="px-3 py-1">
+                <Button
+                  variant="danger"
+                  aria-label={`${t.common.remove} — ${b.groundNo ?? b.serialNo ?? b.capacityAh}`}
+                  onClick={async () => {
+                    if (
+                      !(await confirm({
+                        title: `${t.common.remove} — ${b.groundNo ?? b.serialNo ?? ''}`,
+                        body: t.fleet.deleteBatteryConfirm,
+                        danger: true,
+                      }))
+                    ) {
+                      return
+                    }
+                    setBatteryError(null)
+                    try {
+                      await api.del(`/batteries/${b.id}`)
+                      toast.success(t.common.deleted)
+                    } catch (err) {
+                      setBatteryError((err as { error?: string }).error ?? 'error')
+                    }
+                    load()
+                  }}
+                >
+                  {t.common.remove}
+                </Button>
               </td>
             </tr>
           ))}

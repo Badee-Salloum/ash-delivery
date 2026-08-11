@@ -9,6 +9,15 @@ export interface FittedBattery {
   slotNo: number | null
   capacityAh: number
   serialNo: string | null
+  /**
+   * «الرقم التمييزي» — the number marked on the pack itself.
+   *
+   * The slot number says which socket it sits in, not which pack it is; the serial comes off the
+   * BMS app and is unreadable without pairing. This is the one a driver photographing two packs can
+   * match against what is in his hand, which is what stops slot 1's screenshot being uploaded for
+   * slot 2 and a shift's battery evidence describing the wrong pack.
+   */
+  groundNo?: string | null
   /** Which BMS app this pack ships with. `null` ⇒ the reader tries every profile it knows. */
   bmsProfile?: string | null
 }
@@ -215,7 +224,11 @@ export function BatteryPanel({
               shiftId={shiftId}
               pkg={pkg}
               slot={`bms_${slotNo}`}
-              label={`${t.battery.bmsShot} ${slotNo} · ${battery.capacityAh}Ah`}
+              label={
+                battery.groundNo == null || battery.groundNo === ''
+                  ? `${t.battery.bmsShot} ${slotNo} · ${battery.capacityAh}Ah`
+                  : `${t.battery.bmsShot} ${slotNo} · ${t.fleet.groundNo} ${battery.groundNo} · ${battery.capacityAh}Ah`
+              }
               // Ticked already when the caller kept the slot across a remount — same reason the
               // readings are restored: nothing was lost, only forgotten by the screen.
               uploaded={slots.has(`bms_${slotNo}`)}

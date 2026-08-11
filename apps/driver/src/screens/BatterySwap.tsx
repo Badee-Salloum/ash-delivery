@@ -11,6 +11,8 @@ type Reading = Omit<BatteryReadingInput, 'batteryId'>
 export interface SpareBattery {
   id: string
   capacityAh: number
+  /** «الرقم التمييزي» — what is written on the pack. The only identifier legible at the shelf. */
+  groundNo?: string | null
   serialNo: string | null
   bmsProfile?: string | null
 }
@@ -119,7 +121,8 @@ export function BatterySwap({
             const n = b.slotNo ?? i + 1
             return (
               <option key={b.id} value={String(n)}>
-                {t.battery.swap.slotLabel.replace('{{n}}', String(n))} · {b.capacityAh}Ah{b.serialNo ? ` · ${b.serialNo}` : ''}
+                {t.battery.swap.slotLabel.replace('{{n}}', String(n))} · {b.capacityAh}Ah
+                {b.groundNo ? ` · ${b.groundNo}` : b.serialNo ? ` · ${b.serialNo}` : ''}
               </option>
             )
           })}
@@ -134,7 +137,9 @@ export function BatterySwap({
             <option value="">—</option>
             {spares.map((s) => (
               <option key={s.id} value={s.id}>
-                {s.serialNo ?? s.id.slice(0, 8)} · {s.capacityAh}Ah
+                {/* The marking first: he is standing at the shelf holding the pack, and a serial he
+                    cannot read without pairing to it is no help in choosing which one he took. */}
+                {s.groundNo ?? s.serialNo ?? s.id.slice(0, 8)} · {s.capacityAh}Ah
               </option>
             ))}
           </BareSelect>
