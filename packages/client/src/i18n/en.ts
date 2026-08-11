@@ -231,7 +231,7 @@ export const en: Catalog = {
     readUnread: 'This image could not be read — enter the operations by hand',
     /** Rows the reader saw but would not vouch for. Silence here hides a short day. */
     readCutOff: {
-      one: 'card cut off at the bottom — add it by hand',
+      one: 'card cut off at the bottom — check its destination',
       two: 'cards cut off at the bottom — add them by hand',
       few: 'cards cut off at the bottom — add them by hand',
       many: 'cards cut off at the bottom — add them by hand',
@@ -350,6 +350,8 @@ orderNo: 'Order no.',
   },
 
   br1: {
+    feeGap: 'The gap equals a delivery fee of ≈ {n} — a missing order or a wrong fee',
+    checkScanned: 'check the rows read from the screenshot first',
     title: 'The zero equation',
     expectedCash: 'Expected cash',
     expectedWallet: 'Expected wallet',

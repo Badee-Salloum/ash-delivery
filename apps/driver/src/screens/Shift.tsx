@@ -924,6 +924,16 @@ function EndPackage({
                   />
                 </div>
               ) : null}
+              {/* THE EQUATION USED AS A CHECK ON THE READER. Of every fee the driver keeps 80%
+                  between cash and wallet, so a gap of 696 is a fee of 870 — one read wrongly, or
+                  one delivery never scanned. Naming the amount turns "your numbers are off" into
+                  something the driver can actually go and look for. */}
+              {preview.feeGapText !== null ? (
+                <p className="col-span-2 text-sm font-medium text-red-700">
+                  {t.br1.feeGap.replace('{n}', preview.feeGapText)}
+                  {preview.suspectLocalIds.length > 0 ? ` · ${t.br1.checkScanned}` : ''}
+                </p>
+              ) : null}
             </div>
           ) : null}
           {/* NAMED, not merely absent. Tapping the footer's dead button is how a driver concludes

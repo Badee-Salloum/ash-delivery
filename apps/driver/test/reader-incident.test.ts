@@ -194,6 +194,13 @@ describe('a card the screen sliced in half', () => {
     expect(truncatedCards([line('Abou Roummaneh', 1060), half], [{ y0: 1020, y1: 1040 }], tall)).toEqual([true])
   })
 
+  it('keeps its FEE and CLOCK — only the half-drawn places are withheld', () => {
+    // The price row is at the TOP of the card and is fully rendered; it reads correctly. Dropping
+    // the whole card to spare the driver a wrong address cost him a real delivery on every scan.
+    const lines = [line('Abou Roummaneh', 1210), line('Al Dajeniin; Ctraat innttc.|.', 1260)]
+    expect(truncatedCards(lines, [{ y0: 1174, y1: 1193 }], tall)).toEqual([true])
+  })
+
   it('leaves a whole card alone', () => {
     const lines = [line('مأكولات الشام شارع بغداد', 130), line('الحارة الجديدة', 160)]
     expect(truncatedCards(lines, [{ y0: 100, y1: 118 }], tall)).toEqual([false])

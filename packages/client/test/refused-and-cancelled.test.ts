@@ -3,6 +3,7 @@ import {
   type DraftOrder,
   allProblems,
   mergeScannedOrders,
+  previewBr1,
   submittableOrders,
   validateRow,
 } from '../src/order-entry.ts'
@@ -140,5 +141,82 @@ describe('what may go to the server', () => {
     expect(submittableOrders(rows)).toHaveLength(1)
     // No OCR baseline, so the wire calls it what it is: typed by a person.
     expect('feeOcrText' in rows[0]!).toBe(false)
+  })
+})
+
+/**
+ * BR1 AS A CHECK ON THE READER — the owner's insight, and the one the pipeline was missing.
+ *
+ * Every other stage of reading a screenshot is a guess nothing contradicts. The money is not: of a
+ * delivery's fee the driver keeps 80% between his cash and his wallet, so if a fee is misread the
+ * shift stops balancing by 80% of the error. Dividing back out names the amount to go and look for.
+ */
+describe('the equation catches a misread fee', () => {
+  const scanned = (localId: string, fee: string): DraftOrder => ({
+    localId,
+    providerOrderNo: `YAL-${localId}`,
+    payMode: 'cash',
+    feeText: fee,
+    feeOcrText: fee,
+    included: true,
+  })
+
+  it('THE «1105» INCIDENT: names the fee to look for, and blames the scanned rows', () => {
+    // Ten deliveries, one of which the reader turned from 235 into 1105 — the real failure.
+    const right = ['235', '210', '130', '135', '170', '260', '120', '235', '120', '135']
+    const wrong = right.map((f, i) => (i === 0 ? '1105' : f))
+    const orders = wrong.map((f, i) => scanned(`o${i}`, f))
+    // The driver hands over what he ACTUALLY has: float + 80% of the TRUE fees.
+    const trueFees = right.reduce((n, f) => n + Number(f), 0)
+    const cash = String(3000 + trueFees * 0.8)
+
+    const p = previewBr1({
+      floatText: '3000',
+      topupText: '0',
+      orders,
+      declaredCashText: cash,
+      declaredWalletText: '0',
+    })!
+    expect(p.balanced).toBe(false)
+    // 1105 − 235 = 870 too much fee. The equation is off by 80% of it; dividing back out says 870.
+    expect(p.feeGapText).toBe('870.00')
+    // And it points at the rows a machine read, not the ones a person typed.
+    expect(p.suspectLocalIds).toHaveLength(10)
+  })
+
+  it('says nothing when the shift balances — a correct read raises no alarm', () => {
+    const fees = ['235', '210', '130']
+    const orders = fees.map((f, i) => scanned(`o${i}`, f))
+    const cash = String(1000 + fees.reduce((n, f) => n + Number(f), 0) * 0.8)
+    const p = previewBr1({ floatText: '1000', topupText: '0', orders, declaredCashText: cash, declaredWalletText: '0' })!
+    expect(p.balanced).toBe(true)
+    expect(p.feeGapText).toBeNull()
+    expect(p.suspectLocalIds).toEqual([])
+  })
+
+  it('a MISSING order reads as a fee gap too — the same arithmetic finds both', () => {
+    // Three delivered, only two scanned: the shift is over by 80% of the missing fee.
+    const p = previewBr1({
+      floatText: '1000',
+      topupText: '0',
+      orders: [scanned('a', '200'), scanned('b', '300')],
+      declaredCashText: String(1000 + (200 + 300 + 150) * 0.8),
+      declaredWalletText: '0',
+    })!
+    expect(p.balanced).toBe(false)
+    expect(p.feeGapText).toBe('150.00')
+  })
+
+  it('does not blame the reader for a row the driver typed himself', () => {
+    const typed: DraftOrder = { localId: 'typed', providerOrderNo: 'YAL-typed', payMode: 'cash', feeText: '200', included: true }
+    const p = previewBr1({
+      floatText: '0',
+      topupText: '0',
+      orders: [typed],
+      declaredCashText: '999',
+      declaredWalletText: '0',
+    })!
+    expect(p.balanced).toBe(false)
+    expect(p.suspectLocalIds).toEqual([])
   })
 })

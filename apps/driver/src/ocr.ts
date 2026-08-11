@@ -1586,12 +1586,15 @@ export async function readOrders(image: Blob | Uint8Array, timeoutMs = ORDERS_TI
     // A card the screen sliced in half is withheld entirely — its places are a guess. Counted and
     // announced, never silently dropped: the driver adds that one by hand, and on a page that
     // overlaps the next one it usually arrives whole from there anyway.
+    // A card the screen sliced in half keeps its FEE and its CLOCK — those sit on the price row at
+    // the top of the card, fully drawn, and they read correctly. Only its PLACES are a guess, so
+    // only its places are withheld. Dropping the whole card cost the driver a delivery he then had
+    // to add by hand on every scan, to spare him a wrong address; this spares him both.
     const cutOff = glyphRows.filter((r) => r.cutOff).length
-    const whole = glyphRows.filter((r) => !r.cutOff)
-    const glyphOrders: OcrOrder[] = whole
+    const glyphOrders: OcrOrder[] = glyphRows
       .filter((r) => r.fee !== null || r.time !== '' || r.pointA !== null || r.pointB !== null)
-      .map(({ cutOff: _cutOff, ...row }) => row)
-    const priced = whole.filter((r) => r.fee !== null).length
+      .map(({ cutOff: isCut, ...row }) => (isCut ? { ...row, pointA: null, pointB: null } : row))
+    const priced = glyphRows.filter((r) => r.fee !== null).length
     const cancelledCards: OcrOrder[] = byGlyph.cancelled.map((c) => ({
       dateIso: c.dateIso,
       time: '',

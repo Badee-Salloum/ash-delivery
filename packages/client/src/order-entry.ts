@@ -354,6 +354,29 @@ export interface Br1Preview {
   /** Only shown once the driver has entered his declared figures. */
   differenceText: string | null
   balanced: boolean | null
+  /**
+   * THE DIFFERENCE, EXPRESSED AS A DELIVERY FEE — the equation used as a check on the READER.
+   *
+   * Every other stage of reading a screenshot is a guess with nobody to contradict it: is this
+   * pixel ink, where does one digit end, which digit is it. The money is the one thing that
+   * answers back. Of a delivery's fee the driver keeps 80% between his cash and his wallet, so
+   * whatever the shift is short or over by is 80% of a fee that is wrong or missing — and dividing
+   * back out names the amount to look for.
+   *
+   * A fare misread as «1105» instead of «235» would have shown up here as 870 before any manager
+   * approved it. That is worth more than any amount of tuning the classifier, because it does not
+   * depend on the classifier being right.
+   *
+   * Null until the driver has entered his cash and wallet, and when the shift balances.
+   */
+  feeGapText: string | null
+  /**
+   * The rows worth checking first: the ones a MACHINE read rather than a person typed.
+   *
+   * A hand-typed fee has a driver's memory behind it; an OCR-read fee has only a classifier's
+   * opinion. When the equation disagrees, those are the numbers to doubt.
+   */
+  suspectLocalIds: readonly string[]
 }
 
 /**
@@ -408,6 +431,13 @@ export function previewBr1(input: {
     walletAdjustments,
   })
 
+  // The shortfall, turned back into the fee that would explain it. The driver keeps 80% of a fee,
+  // so a gap of 696 is a fee of 870 — either one read wrongly or one order never scanned at all.
+  // Integer arithmetic throughout: × 100 ÷ 80, never a float, because this is money.
+  const gap = r.scalarDiff < 0n ? -r.scalarDiff : r.scalarDiff
+  const unbalanced = hasDeclared && !r.balanced && gap > 0n
+  const suspects = unbalanced ? valid.filter((o) => o.feeOcrText != null).map((o) => o.localId) : []
+
   return {
     expectedCashText: format(r.expectedCash),
     expectedWalletText: format(r.expectedWallet),
@@ -415,6 +445,8 @@ export function previewBr1(input: {
     blockText: format(r.totals.blockTotal),
     differenceText: hasDeclared ? format(r.scalarDiff) : null,
     balanced: hasDeclared ? r.balanced : null,
+    feeGapText: unbalanced ? format(minor((gap * 100n) / 80n)) : null,
+    suspectLocalIds: suspects,
   }
 }
 
