@@ -24,8 +24,16 @@
  * training on. Successes are what it already handles.
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { neon } from '@neondatabase/serverless'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+// Resolved through `packages/db`, exactly as `scripts/backup-db.mjs` does: the driver is that
+// package's dependency, not the repo root's, and plain `pg` cannot reach Neon from here anyway.
+const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+const req = createRequire(join(root, 'packages/db/package.json'))
+const mod = await import(pathToFileURL(req.resolve('@neondatabase/serverless')).href)
+const neon = mod.neon ?? mod.default?.neon
 
 const outDir = process.argv[2]
 if (!outDir) {
