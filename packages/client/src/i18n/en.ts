@@ -146,6 +146,8 @@ export const en: Catalog = {
     entry_not_balanced: 'The entry doesn’t balance (debits must equal credits)',
     /** The orders screen scrolls back into previous days — this row belongs to one of them. */
     order_belongs_to_other_shift: 'This order is already on an earlier shift — uncheck it',
+    orders_changed_since_review: 'The orders changed after you opened the review — reloaded; check them, then approve',
+    void_reason_required: 'Enter a reason for cancelling first',
   },
 
   notifications: {
@@ -674,6 +676,9 @@ orderNo: 'Order no.',
     voided: 'Shift cancelled',
     recomputed: 'Equation recalculated',
     confirmOpenTitle: 'Confirm the cash disbursed',
+    ordersHidden: 'and {n} more that agree — show them',
+    showFlaggedOnly: 'hide the ones that agree',
+    confirmCloseTitle: 'Approve this shift close?',
     confirmVoidTitle: 'Cancel this shift for good?',
     confirmVoidBody: 'The shift is cancelled and the bike released. This cannot be undone.',
     cannotApproveUnbalanced: 'Cannot approve while the equation is unbalanced — resolve the causes above or send it back.',

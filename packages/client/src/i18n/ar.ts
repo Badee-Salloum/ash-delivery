@@ -147,6 +147,9 @@ export const ar = {
     entry_not_balanced: 'القيد غير متوازن (المدين يساوي الدائن)',
     /** The orders screen scrolls back into previous days — this row belongs to one of them. */
     order_belongs_to_other_shift: 'هذا الطلب مسجَّل في نوبة سابقة — أزِل تحديده',
+    /** The staleness guard — the one thing the review screen exists to prevent. */
+    orders_changed_since_review: 'تغيّرت الطلبات بعد فتحك للمراجعة — أُعيد تحميلها، راجِعها ثم اعتمد',
+    void_reason_required: 'اكتب سبب الإلغاء أولاً',
   },
 
   notifications: {
@@ -675,6 +678,9 @@ orderNo: 'رقم الطلب',
     voided: 'أُلغيت النوبة',
     recomputed: 'أُعيد احتساب المعادلة',
     confirmOpenTitle: 'تأكيد صرف العهدة',
+    ordersHidden: 'و{n} طلبات أخرى مطابقة — اعرضها',
+    showFlaggedOnly: 'إخفاء المطابقة',
+    confirmCloseTitle: 'اعتماد إنهاء النوبة؟',
     confirmVoidTitle: 'إلغاء النوبة نهائياً؟',
     confirmVoidBody: 'ستُلغى النوبة وتُحرَّر الآلية، ولا يمكن التراجع.',
     cannotApproveUnbalanced: 'لا يمكن الاعتماد والمعادلة غير متوازنة — عالج الأسباب أعلاه أو أعِد النوبة للسائق.',

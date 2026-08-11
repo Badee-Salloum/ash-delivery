@@ -6,7 +6,7 @@ import { add, formatMinor, parseMinor, sub } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { useConfirm, useToast } from '../feedback.tsx'
-import { Badge, Button, Card, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
+import { FOCUS_RING, Badge, Button, Card, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
 
 /** Where the map opens when no point has been pinned yet. */
 const DAMASCUS: readonly [number, number] = [33.5138, 36.2765]
@@ -172,6 +172,25 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     )
   }
 
+  /**
+   * WHICH ORDERS DESERVE THE MANAGER'S EYE.
+   *
+   * A row earns attention by being something a person should look at: the machine read it, someone
+   * edited it away from what the machine read, it is excluded from the money, or it is a manual job
+   * priced by hand. Everything else is an ordinary delivery that agrees with itself.
+   *
+   * The rest are never hidden in the sense of being lost — they are counted and totalled, one tap
+   * away. See the button above the table.
+   */
+  const flagged = (o: Review['orders'][number]): boolean =>
+    o.source === 'ocr' || o.included === false || o.kind === 'manual' || (o.feeOcr != null && o.feeOcr !== o.fee)
+  const [showAllOrders, setShowAllOrders] = useState(false)
+  const shownOrders = showAllOrders ? review.orders : review.orders.filter(flagged)
+  const hiddenOrders = showAllOrders ? [] : review.orders.filter((o) => !flagged(o))
+  const hiddenTotal = formatMinor(
+    hiddenOrders.reduce((sum, o) => add(sum, parseMinor(o.fee || '0')), parseMinor('0')),
+  )
+
   const isClose = review.state === 'pending_review'
   /**
    * Is this shift actually AT a gate, waiting for a signature?
@@ -218,6 +237,17 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         title: t.approval.confirmOpenTitle,
         body: `${who.driver ?? ''} · ${t.shift.cashFloat}: ${floatText || '0'} · ${t.shift.walletTopup}: ${topupText || '0'}`,
         confirmLabel: t.common.approve,
+      })
+      if (!ok) return
+    } else {
+      // CLOSING IS THE HEAVIER CLICK, and it was the only one without a confirmation. Opening a
+      // shift disburses a float that can be recounted; approving a close POSTS THE LEDGER — it
+      // splits the day's fees, credits the driver's share and seals figures a week-lock will make
+      // immutable. Read back who and how much before it happens.
+      const ok = await confirm({
+        title: t.approval.confirmCloseTitle,
+        body: `${who.driver ?? ''} · ${t.br1.expected}: ${review.br1.difference === '0.00' ? t.br1.balanced : review.br1.difference}`,
+        confirmLabel: t.approval.approveClose,
       })
       if (!ok) return
     }
@@ -360,67 +390,44 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         /* STICKY. A real review means scrolling through two packages, the photos, the batteries
            and an unbounded orders list; unpinned, the equation is far off-screen by the time the
            manager reaches the approve bar, and he signs from memory. */
-        className={`sticky top-2 z-10 ${verdict.tone === 'green' ? 'ring-2 ring-emerald-300' : verdict.tone === 'amber' ? 'ring-2 ring-amber-400' : 'ring-2 ring-red-300'}`}
+        className={`sticky top-2 z-10 ring-2 ${verdict.tone === 'green' ? 'ring-emerald-300' : 'ring-red-300'}`}
       >
         {/* THE VERDICT, IN WORDS. It was a 2px ring and nothing else — invisible to a colour-blind
             manager and easy to misread at a glance on the screen that signs off real cash. */}
-        <p
-          className={`text-lg font-bold ${verdict.tone === 'green' ? 'text-emerald-700' : verdict.tone === 'amber' ? 'text-amber-800' : 'text-red-700'}`}
-        >
+        {/* Two states, not three. `br1Verdict` stopped returning `split_off` when pay mode was
+            retired, so the amber path was unreachable code pretending to be a warning. */}
+        <p className={`text-lg font-bold ${verdict.tone === 'green' ? 'text-emerald-700' : 'text-red-700'}`}>
           {verdict.label}
         </p>
-        {verdict.tone === 'amber' ? <p className="mt-1 text-sm text-amber-800">{t.br1.splitHint}</p> : null}
 
-        {/* Expected against DECLARED, per leg, with the difference beside it. The declared figures
-            used to live three cards below, so the manager had to hold two numbers in his head and
-            subtract them himself — on the screen whose entire job is that subtraction. */}
-        <div className="mt-3 overflow-x-auto">
-          <table className="w-full min-w-[28rem] text-sm">
-            <thead>
-              <tr className="text-xs text-slate-500">
-                <th className="p-1 text-start font-medium"> </th>
-                <th className="p-1 text-end font-medium">{t.br1.expected}</th>
-                <th className="p-1 text-end font-medium">{t.br1.declared}</th>
-                <th className="p-1 text-end font-medium">{t.common.difference}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {[
-                // ONE ROW, NOT TWO. The per-leg split needed a pay mode on every delivery to know
-                // what SHOULD be in cash versus the wallet, and BR3 was retired (decision 8). The
-                // expected figures are now computed as though everything were cash, so showing them
-                // per leg would paint an honest shift red. The total is what the equation actually
-                // knows, and both halves remain independently evidenced — the wallet by its
-                // photographed balance, the cash by the count at the branch.
-                {
-                  key: 'total',
-                  label: t.br1.expected,
-                  expected: formatMinor(add(parseMinor(review.br1.expectedCash), parseMinor(review.br1.expectedWallet))),
-                  declared: formatMinor(
-                    add(parseMinor(review.endPackage.cashDeclared || '0'), parseMinor(review.endPackage.walletDeclared || '0')),
-                  ),
-                  diff: review.br1.difference,
-                },
-              ].map((leg) => {
-                const off = parseMinor(leg.diff || '0') !== 0n
-                return (
-                  <tr key={leg.key} className="border-t border-slate-100">
-                    <td className="p-1 text-slate-600">{leg.label}</td>
-                    <td className="num p-1 text-end" dir="ltr">
-                      {leg.expected}
-                    </td>
-                    <td className="num p-1 text-end" dir="ltr">
-                      {leg.declared ?? '—'}
-                    </td>
-                    <td className={`num p-1 text-end font-semibold ${off ? 'text-red-700' : 'text-slate-500'}`} dir="ltr">
-                      {leg.diff}
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
+        {/* Expected against DECLARED, and the difference — as three lines, not a table.
+            It WAS a table: four columns and a `min-w-[28rem]`, i.e. 448px of horizontal scroll on a
+            card 280px wide, to render one row of three numbers. The manager had to drag the panel
+            carrying the verdict sideways to read it. Rows stack; a table of one row was never a
+            table. */}
+        <dl className="mt-3 flex flex-col gap-1 text-sm">
+          {[
+            {
+              key: 'expected',
+              label: t.br1.expected,
+              value: formatMinor(add(parseMinor(review.br1.expectedCash), parseMinor(review.br1.expectedWallet))),
+            },
+            {
+              key: 'declared',
+              label: t.br1.declared,
+              value: formatMinor(
+                add(parseMinor(review.endPackage.cashDeclared || '0'), parseMinor(review.endPackage.walletDeclared || '0')),
+              ),
+            },
+          ].map((line) => (
+            <div key={line.key} className="flex items-baseline justify-between gap-2">
+              <dt className="text-slate-600">{line.label}</dt>
+              <dd className="num font-semibold" dir="ltr">
+                {line.value}
+              </dd>
+            </div>
+          ))}
+        </dl>
 
         {/* The net difference, biggest thing on the screen — it is the number that decides. */}
         <div className="mt-3 flex items-baseline justify-between border-t border-slate-100 pt-3">
@@ -433,7 +440,12 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           </span>
         </div>
 
-        {!review.br1.balanced || !review.br1.splitBalanced ? (
+        {/* The causes explain the VERDICT, so they appear exactly when it is bad. This used to also
+            fire on `!splitBalanced` — which is routinely false on an honest shift now that pay mode
+            is no longer collected (decision 8), so a green «المعادلة متوازنة ✓» could sit directly
+            above a red-badged list of things supposedly wrong. Contradicting yourself on the screen
+            that signs off cash is worse than saying nothing. */}
+        {!review.br1.balanced ? (
           <div className="mt-3 flex flex-col gap-1">
             {review.br1.causes.map((c, i) => (
               <div key={i} className="flex items-center gap-2 text-sm">
@@ -535,8 +547,29 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       ) : null}
 
       <Card title={`${t.orders.title} — ${review.orders.length}`}>
+        {/* ONLY THE ROWS WORTH ATTENTION, by default.
+            Twelve orders was ~840px of table on a phone, nearly all of it rows with nothing to say.
+            A row earns a place here by being machine-read, edited away from what OCR said, excluded,
+            or a manual job the manager priced himself.
+
+            THE SAFEGUARD THAT MAKES THAT HONEST: the rest are COUNTED AND TOTALLED in the line
+            below, always, and one tap shows them. Hiding a row is a statement about the order of
+            attention, never about its existence — a manager who cannot see that eleven rows exist
+            is a manager approving something he was not shown. */}
+        {hiddenOrders.length > 0 ? (
+          <button
+            type="button"
+            onClick={() => setShowAllOrders((v) => !v)}
+            className={`mb-2 flex w-full items-baseline justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm ${FOCUS_RING}`}
+          >
+            <span className="text-slate-600">
+              {showAllOrders ? t.approval.showFlaggedOnly : t.approval.ordersHidden.replace('{n}', String(hiddenOrders.length))}
+            </span>
+            <Money value={hiddenTotal} className="font-semibold text-slate-700" />
+          </button>
+        ) : null}
         <Table head={['', '#', t.orders.route, t.orders.payMode, t.orders.fee]}>
-          {review.orders.map((o, i) => (
+          {shownOrders.map((o, i) => (
             <tr key={o.providerOrderNo} className={o.included === false ? 'opacity-60' : ''}>
               {/* Every operation shows, checked or not, and an excluded row keeps its PLACE —
                   hiding it or moving it to the bottom is how a manager stops noticing it. */}
@@ -702,7 +735,14 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       {atGate ? (
         /* A BACKDROP. Rows and photos used to scroll visibly through the gaps between the
            buttons, and on a narrow window the wrapped rows overlapped the content beneath. */
-        <div className="sticky bottom-0 -mx-4 border-t border-slate-200 bg-white/95 px-4 py-3 backdrop-blur">
+        <div
+          /* z-50 to match the toast stack: a toast from `reviseOps` is `fixed bottom-0 z-50` and was
+             landing squarely on top of the approve button. And the safe-area padding, because
+             `viewport-fit=cover` is now set — without it this bar sits under an Android gesture bar,
+             where the tap that should approve a shift dismisses the app instead. */
+          className="sticky bottom-0 z-50 -mx-4 border-t border-slate-200 bg-white/95 px-4 py-3 backdrop-blur"
+          style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
+        >
           {/* WHY the button is dead. A 40%-opacity ghost with no explanation is how a manager
               concludes the console is broken and goes looking for a way around the gate. */}
           {isClose && !review.br1.balanced ? (

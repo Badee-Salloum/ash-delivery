@@ -387,6 +387,11 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
             // is out of the money, so counting it here would tell the manager a shift is worth
             // more than the approval will post.
             orderCount: includedOrders(await deps.orders.listByShift(s.id)).length,
+            // WHICH SHIFT TO OPEN FIRST. The queue showed a driver, a vehicle and a count, so a
+            // manager could not tell a clean shift from a broken one without opening every single
+            // one — and approving from the list is deliberately not offered. The difference is
+            // already stored on the row by `evaluateShift`; serving it costs nothing.
+            equationDiff: s.equationDiff === null ? null : serializeMoney(s.equationDiff),
           })),
         ),
       }

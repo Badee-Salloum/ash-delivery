@@ -12,6 +12,8 @@ interface ShiftRow {
   /** All already on the wire from GET /shifts and, until now, all thrown away by this screen. */
   businessDate?: string
   orderCount?: number
+  /** BR1's scalar difference as last evaluated — null until the driver submits a closing package. */
+  equationDiff?: string | null
   floatTotal?: string
 }
 interface DriverLite {
@@ -137,6 +139,16 @@ export function Queue({ onOpen }: { onOpen(shiftId: string): void }): ReactNode 
           </span>
           {/* How much work is on it — the difference between a two-order shift and a thirty-order
               one, which is the whole of "which of these should I open first". */}
+          {/* BALANCED OR NOT, before he opens it. Approving from the list is deliberately not
+              offered — opening the shift is the speed bump on the tap that moves cash — so the
+              list's whole job is telling him which one to open first. A zero here means the
+              arithmetic already agrees and the review is a confirmation; anything else is where
+              his time should go. */}
+          {s.state === 'pending_review' && s.equationDiff != null ? (
+            <Badge tone={s.equationDiff === '0.00' ? 'green' : 'red'}>
+              {s.equationDiff === '0.00' ? t.br1.balanced : `${t.common.difference} ${s.equationDiff}`}
+            </Badge>
+          ) : null}
           {s.state === 'pending_review' && s.orderCount !== undefined ? (
             <span className="num text-sm text-slate-600">
               {t.orders.title}: {s.orderCount}
