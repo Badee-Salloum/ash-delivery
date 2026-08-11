@@ -288,6 +288,9 @@ export const ar = {
     fixOrderRows: 'صفوف فيها خطأ',
     odometerShot: 'صورة العداد',
     /** Shown ONLY when the photo predates its upload — the common case stays silent. */
+    /** Checked against the number this shift OPENED on — asked, never enforced. */
+    odoBackwards: 'العداد أقل من قراءة البداية ({start}) — هل الرقم صحيح؟',
+    odoJump: 'مسافة {km} كم في نوبة واحدة — هل الرقم صحيح؟',
     photoOld: 'صورة أقدم من الرفع بـ {n}',
     photoAgeUnknown: 'تاريخ الالتقاط غير معروف',
     uploadFailed: 'فشل الرفع — أعد المحاولة',
@@ -527,6 +530,9 @@ orderNo: 'رقم الطلب',
     emptySlot: 'فارغ',
     /** For a phone that cannot run the BMS app at all — the exception, never the easy path. */
     appWontRun: 'تطبيق البطارية لا يعمل على جهازي',
+    /** Asked, never enforced — a pack really can be flat if a charger tripped overnight. */
+    lowAtStart: 'الشحنة منخفضة جداً لبداية نوبة — هل الرقم صحيح؟',
+    yesCorrect: 'نعم صحيح',
     /** The manager's own to-do on the approval screen — not something to check, something to DO. */
     managerMustRead: 'جهاز السائق لا يشغّل التطبيق — اقرأ هذه البطارية بنفسك قبل الاعتماد',
     readByManager: 'قرأها مدير الفرع (جهاز السائق لا يشغّل التطبيق)',

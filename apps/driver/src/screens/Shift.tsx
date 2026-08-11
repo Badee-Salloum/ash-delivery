@@ -12,6 +12,7 @@ import { MAX_PAGE_SLOTS, PAYMENTS_LOG_SLOT, type PayMode, pageSlot } from '@ash/
 import type { DraftMovement, DraftOrder } from '@ash/client'
 import {
   allProblems,
+  checkOdometer,
   compressImage,
   driverPhaseFor,
   plural,
@@ -52,6 +53,13 @@ interface ShiftState {
   topupText: string
   /** The shift's own day — what a scanned row's date is compared against. */
   businessDate: string
+  /**
+   * The odometer the shift OPENED on, so the close can be checked against it.
+   *
+   * A closing reading below the opening one means the bike drove backwards; a jump of hundreds of
+   * kilometres means a digit read twice. Neither is knowable from the closing figure alone.
+   */
+  odoStart: number | null
 }
 
 /** What the payments-log reader made of «سجل المدفوعات», said out loud rather than left silent. */
@@ -226,6 +234,7 @@ export function ShiftFlow({
           floatText: st.startPackage.floatTotal,
           topupText: st.startPackage.topupTotal,
           businessDate: st.businessDate,
+          odoStart: st.startPackage.odometerKm,
         })
         // The operations already stored come back INTO the draft, checkboxes and all. They are
         // editable now: the submit upserts, so correcting a sent row is a correction rather than
@@ -333,7 +342,7 @@ export function ShiftFlow({
         onDiscarded={onDiscarded}
         awaiting={phase === 'awaiting'}
         onOpened={(id) => {
-          setShift({ id, floatText: '0', topupText: '0', businessDate: '' })
+          setShift({ id, floatText: '0', topupText: '0', businessDate: '', odoStart: null })
           setPhase('awaiting')
         }}
         onApproved={(funds) => {
@@ -737,6 +746,8 @@ function EndPackage({
   )
   const [br1, setBr1] = useState<{ difference: string; balanced: boolean } | null>(null)
   const [busy, setBusy] = useState(false)
+  /** He looked at the odd odometer and stood by it. Confirming IS the answer, not a step to refusing. */
+  const [odoConfirmed, setOdoConfirmed] = useState(false)
 
   const [batteriesReady, setBatteriesReady] = useState(batteries.length === 0)
   // The zeroed-wallet photo was dropped (product owner) — the wallet screenshot is the evidence.
@@ -1097,6 +1108,25 @@ function EndPackage({
         <Field label={t.shift.odometer}>
           <TextInput inputMode="numeric" value={odo} onChange={(e) => patch({ odo: e.target.value })} />
         </Field>
+        {/* Checked against the number this very shift opened on, which is the only thing that makes
+            «6900» after «6948» visibly wrong. Asked, never refused: a bike really can be carried on
+            a truck, and refusing would teach him to type whatever gets past it. */}
+        {(() => {
+          const question = checkOdometer(shift.odoStart, odo.trim() === '' ? null : Number(odo))
+          if (!question || odoConfirmed) return null
+          return (
+            <div className="flex flex-col gap-2 rounded-xl bg-amber-50 p-3">
+              <p className="text-sm font-medium text-amber-900">
+                {question.kind === 'odometer_went_backwards'
+                  ? t.shift.odoBackwards.replace('{start}', String(question.start))
+                  : t.shift.odoJump.replace('{km}', String(question.km))}
+              </p>
+              <Button variant="ghost" onClick={() => setOdoConfirmed(true)}>
+                {t.battery.yesCorrect}
+              </Button>
+            </div>
+          )
+        })()}
       </Card>
       {/* The close gate asks for the same per-pack evidence the open gate did. */}
       <BatteryPanel

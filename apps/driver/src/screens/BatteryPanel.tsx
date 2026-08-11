@@ -1,5 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
-import { type BatteryReadingInput, plural } from '@ash/client'
+import { type BatteryReadingInput, checkStartBattery, plural } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { Button, Card, Field, TextInput } from '../ui.tsx'
 import { PhotoSlot } from './PhotoSlot.tsx'
