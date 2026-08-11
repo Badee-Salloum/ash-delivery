@@ -98,8 +98,26 @@ export const addOrderRequest = z.object({
   zone: z.string().max(64).nullable().default(null),
   // SRS D-1/D-3: whether the fee came from the «Recent orders» OCR, and what it read. `feeOcr` is
   // money, so it crosses as a decimal string via `moneySchema` — never a JSON number.
-  source: z.enum(['manual', 'ocr']).default('manual'),
+  /**
+   * `refused` is its own answer, and losing it was throwing away the best training signal there is.
+   *
+   * A row the reader SAW and declined to price used to arrive as `manual` with a null baseline —
+   * indistinguishable from a fee somebody typed from memory. Those two are opposites: a refusal is a
+   * hard glyph, at real phone scale, with a human's correct answer about to be attached to it. That
+   * is the example a classifier learns most from, and it was being discarded at the wire.
+   */
+  source: z.enum(['manual', 'ocr', 'refused']).default('manual'),
   feeOcr: moneySchema.nullable().default(null),
+  /**
+   * The fee's own pixels as a PNG data URL — TRAINING DATA, deliberately not evidence.
+   *
+   * The evidence screenshot is compressed to ~300 KB / 1280 px / quality 0.4 before upload, which at
+   * twelve by sixteen pixels a glyph destroys the strokes a model would learn from. This is cut
+   * losslessly from what the reader was handed, and holds the amount and nothing else — no address,
+   * no name, no map pin — so it carries none of the privacy weight the screenshot does.
+   * Bounded at 64 KB; a real strip is about 2 KB.
+   */
+  feeStrip: z.string().max(65536).nullable().default(null),
   /** `yallago` (their delivery) or `manual` (a job the branch took itself). */
   kind: z.enum(['yallago', 'manual']).default('yallago'),
   /**
@@ -163,8 +181,9 @@ export const operationsRequest = z.object({
         payMode: payModeSchema,
         fee: moneySchema,
         zone: z.string().max(64).nullable().default(null),
-        source: z.enum(['manual', 'ocr']).default('manual'),
+        source: z.enum(['manual', 'ocr', 'refused']).default('manual'),
         feeOcr: moneySchema.nullable().default(null),
+        feeStrip: z.string().max(65536).nullable().default(null),
         included: z.boolean().default(true),
         walletAmount: moneySchema.nullable().default(null),
         occurredMinute: minuteSchema.nullable().default(null),

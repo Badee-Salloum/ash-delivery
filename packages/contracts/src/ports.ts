@@ -509,6 +509,18 @@ export interface AssignmentRepo {
 export interface OrderRepo {
   create(order: ShiftOrderRecord): Promise<void>
   /**
+   * Keep the fee's own pixels beside what the reader made of them — a training sample.
+   *
+   * The classifier has ~500 glyphs behind it, transcribed by one person, and adding 25 more
+   * screenshots by hand measurably made it WORSE. What it has never had is volume from the phones
+   * in use, and that arrives free with every shift: the driver corrects, the manager approves, and
+   * that figure is ground truth verified by two people.
+   *
+   * Best-effort by contract. A sample is research material, and failing to keep one must never cost
+   * a driver his order — callers swallow the error.
+   */
+  recordOcrSample(shiftOrderId: string, source: 'ocr' | 'refused', stripPng: Uint8Array): Promise<void>
+  /**
    * Update the mutable fields of an order that is already stored — the checkbox, the measured
    * wallet amount, the fee, the pay mode, the minute.
    *

@@ -297,6 +297,15 @@ export class MemoryAssignmentRepo implements AssignmentRepo {
 
 export class MemoryOrderRepo implements OrderRepo {
   readonly rows = new Map<string, ShiftOrderRecord>()
+  /** Samples kept only so a test can assert one was written; nothing reads them back in memory. */
+  readonly ocrSamples: Array<{ shiftOrderId: string; source: 'ocr' | 'refused'; bytes: number }> = []
+
+  async recordOcrSample(shiftOrderId: string, source: 'ocr' | 'refused', stripPng: Uint8Array): Promise<void> {
+    // Mirrors the table's UNIQUE (shift_order_id): a re-submitted close must not stack duplicates.
+    if (this.ocrSamples.some((x) => x.shiftOrderId === shiftOrderId)) return
+    this.ocrSamples.push({ shiftOrderId, source, bytes: stripPng.length })
+  }
+
   async create(order: ShiftOrderRecord): Promise<void> {
     // The database has a GLOBAL unique index on provider_order_no; mirror it here so a test
     // cannot pass against a laxer rule than production enforces.

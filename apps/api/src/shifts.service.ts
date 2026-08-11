@@ -829,8 +829,10 @@ export async function addOrder(
     payMode: ShiftOrder['payMode']
     fee: Minor
     zone: string | null
-    source?: 'manual' | 'ocr'
+    source?: 'manual' | 'ocr' | 'refused'
     feeOcr?: Minor | null
+  /** The fee's own pixels, kept as a training sample. Never money; never required. */
+  feeStrip?: string | null
     included?: boolean
     walletAmount?: Minor | null
     occurredMinute?: string | null
@@ -869,7 +871,7 @@ export async function addOrder(
     zone: input.zone,
     driverConfirmed: true,
     // SRS D-1/D-3: 'ocr' when the driver pulled the fee off «Recent orders»; feeOcr is what it read.
-    source: input.source ?? 'manual',
+    source: storedSource(input.source),
     feeOcr: input.feeOcr ?? null,
     // What the driver records is always a Yallago delivery — he scans his own «Recent orders» list.
     // A MANUAL job is the branch's, and only a manager may enter one (`addManualOrder`); allowing it
@@ -895,6 +897,7 @@ export async function addOrder(
     }
     throw err
   }
+  await keepOcrSample(deps, order.id, input)
   return order
 }
 
@@ -1155,8 +1158,10 @@ export interface OperationsInput {
     payMode: ShiftOrder['payMode']
     fee: Minor
     zone?: string | null
-    source?: 'manual' | 'ocr'
+    source?: 'manual' | 'ocr' | 'refused'
     feeOcr?: Minor | null
+  /** The fee's own pixels, kept as a training sample. Never money; never required. */
+  feeStrip?: string | null
     included?: boolean
     walletAmount?: Minor | null
     occurredMinute?: string | null
@@ -1187,6 +1192,46 @@ export interface OperationsInput {
  * `included` there is no longer any need to delete an order to undo it — which is exactly why no
  * order DELETE should ever be added. An order is money; it is unchecked, not erased.
  */
+/**
+ * What `source` a stored order gets. `refused` is not one of them, deliberately.
+ *
+ * On the money row the honest value is `manual`: a PERSON typed that fee, whatever the reader did
+ * beforehand. Widening a CHECK constraint on a money table to carry a research distinction would be
+ * the wrong trade. The fact that the reader saw the row and declined is kept where it is actually
+ * useful — on the training sample, whose own `source` column allows exactly `ocr` and `refused`.
+ */
+const storedSource = (s: 'manual' | 'ocr' | 'refused' | undefined): 'manual' | 'ocr' =>
+  s === 'ocr' ? 'ocr' : 'manual'
+
+/**
+ * Keep the fee's own pixels beside what the reader made of them — one training sample per order.
+ *
+ * BEST EFFORT, ALWAYS. This is research material: a hundred bikes produce about a megabyte a month
+ * of it, and none of it is worth failing a driver's close over. Every error is swallowed.
+ *
+ * Only rows with a screenshot behind them are samples. A fee typed with no scan is not one — there
+ * are no pixels to learn from — which is exactly why `source` carries `refused` as its own value:
+ * a row the reader SAW and declined is the most valuable example there is, being a hard glyph at
+ * real phone scale with a human's correction about to be attached to it.
+ */
+async function keepOcrSample(
+  deps: Deps,
+  orderId: string,
+  row: { source?: string | undefined; feeStrip?: string | null | undefined },
+): Promise<void> {
+  const source = row.source === 'ocr' ? 'ocr' : row.source === 'refused' ? 'refused' : null
+  if (source === null || !row.feeStrip) return
+  const base64 = row.feeStrip.replace(/^data:image\/png;base64,/, '')
+  if (base64 === row.feeStrip) return // not the data URL we produce; ignore rather than store junk
+  try {
+    const bytes = Buffer.from(base64, 'base64')
+    if (bytes.length === 0 || bytes.length > 65536) return
+    await deps.orders.recordOcrSample(orderId, source, bytes)
+  } catch {
+    // A lost sample costs a future model one example. A thrown error would cost a driver his shift.
+  }
+}
+
 export async function submitOperations(
   deps: Deps,
   actor: Actor,
@@ -1216,7 +1261,7 @@ export async function submitOperations(
         payMode: row.payMode,
         fee: row.fee,
         zone: row.zone ?? current.zone,
-        source: row.source ?? current.source,
+        source: row.source === undefined ? current.source : storedSource(row.source),
         feeOcr: row.feeOcr ?? current.feeOcr,
         included: row.included ?? current.included,
         walletAmount: row.walletAmount ?? null,
@@ -1247,15 +1292,16 @@ export async function submitOperations(
         businessDate: owner?.businessDate ?? null,
       })
     }
+    const orderId = deps.ids.uuid()
     await deps.orders.create({
-      id: deps.ids.uuid(),
+      id: orderId,
       shiftId,
       providerOrderNo: row.providerOrderNo,
       payMode: row.payMode,
       fee: row.fee,
       zone: row.zone ?? null,
       driverConfirmed: true,
-      source: row.source ?? 'manual',
+      source: storedSource(row.source),
       feeOcr: row.feeOcr ?? null,
       // A driver's own list is always Yallago's work. A manual job is the branch's and only a
       // manager may price one — letting it in here would let a driver write his own share.
@@ -1275,6 +1321,7 @@ export async function submitOperations(
       occurredMinute: row.occurredMinute ?? null,
       occurredDate: row.occurredDate ?? null,
     })
+    await keepOcrSample(deps, orderId, row)
   }
 
   // Resolve each movement's order AFTER the orders exist, so a page submitted in one go can link

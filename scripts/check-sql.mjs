@@ -58,6 +58,8 @@ const AUDIT_EXEMPT = {
   cash_count_lines: 'sealed with a sha256 proof on the parent cash_count',
   driver_day_shares: 'a derived projection of audited journal entries',
   fx_rate_versions: 'append-only supersession history',
+  ocr_fee_samples:
+    'research material, not money: insert-once pixels beside what OCR made of them, deletable on a retention policy; the approved fee it is compared against lives on the audited shift_orders row',
   gps_pings: 'high-volume append-only telemetry (SRS K); auditing every ping would dwarf the audit log',
   battery_swaps: 'append-only event log; its substance — the pack fitment change on batteries and the swap_out/swap_in readings — is already audited, and the route appends an explicit audit row',
   audit_log: 'the audit log itself',

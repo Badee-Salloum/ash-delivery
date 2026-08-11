@@ -358,6 +358,67 @@ export async function prepareWithPixels(
  * is a small, simple picture, and the layout analyser is far more willing to find lines in it than
  * in a dense two-language page — which is exactly the failure being repaired.
  */
+/**
+ * The fee's own strip of pixels, kept as a PNG so a real shift can teach the reader.
+ *
+ * The classifier has ~500 hand-transcribed glyphs behind it, and a day spent transcribing 25 more
+ * screenshots measurably made it WORSE — averaged prototypes dilute. What it has never had is
+ * volume from real phones. That flows through the system every day and is thrown away: the driver
+ * scans, the reader proposes, the driver corrects, the manager approves. That approved figure is
+ * ground truth, verified by two people, and it arrives free.
+ *
+ * THE STRIP, NOT THE SCREENSHOT, and the difference is the whole design:
+ *   • The stored evidence image is NOT what the reader saw — `compressImage` re-encodes it to
+ *     ~300 KB, 1280 px, JPEG quality as low as 0.4. At 12×16 pixels per glyph that destroys exactly
+ *     the strokes a model would learn. This is cut from the ORIGINAL pixels, losslessly.
+ *   • «٢٣٥ SYP» contains no customer address, no name, no map pin. The place lines do, which is why
+ *     the strip stops at the amount box and never widens to the card.
+ *   • It stays a strip rather than individual glyphs so the cut points can be revisited. Freezing
+ *     the segmentation into the training data would bake in the very decisions that produced
+ *     «1105».
+ *
+ * ~2 KB a row, so a hundred bikes cost a megabyte a month.
+ */
+async function stripBlob(
+  pixels: Uint8ClampedArray,
+  width: number,
+  height: number,
+  box: Box,
+): Promise<Blob | null> {
+  if (typeof OffscreenCanvas !== 'function') return null
+  const x0 = Math.max(0, Math.floor(box.x0))
+  const y0 = Math.max(0, Math.floor(box.y0))
+  const w = Math.min(Math.ceil(box.x1), width) - x0
+  const h = Math.min(Math.ceil(box.y1), height) - y0
+  if (w <= 0 || h <= 0) return null
+  try {
+    const whole = new OffscreenCanvas(width, height)
+    const wctx = whole.getContext('2d')
+    if (!wctx) return null
+    wctx.putImageData(new ImageData(Uint8ClampedArray.from(pixels), width, height), 0, 0)
+    const cut = new OffscreenCanvas(w, h)
+    const ctx = cut.getContext('2d')
+    if (!ctx) return null
+    ctx.drawImage(whole, x0, y0, w, h, 0, 0, w, h)
+    return await cut.convertToBlob({ type: 'image/png' })
+  } catch {
+    return null
+  }
+}
+
+/** A PNG as a data URL, or null. Small by construction — see `stripBlob`. */
+async function asDataUrl(blob: Blob | null): Promise<string | null> {
+  if (!blob) return null
+  try {
+    const bytes = new Uint8Array(await blob.arrayBuffer())
+    let binary = ''
+    for (const b of bytes) binary += String.fromCharCode(b)
+    return `data:image/png;base64,${btoa(binary)}`
+  } catch {
+    return null
+  }
+}
+
 async function bandBlob(
   pixels: Uint8ClampedArray,
   width: number,
@@ -664,6 +725,13 @@ export interface OcrOrder {
    */
   pointA?: string | null
   pointB?: string | null
+  /**
+   * The fee's own pixels as a small PNG data URL — training data, not evidence.
+   *
+   * Kept so a real shift can teach the reader what a day of hand-transcription could not. Contains
+   * the amount and nothing else: no address, no name, no map pin.
+   */
+  feeStrip?: string | null
   /**
    * A «تم إلغاؤه» card: cancelled on the screen, so it has no price and no clock — only its route.
    *
@@ -1370,16 +1438,16 @@ function feeOnLine(line: string): string | null {
 async function readAmountsByGlyph(
   image: Blob | Uint8Array,
   timeoutMs: number,
-): Promise<{ amounts: (string | null)[]; clocks: { time: string; dateIso: string | null }[]; routes: { pointA: string | null; pointB: string | null; pointBIsPin?: boolean }[]; truncated: boolean[]; cancelled: { dateIso: string | null; pointA: string | null; pointB: string | null }[]; rows: number; text: string }> {
+): Promise<{ amounts: (string | null)[]; clocks: { time: string; dateIso: string | null }[]; routes: { pointA: string | null; pointB: string | null; pointBIsPin?: boolean }[]; truncated: boolean[]; strips: (string | null)[]; cancelled: { dateIso: string | null; pointA: string | null; pointB: string | null }[]; rows: number; text: string }> {
   const prepared = await prepareWithPixels(toBlob(image), false, false)
-  if (!prepared) return { amounts: [], clocks: [], routes: [], truncated: [], cancelled: [], rows: 0, text: '' }
+  if (!prepared) return { amounts: [], clocks: [], routes: [], truncated: [], strips: [], cancelled: [], rows: 0, text: '' }
 
   const result = await recognize(prepared.blob, { whitelist: '', psm: 6 }, timeoutMs)
   // The word must BE «SYP», not merely contain it. `/SYP/` matched Tesseract's junk words too, and
   // on an Arabic page it emits plenty: a three-row screen reported twenty-one rows, so the driver
   // was told twenty of them went unread when only two had.
   const anchors = anchorsIn(result.lines)
-  if (anchors.length === 0) return { amounts: [], clocks: [], routes: [], truncated: [], cancelled: [], rows: 0, text: result.text }
+  if (anchors.length === 0) return { amounts: [], clocks: [], routes: [], truncated: [], strips: [], cancelled: [], rows: 0, text: result.text }
 
   /*
    * ── BRING THE PIXELS TO THE SCALE THE TEMPLATES KNOW ──────────────────────────────────────
@@ -1497,8 +1565,16 @@ async function readAmountsByGlyph(
   }
 
   const amounts = anchors.map((a) => readGlyphRow(mask, amountBoxFor(scaleBox(a), canon.height), templates))
+  // The fee's own pixels, kept for training — see `stripBlob`. Cut from `prepared`, the image the
+  // reader was actually handed, NOT from the canon rescale and not from the compressed evidence copy.
+  const strips = await Promise.all(
+    anchors.map(async (a) =>
+      asDataUrl(await stripBlob(prepared.pixels, prepared.width, prepared.height, amountBoxFor(a, prepared.height))),
+    ),
+  )
   return {
     amounts,
+    strips,
     // A clock that carried its own date (the log's «MM/DD») keeps it; the orders screen prints no
     // date per row, so the day comes from the header the row sits under.
     clocks: clocks.map((c, i) => ({ time: c.time, dateIso: c.dateIso ?? dateFor(anchors[i]!) })),
@@ -1564,6 +1640,7 @@ export async function readOrders(image: Blob | Uint8Array, timeoutMs = ORDERS_TI
       const route = byGlyph.routes[i]
       return {
         cutOff: byGlyph.truncated[i] === true,
+        feeStrip: byGlyph.strips[i] ?? null,
         dateIso: clock?.dateIso ?? null,
         time: clock?.time ?? '',
         // A fee the classifier refused, or one whose SHAPE is not a fee, becomes null — not a

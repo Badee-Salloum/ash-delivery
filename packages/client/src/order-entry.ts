@@ -36,6 +36,14 @@ export interface DraftOrder {
    */
   cancelled?: boolean
   /**
+   * The fee's own strip of pixels as a PNG data URL, kept so a real shift can teach the reader.
+   *
+   * Training data, not evidence: it holds the amount and nothing else. The evidence screenshot is
+   * compressed to ~300 KB / 1280 px / quality 0.4 before upload, which at 12x16 pixels a glyph
+   * destroys exactly the strokes a model would learn from — this is cut from the original.
+   */
+  feeStrip?: string | null
+  /**
    * The screen showed COORDINATES for the dropoff instead of a place — the customer dropped a pin.
    *
    * Kept as a flag rather than as text because the coordinates are Arabic-Indic digits Tesseract
@@ -232,6 +240,8 @@ export interface ScannedOrderRow {
   pointB?: string | null
   /** The dropoff was a dropped PIN, not a place name — its coordinates are not readable text. */
   pointBIsPin?: boolean
+  /** The fee's own pixels, for training the reader. The amount only — no address, no name. */
+  feeStrip?: string | null
   /** A “تم إلغاؤه” card: no fee on screen, and normally no money either. */
   cancelled?: boolean
 }
@@ -385,6 +395,7 @@ export function mergeScannedOrders(
       pointA: row.pointA ?? null,
       pointB: row.pointB ?? null,
       ...(row.pointBIsPin === true ? { pointBIsPin: true } : {}),
+      ...(row.feeStrip ? { feeStrip: row.feeStrip } : {}),
     })
   }
   return added

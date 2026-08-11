@@ -448,8 +448,11 @@ async function submitOrders(
         fee: o.feeText,
         zone: null,
         // SRS D-1/D-3: mark rows scanned off «Recent orders», keeping what OCR read as the baseline.
-        source: o.feeOcrText != null ? 'ocr' : 'manual',
+        // `refused` is its own answer — the reader saw this row and declined to price it, which is
+        // not the same as a driver typing a fee from memory.
+        source: o.feeOcrText != null ? 'ocr' : o.feeRefused === true ? 'refused' : 'manual',
         feeOcr: o.feeOcrText ?? null,
+        feeStrip: o.feeStrip ?? null,
       })
       sent.push(no)
     } catch {
@@ -834,8 +837,13 @@ function EndPackage({
             fee: o.feeText,
             zone: null,
             // SRS D-1/D-3: mark rows scanned off «الطلبات الحديثة», keeping what OCR read.
-            source: o.feeOcrText != null ? 'ocr' : 'manual',
+            // Three answers, not two. A row the reader SAW and refused is not a row somebody typed
+            // from memory — it is a hard glyph with a human's correction attached, which is the most
+            // valuable thing this system can teach the reader. Flattening it to 'manual' threw that
+            // away at the wire.
+            source: o.feeOcrText != null ? 'ocr' : o.feeRefused === true ? 'refused' : 'manual',
             feeOcr: o.feeOcrText ?? null,
+            feeStrip: o.feeStrip ?? null,
             included: o.included !== false,
             walletAmount: o.walletAmountText ? o.walletAmountText : null,
             occurredMinute: o.timeText ? o.timeText : null,

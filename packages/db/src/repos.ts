@@ -274,6 +274,21 @@ export class PgOrderRepo implements OrderRepo {
   constructor(pool: Pool) {
     this.pool = pool
   }
+  /**
+   * Keep the fee's own pixels beside what the reader made of them. See `ocr_fee_samples` (0019).
+   *
+   * `ON CONFLICT DO NOTHING` because a close is re-submittable and the same strip must not stack.
+   * The approved fee is deliberately NOT copied here — it is joined from `shift_orders.fee_minor`
+   * at export time, so this table can never drift out of agreement with the money.
+   */
+  async recordOcrSample(shiftOrderId: string, source: 'ocr' | 'refused', stripPng: Uint8Array): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO ocr_fee_samples (shift_order_id, source, strip_png)
+       VALUES ($1, $2, $3) ON CONFLICT (shift_order_id) DO NOTHING`,
+      [shiftOrderId, source, Buffer.from(stripPng)],
+    )
+  }
+
   async create(order: ShiftOrderRecord): Promise<void> {
     try {
       // The order and its route go in together: a manual job whose points failed to write would be
