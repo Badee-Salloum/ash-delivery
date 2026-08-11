@@ -459,6 +459,9 @@ export class ApiClient {
     vehicleId?: string | null
     slotNo?: number | null
     bmsProfile?: string | null
+    /** The marking on the pack. The server has accepted it since `createBatteryRequest` gained it;
+     *  only this type omitted it, so a pack had to be created and then edited to carry its number. */
+    groundNo?: string | null
   }) {
     return this.post<Battery>('/batteries', { ...body, ...(this.branchId ? { branchId: this.branchId } : {}) })
   }
@@ -536,6 +539,19 @@ export class ApiClient {
   }
 
   /** A day's shifts for the branch, every state — including the ones stuck before `open`. */
+  /**
+   * Every shift currently occupying a driver and a bike, ACROSS DATES.
+   *
+   * Not `shiftsOfDay`: a shift opened at 23:40 and still running belongs to yesterday's business
+   * date, so a date-filtered read reports its bike as free and the screen offers it to a second
+   * driver. Any screen asking "who has this right now" wants this one.
+   */
+  liveShifts() {
+    return this.get<{
+      businessDate: string
+      shifts: Array<{ id: string; driverId: string; vehicleId: string; shiftNo: number; state: string }>
+    }>('/shifts?live=1')
+  }
   shiftsOfDay(date?: string) {
     return this.get<{
       businessDate: string

@@ -515,12 +515,15 @@ export class PgDirectoryRepo implements DirectoryRepo {
   }
 
   async updateVehicle(vehicle: VehicleRecord): Promise<void> {
-    await this.pool.query('UPDATE vehicles SET state = $2, active = $3, ground_no = $4 WHERE id = $1', [
-      vehicle.id,
-      vehicle.state,
-      vehicle.active,
-      vehicle.groundNo,
-    ])
+    // `code` is here because it was NOT, and nothing noticed. `restateBranchVehicleCodes` recomputes
+    // every bike's number when a branch moves governorate or changes its number and calls this — and
+    // the column was never in the statement, so Postgres kept the stale number while the in-memory
+    // adapter (a whole-record replace) updated it. The suite therefore passed on a write that did
+    // not happen. The conformance suite now asserts it against both adapters.
+    await this.pool.query(
+      'UPDATE vehicles SET code = $2, state = $3, active = $4, ground_no = $5 WHERE id = $1',
+      [vehicle.id, vehicle.code, vehicle.state, vehicle.active, vehicle.groundNo],
+    )
   }
 
   // -- Geography and the vehicle-numbering scheme -----------------------------------------

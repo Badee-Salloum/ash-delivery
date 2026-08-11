@@ -586,11 +586,22 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
       if (!canTransitionVehicle(before.state, body.state)) {
         throw new ServiceError(422, 'illegal_vehicle_transition', { from: before.state, to: body.state })
       }
-      // Taking a vehicle out of service mid-shift strands the shift riding on it.
-      if (body.state !== 'ready') {
-        const live = await deps.shifts.listLiveForVehicle(id)
-        if (live.length > 0) throw new ServiceError(409, 'vehicle_has_live_shift', { shiftId: live[0]!.id })
-      }
+    }
+
+    /*
+     * Taking a bike out of service strands the shift riding on it — and there are TWO ways to do it.
+     *
+     * This check used to live inside the `state` branch above, so it only ever ran for a state
+     * change. `{ active: false }` took the same bike out of every list the drivers and the gates
+     * read, mid-shift, without passing a single guard. Both are "this bike is no longer available",
+     * so both answer to the same rule.
+     */
+    const goingOutOfService =
+      (body.state !== undefined && body.state !== before.state && body.state !== 'ready') ||
+      (body.active === false && before.active)
+    if (goingOutOfService) {
+      const live = await deps.shifts.listLiveForVehicle(id)
+      if (live.length > 0) throw new ServiceError(409, 'vehicle_has_live_shift', { shiftId: live[0]!.id })
     }
 
     const after: VehicleRecord = {

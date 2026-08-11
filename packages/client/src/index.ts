@@ -4,6 +4,7 @@ export * from './order-match.ts'
 export * from './slot-label.ts'
 export * from './compress.ts'
 export * from './ocr-delta.ts'
+export * from './fleet.ts'
 
 /** Pluralization travels with the catalogues, but app code imports it from the root. */
 export { plural, pluralCategory, type PluralForms } from './i18n/index.ts'

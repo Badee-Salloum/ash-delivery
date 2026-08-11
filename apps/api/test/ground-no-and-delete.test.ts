@@ -146,6 +146,35 @@ describe('deleting a vehicle or a pack', () => {
     expect(refused.json().error).toBe('battery_has_history')
   })
 
+  /**
+   * Taking a bike out of service strands the shift riding on it — and there are two ways to do it.
+   *
+   * The guard lived INSIDE the `state` branch, so it only ran for a state change. `{active: false}`
+   * removed the same bike from every list the drivers and the gates read, mid-shift, without passing
+   * a single check. Both mean "this bike is no longer available", so both answer to the same rule.
+   */
+  it('refuses to deactivate a bike that is out on a shift, not just to change its state', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shift = (await post(driver, '/shifts', { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 })).json()
+      .id as string
+    await h.uploadPhoto(driver, shift, 'start', 'odometer')
+    await put(driver, `/shifts/${shift}/start-package`, { odometerKm: 100, batteryPercent: 90 })
+    await post(manager, `/shifts/${shift}/approve-open`, { floatTranches: [sypStr(100_000)], topupTranches: [] })
+
+    const deactivated = await patch(manager, `/vehicles/${VEHICLE_ID}`, { active: false })
+    expect(deactivated.statusCode).toBe(409)
+    expect(deactivated.json().error).toBe('vehicle_has_live_shift')
+
+    // The older path still holds too.
+    expect((await patch(manager, `/vehicles/${VEHICLE_ID}`, { state: 'maintenance' })).statusCode).toBe(409)
+
+    // And nothing was written: the bike is still active and still ready.
+    const still = (await get(manager, '/vehicles')).json().vehicles.find((v: { id: string }) => v.id === VEHICLE_ID)
+    expect(still.active).toBe(true)
+    expect(still.state).toBe('ready')
+  })
+
   it('is not a driver’s to do', async () => {
     const manager = await h.loginAs('manager')
     const id = (await post(manager, '/vehicles', { vehicleTypeId: await aVehicleType(manager) })).json().id as string
