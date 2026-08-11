@@ -159,7 +159,7 @@ export function DriverApp(): ReactNode {
       <div>
         {bar}
         <ShiftFlow
-          assignment={{ driverId: session.driverId, vehicleId: bike?.id ?? '', shiftNo: 1 }}
+          assignment={{ driverId: session.driverId, vehicleId: bike?.id ?? '' }}
           batteries={bike?.batteries ?? []}
           spares={assignment.spareBatteries ?? []}
           resume={{ id: assignment.liveShiftId, state: assignment.liveShiftState ?? 'draft' }}
@@ -240,7 +240,7 @@ export function DriverApp(): ReactNode {
     <div>
       {bar}
       <ShiftFlow
-        assignment={{ driverId: session.driverId, vehicleId, shiftNo: 1 }}
+        assignment={{ driverId: session.driverId, vehicleId }}
         batteries={assignment?.vehicles.find((v) => v.id === vehicleId)?.batteries ?? []}
         spares={assignment?.spareBatteries ?? []}
         onDiscarded={() => setVehicleId(null)}

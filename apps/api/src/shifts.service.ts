@@ -13,7 +13,7 @@ import type {
   VehicleEventKind,
   VehicleEventRecord,
 } from '@ash/contracts'
-import { serializeMoney } from '@ash/contracts'
+import { MAX_SHIFTS_PER_DAY, serializeMoney } from '@ash/contracts'
 import {
   type Actor,
   type Br1Cause,
@@ -285,7 +285,8 @@ function fail(result: TransitionResult): never {
 export async function createShift(
   deps: Deps,
   actor: Actor,
-  input: { driverId: string; vehicleId: string; shiftNo: number },
+  // No `shiftNo`: the wire still carries one for older bundles, and this function never reads it.
+  input: { driverId: string; vehicleId: string },
 ): Promise<ShiftRecord> {
   const driver = await deps.directory.driver(input.driverId)
   const vehicle = await deps.directory.vehicle(input.vehicleId)
@@ -322,6 +323,21 @@ export async function createShift(
 
   const businessDate = today
 
+  /*
+   * THE SHIFT NUMBER IS THE SERVER'S TO GIVE, never the client's to choose.
+   *
+   * `shifts_no_uq` is UNIQUE (driver_id, business_date, shift_no) and the driver's app hard-coded
+   * `shiftNo: 1`. Every gate above passes for a driver whose first shift of the day is `cancelled`
+   * or `approved` — `canOpenShift` only asks about LIVE shifts — and then the INSERT hit the
+   * constraint and became a bare 500 on the one screen a driver cannot get past. Measured in
+   * production 2026-08-12. `input.shiftNo` is still accepted on the wire so older bundles and the
+   * test suite keep working, and it is deliberately ignored: a client cannot know what is taken.
+   */
+  const shiftNo = await deps.shifts.nextShiftNo(driver.id, businessDate)
+  if (shiftNo > MAX_SHIFTS_PER_DAY) {
+    throw new ServiceError(409, 'too_many_shifts_today', { max: MAX_SHIFTS_PER_DAY })
+  }
+
   // SRS B-3: the manager binds the bike to the driver in advance. Two rules, both enforced here
   // rather than only in the UI:
   //   • if this driver HAS an assignment for the slot, he may only start that bike;
@@ -329,7 +345,7 @@ export async function createShift(
   // Where no assignment exists at all the old free choice stands, so a branch that has not
   // started assigning is not locked out of its own shifts.
   const dayAssignments = await deps.assignments.listByDate(driver.branchId, businessDate)
-  const slot = dayAssignments.filter((a) => a.shiftNo === input.shiftNo)
+  const slot = dayAssignments.filter((a) => a.shiftNo === shiftNo)
   const mine = slot.find((a) => a.driverId === driver.id)
   if (mine && mine.vehicleId !== vehicle.id) {
     throw new ServiceError(409, 'vehicle_not_assigned', { assignedVehicleId: mine.vehicleId })
@@ -342,7 +358,7 @@ export async function createShift(
     branchId: driver.branchId,
     driverId: driver.id,
     vehicleId: vehicle.id,
-    shiftNo: input.shiftNo,
+    shiftNo,
     businessDate,
     weekStartDate: weekStartFor(businessDate),
     state: 'draft',
@@ -366,7 +382,16 @@ export async function createShift(
     ordersHash: null,
     approvedBy: null,
   }
-  await deps.shifts.create(shift)
+  try {
+    await deps.shifts.create(shift)
+  } catch (err) {
+    // Two starts racing on the same driver: `nextShiftNo` handed both the same number. A 409 tells
+    // the app to try again; the 500 it used to be told the driver nothing at all.
+    if ((err as { code?: string }).code === 'DUPLICATE_SHIFT_NO') {
+      throw new ServiceError(409, 'shift_no_taken')
+    }
+    throw err
+  }
   return shift
 }
 

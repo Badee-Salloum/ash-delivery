@@ -84,21 +84,36 @@ export class PgShiftRepo implements ShiftRepo {
   private async persist(shift: ShiftRecord, insert: boolean): Promise<void> {
     await withTransaction(this.pool, { actorId: shift.approvedBy }, async (client) => {
       if (insert) {
-        await client.query(
-          `INSERT INTO shifts (id, branch_id, driver_id, vehicle_id, shift_no, business_date,
-                               week_start_date, state)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8::shift_state)`,
-          [
-            shift.id,
-            shift.branchId,
-            shift.driverId,
-            shift.vehicleId,
-            shift.shiftNo,
-            shift.businessDate,
-            shift.weekStartDate,
-            shift.state,
-          ],
-        )
+        try {
+          await client.query(
+            `INSERT INTO shifts (id, branch_id, driver_id, vehicle_id, shift_no, business_date,
+                                 week_start_date, state)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8::shift_state)`,
+            [
+              shift.id,
+              shift.branchId,
+              shift.driverId,
+              shift.vehicleId,
+              shift.shiftNo,
+              shift.businessDate,
+              shift.weekStartDate,
+              shift.state,
+            ],
+          )
+        } catch (err) {
+          /*
+           * `shifts_no_uq` is UNIQUE (driver_id, business_date, shift_no). `nextShiftNo` is meant
+           * to make this unreachable, but two starts racing on the same driver can still collide —
+           * and when it happened the raw DatabaseError reached the error handler's last branch and
+           * a driver read «internal_error» on the one screen he cannot get past. A typed code lets
+           * the route answer 409 with a sentence in Arabic. Same shape `PgAssignmentRepo.create`
+           * throws, so the caller handles one case rather than two.
+           */
+          if (isPgError(err, PG.UNIQUE_VIOLATION)) {
+            throw Object.assign(new Error('shift number already taken'), { code: 'DUPLICATE_SHIFT_NO' })
+          }
+          throw err
+        }
       }
 
       await client.query(
@@ -205,6 +220,15 @@ export class PgShiftRepo implements ShiftRepo {
       "s.driver_id = $1 AND s.business_date = $2 AND s.state IN ('approved','week_locked')",
       [driverId, businessDate],
     )
+  }
+
+  /** Counts EVERY state: a cancelled shift keeps its number, because the unique index does. */
+  async nextShiftNo(driverId: string, businessDate: CalendarDate): Promise<number> {
+    const { rows } = await this.pool.query<{ next: string }>(
+      'SELECT COALESCE(MAX(shift_no), 0) + 1 AS next FROM shifts WHERE driver_id = $1 AND business_date = $2',
+      [driverId, businessDate],
+    )
+    return Number(rows[0]!.next)
   }
 
   private async load(where: string, params: unknown[]): Promise<ShiftRecord[]> {

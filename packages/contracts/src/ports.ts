@@ -525,6 +525,21 @@ export interface ShiftRepo {
    */
   listByBranchAndDateRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftRecord[]>
   listApprovedForDriverOnDate(driverId: string, businessDate: CalendarDate): Promise<ShiftRecord[]>
+  /**
+   * The next free shift number for this driver on this business date.
+   *
+   * THE CLIENT MUST NEVER PICK THIS. `shifts_no_uq` is `UNIQUE (driver_id, business_date,
+   * shift_no)`, and the driver's app hard-coded `1` — so the moment a driver's first shift of the
+   * day reached any state `canOpenShift` does not consider live (`cancelled`, `closed`,
+   * `approved`), his second shift of the day collided with a row he could not see and the
+   * duplicate-key error surfaced as a bare 500. Measured in production on 2026-08-12: five
+   * identical failures, one blocked driver, and an owner whose own book records four to six
+   * shifts a day.
+   *
+   * It counts EVERY state, not the live ones. A cancelled shift keeps its number — that is what
+   * the unique constraint means, and reusing it would collide all over again.
+   */
+  nextShiftNo(driverId: string, businessDate: CalendarDate): Promise<number>
 }
 
 /**

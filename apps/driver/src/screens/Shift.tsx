@@ -167,7 +167,8 @@ export function ShiftFlow({
   resume,
   onDiscarded,
 }: {
-  assignment: { driverId: string; vehicleId: string; shiftNo: number }
+  /** No `shiftNo`: the SERVER numbers the shift. A client cannot know which numbers are taken. */
+  assignment: { driverId: string; vehicleId: string }
   /** The packs fitted to this bike, from `/me/assignment` — the same list the BR5 gate counts. */
   batteries: readonly FittedBattery[]
   /** Ready spares on the branch shelf, for a mid-shift swap (SRS §L seam). */
@@ -519,7 +520,8 @@ function StartPackage({
   onOpened,
   onApproved,
 }: {
-  assignment: { driverId: string; vehicleId: string; shiftNo: number }
+  /** No `shiftNo`: the SERVER numbers the shift. A client cannot know which numbers are taken. */
+  assignment: { driverId: string; vehicleId: string }
   batteries: readonly FittedBattery[]
   /** A draft that already exists. Present ⇒ attach to it; absent ⇒ create one. */
   existingShiftId?: string | null

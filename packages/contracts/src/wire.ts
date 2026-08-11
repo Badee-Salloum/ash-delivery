@@ -31,6 +31,16 @@ import { MAX_BATTERY_SLOTS, type Minor, formatMinor, parseMinor } from '@ash/dom
  */
 export const MAX_OCR_SAMPLE_CHARS = 262_144
 
+/**
+ * How many shifts one driver may have on one business date.
+ *
+ * This is a runaway guard, not a business rule. It used to be 4, enforced on a number the CLIENT
+ * supplied — which is where the real bug lived. Now the server derives the number and cancelled
+ * shifts keep theirs, so a driver who starts and cancels a few times climbs faster than he works:
+ * at 4 he would have been locked out of his own day by his own mistakes.
+ */
+export const MAX_SHIFTS_PER_DAY = 12
+
 const MINOR_MAX = 9_223_372_036_854_775_807n
 const MINOR_MIN = -9_223_372_036_854_775_808n
 
@@ -89,7 +99,13 @@ export const loginResponse = z.object({
 export const createShiftRequest = z.object({
   driverId: uuidSchema,
   vehicleId: uuidSchema,
-  shiftNo: z.number().int().min(1).max(4),
+  /**
+   * ACCEPTED AND IGNORED. The server derives the shift number — see `ShiftRepo.nextShiftNo`.
+   *
+   * It stays on the wire so a driver running a cached bundle that still sends `1` is not rejected
+   * by the very deploy that fixes his problem.
+   */
+  shiftNo: z.number().int().min(1).max(MAX_SHIFTS_PER_DAY).optional(),
 })
 
 export const startPackageRequest = z.object({

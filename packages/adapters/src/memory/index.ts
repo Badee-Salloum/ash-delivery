@@ -200,6 +200,15 @@ export class MemoryShiftRepo implements ShiftRepo {
   }
 
   async create(shift: ShiftRecord): Promise<void> {
+    /*
+     * Postgres has `shifts_no_uq` UNIQUE (driver_id, business_date, shift_no); without the same
+     * rule here the fake would accept a shift the real database refuses, and the collision that
+     * blocked a driver in production would still be untestable without Docker.
+     */
+    const taken = [...this.rows.values()].some(
+      (s) => s.driverId === shift.driverId && s.businessDate === shift.businessDate && s.shiftNo === shift.shiftNo,
+    )
+    if (taken) throw Object.assign(new Error('shift number already taken'), { code: 'DUPLICATE_SHIFT_NO' })
     this.rows.set(shift.id, structuredClone(shift))
   }
   async findById(id: string): Promise<ShiftRecord | null> {
@@ -235,6 +244,13 @@ export class MemoryShiftRepo implements ShiftRepo {
     return [...this.rows.values()].filter(
       (s) => s.driverId === driverId && s.businessDate === businessDate && (s.state === 'approved' || s.state === 'week_locked'),
     )
+  }
+  /** Counts EVERY state, matching the Postgres unique index the number has to dodge. */
+  async nextShiftNo(driverId: string, businessDate: CalendarDate): Promise<number> {
+    const used = [...this.rows.values()]
+      .filter((s) => s.driverId === driverId && s.businessDate === businessDate)
+      .map((s) => s.shiftNo)
+    return used.length === 0 ? 1 : Math.max(...used) + 1
   }
   async delete(id: string): Promise<void> {
     this.rows.delete(id)
