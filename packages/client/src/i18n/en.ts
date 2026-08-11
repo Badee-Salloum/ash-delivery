@@ -281,6 +281,8 @@ export const en: Catalog = {
     stillMissing: 'Still needed:',
     fixOrderRows: 'rows with an error',
     odometerShot: 'Odometer photo',
+    photoOld: 'Taken {n} before upload',
+    photoAgeUnknown: 'Capture time unknown',
     uploadFailed: 'Upload failed — tap to retry',
     resumeFailed: 'Could not load the shift — check your connection and try again',
     finishShift: 'Finish shift',

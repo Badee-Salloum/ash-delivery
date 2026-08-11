@@ -287,6 +287,9 @@ export const ar = {
     stillMissing: 'ناقص:',
     fixOrderRows: 'صفوف فيها خطأ',
     odometerShot: 'صورة العداد',
+    /** Shown ONLY when the photo predates its upload — the common case stays silent. */
+    photoOld: 'صورة أقدم من الرفع بـ {n}',
+    photoAgeUnknown: 'تاريخ الالتقاط غير معروف',
     uploadFailed: 'فشل الرفع — أعد المحاولة',
     resumeFailed: 'تعذّر تحميل حالة النوبة — تحقّق من الاتصال وأعد المحاولة',
     finishShift: 'إنهاء النوبة',

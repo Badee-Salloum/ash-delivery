@@ -130,3 +130,38 @@ export function fleetSummary(
     spares: spareBatteries(batteries).length,
   }
 }
+
+/**
+ * How old the picture was when it reached us — the control that replaced the forced camera.
+ *
+ * Every evidence slot can now be filled from the gallery, so «this photo was taken just now» stopped
+ * being a guarantee of the capture flow and became a question about the file. The phone's clock is a
+ * CLAIM and the server's receipt is authoritative, so this reports the gap between them rather than
+ * trusting either alone.
+ *
+ * `fresh` means the picture was taken within minutes of arriving — the old `capture` behaviour.
+ * `stale` means it was already old when it was uploaded, which is not misconduct on its own (a
+ * driver may photograph the odometer before his phone finds signal) but is exactly the thing a
+ * manager should see before he signs for the cash behind it.
+ * `unknown` means the picker gave no usable timestamp; silence is reported as silence, never as fresh.
+ */
+export type PhotoAge =
+  | { kind: 'fresh'; minutes: number }
+  | { kind: 'stale'; minutes: number }
+  | { kind: 'unknown' }
+
+/** Beyond this, the photo predates its own upload by enough that a manager should look. */
+export const PHOTO_STALE_MINUTES = 30
+
+export function photoAge(clientTakenAt: string | null, receivedAt: string | null): PhotoAge {
+  if (clientTakenAt === null || receivedAt === null) return { kind: 'unknown' }
+  const taken = Date.parse(clientTakenAt)
+  const received = Date.parse(receivedAt)
+  if (Number.isNaN(taken) || Number.isNaN(received)) return { kind: 'unknown' }
+
+  const minutes = Math.round((received - taken) / 60_000)
+  // A phone clock running AHEAD of the server produces a negative gap. That is a clock problem, not
+  // an old photo, and reporting it as «taken -3 minutes ago» would be nonsense — so it reads fresh.
+  if (minutes <= 0) return { kind: 'fresh', minutes: 0 }
+  return minutes >= PHOTO_STALE_MINUTES ? { kind: 'stale', minutes } : { kind: 'fresh', minutes }
+}

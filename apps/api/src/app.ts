@@ -885,7 +885,29 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           source: m.source,
           notes: m.notes,
         })),
-        media: slots.map((s) => ({ package: s.package, slot: s.slot, mediaId: s.mediaId })),
+        /**
+         * Each photo with WHEN IT WAS TAKEN, not just when it arrived.
+         *
+         * `MediaRecord` has carried both timestamps from the start, and its own comment says the gap
+         * "is surfaced to the branch manager — that difference is what makes a photo evidence rather
+         * than just a picture". It never was: the review sent only the id. That mattered less while
+         * `capture="environment"` forced a live shot; now that every slot can be filled from the
+         * gallery, the age of the image IS the control that replaced it.
+         */
+        media: await Promise.all(
+          slots.map(async (s) => {
+            const record = await deps.media.findById(s.mediaId)
+            return {
+              package: s.package,
+              slot: s.slot,
+              mediaId: s.mediaId,
+              // The phone's clock is a CLAIM; `receivedAt` is authoritative. Both cross, and the
+              // screen shows the difference rather than picking a winner.
+              clientTakenAt: record?.clientTakenAtMs == null ? null : new Date(record.clientTakenAtMs).toISOString(),
+              receivedAt: record ? new Date(record.receivedAtMs).toISOString() : null,
+            }
+          }),
+        ),
         batterySwaps,
       },
     }

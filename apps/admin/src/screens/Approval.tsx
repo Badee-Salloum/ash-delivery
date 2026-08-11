@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import L, { type CircleMarker, type LeafletMouseEvent, type Map as LeafletMap } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { type OcrScalar, br1Verdict, ocrReadingDelta, slotLabel, splitSlot, formatDateTime } from '@ash/client'
+import { type OcrScalar, type PhotoAge, br1Verdict, photoAge, ocrReadingDelta, slotLabel, splitSlot, formatDateTime } from '@ash/client'
 import { add, formatMinor, parseMinor, sub } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
@@ -88,7 +88,15 @@ interface Review {
     outPercent: number | null
     inPercent: number | null
   }>
-  media: Array<{ package: 'start' | 'end'; slot: string; mediaId: string }>
+  media: Array<{
+    package: 'start' | 'end'
+    slot: string
+    mediaId: string
+    /** The phone's clock — a CLAIM. Null when the picker gave no usable timestamp. */
+    clientTakenAt?: string | null
+    /** The server's receipt — authoritative. */
+    receivedAt?: string | null
+  }>
   decisions: Array<{ gate: 'open' | 'close'; decision: 'approved' | 'rejected' | 'rephoto_requested'; notes: string | null; decidedAt: string }>
   br1: {
     expectedCash: string
@@ -1215,6 +1223,22 @@ function Field({ label, value, tone }: { label: string; value: string; tone?: 'g
  * from the same-origin, RBAC-checked `/api/media/:id`; a tap opens it full-screen so the manager
  * can actually read the odometer / dashboard / wallet against the numbers beside it.
  */
+/** Says something only when there is something to say. */
+function PhotoAgeLine({ age }: { age: PhotoAge }): ReactNode {
+  const { t } = useApp()
+  if (age.kind === 'fresh') return null
+  return (
+    <span className={`text-[10px] ${age.kind === 'stale' ? 'text-amber-700' : 'text-slate-400'}`}>
+      {age.kind === 'stale' ? t.shift.photoOld.replace('{n}', String(minutesLabel(age.minutes))) : t.shift.photoAgeUnknown}
+    </span>
+  )
+}
+
+/** Minutes up to an hour, then whole hours — «قبل ١٨٠ دقيقة» is not how anyone reads a clock. */
+function minutesLabel(minutes: number): string {
+  return minutes < 60 ? `${minutes}m` : `${Math.round(minutes / 60)}h`
+}
+
 function PhotoRow({ pkg, media }: { pkg: 'start' | 'end'; media: Review['media'] }): ReactNode {
   const { t, lang } = useApp()
   const [zoom, setZoom] = useState<string | null>(null)
@@ -1255,6 +1279,12 @@ function PhotoRow({ pkg, media }: { pkg: 'start' | 'end'; media: Review['media']
               className="size-24 rounded bg-slate-100 object-contain"
             />
             <span className="text-[10px] text-slate-600">{label(m.slot)}</span>
+            {/* HOW OLD THE PICTURE WAS WHEN IT ARRIVED.
+                Every slot can now be filled from the gallery, so «taken just now» stopped being a
+                guarantee of the capture flow. A fresh photo says nothing — the common case stays
+                quiet; an old one says so, because that is the thing worth seeing before signing for
+                the cash behind it. It is a prompt to look, never an accusation. */}
+            <PhotoAgeLine age={photoAge(m.clientTakenAt ?? null, m.receivedAt ?? null)} />
           </button>
         ))}
       </div>

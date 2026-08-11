@@ -229,8 +229,26 @@ describe('serving evidence', () => {
 
     const review = await h.app.inject({ method: 'GET', url: `/shifts/${id}/review`, headers: { cookie: h.cookie(manager) } })
     expect(review.statusCode, review.body).toBe(200)
-    const media = review.json().media as Array<{ package: string; slot: string; mediaId: string }>
-    expect(media).toContainEqual({ package: 'start', slot: 'odometer', mediaId: uploaded.mediaId })
+    const media = review.json().media as Array<{
+      package: string
+      slot: string
+      mediaId: string
+      clientTakenAt: string | null
+      receivedAt: string | null
+    }>
+    const shot = media.find((m) => m.package === 'start' && m.slot === 'odometer')
+    expect(shot?.mediaId).toBe(uploaded.mediaId)
+
+    /*
+     * WHEN IT WAS TAKEN, not only that it exists.
+     *
+     * `MediaRecord` has carried both timestamps since the beginning and the review sent neither, so
+     * the manager had no way to tell a photo taken at the counter from one chosen out of the gallery.
+     * That mattered little while the camera was forced; every slot can now be filled from the
+     * gallery, so the age of the image is the control that replaced `capture`.
+     */
+    expect(shot?.receivedAt).toBeTruthy()
+    expect('clientTakenAt' in (shot ?? {})).toBe(true)
   })
 
   it('refuses a manager from another branch — evidence is never on a public path', async () => {

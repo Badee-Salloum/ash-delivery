@@ -7,6 +7,7 @@ import {
   occupancyOf,
   packsOn,
   spareBatteries,
+  photoAge,
 } from '../src/fleet.ts'
 
 /**
@@ -139,5 +140,35 @@ describe('the fleet summary', () => {
     const live = [shift({ vehicleId: 'v-1' }), shift({ id: 'sh-2', vehicleId: 'v-2', state: 'pending_review' })]
 
     expect(fleetSummary(vehicles, batteries, live)).toEqual({ total: 3, busy: 2, packs: 3, spares: 1 })
+  })
+})
+
+describe('how old the picture was', () => {
+  const iso = (ms: number): string => new Date(ms).toISOString()
+  const T = Date.UTC(2026, 7, 11, 12, 0, 0)
+
+  it('reads fresh when it was taken moments before it arrived — the old camera behaviour', () => {
+    expect(photoAge(iso(T), iso(T + 20_000))).toEqual({ kind: 'fresh', minutes: 0 })
+    expect(photoAge(iso(T), iso(T + 5 * 60_000))).toEqual({ kind: 'fresh', minutes: 5 })
+  })
+
+  it('reads stale once the photo predates its upload by half an hour', () => {
+    expect(photoAge(iso(T), iso(T + 30 * 60_000))).toEqual({ kind: 'stale', minutes: 30 })
+    expect(photoAge(iso(T), iso(T + 3 * 60 * 60_000))).toEqual({ kind: 'stale', minutes: 180 })
+  })
+
+  /**
+   * The picker gave no usable timestamp — `lastModified` is 0 on some Android pickers. Silence is
+   * reported as silence: calling it fresh would be inventing the very guarantee that was lost when
+   * the camera stopped being forced.
+   */
+  it('says unknown rather than fresh when there is no timestamp', () => {
+    expect(photoAge(null, iso(T))).toEqual({ kind: 'unknown' })
+    expect(photoAge(iso(T), null)).toEqual({ kind: 'unknown' })
+    expect(photoAge('not-a-date', iso(T))).toEqual({ kind: 'unknown' })
+  })
+
+  it('treats a phone clock running ahead as fresh, not as a negative age', () => {
+    expect(photoAge(iso(T + 4 * 60_000), iso(T))).toEqual({ kind: 'fresh', minutes: 0 })
   })
 })
