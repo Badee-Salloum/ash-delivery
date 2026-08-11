@@ -661,6 +661,27 @@ describe('the Yallago wallet balance (SRS D-2)', () => {
     expect(parseWallet('SYP')).toBeNull()
     expect(parseWallet('المحفظة')).toBeNull()
   })
+
+  /**
+   * The production incident: the parser keeps every digit anywhere in the text and glues them
+   * together, so a crop holding the whole wallet card — balance, dates, reference numbers — read as
+   * one thirty-five digit figure. Nothing bounded it, so it crossed the wire and killed the close
+   * with `out of range for type bigint`, on a shift whose equation was exactly zero.
+   */
+  it('refuses a balance longer than money can be, instead of inventing one', () => {
+    expect(parseWallet('82296150060611100000226021100101000 SYP')).toBeNull()
+    // The same digits with a decimal tail are refused on the integer part, not the fraction.
+    expect(parseWallet('822961500606111000002260211001010,00 SYP')).toBeNull()
+    // A card's worth of digits, which is how it actually arrived.
+    expect(parseWallet('المحفظة ٧٦٥٠٩ ٢٠٢٦/٠٨/٠٩ ١٧:٣٣ #٩٩٤٤٢٢١١٠٠٣٣٥٥٦٦٧٧٨٨٩٩ SYP')).toBeNull()
+  })
+
+  it('still reads a genuinely large balance that fits', () => {
+    // 17 integer digits is the most a bigint minor column holds; this must not be collateral damage.
+    expect(parseWallet('99999999999999999 SYP')).toBe('99999999999999999')
+    // Leading zeros are padding, not magnitude.
+    expect(parseWallet('000000000000000000001234 SYP')).toBe('000000000000000000001234')
+  })
 })
 
 /**

@@ -626,9 +626,32 @@ export function parseWallet(text: string): string | null {
   if (frac) {
     const intPart = cleaned.slice(0, frac.index).replace(/[^0-9]/g, '')
     if (intPart === '') return null
-    return `${intPart}.${frac[1]}`
+    return plausible(`${intPart}.${frac[1]}`, intPart)
   }
-  return cleaned.replace(/[^0-9]/g, '')
+  const digits = cleaned.replace(/[^0-9]/g, '')
+  return plausible(digits, digits)
+}
+
+/**
+ * A balance longer than money can be is not a balance — refuse it.
+ *
+ * This function keeps every digit it finds ANYWHERE in the OCR text and glues them together, which
+ * is right when the crop holds one number and catastrophic when it holds a card: in production it
+ * returned a thirty-five digit figure, and because nothing downstream bounded the magnitude it rode
+ * through the wire schema and killed the close with a Postgres `out of range for type bigint`.
+ *
+ * The bound is not a guess about Syrian wallet balances — inventing one of those would eventually
+ * reject somebody's real money. It is the largest number the system can store at all, so anything
+ * failing it could never have been recorded whatever we decided to do with it.
+ *
+ * Refusing is the established answer for a reading this file will not vouch for: the driver's field
+ * stays empty and he types what he sees, exactly as when the read fails outright. Inventing a
+ * truncated number from the same digits would be worse than reading nothing.
+ */
+const MONEY_INT_DIGITS_MAX = 17 // 9,223,372,036,854,775,807 minor = 92,233,720,368,547,758.07
+
+function plausible(amountText: string, intPart: string): string | null {
+  return intPart.replace(/^0+/, '').length > MONEY_INT_DIGITS_MAX ? null : amountText
 }
 
 /**

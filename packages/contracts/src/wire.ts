@@ -10,10 +10,24 @@ import { MAX_BATTERY_SLOTS, type Minor, formatMinor, parseMinor } from '@ash/dom
  * exactly once, here. `scripts/check-wire-money.mjs` greps for `z.number()` on money-shaped field
  * names so this cannot quietly regress.
  */
+/**
+ * What a money column can actually hold: PostgreSQL `bigint`, which every `*_minor` column is.
+ *
+ * The regex alone bounds the SHAPE and not the MAGNITUDE, so `"82296150060611100000226021100101000"`
+ * — thirty-five digits, which is what the wallet reader produced from one screenshot — satisfied it,
+ * became a perfectly good BigInt, and died at the database as `22003 out of range for type bigint`.
+ * That surfaced as an unhandled 500 and the driver got «تعذّر تنفيذ العملية» on a shift whose
+ * equation was exactly zero. A number this system cannot store is a bad request, not a server fault,
+ * and it has to be refused at the edge where it can still be named.
+ */
+const MINOR_MAX = 9_223_372_036_854_775_807n
+const MINOR_MIN = -9_223_372_036_854_775_808n
+
 export const moneySchema = z
   .string()
   .regex(/^-?\d+(\.\d{1,2})?$/, 'money must be a decimal string with at most 2 places')
   .transform((s): Minor => parseMinor(s))
+  .refine((m) => m >= MINOR_MIN && m <= MINOR_MAX, 'money is larger than this system can store')
 
 export const serializeMoney = (m: Minor): string => formatMinor(m)
 
@@ -270,9 +284,23 @@ export const endPackageRequest = z.object({
   batteryPercent: z.number().int().min(0).max(100).nullable(),
   cashDeclared: moneySchema,
   walletDeclared: moneySchema,
-  // SRS D-3 baseline: what `readWallet` OCR'd off the close wallet screenshot before the driver
-  // confirmed. Money, so it crosses as a decimal string via `moneySchema` — never a JSON number.
-  walletDeclaredOcr: moneySchema.nullable().default(null),
+  /**
+   * SRS D-3 baseline: what `readWallet` OCR'd off the close wallet screenshot before the driver
+   * confirmed. Money, so it crosses as a decimal string via `moneySchema` — never a JSON number.
+   *
+   * `.catch(null)` — and ONLY here. This field is EVIDENCE, not money: nothing in BR1 reads it, no
+   * ledger line derives from it, and its whole job is to show the manager «the reader said X, the
+   * driver confirmed Y». An unusable reading is therefore no reading, which the rest of this system
+   * already spells `null`. The alternative is what happened in production: a misread baseline
+   * refused the request and a shift balancing to exactly 0.00 could not be handed over, because a
+   * cosmetic field disagreed. The driver PWA is cached and updates late, so an old build must still
+   * be able to close a correct shift.
+   *
+   * Every OTHER money field stays strict. `cashDeclared`, `walletDeclared`, fees, floats and top-ups
+   * are what the equation is made of — silently turning one of those into null would be inventing a
+   * number, which is the one thing this system must never do.
+   */
+  walletDeclaredOcr: moneySchema.nullable().catch(null).default(null),
 })
 
 /**

@@ -196,8 +196,30 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
    */
   const flagged = (o: Review['orders'][number]): boolean =>
     o.source === 'ocr' || o.included === false || o.kind === 'manual' || (o.feeOcr != null && o.feeOcr !== o.fee)
-  const shownOrders = showAllOrders ? review.orders : review.orders.filter(flagged)
-  const hiddenOrders = showAllOrders ? [] : review.orders.filter((o) => !flagged(o))
+
+  /**
+   * The day in the order it happened.
+   *
+   * The list arrived in the order rows were WRITTEN — the sequence the driver's screenshots were
+   * scanned in, which is roughly the reverse of the day and not reliably anything. A manager
+   * checking ten deliveries against a dashboard he is reading by the clock had to hunt for each one.
+   *
+   * `occurredDate` leads because the driver's list scrolls back past midnight, so a bare «13:10» can
+   * belong to yesterday; a row without one is on the shift's own day. A row the reader could not
+   * time at all cannot be placed in the day, so it sits at the END rather than claiming a position
+   * it does not have — and it is already flagged, so it is never out of sight.
+   */
+  const day = review.businessDate.slice(0, 10)
+  const occurrenceKey = (o: Review['orders'][number]): string =>
+    `${(o.occurredDate ?? day).slice(0, 10)} ${o.occurredMinute ?? ''}`
+  const byOccurrence = (a: Review['orders'][number], b: Review['orders'][number]): number => {
+    if (!a.occurredMinute !== !b.occurredMinute) return a.occurredMinute ? -1 : 1
+    return occurrenceKey(a).localeCompare(occurrenceKey(b))
+  }
+  const ordered = [...review.orders].sort(byOccurrence)
+
+  const shownOrders = showAllOrders ? ordered : ordered.filter(flagged)
+  const hiddenOrders = showAllOrders ? [] : ordered.filter((o) => !flagged(o))
   const hiddenTotal = formatMinor(
     hiddenOrders.reduce((sum, o) => add(sum, parseMinor(o.fee || '0')), parseMinor('0')),
   )
