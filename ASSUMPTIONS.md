@@ -17,9 +17,12 @@ matters when an answer finally arrives.
 | D-2 | GitHub org, VPS and domain already exist → staging goes live in M0, not M6. | 2026-07-21 |
 | D-3 | Old Syrian lira is schema-ready only; all Bundle-1 UI is new SYP + USD equivalent. | 2026-07-21 |
 | D-4 | The wallet is returned/zeroed each day exactly like the cash float. BR1 stays in absolute form. | 2026-07-21 |
-| D-5 | Manual entries and expenses: branch manager ✓ + general manager ✓, sysadmin ✗ (SRS §3 matrix over E-3 prose). | 2026-07-21 |
+| D-5 | ~~Manual entries and expenses: branch manager ✓ + general manager ✓, sysadmin ✗ (SRS §3 matrix over E-3 prose).~~ **SUPERSEDED by D-9.** | 2026-07-21 |
 | D-6 | Tier band computed over the whole day, with a visible day true-up restating earlier shifts. | 2026-07-21 |
 | D-7 | Commercial scope re-cut into Bundle 1a (SRS A–G, as priced) + Bundle 1b (production readiness, separately priced). | 2026-07-21 |
+| D-8 | Pay mode is no longer collected at the driver's screen; `pay_mode` stays in the schema and on the wire defaulted to `cash`. | 2026-08-05 |
+| D-9 | **The system admin holds every permission at scope `all`** — «اعطي صلاحية وصول لكل شيء لمدير النظام و صلاحية لفعل كل شيء», given twice. **Supersedes D-5** and amends BR8's visibility line. Sanctioned by SRS §3 / A-2, which make the matrix sysadmin-customisable with every change logged. `DEFAULT_GRANTS` seeds only a fresh database, so migration `0024` carries it to production, which was measured holding 11 of 16. The SRS transcription in `matrix.test.ts` is untouched; the deviation is the named constant `OWNER_OVERRIDE_2026_08_12` beside it. | 2026-08-12 |
+| D-10 | **الترميم, الذمم, صندوق الشركة** — office capital is a fixed target per box (`كاش المكتب 4,000,000`, `محفظة المكتب 1,000,000`), restored daily after the physical count by sweeping surplus to صندوق الشركة (**كييش**) or funding a shortfall from it (**شحن من الصندوق**), counting الذمم toward the capital. الذمم belong to a named driver and clear when he opens his next shift. حصة السائق is paid at the end of every shift out of the cash in his hands. A shortfall is never auto-absorbed: BR1's zero tolerance still refuses, and the manager force-closes with a written reason. | 2026-08-12 |
 
 ---
 

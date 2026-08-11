@@ -69,11 +69,19 @@ describe('an organisation-wide role names the branch it is reading', () => {
     }
   })
 
-  it('the system admin is still refused the cash count — a scope fix is not a permission grant', async () => {
+  /**
+   * REVERSED BY DECISION 9 (2026-08-12). This asserted 403 while `cash_count.perform` excluded the
+   * sysadmin. The owner granted him everything, so the permission now passes — and what remains is
+   * the scope rule, which is the thing this file is actually about: an org-wide role must NAME the
+   * branch it is reading. That guard is unchanged and still load-bearing.
+   */
+  it('lets the system admin read the cash count sheet, but only for a branch he names', async () => {
     const sa = await h.loginAs('sysadmin')
-    const res = await get(sa, `/cash-counts/sheet?branchId=${BRANCH}`)
-    expect(res.statusCode).toBe(403)
-    expect(res.json().error).toBe('forbidden')
+    expect((await get(sa, `/cash-counts/sheet?branchId=${BRANCH}`)).statusCode).toBe(200)
+
+    const unnamed = await get(sa, '/cash-counts/sheet')
+    expect(unnamed.statusCode).toBe(422)
+    expect(unnamed.json().error).toBe('branch_required')
   })
 })
 
@@ -141,7 +149,8 @@ describe('the GM can fund a branch he names', () => {
     expect(res.json().error).toBe('branch_required')
   })
 
-  it('the system admin still may not deposit — §3 matrix, decision 5', async () => {
+  /** Decision 9: he may deposit now — under the same name-your-branch rule as the GM above. */
+  it('the system admin deposits into the branch he names (decision 9, was decision 5)', async () => {
     const sa = await h.loginAs('sysadmin')
     const res = await h.app.inject({
       method: 'POST',
@@ -149,7 +158,16 @@ describe('the GM can fund a branch he names', () => {
       headers: { cookie: h.cookie(sa) },
       payload: { target: 'cash', amount: '1.00', branchId: BRANCH },
     })
-    expect(res.statusCode).toBe(403)
+    expect(res.statusCode, res.body).toBe(201)
+
+    const unnamed = await h.app.inject({
+      method: 'POST',
+      url: '/treasury/deposit',
+      headers: { cookie: h.cookie(sa) },
+      payload: { target: 'cash', amount: '1.00' },
+    })
+    expect(unnamed.statusCode).toBe(422)
+    expect(unnamed.json().error).toBe('branch_required')
   })
 })
 

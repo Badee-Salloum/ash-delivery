@@ -31,7 +31,7 @@ async function seedOfficeCash(amount: string): Promise<void> {
   })
 }
 
-describe('branch treasury: cash box + wallet deposits (E-1 / D-5)', () => {
+describe('branch treasury: cash box + wallet deposits (E-1, D-5 as superseded by decision 9)', () => {
   it('shows the branch cash box + wallet balances (empty at first)', async () => {
     const manager = await h.loginAs('manager')
     const res = await get(manager, '/treasury/balances')
@@ -53,10 +53,23 @@ describe('branch treasury: cash box + wallet deposits (E-1 / D-5)', () => {
     expect((await get(manager, '/treasury/balances')).json().wallet).toBe(sypStr(50_000))
   })
 
-  it('the system admin cannot deposit — money is not his (§3 matrix, D-5)', async () => {
+  /**
+   * REVERSED BY DECISION 9. The owner granted the system admin every permission, so the question is
+   * no longer whether he may touch the money but whether he said WHOSE money — he is org-wide and
+   * belongs to no branch, exactly like the GM. That guard is untouched and is what this now pins.
+   */
+  it('the system admin may deposit, once he names a branch (decision 9, was D-5)', async () => {
     const sysadmin = await h.loginAs('sysadmin')
-    const res = await post(sysadmin, '/treasury/deposit', { target: 'cash', amount: sypStr(1_000) })
-    expect(res.statusCode).toBe(403)
+    const unnamed = await post(sysadmin, '/treasury/deposit', { target: 'cash', amount: sypStr(1_000) })
+    expect(unnamed.statusCode).toBe(422)
+    expect(unnamed.json().error).toBe('branch_required')
+
+    const named = await post(sysadmin, '/treasury/deposit', {
+      target: 'cash',
+      amount: sypStr(1_000),
+      branchId: BRANCH,
+    })
+    expect(named.statusCode, named.body).toBe(201)
   })
 
   it('rejects a non-positive amount', async () => {
@@ -146,10 +159,18 @@ describe('the daily cash count (E-5)', () => {
     expect(res.json().error).toBe('fund_not_countable')
   })
 
-  it('the system admin may NOT count the drawer (§3 matrix, D-5)', async () => {
+  /** Decision 9 gave him `cash_count.perform`; being org-wide he must still say whose drawer. */
+  it('the system admin may count a drawer he names (decision 9, was D-5)', async () => {
     const admin = await h.loginAs('sysadmin')
-    const res = await post(admin, '/cash-counts', { lines: [{ fundCode: 'office_cash', counted: sypStr(0) }] })
-    expect(res.statusCode).toBe(403)
+    const unnamed = await post(admin, '/cash-counts', { lines: [{ fundCode: 'office_cash', counted: sypStr(0) }] })
+    expect(unnamed.statusCode).toBe(422)
+    expect(unnamed.json().error).toBe('branch_required')
+
+    const named = await post(admin, '/cash-counts', {
+      branchId: BRANCH,
+      lines: [{ fundCode: 'office_cash', counted: sypStr(0) }],
+    })
+    expect(named.statusCode, named.body).toBe(201)
   })
 
   it('a driver may not count anything', async () => {
@@ -212,16 +233,19 @@ describe('manual entries (E-3 / س50)', () => {
     expect(res.json().error).toBe('evidence_required')
   })
 
-  it('the system admin may NOT post manual entries (§3 matrix, D-5)', async () => {
+  /** Decision 9: he may post them. The reason and the branch are still mandatory. */
+  it('the system admin may post manual entries for a branch he names (decision 9, was D-5)', async () => {
     const admin = await h.loginAs('sysadmin')
-    const res = await post(admin, '/journal/manual', {
-      reason: 'x',
-      lines: [
-        { fundCode: 'office_cash', side: 'D', amount: sypStr(1) },
-        { fundCode: 'adjustments', side: 'C', amount: sypStr(1) },
-      ],
-    })
-    expect(res.statusCode).toBe(403)
+    const lines = [
+      { fundCode: 'office_cash', side: 'D', amount: sypStr(1) },
+      { fundCode: 'adjustments', side: 'C', amount: sypStr(1) },
+    ]
+    const unnamed = await post(admin, '/journal/manual', { reason: 'x', lines })
+    expect(unnamed.statusCode).toBe(422)
+    expect(unnamed.json().error).toBe('branch_required')
+
+    const named = await post(admin, '/journal/manual', { reason: 'قيد من مدير النظام', branchId: BRANCH, lines })
+    expect(named.statusCode, named.body).toBe(201)
   })
 })
 

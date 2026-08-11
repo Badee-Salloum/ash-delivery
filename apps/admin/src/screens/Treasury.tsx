@@ -1,5 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
-import { formatMinor, minor, parseMinor } from '@ash/domain'
+import { type RoleKey, can, formatMinor, minor, parseMinor } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { useConfirm, useToast } from '../feedback.tsx'
 import { explainError } from '../errors.ts'
@@ -44,10 +44,20 @@ export function Treasury(): ReactNode {
   const [revReason, setRevReason] = useState('')
   const [revMsg, setRevMsg] = useState<string | null>(null)
 
-  // Only the branch manager + GM may put money in — `journal.manual.write` in the §3 matrix, and
-  // product-owner decision 5. The system admin can SEE the money and not move it; that is
-  // deliberate, so the screen says so rather than silently rendering nothing.
-  const canDeposit = session?.roleKey === 'branch_manager' || session?.roleKey === 'general_manager'
+  /*
+   * ASK THE RULE, do not restate it. This was two hard-coded role names and a comment explaining
+   * that the system admin may look but not touch — which owner decision 9 reversed on 2026-08-12,
+   * leaving the screen confidently wrong and telling him so in Arabic.
+   *
+   * `can()` is pure and already exported, so the screen now reads the same table the server checks.
+   * (UI hiding is not security — the API enforces this regardless. This only decides whether a
+   * control is worth showing.)
+   */
+  const canDeposit =
+    session != null &&
+    can({ userId: session.userId, roleKey: session.roleKey as RoleKey, branchId: session.branchId }, 'journal.manual.write', {
+      branchId: branchId ?? session.branchId,
+    }).allowed
 
   const load = useCallback(() => {
     setSheetError(null)
@@ -200,8 +210,7 @@ export function Treasury(): ReactNode {
                   </Button>
                 </div>
               ) : (
-                // Deliberate, not an oversight: `journal.manual.write` is branch manager + GM only.
-                // Saying so beats an empty card the system admin reads as a broken screen.
+                // Saying why beats an empty card somebody reads as a broken screen.
                 <p className="mt-3 text-xs text-slate-600">{t.treasury.depositRoleHint}</p>
               )}
             </div>

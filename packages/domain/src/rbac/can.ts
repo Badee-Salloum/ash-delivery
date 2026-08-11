@@ -69,26 +69,41 @@ export type PermissionKey =
 export type GrantTable = Readonly<Partial<Record<PermissionKey, Readonly<Partial<Record<RoleKey, Scope>>>>>>
 
 /**
- * SRS §3, transcribed exactly. An absent role means ✗.
+ * SRS §3, transcribed exactly — **plus owner decision 9**. An absent role means ✗.
  *
- * Two rows deserve a second look, because both are counter-intuitive and both are deliberate:
+ * ── DECISION 9 (2026-08-12): the system admin holds every permission at scope `all` ─────────
+ *
+ * «اعطي صلاحية وصول لكل شيء لمدير النظام و صلاحية لفعل كل شيء». Given twice, in writing, after
+ * the narrower rule was put to the owner. It supersedes ASSUMPTIONS D-5 and AMENDS BR8, whose
+ * «رؤية الأرباح والحصص الإجمالية: المدير العام فقط» made `profit.view_total` GM-only.
+ *
+ * This is a legitimate change rather than a violation of the SRS: §3 / A-2 make the matrix
+ * explicitly customisable BY THE SYSTEM ADMIN with every change logged, and `Permissions.tsx`
+ * already edits it as data. Five rows moved: `shift.operate`, `cash_count.perform`,
+ * `journal.manual.write`, `expense.write`, `profit.view_total`.
+ *
+ * THIS CONSTANT ONLY SEEDS A FRESH DATABASE. Live grants are rows in `role_permissions`, which is
+ * why decision 9 also needed migration 0024 — production was measured holding 11 of 16 for the
+ * sysadmin, and editing this table alone would have changed the tests and nothing else.
+ *
+ * One row STILL deserves a second look, and it is unchanged:
  *
  *  • `tier_rule.write` is system_admin ONLY — **not** the General Manager. That is the client's
  *    literal answer to س46, reaffirmed in BR8 and flagged for confirmation as SRS open point م-5.
- *  • `journal.manual.write` / `expense.write` are branch_manager + general_manager, **not**
- *    system_admin. SRS E-3's prose says branch-manager-only while the §3 matrix grants the GM
- *    too; the conflict was escalated and the product owner ruled the matrix wins (ASSUMPTIONS D-5).
+ *
+ * (The old note here — that `journal.manual.write` / `expense.write` exclude the sysadmin — is now
+ * history. It recorded ASSUMPTIONS D-5, which decision 9 reverses.)
  */
 export const DEFAULT_GRANTS: GrantTable = {
-  'shift.operate': { driver: 'own' },
+  'shift.operate': { driver: 'own', system_admin: 'all' },
   'shift.approve': { branch_manager: 'branch', system_admin: 'all', general_manager: 'all' },
-  'cash_count.perform': { branch_manager: 'branch', general_manager: 'all' },
-  'journal.manual.write': { branch_manager: 'branch', general_manager: 'all' },
-  'expense.write': { branch_manager: 'branch', general_manager: 'all' },
+  'cash_count.perform': { branch_manager: 'branch', system_admin: 'all', general_manager: 'all' },
+  'journal.manual.write': { branch_manager: 'branch', system_admin: 'all', general_manager: 'all' },
+  'expense.write': { branch_manager: 'branch', system_admin: 'all', general_manager: 'all' },
   'tier_rule.write': { system_admin: 'all' },
   'fx_rate.write': { system_admin: 'all' },
   'week.close': { system_admin: 'all' },
-  'profit.view_total': { general_manager: 'all' },
+  'profit.view_total': { system_admin: 'all', general_manager: 'all' },
   'branch_data.view': { branch_manager: 'branch', system_admin: 'all', general_manager: 'all' },
   // Live tracking is an UPPER-LEVEL view (owner's decision): the branch manager runs his branch from
   // the shift screens, not by watching where each driver is standing. Removing the grant — rather

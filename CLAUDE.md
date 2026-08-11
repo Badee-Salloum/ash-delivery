@@ -59,9 +59,10 @@ applied to that entire day's transactions. Seed ≈ 130 new SYP/USD — seed onl
 **BR7 — financial week.** Closes every **Sunday** by explicit system-admin action. Locked entries
 are immutable; corrections happen only via visible, dated correction entries.
 
-**BR8 — visibility.** Total profits/shares: General Manager **only**. Branch manager: everything in
-his branch. Driver: his own shifts and earnings only. Tier/rule editing: **system admin only**
-(not even the GM — client's explicit answer; keep it configurable).
+**BR8 — visibility.** Total profits/shares: General Manager **only** — ⚠️ **amended by decision 9**:
+the system admin sees them too. Branch manager: everything in his branch. Driver: his own shifts and
+earnings only. Tier/rule editing: **system admin only** (not even the GM — client's explicit answer;
+keep it configurable).
 
 **Default tier table** (system-admin editable, effective-dated, whole-amount mode, basis = approved
 orders per day): 0–14 → driver 35% · 15–24 → 40% · 25–34 → 43% · 35+ → 46%. Marginal mode must
@@ -81,6 +82,8 @@ exist as a config switch.
 | 6 | Tier band is computed over the **whole day**, with a visible «تسوية شريحة اليوم» true-up restating earlier shifts when a later one crosses a band. |
 | 7 | Commercial scope re-cut: **Bundle 1a** = SRS A–G as priced; **Bundle 1b** = production readiness, separately priced. |
 | 8 | **Pay mode is no longer collected** (SRS BR3 retired at the UI). The owner: *"we won't check each delivery how it got paid; we just check how much extra money we have in the wallet and the cash and compare to what he already worked."* BR1's scalar is blind to pay mode by construction — that is why `cashDiff`/`walletDiff` exist beside it — so the only thing lost is the ability to PREDICT the split, and the split was corroboration rather than a control: the wallet is evidenced by a photographed Yallago balance and the cash by a count at the branch. What remains is `cash + wallet == float + topup + 0.80 × Σfees`. `pay_mode` stays in the schema and on the wire defaulted to `cash`, so restoring the split later is a UI change, not a migration. `br1_split_gate` stays `advisory`. The driver's screen shows **the total only** — an expected-cash figure computed as though every delivery were cash would be a number the app cannot know. |
+| 9 | **2026-08-12 — the system admin has every permission at scope `all`.** «اعطي صلاحية وصول لكل شيء لمدير النظام و صلاحية لفعل كل شيء», given twice in writing after the narrower rule was put to the owner. **Supersedes decision 5** (manual entries & expenses: sysadmin ✗) and **amends BR8**'s «رؤية الأرباح والحصص الإجمالية: المدير العام فقط». Five rows moved: `shift.operate`, `cash_count.perform`, `journal.manual.write`, `expense.write`, `profit.view_total`. Legitimate rather than an SRS violation: §3 / A-2 make the matrix explicitly sysadmin-customisable with every change logged, and `Permissions.tsx` already edits it as data — one row reverses it. `DEFAULT_GRANTS` only ever seeds a fresh database, so this also required migration `0024`: production was measured holding 11 of 16 for the sysadmin. **The SRS §3 transcription in `matrix.test.ts` stays byte-identical**; the deviation lives beside it as `OWNER_OVERRIDE_2026_08_12`, and a test asserts the override is exactly those five rows and nothing more. |
+| 10 | **الترميم — the daily restoration** (2026-08-12, from the owner's own book). Office capital is a **fixed target per box** — `كاش المكتب 4,000,000`, `محفظة المكتب 1,000,000`. Every working day, after the **physical count**, each box is settled against **صندوق الشركة**: `position = counted + الذمم` against that box, `delta = position − رأس المال`; surplus is **كييش** (branch → company, profit taken), shortfall is **شحن من الصندوق** (company → branch). **الذمم** are cash a named driver kept overnight; they count toward the capital and are consumed when he starts his next shift. **حصة السائق is paid at the end of every shift** out of the cash in his hands. A shortfall never auto-passes — BR1's zero tolerance still refuses; the manager force-closes with a written reason and it comes off the driver's share. |
 
 ---
 

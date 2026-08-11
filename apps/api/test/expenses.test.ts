@@ -139,12 +139,12 @@ describe('the approval ceiling (A-4 / س52, G-3)', () => {
   })
 })
 
-describe('who may spend (SRS §3 matrix, decision D-5)', () => {
+describe('who may spend (SRS §3 matrix, as amended by decision 9)', () => {
   it.each([
     ['manager', 201],
     ['gm', 422], // holds expense.write but is org-wide, so must name a branch
-    ['sysadmin', 403], // explicitly NOT granted — D-5
-    ['driver1', 403],
+    ['sysadmin', 422], // decision 9 granted him expense.write; org-wide, so same branch rule as the GM
+    ['driver1', 403], // still no grant, and that floor is what decision 9 does NOT touch
   ])('%s → %i', async (user, expected) => {
     const token = await h.loginAs(user)
     expect((await post(token, '/expenses', expense())).statusCode, user).toBe(expected)

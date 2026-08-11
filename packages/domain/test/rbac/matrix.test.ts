@@ -66,7 +66,66 @@ const SRS_MATRIX: Record<PermissionKey, Partial<Record<RoleKey, Scope>>> = {
   'fleet.manage': { branch_manager: 'branch', system_admin: 'all', general_manager: 'all' },
 }
 
-describe('the grant table IS the SRS §3 matrix', () => {
+/**
+ * OWNER DECISION 9 (2026-08-12) — «اعطي صلاحية وصول لكل شيء لمدير النظام و صلاحية لفعل كل شيء».
+ *
+ * The ONE sanctioned deviation from the transcription above, kept here rather than edited into it.
+ * `SRS_MATRIX` earns its keep only by being an independent second reading of the Arabic §3 table;
+ * folding an override into it would delete the very thing it checks and leave nothing comparing the
+ * code to the document. So the SRS stays as written, the deviation is named, dated and listed, and
+ * a reviewer can see in one place exactly how far the system has moved from the specification.
+ *
+ * It supersedes ASSUMPTIONS D-5 and amends BR8's visibility line. Legitimate under SRS §3 / A-2,
+ * which make the matrix sysadmin-customisable with every change logged.
+ */
+const OWNER_OVERRIDE_2026_08_12: Partial<Record<PermissionKey, Partial<Record<RoleKey, Scope>>>> = {
+  'shift.operate': { system_admin: 'all' },
+  'cash_count.perform': { system_admin: 'all' },
+  'journal.manual.write': { system_admin: 'all' },
+  'expense.write': { system_admin: 'all' },
+  'profit.view_total': { system_admin: 'all' },
+}
+
+/** SRS §3 ⊕ decision 9. This — not the raw transcription — is what the code must equal. */
+const EFFECTIVE_MATRIX: Record<PermissionKey, Partial<Record<RoleKey, Scope>>> = Object.fromEntries(
+  (Object.keys(SRS_MATRIX) as PermissionKey[]).map((permission) => [
+    permission,
+    { ...SRS_MATRIX[permission], ...(OWNER_OVERRIDE_2026_08_12[permission] ?? {}) },
+  ]),
+) as Record<PermissionKey, Partial<Record<RoleKey, Scope>>>
+
+describe('the grant table IS the SRS §3 matrix, plus exactly one recorded override', () => {
+  /**
+   * The override may not grow quietly. Without this, a future widening could be slipped into
+   * `OWNER_OVERRIDE_2026_08_12` and every other test here would still pass — the deviation from the
+   * SRS would be invisible again, which is the whole failure this structure exists to prevent.
+   */
+  it('deviates from the SRS transcription in exactly the five rows decision 9 names', () => {
+    const deviations: string[] = []
+    for (const permission of ALL_PERMISSIONS) {
+      for (const roleKey of ALL_ROLES) {
+        if (SRS_MATRIX[permission][roleKey] !== DEFAULT_GRANTS[permission]?.[roleKey]) {
+          deviations.push(`${permission}:${roleKey}`)
+        }
+      }
+    }
+    expect(deviations.sort()).toEqual(
+      [
+        'cash_count.perform:system_admin',
+        'expense.write:system_admin',
+        'journal.manual.write:system_admin',
+        'profit.view_total:system_admin',
+        'shift.operate:system_admin',
+      ].sort(),
+    )
+  })
+
+  it('gives the system admin every permission at scope all (decision 9)', () => {
+    for (const permission of ALL_PERMISSIONS) {
+      expect(DEFAULT_GRANTS[permission]?.system_admin, `sysadmin missing ${permission}`).toBe('all')
+    }
+  })
+
   it('covers every permission the system declares', () => {
     for (const permission of ALL_PERMISSIONS) {
       expect(SRS_MATRIX[permission], `${permission} missing from the SRS transcription`).toBeDefined()
@@ -75,10 +134,10 @@ describe('the grant table IS the SRS §3 matrix', () => {
     expect(Object.keys(SRS_MATRIX).sort()).toEqual([...ALL_PERMISSIONS].sort())
   })
 
-  // The exhaustive sweep: 15 permissions × 5 roles = 75 assertions, generated.
+  // The exhaustive sweep: 16 permissions × 5 roles, generated, against SRS §3 ⊕ decision 9.
   for (const permission of ALL_PERMISSIONS) {
     for (const roleKey of ALL_ROLES) {
-      const expected = SRS_MATRIX[permission][roleKey]
+      const expected = EFFECTIVE_MATRIX[permission][roleKey]
       it(`${roleKey} ${expected ? `MAY (${expected})` : 'may NOT'} ${permission}`, () => {
         expect(DEFAULT_GRANTS[permission]?.[roleKey]).toBe(expected)
       })
@@ -86,22 +145,43 @@ describe('the grant table IS the SRS §3 matrix', () => {
   }
 })
 
-describe('the two counter-intuitive rows', () => {
+describe('the rows worth a second look', () => {
+  /** UNCHANGED by decision 9, and deliberately so — the GM still may not edit the tier table. */
   it('the General Manager may NOT edit tier rules — sysadmin only (س46, BR8)', () => {
     expect(can(actor('general_manager'), 'tier_rule.write').allowed).toBe(false)
     expect(can(actor('system_admin'), 'tier_rule.write').allowed).toBe(true)
   })
 
-  it('the system admin may NOT post manual entries or expenses — BM and GM only (D-5)', () => {
-    expect(can(actor('system_admin'), 'journal.manual.write', { branchId: BRANCH_A }).allowed).toBe(false)
-    expect(can(actor('system_admin'), 'expense.write', { branchId: BRANCH_A }).allowed).toBe(false)
+  /**
+   * REVERSED by decision 9. This test used to assert the opposite, citing ASSUMPTIONS D-5. Kept as
+   * a test rather than deleted, because the sysadmin's ability to move money is exactly the kind of
+   * thing that should fail loudly if someone narrows it again without a decision to point at.
+   */
+  it('the system admin MAY post manual entries and expenses (decision 9, was D-5)', () => {
+    expect(can(actor('system_admin'), 'journal.manual.write', { branchId: BRANCH_A }).allowed).toBe(true)
+    expect(can(actor('system_admin'), 'expense.write', { branchId: BRANCH_A }).allowed).toBe(true)
     expect(can(actor('branch_manager'), 'journal.manual.write', { branchId: BRANCH_A }).allowed).toBe(true)
     expect(can(actor('general_manager'), 'journal.manual.write', { branchId: BRANCH_A }).allowed).toBe(true)
   })
 
-  it('only the General Manager sees total profits (AC #12, BR8)', () => {
+  /** AMENDED by decision 9: BR8's «المدير العام فقط» now reads GM + sysadmin. Nobody else. */
+  it('only the General Manager and the system admin see total profits (AC #12, BR8 as amended)', () => {
     for (const roleKey of ALL_ROLES) {
-      expect(can(actor(roleKey), 'profit.view_total').allowed).toBe(roleKey === 'general_manager')
+      expect(can(actor(roleKey), 'profit.view_total').allowed).toBe(
+        roleKey === 'general_manager' || roleKey === 'system_admin',
+      )
+    }
+  })
+
+  /** The floor decision 9 does NOT touch: a driver is still confined to his own. */
+  it('leaves every non-sysadmin role exactly where the SRS put it', () => {
+    for (const permission of ALL_PERMISSIONS) {
+      for (const roleKey of ALL_ROLES) {
+        if (roleKey === 'system_admin') continue
+        expect(DEFAULT_GRANTS[permission]?.[roleKey], `${permission}:${roleKey} moved`).toBe(
+          SRS_MATRIX[permission][roleKey],
+        )
+      }
     }
   })
 })
