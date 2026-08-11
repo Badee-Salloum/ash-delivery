@@ -23,11 +23,133 @@
         font: bold 2rem/1 system-ui, sans-serif;
         letter-spacing: 0.1em;
       }
+      #ash-stuck {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 1rem;
+        padding: 1.5rem;
+        background: #eef1f8;
+        color: #1b2a5c;
+        font-family: system-ui, sans-serif;
+        text-align: center;
+      }
+      #ash-stuck p { margin: 0; font-size: 0.95rem; line-height: 1.6; color: #46506e; max-width: 22rem; }
+      #ash-stuck strong { font-size: 1.1rem; color: #1b2a5c; }
+      #ash-stuck button {
+        min-height: 3rem;
+        padding: 0 1.5rem;
+        border: 0;
+        border-radius: 0.85rem;
+        background: #1b2a5c;
+        color: #fff;
+        font: 600 1rem system-ui, sans-serif;
+      }
     </style>
   </head>
   <body>
     <div id="root"></div>
     <noscript>يحتاج هذا التطبيق إلى تفعيل JavaScript.</noscript>
+
+    <!--
+      THE BOOT WATCHDOG. A classic script on purpose: it must still run when the module below is the
+      very thing that is broken.
+
+      This app is a PWA whose service worker answers reloads from cache (`registerType: 'prompt'`, so
+      a money app never swaps code mid-shift). The cost is that a driver can end up holding a bundle
+      he cannot boot, and RELOADING HANDS HIM THE SAME ONE. `#root` stays empty, the CSS above paints
+      «ASH», and it reads as a slow connection rather than a fault — a driver stood in front of that
+      logo at 01:42 with no gesture available that would fix it.
+
+      `__ashBooted` is set at the top of `main.tsx`, so an empty root splits cleanly into two cases:
+      the bundle never executed (stale or broken cache — clear it, once, silently), or it executed and
+      rendered nothing (a real fault the ErrorBoundary should have caught — say so and offer the exit).
+    -->
+    <script>
+      ;(function () {
+        var GRACE_MS = 9000
+        var HEALED = 'ash-boot-healed'
+
+        function hardReset() {
+          var jobs = []
+          try {
+            if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+              jobs.push(
+                navigator.serviceWorker.getRegistrations().then(function (rs) {
+                  return Promise.all(
+                    rs.map(function (r) {
+                      return r.unregister()
+                    }),
+                  )
+                }),
+              )
+            }
+            if (window.caches && caches.keys) {
+              jobs.push(
+                caches.keys().then(function (ks) {
+                  return Promise.all(
+                    ks.map(function (k) {
+                      return caches.delete(k)
+                    }),
+                  )
+                }),
+              )
+            }
+          } catch (e) {
+            /* private mode throws on caches; reloading is still worth doing */
+          }
+          var reloaded = false
+          var go = function () {
+            if (reloaded) return
+            reloaded = true
+            window.location.reload()
+          }
+          Promise.all(jobs)
+            .catch(function () {})
+            .then(go)
+          // Never let the repair itself hang — a wedged worker is exactly when it might.
+          setTimeout(go, 3000)
+        }
+
+        function stuckCard() {
+          var el = document.createElement('div')
+          el.id = 'ash-stuck'
+          el.innerHTML =
+            '<strong>تعذّر فتح التطبيق</strong>' +
+            '<p>لم تتأثر أي بيانات ولم يُفقد أي شيء رفعته. اضغط الزر لتحميل نسخة نظيفة.</p>'
+          var btn = document.createElement('button')
+          btn.type = 'button'
+          btn.textContent = 'إعادة التحميل من جديد'
+          btn.onclick = hardReset
+          el.appendChild(btn)
+          document.body.appendChild(el)
+        }
+
+        setTimeout(function () {
+          var root = document.getElementById('root')
+          if (!root || root.childElementCount > 0) return // it mounted; nothing to do
+
+          if (!window.__ashBooted) {
+            // The bundle never ran. Almost always a stale worker serving code that no longer loads.
+            // Heal silently ONCE per tab — a driver should not have to be told to tap anything.
+            try {
+              if (!sessionStorage.getItem(HEALED)) {
+                sessionStorage.setItem(HEALED, '1')
+                hardReset()
+                return
+              }
+            } catch (e) {
+              /* sessionStorage can throw; fall through to the card rather than loop */
+            }
+          }
+          stuckCard()
+        }, GRACE_MS)
+      })()
+    </script>
+
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
