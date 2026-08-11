@@ -1,6 +1,5 @@
 import {
   type Dispatch,
-  Fragment,
   type ReactNode,
   type SetStateAction,
   useCallback,
@@ -31,6 +30,7 @@ import { Button, Card, Field, Money, MoneyInput, Screen, TextInput } from '../ui
 import { OperationsList } from './OrderEntry.tsx'
 import { BatteryPanel, type FittedBattery, type PackState } from './BatteryPanel.tsx'
 import { BatterySwap, type SpareBattery } from './BatterySwap.tsx'
+import { PageGrid } from './PageGrid.tsx'
 import { PhotoSlot } from './PhotoSlot.tsx'
 import { SourceMark, sourceOf } from './ReadingSource.tsx'
 
@@ -61,6 +61,26 @@ interface ShiftState {
    * kilometres means a digit read twice. Neither is knowable from the closing figure alone.
    */
   odoStart: number | null
+}
+
+/**
+ * How many pages of one scrollable screen actually uploaded.
+ *
+ * Page 1 is the BARE slot name (`dashboard`), pages 2+ carry a suffix (`dashboard_2`) — see
+ * `pageSlot`. So the count is the highest suffix present, or 1 when only the bare name is there.
+ */
+function pagesIn(slots: readonly string[], base: string): number {
+  // No `new RegExp` with a template literal here: `\d` inside one collapses to a plain `d`, so the
+  // pattern silently became `^dashboard_(d+)$` and matched nothing. String work says what it means.
+  let max = 1 // a screen always has page 1, which carries the bare name
+  for (const slot of slots) {
+    if (!slot.startsWith(`${base}_`)) continue
+    const suffix = slot.slice(base.length + 1)
+    // Only a pure number is a page number — otherwise `payments_log` reads as a page of `payments`.
+    if (!/^[0-9]+$/.test(suffix)) continue
+    max = Math.max(max, Number(suffix))
+  }
+  return max
 }
 
 /** What the payments-log reader made of «سجل المدفوعات», said out loud rather than left silent. */
@@ -259,6 +279,17 @@ export function ShiftFlow({
            * never clobber something he is in the middle of correcting.
            */
           slots: new Set(st.endPackage.mediaSlots),
+          /*
+           * THE PAGE COUNTS COME BACK TOO.
+           *
+           * `dashboardPages`/`logPages` start at 1 and were never restored, so a driver who
+           * photographed six pages of «الطلبات الحديثة» and then had his tab evicted came back to a
+           * SINGLE tile — his other five uploads present on the server, ticked nowhere, and the
+           * add-page button the only way to see them again. Derived from the slots that actually
+           * uploaded, so the screen shows exactly what the server holds.
+           */
+          dashboardPages: Math.max(d.dashboardPages, pagesIn(st.endPackage.mediaSlots, 'dashboard')),
+          logPages: Math.max(d.logPages, pagesIn(st.endPackage.mediaSlots, PAYMENTS_LOG_SLOT)),
           cash: d.cash || (st.endPackage.cashDeclared ?? ''),
           wallet: d.wallet || (st.endPackage.walletDeclared ?? ''),
           odo: d.odo || (st.endPackage.odometerKm === null ? '' : String(st.endPackage.odometerKm)),
@@ -715,7 +746,6 @@ function StartPackage({
           <p className="text-center text-sm text-slate-500">{t.shift.resumeHint}</p>
         </Card>
       ) : null}
-      {shiftId ? <DiscardButton onDiscard={discardSelf} /> : null}
       {ocrBusy ? <p className="text-center text-sm text-slate-600">{t.shift.reading}…</p> : null}
       <Card className="flex flex-col gap-3">
         <Field label={t.shift.odometer}>
@@ -737,6 +767,10 @@ function StartPackage({
           onReadingsChanged={setBatteriesReady}
         />
       ) : null}
+      {/* Destructive, so it sits at the END. It used to be wedged between the odometer photo and the
+          number that photo produced — the one place on this screen where a mis-tap costs the whole
+          start package, directly in the path of the eye moving from picture to field. */}
+      {shiftId ? <DiscardButton onDiscard={discardSelf} /> : null}
     </Screen>
   )
 }
@@ -792,12 +826,6 @@ function EndPackage({
    * a short day genuinely fits one screenful, and demanding a second would be demanding a
    * screenshot of nothing.
    */
-  const shown = [
-    ...Array.from({ length: draft.dashboardPages }, (_, i) => pageSlot('dashboard', i + 1)),
-    'wallet',
-    'odometer',
-    ...Array.from({ length: draft.logPages }, (_, i) => pageSlot(PAYMENTS_LOG_SLOT, i + 1)),
-  ]
   const labelOf = (slot: string): string => {
     const { base, n } = splitSlot(slot)
     const name = labels[base] ?? slot
@@ -936,6 +964,74 @@ function EndPackage({
     }
   }
 
+  /** The wallet screenshot: read the balance, and keep the picture either way. */
+  const walletImage = useCallback(
+    async (file: File): Promise<void> => {
+                  const { readWallet } = await import('../ocr.ts')
+                  const r = await readWallet(file)
+                  // Kept whether it read or refused — the refusal is the better example.
+                  onDraft((d) => ({ ...d, walletStrip: d.walletStrip ?? r.sample ?? null }))
+                  if (!r.ok) return
+                  onDraft((d) => ({
+                    ...d,
+                    // The FIRST read is the baseline and stays it; the field is only pre-filled
+                    // while the driver has not answered — his typing always wins.
+                    walletOcr: d.walletOcr ?? r.reading.amountText,
+                    wallet: d.wallet === '' ? r.reading.amountText : d.wallet,
+                  }))
+    },
+    [onDraft],
+  )
+
+  /** The dashboard tile IS the order scan: the image is the evidence AND what was read. */
+  const dashImage = useCallback(
+    async (file: File): Promise<void> => {
+                  patch({ dash: { kind: 'reading' } })
+                  const { readOrders } = await import('../ocr.ts')
+                  const r = await readOrders(file).catch(() => null)
+                  onDraft((d) => {
+                    if (!r?.ok) return { ...d, dash: { kind: 'failed' } }
+                    const added = mergeScannedOrders(d.orders, r.reading.orders, () => crypto.randomUUID())
+                    // A card sliced off the bottom of the previous page is usually whole at the
+                    // top of this one. Its second sighting is de-duplicated away, so without this
+                    // its addresses go with it and the row keeps showing a delivery to nowhere.
+                    const healed = healCutOffRoutes(d.orders, r.reading.orders)
+                    const patch = new Map(healed.map((h) => [h.localId, h]))
+                    // NEW rows, not rows on the page: a page that fully overlaps reads 0, which is
+                    // the truth — nothing was added — and not a failure. `refused` is what the
+                    // reader saw but would not vouch for, and it is the driver's to type.
+                    return {
+                      ...d,
+                      orders: [...d.orders.map((o) => { const h = patch.get(o.localId); return h ? { ...o, pointA: h.pointA, pointB: h.pointB } : o }), ...added],
+                      dash: { kind: 'read', rows: added.length, refused: Math.max(0, (r.rowsSeen ?? 0) - r.fieldsFound), cutOff: r.cutOff ?? 0 },
+                    }
+                  })
+    },
+    [onDraft, patch],
+  )
+
+  const logImage = useCallback(
+    async (file: File): Promise<void> => {
+                  patch({ log: { kind: 'reading' } })
+                  const { readPaymentsLog } = await import('../ocr.ts')
+                  const r = await readPaymentsLog(file).catch(() => null)
+                  onDraft((d) => {
+                    if (!r?.ok) return { ...d, log: { kind: 'failed' } }
+                    const added = mergeScannedMovements(d.movements, r.reading.movements, () => crypto.randomUUID())
+                    return {
+                      ...d,
+                      movements: [...d.movements, ...added],
+                      log: {
+                        kind: 'read',
+                        rows: added.length,
+                        refused: Math.max(0, (r.rowsSeen ?? 0) - r.fieldsFound),
+                      },
+                    }
+                  })
+    },
+    [onDraft, patch],
+  )
+
   return (
     <Screen
       title={t.shift.endShift}
@@ -1003,114 +1099,31 @@ function EndPackage({
         </div>
       }
     >
-      {shown.map((slot) => {
-        const { base, n } = splitSlot(slot)
-        // «+ صورة أخرى» sits under the LAST page of each scrollable screen, and only once that page
-        // actually holds an image — otherwise a tap adds an empty tile, and a wall of empty tiles
-        // reads as a longer list of things the driver still owes.
-        const lastPage =
-          (base === 'dashboard' && n === draft.dashboardPages && n < MAX_PAGE_SLOTS) ||
-          (base === PAYMENTS_LOG_SLOT && n === draft.logPages && n < MAX_PAGE_SLOTS)
-        const addPage = (): void =>
-          onDraft((d) =>
-            base === 'dashboard' ? { ...d, dashboardPages: d.dashboardPages + 1 } : { ...d, logPages: d.logPages + 1 },
-          )
-        return (
-          <Fragment key={slot}>
-        <PhotoSlot
-          shiftId={shift.id}
-          pkg="end"
-          slot={slot}
-          label={labelOf(slot)}
-          uploaded={slots.has(slot)}
-          onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
-          // SRS D-2: read the wallet balance off its screenshot and pre-fill the field; and read the
-          // payments log, which is what tells a cash order from a part-electronic one. Both are
-          // ASSISTED — a failed read leaves the field for the driver, and the manager can correct it
-          // at the review. (Spread so the prop is absent, not `undefined`, on the other slots.)
-          {...(slot === 'wallet'
-            ? {
-                onImage: async (file: File): Promise<void> => {
-                  const { readWallet } = await import('../ocr.ts')
-                  const r = await readWallet(file)
-                  // Kept whether it read or refused — the refusal is the better example.
-                  onDraft((d) => ({ ...d, walletStrip: d.walletStrip ?? r.sample ?? null }))
-                  if (!r.ok) return
-                  onDraft((d) => ({
-                    ...d,
-                    // The FIRST read is the baseline and stays it; the field is only pre-filled
-                    // while the driver has not answered — his typing always wins.
-                    walletOcr: d.walletOcr ?? r.reading.amountText,
-                    wallet: d.wallet === '' ? r.reading.amountText : d.wallet,
-                  }))
-                },
-              }
-            : {})}
-          // The dashboard tile IS the order scan. One pick: the image is the evidence AND the thing
-          // that was read. Its rows are APPENDED, never replacing what is already listed — the
-          // screen scrolls, so page two re-shows the bottom of page one.
-          {...(splitSlot(slot).base === 'dashboard'
-            ? {
-                onImage: async (file: File): Promise<void> => {
-                  patch({ dash: { kind: 'reading' } })
-                  const { readOrders } = await import('../ocr.ts')
-                  const r = await readOrders(file).catch(() => null)
-                  onDraft((d) => {
-                    if (!r?.ok) return { ...d, dash: { kind: 'failed' } }
-                    const added = mergeScannedOrders(d.orders, r.reading.orders, () => crypto.randomUUID())
-                    // A card sliced off the bottom of the previous page is usually whole at the
-                    // top of this one. Its second sighting is de-duplicated away, so without this
-                    // its addresses go with it and the row keeps showing a delivery to nowhere.
-                    const healed = healCutOffRoutes(d.orders, r.reading.orders)
-                    const patch = new Map(healed.map((h) => [h.localId, h]))
-                    // NEW rows, not rows on the page: a page that fully overlaps reads 0, which is
-                    // the truth — nothing was added — and not a failure. `refused` is what the
-                    // reader saw but would not vouch for, and it is the driver's to type.
-                    return {
-                      ...d,
-                      orders: [...d.orders.map((o) => { const h = patch.get(o.localId); return h ? { ...o, pointA: h.pointA, pointB: h.pointB } : o }), ...added],
-                      dash: { kind: 'read', rows: added.length, refused: Math.max(0, (r.rowsSeen ?? 0) - r.fieldsFound), cutOff: r.cutOff ?? 0 },
-                    }
-                  })
-                },
-              }
-            : {})}
-          {...(splitSlot(slot).base === PAYMENTS_LOG_SLOT
-            ? {
-                onImage: async (file: File): Promise<void> => {
-                  patch({ log: { kind: 'reading' } })
-                  const { readPaymentsLog } = await import('../ocr.ts')
-                  const r = await readPaymentsLog(file).catch(() => null)
-                  onDraft((d) => {
-                    if (!r?.ok) return { ...d, log: { kind: 'failed' } }
-                    const added = mergeScannedMovements(d.movements, r.reading.movements, () => crypto.randomUUID())
-                    return {
-                      ...d,
-                      movements: [...d.movements, ...added],
-                      log: {
-                        kind: 'read',
-                        rows: added.length,
-                        refused: Math.max(0, (r.rowsSeen ?? 0) - r.fieldsFound),
-                      },
-                    }
-                  })
-                },
-              }
-            : {})}
-        />
-            {lastPage && slots.has(slot) ? (
-              <Button variant="ghost" onClick={addPage}>
-                + {t.shift.addPage}
-              </Button>
-            ) : null}
-            {/* What THIS screen's read did, under its own tiles. A toast would say it once and
-                vanish; whether a screenshot was understood is a state the driver keeps needing
-                while he decides what he still has to type. */}
-            {lastPage ? <ReadStatus state={base === 'dashboard' ? draft.dash : logState} /> : null}
-          </Fragment>
-        )
-      })}
-      {/* THE list: every operation of the shift, with the checkbox that decides what counts. */}
+      {/*
+        * THE PAGED SCREENS, AS GRIDS.
+        *
+        * A real close package rendered TWELVE tiles - six dashboard pages, two log pages, a wallet,
+        * an odometer, two BMS shots - and `PhotoSlot`'s row is an 80px full-width bar. That is about
+        * a thousand pixels of near-identical grey before the driver reaches a single field he came
+        * to fill in. These pages differ only by a number, so a number is all the label they need.
+        *
+        * Four columns at 328px of content gives ~76px cells: well above a 44px target, and the six
+        * pages a real shift produced fit in two rows with the add-tile beside them.
+        */}
+      <PageGrid
+        title={t.shift.dashboardShot}
+        base="dashboard"
+        pages={draft.dashboardPages}
+        shiftId={shift.id}
+        slots={slots}
+        onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
+        onAddPage={() => onDraft((d) => ({ ...d, dashboardPages: d.dashboardPages + 1 }))}
+        onImage={dashImage}
+        status={<ReadStatus state={draft.dash} />}
+      />
+
+      {/* THE list: every operation of the shift, with the checkbox that decides what counts. It sits
+          directly under the pages that produced it, which is the order the work happens in. */}
       {draft.opsError ? (
         <Card>
           <p className="text-center text-sm font-medium text-red-600">{draft.opsError}</p>
@@ -1120,29 +1133,76 @@ function EndPackage({
         orders={draft.orders}
         movements={draft.movements}
         today={shift.businessDate}
-        // BR1 already works out which rows to doubt; the screen used to compute that list and then
-        // append a generic sentence instead of pointing at the blocks it meant.
         suspectLocalIds={preview?.suspectLocalIds ?? []}
         onOrders={(orders) => onDraft((d) => ({ ...d, orders }))}
         onMovements={(movements) => onDraft((d) => ({ ...d, movements }))}
       />
+
+      <PageGrid
+        title={t.shift.paymentsLog}
+        base={PAYMENTS_LOG_SLOT}
+        pages={draft.logPages}
+        shiftId={shift.id}
+        slots={slots}
+        onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
+        onAddPage={() => onDraft((d) => ({ ...d, logPages: d.logPages + 1 }))}
+        onImage={logImage}
+        status={<ReadStatus state={logState} />}
+      />
+
+      {/*
+        * EACH NUMBER BESIDE THE PICTURE THAT PRODUCED IT.
+        *
+        * The wallet tile and the wallet balance field used to be separated by the entire operations
+        * list - thousands of pixels - so the driver confirmed a figure with its evidence off screen.
+        */}
       <Card className="flex flex-col gap-3">
-        <Field label={t.shift.cashHandover}>
-          <MoneyInput value={cash} onChange={(e) => patch({ cash: e.target.value })} />
-        </Field>
-        <Field label={t.shift.walletBalance}>
-          <MoneyInput value={wallet} onChange={(e) => patch({ wallet: e.target.value })} />
-        </Field>
-        <SourceMark source={sourceOf({ ocrValue: walletOcr, hadImage: draft.walletStrip !== null, value: wallet })} />
-        <Field label={t.shift.odometer}>
-          <TextInput inputMode="numeric" value={odo} onChange={(e) => patch({ odo: e.target.value })} />
-        </Field>
-        {/* The closing odometer has no reader at all today, so this reads «أضفتها بنفسك» — which is
-            true, and worth saying rather than leaving the driver to assume the app checked it. */}
-        <SourceMark source={sourceOf({ ocrValue: null, hadImage: draft.odoStrip !== null, value: odo })} />
+        <div className="flex items-start gap-3">
+          <div className="w-20 shrink-0">
+            <PhotoSlot
+              shiftId={shift.id}
+              pkg="end"
+              slot="wallet"
+              label={t.shift.walletBalance}
+              variant="tile"
+              uploaded={slots.has('wallet')}
+              onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
+              onImage={walletImage}
+            />
+          </div>
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
+            <Field label={t.shift.walletBalance}>
+              <MoneyInput value={wallet} onChange={(e) => patch({ wallet: e.target.value })} />
+            </Field>
+            <SourceMark source={sourceOf({ ocrValue: walletOcr, hadImage: draft.walletStrip !== null, value: wallet })} />
+          </div>
+        </div>
+
+        <div className="flex items-start gap-3">
+          <div className="w-20 shrink-0">
+            <PhotoSlot
+              shiftId={shift.id}
+              pkg="end"
+              slot="odometer"
+              label={t.shift.odometer}
+              variant="tile"
+              uploaded={slots.has('odometer')}
+              onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
+            />
+          </div>
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
+            <Field label={t.shift.odometer}>
+              <TextInput inputMode="numeric" value={odo} onChange={(e) => patch({ odo: e.target.value })} />
+            </Field>
+            {/* The closing odometer has no reader at all today, so this reads the typed mark - which
+                is true, and worth saying rather than letting him assume the app checked it. */}
+            <SourceMark source={sourceOf({ ocrValue: null, hadImage: draft.odoStrip !== null, value: odo })} />
+          </div>
+        </div>
+
         {/* Checked against the number this very shift opened on, which is the only thing that makes
-            «6900» after «6948» visibly wrong. Asked, never refused: a bike really can be carried on
-            a truck, and refusing would teach him to type whatever gets past it. */}
+            6900 after 6948 visibly wrong. Asked, never refused: a bike really can be carried on a
+            truck, and refusing would teach him to type whatever gets past it. */}
         {(() => {
           const question = checkOdometer(shift.odoStart, odo.trim() === '' ? null : Number(odo))
           if (!question || odoConfirmed) return null
@@ -1153,12 +1213,16 @@ function EndPackage({
                   ? t.shift.odoBackwards.replace('{start}', String(question.start))
                   : t.shift.odoJump.replace('{km}', String(question.km))}
               </p>
-              <Button variant="ghost" onClick={() => setOdoConfirmed(true)}>
+              <Button variant="ghost" className="self-start" onClick={() => setOdoConfirmed(true)}>
                 {t.battery.yesCorrect}
               </Button>
             </div>
           )
         })()}
+
+        <Field label={t.shift.cashHandover}>
+          <MoneyInput value={cash} onChange={(e) => patch({ cash: e.target.value })} />
+        </Field>
       </Card>
       {/* The close gate asks for the same per-pack evidence the open gate did. */}
       <BatteryPanel

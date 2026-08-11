@@ -1,4 +1,4 @@
-import { type ReactNode, useCallback, useRef, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { compressImage, uploadEvidencePath } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 
@@ -50,6 +50,18 @@ export interface PhotoSlotProps {
    * upload is the authority on its state.
    */
   uploaded?: boolean
+  /**
+   * `row` (the default) is the full-width bar with a readable label — right for evidence that is one
+   * of a kind and whose NAME is the information: «العداد», «رصيد المحفظة».
+   *
+   * `tile` is a compact square for homogeneous, paged sets — «الطلبات الحديثة» pages 1…8, the
+   * payments log, one per battery. They differ only by a number, so a number is all the label they
+   * need, and stacking them as 80px bars is what made a real close package 12 tiles and ~1,000px of
+   * identical grey before the driver reached a single field he came to fill in.
+   */
+  variant?: 'row' | 'tile'
+  /** The tile's own caption — a page number, or a slot number. Ignored by `row`. */
+  badge?: string
 }
 
 export function PhotoSlot({
@@ -61,12 +73,39 @@ export function PhotoSlot({
   onImage,
   source = 'gallery',
   uploaded = false,
+  variant = 'row',
+  badge,
 }: PhotoSlotProps): ReactNode {
   const { api, t } = useApp()
   const ref = useRef<HTMLInputElement>(null)
   const [state, setState] = useState<'idle' | 'working' | 'done' | 'error'>(uploaded ? 'done' : 'idle')
   /** The file already picked, so a failed upload is one tap — not another trip to the gallery. */
   const [picked, setPicked] = useState<File | null>(null)
+
+  /**
+   * A thumbnail of the picture he actually chose.
+   *
+   * The commonest mistake in a close is uploading the SAME page twice: against identical grey bars
+   * that is invisible until the manager finds it, and against two identical thumbnails it is
+   * obvious immediately. It costs nothing on the network — the file is already in hand for the
+   * retry path, so this renders the local blob rather than downloading anything. (It could not
+   * download it anyway: `/api/media/:id` needs `branch_data.view`, which a driver does not have.)
+   *
+   * A RESUMED package has no local file and shows the tick alone. That is honest — the photo is on
+   * the server, not in this browser — and it is why the tick, not the image, remains the state.
+   */
+  const [preview, setPreview] = useState<string | null>(null)
+  useEffect(() => {
+    if (picked === null || variant !== 'tile') return
+    const url = URL.createObjectURL(picked)
+    setPreview(url)
+    // Revoked on replace AND on unmount: eight full-resolution screenshots held open would be a
+    // real leak on the cheap Android this runs on.
+    return () => {
+      URL.revokeObjectURL(url)
+      setPreview(null)
+    }
+  }, [picked, variant])
 
   const onPick = useCallback(
     async (file: File) => {
@@ -101,6 +140,59 @@ export function PhotoSlot({
     },
     [api, shiftId, pkg, slot, onUploaded, onImage],
   )
+
+  const open = (): void => (state === 'error' && picked ? void onPick(picked) : ref.current?.click())
+  const input = (
+    <input
+      ref={ref}
+      type="file"
+      accept="image/*"
+      {...(source === 'camera' ? { capture: 'environment' as const } : {})}
+      hidden
+      onChange={(e) => {
+        const f = e.target.files?.[0]
+        if (f) void onPick(f)
+      }}
+    />
+  )
+
+  if (variant === 'tile') {
+    return (
+      <button
+        type="button"
+        onClick={open}
+        // The full name lives here because the visible caption is a digit — the same reason the
+        // delivery blocks carry one.
+        aria-label={label}
+        title={label}
+        className={`relative flex aspect-square w-full flex-col items-center justify-center gap-1 overflow-hidden rounded-2xl border-2 ${
+          state === 'done'
+            ? 'border-emerald-400 bg-emerald-50'
+            : state === 'error'
+              ? 'border-red-400 bg-red-50'
+              : 'border-dashed border-slate-300 bg-white'
+        }`}
+      >
+        {/* The border carries the state, exactly as the delivery blocks do. */}
+        <span className="absolute end-1 top-1 text-xs" aria-hidden>
+          {state === 'done' ? '✓' : state === 'error' ? '✕' : ''}
+        </span>
+        {preview && state !== 'error' ? (
+          <img src={preview} alt="" className="absolute inset-0 size-full object-cover opacity-60" />
+        ) : null}
+        {/* A page number when it has one. Otherwise the camera, and only while there is nothing
+            there yet — once the tile is done its green border and ✓ already say so, and a 📷 beside
+            a tick reads as an invitation to redo a photo that is perfectly fine. */}
+        <span className="num relative text-xl font-bold text-slate-700">
+          {badge ?? (state === 'done' ? '' : '📷')}
+        </span>
+        {state === 'working' ? (
+          <span className="relative text-[10px] leading-none text-slate-600">{t.common.loading}</span>
+        ) : null}
+        {input}
+      </button>
+    )
+  }
 
   return (
     <button

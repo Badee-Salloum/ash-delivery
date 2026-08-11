@@ -136,6 +136,13 @@ export function BatteryPanel({
    * this only decides what the screen shows him next.
    */
   const [unavailable, setUnavailable] = useState<ReadonlySet<string>>(new Set())
+  /**
+   * Packs whose surprising charge the driver has looked at and stood by.
+   *
+   * Confirming IS the answer, not a step towards refusing. Every one of these can genuinely be true,
+   * and a value a human has asserted is worth more than a quiet one.
+   */
+  const [confirmed, setConfirmed] = useState<ReadonlySet<string>>(new Set())
 
   const slotOf = (b: FittedBattery, i: number): number => b.slotNo ?? i + 1
   const stateOf = (id: string): PackState => packs[id] ?? EMPTY
@@ -248,28 +255,35 @@ export function BatteryPanel({
       {batteries.map((battery, i) => {
         const slotNo = slotOf(battery, i)
         const state = stateOf(battery.id)
+        const label =
+          battery.groundNo == null || battery.groundNo === ''
+            ? `${t.battery.bmsShot} ${slotNo} · ${battery.capacityAh}Ah`
+            : `${t.battery.bmsShot} ${slotNo} · ${t.fleet.groundNo} ${battery.groundNo} · ${battery.capacityAh}Ah`
         return (
           <div key={battery.id} className="flex flex-col gap-3">
-            <PhotoSlot
-              shiftId={shiftId}
-              pkg={pkg}
-              slot={`bms_${slotNo}`}
-              label={
-                battery.groundNo == null || battery.groundNo === ''
-                  ? `${t.battery.bmsShot} ${slotNo} · ${battery.capacityAh}Ah`
-                  : `${t.battery.bmsShot} ${slotNo} · ${t.fleet.groundNo} ${battery.groundNo} · ${battery.capacityAh}Ah`
-              }
-              // Ticked already when the caller kept the slot across a remount — same reason the
-              // readings are restored: nothing was lost, only forgotten by the screen.
-              uploaded={slots.has(`bms_${slotNo}`)}
-              onUploaded={onSlotUploaded}
-              onImage={(file) => {
-                setFiles((cur) => ({ ...cur, [battery.id]: file }))
-                void runOcr(battery, file)
-              }}
-              source="gallery"
-            />
-
+            {/* The long name is a HEADING now, not the tile's label. «صورة تطبيق البطارية ١ ·
+                الرقم على الأرض D14 · 50Ah» is the longest string in the app, and inside a
+                `justify-between` flex with no truncation it wrapped to four lines and squeezed the
+                tile's own ✓ off the end. */}
+            <div className="flex items-center gap-3">
+              <div className="w-20 shrink-0">
+                <PhotoSlot
+                  shiftId={shiftId}
+                  pkg={pkg}
+                  slot={`bms_${slotNo}`}
+                  label={label}
+                  badge={String(slotNo)}
+                  variant="tile"
+                  uploaded={slots.has(`bms_${slotNo}`)}
+                  onUploaded={onSlotUploaded}
+                  onImage={(file) => {
+                    setFiles((cur) => ({ ...cur, [battery.id]: file }))
+                    void runOcr(battery, file)
+                  }}
+                />
+              </div>
+              <p className="min-w-0 flex-1 text-sm font-medium text-slate-700">{label}</p>
+            </div>
             <OcrStatus
               state={state}
               missing={FIELDS.filter((f) => state.values[f.key].trim() === '').length}
@@ -311,6 +325,24 @@ export function BatteryPanel({
                     />
                   </Field>
                 ))}
+                {/* «هل هذا صحيح؟» — the reading that started all of this. A pack was recorded at 1%
+                    at the START of a shift, straight from OCR, and nothing questioned it; a driver
+                    does not set off on a flat battery, so that is the reader mistaking «100» for «1».
+                    It never blocks: a pack really can be flat because a charger tripped overnight,
+                    and refusing would teach him to type whatever gets past the gate — which is how
+                    the 1% became evidence. A CONFIRMED odd value is the best training label there is. */}
+                {pkg === 'start' && !confirmed.has(battery.id) && checkStartBattery(toStored(state.values.percent, 1)) ? (
+                  <div className="flex flex-col gap-2 rounded-xl bg-amber-50 p-3">
+                    <p className="text-sm font-medium text-amber-900">{t.battery.lowAtStart}</p>
+                    <Button
+                      variant="ghost"
+                      className="self-start"
+                      onClick={() => setConfirmed((cur) => new Set(cur).add(battery.id))}
+                    >
+                      {t.battery.yesCorrect}
+                    </Button>
+                  </div>
+                ) : null}
                 {/* The way out for a phone that cannot run the app at all. Deliberately quiet and at
                     the bottom: it is the exception, and it must not look like the easy path past a
                     gate. It never blocks him and it never hides the pack — it hands it to the manager. */}
