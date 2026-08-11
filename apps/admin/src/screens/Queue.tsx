@@ -56,7 +56,16 @@ export function Queue({ onOpen }: { onOpen(shiftId: string): void }): ReactNode 
   const load = useCallback(() => {
     setError(null)
     void api
-      .get<{ shifts: ShiftRow[] }>('/shifts')
+      /*
+       * `?pending=1` — EVERY shift waiting for a decision, not today's.
+       *
+       * This read used to be the plain `/shifts`, which is date-filtered and defaults to today, and
+       * the states were filtered here afterwards. So a close submitted on Saturday evening and not
+       * approved before midnight vanished: still `pending_review`, its money still unposted, and
+       * gone from the only screen that exists to show it. Nothing expires an approval, and the
+       * queue must not either. The sort below puts the oldest first for exactly that reason.
+       */
+      .get<{ shifts: ShiftRow[] }>('/shifts?pending=1')
       .then((r) =>
         setRows(
           r.shifts

@@ -41,7 +41,7 @@ import type {
   WeekLockRecord,
   WeekLockRepo,
 } from '@ash/contracts'
-import { type CalendarDate, LIVE_STATES, type Minor, minor } from '@ash/domain'
+import { AWAITING_DECISION_STATES, type CalendarDate, LIVE_STATES, type Minor, minor } from '@ash/domain'
 import type { Pool } from './pool.ts'
 import { PG, isPgError, withTransaction } from './pool.ts'
 
@@ -176,6 +176,10 @@ export class PgShiftRepo implements ShiftRepo {
 
   async listLiveForBranch(branchId: string): Promise<ShiftRecord[]> {
     return this.load('s.branch_id = $1 AND s.state = ANY($2::shift_state[])', [branchId, LIVE_STATES])
+  }
+
+  async listAwaitingDecisionForBranch(branchId: string): Promise<ShiftRecord[]> {
+    return this.load('s.branch_id = $1 AND s.state = ANY($2::shift_state[])', [branchId, AWAITING_DECISION_STATES])
   }
 
   async listByBranchAndDate(branchId: string, businessDate: CalendarDate): Promise<ShiftRecord[]> {

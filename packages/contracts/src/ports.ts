@@ -465,6 +465,15 @@ export interface ShiftRepo {
    *  and never closed. Backs the live map: only a driver on a live shift belongs on it. */
   listLiveForBranch(branchId: string): Promise<ShiftRecord[]>
   /**
+   * Every shift in the branch waiting for the manager to decide, across dates.
+   *
+   * Deliberately date-independent, for the same reason `listLiveForBranch` is: "what is waiting for
+   * me" is not a question about today. The queue used the date-filtered read, so a close submitted
+   * before midnight and approved after it disappeared from the only screen that shows it — still
+   * `pending_review`, its money still unposted, and invisible.
+   */
+  listAwaitingDecisionForBranch(branchId: string): Promise<ShiftRecord[]>
+  /**
    * Remove a shift that never opened. Only legal for `draft` / `awaiting_open_approval`, which
    * have posted nothing to the ledger — it is how a mistakenly started shift releases the bike and
    * the driver it would otherwise hold hostage. The audit trigger records the deletion.

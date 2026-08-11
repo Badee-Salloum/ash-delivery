@@ -357,16 +357,25 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     '/shifts',
     { config: { permission: 'branch_data.view', subject: branchSubject } },
     async (req) => {
-      const { date, live } = z.object({ date: z.string().optional(), live: z.string().optional() }).parse(req.query)
+      const { date, live, pending } = z
+        .object({ date: z.string().optional(), live: z.string().optional(), pending: z.string().optional() })
+        .parse(req.query)
       const target = resolveBranchId(req)
       const businessDate = date ?? todayFor(deps)
       // `?live=1` asks "who is out RIGHT NOW", which is NOT a question about today's date: a shift
       // that opened before midnight and is still running belongs to yesterday's business date, and
       // the date-filtered list dropped it — the bike looked free and the shift unreachable from the
       // live screen. `listLiveForBranch` is the same date-independent read the GPS map uses.
-      const shifts = live === '1'
-        ? await deps.shifts.listLiveForBranch(target)
-        : await deps.shifts.listByBranchAndDate(target, businessDate)
+      // `?pending=1` asks "what is waiting for me to decide", which — like `?live=1` above — is NOT
+      // a question about today's date. The approval queue asked the date-filtered list and dropped
+      // everything the manager did not get to before midnight: the shift stayed `pending_review`
+      // with its money unposted, and the one screen whose job is to surface it stopped showing it.
+      const shifts =
+        pending === '1'
+          ? await deps.shifts.listAwaitingDecisionForBranch(target)
+          : live === '1'
+            ? await deps.shifts.listLiveForBranch(target)
+            : await deps.shifts.listByBranchAndDate(target, businessDate)
       return {
         businessDate,
         shifts: await Promise.all(

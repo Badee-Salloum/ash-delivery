@@ -385,3 +385,17 @@ export const LIVE_STATES: readonly ShiftState[] = [
 ]
 
 export const isLive = (state: ShiftState): boolean => LIVE_STATES.includes(state)
+
+/**
+ * States in which a shift is waiting for a branch manager to decide something.
+ *
+ * These are not a question about a DATE, which is why they are their own list. The approval queue
+ * read the branch's shifts for today and filtered client-side, so a close submitted on Saturday and
+ * not approved before midnight left the queue on its own — the shift stayed `pending_review`, its
+ * money stayed unposted, and the only screen whose job is to show it stopped doing so. Nothing
+ * expires an approval: a shift waiting yesterday is still waiting today, and the older it is the
+ * more it needs to be at the top of the list.
+ */
+export const AWAITING_DECISION_STATES: readonly ShiftState[] = ['awaiting_open_approval', 'pending_review']
+
+export const isAwaitingDecision = (state: ShiftState): boolean => AWAITING_DECISION_STATES.includes(state)

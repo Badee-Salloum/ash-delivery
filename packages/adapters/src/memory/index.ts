@@ -49,7 +49,7 @@ import type {
   WeekLockRepo,
 } from '@ash/contracts'
 import { normalizeUsername } from '@ash/contracts'
-import { type CalendarDate, type FxDay, type Minor, type Posting, isLive, minor } from '@ash/domain'
+import { type CalendarDate, type FxDay, type Minor, type Posting, isAwaitingDecision, isLive, minor } from '@ash/domain'
 import { memoryCipher } from '../crypto.ts'
 import { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 import { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
@@ -217,6 +217,9 @@ export class MemoryShiftRepo implements ShiftRepo {
   }
   async listLiveForBranch(branchId: string): Promise<ShiftRecord[]> {
     return [...this.rows.values()].filter((s) => s.branchId === branchId && isLive(s.state))
+  }
+  async listAwaitingDecisionForBranch(branchId: string): Promise<ShiftRecord[]> {
+    return [...this.rows.values()].filter((s) => s.branchId === branchId && isAwaitingDecision(s.state))
   }
   async listByBranchAndDate(branchId: string, businessDate: CalendarDate): Promise<ShiftRecord[]> {
     return [...this.rows.values()].filter((s) => s.branchId === branchId && s.businessDate === businessDate)
