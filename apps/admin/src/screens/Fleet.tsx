@@ -1,9 +1,10 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
-import { BMS_PROFILE_IDS, type VehicleEvent } from '@ash/client'
+import { BMS_PROFILE_IDS, type LiveShiftRow, type VehicleEvent, occupancyOf } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { useConfirm, useToast } from '../feedback.tsx'
 import { explainError } from '../errors.ts'
-import { Badge, Button, Card, DateField, Money, Select, Table, TextInput } from '../ui.tsx'
+import { Badge, Button, Card, DateField, Money, Pending, Select, Table, TextInput } from '../ui.tsx'
+import { BikeBoard } from './fleet/BikeBoard.tsx'
 
 interface Driver {
   id: string
@@ -95,6 +96,19 @@ export function Fleet(): ReactNode {
   const [pick, setPick] = useState({ driverId: '', vehicleId: '' })
   const [assignError, setAssignError] = useState<string | null>(null)
   const [dayShifts, setDayShifts] = useState<Array<{ id: string; vehicleId: string; state: string }>>([])
+  /**
+   * Who has which bike RIGHT NOW — `?live=1`, deliberately not `?date=`.
+   *
+   * A shift opened at 23:40 and still running belongs to yesterday's business date, so the
+   * date-filtered read this screen already had reports that bike as free and invites a manager to
+   * hand it to a second driver. Same lesson as the approval queue's `?pending=1`.
+   */
+  const [liveShifts, setLiveShifts] = useState<LiveShiftRow[]>([])
+  /** Was there a first paint yet? Without it the tables render «لا يوجد بعد» — "there are none". */
+  const [loading, setLoading] = useState(true)
+  const [view, setView] = useState<'board' | 'tables'>('board')
+  /** Lifted out of `VehicleHistory` so «السجل» on a bike card can open that bike's log. */
+  const [historyVehicle, setHistoryVehicle] = useState('')
 
   const load = (): void => {
     setLoadError(null)
@@ -117,7 +131,15 @@ export function Fleet(): ReactNode {
       .then((r) => setDayShifts(r.shifts))
       .catch(() => setDayShifts([]))
     void api.vehicleTypes().then((r) => setTypes(r.vehicleTypes)).catch(() => setTypes([]))
-    void api.batteries().then((r) => setBatteries(r.batteries)).catch(() => setBatteries([]))
+    void api
+      .batteries()
+      .then((r) => setBatteries(r.batteries))
+      .catch(() => setBatteries([]))
+      .finally(() => setLoading(false))
+    void api
+      .liveShifts()
+      .then((r) => setLiveShifts(r.shifts))
+      .catch(() => setLiveShifts([]))
   }
   useEffect(load, [assignDate, branchId]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -128,7 +150,18 @@ export function Fleet(): ReactNode {
   }
   const packsOn = (vehicleId: string): Battery[] =>
     batteries.filter((b) => b.vehicleId === vehicleId && b.active).sort((a, b) => (a.slotNo ?? 0) - (b.slotNo ?? 0))
-  const codeOfVehicle = (id: string): string => vehicles.find((v) => v.id === id)?.code ?? id.slice(0, 8)
+  /**
+   * Name a bike the way a person does: its marking, with the fleet code behind it.
+   *
+   * The fallback used to be `id.slice(0, 8)` rendered in the tabular-figure style reserved for
+   * machine numbers — a UUID prefix that LOOKS like a legitimate bike code. An unresolved id is a
+   * failed lookup and must read as one.
+   */
+  const labelOfVehicle = (id: string): string => {
+    const v = vehicles.find((x) => x.id === id)
+    if (!v) return '—'
+    return v.groundNo ? `${v.groundNo} · ${v.code}` : v.code
+  }
   /** How many slots a bike offers — its type's configurable ceiling (default 2 if unknown). */
   const maxSlotsFor = (vehicleId: string | null): number => {
     const vehicle = vehicles.find((v) => v.id === vehicleId)
@@ -167,17 +200,65 @@ export function Fleet(): ReactNode {
     dayShifts.find((s) => s.vehicleId === vehicleId && (s.state === 'draft' || s.state === 'awaiting_open_approval'))?.id ??
     null
 
+  if (loading || loadError) {
+    // A table rendering its empty row while the request is still in flight says «لا يوجد سائقون»,
+    // which is a statement of fact about an empty branch. `Pending` says what is actually true.
+    return (
+      <Pending
+        error={loadError ? explainError(loadError, t) : null}
+        loadingLabel={t.common.loading}
+        errorLabel={t.common.error}
+        onRetry={load}
+        retryLabel={t.common.retry}
+      />
+    )
+  }
+
   return (
     <div className="flex flex-col gap-4">
-      {loadError ? (
-        <div className="flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
-          <span>{explainError(loadError, t)}</span>
-          <Button variant="ghost" onClick={load}>
-            {t.common.retry}
+      {/* Cards answer "what is my fleet doing"; the tables stay one tap away for bulk editing. */}
+      <div className="flex gap-2">
+        {(['board', 'tables'] as const).map((v) => (
+          <Button key={v} variant={view === v ? 'primary' : 'ghost'} aria-pressed={view === v} onClick={() => setView(v)}>
+            {v === 'board' ? t.fleet.vehicles : t.fleet.tablesView}
           </Button>
-        </div>
+        ))}
+      </div>
+
+      {view === 'board' ? (
+        <BikeBoard
+          vehicles={vehicles}
+          batteries={batteries}
+          types={types}
+          liveShifts={liveShifts}
+          driverName={nameOfDriver}
+          onChanged={load}
+          onHistory={(id) => {
+            setView('tables')
+            setHistoryVehicle(id)
+          }}
+          onState={async (id, state) => {
+            try {
+              await api.patch(`/vehicles/${id}`, { state })
+            } catch (err) {
+              toast.error(explainError((err as { error?: string }).error ?? null, t))
+            }
+            load()
+          }}
+          onRelease={async (shiftId) => {
+            if (!(await confirm({ title: t.fleet.releaseVehicle, body: t.fleet.releaseVehicleConfirm, danger: true }))) return
+            try {
+              await api.cancelShift(shiftId)
+              toast.success(t.common.saved)
+            } catch (err) {
+              toast.error(explainError((err as { error?: string }).error ?? null, t))
+            }
+            load()
+          }}
+        />
       ) : null}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+
+      <div className={`grid grid-cols-1 gap-4 lg:grid-cols-2 ${view === 'tables' ? '' : 'hidden'}`}>
       <Card title={t.fleet.drivers}>
         <div className="mb-3 flex flex-col gap-2">
           <div className="flex gap-2">
@@ -429,7 +510,7 @@ export function Fleet(): ReactNode {
         </Table>
       </Card>
 
-      <VehicleHistory vehicles={vehicles} />
+      <VehicleHistory vehicles={vehicles} vehicleId={historyVehicle} setVehicleId={setHistoryVehicle} />
 
       <DocumentForm drivers={drivers} vehicles={vehicles} onAdded={load} />
 
@@ -465,13 +546,21 @@ export function Fleet(): ReactNode {
             onChange={(e) => setPick({ ...pick, vehicleId: e.target.value })}
           >
             <option value="">{t.fleet.vehicles}</option>
+            {/* A bike somebody already has is shown and DISABLED, not hidden: the manager looking
+                for «D15» must find out that it is out, not conclude it does not exist. The server
+                would refuse the assignment anyway — this refuses it before he types it. */}
             {vehicles
               .filter((v) => v.active)
-              .map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.code}
-                </option>
-              ))}
+              .map((v) => {
+                const occ = occupancyOf(v.id, liveShifts)
+                const busy = occ.kind !== 'free'
+                return (
+                  <option key={v.id} value={v.id} disabled={busy}>
+                    {v.groundNo ? `${v.groundNo} · ${v.code}` : v.code}
+                    {busy ? ` — ${t.fleet.busyNow}` : ''}
+                  </option>
+                )
+              })}
           </select>
           <Button
             disabled={!pick.driverId || !pick.vehicleId}
@@ -493,14 +582,18 @@ export function Fleet(): ReactNode {
           </Button>
         </div>
         {assignError ? <p className="mb-2 text-sm text-rose-600">{explainError(assignError, t)}</p> : null}
+        {/* `shiftNo` and the date are rendered because without them two assignments for the same
+            driver are two identical rows with two identical «إلغاء الإسناد» buttons. */}
         {assignments.length === 0 ? (
           <p className="py-2 text-sm text-slate-500">{t.fleet.noAssignments}</p>
         ) : (
-          <Table head={[t.fleet.driver, t.fleet.vehicles, '']}>
+          <Table head={[t.fleet.driver, t.fleet.vehicles, t.shift.shiftNo, t.fleet.date, '']}>
             {assignments.map((a) => (
               <tr key={a.id}>
                 <td className="px-3 py-1">{nameOfDriver(a.driverId)}</td>
-                <td className="px-3 py-1 num">{codeOfVehicle(a.vehicleId)}</td>
+                <td className="px-3 py-1 num">{labelOfVehicle(a.vehicleId)}</td>
+                <td className="px-3 py-1 num">{a.shiftNo}</td>
+                <td className="px-3 py-1 num">{a.businessDate}</td>
                 <td className="px-3 py-1">
                   <Button
                     variant="ghost"
@@ -755,10 +848,17 @@ function stateChangeLabel(notes: string, states: Record<string, string>, templat
  * charges and linked costs, newest first — and a small form to record one by hand. State changes
  * are logged automatically elsewhere, so they are read here but never offered as something to add.
  */
-function VehicleHistory({ vehicles }: { vehicles: Vehicle[] }): ReactNode {
+function VehicleHistory({
+  vehicles,
+  vehicleId,
+  setVehicleId,
+}: {
+  vehicles: Vehicle[]
+  vehicleId: string
+  setVehicleId(id: string): void
+}): ReactNode {
   const { api, t } = useApp()
   const toast = useToast()
-  const [vehicleId, setVehicleId] = useState('')
   const [events, setEvents] = useState<VehicleEvent[]>([])
   const empty = { kind: 'maintenance', odometerKm: '', cost: '', notes: '' }
   const [form, setForm] = useState(empty)

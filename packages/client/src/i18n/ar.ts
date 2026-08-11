@@ -108,6 +108,9 @@ export const ar = {
     english: 'بالإنجليزية',
     back: 'رجوع',
     remove: 'حذف',
+    all: 'الكل',
+    done: 'تم',
+    error: 'حدث خطأ',
   },
 
   /** API error codes → an actionable message. Unmapped codes fall back to a generic line. */
@@ -429,6 +432,19 @@ orderNo: 'رقم الطلب',
      * sits) nor the plate is what a driver reads in the yard — this is.
      */
     groundNo: 'الرقم على الأرض',
+    groundNoHint: 'الرقم المكتوب على الآلية — هو ما يقرأه السائق في الساحة',
+    /** The board answers this before he reads a single card. */
+    busyNow: 'على نوبة الآن',
+    availableNow: 'متاحة',
+    inactive: 'غير مفعّلة',
+    tablesView: 'الجداول',
+    addVehicleWithPacks: 'إضافة آلية مع بطارياتها',
+    retryPacks: 'إعادة محاولة البطاريات',
+    /**
+     * The bike EXISTS. Never «فشل» — say what was created, so he knows what he is looking at and
+     * what is left to do. `{code}` is the number the machine was given.
+     */
+    partialCreate: 'أُنشئت الآلية {code} — حُفظت {n} من {m} بطاريات. الباقي لم يُحفظ: أعد المحاولة أو أضفه لاحقاً.',
     vehicleType: 'نوع الآلية',
     addType: 'إضافة نوع آلية',
     typeNo: 'رقم النوع',
@@ -504,6 +520,8 @@ orderNo: 'رقم الطلب',
     fitTo: 'تركيب على',
     unfit: 'فك',
     states: { ready: 'جاهزة', charging: 'تشحن', maintenance: 'صيانة', retired: 'مسحوبة' },
+    /** A socket the TYPE declares and no pack fills — a gap you can see, not an absence. */
+    emptySlot: 'فارغ',
     reading: 'قراءة البطارية',
     bmsShot: 'صورة تطبيق البطارية',
     bmsHint: 'اختر سكرينشوت تطبيق البطارية من معرض الصور',
