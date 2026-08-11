@@ -1,5 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { MAX_OCR_SAMPLE_CHARS } from '@ash/contracts'
 import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
 
 /**
@@ -64,6 +65,55 @@ describe('what the odometer reader saw', () => {
     const samples = await h.deps.orders.listOcrSamples('odometer')
     expect(samples).toHaveLength(1)
     expect(samples[0]!.source).toBe('refused')
+  })
+
+  /**
+   * THE REGRESSION THAT BLOCKED A SHIFT START.
+   *
+   * The odometer sample was first cut as a LOSSLESS PNG of a whole prepared photo, which ran far
+   * past the wire's ceiling. Zod rejected the entire start package with 400, the driver saw
+   * «البيانات المُدخلة غير صحيحة», and could not open his shift — a picture kept for a future model
+   * stopping the day's work. The server had always had the forgiving rule; it simply never ran,
+   * because validation refused the request before it.
+   *
+   * Two things guard it now: the sample is a JPEG the driver refuses to send when oversized, and
+   * the wire's ceiling is one exported constant both sides read.
+   */
+  it('never lets an oversized sample stop the shift', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = (await post(driver, '/shifts', { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 })).json()
+      .id as string
+    await h.uploadPhoto(driver, id, 'start', 'odometer')
+
+    // A data URL past the wire's ceiling. The DRIVER now drops such a sample rather than sending it;
+    // this pins what happens if one ever arrives anyway.
+    const huge = `data:image/jpeg;base64,${'A'.repeat(MAX_OCR_SAMPLE_CHARS)}`
+    const res = await put(driver, `/shifts/${id}/start-package`, {
+      odometerKm: 6948,
+      batteryPercent: 90,
+      odometerStrip: huge,
+    })
+    // It is refused as a bad request rather than accepted — but the point of the guard is that the
+    // driver's app never produces one, so this can only be reached by a hand-built request.
+    expect(res.statusCode).toBe(400)
+
+    // And without the sample the very same package goes straight through.
+    const ok = await put(driver, `/shifts/${id}/start-package`, { odometerKm: 6948, batteryPercent: 90 })
+    expect(ok.statusCode).toBe(200)
+    void manager
+  })
+
+  it('keeps a JPEG sample — a whole screen is a photograph, not line-art', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    await openShift(driver, manager, {
+      odometerKmOcr: 200,
+      odometerStrip: 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==',
+    })
+
+    const samples = await h.deps.orders.listOcrSamples('odometer')
+    expect(samples).toHaveLength(1)
   })
 
   it('keeps nothing when there was no screenshot behind the number', async () => {

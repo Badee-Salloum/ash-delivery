@@ -20,6 +20,17 @@ import { MAX_BATTERY_SLOTS, type Minor, formatMinor, parseMinor } from '@ash/dom
  * equation was exactly zero. A number this system cannot store is a bad request, not a server fault,
  * and it has to be refused at the edge where it can still be named.
  */
+/**
+ * The biggest training sample the wire accepts, in characters of data URL.
+ *
+ * EXPORTED because the driver must check it BEFORE sending. It did not, and an oversized odometer
+ * sample failed `startPackageRequest` validation — so a picture kept for a future model returned 400
+ * «البيانات المُدخلة غير صحيحة» and a driver could not start his shift. The server has always had
+ * the right rule («a lost sample costs a future model one example; a thrown error costs a driver his
+ * shift»); it just never ran, because Zod rejected the whole request first.
+ */
+export const MAX_OCR_SAMPLE_CHARS = 262_144
+
 const MINOR_MAX = 9_223_372_036_854_775_807n
 const MINOR_MIN = -9_223_372_036_854_775_808n
 
@@ -98,7 +109,7 @@ export const startPackageRequest = z.object({
    * a wrong CHOICE of number (it answered 200 for 6948), so a tight crop would preserve the mistake.
    * 256 KB ceiling; the prepared image is typically 15–40 KB.
    */
-  odometerStrip: z.string().max(262144).nullable().default(null),
+  odometerStrip: z.string().max(MAX_OCR_SAMPLE_CHARS).nullable().default(null),
 })
 
 /**
@@ -310,9 +321,9 @@ export const endPackageRequest = z.object({
    */
   walletDeclaredOcr: moneySchema.nullable().catch(null).default(null),
   /** The wallet screen as the reader saw it — training data, same rules as `odometerStrip`. */
-  walletStrip: z.string().max(262144).nullable().default(null),
+  walletStrip: z.string().max(MAX_OCR_SAMPLE_CHARS).nullable().default(null),
   /** The closing dashboard as the reader saw it. */
-  odometerStrip: z.string().max(262144).nullable().default(null),
+  odometerStrip: z.string().max(MAX_OCR_SAMPLE_CHARS).nullable().default(null),
 })
 
 /**

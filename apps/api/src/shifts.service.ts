@@ -1287,8 +1287,11 @@ async function keepShiftOcrSample(
   read: number | string | null | undefined,
 ): Promise<void> {
   if (!strip) return
-  const base64 = strip.replace(/^data:image\/png;base64,/, '')
-  if (base64 === strip) return // not the data URL the app produces; ignore rather than store junk
+  // PNG for the narrow glyph strips, JPEG for a whole prepared screen — a photograph coded
+  // losslessly ran to megabytes and blew the wire's ceiling, which stopped a shift instead of a
+  // sample. Anything that is not one of the two data URLs the app produces is ignored, not stored.
+  const base64 = strip.replace(/^data:image\/(png|jpeg);base64,/, '')
+  if (base64 === strip) return
   try {
     const bytes = Buffer.from(base64, 'base64')
     if (bytes.length === 0 || bytes.length > 262144) return

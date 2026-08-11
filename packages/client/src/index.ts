@@ -25,3 +25,12 @@ export function formatDateTime(iso: string, lang: 'ar' | 'en'): string {
   void lang // the shape is identical in both; the parameter keeps call sites honest
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
+
+/**
+ * The wire's ceiling on a training sample, re-exported for the DRIVER.
+ *
+ * It has to check before sending: an oversized sample failed validation and returned 400 on the
+ * whole start package, so a picture kept for a future model stopped a shift. `apps/driver` does not
+ * depend on `@ash/contracts`, and this is the package it does depend on.
+ */
+export { MAX_OCR_SAMPLE_CHARS } from '@ash/contracts'

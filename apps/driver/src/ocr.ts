@@ -27,6 +27,7 @@
  */
 // Statically imported, unlike tesseract.js: this is a few kilobytes of pure arithmetic with no
 // wasm behind it, and the amounts cannot be read without it.
+import { MAX_OCR_SAMPLE_CHARS } from '@ash/client'
 import { type Box, CANON_CAP_HEIGHT, canonFactorFor, CLOCK_ALPHABET, type Mask, maskFromPixels, readDigitRun, readGlyphRow, resampleRgba, type Template, unpackTemplates } from './glyphs.ts'
 import { CLOCK_TEMPLATES } from './glyph-templates.ts'
 import { GLYPH_TEMPLATES } from './glyph-templates.ts'
@@ -418,13 +419,46 @@ async function stripBlob(
 }
 
 /** A PNG as a data URL, or null. Small by construction — see `stripBlob`. */
-async function asDataUrl(blob: Blob | null): Promise<string | null> {
+async function asDataUrl(blob: Blob | null, mime: 'image/png' | 'image/jpeg' = 'image/png'): Promise<string | null> {
   if (!blob) return null
   try {
     const bytes = new Uint8Array(await blob.arrayBuffer())
     let binary = ''
     for (const b of bytes) binary += String.fromCharCode(b)
-    return `data:image/png;base64,${btoa(binary)}`
+    return `data:${mime};base64,${btoa(binary)}`
+  } catch {
+    return null
+  }
+}
+
+/**
+ * A whole prepared screen, as a training sample small enough to travel.
+ *
+ * The fee strips are PNG and stay PNG: a few hundred pixels of line-art, where lossless matters and
+ * costs nothing. A dashboard or wallet SCREEN is a photograph, and PNG is the wrong codec for one —
+ * the first version produced data URLs far over the wire's ceiling, which failed validation and
+ * stopped the shift rather than the sample. JPEG at 0.85 is a fraction of the size and keeps
+ * everything this reader needs: its failure is choosing the wrong NUMBER on the dash, not resolving
+ * a stroke.
+ *
+ * Returns null rather than something oversized — see `MAX_OCR_SAMPLE_CHARS`. A sample is never worth
+ * a shift.
+ */
+async function screenSample(blob: Blob | null): Promise<string | null> {
+  if (!blob) return null
+  try {
+    const bitmap = await createImageBitmap(blob)
+    // Long edge capped: a training set wants the layout and the digits, not the driver's phone's
+    // full sensor. 1280 keeps a dashboard's figures comfortably legible.
+    const scale = Math.min(1, 1280 / Math.max(bitmap.width, bitmap.height))
+    const w = Math.max(1, Math.round(bitmap.width * scale))
+    const h = Math.max(1, Math.round(bitmap.height * scale))
+    const canvas = new OffscreenCanvas(w, h)
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    ctx.drawImage(bitmap, 0, 0, w, h)
+    const url = await asDataUrl(await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 }), 'image/jpeg')
+    return url !== null && url.length <= MAX_OCR_SAMPLE_CHARS ? url : null
   } catch {
     return null
   }
@@ -547,7 +581,7 @@ export async function readDashboard(image: Blob | Uint8Array, timeoutMs = DASH_T
      * The prepared copy, not the evidence copy: evidence is compressed to ~300 KB / 1280 px / q0.4,
      * which is what destroys the strokes a model would learn from.
      */
-    const sample = await asDataUrl(prepared)
+    const sample = await screenSample(prepared)
     const result = await recognize(prepared, { whitelist: '0123456789%.', psm: 11 }, timeoutMs)
     text = result.text
     const reading = parseReading(text)
@@ -622,7 +656,7 @@ export async function readWallet(image: Blob | Uint8Array, timeoutMs = DASH_TIME
     // White digits on a solid orange card ⇒ invert. Whitelist money digits (both scripts) + the
     // separator marks + the "SYP" tag; a uniform block reads better than sparse here.
     const prepared = await prepareForOcr(toBlob(image), true)
-    const sample = await asDataUrl(prepared)
+    const sample = await screenSample(prepared)
     const result = await recognize(prepared, { whitelist: '0123456789٠١٢٣٤٥٦٧٨٩،٬٫., SYPsyp', psm: 6 }, timeoutMs)
     text = result.text
     const amountText = parseWallet(text)
