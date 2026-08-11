@@ -170,7 +170,9 @@ export interface BatteryReadingRecord {
   t1Dc: number | null
   t2Dc: number | null
   mediaId: string | null
-  source: 'ocr' | 'manual'
+  source: 'ocr' | 'manual' | 'manager'
+  /** The driver cannot read this pack on his own phone; the manager owes the reading. */
+  unavailable: boolean
   ocrRaw: unknown
   /** The mid-shift swap this reading belongs to; null for the ordinary start/end readings. */
   batterySwapId: string | null

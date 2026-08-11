@@ -522,6 +522,13 @@ orderNo: 'رقم الطلب',
     states: { ready: 'جاهزة', charging: 'تشحن', maintenance: 'صيانة', retired: 'مسحوبة' },
     /** A socket the TYPE declares and no pack fills — a gap you can see, not an absence. */
     emptySlot: 'فارغ',
+    /** For a phone that cannot run the BMS app at all — the exception, never the easy path. */
+    appWontRun: 'تطبيق البطارية لا يعمل على جهازي',
+    /** The manager's own to-do on the approval screen — not something to check, something to DO. */
+    managerMustRead: 'جهاز السائق لا يشغّل التطبيق — اقرأ هذه البطارية بنفسك قبل الاعتماد',
+    readByManager: 'قرأها مدير الفرع (جهاز السائق لا يشغّل التطبيق)',
+    unavailableDeclared: 'سُجِّل أنّ التطبيق لا يعمل على جهازك',
+    unavailableNext: 'تابع عملك — سيقرأ مدير الفرع هذه البطارية قبل اعتماد النوبة.',
     reading: 'قراءة البطارية',
     bmsShot: 'صورة تطبيق البطارية',
     bmsHint: 'اختر سكرينشوت تطبيق البطارية من معرض الصور',

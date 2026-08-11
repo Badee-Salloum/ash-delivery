@@ -191,7 +191,14 @@ export interface BatteryReadingInput {
   mosTempDc?: number | null
   t1Dc?: number | null
   t2Dc?: number | null
-  source?: 'ocr' | 'manual'
+  source?: 'ocr' | 'manual' | 'manager'
+  /**
+   * «تطبيق البطارية لا يعمل على جهازي» — the driver cannot read this pack on his own phone.
+   *
+   * Unblocks him (the gate stops demanding a screenshot he cannot take) and blocks the branch
+   * manager, who must read the pack himself before the shift can be approved.
+   */
+  unavailable?: boolean
   /** What the OCR read BEFORE the driver corrected anything (SRS D-3). */
   ocrRaw?: unknown
 }

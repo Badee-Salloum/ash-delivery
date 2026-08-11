@@ -535,7 +535,20 @@ export const batteryReadingFields = z.object({
   mosTempDc: z.number().int().min(-500).max(2_000).nullable().default(null),
   t1Dc: z.number().int().min(-500).max(2_000).nullable().default(null),
   t2Dc: z.number().int().min(-500).max(2_000).nullable().default(null),
-  source: z.enum(['ocr', 'manual']).default('manual'),
+  /**
+   * Who produced this figure. `manager` is NOT `manual`: a value the branch manager took on his own
+   * device, after the driver's phone could not, is a different fact from one the driver typed, and
+   * the two must not be distinguishable only by reading the audit log.
+   */
+  source: z.enum(['ocr', 'manual', 'manager']).default('manual'),
+  /**
+   * «تطبيق البطارية لا يعمل على جهازي».
+   *
+   * The driver declaring that this pack cannot be read on his phone at all. It unblocks HIM — the
+   * gate stops demanding a screenshot he is incapable of taking — and blocks the MANAGER, who
+   * cannot approve the shift until he has read the pack himself. Evidence moved, never waived.
+   */
+  unavailable: z.boolean().default(false),
   ocrRaw: z.unknown().optional(),
 })
 

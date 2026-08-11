@@ -128,11 +128,22 @@ export function BatteryPanel({
   const [packs, setPacks] = useState<Record<string, PackState>>(() => initialPacks ?? {})
   useEffect(() => onPacksChanged?.(packs), [packs, onPacksChanged])
   const [files, setFiles] = useState<Record<string, File>>({})
+  /**
+   * Packs the driver has declared he cannot read on his own phone.
+   *
+   * Local to this mount on purpose: the server is the record (`unavailable` on the reading row), and
+   * this only decides what the screen shows him next.
+   */
+  const [unavailable, setUnavailable] = useState<ReadonlySet<string>>(new Set())
 
   const slotOf = (b: FittedBattery, i: number): number => b.slotNo ?? i + 1
   const stateOf = (id: string): PackState => packs[id] ?? EMPTY
 
-  const complete = batteries.every((b, i) => stateOf(b.id).values.percent.trim() !== '' && slots.has(`bms_${slotOf(b, i)}`))
+  // A declared pack counts as done FOR HIM. The server's gate still wants the manager's reading —
+  // that is `awaiting_manager_reading`, and it blocks the approval, not the driver.
+  const complete = batteries.every(
+    (b, i) => unavailable.has(b.id) || (stateOf(b.id).values.percent.trim() !== '' && slots.has(`bms_${slotOf(b, i)}`)),
+  )
   useEffect(() => onReadingsChanged?.(complete), [complete, onReadingsChanged])
 
   /** Push one pack's reading. A retake corrects that pack's row rather than adding a second. */
@@ -161,6 +172,24 @@ export function BatteryPanel({
       // Swallowed on purpose: the gate re-reads the stored rows at submit time, so a dropped write
       // shows up as an honest "reading missing", never as a false success.
       await api.putBatteryReadings(shiftId, pkg, [body]).catch(() => undefined)
+    },
+    [api, shiftId, pkg],
+  )
+
+  /**
+   * «التطبيق لا يعمل على جهازي».
+   *
+   * Some phones simply will not run the BMS app — an old Android, a device its manufacturer's app
+   * refuses, Bluetooth that will not pair. Before this the driver was stuck at the gate being asked
+   * for a screenshot his hardware cannot produce, and the only way past it was to photograph
+   * something else, which turns a hardware problem into false evidence.
+   */
+  const declareUnavailable = useCallback(
+    async (batteryId: string): Promise<void> => {
+      setUnavailable((cur) => new Set(cur).add(batteryId))
+      await api
+        .putBatteryReadings(shiftId, pkg, [{ batteryId, percent: null, unavailable: true, source: 'manual' }])
+        .catch(() => undefined)
     },
     [api, shiftId, pkg],
   )
@@ -246,24 +275,43 @@ export function BatteryPanel({
               onRetry={files[battery.id] ? () => void runOcr(battery, files[battery.id]!) : undefined}
             />
 
-            <Card className="flex flex-col gap-3">
-              <p className="text-sm text-slate-600">{t.battery.bmsHint}</p>
-              <p className="text-xs text-slate-600">{t.battery.requiredHint}</p>
-              {FIELDS.map((f) => (
-                <Field
-                  key={f.key}
-                  label={`${t.battery[f.label]}${f.unit ? ` (${f.unit})` : ''}${'required' in f ? ' *' : ''}`}
+            {unavailable.has(battery.id) ? (
+              /* Declared. Say plainly what happens next, so he is not left wondering whether he has
+                 broken something — the shift proceeds and the branch manager reads this pack. */
+              <Card className="flex flex-col gap-2">
+                <p className="text-sm font-medium text-amber-800">{t.battery.unavailableDeclared}</p>
+                <p className="text-xs text-slate-600">{t.battery.unavailableNext}</p>
+              </Card>
+            ) : (
+              <Card className="flex flex-col gap-3">
+                <p className="text-sm text-slate-600">{t.battery.bmsHint}</p>
+                <p className="text-xs text-slate-600">{t.battery.requiredHint}</p>
+                {FIELDS.map((f) => (
+                  <Field
+                    key={f.key}
+                    label={`${t.battery[f.label]}${f.unit ? ` (${f.unit})` : ''}${'required' in f ? ' *' : ''}`}
+                  >
+                    <TextInput
+                      inputMode="decimal"
+                      value={state.values[f.key]}
+                      onChange={(e) =>
+                        setPack(battery.id, { ...state, values: { ...state.values, [f.key]: e.target.value } })
+                      }
+                    />
+                  </Field>
+                ))}
+                {/* The way out for a phone that cannot run the app at all. Deliberately quiet and at
+                    the bottom: it is the exception, and it must not look like the easy path past a
+                    gate. It never blocks him and it never hides the pack — it hands it to the manager. */}
+                <button
+                  type="button"
+                  onClick={() => void declareUnavailable(battery.id)}
+                  className="min-h-11 self-start text-sm text-slate-500 underline"
                 >
-                  <TextInput
-                    inputMode="decimal"
-                    value={state.values[f.key]}
-                    onChange={(e) =>
-                      setPack(battery.id, { ...state, values: { ...state.values, [f.key]: e.target.value } })
-                    }
-                  />
-                </Field>
-              ))}
-            </Card>
+                  {t.battery.appWontRun}
+                </button>
+              </Card>
+            )}
           </div>
         )
       })}

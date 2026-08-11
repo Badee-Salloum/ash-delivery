@@ -1520,8 +1520,9 @@ export class PgBatteryReadingRepo implements BatteryReadingRepo {
     await this.pool.query(
       `INSERT INTO shift_battery_readings
          (shift_id, battery_id, package, percent, pack_millivolts, cycle_count,
-          remain_capacity_dah, full_capacity_dah, mos_temp_dc, t1_dc, t2_dc, media_id, source, ocr_raw, battery_swap_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+          remain_capacity_dah, full_capacity_dah, mos_temp_dc, t1_dc, t2_dc, media_id, source, ocr_raw,
+          battery_swap_id, unavailable)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
        ON CONFLICT (shift_id, battery_id, package) DO UPDATE SET
          percent = EXCLUDED.percent,
          pack_millivolts = EXCLUDED.pack_millivolts,
@@ -1534,12 +1535,14 @@ export class PgBatteryReadingRepo implements BatteryReadingRepo {
          media_id = EXCLUDED.media_id,
          source = EXCLUDED.source,
          ocr_raw = COALESCE(shift_battery_readings.ocr_raw, EXCLUDED.ocr_raw),
-         battery_swap_id = COALESCE(EXCLUDED.battery_swap_id, shift_battery_readings.battery_swap_id)`,
+         battery_swap_id = COALESCE(EXCLUDED.battery_swap_id, shift_battery_readings.battery_swap_id),
+         unavailable = EXCLUDED.unavailable`,
       [
         r.shiftId, r.batteryId, r.package, r.percent, r.packMillivolts, r.cycleCount,
         r.remainCapacityDah, r.fullCapacityDah, r.mosTempDc, r.t1Dc, r.t2Dc, r.mediaId, r.source,
         r.ocrRaw === null || r.ocrRaw === undefined ? null : JSON.stringify(r.ocrRaw),
         r.batterySwapId,
+        r.unavailable,
       ],
     )
   }
@@ -1568,6 +1571,7 @@ export class PgBatteryReadingRepo implements BatteryReadingRepo {
       t2Dc: numOrNull(r.t2_dc),
       mediaId: (r.media_id as string | null) ?? null,
       source: r.source as BatteryReadingRecord['source'],
+      unavailable: Boolean(r.unavailable),
       ocrRaw: r.ocr_raw ?? null,
       batterySwapId: (r.battery_swap_id as string | null) ?? null,
     }))

@@ -18,7 +18,9 @@ interface BatteryReadingView {
   cycleCount: number | null
   capacityAh: number | null
   serialNo: string | null
-  source: 'ocr' | 'manual'
+  source: 'ocr' | 'manual' | 'manager'
+  /** The driver declared his phone cannot run the BMS app; this pack is the MANAGER's to read. */
+  unavailable?: boolean
   /** The pre-correction OCR reading (SRS D-3 baseline); charge + cycles only now. */
   ocrRaw?: unknown
 }
@@ -320,6 +322,27 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
    * review hash — and approving against a hash this screen no longer shows is precisely what
    * `orders_changed_since_review` exists to prevent.
    */
+  /**
+   * The charge the manager just read on his own device, for a pack the driver's phone could not.
+   *
+   * Its own endpoint because it is its own permission: `shift.operate` is scoped `own` to the
+   * driver, so the manager cannot post to the ordinary readings route at all — which is exactly the
+   * case this exists for. The server stamps `source: 'manager'`; it is not taken from here.
+   */
+  async function managerRead(pkg: 'start' | 'end', batteryId: string, percent: number): Promise<void> {
+    if (!review) return
+    try {
+      await api.put(`/shifts/${review.id}/battery-readings/manager`, {
+        package: pkg,
+        readings: [{ batteryId, percent }],
+      })
+      toast.success(t.common.saved)
+    } catch (err) {
+      toast.error(explainError((err as { error?: string }).error ?? null, t))
+    }
+    load()
+  }
+
   async function reviseOps(body: Record<string, unknown>): Promise<void> {
     if (!review) return
     setBusy(true)
@@ -535,7 +558,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             )}
           />
           <PhotoRow pkg="start" media={review.media} />
-          <BatteryReadings readings={review.startPackage.batteries} />
+          <BatteryReadings readings={review.startPackage.batteries} pkg="start" onManagerRead={managerRead} />
         </Card>
         <Card title={t.shift.endPackage}>
           <dl className="grid grid-cols-2 gap-2 text-sm">
@@ -555,7 +578,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           {/* SRS D-3: what the driver changed from the wallet OCR. */}
           <OcrDeltaLines deltas={scalarDelta(t.shift.walletBalance, review.endPackage.walletDeclaredOcr, review.endPackage.walletDeclared)} />
           <PhotoRow pkg="end" media={review.media} />
-          <BatteryReadings readings={review.endPackage.batteries} />
+          <BatteryReadings readings={review.endPackage.batteries} pkg="end" onManagerRead={managerRead} />
         </Card>
       </div>
 
@@ -1339,28 +1362,92 @@ function Lightbox({
  * for display. The cycle count is the number worth watching over time: it is what says a pack is
  * wearing out before it strands a driver.
  */
-function BatteryReadings({ readings }: { readings: BatteryReadingView[] }): ReactNode {
+function BatteryReadings({
+  readings,
+  pkg,
+  onManagerRead,
+}: {
+  readings: BatteryReadingView[]
+  pkg?: 'start' | 'end'
+  /** Supplying a reading the driver's phone could not produce. Absent ⇒ read-only. */
+  onManagerRead?(pkg: 'start' | 'end', batteryId: string, percent: number): Promise<void>
+}): ReactNode {
   const { t } = useApp()
   if (readings.length === 0) return null
   return (
     <div className="mt-3 flex flex-col gap-2">
-      {readings.map((r) => (
-        <div key={`${r.batteryId}-${r.slotNo}`} className="rounded-lg border border-slate-200 px-3 py-2 text-sm">
-          <div className="flex items-center justify-between">
-            <span className="font-medium">
-              {t.battery.slot} {r.slotNo}
-              {r.capacityAh === null ? '' : ` · ${r.capacityAh}Ah`}
-            </span>
-            <span className="num font-bold">{r.percent === null ? '—' : `${r.percent}%`}</span>
+      {readings.map((r) => {
+        // The driver said his phone will not run the BMS app, and nobody has read it since. This is
+        // the one thing on the screen that is the MANAGER's to do rather than to check.
+        const owed = r.unavailable === true && r.percent === null
+        return (
+          <div
+            key={`${r.batteryId}-${r.slotNo}`}
+            className={`rounded-lg border px-3 py-2 text-sm ${owed ? 'border-amber-300 bg-amber-50' : 'border-slate-200'}`}
+          >
+            <div className="flex items-center justify-between">
+              <span className="font-medium">
+                {t.battery.slot} {r.slotNo}
+                {r.capacityAh === null ? '' : ` · ${r.capacityAh}Ah`}
+              </span>
+              <span className="num font-bold">{r.percent === null ? '—' : `${r.percent}%`}</span>
+            </div>
+            <div className="num mt-1 flex flex-wrap gap-x-4 text-xs text-slate-500">
+              {r.cycleCount === null ? null : <span>{t.battery.cycles}: {r.cycleCount}</span>}
+              {r.serialNo === null ? null : <span className="text-slate-600">{r.serialNo}</span>}
+            </div>
+            {/* Stays visible after he fills it: it is the record of WHY a manager's figure is here,
+                and hiding it would erase that the driver could not read the pack at all. */}
+            {r.unavailable === true ? (
+              <p className="mt-1 text-xs text-amber-800">
+                {r.percent === null ? t.battery.managerMustRead : t.battery.readByManager}
+              </p>
+            ) : null}
+            {owed && onManagerRead && pkg ? <ManagerReading pkg={pkg} batteryId={r.batteryId} onRead={onManagerRead} /> : null}
+            {/* SRS D-3: what the driver changed from the OCR reading. */}
+            <OcrDeltaLines deltas={bmsDeltas(r, t)} />
           </div>
-          <div className="num mt-1 flex flex-wrap gap-x-4 text-xs text-slate-500">
-            {r.cycleCount === null ? null : <span>{t.battery.cycles}: {r.cycleCount}</span>}
-            {r.serialNo === null ? null : <span className="text-slate-600">{r.serialNo}</span>}
-          </div>
-          {/* SRS D-3: what the driver changed from the OCR reading. */}
-          <OcrDeltaLines deltas={bmsDeltas(r, t)} />
-        </div>
-      ))}
+        )
+      })}
+    </div>
+  )
+}
+
+/** The manager typing the charge he just read on his own device. */
+function ManagerReading({
+  pkg,
+  batteryId,
+  onRead,
+}: {
+  pkg: 'start' | 'end'
+  batteryId: string
+  onRead(pkg: 'start' | 'end', batteryId: string, percent: number): Promise<void>
+}): ReactNode {
+  const { t } = useApp()
+  const [value, setValue] = useState('')
+  const [busy, setBusy] = useState(false)
+  const n = Number(value)
+  const ready = value.trim() !== '' && Number.isInteger(n) && n >= 0 && n <= 100 && !busy
+
+  return (
+    <div className="mt-2 flex items-end gap-2">
+      <label className="flex w-28 flex-col gap-1">
+        <span className="text-xs text-slate-600">{t.battery.percent}</span>
+        <TextInput inputMode="numeric" value={value} onChange={(e) => setValue(e.target.value)} />
+      </label>
+      <Button
+        disabled={!ready}
+        onClick={async () => {
+          setBusy(true)
+          try {
+            await onRead(pkg, batteryId, n)
+          } finally {
+            setBusy(false)
+          }
+        }}
+      >
+        {t.common.save}
+      </Button>
     </div>
   )
 }

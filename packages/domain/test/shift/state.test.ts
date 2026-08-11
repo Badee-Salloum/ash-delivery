@@ -92,6 +92,82 @@ describe('the OPEN gate (BR5, AC #1)', () => {
     expect(result).toEqual({ ok: false, reason: 'driver_not_confirmed' })
   })
 
+  /**
+   * A driver whose phone will not run the BMS app.
+   *
+   * It happens: an old Android, a device the manufacturer's app refuses, Bluetooth that will not
+   * pair. Before this he was simply STUCK — the gate wanted a `bms_1` screenshot and a charge figure
+   * that his phone was incapable of producing, so he could not open a shift at all.
+   *
+   * The declaration does not delete the evidence, it moves who owes it. He proceeds; the MANAGER
+   * cannot approve until somebody with a working device has read that pack.
+   */
+  describe('a pack the driver cannot read on his own phone', () => {
+    const pack = (over = {}) => ({
+      batterySlots: 1,
+      batteryReadings: [{ slotNo: 1, percent: null, unavailable: true }],
+      mediaSlots: ['odometer'],
+      ...over,
+    })
+
+    it('lets the driver confirm — he is not asked for a screenshot he cannot take', () => {
+      const result = transition('draft', 'driver_confirm_start',
+        ctx({ actor: actor('driver'), startPackage: completeStart({ ...pack(), driverConfirmedAt: null }) }))
+      expect(result).toEqual({ ok: true, next: 'awaiting_open_approval' })
+    })
+
+    it('but STOPS the manager approving until he has read it himself', () => {
+      const result = transition('awaiting_open_approval', 'manager_approve_open',
+        ctx({ startPackage: completeStart(pack()) }))
+      expect(result).toMatchObject({ ok: false, reason: 'start_package_incomplete' })
+      expect(result.ok === false && result.gaps).toContainEqual({ kind: 'awaiting_manager_reading', slotNo: 1 })
+    })
+
+    it('and once the manager supplies the charge, the shift opens', () => {
+      const result = transition('awaiting_open_approval', 'manager_approve_open',
+        ctx({
+          startPackage: completeStart({
+            batterySlots: 1,
+            batteryReadings: [{ slotNo: 1, percent: 88, unavailable: true }],
+            mediaSlots: ['odometer'],
+          }),
+        }))
+      expect(result).toEqual({ ok: true, next: 'open' })
+    })
+
+    it('does NOT waive a pack he simply has not done yet — that is still his to close', () => {
+      const result = transition('draft', 'driver_confirm_start',
+        ctx({
+          actor: actor('driver'),
+          startPackage: completeStart({
+            batterySlots: 1,
+            batteryReadings: [],
+            mediaSlots: ['odometer'],
+            driverConfirmedAt: null,
+          }),
+        }))
+      expect(result).toMatchObject({ ok: false, reason: 'start_package_incomplete' })
+      expect(result.ok === false && result.gaps).toContainEqual({ kind: 'missing_battery_reading', slotNo: 1 })
+      expect(result.ok === false && result.gaps).toContainEqual({ kind: 'missing_photo', slot: 'bms_1' })
+    })
+
+    it('waives only the declared pack, never its neighbour', () => {
+      const result = transition('draft', 'driver_confirm_start',
+        ctx({
+          actor: actor('driver'),
+          startPackage: completeStart({
+            batterySlots: 2,
+            batteryReadings: [{ slotNo: 1, percent: null, unavailable: true }, { slotNo: 2, percent: 70 }],
+            mediaSlots: ['odometer'],
+            driverConfirmedAt: null,
+          }),
+        }))
+      // Pack 2 still owes its screenshot; pack 1 does not.
+      expect(result.ok === false && result.gaps).toContainEqual({ kind: 'missing_photo', slot: 'bms_2' })
+      expect(result.ok === false && result.gaps).not.toContainEqual({ kind: 'missing_photo', slot: 'bms_1' })
+    })
+  })
+
   it('lets the manager send the package back for a re-shoot (C-7)', () => {
     expect(transition('awaiting_open_approval', 'manager_request_rephoto', ctx()))
       .toEqual({ ok: true, next: 'draft' })

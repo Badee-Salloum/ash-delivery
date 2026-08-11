@@ -24,7 +24,7 @@ import {
   operationsRequest,
   reviseOperationsRequest,
 } from '@ash/contracts'
-import { addDays, checkWeekClose, dayOfWeek, minor, resolveFxDay, sum, weekClosedOn, weekStartFor } from '@ash/domain'
+import { addDays, bmsSlot, checkWeekClose, dayOfWeek, minor, resolveFxDay, sum, weekClosedOn, weekStartFor } from '@ash/domain'
 import {
   SESSION_COOKIE,
   SESSION_IDLE_MS,
@@ -489,6 +489,11 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       // Only packs actually fitted to THIS bike. Without this a driver could attach a reading
       // from a healthy pack on another machine and satisfy his own bike's gate with it.
       const fitted = await deps.directory.listBatteriesForVehicle(shift.vehicleId)
+      // The screenshot each reading came from. `media_id` has been on this table since 0007 and was
+      // written NULL every time, so no manager could ever see WHICH picture produced «39%» and the
+      // training pair had no pixels behind it. The slot name is the link: pack n's evidence is
+      // `bms_n` in the same package.
+      const attached = await deps.media.listSlots(shift.id)
       for (const reading of body.readings) {
         const battery = fitted.find((b) => b.id === reading.batteryId)
         if (!battery) {
@@ -507,10 +512,82 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           mosTempDc: reading.mosTempDc,
           t1Dc: reading.t1Dc,
           t2Dc: reading.t2Dc,
-          mediaId: null,
+          mediaId:
+            attached.find((a) => a.package === body.package && a.slot === bmsSlot(battery.slotNo ?? 1))?.mediaId ?? null,
           source: reading.source,
+          // «تطبيق البطارية لا يعمل على جهازي». Unblocks the driver, and blocks the manager until he
+          // has read the pack himself — see `awaiting_manager_reading` in the domain.
+          unavailable: reading.unavailable,
           ocrRaw: reading.ocrRaw ?? null,
           batterySwapId: null,
+        })
+      }
+      return { readings: await deps.batteryReadings.listByShift(shift.id) }
+    },
+  )
+
+  /**
+   * The branch manager reading a pack the driver's phone could not.
+   *
+   * Its own route because it is its own permission. `shift.operate` is scoped `own` to the driver,
+   * so the manager cannot post to that one at all — and he must be able to, precisely in the case
+   * where the driver has declared «تطبيق البطارية لا يعمل على جهازي». Same shape as
+   * `close-figures`: the manager correcting what the driver could not supply, under `shift.approve`.
+   *
+   * `source` is forced to `manager` here rather than trusted from the body: a figure taken by the
+   * manager on his own device is a different fact from one the driver typed, and the route that only
+   * he can call is the honest place to stamp that.
+   */
+  app.put(
+    '/shifts/:id/battery-readings/manager',
+    { config: { permission: 'shift.approve', subject: shiftSubject } },
+    async (req) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const body = putBatteryReadingsRequest.parse(req.body)
+      const shift = await deps.shifts.findById(id)
+      if (!shift) throw new ServiceError(404, 'shift_not_found')
+
+      const fitted = await deps.directory.listBatteriesForVehicle(shift.vehicleId)
+      const attached = await deps.media.listSlots(shift.id)
+      for (const reading of body.readings) {
+        const battery = fitted.find((b) => b.id === reading.batteryId)
+        if (!battery) throw new ServiceError(422, 'battery_not_on_this_vehicle', { batteryId: reading.batteryId })
+        const before = (await deps.batteryReadings.listByShift(shift.id)).find(
+          (r) => r.batteryId === battery.id && r.package === body.package,
+        )
+        await deps.batteryReadings.upsert({
+          shiftId: shift.id,
+          batteryId: battery.id,
+          package: body.package,
+          slotNo: battery.slotNo ?? 1,
+          percent: reading.percent,
+          packMillivolts: reading.packMillivolts,
+          cycleCount: reading.cycleCount,
+          remainCapacityDah: reading.remainCapacityDah,
+          fullCapacityDah: reading.fullCapacityDah,
+          mosTempDc: reading.mosTempDc,
+          t1Dc: reading.t1Dc,
+          t2Dc: reading.t2Dc,
+          mediaId:
+            attached.find((a) => a.package === body.package && a.slot === bmsSlot(battery.slotNo ?? 1))?.mediaId ?? null,
+          source: 'manager',
+          // The declaration STAYS on the row after he fills it. It is the record of why a manager's
+          // figure is here at all, and erasing it would hide that the driver could not read it.
+          unavailable: before?.unavailable ?? reading.unavailable,
+          ocrRaw: before?.ocrRaw ?? null,
+          batterySwapId: null,
+        })
+        await deps.audit.append({
+          tableName: 'shift_battery_readings',
+          recordId: `${shift.id}:${battery.id}:${body.package}`,
+          action: 'UPDATE',
+          actorId: req.actor!.userId,
+          actorKind: 'user',
+          branchId: shift.branchId,
+          requestId: req.requestId,
+          before: before ? { percent: before.percent, source: before.source } : null,
+          after: { percent: reading.percent, source: 'manager' },
+          occurredAtMs: deps.clock.nowMs(),
         })
       }
       return { readings: await deps.batteryReadings.listByShift(shift.id) }

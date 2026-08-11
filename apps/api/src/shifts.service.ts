@@ -408,10 +408,17 @@ async function batteryContext(
   const forPackage = rows.filter((r) => r.package === pkg)
   return {
     batterySlots: fitted.length,
-    batteryReadings: fitted.map((battery, i) => ({
-      slotNo: battery.slotNo ?? i + 1,
-      percent: forPackage.find((r) => r.batteryId === battery.id)?.percent ?? null,
-    })),
+    batteryReadings: fitted.map((battery, i) => {
+      const row = forPackage.find((r) => r.batteryId === battery.id)
+      return {
+        slotNo: battery.slotNo ?? i + 1,
+        percent: row?.percent ?? null,
+        // The driver's «التطبيق لا يعمل على جهازي». Carried into the gate so it can tell a pack
+        // nobody has done yet from one he has told us he CANNOT do — the first is his to close,
+        // the second is the manager's.
+        unavailable: row?.unavailable === true,
+      }
+    }),
   }
 }
 
@@ -812,6 +819,8 @@ function swapReading(
     package: pkg,
     slotNo,
     percent: r.percent,
+    // A swap is done at the branch with the manager present, so the declaration never applies here.
+    unavailable: false,
     packMillivolts: r.packMillivolts,
     cycleCount: r.cycleCount,
     remainCapacityDah: r.remainCapacityDah,

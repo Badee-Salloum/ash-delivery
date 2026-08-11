@@ -157,6 +157,15 @@ function batterySlotNumbers(batterySlots: number): number[] {
 export interface BatteryReading {
   readonly slotNo: number
   readonly percent: number | null
+  /**
+   * The driver declared that he cannot produce this pack's reading himself — his phone will not run
+   * the BMS app at all (old Android, no Bluetooth pairing, a device the manufacturer's app refuses).
+   *
+   * This is NOT a way out of the evidence. It moves the obligation: the driver stops being blocked,
+   * and the BRANCH MANAGER becomes the one who cannot finish until he has taken the reading on a
+   * device that works. See `awaiting_manager_reading`.
+   */
+  readonly unavailable?: boolean
 }
 
 export interface StartPackage {
@@ -187,6 +196,11 @@ export type PackageGap =
   | { readonly kind: 'missing_photo'; readonly slot: string }
   | { readonly kind: 'missing_value'; readonly field: string }
   | { readonly kind: 'missing_battery_reading'; readonly slotNo: number }
+  /**
+   * The driver said the BMS app will not run on his phone, so this pack is waiting for the manager
+   * to read it. Deliberately a gap of its own: it does not stop the driver, it stops the APPROVAL.
+   */
+  | { readonly kind: 'awaiting_manager_reading'; readonly slotNo: number }
   | { readonly kind: 'unconfirmed_orders' }
   | { readonly kind: 'no_orders' }
 
@@ -202,11 +216,35 @@ function batteryGaps(pkg: {
 }): PackageGap[] {
   const readings = pkg.batteryReadings ?? []
   return batterySlotNumbers(pkg.batterySlots ?? 0)
-    .filter((slotNo) => {
+    .flatMap((slotNo): PackageGap[] => {
       const reading = readings.find((r) => r.slotNo === slotNo)
-      return reading === undefined || reading.percent === null
+      // A pack the driver declared unreadable on his own phone. Still no charge figure, so the
+      // shift is still not fully evidenced — but the person who must act has changed, and saying
+      // «missing» to a driver who already told us why would be telling him to do the impossible.
+      if (reading?.unavailable === true && reading.percent === null) {
+        return [{ kind: 'awaiting_manager_reading' as const, slotNo }]
+      }
+      if (reading === undefined || reading.percent === null) {
+        return [{ kind: 'missing_battery_reading' as const, slotNo }]
+      }
+      return []
     })
-    .map((slotNo) => ({ kind: 'missing_battery_reading' as const, slotNo }))
+}
+
+/**
+ * The photo slots a package still owes, given which packs the driver cannot photograph.
+ *
+ * A pack whose app will not run produces no screenshot by definition, so demanding `bms_2` from him
+ * is demanding the impossible — and a required photo nobody can supply is how a driver ends up
+ * uploading a picture of something else to get past the gate. The obligation moves to the manager
+ * with `awaiting_manager_reading`; it is not dropped.
+ */
+function requiredPhotoSlots(
+  all: readonly string[],
+  readings: readonly BatteryReading[],
+): readonly string[] {
+  const waived = new Set(readings.filter((r) => r.unavailable === true).map((r) => bmsSlot(r.slotNo)))
+  return all.filter((slot) => !waived.has(slot))
 }
 
 /**
@@ -215,7 +253,7 @@ function batteryGaps(pkg: {
  */
 export function startPackageGaps(pkg: StartPackage): PackageGap[] {
   const gaps: PackageGap[] = []
-  for (const slot of requiredStartSlots(pkg.batterySlots ?? 0)) {
+  for (const slot of requiredPhotoSlots(requiredStartSlots(pkg.batterySlots ?? 0), pkg.batteryReadings ?? [])) {
     if (!pkg.mediaSlots.includes(slot)) gaps.push({ kind: 'missing_photo', slot })
   }
   gaps.push(...batteryGaps(pkg))
@@ -231,7 +269,7 @@ export function startPackageGaps(pkg: StartPackage): PackageGap[] {
 
 export function endPackageGaps(pkg: EndPackage): PackageGap[] {
   const gaps: PackageGap[] = []
-  for (const slot of requiredEndSlots(pkg.batterySlots ?? 0)) {
+  for (const slot of requiredPhotoSlots(requiredEndSlots(pkg.batterySlots ?? 0), pkg.batteryReadings ?? [])) {
     if (!pkg.mediaSlots.includes(slot)) gaps.push({ kind: 'missing_photo', slot })
   }
   gaps.push(...batteryGaps(pkg))
@@ -331,9 +369,23 @@ export function transition(
   )
   if (!decision.allowed) return { ok: false, reason: 'forbidden' }
 
+  /**
+   * The gaps THE DRIVER can still close.
+   *
+   * `awaiting_manager_reading` is his declaration that the BMS app will not run on his phone. Both
+   * gates read the same gap list, so without this filter that declaration would block the very
+   * person it exists to unblock — he would be told to supply a screenshot he has already explained
+   * he cannot take, which is how a driver ends up photographing something else to get past a gate.
+   *
+   * The manager's own gates below use the UNFILTERED list, so the obligation is moved, never
+   * dropped: nothing opens or closes until somebody with a working device has read that pack.
+   */
+  const driverGaps = (gaps: PackageGap[]): PackageGap[] =>
+    gaps.filter((g) => g.kind !== 'awaiting_manager_reading')
+
   // ── The OPEN gate (BR5) ────────────────────────────────────────────────────────────────
   if (action === 'driver_confirm_start') {
-    const gaps = ctx.startPackage ? startPackageGaps(ctx.startPackage) : [{ kind: 'missing_value' as const, field: 'startPackage' }]
+    const gaps = ctx.startPackage ? driverGaps(startPackageGaps(ctx.startPackage)) : [{ kind: 'missing_value' as const, field: 'startPackage' }]
     if (gaps.length > 0) return { ok: false, reason: 'start_package_incomplete', gaps }
   }
 
@@ -348,7 +400,7 @@ export function transition(
 
   // ── The CLOSE gate (BR5) ───────────────────────────────────────────────────────────────
   if (action === 'driver_submit_end') {
-    const gaps = ctx.endPackage ? endPackageGaps(ctx.endPackage) : [{ kind: 'missing_value' as const, field: 'endPackage' }]
+    const gaps = ctx.endPackage ? driverGaps(endPackageGaps(ctx.endPackage)) : [{ kind: 'missing_value' as const, field: 'endPackage' }]
     if (gaps.length > 0) return { ok: false, reason: 'end_package_incomplete', gaps }
   }
 
