@@ -48,6 +48,20 @@ const AMOUNTS = {
   // margin causes every refusal the reader currently makes.
   'orders-0806-lg.jpg': ['170', '130', '330', '525', '135'],
   'orders-0807-sm.jpg': ['275', '345', '165', '300'],
+  // ── Harvested from the rest of folder 4, transcribed off magnified crops ──────────────────
+  // Read at 5x from the amount box itself, because at native size «٥» (a small circle) and «٠»
+  // (a dot) are the same shape to a tired eye, and a mislabelled glyph teaches the reader a lie.
+  // A row whose crop caught part of the «SYP» is left EMPTY rather than guessed — the loop skips
+  // a zero-length label, so an uncertain row costs nothing and risks nothing.
+  'orders-h1.jpg': ['205', '500', '435', '155'],
+  'orders-h2.jpg': ['155', '250', '485', '300'],
+  'orders-h3.jpg': ['130', '130', '400', '250'],
+  'orders-h4.jpg': ['130', '150', '750', '350'],
+  'orders-h5.jpg': ['130', '455', '265', '275'],
+  'log-h1.jpg': ['+97', '+250', '-1,875.87', '+85', '', '', '-100'],
+  'log-h2.jpg': ['-87', '+135', '-31', '-50', '+437', '-97', '-150', '-60', '+213', '-63', '+155'],
+  'log-h3.jpg': ['-31', '', '-88', '', '-120', '', '-355', '+26', '+79', ''],
+  'log-h4.jpg': ['-2,067.30', '-229.70', '+51', '+695', '-150', '+221', '-70', '-185', '-26', '+74'],
 }
 
 /**
@@ -91,9 +105,22 @@ const TIME_CLUSTERS = {
   'orders-0804-c.jpg': [['م', '3:19'], ['م', '1:39'], ['م', '1:10']],
   'orders-0806-lg.jpg': [['م', '1:55'], ['م', '1:36'], ['م', '12:56'], ['م', '12:22'], ['ص', '11:14']],
   'orders-0807-sm.jpg': [['م', '1:57'], ['م', '12:59'], ['م', '12:21'], ['ص', '11:53']],
+  // Orders screens only. The LOG rows carry a date in the same cluster and their own truth format,
+  // and a mislabelled colon or half-day mark poisons every clock the reader will ever produce —
+  // so the new logs contribute their amounts and nothing else.
+  'orders-h1.jpg': [['ص', '2:15'], ['ص', '1:21'], ['م', '11:46'], ['م', '10:09']],
+  'orders-h2.jpg': [['م', '10:09'], ['م', '9:29'], ['م', '8:35'], ['م', '7:44']],
+  'orders-h3.jpg': [['م', '10:31'], ['م', '9:48'], ['م', '9:22'], ['م', '8:28']],
+  'orders-h4.jpg': [['م', '2:20'], ['ص', '1:16'], ['ص', '12:32'], ['م', '11:16']],
+  'orders-h5.jpg': [['م', '2:13'], ['ص', '12:57'], ['م', '11:30'], ['م', '10:49']],
 }
 
-const worker = await createWorker(['eng'], OEM.LSTM_ONLY, { langPath: join(driver, 'public', 'tesseract'), gzip: true })
+const g = await import(pathToFileURL(join(driver, 'src', 'glyphs.ts')).href)
+const ocr = await import(pathToFileURL(join(driver, 'src', 'ocr.ts')).href)
+
+// Arabic too: `anchorsIn` filters «SYP» candidates by height against the page median, and an
+// English-only pass on an Arabic screen reports a different set of words to measure that against.
+const worker = await createWorker(['eng', 'ara'], OEM.LSTM_ONLY, { langPath: join(driver, 'public', 'tesseract'), gzip: true })
 await worker.setParameters({ tessedit_pageseg_mode: '6', preserve_interword_spaces: '1' })
 
 /** Connected components (8-neighbour) inside a box, ordered left to right. */
@@ -206,40 +233,74 @@ const samples = []
 let rowsSeen = 0
 let rowsUsable = 0
 
+/**
+ * SEGMENT EXACTLY AS THE READER DOES.
+ *
+ * This loop used to cut its own crops with its own fixed ink threshold, and the result was a
+ * training set describing ink the reader never sees. On the newly added screenshots it split «٢٠٥»
+ * into four shapes and «١٥٥» into seven, so every one of them was rejected — and on an EXISTING
+ * fixture it had been quietly losing rows the same way («٢٧٥» as two glyphs).
+ *
+ * A template must describe the ink the classifier will actually be handed, so the anchors, the
+ * boxes, the Otsu mask, the rule-stripping and the stacked-glyph merge are all the app's own —
+ * imported, not re-implemented. A mismatch reported here is now a real disagreement between the
+ * label and what the reader sees, which is exactly what a harvest should be checking.
+ */
 for (const [file, amounts] of Object.entries(AMOUNTS)) {
   const img = await loadImage(join(fixtures, file))
   const canvas = createCanvas(img.width, img.height)
   const ctx = canvas.getContext('2d')
   ctx.drawImage(img, 0, 0)
-  const { data: px } = ctx.getImageData(0, 0, img.width, img.height)
-  const grey = (x, y) => {
-    const i = (y * img.width + x) * 4
-    return (px[i] * 299 + px[i + 1] * 587 + px[i + 2] * 114) / 1000
-  }
+  const raw = ctx.getImageData(0, 0, img.width, img.height).data
 
-  const { data } = await worker.recognize(join(fixtures, file), {}, { text: true, blocks: true })
-  const words = []
+  const { data } = await worker.recognize(canvas.toBuffer('image/png'), {}, { text: true, blocks: true })
+  const lines = []
   for (const b of data.blocks ?? [])
     for (const p of b.paragraphs ?? [])
       for (const l of p.lines ?? [])
-        for (const w of l.words ?? []) words.push({ text: w.text ?? '', ...w.bbox })
-  const anchors = words.filter((w) => /SYP/i.test(w.text)).sort((a, b) => a.y0 - b.y0)
+        lines.push({
+          text: l.text ?? '',
+          y0: l.bbox?.y0 ?? 0,
+          y1: l.bbox?.y1 ?? 0,
+          words: (l.words ?? []).map((w) => ({ text: w.text ?? '', x0: w.bbox?.x0 ?? 0, x1: w.bbox?.x1 ?? 0, y0: w.bbox?.y0 ?? 0, y1: w.bbox?.y1 ?? 0 })),
+        })
+  const anchors = ocr.anchorsIn(lines)
+  if (anchors.length === 0) { console.log(`!! ${file}: no anchors`); continue }
+  /*
+   * THE WHOLE FILE IS REFUSED IF THE ROW COUNTS DISAGREE.
+   *
+   * Labels are matched to rows by INDEX, so one extra or missing anchor shifts every label onto its
+   * neighbour's glyphs. The per-row length check does not catch that — «-70» and «+51» are both
+   * three glyphs, so a shifted pair passes silently and teaches the classifier two lies. A file
+   * whose count does not match its truth is not partially usable; it is unusable.
+   */
+  if (anchors.length !== amounts.length) {
+    console.log(`!! ${file}: ${anchors.length} anchors vs ${amounts.length} labels — WHOLE FILE SKIPPED (labels would shift)`)
+    continue
+  }
+
+  // The reader normalises an out-of-band screenshot to the scale its templates were learnt at.
+  // Harvesting must do the same, or the samples describe a size the classifier never meets.
+  const caps = anchors.map((a) => a.y1 - a.y0).sort((x, y) => x - y)
+  const factor = g.canonFactorFor(caps[Math.floor(caps.length / 2)])
+  const canon = factor !== 1 ? g.resampleRgba(raw, img.width, img.height, factor) : { data: raw, width: img.width, height: img.height }
+  const scaleBox = (b) => (factor === 1 ? b : { x0: Math.round(b.x0 * factor), x1: Math.round(b.x1 * factor), y0: Math.round(b.y0 * factor), y1: Math.round(b.y1 * factor) })
+  const mask = g.maskFromPixels(canon.data, canon.width, canon.height)
+  const cut = (box) => g.mergeStacked(mask, g.withoutRules(g.componentsIn(mask, box)))
+  // The app returns `bits` as a Uint8Array, which JSON writes as an OBJECT rather than an array —
+  // silently unreadable to the template builder. Normalised here, at the one place it is produced.
+  const featuresOfApp = (c, group) => { const f = g.featuresOf(c, group); return { ...f, bits: Array.from(f.bits) } }
 
   const cluster = CLUSTERS[file]
   anchors.forEach((a, i) => {
-    const unit = a.y1 - a.y0
-    const pad = Math.round(unit * 0.45)
-    const top = Math.max(0, a.y0 - pad)
-    const bottom = Math.min(img.height, a.y1 + pad)
-
     // ── The amount, to the LEFT of «SYP» ──────────────────────────────────────────────────
     rowsSeen++
     const want = [...(amounts[i] ?? '')]
-    const comps = componentsIn(grey, Math.max(0, a.x0 - Math.round(unit * 12)), top, a.x0 - 4, bottom)
+    const comps = cut(ocr.amountBoxFor(scaleBox(a), canon.height))
     if (comps.length === want.length && want.length > 0) {
       rowsUsable++
-      const group = groupOf(comps)
-      comps.forEach((c, j) => samples.push({ label: want[j], font: 'amount', file, ...featuresOf(c, group) }))
+      const group = g.groupMetrics(comps)
+      comps.forEach((c, j) => samples.push({ label: want[j], font: 'amount', file, ...featuresOfApp(c, group) }))
     } else if (want.length > 0) {
       console.log(`!! ${file} row ${i} «${amounts[i]}»: ${comps.length} glyphs, expected ${want.length}`)
     }
@@ -247,7 +308,7 @@ for (const [file, amounts] of Object.entries(AMOUNTS)) {
     // ── The cluster to the RIGHT: the marker, the time, and (on the log) the date ─────────
     const timeRow = TIME_CLUSTERS[file]?.[i]
     if (!timeRow) return
-    const right = componentsIn(grey, a.x1 + 4, top, Math.min(img.width, a.x1 + Math.round(unit * 26)), bottom)
+    const right = cut(ocr.clockBoxFor(scaleBox(a), canon.width, canon.height))
     if (right.length === 0) return
     const late = cluster?.lastRowsDate && i >= cluster.rows - cluster.lastRowsDate.count
     const dateStr = cluster ? (late ? cluster.lastRowsDate.date : cluster.date) : ''
@@ -256,8 +317,8 @@ for (const [file, amounts] of Object.entries(AMOUNTS)) {
       console.log(`!! ${file} row ${i} cluster «${labels.join('')}»: ${right.length} glyphs, expected ${labels.length}`)
       return
     }
-    const group = groupOf(right)
-    right.forEach((c, j) => samples.push({ label: labels[j], font: 'date', file, ...featuresOf(c, group) }))
+    const group = g.groupMetrics(right)
+    right.forEach((c, j) => samples.push({ label: labels[j], font: 'date', file, ...featuresOfApp(c, group) }))
   })
 }
 await worker.terminate()
