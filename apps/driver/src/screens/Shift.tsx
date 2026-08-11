@@ -769,9 +769,6 @@ function EndPackage({
     const name = labels[base] ?? slot
     return n === 1 ? name : `${name} ${n}`
   }
-  // The dashboard, wallet and log are SCREENSHOTS the driver already has in his gallery, not things
-  // to photograph with the camera; the odometer is a real photo of the bike.
-  const gallery = new Set(['dashboard', 'wallet', PAYMENTS_LOG_SLOT])
   // Each fitted pack's closing charge gates the button (batteriesReady), matching the server. The
   // bike-level battery field is gone — charge is tracked per pack.
   // The close gate counts the shift's ORDERS, checked or not — see `endPackageGaps`. Deliberately
@@ -988,7 +985,6 @@ function EndPackage({
           pkg="end"
           slot={slot}
           label={labelOf(slot)}
-          source={gallery.has(splitSlot(slot).base) ? 'gallery' : 'camera'}
           uploaded={slots.has(slot)}
           onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
           // SRS D-2: read the wallet balance off its screenshot and pre-fill the field; and read the

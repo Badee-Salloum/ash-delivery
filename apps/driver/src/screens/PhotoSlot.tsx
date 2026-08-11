@@ -29,9 +29,16 @@ export interface PhotoSlotProps {
    */
   onImage?(file: File): void
   /**
-   * `camera` opens the camera (an odometer is photographed). `gallery` does not — a BMS reading is
-   * a SCREENSHOT the driver already took, and forcing the camera would make him photograph one
-   * phone screen with another.
+   * `gallery` (the default) lets the driver pick what he already has; `camera` forces a live shot.
+   *
+   * Everything is `gallery` now, the odometer included, at the owner's instruction. It is also the
+   * better workflow: he can take the odometer photo, screenshot the BMS app and page through the
+   * Yallago dashboard in ONE pass, then upload the set — instead of the app yanking him into a
+   * camera between each step while a manager waits.
+   *
+   * WHAT THIS COSTS: `capture` was the only thing guaranteeing an evidence photo was taken just now.
+   * A gallery pick can be last week's. `x-client-taken-at` carries the file's real modification time
+   * so the age is at least RECORDED and shown to the manager — see `onPick`.
    */
   source?: 'camera' | 'gallery'
   /**
@@ -52,7 +59,7 @@ export function PhotoSlot({
   label,
   onUploaded,
   onImage,
-  source = 'camera',
+  source = 'gallery',
   uploaded = false,
 }: PhotoSlotProps): ReactNode {
   const { api, t } = useApp()
@@ -72,8 +79,18 @@ export function PhotoSlot({
       onImage?.(file)
       try {
         const { bytes, mimeType } = await compressImage(file)
+        // THE FILE'S OWN TIMESTAMP, not the clock.
+        //
+        // This header used to send `Date.now()`, i.e. the moment of upload — which is not a fact
+        // about the photograph at all, and made every picture look freshly taken. Now that any slot
+        // can be filled from the gallery, the age of the image IS the control that replaced
+        // `capture`: `lastModified` is when the file was written, so a picture chosen from last
+        // week arrives saying so and the manager sees it on the approval screen.
+        //
+        // `lastModified` is 0 on some pickers rather than absent; treat that as "unknown" and send
+        // nothing, because a 1970 timestamp would read as a fifty-year-old photo.
         await api.putBytes(uploadEvidencePath(shiftId, pkg, slot), bytes, mimeType, {
-          'x-client-taken-at': String(Date.now()),
+          ...(file.lastModified > 0 ? { 'x-client-taken-at': String(file.lastModified) } : {}),
         })
         setState('done')
         onUploaded(slot)
@@ -97,7 +114,7 @@ export function PhotoSlot({
             : 'border-slate-300 bg-white'
       }`}
     >
-      <span className="font-medium">{label}</span>
+      <span className="min-w-0 flex-1 text-start font-medium">{label}</span>
       {/* An error used to keep the same grey dashed border and swap the 📷 for grey 14px text —
           in sunlight that reads as "not done yet" at best and as "done" at worst. */}
       <span className={`text-sm ${state === 'error' ? 'font-medium text-red-700' : 'text-slate-600'}`}>
