@@ -89,12 +89,41 @@ export interface PackState {
   text: string
 }
 
-const EMPTY: PackState = {
+/** Exported so a caller restoring readings builds a REAL `PackState` instead of a lookalike. */
+export const EMPTY_PACK: PackState = {
   values: { percent: '', cycleCount: '' },
   ocrRaw: null,
   outcome: 'idle',
   fieldsFound: 0,
   text: '',
+}
+
+/**
+ * Rebuild the panel's state from readings the server already holds, on a resumed shift.
+ *
+ * A FUNCTION RATHER THAN AN INLINE OBJECT, because the inline version was wrong for weeks and
+ * TypeScript was told to stop asking. `Shift.tsx` built `{ ...prior, percent: '41' }` — the charge
+ * at the TOP level instead of inside `values` — and closed the hole with `as EndDraft['packs']`.
+ * `stateOf` is `packs[id] ?? EMPTY_PACK`, so the malformed entry was truthy, the fallback never ran,
+ * and reading `.values.percent` threw «Cannot read properties of undefined (reading 'percent')» the
+ * instant the close screen rendered. The driver saw the «ASH» splash and nothing else.
+ *
+ * Prior local state wins on every field EXCEPT the charge, which is what the server just confirmed.
+ */
+export function restorePacks(
+  stored: readonly { batteryId: string; percent: number | null }[],
+  prior: Readonly<Record<string, PackState>>,
+): Record<string, PackState> {
+  const out: Record<string, PackState> = { ...prior }
+  for (const reading of stored) {
+    if (reading.percent === null) continue
+    const held = prior[reading.batteryId] ?? EMPTY_PACK
+    out[reading.batteryId] = {
+      ...held,
+      values: { ...EMPTY_PACK.values, ...held.values, percent: String(reading.percent) },
+    }
+  }
+  return out
 }
 
 export function BatteryPanel({
@@ -145,7 +174,19 @@ export function BatteryPanel({
   const [confirmed, setConfirmed] = useState<ReadonlySet<string>>(new Set())
 
   const slotOf = (b: FittedBattery, i: number): number => b.slotNo ?? i + 1
-  const stateOf = (id: string): PackState => packs[id] ?? EMPTY
+
+  /**
+   * TOTAL BY CONSTRUCTION. `packs[id] ?? EMPTY_PACK` was not enough: a caller that handed back a
+   * half-built entry produced something truthy, so the fallback never ran and `.values.percent`
+   * threw on a resumed shift — the driver saw only the «ASH» splash. `initialPacks` crosses a
+   * component boundary and has already been wrong once; merging is cheap and this screen is the
+   * last gate before a shift can close.
+   */
+  const stateOf = (id: string): PackState => {
+    const held = packs[id]
+    if (!held) return EMPTY_PACK
+    return { ...EMPTY_PACK, ...held, values: { ...EMPTY_PACK.values, ...held.values } }
+  }
 
   // A declared pack counts as done FOR HIM. The server's gate still wants the manager's reading —
   // that is `awaiting_manager_reading`, and it blocks the approval, not the driver.
@@ -212,14 +253,14 @@ export function BatteryPanel({
 
   const runOcr = useCallback(
     async (battery: FittedBattery, file: File): Promise<void> => {
-      setPacks((cur) => ({ ...cur, [battery.id]: { ...(cur[battery.id] ?? EMPTY), outcome: 'reading' } }))
+      setPacks((cur) => ({ ...cur, [battery.id]: { ...(cur[battery.id] ?? EMPTY_PACK), outcome: 'reading' } }))
       const { readBms } = await import('../ocr.ts')
       // The pack's own app profile: the right label spellings, layout rule and segmentation for
       // THIS battery, rather than one reader guessing at every app at once.
       const result = await readBms(file, { profileId: battery.bmsProfile ?? null })
 
       setPacks((cur) => {
-        const prev = cur[battery.id] ?? EMPTY
+        const prev = cur[battery.id] ?? EMPTY_PACK
         if (!result.ok) return { ...cur, [battery.id]: { ...prev, outcome: result.reason, text: result.text } }
 
         // Only fill a field the driver has not already answered — his typing always wins.

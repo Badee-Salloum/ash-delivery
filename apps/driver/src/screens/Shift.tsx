@@ -28,7 +28,7 @@ import { useToast } from '../feedback.tsx'
 import { useGpsBeacon } from '../use-gps-beacon.ts'
 import { Button, Card, Field, Money, MoneyInput, Screen, TextInput } from '../ui.tsx'
 import { OperationsList } from './OrderEntry.tsx'
-import { BatteryPanel, type FittedBattery, type PackState } from './BatteryPanel.tsx'
+import { BatteryPanel, type FittedBattery, type PackState, restorePacks } from './BatteryPanel.tsx'
 import { BatterySwap, type SpareBattery } from './BatterySwap.tsx'
 import { PageGrid } from './PageGrid.tsx'
 import { PhotoSlot } from './PhotoSlot.tsx'
@@ -294,11 +294,9 @@ export function ShiftFlow({
           cash: d.cash || (st.endPackage.cashDeclared ?? ''),
           wallet: d.wallet || (st.endPackage.walletDeclared ?? ''),
           odo: d.odo || (st.endPackage.odometerKm === null ? '' : String(st.endPackage.odometerKm)),
-          packs: Object.fromEntries(
-            st.endPackage.batteries
-              .filter((b) => b.percent !== null)
-              .map((b) => [b.batteryId, { ...(d.packs[b.batteryId] ?? {}), percent: String(b.percent) }]),
-          ) as EndDraft['packs'],
+          // Owned by `BatteryPanel`, which is the only thing that knows the shape. Building it here
+          // by hand — behind an `as` cast — is what crashed every resumed close screen.
+          packs: restorePacks(st.endPackage.batteries, d.packs),
           orders: st.orders.map((o) => ({
             // `already-<no>` rather than a random id: the list is rebuilt from the server on every
             // resume, and a stable key keeps React from remounting rows the driver is editing.
