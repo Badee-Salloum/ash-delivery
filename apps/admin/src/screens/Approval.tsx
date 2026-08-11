@@ -600,7 +600,11 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
               </td>
               <td className="px-3 py-1">{t.orders.payModes[o.payMode as keyof typeof t.orders.payModes]}</td>
               <td className="px-3 py-1">
-                <Money value={o.fee} />
+                <FeeCell
+                  fee={o.fee}
+                  editable={underReview && !busy}
+                  onSave={(fee) => reviseOps({ orders: [{ providerOrderNo: o.providerOrderNo, fee }] })}
+                />
                 {/* What the payments log measured actually reached the wallet. Its absence is not a
                     gap — it means nobody measured it and the pay mode decides, as it always did. */}
                 {o.walletAmount ? (
@@ -1381,4 +1385,90 @@ function scalarDelta(label: string, ocr: string | null, confirmed: string | null
   if (ocr === null) return []
   if (confirmed !== null && ocr === confirmed) return []
   return [{ label, ocr, confirmed: confirmed ?? '—' }]
+}
+
+/**
+ * The fee, and — while the shift is under review — a way to correct it.
+ *
+ * This is the manager's own comparison made actionable: he is holding the cash, so when the number
+ * on the screen disagrees with the notes in his hand he is the one who knows which is right. His
+ * only previous move was the include checkbox, i.e. deleting a real delivery to fix one figure.
+ *
+ * Closed, it is a button and not an input, for two reasons. A row of live number fields invites a
+ * fat thumb to change money by scrolling past it, and a screen of inputs reads as a form to fill in
+ * rather than a set of figures to check. Editing is deliberately a decision he takes on one row.
+ *
+ * The target is `min-h-11` — 44px — because this one moves money and the include checkbox beside it
+ * (20px) is already the smallest thing on the screen that should not be.
+ */
+function FeeCell({
+  fee,
+  editable,
+  onSave,
+}: {
+  fee: string
+  editable: boolean
+  onSave: (fee: string) => Promise<void>
+}): ReactNode {
+  const { t } = useApp()
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(fee)
+
+  // A reload after somebody else's revision must not leave a stale draft sitting in the box.
+  useEffect(() => {
+    if (!editing) setDraft(fee)
+  }, [fee, editing])
+
+  if (!editable || !editing) {
+    return editable ? (
+      <button
+        type="button"
+        onClick={() => {
+          setDraft(fee)
+          setEditing(true)
+        }}
+        className={`-mx-1 flex min-h-11 w-full items-center justify-between gap-2 rounded-lg px-1 text-start hover:bg-slate-50 ${FOCUS_RING}`}
+        aria-label={`${t.orders.correctFee}: ${fee}`}
+      >
+        <Money value={fee} />
+        <span aria-hidden className="text-xs text-slate-400">✎</span>
+      </button>
+    ) : (
+      <Money value={fee} />
+    )
+  }
+
+  const changed = draft.trim() !== '' && draft.trim() !== fee
+  const commit = (): void => {
+    setEditing(false)
+    // Saving the same number would still move `orders_hash` and force him to re-read the whole
+    // shift for nothing, so an unchanged draft closes the editor and posts nothing.
+    if (changed) void onSave(draft.trim())
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <MoneyInput
+        value={draft}
+        autoFocus
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') commit()
+          if (e.key === 'Escape') setEditing(false)
+        }}
+        aria-label={t.orders.correctFee}
+        className="w-full"
+      />
+      <div className="flex gap-1">
+        <Button onClick={commit} disabled={!changed} className="px-3">
+          {t.common.save}
+        </Button>
+        <Button variant="ghost" onClick={() => setEditing(false)} className="px-3">
+          {t.common.cancel}
+        </Button>
+      </div>
+      {/* He is about to change money. Say what the change is before he taps, not after. */}
+      {changed ? <span className="num text-xs text-slate-500">{fee} →</span> : null}
+    </div>
+  )
 }

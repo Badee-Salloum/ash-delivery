@@ -329,6 +329,11 @@ orderNo: 'رقم الطلب',
     sent: 'مُرسَل',
     /** The checkbox: an unchecked operation stays with the shift and out of the money. */
     included: 'محسوبة',
+    /**
+     * The manager's correction, on the fee cell. He is the one holding the cash, so he is the one
+     * placed to disagree with the number — and his only previous move was excluding the delivery.
+     */
+    correctFee: 'تصحيح القيمة',
     /** What «سجل المدفوعات» says actually reached the wallet from this order's fee. */
     toWallet: 'إلى المحفظة',
     explainedByOrder: 'مرتبطة بطلب',

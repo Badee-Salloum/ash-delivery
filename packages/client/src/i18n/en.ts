@@ -329,6 +329,7 @@ orderNo: 'Order no.',
     /** The checkbox: an unchecked operation stays with the shift and out of the money. */
     included: 'Counted',
     /** What the payments log says actually reached the wallet from this order's fee. */
+    correctFee: 'Correct the fee',
     toWallet: 'To wallet',
     explainedByOrder: 'Matched to an order',
     unexplained: 'No order explains it',
