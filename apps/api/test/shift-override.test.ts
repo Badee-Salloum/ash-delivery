@@ -40,6 +40,8 @@ const bal = async (code: string): Promise<bigint> => await h.deps.ledger.fundBal
 const driverCash = fundCodeOf({ kind: 'driver_cash', driverId: DRIVER_ID })
 const driverWallet = fundCodeOf({ kind: 'driver_wallet', driverId: DRIVER_ID })
 const variance = fundCodeOf({ kind: 'cost_center', costCenterId: 'shift_variance:branch-damascus' })
+const sharePayable = fundCodeOf({ kind: 'driver_share_payable', driverId: DRIVER_ID })
+const receivable = fundCodeOf({ kind: 'driver_receivable_cash', driverId: DRIVER_ID })
 
 /** Every posted entry must balance (AC #5). */
 function assertLedgerBalances(): void {
@@ -98,7 +100,15 @@ describe('shift override (stuck shift)', () => {
     assertLedgerBalances()
   })
 
-  it('FORCE-CLOSE with a cash shortfall books the gap to shift_variance', async () => {
+  /**
+   * «اي نقص يرمم من حصة السائق» — owner decision (k), 2026-08-12.
+   *
+   * This used to book the whole gap to `shift_variance:<branch>`, an account that records THAT
+   * money was missing and nothing about WHOSE shift it was. The owner settles it against the man:
+   * his share absorbs it first. Force-close is the only path that admits a gap at all — an ordinary
+   * approval is refused unless BR1 is exactly zero.
+   */
+  it('FORCE-CLOSE with a cash shortfall takes it from the driver`s share, not a nameless account', async () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
     const id = await openShift(driver, manager)
@@ -111,7 +121,29 @@ describe('shift override (stuck shift)', () => {
     expect(res.statusCode, res.body).toBe(200)
 
     expect(await bal(driverCash)).toBe(0n)
-    expect(await bal(variance)).toBe(1_000_000n) // 10,000 the driver still owes
+    // The 10,000 came off his share — the payable is reduced by exactly that, and the branch
+    // variance centre carries nothing, because the money is no longer unattributed.
+    expect(await bal(sharePayable)).toBe(-3_000_000n) // 40,000 earned − 10,000 withheld, credit-side
+    expect(await bal(variance)).toBe(0n)
+    assertLedgerBalances()
+  })
+
+  /** Beyond his whole share it is not forgiven and not a branch loss — it is a ذمة on him. */
+  it('books only the part beyond his entire share as a receivable', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await openShift(driver, manager)
+    await addOrders(driver, id, 'cash', 12)
+    await addOrders(driver, id, 'electronic', 6)
+    await addOrders(driver, id, 'free', 2)
+
+    // 100,000 handed over against 160,000 expected — a 60,000 gap, well past his 40,000 share.
+    const res = await post(manager, `/shifts/${id}/force-close`, { reason: 'large shortfall', cashDeclared: sypStr(100_000), walletDeclared: sypStr(70_000) })
+    expect(res.statusCode, res.body).toBe(200)
+
+    expect(await bal(sharePayable)).toBe(0n) // the whole share absorbed
+    expect(await bal(receivable)).toBe(2_000_000n) // the remaining 20,000 is owed
+    expect(await bal(variance)).toBe(0n)
     assertLedgerBalances()
   })
 

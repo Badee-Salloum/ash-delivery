@@ -1855,7 +1855,49 @@ export async function forceClose(
   const cashDeclared = input.cashDeclared ?? shift.endCashDeclared ?? expected.endCash
   const walletDeclared = input.walletDeclared ?? shift.endWalletDeclared ?? expected.endWallet
   const variance = `shift_variance:${shift.branchId}`
-  postings.push(...variancePosting('office_cash', variance, expected.endCash - cashDeclared, `fc-cash-${shift.id}`))
+
+  /*
+   * ── «اي نقص يرمم من حصة السائق» (owner decision k) ────────────────────────────────────────
+   *
+   * A CASH SHORTFALL NOW HAS THE DRIVER'S NAME ON IT. Until this, the whole gap went to
+   * `cost_center:shift_variance:<branch>` — a branch account that records THAT money was missing
+   * and nothing about WHOSE shift it was. The owner settles it against the man: his share absorbs
+   * it first, and only what exceeds his entire share stays outstanding, as a ذمة on him.
+   *
+   * This is the ONLY path where a gap can exist at all: `canApproveClose` refuses unless BR1 is
+   * exactly zero, so an ordinary approval never reaches here. That is deliberate — the refusal
+   * stays the default and a manager closes short only on purpose, with a written reason.
+   */
+  const cashGap = expected.endCash - cashDeclared
+  const shareDue = shiftSplit.driverShare > 0n ? shiftSplit.driverShare : minor(0n)
+  const fromShare = cashGap > 0n ? (cashGap < shareDue ? minor(cashGap) : shareDue) : minor(0n)
+  const residual = cashGap > 0n ? minor(cashGap - fromShare) : minor(0n)
+
+  if (fromShare > 0n) {
+    // Debiting the payable discharges what the company owed him, by the amount he is short.
+    postings.push({
+      eventType: 'driver_payout',
+      occurrenceKey: `fc-share-${shift.id}`,
+      lines: [
+        { fund: { kind: 'driver_share_payable', driverId: shift.driverId }, side: 'D', amount: fromShare },
+        { fund: { kind: 'office_cash' }, side: 'C', amount: fromShare },
+      ],
+    })
+  }
+  if (residual > 0n) {
+    // Beyond his whole share it is not forgiven and not a branch loss — it is money he still owes.
+    postings.push({
+      eventType: 'float_return',
+      occurrenceKey: `fc-residual-${shift.id}`,
+      lines: [
+        { fund: { kind: 'driver_receivable_cash', driverId: shift.driverId }, side: 'D', amount: residual },
+        { fund: { kind: 'office_cash' }, side: 'C', amount: residual },
+      ],
+    })
+  }
+  // Whatever the two lines above did NOT absorb — a cash SURPLUS, or any wallet gap — keeps going
+  // to the branch variance centre, which is the right home for a difference nobody can attribute.
+  postings.push(...variancePosting('office_cash', variance, cashGap - fromShare - residual, `fc-cash-${shift.id}`))
   postings.push(...variancePosting('office_wallet', variance, expected.endWallet - walletDeclared, `fc-wallet-${shift.id}`))
 
   const fxDayId = await ensureFxDay(deps, shift.businessDate)
