@@ -646,6 +646,25 @@ export class ApiClient {
     return this.post<ExpenseView>('/expenses', { ...body, ...(this.branchId ? { branchId: this.branchId } : {}) })
   }
 
+  /** «كشف التسوية» — read-only. Posts nothing; it only shows where tonight's cash would go. */
+  shiftSettlement(shiftId: string, choices: { keepAsReceivable?: string; payShareNow?: boolean } = {}) {
+    const q = new URLSearchParams()
+    if (choices.keepAsReceivable) q.set('keepAsReceivable', choices.keepAsReceivable)
+    if (choices.payShareNow !== undefined) q.set('payShareNow', String(choices.payShareNow))
+    const suffix = q.toString() ? `?${q.toString()}` : ''
+    return this.get<{
+      toOfficeCash: string
+      keptAsReceivable: string
+      paidToDriver: string
+      withheldFromShare: string
+      residualReceivable: string
+      shareRemainingPayable: string
+      lines: Array<{ code: string; amount: string }>
+      feasible: boolean
+      refusals: string[]
+    }>(`/shifts/${shiftId}/settlement${suffix}`)
+  }
+
   // ── Branch treasury (cash box + wallet) ─────────────────────────────────────────────────────
   treasuryBalances() {
     return this.get<{ cash: string; wallet: string }>('/treasury/balances')

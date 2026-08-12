@@ -141,6 +141,14 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   const [who, setWho] = useState<{ driver: string | null; vehicle: string | null }>({ driver: null, vehicle: null })
 
   /**
+   * «كشف التسوية». Read-only, so a failure to load it must never block the approval screen — the
+   * manager can still see BR1 and sign off exactly as before. Declared with the other hooks, above
+   * the `if (!review)` guard, for the same reason recorded below it: a hook the first render does
+   * not reach and the second does throws React #310, which is what once left this page blank.
+   */
+  const [settlement, setSettlement] = useState<Awaited<ReturnType<typeof api.shiftSettlement>> | null>(null)
+
+  /**
    * Which orders the table shows — see `flagged()` below for what "worth attention" means.
    *
    * It lives UP HERE, with every other hook, because everything below the `if (!review)` guard runs
@@ -166,6 +174,17 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       })
   }, [api, shiftId])
   useEffect(load, [load])
+
+  // The statement is only meaningful once the driver has declared his cash, so it is fetched with
+  // the review and simply stays null before that. A failure here is swallowed: it is a read-only
+  // panel and must never be the reason a manager cannot approve a shift.
+  useEffect(() => {
+    if (!review) return
+    void api
+      .shiftSettlement(review.id)
+      .then(setSettlement)
+      .catch(() => setSettlement(null))
+  }, [api, review])
 
   useEffect(() => {
     if (!review) return
@@ -528,6 +547,55 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           </div>
         ) : null}
       </Card>
+      ) : null}
+
+      {/* ── «كشف التسوية» — where tonight's cash goes. READ-ONLY: it posts nothing ────────
+          Sits directly under the BR1 verdict because the two answer consecutive questions: BR1
+          says whether the money adds up, this says where it then goes. */}
+      {settlement ? (
+        <Card title={t.settlement.title}>
+          <p className="text-xs text-slate-600">{t.settlement.hint}</p>
+
+          {/* The three figures the owner asked for, biggest first — «كم يجب ان يسحب و يدخل
+              للصندوق وكم يجب ان يعاد للسائق». */}
+          <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+            {(
+              [
+                ['toOfficeCash', settlement.toOfficeCash, 'text-emerald-700'],
+                ['paidToDriver', settlement.paidToDriver, 'text-slate-900'],
+                ['keptAsReceivable', settlement.keptAsReceivable, 'text-amber-700'],
+              ] as const
+            ).map(([key, value, tone]) => (
+              <div key={key} className="rounded-lg border border-slate-200 p-3">
+                <div className="text-xs font-semibold text-slate-500">{t.settlement[key]}</div>
+                <Money value={value} className={`mt-1 block text-2xl font-bold ${tone}`} />
+              </div>
+            ))}
+          </div>
+
+          {/* Every line that carries a figure, so the three totals above are never a claim the
+              manager has to take on trust. */}
+          <div className="mt-3 flex flex-col gap-1 border-t border-slate-100 pt-3">
+            {settlement.lines.map((l) => (
+              <div key={l.code} className="flex items-baseline gap-2 text-sm">
+                <span className="text-slate-700">
+                  {t.settlement.line[l.code as keyof typeof t.settlement.line] ?? l.code}
+                </span>
+                <Money value={l.amount} className="ms-auto font-semibold" />
+              </div>
+            ))}
+          </div>
+
+          {settlement.refusals.length > 0 ? (
+            <div className="mt-3 flex flex-col gap-1">
+              {settlement.refusals.map((r) => (
+                <p key={r} className="text-sm font-medium text-red-700">
+                  {t.settlement.refusal[r as keyof typeof t.settlement.refusal] ?? r}
+                </p>
+              ))}
+            </div>
+          ) : null}
+        </Card>
       ) : null}
 
       {/* ── Start vs end, side by side — the odometer delta is the anti-fraud read ──────── */}

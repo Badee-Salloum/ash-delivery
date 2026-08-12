@@ -22,6 +22,7 @@ import {
   type DocumentStatus,
   type Minor,
   type Posting,
+  type SettlementPlan,
   type ShiftAction,
   type BatteryReading,
   type ShiftOrder,
@@ -40,6 +41,7 @@ import {
   isDateLocked,
   minWalletBalance,
   minor,
+  planSettlement,
   postingsForApproval,
   postingsForOpen,
   walletReturn,
@@ -1677,6 +1679,37 @@ export async function voidShift(deps: Deps, actor: Actor, shiftId: string, reaso
 }
 
 /** Shared with approveClose: the tier-resolved day-level split delta for this shift. */
+/**
+ * «كشف التسوية» — what the manager sees before he approves, and it MOVES NOTHING.
+ *
+ * Read-only on purpose. Every figure comes from the same two readers approval itself uses —
+ * `evaluateShift` for the expected cash and `shiftSplitFor` for the day-tier share — so the
+ * statement can never quietly disagree with the postings that follow it. Recomputing either here
+ * is the drift that D-6's true-up already cost 900,000 minor once.
+ *
+ * The manager's own inputs (how much stays as a ذمة, whether the share is paid tonight, any
+ * adjustment) arrive as query parameters so he can see the effect before committing to it.
+ */
+export async function settlementFor(
+  deps: Deps,
+  shift: ShiftRecord,
+  choices: { keepAsReceivable?: Minor; payShareNow?: boolean; managerAdjustment?: Minor } = {},
+): Promise<SettlementPlan> {
+  const br1 = await evaluateShift(deps, shift)
+  const todaysOrders = toDomainOrders(await deps.orders.listByShift(shift.id))
+  const split = await shiftSplitFor(deps, shift, todaysOrders)
+  return planSettlement({
+    endCashDeclared: shift.endCashDeclared ?? minor(0n),
+    expectedCash: br1.result.expectedCash,
+    driverShare: split.driverShare,
+    // Carried ذمم land in Phase 3; until then a shift has none and the line simply does not print.
+    openingReceivable: minor(0n),
+    keepAsReceivable: choices.keepAsReceivable ?? minor(0n),
+    payShareNow: choices.payShareNow ?? true,
+    managerAdjustment: choices.managerAdjustment ?? minor(0n),
+  })
+}
+
 async function shiftSplitFor(deps: Deps, shift: ShiftRecord, todaysOrders: ShiftOrder[]): Promise<{ driverShare: Minor; companyShare: Minor; yalagoShare: Minor }> {
   const priorShifts = await deps.shifts.listApprovedForDriverOnDate(shift.driverId, shift.businessDate)
   const priorOrders: ShiftOrder[] = []

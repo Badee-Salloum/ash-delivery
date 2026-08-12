@@ -13,6 +13,7 @@ import {
   createShiftRequest,
   endPackageRequest,
   loginRequest,
+  moneySchema,
   uploadEvidenceParams,
   serializeMoney,
   setFxRequest,
@@ -57,6 +58,7 @@ import {
   createShift,
   ensureFxDay,
   evaluateShift,
+  settlementFor,
   rejectClose,
   reviseCloseFigures,
   reviseOperations,
@@ -971,6 +973,46 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         occurredAtMs: deps.clock.nowMs(),
       })
       return { ok: true, id: shift.id }
+    },
+  )
+
+  /**
+   * «كشف التسوية» — where tonight's cash goes. READ-ONLY; it posts nothing.
+   *
+   * The manager's own choices arrive as query parameters so he can see the effect of keeping a
+   * ذمة, or of not paying the share tonight, BEFORE committing to any of it.
+   */
+  app.get(
+    '/shifts/:id/settlement',
+    { config: { permission: 'shift.approve', subject: shiftSubject } },
+    async (req, reply) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const query = z
+        .object({
+          keepAsReceivable: moneySchema.optional(),
+          payShareNow: z.enum(['true', 'false']).optional(),
+          managerAdjustment: moneySchema.optional(),
+        })
+        .parse(req.query)
+      const snapshot = await shiftSnapshot(id)
+      if (!snapshot) return reply.code(404).send({ error: 'shift_not_found' })
+
+      const plan = await settlementFor(deps, snapshot.shift, {
+        ...(query.keepAsReceivable === undefined ? {} : { keepAsReceivable: query.keepAsReceivable }),
+        ...(query.payShareNow === undefined ? {} : { payShareNow: query.payShareNow === 'true' }),
+        ...(query.managerAdjustment === undefined ? {} : { managerAdjustment: query.managerAdjustment }),
+      })
+      return {
+        toOfficeCash: serializeMoney(plan.toOfficeCash),
+        keptAsReceivable: serializeMoney(plan.keptAsReceivable),
+        paidToDriver: serializeMoney(plan.paidToDriver),
+        withheldFromShare: serializeMoney(plan.withheldFromShare),
+        residualReceivable: serializeMoney(plan.residualReceivable),
+        shareRemainingPayable: serializeMoney(plan.shareRemainingPayable),
+        lines: plan.lines.map((l) => ({ code: l.code, amount: serializeMoney(l.amount) })),
+        feasible: plan.feasible,
+        refusals: plan.refusals,
+      }
     },
   )
 
