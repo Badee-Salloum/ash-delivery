@@ -24,6 +24,7 @@
     "glyphs:harvest": "node scripts/glyph-harvest.mjs",
     "glyphs:templates": "node scripts/glyph-templates.mjs",
     "glyphs:scales": "node scripts/glyph-read.mjs --scale=1.25 && node scripts/glyph-read.mjs --scale=1.5 && node scripts/glyph-read.mjs --scale=2.0",
+    "ocr:bench": "node scripts/ocr-bench.mjs",
     "build:apps": "pnpm --filter @ash/driver build && pnpm --filter @ash/admin build"
   },
   "devDependencies": {

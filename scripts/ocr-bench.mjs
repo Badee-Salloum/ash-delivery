@@ -1,0 +1,284 @@
+#!/usr/bin/env node
+/**
+ * PAID OCR, MEASURED — the same eight screenshots, the same answer key, one table.
+ *
+ *   node scripts/ocr-bench.mjs --provider=google   GOOGLE_VISION_KEY=...
+ *   node scripts/ocr-bench.mjs --provider=azure    AZURE_VISION_ENDPOINT=... AZURE_VISION_KEY=...
+ *   node scripts/ocr-bench.mjs --provider=mistral  MISTRAL_API_KEY=...
+ *   node scripts/ocr-bench.mjs --provider=tesseract          (no key — the documented baseline)
+ *   node scripts/ocr-bench.mjs --provider=all
+ *   node scripts/ocr-bench.mjs --provider=google --dry       (print the request, send nothing)
+ *
+ * ── WHY THIS EXISTS ───────────────────────────────────────────────────────────────────────────
+ *
+ * The shipped reader scores 46 fees read, 2 refused, ZERO WRONG on these fixtures. Every provider
+ * priced at $1.50/1,000 claims "Arabic support"; so does Tesseract, which scores 0 of 11 on these
+ * amounts with unrecoverable confusions («٢» and «٣» both return "Y"). Marketing language does not
+ * distinguish the two. This does.
+ *
+ * ── THE METRIC THAT DECIDES IT IS «WRONG», NOT «READ» ─────────────────────────────────────────
+ *
+ * BR1 balances a shift to EXACTLY ZERO. A refused fee costs the driver ten seconds of typing. A
+ * WRONG fee enters the equation as fact, balances to zero against itself, and nobody ever finds it.
+ * A provider that reads 48/48 with one silent error is worse here than one that reads 30 and
+ * refuses the rest. So the table reports `wrong` first and `read` second, deliberately.
+ *
+ * Two independent measurements per provider, because they fail differently:
+ *
+ *   RECALL   does the returned text contain the true amount ANYWHERE (digits folded to Western)?
+ *            Layout-independent. Answers only «can this engine resolve ٢٣٥ at all».
+ *   ROW      the amounts it actually put next to «SYP», in order, against the expected fees.
+ *            This is the number that matters — it is what an integration would consume.
+ *
+ * No image leaves this machine unless you pass a key. `--dry` prints the exact request shape.
+ */
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { ARABIC_INDIC_FIXTURES, TRUTH, foldDigits, normaliseAmount } from './ocr-truth.mjs'
+
+const here = dirname(fileURLToPath(import.meta.url))
+const DRIVER = join(here, '..', 'apps', 'driver')
+const FIXTURES = join(DRIVER, 'test', 'fixtures', 'ocr')
+/** Workspace deps live under apps/driver, not here — same resolution `glyph-read.mjs` uses. */
+const fromDriver = (s) => import(pathToFileURL(createRequire(join(DRIVER, 'package.json')).resolve(s)).href)
+
+const arg = (name, fallback) => process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback
+const DRY = process.argv.includes('--dry')
+const ONLY_ARABIC = process.argv.includes('--arabic-only')
+const WANTED = arg('provider', 'all')
+
+/** Every fixture whose amounts are Arabic-Indic — the only ones that test the hard thing. */
+const files = Object.keys(TRUTH).filter((f) => !ONLY_ARABIC || ARABIC_INDIC_FIXTURES.has(f))
+
+// ── Providers ────────────────────────────────────────────────────────────────────────────────
+//
+// Each returns { text, lines: string[] } or throws. Keys come from the environment and are never
+// logged. The request shapes follow each vendor's current public API; verify against their docs if
+// a call 4xx's — they move.
+
+const providers = {
+  /**
+   * Google Cloud Vision, DOCUMENT_TEXT_DETECTION.
+   * $1.50 per 1,000 units after the first 1,000/month free.
+   * `languageHints: ['ar']` matters: without it Latin is preferred and Arabic-Indic digits are
+   * frequently transliterated into whatever Latin shape is nearest.
+   */
+  google: {
+    needs: ['GOOGLE_VISION_KEY'],
+    async run(bytes) {
+      const body = {
+        requests: [
+          {
+            image: { content: bytes.toString('base64') },
+            features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
+            imageContext: { languageHints: ['ar'] },
+          },
+        ],
+      }
+      if (DRY) return { dry: 'POST https://vision.googleapis.com/v1/images:annotate?key=***', body: { ...body, requests: [{ ...body.requests[0], image: { content: `<${bytes.length} bytes>` } }] } }
+      const res = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${process.env.GOOGLE_VISION_KEY}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!res.ok) throw new Error(`google ${res.status}: ${(await res.text()).slice(0, 300)}`)
+      const json = await res.json()
+      const r = json.responses?.[0]
+      if (r?.error) throw new Error(`google: ${r.error.message}`)
+      const text = r?.fullTextAnnotation?.text ?? ''
+      return { text, lines: text.split('\n') }
+    },
+  },
+
+  /**
+   * Azure AI Vision — Image Analysis 4.0 `read` feature.
+   * $1.50 per 1,000 on S0. Endpoint looks like https://<resource>.cognitiveservices.azure.com
+   */
+  azure: {
+    needs: ['AZURE_VISION_ENDPOINT', 'AZURE_VISION_KEY'],
+    async run(bytes) {
+      const url = `${(process.env.AZURE_VISION_ENDPOINT ?? '').replace(/\/$/, '')}/computervision/imageanalysis:analyze?api-version=2024-02-01&features=read`
+      if (DRY) return { dry: `POST ${url}`, body: `<${bytes.length} bytes, application/octet-stream>` }
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/octet-stream', 'Ocp-Apim-Subscription-Key': process.env.AZURE_VISION_KEY },
+        body: bytes,
+      })
+      if (!res.ok) throw new Error(`azure ${res.status}: ${(await res.text()).slice(0, 300)}`)
+      const json = await res.json()
+      const lines = (json.readResult?.blocks ?? []).flatMap((b) => (b.lines ?? []).map((l) => l.text ?? ''))
+      return { text: lines.join('\n'), lines }
+    },
+  },
+
+  /**
+   * Mistral OCR — document understanding, priced around $1.00 per 1,000 pages.
+   * Returns markdown per page rather than positioned lines, so ROW scoring is weaker here by
+   * construction; RECALL is the honest number for it.
+   */
+  mistral: {
+    needs: ['MISTRAL_API_KEY'],
+    async run(bytes) {
+      const body = {
+        model: 'mistral-ocr-latest',
+        document: { type: 'image_url', image_url: `data:image/jpeg;base64,${bytes.toString('base64')}` },
+      }
+      if (DRY) return { dry: 'POST https://api.mistral.ai/v1/ocr', body: { ...body, document: { type: 'image_url', image_url: `<${bytes.length} bytes>` } } }
+      const res = await fetch('https://api.mistral.ai/v1/ocr', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env.MISTRAL_API_KEY}` },
+        body: JSON.stringify(body),
+      })
+      if (!res.ok) throw new Error(`mistral ${res.status}: ${(await res.text()).slice(0, 300)}`)
+      const json = await res.json()
+      const text = (json.pages ?? []).map((p) => p.markdown ?? '').join('\n')
+      return { text, lines: text.split('\n') }
+    },
+  },
+
+  /** The control. Free, already vendored, and documented at 0 of 11 on these amounts. */
+  tesseract: {
+    needs: [],
+    async run(bytes) {
+      if (DRY) return { dry: 'local tesseract.js, no network', body: `<${bytes.length} bytes>` }
+      const { createWorker, OEM } = await fromDriver('tesseract.js')
+      const worker = await createWorker(['eng', 'ara'], OEM.LSTM_ONLY, {
+        langPath: join(DRIVER, 'public', 'tesseract'),
+        gzip: true,
+      })
+      await worker.setParameters({ tessedit_pageseg_mode: '6', preserve_interword_spaces: '1' })
+      const { data } = await worker.recognize(bytes)
+      await worker.terminate()
+      const text = data.text ?? ''
+      return { text, lines: text.split('\n') }
+    },
+  },
+}
+
+// ── Scoring ──────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The amounts a provider put beside «SYP», left to right, top to bottom.
+ *
+ * Same rule the shipped reader uses: the money is the ink adjacent to the anchor word. Taking every
+ * number on the page instead would score a provider on the clock, the date and the plus-code too,
+ * and flatter it enormously.
+ */
+function amountsNearAnchor(lines) {
+  const out = []
+  for (const raw of lines) {
+    const line = foldDigits(raw)
+    if (!/SYP/i.test(line)) continue
+    // The fee sits immediately before the anchor on these screens; fall back to after it.
+    const before = line.split(/SYP/i)[0] ?? ''
+    const after = line.split(/SYP/i)[1] ?? ''
+    const pick = (s) => {
+      const all = s.match(/[-+−–]?\s*\d[\d,،.]*/g)
+      return all && all.length > 0 ? all[all.length - 1] : null
+    }
+    const candidate = pick(before) ?? pick(after)
+    const n = candidate === null ? null : normaliseAmount(candidate)
+    if (n !== null) out.push(n)
+  }
+  return out
+}
+
+function scoreFile(file, text, lines) {
+  const expected = TRUTH[file].rows.map((r) => r[0])
+  const folded = foldDigits(text).replace(/[,،\s]/g, '')
+
+  // RECALL — can the engine resolve the digits at all, anywhere on the page?
+  let recall = 0
+  for (const fee of expected) {
+    const bare = fee.replace(/^[-+]/, '')
+    if (folded.includes(bare)) recall++
+  }
+
+  // ROW — what an integration would actually consume.
+  const got = amountsNearAnchor(lines)
+  let correct = 0
+  let wrong = 0
+  const wrongs = []
+  const pool = [...expected]
+  for (const g of got) {
+    const i = pool.indexOf(g)
+    if (i >= 0) {
+      pool.splice(i, 1)
+      correct++
+    } else {
+      wrong++
+      wrongs.push(g)
+    }
+  }
+  return { expected: expected.length, recall, correct, wrong, wrongs, missing: pool, anchored: got.length }
+}
+
+// ── Run ──────────────────────────────────────────────────────────────────────────────────────
+
+const chosen = WANTED === 'all' ? Object.keys(providers) : WANTED.split(',')
+const results = []
+
+for (const name of chosen) {
+  const p = providers[name]
+  if (!p) {
+    console.error(`unknown provider «${name}» — try ${Object.keys(providers).join(', ')}`)
+    process.exit(2)
+  }
+  const missingKeys = p.needs.filter((k) => !process.env[k])
+  if (missingKeys.length > 0 && !DRY) {
+    console.log(`\n▸ ${name}: SKIPPED — set ${missingKeys.join(', ')}`)
+    results.push({ name, skipped: missingKeys })
+    continue
+  }
+
+  console.log(`\n▸ ${name}${DRY ? '  (dry run — nothing is sent)' : ''}`)
+  const total = { expected: 0, recall: 0, correct: 0, wrong: 0, anchored: 0 }
+  for (const file of files) {
+    const bytes = readFileSync(join(FIXTURES, file))
+    try {
+      const r = await p.run(bytes)
+      if (DRY) {
+        console.log(`  ${file}: ${r.dry}`)
+        continue
+      }
+      const s = scoreFile(file, r.text, r.lines)
+      total.expected += s.expected
+      total.recall += s.recall
+      total.correct += s.correct
+      total.wrong += s.wrong
+      total.anchored += s.anchored
+      const flag = s.wrong > 0 ? `  ⚠ WRONG ${JSON.stringify(s.wrongs)}` : ''
+      console.log(
+        `  ${file.padEnd(22)} recall ${String(s.recall).padStart(2)}/${s.expected}` +
+          `   rows ${String(s.correct).padStart(2)}/${s.expected}   wrong ${s.wrong}${flag}`,
+      )
+    } catch (e) {
+      console.log(`  ${file.padEnd(22)} ERROR ${e.message}`)
+    }
+  }
+  if (!DRY) {
+    results.push({ name, ...total })
+    console.log(
+      `  ── ${name}: recall ${total.recall}/${total.expected} · rows ${total.correct}/${total.expected} · WRONG ${total.wrong}`,
+    )
+  }
+}
+
+if (!DRY && results.some((r) => !r.skipped)) {
+  console.log('\n══ SUMMARY — «wrong» is the number that decides this ══')
+  console.log('  provider     recall     rows      WRONG')
+  console.log(`  ${'shipped glyph reader'.padEnd(20)}   —      46/48         0     (node scripts/glyph-read.mjs)`)
+  for (const r of results) {
+    if (r.skipped) {
+      console.log(`  ${r.name.padEnd(20)} skipped — needs ${r.skipped.join(', ')}`)
+      continue
+    }
+    console.log(
+      `  ${r.name.padEnd(20)} ${String(r.recall).padStart(2)}/${r.expected}   ${String(r.correct).padStart(2)}/${r.expected}   ${String(r.wrong).padStart(6)}`,
+    )
+  }
+  console.log('\n  A provider is only worth adopting if WRONG is 0 AND rows beats 46/48.')
+  console.log('  Anything with WRONG > 0 is disqualified for money, whatever its read rate.')
+}
