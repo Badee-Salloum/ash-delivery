@@ -46,6 +46,8 @@ const fromDriver = (s) => import(pathToFileURL(createRequire(join(DRIVER, 'packa
 
 const arg = (name, fallback) => process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback
 const DRY = process.argv.includes('--dry')
+/** `--dump=log-0804-a.jpg` prints what the provider actually returned, to judge a disputed row. */
+const DUMP = arg('dump', null)
 const ONLY_ARABIC = process.argv.includes('--arabic-only')
 const WANTED = arg('provider', 'all')
 
@@ -186,20 +188,45 @@ function amountsNearAnchor(lines) {
 }
 
 function scoreFile(file, text, lines) {
-  const expected = TRUTH[file].rows.map((r) => r[0])
+  /*
+   * THE TRUTH IS NORMALISED BY THE SAME FUNCTION AS THE ANSWER, or the bench lies.
+   *
+   * The answer key writes credits as «+153»; `normaliseAmount` drops a leading plus, so an engine
+   * that returned exactly «١٥٣» was scored WRONG against «+153» — four times on the first payments
+   * log alone. That is the benchmark inventing failures, which is worse than useless: it would have
+   * had me report a provider as unsafe for money on the strength of a bug in the scorer.
+   *
+   * Dropping «+» from BOTH sides keeps the only sign distinction that carries meaning: a MINUS.
+   * «-153» still does not match «153», so a genuinely flipped sign is still caught.
+   */
+  const expected = TRUTH[file].rows.map((r) => normaliseAmount(r[0]))
   const folded = foldDigits(text).replace(/[,،\s]/g, '')
 
   // RECALL — can the engine resolve the digits at all, anywhere on the page?
   let recall = 0
   for (const fee of expected) {
+    // Both with and without the decimal point: «165.50» printed as «165,50» is the SAME reading,
+    // and a separator style is not a misread digit.
     const bare = fee.replace(/^[-+]/, '')
-    if (folded.includes(bare)) recall++
+    if (folded.includes(bare) || folded.includes(bare.replace('.', ''))) recall++
   }
 
   // ROW — what an integration would actually consume.
+  /*
+   * TWO KINDS OF WRONG, and they lead to opposite decisions.
+   *
+   * SEPARATOR — every digit is right but the marks are ambiguous. Mistral flattens BOTH the Arabic
+   *   thousands «٬» and decimal «٫» into a plain comma, so «−١٬١٥٥٫٦٥» arrives as «-1,155,65» and
+   *   1155.65 is no longer distinguishable from 115565. Recoverable in our own code with a strict
+   *   rule (a final group of exactly two digits is the decimal), so it is a cost, not a verdict.
+   *
+   * MISREAD — a different digit. «٣٤٥» returned as «٢٤٥». Nothing downstream can detect it: it is a
+   *   plausible fee, it balances against itself, and BR1's zero tolerance never fires. THIS is what
+   *   disqualifies an engine from money, and it is why the two are counted apart.
+   */
+  const digitsOnly = (s) => s.replace(/[^0-9]/g, '')
   const got = amountsNearAnchor(lines)
   let correct = 0
-  let wrong = 0
   const wrongs = []
   const pool = [...expected]
   for (const g of got) {
@@ -207,12 +234,19 @@ function scoreFile(file, text, lines) {
     if (i >= 0) {
       pool.splice(i, 1)
       correct++
+      continue
+    }
+    const j = pool.findIndex((e) => digitsOnly(e) === digitsOnly(g))
+    if (j >= 0) {
+      wrongs.push({ got: g, want: pool[j], kind: 'separator' })
+      pool.splice(j, 1)
     } else {
-      wrong++
-      wrongs.push(g)
+      wrongs.push({ got: g, want: null, kind: 'misread' })
     }
   }
-  return { expected: expected.length, recall, correct, wrong, wrongs, missing: pool, anchored: got.length }
+  const separator = wrongs.filter((w) => w.kind === 'separator').length
+  const misread = wrongs.filter((w) => w.kind === 'misread').length
+  return { expected: expected.length, recall, correct, wrong: wrongs.length, separator, misread, wrongs, missing: pool, anchored: got.length }
 }
 
 // ── Run ──────────────────────────────────────────────────────────────────────────────────────
@@ -234,7 +268,7 @@ for (const name of chosen) {
   }
 
   console.log(`\n▸ ${name}${DRY ? '  (dry run — nothing is sent)' : ''}`)
-  const total = { expected: 0, recall: 0, correct: 0, wrong: 0, anchored: 0 }
+  const total = { expected: 0, recall: 0, correct: 0, wrong: 0, separator: 0, misread: 0, anchored: 0 }
   for (const file of files) {
     const bytes = readFileSync(join(FIXTURES, file))
     try {
@@ -243,16 +277,26 @@ for (const name of chosen) {
         console.log(`  ${file}: ${r.dry}`)
         continue
       }
+      if (DUMP && file === DUMP) {
+        console.log(`\n──── raw text from ${name} for ${file} ────`)
+        console.log(r.lines.filter((l) => /SYP/i.test(l)).join('\n') || r.text.slice(0, 2000))
+        console.log('──── end raw ────\n')
+      }
       const s = scoreFile(file, r.text, r.lines)
       total.expected += s.expected
       total.recall += s.recall
       total.correct += s.correct
       total.wrong += s.wrong
+      total.separator += s.separator
+      total.misread += s.misread
       total.anchored += s.anchored
-      const flag = s.wrong > 0 ? `  ⚠ WRONG ${JSON.stringify(s.wrongs)}` : ''
+      const flag =
+        s.wrongs.length > 0
+          ? '  ⚠ ' + s.wrongs.map((w) => (w.kind === 'separator' ? `sep «${w.got}»→${w.want}` : `MISREAD «${w.got}»`)).join(' ')
+          : ''
       console.log(
         `  ${file.padEnd(22)} recall ${String(s.recall).padStart(2)}/${s.expected}` +
-          `   rows ${String(s.correct).padStart(2)}/${s.expected}   wrong ${s.wrong}${flag}`,
+          `   rows ${String(s.correct).padStart(2)}/${s.expected}   sep ${s.separator}  misread ${s.misread}${flag}`,
       )
     } catch (e) {
       console.log(`  ${file.padEnd(22)} ERROR ${e.message}`)
@@ -267,18 +311,20 @@ for (const name of chosen) {
 }
 
 if (!DRY && results.some((r) => !r.skipped)) {
-  console.log('\n══ SUMMARY — «wrong» is the number that decides this ══')
-  console.log('  provider     recall     rows      WRONG')
-  console.log(`  ${'shipped glyph reader'.padEnd(20)}   —      46/48         0     (node scripts/glyph-read.mjs)`)
+  console.log('\n══ SUMMARY — MISREAD is the column that decides this ══')
+  console.log('  provider              recall     rows     sep   MISREAD')
+  console.log(`  ${'shipped glyph reader'.padEnd(20)}     —     46/48      0        0    (node scripts/glyph-read.mjs)`)
   for (const r of results) {
     if (r.skipped) {
       console.log(`  ${r.name.padEnd(20)} skipped — needs ${r.skipped.join(', ')}`)
       continue
     }
     console.log(
-      `  ${r.name.padEnd(20)} ${String(r.recall).padStart(2)}/${r.expected}   ${String(r.correct).padStart(2)}/${r.expected}   ${String(r.wrong).padStart(6)}`,
+      `  ${r.name.padEnd(20)} ${String(r.recall).padStart(3)}/${r.expected}   ${String(r.correct).padStart(3)}/${r.expected}   ${String(r.separator).padStart(4)}   ${String(r.misread).padStart(6)}`,
     )
   }
-  console.log('\n  A provider is only worth adopting if WRONG is 0 AND rows beats 46/48.')
-  console.log('  Anything with WRONG > 0 is disqualified for money, whatever its read rate.')
+  console.log('\n  sep     = every digit right, separator ambiguous. Our problem to fix; a cost, not a verdict.')
+  console.log('  MISREAD = a different digit, silently. BR1 balances it against itself and nobody')
+  console.log('            ever finds it. ANY misread disqualifies an engine from money here.')
+  console.log('\n  Adopt only if MISREAD is 0 AND rows beats 46/48.')
 }
