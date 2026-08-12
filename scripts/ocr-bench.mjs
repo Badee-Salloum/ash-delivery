@@ -47,9 +47,30 @@
  * SECOND, cheaper models do not degrade gracefully, they degrade SILENTLY: nano answered «٢٧٥» and
  * «٣٤٥» as 270 and 270, which is a plausible fee twice over and undetectable downstream.
  *
- * Gemini's run is CAPABILITY, not reliability. `--repeat=N` is the outstanding test and it has not
- * been completed — the free tier 429'd partway. Until the same image gives the same answer six
- * times, nothing here goes near a shift close.
+ * ── THE DETERMINISM TEST, COMPLETED 2026-08-12 — AND GEMINI FAILS IT ─────────────────────────
+ *
+ *   node scripts/ocr-bench.mjs --provider=gemini --only=log-0804-b.jpg --repeat=10 --delay=5000
+ *
+ *    9/10  ✓  … 300 -1155.65 -416
+ *    1/10  ✗  … 300 -115565  -416
+ *
+ * The SAME image, at temperature 0, ten times. Ten of eleven rows identical every run; the
+ * eleventh flips by a FACTOR OF 100 once in ten, because the Arabic decimal «٫» is sometimes
+ * preserved and sometimes dropped.
+ *
+ * WHY THAT IS FATAL AND NOT MERELY A SEPARATOR PROBLEM. A stable «-1,155,65» would be recoverable
+ * — a rule reading a final two-digit group as the decimal fixes every row. This is not stable, and
+ * «-115565» is a perfectly plausible amount: nothing downstream, BR1 included, can tell it from a
+ * genuine 115,565. The reading is wrong, confident, and undetectable.
+ *
+ * A majority vote does not save it either. At 9-in-10 the wrong answer usually loses — but «usually»
+ * against money is the whole objection, and three calls per screenshot to be probably-right is a
+ * worse trade than one refusal the driver types in ten seconds.
+ *
+ * VERDICT: Gemini cannot be the sole reader. Its 48/48 stands as capability, and it remains the
+ * strongest candidate for a SECOND OPINION on rows our own reader refuses — accepted only when it
+ * agrees with the glyph reader or with itself across two calls, which is exactly the check this run
+ * would have failed.
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -526,12 +547,21 @@ for (const name of chosen) {
           seen.push(`ERROR ${e.message.slice(0, 60)}`)
         }
       }
-      const distinct = [...new Set(seen)]
+      // COUNTS, not just the distinct set. Whether a disagreement is 1-in-6 or 3-in-6 decides
+      // whether a majority vote could rescue the engine or would simply ratify the wrong answer
+      // more often — and that is the only question left once instability is established.
+      const tally = new Map()
+      for (const s of seen) tally.set(s, (tally.get(s) ?? 0) + 1)
+      const distinct = [...tally.keys()]
       const expected = TRUTH[file].rows.map((r) => normaliseAmount(r[0])).join(' ')
       const stable = distinct.length === 1
-      const right = distinct.length === 1 && distinct[0] === expected
+      const right = stable && distinct[0] === expected
       console.log(`  ${file.padEnd(22)} ${REPEAT} runs · ${stable ? 'IDENTICAL' : `${distinct.length} DIFFERENT ANSWERS`} · ${right ? 'and correct' : stable ? 'but NOT the truth' : ''}`)
-      if (!stable) for (const d of distinct) console.log(`      ${d}`)
+      if (!stable) {
+        for (const [d, n] of [...tally.entries()].sort((a, b) => b[1] - a[1])) {
+          console.log(`      ${String(n).padStart(2)}/${REPEAT}  ${d === expected ? '✓' : '✗'}  ${d}`)
+        }
+      }
       if (stable && !right) {
         console.log(`      got  ${distinct[0]}`)
         console.log(`      want ${expected}`)
