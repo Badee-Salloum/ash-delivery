@@ -48,11 +48,27 @@ const arg = (name, fallback) => process.argv.find((a) => a.startsWith(`--${name}
 const DRY = process.argv.includes('--dry')
 /** `--dump=log-0804-a.jpg` prints what the provider actually returned, to judge a disputed row. */
 const DUMP = arg('dump', null)
+/** `--only=a.jpg,b.jpg` narrows the set — for pacing a rate-limited free tier. */
+const ONLY = arg('only', null)
+/**
+ * `--repeat=5` reads every image N times and reports whether the answers AGREE.
+ *
+ * THE TEST THAT MATTERS FOR A LANGUAGE MODEL. A single clean run proves capability; only repetition
+ * proves reliability, and a model is not a deterministic function even at temperature 0. An engine
+ * that answers 345 today and 245 tomorrow is unusable for money no matter how good its best run
+ * looked — and it would be the hardest kind of fault to ever notice in production.
+ */
+const REPEAT = Number(arg('repeat', '1'))
+/** `--delay=4000` waits between calls, so a free tier's per-minute cap is not mistaken for a fault. */
+const DELAY = Number(arg('delay', '0'))
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const ONLY_ARABIC = process.argv.includes('--arabic-only')
 const WANTED = arg('provider', 'all')
 
 /** Every fixture whose amounts are Arabic-Indic — the only ones that test the hard thing. */
-const files = Object.keys(TRUTH).filter((f) => !ONLY_ARABIC || ARABIC_INDIC_FIXTURES.has(f))
+const files = Object.keys(TRUTH)
+  .filter((f) => !ONLY_ARABIC || ARABIC_INDIC_FIXTURES.has(f))
+  .filter((f) => ONLY === null || ONLY.split(',').includes(f))
 
 // ── Providers ────────────────────────────────────────────────────────────────────────────────
 //
@@ -350,6 +366,37 @@ for (const name of chosen) {
   const total = { expected: 0, recall: 0, correct: 0, wrong: 0, separator: 0, misread: 0, anchored: 0 }
   for (const file of files) {
     const bytes = readFileSync(join(FIXTURES, file))
+
+    /*
+     * REPETITION IS THE RELIABILITY TEST. Run the same image N times and compare the extracted
+     * amounts. Disagreement between runs is disqualifying on its own: it means no single result —
+     * including a perfect one — can be trusted, and the fault would be invisible in production
+     * because each individual answer looks perfectly reasonable.
+     */
+    if (REPEAT > 1) {
+      const seen = []
+      for (let i = 0; i < REPEAT; i++) {
+        if (i > 0 && DELAY > 0) await sleep(DELAY)
+        try {
+          const r = await p.run(bytes)
+          seen.push(amountsNearAnchor(r.lines).join(' '))
+        } catch (e) {
+          seen.push(`ERROR ${e.message.slice(0, 60)}`)
+        }
+      }
+      const distinct = [...new Set(seen)]
+      const expected = TRUTH[file].rows.map((r) => normaliseAmount(r[0])).join(' ')
+      const stable = distinct.length === 1
+      const right = distinct.length === 1 && distinct[0] === expected
+      console.log(`  ${file.padEnd(22)} ${REPEAT} runs · ${stable ? 'IDENTICAL' : `${distinct.length} DIFFERENT ANSWERS`} · ${right ? 'and correct' : stable ? 'but NOT the truth' : ''}`)
+      if (!stable) for (const d of distinct) console.log(`      ${d}`)
+      if (stable && !right) {
+        console.log(`      got  ${distinct[0]}`)
+        console.log(`      want ${expected}`)
+      }
+      continue
+    }
+
     try {
       const r = await p.run(bytes)
       if (DRY) {
