@@ -140,6 +140,85 @@ const providers = {
     },
   },
 
+  /**
+   * GEMINI via Google AI Studio — a free API key, NO billing account, NO card.
+   *
+   * Cloud Vision refuses without billing (403 «This API method requires billing to be enabled»),
+   * but AI Studio is a different product with its own free tier. Get a key at aistudio.google.com.
+   *
+   * ⚠ This is a LANGUAGE MODEL, not an OCR engine, and the difference is the whole risk: an OCR
+   * engine that cannot resolve a glyph returns noise, while a model returns the most plausible
+   * number. On a shift that must balance to zero, plausible-and-wrong is the one failure mode with
+   * no defence. Measured here precisely because it is the option people reach for first.
+   */
+  gemini: {
+    needs: ['GEMINI_API_KEY'],
+    async run(bytes) {
+      const model = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash'
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`
+      const body = {
+        contents: [
+          {
+            parts: [
+              {
+                text:
+                  'Transcribe every line of this screenshot exactly as printed, one line per output line. ' +
+                  'Keep Arabic-Indic digits (٠١٢٣٤٥٦٧٨٩) EXACTLY as they appear — do not convert them to Western digits. ' +
+                  'Keep the Arabic thousands separator ٬ and decimal separator ٫ distinct from each other. ' +
+                  'If a character is unclear, write ? rather than guessing. Output only the transcription.',
+              },
+              { inline_data: { mime_type: 'image/jpeg', data: bytes.toString('base64') } },
+            ],
+          },
+        ],
+        generationConfig: { temperature: 0 },
+      }
+      if (DRY) return { dry: `POST ${url} (model ${model})`, body: '<image inline>' }
+      const res = await fetch(`${url}?key=${process.env.GEMINI_API_KEY}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!res.ok) {
+        const detail = (await res.text()).slice(0, 300)
+        throw new Error(`gemini ${res.status}: ${detail}${res.status === 404 ? '  — try GEMINI_MODEL=gemini-2.0-flash' : ''}`)
+      }
+      const json = await res.json()
+      const text = (json.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? '').join('')
+      return { text, lines: text.split('\n') }
+    },
+  },
+
+  /**
+   * OCR.space — a free key by email, 25,000 requests/month, NO card.
+   *
+   * A real OCR engine rather than a model, so it refuses instead of inventing. Engine 1 is the one
+   * that lists Arabic; engine 2 is faster but its language coverage differs — override with
+   * OCRSPACE_ENGINE if a run looks empty.
+   */
+  ocrspace: {
+    needs: ['OCRSPACE_API_KEY'],
+    async run(bytes) {
+      const form = new FormData()
+      form.set('base64Image', `data:image/jpeg;base64,${bytes.toString('base64')}`)
+      form.set('language', process.env.OCRSPACE_LANG ?? 'ara')
+      form.set('OCREngine', process.env.OCRSPACE_ENGINE ?? '1')
+      form.set('scale', 'true')
+      form.set('isTable', 'true')
+      if (DRY) return { dry: 'POST https://api.ocr.space/parse/image', body: '<multipart, base64Image>' }
+      const res = await fetch('https://api.ocr.space/parse/image', {
+        method: 'POST',
+        headers: { apikey: process.env.OCRSPACE_API_KEY },
+        body: form,
+      })
+      if (!res.ok) throw new Error(`ocrspace ${res.status}: ${(await res.text()).slice(0, 200)}`)
+      const json = await res.json()
+      if (json.IsErroredOnProcessing) throw new Error(`ocrspace: ${JSON.stringify(json.ErrorMessage ?? json).slice(0, 200)}`)
+      const text = (json.ParsedResults ?? []).map((p) => p.ParsedText ?? '').join('\n')
+      return { text, lines: text.split('\n') }
+    },
+  },
+
   /** The control. Free, already vendored, and documented at 0 of 11 on these amounts. */
   tesseract: {
     needs: [],
