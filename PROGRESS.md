@@ -14,7 +14,8 @@ specification and they verify exactly: `3,600,000 + 400,000 = 4,000,000` and `97
 1,000,000`, both landing on target — a day already restored.
 
 **All suites green: domain 392, client 149, driver 163, adapters 36, api 448 — 1,188 tests, 8 guards,
-26 migrations, 47 tables.** Six commits, `d676cfa` → `446ce42`.
+26 migrations, 47 tables. Migrations 0023–0026 applied to Neon; API, admin and driver deployed and
+verified in production.** Six commits, `d676cfa` → `446ce42`.
 
 ### What was built
 
@@ -60,10 +61,22 @@ it.
   how that declared cash is *posted*. The equation still closes at exactly zero, and the carry enters
   the next day as a tranche so BR1 stays in its absolute form (decision 4).
 
+### One thing to do differently next time
+
+**The API was deployed before its migrations were applied**, and for about two minutes production ran
+code whose `UPDATE shifts` named two columns the database did not have. Reads were unaffected —
+`SELECT s.*` with `?? '0'` fallbacks degrades cleanly — but every shift WRITE would have failed:
+a driver could not have started or closed a shift. Nothing hit it (the logs show only the smoke
+probes), and the migration went in immediately after. **Migrate first, then deploy.** `RUNBOOK.md`
+says so; the order was inverted because the migration command needed a permission that the deploy
+did not.
+
+Verified after: both columns present, the tranche CHECK carries `carried_receivable`, both audit
+triggers exist, and the capital targets seeded at `400,000,000` / `100,000,000` minor — 4,000,000 and
+1,000,000 new SYP, his figures.
+
 ### Next
 
-- **Migrations 0025 + 0026 are NOT yet applied to production** (it sits at 0024), and the API/admin
-  deploy is still pending. Both were blocked by the permission classifier, not by a problem.
 - Three shifts from 2026-08-11 are still `open` and need closing or force-closing.
 - P2 security, untouched: `GET /audit` returns password hashes and plaintext TOTP secrets; the 2FA
   enrolment bypass; no login rate limiting; no helmet; three cross-branch write holes.
