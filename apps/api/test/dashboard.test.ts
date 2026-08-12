@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
+import { BRANCH, DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
 
 /**
  * The minimal ops dashboard (SRS I-1). Total profit is GM-only (BR8), which is why it is a
@@ -159,5 +159,105 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
     const driver = await h.loginAs('driver1')
     expect((await get(driver, '/dashboard')).statusCode).toBe(403)
     expect((await get(driver, '/dashboard/profit')).statusCode).toBe(403)
+  })
+})
+
+/**
+ * «كشف الصندوق ورأس المال» — the owner's own sheet.
+ *
+ * The point of these is that «كييش» and «شحن من الصندوق» are read off the LEDGER EVENT and not off
+ * a hand-typed Arabic word in a column. Nothing here spells anything.
+ */
+describe('the owner’s treasury sheet (I-1, decision 10)', () => {
+  const post = async (token: string, url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> =>
+    await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(token) }, payload })
+
+  /** The GM is org-wide and the seeded one has no branch; give him this branch to read a figure. */
+  async function scopedGm(): Promise<string> {
+    h.deps.users.seed({
+      id: 'u-gm', branchId: BRANCH, roleKey: 'general_manager', username: 'gm',
+      fullNameAr: 'gm', passwordHash: 'plain:secret', driverId: null,
+      failedAttempts: 0, lockedUntilMs: null, active: true,
+    })
+    return await h.loginAs('gm')
+  }
+
+  async function seedFund(token: string, fundCode: string, amount: string): Promise<void> {
+    const res = await post(token, '/journal/manual', {
+      reason: 'رصيد افتتاحي',
+      lines: [
+        { fundCode, side: 'D', amount },
+        { fundCode: 'opening_balance', side: 'C', amount },
+      ],
+    })
+    expect(res.statusCode, res.body).toBe(201)
+  }
+
+  it('reports رأس المال المدوّر as both boxes PLUS everything out on ذمم', async () => {
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(3_600_000))
+    await seedFund(manager, `driver_receivable_cash:${DRIVER_ID}`, sypStr(400_000))
+    await seedFund(manager, 'office_wallet', sypStr(970_000))
+    await seedFund(manager, `driver_receivable_wallet:${DRIVER_ID}`, sypStr(30_000))
+
+    const res = await get(await scopedGm(), '/dashboard/treasury')
+    expect(res.statusCode, res.body).toBe(200)
+    const c = res.json().capital
+    expect(c.officeCash).toBe(sypStr(3_600_000))
+    expect(c.receivablesCash).toBe(sypStr(400_000))
+    // 3,600,000 + 400,000 + 970,000 + 30,000 — his 4,000,000 and 1,000,000, side by side.
+    expect(c.total).toBe(sypStr(5_000_000))
+    expect(c.target).toBe(sypStr(5_000_000))
+    expect(c.delta).toBe(sypStr(0))
+  })
+
+  it('sums «كييش» and «شحن من الصندوق» from the ledger event, not from a typed word', async () => {
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(4_500_000))
+    await seedFund(manager, 'office_wallet', sypStr(1_000_000))
+    await post(manager, '/cash-counts', {
+      lines: [
+        { fundCode: 'office_cash', counted: sypStr(4_500_000) },
+        { fundCode: 'office_wallet', counted: sypStr(1_000_000) },
+      ],
+    })
+    expect((await post(manager, '/treasury/restoration', { reason: 'ترميم اليوم' })).statusCode).toBe(201)
+
+    const res = await get(await scopedGm(), '/dashboard/treasury')
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json().fundIn).toBe(sypStr(500_000))
+    expect(res.json().fundOut).toBe(sypStr(0))
+    expect(res.json().fundNet).toBe(sypStr(500_000))
+    expect(res.json().companyFund).toBe(sypStr(500_000))
+    // One row per working day — his sheet, a line at a time.
+    expect(res.json().days).toEqual([{ businessDate: '2026-07-21', in: sypStr(500_000), out: sypStr(0), net: sypStr(500_000) }])
+    // And the box is back on its capital, so nothing is «مدوَّر» beyond the target.
+    expect(res.json().capital.delta).toBe(sypStr(0))
+  })
+
+  it('a shortfall reads as خرج الصندوق, and the net goes negative', async () => {
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(3_000_000))
+    await seedFund(manager, 'office_wallet', sypStr(1_000_000))
+    await post(manager, '/cash-counts', {
+      lines: [
+        { fundCode: 'office_cash', counted: sypStr(3_000_000) },
+        { fundCode: 'office_wallet', counted: sypStr(1_000_000) },
+      ],
+    })
+    await post(manager, '/treasury/restoration', { reason: 'ترميم اليوم' })
+
+    const res = await get(await scopedGm(), '/dashboard/treasury')
+    expect(res.json().fundIn).toBe(sypStr(0))
+    expect(res.json().fundOut).toBe(sypStr(1_000_000))
+    expect(res.json().fundNet).toBe(sypStr(-1_000_000))
+  })
+
+  it('is BR8-scoped: the branch manager and the driver are refused, the sysadmin is not', async () => {
+    expect((await get(await h.loginAs('manager'), '/dashboard/treasury')).statusCode).toBe(403)
+    expect((await get(await h.loginAs('driver1'), '/dashboard/treasury')).statusCode).toBe(403)
+    // Decision 9 — every permission at scope `all`. He still has to name a branch.
+    const sysadmin = await h.loginAs('sysadmin')
+    expect((await get(sysadmin, `/dashboard/treasury?branchId=${BRANCH}`)).statusCode).toBe(200)
   })
 })

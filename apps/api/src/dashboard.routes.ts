@@ -146,6 +146,109 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
       yalagoShareSyp: serializeMoney(minor(yalago)),
     }
   })
+
+  /**
+   * The owner's own sheet: «راس المال المدور · ربح الشركة · دخل الصندوق · خرج الصندوق · الصافي».
+   *
+   * His spreadsheet gets these by `SUMIF`-ing a hand-typed Arabic word in a column — one typo away
+   * from a wrong total, and unavailable the moment somebody writes «كيش» instead of «كييش». Here
+   * they come from the LEDGER EVENT: a `restoration` entry that DEBITS `company_box` is كييش,
+   * one that CREDITS it is شحن من الصندوق. Nothing depends on how anybody spelt it.
+   *
+   * `profit.view_total` — BR8's «رؤية الأرباح والحصص الإجمالية», i.e. the GM and, since decision 9,
+   * the system admin. The branch manager sees his own box's position on the الترميم card instead.
+   */
+  app.get('/dashboard/treasury', { config: { permission: 'profit.view_total', subject: () => ({}) } }, async (req) => {
+    const q = z.object({ from: z.string().optional(), to: z.string().optional() }).parse(req.query)
+    const branchId = resolveBranchId(req)
+    const today = todayFor(deps)
+    const to = q.to ?? today
+    const from = q.from ?? weekStartFor(to)
+
+    // No port reads a date RANGE — the ledger is addressed by week, because that is the unit BR7
+    // seals. Walking the weeks the range touches keeps this to existing queries; a month is five.
+    const entries = []
+    for (const start of weekStartsBetween(from, to)) entries.push(...(await deps.ledger.listByWeek(branchId, start)))
+
+    const perDay = new Map<string, { in: bigint; out: bigint }>()
+    let profit = 0n
+    for (const e of entries) {
+      if (e.businessDate < from || e.businessDate > to) continue
+      for (const l of e.lines) {
+        if (l.fundCode === 'company_revenue') profit += l.side === 'C' ? l.amount : -l.amount
+        if (e.eventType !== 'restoration' || l.fundCode !== 'company_box') continue
+        const day = perDay.get(e.businessDate) ?? { in: 0n, out: 0n }
+        // D company_box is money ARRIVING in صندوق الشركة — «كييش». C is «شحن من الصندوق».
+        if (l.side === 'D') day.in += l.amount
+        else day.out += l.amount
+        perDay.set(e.businessDate, day)
+      }
+    }
+    const fundIn = [...perDay.values()].reduce((a, d) => a + d.in, 0n)
+    const fundOut = [...perDay.values()].reduce((a, d) => a + d.out, 0n)
+
+    // «راس المال المدور» is a POSITION, read as it stands now — not a flow over the range. It is
+    // what الترميم settles against: both boxes plus everything out on ذمم.
+    const officeCash = await deps.ledger.fundBalance(branchId, 'office_cash')
+    const officeWallet = await deps.ledger.fundBalance(branchId, 'office_wallet')
+    const receivables = await deps.ledger.balancesByPrefix(branchId, 'driver_receivable_')
+    const sumReceivables = (suffix: string): bigint =>
+      Object.entries(receivables)
+        .filter(([code]) => code.startsWith(`driver_receivable_${suffix}:`))
+        .reduce((acc, [, v]) => acc + v, 0n)
+    const targets = await deps.capitalTargets.resolve(branchId, to)
+    const targetTotal = (targets.office_cash ?? 0n) + (targets.office_wallet ?? 0n)
+    const capitalTotal = officeCash + officeWallet + sumReceivables('cash') + sumReceivables('wallet')
+
+    return {
+      from,
+      to,
+      capital: {
+        officeCash: serializeMoney(officeCash),
+        officeWallet: serializeMoney(officeWallet),
+        receivablesCash: serializeMoney(minor(sumReceivables('cash'))),
+        receivablesWallet: serializeMoney(minor(sumReceivables('wallet'))),
+        total: serializeMoney(minor(capitalTotal)),
+        target: serializeMoney(minor(targetTotal)),
+        /** Positive means the branch is over its capital and tonight's ترميم will sweep. */
+        delta: serializeMoney(minor(capitalTotal - targetTotal)),
+      },
+      companyProfit: serializeMoney(minor(profit)),
+      companyFund: serializeMoney(await deps.ledger.fundBalance(branchId, 'company_box')),
+      fundIn: serializeMoney(minor(fundIn)),
+      fundOut: serializeMoney(minor(fundOut)),
+      fundNet: serializeMoney(minor(fundIn - fundOut)),
+      days: [...perDay.entries()]
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([businessDate, d]) => ({
+          businessDate,
+          in: serializeMoney(minor(d.in)),
+          out: serializeMoney(minor(d.out)),
+          net: serializeMoney(minor(d.in - d.out)),
+        })),
+    }
+  })
+}
+
+/** Every financial-week start the inclusive range [from, to] touches, in order. */
+function weekStartsBetween(from: string, to: string): string[] {
+  const starts: string[] = []
+  let cursor = weekStartFor(from)
+  const last = weekStartFor(to)
+  // Bounded by construction, but a malformed range must not spin: BR7 weeks are 7 days apart and
+  // `cursor` strictly increases, so the guard only ever fires on nonsense input.
+  for (let i = 0; cursor <= last && i < 520; i += 1) {
+    starts.push(cursor)
+    cursor = addDays(cursor, 7)
+  }
+  return starts
+}
+
+function addDays(date: string, days: number): string {
+  const [y, m, d] = date.split('-').map(Number) as [number, number, number]
+  const next = new Date(Date.UTC(y, m - 1, d + days))
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${next.getUTCFullYear()}-${pad(next.getUTCMonth() + 1)}-${pad(next.getUTCDate())}`
 }
 
 function hasCompleteEndPackage(shift: ShiftRecord): boolean {

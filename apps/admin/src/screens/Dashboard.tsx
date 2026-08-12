@@ -1,4 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
+import { type RoleKey, can, minor, parseMinor } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { Badge, Card, Money, Pending, Stat } from '../ui.tsx'
@@ -40,12 +41,34 @@ interface DashboardData {
   completeness: { openShifts: number; awaitingApproval: number; missingEndPackage: number; suspended: number }
 }
 
+/** The owner's own sheet — «راس المال المدور · ربح الشركة · دخل وخرج الصندوق». */
+interface TreasuryDigest {
+  from: string
+  to: string
+  capital: {
+    officeCash: string
+    officeWallet: string
+    receivablesCash: string
+    receivablesWallet: string
+    total: string
+    target: string
+    delta: string
+  }
+  companyProfit: string
+  companyFund: string
+  fundIn: string
+  fundOut: string
+  fundNet: string
+  days: Array<{ businessDate: string; in: string; out: string; net: string }>
+}
+
 /** The five-indicator ops dashboard (SRS I-1). Total profit is a GM-only tile, fetched separately. */
 export function Dashboard(): ReactNode {
   const { api, t, session, branchId } = useApp()
   const [data, setData] = useState<DashboardData | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [profit, setProfit] = useState<{ companyShareSyp: string; driverShareSyp: string; yalagoShareSyp: string } | null>(null)
+  const [treasury, setTreasury] = useState<TreasuryDigest | null>(null)
   const [expiring, setExpiring] = useState<ExpiringDoc[]>([])
   const [attendance, setAttendance] = useState<Attendee[]>([])
 
@@ -63,9 +86,17 @@ export function Dashboard(): ReactNode {
         setData(null)
         setError(e.error ?? 'error')
       })
-    // Only the GM may see total profit (BR8); a 403 for anyone else simply leaves the tile absent.
-    if (session?.roleKey === 'general_manager') {
+    /*
+     * BR8's «رؤية الأرباح والحصص الإجمالية». This read `roleKey === 'general_manager'`, which owner
+     * decision 9 made wrong on 2026-08-12: the system admin holds `profit.view_total` too and was
+     * shown a dashboard silently missing the two cards he is entitled to. Ask the rule.
+     */
+    if (
+      session != null &&
+      can({ userId: session.userId, roleKey: session.roleKey as RoleKey, branchId: session.branchId }, 'profit.view_total', {}).allowed
+    ) {
       void api.get<typeof profit>('/dashboard/profit').then(setProfit).catch(() => setProfit(null))
+      void api.get<TreasuryDigest>('/dashboard/treasury').then(setTreasury).catch(() => setTreasury(null))
     }
     // The expiry board (س37). Reading it also raises the bell for anything crossing a threshold,
     // so the alert fires automatically on the default landing screen — no scheduler needed.
@@ -113,6 +144,63 @@ export function Dashboard(): ReactNode {
             <Stat label={t.dashboard.companyShareLabel} value={<Money value={profit.companyShareSyp} />} />
             <Stat label={t.dashboard.yalagoShareLabel} value={<Money value={profit.yalagoShareSyp} />} />
           </div>
+        </Card>
+      ) : null}
+
+      {/*
+        The owner's own sheet, in his own words. «راس المال المدور» is a position — both boxes plus
+        everything out on ذمم — and the two flow figures are his «كييش» and «شحن من الصندوق»
+        SUMIFs, derived from the ledger event rather than from a hand-typed Arabic word.
+      */}
+      {treasury ? (
+        <Card title={t.dashboard.ownersSheet}>
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+            <Stat
+              label={t.dashboard.workingCapital}
+              value={<Money value={treasury.capital.total} />}
+              sub={
+                <>
+                  {t.treasury.capitalTarget}: <Money value={treasury.capital.target} />
+                </>
+              }
+            />
+            <Stat label={t.dashboard.companyProfitLabel} value={<Money value={treasury.companyProfit} />} />
+            <Stat label={t.dashboard.fundIn} value={<Money value={treasury.fundIn} />} />
+            <Stat label={t.dashboard.fundOut} value={<Money value={treasury.fundOut} />} />
+          </div>
+          <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-1 text-sm sm:grid-cols-3">
+            <dt className="text-slate-600">{t.treasury.cashBox}</dt>
+            <dd className="text-end sm:col-span-2">
+              <Money value={treasury.capital.officeCash} />
+              <span className="text-slate-500">
+                {' + '}
+                {t.treasury.receivablesShort} <Money value={treasury.capital.receivablesCash} />
+              </span>
+            </dd>
+            <dt className="text-slate-600">{t.treasury.wallet}</dt>
+            <dd className="text-end sm:col-span-2">
+              <Money value={treasury.capital.officeWallet} />
+              <span className="text-slate-500">
+                {' + '}
+                {t.treasury.receivablesShort} <Money value={treasury.capital.receivablesWallet} />
+              </span>
+            </dd>
+            <dt className="text-slate-600">{t.treasury.companyFund}</dt>
+            <dd className="text-end font-semibold sm:col-span-2">
+              <Money value={treasury.companyFund} />
+            </dd>
+            <dt className="text-slate-600">{t.dashboard.fundNet}</dt>
+            <dd
+              className={`text-end font-semibold sm:col-span-2 ${
+                parseMinor(treasury.fundNet) < minor(0n) ? 'text-amber-700' : 'text-emerald-700'
+              }`}
+            >
+              <Money value={treasury.fundNet} />
+            </dd>
+          </dl>
+          <p className="mt-2 text-xs text-slate-500">
+            {t.dashboard.sincePeriod} {treasury.from} → {treasury.to}
+          </p>
         </Card>
       ) : null}
 
