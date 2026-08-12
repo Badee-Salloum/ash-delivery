@@ -178,6 +178,33 @@ export interface ExpenseView {
 }
 
 /**
+ * «الترميم» as the wire carries it. Every money field is a decimal STRING — the client never turns
+ * money into a `number`, not even to display it.
+ */
+export interface RestorationLegView {
+  fundCode: 'office_cash' | 'office_wallet'
+  /** counted + الذمم — «الوضع الحالي». */
+  position: string
+  capitalTarget: string
+  /** Signed: positive is «كييش», negative «شحن من الصندوق». */
+  delta: string
+  /** `null` when the box is already exactly on target. */
+  direction: 'to_company' | 'from_company' | null
+  amount: string
+  feasible: boolean
+  refusals: Array<'sweep_exceeds_counted' | 'no_capital_target'>
+}
+export interface RestorationView {
+  businessDate: string
+  /** Preview only: whether tonight's count has been sealed yet (decision j gates on this). */
+  counted?: boolean
+  legs: RestorationLegView[]
+  netToCompany: string
+  feasible: boolean
+  refusals: Array<'sweep_exceeds_counted' | 'no_capital_target'>
+}
+
+/**
  * One pack's BMS reading. Scaled INTEGERS, never floats — millivolts, deci-amp-hours,
  * deci-Celsius — so 83.37 V is 83_370 and 50.0 Ah is 500.
  */
@@ -707,6 +734,20 @@ export class ApiClient {
   companyFundWithdraw(amount: string, reason: string) {
     return this.post<{ balance: string }>('/company-fund/withdraw', {
       amount,
+      reason,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+
+  // ── «الترميم» — the daily restoration (owner decision 10) ───────────────────────────────────
+
+  /** What tonight's ترميم WOULD do, read from the sealed count. Posts nothing. */
+  restorationPreview() {
+    return this.get<RestorationView>(`/treasury/restoration/preview${this.branchId ? `?branchId=${this.branchId}` : ''}`)
+  }
+  /** Performs it. The plan is re-derived server-side from the count — nothing here is trusted. */
+  restore(reason: string) {
+    return this.post<RestorationView & { postings: number }>('/treasury/restoration', {
       reason,
       ...(this.branchId ? { branchId: this.branchId } : {}),
     })

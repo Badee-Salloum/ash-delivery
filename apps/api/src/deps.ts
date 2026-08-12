@@ -5,6 +5,8 @@ import type { BlobStore, Deps } from '@ash/contracts'
 import {
   PgAuditRepo,
   PgCashCountRepo,
+  PgOfficeCapitalTargetRepo,
+  PgRestorationRepo,
   PgDirectoryRepo,
   PgExpenseRepo,
   PgFxRepo,
@@ -109,6 +111,8 @@ export async function buildDeps(config: Config): Promise<BuiltDeps> {
       ledger: new PgLedgerRepo(pool),
       expenses: new PgExpenseRepo(pool),
       cashCounts: new PgCashCountRepo(pool),
+      capitalTargets: new PgOfficeCapitalTargetRepo(pool),
+      restorations: new PgRestorationRepo(pool),
       tiers: new PgTierRepo(pool),
       notifications: new PgNotificationRepo(pool),
       settings: new PgSettingsRepo(pool),

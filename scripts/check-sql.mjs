@@ -34,6 +34,9 @@ const MUST_AUDIT = [
   // What the wallet actually did. An unmatched movement is a term in BR1, and whether a row is
   // included or which order it answers to changes the money a manager approves.
   'shift_wallet_movements',
+  // «رأس مال المكتب» decides how much «كييش» is swept out of the branch every single day, and
+  // «الترميم» is the record of it having happened. Editing a target silently restates the profit.
+  'office_capital_targets', 'restorations',
 ]
 
 /**

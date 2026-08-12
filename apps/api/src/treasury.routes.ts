@@ -4,11 +4,15 @@ import { z } from 'zod'
 import type { CashCountLine, CashCountRecord, Deps } from '@ash/contracts'
 import { createCashCountRequest, manualEntryRequest, moneySchema, serializeMoney } from '@ash/contracts'
 import {
+  type Minor,
   type Posting,
+  type RestorationPlan,
   assertBalanced,
   fundRefFromCode,
   isDateLocked,
   minor,
+  planRestoration,
+  postingsForRestoration,
   reverse,
   sweepToCompany,
   weekStartFor,
@@ -460,6 +464,127 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     return reply.code(201).send({
       target: body.target,
       balance: serializeMoney(await deps.ledger.fundBalance(branchId, office)),
+    })
+  })
+
+  // ── «الترميم» — the daily restoration (owner decision 10) ──────────────────────────────────
+
+  /**
+   * Build the positions from the SEALED COUNT, never from the request body.
+   *
+   * Owner decision (j): «count first, then ترميم». The whole point is that it settles against money
+   * somebody physically counted — computing it from the ledger instead would make it a tautology
+   * that can never find anything.
+   */
+  async function positionsFor(branchId: string, businessDate: string) {
+    const count = await deps.cashCounts.find(branchId, businessDate)
+    const targets = await deps.capitalTargets.resolve(branchId, businessDate)
+    const receivables = await deps.ledger.balancesByPrefix(branchId, 'driver_receivable_')
+    const sumFor = (suffix: string): Minor =>
+      minor(
+        Object.entries(receivables)
+          .filter(([code]) => code.startsWith(`driver_receivable_${suffix}:`))
+          .reduce((acc, [, v]) => acc + v, 0n),
+      )
+
+    return {
+      count,
+      positions: (['office_cash', 'office_wallet'] as const).map((fundCode) => ({
+        fundCode,
+        counted: count?.lines.find((l) => l.fundCode === fundCode)?.counted ?? minor(0n),
+        receivables: sumFor(fundCode === 'office_cash' ? 'cash' : 'wallet'),
+        capitalTarget: targets[fundCode] ?? null,
+      })),
+    }
+  }
+
+  const serializeLeg = (l: RestorationPlan['legs'][number]) => ({
+    fundCode: l.fundCode,
+    position: serializeMoney(l.position),
+    capitalTarget: serializeMoney(l.capitalTarget),
+    delta: serializeMoney(l.delta),
+    direction: l.direction,
+    amount: serializeMoney(l.amount),
+    feasible: l.feasible,
+    refusals: l.refusals,
+  })
+
+  /** What tonight's ترميم WOULD do. Reads the sealed count; posts nothing. */
+  app.get('/treasury/restoration/preview', { config: { permission: 'cash_count.perform', subject: ownBranch } }, async (req) => {
+    const branchId = resolveBranch(req)
+    const businessDate = todayFor(deps)
+    const { count, positions } = await positionsFor(branchId, businessDate)
+    const plan = planRestoration(positions)
+    return {
+      businessDate,
+      counted: count !== null,
+      legs: plan.legs.map(serializeLeg),
+      netToCompany: serializeMoney(plan.netToCompany),
+      feasible: plan.feasible,
+      refusals: plan.refusals,
+    }
+  })
+
+  app.post('/treasury/restoration', { config: { permission: 'journal.manual.write', subject: targetBranch } }, async (req, reply) => {
+    const body = z.object({ reason: z.string().min(1).max(500) }).parse(req.body)
+    const branchId = resolveBranch(req)
+    const businessDate = todayFor(deps)
+    await assertWeekOpen(deps, branchId, businessDate)
+
+    // BEFORE anything posts. The ledger's idempotency index would refuse the replay too, but as a
+    // constraint violation mid-transaction — the operator would see a 500 where the truth is a
+    // plain "already done today". Order matters here, not just the guard.
+    if ((await deps.restorations.find(branchId, businessDate)) !== null) {
+      throw new ServiceError(409, 'already_restored_today')
+    }
+
+    const { count, positions } = await positionsFor(branchId, businessDate)
+    // Decision (j). Without the count this would settle against what the system BELIEVES is in the
+    // drawer, which is the one number a reconciliation must not take on trust.
+    if (count === null) throw new ServiceError(422, 'cash_count_required')
+
+    const plan = planRestoration(positions)
+    if (!plan.feasible) throw new ServiceError(422, 'restoration_infeasible', { refusals: plan.refusals })
+
+    const postings = postingsForRestoration(plan, businessDate)
+    if (postings.length > 0) {
+      const fxDayId = await ensureFxDay(deps, businessDate)
+      await deps.ledger.post(branchId, postings, {
+        shiftId: null,
+        businessDate,
+        postingDate: businessDate,
+        weekStartDate: weekStartFor(businessDate),
+        fxDayId,
+        createdBy: req.actor!.userId,
+        reason: body.reason,
+      })
+    }
+
+    // Once per branch per working day — the unique index refuses a replay rather than posting the
+    // sweep a second time. Recorded even when nothing moved: «we restored and it was already level»
+    // is a different fact from «nobody looked».
+    try {
+      await deps.restorations.create({
+        branchId,
+        businessDate,
+        cashCountId: count.id,
+        plan: { legs: plan.legs.map(serializeLeg) },
+        netToCompany: plan.netToCompany,
+        reason: body.reason,
+        performedBy: req.actor!.userId,
+      })
+    } catch (err) {
+      if ((err as { code?: string }).code === 'DUPLICATE_RESTORATION') {
+        throw new ServiceError(409, 'already_restored_today')
+      }
+      throw err
+    }
+
+    return reply.code(201).send({
+      businessDate,
+      legs: plan.legs.map(serializeLeg),
+      netToCompany: serializeMoney(plan.netToCompany),
+      postings: postings.length,
     })
   })
 

@@ -1,4 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
+import type { RestorationView } from '@ash/client'
 import { type RoleKey, can, formatMinor, minor, parseMinor } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { useConfirm, useToast } from '../feedback.tsx'
@@ -35,6 +36,11 @@ export function Treasury(): ReactNode {
   const [companyError, setCompanyError] = useState<string | null>(null)
   const [companyAmt, setCompanyAmt] = useState('')
   const [companyReason, setCompanyReason] = useState('')
+
+  // ── «الترميم» ─────────────────────────────────────────────────────────────────────────────
+  const [restoration, setRestoration] = useState<RestorationView | null>(null)
+  const [restorationError, setRestorationError] = useState<string | null>(null)
+  const [restoreDone, setRestoreDone] = useState(false)
 
   const [sheetError, setSheetError] = useState<string | null>(null)
   const [balanceError, setBalanceError] = useState<string | null>(null)
@@ -85,9 +91,23 @@ export function Treasury(): ReactNode {
       })
   }, [api])
 
+  const loadRestoration = useCallback(async (): Promise<void> => {
+    try {
+      setRestoration(await api.restorationPreview())
+      setRestorationError(null)
+    } catch (err) {
+      setRestoration(null)
+      setRestorationError((err as { error?: string }).error ?? 'error')
+    }
+  }, [api])
+
   // Refetch when an organisation-wide role switches branch — the treasury is per branch, and
   // showing branch A's cash box under branch B's name is the worst kind of wrong.
   useEffect(load, [load, branchId])
+  useEffect(() => {
+    setRestoreDone(false)
+    void loadRestoration()
+  }, [loadRestoration, branchId])
 
   /** «كييش» — take the day's profit out of the branch box and into صندوق الشركة. */
   async function withdraw(target: 'cash' | 'wallet'): Promise<void> {
@@ -211,6 +231,27 @@ export function Treasury(): ReactNode {
     // whatsoever happened — no error, no result — on the seal of the cash box.
     try {
       setResult(await api.post<typeof result>('/cash-counts', { lines }))
+      // الترميم is computed FROM the count (decision j), so sealing one changes the other.
+      void loadRestoration()
+    } catch (err) {
+      toast.error(explainError((err as { error?: string }).error ?? 'error', t))
+    }
+  }
+
+  async function doRestore(): Promise<void> {
+    if (!restoration) return
+    const ok = await confirm({
+      title: t.treasury.restoration,
+      body: `${t.treasury.netToCompany}: ${formatMinor(parseMinor(restoration.netToCompany))}`,
+      confirmLabel: t.treasury.doRestore,
+    })
+    if (!ok) return
+    try {
+      const done = await api.restore(t.treasury.restoration)
+      setRestoration({ ...done, counted: true })
+      setRestoreDone(true)
+      void refreshCompany()
+      load()
     } catch (err) {
       toast.error(explainError((err as { error?: string }).error ?? 'error', t))
     }
@@ -353,6 +394,91 @@ export function Treasury(): ReactNode {
             </div>
           ) : null}
         </div>
+      </Card>
+
+      {/*
+        «الترميم» — the owner's own end-of-day process, in his own words.
+
+        It reads the SEALED COUNT and shows the two boxes side by side: what is physically there,
+        what is out on ذمم, and how far that stands from رأس مال المكتب. The button is deliberately
+        dead until the count exists — decision (j), and the whole reason the figure is trustworthy.
+      */}
+      <Card title={t.treasury.restoration} className="lg:col-span-2">
+        <p className="text-xs text-slate-600">{t.treasury.restorationHint}</p>
+        {!restoration ? (
+          <Pending
+            error={restorationError}
+            loadingLabel={t.common.loading}
+            errorLabel={explainError(restorationError, t)}
+            onRetry={() => void loadRestoration()}
+            retryLabel={t.common.retry}
+          />
+        ) : (
+          <>
+            <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {restoration.legs.map((leg) => {
+                const delta = parseMinor(leg.delta)
+                return (
+                  <div key={leg.fundCode} className="rounded-lg border border-slate-200 p-3">
+                    <div className="text-xs font-semibold text-slate-500">
+                      {leg.fundCode === 'office_cash' ? t.treasury.cashBox : t.treasury.wallet}
+                    </div>
+                    <dl className="mt-2 grid grid-cols-2 gap-y-1 text-sm">
+                      <dt className="text-slate-600">
+                        {t.treasury.currentPosition}
+                        <span className="text-xs text-slate-400"> ({t.treasury.positionFormula})</span>
+                      </dt>
+                      <dd className="text-end font-semibold">
+                        <Money value={leg.position} />
+                      </dd>
+                      <dt className="text-slate-600">{t.treasury.capitalTarget}</dt>
+                      <dd className="text-end">
+                        <Money value={leg.capitalTarget} />
+                      </dd>
+                    </dl>
+                    <div className="mt-2 border-t border-slate-100 pt-2 text-sm font-semibold">
+                      {delta === minor(0n) ? (
+                        <span className="text-slate-600">{t.treasury.onTarget}</span>
+                      ) : delta > minor(0n) ? (
+                        <span className="text-emerald-700">
+                          {t.treasury.surplus} — {t.treasury.kaish}: <Money value={leg.amount} />
+                        </span>
+                      ) : (
+                        <span className="text-amber-700">
+                          {t.treasury.shortage} — {t.treasury.shahn}: <Money value={leg.amount} />
+                        </span>
+                      )}
+                    </div>
+                    {leg.refusals.map((code) => (
+                      <p key={code} className="mt-2 text-xs text-red-700">
+                        {t.treasury.restorationRefusal[code]}
+                      </p>
+                    ))}
+                  </div>
+                )
+              })}
+            </div>
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+              <span className="text-sm">
+                {t.treasury.netToCompany}:{' '}
+                <span className="font-bold">
+                  <Money value={restoration.netToCompany} />
+                </span>
+              </span>
+              {restoreDone ? (
+                <span className="text-sm font-semibold text-emerald-700">{t.treasury.restored} ✓</span>
+              ) : (
+                <Button onClick={doRestore} disabled={restoration.counted === false || !restoration.feasible}>
+                  {t.treasury.doRestore}
+                </Button>
+              )}
+            </div>
+            {restoration.counted === false ? (
+              // Not an error — an order of operations. The count comes first, always.
+              <p className="mt-2 text-xs text-amber-700">{t.treasury.countFirst}</p>
+            ) : null}
+          </>
+        )}
       </Card>
 
       <Card title={t.treasury.cashCount}>

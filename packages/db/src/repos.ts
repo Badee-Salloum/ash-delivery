@@ -263,6 +263,127 @@ export class PgLedgerRepo implements LedgerRepo {
     )
     return minor(BigInt(rows[0]?.balance ?? '0'))
   }
+
+  /** Every fund under a code prefix, in one query — الترميم needs Σ الذمم across all drivers. */
+  async balancesByPrefix(branchId: string, prefix: string): Promise<Record<string, bigint>> {
+    const { rows } = await this.pool.query<{ code: string; balance: string }>(
+      `SELECT f.code,
+              COALESCE(SUM(CASE WHEN jl.side = 'D' THEN jl.amount_minor ELSE -jl.amount_minor END), 0)::text AS balance
+         FROM funds f
+         LEFT JOIN journal_lines jl ON jl.fund_id = f.id
+        WHERE f.branch_id = $1 AND f.code LIKE $2 || '%'
+        GROUP BY f.code`,
+      [branchId, prefix],
+    )
+    return Object.fromEntries(rows.map((r) => [r.code, BigInt(r.balance)]))
+  }
+}
+
+/**
+ * «رأس مال المكتب» — effective-dated, resolved like a tier rule.
+ *
+ * The status filter includes 'superseded' deliberately. Filtering on 'active' alone would make
+ * every historical day resolve to nothing the moment a successor target is published, silently
+ * restating the profit of every ترميم already run — the exact trap CLAUDE.md records for tiers.
+ */
+export class PgOfficeCapitalTargetRepo {
+  // Explicit field, not a parameter property: Node's strip-only type stripping cannot erase those.
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async resolve(
+    branchId: string,
+    businessDate: string,
+  ): Promise<Partial<Record<'office_cash' | 'office_wallet', Minor>>> {
+    const { rows } = await this.pool.query<{ fund_code: string; target_minor: string }>(
+      `SELECT DISTINCT ON (fund_code) fund_code, target_minor::text
+         FROM office_capital_targets
+        WHERE branch_id = $1
+          AND effective_from <= $2
+          AND status IN ('active', 'superseded')
+        ORDER BY fund_code, effective_from DESC`,
+      [branchId, businessDate],
+    )
+    const out: Partial<Record<'office_cash' | 'office_wallet', Minor>> = {}
+    for (const r of rows) out[r.fund_code as 'office_cash'] = minor(BigInt(r.target_minor))
+    return out
+  }
+
+  async upsert(row: {
+    branchId: string
+    fundCode: 'office_cash' | 'office_wallet'
+    target: Minor
+    effectiveFrom: string
+    createdBy: string
+    note: string | null
+  }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO office_capital_targets (branch_id, fund_code, target_minor, effective_from, created_by, note)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (branch_id, fund_code, effective_from)
+       DO UPDATE SET target_minor = EXCLUDED.target_minor, note = EXCLUDED.note`,
+      [row.branchId, row.fundCode, row.target.toString(), row.effectiveFrom, row.createdBy, row.note],
+    )
+  }
+}
+
+/** «الترميم» — once per branch per working day, enforced by the unique index, not by a check. */
+export class PgRestorationRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async create(row: {
+    branchId: string
+    businessDate: string
+    cashCountId: string
+    plan: unknown
+    netToCompany: Minor
+    reason: string
+    performedBy: string
+  }): Promise<void> {
+    try {
+      await this.pool.query(
+        `INSERT INTO restorations (branch_id, business_date, cash_count_id, plan, net_to_company_minor, reason, performed_by)
+         VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7)`,
+        [
+          row.branchId,
+          row.businessDate,
+          row.cashCountId,
+          JSON.stringify(row.plan),
+          row.netToCompany.toString(),
+          row.reason,
+          row.performedBy,
+        ],
+      )
+    } catch (err) {
+      if (isPgError(err, PG.UNIQUE_VIOLATION)) {
+        throw Object.assign(new Error('already restored today'), { code: 'DUPLICATE_RESTORATION' })
+      }
+      throw err
+    }
+  }
+
+  async find(branchId: string, businessDate: string) {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM restorations WHERE branch_id = $1 AND business_date = $2',
+      [branchId, businessDate],
+    )
+    const r = rows[0]
+    if (!r) return null
+    return {
+      branchId: String(r.branch_id),
+      businessDate: String(r.business_date).slice(0, 10),
+      cashCountId: String(r.cash_count_id),
+      plan: r.plan,
+      netToCompany: minor(BigInt(String(r.net_to_company_minor))),
+      reason: String(r.reason),
+      performedBy: String(r.performed_by),
+    }
+  }
 }
 
 /** Postgres `date` comes back as a JS Date in local time; format it back without a timezone hop. */

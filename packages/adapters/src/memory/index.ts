@@ -54,11 +54,13 @@ import { memoryCipher } from '../crypto.ts'
 import { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 import { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
 import { MemoryCashCountRepo } from './cashcount.ts'
+import { MemoryOfficeCapitalTargetRepo, MemoryRestorationRepo } from './restoration.ts'
 import { MemoryNotificationRepo, MemoryTierRepo } from './tiers.ts'
 
 export { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 export { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
 export { MemoryCashCountRepo } from './cashcount.ts'
+export { MemoryOfficeCapitalTargetRepo, MemoryRestorationRepo } from './restoration.ts'
 export { MemoryNotificationRepo, MemoryTierRepo } from './tiers.ts'
 
 /**
@@ -524,7 +526,16 @@ export class MemoryWalletMovementRepo implements WalletMovementRepo {
 export class MemoryLedgerRepo implements LedgerRepo {
   readonly entries: JournalEntryRecord[] = []
   private nextId = 1
-  /** Mirrors the database's UNIQUE (shift_id, event_type, occurrence_key). */
+  /**
+   * Mirrors `journal_entries_idem_uq` as migration 0017 REDEFINED it:
+   * `UNIQUE (branch_id, event_type, COALESCE(shift_id::text, ''), occurrence_key)`.
+   *
+   * The original 0004 index carried `WHERE shift_id IS NOT NULL`, and this fake was written against
+   * it. 0017 dropped that predicate precisely because a shift-less posting — الترميم, a treasury
+   * move — had no replay protection at all; leaving the predicate here made the fake ACCEPT a
+   * second sweep that the real database refuses, which is the one direction a test double must
+   * never be wrong in.
+   */
   private readonly seen = new Set<string>()
 
   async post(
@@ -543,9 +554,9 @@ export class MemoryLedgerRepo implements LedgerRepo {
       }
       if (d !== c) throw new Error(`unbalanced posting ${posting.eventType}: D ${d} <> C ${c}`)
 
-      const key = `${meta.shiftId ?? '-'}|${posting.eventType}|${posting.occurrenceKey}`
-      if (meta.shiftId !== null && this.seen.has(key)) continue // idempotent replay: write nothing
-      if (meta.shiftId !== null) this.seen.add(key)
+      const key = `${branchId}|${posting.eventType}|${meta.shiftId ?? ''}|${posting.occurrenceKey}`
+      if (this.seen.has(key)) continue // idempotent replay: write nothing
+      this.seen.add(key)
 
       const entry: JournalEntryRecord = {
         id: this.nextId++,
@@ -589,6 +600,19 @@ export class MemoryLedgerRepo implements LedgerRepo {
       }
     }
     return minor(total)
+  }
+
+  /** Same shape as the Pg repo: every fund under a prefix, with its balance. */
+  async balancesByPrefix(branchId: string, prefix: string): Promise<Record<string, bigint>> {
+    const out: Record<string, bigint> = {}
+    for (const e of this.entries) {
+      if (e.branchId !== branchId) continue
+      for (const l of e.lines) {
+        if (!l.fundCode.startsWith(prefix)) continue
+        out[l.fundCode] = (out[l.fundCode] ?? 0n) + (l.side === 'D' ? l.amount : -l.amount)
+      }
+    }
+    return out
   }
   sealWeek(branchId: string, weekStartDate: CalendarDate, lockId: number): number {
     let n = 0
@@ -1017,6 +1041,8 @@ export interface MemoryDeps extends Deps {
   blobs: MemoryBlobStore
   expenses: MemoryExpenseRepo
   cashCounts: MemoryCashCountRepo
+  capitalTargets: MemoryOfficeCapitalTargetRepo
+  restorations: MemoryRestorationRepo
   tiers: MemoryTierRepo
   notifications: MemoryNotificationRepo
   settings: MemorySettingsRepo
@@ -1056,6 +1082,8 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     ledger,
     expenses: new MemoryExpenseRepo(),
     cashCounts: new MemoryCashCountRepo(),
+    capitalTargets: new MemoryOfficeCapitalTargetRepo(),
+    restorations: new MemoryRestorationRepo(),
     tiers: new MemoryTierRepo(),
     notifications: new MemoryNotificationRepo(),
     settings: new MemorySettingsRepo(),

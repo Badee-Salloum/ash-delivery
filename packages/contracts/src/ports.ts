@@ -691,6 +691,52 @@ export interface LedgerRepo {
   listByShift(shiftId: string): Promise<JournalEntryRecord[]>
   listByWeek(branchId: string, weekStartDate: CalendarDate): Promise<JournalEntryRecord[]>
   fundBalance(branchId: string, fundCode: string): Promise<Minor>
+  /**
+   * Every fund whose code starts with `prefix`, and its balance.
+   *
+   * «الترميم» needs Σ الذمم against each box, and receivables are per driver — `driver_receivable_cash:<id>`
+   * — so there is no single code to ask for. Answered in ONE query rather than a lookup per driver,
+   * because this runs on the evening screen with a manager waiting.
+   */
+  balancesByPrefix(branchId: string, prefix: string): Promise<Record<string, bigint>>
+}
+
+// ── «رأس مال المكتب» and «الترميم» (owner decision 10) ────────────────────────────────────
+
+export interface OfficeCapitalTargetRepo {
+  /**
+   * The targets in force on a date, per box.
+   *
+   * MUST filter `status IN ('active','superseded')`, never 'active' alone: publishing a successor
+   * would otherwise make every historical day resolve to nothing and silently restate the profit
+   * of every ترميم already run. Same trap CLAUDE.md records for tier resolution.
+   */
+  resolve(branchId: string, businessDate: CalendarDate): Promise<Partial<Record<'office_cash' | 'office_wallet', Minor>>>
+  upsert(row: {
+    branchId: string
+    fundCode: 'office_cash' | 'office_wallet'
+    target: Minor
+    effectiveFrom: CalendarDate
+    createdBy: string
+    note: string | null
+  }): Promise<void>
+}
+
+export interface RestorationRecord {
+  branchId: string
+  businessDate: CalendarDate
+  cashCountId: string
+  plan: unknown
+  /** SIGNED: positive is «كييش», negative is «شحن من الصندوق». */
+  netToCompany: Minor
+  reason: string
+  performedBy: string
+}
+
+export interface RestorationRepo {
+  /** Throws `{ code: 'DUPLICATE_RESTORATION' }` on a second run for the same branch and day. */
+  create(row: RestorationRecord): Promise<void>
+  find(branchId: string, businessDate: CalendarDate): Promise<RestorationRecord | null>
 }
 
 export interface FxRepo {
@@ -1097,6 +1143,10 @@ export interface Deps {
   ledger: LedgerRepo
   expenses: ExpenseRepo
   cashCounts: CashCountRepo
+  /** «رأس مال المكتب» — the fixed target الترميم restores each box to. */
+  capitalTargets: OfficeCapitalTargetRepo
+  /** «الترميم» — one record per branch per working day. */
+  restorations: RestorationRepo
   tiers: TierRepo
   notifications: NotificationRepo
   settings: SettingsRepo

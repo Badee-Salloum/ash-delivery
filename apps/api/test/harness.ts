@@ -55,6 +55,10 @@ export async function makeHarness(opts: { splitGate?: 'advisory' | 'strict' } = 
   })
   deps.directory.branches.set(BRANCH, { id: BRANCH, code: 'DAM', nameAr: 'دمشق', nameEn: 'Damascus', governorateId: GOV_DAMASCUS, branchNo: 1 })
   deps.directory.branches.set(OTHER_BRANCH, { id: OTHER_BRANCH, code: 'ALP', nameAr: 'حلب', nameEn: 'Aleppo', governorateId: GOV_ALEPPO, branchNo: 1 })
+  // «رأس مال المكتب» — the owner's own figures, seeded exactly as migration 0026 seeds production.
+  // A test that had to configure capital before it could exercise الترميم would be testing its setup.
+  deps.capitalTargets.seed(BRANCH)
+  deps.capitalTargets.seed(OTHER_BRANCH)
   deps.directory.drivers.set(DRIVER_ID, { id: DRIVER_ID, branchId: BRANCH, code: 'DRV-1', fullNameAr: 'سائق ١', active: true, userId: 'u-d1' })
   deps.directory.drivers.set(DRIVER2_ID, { id: DRIVER2_ID, branchId: BRANCH, code: 'DRV-2', fullNameAr: 'سائق ٢', active: true, userId: 'u-d2' })
   deps.directory.vehicles.set(VEHICLE_ID, {
