@@ -25,9 +25,10 @@ CREATE TABLE office_capital_targets (
   created_at     timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT office_capital_targets_uq UNIQUE (branch_id, fund_code, effective_from)
 );
+-- No partial predicate: BOTH statuses resolve (see above), so filtering the index would be a lie
+-- that happens to be free — and the day a third status appears it would silently stop matching.
 CREATE INDEX office_capital_targets_lookup_idx
-  ON office_capital_targets (branch_id, fund_code, effective_from DESC)
-  WHERE status <> 'withdrawn';
+  ON office_capital_targets (branch_id, fund_code, effective_from DESC);
 
 -- ── The restoration itself ──────────────────────────────────────────────────────────────────
 --

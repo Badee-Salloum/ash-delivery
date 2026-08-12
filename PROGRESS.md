@@ -1,5 +1,73 @@
 # PROGRESS
 
+## 2026-08-12 — الترميم: the owner's own daily process, built
+
+The owner asked for a redesign of **الصرفيات / خزينة الفرع / الداشبورد** and handed over the
+spreadsheet he actually runs the business on. Reading it changed the shape of the work: the system
+was never missing screens, it was missing **a daily process the business already performs and the
+software had no concept of**.
+
+His book keeps two fixed capital targets — `كاش المكتب 4,000,000` and `محفظة المكتب 1,000,000` — and
+every evening restores both. Surplus is withdrawn as profit (**كييش**), shortfall is replenished
+(**شحن من الصندوق**), and outstanding **الذمم** count toward the capital. His own numbers are the
+specification and they verify exactly: `3,600,000 + 400,000 = 4,000,000` and `970,000 + 30,000 =
+1,000,000`, both landing on target — a day already restored.
+
+**All suites green: domain 392, client 149, driver 163, adapters 36, api 448 — 1,188 tests, 8 guards,
+26 migrations, 47 tables.** Six commits, `d676cfa` → `446ce42`.
+
+### What was built
+
+| Phase | Commit | What |
+| --- | --- | --- |
+| 0 | (0023/0024) | `wallet_adjustment` added to `ledger_event` — a latent 500 on the first close carrying a payments-log movement. Sysadmin granted every permission at scope `all` (decision 9). Both **applied to production**. |
+| 1 | `d676cfa` | **صندوق الشركة** as a real fund; withdraw beside every deposit; `POST /treasury/deposit` finally calls `assertWeekOpen` — it skipped it. |
+| 2 | `7904379` | **كشف التسوية** — a pure module that computes and explains where tonight's cash goes, and posts nothing. Shown under the BR1 breakdown at approval. |
+| 3 | `edf3430` | **الذمم** — the four-line `float_return`, `floatCarry` for the next morning, and `driver_share_payable` finally gets a debit path. It was credited by `shareSplit` and never debited by anything: the liability grew forever with no settlement. |
+| 4 | `4cde6ae` | A force-close shortfall comes **off the driver's share**, with his name on it, instead of vanishing into `cost_center:shift_variance:<branch>`. |
+| 5 | `1886b85` | **الترميم** — `office_capital_targets` (effective-dated) and `restorations` (one per branch per day, frozen plan). |
+| 6 | `446ce42` | The dashboard in his vocabulary: **راس المال المدور · ربح الشركة · دخل الصندوق · خرج الصندوق · الصافي**. |
+
+### Three things this turned up that nothing else would have
+
+**The in-memory ledger never adopted migration 0017.** It still carried 0004's
+`WHERE shift_id IS NOT NULL` idempotency predicate, so a shift-less posting — الترميم, a treasury
+move, a manual entry — had no replay protection in the fake at all. It **accepted a second sweep the
+real database refuses**, which is the one direction a test double must never be wrong in. The
+duplicate test found 1,000,000 in صندوق الشركة where 500,000 belonged.
+
+**`driver_share_payable` had no debit path.** `shareSplit` credits it at every approval and no recipe
+ever discharged it. The liability was growing without bound and the driver's share was never
+recorded as paid, because in the field it never *was* paid through the system — he simply kept it out
+of the cash in his hand. Decision (f) made that explicit and the close posting now says so.
+
+**«كييش» was a typed Arabic word.** In the spreadsheet the daily in/out totals are `SUMIF`s over a
+hand-written column: one «كيش» for «كييش» and a month's profit is quietly short with nothing to say
+so. The dashboard derives both from the **ledger event** — a `restoration` entry that debits
+`company_box` is كييش, one that credits it is شحن — so nobody spells anything and nobody can misspell
+it.
+
+### Where the safety actually sits
+
+- **الترميم is computed from the SEALED COUNT, never from the request body** (decision j). Computing
+  it from the ledger would make it a tautology that can never find anything; the whole point is that
+  it settles against money somebody physically counted. Uncounted, the button is dead and says why.
+- **It refuses a sweep larger than what is in the drawer.** A box holding 100,000 with 5,000,000 out
+  on ذمم shows a surplus on paper and cannot hand over a lira of it.
+- **It refuses when no رأس مال is configured**, which would otherwise read every box as pure surplus
+  and sweep the whole treasury on day one.
+- **BR1 is untouched.** The driver declares every lira he holds; the ذمة is a manager decision about
+  how that declared cash is *posted*. The equation still closes at exactly zero, and the carry enters
+  the next day as a tranche so BR1 stays in its absolute form (decision 4).
+
+### Next
+
+- **Migrations 0025 + 0026 are NOT yet applied to production** (it sits at 0024), and the API/admin
+  deploy is still pending. Both were blocked by the permission classifier, not by a problem.
+- Three shifts from 2026-08-11 are still `open` and need closing or force-closing.
+- P2 security, untouched: `GET /audit` returns password hashes and plaintext TOTP secrets; the 2FA
+  enrolment bypass; no login rate limiting; no helmet; three cross-branch write holes.
+
 ## 2026-08-09 — a backup that has been restored from, and four ways the ledger could lose money
 
 A full three-way review (money, security, operations) of the whole platform. The UI work of the
