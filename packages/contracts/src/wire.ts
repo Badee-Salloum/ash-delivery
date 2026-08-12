@@ -361,11 +361,27 @@ export const uploadEvidenceParams = z.object({
 export const approveOpenRequest = z.object({
   floatTranches: z.array(moneySchema).min(0),
   topupTranches: z.array(moneySchema).min(0),
+  /**
+   * «الذمة المرحّلة» — cash the driver already holds from an earlier shift, consumed here.
+   *
+   * The office hands over only the difference, so this is not new money leaving the box. Refused
+   * above what the receivable actually holds.
+   */
+  carriedTranches: z.array(moneySchema).min(0).default([]),
 })
 
 export const approveCloseRequest = z.object({
   /** The hash the manager actually reviewed. Re-checked inside the approval transaction. */
   reviewedOrdersHash: z.string().min(1),
+  /** «يبقى ذمة على السائق» — how much of tonight's cash stays with him. The manager decides. */
+  keepAsReceivable: moneySchema.optional(),
+  /**
+   * «يُعاد للسائق» — pay his share tonight out of the cash in his hands (owner decision f).
+   *
+   * Defaults to FALSE, which is the behaviour every close had before this existed: the share stays
+   * a payable. A default of true would silently change how every existing branch settles.
+   */
+  payShareNow: z.boolean().default(false),
 })
 
 /** Upper-level force-close of a stuck shift: a reason + whatever end figures the admin actually has. */

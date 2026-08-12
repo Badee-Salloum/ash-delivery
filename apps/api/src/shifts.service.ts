@@ -36,6 +36,7 @@ import {
   documentStatusOn,
   diagnoseBr1,
   evaluateBr1,
+  floatCarry,
   floatOut,
   floatReturn,
   isDateLocked,
@@ -44,6 +45,7 @@ import {
   planSettlement,
   postingsForApproval,
   postingsForOpen,
+  reverse,
   walletReturn,
   walletTopup,
   REQUIRED_END_SLOTS,
@@ -366,6 +368,9 @@ export async function createShift(
     state: 'draft',
     floatTranches: [],
     topupTranches: [],
+    carriedTranches: [],
+    keptAsReceivable: minor(0n),
+    driverSharePaid: minor(0n),
     mediaSlotsStart: [],
     mediaSlotsEnd: [],
     odoStart: null,
@@ -536,15 +541,37 @@ export async function approveOpen(
   deps: Deps,
   actor: Actor,
   shiftId: string,
-  input: { floatTranches: Minor[]; topupTranches: Minor[] },
+  input: { floatTranches: Minor[]; topupTranches: Minor[]; carriedTranches?: Minor[] },
 ): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
+
+  /*
+   * ── «الذمة المرحّلة» — cash he ALREADY has, consumed here (owner decision c) ────────────────
+   *
+   * «should be handled when he starts a new shift». It may not exceed what he actually owes: the
+   * receivable fund is the record, and carrying more than it holds would credit it below zero and
+   * hand the driver money the office never gave him. Refused rather than clamped — a manager who
+   * typed the wrong figure should be told, not quietly corrected.
+   */
+  const carried = input.carriedTranches ?? []
+  const carriedTotal = sum(carried)
+  if (carriedTotal > 0n) {
+    const owed = await deps.ledger.fundBalance(shift.branchId, `driver_receivable_cash:${shift.driverId}`)
+    if (carriedTotal > owed) {
+      throw new ServiceError(422, 'carry_exceeds_receivable', {
+        owed: serializeMoney(owed),
+        asked: serializeMoney(carriedTotal),
+      })
+    }
+  }
+
   // The manager records the float + top-up here (the driver no longer types them). They are the
   // branch's money, disbursed by the manager, so they become part of the shift at approval time.
   const withFunds: ShiftRecord = {
     ...shift,
     floatTranches: input.floatTranches,
     topupTranches: input.topupTranches,
+    carriedTranches: carried,
   }
   const result = await guard(deps, withFunds, 'manager_approve_open', actor, {
     startPackage: {
@@ -567,6 +594,9 @@ export async function approveOpen(
     postingsForOpen({
       driverId: withFunds.driverId,
       floatTranches: withFunds.floatTranches,
+      // Clears the receivable and raises his cash, WITHOUT the branch box paying again — it paid
+      // yesterday, which is exactly what the ذمة recorded.
+      carriedTranches: withFunds.carriedTranches,
       topupTranches: withFunds.topupTranches,
       orders: [],
     }),
@@ -1060,7 +1090,10 @@ export async function evaluateShift(deps: Deps, shift: ShiftRecord): Promise<Br1
   const orders = toDomainOrders(orderRows)
   const walletAdjustments = toWalletAdjustments(movementRows)
   const result = evaluateBr1({
-    floatTotal: sum(shift.floatTranches),
+    // A carried ذمة is cash he was ALREADY holding at open, so it is part of the float for the
+    // equation exactly as it is for `closingBalances`. These two sums must never drift — the
+    // ledger would otherwise return a different amount from the one BR1 just balanced.
+    floatTotal: add(sum(shift.floatTranches), sum(shift.carriedTranches)),
     topupTotal: sum(shift.topupTranches),
     endCashDeclared: shift.endCashDeclared ?? minor(0n),
     endWalletDeclared: shift.endWalletDeclared ?? minor(0n),
@@ -1542,6 +1575,11 @@ export async function approveClose(
   shiftId: string,
   reviewedOrdersHash: string,
   splitGate: 'advisory' | 'strict' = 'advisory',
+  /**
+   * The manager's «كشف التسوية» decisions. Omitted ⇒ nothing kept and the share left as a payable,
+   * which is byte-identical to every close before this existed.
+   */
+  settlementChoices: { keepAsReceivable?: Minor; payShareNow?: boolean } = {},
 ): Promise<{ shift: ShiftRecord; postings: number }> {
   const shift = await mustFind(deps, shiftId)
   const orderRows = await deps.orders.listByShift(shiftId)
@@ -1606,17 +1644,40 @@ export async function approveClose(
     yalagoShare: settlement.yalagoDelta,
   }
 
+  /*
+   * ── The settlement, decided by the manager and validated HERE, not by the client ───────────
+   *
+   * The screen computes a preview through the very same `planSettlement`, but the numbers it shows
+   * are never trusted: the plan is re-derived from the manager's two CHOICES (how much stays, and
+   * whether the share is paid tonight) against figures the server owns. A client that could name
+   * `toOfficeCash` could name any number at all.
+   */
+  const plan = planSettlement({
+    endCashDeclared: shift.endCashDeclared ?? minor(0n),
+    expectedCash: br1.result.expectedCash,
+    driverShare: shiftSplit.driverShare,
+    openingReceivable: sum(shift.carriedTranches),
+    keepAsReceivable: settlementChoices.keepAsReceivable ?? minor(0n),
+    payShareNow: settlementChoices.payShareNow ?? false,
+    managerAdjustment: minor(0n),
+  })
+  if (!plan.feasible) throw new ServiceError(422, 'settlement_infeasible', { refusals: plan.refusals })
+
   const fxDayId = await ensureFxDay(deps, shift.businessDate)
   const postings = postingsForApproval(
     {
       driverId: shift.driverId,
       branchId: shift.branchId,
       floatTranches: shift.floatTranches,
+      // The ذمة he brought in. Disjoint from the float, and the same list BR1 just balanced.
+      carriedTranches: shift.carriedTranches,
       topupTranches: shift.topupTranches,
       orders: todaysOrders,
       // The SAME list BR1 just balanced against. If these two ever diverged the ledger would
       // return a wallet different from the one the equation approved.
       walletAdjustments: toWalletAdjustments(await deps.movements.listByShift(shiftId)),
+      keptAsReceivable: plan.keptAsReceivable,
+      driverSharePaid: plan.paidToDriver,
     },
     shiftSplit,
   )
@@ -1630,7 +1691,15 @@ export async function approveClose(
     createdBy: actor.userId,
   })
 
-  const updated: ShiftRecord = { ...shift, state: result.next, approvedBy: actor.userId }
+  // What the manager decided is written on the shift, not derived back out of journal lines: it is
+  // an INPUT to the posting, and a shift that cannot say what was decided cannot be audited.
+  const updated: ShiftRecord = {
+    ...shift,
+    state: result.next,
+    approvedBy: actor.userId,
+    keptAsReceivable: plan.keptAsReceivable,
+    driverSharePaid: plan.paidToDriver,
+  }
   await deps.shifts.update(updated)
   await recordDecision(deps, actor, shiftId, 'close', 'approved', null)
   return { shift: updated, postings: written.length }
@@ -1653,7 +1722,17 @@ export async function voidShift(deps: Deps, actor: Actor, shiftId: string, reaso
   const postings: Posting[] = []
   const floatTotal = sum(shift.floatTranches)
   const topupTotal = sum(shift.topupTranches)
+  const carriedTotal = sum(shift.carriedTranches)
   if (floatTotal > minor(0n)) postings.push(floatReturn(shift.driverId, floatTotal))
+  /*
+   * A CARRIED ذمة GOES BACK TO BEING A ذمة, not to the branch box.
+   *
+   * `postingsForOpen` cleared the receivable and raised his cash; voiding must undo exactly that.
+   * Returning it through `floatReturn` instead would credit `office_cash` with money the box never
+   * paid out for this shift — the office would show a gain, the receivable would stay cleared, and
+   * the driver would still be holding the cash with nothing on the books saying so.
+   */
+  if (carriedTotal > minor(0n)) postings.push(reverse(floatCarry(shift.driverId, carriedTotal), `void-carry-${shift.id}`))
   if (topupTotal > minor(0n)) postings.push(walletReturn(shift.driverId, topupTotal))
   if (postings.length > 0) {
     const fxDayId = await ensureFxDay(deps, shift.businessDate)

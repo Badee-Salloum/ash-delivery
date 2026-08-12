@@ -284,6 +284,18 @@ export interface ShiftRecord {
   floatTranches: Minor[]
   topupTranches: Minor[]
   /**
+   * ذمم consumed at OPEN — cash the driver already held from a previous shift.
+   *
+   * DISJOINT from `floatTranches`, and it must stay so: both are summed into the closing cash, so
+   * an amount appearing in each would be returned twice and leave the office over by that much.
+   * The repo loads them from separate `float_tranches.kind` values for exactly this reason.
+   */
+  carriedTranches: Minor[]
+  /** «يبقى ذمة على السائق» — what the manager left with him at close. Zero for every older shift. */
+  keptAsReceivable: Minor
+  /** «يُعاد للسائق» — the share he kept out of the cash in his hands (owner decision f). */
+  driverSharePaid: Minor
+  /**
    * READ-ONLY projections of the evidence actually uploaded.
    *
    * These are derived from `MediaRepo`, never supplied by the client. An earlier version let

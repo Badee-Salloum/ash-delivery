@@ -334,6 +334,33 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     return { total: serializeMoney(minor(total)), branches: perBranch }
   })
 
+  /**
+   * «الذمم» — what each driver still owes, oldest first.
+   *
+   * Read straight from the ledger rather than from a table of its own: the receivable fund IS the
+   * record, and a second list would be one more thing to keep in step with it. The open-approval
+   * screen pre-fills from this, which is what makes «handled when he starts a new shift» automatic
+   * rather than something a manager has to remember.
+   */
+  app.get('/receivables', { config: { permission: 'branch_data.view', subject: ownBranch } }, async (req) => {
+    const branchId = resolveBranch(req)
+    const drivers = await deps.directory.listDrivers(branchId)
+    const rows = await Promise.all(
+      drivers.map(async (d) => ({
+        driverId: d.id,
+        code: d.code,
+        nameAr: d.fullNameAr,
+        cash: serializeMoney(await deps.ledger.fundBalance(branchId, `driver_receivable_cash:${d.id}`)),
+        wallet: serializeMoney(await deps.ledger.fundBalance(branchId, `driver_receivable_wallet:${d.id}`)),
+      })),
+    )
+    // Only the drivers who actually owe something. A list of zeroes is noise on a screen a manager
+    // reads at the counter with a driver waiting.
+    const owing = rows.filter((r) => r.cash !== '0.00' || r.wallet !== '0.00')
+    const total = owing.reduce((sum, r) => sum + BigInt(r.cash.replace('.', '')), 0n)
+    return { total: serializeMoney(minor(total)), drivers: owing }
+  })
+
   const companyMoveRequest = z.object({
     amount: moneySchema,
     reason: z.string().min(1).max(500),

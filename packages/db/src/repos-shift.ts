@@ -130,7 +130,9 @@ export class PgShiftRepo implements ShiftRepo {
            driver_confirmed_at = $15::timestamptz,
            approved_by = $16,
            odo_start_ocr = $17, battery_start_ocr = $18,
-           end_wallet_declared_ocr_minor = $19
+           end_wallet_declared_ocr_minor = $19,
+           kept_as_receivable_minor = $20,
+           driver_share_paid_minor = $21
          WHERE id = $1`,
         [
           shift.id,
@@ -152,13 +154,18 @@ export class PgShiftRepo implements ShiftRepo {
           shift.odoStartOcr,
           shift.batteryStartOcr,
           shift.endWalletDeclaredOcr?.toString() ?? null,
+          shift.keptAsReceivable.toString(),
+          shift.driverSharePaid.toString(),
         ],
       )
 
       // Tranches are replaced wholesale rather than diffed: the list is short, and a diff is
       // where an off-by-one silently drops a cash handover.
       await client.query('DELETE FROM float_tranches WHERE shift_id = $1', [shift.id])
-      const writeTranches = async (kind: 'cash_float' | 'wallet_topup', amounts: readonly Minor[]) => {
+      const writeTranches = async (
+        kind: 'cash_float' | 'wallet_topup' | 'carried_receivable',
+        amounts: readonly Minor[],
+      ) => {
         for (const [i, amount] of amounts.entries()) {
           if (amount <= 0n) continue
           await client.query(
@@ -169,6 +176,7 @@ export class PgShiftRepo implements ShiftRepo {
       }
       await writeTranches('cash_float', shift.floatTranches)
       await writeTranches('wallet_topup', shift.topupTranches)
+      await writeTranches('carried_receivable', shift.carriedTranches)
 
       // shift_media is deliberately NOT written here. Evidence slots exist only because a photo
       // was uploaded, and PgMediaRepo owns that. Writing a caller-supplied slot list would let
@@ -240,6 +248,11 @@ export class PgShiftRepo implements ShiftRepo {
          COALESCE((SELECT json_agg(t.amount_minor::text ORDER BY t.seq_no)
                      FROM float_tranches t
                     WHERE t.shift_id = s.id AND t.kind = 'wallet_topup'), '[]') AS topup_tranches,
+         -- DISJOINT from cash_float on purpose: both are summed into the closing cash, so an
+         -- amount in both lists would be returned twice and leave the office over by that much.
+         COALESCE((SELECT json_agg(t.amount_minor::text ORDER BY t.seq_no)
+                     FROM float_tranches t
+                    WHERE t.shift_id = s.id AND t.kind = 'carried_receivable'), '[]') AS carried_tranches,
          COALESCE((SELECT json_agg(m.slot ORDER BY m.slot)
                      FROM shift_media m
                     WHERE m.shift_id = s.id AND m.package = 'start'), '[]') AS media_start,
@@ -264,6 +277,9 @@ export class PgShiftRepo implements ShiftRepo {
       // Amounts arrive as ::text and become BigInt here — never via Number().
       floatTranches: (r.float_tranches as string[]).map((a) => minor(BigInt(a))),
       topupTranches: (r.topup_tranches as string[]).map((a) => minor(BigInt(a))),
+      carriedTranches: (r.carried_tranches as string[]).map((a) => minor(BigInt(a))),
+      keptAsReceivable: minor(BigInt((r.kept_as_receivable_minor as string | null) ?? '0')),
+      driverSharePaid: minor(BigInt((r.driver_share_paid_minor as string | null) ?? '0')),
       mediaSlotsStart: r.media_start as string[],
       mediaSlotsEnd: r.media_end as string[],
       odoStart: r.odo_start === null ? null : Number(r.odo_start),

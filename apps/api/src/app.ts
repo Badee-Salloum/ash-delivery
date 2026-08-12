@@ -1045,7 +1045,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     async (req) => {
       const { id } = z.object({ id: z.string() }).parse(req.params)
       const body = approveCloseRequest.parse(req.body)
-      const result = await approveClose(deps, req.actor!, id, body.reviewedOrdersHash, opts.splitGate ?? 'advisory')
+      const result = await approveClose(deps, req.actor!, id, body.reviewedOrdersHash, opts.splitGate ?? 'advisory', {
+        ...(body.keepAsReceivable === undefined ? {} : { keepAsReceivable: body.keepAsReceivable }),
+        payShareNow: body.payShareNow,
+      })
       return { id: result.shift.id, state: result.shift.state, postings: result.postings }
     },
   )
