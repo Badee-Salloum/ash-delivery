@@ -1,0 +1,13 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "echo no-deps",
+  "buildCommand": "echo no-build",
+  "functions": {
+    "api/gemini.mjs": {
+      "memory": 512,
+      "maxDuration": 250
+    }
+  },
+  "outputDirectory": "public"
+}

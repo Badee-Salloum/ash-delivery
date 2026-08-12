@@ -26,3 +26,8 @@ apps/driver/public/tesseract/
 # Database backups. Real business data — password hashes, session tokens, the whole ledger.
 # Never committed; kept off-machine instead (see RUNBOOK).
 backups/
+
+# Gemini OCR benchmark output — real customer addresses and GPS. Same rule as backups/.
+# Kept OUTSIDE the repo (~/Desktop/ash-ocr-runs); this is belt and braces.
+ash-ocr-runs/
+tools/gemini-relay/public/

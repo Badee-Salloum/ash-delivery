@@ -1,0 +1,525 @@
+#!/usr/bin/env node
+/**
+ * GEMINI, per image, inside a 20-request-a-day free tier.
+ *
+ *     node scripts/gemini-bench.mjs --dry            build every request, send nothing
+ *     node scripts/gemini-bench.mjs --models         ask which model ids the key actually has
+ *     node scripts/gemini-bench.mjs --pass=1         one full pass over all 48 images
+ *     node scripts/gemini-bench.mjs --report         re-render review.html, zero requests
+ *
+ * ── WHAT THIS MEASURES, AND WHY THE OBVIOUS VERSION OF IT DOES NOT WORK ──────────────────────
+ *
+ * The failure being hunted is documented at `ocr-bench.mjs:50-73`: Gemini read «−١٬١٥٥٫٦٥» as
+ * «115565» — the decimal dropped, a hundredfold error — in ONE RUN IN TEN, at temperature 0. On a
+ * shift that must balance to exactly zero, plausible-and-wrong is the failure with no defence.
+ *
+ * The tempting design is to ask the model for the amount twice, once "as printed" and once parsed,
+ * and to flag any disagreement. It does not work, and it is worth writing down why, because it
+ * looks like it should. Both fields come out of ONE completion, the second conditioned on the
+ * first. When the decimal is lost during READING — which is what actually happened — the printed
+ * field comes back «١١٥٥٦٥» and the parsed field faithfully mirrors it as «115565». They agree.
+ * The check passes. It only ever catches a normaliser bug inside the model, which is not the bug.
+ *
+ * So this asks instead for things that are cheap to state and awkward to fake, generated BEFORE
+ * the amount (see `propertyOrdering`):
+ *
+ *   hasDecimal   does this amount have a FRACTIONAL PART at all?  ← catches the dropped decimal
+ *   hasThousands is a thousands mark printed?
+ *   digitCount   how many digit glyphs, ignoring marks?           ← catches dropped/added digits
+ *
+ * A model that answers `hasDecimal: true` and then hands back «١١٥٥٦٥» has contradicted
+ * itself in a way we can see without knowing the answer. And the strongest check of all costs no
+ * quota whatsoever: the SHIPPED GLYPH READER reads 46 of these 48 fees with zero wrong, so it runs
+ * over the same corpus as a genuinely independent second opinion — a different algorithm, not a
+ * second field of the same completion.
+ *
+ * ── ON THE DATA ──────────────────────────────────────────────────────────────────────────────
+ * These screenshots hold real customer addresses and metre-level GPS. The owner decided on
+ * 2026-08-13 to use the FREE tier, whose terms permit Google to train on submitted content and
+ * allow human review. `ocr-bench.mjs:384` states the opposite principle; the difference is a
+ * decision, recorded so nobody later mistakes it for an oversight.
+ */
+
+import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
+import { INDEX, answerKey, loadCorpus, scoreImage, screenOf } from './ocr-corpus.mjs'
+
+const arg = (name, fallback) =>
+  process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback
+const flag = (name) => process.argv.includes(`--${name}`)
+
+const CORPUS = arg('images', join(homedir(), 'Desktop', 'داتا التجريب'))
+/**
+ * OUTSIDE THE REPO, deliberately, and for the same reason `backups/` is: this writes customer
+ * addresses and GPS to disk. A gitignored directory inside the working tree is one `git add -f`
+ * from being permanent; a sibling directory cannot be committed by accident at all.
+ */
+const OUT = arg('out', join(homedir(), 'Desktop', 'ash-ocr-runs'))
+/**
+ * Pinned to the model the CONSOLE meters, not to an alias.
+ *
+ * `gemini-flash-latest` is a moving target and its quota is metered separately; the dashboard we
+ * read the 5 RPM / 20 RPD from says «Gemini 3.6 Flash», so the benchmark asks for exactly that.
+ * Measuring one model against another model's quota is how a run dies halfway through.
+ */
+const MODEL = arg('model', process.env.GEMINI_MODEL ?? 'gemini-3.6-flash')
+
+/**
+ * `dynamic` sends no thinkingConfig at all, `off` pins the budget to zero, a number fixes it.
+ *
+ * DEFAULTS TO `dynamic` BECAUSE THIS MODEL REJECTS THE FIELD. Measured, not assumed: with
+ * `thinkingConfig: { thinkingBudget: 0 }` gemini-3.6-flash answers a bare
+ * `400 INVALID_ARGUMENT` naming nothing — Gemini 3.x replaced `thinkingBudget` with `thinkingLevel`,
+ * so the 2.5-era field is simply not a field any more. That probe cost one request out of twenty,
+ * which is exactly what `--limit=1` and stop-on-first-error are for.
+ *
+ * The pinning was wanted for a reason that has not gone away: a reasoning budget that varies per
+ * call is a live variable in an experiment trying to explain a fault that appears one run in ten at
+ * temperature 0. Re-pinning it means `thinkingLevel`, and that is worth doing before drawing any
+ * conclusion about determinism from repeat passes.
+ */
+const THINKING = arg('thinking', 'dynamic')
+const BATCH = Number(arg('batch', '8'))
+const PASS = arg('pass', '1')
+const DRY = flag('dry')
+
+/**
+ * Measured from the console on 2026-08-13, free tier: RPM 5 · RPD 20 · TPM 250K.
+ *
+ * The owner first said "5 per day"; the dashboard says 5 per MINUTE and 20 per day. The difference
+ * is what makes this benchmark worth running — 20 a day affords three full passes over 48 images,
+ * and repetition is the only thing that can catch a fault that shows up one run in ten.
+ */
+const RPD = Number(arg('rpd', '20'))
+const RPM = Number(arg('rpm', '5'))
+const SPACING_MS = Math.ceil(60_000 / RPM) + 1_000
+
+const RELAY = arg('relay', process.env.GEMINI_RELAY_URL ?? '')
+const SECRET = process.env.RELAY_SECRET ?? ''
+
+// ── The quota ledger ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Google's daily window resets at midnight US PACIFIC, not local midnight.
+ *
+ * Damascus is UTC+3 and Los Angeles is UTC-7/8, so a local date key is ten or eleven hours out of
+ * step with the window it claims to track: it would refuse while quota remained, then let a run
+ * start that overruns. Keyed on the actual reset zone instead.
+ */
+const quotaDay = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' })
+const ledgerPath = () => join(OUT, 'budget.json')
+
+function readLedger() {
+  try {
+    return JSON.parse(readFileSync(ledgerPath(), 'utf8'))
+  } catch {
+    return {}
+  }
+}
+/** Written BEFORE the call: if the process dies mid-request the quota still counted, so we must. */
+function spend(n = 1) {
+  const led = readLedger()
+  const day = quotaDay()
+  led[day] = (led[day] ?? 0) + n
+  mkdirSync(OUT, { recursive: true })
+  writeFileSync(ledgerPath(), JSON.stringify(led, null, 2))
+  return led[day]
+}
+const spentToday = () => readLedger()[quotaDay()] ?? 0
+
+// ── The request ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `propertyOrdering` is load-bearing, not cosmetic.
+ *
+ * Gemini generates the object's fields in this order, so the verification fields are committed to
+ * BEFORE the amount is written. Put `value` first and the model decides the number, then
+ * back-fills the evidence from its own decision — the check becomes circular and always passes.
+ *
+ * `value` is a STRING and must stay one. Declared as NUMBER, constrained decoding cannot emit the
+ * trailing zero in «-165.50», so every .50 and .00 in the corpus would come back short by
+ * construction — the scorer would then report a hundred failures that are its own fault.
+ */
+const ROW_SCHEMA = {
+  type: 'object',
+  propertyOrdering: ['hasDecimal', 'hasThousands', 'digitCount', 'printed', 'value', 'time', 'dateIso', 'cancelled'],
+  required: ['hasDecimal', 'hasThousands', 'digitCount', 'printed', 'value', 'time'],
+  properties: {
+    hasDecimal: { type: 'boolean', description: 'true iff this amount has a FRACTIONAL PART — a decimal mark ٫ (U+066B) or "." followed by one or two digits at the end' },
+    hasThousands: { type: 'boolean', description: 'true iff a THOUSANDS mark is printed: ٬ (U+066C), ، (U+060C) or ","' },
+    digitCount: { type: 'integer', description: 'how many DIGIT glyphs the amount has, ignoring sign and separators' },
+    printed: { type: 'string', description: 'the amount EXACTLY as printed: same digits, same marks, same sign. Never converted.' },
+    value: { type: 'string', nullable: true, description: 'STRING, never a number. Western digits, "." decimal, sign kept. "-165.50" keeps its trailing zero. null if the row has no amount.' },
+    time: { type: 'string', nullable: true, description: '24-hour HH:MM' },
+    dateIso: { type: 'string', nullable: true, description: 'YYYY-MM-DD from the nearest date header ABOVE this row' },
+    cancelled: { type: 'boolean' },
+  },
+}
+
+const IMAGE_SCHEMA = {
+  type: 'object',
+  propertyOrdering: ['id', 'screen', 'theme', 'statusBarClock', 'rowCount', 'rows', 'fields', 'notes'],
+  required: ['id', 'screen', 'theme', 'rowCount', 'rows'],
+  properties: {
+    id: { type: 'string', description: 'the IMG-nn label printed on the image itself' },
+    screen: { type: 'string', enum: ['payments_log', 'recent_orders', 'odometer', 'bms', 'other'] },
+    theme: { type: 'string', enum: ['light', 'dark'] },
+    statusBarClock: { type: 'string', nullable: true, description: "the phone's own clock in the status bar" },
+    rowCount: { type: 'integer', description: 'how many money rows this screen shows' },
+    rows: { type: 'array', items: ROW_SCHEMA },
+    fields: {
+      type: 'array',
+      description: 'odometer / BMS screens only — no money rows',
+      items: {
+        type: 'object',
+        required: ['label', 'value'],
+        properties: { label: { type: 'string' }, value: { type: 'string' } },
+      },
+    },
+    notes: { type: 'string', nullable: true },
+  },
+}
+
+const SCHEMA = {
+  type: 'object',
+  required: ['images'],
+  properties: { images: { type: 'array', items: IMAGE_SCHEMA } },
+}
+
+const PROMPT = `You are transcribing screenshots from a Damascus delivery company's driver app. Every number you read becomes money in a ledger that must balance to exactly zero, so a plausible guess is worse than an honest refusal.
+
+For EACH image, in the order given, produce one entry.
+
+\`id\` — copy the IMG-nn label printed in the white strip at the top of the image itself. It identifies which image you are describing; get it from the pixels, not from your own count.
+
+For every money row, answer the verification fields FIRST and honestly, then the amount:
+
+  hasDecimal         — does this amount have a FRACTIONAL PART? (a "٫" or "." followed by one or two digits at the end)
+  hasThousands       — is a THOUSANDS mark printed? ("٬", "،" or ",")
+  digitCount         — how many digit glyphs, excluding the sign and any separators?
+  printed            — the amount EXACTLY as it appears. Same digits (Arabic-Indic ٠١٢٣٤٥٦٧٨٩ stay Arabic-Indic), same marks, same sign. Convert NOTHING here.
+  value              — only here do you convert. Western digits, "." as the decimal point, sign kept, as a STRING.
+
+٫ and ٬ are DIFFERENT characters and the difference is a factor of one hundred. ٫ is the decimal mark and is followed by one or two digits at the end. ٬ and ، are thousands marks and always leave groups of exactly three digits.
+
+  «−١٬١٥٥٫٦٥»  →  printed "−١٬١٥٥٫٦٥", value "-1155.65", digitCount 6, hasDecimal true, hasThousands true
+  NOT "-115565". This single error is the reason this benchmark exists.
+
+Other rules, each of which corresponds to a real screen in this set:
+
+- A payments-log row is SIGNED: "+" is money arriving, "−" money leaving. Keep the sign in \`value\`. Orders-list fees are unsigned.
+- A CANCELLED order ("Cancelled" / "تم إلغاؤه") has NO amount: \`value\` null, \`cancelled\` true, \`digitCount\` 0. Never copy a number from a neighbouring row.
+- A card SLICED by the top or bottom edge may show its addresses but not its fee: \`value\` null, and say so in \`notes\`.
+- A screen may carry MORE THAN ONE date header ("Friday, August 7" … then lower down "Thursday, August 6"). Each row takes the nearest header ABOVE it. Month names may be Arabic (أغسطس, آب), Maghrebi (غشت) or English. The year is 2026.
+- Times: Arabic "م" is PM, "ص" is AM. Report 24-hour HH:MM. Some screens already print 24-hour times.
+- Addresses contain digits — "المدخل ١", "entrance ٨٦", GPS pairs, plus-codes like "G63V 78J". Those are NOT fees. Only the amount printed beside "SYP" is a fee.
+- If a character is genuinely unreadable, put "?" in \`printed\` and null in \`value\`. An honest refusal is a correct answer.
+
+An odometer photo (a physical bike dashboard behind glass) and a BMS battery app screenshot have no money rows: \`rows\` is [], \`rowCount\` 0, and the readable labelled values go in \`fields\`.`
+
+/**
+ * The id is burned INTO THE PIXELS, not passed as a neighbouring text part.
+ *
+ * Batching is what makes 48 images fit in a 20-a-day quota, and the failure it introduces is
+ * silent: rows from image 3 attributed to image 7 look perfectly plausible and are entirely wrong.
+ * A text label sitting beside the image is something the model can shuffle; a label it has to READ
+ * off the image cannot drift from the image it is printed on.
+ */
+async function labelImage(bytes, label) {
+  const { createCanvas, loadImage } = await import(
+    (await import('node:url')).pathToFileURL(
+      (await import('node:module')).createRequire(join(process.cwd(), 'apps', 'driver', 'package.json')).resolve('@napi-rs/canvas'),
+    ).href
+  )
+  const img = await loadImage(bytes)
+  const strip = Math.max(48, Math.round(img.height * 0.035))
+  const canvas = createCanvas(img.width, img.height + strip)
+  const ctx = canvas.getContext('2d')
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, canvas.width, strip)
+  ctx.fillStyle = '#000000'
+  ctx.font = `bold ${Math.round(strip * 0.62)}px sans-serif`
+  ctx.textBaseline = 'middle'
+  ctx.fillText(label, 12, strip / 2)
+  ctx.drawImage(img, 0, strip)
+  return canvas.toBuffer('image/jpeg', 88)
+}
+
+function buildRequest(batch) {
+  const parts = [{ text: PROMPT }]
+  for (const im of batch) parts.push({ inline_data: { mime_type: 'image/jpeg', data: im.labelled.toString('base64') } })
+  return {
+    contents: [{ parts }],
+    generationConfig: {
+      temperature: 0,
+      topP: 1,
+      seed: 7,
+      /*
+       * PINNED, and this is as much the experiment as the model is.
+       *
+       * Flash ships with thinking ON and `thinkingBudget: -1` (dynamic), so the amount of hidden
+       * reasoning varies from call to call — a mechanically plausible explanation for a 1-in-10
+       * flip at temperature 0. Leaving it dynamic means measuring a moving target. Thinking tokens
+       * also count against maxOutputTokens, so a dynamic budget under a small ceiling can consume
+       * the lot and return a candidate with no parts at all.
+       */
+      ...(THINKING === 'dynamic' ? {} : { thinkingConfig: { thinkingBudget: THINKING === 'off' ? 0 : Number(THINKING) } }),
+      maxOutputTokens: 32768,
+      responseMimeType: 'application/json',
+      responseSchema: SCHEMA,
+    },
+  }
+}
+
+// ── Talking to the relay ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Every one of these failure modes returns HTML, not JSON, and every one costs a request:
+ * Vercel deployment protection (401 SSO page), FUNCTION_INVOCATION_TIMEOUT (504),
+ * FUNCTION_PAYLOAD_TOO_LARGE (413). `res.json()` on any of them throws something unhelpful, so the
+ * body is captured to disk first and the error names the file.
+ */
+async function callRelay(request, rawDir, tag) {
+  const res = await fetch(RELAY, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-relay-secret': SECRET },
+    body: JSON.stringify({ model: MODEL, request }),
+    signal: AbortSignal.timeout(270_000),
+  })
+  const ct = res.headers.get('content-type') ?? ''
+  const text = await res.text()
+  if (!res.ok || !ct.includes('json')) {
+    writeFileSync(join(rawDir, `${tag}.error.txt`), `HTTP ${res.status}  ${ct}\nx-vercel-id: ${res.headers.get('x-vercel-id')}\n\n${text.slice(0, 8000)}`)
+    throw new Error(`relay ${res.status} (${ct || 'no content-type'}) — see raw/${tag}.error.txt`)
+  }
+  return JSON.parse(text)
+}
+
+/**
+ * A truncated structured response is the quiet one.
+ *
+ * `ocr-bench.mjs:243` uses `(parts ?? []).map(p => p.text ?? '').join('')`, which turns every one
+ * of these into an empty string with no error — a batch that hit the output ceiling would be
+ * scored as "eight images, zero rows" and the summary would look merely disappointing rather than
+ * broken. `finishReason` is unreliable exactly at the limit, so usageMetadata is checked too.
+ */
+function extractText(json, maxOut) {
+  if (json.promptFeedback?.blockReason) throw new Error(`gemini blocked: ${json.promptFeedback.blockReason}`)
+  if (json.error) throw new Error(`gemini ${json.error.code}: ${json.error.message}`)
+  const c = json.candidates?.[0]
+  if (!c) throw new Error('gemini: no candidate in response')
+  if (c.finishReason && c.finishReason !== 'STOP') throw new Error(`gemini finishReason=${c.finishReason}`)
+  const parts = c.content?.parts
+  if (!Array.isArray(parts) || parts.length === 0) {
+    throw new Error('gemini: candidate has no parts — thinking most likely consumed maxOutputTokens')
+  }
+  const u = json.usageMetadata ?? {}
+  const out = (u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0)
+  if (out >= maxOut * 0.98) throw new Error(`gemini: ${out}/${maxOut} output tokens — treat as truncated`)
+  return parts.map((p) => p.text ?? '').join('')
+}
+
+// ── Main ─────────────────────────────────────────────────────────────────────────────────────
+
+async function main() {
+  const images = loadCorpus(CORPUS)
+  const key = answerKey()
+  console.log(`corpus: ${images.length} images · answer key covers ${Object.keys(key).length}`)
+
+  // Re-render the review page from what is already on disk. Costs NOTHING, so the answer key can be
+  // corrected and everything re-scored as often as you like without touching the quota.
+  if (flag('report')) {
+    const { render } = await import('./ocr-report.mjs')
+    const r = render(OUT, CORPUS, new Map(images.map((im) => [im.sha, im.bytes])))
+    console.log(`\n${r.path}\n  ${r.images} images · ${r.runs} pass(es) · ${JSON.stringify(r.counts)}`)
+    return
+  }
+
+  if (flag('models')) {
+    if (!RELAY) throw new Error('--models needs --relay=<url> or GEMINI_RELAY_URL')
+    const r = await fetch(RELAY, { headers: { 'x-relay-secret': SECRET } })
+    const j = await r.json()
+    for (const m of j.models ?? []) {
+      if ((m.supportedGenerationMethods ?? []).includes('generateContent')) {
+        console.log(`  ${(m.name ?? '').replace('models/', '').padEnd(38)} ${m.displayName ?? ''}`)
+      }
+    }
+    return
+  }
+
+  // Size-balanced batches: fill them largest-first round-robin so no single request carries the
+  // ten biggest images at once. Vercel's body cap is 4.5 MB and the corpus is 4.45 MB base64 in
+  // total, so a badly-packed batch is not fatal — but it costs nothing to keep every one small.
+  const sorted = [...images].sort((a, b) => b.bytes.length - a.bytes.length)
+  const nBatches = Math.ceil(images.length / BATCH)
+  const batches = Array.from({ length: nBatches }, () => [])
+  sorted.forEach((im, i) => batches[i % nBatches].push(im))
+
+  const runId = `${quotaDay()}-pass${PASS}`
+  const runDir = join(OUT, runId)
+  const rawDir = join(runDir, 'raw')
+  const imgDir = join(runDir, 'images')
+  mkdirSync(rawDir, { recursive: true })
+  mkdirSync(imgDir, { recursive: true })
+
+  // Label every image before anything is sized or sent, so --dry reports the real payload.
+  let n = 0
+  for (const im of images) im.label = `IMG-${String(++n).padStart(2, '0')}`
+  for (const im of images) im.labelled = await labelImage(im.bytes, im.label)
+
+  console.log(`\nbatches (${BATCH}/request, size-balanced):`)
+  let total = 0
+  const requests = batches.map((batch, i) => {
+    const req = buildRequest(batch)
+    const bytes = Buffer.byteLength(JSON.stringify({ model: MODEL, request: req }))
+    total += bytes
+    console.log(
+      `  batch ${i + 1}: ${String(batch.length).padStart(2)} images  ${(bytes / 1024).toFixed(0).padStart(5)} KB  ` +
+        batch.map((im) => im.label).join(' '),
+    )
+    return { batch, req, bytes }
+  })
+  console.log(`  total ${(total / 1048576).toFixed(2)} MB across ${requests.length} requests`)
+
+  const used = spentToday()
+  console.log(`\nquota (${quotaDay()} US/Pacific): ${used}/${RPD} used, ${RPD - used} left · this pass needs ${requests.length}`)
+
+  if (DRY) {
+    console.log('\n--dry: nothing sent. Prompt is below.\n')
+    console.log(PROMPT)
+    writeFileSync(join(runDir, 'dry-request-1.json'), JSON.stringify({ model: MODEL, request: requests[0].req }, null, 1).slice(0, 4000))
+    return
+  }
+  if (!RELAY) throw new Error('set --relay=<url> or GEMINI_RELAY_URL (and RELAY_SECRET)')
+  if (used + requests.length > RPD) {
+    throw new Error(`would exceed the daily cap: ${used} used + ${requests.length} needed > ${RPD}. Wait for the Pacific-midnight reset or pass --rpd=N.`)
+  }
+
+  // `--limit=1` makes the first real call a single probe: it proves the schema is accepted, the
+  // thinking config is accepted, the ids come back, and the JSON parses — for one request out of
+  // twenty rather than six. Everything after it is the same call with different pixels.
+  const LIMIT = Number(arg('limit', String(requests.length)))
+  const byLabel = new Map(images.map((im) => [im.label, im]))
+  for (const [i, { batch, req }] of requests.slice(0, LIMIT).entries()) {
+    const tag = `batch-${i + 1}`
+
+    /*
+     * RESUME. A batch every one of whose images already has a result for THIS run is not sent again.
+     *
+     * The first probe cost one request and succeeded; without this, finishing the pass would pay for
+     * it a second time. With twenty requests a day and six to a pass, one wasted request is a sixth
+     * of a pass. `--force` re-reads regardless, and a NEW `--pass=N` writes under a different runId
+     * so repeat passes are never mistaken for work already done.
+     */
+    if (!flag('force') && batch.every((im) => existsSync(join(imgDir, im.sha, `${runId}.json`)))) {
+      console.log(`\n${tag}: already read in ${runId} — skipped, no request spent`)
+      continue
+    }
+    if (i > 0) await new Promise((r) => setTimeout(r, SPACING_MS)) // RPM 5 ⇒ 13s apart
+    const after = spend(1)
+    console.log(`\n${tag}: ${batch.length} images … (request ${after}/${RPD} today)`)
+
+    let json
+    try {
+      json = await callRelay(req, rawDir, tag)
+    } catch (err) {
+      console.error(`  ${err.message}`)
+      /*
+       * A DAILY 429 is not a transient failure and must not be retried today.
+       *
+       * Google's own body carries the proof — `GenerateRequestsPerDayPerProjectPerModel-FreeTier`
+       * with `quotaValue: 20`. The local ledger only ever counted requests THIS script made, so it
+       * happily reported "3/20 used" while the project was already exhausted by work done outside
+       * it. Recording the exhaustion means the next run refuses in the pre-flight check instead of
+       * spending a request to be told again.
+       */
+      const detail = (() => {
+        try {
+          return readFileSync(join(rawDir, `${tag}.error.txt`), 'utf8')
+        } catch {
+          return ''
+        }
+      })()
+      if (/PerDay|RequestsPerDay/i.test(detail)) {
+        const led = readLedger()
+        led[quotaDay()] = RPD
+        writeFileSync(ledgerPath(), JSON.stringify(led, null, 2))
+        const secs = detail.match(/retry in ([\d.]+)s/)?.[1]
+        console.error(`  DAILY quota for ${MODEL} is exhausted. Ledger marked ${RPD}/${RPD}.`)
+        console.error(`  It resets at midnight US/Pacific. Re-run then; finished batches are skipped.`)
+        if (secs) console.error(`  (Google also suggests retrying in ${Math.ceil(Number(secs))}s — that is the per-MINUTE limit, not the daily one.)`)
+      } else {
+        console.error(`  STOPPING — later batches are not attempted, so the rest of today's quota survives.`)
+      }
+      break
+    }
+    writeFileSync(join(rawDir, `${tag}.json`), JSON.stringify(json, null, 1))
+
+    let parsed
+    try {
+      parsed = JSON.parse(extractText(json, 32768))
+    } catch (err) {
+      console.error(`  ${err.message} — raw kept at raw/${tag}.json, batch NOT scored`)
+      continue
+    }
+
+    // The id must come back as the exact set we sent. Anything else and the rows may belong to a
+    // different screen than the one they are about to be scored against, so nothing is scored.
+    const got = (parsed.images ?? []).map((e) => e.id)
+    const want = batch.map((im) => im.label)
+    if (got.length !== want.length || want.some((l) => !got.includes(l))) {
+      console.error(`  id mismatch — sent [${want.join(' ')}] got [${got.join(' ')}] · batch NOT scored`)
+      continue
+    }
+
+    for (const entry of parsed.images ?? []) {
+      const im = byLabel.get(entry.id)
+      if (!im) continue
+      const truth = key[im.sha]
+      const score = scoreImage(entry, truth)
+      const localScreen = screenOf(im.sha)
+      const rec = {
+        sha: im.sha,
+        file: im.rel,
+        fixture: INDEX[im.sha]?.fixture ?? null,
+        label: im.label,
+        pass: PASS,
+        model: MODEL,
+        runId,
+        screenSaid: entry.screen,
+        screenLocal: localScreen,
+        screenAgrees: entry.screen === localScreen,
+        theme: entry.theme ?? null,
+        statusBarClock: entry.statusBarClock ?? null,
+        rows: entry.rows ?? [],
+        fields: entry.fields ?? [],
+        notes: entry.notes ?? null,
+        truth: truth ?? null,
+        score,
+        usage: json.usageMetadata ?? null,
+      }
+      // Keyed by sha AND run, so repeat passes ACCUMULATE instead of clobbering — repetition is
+      // the whole point when the fault under test appears one run in ten.
+      mkdirSync(join(imgDir, im.sha), { recursive: true })
+      writeFileSync(join(imgDir, im.sha, `${runId}.json`), JSON.stringify(rec, null, 1))
+
+      const flags = score.suspects.flat()
+      const mark = flags.length ? '⚠' : score.scored ? (score.wrong.length === 0 && score.missed.length === 0 ? '✓' : '✗') : '·'
+      console.log(
+        `  ${mark} ${im.label} ${(INDEX[im.sha]?.fixture ?? im.rel).padEnd(34).slice(0, 34)} ` +
+          `rows ${String(entry.rows?.length ?? 0).padStart(2)}` +
+          (score.scored ? `  matched ${score.matched}/${score.expected}` : '  (no truth)') +
+          (flags.length ? `  SUSPECT: ${[...new Set(flags)].join(', ')}` : ''),
+      )
+    }
+  }
+
+  const { render } = await import('./ocr-report.mjs')
+  const rep = render(OUT, CORPUS, new Map(images.map((im) => [im.sha, im.bytes])))
+  console.log(`\nwrote ${runDir}`)
+  console.log(`review: ${rep.path}  (${rep.images} images, ${rep.runs} pass(es))`)
+  console.log(`quota now: ${spentToday()}/${RPD} today`)
+}
+
+await main()
