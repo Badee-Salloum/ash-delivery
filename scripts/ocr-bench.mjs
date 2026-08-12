@@ -31,6 +31,25 @@
  *            This is the number that matters — it is what an integration would consume.
  *
  * No image leaves this machine unless you pass a key. `--dry` prints the exact request shape.
+ *
+ * ── MEASURED, 2026-08-12, all 48 rows ─────────────────────────────────────────────────────────
+ *
+ *   provider                recall    rows    sep   MISREAD
+ *   shipped glyph reader       —     46/48     0       0     ← refuses 2, never wrong
+ *   gemini-flash-latest      48/48   48/48     0       0     ← every row, ٬ and ٫ kept distinct
+ *   mistral-ocr-latest       47/48   45/48     2       1     ← «٣٤٥» → 245
+ *   gpt-5.4-mini             45/48   39/48     6       3     ← «-165.50» → -1650, dropped minuses
+ *   gpt-5.4-nano              1/4     1/4      0       2     ← «٢٧٥ ٣٤٥» → 270 270
+ *   tesseract (control)       5/48    5/48     0      20     ← those 5 are the Western-digit screen
+ *
+ * Two findings worth keeping. FIRST, the premise this whole reader was built on — that no hosted
+ * engine reads Arabic-Indic digits — is false: Gemini read all 48 and kept «−١٬١٥٥٫٦٥» intact.
+ * SECOND, cheaper models do not degrade gracefully, they degrade SILENTLY: nano answered «٢٧٥» and
+ * «٣٤٥» as 270 and 270, which is a plausible fee twice over and undetectable downstream.
+ *
+ * Gemini's run is CAPABILITY, not reliability. `--repeat=N` is the outstanding test and it has not
+ * been completed — the free tier 429'd partway. Until the same image gives the same answer six
+ * times, nothing here goes near a shift close.
  */
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
