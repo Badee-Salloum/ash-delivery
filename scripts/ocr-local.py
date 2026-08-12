@@ -22,6 +22,25 @@ a different kind of win from a cent saved.
 This writes a plain JSON transcript per fixture and stops. Scoring stays in `ocr-bench.mjs`, against
 the same answer key as every other provider, so a local engine is judged by the same ruler — and the
 expensive part (running the model) does not have to be repeated to re-score.
+
+── RUN THIS ON THE LINUX VPS, NOT ON WINDOWS ────────────────────────────────────────────────────
+
+Attempted 2026-08-12 on Windows 11 / Python 3.12. BOTH engines failed to start, for reasons that
+have nothing to do with reading Arabic and produced no score either way:
+
+  paddleocr 3.x  segfaults — 0xC0000005, after loading its models and before reading a pixel.
+                 `enable_mkldnn=False` clears an earlier, different backend bug
+                 (ConvertPirAttribute2RuntimeAttribute), and the slim pipeline below is right on
+                 the merits, but neither stops the crash.
+
+  surya-ocr 0.22 no longer ships a plain-torch path at all. Its backends are `vllm` (spawns
+                 Docker), `llamacpp` (spawns a native llama-server binary — the install notes list
+                 macOS and Linux only) and `openai_client`. Older releases had a direct torch
+                 pipeline; this one does not.
+
+Neither is evidence about accuracy. Both would be DEPLOYED on the Linux VPS the business already
+pays for — which is where PaddlePaddle's CPU wheels are well tested and where Surya's llamacpp
+backend has a documented install. The meaningful run is there, and it is one command.
 """
 
 from __future__ import annotations
