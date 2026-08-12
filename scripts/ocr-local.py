@@ -58,12 +58,40 @@ def run_paddle(paths: list[Path]) -> dict[str, dict]:
     """
     from paddleocr import PaddleOCR  # noqa: PLC0415
 
-    # 3.x renamed the entry point and dropped several constructor arguments. Try the modern shape
-    # first and fall back, so this script is not pinned to one release of a fast-moving package.
-    try:
-        engine = PaddleOCR(lang="ar", use_textline_orientation=False)
-    except TypeError:
-        engine = PaddleOCR(lang="ar", use_angle_cls=False, show_log=False)
+    # 3.x renamed the entry point and dropped several constructor arguments, so each shape is tried
+    # in turn rather than pinning this script to one release of a fast-moving package.
+    #
+    # `enable_mkldnn=False` is not optional on Windows CPU. With oneDNN on, inference dies with
+    #   (Unimplemented) ConvertPirAttribute2RuntimeAttribute not support
+    #   [pir::ArrayAttribute<pir::DoubleAttribute>]
+    # — a backend fault, nothing to do with the image or the language. Disabling it costs speed and
+    # is the difference between a reader that runs and one that does not.
+    # The 3.x default pipeline also loads a document-orientation classifier and a de-warping model
+    # (PP-LCNet_x1_0_doc_ori, UVDoc). A phone screenshot is already flat and upright, so both are
+    # dead weight — and each is another native code path. On this Windows box the full pipeline
+    # segfaults outright (0xC0000005), so the slim configuration is tried FIRST, not as a fallback.
+    slim = {
+        "use_doc_orientation_classify": False,
+        "use_doc_unwarping": False,
+        "use_textline_orientation": False,
+        "enable_mkldnn": False,
+    }
+    attempts = [
+        {"lang": "ar", **slim},
+        {"lang": "ar", "use_textline_orientation": False, "enable_mkldnn": False},
+        {"lang": "ar", "enable_mkldnn": False},
+        {"lang": "ar", "use_angle_cls": False, "enable_mkldnn": False, "show_log": False},
+        {"lang": "ar"},
+    ]
+    engine = None
+    for kwargs in attempts:
+        try:
+            engine = PaddleOCR(**kwargs)
+            break
+        except TypeError:
+            continue
+    if engine is None:
+        raise RuntimeError("could not construct PaddleOCR with any known argument shape")
 
     out: dict[str, dict] = {}
     for p in paths:
