@@ -51,7 +51,7 @@
  * been completed — the free tier 429'd partway. Until the same image gives the same answer six
  * times, nothing here goes near a shift close.
  */
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -352,6 +352,19 @@ const providers = {
     },
   },
 
+  /**
+   * SELF-HOSTED — PaddleOCR and Surya, read from the JSON `ocr-local.py` wrote.
+   *
+   * Deliberately a two-step rather than a subprocess: loading these models costs tens of seconds,
+   * and re-scoring should never mean re-running them. It also keeps Python out of the Node path
+   * entirely, so the bench still works on a machine that has neither installed.
+   *
+   * These are the only options with no per-image cost, no account, no card, and — the part that
+   * matters for a company in Damascus — no customer address leaving the country.
+   */
+  paddle: { needs: [], local: 'paddle.json', async run() {} },
+  surya: { needs: [], local: 'surya.json', async run() {} },
+
   /** The control. Free, already vendored, and documented at 0 of 11 on these amounts. */
   tesseract: {
     needs: [],
@@ -472,6 +485,18 @@ for (const name of chosen) {
     console.error(`unknown provider «${name}» — try ${Object.keys(providers).join(', ')}`)
     process.exit(2)
   }
+  // A local engine reads a transcript from disk instead of calling anything.
+  if (p.local) {
+    const file = arg('local', p.local)
+    if (!existsSync(file)) {
+      console.log(`\n▸ ${name}: SKIPPED — no ${file}. Run:  python scripts/ocr-local.py --engine=${name} --out=${file}`)
+      results.push({ name, skipped: [file] })
+      continue
+    }
+    const transcripts = JSON.parse(readFileSync(file, 'utf8'))
+    p.run = async (_bytes, fixture) => transcripts[fixture] ?? { text: '', lines: [] }
+  }
+
   const missingKeys = p.needs.filter((k) => !process.env[k])
   if (missingKeys.length > 0 && !DRY) {
     console.log(`\n▸ ${name}: SKIPPED — set ${missingKeys.join(', ')}`)
@@ -495,7 +520,7 @@ for (const name of chosen) {
       for (let i = 0; i < REPEAT; i++) {
         if (i > 0 && DELAY > 0) await sleep(DELAY)
         try {
-          const r = await p.run(bytes)
+          const r = await p.run(bytes, file)
           seen.push(amountsNearAnchor(r.lines).join(' '))
         } catch (e) {
           seen.push(`ERROR ${e.message.slice(0, 60)}`)
@@ -515,7 +540,7 @@ for (const name of chosen) {
     }
 
     try {
-      const r = await p.run(bytes)
+      const r = await p.run(bytes, file)
       if (DRY) {
         console.log(`  ${file}: ${r.dry}`)
         continue
