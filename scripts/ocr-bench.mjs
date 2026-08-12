@@ -206,6 +206,59 @@ const providers = {
   },
 
   /**
+   * CLAUDE — same shape as the Gemini probe, so the two are compared and not merely quoted.
+   *
+   * Priced per token like Gemini, not per page: Haiku 4.5 at $1/$5 per million is the tier that
+   * makes sense here; Sonnet and Opus cost 2-5x for a job that is transcription, not reasoning.
+   * Override with ANTHROPIC_MODEL.
+   *
+   * The same warning as Gemini applies and is the whole reason this is measured rather than
+   * assumed: a model answers with the most plausible number when it cannot read one, and BR1
+   * cannot catch a plausible wrong fee.
+   */
+  claude: {
+    needs: ['ANTHROPIC_API_KEY'],
+    async run(bytes) {
+      const model = process.env.ANTHROPIC_MODEL ?? 'claude-haiku-4-5-20251001'
+      const body = {
+        model,
+        max_tokens: 2048,
+        temperature: 0,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: bytes.toString('base64') } },
+              {
+                type: 'text',
+                text:
+                  'Transcribe every line of this screenshot exactly as printed, one line per output line. ' +
+                  'Keep Arabic-Indic digits (٠١٢٣٤٥٦٧٨٩) EXACTLY as they appear — do not convert them to Western digits. ' +
+                  'Keep the Arabic thousands separator ٬ and decimal separator ٫ distinct from each other. ' +
+                  'If a character is unclear, write ? rather than guessing. Output only the transcription.',
+              },
+            ],
+          },
+        ],
+      }
+      if (DRY) return { dry: `POST https://api.anthropic.com/v1/messages (model ${model})`, body: '<image inline>' }
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': process.env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify(body),
+      })
+      if (!res.ok) throw new Error(`claude ${res.status}: ${(await res.text()).slice(0, 300)}`)
+      const json = await res.json()
+      const text = (json.content ?? []).map((c) => c.text ?? '').join('')
+      return { text, lines: text.split('\n') }
+    },
+  },
+
+  /**
    * OCR.space — a free key by email, 25,000 requests/month, NO card.
    *
    * A real OCR engine rather than a model, so it refuses instead of inventing. Engine 1 is the one
