@@ -187,6 +187,75 @@ export function floatReturn(driverId: string, amount: Minor): Posting {
 }
 
 /**
+ * The end-of-day cash, split between the box, a ذمة, and the share the driver keeps.
+ *
+ * ONE POSTING, NOT THREE, and that is the whole design. `driver_cash` is credited once for the
+ * entire closing balance, so it lands on EXACTLY ZERO however the money is distributed — the
+ * invariant `recipes.test.ts` pins and the reason this is not a `float_return` plus two extra
+ * events. The event type and occurrence key are unchanged, so the idempotency index sees the same
+ * row it always did.
+ *
+ * The three debits, in the owner's own terms:
+ *   • `office_cash`              «يدخل إلى خزينة الفرع»
+ *   • `driver_receivable_cash`   «يبقى ذمة على السائق» — the manager's decision (owner decision g)
+ *   • `driver_share_payable`     «يُعاد للسائق» — he keeps his share out of the cash in his hands
+ *
+ * DEBITING `driver_share_payable` DISCHARGES A LIABILITY. `shareSplit` credits it and, until now,
+ * nothing ever debited it — the company's debt to its drivers could only grow. Owner decision (f)
+ * pays that share at the end of every shift, out of cash he is already holding, so the credit and
+ * the debit land on the same night.
+ *
+ * With both extras zero this emits exactly the two lines `floatReturn` always did.
+ */
+export function floatReturnSplit(
+  driverId: string,
+  endCash: Minor,
+  keptAsReceivable: Minor,
+  sharePaid: Minor,
+): Posting {
+  const toOffice = sub(sub(endCash, keptAsReceivable), sharePaid)
+  if (toOffice < 0n) {
+    throw new RangeError(
+      `the split exceeds the closing cash: ${keptAsReceivable} kept + ${sharePaid} paid > ${endCash}`,
+    )
+  }
+  const lines: PostingLine[] = []
+  // Zero lines are omitted, not pushed — `assertBalanced` requires every amount to be strictly
+  // positive because direction is carried by `side` and a zero has no direction to carry.
+  if (toOffice > 0n) lines.push(D({ kind: 'office_cash' }, toOffice, 'to_office'))
+  if (keptAsReceivable > 0n) {
+    lines.push(D({ kind: 'driver_receivable_cash', driverId }, keptAsReceivable, 'kept_as_receivable'))
+  }
+  if (sharePaid > 0n) lines.push(D({ kind: 'driver_share_payable', driverId }, sharePaid, 'driver_payout'))
+  lines.push(C({ kind: 'driver_cash', driverId }, endCash))
+  return assertBalanced({ eventType: 'float_return', occurrenceKey: '1', lines })
+}
+
+/**
+ * A ذمة carried INTO a new shift — «should be handled when he starts a new shift» (owner decision c).
+ *
+ * He already holds the cash, so the office hands over only the difference. Posting it as a
+ * `float_out` that credits the RECEIVABLE instead of `office_cash` is what makes that true in the
+ * ledger: the driver's cash rises exactly as it would have, the receivable clears, and no money
+ * leaves the branch box for something it already paid out yesterday.
+ *
+ * Keeping the `float_out` event type also keeps BR1 in its ABSOLUTE form (CLAUDE.md decision 4) —
+ * the carried amount is simply another float tranche, and the equation needs no opening balance.
+ */
+export function floatCarry(driverId: string, amount: Minor, tranche: string | number = 1): Posting {
+  return assertBalanced({
+    eventType: 'float_out',
+    // Namespaced away from `addTranche`'s ordinal keys, so a carry and a second cash tranche on the
+    // same shift can never collide on (shift_id, event_type, occurrence_key).
+    occurrenceKey: `carry-${tranche}`,
+    lines: [
+      D({ kind: 'driver_cash', driverId }, amount),
+      C({ kind: 'driver_receivable_cash', driverId }, amount),
+    ],
+  })
+}
+
+/**
  * The wallet balance returned at end of day, zeroing the driver's wallet fund.
  *
  * Product-owner decision D-4: the wallet is zeroed daily exactly like the float, per the literal
@@ -429,6 +498,19 @@ export interface ShiftPostingInput {
   readonly orders: readonly ShiftOrder[]
   /** Wallet movements no order explains (incentive, top-up, withdrawal) — same term BR1 uses. */
   readonly walletAdjustments?: readonly Minor[]
+  /**
+   * ذمم carried in from an earlier shift — cash the driver already had in his hands at open.
+   *
+   * DISJOINT from `floatTranches`, and it must stay that way: these two lists are summed together
+   * into the closing cash, so putting an amount in both would return it twice and leave the office
+   * over by that much. The repo loads them from separate `float_tranches.kind` values for exactly
+   * this reason.
+   */
+  readonly carriedTranches?: readonly Minor[]
+  /** «يبقى ذمة على السائق» — how much of tonight's cash stays with him. The manager decides it. */
+  readonly keptAsReceivable?: Minor
+  /** «يُعاد للسائق» — his share, kept out of the cash in his hands (owner decision f). */
+  readonly driverSharePaid?: Minor
   readonly rounding?: Rounding
 }
 
@@ -436,6 +518,9 @@ export interface ShiftPostingInput {
 export function postingsForOpen(input: ShiftPostingInput): Posting[] {
   return [
     ...input.floatTranches.map((amount, i) => floatOut(input.driverId, amount, i + 1)),
+    // A ذمة he already holds: his cash rises the same way, but the branch box pays nothing,
+    // because it paid yesterday. Clears the receivable in the same movement.
+    ...(input.carriedTranches ?? []).map((amount, i) => floatCarry(input.driverId, amount, i + 1)),
     ...input.topupTranches.map((amount, i) => walletTopup(input.driverId, amount, i + 1)),
   ]
 }
@@ -472,9 +557,16 @@ export function postingsForApproval(input: ShiftPostingInput, split: BlockSplit)
     if (amount !== 0n) postings.push(walletAdjustment(input.driverId, input.branchId!, amount, String(i + 1)))
   })
 
-  // Both are returned in full at end of day (D-4), leaving both driver funds at exactly zero.
+  /*
+   * Both driver funds go to EXACTLY ZERO (D-4). The cash may be distributed three ways now — the
+   * box, a ذمة, and the share he keeps — but it is still ONE credit of the whole closing balance,
+   * so the invariant is untouched. With no settlement supplied this is the two-line posting it has
+   * always been.
+   */
   const { endCash, endWallet } = closingBalances(input)
-  if (endCash !== 0n) postings.push(floatReturn(input.driverId, endCash))
+  const kept = input.keptAsReceivable ?? minor(0n)
+  const sharePaid = input.driverSharePaid ?? minor(0n)
+  if (endCash !== 0n) postings.push(floatReturnSplit(input.driverId, endCash, kept, sharePaid))
   if (endWallet !== 0n) postings.push(walletReturn(input.driverId, endWallet))
 
   return postings
@@ -491,8 +583,11 @@ export function closingBalances(input: ShiftPostingInput): ClosingBalances {
   // The same one rule BR1 uses: what did NOT reach the wallet is in his hand, and what did reach it
   // is there less Yallago's cut. Mirrors `evaluateBr1` exactly — these two must never drift, or the
   // ledger would return a different amount from the one the equation just balanced.
+  // A carried ذمة is cash he was ALREADY holding at open, so it is part of the closing balance
+  // exactly as a float tranche is. `evaluateShift` adds it to `floatTotal` on the BR1 side by the
+  // same rule — the two must never drift, which is the whole point of the note above.
   const endCash = add(
-    sum(input.floatTranches),
+    add(sum(input.floatTranches), sum(input.carriedTranches ?? [])),
     sum(input.orders.map((o) => sub(o.fee, orderWalletAmount(o)))),
   )
   const walletFromOrders = sum(input.orders.map((o) => sub(orderWalletAmount(o), orderYalagoCut(o, rounding))))
