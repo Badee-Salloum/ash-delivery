@@ -259,6 +259,51 @@ const providers = {
   },
 
   /**
+   * OPENAI — same probe again. GPT-5.4 Nano by default, because on paper it is the CHEAPEST option
+   * of anything tested here (~$0.20/$1.25 per million), and if the smallest model can transcribe
+   * digits then nothing larger is justified for a job that is not reasoning.
+   *
+   * That is also the hypothesis most likely to fail: a nano-tier model under-reading a cramped
+   * Arabic-Indic glyph will still answer with a confident number. Override with OPENAI_MODEL to try
+   * gpt-5.4-mini or the full model before concluding anything about the family.
+   */
+  openai: {
+    needs: ['OPENAI_API_KEY'],
+    async run(bytes) {
+      const model = process.env.OPENAI_MODEL ?? 'gpt-5.4-nano'
+      const body = {
+        model,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text:
+                  'Transcribe every line of this screenshot exactly as printed, one line per output line. ' +
+                  'Keep Arabic-Indic digits (٠١٢٣٤٥٦٧٨٩) EXACTLY as they appear — do not convert them to Western digits. ' +
+                  'Keep the Arabic thousands separator ٬ and decimal separator ٫ distinct from each other. ' +
+                  'If a character is unclear, write ? rather than guessing. Output only the transcription.',
+              },
+              { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${bytes.toString('base64')}`, detail: 'high' } },
+            ],
+          },
+        ],
+      }
+      if (DRY) return { dry: `POST https://api.openai.com/v1/chat/completions (model ${model})`, body: '<image inline>' }
+      const res = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+        body: JSON.stringify(body),
+      })
+      if (!res.ok) throw new Error(`openai ${res.status}: ${(await res.text()).slice(0, 300)}`)
+      const json = await res.json()
+      const text = json.choices?.[0]?.message?.content ?? ''
+      return { text, lines: text.split('\n') }
+    },
+  },
+
+  /**
    * OCR.space — a free key by email, 25,000 requests/month, NO card.
    *
    * A real OCR engine rather than a model, so it refuses instead of inventing. Engine 1 is the one
