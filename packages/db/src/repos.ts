@@ -39,6 +39,10 @@ export function fundCodeOf(fund: Posting['lines'][number]['fund']): string {
     case 'driver_cash':
     case 'driver_wallet':
     case 'driver_share_payable':
+    // A ذمة belongs to one named driver; without the suffix every driver's receivable merges into
+    // a single fund and the totals stay right while «who owes this» becomes unanswerable.
+    case 'driver_receivable_cash':
+    case 'driver_receivable_wallet':
       return `${fund.kind}:${fund.driverId}`
     case 'cost_center':
       return `cost_center:${fund.costCenterId}`

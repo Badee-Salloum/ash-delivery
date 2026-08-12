@@ -18,6 +18,7 @@ describe('fund code round-trip', () => {
     { kind: 'company_revenue' },
     { kind: 'yalago_income' },
     { kind: 'fee_earned' },
+    { kind: 'company_box' },
   ]
 
   it.each(simple.map((f) => [f.kind, f] as const))('round-trips %s', (_kind, fund) => {
@@ -27,7 +28,13 @@ describe('fund code round-trip', () => {
   it('round-trips driver-scoped funds', () => {
     fc.assert(
       fc.property(
-        fc.constantFrom('driver_cash' as const, 'driver_wallet' as const, 'driver_share_payable' as const),
+        fc.constantFrom(
+          'driver_cash' as const,
+          'driver_wallet' as const,
+          'driver_share_payable' as const,
+          'driver_receivable_cash' as const,
+          'driver_receivable_wallet' as const,
+        ),
         fc.string({ minLength: 1 }).filter((s) => !s.includes(' ')),
         (kind, driverId) => {
           expect(fundRefFromCode(fundCode({ kind, driverId }))).toEqual({ kind, driverId })
@@ -62,5 +69,34 @@ describe('fund code round-trip', () => {
     // The exact bug this function exists to prevent.
     expect(fundRefFromCode('office_cash')).toEqual({ kind: 'office_cash' })
     expect(fundRefFromCode('office_cash')).not.toEqual({ kind: 'cost_center', costCenterId: 'office_cash' })
+  })
+
+  /**
+   * صندوق الشركة is the newest name and therefore the likeliest to be missed. A manual entry that
+   * writes «company_box» and silently moves `cost_center:company_box` instead would show the
+   * operator a successful sweep while the company fund never changed.
+   */
+  it('resolves company_box to the FUND, never to a cost centre', () => {
+    expect(fundRefFromCode('company_box')).toEqual({ kind: 'company_box' })
+    expect(fundRefFromCode('company_box')).not.toEqual({ kind: 'cost_center', costCenterId: 'company_box' })
+  })
+
+  /** A ذمة without a driver is not a smaller ذمة — it is an unanswerable one. */
+  it('refuses a receivable with no driver id', () => {
+    expect(() => fundRefFromCode('driver_receivable_cash')).toThrow(RangeError)
+    expect(() => fundRefFromCode('driver_receivable_wallet:')).toThrow(RangeError)
+  })
+
+  /**
+   * The cash and wallet receivables must stay DISTINCT codes. الترميم counts each against its own
+   * capital target — his book has 400,000 against كاش المكتب and 30,000 against محفظة المكتب — so
+   * collapsing them would restore both boxes to the wrong numbers while every total still footed.
+   */
+  it('keeps the cash and wallet receivables apart', () => {
+    const cash = fundCode({ kind: 'driver_receivable_cash', driverId: 'd1' })
+    const wallet = fundCode({ kind: 'driver_receivable_wallet', driverId: 'd1' })
+    expect(cash).not.toBe(wallet)
+    expect(fundRefFromCode(cash).kind).toBe('driver_receivable_cash')
+    expect(fundRefFromCode(wallet).kind).toBe('driver_receivable_wallet')
   })
 })

@@ -3,7 +3,16 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { CashCountLine, CashCountRecord, Deps } from '@ash/contracts'
 import { createCashCountRequest, manualEntryRequest, moneySchema, serializeMoney } from '@ash/contracts'
-import { type Posting, assertBalanced, fundRefFromCode, isDateLocked, minor, reverse, weekStartFor } from '@ash/domain'
+import {
+  type Posting,
+  assertBalanced,
+  fundRefFromCode,
+  isDateLocked,
+  minor,
+  reverse,
+  sweepToCompany,
+  weekStartFor,
+} from '@ash/domain'
 import { ServiceError, assertWeekOpen, ensureFxDay, todayFor } from './shifts.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
 
@@ -264,6 +273,11 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     const branchId = resolveBranch(req)
     if (body.amount <= 0n) throw new ServiceError(422, 'amount_must_be_positive')
     const officeCode = body.target === 'cash' ? 'office_cash' : 'office_wallet'
+    // BR7, and it was MISSING here while every other posting route had it. The date is always
+    // today so it rarely bit — but on the Sunday a week is sealed, a deposit would have gone
+    // straight through the application and been refused by the database trigger instead, surfacing
+    // as a raw 25006 rather than «الأسبوع مقفل».
+    await assertWeekOpen(deps, branchId, todayFor(deps))
 
     // A deposit increases the office box/wallet (DEBIT) against an owner-funding contra account
     // (CREDIT), so the ledger stays balanced and the source of the money is recorded. `owner_funding`
@@ -295,6 +309,152 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       balance: serializeMoney(await deps.ledger.fundBalance(branchId, officeCode)),
     })
   })
+
+  // ── «صندوق الشركة» and taking money back OUT of the branch box (owner decisions 10 and (h)) ──
+  //
+  // Until now money could only go INTO the branch treasury. The owner's own book has it going both
+  // ways every day: «كييش» withdraws the day's profit to صندوق الشركة, and «شحن من الصندوق» puts
+  // capital back. الترميم automates that decision later; these are the manual controls underneath
+  // it, and the ones he asked for directly — «امكانية السحب و الايداع بشكل مباشر».
+
+  /** Aggregated across branches: with one branch this simply IS صندوق الشركة. */
+  // No `subject`: صندوق الشركة is company-wide by definition, so there is no branch to scope it to.
+  // `profit.view_total` is the gate — GM and, since decision 9, the system admin.
+  app.get('/company-fund', { config: { permission: 'profit.view_total' } }, async () => {
+    const branches = await deps.directory.listBranches()
+    const perBranch = await Promise.all(
+      branches.map(async (b) => ({
+        branchId: b.id,
+        code: b.code,
+        nameAr: b.nameAr,
+        balance: serializeMoney(await deps.ledger.fundBalance(b.id, 'company_box')),
+      })),
+    )
+    const total = perBranch.reduce((sum, b) => sum + BigInt(b.balance.replace('.', '')), 0n)
+    return { total: serializeMoney(minor(total)), branches: perBranch }
+  })
+
+  const companyMoveRequest = z.object({
+    amount: moneySchema,
+    reason: z.string().min(1).max(500),
+  })
+
+  /**
+   * Put the owner's own money into صندوق الشركة. Its counterpart is `owner_funding`, the same
+   * contra account a branch deposit uses — so «where did this come from» has one answer, not two.
+   */
+  app.post('/company-fund/deposit', { config: { permission: 'journal.manual.write', subject: targetBranch } }, async (req, reply) => {
+    const body = companyMoveRequest.parse(req.body)
+    const branchId = resolveBranch(req)
+    if (body.amount <= 0n) throw new ServiceError(422, 'amount_must_be_positive')
+    const businessDate = todayFor(deps)
+    await assertWeekOpen(deps, branchId, businessDate)
+
+    const posting = assertBalanced({
+      eventType: 'manual',
+      occurrenceKey: deps.ids.uuid(),
+      lines: [
+        { fund: { kind: 'company_box' }, side: 'D', amount: body.amount },
+        { fund: fundRefFromCode('owner_funding'), side: 'C', amount: body.amount },
+      ],
+    })
+    await postOne(branchId, businessDate, posting, req.actor!.userId, body.reason)
+    return reply.code(201).send({ balance: serializeMoney(await deps.ledger.fundBalance(branchId, 'company_box')) })
+  })
+
+  /** Take money out of صندوق الشركة — the owner's drawings. Refused below zero. */
+  app.post('/company-fund/withdraw', { config: { permission: 'journal.manual.write', subject: targetBranch } }, async (req, reply) => {
+    const body = companyMoveRequest.parse(req.body)
+    const branchId = resolveBranch(req)
+    if (body.amount <= 0n) throw new ServiceError(422, 'amount_must_be_positive')
+    const businessDate = todayFor(deps)
+    await assertWeekOpen(deps, branchId, businessDate)
+
+    // You cannot hand over money the fund does not hold. The ledger would happily carry a negative
+    // balance — arithmetic has no opinion about it — but a company fund that owes itself money is
+    // a data-entry mistake every time, and it is cheapest to refuse at the moment it is made.
+    const held = await deps.ledger.fundBalance(branchId, 'company_box')
+    if (body.amount > held) {
+      throw new ServiceError(422, 'insufficient_funds', { held: serializeMoney(held) })
+    }
+
+    const posting = assertBalanced({
+      eventType: 'manual',
+      occurrenceKey: deps.ids.uuid(),
+      lines: [
+        { fund: fundRefFromCode('owner_drawings'), side: 'D', amount: body.amount },
+        { fund: { kind: 'company_box' }, side: 'C', amount: body.amount },
+      ],
+    })
+    await postOne(branchId, businessDate, posting, req.actor!.userId, body.reason)
+    return reply.code(201).send({ balance: serializeMoney(await deps.ledger.fundBalance(branchId, 'company_box')) })
+  })
+
+  const withdrawRequest = z.object({
+    target: z.enum(['cash', 'wallet']),
+    amount: moneySchema,
+    /** Where it goes. `company_box` is «كييش»; anything else is a named contra account. */
+    to: z.string().min(1).max(64).default('company_box'),
+    reason: z.string().min(1).max(500),
+  })
+
+  /**
+   * Take money OUT of خزينة الفرع — the manual half of «كييش».
+   *
+   * Uses the same `sweepToCompany` recipe الترميم will use, so a hand-made sweep and an automatic
+   * one are the same event type and the same shape in the ledger. A dashboard that sums «كييش» must
+   * not have to know which of the two produced a row.
+   */
+  app.post('/treasury/withdraw', { config: { permission: 'journal.manual.write', subject: targetBranch } }, async (req, reply) => {
+    const body = withdrawRequest.parse(req.body)
+    const branchId = resolveBranch(req)
+    if (body.amount <= 0n) throw new ServiceError(422, 'amount_must_be_positive')
+    const office = body.target === 'cash' ? 'office_cash' : 'office_wallet'
+    const businessDate = todayFor(deps)
+    await assertWeekOpen(deps, branchId, businessDate)
+
+    const held = await deps.ledger.fundBalance(branchId, office)
+    if (body.amount > held) {
+      throw new ServiceError(422, 'insufficient_funds', { held: serializeMoney(held) })
+    }
+
+    const posting =
+      body.to === 'company_box'
+        ? sweepToCompany(office, body.amount, deps.ids.uuid())
+        : assertBalanced({
+            eventType: 'manual',
+            occurrenceKey: deps.ids.uuid(),
+            lines: [
+              { fund: fundRefFromCode(body.to), side: 'D', amount: body.amount },
+              { fund: fundRefFromCode(office), side: 'C', amount: body.amount },
+            ],
+          })
+    await postOne(branchId, businessDate, posting, req.actor!.userId, body.reason)
+    return reply.code(201).send({
+      target: body.target,
+      balance: serializeMoney(await deps.ledger.fundBalance(branchId, office)),
+    })
+  })
+
+  /** The four routes above post one balanced entry on today's date; only the lines differ. */
+  async function postOne(
+    branchId: string,
+    businessDate: string,
+    posting: Posting,
+    createdBy: string,
+    reason: string,
+  ): Promise<void> {
+    const fxDayId = await ensureFxDay(deps, businessDate)
+    await deps.ledger.post(branchId, [posting], {
+      shiftId: null,
+      businessDate,
+      postingDate: businessDate,
+      weekStartDate: weekStartFor(businessDate),
+      fxDayId,
+      createdBy,
+      reason,
+    })
+  }
 }
 
 async function findEntry(deps: Deps, branchId: string, entryId: number) {

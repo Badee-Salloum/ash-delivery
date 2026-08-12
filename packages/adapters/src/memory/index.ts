@@ -608,6 +608,9 @@ export function fundCodeOf(fund: Posting['lines'][number]['fund']): string {
     case 'driver_cash':
     case 'driver_wallet':
     case 'driver_share_payable':
+    // Same rule as the Pg repo and the domain: a ذمة is per driver, so it carries his id.
+    case 'driver_receivable_cash':
+    case 'driver_receivable_wallet':
       return `${fund.kind}:${fund.driverId}`
     case 'cost_center':
       return `cost_center:${fund.costCenterId}`

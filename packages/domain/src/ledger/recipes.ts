@@ -45,6 +45,10 @@ export type LedgerEvent =
   | 'expense'
   | 'manual'
   | 'correction'
+  /** «الترميم» — the daily sweep of profit to صندوق الشركة, or the replenishment of office capital. */
+  | 'restoration'
+  /** The driver taking his share. The one event that DEBITS `driver_share_payable`. */
+  | 'driver_payout'
 
 export type FundRef =
   | { readonly kind: 'office_cash' }
@@ -56,7 +60,31 @@ export type FundRef =
   | { readonly kind: 'company_revenue' }
   | { readonly kind: 'yalago_income' }
   | { readonly kind: 'fee_earned' }
+  /**
+   * «صندوق الشركة» — where profit goes, and where an office capital shortfall is funded from.
+   *
+   * BRANCH-SCOPED like every other fund, deliberately. `funds.branch_id` is NOT NULL and both
+   * unique constraints key on it; making it nullable would turn `funds_code_uq` into two partial
+   * indexes (Postgres treats NULLs as distinct, so the constraint would stop preventing
+   * duplicates), split `ensureFund`'s ON CONFLICT target, and push `OR branch_id IS NULL` into the
+   * query behind every treasury balance. A wide, irreversible change to a live ledger for no
+   * benefit at one branch. The AGGREGATE across branches is صندوق الشركة, and this way it also
+   * records which branch each sweep came from.
+   */
+  | { readonly kind: 'company_box' }
+  /**
+   * «الذمم» — cash a named driver kept past the close, and its wallet counterpart.
+   *
+   * TWO kinds because the owner's own book has two: receivables sit against كاش المكتب (400,000)
+   * AND against محفظة المكتب (30,000), and الترميم must know which capital target each counts
+   * toward. An asset of the office, owed by the driver, cleared when he opens his next shift.
+   */
+  | { readonly kind: 'driver_receivable_cash'; readonly driverId: string }
+  | { readonly kind: 'driver_receivable_wallet'; readonly driverId: string }
   | { readonly kind: 'cost_center'; readonly costCenterId: string }
+
+/** The two branch funds that hold real value and are counted, restored and swept. */
+export type OfficeFund = 'office_cash' | 'office_wallet'
 
 export interface PostingLine {
   readonly fund: FundRef
@@ -339,6 +367,40 @@ export function expense(costCenterId: string, amount: Minor, occurrenceKey = '1'
   })
 }
 
+// ── «الترميم» — the daily restoration (owner decision 10) ─────────────────────────────────
+//
+// The owner's own process, in his own words: «راس مال المكتب رقم ثابت لكل من المحفظة و كاش المكتب.
+// في نهاية كل يوم عمل يتم عملية اسمها ترميم، الهدف منها سحب الارباح و ترميم النقص و اعادة راس المال
+// على وضعه السابق مع مراعاة توزع الذمم.»
+//
+// His spreadsheet proves the arithmetic: كاش المكتب 3,600,000 + ذمم 400,000 = 4,000,000 target, and
+// محفظة المكتب 970,000 + ذمم 30,000 = 1,000,000. Both land exactly on capital — a day already
+// restored. The planner lives in `treasury/restoration.ts`; these are the two postings it emits.
+
+/**
+ * «كييش» — profit leaves the branch box for صندوق الشركة.
+ *
+ * Not an expense, though his cash book records it as one: nothing was consumed, the money simply
+ * moved between two funds the company owns. Filing it as an expense would understate profit by
+ * exactly the amount of the profit.
+ */
+export function sweepToCompany(office: OfficeFund, amount: Minor, occurrenceKey = '1'): Posting {
+  return assertBalanced({
+    eventType: 'restoration',
+    occurrenceKey,
+    lines: [D({ kind: 'company_box' }, amount, 'kaish'), C({ kind: office }, amount)],
+  })
+}
+
+/** «شحن من الصندوق» — صندوق الشركة restores the office box to its capital. The exact inverse. */
+export function fundFromCompany(office: OfficeFund, amount: Minor, occurrenceKey = '1'): Posting {
+  return assertBalanced({
+    eventType: 'restoration',
+    occurrenceKey,
+    lines: [D({ kind: office }, amount, 'shahn'), C({ kind: 'company_box' }, amount)],
+  })
+}
+
 // ── Corrections (BR7) ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -487,6 +549,11 @@ export function fundCode(fund: FundRef): string {
     case 'driver_cash':
     case 'driver_wallet':
     case 'driver_share_payable':
+    // A receivable belongs to ONE named driver. Without the suffix every driver's ذمة would
+    // collapse into a single fund, and «who owes this» — the only question a ذمة exists to
+    // answer — becomes unanswerable while the totals still look right.
+    case 'driver_receivable_cash':
+    case 'driver_receivable_wallet':
       return `${fund.kind}:${fund.driverId}`
     case 'cost_center':
       return `cost_center:${fund.costCenterId}`
@@ -519,10 +586,16 @@ export function fundRefFromCode(code: string): FundRef {
     case 'company_revenue':
     case 'yalago_income':
     case 'fee_earned':
+    // WITHOUT THIS LINE a manual entry naming «company_box» silently becomes
+    // `cost_center:company_box` — a different account that looks right in the UI and never moves
+    // the fund the operator meant. Exactly the failure this function's own header describes.
+    case 'company_box':
       return { kind: head }
     case 'driver_cash':
     case 'driver_wallet':
     case 'driver_share_payable':
+    case 'driver_receivable_cash':
+    case 'driver_receivable_wallet':
       if (tail === '') throw new RangeError(`${head} requires a driver id, got ${JSON.stringify(code)}`)
       return { kind: head, driverId: tail }
     case 'cost_center':

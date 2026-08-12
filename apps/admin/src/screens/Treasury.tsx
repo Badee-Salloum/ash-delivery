@@ -6,7 +6,7 @@ import { explainError } from '../errors.ts'
 import { Button, Card, Field, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
 
 /** The branch-level funds a manual entry can move (the driver/cost-centre ones need an id suffix). */
-const MANUAL_FUNDS = ['office_cash', 'office_wallet', 'yalago_share', 'company_revenue', 'yalago_income', 'fee_earned'] as const
+const MANUAL_FUNDS = ['office_cash', 'office_wallet', 'yalago_share', 'company_revenue', 'yalago_income', 'fee_earned', 'company_box'] as const
 interface EntryLine {
   fundCode: string
   side: 'D' | 'C'
@@ -28,6 +28,13 @@ export function Treasury(): ReactNode {
   const [balances, setBalances] = useState<{ cash: string; wallet: string } | null>(null)
   const [depositAmt, setDepositAmt] = useState<{ cash: string; wallet: string }>({ cash: '', wallet: '' })
   const [depositMsg, setDepositMsg] = useState<string | null>(null)
+  const [withdrawAmt, setWithdrawAmt] = useState<{ cash: string; wallet: string }>({ cash: '', wallet: '' })
+
+  // ── «صندوق الشركة» ────────────────────────────────────────────────────────────────────────
+  const [company, setCompany] = useState<{ total: string; branches: Array<{ branchId: string; nameAr: string; balance: string }> } | null>(null)
+  const [companyError, setCompanyError] = useState<string | null>(null)
+  const [companyAmt, setCompanyAmt] = useState('')
+  const [companyReason, setCompanyReason] = useState('')
 
   const [sheetError, setSheetError] = useState<string | null>(null)
   const [balanceError, setBalanceError] = useState<string | null>(null)
@@ -81,6 +88,56 @@ export function Treasury(): ReactNode {
   // Refetch when an organisation-wide role switches branch — the treasury is per branch, and
   // showing branch A's cash box under branch B's name is the worst kind of wrong.
   useEffect(load, [load, branchId])
+
+  /** «كييش» — take the day's profit out of the branch box and into صندوق الشركة. */
+  async function withdraw(target: 'cash' | 'wallet'): Promise<void> {
+    const amount = withdrawAmt[target]
+    if (!amount) return
+    setDepositMsg(null)
+    try {
+      const res = await api.treasuryWithdraw(target, amount, t.treasury.kaish)
+      setBalances((b) => (b ? { ...b, [target]: res.balance } : b))
+      setWithdrawAmt({ ...withdrawAmt, [target]: '' })
+      setDepositMsg(t.treasury.withdrawn)
+      void refreshCompany()
+    } catch (err) {
+      setDepositMsg(null)
+      toast.error(explainError((err as { error?: string }).error ?? 'error', t))
+    }
+  }
+
+  const refreshCompany = useCallback(async (): Promise<void> => {
+    try {
+      setCompany(await api.companyFund())
+      setCompanyError(null)
+    } catch (err) {
+      // `profit.view_total` — the GM and, since decision 9, the system admin. A branch manager
+      // gets 403 here, and saying so beats an empty card he reads as broken.
+      setCompany(null)
+      setCompanyError((err as { error?: string }).error ?? 'error')
+    }
+  }, [api])
+
+  // صندوق الشركة is company-wide, so it does NOT depend on the selected branch. Declared after
+  // `refreshCompany` because a `const` callback is not hoisted — the effect would read it before
+  // assignment.
+  useEffect(() => {
+    void refreshCompany()
+  }, [refreshCompany])
+
+  async function moveCompany(direction: 'deposit' | 'withdraw'): Promise<void> {
+    if (!companyAmt || !companyReason.trim()) return
+    try {
+      if (direction === 'deposit') await api.companyFundDeposit(companyAmt, companyReason.trim())
+      else await api.companyFundWithdraw(companyAmt, companyReason.trim())
+      setCompanyAmt('')
+      setCompanyReason('')
+      await refreshCompany()
+      void load()
+    } catch (err) {
+      toast.error(explainError((err as { error?: string }).error ?? 'error', t))
+    }
+  }
 
   async function deposit(target: 'cash' | 'wallet'): Promise<void> {
     const amount = depositAmt[target]
@@ -198,16 +255,36 @@ export function Treasury(): ReactNode {
                 )}
               </div>
               {canDeposit ? (
-                <div className="mt-3 flex gap-2">
-                  <MoneyInput
-                    value={depositAmt[target]}
-                    onChange={(e) => setDepositAmt({ ...depositAmt, [target]: e.target.value })}
-                    className="w-full"
-                    placeholder={t.treasury.depositAmount}
-                  />
-                  <Button onClick={() => deposit(target)} disabled={!depositAmt[target]}>
-                    {t.treasury.deposit}
-                  </Button>
+                <div className="mt-3 flex flex-col gap-2">
+                  <div className="flex gap-2">
+                    <MoneyInput
+                      value={depositAmt[target]}
+                      onChange={(e) => setDepositAmt({ ...depositAmt, [target]: e.target.value })}
+                      className="w-full"
+                      placeholder={t.treasury.depositAmount}
+                    />
+                    <Button onClick={() => deposit(target)} disabled={!depositAmt[target]}>
+                      {t.treasury.deposit}
+                    </Button>
+                  </div>
+                  {/* «كييش» by hand. The owner's book moves money out of the box every day; until
+                      now the screen could only put money in. الترميم automates the decision later
+                      and posts through the very same recipe, so the two are one thing in the ledger. */}
+                  <div className="flex gap-2">
+                    <MoneyInput
+                      value={withdrawAmt[target]}
+                      onChange={(e) => setWithdrawAmt({ ...withdrawAmt, [target]: e.target.value })}
+                      className="w-full"
+                      placeholder={t.treasury.kaish}
+                    />
+                    <Button
+                      variant="ghost"
+                      onClick={() => withdraw(target)}
+                      disabled={!withdrawAmt[target]}
+                    >
+                      {t.treasury.withdraw}
+                    </Button>
+                  </div>
                 </div>
               ) : (
                 // Saying why beats an empty card somebody reads as a broken screen.
@@ -217,6 +294,65 @@ export function Treasury(): ReactNode {
           ))}
         </div>
         {depositMsg ? <p className="mt-3 text-sm font-medium text-emerald-700">{depositMsg}</p> : null}
+
+        {/* «صندوق الشركة» — where «كييش» lands and where «شحن من الصندوق» comes from. Sits inside
+            the treasury card because the two are one flow: money leaves the box and arrives here. */}
+        <div className="mt-4 rounded-lg border border-slate-300 bg-slate-50 p-3">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <span className="text-xs font-semibold text-slate-500">{t.treasury.companyFund}</span>
+            <span className="text-2xl font-bold">
+              {company ? (
+                <Money value={company.total} />
+              ) : (
+                <span className="text-base font-medium text-red-600">
+                  {companyError ? explainError(companyError, t) : '—'}
+                </span>
+              )}
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-slate-600">{t.treasury.companyFundHint}</p>
+          {company && company.branches.length > 1 ? (
+            <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-600">
+              {company.branches.map((b) => (
+                <li key={b.branchId}>
+                  {b.nameAr} <Money value={b.balance} />
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {company ? (
+            <div className="mt-3 flex flex-col gap-2">
+              <div className="flex gap-2">
+                <MoneyInput
+                  value={companyAmt}
+                  onChange={(e) => setCompanyAmt(e.target.value)}
+                  className="w-full"
+                  placeholder={t.treasury.depositAmount}
+                />
+                <TextInput
+                  value={companyReason}
+                  onChange={(e) => setCompanyReason(e.target.value)}
+                  className="w-full"
+                  placeholder={t.treasury.reason}
+                />
+              </div>
+              <div className="flex gap-2">
+                {/* A reason is mandatory on both: the database enforces it for these events, so a
+                    button that submits without one only ever produces a 400 the operator must decode. */}
+                <Button onClick={() => moveCompany('deposit')} disabled={!companyAmt || !companyReason.trim()}>
+                  {t.treasury.deposit}
+                </Button>
+                <Button
+                  variant="ghost"
+                  onClick={() => moveCompany('withdraw')}
+                  disabled={!companyAmt || !companyReason.trim()}
+                >
+                  {t.treasury.withdraw}
+                </Button>
+              </div>
+            </div>
+          ) : null}
+        </div>
       </Card>
 
       <Card title={t.treasury.cashCount}>

@@ -660,6 +660,38 @@ export class ApiClient {
       ...(this.branchId ? { branchId: this.branchId } : {}),
     })
   }
+  /** «كييش» when `to` is the company fund — the same recipe الترميم uses automatically. */
+  treasuryWithdraw(target: 'cash' | 'wallet', amount: string, reason: string, to = 'company_box') {
+    return this.post<{ target: string; balance: string }>('/treasury/withdraw', {
+      target,
+      amount,
+      to,
+      reason,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+
+  // ── «صندوق الشركة» — company-wide, so it is NOT scoped to the session branch on read ────────
+  companyFund() {
+    return this.get<{
+      total: string
+      branches: Array<{ branchId: string; code: string; nameAr: string; balance: string }>
+    }>('/company-fund')
+  }
+  companyFundDeposit(amount: string, reason: string) {
+    return this.post<{ balance: string }>('/company-fund/deposit', {
+      amount,
+      reason,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+  companyFundWithdraw(amount: string, reason: string) {
+    return this.post<{ balance: string }>('/company-fund/withdraw', {
+      amount,
+      reason,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
 
   // ── Manual journal entry + BR7 correction (SRS E-3) — branch manager + GM ───────────────────
   manualEntry(body: { reason: string; lines: Array<{ fundCode: string; side: 'D' | 'C'; amount: string }>; businessDate?: string; evidenceMediaId?: string | null }) {
