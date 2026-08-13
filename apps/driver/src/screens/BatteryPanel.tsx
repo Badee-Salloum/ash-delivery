@@ -57,6 +57,39 @@ export const FIELDS = [
 type FieldKey = (typeof FIELDS)[number]['key']
 
 /**
+ * What a BMS app might call each field, in either language.
+ *
+ * The prompt now PINS the keys to `percent` / `cycles`, so the first entry in each list is what
+ * should arrive. The rest is belt and braces, and it was earned: the first version matched only
+ * an exact `percent`, the model faithfully returned the app's own «Remain Battery» and «الطاقة
+ * المتبقية», and two live reads filled zero fields at full price.
+ *
+ * `remaincapacity` is deliberately ABSENT from `percent`. It reads «50.0Ah» — a capacity, which
+ * cleans to a plausible «50» and would report a full pack as half empty.
+ */
+export const BMS_ALIASES: Record<FieldKey, readonly string[]> = {
+  percent: ['percent', 'remainbattery', 'remainingbattery', 'batterylevel', 'batterypercent', 'soc', 'الطاقةالمتبقية', 'الشحنالمتبقية', 'نسبةالشحن'],
+  cycleCount: ['cycles', 'cyclecount', 'cyclecounts', 'الدورات', 'عدددورات', 'عددالدورات'],
+}
+
+/**
+ * Normalise a label for comparison, keeping ARABIC letters.
+ *
+ * The bug this replaces stripped with `[^a-z]`, which turns «الطاقة المتبقية» into the empty
+ * string — so every Arabic BMS screen matched nothing, silently.
+ */
+const normaliseLabel = (s: string): string => s.toLowerCase().replace(/[^a-z؀-ۿ]/g, '')
+
+export function pickBmsField(fields: Record<string, string | null>, key: FieldKey): string | null {
+  const aliases = BMS_ALIASES[key]
+  for (const [label, value] of Object.entries(fields)) {
+    if (value == null) continue
+    if (aliases.includes(normaliseLabel(label))) return value
+  }
+  return null
+}
+
+/**
  * Stored scaled integer → what the driver sees. 83_370 → "83.37", 500 → "50" (50.0 Ah).
  *
  * The trailing-zero trim is ONLY for decimal fields, to turn "50.0" into "50". Its logic used to
@@ -303,23 +336,57 @@ export function BatteryPanel({
       setPacks((cur) => {
         const prev = cur[battery.id] ?? EMPTY_PACK
         const values = { ...prev.values }
+        const priorRaw = (prev.ocrRaw as Record<string, number | null> | null) ?? null
+        const raw: Record<string, number | null> = { ...(priorRaw ?? {}) }
         let filled = 0
+
         for (const f of FIELDS) {
-          // The reader labels what it finds; match on the label we asked for, case-insensitively,
-          // rather than on position — a BMS app is a label/value table, not a fixed layout.
-          const entry = Object.entries(e.response.fields).find(
-            ([label]) => label.toLowerCase().replace(/[^a-z]/g, '') === f.label.toLowerCase(),
-          )
-          const raw = entry?.[1]
-          if (raw == null) continue
-          const cleaned = raw.replace(/[^\d.]/g, '')
+          const said = pickBmsField(e.response.fields, f.key)
+          if (said === null) continue
+          const cleaned = said.replace(/[^\d.]/g, '')
           if (cleaned === '') continue
+          // A percentage that is not a percentage is the one wrong answer worth refusing outright:
+          // «Remain Capacity 50.0Ah» cleans to a perfectly plausible «50» on a pack that is full.
+          if (f.key === 'percent' && Number(cleaned) > 100) continue
+
+          /*
+           * WHOSE VALUE IS ALREADY IN THE BOX? Three cases, and only one of them is untouchable.
+           *
+           *   empty                          → fill it
+           *   exactly what the phone read     → the cloud is the better reader; replace it
+           *   anything else                   → the DRIVER typed it. Never overwrite him.
+           *
+           * The middle case is why `priorRaw` is consulted rather than just checking for blank: the
+           * on-device read fires first and usually lands, so deferring to a non-empty field would
+           * mean the cloud reader never got to correct anything on this screen.
+           */
+          const held = values[f.key].trim()
+          const asPhoneRead = toText(priorRaw?.[f.key] ?? null, f.scale, f.decimals)
+          if (held === '' || held === asPhoneRead) values[f.key] = cleaned
+
+          /*
+           * RECORD WHAT THE MACHINE SAID. Leaving this out was a false record, not a missing one.
+           *
+           * `matchesOcr` reads `ocrRaw` to decide whether the row is stored as `source: 'ocr'` or
+           * `'manual'`, and `sourceOf` reads it to pick the mark beside the field. With `ocrRaw`
+           * null, a charge gpt-5.5 had just read shipped to the server as MANUAL and told the
+           * driver «لم يستطع التطبيق قراءتها — أنت كتبتها» — the app could not read it, you typed
+           * it. Both statements were untrue, and D-3's whole purpose is that the manager can see
+           * what the machine said beside what the human confirmed.
+           */
+          raw[f.key] = toStored(cleaned, f.scale)
           filled += 1
-          // Still only fills a BLANK field. The driver's typing beats both readers, always.
-          if (values[f.key].trim() === '') values[f.key] = cleaned
         }
+
         if (filled === 0) return cur
-        const next: PackState = { ...prev, values, outcome: 'ok', fieldsFound: filled }
+        const next: PackState = {
+          ...prev,
+          values,
+          ocrRaw: raw,
+          outcome: 'ok',
+          // Never report FEWER fields than the phone had already found on its own.
+          fieldsFound: Math.max(prev.fieldsFound, filled),
+        }
         void push(battery.id, next)
         return { ...cur, [battery.id]: next }
       })

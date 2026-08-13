@@ -95,6 +95,12 @@ export interface DraftMovement {
   providerOrderNo?: string | null
   role?: 'yalago_cut' | 'order_credit' | 'unmatched'
   ambiguous?: boolean
+  /**
+   * What the on-device reader made of this amount, before any cloud correction. Identity only —
+   * see `mergeScannedMovements` for why a movement's key cannot drop the amount the way an
+   * order's key drops the fee.
+   */
+  scannedAs?: string
 }
 
 export interface OrderEntryState {
@@ -295,6 +301,15 @@ export interface ScannedOrderRow {
 export interface ScannedMovementRow {
   amount: string
   time: string
+  /**
+   * What the ON-DEVICE reader made of this amount, before any cloud correction.
+   *
+   * Identity only — never shown, never submitted. It exists because the merge key contains the
+   * amount (a payments-log minute is not unique) and the amount is now written by whichever reader
+   * answered. Pinning identity to the phone's own reading keeps one movement to one key whether the
+   * cloud answered on this page, on the previous one, or on neither.
+   */
+  scannedAs?: string
 }
 
 /**
@@ -313,27 +328,48 @@ export interface ScannedMovementRow {
 export const newOrderKey = (localId: string): string => `YAL-${localId}`
 
 /**
- * A row's identity, from what the SCREEN said rather than what the driver later typed.
+ * A row's identity: WHEN it happened and WHERE it went. Never how much it was worth.
  *
- * The fee here is the fee as SCANNED. A row is identified by what was on the screen, and the driver
- * correcting a misread «١٦» to «١٦٥» does not make it a different delivery — keying on the edited
- * text meant re-scanning the overlap after any correction added a duplicate. A REFUSED row keys on
- * an empty fee and keeps doing so after it is typed into, which is what lets it survive a rescan.
+ * The day is part of it. Without it a delivery at 13:10 yesterday and another at 13:10 today are
+ * one row, and scanning the second page silently swallows one of them.
  *
- * The DAY is part of it. Without it a 120-lira delivery at 13:10 yesterday and another at 13:10
- * today are one row, and scanning the second page silently swallows one of them.
+ * ── THE FEE USED TO BE IN HERE, and taking it out is the point ──────────────────────────────
+ *
+ * It was the fee *as scanned* rather than as edited, so that a driver correcting a misread «١٦» to
+ * «١٦٥» did not turn one delivery into two. That reasoning was right and it is exactly why the fee
+ * cannot stay: identity has to come from something that does not change after the row is created,
+ * and with a second reader in play the scanned fee changes.
+ *
+ * Concretely, the failure this fixes. The dashboard is photographed page by page and the pages
+ * overlap, so one delivery is commonly read twice. Suppose the cloud reader answers on page 1 and
+ * times out on page 2:
+ *
+ *     page 1   local reads ٧٥,  cloud corrects to 750   →  key …|750|route
+ *     page 2   local reads ٧٥,  cloud times out         →  key …|75 |route
+ *
+ * Two keys, one delivery, and the second sighting is appended as a new order. The driver is paid
+ * once and credited twice. Nothing on his screen says so.
+ *
+ * Measured before changing it: across the corpus's orders screens, **0 of 26 rows share a
+ * (date, minute)** with another row on the same screen — and the route is in the key besides, so
+ * two deliveries would have to share a minute AND both addresses to collide. On the payments log
+ * the same measurement is 36%, which is why `mergeScannedMovements` keeps its amount and pins it to
+ * the local reader instead (see there).
+ *
+ * If a collision ever does happen the driver sees one row where there were two, and BR1 refuses the
+ * close because the cash does not match — which is the same place the old duplicate surfaced. This
+ * trades a silent double-count for a visible short-count, on a screen the driver can add a row to.
  */
 const keyOf = (o: DraftOrder): string => {
-  const fee = o.cancelled === true ? '' : o.feeRefused === true ? '' : (o.feeOcrText ?? o.feeText)
   const head = o.cancelled === true ? 'C' : ''
-  return `${head}|${o.dateText ?? ''}|${o.timeText ?? ''}|${fee}|${cardKey(o.pointA, o.pointB, o.cancelled === true)}`
+  return `${head}|${o.dateText ?? ''}|${o.timeText ?? ''}|${cardKey(o.pointA, o.pointB, o.cancelled === true)}`
 }
 
 /** The same identity, computed from a freshly scanned row. Kept beside `keyOf` so they cannot drift. */
 const scannedKey = (row: ScannedOrderRow): string => {
   const cancelled = row.cancelled === true
-  // A cancelled card has no clock and no fee — its route is the only identity it has.
-  return `${cancelled ? 'C' : ''}|${row.dateIso ?? ''}|${cancelled ? '' : row.time}|${row.fee ?? ''}|${cardKey(row.pointA, row.pointB, cancelled)}`
+  // A cancelled card has no clock — its route is the only identity it has.
+  return `${cancelled ? 'C' : ''}|${row.dateIso ?? ''}|${cancelled ? '' : row.time}|${cardKey(row.pointA, row.pointB, cancelled)}`
 }
 
 /**
@@ -463,6 +499,19 @@ const cardKey = (a: string | null | undefined, b: string | null | undefined, can
  * A MULTISET merge, mirroring the server's: a minute genuinely can hold two identical amounts, so
  * only the surplus of each (minute, amount) is new. Matching by value alone would silently discard
  * the second of two real 24-lira cuts.
+ *
+ * ── WHY THIS ONE KEEPS THE AMOUNT, when the orders key dropped it ────────────────────────────
+ *
+ * Because a payments-log minute is not unique and cannot be made so. Measured on the corpus:
+ * **8 of 22 rows share a (date, minute)** with another row on the same screen — 36% — and it is
+ * structural rather than coincidental. One delivery posts a credit and its Yallago cut at the same
+ * instant: «+153» and «−42» both at 17:42. Key those on the minute alone and the wallet
+ * reconciliation collapses to a single row. A movement also has no route to fall back on; time and
+ * amount are the whole of what the screen gives.
+ *
+ * So the amount stays — but pinned to `scannedAs`, the value the ON-DEVICE reader produced, which
+ * no cloud read can move. `overlayCloudAmounts` carries it through for exactly this. Without it,
+ * the same page read twice with the cloud answering only once yields two keys for one movement.
  */
 export function mergeScannedMovements(
   existing: readonly DraftMovement[],
@@ -471,18 +520,26 @@ export function mergeScannedMovements(
 ): DraftMovement[] {
   const tally = new Map<string, number>()
   for (const m of existing) {
-    const key = `${m.timeText}|${m.amountText}`
+    const key = `${m.timeText}|${m.scannedAs ?? m.amountText}`
     tally.set(key, (tally.get(key) ?? 0) + 1)
   }
   const added: DraftMovement[] = []
   for (const row of scanned) {
-    const key = `${row.time}|${row.amount}`
+    // `scannedAs` is what the phone read before any cloud correction; it is the stable half.
+    const identity = row.scannedAs ?? row.amount
+    const key = `${row.time}|${identity}`
     const already = tally.get(key) ?? 0
     if (already > 0) {
       tally.set(key, already - 1)
       continue
     }
-    added.push({ localId: newId(), amountText: row.amount, timeText: row.time, included: true })
+    added.push({
+      localId: newId(),
+      amountText: row.amount,
+      timeText: row.time,
+      included: true,
+      ...(row.scannedAs !== undefined ? { scannedAs: row.scannedAs } : {}),
+    })
   }
   return added
 }
@@ -735,7 +792,7 @@ export function overlayCloudAmounts<K extends string, T extends Record<K, string
   local: readonly T[],
   cloud: readonly { value: string | null; cancelled: boolean }[],
   key: K,
-): { rows: T[]; overlaid: number } {
+): { rows: (T & { scannedAs?: string })[]; overlaid: number } {
   if (local.length === 0 || local.length !== cloud.length) return { rows: [...local], overlaid: 0 }
 
   let overlaid = 0
@@ -746,7 +803,18 @@ export function overlayCloudAmounts<K extends string, T extends Record<K, string
     if (said.cancelled) return row[key] === null ? row : { ...row, [key]: null }
     if (said.value === null || said.value === row[key]) return row
     overlaid += 1
-    return { ...row, [key]: said.value }
+    /*
+     * KEEP WHAT THE PHONE READ. This is not bookkeeping — it is the identity.
+     *
+     * The payments-log merge keys on the amount, because a minute there routinely holds two rows
+     * (a delivery's credit and its Yallago cut, both at 17:42). Overwriting the amount without
+     * keeping the original means the same movement, read on two overlapping pages, produces two
+     * different keys the moment the cloud answers on one page and not the other — and the driver
+     * is credited twice for one delivery. The orders key solved this by dropping the fee entirely;
+     * a movement has no route to fall back on, so it keeps the amount and pins it here instead.
+     */
+    const asRead = row[key]
+    return { ...row, [key]: said.value, ...(asRead !== null ? { scannedAs: asRead } : {}) }
   })
   return { rows, overlaid }
 }

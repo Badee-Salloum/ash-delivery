@@ -31,8 +31,28 @@ const FIELD_HINT: Record<OcrField, string> = {
     'a PAYMENTS LOG («سجل المدفوعات»). Every row is SIGNED — "+" is money arriving, "−" money leaving — and the sign is part of the answer.',
   wallet: 'a WALLET BALANCE screen. The balance is the figure to read; ignore any promotional numbers.',
   odometer:
-    'a photograph of a physical bike dashboard behind glass, often with glare. There is NO money on it. Put the odometer reading in `fields` as label "odometer".',
-  bms: 'a BMS battery-management app screenshot. There is NO money on it. Put the labelled values — percent, cycle count, volts — in `fields`.',
+    'a photograph of a physical bike dashboard behind glass, often with glare. There is NO money on it. Put the odometer reading in `fields` under the key "odometer", digits only, ignoring any "km" or "ODO" printed beside it.',
+  /*
+   * THE KEYS ARE PINNED, and this is not stylistic.
+   *
+   * Asked merely for "the labelled values", the model returned the app's OWN labels verbatim —
+   * «Remain Battery» and «Cycle Count» on the English pack, «الطاقة المتبقية» and «الدورات» on the
+   * Arabic one. Both are faithful transcriptions and both were useless: the driver app looks up
+   * `percent` and `cycles`, found neither, and filled nothing. Two live reads cost money and ten
+   * seconds of a driver's time to populate zero fields.
+   *
+   * `Remain Capacity` is the trap this also has to dodge — it reads «50.0Ah», which cleans to a
+   * perfectly plausible «50» and would silently become a 50% charge on a pack that is full.
+   */
+  bms:
+    'a BMS battery-management app screenshot, in English or in Arabic. There is NO money on it.\n\n' +
+    'In `fields` you MUST use these exact keys, wherever the screen shows the value:\n' +
+    '  percent  — the REMAINING CHARGE as a percentage. Printed «Remain Battery», «Battery Level», «SOC», or «الطاقة المتبقية». Give the number only, without the % sign.\n' +
+    '  cycles   — the cycle count. Printed «Cycle Count», «Cycles», or «الدورات».\n' +
+    '  voltage  — total pack voltage. Printed «Battery Voltage», «Total Voltage», or «إجمالي الجهد».\n\n' +
+    'Do NOT put a capacity in Ah («Remain Capacity», «Battery Capacity», «السعة») under `percent` — ' +
+    'a 50.0Ah capacity is not a 50% charge. If the percentage is not shown, omit `percent` entirely.\n\n' +
+    'Anything else readable may be added under its own printed label.',
 }
 
 export function readPrompt(field: OcrField): string {
