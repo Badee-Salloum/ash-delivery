@@ -888,12 +888,26 @@ export function cloudRowsToScannedOrders(
     /** Accepted and ignored — the caller passes whole cloud rows, which also carry the glyphs. */
     printed?: string
   }[],
+  /**
+   * The phone's rows for the same image, used ONLY to carry each fee's strip of pixels across.
+   *
+   * A strip is training data — the amount's own pixels beside what a reader made of them — and the
+   * cloud cannot produce one; it never sees the image as pixels we hold. So when both readers
+   * emitted the same NUMBER of rows they are describing the same cards in the same order, and the
+   * strip can ride along positionally. When the counts differ nothing is carried: a strip attached
+   * to the wrong row is a mislabelled training example, which is worse than none.
+   *
+   * The reading itself is never taken from here. That is the whole point of this function.
+   */
+  local?: readonly { feeStrip?: string | null; pointBIsPin?: boolean }[],
 ): ScannedOrderRow[] {
+  const alignable = local !== undefined && local.length === rows.length
   const out: ScannedOrderRow[] = []
-  for (const row of rows) {
+  rows.forEach((row, i) => {
     // A row with no clock has no identity: `keyOf` is (day, minute, route), so a timeless row
     // collides with every other timeless row on the page and the merge would keep exactly one.
-    if (row.time === null || row.time.trim() === '') continue
+    if (row.time === null || row.time.trim() === '') return
+    const mate = alignable ? local[i] : undefined
     out.push({
       dateIso: row.dateIso,
       time: row.time,
@@ -901,8 +915,10 @@ export function cloudRowsToScannedOrders(
       ...(row.cancelled ? { cancelled: true } : {}),
       ...(row.pointA != null ? { pointA: row.pointA } : {}),
       ...(row.pointB != null ? { pointB: row.pointB } : {}),
+      ...(mate?.feeStrip ? { feeStrip: mate.feeStrip } : {}),
+      ...(mate?.pointBIsPin === true ? { pointBIsPin: true } : {}),
     })
-  }
+  })
   return out
 }
 

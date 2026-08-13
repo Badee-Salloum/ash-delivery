@@ -20,7 +20,7 @@ import {
   mergeScannedOrders,
   cloudRowsToScannedMovements,
   cloudRowsToScannedOrders,
-  overlayCloudAmounts,
+
   previewBr1,
   readInCloud,
   splitSlot,
@@ -515,7 +515,6 @@ async function submitOrders(
   }
   return { sent, failed }
 }
-
 
 function StartPackage({
   assignment,
@@ -1109,32 +1108,34 @@ function EndPackage({
                     readOrders(file).catch(() => null),
                     readInCloud(api, shift.id, 'orders', file),
                   ])
-                  const cloudOrders = cloud ? cloudRowsToScannedOrders(cloud.rows) : []
+                  const localOrders = r?.ok ? r.reading.orders : []
+                  const cloudOrders = cloud ? cloudRowsToScannedOrders(cloud.rows, localOrders) : []
                   onDraft((d) => {
                     /*
-                     * WHO OWNS THE LIST depends on whether the phone produced one.
+                     * THE CLOUD IS THE READER. The phone is the fallback and the student.
                      *
-                     * Normally the phone does: it cut the fee strips, found the addresses and knows
-                     * which cards the screen edge sliced, so the cloud only corrects its amounts.
+                     * This was the other way round for a day and the owner was right to say so.
+                     * The phone owned the list and the cloud was allowed to correct its amounts,
+                     * joined by position — which required both readers to emit the SAME NUMBER of
+                     * rows, or nothing was corrected at all. That safety rule became the main thing
+                     * standing between the driver and a correct reading, because the counts differ
+                     * constantly: a card sliced by the screen edge is one row to the cloud (with a
+                     * null fee) and often no row at all to the phone.
                      *
-                     * But when the phone reads NOTHING, "the counts differ" is trivially true, the
-                     * overlay hands back the empty local list, and a perfectly good cloud reading is
-                     * thrown away in silence. That is not hypothetical — on a real close a page came
-                     * back «لم تُضَف أي عملية من هذه الصورة · ٤٠ صفوف لم تُقرأ بثقة» while the cloud
-                     * had read its four deliveries correctly and been billed for them.
+                     * Measured on the owner's own screens, twice in one afternoon. On one page the
+                     * cloud returned 120@20:32, 275@20:12, 140@01:39 and a correctly-null sliced
+                     * card; the phone returned three rows, one with a refused fee and two with no
+                     * clock. The counts were 4 against 3, so every one of the cloud's readings was
+                     * discarded and the driver was shown «؟» and two «11/08»s. Over the whole
+                     * corpus it is 290 rows right against 136.
                      *
-                     * So: no local list and a cloud list ⇒ the cloud owns it. The cloud rows carry
-                     * their own route, which is what keeps their merge identity the same shape as a
-                     * local row's and stops the same delivery being counted twice across pages.
+                     * So the cloud's rows ARE the list whenever it answered. The phone's rows are
+                     * used only when it did not — no network, no key, cap spent — and even then
+                     * they still carry each fee's strip of pixels across for training.
                      */
                     const localOk = r?.ok === true
                     const localRows = localOk ? r.reading.orders : []
-                    const scanned =
-                      localRows.length === 0
-                        ? cloudOrders
-                        : cloud
-                          ? overlayCloudAmounts(localRows, cloud.rows, 'fee').rows
-                          : localRows
+                    const scanned = cloudOrders.length > 0 ? cloudOrders : localRows
                     // Both readers silent is the only real failure. Either one alone is a reading.
                     if (!localOk && scanned.length === 0) return { ...d, dash: { kind: 'failed' } }
                     const added = mergeScannedOrders(d.orders, scanned, () => crypto.randomUUID())
@@ -1179,14 +1180,11 @@ function EndPackage({
                     //
                     // And as on the dashboard: when the phone read nothing, the cloud owns the list
                     // rather than having its answer discarded for failing to match a list of zero.
+                    // Same rule as the dashboard: the cloud's rows ARE the list when it answered.
+                    // The phone's are the fallback for no-network, not a filter on the cloud's.
                     const localOk = r?.ok === true
                     const localRows = localOk ? r.reading.movements : []
-                    const scanned =
-                      localRows.length === 0
-                        ? cloudMovements
-                        : cloud
-                          ? overlayCloudAmounts(localRows, cloud.rows, 'amount').rows
-                          : localRows
+                    const scanned = cloudMovements.length > 0 ? cloudMovements : localRows
                     if (!localOk && scanned.length === 0) return { ...d, log: { kind: 'failed' } }
                     const added = mergeScannedMovements(d.movements, scanned, () => crypto.randomUUID())
                     return {

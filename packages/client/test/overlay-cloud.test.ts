@@ -315,3 +315,61 @@ describe('the clock, when the phone reads a fee but not a time', () => {
     expect(rows[0]).toEqual({ fee: '130', time: '', dateIso: null })
   })
 })
+
+describe('the cloud is the reader, the phone is the fallback', () => {
+  const newId = (() => { let n = 0; return () => `p-${++n}` })()
+
+  /** Verbatim from ocr_reads, 14:53 Damascus — the screen the owner photographed. */
+  const CLOUD_PAGE = [
+    // The card sliced by the TOP edge: addresses visible, fee off-screen. The cloud says so.
+    { value: null, cancelled: false, time: null, dateIso: '2026-08-11', pointA: null, pointB: 'G8MC+3FC, دمشق', printed: '' },
+    { value: '120', cancelled: false, time: '20:32', dateIso: '2026-08-11', pointA: 'صيدلية حاتوت Barzeh', pointB: 'مدرسة ام عمار', printed: '١٢٠' },
+    { value: '275', cancelled: false, time: '20:12', dateIso: '2026-08-11', pointA: 'G7CR+PXR, Al Salhiyeh', pointB: 'Al Hurriya', printed: '٢٧٥' },
+    { value: '140', cancelled: false, time: '01:39', dateIso: '2026-08-11', pointA: null, pointB: null, printed: '١٤٠' },
+  ]
+
+  /** What the phone made of the same image: three rows, one fee refused, two clocks missed. */
+  const PHONE_PAGE = [
+    { dateIso: '2026-08-11', time: '20:32', fee: null, feeStrip: null },
+    { dateIso: null, time: '', fee: '275', feeStrip: 'strip-275' },
+    { dateIso: null, time: '', fee: '140', feeStrip: 'strip-140' },
+  ]
+
+  it('uses the cloud reading even though the row counts disagree', () => {
+    /*
+     * THE FAILURE, EXACTLY AS IT HAPPENED. Four cloud rows against three phone rows — the sliced
+     * card is one row to the cloud and none to the phone — so the positional join refused, the
+     * phone's reading stood, and the driver saw «؟» for a fee the cloud had read as 120 and two
+     * «11/08»s for clocks it had read as 20:12 and 01:39.
+     */
+    const rows = cloudRowsToScannedOrders(CLOUD_PAGE, PHONE_PAGE)
+    // The timeless sliced card is dropped — it has no identity — leaving the three real rows.
+    expect(rows.map((x) => [x.time, x.fee])).toEqual([
+      ['20:32', '120'],
+      ['20:12', '275'],
+      ['01:39', '140'],
+    ])
+    expect(mergeScannedOrders([], rows, newId)).toHaveLength(3)
+  })
+
+  it('does not carry a fee strip across when the counts disagree', () => {
+    // A strip attached to the wrong row is a mislabelled training example — worse than none.
+    const local = [{ feeStrip: 'data:image/png;base64,AAA' }]
+    const rows = cloudRowsToScannedOrders(CLOUD_PAGE, local)
+    expect(rows.every((x) => x.feeStrip === undefined)).toBe(true)
+  })
+
+  it('carries each strip across when both readers saw the same cards', () => {
+    // The common case, and the one that keeps the on-device reader trainable: same count, same
+    // order, so the amount's own pixels ride along with the cloud's reading of it.
+    const cloudRows = CLOUD_PAGE.slice(1)
+    const local = [
+      { feeStrip: 'strip-a' },
+      { feeStrip: 'strip-b' },
+      { feeStrip: null, pointBIsPin: true },
+    ]
+    const rows = cloudRowsToScannedOrders(cloudRows, local)
+    expect(rows.map((x) => x.feeStrip)).toEqual(['strip-a', 'strip-b', undefined])
+    expect(rows[2]!.pointBIsPin).toBe(true)
+  })
+})
