@@ -262,6 +262,25 @@ to its own reader, and nothing else in the app notices. Reach for this if the bi
 provider degrades, or a model update starts misreading. **It cannot break a shift**: an OCR failure
 is a 200 with a reason by construction, and no gate consults the reader.
 
+**«هل قرأها الهاتف أم الذكاء الاصطناعي؟» — which reader produced a number.**
+
+`ocr_reads` holds one row per **cloud** read and nothing else writes to it, so it answers this
+completely: a photo in the table was read by the model, a photo not in it was read by the phone.
+
+```sql
+-- Which screens the cloud read, for one shift, in Damascus time.
+SELECT to_char(r.created_at AT TIME ZONE 'Asia/Damascus', 'HH24:MI') AS at,
+       r.field, r.model, (r.result->>'ok') AS ok, r.latency_ms
+  FROM ocr_reads r JOIN shifts s ON s.id = r.shift_id
+ WHERE s.shift_no = :n AND s.business_date = :d
+ ORDER BY r.created_at;
+```
+
+**The app itself cannot tell you.** The driver's provenance marks — ◍ read · ◌ refused · ✎ typed —
+say only *whether a machine read it*, not which machine, and the manager's «OCR → confirmed» delta
+is likewise undifferentiated. Both readers write the same fields by design. Until that changes, the
+table above is the only answer, and it is a complete one.
+
 **Watching the bill.** `ocr_reads` is the only cost meter that exists.
 
 ```sql
