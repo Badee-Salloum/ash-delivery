@@ -87,6 +87,21 @@ const PROVIDER = arg('provider', 'gemini')
 /** OpenAI 5.x reasoning effort. `default` omits the field entirely. */
 const EFFORT = arg('effort', 'default')
 
+/**
+ * `--raw` asks for a PLAIN TRANSCRIPTION and no schema at all, and we do every bit of the parsing.
+ *
+ * Worth testing rather than assuming, because the structured mode measurably changes the answer:
+ * asked for JSON, gpt-5.4-mini returned «-165.0» in LATIN digits for a row printed «−١٦٥٫٥٠» — it
+ * normalised while transcribing, in the one field whose whole job was not to. Constrained decoding
+ * costs the model something, and this measures how much.
+ *
+ * It does NOT fix a lost decimal. Scored both ways over every run already on disk, our own parse of
+ * the model's glyph string scores identically to the model's own number (and slightly WORSE for
+ * gpt-5.4), because gpt-5.4 wrote «−١٦٥٠٠» — the mark is simply not in the string it returned. No
+ * downstream parser can recover a character the reader never emitted.
+ */
+const RAW = flag('raw')
+
 /** Output ceiling. Reasoning/thinking tokens count against it on BOTH vendors. */
 const MAX_OUT = Number(arg('max-out', '32768'))
 const BATCH = Number(arg('batch', '8'))
@@ -264,6 +279,69 @@ async function labelImage(bytes, label) {
 }
 
 /**
+ * The RAW prompt — transcription only, no schema, no conversion, no structure.
+ *
+ * Deliberately close to the prompt `ocr-bench.mjs:221-224` used when it recorded gemini at 48/48,
+ * so a difference between the two modes is attributable to the SCHEMA rather than to the wording.
+ */
+const RAW_PROMPT = `Transcribe these phone screenshots exactly as printed.
+
+Each image carries a label like IMG-07 in a white strip at the very top. Begin each image's
+transcription with that label alone on its own line, copied from the pixels.
+
+Then write every line of that screen, one line of output per line on screen, in the order they
+appear top to bottom.
+
+Copy the characters you SEE. Do not convert anything:
+- Arabic-Indic digits ٠١٢٣٤٥٦٧٨٩ stay Arabic-Indic. Never write them as 0123456789.
+- The thousands mark ٬ (U+066C) and the decimal mark ٫ (U+066B) are DIFFERENT characters and must
+  stay different. ٫ sits raised, is the decimal point, and is followed by one or two digits at the
+  end. ٬ sits on the baseline, is the thousands mark, and always leaves groups of exactly 3 digits.
+  «−١٬١٥٥٫٦٥» has both, and writing it as «−١١٥٥٦٥» is a hundredfold error on somebody's wages.
+- Keep the sign exactly as printed: + or −.
+- If a character is genuinely unreadable, write ? for that character. An honest ? is a correct
+  answer; a plausible guess is not.
+
+Output nothing but the transcription.`
+
+/**
+ * Plain text back into the same shape the structured mode produces, so ONE scorer serves both.
+ *
+ * Everything numeric is done here rather than by the model — which is the whole point of the mode.
+ * `printed` carries the glyphs and `value` is left null, so the scorer falls through to our own
+ * `normaliseMoney(printed)` exactly as it does for a structured run.
+ */
+function parseRaw(text) {
+  const images = []
+  let current = null
+  for (const line of String(text).split('\n')) {
+    const label = line.match(/\bIMG[-\s]?(\d{2})\b/)
+    if (label && line.trim().length <= 12) {
+      current = { id: `IMG-${label[1]}`, screen: 'other', theme: null, statusBarClock: null, rows: [], fields: [], notes: null, rawLines: [] }
+      images.push(current)
+      continue
+    }
+    if (!current) continue
+    current.rawLines.push(line)
+
+    // A money row is a line carrying the SYP anchor. Take the number ADJACENT to it — the same rule
+    // `ocr-bench.mjs:417` uses — because these screens also print digits in addresses, plus-codes
+    // and coordinates, and none of those are fees.
+    if (!/SYP/i.test(line)) continue
+    const before = line.split(/SYP/i)[0]
+    const after = line.split(/SYP/i)[1] ?? ''
+    const TOKEN = /[-+−–—]?[\d٠-٩۰-۹][\d٠-٩۰-۹٬٫،,.]*/g
+    const left = before.match(TOKEN)
+    const right = after.match(TOKEN)
+    const printed = (left && left.length ? left[left.length - 1] : right && right.length ? right[0] : null)
+    if (printed === null) continue
+    current.rows.push({ printed, value: null, time: null, dateIso: null, cancelled: false, hasDecimal: null, hasThousands: null, digitCount: null })
+  }
+  for (const im of images) { im.rowCount = im.rows.length; delete im.rawLines }
+  return { images }
+}
+
+/**
  * ── TWO PROVIDERS, ONE EXPERIMENT ────────────────────────────────────────────────────────────
  *
  * Same images, same prompt, same answer key, same review page. Only the wire format differs, so a
@@ -286,7 +364,7 @@ const PROVIDERS = {
       contents: [
         {
           parts: [
-            { text: PROMPT },
+            { text: RAW ? RAW_PROMPT : PROMPT },
             ...batch.map((im) => ({ inline_data: { mime_type: 'image/jpeg', data: im.labelled.toString('base64') } })),
           ],
         },
@@ -305,8 +383,7 @@ const PROVIDERS = {
          */
         ...(THINKING === 'dynamic' ? {} : { thinkingConfig: { thinkingBudget: THINKING === 'off' ? 0 : Number(THINKING) } }),
         maxOutputTokens: MAX_OUT,
-        responseMimeType: 'application/json',
-        responseSchema: SCHEMA,
+        ...(RAW ? {} : { responseMimeType: 'application/json', responseSchema: SCHEMA }),
       },
     }),
     extract: (json) => {
@@ -343,7 +420,7 @@ const PROVIDERS = {
         {
           role: 'user',
           content: [
-            { type: 'text', text: PROMPT },
+            { type: 'text', text: RAW ? RAW_PROMPT : PROMPT },
             ...batch.map((im) => ({
               type: 'image_url',
               // `detail: high` is not optional here. On `low` the image is downsampled to a single
@@ -361,7 +438,7 @@ const PROVIDERS = {
        * governed by reasoning effort, not by a sampling knob.
        */
       ...(EFFORT === 'default' ? {} : { reasoning_effort: EFFORT }),
-      response_format: { type: 'json_schema', json_schema: { name: 'screens', strict: true, schema: strictify(SCHEMA) } },
+      ...(RAW ? {} : { response_format: { type: 'json_schema', json_schema: { name: 'screens', strict: true, schema: strictify(SCHEMA) } } }),
     }),
     extract: (json) => {
       if (json.error) throw new Error(`openai ${json.error.code ?? json.error.type}: ${json.error.message}`)
@@ -520,7 +597,7 @@ async function main() {
 
   if (DRY) {
     console.log('\n--dry: nothing sent. Prompt is below.\n')
-    console.log(PROMPT)
+    console.log(RAW ? RAW_PROMPT : PROMPT)
     writeFileSync(join(runDir, 'dry-request-1.json'), JSON.stringify({ model: MODEL, request: requests[0].req }, null, 1).slice(0, 4000))
     return
   }
@@ -591,7 +668,8 @@ async function main() {
 
     let parsed
     try {
-      parsed = JSON.parse(extractText(json))
+      const raw = extractText(json)
+      parsed = RAW ? parseRaw(raw) : JSON.parse(raw)
     } catch (err) {
       console.error(`  ${err.message} — raw kept at raw/${tag}.json, batch NOT scored`)
       continue

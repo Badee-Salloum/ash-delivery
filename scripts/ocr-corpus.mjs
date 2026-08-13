@@ -728,7 +728,15 @@ export function selfChecks(row) {
 
 export function scoreImage(entry, truth) {
   const rows = entry.rows ?? []
-  const said = rows.map((r) => (r.value == null ? null : normaliseMoney(r.value)))
+  /*
+   * The model's own number if it gave one, otherwise OUR parse of the glyphs it transcribed.
+   *
+   * `--raw` mode returns no converted number at all — that is its whole point — so a scorer that
+   * only looked at `value` counted every raw row as unread and reported a flawless transcription as
+   * zero. Falling back to `printed` is also the right general rule: the glyph string is the
+   * evidence, the converted number is the model's opinion about it.
+   */
+  const said = rows.map((r) => (r.value != null ? normaliseMoney(r.value) : r.printed ? normaliseMoney(r.printed) : null))
   const suspects = rows.map(selfChecks)
 
   if (!truth) return { said, suspects, scored: false }

@@ -24,6 +24,10 @@ const PRICE = {
   'gpt-5.4-nano': [0.2, 1.25],
   'gpt-4o-mini': [0.15, 0.6],
   'gpt-4.1-mini': [0.4, 1.6],
+  'gpt-5.6-luna': [0.2, 1.2],
+  'gpt-5.6-terra': [2.0, 12.0],
+  'gpt-5.6-sol': [5.0, 30.0],
+  'gpt-5.5': [5.0, 30.0],
 }
 
 const key = answerKey()
@@ -54,7 +58,7 @@ for (const run of runs) {
       // has no amount. A reading that lands on one of these is UNJUDGEABLE, not wrong — scoring it
       // as a misread punishes a model for reading a row two humans could not agree on.
       let unasserted = t.amounts.filter((a) => a === '' || a === null).length
-      const said = (r.rows ?? []).map((x) => (x.value == null ? null : normaliseMoney(x.value)))
+      const said = (r.rows ?? []).map((x) => (x.value != null ? normaliseMoney(x.value) : x.printed ? normaliseMoney(x.printed) : null))
       const pool = [...want]
       const wrong = []
       for (const s of said) {
@@ -119,7 +123,7 @@ if (rows.length > 1 && common.length) {
       const rec = JSON.parse(readFileSync(join(dir, readdirSync(dir)[0]), 'utf8'))
       const want = key[sha].amounts.filter((a) => a !== '' && a !== null).map(normaliseMoney)
       let unasserted = key[sha].amounts.filter((a) => a === '' || a === null).length
-      const said = (rec.rows ?? []).map((x) => (x.value == null ? null : normaliseMoney(x.value)))
+      const said = (rec.rows ?? []).map((x) => (x.value != null ? normaliseMoney(x.value) : x.printed ? normaliseMoney(x.printed) : null))
       const pool = [...want]
       for (const s of said) {
         if (s === null) continue
