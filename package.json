@@ -26,7 +26,7 @@
     "glyphs:scales": "node scripts/glyph-read.mjs --scale=1.25 && node scripts/glyph-read.mjs --scale=1.5 && node scripts/glyph-read.mjs --scale=2.0",
     "ocr:bench": "node scripts/ocr-bench.mjs",
     "build:apps": "pnpm --filter @ash/driver build && pnpm --filter @ash/admin build",
-    "ocr:gemini": "node scripts/gemini-bench.mjs"
+    "ocr:vision": "node scripts/vision-bench.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",

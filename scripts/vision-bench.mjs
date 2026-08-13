@@ -2,10 +2,10 @@
 /**
  * GEMINI, per image, inside a 20-request-a-day free tier.
  *
- *     node scripts/gemini-bench.mjs --dry            build every request, send nothing
- *     node scripts/gemini-bench.mjs --models         ask which model ids the key actually has
- *     node scripts/gemini-bench.mjs --pass=1         one full pass over all 48 images
- *     node scripts/gemini-bench.mjs --report         re-render review.html, zero requests
+ *     node scripts/vision-bench.mjs --dry            build every request, send nothing
+ *     node scripts/vision-bench.mjs --models         ask which model ids the key actually has
+ *     node scripts/vision-bench.mjs --pass=1         one full pass over all 48 images
+ *     node scripts/vision-bench.mjs --report         re-render review.html, zero requests
  *
  * ── WHAT THIS MEASURES, AND WHY THE OBVIOUS VERSION OF IT DOES NOT WORK ──────────────────────
  *
@@ -63,7 +63,7 @@ const OUT = arg('out', join(homedir(), 'Desktop', 'ash-ocr-runs'))
  * read the 5 RPM / 20 RPD from says «Gemini 3.6 Flash», so the benchmark asks for exactly that.
  * Measuring one model against another model's quota is how a run dies halfway through.
  */
-const MODEL = arg('model', process.env.GEMINI_MODEL ?? 'gemini-3.6-flash')
+const MODEL = arg('model', process.env.GEMINI_MODEL ?? (arg('provider', 'gemini') === 'openai' ? 'gpt-5.4-mini' : 'gemini-3.6-flash'))
 
 /**
  * `dynamic` sends no thinkingConfig at all, `off` pins the budget to zero, a number fixes it.
@@ -80,6 +80,15 @@ const MODEL = arg('model', process.env.GEMINI_MODEL ?? 'gemini-3.6-flash')
  * conclusion about determinism from repeat passes.
  */
 const THINKING = arg('thinking', 'dynamic')
+
+/** Which vendor. Same images, same prompt, same answer key — only the wire format differs. */
+const PROVIDER = arg('provider', 'gemini')
+
+/** OpenAI 5.x reasoning effort. `default` omits the field entirely. */
+const EFFORT = arg('effort', 'default')
+
+/** Output ceiling. Reasoning/thinking tokens count against it on BOTH vendors. */
+const MAX_OUT = Number(arg('max-out', '32768'))
 const BATCH = Number(arg('batch', '8'))
 const PASS = arg('pass', '1')
 const DRY = flag('dry')
@@ -91,8 +100,8 @@ const DRY = flag('dry')
  * is what makes this benchmark worth running — 20 a day affords three full passes over 48 images,
  * and repetition is the only thing that can catch a fault that shows up one run in ten.
  */
-const RPD = Number(arg('rpd', '20'))
-const RPM = Number(arg('rpm', '5'))
+const RPD = Number(arg('rpd', arg('provider', 'gemini') === 'openai' ? '40' : '20'))
+const RPM = Number(arg('rpm', arg('provider', 'gemini') === 'openai' ? '30' : '5'))
 const SPACING_MS = Math.ceil(60_000 / RPM) + 1_000
 
 const RELAY = arg('relay', process.env.GEMINI_RELAY_URL ?? '')
@@ -108,6 +117,14 @@ const SECRET = process.env.RELAY_SECRET ?? ''
  * start that overruns. Keyed on the actual reset zone instead.
  */
 const quotaDay = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' })
+/*
+ * The ledger is PER PROVIDER, and on a paid account it is a spend guard rather than a quota mirror.
+ *
+ * Gemini's key is a hard 20-a-day free-tier ceiling. OpenAI's is a card. The failure modes are
+ * opposite — one refuses, the other silently bills — so the same counter cannot serve both, and a
+ * shared key would have let a spent Gemini day block a paid OpenAI run for no reason at all.
+ */
+const ledgerKey = () => `${PROVIDER}:${quotaDay()}`
 const ledgerPath = () => join(OUT, 'budget.json')
 
 function readLedger() {
@@ -120,13 +137,13 @@ function readLedger() {
 /** Written BEFORE the call: if the process dies mid-request the quota still counted, so we must. */
 function spend(n = 1) {
   const led = readLedger()
-  const day = quotaDay()
-  led[day] = (led[day] ?? 0) + n
+  const k = ledgerKey()
+  led[k] = (led[k] ?? 0) + n
   mkdirSync(OUT, { recursive: true })
   writeFileSync(ledgerPath(), JSON.stringify(led, null, 2))
-  return led[day]
+  return led[k]
 }
-const spentToday = () => readLedger()[quotaDay()] ?? 0
+const spentToday = () => readLedger()[ledgerKey()] ?? 0
 
 // ── The request ──────────────────────────────────────────────────────────────────────────────
 
@@ -246,31 +263,158 @@ async function labelImage(bytes, label) {
   return canvas.toBuffer('image/jpeg', 88)
 }
 
-function buildRequest(batch) {
-  const parts = [{ text: PROMPT }]
-  for (const im of batch) parts.push({ inline_data: { mime_type: 'image/jpeg', data: im.labelled.toString('base64') } })
-  return {
-    contents: [{ parts }],
-    generationConfig: {
-      temperature: 0,
-      topP: 1,
-      seed: 7,
-      /*
-       * PINNED, and this is as much the experiment as the model is.
-       *
-       * Flash ships with thinking ON and `thinkingBudget: -1` (dynamic), so the amount of hidden
-       * reasoning varies from call to call — a mechanically plausible explanation for a 1-in-10
-       * flip at temperature 0. Leaving it dynamic means measuring a moving target. Thinking tokens
-       * also count against maxOutputTokens, so a dynamic budget under a small ceiling can consume
-       * the lot and return a candidate with no parts at all.
-       */
-      ...(THINKING === 'dynamic' ? {} : { thinkingConfig: { thinkingBudget: THINKING === 'off' ? 0 : Number(THINKING) } }),
-      maxOutputTokens: 32768,
-      responseMimeType: 'application/json',
-      responseSchema: SCHEMA,
+/**
+ * ── TWO PROVIDERS, ONE EXPERIMENT ────────────────────────────────────────────────────────────
+ *
+ * Same images, same prompt, same answer key, same review page. Only the wire format differs, so a
+ * difference in the results is a difference in the MODEL rather than in how it was asked.
+ *
+ * The schemas are not interchangeable, and the differences are load-bearing:
+ *
+ *   Gemini  `responseSchema` + `propertyOrdering`, which fixes the ORDER fields are generated in.
+ *           That is what puts the verification fields before the amount.
+ *   OpenAI  `json_schema` with `strict: true`, which has no ordering control but DOES demand
+ *           `additionalProperties: false` and every property listed in `required`; it refuses a
+ *           schema missing either. It has no `nullable` — an optional value is a type union.
+ *           Generation follows declaration order, which is why the row schema is already written
+ *           in the same order as Gemini's `propertyOrdering`.
+ */
+const PROVIDERS = {
+  gemini: {
+    defaultModel: 'gemini-3.6-flash',
+    build: (batch) => ({
+      contents: [
+        {
+          parts: [
+            { text: PROMPT },
+            ...batch.map((im) => ({ inline_data: { mime_type: 'image/jpeg', data: im.labelled.toString('base64') } })),
+          ],
+        },
+      ],
+      generationConfig: {
+        temperature: 0,
+        topP: 1,
+        seed: 7,
+        /*
+         * PINNED, and this is as much the experiment as the model is.
+         *
+         * Flash ships with thinking ON and `thinkingBudget: -1` (dynamic), so the amount of hidden
+         * reasoning varies from call to call — a mechanically plausible explanation for a 1-in-10
+         * flip at temperature 0. Thinking tokens also count against maxOutputTokens, so a dynamic
+         * budget under a small ceiling can consume the lot and return a candidate with no parts.
+         */
+        ...(THINKING === 'dynamic' ? {} : { thinkingConfig: { thinkingBudget: THINKING === 'off' ? 0 : Number(THINKING) } }),
+        maxOutputTokens: MAX_OUT,
+        responseMimeType: 'application/json',
+        responseSchema: SCHEMA,
+      },
+    }),
+    extract: (json) => {
+      if (json.promptFeedback?.blockReason) throw new Error(`gemini blocked: ${json.promptFeedback.blockReason}`)
+      if (json.error) throw new Error(`gemini ${json.error.code}: ${json.error.message}`)
+      const c = json.candidates?.[0]
+      if (!c) throw new Error('gemini: no candidate in response')
+      if (c.finishReason && c.finishReason !== 'STOP') throw new Error(`gemini finishReason=${c.finishReason}`)
+      const parts = c.content?.parts
+      if (!Array.isArray(parts) || parts.length === 0) {
+        throw new Error('gemini: candidate has no parts — thinking most likely consumed maxOutputTokens')
+      }
+      const u = json.usageMetadata ?? {}
+      const out = (u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0)
+      if (out >= MAX_OUT * 0.98) throw new Error(`gemini: ${out}/${MAX_OUT} output tokens — treat as truncated`)
+      return parts.map((p) => p.text ?? '').join('')
     },
-  }
+    usage: (json) => {
+      const u = json.usageMetadata ?? {}
+      return {
+        in: u.promptTokenCount ?? 0,
+        out: (u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0),
+        reasoning: u.thoughtsTokenCount ?? 0,
+        raw: u,
+      }
+    },
+  },
+
+  openai: {
+    defaultModel: 'gpt-5.4-mini',
+    build: (batch) => ({
+      model: MODEL,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: PROMPT },
+            ...batch.map((im) => ({
+              type: 'image_url',
+              // `detail: high` is not optional here. On `low` the image is downsampled to a single
+              // 512px tile, and Arabic-Indic digits at this size stop being resolvable at all — the
+              // benchmark would be measuring the downsampler rather than the model.
+              image_url: { url: `data:image/jpeg;base64,${im.labelled.toString('base64')}`, detail: 'high' },
+            })),
+          ],
+        },
+      ],
+      max_completion_tokens: MAX_OUT,
+      /*
+       * NO `temperature`. The 5.x reasoning models reject any value but the default and answer a
+       * 400 `unsupported_value` — which would cost a PAID request to discover. Determinism there is
+       * governed by reasoning effort, not by a sampling knob.
+       */
+      ...(EFFORT === 'default' ? {} : { reasoning_effort: EFFORT }),
+      response_format: { type: 'json_schema', json_schema: { name: 'screens', strict: true, schema: strictify(SCHEMA) } },
+    }),
+    extract: (json) => {
+      if (json.error) throw new Error(`openai ${json.error.code ?? json.error.type}: ${json.error.message}`)
+      const c = json.choices?.[0]
+      if (!c) throw new Error('openai: no choice in response')
+      if (c.finish_reason && c.finish_reason !== 'stop') throw new Error(`openai finish_reason=${c.finish_reason}`)
+      if (c.message?.refusal) throw new Error(`openai refused: ${c.message.refusal}`)
+      const text = c.message?.content
+      if (!text) throw new Error('openai: empty content — reasoning most likely consumed max_completion_tokens')
+      return text
+    },
+    usage: (json) => {
+      const u = json.usage ?? {}
+      return {
+        in: u.prompt_tokens ?? 0,
+        out: u.completion_tokens ?? 0,
+        reasoning: u.completion_tokens_details?.reasoning_tokens ?? 0,
+        raw: u,
+      }
+    },
+  },
 }
+
+/**
+ * Gemini's schema dialect translated into OpenAI's strict one.
+ *
+ * `strict: true` refuses a schema unless EVERY property appears in `required` and every object sets
+ * `additionalProperties: false`, and it has no `nullable` — an optional value is a type union.
+ * Translating here rather than hand-maintaining two schemas keeps the providers genuinely
+ * comparable: a field that quietly drifted between them would read as a model difference.
+ */
+function strictify(node) {
+  if (Array.isArray(node)) return node.map(strictify)
+  if (!node || typeof node !== 'object') return node
+  const out = {}
+  for (const [k, v] of Object.entries(node)) {
+    if (k === 'propertyOrdering' || k === 'nullable') continue
+    out[k] = strictify(v)
+  }
+  if (node.nullable === true && typeof node.type === 'string') out.type = [node.type, 'null']
+  if (out.type === 'object' && out.properties) {
+    out.additionalProperties = false
+    out.required = Object.keys(out.properties)
+  }
+  return out
+}
+
+const provider = () => {
+  const p = PROVIDERS[PROVIDER]
+  if (!p) throw new Error(`unknown provider "${PROVIDER}" — known: ${Object.keys(PROVIDERS).join(', ')}`)
+  return p
+}
+const buildRequest = (batch) => provider().build(batch)
 
 // ── Talking to the relay ─────────────────────────────────────────────────────────────────────
 
@@ -283,14 +427,17 @@ function buildRequest(batch) {
 async function callRelay(request, rawDir, tag) {
   const res = await fetch(RELAY, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-relay-secret': SECRET },
+    headers: { 'content-type': 'application/json', 'x-relay-secret': SECRET, 'x-provider': PROVIDER },
     body: JSON.stringify({ model: MODEL, request }),
     signal: AbortSignal.timeout(270_000),
   })
   const ct = res.headers.get('content-type') ?? ''
   const text = await res.text()
   if (!res.ok || !ct.includes('json')) {
-    writeFileSync(join(rawDir, `${tag}.error.txt`), `HTTP ${res.status}  ${ct}\nx-vercel-id: ${res.headers.get('x-vercel-id')}\n\n${text.slice(0, 8000)}`)
+    writeFileSync(
+      join(rawDir, `${tag}.error.txt`),
+      `HTTP ${res.status}  ${ct}\nx-vercel-id: ${res.headers.get('x-vercel-id')}\n\n${text.slice(0, 8000)}`,
+    )
     throw new Error(`relay ${res.status} (${ct || 'no content-type'}) — see raw/${tag}.error.txt`)
   }
   return JSON.parse(text)
@@ -299,26 +446,12 @@ async function callRelay(request, rawDir, tag) {
 /**
  * A truncated structured response is the quiet one.
  *
- * `ocr-bench.mjs:243` uses `(parts ?? []).map(p => p.text ?? '').join('')`, which turns every one
- * of these into an empty string with no error — a batch that hit the output ceiling would be
- * scored as "eight images, zero rows" and the summary would look merely disappointing rather than
- * broken. `finishReason` is unreliable exactly at the limit, so usageMetadata is checked too.
+ * `ocr-bench.mjs:243` uses `(parts ?? []).map(p => p.text ?? '').join('')`, which turns every one of
+ * these into an empty string with no error — a batch that hit the output ceiling would be scored as
+ * "eight images, zero rows" and the summary would look merely disappointing rather than broken.
+ * Both providers under-report truncation, so each extractor checks for it explicitly.
  */
-function extractText(json, maxOut) {
-  if (json.promptFeedback?.blockReason) throw new Error(`gemini blocked: ${json.promptFeedback.blockReason}`)
-  if (json.error) throw new Error(`gemini ${json.error.code}: ${json.error.message}`)
-  const c = json.candidates?.[0]
-  if (!c) throw new Error('gemini: no candidate in response')
-  if (c.finishReason && c.finishReason !== 'STOP') throw new Error(`gemini finishReason=${c.finishReason}`)
-  const parts = c.content?.parts
-  if (!Array.isArray(parts) || parts.length === 0) {
-    throw new Error('gemini: candidate has no parts — thinking most likely consumed maxOutputTokens')
-  }
-  const u = json.usageMetadata ?? {}
-  const out = (u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0)
-  if (out >= maxOut * 0.98) throw new Error(`gemini: ${out}/${maxOut} output tokens — treat as truncated`)
-  return parts.map((p) => p.text ?? '').join('')
-}
+const extractText = (json) => provider().extract(json)
 
 // ── Main ─────────────────────────────────────────────────────────────────────────────────────
 
@@ -356,7 +489,7 @@ async function main() {
   const batches = Array.from({ length: nBatches }, () => [])
   sorted.forEach((im, i) => batches[i % nBatches].push(im))
 
-  const runId = `${quotaDay()}-pass${PASS}`
+  const runId = `${quotaDay()}-${MODEL}-p${PASS}`
   const runDir = join(OUT, runId)
   const rawDir = join(runDir, 'raw')
   const imgDir = join(runDir, 'images')
@@ -443,7 +576,7 @@ async function main() {
       })()
       if (/PerDay|RequestsPerDay/i.test(detail)) {
         const led = readLedger()
-        led[quotaDay()] = RPD
+        led[ledgerKey()] = RPD
         writeFileSync(ledgerPath(), JSON.stringify(led, null, 2))
         const secs = detail.match(/retry in ([\d.]+)s/)?.[1]
         console.error(`  DAILY quota for ${MODEL} is exhausted. Ledger marked ${RPD}/${RPD}.`)
@@ -458,7 +591,7 @@ async function main() {
 
     let parsed
     try {
-      parsed = JSON.parse(extractText(json, 32768))
+      parsed = JSON.parse(extractText(json))
     } catch (err) {
       console.error(`  ${err.message} — raw kept at raw/${tag}.json, batch NOT scored`)
       continue
@@ -497,7 +630,8 @@ async function main() {
         notes: entry.notes ?? null,
         truth: truth ?? null,
         score,
-        usage: json.usageMetadata ?? null,
+        usage: provider().usage(json),
+        provider: PROVIDER,
       }
       // Keyed by sha AND run, so repeat passes ACCUMULATE instead of clobbering — repetition is
       // the whole point when the fault under test appears one run in ten.
