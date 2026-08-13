@@ -30,8 +30,30 @@ const FIELD_HINT: Record<OcrField, string> = {
   payments_log:
     'a PAYMENTS LOG («سجل المدفوعات»). Every row is SIGNED — "+" is money arriving, "−" money leaving — and the sign is part of the answer.',
   wallet: 'a WALLET BALANCE screen. The balance is the figure to read; ignore any promotional numbers.',
+  /*
+   * «للعداد هو دائماً آخر رقم» — the owner's own rule about this dashboard, and the only reliable
+   * one there is.
+   *
+   * A bike dash shows several numbers at once: a clock, a trip meter, a voltage, a speed, a gear
+   * or «P». Nothing on the glass labels which is the odometer, so every reader has had to guess —
+   * and both guessed badly. The on-device one takes the LARGEST number, which migration 0022
+   * records getting wrong three times out of three (200 for 6948, 229 for 5426, one refusal). The
+   * cloud, told only "the odometer reading", returned 8 off a dash whose odometer was 7034.
+   *
+   * Position is what actually identifies it on this hardware. That is not something a model can
+   * work out from one photograph, and not something we could infer without being told.
+   */
   odometer:
-    'a photograph of a physical bike dashboard behind glass, often with glare. There is NO money on it. Put the odometer reading in `fields` under the key "odometer", digits only, ignoring any "km" or "ODO" printed beside it.',
+    'a photograph of a physical bike dashboard behind glass, often with glare.\n\n' +
+    'There is NO money on it. Report ONE value, in `fields` under the key "odometer".\n\n' +
+    'THE ODOMETER IS ALWAYS THE LAST NUMBER ON THE DISPLAY — the final one in reading order, ' +
+    'lowest and last. This is a fact about this particular dashboard, not a guess to be revised: ' +
+    'do NOT choose the largest number, the most central, or the one that looks most like a ' +
+    'mileage. If the screen shows a clock, a gear letter such as «P», a speed, a voltage, a ' +
+    'temperature and then a number, it is that LAST number and none of the others.\n\n' +
+    'Give the digits only, dropping any «km» or «ODO» printed beside it, and keeping leading ' +
+    'zeros out («02161 km» is 2161). If the last number is genuinely unreadable through glare, ' +
+    'omit `odometer` entirely rather than offering the second-to-last.',
   /*
    * THE KEYS ARE PINNED, and this is not stylistic.
    *

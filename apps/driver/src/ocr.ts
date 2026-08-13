@@ -636,8 +636,20 @@ const MIN_ODOMETER_DIGITS = 3
 export function parseReading(text: string): OcrReading {
   const batteryAt = text.match(/(\d{1,3})\s*%/)?.index
 
+  /*
+   * THE LAST NUMBER ON THE DISPLAY, not the longest.
+   *
+   * «للعداد هو دائماً آخر رقم» — the owner's rule about this dashboard, and the only reliable one
+   * there is. Nothing on the glass labels which figure is the odometer, so this used to take the
+   * LONGEST run of digits and hope. Migration 0022 records what that was worth on real shifts:
+   * wrong three times out of three — 200 for 6948, 229 for 5426, and a refusal — because a trip
+   * meter, a voltage or a clock fragment is regularly longer than the odometer beside it.
+   *
+   * Position identifies it, and position is stable on this hardware in a way that magnitude never
+   * was. Ties still go to the LAST, which is the whole point.
+   */
   const bestOn = (haystack: string): string => {
-    let longest = ''
+    let last = ''
     for (const m of haystack.matchAll(/\d+/g)) {
       // A clock reads as digits either side of a colon; neither half is a distance.
       const before = haystack[m.index - 1]
@@ -645,9 +657,12 @@ export function parseReading(text: string): OcrReading {
       if (before === ':' || after === ':') continue
       // Skip the charge itself, compared by position rather than by digit string.
       if (batteryAt !== undefined && haystack === text && m.index === batteryAt) continue
-      if (m[0].length > longest.length) longest = m[0]
+      // A number too short to be a distance is never the answer, even when it is genuinely last:
+      // a gear, a temperature or a bar count sits below the odometer on some of these dashes.
+      if (m[0].length < MIN_ODOMETER_DIGITS) continue
+      last = m[0]
     }
-    return longest
+    return last
   }
 
   // The «ODO» row first — even a mangled label («ono», «obo», «0D0») pins the right line.
