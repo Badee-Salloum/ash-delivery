@@ -931,3 +931,36 @@ export interface CloudOcrResponse {
 export function ocrReadPath(shiftId: string, field: CloudOcrField): string {
   return `/shifts/${shiftId}/ocr/${field}`
 }
+
+/**
+ * Prepare a picked file and read it in the cloud. `null` for every failure, of any kind.
+ *
+ * One return value for "offline", "no provider configured", "past the shift's cap", "the model
+ * timed out" and "this image is too big to send", because the caller's response to all five is
+ * identical: keep the on-device reading. Distinguishing them would be UI that shows a driver a
+ * distinction he cannot act on.
+ *
+ * `compressForOcr` is imported lazily so the OCR path stays out of the entry bundle.
+ */
+export async function readInCloud(
+  api: ApiClient,
+  shiftId: string,
+  field: CloudOcrField,
+  file: Blob,
+): Promise<CloudOcrResponse | null> {
+  try {
+    const { compressForOcr } = await import('./compress.ts')
+    const prepared = await compressForOcr(file)
+    if (!prepared) return null
+    const res = await api.putBytes<CloudOcrResponse>(
+      ocrReadPath(shiftId, field),
+      prepared.bytes,
+      prepared.mimeType,
+      {},
+      'POST',
+    )
+    return res.ok ? res : null
+  } catch {
+    return null
+  }
+}

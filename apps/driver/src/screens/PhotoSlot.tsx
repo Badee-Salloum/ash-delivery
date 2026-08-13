@@ -2,9 +2,8 @@ import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import {
   type CloudOcrField,
   type CloudOcrResponse,
-  compressForOcr,
   compressImage,
-  ocrReadPath,
+  readInCloud,
   uploadEvidencePath,
 } from '@ash/client'
 import { useApp } from '../app-context.tsx'
@@ -144,23 +143,8 @@ export function PhotoSlot({
     async (file: File) => {
       if (!ocrField || !onCloudRead) return
       onCloudRead({ status: 'reading' })
-      try {
-        const prepared = await compressForOcr(file)
-        // `null` means it would still be too large for the request body. Refusing to send beats a
-        // 413 the driver has to interpret.
-        if (!prepared) return onCloudRead({ status: 'failed', reason: 'unavailable' })
-        const res = await api.putBytes<CloudOcrResponse>(
-          ocrReadPath(shiftId, ocrField),
-          prepared.bytes,
-          prepared.mimeType,
-          {},
-          'POST',
-        )
-        onCloudRead(res.ok ? { status: 'read', response: res } : { status: 'failed', reason: res.reason ?? 'no_fields' })
-      } catch {
-        // Offline, or the request was refused. Either way the local reader already ran.
-        onCloudRead({ status: 'failed', reason: 'unavailable' })
-      }
+      const res = await readInCloud(api, shiftId, ocrField, file)
+      onCloudRead(res ? { status: 'read', response: res } : { status: 'failed', reason: 'unavailable' })
     },
     [api, shiftId, ocrField, onCloudRead],
   )

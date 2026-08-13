@@ -18,7 +18,9 @@ import {
   mergeScannedMovements,
   healCutOffRoutes,
   mergeScannedOrders,
+  overlayCloudAmounts,
   previewBr1,
+  readInCloud,
   splitSlot,
   submittableOrders,
   uploadEvidencePath,
@@ -1045,15 +1047,30 @@ function EndPackage({
     [onDraft],
   )
 
-  /** The dashboard tile IS the order scan: the image is the evidence AND what was read. */
+  /**
+   * The dashboard tile IS the order scan: the image is the evidence AND what was read.
+   *
+   * BOTH readers run, and only ONE list is merged. See `overlayCloudAmounts` — two readers merging
+   * their own rows would double every delivery they disagreed about, which is precisely the set of
+   * deliveries the cloud reader was added to fix.
+   */
   const dashImage = useCallback(
     async (file: File): Promise<void> => {
                   patch({ dash: { kind: 'reading' } })
                   const { readOrders } = await import('../ocr.ts')
-                  const r = await readOrders(file).catch(() => null)
+                  // In parallel: the phone reads while the request is in flight, so the cloud costs
+                  // wall-clock only where it is slower than tesseract — which, at 20s locally, is
+                  // rarely.
+                  const [r, cloud] = await Promise.all([
+                    readOrders(file).catch(() => null),
+                    readInCloud(api, shift.id, 'orders', file),
+                  ])
                   onDraft((d) => {
                     if (!r?.ok) return { ...d, dash: { kind: 'failed' } }
-                    const added = mergeScannedOrders(d.orders, r.reading.orders, () => crypto.randomUUID())
+                    const { rows: scanned } = cloud
+                      ? overlayCloudAmounts(r.reading.orders, cloud.rows, 'fee')
+                      : { rows: r.reading.orders }
+                    const added = mergeScannedOrders(d.orders, scanned, () => crypto.randomUUID())
                     // A card sliced off the bottom of the previous page is usually whole at the
                     // top of this one. Its second sighting is de-duplicated away, so without this
                     // its addresses go with it and the row keeps showing a delivery to nowhere.
@@ -1069,17 +1086,27 @@ function EndPackage({
                     }
                   })
     },
-    [onDraft, patch],
+    [onDraft, patch, api, shift.id],
   )
 
+  /** Same rule as the dashboard: both readers run, one list merges. */
   const logImage = useCallback(
     async (file: File): Promise<void> => {
                   patch({ log: { kind: 'reading' } })
                   const { readPaymentsLog } = await import('../ocr.ts')
-                  const r = await readPaymentsLog(file).catch(() => null)
+                  const [r, cloud] = await Promise.all([
+                    readPaymentsLog(file).catch(() => null),
+                    readInCloud(api, shift.id, 'payments_log', file),
+                  ])
                   onDraft((d) => {
                     if (!r?.ok) return { ...d, log: { kind: 'failed' } }
-                    const added = mergeScannedMovements(d.movements, r.reading.movements, () => crypto.randomUUID())
+                    // A payments-log row is SIGNED, and the sign is the difference between money
+                    // arriving and money leaving. `overlayCloudAmounts` carries `value` whole,
+                    // sign included — which is where the local reader loses 13 of its 18 misreads.
+                    const { rows: scanned } = cloud
+                      ? overlayCloudAmounts(r.reading.movements, cloud.rows, 'amount')
+                      : { rows: r.reading.movements }
+                    const added = mergeScannedMovements(d.movements, scanned, () => crypto.randomUUID())
                     return {
                       ...d,
                       movements: [...d.movements, ...added],
@@ -1091,7 +1118,7 @@ function EndPackage({
                     }
                   })
     },
-    [onDraft, patch],
+    [onDraft, patch, api, shift.id],
   )
 
   return (

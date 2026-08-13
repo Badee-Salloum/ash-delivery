@@ -708,3 +708,45 @@ export function driverPhaseFor(
   if (serverState === 'pending_review' && (current === 'orders' || current === 'end')) return { gone: null, phase: 'done' }
   return { gone: null, phase: null }
 }
+
+/**
+ * Put the cloud reader's amounts onto the on-device reader's rows — WITHOUT merging twice.
+ *
+ * This exists because the obvious thing is catastrophic. `mergeScannedOrders` identifies a row by
+ * (day, minute, fee-as-scanned), so if both readers merged their own rows into the same draft, the
+ * keys would differ wherever they disagreed — which is exactly where the cloud is useful — and
+ * every one of those deliveries would appear TWICE. A driver paid once, counted twice, in a
+ * ledger that must balance to zero.
+ *
+ * So exactly one merge happens, over one list. The local reader owns the list: it is the one that
+ * cut the fee strips, found the addresses, and knows which cards were sliced by the screen edge.
+ * The cloud owns the NUMBERS, which is what it is measurably better at — 290 of 311 rows against
+ * 136 across the real corpus.
+ *
+ * THE COUNTS MUST MATCH, or nothing is overlaid.
+ *
+ * Joining by position is only meaningful when both readers saw the same rows. With one row missing
+ * from either side, every row below it shifts up and a positional join silently reassigns a dozen
+ * amounts to the wrong deliveries — far worse than the misreads it was trying to fix. That is the
+ * same rule `scripts/ocr-failures.mjs:9-11` applies when scoring, and for the same reason. A
+ * mismatch is not an error; it just means the driver keeps the local reading, as he did last week.
+ */
+export function overlayCloudAmounts<K extends string, T extends Record<K, string | null>>(
+  local: readonly T[],
+  cloud: readonly { value: string | null; cancelled: boolean }[],
+  key: K,
+): { rows: T[]; overlaid: number } {
+  if (local.length === 0 || local.length !== cloud.length) return { rows: [...local], overlaid: 0 }
+
+  let overlaid = 0
+  const rows = local.map((row, i) => {
+    const said = cloud[i]!
+    // A cancelled order has no amount. Never let a value land on one — the commonest way a reader
+    // invents money is copying the row above into a row that has none.
+    if (said.cancelled) return row[key] === null ? row : { ...row, [key]: null }
+    if (said.value === null || said.value === row[key]) return row
+    overlaid += 1
+    return { ...row, [key]: said.value }
+  })
+  return { rows, overlaid }
+}
