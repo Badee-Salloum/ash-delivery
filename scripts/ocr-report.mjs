@@ -61,10 +61,33 @@ export function collect(outDir) {
  * unusable regardless of which reading is correct.
  */
 function stability(records) {
-  if (records.length < 2) return null
-  const sigs = records.map((r) => (r.rows ?? []).map((x) => (x.value == null ? '∅' : normaliseMoney(x.value))).join('|'))
-  const distinct = [...new Set(sigs)]
-  return { passes: records.length, distinct: distinct.length, stable: distinct.length === 1 }
+  /*
+   * «Unstable» must mean ONE READER answering differently twice — not two readers disagreeing.
+   *
+   * With every model's run in the same folder this compared gemini against gpt against the local
+   * reader and called all of them unstable, which put a red badge on 44 of 48 screens and buried
+   * the thing the badge exists to surface. Models disagreeing is the NORMAL state and is what the
+   * columns are for; the same model contradicting itself at temperature 0 is the alarm.
+   */
+  // Keyed on model AND configuration. gpt-5.6-sol structured and gpt-5.6-sol --raw are the same
+  // model asked two different ways, and calling their disagreement instability would be measuring
+  // the question rather than the reader. Only runs of the SAME config are repeats of each other.
+  const byModel = new Map()
+  for (const r of records) {
+    const m = `${r.model ?? 'unknown'} · ${r.pass ?? '1'}`
+    if (!byModel.has(m)) byModel.set(m, [])
+    byModel.get(m).push(r)
+  }
+  for (const [model, list] of byModel) {
+    if (list.length < 2) continue
+    // Compare the NUMBERS, not the prose. Asked twice, this model described the same two
+    // no-amount rows as "", "?" and "Cancelled" — three correct ways of saying nothing, which a
+    // string compare called a contradiction. What must be identical is what would reach the ledger.
+    const sigs = list.map((r) => (r.rows ?? []).map((x) => String(x.value != null ? normaliseMoney(x.value) : x.printed ? (normaliseMoney(x.printed) ?? '∅') : '∅')).join('|'))
+    const distinct = [...new Set(sigs)]
+    if (distinct.length > 1) return { model, passes: list.length, distinct: distinct.length, stable: false }
+  }
+  return null
 }
 
 function rowsTable(records) {
@@ -103,15 +126,18 @@ export function render(outDir, corpusRoot, imagesBySha) {
   const { runs, byImage } = collect(outDir)
   if (byImage.size === 0) throw new Error(`no results under ${outDir} — run a pass first`)
 
+  const FOCUS = process.argv.find((a) => a.startsWith('--focus='))?.slice(8) ?? 'gemini-3.6-flash'
   const cards = []
   for (const [sha, records] of byImage) {
-    const base = records[0]
+    // The badge describes ONE reader — otherwise it is an average of readers, which is not a thing
+    // anybody needs to know about a screenshot. Everything else stays visible as a column.
+    const base = records.find((r) => (r.model ?? '').includes(FOCUS)) ?? records[0]
     const stab = stability(records)
     const suspects = records.flatMap((r) => (r.score?.suspects ?? []).flat())
     const scored = base.score?.scored === true
     const wrong = scored ? (base.score.wrong?.length ?? 0) + (base.score.missed?.length ?? 0) : 0
     const badge =
-      stab && !stab.stable ? ['unstable', `${stab.distinct} DIFFERENT ANSWERS in ${stab.passes} passes`]
+      stab && !stab.stable ? ['unstable', `${stab.model}: ${stab.distinct} DIFFERENT ANSWERS in ${stab.passes} runs`]
       : suspects.length ? ['flagged', `${suspects.length} self-contradiction${suspects.length > 1 ? 's' : ''}`]
       : wrong ? ['wrong', `${wrong} against truth`]
       : scored ? ['ok', 'matches truth']
