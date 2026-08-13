@@ -230,6 +230,69 @@ re-encrypt procedure is a follow-up). The same mechanism is intended to wrap the
 (`mfa_secret_enc`) — deferred until it can be exercised against real Postgres, so live 2FA is not
 put at risk by an untested at-rest change.
 
+**`OPENAI_API_KEY` (cloud OCR).** Read by the API only when `OCR_DRIVER=openai`; the boot refuses
+that combination without it, naming the variable. Set it in the Vercel project, never in the repo.
+
+---
+
+## 7a. The cloud OCR reader — turning it on, watching it, turning it off
+
+**Turning it on** (three env vars on the `ash-api` Vercel project, then redeploy):
+
+```
+OCR_DRIVER=openai
+OPENAI_API_KEY=sk-…
+OCR_MAX_READS_PER_SHIFT=15        # optional; this is the default
+```
+
+`OPENAI_OCR_MODEL` / `_EFFORT` / `_VERBOSITY` default to **gpt-5.5 / medium / medium**. Those three
+were measured together over 48 real screens and 311 hand-transcribed rows. **Do not change one
+without re-running the benchmark** — dropping effort to `low` cut reasoning tokens 16× and cost
+seven more wrong numbers and three more hundredfold errors:
+
+```bash
+node scripts/vision-bench.mjs --provider=openai --model=gpt-5.5 --effort=medium --verbosity=medium
+node scripts/ocr-compare.mjs                 # the scoreboard; MISREAD is the only column that decides
+node scripts/ocr-failures.mjs --run=<folder>  # every wrong row, with the glyphs it claims to have seen
+```
+
+**TURNING IT OFF — the one thing to know at 3 a.m.** Set `OCR_DRIVER=none` in the Vercel project
+and redeploy. No code change. Every read then answers `unavailable`, the driver's phone falls back
+to its own reader, and nothing else in the app notices. Reach for this if the bill runs away, the
+provider degrades, or a model update starts misreading. **It cannot break a shift**: an OCR failure
+is a 200 with a reason by construction, and no gate consults the reader.
+
+**Watching the bill.** `ocr_reads` is the only cost meter that exists.
+
+```sql
+-- What it cost, by day. gpt-5.5 is $5/1M in, $30/1M out.
+SELECT created_at::date AS day,
+       count(*) AS reads,
+       sum(tokens_in) AS tin, sum(tokens_out) AS tout,
+       round((sum(tokens_in)*5.0 + sum(tokens_out)*30.0) / 1e6, 2) AS usd
+  FROM ocr_reads GROUP BY 1 ORDER BY 1 DESC;
+
+-- How often it fails, and how.
+SELECT field, result->>'reason' AS reason, count(*)
+  FROM ocr_reads WHERE (result->>'ok')::boolean IS NOT TRUE GROUP BY 1,2 ORDER BY 3 DESC;
+
+-- Shifts pressed against the cap: candidates for a higher ceiling, or a driver retaking photos.
+SELECT shift_id, count(*) FROM ocr_reads WHERE shift_id IS NOT NULL
+ GROUP BY 1 HAVING count(*) >= 15;
+```
+
+Budget at 3.7¢/image and ~12 photos a shift: **≈$130/month at ten bikes, ≈$1,300 at a hundred.**
+
+**`maxDuration` is 60s** in `vercel.json` (raised from 30 — a measured read took 24.9s). The fetch
+aborts at `OCR_TIMEOUT_MS`, default 45s, deliberately *inside* that window: set the two equal and
+the socket dies at the same instant the platform gives up, turning a clean 504 into an opaque
+error. If the ceiling ever changes, move the timeout with it and keep the gap.
+
+**Privacy.** These screenshots carry real customer addresses, named businesses and metre-level GPS,
+and they now leave the country. Recorded as `ASSUMPTIONS.md` A-30. The **paid** OpenAI API does not
+train on submitted content by default (30-day retention for abuse review); a free tier is a
+different bargain and this must not be pointed at one.
+
 ---
 
 ## 8. Known operational gaps
