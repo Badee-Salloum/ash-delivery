@@ -107,7 +107,8 @@ for (const r of rows) {
 
 console.log('\n  MISREAD = a different number, silently. BR1 balances it against itself and nobody')
 console.log('            ever finds it. ANY misread disqualifies an engine from money here.')
-console.log('  missed  = a row not read at all. The manager types it. Visible, and therefore safe.')
+console.log('  missed  = a row not read, or REFUSED. The driver types it. Visible, and therefore safe.')
+console.log('            A refusing reader scores badly here and is the SAFE one — read the two together.')
 console.log('  Adopt only if MISREAD is 0.\n')
 
 // A like-for-like column: only the images EVERY run covered, so a short run cannot flatter itself.

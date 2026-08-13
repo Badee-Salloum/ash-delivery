@@ -38,6 +38,7 @@
  * the edges of a line; the middle is stable). `null` route truth means "not checkable here" — a
  * cut-off card or Arabic-Indic coordinates — and whatever is read there is accepted uncounted.
  */
+import fsSync from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -156,7 +157,7 @@ const judge = (field, want, got, contains = false) => {
  * a full-resolution phone screenshot takes.
  */
 async function prepared(file, scale = 1, invert = false) {
-  const img = await loadImage(join(fixtures, file))
+  const img = await loadImage(CORPUS_MODE ? join(CORPUS_ROOT, file) : join(fixtures, file))
   const wanted = { w: Math.round(img.width * scale), h: Math.round(img.height * scale) }
   const longest = Math.max(wanted.w, wanted.h)
   const cap = ocr.OCR_MAX_DIMENSION ?? 2000
@@ -185,8 +186,40 @@ async function prepared(file, scale = 1, invert = false) {
   return { px: ctx.getImageData(0, 0, width, height).data, raw, width, height, canvas, buffer: canvas.toBuffer('image/png') }
 }
 
-for (const [file, truth] of Object.entries(TRUTH)) {
-  const isLog = file.startsWith('log-')
+/*
+ * ── CORPUS MODE, opt-in via --corpus ─────────────────────────────────────────────────────────
+ *
+ * The SHIPPED reader over the same 48 screens the hosted models were measured on, writing the same
+ * per-image records so `ocr-compare.mjs` puts it in the same table. Without this the local reader
+ * and the paid ones are scored on different exams and the comparison is decoration.
+ *
+ * It is a flag rather than a rewrite because everything below is a careful replication of what
+ * `readOrders` actually does — the two-pass invert, the coherence gate, the cap-height rescale, the
+ * psm-4 second look. Duplicating that into a second harness is how two harnesses start measuring
+ * two different readers. With the flag absent, `pnpm check:glyphs` runs byte-identically.
+ */
+const CORPUS_MODE = process.argv.includes('--corpus')
+let CORPUS_ROOT = null
+let corpusOut = null
+let corpusIndex = null
+if (CORPUS_MODE) {
+  const os = await import('node:os')
+  const cm = await import('./ocr-corpus.mjs')
+  CORPUS_ROOT = process.argv.find((a) => a.startsWith('--images='))?.slice(9) ?? join(os.homedir(), 'Desktop', 'داتا التجريب')
+  corpusOut = join(
+    process.argv.find((a) => a.startsWith('--out='))?.slice(6) ?? join(os.homedir(), 'Desktop', 'ash-ocr-runs'),
+    `${new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' })}-LOCAL-glyph-reader-p1`,
+  )
+  corpusIndex = cm
+  fsSync.mkdirSync(join(corpusOut, 'images'), { recursive: true })
+}
+
+const WORK = CORPUS_MODE
+  ? Object.entries(corpusIndex.INDEX).map(([sha, v]) => [v.corpus, { rows: [], sha, corpusRel: v.corpus }])
+  : Object.entries(TRUTH)
+
+for (const [file, truth] of WORK) {
+  const isLog = CORPUS_MODE ? corpusIndex.screenOf(truth.sha) === 'payments_log' : file.startsWith('log-')
   // `readOrders` runs the TEXT pass twice — normal, then inverted — and keeps whichever parsed more
   // rows, breaking early when the first succeeds. The dark-theme English screenshot is read by the
   // second pass, so a harness that only ever tried the first scored its own omission as the
@@ -297,6 +330,25 @@ for (const [file, truth] of Object.entries(TRUTH)) {
   }
 
   console.log(`\n=== ${file} — ${rows.length} rows (${textWins ? 'text' : 'glyph'} path)`)
+  if (CORPUS_MODE) {
+    // Same record shape the vision runs write, so one scorer serves all readers. `value` is left
+    // null and the fee goes in `printed`: the local reader returns an already-normalised string,
+    // and `normaliseMoney` is idempotent over it.
+    const dir = join(corpusOut, 'images', truth.sha)
+    fsSync.mkdirSync(dir, { recursive: true })
+    fsSync.writeFileSync(
+      join(dir, 'local.json'),
+      JSON.stringify({
+        sha: truth.sha, file: truth.corpusRel, fixture: file, provider: 'local', model: 'glyph-reader',
+        runId: 'LOCAL-glyph-reader', screenLocal: corpusIndex.screenOf(truth.sha), path: textWins ? 'text' : 'glyph',
+        rows: rows.map((r) => ({ printed: r.fee ?? '', value: null, time: r.time ?? null, dateIso: r.dateIso ?? null,
+          cancelled: false, hasDecimal: null, hasThousands: null, digitCount: null })),
+        fields: [], notes: null, usage: null,
+      }, null, 1),
+    )
+    console.log(`  → ${rows.length} rows (${textWins ? 'text' : 'glyph'} path)`)
+    continue
+  }
   if (rows.length !== truth.rows.length) {
     // A row that does not ANCHOR is a row the driver types — the same refusal as an unreadable
     // fee, one level up. It is only safe to report it that way because the count is checked
@@ -334,6 +386,16 @@ for (const [file, truth] of Object.entries(TRUTH)) {
   })
 }
 await worker.terminate()
+
+// The floors and ratchets below are calibrated against TRUTH's eight fixtures. In corpus mode the
+// tallies were never filled, so running them would print a regression that says nothing except
+// that a different exam was sat.
+if (CORPUS_MODE) {
+  console.log(`
+wrote ${corpusOut}`)
+  console.log('score it with:  node scripts/ocr-compare.mjs')
+  process.exit(0)
+}
 
 console.log('\n           read  refused  WRONG')
 for (const [field, t] of Object.entries(tally)) {

@@ -32,6 +32,7 @@ const said = (row) => (row == null ? null : row.value != null ? normaliseMoney(r
 
 const shas = readdirSync(join(OUT, RUN, 'images'))
 let misread = 0
+let refused = 0
 let shifted = 0
 const magnitude = []
 
@@ -58,6 +59,16 @@ for (const sha of shas.sort()) {
     const w = normaliseMoney(want[i])
     const got = said(rows[i])
     if (got === w) continue
+    /*
+     * A REFUSAL IS NOT A MISREAD, and conflating them destroys the only distinction that matters.
+     *
+     * The shipped reader answers null when the ٢/٣ margin is too thin, and the driver types that
+     * row. It is visible, it is safe, and it is the reason that reader is trusted with money. A
+     * model that returns a confident wrong number instead is the thing this whole benchmark exists
+     * to find. Counting them in one column made the local reader look like the worst engine here
+     * when it had simply declined to guess 175 times.
+     */
+    if (got === null) { refused += 1; continue }
     misread += 1
     const ratio = got !== null && w !== null && Number(w) !== 0 ? Number(got) / Number(w) : null
     if (ratio !== null && (Math.abs(ratio - 100) < 1 || Math.abs(ratio - 10) < 0.5 || Math.abs(ratio - 0.01) < 0.001 || Math.abs(ratio - 0.1) < 0.01)) {
@@ -83,7 +94,8 @@ for (const sha of shas.sort()) {
   console.log()
 }
 
-console.log(`${misread} rows read as a different number, over ${shas.length} screens.`)
+console.log(`${misread} rows read as a DIFFERENT NUMBER, over ${shas.length} screens.`)
+console.log(`${refused} rows it REFUSED to read — the driver types those. Visible, and therefore safe.`)
 console.log(`${shifted} screen(s) returned the wrong NUMBER of rows and were skipped — position-wise`)
 console.log(`comparison is meaningless once the rows have shifted, so those are counted separately.\n`)
 
