@@ -1,5 +1,139 @@
 # PROGRESS
 
+## 2026-08-13 — the cloud reader: gpt-5.5 reads the screenshots, the phone keeps learning
+
+The owner: «switch the ocr on our side to be gpt 5.5 with this setting / the ocr should run on the
+vercel so we shouldn't need to run vpn». Delivered, with one thing changed by measurement.
+
+### The measurement changed the setting, not the model
+
+The chosen settings — effort **low**, verbosity **low** — came from one playground screen that
+happened to come back perfect. Run over all 48 corpus screens and 311 hand-transcribed rows, they
+are the worst value on the board:
+
+| run | clean | ok | **MISREAD** | ×10/×100 | reasoning | cost |
+| --- | --- | --- | --- | --- | --- | --- |
+| **gpt-5.5 medium/medium** | **35/48** | **290** | **24** | **1** | 21,628 | $1.58 |
+| gpt-5.6-sol | 34/48 | 287 | 27 | — | 11,707 | $1.25 |
+| gpt-5.4 | 28/48 | 281 | 26 | — | 0 | $0.44 |
+| gpt-5.5 low/low | 32/48 | 283 | 31 | 4 | 1,345 | $0.91 |
+| LOCAL glyph reader | 14/48 | 136 | 32 | — | — | free |
+
+Dropping gpt-5.5 from medium to low cut reasoning tokens **16×** and saved 42% of the bill — and
+bought **seven more wrong numbers and three more hundredfold errors** (`٧٥٠` read as 75, `٣٥٠` as
+35, `−٥٠` as −5). On a ledger with zero tolerance that is not a saving. The model choice was right;
+`OPENAI_OCR_EFFORT` and `OPENAI_OCR_VERBOSITY` both default to `medium`, and changing either
+without re-running `scripts/vision-bench.mjs` is changing the reader blind.
+
+`vision-bench.mjs` gained `--verbosity` to make this measurable at all.
+
+### Why the phone keeps reading too
+
+The on-device reader is not being replaced, on the owner's instruction — «keep the local ocr so we
+can train it». Three reasons it earns the space:
+
+- it is the only reader that works with **no signal**, which is the end of a shift in Damascus;
+- it **refuses** when the ٢/٣ margin is thin, and a refusal the driver types is visible and
+  therefore safe. The cloud model refused **zero** rows out of 311, so every error it makes is a
+  confident wrong number that BR1 balances against itself;
+- it is the one being **trained**, and training data is a triple — pixels, what the reader said,
+  what the human confirmed. Migration `0027` adds `reader`/`reading` to the sample tables so both
+  readers' answers survive against the same strip.
+
+### The seam
+
+`OcrReader` and `OcrReadRepo` are new ports in the Infrastructure block beside `BlobStore`.
+`readonly available` mirrors `Cipher` — "not configured" is a state to CHECK, never to throw.
+`packages/adapters/src/ocr/` holds the memory fake (available: false), a scripted one that counts
+its calls, and the OpenAI adapter: raw `fetch`, no SDK, `detail: 'high'` (on `low` the image becomes
+one 512px tile and Arabic-Indic digits stop resolving), no `temperature` (5.x rejects it).
+
+`POST /shifts/:id/ocr/:field` takes raw bytes under `shift.operate` + `shiftSubject` — the same
+grant the evidence upload beside it uses, so no new permission key and no RBAC migration.
+
+**The evidence photo could not be the input.** `PhotoSlot` uploads a copy compressed to 1280px at
+q0.4, which migration `0019` calls "the single largest accuracy lever in the whole feature" and
+which is deliberately too degraded to read. Every accuracy figure above was measured on originals.
+So `compressForOcr()` sends a second, larger copy — 2000px/q0.85, matching the on-device reader's
+own `OCR_MAX_DIMENSION`, and a straight pass-through when the original is already inside it. That
+is the normal case: corpus screenshots are 21–170 KB, often *smaller* than the compressed evidence
+copy of the same photo. The cap exists for the odometer, a camera photo of several megabytes.
+
+### The two paged screens needed a different shape
+
+`mergeScannedOrders` identifies a row by (day, minute, fee-as-scanned). Two readers merging their
+own rows into one draft would key differently wherever they **disagreed** — precisely the set of
+deliveries the cloud reader was added to fix — and every one of them would appear twice. A driver
+paid once, counted twice.
+
+So exactly one merge happens over one list. The local reader owns the list (it cut the strips, found
+the addresses, knows which cards the screen edge sliced); the cloud owns the numbers.
+`overlayCloudAmounts()` joins them **by position** and refuses unless the counts match — with one
+row missing from either side every row below it shifts up. A mismatch is not an error; the driver
+keeps the local reading, as he did last week.
+
+### Spend, and the four ways it is bounded
+
+There was no rate limiting anywhere in this API before today — `@fastify/rate-limit` has been a
+declared dependency that was never registered.
+
+1. **Dedupe by content hash.** `UNIQUE (branch_id, sha256, field)`. A retake, or a retry after a
+   timeout, is never billed twice. Failures are stored too — an unrecorded timeout is one that gets
+   paid for again on the next retry.
+2. **A per-shift cap** (`OCR_MAX_READS_PER_SHIFT`, default 15). Cache hits do not consume it;
+   capping those would punish a driver for a bad connection.
+3. **`OCR_DRIVER=none`** — the kill switch and the default. One env var, no code deploy, and every
+   read falls back to the on-device reader.
+4. **`ocr_reads`** carries `tokens_in`/`tokens_out`/`latency_ms`. It is the only cost telemetry that
+   will exist; watch it for the first day.
+
+Measured 3.7¢/image in production shape (one image per request pays the full prompt; the benchmark
+batches eight and amortises it). At ~12 photos a shift that is **≈$130/month at today's ten bikes**
+and ≈$1,300 at a hundred — a real line item at the target fleet, which is what the switch and the
+cap are for.
+
+### What must never happen, and the tests that say so
+
+An OCR failure cannot fail a money request. `wire.ts:322-337` carries the incident: a misread
+baseline refused a request and a shift balancing to exactly 0.00 could not be handed over because a
+cosmetic field disagreed. The read endpoint answers **200 with a reason** for every upstream
+failure; only a malformed request (not an image, empty body, someone else's shift) is a 4xx.
+
+Nine API tests and nine on the join. `check:glyphs` is byte-identical — `fee≥46 clock≥45 date≥28
+route≥40` — so the on-device reader is provably untouched.
+
+**Recorded, not absorbed:** `ASSUMPTIONS.md` **A-30**. `apps/driver/src/ocr.ts` promised «no photo
+leaves the phone, no cloud»; that is now false and the header says so. These screenshots carry real
+customer addresses, named businesses and metre-level GPS. Mitigating and load-bearing: the **paid**
+OpenAI API does not train on submitted content by default, unlike the Gemini free tier the
+benchmark corpus was sent to.
+
+**Next**
+
+- Turn it on: migrate `0027`, deploy, then `OPENAI_API_KEY` + `OCR_DRIVER=openai` in Vercel.
+  **Migrate first** — an earlier deploy inverted the order and left two minutes where the API named
+  columns that did not exist.
+- Write the local reading into `ocr_samples.reading`; the columns exist, the writer does not yet.
+- Retrain the glyph templates on the 48-image key — 3× the labelled data, and 54% of it contains
+  the ٢/٣ pair the classifier refuses on.
+- Four bugs the benchmark surfaced and this work did not touch: the dropped minus sign (13 of the
+  local reader's 18 misreads — `−٧٣` read as 73, on a log where that turns money leaving into money
+  arriving), `log-h4`'s missing row in `glyph-harvest.mjs`, «غشت» absent from `MONTHS_AR`, and the
+  `،` hole in `normaliseAmount`.
+
+**Risks**
+
+- 🔴 **The cloud reader never refuses.** 24 wrong out of 311, and not one of them announced. The
+  on-device reader's 175 refusals are the safe failure; these are not. The manager's «OCR →
+  confirmed» delta is the only place they surface, and it depends on him looking.
+- 🟠 **`maxDuration` is now 60s** (raised from 30; the measured read was 24.9s). The abort is at
+  45s so a slow read returns a clean 504 rather than a dead socket. Untested against a real
+  provider from `iad1`.
+- 🟠 **Recurring spend on someone else's uptime.** ≈$130/month today, ≈$1,300 at a hundred bikes.
+
+---
+
+
 ## 2026-08-12 — الترميم: the owner's own daily process, built
 
 The owner asked for a redesign of **الصرفيات / خزينة الفرع / الداشبورد** and handed over the
