@@ -1,8 +1,9 @@
-import { type ReactNode, useCallback, useEffect, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { type BatteryReadingInput, checkStartBattery, plural, readInCloud } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { Button, Card, Field, TextInput } from '../ui.tsx'
 import { CloudReadStatus } from './CloudReadStatus.tsx'
+import { ReadingLock } from './ReadingLock.tsx'
 import { type CloudReadEvent, PhotoSlot } from './PhotoSlot.tsx'
 import { SourceMark, sourceOf } from './ReadingSource.tsx'
 
@@ -195,6 +196,13 @@ export function BatteryPanel({
   /** What the cloud reader is doing, per pack. Shown beside the pack's own OCR status. */
   const [cloudEvents, setCloudEvents] = useState<Record<string, CloudReadEvent>>({})
   /**
+   * Packs the cloud has already answered for.
+   *
+   * A REF, not state, because the local read consults it inside a `setPacks` updater that must see
+   * the newest value rather than the one captured when its callback was built.
+   */
+  const cloudAnswered = useRef<Set<string>>(new Set())
+  /**
    * Packs the driver has declared he cannot read on his own phone.
    *
    * Local to this mount on purpose: the server is the record (`unavailable` on the reading row), and
@@ -299,6 +307,26 @@ export function BatteryPanel({
         const prev = cur[battery.id] ?? EMPTY_PACK
         if (!result.ok) return { ...cur, [battery.id]: { ...prev, outcome: result.reason, text: result.text } }
 
+        /*
+         * THE CLOUD ALREADY ANSWERED — stay out of both the values AND the baseline.
+         *
+         * The two readers raced and neither waited for the other, so whichever finished last won —
+         * and they won DIFFERENT HALVES. This local read replaces `ocrRaw` wholesale while only
+         * filling BLANK values, so arriving second it left the cloud's 66% in the field and its own
+         * 11% as the baseline. `matchesOcr` then reported a mismatch, the row shipped as
+         * `source: 'manual'`, and the manager's review announced
+         * «مُعدّل يدوياً · الطاقة المتبقية: 11 → 66» about a number no human had touched.
+         *
+         * A false audit record is worse than a missing one: D-3 exists so a manager can see where a
+         * human disagreed with a machine, and this was inventing disagreements.
+         *
+         * `text` still updates — it is what the PHONE saw, shown behind «تفاصيل تقنية للدعم», and
+         * that is true whoever ended up filling the field.
+         */
+        if (cloudAnswered.current.has(battery.id)) {
+          return { ...cur, [battery.id]: { ...prev, text: result.text } }
+        }
+
         // Only fill a field the driver has not already answered — his typing always wins.
         const values = { ...prev.values }
         for (const f of FIELDS) {
@@ -358,6 +386,8 @@ export function BatteryPanel({
       // timed out, is a pack the driver may be waiting on before he can start the shift.
       setCloudEvents((cur) => ({ ...cur, [battery.id]: e }))
       if (e.status !== 'read') return
+      // Claim this pack before writing, so a local read still in flight leaves it alone.
+      cloudAnswered.current.add(battery.id)
       setPacks((cur) => {
         const prev = cur[battery.id] ?? EMPTY_PACK
         const values = { ...prev.values }
@@ -437,7 +467,11 @@ export function BatteryPanel({
             ? `${t.battery.bmsShot} ${slotNo} · ${battery.capacityAh}Ah`
             : `${t.battery.bmsShot} ${slotNo} · ${t.fleet.groundNo} ${battery.groundNo} · ${battery.capacityAh}Ah`
         return (
-          <div key={battery.id} className="flex flex-col gap-3">
+          // Each pack holds only ITSELF while its read runs: two packs are read one after the
+          // other, and covering the whole panel for the second would freeze the first he has
+          // already finished with.
+          <ReadingLock key={battery.id} active={cloudEvents[battery.id]?.status === 'reading'}>
+          <div className="flex flex-col gap-3">
             {/* The long name is a HEADING now, not the tile's label. «صورة تطبيق البطارية ١ ·
                 الرقم على الأرض D14 · 50Ah» is the longest string in the app, and inside a
                 `justify-between` flex with no truncation it wrapped to four lines and squeezed the
@@ -545,6 +579,7 @@ export function BatteryPanel({
               </Card>
             )}
           </div>
+          </ReadingLock>
         )
       })}
     </>

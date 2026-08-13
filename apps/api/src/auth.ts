@@ -6,14 +6,29 @@ import { type Actor, base32Encode, requires2fa, verifyTotp } from '@ash/domain'
  * Authentication, to SRS §7 and A-1:
  *   • bcrypt password hashes
  *   • account lock after 5 failed attempts
- *   • 30-minute sessions, idle-sliding
+ *   • idle-sliding sessions
  *   • opaque DB-backed sessions, so revocation is immediate
  *
- * A stateless JWT cannot honour a 30-minute *idle* timeout or instant revocation without a
- * server-side blocklist — which is a session table wearing a disguise. So: sessions.
+ * A stateless JWT cannot honour an *idle* timeout or instant revocation without a server-side
+ * blocklist — which is a session table wearing a disguise. So: sessions.
  */
 
-export const SESSION_IDLE_MS = 30 * 60 * 1000
+/**
+ * How long a session survives with no activity. **Idle**, not absolute — every authenticated
+ * request slides it forward, so this is the gap between actions, never the length of a shift.
+ *
+ * RAISED FROM 30 MINUTES on the owner's instruction: «يجب ان يصبح مدة الجلسة اطول». Thirty minutes
+ * was read off SRS §7 for an office console, and a driver is not at a console. He opens the app to
+ * start his shift, rides for hours, and comes back to a login screen at the branch counter with a
+ * manager waiting — having lost an unsent close package to a timer that was protecting a phone
+ * already locked by its own PIN.
+ *
+ * Eight hours covers a shift end to end. It is a real loosening and worth naming as one: a stolen
+ * unlocked phone stays signed in for a working day rather than half an hour. Two things bound the
+ * damage — a driver holds `shift.operate` scoped to his OWN shift and can see nobody else's money,
+ * and sessions are DB-backed, so revoking one is immediate rather than a wait for expiry.
+ */
+export const SESSION_IDLE_MS = 8 * 60 * 60 * 1000
 export const MAX_FAILED_ATTEMPTS = 5
 export const LOCKOUT_MS = 15 * 60 * 1000
 export const SESSION_COOKIE = 'ash_session'

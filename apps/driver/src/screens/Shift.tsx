@@ -36,6 +36,7 @@ import { BatteryPanel, type FittedBattery, type PackState, restorePacks } from '
 import { BatterySwap, type SpareBattery } from './BatterySwap.tsx'
 import { PageGrid } from './PageGrid.tsx'
 import { CloudReadStatus } from './CloudReadStatus.tsx'
+import { ReadingLock } from './ReadingLock.tsx'
 import { type CloudReadEvent, PhotoSlot } from './PhotoSlot.tsx'
 import { SourceMark, sourceOf } from './ReadingSource.tsx'
 
@@ -558,6 +559,8 @@ function StartPackage({
   const [odoStrip, setOdoStrip] = useState<string | null>(null)
   /** What the cloud reader is doing with the odometer photo. `null` until one is picked. */
   const [odoCloud, setOdoCloud] = useState<CloudReadEvent | null>(null)
+  /** Set once the cloud has answered, so a slower local read cannot overwrite its baseline. */
+  const odoCloudAnswered = useRef(false)
   /** Kept so a timed-out read can be retried without another trip to the gallery. */
   const [odoFile, setOdoFile] = useState<File | null>(null)
   const [odoShot, setOdoShot] = useState(false)
@@ -579,6 +582,15 @@ function StartPackage({
       const result = await readDashboard(file)
       // The picture it worked from, kept either way — see `odoStrip`.
       setOdoStrip((cur) => cur ?? result.sample ?? null)
+      /*
+       * THE CLOUD ALREADY ANSWERED — do not touch the field or the baseline.
+       *
+       * Same race as the battery packs. The two readers run concurrently and neither waits, so a
+       * local read finishing second used to leave the cloud's value in the box and its own in
+       * `odoOcr`, and the manager's review reported a manual edit nobody had made. The strip is
+       * still kept: it is training material and belongs to the phone either way.
+       */
+      if (odoCloudAnswered.current) return
       // A failed read is not silent any more, but the odometer tile has no status line of its own
       // — the driver simply types, which is what he was going to do anyway.
       if (!result.ok) return
@@ -608,6 +620,7 @@ function StartPackage({
     // read that timed out, are both things the driver standing in front of the bike needs told.
     setOdoCloud(e)
     if (e.status !== 'read') return
+    odoCloudAnswered.current = true
     // The reader is told to label it «odometer»; accept the obvious variants rather than failing
     // on a synonym, since a wrong label costs the whole read.
     const raw =
@@ -813,6 +826,7 @@ function StartPackage({
         </Card>
       ) : null}
       {ocrBusy ? <p className="text-center text-sm text-slate-600">{t.shift.reading}…</p> : null}
+      <ReadingLock active={odoCloud?.status === 'reading'}>
       <Card className="flex flex-col gap-3">
         <Field label={t.shift.odometer}>
           <TextInput inputMode="numeric" value={odo} onChange={(e) => setOdo(e.target.value)} />
@@ -829,6 +843,7 @@ function StartPackage({
           {...(odoFile ? { onRetry: () => void retryOdoCloud(odoFile) } : {})}
         />
       </Card>
+      </ReadingLock>
       {/* One screenshot and one set of numbers per pack fitted — the same count the gate reads. */}
       {shiftId ? (
         <BatteryPanel
