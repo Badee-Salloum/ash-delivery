@@ -141,6 +141,8 @@ export class OpenAiOcrReader implements OcrReader {
       printed: String(r.printed ?? ''),
       value: r.value == null ? null : String(r.value),
       cancelled: r.cancelled === true,
+      time: r.time == null ? null : String(r.time),
+      dateIso: r.dateIso == null ? null : String(r.dateIso),
     }))
     const fields: Record<string, string | null> = {}
     for (const f of parsed.fields ?? []) {
@@ -169,7 +171,13 @@ interface OpenAiResponse {
 }
 
 interface ParsedScreen {
-  rows?: Array<{ printed?: string; value?: string | null; cancelled?: boolean }>
+  rows?: Array<{
+    printed?: string
+    value?: string | null
+    cancelled?: boolean
+    time?: string | null
+    dateIso?: string | null
+  }>
   fields?: Array<{ label?: string; value?: string | null }>
   notes?: string | null
 }

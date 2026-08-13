@@ -87,6 +87,17 @@ export interface OcrRow {
   printed: string
   value: string | null
   cancelled: boolean
+  /** 24-hour `HH:MM`. */
+  time: string | null
+  /**
+   * `YYYY-MM-DD`, from the nearest date header ABOVE this row — not from today's clock.
+   *
+   * A screen can carry MORE THAN ONE header: one corpus screenshot runs «Friday, August 7» for its
+   * top row and «Thursday, August 6» for the rest. Get this wrong and every fee is right while
+   * every order lands on the wrong day, which is exactly how a shift's orders end up on a
+   * neighbouring business date.
+   */
+  dateIso: string | null
 }
 
 export type OcrResult =

@@ -56,7 +56,12 @@ async function openShift(driver: string, manager: string): Promise<string> {
 /** One clean answer, repeated. `ScriptedOcrReader` counts how many times it was actually reached. */
 const scripted = (): ScriptedOcrReader =>
   new ScriptedOcrReader([
-    { ok: true, rows: [{ printed: '٥٬٠٠٠', value: '5000', cancelled: false }], fields: {}, raw: null },
+    {
+      ok: true,
+      rows: [{ printed: '٥٬٠٠٠', value: '5000', cancelled: false, time: '13:10', dateIso: '2026-07-21' }],
+      fields: {},
+      raw: null,
+    },
   ])
 
 describe('cloud OCR: the same pixels are never billed twice', () => {
@@ -71,7 +76,9 @@ describe('cloud OCR: the same pixels are never billed twice', () => {
     expect(first.statusCode, first.body).toBe(200)
     expect(first.json().ok).toBe(true)
     expect(first.json().cached).toBe(false)
-    expect(first.json().rows).toEqual([{ printed: '٥٬٠٠٠', value: '5000', cancelled: false }])
+    expect(first.json().rows).toEqual([
+      { printed: '٥٬٠٠٠', value: '5000', cancelled: false, time: '13:10', dateIso: '2026-07-21' },
+    ])
     expect(reader.calls).toBe(1)
 
     // The driver's connection dropped and the phone retried. Same photo, same answer, no money.

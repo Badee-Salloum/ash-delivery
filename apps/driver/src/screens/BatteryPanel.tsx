@@ -2,7 +2,7 @@ import { type ReactNode, useCallback, useEffect, useState } from 'react'
 import { type BatteryReadingInput, checkStartBattery, plural } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { Button, Card, Field, TextInput } from '../ui.tsx'
-import { PhotoSlot } from './PhotoSlot.tsx'
+import { type CloudReadEvent, PhotoSlot } from './PhotoSlot.tsx'
 import { SourceMark, sourceOf } from './ReadingSource.tsx'
 
 export interface FittedBattery {
@@ -283,6 +283,50 @@ export function BatteryPanel({
     [push],
   )
 
+  /**
+   * The BMS screen read in the CLOUD.
+   *
+   * Unlike the money screens, nothing here reaches BR1 — a battery percentage is telemetry, and a
+   * misread costs a manager a second look rather than a ledger that will not balance. What it does
+   * carry is a GATE: `batteryGaps` refuses to open a shift on a pack whose percent is null,
+   * deliberately, because "the driver uploaded the screenshot and the OCR came back empty is
+   * exactly the case a gate must catch rather than wave through". So a cloud read that fills the
+   * field must be as trustworthy as one the driver typed — which is why it still only PREFILLS,
+   * and `matchesOcr` still decides whether the row is recorded as `ocr` or `manual`.
+   *
+   * These screens are English/Latin-digit and regularly laid out, so this is the easiest of the
+   * five for either reader. The cloud earns its place here mostly on the Arabic-light variant.
+   */
+  const cloudRead = useCallback(
+    (battery: FittedBattery, e: CloudReadEvent): void => {
+      if (e.status !== 'read') return
+      setPacks((cur) => {
+        const prev = cur[battery.id] ?? EMPTY_PACK
+        const values = { ...prev.values }
+        let filled = 0
+        for (const f of FIELDS) {
+          // The reader labels what it finds; match on the label we asked for, case-insensitively,
+          // rather than on position — a BMS app is a label/value table, not a fixed layout.
+          const entry = Object.entries(e.response.fields).find(
+            ([label]) => label.toLowerCase().replace(/[^a-z]/g, '') === f.label.toLowerCase(),
+          )
+          const raw = entry?.[1]
+          if (raw == null) continue
+          const cleaned = raw.replace(/[^\d.]/g, '')
+          if (cleaned === '') continue
+          filled += 1
+          // Still only fills a BLANK field. The driver's typing beats both readers, always.
+          if (values[f.key].trim() === '') values[f.key] = cleaned
+        }
+        if (filled === 0) return cur
+        const next: PackState = { ...prev, values, outcome: 'ok', fieldsFound: filled }
+        void push(battery.id, next)
+        return { ...cur, [battery.id]: next }
+      })
+    },
+    [push],
+  )
+
   if (batteries.length === 0) {
     return (
       <Card>
@@ -321,6 +365,8 @@ export function BatteryPanel({
                     setFiles((cur) => ({ ...cur, [battery.id]: file }))
                     void runOcr(battery, file)
                   }}
+                  ocrField="bms"
+                  onCloudRead={(e) => cloudRead(battery, e)}
                 />
               </div>
               <p className="min-w-0 flex-1 text-sm font-medium text-slate-700">{label}</p>

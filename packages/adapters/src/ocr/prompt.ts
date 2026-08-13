@@ -81,7 +81,7 @@ export const READ_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['hasDecimal', 'hasThousands', 'digitCount', 'printed', 'value', 'cancelled'],
+        required: ['hasDecimal', 'hasThousands', 'digitCount', 'printed', 'value', 'time', 'dateIso', 'cancelled'],
         properties: {
           hasDecimal: {
             type: 'boolean',
@@ -102,6 +102,11 @@ export const READ_SCHEMA = {
           value: {
             type: ['string', 'null'],
             description: 'STRING, never a number. Western digits, "." decimal, sign kept. "-165.50" keeps its trailing zero. null if the row has no amount.',
+          },
+          time: { type: ['string', 'null'], description: '24-hour HH:MM. Arabic "م" is PM, "ص" is AM.' },
+          dateIso: {
+            type: ['string', 'null'],
+            description: 'YYYY-MM-DD from the nearest date header ABOVE this row — not from today. The year is 2026.',
           },
           cancelled: { type: 'boolean' },
         },

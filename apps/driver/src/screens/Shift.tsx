@@ -580,6 +580,35 @@ function StartPackage({
     }
   }, [])
 
+  /**
+   * The odometer read in the CLOUD, and this is the one worth having.
+   *
+   * Migration `0022`'s header records what the on-device reader does with this photograph: wrong
+   * THREE TIMES OUT OF THREE — 200 for 6948, 229 for 5426, and a refusal. Its failure is not a
+   * misread digit but a wrong CHOICE of number on a dashboard that also shows a trip meter and a
+   * voltage, which is the hardest thing to fix with better glyph templates and the easiest thing
+   * for a model that can read the labels around it.
+   *
+   * So this OVERWRITES the local baseline rather than deferring to it — `setOdoOcr(km)`, not
+   * `?? km`. What it does not overwrite is a number the driver has typed.
+   */
+  const odoCloudRead = useCallback((e: CloudReadEvent): void => {
+    if (e.status !== 'read') return
+    // The reader is told to label it «odometer»; accept the obvious variants rather than failing
+    // on a synonym, since a wrong label costs the whole read.
+    const raw =
+      e.response.fields.odometer ?? e.response.fields.odo ?? e.response.fields.km ?? e.response.fields.mileage
+    if (raw == null) return
+    // Digits only. «ODO 02611 km» must not become 2611000 because "km" carried digits, and a
+    // fractional odometer is not a thing this dashboard prints.
+    const digits = raw.replace(/[^\d]/g, '')
+    if (digits === '') return
+    const km = Number(digits)
+    if (!Number.isSafeInteger(km) || km < 0) return
+    setOdoOcr(km)
+    setOdo((cur) => (cur === '' ? String(km) : cur))
+  }, [])
+
   // Create the draft shift once, so the odometer photo has a shift to attach to. If this fails the
   // driver must be TOLD: swallowing it left the camera tile stuck on "loading" with no way to know
   // the bike was already on someone else's shift.
@@ -729,6 +758,8 @@ function StartPackage({
             setStartSlots((cur) => new Set(cur).add(slot))
           }}
           onImage={runOcr}
+          ocrField="odometer"
+          onCloudRead={odoCloudRead}
         />
       ) : (
         <Card>
