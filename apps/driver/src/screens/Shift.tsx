@@ -33,6 +33,7 @@ import { OperationsList } from './OrderEntry.tsx'
 import { BatteryPanel, type FittedBattery, type PackState, restorePacks } from './BatteryPanel.tsx'
 import { BatterySwap, type SpareBattery } from './BatterySwap.tsx'
 import { PageGrid } from './PageGrid.tsx'
+import { CloudReadStatus } from './CloudReadStatus.tsx'
 import { type CloudReadEvent, PhotoSlot } from './PhotoSlot.tsx'
 import { SourceMark, sourceOf } from './ReadingSource.tsx'
 
@@ -102,6 +103,8 @@ interface EndDraft {
   wallet: string
   /** What `readWallet` OCR'd, kept even if the driver edits the field (SRS D-3 baseline). */
   walletOcr: string | null
+  /** What the CLOUD reader is doing with the wallet photo — running, done, or why it failed. */
+  walletCloud: CloudReadEvent | null
   /** The wallet screen as the reader worked on it — training material. */
   walletStrip: string | null
   /** The closing dashboard as the reader worked on it. */
@@ -137,6 +140,7 @@ const EMPTY_END_DRAFT: EndDraft = {
   cash: '',
   wallet: '',
   walletOcr: null,
+  walletCloud: null,
   walletStrip: null,
   odoStrip: null,
   odo: '',
@@ -551,6 +555,10 @@ function StartPackage({
    * currently getting wrong, about to be labelled by the driver typing the right number.
    */
   const [odoStrip, setOdoStrip] = useState<string | null>(null)
+  /** What the cloud reader is doing with the odometer photo. `null` until one is picked. */
+  const [odoCloud, setOdoCloud] = useState<CloudReadEvent | null>(null)
+  /** Kept so a timed-out read can be retried without another trip to the gallery. */
+  const [odoFile, setOdoFile] = useState<File | null>(null)
   const [odoShot, setOdoShot] = useState(false)
   const [busy, setBusy] = useState(false)
   const [ocrBusy, setOcrBusy] = useState(false)
@@ -595,6 +603,9 @@ function StartPackage({
    * `?? km`. What it does not overwrite is a number the driver has typed.
    */
   const odoCloudRead = useCallback((e: CloudReadEvent): void => {
+    // Every event is kept now, not just the successful one. A read that is still running, and a
+    // read that timed out, are both things the driver standing in front of the bike needs told.
+    setOdoCloud(e)
     if (e.status !== 'read') return
     // The reader is told to label it «odometer»; accept the obvious variants rather than failing
     // on a synonym, since a wrong label costs the whole read.
@@ -610,6 +621,24 @@ function StartPackage({
     setOdoOcr(km)
     setOdo((cur) => (cur === '' ? String(km) : cur))
   }, [])
+
+  /**
+   * Read the odometer photo again after a timeout, from the file already in hand.
+   *
+   * A timeout is the one failure worth offering a button for: it means the reader ANSWERED too
+   * slowly, not that it refused, so the same pixels often succeed on a second attempt. The server
+   * caches by content hash, so a retry that lands after the first one finally arrives costs
+   * nothing — and neither does one that fails again.
+   */
+  const retryOdoCloud = useCallback(
+    async (file: File): Promise<void> => {
+      if (!shiftId) return
+      setOdoCloud({ status: 'reading' })
+      const res = await readInCloud(api, shiftId, 'odometer', file)
+      odoCloudRead(res ? { status: 'read', response: res } : { status: 'failed', reason: 'unavailable' })
+    },
+    [api, shiftId, odoCloudRead],
+  )
 
   // Create the draft shift once, so the odometer photo has a shift to attach to. If this fails the
   // driver must be TOLD: swallowing it left the camera tile stuck on "loading" with no way to know
@@ -759,7 +788,10 @@ function StartPackage({
             setOdoShot(true)
             setStartSlots((cur) => new Set(cur).add(slot))
           }}
-          onImage={runOcr}
+          onImage={(file) => {
+            setOdoFile(file)
+            void runOcr(file)
+          }}
           ocrField="odometer"
           onCloudRead={odoCloudRead}
         />
@@ -788,6 +820,13 @@ function StartPackage({
             nowhere until now, so a pre-filled OCR odometer and one typed from memory looked
             identical. This reader was wrong three times out of three on real shifts. */}
         <SourceMark source={sourceOf({ ocrValue: odoOcr, hadImage: odoStrip !== null, value: odo })} />
+        {/* The odometer is the screen the on-device reader is WORST at — migration 0022 records it
+            wrong three times out of three — so it is also the one where a silent cloud failure
+            costs the most. Retry re-reads the file already in hand; no second trip to the gallery. */}
+        <CloudReadStatus
+          event={odoCloud}
+          {...(odoFile ? { onRetry: () => void retryOdoCloud(odoFile) } : {})}
+        />
       </Card>
       {/* One screenshot and one set of numbers per pack fitted — the same count the gate reads. */}
       {shiftId ? (
@@ -1034,6 +1073,9 @@ function EndPackage({
    */
   const walletCloudRead = useCallback(
     (e: CloudReadEvent): void => {
+      // Kept whatever it says. A wallet balance is the one figure in the close package that BR1
+      // checks against counted cash, so a silently-failed read here is worth a line on screen.
+      onDraft((d) => ({ ...d, walletCloud: e }))
       if (e.status !== 'read') return
       // One balance on this screen: the first row it returns with a value.
       const amount = e.response.rows.find((row) => row.value !== null)?.value
@@ -1266,6 +1308,9 @@ function EndPackage({
               <MoneyInput value={wallet} onChange={(e) => patch({ wallet: e.target.value })} />
             </Field>
             <SourceMark source={sourceOf({ ocrValue: walletOcr, hadImage: draft.walletStrip !== null, value: wallet })} />
+            {/* The wallet balance is the one figure BR1 checks against counted cash, so a read
+                that quietly never finished is worth a line rather than a blank tile. */}
+            <CloudReadStatus event={draft.walletCloud} />
           </div>
         </div>
 

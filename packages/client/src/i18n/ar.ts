@@ -202,6 +202,21 @@ export const ar = {
     endShift: 'إنهاء النوبة',
     reading: 'جارٍ قراءة الصورة',
     readingMayTake: '(قد تستغرق ٢٠ ثانية)',
+    /*
+     * The cloud reader, said out loud. It used to say nothing at all: the wallet and odometer
+     * tiles sat blank for up to twenty-five seconds while a model read the photo, and when it
+     * failed they sat blank for good. The driver had no way to know whether to keep waiting.
+     *
+     * «القارئ الذكي» rather than a brand name — it is the reader, not a supplier, and the model
+     * behind it is a setting the owner can change without touching a word of this.
+     */
+    cloudReading: 'القارئ الذكي يقرأ الصورة…',
+    cloudRead: 'قرأها القارئ الذكي',
+    /** Distinct from a plain failure: it ANSWERED too slowly, so trying again may well work. */
+    cloudTimeout: 'استغرقت القراءة وقتاً طويلاً — اضغط لإعادة المحاولة، أو أدخِل الرقم يدوياً',
+    cloudUnavailable: 'تعذّر الوصول إلى القارئ الذكي — قراءة الهاتف مستخدَمة، راجع الأرقام',
+    cloudNoFields: 'لم يتعرّف القارئ الذكي على أي رقم في هذه الصورة',
+    cloudRetry: 'إعادة المحاولة',
     busyVehicle: 'على نوبة الآن',
     resumeShift: 'متابعة نوبتك',
     resumeHint: 'لديك نوبة غير منتهية — أكملها من حيث توقفت',

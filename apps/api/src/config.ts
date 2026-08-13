@@ -92,8 +92,17 @@ const schema = z.object({
   /**
    * Strictly below the platform's function ceiling (`vercel.json`), so a slow read returns a clean
    * 504 instead of the socket dying at the same instant the platform gives up.
+   *
+   * 50s against a 60s ceiling. **The owner asked for two minutes and this is not it** — Vercel's
+   * Hobby plan caps a Node function at 60 seconds, full stop, so 120s is unreachable without Pro.
+   * Raise `maxDuration` to 120 there and the deploy is rejected outright.
+   *
+   * Worth knowing before paying for it: across the first live reads the slowest was **18.8s** and
+   * the average **10.6s**, with zero timeouts. 50s is already 2.7× the worst case observed. If a
+   * genuine timeout ever appears in `ocr_reads` (`result->>'reason' = 'timeout'`) that is the
+   * evidence for the upgrade; until then this is headroom, not a fix.
    */
-  OCR_TIMEOUT_MS: z.coerce.number().int().positive().default(45_000),
+  OCR_TIMEOUT_MS: z.coerce.number().int().positive().default(50_000),
   /**
    * A runaway guard, not a business rule — the same framing `MAX_SHIFTS_PER_DAY` uses.
    *

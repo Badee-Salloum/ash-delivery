@@ -195,6 +195,13 @@ export const en: Catalog = {
     endShift: 'Finish shift',
     reading: 'Reading the photo',
     readingMayTake: '(may take 20 seconds)',
+    cloudReading: 'The smart reader is reading the photo…',
+    cloudRead: 'Read by the smart reader',
+    /** Distinct from a plain failure: it ANSWERED too slowly, so trying again may well work. */
+    cloudTimeout: 'Reading took too long — tap to try again, or type the number in',
+    cloudUnavailable: 'Could not reach the smart reader — using the phone’s reading, check the numbers',
+    cloudNoFields: 'The smart reader found no number in this photo',
+    cloudRetry: 'Try again',
     busyVehicle: 'On a shift now',
     resumeShift: 'Resume your shift',
     resumeHint: 'You have an unfinished shift — pick up where you left off',

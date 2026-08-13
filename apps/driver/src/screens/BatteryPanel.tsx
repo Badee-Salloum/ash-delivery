@@ -1,7 +1,8 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
-import { type BatteryReadingInput, checkStartBattery, plural } from '@ash/client'
+import { type BatteryReadingInput, checkStartBattery, plural, readInCloud } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { Button, Card, Field, TextInput } from '../ui.tsx'
+import { CloudReadStatus } from './CloudReadStatus.tsx'
 import { type CloudReadEvent, PhotoSlot } from './PhotoSlot.tsx'
 import { SourceMark, sourceOf } from './ReadingSource.tsx'
 
@@ -191,6 +192,8 @@ export function BatteryPanel({
   const [packs, setPacks] = useState<Record<string, PackState>>(() => initialPacks ?? {})
   useEffect(() => onPacksChanged?.(packs), [packs, onPacksChanged])
   const [files, setFiles] = useState<Record<string, File>>({})
+  /** What the cloud reader is doing, per pack. Shown beside the pack's own OCR status. */
+  const [cloudEvents, setCloudEvents] = useState<Record<string, CloudReadEvent>>({})
   /**
    * Packs the driver has declared he cannot read on his own phone.
    *
@@ -330,8 +333,30 @@ export function BatteryPanel({
    * These screens are English/Latin-digit and regularly laid out, so this is the easiest of the
    * five for either reader. The cloud earns its place here mostly on the Arabic-light variant.
    */
+  /**
+   * Read this pack's screenshot again after a timeout, from the file already in hand.
+   *
+   * Worth a button here specifically because `batteryGaps` treats a null charge as a missing
+   * reading and refuses to open the shift on it — so a pack whose read timed out is a pack the
+   * driver is blocked on, and sending him back to the gallery for a photo the app is still
+   * holding would be the app wasting his time.
+   */
+  const retryCloud = useCallback(
+    async (battery: FittedBattery, file: File): Promise<void> => {
+      setCloudEvents((cur) => ({ ...cur, [battery.id]: { status: 'reading' } }))
+      const res = await readInCloud(api, shiftId, 'bms', file)
+      cloudRead(battery, res ? { status: 'read', response: res } : { status: 'failed', reason: 'unavailable' })
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- cloudRead is declared below; both are
+    // stable for the lifetime of the panel and referencing it here would be a cycle.
+    [api, shiftId],
+  )
+
   const cloudRead = useCallback(
     (battery: FittedBattery, e: CloudReadEvent): void => {
+      // Every event, not only the successful one. A pack whose cloud read is still running, or
+      // timed out, is a pack the driver may be waiting on before he can start the shift.
+      setCloudEvents((cur) => ({ ...cur, [battery.id]: e }))
       if (e.status !== 'read') return
       setPacks((cur) => {
         const prev = cur[battery.id] ?? EMPTY_PACK
@@ -442,6 +467,16 @@ export function BatteryPanel({
               state={state}
               missing={FIELDS.filter((f) => state.values[f.key].trim() === '').length}
               onRetry={files[battery.id] ? () => void runOcr(battery, files[battery.id]!) : undefined}
+            />
+            {/* The cloud read runs alongside the phone's and finishes at its own pace, so it gets
+                its own line rather than fighting `OcrStatus` for one. A pack with no charge
+                reading cannot open a shift — `batteryGaps` refuses it — so a cloud read still
+                running is something the driver is genuinely waiting on. */}
+            <CloudReadStatus
+              event={cloudEvents[battery.id] ?? null}
+              {...(files[battery.id]
+                ? { onRetry: () => void retryCloud(battery, files[battery.id]!) }
+                : {})}
             />
 
             {unavailable.has(battery.id) ? (
