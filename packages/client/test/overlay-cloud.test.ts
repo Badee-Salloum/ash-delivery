@@ -267,3 +267,51 @@ describe('when the phone reads nothing at all', () => {
     expect(mergeScannedMovements([], rows, newId)).toHaveLength(2)
   })
 })
+
+describe('the clock, when the phone reads a fee but not a time', () => {
+  it('fills a blank time and date from the cloud', () => {
+    /*
+     * FROM A LIVE CLOSE. The phone produced four rows off «الطلبات الحديثة» with their clocks
+     * blank — it reads «١٠:٣١ م» far less reliably than it reads a fee — while the cloud had
+     * returned 22:31 and 2026-08-05 for every one. The overlay carried the amount and nothing
+     * else, so all four cards showed «/» where the time should be.
+     */
+    const local = [{ fee: '130', time: '', dateIso: null }]
+    const said = [{ value: '130', cancelled: false, time: '22:31', dateIso: '2026-08-05' }]
+    const { rows } = overlayCloudAmounts(local, said, 'fee')
+    expect(rows[0]).toEqual({ fee: '130', time: '22:31', dateIso: '2026-08-05' })
+  })
+
+  it('NEVER overwrites a time the phone did read', () => {
+    // Identity is (day, minute, route). Changing a clock the phone read would change the row's
+    // identity between one page and the next depending on whether the cloud answered — the exact
+    // instability that took the fee out of the key. Blank→value is monotonic; value→value is not.
+    const local = [{ fee: '130', time: '22:31', dateIso: '2026-08-05' }]
+    const said = [{ value: '130', cancelled: false, time: '09:99', dateIso: '1999-01-01' }]
+    const { rows } = overlayCloudAmounts(local, said, 'fee')
+    expect(rows[0]).toEqual({ fee: '130', time: '22:31', dateIso: '2026-08-05' })
+  })
+
+  it('makes two sightings of one delivery AGREE rather than disagree', () => {
+    const newId = (() => { let n = 0; return () => `c-${++n}` })()
+    // Page A: the phone missed the clock, the cloud supplied it.
+    const pageA = overlayCloudAmounts(
+      [{ fee: '130', time: '', dateIso: '', pointA: 'مأكولات الشام' }],
+      [{ value: '130', cancelled: false, time: '22:31', dateIso: '2026-08-05' }],
+      'fee',
+    ).rows
+    const existing = mergeScannedOrders([], pageA, newId)
+    expect(existing).toHaveLength(1)
+
+    // Page B overlaps and the phone reads the clock this time. Same delivery, same key.
+    const pageB = [{ dateIso: '2026-08-05', time: '22:31', fee: '130', pointA: 'مأكولات الشام' }]
+    expect(mergeScannedOrders(existing, pageB, newId), 'one delivery, not two').toHaveLength(0)
+  })
+
+  it('leaves a row untouched when the cloud has no clock either', () => {
+    const local = [{ fee: '130', time: '', dateIso: null }]
+    const said = [{ value: '130', cancelled: false, time: null, dateIso: null }]
+    const { rows } = overlayCloudAmounts(local, said, 'fee')
+    expect(rows[0]).toEqual({ fee: '130', time: '', dateIso: null })
+  })
+})

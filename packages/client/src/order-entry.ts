@@ -790,14 +790,39 @@ export function driverPhaseFor(
  */
 export function overlayCloudAmounts<K extends string, T extends Record<K, string | null>>(
   local: readonly T[],
-  cloud: readonly { value: string | null; cancelled: boolean }[],
+  cloud: readonly {
+    value: string | null
+    cancelled: boolean
+    /** Filled onto the local row when the phone read no clock. See below. */
+    time?: string | null
+    dateIso?: string | null
+  }[],
   key: K,
 ): { rows: (T & { scannedAs?: string })[]; overlaid: number } {
   if (local.length === 0 || local.length !== cloud.length) return { rows: [...local], overlaid: 0 }
 
   let overlaid = 0
-  const rows = local.map((row, i) => {
+  const rows = local.map((rawRow, i) => {
     const said = cloud[i]!
+
+    /*
+     * THE CLOCK AND THE DAY, filled where the phone has none.
+     *
+     * This function used to carry the amount and nothing else, and the amount is not the only thing
+     * the phone gets wrong. On a live close the phone produced four rows off «الطلبات الحديثة» with
+     * their clocks blank — it reads «١٠:٣١ م» far less reliably than it reads a fee — while the
+     * cloud had returned 22:31, 21:48, 21:22, 20:28 and the correct 2026-08-05 for every one. The
+     * overlay replaced the four fees, kept the four blanks, and the driver saw «/» where the time
+     * should be on all four cards.
+     *
+     * FILLED, NEVER OVERWRITTEN, and that distinction is load-bearing. A row's merge identity is
+     * (day, minute, route), so changing a clock the phone DID read would change the row's identity
+     * between one page and the next depending on whether the cloud answered — the same instability
+     * that took the fee out of the key. Going from blank to a value is monotonic: it can only make
+     * two sightings of one delivery agree, never disagree.
+     */
+    const row = fillClock(rawRow, said)
+
     // A cancelled order has no amount. Never let a value land on one — the commonest way a reader
     // invents money is copying the row above into a row that has none.
     if (said.cancelled) return row[key] === null ? row : { ...row, [key]: null }
@@ -817,6 +842,23 @@ export function overlayCloudAmounts<K extends string, T extends Record<K, string
     return { ...row, [key]: said.value, ...(asRead !== null ? { scannedAs: asRead } : {}) }
   })
   return { rows, overlaid }
+}
+
+/** Fill a blank `time` / `dateIso` from the cloud's reading. Never replaces one that is present. */
+function fillClock<T extends object>(
+  row: T,
+  said: { time?: string | null; dateIso?: string | null },
+): T {
+  const held = row as { time?: string | null; dateIso?: string | null }
+  const blank = (v: string | null | undefined): boolean => v === null || v === undefined || v === ''
+  const takeTime = blank(held.time) && !blank(said.time)
+  const takeDate = blank(held.dateIso) && !blank(said.dateIso)
+  if (!takeTime && !takeDate) return row
+  return {
+    ...row,
+    ...(takeTime ? { time: said.time } : {}),
+    ...(takeDate ? { dateIso: said.dateIso } : {}),
+  }
 }
 
 /**

@@ -108,8 +108,17 @@ export function OperationsList({
   }
 
   const checkedCount = orders.filter((o) => o.included !== false).length
-  // «YYYY-MM-DD» → «DD/MM», which is how the date is written on the screen being copied.
-  const dayMonth = (iso: string): string => `${iso.slice(8, 10)}/${iso.slice(5, 7)}`
+  /*
+   * «YYYY-MM-DD» → «DD/MM», which is how the date is written on the screen being copied.
+   *
+   * The emptiness check is not defensive padding. Given '' this returned a bare «/» — two empty
+   * slices around a separator — which is TRUTHY, so the `|| '—'` fallback at the call site never
+   * fired and four order cards displayed a lone slash where their time should have been. The
+   * driver could not tell a missing clock from a rendering fault, and neither could I until the
+   * pixels were in front of me.
+   */
+  const dayMonth = (iso: string): string =>
+    iso.length >= 10 ? `${iso.slice(8, 10)}/${iso.slice(5, 7)}` : ''
 
   /**
    * IN THE ORDER THE DAY HAPPENED, newest first — which is how the screen he is copying from reads.
