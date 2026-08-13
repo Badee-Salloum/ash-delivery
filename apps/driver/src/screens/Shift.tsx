@@ -31,7 +31,7 @@ import { OperationsList } from './OrderEntry.tsx'
 import { BatteryPanel, type FittedBattery, type PackState, restorePacks } from './BatteryPanel.tsx'
 import { BatterySwap, type SpareBattery } from './BatterySwap.tsx'
 import { PageGrid } from './PageGrid.tsx'
-import { PhotoSlot } from './PhotoSlot.tsx'
+import { type CloudReadEvent, PhotoSlot } from './PhotoSlot.tsx'
 import { SourceMark, sourceOf } from './ReadingSource.tsx'
 
 /**
@@ -964,7 +964,14 @@ function EndPackage({
     }
   }
 
-  /** The wallet screenshot: read the balance, and keep the picture either way. */
+  /**
+   * The wallet screenshot, read ON DEVICE.
+   *
+   * Still runs on every photo, and its answer is still kept — but it is no longer the one that
+   * fills the field when the cloud reader answers. Two reasons it stays: it is the only reader
+   * that works with no signal, and it is the one being TRAINED, which needs its own reading beside
+   * the strip and the driver's confirmed value.
+   */
   const walletImage = useCallback(
     async (file: File): Promise<void> => {
                   const { readWallet } = await import('../ocr.ts')
@@ -974,11 +981,35 @@ function EndPackage({
                   if (!r.ok) return
                   onDraft((d) => ({
                     ...d,
-                    // The FIRST read is the baseline and stays it; the field is only pre-filled
-                    // while the driver has not answered — his typing always wins.
+                    // LOCAL FILLS ONLY WHAT IS STILL EMPTY. If the cloud answered first its value
+                    // is already here and stands; if it never answers, this is the whole reading.
+                    // Either way the driver's own typing wins over both.
                     walletOcr: d.walletOcr ?? r.reading.amountText,
                     wallet: d.wallet === '' ? r.reading.amountText : d.wallet,
                   }))
+    },
+    [onDraft],
+  )
+
+  /**
+   * The same wallet screenshot, read in the CLOUD — and this is the reading that counts.
+   *
+   * Measured over 48 real screens against a 311-row hand-built key: 290 rows right to the local
+   * reader's 136. So it overwrites the local baseline rather than deferring to it, which is what
+   * keeps the manager's «OCR → confirmed» delta describing the reader that actually suggested the
+   * number. What it does NOT overwrite is anything the driver has typed.
+   */
+  const walletCloudRead = useCallback(
+    (e: CloudReadEvent): void => {
+      if (e.status !== 'read') return
+      // One balance on this screen: the first row it returns with a value.
+      const amount = e.response.rows.find((row) => row.value !== null)?.value
+      if (amount == null) return
+      onDraft((d) => ({
+        ...d,
+        walletOcr: amount,
+        wallet: d.wallet === '' ? amount : d.wallet,
+      }))
     },
     [onDraft],
   )
@@ -1168,6 +1199,8 @@ function EndPackage({
               uploaded={slots.has('wallet')}
               onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
               onImage={walletImage}
+              ocrField="wallet"
+              onCloudRead={walletCloudRead}
             />
           </div>
           <div className="flex min-w-0 flex-1 flex-col gap-1">

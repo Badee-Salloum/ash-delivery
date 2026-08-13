@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { type MemoryDeps, createMemoryDeps } from '@ash/adapters/memory'
+import type { OcrReader } from '@ash/contracts'
 import { type Minor, businessDateFor, minor } from '@ash/domain'
 import { buildApp } from '../src/app.ts'
 import { SESSION_COOKIE } from '../src/auth.ts'
@@ -42,8 +43,16 @@ export interface Harness {
   ): Promise<Record<string, unknown>>
 }
 
-export async function makeHarness(opts: { splitGate?: 'advisory' | 'strict' } = {}): Promise<Harness> {
+export async function makeHarness(
+  opts: {
+    splitGate?: 'advisory' | 'strict'
+    /** Swap in a reader that answers. The default one reports `available: false` and never calls out. */
+    ocr?: OcrReader
+    maxOcrReadsPerShift?: number
+  } = {},
+): Promise<Harness> {
   const deps = createMemoryDeps(NOW_MS)
+  if (opts.ocr) deps.ocr = opts.ocr
 
   // Two governorates so a cross-governorate branch number can be exercised: Damascus branch 1 and
   // Aleppo branch 1 are both legal, because branch numbers are unique WITHIN a governorate.
@@ -104,7 +113,11 @@ export async function makeHarness(opts: { splitGate?: 'advisory' | 'strict' } = 
     })
   }
 
-  const app = await buildApp({ deps, ...(opts.splitGate ? { splitGate: opts.splitGate } : {}) })
+  const app = await buildApp({
+    deps,
+    ...(opts.splitGate ? { splitGate: opts.splitGate } : {}),
+    ...(opts.maxOcrReadsPerShift !== undefined ? { maxOcrReadsPerShift: opts.maxOcrReadsPerShift } : {}),
+  })
 
   const cookieFor = (token: string) => `${SESSION_COOKIE}=${token}`
 

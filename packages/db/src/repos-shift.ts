@@ -15,6 +15,9 @@ import type {
   VehicleTypeRecord,
   MediaRecord,
   MediaRepo,
+  OcrField,
+  OcrReadRecord,
+  OcrReadRepo,
   CashCountRecord,
   CashCountRepo,
   DirectoryRepo,
@@ -946,6 +949,83 @@ const toMedia = (r: Record<string, unknown>): MediaRecord => ({
   clientTakenAtMs: r.client_taken_at === null ? null : (r.client_taken_at as Date).getTime(),
   receivedAtMs: (r.received_at as Date).getTime(),
   uploadedBy: String(r.uploaded_by ?? ''),
+})
+
+// ── The cloud reader's receipts (0027) ───────────────────────────────────────────────────
+
+/**
+ * The dedupe cache, the per-shift cap counter and the cost meter, in one table.
+ *
+ * `put` is an upsert on the content address rather than a plain insert: two devices reading the
+ * same screenshot at the same moment must settle on one row, and the second must get the first's
+ * record back rather than a unique-violation. `DO UPDATE SET sha256 = EXCLUDED.sha256` is a no-op
+ * write that exists only so `RETURNING *` has a row to return — the same trick `PgMediaRepo.put`
+ * uses for the same reason.
+ */
+export class PgOcrReadRepo implements OcrReadRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async findBySha(branchId: string, sha256: string, field: OcrField): Promise<OcrReadRecord | null> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM ocr_reads WHERE branch_id = $1 AND sha256 = $2 AND field = $3',
+      [branchId, sha256, field],
+    )
+    return rows[0] ? toOcrRead(rows[0]) : null
+  }
+
+  async put(record: OcrReadRecord): Promise<OcrReadRecord> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `INSERT INTO ocr_reads (id, branch_id, shift_id, field, sha256, byte_size, model, result,
+                              tokens_in, tokens_out, latency_ms, created_at, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,to_timestamp($12::double precision/1000),$13)
+       ON CONFLICT (branch_id, sha256, field) DO UPDATE SET sha256 = EXCLUDED.sha256
+       RETURNING *`,
+      [
+        record.id,
+        record.branchId,
+        record.shiftId,
+        record.field,
+        record.sha256,
+        record.byteSize,
+        record.model,
+        JSON.stringify(record.result),
+        record.tokensIn,
+        record.tokensOut,
+        record.latencyMs,
+        record.createdAt,
+        record.createdBy,
+      ],
+    )
+    return toOcrRead(rows[0]!)
+  }
+
+  async countBilledForShift(shiftId: string): Promise<number> {
+    const { rows } = await this.pool.query<{ n: string }>(
+      'SELECT count(*)::text AS n FROM ocr_reads WHERE shift_id = $1',
+      [shiftId],
+    )
+    return Number(rows[0]?.n ?? '0')
+  }
+}
+
+const toOcrRead = (r: Record<string, unknown>): OcrReadRecord => ({
+  id: String(r.id),
+  branchId: String(r.branch_id),
+  shiftId: (r.shift_id as string | null) ?? null,
+  field: r.field as OcrField,
+  sha256: String(r.sha256),
+  byteSize: Number(r.byte_size),
+  model: String(r.model),
+  // `jsonb` comes back already parsed by node-postgres; it is the reader's own answer, stored whole.
+  result: r.result as OcrReadRecord['result'],
+  tokensIn: Number(r.tokens_in),
+  tokensOut: Number(r.tokens_out),
+  latencyMs: Number(r.latency_ms),
+  createdAt: (r.created_at as Date).getTime(),
+  createdBy: String(r.created_by),
 })
 
 // ── Expenses and settings (SRS G, A-4) ───────────────────────────────────────────────────

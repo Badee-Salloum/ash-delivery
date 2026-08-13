@@ -1,10 +1,27 @@
 /**
  * On-device OCR (SRS §D, assisted variant).
  *
- * Tesseract.js runs entirely in the browser — no photo leaves the phone, no cloud, and it works on
- * the Damascus network once the assets are cached. The whole library (worker + wasm core +
- * traineddata) is loaded ONLY through a lazy `import()`, so it never touches the ~70 KB entry
- * bundle; the assets are self-hosted under `/tesseract/` (staged by scripts/copy-tesseract.mjs).
+ * Tesseract.js runs entirely in the browser and works on the Damascus network once the assets are
+ * cached. The whole library (worker + wasm core + traineddata) is loaded ONLY through a lazy
+ * `import()`, so it never touches the ~70 KB entry bundle; the assets are self-hosted under
+ * `/tesseract/` (staged by scripts/copy-tesseract.mjs).
+ *
+ * ⚠️ THIS FILE USED TO SAY «no photo leaves the phone, no cloud». That is no longer true of the
+ * APP, and the correction belongs here rather than in a changelog nobody reads. Since 2026-08-13 a
+ * second, CLOUD reader runs beside this one (`POST /shifts/:id/ocr/:field` → gpt-5.5), on the
+ * owner's instruction and recorded as `ASSUMPTIONS.md` A-30. What is still true is that THIS reader
+ * sends nothing anywhere, and that is most of why it is being kept:
+ *
+ *   • it is the only reader that works with no signal, which is the end of a shift in Damascus;
+ *   • it REFUSES when the ٢/٣ margin is too thin, and a refusal the driver types is visible and
+ *     therefore safe — the cloud model never refuses, so every error it makes is a confident wrong
+ *     number that BR1 balances against itself;
+ *   • it is the one being TRAINED. Its reading is stored beside the strip and the driver's
+ *     confirmed value, which is the labelled triple the glyph templates are rebuilt from.
+ *
+ * Measured over 48 real screens (`scripts/vision-bench.mjs`, 311 hand-transcribed rows): this
+ * reader gets 136 right and declines 175; gpt-5.5 at medium effort gets 290 and declines none.
+ * Where the cloud answers, the cloud is authoritative.
  *
  * Two readers, two very different jobs:
  *

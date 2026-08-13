@@ -20,6 +20,7 @@ import {
   PgDirectoryRepo,
   PgExpenseRepo,
   PgMediaRepo,
+  PgOcrReadRepo,
   PgSettingsRepo,
   PgTierRepo,
   PgAssignmentRepo,
@@ -157,6 +158,10 @@ if (!DATABASE_URL) {
         media: new PgMediaRepo(pool),
         // Blob storage is not a database concern; the suite exercises MediaRepo, not bytes.
         blobs: notYetImplemented('BlobStore'),
+        // A paid vision model is not a database concern either, and a suite that reached for it
+        // would bill somebody. Its receipts, however, ARE a table, so that one is real.
+        ocr: notYetImplemented('OcrReader'),
+        ocrReads: new PgOcrReadRepo(pool),
         fx: new PgFxRepo(pool),
         weekLocks: new PgWeekLockRepo(pool),
         audit: new PgAuditRepo(pool),

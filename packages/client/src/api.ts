@@ -317,9 +317,21 @@ export class ApiClient {
     return this.request<T>('DELETE', this.scoped(path))
   }
 
-  /** Raw bytes for evidence upload — never base64, never multipart. */
-  putBytes<T>(path: string, bytes: Uint8Array, contentType: string, extraHeaders: Record<string, string> = {}): Promise<T> {
-    return this.request<T>('PUT', path, bytes, { 'content-type': contentType, ...extraHeaders })
+  /**
+   * Raw bytes for evidence upload — never base64, never multipart.
+   *
+   * `method` exists because the cloud OCR read posts bytes to a different verb: an upload PUTs to
+   * an addressable slot, whereas a read creates nothing and is a POST. Defaulted, so every existing
+   * call site is unchanged.
+   */
+  putBytes<T>(
+    path: string,
+    bytes: Uint8Array,
+    contentType: string,
+    extraHeaders: Record<string, string> = {},
+    method: 'PUT' | 'POST' = 'PUT',
+  ): Promise<T> {
+    return this.request<T>(method, path, bytes, { 'content-type': contentType, ...extraHeaders })
   }
 
   // ── Auth ──────────────────────────────────────────────────────────────────────────────────
@@ -891,4 +903,31 @@ export class ApiClient {
 /** Uploading evidence needs the shift id, package, slot and the compressed bytes. */
 export function uploadEvidencePath(shiftId: string, pkg: 'start' | 'end', slot: string): string {
   return `/shifts/${shiftId}/media/${pkg}/${encodeURIComponent(slot)}`
+}
+
+/** Which screen the cloud reader is being asked about. Mirrors `OcrField` on the server. */
+export type CloudOcrField = 'orders' | 'payments_log' | 'wallet' | 'odometer' | 'bms'
+
+export interface CloudOcrResponse {
+  ok: boolean
+  cached: boolean
+  reads: { used: number; max: number }
+  rows: Array<{ printed: string; value: string | null; cancelled: boolean }>
+  fields: Record<string, string | null>
+  reason?: 'unavailable' | 'timeout' | 'no_fields' | 'refused'
+}
+
+/**
+ * Read one screen with the cloud model.
+ *
+ * A SEPARATE upload from the evidence one, carrying LARGER bytes, and that is the point rather
+ * than an inefficiency: the evidence copy is compressed to 1280 px at quality 0.4 to be cheap to
+ * store, which also puts its body text below what any reader can resolve. See `compressForOcr`.
+ *
+ * Never throws for a failed read — the server answers 200 with `ok: false` and a reason, because a
+ * reader that can fail a request can fail a shift. It still throws for a malformed request (415 on
+ * a body that is not an image, 403 on someone else's shift), which is a bug, not a bad photo.
+ */
+export function ocrReadPath(shiftId: string, field: CloudOcrField): string {
+  return `/shifts/${shiftId}/ocr/${field}`
 }

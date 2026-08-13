@@ -1,6 +1,19 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
-import { compressImage, uploadEvidencePath } from '@ash/client'
+import {
+  type CloudOcrField,
+  type CloudOcrResponse,
+  compressForOcr,
+  compressImage,
+  ocrReadPath,
+  uploadEvidencePath,
+} from '@ash/client'
 import { useApp } from '../app-context.tsx'
+
+/** What the cloud read is doing. One `reading`, then exactly one terminal event. */
+export type CloudReadEvent =
+  | { status: 'reading' }
+  | { status: 'read'; response: CloudOcrResponse }
+  | { status: 'failed'; reason: 'unavailable' | 'timeout' | 'no_fields' | 'refused' }
 
 /**
  * An evidence tile: pick an image, compress it, upload it, and show what happened.
@@ -28,6 +41,17 @@ export interface PhotoSlotProps {
    * it costs nothing to hand it the real pixels.
    */
   onImage?(file: File): void
+  /**
+   * Which screen the CLOUD reader should be asked about, if any. Omitted = no cloud read at all.
+   *
+   * The cloud model is authoritative where it answers: it reads 290 of 311 rows across the real
+   * corpus against the on-device reader's 136. But the two are kept side by side deliberately —
+   * they fail differently, the local one REFUSES rather than guessing, and it is the one being
+   * trained on what the driver confirms.
+   */
+  ocrField?: CloudOcrField
+  /** Progress and result of the cloud read. Called with `reading` first, then exactly one outcome. */
+  onCloudRead?(event: CloudReadEvent): void
   /**
    * `gallery` (the default) lets the driver pick what he already has; `camera` forces a live shot.
    *
@@ -71,6 +95,8 @@ export function PhotoSlot({
   label,
   onUploaded,
   onImage,
+  ocrField,
+  onCloudRead,
   source = 'gallery',
   uploaded = false,
   variant = 'row',
@@ -107,6 +133,38 @@ export function PhotoSlot({
     }
   }, [picked, variant])
 
+  /**
+   * The cloud read, isolated so nothing it does can reach the upload path.
+   *
+   * Every failure mode ends the same way: tell the caller it did not work, and let the on-device
+   * reading stand. A model that is down, a cap that is reached, an image too big to send and a
+   * phone with no signal are one outcome from the driver's side — he keeps the reader in his hand.
+   */
+  const runCloudRead = useCallback(
+    async (file: File) => {
+      if (!ocrField || !onCloudRead) return
+      onCloudRead({ status: 'reading' })
+      try {
+        const prepared = await compressForOcr(file)
+        // `null` means it would still be too large for the request body. Refusing to send beats a
+        // 413 the driver has to interpret.
+        if (!prepared) return onCloudRead({ status: 'failed', reason: 'unavailable' })
+        const res = await api.putBytes<CloudOcrResponse>(
+          ocrReadPath(shiftId, ocrField),
+          prepared.bytes,
+          prepared.mimeType,
+          {},
+          'POST',
+        )
+        onCloudRead(res.ok ? { status: 'read', response: res } : { status: 'failed', reason: res.reason ?? 'no_fields' })
+      } catch {
+        // Offline, or the request was refused. Either way the local reader already ran.
+        onCloudRead({ status: 'failed', reason: 'unavailable' })
+      }
+    },
+    [api, shiftId, ocrField, onCloudRead],
+  )
+
   const onPick = useCallback(
     async (file: File) => {
       setPicked(file)
@@ -116,6 +174,21 @@ export function PhotoSlot({
       // at the end of a shift the upload failed, `onImage` was never reached, and the driver
       // hand-typed thirty orders the phone could have read while standing still.
       onImage?.(file)
+
+      /*
+       * THEN the cloud read, started here and NOT awaited.
+       *
+       * Order matters and this is third on purpose. The evidence upload below is the one that
+       * BR5 gates on — a shift cannot open or close without it — so it must never queue behind a
+       * vision model that can take twenty-five seconds. The cloud read is the fastest way to a
+       * filled-in field, but it is the least important of the three: without it the driver has
+       * the on-device reader, and without that he has a keyboard.
+       *
+       * `ocrField` being undefined means this slot has no cloud reader wired up, which is the
+       * state every slot is in until its screen opts in.
+       */
+      if (ocrField && onCloudRead) void runCloudRead(file)
+
       try {
         const { bytes, mimeType } = await compressImage(file)
         // THE FILE'S OWN TIMESTAMP, not the clock.

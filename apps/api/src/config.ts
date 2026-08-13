@@ -58,6 +58,50 @@ const schema = z.object({
    * plaintext. Never defaulted — a guessable key is no key. See RUNBOOK for generation.
    */
   ENCRYPTION_KEY: z.string().optional(),
+
+  /**
+   * The cloud OCR reader. `none` is the default and the kill switch.
+   *
+   * Flip this to `none` and every read falls back to the on-device reader with no code deploy —
+   * which is what you want at 3 a.m. when the provider is down, the bill is running away, or a new
+   * model turns out to read Arabic-Indic digits worse than the last one. `BLOB_DRIVER` is the
+   * pattern; this is the same shape for the same reason.
+   */
+  OCR_DRIVER: z.enum(['none', 'openai']).default('none'),
+  OPENAI_API_KEY: z.string().optional(),
+  /**
+   * MEASURED, not chosen from a price page. 48 real screens, 311 hand-transcribed rows,
+   * `scripts/vision-bench.mjs`, scored by `scripts/ocr-compare.mjs`:
+   *
+   *   gpt-5.5   medium/medium   35/48 clean   290 ok   24 misread   1 magnitude error   $1.58
+   *   gpt-5.6-sol                34/48        287      27           —                   $1.25
+   *   gpt-5.4                    28/48        281      26           —                   $0.44
+   *   gpt-5.5   low/low          32/48        283      31           4 magnitude errors   $0.91
+   *
+   * The effort dial is the whole story. Dropping gpt-5.5 from medium to low cut reasoning tokens
+   * 16× and saved 42% of the bill — and bought SEVEN more wrong numbers and three more
+   * hundredfold errors. On a ledger with zero tolerance that is not a saving.
+   *
+   * These three move together. Changing one without re-running the benchmark is changing the
+   * reader blind: `medium` effort with `low` verbosity has never been measured, so it is not the
+   * default even though it looks like the cheap half of a good setting.
+   */
+  OPENAI_OCR_MODEL: z.string().default('gpt-5.5'),
+  OPENAI_OCR_EFFORT: z.enum(['low', 'medium', 'high']).default('medium'),
+  OPENAI_OCR_VERBOSITY: z.enum(['low', 'medium', 'high']).default('medium'),
+  /**
+   * Strictly below the platform's function ceiling (`vercel.json`), so a slow read returns a clean
+   * 504 instead of the socket dying at the same instant the platform gives up.
+   */
+  OCR_TIMEOUT_MS: z.coerce.number().int().positive().default(45_000),
+  /**
+   * A runaway guard, not a business rule — the same framing `MAX_SHIFTS_PER_DAY` uses.
+   *
+   * A three-pack bike needs ten mandatory photos a shift plus extra dashboard and payments-log
+   * pages. Fifteen covers that with room for retakes; past it the driver still has the on-device
+   * reader and a keyboard.
+   */
+  OCR_MAX_READS_PER_SHIFT: z.coerce.number().int().positive().default(15),
 })
 
 export type Config = z.infer<typeof schema>
@@ -86,6 +130,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   if (config.BLOB_DRIVER === 'vercel' && !config.BLOB_READ_WRITE_TOKEN) {
     throw new Error('BLOB_DRIVER=vercel requires BLOB_READ_WRITE_TOKEN (link a Vercel Blob store to the project)')
+  }
+
+  if (config.OCR_DRIVER === 'openai' && !config.OPENAI_API_KEY) {
+    throw new Error('OCR_DRIVER=openai requires OPENAI_API_KEY')
   }
 
   return config

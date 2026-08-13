@@ -47,6 +47,7 @@ import { registerNotificationRoutes } from './notification.routes.ts'
 import { registerTierRoutes } from './tier.routes.ts'
 import { registerTreasuryRoutes } from './treasury.routes.ts'
 import { MAX_UPLOAD_BYTES, readEvidence, uploadEvidence } from './media.service.ts'
+import { OCR_FIELDS_TUPLE, readScreen } from './ocr.service.ts'
 import {
   ServiceError,
   addOrder,
@@ -81,6 +82,8 @@ export interface AppOptions {
   deps: Deps
   logger?: boolean
   splitGate?: 'advisory' | 'strict'
+  /** Runaway guard on paid cloud OCR. Defaults here so a test never has to think about spend. */
+  maxOcrReadsPerShift?: number
 }
 
 export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
@@ -754,6 +757,46 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         deduped: result.deduped,
         clockSkewMs: result.clockSkewMs,
         slots: result.slotsNow,
+      })
+    },
+  )
+
+  /**
+   * Read a screen with the cloud model (SRS D, un-deferred).
+   *
+   * Raw bytes, like the upload beside it — but these are the ORIGINAL pixels, not the compressed
+   * evidence copy, because the compression that makes evidence cheap to store also makes it
+   * unreadable. Two uploads of one photograph, deliberately.
+   *
+   * `shift.operate` + `shiftSubject` is the same pair the upload route uses: only a driver on his
+   * OWN shift, plus the system admin. No new permission key, so no `DEFAULT_GRANTS` edit and no
+   * RBAC migration.
+   *
+   * Always 200. A read that failed says so in the body — see the header of `ocr.service.ts` for
+   * why an OCR limb must never be able to fail a money limb.
+   */
+  app.post(
+    '/shifts/:id/ocr/:field',
+    {
+      config: { permission: 'shift.operate', subject: shiftSubject },
+      bodyLimit: MAX_UPLOAD_BYTES,
+    },
+    async (req, reply) => {
+      const params = z.object({ id: z.string(), field: z.enum(OCR_FIELDS_TUPLE) }).parse(req.params)
+      const out = await readScreen(deps, {
+        shiftId: params.id,
+        field: params.field,
+        bytes: new Uint8Array(req.body as Buffer),
+        requestedBy: req.actor!.userId,
+        maxReadsPerShift: opts.maxOcrReadsPerShift ?? 15,
+      })
+      return reply.send({
+        ok: out.result.ok,
+        cached: out.cached,
+        reads: out.reads,
+        ...(out.result.ok
+          ? { rows: out.result.rows, fields: out.result.fields }
+          : { reason: out.result.reason, rows: [], fields: {} }),
       })
     },
   )

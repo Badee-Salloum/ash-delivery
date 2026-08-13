@@ -88,6 +88,16 @@ const PROVIDER = arg('provider', 'gemini')
 const EFFORT = arg('effort', 'default')
 
 /**
+ * OpenAI 5.x output verbosity. `default` omits the field entirely.
+ *
+ * Worth a flag rather than a constant because on a transcription task it is very close to a PRICE
+ * knob: output is roughly three quarters of the bill at $30/1M against $5/1M in, and a terser model
+ * has less room to editorialise around the number we asked for. Whether it also costs accuracy is
+ * the thing to measure — a reader that says less could equally be a reader that looked less.
+ */
+const VERBOSITY = arg('verbosity', 'default')
+
+/**
  * `--raw` asks for a PLAIN TRANSCRIPTION and no schema at all, and we do every bit of the parsing.
  *
  * Worth testing rather than assuming, because the structured mode measurably changes the answer:
@@ -438,6 +448,7 @@ const PROVIDERS = {
        * governed by reasoning effort, not by a sampling knob.
        */
       ...(EFFORT === 'default' ? {} : { reasoning_effort: EFFORT }),
+      ...(VERBOSITY === 'default' ? {} : { verbosity: VERBOSITY }),
       ...(RAW ? {} : { response_format: { type: 'json_schema', json_schema: { name: 'screens', strict: true, schema: strictify(SCHEMA) } } }),
     }),
     extract: (json) => {
@@ -698,6 +709,12 @@ async function main() {
         pass: PASS,
         model: MODEL,
         runId,
+        // The knobs, stored with the answer. A run folder that does not say what settings produced
+        // it is not a measurement — and `gpt-5.5` at low effort and at medium effort are two
+        // different readers wearing one name.
+        effort: EFFORT,
+        verbosity: VERBOSITY,
+        batch: BATCH,
         screenSaid: entry.screen,
         screenLocal: localScreen,
         screenAgrees: entry.screen === localScreen,

@@ -3,6 +3,7 @@
   "framework": null,
   "installCommand": "pnpm install --frozen-lockfile --prod=false",
   "buildCommand": "node scripts/build-api.mjs",
-  "functions": { "api/index.mjs": { "memory": 1024, "maxDuration": 30 } },
+  "comment": "maxDuration 60 (the Hobby ceiling), raised from 30 for the cloud OCR route. A vision read of one screenshot at detail:high was measured at 24.9s, which left no headroom at all. This is a CEILING, not a delay: every other route still returns in milliseconds. OCR_TIMEOUT_MS defaults to 45000 so the fetch aborts cleanly INSIDE this window — set the two equal and the socket dies at the same instant the platform gives up, turning a clean 504 into an opaque error. No `regions` key on purpose: the default iad1 is what lets the API call OpenAI from the US, which is why Damascus needs no VPN.",
+  "functions": { "api/index.mjs": { "memory": 1024, "maxDuration": 60 } },
   "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }]
 }

@@ -52,12 +52,14 @@ import { normalizeUsername } from '@ash/contracts'
 import { type CalendarDate, type FxDay, type Minor, type Posting, isAwaitingDecision, isLive, minor } from '@ash/domain'
 import { memoryCipher } from '../crypto.ts'
 import { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
+import { MemoryOcrReadRepo, MemoryOcrReader } from '../ocr/memory.ts'
 import { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
 import { MemoryCashCountRepo } from './cashcount.ts'
 import { MemoryOfficeCapitalTargetRepo, MemoryRestorationRepo } from './restoration.ts'
 import { MemoryNotificationRepo, MemoryTierRepo } from './tiers.ts'
 
 export { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
+export { MemoryOcrReadRepo, MemoryOcrReader, ScriptedOcrReader } from '../ocr/memory.ts'
 export { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
 export { MemoryCashCountRepo } from './cashcount.ts'
 export { MemoryOfficeCapitalTargetRepo, MemoryRestorationRepo } from './restoration.ts'
@@ -1039,6 +1041,7 @@ export interface MemoryDeps extends Deps {
   clock: FixedClock
   media: MemoryMediaRepo
   blobs: MemoryBlobStore
+  ocrReads: MemoryOcrReadRepo
   expenses: MemoryExpenseRepo
   cashCounts: MemoryCashCountRepo
   capitalTargets: MemoryOfficeCapitalTargetRepo
@@ -1089,6 +1092,10 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     settings: new MemorySettingsRepo(),
     media,
     blobs: new MemoryBlobStore(),
+    // `available: false`. Every test that exists today inherits a reader that never calls out, so
+    // adding this port cannot make anything start hitting the network by accident.
+    ocr: new MemoryOcrReader(),
+    ocrReads: new MemoryOcrReadRepo(),
     fx: new MemoryFxRepo(),
     weekLocks: new MemoryWeekLockRepo(ledger),
     audit: new MemoryAuditRepo(),

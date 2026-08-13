@@ -65,6 +65,8 @@ const AUDIT_EXEMPT = {
     'research material, not money: insert-once pixels beside what OCR made of them, deletable on a retention policy; the approved fee it is compared against lives on the audited shift_orders row',
   ocr_samples:
     'same as ocr_fee_samples, generalised to every reader: insert-once pixels, no money, no ground truth (joined from the audited owning row at export), deletable on a retention policy',
+  ocr_reads:
+    'a receipt, not a decision: insert-once record of what a paid vision model was asked and what it answered, holding no money and editable by nobody. The value it suggested lands on the audited shift/order row, which is where a correction is visible',
   gps_pings: 'high-volume append-only telemetry (SRS K); auditing every ping would dwarf the audit log',
   battery_swaps: 'append-only event log; its substance — the pack fitment change on batteries and the swap_out/swap_in readings — is already audited, and the route appends an explicit audit row',
   audit_log: 'the audit log itself',

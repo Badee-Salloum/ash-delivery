@@ -1,7 +1,8 @@
 import { LocalDiskBlobStore, S3BlobStore, VercelBlobStore, assertDurableBlobStore } from '@ash/adapters/blob'
 import { MemoryBlobStore, createMemoryDeps } from '@ash/adapters/memory'
 import { cipherFromKey } from '@ash/adapters/crypto'
-import type { BlobStore, Deps } from '@ash/contracts'
+import { MemoryOcrReader, OpenAiOcrReader } from '@ash/adapters/ocr'
+import type { BlobStore, Deps, OcrReader } from '@ash/contracts'
 import {
   PgAuditRepo,
   PgCashCountRepo,
@@ -13,6 +14,7 @@ import {
   PgLedgerRepo,
   PgMediaRepo,
   PgNotificationRepo,
+  PgOcrReadRepo,
   PgOrderRepo,
   PgWalletMovementRepo,
   PgSessionRepo,
@@ -69,10 +71,30 @@ function buildBlobStore(config: Config): BlobStore {
   }
 }
 
+/**
+ * `none` returns a reader that reports `available: false` and never calls out. That is the DEFAULT,
+ * so a deploy that forgets the env var degrades to the on-device reader rather than to an error.
+ */
+function buildOcrReader(config: Config): OcrReader {
+  switch (config.OCR_DRIVER) {
+    case 'openai':
+      return new OpenAiOcrReader({
+        apiKey: config.OPENAI_API_KEY!,
+        model: config.OPENAI_OCR_MODEL,
+        effort: config.OPENAI_OCR_EFFORT,
+        verbosity: config.OPENAI_OCR_VERBOSITY,
+        timeoutMs: config.OCR_TIMEOUT_MS,
+      })
+    case 'none':
+      return new MemoryOcrReader()
+  }
+}
+
 export async function buildDeps(config: Config): Promise<BuiltDeps> {
   const blobs = buildBlobStore(config)
   // Refuses to boot production against storage that loses evidence on redeploy.
   assertDurableBlobStore(blobs, config.NODE_ENV)
+  const ocr = buildOcrReader(config)
 
   const clock = new SystemClock(config.TZ_OFFSET_MINUTES)
   const ids = new CryptoIdGen()
@@ -84,7 +106,7 @@ export async function buildDeps(config: Config): Promise<BuiltDeps> {
     // Development only — loadConfig() refuses this combination in production.
     const memory = createMemoryDeps(Date.now())
     return {
-      deps: { ...memory, clock, ids, hasher, cipher, blobs },
+      deps: { ...memory, clock, ids, hasher, cipher, blobs, ocr },
       dispose: async () => undefined,
     }
   }
@@ -100,6 +122,8 @@ export async function buildDeps(config: Config): Promise<BuiltDeps> {
       hasher,
       cipher,
       blobs,
+      ocr,
+      ocrReads: new PgOcrReadRepo(pool),
       users: new PgUserRepo(pool),
       sessions: new PgSessionRepo(pool),
       shifts: new PgShiftRepo(pool),

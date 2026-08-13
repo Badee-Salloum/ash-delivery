@@ -17,7 +17,12 @@ async function main(): Promise<void> {
   }
 
   const { deps, dispose } = await buildDeps(config)
-  const app = await buildApp({ deps, logger: true, splitGate: config.BR1_SPLIT_GATE })
+  const app = await buildApp({
+    deps,
+    logger: true,
+    splitGate: config.BR1_SPLIT_GATE,
+    maxOcrReadsPerShift: config.OCR_MAX_READS_PER_SHIFT,
+  })
 
   const shutdown = async (signal: string): Promise<void> => {
     app.log.info({ signal }, 'shutting down')

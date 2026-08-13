@@ -37,7 +37,12 @@ async function getApp(): Promise<FastifyInstance> {
   appPromise ??= (async () => {
     const config = loadConfig()
     const { deps } = await buildDeps(config)
-    const app = await buildApp({ deps, logger: true, splitGate: config.BR1_SPLIT_GATE })
+    const app = await buildApp({
+      deps,
+      logger: true,
+      splitGate: config.BR1_SPLIT_GATE,
+      maxOcrReadsPerShift: config.OCR_MAX_READS_PER_SHIFT,
+    })
     await app.ready()
     return app
   })()

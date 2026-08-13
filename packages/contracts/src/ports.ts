@@ -63,6 +63,69 @@ export interface BlobStore {
   exists(key: string): Promise<boolean>
 }
 
+/** Which screen is being read. Each one parses differently; none of them is a generic "document". */
+export type OcrField = 'orders' | 'payments_log' | 'wallet' | 'odometer' | 'bms'
+
+/**
+ * Why a read produced nothing. Four states, not one, because each wants a different response.
+ *
+ * The same vocabulary `apps/driver/src/ocr.ts` already uses, and for the reason its header gives:
+ * a missing asset, a dead worker, a timeout and a clean read that matched nothing all used to
+ * return `null` alike, and the UI could say nothing more useful than "it didn't work".
+ */
+export type OcrFailure = 'unavailable' | 'timeout' | 'no_fields' | 'refused'
+
+/**
+ * One money row as the reader saw it.
+ *
+ * `printed` is transcription and `value` is arithmetic, and they are separate fields because they
+ * are separate skills — a model that reads «−١٬١٥٥٫٦٥» correctly can still hand back `-115565`.
+ * Both are STRINGS: a JSON number here would round the money before it ever reached `Minor`, and
+ * `check-wire-money.mjs` fails the build on the attempt.
+ */
+export interface OcrRow {
+  printed: string
+  value: string | null
+  cancelled: boolean
+}
+
+export type OcrResult =
+  | {
+      ok: true
+      rows: OcrRow[]
+      /** Labelled non-money values — odometer km, battery percent, cycle count. */
+      fields: Readonly<Record<string, string | null>>
+      /** The provider's answer verbatim, kept so the D-3 baseline stays reconstructible. */
+      raw: unknown
+    }
+  | { ok: false; reason: OcrFailure }
+
+/**
+ * A cloud vision model reading a driver's screenshot.
+ *
+ * `available` is false when no provider is configured, and it mirrors `Cipher.available` for the
+ * same reason: "not configured" is a legitimate state a caller must CHECK, not an exception. With
+ * no reader the driver app falls back to the on-device one and nothing above this line changes.
+ *
+ * `read` never throws for an upstream failure — a timeout, a 500 and a refusal all come back as
+ * `{ ok: false }`. That is not politeness: `wire.ts`'s `walletDeclaredOcr` carries the incident
+ * where a misread baseline refused a request and a shift balancing to exactly 0.00 could not be
+ * handed over because a cosmetic field disagreed. An OCR limb must never be able to fail a money
+ * limb.
+ */
+export interface OcrReader {
+  readonly available: boolean
+  /** The model actually in use, recorded beside every reading so a run is self-describing. */
+  readonly model: string
+  read(request: { field: OcrField; bytes: Uint8Array; mimeType: string }): Promise<OcrReading>
+}
+
+/** What `read` returns: the result, plus what it cost. There is no other cost meter in this API. */
+export interface OcrReading {
+  result: OcrResult
+  usage: { tokensIn: number; tokensOut: number; latencyMs: number }
+}
+
 // ── Records ───────────────────────────────────────────────────────────────────────────────
 
 export interface GovernorateRecord {
@@ -788,6 +851,40 @@ export interface MediaRepo {
   listSlots(shiftId: string): Promise<AttachedSlot[]>
 }
 
+export interface OcrReadRecord {
+  id: string
+  branchId: string
+  shiftId: string | null
+  field: OcrField
+  /** Content address of the bytes SENT — not of the stored evidence, which is a smaller image. */
+  sha256: string
+  byteSize: number
+  model: string
+  result: OcrResult
+  tokensIn: number
+  tokensOut: number
+  latencyMs: number
+  createdAt: number
+  createdBy: string
+}
+
+/**
+ * Every cloud read, kept for three jobs at once: the dedupe cache, the per-shift cap, and the only
+ * record of what this feature costs.
+ *
+ * The cache is not an optimisation. A driver who retakes the same screenshot, or a client that
+ * retries after a timeout, would otherwise pay twice for bytes we have already read — and at three
+ * cents a call with a hundred bikes that is the difference between a line item and a problem.
+ *
+ * `countBilled` deliberately counts ROWS, so a cache hit costs nothing against the cap. Capping
+ * cache hits would punish a driver for the network being bad.
+ */
+export interface OcrReadRepo {
+  findBySha(branchId: string, sha256: string, field: OcrField): Promise<OcrReadRecord | null>
+  put(record: OcrReadRecord): Promise<OcrReadRecord>
+  countBilledForShift(shiftId: string): Promise<number>
+}
+
 // ── Expenses (SRS G) ──────────────────────────────────────────────────────────────────────
 
 export interface ExpenseCategoryRecord {
@@ -1152,6 +1249,10 @@ export interface Deps {
   settings: SettingsRepo
   media: MediaRepo
   blobs: BlobStore
+  /** The cloud reader. `available: false` when unconfigured — the driver's own reader takes over. */
+  ocr: OcrReader
+  /** What the cloud reader has already been asked, so the same pixels are never billed twice. */
+  ocrReads: OcrReadRepo
   fx: FxRepo
   weekLocks: WeekLockRepo
   audit: AuditRepo
