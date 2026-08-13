@@ -79,6 +79,7 @@ Other rules, each of which corresponds to a real screen:
 - A card SLICED by the top or bottom edge may show its addresses but not its fee: \`value\` null, and say so in \`notes\`.
 - A screen may carry MORE THAN ONE date header ("Friday, August 7" … then lower down "Thursday, August 6"). Each row takes the nearest header ABOVE it. Month names may be Arabic (أغسطس, آب), Maghrebi (غشت) or English. The year is 2026.
 - Times: Arabic "م" is PM, "ص" is AM. Report 24-hour HH:MM. Some screens already print 24-hour times.
+- On the ORDERS list each card shows two address lines, A (pickup) then B (dropoff). Copy each into \`pointA\` / \`pointB\` exactly as printed. On every other screen both are null.
 - Addresses contain digits — "المدخل ١", "entrance ٨٦", GPS pairs, plus-codes like "G63V 78J". Those are NOT fees. Only the amount printed beside "SYP" is a fee.
 - If a character is genuinely unreadable, put "?" in \`printed\` and null in \`value\`. An honest refusal is a correct answer.
 
@@ -101,7 +102,7 @@ export const READ_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['hasDecimal', 'hasThousands', 'digitCount', 'printed', 'value', 'time', 'dateIso', 'cancelled'],
+        required: ['hasDecimal', 'hasThousands', 'digitCount', 'printed', 'value', 'time', 'dateIso', 'pointA', 'pointB', 'cancelled'],
         properties: {
           hasDecimal: {
             type: 'boolean',
@@ -124,6 +125,14 @@ export const READ_SCHEMA = {
             description: 'STRING, never a number. Western digits, "." decimal, sign kept. "-165.50" keeps its trailing zero. null if the row has no amount.',
           },
           time: { type: ['string', 'null'], description: '24-hour HH:MM. Arabic "م" is PM, "ص" is AM.' },
+          pointA: {
+            type: ['string', 'null'],
+            description: 'Orders list only: the PICKUP line, marked A. Copy it as printed. null on any other screen.',
+          },
+          pointB: {
+            type: ['string', 'null'],
+            description: 'Orders list only: the DROPOFF line, marked B — a place name, or a coordinate pair in brackets. null on any other screen.',
+          },
           dateIso: {
             type: ['string', 'null'],
             description: 'YYYY-MM-DD from the nearest date header ABOVE this row — not from today. The year is 2026.',

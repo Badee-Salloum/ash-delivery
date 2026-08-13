@@ -18,6 +18,8 @@ import {
   mergeScannedMovements,
   healCutOffRoutes,
   mergeScannedOrders,
+  cloudRowsToScannedMovements,
+  cloudRowsToScannedOrders,
   overlayCloudAmounts,
   previewBr1,
   readInCloud,
@@ -1107,24 +1109,53 @@ function EndPackage({
                     readOrders(file).catch(() => null),
                     readInCloud(api, shift.id, 'orders', file),
                   ])
+                  const cloudOrders = cloud ? cloudRowsToScannedOrders(cloud.rows) : []
                   onDraft((d) => {
-                    if (!r?.ok) return { ...d, dash: { kind: 'failed' } }
-                    const { rows: scanned } = cloud
-                      ? overlayCloudAmounts(r.reading.orders, cloud.rows, 'fee')
-                      : { rows: r.reading.orders }
+                    /*
+                     * WHO OWNS THE LIST depends on whether the phone produced one.
+                     *
+                     * Normally the phone does: it cut the fee strips, found the addresses and knows
+                     * which cards the screen edge sliced, so the cloud only corrects its amounts.
+                     *
+                     * But when the phone reads NOTHING, "the counts differ" is trivially true, the
+                     * overlay hands back the empty local list, and a perfectly good cloud reading is
+                     * thrown away in silence. That is not hypothetical — on a real close a page came
+                     * back «لم تُضَف أي عملية من هذه الصورة · ٤٠ صفوف لم تُقرأ بثقة» while the cloud
+                     * had read its four deliveries correctly and been billed for them.
+                     *
+                     * So: no local list and a cloud list ⇒ the cloud owns it. The cloud rows carry
+                     * their own route, which is what keeps their merge identity the same shape as a
+                     * local row's and stops the same delivery being counted twice across pages.
+                     */
+                    const localOk = r?.ok === true
+                    const localRows = localOk ? r.reading.orders : []
+                    const scanned =
+                      localRows.length === 0
+                        ? cloudOrders
+                        : cloud
+                          ? overlayCloudAmounts(localRows, cloud.rows, 'fee').rows
+                          : localRows
+                    // Both readers silent is the only real failure. Either one alone is a reading.
+                    if (!localOk && scanned.length === 0) return { ...d, dash: { kind: 'failed' } }
                     const added = mergeScannedOrders(d.orders, scanned, () => crypto.randomUUID())
                     // A card sliced off the bottom of the previous page is usually whole at the
                     // top of this one. Its second sighting is de-duplicated away, so without this
                     // its addresses go with it and the row keeps showing a delivery to nowhere.
-                    const healed = healCutOffRoutes(d.orders, r.reading.orders)
+                    const healed = healCutOffRoutes(d.orders, scanned)
                     const patch = new Map(healed.map((h) => [h.localId, h]))
                     // NEW rows, not rows on the page: a page that fully overlaps reads 0, which is
                     // the truth — nothing was added — and not a failure. `refused` is what the
                     // reader saw but would not vouch for, and it is the driver's to type.
+                    //
+                    // «refused» counts only what the PHONE declined. When the cloud supplied the
+                    // list, the phone's forty unread candidate rows are not forty rows the driver
+                    // must type — they are rows somebody else already read, and telling him
+                    // otherwise on a page that worked would be the app crying wolf.
+                    const phoneRefused = r?.ok && localRows.length > 0 ? Math.max(0, (r.rowsSeen ?? 0) - r.fieldsFound) : 0
                     return {
                       ...d,
                       orders: [...d.orders.map((o) => { const h = patch.get(o.localId); return h ? { ...o, pointA: h.pointA, pointB: h.pointB } : o }), ...added],
-                      dash: { kind: 'read', rows: added.length, refused: Math.max(0, (r.rowsSeen ?? 0) - r.fieldsFound), cutOff: r.cutOff ?? 0 },
+                      dash: { kind: 'read', rows: added.length, refused: phoneRefused, cutOff: r?.ok ? (r.cutOff ?? 0) : 0 },
                     }
                   })
     },
@@ -1140,14 +1171,23 @@ function EndPackage({
                     readPaymentsLog(file).catch(() => null),
                     readInCloud(api, shift.id, 'payments_log', file),
                   ])
+                  const cloudMovements = cloud ? cloudRowsToScannedMovements(cloud.rows) : []
                   onDraft((d) => {
-                    if (!r?.ok) return { ...d, log: { kind: 'failed' } }
                     // A payments-log row is SIGNED, and the sign is the difference between money
                     // arriving and money leaving. `overlayCloudAmounts` carries `value` whole,
                     // sign included — which is where the local reader loses 13 of its 18 misreads.
-                    const { rows: scanned } = cloud
-                      ? overlayCloudAmounts(r.reading.movements, cloud.rows, 'amount')
-                      : { rows: r.reading.movements }
+                    //
+                    // And as on the dashboard: when the phone read nothing, the cloud owns the list
+                    // rather than having its answer discarded for failing to match a list of zero.
+                    const localOk = r?.ok === true
+                    const localRows = localOk ? r.reading.movements : []
+                    const scanned =
+                      localRows.length === 0
+                        ? cloudMovements
+                        : cloud
+                          ? overlayCloudAmounts(localRows, cloud.rows, 'amount').rows
+                          : localRows
+                    if (!localOk && scanned.length === 0) return { ...d, log: { kind: 'failed' } }
                     const added = mergeScannedMovements(d.movements, scanned, () => crypto.randomUUID())
                     return {
                       ...d,
@@ -1155,7 +1195,7 @@ function EndPackage({
                       log: {
                         kind: 'read',
                         rows: added.length,
-                        refused: Math.max(0, (r.rowsSeen ?? 0) - r.fieldsFound),
+                        refused: r?.ok && localRows.length > 0 ? Math.max(0, (r.rowsSeen ?? 0) - r.fieldsFound) : 0,
                       },
                     }
                   })

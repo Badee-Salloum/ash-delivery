@@ -912,7 +912,16 @@ export interface CloudOcrResponse {
   ok: boolean
   cached: boolean
   reads: { used: number; max: number }
-  rows: Array<{ printed: string; value: string | null; cancelled: boolean }>
+  rows: Array<{
+    printed: string
+    value: string | null
+    cancelled: boolean
+    time: string | null
+    dateIso: string | null
+    /** Orders list only — the route, which is half of a row's identity in the merge. */
+    pointA: string | null
+    pointB: string | null
+  }>
   fields: Record<string, string | null>
   reason?: 'unavailable' | 'timeout' | 'no_fields' | 'refused'
 }

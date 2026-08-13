@@ -90,6 +90,19 @@ export interface OcrRow {
   /** 24-hour `HH:MM`. */
   time: string | null
   /**
+   * The two ends of the delivery, as printed. Pickup then dropoff.
+   *
+   * Asked for because when the on-device reader finds nothing, the cloud's rows have to stand on
+   * their own — and a row's identity in the merge is (day, minute, route). Without the route the
+   * same delivery read by each reader keys differently and is counted twice.
+   *
+   * NO ADDITIONAL PRIVACY COST, which is the only reason this is acceptable: the entire screenshot
+   * — addresses, business names, GPS pairs and Plus Codes — is already in the request body. Asking
+   * the model to type back what it can already see exposes nothing new.
+   */
+  pointA: string | null
+  pointB: string | null
+  /**
    * `YYYY-MM-DD`, from the nearest date header ABOVE this row — not from today's clock.
    *
    * A screen can carry MORE THAN ONE header: one corpus screenshot runs «Friday, August 7» for its

@@ -58,7 +58,7 @@ const scripted = (): ScriptedOcrReader =>
   new ScriptedOcrReader([
     {
       ok: true,
-      rows: [{ printed: '٥٬٠٠٠', value: '5000', cancelled: false, time: '13:10', dateIso: '2026-07-21' }],
+      rows: [{ printed: '٥٬٠٠٠', value: '5000', cancelled: false, time: '13:10', dateIso: '2026-07-21', pointA: 'المزة', pointB: 'الشعلان' }],
       fields: {},
       raw: null,
     },
@@ -77,7 +77,7 @@ describe('cloud OCR: the same pixels are never billed twice', () => {
     expect(first.json().ok).toBe(true)
     expect(first.json().cached).toBe(false)
     expect(first.json().rows).toEqual([
-      { printed: '٥٬٠٠٠', value: '5000', cancelled: false, time: '13:10', dateIso: '2026-07-21' },
+      { printed: '٥٬٠٠٠', value: '5000', cancelled: false, time: '13:10', dateIso: '2026-07-21', pointA: 'المزة', pointB: 'الشعلان' },
     ])
     expect(reader.calls).toBe(1)
 

@@ -818,3 +818,60 @@ export function overlayCloudAmounts<K extends string, T extends Record<K, string
   })
   return { rows, overlaid }
 }
+
+/**
+ * The cloud reader's rows, standing on their own — for when the phone's reader found nothing.
+ *
+ * `overlayCloudAmounts` treats the on-device list as authoritative about WHICH rows exist and lets
+ * the cloud correct only the amounts. That is right whenever the phone produced a list. It is
+ * exactly wrong when it produced none: the counts differ, the overlay returns the empty local list
+ * unchanged, and a perfectly good cloud reading of four deliveries is discarded in silence.
+ *
+ * Seen on a real close: «لم تُضَف أي عملية من هذه الصورة · ٤٠ صفوف لم تُقرأ بثقة». The phone saw
+ * forty candidate rows on that screenshot and confidently read zero; the cloud had read it fine and
+ * the driver was told to type four deliveries by hand, having already paid for the answer.
+ *
+ * A cancelled card is kept as a row with no fee. It is a delivery that happened and the screen
+ * still shows it — dropping it here would make the page look shorter than it is, and the driver
+ * would re-add it by hand as a paid order.
+ */
+export function cloudRowsToScannedOrders(
+  rows: readonly {
+    value: string | null
+    cancelled: boolean
+    time: string | null
+    dateIso: string | null
+    pointA?: string | null
+    pointB?: string | null
+    /** Accepted and ignored — the caller passes whole cloud rows, which also carry the glyphs. */
+    printed?: string
+  }[],
+): ScannedOrderRow[] {
+  const out: ScannedOrderRow[] = []
+  for (const row of rows) {
+    // A row with no clock has no identity: `keyOf` is (day, minute, route), so a timeless row
+    // collides with every other timeless row on the page and the merge would keep exactly one.
+    if (row.time === null || row.time.trim() === '') continue
+    out.push({
+      dateIso: row.dateIso,
+      time: row.time,
+      fee: row.cancelled ? null : row.value,
+      ...(row.cancelled ? { cancelled: true } : {}),
+      ...(row.pointA != null ? { pointA: row.pointA } : {}),
+      ...(row.pointB != null ? { pointB: row.pointB } : {}),
+    })
+  }
+  return out
+}
+
+/** The same, for the payments log — which needs only a signed amount and a clock. */
+export function cloudRowsToScannedMovements(
+  rows: readonly { value: string | null; time: string | null }[],
+): ScannedMovementRow[] {
+  const out: ScannedMovementRow[] = []
+  for (const row of rows) {
+    if (row.value === null || row.time === null || row.time.trim() === '') continue
+    out.push({ amount: row.value, time: row.time })
+  }
+  return out
+}

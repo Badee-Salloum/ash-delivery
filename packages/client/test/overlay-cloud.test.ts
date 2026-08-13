@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { mergeScannedMovements, mergeScannedOrders, overlayCloudAmounts } from '../src/order-entry.ts'
+import {
+  cloudRowsToScannedMovements,
+  cloudRowsToScannedOrders,
+  mergeScannedMovements,
+  mergeScannedOrders,
+  overlayCloudAmounts,
+} from '../src/order-entry.ts'
 
 /**
  * The join between two readers, and the one rule that keeps it safe.
@@ -181,5 +187,83 @@ describe('scanning overlapping pages with two readers', () => {
       { amount: '-42', time: '17:42' },
     ]
     expect(mergeScannedMovements([], scanned, newId)).toHaveLength(2)
+  })
+})
+
+describe('when the phone reads nothing at all', () => {
+  const newId = (() => { let n = 0; return () => `x-${++n}` })()
+
+  /** Verbatim shape of what gpt-5.5 returns for an orders screen. */
+  const cloudOrder = (value: string | null, time: string, pointA: string, cancelled = false) => ({
+    printed: value ?? '',
+    value,
+    cancelled,
+    time,
+    dateIso: '2026-08-06',
+    pointA,
+    pointB: null,
+  })
+
+  it('turns the cloud rows into a list the merge can use', () => {
+    /*
+     * THE REAL FAILURE. On a live close, page 4 came back
+     *   «لم تُضَف أي عملية من هذه الصورة · ٤٠ صفوف لم تُقرأ بثقة»
+     * — the phone saw forty candidate rows and confidently read none, while the cloud had read the
+     * screen's four deliveries correctly and been billed for them. `overlayCloudAmounts` compares
+     * lengths, 0 !== 4 is trivially true, and it handed back the empty local list. Four deliveries
+     * the driver was paid for, discarded in silence, after paying to read them.
+     */
+    const rows = cloudRowsToScannedOrders([
+      cloudOrder('130', '14:20', 'كرم فروت - الميدان'),
+      cloudOrder('150', '01:16', 'نادي بردى'),
+      cloudOrder('75', '00:32', 'ZAITOUNE SWEETS'),
+      cloudOrder('350', '23:16', 'بانزو'),
+    ])
+    expect(rows).toHaveLength(4)
+    expect(mergeScannedOrders([], rows, newId)).toHaveLength(4)
+  })
+
+  it('keeps a cancelled card as a row with no fee', () => {
+    // It is a delivery that happened and the screen still shows it. Dropped here, the driver
+    // re-adds it by hand — as a PAID order, because nothing told him it was cancelled.
+    const rows = cloudRowsToScannedOrders([cloudOrder(null, '14:20', 'المزة', true)])
+    expect(rows).toEqual([{ dateIso: '2026-08-06', time: '14:20', fee: null, cancelled: true, pointA: 'المزة' }])
+  })
+
+  it('drops a row with no clock rather than letting it collide', () => {
+    // Identity is (day, minute, route). A timeless row collides with every other timeless row on
+    // the page, and the merge would keep exactly one of them.
+    const rows = cloudRowsToScannedOrders([
+      { printed: '', value: '500', cancelled: false, time: null, dateIso: '2026-08-06', pointA: null, pointB: null },
+      cloudOrder('130', '14:20', 'المزة'),
+    ])
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.fee).toBe('130')
+  })
+
+  it('carries the route through, so the same delivery is not counted twice across pages', () => {
+    // Page 4: the phone read nothing, the cloud supplied the list. Page 5 overlaps and the phone
+    // works this time. Both rows must key identically — (day, minute, route) — or one delivery
+    // becomes two.
+    const fromCloud = cloudRowsToScannedOrders([cloudOrder('130', '14:20', 'كرم فروت - الميدان')])
+    const existing = mergeScannedOrders([], fromCloud, newId)
+    expect(existing).toHaveLength(1)
+
+    const fromPhone = [{ dateIso: '2026-08-06', time: '14:20', fee: '130', pointA: 'كرم فروت - الميدان' }]
+    expect(mergeScannedOrders(existing, fromPhone, newId), 'one delivery, two readers').toHaveLength(0)
+  })
+
+  it('converts payments-log rows, which need only a signed amount and a clock', () => {
+    const rows = cloudRowsToScannedMovements([
+      { value: '+153', time: '17:42' },
+      { value: '-42', time: '17:42' },
+      { value: null, time: '17:42' },
+    ])
+    expect(rows).toEqual([
+      { amount: '+153', time: '17:42' },
+      { amount: '-42', time: '17:42' },
+    ])
+    // Both survive the merge: one delivery's credit and its Yallago cut share a minute by design.
+    expect(mergeScannedMovements([], rows, newId)).toHaveLength(2)
   })
 })
