@@ -52,6 +52,13 @@ export interface PhotoSlotProps {
   /** Progress and result of the cloud read. Called with `reading` first, then exactly one outcome. */
   onCloudRead?(event: CloudReadEvent): void
   /**
+   * Offer «حذف الصورة» on this tile. Called after the server has released the slot.
+   *
+   * Omitted where removal makes no sense — a required one-of-a-kind photo is corrected by
+   * re-shooting it, not by leaving the slot empty.
+   */
+  onDelete?(slot: string): void
+  /**
    * `gallery` (the default) lets the driver pick what he already has; `camera` forces a live shot.
    *
    * Everything is `gallery` now, the odometer included, at the owner's instruction. It is also the
@@ -96,6 +103,7 @@ export function PhotoSlot({
   onImage,
   ocrField,
   onCloudRead,
+  onDelete,
   source = 'gallery',
   uploaded = false,
   variant = 'row',
@@ -106,6 +114,8 @@ export function PhotoSlot({
   const [state, setState] = useState<'idle' | 'working' | 'done' | 'error'>(uploaded ? 'done' : 'idle')
   /** The file already picked, so a failed upload is one tap — not another trip to the gallery. */
   const [picked, setPicked] = useState<File | null>(null)
+  /** Two taps to delete: a photo is evidence, and the second tap is cheaper than a stray first. */
+  const [confirming, setConfirming] = useState(false)
 
   /**
    * A thumbnail of the picture he actually chose.
@@ -198,6 +208,28 @@ export function PhotoSlot({
     [api, shiftId, pkg, slot, onUploaded, onImage],
   )
 
+  /**
+   * Take the photo back out of the slot.
+   *
+   * The tile returns to empty only if the SERVER agreed. Clearing it optimistically would show a
+   * driver an empty tile the BR5 gate still counts as filled, and he would submit believing he had
+   * removed a page that is still attached.
+   */
+  const remove = useCallback(async (): Promise<void> => {
+    if (!onDelete) return
+    setConfirming(false)
+    setState('working')
+    try {
+      await api.del(uploadEvidencePath(shiftId, pkg, slot))
+      setPicked(null)
+      setState('idle')
+      onDelete(slot)
+    } catch {
+      // Still attached. Say so by staying done, rather than by showing an empty tile.
+      setState('done')
+    }
+  }, [api, shiftId, pkg, slot, onDelete])
+
   const open = (): void => (state === 'error' && picked ? void onPick(picked) : ref.current?.click())
   const input = (
     <input
@@ -215,6 +247,7 @@ export function PhotoSlot({
 
   if (variant === 'tile') {
     return (
+      <div className="flex flex-col">
       <button
         type="button"
         onClick={open}
@@ -248,6 +281,28 @@ export function PhotoSlot({
         ) : null}
         {input}
       </button>
+      {/*
+       * «حذف الصورة» — OUTSIDE the tile button, because a delete nested inside the tap target that
+       * opens the gallery is a delete the thumb finds by accident. It appears only once there is
+       * something to remove, and only where the caller offers it: a required one-of-a-kind slot
+       * (the wallet, the odometer) is corrected by re-shooting, whereas a surplus dashboard page
+       * is a thing the driver genuinely needs to take away.
+       *
+       * Two taps. A photo is evidence, and the second tap is cheaper than an accidental first.
+       */}
+      {onDelete && state === 'done' ? (
+        <button
+          type="button"
+          onClick={() => (confirming ? void remove() : setConfirming(true))}
+          onBlur={() => setConfirming(false)}
+          className={`mt-1 w-full rounded-lg py-1 text-[11px] font-medium ${
+            confirming ? 'bg-red-600 text-white' : 'text-slate-500'
+          }`}
+        >
+          {confirming ? t.shift.removePhotoConfirm : t.shift.removePhoto}
+        </button>
+      ) : null}
+      </div>
     )
   }
 

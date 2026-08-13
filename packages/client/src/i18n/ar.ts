@@ -216,6 +216,8 @@ export const ar = {
     cloudTimeout: 'استغرقت القراءة وقتاً طويلاً — اضغط لإعادة المحاولة، أو أدخِل الرقم يدوياً',
     cloudUnavailable: 'تعذّر الوصول إلى القارئ الذكي — قراءة الهاتف مستخدَمة، راجع الأرقام',
     cloudNoFields: 'لم يتعرّف القارئ الذكي على أي رقم في هذه الصورة',
+    removePhoto: 'حذف الصورة',
+    removePhotoConfirm: 'اضغط للتأكيد',
     cloudRetry: 'إعادة المحاولة',
     busyVehicle: 'على نوبة الآن',
     resumeShift: 'متابعة نوبتك',

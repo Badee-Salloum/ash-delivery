@@ -57,6 +57,11 @@ export class MemoryMediaRepo implements MediaRepo {
     this.slots.set(`${shiftId}|${pkg}|${slot}`, { package: pkg, slot, mediaId })
   }
 
+  async detach(shiftId: string, pkg: EvidencePackage, slot: string): Promise<void> {
+    // The blob and its `media` record stay: content-addressed bytes may be another slot's too.
+    this.slots.delete(`${shiftId}|${pkg}|${slot}`)
+  }
+
   async listSlots(shiftId: string): Promise<AttachedSlot[]> {
     const out: AttachedSlot[] = []
     for (const [key, value] of this.slots) {

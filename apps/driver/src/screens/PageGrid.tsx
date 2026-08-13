@@ -24,6 +24,7 @@ export function PageGrid({
   onUploaded,
   onAddPage,
   onImage,
+  onDeleted,
   status,
 }: {
   title: string
@@ -35,6 +36,8 @@ export function PageGrid({
   onUploaded(slot: string): void
   onAddPage(): void
   onImage(file: File): void
+  /** Remove a page. Offered on every tile in a grid — a surplus page is a real thing to undo. */
+  onDeleted(slot: string): void
   /** What this screen's read made of it — one line for the whole set, not per page. */
   status?: ReactNode
 }): ReactNode {
@@ -70,6 +73,7 @@ export function PageGrid({
               uploaded={slots.has(slot)}
               onUploaded={onUploaded}
               onImage={onImage}
+              onDelete={onDeleted}
             />
           )
         })}

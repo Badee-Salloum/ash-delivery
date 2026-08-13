@@ -261,3 +261,96 @@ describe('cloud OCR: malformed requests still 4xx', () => {
     expect(res.statusCode).toBe(403)
   })
 })
+
+describe('deleting an evidence photo', () => {
+  const del = async (token: string, shiftId: string, pkg: string, slot: string): Promise<LightMyRequestResponse> =>
+    await h.app.inject({ method: 'DELETE', url: `/shifts/${shiftId}/media/${pkg}/${slot}`, headers: { cookie: h.cookie(token) } })
+
+  it('releases the slot and reports what is left', async () => {
+    h = await makeHarness()
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = await openShift(driver, manager)
+
+    await h.uploadPhoto(driver, shiftId, 'end', 'dashboard')
+    await h.uploadPhoto(driver, shiftId, 'end', 'dashboard_2')
+    const res = await del(driver, shiftId, 'end', 'dashboard_2')
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json().slots).toEqual(['dashboard'])
+  })
+
+  it('CANNOT be used to delete past a gate', async () => {
+    /*
+     * The property that makes this safe to give a driver at all. The BR5 gates read the slot
+     * links, so removing a photo he still owes fails his own gate immediately — he can correct a
+     * mistake or drop a surplus page, but he cannot delete his way to a close.
+     */
+    h = await makeHarness()
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = await openShift(driver, manager)
+
+    await put(driver, `/shifts/${shiftId}/operations`, {
+      orders: [{ providerOrderNo: 'A-1', payMode: 'cash', fee: sypStr(5_000), source: 'manual' }],
+      movements: [],
+    })
+    await h.uploadPhoto(driver, shiftId, 'end', 'dashboard')
+    await h.uploadPhoto(driver, shiftId, 'end', 'wallet')
+    await h.uploadPhoto(driver, shiftId, 'end', 'odometer')
+
+    // Take the wallet photo back out, then try to close on money that balances perfectly.
+    expect((await del(driver, shiftId, 'end', 'wallet')).statusCode).toBe(200)
+    const end = await put(driver, `/shifts/${shiftId}/end-package`, {
+      odometerKm: 150,
+      batteryPercent: 40,
+      cashDeclared: sypStr(104_000),
+      walletDeclared: sypStr(0),
+    })
+    expect(end.statusCode, 'a missing photo must still block the close').toBe(422)
+    expect(JSON.stringify(end.json())).toContain('missing_photo')
+
+    // Put it back and the same submission goes through.
+    await h.uploadPhoto(driver, shiftId, 'end', 'wallet')
+    const again = await put(driver, `/shifts/${shiftId}/end-package`, {
+      odometerKm: 150,
+      batteryPercent: 40,
+      cashDeclared: sypStr(104_000),
+      walletDeclared: sypStr(0),
+    })
+    expect(again.statusCode, again.body).toBe(200)
+  })
+
+  it('refuses once the shift has left the driver’s hands', async () => {
+    // After submission the manager is looking at this evidence to approve money. Pulling a photo
+    // out from under that review is an audit decision, not a UX one.
+    h = await makeHarness()
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = await openShift(driver, manager)
+    await put(driver, `/shifts/${shiftId}/operations`, {
+      orders: [{ providerOrderNo: 'A-1', payMode: 'cash', fee: sypStr(5_000), source: 'manual' }],
+      movements: [],
+    })
+    for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, shiftId, 'end', slot)
+    await put(driver, `/shifts/${shiftId}/end-package`, {
+      odometerKm: 150, batteryPercent: 40, cashDeclared: sypStr(104_000), walletDeclared: sypStr(0),
+    })
+    await post(driver, `/shifts/${shiftId}/submit`)
+
+    const res = await del(driver, shiftId, 'end', 'wallet')
+    expect(res.statusCode).toBe(409)
+    expect(res.json().error).toBe('shift_not_editable')
+  })
+
+  it('refuses another driver’s shift, and an unknown slot', async () => {
+    h = await makeHarness()
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const other = await h.loginAs('driver2')
+    const shiftId = await openShift(driver, manager)
+    await h.uploadPhoto(driver, shiftId, 'end', 'dashboard')
+
+    expect((await del(other, shiftId, 'end', 'dashboard')).statusCode).toBe(403)
+    expect((await del(driver, shiftId, 'end', 'not_a_slot')).statusCode).toBe(422)
+  })
+})

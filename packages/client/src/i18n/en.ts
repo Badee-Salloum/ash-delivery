@@ -201,6 +201,8 @@ export const en: Catalog = {
     cloudTimeout: 'Reading took too long — tap to try again, or type the number in',
     cloudUnavailable: 'Could not reach the smart reader — using the phone’s reading, check the numbers',
     cloudNoFields: 'The smart reader found no number in this photo',
+    removePhoto: 'Remove photo',
+    removePhotoConfirm: 'Tap to confirm',
     cloudRetry: 'Try again',
     busyVehicle: 'On a shift now',
     resumeShift: 'Resume your shift',

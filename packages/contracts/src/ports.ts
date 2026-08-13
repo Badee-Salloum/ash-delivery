@@ -872,6 +872,15 @@ export interface MediaRepo {
   findById(id: string): Promise<MediaRecord | null>
   /** One photo per (shift, package, slot): re-shooting replaces rather than accumulating. */
   attach(shiftId: string, pkg: EvidencePackage, slot: string, mediaId: string): Promise<void>
+  /**
+   * Unhook a photo from a slot. The `media` row and its bytes are NOT deleted.
+   *
+   * Deliberate: media is content-addressed and shared — the same photograph uploaded to two slots
+   * is one row — so deleting the blob would blank a slot nobody asked about. What the driver means
+   * by "remove this picture" is that this SLOT no longer holds it, and that is exactly what the
+   * BR5 gate reads. The orphaned bytes are cheap and a retention job can sweep them.
+   */
+  detach(shiftId: string, pkg: EvidencePackage, slot: string): Promise<void>
   listSlots(shiftId: string): Promise<AttachedSlot[]>
 }
 

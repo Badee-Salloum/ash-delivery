@@ -68,6 +68,41 @@ export interface UploadInput {
   uploadedBy: string
 }
 
+/**
+ * Remove a photo from a slot — «حذف الصورة».
+ *
+ * The driver picked the wrong screenshot, or photographed one page twice. Until now his only move
+ * was to upload a different image OVER it, which works for a mistake but not for a surplus: an
+ * extra dashboard page he cannot remove leaves a tile he must fill with something.
+ *
+ * WHAT MAKES THIS SAFE rather than a hole in the evidence rules: it removes the LINK, not the
+ * bytes, and the BR5 gates read the links. So a driver who deletes a required photo immediately
+ * fails his own gate — `startPackageGaps` / `endPackageGaps` recompute from `listSlots` — and
+ * cannot submit until he uploads another. He cannot delete his way past a requirement.
+ *
+ * REFUSED ONCE THE SHIFT IS OUT OF HIS HANDS. After `driver_submit_end` the manager is looking at
+ * this evidence to approve money; letting the driver pull a photo out from under that review is
+ * not a UX decision, it is an audit one.
+ */
+export async function deleteEvidence(
+  deps: Deps,
+  input: { shiftId: string; package: EvidencePackage; slot: string },
+): Promise<{ slotsNow: string[] }> {
+  const shift = await deps.shifts.findById(input.shiftId)
+  if (!shift) throw new ServiceError(404, 'shift_not_found')
+
+  const editable = shift.state === 'draft' || shift.state === 'open' || shift.state === 'suspended'
+  if (!editable) throw new ServiceError(409, 'shift_not_editable', { state: shift.state })
+
+  if (!ALL_SLOTS[input.package].includes(input.slot)) {
+    throw new ServiceError(422, 'unknown_evidence_slot', { slot: input.slot })
+  }
+
+  await deps.media.detach(input.shiftId, input.package, input.slot)
+  const slots = await deps.media.listSlots(input.shiftId)
+  return { slotsNow: slots.filter((s) => s.package === input.package).map((s) => s.slot) }
+}
+
 export interface UploadResult {
   media: MediaRecord
   deduped: boolean

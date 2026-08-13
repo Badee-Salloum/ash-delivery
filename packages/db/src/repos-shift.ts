@@ -926,6 +926,15 @@ export class PgMediaRepo implements MediaRepo {
     )
   }
 
+  /** Unhooks the slot only. The content-addressed `media` row survives — see the port's note. */
+  async detach(shiftId: string, pkg: EvidencePackage, slot: string): Promise<void> {
+    await this.pool.query('DELETE FROM shift_media WHERE shift_id = $1 AND package = $2 AND slot = $3', [
+      shiftId,
+      pkg,
+      slot,
+    ])
+  }
+
   async listSlots(shiftId: string): Promise<AttachedSlot[]> {
     const { rows } = await this.pool.query<Record<string, unknown>>(
       'SELECT package, slot, media_id FROM shift_media WHERE shift_id = $1 ORDER BY package, slot',

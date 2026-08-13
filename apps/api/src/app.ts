@@ -46,7 +46,7 @@ import { registerDashboardRoutes } from './dashboard.routes.ts'
 import { registerNotificationRoutes } from './notification.routes.ts'
 import { registerTierRoutes } from './tier.routes.ts'
 import { registerTreasuryRoutes } from './treasury.routes.ts'
-import { MAX_UPLOAD_BYTES, readEvidence, uploadEvidence } from './media.service.ts'
+import { MAX_UPLOAD_BYTES, deleteEvidence, readEvidence, uploadEvidence } from './media.service.ts'
 import { OCR_FIELDS_TUPLE, readScreen } from './ocr.service.ts'
 import {
   ServiceError,
@@ -798,6 +798,27 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           ? { rows: out.result.rows, fields: out.result.fields }
           : { reason: out.result.reason, rows: [], fields: {} }),
       })
+    },
+  )
+
+  /**
+   * «حذف الصورة» — take a photo back out of a slot.
+   *
+   * Same grant as the upload it undoes. The BR5 gates read the slot links, so a driver who deletes
+   * a photo he still owes fails his own gate immediately and cannot submit — he cannot delete his
+   * way past a requirement, only correct a mistake or drop a surplus page.
+   */
+  app.delete(
+    '/shifts/:id/media/:package/:slot',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req, reply) => {
+      const params = uploadEvidenceParams.parse(req.params)
+      const result = await deleteEvidence(deps, {
+        shiftId: params.id,
+        package: params.package,
+        slot: params.slot,
+      })
+      return reply.send({ slots: result.slotsNow })
     },
   )
 

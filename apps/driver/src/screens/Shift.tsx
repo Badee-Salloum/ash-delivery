@@ -1288,6 +1288,7 @@ function EndPackage({
         onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
         onAddPage={() => onDraft((d) => ({ ...d, dashboardPages: d.dashboardPages + 1 }))}
         onImage={dashImage}
+              onDeleted={(gone) => onDraft((d) => { const next = new Set(d.slots); next.delete(gone); return { ...d, slots: next } })}
         status={<ReadStatus state={draft.dash} />}
       />
 
@@ -1316,6 +1317,7 @@ function EndPackage({
         onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
         onAddPage={() => onDraft((d) => ({ ...d, logPages: d.logPages + 1 }))}
         onImage={logImage}
+              onDeleted={(gone) => onDraft((d) => { const next = new Set(d.slots); next.delete(gone); return { ...d, slots: next } })}
         status={<ReadStatus state={logState} />}
       />
 
