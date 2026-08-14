@@ -4,6 +4,7 @@
 .git/
 .github/
 .vercel/
+backups
 backups/
 **/backups/
 node_modules/
