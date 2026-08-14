@@ -46,7 +46,13 @@ import { registerDashboardRoutes } from './dashboard.routes.ts'
 import { registerNotificationRoutes } from './notification.routes.ts'
 import { registerTierRoutes } from './tier.routes.ts'
 import { registerTreasuryRoutes } from './treasury.routes.ts'
-import { MAX_UPLOAD_BYTES, deleteEvidence, readEvidence, uploadEvidence } from './media.service.ts'
+import {
+  MAX_UPLOAD_BYTES,
+  acknowledgeStaleEvidence,
+  deleteEvidence,
+  readEvidence,
+  uploadEvidence,
+} from './media.service.ts'
 import { OCR_FIELDS_TUPLE, readScreen } from './ocr.service.ts'
 import {
   ServiceError,
@@ -75,6 +81,7 @@ import {
   forceClose,
   submitStartPackage,
   includedOrders,
+  prepareShiftReview,
   todayFor,
 } from './shifts.service.ts'
 
@@ -457,7 +464,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
    */
   app.delete('/shifts/:id', { config: { permission: 'shift.approve', subject: shiftSubject } }, async (req) => {
     const { id } = z.object({ id: z.string() }).parse(req.params)
-    const shift = await cancelShift(deps, id)
+    const shift = await cancelShift(deps, id, req.actor?.userId ?? null)
     await deps.audit.append({
       tableName: 'shifts',
       recordId: shift.id,
@@ -490,6 +497,16 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const body = putBatteryReadingsRequest.parse(req.body)
       const shift = await deps.shifts.findById(id)
       if (!shift) throw new ServiceError(404, 'shift_not_found')
+      const packageEditable =
+        body.package === 'start'
+          ? shift.state === 'draft'
+          : shift.state === 'open' || shift.state === 'suspended'
+      if (!packageEditable) {
+        throw new ServiceError(409, 'battery_reading_package_not_editable', {
+          package: body.package,
+          state: shift.state,
+        })
+      }
 
       // Only packs actually fitted to THIS bike. Without this a driver could attach a reading
       // from a healthy pack on another machine and satisfy his own bike's gate with it.
@@ -499,11 +516,47 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       // training pair had no pixels behind it. The slot name is the link: pack n's evidence is
       // `bms_n` in the same package.
       const attached = await deps.media.listSlots(shift.id)
-      for (const reading of body.readings) {
+      const existingReadings = await deps.batteryReadings.listByShift(shift.id)
+      const prepared = body.readings.map((reading) => {
         const battery = fitted.find((b) => b.id === reading.batteryId)
         if (!battery) {
           throw new ServiceError(422, 'battery_not_on_this_vehicle', { batteryId: reading.batteryId })
         }
+        const currentMediaId =
+          attached.find((a) => a.package === body.package && a.slot === bmsSlot(battery.slotNo ?? 1))?.mediaId ?? null
+        // A current PWA names the attachment returned by its own upload. Refuse rather than bind a
+        // late OCR/manual write to whichever file another tab (or a later retake) put in the slot.
+        // Cached PWAs omit the lock: before the FIRST upload they still stage a NULL-media row,
+        // which uploadEvidence binds for backwards compatibility.
+        if (reading.expectedMediaId !== undefined && reading.expectedMediaId !== currentMediaId) {
+          throw new ServiceError(409, 'battery_evidence_changed', {
+            batteryId: battery.id,
+            expectedMediaId: reading.expectedMediaId,
+            currentMediaId,
+          })
+        }
+        const prior = existingReadings.find(
+          (candidate) => candidate.batteryId === battery.id && candidate.package === body.package,
+        )
+        /*
+         * A cached PWA cannot name an evidence generation. Its RETAKE sequence is reading first,
+         * upload second: when its prior row still matches the current attachment, NULL stages the
+         * new value safely and the following bms_N upload binds it. If replacement already landed,
+         * prior/current differ and the read binds current. A first-ever upload-first read has no
+         * prior row and likewise binds current. Current PWAs always take the explicit branch above.
+         */
+        const mediaId =
+          reading.expectedMediaId !== undefined
+            ? currentMediaId
+            : prior !== undefined && prior.mediaId === currentMediaId
+              ? null
+              : currentMediaId
+        return { reading, battery, mediaId }
+      })
+      // Validate the full page before the first write. A cached PWA may reach this route just
+      // before its BMS image upload; that row is staged with mediaId NULL and remains unusable by
+      // the gate until uploadEvidence binds the exact bms_N attachment.
+      for (const { reading, battery, mediaId } of prepared) {
         await deps.batteryReadings.upsert({
           shiftId: shift.id,
           batteryId: battery.id,
@@ -517,8 +570,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           mosTempDc: reading.mosTempDc,
           t1Dc: reading.t1Dc,
           t2Dc: reading.t2Dc,
-          mediaId:
-            attached.find((a) => a.package === body.package && a.slot === bmsSlot(battery.slotNo ?? 1))?.mediaId ?? null,
+          mediaId,
           source: reading.source,
           // «تطبيق البطارية لا يعمل على جهازي». Unblocks the driver, and blocks the manager until he
           // has read the pack himself — see `awaiting_manager_reading` in the domain.
@@ -551,6 +603,14 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const body = putBatteryReadingsRequest.parse(req.body)
       const shift = await deps.shifts.findById(id)
       if (!shift) throw new ServiceError(404, 'shift_not_found')
+      const managerPackageEditable =
+        body.package === 'start' ? shift.state === 'awaiting_open_approval' : shift.state === 'pending_review'
+      if (!managerPackageEditable) {
+        throw new ServiceError(409, 'battery_reading_not_under_review', {
+          package: body.package,
+          state: shift.state,
+        })
+      }
 
       const fitted = await deps.directory.listBatteriesForVehicle(shift.vehicleId)
       const attached = await deps.media.listSlots(shift.id)
@@ -560,6 +620,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         const before = (await deps.batteryReadings.listByShift(shift.id)).find(
           (r) => r.batteryId === battery.id && r.package === body.package,
         )
+        if (before?.unavailable !== true) {
+          throw new ServiceError(409, 'battery_reading_not_awaiting_manager', { batteryId: battery.id })
+        }
         await deps.batteryReadings.upsert({
           shiftId: shift.id,
           batteryId: battery.id,
@@ -741,6 +804,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const params = uploadEvidenceParams.parse(req.params)
       const takenHeader = req.headers['x-client-taken-at']
       const clientTakenAtMs = typeof takenHeader === 'string' && /^\d+$/.test(takenHeader) ? Number(takenHeader) : null
+      const acknowledgedHeader = req.headers['x-stale-evidence-acknowledged']
 
       const result = await uploadEvidence(deps, {
         shiftId: params.id,
@@ -749,6 +813,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         bytes: new Uint8Array(req.body as Buffer),
         clientTakenAtMs,
         uploadedBy: req.actor!.userId,
+        staleAcknowledged: acknowledgedHeader === 'true',
       })
       return reply.code(201).send({
         mediaId: result.media.id,
@@ -756,8 +821,31 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         byteSize: result.media.byteSize,
         deduped: result.deduped,
         clockSkewMs: result.clockSkewMs,
+        reusedFromShiftId: result.reusedFromShiftId,
+        attachmentToken: result.attachmentToken,
+        staleAcknowledged: result.staleAcknowledged,
         slots: result.slotsNow,
       })
+    },
+  )
+
+  app.post(
+    '/shifts/:id/media/:package/:slot/acknowledge-stale',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req) => {
+      const params = uploadEvidenceParams.parse(req.params)
+      const { mediaId, attachmentToken } = z
+        .object({ mediaId: z.string().min(1), attachmentToken: z.string().min(1) })
+        .parse(req.body)
+      await acknowledgeStaleEvidence(deps, {
+        shiftId: params.id,
+        package: params.package,
+        slot: params.slot,
+        mediaId,
+        attachmentToken,
+        acknowledgedBy: req.actor!.userId,
+      })
+      return { ok: true }
     },
   )
 
@@ -817,6 +905,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         shiftId: params.id,
         package: params.package,
         slot: params.slot,
+        deletedBy: req.actor?.userId ?? null,
       })
       return reply.send({ slots: result.slotsNow })
     },
@@ -842,32 +931,40 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
    * what a shift actually contains — they differ only in what is ADDED on top (the manager gets
    * BR1 and its causes; the driver does not, per BR8).
    */
-  const shiftSnapshot = async (shiftId: string) => {
-    const shift = await deps.shifts.findById(shiftId)
+  const shiftSnapshot = async (shiftId: string, sourceDeps: Deps = deps) => {
+    const shift = await sourceDeps.shifts.findById(shiftId)
     if (!shift) return null
     // Per-pack readings, joined to the packs so a slot and a capacity are shown rather than a
     // uuid. A two-pack bike hands back two of these at each end of the shift.
-    const [orders, movements, readings, fitted, slots, swaps, allBatteries] = await Promise.all([
-      deps.orders.listByShift(shiftId),
+    const [orders, movements, cashDeductions, readings, fitted, slots, swaps, allBatteries] = await Promise.all([
+      sourceDeps.orders.listByShift(shiftId),
       // Every movement, checked and unchecked — the owner's rule is that whoever closes the shift
       // sees ALL of them. Fetched HERE so the driver's view and the manager's cannot disagree.
-      deps.movements.listByShift(shiftId),
-      deps.batteryReadings.listByShift(shiftId),
-      deps.directory.listBatteriesForVehicle(shift.vehicleId),
+      sourceDeps.movements.listByShift(shiftId),
+      sourceDeps.cashDeductions.listByShift(shiftId),
+      sourceDeps.batteryReadings.listByShift(shiftId),
+      sourceDeps.directory.listBatteriesForVehicle(shift.vehicleId),
       // C-7: the review must SHOW the photos, not just their slot names. Each attached slot carries
       // the media id the RBAC-checked GET /media/:id serves.
-      deps.media.listSlots(shiftId),
-      deps.batterySwaps.listByShift(shiftId),
+      sourceDeps.media.listSlots(shiftId),
+      sourceDeps.batterySwaps.listByShift(shiftId),
       // Serials for BOTH packs of every swap — the outgoing one is no longer fitted, so it is not in
       // `fitted`; it has to be resolved off the branch's full battery list.
-      deps.directory.listBatteries(shift.branchId),
+      sourceDeps.directory.listBatteries(shift.branchId),
     ])
     const withPack = (pkg: 'start' | 'end') =>
       readings
         .filter((r) => r.package === pkg)
         .map((r) => {
           const battery = fitted.find((b) => b.id === r.batteryId)
-          return { ...r, capacityAh: battery?.capacityAh ?? null, serialNo: battery?.serialNo ?? null }
+          return {
+            ...r,
+            // Required by the driver after a remount: an ordinary edit must lock to the evidence
+            // already reviewed instead of looking like an old-PWA read-before-retake write.
+            mediaId: r.mediaId,
+            capacityAh: battery?.capacityAh ?? null,
+            serialNo: battery?.serialNo ?? null,
+          }
         })
         .sort((a, b) => a.slotNo - b.slotNo)
 
@@ -894,6 +991,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         vehicleId: shift.vehicleId,
         shiftNo: shift.shiftNo,
         businessDate: shift.businessDate,
+        openApprovedAt: shift.openApprovedAt,
+        submittedAt: shift.submittedAt,
         startPackage: {
           odometerKm: shift.odoStart,
           batteryPercent: shift.batteryStart,
@@ -907,6 +1006,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         },
         endPackage: {
           odometerKm: shift.odoEnd,
+          odometerKmOcr: shift.odoEndOcr,
+          odometerAnomalyConfirmedAt: shift.odoEndAnomalyConfirmedAt,
+          odometerAnomalyConfirmedBy: shift.odoEndAnomalyConfirmedBy,
           batteryPercent: shift.batteryEnd,
           cashDeclared: shift.endCashDeclared === null ? null : serializeMoney(shift.endCashDeclared),
           walletDeclared: shift.endWalletDeclared === null ? null : serializeMoney(shift.endWalletDeclared),
@@ -937,6 +1039,24 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           occurredMinute: o.occurredMinute,
           // The DAY the screen said, which is not always the shift's day — the list scrolls back.
           occurredDate: o.occurredDate,
+          windowStatus: o.windowStatus,
+          decisionReason: o.decisionReason,
+          decidedBy: o.decidedBy,
+        })),
+        cashDeductions: cashDeductions.map((d) => ({
+          id: d.id,
+          operationKey: d.operationKey,
+          amount: serializeMoney(d.amount),
+          occurredDate: d.occurredDate,
+          occurredMinute: d.occurredMinute,
+          source: d.source,
+          amountOcr: d.amountOcr === null ? null : serializeMoney(d.amountOcr),
+          pointA: d.pointA,
+          pointB: d.pointB,
+          included: d.included,
+          windowStatus: d.windowStatus,
+          decisionReason: d.decisionReason,
+          decidedBy: d.decidedBy,
         })),
         // «سجل المدفوعات» as read: what the wallet actually did, beside what the orders imply.
         movements: movements.map((m) => ({
@@ -962,7 +1082,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
          */
         media: await Promise.all(
           slots.map(async (s) => {
-            const record = await deps.media.findById(s.mediaId)
+            const record = await sourceDeps.media.findById(s.mediaId)
             return {
               package: s.package,
               slot: s.slot,
@@ -971,6 +1091,11 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
               // screen shows the difference rather than picking a winner.
               clientTakenAt: record?.clientTakenAtMs == null ? null : new Date(record.clientTakenAtMs).toISOString(),
               receivedAt: record ? new Date(record.receivedAtMs).toISOString() : null,
+              attachedAt: new Date(s.attachedAtMs).toISOString(),
+              reusedFromShiftId: s.reusedFromShiftId,
+              staleAcknowledgedAt:
+                s.staleAcknowledgedAtMs === null ? null : new Date(s.staleAcknowledgedAtMs).toISOString(),
+              staleAcknowledgedBy: s.staleAcknowledgedBy,
             }
           }),
         ),
@@ -1023,7 +1148,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     { config: { permission: 'shift.operate', subject: shiftSubject } },
     async (req) => {
       const { id } = z.object({ id: z.string() }).parse(req.params)
-      const shift = await cancelShift(deps, id)
+      const shift = await cancelShift(deps, id, req.actor?.userId ?? null)
       await deps.audit.append({
         tableName: 'shifts',
         recordId: shift.id,
@@ -1058,14 +1183,19 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           managerAdjustment: moneySchema.optional(),
         })
         .parse(req.query)
-      const snapshot = await shiftSnapshot(id)
-      if (!snapshot) return reply.code(404).send({ error: 'shift_not_found' })
-
-      const plan = await settlementFor(deps, snapshot.shift, {
-        ...(query.keepAsReceivable === undefined ? {} : { keepAsReceivable: query.keepAsReceivable }),
-        ...(query.payShareNow === undefined ? {} : { payShareNow: query.payShareNow === 'true' }),
-        ...(query.managerAdjustment === undefined ? {} : { managerAdjustment: query.managerAdjustment }),
-      })
+      const plan = await deps.closeUnitOfWork.run(
+        { shiftId: id, actorId: req.actor!.userId, serializeDriverDay: true },
+        async (transaction) => {
+          const transactionDeps: Deps = { ...deps, ...transaction }
+          const shift = await transaction.shifts.findById(id)
+          if (!shift) throw new ServiceError(404, 'shift_not_found')
+          return settlementFor(transactionDeps, shift, {
+            ...(query.keepAsReceivable === undefined ? {} : { keepAsReceivable: query.keepAsReceivable }),
+            ...(query.payShareNow === undefined ? {} : { payShareNow: query.payShareNow === 'true' }),
+            ...(query.managerAdjustment === undefined ? {} : { managerAdjustment: query.managerAdjustment }),
+          })
+        },
+      )
       return {
         toOfficeCash: serializeMoney(plan.toOfficeCash),
         keptAsReceivable: serializeMoney(plan.keptAsReceivable),
@@ -1073,6 +1203,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         withheldFromShare: serializeMoney(plan.withheldFromShare),
         residualReceivable: serializeMoney(plan.residualReceivable),
         shareRemainingPayable: serializeMoney(plan.shareRemainingPayable),
+        grossDriverShare: serializeMoney(plan.grossDriverShare),
+        cashDeductionTotal: serializeMoney(plan.cashDeductionTotal),
+        netDriverShare: serializeMoney(plan.netDriverShare),
+        deductionReceivable: serializeMoney(plan.deductionReceivable),
         lines: plan.lines.map((l) => ({ code: l.code, amount: serializeMoney(l.amount) })),
         feasible: plan.feasible,
         refusals: plan.refusals,
@@ -1086,20 +1220,31 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     { config: { permission: 'shift.approve', subject: shiftSubject } },
     async (req, reply) => {
       const { id } = z.object({ id: z.string() }).parse(req.params)
-      const snapshot = await shiftSnapshot(id)
-      if (!snapshot) return reply.code(404).send({ error: 'shift_not_found' })
-      const br1 = await evaluateShift(deps, snapshot.shift)
-      const decisions = await deps.decisions.listByShift(id)
-      return {
-        ...snapshot.body,
-        br1: serializeBr1(br1),
-        decisions: decisions.map((d) => ({
-          gate: d.gate,
-          decision: d.decision,
-          notes: d.notes,
-          decidedAt: new Date(d.decidedAtMs).toISOString(),
-        })),
-      }
+      const review = await deps.closeUnitOfWork.run(
+        { shiftId: id, actorId: req.actor!.userId },
+        async (transaction) => {
+          const transactionDeps: Deps = { ...deps, ...transaction }
+          const shift = await transaction.shifts.findById(id)
+          if (!shift) return null
+          await prepareShiftReview(transactionDeps, shift, req.actor!.userId)
+          const snapshot = await shiftSnapshot(id, transactionDeps)
+          if (!snapshot) return null
+          const br1 = await evaluateShift(transactionDeps, snapshot.shift)
+          const decisions = await transaction.decisions.listByShift(id)
+          return {
+            ...snapshot.body,
+            br1: serializeBr1(br1),
+            decisions: decisions.map((d) => ({
+              gate: d.gate,
+              decision: d.decision,
+              notes: d.notes,
+              decidedAt: new Date(d.decidedAtMs).toISOString(),
+            })),
+          }
+        },
+      )
+      if (!review) return reply.code(404).send({ error: 'shift_not_found' })
+      return review
     },
   )
 
@@ -1210,6 +1355,16 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const { id } = z.object({ id: z.string() }).parse(req.params)
       const body = reviseOperationsRequest.parse(req.body)
       const { shift, br1, before } = await reviseOperations(deps, req.actor!, id, body)
+      const auditedBody = {
+        ...body,
+        orders: body.orders.map((order) => ({
+          ...order,
+          ...(order.fee === undefined ? {} : { fee: serializeMoney(order.fee) }),
+          ...(order.walletAmount === undefined
+            ? {}
+            : { walletAmount: order.walletAmount === null ? null : serializeMoney(order.walletAmount) }),
+        })),
+      }
       await deps.audit.append({
         tableName: 'shifts',
         recordId: shift.id,
@@ -1219,7 +1374,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         branchId: shift.branchId,
         requestId: req.requestId,
         before: { ordersHash: before.ordersHash },
-        after: { ordersHash: shift.ordersHash, revisedByManager: true, ...body },
+        after: { ordersHash: shift.ordersHash, revisedByManager: true, ...auditedBody },
         occurredAtMs: deps.clock.nowMs(),
       })
       return { id: shift.id, state: shift.state, br1: serializeBr1(br1) }
@@ -1604,6 +1759,7 @@ function serializeBr1(view: Awaited<ReturnType<typeof evaluateShift>>) {
     balanced: view.result.balanced,
     splitBalanced: view.result.splitBalanced,
     minWalletBalance: serializeMoney(view.minWallet),
+    cashDeductionTotal: serializeMoney(view.cashDeductionTotal),
     // Machine-readable codes; the UI resolves `br1.cause.<code>` to Arabic.
     causes: view.causes.map((c) => ({
       code: c.code,

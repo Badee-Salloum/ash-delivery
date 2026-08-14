@@ -51,16 +51,31 @@ async function shiftAwaitingApproval(): Promise<{ manager: string; shiftId: stri
 }
 
 describe('كشف التسوية', () => {
-  it('distributes the declared cash and leaves the share with the driver', async () => {
+  it('defaults to the same no-immediate-payout choice used by approval', async () => {
     const { manager, shiftId } = await shiftAwaitingApproval()
     const res = await get(manager, `/shifts/${shiftId}/settlement`)
     expect(res.statusCode, res.body).toBe(200)
     const s = res.json()
+    const explicit = await get(manager, `/shifts/${shiftId}/settlement?payShareNow=false`)
+    expect(explicit.statusCode, explicit.body).toBe(200)
 
     // The three destinations must sum back to what he declared — the whole safety property.
     const sum = (...xs: string[]) => xs.reduce((a, b) => a + Number(b), 0)
     expect(sum(s.toOfficeCash, s.paidToDriver, s.keptAsReceivable)).toBeCloseTo(105_000, 2)
+    expect(s.paidToDriver).toBe(sypStr(0))
+    expect(s.toOfficeCash).toBe(sypStr(105_000))
     expect(s.feasible).toBe(true)
+    expect(explicit.json()).toEqual(s)
+
+    // Approval receives the same omitted choice through a different wire schema. Pin the persisted
+    // decision as well as the preview so their defaults cannot silently drift apart again.
+    const review = await get(manager, `/shifts/${shiftId}/review`)
+    expect(review.statusCode, review.body).toBe(200)
+    const approved = await post(manager, `/shifts/${shiftId}/approve-close`, {
+      reviewedOrdersHash: review.json().br1.ordersHash,
+    })
+    expect(approved.statusCode, approved.body).toBe(200)
+    expect((await h.deps.shifts.findById(shiftId))?.driverSharePaid).toBe(0n)
   })
 
   it('moves money into the ذمة without touching the share', async () => {

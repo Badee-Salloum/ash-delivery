@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { Deps, EvidencePackage, MediaRecord } from '@ash/contracts'
+import type { Deps, EvidencePackage, MediaRecord, ShiftRecord } from '@ash/contracts'
 import { ALL_END_SLOTS, ALL_START_SLOTS } from '@ash/domain'
 import { ServiceError } from './shifts.service.ts'
 
@@ -34,6 +34,26 @@ const ALL_SLOTS: Record<EvidencePackage, readonly string[]> = {
   end: ALL_END_SLOTS,
 }
 
+const packageIsEditable = (state: ShiftRecord['state'], pkg: EvidencePackage): boolean =>
+  pkg === 'start' ? state === 'draft' : state === 'open' || state === 'suspended'
+
+function requireEditablePackage(shift: ShiftRecord, pkg: EvidencePackage): void {
+  if (!packageIsEditable(shift.state, pkg)) {
+    throw new ServiceError(409, 'shift_not_editable', { package: pkg, state: shift.state })
+  }
+}
+
+function rethrowMediaMutation(error: unknown): never {
+  const code = (error as { code?: string }).code
+  if (code === 'MEDIA_PACKAGE_NOT_EDITABLE') throw new ServiceError(409, 'shift_not_editable')
+  if (code === 'MEDIA_ATTACHMENT_CHANGED') throw new ServiceError(409, 'evidence_attachment_changed')
+  if (code === 'MEDIA_BRANCH_MISMATCH') throw new ServiceError(409, 'evidence_branch_mismatch')
+  if (code === 'MEDIA_REUSE_PROVENANCE_MISMATCH') {
+    throw new ServiceError(409, 'evidence_reuse_provenance_mismatch')
+  }
+  throw error
+}
+
 /** Magic bytes. The declared Content-Type is a client assertion and is not trusted. */
 export function sniffImageType(bytes: Uint8Array): 'image/jpeg' | 'image/png' | 'image/webp' | null {
   if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg'
@@ -66,6 +86,8 @@ export interface UploadInput {
   bytes: Uint8Array
   clientTakenAtMs: number | null
   uploadedBy: string
+  /** Driver explicitly accepted an old/reused-image warning before attaching it. */
+  staleAcknowledged?: boolean
 }
 
 /**
@@ -86,19 +108,22 @@ export interface UploadInput {
  */
 export async function deleteEvidence(
   deps: Deps,
-  input: { shiftId: string; package: EvidencePackage; slot: string },
+  input: { shiftId: string; package: EvidencePackage; slot: string; deletedBy: string | null },
 ): Promise<{ slotsNow: string[] }> {
   const shift = await deps.shifts.findById(input.shiftId)
   if (!shift) throw new ServiceError(404, 'shift_not_found')
 
-  const editable = shift.state === 'draft' || shift.state === 'open' || shift.state === 'suspended'
-  if (!editable) throw new ServiceError(409, 'shift_not_editable', { state: shift.state })
+  requireEditablePackage(shift, input.package)
 
   if (!ALL_SLOTS[input.package].includes(input.slot)) {
     throw new ServiceError(422, 'unknown_evidence_slot', { slot: input.slot })
   }
 
-  await deps.media.detach(input.shiftId, input.package, input.slot)
+  try {
+    await deps.media.detach(input.shiftId, input.package, input.slot, input.deletedBy)
+  } catch (error) {
+    rethrowMediaMutation(error)
+  }
   const slots = await deps.media.listSlots(input.shiftId)
   return { slotsNow: slots.filter((s) => s.package === input.package).map((s) => s.slot) }
 }
@@ -109,11 +134,16 @@ export interface UploadResult {
   /** Server receipt minus the phone's claim. Large values are worth a manager's attention. */
   clockSkewMs: number | null
   slotsNow: string[]
+  reusedFromShiftId: string | null
+  attachmentToken: string
+  staleAcknowledged: boolean
 }
 
 export async function uploadEvidence(deps: Deps, input: UploadInput): Promise<UploadResult> {
   const shift = await deps.shifts.findById(input.shiftId)
   if (!shift) throw new ServiceError(404, 'shift_not_found')
+
+  requireEditablePackage(shift, input.package)
 
   const allowed = ALL_SLOTS[input.package]
   if (!allowed.includes(input.slot)) {
@@ -153,7 +183,64 @@ export async function uploadEvidence(deps: Deps, input: UploadInput): Promise<Up
     },
   )
 
-  await deps.media.attach(input.shiftId, input.package, input.slot, media.id)
+  try {
+    await deps.media.attach(input.shiftId, input.package, input.slot, media.id, {
+      actorId: input.uploadedBy,
+      attachedAtMs: receivedAtMs,
+    })
+  } catch (error) {
+    rethrowMediaMutation(error)
+  }
+
+  // Compatibility with cached PWAs that persist a BMS OCR result immediately before its upload.
+  // Such a row is deliberately unusable while mediaId is NULL; the first matching bms_N evidence
+  // binds it here. PostgreSQL also enforces this in an attachment trigger so the DB-first rollout
+  // is safe while the previous API is still serving, while this path gives the memory adapter the
+  // same behavior. A replacement never rebinds an already-linked reading.
+  const bmsMatch = /^bms_([1-9]\d*)$/.exec(input.slot)
+  if (bmsMatch) {
+    const slotNo = Number(bmsMatch[1])
+    const battery = (await deps.directory.listBatteriesForVehicle(shift.vehicleId)).find(
+      (candidate) => candidate.slotNo === slotNo,
+    )
+    if (battery) {
+      const pending = (await deps.batteryReadings.listByShift(shift.id)).find(
+        (reading) =>
+          reading.package === input.package &&
+          reading.batteryId === battery.id &&
+          reading.mediaId === null &&
+          reading.source !== 'manager' &&
+          !reading.unavailable,
+      )
+      if (pending) await deps.batteryReadings.upsert({ ...pending, mediaId: media.id })
+    }
+  }
+  let attached = (await deps.media.listSlots(input.shiftId)).find(
+    (s) => s.package === input.package && s.slot === input.slot,
+  )
+  if (!attached) throw new Error(`evidence attachment ${input.shiftId}/${input.package}/${input.slot} disappeared`)
+  const stale = media.clientTakenAtMs != null && attached.attachedAtMs - media.clientTakenAtMs >= 30 * 60_000
+  // Acknowledgement is meaningful only after the server has observed the warning condition. This
+  // prevents a blanket header on a fresh upload from pre-acknowledging future evidence reuse.
+  if (input.staleAcknowledged === true && (stale || attached?.reusedFromShiftId != null)) {
+    try {
+      await deps.media.acknowledgeStale(
+        input.shiftId,
+        input.package,
+        input.slot,
+        media.id,
+        attached.attachmentToken,
+        input.uploadedBy,
+        receivedAtMs,
+      )
+    } catch (error) {
+      rethrowMediaMutation(error)
+    }
+    attached = (await deps.media.listSlots(input.shiftId)).find(
+      (s) => s.package === input.package && s.slot === input.slot,
+    )
+    if (!attached) throw new Error(`evidence attachment ${input.shiftId}/${input.package}/${input.slot} disappeared`)
+  }
 
   const refreshed = await deps.shifts.findById(input.shiftId)
   return {
@@ -161,6 +248,51 @@ export async function uploadEvidence(deps: Deps, input: UploadInput): Promise<Up
     deduped: existing !== null,
     clockSkewMs: input.clientTakenAtMs === null ? null : receivedAtMs - input.clientTakenAtMs,
     slotsNow: input.package === 'start' ? (refreshed?.mediaSlotsStart ?? []) : (refreshed?.mediaSlotsEnd ?? []),
+    reusedFromShiftId: attached?.reusedFromShiftId ?? null,
+    attachmentToken: attached.attachmentToken,
+    staleAcknowledged: attached?.staleAcknowledgedAtMs != null,
+  }
+}
+
+/** Record the driver's explicit acceptance after the server discovers content reuse. */
+export async function acknowledgeStaleEvidence(
+  deps: Deps,
+  input: {
+    shiftId: string
+    package: EvidencePackage
+    slot: string
+    mediaId: string
+    attachmentToken: string
+    acknowledgedBy: string
+  },
+): Promise<void> {
+  const shift = await deps.shifts.findById(input.shiftId)
+  if (!shift) throw new ServiceError(404, 'shift_not_found')
+  requireEditablePackage(shift, input.package)
+  const attached = (await deps.media.listSlots(input.shiftId)).find(
+    (s) => s.package === input.package && s.slot === input.slot,
+  )
+  if (!attached) throw new ServiceError(404, 'evidence_slot_empty')
+  if (attached.mediaId !== input.mediaId || attached.attachmentToken !== input.attachmentToken) {
+    throw new ServiceError(409, 'evidence_attachment_changed')
+  }
+  const media = await deps.media.findById(attached.mediaId)
+  const stale = media?.clientTakenAtMs != null && attached.attachedAtMs - media.clientTakenAtMs >= 30 * 60_000
+  if (!stale && attached.reusedFromShiftId === null) {
+    throw new ServiceError(422, 'evidence_not_stale_or_reused')
+  }
+  try {
+    await deps.media.acknowledgeStale(
+      input.shiftId,
+      input.package,
+      input.slot,
+      input.mediaId,
+      input.attachmentToken,
+      input.acknowledgedBy,
+      deps.clock.nowMs(),
+    )
+  } catch (error) {
+    rethrowMediaMutation(error)
   }
 }
 

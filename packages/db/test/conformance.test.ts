@@ -3,11 +3,15 @@ import type { Deps } from '@ash/contracts'
 import { runConformanceSuite } from '@ash/testkit/conformance'
 import { assertBigIntParser, createPool } from '../src/pool.ts'
 import { migrate } from '../src/migrate.ts'
+import { PgShiftCloseUnitOfWork } from '../src/repos-close.ts'
 import {
   PgAuditRepo,
+  PgCashDeductionRepo,
   PgFxRepo,
   PgLedgerRepo,
   PgOfficeCapitalTargetRepo,
+  PgOperationBatchRepo,
+  PgOperationWindowRepo,
   PgOrderRepo,
   PgRestorationRepo,
   PgSessionRepo,
@@ -62,6 +66,9 @@ if (!DATABASE_URL) {
   const BRANCH = '11111111-1111-1111-1111-111111111111'
   const USER = '22222222-2222-2222-2222-222222222222'
   const SHIFT = '55555555-5555-5555-5555-555555555555'
+  const BATTERY = '99999999-aaaa-4aaa-8aaa-aaaaaaaaaaa1'
+  const MEDIA_1 = '99999999-bbbb-4bbb-8bbb-bbbbbbbbbbb1'
+  const MEDIA_2 = '99999999-bbbb-4bbb-8bbb-bbbbbbbbbbb2'
 
   runConformanceSuite({
     label: 'postgres',
@@ -71,7 +78,7 @@ if (!DATABASE_URL) {
       // Truncate rather than re-migrate: orders of magnitude faster, and it exercises the real
       // constraints on every run instead of a freshly-empty database.
       await pool.query(`
-        TRUNCATE journal_lines, journal_entries, shift_orders, shift_media, media, float_tranches, expenses, expense_categories, settings, cash_counts, cash_count_lines, tier_rules, notifications,
+        TRUNCATE journal_lines, journal_entries, cash_deductions, shift_orders, shift_media_attachment_history, shift_media, media, float_tranches, expenses, expense_categories, settings, cash_counts, cash_count_lines, tier_rules, notifications,
                  shift_battery_readings, gps_pings, batteries,
                  shifts, funds, fx_days, week_locks, audit_log, sessions, drivers, vehicles,
                  vehicle_types, users, branches, governorates
@@ -117,7 +124,20 @@ if (!DATABASE_URL) {
         [SHIFT, BRANCH],
       )
       await pool.query(
-        `INSERT INTO fx_days (id, business_date, syp_minor_per_usd) VALUES (1, DATE '2026-07-21', 13000)
+        `INSERT INTO batteries (id, branch_id, serial_no, capacity_ah, vehicle_id, slot_no)
+         VALUES ($1, $2, 'CONF-BATTERY-1', 50, '88888888-8888-8888-8888-888888888888', 1)`,
+        [BATTERY, BRANCH],
+      )
+      await pool.query(
+        `INSERT INTO media
+           (id, branch_id, sha256, byte_size, mime_type, storage_key, received_at, uploaded_by)
+         VALUES
+           ($1, $3, 'conformance-bms-generation-1', 1, 'image/webp', 'conformance/bms-1.webp', now(), $4),
+           ($2, $3, 'conformance-bms-generation-2', 1, 'image/webp', 'conformance/bms-2.webp', now(), $4)`,
+        [MEDIA_1, MEDIA_2, BRANCH, USER],
+      )
+      await pool.query(
+        `INSERT INTO fx_days (business_date, syp_minor_per_usd) VALUES (DATE '2026-07-21', 13000)
          ON CONFLICT (business_date) DO NOTHING`,
       )
 
@@ -146,6 +166,9 @@ if (!DATABASE_URL) {
         batterySwaps: new PgBatterySwapRepo(pool),
         assignments: new PgAssignmentRepo(pool),
         orders: new PgOrderRepo(pool),
+        cashDeductions: new PgCashDeductionRepo(pool),
+        operationWindows: new PgOperationWindowRepo(pool),
+        operationBatches: new PgOperationBatchRepo(pool),
         movements: new PgWalletMovementRepo(pool),
         ledger: new PgLedgerRepo(pool),
         expenses: new PgExpenseRepo(pool),
@@ -170,6 +193,7 @@ if (!DATABASE_URL) {
         attendance: new PgAttendanceRepo(pool),
         decisions: new PgShiftDecisionRepo(pool),
         gps: new PgGpsPingRepo(pool),
+        closeUnitOfWork: new PgShiftCloseUnitOfWork(pool),
       }
     },
   })

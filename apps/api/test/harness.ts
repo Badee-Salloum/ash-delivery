@@ -62,8 +62,8 @@ export async function makeHarness(
     id: VEHICLE_TYPE, code: 'e_motorbike', nameAr: 'دراجة كهربائية', nameEn: 'Electric Motorbike',
     typeNo: 1, batterySlots: 3, active: true,
   })
-  deps.directory.branches.set(BRANCH, { id: BRANCH, code: 'DAM', nameAr: 'دمشق', nameEn: 'Damascus', governorateId: GOV_DAMASCUS, branchNo: 1 })
-  deps.directory.branches.set(OTHER_BRANCH, { id: OTHER_BRANCH, code: 'ALP', nameAr: 'حلب', nameEn: 'Aleppo', governorateId: GOV_ALEPPO, branchNo: 1 })
+  deps.directory.branches.set(BRANCH, { id: BRANCH, code: 'DAM', nameAr: 'دمشق', nameEn: 'Damascus', governorateId: GOV_DAMASCUS, branchNo: 1, timezone: 'Asia/Damascus' })
+  deps.directory.branches.set(OTHER_BRANCH, { id: OTHER_BRANCH, code: 'ALP', nameAr: 'حلب', nameEn: 'Aleppo', governorateId: GOV_ALEPPO, branchNo: 1, timezone: 'Asia/Damascus' })
   // «رأس مال المكتب» — the owner's own figures, seeded exactly as migration 0026 seeds production.
   // A test that had to configure capital before it could exercise الترميم would be testing its setup.
   deps.capitalTargets.seed(BRANCH)
@@ -129,7 +129,14 @@ export async function makeHarness(
       const res = await app.inject({
         method: 'PUT',
         url: `/shifts/${shiftId}/media/${pkg}/${slot}`,
-        headers: { cookie: cookieFor(token), 'content-type': 'image/jpeg' },
+        // Test fixtures intentionally reuse one 1x1 JPEG across slots. A real driver sees and
+        // acknowledges that warning; do the same here so unrelated lifecycle tests exercise their
+        // own gate. Evidence-specific tests inject without this header when they test refusal.
+        headers: {
+          cookie: cookieFor(token),
+          'content-type': 'image/jpeg',
+          'x-stale-evidence-acknowledged': 'true',
+        },
         payload: bytes,
       })
       if (res.statusCode !== 201) throw new Error(`upload failed: ${res.statusCode} ${res.body}`)

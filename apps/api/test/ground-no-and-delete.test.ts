@@ -136,6 +136,7 @@ describe('deleting a vehicle or a pack', () => {
       .id as string
     const shift = (await post(driver, '/shifts', { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 })).json()
       .id as string
+    await h.uploadPhoto(driver, shift, 'start', 'bms_1')
     await put(driver, `/shifts/${shift}/battery-readings`, {
       package: 'start',
       readings: [{ batteryId: fitted, slotNo: 1, percent: 90 }],

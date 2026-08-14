@@ -1,0 +1,33 @@
+# API deployment denylist. Keep secrets, backups, front-end assets and local build state off the
+# upload while retaining apps/api, workspace packages, scripts/build-api.mjs and api/index.mjs.
+.env*
+.git/
+.github/
+.vercel/
+backups/
+**/backups/
+node_modules/
+**/node_modules/
+
+# The two SPAs are deployed independently from isolated prebuilt directories.
+apps/admin/
+apps/driver/
+
+# Local/generated outputs, except api/index.mjs which Vercel validates before buildCommand.
+**/dist/
+**/*.tsbuildinfo
+**/.tesseract-stage/
+public/
+
+# OCR models are large and belong to the driver deployment, never the API bundle.
+*.traineddata
+**/*.traineddata
+
+# Build-irrelevant repository material.
+docs/
+infra/
+tools/
+**/test/
+**/*.test.ts
+**/vitest.config.ts
+*.md

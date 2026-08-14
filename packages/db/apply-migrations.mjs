@@ -14,11 +14,20 @@
 // history drift and refuses, which is the behaviour we want.
 import { readFileSync, readdirSync } from 'node:fs'
 import { neon } from '@neondatabase/serverless'
+import {
+  bootstrapTransactionQueries,
+  classifyRecordedMigration,
+  migrationTransactionQueries,
+} from './migration-http-plan.mjs'
 
 const url = process.env.DATABASE_URL
 if (!url) throw new Error('DATABASE_URL not set')
 const sql = neon(url)
 const dir = new URL('./migrations/', import.meta.url)
+
+// Serialize even first-install ledger creation. CREATE TABLE IF NOT EXISTS alone does not make two
+// concurrent catalog writes a useful migration-runner lock.
+await sql.transaction((tx) => bootstrapTransactionQueries(tx))
 
 const simpleChecksum = (text) => {
   let hash = 0x811c9dc5
@@ -111,16 +120,45 @@ for (const file of files) {
 
   const statements = splitStatements(body)
   console.log(`applying ${file} (${statements.length} statements) …`)
-  for (const [n, statement] of statements.entries()) {
+  try {
+    // The transaction plan locks, re-checks, atomically claims the filename, then applies DDL. The
+    // callback remains synchronous as required by Neon's non-interactive HTTP transaction API.
+    await sql.transaction((tx) =>
+      migrationTransactionQueries(tx, { file, checksum, statements }),
+    )
+  } catch (e) {
+    // A stale concurrent runner intentionally loses the primary-key claim and aborts before DDL.
+    // Re-read after rollback to distinguish that safe race (or a lost commit acknowledgement) from
+    // a real migration failure. The checksum still enforces immutable migration history.
+    let recorded
     try {
-      await sql.query(statement)
-    } catch (e) {
-      console.error(`!! ${file} statement ${n + 1}/${statements.length} failed: ${e.message}`)
-      console.error(statement.slice(0, 400))
+      recorded = classifyRecordedMigration(
+        await sql.query('SELECT checksum FROM schema_migrations WHERE filename = $1', [file]),
+        checksum,
+      )
+    } catch (verificationError) {
+      console.error(`!! ${file} failed atomically: ${e.message}`)
+      console.error(`!! unable to verify its migration record: ${verificationError.message}`)
       process.exit(1)
     }
+
+    if (recorded.kind === 'present') {
+      console.log(`skipped  ${file} (applied concurrently)`)
+      done.set(file, checksum)
+      present++
+      continue
+    }
+    if (recorded.kind === 'drift') {
+      console.error(
+        `!! ${file} has changed since it was applied (db ${recorded.actualChecksum} -> file ${checksum}).`,
+      )
+      console.error('   Applied migrations are immutable. Add a new migration instead.')
+      process.exit(1)
+    }
+
+    console.error(`!! ${file} failed atomically: ${e.message}`)
+    process.exit(1)
   }
-  await sql.query('INSERT INTO schema_migrations (filename, checksum) VALUES ($1, $2)', [file, checksum])
   console.log(`applied  ${file}`)
   applied++
 }

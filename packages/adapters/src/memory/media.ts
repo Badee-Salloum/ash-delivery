@@ -31,6 +31,9 @@ export class MemoryMediaRepo implements MediaRepo {
   readonly records = new Map<string, MediaRecord>()
   /** key: `${shiftId}|${package}|${slot}` — one photo per slot, mirroring the DB unique index. */
   readonly slots = new Map<string, AttachedSlot>()
+  /** Append-only provenance, mirroring shift_media_attachment_history. */
+  readonly attachmentHistory: Array<{ shiftId: string; package: EvidencePackage; slot: string; mediaId: string }> = []
+  private nextAttachmentToken = 1
 
   async put(record: MediaRecord): Promise<MediaRecord> {
     // Content-addressed: the same bytes uploaded twice (a retry after Wi-Fi dropped) resolve to
@@ -53,11 +56,66 @@ export class MemoryMediaRepo implements MediaRepo {
     return r ? { ...r } : null
   }
 
-  async attach(shiftId: string, pkg: EvidencePackage, slot: string, mediaId: string): Promise<void> {
-    this.slots.set(`${shiftId}|${pkg}|${slot}`, { package: pkg, slot, mediaId })
+  async attach(
+    shiftId: string,
+    pkg: EvidencePackage,
+    slot: string,
+    mediaId: string,
+    metadata: { actorId: string | null; attachedAtMs?: number; reusedFromShiftId?: string | null },
+  ): Promise<void> {
+    const key = `${shiftId}|${pkg}|${slot}`
+    const existing = this.slots.get(key)
+    // An exact retry is idempotent evidence attachment: keep its original time and acknowledgement.
+    if (existing?.mediaId === mediaId) return
+    let reusedFromShiftId = metadata.reusedFromShiftId ?? null
+    if (reusedFromShiftId === null) {
+      for (const prior of this.attachmentHistory.toReversed()) {
+        if (prior.mediaId !== mediaId) continue
+        reusedFromShiftId = prior.shiftId
+        break
+      }
+    }
+    this.slots.set(key, {
+      package: pkg,
+      slot,
+      mediaId,
+      attachmentToken: `memory-attachment-${this.nextAttachmentToken++}`,
+      attachedAtMs: metadata.attachedAtMs ?? Date.now(),
+      reusedFromShiftId,
+      staleAcknowledgedAtMs: null,
+      staleAcknowledgedBy: null,
+    })
+    this.attachmentHistory.push({ shiftId, package: pkg, slot, mediaId })
   }
 
-  async detach(shiftId: string, pkg: EvidencePackage, slot: string): Promise<void> {
+  async acknowledgeStale(
+    shiftId: string,
+    pkg: EvidencePackage,
+    slot: string,
+    expectedMediaId: string,
+    expectedAttachmentToken: string,
+    acknowledgedBy: string,
+    acknowledgedAtMs: number,
+  ): Promise<void> {
+    const key = `${shiftId}|${pkg}|${slot}`
+    const attached = this.slots.get(key)
+    if (
+      !attached ||
+      attached.mediaId !== expectedMediaId ||
+      attached.attachmentToken !== expectedAttachmentToken
+    ) {
+      throw Object.assign(new Error('evidence attachment changed before acknowledgement'), {
+        code: 'MEDIA_ATTACHMENT_CHANGED',
+      })
+    }
+    this.slots.set(key, {
+      ...attached,
+      staleAcknowledgedAtMs: acknowledgedAtMs,
+      staleAcknowledgedBy: acknowledgedBy,
+    })
+  }
+
+  async detach(shiftId: string, pkg: EvidencePackage, slot: string, _actorId: string | null): Promise<void> {
     // The blob and its `media` record stay: content-addressed bytes may be another slot's too.
     this.slots.delete(`${shiftId}|${pkg}|${slot}`)
   }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Deps } from '@ash/contracts'
+import type { BatteryReadingRecord, Deps } from '@ash/contracts'
 import { type Posting, minor } from '@ash/domain'
 
 /**
@@ -26,12 +26,39 @@ const syp = (n: number) => minor(BigInt(n) * 100n)
 const BRANCH = '11111111-1111-1111-1111-111111111111'
 const USER = '22222222-2222-2222-2222-222222222222'
 const SHIFT = '55555555-5555-5555-5555-555555555555'
+const DRIVER = '77777777-7777-7777-7777-777777777777'
+const BATTERY = '99999999-aaaa-4aaa-8aaa-aaaaaaaaaaa1'
+const MEDIA_1 = '99999999-bbbb-4bbb-8bbb-bbbbbbbbbbb1'
+const MEDIA_2 = '99999999-bbbb-4bbb-8bbb-bbbbbbbbbbb2'
+const ORDER_1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1'
+const ORDER_2 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2'
+
+const batteryReading = (overrides: Partial<BatteryReadingRecord> = {}): BatteryReadingRecord => ({
+  shiftId: SHIFT,
+  batteryId: BATTERY,
+  package: 'start',
+  slotNo: 1,
+  percent: 61,
+  packMillivolts: 72_110,
+  cycleCount: 201,
+  remainCapacityDah: 311,
+  fullCapacityDah: 500,
+  mosTempDc: 321,
+  t1Dc: 315,
+  t2Dc: 318,
+  mediaId: MEDIA_1,
+  source: 'ocr',
+  unavailable: false,
+  ocrRaw: { percent: 61, cycleCount: 201 },
+  batterySwapId: null,
+  ...overrides,
+})
 
 const transfer = (occurrenceKey: string, amount = syp(1_000)): Posting => ({
   eventType: 'float_out',
   occurrenceKey,
   lines: [
-    { fund: { kind: 'driver_cash', driverId: 'driver-1' }, side: 'D', amount },
+    { fund: { kind: 'driver_cash', driverId: DRIVER }, side: 'D', amount },
     { fund: { kind: 'office_cash' }, side: 'C', amount },
   ],
 })
@@ -72,7 +99,7 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           expect(replay).toHaveLength(0)
           expect(await deps.ledger.listByShift(SHIFT)).toHaveLength(1)
           // And crucially the money did not double.
-          expect(await deps.ledger.fundBalance(BRANCH, 'driver_cash:driver-1')).toBe(syp(1_000))
+          expect(await deps.ledger.fundBalance(BRANCH, `driver_cash:${DRIVER}`)).toBe(syp(1_000))
         } finally {
           await ctx.cleanup?.(deps)
         }
@@ -85,7 +112,7 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           const second = await deps.ledger.post(BRANCH, [transfer('2', syp(40_000))], META)
 
           expect(second).toHaveLength(1)
-          expect(await deps.ledger.fundBalance(BRANCH, 'driver_cash:driver-1')).toBe(syp(100_000))
+          expect(await deps.ledger.fundBalance(BRANCH, `driver_cash:${DRIVER}`)).toBe(syp(100_000))
         } finally {
           await ctx.cleanup?.(deps)
         }
@@ -122,7 +149,7 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           expect(await deps.ledger.listByShift(SHIFT)).toHaveLength(3)
           // 10 + 20 + 30, with the replay contributing nothing: the figure is wrong in BOTH
           // failure modes — 10,000 if everything rolled back, 70,000 if the replay double-posted.
-          expect(await deps.ledger.fundBalance(BRANCH, 'driver_cash:driver-1')).toBe(syp(60_000))
+          expect(await deps.ledger.fundBalance(BRANCH, `driver_cash:${DRIVER}`)).toBe(syp(60_000))
         } finally {
           await ctx.cleanup?.(deps)
         }
@@ -169,7 +196,7 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
             occurrenceKey: '1',
             lines: [
               { fund: { kind: 'fee_earned' }, side: 'D', amount: syp(100_000) },
-              { fund: { kind: 'driver_share_payable', driverId: 'driver-1' }, side: 'C', amount: syp(40_000) },
+              { fund: { kind: 'driver_share_payable', driverId: DRIVER }, side: 'C', amount: syp(40_000) },
               { fund: { kind: 'company_revenue' }, side: 'C', amount: syp(40_000) },
               { fund: { kind: 'yalago_income' }, side: 'C', amount: syp(20_000) },
             ],
@@ -189,7 +216,7 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           // return ...992 and nobody would notice until an audit.
           const huge = minor(9_007_199_254_740_993n)
           await deps.ledger.post(BRANCH, [transfer('1', huge)], META)
-          expect(await deps.ledger.fundBalance(BRANCH, 'driver_cash:driver-1')).toBe(huge)
+          expect(await deps.ledger.fundBalance(BRANCH, `driver_cash:${DRIVER}`)).toBe(huge)
         } finally {
           await ctx.cleanup?.(deps)
         }
@@ -201,7 +228,7 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
         const deps = await fresh()
         try {
           const order = {
-            id: 'o-1',
+            id: ORDER_1,
             shiftId: SHIFT,
             providerOrderNo: 'YAL-1',
             payMode: 'cash' as const,
@@ -220,9 +247,79 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
             walletAmount: null,
             occurredMinute: null,
             occurredDate: null,
+            windowStatus: 'unknown' as const,
+            decisionReason: null,
+            decidedBy: null,
+            decidedAt: null,
           }
-          await deps.orders.create(order)
-          await expect(deps.orders.create({ ...order, id: 'o-2' })).rejects.toThrow()
+          await deps.orders.create(order, USER)
+          await expect(deps.orders.create({ ...order, id: ORDER_2 }, USER)).rejects.toThrow()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+    })
+
+    describe('battery reading replacement generations', () => {
+      it('same-image correction replaces the OCR baseline submitted with the correction', async () => {
+        const deps = await fresh()
+        try {
+          await deps.media.attach(SHIFT, 'start', 'bms_1', MEDIA_1, {
+            actorId: USER,
+            attachedAtMs: 1_784_000_000_000,
+          })
+          await deps.batteryReadings.upsert(batteryReading())
+
+          const corrected = batteryReading({
+            percent: 64,
+            packMillivolts: 72_260,
+            cycleCount: 203,
+            remainCapacityDah: 326,
+            fullCapacityDah: 502,
+            mosTempDc: 329,
+            t1Dc: 322,
+            t2Dc: 324,
+            source: 'manual',
+            // A cloud retry of the same bytes produced a better baseline before the correction.
+            ocrRaw: { percent: 63, cycleCount: 203 },
+          })
+          await deps.batteryReadings.upsert(corrected)
+
+          expect(await deps.batteryReadings.listByShift(SHIFT)).toEqual([corrected])
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('replacement-photo manual revision clears OCR data from the superseded photo', async () => {
+        const deps = await fresh()
+        try {
+          await deps.media.attach(SHIFT, 'start', 'bms_1', MEDIA_1, {
+            actorId: USER,
+            attachedAtMs: 1_784_000_000_000,
+          })
+          await deps.batteryReadings.upsert(batteryReading())
+
+          const replacement = batteryReading({
+            percent: 78,
+            packMillivolts: 73_040,
+            cycleCount: 207,
+            remainCapacityDah: 391,
+            fullCapacityDah: 505,
+            mosTempDc: 337,
+            t1Dc: 331,
+            t2Dc: 334,
+            mediaId: MEDIA_2,
+            source: 'manual',
+            ocrRaw: null,
+          })
+          await deps.media.attach(SHIFT, 'start', 'bms_1', MEDIA_2, {
+            actorId: USER,
+            attachedAtMs: 1_784_000_060_000,
+          })
+          await deps.batteryReadings.upsert(replacement)
+
+          expect(await deps.batteryReadings.listByShift(SHIFT)).toEqual([replacement])
         } finally {
           await ctx.cleanup?.(deps)
         }
@@ -240,8 +337,8 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
         const deps = await fresh()
         try {
           const page = [move(-47, '18:06'), move(153, '17:42'), move(-42, '17:42')]
-          expect(await deps.movements.merge(SHIFT, page)).toHaveLength(3)
-          expect(await deps.movements.merge(SHIFT, page)).toHaveLength(0)
+          expect(await deps.movements.merge(SHIFT, page, USER)).toHaveLength(3)
+          expect(await deps.movements.merge(SHIFT, page, USER)).toHaveLength(0)
           expect(await deps.movements.listByShift(SHIFT)).toHaveLength(3)
         } finally {
           await ctx.cleanup?.(deps)
@@ -251,9 +348,9 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
       it('a second page contributes only its genuinely new rows', async () => {
         const deps = await fresh()
         try {
-          await deps.movements.merge(SHIFT, [move(-47, '18:06'), move(153, '17:42')])
+          await deps.movements.merge(SHIFT, [move(-47, '18:06'), move(153, '17:42')], USER)
           // The overlap: the first row was already read off page one, the second is new.
-          const added = await deps.movements.merge(SHIFT, [move(153, '17:42'), move(-24, '13:10')])
+          const added = await deps.movements.merge(SHIFT, [move(153, '17:42'), move(-24, '13:10')], USER)
           expect(added.map((m) => m.amount)).toEqual([syp(-24)])
           expect(await deps.movements.listByShift(SHIFT)).toHaveLength(3)
         } finally {
@@ -264,7 +361,7 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
       it('keeps two genuinely identical movements in the same minute, numbered apart', async () => {
         const deps = await fresh()
         try {
-          const both = await deps.movements.merge(SHIFT, [move(-24, '13:10'), move(-24, '13:10')])
+          const both = await deps.movements.merge(SHIFT, [move(-24, '13:10'), move(-24, '13:10')], USER)
           expect(both.map((m) => m.seq)).toEqual([1, 2])
         } finally {
           await ctx.cleanup?.(deps)
@@ -274,8 +371,12 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
       it('can unlink a movement from its order — null is an instruction, not an omission', async () => {
         const deps = await fresh()
         try {
-          const [row] = await deps.movements.merge(SHIFT, [{ ...move(153, '17:42'), orderId: null }])
-          await deps.movements.update(row!.id, { role: 'unmatched', orderId: null, included: false })
+          const [row] = await deps.movements.merge(
+            SHIFT,
+            [{ ...move(153, '17:42'), orderId: null }],
+            USER,
+          )
+          await deps.movements.update(row!.id, { role: 'unmatched', orderId: null, included: false }, USER)
           const after = (await deps.movements.listByShift(SHIFT))[0]!
           expect(after.included).toBe(false)
           expect(after.orderId).toBeNull()
@@ -302,8 +403,19 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
             occurredAtMs: 1_784_000_000_000,
           })
           const rows = await deps.audit.list({ tableName: 'users' })
-          expect(rows).toHaveLength(1)
-          expect(rows[0]?.actorId).toBeNull()
+          const appended = rows.filter((row) => row.requestId === 'req-1')
+          expect(appended).toHaveLength(1)
+          expect(appended[0]).toMatchObject({
+            tableName: 'users',
+            recordId: USER,
+            action: 'UPDATE',
+            actorId: null,
+            actorKind: 'anonymous',
+            branchId: null,
+            before: null,
+            after: { failedAttempts: 1 },
+            occurredAtMs: 1_784_000_000_000,
+          })
         } finally {
           await ctx.cleanup?.(deps)
         }

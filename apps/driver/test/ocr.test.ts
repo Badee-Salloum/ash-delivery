@@ -620,6 +620,12 @@ describe('a page the recogniser could not read is not a page it half read', () =
     ])
   })
 
+  it('preserves a Recent Orders minus sign for cash-deduction routing', () => {
+    expect(parseOrders('−١٤٤٫١٥ SYP ٧:٢٩ م', 2026)).toEqual([
+      { dateIso: null, time: '19:29', fee: '-144.15', zone: null },
+    ])
+  })
+
   it('will not offer eleven rows on the strength of the two that survived', () => {
     const salvaged = parsePaymentsLog(TRANSLITERATED_LOG)
     expect(salvaged.length).toBeLessThan(3) // only the ASCII-looking debris gets even this far

@@ -210,12 +210,20 @@ function LiveRow({
   }
 
   const forceClose = async (): Promise<void> => {
+    const parsedOdometer = odometerKm.trim() === '' ? null : Number(odometerKm)
+    const anomalousOdometer =
+      parsedOdometer !== null &&
+      Number.isFinite(parsedOdometer) &&
+      shift.odometerStart != null &&
+      parsedOdometer < shift.odometerStart
+    if (anomalousOdometer && !window.confirm(t.approval.odometerAnomalyConfirm)) return
     setBusy(true)
     setErr(null)
     try {
       await api.forceCloseShift(shift.id, {
         reason: reason.trim(),
-        odometerKm: odometerKm.trim() === '' ? null : Number(odometerKm),
+        odometerKm: parsedOdometer,
+        odometerAnomalyConfirmed: anomalousOdometer,
         cashDeclared: cashDeclared.trim() === '' ? null : cashDeclared,
         walletDeclared: walletDeclared.trim() === '' ? null : walletDeclared,
       })

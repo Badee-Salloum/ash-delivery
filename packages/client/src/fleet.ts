@@ -159,9 +159,18 @@ export function photoAge(clientTakenAt: string | null, receivedAt: string | null
   const received = Date.parse(receivedAt)
   if (Number.isNaN(taken) || Number.isNaN(received)) return { kind: 'unknown' }
 
-  const minutes = Math.round((received - taken) / 60_000)
+  const ageMs = received - taken
+  const minutes = Math.round(ageMs / 60_000)
   // A phone clock running AHEAD of the server produces a negative gap. That is a clock problem, not
   // an old photo, and reporting it as «taken -3 minutes ago» would be nonsense — so it reads fresh.
-  if (minutes <= 0) return { kind: 'fresh', minutes: 0 }
-  return minutes >= PHOTO_STALE_MINUTES ? { kind: 'stale', minutes } : { kind: 'fresh', minutes }
+  if (ageMs <= 0) return { kind: 'fresh', minutes: 0 }
+  return ageMs >= PHOTO_STALE_MINUTES * 60_000 ? { kind: 'stale', minutes } : { kind: 'fresh', minutes }
+}
+
+/** The upload endpoint already calculated the same receipt/capture gap for the driver UI. */
+export function photoAgeFromClockSkew(clockSkewMs: number | null): PhotoAge {
+  if (clockSkewMs === null || !Number.isFinite(clockSkewMs)) return { kind: 'unknown' }
+  const ageMs = Math.max(0, clockSkewMs)
+  const minutes = Math.round(ageMs / 60_000)
+  return ageMs >= PHOTO_STALE_MINUTES * 60_000 ? { kind: 'stale', minutes } : { kind: 'fresh', minutes }
 }

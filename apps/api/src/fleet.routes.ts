@@ -329,7 +329,7 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
 
   app.post('/branches', { config: { permission: 'settings.write' } }, async (req, reply) => {
     const body = createBranchRequest.parse(req.body)
-    const branch: BranchRecord = { id: deps.ids.uuid(), ...body }
+    const branch: BranchRecord = { id: deps.ids.uuid(), timezone: 'Asia/Damascus', ...body }
     await createOrConflict(() => deps.directory.createBranch(branch), 'duplicate_branch')
     await audit(deps, req, 'branches', branch.id, 'INSERT', null, branch)
     return reply.code(201).send(branch)

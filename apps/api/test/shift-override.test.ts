@@ -147,6 +147,33 @@ describe('shift override (stuck shift)', () => {
     assertLedgerBalances()
   })
 
+  it('requires and persists an explicit manager confirmation for a lower force-close odometer', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await openShift(driver, manager)
+
+    const refused = await post(manager, `/shifts/${id}/force-close`, {
+      reason: 'replacement odometer',
+      odometerKm: 90,
+    })
+    expect(refused.statusCode, refused.body).toBe(422)
+    expect(refused.json().error).toBe('odometer_anomaly_confirmation_required')
+    expect((await h.deps.shifts.findById(id))?.state).toBe('open')
+
+    const accepted = await post(manager, `/shifts/${id}/force-close`, {
+      reason: 'replacement odometer verified in person',
+      odometerKm: 90,
+      odometerAnomalyConfirmed: true,
+    })
+    expect(accepted.statusCode, accepted.body).toBe(200)
+    expect(await h.deps.shifts.findById(id)).toMatchObject({
+      state: 'approved',
+      odoEnd: 90,
+      odoEndAnomalyConfirmedBy: 'u-bm',
+    })
+    expect((await h.deps.shifts.findById(id))?.odoEndAnomalyConfirmedAt).toBeTruthy()
+  })
+
   it('a driver may not void or force-close (shift.approve only)', async () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')

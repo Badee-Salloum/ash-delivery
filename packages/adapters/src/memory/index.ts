@@ -9,6 +9,8 @@ import type {
   BatteryRecord,
   BatterySwapRecord,
   BatterySwapRepo,
+  CashDeductionRecord,
+  CashDeductionRepo,
   GovernorateRecord,
   VehicleTypeRecord,
   AuditRecord,
@@ -30,9 +32,15 @@ import type {
   SessionRepo,
   ShiftDecisionRecord,
   ShiftDecisionRepo,
+  ShiftCloseTransactionDeps,
+  ShiftCloseUnitOfWork,
+  ShiftCloseUnitOfWorkInput,
   GpsPingRecord,
   GpsPingRepo,
   OrderPointRecord,
+  OperationBatch,
+  OperationBatchRepo,
+  OperationWindowRepo,
   ShiftOrderRecord,
   ShiftRecord,
   ShiftRepo,
@@ -48,7 +56,7 @@ import type {
   WeekLockRecord,
   WeekLockRepo,
 } from '@ash/contracts'
-import { normalizeUsername } from '@ash/contracts'
+import { classifyOperationWindow, includedByOperationWindow, normalizeUsername } from '@ash/contracts'
 import { type CalendarDate, type FxDay, type Minor, type Posting, isAwaitingDecision, isLive, minor } from '@ash/domain'
 import { memoryCipher } from '../crypto.ts'
 import { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
@@ -203,7 +211,7 @@ export class MemoryShiftRepo implements ShiftRepo {
     }
   }
 
-  async create(shift: ShiftRecord): Promise<void> {
+  async create(shift: ShiftRecord, _actorId: string | null): Promise<void> {
     /*
      * Postgres has `shifts_no_uq` UNIQUE (driver_id, business_date, shift_no); without the same
      * rule here the fake would accept a shift the real database refuses, and the collision that
@@ -219,7 +227,7 @@ export class MemoryShiftRepo implements ShiftRepo {
     const s = this.rows.get(id)
     return s ? this.withSlots(s) : null
   }
-  async update(shift: ShiftRecord): Promise<void> {
+  async update(shift: ShiftRecord, _actorId: string | null): Promise<void> {
     this.rows.set(shift.id, structuredClone(shift))
   }
   async listLiveForDriver(driverId: string): Promise<ShiftRecord[]> {
@@ -256,7 +264,7 @@ export class MemoryShiftRepo implements ShiftRepo {
       .map((s) => s.shiftNo)
     return used.length === 0 ? 1 : Math.max(...used) + 1
   }
-  async delete(id: string): Promise<void> {
+  async delete(id: string, _actorId: string | null): Promise<void> {
     this.rows.delete(id)
   }
 }
@@ -285,6 +293,26 @@ export class MemoryBatteryReadingRepo implements BatteryReadingRepo {
   async existsForBattery(batteryId: string): Promise<boolean> {
     return [...this.rows.values()].some((r) => r.batteryId === batteryId)
   }
+
+  /** Capture only this shift's readings so a rollback cannot erase another shift's writes. */
+  snapshotForShift(shiftId: string): BatteryReadingRecord[] {
+    return [...this.rows.values()]
+      .filter((reading) => reading.shiftId === shiftId)
+      .map((reading) => structuredClone(reading))
+  }
+
+  /** Replace this shift's readings with a snapshot, leaving every other shift untouched. */
+  restoreForShift(shiftId: string, snapshot: readonly BatteryReadingRecord[]): void {
+    for (const [key, reading] of this.rows) {
+      if (reading.shiftId === shiftId) this.rows.delete(key)
+    }
+    for (const reading of snapshot) {
+      if (reading.shiftId !== shiftId) {
+        throw new Error(`battery-reading snapshot belongs to shift ${reading.shiftId}, not ${shiftId}`)
+      }
+      this.rows.set(this.key(reading), structuredClone(reading))
+    }
+  }
 }
 
 /** The mid-shift battery-swap event log (SRS §L seam). Append-only, ordered by seq_no per shift. */
@@ -301,6 +329,22 @@ export class MemoryBatterySwapRepo implements BatterySwapRepo {
       .filter((r) => r.shiftId === shiftId)
       .sort((a, b) => a.seqNo - b.seqNo)
       .map((r) => ({ ...r }))
+  }
+
+  /** Capture only this shift's swap log so rollback preserves unrelated append-only events. */
+  snapshotForShift(shiftId: string): BatterySwapRecord[] {
+    return this.rows.filter((swap) => swap.shiftId === shiftId).map((swap) => structuredClone(swap))
+  }
+
+  /** Replace this shift's swap log with a snapshot, leaving every other shift untouched. */
+  restoreForShift(shiftId: string, snapshot: readonly BatterySwapRecord[]): void {
+    const retained = this.rows.filter((swap) => swap.shiftId !== shiftId)
+    for (const swap of snapshot) {
+      if (swap.shiftId !== shiftId) {
+        throw new Error(`battery-swap snapshot belongs to shift ${swap.shiftId}, not ${shiftId}`)
+      }
+    }
+    this.rows.splice(0, this.rows.length, ...retained, ...structuredClone(snapshot))
   }
 }
 
@@ -397,7 +441,7 @@ export class MemoryOrderRepo implements OrderRepo {
       }))
   }
 
-  async create(order: ShiftOrderRecord): Promise<void> {
+  async create(order: ShiftOrderRecord, _actorId: string | null): Promise<void> {
     // The database has a GLOBAL unique index on provider_order_no; mirror it here so a test
     // cannot pass against a laxer rule than production enforces.
     for (const o of this.rows.values()) {
@@ -410,7 +454,7 @@ export class MemoryOrderRepo implements OrderRepo {
     this.rows.set(order.id, { ...order })
   }
   /** Identity is never changed — only what a human may correct. Mirrors `PgOrderRepo.update`. */
-  async update(order: ShiftOrderRecord): Promise<void> {
+  async update(order: ShiftOrderRecord, _actorId: string | null): Promise<void> {
     const existing = this.rows.get(order.id)
     if (!existing) return
     this.rows.set(order.id, {
@@ -425,9 +469,13 @@ export class MemoryOrderRepo implements OrderRepo {
       walletAmount: order.walletAmount,
       occurredMinute: order.occurredMinute,
       occurredDate: order.occurredDate,
+      windowStatus: order.windowStatus,
+      decisionReason: order.decisionReason,
+      decidedBy: order.decidedBy,
+      decidedAt: order.decidedAt,
     })
   }
-  async replacePoints(orderId: string, points: readonly OrderPointRecord[]): Promise<void> {
+  async replacePoints(orderId: string, points: readonly OrderPointRecord[], _actorId: string | null): Promise<void> {
     const existing = this.rows.get(orderId)
     if (!existing) return
     this.rows.set(orderId, { ...existing, points: points.map((p) => ({ ...p })) })
@@ -439,8 +487,117 @@ export class MemoryOrderRepo implements OrderRepo {
     for (const o of this.rows.values()) if (o.providerOrderNo === providerOrderNo) return { ...o }
     return null
   }
-  async delete(id: string): Promise<void> {
+  async delete(id: string, _actorId: string | null): Promise<void> {
     this.rows.delete(id)
+  }
+}
+
+export class MemoryCashDeductionRepo implements CashDeductionRepo {
+  readonly rows = new Map<string, CashDeductionRecord>()
+
+  async create(deduction: CashDeductionRecord, _actorId: string | null): Promise<void> {
+    for (const row of this.rows.values()) {
+      if (row.shiftId === deduction.shiftId && row.operationKey === deduction.operationKey) {
+        throw Object.assign(new Error(`duplicate cash deduction ${deduction.operationKey}`), {
+          code: 'DUPLICATE_CASH_DEDUCTION',
+        })
+      }
+    }
+    this.rows.set(deduction.id, { ...deduction })
+  }
+
+  async update(deduction: CashDeductionRecord, _actorId: string | null): Promise<void> {
+    const existing = this.rows.get(deduction.id)
+    if (!existing) return
+    this.rows.set(deduction.id, {
+      ...deduction,
+      id: existing.id,
+      shiftId: existing.shiftId,
+      operationKey: existing.operationKey,
+      createdBy: existing.createdBy,
+    })
+  }
+
+  async listByShift(shiftId: string): Promise<CashDeductionRecord[]> {
+    return [...this.rows.values()]
+      .filter((row) => row.shiftId === shiftId)
+      .sort((a, b) => a.operationKey.localeCompare(b.operationKey))
+      .map((row) => ({ ...row }))
+  }
+
+  async findByOperationKey(shiftId: string, operationKey: string): Promise<CashDeductionRecord | null> {
+    for (const row of this.rows.values()) {
+      if (row.shiftId === shiftId && row.operationKey === operationKey) return { ...row }
+    }
+    return null
+  }
+
+  async delete(id: string, _actorId: string | null): Promise<void> {
+    this.rows.delete(id)
+  }
+}
+
+/** In-memory parity for PostgreSQL's deterministic SECURITY DEFINER classifier. */
+export class MemoryOperationWindowRepo implements OperationWindowRepo {
+  private readonly shifts: MemoryShiftRepo
+  private readonly orders: MemoryOrderRepo
+  private readonly deductions: MemoryCashDeductionRepo
+  private readonly directory: MemoryDirectoryRepo
+  private readonly clock: Clock
+
+  constructor(
+    shifts: MemoryShiftRepo,
+    orders: MemoryOrderRepo,
+    deductions: MemoryCashDeductionRepo,
+    directory: MemoryDirectoryRepo,
+    clock: Clock,
+  ) {
+    this.shifts = shifts
+    this.orders = orders
+    this.deductions = deductions
+    this.directory = directory
+    this.clock = clock
+  }
+
+  async reclassify(
+    shiftId: string,
+    actorId: string | null,
+  ): Promise<{ orders: number; cashDeductions: number }> {
+    const shift = await this.shifts.findById(shiftId)
+    if (!shift) {
+      throw Object.assign(new Error(`shift ${shiftId} not found`), { code: 'OPERATION_WINDOW_SHIFT_NOT_FOUND' })
+    }
+    const branch = await this.directory.branch(shift.branchId)
+    const classify = (occurredDate: string | null, occurredMinute: string | null) =>
+      classifyOperationWindow({
+        occurredDate,
+        occurredMinute,
+        openApprovedAt: shift.openApprovedAt,
+        submittedAt: shift.submittedAt,
+        ...(branch?.timezone ? { timeZone: branch.timezone } : {}),
+        offsetMinutes: this.clock.offsetMinutes(),
+      })
+
+    let orderUpdates = 0
+    for (const order of await this.orders.listByShift(shiftId)) {
+      if (order.kind === 'manual') continue
+      const windowStatus = classify(order.occurredDate, order.occurredMinute)
+      const included = order.decidedBy === null ? includedByOperationWindow(windowStatus) : order.included
+      if (windowStatus === order.windowStatus && included === order.included) continue
+      await this.orders.update({ ...order, windowStatus, included }, actorId)
+      orderUpdates++
+    }
+
+    let deductionUpdates = 0
+    for (const deduction of await this.deductions.listByShift(shiftId)) {
+      const windowStatus = classify(deduction.occurredDate, deduction.occurredMinute)
+      const included = deduction.decidedBy === null ? includedByOperationWindow(windowStatus) : deduction.included
+      if (windowStatus === deduction.windowStatus && included === deduction.included) continue
+      await this.deductions.update({ ...deduction, windowStatus, included }, actorId)
+      deductionUpdates++
+    }
+
+    return { orders: orderUpdates, cashDeductions: deductionUpdates }
   }
 }
 
@@ -462,7 +619,11 @@ export class MemoryWalletMovementRepo implements WalletMovementRepo {
   }
 
   /** The same multiset merge the database does: consume a match, insert only the surplus. */
-  async merge(shiftId: string, movements: readonly WalletMovementInput[]): Promise<WalletMovementRecord[]> {
+  async merge(
+    shiftId: string,
+    movements: readonly WalletMovementInput[],
+    _actorId: string | null,
+  ): Promise<WalletMovementRecord[]> {
     const tally = new Map<string, number>()
     for (const m of this.rows.values()) {
       if (m.shiftId !== shiftId) continue
@@ -507,6 +668,7 @@ export class MemoryWalletMovementRepo implements WalletMovementRepo {
   async update(
     id: string,
     patch: { role?: WalletMovementRole; orderId?: string | null; included?: boolean; ambiguous?: boolean },
+    _actorId: string | null,
   ): Promise<void> {
     const row = this.rows.get(id)
     if (!row) return
@@ -520,10 +682,228 @@ export class MemoryWalletMovementRepo implements WalletMovementRepo {
     })
   }
 
-  async deleteByShift(shiftId: string): Promise<void> {
+  async deleteByShift(shiftId: string, _actorId: string | null): Promise<void> {
     for (const [id, m] of this.rows) if (m.shiftId === shiftId) this.rows.delete(id)
   }
+
+  /** Transaction emulation needs to restore generated IDs as well as rows after a failed batch. */
+  snapshotNextId(): number {
+    return this.nextId
+  }
+
+  restoreNextId(nextId: number): void {
+    this.nextId = nextId
+  }
 }
+
+/** A tiny FIFO mutex shared by driver operation batches and close/approval units of work. */
+export class MemoryTransactionGate {
+  private tail: Promise<void> = Promise.resolve()
+
+  async run<T>(work: () => Promise<T>): Promise<T> {
+    let release!: () => void
+    const turn = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const previous = this.tail
+    this.tail = previous.then(() => turn, () => turn)
+    await previous
+    try {
+      return await work()
+    } finally {
+      release()
+    }
+  }
+}
+
+/** One all-or-nothing write for a complete OCR operations submission. */
+export class MemoryOperationBatchRepo implements OperationBatchRepo {
+  private readonly shifts: MemoryShiftRepo
+  private readonly orders: MemoryOrderRepo
+  private readonly deductions: MemoryCashDeductionRepo
+  private readonly movements: MemoryWalletMovementRepo
+  private readonly gate: MemoryTransactionGate
+
+  constructor(
+    shifts: MemoryShiftRepo,
+    orders: MemoryOrderRepo,
+    deductions: MemoryCashDeductionRepo,
+    movements: MemoryWalletMovementRepo,
+    gate = new MemoryTransactionGate(),
+  ) {
+    this.shifts = shifts
+    this.orders = orders
+    this.deductions = deductions
+    this.movements = movements
+    this.gate = gate
+  }
+
+  async apply(
+    shiftId: string,
+    batch: OperationBatch,
+    actorId: string | null,
+  ): Promise<{ insertedMovements: WalletMovementRecord[] }> {
+    return this.gate.run(() => this.applyLocked(shiftId, batch, actorId))
+  }
+
+  private async applyLocked(
+    shiftId: string,
+    batch: OperationBatch,
+    actorId: string | null,
+  ): Promise<{ insertedMovements: WalletMovementRecord[] }> {
+    const belongs = [
+      ...batch.orderCreates.map((record) => record.shiftId),
+      ...batch.orderUpdates.map(({ record }) => record.shiftId),
+      ...batch.cashDeductionCreates.map((record) => record.shiftId),
+      ...batch.cashDeductionUpdates.map(({ record }) => record.shiftId),
+    ].every((owner) => owner === shiftId)
+    if (!belongs) {
+      throw Object.assign(new Error('operation batch contains a row from another shift'), {
+        code: 'OPERATION_BATCH_SHIFT_MISMATCH',
+      })
+    }
+    const shift = await this.shifts.findById(shiftId)
+    if (!shift) {
+      throw Object.assign(new Error(`shift ${shiftId} not found`), { code: 'OPERATION_BATCH_SHIFT_NOT_FOUND' })
+    }
+    if ((shift.state !== 'open' && shift.state !== 'suspended') || shift.submittedAt !== null) {
+      throw Object.assign(new Error(`shift ${shiftId} no longer accepts operations`), {
+        code: 'OPERATION_BATCH_SHIFT_CLOSED',
+      })
+    }
+
+    const legacyKindTransitions = normalizeLegacyKindTransitions(batch.legacyKindTransitions ?? [])
+
+    const orderSnapshot = new Map([...this.orders.rows].map(([id, row]) => [id, structuredClone(row)]))
+    const deductionSnapshot = new Map([...this.deductions.rows].map(([id, row]) => [id, structuredClone(row)]))
+    const movementSnapshot = new Map([...this.movements.rows].map(([id, row]) => [id, structuredClone(row)]))
+    const movementNextId = this.movements.snapshotNextId()
+    const restore = <T>(target: Map<string, T>, snapshot: Map<string, T>): void => {
+      target.clear()
+      for (const [id, row] of snapshot) target.set(id, row)
+    }
+
+    try {
+      for (const transition of legacyKindTransitions) {
+        const order = [...this.orders.rows.values()].find(
+          (row) => row.shiftId === shiftId && row.providerOrderNo === transition.providerOrderNo,
+        )
+        const deduction = [...this.deductions.rows.values()].find(
+          (row) => row.shiftId === shiftId && row.operationKey === `legacy:${transition.providerOrderNo}`,
+        )
+        if (transition.targetKind === 'order') {
+          const matchesExpected = transition.expectedOppositeId === null
+            ? deduction === undefined
+            : deduction?.id === transition.expectedOppositeId &&
+              deduction.decidedAt === transition.expectedOppositeDecidedAt &&
+              transition.expectedOppositeDecidedAt === null &&
+              deduction.decidedBy === null
+          if (!matchesExpected) {
+            throw staleMemoryOperation(
+              'cash_deduction',
+              deduction?.id ?? transition.expectedOppositeId ?? transition.providerOrderNo,
+            )
+          }
+          if (deduction) await this.deductions.delete(deduction.id, actorId)
+        }
+        if (transition.targetKind === 'cash_deduction') {
+          const matchesExpected = transition.expectedOppositeId === null
+            ? order === undefined
+            : order?.id === transition.expectedOppositeId &&
+              order.decidedAt === transition.expectedOppositeDecidedAt &&
+              transition.expectedOppositeDecidedAt === null &&
+              order.decidedBy === null &&
+              order.kind !== 'manual'
+          if (!matchesExpected) {
+            throw staleMemoryOperation('order', order?.id ?? transition.expectedOppositeId ?? transition.providerOrderNo)
+          }
+          if (!order) continue
+          // Keep wallet-log evidence, but it no longer has an order whose financial role could
+          // explain it. Excluding it avoids turning a detached matched row into BR1 money.
+          for (const movement of this.movements.rows.values()) {
+            if (movement.shiftId !== shiftId || movement.orderId !== order.id) continue
+            await this.movements.update(
+              movement.id,
+              { role: 'unmatched', orderId: null, included: false, ambiguous: true },
+              actorId,
+            )
+          }
+          await this.orders.delete(order.id, actorId)
+        }
+      }
+
+      for (const order of batch.orderCreates) await this.orders.create(order, actorId)
+      for (const movement of batch.movements) {
+        if (movement.orderId == null) continue
+        const linkedOrder = this.orders.rows.get(movement.orderId)
+        if (!linkedOrder || linkedOrder.shiftId !== shiftId) {
+          throw Object.assign(new Error('wallet movement links an order from another shift'), {
+            code: 'OPERATION_BATCH_SHIFT_MISMATCH',
+          })
+        }
+      }
+      for (const update of batch.orderUpdates) {
+        const current = this.orders.rows.get(update.record.id)
+        if (!current || current.shiftId !== shiftId || current.decidedAt !== update.expectedDecidedAt) {
+          throw staleMemoryOperation('order', update.record.id)
+        }
+        await this.orders.update(update.record, actorId)
+      }
+      for (const replacement of batch.orderPointReplacements) {
+        const current = this.orders.rows.get(replacement.orderId)
+        if (!current || current.shiftId !== shiftId || current.points.length !== 0) {
+          throw staleMemoryOperation('order', replacement.orderId)
+        }
+        await this.orders.replacePoints(replacement.orderId, replacement.points, actorId)
+      }
+      for (const deduction of batch.cashDeductionCreates) await this.deductions.create(deduction, actorId)
+      for (const update of batch.cashDeductionUpdates) {
+        const current = this.deductions.rows.get(update.record.id)
+        if (!current || current.shiftId !== shiftId || current.decidedAt !== update.expectedDecidedAt) {
+          throw staleMemoryOperation('cash_deduction', update.record.id)
+        }
+        await this.deductions.update(update.record, actorId)
+      }
+      return { insertedMovements: await this.movements.merge(shiftId, batch.movements, actorId) }
+    } catch (error) {
+      restore(this.orders.rows, orderSnapshot)
+      restore(this.deductions.rows, deductionSnapshot)
+      restore(this.movements.rows, movementSnapshot)
+      this.movements.restoreNextId(movementNextId)
+      throw error
+    }
+  }
+}
+
+const normalizeLegacyKindTransitions = (
+  transitions: NonNullable<OperationBatch['legacyKindTransitions']>,
+): Array<NonNullable<OperationBatch['legacyKindTransitions']>[number]> => {
+  const targets = new Map<string, NonNullable<OperationBatch['legacyKindTransitions']>[number]>()
+  for (const transition of transitions) {
+    const current = targets.get(transition.providerOrderNo)
+    if (
+      transition.providerOrderNo.length === 0 ||
+      (current !== undefined && (
+        current.targetKind !== transition.targetKind ||
+        current.expectedOppositeId !== transition.expectedOppositeId ||
+        current.expectedOppositeDecidedAt !== transition.expectedOppositeDecidedAt
+      ))
+    ) {
+      throw Object.assign(new Error(`conflicting legacy operation kind for ${transition.providerOrderNo}`), {
+        code: 'OPERATION_BATCH_KIND_CONFLICT',
+      })
+    }
+    targets.set(transition.providerOrderNo, transition)
+  }
+  return [...targets]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, transition]) => transition)
+}
+
+const staleMemoryOperation = (kind: 'order' | 'cash_deduction', id: string): Error & { code: string } =>
+  Object.assign(new Error(`${kind} ${id} changed while the operations batch was being prepared`), {
+    code: 'STALE_OPERATION_BATCH',
+  })
 
 export class MemoryLedgerRepo implements LedgerRepo {
   readonly entries: JournalEntryRecord[] = []
@@ -539,6 +919,21 @@ export class MemoryLedgerRepo implements LedgerRepo {
    * never be wrong in.
    */
   private readonly seen = new Set<string>()
+
+  snapshotState(): { entries: JournalEntryRecord[]; seen: Set<string>; nextId: number } {
+    return {
+      entries: structuredClone(this.entries),
+      seen: new Set(this.seen),
+      nextId: this.nextId,
+    }
+  }
+
+  restoreState(state: { entries: JournalEntryRecord[]; seen: Set<string>; nextId: number }): void {
+    this.entries.splice(0, this.entries.length, ...structuredClone(state.entries))
+    this.seen.clear()
+    for (const key of state.seen) this.seen.add(key)
+    this.nextId = state.nextId
+  }
 
   async post(
     branchId: string,
@@ -648,6 +1043,14 @@ export function fundCodeOf(fund: Posting['lines'][number]['fund']): string {
 export class MemoryFxRepo implements FxRepo {
   private readonly rows = new Map<CalendarDate, { id: number; day: FxDay }>()
   private nextId = 1
+  snapshotState(): { rows: Map<CalendarDate, { id: number; day: FxDay }>; nextId: number } {
+    return { rows: structuredClone(this.rows), nextId: this.nextId }
+  }
+  restoreState(state: { rows: Map<CalendarDate, { id: number; day: FxDay }>; nextId: number }): void {
+    this.rows.clear()
+    for (const [date, row] of state.rows) this.rows.set(date, structuredClone(row))
+    this.nextId = state.nextId
+  }
   async list(): Promise<FxDay[]> {
     return [...this.rows.values()].map((r) => r.day)
   }
@@ -906,6 +1309,27 @@ export class MemoryDirectoryRepo implements DirectoryRepo {
     this.batteries.set(battery.id, { ...battery })
   }
 
+  /**
+   * Capture exact battery rows, including absence, for a targeted multi-record rollback.
+   * Every requested id is present in the returned map; `null` means it did not exist.
+   */
+  snapshotBatteries(batteryIds: Iterable<string>): Map<string, BatteryRecord | null> {
+    const snapshot = new Map<string, BatteryRecord | null>()
+    for (const id of batteryIds) {
+      const battery = this.batteries.get(id)
+      snapshot.set(id, battery === undefined ? null : structuredClone(battery))
+    }
+    return snapshot
+  }
+
+  /** Restore only the exact battery ids captured by `snapshotBatteries`. */
+  restoreBatteries(snapshot: ReadonlyMap<string, BatteryRecord | null>): void {
+    for (const [id, battery] of snapshot) {
+      if (battery === null) this.batteries.delete(id)
+      else this.batteries.set(id, structuredClone(battery))
+    }
+  }
+
   /** Mirrors the schema: fitted means BOTH vehicle and slot, and one pack per slot. */
   private assertBatteryPlacement(battery: BatteryRecord): void {
     if ((battery.vehicleId === null) !== (battery.slotNo === null)) {
@@ -970,6 +1394,15 @@ export class MemoryVehicleEventRepo implements VehicleEventRepo {
 export class MemoryShiftDecisionRepo implements ShiftDecisionRepo {
   readonly rows: ShiftDecisionRecord[] = []
   private nextId = 1
+
+  snapshotState(): { rows: ShiftDecisionRecord[]; nextId: number } {
+    return { rows: structuredClone(this.rows), nextId: this.nextId }
+  }
+
+  restoreState(state: { rows: ShiftDecisionRecord[]; nextId: number }): void {
+    this.rows.splice(0, this.rows.length, ...structuredClone(state.rows))
+    this.nextId = state.nextId
+  }
 
   async record(decision: Omit<ShiftDecisionRecord, 'id'>): Promise<ShiftDecisionRecord> {
     const row: ShiftDecisionRecord = { ...decision, id: this.nextId++ }
@@ -1052,6 +1485,10 @@ export interface MemoryDeps extends Deps {
   users: MemoryUserRepo
   shifts: MemoryShiftRepo
   orders: MemoryOrderRepo
+  cashDeductions: MemoryCashDeductionRepo
+  operationWindows: MemoryOperationWindowRepo
+  operationBatches: MemoryOperationBatchRepo
+  closeUnitOfWork: MemoryShiftCloseUnitOfWork
   ledger: MemoryLedgerRepo
   fx: MemoryFxRepo
   weekLocks: MemoryWeekLockRepo
@@ -1066,28 +1503,173 @@ export interface MemoryDeps extends Deps {
   gps: MemoryGpsPingRepo
 }
 
+/**
+ * In-memory parity for the PostgreSQL close unit of work.
+ *
+ * The shared gate makes an operation upload either land before this snapshot or wait until after
+ * it, mirroring the shift-row lock in PostgreSQL. On failure every repository that a close/review
+ * callback may mutate is restored, including generated ledger/decision/movement ids.
+ */
+export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
+  private readonly deps: ShiftCloseTransactionDeps
+  private readonly shifts: MemoryShiftRepo
+  private readonly orders: MemoryOrderRepo
+  private readonly deductions: MemoryCashDeductionRepo
+  private readonly movements: MemoryWalletMovementRepo
+  private readonly ledger: MemoryLedgerRepo
+  private readonly decisions: MemoryShiftDecisionRepo
+  private readonly fx: MemoryFxRepo
+  private readonly batteryReadings: MemoryBatteryReadingRepo
+  private readonly batterySwaps: MemoryBatterySwapRepo
+  private readonly directory: MemoryDirectoryRepo
+  private readonly gate: MemoryTransactionGate
+
+  constructor(
+    deps: ShiftCloseTransactionDeps,
+    shifts: MemoryShiftRepo,
+    orders: MemoryOrderRepo,
+    deductions: MemoryCashDeductionRepo,
+    movements: MemoryWalletMovementRepo,
+    ledger: MemoryLedgerRepo,
+    decisions: MemoryShiftDecisionRepo,
+    fx: MemoryFxRepo,
+    batteryReadings: MemoryBatteryReadingRepo,
+    batterySwaps: MemoryBatterySwapRepo,
+    directory: MemoryDirectoryRepo,
+    gate: MemoryTransactionGate,
+  ) {
+    this.deps = deps
+    this.shifts = shifts
+    this.orders = orders
+    this.deductions = deductions
+    this.movements = movements
+    this.ledger = ledger
+    this.decisions = decisions
+    this.fx = fx
+    this.batteryReadings = batteryReadings
+    this.batterySwaps = batterySwaps
+    this.directory = directory
+    this.gate = gate
+  }
+
+  async run<T>(
+    input: ShiftCloseUnitOfWorkInput,
+    work: (deps: ShiftCloseTransactionDeps) => Promise<T>,
+  ): Promise<T> {
+    return this.gate.run(async () => {
+      const shiftSnapshot = new Map([...this.shifts.rows].map(([id, row]) => [id, structuredClone(row)]))
+      const orderSnapshot = new Map([...this.orders.rows].map(([id, row]) => [id, structuredClone(row)]))
+      const deductionSnapshot = new Map([...this.deductions.rows].map(([id, row]) => [id, structuredClone(row)]))
+      const movementSnapshot = new Map([...this.movements.rows].map(([id, row]) => [id, structuredClone(row)]))
+      const movementNextId = this.movements.snapshotNextId()
+      const ledgerSnapshot = this.ledger.snapshotState()
+      const decisionSnapshot = this.decisions.snapshotState()
+      const fxSnapshot = this.fx.snapshotState()
+      const batteryReadingSnapshot = this.batteryReadings.snapshotForShift(input.shiftId)
+      const batterySwapSnapshot = this.batterySwaps.snapshotForShift(input.shiftId)
+      const batterySnapshot = this.directory.snapshotBatteries(this.directory.batteries.keys())
+
+      const restoreMap = <V>(target: Map<string, V>, snapshot: Map<string, V>): void => {
+        target.clear()
+        for (const [id, row] of snapshot) target.set(id, structuredClone(row))
+      }
+
+      try {
+        return await work(this.deps)
+      } catch (error) {
+        restoreMap(this.shifts.rows, shiftSnapshot)
+        restoreMap(this.orders.rows, orderSnapshot)
+        restoreMap(this.deductions.rows, deductionSnapshot)
+        restoreMap(this.movements.rows, movementSnapshot)
+        this.movements.restoreNextId(movementNextId)
+        this.ledger.restoreState(ledgerSnapshot)
+        this.decisions.restoreState(decisionSnapshot)
+        this.fx.restoreState(fxSnapshot)
+        this.batteryReadings.restoreForShift(input.shiftId, batteryReadingSnapshot)
+        this.batterySwaps.restoreForShift(input.shiftId, batterySwapSnapshot)
+        this.directory.restoreBatteries(batterySnapshot)
+        throw error
+      }
+    })
+  }
+}
+
 export function createMemoryDeps(nowMs: number): MemoryDeps {
+  const clock = new FixedClock(nowMs)
   const ledger = new MemoryLedgerRepo()
   const media = new MemoryMediaRepo()
+  const shifts = new MemoryShiftRepo(media)
+  const orders = new MemoryOrderRepo()
+  const cashDeductions = new MemoryCashDeductionRepo()
+  const movements = new MemoryWalletMovementRepo()
+  const batteryReadings = new MemoryBatteryReadingRepo()
+  const batterySwaps = new MemoryBatterySwapRepo()
+  const tiers = new MemoryTierRepo()
+  const fx = new MemoryFxRepo()
+  const weekLocks = new MemoryWeekLockRepo(ledger)
+  const directory = new MemoryDirectoryRepo()
+  const operationWindows = new MemoryOperationWindowRepo(
+    shifts,
+    orders,
+    cashDeductions,
+    directory,
+    clock,
+  )
+  const decisions = new MemoryShiftDecisionRepo()
+  const gate = new MemoryTransactionGate()
+  const transactionDeps: ShiftCloseTransactionDeps = {
+    shifts,
+    orders,
+    cashDeductions,
+    operationWindows,
+    movements,
+    ledger,
+    decisions,
+    fx,
+    tiers,
+    directory,
+    media,
+    batteryReadings,
+    batterySwaps,
+    weekLocks,
+  }
+  const closeUnitOfWork = new MemoryShiftCloseUnitOfWork(
+    transactionDeps,
+    shifts,
+    orders,
+    cashDeductions,
+    movements,
+    ledger,
+    decisions,
+    fx,
+    batteryReadings,
+    batterySwaps,
+    directory,
+    gate,
+  )
   return {
-    clock: new FixedClock(nowMs),
+    clock,
     ids: new SeqIdGen(),
     hasher: new PlainHasher(),
     cipher: memoryCipher(),
     users: new MemoryUserRepo(),
     sessions: new MemorySessionRepo(),
-    shifts: new MemoryShiftRepo(media),
+    shifts,
     assignments: new MemoryAssignmentRepo(),
-    batteryReadings: new MemoryBatteryReadingRepo(),
-    batterySwaps: new MemoryBatterySwapRepo(),
-    orders: new MemoryOrderRepo(),
-    movements: new MemoryWalletMovementRepo(),
+    batteryReadings,
+    batterySwaps,
+    orders,
+    cashDeductions,
+    operationWindows,
+    operationBatches: new MemoryOperationBatchRepo(shifts, orders, cashDeductions, movements, gate),
+    closeUnitOfWork,
+    movements,
     ledger,
     expenses: new MemoryExpenseRepo(),
     cashCounts: new MemoryCashCountRepo(),
     capitalTargets: new MemoryOfficeCapitalTargetRepo(),
     restorations: new MemoryRestorationRepo(),
-    tiers: new MemoryTierRepo(),
+    tiers,
     notifications: new MemoryNotificationRepo(),
     settings: new MemorySettingsRepo(),
     media,
@@ -1096,13 +1678,13 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     // adding this port cannot make anything start hitting the network by accident.
     ocr: new MemoryOcrReader(),
     ocrReads: new MemoryOcrReadRepo(),
-    fx: new MemoryFxRepo(),
-    weekLocks: new MemoryWeekLockRepo(ledger),
+    fx,
+    weekLocks,
     audit: new MemoryAuditRepo(),
-    directory: new MemoryDirectoryRepo(),
+    directory,
     vehicleEvents: new MemoryVehicleEventRepo(),
     attendance: new MemoryAttendanceRepo(),
-    decisions: new MemoryShiftDecisionRepo(),
+    decisions,
     gps: new MemoryGpsPingRepo(),
   }
 }

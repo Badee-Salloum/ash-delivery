@@ -15,6 +15,9 @@ export interface ApiError {
   detail?: unknown
 }
 
+/** Server-derived position of one provider operation relative to the shift's canonical window. */
+export type OperationWindowStatus = import('@ash/contracts').OperationWindowStatus
+
 /** Everything the driver's app needs to pick a half-finished shift back up where he left it. */
 export interface ShiftStateView {
   id: string
@@ -23,21 +26,26 @@ export interface ShiftStateView {
   vehicleId: string
   shiftNo: number
   businessDate: string
+  /** The manager-approved lower edge and driver-submitted upper edge of the operation window. */
+  openApprovedAt: string | null
+  submittedAt: string | null
   startPackage: {
     odometerKm: number | null
     batteryPercent: number | null
     floatTotal: string
     topupTotal: string
     mediaSlots: string[]
-    batteries: Array<{ batteryId: string; slotNo: number; percent: number | null }>
+    batteries: Array<{ batteryId: string; slotNo: number; percent: number | null; mediaId: string | null }>
   }
   endPackage: {
     odometerKm: number | null
+    /** Present once the end-package OCR baseline is exposed by the state endpoint. */
+    odometerKmOcr?: number | null
     batteryPercent: number | null
     cashDeclared: string | null
     walletDeclared: string | null
     mediaSlots: string[]
-    batteries: Array<{ batteryId: string; slotNo: number; percent: number | null }>
+    batteries: Array<{ batteryId: string; slotNo: number; percent: number | null; mediaId: string | null }>
   }
   orders: Array<{
     providerOrderNo: string
@@ -51,6 +59,9 @@ export interface ShiftStateView {
     occurredMinute: string | null
     /** «الخميس, ٦ أغسطس» — the day the SCREEN said, which is not always the shift's own day. */
     occurredDate?: string | null
+    windowStatus: OperationWindowStatus
+    decisionReason: string | null
+    decidedBy: string | null
     /** «A» the pickup, «B» the dropoff — the order has no number, so this is how it is known. */
     points?: Array<{ role: string; label: string; lat: number | null; lng: number | null }>
   }>
@@ -63,6 +74,22 @@ export interface ShiftStateView {
     role: 'yalago_cut' | 'order_credit' | 'unmatched'
     ambiguous: boolean
     included: boolean
+  }>
+  /** Optional while older state endpoints do not yet expose Recent-Orders cash deductions. */
+  cashDeductions?: Array<{
+    id: string
+    operationKey: string
+    amount: string
+    amountOcr?: string | null
+    occurredMinute: string | null
+    occurredDate: string | null
+    source: 'ocr' | 'manual'
+    pointA: string | null
+    pointB: string | null
+    included: boolean
+    windowStatus: OperationWindowStatus
+    decisionReason: string | null
+    decidedBy: string | null
   }>
   /** Mid-shift battery swaps (SRS §L seam): the pack on `slotNo` came off, another went on. */
   batterySwaps?: Array<{
@@ -211,6 +238,12 @@ export interface RestorationView {
 export interface BatteryReadingInput {
   batteryId: string
   percent: number | null
+  /**
+   * Optimistic evidence lock for a current PWA. When present, the server writes this reading only
+   * if the pack's BMS slot is still attached to this exact media row. Cached PWAs omit it and keep
+   * their read-before-upload staging behaviour, including a retake over an existing attachment.
+   */
+  expectedMediaId?: string
   packMillivolts?: number | null
   cycleCount?: number | null
   remainCapacityDah?: number | null
@@ -692,6 +725,10 @@ export class ApiClient {
     if (choices.payShareNow !== undefined) q.set('payShareNow', String(choices.payShareNow))
     const suffix = q.toString() ? `?${q.toString()}` : ''
     return this.get<{
+      grossDriverShare: string
+      cashDeductionTotal: string
+      netDriverShare: string
+      deductionReceivable: string
       toOfficeCash: string
       keptAsReceivable: string
       paidToDriver: string
@@ -856,7 +893,13 @@ export class ApiClient {
     return this.post<{ id: string; state: string }>(`/shifts/${shiftId}/void`, { reason })
   }
   /** Force-close a stuck shift, settling any declared-vs-expected gap to a variance. */
-  forceCloseShift(shiftId: string, body: { reason: string; odometerKm?: number | null; cashDeclared?: string | null; walletDeclared?: string | null }) {
+  forceCloseShift(shiftId: string, body: {
+    reason: string
+    odometerKm?: number | null
+    odometerAnomalyConfirmed?: boolean
+    cashDeclared?: string | null
+    walletDeclared?: string | null
+  }) {
     return this.post<{ id: string; state: string; postings: number }>(`/shifts/${shiftId}/force-close`, body)
   }
 
@@ -905,6 +948,39 @@ export function uploadEvidencePath(shiftId: string, pkg: 'start' | 'end', slot: 
   return `/shifts/${shiftId}/media/${pkg}/${encodeURIComponent(slot)}`
 }
 
+/** Metadata returned after an evidence slot has actually been attached. */
+export interface EvidenceUploadResponse {
+  mediaId: string
+  sha256: string
+  byteSize: number
+  deduped: boolean
+  /** Server receipt time minus the file timestamp supplied by the picker. */
+  clockSkewMs: number | null
+  slots: string[]
+  /** Another evidence slot or shift already attached these exact bytes; null for first use. */
+  reusedFromShiftId: string | null
+  /** Opaque generation token that prevents acknowledging a slot after it was replaced and restored. */
+  attachmentToken: string
+  /** The server has an explicit driver acknowledgement for stale/reused evidence. */
+  staleAcknowledged: boolean
+}
+
+export function acknowledgeStaleEvidencePath(shiftId: string, pkg: 'start' | 'end', slot: string): string {
+  return `${uploadEvidencePath(shiftId, pkg, slot)}/acknowledge-stale`
+}
+
+export function evidenceUploadHeaders(
+  clientTakenAtMs: number | null,
+  staleAcknowledged: boolean,
+): Record<string, string> {
+  return {
+    ...(clientTakenAtMs !== null && clientTakenAtMs > 0
+      ? { 'x-client-taken-at': String(clientTakenAtMs) }
+      : {}),
+    ...(staleAcknowledged ? { 'x-stale-evidence-acknowledged': 'true' } : {}),
+  }
+}
+
 /** Which screen the cloud reader is being asked about. Mirrors `OcrField` on the server. */
 export type CloudOcrField = 'orders' | 'payments_log' | 'wallet' | 'odometer' | 'bms'
 
@@ -942,12 +1018,11 @@ export function ocrReadPath(shiftId: string, field: CloudOcrField): string {
 }
 
 /**
- * Prepare a picked file and read it in the cloud. `null` for every failure, of any kind.
+ * Prepare a picked file and read it in the cloud. `null` only when no structured response arrived.
  *
- * One return value for "offline", "no provider configured", "past the shift's cap", "the model
- * timed out" and "this image is too big to send", because the caller's response to all five is
- * identical: keep the on-device reading. Distinguishing them would be UI that shows a driver a
- * distinction he cannot act on.
+ * A server response with `ok: false` is deliberately preserved: its reason tells the UI whether a
+ * timeout is worth retrying or the pixels simply contained no readable field. Transport and local
+ * preparation failures still return `null`, because no server reason exists for those cases.
  *
  * `compressForOcr` is imported lazily so the OCR path stays out of the entry bundle.
  */
@@ -968,7 +1043,7 @@ export async function readInCloud(
       {},
       'POST',
     )
-    return res.ok ? res : null
+    return res
   } catch {
     return null
   }

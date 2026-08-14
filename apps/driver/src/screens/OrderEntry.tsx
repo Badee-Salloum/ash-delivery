@@ -1,5 +1,6 @@
 import { type ReactNode, useMemo, useState } from 'react'
 import {
+  type DraftCashDeduction,
   type DraftMovement,
   type DraftOrder,
   allProblems,
@@ -13,8 +14,7 @@ import { useApp } from '../app-context.tsx'
 import { Button, Card, Money, MoneyInput, Sheet } from '../ui.tsx'
 
 /**
- * THE list. Every operation of the shift — what was delivered, and what the wallet did — with a
- * checkbox on each row.
+ * THE list. Every operation of the shift — what was delivered, and what the wallet did.
  *
  * It is one list rather than two because that is how the day happened: an order and the 20% Yallago
  * took for it are one event seen on two screens, and pairing them by minute is what lets the system
@@ -28,10 +28,9 @@ import { Button, Card, Money, MoneyInput, Sheet } from '../ui.tsx'
  * that matters, «cash + wallet == float + topup + 80% of the fees», and the driver is asked for one
  * thing per delivery instead of four. `payMode` is still sent as `cash` so nothing migrates.
  *
- * The CHECKBOX is the point, and its ergonomics used to be inverted. The safe, reversible action —
- * unchecking a row that is not this shift's — was a 24-pixel box a gloved thumb misses, while the
- * IRREVERSIBLE one, deleting the row, was a 56-pixel button beside the money field with no
- * confirmation and no undo. Now the whole row is the checkbox's label, and nothing here deletes.
+ * Inclusion is server-owned. The approved-open and submitted-close window classifies each row;
+ * only a manager may override that classification with an audited reason. The driver can inspect
+ * the status but cannot make the preview disagree with what the server will account for.
  *
  * AN ORDER HAS NO NUMBER. «الطلبات الحديثة» does not display one, so the system stopped inventing
  * one: a row is its value, its route and its clock. The wire still needs a unique key, but that is
@@ -47,13 +46,16 @@ import { Button, Card, Money, MoneyInput, Sheet } from '../ui.tsx'
 export function OperationsList({
   orders,
   movements,
+  cashDeductions,
   today,
   suspectLocalIds,
   onOrders,
   onMovements,
+  onCashDeductions,
 }: {
   orders: readonly DraftOrder[]
   movements: readonly DraftMovement[]
+  cashDeductions: readonly DraftCashDeduction[]
   /** The shift's own business date, «YYYY-MM-DD» — what a row's date is flagged against. */
   today?: string
   /**
@@ -64,6 +66,7 @@ export function OperationsList({
   suspectLocalIds?: readonly string[]
   onOrders(next: DraftOrder[]): void
   onMovements(next: DraftMovement[]): void
+  onCashDeductions(next: DraftCashDeduction[]): void
 }): ReactNode {
   const { t } = useApp()
   const [defaultFee, setDefaultFee] = useState('5000')
@@ -107,7 +110,7 @@ export function OperationsList({
     typed: '✎',
   }
 
-  const checkedCount = orders.filter((o) => o.included !== false).length
+  const includedCount = orders.filter((o) => o.included !== false).length
   /*
    * «YYYY-MM-DD» → «DD/MM», which is how the date is written on the screen being copied.
    *
@@ -144,24 +147,19 @@ export function OperationsList({
   }, [orders])
 
   /** Rows whose own date is not the shift's — the ones a driver most often has to take out. */
-  const otherDayRows = today ? orders.filter((o) => o.dateText && o.dateText !== today && o.included !== false) : []
-  const excludeOtherDays = (): void =>
-    onOrders(orders.map((o) => (o.dateText && today && o.dateText !== today ? { ...o, included: false } : o)))
-
   return (
     <>
-      {/* WHAT THE CHECKBOX MEANS, said once. It is the most consequential control on the screen and
-          its meaning existed only as an aria-label — a driver had no way to learn that unchecking a
-          row takes it out of his money while keeping it visible to everyone. */}
+      {/* Inclusion is shown but never edited here. The server owns the shift window and the manager
+          owns any reasoned override, so a cached client cannot change accounting with a checkbox. */}
       <Card className="bg-slate-50">
-        <p className="text-sm text-slate-600">{t.orders.checkboxLegend}</p>
+        <p className="text-sm text-slate-600">{t.orders.inclusionReadOnly}</p>
       </Card>
 
       {/* Sticky, because it scrolled away the moment he started working — on a list where the
           count and the money it adds up to are the whole point. */}
       <div className="sticky top-0 z-10 -mx-4 flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-200 bg-[var(--ash-bg,#eef1f8)] px-4 py-2">
         <span className="text-sm font-semibold">
-          {t.orders.countedOf.replace('{n}', String(checkedCount)).replace('{total}', String(orders.length))}
+          {t.orders.countedOf.replace('{n}', String(includedCount)).replace('{total}', String(orders.length))}
         </span>
         {/* WHAT HE WORKED. The screen showed him ten rows and a count but never the day's own
             total — the one number he actually wants, and the term BR1 multiplies by 0.80. It sits
@@ -169,11 +167,6 @@ export function OperationsList({
         <span className="text-sm text-slate-600">
           {t.orders.workedTotal} <Money value={worked} className="font-bold text-slate-900" />
         </span>
-        {otherDayRows.length > 0 ? (
-          <Button variant="ghost" className="ms-auto min-h-11 px-3 py-1 text-sm" onClick={excludeOtherDays}>
-            {t.orders.excludeOtherDays.replace('{n}', String(otherDayRows.length))}
-          </Button>
-        ) : null}
       </div>
 
       {/* ── THE GRID ────────────────────────────────────────────────────────────────────────
@@ -211,8 +204,7 @@ export function OperationsList({
                 off ? 'opacity-50' : '',
               ].join(' ')}
             >
-              {/* Unchecked is shown by a hollow tick rather than a checkbox: at this size a real
-                  checkbox is a 24px target beside a 104px one, and the thumb finds the wrong one. */}
+              {/* Read-only server classification: the mark is status, never a driver control. */}
               <span className="absolute end-1 top-1 text-xs" aria-hidden>
                 {off ? '○' : '✓'}
               </span>
@@ -233,7 +225,7 @@ export function OperationsList({
 
       {/* ── THE PANEL BEHIND A BLOCK ────────────────────────────────────────────────────────
           Everything the tall card used to show inline, on one delivery at a time: where it went,
-          what it cost, whether it counts, and — new — where the number came from. */}
+          what it cost, its read-only inclusion status, and where the number came from. */}
       <Sheet
         title={t.orders.editFee}
         open={open !== null}
@@ -307,15 +299,18 @@ export function OperationsList({
               ) : null}
             </div>
 
-            <label className="flex min-h-14 cursor-pointer items-center gap-3">
-              <input
-                type="checkbox"
-                checked={open.included !== false}
-                onChange={(e) => update(open.localId, { included: e.target.checked })}
-                className="size-7 shrink-0 accent-emerald-600"
-              />
-              <span className="text-sm">{t.orders.countInShift}</span>
-            </label>
+            <div className="flex min-h-11 items-center gap-3" aria-label={t.orders.inclusionReadOnly}>
+              <span
+                className={`rounded-full px-2 py-1 text-xs font-medium ${
+                  open.included === false
+                    ? 'bg-slate-100 text-slate-600'
+                    : 'bg-emerald-50 text-emerald-700'
+                }`}
+              >
+                {open.included === false ? t.orders.excluded : t.orders.included}
+              </span>
+              <span className="text-xs text-slate-500">{t.orders.inclusionReadOnly}</span>
+            </div>
           </>
         ) : null}
       </Sheet>
@@ -333,6 +328,55 @@ export function OperationsList({
           + {t.orders.addRow}
         </Button>
       </div>
+
+      {cashDeductions.length > 0 ? (
+        <>
+          <p className="mt-2 text-sm font-semibold">{t.orders.cashDeductions}</p>
+          <p className="text-sm text-slate-600">{t.orders.cashDeductionHint}</p>
+          {cashDeductions.map((deduction) => (
+            <Card key={deduction.localId} className={deduction.included === false ? 'opacity-60' : ''}>
+              <div className="flex items-center gap-3">
+                {/* Inclusion comes from the shift-time window. Only a manager may override it,
+                    with a reason, so the driver sees the status but cannot toggle it here. */}
+                <span
+                  className={`shrink-0 rounded-full px-2 py-1 text-[10px] font-medium ${
+                    deduction.included === false
+                      ? 'bg-slate-100 text-slate-600'
+                      : 'bg-emerald-50 text-emerald-700'
+                  }`}
+                >
+                  {deduction.included === false ? t.orders.excluded : t.orders.included}
+                </span>
+                <span className="num w-14 text-sm text-slate-600">{deduction.timeText || '—'}</span>
+                <label className="min-w-0 flex-1">
+                  <span className="sr-only">{t.orders.cashDeductionAmount}</span>
+                  <MoneyInput
+                    value={deduction.amountText}
+                    onChange={(e) =>
+                      onCashDeductions(
+                        cashDeductions.map((row) =>
+                          row.localId === deduction.localId ? { ...row, amountText: e.target.value } : row,
+                        ),
+                      )
+                    }
+                  />
+                </label>
+                <span className="text-[10px] text-slate-400">{deduction.source === 'ocr' ? '◉' : '✎'}</span>
+              </div>
+              {deduction.pointA || deduction.pointB ? (
+                <p className="mt-2 text-xs text-slate-600">
+                  <bdi>{deduction.pointA ?? '—'}</bdi> → <bdi>{deduction.pointB ?? '—'}</bdi>
+                </p>
+              ) : null}
+              {deduction.amountOcrText !== null && deduction.amountOcrText !== deduction.amountText ? (
+                <p className="mt-1 text-xs text-slate-500">
+                  {t.orders.ocrSaw}: <Money value={deduction.amountOcrText} />
+                </p>
+              ) : null}
+            </Card>
+          ))}
+        </>
+      ) : null}
 
       {/* The wallet's own rows: what MOVED, beside what the orders imply. Only the ones no order
           explains are money the equation has to be told about. */}

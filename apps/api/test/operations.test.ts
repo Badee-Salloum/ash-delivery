@@ -52,7 +52,13 @@ async function openWithOrders(n: number): Promise<{ id: string; driver: string; 
 
 const exclude = async (id: string, providerOrderNo: string): Promise<void> => {
   const row = (await h.deps.orders.listByShift(id)).find((o) => o.providerOrderNo === providerOrderNo)!
-  await h.deps.orders.update({ ...row, included: false })
+  await h.deps.orders.update({
+    ...row,
+    included: false,
+    decisionReason: 'manager verified this row is outside the shift',
+    decidedBy: 'u-bm',
+    decidedAt: new Date(h.deps.clock.nowMs()).toISOString(),
+  }, 'u-bm')
 }
 
 describe('an operation nobody checked', () => {
@@ -120,7 +126,7 @@ describe('an operation nobody checked', () => {
     const reviewed = (await get(manager, `/shifts/${id}/review`)).json().br1.ordersHash as string
 
     const row = (await h.deps.orders.listByShift(id)).find((o) => o.providerOrderNo === 'YAL-3')!
-    await h.deps.orders.update({ ...row, walletAmount: minor(2_000_00n) })
+    await h.deps.orders.update({ ...row, walletAmount: minor(2_000_00n) }, 'u-bm')
 
     const stale = await post(manager, `/shifts/${id}/approve-close`, { reviewedOrdersHash: reviewed })
     expect(stale.statusCode, stale.body).toBe(409)
@@ -155,7 +161,7 @@ describe('what the wallet did on its own', () => {
   it('an unmatched movement enters BR1 instead of being blamed on the driver', async () => {
     const { id, driver } = await openWithOrders(10)
     // An incentive Yallago paid: nothing to do with any order, but the wallet really holds it.
-    await h.deps.movements.merge(id, [{ amount: minor(300_00n), occurredMinute: '09:24' }])
+    await h.deps.movements.merge(id, [{ amount: minor(300_00n), occurredMinute: '09:24' }], 'u-driver')
 
     const closed = await put(driver, `/shifts/${id}/end-package`, {
       odometerKm: 200,
@@ -170,8 +176,12 @@ describe('what the wallet did on its own', () => {
 
   it('an EXCLUDED movement does not', async () => {
     const { id, driver } = await openWithOrders(10)
-    const [row] = await h.deps.movements.merge(id, [{ amount: minor(300_00n), occurredMinute: '09:24' }])
-    await h.deps.movements.update(row!.id, { included: false })
+    const [row] = await h.deps.movements.merge(
+      id,
+      [{ amount: minor(300_00n), occurredMinute: '09:24' }],
+      'u-driver',
+    )
+    await h.deps.movements.update(row!.id, { included: false }, 'u-bm')
 
     const closed = await put(driver, `/shifts/${id}/end-package`, {
       odometerKm: 200,
@@ -195,6 +205,7 @@ describe('what the wallet did on its own', () => {
         role: 'yalago_cut' as const,
         orderId: null,
       })),
+      'u-driver',
     )
     // Deliberately with an order link absent — the constraint only bites in Postgres, and the
     // arithmetic must not depend on it: role alone decides.
@@ -209,7 +220,7 @@ describe('what the wallet did on its own', () => {
 
   it('posts an unmatched movement to the ledger, so the driver’s wallet still zeroes', async () => {
     const { id, driver, manager } = await openWithOrders(10)
-    await h.deps.movements.merge(id, [{ amount: minor(300_00n), occurredMinute: '09:24' }])
+    await h.deps.movements.merge(id, [{ amount: minor(300_00n), occurredMinute: '09:24' }], 'u-driver')
     await put(driver, `/shifts/${id}/end-package`, {
       odometerKm: 200,
       batteryPercent: null,
@@ -246,7 +257,11 @@ describe('what the wallet did on its own', () => {
       walletDeclared: sypStr(47_000),
     })
     const reviewed = (await get(manager, `/shifts/${id}/review`)).json().br1.ordersHash as string
-    await h.deps.movements.merge(id, [{ amount: minor(300_00n), occurredMinute: '09:24', included: false }])
+    await h.deps.movements.merge(
+      id,
+      [{ amount: minor(300_00n), occurredMinute: '09:24', included: false }],
+      'u-driver',
+    )
 
     const stale = await post(manager, `/shifts/${id}/approve-close`, { reviewedOrdersHash: reviewed })
     expect(stale.statusCode, stale.body).toBe(409)
@@ -278,7 +293,7 @@ describe('submitting the list', () => {
     expect(await h.deps.movements.listByShift(id)).toHaveLength(2)
   })
 
-  it('corrects a row already on the server instead of refusing it', async () => {
+  it('corrects a row but ignores a driver attempt to exclude a confirmed in-window operation', async () => {
     const { id, driver } = await openWithOrders(0)
     await put(driver, `/shifts/${id}/operations`, list)
     const fixed = {
@@ -290,7 +305,7 @@ describe('submitting the list', () => {
 
     const row = (await h.deps.orders.listByShift(id)).find((o) => o.providerOrderNo === 'YAL-A')!
     expect(row.fee).toBe(minor(7_000_00n))
-    expect(row.included).toBe(false)
+    expect(row.included).toBe(true)
   })
 
   it('names the shift that already owns an order, rather than failing blankly', async () => {
@@ -360,7 +375,7 @@ describe('the manager revising the list at review', () => {
     const { id, manager } = await closed()
     await exclude(id, 'YAL-2')
     const res = await post(manager, `/shifts/${id}/operations/revise`, {
-      orders: [{ providerOrderNo: 'YAL-2', included: true }],
+      orders: [{ providerOrderNo: 'YAL-2', included: true, reason: 'verified against the shift window' }],
     })
     expect(res.statusCode, res.body).toBe(200)
     expect(res.json().state).toBe('pending_review')
@@ -371,7 +386,7 @@ describe('the manager revising the list at review', () => {
     const { id, manager } = await closed()
     const [credit] = await h.deps.movements.merge(id, [
       { amount: minor(300_00n), occurredMinute: '18:06', role: 'order_credit', ambiguous: true },
-    ])
+    ], 'u-driver')
     const res = await post(manager, `/shifts/${id}/operations/revise`, {
       movements: [{ id: credit!.id, role: 'unmatched', providerOrderNo: null, ambiguous: false }],
     })
@@ -385,7 +400,7 @@ describe('the manager revising the list at review', () => {
   it('is a manager’s act, not a driver’s', async () => {
     const { id, driver } = await closed()
     const res = await post(driver, `/shifts/${id}/operations/revise`, {
-      orders: [{ providerOrderNo: 'YAL-1', included: false }],
+      orders: [{ providerOrderNo: 'YAL-1', included: false, reason: 'verified outside the shift window' }],
     })
     expect(res.statusCode).toBe(403)
   })
@@ -402,7 +417,11 @@ describe('the manager revising the list at review', () => {
   it('is audited — it moves the equation', async () => {
     const { id, manager } = await closed()
     await post(manager, `/shifts/${id}/operations/revise`, {
-      orders: [{ providerOrderNo: 'YAL-1', included: false }],
+      orders: [{
+        providerOrderNo: 'YAL-1',
+        included: false,
+        reason: 'verified outside the shift window',
+      }],
     })
     const trail = await h.deps.audit.list({ tableName: 'shifts', recordId: id })
     expect(trail.some((a) => (a.after as Record<string, unknown>)?.revisedByManager === true)).toBe(true)
@@ -415,7 +434,7 @@ describe('an order the customer paid partly in cash', () => {
     // 5,000 fee, 2,000 of it settled electronically: the driver holds 3,000 in his hand and the
     // wallet gains 2,000 less Yallago's 1,000.
     const row = (await h.deps.orders.listByShift(id))[0]!
-    await h.deps.orders.update({ ...row, walletAmount: minor(2_000_00n), occurredMinute: '18:06' })
+    await h.deps.orders.update({ ...row, walletAmount: minor(2_000_00n), occurredMinute: '08:00' }, 'u-bm')
 
     const closed = await put(driver, `/shifts/${id}/end-package`, {
       odometerKm: 200,
@@ -435,7 +454,7 @@ describe('an order the customer paid partly in cash', () => {
   it('is carried to both screens so a manager can see what was measured', async () => {
     const { id, driver, manager } = await openWithOrders(1)
     const row = (await h.deps.orders.listByShift(id))[0]!
-    await h.deps.orders.update({ ...row, walletAmount: minor(2_000_00n), occurredMinute: '18:06' })
+    await h.deps.orders.update({ ...row, walletAmount: minor(2_000_00n), occurredMinute: '08:00' }, 'u-bm')
     await put(driver, `/shifts/${id}/end-package`, {
       odometerKm: 200,
       batteryPercent: null,
@@ -444,7 +463,7 @@ describe('an order the customer paid partly in cash', () => {
     })
     const order = (await get(manager, `/shifts/${id}/review`)).json().orders[0]
     expect(order.walletAmount).toBe('2000.00')
-    expect(order.occurredMinute).toBe('18:06')
+    expect(order.occurredMinute).toBe('08:00')
   })
 })
 

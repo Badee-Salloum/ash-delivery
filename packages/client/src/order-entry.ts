@@ -103,6 +103,22 @@ export interface DraftMovement {
   scannedAs?: string
 }
 
+/** A negative Recent-Orders operation, represented as a positive cash-out magnitude. */
+export interface DraftCashDeduction {
+  localId: string
+  /** Deterministic across overlapping pages/retries; never a random order id. */
+  operationKey: string
+  amountText: string
+  amountOcrText: string | null
+  amountStrip?: string | null
+  timeText: string
+  dateText: string
+  pointA?: string | null
+  pointB?: string | null
+  source: 'ocr' | 'refused' | 'manual'
+  included?: boolean
+}
+
 export interface OrderEntryState {
   orders: DraftOrder[]
   /** Remembered from the last confirmed row — most orders share a fee, so this saves typing. */
@@ -297,6 +313,222 @@ export interface ScannedOrderRow {
   cancelled?: boolean
 }
 
+/**
+ * Fill only a date gap bounded on both sides by the same known day.
+ *
+ * The on-device reader already applies the nearest legible day header above a row. This closes the
+ * narrower cloud/neighbor gap. A leading/trailing gap, or one between different days, remains null:
+ * scrolling Recent Orders crosses days and either guess could move money across a shift/week gate.
+ */
+export function inferMissingOrderDates<T extends ScannedOrderRow>(rows: readonly T[]): T[] {
+  const out = rows.map((row) => ({ ...row }))
+  let i = 0
+  while (i < out.length) {
+    if (out[i]!.dateIso !== null && out[i]!.dateIso !== '') {
+      i += 1
+      continue
+    }
+    const start = i
+    while (i < out.length && (out[i]!.dateIso === null || out[i]!.dateIso === '')) i += 1
+    const left = start > 0 ? out[start - 1]!.dateIso : null
+    const right = i < out.length ? out[i]!.dateIso : null
+    if (left && right && left === right) {
+      for (let j = start; j < i; j++) out[j] = { ...out[j]!, dateIso: left }
+    }
+  }
+  return out
+}
+
+/** A valid negative money string -> its positive magnitude, otherwise null. */
+export function cashDeductionMagnitude(value: string | null): string | null {
+  if (value === null) return null
+  const normalized = value.trim().replace(/^[−–—]\s*/, '-').replace(/^\+\s*/, '+')
+  if (!normalized.startsWith('-')) return null
+  const magnitude = normalized.slice(1).trim()
+  if (magnitude === '') return null
+  try {
+    return parseMinor(normalized) < 0n ? magnitude : null
+  } catch {
+    return null
+  }
+}
+
+const cleanOperationPart = (value: string | null | undefined): string =>
+  (value ?? '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase()
+
+/**
+ * The part of a Recent-Orders operation that does not change when an overlapping screenshot fills
+ * in a missing minute, day or route. The OCR amount is source identity here; metadata disambiguates
+ * equal-amount rows during the multiset merge, and a later human correction never recomputes the
+ * key stored on the draft row.
+ */
+const operationIdentity = (row: ScannedOrderRow): string => {
+  const magnitude = cashDeductionMagnitude(row.fee)
+  const amountMinor = magnitude === null ? cleanOperationPart(row.fee) : String(parseMinor(magnitude))
+  return amountMinor
+}
+
+/** Small deterministic FNV-1a key; the readable prefix identifies its source screen. */
+export function cashDeductionOperationKey(row: ScannedOrderRow): string {
+  let hash = 0xcbf29ce484222325n
+  for (const char of operationIdentity(row)) {
+    hash ^= BigInt(char.codePointAt(0)!)
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n)
+  }
+  return `recent-orders:${hash.toString(16).padStart(16, '0')}`
+}
+
+/** `~2`, `~3`, … preserve a real multiset when two operations share one minute and amount. */
+const operationKeyBase = (key: string): string => key.replace(/~\d+$/, '')
+
+const nextOperationKey = (base: string, occupied: ReadonlySet<string>): string => {
+  if (!occupied.has(base)) return base
+  let occurrence = 2
+  while (occupied.has(`${base}~${occurrence}`)) occurrence += 1
+  return `${base}~${occurrence}`
+}
+
+/**
+ * Known enrichment fields may agree or be absent, but may never conflict for the same operation.
+ * A more-complete exact match wins over a partial row, preserving multiplicity during overlap.
+ */
+const enrichmentMatchScore = (existing: DraftCashDeduction, scanned: ScannedOrderRow): number => {
+  const pairs: Array<[string | null | undefined, string | null | undefined]> = [
+    [existing.timeText, scanned.time],
+    [existing.dateText, scanned.dateIso],
+    [existing.pointA, scanned.pointA],
+    [existing.pointB, scanned.pointB],
+  ]
+  let score = 0
+  for (const [leftRaw, rightRaw] of pairs) {
+    const left = cleanOperationPart(leftRaw)
+    const right = cleanOperationPart(rightRaw)
+    if (left !== '' && right !== '' && left !== right) return -1
+    if (left !== '' && right !== '') score += 1
+  }
+  return score
+}
+
+const bestExistingDeduction = (
+  existing: readonly DraftCashDeduction[],
+  consumed: ReadonlySet<DraftCashDeduction>,
+  base: string,
+  scanned: ScannedOrderRow,
+): DraftCashDeduction | null => {
+  let best: DraftCashDeduction | null = null
+  let bestScore = -1
+  for (const candidate of existing) {
+    if (consumed.has(candidate)) continue
+    const sameCanonicalKey = operationKeyBase(candidate.operationKey) === base
+    // A cached pre-upgrade PWA named converted negative rows `legacy:<providerOrderNo>`. Once the
+    // new bundle resumes that shift, matching only the new amount-derived key would add the same
+    // operation a second time. Amount + non-conflicting enrichment heals the old identity in place;
+    // the server key itself remains untouched and therefore idempotent.
+    let sameLegacyAmount = false
+    if (candidate.operationKey.startsWith('legacy:')) {
+      try {
+        sameLegacyAmount = String(parseMinor(candidate.amountOcrText ?? candidate.amountText)) === operationIdentity(scanned)
+      } catch {
+        sameLegacyAmount = false
+      }
+    }
+    if (!sameCanonicalKey && !sameLegacyAmount) continue
+    const score = enrichmentMatchScore(candidate, scanned)
+    if (score > bestScore) {
+      best = candidate
+      bestScore = score
+    }
+  }
+  return best
+}
+
+/** Route negative operations away from delivery/tier arithmetic and merge overlapping sightings. */
+export function mergeScannedCashDeductions(
+  existing: readonly DraftCashDeduction[],
+  scanned: readonly ScannedOrderRow[],
+  newId: () => string,
+): DraftCashDeduction[] {
+  const occupied = new Set(existing.map((row) => row.operationKey))
+  const consumed = new Set<DraftCashDeduction>()
+  const added: DraftCashDeduction[] = []
+  for (const row of inferMissingOrderDates(scanned)) {
+    const magnitude = cashDeductionMagnitude(row.fee)
+    if (magnitude === null) continue
+    if (row.time.trim() === '' && row.dateIso === null && row.pointA == null && row.pointB == null) continue
+    const base = cashDeductionOperationKey(row)
+    const match = bestExistingDeduction(existing, consumed, base, row)
+    if (match) {
+      consumed.add(match)
+      continue
+    }
+    const operationKey = nextOperationKey(base, occupied)
+    occupied.add(operationKey)
+    added.push({
+      localId: newId(),
+      operationKey,
+      amountText: magnitude,
+      amountOcrText: magnitude,
+      ...(row.feeStrip ? { amountStrip: row.feeStrip } : {}),
+      timeText: row.time,
+      dateText: row.dateIso ?? '',
+      pointA: row.pointA ?? null,
+      pointB: row.pointB ?? null,
+      source: 'ocr',
+      included: true,
+    })
+  }
+  return added
+}
+
+/** Fill missing date/route evidence from an overlapping sighting without changing operation keys. */
+export function healCashDeductionDetails(
+  existing: readonly DraftCashDeduction[],
+  scanned: readonly ScannedOrderRow[],
+): Array<{ localId: string; timeText: string; dateText: string; pointA: string | null; pointB: string | null }> {
+  const consumed = new Set<DraftCashDeduction>()
+  const patches: Array<{
+    localId: string
+    timeText: string
+    dateText: string
+    pointA: string | null
+    pointB: string | null
+  }> = []
+  for (const row of inferMissingOrderDates(scanned)) {
+    if (cashDeductionMagnitude(row.fee) === null) continue
+    const base = cashDeductionOperationKey(row)
+    const match = bestExistingDeduction(existing, consumed, base, row)
+    if (!match) continue
+    consumed.add(match)
+    const next = {
+      localId: match.localId,
+      timeText: match.timeText || row.time,
+      dateText: match.dateText || row.dateIso || '',
+      pointA: match.pointA ?? row.pointA ?? null,
+      pointB: match.pointB ?? row.pointB ?? null,
+    }
+    if (
+      next.timeText !== match.timeText ||
+      next.dateText !== match.dateText ||
+      next.pointA !== match.pointA ||
+      next.pointB !== match.pointB
+    ) {
+      patches.push(next)
+    }
+  }
+  return patches
+}
+
+/** Every deduction sent to the server must remain a strictly positive magnitude after correction. */
+export function cashDeductionsAreValid(rows: readonly DraftCashDeduction[]): boolean {
+  return rows.every((row) => {
+    try {
+      return parseMinor(row.amountText) > 0n
+    } catch {
+      return false
+    }
+  })
+}
+
 /** One row as the payments-log reader produced it. `amount` is signed. */
 export interface ScannedMovementRow {
   amount: string
@@ -403,6 +635,7 @@ export function healCutOffRoutes(
 
   const out: Array<{ localId: string; pointA: string | null; pointB: string | null }> = []
   for (const row of scanned) {
+    if (cashDeductionMagnitude(row.fee) !== null) continue
     if (row.pointA == null && row.pointB == null) continue
     const bucket = blank.get(scannedKey(row))
     // One sighting heals one row: shift it out so a page listing the same delivery twice cannot
@@ -445,7 +678,10 @@ export function mergeScannedOrders(
     tally.set(key, (tally.get(key) ?? 0) + 1)
   }
   const added: DraftOrder[] = []
-  for (const row of scanned) {
+  for (const row of inferMissingOrderDates(scanned)) {
+    // Negative Recent-Orders rows are cash operations, not delivery fees. Their dedicated merge
+    // preserves the direction once, as a positive magnitude, and keeps them out of tier math.
+    if (cashDeductionMagnitude(row.fee) !== null) continue
     const cancelled = row.cancelled === true
     const key = scannedKey(row)
     const already = tally.get(key) ?? 0
@@ -593,6 +829,8 @@ export function previewBr1(input: {
   orders: readonly DraftOrder[]
   /** The wallet's own rows. Only the ones no order explains reach the equation — see `movementsTerm`. */
   movements?: readonly DraftMovement[]
+  /** Negative Recent-Orders operations, held as positive cash-out magnitudes. */
+  cashDeductions?: readonly DraftCashDeduction[]
   declaredCashText?: string
   declaredWalletText?: string
 }): Br1Preview | null {
@@ -628,6 +866,10 @@ export function previewBr1(input: {
         .map((m) => safeSigned(m.amountText))
     : []
 
+  const cashDeductions = (input.cashDeductions ?? [])
+    .filter((d) => d.included !== false)
+    .map((d) => safeFee(d.amountText))
+
   const hasDeclared = input.declaredCashText !== undefined && input.declaredWalletText !== undefined
   const declaredCash = hasDeclared ? safeFee(input.declaredCashText!) : minor(0n)
   const declaredWallet = hasDeclared ? safeFee(input.declaredWalletText!) : minor(0n)
@@ -639,6 +881,7 @@ export function previewBr1(input: {
     endWalletDeclared: declaredWallet,
     orders,
     walletAdjustments,
+    cashDeductions,
   })
 
   // The shortfall, turned back into the fee that would explain it. The driver keeps 80% of a fee,
@@ -904,13 +1147,18 @@ export function cloudRowsToScannedOrders(
   const alignable = local !== undefined && local.length === rows.length
   const out: ScannedOrderRow[] = []
   rows.forEach((row, i) => {
+    const deduction = cashDeductionMagnitude(row.cancelled ? null : row.value) !== null
     // A row with no clock has no identity: `keyOf` is (day, minute, route), so a timeless row
     // collides with every other timeless row on the page and the merge would keep exactly one.
-    if (row.time === null || row.time.trim() === '') return
+    // A cash deduction may still have a defensible date/route identity and its wire minute is
+    // nullable, so do not throw that money away solely because its clock glyph was unreadable.
+    if (row.time === null || row.time.trim() === '') {
+      if (!deduction || (row.dateIso === null && row.pointA == null && row.pointB == null)) return
+    }
     const mate = alignable ? local[i] : undefined
     out.push({
       dateIso: row.dateIso,
-      time: row.time,
+      time: row.time ?? '',
       fee: row.cancelled ? null : row.value,
       ...(row.cancelled ? { cancelled: true } : {}),
       ...(row.pointA != null ? { pointA: row.pointA } : {}),
@@ -919,7 +1167,7 @@ export function cloudRowsToScannedOrders(
       ...(mate?.pointBIsPin === true ? { pointBIsPin: true } : {}),
     })
   })
-  return out
+  return inferMissingOrderDates(out)
 }
 
 /** The same, for the payments log — which needs only a signed amount and a clock. */

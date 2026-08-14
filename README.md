@@ -54,14 +54,14 @@ Authoritative specs: [SRSv1.0.md](SRSv1.0.md) (Arabic) and [CLAUDECODEKICKOFF.md
 
 ## Current state, honestly
 
-**The Bundle-1a backend is complete: 34 endpoints, 415 tests, every SRS section A/B/C/E/F/G.**
-All twelve ports have both an in-memory and a PostgreSQL implementation, proven by one shared
-conformance suite.
+**Bundle 1a now has a Fastify API, an Arabic-first admin console, and a driver PWA.** All three have
+live Vercel projects; the source of truth for the latest rollout state and remaining acceptance
+work is [PROGRESS.md](PROGRESS.md), not the older milestone estimates below.
 
-**Not built:** both front-ends. Nothing here can be logged into by a human yet — the API can only
-be called. That is ~7 days of work and it is what the client will judge the product on.
-
-**Not yet proven:** `verify-guards.sql` has run against stock PostgreSQL 17 in CI but **not
-against Neon**. Expected to pass; expected is not evidence.
+The database ports are exercised by the shared memory/PostgreSQL conformance suite. On
+2026-08-14 the full migration chain, PostgreSQL conformance suite, and every illegal-write probe in
+`verify-guards.sql` passed on disposable stock PostgreSQL 17.11 databases. An isolated Neon scratch
+database separately passed the backup restore, fingerprint, invariant, and rollback rehearsal.
+Never run the destructive conformance suite against production.
 
 See [STATUS.md](STATUS.md) for the full breakdown, including the six bugs the tests caught.

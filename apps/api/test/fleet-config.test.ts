@@ -267,6 +267,7 @@ describe('per-pack BMS evidence gates the shift (SRS §L seam)', () => {
     const manager = await h.loginAs('manager')
     const packId = await fit(manager, 1, 'PACK-1')
     const { driver, shiftId } = await startShift()
+    await h.uploadPhoto(driver, shiftId, 'start', 'bms_1')
     const put = async (percent: number, source: 'ocr' | 'manual', ocrRaw?: unknown) =>
       await h.app.inject({
         method: 'PUT',

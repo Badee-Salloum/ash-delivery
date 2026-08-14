@@ -782,8 +782,12 @@ function listAmount(token: string): string | null {
  */
 export function glyphListFee(raw: string | null): string | null {
   if (raw === null) return null
-  if (/^[-+]/.test(raw)) return null
-  return listAmount(raw)
+  const normalized = raw.trim().replace(/^[−–—]\s*/, '-').replace(/^\+\s*/, '+')
+  const sign = normalized[0] === '-' || normalized[0] === '+' ? normalized[0] : ''
+  const magnitude = listAmount(sign ? normalized.slice(1).trim() : normalized)
+  if (magnitude === null) return null
+  // A minus on Recent Orders is a cash deduction. The client routes it away from delivery fees.
+  return sign === '-' ? `-${magnitude}` : magnitude
 }
 
 /**
@@ -1531,10 +1535,10 @@ function feeOnLine(line: string): string | null {
    * screenshot arrived whose fee could not be read at all — until then the fee matched first and
    * hid it. A colon on either side means a time, and a time is not money.
    */
-  const after = ascii.match(/(?:^|[^\w.,:])([\d.,،٬٫]+)\s*SYP/i)
-  if (after) return listAmount(after[1]!)
-  const before = ascii.match(/SYP\s*([\d.,،٬٫]+)(?![\w:])/i)
-  return before ? listAmount(before[1]!) : null
+  const after = ascii.match(/(?:^|[^\w.,:])([-+−–—]?\s*[\d.,،٬٫]+)\s*SYP/i)
+  if (after) return glyphListFee(after[1]!)
+  const before = ascii.match(/SYP\s*([-+−–—]?\s*[\d.,،٬٫]+)(?![\w:])/i)
+  return before ? glyphListFee(before[1]!) : null
 }
 
 // ── Reading the amounts ourselves ───────────────────────────────────────────────────────────

@@ -209,7 +209,7 @@ describe('a shift left unapproved on a weekday', () => {
       businessDate,
       weekStartDate: '2026-07-19',
       state: 'pending_review',
-    })
+    }, 'u-bm')
   }
 
   it('blocks the close, on a day the Sunday-only query could not see', async () => {

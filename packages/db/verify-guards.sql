@@ -18,8 +18,13 @@
 -- ── Fixtures ─────────────────────────────────────────────────────────────────────────────
 BEGIN;
 
-INSERT INTO branches (id, code, name_ar, name_en)
-VALUES ('11111111-1111-1111-1111-111111111111', 'DAM', 'دمشق', 'Damascus')
+INSERT INTO governorates (id, no, name_ar, name_en)
+VALUES ('99999999-9999-9999-9999-999999999999', 99, 'محافظة اختبار الحواجز', 'Guard Test Governorate')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO branches (id, code, name_ar, name_en, governorate_id, branch_no)
+VALUES ('11111111-1111-1111-1111-111111111111', 'GUARD', 'فرع اختبار الحواجز', 'Guard Test Branch',
+        '99999999-9999-9999-9999-999999999999', 99)
 ON CONFLICT (code) DO NOTHING;
 
 INSERT INTO roles (key, name_ar, name_en) VALUES ('system_admin', 'مدير النظام', 'System Admin')
@@ -40,8 +45,8 @@ VALUES ('33333333-3333-3333-3333-333333333333', '11111111-1111-1111-1111-1111111
         'office_wallet', 'none', 'OFFICE_WALLET', 'صندوق محفظة المكتب')
 ON CONFLICT (branch_id, code) DO NOTHING;
 
-INSERT INTO vehicle_types (id, code, name_ar, name_en)
-VALUES ('66666666-6666-6666-6666-666666666666', 'e_motorbike', 'دراجة كهربائية', 'E-Motorbike')
+INSERT INTO vehicle_types (id, code, name_ar, name_en, type_no)
+VALUES ('66666666-6666-6666-6666-666666666666', 'guard_vehicle', 'مركبة اختبار', 'Guard Vehicle', 99)
 ON CONFLICT (code) DO NOTHING;
 
 INSERT INTO drivers (id, branch_id, code, full_name_ar)
@@ -49,9 +54,9 @@ VALUES ('77777777-7777-7777-7777-777777777777', '11111111-1111-1111-1111-1111111
         'DRV-GUARD', 'سائق اختبار')
 ON CONFLICT (code) DO NOTHING;
 
-INSERT INTO vehicles (id, branch_id, vehicle_type_id, code)
+INSERT INTO vehicles (id, branch_id, vehicle_type_id, code, machine_no)
 VALUES ('88888888-8888-8888-8888-888888888888', '11111111-1111-1111-1111-111111111111',
-        '66666666-6666-6666-6666-666666666666', 'VEH-GUARD')
+        '66666666-6666-6666-6666-666666666666', 'VEH-GUARD', 99)
 ON CONFLICT (code) DO NOTHING;
 
 INSERT INTO shifts (id, branch_id, driver_id, vehicle_id, shift_no, business_date, week_start_date)

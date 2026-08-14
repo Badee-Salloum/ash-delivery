@@ -126,6 +126,13 @@ describe('the cancelled card', () => {
 })
 
 describe('what may go to the server', () => {
+  it('keeps a server-excluded priced row in the payload while the read-only preview excludes it', () => {
+    const rows = [rowOf({ localId: 'a', providerOrderNo: 'YAL-a', feeText: '235', included: false, recorded: true })]
+    expect(submittableOrders(rows)).toEqual(rows)
+    expect(previewBr1({ floatText: '0', topupText: '0', orders: rows })?.expectedCashText).toBe('0.00')
+    expect(workedTotalText(rows)).toBe('0.00')
+  })
+
   it('drops an unchecked row with no price — it would 400 the whole request', () => {
     const rows = [
       rowOf({ localId: 'a', providerOrderNo: 'YAL-a', feeText: '235' }),

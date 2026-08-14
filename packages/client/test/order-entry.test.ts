@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
   type DraftOrder,
+  cashDeductionMagnitude,
+  cashDeductionOperationKey,
+  cashDeductionsAreValid,
+  healCashDeductionDetails,
+  inferMissingOrderDates,
+  mergeScannedCashDeductions,
   allProblems,
   br1Verdict,
   driverPhaseFor,
@@ -14,6 +20,122 @@ import {
   unsentOrders,
   validateRow,
 } from '../src/order-entry.ts'
+
+describe('negative Recent Orders operations', () => {
+  const scanned = (over: Partial<{ dateIso: string | null; time: string; fee: string | null; pointA: string | null; pointB: string | null }> = {}) => ({
+    dateIso: '2026-08-14',
+    time: '19:29',
+    fee: '-144.15',
+    pointA: 'Branch',
+    pointB: 'Cash desk',
+    ...over,
+  })
+
+  it('turns a negative fee into one positive-magnitude deduction, never an order', () => {
+    const nextId = () => 'deduction-local'
+    const row = scanned()
+    const deductions = mergeScannedCashDeductions([], [row], nextId)
+    expect(deductions).toMatchObject([
+      {
+        amountText: '144.15',
+        amountOcrText: '144.15',
+        dateText: '2026-08-14',
+        timeText: '19:29',
+        pointA: 'Branch',
+        pointB: 'Cash desk',
+        source: 'ocr',
+      },
+    ])
+    expect(mergeScannedOrders([], [row], nextId)).toEqual([])
+    expect(mergeScannedCashDeductions(deductions, [row], nextId)).toEqual([])
+  })
+
+  it('does not duplicate a negative row created by a cached legacy PWA after upgrade', () => {
+    const row = scanned({ fee: '-50', time: '20:01', pointA: 'A', pointB: 'B' })
+    const legacy = {
+      localId: 'deduction-server',
+      operationKey: 'legacy:OLD-NEGATIVE',
+      amountText: '50',
+      amountOcrText: '50',
+      timeText: '20:01',
+      dateText: '2026-08-14',
+      pointA: 'A',
+      pointB: 'B',
+      source: 'ocr' as const,
+      included: true,
+    }
+    expect(mergeScannedCashDeductions([legacy], [row], () => 'duplicate')).toEqual([])
+  })
+
+  it('keeps the source operation key stable when an overlap enriches its minute, date and route', () => {
+    expect(cashDeductionOperationKey(scanned({ dateIso: null, time: '', pointA: null, pointB: 'Cash desk' }))).toBe(
+      cashDeductionOperationKey(scanned()),
+    )
+  })
+
+  it('heals overlap details without appending or re-keying the same cash operation', () => {
+    const partial = scanned({ dateIso: null, time: '', pointA: null, pointB: 'Cash desk' })
+    const existing = mergeScannedCashDeductions([], [partial], () => 'deduction-local')
+    const key = existing[0]!.operationKey
+
+    expect(mergeScannedCashDeductions(existing, [scanned()], () => 'duplicate')).toEqual([])
+    expect(healCashDeductionDetails(existing, [scanned()])).toEqual([
+      {
+        localId: 'deduction-local',
+        timeText: '19:29',
+        dateText: '2026-08-14',
+        pointA: 'Branch',
+        pointB: 'Cash desk',
+      },
+    ])
+    expect(existing[0]!.operationKey).toBe(key)
+  })
+
+  it('preserves multiplicity when two deductions genuinely share a minute and amount', () => {
+    const rows = [scanned({ pointB: 'Desk A' }), scanned({ pointB: 'Desk B' })]
+    const first = mergeScannedCashDeductions([], rows, () => crypto.randomUUID())
+    expect(first).toHaveLength(2)
+    expect(new Set(first.map((row) => row.operationKey)).size).toBe(2)
+    expect(mergeScannedCashDeductions(first, rows, () => 'duplicate')).toEqual([])
+  })
+
+  it('subtracts included deductions from expected cash without creating an order', () => {
+    const deductions = mergeScannedCashDeductions([], [scanned({ fee: '-20' })], () => 'deduction-local')
+    const preview = previewBr1({ floatText: '100', topupText: '0', orders: [], cashDeductions: deductions })
+    expect(preview?.expectedCashText).toBe('80.00')
+    expect(preview?.expectedWalletText).toBe('0.00')
+  })
+
+  it('normalizes the Unicode minus but does not reinterpret positive fees', () => {
+    expect(cashDeductionMagnitude('−١')).toBeNull()
+    expect(cashDeductionMagnitude('−1')).toBe('1')
+    expect(cashDeductionMagnitude('1')).toBeNull()
+  })
+
+  it('validates even a read-only excluded row because every deduction remains in the payload', () => {
+    const [deduction] = mergeScannedCashDeductions([], [scanned()], () => 'deduction-local')
+    expect(cashDeductionsAreValid([{ ...deduction!, included: false, amountText: '' }])).toBe(false)
+  })
+
+  it('infers only a blank run enclosed by the same known date', () => {
+    expect(
+      inferMissingOrderDates([
+        scanned({ dateIso: '2026-08-14' }),
+        scanned({ dateIso: null, time: '18:00' }),
+        scanned({ dateIso: '2026-08-14', time: '17:00' }),
+      ])[1]!.dateIso,
+    ).toBe('2026-08-14')
+
+    const uncertain = inferMissingOrderDates([
+      scanned({ dateIso: null, time: '20:00' }),
+      scanned({ dateIso: '2026-08-14' }),
+      scanned({ dateIso: null, time: '18:00' }),
+      scanned({ dateIso: '2026-08-13', time: '17:00' }),
+      scanned({ dateIso: null, time: '16:00' }),
+    ])
+    expect(uncertain.map((row) => row.dateIso)).toEqual([null, '2026-08-14', null, '2026-08-13', null])
+  })
+})
 
 /**
  * The driver order-entry model. This is the screen the product is judged on, so its logic is

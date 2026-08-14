@@ -1,5 +1,55 @@
 # PROGRESS
 
+## 2026-08-14 — the shift has real boundaries, and the release has a rehearsed recovery path
+
+**Live:** migrations `0028`–`0030` were applied to production, then the API, admin console, and
+driver PWA were deployed and smoke-tested. The release gate passed on Node 24: `pnpm check`, both
+front-end builds, and the standalone API bundle. PostgreSQL 17.11 passed all **40/40** adapter and
+concurrency tests plus every database guard after all 30 migrations.
+
+**Thaer's two Recent Orders screenshots were audited read-only after release.** The production OCR
+receipts show that gpt-5.5 returned all six fees (`190`, `145`, `175`, `370`, `240`, `425`) and the
+`-50` row correctly. The photographed UI was still running an older cached PWA path which discarded
+the cloud list when its row count differed from the phone reader, leaving the phone's two readable
+fees and three refusals on screen. The live bundle now makes the cloud list authoritative; replaying
+those exact production response shapes through it yields six orders and one 50-unit cash deduction,
+each exactly once. No shift row or ledger entry was changed during the diagnosis.
+
+The operation window is now the manager-approved opening through the driver's close submission,
+using branch-local time, inclusive minute boundaries, and correct midnight crossing. Confirmed
+in-window operations are included automatically; an unresolved timestamp blocks approval, and a
+manager correction or exclusion requires an audited reason. `openApprovedAt`, `openApprovedBy`, and
+`submittedAt` are stored on the shift and recovered conservatively from audit history for shifts
+that were already open.
+
+A negative row from **Recent Orders** is no longer disguised as a delivery. It becomes an explicit
+cash deduction: expected cash and this shift's driver share fall, any excess becomes a driver cash
+receivable, and the row never increases order count, tier progress, Yallago's share, or the wallet.
+Old PWA payloads that still send a negative fee are converted atomically. Order/deduction sign
+changes, closing a shift, and sealing a week are serialized so retries and concurrent requests
+cannot leave half a result.
+
+The end odometer finally uses the same local/cloud OCR path as the opening reading, including Arabic
+digits, retry, a refresh-safe draft, and the recorded `odoEndOcr` result and failure reason. A lower
+reading is accepted only after explicit anomaly confirmation. Evidence now records each attachment
+time and provenance; stale or reused media is warned and confirmed, review locks the exact evidence,
+and BMS reading waits for its upload so the number cannot be paired with the wrong photo.
+
+Recovery was exercised again against an isolated Neon scratch database: **2,360 rows across 52
+tables** were restored. Migration and data fingerprints, zero trial balance, sequences, enabled
+triggers, and a write-with-rollback probe all passed. No conformance or destructive verification ran
+against production. After confirming zero sessions, the Neon scratch database was dropped normally.
+The local PostgreSQL test databases were also dropped and their server stopped; its temporary install
+root may remain on disk, but no test database or server is running.
+
+The Neon owner credential was rotated and the superseded credential was verified rejected through
+both direct and pooled connections. Runtime and owner database secrets are DPAPI-protected outside
+the repository. One credential follow-up remains: create and verify a successor Vercel token in the
+personal-account Dashboard, then revoke the predecessor. API token creation was forbidden, so the
+working token was deliberately retained rather than strand deployment access.
+
+---
+
 ## 2026-08-13 — the cloud reader: gpt-5.5 reads the screenshots, the phone keeps learning
 
 The owner: «switch the ocr on our side to be gpt 5.5 with this setting / the ocr should run on the

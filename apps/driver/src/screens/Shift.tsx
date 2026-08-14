@@ -8,14 +8,17 @@ import {
   useState,
 } from 'react'
 import { MAX_PAGE_SLOTS, PAYMENTS_LOG_SLOT, type PayMode, pageSlot } from '@ash/domain'
-import type { DraftMovement, DraftOrder } from '@ash/client'
+import type { DraftCashDeduction, DraftMovement, DraftOrder } from '@ash/client'
 import {
   allProblems,
+  cashDeductionsAreValid,
   checkOdometer,
   compressImage,
   driverPhaseFor,
   plural,
   mergeScannedMovements,
+  mergeScannedCashDeductions,
+  healCashDeductionDetails,
   healCutOffRoutes,
   mergeScannedOrders,
   cloudRowsToScannedMovements,
@@ -23,6 +26,9 @@ import {
 
   previewBr1,
   readInCloud,
+  normalizeDecimalDigits,
+  odometerFromCloudFields,
+  parseNonNegativeInteger,
   splitSlot,
   submittableOrders,
   uploadEvidencePath,
@@ -39,6 +45,19 @@ import { CloudReadStatus } from './CloudReadStatus.tsx'
 import { ReadingLock } from './ReadingLock.tsx'
 import { type CloudReadEvent, PhotoSlot } from './PhotoSlot.tsx'
 import { SourceMark, sourceOf } from './ReadingSource.tsx'
+import {
+  clearEndDraft,
+  readEndDraft,
+  restoreEndDraftScalars,
+  writeEndDraft,
+} from '../end-draft-storage.ts'
+import {
+  endOdometerSubmission,
+  type LocalOdometerReadEvent,
+  localOdometerEvent,
+  localOdometerFailureCopyKey,
+  odometerValueForRetake,
+} from '../odometer-flow.ts'
 
 /**
  * The driver's shift flow: start package → order entry → end package.
@@ -67,6 +86,13 @@ interface ShiftState {
    * kilometres means a digit read twice. Neither is knowable from the closing figure alone.
    */
   odoStart: number | null
+}
+
+/** Server-owned opening evidence used when a draft shift is resumed after a browser remount. */
+interface StartPackageRestore {
+  odometerKm: number | null
+  mediaSlots: string[]
+  batteries: Array<{ batteryId: string; slotNo: number; percent: number | null; mediaId: string | null }>
 }
 
 /**
@@ -112,12 +138,26 @@ interface EndDraft {
   walletStrip: string | null
   /** The closing dashboard as the reader worked on it. */
   odoStrip: string | null
+  /** OCR baseline for the closing odometer, independent of later driver correction. */
+  odoOcr: number | null
+  /** Cloud reader state and retained file make a timeout retryable without another gallery trip. */
+  odoCloud: CloudReadEvent | null
+  odoFile: File | null
+  /** Race arbitration: cloud wins over local OCR; explicit human typing wins over both. */
+  odoCloudAnswered: boolean
+  odoHumanEdited: boolean
+  /** Explicit acknowledgement of the current anomalous end value; reset whenever that value changes. */
+  odoConfirmed: boolean
+  /** Phone-reader result, independent of the cloud reader and retained with its true failure. */
+  odoLocal: LocalOdometerReadEvent | null
   odo: string
   /** Evidence slots already uploaded, so the tiles come back showing their taken state. */
   slots: ReadonlySet<string>
   log: LogState
   /** Per-pack BMS readings, so the charge fields come back filled and the gate stays satisfied. */
   packs: Record<string, PackState>
+  /** Server attachment generation for each restored/uploaded pack; Files do not survive remounts. */
+  batteryMediaIds: Record<string, string | null>
   /**
    * How many tiles each scrollable screen is showing.
    *
@@ -136,6 +176,7 @@ interface EndDraft {
   /** The operations list itself — the orders and the wallet rows, with their checkboxes. */
   orders: DraftOrder[]
   movements: DraftMovement[]
+  cashDeductions: DraftCashDeduction[]
   opsError: string | null
 }
 
@@ -146,17 +187,36 @@ const EMPTY_END_DRAFT: EndDraft = {
   walletCloud: null,
   walletStrip: null,
   odoStrip: null,
+  odoOcr: null,
+  odoCloud: null,
+  odoFile: null,
+  odoCloudAnswered: false,
+  odoHumanEdited: false,
+  odoConfirmed: false,
+  odoLocal: null,
   odo: '',
   slots: new Set(),
   log: { kind: 'idle' },
   packs: {},
+  batteryMediaIds: {},
   dashboardPages: 1,
   logPages: 1,
   dash: { kind: 'idle' },
   orders: [],
   movements: [],
+  cashDeductions: [],
   opsError: null,
 }
+
+const freshEndDraft = (): EndDraft => ({
+  ...EMPTY_END_DRAFT,
+  slots: new Set(),
+  packs: {},
+  batteryMediaIds: {},
+  orders: [],
+  movements: [],
+  cashDeductions: [],
+})
 
 /** Where a shift already in flight puts the driver back. */
 const PHASE_FOR: Record<string, Phase> = {
@@ -167,6 +227,16 @@ const PHASE_FOR: Record<string, Phase> = {
   // and resumes when it clears; the data is later completed under the same equation.
   suspended: 'suspended',
   pending_review: 'done',
+}
+
+/** Accessing `localStorage` itself can throw in hardened/private browser contexts. */
+const localDraftStorage = (): Storage | null => {
+  if (typeof window === 'undefined') return null
+  try {
+    return window.localStorage
+  } catch {
+    return null
+  }
 }
 
 export function ShiftFlow({
@@ -193,11 +263,84 @@ export function ShiftFlow({
   // swap panel hands back the new fitment and the close screen then reads THAT, not the old pack.
   const [fitted, setFitted] = useState<readonly FittedBattery[]>(batteries)
   const [shift, setShift] = useState<ShiftState | null>(null)
+  const [startRestore, setStartRestore] = useState<StartPackageRestore | null>(null)
   const [loaded, setLoaded] = useState(!resume)
   /** The resume fetch failed — shown as a retry, never as a phase we cannot actually render. */
   const [resumeFailed, setResumeFailed] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
-  const [endDraft, setEndDraft] = useState<EndDraft>(EMPTY_END_DRAFT)
+  const [endDraft, setEndDraft] = useState<EndDraft>(freshEndDraft)
+  const [hydratedDraftShiftId, setHydratedDraftShiftId] = useState<string | null>(null)
+  // A changed resume prop names the new owner before its state request finishes; never let the old
+  // in-memory draft win merely because `shift` still points at the previous response for a moment.
+  const activeDraftShiftId = resume?.id ?? shift?.id ?? null
+  const activeDraftShiftIdRef = useRef<string | null>(activeDraftShiftId)
+  activeDraftShiftIdRef.current = activeDraftShiftId
+  const previousDraftShiftId = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (resume) setPhase(PHASE_FOR[resume.state] ?? 'start')
+  }, [resume?.id, resume?.state])
+
+  /** Restore once per shift, and remove the prior shift's scalar draft when identity changes. */
+  useEffect(() => {
+    const shiftId = activeDraftShiftId
+    if (shiftId === null) return
+    const storage = localDraftStorage()
+
+    const previous = previousDraftShiftId.current
+    const changedShift = previous !== null && previous !== shiftId
+    if (changedShift && storage) clearEndDraft(storage, previous)
+    previousDraftShiftId.current = shiftId
+
+    if (changedShift) {
+      const newShiftIsTerminal = resume?.id === shiftId && PHASE_FOR[resume.state] === 'done'
+      const saved = !newShiftIsTerminal && storage ? readEndDraft(storage, shiftId) : null
+      if (newShiftIsTerminal && storage) clearEndDraft(storage, shiftId)
+      const blank = freshEndDraft()
+      setEndDraft(saved ? restoreEndDraftScalars(blank, saved) : blank)
+      setHydratedDraftShiftId(shiftId)
+      return
+    }
+
+    if (phase === 'done') {
+      if (storage) clearEndDraft(storage, shiftId)
+      if (hydratedDraftShiftId !== shiftId) setHydratedDraftShiftId(shiftId)
+      return
+    }
+    if (hydratedDraftShiftId === shiftId) return
+
+    const saved = storage ? readEndDraft(storage, shiftId) : null
+    if (saved) setEndDraft((current) => restoreEndDraftScalars(current, saved))
+    setHydratedDraftShiftId(shiftId)
+  }, [activeDraftShiftId, hydratedDraftShiftId, phase, resume?.id, resume?.state])
+
+  /** Persist only serialisable scalar inputs; evidence files remain browser-memory/server concerns. */
+  useEffect(() => {
+    const shiftId = activeDraftShiftId
+    if (shiftId === null || phase === 'done' || hydratedDraftShiftId !== shiftId) return
+    const storage = localDraftStorage()
+    if (!storage) return
+    writeEndDraft(storage, shiftId, {
+      cash: endDraft.cash,
+      wallet: endDraft.wallet,
+      walletOcr: endDraft.walletOcr,
+      odo: endDraft.odo,
+      odoOcr: endDraft.odoOcr,
+      odoHumanEdited: endDraft.odoHumanEdited,
+      odoConfirmed: endDraft.odoConfirmed,
+    })
+  }, [
+    activeDraftShiftId,
+    hydratedDraftShiftId,
+    phase,
+    endDraft.cash,
+    endDraft.wallet,
+    endDraft.walletOcr,
+    endDraft.odo,
+    endDraft.odoOcr,
+    endDraft.odoHumanEdited,
+    endDraft.odoConfirmed,
+  ])
 
   /**
    * WHAT THE SERVER SAYS THE SHIFT IS NOW — applied to the screen the driver is looking at.
@@ -222,11 +365,15 @@ export function ShiftFlow({
       const { gone, phase: next } = driverPhaseFor(state, phaseRef.current)
       if (next) setPhase(next)
       if (gone === 'cancelled') {
+        const storage = localDraftStorage()
+        if (storage && activeDraftShiftIdRef.current) clearEndDraft(storage, activeDraftShiftIdRef.current)
         toast.error(t.shift.cancelledByManager)
         onDiscarded?.()
         return true
       }
       if (gone === 'closed') {
+        const storage = localDraftStorage()
+        if (storage && activeDraftShiftIdRef.current) clearEndDraft(storage, activeDraftShiftIdRef.current)
         toast.success(t.shift.closedByManager)
         return true
       }
@@ -266,6 +413,11 @@ export function ShiftFlow({
     void api
       .shiftState(resume.id)
       .then((st) => {
+        setStartRestore({
+          odometerKm: st.startPackage.odometerKm,
+          mediaSlots: st.startPackage.mediaSlots,
+          batteries: st.startPackage.batteries,
+        })
         setShift({
           id: st.id,
           floatText: st.startPackage.floatTotal,
@@ -303,9 +455,14 @@ export function ShiftFlow({
           cash: d.cash || (st.endPackage.cashDeclared ?? ''),
           wallet: d.wallet || (st.endPackage.walletDeclared ?? ''),
           odo: d.odo || (st.endPackage.odometerKm === null ? '' : String(st.endPackage.odometerKm)),
+          odoOcr: d.odoOcr ?? st.endPackage.odometerKmOcr ?? null,
+          odoHumanEdited: d.odoHumanEdited || st.endPackage.odometerKm !== null,
           // Owned by `BatteryPanel`, which is the only thing that knows the shape. Building it here
           // by hand — behind an `as` cast — is what crashed every resumed close screen.
           packs: restorePacks(st.endPackage.batteries, d.packs),
+          batteryMediaIds: Object.fromEntries(
+            st.endPackage.batteries.map((reading) => [reading.batteryId, reading.mediaId]),
+          ),
           orders: st.orders.map((o) => ({
             // `already-<no>` rather than a random id: the list is rebuilt from the server on every
             // resume, and a stable key keeps React from remounting rows the driver is editing.
@@ -330,6 +487,18 @@ export function ShiftFlow({
             included: m.included,
             role: m.role,
             ambiguous: m.ambiguous,
+          })),
+          cashDeductions: (st.cashDeductions ?? []).map((row) => ({
+            localId: `deduction-${row.id}`,
+            operationKey: row.operationKey,
+            amountText: row.amount,
+            amountOcrText: row.amountOcr ?? null,
+            timeText: row.occurredMinute ?? '',
+            dateText: row.occurredDate ?? '',
+            pointA: row.pointA,
+            pointB: row.pointB,
+            source: row.source,
+            included: row.included,
           })),
         }))
         // Trust the server's state over the one the assignment reported: the manager may have
@@ -385,6 +554,7 @@ export function ShiftFlow({
         assignment={assignment}
         batteries={fitted}
         existingShiftId={resume?.id ?? null}
+        restore={startRestore}
         onDiscarded={onDiscarded}
         awaiting={phase === 'awaiting'}
         onOpened={(id) => {
@@ -453,7 +623,11 @@ export function ShiftFlow({
         // Back to the running shift. The operations list now lives ON this screen, so there is no
         // intermediate step to return to — and the package survives the trip either way.
         onBack={() => setPhase('orders')}
-        onSubmitted={() => setPhase('done')}
+        onSubmitted={() => {
+          const storage = localDraftStorage()
+          if (storage) clearEndDraft(storage, shift.id)
+          setPhase('done')
+        }}
       />
     )
   }
@@ -521,6 +695,7 @@ function StartPackage({
   assignment,
   batteries,
   existingShiftId,
+  restore,
   onDiscarded,
   awaiting,
   onOpened,
@@ -531,6 +706,8 @@ function StartPackage({
   batteries: readonly FittedBattery[]
   /** A draft that already exists. Present ⇒ attach to it; absent ⇒ create one. */
   existingShiftId?: string | null
+  /** Opening package already persisted by this draft, restored from the driver's state endpoint. */
+  restore?: StartPackageRestore | null
   /** Called after the draft is cancelled, to return to bike selection. */
   onDiscarded?: (() => void) | undefined
   awaiting: boolean
@@ -545,7 +722,9 @@ function StartPackage({
   const { api, t } = useApp()
   const toast = useToast()
   const [shiftId, setShiftId] = useState<string | null>(existingShiftId ?? null)
-  const [odo, setOdo] = useState('')
+  const [odo, setOdo] = useState(
+    restore?.odometerKm === null || restore?.odometerKm === undefined ? '' : String(restore.odometerKm),
+  )
   // SRS D-3 baseline: what OCR read for the odometer, kept even if the driver then edits it, so the
   // manager sees «قراءة الآلة ← ما أكّده السائق».
   const [odoOcr, setOdoOcr] = useState<number | null>(null)
@@ -561,13 +740,16 @@ function StartPackage({
   const [odoCloud, setOdoCloud] = useState<CloudReadEvent | null>(null)
   /** Set once the cloud has answered, so a slower local read cannot overwrite its baseline. */
   const odoCloudAnswered = useRef(false)
+  /** Explicit driver input is authoritative over either asynchronous reader. */
+  const odoHumanEdited = useRef(restore?.odometerKm !== null && restore?.odometerKm !== undefined)
   /** Kept so a timed-out read can be retried without another trip to the gallery. */
   const [odoFile, setOdoFile] = useState<File | null>(null)
-  const [odoShot, setOdoShot] = useState(false)
+  const odoFileRef = useRef<File | null>(null)
+  const [odoShot, setOdoShot] = useState(restore?.mediaSlots.includes('odometer') ?? false)
   const [busy, setBusy] = useState(false)
   const [ocrBusy, setOcrBusy] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
-  const [startSlots, setStartSlots] = useState<Set<string>>(new Set())
+  const [startSlots, setStartSlots] = useState<Set<string>>(() => new Set(restore?.mediaSlots ?? []))
   const [batteriesReady, setBatteriesReady] = useState(batteries.length === 0)
 
   // Assisted OCR: read the ODOMETER off the dashboard photo and pre-fill the km field the driver
@@ -580,6 +762,7 @@ function StartPackage({
       // The ORIGINAL file, not the compressed upload: 1280 px at q=0.4 puts body text under the
       // LSTM's recognition floor, and no tesseract parameter recovers from that.
       const result = await readDashboard(file)
+      if (odoFileRef.current !== file) return
       // The picture it worked from, kept either way — see `odoStrip`.
       setOdoStrip((cur) => cur ?? result.sample ?? null)
       /*
@@ -597,9 +780,9 @@ function StartPackage({
       const { odometer } = result.reading
       // Record the raw read ONCE (the baseline), independent of the later pre-fill/edit.
       if (odometer != null) setOdoOcr((cur) => cur ?? odometer)
-      if (odometer != null) setOdo((cur) => (cur === '' ? String(odometer) : cur))
+      if (odometer != null && !odoHumanEdited.current) setOdo(String(odometer))
     } finally {
-      setOcrBusy(false)
+      if (odoFileRef.current === file) setOcrBusy(false)
     }
   }, [])
 
@@ -615,7 +798,8 @@ function StartPackage({
    * So this OVERWRITES the local baseline rather than deferring to it — `setOdoOcr(km)`, not
    * `?? km`. What it does not overwrite is a number the driver has typed.
    */
-  const odoCloudRead = useCallback((e: CloudReadEvent): void => {
+  const odoCloudRead = useCallback((e: CloudReadEvent, file?: File): void => {
+    if (file && odoFileRef.current !== file) return
     // Every event is kept now, not just the successful one. A read that is still running, and a
     // read that timed out, are both things the driver standing in front of the bike needs told.
     setOdoCloud(e)
@@ -623,17 +807,12 @@ function StartPackage({
     odoCloudAnswered.current = true
     // The reader is told to label it «odometer»; accept the obvious variants rather than failing
     // on a synonym, since a wrong label costs the whole read.
-    const raw =
-      e.response.fields.odometer ?? e.response.fields.odo ?? e.response.fields.km ?? e.response.fields.mileage
-    if (raw == null) return
+    const km = odometerFromCloudFields(e.response.fields)
+    if (km === null) return
     // Digits only. «ODO 02611 km» must not become 2611000 because "km" carried digits, and a
     // fractional odometer is not a thing this dashboard prints.
-    const digits = raw.replace(/[^\d]/g, '')
-    if (digits === '') return
-    const km = Number(digits)
-    if (!Number.isSafeInteger(km) || km < 0) return
     setOdoOcr(km)
-    setOdo((cur) => (cur === '' ? String(km) : cur))
+    if (!odoHumanEdited.current) setOdo(String(km))
   }, [])
 
   /**
@@ -649,7 +828,14 @@ function StartPackage({
       if (!shiftId) return
       setOdoCloud({ status: 'reading' })
       const res = await readInCloud(api, shiftId, 'odometer', file)
-      odoCloudRead(res ? { status: 'read', response: res } : { status: 'failed', reason: 'unavailable' })
+      odoCloudRead(
+        res === null
+          ? { status: 'failed', reason: 'unavailable' }
+          : res.ok
+            ? { status: 'read', response: res }
+            : { status: 'failed', reason: res.reason ?? 'unavailable' },
+        file,
+      )
     },
     [api, shiftId, odoCloudRead],
   )
@@ -676,13 +862,15 @@ function StartPackage({
 
   async function confirm(): Promise<void> {
     if (!shiftId) return
+    const odometerKm = parseNonNegativeInteger(odo)
+    if (odometerKm === null) return
     setBusy(true)
     try {
       // The driver submits only the odometer + photo. The cash float and wallet top-up are the
       // branch's money, entered by the manager at approval. Charge is captured per pack, so the
       // bike-level battery % is gone (sent null — the column stays a nullable seam).
       await api.put(`/shifts/${shiftId}/start-package`, {
-        odometerKm: Number(odo),
+        odometerKm,
         batteryPercent: null,
         // SRS D-3: the odometer OCR baseline (null when OCR never ran).
         odometerKmOcr: odoOcr,
@@ -771,7 +959,7 @@ function StartPackage({
   // can never drift apart.
   const missing: string[] = [
     ...(odoShot ? [] : [t.shift.odometerShot]),
-    ...(odo === '' ? [t.shift.odometer] : []),
+    ...(parseNonNegativeInteger(odo) === null ? [t.shift.odometer] : []),
     ...(batteriesReady ? [] : [t.battery.percent]),
   ]
   const ready = shiftId !== null && missing.length === 0
@@ -798,11 +986,20 @@ function StartPackage({
           pkg="start"
           slot="odometer"
           label={t.shift.odometer}
+          uploaded={odoShot}
           onUploaded={(slot) => {
             setOdoShot(true)
             setStartSlots((cur) => new Set(cur).add(slot))
           }}
           onImage={(file) => {
+            odoFileRef.current = file
+            odoCloudAnswered.current = false
+            setOdoCloud(null)
+            setOdoOcr(null)
+            setOdoStrip(null)
+            // A new photograph must not inherit a machine-prefill from the old one. A value the
+            // driver actually typed is different: human input remains authoritative across a retake.
+            setOdo(odometerValueForRetake(odo, odoHumanEdited.current))
             setOdoFile(file)
             void runOcr(file)
           }}
@@ -829,7 +1026,14 @@ function StartPackage({
       <ReadingLock active={odoCloud?.status === 'reading'}>
       <Card className="flex flex-col gap-3">
         <Field label={t.shift.odometer}>
-          <TextInput inputMode="numeric" value={odo} onChange={(e) => setOdo(e.target.value)} />
+          <TextInput
+            inputMode="numeric"
+            value={odo}
+            onChange={(e) => {
+              odoHumanEdited.current = true
+              setOdo(normalizeDecimalDigits(e.target.value))
+            }}
+          />
         </Field>
         {/* WHERE THIS NUMBER CAME FROM. Captured on every shift as the D-3 baseline and shown
             nowhere until now, so a pre-filled OCR odometer and one typed from memory looked
@@ -853,6 +1057,10 @@ function StartPackage({
           slots={startSlots}
           onSlotUploaded={(slot) => setStartSlots((cur) => new Set(cur).add(slot))}
           onReadingsChanged={setBatteriesReady}
+          initialPacks={restorePacks(restore?.batteries ?? [], {})}
+          initialMediaIds={Object.fromEntries(
+            (restore?.batteries ?? []).map((reading) => [reading.batteryId, reading.mediaId]),
+          )}
         />
       ) : null}
       {/* Destructive, so it sits at the END. It used to be wedged between the odometer photo and the
@@ -860,6 +1068,38 @@ function StartPackage({
           start package, directly in the path of the eye moving from picture to field. */}
       {shiftId ? <DiscardButton onDiscard={discardSelf} /> : null}
     </Screen>
+  )
+}
+
+/** The phone reader has its own outcome and retry; a cloud outcome must never hide or replace it. */
+function LocalOdometerReadStatus({
+  event,
+  onRetry,
+}: {
+  event: LocalOdometerReadEvent | null
+  onRetry?: (() => void) | undefined
+}): ReactNode {
+  const { t } = useApp()
+  if (event === null || event.status === 'read') return null
+  if (event.status === 'reading') {
+    return <p className="text-sm text-slate-600">{t.shift.localOcrReading}</p>
+  }
+
+  return (
+    <div className="flex flex-col items-start gap-1" aria-live="polite">
+      <p className="text-sm font-medium text-amber-800">
+        {t.shift[localOdometerFailureCopyKey(event.reason)]}
+      </p>
+      {onRetry ? (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="rounded-lg bg-amber-100 px-3 py-1 text-sm font-medium text-amber-900"
+        >
+          {t.shift.localOcrRetry}
+        </button>
+      ) : null}
+    </div>
   )
 }
 
@@ -881,7 +1121,9 @@ function EndPackage({
 }): ReactNode {
   const { api, t } = useApp()
   const toast = useToast()
-  const { cash, wallet, walletOcr, odo, slots, log: logState } = draft
+  const { cash, wallet, walletOcr, odo, odoConfirmed, slots, log: logState } = draft
+  const odometerFields = endOdometerSubmission(odo, draft.odoOcr, odoConfirmed)
+  const odometerKm = odometerFields?.odometerKm ?? null
   const patch = useCallback((p: Partial<EndDraft>): void => onDraft((d) => ({ ...d, ...p })), [onDraft])
   // Stable, and a no-op update when the readings are unchanged — an unstable callback here would
   // loop the panel's notify-effect against this state.
@@ -891,8 +1133,6 @@ function EndPackage({
   )
   const [br1, setBr1] = useState<{ difference: string; balanced: boolean } | null>(null)
   const [busy, setBusy] = useState(false)
-  /** He looked at the odd odometer and stood by it. Confirming IS the answer, not a step to refusing. */
-  const [odoConfirmed, setOdoConfirmed] = useState(false)
 
   const [batteriesReady, setBatteriesReady] = useState(batteries.length === 0)
   // The zeroed-wallet photo was dropped (product owner) — the wallet screenshot is the evidence.
@@ -942,21 +1182,25 @@ function EndPackage({
     ...required.filter((s) => !slots.has(s)).map((s) => `${t.shift.photoOf} ${labelOf(s)}`),
     ...(cash === '' ? [t.shift.cashHandover] : []),
     ...(wallet === '' ? [t.shift.walletBalance] : []),
-    ...(odo === '' ? [t.shift.odometer] : []),
+    ...(odometerKm === null ? [t.shift.odometer] : []),
     ...(batteriesReady ? [] : [t.battery.percent]),
     ...(named === 0 ? [t.orders.title] : []),
     ...(allProblems(draft.orders).size > 0 ? [t.shift.fixOrderRows] : []),
+    ...(!cashDeductionsAreValid(draft.cashDeductions) ? [t.shift.fixOrderRows] : []),
     // A read in flight is a reason to WAIT, not a thing to go and fix — but submitting through it
     // silently drops every order it was about to add, which is the shift closing short.
     ...(draft.dash.kind === 'reading' || draft.log.kind === 'reading' ? [t.shift.reading] : []),
   ]
-  const ready = missing.length === 0
+  const odometerQuestion = checkOdometer(shift.odoStart, odometerKm)
+  const odometerNeedsConfirmation = odometerQuestion?.kind === 'odometer_went_backwards' && !odoConfirmed
+  const ready = missing.length === 0 && !odometerNeedsConfirmation
 
   const preview = previewBr1({
     floatText: shift.floatText,
     topupText: shift.topupText,
     orders: draft.orders,
     movements: draft.movements,
+    cashDeductions: draft.cashDeductions,
     // Spread so the keys are ABSENT rather than undefined: the preview shows a difference only
     // once BOTH declared figures exist, and an explicit `undefined` would satisfy that check.
     ...(cash === '' || wallet === '' ? {} : { declaredCashText: cash, declaredWalletText: wallet }),
@@ -970,12 +1214,13 @@ function EndPackage({
    * merges the movements, so re-sending is a no-op rather than a wall of duplicate-key errors.
    */
   async function submit(): Promise<void> {
+    if (odometerFields === null) return
     setBusy(true)
     try {
       await api.put(`/shifts/${shift.id}/operations`, {
-        // A row the driver left unchecked with NO price never travels: `moneySchema` refuses an
-        // empty fee and would 400 the whole request, losing every good row with it. That is a
-        // cancelled card he was not paid for, or a refused row he judged was not this shift's.
+        // A scanner-classified cancelled row with no price never travels: `moneySchema` refuses an
+        // empty fee and would 400 the whole request, losing every good row with it. Driver-visible
+        // inclusion is otherwise read-only and the server classifies every priced row by its window.
         orders: submittableOrders(draft.orders)
           .filter((o) => o.providerOrderNo.trim() !== '')
           .map((o) => ({
@@ -991,13 +1236,23 @@ function EndPackage({
             source: o.feeOcrText != null ? 'ocr' : o.feeRefused === true ? 'refused' : 'manual',
             feeOcr: o.feeOcrText ?? null,
             feeStrip: o.feeStrip ?? null,
-            included: o.included !== false,
             walletAmount: o.walletAmountText ? o.walletAmountText : null,
             occurredMinute: o.timeText ? o.timeText : null,
             occurredDate: o.dateText ? o.dateText : null,
             pointA: o.pointA ?? null,
             pointB: o.pointB ?? null,
           })),
+        cashDeductions: draft.cashDeductions.map((row) => ({
+          operationKey: row.operationKey,
+          amount: row.amountText,
+          occurredMinute: row.timeText || null,
+          occurredDate: row.dateText || null,
+          source: row.source,
+          amountOcr: row.amountOcrText,
+          amountStrip: row.amountStrip ?? null,
+          pointA: row.pointA ?? null,
+          pointB: row.pointB ?? null,
+        })),
         movements: draft.movements.map((m) => ({
           amount: m.amountText,
           occurredMinute: m.timeText,
@@ -1010,7 +1265,7 @@ function EndPackage({
       patch({ opsError: null })
 
       const res = await api.put<{ br1: { difference: string; balanced: boolean } }>(`/shifts/${shift.id}/end-package`, {
-        odometerKm: Number(odo),
+        ...odometerFields,
         // Bike-level battery % is gone — charge is captured per pack. Sent null (nullable seam).
         batteryPercent: null,
         cashDeclared: cash,
@@ -1106,6 +1361,102 @@ function EndPackage({
   )
 
   /**
+   * Read the closing dashboard on the phone while upload/cloud OCR proceed independently.
+   * `newEvidence=false` retries the same pixels without erasing the cloud's outcome or value.
+   */
+  const odoImage = useCallback(
+    async (file: File, newEvidence = true): Promise<void> => {
+      onDraft((d) => {
+        if (!newEvidence) {
+          return d.odoFile === file ? { ...d, odoLocal: { status: 'reading' } } : d
+        }
+        return {
+          ...d,
+          odoFile: file,
+          odoStrip: null,
+          odoOcr: null,
+          odoCloud: null,
+          odoCloudAnswered: false,
+          odoLocal: { status: 'reading' },
+          odoConfirmed: false,
+          // Do not let an earlier photo's machine value survive a retake whose readers may fail.
+          odo: odometerValueForRetake(d.odo, d.odoHumanEdited),
+        }
+      })
+      try {
+        const { readDashboard } = await import('../ocr.ts')
+        const result = await readDashboard(file)
+        onDraft((d) => {
+          // A second selection superseded this read; never let the old photo label the new one.
+          if (d.odoFile !== file) return d
+          const odo = result.ok ? result.reading.odometer : null
+          const next = {
+            ...d,
+            odoLocal: localOdometerEvent(result.ok ? { ok: true, odometer: odo } : result),
+            odoStrip: result.sample ?? null,
+          }
+          // Cloud is authoritative where it answered. Keep only the local sample for training.
+          if (d.odoCloudAnswered || odo === null) return next
+          return {
+            ...next,
+            odoOcr: odo,
+            odo: d.odoHumanEdited ? d.odo : String(odo),
+            odoConfirmed: false,
+          }
+        })
+      } catch {
+        onDraft((d) =>
+          d.odoFile === file
+            ? { ...d, odoLocal: { status: 'failed', reason: 'unavailable' } }
+            : d,
+        )
+      }
+    },
+    [onDraft],
+  )
+
+  /** Apply a cloud event only to the photograph that launched it. */
+  const odoCloudRead = useCallback(
+    (event: CloudReadEvent, file?: File): void => {
+      onDraft((d) => {
+        if (file && d.odoFile !== file) return d
+        if (event.status !== 'read') return { ...d, odoCloud: event }
+        const km = odometerFromCloudFields(event.response.fields)
+        return {
+          ...d,
+          odoCloud: event,
+          // A structured cloud answer wins the race even when it honestly found no odometer.
+          odoCloudAnswered: true,
+          ...(km === null
+            ? {}
+            : {
+                odoOcr: km,
+                odo: d.odoHumanEdited ? d.odo : String(km),
+                odoConfirmed: false,
+              }),
+        }
+      })
+    },
+    [onDraft],
+  )
+
+  const retryEndOdoCloud = useCallback(
+    async (file: File): Promise<void> => {
+      odoCloudRead({ status: 'reading' }, file)
+      const response = await readInCloud(api, shift.id, 'odometer', file)
+      odoCloudRead(
+        response === null
+          ? { status: 'failed', reason: 'unavailable' }
+          : response.ok
+            ? { status: 'read', response }
+            : { status: 'failed', reason: response.reason ?? 'unavailable' },
+        file,
+      )
+    },
+    [api, shift.id, odoCloudRead],
+  )
+
+  /**
    * The dashboard tile IS the order scan: the image is the evidence AND what was read.
    *
    * BOTH readers run, and only ONE list is merged. See `overlayCloudAmounts` — two readers merging
@@ -1124,7 +1475,7 @@ function EndPackage({
                     readInCloud(api, shift.id, 'orders', file),
                   ])
                   const localOrders = r?.ok ? r.reading.orders : []
-                  const cloudOrders = cloud ? cloudRowsToScannedOrders(cloud.rows, localOrders) : []
+                  const cloudOrders = cloud?.ok ? cloudRowsToScannedOrders(cloud.rows, localOrders) : []
                   onDraft((d) => {
                     /*
                      * THE CLOUD IS THE READER. The phone is the fallback and the student.
@@ -1154,11 +1505,18 @@ function EndPackage({
                     // Both readers silent is the only real failure. Either one alone is a reading.
                     if (!localOk && scanned.length === 0) return { ...d, dash: { kind: 'failed' } }
                     const added = mergeScannedOrders(d.orders, scanned, () => crypto.randomUUID())
+                    const addedDeductions = mergeScannedCashDeductions(
+                      d.cashDeductions,
+                      scanned,
+                      () => crypto.randomUUID(),
+                    )
+                    const healedDeductions = healCashDeductionDetails(d.cashDeductions, scanned)
                     // A card sliced off the bottom of the previous page is usually whole at the
                     // top of this one. Its second sighting is de-duplicated away, so without this
                     // its addresses go with it and the row keeps showing a delivery to nowhere.
                     const healed = healCutOffRoutes(d.orders, scanned)
                     const patch = new Map(healed.map((h) => [h.localId, h]))
+                    const deductionPatch = new Map(healedDeductions.map((h) => [h.localId, h]))
                     // NEW rows, not rows on the page: a page that fully overlaps reads 0, which is
                     // the truth — nothing was added — and not a failure. `refused` is what the
                     // reader saw but would not vouch for, and it is the driver's to type.
@@ -1171,7 +1529,14 @@ function EndPackage({
                     return {
                       ...d,
                       orders: [...d.orders.map((o) => { const h = patch.get(o.localId); return h ? { ...o, pointA: h.pointA, pointB: h.pointB } : o }), ...added],
-                      dash: { kind: 'read', rows: added.length, refused: phoneRefused, cutOff: r?.ok ? (r.cutOff ?? 0) : 0 },
+                      cashDeductions: [
+                        ...d.cashDeductions.map((row) => {
+                          const healed = deductionPatch.get(row.localId)
+                          return healed ? { ...row, ...healed } : row
+                        }),
+                        ...addedDeductions,
+                      ],
+                      dash: { kind: 'read', rows: added.length + addedDeductions.length, refused: phoneRefused, cutOff: r?.ok ? (r.cutOff ?? 0) : 0 },
                     }
                   })
     },
@@ -1187,7 +1552,7 @@ function EndPackage({
                     readPaymentsLog(file).catch(() => null),
                     readInCloud(api, shift.id, 'payments_log', file),
                   ])
-                  const cloudMovements = cloud ? cloudRowsToScannedMovements(cloud.rows) : []
+                  const cloudMovements = cloud?.ok ? cloudRowsToScannedMovements(cloud.rows) : []
                   onDraft((d) => {
                     // A payments-log row is SIGNED, and the sign is the difference between money
                     // arriving and money leaving. `overlayCloudAmounts` carries `value` whole,
@@ -1307,8 +1672,8 @@ function EndPackage({
         status={<ReadStatus state={draft.dash} />}
       />
 
-      {/* THE list: every operation of the shift, with the checkbox that decides what counts. It sits
-          directly under the pages that produced it, which is the order the work happens in. */}
+      {/* THE list: every operation of the shift, with server-owned inclusion shown read-only. It
+          sits directly under the pages that produced it, which is the order the work happens in. */}
       {draft.opsError ? (
         <Card>
           <p className="text-center text-sm font-medium text-red-600">{draft.opsError}</p>
@@ -1317,10 +1682,12 @@ function EndPackage({
       <OperationsList
         orders={draft.orders}
         movements={draft.movements}
+        cashDeductions={draft.cashDeductions}
         today={shift.businessDate}
         suspectLocalIds={preview?.suspectLocalIds ?? []}
         onOrders={(orders) => onDraft((d) => ({ ...d, orders }))}
         onMovements={(movements) => onDraft((d) => ({ ...d, movements }))}
+        onCashDeductions={(cashDeductions) => onDraft((d) => ({ ...d, cashDeductions }))}
       />
 
       <PageGrid
@@ -1369,6 +1736,7 @@ function EndPackage({
           </div>
         </div>
 
+        <ReadingLock active={draft.odoCloud?.status === 'reading'}>
         <div className="flex items-start gap-3">
           <div className="w-20 shrink-0">
             <PhotoSlot
@@ -1379,23 +1747,47 @@ function EndPackage({
               variant="tile"
               uploaded={slots.has('odometer')}
               onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
+              onImage={(file) => void odoImage(file)}
+              ocrField="odometer"
+              onCloudRead={odoCloudRead}
             />
           </div>
           <div className="flex min-w-0 flex-1 flex-col gap-1">
             <Field label={t.shift.odometer}>
-              <TextInput inputMode="numeric" value={odo} onChange={(e) => patch({ odo: e.target.value })} />
+              <TextInput
+                inputMode="numeric"
+                value={odo}
+                onChange={(e) =>
+                  patch({ odo: normalizeDecimalDigits(e.target.value), odoHumanEdited: true, odoConfirmed: false })
+                }
+              />
             </Field>
-            {/* The closing odometer has no reader at all today, so this reads the typed mark - which
-                is true, and worth saying rather than letting him assume the app checked it. */}
-            <SourceMark source={sourceOf({ ocrValue: null, hadImage: draft.odoStrip !== null, value: odo })} />
+            <SourceMark
+              source={sourceOf({
+                ocrValue: draft.odoOcr,
+                hadImage: draft.odoStrip !== null || draft.odoFile !== null || slots.has('odometer'),
+                value: odo,
+              })}
+            />
+            <LocalOdometerReadStatus
+              event={draft.odoLocal}
+              {...(draft.odoFile
+                ? { onRetry: () => void odoImage(draft.odoFile!, false) }
+                : {})}
+            />
+            <CloudReadStatus
+              event={draft.odoCloud}
+              {...(draft.odoFile ? { onRetry: () => void retryEndOdoCloud(draft.odoFile!) } : {})}
+            />
           </div>
         </div>
+        </ReadingLock>
 
         {/* Checked against the number this very shift opened on, which is the only thing that makes
             6900 after 6948 visibly wrong. Asked, never refused: a bike really can be carried on a
             truck, and refusing would teach him to type whatever gets past it. */}
         {(() => {
-          const question = checkOdometer(shift.odoStart, odo.trim() === '' ? null : Number(odo))
+          const question = odometerQuestion
           if (!question || odoConfirmed) return null
           return (
             <div className="flex flex-col gap-2 rounded-xl bg-amber-50 p-3">
@@ -1404,7 +1796,11 @@ function EndPackage({
                   ? t.shift.odoBackwards.replace('{start}', String(question.start))
                   : t.shift.odoJump.replace('{km}', String(question.km))}
               </p>
-              <Button variant="ghost" className="self-start" onClick={() => setOdoConfirmed(true)}>
+              <Button
+                variant="ghost"
+                className="self-start"
+                onClick={() => onDraft((d) => ({ ...d, odoConfirmed: true }))}
+              >
                 {t.battery.yesCorrect}
               </Button>
             </div>
@@ -1424,7 +1820,14 @@ function EndPackage({
         onSlotUploaded={(slot) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(slot) }))}
         onReadingsChanged={setBatteriesReady}
         initialPacks={draft.packs}
+        initialMediaIds={draft.batteryMediaIds}
         onPacksChanged={onPacksChanged}
+        onMediaIdChanged={(batteryId, mediaId) =>
+          onDraft((d) => ({
+            ...d,
+            batteryMediaIds: { ...d.batteryMediaIds, [batteryId]: mediaId },
+          }))
+        }
       />
     </Screen>
   )

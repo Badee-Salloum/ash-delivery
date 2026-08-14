@@ -96,6 +96,13 @@ export interface Br1Input {
    * off the payments log. Positive raises the wallet, negative lowers it.
    */
   readonly walletAdjustments?: readonly Minor[]
+  /**
+   * Cash operations scanned as negative movements, represented here as POSITIVE magnitudes.
+   *
+   * They are not orders: they reduce only the cash the driver is expected to hold. In particular,
+   * they do not change the order count, the day's tier, the fee totals, or Yallago's cut.
+   */
+  readonly cashDeductions?: readonly Minor[]
   readonly rounding?: Rounding
 }
 
@@ -144,9 +151,10 @@ export interface Br1Result {
  * BR1 — the zero-shift equation.
  *
  *   driver_cash_on_hand + driver_app_wallet_balance
- *     == cash_float_given + wallet_topup_given + 0.80 × Σ(delivery fees)
+ *     == cash_float_given + wallet_topup_given + 0.80 × Σ(delivery fees) - cash_deductions
  *
- * ...where the "0.80 ×" term is `totals.blockTotal`, a residual (see money/allocate.ts).
+ * ...where the "0.80 ×" term is `totals.blockTotal`, a residual (see money/allocate.ts), and
+ * cash deductions are positive magnitudes for classified operations that reduced cash in hand.
  *
  * Goods value does not appear. For a cash order the driver pays the merchant out of the
  * float and collects the same amount back from the customer, so it round-trips to net zero.
@@ -189,7 +197,14 @@ export function evaluateBr1(input: Br1Input): Br1Result {
   // for money the app moved on its own.
   for (const adjustment of input.walletAdjustments ?? []) walletFromOrders += adjustment
 
-  const expectedCash = add(input.floatTotal, minor(cashFromOrders))
+  const cashDeductions = input.cashDeductions ?? []
+  for (const deduction of cashDeductions) {
+    if (deduction <= 0n) {
+      throw new RangeError(`cash deductions must be positive magnitudes, got ${deduction}`)
+    }
+  }
+
+  const expectedCash = sub(add(input.floatTotal, minor(cashFromOrders)), sum(cashDeductions))
   const expectedWallet = add(input.topupTotal, minor(walletFromOrders))
   const expectedTotal = add(expectedCash, expectedWallet)
   const actualTotal = add(input.endCashDeclared, input.endWalletDeclared)
@@ -213,6 +228,14 @@ export function evaluateBr1(input: Br1Input): Br1Result {
 }
 
 /** Convenience: the BR1 right-hand side, for display next to the left-hand side. */
-export function expectedFromGates(floatTotal: Minor, topupTotal: Minor, blockTotal: Minor): Minor {
-  return add(add(floatTotal, topupTotal), blockTotal)
+export function expectedFromGates(
+  floatTotal: Minor,
+  topupTotal: Minor,
+  blockTotal: Minor,
+  cashDeductionTotal: Minor = minor(0n),
+): Minor {
+  if (cashDeductionTotal < 0n) {
+    throw new RangeError(`cash deduction total must be a positive magnitude, got ${cashDeductionTotal}`)
+  }
+  return sub(add(add(floatTotal, topupTotal), blockTotal), cashDeductionTotal)
 }

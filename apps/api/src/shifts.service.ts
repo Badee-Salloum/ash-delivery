@@ -4,16 +4,24 @@ import type {
   BatteryReadingRecord,
   BatteryRecord,
   BatterySwapRecord,
+  CashDeductionRecord,
+  OperationBatch,
   Deps,
   OrderPointRecord,
   DocumentRecord,
   ShiftOrderRecord,
+  ShiftCloseTransactionDeps,
   WalletMovementRecord,
   ShiftRecord,
   VehicleEventKind,
   VehicleEventRecord,
 } from '@ash/contracts'
-import { MAX_SHIFTS_PER_DAY, serializeMoney } from '@ash/contracts'
+import {
+  MAX_SHIFTS_PER_DAY,
+  classifyOperationWindow as classifyStoredOperationWindow,
+  includedByOperationWindow,
+  serializeMoney,
+} from '@ash/contracts'
 import {
   type Actor,
   type Br1Cause,
@@ -30,6 +38,7 @@ import {
   WALLET_LOG_FEEDS_BR1,
   add,
   businessDateFor,
+  bmsSlot,
   can,
   canOpenShift,
   closingBalances,
@@ -83,6 +92,7 @@ export class ServiceError extends Error {
 export function ordersHash(
   orders: readonly ShiftOrderRecord[],
   movements: readonly WalletMovementRecord[] = [],
+  deductions: readonly CashDeductionRecord[] = [],
 ): string {
   const orderPart = [...orders]
     .sort((a, b) => (a.providerOrderNo < b.providerOrderNo ? -1 : 1))
@@ -94,7 +104,8 @@ export function ordersHash(
     .map(
       (o) =>
         `${o.providerOrderNo}|${o.payMode}|${o.fee}|${o.kind}|${o.driverShare ?? ''}|${o.companyShare ?? ''}` +
-        `|${o.included ? 1 : 0}|${o.walletAmount ?? ''}`,
+        `|${o.included ? 1 : 0}|${o.walletAmount ?? ''}|${o.occurredDate ?? ''}|${o.occurredMinute ?? ''}` +
+        `|${o.windowStatus}|${o.decisionReason ?? ''}`,
     )
     .join(';')
   // The movements are hashed as well, because toggling one changes `walletAdjustments` — hence BR1,
@@ -104,7 +115,73 @@ export function ordersHash(
     .sort((a, b) => (a.id < b.id ? -1 : 1))
     .map((m) => `${m.occurredMinute}|${m.amount}|${m.seq}|${m.role}|${m.orderId ?? ''}|${m.included ? 1 : 0}`)
     .join(';')
-  return createHash('sha256').update(`${orderPart}#${movementPart}`).digest('hex').slice(0, 32)
+  const deductionPart = [...deductions]
+    .sort((a, b) => (a.operationKey < b.operationKey ? -1 : 1))
+    .map(
+      (d) =>
+        `${d.operationKey}|${d.amount}|${d.occurredDate ?? ''}|${d.occurredMinute ?? ''}` +
+        `|${d.windowStatus}|${d.included ? 1 : 0}|${d.decisionReason ?? ''}`,
+    )
+    .join(';')
+  return createHash('sha256').update(`${orderPart}#${movementPart}#${deductionPart}`).digest('hex').slice(0, 32)
+}
+
+/** Overlay only database repositories; clocks, crypto, blobs and notifications stay request-scoped. */
+const withCloseTransaction = (deps: Deps, transaction: ShiftCloseTransactionDeps): Deps => ({
+  ...deps,
+  ...transaction,
+})
+
+/** A local minute key that sorts lexicographically, derived in the branch's IANA timezone. */
+function localMinuteKey(instant: string | null, timeZone: string | undefined, offsetMinutes: number): string | null {
+  if (instant === null) return null
+  const epochMs = Date.parse(instant)
+  if (!Number.isFinite(epochMs)) return null
+  if (timeZone) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      }).formatToParts(epochMs)
+      const value = (type: Intl.DateTimeFormatPartTypes): string | undefined =>
+        parts.find((part) => part.type === type)?.value
+      const [year, month, day, hour, minute] = [value('year'), value('month'), value('day'), value('hour'), value('minute')]
+      if (year && month && day && hour && minute) return `${year}-${month}-${day} ${hour}:${minute}`
+    } catch {
+      // Invalid legacy timezone data falls back to the injected offset instead of losing rows.
+    }
+  }
+  const local = new Date(epochMs + offsetMinutes * 60_000)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${local.getUTCFullYear()}-${pad(local.getUTCMonth() + 1)}-${pad(local.getUTCDate())} ${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())}`
+}
+
+/**
+ * Classify one screenshot row against [manager-open, close-submission], inclusive at minute
+ * precision. Equality is called out for review but included because the source has no seconds.
+ */
+export const classifyOperationWindow = classifyStoredOperationWindow
+
+const includedByWindow = includedByOperationWindow
+
+async function operationWindowContext(deps: Deps, shift: ShiftRecord): Promise<{
+  openApprovedAt: string | null
+  submittedAt: string | null
+  timeZone?: string
+  offsetMinutes: number
+}> {
+  const branch = await deps.directory.branch(shift.branchId)
+  return {
+    openApprovedAt: shift.openApprovedAt,
+    submittedAt: shift.submittedAt,
+    ...(branch?.timezone ? { timeZone: branch.timezone } : {}),
+    offsetMinutes: deps.clock.offsetMinutes(),
+  }
 }
 
 /**
@@ -380,9 +457,15 @@ export async function createShift(
     endCashDeclared: null,
     endWalletDeclared: null,
     odoStartOcr: null,
+    odoEndOcr: null,
+    odoEndAnomalyConfirmedAt: null,
+    odoEndAnomalyConfirmedBy: null,
     batteryStartOcr: null,
     endWalletDeclaredOcr: null,
     driverConfirmedAt: null,
+    openApprovedAt: null,
+    openApprovedBy: null,
+    submittedAt: null,
     equationDiff: null,
     cashDiff: null,
     walletDiff: null,
@@ -390,7 +473,7 @@ export async function createShift(
     approvedBy: null,
   }
   try {
-    await deps.shifts.create(shift)
+    await deps.shifts.create(shift, actor.userId)
   } catch (err) {
     // Two starts racing on the same driver: `nextShiftNo` handed both the same number. A 409 tells
     // the app to try again; the 500 it used to be told the driver nothing at all.
@@ -412,12 +495,19 @@ export async function createShift(
  * yet, so there is no entry to reverse. Anything from `open` onward must be corrected by the
  * normal shift flow, never erased.
  */
-export async function cancelShift(deps: Deps, shiftId: string): Promise<ShiftRecord> {
+export async function cancelShift(deps: Deps, shiftId: string, actorId: string | null): Promise<ShiftRecord> {
+  return deps.closeUnitOfWork.run(
+    { shiftId, actorId },
+    async (transaction) => cancelShiftLocked(withCloseTransaction(deps, transaction), shiftId, actorId),
+  )
+}
+
+async function cancelShiftLocked(deps: Deps, shiftId: string, actorId: string | null): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
   if (shift.state !== 'draft' && shift.state !== 'awaiting_open_approval') {
     throw new ServiceError(409, 'shift_already_opened', { state: shift.state })
   }
-  await deps.shifts.delete(shift.id)
+  await deps.shifts.delete(shift.id, actorId)
   return shift
 }
 
@@ -436,19 +526,31 @@ async function batteryContext(
   pkg: 'start' | 'end',
 ): Promise<{ batterySlots: number; batteryReadings: BatteryReading[] }> {
   const fitted = await deps.directory.listBatteriesForVehicle(shift.vehicleId)
-  const rows = await deps.batteryReadings.listByShift(shift.id)
+  const [rows, attached] = await Promise.all([
+    deps.batteryReadings.listByShift(shift.id),
+    deps.media.listSlots(shift.id),
+  ])
   const forPackage = rows.filter((r) => r.package === pkg)
   return {
     batterySlots: fitted.length,
     batteryReadings: fitted.map((battery, i) => {
       const row = forPackage.find((r) => r.batteryId === battery.id)
+      const currentMediaId = attached.find(
+        (slot) => slot.package === pkg && slot.slot === bmsSlot(battery.slotNo ?? i + 1),
+      )?.mediaId ?? null
+      // A replacement photo invalidates the old machine reading until the new file has been read.
+      // The explicit "app unavailable" path is the exception: it intentionally has no driver image
+      // and waits for the manager's reading at the gate.
+      const evidenceMatches =
+        row?.unavailable === true ||
+        (row?.mediaId !== null && row?.mediaId !== undefined && row.mediaId === currentMediaId)
       return {
         slotNo: battery.slotNo ?? i + 1,
-        percent: row?.percent ?? null,
+        percent: evidenceMatches ? (row?.percent ?? null) : null,
         // The driver's «التطبيق لا يعمل على جهازي». Carried into the gate so it can tell a pack
         // nobody has done yet from one he has told us he CANNOT do — the first is his to close,
         // the second is the manager's.
-        unavailable: row?.unavailable === true,
+        unavailable: evidenceMatches && row?.unavailable === true,
       }
     }),
   }
@@ -456,20 +558,65 @@ async function batteryContext(
 
 // ── The OPEN gate (BR5) ───────────────────────────────────────────────────────────────────
 
+const EVIDENCE_STALE_MS = 30 * 60_000
+
+/** Stale or reused evidence is allowed only after an explicit driver acknowledgement. */
+async function unacknowledgedEvidenceWarnings(
+  deps: Deps,
+  shiftId: string,
+  pkg: 'start' | 'end',
+): Promise<string[]> {
+  const warnings: string[] = []
+  for (const slot of (await deps.media.listSlots(shiftId)).filter((s) => s.package === pkg)) {
+    if (slot.staleAcknowledgedAtMs !== null) continue
+    const media = await deps.media.findById(slot.mediaId)
+    const stale = media?.clientTakenAtMs != null && slot.attachedAtMs - media.clientTakenAtMs >= EVIDENCE_STALE_MS
+    if (stale || slot.reusedFromShiftId !== null) warnings.push(slot.slot)
+  }
+  return warnings
+}
+
+type SubmitStartPackageInput = {
+  odometerKm: number
+  batteryPercent: number | null
+  odometerKmOcr?: number | null
+  batteryPercentOcr?: number | null
+  /** The dashboard as the reader saw it — training material, never evidence. */
+  odometerStrip?: string | null
+}
+
 export async function submitStartPackage(
   deps: Deps,
   actor: Actor,
   shiftId: string,
-  input: {
-    odometerKm: number
-    batteryPercent: number | null
-    odometerKmOcr?: number | null
-    batteryPercentOcr?: number | null
-    /** The dashboard as the reader saw it — training material, never evidence. */
-    odometerStrip?: string | null
-  },
+  input: SubmitStartPackageInput,
+): Promise<ShiftRecord> {
+  const updated = await deps.closeUnitOfWork.run(
+    { shiftId, actorId: actor.userId },
+    async (transaction) =>
+      submitStartPackageLocked(withCloseTransaction(deps, transaction), actor, shiftId, input),
+  )
+  // Research samples and notifications are deliberately outside the transaction: they are
+  // best-effort side effects and must never make a committed state transition look failed.
+  await keepShiftOcrSample(deps, updated.id, 'start', 'odometer', input.odometerStrip, input.odometerKmOcr)
+  await notifyBranch(deps, updated, 'shift_awaiting_open_approval')
+  return updated
+}
+
+async function submitStartPackageLocked(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: SubmitStartPackageInput,
 ): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
+  const evidenceWarnings = await unacknowledgedEvidenceWarnings(deps, shiftId, 'start')
+  if (evidenceWarnings.length > 0) {
+    throw new ServiceError(422, 'stale_evidence_confirmation_required', {
+      package: 'start',
+      slots: evidenceWarnings,
+    })
+  }
   const draft: ShiftRecord = {
     ...shift,
     odoStart: input.odometerKm,
@@ -500,11 +647,7 @@ export async function submitStartPackage(
     state: result.next,
     driverConfirmedAt: new Date(deps.clock.nowMs()).toISOString(),
   }
-  await deps.shifts.update(updated)
-  // The dashboard as the reader saw it, beside what it made of it. The driver's confirmed odometer
-  // becomes the ground truth at export — joined from the shift, never copied here.
-  await keepShiftOcrSample(deps, updated.id, 'start', 'odometer', input.odometerStrip, input.odometerKmOcr)
-  await notifyBranch(deps, updated, 'shift_awaiting_open_approval')
+  await deps.shifts.update(updated, actor.userId)
   return updated
 }
 
@@ -537,13 +680,35 @@ async function notifyBranch(deps: Deps, shift: ShiftRecord, kind: string): Promi
 
 export { notifyBranch }
 
+type ApproveOpenInput = { floatTranches: Minor[]; topupTranches: Minor[]; carriedTranches?: Minor[] }
+
 export async function approveOpen(
   deps: Deps,
   actor: Actor,
   shiftId: string,
-  input: { floatTranches: Minor[]; topupTranches: Minor[]; carriedTranches?: Minor[] },
+  input: ApproveOpenInput,
+): Promise<ShiftRecord> {
+  return deps.closeUnitOfWork.run(
+    { shiftId, actorId: actor.userId },
+    async (transaction) => approveOpenLocked(withCloseTransaction(deps, transaction), actor, shiftId, input),
+  )
+}
+
+async function approveOpenLocked(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: ApproveOpenInput,
 ): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
+
+  const evidenceWarnings = await unacknowledgedEvidenceWarnings(deps, shiftId, 'start')
+  if (evidenceWarnings.length > 0) {
+    throw new ServiceError(422, 'stale_evidence_confirmation_required', {
+      package: 'start',
+      slots: evidenceWarnings,
+    })
+  }
 
   /*
    * ── «الذمة المرحّلة» — cash he ALREADY has, consumed here (owner decision c) ────────────────
@@ -610,8 +775,14 @@ export async function approveOpen(
     },
   )
 
-  const updated: ShiftRecord = { ...withFunds, state: result.next }
-  await deps.shifts.update(updated)
+  const openApprovedAt = new Date(deps.clock.nowMs()).toISOString()
+  const updated: ShiftRecord = {
+    ...withFunds,
+    state: result.next,
+    openApprovedAt,
+    openApprovedBy: actor.userId,
+  }
+  await deps.shifts.update(updated, actor.userId)
   await recordDecision(deps, actor, shiftId, 'open', 'approved', null)
   return updated
 }
@@ -655,14 +826,31 @@ async function notifyDriver(deps: Deps, shift: ShiftRecord, kind: string, notes:
  * The driver is told WHY, and the request is logged.
  */
 export async function requestRephoto(deps: Deps, actor: Actor, shiftId: string, notes: string | null): Promise<ShiftRecord> {
+  const updated = await deps.closeUnitOfWork.run(
+    { shiftId, actorId: actor.userId },
+    async (transaction) => requestRephotoLocked(withCloseTransaction(deps, transaction), actor, shiftId, notes),
+  )
+  await notifyDriver(deps, updated, 'shift_rephoto_requested', notes)
+  return updated
+}
+
+async function requestRephotoLocked(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  notes: string | null,
+): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
   const gate = shift.state === 'pending_review' ? 'close' : 'open'
   const result = await guard(deps, shift, 'manager_request_rephoto', actor)
   if (!result.ok) fail(result)
-  const updated: ShiftRecord = { ...shift, state: result.next }
-  await deps.shifts.update(updated)
+  const updated: ShiftRecord = {
+    ...shift,
+    state: result.next,
+    ...(gate === 'close' ? { submittedAt: null } : {}),
+  }
+  await deps.shifts.update(updated, actor.userId)
   await recordDecision(deps, actor, shiftId, gate, 'rephoto_requested', notes)
-  await notifyDriver(deps, updated, 'shift_rephoto_requested', notes)
   return updated
 }
 
@@ -676,25 +864,51 @@ export async function requestRephoto(deps: Deps, actor: Actor, shiftId: string, 
  * to reverse; the reason and the decision-log entry are the whole point.
  */
 export async function rejectOpen(deps: Deps, actor: Actor, shiftId: string, notes: string | null): Promise<ShiftRecord> {
+  const updated = await deps.closeUnitOfWork.run(
+    { shiftId, actorId: actor.userId },
+    async (transaction) => rejectOpenLocked(withCloseTransaction(deps, transaction), actor, shiftId, notes),
+  )
+  await notifyDriver(deps, updated, 'shift_open_rejected', notes)
+  return updated
+}
+
+async function rejectOpenLocked(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  notes: string | null,
+): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
   const result = await guard(deps, shift, 'manager_reject_open', actor)
   if (!result.ok) fail(result)
   const updated: ShiftRecord = { ...shift, state: result.next }
-  await deps.shifts.update(updated)
+  await deps.shifts.update(updated, actor.userId)
   await recordDecision(deps, actor, shiftId, 'open', 'rejected', notes)
-  await notifyDriver(deps, updated, 'shift_open_rejected', notes)
   return updated
 }
 
 /** The manager rejects a close: the shift returns to `open` so the driver can correct and resubmit. */
 export async function rejectClose(deps: Deps, actor: Actor, shiftId: string, notes: string | null): Promise<ShiftRecord> {
+  const updated = await deps.closeUnitOfWork.run(
+    { shiftId, actorId: actor.userId },
+    async (transaction) => rejectCloseLocked(withCloseTransaction(deps, transaction), actor, shiftId, notes),
+  )
+  await notifyDriver(deps, updated, 'shift_close_rejected', notes)
+  return updated
+}
+
+async function rejectCloseLocked(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  notes: string | null,
+): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
   const result = await guard(deps, shift, 'manager_reject_close', actor)
   if (!result.ok) fail(result)
-  const updated: ShiftRecord = { ...shift, state: result.next }
-  await deps.shifts.update(updated)
+  const updated: ShiftRecord = { ...shift, state: result.next, submittedAt: null }
+  await deps.shifts.update(updated, actor.userId)
   await recordDecision(deps, actor, shiftId, 'close', 'rejected', notes)
-  await notifyDriver(deps, updated, 'shift_close_rejected', notes)
   return updated
 }
 
@@ -707,22 +921,39 @@ export async function rejectClose(deps: Deps, actor: Actor, shiftId: string, not
  * draft/awaiting_open_approval/open/pending_review. `suspend` is a manager act (`shift.approve`).
  */
 export async function suspendShift(deps: Deps, actor: Actor, shiftId: string, notes: string | null): Promise<ShiftRecord> {
+  const updated = await deps.closeUnitOfWork.run(
+    { shiftId, actorId: actor.userId },
+    async (transaction) => suspendShiftLocked(withCloseTransaction(deps, transaction), actor, shiftId),
+  )
+  await notifyDriver(deps, updated, 'shift_suspended', notes)
+  return updated
+}
+
+async function suspendShiftLocked(deps: Deps, actor: Actor, shiftId: string): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
+  // Suspension is a mid-shift incident, never a shortcut from draft/approval/review into `open`.
+  if (shift.state !== 'open') throw new ServiceError(409, 'shift_not_operational', { state: shift.state })
   const result = await guard(deps, shift, 'suspend', actor)
   if (!result.ok) fail(result)
   const updated: ShiftRecord = { ...shift, state: result.next }
-  await deps.shifts.update(updated)
-  await notifyDriver(deps, updated, 'shift_suspended', notes)
+  await deps.shifts.update(updated, actor.userId)
   return updated
 }
 
 /** The driver resumes a suspended shift back to `open` when the incident clears (`shift.operate`). */
 export async function resumeShift(deps: Deps, actor: Actor, shiftId: string): Promise<ShiftRecord> {
+  return deps.closeUnitOfWork.run(
+    { shiftId, actorId: actor.userId },
+    async (transaction) => resumeShiftLocked(withCloseTransaction(deps, transaction), actor, shiftId),
+  )
+}
+
+async function resumeShiftLocked(deps: Deps, actor: Actor, shiftId: string): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
   const result = await guard(deps, shift, 'resume', actor)
   if (!result.ok) fail(result)
   const updated: ShiftRecord = { ...shift, state: result.next }
-  await deps.shifts.update(updated)
+  await deps.shifts.update(updated, actor.userId)
   return updated
 }
 
@@ -763,6 +994,18 @@ export async function addTranche(
   shiftId: string,
   input: { kind: 'float' | 'topup'; amount: Minor; occurrenceKey?: string | undefined },
 ): Promise<ShiftRecord> {
+  return deps.closeUnitOfWork.run(
+    { shiftId, actorId: actor.userId },
+    async (transaction) => addTrancheLocked(withCloseTransaction(deps, transaction), actor, shiftId, input),
+  )
+}
+
+async function addTrancheLocked(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: { kind: 'float' | 'topup'; amount: Minor; occurrenceKey?: string | undefined },
+): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
   // Money the driver is out with: only while he is live. Not before open, not after review.
   if (shift.state !== 'open' && shift.state !== 'suspended') {
@@ -796,7 +1039,7 @@ export async function addTranche(
     input.kind === 'float'
       ? { ...shift, floatTranches: [...shift.floatTranches, input.amount] }
       : { ...shift, topupTranches: [...shift.topupTranches, input.amount] }
-  await deps.shifts.update(updated)
+  await deps.shifts.update(updated, actor.userId)
   return updated
 }
 
@@ -813,6 +1056,18 @@ export async function addTranche(
  * takes it, or the `batteries_slot_uq (vehicle_id, slot_no)` index would reject the second write.
  */
 export async function swapBattery(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: Parameters<typeof swapBatteryLocked>[3],
+): Promise<{ swap: BatterySwapRecord; readings: BatteryReadingRecord[]; fitted: BatteryRecord[] }> {
+  return deps.closeUnitOfWork.run(
+    { shiftId, actorId: actor.userId },
+    async (transaction) => swapBatteryLocked(withCloseTransaction(deps, transaction), actor, shiftId, input),
+  )
+}
+
+async function swapBatteryLocked(
   deps: Deps,
   actor: Actor,
   shiftId: string,
@@ -899,7 +1154,61 @@ function swapReading(
 
 // ── Orders ────────────────────────────────────────────────────────────────────────────────
 
+type LegacyOrderWriteResult =
+  | ShiftOrderRecord
+  | (CashDeductionRecord & { providerOrderNo: string })
+
+const legacyDeductionKey = (providerOrderNo: string): string => `legacy:${providerOrderNo}`
+
+const providerNoFromLegacyDeductionKey = (operationKey: string): string | null => {
+  if (!operationKey.startsWith('legacy:')) return null
+  const providerOrderNo = operationKey.slice('legacy:'.length)
+  return providerOrderNo.length === 0 ? null : providerOrderNo
+}
+
+const hasOperationDecision = (row: { decidedBy: string | null; decidedAt: string | null }): boolean =>
+  row.decidedBy !== null || row.decidedAt !== null
+
+const hasAuthoritativeOrderKind = (order: ShiftOrderRecord): boolean =>
+  order.kind === 'manual' || hasOperationDecision(order)
+
+/**
+ * An order that changes sign stops being an order. Any wallet-log rows previously matched to it
+ * cannot keep a dangling financial role; retain them as excluded evidence for manager review.
+ */
+async function removeOrderForLegacyDeduction(
+  deps: Deps,
+  order: ShiftOrderRecord,
+  actorId: string,
+): Promise<void> {
+  for (const movement of await deps.movements.listByShift(order.shiftId)) {
+    if (movement.orderId !== order.id) continue
+    await deps.movements.update(
+      movement.id,
+      { role: 'unmatched', orderId: null, included: false, ambiguous: true },
+      actorId,
+    )
+  }
+  await deps.orders.delete(order.id, actorId)
+}
+
 export async function addOrder(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: Parameters<typeof addOrderLocked>[3],
+): Promise<LegacyOrderWriteResult> {
+  const written = await deps.closeUnitOfWork.run(
+    { shiftId, actorId: actor.userId },
+    async (transaction) => addOrderLocked(withCloseTransaction(deps, transaction), actor, shiftId, input),
+  )
+  // The strip is optional training material. Keep image decoding/storage outside the state lock,
+  // so a failed sample cannot delay or undo a committed order.
+  if (input.fee >= 0n && !('operationKey' in written)) await keepOcrSample(deps, written.id, input)
+  return written
+}
+
+async function addOrderLocked(
   deps: Deps,
   actor: Actor,
   shiftId: string,
@@ -910,13 +1219,13 @@ export async function addOrder(
     zone: string | null
     source?: 'manual' | 'ocr' | 'refused'
     feeOcr?: Minor | null
-  /** The fee's own pixels, kept as a training sample. Never money; never required. */
-  feeStrip?: string | null
+    /** The fee's own pixels, kept as a training sample. Never money; never required. */
+    feeStrip?: string | null
     included?: boolean
     walletAmount?: Minor | null
     occurredMinute?: string | null
   },
-): Promise<ShiftOrderRecord> {
+): Promise<LegacyOrderWriteResult> {
   const shift = await mustFind(deps, shiftId)
   if (shift.state !== 'open' && shift.state !== 'suspended') {
     throw new ServiceError(409, 'shift_not_open')
@@ -941,6 +1250,86 @@ export async function addOrder(
   })
   if (!allowed.ok && allowed.reason === 'forbidden') throw new ServiceError(403, 'forbidden')
 
+  const windowContext = await operationWindowContext(deps, shift)
+  const currentLocalMinute = localMinuteKey(
+    new Date(deps.clock.nowMs()).toISOString(),
+    windowContext.timeZone,
+    windowContext.offsetMinutes,
+  )!
+  const occurredMinute = input.occurredMinute ?? currentLocalMinute.slice(-5)
+  const occurredDate = currentLocalMinute.slice(0, 10) as CalendarDate
+  const windowStatus = classifyOperationWindow({ occurredDate, occurredMinute, ...windowContext })
+
+  const operationKey = legacyDeductionKey(input.providerOrderNo)
+  const [existingOrder, existingDeduction] = await Promise.all([
+    deps.orders.listByShift(shiftId).then((rows) => rows.find((row) => row.providerOrderNo === input.providerOrderNo) ?? null),
+    deps.cashDeductions.findByOperationKey(shiftId, operationKey),
+  ])
+  if (
+    existingOrder &&
+    existingDeduction &&
+    hasAuthoritativeOrderKind(existingOrder) &&
+    hasOperationDecision(existingDeduction)
+  ) {
+    throw new ServiceError(409, 'operation_kind_conflict_requires_manager', {
+      providerOrderNo: input.providerOrderNo,
+    })
+  }
+
+  if (input.fee < 0n) {
+    // A manager-reviewed order is authoritative over a stale cached negative scan. Clean up only
+    // an undecided duplicate deduction; never delete or rewrite the manager's decision.
+    if (existingOrder && hasAuthoritativeOrderKind(existingOrder)) {
+      if (existingDeduction) await deps.cashDeductions.delete(existingDeduction.id, actor.userId)
+      return existingOrder
+    }
+    if (existingOrder) await removeOrderForLegacyDeduction(deps, existingOrder, actor.userId)
+
+    const current = existingDeduction
+    // A cached legacy client cannot undo a manager's attributed amount/window decision.
+    if (current && hasOperationDecision(current)) {
+      return { ...current, providerOrderNo: input.providerOrderNo }
+    }
+    const deduction: CashDeductionRecord = {
+      id: current?.id ?? deps.ids.uuid(),
+      shiftId,
+      operationKey,
+      amount: minor(-input.fee),
+      // The first persisted printed time is evidence. A cached driver retry may enrich amount/OCR
+      // fields, but correcting which minute/day the operation belongs to is a manager decision.
+      occurredDate: current ? current.occurredDate : existingOrder ? existingOrder.occurredDate : occurredDate,
+      occurredMinute: current ? current.occurredMinute : existingOrder ? existingOrder.occurredMinute : occurredMinute,
+      source: storedSource(input.source),
+      amountOcr: input.feeOcr === null || input.feeOcr === undefined
+        ? null
+        : minor(input.feeOcr < 0n ? -input.feeOcr : input.feeOcr),
+      pointA: null,
+      pointB: null,
+      included: current?.included ?? existingOrder?.included ?? includedByWindow(windowStatus),
+      windowStatus: current?.windowStatus ?? existingOrder?.windowStatus ?? windowStatus,
+      decisionReason: current?.decisionReason ?? null,
+      decidedBy: current?.decidedBy ?? null,
+      decidedAt: current?.decidedAt ?? null,
+      createdBy: current ? current.createdBy : existingOrder ? existingOrder.createdBy : actor.userId,
+    }
+    if (current) await deps.cashDeductions.update(deduction, actor.userId)
+    else await deps.cashDeductions.create(deduction, actor.userId)
+    return { ...deduction, providerOrderNo: input.providerOrderNo }
+  }
+
+  // The inverse sign correction is equally exclusive. A reviewed deduction wins over a cached
+  // positive row; an undecided deduction is removed in the same shift transaction as the order.
+  if (existingDeduction && hasOperationDecision(existingDeduction)) {
+    if (existingOrder) await removeOrderForLegacyDeduction(deps, existingOrder, actor.userId)
+    return { ...existingDeduction, providerOrderNo: input.providerOrderNo }
+  }
+  if (existingDeduction) {
+    await deps.cashDeductions.delete(existingDeduction.id, actor.userId)
+    // Heal an historical double without turning an otherwise idempotent sign correction into a
+    // duplicate-order error. Ordinary same-kind duplicate POSTs retain their old 409 behaviour.
+    if (existingOrder) return existingOrder
+  }
+
   const order: ShiftOrderRecord = {
     id: deps.ids.uuid(),
     shiftId,
@@ -959,15 +1348,19 @@ export async function addOrder(
     driverShare: null,
     companyShare: null,
     notes: null,
-    createdBy: actor.userId,
+    createdBy: existingDeduction ? existingDeduction.createdBy : actor.userId,
     points: [],
-    included: input.included ?? true,
+    included: existingDeduction?.included ?? includedByWindow(windowStatus),
     walletAmount: input.walletAmount ?? null,
-    occurredMinute: input.occurredMinute ?? null,
-    occurredDate: null,
+    occurredMinute: existingDeduction ? existingDeduction.occurredMinute : occurredMinute,
+    occurredDate: existingDeduction ? existingDeduction.occurredDate : occurredDate,
+    windowStatus: existingDeduction?.windowStatus ?? windowStatus,
+    decisionReason: null,
+    decidedBy: null,
+    decidedAt: null,
   }
   try {
-    await deps.orders.create(order)
+    await deps.orders.create(order, actor.userId)
   } catch (err) {
     if ((err as { code?: string }).code === 'DUPLICATE_ORDER_NO') {
       // Catching this as it is typed is the point: Yallago's order number is the reconciliation
@@ -976,7 +1369,6 @@ export async function addOrder(
     }
     throw err
   }
-  await keepOcrSample(deps, order.id, input)
   return order
 }
 
@@ -989,6 +1381,18 @@ export async function addOrder(
  * audits every manual add (who/when), since it moves money into BR1.
  */
 export async function addManualOrder(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: Parameters<typeof addManualOrderLocked>[3],
+): Promise<ShiftOrderRecord> {
+  return deps.closeUnitOfWork.run(
+    { shiftId, actorId: actor.userId },
+    async (transaction) => addManualOrderLocked(withCloseTransaction(deps, transaction), actor, shiftId, input),
+  )
+}
+
+async function addManualOrderLocked(
   deps: Deps,
   actor: Actor,
   shiftId: string,
@@ -1058,9 +1462,13 @@ export async function addManualOrder(
     walletAmount: input.walletAmount ?? null,
     occurredMinute: input.occurredMinute ?? null,
     occurredDate: null,
+    windowStatus: 'in_window',
+    decisionReason: 'manager_manual_entry',
+    decidedBy: actor.userId,
+    decidedAt: new Date(deps.clock.nowMs()).toISOString(),
   }
   try {
-    await deps.orders.create(order)
+    await deps.orders.create(order, actor.userId)
   } catch (err) {
     if ((err as { code?: string }).code === 'DUPLICATE_ORDER_NO') {
       throw new ServiceError(409, 'duplicate_order_no', { providerOrderNo: input.providerOrderNo })
@@ -1082,13 +1490,16 @@ export interface Br1View {
   causes: Br1Cause[]
   minWallet: Minor
   ordersHash: string
+  cashDeductionTotal: Minor
 }
 
 export async function evaluateShift(deps: Deps, shift: ShiftRecord): Promise<Br1View> {
   const orderRows = await deps.orders.listByShift(shift.id)
   const movementRows = await deps.movements.listByShift(shift.id)
+  const deductionRows = await deps.cashDeductions.listByShift(shift.id)
   const orders = toDomainOrders(orderRows)
   const walletAdjustments = toWalletAdjustments(movementRows)
+  const cashDeductions = deductionRows.filter((d) => d.included).map((d) => d.amount)
   const result = evaluateBr1({
     // A carried ذمة is cash he was ALREADY holding at open, so it is part of the float for the
     // equation exactly as it is for `closingBalances`. These two sums must never drift — the
@@ -1099,6 +1510,7 @@ export async function evaluateShift(deps: Deps, shift: ShiftRecord): Promise<Br1
     endWalletDeclared: shift.endWalletDeclared ?? minor(0n),
     orders,
     walletAdjustments,
+    cashDeductions,
   })
   return {
     result,
@@ -1119,37 +1531,134 @@ export async function evaluateShift(deps: Deps, shift: ShiftRecord): Promise<Br1
       topupTranches: shift.topupTranches,
       orders,
     }),
-    ordersHash: ordersHash(orderRows, movementRows),
+    ordersHash: ordersHash(orderRows, movementRows, deductionRows),
+    cashDeductionTotal: sum(cashDeductions),
   }
 }
 
 // ── The CLOSE gate (BR5) ──────────────────────────────────────────────────────────────────
 
+/** Recompute every OCR-derived operation when either edge of the window becomes known. */
+async function reclassifyShiftOperations(deps: Deps, shift: ShiftRecord, actorId: string): Promise<void> {
+  await deps.operationWindows.reclassify(shift.id, actorId)
+}
+
+/**
+ * DB-first rollout healing: an old API can submit the close after 0028 has stamped submittedAt but
+ * before it knows how to classify operation rows. The first new manager review repairs every
+ * deterministic row inside the same locked snapshot. Illegible dates/minutes remain unknown.
+ */
+export async function prepareShiftReview(deps: Deps, shift: ShiftRecord, actorId: string): Promise<void> {
+  if (shift.state !== 'pending_review' || shift.submittedAt === null) return
+  await reclassifyShiftOperations(deps, shift, actorId)
+}
+
+async function unresolvedWindowRows(deps: Deps, shiftId: string): Promise<{ orders: string[]; deductions: string[] }> {
+  const [orders, deductions] = await Promise.all([
+    deps.orders.listByShift(shiftId),
+    deps.cashDeductions.listByShift(shiftId),
+  ])
+  return {
+    orders: orders
+      // A value-only manager correction also versions the row with `decidedBy/decidedAt`, so that
+      // a cached driver submission cannot put the old money back. That is NOT a decision about an
+      // unreadable timestamp. Only an attributed decision carrying the required reason resolves an
+      // unknown operation window.
+      .filter(
+        (o) =>
+          o.kind !== 'manual' &&
+          o.windowStatus === 'unknown' &&
+          (o.decidedBy === null || !o.decisionReason?.trim()),
+      )
+      .map((o) => o.providerOrderNo),
+    deductions: deductions
+      .filter((d) => d.windowStatus === 'unknown' && (d.decidedBy === null || !d.decisionReason?.trim()))
+      .map((d) => d.id),
+  }
+}
+
+interface EndPackageInput {
+  odometerKm: number
+  batteryPercent: number | null
+  cashDeclared: Minor
+  walletDeclared: Minor
+  odometerKmOcr?: number | null
+  odometerAnomalyConfirmed?: boolean
+  walletDeclaredOcr?: Minor | null
+  odometerStrip?: string | null
+  walletStrip?: string | null
+}
+
 export async function submitEndPackage(
   deps: Deps,
   actor: Actor,
   shiftId: string,
-  input: {
-    odometerKm: number
-    batteryPercent: number | null
-    cashDeclared: Minor
-    walletDeclared: Minor
-    walletDeclaredOcr?: Minor | null
-    odometerStrip?: string | null
-    walletStrip?: string | null
-  },
+  input: EndPackageInput,
+): Promise<{ shift: ShiftRecord; br1: Br1View }> {
+  const committed = await deps.closeUnitOfWork.run(
+    { shiftId, actorId: actor.userId },
+    async (transaction) => submitEndPackageLocked(withCloseTransaction(deps, transaction), actor, shiftId, input),
+  )
+
+  // Research samples and notifications are deliberately outside the money/state transaction. A
+  // slow optional path must not hold the shift row, and both operations are safe to retry.
+  await keepShiftOcrSample(deps, committed.shift.id, 'end', 'odometer', input.odometerStrip, input.odometerKmOcr)
+  await keepShiftOcrSample(
+    deps,
+    committed.shift.id,
+    'end',
+    'wallet',
+    input.walletStrip,
+    input.walletDeclaredOcr === null || input.walletDeclaredOcr === undefined ? null : String(input.walletDeclaredOcr),
+  )
+  await notifyBranch(deps, committed.shift, 'shift_awaiting_close_approval')
+  return committed
+}
+
+async function submitEndPackageLocked(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: EndPackageInput,
 ): Promise<{ shift: ShiftRecord; br1: Br1View }> {
   const shift = await mustFind(deps, shiftId)
   const orderRows = await deps.orders.listByShift(shiftId)
 
+  const evidenceWarnings = await unacknowledgedEvidenceWarnings(deps, shiftId, 'end')
+  if (evidenceWarnings.length > 0) {
+    throw new ServiceError(422, 'stale_evidence_confirmation_required', {
+      package: 'end',
+      slots: evidenceWarnings,
+    })
+  }
+
+  if (shift.odoStart !== null && input.odometerKm < shift.odoStart && !input.odometerAnomalyConfirmed) {
+    throw new ServiceError(422, 'odometer_anomaly_confirmation_required', {
+      start: shift.odoStart,
+      end: input.odometerKm,
+    })
+  }
+
+  const submittedAt = new Date(deps.clock.nowMs()).toISOString()
+
   const staged: ShiftRecord = {
     ...shift,
     odoEnd: input.odometerKm,
+    odoEndOcr: input.odometerKmOcr ?? null,
+    odoEndAnomalyConfirmedAt:
+      shift.odoStart !== null && input.odometerKm < shift.odoStart && input.odometerAnomalyConfirmed
+        ? submittedAt
+        : null,
+    odoEndAnomalyConfirmedBy:
+      shift.odoStart !== null && input.odometerKm < shift.odoStart && input.odometerAnomalyConfirmed
+        ? actor.userId
+        : null,
     batteryEnd: input.batteryPercent,
     endCashDeclared: input.cashDeclared,
     endWalletDeclared: input.walletDeclared,
     // SRS D-3: the wallet OCR baseline (readWallet); evidence, not a BR1 input.
     endWalletDeclaredOcr: input.walletDeclaredOcr ?? null,
+    submittedAt,
     // mediaSlotsEnd likewise comes from uploaded evidence, not from the request.
   }
 
@@ -1167,29 +1676,23 @@ export async function submitEndPackage(
   })
   if (!result.ok) fail(result)
 
-  const br1 = await evaluateShift(deps, staged)
+  // Claim the close boundary BEFORE reading/classifying operations. PgOperationBatchRepo locks the
+  // same shift row and accepts only open/suspended rows with no submittedAt, so concurrent paths
+  // serialize: a batch that wins is visible below; a batch that loses is rejected as too late.
+  const claimed: ShiftRecord = { ...staged, state: result.next }
+  await deps.shifts.update(claimed, actor.userId)
+  await reclassifyShiftOperations(deps, claimed, actor.userId)
+  const br1 = await evaluateShift(deps, claimed)
   const updated: ShiftRecord = {
-    ...staged,
-    state: result.next,
+    ...claimed,
     equationDiff: br1.result.scalarDiff,
     cashDiff: br1.result.cashDiff,
     walletDiff: br1.result.walletDiff,
     ordersHash: br1.ordersHash,
   }
-  await deps.shifts.update(updated)
+  await deps.shifts.update(updated, actor.userId)
   // Both closing readers, with what each made of the picture it was handed. The driver's confirmed
   // figures become the ground truth at export — joined from the shift, never copied here.
-  await keepShiftOcrSample(deps, updated.id, 'end', 'odometer', input.odometerStrip, input.odometerKm)
-  await keepShiftOcrSample(
-    deps,
-    updated.id,
-    'end',
-    'wallet',
-    input.walletStrip,
-    // `Minor` is a bigint; the keeper only asks whether the reader produced anything at all.
-    input.walletDeclaredOcr === null || input.walletDeclaredOcr === undefined ? null : String(input.walletDeclaredOcr),
-  )
-  await notifyBranch(deps, updated, 'shift_awaiting_close_approval')
   return { shift: updated, br1 }
 }
 
@@ -1210,7 +1713,24 @@ export async function reviseCloseFigures(
   deps: Deps,
   actor: Actor,
   shiftId: string,
-  input: { odometerKm?: number | null; cashDeclared?: Minor | null; walletDeclared?: Minor | null },
+  input: Parameters<typeof reviseCloseFiguresLocked>[3],
+): Promise<{ shift: ShiftRecord; br1: Br1View; before: ShiftRecord }> {
+  return deps.closeUnitOfWork.run(
+    { shiftId, actorId: actor.userId },
+    async (transaction) => reviseCloseFiguresLocked(withCloseTransaction(deps, transaction), actor, shiftId, input),
+  )
+}
+
+async function reviseCloseFiguresLocked(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: {
+    odometerKm?: number | null
+    odometerAnomalyConfirmed?: boolean
+    cashDeclared?: Minor | null
+    walletDeclared?: Minor | null
+  },
 ): Promise<{ shift: ShiftRecord; br1: Br1View; before: ShiftRecord }> {
   const shift = await mustFind(deps, shiftId)
   if (shift.state !== 'pending_review') throw new ServiceError(409, 'shift_not_under_review')
@@ -1226,9 +1746,25 @@ export async function reviseCloseFigures(
   )
   if (!decision.allowed) throw new ServiceError(403, 'forbidden')
 
+  const changesOdometer = input.odometerKm !== undefined && input.odometerKm !== null
+  const anomalousOdometer = changesOdometer && shift.odoStart !== null && input.odometerKm! < shift.odoStart
+  if (anomalousOdometer && !input.odometerAnomalyConfirmed) {
+    throw new ServiceError(422, 'odometer_anomaly_confirmation_required', {
+      start: shift.odoStart,
+      end: input.odometerKm,
+    })
+  }
+  const anomalyConfirmedAt = new Date(deps.clock.nowMs()).toISOString()
+
   const staged: ShiftRecord = {
     ...shift,
     ...(input.odometerKm === undefined || input.odometerKm === null ? {} : { odoEnd: input.odometerKm }),
+    ...(changesOdometer
+      ? {
+          odoEndAnomalyConfirmedAt: anomalousOdometer ? anomalyConfirmedAt : null,
+          odoEndAnomalyConfirmedBy: anomalousOdometer ? actor.userId : null,
+        }
+      : {}),
     ...(input.cashDeclared === undefined || input.cashDeclared === null ? {} : { endCashDeclared: input.cashDeclared }),
     ...(input.walletDeclared === undefined || input.walletDeclared === null
       ? {}
@@ -1242,7 +1778,7 @@ export async function reviseCloseFigures(
     walletDiff: br1.result.walletDiff,
     ordersHash: br1.ordersHash,
   }
-  await deps.shifts.update(updated)
+  await deps.shifts.update(updated, actor.userId)
   return { shift: updated, br1, before: shift }
 }
 
@@ -1262,6 +1798,17 @@ export interface OperationsInput {
     walletAmount?: Minor | null
     occurredMinute?: string | null
     occurredDate?: string | null
+    pointA?: string | null
+    pointB?: string | null
+  }[]
+  cashDeductions?: readonly {
+    operationKey: string
+    amount: Minor
+    occurredMinute?: string | null
+    occurredDate?: string | null
+    source?: 'manual' | 'ocr' | 'refused'
+    amountOcr?: Minor | null
+    amountStrip?: string | null
     pointA?: string | null
     pointB?: string | null
   }[]
@@ -1384,51 +1931,167 @@ export async function submitOperations(
     grants,
   )
   if (!decision.allowed) throw new ServiceError(403, 'forbidden')
+  const windowContext = await operationWindowContext(deps, shift)
 
-  const existing = await deps.orders.listByShift(shiftId)
+  // Old cached PWAs sent a negative Recent-Orders row as an order fee. Preserve that client, but
+  // never let the signed fee reach the orders table or the tier/Yallago arithmetic.
+  const legacyDeductions = input.orders
+    .filter((row) => row.fee < 0n)
+    .map((row) => ({
+      operationKey: legacyDeductionKey(row.providerOrderNo),
+      amount: minor(-row.fee),
+      occurredMinute: row.occurredMinute ?? null,
+      occurredDate: row.occurredDate ?? null,
+      source: row.source,
+      amountOcr: row.feeOcr === null || row.feeOcr === undefined
+        ? null
+        : minor(row.feeOcr < 0n ? -row.feeOcr : row.feeOcr),
+      amountStrip: row.feeStrip ?? null,
+      pointA: row.pointA ?? null,
+      pointB: row.pointB ?? null,
+    }))
+  const submittedDeductions = [...(input.cashDeductions ?? []), ...legacyDeductions]
+  const submittedOrders = input.orders.filter((row) => row.fee >= 0n)
+
+  const [existing, existingDeductionRows] = await Promise.all([
+    deps.orders.listByShift(shiftId),
+    deps.cashDeductions.listByShift(shiftId),
+  ])
   const byNo = new Map(existing.map((o) => [o.providerOrderNo, o]))
+  const deductionsByKey = new Map(existingDeductionRows.map((row) => [row.operationKey, row]))
 
-  for (const row of input.orders) {
-    const current = byNo.get(row.providerOrderNo)
-    if (current) {
-      await deps.orders.update({
-        ...current,
-        payMode: row.payMode,
-        fee: row.fee,
-        zone: row.zone ?? current.zone,
-        source: row.source === undefined ? current.source : storedSource(row.source),
-        feeOcr: row.feeOcr ?? current.feeOcr,
-        included: row.included ?? current.included,
-        walletAmount: row.walletAmount ?? null,
-        occurredMinute: row.occurredMinute ?? current.occurredMinute,
-        occurredDate: row.occurredDate ?? current.occurredDate,
+  const seenOrderNos = new Set<string>()
+  for (const row of submittedOrders) {
+    if (seenOrderNos.has(row.providerOrderNo)) {
+      throw new ServiceError(422, 'duplicate_order_in_submission', { providerOrderNo: row.providerOrderNo })
+    }
+    seenOrderNos.add(row.providerOrderNo)
+  }
+  const seenDeductionKeys = new Set<string>()
+  for (const row of submittedDeductions) {
+    if (row.amount <= 0n) throw new ServiceError(422, 'cash_deduction_must_be_positive')
+    if (seenDeductionKeys.has(row.operationKey)) {
+      throw new ServiceError(422, 'duplicate_cash_deduction_in_submission', { operationKey: row.operationKey })
+    }
+    const legacyProviderOrderNo = providerNoFromLegacyDeductionKey(row.operationKey)
+    if (legacyProviderOrderNo !== null && seenOrderNos.has(legacyProviderOrderNo)) {
+      throw new ServiceError(422, 'duplicate_operation_kind_in_submission', {
+        providerOrderNo: legacyProviderOrderNo,
       })
+    }
+    seenDeductionKeys.add(row.operationKey)
+  }
+
+  // Validate every cross-shift identity before the first mutation, so one bad row cannot leave the
+  // earlier rows from the same payload committed.
+  for (const row of submittedOrders) {
+    if (byNo.has(row.providerOrderNo)) continue
+    const elsewhere = await deps.orders.findByProviderNo(row.providerOrderNo)
+    if (!elsewhere) continue
+    const owner = await deps.shifts.findById(elsewhere.shiftId)
+    throw new ServiceError(409, 'order_belongs_to_other_shift', {
+      providerOrderNo: row.providerOrderNo,
+      shiftId: elsewhere.shiftId,
+      businessDate: owner?.businessDate ?? null,
+    })
+  }
+  const orderCreates: ShiftOrderRecord[] = []
+  const orderUpdates: Array<OperationBatch['orderUpdates'][number]> = []
+  const orderPointReplacements: Array<OperationBatch['orderPointReplacements'][number]> = []
+  const cashDeductionCreates: CashDeductionRecord[] = []
+  const cashDeductionUpdates: Array<OperationBatch['cashDeductionUpdates'][number]> = []
+  const legacyKindTransitions: Array<NonNullable<OperationBatch['legacyKindTransitions']>[number]> = []
+  const transitionTargets = new Map<string, 'order' | 'cash_deduction'>()
+  const scheduleLegacyKind = (
+    providerOrderNo: string,
+    targetKind: 'order' | 'cash_deduction',
+    opposite: Pick<ShiftOrderRecord | CashDeductionRecord, 'id' | 'decidedAt'> | null | undefined,
+  ): void => {
+    const prior = transitionTargets.get(providerOrderNo)
+    if (prior !== undefined && prior !== targetKind) {
+      throw new ServiceError(422, 'duplicate_operation_kind_in_submission', { providerOrderNo })
+    }
+    if (prior === undefined) {
+      transitionTargets.set(providerOrderNo, targetKind)
+      legacyKindTransitions.push({
+        providerOrderNo,
+        targetKind,
+        expectedOppositeId: opposite?.id ?? null,
+        expectedOppositeDecidedAt: opposite?.decidedAt ?? null,
+      })
+    }
+  }
+  const ocrSamples: Array<{ orderId: string; row: OperationsInput['orders'][number] }> = []
+  const saved = new Map(existing.map((order) => [order.providerOrderNo, order.id]))
+
+  for (const row of submittedOrders) {
+    const windowStatus = classifyOperationWindow({
+      occurredDate: row.occurredDate ?? null,
+      occurredMinute: row.occurredMinute ?? null,
+      ...windowContext,
+    })
+    const current = byNo.get(row.providerOrderNo)
+    const opposite = deductionsByKey.get(legacyDeductionKey(row.providerOrderNo))
+    if (opposite && hasOperationDecision(opposite)) {
+      if (current && hasAuthoritativeOrderKind(current)) {
+        throw new ServiceError(409, 'operation_kind_conflict_requires_manager', {
+          providerOrderNo: row.providerOrderNo,
+        })
+      }
+      // The cached row changed sign after a manager reviewed the deduction. Preserve that decision
+      // and let the transition remove only an undecided duplicate order, if one exists.
+      scheduleLegacyKind(row.providerOrderNo, 'cash_deduction', current)
+      saved.delete(row.providerOrderNo)
+      continue
+    }
+    scheduleLegacyKind(row.providerOrderNo, 'order', opposite)
+    if (current) {
+      const managerDecided = hasOperationDecision(current)
+      const record: ShiftOrderRecord = {
+        ...current,
+        // Once a manager has reviewed a row, the cached driver copy is no longer authoritative for
+        // any of its accounting/evidence fields. Rephoto and reject deliberately reopen the shift,
+        // so an older PWA will send the whole page again; accepting even one of these values would
+        // silently undo the manager's audited correction while retaining the manager's name.
+        payMode: managerDecided ? current.payMode : row.payMode,
+        fee: managerDecided ? current.fee : row.fee,
+        zone: managerDecided ? current.zone : (row.zone ?? current.zone),
+        source: managerDecided
+          ? current.source
+          : row.source === undefined
+            ? current.source
+            : storedSource(row.source),
+        feeOcr: managerDecided ? current.feeOcr : (row.feeOcr ?? current.feeOcr),
+        // Persisted time and classification are evidence, not fields a cached driver retry can
+        // revise. The deterministic close/review classifier may refresh the status; only a manager
+        // with a reason may correct the printed date/minute or resulting inclusion.
+        included: current.included,
+        walletAmount: managerDecided ? current.walletAmount : (row.walletAmount ?? null),
+        occurredMinute: current.occurredMinute,
+        occurredDate: current.occurredDate,
+        windowStatus: current.windowStatus,
+      }
+      orderUpdates.push({ record, expectedDecidedAt: current.decidedAt })
       // BACKFILL the route, never overwrite it. An order submitted before the reader could read
       // routes has none stored, and re-submitting the shift is the only chance it will ever get
       // one; but a route already on the record may have been corrected by a manager, and a
       // re-read screenshot must not undo that.
-      if ((row.pointA || row.pointB) && current.points.length === 0) {
-        await deps.orders.replacePoints(current.id, [
-          ...(row.pointA ? [{ role: 'start' as const, label: row.pointA, lat: null, lng: null }] : []),
-          ...(row.pointB ? [{ role: 'end' as const, label: row.pointB, lat: null, lng: null }] : []),
-        ])
+      if (!managerDecided && (row.pointA || row.pointB) && current.points.length === 0) {
+        orderPointReplacements.push({
+          orderId: current.id,
+          points: [
+            ...(row.pointA ? [{ role: 'start' as const, label: row.pointA, lat: null, lng: null }] : []),
+            ...(row.pointB ? [{ role: 'end' as const, label: row.pointB, lat: null, lng: null }] : []),
+          ],
+        })
       }
       continue
     }
     // The dashboard list scrolls back through PREVIOUS DAYS, so reading further pulls in orders
     // already recorded on an earlier shift. That must say which shift owns it — «هذا الطلب مسجّل في
     // نوبة سابقة» — rather than the blanket "some orders could not be saved" it used to produce.
-    const elsewhere = await deps.orders.findByProviderNo(row.providerOrderNo)
-    if (elsewhere) {
-      const owner = await deps.shifts.findById(elsewhere.shiftId)
-      throw new ServiceError(409, 'order_belongs_to_other_shift', {
-        providerOrderNo: row.providerOrderNo,
-        shiftId: elsewhere.shiftId,
-        businessDate: owner?.businessDate ?? null,
-      })
-    }
     const orderId = deps.ids.uuid()
-    await deps.orders.create({
+    const record: ShiftOrderRecord = {
       id: orderId,
       shiftId,
       providerOrderNo: row.providerOrderNo,
@@ -1444,38 +2107,151 @@ export async function submitOperations(
       driverShare: null,
       companyShare: null,
       notes: null,
-      createdBy: actor.userId,
+      createdBy: opposite ? opposite.createdBy : actor.userId,
       // «A» the pickup, «B» the dropoff, exactly as the screen wrote them. The route is what makes
       // an order recognisable to a person at the review — it has no order number to go by.
       points: [
         ...(row.pointA ? [{ role: 'start' as const, label: row.pointA, lat: null, lng: null }] : []),
         ...(row.pointB ? [{ role: 'end' as const, label: row.pointB, lat: null, lng: null }] : []),
       ],
-      included: row.included ?? true,
+      included: opposite?.included ?? includedByWindow(windowStatus),
       walletAmount: row.walletAmount ?? null,
-      occurredMinute: row.occurredMinute ?? null,
-      occurredDate: row.occurredDate ?? null,
-    })
-    await keepOcrSample(deps, orderId, row)
+      occurredMinute: opposite ? opposite.occurredMinute : (row.occurredMinute ?? null),
+      occurredDate: opposite ? opposite.occurredDate : (row.occurredDate ?? null),
+      windowStatus: opposite?.windowStatus ?? windowStatus,
+      decisionReason: null,
+      decidedBy: null,
+      decidedAt: null,
+    }
+    orderCreates.push(record)
+    saved.set(row.providerOrderNo, orderId)
+    ocrSamples.push({ orderId, row })
   }
 
-  // Resolve each movement's order AFTER the orders exist, so a page submitted in one go can link
-  // its rows to orders created by the same call.
-  const saved = new Map((await deps.orders.listByShift(shiftId)).map((o) => [o.providerOrderNo, o.id]))
-  await deps.movements.merge(
-    shiftId,
-    input.movements.map((m) => ({
-      amount: m.amount,
-      occurredMinute: m.occurredMinute,
-      orderId: m.providerOrderNo ? (saved.get(m.providerOrderNo) ?? null) : null,
-      role: m.role ?? 'unmatched',
-      ambiguous: m.ambiguous ?? false,
-      included: m.included ?? true,
-      source: 'ocr' as const,
-      notes: m.notes ?? null,
-      createdBy: actor.userId,
-    })),
-  )
+  for (const row of submittedDeductions) {
+    const current = deductionsByKey.get(row.operationKey)
+    const legacyProviderOrderNo = providerNoFromLegacyDeductionKey(row.operationKey)
+    const opposite = legacyProviderOrderNo === null ? undefined : byNo.get(legacyProviderOrderNo)
+    if (legacyProviderOrderNo !== null) {
+      if (opposite && hasAuthoritativeOrderKind(opposite)) {
+        if (current && hasOperationDecision(current)) {
+          throw new ServiceError(409, 'operation_kind_conflict_requires_manager', {
+            providerOrderNo: legacyProviderOrderNo,
+          })
+        }
+        // A reviewed order wins over a stale negative retry. The repository still receives the
+        // target so it can atomically remove an undecided duplicate deduction that appeared earlier.
+        scheduleLegacyKind(legacyProviderOrderNo, 'order', current)
+        continue
+      }
+      scheduleLegacyKind(legacyProviderOrderNo, 'cash_deduction', opposite)
+      saved.delete(legacyProviderOrderNo)
+    }
+    // A manager's reviewed classification is authoritative. A cached driver PWA may re-send the
+    // same OCR page after a re-photo request; it must not overwrite that decision or misattribute
+    // the write to the manager stored on the row.
+    if (current && hasOperationDecision(current)) continue
+    const occurredDate = current
+      ? current.occurredDate
+      : opposite
+        ? opposite.occurredDate
+        : (row.occurredDate ?? null)
+    const occurredMinute = current
+      ? current.occurredMinute
+      : opposite
+        ? opposite.occurredMinute
+        : (row.occurredMinute ?? null)
+    const windowStatus = current?.windowStatus ?? opposite?.windowStatus ?? classifyOperationWindow({
+      occurredDate,
+      occurredMinute,
+      ...windowContext,
+    })
+    const record: CashDeductionRecord = {
+      id: current?.id ?? deps.ids.uuid(),
+      shiftId,
+      operationKey: row.operationKey,
+      amount: row.amount,
+      occurredDate,
+      occurredMinute,
+      source: storedSource(row.source),
+      amountOcr: row.amountOcr ?? null,
+      pointA: row.pointA ?? null,
+      pointB: row.pointB ?? null,
+      included: current?.included ?? opposite?.included ?? includedByWindow(windowStatus),
+      windowStatus,
+      decisionReason: current?.decisionReason ?? null,
+      decidedBy: current?.decidedBy ?? null,
+      decidedAt: current?.decidedAt ?? null,
+      createdBy: current ? current.createdBy : opposite ? opposite.createdBy : actor.userId,
+    }
+    if (current) cashDeductionUpdates.push({ record, expectedDecidedAt: current.decidedAt })
+    else cashDeductionCreates.push(record)
+  }
+
+  // Orders, deductions and wallet rows are one accounting claim by the driver. Committing a row at
+  // a time left a half-imported page when a later natural key conflicted; the aggregate repository
+  // locks the shift and rolls the entire page back on any conflict or racing manager decision.
+  const batch: OperationBatch = {
+    orderCreates,
+    orderUpdates,
+    orderPointReplacements,
+    cashDeductionCreates,
+    cashDeductionUpdates,
+    legacyKindTransitions,
+    movements: input.movements.map((m) => {
+      const orderId = m.providerOrderNo ? (saved.get(m.providerOrderNo) ?? null) : null
+      const providerBecameDeduction =
+        m.providerOrderNo !== null &&
+        m.providerOrderNo !== undefined &&
+        transitionTargets.get(m.providerOrderNo) === 'cash_deduction'
+      return {
+        amount: m.amount,
+        occurredMinute: m.occurredMinute,
+        orderId: providerBecameDeduction ? null : orderId,
+        // A wallet row formerly matched to a provider order is retained as evidence when that row
+        // proves to be a cash deduction, but cannot silently become another BR1 adjustment.
+        role: providerBecameDeduction ? ('unmatched' as const) : (m.role ?? 'unmatched'),
+        ambiguous: providerBecameDeduction ? true : (m.ambiguous ?? false),
+        included: providerBecameDeduction ? false : (m.included ?? true),
+        source: 'ocr' as const,
+        notes: m.notes ?? null,
+        createdBy: actor.userId,
+      }
+    }),
+  }
+  try {
+    await deps.operationBatches.apply(shiftId, batch, actor.userId)
+  } catch (error) {
+    const code = (error as { code?: string }).code
+    if (code === 'DUPLICATE_ORDER_NO') {
+      for (const row of submittedOrders) {
+        const ownerOrder = await deps.orders.findByProviderNo(row.providerOrderNo)
+        if (!ownerOrder) continue
+        if (ownerOrder.shiftId === shiftId) throw new ServiceError(409, 'operations_changed_concurrently')
+        const ownerShift = await deps.shifts.findById(ownerOrder.shiftId)
+        throw new ServiceError(409, 'order_belongs_to_other_shift', {
+          providerOrderNo: row.providerOrderNo,
+          shiftId: ownerOrder.shiftId,
+          businessDate: ownerShift?.businessDate ?? null,
+        })
+      }
+    }
+    if (
+      code === 'DUPLICATE_CASH_DEDUCTION' ||
+      code === 'STALE_OPERATION_BATCH' ||
+      code === 'OPERATION_BATCH_KIND_CONFLICT'
+    ) {
+      throw new ServiceError(409, 'operations_changed_concurrently')
+    }
+    if (code === 'OPERATION_BATCH_SHIFT_CLOSED') throw new ServiceError(409, 'shift_not_open')
+    if (code === 'OPERATION_BATCH_SHIFT_NOT_FOUND') throw new ServiceError(404, 'shift_not_found')
+    if (code === 'OPERATION_BATCH_SHIFT_MISMATCH') throw new ServiceError(409, 'operations_batch_shift_mismatch')
+    throw error
+  }
+
+  // Training samples deliberately live outside the money transaction: losing one must never roll
+  // back a valid page, and a failed accounting batch must never leave a sample for a nonexistent row.
+  for (const sample of ocrSamples) await keepOcrSample(deps, sample.orderId, sample.row)
 
   const br1 = await evaluateShift(deps, shift)
   return { shift, br1 }
@@ -1493,6 +2269,24 @@ export async function reviseOperations(
   deps: Deps,
   actor: Actor,
   shiftId: string,
+  input: Parameters<typeof reviseOperationsLocked>[3],
+): Promise<{ shift: ShiftRecord; br1: Br1View; before: ShiftRecord }> {
+  return deps.closeUnitOfWork.run(
+    { shiftId, actorId: actor.userId },
+    async (transaction) => reviseOperationsLocked(withCloseTransaction(deps, transaction), actor, shiftId, input),
+  )
+}
+
+/** Every authoritative revision gets a fresh optimistic/audit version, even under a frozen clock. */
+function nextOperationDecisionAt(nowMs: number, previous: string | null): string {
+  const previousMs = previous === null ? Number.NEGATIVE_INFINITY : Date.parse(previous)
+  return new Date(Math.max(nowMs, Number.isFinite(previousMs) ? previousMs + 1 : nowMs)).toISOString()
+}
+
+async function reviseOperationsLocked(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
   // `| undefined` spelled out on every optional: `exactOptionalPropertyTypes` is on, and Zod's
   // parsed shape carries the explicit undefined that an omitted key produces.
   input: {
@@ -1501,6 +2295,16 @@ export async function reviseOperations(
       included?: boolean | undefined
       walletAmount?: Minor | null | undefined
       fee?: Minor | undefined
+      occurredMinute?: string | null | undefined
+      occurredDate?: string | null | undefined
+      reason?: string | undefined
+    }[]
+    cashDeductions?: readonly {
+      id: string
+      included?: boolean | undefined
+      occurredMinute?: string | null | undefined
+      occurredDate?: string | null | undefined
+      reason: string
     }[]
     movements?: readonly {
       id: string
@@ -1522,15 +2326,31 @@ export async function reviseOperations(
     grants,
   )
   if (!decision.allowed) throw new ServiceError(403, 'forbidden')
+  const windowContext = await operationWindowContext(deps, shift)
 
   const rows = await deps.orders.listByShift(shiftId)
   const byNo = new Map(rows.map((o) => [o.providerOrderNo, o]))
   for (const patch of input.orders ?? []) {
     const current = byNo.get(patch.providerOrderNo)
     if (!current) throw new ServiceError(404, 'order_not_found', { providerOrderNo: patch.providerOrderNo })
+    const changesWindow =
+      patch.included !== undefined || patch.occurredMinute !== undefined || patch.occurredDate !== undefined
+    const authoritativeChange = changesWindow || patch.fee !== undefined || patch.walletAmount !== undefined
+    if (changesWindow && !patch.reason?.trim()) {
+      throw new ServiceError(422, 'operation_decision_reason_required')
+    }
+    const occurredMinute = patch.occurredMinute === undefined ? current.occurredMinute : patch.occurredMinute
+    const occurredDate = patch.occurredDate === undefined ? current.occurredDate : patch.occurredDate
+    const windowStatus = changesWindow
+      ? classifyOperationWindow({
+          occurredDate,
+          occurredMinute,
+          ...windowContext,
+        })
+      : current.windowStatus
     await deps.orders.update({
       ...current,
-      included: patch.included ?? current.included,
+      included: patch.included ?? (changesWindow ? includedByWindow(windowStatus) : current.included),
       // The manager's own correction. He verifies against the cash in his hand, so he is the one
       // placed to say what a fee actually was — and until now his only move against a wrong one was
       // to exclude the whole delivery. The audit trigger attributes the change, and it moves
@@ -1538,7 +2358,44 @@ export async function reviseOperations(
       fee: patch.fee ?? current.fee,
       // `undefined` leaves it alone; an explicit `null` clears a measurement the manager rejects.
       walletAmount: patch.walletAmount === undefined ? current.walletAmount : patch.walletAmount,
+      occurredMinute,
+      occurredDate,
+      windowStatus,
+      ...(authoritativeChange
+        ? {
+            // Window/include decisions require a human reason. Value-only corrections retain an
+            // optional reason for old managers, while still advancing decidedAt as the optimistic
+            // version so a late driver sync cannot overwrite the corrected money.
+            decisionReason: patch.reason?.trim() || current.decisionReason,
+            decidedBy: actor.userId,
+            decidedAt: nextOperationDecisionAt(deps.clock.nowMs(), current.decidedAt),
+          }
+        : {}),
+    }, actor.userId)
+  }
+
+  const deductionRows = await deps.cashDeductions.listByShift(shiftId)
+  const deductionsById = new Map(deductionRows.map((d) => [d.id, d]))
+  for (const patch of input.cashDeductions ?? []) {
+    const current = deductionsById.get(patch.id)
+    if (!current) throw new ServiceError(404, 'cash_deduction_not_found', { id: patch.id })
+    const occurredMinute = patch.occurredMinute === undefined ? current.occurredMinute : patch.occurredMinute
+    const occurredDate = patch.occurredDate === undefined ? current.occurredDate : patch.occurredDate
+    const windowStatus = classifyOperationWindow({
+      occurredDate,
+      occurredMinute,
+      ...windowContext,
     })
+    await deps.cashDeductions.update({
+      ...current,
+      occurredMinute,
+      occurredDate,
+      windowStatus,
+      included: patch.included ?? includedByWindow(windowStatus),
+      decisionReason: patch.reason.trim(),
+      decidedBy: actor.userId,
+      decidedAt: nextOperationDecisionAt(deps.clock.nowMs(), current.decidedAt),
+    }, actor.userId)
   }
 
   const known = new Set((await deps.movements.listByShift(shiftId)).map((m) => m.id))
@@ -1554,7 +2411,7 @@ export async function reviseOperations(
       ...(patch.providerOrderNo === undefined
         ? {}
         : { orderId: patch.providerOrderNo === null ? null : (orderIds.get(patch.providerOrderNo) ?? null) }),
-    })
+    }, actor.userId)
   }
 
   const br1 = await evaluateShift(deps, shift)
@@ -1565,9 +2422,43 @@ export async function reviseOperations(
     walletDiff: br1.result.walletDiff,
     ordersHash: br1.ordersHash,
   }
-  await deps.shifts.update(updated)
+  await deps.shifts.update(updated, actor.userId)
   return { shift: updated, br1, before: shift }
 }
+
+interface CashDeductionAllocation {
+  postings: Array<{ amount: Minor; sharePortion: Minor; occurrenceKey: string }>
+  total: Minor
+  fromShare: Minor
+  receivable: Minor
+}
+
+/** Consume only this shift's positive share, then name the overflow as a cash receivable. */
+function allocateCashDeductions(
+  rows: readonly CashDeductionRecord[],
+  grossDriverShare: Minor,
+): CashDeductionAllocation {
+  let shareAvailable = grossDriverShare > 0n ? grossDriverShare : minor(0n)
+  let total = minor(0n)
+  let fromShare = minor(0n)
+  const postings = [...rows]
+    .filter((row) => row.included)
+    .sort((a, b) => a.operationKey.localeCompare(b.operationKey))
+    .map((row) => {
+      const sharePortion = row.amount < shareAvailable ? row.amount : shareAvailable
+      shareAvailable = minor(shareAvailable - sharePortion)
+      total = add(total, row.amount)
+      fromShare = add(fromShare, sharePortion)
+      return {
+        amount: row.amount,
+        sharePortion,
+        occurrenceKey: `cash-deduction:${row.id}`,
+      }
+    })
+  return { postings, total, fromShare, receivable: minor(total - fromShare) }
+}
+
+type CloseSettlementChoices = { keepAsReceivable?: Minor; payShareNow?: boolean }
 
 export async function approveClose(
   deps: Deps,
@@ -1579,11 +2470,44 @@ export async function approveClose(
    * The manager's «كشف التسوية» decisions. Omitted ⇒ nothing kept and the share left as a payable,
    * which is byte-identical to every close before this existed.
    */
-  settlementChoices: { keepAsReceivable?: Minor; payShareNow?: boolean } = {},
+  settlementChoices: CloseSettlementChoices = {},
+): Promise<{ shift: ShiftRecord; postings: number }> {
+  return deps.closeUnitOfWork.run(
+    { shiftId, actorId: actor.userId, serializeDriverDay: true },
+    async (transaction) =>
+      approveCloseLocked(
+        withCloseTransaction(deps, transaction),
+        actor,
+        shiftId,
+        reviewedOrdersHash,
+        splitGate,
+        settlementChoices,
+      ),
+  )
+}
+
+async function approveCloseLocked(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  reviewedOrdersHash: string,
+  splitGate: 'advisory' | 'strict',
+  settlementChoices: CloseSettlementChoices,
 ): Promise<{ shift: ShiftRecord; postings: number }> {
   const shift = await mustFind(deps, shiftId)
   const orderRows = await deps.orders.listByShift(shiftId)
   const br1 = await evaluateShift(deps, shift)
+  const evidenceWarnings = await unacknowledgedEvidenceWarnings(deps, shiftId, 'end')
+  if (evidenceWarnings.length > 0) {
+    throw new ServiceError(422, 'stale_evidence_confirmation_required', {
+      package: 'end',
+      slots: evidenceWarnings,
+    })
+  }
+  const unresolved = await unresolvedWindowRows(deps, shiftId)
+  if (unresolved.orders.length > 0 || unresolved.deductions.length > 0) {
+    throw new ServiceError(422, 'operation_window_unresolved', unresolved)
+  }
 
   const result = await guard(deps, shift, 'manager_approve_close', actor, {
     endPackage: {
@@ -1643,6 +2567,11 @@ export async function approveClose(
     companyShare: add(settlement.companyDelta, manual.companyShare),
     yalagoShare: settlement.yalagoDelta,
   }
+  const deductionAllocation = allocateCashDeductions(
+    await deps.cashDeductions.listByShift(shiftId),
+    shiftSplit.driverShare,
+  )
+  const netDriverShare = minor(shiftSplit.driverShare - deductionAllocation.fromShare)
 
   /*
    * ── The settlement, decided by the manager and validated HERE, not by the client ───────────
@@ -1655,7 +2584,7 @@ export async function approveClose(
   const plan = planSettlement({
     endCashDeclared: shift.endCashDeclared ?? minor(0n),
     expectedCash: br1.result.expectedCash,
-    driverShare: shiftSplit.driverShare,
+    driverShare: netDriverShare,
     openingReceivable: sum(shift.carriedTranches),
     keepAsReceivable: settlementChoices.keepAsReceivable ?? minor(0n),
     payShareNow: settlementChoices.payShareNow ?? false,
@@ -1676,6 +2605,7 @@ export async function approveClose(
       // The SAME list BR1 just balanced against. If these two ever diverged the ledger would
       // return a wallet different from the one the equation approved.
       walletAdjustments: toWalletAdjustments(await deps.movements.listByShift(shiftId)),
+      cashDeductions: deductionAllocation.postings,
       keptAsReceivable: plan.keptAsReceivable,
       driverSharePaid: plan.paidToDriver,
     },
@@ -1699,8 +2629,14 @@ export async function approveClose(
     approvedBy: actor.userId,
     keptAsReceivable: plan.keptAsReceivable,
     driverSharePaid: plan.paidToDriver,
+    // Persist the exact snapshot that passed this approval, including manager revisions/manual
+    // orders made after the driver's original submission.
+    equationDiff: br1.result.scalarDiff,
+    cashDiff: br1.result.cashDiff,
+    walletDiff: br1.result.walletDiff,
+    ordersHash: br1.ordersHash,
   }
-  await deps.shifts.update(updated)
+  await deps.shifts.update(updated, actor.userId)
   await recordDecision(deps, actor, shiftId, 'close', 'approved', null)
   return { shift: updated, postings: written.length }
 }
@@ -1715,6 +2651,18 @@ export async function approveClose(
  * never counted. Audited with a reason at the route. For test/abandoned/erroneous shifts.
  */
 export async function voidShift(deps: Deps, actor: Actor, shiftId: string, reason: string): Promise<ShiftRecord> {
+  return deps.closeUnitOfWork.run(
+    { shiftId, actorId: actor.userId },
+    async (transaction) => voidShiftLocked(withCloseTransaction(deps, transaction), actor, shiftId, reason),
+  )
+}
+
+async function voidShiftLocked(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  reason: string,
+): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
   const result = await guard(deps, shift, 'manager_force_cancel', actor)
   if (!result.ok) fail(result)
@@ -1749,11 +2697,14 @@ export async function voidShift(deps: Deps, actor: Actor, shiftId: string, reaso
 
   // The movements go with the orders. A voided shift keeping its wallet rows would leave the
   // branch's books carrying adjustments for a shift that is defined never to have counted.
-  await deps.movements.deleteByShift(shiftId)
-  for (const o of await deps.orders.listByShift(shiftId)) await deps.orders.delete(o.id)
+  await deps.movements.deleteByShift(shiftId, actor.userId)
+  for (const deduction of await deps.cashDeductions.listByShift(shiftId)) {
+    await deps.cashDeductions.delete(deduction.id, actor.userId)
+  }
+  for (const o of await deps.orders.listByShift(shiftId)) await deps.orders.delete(o.id, actor.userId)
 
   const updated: ShiftRecord = { ...shift, state: result.next }
-  await deps.shifts.update(updated)
+  await deps.shifts.update(updated, actor.userId)
   return updated
 }
 
@@ -1769,24 +2720,43 @@ export async function voidShift(deps: Deps, actor: Actor, shiftId: string, reaso
  * The manager's own inputs (how much stays as a ذمة, whether the share is paid tonight, any
  * adjustment) arrive as query parameters so he can see the effect before committing to it.
  */
+export type SettlementView = SettlementPlan & {
+  grossDriverShare: Minor
+  cashDeductionTotal: Minor
+  netDriverShare: Minor
+  deductionReceivable: Minor
+}
+
 export async function settlementFor(
   deps: Deps,
   shift: ShiftRecord,
   choices: { keepAsReceivable?: Minor; payShareNow?: boolean; managerAdjustment?: Minor } = {},
-): Promise<SettlementPlan> {
+): Promise<SettlementView> {
   const br1 = await evaluateShift(deps, shift)
   const todaysOrders = toDomainOrders(await deps.orders.listByShift(shift.id))
   const split = await shiftSplitFor(deps, shift, todaysOrders)
-  return planSettlement({
+  const allocation = allocateCashDeductions(await deps.cashDeductions.listByShift(shift.id), split.driverShare)
+  const netDriverShare = minor(split.driverShare - allocation.fromShare)
+  const plan = planSettlement({
     endCashDeclared: shift.endCashDeclared ?? minor(0n),
     expectedCash: br1.result.expectedCash,
-    driverShare: split.driverShare,
+    driverShare: netDriverShare,
     // Carried ذمم land in Phase 3; until then a shift has none and the line simply does not print.
     openingReceivable: minor(0n),
     keepAsReceivable: choices.keepAsReceivable ?? minor(0n),
-    payShareNow: choices.payShareNow ?? true,
+    // Keep preview and approval semantics identical. The approve wire defaults to false and the
+    // manager UI sends no override, so previewing an immediate payout here would show cash flows
+    // that the eventual journal never posts.
+    payShareNow: choices.payShareNow ?? false,
     managerAdjustment: choices.managerAdjustment ?? minor(0n),
   })
+  return {
+    ...plan,
+    grossDriverShare: split.driverShare,
+    cashDeductionTotal: allocation.total,
+    netDriverShare,
+    deductionReceivable: allocation.receivable,
+  }
 }
 
 async function shiftSplitFor(deps: Deps, shift: ShiftRecord, todaysOrders: ShiftOrder[]): Promise<{ driverShare: Minor; companyShare: Minor; yalagoShare: Minor }> {
@@ -1825,26 +2795,81 @@ export async function forceClose(
   deps: Deps,
   actor: Actor,
   shiftId: string,
-  input: { odometerKm?: number | null; cashDeclared?: Minor | null; walletDeclared?: Minor | null; reason: string },
+  input: Parameters<typeof forceCloseLocked>[3],
 ): Promise<{ shift: ShiftRecord; postings: number }> {
-  const shift = await mustFind(deps, shiftId)
+  return deps.closeUnitOfWork.run(
+    { shiftId, actorId: actor.userId, serializeDriverDay: true },
+    async (transaction) => forceCloseLocked(withCloseTransaction(deps, transaction), actor, shiftId, input),
+  )
+}
+
+async function forceCloseLocked(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: {
+    odometerKm?: number | null
+    odometerAnomalyConfirmed?: boolean
+    cashDeclared?: Minor | null
+    walletDeclared?: Minor | null
+    reason: string
+  },
+): Promise<{ shift: ShiftRecord; postings: number }> {
+  let shift = await mustFind(deps, shiftId)
   const result = await guard(deps, shift, 'manager_force_close', actor)
   if (!result.ok) fail(result)
 
+  const finalOdometer = input.odometerKm ?? shift.odoEnd
+  const anomalousOdometer =
+    finalOdometer !== null && shift.odoStart !== null && finalOdometer < shift.odoStart
+  const existingAnomalyConfirmed =
+    finalOdometer === shift.odoEnd &&
+    shift.odoEndAnomalyConfirmedAt !== null &&
+    shift.odoEndAnomalyConfirmedBy !== null
+  if (anomalousOdometer && !existingAnomalyConfirmed && !input.odometerAnomalyConfirmed) {
+    throw new ServiceError(422, 'odometer_anomaly_confirmation_required', {
+      start: shift.odoStart,
+      end: finalOdometer,
+    })
+  }
+
+  // A force-close is still a close boundary. Claim it first so no late PWA batch can slip in, then
+  // classify every OCR operation against that exact minute. Unknown rows remain a human decision:
+  // the force override bypasses BR1, not the requirement to say which operations belong here.
+  if (shift.submittedAt === null) {
+    shift = {
+      ...shift,
+      state: 'pending_review',
+      submittedAt: new Date(deps.clock.nowMs()).toISOString(),
+    }
+    await deps.shifts.update(shift, actor.userId)
+  }
+  await reclassifyShiftOperations(deps, shift, actor.userId)
+  const unresolved = await unresolvedWindowRows(deps, shiftId)
+  if (unresolved.orders.length > 0 || unresolved.deductions.length > 0) {
+    throw new ServiceError(422, 'operation_window_unresolved', unresolved)
+  }
+
   const orderRows = await deps.orders.listByShift(shiftId)
   const todaysOrders = toDomainOrders(orderRows)
+  const shiftSplit = await shiftSplitFor(deps, shift, todaysOrders)
+  const deductionAllocation = allocateCashDeductions(
+    await deps.cashDeductions.listByShift(shiftId),
+    shiftSplit.driverShare,
+  )
   const shiftInput = {
     driverId: shift.driverId,
     branchId: shift.branchId,
     floatTranches: shift.floatTranches,
+    carriedTranches: shift.carriedTranches,
     topupTranches: shift.topupTranches,
     orders: todaysOrders,
     // A force-close still posts the wallet the shift actually had; `closingBalances` below reads
     // the same input, so the variance it computes is against the real expectation, not a partial one.
     walletAdjustments: toWalletAdjustments(await deps.movements.listByShift(shiftId)),
+    cashDeductions: deductionAllocation.postings,
   }
 
-  const shiftSplit = await shiftSplitFor(deps, shift, todaysOrders)
   const postings: Posting[] = postingsForApproval(shiftInput, shiftSplit)
 
   // Variance: postingsForApproval returned the COMPUTED balances to the office. If the admin says
@@ -1869,7 +2894,8 @@ export async function forceClose(
    * stays the default and a manager closes short only on purpose, with a written reason.
    */
   const cashGap = expected.endCash - cashDeclared
-  const shareDue = shiftSplit.driverShare > 0n ? shiftSplit.driverShare : minor(0n)
+  const shareAfterDeductions = minor(shiftSplit.driverShare - deductionAllocation.fromShare)
+  const shareDue = shareAfterDeductions > 0n ? shareAfterDeductions : minor(0n)
   const fromShare = cashGap > 0n ? (cashGap < shareDue ? minor(cashGap) : shareDue) : minor(0n)
   const residual = cashGap > 0n ? minor(cashGap - fromShare) : minor(0n)
 
@@ -1916,7 +2942,15 @@ export async function forceClose(
     ...shift,
     state: result.next,
     approvedBy: actor.userId,
-    odoEnd: input.odometerKm ?? shift.odoEnd,
+    odoEnd: finalOdometer,
+    odoEndAnomalyConfirmedAt: anomalousOdometer
+      ? (existingAnomalyConfirmed
+          ? shift.odoEndAnomalyConfirmedAt
+          : new Date(deps.clock.nowMs()).toISOString())
+      : null,
+    odoEndAnomalyConfirmedBy: anomalousOdometer
+      ? (existingAnomalyConfirmed ? shift.odoEndAnomalyConfirmedBy : actor.userId)
+      : null,
     endCashDeclared: cashDeclared,
     endWalletDeclared: walletDeclared,
     equationDiff: br1.result.scalarDiff,
@@ -1924,7 +2958,7 @@ export async function forceClose(
     walletDiff: br1.result.walletDiff,
     ordersHash: br1.ordersHash,
   }
-  await deps.shifts.update(updated)
+  await deps.shifts.update(updated, actor.userId)
   await recordDecision(deps, actor, shiftId, 'close', 'approved', input.reason)
   return { shift: updated, postings: written.length }
 }

@@ -52,7 +52,9 @@ export function CloudReadStatus({
       ? t.shift.cloudTimeout
       : event.reason === 'no_fields'
         ? t.shift.cloudNoFields
-        : t.shift.cloudUnavailable
+        : event.reason === 'refused'
+          ? t.shift.cloudRefused
+          : t.shift.cloudUnavailable
 
   return (
     <div className="flex flex-col items-start gap-1" aria-live="polite">

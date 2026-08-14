@@ -30,9 +30,10 @@ describe('a glyph-read fee must LOOK like a fee before it is offered as money', 
     expect(glyphListFee('07')).toBeNull()
   })
 
-  it('refuses a signed value — an order fee is never negative, that is the wallet log', () => {
-    expect(glyphListFee('-235')).toBeNull()
-    expect(glyphListFee('+235')).toBeNull()
+  it('keeps a minus so Recent Orders can route the row as a cash deduction', () => {
+    expect(glyphListFee('-235')).toBe('-235')
+    expect(glyphListFee('−235')).toBe('-235')
+    expect(glyphListFee('+235')).toBe('235')
   })
 
   it('refuses anything that is not digits and separators', () => {

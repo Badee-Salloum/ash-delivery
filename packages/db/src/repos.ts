@@ -2,9 +2,14 @@ import type {
   AuditFilter,
   AuditRecord,
   AuditRepo,
+  CashDeductionRecord,
+  CashDeductionRepo,
   FxRepo,
   JournalEntryRecord,
   LedgerRepo,
+  OperationBatch,
+  OperationBatchRepo,
+  OperationWindowRepo,
   OrderRepo,
   SessionRecord,
   SessionRepo,
@@ -396,8 +401,14 @@ function isoDate(value: unknown): CalendarDate {
 
 export class PgOrderRepo implements OrderRepo {
   private readonly pool: Pool
-  constructor(pool: Pool) {
+  private readonly transactionClient: PoolClient | null
+  constructor(pool: Pool, transactionClient: PoolClient | null = null) {
     this.pool = pool
+    this.transactionClient = transactionClient
+  }
+
+  private mutate<T>(actorId: string | null, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    return this.transactionClient ? fn(this.transactionClient) : withTransaction(this.pool, { actorId }, fn)
   }
   /**
    * Keep the fee's own pixels beside what the reader made of them. See `ocr_fee_samples` (0019).
@@ -464,16 +475,18 @@ export class PgOrderRepo implements OrderRepo {
     }))
   }
 
-  async create(order: ShiftOrderRecord): Promise<void> {
+  async create(order: ShiftOrderRecord, actorId: string | null): Promise<void> {
     try {
       // The order and its route go in together: a manual job whose points failed to write would be
       // a delivery from nowhere to nowhere, and the manager would have no way to see it went wrong.
-      await withTransaction(this.pool, {}, async (client) => {
+      await this.mutate(actorId, async (client) => {
         await client.query(
           `INSERT INTO shift_orders (id, shift_id, provider_order_no, pay_mode, fee_minor, zone, driver_confirmed,
                                      source, fee_ocr_minor, kind, driver_share_minor, company_share_minor, notes, created_by,
-                                     included, wallet_amount_minor, occurred_minute, occurred_date)
-           VALUES ($1, $2, $3, $4::pay_mode, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+                                     included, wallet_amount_minor, occurred_minute, occurred_date,
+                                     window_status, decision_reason, decided_by, decided_at)
+           VALUES ($1, $2, $3, $4::pay_mode, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+                   $19, $20, $21, $22::timestamptz)`,
           [
             order.id,
             order.shiftId,
@@ -493,6 +506,10 @@ export class PgOrderRepo implements OrderRepo {
             order.walletAmount?.toString() ?? null,
             order.occurredMinute,
             order.occurredDate,
+            order.windowStatus,
+            order.decisionReason,
+            order.decidedBy,
+            order.decidedAt,
           ],
         )
         for (const [i, point] of order.points.entries()) {
@@ -513,27 +530,34 @@ export class PgOrderRepo implements OrderRepo {
     }
   }
   /** Identity — the shift and the order number — is never touched; only what a human may correct. */
-  async update(order: ShiftOrderRecord): Promise<void> {
-    await this.pool.query(
-      `UPDATE shift_orders
-          SET pay_mode = $2::pay_mode, fee_minor = $3, zone = $4, source = $5, fee_ocr_minor = $6,
-              notes = $7, included = $8, wallet_amount_minor = $9, occurred_minute = $10,
-              occurred_date = $11
-        WHERE id = $1`,
-      [
-        order.id,
-        order.payMode,
-        order.fee.toString(),
-        order.zone,
-        order.source,
-        order.feeOcr?.toString() ?? null,
-        order.notes,
-        order.included,
-        order.walletAmount?.toString() ?? null,
-        order.occurredMinute,
-        order.occurredDate,
-      ],
-    )
+  async update(order: ShiftOrderRecord, actorId: string | null): Promise<void> {
+    await this.mutate(actorId, async (client) => {
+      await client.query(
+        `UPDATE shift_orders
+            SET pay_mode = $2::pay_mode, fee_minor = $3, zone = $4, source = $5, fee_ocr_minor = $6,
+                notes = $7, included = $8, wallet_amount_minor = $9, occurred_minute = $10,
+                occurred_date = $11, window_status = $12, decision_reason = $13,
+                decided_by = $14, decided_at = $15::timestamptz
+          WHERE id = $1`,
+        [
+          order.id,
+          order.payMode,
+          order.fee.toString(),
+          order.zone,
+          order.source,
+          order.feeOcr?.toString() ?? null,
+          order.notes,
+          order.included,
+          order.walletAmount?.toString() ?? null,
+          order.occurredMinute,
+          order.occurredDate,
+          order.windowStatus,
+          order.decisionReason,
+          order.decidedBy,
+          order.decidedAt,
+        ],
+      )
+    })
   }
   async listByShift(shiftId: string): Promise<ShiftOrderRecord[]> {
     const { rows } = await this.pool.query<Record<string, unknown>>(
@@ -550,8 +574,13 @@ export class PgOrderRepo implements OrderRepo {
     return rows[0] ? toOrder(rows[0]) : null
   }
   /** One transaction: an order must never be seen with half a route. */
-  async replacePoints(orderId: string, points: readonly OrderPointRecord[]): Promise<void> {
-    await withTransaction(this.pool, {}, async (client) => {
+  async replacePoints(
+    orderId: string,
+    points: readonly OrderPointRecord[],
+    actorId: string | null,
+  ): Promise<void> {
+    await this.mutate(actorId, async (client) => {
+      await client.query('SELECT id FROM shift_orders WHERE id = $1 FOR UPDATE', [orderId])
       await client.query('DELETE FROM shift_order_points WHERE order_id = $1', [orderId])
       for (const [i, point] of points.entries()) {
         await client.query(
@@ -561,8 +590,10 @@ export class PgOrderRepo implements OrderRepo {
       }
     })
   }
-  async delete(id: string): Promise<void> {
-    await this.pool.query('DELETE FROM shift_orders WHERE id = $1', [id])
+  async delete(id: string, actorId: string | null): Promise<void> {
+    await this.mutate(actorId, async (client) => {
+      await client.query('DELETE FROM shift_orders WHERE id = $1', [id])
+    })
   }
 }
 
@@ -579,6 +610,7 @@ const ORDER_COLUMNS = `
          o.company_share_minor::text AS company_share,
          o.notes, o.created_by, o.included, o.wallet_amount_minor::text AS wallet_amount, o.occurred_minute,
          to_char(o.occurred_date, 'YYYY-MM-DD') AS occurred_date,
+         o.window_status, o.decision_reason, o.decided_by, o.decided_at,
          COALESCE(
            (SELECT json_agg(json_build_object('role', p.role, 'label', p.label, 'lat', p.lat, 'lng', p.lng)
                             ORDER BY p.seq)
@@ -613,7 +645,175 @@ const toOrder = (r: Record<string, unknown>): ShiftOrderRecord => ({
   // Formatted in SQL, never via the JS Date: a timezone conversion here moves a late-evening
   // order to the next day, which is the whole failure this column exists to make visible.
   occurredDate: (r.occurred_date as string | null) ?? null,
+  windowStatus: (r.window_status as ShiftOrderRecord['windowStatus'] | null) ?? 'unknown',
+  decisionReason: (r.decision_reason as string | null) ?? null,
+  decidedBy: (r.decided_by as string | null) ?? null,
+  decidedAt: r.decided_at === null || r.decided_at === undefined ? null : (r.decided_at as Date).toISOString(),
 })
+
+/** Positive cash deductions read from the provider's operation history. */
+export class PgCashDeductionRepo implements CashDeductionRepo {
+  private readonly pool: Pool
+  private readonly transactionClient: PoolClient | null
+  constructor(pool: Pool, transactionClient: PoolClient | null = null) {
+    this.pool = pool
+    this.transactionClient = transactionClient
+  }
+
+  private mutate<T>(actorId: string | null, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    return this.transactionClient ? fn(this.transactionClient) : withTransaction(this.pool, { actorId }, fn)
+  }
+
+  async create(deduction: CashDeductionRecord, actorId: string | null): Promise<void> {
+    try {
+      await this.mutate(actorId, async (client) => {
+        await client.query(
+          `INSERT INTO cash_deductions
+             (id, shift_id, operation_key, amount_minor, occurred_date, occurred_minute, source,
+              amount_ocr_minor, point_a, point_b, included, window_status, decision_reason,
+              decided_by, decided_at, created_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::timestamptz,$16)`,
+          [
+            deduction.id,
+            deduction.shiftId,
+            deduction.operationKey,
+            deduction.amount.toString(),
+            deduction.occurredDate,
+            deduction.occurredMinute,
+            deduction.source,
+            deduction.amountOcr?.toString() ?? null,
+            deduction.pointA,
+            deduction.pointB,
+            deduction.included,
+            deduction.windowStatus,
+            deduction.decisionReason,
+            deduction.decidedBy,
+            deduction.decidedAt,
+            deduction.createdBy,
+          ],
+        )
+      })
+    } catch (err) {
+      if (
+        isPgError(err, PG.UNIQUE_VIOLATION) &&
+        (err as { constraint?: string }).constraint === 'cash_deductions_operation_uq'
+      ) {
+        throw Object.assign(new Error(`duplicate cash-deduction operation key ${deduction.operationKey}`), {
+          code: 'DUPLICATE_CASH_DEDUCTION',
+        })
+      }
+      throw err
+    }
+  }
+
+  async update(deduction: CashDeductionRecord, actorId: string | null): Promise<void> {
+    await this.mutate(actorId, async (client) => {
+      await client.query(
+        `UPDATE cash_deductions
+            SET amount_minor = $2, occurred_date = $3, occurred_minute = $4, source = $5,
+                amount_ocr_minor = $6, point_a = $7, point_b = $8, included = $9,
+                window_status = $10, decision_reason = $11, decided_by = $12,
+                decided_at = $13::timestamptz
+          WHERE id = $1`,
+        [
+          deduction.id,
+          deduction.amount.toString(),
+          deduction.occurredDate,
+          deduction.occurredMinute,
+          deduction.source,
+          deduction.amountOcr?.toString() ?? null,
+          deduction.pointA,
+          deduction.pointB,
+          deduction.included,
+          deduction.windowStatus,
+          deduction.decisionReason,
+          deduction.decidedBy,
+          deduction.decidedAt,
+        ],
+      )
+    })
+  }
+
+  async listByShift(shiftId: string): Promise<CashDeductionRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `${CASH_DEDUCTION_COLUMNS}
+        WHERE shift_id = $1
+        ORDER BY occurred_date NULLS LAST, occurred_minute NULLS LAST, operation_key`,
+      [shiftId],
+    )
+    return rows.map(toCashDeduction)
+  }
+
+  async findByOperationKey(shiftId: string, operationKey: string): Promise<CashDeductionRecord | null> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `${CASH_DEDUCTION_COLUMNS} WHERE shift_id = $1 AND operation_key = $2`,
+      [shiftId, operationKey],
+    )
+    return rows[0] ? toCashDeduction(rows[0]) : null
+  }
+
+  async delete(id: string, actorId: string | null): Promise<void> {
+    await this.mutate(actorId, async (client) => {
+      await client.query('DELETE FROM cash_deductions WHERE id = $1', [id])
+    })
+  }
+}
+
+const CASH_DEDUCTION_COLUMNS = `
+  SELECT id, shift_id, operation_key, amount_minor::text AS amount,
+         to_char(occurred_date, 'YYYY-MM-DD') AS occurred_date, occurred_minute, source,
+         amount_ocr_minor::text AS amount_ocr, point_a, point_b, included, window_status,
+         decision_reason, decided_by, decided_at, created_by
+    FROM cash_deductions`
+
+const toCashDeduction = (r: Record<string, unknown>): CashDeductionRecord => ({
+  id: String(r.id),
+  shiftId: String(r.shift_id),
+  operationKey: String(r.operation_key),
+  amount: minor(BigInt(String(r.amount))),
+  occurredDate: (r.occurred_date as CalendarDate | null) ?? null,
+  occurredMinute: (r.occurred_minute as string | null) ?? null,
+  source: r.source as CashDeductionRecord['source'],
+  amountOcr: r.amount_ocr === null || r.amount_ocr === undefined ? null : minor(BigInt(String(r.amount_ocr))),
+  pointA: (r.point_a as string | null) ?? null,
+  pointB: (r.point_b as string | null) ?? null,
+  included: Boolean(r.included),
+  windowStatus: r.window_status as CashDeductionRecord['windowStatus'],
+  decisionReason: (r.decision_reason as string | null) ?? null,
+  decidedBy: (r.decided_by as string | null) ?? null,
+  decidedAt: r.decided_at === null || r.decided_at === undefined ? null : (r.decided_at as Date).toISOString(),
+  createdBy: (r.created_by as string | null) ?? null,
+})
+
+/** Calls the database-owned classifier; no caller-provided status or inclusion crosses this port. */
+export class PgOperationWindowRepo implements OperationWindowRepo {
+  private readonly pool: Pool
+  private readonly transactionClient: PoolClient | null
+  constructor(pool: Pool, transactionClient: PoolClient | null = null) {
+    this.pool = pool
+    this.transactionClient = transactionClient
+  }
+
+  async reclassify(
+    shiftId: string,
+    actorId: string | null,
+  ): Promise<{ orders: number; cashDeductions: number }> {
+    const run = async (client: PoolClient) => {
+      const { rows } = await client.query<{ order_updates: number; deduction_updates: number }>(
+        'SELECT order_updates, deduction_updates FROM reclassify_shift_operations($1)',
+        [shiftId],
+      )
+      const result = rows[0]
+      return {
+        orders: Number(result?.order_updates ?? 0),
+        cashDeductions: Number(result?.deduction_updates ?? 0),
+      }
+    }
+    return this.transactionClient
+      ? run(this.transactionClient)
+      : withTransaction(this.pool, { actorId }, run)
+  }
+}
 
 /**
  * The wallet's own rows, merged page by page.
@@ -624,8 +824,14 @@ const toOrder = (r: Record<string, unknown>): ShiftOrderRecord => ({
  */
 export class PgWalletMovementRepo implements WalletMovementRepo {
   private readonly pool: Pool
-  constructor(pool: Pool) {
+  private readonly transactionClient: PoolClient | null
+  constructor(pool: Pool, transactionClient: PoolClient | null = null) {
     this.pool = pool
+    this.transactionClient = transactionClient
+  }
+
+  private mutate<T>(actorId: string | null, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    return this.transactionClient ? fn(this.transactionClient) : withTransaction(this.pool, { actorId }, fn)
   }
 
   async listByShift(shiftId: string): Promise<WalletMovementRecord[]> {
@@ -636,16 +842,20 @@ export class PgWalletMovementRepo implements WalletMovementRepo {
     return rows.map(toMovement)
   }
 
-  async merge(shiftId: string, movements: readonly WalletMovementInput[]): Promise<WalletMovementRecord[]> {
+  async merge(
+    shiftId: string,
+    movements: readonly WalletMovementInput[],
+    actorId: string | null,
+  ): Promise<WalletMovementRecord[]> {
     if (movements.length === 0) return []
-    return withTransaction(this.pool, {}, async (client) => {
-      // One locked read of the existing tallies, inside the transaction, so two pages uploaded at
-      // once cannot both decide they are the surplus.
+    return this.mutate(actorId, async (client) => {
+      // PostgreSQL forbids FOR UPDATE on a grouped query. Locking the owning shift serializes all
+      // merges for this shift, then the tally can be aggregated safely inside the same transaction.
+      await client.query('SELECT id FROM shifts WHERE id = $1 FOR UPDATE', [shiftId])
       const { rows: existing } = await client.query<{ occurred_minute: string; amount_minor: string; n: string }>(
         `SELECT occurred_minute, amount_minor::text AS amount_minor, COUNT(*)::text AS n
            FROM shift_wallet_movements WHERE shift_id = $1
-          GROUP BY occurred_minute, amount_minor
-          FOR UPDATE`,
+          GROUP BY occurred_minute, amount_minor`,
         [shiftId],
       )
       const tally = new Map<string, number>()
@@ -692,8 +902,9 @@ export class PgWalletMovementRepo implements WalletMovementRepo {
   async update(
     id: string,
     patch: { role?: WalletMovementRole; orderId?: string | null; included?: boolean; ambiguous?: boolean },
+    actorId: string | null,
   ): Promise<void> {
-    await this.pool.query(
+    await this.mutate(actorId, (client) => client.query(
       `UPDATE shift_wallet_movements
           SET role      = COALESCE($2, role),
               order_id  = CASE WHEN $3::boolean THEN $4 ELSE order_id END,
@@ -710,11 +921,13 @@ export class PgWalletMovementRepo implements WalletMovementRepo {
         patch.included ?? null,
         patch.ambiguous ?? null,
       ],
-    )
+    ))
   }
 
-  async deleteByShift(shiftId: string): Promise<void> {
-    await this.pool.query('DELETE FROM shift_wallet_movements WHERE shift_id = $1', [shiftId])
+  async deleteByShift(shiftId: string, actorId: string | null): Promise<void> {
+    await this.mutate(actorId, (client) =>
+      client.query('DELETE FROM shift_wallet_movements WHERE shift_id = $1', [shiftId]),
+    )
   }
 }
 
@@ -738,6 +951,223 @@ const toMovement = (r: Record<string, unknown>): WalletMovementRecord => ({
   notes: (r.notes as string | null) ?? null,
   createdBy: (r.created_by as string | null) ?? null,
 })
+
+/** Commits one submitted operations page without exposing a generic transaction callback. */
+export class PgOperationBatchRepo implements OperationBatchRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async apply(
+    shiftId: string,
+    batch: OperationBatch,
+    actorId: string | null,
+  ): Promise<{ insertedMovements: WalletMovementRecord[] }> {
+    const wrongShift = [
+      ...batch.orderCreates.map((record) => ({ kind: 'order', id: record.id, shiftId: record.shiftId })),
+      ...batch.orderUpdates.map(({ record }) => ({ kind: 'order', id: record.id, shiftId: record.shiftId })),
+      ...batch.cashDeductionCreates.map((record) => ({ kind: 'cash_deduction', id: record.id, shiftId: record.shiftId })),
+      ...batch.cashDeductionUpdates.map(({ record }) => ({
+        kind: 'cash_deduction',
+        id: record.id,
+        shiftId: record.shiftId,
+      })),
+    ].find((record) => record.shiftId !== shiftId)
+    if (wrongShift) {
+      throw Object.assign(new Error(`${wrongShift.kind} ${wrongShift.id} belongs to another shift`), {
+        code: 'OPERATION_BATCH_SHIFT_MISMATCH',
+      })
+    }
+    const legacyKindTransitions = normalizePgLegacyKindTransitions(batch.legacyKindTransitions ?? [])
+
+    return withTransaction(this.pool, { actorId }, async (client) => {
+      // Serializes complete submissions for one shift. This also makes the movement surplus tally
+      // and concurrent natural-key decisions observe the immediately preceding committed batch.
+      const lockedShift = await client.query<{ state: string; submitted_at: Date | null }>(
+        'SELECT state, submitted_at FROM shifts WHERE id = $1 FOR UPDATE',
+        [shiftId],
+      )
+      if (lockedShift.rowCount !== 1) {
+        throw Object.assign(new Error(`shift ${shiftId} not found`), {
+          code: 'OPERATION_BATCH_SHIFT_NOT_FOUND',
+        })
+      }
+      const lockedState = lockedShift.rows[0]!
+      if (!['open', 'suspended'].includes(lockedState.state) || lockedState.submitted_at !== null) {
+        throw Object.assign(new Error(`shift ${shiftId} is no longer open for operation changes`), {
+          code: 'OPERATION_BATCH_SHIFT_CLOSED',
+        })
+      }
+
+      const orders = new PgOrderRepo(this.pool, client)
+      const deductions = new PgCashDeductionRepo(this.pool, client)
+      const movements = new PgWalletMovementRepo(this.pool, client)
+
+      // Resolve sign changes only after owning the shift lock. A concurrent opposite-sign batch may
+      // have committed after the service read; inspecting current rows here keeps the XOR invariant.
+      for (const transition of legacyKindTransitions) {
+        if (transition.targetKind === 'order') {
+          const opposite = await client.query<{ id: string; decided_by: string | null; decided_at: Date | null }>(
+            `SELECT id::text, decided_by::text, decided_at
+               FROM cash_deductions
+              WHERE shift_id = $1 AND operation_key = $2
+              FOR UPDATE`,
+            [shiftId, `legacy:${transition.providerOrderNo}`],
+          )
+          const row = opposite.rows[0]
+          const decidedAt = row?.decided_at?.toISOString() ?? null
+          const matchesExpected = transition.expectedOppositeId === null
+            ? row === undefined
+            : row?.id === transition.expectedOppositeId &&
+              decidedAt === transition.expectedOppositeDecidedAt &&
+              transition.expectedOppositeDecidedAt === null &&
+              row.decided_by === null
+          if (!matchesExpected) {
+            throw staleOperationBatch(
+              'cash_deduction',
+              row?.id ?? transition.expectedOppositeId ?? transition.providerOrderNo,
+            )
+          }
+          if (row) await deductions.delete(row.id, actorId)
+        } else {
+          const opposite = await client.query<{
+            id: string
+            kind: string
+            decided_by: string | null
+            decided_at: Date | null
+          }>(
+            `SELECT id::text, kind, decided_by::text, decided_at
+               FROM shift_orders
+              WHERE shift_id = $1 AND provider_order_no = $2
+              FOR UPDATE`,
+            [shiftId, transition.providerOrderNo],
+          )
+          const row = opposite.rows[0]
+          const decidedAt = row?.decided_at?.toISOString() ?? null
+          const matchesExpected = transition.expectedOppositeId === null
+            ? row === undefined
+            : row?.id === transition.expectedOppositeId &&
+              decidedAt === transition.expectedOppositeDecidedAt &&
+              transition.expectedOppositeDecidedAt === null &&
+              row.decided_by === null &&
+              row.kind !== 'manual'
+          if (!matchesExpected) {
+            throw staleOperationBatch('order', row?.id ?? transition.expectedOppositeId ?? transition.providerOrderNo)
+          }
+          if (row) {
+            // ON DELETE SET NULL cannot preserve a matched role (the row-level CHECK rejects it).
+            // Retain the evidence, explicitly detach it, and exclude it from BR1 pending review.
+            await client.query(
+              `UPDATE shift_wallet_movements
+                  SET role = 'unmatched', order_id = NULL, included = false, ambiguous = true
+                WHERE shift_id = $1 AND order_id = $2`,
+              [shiftId, row.id],
+            )
+            await orders.delete(row.id, actorId)
+          }
+        }
+      }
+
+      for (const order of batch.orderCreates) await orders.create(order, actorId)
+      for (const update of batch.orderUpdates) {
+        const locked = await client.query(
+          `SELECT id
+             FROM shift_orders
+            WHERE id = $1 AND shift_id = $2
+              AND decided_at IS NOT DISTINCT FROM $3::timestamptz
+            FOR UPDATE`,
+          [update.record.id, shiftId, update.expectedDecidedAt],
+        )
+        if (locked.rowCount !== 1) throw staleOperationBatch('order', update.record.id)
+        await orders.update(update.record, actorId)
+      }
+
+      for (const replacement of batch.orderPointReplacements) {
+        const locked = await client.query(
+          `SELECT o.id
+             FROM shift_orders o
+            WHERE o.id = $1 AND o.shift_id = $2
+            FOR UPDATE`,
+          [replacement.orderId, shiftId],
+        )
+        if (locked.rowCount !== 1) throw staleOperationBatch('order', replacement.orderId)
+        // Use a fresh READ COMMITTED statement after acquiring the parent lock. A manager who held
+        // that lock first may have inserted points without changing the parent row, so folding the
+        // NOT EXISTS into the waiting SELECT could observe its older command snapshot.
+        const existingPoints = await client.query('SELECT 1 FROM shift_order_points WHERE order_id = $1 LIMIT 1', [
+          replacement.orderId,
+        ])
+        if (existingPoints.rowCount !== 0) throw staleOperationBatch('order', replacement.orderId)
+        await orders.replacePoints(replacement.orderId, replacement.points, actorId)
+      }
+
+      for (const deduction of batch.cashDeductionCreates) await deductions.create(deduction, actorId)
+      for (const update of batch.cashDeductionUpdates) {
+        const locked = await client.query(
+          `SELECT id
+             FROM cash_deductions
+            WHERE id = $1 AND shift_id = $2
+              AND decided_at IS NOT DISTINCT FROM $3::timestamptz
+            FOR UPDATE`,
+          [update.record.id, shiftId, update.expectedDecidedAt],
+        )
+        if (locked.rowCount !== 1) throw staleOperationBatch('cash_deduction', update.record.id)
+        await deductions.update(update.record, actorId)
+      }
+
+      const movementOrderIds = [
+        ...new Set(batch.movements.flatMap((movement) => (movement.orderId ? [movement.orderId] : []))),
+      ]
+      if (movementOrderIds.length > 0) {
+        const ownedOrders = await client.query<{ id: string }>(
+          `SELECT id
+             FROM shift_orders
+            WHERE shift_id = $1 AND id = ANY($2::uuid[])
+            FOR KEY SHARE`,
+          [shiftId, movementOrderIds],
+        )
+        if (ownedOrders.rowCount !== movementOrderIds.length) {
+          throw Object.assign(new Error('operation batch movement references an order from another shift'), {
+            code: 'OPERATION_BATCH_SHIFT_MISMATCH',
+          })
+        }
+      }
+
+      return { insertedMovements: await movements.merge(shiftId, batch.movements, actorId) }
+    })
+  }
+}
+
+const normalizePgLegacyKindTransitions = (
+  transitions: NonNullable<OperationBatch['legacyKindTransitions']>,
+): Array<NonNullable<OperationBatch['legacyKindTransitions']>[number]> => {
+  const targets = new Map<string, NonNullable<OperationBatch['legacyKindTransitions']>[number]>()
+  for (const transition of transitions) {
+    const current = targets.get(transition.providerOrderNo)
+    if (
+      transition.providerOrderNo.length === 0 ||
+      (current !== undefined && (
+        current.targetKind !== transition.targetKind ||
+        current.expectedOppositeId !== transition.expectedOppositeId ||
+        current.expectedOppositeDecidedAt !== transition.expectedOppositeDecidedAt
+      ))
+    ) {
+      throw Object.assign(new Error(`conflicting legacy operation kind for ${transition.providerOrderNo}`), {
+        code: 'OPERATION_BATCH_KIND_CONFLICT',
+      })
+    }
+    targets.set(transition.providerOrderNo, transition)
+  }
+  return [...targets]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, transition]) => transition)
+}
+
+const staleOperationBatch = (kind: 'order' | 'cash_deduction', id: string): Error & { code: string } =>
+  Object.assign(new Error(`${kind} ${id} changed while the operations batch was being prepared`), {
+    code: 'STALE_OPERATION_BATCH',
+  })
 
 export class PgFxRepo implements FxRepo {
   private readonly pool: Pool

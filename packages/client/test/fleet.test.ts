@@ -8,6 +8,7 @@ import {
   packsOn,
   spareBatteries,
   photoAge,
+  photoAgeFromClockSkew,
 } from '../src/fleet.ts'
 
 /**
@@ -170,5 +171,12 @@ describe('how old the picture was', () => {
 
   it('treats a phone clock running ahead as fresh, not as a negative age', () => {
     expect(photoAge(iso(T + 4 * 60_000), iso(T))).toEqual({ kind: 'fresh', minutes: 0 })
+  })
+
+  it('uses upload response clock skew without inventing an age when it is absent', () => {
+    expect(photoAgeFromClockSkew(30 * 60_000)).toEqual({ kind: 'stale', minutes: 30 })
+    expect(photoAgeFromClockSkew(30 * 60_000 - 1)).toEqual({ kind: 'fresh', minutes: 30 })
+    expect(photoAgeFromClockSkew(-60_000)).toEqual({ kind: 'fresh', minutes: 0 })
+    expect(photoAgeFromClockSkew(null)).toEqual({ kind: 'unknown' })
   })
 })

@@ -223,6 +223,19 @@ describe('when the phone reads nothing at all', () => {
     expect(mergeScannedOrders([], rows, newId)).toHaveLength(4)
   })
 
+  it('preserves negative Recent Orders values for cash-deduction partitioning', () => {
+    const rows = cloudRowsToScannedOrders([cloudOrder('-144.15', '19:29', 'Branch')])
+    expect(rows[0]!.fee).toBe('-144.15')
+    expect(mergeScannedOrders([], rows, newId)).toEqual([])
+  })
+
+  it('keeps a timeless deduction when its day and route still give it an identity', () => {
+    const rows = cloudRowsToScannedOrders([
+      { ...cloudOrder('-50', '19:29', 'Branch'), time: null },
+    ])
+    expect(rows).toMatchObject([{ fee: '-50', time: '', dateIso: '2026-08-06', pointA: 'Branch' }])
+  })
+
   it('keeps a cancelled card as a row with no fee', () => {
     // It is a delivery that happened and the screen still shows it. Dropped here, the driver
     // re-adds it by hand — as a PAID order, because nothing told him it was cancelled.

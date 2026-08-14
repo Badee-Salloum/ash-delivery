@@ -2,7 +2,11 @@ import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import {
   type CloudOcrField,
   type CloudOcrResponse,
+  type EvidenceUploadResponse,
+  acknowledgeStaleEvidencePath,
   compressImage,
+  evidenceUploadHeaders,
+  photoAgeFromClockSkew,
   readInCloud,
   uploadEvidencePath,
 } from '@ash/client'
@@ -29,7 +33,9 @@ export interface PhotoSlotProps {
   pkg: 'start' | 'end'
   slot: string
   label: string
-  onUploaded(slot: string): void
+  onUploaded(slot: string, result?: EvidenceUploadResponse, file?: File): void | Promise<void>
+  /** Optional hook for dedupe/age telemetry without coupling it to the slot-complete callback. */
+  onUploadResult?(slot: string, result: EvidenceUploadResponse): void
   /**
    * The ORIGINAL file, for on-device OCR. Best-effort — never blocks the upload.
    *
@@ -50,7 +56,7 @@ export interface PhotoSlotProps {
    */
   ocrField?: CloudOcrField
   /** Progress and result of the cloud read. Called with `reading` first, then exactly one outcome. */
-  onCloudRead?(event: CloudReadEvent): void
+  onCloudRead?(event: CloudReadEvent, file?: File): void
   /**
    * Offer «حذف الصورة» on this tile. Called after the server has released the slot.
    *
@@ -100,6 +106,7 @@ export function PhotoSlot({
   slot,
   label,
   onUploaded,
+  onUploadResult,
   onImage,
   ocrField,
   onCloudRead,
@@ -116,6 +123,9 @@ export function PhotoSlot({
   const [picked, setPicked] = useState<File | null>(null)
   /** Two taps to delete: a photo is evidence, and the second tap is cheaper than a stray first. */
   const [confirming, setConfirming] = useState(false)
+  const [uploadResult, setUploadResult] = useState<EvidenceUploadResponse | null>(null)
+  /** Remember acknowledgement across an idempotent retry of the same File object. */
+  const acknowledgedFiles = useRef<WeakSet<File>>(new WeakSet())
 
   /**
    * A thumbnail of the picture he actually chose.
@@ -145,23 +155,44 @@ export function PhotoSlot({
   /**
    * The cloud read, isolated so nothing it does can reach the upload path.
    *
-   * Every failure mode ends the same way: tell the caller it did not work, and let the on-device
-   * reading stand. A model that is down, a cap that is reached, an image too big to send and a
-   * phone with no signal are one outcome from the driver's side — he keeps the reader in his hand.
+   * Every failure leaves the on-device reading standing, but a structured server reason survives:
+   * a timeout is worth retrying while `no_fields`/`refused` asks the driver to check the pixels.
+   * Only transport/local preparation failures collapse to `unavailable`, because no server answer
+   * exists to preserve in those cases.
    */
   const runCloudRead = useCallback(
     async (file: File) => {
       if (!ocrField || !onCloudRead) return
-      onCloudRead({ status: 'reading' })
+      onCloudRead({ status: 'reading' }, file)
       const res = await readInCloud(api, shiftId, ocrField, file)
-      onCloudRead(res ? { status: 'read', response: res } : { status: 'failed', reason: 'unavailable' })
+      onCloudRead(
+        res === null
+          ? { status: 'failed', reason: 'unavailable' }
+          : res.ok
+            ? { status: 'read', response: res }
+            : { status: 'failed', reason: res.reason ?? 'unavailable' },
+        file,
+      )
     },
     [api, shiftId, ocrField, onCloudRead],
   )
 
   const onPick = useCallback(
     async (file: File) => {
+      const pickedAge = photoAgeFromClockSkew(file.lastModified > 0 ? Date.now() - file.lastModified : null)
+      if (pickedAge.kind === 'stale' && !acknowledgedFiles.current.has(file)) {
+        const ageLabel =
+          pickedAge.minutes < 60 ? `${pickedAge.minutes}m` : `${Math.round(pickedAge.minutes / 60)}h`
+        if (!window.confirm(t.shift.staleEvidenceConfirm.replace('{n}', ageLabel))) {
+          // A declined replacement must not erase the slot that is already attached. Nothing has
+          // reached the server yet, so leave every visible/local completion state untouched.
+          if (ref.current) ref.current.value = ''
+          return
+        }
+        acknowledgedFiles.current.add(file)
+      }
       setPicked(file)
+      setUploadResult(null)
       setState('working')
       // READ FIRST, UPLOAD SECOND. Tesseract runs entirely on-device, so reading is the one part
       // of this that never needed the network — and it used to be gated behind the upload. On 2G
@@ -195,17 +226,44 @@ export function PhotoSlot({
         //
         // `lastModified` is 0 on some pickers rather than absent; treat that as "unknown" and send
         // nothing, because a 1970 timestamp would read as a fifty-year-old photo.
-        await api.putBytes(uploadEvidencePath(shiftId, pkg, slot), bytes, mimeType, {
-          ...(file.lastModified > 0 ? { 'x-client-taken-at': String(file.lastModified) } : {}),
-        })
+        const result = await api.putBytes<EvidenceUploadResponse>(
+          uploadEvidencePath(shiftId, pkg, slot),
+          bytes,
+          mimeType,
+          evidenceUploadHeaders(
+            file.lastModified > 0 ? file.lastModified : null,
+            acknowledgedFiles.current.has(file),
+          ),
+        )
+        let accepted = result
+        if (result.reusedFromShiftId && !result.staleAcknowledged && !acknowledgedFiles.current.has(file)) {
+          if (!window.confirm(t.shift.reusedEvidenceConfirm)) {
+            setUploadResult(result)
+            setState('error')
+            return
+          }
+          await api.post(acknowledgeStaleEvidencePath(shiftId, pkg, slot), {
+            mediaId: result.mediaId,
+            attachmentToken: result.attachmentToken,
+          })
+          acknowledgedFiles.current.add(file)
+          accepted = { ...result, staleAcknowledged: true }
+        }
+        setUploadResult(accepted)
+        onUploadResult?.(slot, accepted)
+        // Hand the exact File object through with the server attachment. BMS uses object identity
+        // as its generation token: a read that belongs to an older gallery pick must never be
+        // persisted against this attachment merely because it targets the same slot name.
+        await onUploaded(slot, accepted, file)
+        // Keep replacement disabled until any evidence-dependent persistence (notably BMS) has
+        // completed. Otherwise a new file can race the old slot's completion callback.
         setState('done')
-        onUploaded(slot)
       } catch {
         // The upload is idempotent, so the fix is simply to tap again — with the same file.
         setState('error')
       }
     },
-    [api, shiftId, pkg, slot, onUploaded, onImage],
+    [api, t, shiftId, pkg, slot, onUploaded, onUploadResult, onImage, ocrField, onCloudRead, runCloudRead],
   )
 
   /**
@@ -222,6 +280,7 @@ export function PhotoSlot({
     try {
       await api.del(uploadEvidencePath(shiftId, pkg, slot))
       setPicked(null)
+      setUploadResult(null)
       setState('idle')
       onDelete(slot)
     } catch {
@@ -230,7 +289,13 @@ export function PhotoSlot({
     }
   }, [api, shiftId, pkg, slot, onDelete])
 
-  const open = (): void => (state === 'error' && picked ? void onPick(picked) : ref.current?.click())
+  const open = (): void => {
+    // One file owns the local/cloud/upload race until it reaches a terminal state. Opening the
+    // picker while that work is running could let an older upload complete over a newer choice.
+    if (state === 'working') return
+    if (state === 'error' && picked) void onPick(picked)
+    else ref.current?.click()
+  }
   const input = (
     <input
       ref={ref}
@@ -244,6 +309,9 @@ export function PhotoSlot({
       }}
     />
   )
+  const age = uploadResult === null ? null : photoAgeFromClockSkew(uploadResult.clockSkewMs)
+  const ageWarning =
+    age?.kind === 'stale' ? t.shift.photoOld.replace('{n}', age.minutes < 60 ? `${age.minutes}m` : `${Math.round(age.minutes / 60)}h`) : null
 
   if (variant === 'tile') {
     return (
@@ -302,14 +370,17 @@ export function PhotoSlot({
           {confirming ? t.shift.removePhotoConfirm : t.shift.removePhoto}
         </button>
       ) : null}
+      {ageWarning ? <p className="mt-1 text-center text-[10px] text-amber-700">{ageWarning}</p> : null}
       </div>
     )
   }
 
   return (
+    <div className="flex flex-col gap-1">
     <button
+      type="button"
       // A failed upload retries the file already in hand; only an untouched tile opens the picker.
-      onClick={() => (state === 'error' && picked ? void onPick(picked) : ref.current?.click())}
+      onClick={open}
       className={`flex min-h-20 items-center justify-between rounded-2xl border-2 border-dashed px-4 ${
         state === 'done'
           ? 'border-emerald-400 bg-emerald-50'
@@ -342,5 +413,7 @@ export function PhotoSlot({
         }}
       />
     </button>
+    {ageWarning ? <p className="text-center text-xs text-amber-700">{ageWarning}</p> : null}
+    </div>
   )
 }

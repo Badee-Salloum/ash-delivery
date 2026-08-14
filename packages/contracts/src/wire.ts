@@ -193,7 +193,7 @@ export const addOrderRequest = z.object({
   /** «HH:MM» off the dashboard: what a log row is paired to. */
   occurredMinute: z
     .string()
-    .regex(/^[0-2]\d:[0-5]\d$/)
+    .regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, 'expected HH:MM (00:00-23:59)')
     .nullable()
     .default(null),
 })
@@ -204,14 +204,50 @@ export const addOrderRequest = z.object({
  */
 export const closeFiguresRequest = z.object({
   odometerKm: z.number().int().min(0).nullable().default(null),
+  odometerAnomalyConfirmed: z.boolean().default(false),
   cashDeclared: moneySchema.nullable().default(null),
   walletDeclared: moneySchema.nullable().default(null),
 })
 
 /** «HH:MM» as read off a screenshot. `''` on a movement means the clock was not legible. */
-const minuteSchema = z.string().regex(/^[0-2]\d:[0-5]\d$/)
+const minuteSchema = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, 'expected HH:MM (00:00-23:59)')
 /** «YYYY-MM-DD», the day PRINTED on the screen — already local, never converted. */
-const isoDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+const isoDateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine((value) => {
+    const [year, month, day] = value.split('-').map(Number) as [number, number, number]
+    const parsed = new Date(Date.UTC(year, month - 1, day))
+    return (
+      parsed.getUTCFullYear() === year &&
+      parsed.getUTCMonth() === month - 1 &&
+      parsed.getUTCDate() === day
+    )
+  }, 'expected a real calendar date')
+
+/** Server-derived classification against the immutable open/close instants. */
+export const operationWindowStatusSchema = z.enum([
+  'in_window',
+  'pre_open',
+  'post_close',
+  'open_minute_boundary',
+  'close_minute_boundary',
+  'unknown',
+])
+
+const cashDeductionRequest = z.object({
+  /** Stable across overlapping OCR pages and retries. */
+  operationKey: z.string().min(1).max(160),
+  /** Positive magnitude; the source screen's minus sign describes this operation kind. */
+  amount: moneySchema.refine((v) => v > 0n, 'cash deduction must be positive'),
+  occurredMinute: minuteSchema.nullable().default(null),
+  occurredDate: isoDateSchema.nullable().default(null),
+  source: z.enum(['manual', 'ocr', 'refused']).default('manual'),
+  amountOcr: moneySchema.refine((v) => v > 0n, 'OCR deduction must be positive').nullable().default(null),
+  amountStrip: z.string().max(65536).nullable().default(null),
+  pointA: z.string().max(200).nullable().default(null),
+  pointB: z.string().max(200).nullable().default(null),
+})
 
 const movementRole = z.enum(['yalago_cut', 'order_credit', 'unmatched'])
 
@@ -251,6 +287,7 @@ export const operationsRequest = z.object({
     )
     .max(400)
     .default([]),
+  cashDeductions: z.array(cashDeductionRequest).max(400).default([]),
   movements: z
     .array(
       z.object({
@@ -292,9 +329,26 @@ export const reviseOperationsRequest = z.object({
          * Refused below zero. `moneySchema` allows a sign because `walletAmount` genuinely needs
          * one, but a delivery fee does not: a negative fee flips Yallago's 20% cut into a credit
          * and lets BR1 be satisfied by arithmetic that describes nothing that happened. (The
-         * driver's own `addOrderRequest.fee` is still unguarded — a separate, older gap.)
+         * driver's own `addOrderRequest.fee` may still be negative for cached-PWA compatibility;
+         * the service stores that sign as a positive cash-deduction magnitude, never as an order.)
          */
         fee: moneySchema.refine((v) => v >= 0n, 'fee cannot be negative').optional(),
+        occurredMinute: minuteSchema.nullable().optional(),
+        occurredDate: isoDateSchema.nullable().optional(),
+        /** Required by the service whenever inclusion or timing is changed. */
+        reason: z.string().trim().min(1).max(500).optional(),
+      }),
+    )
+    .max(400)
+    .default([]),
+  cashDeductions: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        included: z.boolean().optional(),
+        occurredMinute: minuteSchema.nullable().optional(),
+        occurredDate: isoDateSchema.nullable().optional(),
+        reason: z.string().trim().min(1).max(500),
       }),
     )
     .max(400)
@@ -316,6 +370,10 @@ export const reviseOperationsRequest = z.object({
 
 export const endPackageRequest = z.object({
   odometerKm: z.number().int().min(0),
+  /** What the end reader produced before the driver's confirmation. Evidence, not a gate. */
+  odometerKmOcr: z.number().int().min(0).nullable().catch(null).default(null),
+  /** Explicit acknowledgement when the end value is below the opening value. */
+  odometerAnomalyConfirmed: z.boolean().default(false),
   batteryPercent: z.number().int().min(0).max(100).nullable(),
   cashDeclared: moneySchema,
   walletDeclared: moneySchema,
@@ -388,6 +446,7 @@ export const approveCloseRequest = z.object({
 export const forceCloseRequest = z.object({
   reason: z.string().min(1).max(500),
   odometerKm: z.number().int().min(0).nullable().default(null),
+  odometerAnomalyConfirmed: z.boolean().default(false),
   cashDeclared: moneySchema.nullable().default(null),
   walletDeclared: moneySchema.nullable().default(null),
 })
@@ -611,6 +670,8 @@ export type BatteryReadingFields = z.infer<typeof batteryReadingFields>
 
 export const batteryReadingRequest = batteryReadingFields.extend({
   batteryId: z.string().min(1),
+  /** Optional for cached PWAs; current clients use it to reject a replaced evidence generation. */
+  expectedMediaId: z.string().min(1).optional(),
 })
 
 export const putBatteryReadingsRequest = z.object({

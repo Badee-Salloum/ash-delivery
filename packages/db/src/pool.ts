@@ -38,6 +38,51 @@ neonTypes.setTypeParser(1700, refuseNumeric)
 export type Pool = pg.Pool
 export type PoolClient = pg.PoolClient
 
+interface TransactionBinding {
+  client: pg.PoolClient
+  actorId: string | null
+  requestId: string | null
+}
+
+const TRANSACTION_BINDING = Symbol('ash.transactionBinding')
+type BoundPool = pg.Pool & { [TRANSACTION_BINDING]?: TransactionBinding }
+
+const transactionBinding = (pool: pg.Pool): TransactionBinding | null =>
+  (pool as BoundPool)[TRANSACTION_BINDING] ?? null
+
+/**
+ * Present an already-open transaction as a Pool to existing repositories.
+ *
+ * Repositories in this package consistently use either `pool.query(...)` or `withTransaction(...)`.
+ * The proxy routes the former to the owning client, while `withTransaction` recognizes the marker
+ * below and joins the transaction instead of opening a nested BEGIN on another connection.
+ */
+export function bindPoolToTransaction(
+  pool: pg.Pool,
+  client: pg.PoolClient,
+  ctx: { actorId?: string | null; requestId?: string | null } = {},
+): pg.Pool {
+  const existing = transactionBinding(pool)
+  if (existing) {
+    if (existing.client !== client) throw new Error('cannot rebind a transaction-bound pool to another client')
+    return pool
+  }
+
+  const binding: TransactionBinding = {
+    client,
+    actorId: ctx.actorId ?? null,
+    requestId: ctx.requestId ?? null,
+  }
+  return new Proxy(pool, {
+    get(target, property) {
+      if (property === TRANSACTION_BINDING) return binding
+      if (property === 'query') return client.query.bind(client)
+      const value = Reflect.get(target, property, target)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+}
+
 /** Neon connection strings carry `neon.tech` in the host; anything else is a plain Postgres. */
 const isNeon = (connectionString: string): boolean => /[.@]neon\.tech\b/i.test(connectionString)
 
@@ -83,6 +128,17 @@ export async function withTransaction<T>(
   ctx: { actorId?: string | null; requestId?: string | null },
   fn: (client: pg.PoolClient) => Promise<T>,
 ): Promise<T> {
+  const bound = transactionBinding(pool)
+  if (bound) {
+    if (ctx.actorId && bound.actorId && ctx.actorId !== bound.actorId) {
+      throw new Error(`nested transaction actor ${ctx.actorId} differs from outer actor ${bound.actorId}`)
+    }
+    if (ctx.requestId && bound.requestId && ctx.requestId !== bound.requestId) {
+      throw new Error(`nested transaction request ${ctx.requestId} differs from outer request ${bound.requestId}`)
+    }
+    return fn(bound.client)
+  }
+
   const client = await pool.connect()
   try {
     await client.query('BEGIN')

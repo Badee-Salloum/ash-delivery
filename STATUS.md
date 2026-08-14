@@ -1,17 +1,18 @@
 # STATUS — where ASH Delivery stands
 
-Written for you coming back to this cold. **471 tests + 6 CI guards green, both front-ends build.**
-Run `pnpm check` to confirm, `pnpm build:apps` to build the UIs.
+Written for you coming back to this cold. **Validated 2026-08-14 on Node 24:** `pnpm check`, both
+front-end builds, the standalone API build, PostgreSQL 17's 40/40 tests, and all database guards
+are green.
 
 ---
 
 ## The one-line answer
 
-**Bundle 1a is feature-complete AND live on Vercel + Neon + Vercel Blob.** Backend, both
-front-ends, database, and evidence storage are all deployed and verified end to end
-(`POST /api/auth/login` → 200 with a working session cookie). What remains is operational, not
-code: send the client samples, prove the DB guards on Neon via psql, calibrate BR1, enrol admin
-2FA, and have someone fluent review the Arabic.
+**Bundle 1a and the shift-window/cash-deduction release are live on Vercel + Neon + Vercel Blob.**
+The API, both front-ends, database, and evidence storage are deployed; migrations `0028`–`0030`
+and public smoke tests are complete. Recovery has also been rehearsed from a logical backup on an
+isolated Neon database. What remains is operational: calibrate BR1 with client samples, complete
+admin security enrolment, review the Arabic, and establish off-site database and evidence copies.
 
 ## Live URLs (team `hadis-projects-3c86ccdb`, all public)
 
@@ -21,8 +22,9 @@ code: send the client samples, prove the DB guards on Neon via psql, calibrate B
 | Driver PWA | https://ash-driver.vercel.app |
 | API | https://ash-api-xi.vercel.app |
 
-Neon (Postgres 18, eu-central-1) is migrated and bootstrapped with the §3 permission matrix, the
-Damascus branch, the default tier table, and two admins (`admin`/system_admin, `gm`/general_manager)
+Neon (Postgres 18, eu-central-1) has all **30 migrations** and is bootstrapped with the §3
+permission matrix, the Damascus branch, the default tier table, and two admins
+(`admin`/system_admin, `gm`/general_manager)
 — **no demo data in the live ledger.** Full deploy detail and redeploy steps:
 [docs/DEPLOY-VERCEL-NEON.md](docs/DEPLOY-VERCEL-NEON.md).
 
@@ -32,28 +34,31 @@ Damascus branch, the default tier table, and two admins (`admin`/system_admin, `
 
 | Layer | State |
 | --- | --- |
-| **Domain** (money, BR1, tiers, ledger, shifts, RBAC, dates, FX, week, fleet, TOTP) | ✅ 290 tests, property-based |
-| **API** — 46 endpoints across A, B, C, E, F, G | ✅ 149 tests over real HTTP |
-| **PostgreSQL adapters** (all 14 ports) | ✅ shared conformance suite, runs in CI |
-| **Shared client** (API client, i18n ar/en, order-entry model) | ✅ 15 tests |
-| **Driver PWA** | ✅ builds, 70 KB gzip, service worker |
-| **Admin console** | ✅ builds, 70 KB gzip |
+| **Domain** (money, BR1, tiers, ledger, shifts, RBAC, dates, FX, week, fleet, TOTP) | ✅ 404 tests, property-based |
+| **API** — A, B, C, E, F, G plus operation-window and evidence flows | ✅ 513 tests over real HTTP |
+| **PostgreSQL adapters** | ✅ 40/40 on PostgreSQL 17; isolated Neon restore/fingerprint rehearsal passed |
+| **In-memory adapters** | ✅ 46 tests against the shared contracts |
+| **Shared client** (API client, i18n ar/en, order-entry model) | ✅ 199 tests |
+| **Driver PWA** | ✅ 188 tests, builds, service worker, live smoke passed |
+| **Admin console** | ✅ 6 tests, builds, live smoke passed |
 
 ### By SRS section — all in scope for Bundle 1a, all done
 
 - **A** auth (incl. **2FA/TOTP**), RBAC-as-data, audit, settings, branches, **notification bell**
 - **B** drivers, vehicles, documents + expiry, assignment
-- **C** shift lifecycle, both gates, **real photo evidence**, BR1 + ranked causes, **C-7 review UI**
+- **C** shift lifecycle, canonical operation window, cash deductions, both gates, end-odo OCR,
+  evidence provenance, BR1 + ranked causes, **C-7 review UI**
 - **E** funds tree, double-entry, FX, **cash count**, **manual entries + corrections**, Sunday close
 - **F** tier engine, whole + marginal, day true-up, **effective-dated admin + what-if simulation**
 - **G** expenses, cost centres, receipt ceiling
 - **I-1** the minimal ops dashboard (in scope per the brief)
 
-### Six CI guards, every one negative-tested
+### Seven repository guards, plus the PostgreSQL guard harness
 
 domain-purity · SQL-correctness · wire-money · TypeScript-strippability · **physical-CSS (RTL)** ·
-**i18n-parity**. Each is verified to *fail* on an injected violation — a guard nobody has watched
-fail is decoration.
+**i18n-parity** · **glyph-corpus parity**. The database harness separately attempts forbidden
+ledger and locked-week writes on a disposable database; it passed on PostgreSQL 17. Never point
+conformance at production because it truncates application tables.
 
 ---
 
@@ -61,7 +66,7 @@ fail is decoration.
 
 | Item | Effort | Note |
 | --- | --- | --- |
-| Visual QA of the UIs | — | The apps typecheck and build but have **not been run in a browser** here (needs the API + a browser). |
+| Full visual/device QA of the UIs | — | Public route and API smoke tests pass; exhaustive browser, camera, offline, and install testing is still owed. |
 | Tier-admin & audit-viewer **screens** | ~1 day | The APIs exist and are tested; the admin console does not yet surface them. |
 | QR code on 2FA enrolment | ~1 h | The secret is shown for manual entry; a QR renderer is a nicety. |
 | Attendance (B-4) | ~0.5 day | Table only. |
@@ -69,20 +74,29 @@ fail is decoration.
 
 ---
 
-## Before go-live — the operational checklist
+## Outstanding operational checklist
 
 1. **Send `docs/client-request-samples.md`.** Still the highest-value hour. BR1's zero tolerance
    is measured against a wallet number Yallago produces; keep `BR1_SPLIT_GATE=advisory` until it
    is calibrated against one real shift.
-2. **Run `verify-guards.sql` against Neon.** Proven on stock Postgres 17, not Neon. Expected to
-   pass; expected is not evidence.
-3. ~~**Pick object storage**~~ **Done — Vercel Blob (private).** `BLOB_DRIVER=vercel`, a
+2. ~~**Prove the database release and restore path.**~~ **Done** on PostgreSQL 17 and isolated Neon;
+   the latest restore reproduced 2,360 rows across 52 tables. Destructive suites stay off production.
+3. ~~**Pick object storage.**~~ **Done — Vercel Blob (private).** `BLOB_DRIVER=vercel`, a
    `VercelBlobStore` adapter behind the `BlobStore` port, store linked to the `ash-api` project so
    `BLOB_READ_WRITE_TOKEN` is injected. The durable-storage boot guard accepts it; evidence photos
    cannot silently vanish. (`s3` remains available for a VPS deploy.)
 4. **Have a fluent speaker review the Arabic** — ~150 keys, including the BR1 cause explanations a
    manager reads under time pressure. CI checks key parity, not that the financial Arabic is right.
-5. **Create the first admin by hand** — the seed refuses to run against production.
+5. **Complete admin password changes and 2FA enrolment.** The production floor already contains the
+   real admins; the demo seed remains forbidden in production.
+6. **Move backups off the operator laptop and copy Vercel Blob evidence.** A local logical backup
+   and a provider snapshot do not cover the same failures.
+7. ~~**Rotate the Neon owner credential and secure database credentials.**~~ **Done:** the old
+   direct and pooled credentials are rejected, and runtime/owner secrets are DPAPI-protected outside
+   the repository.
+8. **Rotate the Vercel token once in the personal-account Dashboard.** Its token-creation API
+   returned forbidden, so the working token was intentionally not revoked. Create and test the
+   successor first, then revoke the predecessor; this is the only remaining credential follow-up.
 
 Full deploy steps: `docs/DEPLOY-VERCEL-NEON.md`.
 
@@ -105,10 +119,12 @@ Each was invisible to reading:
 
 ```bash
 pnpm install
-pnpm check          # typecheck + 6 guards + 471 tests (~40 s, no Docker)
+pnpm check          # Node 24: typecheck + 7 repository guards + unit/API/UI tests
 pnpm build:apps     # build the driver PWA and admin console
+node scripts/build-api.mjs
 pnpm start          # API on :3000 (in-memory store)
-./scripts/db-verify.sh   # prove the DB guards (needs Docker)
+./scripts/db-verify.sh   # disposable PostgreSQL only; prove the DB guards (needs Docker)
+DATABASE_URL='<disposable-db>' pnpm --filter @ash/db test   # NEVER production: truncates tables
 ```
 
 Key docs: [CLAUDE.md](CLAUDE.md) · [ASSUMPTIONS.md](ASSUMPTIONS.md) · [TESTS.md](TESTS.md) ·

@@ -1,11 +1,17 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import L, { type CircleMarker, type LeafletMouseEvent, type Map as LeafletMap } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { type OcrScalar, type PhotoAge, br1Verdict, photoAge, ocrReadingDelta, slotLabel, splitSlot, formatDateTime } from '@ash/client'
+import { type OcrScalar, type PhotoAge, br1Verdict, ocrReadingDelta, slotLabel, splitSlot, formatDateTime } from '@ash/client'
 import { add, formatMinor, parseMinor, sub } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
+import { evidenceReviewWarning } from '../evidence-warning.ts'
 import { useConfirm, useToast } from '../feedback.tsx'
+import {
+  type OperationWindowStatus,
+  countUnresolvedWindowRows,
+  firstMoneyField,
+} from '../operation-window.ts'
 import { FOCUS_RING, Badge, Button, Card, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
 
 /** Where the map opens when no point has been pinned yet. */
@@ -32,6 +38,9 @@ interface Review {
   vehicleId: string
   shiftNo: number
   businessDate: string
+  /** Actual operation-window edges. Optional during a staggered API/admin rollout. */
+  openApprovedAt?: string | null
+  submittedAt?: string | null
   startPackage: {
     odometerKm: number | null
     batteryPercent: number | null
@@ -44,6 +53,9 @@ interface Review {
   }
   endPackage: {
     odometerKm: number | null
+    odometerKmOcr?: number | null
+    odometerAnomalyConfirmedAt?: string | null
+    odometerAnomalyConfirmedBy?: string | null
     batteryPercent: number | null
     cashDeclared: string | null
     walletDeclared: string | null
@@ -69,6 +81,25 @@ interface Review {
     occurredMinute?: string | null
     /** The day the SCREEN said — not always the shift's day, because the list scrolls back. */
     occurredDate?: string | null
+    windowStatus?: OperationWindowStatus
+    decisionReason?: string | null
+    decidedBy?: string | null
+  }>
+  /** A negative Recent-Orders row: positive magnitude, but a distinct cash deduction operation. */
+  cashDeductions?: Array<{
+    id: string
+    operationKey: string
+    amount: string
+    occurredMinute: string | null
+    occurredDate: string | null
+    source: 'manual' | 'ocr'
+    amountOcr?: string | null
+    pointA: string | null
+    pointB: string | null
+    included: boolean
+    windowStatus: OperationWindowStatus
+    decisionReason: string | null
+    decidedBy?: string | null
   }>
   /** «سجل المدفوعات» as read. Only the rows no order explains are a term in BR1. */
   movements: Array<{
@@ -96,6 +127,13 @@ interface Review {
     clientTakenAt?: string | null
     /** The server's receipt — authoritative. */
     receivedAt?: string | null
+    /** When these bytes were attached to this exact shift/slot, independent of deduplication. */
+    attachedAt?: string | null
+    /** An earlier shift that already used these immutable bytes. */
+    reusedFromShiftId?: string | null
+    /** Explicit driver acknowledgement for this old/reused attachment. */
+    staleAcknowledgedAt?: string | null
+    staleAcknowledgedBy?: string | null
   }>
   decisions: Array<{ gate: 'open' | 'close'; decision: 'approved' | 'rejected' | 'rephoto_requested'; notes: string | null; decidedAt: string }>
   br1: {
@@ -109,6 +147,7 @@ interface Review {
     minWalletBalance: string
     causes: Array<{ code: string; confidence: string; amount: string; candidateOrderNos: string[] }>
     ordersHash: string
+    cashDeductionTotal?: string
   }
 }
 
@@ -159,6 +198,12 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
    * whole app goes white. Hooks stay above the guard, unconditionally.
    */
   const [showAllOrders, setShowAllOrders] = useState(false)
+
+  /**
+   * One explicit, visible reason for every window decision. The server audits it with the row;
+   * keeping it above the tables also makes the manager state the reason before a checkbox moves.
+   */
+  const [operationReason, setOperationReason] = useState('')
 
   const [loadError, setLoadError] = useState<string | null>(null)
   const load = useCallback(() => {
@@ -213,6 +258,26 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     )
   }
 
+  const operationCopy = operationReviewCopy(lang)
+  const cashDeductions = review.cashDeductions ?? []
+  const unresolvedWindowCount = countUnresolvedWindowRows(review.orders, cashDeductions)
+  const operationReasonReady = operationReason.trim().length > 0
+  const deductionSettlement = {
+    grossShare: firstMoneyField(settlement, ['grossDriverShare', 'driverShareGross']),
+    total:
+      firstMoneyField(settlement, ['cashDeductionTotal', 'totalCashDeduction']) ??
+      review.br1.cashDeductionTotal ??
+      null,
+    netShare: firstMoneyField(settlement, ['netDriverShare', 'driverShareNet']),
+    receivable: firstMoneyField(settlement, [
+      'cashDeductionReceivable',
+      'deductionReceivable',
+      'cashDeductionOverflow',
+      'deductionOverflow',
+    ]),
+  }
+  const hasDeductionSettlement = Object.values(deductionSettlement).some((value) => value !== null)
+
   /**
    * WHICH ORDERS DESERVE THE MANAGER'S EYE.
    *
@@ -224,7 +289,12 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
    * away. See the button above the table.
    */
   const flagged = (o: Review['orders'][number]): boolean =>
-    o.source === 'ocr' || o.included === false || o.kind === 'manual' || (o.feeOcr != null && o.feeOcr !== o.fee)
+    o.source === 'ocr' ||
+    o.included === false ||
+    o.kind === 'manual' ||
+    (o.windowStatus !== undefined && o.windowStatus !== 'in_window') ||
+    Boolean(o.decisionReason) ||
+    (o.feeOcr != null && o.feeOcr !== o.fee)
 
   /**
    * The day in the order it happened.
@@ -292,6 +362,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   async function approve(): Promise<void> {
     if (!review) return
     const opening = review.state === 'awaiting_open_approval'
+    if (!opening && unresolvedWindowCount > 0) return
     // Money leaves the office on this click, in an amount typed into two boxes that silently
     // default to zero. It is read back to the manager before it is committed.
     if (opening) {
@@ -463,6 +534,17 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         <Badge tone="slate">{t.shift.states[review.state as keyof typeof t.shift.states] ?? review.state}</Badge>
       </div>
 
+      <OperationWindowAdvisory
+        openApprovedAt={review.openApprovedAt ?? null}
+        submittedAt={review.submittedAt ?? null}
+        unresolvedCount={unresolvedWindowCount}
+        reason={operationReason}
+        onReasonChange={setOperationReason}
+        editable={underReview && !busy}
+        lang={lang}
+        copy={operationCopy}
+      />
+
       {/* ── The BR1 panel, pinned first — it is what the decision hinges on ───────────────
           Only once the shift is AT a gate. Mid-shift the driver has declared no closing cash or
           wallet yet, those nulls are read as zero, and the panel would show an alarming red
@@ -555,6 +637,31 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       {settlement ? (
         <Card title={t.settlement.title}>
           <p className="text-xs text-slate-600">{t.settlement.hint}</p>
+
+          {hasDeductionSettlement ? (
+            <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+              <p className="text-xs font-semibold text-amber-900">{operationCopy.deductionSettlement}</p>
+              <div className="mt-2 grid grid-cols-2 gap-2 lg:grid-cols-4">
+                {(
+                  [
+                    [operationCopy.grossShare, deductionSettlement.grossShare],
+                    [operationCopy.cashDeductionTotal, deductionSettlement.total],
+                    [operationCopy.netShare, deductionSettlement.netShare],
+                    [operationCopy.cashReceivable, deductionSettlement.receivable],
+                  ] as const
+                ).flatMap(([label, value]) =>
+                  value === null
+                    ? []
+                    : [
+                        <div key={label} className="rounded-md bg-white p-2">
+                          <div className="text-xs text-slate-500">{label}</div>
+                          <Money value={value} className="mt-1 block text-lg font-bold" />
+                        </div>,
+                      ],
+                )}
+              </div>
+            </div>
+          ) : null}
 
           {/* The three figures the owner asked for, biggest first — «كم يجب ان يسحب و يدخل
               للصندوق وكم يجب ان يعاد للسائق». */}
@@ -650,9 +757,25 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             <Field label={t.shift.cashHandover} value={review.endPackage.cashDeclared ?? '—'} />
             <Field label={t.shift.walletBalance} value={review.endPackage.walletDeclared ?? '—'} />
           </dl>
+          {review.endPackage.odometerAnomalyConfirmedAt ? (
+            <p className="mt-2 text-xs font-medium text-red-700">
+              {t.approval.odometerAnomalyConfirmed}: {' '}
+              <span className="num">{formatDateTime(review.endPackage.odometerAnomalyConfirmedAt, lang)}</span>
+              {' · '}{review.endPackage.odometerAnomalyConfirmedBy ?? '—'}
+            </p>
+          ) : null}
           {isClose ? <ReviseFigures shiftId={review.id} review={review} onRevised={load} /> : null}
-          {/* SRS D-3: what the driver changed from the wallet OCR. */}
-          <OcrDeltaLines deltas={scalarDelta(t.shift.walletBalance, review.endPackage.walletDeclaredOcr, review.endPackage.walletDeclared)} />
+          {/* Both close readers now preserve their baseline; a manual correction remains visible. */}
+          <OcrDeltaLines
+            deltas={[
+              ...scalarDelta(
+                t.shift.odometer,
+                review.endPackage.odometerKmOcr == null ? null : String(review.endPackage.odometerKmOcr),
+                review.endPackage.odometerKm === null ? null : String(review.endPackage.odometerKm),
+              ),
+              ...scalarDelta(t.shift.walletBalance, review.endPackage.walletDeclaredOcr, review.endPackage.walletDeclared),
+            ]}
+          />
           <PhotoRow pkg="end" media={review.media} />
           <BatteryReadings readings={review.endPackage.batteries} pkg="end" onManagerRead={managerRead} />
         </Card>
@@ -671,6 +794,94 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                 </td>
                 <td className="px-3 py-1 num">
                   {s.inSerial ?? '—'} · {s.inPercent ?? '—'}%
+                </td>
+              </tr>
+            ))}
+          </Table>
+        </Card>
+      ) : null}
+
+      {cashDeductions.length > 0 ? (
+        <Card title={`${operationCopy.cashDeductions} — ${cashDeductions.length}`}>
+          <p className="mb-2 text-xs text-slate-600">{operationCopy.cashDeductionHint}</p>
+          <Table
+            head={[
+              operationCopy.included,
+              operationCopy.time,
+              operationCopy.route,
+              operationCopy.amount,
+              operationCopy.source,
+              operationCopy.windowStatus,
+            ]}
+          >
+            {cashDeductions.map((deduction) => (
+              <tr key={deduction.id} className={deduction.included ? '' : 'opacity-60'}>
+                <td className="px-3 py-1">
+                  <input
+                    type="checkbox"
+                    checked={deduction.included}
+                    disabled={!underReview || busy || !operationReasonReady}
+                    title={!operationReasonReady ? operationCopy.reasonRequired : undefined}
+                    onChange={(event) =>
+                      void reviseOps({
+                        cashDeductions: [
+                          {
+                            id: deduction.id,
+                            included: event.target.checked,
+                            reason: operationReason.trim(),
+                          },
+                        ],
+                      })
+                    }
+                    aria-label={operationCopy.included}
+                    className="size-5 accent-emerald-600"
+                  />
+                </td>
+                <td className="num whitespace-nowrap px-3 py-1">
+                  <div>{deduction.occurredDate ?? '—'}</div>
+                  <div className="text-xs text-slate-500">{deduction.occurredMinute ?? '—'}</div>
+                </td>
+                <td className="px-3 py-1 text-xs text-slate-600">
+                  {[deduction.pointA, deduction.pointB].filter(Boolean).join(' ← ') || '—'}
+                </td>
+                <td className="px-3 py-1">
+                  <span dir="ltr" className="inline-flex items-baseline font-semibold text-red-700">
+                    −<Money value={deduction.amount} />
+                  </span>
+                  <OcrDeltaLines
+                    deltas={scalarDelta(operationCopy.amount, deduction.amountOcr ?? null, deduction.amount)}
+                  />
+                </td>
+                <td className="px-3 py-1">
+                  {deduction.source === 'ocr' ? <Badge tone="slate">OCR</Badge> : operationCopy.manual}
+                </td>
+                <td className="min-w-64 px-3 py-1">
+                  <WindowStatusBadge status={deduction.windowStatus} copy={operationCopy} />
+                  {!deduction.included ? <span className="ms-1"><Badge tone="slate">{operationCopy.excluded}</Badge></span> : null}
+                  {deduction.decisionReason ? (
+                    <p className="mt-1 text-xs text-slate-600">{operationCopy.decisionReason}: {deduction.decisionReason}</p>
+                  ) : null}
+                  {underReview ? (
+                    <WindowCorrection
+                      occurredDate={deduction.occurredDate}
+                      occurredMinute={deduction.occurredMinute}
+                      disabled={busy || !operationReasonReady}
+                      reasonRequired={!operationReasonReady}
+                      copy={operationCopy}
+                      onSave={(occurredDate, occurredMinute) =>
+                        reviseOps({
+                          cashDeductions: [
+                            {
+                              id: deduction.id,
+                              occurredDate,
+                              occurredMinute,
+                              reason: operationReason.trim(),
+                            },
+                          ],
+                        })
+                      }
+                    />
+                  ) : null}
                 </td>
               </tr>
             ))}
@@ -700,7 +911,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             <Money value={hiddenTotal} className="font-semibold text-slate-700" />
           </button>
         ) : null}
-        <Table head={['', '#', t.orders.route, t.orders.payMode, t.orders.fee]}>
+        <Table head={['', '#', t.orders.route, t.orders.payMode, t.orders.fee, operationCopy.windowStatus]}>
           {shownOrders.map((o, i) => (
             <tr key={o.providerOrderNo} className={o.included === false ? 'opacity-60' : ''}>
               {/* Every operation shows, checked or not, and an excluded row keeps its PLACE —
@@ -709,8 +920,19 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                 <input
                   type="checkbox"
                   checked={o.included !== false}
-                  disabled={!underReview || busy}
-                  onChange={(e) => void reviseOps({ orders: [{ providerOrderNo: o.providerOrderNo, included: e.target.checked }] })}
+                  disabled={!underReview || busy || !operationReasonReady}
+                  title={!operationReasonReady ? operationCopy.reasonRequired : undefined}
+                  onChange={(e) =>
+                    void reviseOps({
+                      orders: [
+                        {
+                          providerOrderNo: o.providerOrderNo,
+                          included: e.target.checked,
+                          reason: operationReason.trim(),
+                        },
+                      ],
+                    })
+                  }
                   aria-label={t.orders.included}
                   className="size-5 accent-emerald-600"
                 />
@@ -720,7 +942,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                   meaningless, and printing it here told the manager nothing he could check against
                   the driver's screenshot. The clock and the two places are what both of them see. */}
               <td className="px-3 py-1">
-                <span className="num">{o.occurredMinute ?? '—'}</span>
+                <span className="num">{o.occurredDate ?? review.businessDate.slice(0, 10)} · {o.occurredMinute ?? '—'}</span>
                 {o.source === 'ocr' ? <span className="ms-1.5 align-middle"><Badge tone="slate">OCR</Badge></span> : null}
                 {o.included === false ? <span className="ms-1.5 align-middle"><Badge tone="slate">{t.orders.excluded}</Badge></span> : null}
                 {(o.points ?? []).length > 0 ? (
@@ -761,6 +983,39 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                     ) : null}
                     {o.notes ? <span>{o.notes}</span> : null}
                   </div>
+                ) : null}
+              </td>
+              <td className="min-w-64 px-3 py-1">
+                {o.kind === 'manual' ? (
+                  <Badge tone="sky">{operationCopy.manualOutsideWindow}</Badge>
+                ) : o.windowStatus ? (
+                  <WindowStatusBadge status={o.windowStatus} copy={operationCopy} />
+                ) : (
+                  <span className="text-xs text-slate-400">—</span>
+                )}
+                {o.decisionReason ? (
+                  <p className="mt-1 text-xs text-slate-600">{operationCopy.decisionReason}: {o.decisionReason}</p>
+                ) : null}
+                {underReview && o.kind !== 'manual' ? (
+                  <WindowCorrection
+                    occurredDate={o.occurredDate ?? null}
+                    occurredMinute={o.occurredMinute ?? null}
+                    disabled={busy || !operationReasonReady}
+                    reasonRequired={!operationReasonReady}
+                    copy={operationCopy}
+                    onSave={(occurredDate, occurredMinute) =>
+                      reviseOps({
+                        orders: [
+                          {
+                            providerOrderNo: o.providerOrderNo,
+                            occurredDate,
+                            occurredMinute,
+                            reason: operationReason.trim(),
+                          },
+                        ],
+                      })
+                    }
+                  />
                 ) : null}
               </td>
             </tr>
@@ -884,10 +1139,15 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           {isClose && !review.br1.balanced ? (
             <p className="mb-2 text-sm font-medium text-red-700">{t.approval.cannotApproveUnbalanced}</p>
           ) : null}
+          {isClose && unresolvedWindowCount > 0 ? (
+            <p className="mb-2 text-sm font-medium text-amber-800">
+              {operationCopy.cannotApproveUnknown.replace('{n}', String(unresolvedWindowCount))}
+            </p>
+          ) : null}
           <div className="flex flex-wrap gap-3">
             <Button
               variant="success"
-              disabled={busy || (isClose && !review.br1.balanced)}
+              disabled={busy || (isClose && (!review.br1.balanced || unresolvedWindowCount > 0))}
               onClick={approve}
               className="flex-1"
             >
@@ -916,6 +1176,239 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   )
 }
 
+interface OperationReviewCopy {
+  windowTitle: string
+  windowHint: string
+  opened: string
+  submitted: string
+  notSubmitted: string
+  unresolved: string
+  managerReason: string
+  reasonPlaceholder: string
+  reasonRequired: string
+  cashDeductions: string
+  cashDeductionHint: string
+  included: string
+  excluded: string
+  time: string
+  date: string
+  minute: string
+  route: string
+  amount: string
+  source: string
+  manual: string
+  windowStatus: string
+  decisionReason: string
+  correctTiming: string
+  saveTiming: string
+  manualOutsideWindow: string
+  cannotApproveUnknown: string
+  deductionSettlement: string
+  grossShare: string
+  cashDeductionTotal: string
+  netShare: string
+  cashReceivable: string
+  statuses: Record<OperationWindowStatus, string>
+}
+
+function operationReviewCopy(lang: 'ar' | 'en'): OperationReviewCopy {
+  if (lang === 'en') {
+    return {
+      windowTitle: 'Operations window',
+      windowHint:
+        'All provider operations from open approval through close submission are included, including after midnight. Boundary-minute rows count; an unknown time needs a manager decision.',
+      opened: 'Open approved',
+      submitted: 'Close submitted',
+      notSubmitted: 'Shift is still running',
+      unresolved: '{n} operation(s) still need a window decision.',
+      managerReason: 'Reason for inclusion, exclusion, or time correction',
+      reasonPlaceholder: 'State what you verified before changing an operation',
+      reasonRequired: 'Enter the audited reason above first',
+      cashDeductions: 'Cash deductions',
+      cashDeductionHint:
+        'These are not orders or wallet movements. Each included amount reduces expected cash and the driver’s share.',
+      included: 'Included',
+      excluded: 'Excluded',
+      time: 'Date / time',
+      date: 'Date',
+      minute: 'Time',
+      route: 'Route',
+      amount: 'Amount',
+      source: 'Source',
+      manual: 'Manual',
+      windowStatus: 'Window status',
+      decisionReason: 'Manager reason',
+      correctTiming: 'Correct date / time',
+      saveTiming: 'Save timing',
+      manualOutsideWindow: 'Manager-entered · outside auto-classification',
+      cannotApproveUnknown: 'Approval is blocked: resolve {n} operation time(s).',
+      deductionSettlement: 'Effect of cash deductions on this shift’s share',
+      grossShare: 'Gross driver share',
+      cashDeductionTotal: 'Cash deduction',
+      netShare: 'Net driver share',
+      cashReceivable: 'Cash receivable beyond share',
+      statuses: {
+        in_window: 'Inside window',
+        pre_open: 'Before open',
+        post_close: 'After submission',
+        open_minute_boundary: 'Open minute · included',
+        close_minute_boundary: 'Submission minute · included',
+        unknown: 'Needs manager review',
+      },
+    }
+  }
+  return {
+    windowTitle: 'نافذة عمليات النوبة',
+    windowHint:
+      'تُشمل جميع عمليات المزود من لحظة اعتماد الفتح حتى تسليم الإغلاق، بما فيها ما بعد منتصف الليل. دقيقة الحد محسوبة، أما التوقيت المجهول فيحتاج قرار المدير.',
+    opened: 'اعتماد الفتح',
+    submitted: 'تسليم الإغلاق',
+    notSubmitted: 'النوبة ما زالت جارية',
+    unresolved: 'ما زالت {n} عملية بحاجة إلى حسم توقيتها.',
+    managerReason: 'سبب التضمين أو الاستبعاد أو تصحيح التوقيت',
+    reasonPlaceholder: 'اكتب ما تحققت منه قبل تعديل العملية',
+    reasonRequired: 'أدخل السبب المدقّق أعلاه أولاً',
+    cashDeductions: 'الحسومات النقدية',
+    cashDeductionHint: 'ليست طلبات ولا حركات محفظة. كل حسم مشمول ينقص الكاش المتوقع وحصة السائق.',
+    included: 'مشمول',
+    excluded: 'مستبعد',
+    time: 'التاريخ / الوقت',
+    date: 'التاريخ',
+    minute: 'الوقت',
+    route: 'المسار',
+    amount: 'المبلغ',
+    source: 'المصدر',
+    manual: 'يدوي',
+    windowStatus: 'حالة النافذة',
+    decisionReason: 'سبب المدير',
+    correctTiming: 'تصحيح التاريخ / الوقت',
+    saveTiming: 'حفظ التوقيت',
+    manualOutsideWindow: 'طلب مدير · خارج التصنيف الآلي',
+    cannotApproveUnknown: 'الاعتماد متوقف: يجب حسم توقيت {n} عملية.',
+    deductionSettlement: 'أثر الحسومات النقدية على حصة هذه النوبة',
+    grossShare: 'الحصة الإجمالية للسائق',
+    cashDeductionTotal: 'الحسم النقدي',
+    netShare: 'صافي حصة السائق',
+    cashReceivable: 'ذمّة كاش تتجاوز الحصة',
+    statuses: {
+      in_window: 'داخل النافذة',
+      pre_open: 'قبل الفتح',
+      post_close: 'بعد التسليم',
+      open_minute_boundary: 'دقيقة الفتح · مشمولة',
+      close_minute_boundary: 'دقيقة التسليم · مشمولة',
+      unknown: 'بحاجة لمراجعة المدير',
+    },
+  }
+}
+
+function OperationWindowAdvisory({
+  openApprovedAt,
+  submittedAt,
+  unresolvedCount,
+  reason,
+  onReasonChange,
+  editable,
+  lang,
+  copy,
+}: {
+  openApprovedAt: string | null
+  submittedAt: string | null
+  unresolvedCount: number
+  reason: string
+  onReasonChange(value: string): void
+  editable: boolean
+  lang: 'ar' | 'en'
+  copy: OperationReviewCopy
+}): ReactNode {
+  return (
+    <Card title={copy.windowTitle}>
+      <aside role="note" className="rounded-lg border border-sky-200 bg-sky-50 p-3">
+        <p className="text-sm text-sky-950">{copy.windowHint}</p>
+        <dl className="mt-2 grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
+          <Field label={copy.opened} value={openApprovedAt ? formatDateTime(openApprovedAt, lang) : '—'} />
+          <Field
+            label={copy.submitted}
+            value={submittedAt ? formatDateTime(submittedAt, lang) : copy.notSubmitted}
+          />
+        </dl>
+        {unresolvedCount > 0 ? (
+          <p className="mt-2 font-semibold text-amber-800">{copy.unresolved.replace('{n}', String(unresolvedCount))}</p>
+        ) : null}
+      </aside>
+      {editable ? (
+        <label className="mt-3 flex flex-col gap-1">
+          <span className="text-xs font-semibold text-slate-600">{copy.managerReason}</span>
+          <TextInput
+            value={reason}
+            onChange={(event) => onReasonChange(event.target.value)}
+            placeholder={copy.reasonPlaceholder}
+            maxLength={500}
+          />
+          {reason.trim() === '' ? <span className="text-xs text-amber-700">{copy.reasonRequired}</span> : null}
+        </label>
+      ) : null}
+    </Card>
+  )
+}
+
+function WindowStatusBadge({ status, copy }: { status: OperationWindowStatus; copy: OperationReviewCopy }): ReactNode {
+  const tone =
+    status === 'in_window'
+      ? 'green'
+      : status === 'pre_open' || status === 'post_close'
+        ? 'red'
+        : 'amber'
+  return <Badge tone={tone}>{copy.statuses[status]}</Badge>
+}
+
+function WindowCorrection({
+  occurredDate,
+  occurredMinute,
+  disabled,
+  reasonRequired,
+  copy,
+  onSave,
+}: {
+  occurredDate: string | null
+  occurredMinute: string | null
+  disabled: boolean
+  reasonRequired: boolean
+  copy: OperationReviewCopy
+  onSave(date: string | null, minute: string | null): Promise<void>
+}): ReactNode {
+  const [date, setDate] = useState(occurredDate ?? '')
+  const [minute, setMinute] = useState(occurredMinute ?? '')
+  useEffect(() => {
+    setDate(occurredDate ?? '')
+    setMinute(occurredMinute ?? '')
+  }, [occurredDate, occurredMinute])
+
+  const changed = date !== (occurredDate ?? '') || minute !== (occurredMinute ?? '')
+  return (
+    <details className="mt-2 text-xs">
+      <summary className={`cursor-pointer text-brand ${FOCUS_RING}`}>{copy.correctTiming}</summary>
+      <div className="mt-2 flex flex-wrap items-end gap-2">
+        <label className="flex flex-col gap-1">
+          <span className="text-slate-500">{copy.date}</span>
+          <TextInput type="date" dir="ltr" value={date} disabled={disabled} onChange={(event) => setDate(event.target.value)} className="num w-40" />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-slate-500">{copy.minute}</span>
+          <TextInput type="time" dir="ltr" value={minute} disabled={disabled} onChange={(event) => setMinute(event.target.value)} className="num w-28" />
+        </label>
+        <Button
+          variant="ghost"
+          disabled={disabled || !changed}
+          title={reasonRequired ? copy.reasonRequired : undefined}
+          onClick={() => void onSave(date || null, minute || null)}
+        >
+          {copy.saveTiming}
+        </Button>
+      </div>
+    </details>
+  )
+}
+
 /**
  * Correct a closing figure the driver's screenshots could not give us.
  *
@@ -931,7 +1424,10 @@ function ReviseFigures({
   onRevised,
 }: {
   shiftId: string
-  review: { endPackage: { odometerKm: number | null; cashDeclared: string | null; walletDeclared: string | null } }
+  review: {
+    startPackage: { odometerKm: number | null }
+    endPackage: { odometerKm: number | null; cashDeclared: string | null; walletDeclared: string | null }
+  }
   onRevised(): void
 }): ReactNode {
   const { api, t } = useApp()
@@ -956,8 +1452,16 @@ function ReviseFigures({
     setBusy(true)
     setError(null)
     try {
+      const odometerKm = odo.trim() === '' ? null : Number(odo)
+      const anomalous =
+        odometerKm !== null &&
+        Number.isFinite(odometerKm) &&
+        review.startPackage.odometerKm !== null &&
+        odometerKm < review.startPackage.odometerKm
+      if (anomalous && !window.confirm(t.approval.odometerAnomalyConfirm)) return
       await api.post(`/shifts/${shiftId}/close-figures`, {
-        odometerKm: odo.trim() === '' ? null : Number(odo),
+        odometerKm,
+        odometerAnomalyConfirmed: anomalous,
         cashDeclared: cash.trim() === '' ? null : cash,
         walletDeclared: wallet.trim() === '' ? null : wallet,
       })
@@ -1302,6 +1806,35 @@ function PhotoAgeLine({ age }: { age: PhotoAge }): ReactNode {
   )
 }
 
+/** Old/reused evidence is allowed, but the manager must see the warning and its confirmation. */
+function EvidenceWarningLines({ media }: { media: Review['media'][number] }): ReactNode {
+  const { t, lang } = useApp()
+  const warning = evidenceReviewWarning(media)
+  const warned = warning.age.kind === 'stale' || warning.reusedFromShiftId !== null
+
+  return (
+    <span className="flex flex-col items-center gap-0.5">
+      <PhotoAgeLine age={warning.age} />
+      {warning.reusedFromShiftId !== null ? (
+        <span className="text-[10px] font-medium text-amber-700">{t.shift.photoReused}</span>
+      ) : null}
+      {warned ? (
+        <span
+          className={`text-[10px] font-medium ${warning.acknowledged ? 'text-emerald-700' : 'text-red-700'}`}
+          title={media.staleAcknowledgedBy ?? undefined}
+        >
+          {warning.acknowledged
+            ? t.shift.photoWarningAcknowledged.replace(
+                '{at}',
+                warning.acknowledgedAt ? formatDateTime(warning.acknowledgedAt, lang) : '—',
+              )
+            : t.shift.photoWarningUnacknowledged}
+        </span>
+      ) : null}
+    </span>
+  )
+}
+
 /** Minutes up to an hour, then whole hours — «قبل ١٨٠ دقيقة» is not how anyone reads a clock. */
 function minutesLabel(minutes: number): string {
   return minutes < 60 ? `${minutes}m` : `${Math.round(minutes / 60)}h`
@@ -1352,7 +1885,7 @@ function PhotoRow({ pkg, media }: { pkg: 'start' | 'end'; media: Review['media']
                 guarantee of the capture flow. A fresh photo says nothing — the common case stays
                 quiet; an old one says so, because that is the thing worth seeing before signing for
                 the cash behind it. It is a prompt to look, never an accusation. */}
-            <PhotoAgeLine age={photoAge(m.clientTakenAt ?? null, m.receivedAt ?? null)} />
+            <EvidenceWarningLines media={m} />
           </button>
         ))}
       </div>

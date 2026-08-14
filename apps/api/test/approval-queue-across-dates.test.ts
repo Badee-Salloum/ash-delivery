@@ -53,7 +53,7 @@ async function pendingReviewOnAnEarlierDay(driver: string, manager: string): Pro
   // `resolveFxDay` carries the nearest EARLIER one forward, and there is none before the seed.
   await h.deps.fx.upsert({ businessDate: PAST_DAY, sypMinorPerUsd: 13_000n, provisional: false })
   const shift = await h.deps.shifts.findById(id)
-  await h.deps.shifts.update({ ...shift!, businessDate: PAST_DAY })
+  await h.deps.shifts.update({ ...shift!, businessDate: PAST_DAY }, 'u-bm')
   return id
 }
 
@@ -87,7 +87,7 @@ describe('the approval queue across dates', () => {
     await h.uploadPhoto(driver, id, 'start', 'odometer')
     await put(driver, `/shifts/${id}/start-package`, { odometerKm: 100, batteryPercent: 90 })
     const shift = await h.deps.shifts.findById(id)
-    await h.deps.shifts.update({ ...shift!, businessDate: PAST_DAY })
+    await h.deps.shifts.update({ ...shift!, businessDate: PAST_DAY }, 'u-bm')
 
     const pending = (await get(manager, '/shifts?pending=1')).json()
     expect(pending.shifts.map((s: { id: string }) => s.id)).toContain(id)

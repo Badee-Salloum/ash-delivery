@@ -25,7 +25,7 @@ const MUST_AUDIT = [
   'drivers', 'vehicles', 'documents',
   'funds', 'fx_days', 'week_locks', 'journal_entries', 'journal_lines',
   'cash_counts', 'expenses',
-  'shifts', 'shift_orders', 'float_tranches', 'tier_rules',
+  'shifts', 'shift_orders', 'cash_deductions', 'shift_media', 'float_tranches', 'tier_rules',
   // Renumbering a type restates the printed code of every vehicle of that type; a pack moving
   // between bikes is an asset transfer; a corrected reading changes evidence already approved.
   'vehicle_types', 'batteries', 'shift_battery_readings',
@@ -53,10 +53,13 @@ const AUDIT_EXEMPT = {
   login_attempts: 'already an append-only audit record in its own right',
   notifications: 'derived from audited events; auditing them would double the write volume',
   media: 'immutable and content-addressed; the shift_media link is what matters',
+  shift_media_attachment_history:
+    'trigger-owned append-only provenance; direct INSERT/UPDATE/DELETE/TRUNCATE are revoked',
+  operation_window_reclassification_context:
+    'transaction-scoped internal capability; app_user has no privileges and the SECURITY DEFINER classifier always removes it',
   attendance_days: 'derived from session activity',
   vehicle_events: 'append-only life log; is itself the audit trail (B-2)',
   assignments: 'covered by the audited shift it produces',
-  shift_media: 'the media row is immutable; the shift is audited',
   shift_decisions: 'append-only decision log; is itself the audit trail (C-7)',
   cash_count_lines: 'sealed with a sha256 proof on the parent cash_count',
   driver_day_shares: 'a derived projection of audited journal entries',

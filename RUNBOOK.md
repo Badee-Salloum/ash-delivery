@@ -5,11 +5,9 @@ intended procedure that nobody has executed. They are not evidence that anything
 
 ---
 
-## 1. Verifying the database guards ⚠ NOT YET EXECUTED
+## 1. Verifying the database guards — verified 2026-08-14
 
-**Do this before anything in M2 depends on the ledger.** Three claims hold up the architecture,
-and none has touched a real PostgreSQL yet — the machine the schema was written on had neither
-Docker nor `psql`:
+Three claims hold up the architecture:
 
 | Claim | Where |
 | --- | --- |
@@ -22,13 +20,17 @@ docker compose -f infra/compose/docker-compose.dev.yml up -d
 ./scripts/db-verify.sh
 ```
 
-The script recreates a scratch database, applies all six migrations in order, runs
+The script recreates a scratch database, applies every migration in order, runs
 `packages/db/verify-guards.sql` — which **attempts every illegal write and fails if the database
 allows one** — then drops a trigger and confirms verification now FAILS, proving the harness has
 teeth. The same three steps run in CI (`.github/workflows/pr.yml` › `database`), so pushing the
 branch verifies them too.
 
-Until this has run green, treat `0006` as unproven and say so in writing.
+This was run green on disposable stock **PostgreSQL 17.11** databases on 2026-08-14: all guard
+groups and the complete PostgreSQL adapter conformance suite passed after all current migrations.
+An isolated Neon scratch database separately passed the release-backup restore, fingerprint,
+invariant, and rollback rehearsal. None of those targets was production; the conformance suite
+truncates its database and must never be pointed at the live Neon URL.
 
 **If a guard fails**, do not weaken the guard. The guard is the requirement (kickoff brief §4:
 immutability "in the app layer AND a DB-level guard"). Fix the schema.
@@ -40,7 +42,7 @@ immutability "in the app layer AND a DB-level guard"). Fix the schema.
 ```bash
 pnpm install
 pnpm check          # typecheck + domain purity + SQL static checks + tests
-pnpm -r test        # 158 tests, ~800 ms, no Docker required
+pnpm -r test        # workspace suites; DB integration skips unless DATABASE_URL is set
 ```
 
 Node **24 LTS** is the target (`.nvmrc`). A newer Node will run the domain package fine but
@@ -85,10 +87,11 @@ carries the correction sequence so repeated corrections remain possible.
 
 ---
 
-## 5. Deploy / rollback / restore ⚠ WRITTEN, NOT YET EXERCISED
+## 5. Deploy / rollback / restore — Vercel + Neon exercised 2026-08-14
 
-The pipeline exists (`.github/workflows/release.yml`, `infra/`) but **no deploy has ever run**.
-Treat this as the intended procedure, not a proven one, until the first staging deploy is green.
+The live Vercel + Neon procedure below has been exercised, including a production migration,
+three deployments, smoke tests, and an isolated restore rehearsal. The separate VPS pipeline
+(`.github/workflows/release.yml`, `infra/`) still exists but has not been exercised in production.
 
 ### First-time VPS setup
 
@@ -146,8 +149,60 @@ per-table row counts, column types and the foreign-key graph. **Every value is c
 string**: `bigint` is the money type here and a JSON number is an IEEE double, so a single
 `to_jsonb()` would silently round any amount above 2^53 minor units.
 
+For a schema release, take and fully validate **both** logical backups: one after writes are paused
+and before migration, then another after migration and invariant checks. Validation means every
+manifest entry exists, every gzip stream decompresses, every JSONL row parses, and the row totals
+match the manifest. A successful command without those checks is not a verified backup.
+
 **The schema is deliberately NOT in the backup.** It lives in `packages/db/migrations` under
 checksum, in version control. A restore is therefore: empty database → `pnpm migrate` → load.
+
+### Rolling out the shift-window / cash-deduction migrations on Vercel + Neon
+
+These migrations backfill timestamps, install financial guards, and take heavyweight PostgreSQL
+locks. Treat them as a short maintenance operation, not as an ordinary hot deploy:
+
+1. On Node 24, run `pnpm check`, `pnpm build:apps`, and `node scripts/build-api.mjs`. Stage the new
+   API without promoting it, record both deployment ids, and run the production read-only preflight.
+   Record counts for `shifts`, `shift_orders`, `shift_media`, and `audit_log`; invariant probes must
+   find no cross-shift wallet/order links, cross-branch evidence, invalid minutes/odometers, or
+   unrecoverable open/submit boundaries.
+2. Enter a `try/finally` maintenance block: pause **only `ash-api`** through Vercel, verify `/health`
+   returns 503, and wait for two consecutive zero-activity database samples. The admin and driver
+   bundles may remain served, but their writes must fail while the API is paused.
+3. Take and fully validate the **pre-migration** HTTPS logical backup. Never run DB conformance
+   against production: its `beforeEach` deliberately truncates every application table.
+4. Run exactly one HTTPS migration runner with the direct Neon **owner** connection. Migration is
+   the owner's only routine application task; that credential must never be installed in Vercel.
+   The runner is forward-only, advisory-locked, and checksum-enforced.
+5. Run read-only postflight invariants and inspect every current shift. The API's pooled connection
+   must authenticate as the least-privilege `ash_runtime` login inheriting `app_user`, never as the
+   owner. Remove public scratch-space privilege and return it only to the owner:
+
+   ```sql
+   REVOKE TEMPORARY ON DATABASE neondb FROM PUBLIC;
+   GRANT TEMPORARY ON DATABASE neondb TO neondb_owner;
+   ```
+
+   Verify `ash_runtime` can perform its required application work but cannot update/delete journal
+   rows or create temporary tables. Permission probes must roll back their fixtures.
+6. Take and fully validate the **post-migration** logical backup. Promote the already-built API
+   while `ash-api` remains paused; keep the old deployment id available for code rollback.
+7. In the `finally` path, resume `ash-api`, then smoke-test stable `/health` = 200 and an
+   unauthenticated protected route = 401. The API pause spans the migration, postflight, backup,
+   and API promotion; never expose the old API to the new write path between those steps.
+8. Restore the post-migration backup into an empty, explicitly named scratch database. Verify
+   migration checksums, all row/fingerprint counts, zero trial balance, sequences, enabled triggers,
+   and a write-with-rollback probe. Never use the production database as the restore target.
+9. Deploy and smoke-test admin, then the driver PWA. Inspect the target live shift before approval;
+   do not patch the ledger manually to manufacture a balance.
+
+The migration framework is intentionally forward-only. “Rollback” here means restoring the
+pre-migration Neon branch/snapshot or rebuilding an empty branch and loading the verified logical
+backup, then pointing the API at it. There is no honest lossless `DOWN`: enum values, audit history,
+and reconstructed attachment provenance cannot be removed and later recreated exactly. Keep the
+old API deployment available for a code rollback, but restore the database when crossing this
+schema boundary.
 
 ⚠ **Off-site copy is still owed.** `backups/` is git-ignored and lives on one laptop; a backup on
 the same machine as the only checkout is not a backup. And the **evidence photos in Vercel Blob
@@ -168,8 +223,16 @@ Then foot the trial balance before trusting it — expect exactly `0`:
 SELECT SUM(CASE WHEN side='D' THEN amount_minor ELSE -amount_minor END) FROM journal_lines;
 ```
 
-**Rehearsed 2026-08-09** against a scratch database on the live Neon project. The rehearsal was
-not a formality: it found four defects that would each have surfaced only during a real disaster.
+**Rehearsed again 2026-08-14** against an isolated scratch database on the live Neon project:
+all **30 migrations**, **2,360 rows**, and **52 tables** were recovered. Migration/data fingerprints,
+trial balance zero, sequences, enabled triggers, and the write-with-rollback probe all passed.
+The target was positively identified as scratch before loading; production was never truncated.
+After verification, the scratch database was dropped normally after confirming it had zero active
+sessions. Local PostgreSQL test databases were dropped and the local server stopped too. Its
+temporary installation root may remain on disk; that is filesystem cleanup, not a running service.
+
+The earlier 2026-08-09 rehearsal was the one that exposed four loader defects and established the
+following measured baseline:
 
 | | |
 | --- | --- |
@@ -215,6 +278,16 @@ assignment. Expiry alerts fire at T-30/14/7/0 and an expired licence blocks assi
 `.env` is never committed. Secrets are SOPS+age encrypted as `.env.enc`, with the private key
 held only on the VPS and in GitHub Actions secrets. **The restic repository password has its own
 custody**, separate from the age key — a backup you cannot decrypt is not a backup.
+
+**Live Windows operator custody (2026-08-14).** The runtime and Neon owner database secrets are held
+outside the repository under Windows DPAPI protection. The owner credential was rotated, and the old
+credential was tested and rejected through both direct and pooled endpoints. Do not copy either URL
+into a ticket, chat, log, or checked-in environment file.
+
+The only remaining credential action is a single personal-account Dashboard task: create a successor
+Vercel token, verify it can reach every required project, and only then revoke the predecessor. The
+token-creation API returned forbidden for automated attempts, so the existing token was deliberately
+left active to avoid stranding deployment access.
 
 **`ENCRYPTION_KEY` (PII at rest).** Encrypts a driver's national ID (AES-256-GCM). Generate once:
 
@@ -318,8 +391,9 @@ different bargain and this must not be pointed at one.
 
 | Gap | Impact | Owner action |
 | --- | --- | --- |
-| Database guards unverified | The three load-bearing claims are unproven | §1, before M2 |
 | Client samples not received | BR1 is calibrated against Yallago's arithmetic, which we do not control | Send `docs/client-request-samples.md` |
-| 300 KB photo legibility untested | If a manager cannot read order numbers off a compressed screenshot, the whole C-7 review is theatre | Spike with a real screenshot |
-| No staging or production yet | Everything is local | M0 completion |
+| No off-site logical/Blob copy | A laptop loss or provider-account incident can remove the independent recovery path or its evidence | Copy encrypted backups and Blob evidence to separately controlled storage |
+| Full real-device QA incomplete | Smoke tests do not prove camera, offline resume, PWA update, or every Arabic layout | Exercise one complete shift on the supported phones |
+| Admin security enrolment incomplete | A generated bootstrap password without TOTP is not acceptable steady state | Change passwords and enrol 2FA |
+| Vercel token successor requires the personal Dashboard | Revoking the working token before a verified successor would strand deployment access | Create and test the successor in the Dashboard, then revoke the predecessor |
 | Opening balances not imported | SRS §10 م-2: section E cannot go live productively without them | Before go-live |

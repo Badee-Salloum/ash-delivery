@@ -35,8 +35,21 @@ Two strings from the dashboard:
 
 | Use | Which string | Why |
 | --- | --- | --- |
-| `DATABASE_URL` for the app | the **pooled** one (host contains `-pooler`) | Every warm Vercel instance holds its own pool. The direct endpoint exhausts Postgres under modest concurrency. |
-| Migrations / bootstrap | the **direct** one (drop `-pooler`) | They take a session advisory lock and run DDL; a transaction-mode pooler can hand those to different backends. |
+| `DATABASE_URL` for the app | `ash_runtime` on the **pooled** endpoint (host contains `-pooler`) | Every warm Vercel instance holds its own pool; the login inherits `app_user` and owns no schema objects. |
+| Migrations | `neondb_owner` on the **direct** endpoint (drop `-pooler`) | DDL and the advisory migration lock require the owner; this credential is never installed in Vercel. |
+
+`ash_runtime` is the only database identity used by the deployed API. It inherits the permission
+matrix from `app_user`, cannot update/delete journal rows, and must not be able to create temporary
+tables. Harden each production database after creating the role:
+
+```sql
+REVOKE TEMPORARY ON DATABASE neondb FROM PUBLIC;
+GRANT TEMPORARY ON DATABASE neondb TO neondb_owner;
+```
+
+Confirm `ash_runtime` and `app_user` have no effective TEMP privilege and that only the owner retains
+it. Store the pooled runtime URL as a sensitive production environment variable. The direct owner
+URL is operator-held and used only for the forward migration path, never for normal API traffic.
 
 ### 1.2 Running migrations — mind the network
 
@@ -45,20 +58,20 @@ Migrations run over the pg wire protocol on **port 5432**. From a network that b
 Postgres handshake after ~20 s while HTTPS/443 stays open — the ordinary `pg` driver cannot
 connect. Two options:
 
-- **From a network where 5432 is open** (CI, most clouds — Vercel's own functions reach Neon fine):
+- **From a network where 5432 is open** (CI and most clouds):
   ```bash
-  DATABASE_URL='postgres://…@ep-xxx.eu-central-1.aws.neon.tech/neondb?sslmode=require' \
-    node apps/api/src/migrate-cli.ts
+  DATABASE_URL='<direct-owner-url>' pnpm migrate
   ```
 - **From a 5432-blocked network**, use Neon's serverless driver (HTTPS/WebSocket on 443). It is a
-  devDependency of `@ash/db`. `migrate()` accepts its `Pool` unchanged (structurally pg-compatible):
-  ```js
-  import { neonConfig, Pool } from '@neondatabase/serverless'
-  import { migrate } from '@ash/db'
-  neonConfig.webSocketConstructor = globalThis.WebSocket   // Node 22+/25 has a global WebSocket
-  await migrate(new Pool({ connectionString: DIRECT_URL }))
+  dependency of `@ash/db`; the checked-in runner is Node-24 compatible and shares the TCP runner's
+  checksum ledger and advisory lock:
+  ```bash
+  DATABASE_URL='<direct-owner-url>' node packages/db/apply-migrations.mjs
   ```
-  This is exactly how the live database was migrated.
+
+Both paths are deliberately **forward-only**. Never edit an applied migration and never improvise a
+`DOWN` script for production history. A schema rollback means switching to a verified pre-migration
+branch/snapshot or restoring the pre-migration logical backup into an empty database.
 
 ### 1.3 Bootstrap the production floor
 
@@ -76,22 +89,23 @@ From a 5432-blocked network, call `bootstrapProduction(pool, { admins })` from `
 against a `@neondatabase/serverless` `Pool`, hashing passwords with `BcryptHasher` — same code path,
 different driver. Idempotent: safe to re-run.
 
-### 1.4 Prove the guards on Neon
+### 1.4 Prove guards and adapters only on disposable databases
 
-The ledger guards are proven on stock Postgres 17 in CI and negative-tested. On Neon (Postgres 18)
-they are **installed** (migration 0006 applied) but not yet re-verified, because `verify-guards.sql`
-uses psql meta-commands (`\echo`) and `SET ROLE app_user`, and the app connects as `neondb_owner`.
-Run it once from a machine with `psql` and 5432 open:
+The full PostgreSQL suite passed **40/40** on stock PostgreSQL 17.11 after all 30 migrations, and the
+guard harness passed every group. The isolated Neon scratch was used separately for the backup
+restore, fingerprint, invariant, sequence, trigger, and rollback rehearsal. The PostgreSQL suite
+and guard harness are destructive verification tools, not production health checks: conformance
+runs `TRUNCATE` in `beforeEach`, and the guard harness intentionally attempts forbidden writes.
+
+Point them only at a positively identified disposable database:
 
 ```bash
-psql "$DIRECT_DATABASE_URL" -v ON_ERROR_STOP=1 -f packages/db/verify-guards.sql
+DATABASE_URL='<disposable-postgres-url>' pnpm --filter @ash/db test
+psql '<disposable-postgres-url>' -v ON_ERROR_STOP=1 -f packages/db/verify-guards.sql
 ```
 
-The two role-independent triggers — an unbalanced entry rejected at COMMIT, and a locked-week write
-raising `25006` — fire regardless of the connecting role, so those guarantees already hold. The
-`REVOKE`-from-`app_user` layer is a second belt that is **inactive while the app connects as the
-Neon owner**; for defence-in-depth, Bundle 1b should create a least-privilege Neon role. (Note the
-guard file's `SET ROLE app_user` needs `GRANT app_user TO neondb_owner` first.)
+Production receives read-only invariant queries plus tightly scoped `ash_runtime` denial probes
+whose fixtures are rolled back. Never substitute the live URL into either command above.
 
 ---
 
@@ -102,7 +116,7 @@ silently stores an empty string). Current live config:
 
 ```bash
 NODE_ENV=production
-DATABASE_URL=postgres://…-pooler…/neondb?sslmode=require   # sensitive; the POOLED endpoint
+DATABASE_URL=postgres://ash_runtime:…@…-pooler…/neondb?sslmode=require   # sensitive; pooled
 DB_POOL_MAX=3            # small on purpose: pools multiply across warm instances
 BR1_SPLIT_GATE=advisory  # keep advisory until BR1 is calibrated — see RUNBOOK §1
 TZ_OFFSET_MINUTES=180    # Asia/Damascus, UTC+3 year-round since Oct 2022
@@ -143,17 +157,19 @@ the function to a single self-contained `api/index.mjs` with esbuild **before** 
 workspace source and node_modules alike are inlined (an externalised bundle 404s at runtime — Vercel's
 tracer does not follow pnpm's symlinks). `api/index.mjs` and `public/` are generated, git-ignored.
 
-## 5. What does NOT run on Vercel
+## 5. What does NOT run automatically on Vercel
 
 | Thing | Why | Where it goes instead |
 | --- | --- | --- |
 | Migrations | Concurrent cold starts would race; a failure would hide behind a 500 | Direct connection, §1.2 |
 | Bootstrap | Same, and it is a one-time floor | Direct connection, §1.3 |
-| Nightly backups | No cron process, and Neon holds the data | Neon PITR + a scheduled `pg_dump` |
+| Logical backups | A function deployment is not a backup scheduler | Neon PITR + scheduled HTTPS logical exports to separately controlled storage |
 | The demo seed | Guarded to refuse production | Local / staging only |
 
-Neon's branching gives point-in-time recovery. **The restore must still be rehearsed and timed once**
-before go-live, and the number written into `RUNBOOK.md`. RTO < 4 h is a requirement.
+Neon's branching gives point-in-time recovery, but it is not the independent logical copy. The
+2026-08-14 rehearsal restored **2,360 rows across 52 tables** into an isolated scratch database and
+verified fingerprints, zero trial balance, sequences, enabled triggers, and a write rollback. See
+`RUNBOOK.md` for the procedure and the earlier measured RTO; keep rehearsing as data volume grows.
 
 ---
 
@@ -181,14 +197,30 @@ redeploy a front-end: `pnpm build:apps`, copy `apps/<app>/dist/*` into a staging
 
 ## 7. Deploy checklist
 
-- [x] Migrations applied against the **direct** Neon URL (via the serverless driver, §1.2)
+For every schema release: stage the API first; pause `ash-api` and drain database activity; validate
+a pre-migration logical backup; migrate once as the owner; run read-only postflight and runtime-role
+denial probes; validate the post-migration backup; then promote the API **while it is still paused**.
+Unpause in a `finally` path, smoke-test the stable API, deploy both front-ends, and restore the new
+backup into an isolated scratch database. The detailed, failure-aware sequence is in `RUNBOOK.md` §5.
+
+- [x] All 30 migrations applied against the **direct owner** Neon URL (§1.2)
 - [x] Production floor bootstrapped: §3 matrix, branch, tier table, two admins (§1.3)
-- [ ] `verify-guards.sql` run against Neon and green (§1.4 — needs psql + 5432)
+- [x] PostgreSQL 17 adapter suite 40/40 and database guards green on disposable databases (§1.4)
+- [x] Isolated Neon restore/fingerprint/invariant rehearsal passed; never run conformance on production
 - [x] `BLOB_DRIVER=vercel` with a private store linked; round-trip proven by spike
-- [x] `DATABASE_URL` is the **pooled** endpoint, `DB_POOL_MAX=3`
+- [x] `DATABASE_URL` uses least-privilege `ash_runtime` on the **pooled** endpoint, `DB_POOL_MAX=3`
+- [x] Owner credential excluded from Vercel; `TEMPORARY` revoked from `PUBLIC`
 - [x] `BR1_SPLIT_GATE=advisory` for the pilot
 - [x] Real admin users created by bootstrap (not the demo seed)
+- [x] Pre- and post-migration logical backups fully validated
+- [x] API, admin, and driver deployed and smoke-tested after migrations `0028`–`0030`
+- [x] Restore rehearsed: 52 tables / 2,360 rows plus fingerprints, trial, sequences, triggers, rollback
+- [x] Neon scratch database dropped normally after confirming zero active sessions
+- [x] Neon owner credential rotated; old direct and pooled credentials rejected
+- [x] Runtime and owner database secrets protected outside the repository with Windows DPAPI
 - [ ] Admins change passwords + enrol 2FA on first login
 - [ ] A photo uploaded through the app and read back
-- [ ] Restore rehearsed and **timed**, number written into `RUNBOOK.md`
+- [ ] Move encrypted logical backups and Vercel Blob evidence to separately controlled storage
+- [ ] In the personal-account Dashboard, create and verify a successor Vercel token, then revoke the
+      predecessor; API creation is forbidden and the working token remains active to avoid lockout
 - [ ] Consider a custom domain and re-enabling deployment protection for staging

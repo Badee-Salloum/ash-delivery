@@ -93,13 +93,92 @@ describe('a manager corrects a fee', () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
     const id = await pendingReview(driver, manager)
-    await post(manager, `/shifts/${id}/operations/revise`, {
+    const response = await post(manager, `/shifts/${id}/operations/revise`, {
       orders: [{ providerOrderNo: 'A-1', fee: sypStr(4_000) }],
     })
+    expect(response.statusCode, response.body).toBe(200)
+
+    const [order] = await h.deps.orders.listByShift(id)
+    expect(order).toMatchObject({
+      decisionReason: null,
+      decidedBy: 'u-bm',
+      decidedAt: new Date(h.deps.clock.nowMs()).toISOString(),
+    })
+
     const rows = await h.deps.audit.list({ tableName: 'shifts', recordId: id })
     const revised = rows.filter((r) => r.after !== null && 'revisedByManager' in (r.after as object))
     expect(revised.length).toBeGreaterThan(0)
-    expect(revised.at(-1)!.actorId).toBeTruthy()
+    expect(revised.at(-1)!.actorId).toBe('u-bm')
+    expect(revised.at(-1)!.after).toMatchObject({
+      orders: [{ providerOrderNo: 'A-1', fee: sypStr(4_000) }],
+    })
+  })
+
+  it('allows a wallet-only correction without a reason and still versions the row', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await pendingReview(driver, manager)
+
+    const response = await post(manager, `/shifts/${id}/operations/revise`, {
+      orders: [{ providerOrderNo: 'A-1', walletAmount: sypStr(1_500) }],
+    })
+    expect(response.statusCode, response.body).toBe(200)
+
+    const [order] = await h.deps.orders.listByShift(id)
+    expect(order).toMatchObject({
+      walletAmount: 150_000n,
+      decisionReason: null,
+      decidedBy: 'u-bm',
+      decidedAt: new Date(h.deps.clock.nowMs()).toISOString(),
+    })
+  })
+
+  it('does not let a reopened cached driver page overwrite a manager-reviewed order', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await pendingReview(driver, manager)
+
+    const revised = await post(manager, `/shifts/${id}/operations/revise`, {
+      orders: [{ providerOrderNo: 'A-1', fee: sypStr(4_000), walletAmount: sypStr(1_500) }],
+    })
+    expect(revised.statusCode, revised.body).toBe(200)
+    const [managerRow] = await h.deps.orders.listByShift(id)
+    const reopened = await post(manager, `/shifts/${id}/request-rephoto`, { notes: 'replace the closing photo' })
+    expect(reopened.statusCode, reopened.body).toBe(200)
+
+    // A cached PWA sends the whole old row after the shift returns to `open`. None of these stale
+    // values may replace the manager-attributed row while leaving the manager's name on it.
+    const replay = await put(driver, `/shifts/${id}/operations`, {
+      orders: [{
+        providerOrderNo: 'A-1',
+        payMode: 'electronic',
+        fee: sypStr(9_000),
+        walletAmount: sypStr(9_000),
+        zone: 'stale-zone',
+        source: 'ocr',
+        feeOcr: sypStr(9_000),
+        occurredDate: '2026-08-14',
+        occurredMinute: '23:59',
+        pointA: 'stale pickup',
+        pointB: 'stale dropoff',
+      }],
+      movements: [],
+    })
+    expect(replay.statusCode, replay.body).toBe(200)
+
+    const [order] = await h.deps.orders.listByShift(id)
+    expect(order).toMatchObject({
+      payMode: 'cash',
+      fee: 400_000n,
+      walletAmount: 150_000n,
+      zone: null,
+      source: 'manual',
+      feeOcr: null,
+      occurredDate: managerRow!.occurredDate,
+      occurredMinute: managerRow!.occurredMinute,
+      points: [],
+      decidedBy: 'u-bm',
+    })
   })
 
   it('refuses a negative fee — that would turn Yallago’s cut into a credit', async () => {

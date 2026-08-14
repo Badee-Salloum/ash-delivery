@@ -1,0 +1,110 @@
+/** The serialisable, crash-safe part of the closing package. Files and transient reader state stay out. */
+export interface PersistedEndDraft {
+  version: 1
+  savedAt: number
+  cash: string
+  wallet: string
+  walletOcr: string | null
+  odo: string
+  odoOcr: number | null
+  odoHumanEdited: boolean
+  odoConfirmed: boolean
+}
+
+export type EndDraftScalars = Omit<PersistedEndDraft, 'version' | 'savedAt'>
+
+interface DraftStorage {
+  getItem(key: string): string | null
+  setItem(key: string, value: string): void
+  removeItem(key: string): void
+}
+
+const PREFIX = 'ash:driver:end-draft:v1:'
+
+export const endDraftStorageKey = (shiftId: string): string => `${PREFIX}${encodeURIComponent(shiftId)}`
+
+const validNullableString = (value: unknown): value is string | null => value === null || typeof value === 'string'
+const validOcr = (value: unknown): value is number | null =>
+  value === null || (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
+
+/** Strict decoding means a partial/corrupt write is ignored instead of manufacturing money. */
+export function parseEndDraft(raw: string): PersistedEndDraft | null {
+  try {
+    const value = JSON.parse(raw) as Partial<PersistedEndDraft> | null
+    if (
+      value === null ||
+      value.version !== 1 ||
+      typeof value.savedAt !== 'number' ||
+      !Number.isFinite(value.savedAt) ||
+      typeof value.cash !== 'string' ||
+      typeof value.wallet !== 'string' ||
+      !validNullableString(value.walletOcr) ||
+      typeof value.odo !== 'string' ||
+      !validOcr(value.odoOcr) ||
+      typeof value.odoHumanEdited !== 'boolean' ||
+      typeof value.odoConfirmed !== 'boolean'
+    ) {
+      return null
+    }
+    return value as PersistedEndDraft
+  } catch {
+    return null
+  }
+}
+
+export function readEndDraft(storage: DraftStorage, shiftId: string): PersistedEndDraft | null {
+  const key = endDraftStorageKey(shiftId)
+  try {
+    const raw = storage.getItem(key)
+    if (raw === null) return null
+    const parsed = parseEndDraft(raw)
+    if (parsed === null) {
+      // Best effort: a corrupt value should not poison every future mount of this shift.
+      try {
+        storage.removeItem(key)
+      } catch {
+        /* storage may be unavailable; reading still fails closed */
+      }
+    }
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+/** One JSON setItem is the browser's atomic unit; quota/privacy failures never break the shift UI. */
+export function writeEndDraft(
+  storage: DraftStorage,
+  shiftId: string,
+  draft: EndDraftScalars,
+  now = Date.now(),
+): boolean {
+  try {
+    storage.setItem(endDraftStorageKey(shiftId), JSON.stringify({ version: 1, savedAt: now, ...draft }))
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function clearEndDraft(storage: DraftStorage, shiftId: string): void {
+  try {
+    storage.removeItem(endDraftStorageKey(shiftId))
+  } catch {
+    /* cleanup must never replace the terminal screen with a storage error */
+  }
+}
+
+/** Local unsent values are newer than `/state`; restore only this explicitly persisted scalar seam. */
+export function restoreEndDraftScalars<T extends EndDraftScalars>(current: T, saved: PersistedEndDraft): T {
+  return {
+    ...current,
+    cash: saved.cash,
+    wallet: saved.wallet,
+    walletOcr: saved.walletOcr,
+    odo: saved.odo,
+    odoOcr: saved.odoOcr,
+    odoHumanEdited: saved.odoHumanEdited,
+    odoConfirmed: saved.odoConfirmed,
+  }
+}

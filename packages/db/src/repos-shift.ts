@@ -45,7 +45,7 @@ import type {
   WeekLockRepo,
 } from '@ash/contracts'
 import { AWAITING_DECISION_STATES, type CalendarDate, LIVE_STATES, type Minor, minor } from '@ash/domain'
-import type { Pool } from './pool.ts'
+import type { Pool, PoolClient } from './pool.ts'
 import { PG, isPgError, withTransaction } from './pool.ts'
 
 /**
@@ -76,16 +76,16 @@ export class PgShiftRepo implements ShiftRepo {
     this.pool = pool
   }
 
-  async create(shift: ShiftRecord): Promise<void> {
-    await this.persist(shift, true)
+  async create(shift: ShiftRecord, actorId: string | null): Promise<void> {
+    await this.persist(shift, true, actorId)
   }
 
-  async update(shift: ShiftRecord): Promise<void> {
-    await this.persist(shift, false)
+  async update(shift: ShiftRecord, actorId: string | null): Promise<void> {
+    await this.persist(shift, false, actorId)
   }
 
-  private async persist(shift: ShiftRecord, insert: boolean): Promise<void> {
-    await withTransaction(this.pool, { actorId: shift.approvedBy }, async (client) => {
+  private async persist(shift: ShiftRecord, insert: boolean, actorId: string | null): Promise<void> {
+    await withTransaction(this.pool, { actorId }, async (client) => {
       if (insert) {
         try {
           await client.query(
@@ -131,11 +131,17 @@ export class PgShiftRepo implements ShiftRepo {
            equation_diff_minor = $11, cash_diff_minor = $12, wallet_diff_minor = $13,
            orders_hash = $14,
            driver_confirmed_at = $15::timestamptz,
-           approved_by = $16,
-           odo_start_ocr = $17, battery_start_ocr = $18,
-           end_wallet_declared_ocr_minor = $19,
-           kept_as_receivable_minor = $20,
-           driver_share_paid_minor = $21
+           open_approved_at = $16::timestamptz,
+           open_approved_by = $17::uuid,
+           submitted_at = $18::timestamptz,
+           approved_by = $19,
+           odo_start_ocr = $20, odo_end_ocr = $21,
+           odo_end_anomaly_confirmed_at = $22::timestamptz,
+           odo_end_anomaly_confirmed_by = $23::uuid,
+           battery_start_ocr = $24,
+           end_wallet_declared_ocr_minor = $25,
+           kept_as_receivable_minor = $26,
+           driver_share_paid_minor = $27
          WHERE id = $1`,
         [
           shift.id,
@@ -153,8 +159,14 @@ export class PgShiftRepo implements ShiftRepo {
           shift.walletDiff?.toString() ?? null,
           shift.ordersHash,
           shift.driverConfirmedAt,
+          shift.openApprovedAt,
+          shift.openApprovedBy,
+          shift.submittedAt,
           shift.approvedBy,
           shift.odoStartOcr,
+          shift.odoEndOcr,
+          shift.odoEndAnomalyConfirmedAt,
+          shift.odoEndAnomalyConfirmedBy,
           shift.batteryStartOcr,
           shift.endWalletDeclaredOcr?.toString() ?? null,
           shift.keptAsReceivable.toString(),
@@ -222,8 +234,10 @@ export class PgShiftRepo implements ShiftRepo {
   }
 
   /** Only ever called for a shift that never opened; the route enforces that. */
-  async delete(id: string): Promise<void> {
-    await this.pool.query('DELETE FROM shifts WHERE id = $1', [id])
+  async delete(id: string, actorId: string | null): Promise<void> {
+    await withTransaction(this.pool, { actorId }, async (client) => {
+      await client.query('DELETE FROM shifts WHERE id = $1', [id])
+    })
   }
 
   async listApprovedForDriverOnDate(driverId: string, businessDate: CalendarDate): Promise<ShiftRecord[]> {
@@ -291,10 +305,19 @@ export class PgShiftRepo implements ShiftRepo {
       batteryEnd: r.battery_end === null ? null : Number(r.battery_end),
       endCashDeclared: bigintOrNull(r.end_cash_declared_minor),
       endWalletDeclared: bigintOrNull(r.end_wallet_declared_minor),
-      odoStartOcr: r.odo_start_ocr === null ? null : Number(r.odo_start_ocr),
+      odoStartOcr: r.odo_start_ocr === null || r.odo_start_ocr === undefined ? null : Number(r.odo_start_ocr),
+      odoEndOcr: r.odo_end_ocr === null || r.odo_end_ocr === undefined ? null : Number(r.odo_end_ocr),
+      odoEndAnomalyConfirmedAt:
+        r.odo_end_anomaly_confirmed_at === null
+          ? null
+          : (r.odo_end_anomaly_confirmed_at as Date).toISOString(),
+      odoEndAnomalyConfirmedBy: (r.odo_end_anomaly_confirmed_by as string | null) ?? null,
       batteryStartOcr: r.battery_start_ocr === null ? null : Number(r.battery_start_ocr),
       endWalletDeclaredOcr: bigintOrNull(r.end_wallet_declared_ocr_minor),
       driverConfirmedAt: r.driver_confirmed_at === null ? null : (r.driver_confirmed_at as Date).toISOString(),
+      openApprovedAt: r.open_approved_at === null ? null : (r.open_approved_at as Date).toISOString(),
+      openApprovedBy: (r.open_approved_by as string | null) ?? null,
+      submittedAt: r.submitted_at === null ? null : (r.submitted_at as Date).toISOString(),
       equationDiff: bigintOrNull(r.equation_diff_minor),
       cashDiff: bigintOrNull(r.cash_diff_minor),
       walletDiff: bigintOrNull(r.wallet_diff_minor),
@@ -600,8 +623,9 @@ export class PgDirectoryRepo implements DirectoryRepo {
     await this.uniqueOr(
       () =>
         this.pool.query(
-          'INSERT INTO branches (id, code, name_ar, name_en, governorate_id, branch_no) VALUES ($1,$2,$3,$4,$5,$6)',
-          [b.id, b.code, b.nameAr, b.nameEn, b.governorateId, b.branchNo],
+          `INSERT INTO branches (id, code, name_ar, name_en, timezone, governorate_id, branch_no)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [b.id, b.code, b.nameAr, b.nameEn, b.timezone, b.governorateId, b.branchNo],
         ),
       `branch ${b.code} or number ${b.branchNo} is taken`,
     )
@@ -611,8 +635,10 @@ export class PgDirectoryRepo implements DirectoryRepo {
     await this.uniqueOr(
       () =>
         this.pool.query(
-          'UPDATE branches SET name_ar = $2, name_en = $3, governorate_id = $4, branch_no = $5 WHERE id = $1',
-          [b.id, b.nameAr, b.nameEn, b.governorateId, b.branchNo],
+          `UPDATE branches
+              SET name_ar = $2, name_en = $3, timezone = $4, governorate_id = $5, branch_no = $6
+            WHERE id = $1`,
+          [b.id, b.nameAr, b.nameEn, b.timezone, b.governorateId, b.branchNo],
         ),
       `branch number ${b.branchNo} is taken in that governorate`,
     )
@@ -702,7 +728,13 @@ export class PgDirectoryRepo implements DirectoryRepo {
   }
 
   async battery(id: string): Promise<BatteryRecord | null> {
-    const { rows } = await this.pool.query<Record<string, unknown>>('SELECT * FROM batteries WHERE id = $1', [id])
+    // A swap calls this through the transaction-bound directory repo. Holding the candidate row
+    // until commit prevents two shifts from both validating the same ready spare and then moving it
+    // to different bikes. Outside a surrounding transaction the lock naturally lasts one statement.
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM batteries WHERE id = $1 FOR UPDATE',
+      [id],
+    )
     const r = rows[0]
     return r ? toBattery(r) : null
   }
@@ -821,6 +853,7 @@ const toBranch = (r: Record<string, unknown>): BranchRecord => ({
   code: String(r.code),
   nameAr: String(r.name_ar),
   nameEn: String(r.name_en),
+  timezone: String(r.timezone),
   governorateId: String(r.governorate_id),
   branchNo: Number(r.branch_no),
 })
@@ -917,34 +950,152 @@ export class PgMediaRepo implements MediaRepo {
   }
 
   /** One photo per slot: a re-shoot REPLACES, so the manager never sees two odometer photos. */
-  async attach(shiftId: string, pkg: EvidencePackage, slot: string, mediaId: string): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO shift_media (shift_id, media_id, package, slot)
-       VALUES ($1,$2,$3,$4)
-       ON CONFLICT (shift_id, package, slot) DO UPDATE SET media_id = EXCLUDED.media_id`,
-      [shiftId, mediaId, pkg, slot],
-    )
+  async attach(
+    shiftId: string,
+    pkg: EvidencePackage,
+    slot: string,
+    mediaId: string,
+    metadata: { actorId: string | null; attachedAtMs?: number; reusedFromShiftId?: string | null },
+  ): Promise<void> {
+    await withTransaction(this.pool, { actorId: metadata.actorId }, async (client) => {
+      await assertMediaPackageEditable(client, shiftId, pkg)
+      // One immutable-media lock serializes attachments of identical bytes, even when they target
+      // different shifts/slots. The second transaction then sees the first one's history row.
+      const lockedMedia = await client.query(
+        `SELECT m.id
+           FROM media m
+           JOIN shifts s ON s.id = $1 AND s.branch_id = m.branch_id
+          WHERE m.id = $2
+          FOR UPDATE OF m`,
+        [shiftId, mediaId],
+      )
+      if (lockedMedia.rowCount !== 1) {
+        throw Object.assign(new Error(`media ${mediaId} does not belong to shift ${shiftId}'s branch`), {
+          code: 'MEDIA_BRANCH_MISMATCH',
+        })
+      }
+      const { rows: priorRows } = await client.query<{ shift_id: string }>(
+        `SELECT shift_id
+           FROM shift_media_attachment_history
+          WHERE media_id = $1
+          ORDER BY id DESC
+          LIMIT 1`,
+        [mediaId],
+      )
+      const priorShiftId = priorRows[0]?.shift_id ?? null
+      if (
+        metadata.reusedFromShiftId !== undefined &&
+        metadata.reusedFromShiftId !== priorShiftId
+      ) {
+        throw Object.assign(new Error(`media ${mediaId} reuse provenance does not match attachment history`), {
+          code: 'MEDIA_REUSE_PROVENANCE_MISMATCH',
+        })
+      }
+      await client.query(
+        `WITH candidate AS (
+           SELECT $1::uuid AS shift_id, $2::uuid AS media_id, $3::text AS package,
+                  $4::text AS slot,
+                  CASE
+                    WHEN $5::double precision IS NULL THEN now()
+                    ELSE to_timestamp($5::double precision / 1000)
+                  END AS created_at,
+                  $6::uuid AS reused_from_shift_id,
+                  gen_random_uuid() AS attachment_token
+         )
+         INSERT INTO shift_media
+           (shift_id, media_id, package, slot, created_at, reused_from_shift_id, attachment_token)
+         SELECT shift_id, media_id, package, slot, created_at, reused_from_shift_id, attachment_token
+           FROM candidate
+         ON CONFLICT (shift_id, package, slot) DO UPDATE
+           SET media_id                 = EXCLUDED.media_id,
+               created_at               = EXCLUDED.created_at,
+               reused_from_shift_id     = EXCLUDED.reused_from_shift_id,
+               attachment_token         = EXCLUDED.attachment_token,
+               stale_acknowledged_at    = NULL,
+               stale_acknowledged_by    = NULL
+         -- An exact network retry is not another attachment and must not create self-reuse.
+         WHERE shift_media.media_id <> EXCLUDED.media_id`,
+        [shiftId, mediaId, pkg, slot, metadata.attachedAtMs ?? null, priorShiftId],
+      )
+    })
+  }
+
+  async acknowledgeStale(
+    shiftId: string,
+    pkg: EvidencePackage,
+    slot: string,
+    expectedMediaId: string,
+    expectedAttachmentToken: string,
+    acknowledgedBy: string,
+    acknowledgedAtMs: number,
+  ): Promise<void> {
+    await withTransaction(this.pool, { actorId: acknowledgedBy }, async (client) => {
+      await assertMediaPackageEditable(client, shiftId, pkg)
+      const acknowledged = await client.query(
+        `UPDATE shift_media
+            SET stale_acknowledged_at = to_timestamp($6::double precision / 1000),
+                stale_acknowledged_by = $7
+          WHERE shift_id = $1 AND package = $2 AND slot = $3
+            AND media_id = $4 AND attachment_token = $5`,
+        [shiftId, pkg, slot, expectedMediaId, expectedAttachmentToken, acknowledgedAtMs, acknowledgedBy],
+      )
+      if (acknowledged.rowCount !== 1) {
+        throw Object.assign(new Error(`evidence attachment ${shiftId}/${pkg}/${slot} changed before acknowledgment`), {
+          code: 'MEDIA_ATTACHMENT_CHANGED',
+        })
+      }
+    })
   }
 
   /** Unhooks the slot only. The content-addressed `media` row survives — see the port's note. */
-  async detach(shiftId: string, pkg: EvidencePackage, slot: string): Promise<void> {
-    await this.pool.query('DELETE FROM shift_media WHERE shift_id = $1 AND package = $2 AND slot = $3', [
-      shiftId,
-      pkg,
-      slot,
-    ])
+  async detach(shiftId: string, pkg: EvidencePackage, slot: string, actorId: string | null): Promise<void> {
+    await withTransaction(this.pool, { actorId }, async (client) => {
+      await assertMediaPackageEditable(client, shiftId, pkg)
+      await client.query('DELETE FROM shift_media WHERE shift_id = $1 AND package = $2 AND slot = $3', [
+        shiftId,
+        pkg,
+        slot,
+      ])
+    })
   }
 
   async listSlots(shiftId: string): Promise<AttachedSlot[]> {
     const { rows } = await this.pool.query<Record<string, unknown>>(
-      'SELECT package, slot, media_id FROM shift_media WHERE shift_id = $1 ORDER BY package, slot',
+      `SELECT package, slot, media_id, attachment_token, created_at, reused_from_shift_id,
+              stale_acknowledged_at, stale_acknowledged_by
+         FROM shift_media WHERE shift_id = $1 ORDER BY package, slot`,
       [shiftId],
     )
     return rows.map((r) => ({
       package: r.package as EvidencePackage,
       slot: String(r.slot),
       mediaId: String(r.media_id),
+      attachmentToken: String(r.attachment_token),
+      attachedAtMs: (r.created_at as Date).getTime(),
+      reusedFromShiftId: (r.reused_from_shift_id as string | null) ?? null,
+      staleAcknowledgedAtMs:
+        r.stale_acknowledged_at === null ? null : (r.stale_acknowledged_at as Date).getTime(),
+      staleAcknowledgedBy: (r.stale_acknowledged_by as string | null) ?? null,
     }))
+  }
+}
+
+/**
+ * Lock the shift before changing evidence so a concurrent state transition cannot close the package
+ * between the authorization check and the attachment mutation.
+ */
+const assertMediaPackageEditable = async (
+  client: PoolClient,
+  shiftId: string,
+  pkg: EvidencePackage,
+): Promise<void> => {
+  const { rows } = await client.query<{ state: string }>('SELECT state FROM shifts WHERE id = $1 FOR UPDATE', [shiftId])
+  const state = rows[0]?.state
+  const editable = pkg === 'start' ? state === 'draft' : state === 'open' || state === 'suspended'
+  if (!editable) {
+    throw Object.assign(new Error(`${pkg} evidence is not editable while shift ${shiftId} is ${state ?? 'missing'}`), {
+      code: 'MEDIA_PACKAGE_NOT_EDITABLE',
+    })
   }
 }
 
@@ -1636,8 +1787,9 @@ const toAssignment = (r: Record<string, unknown>): AssignmentRecord => ({
  *
  * Keyed on the table's UNIQUE (shift, battery, package): a retake CORRECTS the reading in place
  * rather than adding a second one, so a driver cannot stack readings until one of them looks
- * right. The first OCR reading is preserved on conflict, because it is the baseline a manual
- * correction is measured against -- overwriting it would erase the very delta SRS D-3 asks for.
+ * right. The submitted row is one evidence generation: values, photo, source, and OCR baseline
+ * are replaced together. Retaining an earlier photo's OCR while replacing the other fields would
+ * manufacture a correction delta that never occurred; an explicit null therefore clears it.
  */
 export class PgBatteryReadingRepo implements BatteryReadingRepo {
   private readonly pool: Pool
@@ -1663,7 +1815,7 @@ export class PgBatteryReadingRepo implements BatteryReadingRepo {
          t2_dc = EXCLUDED.t2_dc,
          media_id = EXCLUDED.media_id,
          source = EXCLUDED.source,
-         ocr_raw = COALESCE(shift_battery_readings.ocr_raw, EXCLUDED.ocr_raw),
+         ocr_raw = EXCLUDED.ocr_raw,
          battery_swap_id = COALESCE(EXCLUDED.battery_swap_id, shift_battery_readings.battery_swap_id),
          unavailable = EXCLUDED.unavailable`,
       [

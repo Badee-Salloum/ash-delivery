@@ -39,6 +39,7 @@ export type LedgerEvent =
   | 'order_fee'
   | 'yalago_cut'
   | 'wallet_adjustment'
+  | 'driver_cash_deduction'
   | 'share_split'
   | 'float_return'
   | 'wallet_return'
@@ -47,7 +48,7 @@ export type LedgerEvent =
   | 'correction'
   /** «الترميم» — the daily sweep of profit to صندوق الشركة, or the replenishment of office capital. */
   | 'restoration'
-  /** The driver taking his share. The one event that DEBITS `driver_share_payable`. */
+  /** The driver taking his share. */
   | 'driver_payout'
 
 export type FundRef =
@@ -200,10 +201,9 @@ export function floatReturn(driverId: string, amount: Minor): Posting {
  *   • `driver_receivable_cash`   «يبقى ذمة على السائق» — the manager's decision (owner decision g)
  *   • `driver_share_payable`     «يُعاد للسائق» — he keeps his share out of the cash in his hands
  *
- * DEBITING `driver_share_payable` DISCHARGES A LIABILITY. `shareSplit` credits it and, until now,
- * nothing ever debited it — the company's debt to its drivers could only grow. Owner decision (f)
- * pays that share at the end of every shift, out of cash he is already holding, so the credit and
- * the debit land on the same night.
+ * DEBITING `driver_share_payable` DISCHARGES A LIABILITY. `shareSplit` credits it; this payout and a
+ * separately classified `driverCashDeduction` are the explicit ways to debit it. Owner decision
+ * (f) pays the remaining share at the end of a shift, out of cash he is already holding.
  *
  * With both extras zero this emits exactly the two lines `floatReturn` always did.
  */
@@ -364,6 +364,43 @@ export function walletAdjustment(
   return assertBalanced({ eventType: 'wallet_adjustment', occurrenceKey, lines })
 }
 
+/**
+ * One scanned cash operation that the manager has classified as the driver's responsibility.
+ *
+ * `amount` and `sharePortion` are POSITIVE magnitudes. The part covered by earned share debits
+ * `driver_share_payable`, discharging that liability; anything beyond the allocated share becomes
+ * a named cash receivable. The full operation credits `driver_cash`, because that is the asset the
+ * negative scan says left the driver's hands.
+ *
+ * Classification and allocation happen outside this pure recipe. In particular, it does not
+ * inspect orders or choose a tier, and the caller supplies the scan's stable identity as the
+ * occurrence key.
+ */
+export function driverCashDeduction(
+  driverId: string,
+  amount: Minor,
+  sharePortion: Minor,
+  occurrenceKey: string,
+): Posting {
+  if (amount <= 0n) throw new RangeError(`cash deduction amount must be positive, got ${amount}`)
+  if (sharePortion < 0n || sharePortion > amount) {
+    throw new RangeError(
+      `cash deduction share portion must satisfy 0 <= share <= amount, got ${sharePortion}/${amount}`,
+    )
+  }
+
+  const overflow = sub(amount, sharePortion)
+  const lines: PostingLine[] = []
+  if (sharePortion > 0n) {
+    lines.push(D({ kind: 'driver_share_payable', driverId }, sharePortion, 'cash_deduction_share'))
+  }
+  if (overflow > 0n) {
+    lines.push(D({ kind: 'driver_receivable_cash', driverId }, overflow, 'cash_deduction_overflow'))
+  }
+  lines.push(C({ kind: 'driver_cash', driverId }, amount, 'cash_deduction'))
+  return assertBalanced({ eventType: 'driver_cash_deduction', occurrenceKey, lines })
+}
+
 // ── Approval posting (BR4) ────────────────────────────────────────────────────────────────
 
 /**
@@ -489,6 +526,15 @@ export function reverse(posting: Posting, occurrenceKey: string): Posting {
 
 // ── Whole-shift assembly ──────────────────────────────────────────────────────────────────
 
+export interface CashDeduction {
+  /** Positive magnitude of the cash operation. */
+  readonly amount: Minor
+  /** Amount allocated against driver share; the recipe enforces `0 <= sharePortion <= amount`. */
+  readonly sharePortion: Minor
+  /** Stable identity supplied by the scan/application layer for ledger idempotency. */
+  readonly occurrenceKey: string
+}
+
 export interface ShiftPostingInput {
   readonly driverId: string
   /** Whose books the unexplained wallet movements land in. Only needed when there are any. */
@@ -498,6 +544,8 @@ export interface ShiftPostingInput {
   readonly orders: readonly ShiftOrder[]
   /** Wallet movements no order explains (incentive, top-up, withdrawal) — same term BR1 uses. */
   readonly walletAdjustments?: readonly Minor[]
+  /** Classified cash operations. These reduce cash only and are never treated as orders. */
+  readonly cashDeductions?: readonly CashDeduction[]
   /**
    * ذمم carried in from an earlier shift — cash the driver already had in his hands at open.
    *
@@ -526,8 +574,8 @@ export function postingsForOpen(input: ShiftPostingInput): Posting[] {
 }
 
 /**
- * Everything posted when a shift is APPROVED: order fees, Yallago's cuts, the tier split, and
- * the return of both the float and the wallet.
+ * Everything posted when a shift is APPROVED: order fees, Yallago's cuts, the tier split,
+ * classified cash deductions, and the return of both the float and the wallet.
  *
  * `split` comes from the caller because the tier band is a property of the DAY, not the shift —
  * a second shift can push the day across a band and restate the first (see tier/split.ts
@@ -557,6 +605,12 @@ export function postingsForApproval(input: ShiftPostingInput, split: BlockSplit)
     if (amount !== 0n) postings.push(walletAdjustment(input.driverId, input.branchId!, amount, String(i + 1)))
   })
 
+  for (const deduction of input.cashDeductions ?? []) {
+    postings.push(
+      driverCashDeduction(input.driverId, deduction.amount, deduction.sharePortion, deduction.occurrenceKey),
+    )
+  }
+
   /*
    * Both driver funds go to EXACTLY ZERO (D-4). The cash may be distributed three ways now — the
    * box, a ذمة, and the share he keeps — but it is still ONE credit of the whole closing balance,
@@ -585,10 +639,20 @@ export function closingBalances(input: ShiftPostingInput): ClosingBalances {
   // ledger would return a different amount from the one the equation just balanced.
   // A carried ذمة is cash he was ALREADY holding at open, so it is part of the closing balance
   // exactly as a float tranche is. `evaluateShift` adds it to `floatTotal` on the BR1 side by the
-  // same rule — the two must never drift, which is the whole point of the note above.
-  const endCash = add(
-    add(sum(input.floatTranches), sum(input.carriedTranches ?? [])),
-    sum(input.orders.map((o) => sub(o.fee, orderWalletAmount(o)))),
+  // same rule. Classified cash deductions then reduce only that cash balance, matching BR1.
+  const endCash = sub(
+    add(
+      add(sum(input.floatTranches), sum(input.carriedTranches ?? [])),
+      sum(input.orders.map((o) => sub(o.fee, orderWalletAmount(o)))),
+    ),
+    sum(
+      (input.cashDeductions ?? []).map((deduction) => {
+        if (deduction.amount <= 0n) {
+          throw new RangeError(`cash deductions must be positive magnitudes, got ${deduction.amount}`)
+        }
+        return deduction.amount
+      }),
+    ),
   )
   const walletFromOrders = sum(input.orders.map((o) => sub(orderWalletAmount(o), orderYalagoCut(o, rounding))))
   const adjustments = sum(input.walletAdjustments ?? [])

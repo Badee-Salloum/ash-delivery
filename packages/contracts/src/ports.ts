@@ -166,6 +166,8 @@ export interface BranchRecord {
   code: string
   nameAr: string
   nameEn: string
+  /** IANA zone used for this branch's printed operation dates/minutes. */
+  timezone: string
   /** The second segment of the vehicle number. Unique within the governorate. */
   governorateId: string
   branchNo: number
@@ -260,6 +262,10 @@ export interface BatteryReadingRecord {
   source: 'ocr' | 'manual' | 'manager'
   /** The driver cannot read this pack on his own phone; the manager owes the reading. */
   unavailable: boolean
+  /**
+   * OCR output belonging to this exact submitted reading generation. A replacement submission
+   * replaces this value too; `null` explicitly clears a baseline that belongs to an older photo.
+   */
   ocrRaw: unknown
   /** The mid-shift swap this reading belongs to; null for the ordinary start/end readings. */
   batterySwapId: string | null
@@ -403,9 +409,21 @@ export interface ShiftRecord {
    * from the OCR reading» stays computable. `null` = OCR did not run (or the driver typed straight).
    */
   odoStartOcr: number | null
+  /** Pre-correction OCR end-odometer value. Null when the close reader did not run. */
+  odoEndOcr: number | null
+  /** Driver/manager explicitly accepted an end reading below the opening odometer. */
+  odoEndAnomalyConfirmedAt: string | null
+  /** Actor who accepted that anomaly; null exactly when `odoEndAnomalyConfirmedAt` is null. */
+  odoEndAnomalyConfirmedBy: string | null
   batteryStartOcr: number | null
   endWalletDeclaredOcr: Minor | null
   driverConfirmedAt: string | null
+  /** The one manager-approved instant at which this shift first became operational. */
+  openApprovedAt: string | null
+  /** Manager who approved the initial open. Never replaced by resume/review decisions. */
+  openApprovedBy: string | null
+  /** Driver's most recent close-package submission instant. */
+  submittedAt: string | null
   equationDiff: Minor | null
   cashDiff: Minor | null
   walletDiff: Minor | null
@@ -460,6 +478,53 @@ export interface ShiftOrderRecord {
    * number is Arabic-Indic and is only accepted when the weekday printed beside it agrees.
    */
   occurredDate: string | null
+  /** Position of the printed operation time relative to the shift's approved-open/close window. */
+  windowStatus: OperationWindowStatus
+  /** Required by the service when a manager changes whether this row counts. */
+  decisionReason: string | null
+  decidedBy: string | null
+  decidedAt: string | null
+}
+
+/**
+ * A minute-only screenshot cannot order a row within either boundary minute. Boundary states are
+ * therefore distinct from the certain in/out states and remain included while visibly flagged.
+ */
+export type OperationWindowStatus =
+  | 'in_window'
+  | 'pre_open'
+  | 'post_close'
+  | 'open_minute_boundary'
+  | 'close_minute_boundary'
+  | 'unknown'
+
+export type CashDeductionSource = 'ocr' | 'manual'
+
+/**
+ * A positive cash deduction read from the provider's operations screen.
+ *
+ * `amount` is a magnitude: cash deductions are never represented by a negative money value. The
+ * direction lives in the record type, which prevents a double-negation at BR1/ledger boundaries.
+ */
+export interface CashDeductionRecord {
+  id: string
+  shiftId: string
+  /** Stable identity supplied by the source; unique only within one shift. */
+  operationKey: string
+  amount: Minor
+  occurredDate: CalendarDate | null
+  occurredMinute: string | null
+  source: CashDeductionSource
+  /** What OCR proposed before correction; null for manual/refused reads. */
+  amountOcr: Minor | null
+  pointA: string | null
+  pointB: string | null
+  included: boolean
+  windowStatus: OperationWindowStatus
+  decisionReason: string | null
+  decidedBy: string | null
+  decidedAt: string | null
+  createdBy: string | null
 }
 
 /** What a movement IS, which decides how BR1 may use it. See `WalletMovementRecord.role`. */
@@ -580,9 +645,10 @@ export interface SessionRepo {
 }
 
 export interface ShiftRepo {
-  create(shift: ShiftRecord): Promise<void>
+  create(shift: ShiftRecord, actorId: string | null): Promise<void>
   findById(id: string): Promise<ShiftRecord | null>
-  update(shift: ShiftRecord): Promise<void>
+  /** `actorId` is the current mutation actor, never inferred from an earlier approval. */
+  update(shift: ShiftRecord, actorId: string | null): Promise<void>
   listLiveForDriver(driverId: string): Promise<ShiftRecord[]>
   listLiveForVehicle(vehicleId: string): Promise<ShiftRecord[]>
   /**
@@ -611,7 +677,7 @@ export interface ShiftRepo {
    * have posted nothing to the ledger — it is how a mistakenly started shift releases the bike and
    * the driver it would otherwise hold hostage. The audit trigger records the deletion.
    */
-  delete(id: string): Promise<void>
+  delete(id: string, actorId: string | null): Promise<void>
   listByBranchAndDate(branchId: string, businessDate: CalendarDate): Promise<ShiftRecord[]>
   /**
    * Every shift in a DATE RANGE — what a week close has to look at.
@@ -664,7 +730,7 @@ export interface AssignmentRepo {
 }
 
 export interface OrderRepo {
-  create(order: ShiftOrderRecord): Promise<void>
+  create(order: ShiftOrderRecord, actorId: string | null): Promise<void>
   /**
    * Keep the fee's own pixels beside what the reader made of them — a training sample.
    *
@@ -720,7 +786,7 @@ export interface OrderRepo {
    * and an already-sent row could never be corrected at all; the only remedy was a manager adding
    * a compensating order. Identity — the shift and the order number — is never changed here.
    */
-  update(order: ShiftOrderRecord): Promise<void>
+  update(order: ShiftOrderRecord, actorId: string | null): Promise<void>
   /**
    * Replace an order's route — «A» the pickup, «B» the dropoff.
    *
@@ -729,10 +795,78 @@ export interface OrderRepo {
    * only onto orders that have none. An order stored before the reader could read routes is the
    * case this exists for; a route a manager has already fixed must survive a re-read.
    */
-  replacePoints(orderId: string, points: readonly OrderPointRecord[]): Promise<void>
+  replacePoints(orderId: string, points: readonly OrderPointRecord[], actorId: string | null): Promise<void>
   listByShift(shiftId: string): Promise<ShiftOrderRecord[]>
   findByProviderNo(providerOrderNo: string): Promise<ShiftOrderRecord | null>
-  delete(id: string): Promise<void>
+  delete(id: string, actorId: string | null): Promise<void>
+}
+
+export interface CashDeductionRepo {
+  create(deduction: CashDeductionRecord, actorId: string | null): Promise<void>
+  /** Mutable evidence/decision fields; id, shift and operation key remain the identity. */
+  update(deduction: CashDeductionRecord, actorId: string | null): Promise<void>
+  listByShift(shiftId: string): Promise<CashDeductionRecord[]>
+  findByOperationKey(shiftId: string, operationKey: string): Promise<CashDeductionRecord | null>
+  delete(id: string, actorId: string | null): Promise<void>
+}
+
+export interface OperationWindowReclassificationResult {
+  orders: number
+  cashDeductions: number
+}
+
+/**
+ * A deliberately narrow mutation port: implementations derive both window edges and every result
+ * from stored data. Callers can request a refresh for a shift, but cannot choose an inclusion.
+ */
+export interface OperationWindowRepo {
+  reclassify(shiftId: string, actorId: string | null): Promise<OperationWindowReclassificationResult>
+}
+
+/** One driver operations submission, committed as a single all-or-nothing unit. */
+export interface OperationBatch {
+  orderCreates: readonly ShiftOrderRecord[]
+  orderUpdates: readonly {
+    record: ShiftOrderRecord
+    /** Decision version read while constructing the batch; prevents overwriting a racing manager. */
+    expectedDecidedAt: string | null
+  }[]
+  orderPointReplacements: readonly {
+    orderId: string
+    points: readonly OrderPointRecord[]
+  }[]
+  cashDeductionCreates: readonly CashDeductionRecord[]
+  cashDeductionUpdates: readonly {
+    record: CashDeductionRecord
+    expectedDecidedAt: string | null
+  }[]
+  /**
+   * A signed provider row has exactly one representation. Implementations enforce these intents
+   * after locking the shift, including against an opposite-kind row that appeared concurrently.
+   * A manager-reviewed opposite row makes the batch stale instead of being deleted.
+   */
+  legacyKindTransitions?: readonly {
+    providerOrderNo: string
+    targetKind: 'order' | 'cash_deduction'
+    /** Opposite row observed while preparing the batch; NULL means none existed. */
+    expectedOppositeId: string | null
+    /** Optimistic manager-decision version. Driver sign flips only accept the undecided NULL state. */
+    expectedOppositeDecidedAt: string | null
+  }[]
+  movements: readonly WalletMovementInput[]
+}
+
+export interface OperationBatchResult {
+  insertedMovements: WalletMovementRecord[]
+}
+
+export interface OperationBatchRepo {
+  /** No OCR samples, blobs, or network work belongs inside this transaction. */
+  apply(
+    shiftId: string,
+    batch: OperationBatch,
+    actorId: string | null,
+  ): Promise<OperationBatchResult>
 }
 
 export interface WalletMovementRepo {
@@ -745,13 +879,18 @@ export interface WalletMovementRepo {
    * insert only the SURPLUS, numbering it from there — so a second page contributes exactly its
    * genuinely new rows. Returns what was inserted.
    */
-  merge(shiftId: string, movements: readonly WalletMovementInput[]): Promise<WalletMovementRecord[]>
+  merge(
+    shiftId: string,
+    movements: readonly WalletMovementInput[],
+    actorId: string | null,
+  ): Promise<WalletMovementRecord[]>
   /** Change what a movement IS, or whether it counts. Never its amount — that is what was read. */
   update(
     id: string,
     patch: { role?: WalletMovementRole; orderId?: string | null; included?: boolean; ambiguous?: boolean },
+    actorId: string | null,
   ): Promise<void>
-  deleteByShift(shiftId: string): Promise<void>
+  deleteByShift(shiftId: string, actorId: string | null): Promise<void>
 }
 
 export interface LedgerRepo {
@@ -863,6 +1002,14 @@ export interface AttachedSlot {
   package: EvidencePackage
   slot: string
   mediaId: string
+  /** Changes on every real slot replacement; preserved by an exact retry of the same attachment. */
+  attachmentToken: string
+  /** Server time at which these bytes were most recently attached to this slot. */
+  attachedAtMs: number
+  /** Shift containing an earlier attachment of these bytes; may equal this shift for another slot. */
+  reusedFromShiftId: string | null
+  staleAcknowledgedAtMs: number | null
+  staleAcknowledgedBy: string | null
 }
 
 export interface MediaRepo {
@@ -871,7 +1018,23 @@ export interface MediaRepo {
   findBySha(branchId: string, sha256: string): Promise<MediaRecord | null>
   findById(id: string): Promise<MediaRecord | null>
   /** One photo per (shift, package, slot): re-shooting replaces rather than accumulating. */
-  attach(shiftId: string, pkg: EvidencePackage, slot: string, mediaId: string): Promise<void>
+  attach(
+    shiftId: string,
+    pkg: EvidencePackage,
+    slot: string,
+    mediaId: string,
+    metadata: { actorId: string | null; attachedAtMs?: number; reusedFromShiftId?: string | null },
+  ): Promise<void>
+  /** An authorized uploader explicitly accepts a reused/old attachment after reviewing the warning. */
+  acknowledgeStale(
+    shiftId: string,
+    pkg: EvidencePackage,
+    slot: string,
+    expectedMediaId: string,
+    expectedAttachmentToken: string,
+    acknowledgedBy: string,
+    acknowledgedAtMs: number,
+  ): Promise<void>
   /**
    * Unhook a photo from a slot. The `media` row and its bytes are NOT deleted.
    *
@@ -880,7 +1043,7 @@ export interface MediaRepo {
    * by "remove this picture" is that this SLOT no longer holds it, and that is exactly what the
    * BR5 gate reads. The orphaned bytes are cheap and a retention job can sweep them.
    */
-  detach(shiftId: string, pkg: EvidencePackage, slot: string): Promise<void>
+  detach(shiftId: string, pkg: EvidencePackage, slot: string, actorId: string | null): Promise<void>
   listSlots(shiftId: string): Promise<AttachedSlot[]>
 }
 
@@ -1195,7 +1358,10 @@ export interface DirectoryRepo {
 
 /** Per-pack BMS readings for a shift (SRS §L seam, evidence for the BR5 gates). */
 export interface BatteryReadingRepo {
-  /** Replaces the row for (shift, battery, package) — a re-upload corrects, it does not duplicate. */
+  /**
+   * Replaces the complete row for (shift, battery, package) — including `ocrRaw`. A re-upload
+   * corrects rather than duplicates, and may clear an obsolete OCR baseline with `null`.
+   */
   upsert(reading: BatteryReadingRecord): Promise<void>
   listByShift(shiftId: string): Promise<BatteryReadingRecord[]>
   /** Has this pack ever been read? Asked before a delete — a pack with readings is evidence. */
@@ -1255,6 +1421,45 @@ export interface GpsPingRepo {
   listForShift(shiftId: string): Promise<GpsPingRecord[]>
 }
 
+/**
+ * The repository slice available while a close boundary or approval transaction owns the shift.
+ *
+ * Keeping this list explicit prevents network/blob/notification work from accidentally being held
+ * inside a database transaction. Every PostgreSQL implementation in this slice is rebound to the
+ * same connection by `PgShiftCloseUnitOfWork`.
+ */
+export interface ShiftCloseTransactionDeps {
+  shifts: ShiftRepo
+  orders: OrderRepo
+  cashDeductions: CashDeductionRepo
+  operationWindows: OperationWindowRepo
+  movements: WalletMovementRepo
+  ledger: LedgerRepo
+  decisions: ShiftDecisionRepo
+  fx: FxRepo
+  tiers: TierRepo
+  directory: DirectoryRepo
+  media: MediaRepo
+  batteryReadings: BatteryReadingRepo
+  batterySwaps: BatterySwapRepo
+  weekLocks: WeekLockRepo
+}
+
+export interface ShiftCloseUnitOfWorkInput {
+  shiftId: string
+  actorId: string | null
+  requestId?: string | null
+  /** Serialize approvals that contribute to the same driver's day-level tier true-up. */
+  serializeDriverDay?: boolean
+}
+
+export interface ShiftCloseUnitOfWork {
+  run<T>(
+    input: ShiftCloseUnitOfWorkInput,
+    work: (deps: ShiftCloseTransactionDeps) => Promise<T>,
+  ): Promise<T>
+}
+
 /** Everything the API is handed at construction. One object, so wiring is explicit. */
 export interface Deps {
   clock: Clock
@@ -1268,6 +1473,12 @@ export interface Deps {
   batteryReadings: BatteryReadingRepo
   batterySwaps: BatterySwapRepo
   orders: OrderRepo
+  /** Positive cash deductions read from the provider's operation history. */
+  cashDeductions: CashDeductionRepo
+  /** Deterministic, audited refresh of stored operation-window classifications. */
+  operationWindows: OperationWindowRepo
+  /** Atomic writer for one complete driver operations submission. */
+  operationBatches: OperationBatchRepo
   /** «سجل المدفوعات» — what the wallet actually did, beside what the orders imply it should have. */
   movements: WalletMovementRepo
   ledger: LedgerRepo
@@ -1294,4 +1505,6 @@ export interface Deps {
   attendance: AttendanceRepo
   decisions: ShiftDecisionRepo
   gps: GpsPingRepo
+  /** Atomic close-boundary/review writer; callback work is database-only. */
+  closeUnitOfWork: ShiftCloseUnitOfWork
 }

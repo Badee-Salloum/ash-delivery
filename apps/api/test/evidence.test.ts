@@ -29,6 +29,17 @@ async function newShift(driverToken: string): Promise<string> {
   return res.json().id as string
 }
 
+async function markOpenForEndEvidence(id: string): Promise<void> {
+  const shift = await h.deps.shifts.findById(id)
+  if (!shift) throw new Error('test shift missing')
+  await h.deps.shifts.update({
+    ...shift,
+    state: 'open',
+    openApprovedAt: new Date(h.deps.clock.nowMs()).toISOString(),
+    openApprovedBy: 'u-bm',
+  }, 'u-bm')
+}
+
 const startPackage = { odometerKm: 100, batteryPercent: 90, floatTranches: [sypStr(1_000)], topupTranches: [sypStr(1_000)] }
 
 describe('the gate reads uploaded photos, not client claims', () => {
@@ -79,6 +90,89 @@ describe('the gate reads uploaded photos, not client claims', () => {
 })
 
 describe('upload behaviour', () => {
+  it('does not pre-acknowledge a fresh image merely because a blanket header was sent', async () => {
+    const driver = await h.loginAs('driver1')
+    const id = await newShift(driver)
+    const uploaded = await h.uploadPhoto(driver, id, 'start', 'odometer')
+    expect(uploaded.staleAcknowledged).toBe(false)
+
+    const acknowledge = await h.app.inject({
+      method: 'POST',
+      url: `/shifts/${id}/media/start/odometer/acknowledge-stale`,
+      headers: { cookie: h.cookie(driver) },
+      payload: { mediaId: uploaded.mediaId, attachmentToken: uploaded.attachmentToken },
+    })
+    expect(acknowledge.statusCode).toBe(422)
+    expect(acknowledge.json().error).toBe('evidence_not_stale_or_reused')
+  })
+
+  it('blocks an old attachment until the driver explicitly acknowledges the warning', async () => {
+    const driver = await h.loginAs('driver1')
+    const id = await newShift(driver)
+    const uploaded = await h.app.inject({
+      method: 'PUT',
+      url: `/shifts/${id}/media/start/odometer`,
+      headers: {
+        cookie: h.cookie(driver),
+        'content-type': 'image/jpeg',
+        'x-client-taken-at': String(h.deps.clock.nowMs() - 31 * 60_000),
+      },
+      payload: TINY_JPEG,
+    })
+    expect(uploaded.statusCode, uploaded.body).toBe(201)
+    expect(uploaded.json().staleAcknowledged).toBe(false)
+
+    const blocked = await h.app.inject({
+      method: 'PUT',
+      url: `/shifts/${id}/start-package`,
+      headers: { cookie: h.cookie(driver) },
+      payload: startPackage,
+    })
+    expect(blocked.statusCode, blocked.body).toBe(422)
+    expect(blocked.json().error).toBe('stale_evidence_confirmation_required')
+
+    const acknowledged = await h.app.inject({
+      method: 'POST',
+      url: `/shifts/${id}/media/start/odometer/acknowledge-stale`,
+      headers: { cookie: h.cookie(driver) },
+      payload: {
+        mediaId: uploaded.json().mediaId,
+        attachmentToken: uploaded.json().attachmentToken,
+      },
+    })
+    expect(acknowledged.statusCode, acknowledged.body).toBe(200)
+    const accepted = await h.app.inject({
+      method: 'PUT',
+      url: `/shifts/${id}/start-package`,
+      headers: { cookie: h.cookie(driver) },
+      payload: startPackage,
+    })
+    expect(accepted.statusCode, accepted.body).toBe(200)
+  })
+
+  it('remembers image reuse after the original attachment is detached', async () => {
+    const driver = await h.loginAs('driver1')
+    const id = await newShift(driver)
+    await h.uploadPhoto(driver, id, 'start', 'odometer')
+    const detached = await h.app.inject({
+      method: 'DELETE',
+      url: `/shifts/${id}/media/start/odometer`,
+      headers: { cookie: h.cookie(driver) },
+    })
+    expect(detached.statusCode, detached.body).toBe(200)
+    await markOpenForEndEvidence(id)
+
+    const reused = await h.app.inject({
+      method: 'PUT',
+      url: `/shifts/${id}/media/end/dashboard`,
+      headers: { cookie: h.cookie(driver), 'content-type': 'image/jpeg' },
+      payload: TINY_JPEG,
+    })
+    expect(reused.statusCode, reused.body).toBe(201)
+    expect(reused.json()).toMatchObject({ reusedFromShiftId: id, staleAcknowledged: false })
+    expect(h.deps.media.attachmentHistory).toHaveLength(2)
+  })
+
   it('is content-addressed: the same photo retried dedupes instead of storing twice', async () => {
     // Office Wi-Fi drops mid-upload; the driver's app retries. That must not double-store.
     const driver = await h.loginAs('driver1')
@@ -164,6 +258,7 @@ describe('upload behaviour', () => {
     // page is its own slot — so they accumulate instead of replacing one another.
     const driver = await h.loginAs('driver1')
     const id = await newShift(driver)
+    await markOpenForEndEvidence(id)
     for (const slot of ['dashboard', 'dashboard_2', 'payments_log_3']) {
       const res = await h.app.inject({
         method: 'PUT',
@@ -199,8 +294,53 @@ describe('upload behaviour', () => {
     const shift = await h.deps.shifts.findById(id)
     expect(shift?.mediaSlotsStart).toEqual(['odometer'])
     expect(await h.deps.media.listSlots(id)).toEqual([
-      { package: 'start', slot: 'odometer', mediaId: second.mediaId },
+      expect.objectContaining({ package: 'start', slot: 'odometer', mediaId: second.mediaId }),
     ])
+  })
+  it('refuses evidence replacement after the close package enters manager review', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await newShift(driver)
+    await h.uploadPhoto(driver, id, 'start', 'odometer')
+    await h.app.inject({
+      method: 'PUT',
+      url: `/shifts/${id}/start-package`,
+      headers: { cookie: h.cookie(driver) },
+      payload: { odometerKm: 100, batteryPercent: null },
+    })
+    await h.app.inject({
+      method: 'POST',
+      url: `/shifts/${id}/approve-open`,
+      headers: { cookie: h.cookie(manager) },
+      payload: { floatTranches: [sypStr(100)], topupTranches: [sypStr(2)] },
+    })
+    await h.app.inject({
+      method: 'PUT',
+      url: `/shifts/${id}/operations`,
+      headers: { cookie: h.cookie(driver) },
+      payload: {
+        orders: [{ providerOrderNo: 'EVIDENCE-LOCK', payMode: 'cash', fee: sypStr(10) }],
+        movements: [],
+      },
+    })
+    for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
+    const ended = await h.app.inject({
+      method: 'PUT',
+      url: `/shifts/${id}/end-package`,
+      headers: { cookie: h.cookie(driver) },
+      payload: { odometerKm: 110, batteryPercent: null, cashDeclared: sypStr(110), walletDeclared: sypStr(0) },
+    })
+    expect(ended.statusCode, ended.body).toBe(200)
+
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')
+    const replacement = await h.app.inject({
+      method: 'PUT',
+      url: `/shifts/${id}/media/end/wallet`,
+      headers: { cookie: h.cookie(driver), 'content-type': 'image/png' },
+      payload: png,
+    })
+    expect(replacement.statusCode).toBe(409)
+    expect(replacement.json().error).toBe('shift_not_editable')
   })
 })
 

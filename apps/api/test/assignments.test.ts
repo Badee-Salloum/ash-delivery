@@ -167,7 +167,7 @@ describe('releasing a shift that never opened', () => {
 
     // Backdate it, exactly as a shift that ran through the rollover would be.
     const shift = (await h.deps.shifts.findById(shiftId))!
-    await h.deps.shifts.update({ ...shift, businessDate: '2026-07-01', state: 'open' })
+    await h.deps.shifts.update({ ...shift, businessDate: '2026-07-01', state: 'open' }, 'u-bm')
 
     expect((await get(manager, '/shifts')).json().shifts).toEqual([]) // today's list: gone
     const live = (await get(manager, '/shifts?live=1')).json().shifts as Array<{ id: string; businessDate: string }>
@@ -180,7 +180,7 @@ describe('releasing a shift that never opened', () => {
     const manager = await h.loginAs('manager')
     const shiftId = (await startShift(driver, DRIVER_ID, VEHICLE_ID)).json().id as string
     const shift = (await h.deps.shifts.findById(shiftId))!
-    await h.deps.shifts.update({ ...shift, state: 'open', odoStart: 1_234 })
+    await h.deps.shifts.update({ ...shift, state: 'open', odoStart: 1_234 }, 'u-bm')
 
     const row = (await get(manager, '/shifts?live=1')).json().shifts[0] as Record<string, unknown>
     // Money as decimal strings, never JSON numbers; the order count is what he has recorded so far.
