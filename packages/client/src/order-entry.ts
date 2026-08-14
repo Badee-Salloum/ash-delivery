@@ -774,6 +774,109 @@ const scannedKey = (row: ScannedOrderRow): string => {
   return `${cancelled ? 'C' : ''}|${row.dateIso ?? ''}|${cancelled ? '' : row.time}|${cardKey(row.pointA, row.pointB, cancelled)}`
 }
 
+const authoritativeDeliveryFee = (row: ScannedOrderRow): string | null => {
+  if (row.cancelled === true || row.fee === null) return null
+  const fee = row.fee.trim()
+  if (fee === '') return null
+  try {
+    return parseMinor(fee) >= 0n ? fee : null
+  } catch {
+    return null
+  }
+}
+
+const routeSupportScore = (existing: DraftOrder, scanned: ScannedOrderRow): number => {
+  let score = 0
+  for (const [left, right] of [
+    [existing.pointA, scanned.pointA],
+    [existing.pointB, scanned.pointB],
+  ] as const) {
+    const existingPart = cleanOperationPart(left)
+    const scannedPart = cleanOperationPart(right)
+    if (existingPart === '' || scannedPart === '') continue
+    if (existingPart === scannedPart) score += 2
+    else if (existingPart.includes(scannedPart) || scannedPart.includes(existingPart)) score += 1
+  }
+  return score
+}
+
+/**
+ * Let a successful second AI attempt price the refused card created by the first attempt.
+ *
+ * This is deliberately stricter than ordinary overlap de-duplication because it writes money. The
+ * target must still be the untouched, unrecorded refusal: a driver-entered fee, an OCR baseline or
+ * a server-recorded row makes it ineligible. A nonblank minute must match and at least one sighting
+ * must carry a day; two known different days can never be the same delivery. Route text only helps
+ * choose between otherwise eligible candidates — imperfect route OCR cannot veto a timing match.
+ *
+ * The returned rows retain the original local/wire identities. Missing day/route evidence is filled
+ * without overwriting an existing value, and `feeRefused` is removed once AI supplied the baseline.
+ */
+export function reconcileRefusedOrderFees(
+  existing: readonly DraftOrder[],
+  scanned: readonly ScannedOrderRow[],
+): DraftOrder[] {
+  const next = existing.map((row) => ({ ...row }))
+  const consumed = new Set<number>()
+
+  for (const row of inferMissingOrderDates(scanned)) {
+    const fee = authoritativeDeliveryFee(row)
+    const scannedMinute = cleanOperationPart(row.time)
+    const scannedDate = cleanOperationPart(row.dateIso)
+    if (fee === null || scannedMinute === '') continue
+
+    const matches: Array<{ index: number; score: number }> = []
+    for (let index = 0; index < next.length; index += 1) {
+      if (consumed.has(index)) continue
+      const candidate = next[index]!
+      if (
+        candidate.recorded === true ||
+        candidate.cancelled === true ||
+        candidate.feeRefused !== true ||
+        candidate.feeText.trim() !== '' ||
+        cleanOperationPart(candidate.feeOcrText) !== ''
+      ) continue
+
+      const candidateMinute = cleanOperationPart(candidate.timeText)
+      const candidateDate = cleanOperationPart(candidate.dateText)
+      if (candidateMinute === '' || candidateMinute !== scannedMinute) continue
+      // A known day is the minimum safe boundary. Missing evidence may be enriched; conflicting
+      // evidence may never be reconciled into one monetary row.
+      if (candidateDate === '' && scannedDate === '') continue
+      if (candidateDate !== '' && scannedDate !== '' && candidateDate !== scannedDate) continue
+
+      const exactDateScore = candidateDate !== '' && scannedDate !== '' ? 4 : 0
+      matches.push({ index, score: exactDateScore + routeSupportScore(candidate, row) })
+    }
+
+    if (matches.length === 0) continue
+    matches.sort((left, right) => right.score - left.score)
+    // When timing and route evidence cannot distinguish two refused cards, assigning a fee would
+    // be a guess. Leave both untouched for explicit review rather than writing money to either.
+    if (matches.length > 1 && matches[0]!.score === matches[1]!.score) continue
+
+    const index = matches[0]!.index
+    const target = next[index]!
+    const { feeRefused: _refusal, ...withoutRefusal } = target
+    const pointA = cleanOperationPart(target.pointA) === '' ? (row.pointA ?? null) : (target.pointA ?? null)
+    const pointB = cleanOperationPart(target.pointB) === '' ? (row.pointB ?? null) : (target.pointB ?? null)
+    next[index] = {
+      ...withoutRefusal,
+      feeText: fee,
+      feeOcrText: fee,
+      dateText: target.dateText?.trim() ? target.dateText : (row.dateIso ?? ''),
+      pointA,
+      pointB,
+      ...(target.pointBIsPin === true || (cleanOperationPart(target.pointB) === '' && row.pointBIsPin === true)
+        ? { pointBIsPin: true }
+        : {}),
+    }
+    consumed.add(index)
+  }
+
+  return next
+}
+
 /**
  * A card the screen cut in half, HEALED by the page that shows it whole.
  *

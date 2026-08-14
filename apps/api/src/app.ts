@@ -905,10 +905,12 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         bytes: new Uint8Array(req.body as Buffer),
         requestedBy: req.actor!.userId,
         maxReadsPerShift: opts.maxOcrReadsPerShift ?? 15,
+        retryFailed: req.headers['x-ocr-retry'] === 'true',
       })
       return reply.send({
         ok: out.result.ok,
         cached: out.cached,
+        retryable: out.retryable,
         reads: out.reads,
         ...(out.result.ok
           ? { rows: out.result.rows, fields: out.result.fields }

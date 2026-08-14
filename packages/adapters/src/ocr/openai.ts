@@ -31,7 +31,13 @@
  */
 
 import type { OcrFailure, OcrField, OcrReader, OcrReading, OcrResult, OcrRow } from '@ash/contracts'
-import { READ_SCHEMA, readPrompt, walletReadPrompts } from './prompt.ts'
+import {
+  ORDERS_MONEY_READ_SCHEMA,
+  READ_SCHEMA,
+  ordersMoneyReadPrompt,
+  readPrompt,
+  walletReadPrompts,
+} from './prompt.ts'
 
 export interface OpenAiOcrConfig {
   apiKey: string
@@ -52,6 +58,17 @@ const DEFAULT_BASE_URL = 'https://api.openai.com/v1/chat/completions'
  */
 const MAX_COMPLETION_TOKENS = 8192
 
+/**
+ * Orders have two independent latency budgets. The compact financial pass supplies the primary
+ * candidates and should finish first; an aligned full pass independently verifies their money and
+ * may enrich routes. A disagreement is refused rather than resolved by an arbitrary tie-break.
+ * Even with a 50-second adapter configuration, routes cannot hold the read to the platform ceiling.
+ */
+const ORDERS_MONEY_TIMEOUT_MS = 30_000
+const ORDERS_ROUTE_TIMEOUT_MS = 44_000
+const ORDERS_ROUTE_GRACE_AFTER_MONEY_MS = 12_000
+const ORDERS_MONEY_MAX_COMPLETION_TOKENS = 4096
+
 export class OpenAiOcrReader implements OcrReader {
   readonly available = true
   readonly model: string
@@ -63,13 +80,38 @@ export class OpenAiOcrReader implements OcrReader {
     this.model = config.model
   }
 
+  cacheSignature(field: OcrField): string {
+    const prefix = `openai:${this.model}:${this.config.effort}:${this.config.verbosity}`
+    if (field === 'orders') {
+      const moneyTimeout = Math.min(this.config.timeoutMs, ORDERS_MONEY_TIMEOUT_MS)
+      const routeTimeout = Math.min(this.config.timeoutMs, ORDERS_ROUTE_TIMEOUT_MS)
+      return `${prefix}:orders-money-v2:orders-route-v1:money-validation-v2:money-timeout-${moneyTimeout}:route-timeout-${routeTimeout}:route-grace-${ORDERS_ROUTE_GRACE_AFTER_MONEY_MS}:money-max-${ORDERS_MONEY_MAX_COMPLETION_TOKENS}:route-max-${MAX_COMPLETION_TOKENS}`
+    }
+    const budget = `timeout-${this.config.timeoutMs}:max-${MAX_COMPLETION_TOKENS}`
+    if (field === 'wallet') {
+      return `${prefix}:wallet-consensus-v1:money-validation-v2:${budget}`
+    }
+    return `${prefix}:${field}-prompt-v1:validation-v1:${budget}`
+  }
+
   async read(request: { field: OcrField; bytes: Uint8Array; mimeType: string }): Promise<OcrReading> {
     const startedAt = Date.now()
-    const prompts = request.field === 'wallet' ? walletReadPrompts() : [readPrompt(request.field)]
+    let passes: ModelPass[]
+    let result: OcrResult
 
-    // Parallel, not sequential: three 20-second inspections must still fit below a 60-second
-    // function ceiling. Each pass has its own abort signal and no pass can hold the others open.
-    const passes = await Promise.all(prompts.map(async (prompt) => await this.runPass(request, prompt)))
+    if (request.field === 'orders') {
+      const orders = await this.readOrders(request)
+      passes = orders.passes
+      result = orders.result
+    } else {
+      const prompts = request.field === 'wallet' ? walletReadPrompts() : [readPrompt(request.field)]
+
+      // Parallel, not sequential: three 20-second inspections must still fit below a 60-second
+      // function ceiling. Each pass has its own abort signal and no pass can hold the others open.
+      passes = await Promise.all(prompts.map(async (prompt) => await this.runPass(request, prompt)))
+      result = request.field === 'wallet' ? walletConsensus(passes) : passes[0]!.result
+    }
+
     const usage = passes.reduce(
       (sum, pass) => ({
         tokensIn: sum.tokensIn + pass.tokensIn,
@@ -78,13 +120,39 @@ export class OpenAiOcrReader implements OcrReader {
       { tokensIn: 0, tokensOut: 0 },
     )
 
-    const result = request.field === 'wallet' ? walletConsensus(passes) : passes[0]!.result
     return { result, usage: { ...usage, latencyMs: Date.now() - startedAt } }
+  }
+
+  private async readOrders(
+    request: { field: OcrField; bytes: Uint8Array; mimeType: string },
+  ): Promise<{ result: OcrResult; passes: ModelPass[] }> {
+    const routeAbort = new AbortController()
+    const routePromise = this.runPass(request, readPrompt('orders'), {
+      timeoutMs: Math.min(this.config.timeoutMs, ORDERS_ROUTE_TIMEOUT_MS),
+      signal: routeAbort.signal,
+      schemaName: 'orders_with_routes',
+    })
+    const moneyPromise = this.runPass(request, ordersMoneyReadPrompt(), {
+      timeoutMs: Math.min(this.config.timeoutMs, ORDERS_MONEY_TIMEOUT_MS),
+      maxCompletionTokens: ORDERS_MONEY_MAX_COMPLETION_TOKENS,
+      schema: ORDERS_MONEY_READ_SCHEMA,
+      schemaName: 'orders_money_time_date',
+    })
+
+    // Both calls start above. If the compact pass succeeds, routes get only a short grace period;
+    // if it fails, the already-running full pass gets its complete (still <45s) fallback budget.
+    const money = await moneyPromise
+    const route = money.result.ok
+      ? await routePassWithinGrace(routePromise, routeAbort)
+      : await routePromise
+
+    return { result: ordersPassResult(money, route), passes: [money, route] }
   }
 
   private async runPass(
     request: { field: OcrField; bytes: Uint8Array; mimeType: string },
     prompt: string,
+    options: PassOptions = {},
   ): Promise<ModelPass> {
     let json: OpenAiResponse
     try {
@@ -108,12 +176,16 @@ export class OpenAiOcrReader implements OcrReader {
               ],
             },
           ],
-          max_completion_tokens: MAX_COMPLETION_TOKENS,
+          max_completion_tokens: options.maxCompletionTokens ?? MAX_COMPLETION_TOKENS,
           reasoning_effort: this.config.effort,
           verbosity: this.config.verbosity,
           response_format: {
             type: 'json_schema',
-            json_schema: { name: 'screen', strict: true, schema: READ_SCHEMA },
+            json_schema: {
+              name: options.schemaName ?? 'screen',
+              strict: true,
+              schema: options.schema ?? READ_SCHEMA,
+            },
           },
         }),
         /*
@@ -121,7 +193,13 @@ export class OpenAiOcrReader implements OcrReader {
          * dies at the same instant the platform gives up, turning a clean timeout into an opaque
          * transport error nobody can diagnose from a log line.
          */
-        signal: AbortSignal.timeout(this.config.timeoutMs),
+        signal:
+          options.signal === undefined
+            ? AbortSignal.timeout(options.timeoutMs ?? this.config.timeoutMs)
+            : AbortSignal.any([
+                AbortSignal.timeout(options.timeoutMs ?? this.config.timeoutMs),
+                options.signal,
+              ]),
       })
 
       if (!res.ok) {
@@ -163,18 +241,107 @@ function failedPass(reason: OcrFailure, tokensIn = 0, tokensOut = 0): ModelPass 
   return { result: { ok: false, reason }, raw: null, tokensIn, tokensOut }
 }
 
+async function routePassWithinGrace(
+  routePromise: Promise<ModelPass>,
+  routeAbort: AbortController,
+): Promise<ModelPass> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const graceExpired = new Promise<ModelPass>((resolve) => {
+    timer = setTimeout(() => {
+      routeAbort.abort()
+      resolve(failedPass('timeout'))
+    }, ORDERS_ROUTE_GRACE_AFTER_MONEY_MS)
+  })
+
+  try {
+    return await Promise.race([routePromise, graceExpired])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+/**
+ * Money/date/time come from the compact pass when it succeeds, but a second successful pass is
+ * still independent financial evidence. Agreement is evaluated per position: one disputed fee is
+ * refused without throwing away the other rows or their correctly aligned routes.
+ */
+function ordersPassResult(money: ModelPass, route: ModelPass): OcrResult {
+  if (!money.result.ok) return route.result
+
+  const positionsAligned = route.result.ok && money.result.rows.length === route.result.rows.length
+  const financialDisagreementIndexes: number[] = []
+  const routeAgreementIndexes: number[] = []
+  const rows = money.result.rows.map((row, index) => {
+    if (!positionsAligned || !route.result.ok) return row
+    const routeRow = route.result.rows[index]!
+    if (!ordersRowsFinanciallyAgree(row, routeRow)) {
+      financialDisagreementIndexes.push(index)
+      return { ...row, value: null }
+    }
+    if (!ordersRowsAlign(row, routeRow)) return row
+    routeAgreementIndexes.push(index)
+    return { ...row, pointA: routeRow.pointA, pointB: routeRow.pointB }
+  })
+
+  return {
+    ok: true,
+    retryable: ordersRowsRetryable(rows),
+    rows,
+    fields: money.result.fields,
+    raw: {
+      reader: 'orders-ai-money-authority-v1',
+      routesAligned:
+        positionsAligned && routeAgreementIndexes.length === money.result.rows.length,
+      financialDisagreementIndexes,
+      money: money.raw,
+      route: route.result.ok ? route.raw : route.result,
+    },
+  }
+}
+
+function ordersRowsAlign(money: OcrRow, route: OcrRow | undefined): boolean {
+  if (route === undefined) return false
+  return (
+    ordersRowsFinanciallyAgree(money, route) &&
+    money.time === route.time &&
+    money.dateIso === route.dateIso
+  )
+}
+
+function ordersRowsFinanciallyAgree(money: OcrRow, route: OcrRow): boolean {
+  return money.cancelled === route.cancelled && sameMoneyValue(money.value, route.value)
+}
+
+function ordersRowsRetryable(rows: readonly OcrRow[]): boolean {
+  // Keep every unread non-cancelled slot eligible for the one explicit whole-image retry. A
+  // partial 3/5 read is still a partial failure even though the three authoritative rows remain
+  // useful to the normal cached response. Cancelled rows intentionally have no monetary value.
+  return rows.some((row) => !row.cancelled && row.value === null)
+}
+
+function sameMoneyValue(left: string | null, right: string | null): boolean {
+  if (left === null || right === null) return left === right
+  const leftKey = moneyKey(left)
+  const rightKey = moneyKey(right)
+  return leftKey !== null && rightKey !== null ? leftKey === rightKey : left.trim() === right.trim()
+}
+
 /**
  * Convert one strict provider response into the public port.
  *
- * For the wallet, `printed` is re-derived rather than merely trusted. The prompt has always asked
- * for `hasDecimal`, `hasThousands` and `digitCount`, but the old adapter threw those checks away.
- * That is how `674,30` declared as a thousands number became `67430`. A malformed grouping or a
- * `printed`/`value` disagreement now makes that pass a refusal, so it cannot win the vote.
+ * For the wallet and every non-cancelled orders row, `printed` is re-derived rather than merely
+ * trusted. The prompt has always asked for `hasDecimal`, `hasThousands` and `digitCount`, but the
+ * old adapter threw those checks away. That is how `674,30` declared as a thousands number became
+ * `67430`. A malformed grouping or a `printed`/`value` disagreement now makes that row a refusal.
  */
 export function parsedResult(field: OcrField, parsed: ParsedScreen): OcrResult {
   const rows: OcrRow[] = (parsed.rows ?? []).map((r) => {
     const ordinaryValue = r.value == null ? null : String(r.value)
-    const value = field === 'wallet' && !r.cancelled ? verifiedWalletValue(r) : ordinaryValue
+    const value = r.cancelled
+      ? null
+      : field === 'wallet' || field === 'orders'
+        ? verifiedMoneyValue(r)
+        : ordinaryValue
     return {
       printed: String(r.printed ?? ''),
       value,
@@ -191,7 +358,9 @@ export function parsedResult(field: OcrField, parsed: ParsedScreen): OcrResult {
   }
 
   if (rows.length === 0 && Object.keys(fields).length === 0) return { ok: false, reason: 'no_fields' }
-  return { ok: true, rows, fields, raw: parsed }
+  return field === 'orders'
+    ? { ok: true, retryable: ordersRowsRetryable(rows), rows, fields, raw: parsed }
+    : { ok: true, rows, fields, raw: parsed }
 }
 
 /** Publish only a value seen by at least two independent wallet passes. */
@@ -255,7 +424,7 @@ const ARABIC_DIGITS: Readonly<Record<string, string>> = {
   '۹': '9',
 }
 
-function verifiedWalletValue(row: ParsedRow): string | null {
+function verifiedMoneyValue(row: ParsedRow): string | null {
   if (typeof row.printed !== 'string' || typeof row.value !== 'string') return null
   if (typeof row.hasDecimal !== 'boolean' || typeof row.hasThousands !== 'boolean') return null
   if (!Number.isInteger(row.digitCount) || Number(row.digitCount) < 1) return null
@@ -327,6 +496,14 @@ interface ModelPass {
   raw: ParsedScreen | null
   tokensIn: number
   tokensOut: number
+}
+
+interface PassOptions {
+  timeoutMs?: number
+  maxCompletionTokens?: number
+  schema?: unknown
+  schemaName?: string
+  signal?: AbortSignal
 }
 
 interface OpenAiResponse {

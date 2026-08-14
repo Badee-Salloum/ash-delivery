@@ -37,11 +37,16 @@ const read = async (
   // Annotated rather than inferred from the default: `Buffer.from([...])` widens to
   // `Buffer<ArrayBufferLike>`, which the narrower inferred type would reject.
   bytes: Buffer = TINY_JPEG,
+  retryFailed = false,
 ): Promise<LightMyRequestResponse> =>
   await h.app.inject({
     method: 'POST',
     url: `/shifts/${shiftId}/ocr/${field}`,
-    headers: { cookie: h.cookie(token), 'content-type': 'image/jpeg' },
+    headers: {
+      cookie: h.cookie(token),
+      'content-type': 'image/jpeg',
+      ...(retryFailed ? { 'x-ocr-retry': 'true' } : {}),
+    },
     payload: bytes,
   })
 
@@ -101,6 +106,52 @@ describe('cloud OCR: the same pixels are never billed twice', () => {
     const other = await read(driver, shiftId, 'payments_log')
     expect(other.json().cached).toBe(false)
     expect(reader.calls).toBe(2)
+  })
+
+  it('makes a concurrent duplicate wait for the reserved logical read instead of serving a placeholder', async () => {
+    let release!: () => void
+    let announceStarted!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const started = new Promise<void>((resolve) => {
+      announceStarted = resolve
+    })
+    let calls = 0
+    const reader: OcrReader = {
+      available: true,
+      model: 'delayed',
+      cacheSignature: (field) => `delayed-v1:${field}`,
+      read: async (): Promise<OcrReading> => {
+        calls += 1
+        announceStarted()
+        await gate
+        return {
+          result: { ok: true, rows: [], fields: { odometerKm: '6034' }, raw: null },
+          usage: { tokensIn: 5, tokensOut: 2, latencyMs: 10 },
+        }
+      },
+    }
+    h = await makeHarness({ ocr: reader })
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = await openShift(driver, manager)
+
+    const firstPromise = read(driver, shiftId, 'odometer')
+    await started
+    const waitingPromise = read(driver, shiftId, 'odometer')
+    let waitingSettled = false
+    void waitingPromise.finally(() => {
+      waitingSettled = true
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(waitingSettled, 'the duplicate must wait while the reservation is running').toBe(false)
+    release()
+    const [first, waiting] = await Promise.all([firstPromise, waitingPromise])
+
+    expect(first.json()).toMatchObject({ ok: true, cached: false, fields: { odometerKm: '6034' } })
+    expect(waiting.json()).toMatchObject({ ok: true, cached: true, fields: { odometerKm: '6034' } })
+    expect(calls, 'the waiting request must not start a second logical read').toBe(1)
   })
 })
 
@@ -171,6 +222,23 @@ describe('cloud OCR: wallet publication guard', () => {
 })
 
 describe('cloud OCR: a shift cannot spend without limit', () => {
+  it('atomically caps concurrent initial reads of different pixels', async () => {
+    const reader = scripted()
+    h = await makeHarness({ ocr: reader, maxOcrReadsPerShift: 1 })
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = await openShift(driver, manager)
+    const distinct = (n: number): Buffer => Buffer.from([...TINY_JPEG, n])
+
+    const [left, right] = await Promise.all([
+      read(driver, shiftId, 'orders', distinct(1)),
+      read(driver, shiftId, 'orders', distinct(2)),
+    ])
+    expect([left.json().ok, right.json().ok].sort()).toEqual([false, true])
+    expect(reader.calls).toBe(1)
+    expect(await h.deps.ocrReads.countBilledForShift(shiftId)).toBe(1)
+  })
+
   it('stops calling out at the cap and answers unavailable instead of an error', async () => {
     const reader = scripted()
     // Cap of 2, and every image distinct so the cache never absorbs a call.
@@ -214,10 +282,146 @@ describe('cloud OCR: a shift cannot spend without limit', () => {
 })
 
 describe('cloud OCR: a failure never blocks a shift', () => {
+  it('allows one explicit retry of an orders shape with no authoritative monetary row', async () => {
+    const reader = new ScriptedOcrReader([
+      {
+        ok: true,
+        retryable: true,
+        rows: [
+          {
+            printed: '155 SYP',
+            value: null,
+            cancelled: false,
+            time: '00:49',
+            dateIso: '2026-08-15',
+            pointA: 'A',
+            pointB: 'B',
+          },
+        ],
+        fields: {},
+        raw: null,
+      },
+      {
+        ok: true,
+        rows: [
+          {
+            printed: '155 SYP',
+            value: '155',
+            cancelled: false,
+            time: '00:49',
+            dateIso: '2026-08-15',
+            pointA: 'A',
+            pointB: 'B',
+          },
+        ],
+        fields: {},
+        raw: null,
+      },
+    ])
+    h = await makeHarness({ ocr: reader })
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = await openShift(driver, manager)
+
+    const first = await read(driver, shiftId, 'orders')
+    expect(first.json()).toMatchObject({ ok: true, cached: false, retryable: true, rows: [{ value: null }] })
+    const ordinary = await read(driver, shiftId, 'orders')
+    expect(ordinary.json()).toMatchObject({ ok: true, cached: true, retryable: true, rows: [{ value: null }] })
+    expect(reader.calls).toBe(1)
+
+    const retried = await read(driver, shiftId, 'orders', TINY_JPEG, true)
+    expect(retried.json()).toMatchObject({ ok: true, cached: false, retryable: false, rows: [{ value: '155' }] })
+    expect(reader.calls).toBe(2)
+  })
+
+  it('lets one explicit retry replace a cached timeout with a genuine successful read', async () => {
+    const reader = new ScriptedOcrReader([
+      { ok: false, reason: 'timeout' },
+      {
+        ok: true,
+        rows: [
+          {
+            printed: '155 SYP',
+            value: '155',
+            cancelled: false,
+            time: '00:49',
+            dateIso: '2026-08-15',
+            pointA: 'A',
+            pointB: 'B',
+          },
+        ],
+        fields: {},
+        raw: null,
+      },
+    ])
+    h = await makeHarness({ ocr: reader })
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = await openShift(driver, manager)
+
+    const failed = await read(driver, shiftId, 'orders')
+    expect(failed.json()).toMatchObject({ ok: false, reason: 'timeout', cached: false, retryable: true, reads: { used: 1 } })
+
+    const retried = await read(driver, shiftId, 'orders', TINY_JPEG, true)
+    expect(retried.json()).toMatchObject({ ok: true, cached: false, retryable: false, reads: { used: 2 } })
+    expect(retried.json().rows).toHaveLength(1)
+    expect(reader.calls).toBe(2)
+
+    const third = await read(driver, shiftId, 'orders', TINY_JPEG, true)
+    expect(third.json()).toMatchObject({ ok: true, cached: true, retryable: false, reads: { used: 2 } })
+    expect(reader.calls, 'a successful replacement is cached forever').toBe(2)
+  })
+
+  it('bills at most one explicit retry when the provider times out twice', async () => {
+    const reader = new ScriptedOcrReader([
+      { ok: false, reason: 'timeout' },
+      { ok: false, reason: 'timeout' },
+    ])
+    h = await makeHarness({ ocr: reader })
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = await openShift(driver, manager)
+
+    await read(driver, shiftId, 'orders')
+    const retried = await read(driver, shiftId, 'orders', TINY_JPEG, true)
+    expect(retried.json()).toMatchObject({ ok: false, reason: 'timeout', cached: false, retryable: false, reads: { used: 2 } })
+
+    const third = await read(driver, shiftId, 'orders', TINY_JPEG, true)
+    expect(third.json()).toMatchObject({ ok: false, reason: 'timeout', cached: true, retryable: false, reads: { used: 2 } })
+    expect(reader.calls, 'attemptCount=2 makes every later retry a cache hit').toBe(2)
+  })
+
+  it('counts the explicit retry against the shift cap', async () => {
+    const reader = new ScriptedOcrReader([
+      { ok: false, reason: 'timeout' },
+      { ok: false, reason: 'timeout' },
+      { ok: false, reason: 'timeout' },
+    ])
+    h = await makeHarness({ ocr: reader, maxOcrReadsPerShift: 2 })
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = await openShift(driver, manager)
+
+    await read(driver, shiftId, 'orders')
+    await read(driver, shiftId, 'orders', TINY_JPEG, true)
+    expect(await h.deps.ocrReads.countBilledForShift(shiftId)).toBe(2)
+
+    const distinct = Buffer.from([...TINY_JPEG, 7])
+    const capped = await read(driver, shiftId, 'orders', distinct)
+    expect(capped.json()).toMatchObject({
+      ok: false,
+      reason: 'unavailable',
+      retryable: false,
+      reads: { used: 2, max: 2 },
+    })
+    expect(reader.calls).toBe(2)
+  })
+
   it('returns 200 with a reason when the provider fails, and the shift still closes', async () => {
     const failing: OcrReader = {
       available: true,
       model: 'exploding',
+      cacheSignature: (field) => `exploding-v1:${field}`,
       read: async (): Promise<OcrReading> => ({
         result: { ok: false, reason: 'timeout' },
         usage: { tokensIn: 0, tokensOut: 0, latencyMs: 45_000 },
@@ -259,6 +463,7 @@ describe('cloud OCR: a failure never blocks a shift', () => {
     const failing: OcrReader = {
       available: true,
       model: 'exploding',
+      cacheSignature: (field) => `exploding-v1:${field}`,
       read: async (): Promise<OcrReading> => {
         calls += 1
         return { result: { ok: false, reason: 'timeout' }, usage: { tokensIn: 10, tokensOut: 0, latencyMs: 1 } }
@@ -273,6 +478,29 @@ describe('cloud OCR: a failure never blocks a shift', () => {
     const again = await read(driver, shiftId, 'odometer')
     expect(again.json().cached).toBe(true)
     expect(calls, 'a stored timeout is what stops us paying to rediscover it').toBe(1)
+  })
+
+  it('completes the reservation when an adapter unexpectedly throws', async () => {
+    let calls = 0
+    const throwing: OcrReader = {
+      available: true,
+      model: 'throwing',
+      cacheSignature: (field) => `throwing-v1:${field}`,
+      read: async () => {
+        calls += 1
+        throw new Error('adapter bug')
+      },
+    }
+    h = await makeHarness({ ocr: throwing })
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = await openShift(driver, manager)
+
+    const first = await read(driver, shiftId, 'orders')
+    expect(first.json()).toMatchObject({ ok: false, reason: 'unavailable', cached: false })
+    const duplicate = await read(driver, shiftId, 'orders')
+    expect(duplicate.json()).toMatchObject({ ok: false, reason: 'unavailable', cached: true })
+    expect(calls).toBe(1)
   })
 })
 
@@ -289,6 +517,7 @@ describe('cloud OCR: switched off by default', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json().ok).toBe(false)
     expect(res.json().reason).toBe('unavailable')
+    expect(res.json().retryable).toBe(false)
 
     // Nothing was recorded, because nothing was spent.
     expect(await h.deps.ocrReads.countBilledForShift(shiftId)).toBe(0)

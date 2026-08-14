@@ -116,13 +116,22 @@ export interface OcrRow {
 export type OcrResult =
   | {
       ok: true
+      /** Paid provider attempts represented by this cached result. Missing legacy values mean 1. */
+      attemptCount?: number
+      /** A readable shape with no authoritative monetary row may use the one explicit retry. */
+      retryable?: boolean
       rows: OcrRow[]
       /** Labelled non-money values — odometer km, battery percent, cycle count. */
       fields: Readonly<Record<string, string | null>>
       /** The provider's answer verbatim, kept so the D-3 baseline stays reconstructible. */
       raw: unknown
     }
-  | { ok: false; reason: OcrFailure }
+  | {
+      ok: false
+      /** Paid provider attempts represented by this cached result. Missing legacy values mean 1. */
+      attemptCount?: number
+      reason: OcrFailure
+    }
 
 /**
  * A cloud vision model reading a driver's screenshot.
@@ -141,6 +150,8 @@ export interface OcrReader {
   readonly available: boolean
   /** The model actually in use, recorded beside every reading so a run is self-describing. */
   readonly model: string
+  /** Includes model/config plus the field-specific prompt and validation versions. */
+  cacheSignature(field: OcrField): string
   read(request: { field: OcrField; bytes: Uint8Array; mimeType: string }): Promise<OcrReading>
 }
 
@@ -1065,12 +1076,59 @@ export interface OcrReadRecord {
   sha256: string
   byteSize: number
   model: string
+  /** Versioned reader identity; old prompt/validation results never satisfy a new signature. */
+  cacheSignature: string
+  state: 'running' | 'complete'
   result: OcrResult
+  /** Present only while one process owns the paid logical OCR attempt. */
+  reservationId: string | null
+  reservedAt: number | null
+  reservedAttempt: 1 | 2 | null
+  /** The shift charged for attempt two; attempt one is owned by `shiftId`. */
+  retryShiftId: string | null
+  retryCreatedAt: number | null
+  retryCreatedBy: string | null
   tokensIn: number
   tokensOut: number
   latencyMs: number
   createdAt: number
   createdBy: string
+}
+
+export interface OcrReadClaimInput {
+  id: string
+  branchId: string
+  requestingShiftId: string
+  field: OcrField
+  sha256: string
+  byteSize: number
+  model: string
+  cacheSignature: string
+  createdAt: number
+  createdBy: string
+  reservationId: string
+  nowMs: number
+  leaseMs: number
+  retryFailed: boolean
+  /** Zero disables the cap. */
+  maxReadsPerShift: number
+}
+
+export type OcrReadClaim =
+  | { kind: 'call'; record: OcrReadRecord; attempt: 1 | 2; used: number }
+  | { kind: 'cached'; record: OcrReadRecord; used: number }
+  /** Remaining lease duration calculated by the repository's authoritative clock. */
+  | { kind: 'running'; record: OcrReadRecord; used: number; leaseRemainingMs: number }
+  | { kind: 'capped'; record: OcrReadRecord | null; used: number }
+
+export interface OcrReadCompletion {
+  branchId: string
+  field: OcrField
+  sha256: string
+  cacheSignature: string
+  reservationId: string
+  result: OcrResult
+  usage: { tokensIn: number; tokensOut: number; latencyMs: number }
 }
 
 /**
@@ -1081,12 +1139,15 @@ export interface OcrReadRecord {
  * retries after a timeout, would otherwise pay twice for bytes we have already read — and at three
  * cents a call with a hundred bikes that is the difference between a line item and a problem.
  *
- * `countBilled` deliberately counts ROWS, so a cache hit costs nothing against the cap. Capping
- * cache hits would punish a driver for the network being bad.
+ * `countBilledForShift` counts the attempts represented by each row. A normal cache hit costs
+ * nothing, while the one explicitly requested retry of a failed read counts as a second attempt.
  */
 export interface OcrReadRepo {
-  findBySha(branchId: string, sha256: string, field: OcrField): Promise<OcrReadRecord | null>
-  put(record: OcrReadRecord): Promise<OcrReadRecord>
+  findBySha(branchId: string, sha256: string, field: OcrField, cacheSignature: string): Promise<OcrReadRecord | null>
+  /** Atomically returns cache/running/cap, or reserves exactly one paid logical OCR attempt. */
+  claimReadAttempt(input: OcrReadClaimInput): Promise<OcrReadClaim>
+  /** Completes only the matching live reservation and atomically aggregates its telemetry. */
+  completeReadAttempt(input: OcrReadCompletion): Promise<OcrReadRecord | null>
   countBilledForShift(shiftId: string): Promise<number>
 }
 

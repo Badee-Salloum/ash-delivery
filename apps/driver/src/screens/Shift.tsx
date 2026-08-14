@@ -8,7 +8,13 @@ import {
   useState,
 } from 'react'
 import { MAX_PAGE_SLOTS, PAYMENTS_LOG_SLOT, type PayMode, pageSlot } from '@ash/domain'
-import type { DraftCashDeduction, DraftMovement, DraftOrder, StoredCashDeductionView } from '@ash/client'
+import type {
+  CloudOcrResponse,
+  DraftCashDeduction,
+  DraftMovement,
+  DraftOrder,
+  StoredCashDeductionView,
+} from '@ash/client'
 import {
   allProblems,
   br1DifferencePresentation,
@@ -21,6 +27,7 @@ import {
   mergeScannedCashDeductions,
   healCashDeductionDetails,
   healCutOffRoutes,
+  reconcileRefusedOrderFees,
   mergeScannedOrders,
   cloudRowsToScannedMovements,
   cloudRowsToScannedOrders,
@@ -71,6 +78,7 @@ import {
   beginAiPageRead,
   cancelAiPageRead,
   discardAiPageFailure,
+  discardAiPageRefusals,
   finishAiPageRead,
   type AiPageReadState,
   visibleAiPageReadOutcome,
@@ -134,6 +142,25 @@ function pagesIn(slots: readonly string[], base: string): number {
 
 /** What cloud AI made of a paged operations screen, including every concurrent page. */
 type LogState = AiPageReadState
+
+type PageReadFailureReason = NonNullable<CloudOcrResponse['reason']>
+
+/** The exact evidence generation and why cloud AI failed to read it. */
+interface FailedPageRead {
+  file: File
+  reason: PageReadFailureReason
+  /** The server allows at most one explicit retry for this exact image generation. */
+  canRetry: boolean
+  /** A hard failure increments the aggregate failure counter; a partial refusal does not. */
+  countsAsFailure: boolean
+  /** Visible refused cards attributed to this page and removed before its retry. */
+  refused: number
+}
+
+function discardFailedPageRead(state: AiPageReadState, failure: FailedPageRead): AiPageReadState {
+  const withoutFailure = failure.countsAsFailure ? discardAiPageFailure(state) : state
+  return discardAiPageRefusals(withoutFailure, failure.refused)
+}
 
 /**
  * The closing package while it is being filled in.
@@ -852,7 +879,7 @@ function StartPackage({
     if (km === null) {
       // A structured response without an odometer is a terminal, visible failure — never a hidden
       // success and never permission to promote the phone's guess.
-      setOdoCloud({ status: 'failed', reason: 'no_fields' })
+      setOdoCloud({ status: 'failed', reason: 'no_fields', retryable: e.response.retryable })
       return
     }
     setOdoCloud(e)
@@ -874,13 +901,13 @@ function StartPackage({
     async (file: File): Promise<void> => {
       if (!shiftId) return
       setOdoCloud({ status: 'reading' })
-      const res = await readInCloud(api, shiftId, 'odometer', file)
+      const res = await readInCloud(api, shiftId, 'odometer', file, true)
       odoCloudRead(
         res === null
-          ? { status: 'failed', reason: 'unavailable' }
+          ? { status: 'failed', reason: 'unavailable', retryable: false }
           : res.ok
             ? { status: 'read', response: res }
-            : { status: 'failed', reason: res.reason ?? 'unavailable' },
+            : { status: 'failed', reason: res.reason ?? 'unavailable', retryable: res.retryable },
         file,
       )
     },
@@ -1190,8 +1217,8 @@ function EndPackage({
   /** Exact failed files make AI retry one tap; Sets also identify which partial batch still failed. */
   const dashboardReadFiles = useRef<Map<string, File>>(new Map())
   const logReadFiles = useRef<Map<string, File>>(new Map())
-  const failedDashboardReads = useRef<Map<string, File>>(new Map())
-  const failedLogReads = useRef<Map<string, File>>(new Map())
+  const failedDashboardReads = useRef<Map<string, FailedPageRead>>(new Map())
+  const failedLogReads = useRef<Map<string, FailedPageRead>>(new Map())
 
   // Heal a phone-only overlap even when it entered the draft before this component rendered (for
   // example while a service-worker update was waiting). Persisted rows carry `recorded:true` and
@@ -1478,7 +1505,11 @@ function EndPackage({
             return { ...withWalletAuthority(d, next), walletCloud: event }
           }
 
-          const failed: CloudReadEvent = { status: 'failed', reason: 'no_fields' }
+          const failed: CloudReadEvent = {
+            status: 'failed',
+            reason: 'no_fields',
+            retryable: event.response.retryable,
+          }
           const next = reduceAiOcrAuthority(walletAuthority(d), { type: 'ai_failed', generation })
           return { ...withWalletAuthority(d, next), walletCloud: failed }
         }
@@ -1494,13 +1525,17 @@ function EndPackage({
   const retryWalletCloud = useCallback(
     async (file: File): Promise<void> => {
       walletCloudRead({ status: 'reading' }, file)
-      const response = await readInCloud(api, shift.id, 'wallet', file)
+      const response = await readInCloud(api, shift.id, 'wallet', file, true)
       walletCloudRead(
         response === null
-          ? { status: 'failed', reason: 'unavailable' }
+          ? { status: 'failed', reason: 'unavailable', retryable: false }
           : response.ok
             ? { status: 'read', response }
-            : { status: 'failed', reason: response.reason ?? 'unavailable' },
+            : {
+                status: 'failed',
+                reason: response.reason ?? 'unavailable',
+                retryable: response.retryable,
+              },
         file,
       )
     },
@@ -1567,7 +1602,11 @@ function EndPackage({
         if (km === null) {
           return {
             ...d,
-            odoCloud: { status: 'failed', reason: 'no_fields' },
+            odoCloud: {
+              status: 'failed',
+              reason: 'no_fields',
+              retryable: event.response.retryable,
+            },
             odoOcr: null,
             odoAiAuthoritative: false,
           }
@@ -1588,13 +1627,17 @@ function EndPackage({
   const retryEndOdoCloud = useCallback(
     async (file: File): Promise<void> => {
       odoCloudRead({ status: 'reading' }, file)
-      const response = await readInCloud(api, shift.id, 'odometer', file)
+      const response = await readInCloud(api, shift.id, 'odometer', file, true)
       odoCloudRead(
         response === null
-          ? { status: 'failed', reason: 'unavailable' }
+          ? { status: 'failed', reason: 'unavailable', retryable: false }
           : response.ok
             ? { status: 'read', response }
-            : { status: 'failed', reason: response.reason ?? 'unavailable' },
+            : {
+                status: 'failed',
+                reason: response.reason ?? 'unavailable',
+                retryable: response.retryable,
+              },
         file,
       )
     },
@@ -1609,12 +1652,15 @@ function EndPackage({
    * and the exact File is retained for Retry; the driver can also add the row manually below.
   */
   const dashImage = useCallback(
-    async (file: File, slot: string): Promise<void> => {
+    async (file: File, slot: string, retryFailed = false): Promise<void> => {
       dashboardReadFiles.current.set(slot, file)
-      const replacingFailure = failedDashboardReads.current.delete(slot)
+      const replacingFailure = failedDashboardReads.current.get(slot)
+      failedDashboardReads.current.delete(slot)
       onDraft((d) => ({
         ...d,
-        dash: beginAiPageRead(replacingFailure ? discardAiPageFailure(d.dash) : d.dash),
+        dash: beginAiPageRead(
+          replacingFailure ? discardFailedPageRead(d.dash, replacingFailure) : d.dash,
+        ),
       }))
 
       // Run locally only to carry correctly-aligned glyph strips into AI-owned rows for training.
@@ -1624,7 +1670,7 @@ function EndPackage({
         .catch(() => null)
       const [r, cloud] = await Promise.all([
         localRead,
-        readInCloud(api, shift.id, 'orders', file),
+        readInCloud(api, shift.id, 'orders', file, retryFailed),
       ])
 
       // The page was replaced or deleted while this request was running. Settle its pending count,
@@ -1635,7 +1681,13 @@ function EndPackage({
       }
 
       if (!cloud?.ok) {
-        failedDashboardReads.current.set(slot, file)
+        failedDashboardReads.current.set(slot, {
+          file,
+          reason: cloud?.reason ?? 'unavailable',
+          canRetry: cloud?.retryable ?? !retryFailed,
+          countsAsFailure: true,
+          refused: 0,
+        })
         onDraft((d) => ({ ...d, dash: finishAiPageRead(d.dash, { kind: 'failed' }) }))
         return
       }
@@ -1644,15 +1696,27 @@ function EndPackage({
       const scanned = cloudRowsToScannedOrders(cloud.rows, localOrders)
       // `ok` only says the response was structured. A page with no authoritative monetary row is
       // still a no-fields outcome for reconciliation and must not look like a successful zero-add.
-      if (!scanned.some((row) => row.fee !== null && row.fee.trim() !== '')) {
-        failedDashboardReads.current.set(slot, file)
+      if (!scanned.some((row) => row.cancelled === true || (row.fee !== null && row.fee.trim() !== ''))) {
+        failedDashboardReads.current.set(slot, {
+          file,
+          reason: 'no_fields',
+          canRetry: cloud.retryable,
+          countsAsFailure: true,
+          refused: 0,
+        })
         onDraft((d) => ({ ...d, dash: finishAiPageRead(d.dash, { kind: 'failed' }) }))
         return
       }
 
-      failedDashboardReads.current.delete(slot)
+      const hasVisibleRefusal = scanned.some(
+        (row) => row.cancelled !== true && (row.fee === null || row.fee.trim() === ''),
+      )
       onDraft((d) => {
-        const added = mergeScannedOrders(d.orders, scanned, () => crypto.randomUUID())
+        // A retry can supply the fee that an earlier AI response explicitly refused. Reconcile
+        // that untouched card first so its stable local/provider identity consumes the retry row
+        // instead of leaving an empty card beside a newly appended duplicate.
+        const reconciledOrders = reconcileRefusedOrderFees(d.orders, scanned)
+        const added = mergeScannedOrders(reconciledOrders, scanned, () => crypto.randomUUID())
         const addedDeductions = mergeScannedCashDeductions(
           d.cashDeductions,
           scanned,
@@ -1660,7 +1724,7 @@ function EndPackage({
         )
         const healedDeductions = healCashDeductionDetails(d.cashDeductions, scanned)
         // Keep the existing cloud merge/heal semantics; only its authority changed.
-        const healed = healCutOffRoutes(d.orders, scanned)
+        const healed = healCutOffRoutes(reconciledOrders, scanned)
         const routePatch = new Map(healed.map((row) => [row.localId, row]))
         const deductionPatch = new Map(healedDeductions.map((row) => [row.localId, row]))
         const nextCashDeductions = reconcileLocalCashDeductions([
@@ -1670,10 +1734,22 @@ function EndPackage({
           }),
           ...addedDeductions,
         ])
+        const outcome = visibleAiPageReadOutcome(added, addedDeductions, nextCashDeductions)
+        if (hasVisibleRefusal) {
+          failedDashboardReads.current.set(slot, {
+            file,
+            reason: 'refused',
+            canRetry: cloud.retryable,
+            countsAsFailure: false,
+            refused: outcome.kind === 'read' ? (outcome.refused ?? 0) : 0,
+          })
+        } else {
+          failedDashboardReads.current.delete(slot)
+        }
         return {
           ...d,
           orders: [
-            ...d.orders.map((order) => {
+            ...reconciledOrders.map((order) => {
               const healedOrder = routePatch.get(order.localId)
               return healedOrder
                 ? { ...order, pointA: healedOrder.pointA, pointB: healedOrder.pointB }
@@ -1685,10 +1761,7 @@ function EndPackage({
           // complete sighting collapse only when both are unrecorded OCR rows. Server-restored and
           // genuine complete twins retain multiplicity.
           cashDeductions: nextCashDeductions,
-          dash: finishAiPageRead(
-            d.dash,
-            visibleAiPageReadOutcome(added, addedDeductions, nextCashDeductions),
-          ),
+          dash: finishAiPageRead(d.dash, outcome),
         }
       })
     },
@@ -1697,19 +1770,22 @@ function EndPackage({
 
   /** Same authority rule as Recent Orders: local payment rows are diagnostics, never money. */
   const logImage = useCallback(
-    async (file: File, slot: string): Promise<void> => {
+    async (file: File, slot: string, retryFailed = false): Promise<void> => {
       logReadFiles.current.set(slot, file)
-      const replacingFailure = failedLogReads.current.delete(slot)
+      const replacingFailure = failedLogReads.current.get(slot)
+      failedLogReads.current.delete(slot)
       onDraft((d) => ({
         ...d,
-        log: beginAiPageRead(replacingFailure ? discardAiPageFailure(d.log) : d.log),
+        log: beginAiPageRead(
+          replacingFailure ? discardFailedPageRead(d.log, replacingFailure) : d.log,
+        ),
       }))
       const localRead = import('../ocr.ts')
         .then(({ readPaymentsLog }) => readPaymentsLog(file))
         .catch(() => null)
       const [, cloud] = await Promise.all([
         localRead,
-        readInCloud(api, shift.id, 'payments_log', file),
+        readInCloud(api, shift.id, 'payments_log', file, retryFailed),
       ])
 
       if (logReadFiles.current.get(slot) !== file) {
@@ -1718,14 +1794,26 @@ function EndPackage({
       }
 
       if (!cloud?.ok) {
-        failedLogReads.current.set(slot, file)
+        failedLogReads.current.set(slot, {
+          file,
+          reason: cloud?.reason ?? 'unavailable',
+          canRetry: cloud?.retryable ?? !retryFailed,
+          countsAsFailure: true,
+          refused: 0,
+        })
         onDraft((d) => ({ ...d, log: finishAiPageRead(d.log, { kind: 'failed' }) }))
         return
       }
 
       const scanned = cloudRowsToScannedMovements(cloud.rows)
       if (scanned.length === 0) {
-        failedLogReads.current.set(slot, file)
+        failedLogReads.current.set(slot, {
+          file,
+          reason: 'no_fields',
+          canRetry: cloud.retryable,
+          countsAsFailure: true,
+          refused: 0,
+        })
         onDraft((d) => ({ ...d, log: finishAiPageRead(d.log, { kind: 'failed' }) }))
         return
       }
@@ -1750,10 +1838,16 @@ function EndPackage({
 
   /** Retry every failed page as one concurrent batch, using the exact File objects already held. */
   const retryFailedDashboard = useCallback((): void => {
-    for (const [slot, file] of [...failedDashboardReads.current]) void dashImage(file, slot)
+    for (const [slot, failure] of [...failedDashboardReads.current]) {
+      if (!failure.canRetry) continue
+      void dashImage(failure.file, slot, true)
+    }
   }, [dashImage])
   const retryFailedLog = useCallback((): void => {
-    for (const [slot, file] of [...failedLogReads.current]) void logImage(file, slot)
+    for (const [slot, failure] of [...failedLogReads.current]) {
+      if (!failure.canRetry) continue
+      void logImage(failure.file, slot, true)
+    }
   }, [logImage])
 
   return (
@@ -1873,21 +1967,30 @@ function EndPackage({
         onImage={dashImage}
         onDeleted={(gone) => {
           dashboardReadFiles.current.delete(gone)
-          const discardedFailure = failedDashboardReads.current.delete(gone)
+          const discardedFailure = failedDashboardReads.current.get(gone)
+          failedDashboardReads.current.delete(gone)
           onDraft((d) => {
             const next = new Set(d.slots)
             next.delete(gone)
             return {
               ...d,
               slots: next,
-              dash: discardedFailure ? discardAiPageFailure(d.dash) : d.dash,
+              dash: discardedFailure ? discardFailedPageRead(d.dash, discardedFailure) : d.dash,
             }
           })
         }}
         status={
           <ReadStatus
             state={draft.dash}
-            {...(failedDashboardReads.current.size > 0 ? { onRetry: retryFailedDashboard } : {})}
+            hasEvidence={[...slots].some((slot) => splitSlot(slot).base === 'dashboard')}
+            failureDetails={[...failedDashboardReads.current].map(([slot, failure]) => ({
+              label: t.shift.imageNumber.replace('{n}', String(splitSlot(slot).n)),
+              reason: failure.reason,
+              canRetry: failure.canRetry,
+            }))}
+            {...([...failedDashboardReads.current.values()].some((failure) => failure.canRetry)
+              ? { onRetry: retryFailedDashboard }
+              : {})}
           />
         }
       />
@@ -1921,21 +2024,30 @@ function EndPackage({
         onImage={logImage}
         onDeleted={(gone) => {
           logReadFiles.current.delete(gone)
-          const discardedFailure = failedLogReads.current.delete(gone)
+          const discardedFailure = failedLogReads.current.get(gone)
+          failedLogReads.current.delete(gone)
           onDraft((d) => {
             const next = new Set(d.slots)
             next.delete(gone)
             return {
               ...d,
               slots: next,
-              log: discardedFailure ? discardAiPageFailure(d.log) : d.log,
+              log: discardedFailure ? discardFailedPageRead(d.log, discardedFailure) : d.log,
             }
           })
         }}
         status={
           <ReadStatus
             state={logState}
-            {...(failedLogReads.current.size > 0 ? { onRetry: retryFailedLog } : {})}
+            hasEvidence={[...slots].some((slot) => splitSlot(slot).base === PAYMENTS_LOG_SLOT)}
+            failureDetails={[...failedLogReads.current].map(([slot, failure]) => ({
+              label: t.shift.imageNumber.replace('{n}', String(splitSlot(slot).n)),
+              reason: failure.reason,
+              canRetry: failure.canRetry,
+            }))}
+            {...([...failedLogReads.current.values()].some((failure) => failure.canRetry)
+              ? { onRetry: retryFailedLog }
+              : {})}
           />
         }
       />
@@ -2097,15 +2209,46 @@ function EndPackage({
  */
 function ReadStatus({
   state,
+  hasEvidence,
+  failureDetails,
   onRetry,
 }: {
   state: LogState
+  hasEvidence: boolean
+  failureDetails: readonly { label: string; reason: PageReadFailureReason; canRetry: boolean }[]
   onRetry?: (() => void) | undefined
 }): ReactNode {
   const { t, lang } = useApp()
+  const failureText = (failure: {
+    label: string
+    reason: PageReadFailureReason
+    canRetry: boolean
+  }): string => {
+    const template =
+      failure.reason === 'timeout'
+        ? t.shift.readFailureTimeout
+        : failure.reason === 'no_fields'
+          ? t.shift.readFailureNoFields
+          : failure.reason === 'refused'
+            ? t.shift.readFailureRefused
+            : t.shift.readFailureUnavailable
+    const message = template.replace('{image}', failure.label)
+    return failure.canRetry ? message : `${message} — ${t.shift.readManualRequired}`
+  }
+  const evidenceNotice = hasEvidence ? (
+    <p className="text-center text-xs text-slate-600">{t.shift.uploadedEvidenceOnly}</p>
+  ) : null
   const failureNotice = (
     <div className="flex flex-col items-center gap-1" role="alert">
-      <p className="text-center text-sm font-medium text-amber-800">{t.shift.readUnread}</p>
+      {failureDetails.length > 0 ? (
+        failureDetails.map((failure) => (
+          <p key={failure.label} className="text-center text-sm font-medium text-amber-800">
+            {failureText(failure)}
+          </p>
+        ))
+      ) : (
+        <p className="text-center text-sm font-medium text-amber-800">{t.shift.readUnread}</p>
+      )}
       {onRetry ? (
         <button
           type="button"
@@ -2122,8 +2265,9 @@ function ReadStatus({
   if (state.kind === 'read') {
     return (
       <div className="flex flex-col gap-1">
+        {evidenceNotice}
         <p className="text-center text-sm text-emerald-700">
-          {plural(state.rows, t.shift.readAdded, lang)}
+          {t.shift.aiReadStatus}: {plural(state.rows, t.shift.readAdded, lang)}
           {/* The rows AI saw and would not vouch for. Silence here would let the driver believe the
               page was fully read and submit a day that is short by those rows. */}
           {state.refused > 0 ? (
@@ -2135,7 +2279,7 @@ function ReadStatus({
         </p>
         {/* A sibling page can fail after another succeeded. Keep that failure visible instead of
             collapsing the whole batch into the successful page's green status. */}
-        {state.failures > 0 ? failureNotice : null}
+        {state.failures > 0 || failureDetails.length > 0 ? failureNotice : null}
       </div>
     )
   }
@@ -2150,8 +2294,10 @@ function ReadStatus({
      */
     return (
       <div className="flex flex-col gap-1" role="status">
+        {evidenceNotice}
         <p className="text-center text-sm font-medium text-slate-700">
-          {t.shift.reading}… <span className="text-slate-600">{t.shift.readingMayTake}</span>
+          {t.shift.aiReadStatus}: {t.shift.reading}…{' '}
+          <span className="text-slate-600">{t.shift.readingMayTake}</span>
         </p>
         <div className="h-1.5 overflow-hidden rounded-full bg-slate-200">
           <div className="h-full w-1/3 animate-[ash-slide_1.2s_ease-in-out_infinite] rounded-full bg-brand" />
@@ -2159,8 +2305,16 @@ function ReadStatus({
       </div>
     )
   }
-  if (state.kind === 'failed') return failureNotice
-  return null
+  if (state.kind === 'failed') {
+    return (
+      <div className="flex flex-col gap-1">
+        {evidenceNotice}
+        <p className="text-center text-sm font-medium text-amber-800">{t.shift.aiReadStatus}</p>
+        {failureNotice}
+      </div>
+    )
+  }
+  return evidenceNotice
 }
 
 /**

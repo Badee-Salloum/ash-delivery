@@ -60,7 +60,7 @@ export function CloudReadStatus({
     <div className="flex flex-col items-start gap-1" aria-live="polite">
       {/* Amber, not red. No value is invented: the driver can retry AI or type the field. */}
       <p className="text-sm font-medium text-amber-800">{message}</p>
-      {onRetry ? (
+      {onRetry && event.retryable ? (
         <button
           type="button"
           onClick={onRetry}

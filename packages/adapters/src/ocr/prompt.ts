@@ -26,7 +26,7 @@ import type { OcrField } from '@ash/contracts'
 /** What each screen is, in the model's own terms. A reader told what it is looking at reads better. */
 const FIELD_HINT: Record<OcrField, string> = {
   orders:
-    'a RECENT ORDERS list. Each card is one delivery: an unsigned fee beside "SYP", a time, and one or two addresses.',
+    'a RECENT ORDERS list. Each card is one delivery: a signed fee beside "SYP", a time, and one or two addresses. A negative fee is a cash deduction and its minus sign must be preserved.',
   payments_log:
     'a PAYMENTS LOG («سجل المدفوعات»). Every row is SIGNED — "+" is money arriving, "−" money leaving — and the sign is part of the answer.',
   wallet:
@@ -116,6 +116,49 @@ Rows go in \`rows\`, in the order they appear top to bottom. Labelled non-money 
 }
 
 /**
+ * The financially authoritative orders pass.
+ *
+ * Route transcription is deliberately excluded. A long address, coordinate pair or Plus Code can
+ * make the full orders completion spend most of its budget on text that does not affect the fee.
+ * This pass stays small enough to return the fee/date/time rows even when the independent route
+ * pass times out. The shared row shape is retained so the result can flow through `parsedResult`.
+ */
+export function ordersMoneyReadPrompt(): string {
+  return `ORDERS MONEY/TIME/DATE FAST PASS
+
+Read a RECENT ORDERS screenshot from a Damascus delivery app. Return one row per visible order card,
+top to bottom. This pass is financially authoritative: read only the fee printed beside "SYP", the
+card time, and the nearest date header ABOVE the card.
+
+Do NOT transcribe, copy, translate, or reason about pickup/dropoff addresses, business names,
+coordinates, phone numbers, entrance numbers, or Plus Codes. They are irrelevant here. Set
+\`pointA\` and \`pointB\` to null on EVERY row.
+
+For each fee:
+- \`hasDecimal\`: true only for a final fractional separator ("٫" or ".") plus one or two digits.
+- \`hasThousands\`: true only when a thousands separator ("٬", "،", or ",") is printed.
+- \`digitCount\`: count digit glyphs only, excluding signs and separators.
+- \`printed\`: copy the fee exactly as printed, preserving Arabic-Indic digits and separators.
+- \`value\`: convert only the fee to Western digits with "." as decimal, as a STRING.
+
+A fee can be negative. Preserve a printed minus sign exactly in \`printed\` and at the beginning of
+\`value\`; a negative Recent Orders fee is a cash deduction, not a cancelled card.
+
+Before returning a row, compare value digit by digit with printed. They must describe the same
+amount; if visible glyphs do not support the conversion, preserve printed and set value to null.
+
+Only a number beside "SYP" is a fee. Never use a number from an address, coordinate, phone status
+bar, date header, or time. A cancelled card has \`value\` null, \`cancelled\` true and
+\`digitCount\` 0. Include an edge-sliced card when its fee is visible; if the card is visible but
+its fee is genuinely unreadable, use "?" for \`printed\` and null for \`value\`.
+
+A screenshot can contain multiple date headers. Each row takes the closest header ABOVE it. The
+year is 2026. Month names can be Arabic, Maghrebi, or English. Arabic "م" is PM and "ص" is AM;
+12:xx ص becomes 00:xx, while 12:xx م stays 12:xx. Return time as 24-hour HH:MM. Return all
+visible rows, including rows below a second date header.`
+}
+
+/**
  * Three genuinely different inspections of the one field where a single glyph changes BR1.
  *
  * They are sent as independent model calls and a two-out-of-three agreement is required. Repeating
@@ -131,6 +174,35 @@ export function walletReadPrompts(): readonly [string, string, string] {
     `${base}\n\nWALLET CHECK C — Treat ٢↔٣ as an adversarial ambiguity. Test both hypotheses against the actual first white glyph on the orange card, reject the one whose strokes do not match, and only then assemble the amount. Do not copy any number elsewhere on the screen.`,
   ]
 }
+
+/** A compact strict schema for the orders pass that intentionally cannot emit route text. */
+export const ORDERS_MONEY_READ_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['rows'],
+  properties: {
+    rows: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['hasDecimal', 'hasThousands', 'digitCount', 'printed', 'value', 'time', 'dateIso', 'pointA', 'pointB', 'cancelled'],
+        properties: {
+          hasDecimal: { type: 'boolean' },
+          hasThousands: { type: 'boolean' },
+          digitCount: { type: 'integer' },
+          printed: { type: 'string' },
+          value: { type: ['string', 'null'] },
+          time: { type: ['string', 'null'], description: '24-hour HH:MM' },
+          dateIso: { type: ['string', 'null'], description: 'YYYY-MM-DD from the nearest header above the row' },
+          pointA: { type: 'null', description: 'Always null in the fast orders pass' },
+          pointB: { type: 'null', description: 'Always null in the fast orders pass' },
+          cancelled: { type: 'boolean' },
+        },
+      },
+    },
+  },
+} as const
 
 /**
  * OpenAI's strict dialect, written out rather than translated at runtime.

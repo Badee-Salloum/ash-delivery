@@ -12,6 +12,7 @@ afterEach(() => vi.unstubAllGlobals())
 const failedRead = (reason: NonNullable<CloudOcrResponse['reason']>): CloudOcrResponse => ({
   ok: false,
   cached: false,
+  retryable: true,
   reads: { used: 1, max: 20 },
   rows: [],
   fields: {},
@@ -25,6 +26,30 @@ describe('cloud OCR transport', () => {
     const api = { putBytes } as unknown as ApiClient
 
     await expect(readInCloud(api, 'shift-1', 'odometer', new Blob([new Uint8Array([1])]))).resolves.toBe(response)
+    expect(putBytes).toHaveBeenCalledWith(
+      '/shifts/shift-1/ocr/odometer',
+      expect.any(Uint8Array),
+      expect.any(String),
+      {},
+      'POST',
+    )
+  })
+
+  it('marks an explicit retry so a cached transient failure is genuinely read again', async () => {
+    const response = failedRead('timeout')
+    const putBytes = vi.fn().mockResolvedValue(response)
+    const api = { putBytes } as unknown as ApiClient
+
+    await expect(
+      readInCloud(api, 'shift-1', 'orders', new Blob([new Uint8Array([1])]), true),
+    ).resolves.toBe(response)
+    expect(putBytes).toHaveBeenCalledWith(
+      '/shifts/shift-1/ocr/orders',
+      expect.any(Uint8Array),
+      expect.any(String),
+      { 'x-ocr-retry': 'true' },
+      'POST',
+    )
   })
 
   it('uses null only when no structured response arrives', async () => {

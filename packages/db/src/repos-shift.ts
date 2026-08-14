@@ -16,6 +16,9 @@ import type {
   MediaRecord,
   MediaRepo,
   OcrField,
+  OcrReadClaim,
+  OcrReadClaimInput,
+  OcrReadCompletion,
   OcrReadRecord,
   OcrReadRepo,
   CashCountRecord,
@@ -1121,11 +1124,9 @@ const toMedia = (r: Record<string, unknown>): MediaRecord => ({
 /**
  * The dedupe cache, the per-shift cap counter and the cost meter, in one table.
  *
- * `put` is an upsert on the content address rather than a plain insert: two devices reading the
- * same screenshot at the same moment must settle on one row, and the second must get the first's
- * record back rather than a unique-violation. `DO UPDATE SET sha256 = EXCLUDED.sha256` is a no-op
- * write that exists only so `RETURNING *` has a row to return — the same trick `PgMediaRepo.put`
- * uses for the same reason.
+ * Every paid logical read is claimed before the adapter starts. The content advisory lock
+ * serializes identical screenshots; the requesting-shift lock serializes its spend cap. One
+ * logical read can contain multiple internal model passes, whose telemetry is stored in aggregate.
  */
 export class PgOcrReadRepo implements OcrReadRepo {
   private readonly pool: Pool
@@ -1133,43 +1134,190 @@ export class PgOcrReadRepo implements OcrReadRepo {
     this.pool = pool
   }
 
-  async findBySha(branchId: string, sha256: string, field: OcrField): Promise<OcrReadRecord | null> {
+  async findBySha(
+    branchId: string,
+    sha256: string,
+    field: OcrField,
+    cacheSignature: string,
+  ): Promise<OcrReadRecord | null> {
     const { rows } = await this.pool.query<Record<string, unknown>>(
-      'SELECT * FROM ocr_reads WHERE branch_id = $1 AND sha256 = $2 AND field = $3',
-      [branchId, sha256, field],
+      `SELECT * FROM ocr_reads
+        WHERE branch_id = $1 AND sha256 = $2 AND field = $3 AND cache_signature = $4`,
+      [branchId, sha256, field, cacheSignature],
     )
     return rows[0] ? toOcrRead(rows[0]) : null
   }
 
-  async put(record: OcrReadRecord): Promise<OcrReadRecord> {
+  async claimReadAttempt(input: OcrReadClaimInput): Promise<OcrReadClaim> {
+    return withTransaction(this.pool, { actorId: input.createdBy, requestId: input.reservationId }, async (client) => {
+      const identity = `${input.branchId}:${input.field}:${input.sha256}:${input.cacheSignature}`
+      // Every caller locks content identity first and the requesting shift's budget second.
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [identity])
+
+      let existing = await this.findLocked(client, input)
+      if (existing?.state === 'running') {
+        // Leases are database infrastructure state. Comparing with the database wall clock avoids
+        // expiring a paid call because another function replica has clock skew, or because this
+        // transaction waited for a pool connection/advisory lock before reaching the row.
+        const { rows: clockRows } = await client.query<{ now: Date }>('SELECT clock_timestamp() AS now')
+        const databaseNowMs = clockRows[0]!.now.getTime()
+        const expiresAt = (existing.reservedAt ?? 0) + input.leaseMs
+        if (databaseNowMs < expiresAt) {
+          return {
+            kind: 'running',
+            record: existing,
+            used: await this.billedForShift(client, input.requestingShiftId),
+            leaseRemainingMs: expiresAt - databaseNowMs,
+          }
+        }
+
+        const { rows } = await client.query<Record<string, unknown>>(
+          `UPDATE ocr_reads
+              SET read_state = 'complete',
+                  result = jsonb_build_object(
+                    'ok', false,
+                    'reason', 'timeout',
+                    'attemptCount', COALESCE(reserved_attempt, 1)
+                  ),
+                  reservation_id = NULL,
+                  reserved_at = NULL,
+                  reserved_attempt = NULL
+            WHERE id = $1
+          RETURNING *`,
+          [existing.id],
+        )
+        existing = toOcrRead(rows[0]!)
+      }
+
+      let attempt: 1 | 2
+      if (existing) {
+        const attempts = existing.result.attemptCount ?? 1
+        const retryable = !existing.result.ok || existing.result.retryable === true
+        if (!retryable || !input.retryFailed || attempts >= 2) {
+          return {
+            kind: 'cached',
+            record: existing,
+            used: await this.billedForShift(client, input.requestingShiftId),
+          }
+        }
+        attempt = 2
+      } else {
+        attempt = 1
+      }
+
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 1))', [input.requestingShiftId])
+      const used = await this.billedForShift(client, input.requestingShiftId)
+      if (input.maxReadsPerShift > 0 && used >= input.maxReadsPerShift) {
+        return { kind: 'capped', record: existing ?? null, used }
+      }
+
+      let claimed: OcrReadRecord
+      if (attempt === 1) {
+        const { rows } = await client.query<Record<string, unknown>>(
+          `INSERT INTO ocr_reads (
+             id, branch_id, shift_id, field, sha256, byte_size, model, cache_signature,
+             read_state, result, reservation_id, reserved_at, reserved_attempt, retry_shift_id,
+             tokens_in, tokens_out, latency_ms, created_at, created_by
+           ) VALUES (
+             $1,$2,$3,$4,$5,$6,$7,$8,
+             'running',$9::jsonb,$10,clock_timestamp(),1,NULL,
+             0,0,0,to_timestamp($11::double precision/1000),$12
+           )
+           RETURNING *`,
+          [
+            input.id,
+            input.branchId,
+            input.requestingShiftId,
+            input.field,
+            input.sha256,
+            input.byteSize,
+            input.model,
+            input.cacheSignature,
+            JSON.stringify({ ok: false, reason: 'timeout', attemptCount: 1 }),
+            input.reservationId,
+            input.createdAt,
+            input.createdBy,
+          ],
+        )
+        claimed = toOcrRead(rows[0]!)
+      } else {
+        const { rows } = await client.query<Record<string, unknown>>(
+          `UPDATE ocr_reads
+              SET read_state = 'running',
+                  result = jsonb_set(result, '{attemptCount}', '2'::jsonb, true),
+                  reservation_id = $2,
+                  reserved_at = clock_timestamp(),
+                  reserved_attempt = 2,
+                  retry_shift_id = $3,
+                  retry_created_at = clock_timestamp(),
+                  retry_created_by = $4
+            WHERE id = $1
+          RETURNING *`,
+          [existing!.id, input.reservationId, input.requestingShiftId, input.createdBy],
+        )
+        claimed = toOcrRead(rows[0]!)
+      }
+
+      return { kind: 'call', record: claimed, attempt, used: used + 1 }
+    })
+  }
+
+  async completeReadAttempt(input: OcrReadCompletion): Promise<OcrReadRecord | null> {
     const { rows } = await this.pool.query<Record<string, unknown>>(
-      `INSERT INTO ocr_reads (id, branch_id, shift_id, field, sha256, byte_size, model, result,
-                              tokens_in, tokens_out, latency_ms, created_at, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,to_timestamp($12::double precision/1000),$13)
-       ON CONFLICT (branch_id, sha256, field) DO UPDATE SET sha256 = EXCLUDED.sha256
-       RETURNING *`,
+      `UPDATE ocr_reads
+          SET read_state = 'complete',
+              result = ($6::jsonb - 'attemptCount')
+                       || jsonb_build_object('attemptCount', reserved_attempt),
+              reservation_id = NULL,
+              reserved_at = NULL,
+              reserved_attempt = NULL,
+              tokens_in = tokens_in + $7,
+              tokens_out = tokens_out + $8,
+              latency_ms = latency_ms + $9
+        WHERE branch_id = $1
+          AND sha256 = $2
+          AND field = $3
+          AND cache_signature = $4
+          AND read_state = 'running'
+          AND reservation_id = $5
+      RETURNING *`,
       [
-        record.id,
-        record.branchId,
-        record.shiftId,
-        record.field,
-        record.sha256,
-        record.byteSize,
-        record.model,
-        JSON.stringify(record.result),
-        record.tokensIn,
-        record.tokensOut,
-        record.latencyMs,
-        record.createdAt,
-        record.createdBy,
+        input.branchId,
+        input.sha256,
+        input.field,
+        input.cacheSignature,
+        input.reservationId,
+        JSON.stringify(input.result),
+        input.usage.tokensIn,
+        input.usage.tokensOut,
+        input.usage.latencyMs,
       ],
     )
-    return toOcrRead(rows[0]!)
+    return rows[0] ? toOcrRead(rows[0]) : null
   }
 
   async countBilledForShift(shiftId: string): Promise<number> {
-    const { rows } = await this.pool.query<{ n: string }>(
-      'SELECT count(*)::text AS n FROM ocr_reads WHERE shift_id = $1',
+    return this.billedForShift(this.pool, shiftId)
+  }
+
+  private async findLocked(client: PoolClient, input: OcrReadClaimInput): Promise<OcrReadRecord | null> {
+    const { rows } = await client.query<Record<string, unknown>>(
+      `SELECT * FROM ocr_reads
+        WHERE branch_id = $1 AND sha256 = $2 AND field = $3 AND cache_signature = $4
+        FOR UPDATE`,
+      [input.branchId, input.sha256, input.field, input.cacheSignature],
+    )
+    return rows[0] ? toOcrRead(rows[0]) : null
+  }
+
+  private async billedForShift(db: Pool | PoolClient, shiftId: string): Promise<number> {
+    const { rows } = await db.query<{ n: string }>(
+      `SELECT COALESCE(SUM(
+          CASE WHEN shift_id = $1 THEN 1 ELSE 0 END
+          + CASE WHEN retry_shift_id = $1 THEN 1 ELSE 0 END
+        ), 0)::text AS n
+         FROM ocr_reads
+        WHERE shift_id = $1 OR retry_shift_id = $1`,
       [shiftId],
     )
     return Number(rows[0]?.n ?? '0')
@@ -1184,8 +1332,16 @@ const toOcrRead = (r: Record<string, unknown>): OcrReadRecord => ({
   sha256: String(r.sha256),
   byteSize: Number(r.byte_size),
   model: String(r.model),
+  cacheSignature: String(r.cache_signature),
+  state: r.read_state as OcrReadRecord['state'],
   // `jsonb` comes back already parsed by node-postgres; it is the reader's own answer, stored whole.
   result: r.result as OcrReadRecord['result'],
+  reservationId: (r.reservation_id as string | null) ?? null,
+  reservedAt: r.reserved_at === null ? null : (r.reserved_at as Date).getTime(),
+  reservedAttempt: r.reserved_attempt === null ? null : (Number(r.reserved_attempt) as 1 | 2),
+  retryShiftId: (r.retry_shift_id as string | null) ?? null,
+  retryCreatedAt: r.retry_created_at === null ? null : (r.retry_created_at as Date).getTime(),
+  retryCreatedBy: (r.retry_created_by as string | null) ?? null,
   tokensIn: Number(r.tokens_in),
   tokensOut: Number(r.tokens_out),
   latencyMs: Number(r.latency_ms),

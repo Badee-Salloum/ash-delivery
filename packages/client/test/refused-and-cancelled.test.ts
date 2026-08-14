@@ -7,6 +7,7 @@ import {
   healCutOffRoutes,
   mergeScannedOrders,
   previewBr1,
+  reconcileRefusedOrderFees,
   submittableOrders,
   validateRow,
   workedTotalText,
@@ -75,6 +76,86 @@ describe('a refused fee arrives as an empty card, not as an absence', () => {
   it('a refused row and a priced row at the same minute are two different deliveries', () => {
     const rows = mergeScannedOrders([], [scan('18:06', '235'), scan('18:06', null)], id)
     expect(rows).toHaveLength(2)
+  })
+})
+
+describe('a second AI attempt heals an untouched refusal', () => {
+  const refused = (over: Partial<DraftOrder> = {}): DraftOrder => ({
+    localId: 'stable-local-id',
+    providerOrderNo: 'YAL-stable-provider-key',
+    payMode: 'cash',
+    feeText: '',
+    feeRefused: true,
+    timeText: '00:49',
+    dateText: '2026-08-04',
+    included: true,
+    pointA: null,
+    pointB: null,
+    ...over,
+  })
+
+  it('prices exactly the existing card and consumes the retry row without appending a duplicate', () => {
+    const retry = [scan('00:49', '225', { pointA: 'Bakery', pointB: 'Airport road' })]
+    const reconciled = reconcileRefusedOrderFees([refused()], retry)
+
+    expect(reconciled).toEqual([
+      expect.objectContaining({
+        localId: 'stable-local-id',
+        providerOrderNo: 'YAL-stable-provider-key',
+        feeText: '225',
+        feeOcrText: '225',
+        pointA: 'Bakery',
+        pointB: 'Airport road',
+      }),
+    ])
+    expect(reconciled[0]).not.toHaveProperty('feeRefused')
+    expect(mergeScannedOrders(reconciled, retry, () => 'must-not-be-used')).toEqual([])
+  })
+
+  it('fills a missing day before merge, which keeps the stable provider key', () => {
+    const retry = [scan('00:49', '225')]
+    const reconciled = reconcileRefusedOrderFees([refused({ dateText: '' })], retry)
+
+    expect(reconciled[0]!.dateText).toBe('2026-08-04')
+    expect(reconciled[0]!.providerOrderNo).toBe('YAL-stable-provider-key')
+    expect(mergeScannedOrders(reconciled, retry, () => 'duplicate')).toEqual([])
+  })
+
+  it('never overwrites a fee typed by the driver or a recorded/manager-owned row', () => {
+    const retry = [scan('00:49', '225')]
+    const human = refused({ localId: 'human', feeText: '210' })
+    const recorded = refused({ localId: 'recorded', recorded: true })
+    const hasBaseline = refused({ localId: 'baseline', feeOcrText: '200' })
+
+    expect(reconcileRefusedOrderFees([human, recorded, hasBaseline], retry)).toEqual([
+      human,
+      recorded,
+      hasBaseline,
+    ])
+  })
+
+  it('does not merge two known conflicting days or an unsafe monetary row', () => {
+    const original = refused()
+    expect(
+      reconcileRefusedOrderFees([original], [
+        { ...scan('00:49', '225'), dateIso: '2026-08-14' },
+        scan('00:49', '-50'),
+        scan('00:49', '225', { cancelled: true }),
+      ]),
+    ).toEqual([original])
+  })
+
+  it('uses compatible route evidence only to distinguish same-minute refused cards', () => {
+    const bakery = refused({ localId: 'bakery', providerOrderNo: 'YAL-bakery', pointA: 'Bakery' })
+    const cafe = refused({ localId: 'cafe', providerOrderNo: 'YAL-cafe', pointA: 'Cafe' })
+    const [healedBakery, untouchedCafe] = reconcileRefusedOrderFees(
+      [bakery, cafe],
+      [scan('00:49', '225', { pointA: 'Bakery' })],
+    )
+
+    expect(healedBakery!.feeText).toBe('225')
+    expect(healedBakery!.providerOrderNo).toBe('YAL-bakery')
+    expect(untouchedCafe).toEqual(cafe)
   })
 })
 

@@ -630,14 +630,14 @@ export function BatteryPanel({
   const retryCloud = useCallback(
     async (battery: FittedBattery, file: File): Promise<void> => {
       setCloudEvents((cur) => ({ ...cur, [battery.id]: { status: 'reading' } }))
-      const res = await readInCloud(api, shiftId, 'bms', file)
+      const res = await readInCloud(api, shiftId, 'bms', file, true)
       cloudRead(
         battery,
         res === null
-          ? { status: 'failed', reason: 'unavailable' }
+          ? { status: 'failed', reason: 'unavailable', retryable: false }
           : res.ok
             ? { status: 'read', response: res }
-            : { status: 'failed', reason: res.reason ?? 'unavailable' },
+            : { status: 'failed', reason: res.reason ?? 'unavailable', retryable: res.retryable },
         file,
       )
     },
@@ -659,7 +659,11 @@ export function BatteryPanel({
       if (applyCloudBmsFields(EMPTY_PACK, e.response.fields).fieldsFound === 0) {
         setCloudEvents((cur) => ({
           ...cur,
-          [battery.id]: { status: 'failed', reason: 'no_fields' },
+          [battery.id]: {
+            status: 'failed',
+            reason: 'no_fields',
+            retryable: e.response.retryable,
+          },
         }))
         return
       }

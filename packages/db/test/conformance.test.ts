@@ -109,12 +109,16 @@ if (!DATABASE_URL) {
       )
       await pool.query(
         `INSERT INTO drivers (id, branch_id, code, full_name_ar)
-         VALUES ('77777777-7777-7777-7777-777777777777', $1, 'DRV-C', 'سائق')`,
+         VALUES
+           ('77777777-7777-7777-7777-777777777777', $1, 'DRV-C', 'سائق'),
+           ('77777777-7777-7777-7777-777777777778', $1, 'DRV-D', 'سائق 2')`,
         [BRANCH],
       )
       await pool.query(
         `INSERT INTO vehicles (id, branch_id, vehicle_type_id, code, machine_no)
-         VALUES ('88888888-8888-8888-8888-888888888888', $1, '66666666-6666-6666-6666-666666666666','1-1-1-1', 1)`,
+         VALUES
+           ('88888888-8888-8888-8888-888888888888', $1, '66666666-6666-6666-6666-666666666666','1-1-1-1', 1),
+           ('88888888-8888-8888-8888-888888888889', $1, '66666666-6666-6666-6666-666666666666','1-1-1-2', 2)`,
         [BRANCH],
       )
       await pool.query(
@@ -201,6 +205,103 @@ if (!DATABASE_URL) {
   runConformanceSuite({
     label: 'postgres',
     makeDeps,
+  })
+
+  describe('PostgreSQL OCR cache ownership', () => {
+    it('keeps a live cross-shift retry and its receipt when either owning shift is deleted', async () => {
+      const deps = await makeDeps()
+      const retryShift = '55555555-5555-4555-8555-555555555556'
+      const sha256 = 'e'.repeat(64)
+      const cacheSignature = 'pg-delete-proof:orders-v1'
+
+      await pool.query(
+        `INSERT INTO shifts
+           (id, branch_id, driver_id, vehicle_id, shift_no, business_date, week_start_date)
+         VALUES
+           ($1, $2, '77777777-7777-7777-7777-777777777778',
+            '88888888-8888-8888-8888-888888888889', 1, DATE '2026-07-21', DATE '2026-07-19')`,
+        [retryShift, BRANCH],
+      )
+
+      const initial = await deps.ocrReads.claimReadAttempt({
+        id: 'cccccccc-cccc-4ccc-8ccc-ccccccccccce',
+        branchId: BRANCH,
+        requestingShiftId: SHIFT,
+        field: 'orders',
+        sha256,
+        byteSize: 123,
+        model: 'pg-delete-proof',
+        cacheSignature,
+        createdAt: 1_784_000_000_000,
+        createdBy: USER,
+        reservationId: 'dddddddd-dddd-4ddd-8ddd-ddddddddddde',
+        nowMs: 1_000,
+        leaseMs: 100,
+        retryFailed: false,
+        maxReadsPerShift: 15,
+      })
+      expect(initial.kind).toBe('call')
+      if (initial.kind !== 'call') throw new Error('initial OCR attempt was not reserved')
+      await deps.ocrReads.completeReadAttempt({
+        branchId: BRANCH,
+        field: 'orders',
+        sha256,
+        cacheSignature,
+        reservationId: initial.record.reservationId!,
+        result: { ok: false, reason: 'timeout' },
+        usage: { tokensIn: 10, tokensOut: 1, latencyMs: 50 },
+      })
+
+      const retry = await deps.ocrReads.claimReadAttempt({
+        id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccf',
+        branchId: BRANCH,
+        requestingShiftId: retryShift,
+        field: 'orders',
+        sha256,
+        byteSize: 123,
+        model: 'pg-delete-proof',
+        cacheSignature,
+        createdAt: 1_784_000_000_100,
+        createdBy: USER,
+        reservationId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddf',
+        nowMs: 1_100,
+        leaseMs: 100,
+        retryFailed: true,
+        maxReadsPerShift: 15,
+      })
+      expect(retry).toMatchObject({ kind: 'call', attempt: 2 })
+      if (retry.kind !== 'call') throw new Error('OCR retry was not reserved')
+
+      await expect(pool.query('DELETE FROM shifts WHERE id = $1', [SHIFT])).resolves.toMatchObject({ rowCount: 1 })
+      expect(await deps.ocrReads.findBySha(BRANCH, sha256, 'orders', cacheSignature)).toMatchObject({
+        state: 'running',
+        shiftId: null,
+        retryShiftId: retryShift,
+        retryCreatedAt: expect.any(Number),
+        retryCreatedBy: USER,
+      })
+
+      const completed = await deps.ocrReads.completeReadAttempt({
+        branchId: BRANCH,
+        field: 'orders',
+        sha256,
+        cacheSignature,
+        reservationId: retry.record.reservationId!,
+        result: { ok: true, rows: [], fields: {}, raw: null },
+        usage: { tokensIn: 20, tokensOut: 2, latencyMs: 60 },
+      })
+      expect(completed).toMatchObject({ result: { ok: true, attemptCount: 2 }, tokensIn: 30, tokensOut: 3 })
+      expect(await deps.ocrReads.countBilledForShift(retryShift)).toBe(1)
+
+      await expect(pool.query('DELETE FROM shifts WHERE id = $1', [retryShift])).resolves.toMatchObject({ rowCount: 1 })
+      expect(await deps.ocrReads.findBySha(BRANCH, sha256, 'orders', cacheSignature)).toMatchObject({
+        state: 'complete',
+        shiftId: null,
+        retryShiftId: null,
+        retryCreatedAt: expect.any(Number),
+        retryCreatedBy: USER,
+      })
+    })
   })
 
   describe('PostgreSQL shift-settlement state guard', () => {

@@ -28,8 +28,12 @@ describe('odometer cloud-AI authority', () => {
   })
 
   it('turns an AI response without an odometer into a visible no-fields failure in both flows', () => {
-    expect(shift.match(/odoCloud:\s*\{ status: 'failed', reason: 'no_fields' \}/gu)).toHaveLength(1)
-    expect(shift.match(/setOdoCloud\(\{ status: 'failed', reason: 'no_fields' \}\)/gu)).toHaveLength(1)
+    expect(shift).toContain(
+      "setOdoCloud({ status: 'failed', reason: 'no_fields', retryable: e.response.retryable })",
+    )
+    expect(shift).toMatch(
+      /odoCloud:\s*\{[\s\S]*?reason: 'no_fields',[\s\S]*?retryable: event\.response\.retryable,/u,
+    )
   })
 
   it('gates both submissions while odometer AI is reading', () => {

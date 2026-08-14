@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import type { BatteryReadingRecord, Deps, NewShiftSettlementRecord } from '@ash/contracts'
+import type {
+  BatteryReadingRecord,
+  Deps,
+  NewShiftSettlementRecord,
+  OcrReadClaimInput,
+  OcrReadCompletion,
+  OcrResult,
+} from '@ash/contracts'
 import { type Posting, minor } from '@ash/domain'
 
 /**
@@ -26,7 +33,10 @@ const syp = (n: number) => minor(BigInt(n) * 100n)
 const BRANCH = '11111111-1111-1111-1111-111111111111'
 const USER = '22222222-2222-2222-2222-222222222222'
 const SHIFT = '55555555-5555-5555-5555-555555555555'
+const OTHER_SHIFT = '55555555-5555-5555-5555-555555555556'
 const DRIVER = '77777777-7777-7777-7777-777777777777'
+const OTHER_DRIVER = '77777777-7777-7777-7777-777777777778'
+const OTHER_VEHICLE = '88888888-8888-8888-8888-888888888889'
 const BATTERY = '99999999-aaaa-4aaa-8aaa-aaaaaaaaaaa1'
 const MEDIA_1 = '99999999-bbbb-4bbb-8bbb-bbbbbbbbbbb1'
 const MEDIA_2 = '99999999-bbbb-4bbb-8bbb-bbbbbbbbbbb2'
@@ -125,6 +135,246 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
       }, USER)
       return deps
     }
+
+    describe('OCR paid-read reservations', () => {
+      const claim = (overrides: Partial<OcrReadClaimInput> = {}): OcrReadClaimInput => ({
+        id: 'cccccccc-cccc-4ccc-8ccc-ccccccccccc1',
+        branchId: BRANCH,
+        requestingShiftId: SHIFT,
+        field: 'orders',
+        sha256: 'a'.repeat(64),
+        byteSize: 123,
+        model: 'reader-v2',
+        cacheSignature: 'reader-v2:orders-prompt-v2',
+        createdAt: 1_784_000_000_000,
+        createdBy: USER,
+        reservationId: 'dddddddd-dddd-4ddd-8ddd-ddddddddddd1',
+        nowMs: 1_000,
+        leaseMs: 100,
+        retryFailed: false,
+        maxReadsPerShift: 15,
+        ...overrides,
+      })
+
+      const addOtherShift = async (deps: Deps): Promise<void> => {
+        const original = await deps.shifts.findById(SHIFT)
+        if (!original) throw new Error('conformance shift missing')
+        await deps.shifts.create(
+          {
+            ...original,
+            id: OTHER_SHIFT,
+            driverId: OTHER_DRIVER,
+            vehicleId: OTHER_VEHICLE,
+            shiftNo: 1,
+          },
+          USER,
+        )
+      }
+
+      it('reserves initial/retry once, aggregates telemetry, and charges the requesting shifts', async () => {
+        const deps = await fresh()
+        try {
+          await addOtherShift(deps)
+          const first = await deps.ocrReads.claimReadAttempt(claim())
+          expect(first).toMatchObject({ kind: 'call', attempt: 1, used: 1, record: { state: 'running' } })
+          if (first.kind !== 'call') throw new Error('initial OCR attempt was not reserved')
+
+          const failed = await deps.ocrReads.completeReadAttempt({
+            branchId: BRANCH,
+            field: 'orders',
+            sha256: 'a'.repeat(64),
+            cacheSignature: first.record.cacheSignature,
+            reservationId: first.record.reservationId!,
+            result: { ok: false, reason: 'timeout' },
+            usage: { tokensIn: 10, tokensOut: 1, latencyMs: 100 },
+          })
+          expect(failed?.result).toMatchObject({ ok: false, attemptCount: 1 })
+          expect(await deps.ocrReads.countBilledForShift(SHIFT)).toBe(1)
+
+          const ordinaryDuplicate = await deps.ocrReads.claimReadAttempt(
+            claim({ reservationId: 'dddddddd-dddd-4ddd-8ddd-ddddddddddd2' }),
+          )
+          expect(ordinaryDuplicate.kind).toBe('cached')
+
+          const retry = await deps.ocrReads.claimReadAttempt(
+            claim({
+              requestingShiftId: OTHER_SHIFT,
+              reservationId: 'dddddddd-dddd-4ddd-8ddd-ddddddddddd3',
+              retryFailed: true,
+              nowMs: 1_100,
+            }),
+          )
+          expect(retry).toMatchObject({ kind: 'call', attempt: 2, used: 1 })
+          if (retry.kind !== 'call') throw new Error('OCR retry was not reserved')
+
+          const completed = await deps.ocrReads.completeReadAttempt({
+            branchId: BRANCH,
+            field: 'orders',
+            sha256: 'a'.repeat(64),
+            cacheSignature: retry.record.cacheSignature,
+            reservationId: retry.record.reservationId!,
+            result: { ok: true, rows: [], fields: { odometerKm: '6034' }, raw: null },
+            usage: { tokensIn: 20, tokensOut: 3, latencyMs: 150 },
+          })
+          expect(completed).toMatchObject({
+            state: 'complete',
+            result: { ok: true, attemptCount: 2 },
+            retryCreatedAt: expect.any(Number),
+            retryCreatedBy: USER,
+            tokensIn: 30,
+            tokensOut: 4,
+            latencyMs: 250,
+          })
+          expect(await deps.ocrReads.countBilledForShift(SHIFT)).toBe(1)
+          expect(await deps.ocrReads.countBilledForShift(OTHER_SHIFT)).toBe(1)
+
+          const third = await deps.ocrReads.claimReadAttempt(
+            claim({
+              requestingShiftId: OTHER_SHIFT,
+              reservationId: 'dddddddd-dddd-4ddd-8ddd-ddddddddddd4',
+              retryFailed: true,
+              nowMs: 1_200,
+            }),
+          )
+          expect(third.kind).toBe('cached')
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('serializes the cap across different hashes and ignores an older cache signature', async () => {
+        const deps = await fresh()
+        try {
+          const [left, right] = await Promise.all([
+            deps.ocrReads.claimReadAttempt(claim({ maxReadsPerShift: 1 })),
+            deps.ocrReads.claimReadAttempt(
+              claim({
+                id: 'cccccccc-cccc-4ccc-8ccc-ccccccccccc2',
+                sha256: 'b'.repeat(64),
+                reservationId: 'dddddddd-dddd-4ddd-8ddd-ddddddddddd2',
+                maxReadsPerShift: 1,
+              }),
+            ),
+          ])
+          expect([left.kind, right.kind].sort()).toEqual(['call', 'capped'])
+          expect(await deps.ocrReads.countBilledForShift(SHIFT)).toBe(1)
+
+          const changedSignature = await deps.ocrReads.claimReadAttempt(
+            claim({
+              id: 'cccccccc-cccc-4ccc-8ccc-ccccccccccc3',
+              cacheSignature: 'reader-v2:orders-prompt-v3',
+              reservationId: 'dddddddd-dddd-4ddd-8ddd-ddddddddddd3',
+              maxReadsPerShift: 2,
+            }),
+          )
+          expect(changedSignature).toMatchObject({ kind: 'call', attempt: 1, used: 2 })
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('deduplicates concurrent claims for one identity and rejects wrong or late completion owners', async () => {
+        const deps = await fresh()
+        try {
+          const reservationIds = [
+            'dddddddd-dddd-4ddd-8ddd-dddddddddda1',
+            'dddddddd-dddd-4ddd-8ddd-dddddddddda2',
+          ] as const
+          const claims = await Promise.all([
+            deps.ocrReads.claimReadAttempt(claim({ reservationId: reservationIds[0] })),
+            deps.ocrReads.claimReadAttempt(claim({ reservationId: reservationIds[1] })),
+          ])
+          expect(claims.map(({ kind }) => kind).sort()).toEqual(['call', 'running'])
+
+          const owner = claims.find((candidate) => candidate.kind === 'call')
+          if (!owner || owner.kind !== 'call') throw new Error('same-identity OCR claim had no owner')
+          const wrongReservation = reservationIds.find((id) => id !== owner.record.reservationId)!
+          const completion = (reservationId: string, result: OcrResult): OcrReadCompletion => ({
+            branchId: BRANCH,
+            field: 'orders',
+            sha256: 'a'.repeat(64),
+            cacheSignature: owner.record.cacheSignature,
+            reservationId,
+            result,
+            usage: { tokensIn: 7, tokensOut: 2, latencyMs: 50 },
+          })
+
+          expect(await deps.ocrReads.completeReadAttempt(
+            completion(wrongReservation, { ok: false, reason: 'timeout' }),
+          )).toBeNull()
+          expect(await deps.ocrReads.findBySha(BRANCH, 'a'.repeat(64), 'orders', owner.record.cacheSignature))
+            .toMatchObject({ state: 'running', reservationId: owner.record.reservationId })
+
+          expect(await deps.ocrReads.completeReadAttempt(completion(owner.record.reservationId!, {
+            ok: true,
+            rows: [],
+            fields: { odometerKm: '6034' },
+            raw: null,
+          }))).toMatchObject({ state: 'complete', result: { ok: true, attemptCount: 1 } })
+
+          expect(await deps.ocrReads.completeReadAttempt(
+            completion(wrongReservation, { ok: false, reason: 'timeout' }),
+          )).toBeNull()
+          expect(await deps.ocrReads.findBySha(BRANCH, 'a'.repeat(64), 'orders', owner.record.cacheSignature))
+            .toMatchObject({ state: 'complete', result: { ok: true, attemptCount: 1 }, tokensIn: 7, tokensOut: 2 })
+          expect(await deps.ocrReads.countBilledForShift(SHIFT)).toBe(1)
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('waits on a live lease and makes an expired attempt terminal without calling it again', async () => {
+        const deps = await fresh()
+        try {
+          const leaseMs = 500
+          const firstStartedAt = Date.now()
+          const first = await deps.ocrReads.claimReadAttempt(claim({ nowMs: firstStartedAt, leaseMs }))
+          expect(first.kind).toBe('call')
+
+          const live = await deps.ocrReads.claimReadAttempt(
+            claim({ reservationId: 'dddddddd-dddd-4ddd-8ddd-ddddddddddd2', nowMs: firstStartedAt + 499, leaseMs }),
+          )
+          expect(live.kind).toBe('running')
+
+          await new Promise((resolve) => setTimeout(resolve, leaseMs + 50))
+          const expired = await deps.ocrReads.claimReadAttempt(
+            claim({ reservationId: 'dddddddd-dddd-4ddd-8ddd-ddddddddddd3', nowMs: firstStartedAt + leaseMs, leaseMs }),
+          )
+          expect(expired).toMatchObject({
+            kind: 'cached',
+            record: { state: 'complete', result: { ok: false, reason: 'timeout', attemptCount: 1 } },
+          })
+
+          const retryStartedAt = Date.now()
+          const retry = await deps.ocrReads.claimReadAttempt(
+            claim({
+              reservationId: 'dddddddd-dddd-4ddd-8ddd-ddddddddddd4',
+              nowMs: retryStartedAt,
+              leaseMs,
+              retryFailed: true,
+            }),
+          )
+          expect(retry).toMatchObject({ kind: 'call', attempt: 2 })
+
+          await new Promise((resolve) => setTimeout(resolve, leaseMs + 50))
+          const terminal = await deps.ocrReads.claimReadAttempt(
+            claim({
+              reservationId: 'dddddddd-dddd-4ddd-8ddd-ddddddddddd5',
+              nowMs: retryStartedAt + leaseMs,
+              leaseMs,
+              retryFailed: true,
+            }),
+          )
+          expect(terminal).toMatchObject({
+            kind: 'cached',
+            record: { state: 'complete', result: { ok: false, reason: 'timeout', attemptCount: 2 } },
+          })
+          expect(await deps.ocrReads.countBilledForShift(SHIFT)).toBe(2)
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+    })
 
     describe('ledger idempotency (the rule that stops a double-approve double-posting)', () => {
       it('writes a posting once', async () => {

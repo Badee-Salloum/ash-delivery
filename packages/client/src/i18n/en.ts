@@ -259,6 +259,15 @@ export const en: Catalog = {
     paymentsLogArchiveHint: 'Optional archive only — it does not change order values or the shift difference',
     /** Both the orders list and the payments log scroll: one screenshot rarely holds a whole day. */
     addPage: 'Another image',
+    /** Upload and AI reading are separate facts: a check on the tile proves only evidence storage. */
+    uploadedEvidenceOnly: '✓ confirms the image upload only; AI reading success or failure is shown separately here.',
+    aiReadStatus: 'AI reading status',
+    imageNumber: 'image {n}',
+    readFailureTimeout: 'AI reading timed out for {image}',
+    readFailureUnavailable: 'The smart reader could not be reached for {image}',
+    readFailureNoFields: 'The smart reader found no readable operations in {image}',
+    readFailureRefused: 'The smart reader could not verify {image} confidently',
+    readManualRequired: 'The available AI retry was used; enter this image’s operations manually',
     /** «0 operations» is a real answer — the page had nothing new — not the same as a failed read. */
     /** English collapses to one/other; the same call site serves both languages. */
     readAdded: {

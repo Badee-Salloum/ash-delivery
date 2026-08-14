@@ -1045,6 +1045,8 @@ export type CloudOcrField = 'orders' | 'payments_log' | 'wallet' | 'odometer' | 
 export interface CloudOcrResponse {
   ok: boolean
   cached: boolean
+  /** Whether this exact image generation still owns its single explicit AI retry. */
+  retryable: boolean
   reads: { used: number; max: number }
   rows: Array<{
     printed: string
@@ -1091,6 +1093,7 @@ export async function readInCloud(
   shiftId: string,
   field: CloudOcrField,
   file: Blob,
+  retryFailed = false,
 ): Promise<CloudOcrResponse | null> {
   try {
     const { compressForOcr } = await import('./compress.ts')
@@ -1102,7 +1105,7 @@ export async function readInCloud(
       ocrReadPath(shiftId, field),
       prepared.bytes,
       prepared.mimeType,
-      {},
+      retryFailed ? { 'x-ocr-retry': 'true' } : {},
       'POST',
     )
     return res

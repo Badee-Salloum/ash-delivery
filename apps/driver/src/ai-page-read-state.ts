@@ -123,3 +123,11 @@ export function discardAiPageFailure(state: AiPageReadState): AiPageReadState {
   if (totals.failures > 0) return { kind: 'failed', ...totals }
   return { kind: 'idle' }
 }
+
+/** Remove refused rows previously attributed to a page before its one explicit retry. */
+export function discardAiPageRefusals(state: AiPageReadState, count: number): AiPageReadState {
+  if (state.kind === 'idle' || count < 1) return state
+  const totals = { ...totalsOf(state), refused: Math.max(0, state.refused - count) }
+  if (state.kind === 'reading') return { kind: 'reading', pending: state.pending, ...totals }
+  return { kind: state.kind, ...totals }
+}

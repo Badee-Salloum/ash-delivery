@@ -22,7 +22,11 @@ import {
 export type CloudReadEvent =
   | { status: 'reading' }
   | { status: 'read'; response: CloudOcrResponse }
-  | { status: 'failed'; reason: 'unavailable' | 'timeout' | 'no_fields' | 'refused' }
+  | {
+      status: 'failed'
+      reason: 'unavailable' | 'timeout' | 'no_fields' | 'refused'
+      retryable: boolean
+    }
 
 /**
  * An evidence tile: pick an image, compress it, upload it, and show what happened.
@@ -186,10 +190,10 @@ export function PhotoSlot({
       if (!isCurrentPhotoAttempt(currentAttempt.current, attempt)) return
       onCloudRead(
         res === null
-          ? { status: 'failed', reason: 'unavailable' }
+          ? { status: 'failed', reason: 'unavailable', retryable: true }
           : res.ok
             ? { status: 'read', response: res }
-            : { status: 'failed', reason: res.reason ?? 'unavailable' },
+            : { status: 'failed', reason: res.reason ?? 'unavailable', retryable: res.retryable },
         file,
       )
     },

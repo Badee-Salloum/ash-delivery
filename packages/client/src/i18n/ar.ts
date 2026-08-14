@@ -274,6 +274,15 @@ export const ar = {
     paymentsLogArchiveHint: 'اختياري للأرشفة فقط — لا يغيّر قيمة الطلبات أو فرق النوبة',
     /** Both «الطلبات الحديثة» و«سجل المدفوعات» scroll: one screenshot rarely holds a whole day. */
     addPage: 'صورة أخرى',
+    /** نجاح رفع الدليل ونجاح قراءة الذكاء الاصطناعي حالتان منفصلتان. */
+    uploadedEvidenceOnly: 'علامة ✓ تؤكد رفع الصورة كدليل فقط؛ نجاح أو فشل قراءة الذكاء الاصطناعي يظهر هنا منفصلاً.',
+    aiReadStatus: 'حالة قراءة الذكاء الاصطناعي',
+    imageNumber: 'الصورة {n}',
+    readFailureTimeout: 'انتهت مهلة قراءة {image} بالذكاء الاصطناعي',
+    readFailureUnavailable: 'تعذّر الوصول إلى القارئ الذكي لقراءة {image}',
+    readFailureNoFields: 'لم يجد القارئ الذكي عمليات قابلة للقراءة في {image}',
+    readFailureRefused: 'لم يعتمد القارئ الذكي قراءة {image} بثقة',
+    readManualRequired: 'استُخدمت محاولة القراءة المتاحة؛ أدخِل عمليات هذه الصورة يدوياً',
     /** «٠ عملية» is a real answer — the page had nothing new — and not the same as a failed read. */
     /** Arabic counts zero/one/two/few/many separately — see plural() in i18n/index.ts. */
     readAdded: {

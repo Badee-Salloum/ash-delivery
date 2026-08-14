@@ -3,6 +3,7 @@ import {
   beginAiPageRead,
   cancelAiPageRead,
   discardAiPageFailure,
+  discardAiPageRefusals,
   finishAiPageRead,
   type AiPageReadState,
   visibleAiPageReadOutcome,
@@ -62,6 +63,18 @@ describe('cloud-authoritative paged OCR state', () => {
 
     state = finishAiPageRead(state, { kind: 'read', rows: 2 })
     expect(state).toMatchObject({ kind: 'read', rows: 5, succeeded: 2, failures: 0 })
+  })
+
+  it('removes a partial page refusal before its successful retry without losing accepted rows', () => {
+    let state = finishAiPageRead(beginAiPageRead({ kind: 'idle' }), {
+      kind: 'read',
+      rows: 5,
+      refused: 2,
+    })
+    state = beginAiPageRead(discardAiPageRefusals(state, 2))
+    state = finishAiPageRead(state, { kind: 'read', rows: 0, refused: 0 })
+
+    expect(state).toMatchObject({ kind: 'read', rows: 5, refused: 0, failures: 0 })
   })
 
   it('keeps an earlier failed page visible when a different page is selected later', () => {
