@@ -202,6 +202,79 @@ describe('in-memory operation batch transaction', () => {
     expect((await deps.cashDeductions.listByShift(SHIFT_ID))[0]?.amount).toBe(minor(50_00n))
   })
 
+  it('deletes an exact OCR duplicate atomically and restores it after a later failure', async () => {
+    const deps = createMemoryDeps(NOW_MS)
+    await deps.shifts.create(shift(), ACTOR_ID)
+    const partial = {
+      ...deduction('deduction-partial', 'recent-orders:aaaaaaaaaaaaaaaa'),
+      pointA: 'Pickup',
+    }
+    const richer = {
+      ...deduction('deduction-richer', 'recent-orders:aaaaaaaaaaaaaaaa~2'),
+      pointA: 'Pickup',
+      pointB: 'Dropoff',
+    }
+    await deps.cashDeductions.create(partial, ACTOR_ID)
+    await deps.cashDeductions.create(richer, ACTOR_ID)
+    const batch = operationBatch({
+      cashDeductionDeletes: [{ expected: partial }],
+      movements: [{ amount: minor(20_00n), occurredMinute: '08:01' }],
+    })
+
+    const originalMerge = deps.movements.merge.bind(deps.movements)
+    deps.movements.merge = async (...args: Parameters<typeof originalMerge>) => {
+      await originalMerge(...args)
+      throw Object.assign(new Error('injected failure after duplicate deletion'), { code: 'INJECTED_FAILURE' })
+    }
+    try {
+      await expect(deps.operationBatches.apply(SHIFT_ID, batch, ACTOR_ID)).rejects.toMatchObject({
+        code: 'INJECTED_FAILURE',
+      })
+    } finally {
+      deps.movements.merge = originalMerge
+    }
+    expect((await deps.cashDeductions.listByShift(SHIFT_ID)).map((row) => row.id).sort()).toEqual([
+      'deduction-partial',
+      'deduction-richer',
+    ])
+    expect(await deps.movements.listByShift(SHIFT_ID)).toEqual([])
+
+    await deps.operationBatches.apply(SHIFT_ID, batch, ACTOR_ID)
+    expect((await deps.cashDeductions.listByShift(SHIFT_ID)).map((row) => row.id)).toEqual([
+      'deduction-richer',
+    ])
+  })
+
+  it('rejects an OCR duplicate deletion when a manager decided the row after inspection', async () => {
+    const deps = createMemoryDeps(NOW_MS)
+    await deps.shifts.create(shift(), ACTOR_ID)
+    const expected = {
+      ...deduction('deduction-racing-review', 'recent-orders:bbbbbbbbbbbbbbbb'),
+      pointA: 'Pickup',
+    }
+    await deps.cashDeductions.create(expected, ACTOR_ID)
+    await deps.cashDeductions.update({
+      ...expected,
+      decisionReason: 'manager confirmed this is a separate operation',
+      decidedBy: 'manager-user',
+      decidedAt: '2026-07-21T05:04:00.000Z',
+    }, 'manager-user')
+
+    await expect(deps.operationBatches.apply(SHIFT_ID, operationBatch({
+      orderCreates: [order('order-transient-delete', 'ORDER-TRANSIENT-DELETE')],
+      cashDeductionDeletes: [{ expected }],
+    }), ACTOR_ID)).rejects.toMatchObject({ code: 'STALE_OPERATION_BATCH' })
+
+    expect(await deps.orders.listByShift(SHIFT_ID)).toEqual([])
+    expect(await deps.cashDeductions.listByShift(SHIFT_ID)).toEqual([
+      expect.objectContaining({
+        id: expected.id,
+        decidedBy: 'manager-user',
+        decisionReason: 'manager confirmed this is a separate operation',
+      }),
+    ])
+  })
+
   it.each([
     ['an order owned by another shift', 'order-foreign', true],
     ['a missing order', 'order-missing', false],

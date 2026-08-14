@@ -5,6 +5,7 @@ import {
   discardAiPageFailure,
   finishAiPageRead,
   type AiPageReadState,
+  visibleAiPageReadOutcome,
 } from '../src/ai-page-read-state.ts'
 
 describe('cloud-authoritative paged OCR state', () => {
@@ -98,5 +99,23 @@ describe('cloud-authoritative paged OCR state', () => {
   it('clears a terminal failure when that page is deleted', () => {
     const failed = finishAiPageRead(beginAiPageRead({ kind: 'idle' }), { kind: 'failed' })
     expect(discardAiPageFailure(failed)).toEqual({ kind: 'idle' })
+  })
+
+  it('counts only surviving overlap deductions and actionable refused rows', () => {
+    const orders = Array.from({ length: 6 }, () => ({ feeRefused: false }))
+    const duplicateSightings = [{ localId: 'minus-50' }, { localId: 'minus-50-overlap' }]
+    const reconciled = [{ localId: 'minus-50' }]
+
+    expect(visibleAiPageReadOutcome(orders, duplicateSightings, reconciled)).toEqual({
+      kind: 'read',
+      rows: 7,
+      refused: 0,
+    })
+
+    expect(visibleAiPageReadOutcome([{ feeRefused: true }], [], [])).toEqual({
+      kind: 'read',
+      rows: 1,
+      refused: 1,
+    })
   })
 })

@@ -717,6 +717,24 @@ export class MemoryTransactionGate {
 }
 
 /** One all-or-nothing write for a complete OCR operations submission. */
+const sameCashDeductionRecord = (left: CashDeductionRecord, right: CashDeductionRecord): boolean =>
+  left.id === right.id &&
+  left.shiftId === right.shiftId &&
+  left.operationKey === right.operationKey &&
+  left.amount === right.amount &&
+  left.occurredDate === right.occurredDate &&
+  left.occurredMinute === right.occurredMinute &&
+  left.source === right.source &&
+  left.amountOcr === right.amountOcr &&
+  left.pointA === right.pointA &&
+  left.pointB === right.pointB &&
+  left.included === right.included &&
+  left.windowStatus === right.windowStatus &&
+  left.decisionReason === right.decisionReason &&
+  left.decidedBy === right.decidedBy &&
+  left.decidedAt === right.decidedAt &&
+  left.createdBy === right.createdBy
+
 export class MemoryOperationBatchRepo implements OperationBatchRepo {
   private readonly shifts: MemoryShiftRepo
   private readonly orders: MemoryOrderRepo
@@ -756,6 +774,7 @@ export class MemoryOperationBatchRepo implements OperationBatchRepo {
       ...batch.orderUpdates.map(({ record }) => record.shiftId),
       ...batch.cashDeductionCreates.map((record) => record.shiftId),
       ...batch.cashDeductionUpdates.map(({ record }) => record.shiftId),
+      ...(batch.cashDeductionDeletes ?? []).map(({ expected }) => expected.shiftId),
     ].every((owner) => owner === shiftId)
     if (!belongs) {
       throw Object.assign(new Error('operation batch contains a row from another shift'), {
@@ -830,6 +849,14 @@ export class MemoryOperationBatchRepo implements OperationBatchRepo {
           }
           await this.orders.delete(order.id, actorId)
         }
+      }
+
+      for (const deletion of batch.cashDeductionDeletes ?? []) {
+        const current = this.deductions.rows.get(deletion.expected.id)
+        if (!current || current.shiftId !== shiftId || !sameCashDeductionRecord(current, deletion.expected)) {
+          throw staleMemoryOperation('cash_deduction', deletion.expected.id)
+        }
+        await this.deductions.delete(current.id, actorId)
       }
 
       for (const order of batch.orderCreates) await this.orders.create(order, actorId)

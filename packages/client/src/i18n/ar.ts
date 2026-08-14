@@ -263,12 +263,12 @@ export const ar = {
     /** «٠ عملية» is a real answer — the page had nothing new — and not the same as a failed read. */
     /** Arabic counts zero/one/two/few/many separately — see plural() in i18n/index.ts. */
     readAdded: {
-      zero: 'لم تُضَف أي عملية من هذه الصورة',
-      one: 'أُضيفت عملية واحدة من هذه الصورة',
-      two: 'أُضيفت عمليتان من هذه الصورة',
-      few: 'أُضيفت {n} عمليات من هذه الصورة',
-      many: 'أُضيفت {n} عملية من هذه الصورة',
-      other: 'أُضيفت {n} عملية من هذه الصورة',
+      zero: 'لم تُضَف أي عملية من الصور المرفوعة',
+      one: 'أُضيفت عملية واحدة إجمالاً من الصور',
+      two: 'أُضيفت عمليتان إجمالاً من الصور',
+      few: 'أُضيفت {n} عمليات إجمالاً من الصور',
+      many: 'أُضيفت {n} عملية إجمالاً من الصور',
+      other: 'أُضيفت {n} عملية إجمالاً من الصور',
     },
     readUnread: 'تعذّرت قراءة هذه الصورة — أدخِل العمليات يدوياً',
     /** Rows the reader saw but would not vouch for. Silence here hides a short day. */

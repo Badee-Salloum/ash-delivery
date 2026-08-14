@@ -27,10 +27,9 @@ describe('operations OCR authority guards', () => {
     expect(shift).toContain('state.failures > 0 ? failureNotice : null')
   })
 
-  it('protects server-restored deductions from local overlap reconciliation', () => {
-    expect(shift).toMatch(
-      /cashDeductions: \(st\.cashDeductions \?\? \[\]\)\.map\(\(row\) => \(\{[\s\S]*?recorded: true,[\s\S]*?\}\)\)/u,
-    )
+  it('hydrates and re-syncs deductions from the canonical server list', () => {
+    expect(shift).toContain('cashDeductions: syncRecordedCashDeductions([], st.cashDeductions ?? [])')
+    expect(shift).toContain('syncRecordedCashDeductions(d.cashDeductions, operations.cashDeductions)')
   })
 
   it('labels BR1 as surplus or shortage and displays an absolute amount', () => {

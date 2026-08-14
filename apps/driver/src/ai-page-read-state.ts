@@ -24,6 +24,28 @@ export type AiPageReadOutcome =
   | { kind: 'read'; rows: number; refused?: number; cutOff?: number }
   | { kind: 'failed' }
 
+/**
+ * Describe only rows that survived reconciliation and are visible/actionable in the draft.
+ *
+ * Overlapping screenshots can each return the same deduction. The second sighting briefly exists in
+ * `addedDeductions` before reconciliation folds it into the first identity; counting that transient
+ * row made the status say eight operations while BR1 displayed seven. Likewise a timeless clipped
+ * cloud row is dropped before materialisation and must not become a warning the driver cannot fix.
+ */
+export function visibleAiPageReadOutcome(
+  addedOrders: readonly { feeRefused?: boolean }[],
+  addedDeductions: readonly { localId: string }[],
+  reconciledDeductions: readonly { localId: string }[],
+): AiPageReadOutcome {
+  const survivingDeductionIds = new Set(reconciledDeductions.map((row) => row.localId))
+  const survivingDeductions = addedDeductions.filter((row) => survivingDeductionIds.has(row.localId)).length
+  return {
+    kind: 'read',
+    rows: addedOrders.length + survivingDeductions,
+    refused: addedOrders.filter((row) => row.feeRefused === true).length,
+  }
+}
+
 const EMPTY_TOTALS: PageReadTotals = {
   rows: 0,
   refused: 0,

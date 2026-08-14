@@ -121,6 +121,52 @@ export interface DraftCashDeduction {
   recorded?: boolean
 }
 
+/** The canonical deduction shape returned after the server commits an operations batch. */
+export interface StoredCashDeductionView {
+  id: string
+  operationKey: string
+  amount: string
+  amountOcr?: string | null
+  occurredMinute: string | null
+  occurredDate: string | null
+  source: 'ocr' | 'manual'
+  pointA: string | null
+  pointB: string | null
+  included: boolean
+}
+
+/**
+ * Replace the phone's draft with the exact rows that survived the atomic server batch.
+ *
+ * A server may heal an already-recorded partial/full OCR overlap. Merely marking every submitted
+ * local row as recorded would leave the deleted duplicate visible and would keep subtracting it
+ * from the phone preview until a reload. The server list is authoritative for identity and money;
+ * the only local-only field retained is the training strip for the surviving operation key.
+ */
+export function syncRecordedCashDeductions(
+  current: readonly DraftCashDeduction[],
+  stored: readonly StoredCashDeductionView[],
+): DraftCashDeduction[] {
+  const currentByKey = new Map(current.map((row) => [row.operationKey, row]))
+  return stored.map((row) => {
+    const local = currentByKey.get(row.operationKey)
+    return {
+      localId: local?.localId ?? `deduction-${row.id}`,
+      operationKey: row.operationKey,
+      amountText: row.amount,
+      amountOcrText: row.amountOcr ?? null,
+      ...(local?.amountStrip === undefined ? {} : { amountStrip: local.amountStrip }),
+      timeText: row.occurredMinute ?? '',
+      dateText: row.occurredDate ?? '',
+      pointA: row.pointA,
+      pointB: row.pointB,
+      source: row.source,
+      included: row.included,
+      recorded: true,
+    }
+  })
+}
+
 export interface OrderEntryState {
   orders: DraftOrder[]
   /** Remembered from the last confirmed row — most orders share a fee, so this saves typing. */
@@ -395,15 +441,50 @@ type DeductionRouteEvidence = Pick<DraftCashDeduction, 'pointA' | 'pointB'>
 const routeEvidenceCount = (row: DeductionRouteEvidence): number =>
   [row.pointA, row.pointB].filter((part) => cleanOperationPart(part) !== '').length
 
+/**
+ * The narrow OCR typo tolerated when two screenshots show the same cut-off Plus Code route.
+ *
+ * Thaer's edge card was read as `G777+4GP, Al Qanawat` while its complete overlap was read as
+ * `G77V+4GP, Al Qanawat`. Both are syntactically plausible Plus Codes, so normalisation cannot pick
+ * the right one. Treat them as the same endpoint only for the observed `7`/`V` glyph confusion,
+ * with the same code length and identical written place. Generic fuzzy address matching would
+ * collapse real cash deductions and is deliberately not used here.
+ */
+const nearIdenticalPlusCodeRoute = (leftRaw: string, rightRaw: string): boolean => {
+  const pattern = /^([23456789cfghjmpqrvwx]{4,8}\+[23456789cfghjmpqrvwx]{2,3})\s*(?:,\s*|\s+)(.+)$/u
+  const left = pattern.exec(leftRaw)
+  const right = pattern.exec(rightRaw)
+  if (
+    !left ||
+    !right ||
+    left[2]!.trim() === '' ||
+    left[2]!.trim() !== right[2]!.trim() ||
+    left[1]!.length !== right[1]!.length
+  ) return false
+
+  let differences = 0
+  for (let i = 0; i < left[1]!.length; i += 1) {
+    if (left[1]![i] === right[1]![i]) continue
+    const pair = `${left[1]![i]}${right[1]![i]}`
+    if (pair !== '7v' && pair !== 'v7') return false
+    differences += 1
+    if (differences > 1) return false
+  }
+  return differences === 1
+}
+
+const overlapRoutePartMatches = (left: string, right: string): boolean =>
+  left === right || nearIdenticalPlusCodeRoute(left, right)
+
 const enrichesKnownRoute = (existing: DeductionRouteEvidence, scanned: DeductionRouteEvidence): boolean => {
   const existingParts = routeEvidenceCount(existing)
   const scannedParts = routeEvidenceCount(scanned)
   if (existingParts === scannedParts || Math.min(existingParts, scannedParts) === 0) return false
   return (
     (cleanOperationPart(existing.pointA) !== '' &&
-      cleanOperationPart(existing.pointA) === cleanOperationPart(scanned.pointA)) ||
+      overlapRoutePartMatches(cleanOperationPart(existing.pointA), cleanOperationPart(scanned.pointA))) ||
     (cleanOperationPart(existing.pointB) !== '' &&
-      cleanOperationPart(existing.pointB) === cleanOperationPart(scanned.pointB))
+      overlapRoutePartMatches(cleanOperationPart(existing.pointB), cleanOperationPart(scanned.pointB)))
   )
 }
 
@@ -422,6 +503,9 @@ const enrichmentMatchScore = (existing: DraftCashDeduction, scanned: ScannedOrde
   const timeRight = cleanOperationPart(scanned.time)
   if (timeLeft !== '' && timeRight !== '' && timeLeft !== timeRight) return -1
   const sameKnownClock = timeLeft !== '' && timeRight !== ''
+  const strictlyEnrichesRoute =
+    routeEvidenceCount(existing) !== routeEvidenceCount(scanned) &&
+    Math.min(routeEvidenceCount(existing), routeEvidenceCount(scanned)) > 0
 
   const routePairs: Array<[string | null | undefined, string | null | undefined]> = [
     [existing.pointA, scanned.pointA],
@@ -432,7 +516,12 @@ const enrichmentMatchScore = (existing: DraftCashDeduction, scanned: ScannedOrde
   for (const [leftRaw, rightRaw] of routePairs) {
     const left = cleanOperationPart(leftRaw)
     const right = cleanOperationPart(rightRaw)
-    if (left !== '' && right !== '' && left !== right) return -1
+    if (left !== '' && right !== '' && left !== right) {
+      // A one-character Plus Code correction is safe only where the other sighting actually adds
+      // an endpoint and both screenshots agree on the minute. Two complete rows, or rows without a
+      // shared known clock, remain two real operations even if their codes look close.
+      if (!sameKnownClock || !strictlyEnrichesRoute || !nearIdenticalPlusCodeRoute(left, right)) return -1
+    }
     if (left !== '' && right !== '') sharedRouteParts += 1
     if ((left === '') !== (right === '')) enrichesRoute = true
   }
@@ -499,13 +588,15 @@ const preferredMatchedDate = (existing: DraftCashDeduction, scanned: ScannedOrde
 const mergedDeductionDetails = (existing: DraftCashDeduction, scanned: ScannedOrderRow) => ({
   timeText: existing.timeText || scanned.time,
   dateText: preferredMatchedDate(existing, scanned),
+  // The complete edge-card sighting owns both endpoints. Besides filling the missing endpoint, it
+  // corrects the one-character Plus Code typo carried by the partial sighting.
   pointA:
-    cleanOperationPart(existing.pointA) === '' && cleanOperationPart(scanned.pointA) !== ''
-      ? (scanned.pointA ?? null)
+    routeEvidenceCount(scanned) > routeEvidenceCount(existing)
+      ? (scanned.pointA ?? existing.pointA ?? null)
       : (existing.pointA ?? scanned.pointA ?? null),
   pointB:
-    cleanOperationPart(existing.pointB) === '' && cleanOperationPart(scanned.pointB) !== ''
-      ? (scanned.pointB ?? null)
+    routeEvidenceCount(scanned) > routeEvidenceCount(existing)
+      ? (scanned.pointB ?? existing.pointB ?? null)
       : (existing.pointB ?? scanned.pointB ?? null),
 })
 

@@ -8,6 +8,7 @@ import {
   inferMissingOrderDates,
   mergeScannedCashDeductions,
   reconcileLocalCashDeductions,
+  syncRecordedCashDeductions,
   allProblems,
   br1DifferencePresentation,
   br1Verdict,
@@ -119,7 +120,7 @@ describe('negative Recent Orders operations', () => {
       fee: '-50',
       time: '22:36',
       dateIso: '2026-08-13',
-      pointA: 'G777+4GP, Al Qanawat',
+      pointA: 'G77V+4GP, Al Qanawat',
       pointB: 'G78P+J3M, Al Mouhajrin',
     })
     const existing = mergeScannedCashDeductions([], [partial], () => 'partial-edge-row')
@@ -130,7 +131,7 @@ describe('negative Recent Orders operations', () => {
         localId: 'partial-edge-row',
         timeText: '22:36',
         dateText: '2026-08-13',
-        pointA: 'G777+4GP, Al Qanawat',
+        pointA: 'G77V+4GP, Al Qanawat',
         pointB: 'G78P+J3M, Al Mouhajrin',
       },
     ])
@@ -148,7 +149,7 @@ describe('negative Recent Orders operations', () => {
       fee: '-50',
       time: '22:36',
       dateIso: '2026-08-13',
-      pointA: 'G777+4GP, Al Qanawat',
+      pointA: 'G77V+4GP, Al Qanawat',
       pointB: 'G78P+J3M, Al Mouhajrin',
     })
     let ids = 0
@@ -159,7 +160,7 @@ describe('negative Recent Orders operations', () => {
         amountText: '50',
         timeText: '22:36',
         dateText: '2026-08-13',
-        pointA: 'G777+4GP, Al Qanawat',
+        pointA: 'G77V+4GP, Al Qanawat',
         pointB: 'G78P+J3M, Al Mouhajrin',
       },
     ])
@@ -178,7 +179,7 @@ describe('negative Recent Orders operations', () => {
       fee: '-50',
       time: '22:36',
       dateIso: '2026-08-13',
-      pointA: 'G777+4GP, Al Qanawat',
+      pointA: 'G77V+4GP, Al Qanawat',
       pointB: 'G78P+J3M, Al Mouhajrin',
     })
     const existing = mergeScannedCashDeductions([], [partial], () => 'existing-edge-row')
@@ -189,7 +190,7 @@ describe('negative Recent Orders operations', () => {
         localId: 'existing-edge-row',
         timeText: '22:36',
         dateText: '2026-08-13',
-        pointA: 'G777+4GP, Al Qanawat',
+        pointA: 'G77V+4GP, Al Qanawat',
         pointB: 'G78P+J3M, Al Mouhajrin',
       },
     ])
@@ -214,6 +215,7 @@ describe('negative Recent Orders operations', () => {
       localId: 'later-duplicate-id',
       operationKey: `${partial!.operationKey}~2`,
       dateText: '2026-08-13',
+      pointA: 'G77V+4GP, Al Qanawat',
       pointB: 'G78P+J3M, Al Mouhajrin',
     }
     const input = [partial!, richer]
@@ -225,6 +227,7 @@ describe('negative Recent Orders operations', () => {
         localId: 'first-stable-local-id',
         operationKey: partial!.operationKey,
         dateText: '2026-08-13',
+        pointA: 'G77V+4GP, Al Qanawat',
         pointB: 'G78P+J3M, Al Mouhajrin',
       },
     ])
@@ -284,6 +287,122 @@ describe('negative Recent Orders operations', () => {
       pointB: 'Destination B',
     })
     expect(added[0]!.operationKey).not.toBe(existing[0]!.operationKey)
+  })
+
+  it('keeps complete twins whose Plus Codes differ by one character', () => {
+    const first = scanned({
+      fee: '-50',
+      time: '22:36',
+      pointA: 'G777+4GP, Al Qanawat',
+      pointB: 'G78P+J3M, Al Mouhajrin',
+    })
+    const second = scanned({
+      fee: '-50',
+      time: '22:36',
+      pointA: 'G77V+4GP, Al Qanawat',
+      pointB: 'G78P+J3M, Al Mouhajrin',
+    })
+    const existing = mergeScannedCashDeductions([], [first], () => 'first-complete')
+    const added = mergeScannedCashDeductions(existing, [second], () => 'second-complete')
+
+    expect(added).toHaveLength(1)
+    expect(reconcileLocalCashDeductions([...existing, ...added])).toHaveLength(2)
+  })
+
+  it('does not fuzzy-match an edge row when its minute, Plus Code tail, or two code characters differ', () => {
+    const partial = scanned({
+      fee: '-50',
+      time: '22:36',
+      pointA: 'G777+4GP, Al Qanawat',
+      pointB: null,
+    })
+    const differentTail = scanned({
+      fee: '-50',
+      time: '22:36',
+      pointA: 'G77V+4GP, Al Midan',
+      pointB: 'Destination',
+    })
+    const twoCodeCharacters = scanned({
+      fee: '-50',
+      time: '22:36',
+      pointA: 'G7VV+4GP, Al Qanawat',
+      pointB: 'Destination',
+    })
+    const differentMinute = scanned({
+      fee: '-50',
+      time: '22:37',
+      pointA: 'G77V+4GP, Al Qanawat',
+      pointB: 'Destination',
+    })
+    const existing = mergeScannedCashDeductions([], [partial], () => 'partial')
+
+    expect(mergeScannedCashDeductions(existing, [differentTail], () => 'tail-conflict')).toHaveLength(1)
+    expect(mergeScannedCashDeductions(existing, [twoCodeCharacters], () => 'code-conflict')).toHaveLength(1)
+    expect(mergeScannedCashDeductions(existing, [differentMinute], () => 'minute-conflict')).toHaveLength(1)
+  })
+
+  it('does not fuzzy-match an unlisted one-glyph Plus Code difference', () => {
+    const partial = scanned({
+      fee: '-50',
+      time: '22:36',
+      pointA: 'G77W+4GP, Al Qanawat',
+      pointB: null,
+    })
+    const complete = scanned({
+      fee: '-50',
+      time: '22:36',
+      pointA: 'G77V+4GP, Al Qanawat',
+      pointB: 'Destination',
+    })
+    const existing = mergeScannedCashDeductions([], [partial], () => 'partial')
+
+    expect(mergeScannedCashDeductions(existing, [complete], () => 'distinct')).toHaveLength(1)
+  })
+
+  it('replaces a submitted duplicate draft with the canonical server survivor', () => {
+    const current = [
+      {
+        localId: 'partial-local',
+        operationKey: 'recent-orders:aaaaaaaaaaaaaaaa',
+        amountText: '50.00',
+        amountOcrText: '50.00',
+        timeText: '22:36',
+        dateText: '2026-08-13',
+        pointA: 'G777+4GP, Al Qanawat',
+        pointB: null,
+        source: 'ocr' as const,
+      },
+      {
+        localId: 'richer-local',
+        operationKey: 'recent-orders:aaaaaaaaaaaaaaaa~2',
+        amountText: '50.00',
+        amountOcrText: '50.00',
+        amountStrip: 'data:image/png;base64,sample',
+        timeText: '22:36',
+        dateText: '2026-08-13',
+        pointA: 'G77V+4GP, Al Qanawat',
+        pointB: 'G78P+J3M, Al Mouhajrin',
+        source: 'ocr' as const,
+      },
+    ]
+
+    expect(syncRecordedCashDeductions(current, [{
+      id: 'server-richer',
+      operationKey: 'recent-orders:aaaaaaaaaaaaaaaa~2',
+      amount: '50.00',
+      amountOcr: '50.00',
+      occurredMinute: '22:36',
+      occurredDate: '2026-08-13',
+      source: 'ocr',
+      pointA: 'G77V+4GP, Al Qanawat',
+      pointB: 'G78P+J3M, Al Mouhajrin',
+      included: true,
+    }])).toEqual([expect.objectContaining({
+      localId: 'richer-local',
+      operationKey: 'recent-orders:aaaaaaaaaaaaaaaa~2',
+      amountStrip: 'data:image/png;base64,sample',
+      recorded: true,
+    })])
   })
 
   it('keeps a complete equal deduction repeated on another day even when its route also repeats', () => {

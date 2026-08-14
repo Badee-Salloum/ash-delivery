@@ -8,7 +8,7 @@ import {
   useState,
 } from 'react'
 import { MAX_PAGE_SLOTS, PAYMENTS_LOG_SLOT, type PayMode, pageSlot } from '@ash/domain'
-import type { DraftCashDeduction, DraftMovement, DraftOrder } from '@ash/client'
+import type { DraftCashDeduction, DraftMovement, DraftOrder, StoredCashDeductionView } from '@ash/client'
 import {
   allProblems,
   br1DifferencePresentation,
@@ -28,6 +28,7 @@ import {
   previewBr1,
   readInCloud,
   reconcileLocalCashDeductions,
+  syncRecordedCashDeductions,
   normalizeDecimalDigits,
   odometerFromCloudFields,
   parseNonNegativeInteger,
@@ -67,6 +68,7 @@ import {
   discardAiPageFailure,
   finishAiPageRead,
   type AiPageReadState,
+  visibleAiPageReadOutcome,
 } from '../ai-page-read-state.ts'
 
 /**
@@ -544,21 +546,7 @@ export function ShiftFlow({
             role: m.role,
             ambiguous: m.ambiguous,
           })),
-          cashDeductions: (st.cashDeductions ?? []).map((row) => ({
-            localId: `deduction-${row.id}`,
-            operationKey: row.operationKey,
-            amountText: row.amount,
-            amountOcrText: row.amountOcr ?? null,
-            // This identity already exists on the server. Local overlap healing may enrich it,
-            // but must never hide it because omitting a deduction from PUT is not a deletion.
-            recorded: true,
-            timeText: row.occurredMinute ?? '',
-            dateText: row.occurredDate ?? '',
-            pointA: row.pointA,
-            pointB: row.pointB,
-            source: row.source,
-            included: row.included,
-          })),
+          cashDeductions: syncRecordedCashDeductions([], st.cashDeductions ?? []),
         }))
         // Trust the server's state over the one the assignment reported: the manager may have
         // approved between the two calls. A shift that is no longer LIVE goes through the same
@@ -1198,6 +1186,20 @@ function EndPackage({
   const failedDashboardReads = useRef<Map<string, File>>(new Map())
   const failedLogReads = useRef<Map<string, File>>(new Map())
 
+  // Heal a phone-only overlap even when it entered the draft before this component rendered (for
+  // example while a service-worker update was waiting). Persisted rows carry `recorded:true` and
+  // are deliberately left for the server's audited reconciliation path.
+  useEffect(() => {
+    const reconciled = reconcileLocalCashDeductions(draft.cashDeductions)
+    if (reconciled.length === draft.cashDeductions.length) return
+    onDraft((current) => {
+      const currentReconciled = reconcileLocalCashDeductions(current.cashDeductions)
+      return currentReconciled.length === current.cashDeductions.length
+        ? current
+        : { ...current, cashDeductions: currentReconciled }
+    })
+  }, [draft.cashDeductions, onDraft])
+
   const [batteriesReady, setBatteriesReady] = useState(batteries.length === 0)
   // The zeroed-wallet photo was dropped (product owner) — the wallet screenshot is the evidence.
   // «سجل المدفوعات» joins them: the balance screen says what the wallet HOLDS, the log says what
@@ -1293,7 +1295,7 @@ function EndPackage({
     if (odometerFields === null || draft.odoCloud?.status === 'reading') return
     setBusy(true)
     try {
-      await api.put(`/shifts/${shift.id}/operations`, {
+      const operations = await api.put<{ cashDeductions?: StoredCashDeductionView[] }>(`/shifts/${shift.id}/operations`, {
         // A scanner-classified cancelled row with no price never travels: `moneySchema` refuses an
         // empty fee and would 400 the whole request, losing every good row with it. Driver-visible
         // inclusion is otherwise read-only and the server classifies every priced row by its window.
@@ -1338,12 +1340,14 @@ function EndPackage({
           included: m.included !== false,
         })),
       })
-      // From this point these deduction identities exist on the server. A later screenshot may
-      // enrich them, but local overlap reconciliation must never remove one: omission from this PUT
-      // is not deletion and would make the preview disagree with server BR1 after a close failure.
+      // Replace, do not merely mark, the local list. The server may have atomically removed a
+      // historical partial/full OCR overlap; keeping that deleted phone row would subtract the
+      // deduction twice in the preview until a page reload.
       onDraft((d) => ({
         ...d,
-        cashDeductions: d.cashDeductions.map((row) => ({ ...row, recorded: true })),
+        cashDeductions: operations.cashDeductions
+          ? syncRecordedCashDeductions(d.cashDeductions, operations.cashDeductions)
+          : d.cashDeductions.map((row) => ({ ...row, recorded: true })),
       }))
       patch({ opsError: null })
 
@@ -1632,14 +1636,6 @@ function EndPackage({
       }
 
       failedDashboardReads.current.delete(slot)
-      // These are refusals by AI itself, never candidates invented by local/Tesseract diagnostics.
-      const aiRefused = cloud.rows.filter((row) => {
-        if (!row.cancelled && row.value === null) return true
-        if (row.time !== null && row.time.trim() !== '') return false
-        const isDeduction = row.value !== null && /^\s*[-−]/u.test(row.value)
-        return !(isDeduction && (row.dateIso !== null || row.pointA !== null || row.pointB !== null))
-      }).length
-
       onDraft((d) => {
         const added = mergeScannedOrders(d.orders, scanned, () => crypto.randomUUID())
         const addedDeductions = mergeScannedCashDeductions(
@@ -1674,11 +1670,10 @@ function EndPackage({
           // complete sighting collapse only when both are unrecorded OCR rows. Server-restored and
           // genuine complete twins retain multiplicity.
           cashDeductions: nextCashDeductions,
-          dash: finishAiPageRead(d.dash, {
-            kind: 'read',
-            rows: added.length + addedDeductions.length,
-            refused: aiRefused,
-          }),
+          dash: finishAiPageRead(
+            d.dash,
+            visibleAiPageReadOutcome(added, addedDeductions, nextCashDeductions),
+          ),
         }
       })
     },

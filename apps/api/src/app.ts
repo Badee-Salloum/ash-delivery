@@ -1335,8 +1335,23 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     async (req) => {
       const { id } = z.object({ id: z.string() }).parse(req.params)
       const body = operationsRequest.parse(req.body)
-      const { br1 } = await submitOperations(deps, req.actor!, id, body)
-      return { id, br1: serializeBr1(br1) }
+      const { br1, cashDeductions } = await submitOperations(deps, req.actor!, id, body)
+      return {
+        id,
+        br1: serializeBr1(br1),
+        cashDeductions: cashDeductions.map((deduction) => ({
+          id: deduction.id,
+          operationKey: deduction.operationKey,
+          amount: serializeMoney(deduction.amount),
+          amountOcr: deduction.amountOcr === null ? null : serializeMoney(deduction.amountOcr),
+          occurredMinute: deduction.occurredMinute,
+          occurredDate: deduction.occurredDate,
+          source: deduction.source,
+          pointA: deduction.pointA,
+          pointB: deduction.pointB,
+          included: deduction.included,
+        })),
+      }
     },
   )
 

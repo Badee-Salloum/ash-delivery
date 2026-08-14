@@ -785,6 +785,24 @@ const toCashDeduction = (r: Record<string, unknown>): CashDeductionRecord => ({
   createdBy: (r.created_by as string | null) ?? null,
 })
 
+const sameCashDeductionRecord = (left: CashDeductionRecord, right: CashDeductionRecord): boolean =>
+  left.id === right.id &&
+  left.shiftId === right.shiftId &&
+  left.operationKey === right.operationKey &&
+  left.amount === right.amount &&
+  left.occurredDate === right.occurredDate &&
+  left.occurredMinute === right.occurredMinute &&
+  left.source === right.source &&
+  left.amountOcr === right.amountOcr &&
+  left.pointA === right.pointA &&
+  left.pointB === right.pointB &&
+  left.included === right.included &&
+  left.windowStatus === right.windowStatus &&
+  left.decisionReason === right.decisionReason &&
+  left.decidedBy === right.decidedBy &&
+  left.decidedAt === right.decidedAt &&
+  left.createdBy === right.createdBy
+
 /** Calls the database-owned classifier; no caller-provided status or inclusion crosses this port. */
 export class PgOperationWindowRepo implements OperationWindowRepo {
   private readonly pool: Pool
@@ -973,6 +991,11 @@ export class PgOperationBatchRepo implements OperationBatchRepo {
         id: record.id,
         shiftId: record.shiftId,
       })),
+      ...(batch.cashDeductionDeletes ?? []).map(({ expected }) => ({
+        kind: 'cash_deduction',
+        id: expected.id,
+        shiftId: expected.shiftId,
+      })),
     ].find((record) => record.shiftId !== shiftId)
     if (wrongShift) {
       throw Object.assign(new Error(`${wrongShift.kind} ${wrongShift.id} belongs to another shift`), {
@@ -1067,6 +1090,20 @@ export class PgOperationBatchRepo implements OperationBatchRepo {
             await orders.delete(row.id, actorId)
           }
         }
+      }
+
+      for (const deletion of batch.cashDeductionDeletes ?? []) {
+        const locked = await client.query<Record<string, unknown>>(
+          `${CASH_DEDUCTION_COLUMNS}
+            WHERE id = $1 AND shift_id = $2
+            FOR UPDATE`,
+          [deletion.expected.id, shiftId],
+        )
+        const current = locked.rows[0] === undefined ? null : toCashDeduction(locked.rows[0])
+        if (current === null || !sameCashDeductionRecord(current, deletion.expected)) {
+          throw staleOperationBatch('cash_deduction', deletion.expected.id)
+        }
+        await deductions.delete(current.id, actorId)
       }
 
       for (const order of batch.orderCreates) await orders.create(order, actorId)

@@ -9,6 +9,7 @@ import {
   type Harness,
   VEHICLE_ID,
   makeHarness,
+  syp,
   sypStr,
 } from './harness.ts'
 
@@ -183,6 +184,262 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
     const [storedDeduction] = await h.deps.cashDeductions.listByShift(id)
     expect(entries.find((entry) => entry.eventType === 'driver_cash_deduction')?.occurrenceKey)
       .toBe(`cash-deduction:${storedDeduction!.id}`)
+  })
+
+  it('stores one -50 when the first HTTP batch contains the partial and richer overlap together', async () => {
+    const { id, driver } = await openShift({ float: 3_500, topup: 0 })
+    const operationKey = 'recent-orders:0e0e0e0e0e0e0e0e'
+    const result = await put(driver, `/shifts/${id}/operations`, {
+      orders: [],
+      cashDeductions: [
+        {
+          operationKey,
+          amount: '50.00',
+          amountOcr: '50.00',
+          occurredDate: '2026-08-13',
+          occurredMinute: '22:36',
+          pointA: 'G777+4GP, Al Qanawat',
+          pointB: null,
+          source: 'ocr',
+        },
+        {
+          operationKey: `${operationKey}~2`,
+          amount: '50.00',
+          amountOcr: '50.00',
+          occurredDate: '2026-08-13',
+          occurredMinute: '22:36',
+          pointA: 'G77V+4GP, Al Qanawat',
+          pointB: 'G78P+J3M, Al Mouhajrin',
+          source: 'ocr',
+        },
+      ],
+      movements: [],
+    })
+    expect(result.statusCode, result.body).toBe(200)
+    expect(result.json().br1).toMatchObject({
+      cashDeductionTotal: '50.00',
+      expectedTotal: '3450.00',
+    })
+    expect(result.json().cashDeductions).toEqual([
+      expect.objectContaining({
+        operationKey,
+        amount: '50.00',
+        pointA: 'G77V+4GP, Al Qanawat',
+      }),
+    ])
+    expect(await h.deps.cashDeductions.listByShift(id)).toEqual([
+      expect.objectContaining({
+        operationKey,
+        amount: 5_000n,
+        pointA: 'G77V+4GP, Al Qanawat',
+        pointB: 'G78P+J3M, Al Mouhajrin',
+      }),
+    ])
+
+    const retried = await put(driver, `/shifts/${id}/operations`, {
+      orders: [],
+      cashDeductions: [{
+        operationKey,
+        amount: '50.00',
+        amountOcr: '50.00',
+        occurredDate: '2026-08-13',
+        occurredMinute: '22:36',
+        pointA: 'G777+4GP, Al Qanawat',
+        pointB: null,
+        source: 'ocr',
+      }],
+      movements: [],
+    })
+    expect(retried.statusCode, retried.body).toBe(200)
+    expect(retried.json().br1.cashDeductionTotal).toBe('50.00')
+    expect(await h.deps.cashDeductions.listByShift(id)).toEqual([
+      expect.objectContaining({
+        operationKey,
+        pointA: 'G77V+4GP, Al Qanawat',
+        pointB: 'G78P+J3M, Al Mouhajrin',
+      }),
+    ])
+  })
+
+  it('does not collapse fresh complete twins, conflicts, or rows without a printed minute', async () => {
+    const { id, driver } = await openShift({ float: 1_000, topup: 0 })
+    const row = (operationKey: string, pointA: string, pointB: string | null) => ({
+      operationKey,
+      amount: '50.00',
+      amountOcr: '50.00',
+      occurredDate: '2026-08-13',
+      occurredMinute: '22:36',
+      pointA,
+      pointB,
+      source: 'ocr',
+    })
+    const deductions = [
+      row('recent-orders:1010101010101010', 'G77V+4GP, Al Qanawat', 'Dropoff'),
+      row('recent-orders:1010101010101010~2', 'G77V+4GP, Al Qanawat', 'Dropoff'),
+      row('recent-orders:2020202020202020', 'G777+4GP, Al Qanawat', null),
+      row('recent-orders:2020202020202020~2', 'G77V+4GP, Different place', 'Dropoff'),
+      row('recent-orders:3030303030303030', 'G777+4GP, Al Qanawat', null),
+      row('recent-orders:3030303030303030~2', 'G7PV+4GP, Al Qanawat', 'Dropoff'),
+      { ...row('recent-orders:4040404040404040', 'G777+4GP, Al Qanawat', null), occurredMinute: null },
+      { ...row('recent-orders:4040404040404040~2', 'G77V+4GP, Al Qanawat', 'Dropoff'), occurredMinute: null },
+      row('recent-orders:5050505050505050', 'G77W+4GP, Al Qanawat', null),
+      row('recent-orders:5050505050505050~2', 'G77V+4GP, Al Qanawat', 'Dropoff'),
+    ]
+    const result = await put(driver, `/shifts/${id}/operations`, {
+      orders: [], cashDeductions: deductions, movements: [],
+    })
+    expect(result.statusCode, result.body).toBe(200)
+    expect(result.json().br1.cashDeductionTotal).toBe('500.00')
+    expect(await h.deps.cashDeductions.listByShift(id)).toHaveLength(10)
+  })
+
+  it('atomically heals the historical partial/full OCR overlap to one -50 deduction', async () => {
+    const { id, driver } = await openShift({ float: 3_500, topup: 0 })
+    const operationKey = 'recent-orders:0f0f0f0f0f0f0f0f'
+    const partial = {
+      operationKey,
+      amount: '50.00',
+      amountOcr: '50.00',
+      occurredDate: '2026-08-13',
+      occurredMinute: '22:36',
+      pointA: 'G777+4GP, Al Qanawat',
+      pointB: null,
+      source: 'ocr',
+    }
+    expect((await put(driver, `/shifts/${id}/operations`, {
+      orders: [],
+      cashDeductions: [partial],
+      movements: [],
+    })).statusCode).toBe(200)
+
+    // Reproduce the already-persisted production shape created by the older client: the first
+    // screenshot held a route fragment and its overlap inserted the complete card under `~2`.
+    const [persistedPartial] = await h.deps.cashDeductions.listByShift(id)
+    await h.deps.cashDeductions.create({
+      ...persistedPartial!,
+      id: 'historical-rich-deduction',
+      operationKey: `${operationKey}~2`,
+      pointA: 'G77V+4GP, Al Qanawat',
+      pointB: 'G78P+J3M, Al Mouhajrin',
+    }, 'u-d1')
+    expect(await h.deps.cashDeductions.listByShift(id)).toHaveLength(2)
+
+    const healed = await put(driver, `/shifts/${id}/operations`, {
+      orders: [],
+      cashDeductions: [
+        partial,
+        {
+          ...partial,
+          operationKey: `${operationKey}~2`,
+          pointA: 'G77V+4GP, Al Qanawat',
+          pointB: 'G78P+J3M, Al Mouhajrin',
+        },
+      ],
+      movements: [],
+    })
+    expect(healed.statusCode, healed.body).toBe(200)
+    expect(healed.json().br1).toMatchObject({
+      cashDeductionTotal: '50.00',
+      expectedTotal: '3450.00',
+    })
+    expect(await h.deps.cashDeductions.listByShift(id)).toEqual([
+      expect.objectContaining({
+        id: persistedPartial!.id,
+        operationKey,
+        amount: 5_000n,
+        pointA: 'G77V+4GP, Al Qanawat',
+        pointB: 'G78P+J3M, Al Mouhajrin',
+      }),
+    ])
+  })
+
+  it('preserves complete twins, route conflicts, manual rows, foreign ownership, and manager decisions', async () => {
+    const { id, driver } = await openShift({ float: 1_000, topup: 0 })
+    const template = {
+      id: '',
+      shiftId: id,
+      operationKey: '',
+      amount: syp(50),
+      occurredDate: '2026-08-13' as const,
+      occurredMinute: '22:36',
+      source: 'ocr' as const,
+      amountOcr: syp(50),
+      pointA: 'Pickup',
+      pointB: null,
+      included: true,
+      windowStatus: 'in_window' as const,
+      decisionReason: null,
+      decidedBy: null,
+      decidedAt: null,
+      createdBy: 'u-d1',
+    }
+    const rows = [
+      // Complete twins can be two real cash movements in one minute.
+      { ...template, id: 'complete-1', operationKey: 'recent-orders:1111111111111111', pointB: 'Dropoff' },
+      { ...template, id: 'complete-2', operationKey: 'recent-orders:1111111111111111~2', pointB: 'Dropoff' },
+      // A one-glyph Plus Code mismatch is only compatible while the written place tail agrees.
+      { ...template, id: 'conflict-1', operationKey: 'recent-orders:2222222222222222', pointA: 'G777+4GP, Al Qanawat' },
+      {
+        ...template,
+        id: 'conflict-2',
+        operationKey: 'recent-orders:2222222222222222~2',
+        pointA: 'G77V+4GP, Different place',
+        pointB: 'Dropoff',
+      },
+      // More than one Plus Code glyph differs, even when the place tail agrees.
+      { ...template, id: 'multi-glyph-1', operationKey: 'recent-orders:6666666666666666', pointA: 'G777+4GP, Al Qanawat' },
+      {
+        ...template,
+        id: 'multi-glyph-2',
+        operationKey: 'recent-orders:6666666666666666~2',
+        pointA: 'G7PV+4GP, Al Qanawat',
+        pointB: 'Dropoff',
+      },
+      // Neither a manual record nor evidence owned by somebody else is driver-OCR cleanup scope.
+      { ...template, id: 'manual-1', operationKey: 'recent-orders:3333333333333333', source: 'manual' as const, amountOcr: null },
+      { ...template, id: 'manual-2', operationKey: 'recent-orders:3333333333333333~2', pointB: 'Dropoff' },
+      { ...template, id: 'foreign-1', operationKey: 'recent-orders:4444444444444444', createdBy: 'u-bm' },
+      { ...template, id: 'foreign-2', operationKey: 'recent-orders:4444444444444444~2', pointB: 'Dropoff' },
+      // One attributed decision protects the whole apparent pair from automatic deletion.
+      { ...template, id: 'decided-1', operationKey: 'recent-orders:5555555555555555' },
+      {
+        ...template,
+        id: 'decided-2',
+        operationKey: 'recent-orders:5555555555555555~2',
+        pointB: 'Dropoff',
+        decisionReason: 'manager verified this row',
+        decidedBy: 'u-bm',
+        decidedAt: '2026-08-13T20:00:00.000Z',
+      },
+      // Even an otherwise-healable pair is permanent when this PUT omits it.
+      { ...template, id: 'omitted-1', operationKey: 'recent-orders:7777777777777777' },
+      {
+        ...template,
+        id: 'omitted-2',
+        operationKey: 'recent-orders:7777777777777777~2',
+        pointB: 'Dropoff',
+      },
+    ]
+    for (const row of rows) await h.deps.cashDeductions.create(row, row.createdBy)
+
+    const unchanged = await put(driver, `/shifts/${id}/operations`, {
+      orders: [],
+      cashDeductions: rows
+        .filter((row) => !row.id.startsWith('omitted-'))
+        .map((row) => ({
+          operationKey: row.operationKey,
+          amount: '50.00',
+          amountOcr: row.amountOcr === null ? null : '50.00',
+          occurredDate: row.occurredDate,
+          occurredMinute: row.occurredMinute,
+          source: row.source,
+          pointA: row.pointA,
+          pointB: row.pointB,
+        })),
+      movements: [],
+    })
+    expect(unchanged.statusCode, unchanged.body).toBe(200)
+    expect(await h.deps.cashDeductions.listByShift(id)).toHaveLength(rows.length)
   })
 })
 

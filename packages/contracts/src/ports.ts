@@ -841,6 +841,18 @@ export interface OperationBatch {
     expectedDecidedAt: string | null
   }[]
   /**
+   * Remove an OCR edge-card duplicate while keeping the richer sighting.
+   *
+   * The complete expected row is an optimistic version. A deletion is valid only while every
+   * accounting, evidence, ownership and decision field still matches what the service inspected;
+   * otherwise the whole batch is stale. This is deliberately narrower than a generic deduction
+   * delete: ordinary money rows remain permanent evidence and manager-reviewed rows can never be
+   * healed away by a late driver submission.
+   */
+  cashDeductionDeletes?: readonly {
+    expected: CashDeductionRecord
+  }[]
+  /**
    * A signed provider row has exactly one representation. Implementations enforce these intents
    * after locking the shift, including against an opposite-kind row that appeared concurrently.
    * A manager-reviewed opposite row makes the batch stale instead of being deleted.

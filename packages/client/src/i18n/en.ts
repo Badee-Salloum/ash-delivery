@@ -248,13 +248,13 @@ export const en: Catalog = {
     /** «0 operations» is a real answer — the page had nothing new — not the same as a failed read. */
     /** English collapses to one/other; the same call site serves both languages. */
     readAdded: {
-      zero: 'Nothing was added from this image',
-      one: 'Added 1 operation from this image',
+      zero: 'Nothing was added from the uploaded images',
+      one: 'Added 1 operation in total from the images',
       // English has no dual and no small-plural; these exist so the catalogues share a shape.
-      two: 'Added {n} operations from this image',
-      few: 'Added {n} operations from this image',
-      many: 'Added {n} operations from this image',
-      other: 'Added {n} operations from this image',
+      two: 'Added {n} operations in total from the images',
+      few: 'Added {n} operations in total from the images',
+      many: 'Added {n} operations in total from the images',
+      other: 'Added {n} operations in total from the images',
     },
     readUnread: 'This image could not be read — enter the operations by hand',
     /** Rows the reader saw but would not vouch for. Silence here hides a short day. */
