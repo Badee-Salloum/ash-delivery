@@ -1,7 +1,6 @@
 import type { FastifyInstance } from 'fastify'
-import { z } from 'zod'
 import type { Deps } from '@ash/contracts'
-import { publishTierRequest, serializeMoney, simulateTierRequest } from '@ash/contracts'
+import { serializeMoney, simulateTierRequest } from '@ash/contracts'
 import {
   type ShiftOrder,
   type TierRule,
@@ -10,9 +9,8 @@ import {
   minor,
   splitDay,
   validateBands,
-  TierRuleError,
 } from '@ash/domain'
-import { ServiceError, includedOrders, todayFor } from './shifts.service.ts'
+import { ServiceError, includedOrders } from './shifts.service.ts'
 import { type StoredRule, asDomainRule, ruleInForceOn } from './tier-rule.ts'
 
 /**
@@ -33,63 +31,13 @@ export function registerTierRoutes(app: FastifyInstance, deps: Deps): void {
     }
   })
 
-  /**
-   * Publish a new version (F-3).
-   *
-   * Dated, never destructive: the incumbent becomes `superseded` so every past day still
-   * resolves to the rate that actually applied to it. Deleting it would silently restate
-   * history the first time anyone edited the table.
-   */
-  app.post('/tier-rules', { config: { permission: 'tier_rule.write' } }, async (req, reply) => {
-    const body = publishTierRequest.parse(req.body)
-
-    try {
-      validateBands(body.bands)
-    } catch (err) {
-      // Caught at publish time, never at 23:00 on a Saturday when a shift will not close.
-      if (err instanceof TierRuleError) throw new ServiceError(422, 'invalid_band_table', { message: err.message })
-      throw err
-    }
-
-    // Effective dates are forward-only. Back-dating would restate days that are already posted
-    // and possibly already inside a sealed week.
-    const today = todayFor(deps)
-    if (body.effectiveFrom <= today) {
-      throw new ServiceError(422, 'effective_from_must_be_future', {
-        effectiveFrom: body.effectiveFrom,
-        earliest: addDays(today, 1),
-      })
-    }
-
-    const published = await deps.tiers.publish({
-      basis: body.basis,
-      mode: body.mode,
-      vehicleTypeId: body.vehicleTypeId,
-      bands: body.bands,
-      effectiveFrom: body.effectiveFrom,
-      createdBy: req.actor!.userId,
-    })
-
-    await deps.audit.append({
-      tableName: 'tier_rules',
-      recordId: String(published.id),
-      action: 'INSERT',
-      actorId: req.actor!.userId,
-      actorKind: 'user',
-      branchId: null,
-      requestId: req.requestId,
-      before: null,
-      after: published,
-      occurredAtMs: deps.clock.nowMs(),
-    })
-
-    return reply.code(201).send(published)
+  /** Historical tier versions remain readable, but fixed 40% is the only active close policy. */
+  app.post('/tier-rules', { config: { permission: 'tier_rule.write' } }, async () => {
+    throw new ServiceError(409, 'fixed_share_policy_active')
   })
 
-  app.post('/tier-rules/:id/withdraw', { config: { permission: 'tier_rule.write' } }, async (req) => {
-    const { id } = z.object({ id: z.coerce.number().int() }).parse(req.params)
-    await deps.tiers.withdraw(id, req.actor!.userId)
-    return { id, status: 'withdrawn' }
+  app.post('/tier-rules/:id/withdraw', { config: { permission: 'tier_rule.write' } }, async () => {
+    throw new ServiceError(409, 'fixed_share_policy_active')
   })
 
   /**

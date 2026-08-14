@@ -6,6 +6,7 @@ import {
   type PhotoAge,
   br1DifferencePresentation,
   br1Verdict,
+  groupThousands,
   ocrReadingDelta,
   slotLabel,
   splitSlot,
@@ -19,8 +20,15 @@ import { useConfirm, useToast } from '../feedback.tsx'
 import {
   type OperationWindowStatus,
   countUnresolvedWindowRows,
-  firstMoneyField,
 } from '../operation-window.ts'
+import {
+  activeForcePreparation,
+  closeApprovalRequest,
+  isKnownSettlementAction,
+  settlementApprovalReady,
+  settlementHasVariance,
+  settlementVarianceMagnitude,
+} from '../settlement-review.ts'
 import { FOCUS_RING, Badge, Button, Card, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
 
 /** Where the map opens when no point has been pinned yet. */
@@ -144,7 +152,12 @@ interface Review {
     staleAcknowledgedAt?: string | null
     staleAcknowledgedBy?: string | null
   }>
-  decisions: Array<{ gate: 'open' | 'close'; decision: 'approved' | 'rejected' | 'rephoto_requested'; notes: string | null; decidedAt: string }>
+  decisions: Array<{
+    gate: 'open' | 'close'
+    decision: 'approved' | 'rejected' | 'rephoto_requested' | 'force_close_prepared'
+    notes: string | null
+    decidedAt: string
+  }>
   br1: {
     expectedCash: string
     expectedWallet: string
@@ -189,12 +202,16 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   const [who, setWho] = useState<{ driver: string | null; vehicle: string | null }>({ driver: null, vehicle: null })
 
   /**
-   * «كشف التسوية». Read-only, so a failure to load it must never block the approval screen — the
-   * manager can still see BR1 and sign off exactly as before. Declared with the other hooks, above
-   * the `if (!review)` guard, for the same reason recorded below it: a hook the first render does
-   * not reach and the second does throws React #310, which is what once left this page blank.
+   * «كشف التسوية». It is read-only until both physical actions are confirmed, but it is mandatory:
+   * no manager may approve against a missing or stale statement. Declared with the other hooks,
+   * above the `if (!review)` guard, because a hook reached only after loading would trigger React
+   * #310 and leave this financial screen blank.
    */
   const [settlement, setSettlement] = useState<Awaited<ReturnType<typeof api.shiftSettlement>> | null>(null)
+  const [settlementLoadError, setSettlementLoadError] = useState<string | null>(null)
+  const [walletTransferConfirmed, setWalletTransferConfirmed] = useState(false)
+  const [cashSettlementConfirmed, setCashSettlementConfirmed] = useState(false)
+  const [varianceReason, setVarianceReason] = useState('')
 
   /**
    * Which orders the table shows — see `flagged()` below for what "worth attention" means.
@@ -217,6 +234,14 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   const [loadError, setLoadError] = useState<string | null>(null)
   const load = useCallback(() => {
     setLoadError(null)
+    // A refresh invalidates every number currently on screen. Hide the old snapshot immediately so
+    // a slow replacement request cannot leave a stale approval button reachable for one more tap.
+    setReview(null)
+    setSettlement(null)
+    setSettlementLoadError(null)
+    setWalletTransferConfirmed(false)
+    setCashSettlementConfirmed(false)
+    setVarianceReason('')
     void api
       .get<Review>(`/shifts/${shiftId}/review`)
       .then(setReview)
@@ -229,16 +254,42 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   }, [api, shiftId])
   useEffect(load, [load])
 
-  // The statement is only meaningful once the driver has declared his cash, so it is fetched with
-  // the review and simply stays null before that. A failure here is swallowed: it is a read-only
-  // panel and must never be the reason a manager cannot approve a shift.
+  // This statement is the manager's physical handover checklist, not an optional report. A close
+  // cannot post without the exact snapshot hash and both confirmations, so a load failure is shown
+  // and blocks the close rather than silently falling back to an older cash-only flow.
   useEffect(() => {
-    if (!review) return
+    if (!review || review.state !== 'pending_review') return
+    let cancelled = false
+    setSettlement(null)
+    setSettlementLoadError(null)
     void api
       .shiftSettlement(review.id)
-      .then(setSettlement)
-      .catch(() => setSettlement(null))
+      .then((next) => {
+        if (cancelled) return
+        if (!isKnownSettlementAction(next)) throw new Error('invalid_settlement_action')
+        setSettlement(next)
+      })
+      .catch((e: { error?: string; message?: string }) => {
+        if (cancelled) return
+        setSettlement(null)
+        setSettlementLoadError(e.error ?? e.message ?? 'settlement_unavailable')
+      })
+    return () => {
+      cancelled = true
+    }
   }, [api, review])
+
+  // A changed hash means changed money. Earlier ticks must never carry across to a new statement.
+  useEffect(() => {
+    setWalletTransferConfirmed(false)
+    setCashSettlementConfirmed(false)
+    setVarianceReason('')
+  }, [review?.id, settlement?.settlementHash])
+
+  useEffect(() => {
+    const prepared = activeForcePreparation(review?.submittedAt, review?.decisions ?? [])
+    if (prepared?.notes && notes.trim() === '') setNotes(prepared.notes)
+  }, [notes, review?.decisions, review?.submittedAt])
 
   useEffect(() => {
     if (!review) return
@@ -271,21 +322,14 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   const cashDeductions = review.cashDeductions ?? []
   const unresolvedWindowCount = countUnresolvedWindowRows(review.orders, cashDeductions)
   const operationReasonReady = operationReason.trim().length > 0
-  const deductionSettlement = {
-    grossShare: firstMoneyField(settlement, ['grossDriverShare', 'driverShareGross']),
-    total:
-      firstMoneyField(settlement, ['cashDeductionTotal', 'totalCashDeduction']) ??
-      review.br1.cashDeductionTotal ??
-      null,
-    netShare: firstMoneyField(settlement, ['netDriverShare', 'driverShareNet']),
-    receivable: firstMoneyField(settlement, [
-      'cashDeductionReceivable',
-      'deductionReceivable',
-      'cashDeductionOverflow',
-      'deductionOverflow',
-    ]),
+  const forcePreparation = activeForcePreparation(review.submittedAt, review.decisions)
+  const forcePrepared = forcePreparation !== null
+  const settlementDraft = {
+    walletTransferConfirmed,
+    cashSettlementConfirmed,
+    varianceReason: forcePrepared ? notes : varianceReason,
   }
-  const hasDeductionSettlement = Object.values(deductionSettlement).some((value) => value !== null)
+  const closeSettlementReady = settlementApprovalReady(settlement, settlementDraft)
 
   /**
    * WHICH ORDERS DESERVE THE MANAGER'S EYE.
@@ -380,6 +424,10 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     if (!review) return
     const opening = review.state === 'awaiting_open_approval'
     if (!opening && unresolvedWindowCount > 0) return
+    if (!opening && (!settlement || !closeSettlementReady)) {
+      setError('settlement_confirmation_incomplete')
+      return
+    }
     // Money leaves the office on this click, in an amount typed into two boxes that silently
     // default to zero. It is read back to the manager before it is committed.
     if (opening) {
@@ -396,7 +444,10 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       // immutable. Read back who and how much before it happens.
       const ok = await confirm({
         title: t.approval.confirmCloseTitle,
-        body: `${who.driver ?? ''} · ${differenceLabel}: ${difference.amountText}`,
+        body:
+          `${who.driver ?? ''} · ${t.settlement.walletAction[settlement!.walletAction]}: ` +
+          `${groupThousands(settlement!.walletAmount)} · ${t.settlement.cashAction[settlement!.cashAction]}: ` +
+          groupThousands(settlement!.cashAmount),
         confirmLabel: t.approval.approveClose,
       })
       if (!ok) return
@@ -410,21 +461,59 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           topupTranches: [topupText || '0'],
         })
       } else {
-        await api.post(`/shifts/${review.id}/approve-close`, { reviewedOrdersHash: review.br1.ordersHash })
+        await api.approveCloseShift(
+          review.id,
+          closeApprovalRequest(review.br1.ordersHash, settlement!, settlementDraft),
+        )
       }
       // SAY SO. The screen used to simply vanish back to the queue, which is the most common
       // "did that actually work?" moment in the product and it had no answer.
       toast.success(`${t.approval.approved}${who.driver ? ` — ${who.driver}` : ''}`)
       onDone()
     } catch (err) {
-      // 409 = orders changed since this screen loaded; reload so the manager reviews the truth.
+      // Either hash changing means the money changed after these confirmations. Reload both the
+      // operations and the settlement, then require two fresh ticks against the new snapshot.
       const code = (err as { error?: string }).error
-      if (code === 'orders_changed_since_review') {
+      if (code === 'orders_changed_since_review' || code === 'settlement_changed_since_review') {
         setError(code)
         load()
       } else {
         setError(code ?? 'error')
       }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function forceApprove(): Promise<void> {
+    if (!review || !settlement || !forcePrepared || !closeSettlementReady || notes.trim() === '') return
+    if (unresolvedWindowCount > 0) return
+    const ok = await confirm({
+      title: t.approval.confirmForceCloseTitle,
+      body:
+        `${who.driver ?? ''} · ${t.settlement.walletAction[settlement.walletAction]}: ` +
+        `${groupThousands(settlement.walletAmount)} · ${t.settlement.cashAction[settlement.cashAction]}: ` +
+        groupThousands(settlement.cashAmount),
+      confirmLabel: t.approval.forceApprove,
+    })
+    if (!ok) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api.forceCloseShift(review.id, {
+        reason: notes.trim(),
+        cashDeclared: settlement.actualCash,
+        walletDeclared: settlement.actualWallet,
+        reviewedSettlementHash: settlement.settlementHash,
+        walletTransferConfirmed: true,
+        cashSettlementConfirmed: true,
+      })
+      toast.success(`${t.approval.approved} — ${who.driver ?? ''}`)
+      onDone()
+    } catch (err) {
+      const code = (err as { error?: string }).error
+      setError(code ?? 'error')
+      if (code === 'orders_changed_since_review' || code === 'settlement_changed_since_review') load()
     } finally {
       setBusy(false)
     }
@@ -645,76 +734,145 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       </Card>
       ) : null}
 
-      {/* ── «كشف التسوية» — where tonight's cash goes. READ-ONLY: it posts nothing ────────
-          Sits directly under the BR1 verdict because the two answer consecutive questions: BR1
-          says whether the money adds up, this says where it then goes. */}
+      {/* The physical handover comes immediately after BR1: first what to transfer, then why. */}
       {settlement ? (
         <Card title={t.settlement.title}>
           <p className="text-xs text-slate-600">{t.settlement.hint}</p>
 
-          {hasDeductionSettlement ? (
-            <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
-              <p className="text-xs font-semibold text-amber-900">{operationCopy.deductionSettlement}</p>
-              <div className="mt-2 grid grid-cols-2 gap-2 lg:grid-cols-4">
-                {(
-                  [
-                    [operationCopy.grossShare, deductionSettlement.grossShare],
-                    [operationCopy.cashDeductionTotal, deductionSettlement.total],
-                    [operationCopy.netShare, deductionSettlement.netShare],
-                    [operationCopy.cashReceivable, deductionSettlement.receivable],
-                  ] as const
-                ).flatMap(([label, value]) =>
-                  value === null
-                    ? []
-                    : [
-                        <div key={label} className="rounded-md bg-white p-2">
-                          <div className="text-xs text-slate-500">{label}</div>
-                          <Money value={value} className="mt-1 block text-lg font-bold" />
-                        </div>,
-                      ],
-                )}
+          <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+            <div
+              className={`rounded-xl border-2 p-4 ${
+                settlement.walletAction === 'collect'
+                  ? 'border-sky-300 bg-sky-50'
+                  : settlement.walletAction === 'fund'
+                    ? 'border-amber-300 bg-amber-50'
+                    : 'border-emerald-300 bg-emerald-50'
+              }`}
+            >
+              <p className="text-xs font-bold text-slate-600">{t.settlement.walletInstruction}</p>
+              <p className="mt-1 text-base font-bold text-slate-900">
+                {t.settlement.walletAction[settlement.walletAction]}
+              </p>
+              <Money value={settlement.walletAmount} className="mt-2 block text-3xl font-extrabold text-sky-800" />
+            </div>
+            <div
+              className={`rounded-xl border-2 p-4 ${
+                settlement.cashAction === 'collect'
+                  ? 'border-emerald-300 bg-emerald-50'
+                  : settlement.cashAction === 'pay'
+                    ? 'border-amber-300 bg-amber-50'
+                    : 'border-slate-300 bg-slate-50'
+              }`}
+            >
+              <p className="text-xs font-bold text-slate-600">{t.settlement.cashInstruction}</p>
+              <p className="mt-1 text-base font-bold text-slate-900">
+                {t.settlement.cashAction[settlement.cashAction]}
+              </p>
+              <Money
+                value={settlement.cashAmount}
+                className={`mt-2 block text-3xl font-extrabold ${
+                  settlement.cashAction === 'pay' ? 'text-amber-800' : 'text-emerald-800'
+                }`}
+              />
+            </div>
+          </div>
+
+          <div className="mt-4 rounded-lg border border-slate-200 bg-white p-3">
+            <p className="text-sm font-bold text-slate-800">{t.settlement.breakdown}</p>
+            <div className="mt-2 grid grid-cols-1 gap-x-6 gap-y-1 md:grid-cols-2">
+              {(
+                [
+                  ['deliveryFeeTotal', settlement.deliveryFeeTotal],
+                  ['fixedDriverShare', settlement.fixedDriverShare],
+                  ['manualDriverShare', settlement.manualDriverShare],
+                  ['grossDriverShare', settlement.grossDriverShare],
+                  ['cashDeductionTotal', settlement.cashDeductionTotal],
+                  ['baseDriverShare', settlement.baseDriverShare],
+                  ['expectedTotal', settlement.expectedTotal],
+                  ['actualTotal', settlement.actualTotal],
+                ] as const
+              ).map(([key, value]) => (
+                <div key={key} className="flex items-baseline gap-2 border-b border-slate-100 py-1 text-sm">
+                  <span className="text-slate-600">{t.settlement[key]}</span>
+                  <Money value={value} className="ms-auto font-semibold text-slate-900" />
+                </div>
+              ))}
+              <div
+                className={`flex items-baseline gap-2 border-b py-1 text-sm font-bold md:col-span-2 ${
+                  settlement.varianceDirection === 'surplus'
+                    ? 'border-emerald-200 text-emerald-800'
+                    : settlement.varianceDirection === 'shortage'
+                      ? 'border-red-200 text-red-800'
+                      : 'border-slate-100 text-slate-700'
+                }`}
+              >
+                <span>{t.settlement.varianceDirection[settlement.varianceDirection]}</span>
+                <Money value={settlementVarianceMagnitude(settlement)} className="ms-auto text-lg" />
               </div>
+              <div className="flex items-baseline gap-2 pt-2 text-base font-extrabold md:col-span-2">
+                <span>{t.settlement.finalEmployeeCash}</span>
+                <Money
+                  value={settlement.finalEmployeeCash}
+                  className={`ms-auto text-2xl ${
+                    parseMinor(settlement.finalEmployeeCash) < 0n ? 'text-red-700' : 'text-brand'
+                  }`}
+                />
+              </div>
+            </div>
+          </div>
+
+          {settlementHasVariance(settlement) && !forcePrepared ? (
+            <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3">
+              <label className="text-sm font-bold text-amber-950" htmlFor="settlement-variance-reason">
+                {t.settlement.varianceReason}
+              </label>
+              <textarea
+                id="settlement-variance-reason"
+                value={varianceReason}
+                onChange={(event) => setVarianceReason(event.target.value)}
+                disabled={busy}
+                maxLength={500}
+                rows={2}
+                className="mt-2 w-full rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/15"
+                placeholder={t.settlement.varianceReasonPlaceholder}
+              />
+              {varianceReason.trim() === '' ? (
+                <p className="mt-1 text-xs font-medium text-red-700">{t.settlement.varianceReasonRequired}</p>
+              ) : null}
             </div>
           ) : null}
 
-          {/* The three figures the owner asked for, biggest first — «كم يجب ان يسحب و يدخل
-              للصندوق وكم يجب ان يعاد للسائق». */}
-          <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
-            {(
-              [
-                ['toOfficeCash', settlement.toOfficeCash, 'text-emerald-700'],
-                ['paidToDriver', settlement.paidToDriver, 'text-slate-900'],
-                ['keptAsReceivable', settlement.keptAsReceivable, 'text-amber-700'],
-              ] as const
-            ).map(([key, value, tone]) => (
-              <div key={key} className="rounded-lg border border-slate-200 p-3">
-                <div className="text-xs font-semibold text-slate-500">{t.settlement[key]}</div>
-                <Money value={value} className={`mt-1 block text-2xl font-bold ${tone}`} />
-              </div>
-            ))}
-          </div>
-
-          {/* Every line that carries a figure, so the three totals above are never a claim the
-              manager has to take on trust. */}
-          <div className="mt-3 flex flex-col gap-1 border-t border-slate-100 pt-3">
-            {settlement.lines.map((l) => (
-              <div key={l.code} className="flex items-baseline gap-2 text-sm">
-                <span className="text-slate-700">
-                  {t.settlement.line[l.code as keyof typeof t.settlement.line] ?? l.code}
-                </span>
-                <Money value={l.amount} className="ms-auto font-semibold" />
-              </div>
-            ))}
-          </div>
-
-          {settlement.refusals.length > 0 ? (
-            <div className="mt-3 flex flex-col gap-1">
-              {settlement.refusals.map((r) => (
-                <p key={r} className="text-sm font-medium text-red-700">
-                  {t.settlement.refusal[r as keyof typeof t.settlement.refusal] ?? r}
-                </p>
-              ))}
-            </div>
+          <fieldset className="mt-4 flex flex-col gap-2" disabled={busy}>
+            <legend className="mb-1 text-sm font-bold text-slate-800">{t.settlement.confirmationsTitle}</legend>
+            <label className="flex min-h-12 cursor-pointer items-center gap-3 rounded-lg border border-slate-200 p-3 text-sm font-semibold text-slate-800">
+              <input
+                type="checkbox"
+                checked={walletTransferConfirmed}
+                onChange={(event) => setWalletTransferConfirmed(event.target.checked)}
+                className="size-5 shrink-0 accent-emerald-600"
+              />
+              <span>{t.settlement.walletConfirmed}</span>
+            </label>
+            <label className="flex min-h-12 cursor-pointer items-center gap-3 rounded-lg border border-slate-200 p-3 text-sm font-semibold text-slate-800">
+              <input
+                type="checkbox"
+                checked={cashSettlementConfirmed}
+                onChange={(event) => setCashSettlementConfirmed(event.target.checked)}
+                className="size-5 shrink-0 accent-emerald-600"
+              />
+              <span>{t.settlement.cashConfirmed}</span>
+            </label>
+          </fieldset>
+        </Card>
+      ) : isClose ? (
+        <Card title={t.settlement.title}>
+          <p className="text-sm font-medium text-red-700">
+            {settlementLoadError ? explainError(settlementLoadError, t) : t.settlement.loading}
+          </p>
+          {settlementLoadError ? (
+            <Button variant="ghost" className="mt-3" onClick={load} disabled={busy}>
+              {t.common.retry}
+            </Button>
           ) : null}
         </Card>
       ) : null}
@@ -778,7 +936,9 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
               {' · '}{review.endPackage.odometerAnomalyConfirmedBy ?? '—'}
             </p>
           ) : null}
-          {isClose ? <ReviseFigures shiftId={review.id} review={review} onRevised={load} /> : null}
+          {isClose && !forcePrepared ? (
+            <ReviseFigures shiftId={review.id} review={review} onRevised={load} />
+          ) : null}
           {/* Both close readers now preserve their baseline; a manual correction remains visible. */}
           <OcrDeltaLines
             deltas={[
@@ -1037,7 +1197,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         </Table>
 
         {/* The payments log is deliberately read-only here. It remains useful evidence, but its
-            rows do not change BR1, order fees, tier/share calculations or ledger postings. */}
+            rows do not change BR1, order fees, the fixed share or ledger postings. */}
         {review.movements.length > 0 ? (
           <div className="mt-4">
             <p className="mb-1 text-sm font-semibold">{t.shift.paymentsLog}</p>
@@ -1104,23 +1264,47 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         >
           {/* WHY the button is dead. A 40%-opacity ghost with no explanation is how a manager
               concludes the console is broken and goes looking for a way around the gate. */}
-          {isClose && !review.br1.balanced ? (
-            <p className="mb-2 text-sm font-medium text-red-700">{t.approval.cannotApproveUnbalanced}</p>
+          {isClose && !settlement ? (
+            <p className="mb-2 text-sm font-medium text-red-700">{t.settlement.unavailable}</p>
+          ) : null}
+          {isClose && settlement && (!walletTransferConfirmed || !cashSettlementConfirmed) ? (
+            <p className="mb-2 text-sm font-medium text-amber-800">{t.settlement.confirmBeforeApproval}</p>
+          ) : null}
+          {isClose && settlement && settlementHasVariance(settlement) && settlementDraft.varianceReason.trim() === '' ? (
+            <p className="mb-2 text-sm font-medium text-red-700">{t.settlement.varianceReasonRequired}</p>
           ) : null}
           {isClose && unresolvedWindowCount > 0 ? (
             <p className="mb-2 text-sm font-medium text-amber-800">
               {operationCopy.cannotApproveUnknown.replace('{n}', String(unresolvedWindowCount))}
             </p>
           ) : null}
+          {isClose && forcePrepared && settlementDraft.varianceReason.trim() === '' ? (
+            <p className="mb-2 text-sm font-medium text-red-700">{t.approval.forceReasonRequired}</p>
+          ) : null}
+          {isClose && forcePrepared ? (
+            <p className="mb-2 text-sm font-medium text-amber-800">{t.approval.forcePreparedHint}</p>
+          ) : null}
           <div className="flex flex-wrap gap-3">
-            <Button
-              variant="success"
-              disabled={busy || (isClose && (!review.br1.balanced || unresolvedWindowCount > 0))}
-              onClick={approve}
-              className="flex-1"
-            >
-              {isClose ? t.approval.approveClose : t.common.approve}
-            </Button>
+            {isClose && forcePrepared ? null : (
+              <Button
+                variant="success"
+                disabled={busy || (isClose && (unresolvedWindowCount > 0 || !closeSettlementReady))}
+                onClick={approve}
+                className="flex-1"
+              >
+                {isClose ? t.approval.approveClose : t.common.approve}
+              </Button>
+            )}
+            {isClose && forcePrepared ? (
+              <Button
+                variant="danger"
+                disabled={busy || unresolvedWindowCount > 0 || !closeSettlementReady || notes.trim() === ''}
+                onClick={forceApprove}
+                className="flex-1"
+              >
+                {t.approval.forceApprove}
+              </Button>
+            ) : null}
             {/* Re-shoot is legal on both gates. */}
             <Button variant="ghost" disabled={busy} onClick={() => decide('request-rephoto')}>
               {t.approval.requestRetake}
@@ -1172,11 +1356,6 @@ interface OperationReviewCopy {
   saveTiming: string
   manualOutsideWindow: string
   cannotApproveUnknown: string
-  deductionSettlement: string
-  grossShare: string
-  cashDeductionTotal: string
-  netShare: string
-  cashReceivable: string
   statuses: Record<OperationWindowStatus, string>
 }
 
@@ -1197,7 +1376,7 @@ function operationReviewCopy(lang: 'ar' | 'en'): OperationReviewCopy {
       cashDeductionHint:
         'These are not orders or wallet movements. Each included amount reduces expected cash and the driver’s share.',
       paymentsLogArchiveHint:
-        'Optional archive only. These rows do not change orders, BR1, tiers, shares or ledger postings.',
+        'Optional archive only. These rows do not change orders, BR1, the 40% employee share or ledger postings.',
       included: 'Included',
       excluded: 'Excluded',
       time: 'Date / time',
@@ -1213,11 +1392,6 @@ function operationReviewCopy(lang: 'ar' | 'en'): OperationReviewCopy {
       saveTiming: 'Save timing',
       manualOutsideWindow: 'Manager-entered · outside auto-classification',
       cannotApproveUnknown: 'Approval is blocked: resolve {n} operation time(s).',
-      deductionSettlement: 'Effect of cash deductions on this shift’s share',
-      grossShare: 'Gross driver share',
-      cashDeductionTotal: 'Cash deduction',
-      netShare: 'Net driver share',
-      cashReceivable: 'Cash receivable beyond share',
       statuses: {
         in_window: 'Inside window',
         pre_open: 'Before open',
@@ -1242,7 +1416,7 @@ function operationReviewCopy(lang: 'ar' | 'en'): OperationReviewCopy {
     cashDeductions: 'الحسومات النقدية',
     cashDeductionHint: 'ليست طلبات ولا حركات محفظة. كل حسم مشمول ينقص الكاش المتوقع وحصة السائق.',
     paymentsLogArchiveHint:
-      'أرشيف اختياري فقط. هذه الصفوف لا تغيّر الطلبات أو BR1 أو الشريحة أو الحصص أو الدفتر.',
+      'أرشيف اختياري فقط. هذه الصفوف لا تغيّر الطلبات أو BR1 أو حصة الموظف الثابتة 40% أو الدفتر.',
     included: 'مشمول',
     excluded: 'مستبعد',
     time: 'التاريخ / الوقت',
@@ -1258,11 +1432,6 @@ function operationReviewCopy(lang: 'ar' | 'en'): OperationReviewCopy {
     saveTiming: 'حفظ التوقيت',
     manualOutsideWindow: 'طلب مدير · خارج التصنيف الآلي',
     cannotApproveUnknown: 'الاعتماد متوقف: يجب حسم توقيت {n} عملية.',
-    deductionSettlement: 'أثر الحسومات النقدية على حصة هذه النوبة',
-    grossShare: 'الحصة الإجمالية للسائق',
-    cashDeductionTotal: 'الحسم النقدي',
-    netShare: 'صافي حصة السائق',
-    cashReceivable: 'ذمّة كاش تتجاوز الحصة',
     statuses: {
       in_window: 'داخل النافذة',
       pre_open: 'قبل الفتح',
@@ -1498,7 +1667,7 @@ interface PointDraft {
  * Add an order to a shift, of either kind.
  *
  * A YALLAGO order is a reconciliation — the «missing order» BR1 ranked — and needs only its number,
- * pay mode and fee; its split is the day's tier band, computed at approval.
+ * pay mode and fee; its employee share is the fixed 40%, computed at approval.
  *
  * A MANUAL order is the branch's own job. Yallago takes nothing from it, so the fee is divided
  * between the driver and the company by agreement, and BOTH shares are typed. They must add up to

@@ -308,6 +308,13 @@ export interface TransitionContext {
    */
   readonly splitGate?: 'advisory' | 'strict'
   /**
+   * The application has re-derived the fixed-40 settlement inside the approval transaction,
+   * matched its review hash, and verified the manager's wallet/cash confirmations (plus the
+   * variance reason when required). Only that stronger proof may settle a non-zero BR1; merely
+   * passing `true` from an untrusted request is never sufficient.
+   */
+  readonly settlementConfirmed?: boolean
+  /**
    * The orders hash the manager reviewed. If the driver edited an order in the meantime this
    * will not match, and approving would post against numbers nobody actually reviewed.
    */
@@ -408,8 +415,17 @@ export function transition(
     const gaps = ctx.endPackage ? endPackageGaps(ctx.endPackage) : [{ kind: 'missing_value' as const, field: 'endPackage' }]
     if (gaps.length > 0) return { ok: false, reason: 'end_package_incomplete', gaps }
 
-    if (!ctx.br1?.balanced) return { ok: false, reason: 'br1_not_zero' }
-    if ((ctx.splitGate ?? 'advisory') === 'strict' && !ctx.br1.splitBalanced) {
+    // A settlement confirmation does not replace BR1 evaluation; it only proves that an observed
+    // difference was reviewed and physically settled through the full-wallet/cash workflow.
+    if (!ctx.br1) return { ok: false, reason: 'br1_not_zero' }
+    if (!ctx.br1.balanced && ctx.settlementConfirmed !== true) {
+      return { ok: false, reason: 'br1_not_zero' }
+    }
+    if (
+      (ctx.splitGate ?? 'advisory') === 'strict' &&
+      !ctx.br1.splitBalanced &&
+      ctx.settlementConfirmed !== true
+    ) {
       return { ok: false, reason: 'br1_split_mismatch' }
     }
 

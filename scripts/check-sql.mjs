@@ -26,6 +26,8 @@ const MUST_AUDIT = [
   'funds', 'fx_days', 'week_locks', 'journal_entries', 'journal_lines',
   'cash_counts', 'expenses',
   'shifts', 'shift_orders', 'cash_deductions', 'shift_media', 'float_tranches', 'tier_rules',
+  // Decision-complete cash/wallet close snapshots. Append-only, but creation is a money decision.
+  'shift_settlements',
   // Renumbering a type restates the printed code of every vehicle of that type; a pack moving
   // between bikes is an asset transfer; a corrected reading changes evidence already approved.
   'vehicle_types', 'batteries', 'shift_battery_readings',

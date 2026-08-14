@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { fundCodeOf } from '@ash/adapters/memory'
-import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
+import {
+  DRIVER_ID,
+  type Harness,
+  VEHICLE_ID,
+  approveFixedClose,
+  fixedApprovalPayload,
+  makeHarness,
+  sypStr,
+} from './harness.ts'
 
 /**
  * The full shift lifecycle over real HTTP, via fastify.inject() — no network, no database.
@@ -132,12 +140,7 @@ describe('the SRS §2.3 shift, end to end over HTTP', () => {
     const hash = review.json().br1.ordersHash as string
 
     // ── The manager approves ──────────────────────────────────────────────────────────────
-    const closed = await h.app.inject({
-      method: 'POST',
-      url: `/shifts/${shiftId}/approve-close`,
-      headers: { cookie: h.cookie(manager) },
-      payload: { reviewedOrdersHash: hash },
-    })
+    const closed = await approveFixedClose(h, manager, shiftId, hash)
     expect(closed.statusCode, closed.body).toBe(200)
     expect(closed.json().state).toBe('approved')
 
@@ -146,8 +149,9 @@ describe('the SRS §2.3 shift, end to end over HTTP', () => {
 
     // Yallago's 20% actually left the wallet.
     expect(await balance('yalago_share')).toBe(2_000_000n) // 20,000 new SYP
-    // The tier split at 20 orders → 40% driver, 40% company.
-    expect(await balance(fundCodeOf({ kind: 'driver_share_payable', driverId: DRIVER_ID }))).toBe(-4_000_000n)
+    // Fixed split is 40% driver / 40% company, and the driver's share is settled immediately.
+    expect((await h.deps.settlements.findByShift(shiftId))?.fixedDriverShare).toBe(4_000_000n)
+    expect(await balance(fundCodeOf({ kind: 'driver_share_payable', driverId: DRIVER_ID }))).toBe(0n)
     expect(await balance('company_revenue')).toBe(-4_000_000n)
     expect(await balance('yalago_income')).toBe(-2_000_000n)
     // Revenue fully allocated; the driver holds nothing after the daily returns.
@@ -185,9 +189,10 @@ describe('the SRS §2.3 shift, end to end over HTTP', () => {
     })
     const hash = review.json().br1.ordersHash
 
+    const approvalPayload = await fixedApprovalPayload(h, manager, shiftId, hash)
     const first = await h.app.inject({
       method: 'POST', url: `/shifts/${shiftId}/approve-close`,
-      headers: { cookie: h.cookie(manager) }, payload: { reviewedOrdersHash: hash },
+      headers: { cookie: h.cookie(manager) }, payload: approvalPayload,
     })
     expect(first.statusCode).toBe(200)
     const entriesAfterFirst = h.deps.ledger.entries.length
@@ -196,18 +201,17 @@ describe('the SRS §2.3 shift, end to end over HTTP', () => {
     // A retry, a double-click, or two managers racing.
     const second = await h.app.inject({
       method: 'POST', url: `/shifts/${shiftId}/approve-close`,
-      headers: { cookie: h.cookie(manager) }, payload: { reviewedOrdersHash: hash },
+      headers: { cookie: h.cookie(manager) }, payload: approvalPayload,
     })
-    // The state machine refuses the second transition outright...
-    expect(second.statusCode).toBe(422)
-    // ...and even if it had not, the idempotency key would have stopped the postings.
+    // An exact confirmed replay succeeds without writing a second snapshot or journal batch.
+    expect(second.statusCode).toBe(200)
     expect(h.deps.ledger.entries.length).toBe(entriesAfterFirst)
     expect(await h.deps.ledger.fundBalance('branch-damascus', 'company_revenue')).toBe(companyAfterFirst)
   })
 })
 
-describe('the tier table drives real pay (F wired into the C close)', () => {
-  it('a published table pays the CONFIGURED rate, not the F-1 default', async () => {
+describe('published tier history cannot change the active fixed policy', () => {
+  it('pays fixed 40% even when an old published table says 50%', async () => {
     // A flat driver-50% table, effective before today — seeded like the go-live bootstrap installs
     // the F-1 default (the admin publish route refuses a PAST effective date, F-3, so a rule that
     // already governs today comes from the seed, not a fresh publish).
@@ -233,20 +237,13 @@ describe('the tier table drives real pay (F wired into the C close)', () => {
     })
     const review = await h.app.inject({ method: 'GET', url: `/shifts/${shiftId}/review`, headers: { cookie: h.cookie(manager) } })
     const hash = review.json().br1.ordersHash
-    const closed = await h.app.inject({
-      method: 'POST',
-      url: `/shifts/${shiftId}/approve-close`,
-      headers: { cookie: h.cookie(manager) },
-      payload: { reviewedOrdersHash: hash },
-    })
+    const closed = await approveFixedClose(h, manager, shiftId, hash)
     expect(closed.statusCode, closed.body).toBe(200)
 
     const balance = (code: string) => h.deps.ledger.fundBalance('branch-damascus', code)
-    // Driver 50% of 100,000 fees = 50,000; Yallago's 20% stays fixed = 20,000; the company absorbs
-    // the rest = 30,000. Under the DEFAULT table (40% at 20 orders) the driver would be 40,000 —
-    // that this figure moved is the whole point: the configured table now changes real pay.
-    expect(await balance(fundCodeOf({ kind: 'driver_share_payable', driverId: DRIVER_ID }))).toBe(-5_000_000n)
-    expect(await balance('company_revenue')).toBe(-3_000_000n)
+    expect((await h.deps.settlements.findByShift(shiftId))?.fixedDriverShare).toBe(4_000_000n)
+    expect(await balance(fundCodeOf({ kind: 'driver_share_payable', driverId: DRIVER_ID }))).toBe(0n)
+    expect(await balance('company_revenue')).toBe(-4_000_000n)
     expect(await balance('yalago_income')).toBe(-2_000_000n)
   })
 })
@@ -294,7 +291,7 @@ describe('the gates refuse what BR5 says they must (AC #1, #2)', () => {
     expect(res.json().error).toBe('shift_not_open')
   })
 
-  it('will not close when the equation is not zero, and says why', async () => {
+  it('submits and settles when the equation is not zero, while still explaining the difference', async () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
     const shiftId = await openShift(driver, manager)
@@ -319,13 +316,12 @@ describe('the gates refuse what BR5 says they must (AC #1, #2)', () => {
     // The manager is told where to look, not merely that something is wrong.
     expect(br1.causes[0].code).toBe('cash_handover_mismatch')
 
-    const res = await h.app.inject({
-      method: 'POST', url: `/shifts/${shiftId}/approve-close`,
-      headers: { cookie: h.cookie(manager) }, payload: { reviewedOrdersHash: br1.ordersHash },
+    expect(review.json().state).toBe('pending_review')
+    const res = await approveFixedClose(h, manager, shiftId, br1.ordersHash, {
+      varianceReason: 'cash counted with the driver',
     })
-    expect(res.statusCode).toBe(422)
-    expect(res.json().error).toBe('br1_not_zero')
-    expect(h.deps.ledger.entries.filter((e) => e.eventType === 'share_split')).toHaveLength(0)
+    expect(res.statusCode, res.body).toBe(200)
+    expect((await h.deps.settlements.findByShift(shiftId))?.variance).toBe(-500_000n)
   })
 
   it('refuses approval when the driver edited an order after the manager loaded the screen', async () => {
@@ -346,11 +342,7 @@ describe('the gates refuse what BR5 says they must (AC #1, #2)', () => {
     })
     const staleHash = review.json().br1.ordersHash
 
-    const res = await h.app.inject({
-      method: 'POST', url: `/shifts/${shiftId}/approve-close`,
-      headers: { cookie: h.cookie(manager) },
-      payload: { reviewedOrdersHash: `${staleHash}-stale` },
-    })
+    const res = await approveFixedClose(h, manager, shiftId, `${staleHash}-stale`)
     expect(res.statusCode).toBe(409)
     expect(res.json().error).toBe('orders_changed_since_review')
   })
@@ -414,7 +406,7 @@ describe('the pay-mode blind spot, over HTTP', () => {
     expect(br1.causes[0].candidateOrderNos.length).toBeGreaterThan(0)
   })
 
-  it('advisory lets it through; strict blocks it', async () => {
+  it('a confirmed cash/wallet settlement supersedes the legacy strict split gate', async () => {
     const strict = await makeHarness({ splitGate: 'strict' })
     try {
       const driver = await strict.loginAs('driver1')
@@ -451,12 +443,13 @@ describe('the pay-mode blind spot, over HTTP', () => {
       const review = await strict.app.inject({
         method: 'GET', url: `/shifts/${id}/review`, headers: { cookie: strict.cookie(manager) },
       })
+      const approvalPayload = await fixedApprovalPayload(strict, manager, id, review.json().br1.ordersHash)
       const res = await strict.app.inject({
         method: 'POST', url: `/shifts/${id}/approve-close`, headers: { cookie: strict.cookie(manager) },
-        payload: { reviewedOrdersHash: review.json().br1.ordersHash },
+        payload: approvalPayload,
       })
-      expect(res.statusCode).toBe(422)
-      expect(res.json().error).toBe('br1_split_mismatch')
+      expect(res.statusCode, res.body).toBe(200)
+      expect((await strict.deps.settlements.findByShift(id))?.variance).toBe(0n)
     } finally {
       await strict.app.close()
     }

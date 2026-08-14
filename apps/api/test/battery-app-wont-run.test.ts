@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
+import { DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr } from './harness.ts'
 
 /**
  * «تطبيق البطارية لا يعمل على جهازي».
@@ -240,9 +240,7 @@ describe('a pack the driver cannot read on his own phone', () => {
       if (count === 1) {
         const review = await get(manager, `/shifts/${id}/review`)
         expect(review.statusCode, review.body).toBe(200)
-        const refused = await post(manager, `/shifts/${id}/approve-close`, {
-          reviewedOrdersHash: review.json().br1.ordersHash,
-        })
+        const refused = await approveFixedClose(h, manager, id, review.json().br1.ordersHash)
         expect(refused.statusCode, refused.body).toBe(422)
         expect(refused.json().detail).toContainEqual({ kind: 'awaiting_manager_reading', slotNo: 1 })
 
@@ -251,9 +249,7 @@ describe('a pack the driver cannot read on his own phone', () => {
           readings: [{ batteryId: batteryIds[0], percent: 42, unavailable: true }],
         })
         expect(supplied.statusCode, supplied.body).toBe(200)
-        const approved = await post(manager, `/shifts/${id}/approve-close`, {
-          reviewedOrdersHash: review.json().br1.ordersHash,
-        })
+        const approved = await approveFixedClose(h, manager, id, review.json().br1.ordersHash)
         expect(approved.statusCode, approved.body).toBe(200)
         expect(approved.json().state).toBe('approved')
       }

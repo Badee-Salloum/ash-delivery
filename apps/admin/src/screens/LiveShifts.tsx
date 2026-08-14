@@ -2,6 +2,9 @@ import { type ReactNode, useCallback, useEffect, useState, useRef } from 'react'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { explainLiveShiftActionError, type LiveShiftApiError } from '../live-shift-error.ts'
+import {
+  forceClosePreparationReady,
+} from '../settlement-review.ts'
 import { Badge, Button, Card, Field, MoneyInput, Pending, Select, TextInput } from '../ui.tsx'
 
 interface ShiftRow {
@@ -149,8 +152,33 @@ function LiveRow({
   const [odometerKm, setOdometerKm] = useState('')
   const [cashDeclared, setCashDeclared] = useState('')
   const [walletDeclared, setWalletDeclared] = useState('')
+  const [forcePrefillFailed, setForcePrefillFailed] = useState(false)
+  const forceValuesEdited = useRef(false)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<LiveShiftApiError | null>(null)
+  const forceCloseReady = forceClosePreparationReady(cashDeclared, walletDeclared)
+
+  // A partially completed driver close may already contain real counted figures. Bring those
+  // forward before asking the manager to type them again, but never overwrite a value the manager
+  // starts editing while this request is in flight.
+  useEffect(() => {
+    if (panel !== 'forceClose') return
+    let cancelled = false
+    setForcePrefillFailed(false)
+    void api
+      .get<{ endPackage: { cashDeclared: string | null; walletDeclared: string | null } }>(`/shifts/${shift.id}/review`)
+      .then((review) => {
+        if (cancelled || forceValuesEdited.current) return
+        setCashDeclared(review.endPackage.cashDeclared ?? '')
+        setWalletDeclared(review.endPackage.walletDeclared ?? '')
+      })
+      .catch(() => {
+        if (!cancelled) setForcePrefillFailed(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [api, panel, shift.id])
 
   const suspend = async (): Promise<void> => {
     setBusy(true)
@@ -211,6 +239,7 @@ function LiveRow({
   }
 
   const forceClose = async (): Promise<void> => {
+    if (!forceCloseReady) return
     const parsedOdometer = odometerKm.trim() === '' ? null : Number(odometerKm)
     const anomalousOdometer =
       parsedOdometer !== null &&
@@ -222,20 +251,17 @@ function LiveRow({
     setErr(null)
     try {
       await api.forceCloseShift(shift.id, {
+        prepareOnly: true,
         reason: reason.trim(),
         odometerKm: parsedOdometer,
         odometerAnomalyConfirmed: anomalousOdometer,
-        cashDeclared: cashDeclared.trim() === '' ? null : cashDeclared,
-        walletDeclared: walletDeclared.trim() === '' ? null : walletDeclared,
+        cashDeclared: cashDeclared.trim(),
+        walletDeclared: walletDeclared.trim(),
       })
-      setPanel('none')
-      setReason('')
-      setOdometerKm('')
-      setCashDeclared('')
-      setWalletDeclared('')
-      onChanged()
+      onOpen(shift.id)
     } catch (e) {
-      setErr(e as LiveShiftApiError)
+      const error = e as LiveShiftApiError
+      setErr(error)
     } finally {
       setBusy(false)
     }
@@ -243,6 +269,14 @@ function LiveRow({
 
   const toggle = (p: 'suspend' | 'tranche' | 'void' | 'forceClose'): void => {
     setErr(null)
+    if (p === 'forceClose') {
+      setForcePrefillFailed(false)
+      if (panel !== 'forceClose') {
+        forceValuesEdited.current = false
+        setCashDeclared('')
+        setWalletDeclared('')
+      }
+    }
     setPanel((cur) => (cur === p ? 'none' : p))
   }
 
@@ -350,19 +384,43 @@ function LiveRow({
           </Field>
           <div className="flex flex-wrap gap-2">
             <Field label={t.liveShifts.cashDeclared}>
-              <MoneyInput value={cashDeclared} onChange={(e) => setCashDeclared(e.target.value)} placeholder={t.liveShifts.expectedPlaceholder} />
+              <MoneyInput
+                value={cashDeclared}
+                onChange={(e) => {
+                  forceValuesEdited.current = true
+                  setCashDeclared(e.target.value)
+                }}
+                placeholder={t.liveShifts.requiredPlaceholder}
+              />
             </Field>
             <Field label={t.liveShifts.walletDeclared}>
-              <MoneyInput value={walletDeclared} onChange={(e) => setWalletDeclared(e.target.value)} placeholder={t.liveShifts.expectedPlaceholder} />
+              <MoneyInput
+                value={walletDeclared}
+                onChange={(e) => {
+                  forceValuesEdited.current = true
+                  setWalletDeclared(e.target.value)
+                }}
+                placeholder={t.liveShifts.requiredPlaceholder}
+              />
             </Field>
             <Field label={t.liveShifts.odometerKm}>
               <TextInput inputMode="numeric" value={odometerKm} onChange={(e) => setOdometerKm(e.target.value)} />
             </Field>
           </div>
+          {forcePrefillFailed ? <p className="text-xs text-amber-700">{t.liveShifts.forcePrefillFailed}</p> : null}
+
+          <p className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm text-sky-900">
+            {t.liveShifts.forcePrepareHint}
+          </p>
           {err ? <p className="text-sm text-red-600">{explainLiveShiftActionError(err, 'forceClose', lang, t)}</p> : null}
           <div className="flex gap-2">
-            <Button variant="danger" className="flex-1" disabled={busy || reason.trim() === ''} onClick={forceClose}>
-              {busy ? t.common.loading : t.liveShifts.forceClose}
+            <Button
+              variant="danger"
+              className="flex-1"
+              disabled={busy || reason.trim() === '' || !forceCloseReady}
+              onClick={forceClose}
+            >
+              {busy ? t.common.loading : t.liveShifts.forcePrepare}
             </Button>
             <Button variant="ghost" className="flex-1" onClick={() => setPanel('none')}>
               {t.common.cancel}

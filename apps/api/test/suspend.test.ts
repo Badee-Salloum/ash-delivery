@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BRANCH, DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
+import { BRANCH, DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr } from './harness.ts'
 
 /**
  * Suspended / mid-shift incident (SRS C-1 / س29). A manager puts a live shift on hold; the driver
@@ -54,7 +54,7 @@ async function submitBalancedEnd(driver: string, id: string): Promise<LightMyReq
 
 async function approveClose(manager: string, id: string): Promise<LightMyRequestResponse> {
   const hash = (await get(manager, `/shifts/${id}/review`)).json().br1.ordersHash as string
-  return await post(manager, `/shifts/${id}/approve-close`, { reviewedOrdersHash: hash })
+  return await approveFixedClose(h, manager, id, hash)
 }
 
 describe('suspended shifts (C-1)', () => {

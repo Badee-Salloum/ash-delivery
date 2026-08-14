@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr, today } from './harness.ts'
+import { DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr, today } from './harness.ts'
 
 /**
  * A shift waiting for approval does not stop waiting at midnight.
@@ -99,7 +99,7 @@ describe('the approval queue across dates', () => {
     const id = await pendingReviewOnAnEarlierDay(driver, manager)
 
     const hash = (await get(manager, `/shifts/${id}/review`)).json().br1.ordersHash
-    const approved = await post(manager, `/shifts/${id}/approve-close`, { reviewedOrdersHash: hash })
+    const approved = await approveFixedClose(h, manager, id, hash)
     expect(approved.statusCode).toBe(200)
 
     const pending = (await get(manager, '/shifts?pending=1')).json()

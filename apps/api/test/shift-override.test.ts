@@ -5,8 +5,8 @@ import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harn
 
 /**
  * Upper-level override for a stuck shift a driver can't finish (SRS ops escape hatch). VOID reverses
- * the float/top-up and discards the orders (→ cancelled); FORCE-CLOSE settles it, sending any
- * declared-vs-expected gap to a `shift_variance` cost centre (→ approved). Both are shift.approve.
+ * the float/top-up and discards the orders (→ cancelled); FORCE-CLOSE uses the exact same fixed
+ * settlement preview, full wallet sweep and one cash transaction as ordinary approval.
  */
 
 let h: Harness
@@ -21,6 +21,8 @@ const post = async (token: string, url: string, payload: Record<string, unknown>
   await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(token) }, payload })
 const put = async (token: string, url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
+const get = async (token: string, url: string): Promise<LightMyRequestResponse> =>
+  await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(token) } })
 
 async function openShift(driver: string, manager: string): Promise<string> {
   const id = (await post(driver, '/shifts', { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 })).json().id as string
@@ -42,6 +44,66 @@ const driverWallet = fundCodeOf({ kind: 'driver_wallet', driverId: DRIVER_ID })
 const variance = fundCodeOf({ kind: 'cost_center', costCenterId: 'shift_variance:branch-damascus' })
 const sharePayable = fundCodeOf({ kind: 'driver_share_payable', driverId: DRIVER_ID })
 const receivable = fundCodeOf({ kind: 'driver_receivable_cash', driverId: DRIVER_ID })
+
+async function forceClosePayload(
+  manager: string,
+  id: string,
+  reason: string,
+  cash: number,
+  wallet: number,
+  extra: Record<string, unknown> = {},
+): Promise<Record<string, unknown>> {
+  const settlement = await get(
+    manager,
+    `/shifts/${id}/settlement?actualCash=${encodeURIComponent(sypStr(cash))}&actualWallet=${encodeURIComponent(sypStr(wallet))}`,
+  )
+  expect(settlement.statusCode, settlement.body).toBe(200)
+  return {
+    reason,
+    cashDeclared: sypStr(cash),
+    walletDeclared: sypStr(wallet),
+    reviewedSettlementHash: settlement.json().settlementHash,
+    walletTransferConfirmed: true,
+    cashSettlementConfirmed: true,
+    ...extra,
+  }
+}
+
+async function forceCloseThroughBoundary(
+  manager: string,
+  id: string,
+  reason: string,
+  cash: number,
+  wallet: number,
+  extra: Record<string, unknown> = {},
+): Promise<{ response: LightMyRequestResponse; replayPayload: Record<string, unknown> }> {
+  const beforeLedger = await h.deps.ledger.listByShift(id)
+  const boundary = await post(manager, `/shifts/${id}/force-close`, {
+    prepareOnly: true,
+    reason,
+    cashDeclared: sypStr(cash),
+    walletDeclared: sypStr(wallet),
+    ...extra,
+  })
+  expect(boundary.statusCode, boundary.body).toBe(200)
+  expect(boundary.json()).toMatchObject({ state: 'pending_review', postings: 0, prepared: true })
+  expect(await h.deps.shifts.findById(id)).toMatchObject({
+    state: 'pending_review',
+    submittedAt: expect.any(String),
+    endCashDeclared: BigInt(Math.round(cash * 100)),
+    endWalletDeclared: BigInt(Math.round(wallet * 100)),
+  })
+  expect(await h.deps.decisions.listByShift(id)).toEqual(
+    expect.arrayContaining([expect.objectContaining({ decision: 'force_close_prepared', notes: reason })]),
+  )
+  expect(await h.deps.ledger.listByShift(id)).toEqual(beforeLedger)
+  expect(await h.deps.settlements.findByShift(id)).toBeNull()
+
+  const replayPayload = await forceClosePayload(manager, id, reason, cash, wallet, extra)
+  expect(replayPayload.reviewedSettlementHash).toMatch(/^[0-9a-f]{64}$/)
+  const response = await post(manager, `/shifts/${id}/force-close`, replayPayload)
+  return { response, replayPayload }
+}
 
 /** Every posted entry must balance (AC #5). */
 function assertLedgerBalances(): void {
@@ -89,15 +151,163 @@ describe('shift override (stuck shift)', () => {
     await addOrders(driver, id, 'free', 2)
 
     // The §2.3 expected close: 160,000 cash / 70,000 wallet.
-    const res = await post(manager, `/shifts/${id}/force-close`, { reason: 'lost his phone', cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000) })
+    const { response: res, replayPayload } = await forceCloseThroughBoundary(
+      manager,
+      id,
+      'lost his phone',
+      160_000,
+      70_000,
+    )
     expect(res.statusCode, res.body).toBe(200)
     expect(res.json().state).toBe('approved')
 
     expect(await bal(driverCash)).toBe(0n)
     expect(await bal(driverWallet)).toBe(0n)
+    expect(await bal(sharePayable)).toBe(0n)
     expect(await bal(variance)).toBe(0n) // declared == expected
     expect(await bal('yalago_share')).toBe(2_000_000n) // 20% of 100,000 fees
     assertLedgerBalances()
+
+    const exactRetry = await post(manager, `/shifts/${id}/force-close`, replayPayload)
+    expect(exactRetry.statusCode, exactRetry.body).toBe(200)
+    expect(exactRetry.json()).toMatchObject({ state: 'approved', postings: 0 })
+  })
+
+  it('prepares the force-close boundary without confirmations, then requires the exact confirmed settlement', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await openShift(driver, manager)
+    const reason = 'manager counted the stuck shift in person'
+    const preparedFigures = {
+      odometerKm: 110,
+      cashDeclared: sypStr(100_000),
+      walletDeclared: sypStr(50_000),
+    }
+
+    // Phase one freezes the boundary and actual figures only. Confirming physical handovers against
+    // a pre-boundary preview would be unsafe, so this request deliberately carries no hash/ticks.
+    const prepared = await post(manager, `/shifts/${id}/force-close`, {
+      prepareOnly: true,
+      reason,
+      ...preparedFigures,
+    })
+    expect(prepared.statusCode, prepared.body).toBe(200)
+    expect(prepared.json()).toMatchObject({ state: 'pending_review', postings: 0, prepared: true })
+    expect(await h.deps.shifts.findById(id)).toMatchObject({
+      state: 'pending_review',
+      submittedAt: expect.any(String),
+      endCashDeclared: 10_000_000n,
+      endWalletDeclared: 5_000_000n,
+      odoEnd: 110,
+    })
+    expect(await h.deps.decisions.listByShift(id)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ decision: 'force_close_prepared', notes: reason })]),
+    )
+    expect(await h.deps.settlements.findByShift(id)).toBeNull()
+
+    const revisedAfterPreparation = await post(manager, `/shifts/${id}/close-figures`, {
+      cashDeclared: sypStr(100_001),
+    })
+    expect(revisedAfterPreparation.statusCode, revisedAfterPreparation.body).toBe(409)
+    expect(revisedAfterPreparation.json().error).toBe('force_close_figures_locked')
+    expect(await h.deps.shifts.findById(id)).toMatchObject({
+      endCashDeclared: 10_000_000n,
+      endWalletDeclared: 5_000_000n,
+      odoEnd: 110,
+    })
+
+    const settlement = await get(manager, `/shifts/${id}/settlement`)
+    expect(settlement.statusCode, settlement.body).toBe(200)
+    const review = await get(manager, `/shifts/${id}/review`)
+    expect(review.statusCode, review.body).toBe(200)
+    const ordinaryClose = await post(manager, `/shifts/${id}/approve-close`, {
+      reviewedOrdersHash: review.json().br1.ordersHash,
+      reviewedSettlementHash: settlement.json().settlementHash,
+      walletTransferConfirmed: true,
+      cashSettlementConfirmed: true,
+      varianceReason: reason,
+    })
+    expect(ordinaryClose.statusCode, ordinaryClose.body).toBe(409)
+    expect(ordinaryClose.json().error).toBe('force_close_commit_required')
+
+    const final = {
+      prepareOnly: false,
+      reason,
+      ...preparedFigures,
+      reviewedSettlementHash: settlement.json().settlementHash,
+      walletTransferConfirmed: true,
+      cashSettlementConfirmed: true,
+    }
+    for (const changed of [
+      { ...final, cashDeclared: sypStr(100_001) },
+      { ...final, odometerKm: 111 },
+    ]) {
+      const refused = await post(manager, `/shifts/${id}/force-close`, changed)
+      expect(refused.statusCode, refused.body).toBe(409)
+      expect(refused.json()).toMatchObject({
+        error: 'settlement_changed_since_review',
+        detail: { preparedFiguresChanged: true },
+      })
+    }
+    for (const missing of [
+      'reason',
+      'reviewedSettlementHash',
+      'walletTransferConfirmed',
+      'cashSettlementConfirmed',
+    ] as const) {
+      const invalid = { ...final } as Record<string, unknown>
+      delete invalid[missing]
+      const refused = await post(manager, `/shifts/${id}/force-close`, invalid)
+      expect(refused.statusCode, `${missing}: ${refused.body}`).toBe(400)
+      expect((await h.deps.shifts.findById(id))?.state).toBe('pending_review')
+      expect(await h.deps.settlements.findByShift(id)).toBeNull()
+    }
+
+    const approved = await post(manager, `/shifts/${id}/force-close`, final)
+    expect(approved.statusCode, approved.body).toBe(200)
+    expect(approved.json()).toMatchObject({ state: 'approved', prepared: false })
+
+    const exactRetry = await post(manager, `/shifts/${id}/force-close`, final)
+    expect(exactRetry.statusCode, exactRetry.body).toBe(200)
+    expect(exactRetry.json()).toMatchObject({ state: 'approved', postings: 0, prepared: false })
+
+    for (const changed of [
+      { ...final, cashDeclared: sypStr(100_001) },
+      { ...final, odometerKm: 111 },
+    ]) {
+      const refused = await post(manager, `/shifts/${id}/force-close`, changed)
+      expect(refused.statusCode, refused.body).toBe(409)
+      expect(refused.json()).toMatchObject({
+        error: 'settlement_changed_since_review',
+        detail: { replayFiguresChanged: true },
+      })
+    }
+  })
+
+  it('returns a client validation error for negative actual cash on every close entry point', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await openShift(driver, manager)
+
+    const preview = await get(manager, `/shifts/${id}/settlement?actualCash=-1.00&actualWallet=0.00`)
+    expect(preview.statusCode, preview.body).toBe(400)
+
+    const force = await post(manager, `/shifts/${id}/force-close`, {
+      prepareOnly: true,
+      reason: 'invalid negative count',
+      cashDeclared: '-1.00',
+      walletDeclared: '0.00',
+    })
+    expect(force.statusCode, force.body).toBe(400)
+
+    const endPackage = await put(driver, `/shifts/${id}/end-package`, {
+      odometerKm: 110,
+      batteryPercent: null,
+      cashDeclared: '-1.00',
+      walletDeclared: '0.00',
+    })
+    expect(endPackage.statusCode, endPackage.body).toBe(400)
+    expect((await h.deps.shifts.findById(id))?.state).toBe('open')
   })
 
   /**
@@ -105,8 +315,7 @@ describe('shift override (stuck shift)', () => {
    *
    * This used to book the whole gap to `shift_variance:<branch>`, an account that records THAT
    * money was missing and nothing about WHOSE shift it was. The owner settles it against the man:
-   * his share absorbs it first. Force-close is the only path that admits a gap at all — an ordinary
-   * approval is refused unless BR1 is exactly zero.
+   * his fixed share absorbs it first. Ordinary and exceptional close now use the same function.
    */
   it('FORCE-CLOSE with a cash shortfall takes it from the driver`s share, not a nameless account', async () => {
     const driver = await h.loginAs('driver1')
@@ -117,19 +326,27 @@ describe('shift override (stuck shift)', () => {
     await addOrders(driver, id, 'free', 2)
 
     // The driver handed over 150,000, not the expected 160,000 — a 10,000 shortfall.
-    const res = await post(manager, `/shifts/${id}/force-close`, { reason: 'cash short, driver owes it', cashDeclared: sypStr(150_000), walletDeclared: sypStr(70_000) })
+    const { response: res } = await forceCloseThroughBoundary(
+      manager,
+      id,
+      'cash short, driver owes it',
+      150_000,
+      70_000,
+    )
     expect(res.statusCode, res.body).toBe(200)
 
     expect(await bal(driverCash)).toBe(0n)
-    // The 10,000 came off his share — the payable is reduced by exactly that, and the branch
-    // variance centre carries nothing, because the money is no longer unattributed.
-    expect(await bal(sharePayable)).toBe(-3_000_000n) // 40,000 earned − 10,000 withheld, credit-side
+    expect(await bal(sharePayable)).toBe(0n)
     expect(await bal(variance)).toBe(0n)
+    expect(await h.deps.settlements.findByShift(id)).toMatchObject({
+      variance: -1_000_000n,
+      finalEmployeeCash: 3_000_000n,
+      cashToOffice: 12_000_000n,
+    })
     assertLedgerBalances()
   })
 
-  /** Beyond his whole share it is not forgiven and not a branch loss — it is a ذمة on him. */
-  it('books only the part beyond his entire share as a receivable', async () => {
+  it('collects a shortage beyond his whole share immediately and creates no receivable', async () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
     const id = await openShift(driver, manager)
@@ -138,12 +355,23 @@ describe('shift override (stuck shift)', () => {
     await addOrders(driver, id, 'free', 2)
 
     // 100,000 handed over against 160,000 expected — a 60,000 gap, well past his 40,000 share.
-    const res = await post(manager, `/shifts/${id}/force-close`, { reason: 'large shortfall', cashDeclared: sypStr(100_000), walletDeclared: sypStr(70_000) })
+    const { response: res } = await forceCloseThroughBoundary(
+      manager,
+      id,
+      'large shortfall',
+      100_000,
+      70_000,
+    )
     expect(res.statusCode, res.body).toBe(200)
 
-    expect(await bal(sharePayable)).toBe(0n) // the whole share absorbed
-    expect(await bal(receivable)).toBe(2_000_000n) // the remaining 20,000 is owed
+    expect(await bal(sharePayable)).toBe(0n)
+    expect(await bal(receivable)).toBe(0n)
     expect(await bal(variance)).toBe(0n)
+    expect(await h.deps.settlements.findByShift(id)).toMatchObject({
+      variance: -6_000_000n,
+      finalEmployeeCash: -2_000_000n,
+      cashToOffice: 12_000_000n,
+    })
     assertLedgerBalances()
   })
 
@@ -152,19 +380,26 @@ describe('shift override (stuck shift)', () => {
     const manager = await h.loginAs('manager')
     const id = await openShift(driver, manager)
 
-    const refused = await post(manager, `/shifts/${id}/force-close`, {
-      reason: 'replacement odometer',
-      odometerKm: 90,
-    })
+    const refused = await post(
+      manager,
+      `/shifts/${id}/force-close`,
+      await forceClosePayload(manager, id, 'replacement odometer', 100_000, 50_000, { odometerKm: 90 }),
+    )
     expect(refused.statusCode, refused.body).toBe(422)
     expect(refused.json().error).toBe('odometer_anomaly_confirmation_required')
     expect((await h.deps.shifts.findById(id))?.state).toBe('open')
 
-    const accepted = await post(manager, `/shifts/${id}/force-close`, {
-      reason: 'replacement odometer verified in person',
-      odometerKm: 90,
-      odometerAnomalyConfirmed: true,
-    })
+    const { response: accepted } = await forceCloseThroughBoundary(
+      manager,
+      id,
+      'replacement odometer verified in person',
+      100_000,
+      50_000,
+      {
+        odometerKm: 90,
+        odometerAnomalyConfirmed: true,
+      },
+    )
     expect(accepted.statusCode, accepted.body).toBe(200)
     expect(await h.deps.shifts.findById(id)).toMatchObject({
       state: 'approved',

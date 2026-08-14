@@ -180,7 +180,7 @@ describe('operation sign flips keep one accounting identity', () => {
     })
   })
 
-  it('bulk-converts a legacy deduction into the fifteenth order and uses the 40% tier', async () => {
+  it('bulk-converts a legacy deduction into the fifteenth order and uses fixed 40%', async () => {
     const { id, driver, manager } = await openShift()
     const base = Array.from({ length: 14 }, (_, index) =>
       bulkRow(`BULK-${String(index + 1).padStart(2, '0')}`, 100, `08:${String(index + 10).padStart(2, '0')}`))
@@ -216,12 +216,12 @@ describe('operation sign flips keep one accounting identity', () => {
 
     const ended = await submitEnd(id, driver, 2_500, 700)
     expect(ended.statusCode, ended.body).toBe(200)
-    const settlement = await get(manager, `/shifts/${id}/settlement?payShareNow=false`)
+    const settlement = await get(manager, `/shifts/${id}/settlement`)
     expect(settlement.statusCode, settlement.body).toBe(200)
     expect(settlement.json()).toMatchObject({
       grossDriverShare: '600.00',
       cashDeductionTotal: '0.00',
-      netDriverShare: '600.00',
+      baseDriverShare: '600.00',
     })
   })
 

@@ -5,12 +5,15 @@ import type {
   BatteryRecord,
   BatterySwapRecord,
   CashDeductionRecord,
+  NewShiftSettlementRecord,
+  ShiftSettlementRecord,
   OperationBatch,
   Deps,
   OrderPointRecord,
   DocumentRecord,
   ShiftOrderRecord,
   ShiftCloseTransactionDeps,
+  ShiftDecisionRecord,
   WalletMovementRecord,
   ShiftRecord,
   VehicleEventKind,
@@ -30,7 +33,7 @@ import {
   type DocumentStatus,
   type Minor,
   type Posting,
-  type SettlementPlan,
+  type FixedShareSettlementPlan,
   type ShiftAction,
   type BatteryReading,
   type ShiftOrder,
@@ -41,7 +44,6 @@ import {
   bmsSlot,
   can,
   canOpenShift,
-  closingBalances,
   documentStatusOn,
   diagnoseBr1,
   evaluateBr1,
@@ -51,23 +53,27 @@ import {
   isDateLocked,
   minWalletBalance,
   minor,
-  planSettlement,
-  postingsForApproval,
+  planFixedShareSettlement,
+  postingsForCashSettledApproval,
   postingsForOpen,
   reverse,
   walletReturn,
   walletTopup,
   REQUIRED_END_SLOTS,
   resolveFxDay,
-  splitDay,
+  splitFixedDriverShare,
   sum,
   transition,
-  trueUp,
   weekStartFor,
 } from '@ash/domain'
 import { fundCodeOf } from '@ash/adapters/memory'
 import { grantsFromRows } from './rbac.ts'
-import { resolveTierRule } from './tier-rule.ts'
+import {
+  FIXED_SETTLEMENT_DRIVER_BPS,
+  FIXED_SETTLEMENT_POLICY,
+  fixedSettlementHash,
+  varianceDirection,
+} from './fixed-settlement.ts'
 
 export class ServiceError extends Error {
   readonly status: number
@@ -203,6 +209,8 @@ const toDomainOrders = (rows: readonly ShiftOrderRecord[]): ShiftOrder[] =>
     payMode: o.payMode,
     fee: o.fee,
     kind: o.kind,
+    ...(o.driverShare === null ? {} : { driverShare: o.driverShare }),
+    ...(o.companyShare === null ? {} : { companyShare: o.companyShare }),
     // `?? undefined`, not `?? null`: absent means "nobody measured it" and `orderWalletAmount`
     // falls back to the pay mode, which is what every shift closed before the log was read did.
     ...(o.walletAmount === null ? {} : { walletAmount: o.walletAmount }),
@@ -236,52 +244,6 @@ const manualShareTotals = (rows: readonly ShiftOrderRecord[]): { driverShare: Mi
     driverShare: sum(manual.map((o) => o.driverShare ?? minor(0n))),
     companyShare: sum(manual.map((o) => o.companyShare ?? minor(0n))),
   }
-}
-
-/**
- * What the day's earlier shifts were ACTUALLY paid — read back out of the ledger, never recomputed.
- *
- * This is `trueUp`'s `alreadyPosted`, and the difference matters. It used to be
- * `splitDay(priorYallagoFees, rule)` where `rule` is the one resolved for THIS shift — its business
- * date and **its vehicle's type**. F-4 makes tier tables per vehicle type, so a driver who takes a
- * bike in the morning and a car in the evening has his morning re-priced under the evening's table,
- * and the delta is the difference between two numbers that were never both true. Measured on the
- * real HTTP stack: 12 orders on a bike (35% table) then 10 on a car (flat 50% table) leaves the
- * driver **900,000 minor units — 9,000 new SYP — short**, and the company over-credited by exactly
- * the same, on one driver, on one day. A rule republished between two approvals does it too.
- *
- * The ledger is the only record of what was actually paid, so it is what we read. Summing the
- * `share_split` roles across the day's earlier shifts — signed by side, so a `correction` reversal
- * nets itself out — gives what those shifts credited each party. The manual jobs come back off:
- * their shares are per-order money a manager typed, folded into the same credit lines at approval,
- * and the tier never allocated them.
- *
- * `driver_day_shares` would be the other place to keep this. It stays unwritten deliberately: it
- * would be a second record of the same fact, and two records of one fact eventually disagree. It is
- * a reporting projection for Bundle 2, not the source of truth.
- */
-async function postedDayShares(
-  deps: Deps,
-  priorShifts: readonly ShiftRecord[],
-): Promise<{ driver: Minor; company: Minor; yalago: Minor }> {
-  let driver = 0n
-  let company = 0n
-  let yalago = 0n
-  for (const prior of priorShifts) {
-    for (const entry of await deps.ledger.listByShift(prior.id)) {
-      for (const line of entry.lines) {
-        // These three funds are credit-side: a credit pays the party, a debit takes it back.
-        const signed = line.side === 'C' ? line.amount : -line.amount
-        if (line.role === 'driver_share') driver += signed
-        else if (line.role === 'company_share') company += signed
-        else if (line.role === 'yalago_share') yalago += signed
-      }
-    }
-    const manual = manualShareTotals(await deps.orders.listByShift(prior.id))
-    driver -= manual.driverShare
-    company -= manual.companyShare
-  }
-  return { driver: minor(driver), company: minor(company), yalago: minor(yalago) }
 }
 
 export function todayFor(deps: Deps): CalendarDate {
@@ -797,7 +759,7 @@ async function recordDecision(
   actor: Actor,
   shiftId: string,
   gate: 'open' | 'close',
-  decision: 'approved' | 'rejected' | 'rephoto_requested',
+  decision: 'approved' | 'rejected' | 'rephoto_requested' | 'force_close_prepared',
   notes: string | null,
 ): Promise<void> {
   await deps.decisions.record({ shiftId, gate, decision, notes, decidedBy: actor.userId, decidedAtMs: deps.clock.nowMs() })
@@ -834,6 +796,20 @@ export async function requestRephoto(deps: Deps, actor: Actor, shiftId: string, 
   )
   await notifyDriver(deps, updated, 'shift_rephoto_requested', notes)
   return updated
+}
+
+/** Return the force preparation that belongs to this exact submitted close attempt, if any. */
+async function activeForcePreparation(
+  deps: Deps,
+  shift: ShiftRecord,
+): Promise<ShiftDecisionRecord | null> {
+  if (shift.submittedAt === null) return null
+  const submittedAtMs = Date.parse(shift.submittedAt)
+  if (!Number.isFinite(submittedAtMs)) return null
+  const latest = (await deps.decisions.listByShift(shift.id)).find(
+    (decision) => decision.gate === 'close' && decision.decidedAtMs >= submittedAtMs,
+  )
+  return latest?.decision === 'force_close_prepared' ? latest : null
 }
 
 async function requestRephotoLocked(
@@ -1161,6 +1137,9 @@ type LegacyOrderWriteResult =
   | (CashDeductionRecord & { providerOrderNo: string })
 
 const legacyDeductionKey = (providerOrderNo: string): string => `legacy:${providerOrderNo}`
+
+const isAutomaticCashDeductionKey = (operationKey: string): boolean =>
+  operationKey.startsWith('recent-orders:') || operationKey.startsWith('legacy:')
 
 const providerNoFromLegacyDeductionKey = (operationKey: string): string | null => {
   if (!operationKey.startsWith('legacy:')) return null
@@ -1554,7 +1533,77 @@ async function reclassifyShiftOperations(deps: Deps, shift: ShiftRecord, actorId
  */
 export async function prepareShiftReview(deps: Deps, shift: ShiftRecord, actorId: string): Promise<void> {
   if (shift.state !== 'pending_review' || shift.submittedAt === null) return
+  await healPendingCashDeductionDuplicates(deps, shift, actorId)
   await reclassifyShiftOperations(deps, shift, actorId)
+}
+
+/**
+ * Heal duplicate OCR sightings that were already persisted by an older/cached driver bundle.
+ *
+ * The owner-defined identity is printed date (when known) + minute + untouched OCR amount. Route
+ * text is evidence only. We touch only rows created by this shift's driver, never a manual/edit,
+ * foreign row or manager decision. Choosing a known-date survivor avoids inventing a window edge;
+ * reclassification runs immediately afterwards under the same locked close transaction.
+ */
+async function healPendingCashDeductionDuplicates(
+  deps: Deps,
+  shift: ShiftRecord,
+  actorId: string,
+): Promise<void> {
+  const driver = await deps.directory.driver(shift.driverId)
+  if (!driver?.userId) return
+  const rows = await deps.cashDeductions.listByShift(shift.id)
+  const eligible = (row: CashDeductionRecord): boolean =>
+    row.createdBy === driver.userId &&
+    row.source === 'ocr' &&
+    row.amountOcr !== null &&
+    row.amount === row.amountOcr &&
+    row.decisionReason === null &&
+    !hasOperationDecision(row) &&
+    isAutomaticCashDeductionKey(row.operationKey)
+
+  const survivors: CashDeductionRecord[] = []
+  for (const row of rows) {
+    if (!eligible(row)) {
+      survivors.push(row)
+      continue
+    }
+    const matchIndex = survivors.findIndex(
+      (candidate) => eligible(candidate) && isTimedCashDeductionDuplicate(candidate, row),
+    )
+    if (matchIndex === -1) {
+      survivors.push(row)
+      continue
+    }
+
+    const candidate = survivors[matchIndex]!
+    const candidateHasDate = cleanDeductionEvidence(candidate.occurredDate) !== ''
+    const rowHasDate = cleanDeductionEvidence(row.occurredDate) !== ''
+    let keep = candidate
+    let remove = row
+    if (candidateHasDate !== rowHasDate) {
+      keep = candidateHasDate ? candidate : row
+      remove = candidateHasDate ? row : candidate
+    } else {
+      const family = cashDeductionKeyBase(candidate.operationKey) === cashDeductionKeyBase(row.operationKey)
+      const candidateBase = candidate.operationKey === cashDeductionKeyBase(candidate.operationKey)
+      const rowBase = row.operationKey === cashDeductionKeyBase(row.operationKey)
+      if (family && candidateBase !== rowBase && rowBase) {
+        keep = row
+        remove = candidate
+      }
+    }
+
+    const richer = cashDeductionRouteEvidenceCount(remove) > cashDeductionRouteEvidenceCount(keep)
+      ? remove
+      : keep
+    const merged = richer === keep
+      ? keep
+      : { ...keep, pointA: richer.pointA, pointB: richer.pointB }
+    if (merged !== keep) await deps.cashDeductions.update(merged, actorId)
+    await deps.cashDeductions.delete(remove.id, actorId)
+    survivors[matchIndex] = merged
+  }
 }
 
 async function unresolvedWindowRows(deps: Deps, shiftId: string): Promise<{ orders: string[]; deductions: string[] }> {
@@ -1738,6 +1787,9 @@ async function reviseCloseFiguresLocked(
 ): Promise<{ shift: ShiftRecord; br1: Br1View; before: ShiftRecord }> {
   const shift = await mustFind(deps, shiftId)
   if (shift.state !== 'pending_review') throw new ServiceError(409, 'shift_not_under_review')
+  if (await activeForcePreparation(deps, shift)) {
+    throw new ServiceError(409, 'force_close_figures_locked')
+  }
 
   // `can` rather than `transition`: this is not a state change, so there is no edge to walk — but
   // it is still a `shift.approve` act and must be checked as one, on the SHIFT's branch.
@@ -1879,8 +1931,8 @@ const isTimedCashDeductionDuplicate = (
   right: CashDeductionMatchEvidence,
 ): boolean =>
   left.operationKey !== right.operationKey &&
-  left.operationKey.startsWith('recent-orders:') &&
-  right.operationKey.startsWith('recent-orders:') &&
+  isAutomaticCashDeductionKey(left.operationKey) &&
+  isAutomaticCashDeductionKey(right.operationKey) &&
   hasSameCashDeductionOcrTiming(left, right)
 
 const untouchedSubmittedDriverOcrDeduction = (
@@ -2752,7 +2804,187 @@ function allocateCashDeductions(
   return { postings, total, fromShare, receivable: minor(total - fromShare) }
 }
 
-type CloseSettlementChoices = { keepAsReceivable?: Minor; payShareNow?: boolean }
+export interface CloseSettlementConfirmation {
+  reviewedSettlementHash?: string
+  walletTransferConfirmed?: boolean
+  cashSettlementConfirmed?: boolean
+  varianceReason?: string | null
+  /** Legacy fields are accepted by the wire only so the service can name the obsolete policy. */
+  keepAsReceivable?: Minor
+  payShareNow?: boolean
+}
+
+interface FixedShiftShare {
+  split: { driverShare: Minor; companyShare: Minor; yalagoShare: Minor }
+  deliveryFeeTotal: Minor
+  fixedDriverShare: Minor
+  manualDriverShare: Minor
+}
+
+/** Fixed 40% applies independently to this shift's included Yallago fees; no day-tier true-up. */
+function fixedShiftShare(rows: readonly ShiftOrderRecord[]): FixedShiftShare {
+  const included = includedOrders(rows)
+  const yallagoFees = included.filter((row) => row.kind !== 'manual').map((row) => row.fee)
+  const fixed = splitFixedDriverShare(yallagoFees)
+  const manual = manualShareTotals(included)
+  return {
+    split: {
+      driverShare: add(fixed.driverShare, manual.driverShare),
+      companyShare: add(fixed.companyShare, manual.companyShare),
+      yalagoShare: fixed.yalagoShare,
+    },
+    deliveryFeeTotal: sum(yallagoFees),
+    fixedDriverShare: fixed.driverShare,
+    manualDriverShare: manual.driverShare,
+  }
+}
+
+export type SettlementView = FixedShareSettlementPlan & {
+  policyCode: typeof FIXED_SETTLEMENT_POLICY
+  driverRateBps: typeof FIXED_SETTLEMENT_DRIVER_BPS
+  varianceDirection: 'surplus' | 'shortage' | 'balanced'
+  settlementHash: string
+  reviewedOrdersHash: string
+  deductionPostings: CashDeductionAllocation['postings']
+  split: FixedShiftShare['split']
+}
+
+/** Compute the exact immutable preview approval will recompute under the same close transaction. */
+export async function settlementFor(deps: Deps, shift: ShiftRecord): Promise<SettlementView> {
+  if (shift.endCashDeclared === null || shift.endWalletDeclared === null) {
+    throw new ServiceError(422, 'settlement_figures_missing')
+  }
+  const br1 = await evaluateShift(deps, shift)
+  const rows = await deps.orders.listByShift(shift.id)
+  const share = fixedShiftShare(rows)
+  const deductions = allocateCashDeductions(await deps.cashDeductions.listByShift(shift.id), share.split.driverShare)
+  const plan = planFixedShareSettlement({
+    deliveryFeeTotal: share.deliveryFeeTotal,
+    fixedDriverShare: share.fixedDriverShare,
+    manualDriverShare: share.manualDriverShare,
+    cashDeductionTotal: deductions.total,
+    expectedCash: br1.result.expectedCash,
+    expectedWallet: br1.result.expectedWallet,
+    actualCash: shift.endCashDeclared,
+    actualWallet: shift.endWalletDeclared,
+  })
+  const settlementHash = fixedSettlementHash(
+    {
+      shiftId: shift.id,
+      branchId: shift.branchId,
+      driverId: shift.driverId,
+      businessDate: shift.businessDate,
+      reviewedOrdersHash: br1.ordersHash,
+    },
+    plan,
+  )
+  return {
+    ...plan,
+    policyCode: FIXED_SETTLEMENT_POLICY,
+    driverRateBps: FIXED_SETTLEMENT_DRIVER_BPS,
+    varianceDirection: varianceDirection(plan.variance),
+    settlementHash,
+    reviewedOrdersHash: br1.ordersHash,
+    deductionPostings: deductions.postings,
+    split: share.split,
+  }
+}
+
+function requireSettlementConfirmation(
+  plan: SettlementView,
+  input: CloseSettlementConfirmation,
+): { varianceReason: string | null } {
+  if ((input.keepAsReceivable ?? minor(0n)) !== 0n || input.payShareNow === false) {
+    throw new ServiceError(422, 'fixed_cash_settlement_required')
+  }
+  const missing: string[] = []
+  if (!input.walletTransferConfirmed) missing.push('walletTransferConfirmed')
+  if (!input.cashSettlementConfirmed) missing.push('cashSettlementConfirmed')
+  if (!input.reviewedSettlementHash) missing.push('reviewedSettlementHash')
+  if (missing.length > 0) throw new ServiceError(422, 'settlement_confirmation_required', { missing })
+  if (input.reviewedSettlementHash !== plan.settlementHash) {
+    throw new ServiceError(409, 'settlement_changed_since_review', {
+      reviewed: input.reviewedSettlementHash,
+      current: plan.settlementHash,
+    })
+  }
+  const reason = input.varianceReason?.trim() || null
+  if (plan.variance !== 0n && reason === null) throw new ServiceError(422, 'variance_reason_required')
+  return { varianceReason: reason }
+}
+
+/** Exact retry after a committed response was lost: return success without posting a second time. */
+function requireSettlementReplay(
+  stored: ShiftSettlementRecord,
+  confirmation: CloseSettlementConfirmation,
+  reviewedOrdersHash: string | null,
+): void {
+  if ((confirmation.keepAsReceivable ?? minor(0n)) !== 0n || confirmation.payShareNow === false) {
+    throw new ServiceError(422, 'fixed_cash_settlement_required')
+  }
+  if (!confirmation.walletTransferConfirmed || !confirmation.cashSettlementConfirmed) {
+    throw new ServiceError(422, 'settlement_confirmation_required')
+  }
+  if (
+    confirmation.reviewedSettlementHash !== stored.settlementHash ||
+    (reviewedOrdersHash !== null && reviewedOrdersHash !== stored.reviewedOrdersHash)
+  ) {
+    throw new ServiceError(409, 'settlement_changed_since_review', {
+      reviewed: confirmation.reviewedSettlementHash ?? null,
+      current: stored.settlementHash,
+    })
+  }
+  const reason = confirmation.varianceReason?.trim() || null
+  if (stored.variance !== 0n && reason === null) throw new ServiceError(422, 'variance_reason_required')
+  if (reason !== stored.varianceReason) {
+    throw new ServiceError(409, 'settlement_changed_since_review', {
+      reasonChanged: true,
+    })
+  }
+}
+
+function settlementRecord(
+  shift: ShiftRecord,
+  plan: SettlementView,
+  actor: Actor,
+  confirmedAtMs: number,
+  varianceReason: string | null,
+): NewShiftSettlementRecord {
+  return {
+    shiftId: shift.id,
+    branchId: shift.branchId,
+    driverId: shift.driverId,
+    businessDate: shift.businessDate,
+    policyCode: plan.policyCode,
+    driverRateBps: plan.driverRateBps,
+    deliveryFeeTotal: plan.deliveryFeeTotal,
+    fixedDriverShare: plan.fixedDriverShare,
+    manualDriverShare: plan.manualDriverShare,
+    grossDriverShare: plan.grossDriverShare,
+    cashDeductionTotal: plan.cashDeductionTotal,
+    baseDriverShare: plan.baseDriverShare,
+    expectedTotal: plan.expectedTotal,
+    actualCash: plan.actualCash,
+    actualWallet: plan.actualWallet,
+    actualTotal: plan.actualTotal,
+    variance: plan.variance,
+    varianceDirection: plan.varianceDirection,
+    finalEmployeeCash: plan.finalEmployeeCash,
+    walletToOffice: plan.walletToOffice,
+    cashToOffice: plan.cashToOffice,
+    walletAction: plan.wallet.action,
+    walletAmount: plan.wallet.amount,
+    cashAction: plan.cash.action,
+    cashAmount: plan.cash.amount,
+    reviewedOrdersHash: plan.reviewedOrdersHash,
+    settlementHash: plan.settlementHash,
+    walletTransferConfirmed: true,
+    cashSettlementConfirmed: true,
+    confirmedBy: actor.userId,
+    confirmedAtMs,
+    varianceReason,
+  }
+}
 
 export async function approveClose(
   deps: Deps,
@@ -2760,14 +2992,10 @@ export async function approveClose(
   shiftId: string,
   reviewedOrdersHash: string,
   splitGate: 'advisory' | 'strict' = 'advisory',
-  /**
-   * The manager's «كشف التسوية» decisions. Omitted ⇒ nothing kept and the share left as a payable,
-   * which is byte-identical to every close before this existed.
-   */
-  settlementChoices: CloseSettlementChoices = {},
+  confirmation: CloseSettlementConfirmation = {},
 ): Promise<{ shift: ShiftRecord; postings: number }> {
   return deps.closeUnitOfWork.run(
-    { shiftId, actorId: actor.userId, serializeDriverDay: true },
+    { shiftId, actorId: actor.userId },
     async (transaction) =>
       approveCloseLocked(
         withCloseTransaction(deps, transaction),
@@ -2775,7 +3003,7 @@ export async function approveClose(
         shiftId,
         reviewedOrdersHash,
         splitGate,
-        settlementChoices,
+        confirmation,
       ),
   )
 }
@@ -2786,11 +3014,22 @@ async function approveCloseLocked(
   shiftId: string,
   reviewedOrdersHash: string,
   splitGate: 'advisory' | 'strict',
-  settlementChoices: CloseSettlementChoices,
+  confirmation: CloseSettlementConfirmation,
 ): Promise<{ shift: ShiftRecord; postings: number }> {
   const shift = await mustFind(deps, shiftId)
+  const storedSettlement = await deps.settlements.findByShift(shiftId)
+  if (shift.state === 'approved' || shift.state === 'week_locked') {
+    if (!storedSettlement) throw new ServiceError(409, 'legacy_settlement_read_only')
+    requireSettlementReplay(storedSettlement, confirmation, reviewedOrdersHash)
+    return { shift, postings: 0 }
+  }
+  if (await activeForcePreparation(deps, shift)) {
+    throw new ServiceError(409, 'force_close_commit_required')
+  }
+  await prepareShiftReview(deps, shift, actor.userId)
   const orderRows = await deps.orders.listByShift(shiftId)
   const br1 = await evaluateShift(deps, shift)
+  const settlement = await settlementFor(deps, shift)
   const evidenceWarnings = await unacknowledgedEvidenceWarnings(deps, shiftId, 'end')
   if (evidenceWarnings.length > 0) {
     throw new ServiceError(422, 'stale_evidence_confirmation_required', {
@@ -2802,6 +3041,7 @@ async function approveCloseLocked(
   if (unresolved.orders.length > 0 || unresolved.deductions.length > 0) {
     throw new ServiceError(422, 'operation_window_unresolved', unresolved)
   }
+  const { varianceReason } = requireSettlementConfirmation(settlement, confirmation)
 
   const result = await guard(deps, shift, 'manager_approve_close', actor, {
     endPackage: {
@@ -2815,95 +3055,28 @@ async function approveCloseLocked(
       ...(await batteryContext(deps, shift, 'end')),
     },
     br1: { balanced: br1.result.balanced, splitBalanced: br1.result.splitBalanced },
+    settlementConfirmed: true,
     splitGate,
     reviewedOrdersHash,
     currentOrdersHash: br1.ordersHash,
   })
   if (!result.ok) fail(result)
 
-  // ── The tier band is a property of the DAY, not the shift (SRS F-1) ────────────────────
-  // A second shift can push the day across a band, which restates the first. So the split is
-  // computed over every approved shift of this driver on this business date, plus this one, and
-  // the DIFFERENCE against what was already posted is what gets written.
-  const priorShifts = await deps.shifts.listApprovedForDriverOnDate(shift.driverId, shift.businessDate)
-  const priorOrders: ShiftOrder[] = []
-  for (const prior of priorShifts) {
-    if (prior.id === shift.id) continue
-    priorOrders.push(...toDomainOrders(await deps.orders.listByShift(prior.id)))
-  }
   const todaysOrders = toDomainOrders(orderRows)
-  // ONLY Yallago's deliveries choose the band and feed the true-up. A manual job is the branch's
-  // own, priced by hand: counting it would lift the driver's percentage on Yallago work he did not
-  // do, and totalling its fee here would have the tier try to split money that is already split.
-  const dayFees = [...priorOrders, ...todaysOrders].filter((o) => o.kind !== 'manual').map((o) => o.fee)
-
-  // The tier rule that actually governs this shift's pay — resolved by business date and vehicle
-  // type (F-3 versioning, F-4 per-type), not a frozen default. `resolveTierRule` falls back to the
-  // F-1 table when nothing is published, so a close is never blocked; published/marginal/per-type
-  // tables now change real pay instead of being dead config.
-  const vehicle = await deps.directory.vehicle(shift.vehicleId)
-  const rule = await resolveTierRule(deps, shift.businessDate, vehicle?.vehicleTypeId ?? null)
-
-  // What the day's earlier shifts were already paid — READ from the ledger, never recomputed under
-  // this shift's rule. See `postedDayShares`: recomputing mis-pays a driver who changed vehicle type
-  // mid-day, or whose tier rule was republished between two approvals.
-  const alreadyPosted = await postedDayShares(deps, priorShifts.filter((s) => s.id !== shift.id))
-
-  const settlement = trueUp(dayFees, rule, alreadyPosted)
-
-  // The tier settles Yallago's work; the manual jobs on THIS shift carry the shares a manager typed
-  // and validated (driverShare + companyShare === fee). Adding them here is what lets `shareSplit`
-  // exhaust `fee_earned` across both kinds — the postings total every order's fee, so the split must
-  // account for every order's fee too. Prior shifts' manual orders were settled at their own close.
-  const manual = manualShareTotals(orderRows)
-  const shiftSplit = {
-    driverShare: add(settlement.driverDelta, manual.driverShare),
-    companyShare: add(settlement.companyDelta, manual.companyShare),
-    yalagoShare: settlement.yalagoDelta,
-  }
-  const deductionAllocation = allocateCashDeductions(
-    await deps.cashDeductions.listByShift(shiftId),
-    shiftSplit.driverShare,
-  )
-  const netDriverShare = minor(shiftSplit.driverShare - deductionAllocation.fromShare)
-
-  /*
-   * ── The settlement, decided by the manager and validated HERE, not by the client ───────────
-   *
-   * The screen computes a preview through the very same `planSettlement`, but the numbers it shows
-   * are never trusted: the plan is re-derived from the manager's two CHOICES (how much stays, and
-   * whether the share is paid tonight) against figures the server owns. A client that could name
-   * `toOfficeCash` could name any number at all.
-   */
-  const plan = planSettlement({
-    endCashDeclared: shift.endCashDeclared ?? minor(0n),
-    expectedCash: br1.result.expectedCash,
-    driverShare: netDriverShare,
-    openingReceivable: sum(shift.carriedTranches),
-    keepAsReceivable: settlementChoices.keepAsReceivable ?? minor(0n),
-    payShareNow: settlementChoices.payShareNow ?? false,
-    managerAdjustment: minor(0n),
-  })
-  if (!plan.feasible) throw new ServiceError(422, 'settlement_infeasible', { refusals: plan.refusals })
-
   const fxDayId = await ensureFxDay(deps, shift.businessDate)
-  const postings = postingsForApproval(
+  const postings = postingsForCashSettledApproval(
     {
       driverId: shift.driverId,
       branchId: shift.branchId,
       floatTranches: shift.floatTranches,
-      // The ذمة he brought in. Disjoint from the float, and the same list BR1 just balanced.
       carriedTranches: shift.carriedTranches,
       topupTranches: shift.topupTranches,
       orders: todaysOrders,
-      // The SAME list BR1 just balanced against. If these two ever diverged the ledger would
-      // return a wallet different from the one the equation approved.
       walletAdjustments: toWalletAdjustments(await deps.movements.listByShift(shiftId)),
-      cashDeductions: deductionAllocation.postings,
-      keptAsReceivable: plan.keptAsReceivable,
-      driverSharePaid: plan.paidToDriver,
+      cashDeductions: settlement.deductionPostings,
     },
-    shiftSplit,
+    settlement.split,
+    settlement,
   )
 
   const written = await deps.ledger.post(shift.branchId, postings, {
@@ -2913,25 +3086,25 @@ async function approveCloseLocked(
     weekStartDate: shift.weekStartDate,
     fxDayId,
     createdBy: actor.userId,
+    ...(varianceReason === null ? {} : { reason: varianceReason }),
   })
 
-  // What the manager decided is written on the shift, not derived back out of journal lines: it is
-  // an INPUT to the posting, and a shift that cannot say what was decided cannot be audited.
+  const confirmedAtMs = deps.clock.nowMs()
+  await deps.settlements.create(settlementRecord(shift, settlement, actor, confirmedAtMs, varianceReason))
+
   const updated: ShiftRecord = {
     ...shift,
     state: result.next,
     approvedBy: actor.userId,
-    keptAsReceivable: plan.keptAsReceivable,
-    driverSharePaid: plan.paidToDriver,
-    // Persist the exact snapshot that passed this approval, including manager revisions/manual
-    // orders made after the driver's original submission.
+    keptAsReceivable: minor(0n),
+    driverSharePaid: settlement.finalEmployeeCash > 0n ? settlement.finalEmployeeCash : minor(0n),
     equationDiff: br1.result.scalarDiff,
     cashDiff: br1.result.cashDiff,
     walletDiff: br1.result.walletDiff,
     ordersHash: br1.ordersHash,
   }
   await deps.shifts.update(updated, actor.userId)
-  await recordDecision(deps, actor, shiftId, 'close', 'approved', null)
+  await recordDecision(deps, actor, shiftId, 'close', 'approved', varianceReason)
   return { shift: updated, postings: written.length }
 }
 
@@ -3002,97 +3175,18 @@ async function voidShiftLocked(
   return updated
 }
 
-/** Shared with approveClose: the tier-resolved day-level split delta for this shift. */
-/**
- * «كشف التسوية» — what the manager sees before he approves, and it MOVES NOTHING.
- *
- * Read-only on purpose. Every figure comes from the same two readers approval itself uses —
- * `evaluateShift` for the expected cash and `shiftSplitFor` for the day-tier share — so the
- * statement can never quietly disagree with the postings that follow it. Recomputing either here
- * is the drift that D-6's true-up already cost 900,000 minor once.
- *
- * The manager's own inputs (how much stays as a ذمة, whether the share is paid tonight, any
- * adjustment) arrive as query parameters so he can see the effect before committing to it.
- */
-export type SettlementView = SettlementPlan & {
-  grossDriverShare: Minor
-  cashDeductionTotal: Minor
-  netDriverShare: Minor
-  deductionReceivable: Minor
-}
-
-export async function settlementFor(
-  deps: Deps,
-  shift: ShiftRecord,
-  choices: { keepAsReceivable?: Minor; payShareNow?: boolean; managerAdjustment?: Minor } = {},
-): Promise<SettlementView> {
-  const br1 = await evaluateShift(deps, shift)
-  const todaysOrders = toDomainOrders(await deps.orders.listByShift(shift.id))
-  const split = await shiftSplitFor(deps, shift, todaysOrders)
-  const allocation = allocateCashDeductions(await deps.cashDeductions.listByShift(shift.id), split.driverShare)
-  const netDriverShare = minor(split.driverShare - allocation.fromShare)
-  const plan = planSettlement({
-    endCashDeclared: shift.endCashDeclared ?? minor(0n),
-    expectedCash: br1.result.expectedCash,
-    driverShare: netDriverShare,
-    // Carried ذمم land in Phase 3; until then a shift has none and the line simply does not print.
-    openingReceivable: minor(0n),
-    keepAsReceivable: choices.keepAsReceivable ?? minor(0n),
-    // Keep preview and approval semantics identical. The approve wire defaults to false and the
-    // manager UI sends no override, so previewing an immediate payout here would show cash flows
-    // that the eventual journal never posts.
-    payShareNow: choices.payShareNow ?? false,
-    managerAdjustment: choices.managerAdjustment ?? minor(0n),
-  })
-  return {
-    ...plan,
-    grossDriverShare: split.driverShare,
-    cashDeductionTotal: allocation.total,
-    netDriverShare,
-    deductionReceivable: allocation.receivable,
-  }
-}
-
-async function shiftSplitFor(deps: Deps, shift: ShiftRecord, todaysOrders: ShiftOrder[]): Promise<{ driverShare: Minor; companyShare: Minor; yalagoShare: Minor }> {
-  const priorShifts = await deps.shifts.listApprovedForDriverOnDate(shift.driverId, shift.businessDate)
-  const priorOrders: ShiftOrder[] = []
-  for (const prior of priorShifts) {
-    if (prior.id === shift.id) continue
-    priorOrders.push(...toDomainOrders(await deps.orders.listByShift(prior.id)))
-  }
-  // Yallago's deliveries alone choose the band and feed the true-up — see approveClose.
-  const dayFees = [...priorOrders, ...todaysOrders].filter((o) => o.kind !== 'manual').map((o) => o.fee)
-  const vehicle = await deps.directory.vehicle(shift.vehicleId)
-  const rule = await resolveTierRule(deps, shift.businessDate, vehicle?.vehicleTypeId ?? null)
-  // Read what was paid, do not recompute it — the same reason as approveClose. A force-close on the
-  // second shift of a mixed-vehicle day would otherwise mis-pay exactly as a normal close did.
-  const alreadyPosted = await postedDayShares(deps, priorShifts.filter((p) => p.id !== shift.id))
-  const s = trueUp(dayFees, rule, alreadyPosted)
-  // Plus this shift's manual jobs, whose shares were typed and validated against their fees.
-  const manual = manualShareTotals(await deps.orders.listByShift(shift.id))
-  return {
-    driverShare: add(s.driverDelta, manual.driverShare),
-    companyShare: add(s.companyDelta, manual.companyShare),
-    yalagoShare: s.yalagoDelta,
-  }
-}
-
-/**
- * FORCE-CLOSE a shift the driver can't finish (`manager_force_close`, shift.approve). It posts the
- * SAME approval postings as a normal close (order splits + the returns that zero the driver funds),
- * but bypasses the BR5/BR1 gate. The admin may supply the end figures he actually knows; the gap
- * between what the driver returned (declared) and what the equation expected lands in a
- * `shift_variance` cost centre so the books reflect reality — a shortfall the driver owes, or a
- * surplus — instead of the close being blocked. State → `approved`. Audited with a reason.
- */
+/** Force-close uses the exact same fixed settlement as ordinary approval, but bypasses evidence gates. */
 export async function forceClose(
   deps: Deps,
   actor: Actor,
   shiftId: string,
   input: Parameters<typeof forceCloseLocked>[3],
-): Promise<{ shift: ShiftRecord; postings: number }> {
+): Promise<
+  | { shift: ShiftRecord; postings: 0; prepared: true; replayed: false }
+  | { shift: ShiftRecord; postings: number; prepared: false; replayed: boolean }
+> {
   return deps.closeUnitOfWork.run(
-    { shiftId, actorId: actor.userId, serializeDriverDay: true },
+    { shiftId, actorId: actor.userId },
     async (transaction) => forceCloseLocked(withCloseTransaction(deps, transaction), actor, shiftId, input),
   )
 }
@@ -3106,12 +3200,39 @@ async function forceCloseLocked(
     odometerAnomalyConfirmed?: boolean
     cashDeclared?: Minor | null
     walletDeclared?: Minor | null
+    prepareOnly?: boolean | undefined
+    reviewedSettlementHash?: string
+    walletTransferConfirmed?: boolean
+    cashSettlementConfirmed?: boolean
     reason: string
   },
-): Promise<{ shift: ShiftRecord; postings: number }> {
+): Promise<
+  | { shift: ShiftRecord; postings: 0; prepared: true; replayed: false }
+  | { shift: ShiftRecord; postings: number; prepared: false; replayed: boolean }
+> {
   let shift = await mustFind(deps, shiftId)
+  const storedSettlement = await deps.settlements.findByShift(shiftId)
+  if (shift.state === 'approved' || shift.state === 'week_locked') {
+    if (input.prepareOnly) throw new ServiceError(409, 'illegal_transition')
+    if (!storedSettlement) throw new ServiceError(409, 'legacy_settlement_read_only')
+    if (
+      (input.cashDeclared !== undefined && input.cashDeclared !== null && input.cashDeclared !== storedSettlement.actualCash) ||
+      (input.walletDeclared !== undefined && input.walletDeclared !== null && input.walletDeclared !== storedSettlement.actualWallet) ||
+      (input.odometerKm !== undefined && input.odometerKm !== null && input.odometerKm !== shift.odoEnd)
+    ) {
+      throw new ServiceError(409, 'settlement_changed_since_review', { replayFiguresChanged: true })
+    }
+    requireSettlementReplay(storedSettlement, {
+      ...(input.reviewedSettlementHash === undefined ? {} : { reviewedSettlementHash: input.reviewedSettlementHash }),
+      ...(input.walletTransferConfirmed === undefined ? {} : { walletTransferConfirmed: input.walletTransferConfirmed }),
+      ...(input.cashSettlementConfirmed === undefined ? {} : { cashSettlementConfirmed: input.cashSettlementConfirmed }),
+      varianceReason: input.reason,
+    }, null)
+    return { shift, postings: 0, prepared: false, replayed: true }
+  }
   const result = await guard(deps, shift, 'manager_force_close', actor)
   if (!result.ok) fail(result)
+  const forcePreparation = await activeForcePreparation(deps, shift)
 
   const finalOdometer = input.odometerKm ?? shift.odoEnd
   const anomalousOdometer =
@@ -3126,19 +3247,72 @@ async function forceCloseLocked(
       end: finalOdometer,
     })
   }
-
+  const cashDeclared = input.cashDeclared ?? shift.endCashDeclared
+  const walletDeclared = input.walletDeclared ?? shift.endWalletDeclared
+  if (cashDeclared === null || walletDeclared === null) {
+    throw new ServiceError(422, 'settlement_figures_missing', {
+      missing: [
+        ...(cashDeclared === null ? ['cashDeclared'] : []),
+        ...(walletDeclared === null ? ['walletDeclared'] : []),
+      ],
+    })
+  }
   // A force-close is still a close boundary. Claim it first so no late PWA batch can slip in, then
   // classify every OCR operation against that exact minute. Unknown rows remain a human decision:
   // the force override bypasses BR1, not the requirement to say which operations belong here.
   if (shift.submittedAt === null) {
+    if (!input.prepareOnly) throw new ServiceError(409, 'force_close_preparation_required')
+    const anomalyConfirmedAt = anomalousOdometer
+      ? (existingAnomalyConfirmed
+          ? shift.odoEndAnomalyConfirmedAt
+          : new Date(deps.clock.nowMs()).toISOString())
+      : null
+    const anomalyConfirmedBy = anomalousOdometer
+      ? (existingAnomalyConfirmed ? shift.odoEndAnomalyConfirmedBy : actor.userId)
+      : null
     shift = {
       ...shift,
       state: 'pending_review',
       submittedAt: new Date(deps.clock.nowMs()).toISOString(),
+      endCashDeclared: cashDeclared,
+      endWalletDeclared: walletDeclared,
+      odoEnd: finalOdometer,
+      odoEndAnomalyConfirmedAt: anomalyConfirmedAt,
+      odoEndAnomalyConfirmedBy: anomalyConfirmedBy,
     }
     await deps.shifts.update(shift, actor.userId)
+    await prepareShiftReview(deps, shift, actor.userId)
+    await recordDecision(deps, actor, shiftId, 'close', 'force_close_prepared', input.reason)
+    return { shift, postings: 0, prepared: true, replayed: false }
   }
-  await reclassifyShiftOperations(deps, shift, actor.userId)
+  if (input.prepareOnly) {
+    if (!forcePreparation) throw new ServiceError(409, 'force_close_preparation_required')
+    const samePreparedFigures =
+      shift.endCashDeclared === cashDeclared &&
+      shift.endWalletDeclared === walletDeclared &&
+      shift.odoEnd === finalOdometer
+    if (!samePreparedFigures) throw new ServiceError(409, 'settlement_changed_since_review')
+    return { shift, postings: 0, prepared: true, replayed: false }
+  }
+
+  if (!forcePreparation) throw new ServiceError(409, 'force_close_preparation_required')
+  if (
+    shift.endCashDeclared !== cashDeclared ||
+    shift.endWalletDeclared !== walletDeclared ||
+    shift.odoEnd !== finalOdometer
+  ) {
+    throw new ServiceError(409, 'settlement_changed_since_review', { preparedFiguresChanged: true })
+  }
+
+  const missingConfirmations = [
+    ...(!input.reviewedSettlementHash ? ['reviewedSettlementHash'] : []),
+    ...(!input.walletTransferConfirmed ? ['walletTransferConfirmed'] : []),
+    ...(!input.cashSettlementConfirmed ? ['cashSettlementConfirmed'] : []),
+  ]
+  if (missingConfirmations.length > 0) {
+    throw new ServiceError(422, 'settlement_confirmation_required', { missing: missingConfirmations })
+  }
+  await prepareShiftReview(deps, shift, actor.userId)
   const unresolved = await unresolvedWindowRows(deps, shiftId)
   if (unresolved.orders.length > 0 || unresolved.deductions.length > 0) {
     throw new ServiceError(422, 'operation_window_unresolved', unresolved)
@@ -3146,11 +3320,18 @@ async function forceCloseLocked(
 
   const orderRows = await deps.orders.listByShift(shiftId)
   const todaysOrders = toDomainOrders(orderRows)
-  const shiftSplit = await shiftSplitFor(deps, shift, todaysOrders)
-  const deductionAllocation = allocateCashDeductions(
-    await deps.cashDeductions.listByShift(shiftId),
-    shiftSplit.driverShare,
-  )
+  const stagedShift: ShiftRecord = {
+    ...shift,
+    endCashDeclared: cashDeclared,
+    endWalletDeclared: walletDeclared,
+  }
+  const settlement = await settlementFor(deps, stagedShift)
+  requireSettlementConfirmation(settlement, {
+    ...(input.reviewedSettlementHash === undefined ? {} : { reviewedSettlementHash: input.reviewedSettlementHash }),
+    ...(input.walletTransferConfirmed === undefined ? {} : { walletTransferConfirmed: input.walletTransferConfirmed }),
+    ...(input.cashSettlementConfirmed === undefined ? {} : { cashSettlementConfirmed: input.cashSettlementConfirmed }),
+    varianceReason: input.reason,
+  })
   const shiftInput = {
     driverId: shift.driverId,
     branchId: shift.branchId,
@@ -3158,67 +3339,10 @@ async function forceCloseLocked(
     carriedTranches: shift.carriedTranches,
     topupTranches: shift.topupTranches,
     orders: todaysOrders,
-    // A force-close still posts the wallet the shift actually had; `closingBalances` below reads
-    // the same input, so the variance it computes is against the real expectation, not a partial one.
     walletAdjustments: toWalletAdjustments(await deps.movements.listByShift(shiftId)),
-    cashDeductions: deductionAllocation.postings,
+    cashDeductions: settlement.deductionPostings,
   }
-
-  const postings: Posting[] = postingsForApproval(shiftInput, shiftSplit)
-
-  // Variance: postingsForApproval returned the COMPUTED balances to the office. If the admin says
-  // the driver actually handed over a different amount, move the difference to the shift_variance
-  // cost centre so office_cash/office_wallet reflect what really came in. `null`/omitted ⇒ assume a
-  // full, clean return (no variance).
-  const expected = closingBalances(shiftInput)
-  const cashDeclared = input.cashDeclared ?? shift.endCashDeclared ?? expected.endCash
-  const walletDeclared = input.walletDeclared ?? shift.endWalletDeclared ?? expected.endWallet
-  const variance = `shift_variance:${shift.branchId}`
-
-  /*
-   * ── «اي نقص يرمم من حصة السائق» (owner decision k) ────────────────────────────────────────
-   *
-   * A CASH SHORTFALL NOW HAS THE DRIVER'S NAME ON IT. Until this, the whole gap went to
-   * `cost_center:shift_variance:<branch>` — a branch account that records THAT money was missing
-   * and nothing about WHOSE shift it was. The owner settles it against the man: his share absorbs
-   * it first, and only what exceeds his entire share stays outstanding, as a ذمة on him.
-   *
-   * This is the ONLY path where a gap can exist at all: `canApproveClose` refuses unless BR1 is
-   * exactly zero, so an ordinary approval never reaches here. That is deliberate — the refusal
-   * stays the default and a manager closes short only on purpose, with a written reason.
-   */
-  const cashGap = expected.endCash - cashDeclared
-  const shareAfterDeductions = minor(shiftSplit.driverShare - deductionAllocation.fromShare)
-  const shareDue = shareAfterDeductions > 0n ? shareAfterDeductions : minor(0n)
-  const fromShare = cashGap > 0n ? (cashGap < shareDue ? minor(cashGap) : shareDue) : minor(0n)
-  const residual = cashGap > 0n ? minor(cashGap - fromShare) : minor(0n)
-
-  if (fromShare > 0n) {
-    // Debiting the payable discharges what the company owed him, by the amount he is short.
-    postings.push({
-      eventType: 'driver_payout',
-      occurrenceKey: `fc-share-${shift.id}`,
-      lines: [
-        { fund: { kind: 'driver_share_payable', driverId: shift.driverId }, side: 'D', amount: fromShare },
-        { fund: { kind: 'office_cash' }, side: 'C', amount: fromShare },
-      ],
-    })
-  }
-  if (residual > 0n) {
-    // Beyond his whole share it is not forgiven and not a branch loss — it is money he still owes.
-    postings.push({
-      eventType: 'float_return',
-      occurrenceKey: `fc-residual-${shift.id}`,
-      lines: [
-        { fund: { kind: 'driver_receivable_cash', driverId: shift.driverId }, side: 'D', amount: residual },
-        { fund: { kind: 'office_cash' }, side: 'C', amount: residual },
-      ],
-    })
-  }
-  // Whatever the two lines above did NOT absorb — a cash SURPLUS, or any wallet gap — keeps going
-  // to the branch variance centre, which is the right home for a difference nobody can attribute.
-  postings.push(...variancePosting('office_cash', variance, cashGap - fromShare - residual, `fc-cash-${shift.id}`))
-  postings.push(...variancePosting('office_wallet', variance, expected.endWallet - walletDeclared, `fc-wallet-${shift.id}`))
+  const postings = postingsForCashSettledApproval(shiftInput, settlement.split, settlement)
 
   const fxDayId = await ensureFxDay(deps, shift.businessDate)
   const written = await deps.ledger.post(shift.branchId, postings, {
@@ -3231,11 +3355,15 @@ async function forceCloseLocked(
     reason: input.reason,
   })
 
-  const br1 = await evaluateShift(deps, { ...shift, endCashDeclared: cashDeclared, endWalletDeclared: walletDeclared })
+  const confirmedAtMs = deps.clock.nowMs()
+  await deps.settlements.create(settlementRecord(stagedShift, settlement, actor, confirmedAtMs, input.reason))
+  const br1 = await evaluateShift(deps, stagedShift)
   const updated: ShiftRecord = {
-    ...shift,
+    ...stagedShift,
     state: result.next,
     approvedBy: actor.userId,
+    keptAsReceivable: minor(0n),
+    driverSharePaid: settlement.finalEmployeeCash > 0n ? settlement.finalEmployeeCash : minor(0n),
     odoEnd: finalOdometer,
     odoEndAnomalyConfirmedAt: anomalousOdometer
       ? (existingAnomalyConfirmed
@@ -3245,8 +3373,6 @@ async function forceCloseLocked(
     odoEndAnomalyConfirmedBy: anomalousOdometer
       ? (existingAnomalyConfirmed ? shift.odoEndAnomalyConfirmedBy : actor.userId)
       : null,
-    endCashDeclared: cashDeclared,
-    endWalletDeclared: walletDeclared,
     equationDiff: br1.result.scalarDiff,
     cashDiff: br1.result.cashDiff,
     walletDiff: br1.result.walletDiff,
@@ -3254,24 +3380,7 @@ async function forceCloseLocked(
   }
   await deps.shifts.update(updated, actor.userId)
   await recordDecision(deps, actor, shiftId, 'close', 'approved', input.reason)
-  return { shift: updated, postings: written.length }
-}
-
-/**
- * One balancing posting moving `delta` between an office fund and the variance cost centre. `delta`
- * is a signed value (`expected − declared`); positive means the office is short that much (a
- * receivable / loss to variance), negative a surplus. Empty when there's no gap.
- */
-function variancePosting(office: 'office_cash' | 'office_wallet', costCenterId: string, delta: bigint, occurrenceKey: string): Posting[] {
-  if (delta === 0n) return []
-  const amount = minor(delta > 0n ? delta : -delta)
-  const varFund = { kind: 'cost_center' as const, costCenterId }
-  const officeFund = { kind: office } as const
-  const lines =
-    delta > 0n
-      ? [{ fund: varFund, side: 'D' as const, amount }, { fund: officeFund, side: 'C' as const, amount }]
-      : [{ fund: officeFund, side: 'D' as const, amount }, { fund: varFund, side: 'C' as const, amount }]
-  return [{ eventType: 'manual', occurrenceKey, lines }]
+  return { shift: updated, postings: written.length, prepared: false, replayed: false }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────────────────

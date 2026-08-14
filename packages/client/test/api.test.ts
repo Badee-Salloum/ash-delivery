@@ -1,11 +1,13 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  type ApiClient,
+  ApiClient,
   type CloudOcrResponse,
   acknowledgeStaleEvidencePath,
   evidenceUploadHeaders,
   readInCloud,
 } from '../src/api.ts'
+
+afterEach(() => vi.unstubAllGlobals())
 
 const failedRead = (reason: NonNullable<CloudOcrResponse['reason']>): CloudOcrResponse => ({
   ok: false,
@@ -43,4 +45,78 @@ it('sends explicit stale acknowledgement beside a real file timestamp', () => {
     'x-stale-evidence-acknowledged': 'true',
   })
   expect(evidenceUploadHeaders(null, false)).toEqual({})
+})
+
+it('binds close approval to the reviewed settlement and both physical confirmations', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ id: 'shift-1', state: 'approved', postings: 8 }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+  const settlementHash = 'a'.repeat(64)
+  const body = {
+    reviewedOrdersHash: 'orders-v1',
+    reviewedSettlementHash: settlementHash,
+    walletTransferConfirmed: true,
+    cashSettlementConfirmed: true,
+    varianceReason: 'counted with employee',
+  }
+
+  await expect(api.approveCloseShift('shift-1', body)).resolves.toMatchObject({ state: 'approved' })
+  expect(fetchMock).toHaveBeenCalledWith('/api/shifts/shift-1/approve-close', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+})
+
+it('carries both physical confirmations with exceptional force-close actuals', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ id: 'shift-2', state: 'approved', postings: 6 }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+
+  await api.forceCloseShift('shift-2', {
+    reason: 'device lost',
+    cashDeclared: '120.00',
+    walletDeclared: '30.00',
+    reviewedSettlementHash: 'b'.repeat(64),
+    walletTransferConfirmed: true,
+    cashSettlementConfirmed: true,
+  })
+
+  const init = fetchMock.mock.calls[0]?.[1] as RequestInit
+  expect(JSON.parse(String(init.body))).toMatchObject({
+    cashDeclared: '120.00',
+    walletDeclared: '30.00',
+    reviewedSettlementHash: 'b'.repeat(64),
+    walletTransferConfirmed: true,
+    cashSettlementConfirmed: true,
+  })
+})
+
+it('previews force-close settlement against the entered actual cash and wallet figures', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ settlementHash: 'c'.repeat(64) }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+
+  await api.shiftSettlement('shift-3', { actualCash: '120.00', actualWallet: '30.50' })
+
+  expect(fetchMock).toHaveBeenCalledWith(
+    '/api/shifts/shift-3/settlement?actualCash=120.00&actualWallet=30.50',
+    expect.objectContaining({ method: 'GET', credentials: 'include' }),
+  )
 })

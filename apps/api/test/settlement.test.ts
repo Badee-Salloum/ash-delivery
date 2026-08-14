@@ -1,15 +1,10 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { fundCodeOf } from '@ash/adapters/memory'
+import { minor } from '@ash/domain'
 import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
 
-/**
- * «كشف التسوية» over HTTP — the manager's answer to «كم يجب ان يسحب و يدخل للصندوق وكم يجب ان
- * يعاد للسائق».
- *
- * The property under test is that it MOVES NOTHING. It is the screen a manager reads before he
- * signs, and a preview that posts is worse than no preview at all.
- */
-
+/** HTTP acceptance tests for the fixed-40 cash-close policy. */
 let h: Harness
 beforeEach(async () => {
   h = await makeHarness()
@@ -19,101 +14,432 @@ afterEach(async () => {
 })
 
 type Payload = Record<string, unknown>
-const get = async (t: string, url: string): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(t) } })
-const post = async (t: string, url: string, payload: Payload = {}): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(t) }, payload })
-const put = async (t: string, url: string, payload: Payload = {}): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(t) }, payload })
-
-/** A shift driven to `pending_review` with one 5,000 fee, closing exactly at BR1 zero. */
-async function shiftAwaitingApproval(): Promise<{ manager: string; shiftId: string }> {
-  const driver = await h.loginAs('driver1')
-  const manager = await h.loginAs('manager')
-  const shiftId = (await post(driver, '/shifts', { driverId: DRIVER_ID, vehicleId: VEHICLE_ID })).json().id as string
-
-  await h.uploadPhoto(driver, shiftId, 'start', 'odometer')
-  await put(driver, `/shifts/${shiftId}/start-package`, { odometerKm: 1000, batteryPercent: 90 })
-  await post(manager, `/shifts/${shiftId}/approve-open`, {
-    floatTranches: [sypStr(100_000)],
-    topupTranches: [sypStr(50_000)],
-  })
-  await post(driver, `/shifts/${shiftId}/orders`, { providerOrderNo: 'S-1', payMode: 'cash', fee: sypStr(5_000) })
-  for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, shiftId, 'end', slot)
-  // cash = float + the whole fee; wallet = top-up − Yallago's 20%. BR1 closes at exactly zero.
-  await put(driver, `/shifts/${shiftId}/end-package`, {
-    odometerKm: 1_040,
-    batteryPercent: 50,
-    cashDeclared: sypStr(105_000),
-    walletDeclared: sypStr(49_000),
-  })
-  return { manager, shiftId }
+type Settlement = {
+  policyCode: 'fixed_40_cash_close_v1'
+  driverRateBps: 4000
+  deliveryFeeTotal: string
+  fixedDriverShare: string
+  manualDriverShare: string
+  grossDriverShare: string
+  cashDeductionTotal: string
+  baseDriverShare: string
+  expectedTotal: string
+  actualCash: string
+  actualWallet: string
+  actualTotal: string
+  variance: string
+  varianceDirection: 'surplus' | 'shortage' | 'balanced'
+  finalEmployeeCash: string
+  walletToOffice: string
+  cashToOffice: string
+  walletAction: 'collect' | 'fund' | 'none'
+  walletAmount: string
+  cashAction: 'collect' | 'pay' | 'none'
+  cashAmount: string
+  settlementHash: string
 }
 
-describe('كشف التسوية', () => {
-  it('defaults to the same no-immediate-payout choice used by approval', async () => {
-    const { manager, shiftId } = await shiftAwaitingApproval()
-    const res = await get(manager, `/shifts/${shiftId}/settlement`)
-    expect(res.statusCode, res.body).toBe(200)
-    const s = res.json()
-    const explicit = await get(manager, `/shifts/${shiftId}/settlement?payShareNow=false`)
-    expect(explicit.statusCode, explicit.body).toBe(200)
+const get = async (token: string, url: string): Promise<LightMyRequestResponse> =>
+  await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(token) } })
+const post = async (token: string, url: string, payload: Payload = {}): Promise<LightMyRequestResponse> =>
+  await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(token) }, payload })
+const put = async (token: string, url: string, payload: Payload): Promise<LightMyRequestResponse> =>
+  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
 
-    // The three destinations must sum back to what he declared — the whole safety property.
-    const sum = (...xs: string[]) => xs.reduce((a, b) => a + Number(b), 0)
-    expect(sum(s.toOfficeCash, s.paidToDriver, s.keptAsReceivable)).toBeCloseTo(105_000, 2)
-    expect(s.paidToDriver).toBe(sypStr(0))
-    expect(s.toOfficeCash).toBe(sypStr(105_000))
-    expect(s.feasible).toBe(true)
-    expect(explicit.json()).toEqual(s)
+interface ShiftOptions {
+  actualCash?: number
+  actualWallet?: number
+  deduction?: number
+  manual?: { fee: number; driverShare: number; companyShare: number }
+  archivedPayment?: number
+}
 
-    // Approval receives the same omitted choice through a different wire schema. Pin the persisted
-    // decision as well as the preview so their defaults cannot silently drift apart again.
-    const review = await get(manager, `/shifts/${shiftId}/review`)
-    expect(review.statusCode, review.body).toBe(200)
-    const approved = await post(manager, `/shifts/${shiftId}/approve-close`, {
-      reviewedOrdersHash: review.json().br1.ordersHash,
+/**
+ * Base case: float 10,000 + wallet top-up 5,000 + one 10,000 cash Yallago delivery.
+ * Expected cash is 20,000, expected wallet is 3,000, and fixed share is 4,000.
+ */
+async function pendingShift(options: ShiftOptions = {}): Promise<{
+  driver: string
+  manager: string
+  shiftId: string
+  reviewHash: string
+}> {
+  const driver = await h.loginAs('driver1')
+  const manager = await h.loginAs('manager')
+  const created = await post(driver, '/shifts', { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 })
+  expect(created.statusCode, created.body).toBe(201)
+  const shiftId = created.json().id as string
+
+  await h.uploadPhoto(driver, shiftId, 'start', 'odometer')
+  expect((await put(driver, `/shifts/${shiftId}/start-package`, {
+    odometerKm: 1_000,
+    batteryPercent: 90,
+  })).statusCode).toBe(200)
+  expect((await post(manager, `/shifts/${shiftId}/approve-open`, {
+    floatTranches: [sypStr(10_000)],
+    topupTranches: [sypStr(5_000)],
+  })).statusCode).toBe(200)
+
+  expect((await post(driver, `/shifts/${shiftId}/orders`, {
+    providerOrderNo: 'YAL-1',
+    payMode: 'cash',
+    fee: sypStr(10_000),
+  })).statusCode).toBe(201)
+
+  if (options.manual) {
+    const manual = options.manual
+    const added = await post(manager, `/shifts/${shiftId}/orders/manual`, {
+      providerOrderNo: 'MAN-1',
+      payMode: 'cash',
+      fee: sypStr(manual.fee),
+      kind: 'manual',
+      driverShare: sypStr(manual.driverShare),
+      companyShare: sypStr(manual.companyShare),
+      notes: 'manager-priced branch delivery',
+      points: [
+        { role: 'start', label: 'A', lat: null, lng: null },
+        { role: 'end', label: 'B', lat: null, lng: null },
+      ],
     })
-    expect(approved.statusCode, approved.body).toBe(200)
-    expect((await h.deps.shifts.findById(shiftId))?.driverSharePaid).toBe(0n)
+    expect(added.statusCode, added.body).toBe(201)
+  }
+
+  if (options.deduction !== undefined) {
+    const operations = await put(driver, `/shifts/${shiftId}/operations`, {
+      orders: [],
+      cashDeductions: [{
+        operationKey: `settlement-deduction-${shiftId}`,
+        amount: sypStr(options.deduction),
+        amountOcr: sypStr(options.deduction),
+        occurredDate: '2026-07-21',
+        occurredMinute: '08:00',
+        pointA: 'A',
+        pointB: 'B',
+        source: 'ocr',
+      }],
+      movements: [],
+    })
+    expect(operations.statusCode, operations.body).toBe(200)
+  }
+
+  if (options.archivedPayment !== undefined) {
+    await h.deps.movements.merge(
+      shiftId,
+      [{ amount: minor(BigInt(options.archivedPayment) * 100n), occurredMinute: '08:00' }],
+      'u-d1',
+    )
+  }
+
+  for (const slot of ['dashboard', 'wallet', 'odometer']) {
+    await h.uploadPhoto(driver, shiftId, 'end', slot)
+  }
+  const expectedCash = 20_000 + (options.manual?.fee ?? 0) - (options.deduction ?? 0)
+  const submitted = await put(driver, `/shifts/${shiftId}/end-package`, {
+    odometerKm: 1_040,
+    batteryPercent: null,
+    cashDeclared: sypStr(options.actualCash ?? expectedCash),
+    walletDeclared: sypStr(options.actualWallet ?? 3_000),
   })
+  expect(submitted.statusCode, submitted.body).toBe(200)
+  expect(submitted.json().state).toBe('pending_review')
 
-  it('moves money into the ذمة without touching the share', async () => {
-    const { manager, shiftId } = await shiftAwaitingApproval()
-    const plain = (await get(manager, `/shifts/${shiftId}/settlement`)).json()
-    const kept = (await get(manager, `/shifts/${shiftId}/settlement?keepAsReceivable=40000.00`)).json()
+  const review = await get(manager, `/shifts/${shiftId}/review`)
+  expect(review.statusCode, review.body).toBe(200)
+  return { driver, manager, shiftId, reviewHash: review.json().br1.ordersHash as string }
+}
 
-    expect(kept.keptAsReceivable).toBe(sypStr(40_000))
-    expect(kept.paidToDriver).toBe(plain.paidToDriver)
-    expect(Number(kept.toOfficeCash)).toBeCloseTo(Number(plain.toOfficeCash) - 40_000, 2)
+async function preview(manager: string, shiftId: string): Promise<Settlement> {
+  const response = await get(manager, `/shifts/${shiftId}/settlement`)
+  expect(response.statusCode, response.body).toBe(200)
+  return response.json() as Settlement
+}
+
+async function approve(
+  manager: string,
+  shiftId: string,
+  reviewHash: string,
+  settlement: Settlement,
+  varianceReason: string | null = settlement.variance === '0.00' ? null : 'verified at the counter',
+): Promise<LightMyRequestResponse> {
+  return await post(manager, `/shifts/${shiftId}/approve-close`, {
+    reviewedOrdersHash: reviewHash,
+    reviewedSettlementHash: settlement.settlementHash,
+    walletTransferConfirmed: true,
+    cashSettlementConfirmed: true,
+    varianceReason,
   })
+}
 
-  it('sends everything to the box when the share is not paid tonight', async () => {
-    const { manager, shiftId } = await shiftAwaitingApproval()
-    const res = await get(manager, `/shifts/${shiftId}/settlement?payShareNow=false`)
-    expect(res.json().paidToDriver).toBe(sypStr(0))
-    expect(res.json().toOfficeCash).toBe(sypStr(105_000))
-  })
-
-  it('refuses a ذمة larger than the cash he is holding', async () => {
-    const { manager, shiftId } = await shiftAwaitingApproval()
-    const res = await get(manager, `/shifts/${shiftId}/settlement?keepAsReceivable=999999.00`)
-    expect(res.json().feasible).toBe(false)
-    expect(res.json().refusals).toContain('keep_exceeds_end_cash')
-  })
-
-  /** A preview that posts is worse than no preview. Nothing may reach the ledger from a GET. */
-  it('POSTS NOTHING — the ledger is untouched by reading it', async () => {
-    const { manager, shiftId } = await shiftAwaitingApproval()
+describe('fixed 40% settlement preview', () => {
+  it('shows the balanced wallet sweep and one cash transaction without posting', async () => {
+    const { manager, shiftId } = await pendingShift()
     const before = await h.deps.ledger.listByShift(shiftId)
-    await get(manager, `/shifts/${shiftId}/settlement?keepAsReceivable=40000.00`)
-    await get(manager, `/shifts/${shiftId}/settlement?payShareNow=false`)
-    expect(await h.deps.ledger.listByShift(shiftId)).toHaveLength(before.length)
+    const settlement = await preview(manager, shiftId)
+
+    expect(settlement).toMatchObject({
+      policyCode: 'fixed_40_cash_close_v1',
+      driverRateBps: 4000,
+      deliveryFeeTotal: '10000.00',
+      fixedDriverShare: '4000.00',
+      manualDriverShare: '0.00',
+      grossDriverShare: '4000.00',
+      cashDeductionTotal: '0.00',
+      baseDriverShare: '4000.00',
+      expectedTotal: '23000.00',
+      actualCash: '20000.00',
+      actualWallet: '3000.00',
+      actualTotal: '23000.00',
+      variance: '0.00',
+      varianceDirection: 'balanced',
+      finalEmployeeCash: '4000.00',
+      walletToOffice: '3000.00',
+      walletAction: 'collect',
+      walletAmount: '3000.00',
+      cashToOffice: '16000.00',
+      cashAction: 'collect',
+      cashAmount: '16000.00',
+    })
+    expect(settlement.settlementHash).toMatch(/^[0-9a-f]{64}$/)
+    expect(await h.deps.ledger.listByShift(shiftId)).toEqual(before)
   })
 
-  it('is refused to a driver — it names his share and the branch`s takings', async () => {
-    const driver = await h.loginAs('driver1')
-    const { shiftId } = await shiftAwaitingApproval()
-    expect((await get(driver, `/shifts/${shiftId}/settlement`)).statusCode).toBe(403)
+  it.each([
+    {
+      title: 'cash surplus', actualCash: 21_000, actualWallet: 3_000,
+      variance: '1000.00', direction: 'surplus', final: '5000.00', wallet: '3000.00', cash: '16000.00', cashAction: 'collect',
+    },
+    {
+      title: 'wallet surplus', actualCash: 20_000, actualWallet: 4_000,
+      variance: '1000.00', direction: 'surplus', final: '5000.00', wallet: '4000.00', cash: '15000.00', cashAction: 'collect',
+    },
+    {
+      title: 'cash shortage', actualCash: 19_000, actualWallet: 3_000,
+      variance: '-1000.00', direction: 'shortage', final: '3000.00', wallet: '3000.00', cash: '16000.00', cashAction: 'collect',
+    },
+    {
+      title: 'wallet shortage', actualCash: 20_000, actualWallet: 2_000,
+      variance: '-1000.00', direction: 'shortage', final: '3000.00', wallet: '2000.00', cash: '17000.00', cashAction: 'collect',
+    },
+    {
+      title: 'combined cash and wallet surplus', actualCash: 20_500, actualWallet: 3_500,
+      variance: '1000.00', direction: 'surplus', final: '5000.00', wallet: '3500.00', cash: '15500.00', cashAction: 'collect',
+    },
+    {
+      title: 'combined cash and wallet shortage', actualCash: 19_500, actualWallet: 2_500,
+      variance: '-1000.00', direction: 'shortage', final: '3000.00', wallet: '2500.00', cash: '16500.00', cashAction: 'collect',
+    },
+    {
+      title: 'shortage exactly equal to the share', actualCash: 16_000, actualWallet: 3_000,
+      variance: '-4000.00', direction: 'shortage', final: '0.00', wallet: '3000.00', cash: '16000.00', cashAction: 'collect',
+    },
+    {
+      title: 'wallet exceeds branch entitlement', actualCash: 0, actualWallet: 25_000,
+      variance: '2000.00', direction: 'surplus', final: '6000.00', wallet: '25000.00', cash: '-6000.00', cashAction: 'pay',
+    },
+    {
+      title: 'zero wallet', actualCash: 23_000, actualWallet: 0,
+      variance: '0.00', direction: 'balanced', final: '4000.00', wallet: '0.00', cash: '19000.00', cashAction: 'collect',
+    },
+    {
+      title: 'negative wallet funded back to zero', actualCash: 24_000, actualWallet: -1_000,
+      variance: '0.00', direction: 'balanced', final: '4000.00', wallet: '-1000.00', cash: '20000.00', cashAction: 'collect',
+    },
+  ] as const)(
+    'assigns a $title to the employee and keeps the physical directions explicit',
+    async ({ actualCash, actualWallet, variance, direction, final, wallet, cash, cashAction }) => {
+      const { manager, shiftId } = await pendingShift({ actualCash, actualWallet })
+      const settlement = await preview(manager, shiftId)
+      expect(settlement).toMatchObject({
+        variance,
+        varianceDirection: direction,
+        finalEmployeeCash: final,
+        walletToOffice: wallet,
+        walletAmount: wallet.replace('-', ''),
+        walletAction: wallet === '0.00' ? 'none' : wallet.startsWith('-') ? 'fund' : 'collect',
+        cashToOffice: cash,
+        cashAmount: cash.replace('-', ''),
+        cashAction,
+      })
+    },
+  )
+
+  it('counts a cash deduction once: it lowers expected cash and the employee share', async () => {
+    const { manager, shiftId } = await pendingShift({ deduction: 500 })
+    const settlement = await preview(manager, shiftId)
+
+    expect(settlement).toMatchObject({
+      fixedDriverShare: '4000.00',
+      grossDriverShare: '4000.00',
+      cashDeductionTotal: '500.00',
+      baseDriverShare: '3500.00',
+      expectedTotal: '22500.00',
+      actualTotal: '22500.00',
+      variance: '0.00',
+      finalEmployeeCash: '3500.00',
+      cashToOffice: '16000.00',
+    })
+  })
+
+  it('adds the manager-priced manual share without putting its fee in the 40% basis', async () => {
+    const { manager, shiftId } = await pendingShift({
+      manual: { fee: 3_000, driverShare: 1_200, companyShare: 1_800 },
+    })
+    expect(await preview(manager, shiftId)).toMatchObject({
+      deliveryFeeTotal: '10000.00',
+      fixedDriverShare: '4000.00',
+      manualDriverShare: '1200.00',
+      grossDriverShare: '5200.00',
+      baseDriverShare: '5200.00',
+      expectedTotal: '26000.00',
+      finalEmployeeCash: '5200.00',
+      walletToOffice: '3000.00',
+      cashToOffice: '17800.00',
+    })
+  })
+
+  it('keeps payment-log rows archival and optional', async () => {
+    const plain = await pendingShift()
+    const plainSettlement = await preview(plain.manager, plain.shiftId)
+    await h.app.close()
+
+    h = await makeHarness()
+    const archived = await pendingShift({ archivedPayment: 9_999 })
+    const archivedSettlement = await preview(archived.manager, archived.shiftId)
+    expect(archivedSettlement).toMatchObject({
+      expectedTotal: plainSettlement.expectedTotal,
+      actualTotal: plainSettlement.actualTotal,
+      variance: plainSettlement.variance,
+      fixedDriverShare: plainSettlement.fixedDriverShare,
+      finalEmployeeCash: plainSettlement.finalEmployeeCash,
+      walletToOffice: plainSettlement.walletToOffice,
+      cashToOffice: plainSettlement.cashToOffice,
+    })
+  })
+})
+
+describe('fixed 40% approval', () => {
+  it('gives old clients a named refusal until both actions and the immutable hash are confirmed', async () => {
+    const { manager, shiftId, reviewHash } = await pendingShift()
+    const oldClient = await post(manager, `/shifts/${shiftId}/approve-close`, {
+      reviewedOrdersHash: reviewHash,
+    })
+    expect(oldClient.statusCode, oldClient.body).toBe(422)
+    expect(oldClient.json()).toMatchObject({
+      error: 'settlement_confirmation_required',
+      detail: {
+        missing: expect.arrayContaining([
+          'reviewedSettlementHash',
+          'walletTransferConfirmed',
+          'cashSettlementConfirmed',
+        ]),
+      },
+    })
+  })
+
+  it('refuses a stale settlement hash when actual figures change but the orders hash still matches', async () => {
+    const { manager, shiftId, reviewHash } = await pendingShift()
+    const settlement = await preview(manager, shiftId)
+    const shift = await h.deps.shifts.findById(shiftId)
+    expect(shift).not.toBeNull()
+    await h.deps.shifts.update({ ...shift!, endCashDeclared: minor(2_010_000n) }, 'u-bm')
+    const stale = await post(manager, `/shifts/${shiftId}/approve-close`, {
+      reviewedOrdersHash: reviewHash,
+      reviewedSettlementHash: settlement.settlementHash,
+      walletTransferConfirmed: true,
+      cashSettlementConfirmed: true,
+      varianceReason: 'cash figure was corrected',
+    })
+    expect(stale.statusCode, stale.body).toBe(409)
+    expect(stale.json().error).toBe('settlement_changed_since_review')
+  })
+
+  it('requires a reason for a non-zero variance but lets the employee submit it for review', async () => {
+    const { manager, shiftId, reviewHash } = await pendingShift({ actualCash: 19_000, actualWallet: 3_000 })
+    const settlement = await preview(manager, shiftId)
+    expect(settlement).toMatchObject({ variance: '-1000.00', varianceDirection: 'shortage' })
+    expect((await h.deps.shifts.findById(shiftId))?.state).toBe('pending_review')
+
+    const withoutReason = await approve(manager, shiftId, reviewHash, settlement, null)
+    expect(withoutReason.statusCode, withoutReason.body).toBe(422)
+    expect(withoutReason.json().error).toBe('variance_reason_required')
+
+    const accepted = await approve(manager, shiftId, reviewHash, settlement, 'counted with the employee')
+    expect(accepted.statusCode, accepted.body).toBe(200)
+    expect(accepted.json().state).toBe('approved')
+  })
+
+  it('persists the confirmed snapshot and clears cash, wallet, share, and close receivable', async () => {
+    // A 5,000 shortage exceeds the 4,000 share. The employee pays 1,000 extra immediately.
+    const { manager, shiftId, reviewHash } = await pendingShift({ actualCash: 15_000, actualWallet: 3_000 })
+    const settlement = await preview(manager, shiftId)
+    expect(settlement).toMatchObject({
+      variance: '-5000.00',
+      varianceDirection: 'shortage',
+      finalEmployeeCash: '-1000.00',
+      walletAction: 'collect',
+      walletAmount: '3000.00',
+      cashAction: 'collect',
+      cashAmount: '16000.00',
+    })
+
+    const approved = await approve(manager, shiftId, reviewHash, settlement, 'employee paid the shortage')
+    expect(approved.statusCode, approved.body).toBe(200)
+
+    const snapshot = await h.deps.settlements.findByShift(shiftId)
+    expect(snapshot).toMatchObject({
+      policyCode: 'fixed_40_cash_close_v1',
+      driverRateBps: 4000,
+      variance: minor(-500_000n),
+      finalEmployeeCash: minor(-100_000n),
+      walletToOffice: minor(300_000n),
+      cashToOffice: minor(1_600_000n),
+      walletTransferConfirmed: true,
+      cashSettlementConfirmed: true,
+      confirmedBy: 'u-bm',
+      confirmedAtMs: h.deps.clock.nowMs(),
+      varianceReason: 'employee paid the shortage',
+      settlementHash: settlement.settlementHash,
+    })
+    expect(await h.deps.shifts.findById(shiftId)).toMatchObject({
+      keptAsReceivable: 0n,
+      driverSharePaid: 0n,
+    })
+
+    for (const fund of [
+      fundCodeOf({ kind: 'driver_cash', driverId: DRIVER_ID }),
+      fundCodeOf({ kind: 'driver_wallet', driverId: DRIVER_ID }),
+      fundCodeOf({ kind: 'driver_share_payable', driverId: DRIVER_ID }),
+      fundCodeOf({ kind: 'driver_receivable_cash', driverId: DRIVER_ID }),
+    ]) {
+      expect(await h.deps.ledger.fundBalance('branch-damascus', fund), fund).toBe(0n)
+    }
+  })
+
+  it('retires receivable and deferred-share choices with an explicit policy refusal', async () => {
+    const { manager, shiftId, reviewHash } = await pendingShift()
+    const settlement = await preview(manager, shiftId)
+    for (const legacyChoice of [
+      { payShareNow: false },
+      { keepAsReceivable: '1.00' },
+    ]) {
+      const response = await post(manager, `/shifts/${shiftId}/approve-close`, {
+        reviewedOrdersHash: reviewHash,
+        reviewedSettlementHash: settlement.settlementHash,
+        walletTransferConfirmed: true,
+        cashSettlementConfirmed: true,
+        ...legacyChoice,
+      })
+      expect(response.statusCode, response.body).toBe(422)
+      expect(response.json().error).toBe('fixed_cash_settlement_required')
+    }
+  })
+
+  it('does not let archived payments affect approval postings', async () => {
+    const { manager, shiftId, reviewHash } = await pendingShift({ archivedPayment: 9_999 })
+    const settlement = await preview(manager, shiftId)
+    const response = await approve(manager, shiftId, reviewHash, settlement)
+    expect(response.statusCode, response.body).toBe(200)
+    expect(h.deps.ledger.entries.some((entry) => entry.eventType === 'wallet_adjustment')).toBe(false)
+    expect(await h.deps.ledger.fundBalance('branch-damascus', 'cost_center:wallet_adjustment:branch-damascus')).toBe(0n)
   })
 })

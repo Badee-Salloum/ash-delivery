@@ -1,7 +1,7 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { fundCodeOf } from '@ash/adapters/memory'
-import { DRIVER2_ID, DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
+import { DRIVER2_ID, DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr } from './harness.ts'
 
 /**
  * A second (or later) cash-float / wallet top-up disbursed mid-day (SRS C-5). The arrays and the
@@ -63,7 +63,7 @@ async function submitEnd(driver: string, id: string, cash: number, wallet: numbe
 
 async function approveClose(manager: string, id: string): Promise<LightMyRequestResponse> {
   const hash = (await get(manager, `/shifts/${id}/review`)).json().br1.ordersHash as string
-  return await post(manager, `/shifts/${id}/approve-close`, { reviewedOrdersHash: hash })
+  return await approveFixedClose(h, manager, id, hash)
 }
 
 const cashOf = async (driverId: string): Promise<bigint> =>

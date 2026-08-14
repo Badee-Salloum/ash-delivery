@@ -1,9 +1,11 @@
-import { afterAll, describe, it } from 'vitest'
-import type { Deps } from '@ash/contracts'
+import { afterAll, describe, expect, it } from 'vitest'
+import type { Deps, NewShiftSettlementRecord } from '@ash/contracts'
+import { minor } from '@ash/domain'
 import { runConformanceSuite } from '@ash/testkit/conformance'
 import { assertBigIntParser, createPool } from '../src/pool.ts'
 import { migrate } from '../src/migrate.ts'
 import { PgShiftCloseUnitOfWork } from '../src/repos-close.ts'
+import { PgShiftSettlementRepo } from '../src/repos-settlement.ts'
 import {
   PgAuditRepo,
   PgCashDeductionRepo,
@@ -70,15 +72,13 @@ if (!DATABASE_URL) {
   const MEDIA_1 = '99999999-bbbb-4bbb-8bbb-bbbbbbbbbbb1'
   const MEDIA_2 = '99999999-bbbb-4bbb-8bbb-bbbbbbbbbbb2'
 
-  runConformanceSuite({
-    label: 'postgres',
-    async makeDeps(): Promise<Deps> {
+  const makeDeps = async (): Promise<Deps> => {
       await ensureSchema()
 
       // Truncate rather than re-migrate: orders of magnitude faster, and it exercises the real
       // constraints on every run instead of a freshly-empty database.
       await pool.query(`
-        TRUNCATE journal_lines, journal_entries, cash_deductions, shift_orders, shift_media_attachment_history, shift_media, media, float_tranches, expenses, expense_categories, settings, cash_counts, cash_count_lines, tier_rules, notifications,
+        TRUNCATE shift_settlements, journal_lines, journal_entries, cash_deductions, shift_orders, shift_media_attachment_history, shift_media, media, float_tranches, expenses, expense_categories, settings, cash_counts, cash_count_lines, tier_rules, notifications,
                  shift_battery_readings, gps_pings, batteries,
                  shifts, funds, fx_days, week_locks, audit_log, sessions, drivers, vehicles,
                  vehicle_types, users, branches, governorates
@@ -192,10 +192,144 @@ if (!DATABASE_URL) {
         vehicleEvents: new PgVehicleEventRepo(pool),
         attendance: new PgAttendanceRepo(pool),
         decisions: new PgShiftDecisionRepo(pool),
+        settlements: new PgShiftSettlementRepo(pool),
         gps: new PgGpsPingRepo(pool),
         closeUnitOfWork: new PgShiftCloseUnitOfWork(pool),
       }
-    },
+    }
+
+  runConformanceSuite({
+    label: 'postgres',
+    makeDeps,
+  })
+
+  describe('PostgreSQL shift-settlement state guard', () => {
+    it('rejects an open/unsubmitted shift, then accepts the same snapshot under submitted review', async () => {
+      const deps = await makeDeps()
+      const shift = await deps.shifts.findById(SHIFT)
+      expect(shift).not.toBeNull()
+      await deps.shifts.update({
+        ...shift!,
+        state: 'open',
+        openApprovedAt: '2026-07-21T04:00:00.000Z',
+        openApprovedBy: USER,
+        submittedAt: null,
+      }, USER)
+
+      const zero = minor(0n)
+      const snapshot: NewShiftSettlementRecord = {
+        shiftId: SHIFT,
+        branchId: BRANCH,
+        driverId: '77777777-7777-7777-7777-777777777777',
+        businessDate: '2026-07-21',
+        policyCode: 'fixed_40_cash_close_v1',
+        driverRateBps: 4_000,
+        deliveryFeeTotal: zero,
+        fixedDriverShare: zero,
+        manualDriverShare: zero,
+        grossDriverShare: zero,
+        cashDeductionTotal: zero,
+        baseDriverShare: zero,
+        expectedTotal: zero,
+        actualCash: zero,
+        actualWallet: zero,
+        actualTotal: zero,
+        variance: zero,
+        varianceDirection: 'balanced',
+        finalEmployeeCash: zero,
+        walletToOffice: zero,
+        cashToOffice: zero,
+        walletAction: 'none',
+        walletAmount: zero,
+        cashAction: 'none',
+        cashAmount: zero,
+        reviewedOrdersHash: 'state-guard-orders',
+        settlementHash: 'd'.repeat(64),
+        walletTransferConfirmed: true,
+        cashSettlementConfirmed: true,
+        confirmedBy: USER,
+        confirmedAtMs: Date.UTC(2026, 6, 21, 5, 0, 0),
+        varianceReason: null,
+      }
+
+      await expect(deps.settlements.create(snapshot)).rejects.toMatchObject({
+        code: '23514',
+        constraint: 'shift_settlements_shift_state_guard',
+      })
+      expect(await deps.settlements.findByShift(SHIFT)).toBeNull()
+
+      const open = await deps.shifts.findById(SHIFT)
+      expect(open).not.toBeNull()
+      await deps.shifts.update({
+        ...open!,
+        state: 'pending_review',
+        submittedAt: '2026-07-21T05:00:00.000Z',
+      }, USER)
+
+      const preparedDecision = await deps.decisions.record({
+        shiftId: SHIFT,
+        gate: 'close',
+        decision: 'force_close_prepared',
+        notes: 'manager froze the boundary and actual figures',
+        decidedBy: USER,
+        decidedAtMs: Date.UTC(2026, 6, 21, 5, 0, 0),
+      })
+      await expect(
+        pool.query("UPDATE shift_decisions SET notes = 'rewritten' WHERE id = $1", [preparedDecision.id]),
+      ).rejects.toMatchObject({ code: '55000' })
+      await expect(
+        pool.query('DELETE FROM shift_decisions WHERE id = $1', [preparedDecision.id]),
+      ).rejects.toMatchObject({ code: '55000' })
+      expect(await deps.decisions.listByShift(SHIFT)).toContainEqual(preparedDecision)
+
+      const accepted = await deps.settlements.create(snapshot)
+      expect(accepted).toMatchObject({
+        shiftId: SHIFT,
+        settlementHash: snapshot.settlementHash,
+        confirmedBy: USER,
+      })
+    })
+
+    it.each(['draft', 'awaiting_open_approval'] as const)(
+      'keeps decisions append-only while allowing a parent-shift cascade from %s',
+      async (state) => {
+        const deps = await makeDeps()
+
+        if (state === 'awaiting_open_approval') {
+          await pool.query(
+            `UPDATE shifts
+                SET state = 'awaiting_open_approval', driver_confirmed_at = now()
+              WHERE id = $1`,
+            [SHIFT],
+          )
+        }
+
+        const decision = await deps.decisions.record({
+          shiftId: SHIFT,
+          gate: 'close',
+          decision: 'force_close_prepared',
+          notes: `cascade proof for ${state}`,
+          decidedBy: USER,
+          decidedAtMs: Date.UTC(2026, 6, 21, 5, 0, 0),
+        })
+
+        await expect(
+          pool.query("UPDATE shift_decisions SET notes = 'rewritten' WHERE id = $1", [decision.id]),
+        ).rejects.toMatchObject({ code: '55000' })
+        await expect(
+          pool.query('DELETE FROM shift_decisions WHERE id = $1', [decision.id]),
+        ).rejects.toMatchObject({ code: '55000' })
+        expect(await deps.decisions.listByShift(SHIFT)).toContainEqual(decision)
+
+        const deleted = await pool.query('DELETE FROM shifts WHERE id = $1', [SHIFT])
+        expect(deleted.rowCount).toBe(1)
+        const remaining = await pool.query<{ count: number }>(
+          'SELECT COUNT(*)::int AS count FROM shift_decisions WHERE id = $1',
+          [decision.id],
+        )
+        expect(remaining.rows[0]?.count).toBe(0)
+      },
+    )
   })
 
   afterAll(async () => {

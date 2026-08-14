@@ -2,7 +2,7 @@ import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { fundCodeOf } from '@ash/adapters/memory'
 import { minor } from '@ash/domain'
-import { DRIVER2_ID, DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
+import { DRIVER2_ID, DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr } from './harness.ts'
 
 /**
  * The operations of a shift: what was delivered, what the wallet actually did, and which of it
@@ -128,12 +128,12 @@ describe('an operation nobody checked', () => {
     const row = (await h.deps.orders.listByShift(id)).find((o) => o.providerOrderNo === 'YAL-3')!
     await h.deps.orders.update({ ...row, walletAmount: minor(2_000_00n) }, 'u-bm')
 
-    const stale = await post(manager, `/shifts/${id}/approve-close`, { reviewedOrdersHash: reviewed })
+    const stale = await approveFixedClose(h, manager, id, reviewed)
     expect(stale.statusCode, stale.body).toBe(409)
     expect(stale.json().error).toBe('orders_changed_since_review')
   })
 
-  it('reaches neither the ledger nor the tier band', async () => {
+  it('reaches neither the ledger nor the fixed-share basis', async () => {
     const { id, driver, manager } = await openWithOrders(10)
     await exclude(id, 'YAL-10')
     await put(driver, `/shifts/${id}/end-package`, {
@@ -143,15 +143,14 @@ describe('an operation nobody checked', () => {
       walletDeclared: sypStr(41_000),
     })
     const review = await get(manager, `/shifts/${id}/review`)
-    const approved = await post(manager, `/shifts/${id}/approve-close`, {
-      reviewedOrdersHash: review.json().br1.ordersHash,
-    })
+    const approved = await approveFixedClose(h, manager, id, review.json().br1.ordersHash)
     expect(approved.statusCode, approved.body).toBe(200)
 
     // Nine orders of 5,000 = 45,000 of fees, and Yallago's 20% of that is 9,000 — not 10,000.
     expect(await bal('yalago_share')).toBe(900_000n)
-    // Nine is still the 0–14 band: 35% of 45,000 = 15,750.
-    expect(await bal(fundCodeOf({ kind: 'driver_share_payable', driverId: DRIVER_ID }))).toBe(-1_575_000n)
+    // Fixed share uses the nine included fees only: 40% of 45,000 = 18,000, settled immediately.
+    expect((await h.deps.settlements.findByShift(id))?.fixedDriverShare).toBe(1_800_000n)
+    expect(await bal(fundCodeOf({ kind: 'driver_share_payable', driverId: DRIVER_ID }))).toBe(0n)
     expect(await bal(fundCodeOf({ kind: 'driver_cash', driverId: DRIVER_ID }))).toBe(0n)
     expect(await bal(fundCodeOf({ kind: 'driver_wallet', driverId: DRIVER_ID }))).toBe(0n)
   })
@@ -225,9 +224,7 @@ describe('what the wallet did on its own', () => {
       walletDeclared: sypStr(40_000),
     })
     const review = await get(manager, `/shifts/${id}/review`)
-    const approved = await post(manager, `/shifts/${id}/approve-close`, {
-      reviewedOrdersHash: review.json().br1.ordersHash,
-    })
+    const approved = await approveFixedClose(h, manager, id, review.json().br1.ordersHash)
     expect(approved.statusCode, approved.body).toBe(200)
 
     expect(await bal(fundCodeOf({ kind: 'driver_wallet', driverId: DRIVER_ID }))).toBe(0n)
@@ -256,7 +253,7 @@ describe('what the wallet did on its own', () => {
       'u-driver',
     )
 
-    const approved = await post(manager, `/shifts/${id}/approve-close`, { reviewedOrdersHash: reviewed })
+    const approved = await approveFixedClose(h, manager, id, reviewed)
     expect(approved.statusCode, approved.body).toBe(200)
   })
 })
@@ -438,7 +435,7 @@ describe('an order the customer paid partly in cash', () => {
     expect(closed.json().br1.difference).toBe('0.00')
 
     const review = await get(manager, `/shifts/${id}/review`)
-    expect((await post(manager, `/shifts/${id}/approve-close`, { reviewedOrdersHash: review.json().br1.ordersHash })).statusCode).toBe(200)
+    expect((await approveFixedClose(h, manager, id, review.json().br1.ordersHash)).statusCode).toBe(200)
     expect(await bal(fundCodeOf({ kind: 'driver_cash', driverId: DRIVER_ID }))).toBe(0n)
     expect(await bal(fundCodeOf({ kind: 'driver_wallet', driverId: DRIVER_ID }))).toBe(0n)
   })

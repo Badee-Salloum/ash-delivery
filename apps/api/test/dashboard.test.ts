@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BRANCH, DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
+import { BRANCH, DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr } from './harness.ts'
 
 /**
  * The minimal ops dashboard (SRS I-1). Total profit is GM-only (BR8), which is why it is a
@@ -58,10 +58,7 @@ async function runCanonicalShift(): Promise<void> {
     payload: { odometerKm: 92, batteryPercent: 22, cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000) },
   })
   const review = await get(manager, `/shifts/${id}/review`)
-  await h.app.inject({
-    method: 'POST', url: `/shifts/${id}/approve-close`, headers: { cookie: h.cookie(manager) },
-    payload: { reviewedOrdersHash: review.json().br1.ordersHash },
-  })
+  await approveFixedClose(h, manager, id, review.json().br1.ordersHash)
 }
 
 describe('the operational dashboard', () => {

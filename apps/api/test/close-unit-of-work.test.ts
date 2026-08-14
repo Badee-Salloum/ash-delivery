@@ -2,7 +2,18 @@ import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { fundCodeOf } from '@ash/adapters/memory'
 import { postingsForOpen } from '@ash/domain'
-import { BRANCH, DRIVER_ID, type Harness, NOW_MS, VEHICLE_ID, makeHarness, syp, sypStr } from './harness.ts'
+import {
+  BRANCH,
+  DRIVER_ID,
+  type Harness,
+  NOW_MS,
+  VEHICLE_ID,
+  approveFixedClose,
+  fixedApprovalPayload,
+  makeHarness,
+  syp,
+  sypStr,
+} from './harness.ts'
 
 type Payload = Record<string, unknown>
 
@@ -99,6 +110,7 @@ describe('close unit-of-work rollback', () => {
     const manager = await h.loginAs('manager')
     const id = await pendingReview(h, driver, manager, 'ROLLBACK-CLOSE')
     const hash = await reviewedHash(h, manager, id)
+    const approvalPayload = await fixedApprovalPayload(h, manager, id, hash)
     const beforeShift = await h.deps.shifts.findById(id)
     const beforeLedger = await h.deps.ledger.listByShift(id)
     const beforeDecisions = await h.deps.decisions.listByShift(id)
@@ -109,7 +121,7 @@ describe('close unit-of-work rollback', () => {
       throw new Error('injected after close decision insert')
     }
     try {
-      const failed = await post(h, manager, `/shifts/${id}/approve-close`, { reviewedOrdersHash: hash })
+      const failed = await post(h, manager, `/shifts/${id}/approve-close`, approvalPayload)
       expect(failed.statusCode, failed.body).toBe(500)
     } finally {
       h.deps.decisions.record = originalRecord
@@ -118,6 +130,7 @@ describe('close unit-of-work rollback', () => {
     expect(await h.deps.shifts.findById(id)).toEqual(beforeShift)
     expect(await h.deps.ledger.listByShift(id)).toEqual(beforeLedger)
     expect(await h.deps.decisions.listByShift(id)).toEqual(beforeDecisions)
+    expect(await h.deps.settlements.findByShift(id)).toBeNull()
   })
 
   it('rolls back approve-open money, state, decision, and FX state', async () => {
@@ -208,6 +221,7 @@ describe('close unit-of-work concurrency', () => {
     const manager = await h.loginAs('manager')
     const id = await pendingReview(h, driver, manager, 'WAITING')
     const hash = await reviewedHash(h, manager, id)
+    const approvalPayload = await fixedApprovalPayload(h, manager, id, hash)
     const enteredLedger = latch()
     const releaseLedger = latch()
     const competingRuns = latch()
@@ -235,7 +249,7 @@ describe('close unit-of-work concurrency', () => {
     }
 
     try {
-      const approval = post(h, manager, `/shifts/${id}/approve-close`, { reviewedOrdersHash: hash })
+      const approval = post(h, manager, `/shifts/${id}/approve-close`, approvalPayload)
       await enteredLedger.promise
       let revisionFinished = false
       let rephotoFinished = false
@@ -354,20 +368,27 @@ async function tierBalances(harness: Harness): Promise<Record<string, bigint>> {
   return Object.fromEntries(await Promise.all(codes.map(async (code) => [code, await harness.deps.ledger.fundBalance(BRANCH, code)])))
 }
 
-describe('same-driver/day approval serialization', () => {
-  it('produces the same final tier ledger concurrently as it does sequentially', async () => {
+describe('same-driver/day fixed-share approvals', () => {
+  it('produces the same final ledger concurrently without a day-level true-up lock', async () => {
     const sequential = await makeHarness()
     try {
       const baseline = await prepareSameDayPair(sequential)
       for (let index = 0; index < baseline.ids.length; index += 1) {
-        const approved = await post(sequential, baseline.manager, `/shifts/${baseline.ids[index]}/approve-close`, {
-          reviewedOrdersHash: baseline.hashes[index],
-        })
+        const approved = await approveFixedClose(
+          sequential,
+          baseline.manager,
+          baseline.ids[index]!,
+          baseline.hashes[index]!,
+        )
         expect(approved.statusCode, approved.body).toBe(200)
       }
       const expected = await tierBalances(sequential)
 
       const concurrent = await prepareSameDayPair(h)
+      const approvalPayloads = await Promise.all([
+        fixedApprovalPayload(h, concurrent.manager, concurrent.ids[0], concurrent.hashes[0]),
+        fixedApprovalPayload(h, concurrent.manager, concurrent.ids[1], concurrent.hashes[1]),
+      ])
       const enteredLedger = latch()
       const releaseLedger = latch()
       const originalPost = h.deps.ledger.post
@@ -387,13 +408,9 @@ describe('same-driver/day approval serialization', () => {
         return originalRun(input, work)
       }
       try {
-        const first = post(h, concurrent.manager, `/shifts/${concurrent.ids[0]}/approve-close`, {
-          reviewedOrdersHash: concurrent.hashes[0],
-        })
+        const first = post(h, concurrent.manager, `/shifts/${concurrent.ids[0]}/approve-close`, approvalPayloads[0])
         await enteredLedger.promise
-        const second = post(h, concurrent.manager, `/shifts/${concurrent.ids[1]}/approve-close`, {
-          reviewedOrdersHash: concurrent.hashes[1],
-        })
+        const second = post(h, concurrent.manager, `/shifts/${concurrent.ids[1]}/approve-close`, approvalPayloads[1])
         releaseLedger.release()
         const responses = await Promise.all([first, second])
         expect(responses.map((response) => response.statusCode)).toEqual([200, 200])
@@ -403,9 +420,9 @@ describe('same-driver/day approval serialization', () => {
         h.deps.closeUnitOfWork.run = originalRun
       }
 
-      expect(serializedApprovals).toBe(2)
+      expect(serializedApprovals).toBe(0)
       expect(await tierBalances(h)).toEqual(expected)
-      expect(expected[fundCodeOf({ kind: 'driver_share_payable', driverId: DRIVER_ID })]).toBe(-4_000_000n)
+      expect(expected[fundCodeOf({ kind: 'driver_share_payable', driverId: DRIVER_ID })]).toBe(0n)
       expect(expected.company_revenue).toBe(-4_000_000n)
       expect(expected.yalago_income).toBe(-2_000_000n)
       expect(expected.fee_earned).toBe(0n)

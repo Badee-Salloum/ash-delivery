@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify'
 import { type MemoryDeps, createMemoryDeps } from '@ash/adapters/memory'
 import type { OcrReader } from '@ash/contracts'
 import { type Minor, businessDateFor, minor } from '@ash/domain'
@@ -159,3 +159,60 @@ export async function makeHarness(
 }
 
 export const today = businessDateFor(NOW_MS, 180)
+
+export interface FixedSettlementPreviewForApproval {
+  settlementHash: string
+  variance: string
+}
+
+/**
+ * Build the exact fixed-policy approval payload from a fresh read-only preview.
+ *
+ * Most lifecycle tests are about some other gate, so centralising the two physical confirmations
+ * prevents them from accidentally exercising the old deferred-share policy. Tests for missing or
+ * stale settlement confirmation deliberately send their own payload instead.
+ */
+export async function fixedApprovalPayload(
+  harness: Harness,
+  managerToken: string,
+  shiftId: string,
+  reviewedOrdersHash: string,
+  options: { varianceReason?: string | null } = {},
+): Promise<Record<string, unknown>> {
+  const settlementResponse = await harness.app.inject({
+    method: 'GET',
+    url: `/shifts/${shiftId}/settlement`,
+    headers: { cookie: harness.cookie(managerToken) },
+  })
+  if (settlementResponse.statusCode !== 200) {
+    throw new Error(`settlement preview failed: ${settlementResponse.statusCode} ${settlementResponse.body}`)
+  }
+  const settlement = settlementResponse.json() as FixedSettlementPreviewForApproval
+  return {
+    reviewedOrdersHash,
+    reviewedSettlementHash: settlement.settlementHash,
+    walletTransferConfirmed: true,
+    cashSettlementConfirmed: true,
+    varianceReason:
+      options.varianceReason === undefined
+        ? settlement.variance === '0.00'
+          ? null
+          : 'verified discrepancy in API test'
+        : options.varianceReason,
+  }
+}
+
+export async function approveFixedClose(
+  harness: Harness,
+  managerToken: string,
+  shiftId: string,
+  reviewedOrdersHash: string,
+  options: { varianceReason?: string | null } = {},
+): Promise<LightMyRequestResponse> {
+  return await harness.app.inject({
+    method: 'POST',
+    url: `/shifts/${shiftId}/approve-close`,
+    headers: { cookie: harness.cookie(managerToken) },
+    payload: await fixedApprovalPayload(harness, managerToken, shiftId, reviewedOrdersHash, options),
+  })
+}

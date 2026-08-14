@@ -129,20 +129,39 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     const entries = await deps.ledger.listByWeek(branchId, weekStart)
     let company = 0n
     let yalago = 0n
-    let driverPayable = 0n
+    const legacyDriverShareByShift = new Map<string | null, bigint>()
+    const shiftIds = new Set<string>()
     for (const e of entries) {
+      if (e.shiftId !== null) shiftIds.add(e.shiftId)
       for (const l of e.lines) {
         const signed = l.side === 'C' ? l.amount : -l.amount
         if (l.fundCode === 'company_revenue') company += signed
         else if (l.fundCode === 'yalago_income') yalago += signed
-        else if (l.fundCode.startsWith('driver_share_payable:')) driverPayable += signed
+        else if (
+          l.fundCode.startsWith('driver_share_payable:') &&
+          (l.role === 'driver_share' || l.role === 'cash_deduction_share')
+        ) {
+          legacyDriverShareByShift.set(
+            e.shiftId,
+            (legacyDriverShareByShift.get(e.shiftId) ?? 0n) + signed,
+          )
+        }
       }
+    }
+    let driverShare = legacyDriverShareByShift.get(null) ?? 0n
+    for (const shiftId of shiftIds) {
+      // New settlements assign the total surplus/shortage to the employee, so the immutable final
+      // cash is the earned amount. Legacy approvals have no snapshot and retain their historical
+      // share_split less cash-deduction calculation. Payout/return debits are settlement, not a
+      // reduction in earnings, and are deliberately excluded above.
+      const settlement = await deps.settlements.findByShift(shiftId)
+      driverShare += settlement?.finalEmployeeCash ?? legacyDriverShareByShift.get(shiftId) ?? 0n
     }
     void to
     return {
       weekStart,
       companyShareSyp: serializeMoney(minor(company)),
-      driverShareSyp: serializeMoney(minor(driverPayable)),
+      driverShareSyp: serializeMoney(minor(driverShare)),
       yalagoShareSyp: serializeMoney(minor(yalago)),
     }
   })

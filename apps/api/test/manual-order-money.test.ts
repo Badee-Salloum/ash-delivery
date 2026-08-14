@@ -1,7 +1,7 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { fundCodeOf } from '@ash/adapters/memory'
-import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
+import { DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr } from './harness.ts'
 
 /**
  * A shift that mixes YALLAGO deliveries with the branch's OWN jobs, closed at zero.
@@ -47,6 +47,38 @@ function assertLedgerBalances(): void {
 }
 
 describe('a shift mixing Yallago deliveries and the branch’s own jobs', () => {
+  it('rejects a negative manual share at the request boundary instead of surfacing a database error', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = (await post(driver, '/shifts', {
+      driverId: DRIVER_ID,
+      vehicleId: VEHICLE_ID,
+      shiftNo: 1,
+    })).json().id as string
+    await h.uploadPhoto(driver, id, 'start', 'odometer')
+    await put(driver, `/shifts/${id}/start-package`, { odometerKm: 100, batteryPercent: 90 })
+    await post(manager, `/shifts/${id}/approve-open`, {
+      floatTranches: [sypStr(100)],
+      topupTranches: [],
+    })
+
+    const rejected = await post(manager, `/shifts/${id}/orders/manual`, {
+      providerOrderNo: 'NEGATIVE-MANUAL-SHARE',
+      payMode: 'cash',
+      fee: '100.00',
+      zone: null,
+      kind: 'manual',
+      driverShare: '-1.00',
+      companyShare: '101.00',
+      points: [
+        { role: 'start', label: 'A', lat: null, lng: null },
+        { role: 'end', label: 'B', lat: null, lng: null },
+      ],
+    })
+    expect(rejected.statusCode, rejected.body).toBe(400)
+    expect(await h.deps.orders.listByShift(id)).toHaveLength(0)
+  })
+
   it('closes at zero: no Yallago cut on a manual job, and its typed shares are what post', async () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
@@ -99,28 +131,25 @@ describe('a shift mixing Yallago deliveries and the branch’s own jobs', () => 
     expect(closed.json().br1.difference).toBe('0.00')
 
     const review = await get(manager, `/shifts/${id}/review`)
-    const approved = await post(manager, `/shifts/${id}/approve-close`, { reviewedOrdersHash: review.json().br1.ordersHash })
+    const approved = await approveFixedClose(h, manager, id, review.json().br1.ordersHash)
     expect(approved.statusCode, approved.body).toBe(200)
 
     // ── The money, after approval ────────────────────────────────────────────────────────
-    // Debit raises a fund and credit lowers it, so the three share accounts — all credited — carry
-    // negative balances. Yallago took 20% of their 50,000 and NOTHING of our 10,000.
+    // Yallago took 20% of their 50,000 and NOTHING of our 10,000.
     expect(await bal('yalago_share')).toBe(1_000_000n)
     expect(await bal('yalago_income')).toBe(-1_000_000n)
-    // 10 Yallago orders → the 0–14 band → 35% of 50,000 = 17,500, plus the 4,000 we agreed = 21,500.
-    expect(await bal(fundCodeOf({ kind: 'driver_share_payable', driverId: DRIVER_ID }))).toBe(-2_150_000n)
-    // The company takes the residual of Yallago's block (50,000 − 10,000 − 17,500 = 22,500) plus
-    // our 6,000 = 28,500. And 21,500 + 28,500 + 10,000 = 60,000, the whole of both kinds' fees.
-    expect(await bal('company_revenue')).toBe(-2_850_000n)
-    // Everything the driver held went back: both funds are exactly zero.
+    // Fixed share: 40% of 50,000 = 20,000, plus the typed 4,000 manual share. It is paid in the
+    // close transaction, so the payable ends at zero. Company receives 20,000 + typed 6,000.
+    expect(await bal(fundCodeOf({ kind: 'driver_share_payable', driverId: DRIVER_ID }))).toBe(0n)
+    expect((await h.deps.settlements.findByShift(id))?.grossDriverShare).toBe(2_400_000n)
+    expect(await bal('company_revenue')).toBe(-2_600_000n)
+    // Everything the driver held and the current-shift share went back/was settled.
     expect(await bal(fundCodeOf({ kind: 'driver_cash', driverId: DRIVER_ID }))).toBe(0n)
     expect(await bal(fundCodeOf({ kind: 'driver_wallet', driverId: DRIVER_ID }))).toBe(0n)
     assertLedgerBalances()
   })
 
-  it('the daily band counts Yallago orders only — our own jobs do not lift the driver’s rate', async () => {
-    // 12 Yallago + 5 manual = 17 orders in total. Counting all of them would cross into the 15–24
-    // band (40%); counting Yallago's alone stays in 0–14 (35%). The difference is real money.
+  it('the fixed 40% basis contains Yallago fees only; manual jobs retain their typed shares', async () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
 
@@ -162,11 +191,11 @@ describe('a shift mixing Yallago deliveries and the branch’s own jobs', () => 
     expect(closed.json().br1.difference).toBe('0.00')
 
     const review = await get(manager, `/shifts/${id}/review`)
-    expect((await post(manager, `/shifts/${id}/approve-close`, { reviewedOrdersHash: review.json().br1.ordersHash })).statusCode).toBe(200)
+    expect((await approveFixedClose(h, manager, id, review.json().br1.ordersHash)).statusCode).toBe(200)
 
-    // 12 Yallago orders → the 0–14 band → 35% of 60,000 = 21,000; plus 5 × 600 of ours = 24,000.
-    // Had the manual jobs been counted the band would have been 40%, and this would read 27,000.
-    expect(await bal(fundCodeOf({ kind: 'driver_share_payable', driverId: DRIVER_ID }))).toBe(-2_400_000n)
+    // 40% of 60,000 = 24,000, plus 5 × 600 = 3,000 typed manual share.
+    expect((await h.deps.settlements.findByShift(id))?.grossDriverShare).toBe(2_700_000n)
+    expect(await bal(fundCodeOf({ kind: 'driver_share_payable', driverId: DRIVER_ID }))).toBe(0n)
     assertLedgerBalances()
   })
 })

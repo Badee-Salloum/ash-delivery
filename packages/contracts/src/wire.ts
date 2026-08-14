@@ -50,6 +50,9 @@ export const moneySchema = z
   .transform((s): Minor => parseMinor(s))
   .refine((m) => m >= MINOR_MIN && m <= MINOR_MAX, 'money is larger than this system can store')
 
+/** Physical cash counted at handover cannot be negative; wallet balances may be. */
+export const nonnegativeMoneySchema = moneySchema.refine((m) => m >= 0n, 'cash cannot be negative')
+
 export const serializeMoney = (m: Minor): string => formatMinor(m)
 
 export const calendarDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'expected YYYY-MM-DD')
@@ -174,8 +177,8 @@ export const addOrderRequest = z.object({
    * must not pass through IEEE-754 on its way in). The server refuses a manual order whose two
    * shares do not add up to its fee exactly, which is what keeps the ledger able to close.
    */
-  driverShare: moneySchema.nullable().default(null),
-  companyShare: moneySchema.nullable().default(null),
+  driverShare: nonnegativeMoneySchema.nullable().default(null),
+  companyShare: nonnegativeMoneySchema.nullable().default(null),
   notes: z.string().max(2000).nullable().default(null),
   /** Start, end, and any stops between. Empty for a Yallago order. */
   points: z.array(orderPointRequest).max(20).default([]),
@@ -205,7 +208,7 @@ export const addOrderRequest = z.object({
 export const closeFiguresRequest = z.object({
   odometerKm: z.number().int().min(0).nullable().default(null),
   odometerAnomalyConfirmed: z.boolean().default(false),
-  cashDeclared: moneySchema.nullable().default(null),
+  cashDeclared: nonnegativeMoneySchema.nullable().default(null),
   walletDeclared: moneySchema.nullable().default(null),
 })
 
@@ -375,7 +378,7 @@ export const endPackageRequest = z.object({
   /** Explicit acknowledgement when the end value is below the opening value. */
   odometerAnomalyConfirmed: z.boolean().default(false),
   batteryPercent: z.number().int().min(0).max(100).nullable(),
-  cashDeclared: moneySchema,
+  cashDeclared: nonnegativeMoneySchema,
   walletDeclared: moneySchema,
   /**
    * SRS D-3 baseline: what `readWallet` OCR'd off the close wallet screenshot before the driver
@@ -428,6 +431,62 @@ export const approveOpenRequest = z.object({
   carriedTranches: z.array(moneySchema).min(0).default([]),
 })
 
+export const settlementVarianceDirectionSchema = z.enum(['surplus', 'shortage', 'balanced'])
+export const settlementWalletActionSchema = z.enum(['collect', 'fund', 'none'])
+export const settlementCashActionSchema = z.enum(['collect', 'pay', 'none'])
+export const settlementPolicySchema = z.literal('fixed_40_cash_close_v1')
+
+/** Money in an API RESPONSE: validated decimal text which deliberately stays text. */
+export const settlementMoneyStringSchema = z
+  .string()
+  .regex(/^-?\d+(\.\d{1,2})?$/, 'money must be a decimal string with at most 2 places')
+  .refine((s) => {
+    try {
+      const value = parseMinor(s)
+      return value >= MINOR_MIN && value <= MINOR_MAX
+    } catch {
+      return false
+    }
+  }, 'money is larger than this system can store')
+
+/** The decision-complete settlement preview returned to the manager. */
+export const shiftSettlementViewSchema = z.object({
+  policyCode: settlementPolicySchema,
+  driverRateBps: z.literal(4_000),
+  deliveryFeeTotal: settlementMoneyStringSchema,
+  fixedDriverShare: settlementMoneyStringSchema,
+  manualDriverShare: settlementMoneyStringSchema,
+  grossDriverShare: settlementMoneyStringSchema,
+  cashDeductionTotal: settlementMoneyStringSchema,
+  baseDriverShare: settlementMoneyStringSchema,
+  expectedTotal: settlementMoneyStringSchema,
+  actualCash: settlementMoneyStringSchema,
+  actualWallet: settlementMoneyStringSchema,
+  actualTotal: settlementMoneyStringSchema,
+  variance: settlementMoneyStringSchema,
+  varianceDirection: settlementVarianceDirectionSchema,
+  finalEmployeeCash: settlementMoneyStringSchema,
+  walletToOffice: settlementMoneyStringSchema,
+  cashToOffice: settlementMoneyStringSchema,
+  walletAction: settlementWalletActionSchema,
+  walletAmount: settlementMoneyStringSchema,
+  cashAction: settlementCashActionSchema,
+  cashAmount: settlementMoneyStringSchema,
+  settlementHash: z.string().regex(/^[0-9a-f]{64}$/, 'expected a sha256 hex digest'),
+})
+
+/**
+ * Strict confirmation shape for the fixed policy. The approve request below keeps these fields
+ * optional/defaulted so an old client receives a named service refusal rather than a Zod 400; the
+ * approval service validates this strict schema before it can post or persist the snapshot.
+ */
+export const fixedSettlementConfirmationSchema = z.object({
+  reviewedSettlementHash: z.string().regex(/^[0-9a-f]{64}$/, 'expected a sha256 hex digest'),
+  walletTransferConfirmed: z.literal(true),
+  cashSettlementConfirmed: z.literal(true),
+  varianceReason: z.string().trim().min(1).max(500).nullable().default(null),
+})
+
 export const approveCloseRequest = z.object({
   /** The hash the manager actually reviewed. Re-checked inside the approval transaction. */
   reviewedOrdersHash: z.string().min(1),
@@ -436,20 +495,47 @@ export const approveCloseRequest = z.object({
   /**
    * «يُعاد للسائق» — pay his share tonight out of the cash in his hands (owner decision f).
    *
-   * Defaults to FALSE, which is the behaviour every close had before this existed: the share stays
-   * a payable. A default of true would silently change how every existing branch settles.
+   * Kept only to identify an obsolete client choice. Do not default an omitted field to `false`:
+   * the fixed-policy request deliberately omits this legacy switch, while an explicitly sent false
+   * must remain distinguishable so the service can refuse the old leave-as-payable workflow.
    */
-  payShareNow: z.boolean().default(false),
+  payShareNow: z.boolean().optional(),
+  /** Fixed-policy preview hash. Optional on the wire solely for a controlled old-client refusal. */
+  reviewedSettlementHash: z.string().regex(/^[0-9a-f]{64}$/, 'expected a sha256 hex digest').optional(),
+  /** Both physical actions must be explicitly confirmed before the service persists a settlement. */
+  walletTransferConfirmed: z.boolean().default(false),
+  cashSettlementConfirmed: z.boolean().default(false),
+  /** Required by the service whenever the immutable preview has a non-zero variance. */
+  varianceReason: z.string().trim().min(1).max(500).nullable().default(null),
 })
 
-/** Upper-level force-close of a stuck shift: a reason + whatever end figures the admin actually has. */
-export const forceCloseRequest = z.object({
-  reason: z.string().min(1).max(500),
+const forceCloseBaseRequest = z.object({
+  reason: z.string().trim().min(1).max(500),
   odometerKm: z.number().int().min(0).nullable().default(null),
   odometerAnomalyConfirmed: z.boolean().default(false),
-  cashDeclared: moneySchema.nullable().default(null),
-  walletDeclared: moneySchema.nullable().default(null),
+  /** Force-close still settles real money: both reviewed actual balances are mandatory. */
+  cashDeclared: nonnegativeMoneySchema,
+  walletDeclared: moneySchema,
 })
+
+/**
+ * Phase one claims the close boundary and persists the manager-counted figures. It deliberately has
+ * no transfer confirmations: no wallet/cash action may be performed against a pre-boundary preview.
+ */
+export const prepareForceCloseRequest = forceCloseBaseRequest.extend({
+  prepareOnly: z.literal(true),
+})
+
+/** Phase two posts only the exact final preview and both physical confirmations. */
+export const commitForceCloseRequest = forceCloseBaseRequest.extend({
+  prepareOnly: z.literal(false).optional(),
+  reviewedSettlementHash: z.string().regex(/^[0-9a-f]{64}$/, 'expected a sha256 hex digest'),
+  walletTransferConfirmed: z.literal(true),
+  cashSettlementConfirmed: z.literal(true),
+})
+
+/** Upper-level force-close is an explicit prepare-then-settle protocol. */
+export const forceCloseRequest = z.union([prepareForceCloseRequest, commitForceCloseRequest])
 
 /**
  * A second (or later) cash-float or wallet top-up disbursed mid-day (SRS C-5). Money the branch

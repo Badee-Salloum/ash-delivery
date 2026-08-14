@@ -17,15 +17,20 @@ J maps, K GPS, L battery, M push/anomaly, N accounting bridge.
 
 ## The eight business rules
 
-**BR1 — the zero-shift equation. The core invariant.** At shift close:
+**BR1 — the shift reconciliation equation.** At shift close:
 
 ```
-driver_cash_on_hand + driver_app_wallet_balance
-  == cash_float_given + wallet_topup_given + 0.80 × Σ(delivery fees of the shift's orders)
+actual_total = driver_cash_on_hand + driver_app_wallet_balance
+expected_total = cash_float_given + wallet_topup_given
+               + residual_after_per_order_yallago_cuts - cash_deductions
+variance = actual_total - expected_total
 ```
 
-Tolerance is **zero**. A non-zero difference blocks approval and must display a breakdown of
-likely causes (missing order, wrong payment mode, odometer/cash mismatch).
+The difference is still calculated and explained, but **it does not block the driver from submitting
+the close package or the manager from settling it**. A non-zero variance belongs to the employee:
+surplus increases the employee settlement and shortage reduces it. Manager approval then requires
+an audited variance reason plus explicit confirmation that the complete wallet transfer and signed
+cash transaction were both executed.
 
 Canonical worked example, encoded verbatim in `packages/domain/test/br1/canonical.test.ts`:
 float 100,000 + topup 50,000 (new SYP); 20 orders × 5,000 fee (12 cash, 6 electronic, 2 free)
@@ -42,15 +47,18 @@ and nothing depends on them being right:
 - `electronic`: nothing collected in cash; order counterpart lands in wallet (net +80% of fee)
 - `free` (Yallago promo): wallet +80% of fee, funded by Yallago
 
-**BR4 — the 80% block.** In the field, driver + company share (80% of fees) stays merged in the
-driver's hands/wallet. The ledger splits driver-vs-company **at approval time** using the daily
-tier. Yallago's 20% is always fixed; tier changes come only out of the company's side.
+**BR4 — fixed per-shift 40% share.** In the field, driver + company share (the residual after
+Yallago's per-order 20% cuts) stays merged in the driver's hands/wallet. For every unapproved shift,
+the driver earns `floor(40% × included Yallago delivery fees)` plus the driver shares explicitly
+assigned to manual orders. The company absorbs rounding. Daily tiers and cross-shift true-ups are
+historical-only and must never affect an unapproved shift.
 
 **BR5 — shift gates, both ends.** Open requires: start package (odometer photo, battery %, float
-amount, topup amount) + driver confirmation + branch-manager approval. Close requires: end package
-(dashboard screenshot, wallet photo, odometer photo, cash handed over) + BR1 == 0 + branch-manager
-approval after matching ground numbers to system numbers. A `suspended` state exists for mid-shift
-incidents; data is completed later and the same equation applies.
+amount, topup amount) + driver confirmation + branch-manager approval. The driver may submit a
+complete end package regardless of the BR1 variance. Final approval requires branch-manager review,
+the two settlement confirmations, a matching `settlementHash`, and a reason when variance is
+non-zero. A `suspended` state exists for mid-shift incidents; data is completed later and the same
+settlement applies.
 
 **BR6 — currency.** Base = **new Syrian Lira** (1 new = 100 old — factor configurable). Reports
 show SYP + USD equivalent using **one daily rate** entered each morning by the system admin and
@@ -61,12 +69,12 @@ are immutable; corrections happen only via visible, dated correction entries.
 
 **BR8 — visibility.** Total profits/shares: General Manager **only** — ⚠️ **amended by decision 9**:
 the system admin sees them too. Branch manager: everything in his branch. Driver: his own shifts and
-earnings only. Tier/rule editing: **system admin only** (not even the GM — client's explicit answer;
-keep it configurable).
+earnings only. Tier tables remain readable for approved historical shifts, but their editor and
+publication path are retired for the active fixed-share policy.
 
-**Default tier table** (system-admin editable, effective-dated, whole-amount mode, basis = approved
-orders per day): 0–14 → driver 35% · 15–24 → 40% · 25–34 → 43% · 35+ → 46%. Marginal mode must
-exist as a config switch.
+**Historical tier table — not an active rule:** 0–14 → driver 35% · 15–24 → 40% · 25–34 → 43% ·
+35+ → 46%. It is retained only to explain already-approved entries. The fixed 40% policy applies
+independently to every shift that was not approved when the policy launched.
 
 ---
 
@@ -77,13 +85,16 @@ exist as a config switch.
 | 1 | **Financial week = Sunday 00:00 → Saturday 23:59** Asia/Damascus, closed the *following* Sunday. A shift worked on the closing Sunday belongs to the **new** week. |
 | 2 | Infrastructure exists (GitHub, VPS, domain). **Staging goes live in M0**, not M6. |
 | 3 | Old lira is **schema-ready only**: `settings.old_lira_factor = 100`, currency tag on every row, but all Bundle-1 UI is new SYP + USD. |
-| 4 | **The wallet is zeroed each day**, like the float. `wallet_return` recipe + a zeroed-wallet photo at close. BR1 therefore stays in **absolute** form — no ledger-derived opening balance. |
+| 4 | ~~The wallet is zeroed each day, like the float.~~ **Superseded for all unapproved shifts by decision 13:** the complete actual wallet is swept at every shift close, with a signed `collect`/`fund` direction. |
 | 5 | Manual entries & expenses: **branch manager ✓ + general manager ✓, sysadmin ✗** (SRS §3 matrix wins over the narrower E-3 prose). Stored as data. |
-| 6 | Tier band is computed over the **whole day**, with a visible «تسوية شريحة اليوم» true-up restating earlier shifts when a later one crosses a band. |
+| 6 | ~~Tier band is computed over the whole day, with a visible day true-up.~~ **Superseded by decision 13.** Kept only as history for already-approved shifts. |
 | 7 | Commercial scope re-cut: **Bundle 1a** = SRS A–G as priced; **Bundle 1b** = production readiness, separately priced. |
-| 8 | **Pay mode is no longer collected** (SRS BR3 retired at the UI). The owner: *"we won't check each delivery how it got paid; we just check how much extra money we have in the wallet and the cash and compare to what he already worked."* BR1's scalar is blind to pay mode by construction — that is why `cashDiff`/`walletDiff` exist beside it — so the only thing lost is the ability to PREDICT the split, and the split was corroboration rather than a control: the wallet is evidenced by a photographed Yallago balance and the cash by a count at the branch. What remains is `cash + wallet == float + topup + 0.80 × Σfees`. `pay_mode` stays in the schema and on the wire defaulted to `cash`, so restoring the split later is a UI change, not a migration. `br1_split_gate` stays `advisory`. The driver's screen shows **the total only** — an expected-cash figure computed as though every delivery were cash would be a number the app cannot know. |
+| 8 | **Pay mode is no longer collected** (SRS BR3 retired at the UI). The owner: *"we won't check each delivery how it got paid; we just check how much extra money we have in the wallet and the cash and compare to what he already worked."* BR1's scalar is blind to pay mode by construction — that is why `cashDiff`/`walletDiff` exist beside it — so the only thing lost is the ability to PREDICT the split, and the split was corroboration rather than a control: the wallet is evidenced by a photographed Yallago balance and the cash by a count at the branch. The driver's screen shows **the total only**. **Further amended by decisions 12–13:** deductions adjust expected total, Payments Log has no monetary effect, and all differences are settled rather than used as a zero gate. |
 | 9 | **2026-08-12 — the system admin has every permission at scope `all`.** «اعطي صلاحية وصول لكل شيء لمدير النظام و صلاحية لفعل كل شيء», given twice in writing after the narrower rule was put to the owner. **Supersedes decision 5** (manual entries & expenses: sysadmin ✗) and **amends BR8**'s «رؤية الأرباح والحصص الإجمالية: المدير العام فقط». Five rows moved: `shift.operate`, `cash_count.perform`, `journal.manual.write`, `expense.write`, `profit.view_total`. Legitimate rather than an SRS violation: §3 / A-2 make the matrix explicitly sysadmin-customisable with every change logged, and `Permissions.tsx` already edits it as data — one row reverses it. `DEFAULT_GRANTS` only ever seeds a fresh database, so this also required migration `0024`: production was measured holding 11 of 16 for the sysadmin. **The SRS §3 transcription in `matrix.test.ts` stays byte-identical**; the deviation lives beside it as `OWNER_OVERRIDE_2026_08_12`, and a test asserts the override is exactly those five rows and nothing more. |
-| 10 | **الترميم — the daily restoration** (2026-08-12, from the owner's own book). Office capital is a **fixed target per box** — `كاش المكتب 4,000,000`, `محفظة المكتب 1,000,000`. Every working day, after the **physical count**, each box is settled against **صندوق الشركة**: `position = counted + الذمم` against that box, `delta = position − رأس المال`; surplus is **كييش** (branch → company, profit taken), shortfall is **شحن من الصندوق** (company → branch). **الذمم** are cash a named driver kept overnight; they count toward the capital and are consumed when he starts his next shift. **حصة السائق is paid at the end of every shift** out of the cash in his hands. A shortfall never auto-passes — BR1's zero tolerance still refuses; the manager force-closes with a written reason and it comes off the driver's share. |
+| 10 | **الترميم — the daily restoration** (2026-08-12). Office capital remains a fixed target per box and historical receivables still count toward it. ~~A new close shortfall may become a driver receivable and BR1 zero blocks ordinary approval.~~ **Superseded by decision 13:** a current-shift shortfall is settled immediately through the signed cash transaction and creates no receivable. |
+| 11 | **Operation window** (2026-08-14): included Yallago rows fall within the inclusive branch-local interval from manager open approval through driver close submission. Ambiguous rows block approval until an audited manager decision; a driver cannot exclude a confirmed in-window row. |
+| 12 | **Negative Recent Orders row** (2026-08-14): a timed negative row is one cash deduction, never an order, tier input, Yallago share, or wallet movement. Untouched OCR sightings match by known printed date + minute + OCR amount; route text only enriches evidence. This applies to current and legacy automatic keys. The older rule that excess becomes a receivable and that Payments Log rows affect money is superseded by decision 13. |
+| 13 | **Fixed 40% cash settlement** (2026-08-14): every unapproved shift uses fixed 40%, with no tier or day true-up. Sweep the full actual wallet, apply surplus/shortage to the employee, and close the rest with exactly one signed cash transaction. No current-shift cash, wallet, share payable, or receivable may remain. Payments Log evidence is optional and archival only. Preview, ordinary approval, and exceptional close must use the same pure calculation and atomic posting recipe. |
 
 ---
 
@@ -92,16 +103,24 @@ exist as a config switch.
 1. **Money is `bigint` minor units. Never a float, never a `number`.**
    1 minor unit = 1/100 new SYP = exactly 1 old lira.
 2. **The 80% block is a RESIDUAL**: `Σfees − Σ(per-order 20% cuts)`. **Never** `0.80 × Σfees`.
-   Multiply-and-round makes a zero-tolerance BR1 unsatisfiable as soon as a fee is not divisible
-   by 5. The SRS example (all fees 5,000) hides this — the property tests deliberately do not.
-3. **The company absorbs every rounding remainder**, never the driver and never Yallago. That is
-   BR4's rule expressed as arithmetic: `companyShare = blockTotal − driverShare`.
+   Multiply-and-round manufactures a false employee variance as soon as a fee is not divisible by
+   5. The SRS example (all fees 5,000) hides this — the property tests deliberately do not.
+3. **The company absorbs every rounding remainder**, never the driver and never Yallago. The fixed
+   share is `floor(fees × 4,000 / 10,000)`; `companyShare = blockTotal − driverShare`.
 4. **BR1 returns three differences, not one.** The scalar equation is blind to a pay-mode error:
    flip one order cash↔electronic and `scalarDiff` stays exactly 0 while cash is off by −fee and
-   wallet by +fee. Always evaluate `cashDiff` and `walletDiff` too. The `br1_split_gate` setting
-   (`advisory` → `strict`) decides whether a split failure blocks approval.
+   wallet by +fee. Always evaluate `cashDiff` and `walletDiff` too. They diagnose the variance;
+   they do not prevent the employee from requesting close.
 5. **`allocate()` refuses negative totals.** Signed deltas are always produced by *subtracting two
    allocations*, never by allocating a negative — that keeps the rounding direction unambiguous.
+6. **The close settlement is one immutable snapshot.** In minor-unit arithmetic:
+   `grossShare = fixed40Share + manualDriverShare`; `baseShare = grossShare − cashDeductions`;
+   `variance = actualCash + actualWallet − expectedTotal`; `employeeSettlement = baseShare + variance`;
+   `walletToOffice = actualWallet`; `cashToOffice = actualCash − employeeSettlement`. Positive cash
+   means collect from the employee; negative means pay the employee. Deductions appear exactly once
+   in expected total and exactly once in base share.
+7. **Payments Log evidence is optional and archival.** It never changes orders, expected value,
+   wallet movements, shares, or settlement, and its absence never blocks close submission.
 
 ## Time rules
 
@@ -124,8 +143,9 @@ exist as a config switch.
 - Week-lock immutability is enforced **twice**: `REVOKE UPDATE, DELETE` from `app_user` *and* a
   trigger — on **both** `journal_entries` and `journal_lines` (a guard on entries alone leaves the
   amounts mutable).
-- Tier resolution filters `status IN ('active','superseded')`, never `'active'` alone — otherwise
-  publishing a successor silently restates every historical day.
+- Historical tier resolution filters `status IN ('active','superseded')`, never `'active'` alone.
+  This exists only to reproduce already-approved history; tier publication is disabled while the
+  fixed-share policy is active.
 
 ---
 

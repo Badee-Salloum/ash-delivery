@@ -14,6 +14,7 @@ import {
   endPackageRequest,
   loginRequest,
   moneySchema,
+  nonnegativeMoneySchema,
   uploadEvidenceParams,
   serializeMoney,
   setFxRequest,
@@ -1192,51 +1193,62 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     },
   )
 
-  /**
-   * «كشف التسوية» — where tonight's cash goes. READ-ONLY; it posts nothing.
-   *
-   * The manager's own choices arrive as query parameters so he can see the effect of keeping a
-   * ذمة, or of not paying the share tonight, BEFORE committing to any of it.
-   */
+  /** Immutable fixed-policy preview. Optional actuals let force-close preview the same calculation. */
   app.get(
     '/shifts/:id/settlement',
     { config: { permission: 'shift.approve', subject: shiftSubject } },
     async (req, reply) => {
       const { id } = z.object({ id: z.string() }).parse(req.params)
-      const query = z
-        .object({
-          keepAsReceivable: moneySchema.optional(),
-          payShareNow: z.enum(['true', 'false']).optional(),
-          managerAdjustment: moneySchema.optional(),
-        })
-        .parse(req.query)
+      const query = z.object({ actualCash: nonnegativeMoneySchema.optional(), actualWallet: moneySchema.optional() }).parse(req.query)
       const plan = await deps.closeUnitOfWork.run(
-        { shiftId: id, actorId: req.actor!.userId, serializeDriverDay: true },
+        { shiftId: id, actorId: req.actor!.userId },
         async (transaction) => {
           const transactionDeps: Deps = { ...deps, ...transaction }
           const shift = await transaction.shifts.findById(id)
           if (!shift) throw new ServiceError(404, 'shift_not_found')
-          return settlementFor(transactionDeps, shift, {
-            ...(query.keepAsReceivable === undefined ? {} : { keepAsReceivable: query.keepAsReceivable }),
-            ...(query.payShareNow === undefined ? {} : { payShareNow: query.payShareNow === 'true' }),
-            ...(query.managerAdjustment === undefined ? {} : { managerAdjustment: query.managerAdjustment }),
+          const stored = await transaction.settlements.findByShift(id)
+          if (stored) {
+            return {
+              ...stored,
+              wallet: { action: stored.walletAction, amount: stored.walletAmount },
+              cash: { action: stored.cashAction, amount: stored.cashAmount },
+            }
+          }
+          // Pre-policy approvals stay historically intact; never present a freshly recomputed 40%
+          // receipt for a journal that was actually posted under a former tier rule.
+          if (shift.state === 'approved' || shift.state === 'week_locked') {
+            throw new ServiceError(409, 'legacy_settlement_read_only')
+          }
+          return settlementFor(transactionDeps, {
+            ...shift,
+            ...(query.actualCash === undefined ? {} : { endCashDeclared: query.actualCash }),
+            ...(query.actualWallet === undefined ? {} : { endWalletDeclared: query.actualWallet }),
           })
         },
       )
       return {
-        toOfficeCash: serializeMoney(plan.toOfficeCash),
-        keptAsReceivable: serializeMoney(plan.keptAsReceivable),
-        paidToDriver: serializeMoney(plan.paidToDriver),
-        withheldFromShare: serializeMoney(plan.withheldFromShare),
-        residualReceivable: serializeMoney(plan.residualReceivable),
-        shareRemainingPayable: serializeMoney(plan.shareRemainingPayable),
+        policyCode: plan.policyCode,
+        driverRateBps: plan.driverRateBps,
+        deliveryFeeTotal: serializeMoney(plan.deliveryFeeTotal),
+        fixedDriverShare: serializeMoney(plan.fixedDriverShare),
+        manualDriverShare: serializeMoney(plan.manualDriverShare),
         grossDriverShare: serializeMoney(plan.grossDriverShare),
         cashDeductionTotal: serializeMoney(plan.cashDeductionTotal),
-        netDriverShare: serializeMoney(plan.netDriverShare),
-        deductionReceivable: serializeMoney(plan.deductionReceivable),
-        lines: plan.lines.map((l) => ({ code: l.code, amount: serializeMoney(l.amount) })),
-        feasible: plan.feasible,
-        refusals: plan.refusals,
+        baseDriverShare: serializeMoney(plan.baseDriverShare),
+        expectedTotal: serializeMoney(plan.expectedTotal),
+        actualCash: serializeMoney(plan.actualCash),
+        actualWallet: serializeMoney(plan.actualWallet),
+        actualTotal: serializeMoney(plan.actualTotal),
+        variance: serializeMoney(plan.variance),
+        varianceDirection: plan.varianceDirection,
+        finalEmployeeCash: serializeMoney(plan.finalEmployeeCash),
+        walletToOffice: serializeMoney(plan.walletToOffice),
+        cashToOffice: serializeMoney(plan.cashToOffice),
+        walletAction: plan.wallet.action,
+        walletAmount: serializeMoney(plan.wallet.amount),
+        cashAction: plan.cash.action,
+        cashAmount: serializeMoney(plan.cash.amount),
+        settlementHash: plan.settlementHash,
       }
     },
   )
@@ -1283,7 +1295,11 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const body = approveCloseRequest.parse(req.body)
       const result = await approveClose(deps, req.actor!, id, body.reviewedOrdersHash, opts.splitGate ?? 'advisory', {
         ...(body.keepAsReceivable === undefined ? {} : { keepAsReceivable: body.keepAsReceivable }),
-        payShareNow: body.payShareNow,
+        ...(body.payShareNow === undefined ? {} : { payShareNow: body.payShareNow }),
+        ...(body.reviewedSettlementHash === undefined ? {} : { reviewedSettlementHash: body.reviewedSettlementHash }),
+        walletTransferConfirmed: body.walletTransferConfirmed,
+        cashSettlementConfirmed: body.cashSettlementConfirmed,
+        varianceReason: body.varianceReason,
       })
       return { id: result.shift.id, state: result.shift.state, postings: result.postings }
     },
@@ -1470,8 +1486,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   )
 
   // Upper-level override for a stuck shift (shift.approve). VOID reverses the float/top-up and
-  // discards the orders → cancelled; FORCE-CLOSE settles it (order splits + a shift_variance for any
-  // declared-vs-expected gap) → approved. Both audited with a mandatory reason.
+  // discards the orders → cancelled. FORCE-CLOSE first freezes the boundary/actuals, then uses the
+  // same full-wallet and signed-cash settlement as normal approval; variance belongs to the employee
+  // and never goes to a branch variance account. Both paths are audited with a mandatory reason.
   app.post(
     '/shifts/:id/void',
     { config: { permission: 'shift.approve', subject: shiftSubject } },
@@ -1501,19 +1518,24 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const { id } = z.object({ id: z.string() }).parse(req.params)
       const body = forceCloseRequest.parse(req.body)
       const result = await forceClose(deps, req.actor!, id, body)
-      await deps.audit.append({
-        tableName: 'shifts',
-        recordId: result.shift.id,
-        action: 'UPDATE',
-        actorId: req.actor!.userId,
-        actorKind: 'user',
-        branchId: result.shift.branchId,
-        requestId: req.requestId,
-        before: null,
-        after: { state: result.shift.state, reason: body.reason, forced: true },
-        occurredAtMs: deps.clock.nowMs(),
-      })
-      return { id: result.shift.id, state: result.shift.state, postings: result.postings }
+      if (result.prepared) {
+        return { id: result.shift.id, state: result.shift.state, postings: 0, prepared: true }
+      }
+      if (!result.replayed) {
+        await deps.audit.append({
+          tableName: 'shifts',
+          recordId: result.shift.id,
+          action: 'UPDATE',
+          actorId: req.actor!.userId,
+          actorKind: 'user',
+          branchId: result.shift.branchId,
+          requestId: req.requestId,
+          before: null,
+          after: { state: result.shift.state, reason: body.reason, forced: true },
+          occurredAtMs: deps.clock.nowMs(),
+        })
+      }
+      return { id: result.shift.id, state: result.shift.state, postings: result.postings, prepared: false }
     },
   )
 

@@ -204,6 +204,84 @@ and reconstructed attachment provenance cannot be removed and later recreated ex
 old API deployment available for a code rollback, but restore the database when crossing this
 schema boundary.
 
+### Rolling out fixed 40% wallet/cash settlement (`0031`)
+
+This is a coordinated money-policy release. It changes every shift that is not already approved,
+retires tier publication, and adds immutable settlement snapshots. Deploy database, API, admin, and
+driver PWA in one short write pause; do not expose an old API or old manager UI after approvals can
+use the new policy.
+
+1. On Node 24 run `pnpm check`, `pnpm build:apps`, and `node scripts/build-api.mjs`. Run the database
+   suite only against a disposable PostgreSQL 17 database. Record the exact results; an earlier
+   release's green output is not evidence for this one.
+2. Read-only preflight production. Record all shifts by state and capture the settlement preview for
+   each `pending_review` shift. Confirm no week containing a target shift is locked. Specifically
+   inspect deductions for duplicate timestamps/routes and confirm Payments Log evidence is absent
+   from every expected/share calculation.
+3. Pause API writes and wait for two consecutive zero-activity samples. Take and fully validate the
+   pre-migration logical backup. Never point adapter/conformance tests at production.
+4. Apply the current migrations once with the direct owner connection. Verify migration `0031` is
+   present, the settlement table/immutability guards exist, and the runtime login has only its
+   intended privileges.
+5. Deploy the already-tested API, admin, and driver artifacts while writes remain paused. The API
+   must be live before either UI is allowed to write. Do not enable tier publication as a fallback.
+6. Run read-only postflight checks, then take and validate the post-migration backup. For one
+   unapproved example, independently verify the preview equations below and the direction labels;
+   do **not** approve it merely as a smoke test and do not patch the ledger manually.
+7. Resume writes and smoke-test health/auth plus a settlement preview. Confirm an old driver payload
+   can still submit a complete end package, a non-zero variance reaches manager review, absence of a
+   Payments Log image does not block it, and stale `settlementHash` is rejected safely.
+
+```text
+gross share = floor(40% × included Yallago fees) + manual-order driver shares
+base share = gross share - cash deductions
+variance = actual cash + actual wallet - expected total
+employee settlement = base share + variance
+wallet to office = full actual wallet
+cash to office = actual cash - employee settlement
+```
+
+All amounts sent on the wire are decimal strings in minor units. Positive `wallet to office` means
+collect the full wallet; negative means fund it. Positive `cash to office` means collect cash from
+the employee; negative means pay cash to the employee. Zero means no physical movement, but the
+manager must still confirm that the wallet and cash actions were checked.
+
+After the first real approval, verify atomically that one immutable settlement snapshot exists, one
+approval decision exists, the reviewed order and settlement hashes match, and the shift's driver
+cash, driver wallet, share payable, and current-shift receivable balances are all zero. Variance must
+not appear in `cost_center:shift_variance:*`; no new receivable may exist.
+
+Rollback after a new-policy approval is a financial incident, not an ordinary code rollback. Pause
+writes and reconcile the immutable snapshot and journal before changing versions. Restoring the
+pre-migration database discards approvals made after that backup; rolling back only the UI/API risks
+reintroducing daily tiers for pending shifts. Escalate and choose a ledger-preserving forward fix or
+an explicitly accepted point-in-time restore.
+
+### Manager procedure for approving a submitted shift
+
+1. Confirm the screen identifies the difference as **surplus**, **shortage**, or **zero** and shows
+   delivery fees, fixed 40% share, manual share, cash deductions, expected, collected, variance, and
+   final employee settlement.
+2. Execute the displayed full-wallet action and tick its confirmation only afterward.
+3. Execute exactly the displayed cash action — collect from the employee or pay the employee — and
+   tick its confirmation only afterward. Do not leave share unpaid and do not convert a shortage to
+   a receivable.
+4. If variance is non-zero, enter the actual explanation. Payments Log evidence may be attached for
+   archive, but never require it and never add its rows to today's orders or wallet.
+5. Approve. If the server reports a stale settlement, reload and repeat the physical comparison;
+   never reuse the old confirmations against changed orders, deductions, or declared balances.
+
+If approval fails, show and act on the named validation issue: incomplete end evidence, unresolved
+operation-window row, missing wallet confirmation, missing cash confirmation, missing variance
+reason, stale settlement hash, locked week, or already-processed close. A generic “operation failed”
+is not an acceptable operator diagnosis. Exceptional close is explicitly two-phase: first enter
+the counted cash/wallet, odometer and reason to freeze the close boundary, without moving money or
+ticking confirmations. The resulting review screen then recomputes the final settlement; only
+there does the manager perform and confirm the full-wallet and cash actions. A refresh resumes that
+prepared review, while an old preparation from a rejected/re-photo close cannot apply to a later
+submission. Exceptional close uses the same calculation and does not provide a route around
+settlement.
+
 ⚠ **Off-site copy is still owed.** `backups/` is git-ignored and lives on one laptop; a backup on
 the same machine as the only checkout is not a backup. And the **evidence photos in Vercel Blob
 have no copy at all** — they are the record behind every approved shift.

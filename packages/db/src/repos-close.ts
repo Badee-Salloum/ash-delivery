@@ -22,6 +22,7 @@ import {
   PgTierRepo,
   PgWeekLockRepo,
 } from './repos-shift.ts'
+import { PgShiftSettlementRepo } from './repos-settlement.ts'
 
 type ShiftIdentity = {
   driver_id: string
@@ -49,6 +50,7 @@ function transactionDeps(pool: Pool): ShiftCloseTransactionDeps {
     batteryReadings: new PgBatteryReadingRepo(pool),
     batterySwaps: new PgBatterySwapRepo(pool),
     weekLocks: new PgWeekLockRepo(pool),
+    settlements: new PgShiftSettlementRepo(pool),
   }
 }
 

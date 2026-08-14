@@ -9,6 +9,13 @@ export const YALAGO_BPS: Bps = 2000
 export const MAX_DRIVER_BPS: Bps = 10_000 - YALAGO_BPS
 
 /**
+ * The owner's closing rule from 2026-08-14: every Yallago delivery pays the driver 40% of its
+ * gross fee. This is deliberately separate from the legacy tier table; a close must not silently
+ * move between 35/40/43/46% merely because another order was added later in the day.
+ */
+export const FIXED_DRIVER_BPS: Bps = 4_000
+
+/**
  * Allocate `bps` of `total`, in whole minor units.
  *
  * `total` must be non-negative. Every allocation in this system is over a non-negative
@@ -114,4 +121,19 @@ export function splitBlock(totals: FeeTotals, driverBps: Bps, rounding: Rounding
     throw new RangeError(`company share went negative (${companyShare}) — band table is invalid`)
   }
   return { driverShare, companyShare, yalagoShare: totals.yalagoTotal }
+}
+
+/**
+ * Split one shift's Yallago fees at the fixed 40/40/20 policy.
+ *
+ * `fees` contains Yallago deliveries only. Manual jobs already carry their manager-agreed driver
+ * and company shares and are added by the application after this split. Yallago is still rounded
+ * per order, while the driver's 40% is floored once over the shift's gross Yallago fees; the
+ * company receives the residual so the three parties exhaust every minor unit exactly.
+ */
+export function splitFixedDriverShare(
+  fees: readonly Minor[],
+  rounding: Rounding = 'floor',
+): BlockSplit {
+  return splitBlock(totalFees(fees, rounding), FIXED_DRIVER_BPS, rounding)
 }

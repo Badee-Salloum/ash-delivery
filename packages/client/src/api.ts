@@ -220,6 +220,48 @@ export interface ExpenseView {
 }
 
 /**
+ * The branch manager's immutable close-settlement preview.
+ *
+ * Every money field remains a decimal string. `walletAmount` and `cashAmount` are absolute values;
+ * their direction is carried by the adjacent action so the manager is never asked to interpret a
+ * minus sign while handing over real money. `variance` and `finalEmployeeCash` stay signed because
+ * they are accounting facts in the explanatory breakdown.
+ */
+export interface ShiftSettlementView {
+  policyCode: 'fixed_40_cash_close_v1'
+  driverRateBps: 4000
+  deliveryFeeTotal: string
+  fixedDriverShare: string
+  manualDriverShare: string
+  grossDriverShare: string
+  cashDeductionTotal: string
+  baseDriverShare: string
+  expectedTotal: string
+  actualCash: string
+  actualWallet: string
+  actualTotal: string
+  variance: string
+  varianceDirection: 'surplus' | 'shortage' | 'balanced'
+  finalEmployeeCash: string
+  walletToOffice: string
+  cashToOffice: string
+  walletAction: 'collect' | 'fund' | 'none'
+  walletAmount: string
+  cashAction: 'collect' | 'pay' | 'none'
+  cashAmount: string
+  settlementHash: string
+}
+
+/** The two physical handovers the manager must attest before close approval can post. */
+export interface ApproveCloseRequest {
+  reviewedOrdersHash: string
+  reviewedSettlementHash: string
+  walletTransferConfirmed: boolean
+  cashSettlementConfirmed: boolean
+  varianceReason?: string | null
+}
+
+/**
  * «الترميم» as the wire carries it. Every money field is a decimal STRING — the client never turns
  * money into a `number`, not even to display it.
  */
@@ -733,27 +775,17 @@ export class ApiClient {
     return this.post<ExpenseView>('/expenses', { ...body, ...(this.branchId ? { branchId: this.branchId } : {}) })
   }
 
-  /** «كشف التسوية» — read-only. Posts nothing; it only shows where tonight's cash would go. */
-  shiftSettlement(shiftId: string, choices: { keepAsReceivable?: string; payShareNow?: boolean } = {}) {
-    const q = new URLSearchParams()
-    if (choices.keepAsReceivable) q.set('keepAsReceivable', choices.keepAsReceivable)
-    if (choices.payShareNow !== undefined) q.set('payShareNow', String(choices.payShareNow))
-    const suffix = q.toString() ? `?${q.toString()}` : ''
-    return this.get<{
-      grossDriverShare: string
-      cashDeductionTotal: string
-      netDriverShare: string
-      deductionReceivable: string
-      toOfficeCash: string
-      keptAsReceivable: string
-      paidToDriver: string
-      withheldFromShare: string
-      residualReceivable: string
-      shareRemainingPayable: string
-      lines: Array<{ code: string; amount: string }>
-      feasible: boolean
-      refusals: string[]
-    }>(`/shifts/${shiftId}/settlement${suffix}`)
+  /** «كشف التسوية» — read-only and server-owned. Posts nothing until both handovers are confirmed. */
+  shiftSettlement(shiftId: string, actual?: { actualCash: string; actualWallet: string }) {
+    const query = actual
+      ? `?actualCash=${encodeURIComponent(actual.actualCash)}&actualWallet=${encodeURIComponent(actual.actualWallet)}`
+      : ''
+    return this.get<ShiftSettlementView>(`/shifts/${shiftId}/settlement${query}`)
+  }
+
+  /** Approve the exact settlement the manager reviewed; the server rejects a stale hash. */
+  approveCloseShift(shiftId: string, body: ApproveCloseRequest) {
+    return this.post<{ id: string; state: string; postings: number }>(`/shifts/${shiftId}/approve-close`, body)
   }
 
   // ── Branch treasury (cash box + wallet) ─────────────────────────────────────────────────────
@@ -907,15 +939,26 @@ export class ApiClient {
   voidShift(shiftId: string, reason: string) {
     return this.post<{ id: string; state: string }>(`/shifts/${shiftId}/void`, { reason })
   }
-  /** Force-close a stuck shift, settling any declared-vs-expected gap to a variance. */
+  /** Freeze a stuck shift's boundary/actuals, then settle its exact reviewed snapshot. */
   forceCloseShift(shiftId: string, body: {
     reason: string
     odometerKm?: number | null
     odometerAnomalyConfirmed?: boolean
-    cashDeclared?: string | null
-    walletDeclared?: string | null
-  }) {
-    return this.post<{ id: string; state: string; postings: number }>(`/shifts/${shiftId}/force-close`, body)
+    cashDeclared: string
+    walletDeclared: string
+  } & (
+    | { prepareOnly: true }
+    | {
+        prepareOnly?: false
+        reviewedSettlementHash: string
+        walletTransferConfirmed: true
+        cashSettlementConfirmed: true
+      }
+  )) {
+    return this.post<{ id: string; state: string; postings: number; prepared: boolean }>(
+      `/shifts/${shiftId}/force-close`,
+      body,
+    )
   }
 
   // ── Live GPS (SRS K) ────────────────────────────────────────────────────────────────────────

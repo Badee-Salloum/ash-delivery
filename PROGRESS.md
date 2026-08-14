@@ -1,6 +1,58 @@
 # PROGRESS
 
+## 2026-08-14 — fixed 40% shift settlement (current change set)
+
+The product owner replaced daily tiers and the old zero-difference close gate with one per-shift
+settlement. Every shift that was not already approved at policy launch uses
+`floor(40% × included Yallago delivery fees)` plus manager-defined manual-order shares. Tier tables
+and the day true-up remain only to reproduce approved history; the active editor/publication path is
+retired.
+
+Preview, ordinary approval, and exceptional close now share the same calculation:
+
+```text
+gross share = fixed 40% share + manual-order driver shares
+base share = gross share - cash deductions
+variance = actual cash + actual wallet - expected total
+employee settlement = base share + variance
+wallet to office = full actual wallet
+cash to office = actual cash - employee settlement
+```
+
+Positive `cash to office` tells the manager to collect cash; negative tells the manager to pay the
+employee. A negative wallet produces the opposite, explicit funding direction. Surplus belongs to
+the employee and shortage reduces the employee settlement, including immediate extra collection
+when the shortage exceeds the share. Approval clears the shift's cash, wallet, share payable, and
+any current-shift receivable; it does not post variance to a branch cost centre and does not create
+a new debt.
+
+The manager review makes the two physical actions prominent, requires separate audited
+confirmations for the complete wallet transfer and the signed cash transaction, and requires a
+reason when variance is non-zero. The approval sends the preview's `settlementHash`; the server
+recalculates inside the close transaction and rejects a stale screen. The immutable settlement
+snapshot retains inputs, fixed rate, signed outputs, directions, confirmations, reviewer, reason,
+and timestamps.
+
+The employee may submit a complete close package at any variance. Payments Log evidence is now
+optional and archival only: it cannot change orders, expected totals, wallet movements, shares, or
+settlement. Untouched OCR cash deductions from Recent Orders match across screenshots by known
+printed date, minute and OCR amount (route is evidence only), for both current and legacy keys, and
+still reduce expected cash and the current shift's share once; the former D-12 rule that excess
+becomes a receivable is superseded by immediate signed cash settlement.
+
+This remains an implementation/change-set record, not a production-deploy claim. Its release
+candidate passed the complete Node 24 `pnpm check`, both production front-end builds, the standalone
+API build, and a fresh PostgreSQL 17.11 gate: 31/31 migrations, 0 pending on rerun, 59/59 DB tests,
+and every database guard. The live production baseline remains `0028`–`0030` until migration 0031
+and the coordinated API/admin/PWA rollout and postflight are actually completed.
+
+---
+
 ## 2026-08-14 — the shift has real boundaries, and the release has a rehearsed recovery path
+
+> Historical release record for migrations `0028`–`0030`. Its tier/receivable close behaviour was
+> superseded for unapproved shifts by the fixed-settlement decision above; its deployment and
+> recovery evidence remains valid for that earlier release.
 
 **Live:** migrations `0028`–`0030` were applied to production, then the API, admin console, and
 driver PWA were deployed and smoke-tested. The release gate passed on Node 24: `pnpm check`, both
@@ -27,8 +79,9 @@ manager correction or exclusion requires an audited reason. `openApprovedAt`, `o
 that were already open.
 
 A negative row from **Recent Orders** is no longer disguised as a delivery. It becomes an explicit
-cash deduction: expected cash and this shift's driver share fall, any excess becomes a driver cash
-receivable, and the row never increases order count, tier progress, Yallago's share, or the wallet.
+cash deduction: expected cash and this shift's driver share fall, ~~any excess becomes a driver cash
+receivable~~ (**superseded: it is now collected in the signed close transaction**), and the row never
+increases order count, historical tier progress, Yallago's share, or the wallet.
 Old PWA payloads that still send a negative fee are converted atomically. Order/deduction sign
 changes, closing a shift, and sealing a week are serialized so retries and concurrent requests
 cannot leave half a result.

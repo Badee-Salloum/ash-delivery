@@ -1369,7 +1369,10 @@ function EndPackage({
         odometerStrip: draft.odoStrip,
       })
       setBr1(res.br1)
-      if (res.br1.balanced) onSubmitted()
+      // A non-zero difference is now a manager settlement decision, not a driver submission gate.
+      // The server has already moved the shift to pending_review at this point; keeping the driver
+      // on the editable close screen made a successful request look like a failed one.
+      onSubmitted()
     } catch (e) {
       const err = e as { error?: string; detail?: { providerOrderNo?: string; businessDate?: string } }
       const notice = describeEndSubmitFailure(

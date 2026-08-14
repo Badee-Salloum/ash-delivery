@@ -1395,7 +1395,7 @@ export interface ShiftDecisionRecord {
   id: number
   shiftId: string
   gate: 'open' | 'close'
-  decision: 'approved' | 'rejected' | 'rephoto_requested'
+  decision: 'approved' | 'rejected' | 'rephoto_requested' | 'force_close_prepared'
   notes: string | null
   decidedBy: string
   decidedAtMs: number
@@ -1405,6 +1405,87 @@ export interface ShiftDecisionRepo {
   record(decision: Omit<ShiftDecisionRecord, 'id'>): Promise<ShiftDecisionRecord>
   /** Newest first, so the log reads top-down from the most recent decision. */
   listByShift(shiftId: string): Promise<ShiftDecisionRecord[]>
+}
+
+// ── Immutable shift settlement snapshot ───────────────────────────────────────────────────
+
+/**
+ * The cash-close policy currently authorised by the owner.
+ *
+ * This is deliberately versioned rather than named merely `fixed_40`: a future policy can coexist
+ * with old, immutable settlement snapshots without silently changing what their figures mean.
+ */
+export const FIXED_CASH_SETTLEMENT_POLICY = 'fixed_40_cash_close_v1' as const
+export const FIXED_DRIVER_RATE_BPS = 4_000 as const
+
+export type ShiftSettlementPolicy = typeof FIXED_CASH_SETTLEMENT_POLICY
+export type SettlementVarianceDirection = 'surplus' | 'shortage' | 'balanced'
+export type SettlementWalletAction = 'collect' | 'fund' | 'none'
+export type SettlementCashAction = 'collect' | 'pay' | 'none'
+
+/**
+ * The immutable, manager-confirmed answer to «what was collected from this employee at close?».
+ *
+ * Amounts ending in `ToOffice` are SIGNED: positive means the office receives value, negative
+ * means the office supplies it. The matching action + positive amount are stored as well because a
+ * branch manager must never be asked to interpret a negative monetary figure at the counter.
+ */
+export interface ShiftSettlementRecord {
+  id: number
+  shiftId: string
+  branchId: string
+  driverId: string
+  businessDate: CalendarDate
+  policyCode: ShiftSettlementPolicy
+  driverRateBps: typeof FIXED_DRIVER_RATE_BPS
+  deliveryFeeTotal: Minor
+  fixedDriverShare: Minor
+  manualDriverShare: Minor
+  grossDriverShare: Minor
+  cashDeductionTotal: Minor
+  /** Signed share after cash deductions, before the closing variance. */
+  baseDriverShare: Minor
+  expectedTotal: Minor
+  actualCash: Minor
+  actualWallet: Minor
+  actualTotal: Minor
+  /** `actualTotal - expectedTotal`, signed. */
+  variance: Minor
+  varianceDirection: SettlementVarianceDirection
+  /**
+   * Signed final cash: positive is kept/paid to the employee; negative is collected from him now.
+   * Current-shift shortages never become a carried receivable.
+   */
+  finalEmployeeCash: Minor
+  /** Full actual wallet balance, signed; collecting/funding this amount leaves the wallet at zero. */
+  walletToOffice: Minor
+  /** `actualCash - finalEmployeeCash`, signed. */
+  cashToOffice: Minor
+  walletAction: SettlementWalletAction
+  walletAmount: Minor
+  cashAction: SettlementCashAction
+  cashAmount: Minor
+  reviewedOrdersHash: string
+  /** sha256 over the complete canonical snapshot, including shift identity and policy. */
+  settlementHash: string
+  walletTransferConfirmed: boolean
+  cashSettlementConfirmed: boolean
+  confirmedBy: string
+  confirmedAtMs: number
+  /** Required when `variance !== 0`; nullable for a balanced close. */
+  varianceReason: string | null
+}
+
+export type NewShiftSettlementRecord = Omit<ShiftSettlementRecord, 'id'>
+
+export interface ShiftSettlementRepo {
+  /**
+   * Insert once. An exact hash replay returns the existing row; any different second snapshot is
+   * rejected because an approved financial settlement is corrected by a new journal event, never
+   * rewritten in place.
+   */
+  create(record: NewShiftSettlementRecord): Promise<ShiftSettlementRecord>
+  findByShift(shiftId: string): Promise<ShiftSettlementRecord | null>
 }
 
 /** A single GPS fix from the driver's phone while a shift is open (SRS K). Telemetry, not money. */
@@ -1452,6 +1533,7 @@ export interface ShiftCloseTransactionDeps {
   batteryReadings: BatteryReadingRepo
   batterySwaps: BatterySwapRepo
   weekLocks: WeekLockRepo
+  settlements: ShiftSettlementRepo
 }
 
 export interface ShiftCloseUnitOfWorkInput {
@@ -1513,6 +1595,8 @@ export interface Deps {
   vehicleEvents: VehicleEventRepo
   attendance: AttendanceRepo
   decisions: ShiftDecisionRepo
+  /** Immutable cash/wallet action the manager confirmed when approving the close. */
+  settlements: ShiftSettlementRepo
   gps: GpsPingRepo
   /** Atomic close-boundary/review writer; callback work is database-only. */
   closeUnitOfWork: ShiftCloseUnitOfWork

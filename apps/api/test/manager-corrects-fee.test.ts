@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
+import { DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr } from './harness.ts'
 
 /**
  * The manager corrects a fee.
@@ -81,11 +81,10 @@ describe('a manager corrects a fee', () => {
     // The hash moving is the whole mechanism: it is what makes the figures he read stale.
     expect(freshHash).not.toBe(staleHash)
 
-    // And the approval is refused. The close gate checks the equation BEFORE the hash, so a
-    // correction that unbalances the shift is caught as `br1_not_zero` rather than as staleness —
-    // either way the ledger is not posted from figures nobody re-read.
-    const stale = await post(manager, `/shifts/${id}/approve-close`, { reviewedOrdersHash: staleHash })
-    expect(stale.statusCode).not.toBe(200)
+    // A difference may now be settled by the manager, but an old order digest still cannot pass.
+    const stale = await approveFixedClose(h, manager, id, staleHash)
+    expect(stale.statusCode).toBe(409)
+    expect(stale.json().error).toBe('orders_changed_since_review')
     expect((await get(manager, `/shifts/${id}/review`)).json().state).toBe('pending_review')
   })
 

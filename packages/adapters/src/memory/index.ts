@@ -44,6 +44,9 @@ import type {
   ShiftOrderRecord,
   ShiftRecord,
   ShiftRepo,
+  NewShiftSettlementRecord,
+  ShiftSettlementRecord,
+  ShiftSettlementRepo,
   UserRecord,
   UserRepo,
   VehicleEventRecord,
@@ -56,7 +59,13 @@ import type {
   WeekLockRecord,
   WeekLockRepo,
 } from '@ash/contracts'
-import { classifyOperationWindow, includedByOperationWindow, normalizeUsername } from '@ash/contracts'
+import {
+  FIXED_CASH_SETTLEMENT_POLICY,
+  FIXED_DRIVER_RATE_BPS,
+  classifyOperationWindow,
+  includedByOperationWindow,
+  normalizeUsername,
+} from '@ash/contracts'
 import { type CalendarDate, type FxDay, type Minor, type Posting, isAwaitingDecision, isLive, minor } from '@ash/domain'
 import { memoryCipher } from '../crypto.ts'
 import { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
@@ -1445,6 +1454,124 @@ export class MemoryShiftDecisionRepo implements ShiftDecisionRepo {
   }
 }
 
+const invalidSettlement = (message: string): Error & { code: string } =>
+  Object.assign(new Error(message), { code: 'INVALID_SHIFT_SETTLEMENT' })
+
+const immutableSettlement = (shiftId: string): Error & { code: string } =>
+  Object.assign(new Error(`shift ${shiftId} already has a different immutable settlement`), {
+    code: 'SHIFT_SETTLEMENT_IMMUTABLE',
+  })
+
+function assertSettlement(record: NewShiftSettlementRecord): void {
+  if (record.policyCode !== FIXED_CASH_SETTLEMENT_POLICY || record.driverRateBps !== FIXED_DRIVER_RATE_BPS) {
+    throw invalidSettlement('the fixed 40% settlement policy is required')
+  }
+  const nonnegative = [
+    record.deliveryFeeTotal,
+    record.fixedDriverShare,
+    record.manualDriverShare,
+    record.grossDriverShare,
+    record.cashDeductionTotal,
+    record.actualCash,
+    record.walletAmount,
+    record.cashAmount,
+  ]
+  if (nonnegative.some((amount) => amount < 0n)) throw invalidSettlement('settlement magnitudes must be non-negative')
+  if (record.fixedDriverShare !== (record.deliveryFeeTotal * 4_000n) / 10_000n) {
+    throw invalidSettlement('fixed driver share is not 40% of delivery fees')
+  }
+  if (record.grossDriverShare !== record.fixedDriverShare + record.manualDriverShare) {
+    throw invalidSettlement('gross driver share does not include the fixed and manual shares')
+  }
+  if (record.baseDriverShare !== record.grossDriverShare - record.cashDeductionTotal) {
+    throw invalidSettlement('base driver share does not apply the cash deductions')
+  }
+  if (record.actualTotal !== record.actualCash + record.actualWallet) {
+    throw invalidSettlement('actual total does not equal cash plus wallet')
+  }
+  if (record.variance !== record.actualTotal - record.expectedTotal) {
+    throw invalidSettlement('variance does not equal actual minus expected')
+  }
+  const direction = record.variance > 0n ? 'surplus' : record.variance < 0n ? 'shortage' : 'balanced'
+  if (record.varianceDirection !== direction) throw invalidSettlement('variance direction disagrees with its sign')
+  if (record.finalEmployeeCash !== record.baseDriverShare + record.variance) {
+    throw invalidSettlement('final employee cash does not include the closing variance')
+  }
+  if (record.walletToOffice !== record.actualWallet) {
+    throw invalidSettlement('the settlement does not empty the complete actual wallet')
+  }
+  const walletAction = record.walletToOffice > 0n ? 'collect' : record.walletToOffice < 0n ? 'fund' : 'none'
+  const walletAmount = record.walletToOffice < 0n ? -record.walletToOffice : record.walletToOffice
+  if (record.walletAction !== walletAction || record.walletAmount !== walletAmount) {
+    throw invalidSettlement('wallet action does not match the signed wallet transfer')
+  }
+  if (record.cashToOffice !== record.actualCash - record.finalEmployeeCash) {
+    throw invalidSettlement('cash action does not close the final employee cash')
+  }
+  const cashAction = record.cashToOffice > 0n ? 'collect' : record.cashToOffice < 0n ? 'pay' : 'none'
+  const cashAmount = record.cashToOffice < 0n ? -record.cashToOffice : record.cashToOffice
+  if (record.cashAction !== cashAction || record.cashAmount !== cashAmount) {
+    throw invalidSettlement('cash action does not match the signed cash transfer')
+  }
+  if (
+    !record.reviewedOrdersHash.trim() ||
+    record.reviewedOrdersHash.length > 128 ||
+    !/^[0-9a-f]{64}$/.test(record.settlementHash)
+  ) {
+    throw invalidSettlement('settlement hashes are missing or malformed')
+  }
+  if (!record.walletTransferConfirmed || !record.cashSettlementConfirmed) {
+    throw invalidSettlement('both physical settlement actions must be confirmed')
+  }
+  if (record.variance !== 0n && !record.varianceReason?.trim()) {
+    throw invalidSettlement('a non-zero variance requires a manager reason')
+  }
+  if (record.varianceReason !== null && record.varianceReason.length > 500) {
+    throw invalidSettlement('variance reason is longer than 500 characters')
+  }
+  if (!Number.isFinite(record.confirmedAtMs)) throw invalidSettlement('confirmation time is invalid')
+}
+
+/** Append-only in-memory counterpart to `shift_settlements`. */
+export class MemoryShiftSettlementRepo implements ShiftSettlementRepo {
+  readonly rows = new Map<string, ShiftSettlementRecord>()
+  private nextId = 1
+
+  snapshotState(): { rows: Map<string, ShiftSettlementRecord>; nextId: number } {
+    return { rows: structuredClone(this.rows), nextId: this.nextId }
+  }
+
+  restoreState(state: { rows: Map<string, ShiftSettlementRecord>; nextId: number }): void {
+    this.rows.clear()
+    for (const [shiftId, row] of state.rows) this.rows.set(shiftId, structuredClone(row))
+    this.nextId = state.nextId
+  }
+
+  async create(record: NewShiftSettlementRecord): Promise<ShiftSettlementRecord> {
+    assertSettlement(record)
+    const existing = this.rows.get(record.shiftId)
+    if (existing) {
+      if (existing.settlementHash !== record.settlementHash) throw immutableSettlement(record.shiftId)
+      return structuredClone(existing)
+    }
+    for (const row of this.rows.values()) {
+      if (row.settlementHash === record.settlementHash) {
+        throw Object.assign(new Error(`settlement hash ${record.settlementHash} already exists`), {
+          code: 'SHIFT_SETTLEMENT_HASH_CONFLICT',
+        })
+      }
+    }
+    const created: ShiftSettlementRecord = { ...structuredClone(record), id: this.nextId++ }
+    this.rows.set(record.shiftId, created)
+    return structuredClone(created)
+  }
+
+  async findByShift(shiftId: string): Promise<ShiftSettlementRecord | null> {
+    const row = this.rows.get(shiftId)
+    return row ? structuredClone(row) : null
+  }
+}
+
 /** Live GPS pings (SRS K): append-only telemetry; the live map reads the latest per driver. */
 export class MemoryGpsPingRepo implements GpsPingRepo {
   readonly rows: GpsPingRecord[] = []
@@ -1527,6 +1654,7 @@ export interface MemoryDeps extends Deps {
   vehicleEvents: MemoryVehicleEventRepo
   attendance: MemoryAttendanceRepo
   decisions: MemoryShiftDecisionRepo
+  settlements: MemoryShiftSettlementRepo
   gps: MemoryGpsPingRepo
 }
 
@@ -1545,6 +1673,7 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
   private readonly movements: MemoryWalletMovementRepo
   private readonly ledger: MemoryLedgerRepo
   private readonly decisions: MemoryShiftDecisionRepo
+  private readonly settlements: MemoryShiftSettlementRepo
   private readonly fx: MemoryFxRepo
   private readonly batteryReadings: MemoryBatteryReadingRepo
   private readonly batterySwaps: MemoryBatterySwapRepo
@@ -1559,6 +1688,7 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
     movements: MemoryWalletMovementRepo,
     ledger: MemoryLedgerRepo,
     decisions: MemoryShiftDecisionRepo,
+    settlements: MemoryShiftSettlementRepo,
     fx: MemoryFxRepo,
     batteryReadings: MemoryBatteryReadingRepo,
     batterySwaps: MemoryBatterySwapRepo,
@@ -1572,6 +1702,7 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
     this.movements = movements
     this.ledger = ledger
     this.decisions = decisions
+    this.settlements = settlements
     this.fx = fx
     this.batteryReadings = batteryReadings
     this.batterySwaps = batterySwaps
@@ -1591,6 +1722,7 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
       const movementNextId = this.movements.snapshotNextId()
       const ledgerSnapshot = this.ledger.snapshotState()
       const decisionSnapshot = this.decisions.snapshotState()
+      const settlementSnapshot = this.settlements.snapshotState()
       const fxSnapshot = this.fx.snapshotState()
       const batteryReadingSnapshot = this.batteryReadings.snapshotForShift(input.shiftId)
       const batterySwapSnapshot = this.batterySwaps.snapshotForShift(input.shiftId)
@@ -1611,6 +1743,7 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
         this.movements.restoreNextId(movementNextId)
         this.ledger.restoreState(ledgerSnapshot)
         this.decisions.restoreState(decisionSnapshot)
+        this.settlements.restoreState(settlementSnapshot)
         this.fx.restoreState(fxSnapshot)
         this.batteryReadings.restoreForShift(input.shiftId, batteryReadingSnapshot)
         this.batterySwaps.restoreForShift(input.shiftId, batterySwapSnapshot)
@@ -1643,6 +1776,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     clock,
   )
   const decisions = new MemoryShiftDecisionRepo()
+  const settlements = new MemoryShiftSettlementRepo()
   const gate = new MemoryTransactionGate()
   const transactionDeps: ShiftCloseTransactionDeps = {
     shifts,
@@ -1659,6 +1793,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     batteryReadings,
     batterySwaps,
     weekLocks,
+    settlements,
   }
   const closeUnitOfWork = new MemoryShiftCloseUnitOfWork(
     transactionDeps,
@@ -1668,6 +1803,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     movements,
     ledger,
     decisions,
+    settlements,
     fx,
     batteryReadings,
     batterySwaps,
@@ -1712,6 +1848,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     vehicleEvents: new MemoryVehicleEventRepo(),
     attendance: new MemoryAttendanceRepo(),
     decisions,
+    settlements,
     gps: new MemoryGpsPingRepo(),
   }
 }

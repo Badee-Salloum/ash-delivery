@@ -1,4 +1,5 @@
-import { type Minor, ZERO, add, minor, sub } from '../money/minor.ts'
+import { FIXED_DRIVER_BPS, allocate } from '../money/allocate.ts'
+import { type Minor, ZERO, abs, add, minor, sub } from '../money/minor.ts'
 
 /**
  * «كشف التسوية» — what happens to the cash in the driver's hands when a shift closes.
@@ -168,5 +169,160 @@ export function planSettlement(input: SettlementInput): SettlementPlan {
     lines,
     feasible: refusals.length === 0,
     refusals,
+  }
+}
+
+// ── Fixed-40, full-wallet settlement ─────────────────────────────────────────────────────
+
+export type WalletSettlementAction = 'collect' | 'fund' | 'none'
+export type CashSettlementAction = 'collect' | 'pay' | 'none'
+
+export interface SettlementAction<Action extends string> {
+  readonly action: Action
+  /** Always an absolute magnitude. Direction lives in `action`, never in this number. */
+  readonly amount: Minor
+}
+
+/**
+ * Inputs owned by the server at approval time.
+ *
+ * `expectedCash` and `expectedWallet` are BR1's post-deduction balances. The dedicated cash
+ * deduction term appears again in the employee's earnings because the operation both left his
+ * physical cash and is his responsibility; this is not double-counting. Subtracting it on both
+ * sides is precisely what keeps the office entitlement unchanged.
+ */
+export interface FixedShareSettlementInput {
+  /** Gross fees of included Yallago deliveries on this shift. Manual jobs are excluded. */
+  readonly deliveryFeeTotal: Minor
+  /** Exactly floor(40% × deliveryFeeTotal), supplied by the caller's fixed split. */
+  readonly fixedDriverShare: Minor
+  /** Manager-agreed driver shares of included manual jobs on this shift. */
+  readonly manualDriverShare: Minor
+  /** Included negative recent-order rows, as one positive magnitude. */
+  readonly cashDeductionTotal: Minor
+  readonly expectedCash: Minor
+  readonly expectedWallet: Minor
+  /** What the driver declared before the manager performs the closing cash transaction. */
+  readonly actualCash: Minor
+  /** The complete app-wallet balance. Positive is collected; negative must be funded to reach 0. */
+  readonly actualWallet: Minor
+}
+
+export interface FixedShareSettlementPlan {
+  readonly deliveryFeeTotal: Minor
+  readonly fixedDriverShare: Minor
+  readonly manualDriverShare: Minor
+  /** fixedDriverShare + manualDriverShare. */
+  readonly grossDriverShare: Minor
+  readonly cashDeductionTotal: Minor
+  /** Signed: grossDriverShare − cashDeductionTotal. */
+  readonly baseDriverShare: Minor
+  readonly expectedCash: Minor
+  readonly expectedWallet: Minor
+  readonly expectedTotal: Minor
+  readonly actualCash: Minor
+  readonly actualWallet: Minor
+  readonly actualTotal: Minor
+  /** Signed BR1 scalar variance: actualTotal − expectedTotal. */
+  readonly variance: Minor
+  /**
+   * Signed cash left with / due from the employee after the close.
+   * Positive means he keeps or receives it; negative means he contributes its absolute value.
+   */
+  readonly finalEmployeeCash: Minor
+  /** The invariant office claim before choosing which physical box receives it. */
+  readonly officeEntitlement: Minor
+  /** Signed office-cash movement. Positive collects; negative pays the employee. */
+  readonly cashToOffice: Minor
+  /** Signed full wallet movement. Equal to actualWallet. */
+  readonly walletToOffice: Minor
+  readonly wallet: SettlementAction<WalletSettlementAction>
+  readonly cash: SettlementAction<CashSettlementAction>
+}
+
+function requireNonNegative(label: string, amount: Minor): void {
+  if (amount < ZERO) throw new RangeError(`${label} must be non-negative, got ${amount}`)
+}
+
+function walletAction(amount: Minor): SettlementAction<WalletSettlementAction> {
+  return {
+    action: amount > ZERO ? 'collect' : amount < ZERO ? 'fund' : 'none',
+    amount: abs(amount),
+  }
+}
+
+function cashAction(amount: Minor): SettlementAction<CashSettlementAction> {
+  return {
+    action: amount > ZERO ? 'collect' : amount < ZERO ? 'pay' : 'none',
+    amount: abs(amount),
+  }
+}
+
+/**
+ * Settle a shift by emptying the wallet completely and using one signed cash action for everything
+ * else. There is no "pay later" and no newly carried receivable: after the manager confirms the
+ * two physical actions, the driver's cash, wallet, share payable and close-time receivable all end
+ * at zero in the ledger.
+ *
+ * The essential identities are:
+ *
+ *     base share          B = 40% Yallago share + manual share − deductions
+ *     scalar variance     V = actual total − expected total
+ *     employee cash       N = B + V
+ *     office cash         X = expected total − B − actual wallet
+ *
+ * Therefore `actualCash − X === N`, and the full wallet plus the cash action always gives the
+ * office exactly `expectedTotal − B`, independent of where the driver happened to hold the money.
+ */
+export function planFixedShareSettlement(input: FixedShareSettlementInput): FixedShareSettlementPlan {
+  requireNonNegative('delivery fee total', input.deliveryFeeTotal)
+  requireNonNegative('fixed driver share', input.fixedDriverShare)
+  requireNonNegative('manual driver share', input.manualDriverShare)
+  requireNonNegative('cash deduction total', input.cashDeductionTotal)
+  requireNonNegative('actual cash', input.actualCash)
+
+  const canonicalFixedShare = allocate(input.deliveryFeeTotal, FIXED_DRIVER_BPS, 'floor')
+  if (input.fixedDriverShare !== canonicalFixedShare) {
+    throw new RangeError(
+      `fixed driver share must equal floor(${FIXED_DRIVER_BPS}bps × ${input.deliveryFeeTotal}), ` +
+      `got ${input.fixedDriverShare} instead of ${canonicalFixedShare}`,
+    )
+  }
+
+  const grossDriverShare = add(input.fixedDriverShare, input.manualDriverShare)
+  const baseDriverShare = sub(grossDriverShare, input.cashDeductionTotal)
+  const expectedTotal = add(input.expectedCash, input.expectedWallet)
+  const actualTotal = add(input.actualCash, input.actualWallet)
+  const variance = sub(actualTotal, expectedTotal)
+  const finalEmployeeCash = add(baseDriverShare, variance)
+  const officeEntitlement = sub(expectedTotal, baseDriverShare)
+  const cashToOffice = sub(officeEntitlement, input.actualWallet)
+
+  // This identity is kept executable rather than documentation-only. A future edit that changes
+  // one side of the settlement cannot quietly invent or destroy a minor unit.
+  if (sub(input.actualCash, cashToOffice) !== finalEmployeeCash) {
+    throw new RangeError('fixed-share settlement does not conserve the closing cash')
+  }
+
+  return {
+    deliveryFeeTotal: input.deliveryFeeTotal,
+    fixedDriverShare: input.fixedDriverShare,
+    manualDriverShare: input.manualDriverShare,
+    grossDriverShare,
+    cashDeductionTotal: input.cashDeductionTotal,
+    baseDriverShare,
+    expectedCash: input.expectedCash,
+    expectedWallet: input.expectedWallet,
+    expectedTotal,
+    actualCash: input.actualCash,
+    actualWallet: input.actualWallet,
+    actualTotal,
+    variance,
+    finalEmployeeCash,
+    officeEntitlement,
+    cashToOffice,
+    walletToOffice: input.actualWallet,
+    wallet: walletAction(input.actualWallet),
+    cash: cashAction(cashToOffice),
   }
 }

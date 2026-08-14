@@ -189,9 +189,27 @@ describe('the CLOSE gate (BR5, AC #2)', () => {
     ).toEqual({ ok: false, reason: 'br1_not_zero' })
   })
 
+  it('accepts a non-zero BR1 only after the application validated the reviewed cash settlement', () => {
+    expect(
+      transition('pending_review', 'manager_approve_close',
+        ctx({
+          endPackage: completeEnd(),
+          br1: { balanced: false, splitBalanced: false },
+          settlementConfirmed: true,
+        })),
+    ).toEqual({ ok: true, next: 'approved' })
+  })
+
   it('refuses approval when BR1 was never evaluated', () => {
     expect(transition('pending_review', 'manager_approve_close', ctx({ endPackage: completeEnd() })))
       .toEqual({ ok: false, reason: 'br1_not_zero' })
+  })
+
+  it('does not let a confirmation flag replace BR1 evaluation', () => {
+    expect(transition('pending_review', 'manager_approve_close', ctx({
+      endPackage: completeEnd(),
+      settlementConfirmed: true,
+    }))).toEqual({ ok: false, reason: 'br1_not_zero' })
   })
 
   it.each(['dashboard', 'wallet', 'odometer'])('refuses without the %s photo', (slot) => {
@@ -227,6 +245,18 @@ describe('the split gate — a pay-mode error hides behind a perfect scalar', ()
       transition('pending_review', 'manager_approve_close',
         ctx({ endPackage: completeEnd(), br1: splitMismatch, splitGate: 'strict' })),
     ).toEqual({ ok: false, reason: 'br1_split_mismatch' })
+  })
+
+  it('strict accepts it only after the reviewed cash settlement was confirmed', () => {
+    expect(
+      transition('pending_review', 'manager_approve_close',
+        ctx({
+          endPackage: completeEnd(),
+          br1: splitMismatch,
+          splitGate: 'strict',
+          settlementConfirmed: true,
+        })),
+    ).toEqual({ ok: true, next: 'approved' })
   })
 
   it('defaults to advisory when unset', () => {

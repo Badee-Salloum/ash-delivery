@@ -1,7 +1,8 @@
-import { type Minor, add, minor, sub, sum } from '../money/minor.ts'
+import { type Minor, ZERO, abs, add, minor, neg, sub, sum } from '../money/minor.ts'
 import { type FeeTotals, type Rounding } from '../money/allocate.ts'
 import type { BlockSplit } from '../money/allocate.ts'
 import { type PayMode, type ShiftOrder, orderWalletAmount, orderYalagoCut, totalFeesOfOrders } from '../br1/equation.ts'
+import { type FixedShareSettlementPlan, planFixedShareSettlement } from '../settlement/statement.ts'
 
 /**
  * The posting recipes: every way money is allowed to move.
@@ -154,6 +155,12 @@ const D = (fund: FundRef, amount: Minor, role?: string): PostingLine =>
 const C = (fund: FundRef, amount: Minor, role?: string): PostingLine =>
   role === undefined ? { fund, side: 'C', amount } : { fund, side: 'C', amount, role }
 
+/** Append a signed fund movement without ever placing a signed amount on a journal line. */
+function signedLine(lines: PostingLine[], fund: FundRef, movement: Minor, role: string): void {
+  if (movement > ZERO) lines.push(D(fund, movement, role))
+  else if (movement < ZERO) lines.push(C(fund, abs(movement), role))
+}
+
 // ── Gate postings ─────────────────────────────────────────────────────────────────────────
 
 /** Cash float handed to the driver at open. One posting per tranche (C-5). */
@@ -283,6 +290,115 @@ export function walletReturn(driverId: string, amount: Minor): Posting {
       : // The wallet closed negative: the office funds it back up to zero.
         [D({ kind: 'driver_wallet', driverId }, magnitude, 'wallet_shortfall'), C({ kind: 'office_wallet' }, magnitude)]
   return assertBalanced({ eventType: 'wallet_return', occurrenceKey: '1', lines })
+}
+
+export interface CashSettledReturnInput {
+  readonly driverId: string
+  /** The exact immutable plan the manager reviewed and confirmed. */
+  readonly settlement: FixedShareSettlementPlan
+}
+
+/**
+ * A settlement plan crosses an application/domain boundary as a plain object, so its derived
+ * fields are not protected by a runtime brand. Rebuild them from the seven source facts before
+ * allowing that object to decide a journal. This also protects the audit snapshot: a caller cannot
+ * preserve `cashToOffice` while silently changing the displayed variance or employee amount.
+ */
+function assertCanonicalFixedShareSettlement(settlement: FixedShareSettlementPlan): void {
+  const canonical = planFixedShareSettlement({
+    deliveryFeeTotal: settlement.deliveryFeeTotal,
+    fixedDriverShare: settlement.fixedDriverShare,
+    manualDriverShare: settlement.manualDriverShare,
+    cashDeductionTotal: settlement.cashDeductionTotal,
+    expectedCash: settlement.expectedCash,
+    expectedWallet: settlement.expectedWallet,
+    actualCash: settlement.actualCash,
+    actualWallet: settlement.actualWallet,
+  })
+  const scalarFields = [
+    'grossDriverShare',
+    'baseDriverShare',
+    'expectedTotal',
+    'actualTotal',
+    'variance',
+    'finalEmployeeCash',
+    'officeEntitlement',
+    'cashToOffice',
+    'walletToOffice',
+  ] as const
+  for (const field of scalarFields) {
+    if (settlement[field] !== canonical[field]) {
+      throw new RangeError(
+        `non-canonical fixed-share settlement ${field}: ${settlement[field]} vs ${canonical[field]}`,
+      )
+    }
+  }
+  if (
+    settlement.wallet.action !== canonical.wallet.action ||
+    settlement.wallet.amount !== canonical.wallet.amount ||
+    settlement.cash.action !== canonical.cash.action ||
+    settlement.cash.amount !== canonical.cash.amount
+  ) {
+    throw new RangeError('non-canonical fixed-share settlement action')
+  }
+}
+
+/**
+ * The two physical close movements for the fixed-40 policy.
+ *
+ * Before these run, order/share/deduction postings have left:
+ *
+ *   driver_cash                 = expectedCash
+ *   driver_wallet               = expectedWallet
+ *   driver_share_payable credit = max(baseDriverShare, 0)
+ *   driver_receivable_cash      = max(-baseDriverShare, 0)
+ *
+ * First, the wallet posting reclassifies `actualWallet − expectedWallet` between the two driver
+ * assets and sweeps the complete actual wallet balance. The driver's cash asset is then
+ * `expectedTotal − actualWallet`. Second, one signed cash posting clears that asset and whichever
+ * side of the employee account exists. `office_cash` receives (or pays) the residual.
+ *
+ * No variance cost centre is involved: policy assigns the scalar variance to the employee and the
+ * confirmed cash transaction physically settles it. Both driver assets, the share payable and the
+ * close-time receivable therefore finish at exactly zero.
+ */
+export function cashSettledReturnPostings(input: CashSettledReturnInput): Posting[] {
+  const { driverId, settlement } = input
+  assertCanonicalFixedShareSettlement(settlement)
+  const postings: Posting[] = []
+
+  const walletDelta = sub(settlement.actualWallet, settlement.expectedWallet)
+  const walletLines: PostingLine[] = []
+  // Reclassify the observed cash/wallet split before either fund is swept.
+  signedLine(walletLines, { kind: 'driver_wallet', driverId }, walletDelta, 'wallet_reclassification')
+  signedLine(walletLines, { kind: 'driver_cash', driverId }, neg(walletDelta), 'wallet_reclassification')
+  // Positive actual wallet is collected in full; a negative wallet is funded back to zero.
+  signedLine(walletLines, { kind: 'driver_wallet', driverId }, neg(settlement.actualWallet), 'wallet_cleared')
+  signedLine(walletLines, { kind: 'office_wallet' }, settlement.actualWallet, 'wallet_full_return')
+  if (walletLines.length > 0) {
+    postings.push(assertBalanced({ eventType: 'wallet_return', occurrenceKey: '1', lines: walletLines }))
+  }
+
+  const cashAfterWallet = sub(settlement.expectedTotal, settlement.actualWallet)
+  const payable = settlement.baseDriverShare > ZERO ? settlement.baseDriverShare : ZERO
+  const receivable = settlement.baseDriverShare < ZERO ? abs(settlement.baseDriverShare) : ZERO
+  const cashToOffice = sub(cashAfterWallet, settlement.baseDriverShare)
+  if (cashToOffice !== settlement.cashToOffice) {
+    throw new RangeError(
+      `cash-settled return disagrees with reviewed plan: ${cashToOffice} vs ${settlement.cashToOffice}`,
+    )
+  }
+
+  const cashLines: PostingLine[] = []
+  signedLine(cashLines, { kind: 'driver_cash', driverId }, neg(cashAfterWallet), 'cash_cleared')
+  signedLine(cashLines, { kind: 'driver_share_payable', driverId }, payable, 'driver_share_settled')
+  signedLine(cashLines, { kind: 'driver_receivable_cash', driverId }, neg(receivable), 'driver_receivable_settled')
+  signedLine(cashLines, { kind: 'office_cash' }, cashToOffice, 'cash_settlement')
+  if (cashLines.length > 0) {
+    postings.push(assertBalanced({ eventType: 'float_return', occurrenceKey: '1', lines: cashLines }))
+  }
+
+  return postings
 }
 
 // ── Order postings (BR3) ──────────────────────────────────────────────────────────────────
@@ -581,7 +697,7 @@ export function postingsForOpen(input: ShiftPostingInput): Posting[] {
  * a second shift can push the day across a band and restate the first (see tier/split.ts
  * `trueUp`). The ledger must post what the day says, not what the shift alone would have said.
  */
-export function postingsForApproval(input: ShiftPostingInput, split: BlockSplit): Posting[] {
+function approvalActivityPostings(input: ShiftPostingInput, split: BlockSplit): Posting[] {
   const rounding = input.rounding ?? 'floor'
   // Per ORDER, not per fee: a manual job carries no Yallago cut, and totalling the bare fees would
   // charge one anyway — leaving `shareSplit` unable to exhaust `fee_earned` and throwing.
@@ -611,6 +727,12 @@ export function postingsForApproval(input: ShiftPostingInput, split: BlockSplit)
     )
   }
 
+  return postings
+}
+
+export function postingsForApproval(input: ShiftPostingInput, split: BlockSplit): Posting[] {
+  const postings = approvalActivityPostings(input, split)
+
   /*
    * Both driver funds go to EXACTLY ZERO (D-4). The cash may be distributed three ways now — the
    * box, a ذمة, and the share he keeps — but it is still ONE credit of the whole closing balance,
@@ -624,6 +746,72 @@ export function postingsForApproval(input: ShiftPostingInput, split: BlockSplit)
   if (endWallet !== 0n) postings.push(walletReturn(input.driverId, endWallet))
 
   return postings
+}
+
+/**
+ * Fixed-40 approval assembly used once the manager has reviewed the full-wallet/cash settlement.
+ *
+ * It emits the same order, Yallago, share and deduction entries as the legacy approval path, then
+ * replaces its computed-balance returns with {@link cashSettledReturnPostings}. The validations
+ * below make the settlement snapshot and the postings one fact: a stale or independently-derived
+ * plan fails before any repository sees a journal entry.
+ */
+export function postingsForCashSettledApproval(
+  input: ShiftPostingInput,
+  split: BlockSplit,
+  settlement: FixedShareSettlementPlan,
+): Posting[] {
+  const yallagoFeeTotal = sum(
+    input.orders.filter((order) => order.kind !== 'manual').map((order) => order.fee),
+  )
+  if (settlement.deliveryFeeTotal !== yallagoFeeTotal) {
+    throw new RangeError(
+      `settlement delivery fee total ${settlement.deliveryFeeTotal} does not match approval ${yallagoFeeTotal}`,
+    )
+  }
+  const manualDriverShare = sum(
+    input.orders
+      .filter((order) => order.kind === 'manual')
+      .map((order) => order.driverShare ?? ZERO),
+  )
+  if (settlement.manualDriverShare !== manualDriverShare) {
+    throw new RangeError(
+      `settlement manual driver share ${settlement.manualDriverShare} does not match approval ${manualDriverShare}`,
+    )
+  }
+  const expected = closingBalances(input)
+  if (settlement.expectedCash !== expected.endCash || settlement.expectedWallet !== expected.endWallet) {
+    throw new RangeError(
+      `settlement expected balances do not match approval: ` +
+      `${settlement.expectedCash}/${settlement.expectedWallet} vs ${expected.endCash}/${expected.endWallet}`,
+    )
+  }
+  if (settlement.grossDriverShare !== split.driverShare) {
+    throw new RangeError(
+      `settlement gross driver share ${settlement.grossDriverShare} does not match split ${split.driverShare}`,
+    )
+  }
+
+  const deductions = input.cashDeductions ?? []
+  const deductionTotal = sum(deductions.map((deduction) => deduction.amount))
+  if (deductionTotal !== settlement.cashDeductionTotal) {
+    throw new RangeError(
+      `settlement cash deductions ${settlement.cashDeductionTotal} do not match postings ${deductionTotal}`,
+    )
+  }
+  const allocatedToShare = sum(deductions.map((deduction) => deduction.sharePortion))
+  const expectedShareAllocation =
+    deductionTotal < settlement.grossDriverShare ? deductionTotal : settlement.grossDriverShare
+  if (allocatedToShare !== expectedShareAllocation) {
+    throw new RangeError(
+      `cash-deduction share allocation ${allocatedToShare} does not consume ${expectedShareAllocation}`,
+    )
+  }
+
+  return [
+    ...approvalActivityPostings(input, split),
+    ...cashSettledReturnPostings({ driverId: input.driverId, settlement }),
+  ]
 }
 
 export interface ClosingBalances {

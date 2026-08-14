@@ -8,6 +8,7 @@ import {
   DRIVER_ID,
   type Harness,
   VEHICLE_ID,
+  approveFixedClose,
   makeHarness,
   syp,
   sypStr,
@@ -69,6 +70,44 @@ async function uploadEnd(driver: string, id: string): Promise<void> {
   for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
 }
 
+async function seedHistoricalOcrDeductionOverlap(
+  driver: string,
+  id: string,
+  operationKey: string,
+  richerOperationKey = `${operationKey}~2`,
+): Promise<void> {
+  const partial = {
+    operationKey,
+    amount: '50.00',
+    amountOcr: '50.00',
+    occurredDate: null,
+    occurredMinute: '22:36',
+    pointA: 'G777+4GP, Al Qanawat',
+    pointB: null,
+    source: 'ocr',
+  }
+  const submitted = await put(driver, `/shifts/${id}/operations`, {
+    orders: [],
+    cashDeductions: [partial],
+    movements: [],
+  })
+  expect(submitted.statusCode, submitted.body).toBe(200)
+
+  const [persistedPartial] = await h.deps.cashDeductions.listByShift(id)
+  expect(persistedPartial).toBeDefined()
+  await h.deps.cashDeductions.create({
+    ...persistedPartial!,
+    id: `${operationKey}-historical-rich`,
+    operationKey: richerOperationKey,
+    occurredDate: '2026-08-13',
+    included: true,
+    windowStatus: 'in_window',
+    pointA: 'G77V+4GP, Al Qanawat',
+    pointB: 'G78P+J3M, Al Mouhajrin',
+  }, 'u-d1')
+  expect(await h.deps.cashDeductions.listByShift(id)).toHaveLength(2)
+}
+
 describe('operation minute window', () => {
   const base = {
     openApprovedAt: new Date(OPEN_MS).toISOString(),
@@ -96,7 +135,7 @@ describe('operation minute window', () => {
 })
 
 describe('Thaer regression: six orders and the -50 recent-order row', () => {
-  it('crosses midnight, reduces 4,736 to 4,686, and leaves tier/Yallago order arithmetic unchanged', async () => {
+  it('crosses midnight, reduces 4,736 to 4,686, and leaves fixed-share/Yallago arithmetic unchanged', async () => {
     const { id, driver, manager } = await openShift()
     const fees = [425, 240, 370, 175, 145, 190]
     const times = [
@@ -164,18 +203,17 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
     expect(review.json().cashDeductions).toHaveLength(1)
     expect(review.json().cashDeductions[0]).toMatchObject({ amount: '50.00', included: true, windowStatus: 'in_window' })
 
-    const settlement = await get(manager, `/shifts/${id}/settlement?payShareNow=false`)
+    const settlement = await get(manager, `/shifts/${id}/settlement`)
     expect(settlement.statusCode, settlement.body).toBe(200)
     expect(settlement.json()).toMatchObject({
-      grossDriverShare: '540.75',
+      grossDriverShare: '618.00',
       cashDeductionTotal: '50.00',
-      netDriverShare: '490.75',
-      deductionReceivable: '0.00',
+      baseDriverShare: '568.00',
+      variance: '0.00',
+      finalEmployeeCash: '568.00',
     })
 
-    const approved = await post(manager, `/shifts/${id}/approve-close`, {
-      reviewedOrdersHash: review.json().br1.ordersHash,
-    })
+    const approved = await approveFixedClose(h, manager, id, review.json().br1.ordersHash)
     expect(approved.statusCode, approved.body).toBe(200)
     const entries = await h.deps.ledger.listByShift(id)
     expect(entries.filter((entry) => entry.eventType === 'order_fee')).toHaveLength(6)
@@ -378,6 +416,100 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
     ])
   })
 
+  it('heals an already-persisted OCR overlap when a pending review is first opened and counts it once', async () => {
+    const { id, driver, manager } = await openShift({ float: 3_500, topup: 0 })
+    const fillerOrder = await post(driver, `/shifts/${id}/orders`, {
+      providerOrderNo: 'PENDING-REVIEW-ZERO-FEE',
+      payMode: 'free',
+      fee: '0.00',
+      zone: null,
+    })
+    expect(fillerOrder.statusCode, fillerOrder.body).toBe(201)
+    await seedHistoricalOcrDeductionOverlap(
+      driver,
+      id,
+      'legacy:OLD-PWA-PARTIAL',
+      'legacy:OLD-PWA-RICH',
+    )
+    await uploadEnd(driver, id)
+    h.deps.clock.set(CLOSE_MS)
+
+    const ended = await put(driver, `/shifts/${id}/end-package`, {
+      odometerKm: 6_100,
+      batteryPercent: null,
+      cashDeclared: '3450.00',
+      walletDeclared: '0.00',
+    })
+    expect(ended.statusCode, ended.body).toBe(200)
+    expect((await h.deps.shifts.findById(id))?.state).toBe('pending_review')
+    // The close boundary only classifies. Historical duplicate healing belongs to the locked
+    // manager-review preparation, so prove the persisted production shape still exists first.
+    expect(await h.deps.cashDeductions.listByShift(id)).toHaveLength(2)
+
+    const review = await get(manager, `/shifts/${id}/review`)
+    expect(review.statusCode, review.body).toBe(200)
+    expect(review.json().br1).toMatchObject({
+      cashDeductionTotal: '50.00',
+      expectedTotal: '3450.00',
+      difference: '0.00',
+    })
+    expect(review.json().cashDeductions).toHaveLength(1)
+    expect(await h.deps.cashDeductions.listByShift(id)).toEqual([
+      expect.objectContaining({
+        amount: 5_000n,
+        amountOcr: 5_000n,
+        occurredDate: '2026-08-13',
+        occurredMinute: '22:36',
+        included: true,
+        pointB: 'G78P+J3M, Al Mouhajrin',
+      }),
+    ])
+
+    const settlement = await get(manager, `/shifts/${id}/settlement`)
+    expect(settlement.statusCode, settlement.body).toBe(200)
+    expect(settlement.json()).toMatchObject({
+      cashDeductionTotal: '50.00',
+      expectedTotal: '3450.00',
+      actualCash: '3450.00',
+      variance: '0.00',
+    })
+  })
+
+  it('heals an already-persisted OCR overlap inside force-close preparation and counts it once', async () => {
+    const { id, driver, manager } = await openShift({ float: 3_500, topup: 0 })
+    await seedHistoricalOcrDeductionOverlap(driver, id, 'recent-orders:force-prepare-overlap')
+    h.deps.clock.set(CLOSE_MS)
+
+    const prepared = await post(manager, `/shifts/${id}/force-close`, {
+      prepareOnly: true,
+      reason: 'driver device could not submit the close package',
+      odometerKm: 6_100,
+      cashDeclared: '3450.00',
+      walletDeclared: '0.00',
+    })
+    expect(prepared.statusCode, prepared.body).toBe(200)
+    expect(prepared.json()).toMatchObject({ state: 'pending_review', postings: 0, prepared: true })
+    expect(await h.deps.cashDeductions.listByShift(id)).toEqual([
+      expect.objectContaining({
+        amount: 5_000n,
+        amountOcr: 5_000n,
+        occurredDate: '2026-08-13',
+        occurredMinute: '22:36',
+        included: true,
+        pointB: 'G78P+J3M, Al Mouhajrin',
+      }),
+    ])
+
+    const settlement = await get(manager, `/shifts/${id}/settlement`)
+    expect(settlement.statusCode, settlement.body).toBe(200)
+    expect(settlement.json()).toMatchObject({
+      cashDeductionTotal: '50.00',
+      expectedTotal: '3450.00',
+      actualCash: '3450.00',
+      variance: '0.00',
+    })
+  })
+
   it('does not heal a missing date from a same-key row with a different minute or OCR amount', async () => {
     const { id, driver } = await openShift({ float: 1_000, topup: 0 })
     const operationKey = 'recent-orders:date-heal-safety'
@@ -569,6 +701,48 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
 })
 
 describe('cash deduction compatibility and approval allocation', () => {
+  it('matches two old-PWA negative rows by printed timing even when their legacy keys differ', async () => {
+    const { id, driver } = await openShift({ float: 100, topup: 0 })
+    const operations = await put(driver, `/shifts/${id}/operations`, {
+      orders: [
+        {
+          providerOrderNo: 'OLD-NEGATIVE-PARTIAL',
+          payMode: 'cash',
+          fee: '-50.00',
+          feeOcr: '-50.00',
+          source: 'ocr',
+          occurredDate: '2026-08-13',
+          occurredMinute: '22:36',
+          pointA: 'G777+4GP, Al Qanawat',
+          pointB: null,
+        },
+        {
+          providerOrderNo: 'OLD-NEGATIVE-RICH',
+          payMode: 'cash',
+          fee: '-50.00',
+          feeOcr: '-50.00',
+          source: 'ocr',
+          occurredDate: '2026-08-13',
+          occurredMinute: '22:36',
+          pointA: 'G77V+4GP, Al Qanawat',
+          pointB: 'G78P+J3M, Al Mouhajrin',
+        },
+      ],
+      movements: [],
+    })
+    expect(operations.statusCode, operations.body).toBe(200)
+    expect(await h.deps.orders.listByShift(id)).toHaveLength(0)
+    expect(await h.deps.cashDeductions.listByShift(id)).toEqual([
+      expect.objectContaining({
+        operationKey: 'legacy:OLD-NEGATIVE-PARTIAL',
+        amount: 5_000n,
+        occurredDate: '2026-08-13',
+        occurredMinute: '22:36',
+        pointB: 'G78P+J3M, Al Mouhajrin',
+      }),
+    ])
+  })
+
   it('heals deterministic old-API rows before review but leaves illegible timestamps unresolved', async () => {
     const { id, driver, manager } = await openShift({ float: 100, topup: 0 })
     await put(driver, `/shifts/${id}/operations`, {
@@ -630,14 +804,12 @@ describe('cash deduction compatibility and approval allocation', () => {
       { orders: 1, cashDeductions: 1 },
       { orders: 0, cashDeductions: 0 },
     ])
-    const blocked = await post(manager, `/shifts/${id}/approve-close`, {
-      reviewedOrdersHash: second.json().br1.ordersHash,
-    })
+    const blocked = await approveFixedClose(h, manager, id, second.json().br1.ordersHash)
     expect(blocked.statusCode, blocked.body).toBe(422)
     expect(blocked.json().error).toBe('operation_window_unresolved')
   })
 
-  it('converts an old PWA negative fee, consumes this shift share, and makes only the overflow a cash receivable', async () => {
+  it('converts an old PWA negative fee and collects deduction overflow immediately without a receivable', async () => {
     const { id, driver, manager } = await openShift({ float: 100, topup: 20 })
     const operations = await put(driver, `/shifts/${id}/operations`, {
       orders: [
@@ -676,22 +848,23 @@ describe('cash deduction compatibility and approval allocation', () => {
     })
     expect(ended.statusCode, ended.body).toBe(200)
     const review = await get(manager, `/shifts/${id}/review`)
-    const settlement = await get(manager, `/shifts/${id}/settlement?payShareNow=false`)
+    const settlement = await get(manager, `/shifts/${id}/settlement`)
     expect(settlement.json()).toMatchObject({
-      grossDriverShare: '35.00',
+      grossDriverShare: '40.00',
       cashDeductionTotal: '50.00',
-      netDriverShare: '0.00',
-      deductionReceivable: '15.00',
+      baseDriverShare: '-10.00',
+      variance: '0.00',
+      finalEmployeeCash: '-10.00',
+      cashAction: 'collect',
+      cashAmount: '160.00',
     })
 
-    const approved = await post(manager, `/shifts/${id}/approve-close`, {
-      reviewedOrdersHash: review.json().br1.ordersHash,
-    })
+    const approved = await approveFixedClose(h, manager, id, review.json().br1.ordersHash)
     expect(approved.statusCode, approved.body).toBe(200)
     expect(await h.deps.ledger.fundBalance(BRANCH, fundCodeOf({ kind: 'driver_share_payable', driverId: DRIVER_ID })))
       .toBe(0n)
     expect(await h.deps.ledger.fundBalance(BRANCH, fundCodeOf({ kind: 'driver_receivable_cash', driverId: DRIVER_ID })))
-      .toBe(1_500n)
+      .toBe(0n)
   })
 
   it('blocks unresolved rows until a manager supplies an audited reason and decision', async () => {
@@ -711,9 +884,7 @@ describe('cash deduction compatibility and approval allocation', () => {
     expect(ended.statusCode, ended.body).toBe(200)
 
     const before = await get(manager, `/shifts/${id}/review`)
-    const blocked = await post(manager, `/shifts/${id}/approve-close`, {
-      reviewedOrdersHash: before.json().br1.ordersHash,
-    })
+    const blocked = await approveFixedClose(h, manager, id, before.json().br1.ordersHash)
     expect(blocked.statusCode, blocked.body).toBe(422)
     expect(blocked.json().error).toBe('operation_window_unresolved')
 
@@ -729,9 +900,7 @@ describe('cash deduction compatibility and approval allocation', () => {
       decisionReason: null,
       decidedBy: 'u-bm',
     })
-    const stillBlocked = await post(manager, `/shifts/${id}/approve-close`, {
-      reviewedOrdersHash: afterFeeOnly.json().br1.ordersHash,
-    })
+    const stillBlocked = await approveFixedClose(h, manager, id, afterFeeOnly.json().br1.ordersHash)
     expect(stillBlocked.statusCode, stillBlocked.body).toBe(422)
     expect(stillBlocked.json().error).toBe('operation_window_unresolved')
 
@@ -763,9 +932,7 @@ describe('cash deduction compatibility and approval allocation', () => {
       decisionReason: 'verified against the original Yallago screenshot',
       decidedBy: 'u-bm',
     })
-    const approved = await post(manager, `/shifts/${id}/approve-close`, {
-      reviewedOrdersHash: after.json().br1.ordersHash,
-    })
+    const approved = await approveFixedClose(h, manager, id, after.json().br1.ordersHash)
     expect(approved.statusCode, approved.body).toBe(200)
   })
 })

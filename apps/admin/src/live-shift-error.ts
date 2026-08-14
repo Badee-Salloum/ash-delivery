@@ -11,6 +11,13 @@ type LiveShiftAction = 'void' | 'forceClose' | 'suspend' | 'tranche'
 
 const copy: Record<Lang, Record<string, string>> = {
   ar: {
+    settlement_changed_since_review:
+      'تغيّرت بيانات النوبة بعد المعاينة. تم تحديث التسوية؛ راجع المبالغ وأكّد معاملتي المحفظة والكاش من جديد.',
+    settlement_confirmation_required:
+      'لا يمكن الإغلاق قبل مراجعة التسوية الحالية وتأكيد معاملتي المحفظة والكاش.',
+    settlement_figures_missing: 'أدخل النقد الفعلي ورصيد المحفظة الفعلي قبل احتساب التسوية.',
+    fixed_cash_settlement_required: 'يجب إتمام تصفير المحفظة ومعاملة الكاش النهائية قبل الإغلاق.',
+    invalid_settlement_action: 'أرسل الخادم تعليمات تسوية غير معروفة. أعد المحاولة ولا تنفّذ الإغلاق.',
     week_locked: 'لا يمكن تعديل هذه النوبة لأن أسبوعها المالي مقفل. يلزم إجراء تصحيح مالي مؤرّخ من شاشة الخزينة.',
     shift_not_found: 'لم تعد النوبة موجودة. حدّث قائمة النوبات الجارية.',
     illegal_transition: 'تغيّرت حالة النوبة ولم يعد هذا الإجراء مسموحاً. حدّث القائمة وتحقق من حالتها الحالية.',
@@ -25,6 +32,13 @@ const copy: Record<Lang, Record<string, string>> = {
     internal_error: 'فشل الإجراء بسبب خطأ في الخادم. حاول مرة أخرى؛ وإن تكرر الخطأ بلّغ مسؤول النظام باسم السائق.',
   },
   en: {
+    settlement_changed_since_review:
+      'The shift changed after the preview. The settlement was refreshed; review it and confirm both transactions again.',
+    settlement_confirmation_required:
+      'Review the current settlement and confirm both wallet and cash transactions before closing.',
+    settlement_figures_missing: 'Enter both actual cash and actual wallet balance before calculating the settlement.',
+    fixed_cash_settlement_required: 'The full wallet sweep and final cash transaction must be completed before closing.',
+    invalid_settlement_action: 'The server returned an unknown settlement instruction. Retry and do not close the shift.',
     week_locked: 'This shift belongs to a locked financial week. Post a dated correction from Treasury instead.',
     shift_not_found: 'This shift no longer exists. Refresh the live-shifts list.',
     illegal_transition: 'The shift state changed and this action is no longer allowed. Refresh the list and check its current state.',

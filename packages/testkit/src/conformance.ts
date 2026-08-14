@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { BatteryReadingRecord, Deps } from '@ash/contracts'
+import type { BatteryReadingRecord, Deps, NewShiftSettlementRecord } from '@ash/contracts'
 import { type Posting, minor } from '@ash/domain'
 
 /**
@@ -32,6 +32,42 @@ const MEDIA_1 = '99999999-bbbb-4bbb-8bbb-bbbbbbbbbbb1'
 const MEDIA_2 = '99999999-bbbb-4bbb-8bbb-bbbbbbbbbbb2'
 const ORDER_1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1'
 const ORDER_2 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2'
+
+const settlement = (overrides: Partial<NewShiftSettlementRecord> = {}): NewShiftSettlementRecord => ({
+  shiftId: SHIFT,
+  branchId: BRANCH,
+  driverId: DRIVER,
+  businessDate: '2026-07-21',
+  policyCode: 'fixed_40_cash_close_v1',
+  driverRateBps: 4_000,
+  deliveryFeeTotal: syp(100_000),
+  fixedDriverShare: syp(40_000),
+  manualDriverShare: syp(0),
+  grossDriverShare: syp(40_000),
+  cashDeductionTotal: syp(0),
+  baseDriverShare: syp(40_000),
+  expectedTotal: syp(230_000),
+  actualCash: syp(240_000),
+  actualWallet: syp(-10_000),
+  actualTotal: syp(230_000),
+  variance: syp(0),
+  varianceDirection: 'balanced',
+  finalEmployeeCash: syp(40_000),
+  walletToOffice: syp(-10_000),
+  cashToOffice: syp(200_000),
+  walletAction: 'fund',
+  walletAmount: syp(10_000),
+  cashAction: 'collect',
+  cashAmount: syp(200_000),
+  reviewedOrdersHash: 'b'.repeat(32),
+  settlementHash: 'a'.repeat(64),
+  walletTransferConfirmed: true,
+  cashSettlementConfirmed: true,
+  confirmedBy: USER,
+  confirmedAtMs: 1_784_000_000_000,
+  varianceReason: null,
+  ...overrides,
+})
 
 const batteryReading = (overrides: Partial<BatteryReadingRecord> = {}): BatteryReadingRecord => ({
   shiftId: SHIFT,
@@ -76,6 +112,18 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
   describe(`port conformance — ${ctx.label}`, () => {
     async function fresh(): Promise<Deps> {
       return await ctx.makeDeps()
+    }
+
+    async function freshSettlement(): Promise<Deps> {
+      const deps = await fresh()
+      const shift = await deps.shifts.findById(SHIFT)
+      if (!shift) throw new Error('conformance shift missing')
+      await deps.shifts.update({
+        ...shift,
+        state: 'pending_review',
+        submittedAt: '2026-07-21T05:00:00.000Z',
+      }, USER)
+      return deps
     }
 
     describe('ledger idempotency (the rule that stops a double-approve double-posting)', () => {
@@ -416,6 +464,143 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
             after: { failedAttempts: 1 },
             occurredAtMs: 1_784_000_000_000,
           })
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+    })
+
+    describe('immutable shift settlement', () => {
+      it('round-trips every minor-unit field exactly, including a signed wallet action', async () => {
+        const deps = await freshSettlement()
+        try {
+          const created = await deps.settlements.create(settlement())
+          const stored = await deps.settlements.findByShift(SHIFT)
+
+          expect(created.id).toBeGreaterThan(0)
+          expect(stored).toEqual(created)
+          expect(stored?.actualWallet).toBe(syp(-10_000))
+          expect(stored?.walletToOffice).toBe(syp(-10_000))
+          expect(stored?.walletAction).toBe('fund')
+          expect(typeof stored?.cashToOffice).toBe('bigint')
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('stores a shortage beyond the share as immediate signed employee cash, not a receivable', async () => {
+        const deps = await freshSettlement()
+        try {
+          const stored = await deps.settlements.create(
+            settlement({
+              actualCash: syp(110_000),
+              actualWallet: syp(70_000),
+              actualTotal: syp(180_000),
+              variance: syp(-50_000),
+              varianceDirection: 'shortage',
+              finalEmployeeCash: syp(-10_000),
+              walletToOffice: syp(70_000),
+              walletAction: 'collect',
+              walletAmount: syp(70_000),
+              cashToOffice: syp(120_000),
+              cashAction: 'collect',
+              cashAmount: syp(120_000),
+              varianceReason: 'نقص مؤكد ويُحصّل الآن',
+            }),
+          )
+          expect(stored.finalEmployeeCash).toBe(syp(-10_000))
+          expect(stored.cashToOffice).toBe(syp(120_000))
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('supports a wallet-heavy close where the office collects the wallet and pays cash', async () => {
+        const deps = await freshSettlement()
+        try {
+          const stored = await deps.settlements.create(
+            settlement({
+              actualCash: syp(20_000),
+              actualWallet: syp(210_000),
+              actualTotal: syp(230_000),
+              walletToOffice: syp(210_000),
+              walletAction: 'collect',
+              walletAmount: syp(210_000),
+              cashToOffice: syp(-20_000),
+              cashAction: 'pay',
+              cashAmount: syp(20_000),
+            }),
+          )
+          expect(stored.walletAction).toBe('collect')
+          expect(stored.cashAction).toBe('pay')
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('rejects a snapshot that bypasses the fixed 40% policy or either handover confirmation', async () => {
+        const deps = await freshSettlement()
+        try {
+          await expect(
+            deps.settlements.create(settlement({ fixedDriverShare: syp(39_999) })),
+          ).rejects.toThrow()
+          await expect(
+            deps.settlements.create(settlement({ walletTransferConfirmed: false })),
+          ).rejects.toThrow()
+          expect(await deps.settlements.findByShift(SHIFT)).toBeNull()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('rejects an unexplained non-zero variance', async () => {
+        const deps = await freshSettlement()
+        try {
+          await expect(
+            deps.settlements.create(
+              settlement({
+                actualCash: syp(239_999),
+                actualTotal: syp(229_999),
+                variance: syp(-1),
+                varianceDirection: 'shortage',
+                finalEmployeeCash: syp(39_999),
+                cashToOffice: syp(200_000),
+                varianceReason: null,
+              }),
+            ),
+          ).rejects.toThrow()
+          expect(await deps.settlements.findByShift(SHIFT)).toBeNull()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('accepts an exact hash replay but refuses a different second snapshot for the shift', async () => {
+        const deps = await freshSettlement()
+        try {
+          const first = await deps.settlements.create(settlement())
+          const replay = await deps.settlements.create(settlement())
+          expect(replay).toEqual(first)
+
+          await expect(
+            deps.settlements.create(settlement({ settlementHash: 'c'.repeat(64) })),
+          ).rejects.toMatchObject({ code: 'SHIFT_SETTLEMENT_IMMUTABLE' })
+          expect(await deps.settlements.findByShift(SHIFT)).toEqual(first)
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('rolls the snapshot back with every other close write when the unit of work fails', async () => {
+        const deps = await freshSettlement()
+        try {
+          await expect(
+            deps.closeUnitOfWork.run({ shiftId: SHIFT, actorId: USER }, async (transaction) => {
+              await transaction.settlements.create(settlement())
+              throw new Error('fail after settlement')
+            }),
+          ).rejects.toThrow('fail after settlement')
+          expect(await deps.settlements.findByShift(SHIFT)).toBeNull()
         } finally {
           await ctx.cleanup?.(deps)
         }

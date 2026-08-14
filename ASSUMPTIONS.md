@@ -16,15 +16,16 @@ matters when an answer finally arrives.
 | D-1 | Financial week = Sunday 00:00 → Saturday 23:59 Asia/Damascus, closed the *following* Sunday. A shift worked on the closing Sunday belongs to the new week. | 2026-07-21 |
 | D-2 | GitHub org, VPS and domain already exist → staging goes live in M0, not M6. | 2026-07-21 |
 | D-3 | Old Syrian lira is schema-ready only; all Bundle-1 UI is new SYP + USD equivalent. | 2026-07-21 |
-| D-4 | The wallet is returned/zeroed each day exactly like the cash float. BR1 stays in absolute form. | 2026-07-21 |
+| D-4 | ~~The wallet is returned/zeroed each day exactly like the cash float.~~ **SUPERSEDED for unapproved shifts by D-13:** the full signed actual wallet balance is swept at every shift close. | 2026-07-21 |
 | D-5 | ~~Manual entries and expenses: branch manager ✓ + general manager ✓, sysadmin ✗ (SRS §3 matrix over E-3 prose).~~ **SUPERSEDED by D-9.** | 2026-07-21 |
-| D-6 | Tier band computed over the whole day, with a visible day true-up restating earlier shifts. | 2026-07-21 |
+| D-6 | ~~Tier band computed over the whole day, with a visible day true-up restating earlier shifts.~~ **SUPERSEDED by D-13.** Retained only to reproduce already-approved history. | 2026-07-21 |
 | D-7 | Commercial scope re-cut into Bundle 1a (SRS A–G, as priced) + Bundle 1b (production readiness, separately priced). | 2026-07-21 |
 | D-8 | Pay mode is no longer collected at the driver's screen; `pay_mode` stays in the schema and on the wire defaulted to `cash`. | 2026-08-05 |
 | D-9 | **The system admin holds every permission at scope `all`** — «اعطي صلاحية وصول لكل شيء لمدير النظام و صلاحية لفعل كل شيء», given twice. **Supersedes D-5** and amends BR8's visibility line. Sanctioned by SRS §3 / A-2, which make the matrix sysadmin-customisable with every change logged. `DEFAULT_GRANTS` seeds only a fresh database, so migration `0024` carries it to production, which was measured holding 11 of 16. The SRS transcription in `matrix.test.ts` is untouched; the deviation is the named constant `OWNER_OVERRIDE_2026_08_12` beside it. | 2026-08-12 |
-| D-10 | **الترميم, الذمم, صندوق الشركة** — office capital is a fixed target per box (`كاش المكتب 4,000,000`, `محفظة المكتب 1,000,000`), restored daily after the physical count by sweeping surplus to صندوق الشركة (**كييش**) or funding a shortfall from it (**شحن من الصندوق**), counting الذمم toward the capital. الذمم belong to a named driver and clear when he opens his next shift. حصة السائق is paid at the end of every shift out of the cash in his hands. A shortfall is never auto-absorbed: BR1's zero tolerance still refuses, and the manager force-closes with a written reason. | 2026-08-12 |
+| D-10 | **الترميم, الذمم, صندوق الشركة** — office capital remains a fixed target per box (`كاش المكتب 4,000,000`, `محفظة المكتب 1,000,000`) and historical الذمم remain part of restoration. ~~A new shift shortfall is refused by BR1 and may be carried as a receivable.~~ **SUPERSEDED by D-13:** the variance is settled with the employee immediately and creates no new receivable. | 2026-08-12 |
 | D-11 | **نافذة عمليات النوبة** تبدأ من دقيقة اعتماد المدير للفتح وتنتهي بدقيقة تسليم الإغلاق، شاملتين، بحسب المنطقة الزمنية للفرع وعبر منتصف الليل. العملية ذات التاريخ/الوقت غير القابل للحسم تبقى مشمولة ومحذّرة، وتمنع الاعتماد حتى يتخذ المدير قراراً مسبباً ومدقّقاً. لا يستطيع السائق استبعاد عملية مؤكدة داخل النافذة. | 2026-08-14 |
-| D-12 | **السطر السالب في «الطلبات الحديثة» حسم كاش مستقل**: لا يُعد طلباً، ولا يدخل عدد الطلبات أو الشريحة أو حصة يلاغو، ولا يغيّر المحفظة. ينقص الكاش المتوقع ويستهلك حصة النوبة الحالية فقط؛ وما يتجاوزها يصبح ذمّة كاش على السائق. سوالب سجل المدفوعات تبقى حركات محفظة، والطلبات اليدوية للمدير خارج التصنيف الآلي لصور يلاغو. | 2026-08-14 |
+| D-12 | **السطر السالب في «الطلبات الحديثة» حسم كاش مستقل**: لا يُعد طلباً ولا يدخل حصة يلاغو أو المحفظة، وتُطابق مشاهده الآلية بالتاريخ المطبوع عند توفره + الدقيقة + مبلغ OCR؛ المسار دليل إثراء فقط وليس هوية. ~~ما يتجاوز الحصة يصبح ذمّة، وسوالب سجل المدفوعات حركات محفظة.~~ **SUPERSEDED by D-13:** لا تنشأ ذمة جديدة، وسجل المدفوعات كله أرشيفي لا يدخل أي حساب. | 2026-08-14 |
+| D-13 | **تسوية النوبة بالمحفظة والكاش:** كل نوبة غير معتمدة عند إطلاق القرار تستخدم حصة سائق ثابتة `floor(40% × أجور توصيل يلاغو المشمولة)` بلا شرائح أو تجميع يومي، وتضاف إليها حصص الطلبات اليدوية التي يحددها المدير. `الحصة الأساسية = الحصة الإجمالية − الحسومات النقدية`، و`الفرق = (الكاش الفعلي + المحفظة الفعلية) − المتوقع`، و`تسوية الموظف = الحصة الأساسية + الفرق`. يُحوّل كامل رصيد المحفظة الفعلي ثم يكون `الكاش إلى الفرع = الكاش الفعلي − تسوية الموظف`: الموجب استلام من الموظف والسالب دفع له. يستطيع الموظف طلب الإغلاق مع أي فرق؛ يحتاج اعتماد المدير إلى تأكيد تحويل المحفظة وتأكيد معاملة الكاش وسبب مدقّق عند فرق غير صفري. تُصفّر أرصدة كاش ومحفظة وحصة النوبة ولا تنشأ ذمة، وسجل المدفوعات اختياري وأرشيفي فقط. تستخدم المعاينة والاعتماد والإغلاق الاستثنائي الحساب نفسه، ويحميها `settlementHash` من اعتماد أرقام تغيّرت. | 2026-08-14 |
 
 ---
 
@@ -35,13 +36,17 @@ matters when an answer finally arrives.
 | # | Assumption | Rationale | Reversal |
 | --- | --- | --- | --- |
 | A-01 | **BR1 is fee-only.** Goods value does not appear in the equation, because for a cash order the driver pays the merchant out of the float and collects the same amount back, netting to zero. | SRS §2.1 states the round-trip explicitly for cash orders. | `structural` if the round-trip does not hold |
-| A-02 | **The 80% block is a residual**, `Σfees − Σ(per-order 20% cuts)`, never `0.80 × Σfees`. | A zero-tolerance equation cannot absorb a rounding error. Proven by `allocate.test.ts` → "the naive formula really does diverge". | not reversible — this is correctness |
+| A-02 | **The 80% block is a residual**, `Σfees − Σ(per-order 20% cuts)`, never `0.80 × Σfees`. | Even though variance no longer blocks close, multiplying the aggregate would manufacture a false employee variance. Proven by `allocate.test.ts` → "the naive formula really does diverge". | not reversible — this is correctness |
 | A-03 | **Yallago floors its own 20% cut.** | We do not control this arithmetic; it happens inside their app. Rounding mode is a parameter (`yalagoCut(fee, rounding)`), not a constant. | `cheap` — one argument |
-| A-04 | **The company absorbs every rounding remainder**, never the driver, never Yallago. | BR4: "Yallago's 20% is always fixed; tier changes come only out of the company's side." | `moderate` |
+| A-04 | **The company absorbs every rounding remainder**, never the driver, never Yallago. | D-13 fixes the driver calculation at `floor(fees × 4,000 / 10,000)` and leaves the residual to the company. | `moderate` |
 | A-05 | **م-3 — for electronic orders, the goods value round-trips to the wallet.** `goods_value_minor` and the per-order goods flags ship **inactive**. | The brief instructs isolating this behind a strategy seam. BR1 is fee-only under either branch *provided* the round-trip holds. | `cheap` — a setting, not a migration |
-| A-26 | **A driver's wallet may legitimately go NEGATIVE, and the office covers the shortfall.** `walletReturn` posts in the opposite direction when the closing balance is below zero. | Every cash order takes 20% of its fee *out* of the wallet (BR2) while putting nothing in, so a thin top-up plus many cash orders drives it below zero — 20 orders × 5,000 against a 1,000 top-up leaves −19,000. Found by a property test, not by inspection. **BR1 still evaluates to exactly zero throughout**, so the zero equation cannot detect it; `minWalletBalance()` is a separate check surfaced at the close gate. | `moderate` |
+| A-26 | **A driver's wallet may legitimately go NEGATIVE, and the office covers the shortfall.** The full-wallet settlement action reverses to `fund` when the closing balance is below zero. | Every cash order takes 20% of its fee *out* of the wallet (BR2) while putting nothing in, so a thin top-up plus many cash orders can drive it below zero. BR1 alone cannot identify that position; D-13 requires an explicit signed wallet direction instead of blocking the employee's close request. | `moderate` |
 
-### Tier engine
+### Historical tier engine — superseded for unapproved shifts
+
+D-13 retires the tier editor, daily banding, and true-up for active settlement. A-06 through A-09
+remain here only to explain and reproduce shifts approved before the fixed-share launch; they are
+not selectable rules for a new or pending shift.
 
 | # | Assumption | Rationale | Reversal |
 | --- | --- | --- | --- |
@@ -68,7 +73,7 @@ matters when an answer finally arrives.
 | A-16 | **No driver salaries, advances or penalties.** Honoured by deliberate omission. | SRS B-1 / س35 / س38–40: the relationship is «نسبة فقط» — share only. Recorded so a future session does not "helpfully" add them. | `moderate` |
 | A-17 | **The optional accountant role («محاسب») is seeded inactive** with an empty grant set. | SRS §3 and س77 name it for later. Seeding it as data means enabling it is a row, not a migration. | `cheap` |
 | A-18 | **`shift_no` is capped at 2 by a setting, not by a DB constraint.** | SRS س23 says "up to two shifts daily", but a hard constraint would block a legitimate third shift on an exceptional day. | `cheap` |
-| A-19 | **م-5 — tier editing is system-admin only**, per the literal SRS §3 matrix and س46, including *not* the GM. Stored as data. | SRS §10 flags this for confirmation at acceptance; one row changes it. | `cheap` |
+| A-19 | ~~Tier editing is system-admin only.~~ **Historical only after D-13:** tier data remains readable to reproduce approved entries, while active editing and publication are disabled. | The old SRS §3/F rule is retained as provenance, not as an active permission. | `cheap` |
 
 ### Engineering
 
@@ -76,12 +81,12 @@ matters when an answer finally arrives.
 | --- | --- | --- | --- |
 | A-20 | **The no-float rule is scoped to money.** `double precision` remains legal for GPS coordinates, battery percentages and odometer readings. | Applying it dogmatically to physical measurements would be cargo-cult. | `cheap` |
 | A-21 | **Asia/Damascus is UTC+3 year-round** (Syria abolished DST in October 2022). The offset is injected as a value, so pre-2022 backfilled data can still be handled correctly. | Keeps the domain deterministic and free of `Intl`. | `cheap` |
-| A-22 | **A night shift's `business_date` is the date it OPENED.** A shift running 23:50 → 00:30 belongs to the opening day. | Otherwise a driver's day count splits across two tier bands for one continuous stretch of work. | `moderate` |
+| A-22 | **A night shift's `business_date` is the date it OPENED.** A shift running 23:50 → 00:30 belongs to the opening day. | Keeps reporting and week ownership stable across midnight; operation inclusion itself uses D-11's timestamp window. | `moderate` |
 | A-23 | **`provider_order_no` is globally unique**, not unique per shift. | It is Yallago's own key and doubles as the Bundle-2 reconciliation seam (SRS H-2, س17). Duplicate entry is a data-entry error worth catching immediately. | `moderate` |
 | A-24 | **م-4 — the four real samples arrive mid-development.** Fake dashboard data and battery CSV live behind ports (`DashboardSource`, `BatteryFileParser`) so swapping the real ones in touches zero domain code. | Kickoff brief §5 requires exactly this. | `cheap` |
 | A-27 | **Fleet management (creating drivers, vehicles and documents) is `fleet.manage`: branch_manager (own branch) + sysadmin + GM.** | The SRS §3 matrix has NO row for it. Guarding it with «إدارة المستخدمين والصلاحيات» (sysadmin + GM) would mean **nobody could create a driver**: both holders are organisation-wide roles with no branch, and a driver must belong to one. The person who onboards a driver is the branch manager who works with him daily. Stored as data. | `cheap` — one row |
 | A-28 | **Organisation-wide roles must name a `branchId` explicitly on a fleet write**; branch-scoped roles may not name any branch but their own. | A GM has no branch, so defaulting would be a guess about where a driver works. | `cheap` |
-| A-29 | **A driver cannot be deactivated, and a vehicle cannot leave `ready`, while a shift is live on them.** | Otherwise the shift is stranded: nobody can close it, and BR1 can never be satisfied for that day. | `moderate` |
+| A-29 | **A driver cannot be deactivated, and a vehicle cannot leave `ready`, while a shift is live on them.** | Otherwise the shift and its required employee settlement are stranded. | `moderate` |
 | A-25 | **Node 24 LTS is the target runtime**, though the current dev machine has Node 25. `.nvmrc` and the Dockerfile pin 24; `engines` warns on mismatch. | Node 24 is maintained to April 2028, covering the three-year horizon. Node 25 is not an LTS line. | `cheap` |
 | A-30 | **Evidence photographs now leave the country.** `apps/driver/src/ocr.ts` promised «no photo leaves the phone, no cloud»; that promise ends here. The screenshots carry real customer addresses, named businesses, metre-level GPS and Plus Codes, and they are sent to OpenAI in the United States. **Owner-directed** — «switch the ocr on our side to be gpt 5.5 … the ocr should run on the vercel so we shouldn't need to run vpn». Mitigating and load-bearing: the **paid** API does not train on submitted content by default (30-day retention for abuse review), which is materially different from the Gemini free tier the benchmark corpus was sent to. | Measured, not assumed: over 48 real screens the on-device reader reads 136 of 311 asserted rows and the odometer reader was wrong three times out of three (migration `0022`). gpt-5.5 at medium effort reads 290. The manager was typing numbers a model can read. | `cheap` to reverse — `OCR_DRIVER=none`, one env var, no deploy; automatic monetary prefill then stops and the driver enters values manually. |
 | A-31 | **Cloud AI is the only automatic authority for values read from screenshots.** A faster phone/Tesseract guess may be retained as a training/diagnostic sample, but it must never appear as a fee, deduction, movement, wallet balance, odometer, or BMS reading before AI finishes, nor become the fallback after AI fails. AI failure leaves retry/manual entry; an explicit human edit always outranks a late AI answer. | **Owner-directed after the Thaer incident:** the phone published wallet `214` while AI was still reading the correct `279.50`, and mixed partial sightings counted the `-50` deduction twice. | `moderate` — changing authority changes field provenance, recovery, and close gating. |
@@ -112,21 +117,21 @@ These were genuine conflicts or real-money questions, and were asked, not defaul
    Cost accepted: a driver who has money in the wrong place is no longer contradicted by the
    equation, only by the two photographs. Kept cheap to reverse — `pay_mode` remains in the schema
    and on the wire, defaulted to `cash`, so nothing migrates and restoring the split is a UI change.
-   `br1_split_gate` stays `advisory`, which was already its default.
+   `br1_split_gate` stayed `advisory` under that decision. D-13 later made the split diagnostic and
+   replaced the close gate with the two physical settlement confirmations.
 
-## New question raised by the code, for the same conversation
+## Answered question raised by the code
 
-6. **What does Yallago's app do when its 20% cut exceeds the driver's wallet balance?** Refuse
-   the order, allow a negative balance, or auto-settle? This is reachable in ordinary operation
-   (see A-26) and BR1 cannot detect it. The answer decides whether `minWalletBalance() < 0`
-   **blocks** the shift close or merely warns the branch manager. Until the first real sample
-   arrives it warns. Add this to the samples request.
+6. **What happens when the actual wallet balance is negative?** The provider behaviour still needs
+   field calibration, but D-13 answers the close semantics: the signed full-wallet action is `fund`,
+   its direction is shown explicitly, and a negative wallet does not by itself prevent the driver
+   from requesting close.
 
 ## Still to escalate before M2
 
 **Get one real shift's ground truth**: a dashboard screenshot, the matching wallet screenshot, and
-the branch manager's counted cash and wallet figures for that *same* shift. BR1's zero tolerance is
-measured against a number produced by Yallago, whose semantics we do not control. If their wallet
-figure carries anything this model does not — tips, promo credits, cancellation reversals, a
-pending-vs-settled distinction, or a different rounding direction — then **every shift is
-unclosable on day one**. See `docs/client-request-samples.md`.
+the branch manager's counted cash and wallet figures for that *same* shift. The variance and signed
+cash instruction are measured against a number produced by Yallago, whose semantics we do not
+control. Tips, promo credits, cancellation reversals, pending-vs-settled differences, or a different
+rounding direction could transfer money to the wrong side even though the manager is allowed to
+settle the shift. See `docs/client-request-samples.md`.
