@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  applyCloudBmsFields,
+  applyLocalBmsDiagnostic,
   type BmsEvidenceProgress,
   type PackState,
   expectedBmsMediaId,
@@ -95,6 +97,35 @@ describe('a replacement BMS screenshot starts a new reader race', () => {
     expect(ready({ ...inFlight })).toBe(false)
   })
 
+  it('stays blocked while the AI read is pending even after human values and evidence are ready', () => {
+    const replacement = {} as File
+    const progress: BmsEvidenceProgress = {
+      file: replacement,
+      uploadedMediaId: 'media-new',
+      persistedMediaId: 'media-new',
+    }
+
+    expect(
+      isBmsPackReady({
+        unavailable: false,
+        hasPercent: true,
+        slotUploaded: true,
+        cloudPending: true,
+        progress,
+      }),
+    ).toBe(false)
+    // A terminal AI failure releases the wait; the explicit human value remains a valid fallback.
+    expect(
+      isBmsPackReady({
+        unavailable: false,
+        hasPercent: true,
+        slotUploaded: true,
+        cloudPending: false,
+        progress,
+      }),
+    ).toBe(true)
+  })
+
   it('requires the reading to persist against the exact newly returned media id', () => {
     const replacement = {} as File
     const ready = (progress: BmsEvidenceProgress) =>
@@ -109,6 +140,92 @@ describe('a replacement BMS screenshot starts a new reader race', () => {
     expect(
       ready({ file: replacement, uploadedMediaId: 'media-new', persistedMediaId: 'media-new' }),
     ).toBe(true)
+  })
+})
+
+describe('cloud AI is the only automatic BMS authority', () => {
+  const initial = (): PackState => ({
+    values: { percent: '', cycleCount: '' },
+    ocrRaw: null,
+    outcome: 'reading',
+    fieldsFound: 0,
+    text: '',
+  })
+
+  it('keeps a successful phone read diagnostic-only', () => {
+    const current: PackState = {
+      ...initial(),
+      // A preserved explicit value proves the local read cannot overwrite OR persist its guess.
+      values: { percent: '73', cycleCount: '' },
+      ocrRaw: { percent: 73, cycleCount: null },
+    }
+    const next = applyLocalBmsDiagnostic(
+      current,
+      {
+        ok: true,
+        fieldsFound: 2,
+        text: 'Remain Battery 91%\nCycles 320',
+        reading: { percent: 91, cycleCount: 320 },
+      },
+      false,
+    )
+
+    expect(next.values).toEqual({ percent: '73', cycleCount: '' })
+    expect(next.ocrRaw).toEqual({ percent: 73, cycleCount: null })
+    expect(next.text).toContain('91%')
+  })
+
+  it('does not let a late phone failure downgrade an accepted AI result', () => {
+    const accepted: PackState = {
+      values: { percent: '91', cycleCount: '320' },
+      ocrRaw: { percent: 91, cycleCount: 320 },
+      outcome: 'ok',
+      fieldsFound: 2,
+      text: '',
+    }
+    const next = applyLocalBmsDiagnostic(
+      accepted,
+      { ok: false, reason: 'timeout', text: 'partial phone text' },
+      true,
+    )
+
+    expect(next).toEqual({ ...accepted, text: 'partial phone text' })
+  })
+
+  it('prefills blank fields from cloud AI and records that exact audit baseline', () => {
+    const applied = applyCloudBmsFields(initial(), {
+      percent: '91%',
+      cycles: '320',
+    })
+
+    expect(applied.fieldsFound).toBe(2)
+    expect(applied.state.values).toEqual({ percent: '91', cycleCount: '320' })
+    expect(applied.state.ocrRaw).toEqual({ percent: 91, cycleCount: 320 })
+    expect(applied.state.outcome).toBe('ok')
+  })
+
+  it('records the AI answer without overwriting an explicit typed value', () => {
+    const typed: PackState = {
+      ...initial(),
+      values: { percent: '87', cycleCount: '' },
+    }
+    const applied = applyCloudBmsFields(typed, {
+      percent: '91',
+      cycles: '320',
+    })
+
+    expect(applied.state.values).toEqual({ percent: '87', cycleCount: '320' })
+    expect(applied.state.ocrRaw).toEqual({ percent: 91, cycleCount: 320 })
+  })
+
+  it('treats a structured cloud answer with no usable BMS field as no-fields', () => {
+    const applied = applyCloudBmsFields(initial(), {
+      remainCapacity: '50.0Ah',
+      percent: 'not a number',
+    })
+
+    expect(applied.fieldsFound).toBe(0)
+    expect(applied.state).toEqual(initial())
   })
 })
 

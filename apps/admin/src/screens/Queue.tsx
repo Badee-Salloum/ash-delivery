@@ -1,4 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
+import { br1DifferencePresentation } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { Badge, Button, Card, Pending } from '../ui.tsx'
@@ -135,7 +136,13 @@ export function Queue({ onOpen }: { onOpen(shiftId: string): void }): ReactNode 
 
   return (
     <div className="flex flex-col gap-2">
-      {rows.map((s) => (
+      {rows.map((s) => {
+        const difference = s.equationDiff == null ? null : br1DifferencePresentation(s.equationDiff)
+        const differenceLabel = difference == null ? null : t.br1[difference.direction]
+        const differenceTone =
+          difference?.direction === 'surplus' ? 'amber' : difference?.direction === 'shortage' ? 'red' : 'green'
+
+        return (
         <Card key={s.id} className="flex flex-wrap items-center gap-3">
           {/* The badge reads the shift's REAL state, not the kind of a notification that fired once. */}
           <Badge tone={s.state === 'pending_review' ? 'amber' : 'sky'}>
@@ -153,9 +160,9 @@ export function Queue({ onOpen }: { onOpen(shiftId: string): void }): ReactNode 
               list's whole job is telling him which one to open first. A zero here means the
               arithmetic already agrees and the review is a confirmation; anything else is where
               his time should go. */}
-          {s.state === 'pending_review' && s.equationDiff != null ? (
-            <Badge tone={s.equationDiff === '0.00' ? 'green' : 'red'}>
-              {s.equationDiff === '0.00' ? t.br1.balanced : `${t.common.difference} ${s.equationDiff}`}
+          {s.state === 'pending_review' && difference != null ? (
+            <Badge tone={differenceTone}>
+              {differenceLabel} <span className="num" dir="ltr">{difference.amountText}</span>
             </Badge>
           ) : null}
           {s.state === 'pending_review' && s.orderCount !== undefined ? (
@@ -171,7 +178,8 @@ export function Queue({ onOpen }: { onOpen(shiftId: string): void }): ReactNode 
             </svg>
           </Button>
         </Card>
-      ))}
+        )
+      })}
     </div>
   )
 }

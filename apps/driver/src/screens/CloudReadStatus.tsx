@@ -13,10 +13,10 @@ import type { CloudReadEvent } from './PhotoSlot.tsx'
  *
  * THREE OUTCOMES, DELIBERATELY DISTINGUISHED, because the right response differs:
  *
- *   timeout      it answered too slowly. Trying again often works — so there is a button.
+ *   timeout      it answered too slowly. Trying again often works.
  *   unavailable  no reader reached: offline, switched off, or the shift's cost cap is spent.
- *                Nothing to retry; the phone's own reading is already in the field.
- *   no_fields    it looked and found no number. Retrying the same pixels will not change that.
+ *                The driver retries AI or enters the value explicitly.
+ *   no_fields    it looked and found no number. The driver can still ask AI again before typing.
  *
  * A success is shown quietly and only where the value is not already obvious — the point is to
  * explain a WAIT and a FAILURE, not to congratulate the app for working.
@@ -28,7 +28,7 @@ export function CloudReadStatus({
   onRetry,
 }: {
   event: CloudReadEvent | null
-  /** Offered only for a timeout. Omit it and the timeout is stated without a button. */
+  /** Reuses the exact held File for any terminal AI failure. */
   onRetry?: () => void
 }): ReactNode {
   const { t } = useApp()
@@ -58,10 +58,9 @@ export function CloudReadStatus({
 
   return (
     <div className="flex flex-col items-start gap-1" aria-live="polite">
-      {/* Amber, not red. Nothing is broken and nothing is lost — the phone's own reading is in the
-          field and the driver can type over it. Red would say "your shift is in trouble". */}
+      {/* Amber, not red. No value is invented: the driver can retry AI or type the field. */}
       <p className="text-sm font-medium text-amber-800">{message}</p>
-      {event.reason === 'timeout' && onRetry ? (
+      {onRetry ? (
         <button
           type="button"
           onClick={onRetry}

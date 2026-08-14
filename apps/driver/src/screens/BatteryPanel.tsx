@@ -36,8 +36,9 @@ export interface FittedBattery {
  * The tile opens the GALLERY, not the camera: a BMS reading is a screenshot the driver already
  * took, and forcing the camera would make him photograph one phone screen with another.
  *
- * EVERY FIGURE IS TYPEABLE. OCR pre-fills what it can and the driver corrects or completes the
- * rest. Only the percentage used to be editable, with the health figures shown as a read-only echo
+ * EVERY FIGURE IS TYPEABLE. Cloud AI pre-fills what it can and the driver corrects or completes the
+ * rest. The phone reader remains a diagnostic/training sample and never publishes a provisional
+ * value. Only the percentage used to be editable, with the health figures shown as a read-only echo
  * of whatever OCR found — so on any handset where OCR struggled, the cycle count and voltage were
  * lost even though the screenshot was sitting right there.
  *
@@ -116,8 +117,9 @@ export const toStored = (text: string, scale: number): number | null => {
 
 export interface PackState {
   values: Record<FieldKey, string>
-  /** The OCR reading as produced, before any correction — the D-3 baseline. */
+  /** The authoritative CLOUD OCR reading, before any correction — the D-3 baseline. */
   ocrRaw: unknown
+  /** The phone reader's diagnostic lifecycle. It never owns `values` or `ocrRaw`. */
   outcome: 'idle' | 'reading' | 'ok' | 'timeout' | 'unavailable' | 'no_fields'
   fieldsFound: number
   /** What the reader actually saw, shown behind a tap when it failed. */
@@ -200,8 +202,11 @@ export function isBmsPackReady(input: {
   unavailable: boolean
   hasPercent: boolean
   slotUploaded: boolean
+  /** A newly selected screenshot is not complete until its authoritative AI read settles. */
+  cloudPending?: boolean
   progress?: BmsEvidenceProgress
 }): boolean {
+  if (input.cloudPending) return false
   if (
     input.progress !== undefined &&
     (input.progress.uploadedMediaId === null ||
@@ -210,6 +215,77 @@ export function isBmsPackReady(input: {
     return false
   }
   return input.unavailable || (input.hasPercent && input.slotUploaded)
+}
+
+type LocalBmsDiagnosticResult =
+  | {
+      ok: true
+      fieldsFound: number
+      text: string
+      /** Deliberately present in the input shape and deliberately ignored by the authority reducer. */
+      reading?: Partial<Record<FieldKey, number | null>>
+    }
+  | { ok: false; reason: 'timeout' | 'unavailable' | 'no_fields'; text: string }
+
+/**
+ * Keep the phone reader as a training/diagnostic instrument only.
+ *
+ * In particular this function cannot write `values`, `ocrRaw`, or call the persistence path. A
+ * late local result is also forbidden from changing an already accepted AI outcome; only its raw
+ * text remains useful to support/training in that case.
+ */
+export function applyLocalBmsDiagnostic(
+  current: PackState,
+  result: LocalBmsDiagnosticResult,
+  cloudAlreadyAnswered: boolean,
+): PackState {
+  if (cloudAlreadyAnswered) return { ...current, text: result.text }
+  return result.ok
+    ? { ...current, outcome: 'ok', fieldsFound: result.fieldsFound, text: result.text }
+    : { ...current, outcome: result.reason, fieldsFound: 0, text: result.text }
+}
+
+/**
+ * Apply one authoritative cloud result without overwriting anything the driver already entered.
+ * `ocrRaw` still records every valid AI field, including one whose input was already non-blank, so
+ * the eventual source/audit comparison remains truthful.
+ */
+export function applyCloudBmsFields(
+  current: PackState,
+  fields: Readonly<Record<string, string | null>>,
+): { state: PackState; fieldsFound: number } {
+  const values = { ...EMPTY_PACK.values, ...current.values }
+  const raw: Record<string, number | null> = {}
+  let fieldsFound = 0
+
+  for (const field of FIELDS) {
+    const said = pickBmsField(fields as Record<string, string | null>, field.key)
+    if (said === null) continue
+    const cleaned = said.replace(/[^\d.]/g, '')
+    if (cleaned === '') continue
+    const number = Number(cleaned)
+    if (!Number.isFinite(number)) continue
+    // Capacity labels can resemble percentage labels. A charge above 100% is never accepted.
+    if (field.key === 'percent' && number > 100) continue
+
+    const stored = toStored(cleaned, field.scale)
+    if (stored === null) continue
+    if (values[field.key].trim() === '') values[field.key] = toText(stored, field.scale, field.decimals)
+    raw[field.key] = stored
+    fieldsFound += 1
+  }
+
+  if (fieldsFound === 0) return { state: current, fieldsFound: 0 }
+  return {
+    state: {
+      ...current,
+      values,
+      ocrRaw: raw,
+      outcome: 'ok',
+      fieldsFound,
+    },
+    fieldsFound,
+  }
 }
 
 /**
@@ -361,6 +437,7 @@ export function BatteryPanel({
       unavailable: unavailable.has(b.id),
       hasPercent: stateOf(b.id).values.percent.trim() !== '',
       slotUploaded: slots.has(`bms_${slotOf(b, i)}`),
+      cloudPending: cloudEvents[b.id]?.status === 'reading',
       ...(evidenceProgress[b.id] === undefined ? {} : { progress: evidenceProgress[b.id] }),
     }),
   )
@@ -378,7 +455,8 @@ export function BatteryPanel({
 
       // A restored generation has `file: null` + the media id returned by `/state`; an ordinary edit
       // locks to that id. A newly selected File resets the id to NULL and therefore cannot write
-      // until THAT generation uploads. Local/cloud OCR and typing all share this path.
+      // until THAT generation uploads. Cloud OCR and typing share this path; local OCR is diagnostic
+      // only and never calls it.
       if (
         selectedProgress !== undefined &&
         (selectedProgress.file !== generationFile || lockedMediaId === null)
@@ -475,58 +553,26 @@ export function BatteryPanel({
 
       updatePacks((cur) => {
         const prev = cur[battery.id] ?? EMPTY_PACK
-        if (!result.ok) return { ...cur, [battery.id]: { ...prev, outcome: result.reason, text: result.text } }
-
         /*
-         * THE CLOUD ALREADY ANSWERED — stay out of both the values AND the baseline.
-         *
-         * The two readers raced and neither waited for the other, so whichever finished last won —
-         * and they won DIFFERENT HALVES. This local read replaces `ocrRaw` wholesale while only
-         * filling BLANK values, so arriving second it left the cloud's 66% in the field and its own
-         * 11% as the baseline. `matchesOcr` then reported a mismatch, the row shipped as
-         * `source: 'manual'`, and the manager's review announced
-         * «مُعدّل يدوياً · الطاقة المتبقية: 11 → 66» about a number no human had touched.
-         *
-         * A false audit record is worse than a missing one: D-3 exists so a manager can see where a
-         * human disagreed with a machine, and this was inventing disagreements.
-         *
-         * `text` still updates — it is what the PHONE saw, shown behind «تفاصيل تقنية للدعم», and
-         * that is true whoever ended up filling the field.
+         * TRAINING/DIAGNOSTIC ONLY. The phone's guess must never enter a BMS field, become the audit
+         * baseline, or reach `putBatteryReadings`. The cloud model is the sole automatic authority;
+         * a cloud failure leaves the existing human values (or blank fields) available to edit.
          */
-        if (cloudAnswered.current.has(battery.id)) {
-          return { ...cur, [battery.id]: { ...prev, text: result.text } }
+        return {
+          ...cur,
+          [battery.id]: applyLocalBmsDiagnostic(prev, result, cloudAnswered.current.has(battery.id)),
         }
-
-        // Only fill a field the driver has not already answered — his typing always wins.
-        const values = { ...prev.values }
-        for (const f of FIELDS) {
-          const read = result.reading[f.key]
-          if (values[f.key].trim() === '' && read !== null) values[f.key] = toText(read, f.scale, f.decimals)
-        }
-        const next: PackState = {
-          values,
-          ocrRaw: result.reading,
-          outcome: 'ok',
-          fieldsFound: result.fieldsFound,
-          text: result.text,
-        }
-        void push(battery.id, next)
-        return { ...cur, [battery.id]: next }
       })
     },
-    [push, updatePacks],
+    [updatePacks],
   )
 
   /**
    * The BMS screen read in the CLOUD.
    *
-   * Unlike the money screens, nothing here reaches BR1 — a battery percentage is telemetry, and a
-   * misread costs a manager a second look rather than a ledger that will not balance. What it does
-   * carry is a GATE: `batteryGaps` refuses to open a shift on a pack whose percent is null,
-   * deliberately, because "the driver uploaded the screenshot and the OCR came back empty is
-   * exactly the case a gate must catch rather than wave through". So a cloud read that fills the
-   * field must be as trustworthy as one the driver typed — which is why it still only PREFILLS,
-   * and `matchesOcr` still decides whether the row is recorded as `ocr` or `manual`.
+   * A battery percentage is telemetry, but it still gates the shift. The cloud reader is therefore
+   * the only reader allowed to prefill; the phone retains a training sample without publishing a
+   * provisional number. Explicit typing always wins, and a terminal AI failure unlocks that path.
    *
    * These screens are English/Latin-digit and regularly laid out, so this is the easiest of the
    * five for either reader. The cloud earns its place here mostly on the Arabic-light variant.
@@ -565,62 +611,23 @@ export function BatteryPanel({
       // timed out, is a pack the driver may be waiting on before he can start the shift.
       setCloudEvents((cur) => ({ ...cur, [battery.id]: e }))
       if (e.status !== 'read') return
-      // Claim this pack before writing, so a local read still in flight leaves it alone.
+      // A structurally successful response with no usable BMS field is still a failed read for the
+      // driver. Do not show “read by AI” or silently release Retry merely because HTTP succeeded.
+      if (applyCloudBmsFields(EMPTY_PACK, e.response.fields).fieldsFound === 0) {
+        setCloudEvents((cur) => ({
+          ...cur,
+          [battery.id]: { status: 'failed', reason: 'no_fields' },
+        }))
+        return
+      }
+      // Claim this pack before writing, so a local diagnostic still in flight cannot change the
+      // authoritative source/outcome.
       cloudAnswered.current.add(battery.id)
       updatePacks((cur) => {
         const prev = cur[battery.id] ?? EMPTY_PACK
-        const values = { ...prev.values }
-        const priorRaw = (prev.ocrRaw as Record<string, number | null> | null) ?? null
-        const raw: Record<string, number | null> = { ...(priorRaw ?? {}) }
-        let filled = 0
-
-        for (const f of FIELDS) {
-          const said = pickBmsField(e.response.fields, f.key)
-          if (said === null) continue
-          const cleaned = said.replace(/[^\d.]/g, '')
-          if (cleaned === '') continue
-          // A percentage that is not a percentage is the one wrong answer worth refusing outright:
-          // «Remain Capacity 50.0Ah» cleans to a perfectly plausible «50» on a pack that is full.
-          if (f.key === 'percent' && Number(cleaned) > 100) continue
-
-          /*
-           * WHOSE VALUE IS ALREADY IN THE BOX? Three cases, and only one of them is untouchable.
-           *
-           *   empty                          → fill it
-           *   exactly what the phone read     → the cloud is the better reader; replace it
-           *   anything else                   → the DRIVER typed it. Never overwrite him.
-           *
-           * The middle case is why `priorRaw` is consulted rather than just checking for blank: the
-           * on-device read fires first and usually lands, so deferring to a non-empty field would
-           * mean the cloud reader never got to correct anything on this screen.
-           */
-          const held = values[f.key].trim()
-          const asPhoneRead = toText(priorRaw?.[f.key] ?? null, f.scale, f.decimals)
-          if (held === '' || held === asPhoneRead) values[f.key] = cleaned
-
-          /*
-           * RECORD WHAT THE MACHINE SAID. Leaving this out was a false record, not a missing one.
-           *
-           * `matchesOcr` reads `ocrRaw` to decide whether the row is stored as `source: 'ocr'` or
-           * `'manual'`, and `sourceOf` reads it to pick the mark beside the field. With `ocrRaw`
-           * null, a charge gpt-5.5 had just read shipped to the server as MANUAL and told the
-           * driver «لم يستطع التطبيق قراءتها — أنت كتبتها» — the app could not read it, you typed
-           * it. Both statements were untrue, and D-3's whole purpose is that the manager can see
-           * what the machine said beside what the human confirmed.
-           */
-          raw[f.key] = toStored(cleaned, f.scale)
-          filled += 1
-        }
-
-        if (filled === 0) return cur
-        const next: PackState = {
-          ...prev,
-          values,
-          ocrRaw: raw,
-          outcome: 'ok',
-          // Never report FEWER fields than the phone had already found on its own.
-          fieldsFound: Math.max(prev.fieldsFound, filled),
-        }
+        const applied = applyCloudBmsFields(prev, e.response.fields)
+        if (applied.fieldsFound === 0) return cur
+        const next = applied.state
         void push(battery.id, next)
         return { ...cur, [battery.id]: next }
       })
@@ -641,6 +648,7 @@ export function BatteryPanel({
       {batteries.map((battery, i) => {
         const slotNo = slotOf(battery, i)
         const state = stateOf(battery.id)
+        const cloudEvent = cloudEvents[battery.id]
         const label =
           battery.groundNo == null || battery.groundNo === ''
             ? `${t.battery.bmsShot} ${slotNo} · ${battery.capacityAh}Ah`
@@ -649,7 +657,7 @@ export function BatteryPanel({
           // Each pack holds only ITSELF while its read runs: two packs are read one after the
           // other, and covering the whole panel for the second would freeze the first he has
           // already finished with.
-          <ReadingLock key={battery.id} active={cloudEvents[battery.id]?.status === 'reading'}>
+          <ReadingLock key={battery.id} active={cloudEvent?.status === 'reading'}>
           <div className="flex flex-col gap-3">
             {/* The long name is a HEADING now, not the tile's label. «صورة تطبيق البطارية ١ ·
                 الرقم على الأرض D14 · 50Ah» is the longest string in the app, and inside a
@@ -669,8 +677,8 @@ export function BatteryPanel({
                     /*
                      * The first OCR write can finish before its evidence upload, so the server has
                      * no media id to attach yet. Re-persist after attachment and only then let the
-                     * parent mark the slot complete; this closes that ordering race for local,
-                     * cloud and manually entered values alike.
+                     * parent mark the slot complete; this closes that ordering race for cloud and
+                     * manually entered values alike. The local diagnostic never persists a value.
                      */
                     if (
                       result === undefined ||
@@ -733,12 +741,11 @@ export function BatteryPanel({
                 reading cannot open a shift — `batteryGaps` refuses it — so a cloud read still
                 running is something the driver is genuinely waiting on. */}
             <CloudReadStatus
-              event={cloudEvents[battery.id] ?? null}
+              event={cloudEvent ?? null}
               {...(files[battery.id]
                 ? { onRetry: () => void retryCloud(battery, files[battery.id]!) }
                 : {})}
             />
-
             {unavailable.has(battery.id) ? (
               /* Declared. Say plainly what happens next, so he is not left wondering whether he has
                  broken something — the shift proceeds and the branch manager reads this pack. */
@@ -820,13 +827,13 @@ function matchesOcr(state: PackState): boolean {
 }
 
 /**
- * What OCR did, in words.
+ * What the phone's diagnostic OCR did, in words.
  *
  * This is the whole point of the rework. Every failure used to resolve to `null` and the screen
  * said nothing at all — a missing asset, a dead worker, a timeout and a clean read that matched no
  * field were indistinguishable, to the driver and to anyone debugging it. Now the driver knows
- * whether to wait, retry, or just type; and a report of "it didn't autofill" arrives with a reason
- * attached.
+ * whether the local training sample ran; the separate cloud status is the only automatic reader
+ * that can fill a field. A report of "it didn't autofill" therefore arrives with both outcomes.
  */
 function OcrStatus({
   state,

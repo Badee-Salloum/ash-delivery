@@ -330,10 +330,11 @@ node scripts/ocr-failures.mjs --run=<folder>  # every wrong row, with the glyphs
 ```
 
 **TURNING IT OFF — the one thing to know at 3 a.m.** Set `OCR_DRIVER=none` in the Vercel project
-and redeploy. No code change. Every read then answers `unavailable`, the driver's phone falls back
-to its own reader, and nothing else in the app notices. Reach for this if the bill runs away, the
-provider degrades, or a model update starts misreading. **It cannot break a shift**: an OCR failure
-is a 200 with a reason by construction, and no gate consults the reader.
+and redeploy. No code change. Every read then answers `unavailable`; automatic screenshot prefill
+stops and the driver retries later or enters the value manually. The phone reader can still retain
+training samples, but owner decision A-31 forbids publishing its guess as money. Reach for the kill
+switch if the bill runs away, the provider degrades, or a model update starts misreading. A failed
+read remains a structured 200 response rather than a failed money request.
 
 **«هل قرأها الهاتف أم الذكاء الاصطناعي؟» — which reader produced a number.**
 
@@ -349,10 +350,10 @@ SELECT to_char(r.created_at AT TIME ZONE 'Asia/Damascus', 'HH24:MI') AS at,
  ORDER BY r.created_at;
 ```
 
-**The app itself cannot tell you.** The driver's provenance marks — ◍ read · ◌ refused · ✎ typed —
-say only *whether a machine read it*, not which machine, and the manager's «OCR → confirmed» delta
-is likewise undifferentiated. Both readers write the same fields by design. Until that changes, the
-table above is the only answer, and it is a complete one.
+**The app now treats the cloud result as the automatic authority.** The phone reader may produce a
+training observation, but it does not publish field values. `ocr_reads` remains the definitive
+server record of the model call and its structured failure/success reason; an explicit typed value
+is still the human override and the manager sees its delta from the stored cloud baseline.
 
 **Watching the bill.** `ocr_reads` is the only cost meter that exists.
 

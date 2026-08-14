@@ -11,6 +11,12 @@ import {
   uploadEvidencePath,
 } from '@ash/client'
 import { useApp } from '../app-context.tsx'
+import {
+  executePhotoAttempt,
+  isCurrentPhotoAttempt,
+  nextPhotoAttempt,
+  type PhotoAttempt,
+} from '../photo-attempt.ts'
 
 /** What the cloud read is doing. One `reading`, then exactly one terminal event. */
 export type CloudReadEvent =
@@ -44,6 +50,10 @@ export interface PhotoSlotProps {
    * — below what Tesseract's LSTM can read, with ringing on exactly the thin, high-contrast glyphs
    * a BMS readout is made of. The upload still carries the compressed copy; OCR runs locally, so
    * it costs nothing to hand it the real pixels.
+   *
+   * A consumer that declares the cloud authoritative must treat this as a training/sample reader
+   * only. It must not publish a provisional field value: the wallet flow enforces that rule through
+   * `ai-ocr-authority`, while explicit typing remains the human override.
    */
   onImage?(file: File): void
   /**
@@ -126,6 +136,12 @@ export function PhotoSlot({
   const [uploadResult, setUploadResult] = useState<EvidenceUploadResponse | null>(null)
   /** Remember acknowledgement across an idempotent retry of the same File object. */
   const acknowledgedFiles = useRef<WeakSet<File>>(new WeakSet())
+  /**
+   * One gallery selection is one OCR generation, even if its evidence upload needs another tap.
+   * Reusing this attempt for upload-only retry prevents duplicate local/cloud readers for one File.
+   */
+  const attemptSequence = useRef(0)
+  const currentAttempt = useRef<PhotoAttempt<File> | null>(null)
 
   /**
    * A thumbnail of the picture he actually chose.
@@ -155,16 +171,19 @@ export function PhotoSlot({
   /**
    * The cloud read, isolated so nothing it does can reach the upload path.
    *
-   * Every failure leaves the on-device reading standing, but a structured server reason survives:
-   * a timeout is worth retrying while `no_fields`/`refused` asks the driver to check the pixels.
+   * Every failure keeps the on-device training sample. This component never promotes its guess;
+   * cloud-authoritative consumers such as wallet keep the field blank. A timeout is worth retrying
+   * while `no_fields`/`refused` asks the driver to check the pixels or enter the value explicitly.
    * Only transport/local preparation failures collapse to `unavailable`, because no server answer
    * exists to preserve in those cases.
    */
   const runCloudRead = useCallback(
-    async (file: File) => {
+    async (attempt: PhotoAttempt<File>) => {
       if (!ocrField || !onCloudRead) return
+      const { file } = attempt
       onCloudRead({ status: 'reading' }, file)
       const res = await readInCloud(api, shiftId, ocrField, file)
+      if (!isCurrentPhotoAttempt(currentAttempt.current, attempt)) return
       onCloudRead(
         res === null
           ? { status: 'failed', reason: 'unavailable' }
@@ -175,6 +194,64 @@ export function PhotoSlot({
       )
     },
     [api, shiftId, ocrField, onCloudRead],
+  )
+
+  /** Upload one generation without deciding whether its readers should run. */
+  const upload = useCallback(
+    async (attempt: PhotoAttempt<File>): Promise<void> => {
+      const { file } = attempt
+      try {
+        const { bytes, mimeType } = await compressImage(file)
+        // The file's own timestamp, not the upload clock. A zero timestamp means unknown.
+        const result = await api.putBytes<EvidenceUploadResponse>(
+          uploadEvidencePath(shiftId, pkg, slot),
+          bytes,
+          mimeType,
+          evidenceUploadHeaders(
+            file.lastModified > 0 ? file.lastModified : null,
+            acknowledgedFiles.current.has(file),
+          ),
+        )
+        if (!isCurrentPhotoAttempt(currentAttempt.current, attempt)) return
+        let accepted = result
+        if (result.reusedFromShiftId && !result.staleAcknowledged && !acknowledgedFiles.current.has(file)) {
+          if (!window.confirm(t.shift.reusedEvidenceConfirm)) {
+            setUploadResult(result)
+            setState('error')
+            return
+          }
+          await api.post(acknowledgeStaleEvidencePath(shiftId, pkg, slot), {
+            mediaId: result.mediaId,
+            attachmentToken: result.attachmentToken,
+          })
+          if (!isCurrentPhotoAttempt(currentAttempt.current, attempt)) return
+          acknowledgedFiles.current.add(file)
+          accepted = { ...result, staleAcknowledged: true }
+        }
+        setUploadResult(accepted)
+        onUploadResult?.(slot, accepted)
+        // BMS may persist an evidence-linked read here. Keep the attempt current through that write.
+        await onUploaded(slot, accepted, file)
+        if (!isCurrentPhotoAttempt(currentAttempt.current, attempt)) return
+        setState('done')
+      } catch {
+        // The upload is idempotent. Retry these bytes, but never relaunch the readers for them.
+        if (isCurrentPhotoAttempt(currentAttempt.current, attempt)) setState('error')
+      }
+    },
+    [api, t, shiftId, pkg, slot, onUploaded, onUploadResult],
+  )
+
+  const execute = useCallback(
+    (attempt: PhotoAttempt<File>, phase: 'selection' | 'upload_retry'): Promise<void> =>
+      executePhotoAttempt(attempt, phase, {
+        startReaders: ({ file }) => {
+          onImage?.(file)
+          if (ocrField && onCloudRead) void runCloudRead(attempt)
+        },
+        upload,
+      }),
+    [onImage, ocrField, onCloudRead, runCloudRead, upload],
   )
 
   const onPick = useCallback(
@@ -194,76 +271,28 @@ export function PhotoSlot({
       setPicked(file)
       setUploadResult(null)
       setState('working')
-      // READ FIRST, UPLOAD SECOND. Tesseract runs entirely on-device, so reading is the one part
-      // of this that never needed the network — and it used to be gated behind the upload. On 2G
+      const attempt = nextPhotoAttempt(attemptSequence.current, file)
+      attemptSequence.current = attempt.id
+      currentAttempt.current = attempt
+      // START THE TRAINING READER FIRST, UPLOAD SECOND. Tesseract runs entirely on-device, so it
+      // never needed the network — and it used to be gated behind the upload. On 2G
       // at the end of a shift the upload failed, `onImage` was never reached, and the driver
       // hand-typed thirty orders the phone could have read while standing still.
-      onImage?.(file)
-
       /*
        * THEN the cloud read, started here and NOT awaited.
        *
        * Order matters and this is third on purpose. The evidence upload below is the one that
        * BR5 gates on — a shift cannot open or close without it — so it must never queue behind a
-       * vision model that can take twenty-five seconds. The cloud read is the fastest way to a
-       * filled-in field, but it is the least important of the three: without it the driver has
-       * the on-device reader, and without that he has a keyboard.
+       * vision model that can take twenty-five seconds. For a cloud-authoritative field, only the
+       * cloud callback may publish a machine value; the local callback retains its sample and an
+       * AI failure leaves the keyboard/retry path rather than exposing a provisional guess.
        *
        * `ocrField` being undefined means this slot has no cloud reader wired up, which is the
        * state every slot is in until its screen opts in.
        */
-      if (ocrField && onCloudRead) void runCloudRead(file)
-
-      try {
-        const { bytes, mimeType } = await compressImage(file)
-        // THE FILE'S OWN TIMESTAMP, not the clock.
-        //
-        // This header used to send `Date.now()`, i.e. the moment of upload — which is not a fact
-        // about the photograph at all, and made every picture look freshly taken. Now that any slot
-        // can be filled from the gallery, the age of the image IS the control that replaced
-        // `capture`: `lastModified` is when the file was written, so a picture chosen from last
-        // week arrives saying so and the manager sees it on the approval screen.
-        //
-        // `lastModified` is 0 on some pickers rather than absent; treat that as "unknown" and send
-        // nothing, because a 1970 timestamp would read as a fifty-year-old photo.
-        const result = await api.putBytes<EvidenceUploadResponse>(
-          uploadEvidencePath(shiftId, pkg, slot),
-          bytes,
-          mimeType,
-          evidenceUploadHeaders(
-            file.lastModified > 0 ? file.lastModified : null,
-            acknowledgedFiles.current.has(file),
-          ),
-        )
-        let accepted = result
-        if (result.reusedFromShiftId && !result.staleAcknowledged && !acknowledgedFiles.current.has(file)) {
-          if (!window.confirm(t.shift.reusedEvidenceConfirm)) {
-            setUploadResult(result)
-            setState('error')
-            return
-          }
-          await api.post(acknowledgeStaleEvidencePath(shiftId, pkg, slot), {
-            mediaId: result.mediaId,
-            attachmentToken: result.attachmentToken,
-          })
-          acknowledgedFiles.current.add(file)
-          accepted = { ...result, staleAcknowledged: true }
-        }
-        setUploadResult(accepted)
-        onUploadResult?.(slot, accepted)
-        // Hand the exact File object through with the server attachment. BMS uses object identity
-        // as its generation token: a read that belongs to an older gallery pick must never be
-        // persisted against this attachment merely because it targets the same slot name.
-        await onUploaded(slot, accepted, file)
-        // Keep replacement disabled until any evidence-dependent persistence (notably BMS) has
-        // completed. Otherwise a new file can race the old slot's completion callback.
-        setState('done')
-      } catch {
-        // The upload is idempotent, so the fix is simply to tap again — with the same file.
-        setState('error')
-      }
+      await execute(attempt, 'selection')
     },
-    [api, t, shiftId, pkg, slot, onUploaded, onUploadResult, onImage, ocrField, onCloudRead, runCloudRead],
+    [t, execute],
   )
 
   /**
@@ -279,6 +308,7 @@ export function PhotoSlot({
     setState('working')
     try {
       await api.del(uploadEvidencePath(shiftId, pkg, slot))
+      currentAttempt.current = null
       setPicked(null)
       setUploadResult(null)
       setState('idle')
@@ -293,8 +323,13 @@ export function PhotoSlot({
     // One file owns the local/cloud/upload race until it reaches a terminal state. Opening the
     // picker while that work is running could let an older upload complete over a newer choice.
     if (state === 'working') return
-    if (state === 'error' && picked) void onPick(picked)
-    else ref.current?.click()
+    if (state === 'error' && picked) {
+      const attempt = currentAttempt.current
+      if (attempt === null) return
+      setUploadResult(null)
+      setState('working')
+      void execute(attempt, 'upload_retry')
+    } else ref.current?.click()
   }
   const input = (
     <input

@@ -117,6 +117,8 @@ export interface DraftCashDeduction {
   pointB?: string | null
   source: 'ocr' | 'refused' | 'manual'
   included?: boolean
+  /** Already persisted by the API. Local reconciliation must never hide a server ledger row. */
+  recorded?: boolean
 }
 
 export interface OrderEntryState {
@@ -388,24 +390,63 @@ const nextOperationKey = (base: string, occupied: ReadonlySet<string>): string =
   return `${base}~${occurrence}`
 }
 
+type DeductionRouteEvidence = Pick<DraftCashDeduction, 'pointA' | 'pointB'>
+
+const routeEvidenceCount = (row: DeductionRouteEvidence): number =>
+  [row.pointA, row.pointB].filter((part) => cleanOperationPart(part) !== '').length
+
+const enrichesKnownRoute = (existing: DeductionRouteEvidence, scanned: DeductionRouteEvidence): boolean => {
+  const existingParts = routeEvidenceCount(existing)
+  const scannedParts = routeEvidenceCount(scanned)
+  if (existingParts === scannedParts || Math.min(existingParts, scannedParts) === 0) return false
+  return (
+    (cleanOperationPart(existing.pointA) !== '' &&
+      cleanOperationPart(existing.pointA) === cleanOperationPart(scanned.pointA)) ||
+    (cleanOperationPart(existing.pointB) !== '' &&
+      cleanOperationPart(existing.pointB) === cleanOperationPart(scanned.pointB))
+  )
+}
+
 /**
- * Known enrichment fields may agree or be absent, but may never conflict for the same operation.
  * A more-complete exact match wins over a partial row, preserving multiplicity during overlap.
+ *
+ * The date is the one enrichment field whose conflict is not always evidence of a second row. A
+ * card cut off at a screenshot boundary can inherit the header above it, then appear completely
+ * below the correct header on the overlapping page. Treat that narrow case as one sighting only
+ * when its clock agrees and at least one route endpoint agrees. Any clock or route conflict still
+ * means a distinct operation; in particular, equal deductions from one pickup to two different
+ * destinations retain both members of the multiset.
  */
 const enrichmentMatchScore = (existing: DraftCashDeduction, scanned: ScannedOrderRow): number => {
-  const pairs: Array<[string | null | undefined, string | null | undefined]> = [
-    [existing.timeText, scanned.time],
-    [existing.dateText, scanned.dateIso],
+  const timeLeft = cleanOperationPart(existing.timeText)
+  const timeRight = cleanOperationPart(scanned.time)
+  if (timeLeft !== '' && timeRight !== '' && timeLeft !== timeRight) return -1
+  const sameKnownClock = timeLeft !== '' && timeRight !== ''
+
+  const routePairs: Array<[string | null | undefined, string | null | undefined]> = [
     [existing.pointA, scanned.pointA],
     [existing.pointB, scanned.pointB],
   ]
-  let score = 0
-  for (const [leftRaw, rightRaw] of pairs) {
+  let sharedRouteParts = 0
+  let enrichesRoute = false
+  for (const [leftRaw, rightRaw] of routePairs) {
     const left = cleanOperationPart(leftRaw)
     const right = cleanOperationPart(rightRaw)
     if (left !== '' && right !== '' && left !== right) return -1
-    if (left !== '' && right !== '') score += 1
+    if (left !== '' && right !== '') sharedRouteParts += 1
+    if ((left === '') !== (right === '')) enrichesRoute = true
   }
+
+  const dateLeft = cleanOperationPart(existing.dateText)
+  const dateRight = cleanOperationPart(scanned.dateIso)
+  const dateConflict = dateLeft !== '' && dateRight !== '' && dateLeft !== dateRight
+  // Do not merge two complete, otherwise-identical rows across days: they can be recurring real
+  // operations. The date exception belongs only to an overlapping edge card whose second sighting
+  // actually supplies (or loses) part of its route.
+  if (dateConflict && (!sameKnownClock || sharedRouteParts === 0 || !enrichesRoute)) return -1
+
+  let score = (sameKnownClock ? 1 : 0) + sharedRouteParts
+  if (dateLeft !== '' && dateRight !== '' && !dateConflict) score += 1
   return score
 }
 
@@ -414,6 +455,7 @@ const bestExistingDeduction = (
   consumed: ReadonlySet<DraftCashDeduction>,
   base: string,
   scanned: ScannedOrderRow,
+  acceptCandidate: (candidate: DraftCashDeduction, scanned: ScannedOrderRow) => boolean = () => true,
 ): DraftCashDeduction | null => {
   let best: DraftCashDeduction | null = null
   let bestScore = -1
@@ -433,6 +475,7 @@ const bestExistingDeduction = (
       }
     }
     if (!sameCanonicalKey && !sameLegacyAmount) continue
+    if (!acceptCandidate(candidate, scanned)) continue
     const score = enrichmentMatchScore(candidate, scanned)
     if (score > bestScore) {
       best = candidate
@@ -440,6 +483,93 @@ const bestExistingDeduction = (
     }
   }
   return best
+}
+
+const preferredMatchedDate = (existing: DraftCashDeduction, scanned: ScannedOrderRow): string => {
+  const existingDate = cleanOperationPart(existing.dateText)
+  const scannedDate = cleanOperationPart(scanned.dateIso)
+  if (existingDate === '') return scanned.dateIso ?? ''
+  if (scannedDate === '' || scannedDate === existingDate) return existing.dateText
+  // The complete overlap is the only defensible correction for an edge card that inherited the
+  // adjacent header. A poorer later sighting must never overwrite the richer row in the other
+  // direction.
+  return routeEvidenceCount(scanned) > routeEvidenceCount(existing) ? (scanned.dateIso ?? existing.dateText) : existing.dateText
+}
+
+const mergedDeductionDetails = (existing: DraftCashDeduction, scanned: ScannedOrderRow) => ({
+  timeText: existing.timeText || scanned.time,
+  dateText: preferredMatchedDate(existing, scanned),
+  pointA:
+    cleanOperationPart(existing.pointA) === '' && cleanOperationPart(scanned.pointA) !== ''
+      ? (scanned.pointA ?? null)
+      : (existing.pointA ?? scanned.pointA ?? null),
+  pointB:
+    cleanOperationPart(existing.pointB) === '' && cleanOperationPart(scanned.pointB) !== ''
+      ? (scanned.pointB ?? null)
+      : (existing.pointB ?? scanned.pointB ?? null),
+})
+
+const deductionAsScannedRow = (row: DraftCashDeduction): ScannedOrderRow => ({
+  dateIso: cleanOperationPart(row.dateText) === '' ? null : row.dateText,
+  time: row.timeText,
+  fee: null,
+  pointA: row.pointA ?? null,
+  pointB: row.pointB ?? null,
+  ...(row.amountStrip ? { feeStrip: row.amountStrip } : {}),
+})
+
+const draftDeductionAmountIdentity = (row: DraftCashDeduction): string | null => {
+  try {
+    const amount = parseMinor(row.amountOcrText || row.amountText)
+    return amount > 0n ? String(amount) : null
+  } catch {
+    return null
+  }
+}
+
+const isLocalOcrDeduction = (row: DraftCashDeduction): boolean => row.recorded !== true && row.source === 'ocr'
+
+/**
+ * Remove only the duplicated local edge-card sighting already present in a phone draft.
+ *
+ * This is intentionally narrower than generic de-duplication: both rows must be unrecorded OCR
+ * rows with the same OCR amount and minute, one route must strictly enrich the other, and every
+ * known clock/route field must remain compatible. Complete twins retain multiplicity, as do
+ * conflicting routes. The first row keeps its stable local/wire identities while the richer
+ * sighting supplies its corrected date and missing route evidence.
+ */
+export function reconcileLocalCashDeductions(rows: readonly DraftCashDeduction[]): DraftCashDeduction[] {
+  const reconciled: DraftCashDeduction[] = []
+  for (const source of rows) {
+    const row = { ...source }
+    if (!isLocalOcrDeduction(row)) {
+      reconciled.push(row)
+      continue
+    }
+    const amountIdentity = draftDeductionAmountIdentity(row)
+    const minute = cleanOperationPart(row.timeText)
+    const matchIndex = reconciled.findIndex((candidate) => {
+      if (!isLocalOcrDeduction(candidate) || amountIdentity === null || minute === '') return false
+      if (draftDeductionAmountIdentity(candidate) !== amountIdentity) return false
+      if (cleanOperationPart(candidate.timeText) !== minute) return false
+      if (!enrichesKnownRoute(candidate, row)) return false
+      return enrichmentMatchScore(candidate, deductionAsScannedRow(row)) >= 0
+    })
+    if (matchIndex === -1) {
+      reconciled.push(row)
+      continue
+    }
+
+    const first = reconciled[matchIndex]!
+    const richer = routeEvidenceCount(row) > routeEvidenceCount(first) ? row : first
+    const details = richer === row ? mergedDeductionDetails(first, deductionAsScannedRow(row)) : {}
+    reconciled[matchIndex] = {
+      ...first,
+      ...details,
+      ...(!first.amountStrip && row.amountStrip ? { amountStrip: row.amountStrip } : {}),
+    }
+  }
+  return reconciled
 }
 
 /** Route negative operations away from delivery/tier arithmetic and merge overlapping sightings. */
@@ -450,6 +580,7 @@ export function mergeScannedCashDeductions(
 ): DraftCashDeduction[] {
   const occupied = new Set(existing.map((row) => row.operationKey))
   const consumed = new Set<DraftCashDeduction>()
+  const consumedDetails = new Map<DraftCashDeduction, DraftCashDeduction>()
   const added: DraftCashDeduction[] = []
   for (const row of inferMissingOrderDates(scanned)) {
     const magnitude = cashDeductionMagnitude(row.fee)
@@ -459,6 +590,31 @@ export function mergeScannedCashDeductions(
     const match = bestExistingDeduction(existing, consumed, base, row)
     if (match) {
       consumed.add(match)
+      consumedDetails.set(match, { ...match, ...mergedDeductionDetails(match, row) })
+      continue
+    }
+    // A response may repeat the partial sighting before returning its complete mate. Reuse the
+    // consumed operation only when this sighting strictly enriches that operation's shadow. Once
+    // the shadow is complete, a conflicting/complete peer falls through and retains multiplicity.
+    const repeatedMatch = bestExistingDeduction(
+      [...consumedDetails.values()],
+      new Set(),
+      base,
+      row,
+      enrichesKnownRoute,
+    )
+    if (repeatedMatch) {
+      Object.assign(repeatedMatch, mergedDeductionDetails(repeatedMatch, row))
+      continue
+    }
+    // One cloud answer can contain both the card sliced at one screenshot edge and its complete
+    // overlap. Newly-added rows are therefore candidates too, but only for actual route
+    // enrichment. Exact complete twins retain multiplicity because two real deductions can share
+    // an amount and minute.
+    const batchMatch = bestExistingDeduction(added, new Set(), base, row, enrichesKnownRoute)
+    if (batchMatch) {
+      Object.assign(batchMatch, mergedDeductionDetails(batchMatch, row))
+      if (!batchMatch.amountStrip && row.feeStrip) batchMatch.amountStrip = row.feeStrip
       continue
     }
     const operationKey = nextOperationKey(base, occupied)
@@ -486,6 +642,26 @@ export function healCashDeductionDetails(
   scanned: readonly ScannedOrderRow[],
 ): Array<{ localId: string; timeText: string; dateText: string; pointA: string | null; pointB: string | null }> {
   const consumed = new Set<DraftCashDeduction>()
+  const consumedDetails = new Map<DraftCashDeduction, DraftCashDeduction>()
+  for (const row of inferMissingOrderDates(scanned)) {
+    if (cashDeductionMagnitude(row.fee) === null) continue
+    const base = cashDeductionOperationKey(row)
+    const match = bestExistingDeduction(existing, consumed, base, row)
+    if (match) {
+      consumed.add(match)
+      consumedDetails.set(match, { ...match, ...mergedDeductionDetails(match, row) })
+      continue
+    }
+    const repeatedMatch = bestExistingDeduction(
+      [...consumedDetails.values()],
+      new Set(),
+      base,
+      row,
+      enrichesKnownRoute,
+    )
+    if (repeatedMatch) Object.assign(repeatedMatch, mergedDeductionDetails(repeatedMatch, row))
+  }
+
   const patches: Array<{
     localId: string
     timeText: string
@@ -493,26 +669,20 @@ export function healCashDeductionDetails(
     pointA: string | null
     pointB: string | null
   }> = []
-  for (const row of inferMissingOrderDates(scanned)) {
-    if (cashDeductionMagnitude(row.fee) === null) continue
-    const base = cashDeductionOperationKey(row)
-    const match = bestExistingDeduction(existing, consumed, base, row)
-    if (!match) continue
-    consumed.add(match)
-    const next = {
-      localId: match.localId,
-      timeText: match.timeText || row.time,
-      dateText: match.dateText || row.dateIso || '',
-      pointA: match.pointA ?? row.pointA ?? null,
-      pointB: match.pointB ?? row.pointB ?? null,
-    }
+  for (const [match, next] of consumedDetails) {
     if (
       next.timeText !== match.timeText ||
       next.dateText !== match.dateText ||
       next.pointA !== match.pointA ||
       next.pointB !== match.pointB
     ) {
-      patches.push(next)
+      patches.push({
+        localId: match.localId,
+        timeText: next.timeText,
+        dateText: next.dateText,
+        pointA: next.pointA ?? null,
+        pointB: next.pointB ?? null,
+      })
     }
   }
   return patches
@@ -816,6 +986,31 @@ export interface Br1Preview {
    * opinion. When the equation disagrees, those are the numbers to doubt.
    */
   suspectLocalIds: readonly string[]
+}
+
+/**
+ * Human meaning of BR1's signed scalar difference.
+ *
+ * The domain equation is `declared cash + declared wallet - expected total`. A positive value is
+ * therefore money ABOVE expectation (a surplus), while a negative value is money BELOW it (a
+ * shortage). UI code used to label both merely "difference" and colour both red, leaving an Arabic
+ * reader to guess what the missing sign meant. Keep the sign interpretation here so the driver and
+ * manager screens cannot drift.
+ */
+export type Br1DifferenceDirection = 'balanced' | 'surplus' | 'shortage'
+
+export interface Br1DifferencePresentation {
+  direction: Br1DifferenceDirection
+  /** Absolute amount for display beside the directional label. */
+  amountText: string
+}
+
+export function br1DifferencePresentation(differenceText: string): Br1DifferencePresentation {
+  const difference = parseMinor(differenceText)
+  return {
+    direction: difference > 0n ? 'surplus' : difference < 0n ? 'shortage' : 'balanced',
+    amountText: format(minor(difference < 0n ? -difference : difference)),
+  }
 }
 
 /**

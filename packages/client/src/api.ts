@@ -44,6 +44,8 @@ export interface ShiftStateView {
     batteryPercent: number | null
     cashDeclared: string | null
     walletDeclared: string | null
+    /** Cloud-AI wallet baseline; optional only for compatibility with an older state endpoint. */
+    walletDeclaredOcr?: string | null
     mediaSlots: string[]
     batteries: Array<{ batteryId: string; slotNo: number; percent: number | null; mediaId: string | null }>
   }

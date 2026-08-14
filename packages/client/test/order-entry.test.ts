@@ -7,7 +7,9 @@ import {
   healCashDeductionDetails,
   inferMissingOrderDates,
   mergeScannedCashDeductions,
+  reconcileLocalCashDeductions,
   allProblems,
+  br1DifferencePresentation,
   br1Verdict,
   driverPhaseFor,
   groupThousands,
@@ -20,6 +22,20 @@ import {
   unsentOrders,
   validateRow,
 } from '../src/order-entry.ts'
+
+describe('BR1 difference direction', () => {
+  it('names a positive declared-minus-expected difference as a surplus', () => {
+    expect(br1DifferencePresentation('528.50')).toEqual({ direction: 'surplus', amountText: '528.50' })
+  })
+
+  it('names a negative declared-minus-expected difference as a shortage and displays its magnitude', () => {
+    expect(br1DifferencePresentation('-528.50')).toEqual({ direction: 'shortage', amountText: '528.50' })
+  })
+
+  it('keeps zero as the balanced state', () => {
+    expect(br1DifferencePresentation('0.00')).toEqual({ direction: 'balanced', amountText: '0.00' })
+  })
+})
 
 describe('negative Recent Orders operations', () => {
   const scanned = (over: Partial<{ dateIso: string | null; time: string; fee: string | null; pointA: string | null; pointB: string | null }> = {}) => ({
@@ -89,6 +105,195 @@ describe('negative Recent Orders operations', () => {
       },
     ])
     expect(existing[0]!.operationKey).toBe(key)
+  })
+
+  it('reconciles the same -50 edge row when its inferred day conflicts across overlapping screenshots', () => {
+    const partial = scanned({
+      fee: '-50',
+      time: '22:36',
+      dateIso: '2026-08-14',
+      pointA: 'G777+4GP, Al Qanawat',
+      pointB: null,
+    })
+    const complete = scanned({
+      fee: '-50',
+      time: '22:36',
+      dateIso: '2026-08-13',
+      pointA: 'G777+4GP, Al Qanawat',
+      pointB: 'G78P+J3M, Al Mouhajrin',
+    })
+    const existing = mergeScannedCashDeductions([], [partial], () => 'partial-edge-row')
+
+    expect(mergeScannedCashDeductions(existing, [complete], () => 'duplicate')).toEqual([])
+    expect(healCashDeductionDetails(existing, [complete])).toEqual([
+      {
+        localId: 'partial-edge-row',
+        timeText: '22:36',
+        dateText: '2026-08-13',
+        pointA: 'G777+4GP, Al Qanawat',
+        pointB: 'G78P+J3M, Al Mouhajrin',
+      },
+    ])
+  })
+
+  it('collapses compatible partial and complete -50 sightings returned in one AI response', () => {
+    const partial = scanned({
+      fee: '-50',
+      time: '22:36',
+      dateIso: '2026-08-14',
+      pointA: 'G777+4GP, Al Qanawat',
+      pointB: null,
+    })
+    const complete = scanned({
+      fee: '-50',
+      time: '22:36',
+      dateIso: '2026-08-13',
+      pointA: 'G777+4GP, Al Qanawat',
+      pointB: 'G78P+J3M, Al Mouhajrin',
+    })
+    let ids = 0
+
+    expect(mergeScannedCashDeductions([], [partial, complete], () => `operation-${++ids}`)).toMatchObject([
+      {
+        localId: 'operation-1',
+        amountText: '50',
+        timeText: '22:36',
+        dateText: '2026-08-13',
+        pointA: 'G777+4GP, Al Qanawat',
+        pointB: 'G78P+J3M, Al Mouhajrin',
+      },
+    ])
+    expect(ids).toBe(1)
+  })
+
+  it('reuses one existing partial deduction across partial and complete sightings in the same AI response', () => {
+    const partial = scanned({
+      fee: '-50',
+      time: '22:36',
+      dateIso: '2026-08-14',
+      pointA: 'G777+4GP, Al Qanawat',
+      pointB: '',
+    })
+    const complete = scanned({
+      fee: '-50',
+      time: '22:36',
+      dateIso: '2026-08-13',
+      pointA: 'G777+4GP, Al Qanawat',
+      pointB: 'G78P+J3M, Al Mouhajrin',
+    })
+    const existing = mergeScannedCashDeductions([], [partial], () => 'existing-edge-row')
+
+    expect(mergeScannedCashDeductions(existing, [partial, complete], () => 'duplicate')).toEqual([])
+    expect(healCashDeductionDetails(existing, [partial, complete])).toEqual([
+      {
+        localId: 'existing-edge-row',
+        timeText: '22:36',
+        dateText: '2026-08-13',
+        pointA: 'G777+4GP, Al Qanawat',
+        pointB: 'G78P+J3M, Al Mouhajrin',
+      },
+    ])
+  })
+
+  it('reconciles already-present local OCR duplicates into the richer row under the first stable identity', () => {
+    const [partial] = mergeScannedCashDeductions(
+      [],
+      [
+        scanned({
+          fee: '-50',
+          time: '22:36',
+          dateIso: '2026-08-14',
+          pointA: 'G777+4GP, Al Qanawat',
+          pointB: '',
+        }),
+      ],
+      () => 'first-stable-local-id',
+    )
+    const richer = {
+      ...partial!,
+      localId: 'later-duplicate-id',
+      operationKey: `${partial!.operationKey}~2`,
+      dateText: '2026-08-13',
+      pointB: 'G78P+J3M, Al Mouhajrin',
+    }
+    const input = [partial!, richer]
+    const before = structuredClone(input)
+
+    expect(reconcileLocalCashDeductions(input)).toEqual([
+      {
+        ...partial!,
+        localId: 'first-stable-local-id',
+        operationKey: partial!.operationKey,
+        dateText: '2026-08-13',
+        pointB: 'G78P+J3M, Al Mouhajrin',
+      },
+    ])
+    expect(input).toEqual(before)
+  })
+
+  it('never reconciles complete twins, conflicting routes, manual rows, or server-restored rows', () => {
+    const [complete] = mergeScannedCashDeductions(
+      [],
+      [scanned({ fee: '-50', time: '22:36', pointA: 'Shared pickup', pointB: 'Destination A' })],
+      () => 'first',
+    )
+    const completeTwin = { ...complete!, localId: 'twin', operationKey: `${complete!.operationKey}~2` }
+    const conflicting = {
+      ...complete!,
+      localId: 'conflicting',
+      operationKey: `${complete!.operationKey}~3`,
+      pointB: 'Destination B',
+    }
+    const partialManual = { ...complete!, localId: 'manual', operationKey: 'manual', pointB: null, source: 'manual' as const }
+    const partialRecorded = {
+      ...complete!,
+      localId: 'recorded',
+      operationKey: 'recorded',
+      pointB: null,
+      recorded: true,
+    }
+    const rows = [complete!, completeTwin, conflicting, partialManual, partialRecorded]
+
+    expect(reconcileLocalCashDeductions(rows)).toEqual(rows)
+  })
+
+  it('keeps two equal -50 deductions at 22:36 when their complete routes differ', () => {
+    const first = scanned({
+      fee: '-50',
+      time: '22:36',
+      dateIso: '2026-08-14',
+      pointA: 'Shared pickup',
+      pointB: 'Destination A',
+    })
+    const second = scanned({
+      fee: '-50',
+      time: '22:36',
+      dateIso: '2026-08-13',
+      pointA: 'Shared pickup',
+      pointB: 'Destination B',
+    })
+    const existing = mergeScannedCashDeductions([], [first], () => 'first-operation')
+    const added = mergeScannedCashDeductions(existing, [second], () => 'second-operation')
+
+    expect(added).toHaveLength(1)
+    expect(added[0]).toMatchObject({
+      localId: 'second-operation',
+      amountText: '50',
+      timeText: '22:36',
+      pointA: 'Shared pickup',
+      pointB: 'Destination B',
+    })
+    expect(added[0]!.operationKey).not.toBe(existing[0]!.operationKey)
+  })
+
+  it('keeps a complete equal deduction repeated on another day even when its route also repeats', () => {
+    const first = scanned({ fee: '-50', time: '22:36', dateIso: '2026-08-14' })
+    const nextDay = scanned({ fee: '-50', time: '22:36', dateIso: '2026-08-13' })
+    const existing = mergeScannedCashDeductions([], [first], () => 'first-day')
+    const added = mergeScannedCashDeductions(existing, [nextDay], () => 'second-day')
+
+    expect(added).toHaveLength(1)
+    expect(added[0]).toMatchObject({ localId: 'second-day', dateText: '2026-08-13' })
   })
 
   it('preserves multiplicity when two deductions genuinely share a minute and amount', () => {

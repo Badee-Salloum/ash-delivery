@@ -1,7 +1,16 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import L, { type CircleMarker, type LeafletMouseEvent, type Map as LeafletMap } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { type OcrScalar, type PhotoAge, br1Verdict, ocrReadingDelta, slotLabel, splitSlot, formatDateTime } from '@ash/client'
+import {
+  type OcrScalar,
+  type PhotoAge,
+  br1DifferencePresentation,
+  br1Verdict,
+  ocrReadingDelta,
+  slotLabel,
+  splitSlot,
+  formatDateTime,
+} from '@ash/client'
 import { add, formatMinor, parseMinor, sub } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
@@ -352,6 +361,14 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
    * see rather than a colour he might not.
    */
   const { verdict: br1State } = br1Verdict(review.br1)
+  const difference = br1DifferencePresentation(review.br1.difference)
+  const differenceLabel = t.br1[difference.direction]
+  const differenceColour =
+    difference.direction === 'surplus'
+      ? 'text-amber-700'
+      : difference.direction === 'shortage'
+        ? 'text-red-700'
+        : 'text-emerald-700'
   const verdict =
     br1State === 'not_balanced'
       ? { tone: 'red' as const, label: t.br1.notBalanced }
@@ -379,7 +396,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       // immutable. Read back who and how much before it happens.
       const ok = await confirm({
         title: t.approval.confirmCloseTitle,
-        body: `${who.driver ?? ''} · ${t.br1.expected}: ${review.br1.difference === '0.00' ? t.br1.balanced : review.br1.difference}`,
+        body: `${who.driver ?? ''} · ${differenceLabel}: ${difference.amountText}`,
         confirmLabel: t.approval.approveClose,
       })
       if (!ok) return
@@ -596,12 +613,9 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
 
         {/* The net difference, biggest thing on the screen — it is the number that decides. */}
         <div className="mt-3 flex items-baseline justify-between border-t border-slate-100 pt-3">
-          <span className="text-sm text-slate-600">{t.common.difference}</span>
-          <span
-            dir="ltr"
-            className={`num text-3xl font-bold ${review.br1.balanced ? 'text-emerald-700' : 'text-red-700'}`}
-          >
-            {review.br1.difference}
+          <span className={`text-sm font-semibold ${differenceColour}`}>{differenceLabel}</span>
+          <span dir="ltr" className={`num text-3xl font-bold ${differenceColour}`}>
+            {difference.amountText}
           </span>
         </div>
 

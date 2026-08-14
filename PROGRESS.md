@@ -9,11 +9,15 @@ concurrency tests plus every database guard after all 30 migrations.
 
 **Thaer's two Recent Orders screenshots were audited read-only after release.** The production OCR
 receipts show that gpt-5.5 returned all six fees (`190`, `145`, `175`, `370`, `240`, `425`) and the
-`-50` row correctly. The photographed UI was still running an older cached PWA path which discarded
-the cloud list when its row count differed from the phone reader, leaving the phone's two readable
-fees and three refusals on screen. The live bundle now makes the cloud list authoritative; replaying
-those exact production response shapes through it yields six orders and one 50-unit cash deduction,
-each exactly once. No shift row or ledger entry was changed during the diagnosis.
+`-50` row correctly. The photographed screen was the new PWA, not an old cached bundle: its client
+did not receive/apply the successful server answer and exposed the phone reader's two readable fees
+and refusals instead. The red evidence tiles show that requests around the same capture also failed.
+The incident fix makes AI the only automatic source of screenshot-derived values; the phone reader
+may retain training/diagnostic samples but cannot publish a provisional fee, deduction, movement,
+wallet balance, odometer, or BMS reading.
+Overlapping partial/full sightings of the same `-50` now heal into one deduction. The exact incident
+replay produces six orders, one 50-unit cash deduction, expected total `4,686.00`, and a clearly
+labelled **surplus of `528.50`**. No shift row or ledger entry was changed during the diagnosis.
 
 The operation window is now the manager-approved opening through the driver's close submission,
 using branch-local time, inclusive minute boundaries, and correct midnight crossing. Confirmed
@@ -116,11 +120,12 @@ own rows into one draft would key differently wherever they **disagreed** — pr
 deliveries the cloud reader was added to fix — and every one of them would appear twice. A driver
 paid once, counted twice.
 
-So exactly one merge happens over one list. The local reader owns the list (it cut the strips, found
-the addresses, knows which cards the screen edge sliced); the cloud owns the numbers.
-`overlayCloudAmounts()` joins them **by position** and refuses unless the counts match — with one
-row missing from either side every row below it shifts up. A mismatch is not an error; the driver
-keeps the local reading, as he did last week.
+So exactly one merge happens over one list. This was first shipped with the local reader owning the
+list and `overlayCloudAmounts()` replacing only aligned values. Field evidence later proved that a
+count mismatch discarded a correct cloud answer, and the Thaer incident proved that publishing a
+fast local guess while AI was pending was unsafe. The current rule is A-31: cloud AI owns the full
+automatic list; an equal-length local observation may contribute only aligned training strips. A
+failed cloud call leaves existing rows untouched and exposes retry/manual entry—never local money.
 
 ### Spend, and the four ways it is bounded
 
@@ -132,8 +137,8 @@ declared dependency that was never registered.
    paid for again on the next retry.
 2. **A per-shift cap** (`OCR_MAX_READS_PER_SHIFT`, default 15). Cache hits do not consume it;
    capping those would punish a driver for a bad connection.
-3. **`OCR_DRIVER=none`** — the kill switch and the default. One env var, no code deploy, and every
-   read falls back to the on-device reader.
+3. **`OCR_DRIVER=none`** — the kill switch and the default. One env var, no code deploy; automatic
+   monetary prefill stops and the driver uses retry/manual entry while local samples keep training.
 4. **`ocr_reads`** carries `tokens_in`/`tokens_out`/`latency_ms`. It is the only cost telemetry that
    will exist; watch it for the first day.
 

@@ -25,8 +25,10 @@ const scalars = {
   cash: '123.45',
   wallet: '67.89',
   walletOcr: '67.80',
+  walletHumanEdited: true,
   odo: '6948',
   odoOcr: 6943,
+  odoAiAuthoritative: true,
   odoHumanEdited: true,
   odoConfirmed: true,
 }
@@ -48,8 +50,10 @@ describe('closing draft crash recovery', () => {
           cash: '',
           wallet: '',
           walletOcr: null,
+          walletHumanEdited: false,
           odo: '',
           odoOcr: null,
+          odoAiAuthoritative: false,
           odoHumanEdited: false,
           odoConfirmed: false,
           untouched: 'kept',
@@ -65,6 +69,50 @@ describe('closing draft crash recovery', () => {
     expect(readEndDraft(storage, 'shift-1')).toBeNull()
     expect(storage.getItem(endDraftStorageKey('shift-1'))).toBeNull()
     expect(parseEndDraft('not json')).toBeNull()
+  })
+
+  it('clears untrusted legacy wallet and odometer machine fields after the authority update', () => {
+    const legacy = JSON.stringify({
+      version: 1,
+      savedAt: 1234,
+      cash: '4935',
+      wallet: '214.0',
+      walletOcr: '279.50',
+      odo: '6030',
+      odoOcr: 6030,
+      odoHumanEdited: false,
+      odoConfirmed: false,
+    })
+    expect(parseEndDraft(legacy)).toMatchObject({
+      wallet: '',
+      walletOcr: null,
+      walletHumanEdited: false,
+      cash: '4935',
+      odo: '',
+      odoOcr: null,
+      odoAiAuthoritative: false,
+    })
+  })
+
+  it('preserves an explicitly typed legacy odometer while dropping its untrusted machine baseline', () => {
+    const legacy = JSON.stringify({
+      version: 1,
+      savedAt: 1234,
+      cash: '4935',
+      wallet: '279.50',
+      walletOcr: '279.50',
+      walletHumanEdited: false,
+      odo: '6031',
+      odoOcr: 214,
+      odoHumanEdited: true,
+      odoConfirmed: false,
+    })
+    expect(parseEndDraft(legacy)).toMatchObject({
+      odo: '6031',
+      odoOcr: null,
+      odoAiAuthoritative: false,
+      odoHumanEdited: true,
+    })
   })
 
   it('clears the exact shift at terminal without touching another shift', () => {

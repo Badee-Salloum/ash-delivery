@@ -5,8 +5,12 @@ export interface PersistedEndDraft {
   cash: string
   wallet: string
   walletOcr: string | null
+  /** Explicit typing outranks a later AI response, including after a tab reload. */
+  walletHumanEdited: boolean
   odo: string
   odoOcr: number | null
+  /** True only when the stored machine baseline came from cloud AI. */
+  odoAiAuthoritative: boolean
   odoHumanEdited: boolean
   odoConfirmed: boolean
 }
@@ -39,14 +43,33 @@ export function parseEndDraft(raw: string): PersistedEndDraft | null {
       typeof value.cash !== 'string' ||
       typeof value.wallet !== 'string' ||
       !validNullableString(value.walletOcr) ||
+      (value.walletHumanEdited !== undefined && typeof value.walletHumanEdited !== 'boolean') ||
       typeof value.odo !== 'string' ||
       !validOcr(value.odoOcr) ||
+      (value.odoAiAuthoritative !== undefined && typeof value.odoAiAuthoritative !== 'boolean') ||
       typeof value.odoHumanEdited !== 'boolean' ||
       typeof value.odoConfirmed !== 'boolean'
     ) {
       return null
     }
-    return value as PersistedEndDraft
+    // Drafts written by the immediately-previous PWA lack one or both authority flags. That build
+    // could publish a local provisional read before AI settled, with no persisted bit separating
+    // it from a cloud value. Clear only untrusted machine fields; every explicit input survives.
+    const walletLegacy = value.walletHumanEdited === undefined
+    const odometerLegacy = value.odoAiAuthoritative === undefined
+    return {
+      ...value,
+      ...(walletLegacy ? { wallet: '', walletOcr: null, walletHumanEdited: false } : {}),
+      ...(odometerLegacy
+        ? {
+            // Previous builds stored a phone prefill and a cloud-AI value in the same two fields.
+            // Keep explicit typing, but never restore an indistinguishable local machine guess.
+            odo: value.odoHumanEdited ? value.odo : '',
+            odoOcr: null,
+            odoAiAuthoritative: false,
+          }
+        : {}),
+    } as PersistedEndDraft
   } catch {
     return null
   }
@@ -102,8 +125,10 @@ export function restoreEndDraftScalars<T extends EndDraftScalars>(current: T, sa
     cash: saved.cash,
     wallet: saved.wallet,
     walletOcr: saved.walletOcr,
+    walletHumanEdited: saved.walletHumanEdited,
     odo: saved.odo,
     odoOcr: saved.odoOcr,
+    odoAiAuthoritative: saved.odoAiAuthoritative,
     odoHumanEdited: saved.odoHumanEdited,
     odoConfirmed: saved.odoConfirmed,
   }

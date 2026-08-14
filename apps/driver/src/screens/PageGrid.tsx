@@ -35,7 +35,8 @@ export function PageGrid({
   slots: ReadonlySet<string>
   onUploaded(slot: string): void
   onAddPage(): void
-  onImage(file: File): void
+  /** Slot is part of the OCR generation: a late answer must not land after that page is replaced. */
+  onImage(file: File, slot: string): void
   /** Remove a page. Offered on every tile in a grid — a surplus page is a real thing to undo. */
   onDeleted(slot: string): void
   /** What this screen's read made of it — one line for the whole set, not per page. */
@@ -72,7 +73,7 @@ export function PageGrid({
               variant="tile"
               uploaded={slots.has(slot)}
               onUploaded={onUploaded}
-              onImage={onImage}
+              onImage={(file) => onImage(file, slot)}
               onDelete={onDeleted}
             />
           )

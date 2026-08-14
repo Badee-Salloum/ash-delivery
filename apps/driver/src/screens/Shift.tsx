@@ -11,6 +11,7 @@ import { MAX_PAGE_SLOTS, PAYMENTS_LOG_SLOT, type PayMode, pageSlot } from '@ash/
 import type { DraftCashDeduction, DraftMovement, DraftOrder } from '@ash/client'
 import {
   allProblems,
+  br1DifferencePresentation,
   cashDeductionsAreValid,
   checkOdometer,
   compressImage,
@@ -26,6 +27,7 @@ import {
 
   previewBr1,
   readInCloud,
+  reconcileLocalCashDeductions,
   normalizeDecimalDigits,
   odometerFromCloudFields,
   parseNonNegativeInteger,
@@ -58,6 +60,14 @@ import {
   localOdometerFailureCopyKey,
   odometerValueForRetake,
 } from '../odometer-flow.ts'
+import { type AiOcrAuthorityState, reduceAiOcrAuthority } from '../ai-ocr-authority.ts'
+import {
+  beginAiPageRead,
+  cancelAiPageRead,
+  discardAiPageFailure,
+  finishAiPageRead,
+  type AiPageReadState,
+} from '../ai-page-read-state.ts'
 
 /**
  * The driver's shift flow: start package → order entry → end package.
@@ -115,8 +125,8 @@ function pagesIn(slots: readonly string[], base: string): number {
   return max
 }
 
-/** What the payments-log reader made of «سجل المدفوعات», said out loud rather than left silent. */
-type LogState = { kind: 'idle' | 'reading' | 'failed' } | { kind: 'read'; rows: number; refused: number; cutOff?: number }
+/** What cloud AI made of a paged operations screen, including every concurrent page. */
+type LogState = AiPageReadState
 
 /**
  * The closing package while it is being filled in.
@@ -130,8 +140,12 @@ type LogState = { kind: 'idle' | 'reading' | 'failed' } | { kind: 'read'; rows: 
 interface EndDraft {
   cash: string
   wallet: string
-  /** What `readWallet` OCR'd, kept even if the driver edits the field (SRS D-3 baseline). */
+  /** What cloud AI read, kept even if the driver edits the field (SRS D-3 baseline). */
   walletOcr: string | null
+  /** Only explicit typing can stop a later AI wallet result from filling the field. */
+  walletHumanEdited: boolean
+  /** File identity is the generation token; a late answer from a replaced screenshot is ignored. */
+  walletFile: File | null
   /** What the CLOUD reader is doing with the wallet photo — running, done, or why it failed. */
   walletCloud: CloudReadEvent | null
   /** The wallet screen as the reader worked on it — training material. */
@@ -140,11 +154,11 @@ interface EndDraft {
   odoStrip: string | null
   /** OCR baseline for the closing odometer, independent of later driver correction. */
   odoOcr: number | null
+  /** True only when `odoOcr` came from cloud AI; local OCR is training evidence, never authority. */
+  odoAiAuthoritative: boolean
   /** Cloud reader state and retained file make a timeout retryable without another gallery trip. */
   odoCloud: CloudReadEvent | null
   odoFile: File | null
-  /** Race arbitration: cloud wins over local OCR; explicit human typing wins over both. */
-  odoCloudAnswered: boolean
   odoHumanEdited: boolean
   /** Explicit acknowledgement of the current anomalous end value; reset whenever that value changes. */
   odoConfirmed: boolean
@@ -184,13 +198,15 @@ const EMPTY_END_DRAFT: EndDraft = {
   cash: '',
   wallet: '',
   walletOcr: null,
+  walletHumanEdited: false,
+  walletFile: null,
   walletCloud: null,
   walletStrip: null,
   odoStrip: null,
   odoOcr: null,
+  odoAiAuthoritative: false,
   odoCloud: null,
   odoFile: null,
-  odoCloudAnswered: false,
   odoHumanEdited: false,
   odoConfirmed: false,
   odoLocal: null,
@@ -216,6 +232,34 @@ const freshEndDraft = (): EndDraft => ({
   orders: [],
   movements: [],
   cashDeductions: [],
+})
+
+/** Project the wallet fields into the reusable AI-authority state machine. */
+const walletAuthority = (draft: EndDraft): AiOcrAuthorityState<string, File> => ({
+  generation: draft.walletFile,
+  phase:
+    draft.walletCloud === null
+      ? 'idle'
+      : draft.walletCloud.status === 'reading'
+        ? 'reading'
+        : draft.walletCloud.status === 'read'
+          ? 'read'
+          : 'failed',
+  value: draft.wallet === '' ? null : draft.wallet,
+  aiValue: draft.walletOcr,
+  humanEdited: draft.walletHumanEdited,
+})
+
+/** Keep the public close-package scalars in lockstep with the authority decision. */
+const withWalletAuthority = (
+  draft: EndDraft,
+  authority: AiOcrAuthorityState<string, File>,
+): EndDraft => ({
+  ...draft,
+  walletFile: authority.generation,
+  wallet: authority.value ?? '',
+  walletOcr: authority.aiValue,
+  walletHumanEdited: authority.humanEdited,
 })
 
 /** Where a shift already in flight puts the driver back. */
@@ -324,8 +368,10 @@ export function ShiftFlow({
       cash: endDraft.cash,
       wallet: endDraft.wallet,
       walletOcr: endDraft.walletOcr,
+      walletHumanEdited: endDraft.walletHumanEdited,
       odo: endDraft.odo,
       odoOcr: endDraft.odoOcr,
+      odoAiAuthoritative: endDraft.odoAiAuthoritative,
       odoHumanEdited: endDraft.odoHumanEdited,
       odoConfirmed: endDraft.odoConfirmed,
     })
@@ -336,8 +382,10 @@ export function ShiftFlow({
     endDraft.cash,
     endDraft.wallet,
     endDraft.walletOcr,
+    endDraft.walletHumanEdited,
     endDraft.odo,
     endDraft.odoOcr,
+    endDraft.odoAiAuthoritative,
     endDraft.odoHumanEdited,
     endDraft.odoConfirmed,
   ])
@@ -454,8 +502,16 @@ export function ShiftFlow({
           logPages: Math.max(d.logPages, pagesIn(st.endPackage.mediaSlots, PAYMENTS_LOG_SLOT)),
           cash: d.cash || (st.endPackage.cashDeclared ?? ''),
           wallet: d.wallet || (st.endPackage.walletDeclared ?? ''),
+          walletOcr: d.walletOcr ?? st.endPackage.walletDeclaredOcr ?? null,
+          walletHumanEdited:
+            d.wallet !== ''
+              ? d.walletHumanEdited
+              : st.endPackage.walletDeclared !== null &&
+                (st.endPackage.walletDeclaredOcr == null ||
+                  st.endPackage.walletDeclared !== st.endPackage.walletDeclaredOcr),
           odo: d.odo || (st.endPackage.odometerKm === null ? '' : String(st.endPackage.odometerKm)),
           odoOcr: d.odoOcr ?? st.endPackage.odometerKmOcr ?? null,
+          odoAiAuthoritative: d.odoAiAuthoritative || st.endPackage.odometerKmOcr !== null,
           odoHumanEdited: d.odoHumanEdited || st.endPackage.odometerKm !== null,
           // Owned by `BatteryPanel`, which is the only thing that knows the shape. Building it here
           // by hand — behind an `as` cast — is what crashed every resumed close screen.
@@ -493,6 +549,9 @@ export function ShiftFlow({
             operationKey: row.operationKey,
             amountText: row.amount,
             amountOcrText: row.amountOcr ?? null,
+            // This identity already exists on the server. Local overlap healing may enrich it,
+            // but must never hide it because omitting a deduction from PUT is not a deletion.
+            recorded: true,
             timeText: row.occurredMinute ?? '',
             dateText: row.occurredDate ?? '',
             pointA: row.pointA,
@@ -738,51 +797,41 @@ function StartPackage({
   const [odoStrip, setOdoStrip] = useState<string | null>(null)
   /** What the cloud reader is doing with the odometer photo. `null` until one is picked. */
   const [odoCloud, setOdoCloud] = useState<CloudReadEvent | null>(null)
-  /** Set once the cloud has answered, so a slower local read cannot overwrite its baseline. */
-  const odoCloudAnswered = useRef(false)
   /** Explicit driver input is authoritative over either asynchronous reader. */
   const odoHumanEdited = useRef(restore?.odometerKm !== null && restore?.odometerKm !== undefined)
+  /** Phone OCR is retained only as labelled training/status evidence; it never owns a number. */
+  const [odoLocal, setOdoLocal] = useState<LocalOdometerReadEvent | null>(null)
   /** Kept so a timed-out read can be retried without another trip to the gallery. */
   const [odoFile, setOdoFile] = useState<File | null>(null)
   const odoFileRef = useRef<File | null>(null)
   const [odoShot, setOdoShot] = useState(restore?.mediaSlots.includes('odometer') ?? false)
   const [busy, setBusy] = useState(false)
-  const [ocrBusy, setOcrBusy] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [startSlots, setStartSlots] = useState<Set<string>>(() => new Set(restore?.mediaSlots ?? []))
   const [batteriesReady, setBatteriesReady] = useState(batteries.length === 0)
 
-  // Assisted OCR: read the ODOMETER off the dashboard photo and pre-fill the km field the driver
-  // would otherwise type. Only fills it when he has not already, and any failure is silent — the
-  // driver just types. Charge is read per pack in the battery panel, not off the dash.
+  // The phone still reads the original dashboard pixels so its sample can be trained, but its
+  // numeric guess is never published. Cloud AI is the sole automatic odometer authority.
   const runOcr = useCallback(async (file: File): Promise<void> => {
-    setOcrBusy(true)
+    setOdoLocal({ status: 'reading' })
     try {
       const { readDashboard } = await import('../ocr.ts')
       // The ORIGINAL file, not the compressed upload: 1280 px at q=0.4 puts body text under the
       // LSTM's recognition floor, and no tesseract parameter recovers from that.
       const result = await readDashboard(file)
       if (odoFileRef.current !== file) return
-      // The picture it worked from, kept either way — see `odoStrip`.
+      // The picture and outcome are training/status evidence only. Never copy `result.reading`
+      // into either the visible value or the OCR baseline.
       setOdoStrip((cur) => cur ?? result.sample ?? null)
-      /*
-       * THE CLOUD ALREADY ANSWERED — do not touch the field or the baseline.
-       *
-       * Same race as the battery packs. The two readers run concurrently and neither waits, so a
-       * local read finishing second used to leave the cloud's value in the box and its own in
-       * `odoOcr`, and the manager's review reported a manual edit nobody had made. The strip is
-       * still kept: it is training material and belongs to the phone either way.
-       */
-      if (odoCloudAnswered.current) return
-      // A failed read is not silent any more, but the odometer tile has no status line of its own
-      // — the driver simply types, which is what he was going to do anyway.
-      if (!result.ok) return
-      const { odometer } = result.reading
-      // Record the raw read ONCE (the baseline), independent of the later pre-fill/edit.
-      if (odometer != null) setOdoOcr((cur) => cur ?? odometer)
-      if (odometer != null && !odoHumanEdited.current) setOdo(String(odometer))
-    } finally {
-      if (odoFileRef.current === file) setOcrBusy(false)
+      setOdoLocal(
+        localOdometerEvent(
+          result.ok ? { ok: true, odometer: result.reading.odometer } : result,
+        ),
+      )
+    } catch {
+      if (odoFileRef.current === file) {
+        setOdoLocal({ status: 'failed', reason: 'unavailable' })
+      }
     }
   }, [])
 
@@ -795,20 +844,25 @@ function StartPackage({
    * voltage, which is the hardest thing to fix with better glyph templates and the easiest thing
    * for a model that can read the labels around it.
    *
-   * So this OVERWRITES the local baseline rather than deferring to it — `setOdoOcr(km)`, not
-   * `?? km`. What it does not overwrite is a number the driver has typed.
+   * It is the only callback that may write the machine baseline. What it does not overwrite is a
+   * number the driver has typed.
    */
   const odoCloudRead = useCallback((e: CloudReadEvent, file?: File): void => {
     if (file && odoFileRef.current !== file) return
-    // Every event is kept now, not just the successful one. A read that is still running, and a
-    // read that timed out, are both things the driver standing in front of the bike needs told.
-    setOdoCloud(e)
-    if (e.status !== 'read') return
-    odoCloudAnswered.current = true
+    if (e.status !== 'read') {
+      setOdoCloud(e)
+      return
+    }
     // The reader is told to label it «odometer»; accept the obvious variants rather than failing
     // on a synonym, since a wrong label costs the whole read.
     const km = odometerFromCloudFields(e.response.fields)
-    if (km === null) return
+    if (km === null) {
+      // A structured response without an odometer is a terminal, visible failure — never a hidden
+      // success and never permission to promote the phone's guess.
+      setOdoCloud({ status: 'failed', reason: 'no_fields' })
+      return
+    }
+    setOdoCloud(e)
     // Digits only. «ODO 02611 km» must not become 2611000 because "km" carried digits, and a
     // fractional odometer is not a thing this dashboard prints.
     setOdoOcr(km)
@@ -862,6 +916,7 @@ function StartPackage({
 
   async function confirm(): Promise<void> {
     if (!shiftId) return
+    if (odoCloud?.status === 'reading') return
     const odometerKm = parseNonNegativeInteger(odo)
     if (odometerKm === null) return
     setBusy(true)
@@ -961,6 +1016,7 @@ function StartPackage({
     ...(odoShot ? [] : [t.shift.odometerShot]),
     ...(parseNonNegativeInteger(odo) === null ? [t.shift.odometer] : []),
     ...(batteriesReady ? [] : [t.battery.percent]),
+    ...(odoCloud?.status === 'reading' ? [t.shift.reading] : []),
   ]
   const ready = shiftId !== null && missing.length === 0
 
@@ -993,10 +1049,10 @@ function StartPackage({
           }}
           onImage={(file) => {
             odoFileRef.current = file
-            odoCloudAnswered.current = false
             setOdoCloud(null)
             setOdoOcr(null)
             setOdoStrip(null)
+            setOdoLocal({ status: 'reading' })
             // A new photograph must not inherit a machine-prefill from the old one. A value the
             // driver actually typed is different: human input remains authoritative across a retake.
             setOdo(odometerValueForRetake(odo, odoHumanEdited.current))
@@ -1022,7 +1078,6 @@ function StartPackage({
           <p className="text-center text-sm text-slate-500">{t.shift.resumeHint}</p>
         </Card>
       ) : null}
-      {ocrBusy ? <p className="text-center text-sm text-slate-600">{t.shift.reading}…</p> : null}
       <ReadingLock active={odoCloud?.status === 'reading'}>
       <Card className="flex flex-col gap-3">
         <Field label={t.shift.odometer}>
@@ -1039,6 +1094,10 @@ function StartPackage({
             nowhere until now, so a pre-filled OCR odometer and one typed from memory looked
             identical. This reader was wrong three times out of three on real shifts. */}
         <SourceMark source={sourceOf({ ocrValue: odoOcr, hadImage: odoStrip !== null, value: odo })} />
+        <LocalOdometerReadStatus
+          event={odoLocal}
+          {...(odoFile ? { onRetry: () => void runOcr(odoFile) } : {})}
+        />
         {/* The odometer is the screen the on-device reader is WORST at — migration 0022 records it
             wrong three times out of three — so it is also the one where a silent cloud failure
             costs the most. Retry re-reads the file already in hand; no second trip to the gallery. */}
@@ -1133,6 +1192,11 @@ function EndPackage({
   )
   const [br1, setBr1] = useState<{ difference: string; balanced: boolean } | null>(null)
   const [busy, setBusy] = useState(false)
+  /** Exact failed files make AI retry one tap; Sets also identify which partial batch still failed. */
+  const dashboardReadFiles = useRef<Map<string, File>>(new Map())
+  const logReadFiles = useRef<Map<string, File>>(new Map())
+  const failedDashboardReads = useRef<Map<string, File>>(new Map())
+  const failedLogReads = useRef<Map<string, File>>(new Map())
 
   const [batteriesReady, setBatteriesReady] = useState(batteries.length === 0)
   // The zeroed-wallet photo was dropped (product owner) — the wallet screenshot is the evidence.
@@ -1189,7 +1253,14 @@ function EndPackage({
     ...(!cashDeductionsAreValid(draft.cashDeductions) ? [t.shift.fixOrderRows] : []),
     // A read in flight is a reason to WAIT, not a thing to go and fix — but submitting through it
     // silently drops every order it was about to add, which is the shift closing short.
-    ...(draft.dash.kind === 'reading' || draft.log.kind === 'reading' ? [t.shift.reading] : []),
+    ...(
+      draft.dash.kind === 'reading' ||
+      draft.log.kind === 'reading' ||
+      draft.walletCloud?.status === 'reading' ||
+      draft.odoCloud?.status === 'reading'
+        ? [t.shift.reading]
+        : []
+    ),
   ]
   const odometerQuestion = checkOdometer(shift.odoStart, odometerKm)
   const odometerNeedsConfirmation = odometerQuestion?.kind === 'odometer_went_backwards' && !odoConfirmed
@@ -1205,6 +1276,11 @@ function EndPackage({
     // once BOTH declared figures exist, and an explicit `undefined` would satisfy that check.
     ...(cash === '' || wallet === '' ? {} : { declaredCashText: cash, declaredWalletText: wallet }),
   })
+  const previewDifference =
+    preview?.differenceText === null || preview?.differenceText === undefined
+      ? null
+      : br1DifferencePresentation(preview.differenceText)
+  const submittedDifference = br1 === null ? null : br1DifferencePresentation(br1.difference)
 
   /**
    * The operations first, then the package.
@@ -1214,7 +1290,7 @@ function EndPackage({
    * merges the movements, so re-sending is a no-op rather than a wall of duplicate-key errors.
    */
   async function submit(): Promise<void> {
-    if (odometerFields === null) return
+    if (odometerFields === null || draft.odoCloud?.status === 'reading') return
     setBusy(true)
     try {
       await api.put(`/shifts/${shift.id}/operations`, {
@@ -1262,6 +1338,13 @@ function EndPackage({
           included: m.included !== false,
         })),
       })
+      // From this point these deduction identities exist on the server. A later screenshot may
+      // enrich them, but local overlap reconciliation must never remove one: omission from this PUT
+      // is not deletion and would make the preview disagree with server BR1 after a close failure.
+      onDraft((d) => ({
+        ...d,
+        cashDeductions: d.cashDeductions.map((row) => ({ ...row, recorded: true })),
+      }))
       patch({ opsError: null })
 
       const res = await api.put<{ br1: { difference: string; balanced: boolean } }>(`/shifts/${shift.id}/end-package`, {
@@ -1270,7 +1353,7 @@ function EndPackage({
         batteryPercent: null,
         cashDeclared: cash,
         walletDeclared: wallet,
-        // SRS D-3: the wallet OCR baseline (null when readWallet never ran).
+        // SRS D-3: the authoritative cloud-AI baseline (null when AI did not read a value).
         walletDeclaredOcr: walletOcr,
         // The pictures both closing readers worked from, so the driver's corrections become examples.
         walletStrip: draft.walletStrip,
@@ -1310,26 +1393,41 @@ function EndPackage({
   /**
    * The wallet screenshot, read ON DEVICE.
    *
-   * Still runs on every photo, and its answer is still kept — but it is no longer the one that
-   * fills the field when the cloud reader answers. Two reasons it stays: it is the only reader
-   * that works with no signal, and it is the one being TRAINED, which needs its own reading beside
-   * the strip and the driver's confirmed value.
+   * It still runs on every photo so its sample can be trained against the driver's eventual value.
+   * Its numeric guess is NEVER published: not while AI is reading and not after AI fails. That
+   * prevents a fast local guess from becoming indistinguishable from explicit human input.
    */
   const walletImage = useCallback(
     async (file: File): Promise<void> => {
-                  const { readWallet } = await import('../ocr.ts')
-                  const r = await readWallet(file)
-                  // Kept whether it read or refused — the refusal is the better example.
-                  onDraft((d) => ({ ...d, walletStrip: d.walletStrip ?? r.sample ?? null }))
-                  if (!r.ok) return
-                  onDraft((d) => ({
-                    ...d,
-                    // LOCAL FILLS ONLY WHAT IS STILL EMPTY. If the cloud answered first its value
-                    // is already here and stands; if it never answers, this is the whole reading.
-                    // Either way the driver's own typing wins over both.
-                    walletOcr: d.walletOcr ?? r.reading.amountText,
-                    wallet: d.wallet === '' ? r.reading.amountText : d.wallet,
-                  }))
+      // Claim this file generation and clear any older machine value before either reader answers.
+      // A human edit is retained; the authority reducer is the only place allowed to make that call.
+      onDraft((d) => ({
+        ...withWalletAuthority(
+          d,
+          reduceAiOcrAuthority(walletAuthority(d), { type: 'started', generation: file }),
+        ),
+        walletCloud: { status: 'reading' },
+        walletStrip: null,
+      }))
+
+      try {
+        const { readWallet } = await import('../ocr.ts')
+        const result = await readWallet(file)
+        onDraft((d) => {
+          if (d.walletFile !== file) return d
+          const observed = result.ok
+            ? reduceAiOcrAuthority(walletAuthority(d), {
+                type: 'local_observed',
+                generation: file,
+                value: result.reading.amountText,
+              })
+            : walletAuthority(d)
+          // Kept whether it read or refused — the hard/refused sample is often the better example.
+          return { ...withWalletAuthority(d, observed), walletStrip: result.sample ?? null }
+        })
+      } catch {
+        // Local OCR is training-only for this field. Its failure cannot alter AI or human money.
+      }
     },
     [onDraft],
   )
@@ -1337,27 +1435,57 @@ function EndPackage({
   /**
    * The same wallet screenshot, read in the CLOUD — and this is the reading that counts.
    *
-   * Measured over 48 real screens against a 311-row hand-built key: 290 rows right to the local
-   * reader's 136. So it overwrites the local baseline rather than deferring to it, which is what
-   * keeps the manager's «OCR → confirmed» delta describing the reader that actually suggested the
-   * number. What it does NOT overwrite is anything the driver has typed.
+   * This is the only machine reader allowed to fill `wallet` or `walletOcr`. A structured failure
+   * leaves the field blank for retry/manual entry; it never promotes the buffered phone guess.
+   * Explicit typing remains authoritative if it races the response.
    */
   const walletCloudRead = useCallback(
-    (e: CloudReadEvent): void => {
-      // Kept whatever it says. A wallet balance is the one figure in the close package that BR1
-      // checks against counted cash, so a silently-failed read here is worth a line on screen.
-      onDraft((d) => ({ ...d, walletCloud: e }))
-      if (e.status !== 'read') return
-      // One balance on this screen: the first row it returns with a value.
-      const amount = e.response.rows.find((row) => row.value !== null)?.value
-      if (amount == null) return
-      onDraft((d) => ({
-        ...d,
-        walletOcr: amount,
-        wallet: d.wallet === '' ? amount : d.wallet,
-      }))
+    (event: CloudReadEvent, file?: File): void => {
+      onDraft((d) => {
+        const generation = file ?? d.walletFile
+        if (generation === null || d.walletFile !== generation) return d
+
+        if (event.status === 'reading') return { ...d, walletCloud: event }
+
+        if (event.status === 'read') {
+          // One balance on this screen: the first row AI returns with a value.
+          const amount = event.response.rows.find((row) => row.value !== null)?.value
+          if (amount !== null && amount !== undefined) {
+            const next = reduceAiOcrAuthority(walletAuthority(d), {
+              type: 'ai_read',
+              generation,
+              value: amount,
+            })
+            return { ...withWalletAuthority(d, next), walletCloud: event }
+          }
+
+          const failed: CloudReadEvent = { status: 'failed', reason: 'no_fields' }
+          const next = reduceAiOcrAuthority(walletAuthority(d), { type: 'ai_failed', generation })
+          return { ...withWalletAuthority(d, next), walletCloud: failed }
+        }
+
+        const next = reduceAiOcrAuthority(walletAuthority(d), { type: 'ai_failed', generation })
+        return { ...withWalletAuthority(d, next), walletCloud: event }
+      })
     },
     [onDraft],
+  )
+
+  /** Retry a timed-out wallet AI read from the exact File already selected. */
+  const retryWalletCloud = useCallback(
+    async (file: File): Promise<void> => {
+      walletCloudRead({ status: 'reading' }, file)
+      const response = await readInCloud(api, shift.id, 'wallet', file)
+      walletCloudRead(
+        response === null
+          ? { status: 'failed', reason: 'unavailable' }
+          : response.ok
+            ? { status: 'read', response }
+            : { status: 'failed', reason: response.reason ?? 'unavailable' },
+        file,
+      )
+    },
+    [api, shift.id, walletCloudRead],
   )
 
   /**
@@ -1375,8 +1503,8 @@ function EndPackage({
           odoFile: file,
           odoStrip: null,
           odoOcr: null,
+          odoAiAuthoritative: false,
           odoCloud: null,
-          odoCloudAnswered: false,
           odoLocal: { status: 'reading' },
           odoConfirmed: false,
           // Do not let an earlier photo's machine value survive a retake whose readers may fail.
@@ -1395,14 +1523,9 @@ function EndPackage({
             odoLocal: localOdometerEvent(result.ok ? { ok: true, odometer: odo } : result),
             odoStrip: result.sample ?? null,
           }
-          // Cloud is authoritative where it answered. Keep only the local sample for training.
-          if (d.odoCloudAnswered || odo === null) return next
-          return {
-            ...next,
-            odoOcr: odo,
-            odo: d.odoHumanEdited ? d.odo : String(odo),
-            odoConfirmed: false,
-          }
+          // Phone OCR stops here: its outcome and strip are training evidence, never an automatic
+          // odometer or baseline, even if it finishes before AI or AI later fails.
+          return next
         })
       } catch {
         onDraft((d) =>
@@ -1422,18 +1545,21 @@ function EndPackage({
         if (file && d.odoFile !== file) return d
         if (event.status !== 'read') return { ...d, odoCloud: event }
         const km = odometerFromCloudFields(event.response.fields)
+        if (km === null) {
+          return {
+            ...d,
+            odoCloud: { status: 'failed', reason: 'no_fields' },
+            odoOcr: null,
+            odoAiAuthoritative: false,
+          }
+        }
         return {
           ...d,
           odoCloud: event,
-          // A structured cloud answer wins the race even when it honestly found no odometer.
-          odoCloudAnswered: true,
-          ...(km === null
-            ? {}
-            : {
-                odoOcr: km,
-                odo: d.odoHumanEdited ? d.odo : String(km),
-                odoConfirmed: false,
-              }),
+          odoOcr: km,
+          odoAiAuthoritative: true,
+          odo: d.odoHumanEdited ? d.odo : String(km),
+          odoConfirmed: false,
         }
       })
     },
@@ -1457,129 +1583,168 @@ function EndPackage({
   )
 
   /**
-   * The dashboard tile IS the order scan: the image is the evidence AND what was read.
+   * Read Recent Orders with cloud AI as the sole machine authority.
    *
-   * BOTH readers run, and only ONE list is merged. See `overlayCloudAmounts` — two readers merging
-   * their own rows would double every delivery they disagreed about, which is precisely the set of
-   * deliveries the cloud reader was added to fix.
-   */
+   * The local reader still runs on the original pixels because its strips are training material,
+   * but none of its monetary rows may reach the draft. If AI fails, the existing list is untouched
+   * and the exact File is retained for Retry; the driver can also add the row manually below.
+  */
   const dashImage = useCallback(
-    async (file: File): Promise<void> => {
-                  patch({ dash: { kind: 'reading' } })
-                  const { readOrders } = await import('../ocr.ts')
-                  // In parallel: the phone reads while the request is in flight, so the cloud costs
-                  // wall-clock only where it is slower than tesseract — which, at 20s locally, is
-                  // rarely.
-                  const [r, cloud] = await Promise.all([
-                    readOrders(file).catch(() => null),
-                    readInCloud(api, shift.id, 'orders', file),
-                  ])
-                  const localOrders = r?.ok ? r.reading.orders : []
-                  const cloudOrders = cloud?.ok ? cloudRowsToScannedOrders(cloud.rows, localOrders) : []
-                  onDraft((d) => {
-                    /*
-                     * THE CLOUD IS THE READER. The phone is the fallback and the student.
-                     *
-                     * This was the other way round for a day and the owner was right to say so.
-                     * The phone owned the list and the cloud was allowed to correct its amounts,
-                     * joined by position — which required both readers to emit the SAME NUMBER of
-                     * rows, or nothing was corrected at all. That safety rule became the main thing
-                     * standing between the driver and a correct reading, because the counts differ
-                     * constantly: a card sliced by the screen edge is one row to the cloud (with a
-                     * null fee) and often no row at all to the phone.
-                     *
-                     * Measured on the owner's own screens, twice in one afternoon. On one page the
-                     * cloud returned 120@20:32, 275@20:12, 140@01:39 and a correctly-null sliced
-                     * card; the phone returned three rows, one with a refused fee and two with no
-                     * clock. The counts were 4 against 3, so every one of the cloud's readings was
-                     * discarded and the driver was shown «؟» and two «11/08»s. Over the whole
-                     * corpus it is 290 rows right against 136.
-                     *
-                     * So the cloud's rows ARE the list whenever it answered. The phone's rows are
-                     * used only when it did not — no network, no key, cap spent — and even then
-                     * they still carry each fee's strip of pixels across for training.
-                     */
-                    const localOk = r?.ok === true
-                    const localRows = localOk ? r.reading.orders : []
-                    const scanned = cloudOrders.length > 0 ? cloudOrders : localRows
-                    // Both readers silent is the only real failure. Either one alone is a reading.
-                    if (!localOk && scanned.length === 0) return { ...d, dash: { kind: 'failed' } }
-                    const added = mergeScannedOrders(d.orders, scanned, () => crypto.randomUUID())
-                    const addedDeductions = mergeScannedCashDeductions(
-                      d.cashDeductions,
-                      scanned,
-                      () => crypto.randomUUID(),
-                    )
-                    const healedDeductions = healCashDeductionDetails(d.cashDeductions, scanned)
-                    // A card sliced off the bottom of the previous page is usually whole at the
-                    // top of this one. Its second sighting is de-duplicated away, so without this
-                    // its addresses go with it and the row keeps showing a delivery to nowhere.
-                    const healed = healCutOffRoutes(d.orders, scanned)
-                    const patch = new Map(healed.map((h) => [h.localId, h]))
-                    const deductionPatch = new Map(healedDeductions.map((h) => [h.localId, h]))
-                    // NEW rows, not rows on the page: a page that fully overlaps reads 0, which is
-                    // the truth — nothing was added — and not a failure. `refused` is what the
-                    // reader saw but would not vouch for, and it is the driver's to type.
-                    //
-                    // «refused» counts only what the PHONE declined. When the cloud supplied the
-                    // list, the phone's forty unread candidate rows are not forty rows the driver
-                    // must type — they are rows somebody else already read, and telling him
-                    // otherwise on a page that worked would be the app crying wolf.
-                    const phoneRefused = r?.ok && localRows.length > 0 ? Math.max(0, (r.rowsSeen ?? 0) - r.fieldsFound) : 0
-                    return {
-                      ...d,
-                      orders: [...d.orders.map((o) => { const h = patch.get(o.localId); return h ? { ...o, pointA: h.pointA, pointB: h.pointB } : o }), ...added],
-                      cashDeductions: [
-                        ...d.cashDeductions.map((row) => {
-                          const healed = deductionPatch.get(row.localId)
-                          return healed ? { ...row, ...healed } : row
-                        }),
-                        ...addedDeductions,
-                      ],
-                      dash: { kind: 'read', rows: added.length + addedDeductions.length, refused: phoneRefused, cutOff: r?.ok ? (r.cutOff ?? 0) : 0 },
-                    }
-                  })
+    async (file: File, slot: string): Promise<void> => {
+      dashboardReadFiles.current.set(slot, file)
+      const replacingFailure = failedDashboardReads.current.delete(slot)
+      onDraft((d) => ({
+        ...d,
+        dash: beginAiPageRead(replacingFailure ? discardAiPageFailure(d.dash) : d.dash),
+      }))
+
+      // Run locally only to carry correctly-aligned glyph strips into AI-owned rows for training.
+      // Its result is never considered when deciding whether a monetary row exists.
+      const localRead = import('../ocr.ts')
+        .then(({ readOrders }) => readOrders(file))
+        .catch(() => null)
+      const [r, cloud] = await Promise.all([
+        localRead,
+        readInCloud(api, shift.id, 'orders', file),
+      ])
+
+      // The page was replaced or deleted while this request was running. Settle its pending count,
+      // but never let its late rows label the new evidence generation.
+      if (dashboardReadFiles.current.get(slot) !== file) {
+        onDraft((d) => ({ ...d, dash: cancelAiPageRead(d.dash) }))
+        return
+      }
+
+      if (!cloud?.ok) {
+        failedDashboardReads.current.set(slot, file)
+        onDraft((d) => ({ ...d, dash: finishAiPageRead(d.dash, { kind: 'failed' }) }))
+        return
+      }
+
+      const localOrders = r?.ok ? r.reading.orders : []
+      const scanned = cloudRowsToScannedOrders(cloud.rows, localOrders)
+      // `ok` only says the response was structured. A page with no authoritative monetary row is
+      // still a no-fields outcome for reconciliation and must not look like a successful zero-add.
+      if (!scanned.some((row) => row.fee !== null && row.fee.trim() !== '')) {
+        failedDashboardReads.current.set(slot, file)
+        onDraft((d) => ({ ...d, dash: finishAiPageRead(d.dash, { kind: 'failed' }) }))
+        return
+      }
+
+      failedDashboardReads.current.delete(slot)
+      // These are refusals by AI itself, never candidates invented by local/Tesseract diagnostics.
+      const aiRefused = cloud.rows.filter((row) => {
+        if (!row.cancelled && row.value === null) return true
+        if (row.time !== null && row.time.trim() !== '') return false
+        const isDeduction = row.value !== null && /^\s*[-−]/u.test(row.value)
+        return !(isDeduction && (row.dateIso !== null || row.pointA !== null || row.pointB !== null))
+      }).length
+
+      onDraft((d) => {
+        const added = mergeScannedOrders(d.orders, scanned, () => crypto.randomUUID())
+        const addedDeductions = mergeScannedCashDeductions(
+          d.cashDeductions,
+          scanned,
+          () => crypto.randomUUID(),
+        )
+        const healedDeductions = healCashDeductionDetails(d.cashDeductions, scanned)
+        // Keep the existing cloud merge/heal semantics; only its authority changed.
+        const healed = healCutOffRoutes(d.orders, scanned)
+        const routePatch = new Map(healed.map((row) => [row.localId, row]))
+        const deductionPatch = new Map(healedDeductions.map((row) => [row.localId, row]))
+        const nextCashDeductions = reconcileLocalCashDeductions([
+          ...d.cashDeductions.map((row) => {
+            const healedRow = deductionPatch.get(row.localId)
+            return healedRow ? { ...row, ...healedRow } : row
+          }),
+          ...addedDeductions,
+        ])
+        return {
+          ...d,
+          orders: [
+            ...d.orders.map((order) => {
+              const healedOrder = routePatch.get(order.localId)
+              return healedOrder
+                ? { ...order, pointA: healedOrder.pointA, pointB: healedOrder.pointB }
+                : order
+            }),
+            ...added,
+          ],
+          // Heal the exact phone-draft incident too: an earlier partial edge card and its later
+          // complete sighting collapse only when both are unrecorded OCR rows. Server-restored and
+          // genuine complete twins retain multiplicity.
+          cashDeductions: nextCashDeductions,
+          dash: finishAiPageRead(d.dash, {
+            kind: 'read',
+            rows: added.length + addedDeductions.length,
+            refused: aiRefused,
+          }),
+        }
+      })
     },
-    [onDraft, patch, api, shift.id],
+    [onDraft, api, shift.id],
   )
 
-  /** Same rule as the dashboard: both readers run, one list merges. */
+  /** Same authority rule as Recent Orders: local payment rows are diagnostics, never money. */
   const logImage = useCallback(
-    async (file: File): Promise<void> => {
-                  patch({ log: { kind: 'reading' } })
-                  const { readPaymentsLog } = await import('../ocr.ts')
-                  const [r, cloud] = await Promise.all([
-                    readPaymentsLog(file).catch(() => null),
-                    readInCloud(api, shift.id, 'payments_log', file),
-                  ])
-                  const cloudMovements = cloud?.ok ? cloudRowsToScannedMovements(cloud.rows) : []
-                  onDraft((d) => {
-                    // A payments-log row is SIGNED, and the sign is the difference between money
-                    // arriving and money leaving. `overlayCloudAmounts` carries `value` whole,
-                    // sign included — which is where the local reader loses 13 of its 18 misreads.
-                    //
-                    // And as on the dashboard: when the phone read nothing, the cloud owns the list
-                    // rather than having its answer discarded for failing to match a list of zero.
-                    // Same rule as the dashboard: the cloud's rows ARE the list when it answered.
-                    // The phone's are the fallback for no-network, not a filter on the cloud's.
-                    const localOk = r?.ok === true
-                    const localRows = localOk ? r.reading.movements : []
-                    const scanned = cloudMovements.length > 0 ? cloudMovements : localRows
-                    if (!localOk && scanned.length === 0) return { ...d, log: { kind: 'failed' } }
-                    const added = mergeScannedMovements(d.movements, scanned, () => crypto.randomUUID())
-                    return {
-                      ...d,
-                      movements: [...d.movements, ...added],
-                      log: {
-                        kind: 'read',
-                        rows: added.length,
-                        refused: r?.ok && localRows.length > 0 ? Math.max(0, (r.rowsSeen ?? 0) - r.fieldsFound) : 0,
-                      },
-                    }
-                  })
+    async (file: File, slot: string): Promise<void> => {
+      logReadFiles.current.set(slot, file)
+      const replacingFailure = failedLogReads.current.delete(slot)
+      onDraft((d) => ({
+        ...d,
+        log: beginAiPageRead(replacingFailure ? discardAiPageFailure(d.log) : d.log),
+      }))
+      const localRead = import('../ocr.ts')
+        .then(({ readPaymentsLog }) => readPaymentsLog(file))
+        .catch(() => null)
+      const [, cloud] = await Promise.all([
+        localRead,
+        readInCloud(api, shift.id, 'payments_log', file),
+      ])
+
+      if (logReadFiles.current.get(slot) !== file) {
+        onDraft((d) => ({ ...d, log: cancelAiPageRead(d.log) }))
+        return
+      }
+
+      if (!cloud?.ok) {
+        failedLogReads.current.set(slot, file)
+        onDraft((d) => ({ ...d, log: finishAiPageRead(d.log, { kind: 'failed' }) }))
+        return
+      }
+
+      const scanned = cloudRowsToScannedMovements(cloud.rows)
+      if (scanned.length === 0) {
+        failedLogReads.current.set(slot, file)
+        onDraft((d) => ({ ...d, log: finishAiPageRead(d.log, { kind: 'failed' }) }))
+        return
+      }
+
+      failedLogReads.current.delete(slot)
+      const aiRefused = Math.max(0, cloud.rows.length - scanned.length)
+      onDraft((d) => {
+        const added = mergeScannedMovements(d.movements, scanned, () => crypto.randomUUID())
+        return {
+          ...d,
+          movements: [...d.movements, ...added],
+          log: finishAiPageRead(d.log, {
+            kind: 'read',
+            rows: added.length,
+            refused: aiRefused,
+          }),
+        }
+      })
     },
-    [onDraft, patch, api, shift.id],
+    [onDraft, api, shift.id],
   )
+
+  /** Retry every failed page as one concurrent batch, using the exact File objects already held. */
+  const retryFailedDashboard = useCallback((): void => {
+    for (const [slot, file] of [...failedDashboardReads.current]) void dashImage(file, slot)
+  }, [dashImage])
+  const retryFailedLog = useCallback((): void => {
+    for (const [slot, file] of [...failedLogReads.current]) void logImage(file, slot)
+  }, [logImage])
 
   return (
     <Screen
@@ -1604,12 +1769,28 @@ function EndPackage({
               </div>
               {/* The difference, the moment both declared figures exist — it was computed all
                   along and never shown, so the driver first learned of a gap after submitting. */}
-              {preview.differenceText !== null ? (
+              {previewDifference !== null ? (
                 <div className="col-span-2 flex items-baseline justify-between gap-2 border-t border-slate-200 pt-1">
-                  <span className="text-slate-600">{t.common.difference}</span>
+                  <span
+                    className={`font-semibold ${
+                      previewDifference.direction === 'balanced'
+                        ? 'text-emerald-700'
+                        : previewDifference.direction === 'surplus'
+                          ? 'text-amber-800'
+                          : 'text-red-700'
+                    }`}
+                  >
+                    {t.br1[previewDifference.direction]}
+                  </span>
                   <Money
-                    value={preview.differenceText}
-                    className={`font-bold ${preview.balanced ? 'text-emerald-700' : 'text-red-700'}`}
+                    value={previewDifference.amountText}
+                    className={`font-bold ${
+                      previewDifference.direction === 'balanced'
+                        ? 'text-emerald-700'
+                        : previewDifference.direction === 'surplus'
+                          ? 'text-amber-800'
+                          : 'text-red-700'
+                    }`}
                   />
                 </div>
               ) : null}
@@ -1632,14 +1813,18 @@ function EndPackage({
               {t.shift.stillMissing} {missing.join(' · ')}
             </p>
           ) : null}
-          {br1 ? (
+          {submittedDifference ? (
             <div
               className={`flex items-center justify-between rounded-2xl px-4 py-2 ${
-                br1.balanced ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'
+                submittedDifference.direction === 'balanced'
+                  ? 'bg-emerald-100 text-emerald-800'
+                  : submittedDifference.direction === 'surplus'
+                    ? 'bg-amber-100 text-amber-900'
+                    : 'bg-red-100 text-red-800'
               }`}
             >
-              <span>{br1.balanced ? t.br1.balanced : t.br1.notBalanced}</span>
-              <Money value={br1.difference} className="font-bold" />
+              <span>{t.br1[submittedDifference.direction]}</span>
+              <Money value={submittedDifference.amountText} className="font-bold" />
             </div>
           ) : null}
           <Button variant="success" disabled={!ready || busy} onClick={submit}>
@@ -1668,8 +1853,25 @@ function EndPackage({
         onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
         onAddPage={() => onDraft((d) => ({ ...d, dashboardPages: d.dashboardPages + 1 }))}
         onImage={dashImage}
-              onDeleted={(gone) => onDraft((d) => { const next = new Set(d.slots); next.delete(gone); return { ...d, slots: next } })}
-        status={<ReadStatus state={draft.dash} />}
+        onDeleted={(gone) => {
+          dashboardReadFiles.current.delete(gone)
+          const discardedFailure = failedDashboardReads.current.delete(gone)
+          onDraft((d) => {
+            const next = new Set(d.slots)
+            next.delete(gone)
+            return {
+              ...d,
+              slots: next,
+              dash: discardedFailure ? discardAiPageFailure(d.dash) : d.dash,
+            }
+          })
+        }}
+        status={
+          <ReadStatus
+            state={draft.dash}
+            {...(failedDashboardReads.current.size > 0 ? { onRetry: retryFailedDashboard } : {})}
+          />
+        }
       />
 
       {/* THE list: every operation of the shift, with server-owned inclusion shown read-only. It
@@ -1699,8 +1901,25 @@ function EndPackage({
         onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
         onAddPage={() => onDraft((d) => ({ ...d, logPages: d.logPages + 1 }))}
         onImage={logImage}
-              onDeleted={(gone) => onDraft((d) => { const next = new Set(d.slots); next.delete(gone); return { ...d, slots: next } })}
-        status={<ReadStatus state={logState} />}
+        onDeleted={(gone) => {
+          logReadFiles.current.delete(gone)
+          const discardedFailure = failedLogReads.current.delete(gone)
+          onDraft((d) => {
+            const next = new Set(d.slots)
+            next.delete(gone)
+            return {
+              ...d,
+              slots: next,
+              log: discardedFailure ? discardAiPageFailure(d.log) : d.log,
+            }
+          })
+        }}
+        status={
+          <ReadStatus
+            state={logState}
+            {...(failedLogReads.current.size > 0 ? { onRetry: retryFailedLog } : {})}
+          />
+        }
       />
 
       {/*
@@ -1727,12 +1946,29 @@ function EndPackage({
           </div>
           <div className="flex min-w-0 flex-1 flex-col gap-1">
             <Field label={t.shift.walletBalance}>
-              <MoneyInput value={wallet} onChange={(e) => patch({ wallet: e.target.value })} />
+              <MoneyInput
+                value={wallet}
+                onChange={(e) => {
+                  const value = e.target.value
+                  onDraft((d) =>
+                    withWalletAuthority(
+                      d,
+                      reduceAiOcrAuthority<string, File>(walletAuthority(d), {
+                        type: 'human_edited',
+                        value: value === '' ? null : value,
+                      }),
+                    ),
+                  )
+                }}
+              />
             </Field>
             <SourceMark source={sourceOf({ ocrValue: walletOcr, hadImage: draft.walletStrip !== null, value: wallet })} />
             {/* The wallet balance is the one figure BR1 checks against counted cash, so a read
                 that quietly never finished is worth a line rather than a blank tile. */}
-            <CloudReadStatus event={draft.walletCloud} />
+            <CloudReadStatus
+              event={draft.walletCloud}
+              {...(draft.walletFile ? { onRetry: () => void retryWalletCloud(draft.walletFile!) } : {})}
+            />
           </div>
         </div>
 
@@ -1841,25 +2077,48 @@ function EndPackage({
  * added nothing because it had nothing new on it, the second means the digits could not be read at
  * all and the rows have to be typed. Both are true answers and the driver acts differently on each.
  */
-function ReadStatus({ state }: { state: LogState }): ReactNode {
+function ReadStatus({
+  state,
+  onRetry,
+}: {
+  state: LogState
+  onRetry?: (() => void) | undefined
+}): ReactNode {
   const { t, lang } = useApp()
+  const failureNotice = (
+    <div className="flex flex-col items-center gap-1" role="alert">
+      <p className="text-center text-sm font-medium text-amber-800">{t.shift.readUnread}</p>
+      {onRetry ? (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="rounded-lg bg-amber-100 px-3 py-1 text-sm font-medium text-amber-900"
+        >
+          {t.common.retry}
+        </button>
+      ) : null}
+    </div>
+  )
   // Checked POSITIVELY for `read`: the other member's `kind` is a union of three literals, and
   // narrowing a union by eliminating them one at a time does not reduce to the member with `rows`.
   if (state.kind === 'read') {
     return (
-      <p className="text-center text-sm text-emerald-700">
-        {plural(state.rows, t.shift.readAdded, lang)}
-        {/* The rows the reader SAW and would not vouch for. Silence here would let the driver
-            believe the page was fully read and submit a day that is short by those rows. */}
-        {state.refused > 0 ? (
-          <span className="text-amber-800"> · {plural(state.refused, t.shift.readRefused, lang)}</span>
-        ) : null}
-        {/* A card the screen sliced in half is NOT offered — its places would be a guess. Saying so
-            is the whole difference between withholding a row and losing one. */}
-        {(state.cutOff ?? 0) > 0 ? (
-          <span className="text-amber-800"> · {plural(state.cutOff!, t.shift.readCutOff, lang)}</span>
-        ) : null}
-      </p>
+      <div className="flex flex-col gap-1">
+        <p className="text-center text-sm text-emerald-700">
+          {plural(state.rows, t.shift.readAdded, lang)}
+          {/* The rows AI saw and would not vouch for. Silence here would let the driver believe the
+              page was fully read and submit a day that is short by those rows. */}
+          {state.refused > 0 ? (
+            <span className="text-amber-800"> · {plural(state.refused, t.shift.readRefused, lang)}</span>
+          ) : null}
+          {state.cutOff > 0 ? (
+            <span className="text-amber-800"> · {plural(state.cutOff, t.shift.readCutOff, lang)}</span>
+          ) : null}
+        </p>
+        {/* A sibling page can fail after another succeeded. Keep that failure visible instead of
+            collapsing the whole batch into the successful page's green status. */}
+        {state.failures > 0 ? failureNotice : null}
+      </div>
     )
   }
   if (state.kind === 'reading') {
@@ -1882,7 +2141,7 @@ function ReadStatus({ state }: { state: LogState }): ReactNode {
       </div>
     )
   }
-  if (state.kind === 'failed') return <p className="text-center text-sm font-medium text-amber-800">{t.shift.readUnread}</p>
+  if (state.kind === 'failed') return failureNotice
   return null
 }
 
