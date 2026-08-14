@@ -1828,33 +1828,6 @@ type SubmittedCashDeduction = NonNullable<OperationsInput['cashDeductions']>[num
 const cleanDeductionEvidence = (value: string | null | undefined): string =>
   (value ?? '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase()
 
-const plusCodeAndTail = (value: string): { code: string; tail: string } | null => {
-  const match = /^([23456789cfghjmpqrvwx]{4,8}\+[23456789cfghjmpqrvwx]{2,3})\s*(?:,\s*|\s+)(.+)$/.exec(value)
-  if (!match?.[1] || !match[2]?.trim()) return null
-  return { code: match[1], tail: match[2].trim() }
-}
-
-/** The incident's `7`/`V` OCR confusion is safe only when the written place stays identical. */
-const sameRouteEvidence = (left: string, right: string): boolean => {
-  if (left === right) return true
-  const leftPlace = plusCodeAndTail(left)
-  const rightPlace = plusCodeAndTail(right)
-  if (
-    leftPlace === null ||
-    rightPlace === null ||
-    leftPlace.tail !== rightPlace.tail ||
-    leftPlace.code.length !== rightPlace.code.length
-  ) return false
-  let differences = 0
-  for (let index = 0; index < leftPlace.code.length; index += 1) {
-    if (leftPlace.code[index] === rightPlace.code[index]) continue
-    const pair = `${leftPlace.code[index]}${rightPlace.code[index]}`
-    if (pair !== '7v' && pair !== 'v7') return false
-    differences += 1
-  }
-  return differences === 1
-}
-
 const cashDeductionKeyBase = (operationKey: string): string => operationKey.replace(/~\d+$/, '')
 
 type CashDeductionMatchEvidence = {
@@ -1862,6 +1835,7 @@ type CashDeductionMatchEvidence = {
   amount: Minor
   amountOcr?: Minor | null
   occurredMinute?: string | null
+  occurredDate?: string | null
   pointA?: string | null
   pointB?: string | null
 }
@@ -1870,38 +1844,15 @@ const cashDeductionRouteEvidenceCount = (
   row: Pick<CashDeductionMatchEvidence, 'pointA' | 'pointB'>,
 ): number => [row.pointA, row.pointB].filter((part) => cleanDeductionEvidence(part) !== '').length
 
-const compatibleCashDeductionRoutes = (
-  left: Pick<CashDeductionMatchEvidence, 'pointA' | 'pointB'>,
-  right: Pick<CashDeductionMatchEvidence, 'pointA' | 'pointB'>,
-): boolean => {
-  let shared = 0
-  for (const [leftRaw, rightRaw] of [
-    [left.pointA, right.pointA],
-    [left.pointB, right.pointB],
-  ] as const) {
-    const leftPart = cleanDeductionEvidence(leftRaw)
-    const rightPart = cleanDeductionEvidence(rightRaw)
-    if (leftPart !== '' && rightPart !== '') {
-      if (!sameRouteEvidence(leftPart, rightPart)) return false
-      shared += 1
-    }
-  }
-  return shared > 0
-}
-
 /**
- * True only for the edge-card pattern produced by overlapping Recent Orders screenshots: the
- * amount and printed minute agree, both corresponding route fields are non-conflicting, and one
- * sighting strictly supplies a route field the other lacks. Equal complete rows remain a genuine
- * multiset; equal amounts with different routes remain different cash movements.
+ * Recent Orders OCR identifies a deduction by its OCR magnitude and printed minute. Route OCR is
+ * review evidence only and can disagree completely between overlapping screenshots. Two known,
+ * different dates remain distinct; a missing date can be healed from the other sighting.
  */
-const isStrictlyRicherCashDeductionPair = (
+const hasSameCashDeductionOcrTiming = (
   left: CashDeductionMatchEvidence,
   right: CashDeductionMatchEvidence,
 ): boolean => {
-  if (left.operationKey === right.operationKey) return false
-  const base = cashDeductionKeyBase(left.operationKey)
-  if (!base.startsWith('recent-orders:') || cashDeductionKeyBase(right.operationKey) !== base) return false
   if (
     left.amount !== right.amount ||
     left.amountOcr === null || left.amountOcr === undefined ||
@@ -1911,15 +1862,22 @@ const isStrictlyRicherCashDeductionPair = (
     left.occurredMinute.trim() === '' ||
     typeof right.occurredMinute !== 'string' ||
     right.occurredMinute.trim() === '' ||
-    left.occurredMinute !== right.occurredMinute
+    cleanDeductionEvidence(left.occurredMinute) !== cleanDeductionEvidence(right.occurredMinute)
   ) return false
 
-  const leftCount = cashDeductionRouteEvidenceCount(left)
-  const rightCount = cashDeductionRouteEvidenceCount(right)
-  if (leftCount === rightCount || Math.min(leftCount, rightCount) === 0) return false
-
-  return compatibleCashDeductionRoutes(left, right)
+  const leftDate = cleanDeductionEvidence(left.occurredDate)
+  const rightDate = cleanDeductionEvidence(right.occurredDate)
+  return leftDate === '' || rightDate === '' || leftDate === rightDate
 }
+
+const isTimedCashDeductionDuplicate = (
+  left: CashDeductionMatchEvidence,
+  right: CashDeductionMatchEvidence,
+): boolean =>
+  left.operationKey !== right.operationKey &&
+  left.operationKey.startsWith('recent-orders:') &&
+  right.operationKey.startsWith('recent-orders:') &&
+  hasSameCashDeductionOcrTiming(left, right)
 
 const untouchedSubmittedDriverOcrDeduction = (
   row: SubmittedCashDeduction,
@@ -1932,53 +1890,96 @@ const untouchedSubmittedDriverOcrDeduction = (
   row.amountOcr !== undefined &&
   row.amount === row.amountOcr
 
-/** Prevent the narrow edge-card duplicate from reaching the database in its first batch. */
+const untouchedExistingDriverOcrDeduction = (
+  row: CashDeductionRecord,
+  actor: Actor,
+  shift: ShiftRecord,
+): boolean =>
+  actor.driverId === shift.driverId &&
+  row.createdBy === actor.userId &&
+  row.source === 'ocr' &&
+  row.amountOcr !== null &&
+  row.amount === row.amountOcr &&
+  row.decisionReason === null &&
+  !hasOperationDecision(row)
+
+const preferredSubmittedDeductionIdentity = (
+  candidate: SubmittedCashDeduction,
+  row: SubmittedCashDeduction,
+  eligibleExistingKeys: ReadonlySet<string>,
+): SubmittedCashDeduction => {
+  const candidateExists = eligibleExistingKeys.has(candidate.operationKey)
+  const rowExists = eligibleExistingKeys.has(row.operationKey)
+  if (candidateExists !== rowExists) return candidateExists ? candidate : row
+
+  const sameKeyFamily = cashDeductionKeyBase(candidate.operationKey) === cashDeductionKeyBase(row.operationKey)
+  if (sameKeyFamily) {
+    const candidateIsBase = candidate.operationKey === cashDeductionKeyBase(candidate.operationKey)
+    const rowIsBase = row.operationKey === cashDeductionKeyBase(row.operationKey)
+    if (candidateIsBase !== rowIsBase) return candidateIsBase ? candidate : row
+  }
+  // Different legacy key families have no meaningful ordering. Preserve the first sighting.
+  return candidate
+}
+
+const mergeSubmittedDeductionEvidence = (
+  identity: SubmittedCashDeduction,
+  candidate: SubmittedCashDeduction,
+  row: SubmittedCashDeduction,
+): SubmittedCashDeduction => {
+  const other = identity === candidate ? row : candidate
+  const candidateRoutes = cashDeductionRouteEvidenceCount(candidate)
+  const rowRoutes = cashDeductionRouteEvidenceCount(row)
+  const routeSource = candidateRoutes === rowRoutes
+    ? identity
+    : candidateRoutes > rowRoutes
+      ? candidate
+      : row
+  const identityDate = cleanDeductionEvidence(identity.occurredDate)
+  return {
+    ...identity,
+    occurredDate: identityDate === '' ? (other.occurredDate ?? null) : (identity.occurredDate ?? null),
+    occurredMinute: identity.occurredMinute ?? other.occurredMinute ?? null,
+    pointA: routeSource.pointA ?? null,
+    pointB: routeSource.pointB ?? null,
+    amountStrip: identity.amountStrip ?? routeSource.amountStrip ?? other.amountStrip ?? null,
+  }
+}
+
+/** Prevent a same-timestamp OCR duplicate from reaching the database in its first batch. */
 const reconcileSubmittedCashDeductions = (
   rows: readonly SubmittedCashDeduction[],
   actor: Actor,
   shift: ShiftRecord,
-  existingOperationKeys: ReadonlySet<string>,
+  existingRows: readonly CashDeductionRecord[],
 ): SubmittedCashDeduction[] => {
+  const existingByKey = new Map(existingRows.map((row) => [row.operationKey, row]))
+  const eligibleExistingKeys = new Set(
+    existingRows
+      .filter((row) => untouchedExistingDriverOcrDeduction(row, actor, shift))
+      .map((row) => row.operationKey),
+  )
+  const canReconcile = (row: SubmittedCashDeduction): boolean => {
+    if (!untouchedSubmittedDriverOcrDeduction(row, actor, shift)) return false
+    const existing = existingByKey.get(row.operationKey)
+    return existing === undefined || eligibleExistingKeys.has(row.operationKey)
+  }
   const survivors: SubmittedCashDeduction[] = []
   for (const row of rows) {
-    if (!untouchedSubmittedDriverOcrDeduction(row, actor, shift)) {
+    if (!canReconcile(row)) {
       survivors.push(row)
       continue
     }
     const matchIndex = survivors.findIndex((candidate) =>
-      untouchedSubmittedDriverOcrDeduction(candidate, actor, shift) &&
-      isStrictlyRicherCashDeductionPair(candidate, row),
+      canReconcile(candidate) && isTimedCashDeductionDuplicate(candidate, row),
     )
     if (matchIndex === -1) {
       survivors.push(row)
       continue
     }
     const candidate = survivors[matchIndex]!
-    const candidatePriority = [
-      existingOperationKeys.has(candidate.operationKey) ? 0 : 1,
-      candidate.operationKey === cashDeductionKeyBase(candidate.operationKey) ? 0 : 1,
-      candidate.operationKey,
-    ] as const
-    const rowPriority = [
-      existingOperationKeys.has(row.operationKey) ? 0 : 1,
-      row.operationKey === cashDeductionKeyBase(row.operationKey) ? 0 : 1,
-      row.operationKey,
-    ] as const
-    const identity = candidatePriority[0] < rowPriority[0] ||
-      (candidatePriority[0] === rowPriority[0] && candidatePriority[1] < rowPriority[1]) ||
-      (
-        candidatePriority[0] === rowPriority[0] &&
-        candidatePriority[1] === rowPriority[1] &&
-        candidatePriority[2].localeCompare(rowPriority[2]) <= 0
-      )
-      ? candidate
-      : row
-    const richer = cashDeductionRouteEvidenceCount(row) > cashDeductionRouteEvidenceCount(candidate)
-      ? row
-      : candidate
-    // Keep an already-persisted identity first, otherwise the unsuffixed base. Evidence comes from
-    // the complete card, so a later partial-only retry updates rather than recreates the duplicate.
-    survivors[matchIndex] = { ...richer, operationKey: identity.operationKey }
+    const identity = preferredSubmittedDeductionIdentity(candidate, row, eligibleExistingKeys)
+    survivors[matchIndex] = mergeSubmittedDeductionEvidence(identity, candidate, row)
   }
   return survivors
 }
@@ -2008,9 +2009,9 @@ const untouchedDriverOcrDeduction = (
 /**
  * Locate historical OCR duplicates without granting the operations endpoint a general delete.
  *
- * The richer persisted sighting survives unchanged. The batch repository rechecks the complete
- * poorer row under the shift lock before deleting it, so a racing correction or manager decision
- * makes the whole submission stale instead of erasing newer evidence.
+ * The stable persisted identity survives and may receive the richer sighting's evidence in the
+ * same batch. The repository rechecks the complete deleted row under the shift lock, so a racing
+ * correction or manager decision makes the whole submission stale instead of erasing newer data.
  */
 const persistedCashDeductionHealing = (
   rows: readonly CashDeductionRecord[],
@@ -2033,7 +2034,7 @@ const persistedCashDeductionHealing = (
     const matchIndex = survivors.findIndex((candidate) =>
       submittedByKey.get(candidate.operationKey) !== undefined &&
       untouchedDriverOcrDeduction(candidate, submittedByKey.get(candidate.operationKey), actor, shift) &&
-      isStrictlyRicherCashDeductionPair(candidate, row),
+      isTimedCashDeductionDuplicate(candidate, row),
     )
     if (matchIndex === -1) {
       survivors.push(row)
@@ -2041,7 +2042,11 @@ const persistedCashDeductionHealing = (
     }
 
     const candidate = survivors[matchIndex]!
-    if (candidate.operationKey === cashDeductionKeyBase(candidate.operationKey)) {
+    const sameKeyFamily = cashDeductionKeyBase(candidate.operationKey) === cashDeductionKeyBase(row.operationKey)
+    if (!sameKeyFamily) {
+      // Both are existing identities from an older key scheme. Keep the first stable record.
+      deletes.push(row)
+    } else if (candidate.operationKey === cashDeductionKeyBase(candidate.operationKey)) {
       deletes.push(row)
     } else if (row.operationKey === cashDeductionKeyBase(row.operationKey)) {
       deletes.push(candidate)
@@ -2200,17 +2205,17 @@ export async function submitOperations(
     actor,
     shift,
   )
+  const deductionDeleteIds = new Set(deductionHealing.deletes.map((row) => row.id))
+  const activeExistingDeductionRows = existingDeductionRows.filter((row) => !deductionDeleteIds.has(row.id))
   const submittedDeductionsBeforeHealing = reconcileSubmittedCashDeductions(
     rawSubmittedDeductions,
     actor,
     shift,
-    new Set(existingDeductionRows.map((row) => row.operationKey)),
+    activeExistingDeductionRows,
   )
-  const deductionDeleteIds = new Set(deductionHealing.deletes.map((row) => row.id))
   const submittedDeductions = submittedDeductionsBeforeHealing.filter(
     (row) => !deductionHealing.ignoredOperationKeys.has(row.operationKey),
   )
-  const activeExistingDeductionRows = existingDeductionRows.filter((row) => !deductionDeleteIds.has(row.id))
   const byNo = new Map(existing.map((o) => [o.providerOrderNo, o]))
   const deductionsByKey = new Map(activeExistingDeductionRows.map((row) => [row.operationKey, row]))
 
@@ -2405,8 +2410,25 @@ export async function submitOperations(
     // same OCR page after a re-photo request; it must not overwrite that decision or misattribute
     // the write to the manager stored on the row.
     if (current && hasOperationDecision(current)) continue
+    // An untouched OCR payload must not turn a protected identity into future cleanup scope. This
+    // covers a cached key colliding with a manual row, evidence owned by another actor, or a value
+    // that was already corrected away from its OCR amount. Explicit manual edits use `manual` and
+    // continue through the normal update path.
+    if (
+      current &&
+      untouchedSubmittedDriverOcrDeduction(row, actor, shift) &&
+      !untouchedExistingDriverOcrDeduction(current, actor, shift)
+    ) continue
+    const canHealCurrentOcrDate = current !== undefined &&
+      untouchedExistingDriverOcrDeduction(current, actor, shift) &&
+      untouchedSubmittedDriverOcrDeduction(row, actor, shift) &&
+      hasSameCashDeductionOcrTiming(current, row) &&
+      cleanDeductionEvidence(current.occurredDate) === '' &&
+      cleanDeductionEvidence(row.occurredDate) !== ''
     const occurredDate = current
-      ? current.occurredDate
+      ? canHealCurrentOcrDate
+        ? (row.occurredDate ?? null)
+        : current.occurredDate
       : opposite
         ? opposite.occurredDate
         : (row.occurredDate ?? null)
@@ -2415,11 +2437,10 @@ export async function submitOperations(
       : opposite
         ? opposite.occurredMinute
         : (row.occurredMinute ?? null)
-    const windowStatus = current?.windowStatus ?? opposite?.windowStatus ?? classifyOperationWindow({
-      occurredDate,
-      occurredMinute,
-      ...windowContext,
-    })
+    const classifiedWindowStatus = classifyOperationWindow({ occurredDate, occurredMinute, ...windowContext })
+    const windowStatus = canHealCurrentOcrDate
+      ? classifiedWindowStatus
+      : (current?.windowStatus ?? opposite?.windowStatus ?? classifiedWindowStatus)
     const submittedRoute = { pointA: row.pointA ?? null, pointB: row.pointB ?? null }
     const preserveRicherCurrentRoute = current !== undefined &&
       current.source === 'ocr' &&
@@ -2428,7 +2449,7 @@ export async function submitOperations(
       current.amountOcr !== null &&
       current.amountOcr === row.amountOcr &&
       cashDeductionRouteEvidenceCount(current) > cashDeductionRouteEvidenceCount(submittedRoute) &&
-      compatibleCashDeductionRoutes(current, submittedRoute)
+      hasSameCashDeductionOcrTiming(current, row)
     const record: CashDeductionRecord = {
       id: current?.id ?? deps.ids.uuid(),
       shiftId,
@@ -2440,7 +2461,9 @@ export async function submitOperations(
       amountOcr: row.amountOcr ?? null,
       pointA: preserveRicherCurrentRoute ? current.pointA : submittedRoute.pointA,
       pointB: preserveRicherCurrentRoute ? current.pointB : submittedRoute.pointB,
-      included: current?.included ?? opposite?.included ?? includedByWindow(windowStatus),
+      included: canHealCurrentOcrDate
+        ? includedByWindow(windowStatus)
+        : (current?.included ?? opposite?.included ?? includedByWindow(windowStatus)),
       windowStatus,
       decisionReason: current?.decisionReason ?? null,
       decidedBy: current?.decidedBy ?? null,

@@ -261,36 +261,54 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
     ])
   })
 
-  it('does not collapse fresh complete twins, conflicts, or rows without a printed minute', async () => {
+  it('uses OCR amount plus nonblank timing, not route text, for a fresh batch', async () => {
     const { id, driver } = await openShift({ float: 1_000, topup: 0 })
-    const row = (operationKey: string, pointA: string, pointB: string | null) => ({
+    const row = (
+      operationKey: string,
+      amount: string,
+      occurredMinute: string | null,
+      occurredDate: string | null,
+      pointA: string,
+      pointB: string | null,
+    ) => ({
       operationKey,
-      amount: '50.00',
-      amountOcr: '50.00',
-      occurredDate: '2026-08-13',
-      occurredMinute: '22:36',
+      amount,
+      amountOcr: amount,
+      occurredDate,
+      occurredMinute,
       pointA,
       pointB,
       source: 'ocr',
     })
     const deductions = [
-      row('recent-orders:1010101010101010', 'G77V+4GP, Al Qanawat', 'Dropoff'),
-      row('recent-orders:1010101010101010~2', 'G77V+4GP, Al Qanawat', 'Dropoff'),
-      row('recent-orders:2020202020202020', 'G777+4GP, Al Qanawat', null),
-      row('recent-orders:2020202020202020~2', 'G77V+4GP, Different place', 'Dropoff'),
-      row('recent-orders:3030303030303030', 'G777+4GP, Al Qanawat', null),
-      row('recent-orders:3030303030303030~2', 'G7PV+4GP, Al Qanawat', 'Dropoff'),
-      { ...row('recent-orders:4040404040404040', 'G777+4GP, Al Qanawat', null), occurredMinute: null },
-      { ...row('recent-orders:4040404040404040~2', 'G77V+4GP, Al Qanawat', 'Dropoff'), occurredMinute: null },
-      row('recent-orders:5050505050505050', 'G77W+4GP, Al Qanawat', null),
-      row('recent-orders:5050505050505050~2', 'G77V+4GP, Al Qanawat', 'Dropoff'),
+      // Thaer's exact 22:36 shape: route OCR conflicts, but timing and -50 magnitude identify one.
+      row('recent-orders:1010101010101010', '50.00', '22:36', '2026-08-13', 'G777+4GP, Al Qanawat', null),
+      row('recent-orders:1010101010101010~2', '50.00', '22:36', '2026-08-13', 'G77V+4GP, Different place', 'Dropoff'),
+      // A missing printed minute is never deduplicated.
+      row('recent-orders:2020202020202020', '60.00', null, '2026-08-13', 'A', null),
+      row('recent-orders:2020202020202020~2', '60.00', null, '2026-08-13', 'B', 'C'),
+      // Minute, known date and OCR amount each remain real identity boundaries.
+      row('recent-orders:3030303030303030', '70.00', '22:37', '2026-08-13', 'A', 'B'),
+      row('recent-orders:3030303030303030~2', '70.00', '22:38', '2026-08-13', 'C', 'D'),
+      row('recent-orders:4040404040404040', '80.00', '22:39', '2026-08-13', 'A', 'B'),
+      row('recent-orders:4040404040404040~2', '80.00', '22:39', '2026-08-14', 'C', 'D'),
+      row('recent-orders:5050505050505050', '90.00', '22:40', '2026-08-13', 'A', 'B'),
+      row('recent-orders:6060606060606060', '91.00', '22:40', '2026-08-13', 'C', 'D'),
+      // A missing date can be healed; two missing dates can still match inside this shift.
+      row('recent-orders:7070707070707070', '40.00', '22:41', null, 'A', null),
+      row('recent-orders:7070707070707070~2', '40.00', '22:41', '2026-08-13', 'C', 'D'),
+      row('recent-orders:8080808080808080', '30.00', '22:42', null, 'A', null),
+      row('recent-orders:8080808080808080~2', '30.00', '22:42', null, 'C', 'D'),
     ]
     const result = await put(driver, `/shifts/${id}/operations`, {
       orders: [], cashDeductions: deductions, movements: [],
     })
     expect(result.statusCode, result.body).toBe(200)
-    expect(result.json().br1.cashDeductionTotal).toBe('500.00')
-    expect(await h.deps.cashDeductions.listByShift(id)).toHaveLength(10)
+    expect(result.json().br1.cashDeductionTotal).toBe('721.00')
+    const stored = await h.deps.cashDeductions.listByShift(id)
+    expect(stored).toHaveLength(11)
+    expect(stored.find((item) => item.operationKey === 'recent-orders:7070707070707070'))
+      .toMatchObject({ occurredDate: '2026-08-13', pointA: 'C', pointB: 'D' })
   })
 
   it('atomically heals the historical partial/full OCR overlap to one -50 deduction', async () => {
@@ -300,7 +318,7 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
       operationKey,
       amount: '50.00',
       amountOcr: '50.00',
-      occurredDate: '2026-08-13',
+      occurredDate: null,
       occurredMinute: '22:36',
       pointA: 'G777+4GP, Al Qanawat',
       pointB: null,
@@ -319,6 +337,9 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
       ...persistedPartial!,
       id: 'historical-rich-deduction',
       operationKey: `${operationKey}~2`,
+      occurredDate: '2026-08-13',
+      included: true,
+      windowStatus: 'in_window',
       pointA: 'G77V+4GP, Al Qanawat',
       pointB: 'G78P+J3M, Al Mouhajrin',
     }, 'u-d1')
@@ -331,6 +352,7 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
         {
           ...partial,
           operationKey: `${operationKey}~2`,
+          occurredDate: '2026-08-13',
           pointA: 'G77V+4GP, Al Qanawat',
           pointB: 'G78P+J3M, Al Mouhajrin',
         },
@@ -347,13 +369,52 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
         id: persistedPartial!.id,
         operationKey,
         amount: 5_000n,
+        occurredDate: '2026-08-13',
+        windowStatus: 'in_window',
+        included: true,
         pointA: 'G77V+4GP, Al Qanawat',
         pointB: 'G78P+J3M, Al Mouhajrin',
       }),
     ])
   })
 
-  it('preserves complete twins, route conflicts, manual rows, foreign ownership, and manager decisions', async () => {
+  it('does not heal a missing date from a same-key row with a different minute or OCR amount', async () => {
+    const { id, driver } = await openShift({ float: 1_000, topup: 0 })
+    const operationKey = 'recent-orders:date-heal-safety'
+    const original = {
+      operationKey,
+      amount: '50.00',
+      amountOcr: '50.00',
+      occurredDate: null,
+      occurredMinute: '22:36',
+      pointA: 'A',
+      pointB: null,
+      source: 'ocr',
+    }
+    expect((await put(driver, `/shifts/${id}/operations`, {
+      orders: [], cashDeductions: [original], movements: [],
+    })).statusCode).toBe(200)
+
+    for (const stale of [
+      { ...original, occurredDate: '2026-08-13', occurredMinute: '22:37' },
+      { ...original, amount: '60.00', amountOcr: '60.00', occurredDate: '2026-08-13' },
+    ]) {
+      const result = await put(driver, `/shifts/${id}/operations`, {
+        orders: [], cashDeductions: [stale], movements: [],
+      })
+      expect(result.statusCode, result.body).toBe(200)
+      expect(await h.deps.cashDeductions.listByShift(id)).toEqual([
+        expect.objectContaining({
+          operationKey,
+          occurredDate: null,
+          occurredMinute: '22:36',
+          windowStatus: 'unknown',
+        }),
+      ])
+    }
+  })
+
+  it('heals route conflicts but preserves edited, manual, foreign, decided, and omitted rows', async () => {
     const { id, driver } = await openShift({ float: 1_000, topup: 0 })
     const template = {
       id: '',
@@ -374,49 +435,107 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
       createdBy: 'u-d1',
     }
     const rows = [
-      // Complete twins can be two real cash movements in one minute.
-      { ...template, id: 'complete-1', operationKey: 'recent-orders:1111111111111111', pointB: 'Dropoff' },
-      { ...template, id: 'complete-2', operationKey: 'recent-orders:1111111111111111~2', pointB: 'Dropoff' },
-      // A one-glyph Plus Code mismatch is only compatible while the written place tail agrees.
-      { ...template, id: 'conflict-1', operationKey: 'recent-orders:2222222222222222', pointA: 'G777+4GP, Al Qanawat' },
+      // Complete, conflicting route OCR is one timed sighting.
+      { ...template, id: 'timed-1', operationKey: 'recent-orders:1111111111111111', pointA: 'Route OCR A', pointB: 'Dropoff A' },
       {
         ...template,
-        id: 'conflict-2',
-        operationKey: 'recent-orders:2222222222222222~2',
-        pointA: 'G77V+4GP, Different place',
-        pointB: 'Dropoff',
+        id: 'timed-2',
+        operationKey: 'recent-orders:1111111111111111~2',
+        pointA: 'Completely different OCR',
+        pointB: 'Dropoff B',
       },
-      // More than one Plus Code glyph differs, even when the place tail agrees.
-      { ...template, id: 'multi-glyph-1', operationKey: 'recent-orders:6666666666666666', pointA: 'G777+4GP, Al Qanawat' },
+      // Corrected money is no longer untouched OCR, even if the other row still is.
       {
         ...template,
-        id: 'multi-glyph-2',
-        operationKey: 'recent-orders:6666666666666666~2',
-        pointA: 'G7PV+4GP, Al Qanawat',
+        id: 'edited-1',
+        operationKey: 'recent-orders:2222222222222222',
+        amount: syp(60),
+        amountOcr: syp(55),
+        occurredMinute: '22:37',
+      },
+      {
+        ...template,
+        id: 'edited-2',
+        operationKey: 'recent-orders:2222222222222222~2',
+        amount: syp(60),
+        amountOcr: syp(60),
+        occurredMinute: '22:37',
         pointB: 'Dropoff',
       },
       // Neither a manual record nor evidence owned by somebody else is driver-OCR cleanup scope.
-      { ...template, id: 'manual-1', operationKey: 'recent-orders:3333333333333333', source: 'manual' as const, amountOcr: null },
-      { ...template, id: 'manual-2', operationKey: 'recent-orders:3333333333333333~2', pointB: 'Dropoff' },
-      { ...template, id: 'foreign-1', operationKey: 'recent-orders:4444444444444444', createdBy: 'u-bm' },
-      { ...template, id: 'foreign-2', operationKey: 'recent-orders:4444444444444444~2', pointB: 'Dropoff' },
-      // One attributed decision protects the whole apparent pair from automatic deletion.
-      { ...template, id: 'decided-1', operationKey: 'recent-orders:5555555555555555' },
+      {
+        ...template,
+        id: 'manual-1',
+        operationKey: 'recent-orders:3333333333333333',
+        amount: syp(70),
+        amountOcr: null,
+        occurredMinute: '22:38',
+        source: 'manual' as const,
+      },
+      {
+        ...template,
+        id: 'manual-2',
+        operationKey: 'recent-orders:3333333333333333~2',
+        amount: syp(70),
+        amountOcr: syp(70),
+        occurredMinute: '22:38',
+        pointB: 'Dropoff',
+      },
+      {
+        ...template,
+        id: 'foreign-1',
+        operationKey: 'recent-orders:4444444444444444',
+        amount: syp(80),
+        amountOcr: syp(80),
+        occurredMinute: '22:39',
+        createdBy: 'u-bm',
+      },
+      {
+        ...template,
+        id: 'foreign-2',
+        operationKey: 'recent-orders:4444444444444444~2',
+        amount: syp(80),
+        amountOcr: syp(80),
+        occurredMinute: '22:39',
+        pointB: 'Dropoff',
+      },
+      // One attributed decision protects the apparent pair from automatic deletion.
+      {
+        ...template,
+        id: 'decided-1',
+        operationKey: 'recent-orders:5555555555555555',
+        amount: syp(90),
+        amountOcr: syp(90),
+        occurredMinute: '22:40',
+      },
       {
         ...template,
         id: 'decided-2',
         operationKey: 'recent-orders:5555555555555555~2',
+        amount: syp(90),
+        amountOcr: syp(90),
+        occurredMinute: '22:40',
         pointB: 'Dropoff',
         decisionReason: 'manager verified this row',
         decidedBy: 'u-bm',
         decidedAt: '2026-08-13T20:00:00.000Z',
       },
       // Even an otherwise-healable pair is permanent when this PUT omits it.
-      { ...template, id: 'omitted-1', operationKey: 'recent-orders:7777777777777777' },
+      {
+        ...template,
+        id: 'omitted-1',
+        operationKey: 'recent-orders:7777777777777777',
+        amount: syp(100),
+        amountOcr: syp(100),
+        occurredMinute: '22:41',
+      },
       {
         ...template,
         id: 'omitted-2',
         operationKey: 'recent-orders:7777777777777777~2',
+        amount: syp(100),
+        amountOcr: syp(100),
+        occurredMinute: '22:41',
         pointB: 'Dropoff',
       },
     ]
@@ -428,8 +547,8 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
         .filter((row) => !row.id.startsWith('omitted-'))
         .map((row) => ({
           operationKey: row.operationKey,
-          amount: '50.00',
-          amountOcr: row.amountOcr === null ? null : '50.00',
+          amount: `${Number(row.amount) / 100}.00`,
+          amountOcr: row.amountOcr === null ? null : `${Number(row.amountOcr) / 100}.00`,
           occurredDate: row.occurredDate,
           occurredMinute: row.occurredMinute,
           source: row.source,
@@ -439,7 +558,13 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
       movements: [],
     })
     expect(unchanged.statusCode, unchanged.body).toBe(200)
-    expect(await h.deps.cashDeductions.listByShift(id)).toHaveLength(rows.length)
+    const stored = await h.deps.cashDeductions.listByShift(id)
+    expect(stored).toHaveLength(rows.length - 1)
+    expect(stored.some((row) => row.operationKey === 'recent-orders:1111111111111111')).toBe(true)
+    expect(stored.some((row) => row.operationKey === 'recent-orders:1111111111111111~2')).toBe(false)
+    for (const protectedPrefix of ['edited-', 'manual-', 'foreign-', 'decided-', 'omitted-']) {
+      expect(stored.filter((row) => row.id.startsWith(protectedPrefix))).toHaveLength(2)
+    }
   })
 })
 
