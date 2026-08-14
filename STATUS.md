@@ -1,20 +1,19 @@
 # STATUS — where ASH Delivery stands
 
-Written for you coming back to this cold. **Last validated production baseline (migrations
-`0028`–`0030`, 2026-08-14, Node 24):** `pnpm check`, both front-end builds, the standalone API
-build, PostgreSQL 17's tests, and all database guards were green. The newer fixed-settlement
-candidate is also locally release-gated: current `pnpm check`, both front-end builds and the API
-bundle passed on Node 24; fresh PostgreSQL 17.11 applied 31/31 migrations, reran with 0 pending,
-passed 59/59 DB tests and every guard. This is verification evidence, not a production-deploy claim.
+Written for you coming back to this cold. **Last validated production baseline (migration `0031`,
+2026-08-15, Node 24):** the fixed-settlement release is live. `pnpm check`, both front-end builds,
+the standalone API build, PostgreSQL 17's 59/59 tests, and all database guards were green before
+release. Production applied 0031 once, retained a zero trial balance and the same two open shifts,
+and the API, admin, and driver public smoke tests all passed after promotion.
 
 ---
 
 ## The one-line answer
 
-**Bundle 1a and the shift-window/cash-deduction release are live on Vercel + Neon + Vercel Blob;
-the fixed 40% cash-settlement release is the current, newer change set.** The live API, both
-front-ends, database, and evidence storage remain on the verified `0028`–`0030` baseline until the
-new migration/API/admin/PWA rollout is recorded. Do not infer a deployment from source changes.
+**Bundle 1a and the fixed 40% wallet/cash settlement are live on Vercel + Neon + Vercel Blob.**
+The live API, both front-ends, and database are on migration `0031`; tiers are historical/read-only,
+non-zero BR1 no longer blocks driver submission, and manager approval requires the wallet and cash
+confirmations bound to the current settlement hash.
 
 ## Live URLs (team `hadis-projects-3c86ccdb`, all public)
 
@@ -24,7 +23,7 @@ new migration/API/admin/PWA rollout is recorded. Do not infer a deployment from 
 | Driver PWA | https://ash-driver.vercel.app |
 | API | https://ash-api-xi.vercel.app |
 
-Neon (Postgres 18, eu-central-1) has the **30-migration live baseline** and is bootstrapped with the §3
+Neon (Postgres 18, eu-central-1) has the **31-migration live baseline** and is bootstrapped with the §3
 permission matrix, the Damascus branch, the historical tier table, and two admins
 (`admin`/system_admin, `gm`/general_manager)
 — **no demo data in the live ledger.** Full deploy detail and redeploy steps:
@@ -36,13 +35,13 @@ permission matrix, the Damascus branch, the historical tier table, and two admin
 
 | Layer | State |
 | --- | --- |
-| **Domain** (money, BR1, tiers, ledger, shifts, RBAC, dates, FX, week, fleet, TOTP) | ✅ 404 tests, property-based |
-| **API** — A, B, C, E, F, G plus operation-window and evidence flows | ✅ 513 tests over real HTTP |
-| **PostgreSQL adapters** | ✅ 40/40 on PostgreSQL 17; isolated Neon restore/fingerprint rehearsal passed |
-| **In-memory adapters** | ✅ 46 tests against the shared contracts |
-| **Shared client** (API client, i18n ar/en, order-entry model) | ✅ 199 tests |
-| **Driver PWA** | ✅ 188 tests, builds, service worker, live smoke passed |
-| **Admin console** | ✅ 6 tests, builds, live smoke passed |
+| **Domain** (money, BR1, settlement, ledger, shifts, RBAC, dates, FX, week, fleet, TOTP) | ✅ 423 tests, property-based |
+| **API** — A, B, C, E, F, G plus fixed settlement and evidence flows | ✅ 543 tests over real HTTP |
+| **PostgreSQL adapters** | ✅ 59/59 on PostgreSQL 17; production migration/postflight passed |
+| **In-memory adapters** | ✅ 62 tests against the shared contracts |
+| **Shared client** (API client, i18n ar/en, order-entry model) | ✅ 223 tests |
+| **Driver PWA** | ✅ 233 tests, builds, service worker, live smoke passed |
+| **Admin console** | ✅ 21 tests, builds, live smoke passed |
 
 ### By SRS section — all in scope for Bundle 1a, all done
 
@@ -70,7 +69,7 @@ conformance at production because it truncates application tables.
 | Item | Effort | Note |
 | --- | --- | --- |
 | Full visual/device QA of the UIs | — | Public route and API smoke tests pass; exhaustive browser, camera, offline, and install testing is still owed. |
-| Fixed-settlement production rollout | — | Local Node-24 checks/builds and fresh PostgreSQL 17 tests are green. Migration 0031 plus API/admin/PWA still require the coordinated RUNBOOK maintenance deployment and postflight. |
+| First real fixed-settlement approval audit | — | The release is live, but there was no `pending_review` shift during rollout. Verify the first real immutable receipt and zeroed driver funds as described in the RUNBOOK. |
 | Historical tier admin | retired | Tier tables remain readable for approved history; editing and publication are intentionally disabled by the fixed 40% policy. |
 | QR code on 2FA enrolment | ~1 h | The secret is shown for manual entry; a QR renderer is a nicety. |
 | Attendance (B-4) | ~0.5 day | Table only. |

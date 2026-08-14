@@ -213,7 +213,9 @@ backup into an isolated scratch database. The detailed, failure-aware sequence i
 - [x] `BR1_SPLIT_GATE=advisory` for the pilot
 - [x] Real admin users created by bootstrap (not the demo seed)
 - [x] Pre- and post-migration logical backups fully validated
-- [x] API, admin, and driver deployed and smoke-tested after migrations `0028`–`0030`
+- [x] API, admin, and driver deployed and smoke-tested after migration `0031` (2026-08-15)
+- [x] Fixed-settlement pre/post backups validated: 52/2,687/30 then 53/2,688/31
+- [x] Production postflight: zero trial balance, two open shifts unchanged, runtime TEMP and ledger writes denied
 - [x] Restore rehearsed: 52 tables / 2,360 rows plus fingerprints, trial, sequences, triggers, rollback
 - [x] Neon scratch database dropped normally after confirming zero active sessions
 - [x] Neon owner credential rotated; old direct and pooled credentials rejected

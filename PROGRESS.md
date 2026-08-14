@@ -1,6 +1,6 @@
 # PROGRESS
 
-## 2026-08-14 — fixed 40% shift settlement (current change set)
+## 2026-08-15 — fixed 40% shift settlement deployed
 
 The product owner replaced daily tiers and the old zero-difference close gate with one per-shift
 settlement. Every shift that was not already approved at policy launch uses
@@ -40,11 +40,14 @@ printed date, minute and OCR amount (route is evidence only), for both current a
 still reduce expected cash and the current shift's share once; the former D-12 rule that excess
 becomes a receivable is superseded by immediate signed cash settlement.
 
-This remains an implementation/change-set record, not a production-deploy claim. Its release
-candidate passed the complete Node 24 `pnpm check`, both production front-end builds, the standalone
-API build, and a fresh PostgreSQL 17.11 gate: 31/31 migrations, 0 pending on rerun, 59/59 DB tests,
-and every database guard. The live production baseline remains `0028`–`0030` until migration 0031
-and the coordinated API/admin/PWA rollout and postflight are actually completed.
+**Live:** the complete Node 24 `pnpm check`, both production front-end builds, and the standalone API
+build passed. Fresh PostgreSQL 17.11 applied 31/31 migrations, reran with 0 pending, passed 59/59 DB
+tests and every guard. Production was then paused and drained; fully validated logical backups were
+taken both before (52 tables / 2,687 rows / 30 migrations) and after (53 tables / 2,688 rows / 31
+migrations) applying `0031`. Postflight retained a zero trial balance, the same two open shifts, no
+invalid boundaries or cross-branch/cross-shift links, and the limited `ash_runtime` role retained no
+TEMP or ledger mutation rights. The API, admin console, and driver PWA were promoted together and
+their public health/auth, proxy, SPA, manifest, service-worker, and exact asset-build checks passed.
 
 ---
 
