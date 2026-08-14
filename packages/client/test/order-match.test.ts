@@ -76,8 +76,8 @@ describe('matching a real day of orders against the real payments log', () => {
   })
 
   it('totals the unexplained rows exactly, signs included', () => {
-    // −144.15 − 50 + 9.75 + 300 = 115.60. This becomes BR1's walletAdjustments term; a float here
-    // would put the zero equation out by fractions of a lira.
+    // −144.15 − 50 + 9.75 + 300 = 115.60. This archival reconciliation total still uses
+    // exact minor units even though it does not feed BR1.
     expect(unexplainedTotal(result.unexplained)).toBe('115.60')
   })
 })

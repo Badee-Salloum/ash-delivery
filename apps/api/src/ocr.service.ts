@@ -71,7 +71,11 @@ export async function readScreen(deps: Deps, input: ReadInput): Promise<ReadOutp
   const cachedRead = await deps.ocrReads.findBySha(shift.branchId, sha256, input.field)
   if (cachedRead) {
     const used = await deps.ocrReads.countBilledForShift(input.shiftId)
-    return { result: cachedRead.result, cached: true, reads: { used, max: input.maxReadsPerShift } }
+    return {
+      result: safeFieldResult(input.field, cachedRead.result),
+      cached: true,
+      reads: { used, max: input.maxReadsPerShift },
+    }
   }
 
   // ── 2. Is the reader even switched on? ───────────────────────────────────────────────────
@@ -97,6 +101,7 @@ export async function readScreen(deps: Deps, input: ReadInput): Promise<ReadOutp
 
   // ── 4. Ask. ──────────────────────────────────────────────────────────────────────────────
   const reading = await deps.ocr.read({ field: input.field, bytes: input.bytes, mimeType })
+  const result = safeFieldResult(input.field, reading.result)
 
   /*
    * FAILURES ARE STORED TOO, and that is the point rather than an oversight.
@@ -116,7 +121,7 @@ export async function readScreen(deps: Deps, input: ReadInput): Promise<ReadOutp
     sha256,
     byteSize: input.bytes.length,
     model: deps.ocr.model,
-    result: reading.result,
+    result,
     tokensIn: reading.usage.tokensIn,
     tokensOut: reading.usage.tokensOut,
     latencyMs: reading.usage.latencyMs,
@@ -124,5 +129,19 @@ export async function readScreen(deps: Deps, input: ReadInput): Promise<ReadOutp
     createdBy: input.requestedBy,
   })
 
-  return { result: reading.result, cached: false, reads: { used: used + 1, max: input.maxReadsPerShift } }
+  return { result, cached: false, reads: { used: used + 1, max: input.maxReadsPerShift } }
+}
+
+/**
+ * The wallet screen contains exactly one balance. Never let a provider that echoed a status-bar
+ * number or a payment row make the phone's "take the first row" policy choose arbitrarily.
+ * OpenAI's adapter already requires 2/3 AI agreement; this boundary pins the invariant for every
+ * future provider and for scripted/conformance readers too.
+ */
+function safeFieldResult(field: OcrField, result: OcrResult): OcrResult {
+  if (field !== 'wallet' || !result.ok) return result
+  if (result.rows.length !== 1 || result.rows[0]?.cancelled || result.rows[0]?.value === null) {
+    return { ok: false, reason: 'no_fields' }
+  }
+  return result
 }

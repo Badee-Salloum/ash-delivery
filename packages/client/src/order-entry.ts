@@ -1049,8 +1049,8 @@ export function previewBr1(input: {
     ...(o.walletAmountText ? { walletAmount: safeFee(o.walletAmountText) } : {}),
   }))
   // The payments log is EVIDENCE AND TRAINING DATA, not a term in the equation — owner's decision.
-  // It is still scanned, still shown, still stored; it simply does not move anyone's money while the
-  // reader that produces it is unproven. See WALLET_LOG_FEEDS_BR1 for what restoring it costs.
+  // It is still scanned, still shown and still stored, but it never moves anyone's money. The
+  // shared switch keeps this preview aligned with API review and posting policy.
   //
   // The rule it replaces, kept because it is what gets restored: a logged Yallago cut is
   // corroboration and an order's credit is already inside its `walletAmount`, so only the

@@ -763,7 +763,7 @@ describe('the live preview of the operations list', () => {
     expect(p.expectedWalletText).toBe('1000.00')
   })
 
-  it('adds only the movements no order explains, and keeps their SIGN', () => {
+  it('keeps every payments-log movement out of the financial preview', () => {
     const orders = [row({ providerOrderNo: 'A', feeText: '5000' })]
     const movements = [
       { localId: '1', amountText: '-1000', timeText: '18:06', role: 'yalago_cut' as const },
@@ -771,9 +771,8 @@ describe('the live preview of the operations list', () => {
       { localId: '3', amountText: '-50', timeText: '11:00' },
       { localId: '4', amountText: '900', timeText: '12:00', included: false },
     ]
-    // The logged cut is corroboration and never a second deduction; the excluded row is data only.
-    // 0 topup − 1,000 of Yallago's derived cut + 300 − 50 = −750.
-    expect(previewBr1({ ...base, orders, movements })!.expectedWalletText).toBe('-750.00')
+    // The whole log is archival. Only the 1,000 Yallago cut derived from the order belongs here.
+    expect(previewBr1({ ...base, orders, movements })!.expectedWalletText).toBe('-1000.00')
   })
 })
 

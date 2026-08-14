@@ -93,6 +93,24 @@ export interface AppOptions {
   maxOcrReadsPerShift?: number
 }
 
+/**
+ * SQLSTATE 25006 is broader than the ledger's sealed-week guard.
+ *
+ * PostgreSQL also uses it for this schema's write-once shift approval fields and append-only media
+ * history. Match only the messages emitted by the week guards in migrations 0006, 0018 and 0029;
+ * calling every such refusal `week_locked` sends a manager to the wrong remedy.
+ */
+export function isSealedWeekPgError(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false
+  const candidate = err as { code?: unknown; message?: unknown }
+  if (candidate.code !== '25006' || typeof candidate.message !== 'string') return false
+  return (
+    /^week lock .* is (?:already )?closed\b/.test(candidate.message) ||
+    /^week \d{4}-\d{2}-\d{2} is closed\b/.test(candidate.message) ||
+    /^business date \d{4}-\d{2}-\d{2} falls inside sealed week\b/.test(candidate.message)
+  )
+}
+
 export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   const { deps } = opts
   const app = Fastify({ logger: opts.logger ?? false, genReqId: () => deps.ids.uuid() })
@@ -142,12 +160,12 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     if (err instanceof z.ZodError) {
       return reply.code(400).send({ error: 'invalid_request', detail: err.issues })
     }
-    // The week-lock guards (migrations 0006 and 0018) raise 25006. Migration 0006's own comment has
+    // The week-lock guards (migrations 0006, 0018 and 0029) raise 25006. Migration 0006's own comment has
     // always said «the application maps it to a 409» — it did not, so a week-lock refusal surfaced
     // as «خطأ داخلي» and looked like a bug in the system rather than the rule doing its job. The
     // application checks these cases itself and answers 409 first; this is the backstop for any
-    // write path that forgets to, and it must not be a 500 when it fires.
-    if (typeof (err as { code?: string }).code === 'string' && (err as { code: string }).code === '25006') {
+    // write path that forgets to. Other 25006 invariants must not be mislabeled as a sealed week.
+    if (isSealedWeekPgError(err)) {
       req.log.warn({ err }, 'refused: sealed week')
       return reply.code(409).send({ error: 'week_locked', detail: null })
     }
@@ -551,12 +569,21 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
             : prior !== undefined && prior.mediaId === currentMediaId
               ? null
               : currentMediaId
-        return { reading, battery, mediaId }
+        return {
+          reading,
+          battery,
+          mediaId,
+          // Once the driver transfers this pack to the manager, only the manager route may fill it.
+          // A cloud/upload request already in flight on the phone must not race the declaration and
+          // silently turn it back into an ordinary driver reading.
+          lockedUnavailable: prior?.unavailable === true && reading.unavailable !== true,
+        }
       })
       // Validate the full page before the first write. A cached PWA may reach this route just
       // before its BMS image upload; that row is staged with mediaId NULL and remains unusable by
       // the gate until uploadEvidence binds the exact bms_N attachment.
-      for (const { reading, battery, mediaId } of prepared) {
+      for (const { reading, battery, mediaId, lockedUnavailable } of prepared) {
+        if (lockedUnavailable) continue
         await deps.batteryReadings.upsert({
           shiftId: shift.id,
           batteryId: battery.id,

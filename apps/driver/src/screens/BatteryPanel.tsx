@@ -117,6 +117,8 @@ export const toStored = (text: string, scale: number): number | null => {
 
 export interface PackState {
   values: Record<FieldKey, string>
+  /** Server-confirmed declaration that this pack cannot be read on the driver's phone. */
+  unavailable: boolean
   /** The authoritative CLOUD OCR reading, before any correction — the D-3 baseline. */
   ocrRaw: unknown
   /** The phone reader's diagnostic lifecycle. It never owns `values` or `ocrRaw`. */
@@ -129,6 +131,7 @@ export interface PackState {
 /** Exported so a caller restoring readings builds a REAL `PackState` instead of a lookalike. */
 export const EMPTY_PACK: PackState = {
   values: { percent: '', cycleCount: '' },
+  unavailable: false,
   ocrRaw: null,
   outcome: 'idle',
   fieldsFound: 0,
@@ -206,6 +209,9 @@ export function isBmsPackReady(input: {
   cloudPending?: boolean
   progress?: BmsEvidenceProgress
 }): boolean {
+  // A confirmed declaration transfers this pack to the manager. It needs neither a screenshot nor
+  // a completed read on the driver's device, even if an abandoned read/upload is still settling.
+  if (input.unavailable) return true
   if (input.cloudPending) return false
   if (
     input.progress !== undefined &&
@@ -214,7 +220,7 @@ export function isBmsPackReady(input: {
   ) {
     return false
   }
-  return input.unavailable || (input.hasPercent && input.slotUploaded)
+  return input.hasPercent && input.slotUploaded
 }
 
 type LocalBmsDiagnosticResult =
@@ -298,19 +304,27 @@ export function applyCloudBmsFields(
  * and reading `.values.percent` threw «Cannot read properties of undefined (reading 'percent')» the
  * instant the close screen rendered. The driver saw the «ASH» splash and nothing else.
  *
- * Prior local state wins on every field EXCEPT the charge, which is what the server just confirmed.
+ * Prior local state wins on editable fields except the charge. The server also owns `unavailable`:
+ * it is not complete until its declaration request succeeded, and must remain complete on remount.
  */
 export function restorePacks(
-  stored: readonly { batteryId: string; percent: number | null }[],
+  stored: readonly { batteryId: string; percent: number | null; unavailable?: boolean }[],
   prior: Readonly<Record<string, PackState>>,
 ): Record<string, PackState> {
   const out: Record<string, PackState> = { ...prior }
   for (const reading of stored) {
-    if (reading.percent === null) continue
+    // A null charge is normally no reading at all. The explicit unavailable row is different: it
+    // is the server-owned proof that the obligation moved to the manager and must survive remount.
+    if (reading.percent === null && reading.unavailable !== true) continue
     const held = prior[reading.batteryId] ?? EMPTY_PACK
     out[reading.batteryId] = {
       ...held,
-      values: { ...EMPTY_PACK.values, ...held.values, percent: String(reading.percent) },
+      unavailable: reading.unavailable === true,
+      values: {
+        ...EMPTY_PACK.values,
+        ...held.values,
+        ...(reading.percent === null ? {} : { percent: String(reading.percent) }),
+      },
     }
   }
   return out
@@ -400,13 +414,9 @@ export function BatteryPanel({
    * the newest value rather than the one captured when its callback was built.
    */
   const cloudAnswered = useRef<Set<string>>(new Set())
-  /**
-   * Packs the driver has declared he cannot read on his own phone.
-   *
-   * Local to this mount on purpose: the server is the record (`unavailable` on the reading row), and
-   * this only decides what the screen shows him next.
-   */
-  const [unavailable, setUnavailable] = useState<ReadonlySet<string>>(new Set())
+  /** Declarations in flight stay incomplete until the server confirms them. */
+  const [unavailablePending, setUnavailablePending] = useState<ReadonlySet<string>>(new Set())
+  const [unavailableFailed, setUnavailableFailed] = useState<ReadonlySet<string>>(new Set())
   /**
    * Packs whose surprising charge the driver has looked at and stood by.
    *
@@ -434,7 +444,7 @@ export function BatteryPanel({
   // that is `awaiting_manager_reading`, and it blocks the approval, not the driver.
   const complete = batteries.every((b, i) =>
     isBmsPackReady({
-      unavailable: unavailable.has(b.id),
+      unavailable: stateOf(b.id).unavailable,
       hasPercent: stateOf(b.id).values.percent.trim() !== '',
       slotUploaded: slots.has(`bms_${slotOf(b, i)}`),
       cloudPending: cloudEvents[b.id]?.status === 'reading',
@@ -480,6 +490,7 @@ export function BatteryPanel({
       const body: BatteryReadingInput = {
         batteryId,
         percent,
+        unavailable: state.unavailable,
         cycleCount: scaled('cycleCount'),
         // Voltage / capacity / temperatures are no longer captured; they stay nullable seams on the
         // wire and default to null when omitted.
@@ -524,12 +535,43 @@ export function BatteryPanel({
    */
   const declareUnavailable = useCallback(
     async (batteryId: string): Promise<void> => {
-      setUnavailable((cur) => new Set(cur).add(batteryId))
-      await api
-        .putBatteryReadings(shiftId, pkg, [{ batteryId, percent: null, unavailable: true, source: 'manual' }])
-        .catch(() => undefined)
+      // Do not optimistically open the parent submit gate. On a fast tap the end-package request
+      // used to beat this write to the server, which then truthfully answered
+      // `missing_battery_reading` even though the screen had already hidden the field.
+      setUnavailablePending((cur) => new Set(cur).add(batteryId))
+      setUnavailableFailed((cur) => {
+        const next = new Set(cur)
+        next.delete(batteryId)
+        return next
+      })
+      try {
+        await api.putBatteryReadings(shiftId, pkg, [
+          { batteryId, percent: null, unavailable: true, source: 'manual' },
+        ])
+        // A late cloud result/upload from a screenshot selected before this declaration may not
+        // turn the row back into an ordinary `unavailable:false` reading.
+        syncVersions.current[batteryId] = (syncVersions.current[batteryId] ?? 0) + 1
+        cloudAnswered.current.add(batteryId)
+        setCloudEvents((cur) => {
+          const next = { ...cur }
+          delete next[batteryId]
+          return next
+        })
+        updatePacks((cur) => ({
+          ...cur,
+          [batteryId]: { ...EMPTY_PACK, ...cur[batteryId], unavailable: true },
+        }))
+      } catch {
+        setUnavailableFailed((cur) => new Set(cur).add(batteryId))
+      } finally {
+        setUnavailablePending((cur) => {
+          const next = new Set(cur)
+          next.delete(batteryId)
+          return next
+        })
+      }
     },
-    [api, shiftId, pkg],
+    [api, shiftId, pkg, updatePacks],
   )
 
   const setPack = useCallback(
@@ -607,6 +649,7 @@ export function BatteryPanel({
   const cloudRead = useCallback(
     (battery: FittedBattery, e: CloudReadEvent, file: File): void => {
       if (!isCurrentEvidenceFile(filesRef.current, battery.id, file)) return
+      if (packsRef.current[battery.id]?.unavailable === true) return
       // Every event, not only the successful one. A pack whose cloud read is still running, or
       // timed out, is a pack the driver may be waiting on before he can start the shift.
       setCloudEvents((cur) => ({ ...cur, [battery.id]: e }))
@@ -694,6 +737,12 @@ export function BatteryPanel({
                     )
                     onMediaIdChanged?.(battery.id, result.mediaId)
                     const held = packsRef.current[battery.id]
+                    // A declaration confirmed while this older upload was in flight owns the pack.
+                    // Its null reading must not be replaced by the abandoned screenshot generation.
+                    if (held?.unavailable) {
+                      onSlotUploaded(uploadedSlot)
+                      return
+                    }
                     if (held?.values.percent.trim() && !(await push(battery.id, held))) {
                       throw new Error('battery_reading_persist_failed')
                     }
@@ -746,7 +795,7 @@ export function BatteryPanel({
                 ? { onRetry: () => void retryCloud(battery, files[battery.id]!) }
                 : {})}
             />
-            {unavailable.has(battery.id) ? (
+            {state.unavailable ? (
               /* Declared. Say plainly what happens next, so he is not left wondering whether he has
                  broken something — the shift proceeds and the branch manager reads this pack. */
               <Card className="flex flex-col gap-2">
@@ -805,10 +854,14 @@ export function BatteryPanel({
                 <button
                   type="button"
                   onClick={() => void declareUnavailable(battery.id)}
-                  className="min-h-11 self-start text-sm text-slate-500 underline"
+                  disabled={unavailablePending.has(battery.id)}
+                  className="min-h-11 self-start text-sm text-slate-500 underline disabled:opacity-60"
                 >
-                  {t.battery.appWontRun}
+                  {unavailablePending.has(battery.id) ? t.battery.unavailableSaving : t.battery.appWontRun}
                 </button>
+                {unavailableFailed.has(battery.id) ? (
+                  <p className="text-sm font-medium text-red-700">{t.battery.unavailableFailed}</p>
+                ) : null}
               </Card>
             )}
           </div>

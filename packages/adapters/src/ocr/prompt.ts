@@ -29,7 +29,14 @@ const FIELD_HINT: Record<OcrField, string> = {
     'a RECENT ORDERS list. Each card is one delivery: an unsigned fee beside "SYP", a time, and one or two addresses.',
   payments_log:
     'a PAYMENTS LOG («سجل المدفوعات»). Every row is SIGNED — "+" is money arriving, "−" money leaving — and the sign is part of the answer.',
-  wallet: 'a WALLET BALANCE screen. The balance is the figure to read; ignore any promotional numbers.',
+  wallet:
+    'a Yallago WALLET BALANCE screen. Read the ONE large white balance near the top of the orange wallet card; ' +
+    'ignore the phone status bar, dates, buttons, payment-log rows and promotional numbers.\n\n' +
+    'This screen uses Arabic-Indic digits. Inspect EACH glyph rather than guessing a plausible balance. ' +
+    'In particular, do not confuse the leading ٢ (two) with ٣ (three): ٣ has two adjacent upper teeth/curves, ' +
+    'while ٢ has one leading hook/stroke. A live incident mistook a leading ٢ for ٣. Compare the ' +
+    'first glyph explicitly before answering, without assuming either one. The currency suffix «SYP» is not ' +
+    'part of the number.',
   /*
    * «للعداد هو دائماً آخر رقم» — the owner's own rule about this dashboard, and the only reliable
    * one there is.
@@ -106,6 +113,23 @@ Other rules, each of which corresponds to a real screen:
 - If a character is genuinely unreadable, put "?" in \`printed\` and null in \`value\`. An honest refusal is a correct answer.
 
 Rows go in \`rows\`, in the order they appear top to bottom. Labelled non-money values go in \`fields\`. A screen with no money rows has \`rows: []\`.`
+}
+
+/**
+ * Three genuinely different inspections of the one field where a single glyph changes BR1.
+ *
+ * They are sent as independent model calls and a two-out-of-three agreement is required. Repeating
+ * one prompt three times is not independent evidence: reasoning models are deliberately stable and
+ * tend to repeat the same visual shortcut. These variants make each pass approach the orange card
+ * differently while keeping the exact same strict response schema.
+ */
+export function walletReadPrompts(): readonly [string, string, string] {
+  const base = readPrompt('wallet')
+  return [
+    `${base}\n\nWALLET CHECK A — Read the complete large white balance as a whole, then re-check every glyph once before returning it.`,
+    `${base}\n\nWALLET CHECK B — Work glyph by glyph. Start with the LEFTMOST digit of the balance and explicitly decide whether it is ٢ or ٣ by its visible strokes; then transcribe the remaining digits and separators. Do not infer the answer from a previous balance or from ledger arithmetic.`,
+    `${base}\n\nWALLET CHECK C — Treat ٢↔٣ as an adversarial ambiguity. Test both hypotheses against the actual first white glyph on the orange card, reject the one whose strokes do not match, and only then assemble the amount. Do not copy any number elsewhere on the screen.`,
+  ]
 }
 
 /**

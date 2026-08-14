@@ -108,13 +108,15 @@ export function ordersHash(
         `|${o.windowStatus}|${o.decisionReason ?? ''}`,
     )
     .join(';')
-  // The movements are hashed as well, because toggling one changes `walletAdjustments` — hence BR1,
-  // hence the postings — with every order left untouched. A digest that could not see that would
-  // let the approval post against a wallet the manager never reviewed.
-  const movementPart = [...movements]
-    .sort((a, b) => (a.id < b.id ? -1 : 1))
-    .map((m) => `${m.occurredMinute}|${m.amount}|${m.seq}|${m.role}|${m.orderId ?? ''}|${m.included ? 1 : 0}`)
-    .join(';')
+  // Archive-only payment-log rows do not belong in a financial review fingerprint. If the policy is
+  // ever deliberately restored, hashing them here again makes a changed financial input stale the
+  // review instead of silently changing what gets posted.
+  const movementPart = WALLET_LOG_FEEDS_BR1
+    ? [...movements]
+        .sort((a, b) => (a.id < b.id ? -1 : 1))
+        .map((m) => `${m.occurredMinute}|${m.amount}|${m.seq}|${m.role}|${m.orderId ?? ''}|${m.included ? 1 : 0}`)
+        .join(';')
+    : ''
   const deductionPart = [...deductions]
     .sort((a, b) => (a.operationKey < b.operationKey ? -1 : 1))
     .map(
@@ -1520,7 +1522,9 @@ export async function evaluateShift(deps: Deps, shift: ShiftRecord): Promise<Br1
       'floor',
       // A credit still flagged ambiguous is the likeliest single explanation for a difference, and
       // the only one a manager can settle with one tap.
-      movementRows.filter((m) => m.ambiguous && m.included).map((m) => m.amount),
+      WALLET_LOG_FEEDS_BR1
+        ? movementRows.filter((m) => m.ambiguous && m.included).map((m) => m.amount)
+        : [],
     ),
     // The trough the wallet reaches mid-shift still walks the ORDERS only: a movement carries a
     // minute but the orders do not carry a sequence, so interleaving them would be guesswork.

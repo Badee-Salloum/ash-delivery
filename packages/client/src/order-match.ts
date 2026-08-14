@@ -1,11 +1,10 @@
 import { type Minor, formatMinor, minor, parseMinor, sub, yalagoCut } from '@ash/domain'
 
 /**
- * Pair the orders a driver scanned against his wallet's payments log.
+ * Pair scanned orders with an archival payments log for later reconciliation.
  *
- * The two screens answer different halves of the same question. «الطلبات الحديثة» says WHAT he
- * delivered and for how much; «سجل المدفوعات» says what actually MOVED in his wallet. Neither alone
- * is enough: the orders screen carries no pay mode, and the log carries no order.
+ * The orders screen remains the financial source for fees. The log is evidence only: these
+ * correlations describe what it appears to show but never change BR1, order totals or postings.
  *
  * What the client's real data shows, and what this encodes:
  *
@@ -14,9 +13,8 @@ import { type Minor, formatMinor, minor, parseMinor, sub, yalagoCut } from '@ash
  *   • a positive row at the same minute is the part of the order the customer settled
  *     electronically… OR an unrelated incentive Yallago paid. The owner says it is genuinely
  *     either, so nothing here decides: it is PROPOSED, and a manager confirms.
- *   • whatever is left over — a top-up, a withdrawal, an incentive on its own minute — belongs to
- *     the wallet but to no order, and must be reported rather than dropped, because BR1 would
- *     otherwise show its value as a discrepancy and blame the driver for it.
+ *   • whatever is left over — a top-up, a withdrawal, an incentive on its own minute — is retained
+ *     as unexplained archival evidence for a later explicit reconciliation workflow.
  *
  * Pure and total: no I/O, no clock, and it never invents. Anything it cannot explain comes back in
  * `unexplained` as a question, which is the whole point — a guess here becomes a wrong wallet.
@@ -119,7 +117,7 @@ export function matchOrdersToPayments(
 const absDiff = (a: Minor, b: Minor): bigint => (a > b ? sub(a, b) : sub(b, a))
 
 /**
- * The wallet movements that belong to no order, totalled — BR1's `walletAdjustments` term.
+ * The wallet movements that belong to no order, totalled for archival reconciliation analysis.
  *
  * Sums signed strings exactly, in minor units. Never with a float: these are amounts like
  * «107.50» and «-144.15», and the equation they feed admits no tolerance at all.

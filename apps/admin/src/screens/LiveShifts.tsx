@@ -1,6 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useState, useRef } from 'react'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
+import { explainLiveShiftActionError, type LiveShiftApiError } from '../live-shift-error.ts'
 import { Badge, Button, Card, Field, MoneyInput, Pending, Select, TextInput } from '../ui.tsx'
 
 interface ShiftRow {
@@ -137,7 +138,7 @@ function LiveRow({
   onChanged: () => void
   onOpen(shiftId: string): void
 }): ReactNode {
-  const { api, t } = useApp()
+  const { api, t, lang } = useApp()
   const [panel, setPanel] = useState<'none' | 'suspend' | 'tranche' | 'void' | 'forceClose'>('none')
   const [note, setNote] = useState('')
   const [kind, setKind] = useState<'float' | 'topup'>('float')
@@ -149,7 +150,7 @@ function LiveRow({
   const [cashDeclared, setCashDeclared] = useState('')
   const [walletDeclared, setWalletDeclared] = useState('')
   const [busy, setBusy] = useState(false)
-  const [err, setErr] = useState<string | null>(null)
+  const [err, setErr] = useState<LiveShiftApiError | null>(null)
 
   const suspend = async (): Promise<void> => {
     setBusy(true)
@@ -160,7 +161,7 @@ function LiveRow({
       setNote('')
       onChanged()
     } catch (e) {
-      setErr((e as { error?: string }).error ?? 'error')
+      setErr(e as LiveShiftApiError)
     } finally {
       setBusy(false)
     }
@@ -188,7 +189,7 @@ function LiveRow({
       setAmount('')
       onChanged()
     } catch (e) {
-      setErr((e as { error?: string }).error ?? 'error')
+      setErr(e as LiveShiftApiError)
     } finally {
       setBusy(false)
     }
@@ -203,7 +204,7 @@ function LiveRow({
       setReason('')
       onChanged()
     } catch (e) {
-      setErr((e as { error?: string }).error ?? 'error')
+      setErr(e as LiveShiftApiError)
     } finally {
       setBusy(false)
     }
@@ -234,7 +235,7 @@ function LiveRow({
       setWalletDeclared('')
       onChanged()
     } catch (e) {
-      setErr((e as { error?: string }).error ?? 'error')
+      setErr(e as LiveShiftApiError)
     } finally {
       setBusy(false)
     }
@@ -306,7 +307,7 @@ function LiveRow({
           <Field label={t.liveShifts.incidentNote}>
             <TextInput value={note} onChange={(e) => setNote(e.target.value)} />
           </Field>
-          {err ? <p className="text-sm text-red-600">{explainError(err, t)}</p> : null}
+          {err ? <p className="text-sm text-red-600">{explainLiveShiftActionError(err, 'suspend', lang, t)}</p> : null}
           <div className="flex gap-2">
             <Button variant="danger" className="flex-1" disabled={busy} onClick={suspend}>
               {busy ? t.common.loading : t.liveShifts.suspend}
@@ -330,7 +331,7 @@ function LiveRow({
               <MoneyInput value={amount} onChange={(e) => setAmount(e.target.value)} />
             </Field>
           </div>
-          {err ? <p className="text-sm text-red-600">{explainError(err, t)}</p> : null}
+          {err ? <p className="text-sm text-red-600">{explainLiveShiftActionError(err, 'tranche', lang, t)}</p> : null}
           <div className="flex gap-2">
             <Button variant="primary" className="flex-1" disabled={busy || amount.trim() === ''} onClick={disburse}>
               {busy ? t.common.loading : t.liveShifts.addTranche}
@@ -358,7 +359,7 @@ function LiveRow({
               <TextInput inputMode="numeric" value={odometerKm} onChange={(e) => setOdometerKm(e.target.value)} />
             </Field>
           </div>
-          {err ? <p className="text-sm text-red-600">{explainError(err, t)}</p> : null}
+          {err ? <p className="text-sm text-red-600">{explainLiveShiftActionError(err, 'forceClose', lang, t)}</p> : null}
           <div className="flex gap-2">
             <Button variant="danger" className="flex-1" disabled={busy || reason.trim() === ''} onClick={forceClose}>
               {busy ? t.common.loading : t.liveShifts.forceClose}
@@ -375,7 +376,7 @@ function LiveRow({
           <Field label={t.liveShifts.overrideReason}>
             <TextInput value={reason} onChange={(e) => setReason(e.target.value)} />
           </Field>
-          {err ? <p className="text-sm text-red-600">{explainError(err, t)}</p> : null}
+          {err ? <p className="text-sm text-red-600">{explainLiveShiftActionError(err, 'void', lang, t)}</p> : null}
           <div className="flex gap-2">
             <Button variant="danger" className="flex-1" disabled={busy || reason.trim() === ''} onClick={voidShift}>
               {busy ? t.common.loading : t.liveShifts.void}

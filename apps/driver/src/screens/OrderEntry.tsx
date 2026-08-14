@@ -14,11 +14,9 @@ import { useApp } from '../app-context.tsx'
 import { Button, Card, Money, MoneyInput, Sheet } from '../ui.tsx'
 
 /**
- * THE list. Every operation of the shift — what was delivered, and what the wallet did.
- *
- * It is one list rather than two because that is how the day happened: an order and the 20% Yallago
- * took for it are one event seen on two screens, and pairing them by minute is what lets the system
- * say how much of a fee actually reached the wallet instead of guessing from a pay mode.
+ * THE list of financially counted deliveries and cash deductions, followed by optional archival
+ * payment-log observations. The archive is deliberately read-only: it never classifies pay mode,
+ * changes a fee, or enters BR1/tiers/shares/postings.
  *
  * PAY MODE IS GONE, by the owner's decision (SRS BR3 retired — see CLAUDE.md). The three buttons
  * were most of a card's height and asked the driver to classify every delivery so the app could
@@ -50,7 +48,6 @@ export function OperationsList({
   today,
   suspectLocalIds,
   onOrders,
-  onMovements,
   onCashDeductions,
 }: {
   orders: readonly DraftOrder[]
@@ -65,7 +62,6 @@ export function OperationsList({
    */
   suspectLocalIds?: readonly string[]
   onOrders(next: DraftOrder[]): void
-  onMovements(next: DraftMovement[]): void
   onCashDeductions(next: DraftCashDeduction[]): void
 }): ReactNode {
   const { t } = useApp()
@@ -378,41 +374,21 @@ export function OperationsList({
         </>
       ) : null}
 
-      {/* The wallet's own rows: what MOVED, beside what the orders imply. Only the ones no order
-          explains are money the equation has to be told about. */}
+      {/* Archive display only. There is intentionally no include/classify control: such a control
+          would suggest these rows can change money when the product policy says they cannot. */}
       {movements.length > 0 ? (
         <>
           <p className="mt-2 text-sm font-semibold">{t.shift.paymentsLog}</p>
           <p className="text-sm text-slate-600">{t.orders.movementsLegend}</p>
           {movements.map((m) => {
-            const off = m.included === false
-            const explained = (m.role ?? 'unmatched') !== 'unmatched'
             const outward = m.amountText.trim().startsWith('-') || m.amountText.trim().startsWith('−')
             return (
-              <Card key={m.localId} className={off ? 'opacity-60' : ''}>
-                <label className="flex min-h-14 cursor-pointer items-center gap-3">
-                  <input
-                    type="checkbox"
-                    checked={!off}
-                    onChange={(e) =>
-                      onMovements(movements.map((x) => (x.localId === m.localId ? { ...x, included: e.target.checked } : x)))
-                    }
-                    aria-label={t.orders.included}
-                    className="size-7 shrink-0 accent-emerald-600"
-                  />
+              <Card key={m.localId}>
+                <div className="flex min-h-14 items-center gap-3">
                   <span className="num w-14 text-sm text-slate-600">{m.timeText || '—'}</span>
                   {/* Money in and money out looked identical but for a minus sign. */}
                   <Money value={m.amountText} className={`font-semibold ${outward ? 'text-red-700' : 'text-emerald-700'}`} />
-                  {explained ? (
-                    <span className="ms-auto text-xs text-slate-600">{t.orders.explainedByOrder}</span>
-                  ) : (
-                    /* The flag that actually changes the equation was the lowest-contrast text on
-                       the screen. It is the thing on this row that matters. */
-                    <span className="ms-auto rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
-                      {t.orders.unexplained}
-                    </span>
-                  )}
-                </label>
+                </div>
               </Card>
             )
           })}

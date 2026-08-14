@@ -104,6 +104,72 @@ describe('cloud OCR: the same pixels are never billed twice', () => {
   })
 })
 
+describe('cloud OCR: wallet publication guard', () => {
+  it('publishes one AI wallet balance verbatim', async () => {
+    const reader = new ScriptedOcrReader([
+      {
+        ok: true,
+        rows: [
+          {
+            printed: '٢٧٩٫٥٠',
+            value: '279.50',
+            cancelled: false,
+            time: null,
+            dateIso: null,
+            pointA: null,
+            pointB: null,
+          },
+        ],
+        fields: {},
+        raw: { reader: 'wallet-ai-consensus-v1', agreeingPasses: 2 },
+      },
+    ])
+    h = await makeHarness({ ocr: reader })
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = await openShift(driver, manager)
+
+    const res = await read(driver, shiftId, 'wallet')
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json().rows).toEqual([
+      {
+        printed: '٢٧٩٫٥٠',
+        value: '279.50',
+        cancelled: false,
+        time: null,
+        dateIso: null,
+        pointA: null,
+        pointB: null,
+      },
+    ])
+  })
+
+  it('stores a multi-row wallet answer as no_fields so neither the first nor a cache hit can win', async () => {
+    const row = (printed: string, value: string) => ({
+      printed,
+      value,
+      cancelled: false,
+      time: null,
+      dateIso: null,
+      pointA: null,
+      pointB: null,
+    })
+    const reader = new ScriptedOcrReader([
+      { ok: true, rows: [row('٢٧٩٫٥٠', '279.50'), row('٣٧٩٫٥٠', '379.50')], fields: {}, raw: null },
+    ])
+    h = await makeHarness({ ocr: reader })
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = await openShift(driver, manager)
+
+    const first = await read(driver, shiftId, 'wallet')
+    expect(first.json()).toMatchObject({ ok: false, reason: 'no_fields', cached: false, rows: [] })
+    const again = await read(driver, shiftId, 'wallet')
+    expect(again.json()).toMatchObject({ ok: false, reason: 'no_fields', cached: true, rows: [] })
+    expect(reader.calls).toBe(1)
+  })
+})
+
 describe('cloud OCR: a shift cannot spend without limit', () => {
   it('stops calling out at the cap and answers unavailable instead of an error', async () => {
     const reader = scripted()

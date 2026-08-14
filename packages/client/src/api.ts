@@ -35,7 +35,14 @@ export interface ShiftStateView {
     floatTotal: string
     topupTotal: string
     mediaSlots: string[]
-    batteries: Array<{ batteryId: string; slotNo: number; percent: number | null; mediaId: string | null }>
+    batteries: Array<{
+      batteryId: string
+      slotNo: number
+      percent: number | null
+      mediaId: string | null
+      /** The driver's BMS app cannot read this pack; the manager owns the remaining reading. */
+      unavailable: boolean
+    }>
   }
   endPackage: {
     odometerKm: number | null
@@ -47,7 +54,13 @@ export interface ShiftStateView {
     /** Cloud-AI wallet baseline; optional only for compatibility with an older state endpoint. */
     walletDeclaredOcr?: string | null
     mediaSlots: string[]
-    batteries: Array<{ batteryId: string; slotNo: number; percent: number | null; mediaId: string | null }>
+    batteries: Array<{
+      batteryId: string
+      slotNo: number
+      percent: number | null
+      mediaId: string | null
+      unavailable: boolean
+    }>
   }
   orders: Array<{
     providerOrderNo: string
@@ -1007,9 +1020,11 @@ export interface CloudOcrResponse {
 /**
  * Read one screen with the cloud model.
  *
- * A SEPARATE upload from the evidence one, carrying LARGER bytes, and that is the point rather
- * than an inefficiency: the evidence copy is compressed to 1280 px at quality 0.4 to be cheap to
- * store, which also puts its body text below what any reader can resolve. See `compressForOcr`.
+ * A SEPARATE upload from the evidence one, carrying recognition-quality bytes, and that is the
+ * point rather than an inefficiency: the evidence copy is compressed to 1280 px at quality 0.4 to
+ * be cheap to store, which also puts its body text below what any reader can resolve. Wallet alone
+ * sends a high-quality focus crop of the orange card; all other fields send the full image. See
+ * `compressForOcr`.
  *
  * Never throws for a failed read — the server answers 200 with `ok: false` and a reason, because a
  * reader that can fail a request can fail a shift. It still throws for a malformed request (415 on
@@ -1036,7 +1051,9 @@ export async function readInCloud(
 ): Promise<CloudOcrResponse | null> {
   try {
     const { compressForOcr } = await import('./compress.ts')
-    const prepared = await compressForOcr(file)
+    // The wallet card occupies only the upper third of a tall phone screenshot. Give AI that card
+    // at full effective resolution; all other readers still need their whole screen/page.
+    const prepared = await compressForOcr(file, field === 'wallet' ? 'wallet' : 'full')
     if (!prepared) return null
     const res = await api.putBytes<CloudOcrResponse>(
       ocrReadPath(shiftId, field),

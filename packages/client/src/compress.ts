@@ -19,7 +19,9 @@ export const MAX_DIMENSION = 1280
  * quality 0.4 lands near 300 KB. They also make it unreadable. `PhotoSlot` says so directly — that
  * compression "puts a phone screenshot's body text at roughly 10–13 px of x-height, below what
  * Tesseract's LSTM can read" — and migration 0019 calls it the single largest accuracy lever in the
- * whole feature. Every accuracy figure we have for a cloud model was measured on ORIGINALS.
+ * whole feature. Every accuracy figure we have for a cloud model was measured on originals. The
+ * wallet is the narrow exception: its original pixels are cropped around the orange card (never
+ * locally read) so the cloud model sees the small white balance at a useful effective resolution.
  *
  * So the reader gets its own profile, and it is barely a compression at all:
  *
@@ -38,6 +40,32 @@ export const OCR_MAX_DIMENSION = 2000
 export const OCR_QUALITY = 0.85
 /** Comfortably inside Vercel's ~4.5 MB body cap, with room for the request around it. */
 export const OCR_MAX_BYTES = 4 * 1024 * 1024
+
+/** The cloud question can ask for the whole screen or the fixed Yallago wallet card. */
+export type OcrImageFocus = 'full' | 'wallet'
+
+export interface ImageRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/**
+ * Crop containing the title + orange Yallago wallet card, excluding the empty lower screen.
+ *
+ * The live 540×1200 screenshot put the white balance around y=255. Sending all 1200 rows made
+ * that first `٢` a small feature and the model called it `٣`; this crop gives the balance over
+ * twice the effective resolution. Ratios keep it stable across Android screenshot sizes, while a
+ * landscape fallback keeps the upper two-thirds rather than assuming portrait geometry.
+ */
+export function walletBalanceFocusRect(width: number, height: number): ImageRect {
+  if (width <= 0 || height <= 0) return { x: 0, y: 0, width: Math.max(0, width), height: Math.max(0, height) }
+  if (height <= width) return { x: 0, y: 0, width, height: Math.max(1, Math.round(height * 0.67)) }
+  const y = Math.round(height * 0.1)
+  const focusHeight = Math.min(height - y, Math.max(1, Math.round(height * 0.39)))
+  return { x: 0, y, width, height: focusHeight }
+}
 
 export interface CompressResult {
   bytes: Uint8Array
@@ -91,11 +119,11 @@ export async function compressImage(file: Blob, targetBytes = TARGET_BYTES): Pro
  * The copy sent to the cloud reader. See `OCR_MAX_DIMENSION` above for why this is not
  * `compressImage`.
  *
- * Returns `null` when the result would still be too large for the request body — the caller then
- * skips the cloud read and keeps the on-device one, which is exactly what it does with no network.
- * Refusing to send is better than a 413 the driver has to interpret.
+ * Returns `null` when the result would still be too large for the request body. The caller reports
+ * an AI failure and leaves explicit typing available; phone OCR remains training evidence and is
+ * never promoted to money. Refusing to send is better than a 413 the driver has to interpret.
  */
-export async function compressForOcr(file: Blob): Promise<CompressResult | null> {
+export async function compressForOcr(file: Blob, focus: OcrImageFocus = 'full'): Promise<CompressResult | null> {
   const original = new Uint8Array(await file.arrayBuffer())
   const passthrough: CompressResult = {
     bytes: original,
@@ -111,6 +139,24 @@ export async function compressForOcr(file: Blob): Promise<CompressResult | null>
 
   const bitmap = await createImageBitmap(file)
   const longEdge = Math.max(bitmap.width, bitmap.height)
+
+  if (focus === 'wallet') {
+    const rect = walletBalanceFocusRect(bitmap.width, bitmap.height)
+    // Cropping is the accuracy lever. Upscaling no more than 3× does not manufacture detail, but
+    // it prevents the provider's own whole-screen resize from shrinking the white glyphs again.
+    const scale = Math.min(3, OCR_MAX_DIMENSION / Math.max(rect.width, rect.height))
+    const width = Math.max(1, Math.round(rect.width * scale))
+    const height = Math.max(1, Math.round(rect.height * scale))
+    const canvas = new OffscreenCanvas(width, height)
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return original.length <= OCR_MAX_BYTES ? passthrough : null
+    ctx.drawImage(bitmap, rect.x, rect.y, rect.width, rect.height, 0, 0, width, height)
+    let bytes = await encode(canvas, 0.95)
+    if (bytes.length > OCR_MAX_BYTES) bytes = await encode(canvas, OCR_QUALITY)
+    if (bytes.length > OCR_MAX_BYTES) bytes = await encode(canvas, 0.7)
+    if (bytes.length > OCR_MAX_BYTES) return null
+    return { bytes, mimeType: 'image/jpeg', width, height, compressed: true }
+  }
 
   // Already small enough in both dimensions and bytes: send the ORIGINAL pixels. Re-encoding a
   // screenshot that is already 40 KB would cost detail and save nothing.

@@ -10,9 +10,15 @@
  * key, so a call made from inside it originates in Virginia and needs no relay and no VPN. Move the
  * API to a region Syria cannot reach through and this adapter stops working with a confusing error.
  *
+ * Wallet money gets extra care. One live Yallago screenshot visibly printed `٢٧٩٫٥٠`, while one
+ * otherwise well-formed model answer confidently transcribed both `printed` and `value` as
+ * `٣٧٩٫٥٠` / `379.50`. No separator parser can repair a glyph the model never saw. The wallet is
+ * therefore read by three independent, differently worded AI passes and published only when two
+ * agree. This remains AI-authoritative: phone OCR is not an input to the vote.
+ *
  * REQUEST SHAPE, three parts of which are load-bearing and were each learned the expensive way:
  *
- *   `detail: 'high'`   — on `low` the image is downsampled to a single 512px tile and Arabic-Indic
+ *   `detail: 'high'`   — on `low` the image is downsampled to one 512px tile and Arabic-Indic
  *                        digits stop being resolvable at all. This is not a cost knob.
  *   no `temperature`   — the 5.x reasoning models reject any value but the default and answer a
  *                        400 `unsupported_value`. Determinism is governed by reasoning effort.
@@ -24,15 +30,15 @@
  * because a cosmetic field disagreed.
  */
 
-import type { OcrField, OcrReader, OcrReading, OcrResult, OcrRow } from '@ash/contracts'
-import { READ_SCHEMA, readPrompt } from './prompt.ts'
+import type { OcrFailure, OcrField, OcrReader, OcrReading, OcrResult, OcrRow } from '@ash/contracts'
+import { READ_SCHEMA, readPrompt, walletReadPrompts } from './prompt.ts'
 
 export interface OpenAiOcrConfig {
   apiKey: string
   model: string
   effort: 'low' | 'medium' | 'high'
   verbosity: 'low' | 'medium' | 'high'
-  /** Must stay strictly BELOW the platform's function ceiling — see the note in `read`. */
+  /** Must stay strictly BELOW the platform's function ceiling — see the note in `runPass`. */
   timeoutMs: number
   /** Overridable for tests; there is no other reason to change it. */
   baseUrl?: string
@@ -42,7 +48,7 @@ const DEFAULT_BASE_URL = 'https://api.openai.com/v1/chat/completions'
 
 /**
  * Reasoning tokens count against this, and a completion that hits it comes back EMPTY rather than
- * truncated — which reads as "the screen had nothing on it" unless you check for it explicitly.
+ * truncated — which reads as "the screen had nothing on it" unless checked explicitly.
  */
 const MAX_COMPLETION_TOKENS = 8192
 
@@ -59,12 +65,27 @@ export class OpenAiOcrReader implements OcrReader {
 
   async read(request: { field: OcrField; bytes: Uint8Array; mimeType: string }): Promise<OcrReading> {
     const startedAt = Date.now()
-    const usage = { tokensIn: 0, tokensOut: 0, latencyMs: 0 }
-    const done = (result: OcrResult): OcrReading => ({
-      result,
-      usage: { ...usage, latencyMs: Date.now() - startedAt },
-    })
+    const prompts = request.field === 'wallet' ? walletReadPrompts() : [readPrompt(request.field)]
 
+    // Parallel, not sequential: three 20-second inspections must still fit below a 60-second
+    // function ceiling. Each pass has its own abort signal and no pass can hold the others open.
+    const passes = await Promise.all(prompts.map(async (prompt) => await this.runPass(request, prompt)))
+    const usage = passes.reduce(
+      (sum, pass) => ({
+        tokensIn: sum.tokensIn + pass.tokensIn,
+        tokensOut: sum.tokensOut + pass.tokensOut,
+      }),
+      { tokensIn: 0, tokensOut: 0 },
+    )
+
+    const result = request.field === 'wallet' ? walletConsensus(passes) : passes[0]!.result
+    return { result, usage: { ...usage, latencyMs: Date.now() - startedAt } }
+  }
+
+  private async runPass(
+    request: { field: OcrField; bytes: Uint8Array; mimeType: string },
+    prompt: string,
+  ): Promise<ModelPass> {
     let json: OpenAiResponse
     try {
       const res = await fetch(this.config.baseUrl ?? DEFAULT_BASE_URL, {
@@ -79,7 +100,7 @@ export class OpenAiOcrReader implements OcrReader {
             {
               role: 'user',
               content: [
-                { type: 'text', text: readPrompt(request.field) },
+                { type: 'text', text: prompt },
                 {
                   type: 'image_url',
                   image_url: { url: dataUrl(request.bytes, request.mimeType), detail: 'high' },
@@ -96,72 +117,216 @@ export class OpenAiOcrReader implements OcrReader {
           },
         }),
         /*
-         * STRICTLY below the platform's function ceiling, and that is the whole point.
-         *
-         * `tools/gemini-relay/api/gemini.mjs` carries the reason: set the two equal and the caller's
-         * socket dies at the same instant the platform gives up, turning a clean 504 into an opaque
-         * socket error nobody can diagnose from a log line.
+         * STRICTLY below the platform's function ceiling. Set the two equal and the caller's socket
+         * dies at the same instant the platform gives up, turning a clean timeout into an opaque
+         * transport error nobody can diagnose from a log line.
          */
         signal: AbortSignal.timeout(this.config.timeoutMs),
       })
 
       if (!res.ok) {
-        // Never echo the body — undici puts the request URL in some errors, and this one carries a
-        // bearer token. The status is enough to tell a rate limit from a bad key.
-        return done({ ok: false, reason: res.status === 408 || res.status === 504 ? 'timeout' : 'unavailable' })
+        // Never echo the body: it can include provider diagnostics and this request has a bearer
+        // credential. The status is enough to distinguish timeout from general unavailability.
+        return failedPass(res.status === 408 || res.status === 504 ? 'timeout' : 'unavailable')
       }
       json = (await res.json()) as OpenAiResponse
     } catch (err) {
       const name = (err as { name?: string })?.name
-      return done({ ok: false, reason: name === 'TimeoutError' || name === 'AbortError' ? 'timeout' : 'unavailable' })
+      return failedPass(name === 'TimeoutError' || name === 'AbortError' ? 'timeout' : 'unavailable')
     }
 
-    usage.tokensIn = json.usage?.prompt_tokens ?? 0
-    usage.tokensOut = json.usage?.completion_tokens ?? 0
-
+    const tokensIn = json.usage?.prompt_tokens ?? 0
+    const tokensOut = json.usage?.completion_tokens ?? 0
     const choice = json.choices?.[0]
-    if (!choice) return done({ ok: false, reason: 'unavailable' })
-    // A model that declines is saying something different from a model that read nothing.
-    if (choice.message?.refusal) return done({ ok: false, reason: 'refused' })
-    if (choice.finish_reason && choice.finish_reason !== 'stop') return done({ ok: false, reason: 'no_fields' })
+    if (!choice) return failedPass('unavailable', tokensIn, tokensOut)
+    if (choice.message?.refusal) return failedPass('refused', tokensIn, tokensOut)
+    if (choice.finish_reason && choice.finish_reason !== 'stop') {
+      return failedPass('no_fields', tokensIn, tokensOut)
+    }
 
     const text = choice.message?.content
-    // Empty content means reasoning consumed `max_completion_tokens`. Scored as a clean read it
-    // would look like a screen with nothing on it.
-    if (!text) return done({ ok: false, reason: 'no_fields' })
+    if (!text) return failedPass('no_fields', tokensIn, tokensOut)
 
     let parsed: ParsedScreen
     try {
       parsed = JSON.parse(text) as ParsedScreen
     } catch {
-      return done({ ok: false, reason: 'no_fields' })
+      return failedPass('no_fields', tokensIn, tokensOut)
     }
 
-    const rows: OcrRow[] = (parsed.rows ?? []).map((r) => ({
+    const result = parsedResult(request.field, parsed)
+    return { result, raw: parsed, tokensIn, tokensOut }
+  }
+}
+
+function failedPass(reason: OcrFailure, tokensIn = 0, tokensOut = 0): ModelPass {
+  return { result: { ok: false, reason }, raw: null, tokensIn, tokensOut }
+}
+
+/**
+ * Convert one strict provider response into the public port.
+ *
+ * For the wallet, `printed` is re-derived rather than merely trusted. The prompt has always asked
+ * for `hasDecimal`, `hasThousands` and `digitCount`, but the old adapter threw those checks away.
+ * That is how `674,30` declared as a thousands number became `67430`. A malformed grouping or a
+ * `printed`/`value` disagreement now makes that pass a refusal, so it cannot win the vote.
+ */
+export function parsedResult(field: OcrField, parsed: ParsedScreen): OcrResult {
+  const rows: OcrRow[] = (parsed.rows ?? []).map((r) => {
+    const ordinaryValue = r.value == null ? null : String(r.value)
+    const value = field === 'wallet' && !r.cancelled ? verifiedWalletValue(r) : ordinaryValue
+    return {
       printed: String(r.printed ?? ''),
-      value: r.value == null ? null : String(r.value),
+      value,
       cancelled: r.cancelled === true,
       time: r.time == null ? null : String(r.time),
       dateIso: r.dateIso == null ? null : String(r.dateIso),
       pointA: r.pointA == null ? null : String(r.pointA),
       pointB: r.pointB == null ? null : String(r.pointB),
-    }))
-    const fields: Record<string, string | null> = {}
-    for (const f of parsed.fields ?? []) {
-      if (f?.label) fields[String(f.label)] = f.value == null ? null : String(f.value)
     }
-
-    if (rows.length === 0 && Object.keys(fields).length === 0) {
-      return done({ ok: false, reason: 'no_fields' })
-    }
-    return done({ ok: true, rows, fields, raw: parsed })
+  })
+  const fields: Record<string, string | null> = {}
+  for (const f of parsed.fields ?? []) {
+    if (f?.label) fields[String(f.label)] = f.value == null ? null : String(f.value)
   }
+
+  if (rows.length === 0 && Object.keys(fields).length === 0) return { ok: false, reason: 'no_fields' }
+  return { ok: true, rows, fields, raw: parsed }
+}
+
+/** Publish only a value seen by at least two independent wallet passes. */
+function walletConsensus(passes: readonly ModelPass[]): OcrResult {
+  const votes = new Map<string, Array<{ row: OcrRow; pass: ModelPass }>>()
+  for (const pass of passes) {
+    if (!pass.result.ok || pass.result.rows.length !== 1) continue
+    const row = pass.result.rows[0]!
+    const key = row.cancelled || row.value === null ? null : moneyKey(row.value)
+    if (key === null) continue
+    const group = votes.get(key) ?? []
+    group.push({ row, pass })
+    votes.set(key, group)
+  }
+
+  const winner = [...votes.values()].find((group) => group.length >= 2)
+  if (!winner) return { ok: false, reason: consensusFailure(passes) }
+
+  const representative = winner[0]!
+  return {
+    ok: true,
+    rows: [representative.row],
+    fields: representative.pass.result.ok ? representative.pass.result.fields : {},
+    raw: {
+      reader: 'wallet-ai-consensus-v1',
+      agreeingPasses: winner.length,
+      passes: passes.map((pass) => (pass.result.ok ? pass.raw : pass.result)),
+    },
+  }
+}
+
+function consensusFailure(passes: readonly ModelPass[]): OcrFailure {
+  // Disagreement between readable amounts is an accuracy refusal, not an upstream outage.
+  if (passes.some((pass) => pass.result.ok)) return 'no_fields'
+  const reasons = passes.map((pass) => (pass.result.ok ? 'no_fields' : pass.result.reason))
+  if (reasons.every((reason) => reason === 'timeout')) return 'timeout'
+  if (reasons.every((reason) => reason === 'refused')) return 'refused'
+  return 'unavailable'
+}
+
+const ARABIC_DIGITS: Readonly<Record<string, string>> = {
+  '٠': '0',
+  '١': '1',
+  '٢': '2',
+  '٣': '3',
+  '٤': '4',
+  '٥': '5',
+  '٦': '6',
+  '٧': '7',
+  '٨': '8',
+  '٩': '9',
+  '۰': '0',
+  '۱': '1',
+  '۲': '2',
+  '۳': '3',
+  '۴': '4',
+  '۵': '5',
+  '۶': '6',
+  '۷': '7',
+  '۸': '8',
+  '۹': '9',
+}
+
+function verifiedWalletValue(row: ParsedRow): string | null {
+  if (typeof row.printed !== 'string' || typeof row.value !== 'string') return null
+  if (typeof row.hasDecimal !== 'boolean' || typeof row.hasThousands !== 'boolean') return null
+  if (!Number.isInteger(row.digitCount) || Number(row.digitCount) < 1) return null
+
+  let printed = row.printed.trim().replace(/\s*SYP\s*/giu, '').replace(/\s/gu, '')
+  if (printed.includes('?')) return null
+  let sign = ''
+  if (/^[+＋]/u.test(printed)) {
+    printed = printed.slice(1)
+  } else if (/^[-−–—]/u.test(printed)) {
+    sign = '-'
+    printed = printed.slice(1)
+  }
+
+  const western = [...printed].map((glyph) => ARABIC_DIGITS[glyph] ?? glyph).join('')
+  const digitCount = [...western].filter((glyph) => /\d/u.test(glyph)).length
+  if (digitCount !== Number(row.digitCount)) return null
+  if (!/^[0-9.,٫٬،]+$/u.test(western)) return null
+
+  const decimalCandidates = [...western]
+    .map((glyph, index) => ({ glyph, index }))
+    .filter(({ glyph }) => glyph === '.' || glyph === '٫')
+  // A comma is decimal only when the model explicitly said there is a decimal part. When both
+  // kinds are present, the final comma may be decimal and earlier commas remain grouping marks.
+  if (row.hasDecimal && decimalCandidates.length === 0) {
+    const commaIndexes = [...western]
+      .map((glyph, index) => ({ glyph, index }))
+      .filter(({ glyph }) => glyph === ',' || glyph === '،')
+    if (commaIndexes.length > 0) decimalCandidates.push(commaIndexes.at(-1)!)
+  }
+  if (row.hasDecimal !== (decimalCandidates.length === 1)) return null
+
+  const decimalAt = decimalCandidates[0]?.index ?? -1
+  const wholePrinted = decimalAt < 0 ? western : western.slice(0, decimalAt)
+  const fraction = decimalAt < 0 ? '' : western.slice(decimalAt + 1)
+  if (row.hasDecimal && !/^\d{1,2}$/u.test(fraction)) return null
+
+  const groupingMarks = [...wholePrinted].filter((glyph) => glyph === ',' || glyph === '،' || glyph === '٬')
+  // A decimal comma was sliced away above, so any separators left in the whole part are grouping.
+  if (row.hasThousands !== (groupingMarks.length > 0)) return null
+  const groups = wholePrinted.split(/[,،٬]/u)
+  if (groups.length === 0 || groups.some((group) => !/^\d+$/u.test(group))) return null
+  if (groups.length > 1 && (groups[0]!.length > 3 || groups.slice(1).some((group) => group.length !== 3))) {
+    return null
+  }
+
+  const whole = groups.join('').replace(/^0+(?=\d)/u, '')
+  const derived = `${sign}${whole}${fraction === '' ? '' : `.${fraction}`}`
+  return moneyKey(derived) !== null && moneyKey(derived) === moneyKey(row.value) ? derived : null
+}
+
+/** Exact money identity without floating point; accepts one or two fractional digits. */
+function moneyKey(value: string): string | null {
+  const match = /^([+-]?)(\d+)(?:\.(\d{1,2}))?$/u.exec(value.trim())
+  if (!match) return null
+  const sign = match[1] === '-' ? -1n : 1n
+  const fraction = (match[3] ?? '').padEnd(2, '0')
+  return String(sign * (BigInt(match[2]!) * 100n + BigInt(fraction || '0')))
 }
 
 function dataUrl(bytes: Uint8Array, mimeType: string): string {
   // Node 24 has Buffer; this adapter is server-only and never reaches a browser bundle.
   const b64 = Buffer.from(bytes).toString('base64')
   return `data:${mimeType};base64,${b64}`
+}
+
+interface ModelPass {
+  result: OcrResult
+  raw: ParsedScreen | null
+  tokensIn: number
+  tokensOut: number
 }
 
 interface OpenAiResponse {
@@ -172,16 +337,21 @@ interface OpenAiResponse {
   usage?: { prompt_tokens?: number; completion_tokens?: number }
 }
 
-interface ParsedScreen {
-  rows?: Array<{
-    printed?: string
-    value?: string | null
-    cancelled?: boolean
-    time?: string | null
-    dateIso?: string | null
-    pointA?: string | null
-    pointB?: string | null
-  }>
+export interface ParsedScreen {
+  rows?: ParsedRow[]
   fields?: Array<{ label?: string; value?: string | null }>
   notes?: string | null
+}
+
+export interface ParsedRow {
+  hasDecimal?: boolean
+  hasThousands?: boolean
+  digitCount?: number
+  printed?: string
+  value?: string | null
+  cancelled?: boolean
+  time?: string | null
+  dateIso?: string | null
+  pointA?: string | null
+  pointB?: string | null
 }

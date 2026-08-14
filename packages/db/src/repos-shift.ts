@@ -131,8 +131,13 @@ export class PgShiftRepo implements ShiftRepo {
            equation_diff_minor = $11, cash_diff_minor = $12, wallet_diff_minor = $13,
            orders_hash = $14,
            driver_confirmed_at = $15::timestamptz,
-           open_approved_at = $16::timestamptz,
-           open_approved_by = $17::uuid,
+           -- These two columns are write-once historical identity. PostgreSQL keeps microseconds,
+           -- while the JS Date returned by the driver only keeps milliseconds. Rewriting an
+           -- already-populated value from a loaded ShiftRecord would therefore round it and trip
+           -- shifts_open_approval_immutable even when the caller did not change anything.
+           -- Fill either missing half, but preserve the database's exact value once present.
+           open_approved_at = COALESCE(open_approved_at, $16::timestamptz),
+           open_approved_by = COALESCE(open_approved_by, $17::uuid),
            submitted_at = $18::timestamptz,
            approved_by = $19,
            odo_start_ocr = $20, odo_end_ocr = $21,

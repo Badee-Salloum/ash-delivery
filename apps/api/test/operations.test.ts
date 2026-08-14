@@ -158,30 +158,11 @@ describe('an operation nobody checked', () => {
 })
 
 describe('what the wallet did on its own', () => {
-  it('an unmatched movement enters BR1 instead of being blamed on the driver', async () => {
+  it('keeps an unmatched payment-log movement as archive without changing BR1', async () => {
     const { id, driver } = await openWithOrders(10)
-    // An incentive Yallago paid: nothing to do with any order, but the wallet really holds it.
+    // The payment log is evidence, not an accounting input. Its rows remain available for review
+    // and training while the dedicated wallet screenshot supplies the closing wallet balance.
     await h.deps.movements.merge(id, [{ amount: minor(300_00n), occurredMinute: '09:24' }], 'u-driver')
-
-    const closed = await put(driver, `/shifts/${id}/end-package`, {
-      odometerKm: 200,
-      batteryPercent: null,
-      cashDeclared: sypStr(150_000),
-      // 50,000 topup − 10,000 cut + 300 incentive.
-      walletDeclared: sypStr(40_300),
-    })
-    expect(closed.statusCode, closed.body).toBe(200)
-    expect(closed.json().br1.difference).toBe('0.00')
-  })
-
-  it('an EXCLUDED movement does not', async () => {
-    const { id, driver } = await openWithOrders(10)
-    const [row] = await h.deps.movements.merge(
-      id,
-      [{ amount: minor(300_00n), occurredMinute: '09:24' }],
-      'u-driver',
-    )
-    await h.deps.movements.update(row!.id, { included: false }, 'u-bm')
 
     const closed = await put(driver, `/shifts/${id}/end-package`, {
       odometerKm: 200,
@@ -189,7 +170,23 @@ describe('what the wallet did on its own', () => {
       cashDeclared: sypStr(150_000),
       walletDeclared: sypStr(40_000),
     })
+    expect(closed.statusCode, closed.body).toBe(200)
     expect(closed.json().br1.difference).toBe('0.00')
+    expect(await h.deps.movements.listByShift(id)).toHaveLength(1)
+  })
+
+  it('does not use an archived row to hide a declared-wallet difference', async () => {
+    const { id, driver } = await openWithOrders(10)
+    await h.deps.movements.merge(id, [{ amount: minor(300_00n), occurredMinute: '09:24' }], 'u-driver')
+
+    const closed = await put(driver, `/shifts/${id}/end-package`, {
+      odometerKm: 200,
+      batteryPercent: null,
+      cashDeclared: sypStr(150_000),
+      walletDeclared: sypStr(40_300),
+    })
+    expect(closed.statusCode, closed.body).toBe(200)
+    expect(closed.json().br1.difference).toBe('300.00')
   })
 
   it('a logged Yallago cut is corroboration, NEVER a second deduction', async () => {
@@ -218,14 +215,14 @@ describe('what the wallet did on its own', () => {
     expect(closed.json().br1.difference).toBe('0.00')
   })
 
-  it('posts an unmatched movement to the ledger, so the driver’s wallet still zeroes', async () => {
+  it('posts no payment-log adjustment to the ledger', async () => {
     const { id, driver, manager } = await openWithOrders(10)
     await h.deps.movements.merge(id, [{ amount: minor(300_00n), occurredMinute: '09:24' }], 'u-driver')
     await put(driver, `/shifts/${id}/end-package`, {
       odometerKm: 200,
       batteryPercent: null,
       cashDeclared: sypStr(150_000),
-      walletDeclared: sypStr(40_300),
+      walletDeclared: sypStr(40_000),
     })
     const review = await get(manager, `/shifts/${id}/review`)
     const approved = await post(manager, `/shifts/${id}/approve-close`, {
@@ -234,9 +231,8 @@ describe('what the wallet did on its own', () => {
     expect(approved.statusCode, approved.body).toBe(200)
 
     expect(await bal(fundCodeOf({ kind: 'driver_wallet', driverId: DRIVER_ID }))).toBe(0n)
-    // Nobody has decided whose money an incentive is, so it waits in a named cost centre for the
-    // accounting engine rather than being asserted as anyone's revenue.
-    expect(await bal('cost_center:wallet_adjustment:branch-damascus')).toBe(-300_00n)
+    expect(await bal('cost_center:wallet_adjustment:branch-damascus')).toBe(0n)
+    expect(h.deps.ledger.entries.some((entry) => entry.eventType === 'wallet_adjustment')).toBe(false)
     for (const entry of h.deps.ledger.entries) {
       let d = 0n
       let c = 0n
@@ -245,10 +241,7 @@ describe('what the wallet did on its own', () => {
     }
   })
 
-  it('changes the review hash even though no order moved', async () => {
-    // A row that arrives UNCHECKED changes no money at all — and must still force a re-review,
-    // because checking it later would. The digest is the only thing that can see it: every order
-    // field is untouched.
+  it('does not stale a financial review when only archive data arrives', async () => {
     const { id, driver, manager } = await openWithOrders(3)
     await put(driver, `/shifts/${id}/end-package`, {
       odometerKm: 200,
@@ -263,9 +256,8 @@ describe('what the wallet did on its own', () => {
       'u-driver',
     )
 
-    const stale = await post(manager, `/shifts/${id}/approve-close`, { reviewedOrdersHash: reviewed })
-    expect(stale.statusCode, stale.body).toBe(409)
-    expect(stale.json().error).toBe('orders_changed_since_review')
+    const approved = await post(manager, `/shifts/${id}/approve-close`, { reviewedOrdersHash: reviewed })
+    expect(approved.statusCode, approved.body).toBe(200)
   })
 })
 

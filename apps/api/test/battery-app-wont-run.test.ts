@@ -40,6 +40,54 @@ async function shiftWithOnePack(driver: string, manager: string): Promise<{ id: 
   return { id, batteryId }
 }
 
+async function openShiftWithPacks(
+  driver: string,
+  manager: string,
+  count: 1 | 2,
+): Promise<{ id: string; batteryIds: string[] }> {
+  const batteryIds: string[] = []
+  for (let slotNo = 1; slotNo <= count; slotNo += 1) {
+    const created = await post(manager, '/batteries', {
+      capacityAh: slotNo === 1 ? 50 : 30,
+      vehicleId: VEHICLE_ID,
+      slotNo,
+    })
+    expect(created.statusCode, created.body).toBe(201)
+    batteryIds.push(created.json().id as string)
+  }
+
+  const created = await post(driver, '/shifts', { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 })
+  expect(created.statusCode, created.body).toBe(201)
+  const id = created.json().id as string
+  await h.uploadPhoto(driver, id, 'start', 'odometer')
+  for (let slotNo = 1; slotNo <= count; slotNo += 1) {
+    await h.uploadPhoto(driver, id, 'start', `bms_${slotNo}`)
+  }
+  const readings = await put(driver, `/shifts/${id}/battery-readings`, {
+    package: 'start',
+    readings: batteryIds.map((batteryId, i) => ({ batteryId, percent: 90 - i, source: 'manual' })),
+  })
+  expect(readings.statusCode, readings.body).toBe(200)
+  const submitted = await put(driver, `/shifts/${id}/start-package`, {
+    odometerKm: 100,
+    batteryPercent: null,
+  })
+  expect(submitted.statusCode, submitted.body).toBe(200)
+  const opened = await post(manager, `/shifts/${id}/approve-open`, {
+    floatTranches: [sypStr(100)],
+    topupTranches: [],
+  })
+  expect(opened.statusCode, opened.body).toBe(200)
+  const order = await post(driver, `/shifts/${id}/orders`, {
+    providerOrderNo: `BATTERY-UNAVAILABLE-${count}`,
+    payMode: 'cash',
+    fee: sypStr(10),
+  })
+  expect(order.statusCode, order.body).toBe(201)
+  for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
+  return { id, batteryIds }
+}
+
 describe('a pack the driver cannot read on his own phone', () => {
   it('lets him start the shift — he is not asked for a screenshot he cannot take', async () => {
     const driver = await h.loginAs('driver1')
@@ -74,6 +122,38 @@ describe('a pack the driver cannot read on his own phone', () => {
     })
     expect(refused.statusCode).toBe(422)
     expect(refused.json().error).toBe('start_package_incomplete')
+    expect(refused.json().detail).toContainEqual({ kind: 'awaiting_manager_reading', slotNo: 1 })
+  })
+
+  it('does not let a late driver OCR/upload write undo the confirmed declaration', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const { id, batteryId } = await shiftWithOnePack(driver, manager)
+    await put(driver, `/shifts/${id}/battery-readings`, {
+      package: 'start',
+      readings: [{ batteryId, percent: null, unavailable: true }],
+    })
+
+    // This is the request that was already running when the driver tapped “app will not run”. It
+    // arrives later and must not hand the pack back to the driver or satisfy the manager's gate.
+    const late = await put(driver, `/shifts/${id}/battery-readings`, {
+      package: 'start',
+      readings: [{ batteryId, percent: 73, unavailable: false, source: 'ocr' }],
+    })
+    expect(late.statusCode, late.body).toBe(200)
+    expect(late.json().readings).toEqual([
+      expect.objectContaining({ batteryId, percent: null, unavailable: true }),
+    ])
+
+    expect((await put(driver, `/shifts/${id}/start-package`, {
+      odometerKm: 100,
+      batteryPercent: null,
+    })).statusCode).toBe(200)
+    const refused = await post(manager, `/shifts/${id}/approve-open`, {
+      floatTranches: [sypStr(100)],
+      topupTranches: [],
+    })
+    expect(refused.statusCode, refused.body).toBe(422)
     expect(refused.json().detail).toContainEqual({ kind: 'awaiting_manager_reading', slotNo: 1 })
   })
 
@@ -117,4 +197,66 @@ describe('a pack the driver cannot read on his own phone', () => {
     expect(submitted.statusCode).toBe(422)
     expect(submitted.json().detail).toContainEqual({ kind: 'missing_battery_reading', slotNo: 1 })
   })
+
+  it.each([1, 2] as const)(
+    'lets the driver submit the close with %i server-confirmed unavailable pack(s)',
+    async (count) => {
+      const driver = await h.loginAs('driver1')
+      const manager = await h.loginAs('manager')
+      const { id, batteryIds } = await openShiftWithPacks(driver, manager, count)
+
+      const declared = await put(driver, `/shifts/${id}/battery-readings`, {
+        package: 'end',
+        readings: batteryIds.map((batteryId) => ({
+          batteryId,
+          percent: null,
+          unavailable: true,
+          source: 'manual',
+        })),
+      })
+      expect(declared.statusCode, declared.body).toBe(200)
+
+      // The state endpoint is the remount boundary. A null charge must retain the declaration for
+      // every pack, otherwise the restored closing screen asks for remaining energy again.
+      const resumed = await get(driver, `/shifts/${id}/state`)
+      expect(resumed.statusCode, resumed.body).toBe(200)
+      expect(resumed.json().endPackage.batteries).toEqual(
+        expect.arrayContaining(
+          batteryIds.map((batteryId, i) =>
+            expect.objectContaining({ batteryId, slotNo: i + 1, percent: null, unavailable: true }),
+          ),
+        ),
+      )
+
+      const ended = await put(driver, `/shifts/${id}/end-package`, {
+        odometerKm: 110,
+        batteryPercent: null,
+        cashDeclared: sypStr(110),
+        walletDeclared: sypStr(-2),
+      })
+      expect(ended.statusCode, ended.body).toBe(200)
+      expect(ended.json().state).toBe('pending_review')
+
+      if (count === 1) {
+        const review = await get(manager, `/shifts/${id}/review`)
+        expect(review.statusCode, review.body).toBe(200)
+        const refused = await post(manager, `/shifts/${id}/approve-close`, {
+          reviewedOrdersHash: review.json().br1.ordersHash,
+        })
+        expect(refused.statusCode, refused.body).toBe(422)
+        expect(refused.json().detail).toContainEqual({ kind: 'awaiting_manager_reading', slotNo: 1 })
+
+        const supplied = await put(manager, `/shifts/${id}/battery-readings/manager`, {
+          package: 'end',
+          readings: [{ batteryId: batteryIds[0], percent: 42, unavailable: true }],
+        })
+        expect(supplied.statusCode, supplied.body).toBe(200)
+        const approved = await post(manager, `/shifts/${id}/approve-close`, {
+          reviewedOrdersHash: review.json().br1.ordersHash,
+        })
+        expect(approved.statusCode, approved.body).toBe(200)
+        expect(approved.json().state).toBe('approved')
+      }
+    },
+  )
 })

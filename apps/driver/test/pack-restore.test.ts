@@ -23,6 +23,7 @@ const whole = (state: PackState): void => {
   expect(typeof state.values.cycleCount).toBe('string')
   expect(state).toHaveProperty('outcome')
   expect(state).toHaveProperty('fieldsFound')
+  expect(typeof state.unavailable).toBe('boolean')
 }
 
 describe('restoring battery readings onto a resumed shift', () => {
@@ -66,6 +67,29 @@ describe('restoring battery readings onto a resumed shift', () => {
     )
     expect(packs['pack-1']).toBeUndefined()
     expect(packs['pack-2']!.values.percent).toBe('88')
+  })
+
+  it('restores a null-charge unavailable declaration after the closing screen remounts', () => {
+    const packs = restorePacks(
+      [{ batteryId: 'pack-1', percent: null, unavailable: true }],
+      {},
+    )
+
+    whole(packs['pack-1']!)
+    expect(packs['pack-1']).toMatchObject({ unavailable: true, values: { percent: '' } })
+  })
+
+  it('restores unavailable independently for each pack on a two-pack bike', () => {
+    const packs = restorePacks(
+      [
+        { batteryId: 'pack-1', percent: null, unavailable: true },
+        { batteryId: 'pack-2', percent: 63, unavailable: false },
+      ],
+      {},
+    )
+
+    expect(packs['pack-1']).toMatchObject({ unavailable: true, values: { percent: '' } })
+    expect(packs['pack-2']).toMatchObject({ unavailable: false, values: { percent: '63' } })
   })
 
   /** محمد عقيل's real shape: two packs fitted, only one read. The other must survive untouched. */

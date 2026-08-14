@@ -57,6 +57,7 @@ describe('a replacement BMS screenshot starts a new reader race', () => {
   it('clears old machine values while preserving a human correction', () => {
     const prior: PackState = {
       values: { percent: '66.0', cycleCount: '125' },
+      unavailable: false,
       ocrRaw: { percent: 66, cycleCount: 120 },
       outcome: 'ok',
       fieldsFound: 2,
@@ -65,6 +66,7 @@ describe('a replacement BMS screenshot starts a new reader race', () => {
 
     expect(packForNewEvidence(prior)).toEqual({
       values: { percent: '', cycleCount: '125' },
+      unavailable: false,
       ocrRaw: null,
       outcome: 'reading',
       fieldsFound: 0,
@@ -141,11 +143,26 @@ describe('a replacement BMS screenshot starts a new reader race', () => {
       ready({ file: replacement, uploadedMediaId: 'media-new', persistedMediaId: 'media-new' }),
     ).toBe(true)
   })
+
+  it('treats a server-confirmed unavailable declaration as complete even without charge or evidence', () => {
+    expect(
+      isBmsPackReady({
+        unavailable: true,
+        hasPercent: false,
+        slotUploaded: false,
+        // A read selected just before the declaration can still be settling; it no longer owns the
+        // gate after the server transfers this pack to the manager.
+        cloudPending: true,
+        progress: { file: {} as File, uploadedMediaId: null, persistedMediaId: null },
+      }),
+    ).toBe(true)
+  })
 })
 
 describe('cloud AI is the only automatic BMS authority', () => {
   const initial = (): PackState => ({
     values: { percent: '', cycleCount: '' },
+    unavailable: false,
     ocrRaw: null,
     outcome: 'reading',
     fieldsFound: 0,
@@ -178,6 +195,7 @@ describe('cloud AI is the only automatic BMS authority', () => {
   it('does not let a late phone failure downgrade an accepted AI result', () => {
     const accepted: PackState = {
       values: { percent: '91', cycleCount: '320' },
+      unavailable: false,
       ocrRaw: { percent: 91, cycleCount: 320 },
       outcome: 'ok',
       fieldsFound: 2,

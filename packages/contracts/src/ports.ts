@@ -527,16 +527,13 @@ export interface CashDeductionRecord {
   createdBy: string | null
 }
 
-/** What a movement IS, which decides how BR1 may use it. See `WalletMovementRecord.role`. */
+/** What a captured payment-log movement appears to be; retained for archival review/matching. */
 export type WalletMovementRole = 'yalago_cut' | 'order_credit' | 'unmatched'
 
 /**
- * One row of «سجل المدفوعات» — what the wallet actually did, as opposed to what the orders imply.
- *
- * The three roles are disjoint and that is the whole defence against counting money twice:
- * `yalago_cut` never enters BR1 (the equation derives the cut from the fee, because the 80% block
- * is a residual); `order_credit` becomes its order's `walletAmount` and is already inside the
- * order's arithmetic; only `unmatched` rows are summed into BR1's `walletAdjustments`.
+ * One archival row of «سجل المدفوعات». It is preserved for evidence, OCR training and
+ * manager inspection, but does not change BR1, order totals, tiers, shares or ledger postings.
+ * Roles remain useful metadata for a future reconciliation workflow without asserting money now.
  */
 export interface WalletMovementRecord {
   id: string

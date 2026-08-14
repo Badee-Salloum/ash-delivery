@@ -107,30 +107,14 @@ export interface Br1Input {
 }
 
 /**
- * Does «سجل المدفوعات» change the equation? YES — and it was MEASURED that it must.
+ * The payments log is archival evidence only. Its OCR rows never change BR1, order fees, tiers,
+ * Yallago's share, or ledger postings. The app-wallet balance entered from the dedicated wallet
+ * screenshot remains the sole closing-wallet measurement.
  *
- * The owner asked for the payments log to be held as evidence and training data only, on the sound
- * reasoning that its reader has never been measured the way the fee reader has. Setting this false
- * was tried, and the test suite showed what it costs — not in theory, in numbers:
- *
- *   • A shift with 300 of Yallago bonus in the wallet returns 422 `br1_not_zero`. The money is
- *     really there, no delivery explains it, and with the log silent nothing can. The shift becomes
- *     UNCLOSEABLE until a manager posts a manual entry — on every bonus day, for every driver.
- *   • Worse, the LEDGER breaks the same way. `walletReturn` credits back the whole declared wallet
- *     including that 300, and with no `walletAdjustment` posting to debit it, `driver_wallet` is
- *     left at exactly −300. An unbalanced ledger is not a smaller problem than an unread log.
- *
- * The two are separable, and that is the resolution: TRAINING DATA DOES NOT REQUIRE SILENCE. The
- * log's rows can be captured, stored and learnt from while still telling the equation about money
- * that is genuinely in the wallet. Removing them from the equation would not have made the data any
- * better — it would only have stopped honest shifts from closing.
- *
- * Kept as a named constant rather than deleted, so the finding survives the next person who has the
- * same reasonable idea. It lives in the pure domain because the driver's live preview and the
- * figure the manager approves are computed by different packages, and a disagreement about this
- * makes a shift impossible to close and impossible to explain.
+ * Keep this named switch shared by API and client so a future accounting-policy change cannot make
+ * the driver's preview disagree with the manager's review.
  */
-export const WALLET_LOG_FEEDS_BR1 = true
+export const WALLET_LOG_FEEDS_BR1 = false
 
 export interface Br1Result {
   readonly totals: FeeTotals

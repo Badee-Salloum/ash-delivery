@@ -110,7 +110,7 @@ interface Review {
     decisionReason: string | null
     decidedBy?: string | null
   }>
-  /** «سجل المدفوعات» as read. Only the rows no order explains are a term in BR1. */
+  /** «سجل المدفوعات» as read: archival evidence only, never a financial input. */
   movements: Array<{
     id: string
     amount: string
@@ -1036,64 +1036,18 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           ))}
         </Table>
 
-        {/* «سجل المدفوعات» — what the wallet actually did, beside what the orders imply it should
-            have. Only the rows no order explains are a term in BR1; the others are corroboration. */}
+        {/* The payments log is deliberately read-only here. It remains useful evidence, but its
+            rows do not change BR1, order fees, tier/share calculations or ledger postings. */}
         {review.movements.length > 0 ? (
           <div className="mt-4">
             <p className="mb-1 text-sm font-semibold">{t.shift.paymentsLog}</p>
-            <Table head={['', t.orders.time, t.orders.fee, '']}>
+            <p className="mb-2 text-xs text-slate-600">{operationCopy.paymentsLogArchiveHint}</p>
+            <Table head={[t.orders.time, t.orders.fee]}>
               {review.movements.map((m) => (
-                <tr key={m.id} className={m.included === false ? 'opacity-60' : ''}>
-                  <td className="px-3 py-1">
-                    <input
-                      type="checkbox"
-                      checked={m.included !== false}
-                      disabled={!underReview || busy}
-                      onChange={(e) => void reviseOps({ movements: [{ id: m.id, included: e.target.checked }] })}
-                      aria-label={t.orders.included}
-                      className="size-5 accent-emerald-600"
-                    />
-                  </td>
+                <tr key={m.id}>
                   <td className="num px-3 py-1 text-slate-500">{m.occurredMinute || '—'}</td>
                   <td className="num px-3 py-1">
                     <Money value={m.amount} />
-                  </td>
-                  <td className="px-3 py-1 text-xs">
-                    {/*
-                      The one question no machine may answer. A credit landing at an order's minute
-                      is either that order's electronic part or an unrelated incentive, and the two
-                      readings agree on the wallet to the minor unit while differing on the CASH by
-                      exactly the credit — so BR1 catches a wrong choice, and no second gate is
-                      needed. Offered only where the reader actually flagged the doubt.
-                    */}
-                    {m.ambiguous ? (
-                      <div className="flex flex-wrap items-center gap-1">
-                        <Button
-                          variant="ghost"
-                          disabled={!underReview || busy}
-                          onClick={() =>
-                            void reviseOps({ movements: [{ id: m.id, role: 'order_credit', ambiguous: false }] })
-                          }
-                        >
-                          {t.orders.partOfOrder}
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          disabled={!underReview || busy}
-                          onClick={() =>
-                            void reviseOps({
-                              movements: [{ id: m.id, role: 'unmatched', providerOrderNo: null, ambiguous: false }],
-                            })
-                          }
-                        >
-                          {t.orders.separateIncentive}
-                        </Button>
-                      </div>
-                    ) : (
-                      <span className="text-slate-600">
-                        {m.role === 'unmatched' ? t.orders.unexplained : t.orders.explainedByOrder}
-                      </span>
-                    )}
                   </td>
                 </tr>
               ))}
@@ -1202,6 +1156,7 @@ interface OperationReviewCopy {
   reasonRequired: string
   cashDeductions: string
   cashDeductionHint: string
+  paymentsLogArchiveHint: string
   included: string
   excluded: string
   time: string
@@ -1241,6 +1196,8 @@ function operationReviewCopy(lang: 'ar' | 'en'): OperationReviewCopy {
       cashDeductions: 'Cash deductions',
       cashDeductionHint:
         'These are not orders or wallet movements. Each included amount reduces expected cash and the driver’s share.',
+      paymentsLogArchiveHint:
+        'Optional archive only. These rows do not change orders, BR1, tiers, shares or ledger postings.',
       included: 'Included',
       excluded: 'Excluded',
       time: 'Date / time',
@@ -1284,6 +1241,8 @@ function operationReviewCopy(lang: 'ar' | 'en'): OperationReviewCopy {
     reasonRequired: 'أدخل السبب المدقّق أعلاه أولاً',
     cashDeductions: 'الحسومات النقدية',
     cashDeductionHint: 'ليست طلبات ولا حركات محفظة. كل حسم مشمول ينقص الكاش المتوقع وحصة السائق.',
+    paymentsLogArchiveHint:
+      'أرشيف اختياري فقط. هذه الصفوف لا تغيّر الطلبات أو BR1 أو الشريحة أو الحصص أو الدفتر.',
     included: 'مشمول',
     excluded: 'مستبعد',
     time: 'التاريخ / الوقت',

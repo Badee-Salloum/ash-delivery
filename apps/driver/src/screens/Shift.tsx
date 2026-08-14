@@ -32,6 +32,7 @@ import {
   normalizeDecimalDigits,
   odometerFromCloudFields,
   parseNonNegativeInteger,
+  slotLabel,
   splitSlot,
   submittableOrders,
   uploadEvidencePath,
@@ -62,6 +63,10 @@ import {
   odometerValueForRetake,
 } from '../odometer-flow.ts'
 import { type AiOcrAuthorityState, reduceAiOcrAuthority } from '../ai-ocr-authority.ts'
+import {
+  describeEndSubmitFailure,
+  type EndSubmitFailureNotice,
+} from '../end-submit-error.ts'
 import {
   beginAiPageRead,
   cancelAiPageRead,
@@ -1166,7 +1171,7 @@ function EndPackage({
   onBack?(): void
   onSubmitted(): void
 }): ReactNode {
-  const { api, t } = useApp()
+  const { api, t, lang } = useApp()
   const toast = useToast()
   const { cash, wallet, walletOcr, odo, odoConfirmed, slots, log: logState } = draft
   const odometerFields = endOdometerSubmission(odo, draft.odoOcr, odoConfirmed)
@@ -1180,6 +1185,8 @@ function EndPackage({
   )
   const [br1, setBr1] = useState<{ difference: string; balanced: boolean } | null>(null)
   const [busy, setBusy] = useState(false)
+  /** A server refusal stays beside the close button until the driver fixes it or retries. */
+  const [closeFailure, setCloseFailure] = useState<EndSubmitFailureNotice | null>(null)
   /** Exact failed files make AI retry one tap; Sets also identify which partial batch still failed. */
   const dashboardReadFiles = useRef<Map<string, File>>(new Map())
   const logReadFiles = useRef<Map<string, File>>(new Map())
@@ -1202,10 +1209,8 @@ function EndPackage({
 
   const [batteriesReady, setBatteriesReady] = useState(batteries.length === 0)
   // The zeroed-wallet photo was dropped (product owner) — the wallet screenshot is the evidence.
-  // «سجل المدفوعات» joins them: the balance screen says what the wallet HOLDS, the log says what
-  // MOVED, and only the log can tell a cash order from a part-electronic one (each order leaves
-  // Yallago's 20% in it at its own minute). It is evidence, not a gate — a driver whose log will
-  // not photograph must still be able to close, and the manager reconciles from the balance.
+  // «سجل المدفوعات» is optional archive/training evidence only. It neither classifies order pay
+  // modes nor changes BR1, so an unread or absent log must never keep a driver at the branch.
   const required = ['dashboard', 'wallet', 'odometer']
   const labels: Record<string, string> = {
     dashboard: t.shift.dashboardShot,
@@ -1257,7 +1262,6 @@ function EndPackage({
     // silently drops every order it was about to add, which is the shift closing short.
     ...(
       draft.dash.kind === 'reading' ||
-      draft.log.kind === 'reading' ||
       draft.walletCloud?.status === 'reading' ||
       draft.odoCloud?.status === 'reading'
         ? [t.shift.reading]
@@ -1293,6 +1297,7 @@ function EndPackage({
    */
   async function submit(): Promise<void> {
     if (odometerFields === null || draft.odoCloud?.status === 'reading') return
+    setCloseFailure(null)
     setBusy(true)
     try {
       const operations = await api.put<{ cashDeductions?: StoredCashDeductionView[] }>(`/shifts/${shift.id}/operations`, {
@@ -1367,6 +1372,11 @@ function EndPackage({
       if (res.br1.balanced) onSubmitted()
     } catch (e) {
       const err = e as { error?: string; detail?: { providerOrderNo?: string; businessDate?: string } }
+      const notice = describeEndSubmitFailure(
+        e,
+        t.shift.closeFailure,
+        (slot) => slotLabel(slot, t.shift.slotNames, lang),
+      )
       // The one failure a driver can actually act on: a row he scrolled too far back to reach.
       // «تعذّر الحفظ» tells him nothing; the order number and the day tell him which to uncheck.
       if (err.error === 'order_belongs_to_other_shift') {
@@ -1382,13 +1392,15 @@ function EndPackage({
           : no
         const message = `${t.errors.order_belongs_to_other_shift}: ${named}${day ? ` (${day})` : ''}`
         patch({ opsError: message })
+        setCloseFailure({ ...notice, lines: [message] })
         // The error card sits above a list that sits below ten photo tiles, and the driver tapping
         // submit is pinned to the footer at the bottom of a very long page. Unannounced, the
         // button simply greys and comes back and he taps it again, and again.
         toast.error(message)
         return
       }
-      toast.error((err.error && (t.errors as Record<string, string>)[err.error]) || t.common.actionFailed)
+      setCloseFailure(notice)
+      toast.error(`${notice.title}: ${notice.lines[0] ?? t.common.actionFailed}`)
     } finally {
       setBusy(false)
     }
@@ -1808,6 +1820,14 @@ function EndPackage({
               {t.shift.stillMissing} {missing.join(' · ')}
             </p>
           ) : null}
+          {closeFailure ? (
+            <div className="rounded-xl bg-red-50 p-3 text-red-800" role="alert" aria-live="assertive">
+              <p className="text-sm font-bold">{closeFailure.title}</p>
+              <ul className="mt-1 list-disc space-y-0.5 ps-5 text-sm">
+                {closeFailure.lines.map((line) => <li key={line}>{line}</li>)}
+              </ul>
+            </div>
+          ) : null}
           {submittedDifference ? (
             <div
               className={`flex items-center justify-between rounded-2xl px-4 py-2 ${
@@ -1883,10 +1903,10 @@ function EndPackage({
         today={shift.businessDate}
         suspectLocalIds={preview?.suspectLocalIds ?? []}
         onOrders={(orders) => onDraft((d) => ({ ...d, orders }))}
-        onMovements={(movements) => onDraft((d) => ({ ...d, movements }))}
         onCashDeductions={(cashDeductions) => onDraft((d) => ({ ...d, cashDeductions }))}
       />
 
+      <p className="text-sm text-slate-500">{t.shift.paymentsLogArchiveHint}</p>
       <PageGrid
         title={t.shift.paymentsLog}
         base={PAYMENTS_LOG_SLOT}
