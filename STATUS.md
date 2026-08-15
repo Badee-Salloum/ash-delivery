@@ -1,33 +1,38 @@
 # STATUS — where ASH Delivery stands
 
-Written for you coming back to this cold. **Last validated production baseline (migration `0032`,
-2026-08-15, Node 24):** the fixed-settlement release and resilient cloud OCR are live. `pnpm check`,
-both front-end builds, the standalone API build, and PostgreSQL 17 OCR reservation tests were green
-before release. Production applied 0032 once, retained a zero trial balance, and the API and driver
-PWA public smoke tests passed after coordinated promotion.
+Written for you coming back to this cold. **Last validated production baseline (commit `a150380`,
+migration `0033`, 2026-08-15, Node 24):** fixed settlement, resilient cloud OCR, three-pass printed
+time consensus, evidence thumbnails, and manager same-image rereads are live. The complete repository
+check and all **69** real PostgreSQL 17 DB tests passed before release. Production Neon PostgreSQL
+18.4 applied `0033` once with checksum `687e773f`; all stable API, admin, and driver smokes passed
+after coordinated promotion.
 
 ---
 
 ## The one-line answer
 
-**Bundle 1a, fixed settlement, and resilient AI order reading are live on Vercel + Neon + Vercel
-Blob.** The live API and database are on migration `0032`. Order screenshots use a compact financial
-pass with printed/value verification; a transient or partial failure has one atomic, image-specific
-retry and cannot create a third billed attempt.
+**Bundle 1a, fixed settlement, and verified AI order reading are live on Vercel + Neon + Vercel
+Blob.** The live API and database are on migration `0033`. Order screenshots use a compact financial
+pass plus three independent time reads; only literal printed AM/PM evidence participates in the time
+consensus. A disagreement remains `unknown` and is excluded until an audited manager decision.
 
 ## Live URLs (team `hadis-projects-3c86ccdb`, all public)
 
-| Surface | URL |
-| --- | --- |
-| Admin console | https://ash-admin-eta.vercel.app |
-| Driver PWA | https://ash-driver.vercel.app |
-| API | https://ash-api-xi.vercel.app |
+| Surface | URL | Live deployment |
+| --- | --- | --- |
+| Admin console | https://ash-admin-eta.vercel.app | `dpl_41fxrirN8uEcKRHcJaZ1ZKXaYJsv` |
+| Driver PWA | https://ash-driver.vercel.app | `dpl_6JVSMPr1ofVwnYhvYJYncygAFpia` |
+| API | https://ash-api-xi.vercel.app | `dpl_7kzCbcYFhuSXVFUtBG4fheEwiT95` |
 
-Neon (Postgres 18, eu-central-1) has the **32-migration live baseline** and is bootstrapped with the §3
-permission matrix, the Damascus branch, the historical tier table, and two admins
+Neon (PostgreSQL **18.4**, eu-central-1) has the **33-migration live baseline** and is bootstrapped
+with the §3 permission matrix, the Damascus branch, the historical tier table, and two admins
 (`admin`/system_admin, `gm`/general_manager)
 — **no demo data in the live ledger.** Full deploy detail and redeploy steps:
 [docs/DEPLOY-VERCEL-NEON.md](docs/DEPLOY-VERCEL-NEON.md).
+
+The validated production backup moved from `53` tables / `2,993` rows / `32` migrations before
+`0033` to `53` / `2,994` / `33` after it. All stable-alias smoke checks passed on the deployment IDs
+above.
 
 ---
 
@@ -36,19 +41,21 @@ permission matrix, the Damascus branch, the historical tier table, and two admin
 | Layer | State |
 | --- | --- |
 | **Domain** (money, BR1, settlement, ledger, shifts, RBAC, dates, FX, week, fleet, TOTP) | ✅ 423 tests, property-based |
-| **API** — A, B, C, E, F, G plus fixed settlement and evidence flows | ✅ 550 tests over real HTTP |
-| **PostgreSQL adapters** | ✅ OCR reservation suite passed on PostgreSQL 17; production migration/postflight passed |
-| **In-memory adapters** | ✅ 75 tests, including atomic OCR attempt/cap races |
-| **Shared client** (API client, i18n ar/en, order-entry model) | ✅ 229 tests |
-| **Driver PWA** | ✅ 240 tests, builds, service worker, live smoke passed |
-| **Admin console** | ✅ 21 tests, builds, live smoke passed |
+| **Contracts** | ✅ 10 tests |
+| **Shared client** (API client, i18n ar/en, order-entry model) | ✅ 247 tests |
+| **Driver PWA** | ✅ 241 tests, build, service worker, live smoke passed |
+| **Admin console** | ✅ 42 tests, build, live smoke passed |
+| **Adapters** | ✅ 97 tests, including atomic OCR attempt/cap races |
+| **API** — A, B, C, E, F, G plus fixed settlement and evidence flows | ✅ 558 tests over real HTTP |
+| **Database** | ✅ static run: 31 passed + 5 environment-gated skipped; real PostgreSQL 17: 69 passed |
 
 ### By SRS section — all in scope for Bundle 1a, all done
 
 - **A** auth (incl. **2FA/TOTP**), RBAC-as-data, audit, settings, branches, **notification bell**
 - **B** drivers, vehicles, documents + expiry, assignment
 - **C** shift lifecycle, canonical operation window, cash deductions, both gates, end-odo OCR,
-  evidence provenance, BR1 + ranked causes, **C-7 review UI**
+  three-pass printed-time consensus, unknown-operation exclusion, evidence provenance, BR1 + ranked
+  causes, and the **C-7 review UI with thumbnails and same-image manager reread**
 - **E** funds tree, double-entry, FX, **cash count**, **manual entries + corrections**, Sunday close
 - **F (historical baseline)** tier engine, whole + marginal, day true-up, effective-dated admin +
   what-if simulation. The new policy retires these write paths and uses fixed 40% per unapproved shift.
@@ -73,7 +80,9 @@ conformance at production because it truncates application tables.
 | Historical tier admin | retired | Tier tables remain readable for approved history; editing and publication are intentionally disabled by the fixed 40% policy. |
 | QR code on 2FA enrolment | ~1 h | The secret is shown for manual entry; a QR renderer is a nicety. |
 | Attendance (B-4) | ~0.5 day | Table only. |
-| Evidence thumbnails in C-7 | ~0.5 day | The review lists which slots are present; the id-addressed image endpoint exists, the `<img>` wiring does not. |
+
+Evidence thumbnails and same-image manager rereads are implemented. Unknown-time rows being excluded
+until an audited manager decision is a deliberate accounting guard, not an unfinished fallback.
 
 ---
 
@@ -82,8 +91,10 @@ conformance at production because it truncates application tables.
 1. **Send `docs/client-request-samples.md`.** Still the highest-value hour. The signed wallet/cash
    settlement is measured against a wallet number Yallago produces; compare one complete real shift
    before treating the variance explanation as calibrated. Variance no longer blocks submission.
-2. ~~**Prove the database release and restore path.**~~ **Done** on PostgreSQL 17 and isolated Neon;
-   the latest restore reproduced 2,360 rows across 52 tables. Destructive suites stay off production.
+2. ~~**Prove the database release and restore path.**~~ **Done** on PostgreSQL 17 and isolated Neon.
+   The current release additionally validated production backups before `0033` (`53` tables /
+   `2,993` rows / `32` migrations) and after it (`53` / `2,994` / `33`). Destructive suites stay off
+   production.
 3. ~~**Pick object storage.**~~ **Done — Vercel Blob (private).** `BLOB_DRIVER=vercel`, a
    `VercelBlobStore` adapter behind the `BlobStore` port, store linked to the `ash-api` project so
    `BLOB_READ_WRITE_TOKEN` is injected. The durable-storage boot guard accepts it; evidence photos

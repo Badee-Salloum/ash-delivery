@@ -5,7 +5,7 @@ intended procedure that nobody has executed. They are not evidence that anything
 
 ---
 
-## 1. Verifying the database guards — verified 2026-08-14
+## 1. Verifying the database guards — verified 2026-08-15
 
 Three claims hold up the architecture:
 
@@ -26,11 +26,11 @@ allows one** — then drops a trigger and confirms verification now FAILS, provi
 teeth. The same three steps run in CI (`.github/workflows/pr.yml` › `database`), so pushing the
 branch verifies them too.
 
-This was run green on disposable stock **PostgreSQL 17.11** databases on 2026-08-14: all guard
-groups and the complete PostgreSQL adapter conformance suite passed after all current migrations.
-An isolated Neon scratch database separately passed the release-backup restore, fingerprint,
-invariant, and rollback rehearsal. None of those targets was production; the conformance suite
-truncates its database and must never be pointed at the live Neon URL.
+For release `a150380`, the full Node 24 gates passed and the complete database suite ran **69/69**
+green on a real, disposable **PostgreSQL 17** database after all 33 migrations; every guard group
+also passed. An isolated Neon scratch database separately passed the historical release-backup
+restore, fingerprint, invariant, and rollback rehearsal. None of those targets was production; the
+conformance suite truncates its database and must never be pointed at the live Neon URL.
 
 **If a guard fails**, do not weaken the guard. The guard is the requirement (kickoff brief §4:
 immutability "in the app layer AND a DB-level guard"). Fix the schema.
@@ -87,7 +87,7 @@ carries the correction sequence so repeated corrections remain possible.
 
 ---
 
-## 5. Deploy / rollback / restore — Vercel + Neon exercised 2026-08-14
+## 5. Deploy / rollback / restore — Vercel + Neon exercised through 2026-08-15
 
 The live Vercel + Neon procedure below has been exercised, including a production migration,
 three deployments, smoke tests, and an isolated restore rehearsal. The separate VPS pipeline
@@ -157,19 +157,20 @@ match the manifest. A successful command without those checks is not a verified 
 **The schema is deliberately NOT in the backup.** It lives in `packages/db/migrations` under
 checksum, in version control. A restore is therefore: empty database → `pnpm migrate` → load.
 
-### Rolling out the shift-window / cash-deduction migrations on Vercel + Neon
+### Coordinated schema releases on Vercel + Neon
 
-These migrations backfill timestamps, install financial guards, and take heavyweight PostgreSQL
-locks. Treat them as a short maintenance operation, not as an ordinary hot deploy:
+The shift-window/cash-deduction rollout established this procedure. A schema release can install
+financial guards and take heavyweight PostgreSQL locks, so treat it as one coordinated maintenance
+operation, not as an ordinary hot deploy:
 
-1. On Node 24, run `pnpm check`, `pnpm build:apps`, and `node scripts/build-api.mjs`. Stage the new
-   API without promoting it, record both deployment ids, and run the production read-only preflight.
-   Record counts for `shifts`, `shift_orders`, `shift_media`, and `audit_log`; invariant probes must
-   find no cross-shift wallet/order links, cross-branch evidence, invalid minutes/odometers, or
-   unrecoverable open/submit boundaries.
-2. Enter a `try/finally` maintenance block: pause **only `ash-api`** through Vercel, verify `/health`
-   returns 503, and wait for two consecutive zero-activity database samples. The admin and driver
-   bundles may remain served, but their writes must fail while the API is paused.
+1. On Node 24, run `pnpm check`, `pnpm build:apps`, and `node scripts/build-api.mjs`. Stage the API,
+   admin, and driver artifacts without promoting them; record every current and candidate deployment
+   id. Run the production read-only preflight. Record counts for `shifts`, `shift_orders`,
+   `shift_media`, and `audit_log`; invariant probes must find no cross-shift wallet/order links,
+   cross-branch evidence, invalid minutes/odometers, or unrecoverable open/submit boundaries.
+2. Enter the maintenance block: pause **only `ash-api`** through Vercel, verify `/health` returns
+   503, and wait for two consecutive zero-activity database samples. The admin and driver bundles
+   may remain served, but their writes must fail while the API is paused.
 3. Take and fully validate the **pre-migration** HTTPS logical backup. Never run DB conformance
    against production: its `beforeEach` deliberately truncates every application table.
 4. Run exactly one HTTPS migration runner with the direct Neon **owner** connection. Migration is
@@ -186,16 +187,19 @@ locks. Treat them as a short maintenance operation, not as an ordinary hot deplo
 
    Verify `ash_runtime` can perform its required application work but cannot update/delete journal
    rows or create temporary tables. Permission probes must roll back their fixtures.
-6. Take and fully validate the **post-migration** logical backup. Promote the already-built API
-   while `ash-api` remains paused; keep the old deployment id available for code rollback.
-7. In the `finally` path, resume `ash-api`, then smoke-test stable `/health` = 200 and an
-   unauthenticated protected route = 401. The API pause spans the migration, postflight, backup,
-   and API promotion; never expose the old API to the new write path between those steps.
-8. Restore the post-migration backup into an empty, explicitly named scratch database. Verify
+6. Take and fully validate the **post-migration** logical backup while `ash-api` remains paused.
+7. Still inside maintenance, promote the already-built **API, admin, and driver together**. Keep
+   all three old deployment ids available for code rollback; do not let either UI write through an
+   old or mismatched API. If any promotion fails, keep the API paused until all three aliases are
+   coherently restored to the old set or advanced to the new set.
+8. Only after all three stable aliases point at one coordinated release, resume `ash-api` and
+   smoke-test stable `/health` = 200, an unauthenticated protected route = 401, both front-end
+   proxies and SPA fallbacks, the driver manifest, and its service worker. The API pause spans
+   migration, postflight, post-backup, and all three promotions. Inspect the target live shift
+   before approval; do not patch the ledger manually to manufacture a balance.
+9. Restore the post-migration backup into an empty, explicitly named scratch database. Verify
    migration checksums, all row/fingerprint counts, zero trial balance, sequences, enabled triggers,
    and a write-with-rollback probe. Never use the production database as the restore target.
-9. Deploy and smoke-test admin, then the driver PWA. Inspect the target live shift before approval;
-   do not patch the ledger manually to manufacture a balance.
 
 The migration framework is intentionally forward-only. “Rollback” here means restoring the
 pre-migration Neon branch/snapshot or rebuilding an empty branch and loading the verified logical
@@ -205,6 +209,10 @@ old API deployment available for a code rollback, but restore the database when 
 schema boundary.
 
 ### Rolling out fixed 40% wallet/cash settlement (`0031`)
+
+> **Historical release procedure for `0031`.** Keep it as evidence of that rollout; for every new
+> schema release use the coordinated sequence above, including post-backup before promotion and
+> promotion of all three surfaces before unpausing.
 
 This is a coordinated money-policy release. It changes every shift that is not already approved,
 retires tier publication, and adds immutable settlement snapshots. Deploy database, API, admin, and
@@ -257,18 +265,47 @@ pre-migration database discards approvals made after that backup; rolling back o
 reintroducing daily tiers for pending shifts. Escalate and choose a ledger-preserving forward fix or
 an explicitly accepted point-in-time restore.
 
+### Order-time verification and unknown-operation exclusion (`0033`)
+
+Release `a150380` is live with migration `0033`, the 33rd migration. For each Recent Orders image,
+three independently started AI passes can supply time evidence at the same card position. A clock
+is accepted only when at least two passes agree on the **literal printed time**, including the
+printed AM/PM marker; only after that vote does deterministic code convert it to 24-hour time.
+Disagreement, a missing marker on an ambiguous 1–12 clock, or otherwise insufficient evidence yields
+`windowStatus: unknown`. Migration `0033` forces every unresolved unknown order or cash deduction
+to `included = false`, so it is excluded from BR1 and fixed settlement until a manager records an
+audited correction or inclusion/exclusion decision.
+
+The order-reader cache signature changed with this logic. Answers created under old `11:*`
+signatures are not eligible cache hits. A failed or partial result under the current signature gets
+at most **one explicit retry**; repeated clicks must not create an unbounded paid-read path. A
+manager reread uses the exact stored evidence attachment selected in the review and returns all rows
+as suggestions only. It cannot mutate an operation or settlement. The separate audit event records
+who requested it, why, the media id and immutable attachment token, result/usage metadata, and the
+reviewed order and settlement hashes; applying any suggestion requires a separate audited action.
+
+Release evidence: the full Node 24 gates passed, as did **69/69** database tests on real disposable
+PostgreSQL 17 after all 33 migrations. The validated production backups were 53 tables / 2,993 rows /
+32 migrations before maintenance and 53 / 2,994 / 33 afterward; the applied `0033` ledger checksum
+was `687e773f`. The API stayed paused through migration, postflight, post-backup, and coordinated
+promotion of API, admin, and driver; it was unpaused only before the final smoke tests.
+
 ### Manager procedure for approving a submitted shift
 
-1. Confirm the screen identifies the difference as **surplus**, **shortage**, or **zero** and shows
+1. Resolve every `unknown`-time order or cash deduction before touching the physical handover
+   confirmations. It starts outside BR1 and settlement. Correct its printed date/time or make an
+   explicit include/exclude decision with the real reason; a stored-image AI reread is only a
+   suggestion and never makes that decision for the manager.
+2. Confirm the screen identifies the difference as **surplus**, **shortage**, or **zero** and shows
    delivery fees, fixed 40% share, manual share, cash deductions, expected, collected, variance, and
    final employee settlement.
-2. Execute the displayed full-wallet action and tick its confirmation only afterward.
-3. Execute exactly the displayed cash action — collect from the employee or pay the employee — and
+3. Execute the displayed full-wallet action and tick its confirmation only afterward.
+4. Execute exactly the displayed cash action — collect from the employee or pay the employee — and
    tick its confirmation only afterward. Do not leave share unpaid and do not convert a shortage to
    a receivable.
-4. If variance is non-zero, enter the actual explanation. Payments Log evidence may be attached for
+5. If variance is non-zero, enter the actual explanation. Payments Log evidence may be attached for
    archive, but never require it and never add its rows to today's orders or wallet.
-5. Approve. If the server reports a stale settlement, reload and repeat the physical comparison;
+6. Approve. If the server reports a stale settlement, reload and repeat the physical comparison;
    never reuse the old confirmations against changed orders, deductions, or declared balances.
 
 If approval fails, show and act on the named validation issue: incomplete end evidence, unresolved
@@ -432,6 +469,14 @@ SELECT to_char(r.created_at AT TIME ZONE 'Asia/Damascus', 'HH24:MI') AS at,
 training observation, but it does not publish field values. `ocr_reads` remains the definitive
 server record of the model call and its structured failure/success reason; an explicit typed value
 is still the human override and the manager sees its delta from the stored cloud baseline.
+
+For Recent Orders, “cloud authority” means the `0033` consensus rule, not one completion: three
+independent passes provide time evidence, two must agree on the literal printed clock, and AM/PM is
+converted deterministically only after that vote. An unresolved clock stays `unknown` and excluded
+from BR1/settlement pending an audited manager decision. Old `11:*` cache signatures are invalid;
+the current failed/partial image read permits one explicit retry. Rereading that same stored image
+from manager review is suggestion-only and creates its own audit event—it never edits money by
+itself. See §5's `0033` release section for the full control and release evidence.
 
 **Watching the bill.** `ocr_reads` is the only cost meter that exists.
 

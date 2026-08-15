@@ -10,7 +10,7 @@ every movement is a balanced double-entry posting, and the financial week freeze
 
 ```bash
 pnpm install
-pnpm check     # typecheck + domain purity + SQL static checks + 260 tests (~15 s, no Docker)
+pnpm check     # full Node 24 gate: typecheck, repository guards, and workspace tests (no Docker)
 ```
 
 The whole domain suite runs without Docker or a database, by construction — `packages/domain` has
@@ -28,7 +28,7 @@ docker compose -f infra/compose/docker-compose.dev.yml up -d
 | Path | What |
 | --- | --- |
 | [packages/domain/](packages/domain/) | ★ The money core. Pure, zero-dependency. Every rule that decides where money goes. |
-| [packages/db/migrations/](packages/db/migrations/) | Hand-written SQL. ⚠ Not yet executed — see below. |
+| [packages/db/migrations/](packages/db/migrations/) | 33 forward-only, hand-written SQL migrations; production is live through `0033`. |
 | [packages/db/verify-guards.sql](packages/db/verify-guards.sql) | Attempts every illegal write and fails if the database allows one. |
 | [scripts/](scripts/) | `check-domain-pure.mjs`, `check-sql.mjs`, `db-verify.sh` — all negative-tested. |
 | [CLAUDE.md](CLAUDE.md) | Business rules BR1–BR8 + conventions. Read this first. |
@@ -55,13 +55,20 @@ Authoritative specs: [SRSv1.0.md](SRSv1.0.md) (Arabic) and [CLAUDECODEKICKOFF.md
 ## Current state, honestly
 
 **Bundle 1a now has a Fastify API, an Arabic-first admin console, and a driver PWA.** All three have
-live Vercel projects; the source of truth for the latest rollout state and remaining acceptance
-work is [PROGRESS.md](PROGRESS.md), not the older milestone estimates below.
+live Vercel projects, and Neon is live at migration `0033` (33 total) after release `a150380`; the
+source of truth for rollout state and remaining acceptance work is [PROGRESS.md](PROGRESS.md), not
+the older milestone estimates below.
 
-The database ports are exercised by the shared memory/PostgreSQL conformance suite. On
-2026-08-14 the full migration chain, PostgreSQL conformance suite, and every illegal-write probe in
-`verify-guards.sql` passed on disposable stock PostgreSQL 17.11 databases. An isolated Neon scratch
-database separately passed the backup restore, fingerprint, invariant, and rollback rehearsal.
-Never run the destructive conformance suite against production.
+On 2026-08-15 the full Node 24 gates passed, and the complete 69/69 database suite passed on a real,
+disposable PostgreSQL 17 database after all 33 migrations. Production migration and postflight were
+read-only apart from the migration itself; never run the destructive conformance suite against
+production. The earlier isolated Neon restore/fingerprint rehearsal remains the recovery evidence
+for that historical baseline.
+
+Recent Orders OCR now requires two agreeing observations from three independent time-evidence
+passes. It votes on the literal printed clock before deterministic AM/PM conversion; disagreement
+or insufficient evidence leaves the operation `unknown` and outside BR1 and settlement until an
+audited manager action resolves it. See [RUNBOOK.md](RUNBOOK.md) for retry and stored-image reread
+rules.
 
 See [STATUS.md](STATUS.md) for the full breakdown, including the six bugs the tests caught.

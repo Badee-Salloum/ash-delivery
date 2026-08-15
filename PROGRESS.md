@@ -1,6 +1,37 @@
 # PROGRESS
 
+## 2026-08-15 — verified order times and focused close review deployed
+
+Commit `a150380` is live. Recent Orders now uses a three-pass AI consensus for printed dates and
+times, including the literal AM/PM marker on the image. A disagreement is recorded as `unknown`
+rather than guessed. Migration `0033` makes that uncertainty financially safe: an unknown-time
+operation is excluded until a manager records an audited decision. The corrected incident replay
+contains **six included orders totalling `1,570.00` and one excluded duplicate** — not the earlier
+reduced five-row `1,415` fixture.
+
+The close workspace now puts evidence thumbnails beside the operations that need attention. A
+manager can reread the exact stored Recent Orders image without asking the driver to upload it
+again; the result is a suggestion only and does not enter accounting until the manager saves the
+audited correction or inclusion decision.
+
+Release evidence: the complete Node 24 check passed with domain **423**, contracts **10**, shared
+client **247**, driver **241**, admin **42**, adapters **97**, and API **558** tests. The static DB
+run passed **31** with **5** environment-gated skips, and a real PostgreSQL 17 run passed **69** DB
+tests. Production Neon PostgreSQL **18.4** was backed up before the migration (`53` tables / `2,993`
+rows / `32` migrations), applied `0033`, and produced a validated post-migration backup (`53` /
+`2,994` / `33`) with migration checksum `687e773f`.
+
+The stable aliases now point to API deployment `dpl_7kzCbcYFhuSXVFUtBG4fheEwiT95`, admin
+`dpl_41fxrirN8uEcKRHcJaZ1ZKXaYJsv`, and driver `dpl_6JVSMPr1ofVwnYhvYJYncygAFpia`. All stable
+API, admin, and driver smoke checks passed after promotion.
+
+---
+
 ## 2026-08-15 — resilient AI order reading deployed
+
+> Historical release record for migration `0032`. Its deployment evidence remains valid; the
+> reduced `1,415` regression below did not represent the complete incident and is superseded by the
+> six-order `1,570.00` replay plus one excluded duplicate in the release above.
 
 The reported Recent Orders image did not produce a bad client merge: its two production AI calls
 both reached the 50-second timeout with no rows. The surviving `550` total belonged to the sibling
@@ -8,8 +39,9 @@ image. The old cache then made a same-image Retry replay that timeout without ca
 
 Orders now run a compact money/date/time pass before optional route enrichment. Every accepted
 non-cancelled amount is re-derived from the printed glyph string; disagreement between independent
-AI passes becomes an explicit refused row, never an arbitrary fee. The exact incident fixture is
-covered as `155 + 240 + 225 + 425 + 370 = 1,415`.
+AI passes becomes an explicit refused row, never an arbitrary fee. At this release, the reduced
+five-row regression was covered as `155 + 240 + 225 + 425 + 370 = 1,415`; it was not the complete
+incident fixture and is corrected by the release above.
 
 Migration `0032` makes every paid logical read an atomic reservation keyed by branch, image hash,
 field, and reader signature. It serializes the per-shift cap, allows one explicit retry for a
@@ -25,6 +57,9 @@ balance. API health is `200`, `/fx` is `401` without auth, and the public driver
 service worker, SPA fallback, and `/api/health` all return `200` on the promoted deployment.
 
 ## 2026-08-15 — fixed 40% shift settlement deployed
+
+> Historical release record for migration `0031`. Its deployment and policy evidence remains
+> valid for that earlier release.
 
 The product owner replaced daily tiers and the old zero-difference close gate with one per-shift
 settlement. Every shift that was not already approved at policy launch uses

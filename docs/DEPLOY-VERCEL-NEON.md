@@ -15,7 +15,7 @@ Team `hadis-projects-3c86ccdb`, three projects, all public (no deployment protec
 | Admin console | https://ash-admin-eta.vercel.app | React SPA, `/api/*` proxied to the API |
 | Driver PWA | https://ash-driver.vercel.app | installable PWA, `/api/*` proxied to the API |
 | API | https://ash-api-xi.vercel.app | Fastify serverless function |
-| Database | Neon `ep-billowing-butterfly-…` (eu-central-1, **Postgres 18**) | migrated + bootstrapped |
+| Database | Neon `ep-billowing-butterfly-…` (eu-central-1, **Postgres 18**) | live at `0033` (33 migrations) + bootstrapped |
 | Evidence | Vercel Blob store `ash-evidence` (private) | linked to `ash-api` |
 
 Verified end to end: `POST /api/auth/login` → 200 with a session cookie that survives the proxy;
@@ -91,8 +91,9 @@ different driver. Idempotent: safe to re-run.
 
 ### 1.4 Prove guards and adapters only on disposable databases
 
-The full PostgreSQL suite passed **40/40** on stock PostgreSQL 17.11 after all 30 migrations, and the
-guard harness passed every group. The isolated Neon scratch was used separately for the backup
+For release `a150380`, the full Node 24 gates passed and the complete PostgreSQL suite passed
+**69/69** on a real, disposable PostgreSQL 17 database after all 33 migrations; the guard harness
+also passed every group. The isolated Neon scratch was used separately for the historical backup
 restore, fingerprint, invariant, sequence, trigger, and rollback rehearsal. The PostgreSQL suite
 and guard harness are destructive verification tools, not production health checks: conformance
 runs `TRUNCATE` in `beforeEach`, and the guard harness intentionally attempts forbidden writes.
@@ -146,6 +147,12 @@ token as a bearer credential, and the media route streams bytes server-side afte
 `S3BlobStore` remains available (`BLOB_DRIVER=s3`, hand-rolled SigV4) for a VPS or R2/B2 deploy.
 Storage estimate from SRS §7: ~10 GB/year at 10 vehicles, ~100 GB at 100.
 
+A manager may ask the API to reread one explicitly selected, immutable Recent Orders attachment.
+That operation returns **suggestions only**: it never edits an order, cash deduction, BR1 input, or
+settlement. The audit trail records the selected media id and attachment token, requester, reason,
+read result, and the reviewed order/settlement hashes; applying a suggestion remains a separate,
+explicit audited manager action.
+
 ---
 
 ## 4. The API function build
@@ -166,10 +173,11 @@ tracer does not follow pnpm's symlinks). `api/index.mjs` and `public/` are gener
 | Logical backups | A function deployment is not a backup scheduler | Neon PITR + scheduled HTTPS logical exports to separately controlled storage |
 | The demo seed | Guarded to refuse production | Local / staging only |
 
-Neon's branching gives point-in-time recovery, but it is not the independent logical copy. The
-2026-08-14 rehearsal restored **2,360 rows across 52 tables** into an isolated scratch database and
-verified fingerprints, zero trial balance, sequences, enabled triggers, and a write rollback. See
-`RUNBOOK.md` for the procedure and the earlier measured RTO; keep rehearsing as data volume grows.
+Neon's branching gives point-in-time recovery, but it is not the independent logical copy.
+Historical recovery evidence: the 2026-08-14 rehearsal restored **2,360 rows across 52 tables** into
+an isolated scratch database and verified fingerprints, zero trial balance, sequences, enabled
+triggers, and a write rollback. See `RUNBOOK.md` for the procedure and the earlier measured RTO;
+keep rehearsing as data volume grows.
 
 ---
 
@@ -197,15 +205,18 @@ redeploy a front-end: `pnpm build:apps`, copy `apps/<app>/dist/*` into a staging
 
 ## 7. Deploy checklist
 
-For every schema release: stage the API first; pause `ash-api` and drain database activity; validate
-a pre-migration logical backup; migrate once as the owner; run read-only postflight and runtime-role
-denial probes; validate the post-migration backup; then promote the API **while it is still paused**.
-Unpause in a `finally` path, smoke-test the stable API, deploy both front-ends, and restore the new
-backup into an isolated scratch database. The detailed, failure-aware sequence is in `RUNBOOK.md` §5.
+For every schema release: build and stage candidate API, admin, and driver artifacts first; pause
+`ash-api` and drain database activity; validate the pre-migration logical backup; migrate once as
+the owner; run read-only postflight and rolled-back runtime-role denial probes; then validate the
+post-migration backup. Keep the API paused while promoting **API, admin, and driver together**.
+If one promotion fails, keep it paused until all three aliases are coherently back on the old set or
+forward on the new set. Only then unpause the API and smoke-test health/auth, both proxies, both
+SPAs, the manifest, and service worker. Then restore the new backup into an isolated scratch
+database. The detailed, failure-aware sequence is in `RUNBOOK.md` §5.
 
-- [x] All 30 migrations applied against the **direct owner** Neon URL (§1.2)
+- [x] All 33 migrations applied against the **direct owner** Neon URL (§1.2); live head is `0033`
 - [x] Production floor bootstrapped: §3 matrix, branch, tier table, two admins (§1.3)
-- [x] PostgreSQL 17 adapter suite 40/40 and database guards green on disposable databases (§1.4)
+- [x] Release `a150380`: full Node 24 gates and PostgreSQL 17 suite 69/69 green (§1.4)
 - [x] Isolated Neon restore/fingerprint/invariant rehearsal passed; never run conformance on production
 - [x] `BLOB_DRIVER=vercel` with a private store linked; round-trip proven by spike
 - [x] `DATABASE_URL` uses least-privilege `ash_runtime` on the **pooled** endpoint, `DB_POOL_MAX=3`
@@ -213,10 +224,12 @@ backup into an isolated scratch database. The detailed, failure-aware sequence i
 - [x] `BR1_SPLIT_GATE=advisory` for the pilot
 - [x] Real admin users created by bootstrap (not the demo seed)
 - [x] Pre- and post-migration logical backups fully validated
-- [x] API, admin, and driver deployed and smoke-tested after migration `0031` (2026-08-15)
-- [x] Fixed-settlement pre/post backups validated: 52/2,687/30 then 53/2,688/31
-- [x] Production postflight: zero trial balance, two open shifts unchanged, runtime TEMP and ledger writes denied
-- [x] Restore rehearsed: 52 tables / 2,360 rows plus fingerprints, trial, sequences, triggers, rollback
+- [x] Pre-release backup validated: 53 tables / 2,993 rows / 32 migrations
+- [x] Post-release backup validated: 53 tables / 2,994 rows / 33 migrations; `0033` checksum `687e773f`
+- [x] API, admin, and driver promoted together while paused, then unpaused and smoke-tested after `0033`
+- [x] Three-pass literal-time consensus live; old `11:*` order-cache results invalidated and one explicit retry retained
+- [x] Production read-only postflight completed while paused, before post-backup and promotion
+- [x] Historical 2026-08-14 restore rehearsal: 52 tables / 2,360 rows plus fingerprints, trial, sequences, triggers, rollback
 - [x] Neon scratch database dropped normally after confirming zero active sessions
 - [x] Neon owner credential rotated; old direct and pooled credentials rejected
 - [x] Runtime and owner database secrets protected outside the repository with Windows DPAPI
