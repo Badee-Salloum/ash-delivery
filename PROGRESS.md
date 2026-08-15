@@ -1,5 +1,45 @@
 # PROGRESS
 
+## 2026-08-15 — branch treasury clarity deployed
+
+The branch treasury now separates the physical-count variance (`counted − system balance`) from
+the capital variance (`counted + receivables − target`). Cash and wallet each show the
+frozen system balance, counted value, explicit surplus/shortage direction, absolute amount, and the
+audited explanation. A non-zero count cannot be sealed without its own server-validated reason,
+and the complete sealed result is restored after refresh.
+
+The restoration card keeps cash and wallet legs visible independently, uses directional transfer
+copy without negative display amounts, and shows the live current position, target, and capital
+surplus/shortage. After execution it reloads the post-action ledger position immediately and uses
+`alreadyRestored` to prevent a fresh-looking replay. The Excel acceptance examples are encoded in
+tests: `6,102,152 − 5,000,000 = 1,102,152` capital surplus, and corrected kaish
+`9,582,553 − 504,322 = 9,078,231` while shahn remains separately classified.
+
+The management dashboard now labels company revenue as “company share before expenses” and shows
+the signed capital delta. Company-fund data is neither requested nor rendered for branch managers.
+Reversals preserve `kaish`/`shahn` line roles; historical `reversal-of-<entryId>` corrections are
+also netted into the original movement category without a database migration. This deliberately
+does not add the spreadsheet's historical `177,000` reconciliation report.
+
+Release state: commit `d7b6643` is live. Node 24 `pnpm check` passed, including API **566**, domain
+**424**, client **248**, adapters **98**, and the existing DB static suite. A disposable PostgreSQL
+17.11 run passed the full DB suite **70/70**, including a real `kaish` line-role round trip. The
+final admin suite passed **53/53** and its production build passed. This was a code-only release:
+there was no migration, production database write, or driver deployment.
+
+The stable aliases now point to API deployment `dpl_3QkzHvaJ1ijymQWE2oZU8PQzqQXE` and admin
+deployment `dpl_8n3sLrMGjF7FQj7EVAhqbbhCM86W`; driver remains on
+`dpl_6JVSMPr1ofVwnYhvYJYncygAFpia`. Stable API health and both admin routes/proxies returned `200`,
+protected API routes returned `401`, and the promoted bundle contains the new capital, funding,
+company-share, and count-reason copy. The only build note is the existing Vite bundle-size warning.
+
+See it in two minutes: open «خزينة الفرع», enter matching and differing cash/wallet counts, confirm
+that a reason is required only for each difference, then preview a mixed-leg restoration and verify
+that both directions remain visible. After executing in a disposable environment, refresh and
+confirm the current position is at target and the action cannot be repeated.
+
+---
+
 ## 2026-08-15 — verified order times and focused close review deployed
 
 Commit `a150380` is live. Recent Orders now uses a three-pass AI consensus for printed dates and

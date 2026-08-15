@@ -1,28 +1,32 @@
 # STATUS — where ASH Delivery stands
 
-Written for you coming back to this cold. **Last validated production baseline (commit `a150380`,
-migration `0033`, 2026-08-15, Node 24):** fixed settlement, resilient cloud OCR, three-pass printed
-time consensus, evidence thumbnails, and manager same-image rereads are live. The complete repository
-check and all **69** real PostgreSQL 17 DB tests passed before release. Production Neon PostgreSQL
-18.4 applied `0033` once with checksum `687e773f`; all stable API, admin, and driver smokes passed
-after coordinated promotion.
+Written for you coming back to this cold. **Last validated production baseline (commit `d7b6643`,
+migration `0033`, 2026-08-15, Node 24):** the clarified branch treasury, fixed settlement, resilient
+cloud OCR, three-pass printed-time consensus, evidence thumbnails, and manager same-image rereads
+are live. The complete repository check and all **70** real PostgreSQL 17 DB tests passed before the
+latest code-only release. Production Neon PostgreSQL 18.4 remains on `0033` with checksum
+`687e773f`; the stable API and admin smokes passed after promotion, and the unchanged driver stayed
+on its prior validated deployment.
 
 ---
 
 ## The one-line answer
 
-**Bundle 1a, fixed settlement, and verified AI order reading are live on Vercel + Neon + Vercel
-Blob.** The live API and database are on migration `0033`. Order screenshots use a compact financial
-pass plus three independent time reads; only literal printed AM/PM evidence participates in the time
-consensus. A disagreement remains `unknown` and is excluded until an audited manager decision.
+**Bundle 1a, fixed settlement, verified AI order reading, and the clarified branch treasury are live
+on Vercel + Neon + Vercel Blob.** The treasury separates physical-count variance from capital
+variance, requires an audited reason for every non-zero count line, and displays both restoration
+legs with explicit directions. The live API and database remain on migration `0033`. Order
+screenshots use a compact financial pass plus three independent time reads; only literal printed
+AM/PM evidence participates in the time consensus. A disagreement remains `unknown` and is excluded
+until an audited manager decision.
 
 ## Live URLs (team `hadis-projects-3c86ccdb`, all public)
 
 | Surface | URL | Live deployment |
 | --- | --- | --- |
-| Admin console | https://ash-admin-eta.vercel.app | `dpl_41fxrirN8uEcKRHcJaZ1ZKXaYJsv` |
+| Admin console | https://ash-admin-eta.vercel.app | `dpl_8n3sLrMGjF7FQj7EVAhqbbhCM86W` |
 | Driver PWA | https://ash-driver.vercel.app | `dpl_6JVSMPr1ofVwnYhvYJYncygAFpia` |
-| API | https://ash-api-xi.vercel.app | `dpl_7kzCbcYFhuSXVFUtBG4fheEwiT95` |
+| API | https://ash-api-xi.vercel.app | `dpl_3QkzHvaJ1ijymQWE2oZU8PQzqQXE` |
 
 Neon (PostgreSQL **18.4**, eu-central-1) has the **33-migration live baseline** and is bootstrapped
 with the §3 permission matrix, the Damascus branch, the historical tier table, and two admins
@@ -40,14 +44,14 @@ above.
 
 | Layer | State |
 | --- | --- |
-| **Domain** (money, BR1, settlement, ledger, shifts, RBAC, dates, FX, week, fleet, TOTP) | ✅ 423 tests, property-based |
+| **Domain** (money, BR1, settlement, ledger, shifts, RBAC, dates, FX, week, fleet, TOTP) | ✅ 424 tests, property-based |
 | **Contracts** | ✅ 10 tests |
-| **Shared client** (API client, i18n ar/en, order-entry model) | ✅ 247 tests |
+| **Shared client** (API client, i18n ar/en, order-entry model) | ✅ 248 tests |
 | **Driver PWA** | ✅ 241 tests, build, service worker, live smoke passed |
-| **Admin console** | ✅ 42 tests, build, live smoke passed |
-| **Adapters** | ✅ 97 tests, including atomic OCR attempt/cap races |
-| **API** — A, B, C, E, F, G plus fixed settlement and evidence flows | ✅ 558 tests over real HTTP |
-| **Database** | ✅ static run: 31 passed + 5 environment-gated skipped; real PostgreSQL 17: 69 passed |
+| **Admin console** | ✅ 53 tests, build, live smoke passed |
+| **Adapters** | ✅ 98 tests, including atomic OCR attempt/cap races |
+| **API** — A, B, C, E, F, G plus fixed settlement and evidence flows | ✅ 566 tests over real HTTP |
+| **Database** | ✅ static run: 31 passed + 5 environment-gated skipped; real PostgreSQL 17: 70 passed |
 
 ### By SRS section — all in scope for Bundle 1a, all done
 
