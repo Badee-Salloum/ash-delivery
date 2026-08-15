@@ -1,19 +1,19 @@
 # STATUS — where ASH Delivery stands
 
-Written for you coming back to this cold. **Last validated production baseline (migration `0031`,
-2026-08-15, Node 24):** the fixed-settlement release is live. `pnpm check`, both front-end builds,
-the standalone API build, PostgreSQL 17's 59/59 tests, and all database guards were green before
-release. Production applied 0031 once, retained a zero trial balance and the same two open shifts,
-and the API, admin, and driver public smoke tests all passed after promotion.
+Written for you coming back to this cold. **Last validated production baseline (migration `0032`,
+2026-08-15, Node 24):** the fixed-settlement release and resilient cloud OCR are live. `pnpm check`,
+both front-end builds, the standalone API build, and PostgreSQL 17 OCR reservation tests were green
+before release. Production applied 0032 once, retained a zero trial balance, and the API and driver
+PWA public smoke tests passed after coordinated promotion.
 
 ---
 
 ## The one-line answer
 
-**Bundle 1a and the fixed 40% wallet/cash settlement are live on Vercel + Neon + Vercel Blob.**
-The live API, both front-ends, and database are on migration `0031`; tiers are historical/read-only,
-non-zero BR1 no longer blocks driver submission, and manager approval requires the wallet and cash
-confirmations bound to the current settlement hash.
+**Bundle 1a, fixed settlement, and resilient AI order reading are live on Vercel + Neon + Vercel
+Blob.** The live API and database are on migration `0032`. Order screenshots use a compact financial
+pass with printed/value verification; a transient or partial failure has one atomic, image-specific
+retry and cannot create a third billed attempt.
 
 ## Live URLs (team `hadis-projects-3c86ccdb`, all public)
 
@@ -23,7 +23,7 @@ confirmations bound to the current settlement hash.
 | Driver PWA | https://ash-driver.vercel.app |
 | API | https://ash-api-xi.vercel.app |
 
-Neon (Postgres 18, eu-central-1) has the **31-migration live baseline** and is bootstrapped with the §3
+Neon (Postgres 18, eu-central-1) has the **32-migration live baseline** and is bootstrapped with the §3
 permission matrix, the Damascus branch, the historical tier table, and two admins
 (`admin`/system_admin, `gm`/general_manager)
 — **no demo data in the live ledger.** Full deploy detail and redeploy steps:
@@ -36,11 +36,11 @@ permission matrix, the Damascus branch, the historical tier table, and two admin
 | Layer | State |
 | --- | --- |
 | **Domain** (money, BR1, settlement, ledger, shifts, RBAC, dates, FX, week, fleet, TOTP) | ✅ 423 tests, property-based |
-| **API** — A, B, C, E, F, G plus fixed settlement and evidence flows | ✅ 543 tests over real HTTP |
-| **PostgreSQL adapters** | ✅ 59/59 on PostgreSQL 17; production migration/postflight passed |
-| **In-memory adapters** | ✅ 62 tests against the shared contracts |
-| **Shared client** (API client, i18n ar/en, order-entry model) | ✅ 223 tests |
-| **Driver PWA** | ✅ 233 tests, builds, service worker, live smoke passed |
+| **API** — A, B, C, E, F, G plus fixed settlement and evidence flows | ✅ 550 tests over real HTTP |
+| **PostgreSQL adapters** | ✅ OCR reservation suite passed on PostgreSQL 17; production migration/postflight passed |
+| **In-memory adapters** | ✅ 75 tests, including atomic OCR attempt/cap races |
+| **Shared client** (API client, i18n ar/en, order-entry model) | ✅ 229 tests |
+| **Driver PWA** | ✅ 240 tests, builds, service worker, live smoke passed |
 | **Admin console** | ✅ 21 tests, builds, live smoke passed |
 
 ### By SRS section — all in scope for Bundle 1a, all done

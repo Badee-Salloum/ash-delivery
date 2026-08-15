@@ -1,5 +1,29 @@
 # PROGRESS
 
+## 2026-08-15 — resilient AI order reading deployed
+
+The reported Recent Orders image did not produce a bad client merge: its two production AI calls
+both reached the 50-second timeout with no rows. The surviving `550` total belonged to the sibling
+image. The old cache then made a same-image Retry replay that timeout without calling AI again.
+
+Orders now run a compact money/date/time pass before optional route enrichment. Every accepted
+non-cancelled amount is re-derived from the printed glyph string; disagreement between independent
+AI passes becomes an explicit refused row, never an arbitrary fee. The exact incident fixture is
+covered as `155 + 240 + 225 + 425 + 370 = 1,415`.
+
+Migration `0032` makes every paid logical read an atomic reservation keyed by branch, image hash,
+field, and reader signature. It serializes the per-shift cap, allows one explicit retry for a
+timeout or partial read, bills a cross-shift retry to its requester, uses a PostgreSQL-clock lease,
+and ignores legacy prompt/cache answers. The PWA identifies the failed image, preserves accepted
+rows, repairs matching refused cards on retry, and removes the retry button after attempt two.
+
+Release evidence: commit `96bb69e`; Node 24 `pnpm check`, both app builds, and the standalone API
+build passed. Production was paused and drained, then fully validated backups were taken before
+(`53` tables / `2,915` rows / `31` migrations) and after (`53` / `2,916` / `32`). Postflight found
+all eight reservation columns, the versioned cache index, zero running reservations, and zero trial
+balance. API health is `200`, `/fx` is `401` without auth, and the public driver PWA, manifest,
+service worker, SPA fallback, and `/api/health` all return `200` on the promoted deployment.
+
 ## 2026-08-15 — fixed 40% shift settlement deployed
 
 The product owner replaced daily tiers and the old zero-difference close gate with one per-shift
