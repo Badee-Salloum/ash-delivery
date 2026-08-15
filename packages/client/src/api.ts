@@ -284,6 +284,8 @@ export interface RestorationView {
   businessDate: string
   /** Preview only: whether tonight's count has been sealed yet (decision j gates on this). */
   counted?: boolean
+  /** True after today's immutable restoration posting exists; prevents a fresh-looking replay after reload. */
+  alreadyRestored?: boolean
   legs: RestorationLegView[]
   netToCompany: string
   feasible: boolean
@@ -862,7 +864,10 @@ export class ApiClient {
 
   /** What tonight's ترميم WOULD do, read from the sealed count. Posts nothing. */
   restorationPreview() {
-    return this.get<RestorationView>(`/treasury/restoration/preview${this.branchId ? `?branchId=${this.branchId}` : ''}`)
+    // `get()` already scopes branch reads. Building the query here as well produced duplicate
+    // `branchId` parameters for organisation-wide actors, which some query parsers expose as an
+    // array and the server correctly refuses as an invalid branch selector.
+    return this.get<RestorationView>('/treasury/restoration/preview')
   }
   /** Performs it. The plan is re-derived server-side from the count — nothing here is trusted. */
   restore(reason: string) {

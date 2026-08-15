@@ -200,6 +200,34 @@ describe('الترميم — the daily restoration', () => {
     expect(await companyFund()).toBe(sypStr(500_000))
   })
 
+  it('returns the live post-action position after reload while keeping the restoration record immutable', async () => {
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(4_500_000))
+    await seedFund(manager, 'office_wallet', sypStr(1_000_000))
+    await countBoxes(manager, sypStr(4_500_000), sypStr(1_000_000))
+
+    const before = await get(manager, '/treasury/restoration/preview')
+    expect(before.statusCode, before.body).toBe(200)
+    expect(before.json().alreadyRestored).toBe(false)
+
+    const performed = await post(manager, '/treasury/restoration', { reason: 'daily restoration' })
+    expect(performed.statusCode, performed.body).toBe(201)
+    const storedBeforeReload = structuredClone(await h.deps.restorations.find(BRANCH, '2026-07-21'))
+
+    const reloaded = await get(manager, '/treasury/restoration/preview')
+    expect(reloaded.statusCode, reloaded.body).toBe(200)
+    expect(reloaded.json().alreadyRestored).toBe(true)
+    expect(reloaded.json().netToCompany).toBe(sypStr(0))
+    for (const leg of reloaded.json().legs as LegView[]) {
+      expect(leg.position).toBe(leg.capitalTarget)
+      expect(leg.delta).toBe(sypStr(0))
+      expect(leg.direction).toBeNull()
+      expect(leg.amount).toBe(sypStr(0))
+    }
+    expect(reloaded.json().legs).not.toEqual(performed.json().legs)
+    expect(await h.deps.restorations.find(BRANCH, '2026-07-21')).toEqual(storedBeforeReload)
+  })
+
   it('is refused to a driver, and the system admin must name a branch', async () => {
     const driver = await h.loginAs('driver1')
     expect((await get(driver, '/treasury/restoration/preview')).statusCode).toBe(403)

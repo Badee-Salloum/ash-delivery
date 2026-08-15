@@ -468,6 +468,33 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
       })
     })
 
+    describe('journal line metadata', () => {
+      it('round-trips a semantic line role through post() and listByShift()', async () => {
+        const deps = await fresh()
+        try {
+          const posting: Posting = {
+            eventType: 'restoration',
+            occurrenceKey: 'role-round-trip',
+            lines: [
+              { fund: { kind: 'company_box' }, side: 'D', amount: syp(1_000), role: 'kaish' },
+              { fund: { kind: 'office_cash' }, side: 'C', amount: syp(1_000) },
+            ],
+          }
+
+          const written = await deps.ledger.post(BRANCH, [posting], {
+            ...META,
+            reason: 'role round-trip conformance',
+          })
+          expect(written[0]?.lines.find((line) => line.fundCode === 'company_box')?.role).toBe('kaish')
+
+          const stored = await deps.ledger.listByShift(SHIFT)
+          expect(stored[0]?.lines.find((line) => line.fundCode === 'company_box')?.role).toBe('kaish')
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+    })
+
     describe('double-entry balance', () => {
       it('rejects an unbalanced posting', async () => {
         const deps = await fresh()

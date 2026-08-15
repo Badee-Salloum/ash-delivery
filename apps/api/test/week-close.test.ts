@@ -29,7 +29,9 @@ async function countEveryDay(): Promise<void> {
   for (const businessDate of WEEK) {
     await post(manager, '/cash-counts', {
       businessDate,
-      lines: [{ fundCode: 'office_cash', counted: sypStr(0) }],
+      // Some tests post a journal entry before back-filling these historical counts. The API
+      // freezes today's ledger balance, so any resulting non-zero line must carry its own reason.
+      lines: [{ fundCode: 'office_cash', counted: sypStr(0), resolution: 'week-close fixture count' }],
     })
   }
 }

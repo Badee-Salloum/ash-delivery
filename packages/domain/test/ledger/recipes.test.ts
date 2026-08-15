@@ -250,6 +250,24 @@ describe('corrections (BR7)', () => {
   })
 })
 
+describe('correction line roles', () => {
+  it('preserves the semantic role while reversing the accounting side', () => {
+    const original: Posting = {
+      eventType: 'restoration',
+      occurrenceKey: 'sweep-1',
+      lines: [
+        { fund: { kind: 'company_box' }, side: 'D', amount: syp(500), role: 'kaish' },
+        { fund: { kind: 'office_cash' }, side: 'C', amount: syp(500) },
+      ],
+    }
+
+    expect(reverse(original, 'corr-role').lines).toEqual([
+      { fund: { kind: 'company_box' }, side: 'C', amount: syp(500), role: 'kaish' },
+      { fund: { kind: 'office_cash' }, side: 'D', amount: syp(500) },
+    ])
+  })
+})
+
 /**
  * An order settled PARTLY in cash and partly through the wallet — what the client's real payments
  * log shows, and what `payMode` cannot express.

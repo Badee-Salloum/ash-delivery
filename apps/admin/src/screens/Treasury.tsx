@@ -1,10 +1,18 @@
-import { type ReactNode, useCallback, useEffect, useState } from 'react'
-import type { RestorationView } from '@ash/client'
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import { groupThousands, type RestorationView } from '@ash/client'
 import { type RoleKey, can, formatMinor, minor, parseMinor } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { useConfirm, useToast } from '../feedback.tsx'
 import { explainError } from '../errors.ts'
 import { Button, Card, Field, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
+import {
+  buildCountLines,
+  countDifference,
+  countDraftReady,
+  differenceView,
+  restoreCountDraft,
+  summarizeRestoration,
+} from '../treasury-view.ts'
 
 /** The branch-level funds a manual entry can move (the driver/cost-centre ones need an id suffix). */
 const MANUAL_FUNDS = ['office_cash', 'office_wallet', 'yalago_share', 'company_revenue', 'yalago_income', 'fee_earned', 'company_box'] as const
@@ -12,6 +20,29 @@ interface EntryLine {
   fundCode: string
   side: 'D' | 'C'
   amount: string
+}
+
+interface CashCountSheet {
+  businessDate: string
+  alreadyCounted: boolean
+  funds: Array<{ fundCode: string; computed: string }>
+}
+
+interface CashCountView {
+  id: string
+  businessDate: string
+  countedBy: string
+  countedAt: string
+  proofSha256: string | null
+  notes: string | null
+  balanced: boolean
+  lines: Array<{
+    fundCode: string
+    counted: string
+    computed: string
+    variance: string
+    resolution: string | null
+  }>
 }
 
 /**
@@ -22,9 +53,10 @@ export function Treasury(): ReactNode {
   const { api, t, session, branchId } = useApp()
   const toast = useToast()
   const confirm = useConfirm()
-  const [sheet, setSheet] = useState<{ businessDate: string; alreadyCounted: boolean; funds: Array<{ fundCode: string; computed: string }> } | null>(null)
+  const [sheet, setSheet] = useState<CashCountSheet | null>(null)
   const [counted, setCounted] = useState<Record<string, string>>({})
-  const [result, setResult] = useState<{ balanced: boolean; lines: Array<{ fundCode: string; variance: string }> } | null>(null)
+  const [countResolutions, setCountResolutions] = useState<Record<string, string>>({})
+  const [result, setResult] = useState<CashCountView | null>(null)
   const [closeResult, setCloseResult] = useState<{ error?: string; blockers?: Array<{ kind: string }>; weekStart?: string } | null>(null)
   const [balances, setBalances] = useState<{ cash: string; wallet: string } | null>(null)
   const [depositAmt, setDepositAmt] = useState<{ cash: string; wallet: string }>({ cash: '', wallet: '' })
@@ -44,6 +76,8 @@ export function Treasury(): ReactNode {
 
   const [sheetError, setSheetError] = useState<string | null>(null)
   const [balanceError, setBalanceError] = useState<string | null>(null)
+  const loadVersion = useRef(0)
+  const restorationLoadVersion = useRef(0)
 
   // ── Manual entry + reversal (E-3) ────────────────────────────────────────────────────────
   const [reason, setReason] = useState('')
@@ -72,34 +106,74 @@ export function Treasury(): ReactNode {
       branchId: branchId ?? session.branchId,
     }).allowed
 
+  const canViewCompanyFund =
+    session != null &&
+    can({ userId: session.userId, roleKey: session.roleKey as RoleKey, branchId: session.branchId }, 'profit.view_total', {}).allowed
+
   const load = useCallback(() => {
+    const version = ++loadVersion.current
     setSheetError(null)
     setBalanceError(null)
+    setSheet(null)
+    setResult(null)
+    setCounted({})
+    setCountResolutions({})
+    setBalances(null)
     void api
-      .get<typeof sheet>('/cash-counts/sheet')
-      .then((d) => setSheet(d))
+      .get<CashCountSheet>('/cash-counts/sheet')
+      .then(async (d) => {
+        if (version !== loadVersion.current) return
+        setSheet(d)
+        if (!d.alreadyCounted) {
+          setResult(null)
+          setCounted({})
+          setCountResolutions({})
+          return
+        }
+
+        // The sheet only says that today's count exists. Load the sealed record as well so a
+        // refresh restores the frozen system balance, the physical count, every variance and its
+        // audited explanation instead of replacing the whole card with a bare check mark.
+        const saved = await api.get<CashCountView>(`/cash-counts/${d.businessDate}`)
+        if (version !== loadVersion.current) return
+        const draft = restoreCountDraft(saved.lines)
+        setResult(saved)
+        setCounted(draft.counted)
+        setCountResolutions(draft.resolutions)
+      })
       .catch((e: { error?: string }) => {
+        if (version !== loadVersion.current) return
         setSheet(null)
+        setResult(null)
         setSheetError(e.error ?? 'error')
       })
     void api
       .treasuryBalances()
-      .then(setBalances)
+      .then((next) => {
+        if (version === loadVersion.current) setBalances(next)
+      })
       .catch((e: { error?: string }) => {
+        if (version !== loadVersion.current) return
         setBalances(null)
         setBalanceError(e.error ?? 'error')
       })
-  }, [api])
+  }, [api, branchId])
 
   const loadRestoration = useCallback(async (): Promise<void> => {
+    const version = ++restorationLoadVersion.current
+    setRestoration(null)
     try {
-      setRestoration(await api.restorationPreview())
+      const preview = await api.restorationPreview()
+      if (version !== restorationLoadVersion.current) return
+      setRestoration(preview)
+      setRestoreDone(preview.alreadyRestored === true)
       setRestorationError(null)
     } catch (err) {
+      if (version !== restorationLoadVersion.current) return
       setRestoration(null)
       setRestorationError((err as { error?: string }).error ?? 'error')
     }
-  }, [api])
+  }, [api, branchId])
 
   // Refetch when an organisation-wide role switches branch — the treasury is per branch, and
   // showing branch A's cash box under branch B's name is the worst kind of wrong.
@@ -107,7 +181,7 @@ export function Treasury(): ReactNode {
   useEffect(() => {
     setRestoreDone(false)
     void loadRestoration()
-  }, [loadRestoration, branchId])
+  }, [loadRestoration])
 
   /** «كييش» — take the day's profit out of the branch box and into صندوق الشركة. */
   async function withdraw(target: 'cash' | 'wallet'): Promise<void> {
@@ -127,6 +201,11 @@ export function Treasury(): ReactNode {
   }
 
   const refreshCompany = useCallback(async (): Promise<void> => {
+    if (!canViewCompanyFund) {
+      setCompany(null)
+      setCompanyError(null)
+      return
+    }
     try {
       setCompany(await api.companyFund())
       setCompanyError(null)
@@ -136,7 +215,7 @@ export function Treasury(): ReactNode {
       setCompany(null)
       setCompanyError((err as { error?: string }).error ?? 'error')
     }
-  }, [api])
+  }, [api, canViewCompanyFund])
 
   // صندوق الشركة is company-wide, so it does NOT depend on the selected branch. Declared after
   // `refreshCompany` because a `const` callback is not hoisted — the effect would read it before
@@ -224,32 +303,89 @@ export function Treasury(): ReactNode {
     }
   }
 
+  async function reloadCountSheetPreservingDraft(): Promise<void> {
+    try {
+      const latest = await api.get<CashCountSheet>('/cash-counts/sheet')
+      setSheet(latest)
+      if (!latest.alreadyCounted) return
+      const saved = await api.get<CashCountView>(`/cash-counts/${latest.businessDate}`)
+      const draft = restoreCountDraft(saved.lines)
+      setResult(saved)
+      setCounted(draft.counted)
+      setCountResolutions(draft.resolutions)
+    } catch {
+      // Keep the manager's draft intact. The actionable refusal remains visible in the toast and a
+      // later manual retry can refresh without forcing the physical count to be typed again.
+    }
+  }
+
   async function submitCount(): Promise<void> {
     if (!sheet) return
-    const lines = sheet.funds.map((f) => ({ fundCode: f.fundCode, counted: counted[f.fundCode] || '0', resolution: null }))
+    const lines = buildCountLines(sheet.funds, counted, countResolutions)
     // Swallowed before: the manager typed the day's counted cash, pressed «تأكيد», and nothing
     // whatsoever happened — no error, no result — on the seal of the cash box.
     try {
-      setResult(await api.post<typeof result>('/cash-counts', { lines }))
+      const saved = await api.post<CashCountView>('/cash-counts', {
+        ...(branchId ? { branchId } : {}),
+        businessDate: sheet.businessDate,
+        lines,
+      })
+      const draft = restoreCountDraft(saved.lines)
+      setResult(saved)
+      setCounted(draft.counted)
+      setCountResolutions(draft.resolutions)
+      setSheet((current) => (current ? { ...current, alreadyCounted: true } : current))
       // الترميم is computed FROM the count (decision j), so sealing one changes the other.
       void loadRestoration()
     } catch (err) {
-      toast.error(explainError((err as { error?: string }).error ?? 'error', t))
+      const failure = err as { error?: string; detail?: unknown }
+      if (failure.error === 'cash_count_resolution_required') {
+        if (isCountResolutionDetail(failure.detail)) {
+          const fund = t.treasury.fundCodes[failure.detail.fundCode as keyof typeof t.treasury.fundCodes] ?? failure.detail.fundCode
+          const variance = differenceView(failure.detail.variance)
+          const direction = variance.direction === 'increase' ? t.treasury.increase : t.treasury.shortage
+          toast.error(`${t.errors.cash_count_resolution_required}: ${fund} — ${direction} ${groupThousands(variance.amount)}`)
+        } else {
+          toast.error(t.errors.cash_count_resolution_required)
+        }
+        void reloadCountSheetPreservingDraft()
+      } else {
+        toast.error(explainError(failure.error ?? 'error', t))
+      }
     }
   }
 
   async function doRestore(): Promise<void> {
     if (!restoration) return
+    const legText = restoration.legs.map((leg) => {
+      const fund = leg.fundCode === 'office_cash' ? t.treasury.cashBox : t.treasury.wallet
+      const action =
+        leg.direction === 'to_company'
+          ? t.treasury.transferToCompany
+          : leg.direction === 'from_company'
+            ? t.treasury.transferFromCompany
+            : t.treasury.noMovement
+      return `${fund}: ${action}${leg.direction ? ` ${groupThousands(leg.amount)}` : ''}`
+    })
+    const net = differenceView(restoration.netToCompany)
+    const netAction =
+      net.direction === 'increase'
+        ? t.treasury.transferToCompany
+        : net.direction === 'shortage'
+          ? t.treasury.transferFromCompany
+          : t.treasury.noMovement
     const ok = await confirm({
       title: t.treasury.restoration,
-      body: `${t.treasury.netToCompany}: ${formatMinor(parseMinor(restoration.netToCompany))}`,
+      body: `${legText.join(' • ')} • ${t.treasury.netMovement}: ${netAction}${net.direction === 'none' ? '' : ` ${groupThousands(net.amount)}`}`,
       confirmLabel: t.treasury.doRestore,
     })
     if (!ok) return
     try {
-      const done = await api.restore(t.treasury.restoration)
-      setRestoration({ ...done, counted: true })
-      setRestoreDone(true)
+      await api.restore(t.treasury.restoration)
+      // POST returns the plan that was executed, whose positions are necessarily pre-action. The
+      // preview endpoint returns the live post-action position plus `alreadyRestored`; reload it
+      // before painting success so the card cannot present the old position as the live balance.
+      await loadRestoration()
       void refreshCompany()
       load()
     } catch (err) {
@@ -277,6 +413,26 @@ export function Treasury(): ReactNode {
     }
   }
 
+  const countIsSealed = sheet?.alreadyCounted === true || result !== null
+  const countReady = sheet ? countDraftReady(sheet.funds, counted, countResolutions) : false
+  const restorationSummary = restoration ? summarizeRestoration(restoration.legs) : null
+  const restorationNet = restoration ? differenceView(restoration.netToCompany) : null
+
+  const fundLabel = (fundCode: string): string =>
+    t.treasury.fundCodes[fundCode as keyof typeof t.treasury.fundCodes] ?? fundCode
+
+  const directionLabel = (direction: 'increase' | 'shortage' | 'none', capital = false): string => {
+    if (direction === 'increase') return capital ? t.treasury.capitalSurplus : t.treasury.increase
+    if (direction === 'shortage') return capital ? t.treasury.capitalShortage : t.treasury.shortage
+    return capital ? t.treasury.onTarget : t.treasury.noDifference
+  }
+
+  const transferLabel = (direction: 'to_company' | 'from_company' | null): string => {
+    if (direction === 'to_company') return t.treasury.transferToCompany
+    if (direction === 'from_company') return t.treasury.transferFromCompany
+    return t.treasury.noMovement
+  }
+
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
       <Card title={t.treasury.branchTreasury} className="lg:col-span-2">
@@ -297,25 +453,25 @@ export function Treasury(): ReactNode {
               </div>
               {canDeposit ? (
                 <div className="mt-3 flex flex-col gap-2">
-                  <div className="flex gap-2">
+                  <div className="flex flex-col gap-2 sm:flex-row">
                     <MoneyInput
                       value={depositAmt[target]}
                       onChange={(e) => setDepositAmt({ ...depositAmt, [target]: e.target.value })}
-                      className="w-full"
+                      className="min-w-0 flex-1"
                       placeholder={t.treasury.depositAmount}
                     />
                     <Button onClick={() => deposit(target)} disabled={!depositAmt[target]}>
-                      {t.treasury.deposit}
+                      {t.treasury.ownerFunding}
                     </Button>
                   </div>
                   {/* «كييش» by hand. The owner's book moves money out of the box every day; until
                       now the screen could only put money in. الترميم automates the decision later
                       and posts through the very same recipe, so the two are one thing in the ledger. */}
-                  <div className="flex gap-2">
+                  <div className="flex flex-col gap-2 sm:flex-row">
                     <MoneyInput
                       value={withdrawAmt[target]}
                       onChange={(e) => setWithdrawAmt({ ...withdrawAmt, [target]: e.target.value })}
-                      className="w-full"
+                      className="min-w-0 flex-1"
                       placeholder={t.treasury.kaish}
                     />
                     <Button
@@ -323,7 +479,7 @@ export function Treasury(): ReactNode {
                       onClick={() => withdraw(target)}
                       disabled={!withdrawAmt[target]}
                     >
-                      {t.treasury.withdraw}
+                      {t.treasury.transferToCompanyKaish}
                     </Button>
                   </div>
                 </div>
@@ -338,7 +494,7 @@ export function Treasury(): ReactNode {
 
         {/* «صندوق الشركة» — where «كييش» lands and where «شحن من الصندوق» comes from. Sits inside
             the treasury card because the two are one flow: money leaves the box and arrives here. */}
-        <div className="mt-4 rounded-lg border border-slate-300 bg-slate-50 p-3">
+        {canViewCompanyFund ? <div className="mt-4 rounded-lg border border-slate-300 bg-slate-50 p-3">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <span className="text-xs font-semibold text-slate-500">{t.treasury.companyFund}</span>
             <span className="text-2xl font-bold">
@@ -393,7 +549,7 @@ export function Treasury(): ReactNode {
               </div>
             </div>
           ) : null}
-        </div>
+        </div> : null}
       </Card>
 
       {/*
@@ -415,9 +571,33 @@ export function Treasury(): ReactNode {
           />
         ) : (
           <>
+            {restorationSummary ? (
+              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <div className="rounded-lg bg-slate-50 p-3">
+                  <div className="text-xs font-medium text-slate-500">{t.treasury.currentPosition}</div>
+                  <div className="mt-1 text-lg font-bold"><Money value={restorationSummary.position} /></div>
+                </div>
+                <div className="rounded-lg bg-slate-50 p-3">
+                  <div className="text-xs font-medium text-slate-500">{t.treasury.capitalTarget}</div>
+                  <div className="mt-1 text-lg font-bold"><Money value={restorationSummary.target} /></div>
+                </div>
+                <div
+                  className={`rounded-lg p-3 ${
+                    restorationSummary.delta.direction === 'increase'
+                      ? 'bg-emerald-50 text-emerald-800'
+                      : restorationSummary.delta.direction === 'shortage'
+                        ? 'bg-amber-50 text-amber-800'
+                        : 'bg-slate-50 text-slate-700'
+                  }`}
+                >
+                  <div className="text-xs font-medium">{directionLabel(restorationSummary.delta.direction, true)}</div>
+                  <div className="mt-1 text-lg font-bold"><Money value={restorationSummary.delta.amount} /></div>
+                </div>
+              </div>
+            ) : null}
             <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
               {restoration.legs.map((leg) => {
-                const delta = parseMinor(leg.delta)
+                const delta = differenceView(leg.delta)
                 return (
                   <div key={leg.fundCode} className="rounded-lg border border-slate-200 p-3">
                     <div className="text-xs font-semibold text-slate-500">
@@ -436,18 +616,23 @@ export function Treasury(): ReactNode {
                         <Money value={leg.capitalTarget} />
                       </dd>
                     </dl>
-                    <div className="mt-2 border-t border-slate-100 pt-2 text-sm font-semibold">
-                      {delta === minor(0n) ? (
-                        <span className="text-slate-600">{t.treasury.onTarget}</span>
-                      ) : delta > minor(0n) ? (
-                        <span className="text-emerald-700">
-                          {t.treasury.surplus} — {t.treasury.kaish}: <Money value={leg.amount} />
-                        </span>
-                      ) : (
-                        <span className="text-amber-700">
-                          {t.treasury.shortage} — {t.treasury.shahn}: <Money value={leg.amount} />
-                        </span>
-                      )}
+                    <div
+                      className={`mt-2 border-t border-slate-100 pt-2 text-sm font-semibold ${
+                        delta.direction === 'increase'
+                          ? 'text-emerald-700'
+                          : delta.direction === 'shortage'
+                            ? 'text-amber-700'
+                            : 'text-slate-600'
+                      }`}
+                    >
+                      <div>
+                        {directionLabel(delta.direction, true)}
+                        {delta.direction === 'none' ? null : <>: <Money value={delta.amount} /></>}
+                      </div>
+                      <div className="mt-1">
+                        {transferLabel(leg.direction)}
+                        {leg.direction ? <>: <Money value={leg.amount} /></> : null}
+                      </div>
                     </div>
                     {leg.refusals.map((code) => (
                       <p key={code} className="mt-2 text-xs text-red-700">
@@ -459,13 +644,26 @@ export function Treasury(): ReactNode {
               })}
             </div>
             <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-              <span className="text-sm">
-                {t.treasury.netToCompany}:{' '}
-                <span className="font-bold">
-                  <Money value={restoration.netToCompany} />
+              {restorationNet ? (
+                <span
+                  className={`text-sm font-semibold ${
+                    restorationNet.direction === 'increase'
+                      ? 'text-emerald-700'
+                      : restorationNet.direction === 'shortage'
+                        ? 'text-amber-700'
+                        : 'text-slate-600'
+                  }`}
+                >
+                  {t.treasury.netMovement}: {' '}
+                  {restorationNet.direction === 'increase'
+                    ? t.treasury.transferToCompany
+                    : restorationNet.direction === 'shortage'
+                      ? t.treasury.transferFromCompany
+                      : t.treasury.noMovement}
+                  {restorationNet.direction === 'none' ? null : <> — <Money value={restorationNet.amount} /></>}
                 </span>
-              </span>
-              {restoreDone ? (
+              ) : null}
+              {restoreDone || restoration.alreadyRestored === true ? (
                 <span className="text-sm font-semibold text-emerald-700">{t.treasury.restored} ✓</span>
               ) : (
                 <Button onClick={doRestore} disabled={restoration.counted === false || !restoration.feasible}>
@@ -490,33 +688,86 @@ export function Treasury(): ReactNode {
             onRetry={load}
             retryLabel={t.common.retry}
           />
-        ) : sheet.alreadyCounted && !result ? (
-          <p className="text-emerald-700">{t.treasury.sealProof} ✓</p>
         ) : (
           <>
-            <Table head={[t.treasury.category, t.treasury.computed, t.treasury.counted]}>
-              {sheet.funds.map((f) => (
-                <tr key={f.fundCode}>
-                  <td className="px-3 py-1">
-                    {t.treasury.fundCodes[f.fundCode as keyof typeof t.treasury.fundCodes] ?? f.fundCode}
-                  </td>
-                  <td className="px-3 py-1"><Money value={f.computed} /></td>
-                  <td className="px-3 py-1">
-                    <MoneyInput
-                      value={counted[f.fundCode] ?? ''}
-                      onChange={(e) => setCounted({ ...counted, [f.fundCode]: e.target.value })}
-                      className="w-32"
-                    />
-                  </td>
-                </tr>
-              ))}
-            </Table>
-            <Button className="mt-3" onClick={submitCount}>
-              {t.common.confirm}
-            </Button>
+            {countIsSealed ? (
+              <p className="mb-3 text-sm font-semibold text-emerald-700">
+                {t.treasury.savedCountDetails} — {t.treasury.sealProof} ✓
+              </p>
+            ) : null}
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {sheet.funds.map((fund) => {
+                const saved = result?.lines.find((line) => line.fundCode === fund.fundCode)
+                const computed = saved?.computed ?? fund.computed
+                const countedValue = saved?.counted ?? counted[fund.fundCode] ?? ''
+                const variance = saved ? differenceView(saved.variance) : countDifference(countedValue, computed)
+                const resolution = saved?.resolution ?? countResolutions[fund.fundCode] ?? ''
+                const needsReason = variance != null && variance.direction !== 'none'
+                return (
+                  <div key={fund.fundCode} className="rounded-lg border border-slate-200 p-3">
+                    <h3 className="text-sm font-bold text-slate-700">{fundLabel(fund.fundCode)}</h3>
+                    <dl className="mt-2 grid grid-cols-2 gap-y-1 text-sm">
+                      <dt className="text-slate-600">{t.treasury.systemBalance}</dt>
+                      <dd className="text-end font-semibold"><Money value={computed} /></dd>
+                    </dl>
+                    <Field label={t.treasury.counted} className="mt-2">
+                      <MoneyInput
+                        value={countedValue}
+                        disabled={countIsSealed}
+                        aria-label={`${t.treasury.counted} — ${fundLabel(fund.fundCode)}`}
+                        onChange={(e) => setCounted((current) => ({ ...current, [fund.fundCode]: e.target.value }))}
+                        className="w-full"
+                      />
+                    </Field>
+                    {variance ? (
+                      <div
+                        className={`mt-2 rounded-md px-3 py-2 text-sm font-semibold ${
+                          variance.direction === 'increase'
+                            ? 'bg-emerald-50 text-emerald-800'
+                            : variance.direction === 'shortage'
+                              ? 'bg-amber-50 text-amber-800'
+                              : 'bg-slate-50 text-slate-700'
+                        }`}
+                      >
+                        {directionLabel(variance.direction)}
+                        {variance.direction === 'none' ? null : <>: <Money value={variance.amount} /></>}
+                      </div>
+                    ) : null}
+                    {needsReason ? (
+                      countIsSealed ? (
+                        <dl className="mt-2 text-sm">
+                          <dt className="text-xs text-slate-500">{t.treasury.varianceReason}</dt>
+                          <dd className="mt-1 text-slate-700">{resolution}</dd>
+                        </dl>
+                      ) : (
+                        <Field
+                          label={t.treasury.varianceReason}
+                          hint={t.treasury.varianceReasonHint}
+                          error={resolution.trim() ? null : t.errors.cash_count_resolution_required}
+                          className="mt-2"
+                        >
+                          <TextInput
+                            value={resolution}
+                            aria-label={`${t.treasury.varianceReason} — ${fundLabel(fund.fundCode)}`}
+                            onChange={(e) =>
+                              setCountResolutions((current) => ({ ...current, [fund.fundCode]: e.target.value }))
+                            }
+                          />
+                        </Field>
+                      )
+                    ) : null}
+                  </div>
+                )
+              })}
+            </div>
+            {!countIsSealed ? (
+              <Button className="mt-3" onClick={submitCount} disabled={!countReady}>
+                {t.common.confirm}
+              </Button>
+            ) : null}
             {result ? (
               <p className={`mt-2 text-sm font-medium ${result.balanced ? 'text-emerald-700' : 'text-amber-700'}`}>
-                {result.balanced ? t.br1.balanced : t.treasury.variance}
+                {result.balanced ? t.treasury.noDifference : t.treasury.variance}
               </p>
             ) : null}
           </>
@@ -633,4 +884,16 @@ function nextSunday(date: string): string {
   const next = new Date(ms + add * 86_400_000)
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${next.getUTCFullYear()}-${pad(next.getUTCMonth() + 1)}-${pad(next.getUTCDate())}`
+}
+
+function isCountResolutionDetail(value: unknown): value is { fundCode: string; variance: string } {
+  if (typeof value !== 'object' || value === null) return false
+  const detail = value as Record<string, unknown>
+  if (typeof detail.fundCode !== 'string' || typeof detail.variance !== 'string') return false
+  try {
+    parseMinor(detail.variance)
+    return true
+  } catch {
+    return false
+  }
 }

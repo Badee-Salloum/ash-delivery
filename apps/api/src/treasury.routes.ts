@@ -70,12 +70,24 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       // The computed side is FROZEN here, not recomputed at read time. Otherwise a later
       // posting silently rewrites history and the variance the manager signed off disappears.
       const computed = await deps.ledger.fundBalance(branchId, line.fundCode)
+      const variance = minor(line.counted - computed)
+      const resolution = line.resolution?.trim() || null
+      // A signed count is audit evidence. A non-zero line without its own explanation would leave
+      // the manager (and the week close) with no record of which physical box was investigated.
+      // This check must happen after the server freezes `computed`: the client cannot know or
+      // authoritatively assert the variance it is explaining.
+      if (variance !== 0n && resolution === null) {
+        throw new ServiceError(422, 'cash_count_resolution_required', {
+          fundCode: line.fundCode,
+          variance: serializeMoney(variance),
+        })
+      }
       lines.push({
         fundCode: line.fundCode,
         counted: line.counted,
         computed,
-        variance: minor(line.counted - computed),
-        resolution: line.resolution,
+        variance,
+        resolution,
       })
     }
 
@@ -204,6 +216,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
             fund: fundRefFromCode(l.fundCode),
             side: l.side,
             amount: l.amount,
+            ...(l.role === undefined ? {} : { role: l.role }),
           })),
         },
         `reversal-of-${entryId}`,
@@ -470,16 +483,23 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
   // ── «الترميم» — the daily restoration (owner decision 10) ──────────────────────────────────
 
   /**
-   * Build the positions from the SEALED COUNT, never from the request body.
+   * Build the positions from the SEALED COUNT before posting, never from the request body.
    *
    * Owner decision (j): «count first, then ترميم». The whole point is that it settles against money
-   * somebody physically counted — computing it from the ledger instead would make it a tautology
-   * that can never find anything.
+   * somebody physically counted — computing the actionable plan from the ledger would make it a
+   * tautology that can never find anything. The live-ledger mode is read-only and used only after
+   * the immutable restoration exists, so a reloaded card describes the post-action position.
    */
-  async function positionsFor(branchId: string, businessDate: string) {
-    const count = await deps.cashCounts.find(branchId, businessDate)
-    const targets = await deps.capitalTargets.resolve(branchId, businessDate)
-    const receivables = await deps.ledger.balancesByPrefix(branchId, 'driver_receivable_')
+  async function positionsFor(
+    branchId: string,
+    businessDate: string,
+    source: 'sealed_count' | 'live_ledger' = 'sealed_count',
+  ) {
+    const [count, targets, receivables] = await Promise.all([
+      deps.cashCounts.find(branchId, businessDate),
+      deps.capitalTargets.resolve(branchId, businessDate),
+      deps.ledger.balancesByPrefix(branchId, 'driver_receivable_'),
+    ])
     const sumFor = (suffix: string): Minor =>
       minor(
         Object.entries(receivables)
@@ -489,12 +509,16 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
 
     return {
       count,
-      positions: (['office_cash', 'office_wallet'] as const).map((fundCode) => ({
-        fundCode,
-        counted: count?.lines.find((l) => l.fundCode === fundCode)?.counted ?? minor(0n),
-        receivables: sumFor(fundCode === 'office_cash' ? 'cash' : 'wallet'),
-        capitalTarget: targets[fundCode] ?? null,
-      })),
+      positions: await Promise.all(
+        (['office_cash', 'office_wallet'] as const).map(async (fundCode) => ({
+          fundCode,
+          counted: source === 'live_ledger'
+            ? await deps.ledger.fundBalance(branchId, fundCode)
+            : count?.lines.find((l) => l.fundCode === fundCode)?.counted ?? minor(0n),
+          receivables: sumFor(fundCode === 'office_cash' ? 'cash' : 'wallet'),
+          capitalTarget: targets[fundCode] ?? null,
+        })),
+      ),
     }
   }
 
@@ -513,11 +537,20 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
   app.get('/treasury/restoration/preview', { config: { permission: 'cash_count.perform', subject: ownBranch } }, async (req) => {
     const branchId = resolveBranch(req)
     const businessDate = todayFor(deps)
-    const { count, positions } = await positionsFor(branchId, businessDate)
+    const completed = await deps.restorations.find(branchId, businessDate)
+    // Before execution, only the sealed physical count is authoritative. Afterwards the posting
+    // has moved the funds, so a card labelled "current position" must use live ledger balances;
+    // `alreadyRestored` still disables a second execution and the stored record remains immutable.
+    const { count, positions } = await positionsFor(
+      branchId,
+      businessDate,
+      completed === null ? 'sealed_count' : 'live_ledger',
+    )
     const plan = planRestoration(positions)
     return {
       businessDate,
       counted: count !== null,
+      alreadyRestored: completed !== null,
       legs: plan.legs.map(serializeLeg),
       netToCompany: serializeMoney(plan.netToCompany),
       feasible: plan.feasible,
@@ -622,12 +655,25 @@ async function findEntry(deps: Deps, branchId: string, entryId: number) {
 }
 
 function sealProof(record: CashCountRecord): string {
-  const canonical = record.lines
-    .map((l) => `${l.fundCode}|${l.counted}|${l.computed}|${l.variance}`)
-    .sort()
-    .join(';')
+  const lines = record.lines
+    // A tuple encoded by JSON is prefix-safe: delimiters inside a manager's explanation remain a
+    // string value and cannot masquerade as another fund line. Money is serialized explicitly
+    // because JSON cannot encode bigint and the wire representation is the evidence managers see.
+    .map((line): [string, string, string, string, string] => [
+      line.fundCode,
+      serializeMoney(line.counted),
+      serializeMoney(line.computed),
+      serializeMoney(line.variance),
+      line.resolution ?? '',
+    ])
+    .sort((left, right) => {
+      const a = JSON.stringify(left)
+      const b = JSON.stringify(right)
+      return a < b ? -1 : a > b ? 1 : 0
+    })
+  const canonical = JSON.stringify([record.branchId, record.businessDate, record.countedBy, lines])
   return createHash('sha256')
-    .update(`${record.branchId}|${record.businessDate}|${record.countedBy}|${canonical}`)
+    .update(canonical)
     .digest('hex')
 }
 

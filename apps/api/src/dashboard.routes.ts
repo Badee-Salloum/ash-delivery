@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { type Deps, type ShiftRecord, serializeMoney } from '@ash/contracts'
+import { type Deps, type JournalEntryRecord, type ShiftRecord, serializeMoney } from '@ash/contracts'
 import { REQUIRED_END_SLOTS, isLive, minor, toUsdMinor, weekStartFor } from '@ash/domain'
 import { includedOrders, todayFor } from './shifts.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
@@ -186,8 +186,54 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
 
     // No port reads a date RANGE — the ledger is addressed by week, because that is the unit BR7
     // seals. Walking the weeks the range touches keeps this to existing queries; a month is five.
-    const entries = []
-    for (const start of weekStartsBetween(from, to)) entries.push(...(await deps.ledger.listByWeek(branchId, start)))
+    const rangeWeekStarts = weekStartsBetween(from, to)
+    const entries: JournalEntryRecord[] = []
+    for (const start of rangeWeekStarts) entries.push(...(await deps.ledger.listByWeek(branchId, start)))
+
+    // New corrections keep the original treasury role on every reversed line. Corrections written
+    // before that guarantee have no role, however, so resolve their `reversal-of-<id>` link back to
+    // the visible original entry. Weeks are loaded lazily and cached; the ordinary path performs no
+    // extra ledger reads, while a legacy row remains explainable without a schema migration.
+    const entriesById = new Map(entries.map((entry) => [entry.id, entry]))
+    const loadedWeekStarts = new Set(rangeWeekStarts)
+    let legacyLookupStarts: string[] | null = null
+    const findEntryById = async (entryId: number): Promise<JournalEntryRecord | null> => {
+      const loaded = entriesById.get(entryId)
+      if (loaded) return loaded
+      legacyLookupStarts ??= [
+        ...new Set([
+          weekStartFor(today),
+          ...(await deps.weekLocks.listClosedStarts(branchId)).sort().reverse(),
+        ]),
+      ]
+      for (const start of legacyLookupStarts) {
+        if (loadedWeekStarts.has(start)) continue
+        loadedWeekStarts.add(start)
+        const batch = await deps.ledger.listByWeek(branchId, start)
+        for (const entry of batch) entriesById.set(entry.id, entry)
+        const found = entriesById.get(entryId)
+        if (found) return found
+      }
+      return null
+    }
+
+    type TreasuryRole = 'kaish' | 'shahn'
+    const treasuryRoleOf = async (
+      entry: JournalEntryRecord,
+      line: JournalEntryRecord['lines'][number],
+      visited = new Set<number>(),
+    ): Promise<TreasuryRole | null> => {
+      if (line.role === 'kaish' || line.role === 'shahn') return line.role
+      if (entry.eventType === 'restoration') return line.side === 'D' ? 'kaish' : 'shahn'
+      if (entry.eventType !== 'correction' || visited.has(entry.id)) return null
+
+      const match = /^reversal-of-(\d+)$/.exec(entry.occurrenceKey)
+      if (!match) return null
+      visited.add(entry.id)
+      const original = await findEntryById(Number(match[1]))
+      const originalLine = original?.lines.find((candidate) => candidate.fundCode === 'company_box')
+      return original && originalLine ? treasuryRoleOf(original, originalLine, visited) : null
+    }
 
     const perDay = new Map<string, { in: bigint; out: bigint }>()
     let profit = 0n
@@ -195,11 +241,16 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
       if (e.businessDate < from || e.businessDate > to) continue
       for (const l of e.lines) {
         if (l.fundCode === 'company_revenue') profit += l.side === 'C' ? l.amount : -l.amount
-        if (e.eventType !== 'restoration' || l.fundCode !== 'company_box') continue
+        if ((e.eventType !== 'restoration' && e.eventType !== 'correction') || l.fundCode !== 'company_box') continue
+        const role = await treasuryRoleOf(e, l)
+        // A correction of an unrelated manual company-box entry is not a restoration flow.
+        if (role === null) continue
         const day = perDay.get(e.businessDate) ?? { in: 0n, out: 0n }
         // D company_box is money ARRIVING in صندوق الشركة — «كييش». C is «شحن من الصندوق».
-        if (l.side === 'D') day.in += l.amount
-        else day.out += l.amount
+        // Keep corrections in the same column as their original movement, with the opposite sign.
+        // Otherwise reversing kaish would be misreported as new shahn (and vice versa).
+        if (role === 'kaish') day.in += l.side === 'D' ? l.amount : -l.amount
+        else day.out += l.side === 'C' ? l.amount : -l.amount
         perDay.set(e.businessDate, day)
       }
     }

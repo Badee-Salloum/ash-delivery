@@ -72,6 +72,34 @@ it('sends explicit stale acknowledgement beside a real file timestamp', () => {
   expect(evidenceUploadHeaders(null, false)).toEqual({})
 })
 
+it('adds the selected branch exactly once to the restoration preview read', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        businessDate: '2026-08-15',
+        counted: true,
+        alreadyRestored: false,
+        legs: [],
+        netToCompany: '0.00',
+        feasible: true,
+        refusals: [],
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+  api.setBranch('branch-1')
+
+  await api.restorationPreview()
+
+  expect(fetchMock).toHaveBeenCalledWith('/api/treasury/restoration/preview?branchId=branch-1', {
+    method: 'GET',
+    credentials: 'include',
+    headers: { 'content-type': 'application/json' },
+  })
+})
+
 it('binds close approval to the reviewed settlement and both physical confirmations', async () => {
   const fetchMock = vi.fn().mockResolvedValue(
     new Response(JSON.stringify({ id: 'shift-1', state: 'approved', postings: 8 }), {

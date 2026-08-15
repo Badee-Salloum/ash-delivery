@@ -3,6 +3,7 @@ import { type RoleKey, can, minor, parseMinor } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { Badge, Card, Money, Pending, Stat } from '../ui.tsx'
+import { differenceView } from '../treasury-view.ts'
 
 interface ExpiringDoc {
   id: string
@@ -119,6 +120,8 @@ export function Dashboard(): ReactNode {
     )
   }
 
+  const capitalDelta = treasury ? differenceView(treasury.capital.delta) : null
+
   return (
     <div className="flex flex-col gap-4">
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
@@ -159,9 +162,27 @@ export function Dashboard(): ReactNode {
               label={t.dashboard.workingCapital}
               value={<Money value={treasury.capital.total} />}
               sub={
-                <>
-                  {t.treasury.capitalTarget}: <Money value={treasury.capital.target} />
-                </>
+                <span className="flex flex-col gap-1">
+                  <span>{t.treasury.capitalTarget}: <Money value={treasury.capital.target} /></span>
+                  {capitalDelta ? (
+                    <span
+                      className={
+                        capitalDelta.direction === 'increase'
+                          ? 'text-emerald-700'
+                          : capitalDelta.direction === 'shortage'
+                            ? 'text-amber-700'
+                            : 'text-slate-600'
+                      }
+                    >
+                      {capitalDelta.direction === 'increase'
+                        ? t.treasury.capitalSurplus
+                        : capitalDelta.direction === 'shortage'
+                          ? t.treasury.capitalShortage
+                          : t.treasury.onTarget}
+                      {capitalDelta.direction === 'none' ? null : <>: <Money value={capitalDelta.amount} /></>}
+                    </span>
+                  ) : null}
+                </span>
               }
             />
             <Stat label={t.dashboard.companyProfitLabel} value={<Money value={treasury.companyProfit} />} />

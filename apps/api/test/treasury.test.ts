@@ -139,6 +139,91 @@ describe('the daily cash count (E-5)', () => {
     expect(stored.json().lines[0].variance).toBe('0.00')
   })
 
+  it.each([null, '   '])('refuses a non-zero line without its own explanation (%s)', async (resolution) => {
+    await seedOfficeCash(sypStr(500_000))
+    const manager = await h.loginAs('manager')
+
+    const res = await post(manager, '/cash-counts', {
+      lines: [{ fundCode: 'office_cash', counted: sypStr(495_000), resolution }],
+    })
+
+    expect(res.statusCode).toBe(422)
+    expect(res.json()).toEqual({
+      error: 'cash_count_resolution_required',
+      detail: { fundCode: 'office_cash', variance: '-5000.00' },
+    })
+    expect(await h.deps.cashCounts.find(BRANCH, '2026-07-21')).toBeNull()
+  })
+
+  it('seals the per-line explanation into the cash-count proof', async () => {
+    await seedOfficeCash(sypStr(500_000))
+    const manager = await h.loginAs('manager')
+    const first = await post(manager, '/cash-counts', {
+      lines: [{ fundCode: 'office_cash', counted: sypStr(495_000), resolution: 'first explanation' }],
+    })
+    expect(first.statusCode, first.body).toBe(201)
+
+    const other = await makeHarness()
+    try {
+      const otherManager = await other.loginAs('manager')
+      const otherPost = async (url: string, payload: Record<string, unknown>) =>
+        await other.app.inject({ method: 'POST', url, headers: { cookie: other.cookie(otherManager) }, payload })
+      await otherPost('/journal/manual', {
+        reason: 'opening balance',
+        lines: [
+          { fundCode: 'office_cash', side: 'D', amount: sypStr(500_000) },
+          { fundCode: 'opening_balance', side: 'C', amount: sypStr(500_000) },
+        ],
+      })
+      const second = await otherPost('/cash-counts', {
+        lines: [{ fundCode: 'office_cash', counted: sypStr(495_000), resolution: 'second explanation' }],
+      })
+      expect(second.statusCode, second.body).toBe(201)
+      expect(second.json().proofSha256).not.toBe(first.json().proofSha256)
+    } finally {
+      await other.app.close()
+    }
+  })
+
+  it('uses a deterministic prefix-safe proof when explanations contain old delimiters', async () => {
+    const proofFor = async (lines: Array<Record<string, unknown>>): Promise<string> => {
+      const isolated = await makeHarness()
+      try {
+        const manager = await isolated.loginAs('manager')
+        const res = await isolated.app.inject({
+          method: 'POST',
+          url: '/cash-counts',
+          headers: { cookie: isolated.cookie(manager) },
+          payload: { lines },
+        })
+        expect(res.statusCode, res.body).toBe(201)
+        return String(res.json().proofSha256)
+      } finally {
+        await isolated.app.close()
+      }
+    }
+
+    // Under the old `line.join('|') + lines.join(';')` canonicalization these two different
+    // records produced exactly the same text: the first explanation impersonated a wallet line.
+    const embeddedLine = [
+      {
+        fundCode: 'office_cash',
+        counted: sypStr(1),
+        resolution: 'a;office_wallet|100|0|100|b',
+      },
+    ]
+    const realTwoLines = [
+      { fundCode: 'office_cash', counted: sypStr(1), resolution: 'a' },
+      { fundCode: 'office_wallet', counted: sypStr(1), resolution: 'b' },
+    ]
+
+    const embeddedProof = await proofFor(embeddedLine)
+    const twoLineProof = await proofFor(realTwoLines)
+    const reorderedProof = await proofFor([...realTwoLines].reverse())
+    expect(embeddedProof).not.toBe(twoLineProof)
+    expect(reorderedProof).toBe(twoLineProof)
+  })
+
   it('refuses a second count for the same day', async () => {
     const manager = await h.loginAs('manager')
     const body = { lines: [{ fundCode: 'office_cash', counted: sypStr(0) }] }
@@ -270,6 +355,29 @@ describe('corrections are visible reversals, never edits (BR7)', () => {
     expect(await h.deps.ledger.fundBalance(BRANCH, 'office_cash')).toBe(0n)
     expect(h.deps.ledger.entries.filter((e) => e.eventType === 'manual')).toHaveLength(1)
     expect(h.deps.ledger.entries.filter((e) => e.eventType === 'correction')).toHaveLength(1)
+  })
+
+  it('preserves a treasury line role when reversing a restoration entry', async () => {
+    await seedOfficeCash(sypStr(10_000))
+    const manager = await h.loginAs('manager')
+    const moved = await post(manager, '/treasury/withdraw', {
+      target: 'cash',
+      amount: sypStr(10_000),
+      to: 'company_box',
+      reason: 'sweep',
+    })
+    expect(moved.statusCode, moved.body).toBe(201)
+
+    const original = h.deps.ledger.entries.find((entry) => entry.eventType === 'restoration')!
+    expect(original.lines.find((line) => line.fundCode === 'company_box')?.role).toBe('kaish')
+
+    const res = await post(manager, `/journal/${original.id}/reverse`, { reason: 'reverse sweep' })
+    expect(res.statusCode, res.body).toBe(201)
+    const correction = h.deps.ledger.entries.find((entry) => entry.id === res.json().reversalEntryId)!
+    expect(correction.lines.find((line) => line.fundCode === 'company_box')).toMatchObject({
+      side: 'C',
+      role: 'kaish',
+    })
   })
 
   it('404s on an entry that does not exist', async () => {

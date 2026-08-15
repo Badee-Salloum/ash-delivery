@@ -250,6 +250,62 @@ describe('the owner’s treasury sheet (I-1, decision 10)', () => {
     expect(res.json().fundNet).toBe(sypStr(-1_000_000))
   })
 
+  it('nets a reversed kaish in fundIn and supports a legacy correction without line roles', async () => {
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(9_582_553))
+
+    for (const amount of [9_078_231, 504_322]) {
+      const moved = await post(manager, '/treasury/withdraw', {
+        target: 'cash',
+        amount: sypStr(amount),
+        to: 'company_box',
+        reason: 'kaish',
+      })
+      expect(moved.statusCode, moved.body).toBe(201)
+    }
+
+    const restorations = h.deps.ledger.entries.filter((entry) => entry.eventType === 'restoration')
+    const corrected = restorations[1]!
+    const reversed = await post(manager, `/journal/${corrected.id}/reverse`, { reason: 'visible correction' })
+    expect(reversed.statusCode, reversed.body).toBe(201)
+    const correction = h.deps.ledger.entries.find((entry) => entry.id === reversed.json().reversalEntryId)!
+    expect(correction.lines.find((line) => line.fundCode === 'company_box')?.role).toBe('kaish')
+
+    // Simulate a correction written before roles were preserved. The occurrence key is the stable
+    // compatibility link; the dashboard must use it instead of guessing from the reversed side.
+    for (const line of correction.lines) delete line.role
+
+    const res = await get(await scopedGm(), '/dashboard/treasury')
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json().fundIn).toBe(sypStr(9_078_231))
+    expect(res.json().fundOut).toBe(sypStr(0))
+    expect(res.json().fundNet).toBe(sypStr(9_078_231))
+  })
+
+  it('nets a reversed shahn in fundOut instead of reporting it as new fundIn', async () => {
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(3_000_000))
+    await seedFund(manager, 'office_wallet', sypStr(1_000_000))
+    await post(manager, '/cash-counts', {
+      lines: [
+        { fundCode: 'office_cash', counted: sypStr(3_000_000) },
+        { fundCode: 'office_wallet', counted: sypStr(1_000_000) },
+      ],
+    })
+    const restored = await post(manager, '/treasury/restoration', { reason: 'restore capital' })
+    expect(restored.statusCode, restored.body).toBe(201)
+
+    const original = h.deps.ledger.entries.find((entry) => entry.eventType === 'restoration')!
+    const reversed = await post(manager, `/journal/${original.id}/reverse`, { reason: 'reverse shahn' })
+    expect(reversed.statusCode, reversed.body).toBe(201)
+
+    const res = await get(await scopedGm(), '/dashboard/treasury')
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json().fundIn).toBe(sypStr(0))
+    expect(res.json().fundOut).toBe(sypStr(0))
+    expect(res.json().fundNet).toBe(sypStr(0))
+  })
+
   it('is BR8-scoped: the branch manager and the driver are refused, the sysadmin is not', async () => {
     expect((await get(await h.loginAs('manager'), '/dashboard/treasury')).statusCode).toBe(403)
     expect((await get(await h.loginAs('driver1'), '/dashboard/treasury')).statusCode).toBe(403)
