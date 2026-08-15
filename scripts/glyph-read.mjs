@@ -189,7 +189,7 @@ async function prepared(file, scale = 1, invert = false) {
 /*
  * ── CORPUS MODE, opt-in via --corpus ─────────────────────────────────────────────────────────
  *
- * The SHIPPED reader over the same 48 screens the hosted models were measured on, writing the same
+ * The SHIPPED reader over the same 66 screens the hosted models were measured on, writing the same
  * per-image records so `ocr-compare.mjs` puts it in the same table. Without this the local reader
  * and the paid ones are scored on different exams and the comparison is decoration.
  *

@@ -33,16 +33,28 @@ export type AiPageReadOutcome =
  * cloud row is dropped before materialisation and must not become a warning the driver cannot fix.
  */
 export function visibleAiPageReadOutcome(
-  addedOrders: readonly { feeRefused?: boolean }[],
-  addedDeductions: readonly { localId: string }[],
+  addedOrders: readonly { feeRefused?: boolean; timeText?: string; cancelled?: boolean }[],
+  addedDeductions: readonly {
+    localId: string
+    timeText?: string
+    timeReviewRequired?: boolean
+  }[],
   reconciledDeductions: readonly { localId: string }[],
 ): AiPageReadOutcome {
   const survivingDeductionIds = new Set(reconciledDeductions.map((row) => row.localId))
-  const survivingDeductions = addedDeductions.filter((row) => survivingDeductionIds.has(row.localId)).length
+  const survivingDeductions = addedDeductions.filter((row) => survivingDeductionIds.has(row.localId))
   return {
     kind: 'read',
-    rows: addedOrders.length + survivingDeductions,
-    refused: addedOrders.filter((row) => row.feeRefused === true).length,
+    rows: addedOrders.length + survivingDeductions.length,
+    refused:
+      addedOrders.filter(
+        (row) =>
+          row.feeRefused === true ||
+          (row.cancelled !== true && row.timeText !== undefined && row.timeText.trim() === ''),
+      ).length +
+      survivingDeductions.filter(
+        (row) => row.timeReviewRequired === true || row.timeText?.trim() === '',
+      ).length,
   }
 }
 

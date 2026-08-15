@@ -5,6 +5,7 @@ import {
   mergeScannedMovements,
   mergeScannedOrders,
   overlayCloudAmounts,
+  reconcileUnverifiedOrderTimes,
 } from '../src/order-entry.ts'
 
 /**
@@ -243,15 +244,278 @@ describe('when the phone reads nothing at all', () => {
     expect(rows).toEqual([{ dateIso: '2026-08-06', time: '14:20', fee: null, cancelled: true, pointA: 'المزة' }])
   })
 
-  it('drops a row with no clock rather than letting it collide', () => {
-    // Identity is (day, minute, route). A timeless row collides with every other timeless row on
-    // the page, and the merge would keep exactly one of them.
+  it('keeps a priced row whose clock AI refused, with evidence provenance for safe review', () => {
+    // Money that AI read correctly must not disappear merely because the independent time vote
+    // failed. The empty minute reaches the API as null and the server classifies it `unknown`.
     const rows = cloudRowsToScannedOrders([
       { printed: '', value: '500', cancelled: false, time: null, dateIso: '2026-08-06', pointA: null, pointB: null },
       cloudOrder('130', '14:20', 'المزة'),
+    ], undefined, 'dashboard-3')
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toMatchObject({
+      fee: '500',
+      time: '',
+      dateIso: '2026-08-06',
+      scanProvenance: 'dashboard-3:0',
+    })
+    const draft = mergeScannedOrders([], rows, () => 'unknown-time')
+    expect(draft[0]).toMatchObject({
+      feeText: '500',
+      feeOcrText: '500',
+      timeText: '',
+      dateText: '2026-08-06',
+      scanProvenance: 'dashboard-3:0',
+      included: false,
+      timeReviewRequired: true,
+    })
+  })
+
+  it.each([
+    ['25:00', '2026-08-15'],
+    ['00:30', '2026-02-30'],
+  ])('keeps a priced row excluded when %s / %s is not a valid boundary', (time, dateIso) => {
+    const [draft] = mergeScannedOrders([], [{
+      time,
+      dateIso,
+      fee: '155',
+      scanProvenance: 'invalid-boundary:0',
+    }], () => 'invalid-boundary')
+    expect(draft).toMatchObject({ included: false, timeReviewRequired: true })
+  })
+
+  it('keeps a cancellation-contested card with refused money and time beside valid rows', () => {
+    const rows = cloudRowsToScannedOrders([
+      {
+        printed: '240',
+        value: '240',
+        cancelled: false,
+        time: '23:21',
+        dateIso: '2026-08-14',
+      },
+      {
+        printed: 'Cancelled / 155',
+        value: null,
+        cancelled: false,
+        reviewRequired: true,
+        time: null,
+        dateIso: '2026-08-15',
+      },
+    ], undefined, 'dashboard-cancel-conflict')
+
+    expect(rows).toMatchObject([
+      { fee: '240', time: '23:21' },
+      { fee: null, time: '', dateIso: '2026-08-15', scanProvenance: 'dashboard-cancel-conflict:1' },
     ])
-    expect(rows).toHaveLength(1)
-    expect(rows[0]!.fee).toBe('130')
+    let id = 0
+    const draft = mergeScannedOrders([], rows, () => `visible-row-${++id}`)
+    expect(draft[1]).toMatchObject({
+      localId: 'visible-row-2',
+      feeText: '',
+      feeRefused: true,
+      timeText: '',
+    })
+  })
+
+  it('dedupes an unknown-time retry of one photo but retains uncertain rows from another photo', () => {
+    const cloud = [
+      { printed: '500', value: '500', cancelled: false, time: null, dateIso: '2026-08-06', pointA: 'A', pointB: 'B' },
+    ]
+    const firstScan = cloudRowsToScannedOrders(cloud, undefined, 'dashboard-3')
+    const existing = mergeScannedOrders([], firstScan, () => 'first')
+    expect(mergeScannedOrders(existing, firstScan, () => 'retry')).toEqual([])
+
+    const overlappingOtherPhoto = cloudRowsToScannedOrders(cloud, undefined, 'dashboard-4')
+    expect(mergeScannedOrders(existing, overlappingOtherPhoto, () => 'needs-review')).toHaveLength(1)
+  })
+
+  it('enriches the same unknown row when its retry verifies 00:30 instead of appending money', () => {
+    const firstScan = cloudRowsToScannedOrders([
+      {
+        printed: '155',
+        value: '155',
+        cancelled: false,
+        time: null,
+        dateIso: null,
+        pointA: 'verified route A',
+        pointB: 'verified route B',
+      },
+    ], undefined, 'dashboard-7')
+    const existing = mergeScannedOrders([], firstScan, () => 'original-local-id')
+    const originalProviderNo = existing[0]!.providerOrderNo
+
+    const retry = cloudRowsToScannedOrders([
+      {
+        printed: '155',
+        value: '155',
+        cancelled: false,
+        time: '00:30',
+        dateIso: '2026-08-15',
+        pointA: 'verified route A',
+        pointB: 'verified route B',
+      },
+    ], undefined, 'dashboard-7')
+    const reconciled = reconcileUnverifiedOrderTimes(existing, retry)
+    const appended = mergeScannedOrders(reconciled, retry, () => 'must-not-be-used')
+
+    expect(appended).toEqual([])
+    expect(reconciled).toHaveLength(1)
+    expect(reconciled[0]).toMatchObject({
+      localId: 'original-local-id',
+      providerOrderNo: originalProviderNo,
+      timeText: '00:30',
+      dateText: '2026-08-15',
+      feeText: '155',
+      feeOcrText: '155',
+      pointA: 'verified route A',
+      pointB: 'verified route B',
+      scanProvenance: 'dashboard-7:0',
+      included: true,
+      timeReviewRequired: false,
+    })
+
+    const otherSlotUnknown = cloudRowsToScannedOrders([
+      {
+        printed: '155',
+        value: '155',
+        cancelled: false,
+        time: null,
+        dateIso: '2026-08-15',
+        pointA: 'verified route A',
+        pointB: 'verified route B',
+      },
+    ], undefined, 'dashboard-8')
+    expect(mergeScannedOrders(reconciled, otherSlotUnknown, () => 'separate-unknown')).toHaveLength(1)
+  })
+
+  it('does not swallow a different known row that moved into the same slot position', () => {
+    const first = cloudRowsToScannedOrders([
+      {
+        printed: '155',
+        value: '155',
+        cancelled: false,
+        time: '00:03',
+        dateIso: '2026-08-15',
+        pointA: 'A',
+        pointB: 'B',
+      },
+    ], undefined, 'dashboard-shifted')
+    const existing = mergeScannedOrders([], first, () => '00:03-row')
+    const shiftedRetry = cloudRowsToScannedOrders([
+      {
+        printed: '155',
+        value: '155',
+        cancelled: false,
+        time: '00:30',
+        dateIso: '2026-08-15',
+        pointA: 'A',
+        pointB: 'B',
+      },
+    ], undefined, 'dashboard-shifted')
+
+    expect(mergeScannedOrders(existing, shiftedRetry, () => '00:30-row')).toMatchObject([
+      { localId: '00:30-row', timeText: '00:30', feeText: '155' },
+    ])
+  })
+
+  it('keeps both rows visible when same-position unknown and retry fees conflict', () => {
+    const first = cloudRowsToScannedOrders([
+      {
+        printed: '155',
+        value: '155',
+        cancelled: false,
+        time: null,
+        dateIso: '2026-08-15',
+        pointA: 'A',
+        pointB: 'B',
+      },
+    ], undefined, 'dashboard-conflict')
+    const existing = mergeScannedOrders([], first, () => 'unknown-155')
+    const conflictingRetry = cloudRowsToScannedOrders([
+      {
+        printed: '240',
+        value: '240',
+        cancelled: false,
+        time: '00:30',
+        dateIso: '2026-08-15',
+        pointA: 'A',
+        pointB: 'B',
+      },
+    ], undefined, 'dashboard-conflict')
+    const reconciled = reconcileUnverifiedOrderTimes(existing, conflictingRetry)
+    const added = mergeScannedOrders(reconciled, conflictingRetry, () => 'timed-240')
+
+    expect(reconciled).toMatchObject([
+      { localId: 'unknown-155', timeText: '', feeText: '155' },
+    ])
+    expect(added).toMatchObject([
+      { localId: 'timed-240', timeText: '00:30', feeText: '240' },
+    ])
+  })
+
+  it('does not heal a moved same-fee row from slot position when no route proves identity', () => {
+    const first = cloudRowsToScannedOrders([{
+      printed: '155',
+      value: '155',
+      cancelled: false,
+      time: null,
+      dateIso: '2026-08-15',
+      pointA: null,
+      pointB: null,
+    }], undefined, 'dashboard-same-fee')
+    const existing = mergeScannedOrders([], first, () => 'unknown-first-155')
+    const movedRetry = cloudRowsToScannedOrders([{
+      printed: '155',
+      value: '155',
+      cancelled: false,
+      time: '00:30',
+      dateIso: '2026-08-15',
+      pointA: null,
+      pointB: null,
+    }], undefined, 'dashboard-same-fee')
+
+    const reconciled = reconcileUnverifiedOrderTimes(existing, movedRetry)
+    const added = mergeScannedOrders(reconciled, movedRetry, () => 'timed-second-155')
+
+    expect(reconciled).toMatchObject([
+      { localId: 'unknown-first-155', timeText: '', feeText: '155' },
+    ])
+    expect(added).toMatchObject([
+      { localId: 'timed-second-155', timeText: '00:30', feeText: '155' },
+    ])
+  })
+
+  it('uses same-photo provenance when a verified-time retry has no repeated day header', () => {
+    const first = cloudRowsToScannedOrders([
+      {
+        printed: '155',
+        value: '155',
+        cancelled: false,
+        time: null,
+        dateIso: '2026-08-15',
+        pointA: 'A',
+        pointB: 'B',
+      },
+    ], undefined, 'dashboard-9')
+    const existing = mergeScannedOrders([], first, () => 'held')
+    const retry = cloudRowsToScannedOrders([
+      {
+        printed: '155',
+        value: '155',
+        cancelled: false,
+        time: '00:30',
+        dateIso: null,
+        pointA: 'A',
+        pointB: 'B',
+      },
+    ], undefined, 'dashboard-9')
+    const reconciled = reconcileUnverifiedOrderTimes(existing, retry)
+
+    expect(reconciled[0]).toMatchObject({
+      localId: 'held',
+      timeText: '00:30',
+      dateText: '2026-08-15',
+    })
+    expect(mergeScannedOrders(reconciled, retry, () => 'duplicate')).toEqual([])
   })
 
   it('carries the route through, so the same delivery is not counted twice across pages', () => {

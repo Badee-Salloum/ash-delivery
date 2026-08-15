@@ -47,7 +47,7 @@ describe('cloud OCR transport', () => {
       '/shifts/shift-1/ocr/orders',
       expect.any(Uint8Array),
       expect.any(String),
-      { 'x-ocr-retry': 'true' },
+      { 'x-ash-orders-time-consensus': 'v1', 'x-ocr-retry': 'true' },
       'POST',
     )
   })
@@ -95,6 +95,50 @@ it('binds close approval to the reviewed settlement and both physical confirmati
     method: 'POST',
     credentials: 'include',
     headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+})
+
+it('re-reads an explicit stored dashboard slot with the time-consensus capability', async () => {
+  const response = {
+    ok: true,
+    cached: false,
+    retryable: false,
+    reads: { used: 2, max: 15 },
+    rows: [],
+    evidence: {
+      package: 'end',
+      slot: 'dashboard_2',
+      mediaId: 'media-2',
+      attachmentToken: 'attachment-2',
+    },
+    target: { kind: 'order', providerOrderNo: 'order-7', provenanceLinked: false },
+    reviewedOrdersHash: 'orders-hash',
+    settlementHash: 'settlement-hash',
+  }
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(JSON.stringify(response), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+  const body = {
+    package: 'end' as const,
+    slot: 'dashboard_2',
+    target: { kind: 'order' as const, providerOrderNo: 'order-7' },
+    reason: 'verify the printed midnight time',
+  }
+
+  await expect(api.rereadOrderEvidence('shift-1', body)).resolves.toEqual(response)
+  expect(fetchMock).toHaveBeenCalledWith('/api/shifts/shift-1/ocr/orders/evidence-reread', {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'content-type': 'application/json',
+      'x-ash-orders-time-consensus': 'v1',
+    },
     body: JSON.stringify(body),
   })
 })

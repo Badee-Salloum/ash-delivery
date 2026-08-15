@@ -137,6 +137,11 @@ describe('the SRS §2.3 shift, end to end over HTTP', () => {
     expect(review.statusCode).toBe(200)
     expect(review.json().orders).toHaveLength(20)
     expect(review.json().startPackage.floatTotal).toBe('100000.00')
+    const seededDriver = await h.deps.directory.driver(DRIVER_ID)
+    const seededVehicle = await h.deps.directory.vehicle(VEHICLE_ID)
+    expect(review.json().driverNameAr).toBe(seededDriver?.fullNameAr)
+    expect(review.json().driverNameEn).toBe(seededDriver?.fullNameEn ?? null)
+    expect(review.json().vehicleCode).toBe(seededVehicle?.code)
     const hash = review.json().br1.ordersHash as string
 
     // ── The manager approves ──────────────────────────────────────────────────────────────

@@ -591,7 +591,10 @@ export class MemoryOperationWindowRepo implements OperationWindowRepo {
     for (const order of await this.orders.listByShift(shiftId)) {
       if (order.kind === 'manual') continue
       const windowStatus = classify(order.occurredDate, order.occurredMinute)
-      const included = order.decidedBy === null ? includedByOperationWindow(windowStatus) : order.included
+      const auditedDecision = order.decidedBy !== null
+        && order.decidedAt !== null
+        && Boolean(order.decisionReason?.trim())
+      const included = auditedDecision ? order.included : includedByOperationWindow(windowStatus)
       if (windowStatus === order.windowStatus && included === order.included) continue
       await this.orders.update({ ...order, windowStatus, included }, actorId)
       orderUpdates++
@@ -600,7 +603,10 @@ export class MemoryOperationWindowRepo implements OperationWindowRepo {
     let deductionUpdates = 0
     for (const deduction of await this.deductions.listByShift(shiftId)) {
       const windowStatus = classify(deduction.occurredDate, deduction.occurredMinute)
-      const included = deduction.decidedBy === null ? includedByOperationWindow(windowStatus) : deduction.included
+      const auditedDecision = deduction.decidedBy !== null
+        && deduction.decidedAt !== null
+        && Boolean(deduction.decisionReason?.trim())
+      const included = auditedDecision ? deduction.included : includedByOperationWindow(windowStatus)
       if (windowStatus === deduction.windowStatus && included === deduction.included) continue
       await this.deductions.update({ ...deduction, windowStatus, included }, actorId)
       deductionUpdates++

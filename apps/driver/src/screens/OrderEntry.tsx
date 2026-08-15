@@ -330,18 +330,27 @@ export function OperationsList({
           <p className="mt-2 text-sm font-semibold">{t.orders.cashDeductions}</p>
           <p className="text-sm text-slate-600">{t.orders.cashDeductionHint}</p>
           {cashDeductions.map((deduction) => (
-            <Card key={deduction.localId} className={deduction.included === false ? 'opacity-60' : ''}>
+            <Card
+              key={deduction.localId}
+              className={deduction.included === false && deduction.timeReviewRequired !== true ? 'opacity-60' : ''}
+            >
               <div className="flex items-center gap-3">
                 {/* Inclusion comes from the shift-time window. Only a manager may override it,
                     with a reason, so the driver sees the status but cannot toggle it here. */}
                 <span
                   className={`shrink-0 rounded-full px-2 py-1 text-[10px] font-medium ${
-                    deduction.included === false
+                    deduction.timeReviewRequired === true
+                      ? 'bg-amber-50 text-amber-800'
+                      : deduction.included === false
                       ? 'bg-slate-100 text-slate-600'
                       : 'bg-emerald-50 text-emerald-700'
                   }`}
                 >
-                  {deduction.included === false ? t.orders.excluded : t.orders.included}
+                  {deduction.timeReviewRequired === true
+                    ? t.orders.timeUnverified
+                    : deduction.included === false
+                      ? t.orders.excluded
+                      : t.orders.included}
                 </span>
                 <span className="num w-14 text-sm text-slate-600">{deduction.timeText || '—'}</span>
                 <label className="min-w-0 flex-1">

@@ -1,8 +1,8 @@
 /**
- * The CORPUS — «داتا التجريب», 48 screenshots, keyed by CONTENT HASH.
+ * The CORPUS — «داتا التجريب», 66 screenshots, keyed by CONTENT HASH.
  *
  * Why a hash and not a filename: all 24 files in `apps/driver/test/fixtures/ocr/` are byte-identical
- * to 24 of these 48 images — that folder is where the fixtures were cut from. The same screen
+ * to 24 of these images — that folder is where the fixtures were cut from. The same screen
  * therefore has two names (`log-0804-b.jpg` and `3/photo_1_2026-08-10_15-23-32.jpg`), and a
  * filename-keyed answer key would grade it twice, or grade it once and silently miss the other half
  * of the corpus. sha1 makes the two names one entry.
@@ -26,7 +26,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { TRUTH } from './ocr-truth.mjs'
 
-/** Short sha1 — 12 hex chars. 48 images, all mutually distinct; collision risk is not a concern. */
+/** Short sha1 — 12 hex chars. All corpus images are mutually distinct; collision risk is negligible. */
 export const shaOf = (bytes) => createHash('sha1').update(bytes).digest('hex').slice(0, 12)
 
 /**
@@ -82,12 +82,30 @@ export const INDEX = {
   '41061ae0a5b8': { corpus: 'New folder/4c209e8b-60f0-476f-ab6b-5b998ccc5071.jpg', fixture: null },
   'f951bcd61a1d': { corpus: 'New folder/82d542e4-e628-4b7e-8980-5c201a1672ad.jpg', fixture: null },
   '9a7527f711ba': { corpus: 'New folder/935036a4-60bb-4fc3-9a12-08607d03758e.jpg', fixture: null },
+  'a6f282ba09c2': { corpus: '5/photo_1_2026-08-13_14-52-23.jpg', fixture: null },
+  '3f7f5ea8436e': { corpus: '5/photo_2026-08-12_01-38-38.jpg', fixture: null },
+  'b75f10ac7329': { corpus: '5/photo_2026-08-13_14-49-35.jpg', fixture: null },
+  '8c41f55ce6e6': { corpus: '5/photo_2026-08-13_14-50-48.jpg', fixture: null },
+  '9baf67529d8d': { corpus: '5/photo_2_2026-08-13_14-52-23.jpg', fixture: null },
+  'ddbeeacc8e84': { corpus: '5/photo_3_2026-08-13_14-52-23.jpg', fixture: null },
+  'e7802c912a99': { corpus: '5/photo_4_2026-08-13_14-52-23.jpg', fixture: null },
+  '888b56e1c135': { corpus: '6/WhatsApp Image 2026-08-14 at 02.04.56 (1).jpeg', fixture: null },
+  '2cc4605a5098': { corpus: '6/WhatsApp Image 2026-08-14 at 02.04.56 (2).jpeg', fixture: null },
+  '410da3fe4360': { corpus: '6/WhatsApp Image 2026-08-14 at 02.04.56 (3).jpeg', fixture: null },
+  '25394500670d': { corpus: '6/WhatsApp Image 2026-08-14 at 02.04.56.jpeg', fixture: null },
+  '9d3a0c0bcdb0': { corpus: '6/WhatsApp Image 2026-08-14 at 02.04.59.jpeg', fixture: null },
+  'a081e7504e70': { corpus: '7/WhatsApp Image 2026-08-15 at 01.38.42.jpeg', fixture: null },
+  'ac2a393ec879': { corpus: '7/WhatsApp Image 2026-08-15 at 01.38.43 (1).jpeg', fixture: null },
+  '2561d050287d': { corpus: '7/WhatsApp Image 2026-08-15 at 01.38.43 (2).jpeg', fixture: null },
+  '481eeb6085c9': { corpus: '7/WhatsApp Image 2026-08-15 at 01.38.43 (3).jpeg', fixture: null },
+  '38122edd2a8f': { corpus: '7/WhatsApp Image 2026-08-15 at 01.38.43.jpeg', fixture: null },
+  '42d567b7783f': { corpus: '7/WhatsApp Image 2026-08-15 at 01.38.44.jpeg', fixture: null },
   'fb0ea4c67284': { corpus: 'photo_1_2026-07-30_15-20-32.jpg', fixture: 'dash-odometer.jpg' },
   'e6449c2f9e6b': { corpus: 'photo_2_2026-07-30_15-20-32.jpg', fixture: 'bms-cards-ar.jpg' },
   '2d57e3aacc2a': { corpus: 'photo_3_2026-07-30_15-20-32.jpg', fixture: 'bms-table-en.jpg' },
 }
 
-export const CORPUS_COUNT = 48
+export const CORPUS_COUNT = 66
 
 /**
  * What each screen IS. The reader must be told, because a payments log and an orders list are the
@@ -107,10 +125,11 @@ export const SCREEN = {
     '36220ba7b914', '56b4da17fa47', 'df176fae62ff', 'f781b623fffc', '4a097298c78d',
     '229464c346b6', '84363fa7ae62', '25cb45ef9a8a', 'e013cfebb349', 'f8d28c8442d5',
     'a83beebdc9bc', '94b554b64a69', 'ea2445753596', '36e9e988d5b1', '7077853d9782',
-    'eab4b4ecc01c', 'f983f86b2908', '9a7527f711ba',
+    'eab4b4ecc01c', 'f983f86b2908', '9a7527f711ba', 'ac2a393ec879', '38122edd2a8f',
   ],
-  odometer: ['fb0ea4c67284'],
-  bms: ['e6449c2f9e6b', '2d57e3aacc2a', '41061ae0a5b8', 'f951bcd61a1d'],
+  wallet: ['a081e7504e70'],
+  odometer: ['fb0ea4c67284', '42d567b7783f'],
+  bms: ['e6449c2f9e6b', '2d57e3aacc2a', '41061ae0a5b8', 'f951bcd61a1d', '2561d050287d', '481eeb6085c9'],
 }
 
 /**
@@ -207,6 +226,26 @@ export const digitsIn = (s) => stripBidi(String(s ?? '')).replace(/[^٠-٩۰-۹0
  * nothing; a number there is a hallucination and must score as one.
  */
 export const CORPUS_TRUTH = {
+  // recent_orders · light · the live midnight-boundary incident, page 2.
+  // `12:03 ص` is midnight-hour 00:03, not 11:03. The remaining rows belong to the date header
+  // immediately above them, which is the previous calendar day.
+  'ac2a393ec879': { screen: 'recent_orders', rows: [
+    ['155', '00:03', '2026-08-15'],
+    ['240', '23:21', '2026-08-14'],
+    ['225', '22:27', '2026-08-14'],
+    ['425', '21:19', '2026-08-14'],
+    ['370', '20:09', '2026-08-14'],
+  ] },
+  // recent_orders · light · overlapping page 1 from the same shift.
+  // The first two cards are explicitly cancelled. The following clocks are printed `12:30 ص`
+  // and `12:03 ص`; this image exposed the provider's silent 12→11 transcription error.
+  '38122edd2a8f': { screen: 'recent_orders', rows: [
+    [null, '00:59', '2026-08-15'],
+    [null, '00:49', '2026-08-15'],
+    ['155', '00:30', '2026-08-15'],
+    ['155', '00:03', '2026-08-15'],
+    ['240', '23:21', '2026-08-14'],
+  ] },
   // payments_log · light · status clock 2:40
   //   Same Arabic «سجل المدفوعات» list as 3f38cb858490 and 81a3551061f5, scrolled to a middle
   //   position. Status-bar clock printed as ٢:٤٠, no AM/PM. All row stamps read ٠٨/٠٦ = Aug 6. Row 1

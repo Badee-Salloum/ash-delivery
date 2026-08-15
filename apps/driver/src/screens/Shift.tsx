@@ -28,6 +28,7 @@ import {
   healCashDeductionDetails,
   healCutOffRoutes,
   reconcileRefusedOrderFees,
+  reconcileUnverifiedOrderTimes,
   mergeScannedOrders,
   cloudRowsToScannedMovements,
   cloudRowsToScannedOrders,
@@ -35,6 +36,7 @@ import {
   previewBr1,
   readInCloud,
   reconcileLocalCashDeductions,
+  resumedOrderWindowState,
   syncRecordedCashDeductions,
   normalizeDecimalDigits,
   odometerFromCloudFields,
@@ -561,7 +563,7 @@ export function ShiftFlow({
             payMode: o.payMode,
             feeText: o.fee,
             recorded: true,
-            included: o.included,
+            ...resumedOrderWindowState(o),
             walletAmountText: o.walletAmount ?? '',
             timeText: o.occurredMinute ?? '',
             dateText: o.occurredDate ?? '',
@@ -1693,7 +1695,10 @@ function EndPackage({
       }
 
       const localOrders = r?.ok ? r.reading.orders : []
-      const scanned = cloudRowsToScannedOrders(cloud.rows, localOrders)
+      // Slot + row position is local provenance for a delivery whose AI-verified clock is null.
+      // It makes a retry of this same photo idempotent without collapsing two uncertain rows from
+      // different overlapping photos. Known clocks still dedupe across slots by (day, minute).
+      const scanned = cloudRowsToScannedOrders(cloud.rows, localOrders, slot)
       // `ok` only says the response was structured. A page with no authoritative monetary row is
       // still a no-fields outcome for reconciliation and must not look like a successful zero-add.
       if (!scanned.some((row) => row.cancelled === true || (row.fee !== null && row.fee.trim() !== ''))) {
@@ -1709,13 +1714,16 @@ function EndPackage({
       }
 
       const hasVisibleRefusal = scanned.some(
-        (row) => row.cancelled !== true && (row.fee === null || row.fee.trim() === ''),
+        (row) =>
+          row.cancelled !== true &&
+          (row.fee === null || row.fee.trim() === '' || row.time.trim() === ''),
       )
       onDraft((d) => {
         // A retry can supply the fee that an earlier AI response explicitly refused. Reconcile
         // that untouched card first so its stable local/provider identity consumes the retry row
         // instead of leaving an empty card beside a newly appended duplicate.
-        const reconciledOrders = reconcileRefusedOrderFees(d.orders, scanned)
+        const reconciledTimes = reconcileUnverifiedOrderTimes(d.orders, scanned)
+        const reconciledOrders = reconcileRefusedOrderFees(reconciledTimes, scanned)
         const added = mergeScannedOrders(reconciledOrders, scanned, () => crypto.randomUUID())
         const addedDeductions = mergeScannedCashDeductions(
           d.cashDeductions,
@@ -1734,29 +1742,48 @@ function EndPackage({
           }),
           ...addedDeductions,
         ])
+        const nextOrders = [
+          ...reconciledOrders.map((order) => {
+            const healedOrder = routePatch.get(order.localId)
+            return healedOrder
+              ? { ...order, pointA: healedOrder.pointA, pointB: healedOrder.pointB }
+              : order
+          }),
+          ...added,
+        ]
         const outcome = visibleAiPageReadOutcome(added, addedDeductions, nextCashDeductions)
-        if (hasVisibleRefusal) {
+        // A verified retry may add a new timed row but must not make the earlier unknown-time card
+        // disappear from the status line. It stays an explicit manager decision until an audited
+        // correction/exclusion resolves it; after attempt two the same line becomes terminal.
+        const remainingSlotRefusals =
+          nextOrders.filter(
+            (row) =>
+              row.scanProvenance?.startsWith(`${slot}:`) === true &&
+              row.cancelled !== true &&
+              (row.feeRefused === true || row.timeText?.trim() === ''),
+          ).length +
+          nextCashDeductions.filter(
+            (row) =>
+              row.scanProvenance?.startsWith(`${slot}:`) === true &&
+              (row.timeReviewRequired === true || row.timeText.trim() === ''),
+          ).length
+        if (hasVisibleRefusal || remainingSlotRefusals > 0) {
           failedDashboardReads.current.set(slot, {
             file,
             reason: 'refused',
             canRetry: cloud.retryable,
             countsAsFailure: false,
-            refused: outcome.kind === 'read' ? (outcome.refused ?? 0) : 0,
+            refused: Math.max(
+              remainingSlotRefusals,
+              outcome.kind === 'read' ? (outcome.refused ?? 0) : 0,
+            ),
           })
         } else {
           failedDashboardReads.current.delete(slot)
         }
         return {
           ...d,
-          orders: [
-            ...reconciledOrders.map((order) => {
-              const healedOrder = routePatch.get(order.localId)
-              return healedOrder
-                ? { ...order, pointA: healedOrder.pointA, pointB: healedOrder.pointB }
-                : order
-            }),
-            ...added,
-          ],
+          orders: nextOrders,
           // Heal the exact phone-draft incident too: an earlier partial edge card and its later
           // complete sighting collapse only when both are unrecorded OCR rows. Server-restored and
           // genuine complete twins retain multiplicity.

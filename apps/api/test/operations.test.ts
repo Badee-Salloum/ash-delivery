@@ -261,8 +261,14 @@ describe('what the wallet did on its own', () => {
 describe('submitting the list', () => {
   const list = {
     orders: [
-      { providerOrderNo: 'YAL-A', payMode: 'cash', fee: sypStr(5_000), occurredMinute: '18:06' },
-      { providerOrderNo: 'YAL-B', payMode: 'cash', fee: sypStr(5_000), occurredMinute: '17:42' },
+      {
+        providerOrderNo: 'YAL-A', payMode: 'cash', fee: sypStr(5_000),
+        occurredDate: '2026-07-21', occurredMinute: '18:06',
+      },
+      {
+        providerOrderNo: 'YAL-B', payMode: 'cash', fee: sypStr(5_000),
+        occurredDate: '2026-07-21', occurredMinute: '17:42',
+      },
     ],
     movements: [
       { amount: sypStr(-1_000), occurredMinute: '18:06', role: 'yalago_cut', providerOrderNo: 'YAL-A' },

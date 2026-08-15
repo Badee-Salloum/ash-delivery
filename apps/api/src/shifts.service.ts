@@ -6,6 +6,7 @@ import type {
   BatterySwapRecord,
   CashDeductionRecord,
   NewShiftSettlementRecord,
+  OperationWindowStatus,
   ShiftSettlementRecord,
   OperationBatch,
   Deps,
@@ -200,8 +201,40 @@ async function operationWindowContext(deps: Deps, shift: ShiftRecord): Promise<{
  * become domain values, is what keeps `packages/domain` from having to learn what "excluded" means
  * and keeps the rule from drifting across the several places that ask for a shift's orders.
  */
+const hasAuditedWindowDecision = (row: {
+  decisionReason: string | null
+  decidedBy: string | null
+  decidedAt: string | null
+}): boolean =>
+  row.decidedBy !== null && row.decidedAt !== null && Boolean(row.decisionReason?.trim())
+
+/**
+ * `included=true` is not enough for an unknown-time legacy row. Older API/database versions wrote
+ * that combination automatically, so the money boundary also requires the attributed manager
+ * reason that resolves the uncertainty. This keeps BR1 and settlement safe even before the first
+ * compatibility reclassification runs.
+ */
+const operationCounts = (row: {
+  included: boolean
+  windowStatus: OperationWindowStatus
+  decisionReason: string | null
+  decidedBy: string | null
+  decidedAt: string | null
+}): boolean =>
+  row.included && (row.windowStatus !== 'unknown' || hasAuditedWindowDecision(row))
+
+/** Preserve an audited manager choice; otherwise derive inclusion only from verified timing. */
+const persistedOperationInclusion = (row: {
+  included: boolean
+  windowStatus: OperationWindowStatus
+  decisionReason: string | null
+  decidedBy: string | null
+  decidedAt: string | null
+}): boolean =>
+  hasAuditedWindowDecision(row) ? row.included : includedByWindow(row.windowStatus)
+
 export const includedOrders = (rows: readonly ShiftOrderRecord[]): ShiftOrderRecord[] =>
-  rows.filter((o) => o.included)
+  rows.filter(operationCounts)
 
 const toDomainOrders = (rows: readonly ShiftOrderRecord[]): ShiftOrder[] =>
   includedOrders(rows).map((o) => ({
@@ -1286,7 +1319,11 @@ async function addOrderLocked(
         : minor(input.feeOcr < 0n ? -input.feeOcr : input.feeOcr),
       pointA: null,
       pointB: null,
-      included: current?.included ?? existingOrder?.included ?? includedByWindow(windowStatus),
+      included: current
+        ? persistedOperationInclusion(current)
+        : existingOrder
+          ? persistedOperationInclusion(existingOrder)
+          : includedByWindow(windowStatus),
       windowStatus: current?.windowStatus ?? existingOrder?.windowStatus ?? windowStatus,
       decisionReason: current?.decisionReason ?? null,
       decidedBy: current?.decidedBy ?? null,
@@ -1331,7 +1368,9 @@ async function addOrderLocked(
     notes: null,
     createdBy: existingDeduction ? existingDeduction.createdBy : actor.userId,
     points: [],
-    included: existingDeduction?.included ?? includedByWindow(windowStatus),
+    included: existingDeduction
+      ? persistedOperationInclusion(existingDeduction)
+      : includedByWindow(windowStatus),
     walletAmount: input.walletAmount ?? null,
     occurredMinute: existingDeduction ? existingDeduction.occurredMinute : occurredMinute,
     occurredDate: existingDeduction ? existingDeduction.occurredDate : occurredDate,
@@ -1480,7 +1519,7 @@ export async function evaluateShift(deps: Deps, shift: ShiftRecord): Promise<Br1
   const deductionRows = await deps.cashDeductions.listByShift(shift.id)
   const orders = toDomainOrders(orderRows)
   const walletAdjustments = toWalletAdjustments(movementRows)
-  const cashDeductions = deductionRows.filter((d) => d.included).map((d) => d.amount)
+  const cashDeductions = deductionRows.filter(operationCounts).map((d) => d.amount)
   const result = evaluateBr1({
     // A carried ذمة is cash he was ALREADY holding at open, so it is part of the float for the
     // equation exactly as it is for `closingBalances`. These two sums must never drift — the
@@ -1621,11 +1660,11 @@ async function unresolvedWindowRows(deps: Deps, shiftId: string): Promise<{ orde
         (o) =>
           o.kind !== 'manual' &&
           o.windowStatus === 'unknown' &&
-          (o.decidedBy === null || !o.decisionReason?.trim()),
+          !hasAuditedWindowDecision(o),
       )
       .map((o) => o.providerOrderNo),
     deductions: deductions
-      .filter((d) => d.windowStatus === 'unknown' && (d.decidedBy === null || !d.decisionReason?.trim()))
+      .filter((d) => d.windowStatus === 'unknown' && !hasAuditedWindowDecision(d))
       .map((d) => d.id),
   }
 }
@@ -2380,7 +2419,7 @@ export async function submitOperations(
         // Persisted time and classification are evidence, not fields a cached driver retry can
         // revise. The deterministic close/review classifier may refresh the status; only a manager
         // with a reason may correct the printed date/minute or resulting inclusion.
-        included: current.included,
+        included: persistedOperationInclusion(current),
         walletAmount: managerDecided ? current.walletAmount : (row.walletAmount ?? null),
         occurredMinute: current.occurredMinute,
         occurredDate: current.occurredDate,
@@ -2429,7 +2468,7 @@ export async function submitOperations(
         ...(row.pointA ? [{ role: 'start' as const, label: row.pointA, lat: null, lng: null }] : []),
         ...(row.pointB ? [{ role: 'end' as const, label: row.pointB, lat: null, lng: null }] : []),
       ],
-      included: opposite?.included ?? includedByWindow(windowStatus),
+      included: opposite ? persistedOperationInclusion(opposite) : includedByWindow(windowStatus),
       walletAmount: row.walletAmount ?? null,
       occurredMinute: opposite ? opposite.occurredMinute : (row.occurredMinute ?? null),
       occurredDate: opposite ? opposite.occurredDate : (row.occurredDate ?? null),
@@ -2519,7 +2558,11 @@ export async function submitOperations(
       pointB: preserveRicherCurrentRoute ? current.pointB : submittedRoute.pointB,
       included: canHealCurrentOcrDate
         ? includedByWindow(windowStatus)
-        : (current?.included ?? opposite?.included ?? includedByWindow(windowStatus)),
+        : current
+          ? persistedOperationInclusion(current)
+          : opposite
+            ? persistedOperationInclusion(opposite)
+            : includedByWindow(windowStatus),
       windowStatus,
       decisionReason: current?.decisionReason ?? null,
       decidedBy: current?.decidedBy ?? null,
@@ -2712,7 +2755,14 @@ async function reviseOperationsLocked(
             // Window/include decisions require a human reason. Value-only corrections retain an
             // optional reason for old managers, while still advancing decidedAt as the optimistic
             // version so a late driver sync cannot overwrite the corrected money.
-            decisionReason: patch.reason?.trim() || current.decisionReason,
+            // On an UNKNOWN row, however, a fee note must not masquerade as the reasoned include /
+            // exclude decision approval requires. Keep the existing window reason (normally null)
+            // until the manager explicitly changes inclusion or timing.
+            decisionReason: changesWindow
+              ? patch.reason!.trim()
+              : current.windowStatus === 'unknown'
+                ? current.decisionReason
+                : (patch.reason?.trim() || current.decisionReason),
             decidedBy: actor.userId,
             decidedAt: nextOperationDecisionAt(deps.clock.nowMs(), current.decidedAt),
           }
@@ -2788,7 +2838,7 @@ function allocateCashDeductions(
   let total = minor(0n)
   let fromShare = minor(0n)
   const postings = [...rows]
-    .filter((row) => row.included)
+    .filter(operationCounts)
     .sort((a, b) => a.operationKey.localeCompare(b.operationKey))
     .map((row) => {
       const sharePortion = row.amount < shareAvailable ? row.amount : shareAvailable

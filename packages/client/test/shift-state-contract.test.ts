@@ -14,9 +14,11 @@ describe('shift-state operation window contract', () => {
     expectTypeOf<Order['windowStatus']>().toEqualTypeOf<OperationWindowStatus>()
     expectTypeOf<Order['decisionReason']>().toEqualTypeOf<string | null>()
     expectTypeOf<Order['decidedBy']>().toEqualTypeOf<string | null>()
+    expectTypeOf<Order['decidedAt']>().toEqualTypeOf<string | null>()
     expectTypeOf<Deduction['windowStatus']>().toEqualTypeOf<OperationWindowStatus>()
     expectTypeOf<Deduction['decisionReason']>().toEqualTypeOf<string | null>()
     expectTypeOf<Deduction['decidedBy']>().toEqualTypeOf<string | null>()
+    expectTypeOf<Deduction['decidedAt']>().toEqualTypeOf<string | null>()
   })
 
   it('carries the exact BMS evidence generation needed after a remount', () => {

@@ -10,7 +10,9 @@ describe('operations OCR authority guards', () => {
     expect(shift).not.toContain('cloudOrders.length > 0 ? cloudOrders : localRows')
     expect(shift).not.toContain('cloudMovements.length > 0 ? cloudMovements : localRows')
     expect(shift).not.toMatch(/const scanned\s*=\s*[^\n]*localRows/u)
-    expect(shift).toContain('const scanned = cloudRowsToScannedOrders(cloud.rows, localOrders)')
+    expect(shift).toContain('const scanned = cloudRowsToScannedOrders(cloud.rows, localOrders, slot)')
+    expect(shift).toContain('const reconciledTimes = reconcileUnverifiedOrderTimes(d.orders, scanned)')
+    expect(shift).toContain('reconcileRefusedOrderFees(reconciledTimes, scanned)')
     expect(shift).toContain('const scanned = cloudRowsToScannedMovements(cloud.rows)')
     expect(shift).toContain('const nextCashDeductions = reconcileLocalCashDeductions([')
   })
@@ -60,6 +62,8 @@ describe('operations OCR authority guards', () => {
     expect(shift).toContain('const hasVisibleRefusal = scanned.some(')
     expect(shift).toContain("reason: 'refused'")
     expect(shift).toContain('discardAiPageRefusals(withoutFailure, failure.refused)')
+    expect(shift).toContain('nextCashDeductions.filter(')
+    expect(shift).toContain('row.timeReviewRequired === true || row.timeText.trim() ===')
   })
 
   it('accepts a page made only of structured cancelled cards as a successful AI read', () => {
@@ -71,6 +75,11 @@ describe('operations OCR authority guards', () => {
   it('hydrates and re-syncs deductions from the canonical server list', () => {
     expect(shift).toContain('cashDeductions: syncRecordedCashDeductions([], st.cashDeductions ?? [])')
     expect(shift).toContain('syncRecordedCashDeductions(d.cashDeductions, operations.cashDeductions)')
+  })
+
+  it('does not hydrate an unresolved legacy unknown order into the phone BR1 preview', () => {
+    expect(shift).toContain('...resumedOrderWindowState(o)')
+    expect(shift).not.toContain('included: o.included,')
   })
 
   it('labels BR1 as surplus or shortage and displays an absolute amount', () => {

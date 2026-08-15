@@ -67,6 +67,8 @@ export interface DraftOrder {
    * money. Absent means checked: every row typed by hand is one the driver is asserting.
    */
   included?: boolean
+  /** Automatically excluded until both printed day and minute are verified by the reader. */
+  timeReviewRequired?: boolean
   /** How much of the fee reached the wallet, as typed/measured. '' = unmeasured, the mode decides. */
   walletAmountText?: string
   /** «HH:MM» off the dashboard — what a payments-log row is paired to. */
@@ -82,6 +84,16 @@ export interface DraftOrder {
   /** Where it went: «A» the pickup, «B» the dropoff, as the screen wrote them. */
   pointA?: string | null
   pointB?: string | null
+  /**
+   * Stable identity of a row whose printed clock AI refused to verify.
+   *
+   * A known (day, minute) is enough to merge overlapping screenshots. With no minute, using an
+   * empty string as identity makes unrelated deliveries on different pages look identical. The
+   * evidence slot plus row position keeps a retry of the SAME image idempotent, while deliberately
+   * retaining uncertain rows from DIFFERENT images for the manager to resolve instead of silently
+   * discarding money. It is local provenance only and never crosses the operations wire.
+   */
+  scanProvenance?: string
 }
 
 /** A «سجل المدفوعات» row as the driver's list holds it, before the server gives it an identity. */
@@ -117,6 +129,19 @@ export interface DraftCashDeduction {
   pointB?: string | null
   source: 'ocr' | 'refused' | 'manual'
   included?: boolean
+  /**
+   * Stable identity of this row in the dashboard evidence while its printed time is unverified.
+   *
+   * A negative amount remains financially important even when AI refuses every other field. The
+   * evidence slot plus row position lets a retry heal that same draft instead of appending a second
+   * deduction. It is local-only and never becomes ledger identity (`operationKey` owns that).
+   */
+  scanProvenance?: string
+  /**
+   * The amount is trusted, but its time boundary is not. Such a row stays visible/retryable and
+   * remains excluded from the phone's BR1 preview until AI has verified both its minute and date.
+   */
+  timeReviewRequired?: boolean
   /** Already persisted by the API. Local reconciliation must never hide a server ledger row. */
   recorded?: boolean
 }
@@ -133,6 +158,10 @@ export interface StoredCashDeductionView {
   pointA: string | null
   pointB: string | null
   included: boolean
+  windowStatus?: string
+  decisionReason?: string | null
+  decidedBy?: string | null
+  decidedAt?: string | null
 }
 
 /**
@@ -150,6 +179,14 @@ export function syncRecordedCashDeductions(
   const currentByKey = new Map(current.map((row) => [row.operationKey, row]))
   return stored.map((row) => {
     const local = currentByKey.get(row.operationKey)
+    const missingBoundary = row.occurredMinute === null || row.occurredDate === null
+    const auditedUnknownDecision = row.windowStatus === 'unknown'
+      && row.decidedBy != null
+      && row.decidedAt != null
+      && Boolean(row.decisionReason?.trim())
+    const unresolvedBoundary = row.windowStatus === 'unknown'
+      ? !auditedUnknownDecision
+      : row.windowStatus === undefined && row.source === 'ocr' && missingBoundary
     return {
       localId: local?.localId ?? `deduction-${row.id}`,
       operationKey: row.operationKey,
@@ -161,7 +198,11 @@ export function syncRecordedCashDeductions(
       pointA: row.pointA,
       pointB: row.pointB,
       source: row.source,
-      included: row.included,
+      included: unresolvedBoundary ? false : row.included,
+      ...(local?.scanProvenance ? { scanProvenance: local.scanProvenance } : {}),
+      ...(unresolvedBoundary
+        ? { timeReviewRequired: true }
+        : {}),
       recorded: true,
     }
   })
@@ -306,7 +347,7 @@ export const feeSourceOf = (o: DraftOrder): FeeSource =>
 export function workedTotalText(orders: readonly DraftOrder[]): string {
   let sum = minor(0n)
   for (const o of orders) {
-    if (o.included === false) continue
+    if (!draftOrderCounts(o)) continue
     try {
       const fee = parseMinor(o.feeText || '0')
       if (fee > 0n) sum = minor(sum + fee)
@@ -359,6 +400,8 @@ export interface ScannedOrderRow {
   feeStrip?: string | null
   /** A “تم إلغاؤه” card: no fee on screen, and normally no money either. */
   cancelled?: boolean
+  /** Local evidence-slot/row identity used only when the verified clock is absent. */
+  scanProvenance?: string
 }
 
 /**
@@ -403,6 +446,50 @@ export function cashDeductionMagnitude(value: string | null): string | null {
 
 const cleanOperationPart = (value: string | null | undefined): string =>
   (value ?? '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase()
+
+const validOperationMinute = (value: string | null | undefined): boolean =>
+  /^(?:[01]\d|2[0-3]):[0-5]\d$/.test((value ?? '').trim())
+
+const validOperationDate = (value: string | null | undefined): boolean => {
+  const text = (value ?? '').trim()
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text)
+  if (!match) return false
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const date = new Date(Date.UTC(year, month - 1, day))
+  return date.getUTCFullYear() === year && date.getUTCMonth() + 1 === month && date.getUTCDate() === day
+}
+
+const hasVerifiedOperationBoundary = (
+  time: string | null | undefined,
+  date: string | null | undefined,
+): boolean => validOperationMinute(time) && validOperationDate(date)
+
+const draftOrderCounts = (row: DraftOrder): boolean =>
+  row.included !== false && row.timeReviewRequired !== true
+
+const draftDeductionCounts = (row: DraftCashDeduction): boolean =>
+  row.included !== false && row.timeReviewRequired !== true
+
+/**
+ * Restore a server order without letting legacy `unknown + included=true` enter the phone preview.
+ * A reason attributed to a manager is the state endpoint's audited-window marker; explicit manager
+ * include/exclude decisions remain authoritative, while an unresolved legacy default is unchecked.
+ */
+export function resumedOrderWindowState(row: {
+  included: boolean
+  windowStatus: string
+  decisionReason: string | null
+  decidedBy: string | null
+  decidedAt: string | null
+}): Pick<DraftOrder, 'included' | 'timeReviewRequired'> {
+  const unresolvedUnknown = row.windowStatus === 'unknown'
+    && (row.decidedBy === null || row.decidedAt === null || !row.decisionReason?.trim())
+  return unresolvedUnknown
+    ? { included: false, timeReviewRequired: true }
+    : { included: row.included }
+}
 
 /**
  * The part of a Recent-Orders operation that does not change when an overlapping screenshot fills
@@ -467,6 +554,31 @@ const sameCashDeductionTiming = (
   return leftMinute !== '' && leftMinute === rightMinute && compatibleKnownDeductionDates(left, right)
 }
 
+/**
+ * A retry of one evidence row may move from an unknown clock to a verified one.
+ *
+ * Amount equality is checked by the caller. Provenance is allowed to bridge the missing-clock gap,
+ * but never two conflicting known clocks or dates. This is intentionally narrower than ordinary
+ * overlap matching: different evidence slots with the same -50 remain two visible candidates.
+ */
+const sameCashDeductionProvenance = (
+  existing: DraftCashDeduction,
+  scanned: ScannedOrderRow,
+): boolean => {
+  const existingProvenance = cleanOperationPart(existing.scanProvenance)
+  const scannedProvenance = cleanOperationPart(scanned.scanProvenance)
+  if (
+    existingProvenance === '' ||
+    scannedProvenance === '' ||
+    existingProvenance !== scannedProvenance ||
+    !compatibleKnownDeductionDates(existing, { dateText: scanned.dateIso })
+  ) return false
+
+  const existingMinute = cleanOperationPart(existing.timeText)
+  const scannedMinute = cleanOperationPart(scanned.time)
+  return existingMinute === '' || scannedMinute === '' || existingMinute === scannedMinute
+}
+
 const enrichmentMatchScore = (existing: DraftCashDeduction, scanned: ScannedOrderRow): number => {
   if (!sameCashDeductionTiming(
     existing,
@@ -482,14 +594,23 @@ const bestExistingDeduction = (
   consumed: ReadonlySet<DraftCashDeduction>,
   scanned: ScannedOrderRow,
 ): DraftCashDeduction | null => {
-  let best: DraftCashDeduction | null = null
-  let bestScore = -1
   const scannedAmount = operationIdentity(scanned)
-  for (const candidate of existing) {
-    if (consumed.has(candidate)) continue
+  const eligible = existing.filter((candidate) => {
+    if (consumed.has(candidate)) return false
     // A manual row is a separate human claim. OCR rows, including keys made by an older cached PWA,
     // match by the printed timing and OCR magnitude rather than by route-derived key history.
-    if (!hasUneditedOcrAmount(candidate) || draftDeductionAmountIdentity(candidate) !== scannedAmount) continue
+    return hasUneditedOcrAmount(candidate) && draftDeductionAmountIdentity(candidate) === scannedAmount
+  })
+
+  const byProvenance = eligible.filter((candidate) => sameCashDeductionProvenance(candidate, scanned))
+  // Duplicate provenance is corrupt/ambiguous draft state. Do not guess which monetary row a retry
+  // should heal; both remain visible for the manager.
+  if (byProvenance.length === 1) return byProvenance[0]!
+  if (byProvenance.length > 1) return null
+
+  let best: DraftCashDeduction | null = null
+  let bestScore = -1
+  for (const candidate of eligible) {
     const score = enrichmentMatchScore(candidate, scanned)
     if (score > bestScore) {
       best = candidate
@@ -508,20 +629,33 @@ const preferredMatchedDate = (existing: DraftCashDeduction, scanned: ScannedOrde
   return existing.dateText
 }
 
-const mergedDeductionDetails = (existing: DraftCashDeduction, scanned: ScannedOrderRow) => ({
-  timeText: existing.timeText || scanned.time,
-  dateText: preferredMatchedDate(existing, scanned),
-  // Prefer the sighting with more route evidence. Equal-length conflicting OCR keeps the stable
-  // first sighting; the route is for review and never changes timing identity.
-  pointA:
-    routeEvidenceCount(scanned) > routeEvidenceCount(existing)
-      ? (scanned.pointA ?? existing.pointA ?? null)
-      : (existing.pointA ?? scanned.pointA ?? null),
-  pointB:
-    routeEvidenceCount(scanned) > routeEvidenceCount(existing)
-      ? (scanned.pointB ?? existing.pointB ?? null)
-      : (existing.pointB ?? scanned.pointB ?? null),
-})
+const hasVerifiedDeductionBoundary = hasVerifiedOperationBoundary
+
+const mergedDeductionDetails = (existing: DraftCashDeduction, scanned: ScannedOrderRow) => {
+  const timeText = existing.timeText || scanned.time
+  const dateText = preferredMatchedDate(existing, scanned)
+  const boundaryVerified = hasVerifiedDeductionBoundary(timeText, dateText)
+  return {
+    timeText,
+    dateText,
+    ...(existing.scanProvenance || scanned.scanProvenance
+      ? { scanProvenance: existing.scanProvenance || scanned.scanProvenance }
+      : {}),
+    ...(existing.timeReviewRequired === true && boundaryVerified
+      ? { timeReviewRequired: false, included: true }
+      : {}),
+    // Prefer the sighting with more route evidence. Equal-length conflicting OCR keeps the stable
+    // first sighting; the route is for review and never changes timing identity.
+    pointA:
+      routeEvidenceCount(scanned) > routeEvidenceCount(existing)
+        ? (scanned.pointA ?? existing.pointA ?? null)
+        : (existing.pointA ?? scanned.pointA ?? null),
+    pointB:
+      routeEvidenceCount(scanned) > routeEvidenceCount(existing)
+        ? (scanned.pointB ?? existing.pointB ?? null)
+        : (existing.pointB ?? scanned.pointB ?? null),
+  }
+}
 
 const deductionAsScannedRow = (row: DraftCashDeduction): ScannedOrderRow => ({
   dateIso: cleanOperationPart(row.dateText) === '' ? null : row.dateText,
@@ -530,6 +664,7 @@ const deductionAsScannedRow = (row: DraftCashDeduction): ScannedOrderRow => ({
   pointA: row.pointA ?? null,
   pointB: row.pointB ?? null,
   ...(row.amountStrip ? { feeStrip: row.amountStrip } : {}),
+  ...(row.scanProvenance ? { scanProvenance: row.scanProvenance } : {}),
 })
 
 const draftDeductionAmountIdentity = (row: DraftCashDeduction): string | null => {
@@ -603,7 +738,6 @@ export function mergeScannedCashDeductions(
   for (const row of inferMissingOrderDates(scanned)) {
     const magnitude = cashDeductionMagnitude(row.fee)
     if (magnitude === null) continue
-    if (row.time.trim() === '' && row.dateIso === null && row.pointA == null && row.pointB == null) continue
     const base = cashDeductionOperationKey(row)
     const match = bestExistingDeduction(existing, consumed, row)
     if (match) {
@@ -637,7 +771,9 @@ export function mergeScannedCashDeductions(
       pointA: row.pointA ?? null,
       pointB: row.pointB ?? null,
       source: 'ocr',
-      included: true,
+      included: hasVerifiedDeductionBoundary(row.time, row.dateIso),
+      ...(!hasVerifiedDeductionBoundary(row.time, row.dateIso) ? { timeReviewRequired: true } : {}),
+      ...(row.scanProvenance ? { scanProvenance: row.scanProvenance } : {}),
     })
   }
   return added
@@ -647,7 +783,16 @@ export function mergeScannedCashDeductions(
 export function healCashDeductionDetails(
   existing: readonly DraftCashDeduction[],
   scanned: readonly ScannedOrderRow[],
-): Array<{ localId: string; timeText: string; dateText: string; pointA: string | null; pointB: string | null }> {
+): Array<{
+  localId: string
+  timeText: string
+  dateText: string
+  pointA: string | null
+  pointB: string | null
+  included?: boolean
+  timeReviewRequired?: boolean
+  scanProvenance?: string
+}> {
   const consumed = new Set<DraftCashDeduction>()
   const consumedDetails = new Map<DraftCashDeduction, DraftCashDeduction>()
   for (const row of inferMissingOrderDates(scanned)) {
@@ -655,6 +800,10 @@ export function healCashDeductionDetails(
     const match = bestExistingDeduction(existing, consumed, row)
     if (match) {
       consumed.add(match)
+      // A persisted ledger row still consumes this sighting so the merge cannot append a duplicate,
+      // but the phone may never rewrite its time/date/inclusion from fresh OCR. Any such correction
+      // belongs to the server's audited manager path.
+      if (match.recorded === true) continue
       consumedDetails.set(match, { ...match, ...mergedDeductionDetails(match, row) })
       continue
     }
@@ -668,13 +817,19 @@ export function healCashDeductionDetails(
     dateText: string
     pointA: string | null
     pointB: string | null
+    included?: boolean
+    timeReviewRequired?: boolean
+    scanProvenance?: string
   }> = []
   for (const [match, next] of consumedDetails) {
     if (
       next.timeText !== match.timeText ||
       next.dateText !== match.dateText ||
       next.pointA !== match.pointA ||
-      next.pointB !== match.pointB
+      next.pointB !== match.pointB ||
+      next.included !== match.included ||
+      next.timeReviewRequired !== match.timeReviewRequired ||
+      next.scanProvenance !== match.scanProvenance
     ) {
       patches.push({
         localId: match.localId,
@@ -682,6 +837,11 @@ export function healCashDeductionDetails(
         dateText: next.dateText,
         pointA: next.pointA ?? null,
         pointB: next.pointB ?? null,
+        ...(next.included !== match.included ? { included: next.included !== false } : {}),
+        ...(next.timeReviewRequired !== match.timeReviewRequired
+          ? { timeReviewRequired: next.timeReviewRequired === true }
+          : {}),
+        ...(next.scanProvenance ? { scanProvenance: next.scanProvenance } : {}),
       })
     }
   }
@@ -764,14 +924,28 @@ export const newOrderKey = (localId: string): string => `YAL-${localId}`
  */
 const keyOf = (o: DraftOrder): string => {
   const head = o.cancelled === true ? 'C' : ''
-  return `${head}|${o.dateText ?? ''}|${o.timeText ?? ''}|${cardKey(o.pointA, o.pointB, o.cancelled === true)}`
+  const time = cleanOperationPart(o.timeText)
+  return `${head}|${o.dateText ?? ''}|${o.timeText ?? ''}|${cardKey(
+    o.pointA,
+    o.pointB,
+    o.cancelled === true,
+    time === '',
+    o.scanProvenance,
+  )}`
 }
 
 /** The same identity, computed from a freshly scanned row. Kept beside `keyOf` so they cannot drift. */
 const scannedKey = (row: ScannedOrderRow): string => {
   const cancelled = row.cancelled === true
   // A cancelled card has no clock — its route is the only identity it has.
-  return `${cancelled ? 'C' : ''}|${row.dateIso ?? ''}|${cancelled ? '' : row.time}|${cardKey(row.pointA, row.pointB, cancelled)}`
+  const time = cleanOperationPart(row.time)
+  return `${cancelled ? 'C' : ''}|${row.dateIso ?? ''}|${cancelled ? '' : row.time}|${cardKey(
+    row.pointA,
+    row.pointB,
+    cancelled,
+    time === '',
+    row.scanProvenance,
+  )}`
 }
 
 const authoritativeDeliveryFee = (row: ScannedOrderRow): string | null => {
@@ -783,6 +957,72 @@ const authoritativeDeliveryFee = (row: ScannedOrderRow): string | null => {
   } catch {
     return null
   }
+}
+
+const compatibleEvidencePart = (
+  left: string | null | undefined,
+  right: string | null | undefined,
+): boolean => {
+  const held = cleanOperationPart(left)
+  const retried = cleanOperationPart(right)
+  return held === '' || retried === '' || held === retried
+}
+
+/** Same evidence slot is a hint, never permission to replace conflicting money. */
+const compatibleKnownDeliveryFees = (existing: DraftOrder, scanned: ScannedOrderRow): boolean => {
+  const retried = authoritativeDeliveryFee(scanned)
+  if (retried === null) return true
+  const retriedMinor = parseMinor(retried)
+
+  for (const held of [existing.feeOcrText, existing.feeText]) {
+    if (cleanOperationPart(held) === '') continue
+    try {
+      if (parseMinor(held!) !== retriedMinor) return false
+    } catch {
+      // Malformed held evidence cannot establish that two monetary rows are the same. Keeping both
+      // visible is safer than allowing source position to discard one.
+      return false
+    }
+  }
+  return true
+}
+
+/**
+ * Row position may shift between AI attempts. Require one exact, non-empty route endpoint before a
+ * verified clock is allowed to heal an unknown-clock row from the same slot/index. Fee and day are
+ * not enough: the incident image itself contains two 155-lira deliveries on the same day.
+ */
+const hasSharedRouteEvidence = (existing: DraftOrder, scanned: ScannedOrderRow): boolean =>
+  ([
+    [existing.pointA, scanned.pointA],
+    [existing.pointB, scanned.pointB],
+  ] as const).some(([held, retried]) => {
+    const heldPart = cleanOperationPart(held)
+    const retriedPart = cleanOperationPart(retried)
+    return heldPart !== '' && heldPart === retriedPart
+  })
+
+/**
+ * Whether a same-photo retry can safely refer to this held row.
+ *
+ * A blank held clock is the unresolved case provenance exists to heal. Once the held clock is
+ * known, provenance may only confirm the same minute; it must never swallow a different row that
+ * moved into the same ordinal position on a retry. Known day/route/fee conflicts likewise force a
+ * second visible row for manager review.
+ */
+const compatibleRetryProvenance = (existing: DraftOrder, scanned: ScannedOrderRow): boolean => {
+  const heldMinute = cleanOperationPart(existing.timeText)
+  const retriedMinute = cleanOperationPart(scanned.time)
+  if (heldMinute !== '' && (retriedMinute === '' || heldMinute !== retriedMinute)) return false
+  if ((heldMinute === '' || retriedMinute === '') && !hasSharedRouteEvidence(existing, scanned)) {
+    return false
+  }
+  return (
+    compatibleEvidencePart(existing.dateText, scanned.dateIso) &&
+    compatibleEvidencePart(existing.pointA, scanned.pointA) &&
+    compatibleEvidencePart(existing.pointB, scanned.pointB) &&
+    compatibleKnownDeliveryFees(existing, scanned)
+  )
 }
 
 const routeSupportScore = (existing: DraftOrder, scanned: ScannedOrderRow): number => {
@@ -798,6 +1038,85 @@ const routeSupportScore = (existing: DraftOrder, scanned: ScannedOrderRow): numb
     else if (existingPart.includes(scannedPart) || scannedPart.includes(existingPart)) score += 1
   }
   return score
+}
+
+/**
+ * Replace an unresolved clock from one evidence slot with the verified clock from its retry.
+ *
+ * A row with no verified minute is deliberately keyed by `scanProvenance` so it remains visible.
+ * Once a retry verifies the minute, however, its ordinary identity becomes (day, minute). Without
+ * this reconciliation the old unknown row and the new timed row have different keys, so the retry
+ * appends a second delivery and leaves the original warning unresolved.
+ *
+ * Provenance is deliberately used only to enrich an unrecorded, non-cancelled row whose clock is
+ * still blank. The original local and provider ids (and the driver's include decision) survive.
+ * The successful AI retry supplies the clock and fills missing day/route/fee evidence. It never
+ * overwrites conflicting evidence merely because row positions happen to match: a changed row
+ * count can move another delivery into the same ordinal position, and both must remain visible.
+ */
+export function reconcileUnverifiedOrderTimes(
+  existing: readonly DraftOrder[],
+  scanned: readonly ScannedOrderRow[],
+): DraftOrder[] {
+  const next = existing.map((row) => ({ ...row }))
+
+  for (const row of inferMissingOrderDates(scanned)) {
+    const provenance = cleanOperationPart(row.scanProvenance)
+    const verifiedMinute = row.time.trim()
+    if (
+      provenance === '' ||
+      verifiedMinute === '' ||
+      row.cancelled === true ||
+      cashDeductionMagnitude(row.fee) !== null
+    ) continue
+
+    const matches: number[] = []
+    for (let index = 0; index < next.length; index += 1) {
+      const candidate = next[index]!
+      if (
+        candidate.recorded === true ||
+        candidate.cancelled === true ||
+        cleanOperationPart(candidate.timeText) !== '' ||
+        cleanOperationPart(candidate.scanProvenance) !== provenance
+      ) continue
+      matches.push(index)
+    }
+
+    // Duplicate provenance is corrupted/ambiguous local state. Never guess which monetary row a
+    // verified clock belongs to; leave both visible for manager review.
+    if (matches.length !== 1) continue
+
+    const index = matches[0]!
+    const target = next[index]!
+    if (!compatibleRetryProvenance(target, row)) continue
+    const fee = authoritativeDeliveryFee(row)
+    const retryDate = row.dateIso?.trim() ?? ''
+    const verifiedDate = target.dateText?.trim() ? target.dateText.trim() : retryDate
+    if (!hasVerifiedOperationBoundary(verifiedMinute, verifiedDate)) continue
+    const retryPointA = cleanOperationPart(row.pointA) === '' ? null : (row.pointA ?? null)
+    const retryPointB = cleanOperationPart(row.pointB) === '' ? null : (row.pointB ?? null)
+    const heldFeeKnown = cleanOperationPart(target.feeText) !== '' || cleanOperationPart(target.feeOcrText) !== ''
+    const shouldFillFee = fee !== null && !heldFeeKnown
+    const { feeRefused: _refusal, ...withoutRefusal } = target
+    const base = shouldFillFee ? withoutRefusal : target
+    const retryProvenance = target.scanProvenance ?? row.scanProvenance
+
+    next[index] = {
+      ...base,
+      timeText: verifiedMinute,
+      dateText: verifiedDate,
+      included: true,
+      timeReviewRequired: false,
+      pointA: cleanOperationPart(target.pointA) === '' ? retryPointA : (target.pointA ?? null),
+      pointB: cleanOperationPart(target.pointB) === '' ? retryPointB : (target.pointB ?? null),
+      ...(shouldFillFee ? { feeText: fee, feeOcrText: fee } : {}),
+      ...(target.feeStrip ? {} : row.feeStrip ? { feeStrip: row.feeStrip } : {}),
+      ...(target.pointBIsPin === true || row.pointBIsPin === true ? { pointBIsPin: true } : {}),
+      ...(retryProvenance ? { scanProvenance: retryProvenance } : {}),
+    }
+  }
+
+  return next
 }
 
 /**
@@ -945,10 +1264,47 @@ export function mergeScannedOrders(
   // delivery — keying on `feeText` meant re-scanning the overlap after any correction added a
   // duplicate. A REFUSED row therefore keys on an empty fee and keeps doing so after it is typed
   // into, which is what lets it survive a rescan.
-  const tally = new Map<string, number>()
-  for (const o of existing) {
-    const key = keyOf(o)
-    tally.set(key, (tally.get(key) ?? 0) + 1)
+  // Each held row can consume exactly one sighting. A retry of the same evidence slot is matched
+  // by provenance first because an unknown-time first answer and a verified-time retry necessarily
+  // have different ordinary keys. The ordinary key remains the fallback across overlapping photos.
+  const byKey = new Map<string, number[]>()
+  const byProvenance = new Map<string, number[]>()
+  const pushIndex = (map: Map<string, number[]>, key: string, index: number): void => {
+    const bucket = map.get(key)
+    if (bucket) bucket.push(index)
+    else map.set(key, [index])
+  }
+  for (let index = 0; index < existing.length; index += 1) {
+    const order = existing[index]!
+    pushIndex(byKey, keyOf(order), index)
+    const provenance = cleanOperationPart(order.scanProvenance)
+    if (provenance !== '') {
+      pushIndex(byProvenance, `${order.cancelled === true ? 'C' : 'O'}|${provenance}`, index)
+    }
+  }
+  const consumed = new Set<number>()
+  const consume = (bucket: readonly number[] | undefined): boolean => {
+    if (!bucket) return false
+    for (const index of bucket) {
+      if (consumed.has(index)) continue
+      consumed.add(index)
+      return true
+    }
+    return false
+  }
+  const consumeCompatibleProvenance = (
+    bucket: readonly number[] | undefined,
+    row: ScannedOrderRow,
+  ): boolean => {
+    if (!bucket) return false
+    const available = bucket.filter((index) => !consumed.has(index))
+    // Provenance is only safe when it points to one unresolved/healed-compatible row. Duplicate
+    // local provenance is ambiguous state and must fall through to ordinary identity/review.
+    if (available.length !== 1) return false
+    const index = available[0]!
+    if (!compatibleRetryProvenance(existing[index]!, row)) return false
+    consumed.add(index)
+    return true
   }
   const added: DraftOrder[] = []
   for (const row of inferMissingOrderDates(scanned)) {
@@ -956,15 +1312,20 @@ export function mergeScannedOrders(
     // preserves the direction once, as a positive magnitude, and keeps them out of tier math.
     if (cashDeductionMagnitude(row.fee) !== null) continue
     const cancelled = row.cancelled === true
+    const provenance = cleanOperationPart(row.scanProvenance)
+    if (
+      provenance !== '' &&
+      consumeCompatibleProvenance(
+        byProvenance.get(`${cancelled ? 'C' : 'O'}|${provenance}`),
+        row,
+      )
+    ) continue
     const key = scannedKey(row)
-    const already = tally.get(key) ?? 0
     // Counted against what was ALREADY HELD, never against rows added by this same scan. One page
     // is one set of observations: if it lists «١٢٠» twice then two deliveries cost 120.
-    if (already > 0) {
-      tally.set(key, already - 1)
-      continue
-    }
+    if (consume(byKey.get(key))) continue
     const localId = newId()
+    const boundaryVerified = hasVerifiedOperationBoundary(row.time, row.dateIso)
     added.push({
       localId,
       providerOrderNo: newOrderKey(localId),
@@ -981,11 +1342,13 @@ export function mergeScannedOrders(
       dateText: row.dateIso ?? '',
       // A cancelled card arrives UNCHECKED: it is normally not money. The driver checks it only if
       // he was in fact paid for it, and then types what he got.
-      included: !cancelled,
+      included: !cancelled && boundaryVerified,
+      ...(!cancelled && !boundaryVerified ? { timeReviewRequired: true } : {}),
       pointA: row.pointA ?? null,
       pointB: row.pointB ?? null,
       ...(row.pointBIsPin === true ? { pointBIsPin: true } : {}),
       ...(row.feeStrip ? { feeStrip: row.feeStrip } : {}),
+      ...(row.scanProvenance ? { scanProvenance: row.scanProvenance } : {}),
     })
   }
   return added
@@ -999,8 +1362,22 @@ export function mergeScannedOrders(
  * the safe direction — a cancelled order is not money, and the alternative (a fresh copy on every
  * rescan of an overlapping page) is a list the driver has to clean by hand.
  */
-const cardKey = (a: string | null | undefined, b: string | null | undefined, cancelled: boolean): string =>
-  cancelled ? `${(a ?? '').slice(0, 24)}→${(b ?? '').slice(0, 24)}` : ''
+const cardKey = (
+  a: string | null | undefined,
+  b: string | null | undefined,
+  cancelled: boolean,
+  uncertainTime: boolean,
+  uncertainProvenance?: string,
+): string => {
+  if (cancelled) return `${(a ?? '').slice(0, 24)}→${(b ?? '').slice(0, 24)}`
+  if (!uncertainTime) return ''
+  if (uncertainProvenance) return `evidence:${uncertainProvenance}`
+  // Legacy/unit callers may not have page provenance. Route is the next safest identity; when it
+  // too is blank the multiset behaviour remains conservative and visible rather than inventing a
+  // clock. The live cloud path always supplies provenance.
+  const route = `${(a ?? '').slice(0, 24)}→${(b ?? '').slice(0, 24)}`
+  return route === '→' ? '' : `route:${route}`
+}
 
 /**
  * Append what a payments-log screenshot read, skipping what the list already holds.
@@ -1144,7 +1521,7 @@ export function previewBr1(input: {
   // Only valid rows contribute — a half-typed row must not make the preview flicker to nonsense —
   // and only CHECKED ones, mirroring `includedOrders` on the server so the driver's own preview and
   // the figure the manager will see are the same arithmetic.
-  const valid = input.orders.filter((o, i) => o.included !== false && validateRow(input.orders, i) === null)
+  const valid = input.orders.filter((o, i) => draftOrderCounts(o) && validateRow(input.orders, i) === null)
   const orders = valid.map((o) => ({
     orderNo: o.providerOrderNo,
     payMode: o.payMode,
@@ -1165,7 +1542,7 @@ export function previewBr1(input: {
     : []
 
   const cashDeductions = (input.cashDeductions ?? [])
-    .filter((d) => d.included !== false)
+    .filter(draftDeductionCounts)
     .map((d) => safeFee(d.amountText))
 
   const hasDeclared = input.declaredCashText !== undefined && input.declaredWalletText !== undefined
@@ -1334,6 +1711,7 @@ export function overlayCloudAmounts<K extends string, T extends Record<K, string
   cloud: readonly {
     value: string | null
     cancelled: boolean
+    reviewRequired?: boolean
     /** Filled onto the local row when the phone read no clock. See below. */
     time?: string | null
     dateIso?: string | null
@@ -1422,6 +1800,7 @@ export function cloudRowsToScannedOrders(
   rows: readonly {
     value: string | null
     cancelled: boolean
+    reviewRequired?: boolean
     time: string | null
     dateIso: string | null
     pointA?: string | null
@@ -1441,17 +1820,27 @@ export function cloudRowsToScannedOrders(
    * The reading itself is never taken from here. That is the whole point of this function.
    */
   local?: readonly { feeStrip?: string | null; pointBIsPin?: boolean }[],
+  /** Stable photo slot. A retry uses the same slot; another overlapping photo uses another one. */
+  evidenceSlot?: string,
 ): ScannedOrderRow[] {
   const alignable = local !== undefined && local.length === rows.length
   const out: ScannedOrderRow[] = []
   rows.forEach((row, i) => {
     const deduction = cashDeductionMagnitude(row.cancelled ? null : row.value) !== null
-    // A row with no clock has no identity: `keyOf` is (day, minute, route), so a timeless row
-    // collides with every other timeless row on the page and the merge would keep exactly one.
-    // A cash deduction may still have a defensible date/route identity and its wire minute is
-    // nullable, so do not throw that money away solely because its clock glyph was unreadable.
+    // A positive delivery with an unverified clock must remain visible. Dropping it here discards
+    // correctly-read money and prevents the manager from making the required window decision.
+    // The live path supplies evidenceSlot, so slot+position gives it a retry-stable identity until
+    // it is submitted with occurredMinute=null and classified `unknown` by the server.
+    //
+    // A trusted negative amount is itself enough evidence to keep a cash deduction. Its evidence
+    // provenance owns retry identity while its missing clock keeps it out of BR1/window arithmetic.
     if (row.time === null || row.time.trim() === '') {
-      if (!deduction || (row.dateIso === null && row.pointA == null && row.pointB == null)) return
+      // A cancellation-contested card is explicitly marked by the server. Preserve that refused
+      // financial candidate, but keep dropping ordinary clipped edge fragments that have neither
+      // money nor a clock and carry no such safety signal.
+      const positiveDelivery =
+        !row.cancelled && !deduction && (row.value !== null || row.reviewRequired === true)
+      if (!positiveDelivery && !deduction) return
     }
     const mate = alignable ? local[i] : undefined
     out.push({
@@ -1463,6 +1852,7 @@ export function cloudRowsToScannedOrders(
       ...(row.pointB != null ? { pointB: row.pointB } : {}),
       ...(mate?.feeStrip ? { feeStrip: mate.feeStrip } : {}),
       ...(mate?.pointBIsPin === true ? { pointBIsPin: true } : {}),
+      ...(evidenceSlot ? { scanProvenance: `${evidenceSlot}:${i}` } : {}),
     })
   })
   return inferMissingOrderDates(out)

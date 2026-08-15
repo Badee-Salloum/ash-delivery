@@ -45,6 +45,7 @@ const read = async (
     headers: {
       cookie: h.cookie(token),
       'content-type': 'image/jpeg',
+      ...(field === 'orders' ? { 'x-ash-orders-time-consensus': 'v1' } : {}),
       ...(retryFailed ? { 'x-ocr-retry': 'true' } : {}),
     },
     payload: bytes,
@@ -70,6 +71,25 @@ const scripted = (): ScriptedOcrReader =>
   ])
 
 describe('cloud OCR: the same pixels are never billed twice', () => {
+  it('refuses a stale driver bundle before it can silently drop an unverified order time', async () => {
+    const reader = scripted()
+    h = await makeHarness({ ocr: reader })
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = await openShift(driver, manager)
+
+    const response = await h.app.inject({
+      method: 'POST',
+      url: `/shifts/${shiftId}/ocr/orders`,
+      headers: { cookie: h.cookie(driver), 'content-type': 'image/jpeg' },
+      payload: TINY_JPEG,
+    })
+
+    expect(response.statusCode).toBe(428)
+    expect(response.json().error).toBe('driver_update_required')
+    expect(reader.calls).toBe(0)
+  })
+
   it('serves a repeat of identical bytes from the cache without reaching the provider', async () => {
     const reader = scripted()
     h = await makeHarness({ ocr: reader })

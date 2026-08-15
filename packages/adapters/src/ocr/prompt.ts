@@ -85,6 +85,9 @@ const FIELD_HINT: Record<OcrField, string> = {
 }
 
 export function readPrompt(field: OcrField): string {
+  const timeRule = field === 'orders'
+    ? '- On every ORDERS card, `time` is the time EXACTLY AS PRINTED, including the original Arabic-Indic or Western digits and the printed `ص` / `م` / AM / PM marker. Convert NOTHING and do not infer 24-hour time. If any time glyph is unreadable, return null.'
+    : '- Times: Arabic "م" is PM, "ص" is AM. Report 24-hour HH:MM. Some screens already print 24-hour times.'
   return `You are transcribing a screenshot from a Damascus delivery company's driver app. Every number you read becomes money in a ledger that must balance to exactly zero, so a plausible guess is worse than an honest refusal.
 
 This image is ${FIELD_HINT[field]}
@@ -107,7 +110,7 @@ Other rules, each of which corresponds to a real screen:
 - A CANCELLED order ("Cancelled" / "تم إلغاؤه") has NO amount: \`value\` null, \`cancelled\` true, \`digitCount\` 0. Never copy a number from a neighbouring row.
 - A card SLICED by the top or bottom edge may show its addresses but not its fee: \`value\` null, and say so in \`notes\`.
 - A screen may carry MORE THAN ONE date header ("Friday, August 7" … then lower down "Thursday, August 6"). Each row takes the nearest header ABOVE it. Month names may be Arabic (أغسطس, آب), Maghrebi (غشت) or English. The year is 2026.
-- Times: Arabic "م" is PM, "ص" is AM. Report 24-hour HH:MM. Some screens already print 24-hour times.
+${timeRule}
 - On the ORDERS list each card shows two address lines, A (pickup) then B (dropoff). Copy each into \`pointA\` / \`pointB\` exactly as printed. On every other screen both are null.
 - Addresses contain digits — "المدخل ١", "entrance ٨٦", GPS pairs, plus-codes like "G63V 78J". Those are NOT fees. Only the amount printed beside "SYP" is a fee.
 - If a character is genuinely unreadable, put "?" in \`printed\` and null in \`value\`. An honest refusal is a correct answer.
@@ -153,9 +156,36 @@ bar, date header, or time. A cancelled card has \`value\` null, \`cancelled\` tr
 its fee is genuinely unreadable, use "?" for \`printed\` and null for \`value\`.
 
 A screenshot can contain multiple date headers. Each row takes the closest header ABOVE it. The
-year is 2026. Month names can be Arabic, Maghrebi, or English. Arabic "م" is PM and "ص" is AM;
-12:xx ص becomes 00:xx, while 12:xx م stays 12:xx. Return time as 24-hour HH:MM. Return all
-visible rows, including rows below a second date header.`
+year is 2026. Month names can be Arabic, Maghrebi, or English. In \`time\`, copy the complete time
+EXACTLY AS PRINTED, preserving Arabic-Indic or Western digits, the separator, and the printed
+\`ص\` / \`م\` / AM / PM marker. Do not convert it to 24-hour time and do not guess a missing marker.
+Return all visible rows, including rows below a second date header.`
+}
+
+/**
+ * An independent, deliberately tiny inspection of card clocks and their date headers.
+ *
+ * It contains no money and no routes so it cannot copy the financial pass's reasoning. The server
+ * converts the two raw transcriptions itself and requires two observations to agree before a clock
+ * is allowed to classify an order inside or outside a shift window.
+ */
+export function ordersTimeReadPrompt(): string {
+  return `ORDERS PRINTED-TIME VERIFIER
+
+Inspect the RECENT ORDERS screenshot independently. Return one row for EVERY visible order card,
+top to bottom, including cancelled and edge-sliced cards. Read only:
+
+- \`time\`: copy the card time EXACTLY AS PRINTED. Preserve Arabic-Indic or Western digits, the
+  printed separator, and the printed \`ص\` / \`م\` / AM / PM marker. Convert NOTHING. In particular,
+  never turn 12:xx into 00:xx and never change a visible 12 into 11. Return null when any time glyph
+  or its marker is unreadable.
+- \`dateIso\`: YYYY-MM-DD from the nearest date header ABOVE that card. The year is 2026. A screen
+  can contain more than one date header; do not carry the lower header upward or the upper header
+  past a newer one.
+- \`cancelled\`: true only when that card visibly says Cancelled / تم إلغاؤه.
+
+Ignore all fees, SYP values, addresses, coordinates, status-bar clocks and phone numbers. They are
+not time evidence.`
 }
 
 /**
@@ -193,10 +223,38 @@ export const ORDERS_MONEY_READ_SCHEMA = {
           digitCount: { type: 'integer' },
           printed: { type: 'string' },
           value: { type: ['string', 'null'] },
-          time: { type: ['string', 'null'], description: '24-hour HH:MM' },
+          time: { type: ['string', 'null'], description: 'Card time exactly as printed, including ص / م / AM / PM; never converted' },
           dateIso: { type: ['string', 'null'], description: 'YYYY-MM-DD from the nearest header above the row' },
           pointA: { type: 'null', description: 'Always null in the fast orders pass' },
           pointB: { type: 'null', description: 'Always null in the fast orders pass' },
+          cancelled: { type: 'boolean' },
+        },
+      },
+    },
+  },
+} as const
+
+/** A compact strict schema for the independent printed-time pass. */
+export const ORDERS_TIME_READ_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['rows'],
+  properties: {
+    rows: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['time', 'dateIso', 'cancelled'],
+        properties: {
+          time: {
+            type: ['string', 'null'],
+            description: 'Card time exactly as printed, including original digits and ص / م / AM / PM',
+          },
+          dateIso: {
+            type: ['string', 'null'],
+            description: 'YYYY-MM-DD from the nearest date header above the row',
+          },
           cancelled: { type: 'boolean' },
         },
       },
@@ -242,7 +300,10 @@ export const READ_SCHEMA = {
             type: ['string', 'null'],
             description: 'STRING, never a number. Western digits, "." decimal, sign kept. "-165.50" keeps its trailing zero. null if the row has no amount.',
           },
-          time: { type: ['string', 'null'], description: '24-hour HH:MM. Arabic "م" is PM, "ص" is AM.' },
+          time: {
+            type: ['string', 'null'],
+            description: 'Orders: exact printed time with marker, never converted. Other screens: 24-hour HH:MM.',
+          },
           pointA: {
             type: ['string', 'null'],
             description: 'Orders list only: the PICKUP line, marked A. Copy it as printed. null on any other screen.',

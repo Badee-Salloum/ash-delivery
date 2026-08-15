@@ -4,10 +4,12 @@ import {
   cashDeductionMagnitude,
   cashDeductionOperationKey,
   cashDeductionsAreValid,
+  cloudRowsToScannedOrders,
   healCashDeductionDetails,
   inferMissingOrderDates,
   mergeScannedCashDeductions,
   reconcileLocalCashDeductions,
+  resumedOrderWindowState,
   syncRecordedCashDeductions,
   allProblems,
   br1DifferencePresentation,
@@ -38,6 +40,38 @@ describe('BR1 difference direction', () => {
   })
 })
 
+describe('resumed order window safety', () => {
+  it('excludes a legacy unknown row until a manager supplies the audited decision marker', () => {
+    expect(resumedOrderWindowState({
+      included: true,
+      windowStatus: 'unknown',
+      decisionReason: null,
+      decidedBy: null,
+      decidedAt: null,
+    })).toEqual({ included: false, timeReviewRequired: true })
+  })
+
+  it.each([true, false])('preserves an audited manager unknown decision: included=%s', (included) => {
+    expect(resumedOrderWindowState({
+      included,
+      windowStatus: 'unknown',
+      decisionReason: 'manager verified the original screenshot',
+      decidedBy: 'u-bm',
+      decidedAt: '2026-08-15T00:01:00.000Z',
+    })).toEqual({ included })
+  })
+
+  it('preserves deterministic in-window inclusion without requiring a manager decision', () => {
+    expect(resumedOrderWindowState({
+      included: true,
+      windowStatus: 'in_window',
+      decisionReason: null,
+      decidedBy: null,
+      decidedAt: null,
+    })).toEqual({ included: true })
+  })
+})
+
 describe('negative Recent Orders operations', () => {
   const scanned = (over: Partial<{ dateIso: string | null; time: string; fee: string | null; pointA: string | null; pointB: string | null }> = {}) => ({
     dateIso: '2026-08-14',
@@ -65,6 +99,189 @@ describe('negative Recent Orders operations', () => {
     ])
     expect(mergeScannedOrders([], [row], nextId)).toEqual([])
     expect(mergeScannedCashDeductions(deductions, [row], nextId)).toEqual([])
+  })
+
+  it('keeps -50 unknown until time and date are both verified, then heals one identity', () => {
+    const firstPage = cloudRowsToScannedOrders([
+      {
+        value: '175',
+        cancelled: false,
+        time: '20:09',
+        dateIso: '2026-08-15',
+        pointA: 'Known pickup',
+        pointB: 'Known dropoff',
+      },
+      {
+        value: '-50',
+        cancelled: false,
+        reviewRequired: true,
+        time: null,
+        dateIso: null,
+        pointA: null,
+        pointB: null,
+      },
+    ], undefined, 'dashboard-6')
+
+    expect(firstPage).toHaveLength(2)
+    expect(firstPage[1]).toMatchObject({
+      fee: '-50',
+      time: '',
+      dateIso: null,
+      scanProvenance: 'dashboard-6:1',
+    })
+
+    const orders = mergeScannedOrders([], firstPage, () => 'known-order')
+    const deductions = mergeScannedCashDeductions([], firstPage, () => 'unknown-minus-50')
+    expect(orders).toHaveLength(1)
+    expect(deductions).toMatchObject([{
+      localId: 'unknown-minus-50',
+      amountText: '50',
+      amountOcrText: '50',
+      timeText: '',
+      dateText: '',
+      included: false,
+      timeReviewRequired: true,
+      scanProvenance: 'dashboard-6:1',
+    }])
+    expect(mergeScannedCashDeductions(deductions, firstPage, () => 'same-retry-duplicate')).toEqual([])
+
+    const otherPhotoUnknown = cloudRowsToScannedOrders([{
+      value: '-50',
+      cancelled: false,
+      reviewRequired: true,
+      time: null,
+      dateIso: null,
+      pointA: null,
+      pointB: null,
+    }], undefined, 'dashboard-7')
+    expect(mergeScannedCashDeductions(deductions, otherPhotoUnknown, () => 'separate-review-row')).toMatchObject([{
+      localId: 'separate-review-row',
+      included: false,
+      scanProvenance: 'dashboard-7:0',
+    }])
+
+    const withoutDeduction = previewBr1({ floatText: '100', topupText: '0', orders })
+    const whileUnknown = previewBr1({
+      floatText: '100',
+      topupText: '0',
+      orders,
+      cashDeductions: deductions,
+    })
+    expect(whileUnknown?.expectedCashText).toBe(withoutDeduction?.expectedCashText)
+
+    const timeOnlyPage = cloudRowsToScannedOrders([
+      {
+        value: '175',
+        cancelled: false,
+        time: '20:09',
+        dateIso: '2026-08-15',
+        pointA: 'Known pickup',
+        pointB: 'Known dropoff',
+      },
+      {
+        value: '-50',
+        cancelled: false,
+        reviewRequired: true,
+        time: '22:36',
+        dateIso: null,
+        pointA: 'G777+4GP, Al Qanawat',
+        pointB: 'G78P+J3M, Al Mouhajrin',
+      },
+    ], undefined, 'dashboard-6')
+    expect(mergeScannedCashDeductions(deductions, timeOnlyPage, () => 'must-not-append-time-only')).toEqual([])
+    const timeOnlyPatches = healCashDeductionDetails(deductions, timeOnlyPage)
+    const timeOnly = reconcileLocalCashDeductions(
+      deductions.map((row) => ({ ...row, ...timeOnlyPatches[0]! })),
+    )
+    expect(timeOnly).toHaveLength(1)
+    expect(timeOnly[0]).toMatchObject({
+      localId: 'unknown-minus-50',
+      operationKey: deductions[0]!.operationKey,
+      timeText: '22:36',
+      dateText: '',
+      included: false,
+      timeReviewRequired: true,
+      scanProvenance: 'dashboard-6:1',
+    })
+    expect(previewBr1({
+      floatText: '100',
+      topupText: '0',
+      orders,
+      cashDeductions: timeOnly,
+    })?.expectedCashText).toBe(withoutDeduction?.expectedCashText)
+
+    const retryPage = cloudRowsToScannedOrders([
+      {
+        value: '175',
+        cancelled: false,
+        time: '20:09',
+        dateIso: '2026-08-15',
+        pointA: 'Known pickup',
+        pointB: 'Known dropoff',
+      },
+      {
+        value: '-50',
+        cancelled: false,
+        time: '22:36',
+        dateIso: '2026-08-15',
+        pointA: 'G777+4GP, Al Qanawat',
+        pointB: 'G78P+J3M, Al Mouhajrin',
+      },
+    ], undefined, 'dashboard-6')
+
+    expect(mergeScannedCashDeductions(timeOnly, retryPage, () => 'must-not-append')).toEqual([])
+    const patches = healCashDeductionDetails(timeOnly, retryPage)
+    expect(patches).toMatchObject([{
+      localId: 'unknown-minus-50',
+      timeText: '22:36',
+      dateText: '2026-08-15',
+      included: true,
+      timeReviewRequired: false,
+      scanProvenance: 'dashboard-6:1',
+    }])
+
+    const healed = reconcileLocalCashDeductions(timeOnly.map((row) => ({ ...row, ...patches[0]! })))
+    expect(healed).toHaveLength(1)
+    expect(healed[0]).toMatchObject({
+      localId: 'unknown-minus-50',
+      operationKey: deductions[0]!.operationKey,
+      timeText: '22:36',
+      included: true,
+      timeReviewRequired: false,
+    })
+    expect(mergeScannedCashDeductions(healed, retryPage, () => 'must-still-not-append')).toEqual([])
+  })
+
+  it('consumes a recorded deduction retry without mutating server-owned details', () => {
+    const unknown = {
+      fee: '-50',
+      time: '',
+      dateIso: null,
+      pointA: null,
+      pointB: null,
+      scanProvenance: 'dashboard-recorded:0',
+    }
+    const [draft] = mergeScannedCashDeductions([], [unknown], () => 'recorded-minus-50')
+    const recorded = { ...draft!, recorded: true }
+    const before = structuredClone(recorded)
+    const verifiedRetry = {
+      fee: '-50',
+      time: '22:36',
+      dateIso: '2026-08-15',
+      pointA: 'Verified pickup',
+      pointB: 'Verified dropoff',
+      scanProvenance: 'dashboard-recorded:0',
+    }
+
+    // The row consumes both sightings in this response, so no duplicate is materialised.
+    expect(mergeScannedCashDeductions(
+      [recorded],
+      [verifiedRetry, verifiedRetry],
+      () => 'must-not-append-recorded',
+    )).toEqual([])
+    // Fresh OCR cannot rewrite persisted ledger truth on the phone.
+    expect(healCashDeductionDetails([recorded], [verifiedRetry])).toEqual([])
+    expect(recorded).toEqual(before)
   })
 
   it('does not duplicate a negative row created by a cached legacy PWA after upgrade', () => {
@@ -103,6 +320,8 @@ describe('negative Recent Orders operations', () => {
         dateText: '2026-08-14',
         pointA: 'Branch',
         pointB: 'Cash desk',
+        included: true,
+        timeReviewRequired: false,
       },
     ])
     expect(existing[0]!.operationKey).toBe(key)
@@ -133,6 +352,8 @@ describe('negative Recent Orders operations', () => {
         dateText: '2026-08-13',
         pointA: 'G77V+4GP, Al Qanawat',
         pointB: 'G78P+J3M, Al Mouhajrin',
+        included: true,
+        timeReviewRequired: false,
       },
     ])
   })
@@ -162,6 +383,8 @@ describe('negative Recent Orders operations', () => {
         dateText: '2026-08-13',
         pointA: 'G77V+4GP, Al Qanawat',
         pointB: 'G78P+J3M, Al Mouhajrin',
+        included: true,
+        timeReviewRequired: false,
       },
     ])
     expect(ids).toBe(1)
@@ -192,6 +415,8 @@ describe('negative Recent Orders operations', () => {
         dateText: '2026-08-13',
         pointA: 'G77V+4GP, Al Qanawat',
         pointB: 'G78P+J3M, Al Mouhajrin',
+        included: true,
+        timeReviewRequired: false,
       },
     ])
   })
@@ -229,6 +454,8 @@ describe('negative Recent Orders operations', () => {
         dateText: '2026-08-13',
         pointA: 'G77V+4GP, Al Qanawat',
         pointB: 'G78P+J3M, Al Mouhajrin',
+        included: true,
+        timeReviewRequired: false,
       },
     ])
     expect(input).toEqual(before)
@@ -433,6 +660,44 @@ describe('negative Recent Orders operations', () => {
     })])
   })
 
+  it('keeps a resumed unknown deduction out of preview but preserves an audited manager decision', () => {
+    const stored = {
+      id: 'unknown-deduction',
+      operationKey: 'recent-orders:unknown',
+      amount: '50.00',
+      amountOcr: '50.00',
+      occurredMinute: null,
+      occurredDate: null,
+      source: 'ocr' as const,
+      pointA: null,
+      pointB: null,
+      included: true,
+      windowStatus: 'unknown',
+      decisionReason: null,
+      decidedBy: null,
+      decidedAt: null,
+    }
+    expect(syncRecordedCashDeductions([], [stored])).toEqual([
+      expect.objectContaining({ included: false, timeReviewRequired: true, recorded: true }),
+    ])
+
+    expect(syncRecordedCashDeductions([], [{
+      ...stored,
+      decisionReason: 'manager verified original evidence',
+      decidedBy: 'u-bm',
+      decidedAt: '2026-08-15T00:01:00.000Z',
+    }])).toEqual([
+      expect.objectContaining({ included: true, recorded: true }),
+    ])
+    expect(syncRecordedCashDeductions([], [{
+      ...stored,
+      included: false,
+      decisionReason: 'manager excluded duplicate evidence',
+      decidedBy: 'u-bm',
+      decidedAt: '2026-08-15T00:02:00.000Z',
+    }])[0]).not.toHaveProperty('timeReviewRequired')
+  })
+
   it('keeps a complete equal deduction repeated on another day even when its route also repeats', () => {
     const first = scanned({ fee: '-50', time: '22:36', dateIso: '2026-08-14' })
     const nextDay = scanned({ fee: '-50', time: '22:36', dateIso: '2026-08-13' })
@@ -629,6 +894,54 @@ describe('merging a scanned page into the list', () => {
     const pageTwo = [scan('17:42', '210'), scan('17:22', '130'), scan('17:07', '135'), scan('16:50', '170')]
     const second = mergeScannedOrders(first, pageTwo, id)
     expect(second.map((o) => o.feeText)).toEqual(['135', '170'])
+  })
+
+  it('merges the exact midnight incident: repeats 00:03 and 23:21, adds only 00:30', () => {
+    const existing = mergeScannedOrders(
+      [],
+      [
+        { dateIso: '2026-08-14', time: '20:09', fee: '370' },
+        { dateIso: '2026-08-14', time: '21:19', fee: '425' },
+        { dateIso: '2026-08-14', time: '22:27', fee: '225' },
+        { dateIso: '2026-08-14', time: '23:21', fee: '240' },
+        { dateIso: '2026-08-15', time: '00:03', fee: '155' },
+      ],
+      id,
+    )
+    const overlap = [
+      {
+        dateIso: '2026-08-15',
+        time: '00:59',
+        fee: null,
+        cancelled: true,
+        pointA: 'G78V+586, Damascus',
+        pointB: 'G78V+586, Damascus',
+      },
+      {
+        dateIso: '2026-08-15',
+        time: '00:49',
+        fee: null,
+        cancelled: true,
+        pointA: 'Al Halabouni',
+        pointB: 'Old Damascus',
+      },
+      { dateIso: '2026-08-15', time: '00:30', fee: '155' },
+      { dateIso: '2026-08-15', time: '00:03', fee: '155' },
+      { dateIso: '2026-08-14', time: '23:21', fee: '240' },
+    ]
+
+    const added = mergeScannedOrders(existing, overlap, id)
+    expect(added.filter((row) => row.cancelled !== true).map((row) => [row.timeText, row.feeText]))
+      .toEqual([['00:30', '155']])
+    expect(added.filter((row) => row.cancelled === true)).toMatchObject([
+      { timeText: '00:59', feeText: '', included: false },
+      { timeText: '00:49', feeText: '', included: false },
+    ])
+    expect(
+      [...existing, ...added]
+        .filter((row) => row.cancelled !== true && row.included !== false)
+        .reduce((sum, row) => sum + Number(row.feeText), 0),
+    ).toBe(1570)
   })
 
   it('keeps a genuine second delivery in the same minute, under its own key', () => {

@@ -267,7 +267,7 @@ export const en: Catalog = {
     readFailureUnavailable: 'The smart reader could not be reached for {image}',
     readFailureNoFields: 'The smart reader found no readable operations in {image}',
     readFailureRefused: 'The smart reader could not verify {image} confidently',
-    readManualRequired: 'The available AI retry was used; enter this image’s operations manually',
+    readManualRequired: 'The available AI retry was used; enter only a missing fee. The manager reviews any unverified time',
     /** «0 operations» is a real answer — the page had nothing new — not the same as a failed read. */
     /** English collapses to one/other; the same call site serves both languages. */
     readAdded: {
@@ -290,11 +290,11 @@ export const en: Catalog = {
     },
     photoOf: 'photo of',
     readRefused: {
-      one: '1 row was not read confidently — enter it by hand',
-      two: '{n} rows were not read confidently — enter them by hand',
-      few: '{n} rows were not read confidently — enter them by hand',
-      many: '{n} rows were not read confidently — enter them by hand',
-      other: '{n} rows were not read confidently — enter them by hand',
+      one: '1 row needs review — enter a missing fee; the manager reviews its time',
+      two: '{n} rows need review — enter missing fees; the manager reviews their times',
+      few: '{n} rows need review — enter missing fees; the manager reviews their times',
+      many: '{n} rows need review — enter missing fees; the manager reviews their times',
+      other: '{n} rows need review — enter missing fees; the manager reviews their times',
     },
     retakeRequested: 'The manager requested a re-shoot',
     closeRejected: 'The manager rejected the close',
@@ -417,6 +417,7 @@ orderNo: 'Order no.',
     explainedByOrder: 'Matched to an order',
     unexplained: 'No order explains it',
     excluded: 'Excluded',
+    timeUnverified: 'Time/date need AI review',
     time: 'Time',
     /** The one question no machine may answer — see the ambiguous-credit control. */
     partOfOrder: 'Part of the order',

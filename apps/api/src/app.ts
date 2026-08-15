@@ -55,6 +55,7 @@ import {
   uploadEvidence,
 } from './media.service.ts'
 import { OCR_FIELDS_TUPLE, readScreen } from './ocr.service.ts'
+import { rereadManagerOrderEvidence } from './manager-order-reread.service.ts'
 import {
   ServiceError,
   addOrder,
@@ -899,6 +900,19 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     },
     async (req, reply) => {
       const params = z.object({ id: z.string(), field: z.enum(OCR_FIELDS_TUPLE) }).parse(req.params)
+      // The consensus reader can deliberately return a monetary row whose unverified clock is
+      // null. Driver bundles before this release discarded such rows. Refuse those stale callers
+      // before spending an OCR attempt so a cached PWA can never turn uncertainty into missing
+      // money. The current same-origin client always sends this capability header for orders.
+      if (
+        params.field === 'orders' &&
+        req.headers['x-ash-orders-time-consensus'] !== 'v1'
+      ) {
+        return reply.code(428).send({
+          error: 'driver_update_required',
+          message: 'Refresh the driver application before reading Recent Orders.',
+        })
+      }
       const out = await readScreen(deps, {
         shiftId: params.id,
         field: params.field,
@@ -966,7 +980,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     if (!shift) return null
     // Per-pack readings, joined to the packs so a slot and a capacity are shown rather than a
     // uuid. A two-pack bike hands back two of these at each end of the shift.
-    const [orders, movements, cashDeductions, readings, fitted, slots, swaps, allBatteries] = await Promise.all([
+    const [orders, movements, cashDeductions, readings, fitted, slots, swaps, allBatteries, driver, vehicle] = await Promise.all([
       sourceDeps.orders.listByShift(shiftId),
       // Every movement, checked and unchecked — the owner's rule is that whoever closes the shift
       // sees ALL of them. Fetched HERE so the driver's view and the manager's cannot disagree.
@@ -981,6 +995,12 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       // Serials for BOTH packs of every swap — the outgoing one is no longer fitted, so it is not in
       // `fitted`; it has to be resolved off the branch's full battery list.
       sourceDeps.directory.listBatteries(shift.branchId),
+      // The review header used to make two extra HTTP round-trips through the fleet endpoints just
+      // to turn ids already present on the shift into the name/code a manager can recognise. Keep
+      // the identity beside the snapshot so deep links and a freshly opened review render it on the
+      // first response. These are additive fields; older clients continue to use the ids.
+      sourceDeps.directory.driver(shift.driverId),
+      sourceDeps.directory.vehicle(shift.vehicleId),
     ])
     const withPack = (pkg: 'start' | 'end') =>
       readings
@@ -1019,6 +1039,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         state: shift.state,
         driverId: shift.driverId,
         vehicleId: shift.vehicleId,
+        driverNameAr: driver?.fullNameAr ?? null,
+        driverNameEn: driver?.fullNameEn ?? null,
+        vehicleCode: vehicle?.code ?? null,
         shiftNo: shift.shiftNo,
         businessDate: shift.businessDate,
         openApprovedAt: shift.openApprovedAt,
@@ -1072,6 +1095,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           windowStatus: o.windowStatus,
           decisionReason: o.decisionReason,
           decidedBy: o.decidedBy,
+          decidedAt: o.decidedAt,
         })),
         cashDeductions: cashDeductions.map((d) => ({
           id: d.id,
@@ -1087,6 +1111,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           windowStatus: d.windowStatus,
           decisionReason: d.decisionReason,
           decidedBy: d.decidedBy,
+          decidedAt: d.decidedAt,
         })),
         // «سجل المدفوعات» as read: what the wallet actually did, beside what the orders imply.
         movements: movements.map((m) => ({
@@ -1307,6 +1332,77 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     },
   )
 
+  /**
+   * Re-read one explicitly selected stored Recent Orders page during close review.
+   *
+   * Persisted operations do not know which screenshot row created them. Consequently this route
+   * returns the COMPLETE page as suggestions and never changes a fee, time or inclusion itself;
+   * applying one suggestion remains an explicit, reasoned `/operations/revise` action.
+   */
+  app.post(
+    '/shifts/:id/ocr/orders/evidence-reread',
+    { config: { permission: 'shift.approve', subject: shiftSubject } },
+    async (req, reply) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      if (req.headers['x-ash-orders-time-consensus'] !== 'v1') {
+        return reply.code(428).send({
+          error: 'manager_update_required',
+          message: 'Refresh the manager application before re-reading stored Recent Orders evidence.',
+        })
+      }
+      const body = z
+        .object({
+          package: z.literal('end').default('end'),
+          slot: z.string().min(1).max(80),
+          target: z.discriminatedUnion('kind', [
+            z.object({ kind: z.literal('order'), providerOrderNo: z.string().min(1).max(64) }),
+            z.object({
+              kind: z.literal('cash_deduction'),
+              id: z.string().min(1).optional(),
+              operationKey: z.string().min(1).max(160).optional(),
+            }),
+          ]),
+          reason: z.string().trim().min(1).max(500),
+        })
+        .superRefine((value, context) => {
+          if (
+            value.target.kind === 'cash_deduction' &&
+            value.target.id === undefined &&
+            value.target.operationKey === undefined
+          ) {
+            context.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ['target'],
+              message: 'cash deduction id or operationKey is required',
+            })
+          }
+        })
+        .parse(req.body)
+      const out = await rereadManagerOrderEvidence(deps, req.actor!, {
+        shiftId: id,
+        package: body.package,
+        slot: body.slot,
+        target: body.target,
+        reason: body.reason,
+        requestId: req.requestId,
+        maxReadsPerShift: opts.maxOcrReadsPerShift ?? 15,
+      })
+      return reply.send({
+        ok: out.result.ok,
+        cached: out.cached,
+        retryable: out.retryable,
+        reads: out.reads,
+        evidence: out.evidence,
+        target: out.target,
+        reviewedOrdersHash: out.reviewedOrdersHash,
+        settlementHash: out.settlementHash,
+        ...(out.result.ok
+          ? { rows: out.result.rows }
+          : { reason: out.result.reason, rows: [] }),
+      })
+    },
+  )
+
   // C-7: the manager sends the package back for a re-shoot, or rejects a close. Both return the
   // shift to the driver with a logged reason.
   const decisionBody = z.object({ notes: z.string().max(2000).nullable().default(null) })
@@ -1395,6 +1491,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           pointA: deduction.pointA,
           pointB: deduction.pointB,
           included: deduction.included,
+          windowStatus: deduction.windowStatus,
+          decisionReason: deduction.decisionReason,
+          decidedBy: deduction.decidedBy,
+          decidedAt: deduction.decidedAt,
         })),
       }
     },

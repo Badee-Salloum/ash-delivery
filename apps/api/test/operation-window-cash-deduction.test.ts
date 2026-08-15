@@ -299,7 +299,7 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
     ])
   })
 
-  it('uses OCR amount plus nonblank timing, not route text, for a fresh batch', async () => {
+  it('uses OCR amount plus verified timing, not route text, for a fresh batch', async () => {
     const { id, driver } = await openShift({ float: 1_000, topup: 0 })
     const row = (
       operationKey: string,
@@ -342,9 +342,11 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
       orders: [], cashDeductions: deductions, movements: [],
     })
     expect(result.statusCode, result.body).toBe(200)
-    expect(result.json().br1.cashDeductionTotal).toBe('721.00')
+    // The two minute-less 60s and the surviving date-less 30 remain visible but contribute zero.
+    expect(result.json().br1.cashDeductionTotal).toBe('571.00')
     const stored = await h.deps.cashDeductions.listByShift(id)
     expect(stored).toHaveLength(11)
+    expect(stored.filter((item) => item.windowStatus === 'unknown').every((item) => !item.included)).toBe(true)
     expect(stored.find((item) => item.operationKey === 'recent-orders:7070707070707070'))
       .toMatchObject({ occurredDate: '2026-08-13', pointA: 'C', pointB: 'D' })
   })
@@ -794,14 +796,14 @@ describe('cash deduction compatibility and approval allocation', () => {
     expect(first.statusCode, first.body).toBe(200)
     expect(first.json().orders).toEqual(expect.arrayContaining([
       expect.objectContaining({ providerOrderNo: 'OLD-API-PRE-OPEN', windowStatus: 'pre_open', included: false }),
-      expect.objectContaining({ providerOrderNo: 'OLD-API-UNKNOWN', windowStatus: 'unknown', included: true }),
+      expect.objectContaining({ providerOrderNo: 'OLD-API-UNKNOWN', windowStatus: 'unknown', included: false }),
     ]))
     expect(first.json().cashDeductions[0]).toMatchObject({ windowStatus: 'post_close', included: false })
 
     const second = await get(manager, `/shifts/${id}/review`)
     expect(second.statusCode, second.body).toBe(200)
     expect(counts).toEqual([
-      { orders: 1, cashDeductions: 1 },
+      { orders: 2, cashDeductions: 1 },
       { orders: 0, cashDeductions: 0 },
     ])
     const blocked = await approveFixedClose(h, manager, id, second.json().br1.ordersHash)
@@ -867,6 +869,180 @@ describe('cash deduction compatibility and approval allocation', () => {
       .toBe(0n)
   })
 
+  it('keeps unknown positive and negative operations out of BR1/settlement until audited inclusion', async () => {
+    const { id, driver, manager } = await openShift({ float: 100, topup: 20 })
+    const submitted = await put(driver, `/shifts/${id}/operations`, {
+      orders: [{ providerOrderNo: 'UNKNOWN-POSITIVE', payMode: 'cash', fee: '100.00' }],
+      cashDeductions: [{
+        operationKey: 'unknown-negative',
+        amount: '30.00',
+        occurredDate: null,
+        occurredMinute: null,
+        source: 'ocr',
+      }],
+      movements: [],
+    })
+    expect(submitted.statusCode, submitted.body).toBe(200)
+    expect((await h.deps.orders.listByShift(id))[0]).toMatchObject({
+      providerOrderNo: 'UNKNOWN-POSITIVE',
+      windowStatus: 'unknown',
+      included: false,
+    })
+    const [deduction] = await h.deps.cashDeductions.listByShift(id)
+    expect(deduction).toMatchObject({ windowStatus: 'unknown', included: false })
+    expect(submitted.json().br1).toMatchObject({ expectedTotal: '120.00', cashDeductionTotal: '0.00' })
+
+    await uploadEnd(driver, id)
+    h.deps.clock.set(CLOSE_MS)
+    const ended = await put(driver, `/shifts/${id}/end-package`, {
+      odometerKm: 6_050,
+      batteryPercent: null,
+      cashDeclared: '170.00',
+      walletDeclared: '0.00',
+    })
+    expect(ended.statusCode, ended.body).toBe(200)
+
+    const initialReview = await get(manager, `/shifts/${id}/review`)
+    expect(initialReview.statusCode, initialReview.body).toBe(200)
+    expect(initialReview.json().br1).toMatchObject({ expectedTotal: '120.00', cashDeductionTotal: '0.00' })
+    const initialHash = initialReview.json().br1.ordersHash as string
+    const initialSettlement = await get(manager, `/shifts/${id}/settlement`)
+    expect(initialSettlement.json()).toMatchObject({
+      deliveryFeeTotal: '0.00',
+      cashDeductionTotal: '0.00',
+      expectedTotal: '120.00',
+      variance: '50.00',
+    })
+    const initialSettlementHash = initialSettlement.json().settlementHash as string
+
+    const includeOrder = await post(manager, `/shifts/${id}/operations/revise`, {
+      orders: [{
+        providerOrderNo: 'UNKNOWN-POSITIVE',
+        included: true,
+        reason: 'manager verified this order belongs to the shift',
+      }],
+    })
+    expect(includeOrder.statusCode, includeOrder.body).toBe(200)
+    expect(includeOrder.json().br1).toMatchObject({ expectedTotal: '200.00', cashDeductionTotal: '0.00' })
+    expect(includeOrder.json().br1.ordersHash).not.toBe(initialHash)
+    const orderSettlement = await get(manager, `/shifts/${id}/settlement`)
+    expect(orderSettlement.json()).toMatchObject({
+      deliveryFeeTotal: '100.00',
+      cashDeductionTotal: '0.00',
+      expectedTotal: '200.00',
+      variance: '-30.00',
+    })
+    expect(orderSettlement.json().settlementHash).not.toBe(initialSettlementHash)
+
+    const includeDeduction = await post(manager, `/shifts/${id}/operations/revise`, {
+      cashDeductions: [{
+        id: deduction!.id,
+        included: true,
+        reason: 'manager verified this cash deduction belongs to the shift',
+      }],
+    })
+    expect(includeDeduction.statusCode, includeDeduction.body).toBe(200)
+    expect(includeDeduction.json().br1).toMatchObject({ expectedTotal: '170.00', cashDeductionTotal: '30.00' })
+    expect(includeDeduction.json().br1.ordersHash).not.toBe(includeOrder.json().br1.ordersHash)
+    const finalSettlement = await get(manager, `/shifts/${id}/settlement`)
+    expect(finalSettlement.json()).toMatchObject({
+      deliveryFeeTotal: '100.00',
+      grossDriverShare: '40.00',
+      cashDeductionTotal: '30.00',
+      baseDriverShare: '10.00',
+      expectedTotal: '170.00',
+      variance: '0.00',
+    })
+    expect(finalSettlement.json().settlementHash).not.toBe(orderSettlement.json().settlementHash)
+
+    const finalReview = await get(manager, `/shifts/${id}/review`)
+    const approved = await approveFixedClose(h, manager, id, finalReview.json().br1.ordersHash)
+    expect(approved.statusCode, approved.body).toBe(200)
+  })
+
+  it('round-trips audited and unresolved unknown deductions through the operations response', async () => {
+    const { id, driver } = await openShift({ float: 100, topup: 0 })
+    const input = {
+      orders: [],
+      cashDeductions: [
+        {
+          operationKey: 'unknown-manager-included',
+          amount: '30.00',
+          occurredDate: null,
+          occurredMinute: null,
+          source: 'ocr',
+        },
+        {
+          operationKey: 'unknown-unresolved',
+          amount: '20.00',
+          occurredDate: null,
+          occurredMinute: null,
+          source: 'ocr',
+        },
+      ],
+      movements: [],
+    }
+    const first = await put(driver, `/shifts/${id}/operations`, input)
+    expect(first.statusCode, first.body).toBe(200)
+    expect(first.json().cashDeductions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        operationKey: 'unknown-manager-included',
+        included: false,
+        windowStatus: 'unknown',
+        decisionReason: null,
+        decidedBy: null,
+        decidedAt: null,
+      }),
+      expect.objectContaining({
+        operationKey: 'unknown-unresolved',
+        included: false,
+        windowStatus: 'unknown',
+        decisionReason: null,
+        decidedBy: null,
+        decidedAt: null,
+      }),
+    ]))
+
+    const rows = await h.deps.cashDeductions.listByShift(id)
+    const audited = rows.find((row) => row.operationKey === 'unknown-manager-included')!
+    const decidedAt = '2026-08-13T20:00:00.000Z'
+    await h.deps.cashDeductions.update({
+      ...audited,
+      included: true,
+      decisionReason: 'manager verified this unknown-time deduction belongs to the shift',
+      decidedBy: 'u-bm',
+      decidedAt,
+    }, 'u-bm')
+
+    // This simulates a reopened/resumed phone submitting its full list after the audited decision.
+    // The service must preserve the decision and the response must carry enough metadata for the
+    // phone reconciliation layer to distinguish it from the still-unresolved unknown row.
+    const resumed = await put(driver, `/shifts/${id}/operations`, input)
+    expect(resumed.statusCode, resumed.body).toBe(200)
+    expect(resumed.json().cashDeductions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        operationKey: 'unknown-manager-included',
+        included: true,
+        windowStatus: 'unknown',
+        decisionReason: 'manager verified this unknown-time deduction belongs to the shift',
+        decidedBy: 'u-bm',
+        decidedAt,
+      }),
+      expect.objectContaining({
+        operationKey: 'unknown-unresolved',
+        included: false,
+        windowStatus: 'unknown',
+        decisionReason: null,
+        decidedBy: null,
+        decidedAt: null,
+      }),
+    ]))
+    expect(resumed.json().br1).toMatchObject({
+      cashDeductionTotal: '30.00',
+      expectedTotal: '70.00',
+    })
+  })
+
   it('blocks unresolved rows until a manager supplies an audited reason and decision', async () => {
     const { id, driver, manager } = await openShift({ float: 100, topup: 20 })
     await put(driver, `/shifts/${id}/operations`, {
@@ -891,7 +1067,11 @@ describe('cash deduction compatibility and approval allocation', () => {
     // Correcting money versions the row so a cached driver cannot overwrite it, but does not say
     // when the operation happened. It must therefore remain an unresolved window row.
     const feeOnly = await post(manager, `/shifts/${id}/operations/revise`, {
-      orders: [{ providerOrderNo: 'TIME-UNKNOWN', fee: '100.00' }],
+      orders: [{
+        providerOrderNo: 'TIME-UNKNOWN',
+        fee: '100.00',
+        reason: 'this note explains the fee only, not the unreadable time',
+      }],
     })
     expect(feeOnly.statusCode, feeOnly.body).toBe(200)
     const afterFeeOnly = await get(manager, `/shifts/${id}/review`)

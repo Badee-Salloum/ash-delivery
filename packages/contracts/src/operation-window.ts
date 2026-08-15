@@ -70,9 +70,8 @@ export function classifyOperationWindow(input: {
   return 'in_window'
 }
 
-/** Unknown rows stay provisionally visible/counting until a manager resolves them. */
+/** Only a verified operation minute counts automatically; unknown rows require a manager decision. */
 export const includedByOperationWindow = (status: OperationWindowStatus): boolean =>
   status === 'in_window'
   || status === 'open_minute_boundary'
   || status === 'close_minute_boundary'
-  || status === 'unknown'

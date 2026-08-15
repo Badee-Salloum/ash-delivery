@@ -87,6 +87,8 @@ export interface OcrRow {
   printed: string
   value: string | null
   cancelled: boolean
+  /** The readers disagreed on a financially destructive classification; keep this row visible. */
+  reviewRequired?: boolean
   /** 24-hour `HH:MM`. */
   time: string | null
   /**

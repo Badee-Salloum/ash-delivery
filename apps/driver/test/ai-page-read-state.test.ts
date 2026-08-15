@@ -130,5 +130,29 @@ describe('cloud-authoritative paged OCR state', () => {
       rows: 1,
       refused: 1,
     })
+
+    expect(visibleAiPageReadOutcome([{ feeRefused: false, timeText: '' }], [], [])).toEqual({
+      kind: 'read',
+      rows: 1,
+      refused: 1,
+    })
+
+    expect(visibleAiPageReadOutcome([{ feeRefused: false, timeText: '', cancelled: true }], [], [])).toEqual({
+      kind: 'read',
+      rows: 1,
+      refused: 0,
+    })
+
+    expect(visibleAiPageReadOutcome(
+      [{ feeRefused: false, timeText: '20:09' }],
+      // A retry that verified only the minute is still actionable: without its date the server
+      // cannot place the deduction in the shift window.
+      [{ localId: 'unknown-minus-50', timeText: '22:36', timeReviewRequired: true }],
+      [{ localId: 'unknown-minus-50' }],
+    )).toEqual({
+      kind: 'read',
+      rows: 2,
+      refused: 1,
+    })
   })
 })

@@ -282,7 +282,7 @@ export const ar = {
     readFailureUnavailable: 'تعذّر الوصول إلى القارئ الذكي لقراءة {image}',
     readFailureNoFields: 'لم يجد القارئ الذكي عمليات قابلة للقراءة في {image}',
     readFailureRefused: 'لم يعتمد القارئ الذكي قراءة {image} بثقة',
-    readManualRequired: 'استُخدمت محاولة القراءة المتاحة؛ أدخِل عمليات هذه الصورة يدوياً',
+    readManualRequired: 'استُخدمت محاولة القراءة المتاحة؛ أدخِل الأجرة الناقصة فقط، أما التوقيت غير الموثق فيراجعه المدير',
     /** «٠ عملية» is a real answer — the page had nothing new — and not the same as a failed read. */
     /** Arabic counts zero/one/two/few/many separately — see plural() in i18n/index.ts. */
     readAdded: {
@@ -304,11 +304,11 @@ export const ar = {
     },
     photoOf: 'صورة',
     readRefused: {
-      one: 'صف واحد لم يُقرأ بثقة — أدخِله يدوياً',
-      two: 'صفّان لم يُقرآ بثقة — أدخِلهما يدوياً',
-      few: '{n} صفوف لم تُقرأ بثقة — أدخِلها يدوياً',
-      many: '{n} صفاً لم يُقرأ بثقة — أدخِلها يدوياً',
-      other: '{n} صف لم يُقرأ بثقة — أدخِلها يدوياً',
+      one: 'صف واحد يحتاج مراجعة — أدخِل الأجرة إن كانت ناقصة، والتوقيت يراجعه المدير',
+      two: 'صفّان يحتاجان مراجعة — أدخِل الأجرة إن كانت ناقصة، والتوقيت يراجعه المدير',
+      few: '{n} صفوف تحتاج مراجعة — أدخِل الأجرة الناقصة، والتوقيت يراجعه المدير',
+      many: '{n} صفاً يحتاج مراجعة — أدخِل الأجرة الناقصة، والتوقيت يراجعه المدير',
+      other: '{n} صف يحتاج مراجعة — أدخِل الأجرة الناقصة، والتوقيت يراجعه المدير',
     },
     retakeRequested: 'طلب المدير إعادة التصوير',
     closeRejected: 'رفض المدير إنهاء النوبة',
@@ -437,6 +437,7 @@ orderNo: 'رقم الطلب',
     explainedByOrder: 'مرتبطة بطلب',
     unexplained: 'لا يقابلها طلب',
     excluded: 'مستبعدة',
+    timeUnverified: 'الوقت والتاريخ يحتاجان قراءة AI',
     time: 'الوقت',
     /** The one question no machine may answer — see the ambiguous-credit control. */
     partOfOrder: 'جزء من الطلب',

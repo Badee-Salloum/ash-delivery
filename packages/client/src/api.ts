@@ -77,6 +77,7 @@ export interface ShiftStateView {
     windowStatus: OperationWindowStatus
     decisionReason: string | null
     decidedBy: string | null
+    decidedAt: string | null
     /** «A» the pickup, «B» the dropoff — the order has no number, so this is how it is known. */
     points?: Array<{ role: string; label: string; lat: number | null; lng: number | null }>
   }>
@@ -105,6 +106,7 @@ export interface ShiftStateView {
     windowStatus: OperationWindowStatus
     decisionReason: string | null
     decidedBy: string | null
+    decidedAt: string | null
   }>
   /** Mid-shift battery swaps (SRS §L seam): the pack on `slotNo` came off, another went on. */
   batterySwaps?: Array<{
@@ -783,6 +785,27 @@ export class ApiClient {
     return this.get<ShiftSettlementView>(`/shifts/${shiftId}/settlement${query}`)
   }
 
+  /**
+   * Ask AI to inspect the exact stored Recent Orders evidence page selected by the manager.
+   * The response is suggestion-only: applying a time still uses the audited operation revision.
+   */
+  rereadOrderEvidence(
+    shiftId: string,
+    body: {
+      package: 'end'
+      slot: string
+      target: ManagerOrderEvidenceRereadTarget
+      reason: string
+    },
+  ) {
+    return this.request<ManagerOrderEvidenceRereadResponse>(
+      'POST',
+      `/shifts/${shiftId}/ocr/orders/evidence-reread`,
+      body,
+      { 'x-ash-orders-time-consensus': 'v1' },
+    )
+  }
+
   /** Approve the exact settlement the manager reviewed; the server rejects a stale hash. */
   approveCloseShift(shiftId: string, body: ApproveCloseRequest) {
     return this.post<{ id: string; state: string; postings: number }>(`/shifts/${shiftId}/approve-close`, body)
@@ -1052,6 +1075,7 @@ export interface CloudOcrResponse {
     printed: string
     value: string | null
     cancelled: boolean
+    reviewRequired?: boolean
     time: string | null
     dateIso: string | null
     /** Orders list only — the route, which is half of a row's identity in the merge. */
@@ -1061,6 +1085,32 @@ export interface CloudOcrResponse {
   fields: Record<string, string | null>
   reason?: 'unavailable' | 'timeout' | 'no_fields' | 'refused'
 }
+
+/** A read-only, audited manager read of one explicit stored dashboard evidence attachment. */
+export interface ManagerOrderEvidenceRereadResponse {
+  ok: boolean
+  cached: boolean
+  retryable: boolean
+  reads: { used: number; max: number }
+  rows: CloudOcrResponse['rows']
+  reason?: CloudOcrResponse['reason']
+  evidence: {
+    package: 'end'
+    slot: string
+    mediaId: string
+    attachmentToken: string
+  }
+  /** The requested operation is audit context only; server-side row provenance is not claimed. */
+  target:
+    | { kind: 'order'; providerOrderNo: string; provenanceLinked: false }
+    | { kind: 'cash_deduction'; id: string; operationKey: string; provenanceLinked: false }
+  reviewedOrdersHash: string
+  settlementHash: string
+}
+
+export type ManagerOrderEvidenceRereadTarget =
+  | { kind: 'order'; providerOrderNo: string }
+  | { kind: 'cash_deduction'; id?: string; operationKey?: string }
 
 /**
  * Read one screen with the cloud model.
@@ -1101,11 +1151,18 @@ export async function readInCloud(
     // at full effective resolution; all other readers still need their whole screen/page.
     const prepared = await compressForOcr(file, field === 'wallet' ? 'wallet' : 'full')
     if (!prepared) return null
+    const headers = {
+      ...(retryFailed ? { 'x-ocr-retry': 'true' } : {}),
+      // The time-consensus response may retain a paid row with `time: null` for manager review.
+      // Older driver bundles discarded that row, so the API refuses their orders requests instead
+      // of allowing a stale PWA to create a silent short-count.
+      ...(field === 'orders' ? { 'x-ash-orders-time-consensus': 'v1' } : {}),
+    }
     const res = await api.putBytes<CloudOcrResponse>(
       ocrReadPath(shiftId, field),
       prepared.bytes,
       prepared.mimeType,
-      retryFailed ? { 'x-ocr-retry': 'true' } : {},
+      headers,
       'POST',
     )
     return res

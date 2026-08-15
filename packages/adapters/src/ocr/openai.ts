@@ -33,8 +33,10 @@
 import type { OcrFailure, OcrField, OcrReader, OcrReading, OcrResult, OcrRow } from '@ash/contracts'
 import {
   ORDERS_MONEY_READ_SCHEMA,
+  ORDERS_TIME_READ_SCHEMA,
   READ_SCHEMA,
   ordersMoneyReadPrompt,
+  ordersTimeReadPrompt,
   readPrompt,
   walletReadPrompts,
 } from './prompt.ts'
@@ -59,15 +61,17 @@ const DEFAULT_BASE_URL = 'https://api.openai.com/v1/chat/completions'
 const MAX_COMPLETION_TOKENS = 8192
 
 /**
- * Orders have two independent latency budgets. The compact financial pass supplies the primary
- * candidates and should finish first; an aligned full pass independently verifies their money and
- * may enrich routes. A disagreement is refused rather than resolved by an arbitrary tie-break.
- * Even with a 50-second adapter configuration, routes cannot hold the read to the platform ceiling.
+ * Orders have three independent latency budgets. Compact money and printed-time passes supply the
+ * primary candidates; an aligned full route pass is a possible third time observation and may
+ * enrich routes. A disagreement is refused rather than resolved by an arbitrary tie-break. Even
+ * with a 50-second adapter configuration, routes cannot hold the read to the platform ceiling.
  */
 const ORDERS_MONEY_TIMEOUT_MS = 30_000
+const ORDERS_TIME_TIMEOUT_MS = 24_000
 const ORDERS_ROUTE_TIMEOUT_MS = 44_000
 const ORDERS_ROUTE_GRACE_AFTER_MONEY_MS = 12_000
 const ORDERS_MONEY_MAX_COMPLETION_TOKENS = 4096
+const ORDERS_TIME_MAX_COMPLETION_TOKENS = 2048
 
 export class OpenAiOcrReader implements OcrReader {
   readonly available = true
@@ -84,8 +88,9 @@ export class OpenAiOcrReader implements OcrReader {
     const prefix = `openai:${this.model}:${this.config.effort}:${this.config.verbosity}`
     if (field === 'orders') {
       const moneyTimeout = Math.min(this.config.timeoutMs, ORDERS_MONEY_TIMEOUT_MS)
+      const timeTimeout = Math.min(this.config.timeoutMs, ORDERS_TIME_TIMEOUT_MS)
       const routeTimeout = Math.min(this.config.timeoutMs, ORDERS_ROUTE_TIMEOUT_MS)
-      return `${prefix}:orders-money-v2:orders-route-v1:money-validation-v2:money-timeout-${moneyTimeout}:route-timeout-${routeTimeout}:route-grace-${ORDERS_ROUTE_GRACE_AFTER_MONEY_MS}:money-max-${ORDERS_MONEY_MAX_COMPLETION_TOKENS}:route-max-${MAX_COMPLETION_TOKENS}`
+      return `${prefix}:orders-money-v3:orders-time-v2:orders-route-v2:money-validation-v2:time-validation-v2:cancellation-consensus-v1:money-timeout-${moneyTimeout}:time-timeout-${timeTimeout}:route-timeout-${routeTimeout}:route-grace-${ORDERS_ROUTE_GRACE_AFTER_MONEY_MS}:money-max-${ORDERS_MONEY_MAX_COMPLETION_TOKENS}:time-max-${ORDERS_TIME_MAX_COMPLETION_TOKENS}:route-max-${MAX_COMPLETION_TOKENS}`
     }
     const budget = `timeout-${this.config.timeoutMs}:max-${MAX_COMPLETION_TOKENS}`
     if (field === 'wallet') {
@@ -138,15 +143,21 @@ export class OpenAiOcrReader implements OcrReader {
       schema: ORDERS_MONEY_READ_SCHEMA,
       schemaName: 'orders_money_time_date',
     })
+    const timePromise = this.runPass(request, ordersTimeReadPrompt(), {
+      timeoutMs: Math.min(this.config.timeoutMs, ORDERS_TIME_TIMEOUT_MS),
+      maxCompletionTokens: ORDERS_TIME_MAX_COMPLETION_TOKENS,
+      schema: ORDERS_TIME_READ_SCHEMA,
+      schemaName: 'orders_printed_time_verifier',
+    })
 
-    // Both calls start above. If the compact pass succeeds, routes get only a short grace period;
-    // if it fails, the already-running full pass gets its complete (still <45s) fallback budget.
-    const money = await moneyPromise
-    const route = money.result.ok
+    // All three calls start above. Once both compact passes settle, routes get only a short grace;
+    // if both fail, the already-running full pass gets its complete (still <45s) fallback budget.
+    const [money, time] = await Promise.all([moneyPromise, timePromise])
+    const route = money.result.ok || time.result.ok
       ? await routePassWithinGrace(routePromise, routeAbort)
       : await routePromise
 
-    return { result: ordersPassResult(money, route), passes: [money, route] }
+    return { result: ordersPassResult(money, time, route), passes: [money, time, route] }
   }
 
   private async runPass(
@@ -261,22 +272,67 @@ async function routePassWithinGrace(
 }
 
 /**
- * Money/date/time come from the compact pass when it succeeds, but a second successful pass is
- * still independent financial evidence. Agreement is evaluated per position: one disputed fee is
- * refused without throwing away the other rows or their correctly aligned routes.
+ * Money comes from the compact pass when available. Time never comes from one model answer: every
+ * row is published with a clock/date only when two independently-started passes agree at the same
+ * card position. The dedicated pass cannot see or reason about money, and the route pass is a
+ * possible third vote. Thus a failed verifier can be rescued by money+route agreement, while a
+ * money+verifier result does not have to wait for slow route transcription.
  */
-function ordersPassResult(money: ModelPass, route: ModelPass): OcrResult {
-  if (!money.result.ok) return route.result
+function ordersPassResult(money: ModelPass, time: ModelPass, route: ModelPass): OcrResult {
+  const base = money.result.ok ? money : route.result.ok ? route : null
+  if (base === null || !base.result.ok) {
+    return route.result
+  }
 
-  const positionsAligned = route.result.ok && money.result.rows.length === route.result.rows.length
+  const baseLength = base.result.rows.length
+  const alignedPasses = [money, time, route].filter(
+    (pass): pass is ModelPass & { result: Extract<OcrResult, { ok: true }> } =>
+      pass.result.ok && pass.result.rows.length === baseLength,
+  )
+  const routePositionsAligned = route.result.ok && route.result.rows.length === baseLength
+  const moneyIsBase = base === money
   const financialDisagreementIndexes: number[] = []
+  const timeDisagreementIndexes: number[] = []
+  const dateDisagreementIndexes: number[] = []
+  const timeAgreementCounts: number[] = []
+  const cancellationAgreementCounts: number[] = []
+  const cancellationDisagreementIndexes: number[] = []
+  const cancellationUnverifiedIndexes: number[] = []
   const routeAgreementIndexes: number[] = []
-  const rows = money.result.rows.map((row, index) => {
-    if (!positionsAligned || !route.result.ok) return row
+
+  const rows = base.result.rows.map((baseRow, index) => {
+    const cancellation = orderCancellationConsensus(alignedPasses, index)
+    cancellationAgreementCounts.push(cancellation.votes)
+    if (cancellation.disagreement) cancellationDisagreementIndexes.push(index)
+    if (cancellation.value === null) cancellationUnverifiedIndexes.push(index)
+
+    // Any disagreement is financially unresolved even when two passes voted “cancelled”. A false
+    // cancellation deletes a paid delivery, so contested rows remain visible as refused live-card
+    // candidates and retryable; only an uncontested cancellation may disappear from the money.
+    const cancellationContested = cancellation.disagreement
+    const cancellationNeedsReview = cancellationContested || cancellation.value === null
+    const cancelled = cancellationContested ? false : (cancellation.value ?? false)
+    const printedMoneyRefused =
+      !cancelled && baseRow.value === null && baseRow.printed.trim() !== ''
+    const consensus = orderDateTimeConsensus(alignedPasses, index, cancelled)
+    timeAgreementCounts.push(consensus.timeVotes)
+    if (consensus.time === null && !cancelled) timeDisagreementIndexes.push(index)
+    if (consensus.dateIso === null && !cancelled) dateDisagreementIndexes.push(index)
+
+    let row: OcrRow = {
+      ...baseRow,
+      value: cancelled || cancellationContested ? null : baseRow.value,
+      cancelled,
+      ...(cancellationNeedsReview || printedMoneyRefused ? { reviewRequired: true } : {}),
+      time: consensus.time,
+      dateIso: consensus.dateIso,
+    }
+
+    if (!routePositionsAligned || !route.result.ok) return row
     const routeRow = route.result.rows[index]!
-    if (!ordersRowsFinanciallyAgree(row, routeRow)) {
+    if (moneyIsBase && !ordersRowsFinanciallyAgree(baseRow, routeRow)) {
       financialDisagreementIndexes.push(index)
-      return { ...row, value: null }
+      row = { ...row, value: null, reviewRequired: true }
     }
     if (!ordersRowsAlign(row, routeRow)) return row
     routeAgreementIndexes.push(index)
@@ -285,18 +341,87 @@ function ordersPassResult(money: ModelPass, route: ModelPass): OcrResult {
 
   return {
     ok: true,
-    retryable: ordersRowsRetryable(rows),
+    retryable:
+      ordersRowsRetryable(rows) ||
+      cancellationDisagreementIndexes.length > 0 ||
+      cancellationUnverifiedIndexes.length > 0,
     rows,
-    fields: money.result.fields,
+    fields: base.result.fields,
     raw: {
-      reader: 'orders-ai-money-authority-v1',
+      reader: 'orders-ai-time-consensus-v3',
       routesAligned:
-        positionsAligned && routeAgreementIndexes.length === money.result.rows.length,
+        routePositionsAligned && routeAgreementIndexes.length === baseLength,
       financialDisagreementIndexes,
-      money: money.raw,
+      timeDisagreementIndexes,
+      dateDisagreementIndexes,
+      timeAgreementCounts,
+      cancellationAgreementCounts,
+      cancellationDisagreementIndexes,
+      cancellationUnverifiedIndexes,
+      money: money.result.ok ? money.raw : money.result,
+      time: time.result.ok ? time.raw : time.result,
       route: route.result.ok ? route.raw : route.result,
     },
   }
+}
+
+function orderCancellationConsensus(
+  passes: ReadonlyArray<ModelPass & { result: Extract<OcrResult, { ok: true }> }>,
+  index: number,
+): { value: boolean | null; votes: number; disagreement: boolean } {
+  let cancelledVotes = 0
+  let liveVotes = 0
+  for (const pass of passes) {
+    const row = pass.result.rows[index]
+    if (row === undefined) continue
+    if (row.cancelled) cancelledVotes += 1
+    else liveVotes += 1
+  }
+  const disagreement = cancelledVotes > 0 && liveVotes > 0
+  if (cancelledVotes >= 2) return { value: true, votes: cancelledVotes, disagreement }
+  if (liveVotes >= 2) return { value: false, votes: liveVotes, disagreement }
+  return { value: null, votes: 0, disagreement }
+}
+
+function orderDateTimeConsensus(
+  passes: ReadonlyArray<ModelPass & { result: Extract<OcrResult, { ok: true }> }>,
+  index: number,
+  cancelled: boolean,
+): { time: string | null; dateIso: string | null; timeVotes: number } {
+  const candidates = passes
+    .map((pass) => ({ pass, row: pass.result.rows[index] }))
+    // A cancellation disagreement is a row-alignment warning, not supporting time evidence.
+    .filter(
+      (candidate): candidate is {
+        pass: ModelPass & { result: Extract<OcrResult, { ok: true }> }
+        row: OcrRow
+      } => candidate.row !== undefined && candidate.row.cancelled === cancelled,
+    )
+
+  // Vote on the printed clock evidence, not the already-normalized public row. Otherwise
+  // `12:03 AM` and a second pass that illegally omitted its marker as `00:03` would appear to
+  // agree even though only one model actually transcribed the printed clock.
+  const timeEvidence = candidates.map(({ pass }) =>
+    printedOrderTimeEvidence(pass.raw?.rows?.[index]?.time),
+  )
+  const timeWinner = consensusValue(timeEvidence.map((evidence) => evidence?.key ?? null))
+  const winningEvidence = timeEvidence.find((evidence) => evidence?.key === timeWinner.value) ?? null
+  const dateWinner = consensusValue(candidates.map(({ row }) => row.dateIso))
+  return {
+    time: winningEvidence === null ? null : normalizePrintedOrderTimeEvidence(winningEvidence),
+    dateIso: dateWinner.value,
+    timeVotes: timeWinner.votes,
+  }
+}
+
+function consensusValue(values: readonly (string | null)[]): { value: string | null; votes: number } {
+  const votes = new Map<string, number>()
+  for (const value of values) {
+    if (value === null) continue
+    votes.set(value, (votes.get(value) ?? 0) + 1)
+  }
+  const winner = [...votes.entries()].find(([, count]) => count >= 2)
+  return winner === undefined ? { value: null, votes: 0 } : { value: winner[0], votes: winner[1] }
 }
 
 function ordersRowsAlign(money: OcrRow, route: OcrRow | undefined): boolean {
@@ -313,10 +438,12 @@ function ordersRowsFinanciallyAgree(money: OcrRow, route: OcrRow): boolean {
 }
 
 function ordersRowsRetryable(rows: readonly OcrRow[]): boolean {
-  // Keep every unread non-cancelled slot eligible for the one explicit whole-image retry. A
-  // partial 3/5 read is still a partial failure even though the three authoritative rows remain
-  // useful to the normal cached response. Cancelled rows intentionally have no monetary value.
-  return rows.some((row) => !row.cancelled && row.value === null)
+  // Keep every unread or unverified non-cancelled slot eligible for the one explicit whole-image
+  // retry. A time accepted from only one pass must never silently classify an order in the window.
+  // Cancelled rows intentionally have neither a monetary value nor a required financial time.
+  return rows.some(
+    (row) => !row.cancelled && (row.value === null || row.time === null || row.dateIso === null),
+  )
 }
 
 function sameMoneyValue(left: string | null, right: string | null): boolean {
@@ -324,6 +451,85 @@ function sameMoneyValue(left: string | null, right: string | null): boolean {
   const leftKey = moneyKey(left)
   const rightKey = moneyKey(right)
   return leftKey !== null && rightKey !== null ? leftKey === rightKey : left.trim() === right.trim()
+}
+
+/**
+ * Deterministically convert a card clock copied verbatim by the model.
+ *
+ * Both Arabic-Indic digit sets and Western digits are accepted. A 12-hour clock is accepted only
+ * with an explicit Arabic or English AM/PM marker; a marker-less value must already be valid
+ * 24-hour time. This function never repairs a plausible-looking but invalid transcription.
+ */
+export function normalizePrintedOrderTime(printed: string | null | undefined): string | null {
+  const evidence = printedOrderTimeEvidence(printed)
+  return evidence === null ? null : normalizePrintedOrderTimeEvidence(evidence)
+}
+
+interface PrintedOrderTimeEvidence {
+  /** Canonical printed identity used for voting; still 12-hour when a marker was printed. */
+  key: string
+  hour: number
+  minute: number
+  marker: 'am' | 'pm' | '24h'
+}
+
+function printedOrderTimeEvidence(
+  printed: string | null | undefined,
+): PrintedOrderTimeEvidence | null {
+  if (typeof printed !== 'string') return null
+  const clean = [...printed.normalize('NFKC').replace(/[\u061c\u200e\u200f]/gu, '').trim()]
+    .map((glyph) => ARABIC_DIGITS[glyph] ?? glyph)
+    .join('')
+
+  const markerPattern = '(?:ص|م|A\\.?\\s*M\\.?|P\\.?\\s*M\\.?)'
+  const suffix = new RegExp(`^(\\d{1,2})\\s*[:：]\\s*(\\d{2})\\s*(${markerPattern})?$`, 'iu').exec(clean)
+  const prefix = suffix === null
+    ? new RegExp(`^(${markerPattern})\\s*(\\d{1,2})\\s*[:：]\\s*(\\d{2})$`, 'iu').exec(clean)
+    : null
+
+  const hourText = suffix?.[1] ?? prefix?.[2]
+  const minuteText = suffix?.[2] ?? prefix?.[3]
+  const rawMarker = suffix?.[3] ?? prefix?.[1]
+  if (hourText === undefined || minuteText === undefined) return null
+
+  const hour = Number(hourText)
+  const minute = Number(minuteText)
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null
+
+  const marker = rawMarker?.replace(/[.\s]/gu, '').toUpperCase()
+  if (marker === undefined) {
+    // A marker-less 01..12 is ambiguous on the Recent Orders screen. Accepting it would let a
+    // model that dropped ص/م become the second vote for the exact class of midnight bug this
+    // verifier exists to prevent. Only unambiguous 24-hour clocks survive without a marker.
+    if (!Number.isInteger(hour) || (hour !== 0 && (hour < 13 || hour > 23))) return null
+    return {
+      key: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}|24h`,
+      hour,
+      minute,
+      marker: '24h',
+    }
+  }
+
+  if (!Number.isInteger(hour) || hour < 1 || hour > 12) return null
+  const semanticMarker = marker === 'ص' || marker === 'AM'
+    ? 'am'
+    : marker === 'م' || marker === 'PM'
+      ? 'pm'
+      : null
+  if (semanticMarker === null) return null
+  return {
+    key: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}|${semanticMarker}`,
+    hour,
+    minute,
+    marker: semanticMarker,
+  }
+}
+
+function normalizePrintedOrderTimeEvidence(evidence: PrintedOrderTimeEvidence): string {
+  let hour = evidence.hour
+  if (evidence.marker === 'am') hour %= 12
+  else if (evidence.marker === 'pm') hour = (hour % 12) + 12
+  return `${String(hour).padStart(2, '0')}:${String(evidence.minute).padStart(2, '0')}`
 }
 
 /**
@@ -346,7 +552,12 @@ export function parsedResult(field: OcrField, parsed: ParsedScreen): OcrResult {
       printed: String(r.printed ?? ''),
       value,
       cancelled: r.cancelled === true,
-      time: r.time == null ? null : String(r.time),
+      time:
+        field === 'orders'
+          ? normalizePrintedOrderTime(r.time)
+          : r.time == null
+            ? null
+            : String(r.time),
       dateIso: r.dateIso == null ? null : String(r.dateIso),
       pointA: r.pointA == null ? null : String(r.pointA),
       pointB: r.pointB == null ? null : String(r.pointB),

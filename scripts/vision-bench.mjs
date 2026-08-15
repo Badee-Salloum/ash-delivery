@@ -4,7 +4,7 @@
  *
  *     node scripts/vision-bench.mjs --dry            build every request, send nothing
  *     node scripts/vision-bench.mjs --models         ask which model ids the key actually has
- *     node scripts/vision-bench.mjs --pass=1         one full pass over all 48 images
+ *     node scripts/vision-bench.mjs --pass=1         one full pass over all 66 images
  *     node scripts/vision-bench.mjs --report         re-render review.html, zero requests
  *
  * ── WHAT THIS MEASURES, AND WHY THE OBVIOUS VERSION OF IT DOES NOT WORK ──────────────────────
@@ -29,9 +29,8 @@
  *
  * A model that answers `hasDecimal: true` and then hands back «١١٥٥٦٥» has contradicted
  * itself in a way we can see without knowing the answer. And the strongest check of all costs no
- * quota whatsoever: the SHIPPED GLYPH READER reads 46 of these 48 fees with zero wrong, so it runs
- * over the same corpus as a genuinely independent second opinion — a different algorithm, not a
- * second field of the same completion.
+ * quota whatsoever: the SHIPPED GLYPH READER runs over the same corpus as a genuinely independent
+ * second opinion — a different algorithm, not a second field of the same completion.
  *
  * ── ON THE DATA ──────────────────────────────────────────────────────────────────────────────
  * These screenshots hold real customer addresses and metre-level GPS. The owner decided on
@@ -122,8 +121,9 @@ const DRY = flag('dry')
  * Measured from the console on 2026-08-13, free tier: RPM 5 · RPD 20 · TPM 250K.
  *
  * The owner first said "5 per day"; the dashboard says 5 per MINUTE and 20 per day. The difference
- * is what makes this benchmark worth running — 20 a day affords three full passes over 48 images,
- * and repetition is the only thing that can catch a fault that shows up one run in ten.
+ * is what makes this benchmark worth running — at the default batch of eight, 20 a day affords two
+ * full passes over the current 66 images, and repetition is the only thing that can catch a fault
+ * that shows up one run in ten.
  */
 const RPD = Number(arg('rpd', arg('provider', 'gemini') === 'openai' ? '40' : '20'))
 const RPM = Number(arg('rpm', arg('provider', 'gemini') === 'openai' ? '30' : '5'))

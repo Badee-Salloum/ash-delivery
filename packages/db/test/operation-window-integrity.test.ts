@@ -29,6 +29,7 @@ if (!DATABASE_URL) {
       const managerOrderId = randomUUID()
       const automaticOrderId = randomUUID()
       const unknownOrderId = randomUUID()
+      const automaticUnknownOrderId = randomUUID()
       const appUserOrderId = randomUUID()
       const deductionId = randomUUID()
       const suffix = shiftId.replaceAll('-', '').slice(0, 12)
@@ -91,6 +92,8 @@ if (!DATABASE_URL) {
            ($2, $4, $6, 'cash', 1000, true, 'ocr', 'yallago', true,
             DATE '2026-08-13', '19:48', 'unknown', $7),
            ($3, $4, $8, 'cash', 1000, true, 'ocr', 'yallago', true,
+            NULL, NULL, 'unknown', $7),
+           ($9, $4, $10, 'cash', 1000, true, 'ocr', 'yallago', true,
             NULL, NULL, 'unknown', $7)`,
         [
           managerOrderId,
@@ -101,6 +104,8 @@ if (!DATABASE_URL) {
           `WIN-AUTO-${suffix}`,
           managerId,
           `WIN-UNKNOWN-${suffix}`,
+          automaticUnknownOrderId,
+          `WIN-AUTO-UNKNOWN-${suffix}`,
         ],
       )
       await pool.query(
@@ -248,7 +253,7 @@ if (!DATABASE_URL) {
       })
 
       const classified = await new PgOperationWindowRepo(pool).reclassify(shiftId, managerId)
-      expect(classified).toEqual({ orders: 1, cashDeductions: 1 })
+      expect(classified).toEqual({ orders: 2, cashDeductions: 1 })
 
       const orders = await pool.query<{
         id: string
@@ -273,6 +278,10 @@ if (!DATABASE_URL) {
         included: true,
         window_status: 'unknown',
       })
+      expect(orders.rows.find((row) => row.id === automaticUnknownOrderId)).toMatchObject({
+        included: false,
+        window_status: 'unknown',
+      })
       expect((await pool.query(
         'SELECT included, window_status::text FROM cash_deductions WHERE id = $1',
         [deductionId],
@@ -282,12 +291,12 @@ if (!DATABASE_URL) {
         `SELECT actor_id::text
            FROM audit_log
           WHERE table_name IN ('shift_orders', 'cash_deductions')
-            AND record_id IN ($1, $2, $3)
+            AND record_id IN ($1, $2, $3, $4)
             AND action = 'UPDATE'
           ORDER BY id`,
-        [managerOrderId, automaticOrderId, deductionId],
+        [managerOrderId, automaticOrderId, automaticUnknownOrderId, deductionId],
       )
-      expect(audit.rows).toHaveLength(3)
+      expect(audit.rows).toHaveLength(4)
       expect(audit.rows.every((row) => row.actor_id === managerId)).toBe(true)
       expect((await pool.query(
         `SELECT has_table_privilege('app_user', 'operation_window_reclassification_context', 'INSERT') AS can_insert,

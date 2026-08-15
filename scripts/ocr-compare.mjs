@@ -95,7 +95,7 @@ for (const run of runs) {
 const pad = (s, n) => String(s).padEnd(n)
 const num = (s, n) => String(s).padStart(n)
 
-console.log('\n══ every run on disk, scored against the same 48-image answer key ══\n')
+console.log('\n══ every run on disk, scored against the current corpus answer key ══\n')
 console.log(pad('run', 36), num('imgs', 4), num('clean', 6), num('rows', 5), num('ok', 5), num('MISREAD', 8), num('missed', 7), num('cost', 9))
 for (const r of rows) {
   console.log(

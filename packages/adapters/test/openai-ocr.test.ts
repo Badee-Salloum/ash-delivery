@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { OpenAiOcrReader, parsedResult, type ParsedRow, type ParsedScreen } from '../src/ocr/openai.ts'
+import {
+  OpenAiOcrReader,
+  normalizePrintedOrderTime,
+  parsedResult,
+  type ParsedRow,
+  type ParsedScreen,
+} from '../src/ocr/openai.ts'
 
 const walletRow = (
   printed: string,
@@ -181,10 +187,28 @@ function requestedPrompt(init?: RequestInit): string {
   return body.messages[0]!.content[0]!.text ?? ''
 }
 
+describe('printed order time normalization', () => {
+  it.each([
+    ['١٢:٠٣ ص', '00:03'],
+    ['۱۲:۳۰ ص', '00:30'],
+    ['12:00 PM', '12:00'],
+    ['١:٠٥ م', '13:05'],
+    ['P.M. 9:19', '21:19'],
+    ['00:03', '00:03'],
+    ['23:21', '23:21'],
+  ])('converts %s deterministically to %s', (printed, expected) => {
+    expect(normalizePrintedOrderTime(printed)).toBe(expected)
+  })
+
+  it.each(['24:03', '٠٠:٦٠', '13:03 ص', '12:03', '01:03', '11:3 PM', 'وقت غير واضح'])('refuses invalid or ambiguous %s', (printed) => {
+    expect(normalizePrintedOrderTime(printed)).toBeNull()
+  })
+})
+
 describe('orders fast financial pass', () => {
-  it('versions the cache by model configuration and both orders validation passes', () => {
+  it('versions the cache by model configuration and all orders pass versions and budgets', () => {
     expect(reader().cacheSignature('orders')).toBe(
-      'openai:gpt-test:medium:medium:orders-money-v2:orders-route-v1:money-validation-v2:money-timeout-1000:route-timeout-1000:route-grace-12000:money-max-4096:route-max-8192',
+      'openai:gpt-test:medium:medium:orders-money-v3:orders-time-v2:orders-route-v2:money-validation-v2:time-validation-v2:cancellation-consensus-v1:money-timeout-1000:time-timeout-1000:route-timeout-1000:route-grace-12000:money-max-4096:time-max-2048:route-max-8192',
     )
     expect(reader(2_000).cacheSignature('orders')).not.toBe(reader().cacheSignature('orders'))
     expect(reader(2_000).cacheSignature('wallet')).not.toBe(reader().cacheSignature('wallet'))
@@ -203,14 +227,15 @@ describe('orders fast financial pass', () => {
       notes: null,
     }
     vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-      return requestedPrompt(init).includes('ORDERS MONEY/TIME/DATE FAST PASS')
-        ? completion(fast, 8, 4)
-        : new Response('', { status: 504 })
+      const prompt = requestedPrompt(init)
+      if (prompt.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return completion(fast, 8, 4)
+      if (prompt.includes('ORDERS PRINTED-TIME VERIFIER')) return completion(fast, 6, 3)
+      return new Response('', { status: 504 })
     }))
 
     const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
 
-    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(fetch).toHaveBeenCalledTimes(3)
     const fastCall = vi.mocked(fetch).mock.calls.find(([, init]) =>
       requestedPrompt(init).includes('ORDERS MONEY/TIME/DATE FAST PASS'),
     )
@@ -232,11 +257,306 @@ describe('orders fast financial pass', () => {
     ])
     expect(reading.result.rows.reduce((sum, row) => sum + Number(row.value), 0)).toBe(1_415)
     expect(reading.result.raw).toMatchObject({
-      reader: 'orders-ai-money-authority-v1',
+      reader: 'orders-ai-time-consensus-v3',
       routesAligned: false,
       route: { ok: false, reason: 'timeout' },
+      timeAgreementCounts: [2, 2, 2, 2, 2],
     })
-    expect(reading.usage).toMatchObject({ tokensIn: 8, tokensOut: 4 })
+    expect(reading.usage).toMatchObject({ tokensIn: 14, tokensOut: 7 })
+  })
+
+  it('normalizes the exact midnight incident only after money and time passes agree', async () => {
+    const cancelled = (time: string): ParsedRow => orderRow('0', {
+      printed: 'تم إلغاؤه',
+      value: null,
+      digitCount: 0,
+      cancelled: true,
+      time,
+      dateIso: '2026-08-15',
+    })
+    const money: ParsedScreen = {
+      rows: [
+        cancelled('١٢:٥٩ ص'),
+        cancelled('١٢:٤٩ ص'),
+        orderRow('155', { time: '١٢:٣٠ ص', dateIso: '2026-08-15' }),
+        orderRow('155', { time: '١٢:٠٣ ص', dateIso: '2026-08-15' }),
+        orderRow('240', { time: '١١:٢١ م', dateIso: '2026-08-14' }),
+        orderRow('225', { time: '١٠:٢٧ م', dateIso: '2026-08-14' }),
+        orderRow('425', { time: '٩:١٩ م', dateIso: '2026-08-14' }),
+        orderRow('370', { time: '٨:٠٩ م', dateIso: '2026-08-14' }),
+      ],
+      fields: [],
+      notes: null,
+    }
+    const verifier: ParsedScreen = {
+      rows: [
+        { time: '12:59 AM', dateIso: '2026-08-15', cancelled: true },
+        { time: '12:49 AM', dateIso: '2026-08-15', cancelled: true },
+        { time: '12:30 AM', dateIso: '2026-08-15', cancelled: false },
+        { time: '12:03 AM', dateIso: '2026-08-15', cancelled: false },
+        { time: '11:21 PM', dateIso: '2026-08-14', cancelled: false },
+        { time: '10:27 PM', dateIso: '2026-08-14', cancelled: false },
+        { time: '9:19 PM', dateIso: '2026-08-14', cancelled: false },
+        { time: '8:09 PM', dateIso: '2026-08-14', cancelled: false },
+      ],
+      fields: [],
+      notes: null,
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const prompt = requestedPrompt(init)
+      if (prompt.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return completion(money)
+      if (prompt.includes('ORDERS PRINTED-TIME VERIFIER')) return completion(verifier)
+      return new Response('', { status: 504 })
+    }))
+
+    const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+
+    expect(reading.result.ok).toBe(true)
+    if (!reading.result.ok) throw new Error('expected an orders result')
+    expect(reading.result.rows.map(({ value, cancelled: isCancelled, time, dateIso }) => ({
+      value,
+      cancelled: isCancelled,
+      time,
+      dateIso,
+    }))).toEqual([
+      { value: null, cancelled: true, time: '00:59', dateIso: '2026-08-15' },
+      { value: null, cancelled: true, time: '00:49', dateIso: '2026-08-15' },
+      { value: '155', cancelled: false, time: '00:30', dateIso: '2026-08-15' },
+      { value: '155', cancelled: false, time: '00:03', dateIso: '2026-08-15' },
+      { value: '240', cancelled: false, time: '23:21', dateIso: '2026-08-14' },
+      { value: '225', cancelled: false, time: '22:27', dateIso: '2026-08-14' },
+      { value: '425', cancelled: false, time: '21:19', dateIso: '2026-08-14' },
+      { value: '370', cancelled: false, time: '20:09', dateIso: '2026-08-14' },
+    ])
+    expect(reading.result.rows.reduce((sum, row) => sum + Number(row.value ?? 0), 0)).toBe(1_570)
+    expect(reading.result.retryable).toBe(false)
+  })
+
+  it('keeps money but refuses a silently conflicting non-cancelled time and makes it retryable', async () => {
+    const money = screen(orderRow('155', { time: '١٢:٠٣ ص' }))
+    const verifier: ParsedScreen = {
+      rows: [{ time: '١١:٠٣ ص', dateIso: '2026-08-15', cancelled: false }],
+      fields: [],
+      notes: null,
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const prompt = requestedPrompt(init)
+      if (prompt.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return completion(money)
+      if (prompt.includes('ORDERS PRINTED-TIME VERIFIER')) return completion(verifier)
+      return new Response('', { status: 504 })
+    }))
+
+    const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+
+    expect(reading.result.ok && reading.result.rows[0]).toMatchObject({
+      value: '155',
+      time: null,
+      dateIso: '2026-08-15',
+    })
+    expect(reading.result.ok && reading.result.retryable).toBe(true)
+    expect(reading.result.ok && reading.result.raw).toMatchObject({
+      timeDisagreementIndexes: [0],
+      timeAgreementCounts: [0],
+    })
+  })
+
+  it('votes on printed evidence before normalization can make unlike transcriptions look equal', async () => {
+    const money = screen(orderRow('155', { time: '١٢:٠٣ ص' }))
+    const verifier: ParsedScreen = {
+      // This is the same normalized minute, but it is not evidence of the printed 12-hour clock.
+      rows: [{ time: '00:03', dateIso: '2026-08-15', cancelled: false }],
+      fields: [],
+      notes: null,
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const prompt = requestedPrompt(init)
+      if (prompt.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return completion(money)
+      if (prompt.includes('ORDERS PRINTED-TIME VERIFIER')) return completion(verifier)
+      return new Response('', { status: 504 })
+    }))
+
+    const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+
+    expect(reading.result.ok && reading.result.rows[0]).toMatchObject({
+      value: '155',
+      time: null,
+      dateIso: '2026-08-15',
+    })
+    expect(reading.result.ok && reading.result.retryable).toBe(true)
+    expect(reading.result.ok && reading.result.raw).toMatchObject({
+      timeDisagreementIndexes: [0],
+      timeAgreementCounts: [0],
+    })
+  })
+
+  it('does not let one false money-pass cancellation silently discard two live-card votes', async () => {
+    const money = screen(orderRow('0', {
+      printed: 'Cancelled',
+      value: null,
+      digitCount: 0,
+      cancelled: true,
+      time: '12:30 AM',
+    }))
+    const verifier: ParsedScreen = {
+      rows: [{ time: '12:30 AM', dateIso: '2026-08-15', cancelled: false }],
+      fields: [],
+      notes: null,
+    }
+    const route = screen(orderRow('155', {
+      time: '12:30 AM',
+      pointA: 'Pickup',
+      pointB: 'Dropoff',
+    }))
+    vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const prompt = requestedPrompt(init)
+      if (prompt.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return completion(money)
+      if (prompt.includes('ORDERS PRINTED-TIME VERIFIER')) return completion(verifier)
+      return completion(route)
+    }))
+
+    const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+
+    expect(reading.result.ok && reading.result.rows[0]).toMatchObject({
+      value: null,
+      cancelled: false,
+      time: '00:30',
+      dateIso: '2026-08-15',
+    })
+    expect(reading.result.ok && reading.result.retryable).toBe(true)
+    expect(reading.result.ok && reading.result.raw).toMatchObject({
+      financialDisagreementIndexes: [0],
+      cancellationAgreementCounts: [2],
+      cancellationDisagreementIndexes: [0],
+      cancellationUnverifiedIndexes: [],
+    })
+  })
+
+  it('keeps a paid candidate visible when two cancellation votes conflict with one live vote', async () => {
+    const money = screen(orderRow('155', { time: '12:30 AM' }))
+    const cancelledRow = orderRow('0', {
+      printed: 'Cancelled',
+      value: null,
+      digitCount: 0,
+      cancelled: true,
+      time: '12:30 AM',
+    })
+    const verifier: ParsedScreen = {
+      rows: [{ time: '12:30 AM', dateIso: '2026-08-15', cancelled: true }],
+      fields: [],
+      notes: null,
+    }
+    const route = screen(cancelledRow)
+    vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const prompt = requestedPrompt(init)
+      if (prompt.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return completion(money)
+      if (prompt.includes('ORDERS PRINTED-TIME VERIFIER')) return completion(verifier)
+      return completion(route)
+    }))
+
+    const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+
+    expect(reading.result.ok && reading.result.rows[0]).toMatchObject({
+      value: null,
+      cancelled: false,
+      reviewRequired: true,
+      time: null,
+    })
+    expect(reading.result.ok && reading.result.retryable).toBe(true)
+    expect(reading.result.ok && reading.result.raw).toMatchObject({
+      cancellationAgreementCounts: [2],
+      cancellationDisagreementIndexes: [0],
+    })
+  })
+
+  it('marks a lone cancellation observation for review when the other passes cannot vote', async () => {
+    const money: ParsedScreen = {
+      rows: [
+        orderRow('240', { time: '11:21 PM' }),
+        orderRow('0', {
+          printed: 'Cancelled',
+          value: null,
+          digitCount: 0,
+          cancelled: true,
+          time: '12:30 AM',
+        }),
+      ],
+      fields: [],
+      notes: null,
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const prompt = requestedPrompt(init)
+      if (prompt.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return completion(money)
+      return new Response('', { status: 504 })
+    }))
+
+    const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+
+    expect(reading.result.ok && reading.result.rows).toMatchObject([
+      { value: '240', cancelled: false, reviewRequired: true, time: null },
+      { value: null, cancelled: false, reviewRequired: true, time: null },
+    ])
+    expect(reading.result.ok && reading.result.retryable).toBe(true)
+  })
+
+  it('keeps a fee/time disagreement visible beside a valid row when the verifier times out', async () => {
+    const money: ParsedScreen = {
+      rows: [
+        orderRow('240', { time: '11:21 PM' }),
+        orderRow('155', { time: '12:30 AM' }),
+      ],
+      fields: [],
+      notes: null,
+    }
+    const route: ParsedScreen = {
+      rows: [
+        orderRow('240', { time: '11:21 PM', pointA: 'A1', pointB: 'B1' }),
+        orderRow('175', { time: '11:30 AM', pointA: 'A2', pointB: 'B2' }),
+      ],
+      fields: [],
+      notes: null,
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const prompt = requestedPrompt(init)
+      if (prompt.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return completion(money)
+      if (prompt.includes('ORDERS PRINTED-TIME VERIFIER')) return new Response('', { status: 504 })
+      return completion(route)
+    }))
+
+    const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+
+    expect(reading.result.ok && reading.result.rows).toMatchObject([
+      { value: '240', time: '23:21', cancelled: false },
+      { value: null, time: null, cancelled: false, reviewRequired: true },
+    ])
+    expect(reading.result.ok && reading.result.retryable).toBe(true)
+  })
+
+  it('keeps an agreed time but refuses a conflicting date without choosing a tie-break', async () => {
+    const money = screen(orderRow('155', { time: '١٢:٠٣ ص', dateIso: '2026-08-15' }))
+    const verifier: ParsedScreen = {
+      rows: [{ time: '12:03 AM', dateIso: '2026-08-14', cancelled: false }],
+      fields: [],
+      notes: null,
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const prompt = requestedPrompt(init)
+      if (prompt.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return completion(money)
+      if (prompt.includes('ORDERS PRINTED-TIME VERIFIER')) return completion(verifier)
+      return new Response('', { status: 504 })
+    }))
+
+    const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+
+    expect(reading.result.ok && reading.result.rows[0]).toMatchObject({
+      value: '155',
+      time: '00:03',
+      dateIso: null,
+    })
+    expect(reading.result.ok && reading.result.retryable).toBe(true)
+    expect(reading.result.ok && reading.result.raw).toMatchObject({
+      timeDisagreementIndexes: [],
+      dateDisagreementIndexes: [0],
+    })
   })
 
   it('enriches routes when the full pass rows align with the fast pass', async () => {
@@ -248,7 +568,10 @@ describe('orders fast financial pass', () => {
       pointB: 'Soprano M. Ali El Abed',
     }))
     vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-      return completion(requestedPrompt(init).includes('ORDERS MONEY/TIME/DATE FAST PASS') ? fast : full)
+      const prompt = requestedPrompt(init)
+      if (prompt.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return completion(fast)
+      if (prompt.includes('ORDERS PRINTED-TIME VERIFIER')) return new Response('', { status: 503 })
+      return completion(full)
     }))
 
     const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
@@ -263,7 +586,11 @@ describe('orders fast financial pass', () => {
       pointA: 'Abdullah Ibn Omar Street',
       pointB: 'Soprano M. Ali El Abed',
     })
-    expect(reading.result.raw).toMatchObject({ routesAligned: true })
+    expect(reading.result.raw).toMatchObject({
+      routesAligned: true,
+      timeAgreementCounts: [2],
+      time: { ok: false, reason: 'unavailable' },
+    })
   })
 
   it('refuses a printed ٢٢٥ / converted 425 mismatch before it can become order money', () => {
@@ -335,6 +662,7 @@ describe('orders fast financial pass', () => {
         printed: '155',
         value: null,
         cancelled: false,
+        reviewRequired: true,
         time: '13:32',
         dateIso: '2026-08-15',
         pointA: null,
@@ -357,20 +685,38 @@ describe('orders fast financial pass', () => {
     expect(reading.result.retryable).toBe(true)
   })
 
-  it('falls back to a successful full pass when the fast pass fails', async () => {
-    const full = screen(orderRow('240', { pointA: 'Pickup', pointB: 'Dropoff' }))
+  it('uses verifier plus route consensus when the money pass fails', async () => {
+    const full = screen(orderRow('240', {
+      time: '١١:٢١ م',
+      dateIso: '2026-08-14',
+      pointA: 'Pickup',
+      pointB: 'Dropoff',
+    }))
+    const verifier: ParsedScreen = {
+      rows: [{ time: '11:21 PM', dateIso: '2026-08-14', cancelled: false }],
+      fields: [],
+      notes: null,
+    }
     vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-      return requestedPrompt(init).includes('ORDERS MONEY/TIME/DATE FAST PASS')
-        ? new Response('', { status: 503 })
-        : completion(full)
+      const prompt = requestedPrompt(init)
+      if (prompt.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return new Response('', { status: 503 })
+      if (prompt.includes('ORDERS PRINTED-TIME VERIFIER')) return completion(verifier)
+      return completion(full)
     }))
 
     const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
 
     expect(reading.result.ok && reading.result.rows[0]).toMatchObject({
       value: '240',
+      time: '23:21',
+      dateIso: '2026-08-14',
       pointA: 'Pickup',
       pointB: 'Dropoff',
+    })
+    expect(reading.result.ok && reading.result.retryable).toBe(false)
+    expect(reading.result.ok && reading.result.raw).toMatchObject({
+      money: { ok: false, reason: 'unavailable' },
+      timeAgreementCounts: [2],
     })
   })
 
