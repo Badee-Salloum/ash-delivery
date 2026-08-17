@@ -2,7 +2,7 @@ import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { fundCodeOf } from '@ash/adapters/memory'
 import { minor } from '@ash/domain'
-import { DRIVER2_ID, DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr } from './harness.ts'
+import { DRIVER2_ID, DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr, today } from './harness.ts'
 
 /**
  * The operations of a shift: what was delivered, what the wallet actually did, and which of it
@@ -30,7 +30,9 @@ afterEach(async () => {
 const post = async (token: string, url: string, payload: Record<string, unknown> = {}): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(token) }, payload })
 const put = async (token: string, url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
+  url.endsWith('/end-package')
+    ? await h.submitEndPackage(token, url.split('/')[2]!, payload)
+    : await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
 const get = async (token: string, url: string): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(token) } })
 const bal = async (code: string): Promise<bigint> => await h.deps.ledger.fundBalance('branch-damascus', code)
@@ -43,15 +45,27 @@ async function openWithOrders(n: number): Promise<{ id: string; driver: string; 
   await h.uploadPhoto(driver, id, 'start', 'odometer')
   await put(driver, `/shifts/${id}/start-package`, { odometerKm: 100, batteryPercent: 90 })
   await post(manager, `/shifts/${id}/approve-open`, { floatTranches: [sypStr(100_000)], topupTranches: [sypStr(50_000)] })
-  for (let i = 1; i <= n; i++) {
-    await post(driver, `/shifts/${id}/orders`, { providerOrderNo: `YAL-${i}`, payMode: 'cash', fee: sypStr(5_000), zone: null })
-  }
+  h.stageCloseDraftFinancialFixture(id, {
+    managerToken: manager,
+    orders: Array.from({ length: n }, (_, offset) => ({
+      clientKey: `operations-yal-${offset + 1}`,
+      providerOrderNo: `YAL-${offset + 1}`,
+      payMode: 'cash' as const,
+      fee: sypStr(5_000),
+      occurredDate: today,
+      occurredMinute: '08:00',
+    })),
+  })
   for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
   return { id, driver, manager }
 }
 
 const exclude = async (id: string, providerOrderNo: string): Promise<void> => {
-  const row = (await h.deps.orders.listByShift(id)).find((o) => o.providerOrderNo === providerOrderNo)!
+  const row = (await h.deps.orders.listByShift(id)).find((o) => o.providerOrderNo === providerOrderNo)
+  if (!row) {
+    h.updateStagedCloseDraftFinancialOrder(id, providerOrderNo, { included: false })
+    return
+  }
   await h.deps.orders.update({
     ...row,
     included: false,
@@ -428,8 +442,7 @@ describe('an order the customer paid partly in cash', () => {
     const { id, driver, manager } = await openWithOrders(1)
     // 5,000 fee, 2,000 of it settled electronically: the driver holds 3,000 in his hand and the
     // wallet gains 2,000 less Yallago's 1,000.
-    const row = (await h.deps.orders.listByShift(id))[0]!
-    await h.deps.orders.update({ ...row, walletAmount: minor(2_000_00n), occurredMinute: '08:00' }, 'u-bm')
+    h.updateStagedCloseDraftFinancialOrder(id, 'YAL-1', { walletAmount: sypStr(2_000) })
 
     const closed = await put(driver, `/shifts/${id}/end-package`, {
       odometerKm: 200,
@@ -448,8 +461,7 @@ describe('an order the customer paid partly in cash', () => {
 
   it('is carried to both screens so a manager can see what was measured', async () => {
     const { id, driver, manager } = await openWithOrders(1)
-    const row = (await h.deps.orders.listByShift(id))[0]!
-    await h.deps.orders.update({ ...row, walletAmount: minor(2_000_00n), occurredMinute: '08:00' }, 'u-bm')
+    h.updateStagedCloseDraftFinancialOrder(id, 'YAL-1', { walletAmount: sypStr(2_000) })
     await put(driver, `/shifts/${id}/end-package`, {
       odometerKm: 200,
       batteryPercent: null,

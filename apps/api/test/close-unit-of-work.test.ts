@@ -28,7 +28,9 @@ afterEach(async () => {
 const post = async (harness: Harness, token: string, url: string, payload: Payload = {}): Promise<LightMyRequestResponse> =>
   await harness.app.inject({ method: 'POST', url, headers: { cookie: harness.cookie(token) }, payload })
 const put = async (harness: Harness, token: string, url: string, payload: Payload): Promise<LightMyRequestResponse> =>
-  await harness.app.inject({ method: 'PUT', url, headers: { cookie: harness.cookie(token) }, payload })
+  url.endsWith('/end-package')
+    ? await harness.submitEndPackage(token, url.split('/')[2]!, payload)
+    : await harness.app.inject({ method: 'PUT', url, headers: { cookie: harness.cookie(token) }, payload })
 const del = async (harness: Harness, token: string, url: string): Promise<LightMyRequestResponse> =>
   await harness.app.inject({ method: 'DELETE', url, headers: { cookie: harness.cookie(token) } })
 const get = async (harness: Harness, token: string, url: string): Promise<LightMyRequestResponse> =>
@@ -73,18 +75,17 @@ async function pendingReview(
   orderCount = 1,
 ): Promise<string> {
   const id = await openShift(harness, driver, manager)
-  const operations = await put(harness, driver, `/shifts/${id}/operations`, {
+  harness.stageCloseDraftFinancialFixture(id, {
+    managerToken: manager,
     orders: Array.from({ length: orderCount }, (_, index) => ({
+      clientKey: `close-uow-${prefix}-${index + 1}`,
       providerOrderNo: `${prefix}-${index + 1}`,
       payMode: 'cash',
       fee: sypStr(5_000),
       occurredDate: '2026-07-21',
       occurredMinute: `08:${String(index + 1).padStart(2, '0')}`,
     })),
-    cashDeductions: [],
-    movements: [],
   })
-  expect(operations.statusCode, operations.body).toBe(200)
   for (const slot of ['dashboard', 'wallet', 'odometer']) await harness.uploadPhoto(driver, id, 'end', slot)
   harness.deps.clock.set(NOW_MS + 4 * 60 * 60_000)
   const ended = await put(harness, driver, `/shifts/${id}/end-package`, {

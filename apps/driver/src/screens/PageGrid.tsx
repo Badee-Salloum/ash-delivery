@@ -1,5 +1,10 @@
 import type { ReactNode } from 'react'
 import { MAX_PAGE_SLOTS, pageSlot } from '@ash/domain'
+import type {
+  CloseDraftAttachment,
+  CloseDraftView,
+  EvidenceUploadResponse,
+} from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { PhotoSlot } from './PhotoSlot.tsx'
 
@@ -26,6 +31,10 @@ export function PageGrid({
   onImage,
   onDeleted,
   status,
+  attachments = {},
+  closeDraftRevision = null,
+  onCloseDraft,
+  onRetryRead,
 }: {
   title: string
   base: string
@@ -33,14 +42,18 @@ export function PageGrid({
   pages: number
   shiftId: string
   slots: ReadonlySet<string>
-  onUploaded(slot: string): void
+  onUploaded(slot: string, result?: EvidenceUploadResponse, file?: File): void | Promise<void>
   onAddPage(): void
   /** Slot is part of the OCR generation: a late answer must not land after that page is replaced. */
-  onImage(file: File, slot: string): void
+  onImage(file: File, slot: string, result?: EvidenceUploadResponse): void | Promise<void>
   /** Remove a page. Offered on every tile in a grid — a surplus page is a real thing to undo. */
   onDeleted(slot: string): void
   /** What this screen's read made of it — one line for the whole set, not per page. */
   status?: ReactNode
+  attachments?: Readonly<Record<string, CloseDraftAttachment>>
+  closeDraftRevision?: number | null
+  onCloseDraft?(draft: CloseDraftView): void
+  onRetryRead?(slot: string): void | Promise<void>
 }): ReactNode {
   const { t } = useApp()
   const numbers = Array.from({ length: pages }, (_, i) => i + 1)
@@ -54,11 +67,11 @@ export function PageGrid({
   const canAdd = slots.has(last) && pages < MAX_PAGE_SLOTS
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex min-w-0 flex-col gap-2">
       <p className="text-sm font-medium text-slate-700">{title}</p>
       {/* Four columns: at 360px the content is 328px, so ~76px cells — well above a 44px target,
           and the six pages a real shift produced fit in two rows with the add-tile beside them. */}
-      <div className="grid grid-cols-4 gap-2">
+      <div className="grid min-w-0 grid-cols-3 gap-2 sm:grid-cols-4">
         {numbers.map((n) => {
           const slot = pageSlot(base, n)
           return (
@@ -72,8 +85,13 @@ export function PageGrid({
               badge={String(n)}
               variant="tile"
               uploaded={slots.has(slot)}
+              attachment={attachments[slot] ?? null}
+              closeDraftRevision={closeDraftRevision}
+              {...(onCloseDraft ? { onCloseDraft } : {})}
+              recognitionQuality
               onUploaded={onUploaded}
-              onImage={(file) => onImage(file, slot)}
+              onImage={(file, result) => onImage(file, slot, result)}
+              {...(onRetryRead ? { onRetryRead: () => onRetryRead(slot) } : {})}
               onDelete={onDeleted}
             />
           )
@@ -83,7 +101,7 @@ export function PageGrid({
             type="button"
             onClick={onAddPage}
             aria-label={t.shift.addPage}
-            className="flex aspect-square items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-white text-2xl text-slate-400"
+            className="flex aspect-square min-w-0 items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-white text-2xl text-slate-400"
           >
             +
           </button>

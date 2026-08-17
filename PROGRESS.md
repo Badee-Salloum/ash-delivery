@@ -1,5 +1,46 @@
 # PROGRESS
 
+## 2026-08-16 — durable close draft staged, not deployed
+
+The source head now contains migration `0034` and the coordinated application changes for a
+durable server-side shift-close draft. Attachments, upload/read attempts, incomplete operations,
+manual edits, figures, and readiness survive navigation or reload; OCR is linked to the current
+attachment token, and replacing or restoring an attachment rotates identity so a stale read cannot
+land on a newer image. Final submission identifies the exact draft revision/hash and materialises
+the draft atomically with the close package. BR1 and settlement equations are unchanged.
+
+The linked Recent Orders reader now requires the new client protocol. A request without
+`X-ASH-ORDERS-TIME-CONSENSUS: close-draft-v1` is refused with
+`428 driver_update_required`, and the reader/cache signature changed so an older cached result is
+not eligible for this flow. The driver keeps upload and read state separate, restores its durable
+draft after return/reload, and uses a local outbox only until the server accepts an attachment or
+edit. The admin review retains explicit source and manager-decision provenance.
+
+**Release state:** staged and unpublished. Production Neon and all stable Vercel aliases remain on
+the validated `0033` baseline described in the historical records below. No production migration,
+deployment, or live Muhammad/Thaer remediation occurred during implementation or verification.
+The release must run as one paused-write maintenance operation: validate the pre-backup, apply
+`0034`, run postflight, promote the API first, then promote driver/admin, and resume writes only
+after all three stable aliases are coherent.
+
+Final database evidence used Node `24.19.0` and PostgreSQL `17.11`. A fresh database applied
+`0001`–`0034` (`34/34`), the checksum rerun reported `0 applied / 34 present`, every SQL guard
+passed, and the full real-PostgreSQL `@ash/db` gate passed **76/76** tests across 15 files.
+Migration `0034` had ledger checksum `5bc30a31` and file SHA-256
+`228F090D8FCF2DC0CA1B7EDF6FA500D679CA19ED9E388D2DE9054B7EE2E8659A`. Two no-shim API
+reproductions on real PostgreSQL passed: ordinary submit and manager force-prepare both preserved
+the `created_by=manager` owner of an order that existed before the draft and assigned its canonical
+`legacy:order:<orderId>` draft key.
+
+Post-deploy handling of the two named shifts remains pending. Muhammad's `01:18` order must be
+verified and saved through the audited manager decision flow before recalculating hashes and
+settlement. Thaer's wrong-screen attachments must be invalidated, the last valid order attachments
+restored from attachment history, and linked OCR rerun; the 23 suspect local rows must not be
+accepted by assumption. Neither shift may be auto-approved, and neither may be repaired with direct
+SQL.
+
+---
+
 ## 2026-08-15 — branch treasury clarity deployed
 
 The branch treasury now separates the physical-count variance (`counted − system balance`) from

@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr } from './harness.ts'
+import { DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr, today } from './harness.ts'
 
 /**
  * «تطبيق البطارية لا يعمل على جهازي».
@@ -26,7 +26,9 @@ afterEach(async () => {
 const post = async (t: string, url: string, payload: Record<string, unknown> = {}): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(t) }, payload })
 const put = async (t: string, url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(t) }, payload })
+  url.endsWith('/end-package')
+    ? await h.submitEndPackage(t, url.split('/')[2]!, payload)
+    : await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(t) }, payload })
 const get = async (t: string, url: string): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(t) } })
 
@@ -78,12 +80,17 @@ async function openShiftWithPacks(
     topupTranches: [],
   })
   expect(opened.statusCode, opened.body).toBe(200)
-  const order = await post(driver, `/shifts/${id}/orders`, {
-    providerOrderNo: `BATTERY-UNAVAILABLE-${count}`,
-    payMode: 'cash',
-    fee: sypStr(10),
+  h.stageCloseDraftFinancialFixture(id, {
+    managerToken: manager,
+    orders: [{
+      clientKey: `battery-unavailable-${count}`,
+      providerOrderNo: `BATTERY-UNAVAILABLE-${count}`,
+      payMode: 'cash',
+      fee: sypStr(10),
+      occurredDate: today,
+      occurredMinute: '08:00',
+    }],
   })
-  expect(order.statusCode, order.body).toBe(201)
   for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
   return { id, batteryIds }
 }

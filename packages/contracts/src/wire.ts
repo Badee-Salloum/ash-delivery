@@ -170,6 +170,7 @@ export const addOrderRequest = z.object({
    * Bounded at 64 KB; a real strip is about 2 KB.
    */
   feeStrip: z.string().max(65536).nullable().default(null),
+  included: z.boolean().default(true),
   /** `yallago` (their delivery) or `manual` (a job the branch took itself). */
   kind: z.enum(['yallago', 'manual']).default('yallago'),
   /**
@@ -187,7 +188,6 @@ export const addOrderRequest = z.object({
    * band and the ledger — the screenshots overlap and show previous days, so a read list always
    * contains rows that are not this shift's.
    */
-  included: z.boolean().default(true),
   /**
    * How much of this fee reached the WALLET, measured off «سجل المدفوعات». Money, so it crosses as
    * a decimal string — never a JSON number. `null` means unmeasured and the pay mode decides.
@@ -372,6 +372,9 @@ export const reviseOperationsRequest = z.object({
 })
 
 export const endPackageRequest = z.object({
+  /** Optimistic close-draft identity. Required by the service once a durable draft exists. */
+  draftRevision: z.number().int().min(0).optional(),
+  draftHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   odometerKm: z.number().int().min(0),
   /** What the end reader produced before the driver's confirmation. Evidence, not a gate. */
   odometerKmOcr: z.number().int().min(0).nullable().catch(null).default(null),
@@ -401,6 +404,100 @@ export const endPackageRequest = z.object({
   walletStrip: z.string().max(MAX_OCR_SAMPLE_CHARS).nullable().default(null),
   /** The closing dashboard as the reader saw it. */
   odometerStrip: z.string().max(MAX_OCR_SAMPLE_CHARS).nullable().default(null),
+})
+
+const closeDraftFiguresPatch = z.object({
+  odometerKm: z.number().int().min(0).nullable().optional(),
+  odometerAnomalyConfirmed: z.boolean().optional(),
+  cashDeclared: nonnegativeMoneySchema.nullable().optional(),
+  walletDeclared: moneySchema.nullable().optional(),
+}).strict()
+
+const closeDraftClientOrder = z.object({
+  clientKey: z.string().min(1).max(160),
+  providerOrderNo: z.string().max(64),
+  payMode: payModeSchema,
+  fee: nonnegativeMoneySchema.nullable(),
+  occurredMinute: minuteSchema.nullable().default(null),
+  occurredDate: isoDateSchema.nullable().default(null),
+  pointA: z.string().max(200).nullable().default(null),
+  pointB: z.string().max(200).nullable().default(null),
+  source: z.literal('manual').default('manual'),
+})
+
+const closeDraftRowEdit = z
+  .object({
+    clientKey: z.string().min(1).max(160),
+    kind: z.enum(['order', 'cash_deduction', 'movement']),
+    fee: nonnegativeMoneySchema.nullable().optional(),
+    amount: moneySchema.refine((v) => v > 0n, 'cash deduction must be positive').nullable().optional(),
+    occurredMinute: minuteSchema.nullable().optional(),
+    occurredDate: isoDateSchema.nullable().optional(),
+    notes: z.string().max(2000).nullable().optional(),
+    ambiguous: z.boolean().optional(),
+  })
+  .strict()
+  .superRefine((edit, ctx) => {
+    if (edit.kind === 'order' && (edit.amount !== undefined || edit.notes !== undefined || edit.ambiguous !== undefined)) {
+      ctx.addIssue({ code: 'custom', path: ['kind'], message: 'unsupported order edit field' })
+    }
+    if (edit.kind === 'cash_deduction' &&
+        (edit.fee !== undefined || edit.notes !== undefined || edit.ambiguous !== undefined)) {
+      ctx.addIssue({ code: 'custom', path: ['kind'], message: 'unsupported cash-deduction edit field' })
+    }
+    if (edit.kind === 'movement' && (edit.fee !== undefined || edit.occurredDate !== undefined)) {
+      ctx.addIssue({ code: 'custom', path: ['kind'], message: 'unsupported movement edit field' })
+    }
+  })
+
+const closeDraftClientDeduction = z.object({
+  clientKey: z.string().min(1).max(160),
+  operationKey: z.string().min(1).max(160),
+  amount: moneySchema.refine((v) => v > 0n, 'cash deduction must be positive').nullable(),
+  occurredMinute: minuteSchema.nullable().default(null),
+  occurredDate: isoDateSchema.nullable().default(null),
+  pointA: z.string().max(200).nullable().default(null),
+  pointB: z.string().max(200).nullable().default(null),
+  source: z.literal('manual').default('manual'),
+})
+
+const closeDraftClientMovement = z.object({
+  clientKey: z.string().min(1).max(160),
+  amount: moneySchema,
+  occurredMinute: minuteSchema.nullable().default(null),
+  role: movementRole.default('unmatched'),
+  providerOrderNo: z.string().max(64).nullable().default(null),
+  ambiguous: z.boolean().default(false),
+  notes: z.string().max(2000).nullable().default(null),
+  source: z.literal('manual').default('manual'),
+})
+
+/** Human-editable close state only; read identities, evidence links and window basis are server-owned. */
+export const patchCloseDraftRequest = z.object({
+  expectedRevision: z.number().int().min(0),
+  figures: closeDraftFiguresPatch.optional(),
+  operations: z
+    .object({
+      manualOrders: z.array(closeDraftClientOrder).max(400).optional(),
+      manualCashDeductions: z.array(closeDraftClientDeduction).max(400).optional(),
+      manualMovements: z.array(closeDraftClientMovement).max(400).optional(),
+      rowEdits: z.array(closeDraftRowEdit).max(400).optional(),
+    })
+    .optional(),
+})
+
+export const linkedCloseDraftReadRequest = z.object({
+  expectedRevision: z.number().int().min(0),
+  mediaId: z.string().min(1),
+  attachmentToken: z.string().min(1),
+  field: z.enum(['orders', 'payments_log', 'wallet', 'odometer', 'bms']),
+  retryFailed: z.boolean().default(false),
+})
+
+export const restoreCloseDraftAttachmentRequest = z.object({
+  expectedRevision: z.number().int().min(0),
+  expectedAttachmentToken: z.string().min(1).nullable(),
+  reason: z.string().trim().min(1).max(500),
 })
 
 /**
@@ -941,4 +1038,7 @@ export type CreateShiftRequest = z.infer<typeof createShiftRequest>
 export type StartPackageRequest = z.infer<typeof startPackageRequest>
 export type AddOrderRequest = z.infer<typeof addOrderRequest>
 export type EndPackageRequest = z.infer<typeof endPackageRequest>
+export type PatchCloseDraftRequest = z.infer<typeof patchCloseDraftRequest>
+export type LinkedCloseDraftReadRequest = z.infer<typeof linkedCloseDraftReadRequest>
+export type RestoreCloseDraftAttachmentRequest = z.infer<typeof restoreCloseDraftAttachmentRequest>
 export type ApproveOpenRequest = z.infer<typeof approveOpenRequest>

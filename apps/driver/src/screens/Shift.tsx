@@ -9,30 +9,25 @@ import {
 } from 'react'
 import { MAX_PAGE_SLOTS, PAYMENTS_LOG_SLOT, type PayMode, pageSlot } from '@ash/domain'
 import type {
-  CloudOcrResponse,
+  CloseDraftAttachment,
+  CloseDraftReadResponse,
+  CloseDraftView,
   DraftCashDeduction,
   DraftMovement,
   DraftOrder,
-  StoredCashDeductionView,
+  EvidenceUploadResponse,
 } from '@ash/client'
 import {
   allProblems,
   br1DifferencePresentation,
   cashDeductionsAreValid,
   checkOdometer,
+  applyCloseDraftOperationsOverlay,
+  closeDraftEditableFingerprint,
+  closeDraftOperations,
+  closeDraftOperationsPatch,
   compressImage,
   driverPhaseFor,
-  plural,
-  mergeScannedMovements,
-  mergeScannedCashDeductions,
-  healCashDeductionDetails,
-  healCutOffRoutes,
-  reconcileRefusedOrderFees,
-  reconcileUnverifiedOrderTimes,
-  mergeScannedOrders,
-  cloudRowsToScannedMovements,
-  cloudRowsToScannedOrders,
-
   previewBr1,
   readInCloud,
   reconcileLocalCashDeductions,
@@ -43,7 +38,6 @@ import {
   parseNonNegativeInteger,
   slotLabel,
   splitSlot,
-  submittableOrders,
   uploadEvidencePath,
 } from '@ash/client'
 import { useApp } from '../app-context.tsx'
@@ -60,10 +54,12 @@ import { type CloudReadEvent, PhotoSlot } from './PhotoSlot.tsx'
 import { SourceMark, sourceOf } from './ReadingSource.tsx'
 import {
   clearEndDraft,
+  type PersistedEndDraft,
   readEndDraft,
   restoreEndDraftScalars,
   writeEndDraft,
 } from '../end-draft-storage.ts'
+import { runCloseDraftSaveWithRetry } from '../close-draft-autosave.ts'
 import {
   endOdometerSubmission,
   type LocalOdometerReadEvent,
@@ -76,15 +72,8 @@ import {
   describeEndSubmitFailure,
   type EndSubmitFailureNotice,
 } from '../end-submit-error.ts'
-import {
-  beginAiPageRead,
-  cancelAiPageRead,
-  discardAiPageFailure,
-  discardAiPageRefusals,
-  finishAiPageRead,
-  type AiPageReadState,
-  visibleAiPageReadOutcome,
-} from '../ai-page-read-state.ts'
+import type { AiPageReadState } from '../ai-page-read-state.ts'
+import { deletePendingEvidenceForShift } from '../pending-evidence-storage.ts'
 
 /**
  * The driver's shift flow: start package → order entry → end package.
@@ -145,25 +134,6 @@ function pagesIn(slots: readonly string[], base: string): number {
 /** What cloud AI made of a paged operations screen, including every concurrent page. */
 type LogState = AiPageReadState
 
-type PageReadFailureReason = NonNullable<CloudOcrResponse['reason']>
-
-/** The exact evidence generation and why cloud AI failed to read it. */
-interface FailedPageRead {
-  file: File
-  reason: PageReadFailureReason
-  /** The server allows at most one explicit retry for this exact image generation. */
-  canRetry: boolean
-  /** A hard failure increments the aggregate failure counter; a partial refusal does not. */
-  countsAsFailure: boolean
-  /** Visible refused cards attributed to this page and removed before its retry. */
-  refused: number
-}
-
-function discardFailedPageRead(state: AiPageReadState, failure: FailedPageRead): AiPageReadState {
-  const withoutFailure = failure.countsAsFailure ? discardAiPageFailure(state) : state
-  return discardAiPageRefusals(withoutFailure, failure.refused)
-}
-
 /**
  * The closing package while it is being filled in.
  *
@@ -174,6 +144,17 @@ function discardFailedPageRead(state: AiPageReadState, failure: FailedPageRead):
  * submit until he retyped what the server already had.
  */
 interface EndDraft {
+  /** Revision/hash of the only server draft allowed to materialise at submit. */
+  closeDraftRevision: number | null
+  closeDraftHash: string | null
+  closeDraftAttachments: Readonly<Record<string, CloseDraftAttachment>>
+  closeDraftRestored: boolean
+  /** Last canonical editable payload; debounced persistence compares against this. */
+  persistedCloseDraftFingerprint: string | null
+  persistedCashDeclared: string | null
+  persistedWalletDeclared: string | null
+  persistedOdometerKm: number | null
+  persistedOdometerAnomalyConfirmed: boolean
   cash: string
   wallet: string
   /** What cloud AI read, kept even if the driver edits the field (SRS D-3 baseline). */
@@ -231,6 +212,15 @@ interface EndDraft {
 }
 
 const EMPTY_END_DRAFT: EndDraft = {
+  closeDraftRevision: null,
+  closeDraftHash: null,
+  closeDraftAttachments: {},
+  closeDraftRestored: false,
+  persistedCloseDraftFingerprint: null,
+  persistedCashDeclared: null,
+  persistedWalletDeclared: null,
+  persistedOdometerKm: null,
+  persistedOdometerAnomalyConfirmed: false,
   cash: '',
   wallet: '',
   walletOcr: null,
@@ -268,7 +258,200 @@ const freshEndDraft = (): EndDraft => ({
   orders: [],
   movements: [],
   cashDeductions: [],
+  closeDraftAttachments: {},
 })
+
+function restoredPageReadState(
+  attachments: readonly CloseDraftAttachment[],
+  base: string,
+  rows: number,
+  refused: number,
+): AiPageReadState {
+  const relevant = attachments.filter((attachment) => splitSlot(attachment.slot).base === base)
+  if (relevant.length === 0) return { kind: 'idle' }
+  const pending = relevant.filter((attachment) => attachment.read?.status === 'running').length
+  const succeeded = relevant.filter((attachment) => attachment.read?.status === 'complete').length
+  const failures = relevant.filter((attachment) => attachment.read?.status === 'failed').length
+  const totals = { rows, refused, cutOff: 0, succeeded, failures }
+  if (pending > 0) return { kind: 'reading', pending, ...totals }
+  return succeeded > 0 ? { kind: 'read', ...totals } : failures > 0 ? { kind: 'failed', ...totals } : { kind: 'idle' }
+}
+
+/** Apply one canonical close-draft snapshot; no local-only OCR row can enter through this path. */
+function restoreCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
+  const operations = closeDraftOperations(view)
+  const attachments = Object.fromEntries(view.attachments.map((attachment) => [attachment.slot, attachment]))
+  const orderRefusals = operations.orders.filter(
+    (row) => row.feeText.trim() === '' || row.timeReviewRequired === true,
+  ).length
+  const deductionRefusals = operations.cashDeductions.filter(
+    (row) => row.amountText.trim() === '' || row.timeReviewRequired === true,
+  ).length
+  const serverFingerprint = closeDraftEditableFingerprint({
+    figures: {
+      cashDeclared: view.figures.cashDeclared,
+      walletDeclared: view.figures.walletDeclared,
+      odometerKm: view.figures.odometerKm,
+      odometerAnomalyConfirmed: view.figures.odometerAnomalyConfirmed,
+    },
+    ...operations,
+  })
+  const walletOcr = view.figures.walletDeclaredOcr
+  const walletHumanEdited =
+    (view.figures.walletDeclared !== null && view.figures.walletDeclared !== view.figures.walletDeclaredOcr)
+  const restoredWallet = view.figures.walletDeclared ?? walletOcr ?? ''
+  const restoredOdometer =
+    view.figures.odometerKm === null
+      ? view.figures.odometerKmOcr === null
+        ? ''
+        : String(view.figures.odometerKmOcr)
+      : String(view.figures.odometerKm)
+  return {
+    ...current,
+    closeDraftRevision: view.revision,
+    closeDraftHash: view.draftHash,
+    closeDraftAttachments: attachments,
+    closeDraftRestored: current.closeDraftRestored || view.restored,
+    persistedCloseDraftFingerprint: serverFingerprint,
+    persistedCashDeclared: view.figures.cashDeclared,
+    persistedWalletDeclared: view.figures.walletDeclared,
+    persistedOdometerKm: view.figures.odometerKm,
+    persistedOdometerAnomalyConfirmed: view.figures.odometerAnomalyConfirmed,
+    slots: new Set(view.attachments.map((attachment) => attachment.slot)),
+    dashboardPages: Math.max(current.dashboardPages, pagesIn(view.attachments.map((x) => x.slot), 'dashboard')),
+    logPages: Math.max(current.logPages, pagesIn(view.attachments.map((x) => x.slot), PAYMENTS_LOG_SLOT)),
+    cash: view.figures.cashDeclared ?? '',
+    wallet: restoredWallet,
+    walletOcr,
+    walletHumanEdited,
+    odo: restoredOdometer,
+    odoOcr: view.figures.odometerKmOcr,
+    odoAiAuthoritative: view.figures.odometerKmOcr !== null,
+    odoHumanEdited:
+      view.figures.odometerKm !== null && view.figures.odometerKm !== view.figures.odometerKmOcr,
+    odoConfirmed: view.figures.odometerAnomalyConfirmed,
+    orders: operations.orders,
+    cashDeductions: operations.cashDeductions,
+    movements: operations.movements,
+    dash: restoredPageReadState(
+      view.attachments,
+      'dashboard',
+      operations.orders.length + operations.cashDeductions.length,
+      orderRefusals + deductionRefusals,
+    ),
+    log: restoredPageReadState(view.attachments, PAYMENTS_LOG_SLOT, operations.movements.length, 0),
+  }
+}
+
+/** Apply linked scalar OCR through the same human-wins authority rule as the legacy reader. */
+export function applyLinkedScalarRead(
+  current: EndDraft,
+  response: CloseDraftReadResponse,
+  field: 'orders' | 'payments_log' | 'wallet' | 'odometer' | 'bms',
+  generation: string,
+): EndDraft {
+  const restored = rebaseCloseDraft(current, response.draft)
+  if (field === 'wallet') {
+    const value = response.draft.figures.walletDeclaredOcr ?? response.rows.find((row) => row.value !== null)?.value ?? null
+    if (value === null) return { ...restored, walletCloud: null }
+    const authority = reduceAiOcrAuthority<string, string>(
+      {
+        generation,
+        phase: 'reading',
+        value: restored.wallet === '' ? null : restored.wallet,
+        aiValue: restored.walletOcr,
+        humanEdited: restored.walletHumanEdited,
+      },
+      { type: 'ai_read', generation, value },
+    )
+    return {
+      ...restored,
+      wallet: authority.value ?? '',
+      walletOcr: authority.aiValue,
+      walletHumanEdited: authority.humanEdited,
+      walletCloud: null,
+    }
+  }
+  if (field === 'odometer') {
+    const value = response.draft.figures.odometerKmOcr ?? odometerFromCloudFields(response.fields)
+    if (value === null) return { ...restored, odoCloud: null }
+    const authority = reduceAiOcrAuthority<number, string>(
+      {
+        generation,
+        phase: 'reading',
+        value: parseNonNegativeInteger(restored.odo),
+        aiValue: restored.odoOcr,
+        humanEdited: restored.odoHumanEdited,
+      },
+      { type: 'ai_read', generation, value },
+    )
+    return {
+      ...restored,
+      odo: authority.value === null ? '' : String(authority.value),
+      odoOcr: authority.aiValue,
+      odoAiAuthoritative: authority.aiValue !== null,
+      odoConfirmed: false,
+      odoCloud: null,
+    }
+  }
+  return restored
+}
+
+/** Rebase local human input over a newer canonical revision without retaining withdrawn OCR rows. */
+function rebaseCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
+  const cashDirty = (current.cash.trim() === '' ? null : current.cash) !== current.persistedCashDeclared
+  const walletDirty =
+    (current.wallet.trim() === '' ? null : current.wallet) !== current.persistedWalletDeclared
+  const currentOdometer = parseNonNegativeInteger(current.odo)
+  const odometerDirty = currentOdometer !== current.persistedOdometerKm
+  const odometerConfirmationDirty =
+    current.odoConfirmed !== current.persistedOdometerAnomalyConfirmed
+  const restored = restoreCloseDraft(current, view)
+  const operations = applyCloseDraftOperationsOverlay(
+    {
+      orders: restored.orders,
+      cashDeductions: restored.cashDeductions,
+      movements: restored.movements,
+    },
+    closeDraftOperationsPatch(current.orders, current.cashDeductions, current.movements),
+  )
+  return {
+    ...restored,
+    cash: cashDirty ? current.cash : restored.cash,
+    wallet: walletDirty ? current.wallet : restored.wallet,
+    walletHumanEdited: walletDirty ? current.walletHumanEdited : restored.walletHumanEdited,
+    odo: odometerDirty ? current.odo : restored.odo,
+    odoHumanEdited: odometerDirty ? current.odoHumanEdited : restored.odoHumanEdited,
+    odoConfirmed: odometerConfirmationDirty ? current.odoConfirmed : restored.odoConfirmed,
+    ...operations,
+  }
+}
+
+/** Overlay locally crash-saved human work only after the canonical rows have been restored. */
+function rebaseStoredCloseDraft(
+  current: EndDraft,
+  view: CloseDraftView,
+  saved: PersistedEndDraft | null,
+): EndDraft {
+  const canonical = rebaseCloseDraft(current, view)
+  if (saved === null) return canonical
+  const operations = applyCloseDraftOperationsOverlay(
+    {
+      orders: canonical.orders,
+      cashDeductions: canonical.cashDeductions,
+      movements: canonical.movements,
+    },
+    saved.operations,
+  )
+  const overlaid = restoreEndDraftScalars({ ...canonical, ...operations }, saved)
+  return {
+    ...overlaid,
+    persistedCashDeclared: canonical.persistedCashDeclared,
+    persistedWalletDeclared: canonical.persistedWalletDeclared,
+    persistedOdometerKm: canonical.persistedOdometerKm,
+    persistedOdometerAnomalyConfirmed: canonical.persistedOdometerAnomalyConfirmed,
+  }
+}
 
 /** Project the wallet fields into the reusable AI-authority state machine. */
 const walletAuthority = (draft: EndDraft): AiOcrAuthorityState<string, File> => ({
@@ -349,7 +532,12 @@ export function ShiftFlow({
   const [resumeFailed, setResumeFailed] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
   const [endDraft, setEndDraft] = useState<EndDraft>(freshEndDraft)
+  const [closeDraftFailed, setCloseDraftFailed] = useState(false)
+  const [closeDraftReloadKey, setCloseDraftReloadKey] = useState(0)
+  const [closeDraftSaveFailed, setCloseDraftSaveFailed] = useState(false)
+  const [closeDraftSaveRetryKey, setCloseDraftSaveRetryKey] = useState(0)
   const [hydratedDraftShiftId, setHydratedDraftShiftId] = useState<string | null>(null)
+  const pendingStoredDraft = useRef<PersistedEndDraft | null>(null)
   // A changed resume prop names the new owner before its state request finishes; never let the old
   // in-memory draft win merely because `shift` still points at the previous response for a moment.
   const activeDraftShiftId = resume?.id ?? shift?.id ?? null
@@ -369,13 +557,16 @@ export function ShiftFlow({
 
     const previous = previousDraftShiftId.current
     const changedShift = previous !== null && previous !== shiftId
-    if (changedShift && storage) clearEndDraft(storage, previous)
+    if (changedShift && storage) clearEndDraft(storage, assignment.driverId, previous)
     previousDraftShiftId.current = shiftId
 
     if (changedShift) {
       const newShiftIsTerminal = resume?.id === shiftId && PHASE_FOR[resume.state] === 'done'
-      const saved = !newShiftIsTerminal && storage ? readEndDraft(storage, shiftId) : null
-      if (newShiftIsTerminal && storage) clearEndDraft(storage, shiftId)
+      const saved = !newShiftIsTerminal && storage
+        ? readEndDraft(storage, assignment.driverId, shiftId)
+        : null
+      pendingStoredDraft.current = saved
+      if (newShiftIsTerminal && storage) clearEndDraft(storage, assignment.driverId, shiftId)
       const blank = freshEndDraft()
       setEndDraft(saved ? restoreEndDraftScalars(blank, saved) : blank)
       setHydratedDraftShiftId(shiftId)
@@ -383,38 +574,79 @@ export function ShiftFlow({
     }
 
     if (phase === 'done') {
-      if (storage) clearEndDraft(storage, shiftId)
+      pendingStoredDraft.current = null
+      if (storage) clearEndDraft(storage, assignment.driverId, shiftId)
       if (hydratedDraftShiftId !== shiftId) setHydratedDraftShiftId(shiftId)
       return
     }
     if (hydratedDraftShiftId === shiftId) return
 
-    const saved = storage ? readEndDraft(storage, shiftId) : null
+    const saved = storage ? readEndDraft(storage, assignment.driverId, shiftId) : null
+    pendingStoredDraft.current = saved
     if (saved) setEndDraft((current) => restoreEndDraftScalars(current, saved))
     setHydratedDraftShiftId(shiftId)
-  }, [activeDraftShiftId, hydratedDraftShiftId, phase, resume?.id, resume?.state])
+  }, [activeDraftShiftId, assignment.driverId, hydratedDraftShiftId, phase, resume?.id, resume?.state])
 
-  /** Persist only serialisable scalar inputs; evidence files remain browser-memory/server concerns. */
+  /** Persist only the dirty human overlay; canonical save removes it immediately. */
   useEffect(() => {
     const shiftId = activeDraftShiftId
-    if (shiftId === null || phase === 'done' || hydratedDraftShiftId !== shiftId) return
+    if (
+      shiftId === null ||
+      phase === 'done' ||
+      hydratedDraftShiftId !== shiftId ||
+      endDraft.closeDraftRevision === null
+    ) return
     const storage = localDraftStorage()
     if (!storage) return
-    writeEndDraft(storage, shiftId, {
-      cash: endDraft.cash,
-      wallet: endDraft.wallet,
-      walletOcr: endDraft.walletOcr,
-      walletHumanEdited: endDraft.walletHumanEdited,
-      odo: endDraft.odo,
-      odoOcr: endDraft.odoOcr,
-      odoAiAuthoritative: endDraft.odoAiAuthoritative,
-      odoHumanEdited: endDraft.odoHumanEdited,
-      odoConfirmed: endDraft.odoConfirmed,
+    const fingerprint = closeDraftEditableFingerprint({
+      figures: {
+        cashDeclared: endDraft.cash.trim() === '' ? null : endDraft.cash,
+        walletDeclared: endDraft.wallet.trim() === '' ? null : endDraft.wallet,
+        odometerKm: parseNonNegativeInteger(endDraft.odo),
+        odometerAnomalyConfirmed: endDraft.odoConfirmed,
+      },
+      orders: endDraft.orders,
+      cashDeductions: endDraft.cashDeductions,
+      movements: endDraft.movements,
     })
+    if (fingerprint === endDraft.persistedCloseDraftFingerprint) {
+      clearEndDraft(storage, assignment.driverId, shiftId)
+      return
+    }
+    const stored = writeEndDraft(
+      storage,
+      assignment.driverId,
+      shiftId,
+      {
+        persistedCashDeclared: endDraft.persistedCashDeclared,
+        persistedWalletDeclared: endDraft.persistedWalletDeclared,
+        persistedOdometerKm: endDraft.persistedOdometerKm,
+        persistedOdometerAnomalyConfirmed: endDraft.persistedOdometerAnomalyConfirmed,
+        cash: endDraft.cash,
+        wallet: endDraft.wallet,
+        walletOcr: endDraft.walletOcr,
+        walletHumanEdited: endDraft.walletHumanEdited,
+        odo: endDraft.odo,
+        odoOcr: endDraft.odoOcr,
+        odoAiAuthoritative: endDraft.odoAiAuthoritative,
+        odoHumanEdited: endDraft.odoHumanEdited,
+        odoConfirmed: endDraft.odoConfirmed,
+      },
+      closeDraftOperationsPatch(endDraft.orders, endDraft.cashDeductions, endDraft.movements),
+      fingerprint,
+    )
+    if (!stored) setCloseDraftSaveFailed(true)
   }, [
     activeDraftShiftId,
+    assignment.driverId,
     hydratedDraftShiftId,
     phase,
+    endDraft.closeDraftRevision,
+    endDraft.persistedCloseDraftFingerprint,
+    endDraft.persistedCashDeclared,
+    endDraft.persistedWalletDeclared,
+    endDraft.persistedOdometerKm,
+    endDraft.persistedOdometerAnomalyConfirmed,
     endDraft.cash,
     endDraft.wallet,
     endDraft.walletOcr,
@@ -424,6 +656,86 @@ export function ShiftFlow({
     endDraft.odoAiAuthoritative,
     endDraft.odoHumanEdited,
     endDraft.odoConfirmed,
+    endDraft.orders,
+    endDraft.cashDeductions,
+    endDraft.movements,
+  ])
+
+  const closeDraftSaveCycle = useRef(0)
+  /** Persist human edits with bounded retry; conflicts rebase without discarding the local overlay. */
+  useEffect(() => {
+    if (phase !== 'end' || shift === null || endDraft.closeDraftRevision === null) return
+    const odometerKm = parseNonNegativeInteger(endDraft.odo)
+    const fingerprint = closeDraftEditableFingerprint({
+      figures: {
+        cashDeclared: endDraft.cash.trim() === '' ? null : endDraft.cash,
+        walletDeclared: endDraft.wallet.trim() === '' ? null : endDraft.wallet,
+        odometerKm,
+        odometerAnomalyConfirmed: endDraft.odoConfirmed,
+      },
+      orders: endDraft.orders,
+      cashDeductions: endDraft.cashDeductions,
+      movements: endDraft.movements,
+    })
+    if (fingerprint === endDraft.persistedCloseDraftFingerprint) {
+      setCloseDraftSaveFailed(false)
+      return
+    }
+    const expectedRevision = endDraft.closeDraftRevision
+    const cycle = closeDraftSaveCycle.current + 1
+    closeDraftSaveCycle.current = cycle
+    let active = true
+    const payload = {
+      expectedRevision,
+      figures: {
+        cashDeclared: endDraft.cash.trim() === '' ? null : endDraft.cash,
+        walletDeclared: endDraft.wallet.trim() === '' ? null : endDraft.wallet,
+        odometerKm,
+        odometerAnomalyConfirmed: endDraft.odoConfirmed,
+      },
+      operations: closeDraftOperationsPatch(
+        endDraft.orders,
+        endDraft.cashDeductions,
+        endDraft.movements,
+      ),
+    }
+    void runCloseDraftSaveWithRetry({
+      save: () => api.patchCloseDraft(shift.id, payload),
+      conflictValue: (error) => {
+        const apiError = error as { error?: string; detail?: unknown }
+        if (apiError.error !== 'close_draft_revision_conflict') return null
+        const detail = apiError.detail as { current?: CloseDraftView } | undefined
+        return detail?.current ?? null
+      },
+      isCurrent: () => active && closeDraftSaveCycle.current === cycle,
+      onTransientFailure: () => {
+        if (active && closeDraftSaveCycle.current === cycle) setCloseDraftSaveFailed(true)
+      },
+    }).then((result) => {
+      if (!active || closeDraftSaveCycle.current !== cycle) return
+      if (result.kind === 'saved' || result.kind === 'conflict') {
+        setEndDraft((current) => rebaseCloseDraft(current, result.value))
+        setCloseDraftSaveFailed(false)
+      }
+    })
+    return () => {
+      active = false
+      if (closeDraftSaveCycle.current === cycle) closeDraftSaveCycle.current += 1
+    }
+  }, [
+    api,
+    phase,
+    shift?.id,
+    closeDraftSaveRetryKey,
+    endDraft.closeDraftRevision,
+    endDraft.persistedCloseDraftFingerprint,
+    endDraft.cash,
+    endDraft.wallet,
+    endDraft.odo,
+    endDraft.odoConfirmed,
+    endDraft.orders,
+    endDraft.cashDeductions,
+    endDraft.movements,
   ])
 
   /**
@@ -450,20 +762,35 @@ export function ShiftFlow({
       if (next) setPhase(next)
       if (gone === 'cancelled') {
         const storage = localDraftStorage()
-        if (storage && activeDraftShiftIdRef.current) clearEndDraft(storage, activeDraftShiftIdRef.current)
+        if (storage && activeDraftShiftIdRef.current) {
+          clearEndDraft(storage, assignment.driverId, activeDraftShiftIdRef.current)
+        }
+        if (activeDraftShiftIdRef.current) void deletePendingEvidenceForShift(activeDraftShiftIdRef.current)
         toast.error(t.shift.cancelledByManager)
         onDiscarded?.()
         return true
       }
       if (gone === 'closed') {
         const storage = localDraftStorage()
-        if (storage && activeDraftShiftIdRef.current) clearEndDraft(storage, activeDraftShiftIdRef.current)
+        if (storage && activeDraftShiftIdRef.current) {
+          clearEndDraft(storage, assignment.driverId, activeDraftShiftIdRef.current)
+        }
+        if (activeDraftShiftIdRef.current) void deletePendingEvidenceForShift(activeDraftShiftIdRef.current)
         toast.success(t.shift.closedByManager)
         return true
       }
       return false
     },
-    [toast, t, onDiscarded],
+    [assignment.driverId, toast, t, onDiscarded],
+  )
+
+  const showManagerReturnReason = useCallback(
+    (decision: { decision: 'approved' | 'rejected' | 'rephoto_requested'; notes: string | null } | null | undefined) => {
+      if (!decision || (decision.decision !== 'rephoto_requested' && decision.decision !== 'rejected')) return
+      const label = decision.decision === 'rejected' ? t.shift.closeRejected : t.shift.retakeRequested
+      toast.error(decision.notes ? `${label}: ${decision.notes}` : label)
+    },
+    [t, toast],
   )
 
   /**
@@ -484,6 +811,50 @@ export function ShiftFlow({
     }, 20_000)
     return () => clearInterval(timer)
   }, [api, phase, shift, applyServerState])
+
+  /**
+   * Keep the manager-review screen alive. A rephoto changes the SAME shift from pending_review back
+   * to open; without this small poll the phone remains in the success cul-de-sac until a hard reload.
+   */
+  useEffect(() => {
+    if (phase !== 'done' || !shift) return
+    let cancelled = false
+    let timer: ReturnType<typeof setInterval> | null = null
+    const stop = (): void => {
+      if (timer !== null) clearInterval(timer)
+      timer = null
+    }
+    const check = async (): Promise<void> => {
+      try {
+        const state = await api.shiftState(shift.id)
+        if (cancelled) return
+        if (state.state === 'open') {
+          // Force a fresh canonical revision/hash. Keeping the submitted generation would make the
+          // next submit fail with close_draft_changed and could hide the manager's evidence edits.
+          setEndDraft((current) => ({
+            ...current,
+            closeDraftRevision: null,
+            closeDraftHash: null,
+          }))
+          setCloseDraftFailed(false)
+          setCloseDraftSaveFailed(false)
+          showManagerReturnReason(state.lastDecision)
+          applyServerState(state.state)
+          stop()
+          return
+        }
+        if (applyServerState(state.state)) stop()
+      } catch {
+        // A dropped poll is harmless; the next interval retries and the offline banner is visible.
+      }
+    }
+    void check()
+    timer = setInterval(() => void check(), 8_000)
+    return () => {
+      cancelled = true
+      stop()
+    }
+  }, [api, phase, shift, applyServerState, showManagerReturnReason])
 
   /**
    * Pick the shift back up.
@@ -589,11 +960,7 @@ export function ShiftFlow({
         if (!applyServerState(st.state)) setPhase(PHASE_FOR[st.state] ?? 'start')
         // C-7: if the manager bounced this shift back for a re-shoot or rejected the close, tell the
         // driver WHY — otherwise a shift that jumped back a phase looks like a silent glitch.
-        const d = st.lastDecision
-        if (d && (d.decision === 'rephoto_requested' || d.decision === 'rejected')) {
-          const label = d.decision === 'rejected' ? t.shift.closeRejected : t.shift.retakeRequested
-          toast.error(d.notes ? `${label}: ${d.notes}` : label)
-        }
+        showManagerReturnReason(st.lastDecision)
         setResumeFailed(false)
         setLoaded(true)
       })
@@ -604,7 +971,31 @@ export function ShiftFlow({
         setResumeFailed(true)
         setLoaded(true)
       })
-  }, [api, resume, reloadKey])
+  }, [api, resume, reloadKey, applyServerState, showManagerReturnReason])
+
+  /**
+   * The end screen never accepts evidence until its revisioned server draft is loaded.
+   * This covers both a resumed shift and a freshly-opened shift entering close for the first time.
+   */
+  useEffect(() => {
+    if (phase !== 'end' || shift === null || endDraft.closeDraftRevision !== null) return
+    let cancelled = false
+    setCloseDraftFailed(false)
+    void api
+      .closeDraft(shift.id)
+      .then((view) => {
+        if (cancelled) return
+        const saved = pendingStoredDraft.current
+        pendingStoredDraft.current = null
+        setEndDraft((current) => rebaseStoredCloseDraft(current, view, saved))
+      })
+      .catch(() => {
+        if (!cancelled) setCloseDraftFailed(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [api, phase, shift?.id, endDraft.closeDraftRevision, closeDraftReloadKey])
 
   if (!loaded) {
     return (
@@ -695,18 +1086,41 @@ export function ShiftFlow({
     )
   }
   if (phase === 'end' && shift) {
+    if (endDraft.closeDraftRevision === null) {
+      return (
+        <Screen
+          title={t.shift.endShift}
+          back={{ label: t.common.back, onBack: () => setPhase('orders') }}
+        >
+          <Card className="flex flex-col gap-3">
+            <p className={`text-center text-sm ${closeDraftFailed ? 'font-medium text-red-700' : 'text-slate-600'}`}>
+              {closeDraftFailed ? t.shift.resumeFailed : t.common.loading}
+            </p>
+            {closeDraftFailed ? (
+              <Button onClick={() => setCloseDraftReloadKey((value) => value + 1)}>{t.common.retry}</Button>
+            ) : null}
+          </Card>
+        </Screen>
+      )
+    }
     return (
       <EndPackage
         shift={shift}
         batteries={fitted}
         draft={endDraft}
         onDraft={setEndDraft}
+        saveFailed={closeDraftSaveFailed}
+        onRetrySave={() => {
+          setCloseDraftSaveFailed(false)
+          setCloseDraftSaveRetryKey((value) => value + 1)
+        }}
         // Back to the running shift. The operations list now lives ON this screen, so there is no
         // intermediate step to return to — and the package survives the trip either way.
         onBack={() => setPhase('orders')}
         onSubmitted={() => {
           const storage = localDraftStorage()
-          if (storage) clearEndDraft(storage, shift.id)
+          if (storage) clearEndDraft(storage, assignment.driverId, shift.id)
+          void deletePendingEvidenceForShift(shift.id)
           setPhase('done')
         }}
       />
@@ -1189,6 +1603,8 @@ function EndPackage({
   batteries,
   draft,
   onDraft,
+  saveFailed,
+  onRetrySave,
   onBack,
   onSubmitted,
 }: {
@@ -1197,12 +1613,14 @@ function EndPackage({
   /** Held by the caller so the package survives a step back to the order list. See `EndDraft`. */
   draft: EndDraft
   onDraft: Dispatch<SetStateAction<EndDraft>>
+  saveFailed: boolean
+  onRetrySave(): void
   onBack?(): void
   onSubmitted(): void
 }): ReactNode {
   const { api, t, lang } = useApp()
   const toast = useToast()
-  const { cash, wallet, walletOcr, odo, odoConfirmed, slots, log: logState } = draft
+  const { cash, wallet, walletOcr, odo, odoConfirmed, slots } = draft
   const odometerFields = endOdometerSubmission(odo, draft.odoOcr, odoConfirmed)
   const odometerKm = odometerFields?.odometerKm ?? null
   const patch = useCallback((p: Partial<EndDraft>): void => onDraft((d) => ({ ...d, ...p })), [onDraft])
@@ -1216,11 +1634,92 @@ function EndPackage({
   const [busy, setBusy] = useState(false)
   /** A server refusal stays beside the close button until the driver fixes it or retries. */
   const [closeFailure, setCloseFailure] = useState<EndSubmitFailureNotice | null>(null)
-  /** Exact failed files make AI retry one tap; Sets also identify which partial batch still failed. */
-  const dashboardReadFiles = useRef<Map<string, File>>(new Map())
-  const logReadFiles = useRef<Map<string, File>>(new Map())
-  const failedDashboardReads = useRef<Map<string, FailedPageRead>>(new Map())
-  const failedLogReads = useRef<Map<string, FailedPageRead>>(new Map())
+  const draftRef = useRef(draft)
+  draftRef.current = draft
+
+  const applyCanonicalDraft = useCallback(
+    (view: CloseDraftView): void => onDraft((current) => rebaseCloseDraft(current, view)),
+    [onDraft],
+  )
+
+  /** Read only an accepted attachment generation. Raw/unlinked OCR is not used by this screen. */
+  const readLinkedAttachment = useCallback(
+    async (
+      slot: string,
+      field: 'orders' | 'payments_log' | 'wallet' | 'odometer' | 'bms',
+      retryFailed: boolean,
+      upload?: EvidenceUploadResponse,
+    ): Promise<CloseDraftReadResponse | null> => {
+      const uploadedDraft = upload?.draft
+      if (uploadedDraft) applyCanonicalDraft(uploadedDraft)
+      const current = uploadedDraft ?? null
+      const attachment =
+        current?.attachments.find((item) => item.slot === slot) ??
+        draftRef.current.closeDraftAttachments[slot] ??
+        (upload
+          ? {
+              package: 'end' as const,
+              slot,
+              mediaId: upload.mediaId,
+              attachmentToken: upload.attachmentToken,
+              read: null,
+            }
+          : null)
+      const revision = current?.revision ?? draftRef.current.closeDraftRevision
+      if (!attachment || revision === null) return null
+
+      // A running marker is presentation only. It is deliberately not terminal, so the IndexedDB
+      // copy remains until the server returns a persisted complete/failed read.
+      onDraft((state) => ({
+        ...state,
+        closeDraftAttachments: {
+          ...state.closeDraftAttachments,
+          [slot]: {
+            ...attachment,
+            read: attachment.read
+              ? { ...attachment.read, status: 'running', failure: null }
+              : {
+                  readId: `pending-${attachment.attachmentToken}`,
+                  status: 'running',
+                  field,
+                  failure: null,
+                  attempts: 0,
+                },
+          },
+        },
+      }))
+      try {
+        const response = await api.readCloseDraftAttachment(shift.id, slot, {
+          expectedRevision: revision,
+          mediaId: attachment.mediaId,
+          attachmentToken: attachment.attachmentToken,
+          field,
+          ...(retryFailed ? { retryFailed: true } : {}),
+        })
+        onDraft((state) => applyLinkedScalarRead(state, response, field, attachment.attachmentToken))
+        return response
+      } catch (error) {
+        const apiError = error as { error?: string; detail?: unknown }
+        const detail = apiError.detail as { current?: CloseDraftView } | undefined
+        const latest = detail?.current
+        if (latest) applyCanonicalDraft(latest)
+        else {
+          // Restore the last persisted read state and leave the pending blob retryable.
+          onDraft((state) => ({
+            ...state,
+            ...(field === 'wallet' ? { walletCloud: null } : {}),
+            ...(field === 'odometer' ? { odoCloud: null } : {}),
+            closeDraftAttachments: {
+              ...state.closeDraftAttachments,
+              [slot]: attachment,
+            },
+          }))
+        }
+        return null
+      }
+    },
+    [api, shift.id, applyCanonicalDraft, onDraft],
+  )
 
   // Heal a phone-only overlap even when it entered the draft before this component rendered (for
   // example while a service-worker update was waiting). Persisted rows carry `recorded:true` and
@@ -1265,6 +1764,22 @@ function EndPackage({
   // the total and not the checked count: a driver who unchecks everything would otherwise be
   // refused submission, and every tool that could rescue him needs the shift to reach review first.
   const named = draft.orders.filter((o) => o.providerOrderNo.trim() !== '').length
+  const currentDraftFingerprint = closeDraftEditableFingerprint({
+    figures: {
+      cashDeclared: cash.trim() === '' ? null : cash,
+      walletDeclared: wallet.trim() === '' ? null : wallet,
+      odometerKm,
+      odometerAnomalyConfirmed: odoConfirmed,
+    },
+    orders: draft.orders,
+    cashDeductions: draft.cashDeductions,
+    movements: draft.movements,
+  })
+  const draftSaved = currentDraftFingerprint === draft.persistedCloseDraftFingerprint
+  const readingAttachment = Object.values(draft.closeDraftAttachments).some(
+    (attachment) =>
+      attachment.read?.status === 'running' && attachment.read.field !== 'payments_log',
+  )
   /**
    * WHAT IS STILL MISSING, named — instead of one grey button and no explanation.
    *
@@ -1289,17 +1804,11 @@ function EndPackage({
     ...(!cashDeductionsAreValid(draft.cashDeductions) ? [t.shift.fixOrderRows] : []),
     // A read in flight is a reason to WAIT, not a thing to go and fix — but submitting through it
     // silently drops every order it was about to add, which is the shift closing short.
-    ...(
-      draft.dash.kind === 'reading' ||
-      draft.walletCloud?.status === 'reading' ||
-      draft.odoCloud?.status === 'reading'
-        ? [t.shift.reading]
-        : []
-    ),
+    ...(readingAttachment ? [t.shift.reading] : []),
   ]
   const odometerQuestion = checkOdometer(shift.odoStart, odometerKm)
   const odometerNeedsConfirmation = odometerQuestion?.kind === 'odometer_went_backwards' && !odoConfirmed
-  const ready = missing.length === 0 && !odometerNeedsConfirmation
+  const ready = missing.length === 0 && !odometerNeedsConfirmation && draftSaved
 
   const preview = previewBr1({
     floatText: shift.floatText,
@@ -1317,72 +1826,22 @@ function EndPackage({
       : br1DifferencePresentation(preview.differenceText)
   const submittedDifference = br1 === null ? null : br1DifferencePresentation(br1.difference)
 
-  /**
-   * The operations first, then the package.
-   *
-   * In that order because the close gate counts the shift's orders: sending the package first would
-   * be refused for having none. The whole list goes every time — the server upserts the orders and
-   * merges the movements, so re-sending is a no-op rather than a wall of duplicate-key errors.
-   */
+  /** Submit the exact revision/hash; the server materialises its canonical draft atomically. */
   async function submit(): Promise<void> {
-    if (odometerFields === null || draft.odoCloud?.status === 'reading') return
+    if (
+      odometerFields === null ||
+      draft.closeDraftRevision === null ||
+      draft.closeDraftHash === null ||
+      Object.values(draft.closeDraftAttachments).some(
+        (item) => item.read?.status === 'running' && item.read.field !== 'payments_log',
+      )
+    ) return
     setCloseFailure(null)
     setBusy(true)
     try {
-      const operations = await api.put<{ cashDeductions?: StoredCashDeductionView[] }>(`/shifts/${shift.id}/operations`, {
-        // A scanner-classified cancelled row with no price never travels: `moneySchema` refuses an
-        // empty fee and would 400 the whole request, losing every good row with it. Driver-visible
-        // inclusion is otherwise read-only and the server classifies every priced row by its window.
-        orders: submittableOrders(draft.orders)
-          .filter((o) => o.providerOrderNo.trim() !== '')
-          .map((o) => ({
-            providerOrderNo: o.providerOrderNo.trim(),
-            payMode: o.payMode,
-            fee: o.feeText,
-            zone: null,
-            // SRS D-1/D-3: mark rows scanned off «الطلبات الحديثة», keeping what OCR read.
-            // Three answers, not two. A row the reader SAW and refused is not a row somebody typed
-            // from memory — it is a hard glyph with a human's correction attached, which is the most
-            // valuable thing this system can teach the reader. Flattening it to 'manual' threw that
-            // away at the wire.
-            source: o.feeOcrText != null ? 'ocr' : o.feeRefused === true ? 'refused' : 'manual',
-            feeOcr: o.feeOcrText ?? null,
-            feeStrip: o.feeStrip ?? null,
-            walletAmount: o.walletAmountText ? o.walletAmountText : null,
-            occurredMinute: o.timeText ? o.timeText : null,
-            occurredDate: o.dateText ? o.dateText : null,
-            pointA: o.pointA ?? null,
-            pointB: o.pointB ?? null,
-          })),
-        cashDeductions: draft.cashDeductions.map((row) => ({
-          operationKey: row.operationKey,
-          amount: row.amountText,
-          occurredMinute: row.timeText || null,
-          occurredDate: row.dateText || null,
-          source: row.source,
-          amountOcr: row.amountOcrText,
-          amountStrip: row.amountStrip ?? null,
-          pointA: row.pointA ?? null,
-          pointB: row.pointB ?? null,
-        })),
-        movements: draft.movements.map((m) => ({
-          amount: m.amountText,
-          occurredMinute: m.timeText,
-          role: m.role ?? 'unmatched',
-          providerOrderNo: m.providerOrderNo ?? null,
-          ambiguous: m.ambiguous ?? false,
-          included: m.included !== false,
-        })),
-      })
       // Replace, do not merely mark, the local list. The server may have atomically removed a
       // historical partial/full OCR overlap; keeping that deleted phone row would subtract the
       // deduction twice in the preview until a page reload.
-      onDraft((d) => ({
-        ...d,
-        cashDeductions: operations.cashDeductions
-          ? syncRecordedCashDeductions(d.cashDeductions, operations.cashDeductions)
-          : d.cashDeductions.map((row) => ({ ...row, recorded: true })),
-      }))
       patch({ opsError: null })
 
       const res = await api.put<{ br1: { difference: string; balanced: boolean } }>(`/shifts/${shift.id}/end-package`, {
@@ -1396,6 +1855,8 @@ function EndPackage({
         // The pictures both closing readers worked from, so the driver's corrections become examples.
         walletStrip: draft.walletStrip,
         odometerStrip: draft.odoStrip,
+        draftRevision: draft.closeDraftRevision,
+        draftHash: draft.closeDraftHash,
       })
       setBr1(res.br1)
       // A non-zero difference is now a manager settlement decision, not a driver submission gate.
@@ -1481,70 +1942,6 @@ function EndPackage({
   )
 
   /**
-   * The same wallet screenshot, read in the CLOUD — and this is the reading that counts.
-   *
-   * This is the only machine reader allowed to fill `wallet` or `walletOcr`. A structured failure
-   * leaves the field blank for retry/manual entry; it never promotes the buffered phone guess.
-   * Explicit typing remains authoritative if it races the response.
-   */
-  const walletCloudRead = useCallback(
-    (event: CloudReadEvent, file?: File): void => {
-      onDraft((d) => {
-        const generation = file ?? d.walletFile
-        if (generation === null || d.walletFile !== generation) return d
-
-        if (event.status === 'reading') return { ...d, walletCloud: event }
-
-        if (event.status === 'read') {
-          // One balance on this screen: the first row AI returns with a value.
-          const amount = event.response.rows.find((row) => row.value !== null)?.value
-          if (amount !== null && amount !== undefined) {
-            const next = reduceAiOcrAuthority(walletAuthority(d), {
-              type: 'ai_read',
-              generation,
-              value: amount,
-            })
-            return { ...withWalletAuthority(d, next), walletCloud: event }
-          }
-
-          const failed: CloudReadEvent = {
-            status: 'failed',
-            reason: 'no_fields',
-            retryable: event.response.retryable,
-          }
-          const next = reduceAiOcrAuthority(walletAuthority(d), { type: 'ai_failed', generation })
-          return { ...withWalletAuthority(d, next), walletCloud: failed }
-        }
-
-        const next = reduceAiOcrAuthority(walletAuthority(d), { type: 'ai_failed', generation })
-        return { ...withWalletAuthority(d, next), walletCloud: event }
-      })
-    },
-    [onDraft],
-  )
-
-  /** Retry a timed-out wallet AI read from the exact File already selected. */
-  const retryWalletCloud = useCallback(
-    async (file: File): Promise<void> => {
-      walletCloudRead({ status: 'reading' }, file)
-      const response = await readInCloud(api, shift.id, 'wallet', file, true)
-      walletCloudRead(
-        response === null
-          ? { status: 'failed', reason: 'unavailable', retryable: false }
-          : response.ok
-            ? { status: 'read', response }
-            : {
-                status: 'failed',
-                reason: response.reason ?? 'unavailable',
-                retryable: response.retryable,
-              },
-        file,
-      )
-    },
-    [api, shift.id, walletCloudRead],
-  )
-
-  /**
    * Read the closing dashboard on the phone while upload/cloud OCR proceed independently.
    * `newEvidence=false` retries the same pixels without erasing the cloud's outcome or value.
    */
@@ -1594,288 +1991,30 @@ function EndPackage({
     [onDraft],
   )
 
-  /** Apply a cloud event only to the photograph that launched it. */
-  const odoCloudRead = useCallback(
-    (event: CloudReadEvent, file?: File): void => {
-      onDraft((d) => {
-        if (file && d.odoFile !== file) return d
-        if (event.status !== 'read') return { ...d, odoCloud: event }
-        const km = odometerFromCloudFields(event.response.fields)
-        if (km === null) {
-          return {
-            ...d,
-            odoCloud: {
-              status: 'failed',
-              reason: 'no_fields',
-              retryable: event.response.retryable,
-            },
-            odoOcr: null,
-            odoAiAuthoritative: false,
-          }
-        }
-        return {
-          ...d,
-          odoCloud: event,
-          odoOcr: km,
-          odoAiAuthoritative: true,
-          odo: d.odoHumanEdited ? d.odo : String(km),
-          odoConfirmed: false,
-        }
-      })
-    },
-    [onDraft],
-  )
-
-  const retryEndOdoCloud = useCallback(
-    async (file: File): Promise<void> => {
-      odoCloudRead({ status: 'reading' }, file)
-      const response = await readInCloud(api, shift.id, 'odometer', file, true)
-      odoCloudRead(
-        response === null
-          ? { status: 'failed', reason: 'unavailable', retryable: false }
-          : response.ok
-            ? { status: 'read', response }
-            : {
-                status: 'failed',
-                reason: response.reason ?? 'unavailable',
-                retryable: response.retryable,
-              },
-        file,
-      )
-    },
-    [api, shift.id, odoCloudRead],
-  )
-
-  /**
-   * Read Recent Orders with cloud AI as the sole machine authority.
-   *
-   * The local reader still runs on the original pixels because its strips are training material,
-   * but none of its monetary rows may reach the draft. If AI fails, the existing list is untouched
-   * and the exact File is retained for Retry; the driver can also add the row manually below.
-  */
   const dashImage = useCallback(
-    async (file: File, slot: string, retryFailed = false): Promise<void> => {
-      dashboardReadFiles.current.set(slot, file)
-      const replacingFailure = failedDashboardReads.current.get(slot)
-      failedDashboardReads.current.delete(slot)
-      onDraft((d) => ({
-        ...d,
-        dash: beginAiPageRead(
-          replacingFailure ? discardFailedPageRead(d.dash, replacingFailure) : d.dash,
-        ),
-      }))
-
-      // Run locally only to carry correctly-aligned glyph strips into AI-owned rows for training.
-      // Its result is never considered when deciding whether a monetary row exists.
-      const localRead = import('../ocr.ts')
-        .then(({ readOrders }) => readOrders(file))
-        .catch(() => null)
-      const [r, cloud] = await Promise.all([
-        localRead,
-        readInCloud(api, shift.id, 'orders', file, retryFailed),
-      ])
-
-      // The page was replaced or deleted while this request was running. Settle its pending count,
-      // but never let its late rows label the new evidence generation.
-      if (dashboardReadFiles.current.get(slot) !== file) {
-        onDraft((d) => ({ ...d, dash: cancelAiPageRead(d.dash) }))
-        return
-      }
-
-      if (!cloud?.ok) {
-        failedDashboardReads.current.set(slot, {
-          file,
-          reason: cloud?.reason ?? 'unavailable',
-          canRetry: cloud?.retryable ?? !retryFailed,
-          countsAsFailure: true,
-          refused: 0,
-        })
-        onDraft((d) => ({ ...d, dash: finishAiPageRead(d.dash, { kind: 'failed' }) }))
-        return
-      }
-
-      const localOrders = r?.ok ? r.reading.orders : []
-      // Slot + row position is local provenance for a delivery whose AI-verified clock is null.
-      // It makes a retry of this same photo idempotent without collapsing two uncertain rows from
-      // different overlapping photos. Known clocks still dedupe across slots by (day, minute).
-      const scanned = cloudRowsToScannedOrders(cloud.rows, localOrders, slot)
-      // `ok` only says the response was structured. A page with no authoritative monetary row is
-      // still a no-fields outcome for reconciliation and must not look like a successful zero-add.
-      if (!scanned.some((row) => row.cancelled === true || (row.fee !== null && row.fee.trim() !== ''))) {
-        failedDashboardReads.current.set(slot, {
-          file,
-          reason: 'no_fields',
-          canRetry: cloud.retryable,
-          countsAsFailure: true,
-          refused: 0,
-        })
-        onDraft((d) => ({ ...d, dash: finishAiPageRead(d.dash, { kind: 'failed' }) }))
-        return
-      }
-
-      const hasVisibleRefusal = scanned.some(
-        (row) =>
-          row.cancelled !== true &&
-          (row.fee === null || row.fee.trim() === '' || row.time.trim() === ''),
-      )
-      onDraft((d) => {
-        // A retry can supply the fee that an earlier AI response explicitly refused. Reconcile
-        // that untouched card first so its stable local/provider identity consumes the retry row
-        // instead of leaving an empty card beside a newly appended duplicate.
-        const reconciledTimes = reconcileUnverifiedOrderTimes(d.orders, scanned)
-        const reconciledOrders = reconcileRefusedOrderFees(reconciledTimes, scanned)
-        const added = mergeScannedOrders(reconciledOrders, scanned, () => crypto.randomUUID())
-        const addedDeductions = mergeScannedCashDeductions(
-          d.cashDeductions,
-          scanned,
-          () => crypto.randomUUID(),
-        )
-        const healedDeductions = healCashDeductionDetails(d.cashDeductions, scanned)
-        // Keep the existing cloud merge/heal semantics; only its authority changed.
-        const healed = healCutOffRoutes(reconciledOrders, scanned)
-        const routePatch = new Map(healed.map((row) => [row.localId, row]))
-        const deductionPatch = new Map(healedDeductions.map((row) => [row.localId, row]))
-        const nextCashDeductions = reconcileLocalCashDeductions([
-          ...d.cashDeductions.map((row) => {
-            const healedRow = deductionPatch.get(row.localId)
-            return healedRow ? { ...row, ...healedRow } : row
-          }),
-          ...addedDeductions,
-        ])
-        const nextOrders = [
-          ...reconciledOrders.map((order) => {
-            const healedOrder = routePatch.get(order.localId)
-            return healedOrder
-              ? { ...order, pointA: healedOrder.pointA, pointB: healedOrder.pointB }
-              : order
-          }),
-          ...added,
-        ]
-        const outcome = visibleAiPageReadOutcome(added, addedDeductions, nextCashDeductions)
-        // A verified retry may add a new timed row but must not make the earlier unknown-time card
-        // disappear from the status line. It stays an explicit manager decision until an audited
-        // correction/exclusion resolves it; after attempt two the same line becomes terminal.
-        const remainingSlotRefusals =
-          nextOrders.filter(
-            (row) =>
-              row.scanProvenance?.startsWith(`${slot}:`) === true &&
-              row.cancelled !== true &&
-              (row.feeRefused === true || row.timeText?.trim() === ''),
-          ).length +
-          nextCashDeductions.filter(
-            (row) =>
-              row.scanProvenance?.startsWith(`${slot}:`) === true &&
-              (row.timeReviewRequired === true || row.timeText.trim() === ''),
-          ).length
-        if (hasVisibleRefusal || remainingSlotRefusals > 0) {
-          failedDashboardReads.current.set(slot, {
-            file,
-            reason: 'refused',
-            canRetry: cloud.retryable,
-            countsAsFailure: false,
-            refused: Math.max(
-              remainingSlotRefusals,
-              outcome.kind === 'read' ? (outcome.refused ?? 0) : 0,
-            ),
-          })
-        } else {
-          failedDashboardReads.current.delete(slot)
-        }
-        return {
-          ...d,
-          orders: nextOrders,
-          // Heal the exact phone-draft incident too: an earlier partial edge card and its later
-          // complete sighting collapse only when both are unrecorded OCR rows. Server-restored and
-          // genuine complete twins retain multiplicity.
-          cashDeductions: nextCashDeductions,
-          dash: finishAiPageRead(d.dash, outcome),
-        }
-      })
+    async (_file: File, slot: string, result?: EvidenceUploadResponse): Promise<void> => {
+      await readLinkedAttachment(slot, 'orders', false, result)
     },
-    [onDraft, api, shift.id],
+    [readLinkedAttachment],
   )
-
-  /** Same authority rule as Recent Orders: local payment rows are diagnostics, never money. */
   const logImage = useCallback(
-    async (file: File, slot: string, retryFailed = false): Promise<void> => {
-      logReadFiles.current.set(slot, file)
-      const replacingFailure = failedLogReads.current.get(slot)
-      failedLogReads.current.delete(slot)
-      onDraft((d) => ({
-        ...d,
-        log: beginAiPageRead(
-          replacingFailure ? discardFailedPageRead(d.log, replacingFailure) : d.log,
-        ),
-      }))
-      const localRead = import('../ocr.ts')
-        .then(({ readPaymentsLog }) => readPaymentsLog(file))
-        .catch(() => null)
-      const [, cloud] = await Promise.all([
-        localRead,
-        readInCloud(api, shift.id, 'payments_log', file, retryFailed),
-      ])
-
-      if (logReadFiles.current.get(slot) !== file) {
-        onDraft((d) => ({ ...d, log: cancelAiPageRead(d.log) }))
-        return
-      }
-
-      if (!cloud?.ok) {
-        failedLogReads.current.set(slot, {
-          file,
-          reason: cloud?.reason ?? 'unavailable',
-          canRetry: cloud?.retryable ?? !retryFailed,
-          countsAsFailure: true,
-          refused: 0,
-        })
-        onDraft((d) => ({ ...d, log: finishAiPageRead(d.log, { kind: 'failed' }) }))
-        return
-      }
-
-      const scanned = cloudRowsToScannedMovements(cloud.rows)
-      if (scanned.length === 0) {
-        failedLogReads.current.set(slot, {
-          file,
-          reason: 'no_fields',
-          canRetry: cloud.retryable,
-          countsAsFailure: true,
-          refused: 0,
-        })
-        onDraft((d) => ({ ...d, log: finishAiPageRead(d.log, { kind: 'failed' }) }))
-        return
-      }
-
-      failedLogReads.current.delete(slot)
-      const aiRefused = Math.max(0, cloud.rows.length - scanned.length)
-      onDraft((d) => {
-        const added = mergeScannedMovements(d.movements, scanned, () => crypto.randomUUID())
-        return {
-          ...d,
-          movements: [...d.movements, ...added],
-          log: finishAiPageRead(d.log, {
-            kind: 'read',
-            rows: added.length,
-            refused: aiRefused,
-          }),
-        }
-      })
+    async (_file: File, slot: string, result?: EvidenceUploadResponse): Promise<void> => {
+      await readLinkedAttachment(slot, 'payments_log', false, result)
     },
-    [onDraft, api, shift.id],
+    [readLinkedAttachment],
   )
-
-  /** Retry every failed page as one concurrent batch, using the exact File objects already held. */
-  const retryFailedDashboard = useCallback((): void => {
-    for (const [slot, failure] of [...failedDashboardReads.current]) {
-      if (!failure.canRetry) continue
-      void dashImage(failure.file, slot, true)
-    }
-  }, [dashImage])
-  const retryFailedLog = useCallback((): void => {
-    for (const [slot, failure] of [...failedLogReads.current]) {
-      if (!failure.canRetry) continue
-      void logImage(failure.file, slot, true)
-    }
-  }, [logImage])
+  const retryDashboardRead = useCallback(
+    async (slot: string): Promise<void> => {
+      await readLinkedAttachment(slot, 'orders', true)
+    },
+    [readLinkedAttachment],
+  )
+  const retryLogRead = useCallback(
+    async (slot: string): Promise<void> => {
+      await readLinkedAttachment(slot, 'payments_log', true)
+    },
+    [readLinkedAttachment],
+  )
 
   return (
     <Screen
@@ -1893,7 +2032,9 @@ function EndPackage({
               What remains is the equation the owner described: cash + wallet against float + topup
               + 80% of the fees. */}
           {preview ? (
-            <div className="grid grid-cols-2 gap-x-4 text-sm">
+            <details className="text-sm">
+              <summary className="cursor-pointer font-medium text-slate-700">{t.shift.closeSummary}</summary>
+              <div className="mt-1 grid grid-cols-2 gap-x-4">
               <div className="col-span-2 flex items-baseline justify-between gap-2">
                 <span className="text-slate-600">{t.br1.expected}</span>
                 <Money value={preview.expectedTotalText} className="font-semibold" />
@@ -1935,22 +2076,50 @@ function EndPackage({
                   {preview.suspectLocalIds.length > 0 ? ` · ${t.br1.checkScanned}` : ''}
                 </p>
               ) : null}
-            </div>
+              </div>
+            </details>
           ) : null}
           {/* NAMED, not merely absent. Tapping the footer's dead button is how a driver concludes
               the app is broken; this says which thing to go and do. */}
           {!ready && missing.length > 0 ? (
-            <p className="text-sm font-medium text-amber-800">
-              {t.shift.stillMissing} {missing.join(' · ')}
-            </p>
+            <details className="text-sm text-amber-800">
+              <summary className="cursor-pointer font-medium">
+                {t.shift.remainingCount.replace('{n}', String(missing.length))}
+              </summary>
+              <p className="pt-1">{missing.join(' · ')}</p>
+            </details>
+          ) : null}
+          {!draftSaved ? (
+            saveFailed ? (
+              <div
+                className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded-xl bg-red-50 px-3 py-2 text-red-800"
+                role="alert"
+              >
+                <p className="min-w-0 flex-1 break-words text-xs font-medium">{t.shift.draftSaveFailed}</p>
+                <button
+                  type="button"
+                  onClick={onRetrySave}
+                  className="min-h-9 shrink-0 rounded-lg bg-red-100 px-3 text-xs font-semibold"
+                >
+                  {t.shift.retryDraftSave}
+                </button>
+              </div>
+            ) : (
+              <p className="truncate text-xs text-slate-500" role="status">{t.shift.savingDraft}</p>
+            )
           ) : null}
           {closeFailure ? (
-            <div className="rounded-xl bg-red-50 p-3 text-red-800" role="alert" aria-live="assertive">
-              <p className="text-sm font-bold">{closeFailure.title}</p>
-              <ul className="mt-1 list-disc space-y-0.5 ps-5 text-sm">
+            <details
+              className="rounded-xl bg-red-50 p-2 text-red-800"
+              role="alert"
+              aria-live="assertive"
+              open
+            >
+              <summary className="cursor-pointer text-sm font-bold">{closeFailure.title}</summary>
+              <ul className="mt-1 list-disc space-y-0.5 ps-5 text-xs">
                 {closeFailure.lines.map((line) => <li key={line}>{line}</li>)}
               </ul>
-            </div>
+            </details>
           ) : null}
           {submittedDifference ? (
             <div
@@ -1972,6 +2141,11 @@ function EndPackage({
         </div>
       }
     >
+      {draft.closeDraftRestored ? (
+        <p className="rounded-xl bg-emerald-50 px-3 py-2 text-center text-sm text-emerald-800" role="status">
+          {t.shift.draftRestored}
+        </p>
+      ) : null}
       {/*
         * THE PAGED SCREENS, AS GRIDS.
         *
@@ -1989,37 +2163,20 @@ function EndPackage({
         pages={draft.dashboardPages}
         shiftId={shift.id}
         slots={slots}
+        attachments={draft.closeDraftAttachments}
+        closeDraftRevision={draft.closeDraftRevision}
+        onCloseDraft={applyCanonicalDraft}
+        onRetryRead={retryDashboardRead}
         onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
         onAddPage={() => onDraft((d) => ({ ...d, dashboardPages: d.dashboardPages + 1 }))}
         onImage={dashImage}
         onDeleted={(gone) => {
-          dashboardReadFiles.current.delete(gone)
-          const discardedFailure = failedDashboardReads.current.get(gone)
-          failedDashboardReads.current.delete(gone)
           onDraft((d) => {
             const next = new Set(d.slots)
             next.delete(gone)
-            return {
-              ...d,
-              slots: next,
-              dash: discardedFailure ? discardFailedPageRead(d.dash, discardedFailure) : d.dash,
-            }
+            return { ...d, slots: next }
           })
         }}
-        status={
-          <ReadStatus
-            state={draft.dash}
-            hasEvidence={[...slots].some((slot) => splitSlot(slot).base === 'dashboard')}
-            failureDetails={[...failedDashboardReads.current].map(([slot, failure]) => ({
-              label: t.shift.imageNumber.replace('{n}', String(splitSlot(slot).n)),
-              reason: failure.reason,
-              canRetry: failure.canRetry,
-            }))}
-            {...([...failedDashboardReads.current.values()].some((failure) => failure.canRetry)
-              ? { onRetry: retryFailedDashboard }
-              : {})}
-          />
-        }
       />
 
       {/* THE list: every operation of the shift, with server-owned inclusion shown read-only. It
@@ -2046,37 +2203,20 @@ function EndPackage({
         pages={draft.logPages}
         shiftId={shift.id}
         slots={slots}
+        attachments={draft.closeDraftAttachments}
+        closeDraftRevision={draft.closeDraftRevision}
+        onCloseDraft={applyCanonicalDraft}
+        onRetryRead={retryLogRead}
         onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
         onAddPage={() => onDraft((d) => ({ ...d, logPages: d.logPages + 1 }))}
         onImage={logImage}
         onDeleted={(gone) => {
-          logReadFiles.current.delete(gone)
-          const discardedFailure = failedLogReads.current.get(gone)
-          failedLogReads.current.delete(gone)
           onDraft((d) => {
             const next = new Set(d.slots)
             next.delete(gone)
-            return {
-              ...d,
-              slots: next,
-              log: discardedFailure ? discardFailedPageRead(d.log, discardedFailure) : d.log,
-            }
+            return { ...d, slots: next }
           })
         }}
-        status={
-          <ReadStatus
-            state={logState}
-            hasEvidence={[...slots].some((slot) => splitSlot(slot).base === PAYMENTS_LOG_SLOT)}
-            failureDetails={[...failedLogReads.current].map(([slot, failure]) => ({
-              label: t.shift.imageNumber.replace('{n}', String(splitSlot(slot).n)),
-              reason: failure.reason,
-              canRetry: failure.canRetry,
-            }))}
-            {...([...failedLogReads.current.values()].some((failure) => failure.canRetry)
-              ? { onRetry: retryFailedLog }
-              : {})}
-          />
-        }
       />
 
       {/*
@@ -2095,10 +2235,18 @@ function EndPackage({
               label={t.shift.walletBalance}
               variant="tile"
               uploaded={slots.has('wallet')}
+              attachment={draft.closeDraftAttachments.wallet ?? null}
+              closeDraftRevision={draft.closeDraftRevision}
+              onCloseDraft={applyCanonicalDraft}
+              recognitionFocus="wallet"
               onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
-              onImage={walletImage}
-              ocrField="wallet"
-              onCloudRead={walletCloudRead}
+              onImage={async (file, result) => {
+                await walletImage(file)
+                await readLinkedAttachment('wallet', 'wallet', false, result)
+              }}
+              onRetryRead={async () => {
+                await readLinkedAttachment('wallet', 'wallet', true)
+              }}
             />
           </div>
           <div className="flex min-w-0 flex-1 flex-col gap-1">
@@ -2122,10 +2270,6 @@ function EndPackage({
             <SourceMark source={sourceOf({ ocrValue: walletOcr, hadImage: draft.walletStrip !== null, value: wallet })} />
             {/* The wallet balance is the one figure BR1 checks against counted cash, so a read
                 that quietly never finished is worth a line rather than a blank tile. */}
-            <CloudReadStatus
-              event={draft.walletCloud}
-              {...(draft.walletFile ? { onRetry: () => void retryWalletCloud(draft.walletFile!) } : {})}
-            />
           </div>
         </div>
 
@@ -2139,10 +2283,18 @@ function EndPackage({
               label={t.shift.odometer}
               variant="tile"
               uploaded={slots.has('odometer')}
+              attachment={draft.closeDraftAttachments.odometer ?? null}
+              closeDraftRevision={draft.closeDraftRevision}
+              onCloseDraft={applyCanonicalDraft}
+              recognitionQuality
               onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
-              onImage={(file) => void odoImage(file)}
-              ocrField="odometer"
-              onCloudRead={odoCloudRead}
+              onImage={async (file, result) => {
+                await odoImage(file)
+                await readLinkedAttachment('odometer', 'odometer', false, result)
+              }}
+              onRetryRead={async () => {
+                await readLinkedAttachment('odometer', 'odometer', true)
+              }}
             />
           </div>
           <div className="flex min-w-0 flex-1 flex-col gap-1">
@@ -2167,10 +2319,6 @@ function EndPackage({
               {...(draft.odoFile
                 ? { onRetry: () => void odoImage(draft.odoFile!, false) }
                 : {})}
-            />
-            <CloudReadStatus
-              event={draft.odoCloud}
-              {...(draft.odoFile ? { onRetry: () => void retryEndOdoCloud(draft.odoFile!) } : {})}
             />
           </div>
         </div>
@@ -2215,6 +2363,12 @@ function EndPackage({
         initialPacks={draft.packs}
         initialMediaIds={draft.batteryMediaIds}
         onPacksChanged={onPacksChanged}
+        closeDraftAttachments={draft.closeDraftAttachments}
+        closeDraftRevision={draft.closeDraftRevision}
+        onCloseDraft={applyCanonicalDraft}
+        onLinkedRead={(slot, retryFailed, upload) =>
+          readLinkedAttachment(slot, 'bms', retryFailed, upload)
+        }
         onMediaIdChanged={(batteryId, mediaId) =>
           onDraft((d) => ({
             ...d,
@@ -2224,124 +2378,6 @@ function EndPackage({
       />
     </Screen>
   )
-}
-
-/**
- * What a screenshot's reader made of it — said out loud, and left on screen.
- *
- * A silent reader is how a driver ends up believing a screenshot was understood when it was not,
- * and «قُرئت ٠ عملية» is a different statement from «تعذّرت القراءة»: the first means the page
- * added nothing because it had nothing new on it, the second means the digits could not be read at
- * all and the rows have to be typed. Both are true answers and the driver acts differently on each.
- */
-function ReadStatus({
-  state,
-  hasEvidence,
-  failureDetails,
-  onRetry,
-}: {
-  state: LogState
-  hasEvidence: boolean
-  failureDetails: readonly { label: string; reason: PageReadFailureReason; canRetry: boolean }[]
-  onRetry?: (() => void) | undefined
-}): ReactNode {
-  const { t, lang } = useApp()
-  const failureText = (failure: {
-    label: string
-    reason: PageReadFailureReason
-    canRetry: boolean
-  }): string => {
-    const template =
-      failure.reason === 'timeout'
-        ? t.shift.readFailureTimeout
-        : failure.reason === 'no_fields'
-          ? t.shift.readFailureNoFields
-          : failure.reason === 'refused'
-            ? t.shift.readFailureRefused
-            : t.shift.readFailureUnavailable
-    const message = template.replace('{image}', failure.label)
-    return failure.canRetry ? message : `${message} — ${t.shift.readManualRequired}`
-  }
-  const evidenceNotice = hasEvidence ? (
-    <p className="text-center text-xs text-slate-600">{t.shift.uploadedEvidenceOnly}</p>
-  ) : null
-  const failureNotice = (
-    <div className="flex flex-col items-center gap-1" role="alert">
-      {failureDetails.length > 0 ? (
-        failureDetails.map((failure) => (
-          <p key={failure.label} className="text-center text-sm font-medium text-amber-800">
-            {failureText(failure)}
-          </p>
-        ))
-      ) : (
-        <p className="text-center text-sm font-medium text-amber-800">{t.shift.readUnread}</p>
-      )}
-      {onRetry ? (
-        <button
-          type="button"
-          onClick={onRetry}
-          className="rounded-lg bg-amber-100 px-3 py-1 text-sm font-medium text-amber-900"
-        >
-          {t.common.retry}
-        </button>
-      ) : null}
-    </div>
-  )
-  // Checked POSITIVELY for `read`: the other member's `kind` is a union of three literals, and
-  // narrowing a union by eliminating them one at a time does not reduce to the member with `rows`.
-  if (state.kind === 'read') {
-    return (
-      <div className="flex flex-col gap-1">
-        {evidenceNotice}
-        <p className="text-center text-sm text-emerald-700">
-          {t.shift.aiReadStatus}: {plural(state.rows, t.shift.readAdded, lang)}
-          {/* The rows AI saw and would not vouch for. Silence here would let the driver believe the
-              page was fully read and submit a day that is short by those rows. */}
-          {state.refused > 0 ? (
-            <span className="text-amber-800"> · {plural(state.refused, t.shift.readRefused, lang)}</span>
-          ) : null}
-          {state.cutOff > 0 ? (
-            <span className="text-amber-800"> · {plural(state.cutOff, t.shift.readCutOff, lang)}</span>
-          ) : null}
-        </p>
-        {/* A sibling page can fail after another succeeded. Keep that failure visible instead of
-            collapsing the whole batch into the successful page's green status. */}
-        {state.failures > 0 || failureDetails.length > 0 ? failureNotice : null}
-      </div>
-    )
-  }
-  if (state.kind === 'reading') {
-    /*
-     * A READ TAKES 20–40 SECONDS on a cheap Android, and it was one line of `text-slate-400` —
-     * 2.6:1 against white, which is to say invisible in Damascus daylight. Meanwhile the tile
-     * above had already flipped to ✓ for its upload, so the driver reasonably concluded the work
-     * was done, scrolled past, and submitted a shift short by everything the reader was about to
-     * add. An indeterminate bar is honest here: Tesseract's progress covers only its own pass,
-     * and the glyph reader that follows it reports nothing.
-     */
-    return (
-      <div className="flex flex-col gap-1" role="status">
-        {evidenceNotice}
-        <p className="text-center text-sm font-medium text-slate-700">
-          {t.shift.aiReadStatus}: {t.shift.reading}…{' '}
-          <span className="text-slate-600">{t.shift.readingMayTake}</span>
-        </p>
-        <div className="h-1.5 overflow-hidden rounded-full bg-slate-200">
-          <div className="h-full w-1/3 animate-[ash-slide_1.2s_ease-in-out_infinite] rounded-full bg-brand" />
-        </div>
-      </div>
-    )
-  }
-  if (state.kind === 'failed') {
-    return (
-      <div className="flex flex-col gap-1">
-        {evidenceNotice}
-        <p className="text-center text-sm font-medium text-amber-800">{t.shift.aiReadStatus}</p>
-        {failureNotice}
-      </div>
-    )
-  }
-  return evidenceNotice
 }
 
 /**

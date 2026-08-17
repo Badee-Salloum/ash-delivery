@@ -1,7 +1,7 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { fundCodeOf } from '@ash/adapters/memory'
-import { DRIVER2_ID, DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr } from './harness.ts'
+import { DRIVER2_ID, DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr, today } from './harness.ts'
 
 /**
  * A second (or later) cash-float / wallet top-up disbursed mid-day (SRS C-5). The arrays and the
@@ -22,7 +22,9 @@ afterEach(async () => {
 const post = async (token: string, url: string, payload: Record<string, unknown> = {}): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(token) }, payload })
 const put = async (token: string, url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
+  url.endsWith('/end-package')
+    ? await h.submitEndPackage(token, url.split('/')[2]!, payload)
+    : await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
 const get = async (token: string, url: string): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(token) } })
 
@@ -36,11 +38,27 @@ async function openShift(driver: string, manager: string): Promise<string> {
 }
 
 let seq = 0
+const fixtureOrders = new Map<string, Array<{
+  clientKey: string
+  providerOrderNo: string
+  payMode: 'cash' | 'electronic' | 'free'
+  fee: string
+  occurredDate: string
+  occurredMinute: string
+}>>()
 async function addOrders(driver: string, id: string, payMode: string, count: number): Promise<void> {
   for (let i = 0; i < count; i++) {
     seq += 1
-    const res = await post(driver, `/shifts/${id}/orders`, { providerOrderNo: `YAL-${seq}`, payMode, fee: sypStr(5_000), zone: 'المزة' })
-    expect(res.statusCode, res.body).toBe(201)
+    const rows = fixtureOrders.get(id) ?? []
+    rows.push({
+      clientKey: `tranche-${seq}`,
+      providerOrderNo: `YAL-${seq}`,
+      payMode: payMode as 'cash' | 'electronic' | 'free',
+      fee: sypStr(5_000),
+      occurredDate: today,
+      occurredMinute: '08:00',
+    })
+    fixtureOrders.set(id, rows)
   }
 }
 
@@ -52,6 +70,10 @@ async function addTwentyOrders(driver: string, id: string): Promise<void> {
 }
 
 async function submitEnd(driver: string, id: string, cash: number, wallet: number): Promise<LightMyRequestResponse> {
+  h.stageCloseDraftFinancialFixture(id, {
+    managerToken: await h.loginAs('manager'),
+    orders: fixtureOrders.get(id) ?? [],
+  })
   for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
   return await put(driver, `/shifts/${id}/end-package`, {
     odometerKm: 15_412,
@@ -72,6 +94,7 @@ const cashOf = async (driverId: string): Promise<bigint> =>
 describe('mid-day tranche (C-5)', () => {
   beforeEach(() => {
     seq = 0
+    fixtureOrders.clear()
   })
 
   it('a second float posts under occurrence_key=2; the shift closes at zero with the summed float', async () => {

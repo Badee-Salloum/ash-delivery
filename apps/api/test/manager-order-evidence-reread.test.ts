@@ -29,7 +29,7 @@ const post = async (
     url,
     headers: {
       cookie: h.cookie(token),
-      ...(consensus ? { 'x-ash-orders-time-consensus': 'v1' } : {}),
+      ...(consensus ? { 'x-ash-orders-time-consensus': 'close-draft-v1' } : {}),
     },
     payload,
   })
@@ -39,7 +39,9 @@ const put = async (
   url: string,
   payload: Record<string, unknown>,
 ): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
+  url.endsWith('/end-package')
+    ? await h.submitEndPackage(token, url.split('/')[2]!, payload)
+    : await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
 
 async function pendingReviewShift(driver: string, manager: string): Promise<string> {
   const created = await post(
@@ -142,7 +144,8 @@ describe('manager re-read of stored Recent Orders evidence', () => {
     const manager = await h.loginAs('manager')
     const shiftId = await pendingReviewShift(driver, manager)
     const before = await h.deps.orders.listByShift(shiftId)
-    expect(before[0]?.source).toBe('manual')
+    expect(before[0]?.source).toBe('ocr')
+    const callsBeforeReread = reader.calls
 
     const response = await post(
       manager,
@@ -153,7 +156,8 @@ describe('manager re-read of stored Recent Orders evidence', () => {
     expect(response.statusCode, response.body).toBe(200)
     expect(response.json()).toMatchObject({
       ok: true,
-      cached: false,
+      // Upload screen-kind validation already read these exact bytes with the same current reader.
+      cached: true,
       evidence: { package: 'end', slot: 'dashboard' },
       target: { kind: 'order', providerOrderNo: 'order-7', provenanceLinked: false },
       rows: [
@@ -163,7 +167,9 @@ describe('manager re-read of stored Recent Orders evidence', () => {
     })
     expect(response.json().reviewedOrdersHash).toEqual(expect.any(String))
     expect(response.json().settlementHash).toEqual(expect.any(String))
-    expect(reader.calls).toBe(1)
+    // Screen-kind checks may also inspect the wallet/odometer fixtures. This page itself is cached,
+    // so the manager action must not invoke the provider again.
+    expect(reader.calls).toBe(callsBeforeReread)
 
     const after = await h.deps.orders.listByShift(shiftId)
     expect(after).toEqual(before)
@@ -191,7 +197,7 @@ describe('manager re-read of stored Recent Orders evidence', () => {
     const shiftId = await pendingReviewShift(driver, manager)
     const [deduction] = await h.deps.cashDeductions.listByShift(shiftId)
     expect(deduction).toBeDefined()
-    expect(deduction!.source).toBe('manual')
+    expect(deduction!.source).toBe('ocr')
     const before = { ...deduction! }
 
     const response = await post(
@@ -237,19 +243,22 @@ describe('manager re-read of stored Recent Orders evidence', () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
     const shiftId = await pendingReviewShift(driver, manager)
+    const callsAfterUploads = reader.calls
 
+    // Upload validation consumed/cached the first failed attempt. The manager's explicit reread is
+    // the one permitted retry, and the next call must be the immutable cached terminal result.
     const first = await post(manager, `/shifts/${shiftId}/ocr/orders/evidence-reread`, body())
     expect(first.statusCode, first.body).toBe(200)
-    expect(first.json()).toMatchObject({ ok: false, reason: 'no_fields', cached: false, retryable: true })
+    expect(first.json()).toMatchObject({ ok: false, reason: 'refused', cached: false, retryable: false })
 
     const second = await post(manager, `/shifts/${shiftId}/ocr/orders/evidence-reread`, body())
     expect(second.statusCode, second.body).toBe(200)
-    expect(second.json()).toMatchObject({ ok: false, reason: 'refused', cached: false, retryable: false })
+    expect(second.json()).toMatchObject({ ok: false, reason: 'refused', cached: true, retryable: false })
 
     const capped = await post(manager, `/shifts/${shiftId}/ocr/orders/evidence-reread`, body())
     expect(capped.statusCode, capped.body).toBe(200)
     expect(capped.json()).toMatchObject({ ok: false, reason: 'refused', cached: true, retryable: false })
-    expect(reader.calls).toBe(2)
+    expect(reader.calls).toBe(callsAfterUploads + 1)
     expect(
       h.deps.audit.rows.filter(
         (row) => row.tableName === 'shift_order_evidence_rereads' && row.recordId === shiftId,
@@ -261,6 +270,7 @@ describe('manager re-read of stored Recent Orders evidence', () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
     const shiftId = await pendingReviewShift(driver, manager)
+    const callsBefore = reader.calls
 
     const response = await post(
       manager,
@@ -271,7 +281,7 @@ describe('manager re-read of stored Recent Orders evidence', () => {
 
     expect(response.statusCode).toBe(428)
     expect(response.json().error).toBe('manager_update_required')
-    expect(reader.calls).toBe(0)
+    expect(reader.calls).toBe(callsBefore)
   })
 
   it('requires the manager branch, pending-review state, a stored dashboard slot and a real order', async () => {
@@ -298,6 +308,7 @@ describe('manager re-read of stored Recent Orders evidence', () => {
     expect(cancelled.statusCode, cancelled.body).toBe(200)
 
     const shiftId = await pendingReviewShift(driver, manager)
+    const callsBeforeValidationFailures = reader.calls
     const foreign = await post(otherManager, `/shifts/${shiftId}/ocr/orders/evidence-reread`, body())
     expect(foreign.statusCode).toBe(403)
 
@@ -350,6 +361,6 @@ describe('manager re-read of stored Recent Orders evidence', () => {
     )
     expect(manualReread.statusCode).toBe(422)
     expect(manualReread.json().error).toBe('operation_has_no_ocr_evidence')
-    expect(reader.calls).toBe(0)
+    expect(reader.calls).toBe(callsBeforeValidationFailures)
   })
 })

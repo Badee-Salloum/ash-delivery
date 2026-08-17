@@ -5,6 +5,8 @@ import type {
   BatteryRecord,
   BatterySwapRecord,
   CashDeductionRecord,
+  CloseDraftRecord,
+  CloseDraftReviewReason,
   NewShiftSettlementRecord,
   OperationWindowStatus,
   ShiftSettlementRecord,
@@ -55,6 +57,7 @@ import {
   minWalletBalance,
   minor,
   planFixedShareSettlement,
+  parseMinor,
   postingsForCashSettledApproval,
   postingsForOpen,
   reverse,
@@ -75,6 +78,7 @@ import {
   fixedSettlementHash,
   varianceDirection,
 } from './fixed-settlement.ts'
+import { closeDraftHash, sameCloseDraftEvidence } from './close-draft.hash.ts'
 
 export class ServiceError extends Error {
   readonly status: number
@@ -101,6 +105,24 @@ export function ordersHash(
   movements: readonly WalletMovementRecord[] = [],
   deductions: readonly CashDeductionRecord[] = [],
 ): string {
+  const provenance = (
+    row: Pick<
+      ShiftOrderRecord | CashDeductionRecord,
+      'windowBasis' | 'positionEvidence' | 'observationId' | 'closeDraftReviewReasons'
+    >,
+  ): string => {
+    const position = row.positionEvidence
+    return [
+      row.windowBasis ?? '',
+      row.observationId ?? '',
+      position?.rowIndex ?? '',
+      position?.rowCount ?? '',
+      position?.lowerInstant ?? '',
+      position?.upperInstant ?? '',
+      ...(position?.anchorObservationIds ?? []),
+      ...(row.closeDraftReviewReasons ?? []).slice().sort(),
+    ].join(',')
+  }
   const orderPart = [...orders]
     .sort((a, b) => (a.providerOrderNo < b.providerOrderNo ? -1 : 1))
     // The kind and the typed shares are hashed too: they decide the money as much as the fee does,
@@ -112,7 +134,7 @@ export function ordersHash(
       (o) =>
         `${o.providerOrderNo}|${o.payMode}|${o.fee}|${o.kind}|${o.driverShare ?? ''}|${o.companyShare ?? ''}` +
         `|${o.included ? 1 : 0}|${o.walletAmount ?? ''}|${o.occurredDate ?? ''}|${o.occurredMinute ?? ''}` +
-        `|${o.windowStatus}|${o.decisionReason ?? ''}`,
+        `|${o.windowStatus}|${o.decisionReason ?? ''}|${provenance(o)}`,
     )
     .join(';')
   // Archive-only payment-log rows do not belong in a financial review fingerprint. If the policy is
@@ -129,7 +151,7 @@ export function ordersHash(
     .map(
       (d) =>
         `${d.operationKey}|${d.amount}|${d.occurredDate ?? ''}|${d.occurredMinute ?? ''}` +
-        `|${d.windowStatus}|${d.included ? 1 : 0}|${d.decisionReason ?? ''}`,
+        `|${d.windowStatus}|${d.included ? 1 : 0}|${d.decisionReason ?? ''}|${provenance(d)}`,
     )
     .join(';')
   return createHash('sha256').update(`${orderPart}#${movementPart}#${deductionPart}`).digest('hex').slice(0, 32)
@@ -220,7 +242,9 @@ const operationCounts = (row: {
   decisionReason: string | null
   decidedBy: string | null
   decidedAt: string | null
+  closeDraftReviewReasons?: readonly CloseDraftReviewReason[]
 }): boolean =>
+  (row.closeDraftReviewReasons?.length ?? 0) === 0 &&
   row.included && (row.windowStatus !== 'unknown' || hasAuditedWindowDecision(row))
 
 /** Preserve an audited manager choice; otherwise derive inclusion only from verified timing. */
@@ -230,8 +254,11 @@ const persistedOperationInclusion = (row: {
   decisionReason: string | null
   decidedBy: string | null
   decidedAt: string | null
+  closeDraftReviewReasons?: readonly CloseDraftReviewReason[]
 }): boolean =>
-  hasAuditedWindowDecision(row) ? row.included : includedByWindow(row.windowStatus)
+  (row.closeDraftReviewReasons?.length ?? 0) > 0
+    ? false
+    : hasAuditedWindowDecision(row) ? row.included : includedByWindow(row.windowStatus)
 
 export const includedOrders = (rows: readonly ShiftOrderRecord[]): ShiftOrderRecord[] =>
   rows.filter(operationCounts)
@@ -861,6 +888,13 @@ async function requestRephotoLocked(
     ...(gate === 'close' ? { submittedAt: null } : {}),
   }
   await deps.shifts.update(updated, actor.userId)
+  if (gate === 'close') {
+    await deps.closeDrafts.reopen({
+      shiftId,
+      updatedAtMs: deps.clock.nowMs(),
+      updatedBy: actor.userId,
+    })
+  }
   await recordDecision(deps, actor, shiftId, gate, 'rephoto_requested', notes)
   return updated
 }
@@ -919,6 +953,7 @@ async function rejectCloseLocked(
   if (!result.ok) fail(result)
   const updated: ShiftRecord = { ...shift, state: result.next, submittedAt: null }
   await deps.shifts.update(updated, actor.userId)
+  await deps.closeDrafts.reopen({ shiftId, updatedAtMs: deps.clock.nowMs(), updatedBy: actor.userId })
   await recordDecision(deps, actor, shiftId, 'close', 'rejected', notes)
   return updated
 }
@@ -1658,18 +1693,24 @@ async function unresolvedWindowRows(deps: Deps, shiftId: string): Promise<{ orde
       // unknown operation window.
       .filter(
         (o) =>
-          o.kind !== 'manual' &&
-          o.windowStatus === 'unknown' &&
-          !hasAuditedWindowDecision(o),
+          o.kind !== 'manual' && (
+            (o.closeDraftReviewReasons?.length ?? 0) > 0 ||
+            (o.windowStatus === 'unknown' && !hasAuditedWindowDecision(o))
+          ),
       )
       .map((o) => o.providerOrderNo),
     deductions: deductions
-      .filter((d) => d.windowStatus === 'unknown' && !hasAuditedWindowDecision(d))
+      .filter((d) =>
+        (d.closeDraftReviewReasons?.length ?? 0) > 0 ||
+        (d.windowStatus === 'unknown' && !hasAuditedWindowDecision(d)),
+      )
       .map((d) => d.id),
   }
 }
 
 interface EndPackageInput {
+  draftRevision?: number | undefined
+  draftHash?: string | undefined
   odometerKm: number
   batteryPercent: number | null
   cashDeclared: Minor
@@ -1679,6 +1720,106 @@ interface EndPackageInput {
   walletDeclaredOcr?: Minor | null
   odometerStrip?: string | null
   walletStrip?: string | null
+}
+
+function closeDraftOperationsInput(shiftId: string, closeDraft: CloseDraftRecord): OperationsInput {
+  const providerNo = (clientKey: string, supplied: string): string => supplied.trim() !== ''
+    ? supplied
+    : `YAL-${createHash('sha256').update(`${shiftId}|${clientKey}`).digest('hex').slice(0, 32)}`
+  return {
+    orders: closeDraft.data.operations.orders.map((row) => ({
+      providerOrderNo: providerNo(row.clientKey, row.providerOrderNo),
+      payMode: row.payMode,
+      fee: parseMinor(row.fee!),
+      source: row.source === 'manual' ? (row.feeRefused ? 'refused' : 'manual') : 'ocr',
+      feeOcr: row.feeOcr === null ? null : parseMinor(row.feeOcr),
+      included: row.included,
+      occurredMinute: row.occurredMinute,
+      occurredDate: row.occurredDate,
+      pointA: row.pointA,
+      pointB: row.pointB,
+      windowBasis: row.windowBasis,
+      positionEvidence: row.position,
+      observationId: row.observationId,
+      closeDraftReviewReasons: row.reviewReasons,
+      closeDraftClientKey: row.clientKey,
+    })),
+    cashDeductions: closeDraft.data.operations.cashDeductions.map((row) => ({
+      operationKey: row.operationKey,
+      amount: parseMinor(row.amount!),
+      source: row.source === 'manual' ? 'manual' : 'ocr',
+      amountOcr: row.amountOcr === null ? null : parseMinor(row.amountOcr),
+      occurredMinute: row.occurredMinute,
+      occurredDate: row.occurredDate,
+      pointA: row.pointA,
+      pointB: row.pointB,
+      windowBasis: row.windowBasis,
+      positionEvidence: row.position,
+      observationId: row.observationId,
+      included: row.included,
+      closeDraftReviewReasons: row.reviewReasons,
+      closeDraftClientKey: row.clientKey,
+    })),
+    movements: closeDraft.data.operations.movements
+      .filter((row): row is typeof row & { occurredMinute: string } => row.occurredMinute !== null)
+      .map((row) => ({
+        amount: parseMinor(row.amount),
+        occurredMinute: row.occurredMinute,
+        role: row.role,
+        providerOrderNo: row.providerOrderNo,
+        ambiguous: row.ambiguous,
+        included: row.included,
+        notes: row.notes,
+      })),
+  }
+}
+
+function assertCloseDraftMoneyComplete(closeDraft: CloseDraftRecord): void {
+  const incompleteOrders = closeDraft.data.operations.orders
+    .filter((row) => row.fee === null)
+    .map((row) => row.clientKey)
+  const incompleteDeductions = closeDraft.data.operations.cashDeductions
+    .filter((row) => row.amount === null)
+    .map((row) => row.clientKey)
+  if (incompleteOrders.length > 0 || incompleteDeductions.length > 0) {
+    throw new ServiceError(422, 'close_draft_money_incomplete', {
+      orders: incompleteOrders,
+      cashDeductions: incompleteDeductions,
+    })
+  }
+}
+
+async function assertCloseDraftEvidenceCurrent(
+  deps: Deps,
+  shiftId: string,
+  closeDraft: CloseDraftRecord,
+): Promise<void> {
+  const slots = (await deps.media.listSlots(shiftId)).filter((slot) => slot.package === 'end')
+  const duplicate = slots.find((slot, index) =>
+    slots.findIndex((candidate) => candidate.mediaId === slot.mediaId) !== index,
+  )
+  if (duplicate) {
+    const source = slots.find((slot) => slot.mediaId === duplicate.mediaId && slot.slot !== duplicate.slot)!
+    throw new ServiceError(409, 'evidence_already_attached', {
+      sourcePackage: source.package,
+      sourceSlot: source.slot,
+      conflictingPackage: duplicate.package,
+      conflictingSlot: duplicate.slot,
+    })
+  }
+  const liveEvidence = Object.fromEntries(slots.map((slot) => [slot.slot, {
+    mediaId: slot.mediaId,
+    attachmentToken: slot.attachmentToken,
+    attachedAtMs: slot.attachedAtMs,
+  }]))
+  const evidenceMatches = sameCloseDraftEvidence(liveEvidence, closeDraft.data.evidence)
+  const recomputedHash = closeDraftHash(closeDraft.data)
+  if (recomputedHash !== closeDraft.draftHash || !evidenceMatches) {
+    throw new ServiceError(409, 'close_draft_changed', {
+      currentRevision: closeDraft.revision,
+      currentDraftHash: closeDraft.draftHash,
+    })
+  }
 }
 
 export async function submitEndPackage(
@@ -1714,6 +1855,50 @@ async function submitEndPackageLocked(
   input: EndPackageInput,
 ): Promise<{ shift: ShiftRecord; br1: Br1View }> {
   const shift = await mustFind(deps, shiftId)
+  const closeDraft = await deps.closeDrafts.findByShift(shiftId)
+  if (closeDraft?.submittedAtMs !== null && closeDraft !== null && shift.state === 'pending_review') {
+    if (input.draftRevision === closeDraft.revision && input.draftHash === closeDraft.draftHash) {
+      return { shift, br1: await evaluateShift(deps, shift) }
+    }
+    throw new ServiceError(409, 'close_draft_changed')
+  }
+
+  let effectiveInput = input
+  if (closeDraft !== null || input.draftRevision !== undefined || input.draftHash !== undefined) {
+    if (closeDraft === null || input.draftRevision === undefined || input.draftHash === undefined) {
+      throw new ServiceError(428, 'driver_update_required')
+    }
+    await assertCloseDraftEvidenceCurrent(deps, shiftId, closeDraft)
+    if (
+      closeDraft.revision !== input.draftRevision ||
+      closeDraft.draftHash !== input.draftHash
+    ) {
+      throw new ServiceError(409, 'close_draft_changed', {
+        currentRevision: closeDraft.revision,
+        currentDraftHash: closeDraft.draftHash,
+      })
+    }
+    assertCloseDraftMoneyComplete(closeDraft)
+    const figures = closeDraft.data.figures
+    if (figures.odometerKm === null || figures.cashDeclared === null || figures.walletDeclared === null) {
+      throw new ServiceError(422, 'close_draft_figures_incomplete')
+    }
+    effectiveInput = {
+      ...input,
+      odometerKm: figures.odometerKm,
+      odometerKmOcr: figures.odometerKmOcr,
+      odometerAnomalyConfirmed: figures.odometerAnomalyConfirmed,
+      batteryPercent: figures.batteryPercent,
+      cashDeclared: parseMinor(figures.cashDeclared),
+      walletDeclared: parseMinor(figures.walletDeclared),
+      walletDeclaredOcr: figures.walletDeclaredOcr === null ? null : parseMinor(figures.walletDeclaredOcr),
+    }
+    await submitOperations(deps, actor, shiftId, closeDraftOperationsInput(shiftId, closeDraft), {
+      canonicalCloseDraft: true,
+      revision: closeDraft.revision,
+      draftHash: closeDraft.draftHash,
+    })
+  }
   const orderRows = await deps.orders.listByShift(shiftId)
 
   const evidenceWarnings = await unacknowledgedEvidenceWarnings(deps, shiftId, 'end')
@@ -1724,10 +1909,10 @@ async function submitEndPackageLocked(
     })
   }
 
-  if (shift.odoStart !== null && input.odometerKm < shift.odoStart && !input.odometerAnomalyConfirmed) {
+  if (shift.odoStart !== null && effectiveInput.odometerKm < shift.odoStart && !effectiveInput.odometerAnomalyConfirmed) {
     throw new ServiceError(422, 'odometer_anomaly_confirmation_required', {
       start: shift.odoStart,
-      end: input.odometerKm,
+      end: effectiveInput.odometerKm,
     })
   }
 
@@ -1735,21 +1920,21 @@ async function submitEndPackageLocked(
 
   const staged: ShiftRecord = {
     ...shift,
-    odoEnd: input.odometerKm,
-    odoEndOcr: input.odometerKmOcr ?? null,
+    odoEnd: effectiveInput.odometerKm,
+    odoEndOcr: effectiveInput.odometerKmOcr ?? null,
     odoEndAnomalyConfirmedAt:
-      shift.odoStart !== null && input.odometerKm < shift.odoStart && input.odometerAnomalyConfirmed
+      shift.odoStart !== null && effectiveInput.odometerKm < shift.odoStart && effectiveInput.odometerAnomalyConfirmed
         ? submittedAt
         : null,
     odoEndAnomalyConfirmedBy:
-      shift.odoStart !== null && input.odometerKm < shift.odoStart && input.odometerAnomalyConfirmed
+      shift.odoStart !== null && effectiveInput.odometerKm < shift.odoStart && effectiveInput.odometerAnomalyConfirmed
         ? actor.userId
         : null,
-    batteryEnd: input.batteryPercent,
-    endCashDeclared: input.cashDeclared,
-    endWalletDeclared: input.walletDeclared,
+    batteryEnd: effectiveInput.batteryPercent,
+    endCashDeclared: effectiveInput.cashDeclared,
+    endWalletDeclared: effectiveInput.walletDeclared,
     // SRS D-3: the wallet OCR baseline (readWallet); evidence, not a BR1 input.
-    endWalletDeclaredOcr: input.walletDeclaredOcr ?? null,
+    endWalletDeclaredOcr: effectiveInput.walletDeclaredOcr ?? null,
     submittedAt,
     // mediaSlotsEnd likewise comes from uploaded evidence, not from the request.
   }
@@ -1771,6 +1956,16 @@ async function submitEndPackageLocked(
   // Claim the close boundary BEFORE reading/classifying operations. PgOperationBatchRepo locks the
   // same shift row and accepts only open/suspended rows with no submittedAt, so concurrent paths
   // serialize: a batch that wins is visible below; a batch that loses is rejected as too late.
+  if (closeDraft !== null) {
+    const marked = await deps.closeDrafts.markSubmitted({
+      shiftId,
+      expectedRevision: closeDraft.revision,
+      expectedDraftHash: closeDraft.draftHash,
+      submittedAtMs: Date.parse(submittedAt),
+      updatedBy: actor.userId,
+    })
+    if (!marked) throw new ServiceError(409, 'close_draft_changed')
+  }
   const claimed: ShiftRecord = { ...staged, state: result.next }
   await deps.shifts.update(claimed, actor.userId)
   await reclassifyShiftOperations(deps, claimed, actor.userId)
@@ -1895,6 +2090,11 @@ export interface OperationsInput {
     occurredDate?: string | null
     pointA?: string | null
     pointB?: string | null
+    windowBasis?: ShiftOrderRecord['windowBasis']
+    positionEvidence?: ShiftOrderRecord['positionEvidence']
+    observationId?: string | null
+    closeDraftReviewReasons?: readonly CloseDraftReviewReason[]
+    closeDraftClientKey?: string | null
   }[]
   cashDeductions?: readonly {
     operationKey: string
@@ -1906,6 +2106,12 @@ export interface OperationsInput {
     amountStrip?: string | null
     pointA?: string | null
     pointB?: string | null
+    included?: boolean
+    windowBasis?: CashDeductionRecord['windowBasis']
+    positionEvidence?: CashDeductionRecord['positionEvidence']
+    observationId?: string | null
+    closeDraftReviewReasons?: readonly CloseDraftReviewReason[]
+    closeDraftClientKey?: string | null
   }[]
   movements: readonly {
     amount: Minor
@@ -1931,8 +2137,11 @@ type CashDeductionMatchEvidence = {
   amountOcr?: Minor | null
   occurredMinute?: string | null
   occurredDate?: string | null
-  pointA?: string | null
-  pointB?: string | null
+    pointA?: string | null
+    pointB?: string | null
+    windowBasis?: CashDeductionRecord['windowBasis']
+    positionEvidence?: CashDeductionRecord['positionEvidence']
+    observationId?: string | null
 }
 
 const cashDeductionRouteEvidenceCount = (
@@ -2256,6 +2465,7 @@ export async function submitOperations(
   actor: Actor,
   shiftId: string,
   input: OperationsInput,
+  internal: { canonicalCloseDraft?: boolean; revision?: number; draftHash?: string } = {},
 ): Promise<{ shift: ShiftRecord; br1: Br1View; cashDeductions: CashDeductionRecord[] }> {
   const shift = await mustFind(deps, shiftId)
   if (shift.state !== 'open' && shift.state !== 'suspended') throw new ServiceError(409, 'shift_not_open')
@@ -2267,8 +2477,18 @@ export async function submitOperations(
     { driverId: shift.driverId, branchId: shift.branchId, ownerUserId: null },
     grants,
   )
-  if (!decision.allowed) throw new ServiceError(403, 'forbidden')
+  if (!decision.allowed && internal.canonicalCloseDraft !== true) throw new ServiceError(403, 'forbidden')
   const windowContext = await operationWindowContext(deps, shift)
+  const canonicalCloseDraft = internal.canonicalCloseDraft === true
+  if (canonicalCloseDraft && (internal.revision === undefined || internal.draftHash === undefined)) {
+    throw new ServiceError(500, 'close_draft_materialization_identity_missing')
+  }
+  const shiftDriver = canonicalCloseDraft ? await deps.directory.driver(shift.driverId) : null
+  const canonicalCreatedBy = canonicalCloseDraft ? shiftDriver?.userId : actor.userId
+  if (canonicalCloseDraft && !canonicalCreatedBy) {
+    throw new ServiceError(409, 'shift_driver_user_missing')
+  }
+  const operationOwnerId = canonicalCreatedBy ?? actor.userId
 
   // Old cached PWAs sent a negative Recent-Orders row as an order fee. Preserve that client, but
   // never let the signed fee reach the orders table or the tier/Yallago arithmetic.
@@ -2379,11 +2599,28 @@ export async function submitOperations(
   const saved = new Map(existing.map((order) => [order.providerOrderNo, order.id]))
 
   for (const row of submittedOrders) {
-    const windowStatus = classifyOperationWindow({
+    const reviewReasons = canonicalCloseDraft
+      ? [...new Set(row.closeDraftReviewReasons ?? [])]
+      : []
+    const canonicalIncluded = row.included === true && reviewReasons.length === 0
+    const canonicalWindowBasis = row.windowBasis ?? null
+    const screenPositionIncluded = canonicalCloseDraft && row.windowBasis === 'screen_position' &&
+      row.positionEvidence !== null && row.positionEvidence !== undefined &&
+      row.observationId !== null && row.observationId !== undefined && canonicalIncluded
+    const classifiedWindowStatus = classifyOperationWindow({
       occurredDate: row.occurredDate ?? null,
       occurredMinute: row.occurredMinute ?? null,
       ...windowContext,
     })
+    const windowStatus = canonicalCloseDraft
+      ? canonicalIncluded
+        ? ('in_window' as const)
+        : reviewReasons.length > 0
+          ? ('unknown' as const)
+          : classifiedWindowStatus
+      : screenPositionIncluded
+        ? ('in_window' as const)
+        : classifiedWindowStatus
     const current = byNo.get(row.providerOrderNo)
     const opposite = deductionsByKey.get(legacyDeductionKey(row.providerOrderNo))
     if (opposite && hasOperationDecision(opposite)) {
@@ -2401,6 +2638,7 @@ export async function submitOperations(
     scheduleLegacyKind(row.providerOrderNo, 'order', opposite)
     if (current) {
       const managerDecided = hasOperationDecision(current)
+      const preserveManagerWindow = current.windowBasis === 'manager' && hasAuditedWindowDecision(current)
       const record: ShiftOrderRecord = {
         ...current,
         // Once a manager has reviewed a row, the cached driver copy is no longer authoritative for
@@ -2419,11 +2657,38 @@ export async function submitOperations(
         // Persisted time and classification are evidence, not fields a cached driver retry can
         // revise. The deterministic close/review classifier may refresh the status; only a manager
         // with a reason may correct the printed date/minute or resulting inclusion.
-        included: persistedOperationInclusion(current),
-        walletAmount: managerDecided ? current.walletAmount : (row.walletAmount ?? null),
-        occurredMinute: current.occurredMinute,
-        occurredDate: current.occurredDate,
-        windowStatus: current.windowStatus,
+        included: preserveManagerWindow
+          ? current.included
+          : canonicalCloseDraft
+            ? canonicalIncluded
+            : persistedOperationInclusion(current),
+        walletAmount: managerDecided || row.walletAmount === undefined
+          ? current.walletAmount
+          : (row.walletAmount ?? null),
+        occurredMinute: preserveManagerWindow || !canonicalCloseDraft
+          ? current.occurredMinute
+          : (row.occurredMinute ?? null),
+        occurredDate: preserveManagerWindow || !canonicalCloseDraft
+          ? current.occurredDate
+          : (row.occurredDate ?? null),
+        windowStatus: preserveManagerWindow || !canonicalCloseDraft ? current.windowStatus : windowStatus,
+        windowBasis: preserveManagerWindow || !canonicalCloseDraft
+          ? (current.windowBasis ?? null)
+          : canonicalWindowBasis,
+        positionEvidence: preserveManagerWindow || !canonicalCloseDraft
+          ? (current.positionEvidence ?? null)
+          : canonicalWindowBasis === 'screen_position'
+            ? (row.positionEvidence ?? null)
+            : null,
+        observationId: preserveManagerWindow || !canonicalCloseDraft
+          ? (current.observationId ?? null)
+          : (row.observationId ?? null),
+        closeDraftReviewReasons: canonicalCloseDraft
+          ? reviewReasons
+          : (current.closeDraftReviewReasons ?? []),
+        closeDraftClientKey: canonicalCloseDraft
+          ? (row.closeDraftClientKey ?? current.closeDraftClientKey ?? null)
+          : (current.closeDraftClientKey ?? null),
       }
       orderUpdates.push({ record, expectedDecidedAt: current.decidedAt })
       // BACKFILL the route, never overwrite it. An order submitted before the reader could read
@@ -2461,21 +2726,38 @@ export async function submitOperations(
       driverShare: null,
       companyShare: null,
       notes: null,
-      createdBy: opposite ? opposite.createdBy : actor.userId,
+      createdBy: opposite ? opposite.createdBy : operationOwnerId,
       // «A» the pickup, «B» the dropoff, exactly as the screen wrote them. The route is what makes
       // an order recognisable to a person at the review — it has no order number to go by.
       points: [
         ...(row.pointA ? [{ role: 'start' as const, label: row.pointA, lat: null, lng: null }] : []),
         ...(row.pointB ? [{ role: 'end' as const, label: row.pointB, lat: null, lng: null }] : []),
       ],
-      included: opposite ? persistedOperationInclusion(opposite) : includedByWindow(windowStatus),
+      included: canonicalCloseDraft
+        ? canonicalIncluded
+        : opposite
+          ? persistedOperationInclusion(opposite)
+          : screenPositionIncluded || includedByWindow(windowStatus),
       walletAmount: row.walletAmount ?? null,
-      occurredMinute: opposite ? opposite.occurredMinute : (row.occurredMinute ?? null),
-      occurredDate: opposite ? opposite.occurredDate : (row.occurredDate ?? null),
-      windowStatus: opposite?.windowStatus ?? windowStatus,
+      occurredMinute: canonicalCloseDraft
+        ? (row.occurredMinute ?? null)
+        : opposite
+          ? opposite.occurredMinute
+          : (row.occurredMinute ?? null),
+      occurredDate: canonicalCloseDraft
+        ? (row.occurredDate ?? null)
+        : opposite
+          ? opposite.occurredDate
+          : (row.occurredDate ?? null),
+      windowStatus: canonicalCloseDraft ? windowStatus : (opposite?.windowStatus ?? windowStatus),
       decisionReason: null,
       decidedBy: null,
       decidedAt: null,
+      windowBasis: canonicalWindowBasis,
+      positionEvidence: canonicalWindowBasis === 'screen_position' ? (row.positionEvidence ?? null) : null,
+      observationId: row.observationId ?? null,
+      closeDraftReviewReasons: reviewReasons,
+      closeDraftClientKey: row.closeDraftClientKey ?? null,
     }
     orderCreates.push(record)
     saved.set(row.providerOrderNo, orderId)
@@ -2483,6 +2765,11 @@ export async function submitOperations(
   }
 
   for (const row of submittedDeductions) {
+    const reviewReasons = canonicalCloseDraft
+      ? [...new Set(row.closeDraftReviewReasons ?? [])]
+      : []
+    const canonicalIncluded = row.included === true && reviewReasons.length === 0
+    const canonicalWindowBasis = row.windowBasis ?? null
     const current = deductionsByKey.get(row.operationKey)
     const legacyProviderOrderNo = providerNoFromLegacyDeductionKey(row.operationKey)
     const opposite = legacyProviderOrderNo === null ? undefined : byNo.get(legacyProviderOrderNo)
@@ -2504,36 +2791,56 @@ export async function submitOperations(
     // A manager's reviewed classification is authoritative. A cached driver PWA may re-send the
     // same OCR page after a re-photo request; it must not overwrite that decision or misattribute
     // the write to the manager stored on the row.
-    if (current && hasOperationDecision(current)) continue
+    if (current && hasOperationDecision(current) && !canonicalCloseDraft) continue
     // An untouched OCR payload must not turn a protected identity into future cleanup scope. This
     // covers a cached key colliding with a manual row, evidence owned by another actor, or a value
     // that was already corrected away from its OCR amount. Explicit manual edits use `manual` and
     // continue through the normal update path.
     if (
-      current &&
+      !canonicalCloseDraft && current &&
       untouchedSubmittedDriverOcrDeduction(row, actor, shift) &&
       !untouchedExistingDriverOcrDeduction(current, actor, shift)
     ) continue
+    const preserveManagerWindow = current !== undefined && current.windowBasis === 'manager' &&
+      hasAuditedWindowDecision(current)
     const canHealCurrentOcrDate = current !== undefined &&
       untouchedExistingDriverOcrDeduction(current, actor, shift) &&
       untouchedSubmittedDriverOcrDeduction(row, actor, shift) &&
       hasSameCashDeductionOcrTiming(current, row) &&
       cleanDeductionEvidence(current.occurredDate) === '' &&
       cleanDeductionEvidence(row.occurredDate) !== ''
-    const occurredDate = current
+    const occurredDate = canonicalCloseDraft
+      ? preserveManagerWindow ? current!.occurredDate : (row.occurredDate ?? null)
+      : current
       ? canHealCurrentOcrDate
         ? (row.occurredDate ?? null)
         : current.occurredDate
       : opposite
         ? opposite.occurredDate
         : (row.occurredDate ?? null)
-    const occurredMinute = current
+    const occurredMinute = canonicalCloseDraft
+      ? preserveManagerWindow ? current!.occurredMinute : (row.occurredMinute ?? null)
+      : current
       ? current.occurredMinute
       : opposite
         ? opposite.occurredMinute
         : (row.occurredMinute ?? null)
-    const classifiedWindowStatus = classifyOperationWindow({ occurredDate, occurredMinute, ...windowContext })
-    const windowStatus = canHealCurrentOcrDate
+    const screenPositionIncluded = canonicalCloseDraft && row.windowBasis === 'screen_position' &&
+      row.positionEvidence !== null && row.positionEvidence !== undefined &&
+      row.observationId !== null && row.observationId !== undefined && canonicalIncluded
+    const naturallyClassifiedWindowStatus = classifyOperationWindow({ occurredDate, occurredMinute, ...windowContext })
+    const classifiedWindowStatus = canonicalCloseDraft
+      ? canonicalIncluded
+        ? ('in_window' as const)
+        : reviewReasons.length > 0
+          ? ('unknown' as const)
+          : naturallyClassifiedWindowStatus
+      : screenPositionIncluded
+        ? ('in_window' as const)
+        : naturallyClassifiedWindowStatus
+    const windowStatus = canonicalCloseDraft
+      ? preserveManagerWindow ? current!.windowStatus : classifiedWindowStatus
+      : canHealCurrentOcrDate
       ? classifiedWindowStatus
       : (current?.windowStatus ?? opposite?.windowStatus ?? classifiedWindowStatus)
     const submittedRoute = { pointA: row.pointA ?? null, pointB: row.pointB ?? null }
@@ -2549,14 +2856,16 @@ export async function submitOperations(
       id: current?.id ?? deps.ids.uuid(),
       shiftId,
       operationKey: row.operationKey,
-      amount: row.amount,
+      amount: current && hasOperationDecision(current) ? current.amount : row.amount,
       occurredDate,
       occurredMinute,
-      source: storedSource(row.source),
-      amountOcr: row.amountOcr ?? null,
+      source: current && hasOperationDecision(current) ? current.source : storedSource(row.source),
+      amountOcr: current && hasOperationDecision(current) ? current.amountOcr : (row.amountOcr ?? null),
       pointA: preserveRicherCurrentRoute ? current.pointA : submittedRoute.pointA,
       pointB: preserveRicherCurrentRoute ? current.pointB : submittedRoute.pointB,
-      included: canHealCurrentOcrDate
+      included: canonicalCloseDraft
+        ? preserveManagerWindow ? current!.included : canonicalIncluded
+        : canHealCurrentOcrDate
         ? includedByWindow(windowStatus)
         : current
           ? persistedOperationInclusion(current)
@@ -2567,16 +2876,100 @@ export async function submitOperations(
       decisionReason: current?.decisionReason ?? null,
       decidedBy: current?.decidedBy ?? null,
       decidedAt: current?.decidedAt ?? null,
-      createdBy: current ? current.createdBy : opposite ? opposite.createdBy : actor.userId,
+      createdBy: current ? current.createdBy : opposite ? opposite.createdBy : operationOwnerId,
+      windowBasis: canonicalCloseDraft
+        ? preserveManagerWindow ? (current!.windowBasis ?? null) : canonicalWindowBasis
+        : (current?.windowBasis ?? row.windowBasis ?? null),
+      positionEvidence: canonicalCloseDraft
+        ? preserveManagerWindow
+          ? (current!.positionEvidence ?? null)
+          : canonicalWindowBasis === 'screen_position' ? (row.positionEvidence ?? null) : null
+        : (current?.positionEvidence ?? row.positionEvidence ?? null),
+      observationId: canonicalCloseDraft
+        ? preserveManagerWindow ? (current!.observationId ?? null) : (row.observationId ?? null)
+        : (current?.observationId ?? row.observationId ?? null),
+      closeDraftReviewReasons: canonicalCloseDraft
+        ? reviewReasons
+        : (current?.closeDraftReviewReasons ?? []),
+      closeDraftClientKey: canonicalCloseDraft
+        ? (row.closeDraftClientKey ?? current?.closeDraftClientKey ?? null)
+        : (current?.closeDraftClientKey ?? null),
     }
     if (current) cashDeductionUpdates.push({ record, expectedDecidedAt: current.decidedAt })
     else cashDeductionCreates.push(record)
+  }
+
+  if (canonicalCloseDraft) {
+    // The durable draft is the server's canonical evidence set. Rows written by an older OCR
+    // submission but no longer supported by that set must stay visible while leaving every money
+    // calculation. True manager-owned manual rows and audited manager decisions are never cleanup
+    // scope. A driver-authored OCR row whose value differs from its OCR baseline is not protected:
+    // it may have arrived through the legacy endpoint after this draft snapshot and still lacks
+    // canonical evidence or an attributed manager decision.
+    const submittedOrderNos = new Set(submittedOrders.map((row) => row.providerOrderNo))
+    const updatedOrderIds = new Set(orderUpdates.map(({ record }) => record.id))
+    for (const current of existing) {
+      if (
+        submittedOrderNos.has(current.providerOrderNo) ||
+        updatedOrderIds.has(current.id) ||
+        transitionTargets.get(current.providerOrderNo) === 'cash_deduction' ||
+        current.kind === 'manual' ||
+        current.createdBy !== operationOwnerId ||
+        hasOperationDecision(current)
+      ) continue
+      orderUpdates.push({
+        expectedDecidedAt: current.decidedAt,
+        record: {
+          ...current,
+          included: false,
+          windowStatus: 'unknown',
+          windowBasis: null,
+          positionEvidence: null,
+          observationId: null,
+          closeDraftReviewReasons: [...new Set([
+            ...(current.closeDraftReviewReasons ?? []),
+            'evidence_removed' as const,
+          ])],
+        },
+      })
+    }
+
+    const submittedDeductionKeys = new Set(submittedDeductions.map((row) => row.operationKey))
+    const updatedDeductionIds = new Set(cashDeductionUpdates.map(({ record }) => record.id))
+    for (const current of activeExistingDeductionRows) {
+      const legacyProviderNo = providerNoFromLegacyDeductionKey(current.operationKey)
+      if (
+        submittedDeductionKeys.has(current.operationKey) ||
+        updatedDeductionIds.has(current.id) ||
+        (legacyProviderNo !== null && transitionTargets.get(legacyProviderNo) === 'order') ||
+        current.createdBy !== operationOwnerId ||
+        hasOperationDecision(current)
+      ) continue
+      cashDeductionUpdates.push({
+        expectedDecidedAt: current.decidedAt,
+        record: {
+          ...current,
+          included: false,
+          windowStatus: 'unknown',
+          windowBasis: null,
+          positionEvidence: null,
+          observationId: null,
+          closeDraftReviewReasons: [...new Set([
+            ...(current.closeDraftReviewReasons ?? []),
+            'evidence_removed' as const,
+          ])],
+        },
+      })
+    }
   }
 
   // Orders, deductions and wallet rows are one accounting claim by the driver. Committing a row at
   // a time left a half-imported page when a later natural key conflicted; the aggregate repository
   // locks the shift and rolls the entire page back on any conflict or racing manager decision.
   const batch: OperationBatch = {
+    ...(canonicalCloseDraft && internal.revision !== undefined && internal.draftHash !== undefined
+      ? { closeDraftMaterialization: { revision: internal.revision, draftHash: internal.draftHash } }
+      : {}),
     orderCreates,
     orderUpdates,
     orderPointReplacements,
@@ -2601,7 +2994,7 @@ export async function submitOperations(
         included: providerBecameDeduction ? false : (m.included ?? true),
         source: 'ocr' as const,
         notes: m.notes ?? null,
-        createdBy: actor.userId,
+        createdBy: operationOwnerId,
       }
     }),
   }
@@ -2724,13 +3117,15 @@ async function reviseOperationsLocked(
     if (!current) throw new ServiceError(404, 'order_not_found', { providerOrderNo: patch.providerOrderNo })
     const changesWindow =
       patch.included !== undefined || patch.occurredMinute !== undefined || patch.occurredDate !== undefined
+    const resolvesHumanMoney = patch.fee !== undefined &&
+      (current.closeDraftReviewReasons ?? []).includes('human_money_edit')
     const authoritativeChange = changesWindow || patch.fee !== undefined || patch.walletAmount !== undefined
-    if (changesWindow && !patch.reason?.trim()) {
+    if ((changesWindow || resolvesHumanMoney) && !patch.reason?.trim()) {
       throw new ServiceError(422, 'operation_decision_reason_required')
     }
     const occurredMinute = patch.occurredMinute === undefined ? current.occurredMinute : patch.occurredMinute
     const occurredDate = patch.occurredDate === undefined ? current.occurredDate : patch.occurredDate
-    const windowStatus = changesWindow
+    const windowStatus = changesWindow || resolvesHumanMoney
       ? classifyOperationWindow({
           occurredDate,
           occurredMinute,
@@ -2739,7 +3134,9 @@ async function reviseOperationsLocked(
       : current.windowStatus
     await deps.orders.update({
       ...current,
-      included: patch.included ?? (changesWindow ? includedByWindow(windowStatus) : current.included),
+      included: patch.included ?? (changesWindow || resolvesHumanMoney
+        ? includedByWindow(windowStatus)
+        : current.included),
       // The manager's own correction. He verifies against the cash in his hand, so he is the one
       // placed to say what a fee actually was — and until now his only move against a wrong one was
       // to exclude the whole delivery. The audit trigger attributes the change, and it moves
@@ -2750,6 +3147,19 @@ async function reviseOperationsLocked(
       occurredMinute,
       occurredDate,
       windowStatus,
+      ...(changesWindow
+        ? {
+            windowBasis: 'manager' as const,
+            positionEvidence: null,
+            closeDraftReviewReasons: [],
+          }
+        : resolvesHumanMoney
+          ? {
+              closeDraftReviewReasons: (current.closeDraftReviewReasons ?? []).filter(
+                (reason) => reason !== 'human_money_edit',
+              ),
+            }
+          : {}),
       ...(authoritativeChange
         ? {
             // Window/include decisions require a human reason. Value-only corrections retain an
@@ -2758,7 +3168,7 @@ async function reviseOperationsLocked(
             // On an UNKNOWN row, however, a fee note must not masquerade as the reasoned include /
             // exclude decision approval requires. Keep the existing window reason (normally null)
             // until the manager explicitly changes inclusion or timing.
-            decisionReason: changesWindow
+            decisionReason: changesWindow || resolvesHumanMoney
               ? patch.reason!.trim()
               : current.windowStatus === 'unknown'
                 ? current.decisionReason
@@ -2791,6 +3201,9 @@ async function reviseOperationsLocked(
       decisionReason: patch.reason.trim(),
       decidedBy: actor.userId,
       decidedAt: nextOperationDecisionAt(deps.clock.nowMs(), current.decidedAt),
+      windowBasis: 'manager',
+      positionEvidence: null,
+      closeDraftReviewReasons: [],
     }, actor.userId)
   }
 
@@ -2918,6 +3331,12 @@ export async function settlementFor(deps: Deps, shift: ShiftRecord): Promise<Set
     actualCash: shift.endCashDeclared,
     actualWallet: shift.endWalletDeclared,
   })
+  const closeDraft = await deps.closeDrafts.findByShift(shift.id)
+  const submittedCloseDraft = closeDraft?.submittedAtMs == null ? null : {
+    revision: closeDraft.revision,
+    draftHash: closeDraft.draftHash,
+    submittedAtMs: closeDraft.submittedAtMs,
+  }
   const settlementHash = fixedSettlementHash(
     {
       shiftId: shift.id,
@@ -2925,6 +3344,11 @@ export async function settlementFor(deps: Deps, shift: ShiftRecord): Promise<Set
       driverId: shift.driverId,
       businessDate: shift.businessDate,
       reviewedOrdersHash: br1.ordersHash,
+      closeDraftRevision: submittedCloseDraft?.revision ?? null,
+      closeDraftHash: submittedCloseDraft?.draftHash ?? null,
+      closeDraftSubmittedAt: submittedCloseDraft === null
+        ? null
+        : new Date(submittedCloseDraft.submittedAtMs).toISOString(),
     },
     plan,
   )
@@ -3312,10 +3736,35 @@ async function forceCloseLocked(
   // the force override bypasses BR1, not the requirement to say which operations belong here.
   if (shift.submittedAt === null) {
     if (!input.prepareOnly) throw new ServiceError(409, 'force_close_preparation_required')
+    const submittedAt = new Date(deps.clock.nowMs()).toISOString()
+    const closeDraft = await deps.closeDrafts.findByShift(shiftId)
+    if (closeDraft !== null) {
+      if (closeDraft.submittedAtMs !== null) {
+        throw new ServiceError(409, 'close_draft_changed', {
+          currentRevision: closeDraft.revision,
+          currentDraftHash: closeDraft.draftHash,
+        })
+      }
+      await assertCloseDraftEvidenceCurrent(deps, shiftId, closeDraft)
+      assertCloseDraftMoneyComplete(closeDraft)
+      await submitOperations(deps, actor, shiftId, closeDraftOperationsInput(shiftId, closeDraft), {
+        canonicalCloseDraft: true,
+        revision: closeDraft.revision,
+        draftHash: closeDraft.draftHash,
+      })
+      const marked = await deps.closeDrafts.markSubmitted({
+        shiftId,
+        expectedRevision: closeDraft.revision,
+        expectedDraftHash: closeDraft.draftHash,
+        submittedAtMs: Date.parse(submittedAt),
+        updatedBy: actor.userId,
+      })
+      if (!marked) throw new ServiceError(409, 'close_draft_changed')
+    }
     const anomalyConfirmedAt = anomalousOdometer
       ? (existingAnomalyConfirmed
           ? shift.odoEndAnomalyConfirmedAt
-          : new Date(deps.clock.nowMs()).toISOString())
+          : submittedAt)
       : null
     const anomalyConfirmedBy = anomalousOdometer
       ? (existingAnomalyConfirmed ? shift.odoEndAnomalyConfirmedBy : actor.userId)
@@ -3323,7 +3772,7 @@ async function forceCloseLocked(
     shift = {
       ...shift,
       state: 'pending_review',
-      submittedAt: new Date(deps.clock.nowMs()).toISOString(),
+      submittedAt,
       endCashDeclared: cashDeclared,
       endWalletDeclared: walletDeclared,
       odoEnd: finalOdometer,

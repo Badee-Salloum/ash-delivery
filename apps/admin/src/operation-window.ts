@@ -9,6 +9,7 @@ export type OperationWindowStatus =
 export interface WindowReviewRow {
   windowStatus?: OperationWindowStatus
   decisionReason?: string | null
+  closeDraftReviewReasons?: readonly string[]
 }
 
 /**
@@ -17,7 +18,10 @@ export interface WindowReviewRow {
  * so only the explicit server status is considered unresolved.
  */
 export function isUnresolvedWindowRow(row: WindowReviewRow): boolean {
-  return row.windowStatus === 'unknown' && !row.decisionReason?.trim()
+  return (
+    (row.closeDraftReviewReasons?.length ?? 0) > 0 ||
+    (row.windowStatus === 'unknown' && !row.decisionReason?.trim())
+  )
 }
 
 export function countUnresolvedWindowRows(
@@ -25,7 +29,10 @@ export function countUnresolvedWindowRows(
   cashDeductions: readonly WindowReviewRow[],
 ): number {
   return (
-    orders.filter((row) => row.kind !== 'manual' && isUnresolvedWindowRow(row)).length +
+    orders.filter(
+      (row) => (row.kind !== 'manual' || (row.closeDraftReviewReasons?.length ?? 0) > 0) &&
+        isUnresolvedWindowRow(row),
+    ).length +
     cashDeductions.filter(isUnresolvedWindowRow).length
   )
 }

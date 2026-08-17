@@ -26,7 +26,9 @@ afterEach(async () => {
 const post = async (t: string, url: string, payload: Record<string, unknown> = {}): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(t) }, payload })
 const put = async (t: string, url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(t) }, payload })
+  url.endsWith('/end-package')
+    ? await h.submitEndPackage(t, url.split('/')[2]!, payload)
+    : await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(t) }, payload })
 const get = async (t: string, url: string): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(t) } })
 
@@ -40,14 +42,22 @@ async function pendingReviewOnAnEarlierDay(driver: string, manager: string): Pro
   await h.uploadPhoto(driver, id, 'start', 'odometer')
   await put(driver, `/shifts/${id}/start-package`, { odometerKm: 100, batteryPercent: 90 })
   await post(manager, `/shifts/${id}/approve-open`, { floatTranches: [sypStr(100_000)], topupTranches: [] })
-  await post(driver, `/shifts/${id}/orders`, { providerOrderNo: 'A-1', payMode: 'cash', fee: sypStr(5_000) })
+  h.stageCloseDraftFinancialFixture(id, {
+    managerToken: manager,
+    orders: [{
+      clientKey: 'approval-queue-a1', providerOrderNo: 'A-1', payMode: 'cash', fee: sypStr(5_000),
+      occurredDate: today, occurredMinute: '08:00',
+    }],
+  })
   for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
-  await put(driver, `/shifts/${id}/end-package`, {
+  const ended = await put(driver, `/shifts/${id}/end-package`, {
     odometerKm: 110,
     batteryPercent: 50,
     cashDeclared: sypStr(105_000),
     walletDeclared: sypStr(-1_000),
   })
+  expect(ended.statusCode, ended.body).toBe(200)
+  expect(ended.json().state).toBe('pending_review')
 
   // Move it into the past exactly as a night rolling over would. The day needs its own FX rate:
   // `resolveFxDay` carries the nearest EARLIER one forward, and there is none before the seed.

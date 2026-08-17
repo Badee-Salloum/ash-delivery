@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
+import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr, today } from './harness.ts'
 
 /**
  * Manager decisions and the decision log (SRS C-7). Until now the manager could only APPROVE;
@@ -20,7 +20,9 @@ afterEach(async () => {
 const post = async (token: string, url: string, payload: Record<string, unknown> = {}): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(token) }, payload })
 const put = async (token: string, url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
+  url.endsWith('/end-package')
+    ? await h.submitEndPackage(token, url.split('/')[2]!, payload)
+    : await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
 
 /** Drive a shift to `pending_review` (float 100k, no orders). BR1 need not balance to get there —
  * the end-package gate is completeness only; the manager reviews after. */
@@ -30,7 +32,13 @@ async function toPendingReview(driver: string, manager: string): Promise<string>
   await put(driver, `/shifts/${id}/start-package`, { odometerKm: 100, batteryPercent: 90 })
   const open = await post(manager, `/shifts/${id}/approve-open`, { floatTranches: [sypStr(100_000)], topupTranches: [] })
   expect(open.statusCode, open.body).toBe(200)
-  await post(driver, `/shifts/${id}/orders`, { providerOrderNo: 'A-1', payMode: 'cash', fee: sypStr(5_000), zone: null })
+  h.stageCloseDraftFinancialFixture(id, {
+    managerToken: manager,
+    orders: [{
+      clientKey: 'decisions-a1', providerOrderNo: 'A-1', payMode: 'cash', fee: sypStr(5_000),
+      occurredDate: today, occurredMinute: '08:00',
+    }],
+  })
   for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
   const end = await put(driver, `/shifts/${id}/end-package`, { odometerKm: 110, batteryPercent: 50, cashDeclared: sypStr(100_000), walletDeclared: sypStr(0) })
   expect(end.statusCode, end.body).toBe(200)

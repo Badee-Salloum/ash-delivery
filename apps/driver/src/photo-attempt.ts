@@ -9,12 +9,14 @@
 export interface PhotoAttempt<FileLike> {
   readonly id: number
   readonly file: FileLike
+  /** Internal once-bit: an upload retry may start readers, but never twice for one generation. */
+  readersStarted: boolean
 }
 
 export type PhotoAttemptPhase = 'selection' | 'upload_retry'
 
 export function nextPhotoAttempt<FileLike>(previousId: number, file: FileLike): PhotoAttempt<FileLike> {
-  return { id: previousId + 1, file }
+  return { id: previousId + 1, file, readersStarted: false }
 }
 
 export function isCurrentPhotoAttempt<FileLike>(
@@ -24,15 +26,23 @@ export function isCurrentPhotoAttempt<FileLike>(
   return current === candidate
 }
 
-/** Execute the only policy distinction: a selection reads + uploads; an upload retry only uploads. */
+/**
+ * Accept evidence first, then read that accepted generation exactly once.
+ *
+ * An upload retry is allowed to start the readers when the first upload never reached the server.
+ * It is not allowed to start them again after a successful upload. This is the critical distinction
+ * from the old "read first, upload second" flow that could materialise operations with no evidence.
+ */
 export async function executePhotoAttempt<FileLike>(
   attempt: PhotoAttempt<FileLike>,
-  phase: PhotoAttemptPhase,
+  _phase: PhotoAttemptPhase,
   actions: {
-    startReaders(attempt: PhotoAttempt<FileLike>): void
-    upload(attempt: PhotoAttempt<FileLike>): void | Promise<void>
+    startReaders(attempt: PhotoAttempt<FileLike>): void | Promise<void>
+    upload(attempt: PhotoAttempt<FileLike>): boolean | Promise<boolean>
   },
 ): Promise<void> {
-  if (phase === 'selection') actions.startReaders(attempt)
-  await actions.upload(attempt)
+  const accepted = await actions.upload(attempt)
+  if (!accepted || attempt.readersStarted) return
+  attempt.readersStarted = true
+  await actions.startReaders(attempt)
 }

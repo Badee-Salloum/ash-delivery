@@ -28,7 +28,7 @@ docker compose -f infra/compose/docker-compose.dev.yml up -d
 | Path | What |
 | --- | --- |
 | [packages/domain/](packages/domain/) | ★ The money core. Pure, zero-dependency. Every rule that decides where money goes. |
-| [packages/db/migrations/](packages/db/migrations/) | 33 forward-only, hand-written SQL migrations; production is live through `0033`. |
+| [packages/db/migrations/](packages/db/migrations/) | 34 forward-only, hand-written SQL migrations in source; production is still live through `0033`. |
 | [packages/db/verify-guards.sql](packages/db/verify-guards.sql) | Attempts every illegal write and fails if the database allows one. |
 | [scripts/](scripts/) | `check-domain-pure.mjs`, `check-sql.mjs`, `db-verify.sh` — all negative-tested. |
 | [CLAUDE.md](CLAUDE.md) | Business rules BR1–BR8 + conventions. Read this first. |
@@ -59,13 +59,26 @@ live Vercel projects, and Neon is live at migration `0033` (33 total) after rele
 source of truth for rollout state and remaining acceptance work is [PROGRESS.md](PROGRESS.md), not
 the older milestone estimates below.
 
+**The repository head is an unpublished `0034` release candidate.** It adds a durable server-side
+shift-close draft, attachment-linked OCR and restoration, and a `428 driver_update_required`
+response for an old driver attempting the new linked order-reader flow. The candidate must be
+released as one maintenance operation in this order: migration `0034` → API → driver/admin, with
+writes paused until all three application surfaces agree. Production has not received `0034`, and
+no live Muhammad/Thaer shift has been changed by this work.
+
+The final candidate database gate used Node `24.19.0` and PostgreSQL `17.11`: a fresh database
+applied all 34 migrations, a rerun reported `0 applied / 34 present`, all database guards passed,
+and the real-PostgreSQL suite passed **76/76** across 15 files. Migration `0034` recorded checksum
+`5bc30a31` and SHA-256
+`228F090D8FCF2DC0CA1B7EDF6FA500D679CA19ED9E388D2DE9054B7EE2E8659A` on the disposable gate.
+
 On 2026-08-15 the full Node 24 gates passed, and the complete 69/69 database suite passed on a real,
 disposable PostgreSQL 17 database after all 33 migrations. Production migration and postflight were
 read-only apart from the migration itself; never run the destructive conformance suite against
 production. The earlier isolated Neon restore/fingerprint rehearsal remains the recovery evidence
 for that historical baseline.
 
-Recent Orders OCR now requires two agreeing observations from three independent time-evidence
+The live `0033` Recent Orders OCR requires two agreeing observations from three independent time-evidence
 passes. It votes on the literal printed clock before deterministic AM/PM conversion; disagreement
 or insufficient evidence leaves the operation `unknown` and outside BR1 and settlement until an
 audited manager action resolves it. See [RUNBOOK.md](RUNBOOK.md) for retry and stored-image reread

@@ -73,7 +73,7 @@ export type OcrField = 'orders' | 'payments_log' | 'wallet' | 'odometer' | 'bms'
  * a missing asset, a dead worker, a timeout and a clean read that matched nothing all used to
  * return `null` alike, and the UI could say nothing more useful than "it didn't work".
  */
-export type OcrFailure = 'unavailable' | 'timeout' | 'no_fields' | 'refused'
+export type OcrFailure = 'unavailable' | 'timeout' | 'no_fields' | 'refused' | 'wrong_screen'
 
 /**
  * One money row as the reader saw it.
@@ -85,6 +85,8 @@ export type OcrFailure = 'unavailable' | 'timeout' | 'no_fields' | 'refused'
  */
 export interface OcrRow {
   printed: string
+  /** Literal clock glyphs before AM/PM normalization (for example `١٢:٣٠ ص`). */
+  printedTime?: string | null
   value: string | null
   cancelled: boolean
   /** The readers disagreed on a financially destructive classification; keep this row visible. */
@@ -113,6 +115,12 @@ export interface OcrRow {
    * neighbouring business date.
    */
   dateIso: string | null
+  /** Optional deterministic screen geometry; absent readers remain valid. */
+  rowIndex?: number
+  rowCount?: number
+  dateSection?: string | null
+  yTop?: number | null
+  yBottom?: number | null
 }
 
 export type OcrResult =
@@ -497,6 +505,13 @@ export interface ShiftOrderRecord {
   decisionReason: string | null
   decidedBy: string | null
   decidedAt: string | null
+  /** Additive provenance for conservative operation-window inference. */
+  windowBasis?: OperationWindowBasis | null
+  positionEvidence?: CloseDraftPositionEvidence | null
+  observationId?: string | null
+  closeDraftReviewReasons?: CloseDraftReviewReason[]
+  /** Stable server draft identity; null on operations predating durable close drafts. */
+  closeDraftClientKey?: string | null
 }
 
 /**
@@ -510,6 +525,9 @@ export type OperationWindowStatus =
   | 'open_minute_boundary'
   | 'close_minute_boundary'
   | 'unknown'
+
+/** The evidence that justified an operation's window classification. */
+export type OperationWindowBasis = 'printed_time' | 'screen_position' | 'manager'
 
 export type CashDeductionSource = 'ocr' | 'manual'
 
@@ -538,6 +556,11 @@ export interface CashDeductionRecord {
   decidedBy: string | null
   decidedAt: string | null
   createdBy: string | null
+  windowBasis?: OperationWindowBasis | null
+  positionEvidence?: CloseDraftPositionEvidence | null
+  observationId?: string | null
+  closeDraftReviewReasons?: CloseDraftReviewReason[]
+  closeDraftClientKey?: string | null
 }
 
 /** What a captured payment-log movement appears to be; retained for archival review/matching. */
@@ -835,6 +858,11 @@ export interface OperationWindowRepo {
 
 /** One driver operations submission, committed as a single all-or-nothing unit. */
 export interface OperationBatch {
+  /** Server-only capability for atomically materializing one exact durable close draft. */
+  closeDraftMaterialization?: {
+    revision: number
+    draftHash: string
+  }
   orderCreates: readonly ShiftOrderRecord[]
   orderUpdates: readonly {
     record: ShiftOrderRecord
@@ -1045,7 +1073,12 @@ export interface MediaRepo {
     pkg: EvidencePackage,
     slot: string,
     mediaId: string,
-    metadata: { actorId: string | null; attachedAtMs?: number; reusedFromShiftId?: string | null },
+    metadata: {
+      actorId: string | null
+      attachedAtMs?: number
+      reusedFromShiftId?: string | null
+      expectedAttachmentToken?: string | null
+    },
   ): Promise<void>
   /** An authorized uploader explicitly accepts a reused/old attachment after reviewing the warning. */
   acknowledgeStale(
@@ -1065,8 +1098,278 @@ export interface MediaRepo {
    * by "remove this picture" is that this SLOT no longer holds it, and that is exactly what the
    * BR5 gate reads. The orphaned bytes are cheap and a retention job can sweep them.
    */
-  detach(shiftId: string, pkg: EvidencePackage, slot: string, actorId: string | null): Promise<void>
+  detach(
+    shiftId: string,
+    pkg: EvidencePackage,
+    slot: string,
+    actorId: string | null,
+    expectedAttachmentToken?: string,
+  ): Promise<void>
   listSlots(shiftId: string): Promise<AttachedSlot[]>
+  /** Append-only attachment generations, newest first. */
+  listAttachmentHistory(shiftId: string): Promise<AttachmentHistoryRecord[]>
+  /** `lock` is used only inside an existing UOW and serializes the media's attachment history. */
+  latestAttachmentForMedia(
+    mediaId: string,
+    options?: { lock?: boolean },
+  ): Promise<AttachmentHistoryRecord | null>
+  /** Re-attach historical immutable bytes as a new generation after optimistic checks. */
+  restoreAttachment(input: {
+    shiftId: string
+    historyId: string
+    expectedCurrentAttachmentToken: string | null
+    actorId: string
+    reason: string
+    attachedAtMs: number
+  }): Promise<AttachedSlot>
+}
+
+export interface AttachmentHistoryRecord {
+  id: string
+  shiftId: string
+  package: EvidencePackage
+  slot: string
+  mediaId: string
+  attachmentToken: string
+  attachedAtMs: number
+  reusedFromShiftId: string | null
+}
+
+export type CloseDraftReadStatus = 'idle' | 'running' | 'complete' | 'failed'
+
+export interface CloseDraftReadRecord {
+  readId: string
+  status: CloseDraftReadStatus
+  field: OcrField
+  failure: OcrFailure | null
+  attempts: number
+}
+
+export interface CloseDraftAttachment {
+  package: 'end'
+  slot: string
+  mediaId: string
+  attachmentToken: string
+  attachedAtMs: number
+  attachedAt: string
+  read: CloseDraftReadRecord | null
+}
+
+export interface CloseDraftObservationSource {
+  mediaId: string
+  attachmentToken: string
+  slot: string
+}
+
+export interface CloseDraftPositionEvidence {
+  /** Zero-based top-to-bottom row ordinal within exactly one screenshot. */
+  rowIndex: number
+  rowCount: number
+  /** Normalized 0..1 vertical bounds produced by deterministic image geometry. */
+  yTop: number | null
+  yBottom: number | null
+  /** Inclusive local date+minute bound (`YYYY-MM-DD HH:MM`), never a fabricated exact clock. */
+  lowerInstant: string | null
+  upperInstant: string | null
+  anchorObservationIds: string[]
+}
+
+export interface CloseDraftSighting {
+  kind: 'order' | 'cash_deduction' | 'movement'
+  readId: string
+  observationId: string
+  rowIndex: number
+  dateSection: string | null
+  evidence: CloseDraftObservationSource
+  /** Normalized immutable result for this one page; used when another page generation is removed. */
+  value: string | null
+  /** Literal clock printed on the screenshot. AM/PM is retained; matching normalizes it separately. */
+  printedTime?: string | null
+  occurredMinute: string | null
+  occurredDate: string | null
+  included: boolean
+  reviewReasons: CloseDraftReviewReason[]
+  pointA: string | null
+  pointB: string | null
+  windowBasis: OperationWindowBasis | null
+  position: CloseDraftPositionEvidence | null
+}
+
+export type CloseDraftReviewReason =
+  | 'missing_money'
+  | 'missing_time'
+  | 'reader_conflict'
+  | 'time_conflict'
+  | 'cancelled_conflict'
+  | 'human_time_edit'
+  | 'human_money_edit'
+  | 'evidence_removed'
+
+export interface CloseDraftOrder {
+  clientKey: string
+  /** Server-only overlap key; null for human-created rows. */
+  matchKey: string | null
+  providerOrderNo: string
+  payMode: PayMode
+  fee: string | null
+  feeOcr: string | null
+  feeRefused: boolean
+  reviewRequired: boolean
+  reviewReasons: CloseDraftReviewReason[]
+  included: boolean
+  occurredMinute: string | null
+  occurredDate: string | null
+  pointA: string | null
+  pointB: string | null
+  source: 'manual' | 'local_ocr' | 'cloud_ocr'
+  readId: string | null
+  observationId: string | null
+  rowIndex: number | null
+  dateSection: string | null
+  evidence: CloseDraftObservationSource | null
+  windowBasis: OperationWindowBasis | null
+  position: CloseDraftPositionEvidence | null
+  /** Every active page that independently supports this canonical operation. */
+  sightings: CloseDraftSighting[]
+}
+
+export interface CloseDraftCashDeduction {
+  clientKey: string
+  matchKey: string | null
+  operationKey: string
+  amount: string | null
+  amountOcr: string | null
+  reviewRequired: boolean
+  reviewReasons: CloseDraftReviewReason[]
+  included: boolean
+  occurredMinute: string | null
+  occurredDate: string | null
+  pointA: string | null
+  pointB: string | null
+  source: 'manual' | 'local_ocr' | 'cloud_ocr'
+  readId: string | null
+  observationId: string | null
+  rowIndex: number | null
+  dateSection: string | null
+  evidence: CloseDraftObservationSource | null
+  windowBasis: OperationWindowBasis | null
+  position: CloseDraftPositionEvidence | null
+  sightings: CloseDraftSighting[]
+}
+
+export interface CloseDraftMovement {
+  clientKey: string
+  matchKey: string | null
+  amount: string
+  occurredMinute: string | null
+  role: WalletMovementRole
+  providerOrderNo: string | null
+  ambiguous: boolean
+  included: boolean
+  notes: string | null
+  source: 'manual' | 'local_ocr' | 'cloud_ocr'
+  readId: string | null
+  observationId: string | null
+  rowIndex: number | null
+  dateSection: string | null
+  evidence: CloseDraftObservationSource | null
+  sightings: CloseDraftSighting[]
+}
+
+export interface CloseDraftFigures {
+  odometerKm: number | null
+  odometerKmOcr: number | null
+  odometerAnomalyConfirmed: boolean
+  batteryPercent: number | null
+  cashDeclared: string | null
+  walletDeclared: string | null
+  walletDeclaredOcr: string | null
+}
+
+export interface CloseDraftData {
+  figures: CloseDraftFigures
+  operations: {
+    orders: CloseDraftOrder[]
+    cashDeductions: CloseDraftCashDeduction[]
+    movements: CloseDraftMovement[]
+  }
+  /** Latest read per current attachment token; old generations remain in attachment history. */
+  reads: Record<string, CloseDraftReadRecord>
+  /** Current evidence generations included in the draft hash; keyed by end-package slot. */
+  evidence: Record<string, { mediaId: string; attachmentToken: string; attachedAtMs: number }>
+}
+
+export interface CloseDraftRecord {
+  shiftId: string
+  revision: number
+  draftHash: string
+  data: CloseDraftData
+  updatedAtMs: number
+  updatedBy: string
+  submittedAtMs: number | null
+}
+
+export interface CloseDraftView {
+  shiftId: string
+  revision: number
+  draftHash: string
+  updatedAt: string
+  submittedAt: string | null
+  restored: boolean
+  figures: CloseDraftFigures
+  attachments: CloseDraftAttachment[]
+  operations: CloseDraftData['operations']
+}
+
+export interface CloseDraftRepo {
+  findByShift(shiftId: string): Promise<CloseDraftRecord | null>
+  /** Create revision 0, or return the row another request created first. */
+  getOrCreate(input: Omit<CloseDraftRecord, 'revision'>): Promise<CloseDraftRecord>
+  /** Compare-and-swap. Null means the expected revision/hash was stale. */
+  update(input: {
+    shiftId: string
+    expectedRevision: number
+    data: CloseDraftData
+    draftHash: string
+    updatedAtMs: number
+    updatedBy: string
+  }): Promise<CloseDraftRecord | null>
+  /** Called only inside the close UOW; exact retries return the already-submitted row. */
+  markSubmitted(input: {
+    shiftId: string
+    expectedRevision: number
+    expectedDraftHash: string
+    submittedAtMs: number
+    updatedBy: string
+  }): Promise<CloseDraftRecord | null>
+  /** Re-open the same immutable content after an audited manager rejection/rephoto transition. */
+  reopen(input: {
+    shiftId: string
+    updatedAtMs: number
+    updatedBy: string
+  }): Promise<CloseDraftRecord | null>
+  /** Atomically verifies the live attachment, appends one immutable read/observation set and CASes the draft. */
+  saveRead(input: {
+    shiftId: string
+    expectedRevision: number
+    mediaId: string
+    attachmentToken: string
+    slot: string
+    read: CloseDraftReadRecord
+    observations: Array<{
+      id: string
+      rowIndex: number
+      rowCount: number
+      dateSection: string | null
+      yTop: number | null
+      yBottom: number | null
+      row: OcrRow
+    }>
+    data: CloseDraftData
+    draftHash: string
+    updatedAtMs: number
+    updatedBy: string
+  }): Promise<CloseDraftRecord | null>
 }
 
 export interface OcrReadRecord {
@@ -1597,6 +1900,8 @@ export interface ShiftCloseTransactionDeps {
   batterySwaps: BatterySwapRepo
   weekLocks: WeekLockRepo
   settlements: ShiftSettlementRepo
+  closeDrafts: CloseDraftRepo
+  operationBatches: OperationBatchRepo
 }
 
 export interface ShiftCloseUnitOfWorkInput {
@@ -1660,6 +1965,8 @@ export interface Deps {
   decisions: ShiftDecisionRepo
   /** Immutable cash/wallet action the manager confirmed when approving the close. */
   settlements: ShiftSettlementRepo
+  /** Revisioned, server-owned recovery state for the driver's closing workflow. */
+  closeDrafts: CloseDraftRepo
   gps: GpsPingRepo
   /** Atomic close-boundary/review writer; callback work is database-only. */
   closeUnitOfWork: ShiftCloseUnitOfWork

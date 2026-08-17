@@ -74,6 +74,7 @@ import { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
 import { MemoryCashCountRepo } from './cashcount.ts'
 import { MemoryOfficeCapitalTargetRepo, MemoryRestorationRepo } from './restoration.ts'
 import { MemoryNotificationRepo, MemoryTierRepo } from './tiers.ts'
+import { MemoryCloseDraftRepo } from './close-draft.ts'
 
 export { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 export { MemoryOcrReadRepo, MemoryOcrReader, ScriptedOcrReader } from '../ocr/memory.ts'
@@ -81,6 +82,7 @@ export { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
 export { MemoryCashCountRepo } from './cashcount.ts'
 export { MemoryOfficeCapitalTargetRepo, MemoryRestorationRepo } from './restoration.ts'
 export { MemoryNotificationRepo, MemoryTierRepo } from './tiers.ts'
+export { MemoryCloseDraftRepo } from './close-draft.ts'
 
 /**
  * In-memory implementations of every port.
@@ -482,6 +484,11 @@ export class MemoryOrderRepo implements OrderRepo {
       decisionReason: order.decisionReason,
       decidedBy: order.decidedBy,
       decidedAt: order.decidedAt,
+      windowBasis: order.windowBasis ?? null,
+      positionEvidence: order.positionEvidence ?? null,
+      observationId: order.observationId ?? null,
+      closeDraftClientKey: order.closeDraftClientKey ?? null,
+      closeDraftReviewReasons: [...(order.closeDraftReviewReasons ?? [])],
     })
   }
   async replacePoints(orderId: string, points: readonly OrderPointRecord[], _actorId: string | null): Promise<void> {
@@ -590,6 +597,10 @@ export class MemoryOperationWindowRepo implements OperationWindowRepo {
     let orderUpdates = 0
     for (const order of await this.orders.listByShift(shiftId)) {
       if (order.kind === 'manual') continue
+      if (
+        (order.windowBasis === 'screen_position' && order.occurredMinute === null && order.included) ||
+        (!order.included && (order.closeDraftReviewReasons?.length ?? 0) > 0)
+      ) continue
       const windowStatus = classify(order.occurredDate, order.occurredMinute)
       const auditedDecision = order.decidedBy !== null
         && order.decidedAt !== null
@@ -602,6 +613,10 @@ export class MemoryOperationWindowRepo implements OperationWindowRepo {
 
     let deductionUpdates = 0
     for (const deduction of await this.deductions.listByShift(shiftId)) {
+      if (
+        (deduction.windowBasis === 'screen_position' && deduction.occurredMinute === null && deduction.included) ||
+        (!deduction.included && (deduction.closeDraftReviewReasons?.length ?? 0) > 0)
+      ) continue
       const windowStatus = classify(deduction.occurredDate, deduction.occurredMinute)
       const auditedDecision = deduction.decidedBy !== null
         && deduction.decidedAt !== null
@@ -748,7 +763,12 @@ const sameCashDeductionRecord = (left: CashDeductionRecord, right: CashDeduction
   left.decisionReason === right.decisionReason &&
   left.decidedBy === right.decidedBy &&
   left.decidedAt === right.decidedAt &&
-  left.createdBy === right.createdBy
+  left.createdBy === right.createdBy &&
+  (left.windowBasis ?? null) === (right.windowBasis ?? null) &&
+  JSON.stringify(left.positionEvidence ?? null) === JSON.stringify(right.positionEvidence ?? null) &&
+  (left.observationId ?? null) === (right.observationId ?? null) &&
+  (left.closeDraftClientKey ?? null) === (right.closeDraftClientKey ?? null) &&
+  JSON.stringify(left.closeDraftReviewReasons ?? []) === JSON.stringify(right.closeDraftReviewReasons ?? [])
 
 export class MemoryOperationBatchRepo implements OperationBatchRepo {
   private readonly shifts: MemoryShiftRepo
@@ -756,6 +776,7 @@ export class MemoryOperationBatchRepo implements OperationBatchRepo {
   private readonly deductions: MemoryCashDeductionRepo
   private readonly movements: MemoryWalletMovementRepo
   private readonly gate: MemoryTransactionGate
+  private readonly alreadyLocked: boolean
 
   constructor(
     shifts: MemoryShiftRepo,
@@ -763,12 +784,14 @@ export class MemoryOperationBatchRepo implements OperationBatchRepo {
     deductions: MemoryCashDeductionRepo,
     movements: MemoryWalletMovementRepo,
     gate = new MemoryTransactionGate(),
+    alreadyLocked = false,
   ) {
     this.shifts = shifts
     this.orders = orders
     this.deductions = deductions
     this.movements = movements
     this.gate = gate
+    this.alreadyLocked = alreadyLocked
   }
 
   async apply(
@@ -776,7 +799,9 @@ export class MemoryOperationBatchRepo implements OperationBatchRepo {
     batch: OperationBatch,
     actorId: string | null,
   ): Promise<{ insertedMovements: WalletMovementRecord[] }> {
-    return this.gate.run(() => this.applyLocked(shiftId, batch, actorId))
+    return this.alreadyLocked
+      ? this.applyLocked(shiftId, batch, actorId)
+      : this.gate.run(() => this.applyLocked(shiftId, batch, actorId))
   }
 
   private async applyLocked(
@@ -1661,6 +1686,7 @@ export interface MemoryDeps extends Deps {
   attendance: MemoryAttendanceRepo
   decisions: MemoryShiftDecisionRepo
   settlements: MemoryShiftSettlementRepo
+  closeDrafts: MemoryCloseDraftRepo
   gps: MemoryGpsPingRepo
 }
 
@@ -1684,6 +1710,8 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
   private readonly batteryReadings: MemoryBatteryReadingRepo
   private readonly batterySwaps: MemoryBatterySwapRepo
   private readonly directory: MemoryDirectoryRepo
+  private readonly closeDrafts: MemoryCloseDraftRepo
+  private readonly media: MemoryMediaRepo
   private readonly gate: MemoryTransactionGate
 
   constructor(
@@ -1699,6 +1727,8 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
     batteryReadings: MemoryBatteryReadingRepo,
     batterySwaps: MemoryBatterySwapRepo,
     directory: MemoryDirectoryRepo,
+    closeDrafts: MemoryCloseDraftRepo,
+    media: MemoryMediaRepo,
     gate: MemoryTransactionGate,
   ) {
     this.deps = deps
@@ -1713,6 +1743,8 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
     this.batteryReadings = batteryReadings
     this.batterySwaps = batterySwaps
     this.directory = directory
+    this.closeDrafts = closeDrafts
+    this.media = media
     this.gate = gate
   }
 
@@ -1733,6 +1765,8 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
       const batteryReadingSnapshot = this.batteryReadings.snapshotForShift(input.shiftId)
       const batterySwapSnapshot = this.batterySwaps.snapshotForShift(input.shiftId)
       const batterySnapshot = this.directory.snapshotBatteries(this.directory.batteries.keys())
+      const closeDraftSnapshot = this.closeDrafts.snapshot()
+      const mediaSnapshot = this.media.snapshotState()
 
       const restoreMap = <V>(target: Map<string, V>, snapshot: Map<string, V>): void => {
         target.clear()
@@ -1754,6 +1788,8 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
         this.batteryReadings.restoreForShift(input.shiftId, batteryReadingSnapshot)
         this.batterySwaps.restoreForShift(input.shiftId, batterySwapSnapshot)
         this.directory.restoreBatteries(batterySnapshot)
+        this.closeDrafts.restore(closeDraftSnapshot)
+        this.media.restoreState(mediaSnapshot)
         throw error
       }
     })
@@ -1783,6 +1819,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   )
   const decisions = new MemoryShiftDecisionRepo()
   const settlements = new MemoryShiftSettlementRepo()
+  const closeDrafts = new MemoryCloseDraftRepo(media)
   const gate = new MemoryTransactionGate()
   const transactionDeps: ShiftCloseTransactionDeps = {
     shifts,
@@ -1800,6 +1837,8 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     batterySwaps,
     weekLocks,
     settlements,
+    closeDrafts,
+    operationBatches: new MemoryOperationBatchRepo(shifts, orders, cashDeductions, movements, gate, true),
   }
   const closeUnitOfWork = new MemoryShiftCloseUnitOfWork(
     transactionDeps,
@@ -1814,6 +1853,8 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     batteryReadings,
     batterySwaps,
     directory,
+    closeDrafts,
+    media,
     gate,
   )
   return {
@@ -1855,6 +1896,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     attendance: new MemoryAttendanceRepo(),
     decisions,
     settlements,
+    closeDrafts,
     gps: new MemoryGpsPingRepo(),
   }
 }

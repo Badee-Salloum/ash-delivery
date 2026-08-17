@@ -1,5 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { ScriptedOcrReader } from '@ash/adapters/memory'
 import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
 
 /**
@@ -19,9 +20,50 @@ afterEach(async () => {
 const post = async (token: string, url: string, payload: Record<string, unknown> = {}): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(token) }, payload })
 const put = async (token: string, url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
+  url.endsWith('/end-package')
+    ? await h.submitEndPackage(token, url.split('/')[2]!, payload)
+    : await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
 const get = async (token: string, url: string): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(token) } })
+
+async function resetWithWalletOcr(value: string): Promise<void> {
+  await h.app.close()
+  h = await makeHarness({
+    ocr: new ScriptedOcrReader([{
+      ok: true,
+      rows: [{
+        printed: value,
+        value,
+        cancelled: false,
+        time: null,
+        dateIso: null,
+        pointA: null,
+        pointB: null,
+      }],
+      fields: {},
+      raw: null,
+    }]),
+  })
+}
+
+async function readAttachedWallet(driver: string, id: string): Promise<void> {
+  const draftResponse = await get(driver, `/shifts/${id}/close-draft`)
+  expect(draftResponse.statusCode, draftResponse.body).toBe(200)
+  const draft = draftResponse.json() as {
+    revision: number
+    attachments: Array<{ slot: string; mediaId: string; attachmentToken: string }>
+  }
+  const wallet = draft.attachments.find((attachment) => attachment.slot === 'wallet')
+  expect(wallet).toBeDefined()
+  const read = await post(driver, `/shifts/${id}/close-draft/media/wallet/read`, {
+    expectedRevision: draft.revision,
+    mediaId: wallet!.mediaId,
+    attachmentToken: wallet!.attachmentToken,
+    field: 'wallet',
+    retryFailed: false,
+  })
+  expect(read.statusCode, read.body).toBe(200)
+}
 
 async function newDraft(driver: string): Promise<string> {
   return (await post(driver, '/shifts', { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 })).json().id as string
@@ -76,11 +118,13 @@ async function toOpen(driver: string, manager: string): Promise<string> {
 
 describe('OCR D-3 trail — close wallet balance (readWallet)', () => {
   it('carries the wallet OCR baseline to the review, distinct from the declared balance', async () => {
+    await resetWithWalletOcr('76509.55')
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
     const id = await toOpen(driver, manager)
     await post(driver, `/shifts/${id}/orders`, { providerOrderNo: 'A-1', payMode: 'cash', fee: sypStr(5_000), zone: null })
     for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
+    await readAttachedWallet(driver, id)
 
     // OCR read 76,509.55 off the wallet screenshot; the driver declared 70,000 — a real edit.
     const res = await put(driver, `/shifts/${id}/end-package`, {
@@ -88,7 +132,6 @@ describe('OCR D-3 trail — close wallet balance (readWallet)', () => {
       batteryPercent: 50,
       cashDeclared: sypStr(105_000),
       walletDeclared: sypStr(70_000),
-      walletDeclaredOcr: '76509.55',
     })
     expect(res.statusCode, res.body).toBe(200)
 

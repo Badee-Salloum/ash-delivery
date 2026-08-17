@@ -484,9 +484,11 @@ export class PgOrderRepo implements OrderRepo {
           `INSERT INTO shift_orders (id, shift_id, provider_order_no, pay_mode, fee_minor, zone, driver_confirmed,
                                      source, fee_ocr_minor, kind, driver_share_minor, company_share_minor, notes, created_by,
                                      included, wallet_amount_minor, occurred_minute, occurred_date,
-                                     window_status, decision_reason, decided_by, decided_at)
+                                     window_status, decision_reason, decided_by, decided_at,
+                                     window_basis, position_evidence, close_draft_observation_id,
+                                     close_draft_client_key, close_draft_review_reasons)
            VALUES ($1, $2, $3, $4::pay_mode, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-                   $19, $20, $21, $22::timestamptz)`,
+                   $19, $20, $21, $22::timestamptz, $23, $24::jsonb, $25, $26, $27::jsonb)`,
           [
             order.id,
             order.shiftId,
@@ -510,6 +512,13 @@ export class PgOrderRepo implements OrderRepo {
             order.decisionReason,
             order.decidedBy,
             order.decidedAt,
+            order.windowBasis ?? null,
+            order.positionEvidence === null || order.positionEvidence === undefined
+              ? null
+              : JSON.stringify(order.positionEvidence),
+            order.observationId ?? null,
+            order.closeDraftClientKey ?? null,
+            JSON.stringify(order.closeDraftReviewReasons ?? []),
           ],
         )
         for (const [i, point] of order.points.entries()) {
@@ -537,7 +546,10 @@ export class PgOrderRepo implements OrderRepo {
             SET pay_mode = $2::pay_mode, fee_minor = $3, zone = $4, source = $5, fee_ocr_minor = $6,
                 notes = $7, included = $8, wallet_amount_minor = $9, occurred_minute = $10,
                 occurred_date = $11, window_status = $12, decision_reason = $13,
-                decided_by = $14, decided_at = $15::timestamptz
+                decided_by = $14, decided_at = $15::timestamptz,
+                window_basis = $16, position_evidence = $17::jsonb,
+                close_draft_observation_id = $18, close_draft_client_key = $19,
+                close_draft_review_reasons = $20::jsonb
           WHERE id = $1`,
         [
           order.id,
@@ -555,6 +567,13 @@ export class PgOrderRepo implements OrderRepo {
           order.decisionReason,
           order.decidedBy,
           order.decidedAt,
+          order.windowBasis ?? null,
+          order.positionEvidence === null || order.positionEvidence === undefined
+            ? null
+            : JSON.stringify(order.positionEvidence),
+          order.observationId ?? null,
+          order.closeDraftClientKey ?? null,
+          JSON.stringify(order.closeDraftReviewReasons ?? []),
         ],
       )
     })
@@ -611,6 +630,8 @@ const ORDER_COLUMNS = `
          o.notes, o.created_by, o.included, o.wallet_amount_minor::text AS wallet_amount, o.occurred_minute,
          to_char(o.occurred_date, 'YYYY-MM-DD') AS occurred_date,
          o.window_status, o.decision_reason, o.decided_by, o.decided_at,
+         o.window_basis, o.position_evidence, o.close_draft_observation_id,
+         o.close_draft_client_key, o.close_draft_review_reasons,
          COALESCE(
            (SELECT json_agg(json_build_object('role', p.role, 'label', p.label, 'lat', p.lat, 'lng', p.lng)
                             ORDER BY p.seq)
@@ -649,6 +670,12 @@ const toOrder = (r: Record<string, unknown>): ShiftOrderRecord => ({
   decisionReason: (r.decision_reason as string | null) ?? null,
   decidedBy: (r.decided_by as string | null) ?? null,
   decidedAt: r.decided_at === null || r.decided_at === undefined ? null : (r.decided_at as Date).toISOString(),
+  windowBasis: (r.window_basis as ShiftOrderRecord['windowBasis'] | null) ?? null,
+  positionEvidence: (r.position_evidence as ShiftOrderRecord['positionEvidence'] | null) ?? null,
+  observationId: (r.close_draft_observation_id as string | null) ?? null,
+  closeDraftClientKey: (r.close_draft_client_key as string | null) ?? null,
+  closeDraftReviewReasons:
+    (r.close_draft_review_reasons as ShiftOrderRecord['closeDraftReviewReasons'] | null) ?? [],
 })
 
 /** Positive cash deductions read from the provider's operation history. */
@@ -671,8 +698,9 @@ export class PgCashDeductionRepo implements CashDeductionRepo {
           `INSERT INTO cash_deductions
              (id, shift_id, operation_key, amount_minor, occurred_date, occurred_minute, source,
               amount_ocr_minor, point_a, point_b, included, window_status, decision_reason,
-              decided_by, decided_at, created_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::timestamptz,$16)`,
+              decided_by, decided_at, created_by, window_basis, position_evidence,
+              close_draft_observation_id, close_draft_client_key, close_draft_review_reasons)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::timestamptz,$16,$17,$18::jsonb,$19,$20,$21::jsonb)`,
           [
             deduction.id,
             deduction.shiftId,
@@ -690,6 +718,13 @@ export class PgCashDeductionRepo implements CashDeductionRepo {
             deduction.decidedBy,
             deduction.decidedAt,
             deduction.createdBy,
+            deduction.windowBasis ?? null,
+            deduction.positionEvidence === null || deduction.positionEvidence === undefined
+              ? null
+              : JSON.stringify(deduction.positionEvidence),
+            deduction.observationId ?? null,
+            deduction.closeDraftClientKey ?? null,
+            JSON.stringify(deduction.closeDraftReviewReasons ?? []),
           ],
         )
       })
@@ -713,7 +748,9 @@ export class PgCashDeductionRepo implements CashDeductionRepo {
             SET amount_minor = $2, occurred_date = $3, occurred_minute = $4, source = $5,
                 amount_ocr_minor = $6, point_a = $7, point_b = $8, included = $9,
                 window_status = $10, decision_reason = $11, decided_by = $12,
-                decided_at = $13::timestamptz
+                decided_at = $13::timestamptz, window_basis = $14,
+                position_evidence = $15::jsonb, close_draft_observation_id = $16,
+                close_draft_client_key = $17, close_draft_review_reasons = $18::jsonb
           WHERE id = $1`,
         [
           deduction.id,
@@ -729,6 +766,13 @@ export class PgCashDeductionRepo implements CashDeductionRepo {
           deduction.decisionReason,
           deduction.decidedBy,
           deduction.decidedAt,
+          deduction.windowBasis ?? null,
+          deduction.positionEvidence === null || deduction.positionEvidence === undefined
+            ? null
+            : JSON.stringify(deduction.positionEvidence),
+          deduction.observationId ?? null,
+          deduction.closeDraftClientKey ?? null,
+          JSON.stringify(deduction.closeDraftReviewReasons ?? []),
         ],
       )
     })
@@ -763,7 +807,9 @@ const CASH_DEDUCTION_COLUMNS = `
   SELECT id, shift_id, operation_key, amount_minor::text AS amount,
          to_char(occurred_date, 'YYYY-MM-DD') AS occurred_date, occurred_minute, source,
          amount_ocr_minor::text AS amount_ocr, point_a, point_b, included, window_status,
-         decision_reason, decided_by, decided_at, created_by
+         decision_reason, decided_by, decided_at, created_by, window_basis,
+         position_evidence, close_draft_observation_id, close_draft_client_key,
+         close_draft_review_reasons
     FROM cash_deductions`
 
 const toCashDeduction = (r: Record<string, unknown>): CashDeductionRecord => ({
@@ -783,6 +829,12 @@ const toCashDeduction = (r: Record<string, unknown>): CashDeductionRecord => ({
   decidedBy: (r.decided_by as string | null) ?? null,
   decidedAt: r.decided_at === null || r.decided_at === undefined ? null : (r.decided_at as Date).toISOString(),
   createdBy: (r.created_by as string | null) ?? null,
+  windowBasis: (r.window_basis as CashDeductionRecord['windowBasis'] | null) ?? null,
+  positionEvidence: (r.position_evidence as CashDeductionRecord['positionEvidence'] | null) ?? null,
+  observationId: (r.close_draft_observation_id as string | null) ?? null,
+  closeDraftClientKey: (r.close_draft_client_key as string | null) ?? null,
+  closeDraftReviewReasons:
+    (r.close_draft_review_reasons as CashDeductionRecord['closeDraftReviewReasons'] | null) ?? [],
 })
 
 const sameCashDeductionRecord = (left: CashDeductionRecord, right: CashDeductionRecord): boolean =>
@@ -801,7 +853,12 @@ const sameCashDeductionRecord = (left: CashDeductionRecord, right: CashDeduction
   left.decisionReason === right.decisionReason &&
   left.decidedBy === right.decidedBy &&
   left.decidedAt === right.decidedAt &&
-  left.createdBy === right.createdBy
+  left.createdBy === right.createdBy &&
+  (left.windowBasis ?? null) === (right.windowBasis ?? null) &&
+  JSON.stringify(left.positionEvidence ?? null) === JSON.stringify(right.positionEvidence ?? null) &&
+  (left.observationId ?? null) === (right.observationId ?? null) &&
+  (left.closeDraftClientKey ?? null) === (right.closeDraftClientKey ?? null) &&
+  JSON.stringify(left.closeDraftReviewReasons ?? []) === JSON.stringify(right.closeDraftReviewReasons ?? [])
 
 /** Calls the database-owned classifier; no caller-provided status or inclusion crosses this port. */
 export class PgOperationWindowRepo implements OperationWindowRepo {
@@ -1022,6 +1079,13 @@ export class PgOperationBatchRepo implements OperationBatchRepo {
           code: 'OPERATION_BATCH_SHIFT_CLOSED',
         })
       }
+      if (batch.closeDraftMaterialization) {
+        await client.query('SELECT begin_close_draft_materialization($1,$2,$3)', [
+          shiftId,
+          batch.closeDraftMaterialization.revision,
+          batch.closeDraftMaterialization.draftHash,
+        ])
+      }
 
       const orders = new PgOrderRepo(this.pool, client)
       const deductions = new PgCashDeductionRepo(this.pool, client)
@@ -1171,7 +1235,11 @@ export class PgOperationBatchRepo implements OperationBatchRepo {
         }
       }
 
-      return { insertedMovements: await movements.merge(shiftId, batch.movements, actorId) }
+      const insertedMovements = await movements.merge(shiftId, batch.movements, actorId)
+      if (batch.closeDraftMaterialization) {
+        await client.query('SELECT end_close_draft_materialization($1)', [shiftId])
+      }
+      return { insertedMovements }
     })
   }
 }

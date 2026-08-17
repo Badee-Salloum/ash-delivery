@@ -18,6 +18,10 @@ Team `hadis-projects-3c86ccdb`, three projects, all public (no deployment protec
 | Database | Neon `ep-billowing-butterfly-…` (eu-central-1, **Postgres 18**) | live at `0033` (33 migrations) + bootstrapped |
 | Evidence | Vercel Blob store `ash-evidence` (private) | linked to `ash-api` |
 
+**Version boundary:** the repository's staged source head includes migration `0034`, but this live
+table is still the validated `0033` production state. No `0034` migration or candidate alias has
+been promoted, and no Muhammad/Thaer production repair has been performed.
+
 Verified end to end: `POST /api/auth/login` → 200 with a session cookie that survives the proxy;
 an authenticated `GET /api/notifications` → 200; the same route without the cookie → 401.
 
@@ -97,6 +101,12 @@ also passed every group. The isolated Neon scratch was used separately for the h
 restore, fingerprint, invariant, sequence, trigger, and rollback rehearsal. The PostgreSQL suite
 and guard harness are destructive verification tools, not production health checks: conformance
 runs `TRUNCATE` in `beforeEach`, and the guard harness intentionally attempts forbidden writes.
+
+The unpublished `0034` candidate has its own final gate: Node `24.19.0`, PostgreSQL `17.11`, fresh
+`34/34` migrations, checksum rerun `0 applied / 34 present`, every guard green, and **76/76** real-DB
+tests across 15 files. Its disposable migration checksum is `5bc30a31`; file SHA-256 is
+`228F090D8FCF2DC0CA1B7EDF6FA500D679CA19ED9E388D2DE9054B7EE2E8659A`. These results do not change
+the live migration head shown in §0.
 
 Point them only at a positively identified disposable database:
 
@@ -204,6 +214,26 @@ redeploy a front-end: `pnpm build:apps`, copy `apps/<app>/dist/*` into a staging
 ---
 
 ## 7. Deploy checklist
+
+### Staged `0034` candidate — all production steps remain unchecked
+
+Migration `0034` adds the durable close draft and linked OCR protocol. Old driver linked-order
+reads are deliberately refused with `428 driver_update_required`, and the service-worker/reader
+cache identity changed. Stage all artifacts first, then keep writes paused through the ordered
+promotion: **migration `0034` → API → driver/admin**. The API must be promoted before either UI, but
+writes must not resume until all three stable aliases are coherent.
+
+- [x] Disposable Node 24.19 / PostgreSQL 17.11 gate: fresh 34 migrations, rerun/checksum, guards, and 76/76 DB tests
+- [ ] Read-only production preflight and inventory of open/`pending_review` shifts
+- [ ] Validated pre-`0034` logical backup
+- [ ] Apply `0034` once with the direct owner URL; verify checksum, objects, guards, and runtime grants
+- [ ] Read-only postflight and validated post-`0034` logical backup while writes remain paused
+- [ ] Promote candidate API first, then candidate driver/admin; keep all aliases coherent before resume
+- [ ] Smoke-test linked OCR, restored draft after reload, service worker, and headerless-read `428`
+- [ ] Restore the post-migration backup into scratch and verify fingerprints/invariants
+- [ ] Separately audit Muhammad and Thaer through API workflows; no direct SQL and no automatic approval
+
+### Validated live `0033` checklist — historical production record
 
 For every schema release: build and stage candidate API, admin, and driver artifacts first; pause
 `ash-api` and drain database activity; validate the pre-migration logical backup; migrate once as

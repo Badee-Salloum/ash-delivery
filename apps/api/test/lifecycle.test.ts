@@ -8,6 +8,7 @@ import {
   fixedApprovalPayload,
   makeHarness,
   sypStr,
+  today,
 } from './harness.ts'
 
 /**
@@ -74,23 +75,28 @@ async function openShift(driverToken: string, managerToken: string, vehicleId = 
   return id
 }
 
-async function addTwentyOrders(shiftId: string, driverToken: string) {
+async function addTwentyOrders(shiftId: string, _driverToken: string) {
   let n = 0
+  const orders: Array<{
+    clientKey: string; providerOrderNo: string; payMode: 'cash' | 'electronic' | 'free'; fee: string; occurredDate: string; occurredMinute: string
+  }> = []
   const add = async (payMode: string, count: number) => {
     for (let i = 0; i < count; i++) {
       n += 1
-      const res = await h.app.inject({
-        method: 'POST',
-        url: `/shifts/${shiftId}/orders`,
-        headers: { cookie: h.cookie(driverToken) },
-        payload: { providerOrderNo: `YAL-${n}`, payMode, fee: sypStr(5_000), zone: 'المزة' },
+      orders.push({
+        clientKey: `lifecycle-yal-${n}`, providerOrderNo: `YAL-${n}`,
+        payMode: payMode as 'cash' | 'electronic' | 'free', fee: sypStr(5_000),
+        occurredDate: today, occurredMinute: '08:00',
       })
-      expect(res.statusCode, res.body).toBe(201)
     }
   }
   await add('cash', 12)
   await add('electronic', 6)
   await add('free', 2)
+  h.stageCloseDraftFinancialFixture(shiftId, {
+    managerToken: await h.loginAs('manager'),
+    orders,
+  })
 }
 
 describe('the SRS §2.3 shift, end to end over HTTP', () => {
@@ -103,16 +109,11 @@ describe('the SRS §2.3 shift, end to end over HTTP', () => {
 
     // ── The driver submits the end package ────────────────────────────────────────────────
     await uploadEnd(shiftId, driver)
-    const submitted = await h.app.inject({
-      method: 'PUT',
-      url: `/shifts/${shiftId}/end-package`,
-      headers: { cookie: h.cookie(driver) },
-      payload: {
-        odometerKm: 15_412,
-        batteryPercent: 22,
-        cashDeclared: sypStr(160_000),
-        walletDeclared: sypStr(70_000),
-      },
+    const submitted = await h.submitEndPackage(driver, shiftId, {
+      odometerKm: 15_412,
+      batteryPercent: 22,
+      cashDeclared: sypStr(160_000),
+      walletDeclared: sypStr(70_000),
     })
     expect(submitted.statusCode, submitted.body).toBe(200)
     const br1 = submitted.json().br1
@@ -180,14 +181,9 @@ describe('the SRS §2.3 shift, end to end over HTTP', () => {
     await addTwentyOrders(shiftId, driver)
     await uploadEnd(shiftId, driver)
 
-    await h.app.inject({
-      method: 'PUT',
-      url: `/shifts/${shiftId}/end-package`,
-      headers: { cookie: h.cookie(driver) },
-      payload: {
-        odometerKm: 15_412, batteryPercent: 22,
-        cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000),
-      },
+    await h.submitEndPackage(driver, shiftId, {
+      odometerKm: 15_412, batteryPercent: 22,
+      cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000),
     })
     const review = await h.app.inject({
       method: 'GET', url: `/shifts/${shiftId}/review`, headers: { cookie: h.cookie(manager) },
@@ -234,11 +230,8 @@ describe('published tier history cannot change the active fixed policy', () => {
     const shiftId = await openShift(driver, manager)
     await addTwentyOrders(shiftId, driver)
     await uploadEnd(shiftId, driver)
-    await h.app.inject({
-      method: 'PUT',
-      url: `/shifts/${shiftId}/end-package`,
-      headers: { cookie: h.cookie(driver) },
-      payload: { odometerKm: 15_412, batteryPercent: 22, cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000) },
+    await h.submitEndPackage(driver, shiftId, {
+      odometerKm: 15_412, batteryPercent: 22, cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000),
     })
     const review = await h.app.inject({ method: 'GET', url: `/shifts/${shiftId}/review`, headers: { cookie: h.cookie(manager) } })
     const hash = review.json().br1.ordersHash
@@ -304,12 +297,9 @@ describe('the gates refuse what BR5 says they must (AC #1, #2)', () => {
 
     // The driver hands over 5,000 too little in cash.
     await uploadEnd(shiftId, driver)
-    await h.app.inject({
-      method: 'PUT', url: `/shifts/${shiftId}/end-package`, headers: { cookie: h.cookie(driver) },
-      payload: {
-        odometerKm: 15_412, batteryPercent: 22,
-        cashDeclared: sypStr(155_000), walletDeclared: sypStr(70_000),
-      },
+    await h.submitEndPackage(driver, shiftId, {
+      odometerKm: 15_412, batteryPercent: 22,
+      cashDeclared: sypStr(155_000), walletDeclared: sypStr(70_000),
     })
 
     const review = await h.app.inject({
@@ -335,12 +325,9 @@ describe('the gates refuse what BR5 says they must (AC #1, #2)', () => {
     const shiftId = await openShift(driver, manager)
     await addTwentyOrders(shiftId, driver)
     await uploadEnd(shiftId, driver)
-    await h.app.inject({
-      method: 'PUT', url: `/shifts/${shiftId}/end-package`, headers: { cookie: h.cookie(driver) },
-      payload: {
-        odometerKm: 15_412, batteryPercent: 22,
-        cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000),
-      },
+    await h.submitEndPackage(driver, shiftId, {
+      odometerKm: 15_412, batteryPercent: 22,
+      cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000),
     })
     const review = await h.app.inject({
       method: 'GET', url: `/shifts/${shiftId}/review`, headers: { cookie: h.cookie(manager) },
@@ -378,27 +365,29 @@ describe('the pay-mode blind spot, over HTTP', () => {
 
     // 11 cash + 7 electronic + 2 free: one cash order recorded as electronic.
     let n = 0
+    const orders: Array<{
+      clientKey: string; providerOrderNo: string; payMode: 'cash' | 'electronic' | 'free'; fee: string; occurredDate: string; occurredMinute: string
+    }> = []
     const add = async (payMode: string, count: number) => {
       for (let i = 0; i < count; i++) {
         n += 1
-        await h.app.inject({
-          method: 'POST', url: `/shifts/${shiftId}/orders`, headers: { cookie: h.cookie(driver) },
-          payload: { providerOrderNo: `M-${n}`, payMode, fee: sypStr(5_000), zone: null },
+        orders.push({
+          clientKey: `lifecycle-m-${n}`, providerOrderNo: `M-${n}`,
+          payMode: payMode as 'cash' | 'electronic' | 'free', fee: sypStr(5_000),
+          occurredDate: today, occurredMinute: '08:00',
         })
       }
     }
     await add('cash', 11)
     await add('electronic', 7)
     await add('free', 2)
+    h.stageCloseDraftFinancialFixture(shiftId, { managerToken: manager, orders })
 
     // The driver hands over what he ACTUALLY holds.
     await uploadEnd(shiftId, driver)
-    const res = await h.app.inject({
-      method: 'PUT', url: `/shifts/${shiftId}/end-package`, headers: { cookie: h.cookie(driver) },
-      payload: {
-        odometerKm: 15_412, batteryPercent: 22,
-        cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000),
-      },
+    const res = await h.submitEndPackage(driver, shiftId, {
+      odometerKm: 15_412, batteryPercent: 22,
+      cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000),
     })
     const br1 = res.json().br1
 
@@ -431,19 +420,21 @@ describe('the pay-mode blind spot, over HTTP', () => {
         method: 'POST', url: `/shifts/${id}/approve-open`, headers: { cookie: strict.cookie(manager) },
         payload: { floatTranches: [sypStr(100_000)], topupTranches: [sypStr(50_000)] },
       })
-      for (let i = 1; i <= 20; i++) {
-        await strict.app.inject({
-          method: 'POST', url: `/shifts/${id}/orders`, headers: { cookie: strict.cookie(driver) },
-          payload: { providerOrderNo: `S-${i}`, payMode: i <= 11 ? 'cash' : 'electronic', fee: sypStr(5_000), zone: null },
-        })
-      }
+      strict.stageCloseDraftFinancialFixture(id, {
+        managerToken: manager,
+        orders: Array.from({ length: 20 }, (_, offset) => ({
+          clientKey: `strict-s-${offset + 1}`,
+          providerOrderNo: `S-${offset + 1}`,
+          payMode: (offset < 11 ? 'cash' : 'electronic') as 'cash' | 'electronic',
+          fee: sypStr(5_000),
+          occurredDate: today,
+          occurredMinute: '08:00',
+        })),
+      })
       for (const slot of END_MEDIA) await strict.uploadPhoto(driver, id, 'end', slot)
-      await strict.app.inject({
-        method: 'PUT', url: `/shifts/${id}/end-package`, headers: { cookie: strict.cookie(driver) },
-        payload: {
-          odometerKm: 2, batteryPercent: 20,
-          cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000),
-        },
+      await strict.submitEndPackage(driver, id, {
+        odometerKm: 2, batteryPercent: 20,
+        cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000),
       })
       const review = await strict.app.inject({
         method: 'GET', url: `/shifts/${id}/review`, headers: { cookie: strict.cookie(manager) },

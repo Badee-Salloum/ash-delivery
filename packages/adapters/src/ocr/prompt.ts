@@ -189,6 +189,31 @@ not time evidence.`
 }
 
 /**
+ * A cheap, independent gate that runs beside the financial and time readers.
+ *
+ * Recent Orders and the Payments Log both contain stacked cards, times and money. Asking a reader
+ * that has already been told “this is orders” to notice the difference is circular, so this pass
+ * gets neither that assumption nor any transcription work. It classifies only stable screen
+ * landmarks and fails closed when the title/structure is cropped away.
+ */
+export function ordersScreenKindPrompt(): string {
+  return `ORDERS SCREEN-KIND SAFETY CHECK
+
+Classify this Damascus delivery-app screenshot using only visible screen structure and labels. Do
+not transcribe amounts, times, addresses, or rows.
+
+- "orders": the Recent Orders / «الطلبات الحديثة» screen. Delivery cards normally have orange A
+  and blue B route markers, pickup/dropoff lines, and may show a fee beside SYP or Cancelled / تم
+  إلغاؤه. A visible Recent Orders title is decisive.
+- "payments_log": the Payments Log / «سجل المدفوعات» screen. It is a ledger of signed incoming and
+  outgoing movements, not pickup/dropoff delivery cards. A visible Payments Log title is decisive.
+- "unknown": neither identity is proved, the decisive title/landmarks are cropped, or the image is
+  another screen.
+
+Never infer "orders" merely because SYP, dates, times, or stacked white cards are visible.`
+}
+
+/**
  * Three genuinely different inspections of the one field where a single glyph changes BR1.
  *
  * They are sent as independent model calls and a two-out-of-three agreement is required. Repeating
@@ -258,6 +283,19 @@ export const ORDERS_TIME_READ_SCHEMA = {
           cancelled: { type: 'boolean' },
         },
       },
+    },
+  },
+} as const
+
+/** Strict response for the independent Orders-vs-Payments-Log safety gate. */
+export const ORDERS_SCREEN_KIND_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['screenKind'],
+  properties: {
+    screenKind: {
+      type: 'string',
+      enum: ['orders', 'payments_log', 'unknown'],
     },
   },
 } as const

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { Deps, EvidencePackage, MediaRecord, ShiftRecord } from '@ash/contracts'
+import type { CloseDraftView, Deps, EvidencePackage, MediaRecord, ShiftRecord } from '@ash/contracts'
 import { ALL_END_SLOTS, ALL_START_SLOTS } from '@ash/domain'
 import { ServiceError } from './shifts.service.ts'
 
@@ -51,6 +51,15 @@ function rethrowMediaMutation(error: unknown): never {
   if (code === 'MEDIA_REUSE_PROVENANCE_MISMATCH') {
     throw new ServiceError(409, 'evidence_reuse_provenance_mismatch')
   }
+  if (code === 'MEDIA_ALREADY_ATTACHED') {
+    const detail = error as { sourcePackage?: string; sourceSlot?: string }
+    throw new ServiceError(409, 'evidence_already_attached', {
+      sourcePackage: detail.sourcePackage ?? null,
+      sourceSlot: detail.sourceSlot ?? null,
+    })
+  }
+  if (code === 'MEDIA_HISTORY_NOT_FOUND') throw new ServiceError(404, 'evidence_attachment_history_not_found')
+  if (code === 'MEDIA_HISTORY_CURRENT') throw new ServiceError(409, 'evidence_attachment_already_current')
   throw error
 }
 
@@ -88,6 +97,18 @@ export interface UploadInput {
   uploadedBy: string
   /** Driver explicitly accepted an old/reused-image warning before attaching it. */
   staleAcknowledged?: boolean
+  /** Required to replace an occupied slot with different bytes. */
+  replaceConfirmed?: boolean
+  /** Optimistic identity of the occupied generation; null/undefined means the caller saw an empty slot. */
+  expectedAttachmentToken?: string | null
+  /** Optional end-screen validator, called only after every non-mutating confirmation preflight. */
+  beforeAttach?: (media: MediaRecord) => Promise<void>
+  /** Run the small attachment mutation in the shift-close UOW after slow validation has finished. */
+  runCommit?: <T>(work: (transactionDeps: Deps) => Promise<T>) => Promise<T>
+  /** Re-check the optimistic draft while the shift lock is held, before the attachment changes. */
+  beforeCommit?: (transactionDeps: Deps) => Promise<void>
+  /** Advance the draft generation in the same transaction as the attachment. */
+  afterAttach?: (transactionDeps: Deps) => Promise<CloseDraftView>
 }
 
 /**
@@ -108,7 +129,13 @@ export interface UploadInput {
  */
 export async function deleteEvidence(
   deps: Deps,
-  input: { shiftId: string; package: EvidencePackage; slot: string; deletedBy: string | null },
+  input: {
+    shiftId: string
+    package: EvidencePackage
+    slot: string
+    deletedBy: string | null
+    expectedAttachmentToken?: string
+  },
 ): Promise<{ slotsNow: string[] }> {
   const shift = await deps.shifts.findById(input.shiftId)
   if (!shift) throw new ServiceError(404, 'shift_not_found')
@@ -120,7 +147,7 @@ export async function deleteEvidence(
   }
 
   try {
-    await deps.media.detach(input.shiftId, input.package, input.slot, input.deletedBy)
+    await deps.media.detach(input.shiftId, input.package, input.slot, input.deletedBy, input.expectedAttachmentToken)
   } catch (error) {
     rethrowMediaMutation(error)
   }
@@ -137,6 +164,29 @@ export interface UploadResult {
   reusedFromShiftId: string | null
   attachmentToken: string
   staleAcknowledged: boolean
+  draft?: CloseDraftView
+}
+
+export async function restoreEvidence(
+  deps: Deps,
+  input: {
+    shiftId: string
+    historyId: string
+    expectedCurrentAttachmentToken: string | null
+    actorId: string
+    reason: string
+  },
+) {
+  const shift = await deps.shifts.findById(input.shiftId)
+  if (!shift) throw new ServiceError(404, 'shift_not_found')
+  try {
+    return await deps.media.restoreAttachment({
+      ...input,
+      attachedAtMs: deps.clock.nowMs(),
+    })
+  } catch (error) {
+    rethrowMediaMutation(error)
+  }
 }
 
 export async function uploadEvidence(deps: Deps, input: UploadInput): Promise<UploadResult> {
@@ -183,75 +233,141 @@ export async function uploadEvidence(deps: Deps, input: UploadInput): Promise<Up
     },
   )
 
-  try {
-    await deps.media.attach(input.shiftId, input.package, input.slot, media.id, {
-      actorId: input.uploadedBy,
-      attachedAtMs: receivedAtMs,
+  const beforeSlots = await deps.media.listSlots(input.shiftId)
+  const currentSlot = beforeSlots.find((slot) => slot.package === input.package && slot.slot === input.slot)
+  const duplicateSlot = beforeSlots.find(
+    (slot) =>
+      slot.mediaId === media.id &&
+      (slot.package !== input.package || slot.slot !== input.slot),
+  )
+  if (duplicateSlot) {
+    throw new ServiceError(409, 'evidence_already_attached', {
+      sourcePackage: duplicateSlot.package,
+      sourceSlot: duplicateSlot.slot,
+      currentAttachment: currentSlot ?? null,
     })
-  } catch (error) {
-    rethrowMediaMutation(error)
   }
-
-  // Compatibility with cached PWAs that persist a BMS OCR result immediately before its upload.
-  // Such a row is deliberately unusable while mediaId is NULL; the first matching bms_N evidence
-  // binds it here. PostgreSQL also enforces this in an attachment trigger so the DB-first rollout
-  // is safe while the previous API is still serving, while this path gives the memory adapter the
-  // same behavior. A replacement never rebinds an already-linked reading.
-  const bmsMatch = /^bms_([1-9]\d*)$/.exec(input.slot)
-  if (bmsMatch) {
-    const slotNo = Number(bmsMatch[1])
-    const battery = (await deps.directory.listBatteriesForVehicle(shift.vehicleId)).find(
-      (candidate) => candidate.slotNo === slotNo,
-    )
-    if (battery) {
-      const pending = (await deps.batteryReadings.listByShift(shift.id)).find(
-        (reading) =>
-          reading.package === input.package &&
-          reading.batteryId === battery.id &&
-          reading.mediaId === null &&
-          reading.source !== 'manager' &&
-          !reading.unavailable,
-      )
-      if (pending) await deps.batteryReadings.upsert({ ...pending, mediaId: media.id })
+  const exactRetry = currentSlot?.mediaId === media.id
+  if (!exactRetry && currentSlot) {
+    if (input.expectedAttachmentToken !== currentSlot.attachmentToken) {
+      throw new ServiceError(409, 'evidence_attachment_changed', { currentAttachment: currentSlot })
+    }
+    if (input.replaceConfirmed !== true) {
+      throw new ServiceError(409, 'evidence_replacement_confirmation_required', {
+        sourcePackage: currentSlot.package,
+        sourceSlot: currentSlot.slot,
+        currentAttachment: currentSlot,
+      })
     }
   }
-  let attached = (await deps.media.listSlots(input.shiftId)).find(
-    (s) => s.package === input.package && s.slot === input.slot,
-  )
-  if (!attached) throw new Error(`evidence attachment ${input.shiftId}/${input.package}/${input.slot} disappeared`)
-  const stale = media.clientTakenAtMs != null && attached.attachedAtMs - media.clientTakenAtMs >= 30 * 60_000
-  // Acknowledgement is meaningful only after the server has observed the warning condition. This
-  // prevents a blanket header on a fresh upload from pre-acknowledging future evidence reuse.
-  if (input.staleAcknowledged === true && (stale || attached?.reusedFromShiftId != null)) {
+  if (!exactRetry && !currentSlot && input.expectedAttachmentToken != null) {
+    throw new ServiceError(409, 'evidence_attachment_changed', { currentAttachment: null })
+  }
+
+  const prior = exactRetry ? null : await deps.media.latestAttachmentForMedia(media.id)
+  const stale = media.clientTakenAtMs != null && receivedAtMs - media.clientTakenAtMs >= 30 * 60_000
+  if (!exactRetry && input.staleAcknowledged !== true && (stale || prior !== null)) {
+    throw new ServiceError(409, 'stale_evidence_confirmation_required', {
+      sourcePackage: prior?.package ?? null,
+      sourceSlot: prior?.slot ?? null,
+      reusedFromShiftId: prior?.shiftId ?? null,
+      currentAttachment: currentSlot ?? null,
+      stale,
+    })
+  }
+
+  if (!exactRetry) await input.beforeAttach?.(media)
+
+  const commitMutation = async (commitDeps: Deps): Promise<UploadResult> => {
+    await input.beforeCommit?.(commitDeps)
+    const committedPrior = exactRetry
+      ? null
+      : await commitDeps.media.latestAttachmentForMedia(media.id, { lock: true })
+    if (!exactRetry && (committedPrior?.id ?? null) !== (prior?.id ?? null)) {
+      // The slow screen classifier ran after the user's confirmation. A newly appended reuse
+      // generation changes what was confirmed, so fail before touching the occupied slot. The next
+      // request will show the new source and can carry a fresh acknowledgement.
+      throw new ServiceError(409, 'stale_evidence_confirmation_required', {
+        sourcePackage: committedPrior?.package ?? null,
+        sourceSlot: committedPrior?.slot ?? null,
+        reusedFromShiftId: committedPrior?.shiftId ?? null,
+        currentAttachment: currentSlot ?? null,
+        stale,
+        confirmationStale: true,
+      })
+    }
     try {
-      await deps.media.acknowledgeStale(
-        input.shiftId,
-        input.package,
-        input.slot,
-        media.id,
-        attached.attachmentToken,
-        input.uploadedBy,
-        receivedAtMs,
-      )
+      await commitDeps.media.attach(input.shiftId, input.package, input.slot, media.id, {
+      actorId: input.uploadedBy,
+      attachedAtMs: receivedAtMs,
+      reusedFromShiftId: committedPrior?.shiftId ?? null,
+      expectedAttachmentToken: input.expectedAttachmentToken === undefined
+        ? (exactRetry ? currentSlot!.attachmentToken : null)
+        : input.expectedAttachmentToken,
+      })
     } catch (error) {
       rethrowMediaMutation(error)
     }
-    attached = (await deps.media.listSlots(input.shiftId)).find(
+
+    // Compatibility with cached PWAs that persist a BMS OCR result immediately before its upload.
+    const bmsMatch = /^bms_([1-9]\d*)$/.exec(input.slot)
+    if (bmsMatch) {
+      const slotNo = Number(bmsMatch[1])
+      const battery = (await commitDeps.directory.listBatteriesForVehicle(shift.vehicleId)).find(
+        (candidate) => candidate.slotNo === slotNo,
+      )
+      if (battery) {
+        const pending = (await commitDeps.batteryReadings.listByShift(shift.id)).find(
+          (reading) =>
+            reading.package === input.package &&
+            reading.batteryId === battery.id &&
+            reading.mediaId === null &&
+            reading.source !== 'manager' &&
+            !reading.unavailable,
+        )
+        if (pending) await commitDeps.batteryReadings.upsert({ ...pending, mediaId: media.id })
+      }
+    }
+    let attached = (await commitDeps.media.listSlots(input.shiftId)).find(
       (s) => s.package === input.package && s.slot === input.slot,
     )
     if (!attached) throw new Error(`evidence attachment ${input.shiftId}/${input.package}/${input.slot} disappeared`)
-  }
+    const attachedStale = media.clientTakenAtMs != null && attached.attachedAtMs - media.clientTakenAtMs >= 30 * 60_000
+    // Acknowledgement is meaningful only after the server has observed the warning condition.
+    if (input.staleAcknowledged === true && (attachedStale || attached.reusedFromShiftId != null)) {
+      try {
+        await commitDeps.media.acknowledgeStale(
+          input.shiftId,
+          input.package,
+          input.slot,
+          media.id,
+          attached.attachmentToken,
+          input.uploadedBy,
+          receivedAtMs,
+        )
+      } catch (error) {
+        rethrowMediaMutation(error)
+      }
+      attached = (await commitDeps.media.listSlots(input.shiftId)).find(
+        (s) => s.package === input.package && s.slot === input.slot,
+      )
+      if (!attached) throw new Error(`evidence attachment ${input.shiftId}/${input.package}/${input.slot} disappeared`)
+    }
 
-  const refreshed = await deps.shifts.findById(input.shiftId)
-  return {
-    media,
-    deduped: existing !== null,
-    clockSkewMs: input.clientTakenAtMs === null ? null : receivedAtMs - input.clientTakenAtMs,
-    slotsNow: input.package === 'start' ? (refreshed?.mediaSlotsStart ?? []) : (refreshed?.mediaSlotsEnd ?? []),
-    reusedFromShiftId: attached?.reusedFromShiftId ?? null,
-    attachmentToken: attached.attachmentToken,
-    staleAcknowledged: attached?.staleAcknowledgedAtMs != null,
+    const draft = await input.afterAttach?.(commitDeps)
+    const refreshed = await commitDeps.shifts.findById(input.shiftId)
+    return {
+      media,
+      deduped: existing !== null,
+      clockSkewMs: input.clientTakenAtMs === null ? null : receivedAtMs - input.clientTakenAtMs,
+      slotsNow: input.package === 'start' ? (refreshed?.mediaSlotsStart ?? []) : (refreshed?.mediaSlotsEnd ?? []),
+      reusedFromShiftId: attached.reusedFromShiftId ?? null,
+      attachmentToken: attached.attachmentToken,
+      staleAcknowledged: attached.staleAcknowledgedAtMs != null,
+      ...(draft === undefined ? {} : { draft }),
+    }
   }
+  return input.runCommit ? input.runCommit(commitMutation) : commitMutation(deps)
 }
 
 /** Record the driver's explicit acceptance after the server discovers content reuse. */

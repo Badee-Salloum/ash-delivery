@@ -9,6 +9,7 @@ import {
   approveFixedClose,
   makeHarness,
   sypStr,
+  today,
 } from './harness.ts'
 
 /**
@@ -59,7 +60,9 @@ const put = async (
   url: string,
   payload: Record<string, unknown>,
 ): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
+  url.endsWith('/end-package')
+    ? await h.submitEndPackage(token, url.split('/')[2]!, payload)
+    : await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
 
 const get = async (token: string, url: string): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(token) } })
@@ -119,15 +122,17 @@ async function runShift(options: {
   })
   expect(opened.statusCode, opened.body).toBe(200)
 
-  for (let index = 1; index <= options.orderCount; index++) {
-    const order = await post(driver, `/shifts/${id}/orders`, {
-      providerOrderNo: `${options.prefix}-${index}`,
-      payMode: 'electronic',
+  h.stageCloseDraftFinancialFixture(id, {
+    managerToken: manager,
+    orders: Array.from({ length: options.orderCount }, (_, offset) => ({
+      clientKey: `tier-day-${options.prefix}-${offset + 1}`,
+      providerOrderNo: `${options.prefix}-${offset + 1}`,
+      payMode: 'electronic' as const,
       fee: sypStr(5_000),
-      zone: null,
-    })
-    expect(order.statusCode, order.body).toBe(201)
-  }
+      occurredDate: today,
+      occurredMinute: '08:00',
+    })),
+  })
 
   let manualWallet = 0
   for (const [index, manual] of (options.manual ?? []).entries()) {

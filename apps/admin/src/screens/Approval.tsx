@@ -22,13 +22,16 @@ import { useConfirm, useToast } from '../feedback.tsx'
 import {
   buildOrderDuplicateRevision,
   buildOrderTimingRevision,
+  closeDraftReviewReasonLabel,
   closeWorkspaceApprovalReady,
   countAwaitingCloseBatteryReadings,
   deductionHasDashboardEvidenceOrigin,
   guardPhysicalSettlementConfirmations,
   orderHasDashboardEvidenceOrigin,
   orderNeedsAttention,
+  positionEvidenceLabel,
   summarizeOrders,
+  type CloseDraftReviewReason,
 } from '../approval-workspace.ts'
 import {
   type OperationWindowStatus,
@@ -118,6 +121,13 @@ interface Review {
     windowStatus?: OperationWindowStatus
     decisionReason?: string | null
     decidedBy?: string | null
+    windowBasis?: 'printed_time' | 'screen_position' | 'manager' | null
+    positionEvidence?: {
+      lowerInstant?: string | null
+      upperInstant?: string | null
+      anchorObservationIds?: string[]
+    } | null
+    closeDraftReviewReasons?: CloseDraftReviewReason[]
   }>
   /** A negative Recent-Orders row: positive magnitude, but a distinct cash deduction operation. */
   cashDeductions?: Array<{
@@ -134,6 +144,13 @@ interface Review {
     windowStatus: OperationWindowStatus
     decisionReason: string | null
     decidedBy?: string | null
+    windowBasis?: 'printed_time' | 'screen_position' | 'manager' | null
+    positionEvidence?: {
+      lowerInstant?: string | null
+      upperInstant?: string | null
+      anchorObservationIds?: string[]
+    } | null
+    closeDraftReviewReasons?: CloseDraftReviewReason[]
   }>
   /** «سجل المدفوعات» as read: archival evidence only, never a financial input. */
   movements: Array<{
@@ -2151,6 +2168,8 @@ function OrderAttentionCard({
   )
   const reasonReady = reason.trim() !== ''
   const canRereadStoredDashboard = orderHasDashboardEvidenceOrigin(order)
+  const positionalBounds = positionEvidenceLabel(order.positionEvidence)
+  const reviewReasons = order.closeDraftReviewReasons ?? []
   const date = order.occurredDate ?? businessDate
   const route = [
     (order.points ?? []).find((point) => point.role === 'start')?.label,
@@ -2238,7 +2257,7 @@ function OrderAttentionCard({
   )
 
   return (
-    <article className={`min-w-0 rounded-xl border p-3 ${order.windowStatus === 'unknown' ? 'border-amber-300 bg-amber-50/40' : order.included === false ? 'border-slate-300 bg-slate-50' : 'border-sky-200 bg-white'}`}>
+    <article className={`min-w-0 rounded-xl border p-3 ${reviewReasons.length > 0 || order.windowStatus === 'unknown' ? 'border-amber-300 bg-amber-50/40' : order.included === false ? 'border-slate-300 bg-slate-50' : 'border-sky-200 bg-white'}`}>
       <div className="flex min-w-0 flex-wrap items-start gap-2">
         <span className="num rounded bg-slate-100 px-2 py-1 text-xs font-bold">#{index}</span>
         <div className="min-w-0 flex-1">
@@ -2256,10 +2275,24 @@ function OrderAttentionCard({
 
       <div className="mt-2 flex flex-wrap gap-1.5">
         {order.windowStatus ? <WindowStatusBadge status={order.windowStatus} copy={operationCopy} /> : null}
+        {order.windowBasis === 'screen_position' ? <Badge tone="sky">{operationCopy.positionBasis}</Badge> : null}
         {order.included === false ? <Badge tone="slate">{operationCopy.excluded}</Badge> : null}
         {order.kind === 'manual' ? <Badge tone="sky">{operationCopy.manual}</Badge> : null}
         {order.feeOcr != null && order.feeOcr !== order.fee ? <Badge tone="amber">{copy.changedByManager}</Badge> : null}
+        {reviewReasons.map((reviewReason) => (
+          <Badge
+            key={reviewReason}
+            tone={reviewReason === 'missing_money' || reviewReason === 'cancelled_conflict' || reviewReason === 'evidence_removed' ? 'red' : 'amber'}
+          >
+            {closeDraftReviewReasonLabel(reviewReason, lang)}
+          </Badge>
+        ))}
       </div>
+      {order.windowBasis === 'screen_position' ? (
+        <p className="num mt-2 text-xs text-sky-800">
+          {operationCopy.positionBasis}{positionalBounds ? ` · ${positionalBounds}` : ''}
+        </p>
+      ) : null}
       {order.decisionReason ? <p className="mt-2 text-xs text-slate-600">{operationCopy.decisionReason}: {order.decisionReason}</p> : null}
       {order.kind === 'manual' ? (
         <p className="num mt-2 text-xs text-slate-600">{t.orders.driverShare}: {order.driverShare ?? '—'} · {t.orders.companyShare}: {order.companyShare ?? '—'}</p>
@@ -2438,6 +2471,8 @@ function DeductionAttentionCard({
   } | null>(null)
   const reasonReady = reason.trim() !== ''
   const canRereadStoredDashboard = deductionHasDashboardEvidenceOrigin(deduction)
+  const positionalBounds = positionEvidenceLabel(deduction.positionEvidence)
+  const reviewReasons = deduction.closeDraftReviewReasons ?? []
   const revise = (patch: Record<string, unknown>): Promise<boolean> =>
     onRevise({ cashDeductions: [{ id: deduction.id, ...patch, reason: reason.trim() }] })
   useEffect(() => {
@@ -2459,8 +2494,22 @@ function DeductionAttentionCard({
       </div>
       <div className="mt-2 flex flex-wrap gap-1.5">
         <WindowStatusBadge status={deduction.windowStatus} copy={operationCopy} />
+        {deduction.windowBasis === 'screen_position' ? <Badge tone="sky">{operationCopy.positionBasis}</Badge> : null}
         {!deduction.included ? <Badge tone="slate">{operationCopy.excluded}</Badge> : null}
+        {reviewReasons.map((reviewReason) => (
+          <Badge
+            key={reviewReason}
+            tone={reviewReason === 'missing_money' || reviewReason === 'cancelled_conflict' || reviewReason === 'evidence_removed' ? 'red' : 'amber'}
+          >
+            {closeDraftReviewReasonLabel(reviewReason, lang)}
+          </Badge>
+        ))}
       </div>
+      {deduction.windowBasis === 'screen_position' ? (
+        <p className="num mt-2 text-xs text-sky-800">
+          {operationCopy.positionBasis}{positionalBounds ? ` · ${positionalBounds}` : ''}
+        </p>
+      ) : null}
       {deduction.decisionReason ? <p className="mt-2 text-xs text-slate-600">{operationCopy.decisionReason}: {deduction.decisionReason}</p> : null}
       <label className="mt-3 flex min-w-0 flex-col gap-1">
         <span className="text-xs font-semibold text-slate-600">{copy.auditReason}</span>
@@ -2714,6 +2763,7 @@ interface OperationReviewCopy {
   manual: string
   windowStatus: string
   decisionReason: string
+  positionBasis: string
   correctTiming: string
   saveTiming: string
   manualOutsideWindow: string
@@ -2750,6 +2800,7 @@ function operationReviewCopy(lang: 'ar' | 'en'): OperationReviewCopy {
       manual: 'Manual',
       windowStatus: 'Window status',
       decisionReason: 'Manager reason',
+      positionBasis: 'Inside shift by screen order',
       correctTiming: 'Correct date / time',
       saveTiming: 'Save timing',
       manualOutsideWindow: 'Manager-entered · outside auto-classification',
@@ -2790,6 +2841,7 @@ function operationReviewCopy(lang: 'ar' | 'en'): OperationReviewCopy {
     manual: 'يدوي',
     windowStatus: 'حالة النافذة',
     decisionReason: 'سبب المدير',
+    positionBasis: 'ضمن النوبة حسب ترتيب الشاشة',
     correctTiming: 'تصحيح التاريخ / الوقت',
     saveTiming: 'حفظ التوقيت',
     manualOutsideWindow: 'طلب مدير · خارج التصنيف الآلي',

@@ -1,8 +1,13 @@
-import { type ReactNode, useEffect, useState } from 'react'
+import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { useApp } from './app-context.tsx'
 import { Button, Card, Screen } from './ui.tsx'
 import { Login } from './screens/Login.tsx'
 import { ShiftFlow } from './screens/Shift.tsx'
+import {
+  deleteAllPendingEvidence,
+  sweepExpiredPendingEvidence,
+} from './pending-evidence-storage.ts'
+import { clearAllEndDrafts, sweepExpiredEndDrafts } from './end-draft-storage.ts'
 
 interface Assignment {
   driverId: string
@@ -41,6 +46,35 @@ interface Assignment {
   }>
 }
 
+/** Non-binary owner marker: lets a fresh app load distinguish a legitimate same-driver resume
+ * from evidence left by another account on a shared phone. Image bytes remain IndexedDB-only. */
+const PENDING_EVIDENCE_OWNER_KEY = 'ash.pendingEvidenceOwner'
+
+function pendingEvidenceOwner(): string | null {
+  try {
+    return localStorage.getItem(PENDING_EVIDENCE_OWNER_KEY)
+  } catch {
+    return null
+  }
+}
+
+function rememberPendingEvidenceOwner(driverId: string | null): void {
+  try {
+    if (driverId === null) localStorage.removeItem(PENDING_EVIDENCE_OWNER_KEY)
+    else localStorage.setItem(PENDING_EVIDENCE_OWNER_KEY, driverId)
+  } catch {
+    // Private mode: logout/change cleanup below still protects this live browser session.
+  }
+}
+
+function withLocalStorage(action: (storage: Storage) => void): void {
+  try {
+    action(localStorage)
+  } catch {
+    // Storage can be disabled; the in-memory UI and server draft still work.
+  }
+}
+
 /**
  * The driver app is intentionally a straight line: log in → confirm today's bike → run the shift.
  * No side menu, no dashboard — a driver on a phone wants the next action, not navigation.
@@ -50,6 +84,26 @@ export function DriverApp(): ReactNode {
   /** Whether the phone thinks it has a network. Cheap, and the difference between "the app is
       broken" and "wait until you are back in range". */
   const [online, setOnline] = useState(navigator.onLine)
+  const evidenceOwner = useRef<string | null>(session?.driverId ?? null)
+  useEffect(() => {
+    void sweepExpiredPendingEvidence()
+    withLocalStorage((storage) => sweepExpiredEndDrafts(storage))
+  }, [])
+  useEffect(() => {
+    const next = session?.driverId ?? null
+    const previous = evidenceOwner.current
+    const remembered = pendingEvidenceOwner()
+    if (
+      (next !== null && remembered !== null && remembered !== next) ||
+      (previous !== null && previous !== next)
+    ) {
+      void deleteAllPendingEvidence()
+      withLocalStorage((storage) => clearAllEndDrafts(storage))
+    }
+    if (next !== null) rememberPendingEvidenceOwner(next)
+    else if (previous !== null) rememberPendingEvidenceOwner(null)
+    evidenceOwner.current = next
+  }, [session?.driverId])
   useEffect(() => {
     const up = (): void => setOnline(true)
     const down = (): void => setOnline(false)
@@ -119,6 +173,9 @@ export function DriverApp(): ReactNode {
             try {
               await api.logout()
             } finally {
+              await deleteAllPendingEvidence()
+              withLocalStorage((storage) => clearAllEndDrafts(storage))
+              rememberPendingEvidenceOwner(null)
               // Always clear the session locally, even if the network call fails.
               setVehicleId(null)
               setSession(null)

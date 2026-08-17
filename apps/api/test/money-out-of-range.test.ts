@@ -1,6 +1,8 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
+import { ScriptedOcrReader } from '@ash/adapters/memory'
+import type { OcrReader } from '@ash/contracts'
+import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr, today } from './harness.ts'
 
 /**
  * The production incident, pinned.
@@ -32,12 +34,53 @@ afterEach(async () => {
 const post = async (t: string, url: string, payload: Record<string, unknown> = {}): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(t) }, payload })
 const put = async (t: string, url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(t) }, payload })
+  url.endsWith('/end-package')
+    ? await h.submitEndPackage(t, url.split('/')[2]!, payload)
+    : await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(t) }, payload })
 const get = async (t: string, url: string): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(t) } })
 
 /** The unstorable figure exactly as production sent it. */
 const OUT_OF_RANGE = '82296150060611100000226021100101000'
+
+async function resetWithWalletOcr(value: string): Promise<void> {
+  await h.app.close()
+  h = await makeHarness({
+    ocr: new ScriptedOcrReader([{
+      ok: true,
+      rows: [{
+        printed: value,
+        value,
+        cancelled: false,
+        time: null,
+        dateIso: null,
+        pointA: null,
+        pointB: null,
+      }],
+      fields: {},
+      raw: null,
+    }]),
+  })
+}
+
+async function readAttachedWallet(driver: string, id: string, retryFailed = false): Promise<void> {
+  const draftResponse = await get(driver, `/shifts/${id}/close-draft`)
+  expect(draftResponse.statusCode, draftResponse.body).toBe(200)
+  const draft = draftResponse.json() as {
+    revision: number
+    attachments: Array<{ slot: string; mediaId: string; attachmentToken: string }>
+  }
+  const wallet = draft.attachments.find((attachment) => attachment.slot === 'wallet')
+  expect(wallet).toBeDefined()
+  const read = await post(driver, `/shifts/${id}/close-draft/media/wallet/read`, {
+    expectedRevision: draft.revision,
+    mediaId: wallet!.mediaId,
+    attachmentToken: wallet!.attachmentToken,
+    field: 'wallet',
+    retryFailed,
+  })
+  expect(read.statusCode, read.body).toBe(200)
+}
 
 async function shiftReadyToClose(driver: string, manager: string): Promise<string> {
   const id = (await post(driver, '/shifts', { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 })).json()
@@ -45,7 +88,13 @@ async function shiftReadyToClose(driver: string, manager: string): Promise<strin
   await h.uploadPhoto(driver, id, 'start', 'odometer')
   await put(driver, `/shifts/${id}/start-package`, { odometerKm: 100, batteryPercent: 90 })
   await post(manager, `/shifts/${id}/approve-open`, { floatTranches: [sypStr(100_000)], topupTranches: [] })
-  await post(driver, `/shifts/${id}/orders`, { providerOrderNo: 'A-1', payMode: 'cash', fee: sypStr(5_000) })
+  h.stageCloseDraftFinancialFixture(id, {
+    managerToken: manager,
+    orders: [{
+      clientKey: 'money-range-a1', providerOrderNo: 'A-1', payMode: 'cash', fee: sypStr(5_000),
+      occurredDate: today, occurredMinute: '08:00',
+    }],
+  })
   for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
   return id
 }
@@ -55,11 +104,13 @@ const BALANCED = { odometerKm: 110, batteryPercent: 50, cashDeclared: sypStr(105
 
 describe('money the system cannot store', () => {
   it('closes the shift anyway when it is only the OCR baseline that is unreadable', async () => {
+    await resetWithWalletOcr(OUT_OF_RANGE)
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
     const id = await shiftReadyToClose(driver, manager)
+    await readAttachedWallet(driver, id)
 
-    const res = await put(driver, `/shifts/${id}/end-package`, { ...BALANCED, walletDeclaredOcr: OUT_OF_RANGE })
+    const res = await put(driver, `/shifts/${id}/end-package`, BALANCED)
 
     expect(res.statusCode).toBe(200)
     // The equation is untouched by the misread — this is the shift the driver was blocked on.
@@ -89,6 +140,54 @@ describe('money the system cannot store', () => {
     expect((await get(manager, `/shifts/${id}/review`)).json().state).toBe('open')
   })
 
+  it('keeps the last storable wallet baseline when a same-photo reread is out of range', async () => {
+    await h.app.close()
+    let walletCalls = 0
+    const reader: OcrReader = {
+      available: true,
+      model: 'wallet-range-regression',
+      cacheSignature: (field) => `wallet-range-regression-v1:${field}`,
+      read: async ({ field }) => {
+        if (field !== 'wallet') {
+          return {
+            result: { ok: true, rows: [], fields: field === 'odometer' ? { odometer: '110' } : {}, raw: null },
+            usage: { tokensIn: 1, tokensOut: 1, latencyMs: 1 },
+          }
+        }
+        walletCalls += 1
+        const value = walletCalls === 1 ? '76509.55' : OUT_OF_RANGE
+        return {
+          result: {
+            ok: true,
+            ...(walletCalls === 1 ? { retryable: true } : {}),
+            rows: [{
+              printed: value, value, cancelled: false,
+              time: null, dateIso: null, pointA: null, pointB: null,
+            }],
+            fields: {},
+            raw: null,
+          },
+          usage: { tokensIn: 1, tokensOut: 1, latencyMs: 1 },
+        }
+      },
+    }
+    h = await makeHarness({
+      ocr: reader,
+    })
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await shiftReadyToClose(driver, manager)
+
+    await readAttachedWallet(driver, id)
+    await readAttachedWallet(driver, id, true)
+    expect(walletCalls).toBe(2)
+    const res = await put(driver, `/shifts/${id}/end-package`, BALANCED)
+
+    expect(res.statusCode, res.body).toBe(200)
+    expect((await get(manager, `/shifts/${id}/review`)).json().endPackage.walletDeclaredOcr)
+      .toBe('76509.55')
+  })
+
   it('refuses it as a fee — 400 at the edge, never a 500 from the database', async () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
@@ -100,18 +199,19 @@ describe('money the system cannot store', () => {
       fee: OUT_OF_RANGE,
     })
     expect(res.statusCode).toBe(400)
-    expect((await get(manager, `/shifts/${id}/review`)).json().orders).toHaveLength(1)
+    expect(await h.deps.orders.findByProviderNo('A-2')).toBeNull()
   })
 
   it('still accepts the largest figure that genuinely fits', async () => {
+    await resetWithWalletOcr('92233720368547758.07')
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
     const id = await shiftReadyToClose(driver, manager)
+    await readAttachedWallet(driver, id)
 
     // 9,223,372,036,854,775,807 minor units — the top of a Postgres bigint, to the cent.
     const res = await put(driver, `/shifts/${id}/end-package`, {
       ...BALANCED,
-      walletDeclaredOcr: '92233720368547758.07',
     })
     expect(res.statusCode).toBe(200)
     expect((await get(manager, `/shifts/${id}/review`)).json().endPackage.walletDeclaredOcr).toBe('92233720368547758.07')

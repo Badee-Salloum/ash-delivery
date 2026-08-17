@@ -1,5 +1,14 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
-import { type BatteryReadingInput, checkStartBattery, plural, readInCloud } from '@ash/client'
+import {
+  type BatteryReadingInput,
+  type CloseDraftAttachment,
+  type CloseDraftReadResponse,
+  type CloseDraftView,
+  type EvidenceUploadResponse,
+  checkStartBattery,
+  plural,
+  readInCloud,
+} from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { Button, Card, Field, TextInput } from '../ui.tsx'
 import { CloudReadStatus } from './CloudReadStatus.tsx'
@@ -341,6 +350,10 @@ export function BatteryPanel({
   initialMediaIds,
   onPacksChanged,
   onMediaIdChanged,
+  closeDraftAttachments,
+  closeDraftRevision,
+  onCloseDraft,
+  onLinkedRead,
 }: {
   shiftId: string
   pkg: 'start' | 'end'
@@ -363,6 +376,15 @@ export function BatteryPanel({
   onPacksChanged?(packs: Record<string, PackState>): void
   /** Preserve a newly uploaded generation when this panel is temporarily unmounted. */
   onMediaIdChanged?(batteryId: string, mediaId: string): void
+  /** Durable end-package evidence; omitted for the legacy start package. */
+  closeDraftAttachments?: Readonly<Record<string, CloseDraftAttachment>>
+  closeDraftRevision?: number | null
+  onCloseDraft?(draft: CloseDraftView): void
+  onLinkedRead?(
+    slot: string,
+    retryFailed: boolean,
+    upload?: EvidenceUploadResponse,
+  ): Promise<CloseDraftReadResponse | null>
 }): ReactNode {
   const { api, t } = useApp()
   const [packs, setPacks] = useState<Record<string, PackState>>(() => initialPacks ?? {})
@@ -682,6 +704,68 @@ export function BatteryPanel({
     [push, updatePacks],
   )
 
+  /** End-package BMS reads are linked to the accepted attachment generation and survive reload. */
+  const linkedRead = useCallback(
+    async (
+      battery: FittedBattery,
+      slot: string,
+      retryFailed: boolean,
+      upload?: EvidenceUploadResponse,
+    ): Promise<void> => {
+      if (!onLinkedRead) return
+      setCloudEvents((current) => ({ ...current, [battery.id]: { status: 'reading' } }))
+      const response = await onLinkedRead(slot, retryFailed, upload)
+      if (response === null || response.read.status !== 'complete') {
+        setCloudEvents((current) => ({
+          ...current,
+          [battery.id]: {
+            status: 'failed',
+            reason: response?.read.failure ?? 'unavailable',
+            retryable: true,
+          },
+        }))
+        return
+      }
+
+      // A retry after reload has no browser File, but the linked response still proves exactly
+      // which accepted media generation produced these fields. Rehydrate that lock before writing
+      // the battery reading so provenance is never weakened to an unguarded scalar update.
+      const linkedAttachment = response.draft.attachments.find((item) => item.slot === slot)
+      if (linkedAttachment) {
+        const selectedFile = filesRef.current[battery.id] ?? null
+        updateEvidenceProgress(battery.id, (current) =>
+          current?.uploadedMediaId === linkedAttachment.mediaId && current.file === selectedFile
+            ? current
+            : {
+                file: selectedFile,
+                uploadedMediaId: linkedAttachment.mediaId,
+                persistedMediaId: null,
+              },
+        )
+        onMediaIdChanged?.(battery.id, linkedAttachment.mediaId)
+      }
+
+      const applied = applyCloudBmsFields(packsRef.current[battery.id] ?? EMPTY_PACK, response.fields)
+      if (applied.fieldsFound === 0) {
+        setCloudEvents((current) => ({
+          ...current,
+          [battery.id]: { status: 'failed', reason: 'no_fields', retryable: true },
+        }))
+        return
+      }
+      cloudAnswered.current.add(battery.id)
+      updatePacks((current) => ({ ...current, [battery.id]: applied.state }))
+      const persisted = await push(battery.id, applied.state)
+      setCloudEvents((current) => {
+        const next = { ...current }
+        if (persisted) delete next[battery.id]
+        else next[battery.id] = { status: 'failed', reason: 'unavailable', retryable: true }
+        return next
+      })
+    },
+    [onLinkedRead, onMediaIdChanged, push, updateEvidenceProgress, updatePacks],
+  )
+
   if (batteries.length === 0) {
     return (
       <Card>
@@ -696,6 +780,7 @@ export function BatteryPanel({
         const slotNo = slotOf(battery, i)
         const state = stateOf(battery.id)
         const cloudEvent = cloudEvents[battery.id]
+        const evidenceSlot = `bms_${slotNo}`
         const label =
           battery.groundNo == null || battery.groundNo === ''
             ? `${t.battery.bmsShot} ${slotNo} · ${battery.capacityAh}Ah`
@@ -715,11 +800,19 @@ export function BatteryPanel({
                 <PhotoSlot
                   shiftId={shiftId}
                   pkg={pkg}
-                  slot={`bms_${slotNo}`}
+                  slot={evidenceSlot}
                   label={label}
                   badge={String(slotNo)}
                   variant="tile"
-                  uploaded={slots.has(`bms_${slotNo}`)}
+                  uploaded={slots.has(evidenceSlot)}
+                  recognitionQuality
+                  {...(pkg === 'end'
+                    ? {
+                        attachment: closeDraftAttachments?.[evidenceSlot] ?? null,
+                        closeDraftRevision: closeDraftRevision ?? null,
+                        ...(onCloseDraft ? { onCloseDraft } : {}),
+                      }
+                    : {})}
                   onUploaded={async (uploadedSlot, result, file) => {
                     /*
                      * The first OCR write can finish before its evidence upload, so the server has
@@ -727,59 +820,54 @@ export function BatteryPanel({
                      * parent mark the slot complete; this closes that ordering race for cloud and
                      * manually entered values alike. The local diagnostic never persists a value.
                      */
-                    if (
-                      result === undefined ||
-                      file === undefined ||
-                      !isCurrentEvidenceFile(filesRef.current, battery.id, file)
-                    ) {
+                    if (result === undefined || file === undefined) {
                       throw new Error('battery_evidence_generation_changed')
                     }
-                    updateEvidenceProgress(battery.id, (current) =>
-                      current?.file === file
-                        ? { ...current, uploadedMediaId: result.mediaId, persistedMediaId: null }
-                        : current,
-                    )
+                    onReadingsChanged?.(false)
+                    filesRef.current = { ...filesRef.current, [battery.id]: file }
+                    setFiles((current) => ({ ...current, [battery.id]: file }))
+                    syncVersions.current[battery.id] = (syncVersions.current[battery.id] ?? 0) + 1
+                    updateEvidenceProgress(battery.id, () => ({
+                      file,
+                      uploadedMediaId: result.mediaId,
+                      persistedMediaId: null,
+                    }))
+                    cloudAnswered.current.delete(battery.id)
+                    setCloudEvents((current) => {
+                      const next = { ...current }
+                      delete next[battery.id]
+                      return next
+                    })
+                    const nextState = packForNewEvidence(packsRef.current[battery.id] ?? EMPTY_PACK)
+                    updatePacks((current) => ({ ...current, [battery.id]: nextState }))
                     onMediaIdChanged?.(battery.id, result.mediaId)
-                    const held = packsRef.current[battery.id]
                     // A declaration confirmed while this older upload was in flight owns the pack.
                     // Its null reading must not be replaced by the abandoned screenshot generation.
-                    if (held?.unavailable) {
+                    if (nextState.unavailable) {
                       onSlotUploaded(uploadedSlot)
                       return
                     }
-                    if (held?.values.percent.trim() && !(await push(battery.id, held))) {
+                    if (nextState.values.percent.trim() && !(await push(battery.id, nextState))) {
                       throw new Error('battery_reading_persist_failed')
                     }
                     onSlotUploaded(uploadedSlot)
                   }}
-                  onImage={(file) => {
-                    // Close the parent gate in this same interaction; do not leave one render in
-                    // which the old slot + old persisted reading can still enable submit.
-                    onReadingsChanged?.(false)
-                    filesRef.current = { ...filesRef.current, [battery.id]: file }
-                    syncVersions.current[battery.id] = (syncVersions.current[battery.id] ?? 0) + 1
-                    updateEvidenceProgress(battery.id, () => ({
-                      file,
-                      uploadedMediaId: null,
-                      persistedMediaId: null,
-                    }))
-                    cloudAnswered.current.delete(battery.id)
-                    setCloudEvents((cur) => {
-                      const next = { ...cur }
-                      delete next[battery.id]
-                      return next
-                    })
-                    updatePacks((cur) => ({
-                      ...cur,
-                      [battery.id]: packForNewEvidence(cur[battery.id] ?? EMPTY_PACK),
-                    }))
-                    setFiles((cur) => ({ ...cur, [battery.id]: file }))
+                  onImage={async (file, upload) => {
                     void runOcr(battery, file)
+                    if (pkg === 'end') await linkedRead(battery, evidenceSlot, false, upload)
                   }}
-                  ocrField="bms"
-                  onCloudRead={(e, file) => {
-                    if (file) cloudRead(battery, e, file)
-                  }}
+                  {...(pkg === 'start'
+                    ? {
+                        ocrField: 'bms' as const,
+                        onCloudRead: (event: CloudReadEvent, file?: File) => {
+                          if (file) cloudRead(battery, event, file)
+                        },
+                      }
+                    : {
+                        onRetryRead: async () => {
+                          await linkedRead(battery, evidenceSlot, true)
+                        },
+                      })}
                 />
               </div>
               <p className="min-w-0 flex-1 text-sm font-medium text-slate-700">{label}</p>
@@ -793,12 +881,14 @@ export function BatteryPanel({
                 its own line rather than fighting `OcrStatus` for one. A pack with no charge
                 reading cannot open a shift — `batteryGaps` refuses it — so a cloud read still
                 running is something the driver is genuinely waiting on. */}
-            <CloudReadStatus
-              event={cloudEvent ?? null}
-              {...(files[battery.id]
-                ? { onRetry: () => void retryCloud(battery, files[battery.id]!) }
-                : {})}
-            />
+            {pkg === 'start' ? (
+              <CloudReadStatus
+                event={cloudEvent ?? null}
+                {...(files[battery.id]
+                  ? { onRetry: () => void retryCloud(battery, files[battery.id]!) }
+                  : {})}
+              />
+            ) : null}
             {state.unavailable ? (
               /* Declared. Say plainly what happens next, so he is not left wondering whether he has
                  broken something — the shift proceeds and the branch manager reads this pack. */

@@ -28,7 +28,9 @@ afterEach(async () => {
 const post = async (t: string, url: string, payload: Record<string, unknown> = {}): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(t) }, payload })
 const put = async (t: string, url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(t) }, payload })
+  url.endsWith('/end-package')
+    ? await h.submitEndPackage(t, url.split('/')[2]!, payload)
+    : await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(t) }, payload })
 
 async function openShift(driver: string, manager: string, start: Record<string, unknown>): Promise<string> {
   const id = (await post(driver, '/shifts', { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 })).json()

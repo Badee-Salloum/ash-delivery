@@ -13,10 +13,14 @@ import { type Minor, type PayMode, WALLET_LOG_FEEDS_BR1, evaluateBr1, minor, par
 export interface DraftOrder {
   /** Local id; the server assigns the real one. */
   localId: string
+  /** Stable close-draft identity. Unlike `scanProvenance`, this crosses the wire. */
+  clientKey?: string
   providerOrderNo: string
   payMode: PayMode
   /** As typed, so the field round-trips exactly what the driver sees. */
   feeText: string
+  /** Last canonical value, used to send a row edit only when the driver actually changed it. */
+  persistedFeeText?: string
   /** SRS D-1/D-3: the OCR-read fee, set only on rows scanned off «Recent orders» — the baseline. */
   feeOcrText?: string
   /**
@@ -73,6 +77,8 @@ export interface DraftOrder {
   walletAmountText?: string
   /** «HH:MM» off the dashboard — what a payments-log row is paired to. */
   timeText?: string
+  /** Canonical clock baseline, so an autosave never claims an unchanged OCR field as human input. */
+  persistedTimeText?: string
   /**
    * «YYYY-MM-DD» from the screen's own day header, when one could be read.
    *
@@ -81,6 +87,8 @@ export interface DraftOrder {
    * between them and the shift's money was the driver noticing.
    */
   dateText?: string
+  /** Canonical printed-day baseline paired with `persistedTimeText`. */
+  persistedDateText?: string
   /** Where it went: «A» the pickup, «B» the dropoff, as the screen wrote them. */
   pointA?: string | null
   pointB?: string | null
@@ -94,37 +102,80 @@ export interface DraftOrder {
    * discarding money. It is local provenance only and never crosses the operations wire.
    */
   scanProvenance?: string
+  /** Server-owned provenance for a durable close-draft row. */
+  draftSource?: 'manual' | 'local_ocr' | 'cloud_ocr'
+  readId?: string | null
+  observationId?: string | null
+  rowIndex?: number | null
+  dateSection?: string | null
+  evidence?: { mediaId: string; attachmentToken: string; slot: string } | null
+  sightings?: Array<{
+    readId: string
+    observationId: string
+    rowIndex: number
+    dateSection: string | null
+    evidence: { mediaId: string; attachmentToken: string; slot: string }
+  }>
+  windowBasis?: 'printed_time' | 'screen_position' | 'manager' | null
+  position?: {
+    lowerInstant: string | null
+    upperInstant: string | null
+    anchorObservationIds?: string[]
+  } | null
 }
 
 /** A «سجل المدفوعات» row as the driver's list holds it, before the server gives it an identity. */
 export interface DraftMovement {
   localId: string
+  clientKey?: string
   /** SIGNED money as typed: «-99», «107.50». Negative left the wallet. */
   amountText: string
+  persistedAmountText?: string
   timeText: string
+  persistedTimeText?: string
   included?: boolean
   /** Which order it answers to, by number, when the matcher paired them. */
   providerOrderNo?: string | null
   role?: 'yalago_cut' | 'order_credit' | 'unmatched'
   ambiguous?: boolean
+  persistedAmbiguous?: boolean
   /**
    * What the on-device reader made of this amount, before any cloud correction. Identity only —
    * see `mergeScannedMovements` for why a movement's key cannot drop the amount the way an
    * order's key drops the fee.
    */
   scannedAs?: string
+  notes?: string | null
+  persistedNotes?: string | null
+  draftSource?: 'manual' | 'local_ocr' | 'cloud_ocr'
+  readId?: string | null
+  observationId?: string | null
+  rowIndex?: number | null
+  dateSection?: string | null
+  evidence?: { mediaId: string; attachmentToken: string; slot: string } | null
+  sightings?: Array<{
+    readId: string
+    observationId: string
+    rowIndex: number
+    dateSection: string | null
+    evidence: { mediaId: string; attachmentToken: string; slot: string }
+  }>
 }
 
 /** A negative Recent-Orders operation, represented as a positive cash-out magnitude. */
 export interface DraftCashDeduction {
   localId: string
+  clientKey?: string
   /** Deterministic across overlapping pages/retries; never a random order id. */
   operationKey: string
   amountText: string
+  persistedAmountText?: string
   amountOcrText: string | null
   amountStrip?: string | null
   timeText: string
+  persistedTimeText?: string
   dateText: string
+  persistedDateText?: string
   pointA?: string | null
   pointB?: string | null
   source: 'ocr' | 'refused' | 'manual'
@@ -144,6 +195,25 @@ export interface DraftCashDeduction {
   timeReviewRequired?: boolean
   /** Already persisted by the API. Local reconciliation must never hide a server ledger row. */
   recorded?: boolean
+  draftSource?: 'manual' | 'local_ocr' | 'cloud_ocr'
+  readId?: string | null
+  observationId?: string | null
+  rowIndex?: number | null
+  dateSection?: string | null
+  evidence?: { mediaId: string; attachmentToken: string; slot: string } | null
+  sightings?: Array<{
+    readId: string
+    observationId: string
+    rowIndex: number
+    dateSection: string | null
+    evidence: { mediaId: string; attachmentToken: string; slot: string }
+  }>
+  windowBasis?: 'printed_time' | 'screen_position' | 'manager' | null
+  position?: {
+    lowerInstant: string | null
+    upperInstant: string | null
+    anchorObservationIds?: string[]
+  } | null
 }
 
 /** The canonical deduction shape returned after the server commits an operations batch. */
@@ -1680,6 +1750,9 @@ export function driverPhaseFor(
   if (serverState === 'approved' || serverState === 'week_locked') return { gone: 'closed', phase: 'done' }
   if (serverState === 'suspended' && (current === 'orders' || current === 'end')) return { gone: null, phase: 'suspended' }
   if (serverState === 'open' && current === 'suspended') return { gone: null, phase: 'orders' }
+  // A submitted close normally stays `pending_review`. Seeing the same shift return to `open` while
+  // its phone is already on done means the manager reopened it for correction/rephoto.
+  if (serverState === 'open' && current === 'done') return { gone: null, phase: 'end' }
   if (serverState === 'pending_review' && (current === 'orders' || current === 'end')) return { gone: null, phase: 'done' }
   return { gone: null, phase: null }
 }

@@ -33,9 +33,11 @@
 import type { OcrFailure, OcrField, OcrReader, OcrReading, OcrResult, OcrRow } from '@ash/contracts'
 import {
   ORDERS_MONEY_READ_SCHEMA,
+  ORDERS_SCREEN_KIND_SCHEMA,
   ORDERS_TIME_READ_SCHEMA,
   READ_SCHEMA,
   ordersMoneyReadPrompt,
+  ordersScreenKindPrompt,
   ordersTimeReadPrompt,
   readPrompt,
   walletReadPrompts,
@@ -68,10 +70,16 @@ const MAX_COMPLETION_TOKENS = 8192
  */
 const ORDERS_MONEY_TIMEOUT_MS = 30_000
 const ORDERS_TIME_TIMEOUT_MS = 24_000
+const ORDERS_SCREEN_KIND_TIMEOUT_MS = 12_000
 const ORDERS_ROUTE_TIMEOUT_MS = 44_000
 const ORDERS_ROUTE_GRACE_AFTER_MONEY_MS = 12_000
 const ORDERS_MONEY_MAX_COMPLETION_TOKENS = 4096
 const ORDERS_TIME_MAX_COMPLETION_TOKENS = 2048
+// Reasoning tokens share this ceiling with the tiny JSON answer. 128 regularly lets a medium
+// reasoning pass exhaust its budget before emitting `screenKind`, which turns the safety gate into
+// a false `no_fields`. The schema still permits only one enum, so the larger ceiling cannot create
+// a verbose response; it merely leaves enough room to finish the classification.
+const ORDERS_SCREEN_KIND_MAX_COMPLETION_TOKENS = 512
 
 export class OpenAiOcrReader implements OcrReader {
   readonly available = true
@@ -89,8 +97,9 @@ export class OpenAiOcrReader implements OcrReader {
     if (field === 'orders') {
       const moneyTimeout = Math.min(this.config.timeoutMs, ORDERS_MONEY_TIMEOUT_MS)
       const timeTimeout = Math.min(this.config.timeoutMs, ORDERS_TIME_TIMEOUT_MS)
+      const kindTimeout = Math.min(this.config.timeoutMs, ORDERS_SCREEN_KIND_TIMEOUT_MS)
       const routeTimeout = Math.min(this.config.timeoutMs, ORDERS_ROUTE_TIMEOUT_MS)
-      return `${prefix}:orders-money-v3:orders-time-v2:orders-route-v2:money-validation-v2:time-validation-v2:cancellation-consensus-v1:money-timeout-${moneyTimeout}:time-timeout-${timeTimeout}:route-timeout-${routeTimeout}:route-grace-${ORDERS_ROUTE_GRACE_AFTER_MONEY_MS}:money-max-${ORDERS_MONEY_MAX_COMPLETION_TOKENS}:time-max-${ORDERS_TIME_MAX_COMPLETION_TOKENS}:route-max-${MAX_COMPLETION_TOKENS}`
+      return `${prefix}:orders-screen-kind-v1:orders-money-v4:orders-time-v3:orders-route-v3:money-authority-v1:money-validation-v2:time-validation-v3:position-evidence-v1:cancellation-consensus-v1:kind-timeout-${kindTimeout}:money-timeout-${moneyTimeout}:time-timeout-${timeTimeout}:route-timeout-${routeTimeout}:route-grace-${ORDERS_ROUTE_GRACE_AFTER_MONEY_MS}:kind-max-${ORDERS_SCREEN_KIND_MAX_COMPLETION_TOKENS}:money-max-${ORDERS_MONEY_MAX_COMPLETION_TOKENS}:time-max-${ORDERS_TIME_MAX_COMPLETION_TOKENS}:route-max-${MAX_COMPLETION_TOKENS}`
     }
     const budget = `timeout-${this.config.timeoutMs}:max-${MAX_COMPLETION_TOKENS}`
     if (field === 'wallet') {
@@ -149,15 +158,25 @@ export class OpenAiOcrReader implements OcrReader {
       schema: ORDERS_TIME_READ_SCHEMA,
       schemaName: 'orders_printed_time_verifier',
     })
+    const screenKindPromise = this.runPass(request, ordersScreenKindPrompt(), {
+      timeoutMs: Math.min(this.config.timeoutMs, ORDERS_SCREEN_KIND_TIMEOUT_MS),
+      maxCompletionTokens: ORDERS_SCREEN_KIND_MAX_COMPLETION_TOKENS,
+      schema: ORDERS_SCREEN_KIND_SCHEMA,
+      schemaName: 'orders_screen_kind',
+      screenKind: true,
+    })
 
     // All three calls start above. Once both compact passes settle, routes get only a short grace;
     // if both fail, the already-running full pass gets its complete (still <45s) fallback budget.
-    const [money, time] = await Promise.all([moneyPromise, timePromise])
-    const route = money.result.ok || time.result.ok
+    const [screenKind, money, time] = await Promise.all([screenKindPromise, moneyPromise, timePromise])
+    const route = screenKind.result.ok || money.result.ok || time.result.ok
       ? await routePassWithinGrace(routePromise, routeAbort)
       : await routePromise
 
-    return { result: ordersPassResult(money, time, route), passes: [money, time, route] }
+    return {
+      result: ordersPassResult(screenKind, money, time, route),
+      passes: [screenKind, money, time, route],
+    }
   }
 
   private async runPass(
@@ -243,13 +262,19 @@ export class OpenAiOcrReader implements OcrReader {
       return failedPass('no_fields', tokensIn, tokensOut)
     }
 
-    const result = parsedResult(request.field, parsed)
+    const result = options.screenKind ? parsedScreenKindResult(parsed) : parsedResult(request.field, parsed)
     return { result, raw: parsed, tokensIn, tokensOut }
   }
 }
 
 function failedPass(reason: OcrFailure, tokensIn = 0, tokensOut = 0): ModelPass {
   return { result: { ok: false, reason }, raw: null, tokensIn, tokensOut }
+}
+
+function parsedScreenKindResult(parsed: ParsedScreen): OcrResult {
+  return parsed.screenKind === 'orders' || parsed.screenKind === 'payments_log' || parsed.screenKind === 'unknown'
+    ? { ok: true, rows: [], fields: {}, raw: parsed }
+    : { ok: false, reason: 'no_fields' }
 }
 
 async function routePassWithinGrace(
@@ -278,11 +303,24 @@ async function routePassWithinGrace(
  * possible third vote. Thus a failed verifier can be rescued by money+route agreement, while a
  * money+verifier result does not have to wait for slow route transcription.
  */
-function ordersPassResult(money: ModelPass, time: ModelPass, route: ModelPass): OcrResult {
-  const base = money.result.ok ? money : route.result.ok ? route : null
-  if (base === null || !base.result.ok) {
-    return route.result
-  }
+function ordersPassResult(
+  screenKind: ModelPass,
+  money: ModelPass,
+  time: ModelPass,
+  route: ModelPass,
+): OcrResult {
+  // Screen identity is a separate inspection. A payments ledger contains plausible signed money and
+  // times, so no monetary row is published unless this independent gate proves Recent Orders.
+  if (!screenKind.result.ok) return screenKind.result
+  if (screenKind.raw?.screenKind === 'payments_log') return { ok: false, reason: 'wrong_screen' }
+  // `unknown` is not proof that the driver selected the wrong screen. Keep that distinction so the
+  // UI asks for a clearer/retryable image instead of confidently naming an unrelated source.
+  if (screenKind.raw?.screenKind !== 'orders') return { ok: false, reason: 'no_fields' }
+
+  // The compact money pass is the sole financial authority. Route transcription is optional
+  // enrichment and can neither rescue a failed money read nor replace/refuse a verified fee.
+  if (!money.result.ok) return money.result
+  const base = money as ModelPass & { result: Extract<OcrResult, { ok: true }> }
 
   const baseLength = base.result.rows.length
   const alignedPasses = [money, time, route].filter(
@@ -290,7 +328,6 @@ function ordersPassResult(money: ModelPass, time: ModelPass, route: ModelPass): 
       pass.result.ok && pass.result.rows.length === baseLength,
   )
   const routePositionsAligned = route.result.ok && route.result.rows.length === baseLength
-  const moneyIsBase = base === money
   const financialDisagreementIndexes: number[] = []
   const timeDisagreementIndexes: number[] = []
   const dateDisagreementIndexes: number[] = []
@@ -300,7 +337,7 @@ function ordersPassResult(money: ModelPass, time: ModelPass, route: ModelPass): 
   const cancellationUnverifiedIndexes: number[] = []
   const routeAgreementIndexes: number[] = []
 
-  const rows = base.result.rows.map((baseRow, index) => {
+  let rows: OcrRow[] = base.result.rows.map((baseRow, index) => {
     const cancellation = orderCancellationConsensus(alignedPasses, index)
     cancellationAgreementCounts.push(cancellation.votes)
     if (cancellation.disagreement) cancellationDisagreementIndexes.push(index)
@@ -316,27 +353,46 @@ function ordersPassResult(money: ModelPass, time: ModelPass, route: ModelPass): 
       !cancelled && baseRow.value === null && baseRow.printed.trim() !== ''
     const consensus = orderDateTimeConsensus(alignedPasses, index, cancelled)
     timeAgreementCounts.push(consensus.timeVotes)
-    if (consensus.time === null && !cancelled) timeDisagreementIndexes.push(index)
     if (consensus.dateIso === null && !cancelled) dateDisagreementIndexes.push(index)
 
     let row: OcrRow = {
       ...baseRow,
+      printedTime: consensus.printedTime,
       value: cancelled || cancellationContested ? null : baseRow.value,
       cancelled,
       ...(cancellationNeedsReview || printedMoneyRefused ? { reviewRequired: true } : {}),
       time: consensus.time,
       dateIso: consensus.dateIso,
+      rowIndex: index,
+      rowCount: baseLength,
+      dateSection: consensus.dateIso,
+      yTop: null,
+      yBottom: null,
     }
 
     if (!routePositionsAligned || !route.result.ok) return row
     const routeRow = route.result.rows[index]!
-    if (moneyIsBase && !ordersRowsFinanciallyAgree(baseRow, routeRow)) {
+    if (!ordersRowsFinanciallyAgree(baseRow, routeRow)) {
       financialDisagreementIndexes.push(index)
-      row = { ...row, value: null, reviewRequired: true }
+      return row
     }
     if (!ordersRowsAlign(row, routeRow)) return row
     routeAgreementIndexes.push(index)
     return { ...row, pointA: routeRow.pointA, pointB: routeRow.pointB }
+  })
+
+  const timePosition = resolveSamePageOrderTimes(rows.map((row) => ({
+    printedTime: row.printedTime,
+    dateIso: row.dateIso,
+  })))
+  rows = rows.map((row, index) => {
+    const resolution = timePosition[index]!
+    if (resolution.time === null && !row.cancelled) timeDisagreementIndexes.push(index)
+    return {
+      ...row,
+      time: resolution.time,
+      ...(resolution.conflict && !row.cancelled ? { reviewRequired: true } : {}),
+    }
   })
 
   return {
@@ -348,13 +404,19 @@ function ordersPassResult(money: ModelPass, time: ModelPass, route: ModelPass): 
     rows,
     fields: base.result.fields,
     raw: {
-      reader: 'orders-ai-time-consensus-v3',
+      reader: 'orders-ai-time-consensus-v4',
+      screenKind: screenKind.raw,
       routesAligned:
         routePositionsAligned && routeAgreementIndexes.length === baseLength,
       financialDisagreementIndexes,
       timeDisagreementIndexes,
       dateDisagreementIndexes,
       timeAgreementCounts,
+      timeCandidates: timePosition.map(({ candidates }) => candidates),
+      timeBases: timePosition.map(({ basis }) => basis),
+      monotonicConflictIndexes: timePosition
+        .map(({ conflict }, index) => conflict ? index : -1)
+        .filter((index) => index >= 0),
       cancellationAgreementCounts,
       cancellationDisagreementIndexes,
       cancellationUnverifiedIndexes,
@@ -387,7 +449,7 @@ function orderDateTimeConsensus(
   passes: ReadonlyArray<ModelPass & { result: Extract<OcrResult, { ok: true }> }>,
   index: number,
   cancelled: boolean,
-): { time: string | null; dateIso: string | null; timeVotes: number } {
+): { time: string | null; printedTime: string | null; dateIso: string | null; timeVotes: number } {
   const candidates = passes
     .map((pass) => ({ pass, row: pass.result.rows[index] }))
     // A cancellation disagreement is a row-alignment warning, not supporting time evidence.
@@ -405,10 +467,15 @@ function orderDateTimeConsensus(
     printedOrderTimeEvidence(pass.raw?.rows?.[index]?.time),
   )
   const timeWinner = consensusValue(timeEvidence.map((evidence) => evidence?.key ?? null))
-  const winningEvidence = timeEvidence.find((evidence) => evidence?.key === timeWinner.value) ?? null
+  const winningIndex = timeEvidence.findIndex((evidence) => evidence?.key === timeWinner.value)
+  const winningEvidence = winningIndex < 0 ? null : timeEvidence[winningIndex] ?? null
+  const winningPrinted = winningIndex < 0
+    ? null
+    : candidates[winningIndex]?.pass.raw?.rows?.[index]?.time
   const dateWinner = consensusValue(candidates.map(({ row }) => row.dateIso))
   return {
     time: winningEvidence === null ? null : normalizePrintedOrderTimeEvidence(winningEvidence),
+    printedTime: typeof winningPrinted === 'string' ? winningPrinted : null,
     dateIso: dateWinner.value,
     timeVotes: timeWinner.votes,
   }
@@ -470,7 +537,7 @@ interface PrintedOrderTimeEvidence {
   key: string
   hour: number
   minute: number
-  marker: 'am' | 'pm' | '24h'
+  marker: 'am' | 'pm' | '24h' | 'ambiguous'
 }
 
 function printedOrderTimeEvidence(
@@ -498,10 +565,19 @@ function printedOrderTimeEvidence(
 
   const marker = rawMarker?.replace(/[.\s]/gu, '').toUpperCase()
   if (marker === undefined) {
-    // A marker-less 01..12 is ambiguous on the Recent Orders screen. Accepting it would let a
-    // model that dropped ص/م become the second vote for the exact class of midnight bug this
-    // verifier exists to prevent. Only unambiguous 24-hour clocks survive without a marker.
-    if (!Number.isInteger(hour) || (hour !== 0 && (hour < 13 || hour > 23))) return null
+    if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null
+    // A marker-less 01..12 remains valid literal evidence, but not yet a usable 24-hour minute.
+    // Two readers may agree that the card really says `1:18` without proving AM or PM. Keeping the
+    // evidence lets the linked-read service constrain its two candidates from trusted same-page
+    // neighbours and the attachment receipt time without teaching the provider to guess a marker.
+    if (hour >= 1 && hour <= 12) {
+      return {
+        key: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}|ambiguous`,
+        hour,
+        minute,
+        marker: 'ambiguous',
+      }
+    }
     return {
       key: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}|24h`,
       hour,
@@ -525,11 +601,200 @@ function printedOrderTimeEvidence(
   }
 }
 
-function normalizePrintedOrderTimeEvidence(evidence: PrintedOrderTimeEvidence): string {
+function normalizePrintedOrderTimeEvidence(evidence: PrintedOrderTimeEvidence): string | null {
+  if (evidence.marker === 'ambiguous') return null
   let hour = evidence.hour
   if (evidence.marker === 'am') hour %= 12
   else if (evidence.marker === 'pm') hour = (hour % 12) + 12
   return `${String(hour).padStart(2, '0')}:${String(evidence.minute).padStart(2, '0')}`
+}
+
+export interface SamePageOrderTimeInput {
+  /** Literal clock agreed by at least two independent readers. */
+  printedTime: string | null | undefined
+  /** Date from the nearest header above this exact row. */
+  dateIso: string | null | undefined
+}
+
+export type OrdersEvidenceReceivedAt =
+  | { dateIso: string; time: string }
+  | string
+  | number
+  | Date
+
+export interface SamePageOrderTimeResolution {
+  /** A publishable 24-hour clock, or null when more than one safe candidate remains. */
+  time: string | null
+  /** All candidates still compatible with the evidence, ordered AM then PM. */
+  candidates: string[]
+  basis: 'printed_time' | 'screen_position' | 'unknown'
+  /** True when printed evidence contradicts receipt time or newest-first screen order. */
+  conflict: boolean
+}
+
+/**
+ * Resolve agreed marker-less clocks without guessing.
+ *
+ * Recent Orders is newest first. For `1:18` the only candidates are 01:18 and 13:18 on the row's
+ * own date. A candidate survives only if there is a complete non-increasing path through all other
+ * dated clocks on this same screenshot and it is no later than the evidence receipt time. The
+ * function is deliberately context-free with respect to shifts, so its output can be cached and a
+ * linked-read service can call it again with the authoritative attachment time.
+ */
+export function resolveSamePageOrderTimes(
+  rows: readonly SamePageOrderTimeInput[],
+  receivedAt: OrdersEvidenceReceivedAt | null = null,
+): SamePageOrderTimeResolution[] {
+  const receivedMinute = receivedAt === null ? null : receivedAtMinute(receivedAt)
+  const states = rows.map((row) => {
+    const evidence = printedOrderTimeEvidence(row.printedTime)
+    const allCandidates = evidence === null ? [] : timeCandidates(evidence)
+    const datedCandidates = allCandidates
+      .map((time) => ({ time, absoluteMinute: datedMinute(row.dateIso, time) }))
+      .filter((candidate) =>
+        receivedMinute === null ||
+        candidate.absoluteMinute === null ||
+        candidate.absoluteMinute <= receivedMinute,
+      )
+    return {
+      evidence,
+      allCandidates,
+      candidates: datedCandidates,
+      rejectedByReceipt: allCandidates.length > 0 && datedCandidates.length === 0,
+    }
+  })
+
+  // Missing dates cannot safely constrain AM/PM, but an explicit marked/24h clock remains useful.
+  const active = states
+    .map((state, index) => ({ state, index }))
+    .filter(({ state }) =>
+      state.candidates.length > 0 &&
+      state.candidates.every(({ absoluteMinute }) => absoluteMinute !== null),
+    )
+
+  const viable = new Map<number, Set<number>>()
+  if (active.length > 0) {
+    const forward = active.map(({ state }) => state.candidates.map(() => false))
+    const backward = active.map(({ state }) => state.candidates.map(() => false))
+    forward[0] = active[0]!.state.candidates.map(() => true)
+    for (let position = 1; position < active.length; position += 1) {
+      const previous = active[position - 1]!.state.candidates
+      const current = active[position]!.state.candidates
+      forward[position] = current.map((candidate) => previous.some((prior, priorIndex) =>
+        forward[position - 1]![priorIndex] === true &&
+        prior.absoluteMinute! >= candidate.absoluteMinute!,
+      ))
+    }
+    backward[active.length - 1] = active.at(-1)!.state.candidates.map(() => true)
+    for (let position = active.length - 2; position >= 0; position -= 1) {
+      const current = active[position]!.state.candidates
+      const next = active[position + 1]!.state.candidates
+      backward[position] = current.map((candidate) => next.some((following, followingIndex) =>
+        backward[position + 1]![followingIndex] === true &&
+        candidate.absoluteMinute! >= following.absoluteMinute!,
+      ))
+    }
+    active.forEach(({ index, state }, position) => {
+      viable.set(index, new Set(state.candidates
+        .map((_candidate, candidateIndex) => candidateIndex)
+        .filter((candidateIndex) =>
+          forward[position]![candidateIndex] === true && backward[position]![candidateIndex] === true,
+        )))
+    })
+  }
+
+  const monotonicPathExists = active.length === 0 ||
+    [...(viable.get(active.at(-1)?.index ?? -1) ?? [])].length > 0
+
+  return states.map((state, index): SamePageOrderTimeResolution => {
+    if (state.evidence === null) {
+      return { time: null, candidates: [], basis: 'unknown', conflict: false }
+    }
+    if (state.rejectedByReceipt) {
+      return { time: null, candidates: [], basis: 'unknown', conflict: true }
+    }
+
+    const dated = state.candidates.every(({ absoluteMinute }) => absoluteMinute !== null)
+    const candidateIndexes = dated && monotonicPathExists
+      ? [...(viable.get(index) ?? [])]
+      : state.candidates.map((_candidate, candidateIndex) => candidateIndex)
+    if (dated && !monotonicPathExists) {
+      return { time: null, candidates: [], basis: 'unknown', conflict: true }
+    }
+
+    const candidates = candidateIndexes.map((candidateIndex) => state.candidates[candidateIndex]!.time)
+    if (state.evidence.marker !== 'ambiguous') {
+      return {
+        time: candidates.length === 1 ? candidates[0]! : null,
+        candidates,
+        basis: candidates.length === 1 ? 'printed_time' : 'unknown',
+        conflict: candidates.length === 0,
+      }
+    }
+    return {
+      time: candidates.length === 1 ? candidates[0]! : null,
+      candidates,
+      basis: candidates.length === 1 ? 'screen_position' : 'unknown',
+      conflict: false,
+    }
+  })
+}
+
+function timeCandidates(evidence: PrintedOrderTimeEvidence): string[] {
+  if (evidence.marker !== 'ambiguous') {
+    const normalized = normalizePrintedOrderTimeEvidence(evidence)
+    return normalized === null ? [] : [normalized]
+  }
+  const amHour = evidence.hour % 12
+  const pmHour = (evidence.hour % 12) + 12
+  return [amHour, pmHour]
+    .map((hour) => `${String(hour).padStart(2, '0')}:${String(evidence.minute).padStart(2, '0')}`)
+    .filter((time, index, candidates) => candidates.indexOf(time) === index)
+}
+
+function datedMinute(dateIso: string | null | undefined, time: string): number | null {
+  const date = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(dateIso ?? '')
+  const clock = /^(\d{2}):(\d{2})$/u.exec(time)
+  if (date === null || clock === null) return null
+  const year = Number(date[1])
+  const month = Number(date[2])
+  const day = Number(date[3])
+  const hour = Number(clock[1])
+  const minute = Number(clock[2])
+  const dayStart = Date.UTC(year, month - 1, day) / 60_000
+  if (
+    !Number.isInteger(dayStart) ||
+    new Date(dayStart * 60_000).toISOString().slice(0, 10) !== dateIso ||
+    hour < 0 || hour > 23 || minute < 0 || minute > 59
+  ) return null
+  return dayStart + hour * 60 + minute
+}
+
+function receivedAtMinute(receivedAt: OrdersEvidenceReceivedAt): number | null {
+  if (typeof receivedAt === 'object' && !(receivedAt instanceof Date)) {
+    return datedMinute(receivedAt.dateIso, receivedAt.time)
+  }
+  if (typeof receivedAt === 'string') {
+    const local = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(?::\d{2}(?:\.\d+)?)?$/u.exec(receivedAt)
+    if (local !== null) return datedMinute(local[1]!, local[2]!)
+  }
+  const epoch = receivedAt instanceof Date ? receivedAt.getTime() :
+    typeof receivedAt === 'number' ? receivedAt : Date.parse(receivedAt)
+  if (!Number.isFinite(epoch)) return null
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Damascus',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(epoch)
+  const part = (type: Intl.DateTimeFormatPartTypes): string | undefined =>
+    parts.find((candidate) => candidate.type === type)?.value
+  const dateIso = `${part('year')}-${part('month')}-${part('day')}`
+  const time = `${part('hour')}:${part('minute')}`
+  return datedMinute(dateIso, time)
 }
 
 /**
@@ -541,7 +806,8 @@ function normalizePrintedOrderTimeEvidence(evidence: PrintedOrderTimeEvidence): 
  * `67430`. A malformed grouping or a `printed`/`value` disagreement now makes that row a refusal.
  */
 export function parsedResult(field: OcrField, parsed: ParsedScreen): OcrResult {
-  const rows: OcrRow[] = (parsed.rows ?? []).map((r) => {
+  const parsedRows = parsed.rows ?? []
+  const rows: OcrRow[] = parsedRows.map((r, index) => {
     const ordinaryValue = r.value == null ? null : String(r.value)
     const value = r.cancelled
       ? null
@@ -550,6 +816,16 @@ export function parsedResult(field: OcrField, parsed: ParsedScreen): OcrResult {
         : ordinaryValue
     return {
       printed: String(r.printed ?? ''),
+      ...(field === 'orders'
+        ? {
+            printedTime: typeof r.time === 'string' ? r.time : null,
+            rowIndex: index,
+            rowCount: parsedRows.length,
+            dateSection: r.dateIso == null ? null : String(r.dateIso),
+            yTop: null,
+            yBottom: null,
+          }
+        : {}),
       value,
       cancelled: r.cancelled === true,
       time:
@@ -715,6 +991,8 @@ interface PassOptions {
   schema?: unknown
   schemaName?: string
   signal?: AbortSignal
+  /** Parse the compact Orders-vs-Payments-Log classifier rather than monetary rows. */
+  screenKind?: boolean
 }
 
 interface OpenAiResponse {
@@ -726,6 +1004,7 @@ interface OpenAiResponse {
 }
 
 export interface ParsedScreen {
+  screenKind?: 'orders' | 'payments_log' | 'unknown'
   rows?: ParsedRow[]
   fields?: Array<{ label?: string; value?: string | null }>
   notes?: string | null

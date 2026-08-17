@@ -1,7 +1,7 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { fundCodeOf } from '@ash/adapters/memory'
-import { DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr } from './harness.ts'
+import { DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr, today } from './harness.ts'
 
 /**
  * A shift that mixes YALLAGO deliveries with the branch's OWN jobs, closed at zero.
@@ -30,7 +30,9 @@ afterEach(async () => {
 const post = async (token: string, url: string, payload: Record<string, unknown> = {}): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(token) }, payload })
 const put = async (token: string, url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
+  url.endsWith('/end-package')
+    ? await h.submitEndPackage(token, url.split('/')[2]!, payload)
+    : await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
 const get = async (token: string, url: string): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(token) } })
 
@@ -89,11 +91,17 @@ describe('a shift mixing Yallago deliveries and the branch’s own jobs', () => 
     await post(manager, `/shifts/${id}/approve-open`, { floatTranches: [sypStr(100_000)], topupTranches: [sypStr(50_000)] })
 
     // 10 Yallago cash deliveries at 5,000 → cash +50,000, wallet −10,000 (their 20%).
-    for (let i = 1; i <= 10; i++) {
-      expect(
-        (await post(driver, `/shifts/${id}/orders`, { providerOrderNo: `YAL-${i}`, payMode: 'cash', fee: sypStr(5_000), zone: null })).statusCode,
-      ).toBe(201)
-    }
+    h.stageCloseDraftFinancialFixture(id, {
+      managerToken: manager,
+      orders: Array.from({ length: 10 }, (_, offset) => ({
+        clientKey: `manual-money-cash-${offset + 1}`,
+        providerOrderNo: `YAL-${offset + 1}`,
+        payMode: 'cash' as const,
+        fee: sypStr(5_000),
+        occurredDate: today,
+        occurredMinute: '08:00',
+      })),
+    })
 
     // One of our own jobs, in cash, at 10,000 — split 4,000 / 6,000 by agreement. Yallago gets
     // NOTHING from it, so the wallet must not move at all for this order.
@@ -159,9 +167,17 @@ describe('a shift mixing Yallago deliveries and the branch’s own jobs', () => 
     await post(manager, `/shifts/${id}/approve-open`, { floatTranches: [sypStr(10_000)], topupTranches: [sypStr(100_000)] })
 
     // 12 Yallago, electronic — 5,000 each, so the wallet gains the 80% block on each.
-    for (let i = 1; i <= 12; i++) {
-      await post(driver, `/shifts/${id}/orders`, { providerOrderNo: `YAL-${i}`, payMode: 'electronic', fee: sypStr(5_000), zone: null })
-    }
+    h.stageCloseDraftFinancialFixture(id, {
+      managerToken: manager,
+      orders: Array.from({ length: 12 }, (_, offset) => ({
+        clientKey: `manual-money-wallet-${offset + 1}`,
+        providerOrderNo: `YAL-${offset + 1}`,
+        payMode: 'electronic' as const,
+        fee: sypStr(5_000),
+        occurredDate: today,
+        occurredMinute: '08:00',
+      })),
+    })
     // 5 of our own, electronic, 1,000 each, split 600/400. No Yallago cut ⇒ the FULL fee lands.
     for (let i = 1; i <= 5; i++) {
       await post(manager, `/shifts/${id}/orders/manual`, {

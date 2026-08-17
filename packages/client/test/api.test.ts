@@ -47,7 +47,7 @@ describe('cloud OCR transport', () => {
       '/shifts/shift-1/ocr/orders',
       expect.any(Uint8Array),
       expect.any(String),
-      { 'x-ash-orders-time-consensus': 'v1', 'x-ocr-retry': 'true' },
+      { 'x-ash-orders-time-consensus': 'close-draft-v1', 'x-ocr-retry': 'true' },
       'POST',
     )
   })
@@ -165,7 +165,38 @@ it('re-reads an explicit stored dashboard slot with the time-consensus capabilit
     credentials: 'include',
     headers: {
       'content-type': 'application/json',
-      'x-ash-orders-time-consensus': 'v1',
+      'x-ash-orders-time-consensus': 'close-draft-v1',
+    },
+    body: JSON.stringify(body),
+  })
+})
+
+it('reads a linked close-draft attachment with the current time-consensus capability', async () => {
+  const response = { draft: {}, read: {}, rows: [], fields: {} }
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(JSON.stringify(response), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+  const body = {
+    expectedRevision: 7,
+    mediaId: 'media-2',
+    attachmentToken: 'attachment-2',
+    field: 'orders' as const,
+    retryFailed: true,
+  }
+
+  await api.readCloseDraftAttachment('shift-1', 'dashboard_2', body)
+
+  expect(fetchMock).toHaveBeenCalledWith('/api/shifts/shift-1/close-draft/media/dashboard_2/read', {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'content-type': 'application/json',
+      'x-ash-orders-time-consensus': 'close-draft-v1',
     },
     body: JSON.stringify(body),
   })

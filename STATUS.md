@@ -8,6 +8,24 @@ latest code-only release. Production Neon PostgreSQL 18.4 remains on `0033` with
 `687e773f`; the stable API and admin smokes passed after promotion, and the unchanged driver stayed
 on its prior validated deployment.
 
+**Unpublished source head:** the staged release candidate contains migration `0034`; production
+still contains exactly 33 migrations and has not been promoted. `0034` adds the durable
+server-side `closeDraft`, attachment-token-linked OCR/read retries and restoration, atomic final
+materialisation, and the old-reader safety response `428 driver_update_required`. It does not
+change BR1 or settlement arithmetic.
+
+The candidate's final disposable gate ran on Node `24.19.0` and PostgreSQL `17.11`: fresh
+`0001`–`0034` applied `34/34`, the checksum rerun applied `0` and found all `34`, every database
+guard passed, and `@ash/db` passed **76/76** tests in 15 files. The disposable migration ledger
+recorded `0034` checksum `5bc30a31`; the file SHA-256 was
+`228F090D8FCF2DC0CA1B7EDF6FA500D679CA19ED9E388D2DE9054B7EE2E8659A`. Real-PostgreSQL API
+reproductions also proved that normal submit and manager force-prepare materialise a pre-draft
+manager order without changing its `created_by` owner.
+
+This is readiness evidence, not deployment evidence. The required production order is
+`0034` migration → API → driver/admin inside one paused-write maintenance window. No production
+migration, alias promotion, Muhammad correction, or Thaer attachment recovery has been performed.
+
 ---
 
 ## The one-line answer
@@ -79,6 +97,8 @@ conformance at production because it truncates application tables.
 
 | Item | Effort | Note |
 | --- | --- | --- |
+| Deploy staged source head `0034` | — | Production remains on `0033`; take the backups and use the coordinated migration → API → driver/admin sequence in the RUNBOOK. |
+| Audit Muhammad/Thaer after `0034` | — | Pending and deliberately separate from deployment; use only audited API workflows, never direct SQL or automatic approval. |
 | Full visual/device QA of the UIs | — | Public route and API smoke tests pass; exhaustive browser, camera, offline, and install testing is still owed. |
 | First real fixed-settlement approval audit | — | The release is live, but there was no `pending_review` shift during rollout. Verify the first real immutable receipt and zeroed driver funds as described in the RUNBOOK. |
 | Historical tier admin | retired | Tier tables remain readable for approved history; editing and publication are intentionally disabled by the fixed 40% policy. |

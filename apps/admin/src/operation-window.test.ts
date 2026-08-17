@@ -9,6 +9,14 @@ describe('operation-window review helpers', () => {
     expect(isUnresolvedWindowRow({})).toBe(false)
   })
 
+  it('blocks a durable reader conflict even when its clock is exact or an older decision exists', () => {
+    expect(isUnresolvedWindowRow({
+      windowStatus: 'in_window',
+      decisionReason: 'older review before rephoto',
+      closeDraftReviewReasons: ['reader_conflict'],
+    })).toBe(true)
+  })
+
   it('does not classify manager-entered manual orders as automatic-window blockers', () => {
     expect(
       countUnresolvedWindowRows(

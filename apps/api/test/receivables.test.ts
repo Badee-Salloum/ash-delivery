@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BRANCH, DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr } from './harness.ts'
+import { BRANCH, DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr, today } from './harness.ts'
 
 /**
  * Historical receivables remain collectible, but the fixed cash-close policy never creates a new
@@ -22,7 +22,9 @@ const get = async (token: string, url: string): Promise<LightMyRequestResponse> 
 const post = async (token: string, url: string, payload: Payload = {}): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(token) }, payload })
 const put = async (token: string, url: string, payload: Payload = {}): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
+  url.endsWith('/end-package')
+    ? await h.submitEndPackage(token, url.split('/')[2]!, payload)
+    : await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
 
 const receivable = async (): Promise<bigint> =>
   await h.deps.ledger.fundBalance(BRANCH, `driver_receivable_cash:${DRIVER_ID}`)
@@ -67,11 +69,14 @@ async function submitBalanced(
   cashAtOpen: number,
 ): Promise<{ managerHash: string }> {
   orderSeq += 1
-  expect((await post(driver, `/shifts/${id}/orders`, {
-    providerOrderNo: `R-${orderSeq}`,
-    payMode: 'cash',
-    fee: sypStr(5_000),
-  })).statusCode).toBe(201)
+  const manager = await h.loginAs('manager')
+  h.stageCloseDraftFinancialFixture(id, {
+    managerToken: manager,
+    orders: [{
+      clientKey: `receivable-r-${orderSeq}`, providerOrderNo: `R-${orderSeq}`, payMode: 'cash', fee: sypStr(5_000),
+      occurredDate: today, occurredMinute: '08:00',
+    }],
+  })
   for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
   const ended = await put(driver, `/shifts/${id}/end-package`, {
     odometerKm: 1_040,
@@ -81,7 +86,6 @@ async function submitBalanced(
   })
   expect(ended.statusCode, ended.body).toBe(200)
   expect(ended.json().br1.difference).toBe('0.00')
-  const manager = await h.loginAs('manager')
   return { managerHash: (await get(manager, `/shifts/${id}/review`)).json().br1.ordersHash as string }
 }
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { sniffImageType, storageKeyFor } from '../src/media.service.ts'
-import { DRIVER_ID, type Harness, TINY_JPEG, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
+import { DRIVER_ID, type Harness, TINY_JPEG, VEHICLE_ID, makeHarness, sypStr, today } from './harness.ts'
 
 /**
  * Photo evidence (SRS C-6).
@@ -119,28 +119,21 @@ describe('upload behaviour', () => {
       },
       payload: TINY_JPEG,
     })
-    expect(uploaded.statusCode, uploaded.body).toBe(201)
-    expect(uploaded.json().staleAcknowledged).toBe(false)
-
-    const blocked = await h.app.inject({
-      method: 'PUT',
-      url: `/shifts/${id}/start-package`,
-      headers: { cookie: h.cookie(driver) },
-      payload: startPackage,
-    })
-    expect(blocked.statusCode, blocked.body).toBe(422)
-    expect(blocked.json().error).toBe('stale_evidence_confirmation_required')
-
+    expect(uploaded.statusCode, uploaded.body).toBe(409)
+    expect(uploaded.json().error).toBe('stale_evidence_confirmation_required')
     const acknowledged = await h.app.inject({
-      method: 'POST',
-      url: `/shifts/${id}/media/start/odometer/acknowledge-stale`,
-      headers: { cookie: h.cookie(driver) },
-      payload: {
-        mediaId: uploaded.json().mediaId,
-        attachmentToken: uploaded.json().attachmentToken,
+      method: 'PUT',
+      url: `/shifts/${id}/media/start/odometer`,
+      headers: {
+        cookie: h.cookie(driver),
+        'content-type': 'image/jpeg',
+        'x-client-taken-at': String(h.deps.clock.nowMs() - 31 * 60_000),
+        'x-stale-evidence-acknowledged': 'true',
       },
+      payload: TINY_JPEG,
     })
-    expect(acknowledged.statusCode, acknowledged.body).toBe(200)
+    expect(acknowledged.statusCode, acknowledged.body).toBe(201)
+    expect(acknowledged.json().staleAcknowledged).toBe(true)
     const accepted = await h.app.inject({
       method: 'PUT',
       url: `/shifts/${id}/start-package`,
@@ -162,14 +155,30 @@ describe('upload behaviour', () => {
     expect(detached.statusCode, detached.body).toBe(200)
     await markOpenForEndEvidence(id)
 
-    const reused = await h.app.inject({
+    const warning = await h.app.inject({
       method: 'PUT',
       url: `/shifts/${id}/media/end/dashboard`,
       headers: { cookie: h.cookie(driver), 'content-type': 'image/jpeg' },
       payload: TINY_JPEG,
     })
+    expect(warning.statusCode).toBe(428)
+    const draft = (await h.app.inject({
+      method: 'GET', url: `/shifts/${id}/close-draft`, headers: { cookie: h.cookie(driver) },
+    })).json()
+
+    const reused = await h.app.inject({
+      method: 'PUT',
+      url: `/shifts/${id}/media/end/dashboard`,
+      headers: {
+        cookie: h.cookie(driver),
+        'content-type': 'image/jpeg',
+        'x-close-draft-revision': String(draft.revision),
+        'x-stale-evidence-acknowledged': 'true',
+      },
+      payload: TINY_JPEG,
+    })
     expect(reused.statusCode, reused.body).toBe(201)
-    expect(reused.json()).toMatchObject({ reusedFromShiftId: id, staleAcknowledged: false })
+    expect(reused.json()).toMatchObject({ reusedFromShiftId: id, staleAcknowledged: true })
     expect(h.deps.media.attachmentHistory).toHaveLength(2)
   })
 
@@ -198,6 +207,7 @@ describe('upload behaviour', () => {
       headers: {
         cookie: h.cookie(driver),
         'content-type': 'image/jpeg',
+        'x-stale-evidence-acknowledged': 'true',
         // A phone whose clock is two hours slow.
         'x-client-taken-at': String(h.deps.clock.nowMs() - 2 * 60 * 60 * 1000),
       },
@@ -260,22 +270,24 @@ describe('upload behaviour', () => {
     const id = await newShift(driver)
     await markOpenForEndEvidence(id)
     for (const slot of ['dashboard', 'dashboard_2', 'payments_log_3']) {
-      const res = await h.app.inject({
-        method: 'PUT',
-        url: `/shifts/${id}/media/end/${slot}`,
-        headers: { cookie: h.cookie(driver), 'content-type': 'image/jpeg' },
-        payload: TINY_JPEG,
-      })
-      expect(res.statusCode, `${slot}: ${res.body}`).toBe(201)
+      await h.uploadPhoto(driver, id, 'end', slot)
     }
     const slots = (await h.deps.media.listSlots(id)).map((s) => s.slot)
     expect(slots).toEqual(expect.arrayContaining(['dashboard', 'dashboard_2', 'payments_log_3']))
 
     // Past the ceiling is not a slot at all.
+    const draft = (await h.app.inject({
+      method: 'GET', url: `/shifts/${id}/close-draft`, headers: { cookie: h.cookie(driver) },
+    })).json()
     const tooFar = await h.app.inject({
       method: 'PUT',
       url: `/shifts/${id}/media/end/dashboard_9`,
-      headers: { cookie: h.cookie(driver), 'content-type': 'image/jpeg' },
+      headers: {
+        cookie: h.cookie(driver),
+        'content-type': 'image/jpeg',
+        'x-close-draft-revision': String(draft.revision),
+        'x-stale-evidence-acknowledged': 'true',
+      },
       payload: TINY_JPEG,
     })
     expect(tooFar.statusCode).toBe(422)
@@ -314,29 +326,34 @@ describe('upload behaviour', () => {
       headers: { cookie: h.cookie(manager) },
       payload: { floatTranches: [sypStr(100)], topupTranches: [sypStr(2)] },
     })
-    await h.app.inject({
-      method: 'PUT',
-      url: `/shifts/${id}/operations`,
-      headers: { cookie: h.cookie(driver) },
-      payload: {
-        orders: [{ providerOrderNo: 'EVIDENCE-LOCK', payMode: 'cash', fee: sypStr(10) }],
-        movements: [],
-      },
+    h.stageCloseDraftFinancialFixture(id, {
+      managerToken: manager,
+      orders: [{
+        clientKey: 'evidence-lock', providerOrderNo: 'EVIDENCE-LOCK', payMode: 'cash', fee: sypStr(10),
+        occurredDate: today, occurredMinute: '08:00',
+      }],
     })
     for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
-    const ended = await h.app.inject({
-      method: 'PUT',
-      url: `/shifts/${id}/end-package`,
-      headers: { cookie: h.cookie(driver) },
-      payload: { odometerKm: 110, batteryPercent: null, cashDeclared: sypStr(110), walletDeclared: sypStr(0) },
+    const ended = await h.submitEndPackage(driver, id, {
+      odometerKm: 110, batteryPercent: null, cashDeclared: sypStr(110), walletDeclared: sypStr(0),
     })
     expect(ended.statusCode, ended.body).toBe(200)
 
     const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')
+    const draft = (await h.app.inject({
+      method: 'GET', url: `/shifts/${id}/close-draft`, headers: { cookie: h.cookie(driver) },
+    })).json()
+    const wallet = draft.attachments.find((row: { slot: string }) => row.slot === 'wallet')
     const replacement = await h.app.inject({
       method: 'PUT',
       url: `/shifts/${id}/media/end/wallet`,
-      headers: { cookie: h.cookie(driver), 'content-type': 'image/png' },
+      headers: {
+        cookie: h.cookie(driver),
+        'content-type': 'image/png',
+        'x-close-draft-revision': String(draft.revision),
+        'x-expected-attachment-token': wallet.attachmentToken,
+        'x-replace-confirmed': 'true',
+      },
       payload: png,
     })
     expect(replacement.statusCode).toBe(409)

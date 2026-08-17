@@ -18,6 +18,227 @@ export interface ApiError {
 /** Server-derived position of one provider operation relative to the shift's canonical window. */
 export type OperationWindowStatus = import('@ash/contracts').OperationWindowStatus
 
+/** The persisted, driver-owned closing draft. It is the only source used by the new close flow. */
+export type CloseDraftReadFailure =
+  | 'unavailable'
+  | 'timeout'
+  | 'no_fields'
+  | 'refused'
+  | 'wrong_screen'
+
+export type CloseDraftReadStatus = 'idle' | 'running' | 'complete' | 'failed'
+
+export interface CloseDraftAttachmentRead {
+  readId: string
+  status: CloseDraftReadStatus
+  field: CloudOcrField
+  failure: CloseDraftReadFailure | null
+  attempts: number
+}
+
+export interface CloseDraftAttachment {
+  package: 'end'
+  slot: string
+  mediaId: string
+  attachmentToken: string
+  attachedAt?: string
+  attachedAtMs?: number
+  read: CloseDraftAttachmentRead | null
+}
+
+export interface CloseDraftFigures {
+  odometerKm: number | null
+  odometerKmOcr: number | null
+  odometerAnomalyConfirmed: boolean
+  batteryPercent: number | null
+  cashDeclared: string | null
+  walletDeclared: string | null
+  walletDeclaredOcr: string | null
+}
+
+export type CloseDraftOperationSource = 'manual' | 'local_ocr' | 'cloud_ocr'
+export type CloseDraftWindowBasis = 'printed_time' | 'screen_position' | 'manager' | null
+
+export interface CloseDraftEvidenceSource {
+  mediaId: string
+  attachmentToken: string
+  slot: string
+}
+
+export interface CloseDraftPositionBasis {
+  lowerInstant: string | null
+  upperInstant: string | null
+  anchorObservationIds?: string[]
+}
+
+export interface CloseDraftSighting {
+  readId: string
+  observationId: string
+  rowIndex: number
+  dateSection: string | null
+  evidence: CloseDraftEvidenceSource
+}
+
+interface CloseDraftObservedRow {
+  clientKey: string
+  source: CloseDraftOperationSource
+  readId: string | null
+  observationId: string | null
+  rowIndex: number | null
+  dateSection: string | null
+  evidence: CloseDraftEvidenceSource | null
+  /** All overlapping evidence observations; singular fields remain for rolling compatibility. */
+  sightings?: CloseDraftSighting[]
+}
+
+export interface CloseDraftOrder extends CloseDraftObservedRow {
+  providerOrderNo: string
+  payMode: 'cash' | 'electronic' | 'free'
+  fee: string | null
+  feeOcr: string | null
+  feeRefused: boolean
+  reviewRequired: boolean
+  included: boolean
+  occurredMinute: string | null
+  occurredDate: string | null
+  pointA: string | null
+  pointB: string | null
+  windowBasis: CloseDraftWindowBasis
+  position: CloseDraftPositionBasis | null
+}
+
+export interface CloseDraftCashDeduction extends CloseDraftObservedRow {
+  operationKey: string
+  amount: string | null
+  amountOcr: string | null
+  reviewRequired: boolean
+  included: boolean
+  occurredMinute: string | null
+  occurredDate: string | null
+  pointA: string | null
+  pointB: string | null
+  windowBasis: CloseDraftWindowBasis
+  position: CloseDraftPositionBasis | null
+}
+
+export interface CloseDraftMovement extends CloseDraftObservedRow {
+  amount: string
+  occurredMinute: string | null
+  role: 'yalago_cut' | 'order_credit' | 'unmatched'
+  providerOrderNo: string | null
+  ambiguous: boolean
+  included: boolean
+  notes: string | null
+}
+
+/**
+ * Canonical operations are returned in the driver's existing editing model.
+ * OCR provenance is server-owned; callers may edit values but must never manufacture it.
+ */
+export interface CloseDraftView {
+  shiftId: string
+  revision: number
+  draftHash: string
+  updatedAt: string
+  restored: boolean
+  figures: CloseDraftFigures
+  attachments: CloseDraftAttachment[]
+  operations: {
+    orders: CloseDraftOrder[]
+    cashDeductions: CloseDraftCashDeduction[]
+    movements: CloseDraftMovement[]
+  }
+  submittedAt: string | null
+}
+
+export type CloseDraftRowEdit =
+  | {
+      clientKey: string
+      kind: 'order'
+      fee?: string | null
+      occurredMinute?: string | null
+      occurredDate?: string | null
+    }
+  | {
+      clientKey: string
+      kind: 'cash_deduction'
+      amount?: string | null
+      occurredMinute?: string | null
+      occurredDate?: string | null
+    }
+  | {
+      clientKey: string
+      kind: 'movement'
+      amount?: string
+      occurredMinute?: string | null
+      notes?: string | null
+      ambiguous?: boolean
+    }
+
+export interface CloseDraftPatch {
+  expectedRevision: number
+  /** Human-editable declarations only. OCR baselines and battery fields are server-owned. */
+  figures?: {
+    odometerKm?: number | null
+    odometerAnomalyConfirmed?: boolean
+    cashDeclared?: string | null
+    walletDeclared?: string | null
+  }
+  operations?: {
+    manualOrders?: Array<{
+      clientKey: string
+      providerOrderNo: string
+      payMode: 'cash' | 'electronic' | 'free'
+      fee: string | null
+      occurredMinute: string | null
+      occurredDate: string | null
+      pointA: string | null
+      pointB: string | null
+      source: 'manual'
+    }>
+    manualCashDeductions?: Array<{
+      clientKey: string
+      operationKey: string
+      amount: string | null
+      occurredMinute: string | null
+      occurredDate: string | null
+      pointA: string | null
+      pointB: string | null
+      source: 'manual'
+    }>
+    manualMovements?: Array<{
+      clientKey: string
+      amount: string
+      occurredMinute: string | null
+      role: 'yalago_cut' | 'order_credit' | 'unmatched'
+      providerOrderNo: string | null
+      ambiguous: boolean
+      notes: string | null
+      source: 'manual'
+    }>
+    rowEdits?: CloseDraftRowEdit[]
+  }
+}
+
+export interface CloseDraftReadResponse {
+  draft: CloseDraftView
+  read: CloseDraftAttachmentRead
+  rows: CloudOcrResponse['rows']
+  fields: Record<string, string | null>
+}
+
+export interface CloseDraftAttachmentHistoryItem {
+  historyId: string
+  package: 'end'
+  slot: string
+  mediaId: string
+  attachmentToken: string
+  attachedAt?: string
+  attachedAtMs?: number
+  reusedFromShiftId: string | null
+  isCurrent: boolean
+}
+
 /** Everything the driver's app needs to pick a half-finished shift back up where he left it. */
 export interface ShiftStateView {
   id: string
@@ -710,6 +931,71 @@ export class ApiClient {
     return this.get<ShiftStateView>(`/shifts/${id}/state`)
   }
 
+  /** The durable, revisioned draft used by the driver's end-shift flow. */
+  closeDraft(id: string) {
+    return this.get<CloseDraftView>(`/shifts/${id}/close-draft`)
+  }
+
+  patchCloseDraft(id: string, body: CloseDraftPatch) {
+    return this.patch<CloseDraftView>(`/shifts/${id}/close-draft`, body)
+  }
+
+  /** Read the exact attachment generation already accepted as evidence. No unlinked bytes. */
+  readCloseDraftAttachment(
+    id: string,
+    slot: string,
+    body: {
+      expectedRevision: number
+      mediaId: string
+      attachmentToken: string
+      field: CloudOcrField
+      retryFailed?: boolean
+    },
+  ) {
+    return this.request<CloseDraftReadResponse>(
+      'POST',
+      `/shifts/${id}/close-draft/media/${encodeURIComponent(slot)}/read`,
+      body,
+      { 'x-ash-orders-time-consensus': 'close-draft-v1' },
+    )
+  }
+
+  closeDraftAttachmentHistory(id: string) {
+    return this.get<{
+      current: CloseDraftAttachment[]
+      history: CloseDraftAttachmentHistoryItem[]
+    }>(
+      `/shifts/${id}/close-draft/attachments`,
+    )
+  }
+
+  restoreCloseDraftAttachment(
+    id: string,
+    historyId: string,
+    body: { expectedRevision: number; expectedAttachmentToken: string | null; reason: string },
+  ) {
+    return this.post<{ draft: CloseDraftView }>(
+      `/shifts/${id}/close-draft/attachments/${encodeURIComponent(historyId)}/restore`,
+      body,
+    )
+  }
+
+  deleteCloseDraftAttachment(
+    id: string,
+    slot: string,
+    body: { expectedRevision: number; expectedAttachmentToken: string },
+  ) {
+    return this.request<{ slots: string[]; draft: CloseDraftView }>(
+      'DELETE',
+      `/shifts/${id}/media/end/${encodeURIComponent(slot)}`,
+      undefined,
+      {
+        'x-close-draft-revision': String(body.expectedRevision),
+        'x-expected-attachment-token': body.expectedAttachmentToken,
+      },
+    )
+  }
+
   /** Discard a shift of his own that never opened — draft or awaiting approval only. */
   cancelMyShift(id: string) {
     return this.del<{ ok: boolean; id: string }>(`/shifts/${id}/mine`)
@@ -804,7 +1090,7 @@ export class ApiClient {
       'POST',
       `/shifts/${shiftId}/ocr/orders/evidence-reread`,
       body,
-      { 'x-ash-orders-time-consensus': 'v1' },
+      { 'x-ash-orders-time-consensus': 'close-draft-v1' },
     )
   }
 
@@ -1049,6 +1335,8 @@ export interface EvidenceUploadResponse {
   attachmentToken: string
   /** The server has an explicit driver acknowledgement for stale/reused evidence. */
   staleAcknowledged: boolean
+  /** Present for end-package evidence: the upload and draft revision advance atomically. */
+  draft?: CloseDraftView
 }
 
 export function acknowledgeStaleEvidencePath(shiftId: string, pkg: 'start' | 'end', slot: string): string {
@@ -1058,13 +1346,30 @@ export function acknowledgeStaleEvidencePath(shiftId: string, pkg: 'start' | 'en
 export function evidenceUploadHeaders(
   clientTakenAtMs: number | null,
   staleAcknowledged: boolean,
+  options?: {
+    expectedRevision?: number
+    expectedAttachmentToken?: string | null
+    replaceConfirmed?: boolean
+  },
 ): Record<string, string> {
   return {
     ...(clientTakenAtMs !== null && clientTakenAtMs > 0
       ? { 'x-client-taken-at': String(clientTakenAtMs) }
       : {}),
     ...(staleAcknowledged ? { 'x-stale-evidence-acknowledged': 'true' } : {}),
+    ...(options?.expectedRevision !== undefined
+      ? { 'x-close-draft-revision': String(options.expectedRevision) }
+      : {}),
+    ...(options?.expectedAttachmentToken
+      ? { 'x-expected-attachment-token': options.expectedAttachmentToken }
+      : {}),
+    ...(options?.replaceConfirmed ? { 'x-replace-confirmed': 'true' } : {}),
   }
+}
+
+/** Driver-scoped same-origin thumbnail; the session cookie remains httpOnly. */
+export function closeDraftThumbnailPath(shiftId: string, mediaId: string): string {
+  return `/api/shifts/${encodeURIComponent(shiftId)}/close-draft/media/${encodeURIComponent(mediaId)}/thumbnail`
 }
 
 /** Which screen the cloud reader is being asked about. Mirrors `OcrField` on the server. */
@@ -1088,7 +1393,7 @@ export interface CloudOcrResponse {
     pointB: string | null
   }>
   fields: Record<string, string | null>
-  reason?: 'unavailable' | 'timeout' | 'no_fields' | 'refused'
+  reason?: 'unavailable' | 'timeout' | 'no_fields' | 'refused' | 'wrong_screen'
 }
 
 /** A read-only, audited manager read of one explicit stored dashboard evidence attachment. */
@@ -1161,7 +1466,7 @@ export async function readInCloud(
       // The time-consensus response may retain a paid row with `time: null` for manager review.
       // Older driver bundles discarded that row, so the API refuses their orders requests instead
       // of allowing a stale PWA to create a silent short-count.
-      ...(field === 'orders' ? { 'x-ash-orders-time-consensus': 'v1' } : {}),
+      ...(field === 'orders' ? { 'x-ash-orders-time-consensus': 'close-draft-v1' } : {}),
     }
     const res = await api.putBytes<CloudOcrResponse>(
       ocrReadPath(shiftId, field),

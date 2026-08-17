@@ -5,7 +5,7 @@ intended procedure that nobody has executed. They are not evidence that anything
 
 ---
 
-## 1. Verifying the database guards — verified 2026-08-15
+## 1. Verifying the database guards — verified 2026-08-16
 
 Three claims hold up the architecture:
 
@@ -31,6 +31,12 @@ green on a real, disposable **PostgreSQL 17** database after all 33 migrations; 
 also passed. An isolated Neon scratch database separately passed the historical release-backup
 restore, fingerprint, invariant, and rollback rehearsal. None of those targets was production; the
 conformance suite truncates its database and must never be pointed at the live Neon URL.
+
+For the **unpublished** `0034` candidate, Node `24.19.0` and PostgreSQL `17.11` applied a fresh
+`0001`–`0034`, reran with `0 applied / 34 present`, passed every guard, and passed **76/76** real-DB
+tests across 15 files. The disposable ledger checksum for `0034` was `5bc30a31`; the migration file
+SHA-256 was `228F090D8FCF2DC0CA1B7EDF6FA500D679CA19ED9E388D2DE9054B7EE2E8659A`.
+Production remains on `0033`; do not treat this candidate gate as a production postflight.
 
 **If a guard fails**, do not weaken the guard. The guard is the requirement (kickoff brief §4:
 immutability "in the app layer AND a DB-level guard"). Fix the schema.
@@ -207,6 +213,56 @@ backup, then pointing the API at it. There is no honest lossless `DOWN`: enum va
 and reconstructed attachment provenance cannot be removed and later recreated exactly. Keep the
 old API deployment available for a code rollback, but restore the database when crossing this
 schema boundary.
+
+### Staged durable close-draft rollout (`0034` — not deployed)
+
+Source contains `0034`; the live Neon ledger still ends at `0033`. This release adds durable
+`closeDraft` state, attachment-token-linked OCR and restoration, atomic draft materialisation, and
+an explicit old-driver refusal. A linked order-read request that omits
+`X-ASH-ORDERS-TIME-CONSENSUS: close-draft-v1` must receive
+`428 driver_update_required`; do not work around that response by reopening the legacy reader.
+The cache/reader signature also changes, so a pre-release cached OCR answer must not populate the
+new draft.
+
+Use the coordinated schema-release procedure above, with this exact application order while API
+writes remain paused:
+
+1. Build and stage API, driver, and admin artifacts; record old and candidate deployment ids. Test
+   the new driver service worker, linked-read header, reload restoration, and the `428` old-client
+   path on the candidate deployment.
+2. Complete the read-only production preflight and validated pre-migration backup. Record every
+   open and `pending_review` shift plus its current evidence slots; do not alter either named shift.
+3. Apply **only** migration `0034` with the direct owner connection. Confirm the migration ledger
+   checksum, new close-draft/attachment-history objects, guards, ownership, and runtime grants.
+4. Run read-only postflight and take the validated post-migration backup while writes remain paused.
+5. Promote the **API first**, still paused; then promote the **driver and admin** candidates. If any
+   promotion fails, keep writes paused and return all aliases to one coherent set or complete the
+   forward promotion. Never expose the new UI to the old API or resume an old driver against the
+   new linked-reader workflow.
+6. Resume writes only after all aliases are coherent. Smoke-test health/auth and both proxies; then
+   verify the driver manifest/service worker, a linked OCR request, draft restore after reload, and
+   that an intentionally headerless linked order read returns `428 driver_update_required` without
+   creating operations.
+7. Restore the post-migration backup into a named scratch database and rerun checksum, fingerprint,
+   invariant, trigger, sequence, and rolled-back write probes.
+
+Rollback before any new close draft is written may use the verified pre-migration restore path.
+After a draft, attachment restoration, or final materialisation is written, do not expose the old
+API as a casual code rollback: pause writes and choose a forward fix or an explicitly accepted
+point-in-time database restore. Migration `0034` is forward-only.
+
+The following are **pending post-deploy audited operations, not release smoke tests and not completed
+work**:
+
+- **Muhammad:** retrieve the restored draft and exact evidence; verify the `2026-08-16 01:18` order
+  through the manager decision flow, record the reason/provenance, then obtain fresh order and
+  settlement hashes. Do not approve automatically.
+- **Thaer:** mark the Payments Log images in order slots as wrong-screen evidence, restore the last
+  valid order attachments from attachment history (which rotates the attachment token), and rerun
+  linked OCR. Confirm the 23 suspect local operations did not materialise. Do not approve
+  automatically.
+
+Use API/service actions and the audit trail only. Never repair either shift with direct SQL.
 
 ### Rolling out fixed 40% wallet/cash settlement (`0031`)
 

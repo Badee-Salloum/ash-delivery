@@ -1246,4 +1246,8 @@ describe('what the driver screen does when the shift changes under him', () => {
     // …but a shift already showing done is left alone rather than re-announced.
     expect(driverPhaseFor('pending_review', 'done').phase).toBe(null)
   })
+
+  it('returns the same submitted shift to close when the manager reopens it', () => {
+    expect(driverPhaseFor('open', 'done')).toEqual({ gone: null, phase: 'end' })
+  })
 })

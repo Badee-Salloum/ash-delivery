@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BRANCH, DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr } from './harness.ts'
+import { BRANCH, DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr, today } from './harness.ts'
 
 /**
  * The minimal ops dashboard (SRS I-1). Total profit is GM-only (BR8), which is why it is a
@@ -39,23 +39,27 @@ async function runCanonicalShift(): Promise<void> {
   })
 
   let n = 0
+  const orders: Array<{
+    clientKey: string; providerOrderNo: string; payMode: 'cash' | 'electronic' | 'free'; fee: string; occurredDate: string; occurredMinute: string
+  }> = []
   const add = async (mode: string, count: number) => {
     for (let i = 0; i < count; i++) {
       n += 1
-      await h.app.inject({
-        method: 'POST', url: `/shifts/${id}/orders`, headers: { cookie: h.cookie(driver) },
-        payload: { providerOrderNo: `D-${n}`, payMode: mode, fee: sypStr(5_000), zone: 'المزة' },
+      orders.push({
+        clientKey: `dashboard-d-${n}`, providerOrderNo: `D-${n}`,
+        payMode: mode as 'cash' | 'electronic' | 'free', fee: sypStr(5_000),
+        occurredDate: today, occurredMinute: '08:00',
       })
     }
   }
   await add('cash', 12)
   await add('electronic', 6)
   await add('free', 2)
+  h.stageCloseDraftFinancialFixture(id, { managerToken: manager, orders })
 
   for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
-  await h.app.inject({
-    method: 'PUT', url: `/shifts/${id}/end-package`, headers: { cookie: h.cookie(driver) },
-    payload: { odometerKm: 92, batteryPercent: 22, cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000) },
+  await h.submitEndPackage(driver, id, {
+    odometerKm: 92, batteryPercent: 22, cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000),
   })
   const review = await get(manager, `/shifts/${id}/review`)
   await approveFixedClose(h, manager, id, review.json().br1.ordersHash)

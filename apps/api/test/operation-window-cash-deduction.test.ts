@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { fundCodeOf } from '@ash/adapters/memory'
+import { ScriptedOcrReader, fundCodeOf } from '@ash/adapters/memory'
 import { classifyOperationWindow } from '../src/shifts.service.ts'
 import {
   BRANCH,
@@ -29,7 +29,9 @@ afterEach(async () => {
 const post = async (token: string, url: string, payload: Record<string, unknown> = {}): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(token) }, payload })
 const put = async (token: string, url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
+  url.endsWith('/end-package')
+    ? await h.submitEndPackage(token, url.split('/')[2]!, payload)
+    : await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
 const get = async (token: string, url: string): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(token) } })
 
@@ -147,32 +149,28 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
       ['2026-08-14', '01:10'],
     ] as const
 
-    const operations = await put(driver, `/shifts/${id}/operations`, {
+    h.stageCloseDraftFinancialFixture(id, {
+      managerToken: manager,
       orders: fees.map((fee, index) => ({
+        clientKey: `thaer-order-${index + 1}`,
         providerOrderNo: `THAER-${index + 1}`,
         payMode: 'cash',
         fee: sypStr(fee),
-        included: false, // A driver checkbox cannot exclude a known in-window row.
         occurredDate: times[index]![0],
         occurredMinute: times[index]![1],
         pointA: `A${index + 1}`,
         pointB: `B${index + 1}`,
-        source: 'ocr',
       })),
       cashDeductions: [{
+        clientKey: 'thaer-deduction-50',
         operationKey: 'thaer:2026-08-13:22:36:-50',
         amount: '50.00',
-        amountOcr: '50.00',
         occurredDate: '2026-08-13',
         occurredMinute: '22:36',
         pointA: 'A-',
         pointB: 'B-',
-        source: 'ocr',
       }],
-      movements: [],
     })
-    expect(operations.statusCode, operations.body).toBe(200)
-    expect(operations.json().br1.cashDeductionTotal).toBe('50.00')
 
     await uploadEnd(driver, id)
     h.deps.clock.set(CLOSE_MS)
@@ -418,21 +416,34 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
     ])
   })
 
-  it('heals an already-persisted OCR overlap when a pending review is first opened and counts it once', async () => {
+  it('tombstones a persisted legacy OCR overlap and counts its canonical draft replacement once', async () => {
     const { id, driver, manager } = await openShift({ float: 3_500, topup: 0 })
-    const fillerOrder = await post(driver, `/shifts/${id}/orders`, {
-      providerOrderNo: 'PENDING-REVIEW-ZERO-FEE',
-      payMode: 'free',
-      fee: '0.00',
-      zone: null,
-    })
-    expect(fillerOrder.statusCode, fillerOrder.body).toBe(201)
     await seedHistoricalOcrDeductionOverlap(
       driver,
       id,
       'legacy:OLD-PWA-PARTIAL',
       'legacy:OLD-PWA-RICH',
     )
+    h.stageCloseDraftFinancialFixture(id, {
+      managerToken: manager,
+      orders: [{
+        clientKey: 'canonical-pending-review-zero-fee',
+        providerOrderNo: 'CANONICAL-PENDING-REVIEW-ZERO-FEE',
+        payMode: 'free',
+        fee: '0.00',
+        occurredDate: '2026-08-13',
+        occurredMinute: '22:35',
+      }],
+      cashDeductions: [{
+        clientKey: 'canonical-pending-review-deduction',
+        operationKey: 'canonical:PENDING-REVIEW-50',
+        amount: '50.00',
+        occurredDate: '2026-08-13',
+        occurredMinute: '22:36',
+        pointA: 'G77V+4GP, Al Qanawat',
+        pointB: 'G78P+J3M, Al Mouhajrin',
+      }],
+    })
     await uploadEnd(driver, id)
     h.deps.clock.set(CLOSE_MS)
 
@@ -444,9 +455,6 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
     })
     expect(ended.statusCode, ended.body).toBe(200)
     expect((await h.deps.shifts.findById(id))?.state).toBe('pending_review')
-    // The close boundary only classifies. Historical duplicate healing belongs to the locked
-    // manager-review preparation, so prove the persisted production shape still exists first.
-    expect(await h.deps.cashDeductions.listByShift(id)).toHaveLength(2)
 
     const review = await get(manager, `/shifts/${id}/review`)
     expect(review.statusCode, review.body).toBe(200)
@@ -455,17 +463,29 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
       expectedTotal: '3450.00',
       difference: '0.00',
     })
-    expect(review.json().cashDeductions).toHaveLength(1)
-    expect(await h.deps.cashDeductions.listByShift(id)).toEqual([
+    expect(review.json().cashDeductions.filter((row: { included: boolean }) => row.included)).toEqual([
       expect.objectContaining({
-        amount: 5_000n,
-        amountOcr: 5_000n,
+        operationKey: 'canonical:PENDING-REVIEW-50',
+        amount: '50.00',
         occurredDate: '2026-08-13',
         occurredMinute: '22:36',
         included: true,
         pointB: 'G78P+J3M, Al Mouhajrin',
       }),
     ])
+    const persisted = await h.deps.cashDeductions.listByShift(id)
+    expect(persisted.filter((row) => row.included)).toEqual([
+      expect.objectContaining({
+        operationKey: 'canonical:PENDING-REVIEW-50',
+        amount: 5_000n,
+        occurredDate: '2026-08-13',
+        occurredMinute: '22:36',
+        pointB: 'G78P+J3M, Al Mouhajrin',
+      }),
+    ])
+    // The historical partial/rich pair is first coalesced, then its surviving legacy row is
+    // tombstoned because it is absent from the canonical close draft.
+    expect(persisted.filter((row) => !row.included)).toHaveLength(1)
 
     const settlement = await get(manager, `/shifts/${id}/settlement`)
     expect(settlement.statusCode, settlement.body).toBe(200)
@@ -840,6 +860,25 @@ describe('cash deduction compatibility and approval allocation', () => {
     expect(deductions).toHaveLength(1)
     expect(deductions[0]).toMatchObject({ operationKey: 'legacy:OLD-NEGATIVE', amount: 5_000n })
 
+    h.stageCloseDraftFinancialFixture(id, {
+      managerToken: manager,
+      orders: [{
+        clientKey: 'old-pwa-positive-canonical',
+        providerOrderNo: 'CANONICAL-OLD-POSITIVE',
+        payMode: 'cash',
+        fee: '100.00',
+        occurredDate: '2026-08-13',
+        occurredMinute: '20:00',
+      }],
+      cashDeductions: [{
+        clientKey: 'old-pwa-negative-canonical',
+        operationKey: 'canonical:OLD-NEGATIVE',
+        amount: '50.00',
+        occurredDate: '2026-08-13',
+        occurredMinute: '20:01',
+      }],
+    })
+
     await uploadEnd(driver, id)
     h.deps.clock.set(CLOSE_MS)
     const ended = await put(driver, `/shifts/${id}/end-package`, {
@@ -849,7 +888,7 @@ describe('cash deduction compatibility and approval allocation', () => {
       walletDeclared: '0.00',
     })
     expect(ended.statusCode, ended.body).toBe(200)
-    const review = await get(manager, `/shifts/${id}/review`)
+    let review = await get(manager, `/shifts/${id}/review`)
     const settlement = await get(manager, `/shifts/${id}/settlement`)
     expect(settlement.json()).toMatchObject({
       grossDriverShare: '40.00',
@@ -861,6 +900,23 @@ describe('cash deduction compatibility and approval allocation', () => {
       cashAmount: '160.00',
     })
 
+    const legacyOrder = await h.deps.orders.findByProviderNo('OLD-POSITIVE')
+    const legacyDeduction = (await h.deps.cashDeductions.listByShift(id))
+      .find((row) => row.operationKey === 'legacy:OLD-NEGATIVE')
+    expect(legacyOrder).toBeDefined()
+    expect(legacyDeduction).toBeDefined()
+    const resolvedLegacy = await post(manager, `/shifts/${id}/operations/revise`, {
+      orders: [{
+        providerOrderNo: 'OLD-POSITIVE', included: false,
+        reason: 'legacy row is absent from the canonical close draft',
+      }],
+      cashDeductions: [{
+        id: legacyDeduction!.id, included: false,
+        reason: 'legacy deduction is absent from the canonical close draft',
+      }],
+    })
+    expect(resolvedLegacy.statusCode, resolvedLegacy.body).toBe(200)
+    review = await get(manager, `/shifts/${id}/review`)
     const approved = await approveFixedClose(h, manager, id, review.json().br1.ordersHash)
     expect(approved.statusCode, approved.body).toBe(200)
     expect(await h.deps.ledger.fundBalance(BRANCH, fundCodeOf({ kind: 'driver_share_payable', driverId: DRIVER_ID })))
@@ -1119,6 +1175,16 @@ describe('cash deduction compatibility and approval allocation', () => {
 
 describe('end odometer evidence', () => {
   it('requires explicit confirmation below the start and persists the independent OCR baseline', async () => {
+    await h.app.close()
+    h = await makeHarness({
+      ocr: new ScriptedOcrReader([{
+        ok: true,
+        rows: [],
+        fields: { odometer: '6027' },
+        raw: null,
+      }]),
+    })
+    h.deps.clock.set(OPEN_MS - 10 * 60_000)
     const { id, driver, manager } = await openShift({ float: 100, topup: 2, odometerKm: 6_030 })
     const operations = await put(driver, `/shifts/${id}/operations`, {
       orders: [{
@@ -1132,6 +1198,22 @@ describe('end odometer evidence', () => {
     })
     expect(operations.statusCode, operations.body).toBe(200)
     await uploadEnd(driver, id)
+    const draftResponse = await get(driver, `/shifts/${id}/close-draft`)
+    expect(draftResponse.statusCode, draftResponse.body).toBe(200)
+    const draft = draftResponse.json() as {
+      revision: number
+      attachments: Array<{ slot: string; mediaId: string; attachmentToken: string }>
+    }
+    const odometerAttachment = draft.attachments.find((attachment) => attachment.slot === 'odometer')
+    expect(odometerAttachment).toBeDefined()
+    const read = await post(driver, `/shifts/${id}/close-draft/media/odometer/read`, {
+      expectedRevision: draft.revision,
+      mediaId: odometerAttachment!.mediaId,
+      attachmentToken: odometerAttachment!.attachmentToken,
+      field: 'odometer',
+      retryFailed: false,
+    })
+    expect(read.statusCode, read.body).toBe(200)
     h.deps.clock.set(CLOSE_MS)
     const body = {
       odometerKm: 6_028,

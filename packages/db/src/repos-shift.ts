@@ -2,6 +2,7 @@ import type {
   AssignmentRecord,
   AssignmentRepo,
   AttachedSlot,
+  AttachmentHistoryRecord,
   AttendanceRecord,
   AttendanceRepo,
   BatteryReadingRecord,
@@ -419,15 +420,7 @@ export class PgDirectoryRepo implements DirectoryRepo {
   async driver(id: string): Promise<DriverRecord | null> {
     const { rows } = await this.pool.query<Record<string, unknown>>('SELECT * FROM drivers WHERE id = $1', [id])
     const r = rows[0]
-    return r
-      ? {
-          id: String(r.id),
-          branchId: String(r.branch_id),
-          code: String(r.code),
-          fullNameAr: String(r.full_name_ar),
-          active: Boolean(r.active),
-        }
-      : null
+    return r ? toDriver(r) : null
   }
 
   async vehicle(id: string): Promise<VehicleRecord | null> {
@@ -963,7 +956,12 @@ export class PgMediaRepo implements MediaRepo {
     pkg: EvidencePackage,
     slot: string,
     mediaId: string,
-    metadata: { actorId: string | null; attachedAtMs?: number; reusedFromShiftId?: string | null },
+    metadata: {
+      actorId: string | null
+      attachedAtMs?: number
+      reusedFromShiftId?: string | null
+      expectedAttachmentToken?: string | null
+    },
   ): Promise<void> {
     await withTransaction(this.pool, { actorId: metadata.actorId }, async (client) => {
       await assertMediaPackageEditable(client, shiftId, pkg)
@@ -981,6 +979,43 @@ export class PgMediaRepo implements MediaRepo {
         throw Object.assign(new Error(`media ${mediaId} does not belong to shift ${shiftId}'s branch`), {
           code: 'MEDIA_BRANCH_MISMATCH',
         })
+      }
+      const duplicate = await client.query<{ package: string; slot: string }>(
+        `SELECT package, slot
+           FROM shift_media
+          WHERE shift_id = $1 AND media_id = $2
+            AND (package, slot) <> ($3::text, $4::text)
+          ORDER BY package, slot
+          LIMIT 1
+          FOR UPDATE`,
+        [shiftId, mediaId, pkg, slot],
+      )
+      if (duplicate.rows[0]) {
+        throw Object.assign(new Error('the same evidence is already active in another slot'), {
+          code: 'MEDIA_ALREADY_ATTACHED',
+          sourcePackage: duplicate.rows[0].package,
+          sourceSlot: duplicate.rows[0].slot,
+        })
+      }
+      const current = await client.query<{ media_id: string; attachment_token: string }>(
+        `SELECT media_id, attachment_token
+           FROM shift_media
+          WHERE shift_id = $1 AND package = $2 AND slot = $3
+          FOR UPDATE`,
+        [shiftId, pkg, slot],
+      )
+      if (
+        metadata.expectedAttachmentToken !== undefined &&
+        (current.rows[0]?.attachment_token ?? null) !== metadata.expectedAttachmentToken
+      ) {
+        throw Object.assign(new Error('evidence attachment changed before replacement'), {
+          code: 'MEDIA_ATTACHMENT_CHANGED',
+        })
+      }
+      // The content is already the current generation. A network retry is a true no-op: it must
+      // neither rotate the token nor reinterpret the current history row as self-reuse.
+      if (current.rows[0]?.media_id === mediaId) {
+        return
       }
       const { rows: priorRows } = await client.query<{ shift_id: string }>(
         `SELECT shift_id
@@ -1056,14 +1091,24 @@ export class PgMediaRepo implements MediaRepo {
   }
 
   /** Unhooks the slot only. The content-addressed `media` row survives — see the port's note. */
-  async detach(shiftId: string, pkg: EvidencePackage, slot: string, actorId: string | null): Promise<void> {
+  async detach(
+    shiftId: string,
+    pkg: EvidencePackage,
+    slot: string,
+    actorId: string | null,
+    expectedAttachmentToken?: string,
+  ): Promise<void> {
     await withTransaction(this.pool, { actorId }, async (client) => {
       await assertMediaPackageEditable(client, shiftId, pkg)
-      await client.query('DELETE FROM shift_media WHERE shift_id = $1 AND package = $2 AND slot = $3', [
-        shiftId,
-        pkg,
-        slot,
-      ])
+      const deleted = await client.query(
+        `DELETE FROM shift_media
+          WHERE shift_id = $1 AND package = $2 AND slot = $3
+            AND ($4::uuid IS NULL OR attachment_token = $4)`,
+        [shiftId, pkg, slot, expectedAttachmentToken ?? null],
+      )
+      if (expectedAttachmentToken !== undefined && deleted.rowCount !== 1) {
+        throw Object.assign(new Error('evidence attachment changed before delete'), { code: 'MEDIA_ATTACHMENT_CHANGED' })
+      }
     })
   }
 
@@ -1085,6 +1130,182 @@ export class PgMediaRepo implements MediaRepo {
         r.stale_acknowledged_at === null ? null : (r.stale_acknowledged_at as Date).getTime(),
       staleAcknowledgedBy: (r.stale_acknowledged_by as string | null) ?? null,
     }))
+  }
+
+  async listAttachmentHistory(shiftId: string): Promise<AttachmentHistoryRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT id, shift_id, package, slot, media_id, attachment_token, attached_at, reused_from_shift_id
+         FROM shift_media_attachment_history
+        WHERE shift_id = $1
+        ORDER BY id DESC`,
+      [shiftId],
+    )
+    return rows.map((row) => ({
+      id: String(row.id),
+      shiftId: String(row.shift_id),
+      package: row.package as EvidencePackage,
+      slot: String(row.slot),
+      mediaId: String(row.media_id),
+      attachmentToken: String(row.attachment_token),
+      attachedAtMs: (row.attached_at as Date).getTime(),
+      reusedFromShiftId: (row.reused_from_shift_id as string | null) ?? null,
+    }))
+  }
+
+  async latestAttachmentForMedia(
+    mediaId: string,
+    options?: { lock?: boolean },
+  ): Promise<AttachmentHistoryRecord | null> {
+    if (options?.lock) {
+      // The caller already owns the close UOW transaction. Locking the content row prevents a
+      // concurrent shift from appending a new history generation between this re-check and attach.
+      await this.pool.query('SELECT id FROM media WHERE id = $1 FOR UPDATE', [mediaId])
+    }
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT id, shift_id, package, slot, media_id, attachment_token, attached_at, reused_from_shift_id
+         FROM shift_media_attachment_history
+        WHERE media_id = $1
+        ORDER BY id DESC
+        LIMIT 1
+        ${options?.lock ? 'FOR UPDATE' : ''}`,
+      [mediaId],
+    )
+    const row = rows[0]
+    return row ? {
+      id: String(row.id),
+      shiftId: String(row.shift_id),
+      package: row.package as EvidencePackage,
+      slot: String(row.slot),
+      mediaId: String(row.media_id),
+      attachmentToken: String(row.attachment_token),
+      attachedAtMs: (row.attached_at as Date).getTime(),
+      reusedFromShiftId: (row.reused_from_shift_id as string | null) ?? null,
+    } : null
+  }
+
+  async restoreAttachment(input: {
+    shiftId: string
+    historyId: string
+    expectedCurrentAttachmentToken: string | null
+    actorId: string
+    reason: string
+    attachedAtMs: number
+  }): Promise<AttachedSlot> {
+    return withTransaction(this.pool, { actorId: input.actorId }, async (client) => {
+      const { rows: historyRows } = await client.query<Record<string, unknown>>(
+        `SELECT id, shift_id, package, slot, media_id
+           FROM shift_media_attachment_history
+          WHERE id = $1 AND shift_id = $2`,
+        [input.historyId, input.shiftId],
+      )
+      const history = historyRows[0]
+      if (!history) throw Object.assign(new Error('attachment history not found'), { code: 'MEDIA_HISTORY_NOT_FOUND' })
+      const pkg = history.package as EvidencePackage
+      const slot = String(history.slot)
+      await assertMediaPackageEditable(client, input.shiftId, pkg)
+      const lockedMedia = await client.query(
+        `SELECT m.id
+           FROM media m
+           JOIN shifts s ON s.id = $1 AND s.branch_id = m.branch_id
+          WHERE m.id = $2
+          FOR UPDATE OF m`,
+        [input.shiftId, history.media_id],
+      )
+      if (lockedMedia.rowCount !== 1) {
+        throw Object.assign(new Error('historical media does not belong to this shift branch'), {
+          code: 'MEDIA_BRANCH_MISMATCH',
+        })
+      }
+      const duplicate = await client.query<{ package: string; slot: string }>(
+        `SELECT package, slot
+           FROM shift_media
+          WHERE shift_id = $1 AND media_id = $2
+            AND (package, slot) <> ($3::text, $4::text)
+          ORDER BY package, slot
+          LIMIT 1
+          FOR UPDATE`,
+        [input.shiftId, history.media_id, pkg, slot],
+      )
+      if (duplicate.rows[0]) {
+        throw Object.assign(new Error('the same evidence is already active in another slot'), {
+          code: 'MEDIA_ALREADY_ATTACHED',
+          sourcePackage: duplicate.rows[0].package,
+          sourceSlot: duplicate.rows[0].slot,
+        })
+      }
+      const { rows: currentRows } = await client.query<Record<string, unknown>>(
+        `SELECT media_id, attachment_token
+           FROM shift_media
+          WHERE shift_id = $1 AND package = $2 AND slot = $3
+          FOR UPDATE`,
+        [input.shiftId, pkg, slot],
+      )
+      const current = currentRows[0]
+      if (((current?.attachment_token as string | undefined) ?? null) !== input.expectedCurrentAttachmentToken) {
+        throw Object.assign(new Error('attachment changed before restore'), { code: 'MEDIA_ATTACHMENT_CHANGED' })
+      }
+      if (current && String(current.media_id) === String(history.media_id)) {
+        throw Object.assign(new Error('attachment history generation is already current'), { code: 'MEDIA_HISTORY_CURRENT' })
+      }
+      await client.query(
+        `INSERT INTO shift_media
+           (shift_id, media_id, package, slot, created_at, attachment_token,
+            stale_acknowledged_at, stale_acknowledged_by)
+         VALUES ($1,$2,$3,$4,to_timestamp($5::double precision / 1000),gen_random_uuid(),NULL,NULL)
+         ON CONFLICT (shift_id, package, slot) DO UPDATE
+           SET media_id = EXCLUDED.media_id,
+               created_at = EXCLUDED.created_at,
+               attachment_token = EXCLUDED.attachment_token,
+               stale_acknowledged_at = NULL,
+               stale_acknowledged_by = NULL`,
+        [input.shiftId, history.media_id, pkg, slot, input.attachedAtMs],
+      )
+      // A reasoned restore is itself the explicit reuse/staleness acknowledgement. Keep the
+      // generation auditable and immediately usable instead of forcing a second acknowledgement.
+      await client.query(
+        `UPDATE shift_media
+            SET stale_acknowledged_at = to_timestamp($4::double precision / 1000),
+                stale_acknowledged_by = $5
+          WHERE shift_id = $1 AND package = $2 AND slot = $3`,
+        [input.shiftId, pkg, slot, input.attachedAtMs, input.actorId],
+      )
+      const { rows } = await client.query<Record<string, unknown>>(
+        `SELECT package, slot, media_id, attachment_token, created_at, reused_from_shift_id,
+                stale_acknowledged_at, stale_acknowledged_by
+           FROM shift_media
+          WHERE shift_id = $1 AND package = $2 AND slot = $3`,
+        [input.shiftId, pkg, slot],
+      )
+      const row = rows[0]!
+      await client.query(
+        `INSERT INTO shift_media_restore_decisions
+           (shift_id, attachment_history_id, package, slot, media_id,
+            from_attachment_token, to_attachment_token, reason, restored_by, restored_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10::double precision / 1000))`,
+        [
+          input.shiftId,
+          input.historyId,
+          pkg,
+          slot,
+          history.media_id,
+          (current?.attachment_token as string | undefined) ?? null,
+          row.attachment_token,
+          input.reason,
+          input.actorId,
+          input.attachedAtMs,
+        ],
+      )
+      return {
+        package: row.package as EvidencePackage,
+        slot: String(row.slot),
+        mediaId: String(row.media_id),
+        attachmentToken: String(row.attachment_token),
+        attachedAtMs: (row.created_at as Date).getTime(),
+        reusedFromShiftId: (row.reused_from_shift_id as string | null) ?? null,
+        staleAcknowledgedAtMs: row.stale_acknowledged_at === null ? null : (row.stale_acknowledged_at as Date).getTime(),
+        staleAcknowledgedBy: (row.stale_acknowledged_by as string | null) ?? null,
+      }
+    })
   }
 }
 

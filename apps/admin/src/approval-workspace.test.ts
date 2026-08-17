@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest'
 import {
   buildOrderDuplicateRevision,
   buildOrderTimingRevision,
+  closeDraftReviewReasonLabel,
   closeWorkspaceApprovalReady,
   countAwaitingCloseBatteryReadings,
   deductionHasDashboardEvidenceOrigin,
   guardPhysicalSettlementConfirmations,
   orderHasDashboardEvidenceOrigin,
   orderNeedsAttention,
+  positionEvidenceLabel,
   summarizeOrders,
 } from './approval-workspace.ts'
 
@@ -25,8 +27,23 @@ describe('close approval workspace', () => {
     { fee: '155.00', windowStatus: 'post_close' as const },
     { fee: '155.00', feeOcr: '150.00' },
     { fee: '155.00', decisionReason: 'verified against screenshot' },
+    { fee: '155.00', windowStatus: 'in_window' as const, windowBasis: 'screen_position' as const },
+    { fee: '155.00', windowStatus: 'in_window' as const, closeDraftReviewReasons: ['cancelled_conflict'] as const },
   ])('flags a true exception: %#', (order) => {
     expect(orderNeedsAttention(order)).toBe(true)
+  })
+
+  it('shows positional evidence as an interval rather than a fabricated operation time', () => {
+    expect(
+      positionEvidenceLabel({
+        lowerInstant: '2026-08-16T00:57',
+        upperInstant: '2026-08-16T01:37',
+      }),
+    ).toBe('2026-08-16T00:57 → 2026-08-16T01:37')
+    expect(positionEvidenceLabel({ lowerInstant: null, upperInstant: '2026-08-16T01:37' })).toBe(
+      '… → 2026-08-16T01:37',
+    )
+    expect(positionEvidenceLabel(null)).toBeNull()
   })
 
   it('keeps included, excluded and unresolved counts and totals explicit', () => {
@@ -50,6 +67,24 @@ describe('close approval workspace', () => {
       excluded: { count: 0, total: '0.00' },
       unresolved: { count: 1, total: '225.00' },
     })
+  })
+
+  it('keeps an exact-time reader conflict in the unresolved bucket until a manager decides it', () => {
+    expect(
+      summarizeOrders([{
+        fee: '220.00',
+        included: false,
+        windowStatus: 'in_window',
+        closeDraftReviewReasons: ['cancelled_conflict'],
+      }]),
+    ).toEqual({
+      included: { count: 0, total: '0.00' },
+      excluded: { count: 0, total: '0.00' },
+      unresolved: { count: 1, total: '220.00' },
+    })
+    expect(closeDraftReviewReasonLabel('cancelled_conflict', 'ar')).toBe('تعارض حول إلغاء الطلب')
+    expect(closeDraftReviewReasonLabel('evidence_removed', 'en')).toBe('The row lost its last supporting image')
+    expect(closeDraftReviewReasonLabel('human_money_edit', 'en')).toBe('Driver-entered amount needs approval')
   })
 
   it('moves an audited unknown-time decision into its selected financial bucket', () => {

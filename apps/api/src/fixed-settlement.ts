@@ -20,6 +20,14 @@ export interface SettlementHashContext {
   driverId: string
   businessDate: CalendarDate
   reviewedOrdersHash: string
+  /**
+   * The exact durable close submission the manager reviewed. Legacy shifts have no draft and use
+   * the explicit null sentinel; a re-photo always creates a new revision/hash even when its money
+   * happens to be identical.
+   */
+  closeDraftRevision: number | null
+  closeDraftHash: string | null
+  closeDraftSubmittedAt: string | null
 }
 
 /**
@@ -33,7 +41,7 @@ export function fixedSettlementHash(
   plan: FixedShareSettlementPlan,
 ): string {
   const canonical = {
-    version: 1,
+    version: 2,
     policyCode: FIXED_SETTLEMENT_POLICY,
     driverRateBps: FIXED_SETTLEMENT_DRIVER_BPS,
     ...context,

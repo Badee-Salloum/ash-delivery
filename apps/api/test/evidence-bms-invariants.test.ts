@@ -27,7 +27,9 @@ const put = async (
   url: string,
   payload: Record<string, unknown>,
 ): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
+  url.endsWith('/end-package')
+    ? await h.submitEndPackage(token, url.split('/')[2]!, payload)
+    : await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
 
 const get = async (token: string, url: string): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(token) } })
@@ -358,6 +360,7 @@ describe('stale acknowledgement is attachment-specific', () => {
         cookie: h.cookie(driver),
         'content-type': 'image/jpeg',
         'x-client-taken-at': staleTakenAt,
+        'x-stale-evidence-acknowledged': 'true',
       },
       payload: TINY_JPEG,
     })
@@ -369,11 +372,14 @@ describe('stale acknowledgement is attachment-specific', () => {
         cookie: h.cookie(driver),
         'content-type': 'image/png',
         'x-client-taken-at': staleTakenAt,
+        'x-stale-evidence-acknowledged': 'true',
+        'x-expected-attachment-token': first.json().attachmentToken,
+        'x-replace-confirmed': 'true',
       },
       payload: TINY_PNG,
     })
     expect(second.statusCode, second.body).toBe(201)
-    expect(second.json()).toMatchObject({ staleAcknowledged: false })
+    expect(second.json()).toMatchObject({ staleAcknowledged: true })
     expect(second.json().mediaId).not.toBe(first.json().mediaId)
 
     const acknowledgement = await post(
@@ -390,15 +396,14 @@ describe('stale acknowledgement is attachment-specific', () => {
     const [attached] = await h.deps.media.listSlots(id)
     expect(attached).toMatchObject({
       mediaId: second.json().mediaId,
-      staleAcknowledgedAtMs: null,
-      staleAcknowledgedBy: null,
+      staleAcknowledgedAtMs: h.deps.clock.nowMs(),
+      staleAcknowledgedBy: 'u-d1',
     })
     const blocked = await put(driver, `/shifts/${id}/start-package`, {
       odometerKm: 100,
       batteryPercent: null,
     })
-    expect(blocked.statusCode, blocked.body).toBe(422)
-    expect(blocked.json().error).toBe('stale_evidence_confirmation_required')
+    expect(blocked.statusCode, blocked.body).toBe(200)
   })
 
   it('uses the attachment token to reject a stale A token after A → B → A', async () => {
@@ -411,7 +416,11 @@ describe('stale acknowledgement is attachment-specific', () => {
     expect(created.statusCode, created.body).toBe(201)
     const id = created.json().id as string
     const staleTakenAt = String(h.deps.clock.nowMs() - 31 * 60_000)
-    const upload = async (contentType: 'image/jpeg' | 'image/png', bytes: Buffer) =>
+    const upload = async (
+      contentType: 'image/jpeg' | 'image/png',
+      bytes: Buffer,
+      expectedAttachmentToken?: string,
+    ) =>
       await h.app.inject({
         method: 'PUT',
         url: `/shifts/${id}/media/start/odometer`,
@@ -419,20 +428,25 @@ describe('stale acknowledgement is attachment-specific', () => {
           cookie: h.cookie(driver),
           'content-type': contentType,
           'x-client-taken-at': staleTakenAt,
+          'x-stale-evidence-acknowledged': 'true',
+          ...(expectedAttachmentToken === undefined ? {} : {
+            'x-expected-attachment-token': expectedAttachmentToken,
+            'x-replace-confirmed': 'true',
+          }),
         },
         payload: bytes,
       })
 
     const firstA = await upload('image/jpeg', TINY_JPEG)
-    const middleB = await upload('image/png', TINY_PNG)
-    const currentA = await upload('image/jpeg', TINY_JPEG)
+    const middleB = await upload('image/png', TINY_PNG, firstA.json().attachmentToken)
+    const currentA = await upload('image/jpeg', TINY_JPEG, middleB.json().attachmentToken)
     expect(firstA.statusCode, firstA.body).toBe(201)
     expect(middleB.statusCode, middleB.body).toBe(201)
     expect(currentA.statusCode, currentA.body).toBe(201)
     expect(currentA.json().mediaId).toBe(firstA.json().mediaId)
     expect(middleB.json().mediaId).not.toBe(firstA.json().mediaId)
     expect(currentA.json().attachmentToken).not.toBe(firstA.json().attachmentToken)
-    expect(currentA.json().staleAcknowledged).toBe(false)
+    expect(currentA.json().staleAcknowledged).toBe(true)
 
     const missingToken = await post(
       driver,
@@ -453,25 +467,12 @@ describe('stale acknowledgement is attachment-specific', () => {
     expect(oldToken.statusCode, oldToken.body).toBe(409)
     expect(oldToken.json().error).toBe('evidence_attachment_changed')
 
-    const [beforeAcknowledgement] = await h.deps.media.listSlots(id)
-    expect(beforeAcknowledgement).toMatchObject({
+    const [acknowledged] = await h.deps.media.listSlots(id)
+    expect(acknowledged).toMatchObject({
       mediaId: currentA.json().mediaId,
       attachmentToken: currentA.json().attachmentToken,
-      staleAcknowledgedAtMs: null,
-      staleAcknowledgedBy: null,
+      staleAcknowledgedAtMs: h.deps.clock.nowMs(),
+      staleAcknowledgedBy: 'u-d1',
     })
-
-    const currentToken = await post(
-      driver,
-      `/shifts/${id}/media/start/odometer/acknowledge-stale`,
-      {
-        mediaId: currentA.json().mediaId,
-        attachmentToken: currentA.json().attachmentToken,
-      },
-    )
-    expect(currentToken.statusCode, currentToken.body).toBe(200)
-    const [acknowledged] = await h.deps.media.listSlots(id)
-    expect(acknowledged?.staleAcknowledgedBy).toBe('u-d1')
-    expect(acknowledged?.staleAcknowledgedAtMs).toBe(h.deps.clock.nowMs())
   })
 })

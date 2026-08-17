@@ -27,7 +27,9 @@ afterEach(async () => {
 const post = async (token: string, url: string, payload: Record<string, unknown> = {}): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(token) }, payload })
 const put = async (token: string, url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
+  url.endsWith('/end-package')
+    ? await h.submitEndPackage(token, url.split('/')[2]!, payload)
+    : await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
 
 /** Post raw image bytes to the read endpoint, exactly as the phone does. */
 const read = async (
@@ -45,7 +47,7 @@ const read = async (
     headers: {
       cookie: h.cookie(token),
       'content-type': 'image/jpeg',
-      ...(field === 'orders' ? { 'x-ash-orders-time-consensus': 'v1' } : {}),
+      ...(field === 'orders' ? { 'x-ash-orders-time-consensus': 'close-draft-v1' } : {}),
       ...(retryFailed ? { 'x-ocr-retry': 'true' } : {}),
     },
     payload: bytes,
@@ -578,8 +580,23 @@ describe('cloud OCR: malformed requests still 4xx', () => {
 })
 
 describe('deleting an evidence photo', () => {
-  const del = async (token: string, shiftId: string, pkg: string, slot: string): Promise<LightMyRequestResponse> =>
-    await h.app.inject({ method: 'DELETE', url: `/shifts/${shiftId}/media/${pkg}/${slot}`, headers: { cookie: h.cookie(token) } })
+  const del = async (token: string, shiftId: string, pkg: string, slot: string): Promise<LightMyRequestResponse> => {
+    const draft = pkg === 'end' ? await h.deps.closeDrafts.findByShift(shiftId) : null
+    const attachment = pkg === 'end'
+      ? (await h.deps.media.listSlots(shiftId)).find((row) => row.package === 'end' && row.slot === slot)
+      : null
+    return h.app.inject({
+      method: 'DELETE',
+      url: `/shifts/${shiftId}/media/${pkg}/${slot}`,
+      headers: {
+        cookie: h.cookie(token),
+        ...(draft === null ? {} : { 'x-close-draft-revision': String(draft.revision) }),
+        ...(pkg !== 'end'
+          ? {}
+          : { 'x-expected-attachment-token': attachment?.attachmentToken ?? 'missing-slot-token' }),
+      },
+    })
+  }
 
   it('releases the slot and reports what is left', async () => {
     h = await makeHarness()

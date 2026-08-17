@@ -30,7 +30,9 @@ const put = async (
   url: string,
   payload: Record<string, unknown>,
 ): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
+  url.endsWith('/end-package')
+    ? await h.submitEndPackage(token, url.split('/')[2]!, payload)
+    : await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
 
 const get = async (token: string, url: string): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(token) } })
@@ -214,6 +216,29 @@ describe('operation sign flips keep one accounting identity', () => {
       cashDeductionTotal: '0.00',
     })
 
+    // The sign-flip endpoint above is legacy input. Closing now materializes only the durable
+    // canonical draft, so explicitly stage the same fifteen audited financial rows.
+    h.stageCloseDraftFinancialFixture(id, {
+      managerToken: manager,
+      orders: [
+        ...Array.from({ length: 14 }, (_, index) => ({
+          clientKey: `canonical-bulk-${index + 1}`,
+          providerOrderNo: `CANONICAL-BULK-${String(index + 1).padStart(2, '0')}`,
+          payMode: 'cash' as const,
+          fee: '100.00',
+          occurredDate: '2026-07-21',
+          occurredMinute: `08:${String(index + 10).padStart(2, '0')}`,
+        })),
+        {
+          clientKey: 'canonical-bulk-flip',
+          providerOrderNo: 'CANONICAL-BULK-FLIP',
+          payMode: 'cash',
+          fee: '100.00',
+          occurredDate: '2026-07-21',
+          occurredMinute: '08:05',
+        },
+      ],
+    })
     const ended = await submitEnd(id, driver, 2_500, 700)
     expect(ended.statusCode, ended.body).toBe(200)
     const settlement = await get(manager, `/shifts/${id}/settlement`)
@@ -314,6 +339,17 @@ describe('manager-attributed operation kinds survive rephoto retries', () => {
       movements: [],
     })
     expect(submitted.statusCode, submitted.body).toBe(200)
+    h.stageCloseDraftFinancialFixture(id, {
+      managerToken: manager,
+      orders: [{
+        clientKey: 'canonical-decided-anchor',
+        providerOrderNo: 'CANONICAL-DECIDED-ANCHOR',
+        payMode: 'cash',
+        fee: '100.00',
+        occurredDate: '2026-07-21',
+        occurredMinute: '08:04',
+      }],
+    })
     const ended = await submitEnd(id, driver, 1_000, 980)
     expect(ended.statusCode, ended.body).toBe(200)
 

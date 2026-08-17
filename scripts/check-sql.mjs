@@ -57,8 +57,18 @@ const AUDIT_EXEMPT = {
   media: 'immutable and content-addressed; the shift_media link is what matters',
   shift_media_attachment_history:
     'trigger-owned append-only provenance; direct INSERT/UPDATE/DELETE/TRUNCATE are revoked',
+  shift_close_draft_observations:
+    'append-only machine observations tied by composite FK to immutable OCR-read metadata; updates and deletes are revoked',
+  shift_close_drafts:
+    'high-frequency recoverable working state; revision/hash carry concurrency while final canonical rows and explicit restore actions are audited without duplicating routes/figures into audit_log',
+  shift_close_draft_reads:
+    'append-only OCR metadata; row pixels/transcription live only in protected observations and must not be copied into generic audit snapshots',
+  shift_media_restore_decisions:
+    'append-only reasoned restore decisions; this table is the minimal audit record itself',
   operation_window_reclassification_context:
     'transaction-scoped internal capability; app_user has no privileges and the SECURITY DEFINER classifier always removes it',
+  close_draft_materialization_context:
+    'transaction-scoped exact-draft capability; guarded writes are matched to the locked revision and the marker is removed before commit',
   attendance_days: 'derived from session activity',
   vehicle_events: 'append-only life log; is itself the audit trail (B-2)',
   assignments: 'covered by the audited shift it produces',

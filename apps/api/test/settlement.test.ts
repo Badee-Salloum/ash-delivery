@@ -44,7 +44,9 @@ const get = async (token: string, url: string): Promise<LightMyRequestResponse> 
 const post = async (token: string, url: string, payload: Payload = {}): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(token) }, payload })
 const put = async (token: string, url: string, payload: Payload): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
+  url.endsWith('/end-package')
+    ? await h.submitEndPackage(token, url.split('/')[2]!, payload)
+    : await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
 
 interface ShiftOptions {
   actualCash?: number
@@ -52,6 +54,46 @@ interface ShiftOptions {
   deduction?: number
   manual?: { fee: number; driverShare: number; companyShare: number }
   archivedPayment?: number
+}
+
+async function setCanonicalFinancialFixture(
+  driver: string,
+  shiftId: string,
+  deduction: number | undefined,
+): Promise<void> {
+  const current = await get(driver, `/shifts/${shiftId}/close-draft`)
+  expect(current.statusCode, current.body).toBe(200)
+  const draft = current.json() as { revision: number }
+  const patched = await h.app.inject({
+    method: 'PATCH',
+    url: `/shifts/${shiftId}/close-draft`,
+    headers: { cookie: h.cookie(driver) },
+    payload: {
+      expectedRevision: draft.revision,
+      operations: {
+        manualOrders: [{
+          clientKey: `settlement-order-${shiftId}`,
+          providerOrderNo: 'YAL-1',
+          payMode: 'cash',
+          fee: sypStr(10_000),
+          occurredDate: '2026-07-21',
+          occurredMinute: '08:00',
+          pointA: 'A',
+          pointB: 'B',
+        }],
+        manualCashDeductions: deduction === undefined ? [] : [{
+          clientKey: `settlement-deduction-${shiftId}`,
+          operationKey: `settlement-deduction-${shiftId}`,
+          amount: sypStr(deduction),
+          occurredDate: '2026-07-21',
+          occurredMinute: '08:00',
+          pointA: 'A',
+          pointB: 'B',
+        }],
+      },
+    },
+  })
+  expect(patched.statusCode, patched.body).toBe(200)
 }
 
 /**
@@ -80,12 +122,6 @@ async function pendingShift(options: ShiftOptions = {}): Promise<{
     topupTranches: [sypStr(5_000)],
   })).statusCode).toBe(200)
 
-  expect((await post(driver, `/shifts/${shiftId}/orders`, {
-    providerOrderNo: 'YAL-1',
-    payMode: 'cash',
-    fee: sypStr(10_000),
-  })).statusCode).toBe(201)
-
   if (options.manual) {
     const manual = options.manual
     const added = await post(manager, `/shifts/${shiftId}/orders/manual`, {
@@ -104,23 +140,7 @@ async function pendingShift(options: ShiftOptions = {}): Promise<{
     expect(added.statusCode, added.body).toBe(201)
   }
 
-  if (options.deduction !== undefined) {
-    const operations = await put(driver, `/shifts/${shiftId}/operations`, {
-      orders: [],
-      cashDeductions: [{
-        operationKey: `settlement-deduction-${shiftId}`,
-        amount: sypStr(options.deduction),
-        amountOcr: sypStr(options.deduction),
-        occurredDate: '2026-07-21',
-        occurredMinute: '08:00',
-        pointA: 'A',
-        pointB: 'B',
-        source: 'ocr',
-      }],
-      movements: [],
-    })
-    expect(operations.statusCode, operations.body).toBe(200)
-  }
+  await setCanonicalFinancialFixture(driver, shiftId, options.deduction)
 
   if (options.archivedPayment !== undefined) {
     await h.deps.movements.merge(
@@ -142,6 +162,27 @@ async function pendingShift(options: ShiftOptions = {}): Promise<{
   })
   expect(submitted.statusCode, submitted.body).toBe(200)
   expect(submitted.json().state).toBe('pending_review')
+
+  const unresolved = await get(manager, `/shifts/${shiftId}/review`)
+  expect(unresolved.statusCode, unresolved.body).toBe(200)
+  const deductionRows = unresolved.json().cashDeductions as Array<{ id: string }>
+  const verified = await post(manager, `/shifts/${shiftId}/operations/revise`, {
+    orders: [{
+      providerOrderNo: 'YAL-1',
+      included: true,
+      occurredDate: '2026-07-21',
+      occurredMinute: '08:00',
+      reason: 'manager verified the explicit settlement fixture',
+    }],
+    cashDeductions: options.deduction === undefined ? [] : [{
+      id: deductionRows[0]!.id,
+      included: true,
+      occurredDate: '2026-07-21',
+      occurredMinute: '08:00',
+      reason: 'manager verified the explicit settlement deduction fixture',
+    }],
+  })
+  expect(verified.statusCode, verified.body).toBe(200)
 
   const review = await get(manager, `/shifts/${shiftId}/review`)
   expect(review.statusCode, review.body).toBe(200)

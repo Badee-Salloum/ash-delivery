@@ -95,7 +95,8 @@ describe('end-shift failure and optional-log source guards', () => {
     const closeGate = shiftSource.slice(missingStart, missingEnd)
 
     expect(closeGate).not.toContain("draft.log.kind === 'reading'")
-    expect(closeGate).toContain("draft.dash.kind === 'reading'")
+    expect(closeGate).toContain('readingAttachment')
+    expect(shiftSource).toContain("attachment.read.field !== 'payments_log'")
     expect(shiftSource).toContain('t.shift.paymentsLogArchiveHint')
     expect(ar.shift.paymentsLogArchiveHint).toBe('اختياري للأرشفة فقط — لا يغيّر قيمة الطلبات أو فرق النوبة')
     expect(en.shift.paymentsLogArchiveHint).toContain('Optional archive only')
@@ -105,7 +106,7 @@ describe('end-shift failure and optional-log source guards', () => {
 
   it('keeps the detailed server refusal by the close button and also raises a toast', () => {
     expect(shiftSource).toContain('setCloseFailure(notice)')
-    expect(shiftSource).toContain('role="alert" aria-live="assertive"')
+    expect(shiftSource).toContain('aria-live="assertive"')
     expect(shiftSource).toContain('closeFailure.lines.map')
     expect(shiftSource).toContain('toast.error(`${notice.title}:')
   })

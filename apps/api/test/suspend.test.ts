@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BRANCH, DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr } from './harness.ts'
+import { BRANCH, DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr, today } from './harness.ts'
 
 /**
  * Suspended / mid-shift incident (SRS C-1 / س29). A manager puts a live shift on hold; the driver
@@ -20,7 +20,9 @@ afterEach(async () => {
 const post = async (token: string, url: string, payload: Record<string, unknown> = {}): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(token) }, payload })
 const put = async (token: string, url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
+  url.endsWith('/end-package')
+    ? await h.submitEndPackage(token, url.split('/')[2]!, payload)
+    : await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
 const get = async (token: string, url: string): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(token) } })
 
@@ -33,16 +35,37 @@ async function openShift(driver: string, manager: string): Promise<string> {
 }
 
 let seq = 0
-async function addOrder(driver: string, id: string, payMode: string): Promise<LightMyRequestResponse> {
+const fixtureOrders = new Map<string, Array<{
+  clientKey: string
+  providerOrderNo: string
+  payMode: 'cash' | 'electronic' | 'free'
+  fee: string
+  occurredDate: string
+  occurredMinute: string
+}>>()
+async function addOrder(_driver: string, id: string, payMode: string): Promise<void> {
   seq += 1
-  return await post(driver, `/shifts/${id}/orders`, { providerOrderNo: `YAL-${seq}`, payMode, fee: sypStr(5_000), zone: 'المزة' })
+  const rows = fixtureOrders.get(id) ?? []
+  rows.push({
+    clientKey: `suspend-${seq}`,
+    providerOrderNo: `YAL-${seq}`,
+    payMode: payMode as 'cash' | 'electronic' | 'free',
+    fee: sypStr(5_000),
+    occurredDate: today,
+    occurredMinute: '08:00',
+  })
+  fixtureOrders.set(id, rows)
 }
 async function addOrders(driver: string, id: string, payMode: string, count: number): Promise<void> {
-  for (let i = 0; i < count; i++) expect((await addOrder(driver, id, payMode)).statusCode).toBe(201)
+  for (let i = 0; i < count; i++) await addOrder(driver, id, payMode)
 }
 
 /** The SRS §2.3 balanced end package (160,000 cash · 70,000 wallet) after 12 cash / 6 electronic / 2 free. */
 async function submitBalancedEnd(driver: string, id: string): Promise<LightMyRequestResponse> {
+  h.stageCloseDraftFinancialFixture(id, {
+    managerToken: await h.loginAs('manager'),
+    orders: fixtureOrders.get(id) ?? [],
+  })
   for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
   return await put(driver, `/shifts/${id}/end-package`, {
     odometerKm: 15_412,
@@ -60,6 +83,7 @@ async function approveClose(manager: string, id: string): Promise<LightMyRequest
 describe('suspended shifts (C-1)', () => {
   beforeEach(() => {
     seq = 0
+    fixtureOrders.clear()
   })
 
   it('a manager suspends an open shift; orders still record; the driver resumes and closes at zero', async () => {

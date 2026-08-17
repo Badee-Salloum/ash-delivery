@@ -11,6 +11,7 @@ import {
   PgOperationWindowRepo,
   PgOrderRepo,
   PgWalletMovementRepo,
+  PgOperationBatchRepo,
 } from './repos.ts'
 import {
   PgBatteryReadingRepo,
@@ -23,6 +24,7 @@ import {
   PgWeekLockRepo,
 } from './repos-shift.ts'
 import { PgShiftSettlementRepo } from './repos-settlement.ts'
+import { PgCloseDraftRepo } from './repos-close-draft.ts'
 
 type ShiftIdentity = {
   driver_id: string
@@ -51,6 +53,8 @@ function transactionDeps(pool: Pool): ShiftCloseTransactionDeps {
     batterySwaps: new PgBatterySwapRepo(pool),
     weekLocks: new PgWeekLockRepo(pool),
     settlements: new PgShiftSettlementRepo(pool),
+    closeDrafts: new PgCloseDraftRepo(pool),
+    operationBatches: new PgOperationBatchRepo(pool),
   }
 }
 

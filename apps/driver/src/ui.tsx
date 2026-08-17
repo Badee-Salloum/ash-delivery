@@ -190,7 +190,7 @@ export function Screen({
   back?: { label: string; onBack(): void }
 }): ReactNode {
   return (
-    <div className="mx-auto flex min-h-dvh max-w-md flex-col">
+    <div className="mx-auto flex min-h-dvh w-full min-w-0 max-w-md flex-col overflow-x-hidden">
       <header className="sticky top-0 z-10 flex items-center gap-2.5 bg-brand px-4 py-3 text-white">
         {back ? (
           <button
@@ -209,13 +209,13 @@ export function Screen({
       </header>
       {/* pb-44 rather than pb-28: the footer GROWS — the BR1 banner, the «ناقص» checklist and the
           live difference all live in it — and at 112px it began covering the last battery field. */}
-      <main className="flex flex-1 flex-col gap-4 p-4 pb-44">{children}</main>
+      <main className="flex min-w-0 flex-1 flex-col gap-4 p-4 pb-44">{children}</main>
       {footer ? (
         /* viewport-fit=cover is set in index.html, so on a gesture-navigation Android the bottom of
            the primary button sat UNDER the home indicator: the driver's tap dismissed the app
            instead of submitting his shift. */
         <footer
-          className="fixed inset-x-0 bottom-0 mx-auto max-w-md border-t border-slate-200 bg-white/95 p-3 backdrop-blur"
+          className="fixed inset-x-0 bottom-0 mx-auto w-full min-w-0 max-w-md overflow-x-hidden border-t border-slate-200 bg-white/95 p-3 backdrop-blur"
           style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
         >
           {footer}

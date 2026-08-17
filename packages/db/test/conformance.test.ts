@@ -6,6 +6,7 @@ import { assertBigIntParser, createPool } from '../src/pool.ts'
 import { migrate } from '../src/migrate.ts'
 import { PgShiftCloseUnitOfWork } from '../src/repos-close.ts'
 import { PgShiftSettlementRepo } from '../src/repos-settlement.ts'
+import { PgCloseDraftRepo } from '../src/repos-close-draft.ts'
 import {
   PgAuditRepo,
   PgCashDeductionRepo,
@@ -197,6 +198,7 @@ if (!DATABASE_URL) {
         attendance: new PgAttendanceRepo(pool),
         decisions: new PgShiftDecisionRepo(pool),
         settlements: new PgShiftSettlementRepo(pool),
+        closeDrafts: new PgCloseDraftRepo(pool),
         gps: new PgGpsPingRepo(pool),
         closeUnitOfWork: new PgShiftCloseUnitOfWork(pool),
       }

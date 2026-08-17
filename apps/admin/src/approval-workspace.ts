@@ -1,6 +1,16 @@
 import { add, formatMinor, parseMinor } from '@ash/domain'
 import type { OperationWindowStatus } from './operation-window.ts'
 
+export type CloseDraftReviewReason =
+  | 'missing_money'
+  | 'missing_time'
+  | 'reader_conflict'
+  | 'time_conflict'
+  | 'cancelled_conflict'
+  | 'human_time_edit'
+  | 'human_money_edit'
+  | 'evidence_removed'
+
 export interface ReviewOrderSummaryInput {
   fee: string
   source?: 'manual' | 'ocr'
@@ -9,6 +19,8 @@ export interface ReviewOrderSummaryInput {
   feeOcr?: string | null
   windowStatus?: OperationWindowStatus
   decisionReason?: string | null
+  windowBasis?: 'printed_time' | 'screen_position' | 'manager' | null
+  closeDraftReviewReasons?: readonly CloseDraftReviewReason[]
 }
 
 export interface OrderReviewSummary {
@@ -132,8 +144,43 @@ export function orderNeedsAttention(order: ReviewOrderSummaryInput): boolean {
     order.windowStatus === 'pre_open' ||
     order.windowStatus === 'post_close' ||
     Boolean(order.decisionReason) ||
+    order.windowBasis === 'screen_position' ||
+    (order.closeDraftReviewReasons?.length ?? 0) > 0 ||
     (order.feeOcr != null && order.feeOcr !== order.fee)
   )
+}
+
+/** Human-facing copy for the durable reader reasons that must be resolved before approval. */
+export function closeDraftReviewReasonLabel(
+  reason: CloseDraftReviewReason,
+  lang: 'ar' | 'en',
+): string {
+  const labels: Record<CloseDraftReviewReason, { ar: string; en: string }> = {
+    missing_money: { ar: 'الأجرة غير موثقة', en: 'Fee is not verified' },
+    missing_time: { ar: 'الوقت غير موثق', en: 'Time is not verified' },
+    reader_conflict: { ar: 'اختلفت قراءات الذكاء الاصطناعي', en: 'AI readings disagree' },
+    time_conflict: { ar: 'تعارض وقت الطلب', en: 'Order time conflicts' },
+    cancelled_conflict: { ar: 'تعارض حول إلغاء الطلب', en: 'Cancellation status conflicts' },
+    human_time_edit: { ar: 'وقت أدخله السائق ويحتاج اعتماداً', en: 'Driver-entered time needs approval' },
+    human_money_edit: { ar: 'مبلغ أدخله السائق ويحتاج اعتماداً', en: 'Driver-entered amount needs approval' },
+    evidence_removed: { ar: 'فقد الصف آخر صورة داعمة', en: 'The row lost its last supporting image' },
+  }
+  return labels[reason][lang]
+}
+
+/**
+ * Positional evidence is an interval, not a fabricated clock. Keep the bounds readable in the
+ * manager audit without ever presenting either edge as the operation's actual minute.
+ */
+export function positionEvidenceLabel(
+  evidence: { lowerInstant?: string | null; upperInstant?: string | null } | null | undefined,
+  separator = ' → ',
+): string | null {
+  if (!evidence) return null
+  const lower = evidence.lowerInstant?.trim() || null
+  const upper = evidence.upperInstant?.trim() || null
+  if (!lower && !upper) return null
+  return `${lower ?? '…'}${separator}${upper ?? '…'}`
 }
 
 /** Counts and totals remain visible even while ordinary rows are folded away. */
@@ -150,7 +197,8 @@ export function summarizeOrders(orders: readonly ReviewOrderSummaryInput[]): Ord
   // records an audited reason, the row belongs in the financial bucket selected by `included`.
   // Keeping it in «unknown» after that would make the included total disagree with settlement.
   const needsDecision = (order: ReviewOrderSummaryInput): boolean =>
-    order.windowStatus === 'unknown' && !order.decisionReason?.trim()
+    (order.closeDraftReviewReasons?.length ?? 0) > 0 ||
+    (order.windowStatus === 'unknown' && !order.decisionReason?.trim())
 
   return {
     included: summarize((order) => !needsDecision(order) && order.included !== false),

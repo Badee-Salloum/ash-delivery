@@ -20,27 +20,28 @@ describe('odometer cloud-AI authority', () => {
     expect(startLocal).not.toContain('setOdoOcr')
     expect(startLocal).not.toMatch(/setOdo\s*\(/u)
 
-    const endLocal = section('const odoImage = useCallback', '/** Apply a cloud event')
+    const endLocal = section('const odoImage = useCallback', 'const dashImage = useCallback')
     expect(endLocal).toContain('odoLocal: localOdometerEvent')
     expect(endLocal).toContain('odoStrip: result.sample ?? null')
     expect(endLocal).not.toContain('odoOcr: odo')
     expect(endLocal).not.toContain('String(odo)')
   })
 
-  it('turns an AI response without an odometer into a visible no-fields failure in both flows', () => {
+  it('keeps a no-fields odometer read explicit in both flows', () => {
     expect(shift).toContain(
       "setOdoCloud({ status: 'failed', reason: 'no_fields', retryable: e.response.retryable })",
     )
-    expect(shift).toMatch(
-      /odoCloud:\s*\{[\s\S]*?reason: 'no_fields',[\s\S]*?retryable: event\.response\.retryable,/u,
-    )
+    expect(shift).toContain("if (value === null) return { ...restored, odoCloud: null }")
+    expect(shift).toContain("readLinkedAttachment('odometer', 'odometer', false, result)")
   })
 
   it('gates both submissions while odometer AI is reading', () => {
     expect(shift).toContain("if (odoCloud?.status === 'reading') return")
-    expect(shift).toContain("if (odometerFields === null || draft.odoCloud?.status === 'reading') return")
+    expect(shift).toContain("attachment.read?.status === 'running'")
+    expect(shift).toContain("item.read?.status === 'running'")
     expect(shift).toMatch(/const missing:[\s\S]*odoCloud\?\.status === 'reading'[\s\S]*const ready/u)
-    expect(shift).toMatch(/const missing:[\s\S]*draft\.odoCloud\?\.status === 'reading'[\s\S]*const ready/u)
+    expect(shift).toMatch(/const missing:[\s\S]*readingAttachment[\s\S]*const ready/u)
+    expect(shift).toContain("readLinkedAttachment('odometer', 'odometer', false, result)")
   })
 
   it('keeps explicit typing while retaining the cloud-AI baseline', () => {

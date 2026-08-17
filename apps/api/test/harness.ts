@@ -28,6 +28,41 @@ export const TINY_JPEG = Buffer.from(
   'base64',
 )
 
+export interface CloseDraftFinancialFixture {
+  managerToken: string
+  orders?: Array<{
+    clientKey: string
+    providerOrderNo: string
+    payMode: 'cash' | 'electronic' | 'free'
+    fee: string
+    occurredDate: string
+    occurredMinute: string
+    pointA?: string | null
+    pointB?: string | null
+    included?: boolean
+    walletAmount?: string | null
+  }>
+  cashDeductions?: Array<{
+    clientKey: string
+    operationKey: string
+    amount: string
+    occurredDate: string
+    occurredMinute: string
+    pointA?: string | null
+    pointB?: string | null
+    included?: boolean
+  }>
+  movements?: Array<{
+    clientKey: string
+    amount: string
+    occurredMinute?: string | null
+    role?: 'unmatched' | 'corroboration'
+    providerOrderNo?: string | null
+    ambiguous?: boolean
+    notes?: string | null
+  }>
+}
+
 export interface Harness {
   app: FastifyInstance
   deps: MemoryDeps
@@ -41,6 +76,19 @@ export interface Harness {
     slot: string,
     bytes?: Buffer,
   ): Promise<Record<string, unknown>>
+  /** Persist the driver's closing figures into the durable draft, then submit its exact identity. */
+  submitEndPackage(
+    token: string,
+    shiftId: string,
+    payload: Record<string, unknown>,
+  ): Promise<LightMyRequestResponse>
+  /** Explicitly stage non-OCR financial rows as manual draft rows and have the manager decide them. */
+  stageCloseDraftFinancialFixture(shiftId: string, fixture: CloseDraftFinancialFixture): void
+  updateStagedCloseDraftFinancialOrder(
+    shiftId: string,
+    providerOrderNo: string,
+    patch: { included?: boolean; walletAmount?: string | null },
+  ): void
 }
 
 export async function makeHarness(
@@ -52,6 +100,9 @@ export async function makeHarness(
   } = {},
 ): Promise<Harness> {
   const deps = createMemoryDeps(NOW_MS)
+  const fixturePhotoBytes = new Map<string, Buffer>()
+  const financialFixtures = new Map<string, CloseDraftFinancialFixture>()
+  let fixturePhotoSequence = 0
   if (opts.ocr) deps.ocr = opts.ocr
 
   // Two governorates so a cross-governorate branch number can be exercised: Damascus branch 1 and
@@ -125,7 +176,55 @@ export async function makeHarness(
     app,
     deps,
     cookie: cookieFor,
-    async uploadPhoto(token, shiftId, pkg, slot, bytes = TINY_JPEG) {
+    stageCloseDraftFinancialFixture(shiftId, fixture) {
+      financialFixtures.set(shiftId, structuredClone(fixture))
+    },
+    updateStagedCloseDraftFinancialOrder(shiftId, providerOrderNo, patch) {
+      const fixture = financialFixtures.get(shiftId)
+      const order = fixture?.orders?.find((candidate) => candidate.providerOrderNo === providerOrderNo)
+      if (!order) throw new Error(`staged canonical fixture order not found: ${providerOrderNo}`)
+      Object.assign(order, patch)
+    },
+    async uploadPhoto(token, shiftId, pkg, slot, bytes) {
+      // A normal fixture represents a different real photograph in every slot. Reusing the same
+      // 1x1 bytes everywhere used to be harmless, but the evidence layer now correctly refuses one
+      // photograph being active in two slots. Tests that intentionally exercise reuse still pass
+      // explicit bytes and therefore keep the old content identity.
+      const fixtureKey = `${shiftId}:${pkg}:${slot}`
+      let generated = fixturePhotoBytes.get(fixtureKey)
+      if (bytes === undefined && generated === undefined) {
+        fixturePhotoSequence += 1
+        // Preserve the historical first fixture byte-for-byte for tests that serve it back, then
+        // distinguish every additional slot while retaining valid JPEG magic bytes.
+        generated = fixturePhotoSequence === 1
+          ? TINY_JPEG
+          : Buffer.concat([TINY_JPEG, Buffer.from(`ash-test-photo:${fixturePhotoSequence}:${fixtureKey}`, 'utf8')])
+        fixturePhotoBytes.set(fixtureKey, generated)
+      }
+      const uploadBytes = bytes ?? generated!
+      let closeDraftRevision: number | null = null
+      let expectedAttachmentToken: string | null = null
+      if (pkg === 'end') {
+        const current = await app.inject({
+          method: 'GET',
+          url: `/shifts/${shiftId}/close-draft`,
+          headers: { cookie: cookieFor(token) },
+        })
+        if (current.statusCode !== 200) {
+          throw new Error(`close draft read failed: ${current.statusCode} ${current.body}`)
+        }
+        const draft = current.json() as {
+          revision: number
+          attachments: Array<{ slot: string; attachmentToken: string }>
+        }
+        closeDraftRevision = draft.revision
+        expectedAttachmentToken =
+          draft.attachments.find((attachment) => attachment.slot === slot)?.attachmentToken ?? null
+      } else {
+        expectedAttachmentToken = (await deps.media.listSlots(shiftId)).find(
+          (attachment) => attachment.package === pkg && attachment.slot === slot,
+        )?.attachmentToken ?? null
+      }
       const res = await app.inject({
         method: 'PUT',
         url: `/shifts/${shiftId}/media/${pkg}/${slot}`,
@@ -136,11 +235,206 @@ export async function makeHarness(
           cookie: cookieFor(token),
           'content-type': 'image/jpeg',
           'x-stale-evidence-acknowledged': 'true',
+          'x-replace-confirmed': 'true',
+          ...(expectedAttachmentToken === null
+            ? {}
+            : { 'x-expected-attachment-token': expectedAttachmentToken }),
+          ...(closeDraftRevision === null
+            ? {}
+            : {
+                'x-close-draft-revision': String(closeDraftRevision),
+              }),
         },
-        payload: bytes,
+        payload: uploadBytes,
       })
       if (res.statusCode !== 201) throw new Error(`upload failed: ${res.statusCode} ${res.body}`)
       return res.json()
+    },
+    async submitEndPackage(token, shiftId, payload) {
+      const currentResponse = await app.inject({
+        method: 'GET',
+        url: `/shifts/${shiftId}/close-draft`,
+        headers: { cookie: cookieFor(token) },
+      })
+      if (currentResponse.statusCode !== 200) return currentResponse
+      let current = currentResponse.json() as {
+        revision: number
+        draftHash: string
+        submittedAt: string | null
+      }
+      if (current.submittedAt === null) {
+        const figureKeys = [
+          'odometerKm',
+          'odometerAnomalyConfirmed',
+          'cashDeclared',
+          'walletDeclared',
+        ] as const
+        const figures = Object.fromEntries(
+          figureKeys.flatMap((key) => key in payload ? [[key, payload[key]]] : []),
+        )
+        const fixture = financialFixtures.get(shiftId)
+        let saved = await app.inject({
+          method: 'PATCH',
+          url: `/shifts/${shiftId}/close-draft`,
+          headers: { cookie: cookieFor(token) },
+          payload: {
+            expectedRevision: current.revision,
+            figures,
+            ...(fixture === undefined
+              ? {}
+              : {
+                  operations: {
+                    manualOrders: (fixture.orders ?? []).map((row) => ({
+                      clientKey: row.clientKey,
+                      providerOrderNo: row.providerOrderNo,
+                      payMode: row.payMode,
+                      fee: row.fee,
+                      occurredDate: row.occurredDate,
+                      occurredMinute: row.occurredMinute,
+                      pointA: row.pointA ?? null,
+                      pointB: row.pointB ?? null,
+                      source: 'manual',
+                    })),
+                    manualCashDeductions: (fixture.cashDeductions ?? []).map((row) => ({
+                      clientKey: row.clientKey,
+                      operationKey: row.operationKey,
+                      amount: row.amount,
+                      occurredDate: row.occurredDate,
+                      occurredMinute: row.occurredMinute,
+                      pointA: row.pointA ?? null,
+                      pointB: row.pointB ?? null,
+                      source: 'manual',
+                    })),
+                    manualMovements: (fixture.movements ?? []).map((row) => ({
+                      clientKey: row.clientKey,
+                      amount: row.amount,
+                      occurredMinute: row.occurredMinute ?? null,
+                      role: row.role ?? 'unmatched',
+                      providerOrderNo: row.providerOrderNo ?? null,
+                      ambiguous: row.ambiguous ?? false,
+                      notes: row.notes ?? null,
+                      source: 'manual',
+                    })),
+                  },
+                }),
+          },
+        })
+        if (saved.statusCode !== 200 && 'walletDeclaredOcr' in figures) {
+          const { walletDeclaredOcr: _ignoredUnreadableBaseline, ...storableFigures } = figures
+          saved = await app.inject({
+            method: 'PATCH',
+            url: `/shifts/${shiftId}/close-draft`,
+            headers: { cookie: cookieFor(token) },
+            payload: {
+              expectedRevision: current.revision,
+              figures: storableFigures,
+              ...(fixture === undefined
+                ? {}
+                : {
+                    operations: {
+                      manualOrders: (fixture.orders ?? []).map((row) => ({
+                        clientKey: row.clientKey,
+                        providerOrderNo: row.providerOrderNo,
+                        payMode: row.payMode,
+                        fee: row.fee,
+                        occurredDate: row.occurredDate,
+                        occurredMinute: row.occurredMinute,
+                        pointA: row.pointA ?? null,
+                        pointB: row.pointB ?? null,
+                        source: 'manual',
+                      })),
+                      manualCashDeductions: (fixture.cashDeductions ?? []).map((row) => ({
+                        clientKey: row.clientKey,
+                        operationKey: row.operationKey,
+                        amount: row.amount,
+                        occurredDate: row.occurredDate,
+                        occurredMinute: row.occurredMinute,
+                        pointA: row.pointA ?? null,
+                        pointB: row.pointB ?? null,
+                        source: 'manual',
+                      })),
+                      manualMovements: (fixture.movements ?? []).map((row) => ({
+                        clientKey: row.clientKey,
+                        amount: row.amount,
+                        occurredMinute: row.occurredMinute ?? null,
+                        role: row.role ?? 'unmatched',
+                        providerOrderNo: row.providerOrderNo ?? null,
+                        ambiguous: row.ambiguous ?? false,
+                        notes: row.notes ?? null,
+                        source: 'manual',
+                      })),
+                    },
+                  }),
+            },
+          })
+        }
+        if (saved.statusCode !== 200 && fixture !== undefined) {
+          const failure = saved.json() as {
+            error?: string
+            detail?: Array<{ path?: unknown[] }>
+          }
+          const rejectedClientFigure = failure.error === 'invalid_request'
+            && Array.isArray(failure.detail)
+            && failure.detail.length > 0
+            && failure.detail.every((issue) => issue.path?.[0] === 'figures')
+          if (!rejectedClientFigure) {
+            throw new Error(`canonical fixture patch failed: ${saved.statusCode} ${saved.body}`)
+          }
+        }
+        // Invalid wire values still belong to the end-package schema test. Preserve its response
+        // surface by sending them to that route with the current identity instead of throwing here.
+        if (saved.statusCode === 200) {
+          current = saved.json() as typeof current
+        }
+      }
+      const submitted = await app.inject({
+        method: 'PUT',
+        url: `/shifts/${shiftId}/end-package`,
+        headers: { cookie: cookieFor(token) },
+        payload: {
+          ...payload,
+          draftRevision: current.revision,
+          draftHash: current.draftHash,
+        },
+      })
+      const fixture = financialFixtures.get(shiftId)
+      if (submitted.statusCode !== 200 || fixture === undefined) return submitted
+      financialFixtures.delete(shiftId)
+      const deductions = await deps.cashDeductions.listByShift(shiftId)
+      const decisions = await app.inject({
+        method: 'POST',
+        url: `/shifts/${shiftId}/operations/revise`,
+        headers: { cookie: cookieFor(fixture.managerToken) },
+        payload: {
+          orders: (fixture.orders ?? []).map((row) => ({
+            providerOrderNo: row.providerOrderNo,
+            included: row.included ?? true,
+            ...(row.walletAmount === undefined ? {} : { walletAmount: row.walletAmount }),
+            occurredDate: row.occurredDate,
+            occurredMinute: row.occurredMinute,
+            reason: 'manager verified the explicit close-draft financial fixture',
+          })),
+          cashDeductions: (fixture.cashDeductions ?? []).map((row) => {
+            const deduction = deductions.find((candidate) => candidate.operationKey === row.operationKey)
+            if (!deduction) throw new Error(`canonical fixture deduction not materialized: ${row.operationKey}`)
+            return {
+              id: deduction.id,
+              included: row.included ?? true,
+              occurredDate: row.occurredDate,
+              occurredMinute: row.occurredMinute,
+              reason: 'manager verified the explicit close-draft deduction fixture',
+            }
+          }),
+        },
+      })
+      if (decisions.statusCode !== 200) {
+        throw new Error(`canonical fixture decision failed: ${decisions.statusCode} ${decisions.body}`)
+      }
+      return app.inject({
+        method: 'GET',
+        url: `/shifts/${shiftId}/review`,
+        headers: { cookie: cookieFor(fixture.managerToken) },
+      })
     },
     async loginAs(username: string) {
       const res = await app.inject({

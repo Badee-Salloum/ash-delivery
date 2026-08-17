@@ -25,6 +25,9 @@ import {
   closeFiguresRequest,
   operationsRequest,
   reviseOperationsRequest,
+  patchCloseDraftRequest,
+  linkedCloseDraftReadRequest,
+  restoreCloseDraftAttachmentRequest,
 } from '@ash/contracts'
 import { addDays, bmsSlot, checkWeekClose, dayOfWeek, minor, resolveFxDay, sum, weekClosedOn, weekStartFor } from '@ash/domain'
 import {
@@ -52,10 +55,17 @@ import {
   acknowledgeStaleEvidence,
   deleteEvidence,
   readEvidence,
+  restoreEvidence,
   uploadEvidence,
 } from './media.service.ts'
 import { OCR_FIELDS_TUPLE, readScreen } from './ocr.service.ts'
 import { rereadManagerOrderEvidence } from './manager-order-reread.service.ts'
+import {
+  getCloseDraft,
+  patchCloseDraft,
+  readCloseDraftAttachment,
+  syncCloseDraftEvidence,
+} from './close-draft.service.ts'
 import {
   ServiceError,
   addOrder,
@@ -819,6 +829,146 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     },
   )
 
+  app.get(
+    '/shifts/:id/close-draft',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      return getCloseDraft(deps, req.actor!, id)
+    },
+  )
+
+  app.patch(
+    '/shifts/:id/close-draft',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      return patchCloseDraft(deps, req.actor!, id, patchCloseDraftRequest.parse(req.body))
+    },
+  )
+
+  app.post(
+    '/shifts/:id/close-draft/media/:slot/read',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req, reply) => {
+      const { id, slot } = z.object({ id: z.string(), slot: z.string().min(1).max(32) }).parse(req.params)
+      const body = linkedCloseDraftReadRequest.parse(req.body)
+      if (body.field === 'orders' && req.headers['x-ash-orders-time-consensus'] !== 'close-draft-v1') {
+        return reply.code(428).send({ error: 'driver_update_required' })
+      }
+      return readCloseDraftAttachment(
+        deps,
+        req.actor!,
+        id,
+        slot,
+        body,
+        opts.maxOcrReadsPerShift ?? 15,
+      )
+    },
+  )
+
+  app.get(
+    '/shifts/:id/close-draft/attachments',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const current = await getCloseDraft(deps, req.actor!, id)
+      const tokens = new Set(current.attachments.map((attachment) => attachment.attachmentToken))
+      const history = (await deps.media.listAttachmentHistory(id)).map((row) => ({
+        historyId: row.id,
+        package: row.package,
+        slot: row.slot,
+        mediaId: row.mediaId,
+        attachmentToken: row.attachmentToken,
+        attachedAt: new Date(row.attachedAtMs).toISOString(),
+        attachedAtMs: row.attachedAtMs,
+        reusedFromShiftId: row.reusedFromShiftId,
+        isCurrent: tokens.has(row.attachmentToken),
+      }))
+      return { current: current.attachments, history }
+    },
+  )
+
+  app.post(
+    '/shifts/:id/close-draft/attachments/:historyId/restore',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req) => {
+      const { id, historyId } = z.object({ id: z.string(), historyId: z.string().min(1) }).parse(req.params)
+      const body = restoreCloseDraftAttachmentRequest.parse(req.body)
+      const preliminary = await getCloseDraft(deps, req.actor!, id)
+      if (preliminary.revision !== body.expectedRevision) {
+        throw new ServiceError(409, 'close_draft_revision_conflict', { current: preliminary })
+      }
+      const historical = (await deps.media.listAttachmentHistory(id)).find((row) => row.id === historyId)
+      if (!historical) throw new ServiceError(404, 'evidence_history_not_found')
+      const expectedField = historical.package === 'end'
+        ? /^dashboard(?:_[2-9]|_[1-9]\d+)?$/.test(historical.slot)
+          ? 'orders' as const
+          : /^payments_log(?:_[2-9]|_[1-9]\d+)?$/.test(historical.slot)
+            ? 'payments_log' as const
+            : null
+        : null
+      if (expectedField !== null) {
+        const { bytes } = await readEvidence(deps, historical.mediaId)
+        const classified = await readScreen(deps, {
+          shiftId: id,
+          field: expectedField,
+          bytes,
+          requestedBy: req.actor!.userId,
+          maxReadsPerShift: opts.maxOcrReadsPerShift ?? 15,
+          retryFailed: false,
+        })
+        if (!classified.result.ok && classified.result.reason === 'wrong_screen') {
+          throw new ServiceError(422, 'wrong_screen', {
+            slot: historical.slot,
+            expectedField,
+            historyId,
+          })
+        }
+      }
+      const committed = await deps.closeUnitOfWork.run(
+        { shiftId: id, actorId: req.actor!.userId, requestId: req.requestId },
+        async (transaction) => {
+          const transactionDeps: Deps = { ...deps, ...transaction }
+          const current = await getCloseDraft(transactionDeps, req.actor!, id)
+          if (current.revision !== body.expectedRevision) {
+            throw new ServiceError(409, 'close_draft_revision_conflict', { current })
+          }
+          const before = current.attachments.find(
+            (attachment) => attachment.attachmentToken === body.expectedAttachmentToken,
+          ) ?? null
+          const restored = await restoreEvidence(transactionDeps, {
+            shiftId: id,
+            historyId,
+            expectedCurrentAttachmentToken: body.expectedAttachmentToken,
+            actorId: req.actor!.userId,
+            reason: body.reason,
+          })
+          const draft = await syncCloseDraftEvidence(transactionDeps, req.actor!, id, current.revision)
+          return { before, restored, draft }
+        },
+      )
+      return { attachment: committed.restored, draft: committed.draft }
+    },
+  )
+
+  app.get(
+    '/shifts/:id/close-draft/media/:mediaId/thumbnail',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req, reply) => {
+      const { id, mediaId } = z.object({ id: z.string(), mediaId: z.string() }).parse(req.params)
+      const allowed = (await deps.media.listAttachmentHistory(id)).some((row) => row.mediaId === mediaId)
+      if (!allowed) throw new ServiceError(404, 'evidence_not_found')
+      const { media, bytes } = await readEvidence(deps, mediaId)
+      return reply
+        .header('content-type', media.mimeType)
+        .header('cache-control', 'private, no-store')
+        .header('pragma', 'no-cache')
+        .header('expires', '0')
+        .send(Buffer.from(bytes))
+    },
+  )
+
   /**
    * Evidence upload (SRS C-6). Raw image bytes as the body — not multipart, not base64 — so a
    * ~300 KB photo costs 300 KB on a phone connection rather than 400.
@@ -831,19 +981,110 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     },
     async (req, reply) => {
       const params = uploadEvidenceParams.parse(req.params)
+      const bytes = new Uint8Array(req.body as Buffer)
       const takenHeader = req.headers['x-client-taken-at']
       const clientTakenAtMs = typeof takenHeader === 'string' && /^\d+$/.test(takenHeader) ? Number(takenHeader) : null
       const acknowledgedHeader = req.headers['x-stale-evidence-acknowledged']
+      const revisionHeader = req.headers['x-close-draft-revision']
+      const expectedTokenHeader = req.headers['x-expected-attachment-token']
+      let expectedAttachmentToken = typeof expectedTokenHeader === 'string' && expectedTokenHeader !== ''
+        ? expectedTokenHeader
+        : null
+      if (params.package === 'start' && expectedAttachmentToken === null) {
+        expectedAttachmentToken = (await deps.media.listSlots(params.id)).find(
+          (slot) => slot.package === 'start' && slot.slot === params.slot,
+        )?.attachmentToken ?? null
+      }
+      let expectedRevision: number | null = null
+      let draftBefore: Awaited<ReturnType<typeof getCloseDraft>> | null = null
+      if (params.package === 'end') {
+        if (typeof revisionHeader !== 'string' || !/^\d+$/.test(revisionHeader)) {
+          return reply.code(428).send({ error: 'driver_update_required' })
+        }
+        expectedRevision = Number(revisionHeader)
+        draftBefore = await getCloseDraft(deps, req.actor!, params.id)
+        if (draftBefore.revision !== expectedRevision) {
+          throw new ServiceError(409, 'close_draft_revision_conflict', { current: draftBefore })
+        }
+      }
 
-      const result = await uploadEvidence(deps, {
-        shiftId: params.id,
-        package: params.package,
-        slot: params.slot,
-        bytes: new Uint8Array(req.body as Buffer),
-        clientTakenAtMs,
-        uploadedBy: req.actor!.userId,
-        staleAcknowledged: acknowledgedHeader === 'true',
-      })
+      const preflightField = params.package === 'end'
+        ? /^dashboard(?:_[2-9]|_[1-9]\d+)?$/.test(params.slot)
+          ? 'orders' as const
+          : /^payments_log(?:_[2-9]|_[1-9]\d+)?$/.test(params.slot)
+            ? 'payments_log' as const
+            : params.slot === 'wallet'
+              ? 'wallet' as const
+              : params.slot === 'odometer'
+                ? 'odometer' as const
+                : /^bms(?:_[1-9]\d*)?$/.test(params.slot)
+                  ? 'bms' as const
+                  : null
+        : null
+
+      let result
+      try {
+        result = await uploadEvidence(deps, {
+          shiftId: params.id,
+          package: params.package,
+          slot: params.slot,
+          bytes,
+          clientTakenAtMs,
+          uploadedBy: req.actor!.userId,
+          staleAcknowledged: acknowledgedHeader === 'true',
+          replaceConfirmed: req.headers['x-replace-confirmed'] === 'true',
+          expectedAttachmentToken,
+          ...(expectedRevision === null ? {} : {
+            runCommit: <T>(work: (transactionDeps: Deps) => Promise<T>): Promise<T> =>
+              deps.closeUnitOfWork.run(
+                { shiftId: params.id, actorId: req.actor!.userId, requestId: req.requestId },
+                (transaction) => work({ ...deps, ...transaction }),
+              ),
+            beforeCommit: async (transactionDeps: Deps) => {
+              const current = await transactionDeps.closeDrafts.findByShift(params.id)
+              if (!current || current.revision !== expectedRevision) {
+                throw new ServiceError(409, 'close_draft_revision_conflict', {
+                  current: current ? await getCloseDraft(transactionDeps, req.actor!, params.id) : null,
+                })
+              }
+            },
+            afterAttach: (transactionDeps: Deps) =>
+              syncCloseDraftEvidence(transactionDeps, req.actor!, params.id, expectedRevision),
+          }),
+          ...(preflightField === null ? {} : {
+            beforeAttach: async () => {
+              const screen = await readScreen(deps, {
+                shiftId: params.id,
+                field: preflightField,
+                bytes,
+                requestedBy: req.actor!.userId,
+                maxReadsPerShift: opts.maxOcrReadsPerShift ?? 15,
+                retryFailed: false,
+              })
+              if (!screen.result.ok && screen.result.reason === 'wrong_screen') {
+                throw new ServiceError(422, 'wrong_screen', { slot: params.slot, expectedField: preflightField })
+              }
+            },
+          }),
+        })
+      } catch (error) {
+        if (
+          error instanceof ServiceError &&
+          draftBefore !== null &&
+          [
+            'stale_evidence_confirmation_required',
+            'evidence_replacement_confirmation_required',
+            'evidence_already_attached',
+            'evidence_attachment_changed',
+          ].includes(error.code)
+        ) {
+          throw new ServiceError(error.status, error.code, {
+            ...(typeof error.detail === 'object' && error.detail !== null ? error.detail : {}),
+            current: draftBefore,
+          })
+        }
+        throw error
+      }
       return reply.code(201).send({
         mediaId: result.media.id,
         sha256: result.media.sha256,
@@ -854,6 +1095,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         attachmentToken: result.attachmentToken,
         staleAcknowledged: result.staleAcknowledged,
         slots: result.slotsNow,
+        ...(result.draft === undefined ? {} : { draft: result.draft }),
       })
     },
   )
@@ -906,7 +1148,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       // money. The current same-origin client always sends this capability header for orders.
       if (
         params.field === 'orders' &&
-        req.headers['x-ash-orders-time-consensus'] !== 'v1'
+        req.headers['x-ash-orders-time-consensus'] !== 'close-draft-v1'
       ) {
         return reply.code(428).send({
           error: 'driver_update_required',
@@ -945,9 +1187,40 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     { config: { permission: 'shift.operate', subject: shiftSubject } },
     async (req, reply) => {
       const params = uploadEvidenceParams.parse(req.params)
+      if (params.package === 'end') {
+        const revisionHeader = req.headers['x-close-draft-revision']
+        const tokenHeader = req.headers['x-expected-attachment-token']
+        if (
+          typeof revisionHeader !== 'string' || !/^\d+$/.test(revisionHeader) ||
+          typeof tokenHeader !== 'string' || tokenHeader === ''
+        ) {
+          return reply.code(428).send({ error: 'driver_update_required' })
+        }
+        const expectedRevision = Number(revisionHeader)
+        const committed = await deps.closeUnitOfWork.run(
+          { shiftId: params.id, actorId: req.actor!.userId, requestId: req.requestId },
+          async (transaction) => {
+            const transactionDeps: Deps = { ...deps, ...transaction }
+            const current = await getCloseDraft(transactionDeps, req.actor!, params.id)
+            if (current.revision !== expectedRevision) {
+              throw new ServiceError(409, 'close_draft_revision_conflict', { current })
+            }
+            const result = await deleteEvidence(transactionDeps, {
+              shiftId: params.id,
+              package: 'end',
+              slot: params.slot,
+              deletedBy: req.actor!.userId,
+              expectedAttachmentToken: tokenHeader,
+            })
+            const draft = await syncCloseDraftEvidence(transactionDeps, req.actor!, params.id, current.revision)
+            return { result, draft }
+          },
+        )
+        return reply.send({ slots: committed.result.slotsNow, draft: committed.draft })
+      }
       const result = await deleteEvidence(deps, {
         shiftId: params.id,
-        package: params.package,
+        package: 'start',
         slot: params.slot,
         deletedBy: req.actor?.userId ?? null,
       })
@@ -1096,6 +1369,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           decisionReason: o.decisionReason,
           decidedBy: o.decidedBy,
           decidedAt: o.decidedAt,
+          windowBasis: o.windowBasis ?? null,
+          positionEvidence: o.positionEvidence ?? null,
+          observationId: o.observationId ?? null,
+          closeDraftReviewReasons: o.closeDraftReviewReasons ?? [],
         })),
         cashDeductions: cashDeductions.map((d) => ({
           id: d.id,
@@ -1112,6 +1389,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           decisionReason: d.decisionReason,
           decidedBy: d.decidedBy,
           decidedAt: d.decidedAt,
+          windowBasis: d.windowBasis ?? null,
+          positionEvidence: d.positionEvidence ?? null,
+          observationId: d.observationId ?? null,
+          closeDraftReviewReasons: d.closeDraftReviewReasons ?? [],
         })),
         // «سجل المدفوعات» as read: what the wallet actually did, beside what the orders imply.
         movements: movements.map((m) => ({
@@ -1344,7 +1625,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     { config: { permission: 'shift.approve', subject: shiftSubject } },
     async (req, reply) => {
       const { id } = z.object({ id: z.string() }).parse(req.params)
-      if (req.headers['x-ash-orders-time-consensus'] !== 'v1') {
+      if (req.headers['x-ash-orders-time-consensus'] !== 'close-draft-v1') {
         return reply.code(428).send({
           error: 'manager_update_required',
           message: 'Refresh the manager application before re-reading stored Recent Orders evidence.',
@@ -1495,6 +1776,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           decisionReason: deduction.decisionReason,
           decidedBy: deduction.decidedBy,
           decidedAt: deduction.decidedAt,
+          windowBasis: deduction.windowBasis ?? null,
+          positionEvidence: deduction.positionEvidence ?? null,
+          observationId: deduction.observationId ?? null,
+          closeDraftReviewReasons: deduction.closeDraftReviewReasons ?? [],
         })),
       }
     },

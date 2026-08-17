@@ -109,27 +109,25 @@ describe('historical what-if simulation remains read-only', () => {
       floatTranches: [sypStr(100_000)],
       topupTranches: [sypStr(50_000)],
     })
-    for (let i = 1; i <= 20; i++) {
-      await post(driver, `/shifts/${id}/orders`, {
-        providerOrderNo: `S-${i}`,
-        payMode: 'electronic',
+    h.stageCloseDraftFinancialFixture(id, {
+      managerToken: manager,
+      orders: Array.from({ length: 20 }, (_, offset) => ({
+        clientKey: `tier-s-${offset + 1}`,
+        providerOrderNo: `S-${offset + 1}`,
+        payMode: 'electronic' as const,
         fee: sypStr(5_000),
-        zone: null,
-      })
-    }
+        occurredDate: '2026-07-21',
+        occurredMinute: '08:00',
+      })),
+    })
     for (const slot of ['dashboard', 'wallet', 'odometer']) {
       await h.uploadPhoto(driver, id, 'end', slot)
     }
-    await h.app.inject({
-      method: 'PUT',
-      url: `/shifts/${id}/end-package`,
-      headers: { cookie: h.cookie(driver) },
-      payload: {
-        odometerKm: 2,
-        batteryPercent: 20,
-        cashDeclared: sypStr(100_000),
-        walletDeclared: sypStr(50_000 + 20 * 4_000),
-      },
+    await h.submitEndPackage(driver, id, {
+      odometerKm: 2,
+      batteryPercent: 20,
+      cashDeclared: sypStr(100_000),
+      walletDeclared: sypStr(50_000 + 20 * 4_000),
     })
     const review = await get(manager, `/shifts/${id}/review`)
     const approved = await approveFixedClose(h, manager, id, review.json().br1.ordersHash)

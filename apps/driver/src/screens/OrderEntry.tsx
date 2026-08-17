@@ -4,10 +4,12 @@ import {
   type DraftMovement,
   type DraftOrder,
   allProblems,
+  closeOperationsSummary,
   feeSourceOf,
   frequentFees,
   groupThousands,
   newOrderKey,
+  operationDecisionState,
   workedTotalText,
 } from '@ash/client'
 import { useApp } from '../app-context.tsx'
@@ -106,19 +108,20 @@ export function OperationsList({
     typed: '✎',
   }
 
-  const includedCount = orders.filter((o) => o.included !== false).length
-  /*
-   * «YYYY-MM-DD» → «DD/MM», which is how the date is written on the screen being copied.
-   *
-   * The emptiness check is not defensive padding. Given '' this returned a bare «/» — two empty
-   * slices around a separator — which is TRUTHY, so the `|| '—'` fallback at the call site never
-   * fired and four order cards displayed a lone slash where their time should have been. The
-   * driver could not tell a missing clock from a rendering fault, and neither could I until the
-   * pixels were in front of me.
-   */
-  const dayMonth = (iso: string): string =>
-    iso.length >= 10 ? `${iso.slice(8, 10)}/${iso.slice(5, 7)}` : ''
-
+  const summary = useMemo(
+    () => closeOperationsSummary(orders, cashDeductions),
+    [orders, cashDeductions],
+  )
+  const summaryText = t.orders.compactSummary
+    .replace('{total}', String(summary.orders.total))
+    .replace('{included}', String(summary.orders.included))
+    .replace('{pending}', String(summary.orders.pending))
+    .replace('{excluded}', String(summary.orders.excluded))
+  const deductionSummaryText = t.orders.deductionSummary
+    .replace('{total}', String(summary.cashDeductions.total))
+    .replace('{included}', String(summary.cashDeductions.included))
+    .replace('{pending}', String(summary.cashDeductions.pending))
+    .replace('{excluded}', String(summary.cashDeductions.excluded))
   /**
    * IN THE ORDER THE DAY HAPPENED, newest first — which is how the screen he is copying from reads.
    *
@@ -147,15 +150,29 @@ export function OperationsList({
     <>
       {/* Inclusion is shown but never edited here. The server owns the shift window and the manager
           owns any reasoned override, so a cached client cannot change accounting with a checkbox. */}
-      <Card className="bg-slate-50">
-        <p className="text-sm text-slate-600">{t.orders.inclusionReadOnly}</p>
+      <Card className="flex flex-col gap-1 bg-white">
+        <p className="text-sm font-semibold text-slate-800">{summaryText}</p>
+        {summary.cashDeductions.total > 0 ? (
+          <p className="text-sm text-slate-600">{deductionSummaryText}</p>
+        ) : null}
+        {summary.missingAmountTotal > 0 ? (
+          <p className="text-sm font-medium text-red-700">
+            {t.orders.missingAmounts.replace('{n}', String(summary.missingAmountTotal))}
+          </p>
+        ) : null}
+        <details className="text-xs text-slate-500">
+          <summary className="cursor-pointer py-1 font-medium">{t.shift.howReadingWorks}</summary>
+          <p className="pt-1">{t.orders.inclusionReadOnly}</p>
+        </details>
       </Card>
 
       {/* Sticky, because it scrolled away the moment he started working — on a list where the
           count and the money it adds up to are the whole point. */}
       <div className="sticky top-0 z-10 -mx-4 flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-200 bg-[var(--ash-bg,#eef1f8)] px-4 py-2">
         <span className="text-sm font-semibold">
-          {t.orders.countedOf.replace('{n}', String(includedCount)).replace('{total}', String(orders.length))}
+          {t.orders.countedOf
+            .replace('{n}', String(summary.orders.included))
+            .replace('{total}', String(orders.length))}
         </span>
         {/* WHAT HE WORKED. The screen showed him ten rows and a count but never the day's own
             total — the one number he actually wants, and the term BR1 multiplies by 0.80. It sits
@@ -174,7 +191,9 @@ export function OperationsList({
       <div className="grid grid-cols-3 gap-2">
         {sorted.map((o) => {
           const problem = problems.get(o.localId)
-          const off = o.included === false
+          const decision = operationDecisionState(o)
+          const off = decision === 'excluded'
+          const pending = decision === 'pending'
           const otherDay = Boolean(today && o.dateText && o.dateText !== today)
           const suspect = suspects.has(o.localId)
           const source = feeSourceOf(o)
@@ -183,7 +202,7 @@ export function OperationsList({
               key={o.localId}
               type="button"
               onClick={() => setOpenId(o.localId)}
-              aria-label={`${o.timeText || dayMonth(o.dateText ?? '')} ${o.feeText}`}
+              aria-label={`${o.timeText || t.orders.unknownTime} ${o.feeText}`}
               className={[
                 'relative flex min-h-[72px] flex-col items-center justify-center rounded-2xl border-2 px-1 py-2',
                 // The border carries the state, exactly as PhotoSlot's tile does — red needs
@@ -192,6 +211,8 @@ export function OperationsList({
                   ? 'border-red-400 bg-red-50'
                   : o.cancelled
                     ? 'border-rose-300 bg-rose-50'
+                    : pending
+                      ? 'border-amber-400 bg-amber-50'
                     : otherDay
                       ? 'border-amber-400 bg-amber-50'
                       : suspect
@@ -202,10 +223,10 @@ export function OperationsList({
             >
               {/* Read-only server classification: the mark is status, never a driver control. */}
               <span className="absolute end-1 top-1 text-xs" aria-hidden>
-                {off ? '○' : '✓'}
+                {off ? '○' : pending ? '!' : '✓'}
               </span>
               <span className="num text-xs font-semibold text-slate-500">
-                {o.timeText || dayMonth(o.dateText ?? '') || '—'}
+                {o.timeText || t.orders.unknownTime}
               </span>
               <span className={`num text-lg font-bold ${o.feeText.trim() === '' ? 'text-red-600' : ''}`}>
                 {o.feeText.trim() === '' ? '؟' : groupThousands(o.feeText)}
@@ -214,6 +235,21 @@ export function OperationsList({
                   and one he typed himself look identical today, and he is the only person who can
                   still check it against the screen in his hand. */}
               <span className="text-[10px] leading-none text-slate-400">{sourceMark[source]}</span>
+              <span
+                className={`mt-1 max-w-full truncate rounded-full px-1.5 py-0.5 text-[9px] font-medium ${
+                  decision === 'included'
+                    ? 'bg-emerald-50 text-emerald-700'
+                    : decision === 'pending'
+                      ? 'bg-amber-100 text-amber-900'
+                      : 'bg-slate-100 text-slate-600'
+                }`}
+              >
+                {decision === 'included'
+                  ? t.orders.included
+                  : decision === 'pending'
+                    ? t.orders.awaitingManagerDecision
+                    : t.orders.excluded}
+              </span>
             </button>
           )
         })}
@@ -235,7 +271,7 @@ export function OperationsList({
         {open ? (
           <>
             <p className="num text-sm font-semibold text-slate-600">
-              {open.timeText || dayMonth(open.dateText ?? '')}
+              {open.timeText || t.orders.unknownTime}
               {open.cancelled ? (
                 <span className="ms-2 rounded-md bg-rose-100 px-1.5 py-0.5 text-xs font-semibold text-rose-700">
                   {t.orders.cancelledCard}
@@ -298,12 +334,18 @@ export function OperationsList({
             <div className="flex min-h-11 items-center gap-3" aria-label={t.orders.inclusionReadOnly}>
               <span
                 className={`rounded-full px-2 py-1 text-xs font-medium ${
-                  open.included === false
+                  operationDecisionState(open) === 'excluded'
                     ? 'bg-slate-100 text-slate-600'
-                    : 'bg-emerald-50 text-emerald-700'
+                    : operationDecisionState(open) === 'pending'
+                      ? 'bg-amber-50 text-amber-800'
+                      : 'bg-emerald-50 text-emerald-700'
                 }`}
               >
-                {open.included === false ? t.orders.excluded : t.orders.included}
+                {operationDecisionState(open) === 'excluded'
+                  ? t.orders.excluded
+                  : operationDecisionState(open) === 'pending'
+                    ? t.orders.awaitingManagerDecision
+                    : t.orders.included}
               </span>
               <span className="text-xs text-slate-500">{t.orders.inclusionReadOnly}</span>
             </div>
@@ -347,12 +389,14 @@ export function OperationsList({
                   }`}
                 >
                   {deduction.timeReviewRequired === true
-                    ? t.orders.timeUnverified
+                    ? t.orders.awaitingManagerDecision
                     : deduction.included === false
                       ? t.orders.excluded
                       : t.orders.included}
                 </span>
-                <span className="num w-14 text-sm text-slate-600">{deduction.timeText || '—'}</span>
+                <span className="num w-20 text-xs text-slate-600">
+                  {deduction.timeText || t.orders.unknownTime}
+                </span>
                 <label className="min-w-0 flex-1">
                   <span className="sr-only">{t.orders.cashDeductionAmount}</span>
                   <MoneyInput

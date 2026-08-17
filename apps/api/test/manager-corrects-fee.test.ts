@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr } from './harness.ts'
+import { DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr, today } from './harness.ts'
 
 /**
  * The manager corrects a fee.
@@ -24,7 +24,9 @@ afterEach(async () => {
 const post = async (token: string, url: string, payload: Record<string, unknown> = {}): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(token) }, payload })
 const put = async (token: string, url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> =>
-  await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
+  url.endsWith('/end-package')
+    ? await h.submitEndPackage(token, url.split('/')[2]!, payload)
+    : await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload })
 const get = async (token: string, url: string): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(token) } })
 
@@ -34,7 +36,13 @@ async function pendingReview(driver: string, manager: string): Promise<string> {
   await h.uploadPhoto(driver, id, 'start', 'odometer')
   await put(driver, `/shifts/${id}/start-package`, { odometerKm: 100, batteryPercent: 90 })
   await post(manager, `/shifts/${id}/approve-open`, { floatTranches: [sypStr(100_000)], topupTranches: [] })
-  await post(driver, `/shifts/${id}/orders`, { providerOrderNo: 'A-1', payMode: 'cash', fee: sypStr(5_000) })
+  h.stageCloseDraftFinancialFixture(id, {
+    managerToken: manager,
+    orders: [{
+      clientKey: 'manager-fee-a1', providerOrderNo: 'A-1', payMode: 'cash', fee: sypStr(5_000),
+      occurredDate: today, occurredMinute: '08:00',
+    }],
+  })
   for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
   await put(driver, `/shifts/${id}/end-package`, {
     odometerKm: 110,
@@ -99,9 +107,9 @@ describe('a manager corrects a fee', () => {
 
     const [order] = await h.deps.orders.listByShift(id)
     expect(order).toMatchObject({
-      decisionReason: null,
+      decisionReason: 'manager verified the explicit close-draft financial fixture',
       decidedBy: 'u-bm',
-      decidedAt: new Date(h.deps.clock.nowMs()).toISOString(),
+      decidedAt: expect.any(String),
     })
 
     const rows = await h.deps.audit.list({ tableName: 'shifts', recordId: id })
@@ -126,9 +134,9 @@ describe('a manager corrects a fee', () => {
     const [order] = await h.deps.orders.listByShift(id)
     expect(order).toMatchObject({
       walletAmount: 150_000n,
-      decisionReason: null,
+      decisionReason: 'manager verified the explicit close-draft financial fixture',
       decidedBy: 'u-bm',
-      decidedAt: new Date(h.deps.clock.nowMs()).toISOString(),
+      decidedAt: expect.any(String),
     })
   })
 
