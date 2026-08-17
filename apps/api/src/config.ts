@@ -85,10 +85,35 @@ const schema = z.object({
    * These three move together. Changing one without re-running the benchmark is changing the
    * reader blind: `medium` effort with `low` verbosity has never been measured, so it is not the
    * default even though it looks like the cheap half of a good setting.
+   *
+   * ── 2026-08-17: gpt-5.4, ON COST ─────────────────────────────────────────────────────────
+   *
+   * Same 48 screens, same 311 rows, same prompt, same scorer — so the two runs above are already
+   * a like-for-like comparison and no new measurement was needed to read this off:
+   *
+   *              MISREAD   missed   ok    cost
+   *   gpt-5.5      24        21     290   $1.58
+   *   gpt-5.4      26        30     281   $0.44     ← 28% of the price
+   *
+   * Two more wrong numbers across 311 rows, for a 72% cut. Production was measured at ~$174/month
+   * at ten bikes and would have been ~$1,740 at a hundred; this makes those ~$49 and ~$490.
+   *
+   * WHAT IS ACTUALLY GIVEN UP, stated precisely rather than glossed: gpt-5.4 reads NINE fewer rows
+   * correctly and misses nine more. A missed row is one the driver types — visible, and therefore
+   * safe. The dangerous column, a different number sitting where a real one should be, moves by
+   * two. That is the trade: a little more typing for two thirds off the bill.
+   *
+   * Two caveats worth carrying. That gpt-5.4 run is from 2026-08-12 and the corpus has since grown
+   * from 48 images to 66, so it is a valid comparison on the images both saw and silent about the
+   * eighteen newer ones. And changing the model changes `cacheSignature`, so every previously-read
+   * screenshot is re-read once at the new price — a one-off cost, by design, because an answer
+   * from a different reader is a different answer.
+   *
+   * gpt-5.5 remains one env var away: `OPENAI_OCR_MODEL=gpt-5.5`.
    */
-  OPENAI_OCR_MODEL: z.string().default('gpt-5.5'),
-  OPENAI_OCR_EFFORT: z.enum(['low', 'medium', 'high']).default('medium'),
-  OPENAI_OCR_VERBOSITY: z.enum(['low', 'medium', 'high']).default('medium'),
+  OPENAI_OCR_MODEL: z.string().default('gpt-5.4'),
+  OPENAI_OCR_EFFORT: z.enum(['default', 'low', 'medium', 'high']).default('default'),
+  OPENAI_OCR_VERBOSITY: z.enum(['default', 'low', 'medium', 'high']).default('default'),
   /**
    * Strictly below the platform's function ceiling (`vercel.json`), so a slow read returns a clean
    * 504 instead of the socket dying at the same instant the platform gives up.

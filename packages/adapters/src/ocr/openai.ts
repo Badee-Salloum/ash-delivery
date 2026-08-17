@@ -46,8 +46,8 @@ import {
 export interface OpenAiOcrConfig {
   apiKey: string
   model: string
-  effort: 'low' | 'medium' | 'high'
-  verbosity: 'low' | 'medium' | 'high'
+  effort: 'default' | 'low' | 'medium' | 'high'
+  verbosity: 'default' | 'low' | 'medium' | 'high'
   /** Must stay strictly BELOW the platform's function ceiling — see the note in `runPass`. */
   timeoutMs: number
   /** Overridable for tests; there is no other reason to change it. */
@@ -207,8 +207,17 @@ export class OpenAiOcrReader implements OcrReader {
             },
           ],
           max_completion_tokens: options.maxCompletionTokens ?? MAX_COMPLETION_TOKENS,
-          reasoning_effort: this.config.effort,
-          verbosity: this.config.verbosity,
+          /*
+           * `default` OMITS the field, and that is a measured setting rather than a lazy one.
+           *
+           * The gpt-5.4 benchmark that costs 28% of gpt-5.5 was run WITHOUT `reasoning_effort` and
+           * recorded exactly 0 reasoning tokens. Sending `medium` to the same model would buy
+           * reasoning the measurement never included, so the price would not be the price that was
+           * measured. A setting and a model are a matched pair here; shipping one without the other
+           * is shipping an unmeasured reader.
+           */
+          ...(this.config.effort === 'default' ? {} : { reasoning_effort: this.config.effort }),
+          ...(this.config.verbosity === 'default' ? {} : { verbosity: this.config.verbosity }),
           response_format: {
             type: 'json_schema',
             json_schema: {
