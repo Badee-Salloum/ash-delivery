@@ -28,6 +28,18 @@ const PRICE = {
   'gpt-5.6-terra': [2.0, 12.0],
   'gpt-5.6-sol': [5.0, 30.0],
   'gpt-5.5': [5.0, 30.0],
+  /*
+   * Qwen3-VL via OpenRouter, read from its own `/api/v1/models` endpoint on 2026-08-17 rather than
+   * from a pricing article. The `-thinking` variants cost roughly ten times their `-instruct`
+   * siblings on OUTPUT, which is where a reasoning model spends — so the cheap-looking gap between
+   * 32b-instruct and 235b-thinking is much wider per image than the input column suggests.
+   */
+  'qwen/qwen3-vl-235b-a22b-thinking': [0.4, 4.0],
+  'qwen/qwen3-vl-235b-a22b-instruct': [0.21, 1.9],
+  'qwen/qwen3-vl-30b-a3b-thinking': [0.2, 2.4],
+  'qwen/qwen3-vl-30b-a3b-instruct': [0.13, 0.52],
+  'qwen/qwen3-vl-32b-instruct': [0.104, 0.416],
+  'qwen/qwen3-vl-8b-instruct': [0.117, 0.455],
 }
 
 const key = answerKey()
@@ -86,7 +98,8 @@ for (const run of runs) {
     }
   }
 
-  const model = run.replace(/^\d{4}-\d{2}-\d{2}-/, '').replace(/-p[^-]*$/, '')
+  // `__` back to `/`: OpenRouter ids are `vendor/model`, and a slash cannot live in a folder name.
+  const model = run.replace(/^\d{4}-\d{2}-\d{2}-/, '').replace(/-p[^-]*$/, '').replace(/__/g, '/')
   const p = PRICE[model]
   rows.push({ run, model, imgs, clean, expected, matched, misread, missing, tin, tout, reasoning,
     cost: p ? (tin / 1e6) * p[0] + (tout / 1e6) * p[1] : null, offenders })

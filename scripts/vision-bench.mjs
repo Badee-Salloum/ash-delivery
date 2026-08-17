@@ -62,7 +62,9 @@ const OUT = arg('out', join(homedir(), 'Desktop', 'ash-ocr-runs'))
  * read the 5 RPM / 20 RPD from says «Gemini 3.6 Flash», so the benchmark asks for exactly that.
  * Measuring one model against another model's quota is how a run dies halfway through.
  */
-const MODEL = arg('model', process.env.GEMINI_MODEL ?? (arg('provider', 'gemini') === 'openai' ? 'gpt-5.4-mini' : 'gemini-3.6-flash'))
+/** Each provider carries its own default so `--provider=qwen` alone is a valid run. */
+const DEFAULT_MODEL = { openai: 'gpt-5.4-mini', qwen: 'qwen/qwen3-vl-235b-a22b-thinking', gemini: 'gemini-3.6-flash' }
+const MODEL = arg('model', process.env.GEMINI_MODEL ?? DEFAULT_MODEL[arg('provider', 'gemini')] ?? 'gemini-3.6-flash')
 
 /**
  * `dynamic` sends no thinkingConfig at all, `off` pins the budget to zero, a number fixes it.
@@ -125,8 +127,8 @@ const DRY = flag('dry')
  * full passes over the current 66 images, and repetition is the only thing that can catch a fault
  * that shows up one run in ten.
  */
-const RPD = Number(arg('rpd', arg('provider', 'gemini') === 'openai' ? '40' : '20'))
-const RPM = Number(arg('rpm', arg('provider', 'gemini') === 'openai' ? '30' : '5'))
+const RPD = Number(arg('rpd', arg('provider', 'gemini') === 'gemini' ? '20' : '40'))
+const RPM = Number(arg('rpm', arg('provider', 'gemini') === 'gemini' ? '5' : '30'))
 const SPACING_MS = Math.ceil(60_000 / RPM) + 1_000
 
 const RELAY = arg('relay', process.env.GEMINI_RELAY_URL ?? '')
@@ -422,6 +424,80 @@ const PROVIDERS = {
     },
   },
 
+  /*
+   * Qwen3-VL, reached through OpenRouter rather than Alibaba Model Studio.
+   *
+   * WHY NOT ALIBABA DIRECT, which is cheaper: their own structured-output documentation says Qwen
+   * supports `response_format: {"type":"json_object"}` and NOT strict JSON Schema, and requires the
+   * word "json" to appear in the prompt. This benchmark's whole method rests on the model being
+   * unable to omit `hasDecimal` / `hasThousands` / `digitCount` — the fields the money check
+   * re-derives the amount from. JSON mode guarantees valid JSON of arbitrary shape, which is not
+   * the same promise at all. Alibaba also lists VL structured output under non-thinking mode, and
+   * reasoning is exactly what bought gpt-5.5 its accuracy.
+   *
+   * OpenRouter answers both: queried live, eight Qwen VL models advertise `structured_outputs`,
+   * including the thinking variants. It speaks the OpenAI Chat Completions shape, so this entry is
+   * the `openai` one below with three OpenAI-only knobs removed.
+   *
+   * `strict: true` is sent, but OpenRouter's docs are explicit that enforcement varies by upstream
+   * host — some constrain decoding natively, others treat the schema as a strong hint. So batch 1
+   * is the real smoke test: if rows come back missing the verification fields, this is measuring
+   * a different thing and the run should stop rather than collect five batches of noise.
+   */
+  qwen: {
+    defaultModel: 'qwen/qwen3-vl-235b-a22b-thinking',
+    endpoint: 'https://openrouter.ai/api/v1/chat/completions',
+    build: (batch) => ({
+      model: MODEL,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: RAW ? RAW_PROMPT : PROMPT },
+            ...batch.map((im) => ({
+              type: 'image_url',
+              // Same reasoning as the OpenAI entry: on `low` the image becomes a single 512px tile
+              // and Arabic-Indic digits stop being resolvable. Non-OpenAI hosts generally accept
+              // and ignore this; Qwen's own resolution control is a pixel budget, so if a run comes
+              // back uniformly unable to read digits, suspect downsampling before blaming the model.
+              image_url: { url: `data:image/jpeg;base64,${im.labelled.toString('base64')}`, detail: 'high' },
+            })),
+          ],
+        },
+      ],
+      // `max_tokens`, not `max_completion_tokens` — the older name is what compatible endpoints
+      // accept. Sending only the newer one risks a silently ignored ceiling, and an ignored ceiling
+      // shows up as a truncated completion that reads exactly like "the screen had nothing on it".
+      max_tokens: MAX_OUT,
+      // Qwen has no `reasoning_effort` and no `verbosity`; the reasoning knob here is which MODEL
+      // you pick (`-thinking` vs `-instruct`). Temperature 0 IS accepted, unlike OpenAI 5.x.
+      temperature: 0,
+      ...(RAW ? {} : { response_format: { type: 'json_schema', json_schema: { name: 'screens', strict: true, schema: strictify(SCHEMA) } } }),
+    }),
+    extract: (json) => {
+      if (json.error) throw new Error(`openrouter ${json.error.code ?? json.error.type}: ${json.error.message}`)
+      const c = json.choices?.[0]
+      if (!c) throw new Error('openrouter: no choice in response')
+      if (c.finish_reason && c.finish_reason !== 'stop') throw new Error(`openrouter finish_reason=${c.finish_reason}`)
+      const text = c.message?.content
+      // No `refusal` field outside OpenAI — a refusal arrives as prose in `content` and fails the
+      // JSON parse downstream, which is the same outcome by a different road.
+      if (!text) throw new Error('openrouter: empty content — the output ceiling was most likely consumed')
+      return text
+    },
+    usage: (json) => {
+      const u = json.usage ?? {}
+      return {
+        in: u.prompt_tokens ?? 0,
+        out: u.completion_tokens ?? 0,
+        // Thinking variants may or may not itemise reasoning tokens; they are already inside
+        // `completion_tokens` either way, so 0 here under-reports a breakdown, never the bill.
+        reasoning: u.completion_tokens_details?.reasoning_tokens ?? 0,
+        raw: u,
+      }
+    },
+  },
+
   openai: {
     defaultModel: 'gpt-5.4-mini',
     build: (batch) => ({
@@ -577,7 +653,13 @@ async function main() {
   const batches = Array.from({ length: nBatches }, () => [])
   sorted.forEach((im, i) => batches[i % nBatches].push(im))
 
-  const runId = `${quotaDay()}-${MODEL}-p${PASS}`
+  /*
+   * The model id goes into a DIRECTORY NAME, and OpenRouter ids carry a vendor prefix with a slash
+   * — `qwen/qwen3-vl-235b-a22b-thinking`. Left alone that silently creates a nested folder, the run
+   * lands one level deeper than every scorer looks for it, and the pass appears to have produced
+   * nothing. Flattened to `qwen__qwen3-vl-…`, which `ocr-compare.mjs` reverses.
+   */
+  const runId = `${quotaDay()}-${MODEL.replace(/\//g, '__')}-p${PASS}`
   const runDir = join(OUT, runId)
   const rawDir = join(runDir, 'raw')
   const imgDir = join(runDir, 'images')
