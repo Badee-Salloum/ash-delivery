@@ -40,6 +40,16 @@ const PRICE = {
   'qwen/qwen3-vl-30b-a3b-instruct': [0.13, 0.52],
   'qwen/qwen3-vl-32b-instruct': [0.104, 0.416],
   'qwen/qwen3-vl-8b-instruct': [0.117, 0.455],
+  // Gemini and the rest, via OpenRouter. Read from its /api/v1/models on 2026-08-17.
+  'google/gemini-3.6-flash': [0.75, 3.75],
+  'google/gemini-3.7-flash': [0.375, 1.875],
+  'google/gemini-2.5-flash': [0.30, 2.50],
+  'google/gemini-3.1-flash-lite': [0.25, 1.50],
+  'google/gemini-2.5-flash-lite': [0.10, 0.40],
+  'google/gemma-4-26b-a4b-it:free': [0, 0],
+  'openai/gpt-5.6-luna': [0.10, 0.60],
+  'mistralai/mistral-small-3.2-24b-instruct': [0.094, 0.25],
+  'xiaomi/mimo-v2.5': [0.14, 0.28],
 }
 
 const key = answerKey()

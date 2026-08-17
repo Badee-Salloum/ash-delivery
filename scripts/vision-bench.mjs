@@ -62,8 +62,8 @@ const OUT = arg('out', join(homedir(), 'Desktop', 'ash-ocr-runs'))
  * read the 5 RPM / 20 RPD from says «Gemini 3.6 Flash», so the benchmark asks for exactly that.
  * Measuring one model against another model's quota is how a run dies halfway through.
  */
-/** Each provider carries its own default so `--provider=qwen` alone is a valid run. */
-const DEFAULT_MODEL = { openai: 'gpt-5.4-mini', qwen: 'qwen/qwen3-vl-235b-a22b-thinking', gemini: 'gemini-3.6-flash' }
+/** Each provider carries its own default so `--provider=openrouter` alone is a valid run. */
+const DEFAULT_MODEL = { openai: 'gpt-5.4-mini', openrouter: 'google/gemini-3.6-flash', gemini: 'gemini-3.6-flash' }
 const MODEL = arg('model', process.env.GEMINI_MODEL ?? DEFAULT_MODEL[arg('provider', 'gemini')] ?? 'gemini-3.6-flash')
 
 /**
@@ -425,7 +425,7 @@ const PROVIDERS = {
   },
 
   /*
-   * Qwen3-VL, reached through OpenRouter rather than Alibaba Model Studio.
+   * OpenRouter: one key, many vendors — and the only payment channel that works from here.
    *
    * WHY NOT ALIBABA DIRECT, which is cheaper: their own structured-output documentation says Qwen
    * supports `response_format: {"type":"json_object"}` and NOT strict JSON Schema, and requires the
@@ -444,7 +444,7 @@ const PROVIDERS = {
    * is the real smoke test: if rows come back missing the verification fields, this is measuring
    * a different thing and the run should stop rather than collect five batches of noise.
    */
-  qwen: {
+  openrouter: {
     defaultModel: 'qwen/qwen3-vl-235b-a22b-thinking',
     endpoint: 'https://openrouter.ai/api/v1/chat/completions',
     envKey: 'OPENROUTER_API_KEY',
