@@ -447,6 +447,7 @@ const PROVIDERS = {
   qwen: {
     defaultModel: 'qwen/qwen3-vl-235b-a22b-thinking',
     endpoint: 'https://openrouter.ai/api/v1/chat/completions',
+    envKey: 'OPENROUTER_API_KEY',
     build: (batch) => ({
       model: MODEL,
       messages: [
@@ -589,6 +590,36 @@ const buildRequest = (batch) => provider().build(batch)
  * body is captured to disk first and the error names the file.
  */
 async function callRelay(request, rawDir, tag) {
+  /*
+   * DIRECT WHEN THE PROVIDER IS REACHABLE, relayed when it is not.
+   *
+   * The relay exists because Google and OpenAI geo-block Syria — it is a Vercel function in a US
+   * region whose only job is to be somewhere they will answer. Measured 2026-08-17: OpenRouter
+   * answers Damascus directly (`/api/v1/key` → 200), so a provider carrying its own `endpoint` and
+   * an env key skips the hop entirely. One less moving part, one less place for a 504 to come from,
+   * and no key sitting in a second project's environment.
+   *
+   * Set `--relay=` / `GEMINI_RELAY_URL` and it goes back through the relay regardless, which is
+   * what the geo-blocked providers still need.
+   */
+  const provider = PROVIDERS[PROVIDER]
+  const directKey = provider?.envKey ? process.env[provider.envKey] : undefined
+  if (RELAY === '' && provider?.endpoint && directKey) {
+    const res = await fetch(provider.endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${directKey}` },
+      body: JSON.stringify(request),
+      signal: AbortSignal.timeout(270_000),
+    })
+    const ct = res.headers.get('content-type') ?? ''
+    const text = await res.text()
+    if (!res.ok || !ct.includes('json')) {
+      writeFileSync(join(rawDir, `${tag}.error.txt`), `HTTP ${res.status}  ${ct}\n\n${text.slice(0, 8000)}`)
+      throw new Error(`${PROVIDER} ${res.status} (${ct || 'no content-type'}) — see raw/${tag}.error.txt`)
+    }
+    return JSON.parse(text)
+  }
+
   const res = await fetch(RELAY, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-relay-secret': SECRET, 'x-provider': PROVIDER },
@@ -694,7 +725,20 @@ async function main() {
     writeFileSync(join(runDir, 'dry-request-1.json'), JSON.stringify({ model: MODEL, request: requests[0].req }, null, 1).slice(0, 4000))
     return
   }
-  if (!RELAY) throw new Error('set --relay=<url> or GEMINI_RELAY_URL (and RELAY_SECRET)')
+  /*
+   * A relay is required only for the providers that need one. Google and OpenAI geo-block Syria, so
+   * calls to them must originate from the US function; OpenRouter answers Damascus directly
+   * (measured 2026-08-17), so it needs an endpoint and a key and nothing else.
+   */
+  const direct = PROVIDERS[PROVIDER]?.endpoint && process.env[PROVIDERS[PROVIDER]?.envKey ?? '']
+  if (!RELAY && !direct) {
+    const wants = PROVIDERS[PROVIDER]?.envKey
+    throw new Error(
+      wants
+        ? `set ${wants} to call ${PROVIDER} directly, or --relay=<url> (and RELAY_SECRET) to go through the relay`
+        : 'set --relay=<url> or GEMINI_RELAY_URL (and RELAY_SECRET)',
+    )
+  }
   if (used + requests.length > RPD) {
     throw new Error(`would exceed the daily cap: ${used} used + ${requests.length} needed > ${RPD}. Wait for the Pacific-midnight reset or pass --rpd=N.`)
   }
