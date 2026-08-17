@@ -1,5 +1,69 @@
 # PROGRESS
 
+## 2026-08-17 — the staged close-draft release is LIVE (migration `0034`)
+
+The candidate described in the entry below was reviewed, committed as `afbb31d`, and promoted. This
+is deployment evidence, which the previous entry was careful to say it was not.
+
+**Reviewed before it was trusted.** The candidate arrived as 95 uncommitted files written in an
+earlier session. Three things were checked rather than taken on the author's word:
+
+- **`0034` is the most conservative migration in the `0028`–`0034` range.** No `DROP TABLE`, no
+  `DROP COLUMN`, no `DELETE`, no `ALTER COLUMN … TYPE`, no bare `NOT NULL`, and **zero
+  migration-time DML** — every `UPDATE`/`INSERT` in the file lives inside a function body. Its new
+  guards were checked against existing rows: `window_basis IS NULL` and
+  `close_draft_review_reasons = '[]'` short-circuit every branch, so legacy rows classify exactly
+  as they did under `0033`. The row count afterwards proved it: 3,303 → 3,304, the one new row
+  being the migration ledger entry itself.
+- **The RBAC skip on the materialisation path is unreachable from the wire.** `submitOperations`
+  bypasses the `shift.operate` check when `internal.canonicalCloseDraft` is set; every caller was
+  traced. The route passes four arguments and never sets it, the only setter is
+  `shifts.service.ts:1897` on the server-internal path, and the DB trigger
+  `close_draft_materialized_operation_valid` re-checks driver ownership on INSERT independently.
+- **The money maths is unchanged.** `packages/domain` verified: the 80% block is still a residual,
+  rounding still lands on the company, and the settlement identity is enforced at runtime — 424/424
+  domain tests, `canonical.test.ts` byte-unchanged.
+
+**The release, in order.** Backup → migrate → API → driver → admin, which is the RUNBOOK's sequence
+and not negotiable: an earlier deploy in this project inverted it and left two minutes where the API
+named columns that did not exist.
+
+| step | evidence |
+| --- | --- |
+| preflight | 53 tables · 3,303 rows · 33 migrations · `0033` checksum `687e773f` |
+| pre-backup | `Desktop\ash-backups\2026-08-17-pre-0034` — 53 tables, 3,303 rows |
+| migrate | `0034` applied, checksum **`5bc30a31`** — matches the documented disposable-gate value |
+| idempotency | immediate re-run: `0 applied, 34 already present` |
+| postflight | 58 tables · 3,304 rows · all five close-draft objects present · shifts untouched |
+| post-backup | `Desktop\ash-backups\2026-08-17-post-0034` — 58 tables, 3,304 rows |
+| API | `ash-api-xi` · `/health` 200 · `/fx` 401 · region `iad1` |
+| driver · admin | both 200; both `/api` proxies reach the new API |
+
+**Why now was the right window.** Production held **zero `open` shifts** — 13 cancelled, one
+`draft`, one `pending_review`. That matters because `0034` is a deliberate breaking change:
+`PUT /shifts/:id/media/end/:slot` answers **`428 driver_update_required`** without the close-draft
+revision header, so a driver on an old PWA bundle cannot upload closing evidence until his app
+updates. With nobody mid-shift, nobody could be stranded.
+
+**Known and accepted at promotion time:**
+
+- The candidate's DB gate ran on PostgreSQL **17.11**; production Neon is **18.4**. That gap was
+  accepted rather than closed, with the pre-migration backup as the net. `0034` applied cleanly on
+  18.4 and postflight was exact, so the gap is now closed by observation rather than by test.
+- Both the settlement and orders hashes changed format. A manager holding an already-loaded review
+  of the `pending_review` shift will get `409 settlement_changed_since_review` and must reload.
+  Fail-safe direction, but it will happen.
+- `0034` is **forward-only**. Rollback before any close draft is written is the pre-migration
+  restore; after one is written it is a forward fix.
+
+**Still owed, and deliberately not folded into this release:** the Muhammad `01:18` order
+verification and the Thaer wrong-screen attachment recovery. Both are audited API operations, never
+direct SQL, and neither shift may be auto-approved.
+
+**Next:** the fixed-settlement path has still never executed against a real shift in production —
+the one `pending_review` shift is the first opportunity to verify a real immutable receipt and
+zeroed driver funds.
+
 ## 2026-08-16 — durable close draft staged, not deployed
 
 The source head now contains migration `0034` and the coordinated application changes for a
