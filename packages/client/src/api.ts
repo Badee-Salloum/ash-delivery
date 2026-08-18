@@ -602,16 +602,44 @@ export class ApiClient {
     const res = await fetch(`${this.baseUrl}${path}`, init)
 
     const text = await res.text()
-    const json = text ? (JSON.parse(text) as unknown) : null
+    /*
+     * Parse DEFENSIVELY, and never before the status has been read.
+     *
+     * A platform error page is HTML, not JSON. Vercel answers `FUNCTION_PAYLOAD_TOO_LARGE` (413)
+     * and `FUNCTION_INVOCATION_TIMEOUT` (504) that way, and so do proxies and SSO gates. Parsing
+     * first turned every one of them into a `SyntaxError` carrying no status and no code, which the
+     * driver's upload tile could only render as a bare «فشل الرفع» — indistinguishable from an
+     * offline phone. When the body is unreadable the status is the most useful thing we have, so
+     * carry it rather than discarding it with the exception.
+     */
+    let json: unknown = null
+    let parsed = true
+    if (text) {
+      try {
+        json = JSON.parse(text)
+      } catch {
+        parsed = false
+      }
+    }
 
     if (!res.ok) {
-      const err = (json ?? {}) as { error?: string; detail?: unknown }
+      const err = (parsed ? (json ?? {}) : {}) as { error?: string; detail?: unknown }
       // The session, not this request, is what failed. Announced once so the app can drop to the
       // login screen; the error still throws, because the caller's own state is still wrong.
       // `login` itself answers 401 on a bad password — that is a failed ATTEMPT, not a lapsed
       // session, and signing the user out of a screen he is not signed in to helps nobody.
       if (res.status === 401 && !path.endsWith('/auth/login')) this.onUnauthorized?.()
-      throw { status: res.status, error: err.error ?? 'unknown', detail: err.detail } satisfies ApiError
+      throw {
+        status: res.status,
+        // An unreadable body still names its status. `http_413` is something the UI can map to real
+        // words; a `SyntaxError` is not.
+        error: err.error ?? (parsed ? 'unknown' : `http_${res.status}`),
+        detail: parsed ? err.detail : text.slice(0, 200),
+      } satisfies ApiError
+    }
+    // A 2xx whose body is not JSON is its own failure and must not be handed back as `T`.
+    if (!parsed) {
+      throw { status: res.status, error: 'malformed_response', detail: text.slice(0, 200) } satisfies ApiError
     }
     return json as T
   }

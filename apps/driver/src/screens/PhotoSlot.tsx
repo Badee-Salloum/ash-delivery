@@ -301,8 +301,22 @@ export function PhotoSlot({
           const current = detail?.current ?? detail?.draft
           if (current) onCloseDraft?.(current)
           setUploadError(t.shift.draftChangedRetry)
+        } else if (apiError.error === 'upload_too_large') {
+          setUploadError(t.shift.uploadTooLarge)
+        } else if (apiError.error === 'not_an_image') {
+          setUploadError(t.shift.notAnImage)
         } else {
-          setUploadError(t.shift.uploadFailed)
+          /*
+           * Name the cause, even when we have no words for it.
+           *
+           * This branch used to collapse 413, 415, 504, 500, a privilege refusal and an offline
+           * phone into the same nine words. That is how a fleet-wide outage looked like one
+           * driver's bad photo for three days. A raw code is not pretty, but «فشل الرفع
+           * (insufficient_privilege)» is something a manager can read down the phone, and
+           * «(http_504)» tells him to wait rather than re-shoot.
+           */
+          const code = typeof apiError.error === 'string' && apiError.error !== 'unknown' ? apiError.error : null
+          setUploadError(code === null ? t.shift.uploadFailed : `${t.shift.uploadFailed} (${code})`)
         }
         if (terminalCandidateRejection) {
           // Retrying identical bytes cannot succeed. Remove only the rejected local generation;

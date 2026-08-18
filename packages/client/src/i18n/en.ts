@@ -335,6 +335,9 @@ export const en: Catalog = {
     staleEvidenceConfirm: 'This photo is {n} old. Confirm it belongs to this shift and upload it?',
     reusedEvidenceConfirm: 'This exact photo was already used for another evidence slot or shift. Confirm it belongs to this shift?',
     uploadFailed: 'Upload failed — tap to retry',
+    /** Fastify refuses these two in the content-type parser, before any handler sees the request. */
+    uploadTooLarge: 'The photo is too large — take it again at a lower quality',
+    notAnImage: 'That file is not an image — choose the photo again',
     retryUpload: 'Retry image upload',
     chooseAnotherImage: 'Choose a valid image',
     retryRead: 'Retry image reading',

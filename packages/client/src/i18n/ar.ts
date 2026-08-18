@@ -351,6 +351,9 @@ export const ar = {
     staleEvidenceConfirm: 'عمر هذه الصورة {n}. أكّد أنها تخص هذه النوبة ليتم رفعها.',
     reusedEvidenceConfirm: 'استُخدمت هذه الصورة نفسها في خانة إثبات أو نوبة أخرى. أكّد أنها تخص هذه النوبة.',
     uploadFailed: 'فشل الرفع — أعد المحاولة',
+    /** Fastify refuses these two in the content-type parser, before any handler sees the request. */
+    uploadTooLarge: 'الصورة كبيرة جداً — أعد التقاطها بجودة أقل',
+    notAnImage: 'هذا الملف ليس صورة — اختر الصورة من جديد',
     retryUpload: 'إعادة رفع الصورة',
     chooseAnotherImage: 'اختر صورة صحيحة',
     retryRead: 'إعادة قراءة الصورة',

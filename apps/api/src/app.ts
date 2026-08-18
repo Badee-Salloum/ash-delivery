@@ -181,6 +181,40 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       req.log.warn({ err }, 'refused: sealed week')
       return reply.code(409).send({ error: 'week_locked', detail: null })
     }
+    /*
+     * A framework refusal already carries its own status, and flattening it to 500 destroys the
+     * only signal the caller could act on.
+     *
+     * Fastify raises `FST_ERR_CTP_BODY_TOO_LARGE` (413) and `FST_ERR_CTP_INVALID_MEDIA_TYPE` (415)
+     * from the content-type parser, BEFORE any handler runs — which is also why `media.service`'s
+     * own `upload_too_large` and `not_an_image` are unreachable over HTTP. Those two were the whole
+     * signal for "your photo is too big" and "that is not an image", and both arrived as an
+     * anonymous «خطأ داخلي».
+     */
+    const framework = err as { statusCode?: unknown; code?: unknown }
+    if (typeof framework.statusCode === 'number' && framework.statusCode >= 400 && framework.statusCode < 500) {
+      const code =
+        framework.code === 'FST_ERR_CTP_BODY_TOO_LARGE'
+          ? 'upload_too_large'
+          : framework.code === 'FST_ERR_CTP_INVALID_MEDIA_TYPE'
+            ? 'not_an_image'
+            : 'invalid_request'
+      req.log.warn({ err }, 'refused before the handler')
+      return reply.code(framework.statusCode).send({ error: code, detail: null })
+    }
+    /*
+     * A privilege refusal is OUR bug, never the caller's, so it stays a 500 — but it is NAMED.
+     *
+     * An anonymous 42501 took every evidence upload in the fleet down for three days: `0028` makes
+     * `shift_media_attachment_history` append-only by REVOKEing UPDATE from `app_user`, and a
+     * `SELECT ... FOR UPDATE` against it asked for a lock the runtime role cannot hold. The only
+     * thing anyone could see was «فشل الرفع». Give the next one a name in the response and a
+     * dedicated log line, so it is one grep away instead of three days away.
+     */
+    if (typeof framework.code === 'string' && framework.code === '42501') {
+      req.log.error({ err }, 'insufficient database privilege — a statement asked for a grant the runtime role lacks')
+      return reply.code(500).send({ error: 'insufficient_privilege', detail: null })
+    }
     req.log.error({ err }, 'unhandled error')
     return reply.code(500).send({ error: 'internal_error' })
   })
