@@ -1157,8 +1157,25 @@ export class PgMediaRepo implements MediaRepo {
     options?: { lock?: boolean },
   ): Promise<AttachmentHistoryRecord | null> {
     if (options?.lock) {
-      // The caller already owns the close UOW transaction. Locking the content row prevents a
-      // concurrent shift from appending a new history generation between this re-check and attach.
+      /*
+       * Lock the CONTENT row, and never the history table.
+       *
+       * `shift_media_attachment_history` is append-only on purpose: `0028` REVOKEs UPDATE from
+       * `app_user`, and the runtime logs in as `ash_runtime`, which inherits it. Postgres requires
+       * UPDATE for `SELECT ... FOR UPDATE`, so locking THAT table here is `42501 permission denied`
+       * — an unhandled 500 the driver reads as a bare «فشل الرفع». Because this call sits between
+       * the media write and the attach, it took every evidence upload in the fleet down for three
+       * days without leaving a single diagnosable trace.
+       *
+       * Nothing is lost: the media row IS the serializer. A competing shift must lock the same
+       * content row before it can append a generation, so locking the log of what already
+       * happened only ever duplicated that guarantee.
+       *
+       * `end` reaches this inside the close unit of work. `start` does NOT run in a transaction at
+       * all — `uploadEvidence` passes `runCommit` only when a draft revision is present — so there
+       * the lock is released as the statement returns. Start slots are single-writer, so that is
+       * tolerable, but it is not the serialization this comment used to claim.
+       */
       await this.pool.query('SELECT id FROM media WHERE id = $1 FOR UPDATE', [mediaId])
     }
     const { rows } = await this.pool.query<Record<string, unknown>>(
@@ -1166,8 +1183,7 @@ export class PgMediaRepo implements MediaRepo {
          FROM shift_media_attachment_history
         WHERE media_id = $1
         ORDER BY id DESC
-        LIMIT 1
-        ${options?.lock ? 'FOR UPDATE' : ''}`,
+        LIMIT 1`,
       [mediaId],
     )
     const row = rows[0]
