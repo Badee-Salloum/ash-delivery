@@ -67,7 +67,7 @@ const schema = z.object({
    * model turns out to read Arabic-Indic digits worse than the last one. `BLOB_DRIVER` is the
    * pattern; this is the same shape for the same reason.
    */
-  OCR_DRIVER: z.enum(['none', 'openai']).default('none'),
+  OCR_DRIVER: z.enum(['none', 'openai', 'openrouter']).default('none'),
   OPENAI_API_KEY: z.string().optional(),
   /**
    * MEASURED, not chosen from a price page. 48 real screens, 311 hand-transcribed rows,
@@ -114,6 +114,32 @@ const schema = z.object({
   OPENAI_OCR_MODEL: z.string().default('gpt-5.4'),
   OPENAI_OCR_EFFORT: z.enum(['default', 'low', 'medium', 'high']).default('default'),
   OPENAI_OCR_VERBOSITY: z.enum(['default', 'low', 'medium', 'high']).default('default'),
+
+  /**
+   * OpenRouter, and why the reader moved here.
+   *
+   * MEASURED over the 66-image corpus against the 319-row answer key, with three full passes:
+   *
+   *              MISREAD   disagrees with ITSELF on money   cost/run
+   *   gemini-3.7-flash   5        0 of 3 passes             $0.180
+   *   gpt-5.4         26-34      14 of 48 images            $0.550
+   *
+   * The misread column is five to one, but the column that decided it is the second one. Asked the
+   * same image twice, gpt-5.4 read `-16500` where its own other pass read `-165.50`. A reader that
+   * changes its mind puts a number in the ledger that depends on which second the request fired,
+   * and BR1 balances a wrong fee against itself, so nobody ever finds it.
+   *
+   * THINKING IS DELIBERATELY UNCAPPED. Capping it at 256 tokens measured 3x faster and 40% cheaper
+   * with the same 5 misreads — and a second pass showed it disagreeing with itself twice in fifty
+   * images, once tenfold. The misread COUNT hid it because both passes scored 5 on different rows.
+   * There is no effort/verbosity knob on this path; `temperature: 0` is what was measured instead.
+   *
+   * `google/gemini-3.7-flash` is a ROUTED ALIAS, not a pinned endpoint. Upstreams can differ in
+   * quantisation, latency and retention, which is one more reason the request pins
+   * `provider.data_collection: 'deny'` (ASSUMPTIONS A-30).
+   */
+  OPENROUTER_API_KEY: z.string().optional(),
+  OPENROUTER_OCR_MODEL: z.string().default('google/gemini-3.7-flash'),
   /**
    * Strictly below the platform's function ceiling (`vercel.json`), so a slow read returns a clean
    * 504 instead of the socket dying at the same instant the platform gives up.
@@ -168,6 +194,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   if (config.OCR_DRIVER === 'openai' && !config.OPENAI_API_KEY) {
     throw new Error('OCR_DRIVER=openai requires OPENAI_API_KEY')
+  }
+
+  if (config.OCR_DRIVER === 'openrouter' && !config.OPENROUTER_API_KEY) {
+    throw new Error('OCR_DRIVER=openrouter requires OPENROUTER_API_KEY')
   }
 
   return config

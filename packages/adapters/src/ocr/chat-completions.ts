@@ -5,10 +5,17 @@
  * `scripts/build-api.mjs` inlines everything into a single 4 MB function file — the same argument
  * `S3BlobStore` makes for hand-rolling SigV4 rather than pulling the AWS SDK. `fetch` is enough.
  *
- * WHERE THIS RUNS MATTERS. OpenAI geo-blocks Syria, which is why `tools/gemini-relay/` exists at
- * all. The production API function runs in `iad1` (US East) because `vercel.json` sets no `regions`
- * key, so a call made from inside it originates in Virginia and needs no relay and no VPN. Move the
- * API to a region Syria cannot reach through and this adapter stops working with a confusing error.
+ * TWO PROVIDERS, ONE DIALECT. OpenAI and OpenRouter both speak Chat Completions, so every line of
+ * parsing, consensus, time-evidence and money verification below is shared unchanged. Only the
+ * endpoint and a handful of request-body fields differ, and those live in `PROVIDERS` rather than in
+ * conditionals scattered through `runPass`.
+ *
+ * WHERE THIS RUNS MATTERS — for `openai` specifically. OpenAI geo-blocks Syria, which is why
+ * `tools/gemini-relay/` exists at all. The production API function runs in `iad1` (US East) because
+ * `vercel.json` sets no `regions` key, so a call made from inside it originates in Virginia and needs
+ * no relay and no VPN. Move the API to a region Syria cannot reach through and the `openai` provider
+ * stops working with a confusing error. The paragraph stays because `OCR_DRIVER=openai` is the
+ * revert path; `scripts/vision-bench.mjs` measured that OpenRouter answers Damascus directly.
  *
  * Wallet money gets extra care. One live Yallago screenshot visibly printed `٢٧٩٫٥٠`, while one
  * otherwise well-formed model answer confidently transcribed both `printed` and `value` as
@@ -43,7 +50,24 @@ import {
   walletReadPrompts,
 } from './prompt.ts'
 
-export interface OpenAiOcrConfig {
+export type OcrProviderId = 'openai' | 'openrouter'
+
+/**
+ * What a failed pass looked like on the wire, for whoever is reading logs at 3 a.m.
+ *
+ * `kind: 'ceiling'` is the one that did not exist before. A completion that exhausts its token
+ * budget comes back EMPTY, which is byte-identical in the ledger to "the screen had nothing on it".
+ */
+export interface OcrProviderErrorEvent {
+  provider: OcrProviderId
+  pass: string
+  kind: 'http' | 'timeout' | 'ceiling'
+  status?: number
+  detail: string
+}
+
+export interface ChatCompletionsOcrConfig {
+  provider: OcrProviderId
   apiKey: string
   model: string
   effort: 'default' | 'low' | 'medium' | 'high'
@@ -52,9 +76,56 @@ export interface OpenAiOcrConfig {
   timeoutMs: number
   /** Overridable for tests; there is no other reason to change it. */
   baseUrl?: string
+  /** Structured sink for provider failures. Optional, so the adapter stays framework-free. */
+  onProviderError?: (event: OcrProviderErrorEvent) => void
 }
 
-const DEFAULT_BASE_URL = 'https://api.openai.com/v1/chat/completions'
+/**
+ * Everything that differs between providers, in one table rather than scattered conditionals.
+ * The shape is lifted from `scripts/vision-bench.mjs`, which measured both of these endpoints.
+ */
+const PROVIDERS: Record<
+  OcrProviderId,
+  {
+    endpoint: string
+    /**
+     * OpenAI 5.x REQUIRES `max_completion_tokens` and rejects `max_tokens`; OpenRouter takes the older
+     * name and may SILENTLY IGNORE the newer one. An ignored ceiling is not cosmetic — it removes
+     * the only bound on a model measured emitting 3.6x the output tokens.
+     */
+    tokenCeilingField: 'max_completion_tokens' | 'max_tokens'
+    /** The 5.x reasoning knobs. No other vendor accepts them. */
+    sendOpenAiReasoningKnobs: boolean
+    /** OpenAI 5.x answers 400 `unsupported_value` for ANY temperature. Gemini was measured at 0. */
+    temperature: number | null
+    /** OpenRouter-only routing controls, sent verbatim under `provider`. */
+    routing?: Record<string, unknown>
+  }
+> = {
+  openai: {
+    endpoint: 'https://api.openai.com/v1/chat/completions',
+    tokenCeilingField: 'max_completion_tokens',
+    sendOpenAiReasoningKnobs: true,
+    temperature: null,
+  },
+  openrouter: {
+    endpoint: 'https://openrouter.ai/api/v1/chat/completions',
+    tokenCeilingField: 'max_tokens',
+    sendOpenAiReasoningKnobs: false,
+    /*
+     * The benchmark that chose this reader sent `temperature: 0`. Omitting it would ship a reader
+     * nobody measured — the same argument the `effort: 'default'` note below makes.
+     */
+    temperature: 0,
+    /*
+     * These screenshots carry real customer addresses and metre-level GPS (ASSUMPTIONS A-30).
+     * OpenRouter is a BROKER: without this it may route to an upstream that retains prompts. It
+     * also constrains routing, so it must be present during any measurement whose result is meant
+     * to describe production.
+     */
+    routing: { data_collection: 'deny' },
+  },
+}
 
 /**
  * Reasoning tokens count against this, and a completion that hits it comes back EMPTY rather than
@@ -81,19 +152,32 @@ const ORDERS_TIME_MAX_COMPLETION_TOKENS = 2048
 // a verbose response; it merely leaves enough room to finish the classification.
 const ORDERS_SCREEN_KIND_MAX_COMPLETION_TOKENS = 512
 
-export class OpenAiOcrReader implements OcrReader {
+export class ChatCompletionsOcrReader implements OcrReader {
   readonly available = true
   readonly model: string
-  private readonly config: OpenAiOcrConfig
+  private readonly config: ChatCompletionsOcrConfig
+  private readonly endpoint: string
+  /** Host of the resolved endpoint, so a `baseUrl` override cannot falsify the cache signature. */
+  private readonly endpointHost: string
 
-  constructor(config: OpenAiOcrConfig) {
-    if (!config.apiKey) throw new Error('OpenAiOcrReader requires an OPENAI_API_KEY')
+  constructor(config: ChatCompletionsOcrConfig) {
+    // The adapter cannot know WHICH env var the caller read; `config.ts` owns that message.
+    if (!config.apiKey) throw new Error(config.provider + ' OCR reader requires an apiKey')
     this.config = config
     this.model = config.model
+    this.endpoint = config.baseUrl ?? PROVIDERS[config.provider].endpoint
+    this.endpointHost = new URL(this.endpoint).host
   }
 
   cacheSignature(field: OcrField): string {
-    const prefix = `openai:${this.model}:${this.config.effort}:${this.config.verbosity}`
+    /*
+     * The prefix is DERIVED. It used to be the literal string `openai`, which meant the persisted
+     * `ocr_reads.cache_signature` could not distinguish two providers running the same model name,
+     * so a provider swap — or the revert — could serve rows produced by the other one. The host is
+     * here as well as the provider id because `baseUrl` is overridable, and a signature that can be
+     * falsified is not an identity.
+     */
+    const prefix = `${this.config.provider}@${this.endpointHost}:${this.model}:${this.config.effort}:${this.config.verbosity}`
     if (field === 'orders') {
       const moneyTimeout = Math.min(this.config.timeoutMs, ORDERS_MONEY_TIMEOUT_MS)
       const timeTimeout = Math.min(this.config.timeoutMs, ORDERS_TIME_TIMEOUT_MS)
@@ -106,6 +190,18 @@ export class OpenAiOcrReader implements OcrReader {
       return `${prefix}:wallet-consensus-v1:money-validation-v2:${budget}`
     }
     return `${prefix}:${field}-prompt-v1:validation-v1:${budget}`
+  }
+
+  /**
+   * Send a failure to the log sink and hand back the same string for the durable record.
+   *
+   * TWO channels on purpose. The sink is for whoever is watching right now; the returned string
+   * rides into `ocr_reads.result` jsonb, which is what is still there three days later when
+   * somebody finally asks why the reads stopped.
+   */
+  private reportProviderError(event: Omit<OcrProviderErrorEvent, 'provider'>): string {
+    this.config.onProviderError?.({ ...event, provider: this.config.provider })
+    return event.detail
   }
 
   async read(request: { field: OcrField; bytes: Uint8Array; mimeType: string }): Promise<OcrReading> {
@@ -184,9 +280,11 @@ export class OpenAiOcrReader implements OcrReader {
     prompt: string,
     options: PassOptions = {},
   ): Promise<ModelPass> {
+    const provider = PROVIDERS[this.config.provider]
+    const pass = options.schemaName ?? request.field
     let json: OpenAiResponse
     try {
-      const res = await fetch(this.config.baseUrl ?? DEFAULT_BASE_URL, {
+      const res = await fetch(this.endpoint, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -206,7 +304,16 @@ export class OpenAiOcrReader implements OcrReader {
               ],
             },
           ],
-          max_completion_tokens: options.maxCompletionTokens ?? MAX_COMPLETION_TOKENS,
+          /*
+           * ONE ceiling field, named by the provider. Sending both would 400 on OpenAI, which
+           * rejects `max_tokens`; sending only the newer name risks OpenRouter ignoring it
+           * silently, which leaves an uncapped reasoner unbounded. Neither is acceptable, so the
+           * name comes from `PROVIDERS` and the truncation probe in the pre-flight bench proves the
+           * chosen one is actually honoured.
+           */
+          [provider.tokenCeilingField]: options.maxCompletionTokens ?? MAX_COMPLETION_TOKENS,
+          ...(provider.temperature === null ? {} : { temperature: provider.temperature }),
+          ...(provider.routing === undefined ? {} : { provider: provider.routing }),
           /*
            * `default` OMITS the field, and that is a measured setting rather than a lazy one.
            *
@@ -215,9 +322,18 @@ export class OpenAiOcrReader implements OcrReader {
            * reasoning the measurement never included, so the price would not be the price that was
            * measured. A setting and a model are a matched pair here; shipping one without the other
            * is shipping an unmeasured reader.
+           *
+           * Only OpenAI accepts these at all. For OpenRouter the equivalent knob would be a
+           * `reasoning` object, and it is deliberately never sent: uncapped thinking is what was
+           * measured, and a 256-token cap was measured introducing two money self-disagreements in
+           * fifty images, one of them tenfold.
            */
-          ...(this.config.effort === 'default' ? {} : { reasoning_effort: this.config.effort }),
-          ...(this.config.verbosity === 'default' ? {} : { verbosity: this.config.verbosity }),
+          ...(provider.sendOpenAiReasoningKnobs && this.config.effort !== 'default'
+            ? { reasoning_effort: this.config.effort }
+            : {}),
+          ...(provider.sendOpenAiReasoningKnobs && this.config.verbosity !== 'default'
+            ? { verbosity: this.config.verbosity }
+            : {}),
           response_format: {
             type: 'json_schema',
             json_schema: {
@@ -242,27 +358,71 @@ export class OpenAiOcrReader implements OcrReader {
       })
 
       if (!res.ok) {
-        // Never echo the body: it can include provider diagnostics and this request has a bearer
-        // credential. The status is enough to distinguish timeout from general unavailability.
-        return failedPass(res.status === 408 || res.status === 504 ? 'timeout' : 'unavailable')
+        /*
+         * The body IS read now, redacted and capped. The old comment worried about echoing a bearer
+         * credential, but a response body cannot contain the request's own Authorization header —
+         * the real hazards are an upstream that echoes the request (which carries the base64
+         * screenshot) and a key quoted back inside an error. `safeProviderDetail` handles both.
+         *
+         * Without this, a provider rejecting one body field is indistinguishable from an outage,
+         * and this repository has already lost three days to an error swallowed exactly that way.
+         */
+        const body = await res.text().catch(() => '')
+        const detail = this.reportProviderError({
+          kind: 'http',
+          pass,
+          status: res.status,
+          detail: `http ${res.status} ${pass}: ${safeProviderDetail(body, this.config.apiKey)}`,
+        })
+        return failedPass(res.status === 408 || res.status === 504 ? 'timeout' : 'unavailable', 0, 0, detail)
       }
       json = (await res.json()) as OpenAiResponse
     } catch (err) {
       const name = (err as { name?: string })?.name
-      return failedPass(name === 'TimeoutError' || name === 'AbortError' ? 'timeout' : 'unavailable')
+      const timedOut = name === 'TimeoutError' || name === 'AbortError'
+      const budget = options.timeoutMs ?? this.config.timeoutMs
+      const detail = this.reportProviderError({
+        kind: timedOut ? 'timeout' : 'http',
+        pass,
+        detail: timedOut
+          ? `timeout ${budget}ms ${pass}`
+          : `transport ${pass}: ${safeProviderDetail(String((err as { message?: string })?.message ?? name ?? ''), this.config.apiKey)}`,
+      })
+      return failedPass(timedOut ? 'timeout' : 'unavailable', 0, 0, detail)
     }
 
     const tokensIn = json.usage?.prompt_tokens ?? 0
     const tokensOut = json.usage?.completion_tokens ?? 0
+    const ceiling = options.maxCompletionTokens ?? MAX_COMPLETION_TOKENS
     const choice = json.choices?.[0]
-    if (!choice) return failedPass('unavailable', tokensIn, tokensOut)
-    if (choice.message?.refusal) return failedPass('refused', tokensIn, tokensOut)
-    if (choice.finish_reason && choice.finish_reason !== 'stop') {
-      return failedPass('no_fields', tokensIn, tokensOut)
+    if (!choice) {
+      return failedPass('unavailable', tokensIn, tokensOut, this.reportProviderError({
+        kind: 'http',
+        pass,
+        detail: `no choice in response ${pass}`,
+      }))
     }
+    /*
+     * OpenAI-only field. OpenRouter expresses a refusal as prose in `content`, which fails the JSON
+     * parse below and arrives as `no_fields` — the same outcome by a different road. Left in place
+     * because `OCR_DRIVER=openai` is the revert path.
+     */
+    if (choice.message?.refusal) return failedPass('refused', tokensIn, tokensOut)
 
     const text = choice.message?.content
-    if (!text) return failedPass('no_fields', tokensIn, tokensOut)
+    if ((choice.finish_reason && choice.finish_reason !== 'stop') || !text) {
+      /*
+       * THE SILENT ONE. A completion that exhausts its token budget comes back empty, and an empty
+       * completion is byte-identical, in `ocr_reads`, to "the driver photographed a blank screen".
+       * Naming it here is what makes a ceiling that is too small for a new model diagnosable in the
+       * ledger instead of looking like drivers taking bad photographs.
+       */
+      return failedPass('no_fields', tokensIn, tokensOut, this.reportProviderError({
+        kind: 'ceiling',
+        pass,
+        detail: `ceiling ${pass}: finish_reason=${choice.finish_reason ?? 'none'}, ${tokensOut}/${ceiling} out`,
+      }))
+    }
 
     let parsed: ParsedScreen
     try {
@@ -276,8 +436,30 @@ export class OpenAiOcrReader implements OcrReader {
   }
 }
 
-function failedPass(reason: OcrFailure, tokensIn = 0, tokensOut = 0): ModelPass {
-  return { result: { ok: false, reason }, raw: null, tokensIn, tokensOut }
+function failedPass(reason: OcrFailure, tokensIn = 0, tokensOut = 0, detail?: string): ModelPass {
+  return {
+    result: { ok: false, reason, ...(detail === undefined ? {} : { detail }) },
+    raw: null,
+    tokensIn,
+    tokensOut,
+  }
+}
+
+/**
+ * Everything a provider said, with everything dangerous taken out.
+ *
+ * Two hazards, in order of likelihood: an upstream that echoes the request back (which carries the
+ * base64 screenshot — customer addresses and metre-level GPS), and an API key quoted inside an
+ * error. Both are removed by construction rather than by hoping the provider is discreet.
+ */
+export function safeProviderDetail(raw: string, apiKey: string): string {
+  let out = String(raw ?? '').slice(0, 2048)
+  out = out.replace(/data:[^;,\s"']+;base64,[A-Za-z0-9+/=]+/g, '[image]')
+  if (apiKey) out = out.split(apiKey).join('[redacted-key]')
+  // Shape-based sweep, for a key that is not the one we hold (a proxy's, or a rotated one).
+  out = out.replace(/\b(?:sk|sk-proj|sk-or|sk-or-v1|or)-[A-Za-z0-9_-]{8,}/g, '[redacted-key]')
+  out = out.replace(/\s+/g, ' ').trim()
+  return out.length > 200 ? out.slice(0, 197) + '...' : out
 }
 
 function parsedScreenKindResult(parsed: ParsedScreen): OcrResult {

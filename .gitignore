@@ -31,3 +31,6 @@ backups/
 # Kept OUTSIDE the repo (~/Desktop/ash-ocr-runs); this is belt and braces.
 ash-ocr-runs/
 tools/gemini-relay/public/
+
+# Claude Code local settings (personal; holds deploy rights)
+.claude/settings.local.json

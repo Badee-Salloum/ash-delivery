@@ -65,3 +65,46 @@ describe('bcrypt hasher (SRS §7)', () => {
     expect(await hasher.verify('anything', '')).toBe(false)
   })
 })
+
+describe('the cloud OCR reader is configured, not assumed', () => {
+  // Until this suite existed, NOTHING covered the OCR config: not the key guard, not the model
+  // defaults. A model default that no test pins is a default that drifts, and the model is the
+  // one setting that decides how often a wrong number lands in the ledger.
+  it('defaults to the kill switch, so a deploy that forgets the env var degrades instead of erroring', () => {
+    const c = loadConfig({} as NodeJS.ProcessEnv)
+    expect(c.OCR_DRIVER).toBe('none')
+  })
+
+  it('pins the measured model for each provider', () => {
+    const c = loadConfig({} as NodeJS.ProcessEnv)
+    expect(c.OPENAI_OCR_MODEL).toBe('gpt-5.4')
+    expect(c.OPENROUTER_OCR_MODEL).toBe('google/gemini-3.7-flash')
+    // Effort and verbosity are a matched pair with the model; `default` omits both fields.
+    expect(c.OPENAI_OCR_EFFORT).toBe('default')
+    expect(c.OPENAI_OCR_VERBOSITY).toBe('default')
+  })
+
+  it('refuses each driver without its OWN key, naming the variable an operator must set', () => {
+    // Naming the right variable matters: the two providers use different keys, and a boot error
+    // that names the wrong one sends whoever is on call to the wrong place.
+    expect(() => loadConfig({ OCR_DRIVER: 'openai' } as NodeJS.ProcessEnv)).toThrow(/OPENAI_API_KEY/)
+    expect(() => loadConfig({ OCR_DRIVER: 'openrouter' } as NodeJS.ProcessEnv)).toThrow(/OPENROUTER_API_KEY/)
+  })
+
+  it('accepts each driver with its own key', () => {
+    expect(loadConfig({ OCR_DRIVER: 'openai', OPENAI_API_KEY: 'sk-x' } as NodeJS.ProcessEnv).OCR_DRIVER).toBe('openai')
+    expect(
+      loadConfig({ OCR_DRIVER: 'openrouter', OPENROUTER_API_KEY: 'sk-or-x' } as NodeJS.ProcessEnv).OCR_DRIVER,
+    ).toBe('openrouter')
+  })
+
+  it('rejects an unknown driver rather than silently reading nothing', () => {
+    expect(() => loadConfig({ OCR_DRIVER: 'gemini' } as NodeJS.ProcessEnv)).toThrow(/OCR_DRIVER/)
+  })
+
+  it('keeps the read timeout strictly below the 60s platform ceiling in vercel.json', () => {
+    // Set the two equal and the socket dies at the same instant the platform gives up, turning a
+    // clean timeout into an opaque transport error nobody can diagnose from a log line.
+    expect(loadConfig({} as NodeJS.ProcessEnv).OCR_TIMEOUT_MS).toBeLessThan(60_000)
+  })
+})

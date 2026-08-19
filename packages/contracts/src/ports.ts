@@ -141,6 +141,15 @@ export type OcrResult =
       /** Paid provider attempts represented by this cached result. Missing legacy values mean 1. */
       attemptCount?: number
       reason: OcrFailure
+      /**
+       * What the provider actually said, redacted and capped — never shown to a driver.
+       *
+       * `reason` is a vocabulary the UI can translate; this is the sentence an engineer needs at
+       * 3 a.m. It rides into `ocr_reads.result` jsonb with no migration, so a failure is still
+       * legible days later. Its most important job is distinguishing a completion truncated by its
+       * token ceiling from a screen that genuinely had nothing on it: both are `no_fields`.
+       */
+      detail?: string
     }
 
 /**

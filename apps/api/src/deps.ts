@@ -1,7 +1,8 @@
 import { LocalDiskBlobStore, S3BlobStore, VercelBlobStore, assertDurableBlobStore } from '@ash/adapters/blob'
 import { MemoryBlobStore, createMemoryDeps } from '@ash/adapters/memory'
 import { cipherFromKey } from '@ash/adapters/crypto'
-import { MemoryOcrReader, OpenAiOcrReader } from '@ash/adapters/ocr'
+import { MemoryOcrReader, ChatCompletionsOcrReader } from '@ash/adapters/ocr'
+import type { OcrProviderErrorEvent } from '@ash/adapters/ocr'
 import type { BlobStore, Deps, OcrReader } from '@ash/contracts'
 import {
   PgAuditRepo,
@@ -82,14 +83,39 @@ function buildBlobStore(config: Config): BlobStore {
  * so a deploy that forgets the env var degrades to the on-device reader rather than to an error.
  */
 function buildOcrReader(config: Config): OcrReader {
+  /*
+   * One structured line per failed pass. The durable copy rides into `ocr_reads.result.detail`;
+   * this is the live one, and it is the difference between "reads stopped" and "the screen-kind
+   * pass is exhausting its 512-token ceiling".
+   */
+  const onProviderError = (event: OcrProviderErrorEvent): void => {
+    console.warn(JSON.stringify({ event: 'ocr_provider_error', ...event }))
+  }
   switch (config.OCR_DRIVER) {
     case 'openai':
-      return new OpenAiOcrReader({
+      return new ChatCompletionsOcrReader({
+        provider: 'openai',
         apiKey: config.OPENAI_API_KEY!,
         model: config.OPENAI_OCR_MODEL,
         effort: config.OPENAI_OCR_EFFORT,
         verbosity: config.OPENAI_OCR_VERBOSITY,
         timeoutMs: config.OCR_TIMEOUT_MS,
+        onProviderError,
+      })
+    case 'openrouter':
+      /*
+       * Effort and verbosity are OpenAI-only and are pinned to `default` here rather than plumbed:
+       * the adapter refuses to send them on this provider anyway, and a config value that cannot
+       * take effect is a lie waiting to be believed.
+       */
+      return new ChatCompletionsOcrReader({
+        provider: 'openrouter',
+        apiKey: config.OPENROUTER_API_KEY!,
+        model: config.OPENROUTER_OCR_MODEL,
+        effort: 'default',
+        verbosity: 'default',
+        timeoutMs: config.OCR_TIMEOUT_MS,
+        onProviderError,
       })
     case 'none':
       return new MemoryOcrReader()

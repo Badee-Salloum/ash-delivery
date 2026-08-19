@@ -117,6 +117,18 @@ const RAW = flag('raw')
 const MAX_OUT = Number(arg('max-out', '32768'))
 const BATCH = Number(arg('batch', '8'))
 const PASS = arg('pass', '1')
+/*
+ * Cap the model's THINKING budget, in tokens. Empty = leave it to the model.
+ *
+ * Gemini's latency is dominated by output, and OpenRouter bills `internal_reasoning` at the output
+ * rate — so an uncapped reasoner costs twice: seconds on the driver's locked screen and money.
+ * Capping it at 256 measured 3x faster on orders pages over 5 real screens. Whether it stays
+ * ACCURATE is exactly what a full corpus run is for: the same intervention on gpt-5.5 (medium->low)
+ * bought seven more wrong numbers and three hundredfold errors.
+ *
+ * `--reasoning=0` is not "off": some endpoints refuse to disable reasoning outright.
+ */
+const REASONING = arg('reasoning', '')
 const DRY = flag('dry')
 
 /**
@@ -473,6 +485,7 @@ const PROVIDERS = {
       // Qwen has no `reasoning_effort` and no `verbosity`; the reasoning knob here is which MODEL
       // you pick (`-thinking` vs `-instruct`). Temperature 0 IS accepted, unlike OpenAI 5.x.
       temperature: 0,
+      ...(REASONING === '' ? {} : { reasoning: { max_tokens: Number(REASONING) } }),
       ...(RAW ? {} : { response_format: { type: 'json_schema', json_schema: { name: 'screens', strict: true, schema: strictify(SCHEMA) } } }),
     }),
     extract: (json) => {
@@ -690,7 +703,7 @@ async function main() {
    * lands one level deeper than every scorer looks for it, and the pass appears to have produced
    * nothing. Flattened to `qwen__qwen3-vl-…`, which `ocr-compare.mjs` reverses.
    */
-  const runId = `${quotaDay()}-${MODEL.replace(/\//g, '__')}-p${PASS}`
+  const runId = `${quotaDay()}-${MODEL.replace(/\//g, '__').replace(/:/g, '~')}-p${PASS}`
   const runDir = join(OUT, runId)
   const rawDir = join(runDir, 'raw')
   const imgDir = join(runDir, 'images')

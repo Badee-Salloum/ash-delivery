@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  OpenAiOcrReader,
+  ChatCompletionsOcrReader,
   normalizePrintedOrderTime,
   parsedResult,
   resolveSamePageOrderTimes,
+  safeProviderDetail,
+  type OcrProviderErrorEvent,
   type ParsedRow,
   type ParsedScreen,
-} from '../src/ocr/openai.ts'
+} from '../src/ocr/chat-completions.ts'
 
 const walletRow = (
   printed: string,
@@ -41,8 +43,9 @@ function completion(parsed: ParsedScreen, tokensIn = 10, tokensOut = 5): Respons
   )
 }
 
-const reader = (timeoutMs = 1_000): OpenAiOcrReader =>
-  new OpenAiOcrReader({
+const reader = (timeoutMs = 1_000): ChatCompletionsOcrReader =>
+  new ChatCompletionsOcrReader({
+    provider: 'openai',
     apiKey: 'test-only',
     model: 'gpt-test',
     effort: 'medium',
@@ -50,6 +53,38 @@ const reader = (timeoutMs = 1_000): OpenAiOcrReader =>
     timeoutMs,
     baseUrl: 'https://ocr.test/read',
   })
+
+/** Same reader, real default endpoints, so the request body and the signature can be asserted. */
+const providerReader = (
+  provider: 'openai' | 'openrouter',
+  onProviderError?: (event: OcrProviderErrorEvent) => void,
+): ChatCompletionsOcrReader =>
+  new ChatCompletionsOcrReader({
+    provider,
+    apiKey: 'sk-or-v1-testkeytestkeytestkey',
+    model: 'model-under-test',
+    effort: 'medium',
+    verbosity: 'medium',
+    timeoutMs: 1_000,
+    ...(onProviderError === undefined ? {} : { onProviderError }),
+  })
+
+/**
+ * Stub `fetch` and record every request, so a test can assert on the body that actually went out.
+ *
+ * Reading them back off `vi.fn().mock.calls` does not typecheck — a stub declaring no parameters
+ * types its calls as an empty tuple — and casting around that would only hide the next mistake.
+ */
+function recordFetch(reply: () => Response): { urls: string[]; bodies: Record<string, unknown>[] } {
+  const urls: string[] = []
+  const bodies: Record<string, unknown>[] = []
+  vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+    urls.push(String(url))
+    bodies.push(JSON.parse(String(init.body)) as Record<string, unknown>)
+    return reply()
+  })
+  return { urls, bodies }
+}
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -104,7 +139,7 @@ describe('wallet AI consensus', () => {
     vi.stubGlobal('fetch', vi.fn(async () => completion(replies[call++]!)))
 
     const reading = await reader().read({ field: 'wallet', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
-    expect(reading.result).toEqual({ ok: false, reason: 'no_fields' })
+    expect(reading.result).toMatchObject({ ok: false, reason: 'no_fields' })
   })
 
   it('survives one failed provider pass when the other two AI passes agree', async () => {
@@ -257,7 +292,7 @@ describe('printed order time normalization', () => {
 describe('orders fast financial pass', () => {
   it('versions the cache by model configuration and all orders pass versions and budgets', () => {
     expect(reader().cacheSignature('orders')).toBe(
-      'openai:gpt-test:medium:medium:orders-screen-kind-v1:orders-money-v4:orders-time-v3:orders-route-v3:money-authority-v1:money-validation-v2:time-validation-v3:position-evidence-v1:cancellation-consensus-v1:kind-timeout-1000:money-timeout-1000:time-timeout-1000:route-timeout-1000:route-grace-12000:kind-max-512:money-max-4096:time-max-2048:route-max-8192',
+      'openai@ocr.test:gpt-test:medium:medium:orders-screen-kind-v1:orders-money-v4:orders-time-v3:orders-route-v3:money-authority-v1:money-validation-v2:time-validation-v3:position-evidence-v1:cancellation-consensus-v1:kind-timeout-1000:money-timeout-1000:time-timeout-1000:route-timeout-1000:route-grace-12000:kind-max-512:money-max-4096:time-max-2048:route-max-8192',
     )
     expect(reader(2_000).cacheSignature('orders')).not.toBe(reader().cacheSignature('orders'))
     expect(reader(2_000).cacheSignature('wallet')).not.toBe(reader().cacheSignature('wallet'))
@@ -293,7 +328,7 @@ describe('orders fast financial pass', () => {
 
     const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
 
-    expect(reading.result).toEqual({ ok: false, reason: 'no_fields' })
+    expect(reading.result).toMatchObject({ ok: false, reason: 'no_fields' })
   })
 
   it('publishes agreed marker-less evidence and candidates without guessing AM or PM', async () => {
@@ -831,7 +866,7 @@ describe('orders fast financial pass', () => {
 
     const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
 
-    expect(reading.result).toEqual({ ok: false, reason: 'unavailable' })
+    expect(reading.result).toMatchObject({ ok: false, reason: 'unavailable' })
   })
 
   it('does not publish route-only rows after a money timeout', async () => {
@@ -851,6 +886,153 @@ describe('orders fast financial pass', () => {
 
     const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
 
-    expect(reading.result).toEqual({ ok: false, reason: 'unavailable' })
+    expect(reading.result).toMatchObject({ ok: false, reason: 'unavailable' })
+  })
+})
+
+describe('provider identity and request shape', () => {
+  it('gives two providers DIFFERENT cache signatures for every field', () => {
+    // The signature is persisted to `ocr_reads.cache_signature` and IS the cache identity. It used
+    // to begin with the literal string `openai`, so two providers running the same model name were
+    // indistinguishable and a swap — or the revert — could serve rows the other one produced.
+    for (const field of ['orders', 'wallet', 'bms', 'odometer', 'payments_log'] as const) {
+      const openai = providerReader('openai').cacheSignature(field)
+      const openrouter = providerReader('openrouter').cacheSignature(field)
+      expect(openai).not.toBe(openrouter)
+      expect(openai.startsWith('openai@api.openai.com:')).toBe(true)
+      expect(openrouter.startsWith('openrouter@openrouter.ai:')).toBe(true)
+    }
+  })
+
+  it('pins each provider default endpoint', async () => {
+    for (const [provider, host] of [
+      ['openai', 'https://api.openai.com/v1/chat/completions'],
+      ['openrouter', 'https://openrouter.ai/api/v1/chat/completions'],
+    ] as const) {
+      const sent = recordFetch(() => completion(screen(walletRow('1', '1'))))
+      await providerReader(provider).read({ field: 'odometer', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+      expect(sent.urls[0]).toBe(host)
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('names the token ceiling the way each provider expects, and never both', async () => {
+    // OpenAI rejects `max_tokens`; OpenRouter may silently IGNORE `max_completion_tokens`, which
+    // would leave an uncapped reasoner with no bound at all.
+    const openai = recordFetch(() => completion(screen(walletRow('1', '1'))))
+    await providerReader('openai').read({ field: 'odometer', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+    expect(openai.bodies[0]).toHaveProperty('max_completion_tokens', 8192)
+    expect(openai.bodies[0]).not.toHaveProperty('max_tokens')
+    vi.unstubAllGlobals()
+
+    const openrouter = recordFetch(() => completion(screen(walletRow('1', '1'))))
+    await providerReader('openrouter').read({ field: 'odometer', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+    expect(openrouter.bodies[0]).toHaveProperty('max_tokens', 8192)
+    expect(openrouter.bodies[0]).not.toHaveProperty('max_completion_tokens')
+  })
+
+  it('sends temperature 0 and denies data collection on openrouter, and no OpenAI-only knobs', async () => {
+    const sent = recordFetch(() => completion(screen(walletRow('1', '1'))))
+    await providerReader('openrouter').read({ field: 'odometer', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+    const body = sent.bodies[0]!
+    // Measured at temperature 0; omitting it would ship a reader nobody benchmarked.
+    expect(body).toHaveProperty('temperature', 0)
+    // The photos carry customer addresses and metre-level GPS — ASSUMPTIONS A-30.
+    expect(body).toHaveProperty('provider', { data_collection: 'deny' })
+    // Thinking stays UNCAPPED: a 256 cap measured two money self-disagreements in fifty images.
+    expect(body).not.toHaveProperty('reasoning')
+    expect(body).not.toHaveProperty('reasoning_effort')
+    expect(body).not.toHaveProperty('verbosity')
+  })
+
+  it('keeps sending the OpenAI reasoning knobs on the openai provider', async () => {
+    const sent = recordFetch(() => completion(screen(walletRow('1', '1'))))
+    await providerReader('openai').read({ field: 'odometer', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+    expect(sent.bodies[0]).toMatchObject({ reasoning_effort: 'medium', verbosity: 'medium' })
+    expect(sent.bodies[0]).not.toHaveProperty('temperature')
+    expect(sent.bodies[0]).not.toHaveProperty('provider')
+  })
+})
+
+describe('a failed pass says what happened', () => {
+  it('distinguishes a token-ceiling truncation from a blank screen', async () => {
+    // Both are `no_fields`. Before this, a ceiling too small for a new model was indistinguishable
+    // in the ledger from drivers photographing nothing — which is how an outage hides for days.
+    const events: OcrProviderErrorEvent[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ finish_reason: 'length', message: { content: '', refusal: null } }],
+            usage: { prompt_tokens: 10, completion_tokens: 8192 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      ),
+    )
+    const reading = await providerReader('openrouter', (e) => events.push(e)).read({
+      field: 'odometer',
+      bytes: new Uint8Array([1]),
+      mimeType: 'image/jpeg',
+    })
+    expect(reading.result).toMatchObject({ ok: false, reason: 'no_fields' })
+    expect((reading.result as { detail?: string }).detail).toContain('ceiling')
+    expect((reading.result as { detail?: string }).detail).toContain('finish_reason=length')
+    expect((reading.result as { detail?: string }).detail).toContain('8192/8192')
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ provider: 'openrouter', kind: 'ceiling' })
+  })
+
+  it('carries the provider error code on a 4xx, and fires the sink exactly once', async () => {
+    const events: OcrProviderErrorEvent[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ error: { code: 'invalid_request', message: 'bad field xyz' } }), {
+          status: 400,
+        }),
+      ),
+    )
+    const reading = await providerReader('openrouter', (e) => events.push(e)).read({
+      field: 'odometer',
+      bytes: new Uint8Array([1]),
+      mimeType: 'image/jpeg',
+    })
+    expect(reading.result).toMatchObject({ ok: false, reason: 'unavailable' })
+    expect((reading.result as { detail?: string }).detail).toContain('http 400')
+    expect((reading.result as { detail?: string }).detail).toContain('bad field xyz')
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ kind: 'http', status: 400 })
+  })
+
+  it('never fires the sink on a good read', async () => {
+    const events: OcrProviderErrorEvent[] = []
+    vi.stubGlobal('fetch', vi.fn(async () => completion(screen(walletRow('1', '1')))))
+    await providerReader('openrouter', (e) => events.push(e)).read({
+      field: 'odometer',
+      bytes: new Uint8Array([1]),
+      mimeType: 'image/jpeg',
+    })
+    expect(events).toHaveLength(0)
+  })
+})
+
+describe('safeProviderDetail', () => {
+  it('removes the api key, by value and by shape', () => {
+    const key = 'sk-or-v1-abcdef0123456789'
+    expect(safeProviderDetail('auth failed for ' + key, key)).not.toContain(key)
+    // A key that is NOT the one we hold — a proxy's, or one already rotated.
+    expect(safeProviderDetail('upstream said sk-proj-ZZZZZZZZZZZZ', 'other')).not.toContain('sk-proj-ZZZZ')
+  })
+
+  it('removes an echoed screenshot rather than logging customer addresses', () => {
+    const out = safeProviderDetail('rejected: data:image/jpeg;base64,AAAABBBBCCCCDDDD/w== end', 'k')
+    expect(out).toContain('[image]')
+    expect(out).not.toContain('AAAABBBBCCCC')
+  })
+
+  it('caps the length so one provider cannot flood the ledger', () => {
+    expect(safeProviderDetail('x'.repeat(5_000), 'k').length).toBeLessThanOrEqual(200)
   })
 })

@@ -474,31 +474,79 @@ re-encrypt procedure is a follow-up). The same mechanism is intended to wrap the
 (`mfa_secret_enc`) — deferred until it can be exercised against real Postgres, so live 2FA is not
 put at risk by an untested at-rest change.
 
-**`OPENAI_API_KEY` (cloud OCR).** Read by the API only when `OCR_DRIVER=openai`; the boot refuses
-that combination without it, naming the variable. Set it in the Vercel project, never in the repo.
+**`OPENAI_API_KEY` / `OPENROUTER_API_KEY` (cloud OCR).** Each is read only by its own driver —
+`OCR_DRIVER=openai` and `OCR_DRIVER=openrouter` respectively — and the boot refuses either
+combination without its key, naming the variable an operator must actually set. Both live in the
+Vercel project, never in the repo.
 
 ---
 
 ## 7a. The cloud OCR reader — turning it on, watching it, turning it off
 
-**Turning it on** (three env vars on the `ash-api` Vercel project, then redeploy):
+**Turning it on** (env vars on the `ash-api` Vercel project, then redeploy):
+
+```
+OCR_DRIVER=openrouter
+OPENROUTER_API_KEY=sk-or-…
+OCR_MAX_READS_PER_SHIFT=15        # optional; this is the default
+```
+
+`OPENROUTER_OCR_MODEL` defaults to **google/gemini-3.7-flash** with thinking **uncapped**. Measured
+over 66 real screens and 319 hand-transcribed rows, three full passes:
+
+| reader | MISREAD | disagrees with ITSELF on money | cost/run |
+| --- | --- | --- | --- |
+| `google/gemini-3.7-flash` | **5** | **0 of 3 passes** | $0.180 |
+| `gpt-5.4` | 26–34 | **14 of 48 images** | $0.550 |
+
+The second column is the one that decided it. Asked the same image twice, gpt-5.4 read `-16500`
+where its own other pass read `-165.50`.
+
+**Do not cap the thinking.** `reasoning.max_tokens=256` measured 3× faster, 40% cheaper and the
+*same* 5 misreads — then a second pass showed it disagreeing with itself twice in fifty images, once
+tenfold. The misread COUNT hid it because both passes scored 5 on different rows. Effort and
+verbosity are OpenAI-only and are not sent on this path; `temperature: 0` is what was measured.
+
+**The revert reader**, still one env var away and still measured:
 
 ```
 OCR_DRIVER=openai
 OPENAI_API_KEY=sk-…
-OCR_MAX_READS_PER_SHIFT=15        # optional; this is the default
+# OPENAI_OCR_MODEL / _EFFORT / _VERBOSITY default to gpt-5.4 / default / default
 ```
 
-`OPENAI_OCR_MODEL` / `_EFFORT` / `_VERBOSITY` default to **gpt-5.5 / medium / medium**. Those three
-were measured together over 48 real screens and 311 hand-transcribed rows. **Do not change one
-without re-running the benchmark** — dropping effort to `low` cut reasoning tokens 16× and cost
-seven more wrong numbers and three more hundredfold errors:
+Because the provider is now part of the cache signature, **no Gemini-produced row can ever be served
+to the OpenAI reader**, or the reverse.
 
 ```bash
-node scripts/vision-bench.mjs --provider=openai --model=gpt-5.5 --effort=medium --verbosity=medium
+node scripts/vision-bench.mjs --provider=openrouter --model=google/gemini-3.7-flash
 node scripts/ocr-compare.mjs                 # the scoreboard; MISREAD is the only column that decides
 node scripts/ocr-failures.mjs --run=<folder>  # every wrong row, with the glyphs it claims to have seen
 ```
+
+**Which reader produced a row**, now unambiguous:
+
+```sql
+SELECT split_part(cache_signature, ':', 1) AS reader, count(*)
+  FROM ocr_reads WHERE created_at > now() - interval '1 day' GROUP BY 1;
+```
+
+**Why a read failed** — `detail` is the field that did not exist before, and the reason it was
+added. A completion truncated by its token ceiling comes back EMPTY, which is byte-identical in the
+ledger to "the driver photographed a blank screen". Both are `no_fields`; only `detail` separates
+them:
+
+```sql
+SELECT field, result->>'reason' AS reason, result->>'detail' AS detail, count(*)
+  FROM ocr_reads
+ WHERE (result->>'ok')::boolean IS NOT TRUE AND created_at > now() - interval '1 day'
+ GROUP BY 1,2,3 ORDER BY 4 DESC;
+```
+
+A spike of `field='orders'` / `reason='no_fields'` whose `detail` says `ceiling orders_screen_kind`
+means the 512-token classifier budget is too small for the current model. Raise
+`ORDERS_SCREEN_KIND_MAX_COMPLETION_TOKENS` — noting that it is inside `cacheSignature`, so it turns
+the cache over.
 
 **TURNING IT OFF — the one thing to know at 3 a.m.** Set `OCR_DRIVER=none` in the Vercel project
 and redeploy. No code change. Every read then answers `unavailable`; automatic screenshot prefill
@@ -537,12 +585,16 @@ itself. See §5's `0033` release section for the full control and release eviden
 **Watching the bill.** `ocr_reads` is the only cost meter that exists.
 
 ```sql
--- What it cost, by day. gpt-5.5 is $5/1M in, $30/1M out.
-SELECT created_at::date AS day,
+-- What it cost, by day AND BY MODEL. Grouping by model is not cosmetic: priced with one rate,
+-- this query silently bills a Gemini day at OpenAI rates and reports four times the real number.
+--   google/gemini-3.7-flash  $0.375 / $1.875 per 1M
+--   gpt-5.4                  $2.50  / $15.00  per 1M
+SELECT created_at::date AS day, model,
        count(*) AS reads,
        sum(tokens_in) AS tin, sum(tokens_out) AS tout,
-       round((sum(tokens_in)*5.0 + sum(tokens_out)*30.0) / 1e6, 2) AS usd
-  FROM ocr_reads GROUP BY 1 ORDER BY 1 DESC;
+       round((sum(tokens_in) * CASE WHEN model LIKE 'google/%' THEN 0.375 ELSE 2.5 END
+            + sum(tokens_out) * CASE WHEN model LIKE 'google/%' THEN 1.875 ELSE 15.0 END) / 1e6, 4) AS usd
+  FROM ocr_reads GROUP BY 1, 2 ORDER BY 1 DESC, 2;
 
 -- How often it fails, and how.
 SELECT field, result->>'reason' AS reason, count(*)
@@ -553,10 +605,19 @@ SELECT shift_id, count(*) FROM ocr_reads WHERE shift_id IS NOT NULL
  GROUP BY 1 HAVING count(*) >= 15;
 ```
 
-Budget at 3.7¢/image and ~12 photos a shift: **≈$130/month at ten bikes, ≈$1,300 at a hundred.**
+Budget, measured per field off `ocr_reads` at 15 reads a shift and 26 shifts a month:
+
+| | per shift | 10 bikes | 100 bikes |
+| --- | --- | --- | --- |
+| `gpt-5.4` | $0.309 | **$80/month** | $804/month |
+| `google/gemini-3.7-flash` | $0.076 | **$20/month** | $199/month |
+
+**Orders is 53% of that bill** — 4 pages × 4 passes = 16 model calls a shift, before anything else
+runs. That is a bigger lever than the model choice, and cutting a pass needs instrumenting first:
+`ocr_reads` keeps only the consensus outcome, not what each pass said.
 
 **`maxDuration` is 60s** in `vercel.json` (raised from 30 — a measured read took 24.9s). The fetch
-aborts at `OCR_TIMEOUT_MS`, default 45s, deliberately *inside* that window: set the two equal and
+aborts at `OCR_TIMEOUT_MS`, default 50s, deliberately *inside* that window: set the two equal and
 the socket dies at the same instant the platform gives up, turning a clean 504 into an opaque
 error. If the ceiling ever changes, move the timeout with it and keep the gap.
 
