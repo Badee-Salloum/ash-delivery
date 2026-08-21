@@ -628,6 +628,74 @@ different bargain and this must not be pointed at one.
 
 ---
 
+## 7b. Evidence uploads — telling an outage from an ordinary discard
+
+Between 2026-08-15 and 2026-08-18 **every** evidence upload in the fleet failed to attach, and it
+took three days to find because the driver saw «فشل الرفع» and nothing else did. The lesson is not
+the bug (a `SELECT … FOR UPDATE` on an append-only table the runtime role may only read). The lesson
+is that the obvious signal is ambiguous, so here is the unambiguous one.
+
+**An orphaned `media` row does NOT mean an upload failed.** A blob with no `shift_media` row is the
+normal residue of a **discarded shift**: `shift_media` cascades on `shifts` delete, so every photo
+of a cancelled-and-deleted shift is orphaned by design. Measured 2026-08-21: of 36 orphans, only 9
+came from the outage; the rest are ordinary discards.
+
+**`shift_media_attachment_history` is the discriminator.** It is append-only (`0028` REVOKEs
+UPDATE/DELETE from `app_user`) and a trigger writes it on every attach, so it survives the cascade
+that removes `shift_media`. That gives a clean test:
+
+```sql
+-- For a suspect window: did the attach ever RUN?
+SELECT m.created_at, m.byte_size,
+       (h.id IS NOT NULL) AS attach_ran,
+       (sm.id IS NOT NULL) AS still_attached
+  FROM media m
+  LEFT JOIN shift_media_attachment_history h ON h.media_id = m.id
+  LEFT JOIN shift_media sm ON sm.media_id = m.id
+ WHERE m.created_at > now() - interval '1 day'
+ ORDER BY m.created_at;
+```
+
+| `attach_ran` | `still_attached` | what it means |
+| --- | --- | --- |
+| true | true | healthy |
+| true | false | the shift was **discarded**. Ordinary. Confirm in `audit_log` |
+| **false** | **false** | **the attach never ran — this is the outage shape.** Investigate now |
+
+`audit_log` settles the middle row, because `shift_media` mutations are audited by trigger (`0028`):
+
+```sql
+SELECT occurred_at, table_name, action, record_id FROM audit_log
+ WHERE occurred_at > now() - interval '1 day' AND table_name IN ('shifts', 'shift_media')
+ ORDER BY occurred_at;
+```
+
+A `shifts DELETE` followed by `shift_media DELETE` rows is a driver discarding a shift. No such
+pair, and no history row, means the upload died before the attachment — check the API logs for
+`evidence_attach_denied` and `refused before the handler`, both added after the outage.
+
+**The reason it stayed hidden for three days** is worth keeping in view: the upload writes the blob
+and the `media` row BEFORE the attachment, outside its transaction. Every rejected upload therefore
+leaves a real, billed blob behind. That is intentional — a blob with no row is harmless garbage,
+while a row with no blob is a broken evidence link a manager cannot open — but it means orphan count
+grows in normal operation and cannot be read as an alarm on its own.
+
+**Reaping orphans.** Safe, and pure housekeeping rather than a fix. Never reap inside the window you
+are diagnosing: the orphan is the only trace of a rejected upload.
+
+```sql
+-- Look first. 36 rows / 4.2 MB as of 2026-08-21 — small enough that this is not urgent.
+SELECT count(*), pg_size_pretty(sum(byte_size)::bigint)
+  FROM media m LEFT JOIN shift_media sm ON sm.media_id = m.id
+ WHERE sm.id IS NULL AND m.created_at < now() - interval '30 days';
+```
+
+Delete the blob from the store first, then the row — the opposite order leaves a blob nothing points
+at. Note `media` is deduped by `(branch_id, sha256)`, so a row may be orphaned now and referenced
+again later by an identical re-upload; only reap rows older than the retention window.
+
+---
+
 ## 8. Known operational gaps
 
 | Gap | Impact | Owner action |
