@@ -119,9 +119,11 @@ const PROVIDERS: Record<
     temperature: 0,
     /*
      * These screenshots carry real customer addresses and metre-level GPS (ASSUMPTIONS A-30).
-     * OpenRouter is a BROKER: without this it may route to an upstream that retains prompts. It
-     * also constrains routing, so it must be present during any measurement whose result is meant
-     * to describe production.
+     * OpenRouter is a BROKER: without this it may route to an upstream that retains prompts.
+     *
+     * It also CONSTRAINS ROUTING, so a benchmark run without it may reach a different upstream pool
+     * than production does. `scripts/vision-bench.mjs` now sends the same block for that reason —
+     * the model-selection runs of 2026-08-17/18 predate it and did not.
      */
     routing: { data_collection: 'deny' },
   },
@@ -381,13 +383,25 @@ export class ChatCompletionsOcrReader implements OcrReader {
       const name = (err as { name?: string })?.name
       const timedOut = name === 'TimeoutError' || name === 'AbortError'
       const budget = options.timeoutMs ?? this.config.timeoutMs
-      const detail = this.reportProviderError({
-        kind: timedOut ? 'timeout' : 'http',
-        pass,
-        detail: timedOut
-          ? `timeout ${budget}ms ${pass}`
-          : `transport ${pass}: ${safeProviderDetail(String((err as { message?: string })?.message ?? name ?? ''), this.config.apiKey)}`,
-      })
+      /*
+       * A DELIBERATE abort is not a failure and must not raise an alarm.
+       *
+       * The orders route pass is cancelled on purpose by `routePassWithinGrace` once the compact
+       * money and time passes have settled — that is the design, and it happens on healthy reads.
+       * The caller's own signal is what fired in that case; the timeout signal fired in the real
+       * one. Reporting both would put an `ocr_provider_error` in the log on every successful
+       * orders read, and an alert that shouts during normal operation is one people learn to skip.
+       */
+      const deliberate = isDeliberateAbort(name, options.signal)
+      const detail = deliberate
+        ? `cancelled ${pass} after the compact passes settled`
+        : this.reportProviderError({
+            kind: timedOut ? 'timeout' : 'http',
+            pass,
+            detail: timedOut
+              ? `timeout ${budget}ms ${pass}`
+              : `transport ${pass}: ${safeProviderDetail(String((err as { message?: string })?.message ?? name ?? ''), this.config.apiKey)}`,
+          })
       return failedPass(timedOut ? 'timeout' : 'unavailable', 0, 0, detail)
     }
 
@@ -434,6 +448,23 @@ export class ChatCompletionsOcrReader implements OcrReader {
     const result = options.screenKind ? parsedScreenKindResult(parsed) : parsedResult(request.field, parsed)
     return { result, raw: parsed, tokensIn, tokensOut }
   }
+}
+
+/**
+ * Was this abort the CALLER's doing, rather than the budget running out?
+ *
+ * The orders route pass is cancelled on purpose by `routePassWithinGrace` once the compact money
+ * and time passes have settled — on healthy reads, every time. Both arrive as an `AbortError`, and
+ * only the signal says which happened: the caller's own signal is aborted in the deliberate case,
+ * while a budget expiry fires the separate timeout signal and leaves the caller's untouched.
+ *
+ * Getting this wrong does not break a read; it puts an `ocr_provider_error` in the log on every
+ * successful orders read, and an alert channel that shouts during normal operation is one people
+ * stop reading — which is how the next outage stays hidden.
+ */
+export function isDeliberateAbort(errorName: string | undefined, callerSignal?: AbortSignal): boolean {
+  const aborted = errorName === 'TimeoutError' || errorName === 'AbortError'
+  return aborted && callerSignal?.aborted === true
 }
 
 function failedPass(reason: OcrFailure, tokensIn = 0, tokensOut = 0, detail?: string): ModelPass {

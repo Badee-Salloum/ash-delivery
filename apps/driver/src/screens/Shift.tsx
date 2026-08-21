@@ -1483,6 +1483,15 @@ function StartPackage({
             setOdoShot(true)
             setStartSlots((cur) => new Set(cur).add(slot))
           }}
+          /*
+           * The server holds this photo even though a newer selection owns the tile. Without this
+           * the gate goes on demanding «صورة العداد» for evidence that already exists, and the
+           * driver's only way out is discarding the shift he is standing in front of.
+           */
+          onSupersededAttach={(slot) => {
+            setOdoShot(true)
+            setStartSlots((cur) => new Set(cur).add(slot))
+          }}
           onImage={(file) => {
             odoFileRef.current = file
             setOdoCloud(null)

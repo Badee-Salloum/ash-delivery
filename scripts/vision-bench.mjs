@@ -395,6 +395,13 @@ const PROVIDERS = {
       ],
       generationConfig: {
         temperature: 0,
+      /*
+       * The same retention denial the production adapter pins (ASSUMPTIONS A-30). Two reasons it
+       * belongs here and not only there: this harness sends 66 REAL driver screenshots — customer
+       * addresses, named businesses, metre-level GPS — and `provider` constrains which upstreams
+       * may serve the request, so a run without it is not measuring the pool production uses.
+       */
+      provider: { data_collection: 'deny' },
         topP: 1,
         seed: 7,
         /*

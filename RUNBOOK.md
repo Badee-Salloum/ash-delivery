@@ -671,8 +671,13 @@ SELECT occurred_at, table_name, action, record_id FROM audit_log
 ```
 
 A `shifts DELETE` followed by `shift_media DELETE` rows is a driver discarding a shift. No such
-pair, and no history row, means the upload died before the attachment — check the API logs for
-`evidence_attach_denied` and `refused before the handler`, both added after the outage.
+pair, and no history row, means the upload died before the attachment. Grep the API logs for the
+two lines added after the outage — both are real strings in `apps/api/src/app.ts`:
+
+```
+insufficient database privilege        # a 42501: the runtime role lacks a grant. THE outage's cause
+refused before the handler             # a 4xx from Fastify's parser: too large, or not an image
+```
 
 **The reason it stayed hidden for three days** is worth keeping in view: the upload writes the blob
 and the `media` row BEFORE the attachment, outside its transaction. Every rejected upload therefore

@@ -813,6 +813,14 @@ export function BatteryPanel({
                         ...(onCloseDraft ? { onCloseDraft } : {}),
                       }
                     : {})}
+                  /*
+                   * A superseded generation the server still accepted. Record the slot so the BR5
+                   * gate stops asking for a screenshot that exists — and do nothing else. The pack
+                   * reset, the cloud-read clear and `onMediaIdChanged` below all belong to the
+                   * generation currently on screen; running them for an abandoned upload would let
+                   * an older photo overwrite the newer one's reading.
+                   */
+                  onSupersededAttach={(uploadedSlot) => onSlotUploaded(uploadedSlot)}
                   onUploaded={async (uploadedSlot, result, file) => {
                     /*
                      * The first OCR write can finish before its evidence upload, so the server has

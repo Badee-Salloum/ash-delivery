@@ -53,6 +53,19 @@ export interface PhotoSlotProps {
   slot: string
   label: string
   onUploaded(slot: string, result?: EvidenceUploadResponse, file?: File): void | Promise<void>
+  /**
+   * The server accepted an upload for an attempt that is no longer on screen.
+   *
+   * Deliberately NOT `onUploaded`. That callback means "this generation is now the slot", and
+   * consumers act on it: `BatteryPanel` resets the pack, clears the cloud read and repoints
+   * `onMediaIdChanged`. Running that for a SUPERSEDED generation would let an older photo clobber
+   * the newer one's state — a worse bug than the one being fixed.
+   *
+   * So this says only the narrow true thing: the slot is filled on the server. Consumers that gate
+   * on "is there a photo" implement it; consumers that track generations ignore it or record the
+   * slot alone.
+   */
+  onSupersededAttach?(slot: string, result: EvidenceUploadResponse): void
   onUploadResult?(slot: string, result: EvidenceUploadResponse): void
   /** Runs only after the server accepted this exact attachment generation. */
   onImage?(file: File, result?: EvidenceUploadResponse): void | Promise<void>
@@ -93,6 +106,7 @@ export function PhotoSlot({
   slot,
   label,
   onUploaded,
+  onSupersededAttach,
   onUploadResult,
   onImage,
   ocrField,
@@ -279,11 +293,9 @@ export function PhotoSlot({
            *
            * So tell the parent the slot IS attached. Deliberately NOT done here: `setState` and
            * `onCloseDraft`, which belong to the newer attempt — rewinding a close-draft revision to
-           * a superseded generation would trade this bug for a worse one. If `onUploaded` rejects
-           * the stale generation (BatteryPanel does), the catch below sees a superseded attempt and
-           * returns quietly without painting an error over the newer attempt's tile.
+           * a superseded generation would trade this bug for a worse one.
            */
-          if (plan.notifyAttached) await onUploaded(slot, result, prepared.file)
+          if (plan.notifyAttached) onSupersededAttach?.(slot, result)
           return false
         }
 
@@ -365,6 +377,7 @@ export function PhotoSlot({
       attachment?.attachmentToken,
       attached,
       onUploadResult,
+      onSupersededAttach,
       onCloseDraft,
       onUploaded,
       onImage,

@@ -4,6 +4,7 @@ import {
   normalizePrintedOrderTime,
   parsedResult,
   resolveSamePageOrderTimes,
+  isDeliberateAbort,
   safeProviderDetail,
   type OcrProviderErrorEvent,
   type ParsedRow,
@@ -1034,5 +1035,34 @@ describe('safeProviderDetail', () => {
 
   it('caps the length so one provider cannot flood the ledger', () => {
     expect(safeProviderDetail('x'.repeat(5_000), 'k').length).toBeLessThanOrEqual(200)
+  })
+})
+
+describe('a deliberate cancellation is not an alarm', () => {
+  // The orders route pass is aborted ON PURPOSE by `routePassWithinGrace` once the compact money
+  // and time passes have settled — that happens on every healthy orders read. Reporting it as a
+  // provider failure would put an `ocr_provider_error` in the log on the happy path, and an alert
+  // channel that shouts during normal operation is one people stop reading. Which is how the NEXT
+  // outage stays hidden for three days.
+  it('treats an abort from the caller signal as cancellation, not failure', () => {
+    const caller = new AbortController()
+    caller.abort()
+    expect(isDeliberateAbort('AbortError', caller.signal)).toBe(true)
+  })
+
+  it('still treats a budget expiry as a real failure worth reporting', () => {
+    // The timeout signal fires and the caller's own signal is untouched — that is the discriminator.
+    const caller = new AbortController()
+    expect(isDeliberateAbort('TimeoutError', caller.signal)).toBe(false)
+    expect(isDeliberateAbort('AbortError', caller.signal)).toBe(false)
+    // Passes with no caller signal at all (wallet, bms, odometer) can only ever be real timeouts.
+    expect(isDeliberateAbort('TimeoutError', undefined)).toBe(false)
+  })
+
+  it('never calls a transport error deliberate, however the signal looks', () => {
+    const caller = new AbortController()
+    caller.abort()
+    expect(isDeliberateAbort('TypeError', caller.signal)).toBe(false)
+    expect(isDeliberateAbort(undefined, caller.signal)).toBe(false)
   })
 })
