@@ -1,5 +1,111 @@
 # PROGRESS
 
+## 2026-08-21 — a second OCR provider, shipped INERT; and the evidence-upload outage closed out
+
+Two threads. Neither has changed what production reads with yet.
+
+### The upload outage, and what it cost to find
+
+Between **2026-08-15T23:02Z and 2026-08-18T18:43Z every evidence upload in the fleet failed to
+attach.** Blob written, `media` row written, `shift_media` row never created — so drivers could not
+start or close a shift, and the screen said «فشل الرفع» and nothing else did.
+
+The cause was one line: `latestAttachmentForMedia(id, { lock: true })` issued
+`SELECT … FOR UPDATE` against `shift_media_attachment_history`, which `0028` deliberately makes
+append-only by REVOKEing UPDATE from `app_user`. Postgres answered `42501`, which was not a
+`ServiceError`, so it became an anonymous 500. Fixed in `f81d8bf`; verified live the same evening.
+
+**It took three days because nothing could name it.** Three layers independently collapsed every
+distinct cause into the same nine Arabic words, and there is still no table that records a failed
+upload. That is the real defect, and it is the one worth remembering.
+
+Closed out since:
+
+- `863c94b` — a 4xx from Fastify's parser keeps its status; a `42501` gets a named log line.
+- `e3da8fc` — an upload the server ACCEPTED is no longer silently dropped when the driver picks a
+  second photo mid-flight. `planAcceptedUpload` splits the three questions that were conflated:
+  the attachment is a fact and is always reported, while owning the tile and advancing the
+  close-draft revision belong to the newest selection only.
+- `2614466` — RUNBOOK §7b: **an orphaned blob is not an outage.** `shift_media` cascades on shift
+  delete, so every photo of a discarded shift is orphaned by design — measured 2026-08-21, 36
+  orphans of which only 9 were the outage. `shift_media_attachment_history` is append-only and
+  survives the cascade, which makes it the discriminator.
+
+### The OCR reader: measured, chosen, and NOT yet switched on
+
+66 real screens, 319 hand-transcribed rows, three full passes per candidate, 20 runs over 17 models:
+
+| reader | MISREAD | disagrees with ITSELF on money | cost/run |
+| --- | --- | --- | --- |
+| `google/gemini-3.7-flash` (uncapped) | **5** | **0 of 3 passes** | $0.180 |
+| `gpt-5.4` — what production runs | 26–34 | **14 of 48 images** | $0.550 |
+
+The misread column is five to one; the column that decided it is the second. Asked the same image
+twice, gpt-5.4 read `-16500` where its own other pass read `-165.50`. A reader that changes its
+mind puts a number in the ledger that depends on which second the request fired — and BR1 balances a
+wrong fee against itself, so nobody ever finds it.
+
+Two results worth keeping because they are counter-intuitive:
+
+- **Capping the thinking budget is NOT free.** `reasoning.max_tokens=256` measured 3× faster, 40%
+  cheaper and the *same* 5 misreads — then a second pass showed it disagreeing with itself twice in
+  fifty images, once tenfold. The misread COUNT hid it, because both passes scored 5 on different
+  rows. One measurement is not a measurement.
+- **The pro tier is worse and dearer** (`3.1-pro` 10 misreads at $0.617, `2.5-pro` 24 at $0.460),
+  and every model under $0.15/1M landed at 26+. Cheap per token is not cheap per correct answer.
+
+`8ba2007` ships the provider as `OCR_DRIVER=openrouter`, **inert**. It also had to fix a signature
+that lied: `cacheSignature` began with the literal string `openai` and never included the endpoint,
+so two providers on the same model name were indistinguishable in `ocr_reads.cache_signature` and a
+swap — or the revert — could have served the other one's rows.
+
+**Done**
+
+- Multi-provider Chat Completions adapter, provider-derived cache signature, per-provider request
+  body (`max_tokens` vs `max_completion_tokens`, `temperature: 0`, `data_collection: 'deny'`).
+- Failed passes now carry a redacted `detail` into `ocr_reads.result`, which distinguishes a
+  completion truncated by its token ceiling from a screen that genuinely had nothing on it. Both
+  are `no_fields`; only `detail` separates them.
+- OCR config tests, which did not exist at all — not the key guard, not the model defaults.
+- `4dc76ca` — four defects a self-review found in the above, including an alert that fired on the
+  happy path and a superseded-upload fix that was unsafe for `BatteryPanel`.
+
+**Next**
+
+1. **Phase 2 pre-flight, and it can still say no.** The 5-vs-26 result came from batched requests
+   under a 32,768 ceiling; production sends four single-image calls under 512/4,096/2,048/8,192.
+   `scripts/ocr-adapter-bench.mjs` must measure the SHIPPED class against twelve gates. Gate 1 is
+   screen-kind output ≤307 tokens: if that 512 ceiling exhausts, the completion returns empty and
+   **every orders read fails while looking like a blank screen**.
+2. Then, and only then, `OCR_DRIVER=openrouter` — one env var, no deploy.
+
+**Risks**
+
+- 🔴 **The measurement does not cover the shipped code path.** See Next 1. Nothing flips until it does.
+- 🟠 **The model-selection runs sent 66 real driver screenshots — customer addresses, named
+  businesses, metre-level GPS — WITHOUT `data_collection: 'deny'`**, because the bench did not send
+  it until `4dc76ca`. Already-sent data cannot be recalled. A-30 is rewritten to describe the real
+  path; the account-level logging setting is the owner's to disable.
+- 🟠 **`google/gemini-3.7-flash` is a routed alias, not a pinned endpoint.** Upstreams can differ in
+  quantisation, latency and retention. A measurement against a broker alias has a shorter shelf life
+  than one against a first-party model id.
+- 🟡 **Orders is 53% of the OCR bill** — 4 pages × 4 passes = 16 model calls a shift. A bigger lever
+  than the model choice, but `ocr_reads` keeps only the consensus outcome, so whether the 4th pass
+  earns its keep cannot be answered without instrumenting it first.
+- 🟡 Still no table records a failed upload. The orphaned `media` row is the only trace, and §7b now
+  explains why that signal is ambiguous.
+
+**See it in 2 minutes**
+
+```bash
+pnpm check                                        # 1,763 tests, all green
+node -e "import('./apps/api/src/config.ts')"       # OCR_DRIVER: none | openai | openrouter
+```
+
+Then in `psql`: `SELECT split_part(cache_signature,':',1) AS reader, count(*) FROM ocr_reads
+GROUP BY 1;` — every row is now self-describing about which provider produced it.
+
+
 ## 2026-08-17 — the staged close-draft release is LIVE (migration `0034`)
 
 The candidate described in the entry below was reviewed, committed as `afbb31d`, and promoted. This
