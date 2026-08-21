@@ -701,6 +701,47 @@ again later by an identical re-upload; only reap rows older than the retention w
 
 ---
 
+## 7c. Data health — the four questions, and the two traps
+
+Run these before believing anything is wrong, and after any migration. Verified against production
+on 2026-08-21: ledger clean (70 entries / 140 lines), no stuck reads, no dangling references.
+
+```sql
+-- 1. DOUBLE ENTRY. The invariant that must never fail.
+--    TRAP: debits and credits are BOTH POSITIVE with a `side` discriminator ('D'/'C').
+--    `sum(amount_minor)` therefore never reaches zero and reports EVERY entry as broken.
+SELECT entry_id, sum(CASE WHEN side = 'D' THEN amount_minor ELSE -amount_minor END) AS delta
+  FROM journal_lines
+ GROUP BY entry_id
+HAVING sum(CASE WHEN side = 'D' THEN amount_minor ELSE -amount_minor END) <> 0;   -- expect 0 rows
+
+SELECT entry_id FROM journal_lines GROUP BY entry_id HAVING count(DISTINCT side) < 2;  -- expect 0
+SELECT count(*) FROM journal_lines WHERE amount_minor < 0;  -- expect 0; allocate() refuses negatives
+
+-- 2. BR7. The financial week closes SUNDAY, never ISO Monday.
+--    TRAP: compute the day IN POSTGRES. A DATE read into JS becomes local midnight, and
+--    getUTCDay() on Asia/Damascus (UTC+3) then reports the PREVIOUS day — a Sunday reads Saturday.
+SELECT week_start_date, to_char(week_start_date, 'Dy') AS day, count(*)
+  FROM journal_entries GROUP BY 1, 2 ORDER BY 1 DESC;      -- every row must say Sun
+
+-- 3. Dangling references.
+SELECT count(*) FROM shift_media sm LEFT JOIN shifts s ON s.id = sm.shift_id WHERE s.id IS NULL;
+SELECT count(*) FROM ocr_reads o WHERE o.shift_id IS NOT NULL
+   AND NOT EXISTS (SELECT 1 FROM shifts s WHERE s.id = o.shift_id);
+
+-- 4. Reads that never finished. A row stuck 'running' makes the NEXT request for the same image
+--    wait out OCR_RUNNING_MAX_WAIT_MS (50s) before it can proceed.
+SELECT count(*) FROM ocr_reads WHERE read_state = 'running'
+   AND reserved_at < now() - interval '5 minutes';
+```
+
+**A check that fails universally is a broken check.** Both traps above were hit while writing this
+section, and in each case the query reported that *every* row was wrong — 70 of 70 entries
+unbalanced, every week starting on Saturday. That shape is the tell: real corruption is almost
+always partial. Confirm the query before raising the alarm.
+
+---
+
 ## 8. Known operational gaps
 
 | Gap | Impact | Owner action |
