@@ -27,6 +27,7 @@ import {
   executePhotoAttempt,
   isCurrentPhotoAttempt,
   nextPhotoAttempt,
+  planAcceptedUpload,
   type PhotoAttempt,
 } from '../photo-attempt.ts'
 
@@ -264,7 +265,27 @@ export function PhotoSlot({
           }
         }
         if (result === null) throw new Error('evidence_preflight_did_not_settle')
-        if (!isCurrentPhotoAttempt(currentAttempt.current, attempt)) return false
+        const plan = planAcceptedUpload(currentAttempt.current, attempt)
+        if (!plan.ownsUi) {
+          /*
+           * SUPERSEDED, BUT THE SERVER TOOK IT.
+           *
+           * This runs when the driver picks a second photo while the first is still in flight. The
+           * first PUT then lands on a slot that is no longer the one on screen — and the old code
+           * returned here, before `onUploaded`, so the parent never learned the slot was filled.
+           * The server holds the photo; the gate goes on saying «ناقص: صورة العداد»; and the driver
+           * has no way out but to discard the shift. That is the same shape as the outage of
+           * 2026-08-15: evidence stored server-side that nothing on the client can see.
+           *
+           * So tell the parent the slot IS attached. Deliberately NOT done here: `setState` and
+           * `onCloseDraft`, which belong to the newer attempt — rewinding a close-draft revision to
+           * a superseded generation would trade this bug for a worse one. If `onUploaded` rejects
+           * the stale generation (BatteryPanel does), the catch below sees a superseded attempt and
+           * returns quietly without painting an error over the newer attempt's tile.
+           */
+          if (plan.notifyAttached) await onUploaded(slot, result, prepared.file)
+          return false
+        }
 
         const accepted = result
         acceptedResult.current = accepted
@@ -423,15 +444,19 @@ export function PhotoSlot({
     void execute(attempt, 'upload_retry')
   }, [execute, state])
 
+  /*
+   * Re-read the bytes the SERVER already holds, never the bytes in this browser.
+   *
+   * There used to be a fallback here that called `runLegacyCloudRead` directly when `onRetryRead`
+   * was absent. It was unreachable — `canRetryRead` requires `onRetryRead`, so the button could
+   * never invoke it — but it described something the system must not do: publish a machine reading
+   * for bytes that were never stored. `odoOcr` ships as `odometerKmOcr`, the SRS D-3 baseline a
+   * manager reviews against the driver's typed number, so a reading whose evidence does not exist
+   * is an audit trail that cannot be checked. Removed rather than left as a trap.
+   */
   const retryRead = useCallback((): void => {
-    if (onRetryRead) {
-      void onRetryRead()
-      return
-    }
-    const attempt = currentAttempt.current
-    if (!attempt || !ocrField || !onCloudRead) return
-    void runLegacyCloudRead(attempt)
-  }, [onRetryRead, ocrField, onCloudRead, runLegacyCloudRead])
+    void onRetryRead?.()
+  }, [onRetryRead])
 
   const remove = useCallback(async (): Promise<void> => {
     if (!onDelete) return

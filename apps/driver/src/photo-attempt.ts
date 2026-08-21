@@ -15,6 +15,38 @@ export interface PhotoAttempt<FileLike> {
 
 export type PhotoAttemptPhase = 'selection' | 'upload_retry'
 
+/**
+ * What to do with an upload the SERVER ACCEPTED, split three ways.
+ *
+ * The three are not the same question, and treating them as one is what caused the bug this
+ * function exists to prevent. A driver who picks a second photo while the first is still uploading
+ * leaves the first PUT to land on a slot that is no longer on screen. The old code returned at that
+ * point — before telling the parent anything — so the server held a photo the client could not see,
+ * the start gate went on demanding «صورة العداد», and the only way out was discarding the shift.
+ *
+ * Evidence the server holds is a FACT and must always be reported. Which attempt owns the tile, and
+ * which may move the close-draft revision, are questions about the newest selection only.
+ */
+export interface AcceptedUploadPlan {
+  /** The server holds these bytes; the slot IS filled. True even for a superseded attempt. */
+  readonly notifyAttached: boolean
+  /** Paint the tile and start this attempt's readers. Only the newest selection may. */
+  readonly ownsUi: boolean
+  /**
+   * Advance the close-draft revision. Only the newest selection may: rewinding a revision to a
+   * superseded generation would trade a stuck gate for a corrupted draft, which is worse.
+   */
+  readonly advanceDraft: boolean
+}
+
+export function planAcceptedUpload<FileLike>(
+  current: PhotoAttempt<FileLike> | null,
+  attempt: PhotoAttempt<FileLike>,
+): AcceptedUploadPlan {
+  const owns = isCurrentPhotoAttempt(current, attempt)
+  return { notifyAttached: true, ownsUi: owns, advanceDraft: owns }
+}
+
 export function nextPhotoAttempt<FileLike>(previousId: number, file: FileLike): PhotoAttempt<FileLike> {
   return { id: previousId + 1, file, readersStarted: false }
 }

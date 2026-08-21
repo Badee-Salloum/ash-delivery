@@ -4,6 +4,7 @@ import {
   executePhotoAttempt,
   isCurrentPhotoAttempt,
   nextPhotoAttempt,
+  planAcceptedUpload,
 } from '../src/photo-attempt.ts'
 
 const photoSlot = readFileSync(new URL('../src/screens/PhotoSlot.tsx', import.meta.url), 'utf8')
@@ -62,5 +63,41 @@ describe('photo upload and OCR attempt ownership', () => {
     await executePhotoAttempt(recovered, 'upload_retry', { upload, startReaders })
     expect(upload).toHaveBeenCalledOnce()
     expect(startReaders).toHaveBeenCalledOnce()
+  })
+})
+
+describe('an upload the server accepted is never silently dropped', () => {
+  // The bug this prevents: a driver picks a second photo while the first is still uploading. The
+  // first PUT lands on a slot that is no longer on screen, and the old code returned right there —
+  // before telling the parent anything. The server held the photo; the start gate went on demanding
+  // «صورة العداد»; and the only way out was discarding the shift. Evidence the server holds is a
+  // fact, and a fact does not stop being true because the driver tapped again.
+  const attempt = nextPhotoAttempt(0, 'photo-1')
+  const newer = nextPhotoAttempt(1, 'photo-2')
+
+  it('reports the attachment even when a newer selection owns the screen', () => {
+    const plan = planAcceptedUpload(newer, attempt)
+    expect(plan.notifyAttached).toBe(true)
+    expect(plan.ownsUi).toBe(false)
+  })
+
+  it('refuses to let a superseded attempt move the close-draft revision', () => {
+    // Rewinding a revision to a superseded generation would trade a stuck gate for a corrupted
+    // draft, which is the worse of the two.
+    expect(planAcceptedUpload(newer, attempt).advanceDraft).toBe(false)
+  })
+
+  it('gives the newest selection all three: the attachment, the tile and the draft', () => {
+    expect(planAcceptedUpload(attempt, attempt)).toEqual({
+      notifyAttached: true,
+      ownsUi: true,
+      advanceDraft: true,
+    })
+  })
+
+  it('still reports the attachment when no attempt is current at all', () => {
+    // A remount or a delete clears `currentAttempt`. The bytes are still on the server.
+    expect(planAcceptedUpload(null, attempt).notifyAttached).toBe(true)
+    expect(planAcceptedUpload(null, attempt).ownsUi).toBe(false)
   })
 })
