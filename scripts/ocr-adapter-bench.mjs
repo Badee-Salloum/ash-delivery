@@ -65,7 +65,7 @@ const adapter = await import(
  */
 function passOf(body, field) {
   const text = String(body?.messages?.[0]?.content?.[0]?.text ?? '')
-  if (text.includes('ORDERS SCREEN KIND') || text.includes('screenKind')) return 'orders:screen-kind'
+  if (text.includes('ORDERS SCREEN-KIND') || text.includes('screenKind')) return 'orders:screen-kind'
   if (text.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return 'orders:money'
   if (text.includes('ORDERS PRINTED-TIME VERIFIER')) return 'orders:time'
   if (field === 'orders') return 'orders:route'

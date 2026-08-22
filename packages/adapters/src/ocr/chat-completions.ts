@@ -146,8 +146,22 @@ const ORDERS_TIME_TIMEOUT_MS = 24_000
 const ORDERS_SCREEN_KIND_TIMEOUT_MS = 12_000
 const ORDERS_ROUTE_TIMEOUT_MS = 44_000
 const ORDERS_ROUTE_GRACE_AFTER_MONEY_MS = 12_000
-const ORDERS_MONEY_MAX_COMPLETION_TOKENS = 4096
-const ORDERS_TIME_MAX_COMPLETION_TOKENS = 2048
+/*
+ * RAISED for the Gemini reader, 2026-08-22, on measurement rather than instinct.
+ *
+ * `ocr-adapter-bench.mjs` over real orders screens: money peaked at 2,894 of 4,096 and time at
+ * 1,417 of 2,048 — 71% and 69% of their ceilings, against roughly 20% for gpt-5.4. The candidate
+ * emits ~3.6x the output tokens, and these two budgets were sized for the old reader.
+ *
+ * ~30% headroom is not enough for a screen denser than the sample. A pass that exhausts its ceiling
+ * returns an EMPTY completion, not a truncated one, so it reads as `no_fields` — "the screen had
+ * nothing on it" — and for money that fails the entire orders read. Roughly 2.8x the measured worst
+ * case, which puts them in the same relationship to observed output that screen-kind already had.
+ *
+ * A ceiling is a BOUND, not a spend: raising it costs nothing until something actually runs long.
+ */
+const ORDERS_MONEY_MAX_COMPLETION_TOKENS = 8192
+const ORDERS_TIME_MAX_COMPLETION_TOKENS = 4096
 // Reasoning tokens share this ceiling with the tiny JSON answer. 128 regularly lets a medium
 // reasoning pass exhaust its budget before emitting `screenKind`, which turns the safety gate into
 // a false `no_fields`. The schema still permits only one enum, so the larger ceiling cannot create
