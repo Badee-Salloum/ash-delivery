@@ -1,5 +1,63 @@
 # PROGRESS
 
+## 2026-08-22 — the Gemini reader is LIVE (`dpl_6Rknpd6`)
+
+`OCR_DRIVER=openrouter`, `google/gemini-3.7-flash`, thinking uncapped. The entry below said
+"shipped INERT"; this is the flip, and it is deployment evidence rather than intent.
+
+**The pre-flight ran first, and it changed the code.** `ocr-adapter-bench.mjs` against real orders
+screens through the SHIPPED adapter:
+
+| pass | max out / ceiling | max ms / budget | ceiling hits |
+| --- | --- | --- | --- |
+| `orders:screen-kind` | 108 / 512 (21%) | 7,646 / 12,000 | 0 |
+| `orders:money` | 2,894 / 4,096 (**71%**) | 4,277 / 30,000 | 0 |
+| `orders:time` | 1,417 / 2,048 (**69%**) | 5,317 / 24,000 | 0 |
+| `orders:route` | 1,791 / 8,192 (22%) | 6,628 / 44,000 | 0 |
+
+The feared failure does not occur — screen-kind uses a fifth of its budget, so the exhaustion that
+would have failed EVERY orders read while looking like a blank screen is not a live risk. But money
+and time sat near 70% of ceilings sized for gpt-5.4, because this reader emits ~3.6x the output.
+Both were raised to ~2.8x the measured worst case (`0a33051`) **in the same deploy**, because they
+live inside `cacheSignature`.
+
+Gate 11 separately proved the ceiling is honoured at all: forced to `max_tokens: 16`, OpenRouter
+returned `finish_reason: 'length'` at 12 tokens out. It does not silently ignore the field.
+
+**Verified after deploy:** `/health` 200 — which is not a formality here, because `loadConfig`
+throws at boot when `OCR_DRIVER=openrouter` has no `OPENROUTER_API_KEY`. A 200 proves both.
+
+**Not yet verified:** a real driver read. Confirm with the first one —
+
+```sql
+SELECT split_part(cache_signature, ':', 1) AS reader, model, count(*)
+  FROM ocr_reads WHERE created_at > now() - interval '1 day' GROUP BY 1, 2;
+```
+
+Rows should read `openrouter@openrouter.ai` / `google/gemini-3.7-flash`.
+
+**Risks**
+
+- 🔴 **The OpenRouter balance is $0.087 — about ONE shift.** When it empties, every cloud read
+  answers `unavailable` and drivers type every number by hand. Degraded, visible, not blocked, and
+  the `detail` field will name it. **Top up before the next shift.**
+- 🟠 The pre-flight measured 4 orders screens, not the full corpus, because the balance would not
+  cover more. Gate 1 has wide margin; the money ceiling now has ~2.8x headroom rather than measured
+  proof across 66 images.
+- 🟠 Account-level prompt logging on OpenRouter is still unconfirmed (A-30). The request-level
+  `data_collection: 'deny'` is verified and in force.
+
+**Revert**, in order of blast radius:
+
+```
+OCR_DRIVER=none          # kill switch: no cloud reads at all, drivers type
+OCR_DRIVER=openai        # back to gpt-5.4; OPENAI_API_KEY was deliberately left in place
+```
+
+Neither needs a code change. The provider is part of the cache signature, so no Gemini-produced row
+can ever be served to the OpenAI reader, or the reverse.
+
+
 ## 2026-08-21 — a second OCR provider, shipped INERT; and the evidence-upload outage closed out
 
 Two threads. Neither has changed what production reads with yet.
