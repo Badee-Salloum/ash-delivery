@@ -1,5 +1,57 @@
 # PROGRESS
 
+## 2026-08-23 — receivables/restoration release `0039` is live
+
+The complete same-day release is live from frozen application commit
+`1407676b9802382b926b9b4f07f59636cb0ea0ee`. It adds two dashboard KPIs backed by the lightweight
+branch-scoped exact-`open` query; zero cash/wallet openings; retry-safe mid-shift tranches; range-safe
+settlement writes; inclusive profit ranges; optional user variance text with a deterministic audit
+marker; and driver handoff despite money mismatch or incomplete end-battery evidence.
+
+The finance expansion adds ordinary and shift-funding receivables for cash and wallet, direct entry
+against a driver without a shift, automatic shift-funding carry into the next approved shift,
+receivable-aware settlement and restoration, atomic expense/restoration guards, and editable office
+cash/wallet targets. The live effective targets are SYP 50,000 cash and SYP 10,000 wallet.
+
+The release gate ran on Node `24.19.0`. Frozen `pnpm check` passed 1,998 tests with 11 expected
+PostgreSQL-only skips; a fresh disposable database ran 27/27 test files and passed 141/141 with zero
+skips. Both frontend builds, the API bundle, and the Vercel production builds passed. Migrations
+applied in order and their immediate rerun found 0 pending / 39 present:
+
+- `0036_receivable_ledger_event.sql` — `adbfc150`
+- `0037_receivable_settlement_and_events.sql` — `5fdf1556`
+- `0038_restoration_atomicity_guards.sql` — `b2dd47f0`
+- `0039_editable_office_capital_targets.sql` — `ec71e10c`
+
+Production writes were paused through the provider API and drained to two zero-activity samples.
+The pre-backup contains 58 tables / 3,994 rows / 35 migrations with aggregate SHA-256
+`dd0e904a228d1022df80e1d5f75b01bec79c829a884154042f6b41ca2a3f7103`. After applying the four
+migrations, runtime guard probes rejected journal mutation, temporary-table creation, and an
+unaudited target edit. The post-backup contains 59 tables / 4,002 rows / 39 migrations with
+aggregate SHA-256 `be8dc82f07b645edcc0463adc43a3ae2588791848dd9da52bde36786ad732a20`.
+
+Artifacts were promoted while writes remained paused, in order: API
+`dpl_826jbAVvqCetjgVtGihgCX4Kp16b`, driver `dpl_4YKqcBfCKkHXLr6oggduwx9P5VDE`, then admin
+`dpl_6y6NJLBuRy2x73hZ4kqfTykNv1sZ`. After resume, health/auth/proxy/PWA/protected-route smokes and
+exact 390×844 driver plus 1024×768 admin browser checks passed. Final production is schema 39/head
+0039, working `0/0`, zero active shifts, zero trial-balance difference, and zero violations across
+all 17 shift-money integrity checks. No historical live-ledger row was rewritten.
+
+The post-backup was restored completely into isolated Neon database
+`ash_restore_0039_20260823_1337`. All 59 table fingerprints and 4,002 rows matched, all 27 sequences
+were safe, all user triggers were enabled, and the trial balance and 17-check integrity audit were
+zero. The rehearsal exposed a restore-runner performance defect: the old sequence loop made 652
+HTTPS requests and could stop partway. The checked-in helper reduces that to one catalog query plus
+one reset statement and adds five regressions; current-HEAD `pnpm check` passes 2,003 tests. After
+Neon naturally expired all idle rehearsal sessions, the exact scratch database was dropped and
+confirmed absent.
+
+The remaining release acceptance is the next normal staff shift. Record the existing `0/0`
+baseline, prove `+1/+1` within eight seconds while open and reversal on end submission, independently
+recalculate fixed 40%, then verify exactly one immutable settlement, one decision, matching hashes,
+balanced journals, and zero residual shift balances. No demo transaction will be written to
+production for this evidence.
+
 ## 2026-08-23 — battery-close hang hotfix is live
 
 Thaer's end-BMS incident had two independent, read-only-confirmed facts. The close-draft OCR had

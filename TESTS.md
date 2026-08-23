@@ -7,6 +7,60 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 
 **Legend:** ✅ implemented and green · ⚠ written but never executed · 🔜 planned, milestone named.
 
+## 2026-08-23 release gate — receivables, restoration, and editable targets (`0036`–`0039`)
+
+Application artifacts were frozen at commit `1407676b9802382b926b9b4f07f59636cb0ea0ee` and tested
+under Node `24.19.0`. The full default `pnpm check` passed **1,998 tests** with 11 expected
+PostgreSQL-only skips:
+
+| Package | Tests |
+| --- | ---: |
+| Domain | 429 |
+| Contracts | 19 |
+| Shared client | 263 |
+| Admin | 136 |
+| Driver | 263 |
+| Adapters | 130 |
+| Database, default run | 83 passed / 11 skipped |
+| API | 675 |
+
+The required fresh disposable-PostgreSQL rerun executed 27/27 database test files and passed
+**141/141 with zero skips**. Fresh migrations applied 39/39; the immediate checksum rerun applied
+zero and found all 39 present. Release checksums are `0036 adbfc150`, `0037 5fdf1556`,
+`0038 b2dd47f0`, and `0039 ec71e10c`. Both frontend production builds, the standalone API bundle,
+and all three Vercel production builds passed.
+
+Automated coverage includes ordinary and shift-funding receivables in both cash and wallet, direct
+driver assignment without a shift, automatic next-shift carry, exact/concurrent/conflicting event
+retries, immutable settlement and force-void journals, deferred money and battery review, zero
+opening funds, expense atomicity, receivable-aware restoration, editable capital targets, negative
+physical-cash rejection, restoration/target actor guards, journal metadata coupling, and the full
+17-check read-only money-integrity audit. Dashboard coverage retains exact-`open` counts, suspended
+exclusion, cross-midnight and branch isolation, distinct actors, polling, branch switching, and
+stale-value preservation.
+
+Production migration and smoke evidence is also green: writes were paused and drained to two
+zero-activity samples; migrations `0036`–`0039` applied in order; runtime guard probes rolled back;
+API, auth, both proxies, PWA manifest/service worker, protected routes, and exact deployed assets
+passed. Exact 390×844 driver and 1024×768 admin browser smokes had no horizontal overflow. Final
+production state is schema 39/head 0039, working `0/0`, trial balance zero, and zero integrity
+violations.
+
+The 59-table / 4,002-row post-release backup was restored end to end into the explicitly identified
+Neon scratch database `ash_restore_0039_20260823_1337`. All 59 canonical table fingerprints matched;
+all 27 serial/identity sequences were positioned at `max + 1` with `is_called = false`; no user
+trigger remained disabled; trial balance and all 17 integrity checks were zero. The rehearsal found
+that the old restore loop made 652 Neon HTTPS calls while probing every column. The checked-in fix
+uses one catalog lookup and one reset statement; five focused regressions pass. The current HEAD
+full gate therefore passes **2,003 tests**, with the same 11 expected non-database skips. Once Neon
+reported zero remaining sessions, the exact scratch database was dropped and confirmed absent; no
+production row was changed by the rehearsal.
+
+The remaining acceptance case is deliberately live, not simulated: the next ordinary staff shift
+must show `0/0 → 1/1` within eight seconds and reverse on end submission, then independently prove
+the fixed 40% settlement, one immutable settlement, one decision, matching hashes, balanced
+journals, and zero remaining shift cash/wallet/share/receivable balances.
+
 ## 2026-08-23 same-day battery-close hotfix
 
 The hotfix is frozen in commits `cee0fca`, `0699581`, and `512b6bf`. Node `24.19.0` full
@@ -76,14 +130,15 @@ stale failure preserved `1/1`, recovery in 7,693 ms, and end submission returned
 7,786 ms before approval. Grid columns were 2/3/6, no overflow or page errors occurred, and seven
 lightweight polls did not periodically reload financial dashboard endpoints.
 
-The production pre/postflight checker continues to detect three cancelled 2026-08-11 shifts with tranches
-`300,000`/`30,000` but journals `30,000,000`/`3,000,000` minor units. A separate backup query
-confirmed the exact 100× history. On 2026-08-23 the owner explicitly accepted exactly these three
-cancelled shifts as grandfathered historical exceptions for the `0035` rollout. They are not
-repaired or hidden: pre/postflight must continue reporting the same three, with all other checks
-clean. Their IDs are `0df7c7f1-105c-40b3-97ec-3fc81f83874c`,
+During the historical `0035` rollout, the pre/postflight checker detected three cancelled
+2026-08-11 shifts with tranches `300,000`/`30,000` but journals
+`30,000,000`/`3,000,000` minor units. A separate backup query confirmed the exact 100× history, and
+the owner accepted exactly those rows for that rollout. They were not repaired or hidden. Their IDs
+are `0df7c7f1-105c-40b3-97ec-3fc81f83874c`,
 `f51cd7a1-ffa5-4e72-b0e4-a1761531b11b`, and `b81ad711-835b-479a-8ee1-37105ca96c21`. The rollout
-then completed with the exception set unchanged. Validated backups contained
+then completed with the exception set unchanged. This paragraph is historical evidence, not the
+current release status: the `0039` production checker reports zero violations and no live row was
+rewritten. Validated `0035` backups contained
 58 tables / 3,852 pre-migration rows and 58 / 3,853 post-migration rows. Production smokes passed,
 and the post-backup restore reproduced all 3,853 rows and every table fingerprint with 27 safe
 sequences, no disabled triggers, zero unbalanced entries, and a clean rollback probe. The two shifts
@@ -187,21 +242,20 @@ real protection either way.
 ## Current state
 
 ```
-domain       425 tests
-contracts     12 tests
-client       257 tests
-admin         93 tests
+domain       429 tests
+contracts     19 tests
+client       263 tests
+admin        136 tests
 driver       263 tests
-adapters     121 tests
-database      63 passed / 8 skipped locally (no DATABASE_URL)
-api          649 tests
+adapters     130 tests
+database      88 passed / 11 skipped by default; 141/141 on disposable PostgreSQL at release
+api          675 tests
 ```
 
-The unchanged pre-hotfix database evidence remains 108/108 on a positively identified disposable
-PostgreSQL 17.11 database. `packages/db/verify-guards.sql` attempted the forbidden writes and passed
-every guard; destructive conformance was never pointed at production. The hotfix has no database
-code or migration, and the local hotfix run's 8 skips are stated rather than folded into the earlier
-zero-skip result. The production integrity checker is read-only and separately continues to report
-only the exact owner-accepted historical exceptions documented above.
+The release database evidence is 141/141 on a positively identified disposable PostgreSQL database,
+with zero skips. Destructive conformance and guard suites were never pointed at production. The 11
+default skips remain stated rather than folded into the real-database result. Production and the
+restored post-release backup both pass all 17 permanent read-only integrity checks with zero
+violations.
 
 Run the full gate with `pnpm check`.

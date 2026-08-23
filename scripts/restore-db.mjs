@@ -27,6 +27,7 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createGunzip } from 'node:zlib'
+import { resetOwnedSequences } from './restore-db-sequences.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const req = createRequire(join(root, 'packages/db/package.json'))
@@ -214,18 +215,9 @@ async function main() {
    * came back with `journal_entries` about to reissue id 1 over a table whose max was 12.
    */
   console.log('\nresetting sequences…')
-  let reset = 0
-  for (const t of order) {
-    for (const c of manifest.columns[t] ?? []) {
-      const [{ seq }] = await sql.query(`SELECT pg_get_serial_sequence($1, $2) AS seq`, [t, c.name])
-      if (!seq) continue
-      // `false` so the NEXT value is max+1: `setval(seq, 0, true)` on an empty table is illegal.
-      await sql.query(
-        `SELECT setval('${seq}', COALESCE((SELECT MAX("${c.name}") FROM "${t}"), 0) + 1, false)`,
-      )
-      reset++
-    }
-  }
+  // One catalog query plus one reset query keeps this practical over Neon HTTP. The old
+  // per-column probe made 652 network round trips for the 0039 backup and timed out mid-reset.
+  const reset = await resetOwnedSequences(sql, order)
   console.log(`  ${reset} sequences`)
 
   console.log(`\nrestored ${loaded} of ${manifest.totalRows} rows into ${targetHost}`)
