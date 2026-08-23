@@ -1,12 +1,12 @@
 # STATUS — where ASH Delivery stands
 
-Written for you coming back to this cold. **Production is on migration `0034` (deployed
-2026-08-17); the `0035` release candidate is not live.** The candidate adds live working-driver and
-working-vehicle dashboard counts, closes the zero-opening-funds and tranche-retry defects, adds
-money-range and settlement database guards, corrects dashboard profit semantics, and installs a
-permanent read-only shift-money integrity checker. A driver may now hand an end package to manager
-review even when its money differs or end-battery evidence is incomplete. Incomplete packs become
-explicit manager-reading obligations; this does not bypass manager approval or settlement.
+Written for you coming back to this cold. **Production is on migration `0035`, deployed
+2026-08-23.** Live working-driver and working-vehicle dashboard counts, zero-opening-funds handling,
+safe tranche retries, money-range and settlement database guards, corrected dashboard profit
+semantics, and the permanent read-only shift-money integrity checker are live. A driver may hand an
+end package to manager review even when its money differs or end-battery evidence is incomplete.
+Incomplete packs become explicit manager-reading obligations; this does not bypass manager approval
+or settlement.
 
 The final isolated gate ran on Node `24.19.0`, pnpm `11.3.0`, and PostgreSQL `17.11`. A frozen
 install, full `pnpm check`, and required real-PostgreSQL rerun passed **1,916/1,916 tests**: domain
@@ -27,45 +27,51 @@ shift changed the distinct counts from `0/0` to `1/1` in 7,516 ms; a failed refr
 7,786 ms, before manager approval. The layout used 2/3/6 columns, had no horizontal overflow or
 page errors, and polling the lightweight endpoint did not reload financial dashboard data.
 
-The production checker was rerun read-only at 2026-08-23 08:07 Damascus. Thirteen checks were clean;
-the same three cancelled 2026-08-11 shifts still report their known exact 100× tranche/journal
-history. At 08:21 the owner explicitly accepted exactly those three cancelled shifts as grandfathered
-historical exceptions and directed the `0035` deployment. They remain visible in every pre/postflight
-report and receive no repair, deletion, or checker suppression. Promotion may proceed only while the
-exception set is unchanged and every other integrity check remains clean. Vercel deployment access
-was restored for this rollout; the real-staff shift audit remains a post-deployment requirement.
+The coordinated rollout completed from frozen commit `6389816`. API writes were paused and drained;
+validated backups captured 58 tables / 3,852 rows before migration and 58 / 3,853 after it. Only
+`0035` applied, then its checksum rerun found 0 pending / all 35 present. Postflight retained exactly
+the three owner-accepted cancelled-shift exceptions and found no other violation. The API was
+promoted first, followed by driver and admin, before writes resumed. Health/auth, both proxies and
+SPA fallbacks, the dashboard route, manifest, service worker, admin asset `index-DGhFwpyp.js`, and
+driver asset `index-Z4O4ZOFe.js` passed. A local disposable restore reproduced all 58 tables / 3,853
+rows, every table fingerprint, 27 sequences, enabled triggers, zero unbalanced journals, and a clean
+rolled-back write probe. The real-staff close audit remains a post-deployment requirement.
+
+The accepted exception set is immutable deployment evidence: shifts
+`0df7c7f1-105c-40b3-97ec-3fc81f83874c`, `f51cd7a1-ffa5-4e72-b0e4-a1761531b11b`, and
+`b81ad711-835b-479a-8ee1-37105ca96c21`, accepted by the owner at 08:21 Damascus on 2026-08-23.
+Any new or changed exception still blocks a future promotion.
 
 ---
 
 ## The one-line answer
 
-**Bundle 1a, fixed settlement, durable close drafts (`0034`), verified AI order reading, and the
-clarified branch treasury are live on Vercel + Neon + Vercel Blob.** The working-count and
-shift-money-integrity release (`0035`) is fully verified and authorized for coordinated production
-rollout with the three known cancelled shifts retained as explicit historical exceptions.
+**The working-count and shift-money-integrity release (`0035`) is live on Vercel + Neon + Vercel
+Blob.** The three known cancelled shifts remain explicit historical exceptions; they were neither
+rewritten nor hidden.
 
 ## Live URLs (team `hadis-projects-3c86ccdb`, all public)
 
 | Surface | URL | Live deployment |
 | --- | --- | --- |
-| Admin console | https://ash-admin-eta.vercel.app | `dpl_8n3sLrMGjF7FQj7EVAhqbbhCM86W` |
-| Driver PWA | https://ash-driver.vercel.app | `dpl_6JVSMPr1ofVwnYhvYJYncygAFpia` |
-| API | https://ash-api-xi.vercel.app | `dpl_6Rknpd6` |
+| Admin console | https://ash-admin-eta.vercel.app | `dpl_9d5Zp8QHMwuKiUB5SxJXgR5xWvpw` |
+| Driver PWA | https://ash-driver.vercel.app | `dpl_GzB3CyzkjEFBeYyP1WaHQwZYHccw` |
+| API | https://ash-api-xi.vercel.app | `dpl_9DnbaiswA4bPP1bCEJ8H2eLi4Fub` |
 
-Neon (PostgreSQL **18.4**, eu-central-1) has the **34-migration live baseline** and is bootstrapped
+Neon (PostgreSQL **18.4**, eu-central-1) has the **35-migration live baseline** and is bootstrapped
 with the §3 permission matrix, the Damascus branch, the historical tier table, and two admins
 (`admin`/system_admin, `gm`/general_manager)
 — **no demo data in the live ledger.** Full deploy detail and redeploy steps:
 [docs/DEPLOY-VERCEL-NEON.md](docs/DEPLOY-VERCEL-NEON.md).
 
-The earlier validated backup moved from `53` tables / `2,993` rows / `32` migrations before `0033`
-to `53` / `2,994` / `33` after it. The 2026-08-23 preflight positively identified production at
-`0034`; a new rollout backup was intentionally not started after the integrity gate blocked
-promotion.
+The `0035` rollout backups are
+`Desktop\ash-backups\2026-08-23-pre-0035\2026-08-23T05-42-10-547Z` (58 tables / 3,852 rows / 34
+migrations) and `Desktop\ash-backups\2026-08-23-post-0035\2026-08-23T05-44-48-740Z` (58 / 3,853 /
+35). Both were fully validated before promotion.
 
 ---
 
-## Current release-candidate verification
+## Current production-release verification
 
 | Layer | State |
 | --- | --- |
@@ -104,10 +110,9 @@ conformance at production because it truncates application tables.
 
 | Item | Effort | Note |
 | --- | --- | --- |
-| Resolve the production integrity blocker and deploy `0035` | — | Three cancelled shifts have exact 100× tranche/journal mismatches. No automatic ledger repair is allowed; obtain a supervised accounting decision, rerun preflight, then use the coordinated RUNBOOK. |
+| First real `0035` close audit | — | Two ordinary shifts were open when deployment completed. Audit their working-count reversal and first completed settlement without fabricating production data. |
 | Audit Muhammad/Thaer after `0034` | — | Pending and deliberately separate from deployment; use only audited API workflows, never direct SQL or automatic approval. |
 | Broader physical-device QA | — | The focused 390/768/1280 px Arabic/English release flow passed; physical camera, offline, install, and long-session testing remain broader follow-up work. |
-| First real `0035` shift-close audit | — | Candidate browser acceptance used isolated data only. After the blocker is resolved and deployment succeeds, audit the next ordinary Damascus staff shift exactly as described in the RUNBOOK. |
 | Historical tier admin | retired | Tier tables remain readable for approved history; editing and publication are intentionally disabled by the fixed 40% policy. |
 | QR code on 2FA enrolment | ~1 h | The secret is shown for manual entry; a QR renderer is a nicety. |
 | Attendance (B-4) | ~0.5 day | Table only. |
@@ -123,9 +128,9 @@ until an audited manager decision is a deliberate accounting guard, not an unfin
    settlement is measured against a wallet number Yallago produces; compare one complete real shift
    before treating the variance explanation as calibrated. Variance no longer blocks submission.
 2. ~~**Prove the database release and restore path.**~~ **Done** on PostgreSQL 17 and isolated Neon.
-   The current release additionally validated production backups before `0033` (`53` tables /
-   `2,993` rows / `32` migrations) and after it (`53` / `2,994` / `33`). Destructive suites stay off
-   production.
+   The `0035` release validated production backups before migration (`58` tables / `3,852` rows /
+   `34` migrations) and after it (`58` / `3,853` / `35`), then reproduced every table fingerprint
+   in an explicitly named disposable restore database. Destructive suites stay off production.
 3. ~~**Pick object storage.**~~ **Done — Vercel Blob (private).** `BLOB_DRIVER=vercel`, a
    `VercelBlobStore` adapter behind the `BlobStore` port, store linked to the `ash-api` project so
    `BLOB_READ_WRITE_TOKEN` is injected. The durable-storage boot guard accepts it; evidence photos
@@ -139,9 +144,8 @@ until an audited manager decision is a deliberate accounting guard, not an unfin
 7. ~~**Rotate the Neon owner credential and secure database credentials.**~~ **Done:** the old
    direct and pooled credentials are rejected, and runtime/owner secrets are DPAPI-protected outside
    the repository.
-8. **Restore Vercel CLI authentication before rollout.** The local OIDC material is expired and is
-   not a deploy token. Create/test a successor credential before revoking anything, then record the
-   new deployment IDs during the coordinated promotion.
+8. **Rotate the deployment token shared during the `0035` rollout.** The release succeeded, but a
+   credential placed in chat must be replaced and the successor verified before revocation.
 
 Full deploy steps: `docs/DEPLOY-VERCEL-NEON.md`.
 

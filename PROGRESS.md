@@ -1,5 +1,29 @@
 # PROGRESS
 
+## 2026-08-23 — `0035` is live
+
+The coordinated Vercel + Neon release completed from frozen commit `6389816`. API writes paused and
+drained to two zero-activity samples while the two real open shifts remained intact. The validated
+pre-backup contains 58 tables / 3,852 rows / 34 migrations. Only
+`0035_shift_money_integrity.sql` applied (FNV `087c01d4`), and the immediate rerun found 0 pending /
+all 35 present. Postflight preserved exactly the three owner-accepted cancelled-shift exceptions and
+found no other integrity violation; runtime cannot update/delete journal rows or create temp tables.
+The validated post-backup contains 58 tables / 3,853 rows / 35 migrations.
+
+All stable aliases were promoted while the API remained paused, in the required order—API first,
+then driver and admin: API
+`dpl_9DnbaiswA4bPP1bCEJ8H2eLi4Fub`, driver `dpl_GzB3CyzkjEFBeYyP1WaHQwZYHccw`, admin
+`dpl_9d5Zp8QHMwuKiUB5SxJXgR5xWvpw`. After resume, health/auth, both frontend proxies and SPA
+fallbacks, the protected working-count route, manifest, service worker, and exact production asset
+hashes passed: admin `index-DGhFwpyp.js`, driver `index-Z4O4ZOFe.js`. Production reports two
+distinct working drivers and two working vehicles.
+
+The post-backup was restored into the explicitly named local disposable database
+`ash_restore_0035_post_20260823_0849`. All 58 table fingerprints and 3,853 rows matched, all 27
+sequences were positioned safely, no trigger remained disabled, journals balanced, and a rolled-back
+write probe left no object. The scratch database was dropped and its PostgreSQL server stopped. The
+next required evidence is the real-staff close of the two open shifts; no transaction was fabricated.
+
 ## 2026-08-23 — `0035` rollout authorized with an explicit historical exception
 
 The read-only production checker was rerun at 08:07 Damascus: 13 checks were clean and the same
@@ -7,7 +31,10 @@ three cancelled 2026-08-11 shifts retained the previously confirmed exact 100× 
 history. At 08:21 the owner explicitly directed the release to proceed while grandfathering exactly
 those three cancelled shifts. This is a deployment exception, not a ledger rewrite: the records
 remain unchanged, the checker continues to report them, and any new or different discrepancy still
-stops the rollout. Vercel project access was restored for the coordinated release.
+stops the rollout. The exact accepted shift IDs are
+`0df7c7f1-105c-40b3-97ec-3fc81f83874c`, `f51cd7a1-ffa5-4e72-b0e4-a1761531b11b`, and
+`b81ad711-835b-479a-8ee1-37105ca96c21`. Vercel project access was restored for the coordinated
+release.
 
 ## 2026-08-23 — driver can finish despite mismatch or missing end-battery evidence
 
@@ -34,8 +61,8 @@ Final Node 24 gate: **1,916/1,916** tests (425 domain + 12 contracts + 256 clien
 driver + 119 adapters + 108 real-PostgreSQL DB + 647 API), zero DB skips. The combined API regression
 proves `1/1 → 0/0` working counts on a mismatched close with one complete pack and one missing BMS
 photo, preserves the complete pack, blocks manager approval, then succeeds after the manager supplies
-the deferred reading. Driver/admin production builds and the API bundle passed. This source remains
-undeployed because the previously documented production tranche/journal integrity blocker remains.
+the deferred reading. Driver/admin production builds and the API bundle passed. At that checkpoint
+the source was still undeployed; the later rollout entry above records its promotion.
 
 ## 2026-08-23 — working-count and shift-close candidate green; production blocked by preflight
 
@@ -70,12 +97,13 @@ overflow or page errors, `0/0 → 1/1` in 7,516 ms, failed refresh visibly stale
 `1/1`, recovery in 7,693 ms, and end submission `1/1 → 0/0` in 7,786 ms before approval. Seven
 lightweight count requests caused no periodic financial-data reload.
 
-Production was not changed. The mandatory read-only checker, run at 2026-08-23 01:07 Damascus,
+At that candidate checkpoint production was not changed. The mandatory read-only checker, run at
+2026-08-23 01:07 Damascus,
 found three cancelled 2026-08-11 shifts with `300,000`/`30,000` minor-unit tranches but
 `30,000,000`/`3,000,000` journal events—exactly 100×. A validated local backup independently
 confirmed the history. This violates the tranche/journal invariant and blocks promotion by policy;
-there was no automatic repair, migration, deploy, or fabricated live transaction. Production
-remains at `0034`. Vercel CLI auth is unavailable and the next-real-staff-shift audit is pending.
+there was no automatic repair, migration, deploy, or fabricated live transaction. The later rollout
+entry above records the owner exception and successful deployment; the real-staff audit is pending.
 
 ## 2026-08-22 — the Gemini reader is LIVE (`dpl_6Rknpd6`)
 

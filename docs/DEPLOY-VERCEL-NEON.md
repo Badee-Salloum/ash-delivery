@@ -10,17 +10,20 @@ if ignored.**
 
 Team `hadis-projects-3c86ccdb`, three projects, all public (no deployment protection):
 
-| Surface | URL | Notes |
+| Surface | URL | Live deployment / notes |
 | --- | --- | --- |
-| Admin console | https://ash-admin-eta.vercel.app | React SPA, `/api/*` proxied to the API |
-| Driver PWA | https://ash-driver.vercel.app | installable PWA, `/api/*` proxied to the API |
-| API | https://ash-api-xi.vercel.app | Fastify serverless function |
-| Database | Neon `ep-billowing-butterfly-…` (eu-central-1, **Postgres 18**) | live at `0033` (33 migrations) + bootstrapped |
+| Admin console | https://ash-admin-eta.vercel.app | `dpl_9d5Zp8QHMwuKiUB5SxJXgR5xWvpw`; React SPA, `/api/*` proxied to API |
+| Driver PWA | https://ash-driver.vercel.app | `dpl_GzB3CyzkjEFBeYyP1WaHQwZYHccw`; installable PWA, `/api/*` proxied to API |
+| API | https://ash-api-xi.vercel.app | `dpl_9DnbaiswA4bPP1bCEJ8H2eLi4Fub`; Fastify serverless function |
+| Database | Neon `ep-billowing-butterfly-…` (eu-central-1, **Postgres 18**) | live at `0035` (35 migrations) + bootstrapped |
 | Evidence | Vercel Blob store `ash-evidence` (private) | linked to `ash-api` |
 
-**Version boundary:** the repository's staged source head includes migration `0034`, but this live
-table is still the validated `0033` production state. No `0034` migration or candidate alias has
-been promoted, and no Muhammad/Thaer production repair has been performed.
+**Version boundary:** production is at `0035`, deployed 2026-08-23 from commit `6389816`. The three
+known cancelled-shift tranche/journal discrepancies remain explicit owner-accepted historical
+exceptions: `0df7c7f1-105c-40b3-97ec-3fc81f83874c`,
+`f51cd7a1-ffa5-4e72-b0e4-a1761531b11b`, and `b81ad711-835b-479a-8ee1-37105ca96c21`. The owner
+accepted exactly this set at 08:21 Damascus on 2026-08-23. No Muhammad/Thaer production repair or
+fabricated transaction was performed.
 
 Verified end to end: `POST /api/auth/login` → 200 with a session cookie that survives the proxy;
 an authenticated `GET /api/notifications` → 200; the same route without the cookie → 401.
@@ -95,18 +98,16 @@ different driver. Idempotent: safe to re-run.
 
 ### 1.4 Prove guards and adapters only on disposable databases
 
-For release `a150380`, the full Node 24 gates passed and the complete PostgreSQL suite passed
-**69/69** on a real, disposable PostgreSQL 17 database after all 33 migrations; the guard harness
-also passed every group. The isolated Neon scratch was used separately for the historical backup
-restore, fingerprint, invariant, sequence, trigger, and rollback rehearsal. The PostgreSQL suite
-and guard harness are destructive verification tools, not production health checks: conformance
-runs `TRUNCATE` in `beforeEach`, and the guard harness intentionally attempts forbidden writes.
+Release `6389816` passed the full Node `24.19.0` gate: **1,916/1,916** tests, including **108/108**
+real-PostgreSQL tests with zero database skips, after fresh migrations `0001`–`0035`. The checksum
+rerun applied `0` and found all 35 migrations. `0034` is FNV `5bc30a31` / SHA-256
+`228F090D8FCF2DC0CA1B7EDF6FA500D679CA19ED9E388D2DE9054B7EE2E8659A`; `0035` is FNV `087c01d4` /
+SHA-256 `D3958FCABB4886E390DBCD969E8BFA1241265A8CA661A843C80FA51176ECEF40`.
 
-The unpublished `0034` candidate has its own final gate: Node `24.19.0`, PostgreSQL `17.11`, fresh
-`34/34` migrations, checksum rerun `0 applied / 34 present`, every guard green, and **76/76** real-DB
-tests across 15 files. Its disposable migration checksum is `5bc30a31`; file SHA-256 is
-`228F090D8FCF2DC0CA1B7EDF6FA500D679CA19ED9E388D2DE9054B7EE2E8659A`. These results do not change
-the live migration head shown in §0.
+The PostgreSQL suite and guard harness are destructive verification tools, not production health
+checks: conformance runs `TRUNCATE` in `beforeEach`, and the guard harness intentionally attempts
+forbidden writes. Production receives only read-only integrity checks plus tightly scoped denial
+probes whose fixtures are rolled back.
 
 Point them only at a positively identified disposable database:
 
@@ -115,8 +116,7 @@ DATABASE_URL='<disposable-postgres-url>' pnpm --filter @ash/db test
 psql '<disposable-postgres-url>' -v ON_ERROR_STOP=1 -f packages/db/verify-guards.sql
 ```
 
-Production receives read-only invariant queries plus tightly scoped `ash_runtime` denial probes
-whose fixtures are rolled back. Never substitute the live URL into either command above.
+Never substitute the live URL into either command above.
 
 ---
 
@@ -215,23 +215,21 @@ redeploy a front-end: `pnpm build:apps`, copy `apps/<app>/dist/*` into a staging
 
 ## 7. Deploy checklist
 
-### Staged `0034` candidate — all production steps remain unchecked
+### Validated live `0035` checklist — 2026-08-23
 
-Migration `0034` adds the durable close draft and linked OCR protocol. Old driver linked-order
-reads are deliberately refused with `428 driver_update_required`, and the service-worker/reader
-cache identity changed. Stage all artifacts first, then keep writes paused through the ordered
-promotion: **migration `0034` → API → driver/admin**. The API must be promoted before either UI, but
-writes must not resume until all three stable aliases are coherent.
-
-- [x] Disposable Node 24.19 / PostgreSQL 17.11 gate: fresh 34 migrations, rerun/checksum, guards, and 76/76 DB tests
-- [ ] Read-only production preflight and inventory of open/`pending_review` shifts
-- [ ] Validated pre-`0034` logical backup
-- [ ] Apply `0034` once with the direct owner URL; verify checksum, objects, guards, and runtime grants
-- [ ] Read-only postflight and validated post-`0034` logical backup while writes remain paused
-- [ ] Promote candidate API first, then candidate driver/admin; keep all aliases coherent before resume
-- [ ] Smoke-test linked OCR, restored draft after reload, service worker, and headerless-read `428`
-- [ ] Restore the post-migration backup into scratch and verify fingerprints/invariants
-- [ ] Separately audit Muhammad and Thaer through API workflows; no direct SQL and no automatic approval
+- [x] Frozen commit `6389816`: Node 24 gate, both frontend builds, API bundle, and 108/108 real-DB tests
+- [x] Read-only preflight and inventory; two open shifts identified before maintenance
+- [x] Exact three historical cancelled-shift exceptions explicitly accepted; no repair or suppression
+- [x] API writes paused and database activity drained without changing either open shift
+- [x] Validated pre-backup: 58 tables / 3,852 rows / 34 migrations
+- [x] Applied `0035` only; immediate checksum rerun found 0 pending / all 35 present
+- [x] Postflight guards, runtime denial probes, and permanent integrity checker passed apart from the exact accepted exceptions
+- [x] Validated post-backup: 58 tables / 3,853 rows / 35 migrations
+- [x] API promoted first, then driver and admin, while writes remained paused
+- [x] Health/auth/proxy/SPA/PWA/dashboard smokes passed after resume; admin `index-DGhFwpyp.js`, driver `index-Z4O4ZOFe.js`
+- [x] Post-backup restored into an explicitly named disposable database; all table fingerprints, 27 sequences, triggers, journals, and rollback probe verified
+- [ ] Audit the two real-staff closes: count reversal, fixed-40% settlement, immutable decision/hash coupling, balanced journals, and zero residual balances
+- [ ] Rotate the deployment token disclosed during the rollout after verifying its successor
 
 ### Validated live `0033` checklist — historical production record
 

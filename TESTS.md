@@ -42,12 +42,18 @@ stale failure preserved `1/1`, recovery in 7,693 ms, and end submission returned
 7,786 ms before approval. Grid columns were 2/3/6, no overflow or page errors occurred, and seven
 lightweight polls did not periodically reload financial dashboard endpoints.
 
-The production preflight still reports three cancelled 2026-08-11 shifts with tranches
+The production pre/postflight checker continues to detect three cancelled 2026-08-11 shifts with tranches
 `300,000`/`30,000` but journals `30,000,000`/`3,000,000` minor units. A separate backup query
 confirmed the exact 100× history. On 2026-08-23 the owner explicitly accepted exactly these three
 cancelled shifts as grandfathered historical exceptions for the `0035` rollout. They are not
 repaired or hidden: pre/postflight must continue reporting the same three, with all other checks
-clean. The real-staff live-shift acceptance remains pending until after deployment.
+clean. Their IDs are `0df7c7f1-105c-40b3-97ec-3fc81f83874c`,
+`f51cd7a1-ffa5-4e72-b0e4-a1761531b11b`, and `b81ad711-835b-479a-8ee1-37105ca96c21`. The rollout
+then completed with the exception set unchanged. Validated backups contained
+58 tables / 3,852 pre-migration rows and 58 / 3,853 post-migration rows. Production smokes passed,
+and the post-backup restore reproduced all 3,853 rows and every table fingerprint with 27 safe
+sequences, no disabled triggers, zero unbalanced entries, and a clean rollback probe. The two shifts
+open during deployment remain the real-staff close acceptance cases.
 
 ### Driver end handoff follow-up
 
@@ -65,9 +71,9 @@ required evidence/values, invalid operations, and odometer confirmation still bl
 | --- | --- | --- | --- |
 | **1** | A shift cannot open before the start package is complete, the driver confirms, and the branch manager approves | `shift/state.test.ts` › "the OPEN gate (BR5, AC #1)" (5 cases) | ✅ |
 | | | `api/lifecycle.test.ts` › "will not open without the odometer photo" / "will not open before the branch manager approves" | ✅ |
-| **2** | A shift cannot close before the zero equation holds and the branch manager approves | `br1/canonical.test.ts` › "closes the zero equation exactly" · `br1/property.test.ts` › "closes at exactly zero for any mix" | ✅ |
-| | | `shift/state.test.ts` › "the CLOSE gate (BR5, AC #2)" (7 cases) | ✅ |
-| | | `api/lifecycle.test.ts` › "will not close when the equation is not zero, and says why" | ✅ |
+| **2** | A driver may submit a nonzero result for review; final approval requires BR1 zero or an application-validated settlement, plus branch-manager approval | `br1/canonical.test.ts` › "closes the zero equation exactly" · `br1/property.test.ts` › "closes at exactly zero for any mix" | ✅ |
+| | | `shift/state.test.ts` › "the CLOSE gate (BR5, AC #2)" (9 executed cases) | ✅ |
+| | | `api/lifecycle.test.ts` › "submits and settles when the equation is not zero, while still explaining the difference" | ✅ |
 | | | `api/lifecycle.test.ts` › "the SRS §2.3 shift, end to end over HTTP" | ✅ |
 | | | `shift/lifecycle.e2e.ts` — the same, through the real **UI** | 🔜 M3 |
 | **3** | A cash order deducts 20% of its fee instantly from the driver's wallet to the Yallago fund | `br1/canonical.test.ts` › "reproduces the SRS table row for row" · "splits at approval" | ✅ |
@@ -160,6 +166,6 @@ api          647 tests
 `packages/db/verify-guards.sql` was executed against a positively identified disposable PostgreSQL
 17.11 database. It attempted the forbidden writes and passed every guard; destructive conformance
 was never pointed at production. The production integrity checker is read-only and separately
-reported the release blocker documented above.
+continues to report only the exact owner-accepted historical exceptions documented above.
 
 Run the full gate with `pnpm check`.
