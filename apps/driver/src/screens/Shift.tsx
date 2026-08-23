@@ -72,6 +72,7 @@ import {
   describeEndSubmitFailure,
   type EndSubmitFailureNotice,
 } from '../end-submit-error.ts'
+import { endReviewWarningKeys } from '../end-review.ts'
 import type { AiPageReadState } from '../ai-page-read-state.ts'
 import { deletePendingEvidenceForShift } from '../pending-evidence-storage.ts'
 
@@ -1443,11 +1444,9 @@ function StartPackage({
     )
   }
 
-  // `batteriesReady` gates too, matching the close screen and the server BR5 gate: a driver can't
-  // confirm start until every fitted pack's required reading is in — the pack charges ARE the
-  // battery state now, so there is no separate bike-level battery field to fill.
-  // Same rule as the close gate: the list IS the gate, so what is disabled and what is explained
-  // can never drift apart.
+  // Opening remains strict: a driver cannot confirm the start until every fitted pack's required
+  // reading is in. End-of-shift evidence is different because an incomplete pack can be handed to
+  // the manager for review, but the opening baseline must be complete before work begins.
   const missing: string[] = [
     ...(odoShot ? [] : [t.shift.odometerShot]),
     ...(parseNonNegativeInteger(odo) === null ? [t.shift.odometer] : []),
@@ -1767,8 +1766,10 @@ function EndPackage({
     const name = labels[base] ?? slot
     return n === 1 ? name : `${name} ${n}`
   }
-  // Each fitted pack's closing charge gates the button (batteriesReady), matching the server. The
-  // bike-level battery field is gone — charge is tracked per pack.
+  // Each fitted pack's closing charge is still measured here, but incomplete END evidence is a
+  // manager-review warning rather than a reason to strand the driver at work. The server
+  // atomically transfers only those incomplete packs to the manager when the shift is submitted.
+  // The bike-level battery field is gone — charge is tracked per pack.
   // The close gate counts the shift's ORDERS, checked or not — see `endPackageGaps`. Deliberately
   // the total and not the checked count: a driver who unchecks everything would otherwise be
   // refused submission, and every tool that could rescue him needs the shift to reach review first.
@@ -1807,7 +1808,6 @@ function EndPackage({
     ...(cash === '' ? [t.shift.cashHandover] : []),
     ...(wallet === '' ? [t.shift.walletBalance] : []),
     ...(odometerKm === null ? [t.shift.odometer] : []),
-    ...(batteriesReady ? [] : [t.battery.percent]),
     ...(named === 0 ? [t.orders.title] : []),
     ...(allProblems(draft.orders).size > 0 ? [t.shift.fixOrderRows] : []),
     ...(!cashDeductionsAreValid(draft.cashDeductions) ? [t.shift.fixOrderRows] : []),
@@ -1834,6 +1834,15 @@ function EndPackage({
       ? null
       : br1DifferencePresentation(preview.differenceText)
   const submittedDifference = br1 === null ? null : br1DifferencePresentation(br1.difference)
+  const reviewWarningKeys = endReviewWarningKeys({
+    difference: previewDifference?.direction ?? null,
+    batteriesReady,
+  })
+  const reviewWarnings = reviewWarningKeys.map((key) =>
+    key === 'moneyMismatch'
+      ? t.shift.reviewWarningMoneyMismatch
+      : t.shift.reviewWarningBatteryIncomplete,
+  )
 
   /** Submit the exact revision/hash; the server materialises its canonical draft atomically. */
   async function submit(): Promise<void> {
@@ -1866,6 +1875,9 @@ function EndPackage({
         odometerStrip: draft.odoStrip,
         draftRevision: draft.closeDraftRevision,
         draftHash: draft.closeDraftHash,
+        // Missing end BMS evidence must not keep a driver clocked in. The API converts only those
+        // incomplete packs into an explicit manager-reading obligation inside the close transaction.
+        deferMissingBatteryEvidenceToManager: true,
       })
       setBr1(res.br1)
       // A non-zero difference is now a manager settlement decision, not a driver submission gate.
@@ -2088,6 +2100,14 @@ function EndPackage({
               </div>
             </details>
           ) : null}
+          {reviewWarnings.length > 0 ? (
+            <div className="rounded-xl bg-amber-50 px-3 py-2 text-amber-900" role="note">
+              <p className="text-sm font-semibold">{t.shift.reviewWarningTitle}</p>
+              <ul className="mt-1 list-disc space-y-0.5 ps-5 text-xs">
+                {reviewWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+              </ul>
+            </div>
+          ) : null}
           {/* NAMED, not merely absent. Tapping the footer's dead button is how a driver concludes
               the app is broken; this says which thing to go and do. */}
           {!ready && missing.length > 0 ? (
@@ -2145,7 +2165,11 @@ function EndPackage({
             </div>
           ) : null}
           <Button variant="success" disabled={!ready || busy} onClick={submit}>
-            {busy ? t.common.loading : t.shift.submitEnd}
+            {busy
+              ? t.common.loading
+              : reviewWarnings.length > 0
+                ? t.shift.submitEndForReview
+                : t.shift.submitEnd}
           </Button>
         </div>
       }

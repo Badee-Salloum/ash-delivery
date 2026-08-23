@@ -3,8 +3,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { migrate } from '../src/migrate.ts'
 import { createPool } from '../src/pool.ts'
 import { PgShiftRepo } from '../src/repos-shift.ts'
+import { assertDisposableDatabaseUrl } from './disposable-database.ts'
 
 const DATABASE_URL = process.env.DATABASE_URL
+if (DATABASE_URL) assertDisposableDatabaseUrl(DATABASE_URL)
 
 if (!DATABASE_URL) {
   describe('PostgreSQL shift open-approval precision', () => {

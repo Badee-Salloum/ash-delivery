@@ -7,6 +7,60 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 
 **Legend:** ✅ implemented and green · ⚠ written but never executed · 🔜 planned, milestone named.
 
+## 2026-08-23 release gate — dashboard working counts and shift-close integrity
+
+All release-gate commands ran under Node `24.19.0` / pnpm `11.3.0`. The frozen-install full
+`pnpm check` plus the required real-PostgreSQL rerun passed **1,916/1,916 tests**:
+
+| Package/gate | Tests | Result |
+| --- | ---: | --- |
+| Domain | 425 | ✅ |
+| Contracts | 12 | ✅ |
+| Shared client | 256 | ✅ |
+| Admin | 93 | ✅ |
+| Driver | 256 | ✅ |
+| Adapters | 119 | ✅ |
+| Database on disposable PostgreSQL 17.11 | 108 | ✅, zero skips |
+| API | 647 | ✅ |
+
+Both frontend production builds and the API bundle passed. Fresh migrations `0001`–`0035` applied
+35/35, then the checksum rerun applied 0 and found all 35. The disposable SQL guard harness passed.
+Checksums: `0034` FNV `5bc30a31`, SHA-256
+`228F090D8FCF2DC0CA1B7EDF6FA500D679CA19ED9E388D2DE9054B7EE2E8659A`; `0035` FNV `087c01d4`,
+SHA-256 `D3958FCABB4886E390DBCD969E8BFA1241265A8CA661A843C80FA51176ECEF40`.
+
+Automated coverage includes exact-open/suspended/terminal state counts, distinct actors, branch and
+cross-midnight isolation, polling/branch-switch/failure preservation; zero/blank/positive/mixed
+opening tranches; exact/concurrent/conflicting mid-shift retries and successful close after retry;
+balanced/surplus/shortage/negative-wallet/manual-order/cash-deduction/rephoto/stale-hash/
+lost-response/two-phase-force-close flows; inclusive cross-week profit and variance exclusion; and
+direct PostgreSQL variance-reason plus near-bigint rejection. A twice-seeded release database passed
+all 14 permanent read-only money-integrity checks.
+
+The isolated browser flow passed English/Arabic at 390/768/1280 px: `0/0 → 1/1` in 7,516 ms,
+stale failure preserved `1/1`, recovery in 7,693 ms, and end submission returned `1/1 → 0/0` in
+7,786 ms before approval. Grid columns were 2/3/6, no overflow or page errors occurred, and seven
+lightweight polls did not periodically reload financial dashboard endpoints.
+
+The production preflight still reports three cancelled 2026-08-11 shifts with tranches
+`300,000`/`30,000` but journals `30,000,000`/`3,000,000` minor units. A separate backup query
+confirmed the exact 100× history. On 2026-08-23 the owner explicitly accepted exactly these three
+cancelled shifts as grandfathered historical exceptions for the `0035` rollout. They are not
+repaired or hidden: pre/postflight must continue reporting the same three, with all other checks
+clean. The real-staff live-shift acceptance remains pending until after deployment.
+
+### Driver end handoff follow-up
+
+Regression coverage now proves that a driver can submit a non-zero money result and can explicitly
+defer incomplete end-battery evidence to the manager in the same request. The API test uses two
+packs: one valid attachment/reading is preserved, while the unlinked pack becomes a null,
+`unavailable: true` manager obligation. It verifies working counts `1/1 → 0/0`, a
+`pending_review` state, failed ordinary approval, manager reading completion, and successful final
+approval. A no-flag request retains the historical strict battery gate, and domain tests retain the
+strict start and manager gates. Driver tests prove that mismatch/battery conditions create visible
+review warnings and never enter the end screen's blocking list; active reads, unsaved drafts, other
+required evidence/values, invalid operations, and odometer confirmation still block.
+
 | # | Criterion (SRS §8) | Test | Status |
 | --- | --- | --- | --- |
 | **1** | A shift cannot open before the start package is complete, the driver confirms, and the branch manager approves | `shift/state.test.ts` › "the OPEN gate (BR5, AC #1)" (5 cases) | ✅ |
@@ -22,7 +76,7 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 | | | `ledger/recipes.test.ts` › "SRS §2.3 walked through the ledger" | ✅ |
 | **5** | Σ debits == Σ credits across every entry of any day | `money/allocate.test.ts` › "driver + company + yalago === feeTotal, exactly" | ✅ |
 | | | `ledger/recipes.test.ts` › "every posting balances under random event streams" (400 runs) | ✅ |
-| | | `db/verify-guards.sql` › guard 1 — rejected at COMMIT by Postgres | ⚠ written, unrun |
+| | | `db/verify-guards.sql` › guard 1 — rejected at COMMIT by Postgres | ✅ PostgreSQL 17.11 |
 | **6** | The day's rate applies to all that day's transactions **and the USD equivalent appears in reports** | `fx/rate.test.ts` › "USD equivalence (BR6, AC #6)" (6 cases) + "resolving the day's rate" (5 cases) | ✅ |
 | | | `fx/usd-display.itest.ts` — the *second half* of the criterion, easy to miss | 🔜 M5 |
 | | | `api/auth-rbac.test.ts` › "only the system admin may set the daily rate" | ✅ |
@@ -30,7 +84,7 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 | | | `tier/bands.test.ts` › "the company absorbs the rounding remainder, never the driver and never Yallago" | ✅ |
 | | | `rbac/matrix.test.ts` › "the General Manager may NOT edit tier rules" | ✅ |
 | **9** | The Sunday close blocks any edit to that week's entries except via a visible correction entry | `shift/state.test.ts` › "immutability after the week lock" | ✅ |
-| | | `db/verify-guards.sql` › guards 3, 5a, 5b, 5c — `REVOKE` *and* trigger, entries **and** lines | ⚠ written, unrun |
+| | | `db/verify-guards.sql` › guards 3, 5a, 5b, 5c — `REVOKE` *and* trigger, entries **and** lines | ✅ PostgreSQL 17.11 |
 | | | `ledger/recipes.test.ts` › "corrections (BR7)" | ✅ |
 | **12** | Total profits are visible to the General Manager only; a branch manager sees only his branch | `rbac/matrix.test.ts` — every role × every permission, 93 generated cases | ✅ |
 | | | `shift/state.test.ts` › "RBAC on transitions" | ✅ |
@@ -57,7 +111,7 @@ accrues weekly — which is exactly the kind of thing that silently regresses.
 | BR7 close pre-flight blockers | `week/close.test.ts` (15 cases) | ✅ |
 | B-1 document expiry / B-3 assignment binding | `fleet/documents.test.ts` (24 cases) | ✅ |
 | BR7 Sunday week, Sunday→Saturday | `time/civil.test.ts` › "financial week — Sunday → Saturday" (7 cases) | ✅ |
-| BR7 non-Sunday week start refused by the DB | `db/verify-guards.sql` › guard 4 | ⚠ written, unrun |
+| BR7 non-Sunday week start refused by the DB | `db/verify-guards.sql` › guard 4 | ✅ PostgreSQL 17.11 |
 | BR8 visibility limits | `rbac/matrix.test.ts` (93 cases) + `api/auth-rbac.test.ts` | ✅ |
 | A-1 auth: 5-attempt lockout, 30-min idle sessions | `api/auth-rbac.test.ts` › "authentication" (9 cases) | ✅ |
 | Every route declares a permission (boot assertion) | `api/auth-rbac.test.ts` › "the boot assertion" (3 cases) | ✅ |
@@ -91,15 +145,21 @@ real protection either way.
 ## Current state
 
 ```
-domain    11 files · 260 tests
-api        2 files ·  33 tests   (full lifecycle over HTTP, no database)
-           ────────────────────
-           13 files · 293 tests · ~3 s · no Docker required
+domain       425 tests
+contracts     12 tests
+client       256 tests
+admin         93 tests
+driver       256 tests
+adapters     119 tests
+database     108 tests   (real disposable PostgreSQL 17.11; zero skips)
+api          647 tests
+             ─────────
+           1,916 tests
 ```
 
-**⚠ Rows marked "written, unrun"** live in `packages/db/verify-guards.sql`. That file attempts
-every illegal write and fails if the database allows one, but it has never been executed — this
-machine has no Docker and no `psql`. CI runs it against real Postgres 17, so the first push
-proves them. Until then they are claims, not evidence.
+`packages/db/verify-guards.sql` was executed against a positively identified disposable PostgreSQL
+17.11 database. It attempted the forbidden writes and passed every guard; destructive conformance
+was never pointed at production. The production integrity checker is read-only and separately
+reported the release blocker documented above.
 
-Run with `pnpm -r test`.
+Run the full gate with `pnpm check`.

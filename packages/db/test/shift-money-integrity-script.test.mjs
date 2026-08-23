@@ -1,0 +1,623 @@
+import { createHash, randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { afterAll, describe, expect, it } from 'vitest'
+import { createPool } from '../src/pool.ts'
+import { assertDisposableDatabaseUrl } from './disposable-database.ts'
+import {
+  INTEGRITY_CHECKS,
+  canonicalSettlementHash,
+  canonicalJson,
+  closeDraftHash,
+  runShiftMoneyIntegrity,
+  settlementHashFailures,
+} from '../../../scripts/check-shift-money-integrity.mjs'
+
+const script = readFileSync(
+  new URL('../../../scripts/check-shift-money-integrity.mjs', import.meta.url),
+  'utf8',
+)
+
+describe('read-only shift-money integrity checker', () => {
+  it('covers every permanent release-blocking invariant', () => {
+    expect(INTEGRITY_CHECKS.map((check) => check.id)).toEqual([
+      'settlement_formulas',
+      'settlement_state_coupling',
+      'br1_settlement_snapshot',
+      'journal_metadata_alignment',
+      'double_entry',
+      'tranche_journal_totals',
+      'expected_close_events',
+      'close_journal_alignment',
+      'force_cancel_integrity',
+      'unresolved_operations',
+      'close_draft_boundaries',
+      'residual_driver_balances',
+    ])
+    expect(script).toContain("id: 'settlement_hashes'")
+    expect(script).toContain("id: 'close_draft_hashes'")
+  })
+
+  it('grandfathers only terminal shifts approved before the settlement rollout boundary', () => {
+    const coupling = INTEGRITY_CHECKS.find((check) => check.id === 'settlement_state_coupling').sql
+    expect(coupling).toContain('schema_migrations')
+    expect(coupling).toContain("filename = '0031_shift_settlements.sql'")
+    expect(coupling).toContain("al.after ->> 'state' = 'approved'")
+    expect(coupling).toContain('al.occurred_at >= rollout.applied_at')
+    expect(coupling).toContain('s.created_at >= rollout.applied_at')
+  })
+
+  it('converts decimal close-draft money to exact minor units before comparing it', () => {
+    const boundaries = INTEGRITY_CHECKS.find((check) => check.id === 'close_draft_boundaries').sql
+    expect(boundaries).toContain("{figures,cashDeclared}')::numeric * 100")
+    expect(boundaries).toContain("{figures,walletDeclared}')::numeric * 100")
+    expect(boundaries).toContain("~ '^-?[0-9]+(\\.[0-9]{1,2})?$'")
+  })
+
+  it('accepts a retained submitted draft only for an audited force-cancel', () => {
+    const boundaries = INTEGRITY_CHECKS.find((check) => check.id === 'close_draft_boundaries').sql
+    expect(boundaries).toContain("s.state NOT IN ('pending_review', 'approved', 'week_locked', 'cancelled')")
+    expect(boundaries).toContain('FROM shift_decisions cancel_decision')
+    expect(boundaries).toContain("cancel_decision.gate = 'close'")
+    expect(boundaries).toContain("cancel_decision.decision = 'force_cancelled'")
+    expect(boundaries).toContain('regexp_replace')
+    expect(boundaries).toContain('cancel_decision.notes IS NOT NULL')
+    expect(boundaries).toContain('cancel_decision.decided_at >= d.submitted_at')
+    expect(boundaries).not.toContain('void_audit')
+    expect(boundaries).not.toContain("after ->> 'voided'")
+  })
+
+  it('recognizes the real manager close-figure revision audit shape', () => {
+    const boundaries = INTEGRITY_CHECKS.find((check) => check.id === 'close_draft_boundaries').sql
+    expect(boundaries).toContain("al.after ->> 'revisedByManager' = 'true'")
+    expect(boundaries).toContain("al.actor_kind = 'user' AND al.actor_id IS NOT NULL")
+    expect(boundaries).toContain('al.branch_id = s.branch_id')
+    expect(boundaries).toContain("al.before ->> 'cashDeclared' IS DISTINCT FROM al.after ->> 'cashDeclared'")
+    expect(boundaries).toContain("al.before ->> 'walletDeclared' IS DISTINCT FROM al.after ->> 'walletDeclared'")
+    expect(boundaries).toContain("al.before ->> 'odometerKm' IS DISTINCT FROM al.after ->> 'odometerKm'")
+    expect(boundaries).toContain("(al.after ->> 'cashDeclared')::numeric * 100")
+    expect(boundaries).toContain("(al.after ->> 'walletDeclared')::numeric * 100")
+    expect(boundaries).toContain('IS NOT DISTINCT FROM s.end_cash_declared_minor::numeric')
+    expect(boundaries).toContain('IS NOT DISTINCT FROM s.end_wallet_declared_minor::numeric')
+    expect(boundaries).toContain('IS NOT DISTINCT FROM s.odo_end::numeric')
+    expect(boundaries).not.toContain("al.before ->> 'state' = 'pending_review'")
+    expect(boundaries).not.toContain("al.before ->> 'end_cash_declared_minor'")
+  })
+
+  it('checks only each settled shift contribution and permits carried historical receivables', () => {
+    const residuals = INTEGRITY_CHECKS.find((check) => check.id === 'residual_driver_balances').sql
+    expect(residuals).toContain('je.shift_id = ss.shift_id')
+    expect(residuals).toContain("ft.kind = 'carried_receivable'")
+    expect(residuals).toContain('sb.driver_receivable_cash <> -COALESCE(c.carried, 0)')
+    expect(residuals).toContain("f.type::text = 'driver_receivable_wallet'")
+    expect(residuals).toContain('sb.driver_receivable_wallet <> 0')
+  })
+
+  it('compares the complete close-line multiset so extra balanced lines cannot hide', () => {
+    const alignment = INTEGRITY_CHECKS.find((check) => check.id === 'close_journal_alignment').sql
+    expect(alignment).toContain('expected_lines AS')
+    expect(alignment).toContain('actual_shapes AS')
+    expect(alignment).toContain("FILTER (WHERE jl.id IS NOT NULL)")
+    expect(alignment).toContain('actual.line_shape IS DISTINCT FROM expected.line_shape')
+    expect(alignment).toContain('actual.wallet_entries <> expected.wallet_entries')
+    expect(alignment).toContain('actual.cash_entries <> expected.cash_entries')
+
+    // This is balanced and therefore passes the general double-entry check, but both unexpected
+    // roles remain in the actual multiset and make it differ from the canonical empty set.
+    const extraBalancedLines = [
+      ['float_return', '1', 'unexpected_debit', 'office_cash', null, 'branch', 'D', '25'],
+      ['float_return', '1', 'unexpected_credit', 'office_wallet', null, 'branch', 'C', '25'],
+    ]
+    const signedTotal = extraBalancedLines.reduce(
+      (total, line) => total + (line[6] === 'D' ? BigInt(line[7]) : -BigInt(line[7])),
+      0n,
+    )
+    expect(signedTotal).toBe(0n)
+    expect(JSON.stringify(extraBalancedLines)).not.toBe(JSON.stringify([]))
+  })
+
+  it('ties every shift journal and line fund to the shift branch and accounting dates', () => {
+    const alignment = INTEGRITY_CHECKS.find((check) => check.id === 'journal_metadata_alignment').sql
+    expect(alignment).toContain('je.branch_id IS DISTINCT FROM s.branch_id')
+    expect(alignment).toContain('je.business_date IS DISTINCT FROM s.business_date')
+    expect(alignment).toContain('je.week_start_date IS DISTINCT FROM s.week_start_date')
+    expect(alignment).toContain('f.branch_id IS DISTINCT FROM je.branch_id')
+    expect(alignment).toContain('jl.entry_id = je.id')
+  })
+
+  it('recomputes stored BR1 and settlement sources from canonical included operations', () => {
+    const snapshot = INTEGRITY_CHECKS.find((check) => check.id === 'br1_settlement_snapshot').sql
+    expect(snapshot).toContain('included_orders AS')
+    expect(snapshot).toContain('included_deductions AS')
+    expect(snapshot).toContain('jsonb_array_length(o.close_draft_review_reasons)')
+    expect(snapshot).toContain("o.window_status <> 'unknown'")
+    expect(snapshot).toContain("CASE WHEN io.pay_mode = 'cash' THEN 0 ELSE io.fee_minor::numeric END")
+    expect(snapshot).toContain("WHEN io.kind = 'manual' THEN 0")
+    expect(snapshot).toContain('floor(io.fee_minor::numeric * 2000 / 10000)')
+    expect(snapshot).toContain("FILTER (WHERE ft.kind = 'carried_receivable')")
+    expect(snapshot).toContain('r.equation_diff_minor::numeric IS DISTINCT FROM r.scalar_diff')
+    expect(snapshot).toContain('ss.delivery_fee_total_minor::numeric IS DISTINCT FROM r.delivery_fee_total')
+    expect(snapshot).toContain('ss.cash_deduction_total_minor::numeric IS DISTINCT FROM r.cash_deductions')
+    expect(snapshot).toContain('ss.variance_minor::numeric IS DISTINCT FROM r.scalar_diff')
+  })
+
+  it('audits post-rollout force-cancels without relying on a close draft or settlement', () => {
+    const forceCancel = INTEGRITY_CHECKS.find((check) => check.id === 'force_cancel_integrity').sql
+    expect(forceCancel).toContain("filename = '0035_shift_money_integrity.sql'")
+    expect(forceCancel).toContain("sd.decision = 'force_cancelled'")
+    expect(forceCancel).toContain('(fd.notes)[1] IS NOT NULL')
+    expect(forceCancel).toContain('regexp_replace')
+    expect(forceCancel).toContain("'void-carry-' || vc.id::text")
+    expect(forceCancel).toContain("'float_return'::text, '1'::text")
+    expect(forceCancel).toContain("'wallet_return', '1'")
+    expect(forceCancel).toContain('actual.line_shape IS DISTINCT FROM expected.line_shape')
+    expect(forceCancel).toContain('balances.driver_cash <> 0')
+    expect(forceCancel).toContain('balances.driver_wallet <> 0')
+    expect(forceCancel).toContain('balances.driver_share <> 0')
+    expect(forceCancel).toContain('balances.driver_receivable_cash <> 0')
+    expect(forceCancel).not.toContain('shift_close_drafts')
+    expect(forceCancel).not.toContain('shift_settlements')
+  })
+
+  it('contains only SELECT/CTE audit queries and enforces a read-only snapshot', () => {
+    const mutation = /\b(?:INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|TRUNCATE|GRANT|REVOKE|CALL|COPY)\b/i
+    for (const check of INTEGRITY_CHECKS) {
+      expect(check.sql.trim()).toMatch(/^(?:SELECT|WITH)\b/i)
+      const executableSql = check.sql.replace(/'(?:''|[^'])*'/g, "''")
+      expect(executableSql).not.toMatch(mutation)
+    }
+    expect(script).toContain('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    expect(script).toContain("await client.query('ROLLBACK')")
+    expect(script).not.toContain("await client.query('COMMIT')")
+  })
+
+  it('does not require migration 0035 helpers during the pre-migration production audit', () => {
+    for (const check of INTEGRITY_CHECKS) {
+      expect(check.sql).not.toContain('ash_has_visible_text')
+    }
+    expect(script).toContain('Keep the pre-migration audit runnable on schema 0034')
+  })
+
+  it('opens and rolls back the read-only snapshot without ever committing', async () => {
+    const calls = []
+    let released = false
+    const client = {
+      async query(sql, params) {
+        calls.push({ sql, params })
+        if (sql.includes('current_database()')) {
+          return {
+            rows: [{
+              database: 'disposable',
+              database_user: 'auditor',
+              server_version: '17-test',
+              as_of: '2026-08-23 00:00:00+00',
+            }],
+          }
+        }
+        return { rows: [] }
+      },
+      release() { released = true },
+    }
+    const pool = { async connect() { return client } }
+
+    const result = await runShiftMoneyIntegrity(pool, { sampleLimit: 5 })
+
+    expect(result.violations).toBe(0)
+    expect(calls[0].sql).toBe('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    expect(calls.at(-1).sql).toBe('ROLLBACK')
+    expect(calls.some(({ sql }) => /\bCOMMIT\b/.test(sql))).toBe(false)
+    expect(released).toBe(true)
+  })
+
+  it('uses the same recursively canonical SHA-256 shape as close-draft storage', () => {
+    const payload = {
+      z: [{ b: 2, a: 1 }],
+      a: { d: null, c: 'minor-units' },
+    }
+    const canonical = '{"a":{"c":"minor-units","d":null},"z":[{"a":1,"b":2}]}'
+    expect(canonicalJson(payload)).toBe(canonical)
+    expect(closeDraftHash(payload)).toBe(createHash('sha256').update(canonical).digest('hex'))
+    expect(closeDraftHash({ a: 1, b: 2 })).toBe(closeDraftHash({ b: 2, a: 1 }))
+  })
+
+  it('recomputes settlement hashes and rejects a wrong but well-formed 64-hex value', () => {
+    const row = {
+      shift_id: '00000000-0000-4000-8000-000000000001',
+      branch_id: '00000000-0000-4000-8000-000000000002',
+      driver_id: '00000000-0000-4000-8000-000000000003',
+      business_date: '2026-08-22',
+      delivery_fee_total_minor: '10000',
+      fixed_driver_share_minor: '4000',
+      manual_driver_share_minor: '0',
+      gross_driver_share_minor: '4000',
+      cash_deduction_total_minor: '0',
+      base_driver_share_minor: '4000',
+      expected_total_minor: '10000',
+      actual_cash_minor: '10000',
+      actual_wallet_minor: '0',
+      actual_total_minor: '10000',
+      variance_minor: '0',
+      final_employee_cash_minor: '4000',
+      wallet_to_office_minor: '0',
+      cash_to_office_minor: '6000',
+      wallet_action: 'none',
+      wallet_amount_minor: '0',
+      cash_action: 'collect',
+      cash_amount_minor: '6000',
+      reviewed_orders_hash: 'orders-hash',
+      cash_diff_minor: '0',
+      wallet_diff_minor: '0',
+      close_draft_revision: '3',
+      close_draft_hash: 'b'.repeat(64),
+      close_draft_submitted_at: '2026-08-22T12:00:00.000Z',
+      confirmed_at: '2026-08-22T12:01:00.000Z',
+      close_draft_rollout_at: '2026-08-22T11:00:00.000Z',
+      settlement_hash: 'f'.repeat(64),
+    }
+
+    const computed = canonicalSettlementHash(row)
+    expect(computed).toMatch(/^[0-9a-f]{64}$/)
+    expect(computed).not.toBe(row.settlement_hash)
+    expect(settlementHashFailures([row])).toEqual([{
+      shift_id: row.shift_id,
+      stored_hash: row.settlement_hash,
+      computed_hash: computed,
+    }])
+
+    expect(settlementHashFailures([{ ...row, settlement_hash: computed }])).toEqual([])
+  })
+})
+
+const DATABASE_URL = process.env.SHIFT_MONEY_TEST_DATABASE_URL ?? process.env.DATABASE_URL
+if (DATABASE_URL) assertDisposableDatabaseUrl(DATABASE_URL)
+
+if (!DATABASE_URL) {
+  describe('close journal multiset on PostgreSQL', () => {
+    it.skip('skipped: set SHIFT_MONEY_TEST_DATABASE_URL for the real-PostgreSQL query test', () => {})
+  })
+} else {
+  const pool = createPool(DATABASE_URL)
+
+  afterAll(async () => {
+    await pool.end()
+  })
+
+  describe('close journal multiset on PostgreSQL', () => {
+    it('accepts a canonical close and rejects extra balanced lines', async () => {
+      const client = await pool.connect()
+      const shiftId = randomUUID()
+      const branchId = randomUUID()
+      const driverId = randomUUID()
+      const funds = {
+        driverWallet: randomUUID(),
+        driverCash: randomUUID(),
+        sharePayable: randomUUID(),
+        officeWallet: randomUUID(),
+        officeCash: randomUUID(),
+      }
+      const alignment = INTEGRITY_CHECKS.find((check) => check.id === 'close_journal_alignment').sql
+      const doubleEntry = INTEGRITY_CHECKS.find((check) => check.id === 'double_entry').sql
+      const metadata = INTEGRITY_CHECKS.find((check) => check.id === 'journal_metadata_alignment').sql
+      const violationCount = async (sql) => {
+        const { rows } = await client.query(`SELECT count(*)::text AS count FROM (${sql}) violation`)
+        return Number(rows[0].count)
+      }
+
+      try {
+        await client.query('BEGIN')
+        // Session-local tables execute the production checker SQL on PostgreSQL without touching
+        // any durable application row, even when the supplied test database is already migrated.
+        await client.query(`
+          CREATE TEMP TABLE shifts (
+            id uuid PRIMARY KEY,
+            branch_id uuid NOT NULL,
+            driver_id uuid NOT NULL,
+            business_date date NOT NULL,
+            week_start_date date NOT NULL,
+            state text NOT NULL,
+            created_at timestamptz NOT NULL,
+            wallet_diff_minor bigint
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE shift_settlements (
+            shift_id uuid PRIMARY KEY,
+            branch_id uuid NOT NULL,
+            driver_id uuid NOT NULL,
+            actual_wallet_minor bigint NOT NULL,
+            expected_total_minor bigint NOT NULL,
+            base_driver_share_minor bigint NOT NULL,
+            cash_to_office_minor bigint NOT NULL
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE journal_entries (
+            id bigint PRIMARY KEY,
+            shift_id uuid,
+            branch_id uuid NOT NULL,
+            event_type text NOT NULL,
+            occurrence_key text NOT NULL,
+            business_date date NOT NULL,
+            week_start_date date NOT NULL,
+            reason text,
+            created_by uuid NOT NULL
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE funds (
+            id uuid PRIMARY KEY,
+            branch_id uuid NOT NULL,
+            type text NOT NULL,
+            owner_id uuid
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE journal_lines (
+            id bigint PRIMARY KEY,
+            entry_id bigint NOT NULL,
+            fund_id uuid NOT NULL,
+            side char(1) NOT NULL,
+            amount_minor bigint NOT NULL,
+            line_role text
+          ) ON COMMIT DROP
+        `)
+        await client.query(
+          `INSERT INTO shifts
+             (id, branch_id, driver_id, business_date, week_start_date, state, created_at, wallet_diff_minor)
+           VALUES ($1, $2, $3, DATE '2026-08-22', DATE '2026-08-16', 'approved',
+                   TIMESTAMPTZ '2026-08-22 11:00:00+00', 200)`,
+          [shiftId, branchId, driverId],
+        )
+        await client.query(
+          `INSERT INTO shift_settlements
+             (shift_id, branch_id, driver_id, actual_wallet_minor, expected_total_minor,
+              base_driver_share_minor, cash_to_office_minor)
+           VALUES ($1, $2, $3, 300, 1000, 400, 300)`,
+          [shiftId, branchId, driverId],
+        )
+        await client.query(
+          `INSERT INTO funds (id, branch_id, type, owner_id) VALUES
+             ($1, $6, 'driver_wallet', $7),
+             ($2, $6, 'driver_cash', $7),
+             ($3, $6, 'driver_share_payable', $7),
+             ($4, $6, 'office_wallet', NULL),
+             ($5, $6, 'office_cash', NULL)`,
+          [
+            funds.driverWallet,
+            funds.driverCash,
+            funds.sharePayable,
+            funds.officeWallet,
+            funds.officeCash,
+            branchId,
+            driverId,
+          ],
+        )
+        await client.query(
+          `INSERT INTO journal_entries
+             (id, shift_id, branch_id, event_type, occurrence_key, business_date,
+              week_start_date, reason, created_by)
+           VALUES
+             (1, $1, $2, 'wallet_return', '1', DATE '2026-08-22', DATE '2026-08-16', NULL, $3),
+             (2, $1, $2, 'float_return', '1', DATE '2026-08-22', DATE '2026-08-16', NULL, $3)`,
+          [shiftId, branchId, randomUUID()],
+        )
+        await client.query(
+          `INSERT INTO journal_lines (id, entry_id, fund_id, side, amount_minor, line_role) VALUES
+             (1, 1, $1, 'D', 200, 'wallet_reclassification'),
+             (2, 1, $2, 'C', 200, 'wallet_reclassification'),
+             (3, 1, $1, 'C', 300, 'wallet_cleared'),
+             (4, 1, $3, 'D', 300, 'wallet_full_return'),
+             (5, 2, $2, 'C', 700, 'cash_cleared'),
+             (6, 2, $4, 'D', 400, 'driver_share_settled'),
+             (7, 2, $5, 'D', 300, 'cash_settlement')`,
+          [
+            funds.driverWallet,
+            funds.driverCash,
+            funds.officeWallet,
+            funds.sharePayable,
+            funds.officeCash,
+          ],
+        )
+
+        expect(await violationCount(alignment)).toBe(0)
+        expect(await violationCount(doubleEntry)).toBe(0)
+        expect(await violationCount(metadata)).toBe(0)
+
+        await client.query(
+          `INSERT INTO journal_lines (id, entry_id, fund_id, side, amount_minor, line_role) VALUES
+             (8, 2, $1, 'D', 25, 'unexpected_debit'),
+             (9, 2, $2, 'C', 25, 'unexpected_credit')`,
+          [funds.officeCash, funds.officeWallet],
+        )
+
+        expect(await violationCount(doubleEntry)).toBe(0)
+        expect(await violationCount(alignment)).toBe(1)
+
+        await client.query("UPDATE journal_entries SET business_date = DATE '2026-08-23' WHERE id = 2")
+        expect(await violationCount(metadata)).toBe(1)
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+      }
+    })
+
+    it('accepts a no-draft force-cancel inverse and rejects extra balanced void lines', async () => {
+      const client = await pool.connect()
+      const shiftId = randomUUID()
+      const branchId = randomUUID()
+      const driverId = randomUUID()
+      const managerId = randomUUID()
+      const fundIds = {
+        driverCash: randomUUID(),
+        driverWallet: randomUUID(),
+        driverShare: randomUUID(),
+        receivableCash: randomUUID(),
+        receivableWallet: randomUUID(),
+        officeCash: randomUUID(),
+        officeWallet: randomUUID(),
+      }
+      const forceCancel = INTEGRITY_CHECKS.find((check) => check.id === 'force_cancel_integrity').sql
+      const doubleEntry = INTEGRITY_CHECKS.find((check) => check.id === 'double_entry').sql
+      const violationCount = async (sql) => {
+        const { rows } = await client.query(`SELECT count(*)::text AS count FROM (${sql}) violation`)
+        return Number(rows[0].count)
+      }
+
+      try {
+        await client.query('BEGIN')
+        await client.query(`
+          CREATE TEMP TABLE schema_migrations (
+            filename text PRIMARY KEY,
+            applied_at timestamptz NOT NULL
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE shifts (
+            id uuid PRIMARY KEY,
+            branch_id uuid NOT NULL,
+            driver_id uuid NOT NULL,
+            business_date date NOT NULL,
+            week_start_date date NOT NULL,
+            state text NOT NULL,
+            created_at timestamptz NOT NULL
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE shift_decisions (
+            id bigint PRIMARY KEY,
+            shift_id uuid NOT NULL,
+            gate text NOT NULL,
+            decision text NOT NULL,
+            notes text,
+            decided_by uuid NOT NULL,
+            decided_at timestamptz NOT NULL
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE audit_log (
+            table_name text NOT NULL,
+            record_id text NOT NULL,
+            action text NOT NULL,
+            before jsonb,
+            after jsonb,
+            occurred_at timestamptz NOT NULL
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE float_tranches (
+            shift_id uuid NOT NULL,
+            kind text NOT NULL,
+            amount_minor bigint NOT NULL
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE journal_entries (
+            id bigint PRIMARY KEY,
+            shift_id uuid,
+            branch_id uuid NOT NULL,
+            event_type text NOT NULL,
+            occurrence_key text NOT NULL,
+            business_date date NOT NULL,
+            week_start_date date NOT NULL,
+            reason text,
+            created_by uuid NOT NULL
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE funds (
+            id uuid PRIMARY KEY,
+            branch_id uuid NOT NULL,
+            type text NOT NULL,
+            owner_id uuid
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE journal_lines (
+            id bigint PRIMARY KEY,
+            entry_id bigint NOT NULL,
+            fund_id uuid NOT NULL,
+            side char(1) NOT NULL,
+            amount_minor bigint NOT NULL,
+            line_role text
+          ) ON COMMIT DROP
+        `)
+        await client.query(
+          `INSERT INTO schema_migrations (filename, applied_at)
+           VALUES ('0035_shift_money_integrity.sql', TIMESTAMPTZ '2026-08-23 08:00:00+00')`,
+        )
+        await client.query(
+          `INSERT INTO shifts
+             (id, branch_id, driver_id, business_date, week_start_date, state, created_at)
+           VALUES ($1, $2, $3, DATE '2026-08-23', DATE '2026-08-23', 'cancelled',
+                   TIMESTAMPTZ '2026-08-23 08:05:00+00')`,
+          [shiftId, branchId, driverId],
+        )
+        await client.query(
+          `INSERT INTO shift_decisions
+             (id, shift_id, gate, decision, notes, decided_by, decided_at)
+           VALUES (1, $1, 'close', 'force_cancelled', 'vehicle failure', $2,
+                   TIMESTAMPTZ '2026-08-23 09:00:00+00')`,
+          [shiftId, managerId],
+        )
+        await client.query(
+          `INSERT INTO float_tranches (shift_id, kind, amount_minor) VALUES
+             ($1, 'cash_float', 100),
+             ($1, 'wallet_topup', 200),
+             ($1, 'carried_receivable', 50)`,
+          [shiftId],
+        )
+        await client.query(
+          `INSERT INTO funds (id, branch_id, type, owner_id) VALUES
+             ($1, $8, 'driver_cash', $9),
+             ($2, $8, 'driver_wallet', $9),
+             ($3, $8, 'driver_share_payable', $9),
+             ($4, $8, 'driver_receivable_cash', $9),
+             ($5, $8, 'driver_receivable_wallet', $9),
+             ($6, $8, 'office_cash', NULL),
+             ($7, $8, 'office_wallet', NULL)`,
+          [
+            fundIds.driverCash,
+            fundIds.driverWallet,
+            fundIds.driverShare,
+            fundIds.receivableCash,
+            fundIds.receivableWallet,
+            fundIds.officeCash,
+            fundIds.officeWallet,
+            branchId,
+            driverId,
+          ],
+        )
+        await client.query(
+          `INSERT INTO journal_entries
+             (id, shift_id, branch_id, event_type, occurrence_key, business_date,
+              week_start_date, reason, created_by)
+           VALUES
+             (1, $1, $2, 'float_out', '1', DATE '2026-08-23', DATE '2026-08-23', NULL, $3),
+             (2, $1, $2, 'float_out', 'carry-1', DATE '2026-08-23', DATE '2026-08-23', NULL, $3),
+             (3, $1, $2, 'wallet_topup', '1', DATE '2026-08-23', DATE '2026-08-23', NULL, $3),
+             (4, $1, $2, 'float_return', '1', DATE '2026-08-23', DATE '2026-08-23',
+              'vehicle failure', $3),
+             (5, $1, $2, 'wallet_return', '1', DATE '2026-08-23', DATE '2026-08-23',
+              'vehicle failure', $3),
+             (6, $1, $2, 'correction', $4, DATE '2026-08-23', DATE '2026-08-23',
+              'vehicle failure', $3)`,
+          [shiftId, branchId, managerId, `void-carry-${shiftId}`],
+        )
+        await client.query(
+          `INSERT INTO journal_lines (id, entry_id, fund_id, side, amount_minor, line_role) VALUES
+             (1, 1, $1, 'D', 100, NULL),
+             (2, 1, $4, 'C', 100, NULL),
+             (3, 2, $1, 'D', 50, NULL),
+             (4, 2, $3, 'C', 50, NULL),
+             (5, 3, $2, 'D', 200, NULL),
+             (6, 3, $5, 'C', 200, NULL),
+             (7, 4, $4, 'D', 100, NULL),
+             (8, 4, $1, 'C', 100, NULL),
+             (9, 5, $5, 'D', 200, NULL),
+             (10, 5, $2, 'C', 200, NULL),
+             (11, 6, $1, 'C', 50, NULL),
+             (12, 6, $3, 'D', 50, NULL)`,
+          [
+            fundIds.driverCash,
+            fundIds.driverWallet,
+            fundIds.receivableCash,
+            fundIds.officeCash,
+            fundIds.officeWallet,
+          ],
+        )
+
+        expect(await violationCount(forceCancel)).toBe(0)
+        expect(await violationCount(doubleEntry)).toBe(0)
+
+        await client.query(
+          `INSERT INTO journal_lines (id, entry_id, fund_id, side, amount_minor, line_role) VALUES
+             (13, 4, $1, 'D', 7, 'unexpected_debit'),
+             (14, 4, $2, 'C', 7, 'unexpected_credit')`,
+          [fundIds.officeCash, fundIds.officeWallet],
+        )
+        expect(await violationCount(doubleEntry)).toBe(0)
+        expect(await violationCount(forceCancel)).toBe(1)
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+      }
+    })
+  })
+}

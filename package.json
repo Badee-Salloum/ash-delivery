@@ -21,6 +21,7 @@
     "check:i18n": "node scripts/check-i18n-parity.mjs",
     "check:css": "node scripts/check-physical-css.mjs",
     "check:glyphs": "node scripts/glyph-read.mjs",
+    "check:shift-money": "node scripts/check-shift-money-integrity.mjs",
     "glyphs:harvest": "node scripts/glyph-harvest.mjs",
     "glyphs:templates": "node scripts/glyph-templates.mjs",
     "glyphs:scales": "node scripts/glyph-read.mjs --scale=1.25 && node scripts/glyph-read.mjs --scale=1.5 && node scripts/glyph-read.mjs --scale=2.0",

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   approveCloseRequest,
+  approveOpenRequest,
   fixedSettlementConfirmationSchema,
   forceCloseRequest,
   shiftSettlementViewSchema,
@@ -61,6 +62,26 @@ describe('fixed settlement wire contract', () => {
         cashSettlementConfirmed: true,
       }),
     ).toThrow()
+  })
+
+  it('rejects reasons made only from invisible Unicode formatting marks', () => {
+    for (const varianceReason of ['\u200B', '\u2060\uFEFF', ' \u200F\t']) {
+      expect(() => approveCloseRequest.parse({
+        reviewedOrdersHash: 'orders',
+        varianceReason,
+      })).toThrow()
+      expect(() => forceCloseRequest.parse({
+        prepareOnly: true,
+        reason: varianceReason,
+        cashDeclared: '0.00',
+        walletDeclared: '0.00',
+      })).toThrow()
+    }
+  })
+
+  it('bounds opening tranche arrays to the PostgreSQL smallint sequence range', () => {
+    const tooMany = Array.from({ length: 32_768 }, () => '0.01')
+    expect(approveOpenRequest.safeParse({ floatTranches: tooMany, topupTranches: [] }).success).toBe(false)
   })
 
   it('separates boundary preparation from the confirmed force-close', () => {

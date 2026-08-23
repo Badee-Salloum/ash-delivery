@@ -33,6 +33,7 @@ const get = async (token: string, url: string): Promise<LightMyRequestResponse> 
 /** Every branch-scoped read the admin console makes on load. */
 const BRANCH_SCOPED_READS = [
   '/dashboard',
+  '/dashboard/working-now',
   '/drivers',
   '/vehicles',
   '/assignments',
@@ -63,7 +64,7 @@ describe('an organisation-wide role names the branch it is reading', () => {
   it('succeeds for the system admin on the reads his matrix allows', async () => {
     const sa = await h.loginAs('sysadmin')
     // `branch_data.view` is sysadmin 'all'; `cash_count.perform` is NOT his, by design (decision 5).
-    for (const path of ['/dashboard', '/drivers', '/vehicles', '/assignments', '/shifts', '/treasury/balances']) {
+    for (const path of ['/dashboard', '/dashboard/working-now', '/drivers', '/vehicles', '/assignments', '/shifts', '/treasury/balances']) {
       const res = await get(sa, `${path}?branchId=${BRANCH}`)
       expect(res.statusCode, `${path} -> ${res.body}`).toBe(200)
     }

@@ -241,6 +241,13 @@ export class MemoryShiftRepo implements ShiftRepo {
   async update(shift: ShiftRecord, _actorId: string | null): Promise<void> {
     this.rows.set(shift.id, structuredClone(shift))
   }
+  async countOpenActorsForBranch(branchId: string): Promise<{ drivers: number; vehicles: number }> {
+    const open = [...this.rows.values()].filter((shift) => shift.branchId === branchId && shift.state === 'open')
+    return {
+      drivers: new Set(open.map((shift) => shift.driverId)).size,
+      vehicles: new Set(open.map((shift) => shift.vehicleId)).size,
+    }
+  }
   async listLiveForDriver(driverId: string): Promise<ShiftRecord[]> {
     return [...this.rows.values()].filter((s) => s.driverId === driverId && isLive(s.state))
   }
@@ -1600,6 +1607,13 @@ export class MemoryShiftSettlementRepo implements ShiftSettlementRepo {
   async findByShift(shiftId: string): Promise<ShiftSettlementRecord | null> {
     const row = this.rows.get(shiftId)
     return row ? structuredClone(row) : null
+  }
+
+  async listByShiftIds(shiftIds: readonly string[]): Promise<ShiftSettlementRecord[]> {
+    return [...new Set(shiftIds)].flatMap((shiftId) => {
+      const row = this.rows.get(shiftId)
+      return row ? [structuredClone(row)] : []
+    })
   }
 }
 

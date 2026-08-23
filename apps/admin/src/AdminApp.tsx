@@ -263,7 +263,10 @@ export function AdminApp(): ReactNode {
         </div>
         <main className="flex-1 overflow-y-auto p-3 lg:p-6">
         {openShift ? (
-          <Approval shiftId={openShift} onDone={() => setOpenShift(null)} />
+          /* A notification can replace `openShift` while a review is already mounted. Keying the
+             workspace prevents typed cash/top-up or confirmations from one driver surviving into
+             another driver's shift. */
+          <Approval key={openShift} shiftId={openShift} onDone={() => setOpenShift(null)} />
         ) : section === 'dashboard' ? (
           <Dashboard />
         ) : section === 'queue' ? (

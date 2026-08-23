@@ -182,6 +182,30 @@ describe('the OPEN gate (BR5, AC #1)', () => {
 })
 
 describe('the CLOSE gate (BR5, AC #2)', () => {
+  it('lets the driver hand an unreadable fitted pack to review but keeps manager approval blocked', () => {
+    const endPackage = completeEnd({
+      batterySlots: 1,
+      batteryReadings: [{ slotNo: 1, percent: null, unavailable: true }],
+    })
+
+    for (const state of ['open', 'suspended'] as const) {
+      expect(transition(state, 'driver_submit_end', ctx({
+        actor: actor('driver'),
+        endPackage,
+      }))).toEqual({ ok: true, next: 'pending_review' })
+    }
+
+    const approval = transition('pending_review', 'manager_approve_close', ctx({
+      endPackage,
+      br1: { balanced: true, splitBalanced: true },
+    }))
+    expect(approval).toMatchObject({ ok: false, reason: 'end_package_incomplete' })
+    expect(approval.ok === false && approval.gaps).toContainEqual({
+      kind: 'awaiting_manager_reading',
+      slotNo: 1,
+    })
+  })
+
   it('refuses approval when BR1 is not zero', () => {
     expect(
       transition('pending_review', 'manager_approve_close',

@@ -129,11 +129,18 @@ jobs:
           set -euo pipefail
           psql -v ON_ERROR_STOP=1 -h localhost -U postgres -d ash_test \
                -c 'DROP TRIGGER journal_lines_week_locked ON journal_lines;'
+          negative_output="$(mktemp)"
           if psql -v ON_ERROR_STOP=1 -h localhost -U postgres -d ash_test \
-                  -f packages/db/verify-guards.sql > /dev/null 2>&1; then
+                  -f packages/db/verify-guards.sql > "$negative_output" 2>&1; then
             echo "::error::verify-guards.sql PASSED with a guard removed — the harness has no teeth"
             exit 1
           fi
+          if ! grep -Fq 'GUARD FAILED: a locked-week LINE amount was updated' "$negative_output"; then
+            cat "$negative_output"
+            echo "::error::verification failed before the deliberately removed guard"
+            exit 1
+          fi
+          rm -f "$negative_output"
           echo "OK: removing a guard makes the verification fail, as it must"
 
       # The PostgreSQL adapters must pass the SAME conformance suite as the in-memory ones.
@@ -150,6 +157,7 @@ jobs:
         env:
           PGPASSWORD: postgres
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/ash_conformance
+          ASH_ALLOW_DESTRUCTIVE_DATABASE_TESTS: '1'
         run: |
           set -euo pipefail
           psql -v ON_ERROR_STOP=1 -h localhost -U postgres -d postgres \

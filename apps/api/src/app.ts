@@ -14,6 +14,7 @@ import {
   endPackageRequest,
   loginRequest,
   moneySchema,
+  nonblankReasonSchema,
   nonnegativeMoneySchema,
   uploadEvidenceParams,
   serializeMoney,
@@ -1915,21 +1916,23 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     { config: { permission: 'shift.approve', subject: shiftSubject } },
     async (req) => {
       const { id } = z.object({ id: z.string() }).parse(req.params)
-      const { reason } = z.object({ reason: z.string().min(1).max(500) }).parse(req.body)
-      const shift = await voidShift(deps, req.actor!, id, reason)
-      await deps.audit.append({
-        tableName: 'shifts',
-        recordId: shift.id,
-        action: 'UPDATE',
-        actorId: req.actor!.userId,
-        actorKind: 'user',
-        branchId: shift.branchId,
-        requestId: req.requestId,
-        before: null,
-        after: { state: shift.state, reason, voided: true },
-        occurredAtMs: deps.clock.nowMs(),
-      })
-      return { id: shift.id, state: shift.state }
+      const { reason } = z.object({ reason: nonblankReasonSchema }).parse(req.body)
+      const result = await voidShift(deps, req.actor!, id, reason)
+      if (!result.replayed) {
+        await deps.audit.append({
+          tableName: 'shifts',
+          recordId: result.shift.id,
+          action: 'UPDATE',
+          actorId: req.actor!.userId,
+          actorKind: 'user',
+          branchId: result.shift.branchId,
+          requestId: req.requestId,
+          before: null,
+          after: { state: result.shift.state, reason, voided: true },
+          occurredAtMs: deps.clock.nowMs(),
+        })
+      }
+      return { id: result.shift.id, state: result.shift.state, replayed: result.replayed }
     },
   )
   app.post(
@@ -2019,20 +2022,26 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     async (req, reply) => {
       const { id } = z.object({ id: z.string() }).parse(req.params)
       const body = addTrancheRequest.parse(req.body)
-      const shift = await addTranche(deps, req.actor!, id, body)
-      await deps.audit.append({
-        tableName: 'shifts',
-        recordId: shift.id,
-        action: 'UPDATE',
-        actorId: req.actor!.userId,
-        actorKind: 'user',
-        branchId: shift.branchId,
-        requestId: req.requestId,
-        before: null,
-        after: { tranche: body.kind, amount: serializeMoney(body.amount) },
-        occurredAtMs: deps.clock.nowMs(),
+      const result = await addTranche(deps, req.actor!, id, body)
+      if (!result.replayed) {
+        await deps.audit.append({
+          tableName: 'shifts',
+          recordId: result.shift.id,
+          action: 'UPDATE',
+          actorId: req.actor!.userId,
+          actorKind: 'user',
+          branchId: result.shift.branchId,
+          requestId: req.requestId,
+          before: null,
+          after: { tranche: body.kind, amount: serializeMoney(body.amount), occurrenceKey: body.occurrenceKey },
+          occurredAtMs: deps.clock.nowMs(),
+        })
+      }
+      return reply.code(result.replayed ? 200 : 201).send({
+        id: result.shift.id,
+        kind: body.kind,
+        replayed: result.replayed,
       })
-      return reply.code(201).send({ id: shift.id, kind: body.kind })
     },
   )
 

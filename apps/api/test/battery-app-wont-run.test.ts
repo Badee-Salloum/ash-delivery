@@ -262,4 +262,90 @@ describe('a pack the driver cannot read on his own phone', () => {
       }
     },
   )
+
+  it('atomically hands missing end BMS evidence to the manager while ending a mismatched shift', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const { id, batteryIds } = await openShiftWithPacks(driver, manager, 2)
+
+    expect((await get(manager, '/dashboard/working-now')).json()).toMatchObject({
+      drivers: 1,
+      vehicles: 1,
+    })
+
+    // Pack 1 is complete. Pack 2 has a manual value but no evidence generation, so the server
+    // preserves pack 1 and turns only pack 2 into an explicit manager obligation.
+    const firstPhoto = await h.uploadPhoto(driver, id, 'end', 'bms_1')
+    const readings = await put(driver, `/shifts/${id}/battery-readings`, {
+      package: 'end',
+      readings: [
+        { batteryId: batteryIds[0], percent: 61, source: 'manual' },
+        { batteryId: batteryIds[1], percent: 47, source: 'manual' },
+      ],
+    })
+    expect(readings.statusCode, readings.body).toBe(200)
+
+    const ended = await put(driver, `/shifts/${id}/end-package`, {
+      odometerKm: 110,
+      batteryPercent: null,
+      cashDeclared: sypStr(0),
+      walletDeclared: sypStr(0),
+      deferMissingBatteryEvidenceToManager: true,
+    })
+    expect(ended.statusCode, ended.body).toBe(200)
+    expect(ended.json()).toMatchObject({ state: 'pending_review', br1: { balanced: false } })
+    expect((await get(manager, '/dashboard/working-now')).json()).toMatchObject({
+      drivers: 0,
+      vehicles: 0,
+    })
+
+    const stored = (await h.deps.batteryReadings.listByShift(id)).filter((row) => row.package === 'end')
+    expect(stored.find((row) => row.batteryId === batteryIds[0])).toMatchObject({
+      percent: 61,
+      mediaId: firstPhoto.mediaId,
+      unavailable: false,
+      source: 'manual',
+    })
+    expect(stored.find((row) => row.batteryId === batteryIds[1])).toMatchObject({
+      percent: null,
+      mediaId: null,
+      unavailable: true,
+      source: 'manual',
+    })
+
+    const review = await get(manager, `/shifts/${id}/review`)
+    const refused = await approveFixedClose(h, manager, id, review.json().br1.ordersHash)
+    expect(refused.statusCode, refused.body).toBe(422)
+    expect(refused.json()).toMatchObject({ error: 'end_package_incomplete' })
+    expect(refused.json().detail).toContainEqual({ kind: 'awaiting_manager_reading', slotNo: 2 })
+
+    const supplied = await put(manager, `/shifts/${id}/battery-readings/manager`, {
+      package: 'end',
+      readings: [{ batteryId: batteryIds[1], percent: 46 }],
+    })
+    expect(supplied.statusCode, supplied.body).toBe(200)
+    const approved = await approveFixedClose(h, manager, id, review.json().br1.ordersHash)
+    expect(approved.statusCode, approved.body).toBe(200)
+    expect(approved.json().state).toBe('approved')
+  })
+
+  it('keeps the historical battery gate when the explicit defer flag is absent', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const { id, batteryIds } = await openShiftWithPacks(driver, manager, 1)
+    expect((await put(driver, `/shifts/${id}/battery-readings`, {
+      package: 'end',
+      readings: [{ batteryId: batteryIds[0], percent: 51, source: 'manual' }],
+    })).statusCode).toBe(200)
+
+    const refused = await put(driver, `/shifts/${id}/end-package`, {
+      odometerKm: 110,
+      batteryPercent: null,
+      cashDeclared: sypStr(110),
+      walletDeclared: sypStr(-2),
+    })
+    expect(refused.statusCode, refused.body).toBe(422)
+    expect(refused.json()).toMatchObject({ error: 'end_package_incomplete' })
+    expect(refused.json().detail).toContainEqual({ kind: 'missing_photo', slot: 'bms_1' })
+  })
 })

@@ -7,7 +7,8 @@
 #   docker compose -f infra/compose/docker-compose.dev.yml up -d
 #   ./scripts/db-verify.sh
 #
-# Env overrides: PGHOST PGPORT PGUSER PGPASSWORD VERIFY_DB
+# Env overrides: PGHOST PGPORT PGUSER PGPASSWORD VERIFY_DB.
+# Destructive execution additionally requires ASH_ALLOW_DESTRUCTIVE_DATABASE_TESTS=1.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,6 +18,24 @@ export PGPORT="${PGPORT:-55432}"
 export PGUSER="${PGUSER:-postgres}"
 export PGPASSWORD="${PGPASSWORD:-postgres}"
 VERIFY_DB="${VERIFY_DB:-ash_guardcheck}"
+
+if [[ "${ASH_ALLOW_DESTRUCTIVE_DATABASE_TESTS:-}" != "1" ]]; then
+  echo "refusing destructive database verification: set ASH_ALLOW_DESTRUCTIVE_DATABASE_TESTS=1" >&2
+  exit 2
+fi
+if [[ ! "$VERIFY_DB" =~ ^ash_(test|conformance|release_gate|guardcheck|integritycheck)(_[A-Za-z0-9_]+)?$ ]]; then
+  echo "refusing destructive database verification: VERIFY_DB is not disposable-test allowlisted" >&2
+  exit 2
+fi
+case "$PGHOST" in
+  localhost|127.0.0.1|::1) ;;
+  *)
+    if [[ "${ASH_ALLOW_REMOTE_DESTRUCTIVE_DATABASE_TESTS:-}" != "1" ]]; then
+      echo "refusing destructive database verification: remote PGHOST requires ASH_ALLOW_REMOTE_DESTRUCTIVE_DATABASE_TESTS=1" >&2
+      exit 2
+    fi
+    ;;
+esac
 
 if ! command -v psql >/dev/null 2>&1; then
   cat >&2 <<'MSG'
@@ -33,8 +52,8 @@ MSG
 fi
 
 echo "── recreating scratch database ${VERIFY_DB} on ${PGHOST}:${PGPORT}"
-psql -v ON_ERROR_STOP=1 -d postgres -c "DROP DATABASE IF EXISTS ${VERIFY_DB};" >/dev/null
-psql -v ON_ERROR_STOP=1 -d postgres -c "CREATE DATABASE ${VERIFY_DB};" >/dev/null
+psql -v ON_ERROR_STOP=1 -v db_name="$VERIFY_DB" -d postgres -c 'DROP DATABASE IF EXISTS :"db_name";' >/dev/null
+psql -v ON_ERROR_STOP=1 -v db_name="$VERIFY_DB" -d postgres -c 'CREATE DATABASE :"db_name";' >/dev/null
 
 for f in "$ROOT"/packages/db/migrations/*.sql; do
   echo "── applying $(basename "$f")"
@@ -49,13 +68,22 @@ psql -v ON_ERROR_STOP=1 -d "$VERIFY_DB" -f "$ROOT/packages/db/verify-guards.sql"
 echo "── negative-testing the harness (removing a guard must break verification)"
 psql -v ON_ERROR_STOP=1 -q -d "$VERIFY_DB" \
      -c 'DROP TRIGGER journal_lines_week_locked ON journal_lines;'
+negative_output="$(mktemp)"
 if psql -v ON_ERROR_STOP=1 -q -d "$VERIFY_DB" \
-        -f "$ROOT/packages/db/verify-guards.sql" >/dev/null 2>&1; then
+        -f "$ROOT/packages/db/verify-guards.sql" >"$negative_output" 2>&1; then
+  rm -f "$negative_output"
   echo "FAIL: verify-guards.sql passed with a guard removed — the harness has no teeth" >&2
   exit 1
 fi
+if ! grep -Fq 'GUARD FAILED: a locked-week LINE amount was updated' "$negative_output"; then
+  cat "$negative_output" >&2
+  rm -f "$negative_output"
+  echo "FAIL: verification failed before it exercised the deliberately removed guard" >&2
+  exit 1
+fi
+rm -f "$negative_output"
 echo "   OK: removing a guard makes verification fail, as it must"
 
-psql -v ON_ERROR_STOP=1 -d postgres -c "DROP DATABASE ${VERIFY_DB};" >/dev/null
+psql -v ON_ERROR_STOP=1 -v db_name="$VERIFY_DB" -d postgres -c 'DROP DATABASE :"db_name";' >/dev/null
 echo
 echo "All database guards verified against real PostgreSQL."

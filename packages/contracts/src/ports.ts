@@ -290,7 +290,7 @@ export interface BatteryReadingRecord {
   t2Dc: number | null
   mediaId: string | null
   source: 'ocr' | 'manual' | 'manager'
-  /** The driver cannot read this pack on his own phone; the manager owes the reading. */
+  /** Driver evidence was unavailable/incomplete; the manager now owes the reading. */
   unavailable: boolean
   /**
    * OCR output belonging to this exact submitted reading generation. A replacement submission
@@ -691,6 +691,14 @@ export interface ShiftRepo {
   findById(id: string): Promise<ShiftRecord | null>
   /** `actorId` is the current mutation actor, never inferred from an earlier approval. */
   update(shift: ShiftRecord, actorId: string | null): Promise<void>
+  /**
+   * Distinct drivers and vehicles that are working right now in one branch.
+   *
+   * This deliberately means exactly `open`: a suspended shift still occupies its assignment but
+   * is not currently working, and draft/review/terminal states are excluded. The query is
+   * date-independent so an overnight shift remains visible until its end package is submitted.
+   */
+  countOpenActorsForBranch(branchId: string): Promise<{ drivers: number; vehicles: number }>
   listLiveForDriver(driverId: string): Promise<ShiftRecord[]>
   listLiveForVehicle(vehicleId: string): Promise<ShiftRecord[]>
   /**
@@ -1770,7 +1778,7 @@ export interface ShiftDecisionRecord {
   id: number
   shiftId: string
   gate: 'open' | 'close'
-  decision: 'approved' | 'rejected' | 'rephoto_requested' | 'force_close_prepared'
+  decision: 'approved' | 'rejected' | 'rephoto_requested' | 'force_close_prepared' | 'force_cancelled'
   notes: string | null
   decidedBy: string
   decidedAtMs: number
@@ -1861,6 +1869,8 @@ export interface ShiftSettlementRepo {
    */
   create(record: NewShiftSettlementRecord): Promise<ShiftSettlementRecord>
   findByShift(shiftId: string): Promise<ShiftSettlementRecord | null>
+  /** Resolve a reporting batch in one read; missing IDs are absent and each stored row appears once. */
+  listByShiftIds(shiftIds: readonly string[]): Promise<ShiftSettlementRecord[]>
 }
 
 /** A single GPS fix from the driver's phone while a shift is open (SRS K). Telemetry, not money. */

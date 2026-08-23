@@ -2,8 +2,10 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { createPool } from '../src/pool.ts'
 import { migrate } from '../src/migrate.ts'
+import { assertDisposableDatabaseUrl } from './disposable-database.ts'
 
 const DATABASE_URL = process.env.DATABASE_URL
+if (DATABASE_URL) assertDisposableDatabaseUrl(DATABASE_URL)
 
 if (!DATABASE_URL) {
   describe('PostgreSQL posting/week-seal race', () => {

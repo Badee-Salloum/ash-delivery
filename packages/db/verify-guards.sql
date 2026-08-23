@@ -135,9 +135,10 @@ BEGIN
          (v_entry, '44444444-4444-4444-4444-444444444444', 'C', 7000);
 END
 $$;
-COMMIT;
 
-BEGIN;
+-- Keep the target and the tamper attempt in one transaction.  The old COMMIT left an
+-- idempotency row behind, so a second verification run failed in guard 1 before it reached the
+-- deliberately removed guard.  That made db-verify.sh's negative test capable of a false pass.
 SET LOCAL ROLE app_user;
 DO $$
 BEGIN
@@ -190,6 +191,21 @@ BEGIN;
 DO $$
 DECLARE v_lock bigint; v_entry bigint; v_sealed integer;
 BEGIN
+  -- Seed the entry this guard seals inside the same transaction. Relying on guard 3's committed
+  -- tamper target left an idempotency row behind and prevented a trustworthy second run.
+  INSERT INTO journal_entries
+    (branch_id, event_type, occurrence_key, business_date, posting_date,
+     week_start_date, fx_day_id, created_by, reason)
+  VALUES ('11111111-1111-1111-1111-111111111111', 'manual', 'guard-5-target',
+          DATE '2026-07-20', DATE '2026-07-20', DATE '2026-07-19',
+          (SELECT id FROM fx_days WHERE business_date = DATE '2026-07-20'),
+          '22222222-2222-2222-2222-222222222222', 'guard 5 target')
+  RETURNING id INTO v_entry;
+
+  INSERT INTO journal_lines (entry_id, fund_id, side, amount_minor)
+  VALUES (v_entry, '33333333-3333-3333-3333-333333333333', 'D', 8000),
+         (v_entry, '44444444-4444-4444-4444-444444444444', 'C', 8000);
+
   INSERT INTO week_locks (branch_id, week_start_date, week_end_date)
   VALUES ('11111111-1111-1111-1111-111111111111', DATE '2026-07-19', DATE '2026-07-25')
   RETURNING id INTO v_lock;
@@ -199,7 +215,9 @@ BEGIN
     RAISE EXCEPTION 'GUARD FAILED: fin_seal_week sealed % entries — the fixture is wrong', v_sealed;
   END IF;
 
-  SELECT id INTO v_entry FROM journal_entries WHERE week_lock_id = v_lock LIMIT 1;
+  IF NOT EXISTS (SELECT 1 FROM journal_entries WHERE id = v_entry AND week_lock_id = v_lock) THEN
+    RAISE EXCEPTION 'GUARD FAILED: fin_seal_week did not attach the seeded entry to the lock';
+  END IF;
 
   BEGIN
     UPDATE journal_entries SET reason = 'tampered' WHERE id = v_entry;

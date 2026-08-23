@@ -6,5 +6,13 @@ import { defineConfig } from 'vite'
 // lazy-loaded per route — no chart lib in the initial bundle.
 export default defineConfig({
   plugins: [react(), tailwind()],
-  server: { proxy: { '/api': 'http://localhost:3000' } },
+  server: {
+    proxy: {
+      '/api': {
+        target: 'http://localhost:3000',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, ''),
+      },
+    },
+  },
 })

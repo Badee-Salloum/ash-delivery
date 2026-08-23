@@ -1,4 +1,4 @@
-import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useId, useRef, useState } from 'react'
 import L, { type CircleMarker, type LeafletMouseEvent, type Map as LeafletMap } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import {
@@ -19,6 +19,8 @@ import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { evidenceReviewWarning } from '../evidence-warning.ts'
 import { useConfirm, useToast } from '../feedback.tsx'
+import { LatestRequestGuard } from '../latest-request.ts'
+import { isValidOpeningFundInput, openingFundTranches } from '../opening-funds.ts'
 import {
   buildOrderDuplicateRevision,
   buildOrderTimingRevision,
@@ -228,6 +230,8 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   // longer types them). Empty is treated as 0.
   const [floatText, setFloatText] = useState('')
   const [topupText, setTopupText] = useState('')
+  const floatInputId = useId()
+  const topupInputId = useId()
   const [notes, setNotes] = useState('') // for a re-shoot request or a reject (C-7)
   const [manual, setManual] = useState({ providerOrderNo: '', payMode: 'cash', fee: '' }) // manual-order reconcile
   /**
@@ -290,7 +294,9 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
 
   const [loadError, setLoadError] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
+  const reviewRequests = useRef(new LatestRequestGuard())
   const fetchReview = useCallback((preserveVisibleReview: boolean) => {
+    const request = reviewRequests.current.next()
     setLoadError(null)
     setRefreshing(preserveVisibleReview)
     // A financial edit invalidates the settlement but should not throw the manager back to a full
@@ -304,8 +310,9 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     setVarianceReason('')
     setOrderRereads({})
     void api
-      .get<Review>(`/shifts/${shiftId}/review`)
+      .get<Review>(`/shifts/${shiftId}/review`, { cache: 'no-store', signal: request.signal })
       .then((next) => {
+        if (!request.isCurrent()) return
         // Local AI suggestions/drafts belong to the previous hash. Clear the guard and remount its
         // cards in the same accepted-snapshot render, so no hidden stale draft can survive while
         // the parent thinks there are zero pending edits.
@@ -315,6 +322,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         setRefreshing(false)
       })
       .catch((e: { error?: string }) => {
+        if (!request.isCurrent()) return
         // Not a spinner: a review that cannot be fetched (the shift was cancelled, or this role
         // may not see it) has to say so, or the manager waits on a screen that will never fill.
         if (!preserveVisibleReview) setReview(null)
@@ -324,7 +332,10 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   }, [api, shiftId])
   const load = useCallback(() => fetchReview(false), [fetchReview])
   const refreshVisible = useCallback(() => fetchReview(true), [fetchReview])
-  useEffect(load, [load])
+  useEffect(() => {
+    load()
+    return () => reviewRequests.current.cancel()
+  }, [load])
 
   // This statement is the manager's physical handover checklist, not an optional report. A close
   // cannot post without the exact snapshot hash and both confirmations, so a load failure is shown
@@ -399,6 +410,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   }
 
   const operationCopy = operationReviewCopy(lang)
+  const openingFundsValid = isValidOpeningFundInput(floatText) && isValidOpeningFundInput(topupText)
   const cashDeductions = review.cashDeductions ?? []
   const unresolvedWindowCount = countUnresolvedWindowRows(review.orders, cashDeductions)
   const operationReasonReady = operationReason.trim().length > 0
@@ -503,6 +515,10 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   async function approve(): Promise<void> {
     if (!review) return
     const opening = review.state === 'awaiting_open_approval'
+    if (opening && !openingFundsValid) {
+      setError('invalid_request')
+      return
+    }
     if (!opening && unresolvedWindowCount > 0) return
     if (!opening && pendingTimingDraftKeys.size > 0) {
       setError('unsaved_timing_correction')
@@ -528,10 +544,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     setError(null)
     try {
       if (opening) {
-        await api.post(`/shifts/${review.id}/approve-open`, {
-          floatTranches: [floatText || '0'],
-          topupTranches: [topupText || '0'],
-        })
+        await api.post(`/shifts/${review.id}/approve-open`, openingFundTranches(floatText, topupText))
       } else {
         await api.approveCloseShift(
           review.id,
@@ -1048,17 +1061,35 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             {review.state === 'awaiting_open_approval' ? (
               <>
                 <div>
-                  <dt className="text-xs text-slate-500">{t.shift.cashFloat}</dt>
+                  <dt className="text-xs text-slate-500"><label htmlFor={floatInputId}>{t.shift.cashFloat}</label></dt>
                   <dd className="mt-1">
-                    <MoneyInput value={floatText} onChange={(e) => setFloatText(e.target.value)} className="w-full" />
+                    <MoneyInput
+                      id={floatInputId}
+                      value={floatText}
+                      aria-invalid={!isValidOpeningFundInput(floatText)}
+                      onChange={(e) => setFloatText(e.target.value)}
+                      className="w-full"
+                    />
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-xs text-slate-500">{t.shift.walletTopup}</dt>
+                  <dt className="text-xs text-slate-500"><label htmlFor={topupInputId}>{t.shift.walletTopup}</label></dt>
                   <dd className="mt-1">
-                    <MoneyInput value={topupText} onChange={(e) => setTopupText(e.target.value)} className="w-full" />
+                    <MoneyInput
+                      id={topupInputId}
+                      value={topupText}
+                      aria-invalid={!isValidOpeningFundInput(topupText)}
+                      onChange={(e) => setTopupText(e.target.value)}
+                      className="w-full"
+                    />
                   </dd>
                 </div>
+                {!openingFundsValid ? (
+                  <div className="col-span-2">
+                    <dt className="sr-only">{t.liveShifts.openingAmountInvalid}</dt>
+                    <dd className="text-xs font-medium text-red-700">{t.liveShifts.openingAmountInvalid}</dd>
+                  </div>
+                ) : null}
               </>
             ) : (
               <>
@@ -1451,7 +1482,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             {isClose && forcePrepared ? null : (
               <Button
                 variant="success"
-                disabled={busy || (isClose && (unresolvedWindowCount > 0 || !closeSettlementReady))}
+                disabled={busy || (!isClose && !openingFundsValid) || (isClose && (unresolvedWindowCount > 0 || !closeSettlementReady))}
                 onClick={approve}
                 className="flex-1"
               >

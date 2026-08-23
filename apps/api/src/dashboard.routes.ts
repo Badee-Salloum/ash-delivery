@@ -8,8 +8,9 @@ import { branchSubject, resolveBranchId } from './branch-scope.ts'
 /**
  * The minimal ops dashboard (SRS I-1, in scope per the brief's "minimal ops dashboard").
  *
- * Five indicators the client asked for (س69), minus the cash-difference tile the SRS itself
- * dropped because BR1 makes it always zero:
+ * Five original indicators from the brief (س69), minus the cash-difference tile the SRS itself
+ * dropped because BR1 makes it always zero. The two live working counts are served separately
+ * below so their frequent refresh never reloads these heavier financial reads:
  *   1. today's fee revenue (SYP + USD)
  *   2. orders, total and per driver
  *   3. the company's accumulated share since the last Sunday
@@ -20,6 +21,22 @@ import { branchSubject, resolveBranchId } from './branch-scope.ts'
  */
 export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void {
   const ownBranch = branchSubject
+
+  /**
+   * The high-frequency dashboard read. Keep this separate from `/dashboard`: polling a pair of
+   * counts must not repeatedly load orders, FX, ledger entries, fleet details and notifications.
+   * "Working" is exactly the `open` state and intentionally ignores business date, so an open
+   * shift remains visible after midnight until the driver submits its end package.
+   */
+  app.get('/dashboard/working-now', { config: { permission: 'branch_data.view', subject: ownBranch } }, async (req, reply) => {
+    reply.header('cache-control', 'private, no-store')
+    const branchId = resolveBranchId(req)
+    const counts = await deps.shifts.countOpenActorsForBranch(branchId)
+    return {
+      asOf: new Date(deps.clock.nowMs()).toISOString(),
+      ...counts,
+    }
+  })
 
   app.get('/dashboard', { config: { permission: 'branch_data.view', subject: ownBranch } }, async (req) => {
     // The GM and the sysadmin have no branch of their own — they name one with `?branchId=`.
@@ -119,27 +136,45 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
    * SEPARATE permission, rather than a field the branch dashboard hides.
    */
   app.get('/dashboard/profit', { config: { permission: 'profit.view_total', subject: () => ({}) } }, async (req) => {
-    const { from, to } = z.object({ from: z.string().optional(), to: z.string().optional() }).parse(req.query)
+    const q = z.object({ from: realCalendarDate.optional(), to: realCalendarDate.optional() }).parse(req.query)
     const today = todayFor(deps)
+    const to = q.to ?? today
+    const from = q.from ?? weekStartFor(to)
+    if (from > to) {
+      throw new z.ZodError([{
+        code: 'custom',
+        path: ['from'],
+        message: '`from` must be on or before `to`',
+      }])
+    }
     // The GM is org-wide; totalling across every branch would need a fan-out. Single branch
     // today, so he names the one he means and the figure stays unambiguous.
     const branchId = resolveBranchId(req)
 
-    const weekStart = weekStartFor(from ?? today)
-    const entries = await deps.ledger.listByWeek(branchId, weekStart)
+    const weekStart = weekStartFor(from)
+    const entries: JournalEntryRecord[] = []
+    for (const start of weekStartsBetween(from, to)) {
+      entries.push(...(await deps.ledger.listByWeek(branchId, start)))
+    }
     let company = 0n
     let yalago = 0n
     const legacyDriverShareByShift = new Map<string | null, bigint>()
     const shiftIds = new Set<string>()
     for (const e of entries) {
+      if (e.businessDate < from || e.businessDate > to) continue
       if (e.shiftId !== null) shiftIds.add(e.shiftId)
       for (const l of e.lines) {
         const signed = l.side === 'C' ? l.amount : -l.amount
         if (l.fundCode === 'company_revenue') company += signed
         else if (l.fundCode === 'yalago_income') yalago += signed
         else if (
-          l.fundCode.startsWith('driver_share_payable:') &&
-          (l.role === 'driver_share' || l.role === 'cash_deduction_share')
+          (
+            l.fundCode.startsWith('driver_share_payable:') &&
+            (l.role === 'driver_share' || l.role === 'cash_deduction_share')
+          ) || (
+            l.fundCode.startsWith('driver_receivable_cash:') &&
+            l.role === 'cash_deduction_overflow'
+          )
         ) {
           legacyDriverShareByShift.set(
             e.shiftId,
@@ -149,16 +184,19 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
       }
     }
     let driverShare = legacyDriverShareByShift.get(null) ?? 0n
+    const settlements = await deps.settlements.listByShiftIds([...shiftIds])
+    const settlementByShift = new Map(settlements.map((settlement) => [settlement.shiftId, settlement]))
     for (const shiftId of shiftIds) {
-      // New settlements assign the total surplus/shortage to the employee, so the immutable final
-      // cash is the earned amount. Legacy approvals have no snapshot and retain their historical
-      // share_split less cash-deduction calculation. Payout/return debits are settlement, not a
-      // reduction in earnings, and are deliberately excluded above.
-      const settlement = await deps.settlements.findByShift(shiftId)
-      driverShare += settlement?.finalEmployeeCash ?? legacyDriverShareByShift.get(shiftId) ?? 0n
+      // A surplus/shortage is a settlement difference, not earned driver share. New immutable
+      // snapshots expose the exact net earned share after cash deductions and before variance.
+      // Legacy approvals have no snapshot and retain their historical share_split less
+      // cash-deduction calculation. Payout/return debits are settlement, not reduced earnings.
+      const settlement = settlementByShift.get(shiftId)
+      driverShare += settlement?.baseDriverShare ?? legacyDriverShareByShift.get(shiftId) ?? 0n
     }
-    void to
     return {
+      from,
+      to,
       weekStart,
       companyShareSyp: serializeMoney(minor(company)),
       driverShareSyp: serializeMoney(minor(driverShare)),
@@ -300,14 +338,35 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
   })
 }
 
+const realCalendarDate = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'expected YYYY-MM-DD')
+  .refine((value) => {
+    const [year, month, day] = value.split('-').map(Number) as [number, number, number]
+    const parsed = new Date(Date.UTC(year, month - 1, day))
+    return (
+      parsed.getUTCFullYear() === year &&
+      parsed.getUTCMonth() === month - 1 &&
+      parsed.getUTCDate() === day
+    )
+  }, 'expected a real calendar date')
+
 /** Every financial-week start the inclusive range [from, to] touches, in order. */
 function weekStartsBetween(from: string, to: string): string[] {
   const starts: string[] = []
   let cursor = weekStartFor(from)
   const last = weekStartFor(to)
-  // Bounded by construction, but a malformed range must not spin: BR7 weeks are 7 days apart and
-  // `cursor` strictly increases, so the guard only ever fires on nonsense input.
-  for (let i = 0; cursor <= last && i < 520; i += 1) {
+  while (cursor <= last) {
+    // Never return a plausible-looking partial total. A ten-year reporting window is already far
+    // beyond the operational use case and means 520 weekly ledger reads with the current port; a
+    // wider request must be narrowed (or served by a future range-query adapter) explicitly.
+    if (starts.length >= 520) {
+      throw new z.ZodError([{
+        code: 'custom',
+        path: ['from', 'to'],
+        message: 'profit range cannot exceed 520 financial weeks',
+      }])
+    }
     starts.push(cursor)
     cursor = addDays(cursor, 7)
   }

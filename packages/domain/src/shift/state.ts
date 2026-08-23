@@ -158,8 +158,8 @@ export interface BatteryReading {
   readonly slotNo: number
   readonly percent: number | null
   /**
-   * The driver declared that he cannot produce this pack's reading himself — his phone will not run
-   * the BMS app at all (old Android, no Bluetooth pairing, a device the manufacturer's app refuses).
+   * The driver cannot provide complete evidence for this pack — either his phone will not run the
+   * BMS app or he is handing an incomplete end reading to the manager rather than staying clocked in.
    *
    * This is NOT a way out of the evidence. It moves the obligation: the driver stops being blocked,
    * and the BRANCH MANAGER becomes the one who cannot finish until he has taken the reading on a
@@ -197,8 +197,8 @@ export type PackageGap =
   | { readonly kind: 'missing_value'; readonly field: string }
   | { readonly kind: 'missing_battery_reading'; readonly slotNo: number }
   /**
-   * The driver said the BMS app will not run on his phone, so this pack is waiting for the manager
-   * to read it. Deliberately a gap of its own: it does not stop the driver, it stops the APPROVAL.
+   * The driver could not provide complete pack evidence, so this is waiting for the manager to read
+   * it. Deliberately a gap of its own: it does not stop the driver, it stops the APPROVAL.
    */
   | { readonly kind: 'awaiting_manager_reading'; readonly slotNo: number }
   | { readonly kind: 'unconfirmed_orders' }

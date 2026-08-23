@@ -213,6 +213,21 @@ export class PgShiftRepo implements ShiftRepo {
     return rows[0] ?? null
   }
 
+  async countOpenActorsForBranch(branchId: string): Promise<{ drivers: number; vehicles: number }> {
+    const { rows } = await this.pool.query<{ drivers: number; vehicles: number }>(
+      `SELECT COUNT(DISTINCT driver_id)::int AS drivers,
+              COUNT(DISTINCT vehicle_id)::int AS vehicles
+         FROM shifts
+        WHERE branch_id = $1
+          AND state = 'open'`,
+      [branchId],
+    )
+    return {
+      drivers: Number(rows[0]?.drivers ?? 0),
+      vehicles: Number(rows[0]?.vehicles ?? 0),
+    }
+  }
+
   async listLiveForDriver(driverId: string): Promise<ShiftRecord[]> {
     return this.load('s.driver_id = $1 AND s.state = ANY($2::shift_state[])', [driverId, LIVE_STATES])
   }

@@ -1,10 +1,18 @@
-import { type ReactNode, useCallback, useEffect, useState, useRef } from 'react'
+import { type ReactNode, useCallback, useEffect, useId, useRef, useState } from 'react'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { explainLiveShiftActionError, type LiveShiftApiError } from '../live-shift-error.ts'
 import {
   forceClosePreparationReady,
 } from '../settlement-review.ts'
+import {
+  clearPendingTranche,
+  isStrictlyPositiveTrancheAmount,
+  newPendingTranche,
+  readPendingTranche,
+  trancheRejectionDefinitelyDidNotCommit,
+  writePendingTranche,
+} from '../pending-tranche.ts'
 import { Badge, Button, Card, Field, MoneyInput, Pending, Select, TextInput } from '../ui.tsx'
 
 interface ShiftRow {
@@ -144,10 +152,15 @@ function LiveRow({
   const { api, t, lang } = useApp()
   const [panel, setPanel] = useState<'none' | 'suspend' | 'tranche' | 'void' | 'forceClose'>('none')
   const [note, setNote] = useState('')
-  const [kind, setKind] = useState<'float' | 'topup'>('float')
-  const [amount, setAmount] = useState('')
-  /** Survives re-renders and failed attempts; cleared only once the money is actually out. */
-  const trancheKey = useRef<string | null>(null)
+  const [trancheRecovery, setTrancheRecovery] = useState(() => readPendingTranche(shift.id))
+  const [kind, setKind] = useState<'float' | 'topup'>(
+    trancheRecovery.status === 'pending' ? trancheRecovery.operation.kind : 'float',
+  )
+  const [amount, setAmount] = useState(
+    trancheRecovery.status === 'pending' ? trancheRecovery.operation.amount : '',
+  )
+  const trancheKindId = useId()
+  const trancheAmountId = useId()
   const [reason, setReason] = useState('')
   const [odometerKm, setOdometerKm] = useState('')
   const [cashDeclared, setCashDeclared] = useState('')
@@ -196,27 +209,63 @@ function LiveRow({
   }
 
   const disburse = async (): Promise<void> => {
-    setBusy(true)
     setErr(null)
     /*
-     * ONE KEY PER INTENDED DISBURSEMENT, minted here and REUSED on every retry of it.
+     * ONE DURABLE KEY PER INTENDED DISBURSEMENT, persisted BEFORE the request and REUSED on every
+     * retry. Reloading, navigating away, or losing the response must not turn the retry into a new
+     * transfer of branch money.
      *
      * The server cannot tell a second tranche from a repeated one — SRS C-5 allows several a day
      * and the amounts may be identical — so it used to key the ledger on `tranches.length + 1`,
      * recomputed per request. A double tap on a slow office connection was therefore tranche #2:
      * twice the cash out, and BR1 then expecting money back the driver never received.
      *
-     * The key is cleared only when a disbursement SUCCEEDS, so a retry after a timeout — the case
-     * where the server may well have committed already — carries the same key and posts nothing.
+     * The key and exact payload are cleared only after a successful/replayed response. While they
+     * are pending the fields are locked: this reconciles the first handover instead of creating a
+     * new handover with ambiguous details.
      */
-    const key = (trancheKey.current ??= crypto.randomUUID())
+    if (trancheRecovery.status === 'corrupt' || trancheRecovery.status === 'unavailable') return
+    if (trancheRecovery.status === 'none' && !isStrictlyPositiveTrancheAmount(amount)) return
+
+    let operation = trancheRecovery.status === 'pending' ? trancheRecovery.operation : null
+    if (!operation) {
+      try {
+        operation = newPendingTranche(shift.id, kind, amount, crypto.randomUUID())
+      } catch {
+        setTrancheRecovery({ status: 'unavailable' })
+        return
+      }
+      if (!writePendingTranche(operation)) {
+        setTrancheRecovery({ status: 'unavailable' })
+        return
+      }
+      setTrancheRecovery({ status: 'pending', operation })
+    }
+
+    setBusy(true)
     try {
-      await api.addTranche(shift.id, { kind, amount, occurrenceKey: key })
-      trancheKey.current = null
+      await api.addTranche(shift.id, {
+        kind: operation.kind,
+        amount: operation.amount,
+        occurrenceKey: operation.occurrenceKey,
+      })
+      if (!clearPendingTranche(shift.id)) {
+        // The POST succeeded, but retaining the exact locked operation is safer than allowing a
+        // new key while durable storage still says this handover requires reconciliation.
+        setTrancheRecovery({ status: 'pending', operation })
+        return
+      }
+      setTrancheRecovery({ status: 'none' })
       setPanel('none')
       setAmount('')
       onChanged()
     } catch (e) {
+      // An explicit client refusal (validation/auth/state) cannot have committed this request, so
+      // the operator may correct it. Ambiguous transport/5xx failures and key conflicts keep the
+      // exact operation locked for an idempotent reconciliation retry.
+      if (trancheRejectionDefinitelyDidNotCommit(e) && clearPendingTranche(shift.id)) {
+        setTrancheRecovery({ status: 'none' })
+      }
       setErr(e as LiveShiftApiError)
     } finally {
       setBusy(false)
@@ -301,7 +350,7 @@ function LiveRow({
             {shift.state === 'open' ? (
               <>
                 <Button variant="ghost" onClick={() => toggle('tranche')}>
-                  {t.liveShifts.addTranche}
+                  {trancheRecovery.status === 'pending' ? t.liveShifts.resumeTranche : t.liveShifts.addTranche}
                 </Button>
                 <Button variant="ghost" onClick={() => toggle('suspend')}>
                   {t.liveShifts.suspend}
@@ -354,23 +403,69 @@ function LiveRow({
       ) : null}
       {panel === 'tranche' ? (
         <div className="flex flex-col gap-2">
+          {trancheRecovery.status === 'pending' ? (
+            <p className="text-sm font-medium text-amber-800" role="status">
+              {t.liveShifts.pendingTrancheHint}
+            </p>
+          ) : trancheRecovery.status === 'corrupt' ? (
+            <p className="text-sm font-medium text-red-700" role="alert">
+              {t.liveShifts.pendingTrancheCorrupt}
+            </p>
+          ) : trancheRecovery.status === 'unavailable' ? (
+            <p className="text-sm font-medium text-red-700" role="alert">
+              {t.liveShifts.safeRetryStorageUnavailable}
+            </p>
+          ) : null}
           <div className="flex flex-wrap gap-2">
-            <Field label={t.liveShifts.kind}>
-              <Select value={kind} onChange={(e) => setKind(e.target.value as 'float' | 'topup')}>
+            <Field label={t.liveShifts.kind} htmlFor={trancheKindId}>
+              <Select
+                id={trancheKindId}
+                value={kind}
+                disabled={trancheRecovery.status === 'pending'}
+                onChange={(e) => setKind(e.target.value as 'float' | 'topup')}
+              >
                 <option value="float">{t.liveShifts.float}</option>
                 <option value="topup">{t.liveShifts.topup}</option>
               </Select>
             </Field>
-            <Field label={t.liveShifts.amount}>
-              <MoneyInput value={amount} onChange={(e) => setAmount(e.target.value)} />
+            <Field
+              label={t.liveShifts.amount}
+              htmlFor={trancheAmountId}
+              error={
+                trancheRecovery.status === 'none' && amount.trim() !== '' && !isStrictlyPositiveTrancheAmount(amount)
+                  ? t.liveShifts.positiveAmountRequired
+                  : null
+              }
+            >
+              <MoneyInput
+                id={trancheAmountId}
+                value={amount}
+                disabled={trancheRecovery.status === 'pending'}
+                onChange={(e) => setAmount(e.target.value)}
+              />
             </Field>
           </div>
           {err ? <p className="text-sm text-red-600">{explainLiveShiftActionError(err, 'tranche', lang, t)}</p> : null}
           <div className="flex gap-2">
-            <Button variant="primary" className="flex-1" disabled={busy || amount.trim() === ''} onClick={disburse}>
-              {busy ? t.common.loading : t.liveShifts.addTranche}
+            <Button
+              variant="primary"
+              className="flex-1"
+              disabled={
+                busy ||
+                trancheRecovery.status === 'corrupt' ||
+                trancheRecovery.status === 'unavailable' ||
+                amount.trim() === '' ||
+                (trancheRecovery.status === 'none' && !isStrictlyPositiveTrancheAmount(amount))
+              }
+              onClick={disburse}
+            >
+              {busy
+                ? t.common.loading
+                : trancheRecovery.status === 'pending'
+                  ? t.liveShifts.resumeTranche
+                  : t.liveShifts.addTranche}
             </Button>
-            <Button variant="ghost" className="flex-1" onClick={() => setPanel('none')}>
+            <Button variant="ghost" className="flex-1" disabled={busy} onClick={() => setPanel('none')}>
               {t.common.cancel}
             </Button>
           </div>

@@ -42,6 +42,9 @@ const get = async (t: string, url: string): Promise<LightMyRequestResponse> =>
 
 /** The unstorable figure exactly as production sent it. */
 const OUT_OF_RANGE = '82296150060611100000226021100101000'
+/** PostgreSQL bigint limits, expressed as major-unit wire values. */
+const MAX_MINOR = '92233720368547758.07'
+const ONE_MINOR = '0.01'
 
 async function resetWithWalletOcr(value: string): Promise<void> {
   await h.app.close()
@@ -96,6 +99,15 @@ async function shiftReadyToClose(driver: string, manager: string): Promise<strin
     }],
   })
   for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
+  return id
+}
+
+async function shiftAwaitingOpen(driver: string): Promise<string> {
+  const id = (await post(driver, '/shifts', { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 })).json()
+    .id as string
+  await h.uploadPhoto(driver, id, 'start', 'odometer')
+  const start = await put(driver, `/shifts/${id}/start-package`, { odometerKm: 100, batteryPercent: 90 })
+  expect(start.statusCode, start.body).toBe(200)
   return id
 }
 
@@ -203,7 +215,7 @@ describe('money the system cannot store', () => {
   })
 
   it('still accepts the largest figure that genuinely fits', async () => {
-    await resetWithWalletOcr('92233720368547758.07')
+    await resetWithWalletOcr(MAX_MINOR)
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
     const id = await shiftReadyToClose(driver, manager)
@@ -214,6 +226,138 @@ describe('money the system cannot store', () => {
       ...BALANCED,
     })
     expect(res.statusCode).toBe(200)
-    expect((await get(manager, `/shifts/${id}/review`)).json().endPackage.walletDeclaredOcr).toBe('92233720368547758.07')
+    expect((await get(manager, `/shifts/${id}/review`)).json().endPackage.walletDeclaredOcr).toBe(MAX_MINOR)
+  })
+
+  it.each([
+    ['float', { floatTranches: [MAX_MINOR, ONE_MINOR], topupTranches: [] }, 'shift.floatTotal'],
+    ['top-up', { floatTranches: [], topupTranches: [MAX_MINOR, ONE_MINOR] }, 'shift.topupTotal'],
+  ])('returns a named 422 when the %s aggregate exceeds bigint', async (_kind, payload, field) => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await shiftAwaitingOpen(driver)
+
+    const response = await post(manager, `/shifts/${id}/approve-open`, payload)
+
+    expect(response.statusCode).toBe(422)
+    expect(response.json()).toMatchObject({ error: 'money_total_out_of_range', detail: { field } })
+    expect((await h.deps.shifts.findById(id))?.state).toBe('awaiting_open_approval')
+    expect(await h.deps.ledger.listByShift(id)).toEqual([])
+  })
+
+  it('rejects an overflowing BR1 actual-total aggregate and rolls back the close boundary', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await shiftAwaitingOpen(driver)
+    expect((await post(manager, `/shifts/${id}/approve-open`, {
+      floatTranches: [], topupTranches: [],
+    })).statusCode).toBe(200)
+    h.stageCloseDraftFinancialFixture(id, {
+      managerToken: manager,
+      orders: [{
+        clientKey: 'range-zero-order',
+        providerOrderNo: 'RANGE-ZERO-1',
+        payMode: 'free',
+        fee: '0.00',
+        occurredDate: today,
+        occurredMinute: '08:00',
+      }],
+    })
+    for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
+
+    const response = await put(driver, `/shifts/${id}/end-package`, {
+      odometerKm: 110,
+      batteryPercent: 50,
+      cashDeclared: MAX_MINOR,
+      walletDeclared: MAX_MINOR,
+    })
+
+    expect(response.statusCode).toBe(422)
+    expect(response.json()).toMatchObject({
+      error: 'money_total_out_of_range',
+      detail: { field: 'br1.actualTotal' },
+    })
+    const stored = await h.deps.shifts.findById(id)
+    expect(stored?.state).toBe('open')
+    expect(stored?.submittedAt).toBeNull()
+    expect(stored?.equationDiff).toBeNull()
+  })
+
+  it('rejects an overflowing force-close actual total before freezing its two-phase boundary', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await shiftAwaitingOpen(driver)
+    expect((await post(manager, `/shifts/${id}/approve-open`, {
+      floatTranches: [], topupTranches: [],
+    })).statusCode).toBe(200)
+
+    const response = await post(manager, `/shifts/${id}/force-close`, {
+      prepareOnly: true,
+      reason: 'manager counted both balances',
+      odometerKm: 110,
+      cashDeclared: MAX_MINOR,
+      walletDeclared: MAX_MINOR,
+    })
+
+    expect(response.statusCode).toBe(422)
+    expect(response.json()).toMatchObject({
+      error: 'money_total_out_of_range',
+      detail: { field: 'forceClose.actualTotal' },
+    })
+    expect(await h.deps.shifts.findById(id)).toMatchObject({
+      state: 'open',
+      submittedAt: null,
+      endCashDeclared: null,
+      endWalletDeclared: null,
+    })
+    expect(await h.deps.decisions.listByShift(id)).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ decision: 'force_close_prepared' })]),
+    )
+  })
+
+  it('rejects an overflowing settlement aggregate before a snapshot or journal can persist', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await shiftAwaitingOpen(driver)
+    expect((await post(manager, `/shifts/${id}/approve-open`, {
+      floatTranches: [MAX_MINOR], topupTranches: [],
+    })).statusCode).toBe(200)
+    h.stageCloseDraftFinancialFixture(id, {
+      managerToken: manager,
+      orders: [{
+        clientKey: 'range-zero-order',
+        providerOrderNo: 'RANGE-ZERO-2',
+        payMode: 'free',
+        fee: '0.00',
+        occurredDate: today,
+        occurredMinute: '08:00',
+      }],
+      cashDeductions: [{
+        clientKey: 'range-deduction',
+        operationKey: 'range-deduction',
+        amount: MAX_MINOR,
+        occurredDate: today,
+        occurredMinute: '08:00',
+      }],
+    })
+    for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
+    const submitted = await put(driver, `/shifts/${id}/end-package`, {
+      odometerKm: 110,
+      batteryPercent: 50,
+      cashDeclared: MAX_MINOR,
+      walletDeclared: `-${MAX_MINOR}`,
+    })
+    expect(submitted.statusCode, submitted.body).toBe(200)
+
+    const response = await get(manager, `/shifts/${id}/settlement`)
+
+    expect(response.statusCode).toBe(422)
+    expect(response.json()).toMatchObject({
+      error: 'money_total_out_of_range',
+      detail: { field: 'settlement.cashToOffice' },
+    })
+    expect(await h.deps.settlements.findByShift(id)).toBeNull()
+    // Only the opening float exists; no close journal was attempted.
+    expect((await h.deps.ledger.listByShift(id)).map((entry) => entry.eventType)).toEqual(['float_out'])
   })
 })

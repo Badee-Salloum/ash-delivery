@@ -39,4 +39,27 @@ describe('live-shift action errors', () => {
       'new_server_refusal',
     )
   })
+
+  it('tells a stale admin to refresh instead of retrying an unsafe tranche request', () => {
+    const message = explainLiveShiftActionError(
+      { status: 428, error: 'admin_update_required' },
+      'tranche',
+      'en',
+      en,
+    )
+    expect(message).toContain('outdated')
+    expect(message).toContain('refresh')
+  })
+
+  it('warns that a conflicting event key must not be resent', () => {
+    const message = explainLiveShiftActionError(
+      { status: 409, error: 'idempotency_key_conflict' },
+      'tranche',
+      'ar',
+      ar,
+    )
+    expect(message).toContain('مفتاح')
+    expect(message).toContain('نوع العهدة أو المبلغ')
+    expect(message).toContain('لا تعِد الإرسال')
+  })
 })

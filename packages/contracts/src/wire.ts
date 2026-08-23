@@ -53,6 +53,21 @@ export const moneySchema = z
 /** Physical cash counted at handover cannot be negative; wallet balances may be. */
 export const nonnegativeMoneySchema = moneySchema.refine((m) => m >= 0n, 'cash cannot be negative')
 
+/** A real disbursement tranche. Zero means "no tranche" and is represented by an empty array. */
+export const positiveMoneySchema = moneySchema.refine((m) => m > 0n, 'tranche must be strictly positive')
+
+/**
+ * A reason is evidence, so a string made only from whitespace or invisible Unicode formatting
+ * marks is no reason at all. JavaScript's `trim()` deliberately leaves characters such as U+200B
+ * ZERO WIDTH SPACE in place; test the Unicode categories explicitly after trimming.
+ */
+export const nonblankReasonSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(500)
+  .refine((value) => /[^\p{White_Space}\p{Cf}]/u.test(value), 'reason must include a visible character')
+
 export const serializeMoney = (m: Minor): string => formatMinor(m)
 
 export const calendarDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'expected YYYY-MM-DD')
@@ -375,6 +390,12 @@ export const endPackageRequest = z.object({
   /** Optimistic close-draft identity. Required by the service once a durable draft exists. */
   draftRevision: z.number().int().min(0).optional(),
   draftHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  /**
+   * Explicitly hand incomplete fitted-pack evidence to the manager instead of keeping the driver
+   * clocked in. Complete end-pack readings/evidence remain untouched. Cached clients that omit
+   * this flag retain the stricter historical gate.
+   */
+  deferMissingBatteryEvidenceToManager: z.boolean().default(false),
   odometerKm: z.number().int().min(0),
   /** What the end reader produced before the driver's confirmation. Evidence, not a gate. */
   odometerKmOcr: z.number().int().min(0).nullable().catch(null).default(null),
@@ -517,15 +538,15 @@ export const uploadEvidenceParams = z.object({
  * per day are legitimate, so each is a list, not a scalar.
  */
 export const approveOpenRequest = z.object({
-  floatTranches: z.array(moneySchema).min(0),
-  topupTranches: z.array(moneySchema).min(0),
+  floatTranches: z.array(positiveMoneySchema).max(32_767),
+  topupTranches: z.array(positiveMoneySchema).max(32_767),
   /**
    * «الذمة المرحّلة» — cash the driver already holds from an earlier shift, consumed here.
    *
    * The office hands over only the difference, so this is not new money leaving the box. Refused
    * above what the receivable actually holds.
    */
-  carriedTranches: z.array(moneySchema).min(0).default([]),
+  carriedTranches: z.array(positiveMoneySchema).max(32_767).default([]),
 })
 
 export const settlementVarianceDirectionSchema = z.enum(['surplus', 'shortage', 'balanced'])
@@ -581,7 +602,7 @@ export const fixedSettlementConfirmationSchema = z.object({
   reviewedSettlementHash: z.string().regex(/^[0-9a-f]{64}$/, 'expected a sha256 hex digest'),
   walletTransferConfirmed: z.literal(true),
   cashSettlementConfirmed: z.literal(true),
-  varianceReason: z.string().trim().min(1).max(500).nullable().default(null),
+  varianceReason: nonblankReasonSchema.nullable().default(null),
 })
 
 export const approveCloseRequest = z.object({
@@ -603,11 +624,11 @@ export const approveCloseRequest = z.object({
   walletTransferConfirmed: z.boolean().default(false),
   cashSettlementConfirmed: z.boolean().default(false),
   /** Required by the service whenever the immutable preview has a non-zero variance. */
-  varianceReason: z.string().trim().min(1).max(500).nullable().default(null),
+  varianceReason: nonblankReasonSchema.nullable().default(null),
 })
 
 const forceCloseBaseRequest = z.object({
-  reason: z.string().trim().min(1).max(500),
+  reason: nonblankReasonSchema,
   odometerKm: z.number().int().min(0).nullable().default(null),
   odometerAnomalyConfirmed: z.boolean().default(false),
   /** Force-close still settles real money: both reviewed actual balances are mandatory. */
@@ -640,7 +661,7 @@ export const forceCloseRequest = z.union([prepareForceCloseRequest, commitForceC
  */
 export const addTrancheRequest = z.object({
   kind: z.enum(['float', 'topup']),
-  amount: moneySchema,
+  amount: positiveMoneySchema,
   /**
    * ONE KEY PER INTENDED DISBURSEMENT, minted by the client before it first sends.
    *
@@ -650,10 +671,11 @@ export const addTrancheRequest = z.object({
    * out of `office_cash`, and BR1 then expecting the driver to return money he never received,
    * which makes the shift unclosable.
    *
-   * Optional so an older client still posts; when absent the old ordinal is used and the old risk
-   * remains, which is why the admin console always sends one.
+   * Kept optional at the parser only so an older admin receives the named
+   * `428 admin_update_required` service response instead of an opaque schema error. The service
+   * never derives an ordinal fallback, and the supported admin console always sends this key.
    */
-  occurrenceKey: z.string().min(1).max(64).optional(),
+  occurrenceKey: z.string().trim().min(1).max(64).optional(),
 })
 
 /**

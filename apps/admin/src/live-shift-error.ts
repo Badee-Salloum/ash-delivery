@@ -11,6 +11,12 @@ type LiveShiftAction = 'void' | 'forceClose' | 'suspend' | 'tranche'
 
 const copy: Record<Lang, Record<string, string>> = {
   ar: {
+    admin_update_required:
+      'نسخة لوحة الإدارة قديمة ولا ترسل مفتاح العملية الآمن. حدّث الصفحة تحديثاً كاملاً قبل إعادة المحاولة.',
+    idempotency_key_conflict:
+      'استُخدم مفتاح هذه العملية سابقاً بتفاصيل مختلفة (نوع العهدة أو المبلغ). لا تعِد الإرسال؛ حدّث النوبة وتحقق من العهدة المسجلة.',
+    money_total_out_of_range:
+      'إجمالي المبلغ أكبر من الحد الذي يمكن للنظام حفظه. راجع المبلغ ولا تنفّذ التسليم قبل تصحيحه.',
     settlement_changed_since_review:
       'تغيّرت بيانات النوبة بعد المعاينة. تم تحديث التسوية؛ راجع المبالغ وأكّد معاملتي المحفظة والكاش من جديد.',
     settlement_confirmation_required:
@@ -32,6 +38,12 @@ const copy: Record<Lang, Record<string, string>> = {
     internal_error: 'فشل الإجراء بسبب خطأ في الخادم. حاول مرة أخرى؛ وإن تكرر الخطأ بلّغ مسؤول النظام باسم السائق.',
   },
   en: {
+    admin_update_required:
+      'This admin build is outdated and cannot identify the disbursement safely. Fully refresh it before retrying.',
+    idempotency_key_conflict:
+      'This operation key was already used with different tranche details (type or amount). Do not resend; refresh the shift and verify the recorded funds.',
+    money_total_out_of_range:
+      'The money total is larger than the system can store. Correct the amount before handing over funds.',
     settlement_changed_since_review:
       'The shift changed after the preview. The settlement was refreshed; review it and confirm both transactions again.',
     settlement_confirmation_required:

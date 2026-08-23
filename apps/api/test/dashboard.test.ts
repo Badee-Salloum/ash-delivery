@@ -1,6 +1,20 @@
 import type { LightMyRequestResponse } from 'fastify'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BRANCH, DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr, today } from './harness.ts'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ShiftRecord } from '@ash/contracts'
+import { type ShiftState, minor, weekStartFor } from '@ash/domain'
+import {
+  BRANCH,
+  DRIVER_ID,
+  type Harness,
+  NOW_MS,
+  OTHER_BRANCH,
+  VEHICLE_ID,
+  approveFixedClose,
+  makeHarness,
+  syp,
+  sypStr,
+  today,
+} from './harness.ts'
 
 /**
  * The minimal ops dashboard (SRS I-1). Total profit is GM-only (BR8), which is why it is a
@@ -18,8 +32,56 @@ afterEach(async () => {
 const get = async (token: string, url: string): Promise<LightMyRequestResponse> =>
   await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(token) } })
 
+async function seedCountShift(
+  id: string,
+  state: ShiftState,
+  overrides: Partial<Pick<ShiftRecord, 'branchId' | 'driverId' | 'vehicleId' | 'businessDate' | 'shiftNo'>> = {},
+): Promise<void> {
+  await h.deps.shifts.create({
+    id,
+    branchId: BRANCH,
+    driverId: `driver-${id}`,
+    vehicleId: `vehicle-${id}`,
+    shiftNo: 1,
+    businessDate: today,
+    weekStartDate: '2026-07-19',
+    state,
+    floatTranches: [],
+    topupTranches: [],
+    carriedTranches: [],
+    keptAsReceivable: minor(0n),
+    driverSharePaid: minor(0n),
+    mediaSlotsStart: [],
+    mediaSlotsEnd: [],
+    odoStart: null,
+    odoEnd: null,
+    batteryStart: null,
+    batteryEnd: null,
+    endCashDeclared: null,
+    endWalletDeclared: null,
+    odoStartOcr: null,
+    odoEndOcr: null,
+    odoEndAnomalyConfirmedAt: null,
+    odoEndAnomalyConfirmedBy: null,
+    batteryStartOcr: null,
+    endWalletDeclaredOcr: null,
+    driverConfirmedAt: null,
+    openApprovedAt: null,
+    openApprovedBy: null,
+    submittedAt: null,
+    equationDiff: null,
+    cashDiff: null,
+    walletDiff: null,
+    ordersHash: null,
+    approvedBy: null,
+    ...overrides,
+  }, null)
+}
+
 /** Run the canonical §2.3 shift to completion so the tiles have real numbers. */
-async function runCanonicalShift(): Promise<void> {
+async function runCanonicalShift(
+  options: { cashDeclared?: number; cashDeduction?: number } = {},
+): Promise<void> {
   const driver = await h.loginAs('driver1')
   const manager = await h.loginAs('manager')
 
@@ -55,17 +117,131 @@ async function runCanonicalShift(): Promise<void> {
   await add('cash', 12)
   await add('electronic', 6)
   await add('free', 2)
-  h.stageCloseDraftFinancialFixture(id, { managerToken: manager, orders })
+  h.stageCloseDraftFinancialFixture(id, {
+    managerToken: manager,
+    orders,
+    cashDeductions: options.cashDeduction === undefined ? [] : [{
+      clientKey: 'dashboard-deduction',
+      operationKey: 'dashboard-deduction',
+      amount: sypStr(options.cashDeduction),
+      occurredDate: today,
+      occurredMinute: '08:30',
+    }],
+  })
 
   for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
   await h.submitEndPackage(driver, id, {
-    odometerKm: 92, batteryPercent: 22, cashDeclared: sypStr(160_000), walletDeclared: sypStr(70_000),
+    odometerKm: 92,
+    batteryPercent: 22,
+    cashDeclared: sypStr(options.cashDeclared ?? 160_000),
+    walletDeclared: sypStr(70_000),
   })
   const review = await get(manager, `/shifts/${id}/review`)
   await approveFixedClose(h, manager, id, review.json().br1.ordersHash)
 }
 
 describe('the operational dashboard', () => {
+  it('counts exactly open shifts and excludes every other state, including suspended', async () => {
+    const states: ShiftState[] = [
+      'draft',
+      'awaiting_open_approval',
+      'open',
+      'pending_review',
+      'approved',
+      'suspended',
+      'week_locked',
+      'cancelled',
+    ]
+    for (const [index, state] of states.entries()) {
+      await seedCountShift(`state-${state}`, state, { shiftNo: index + 1 })
+    }
+
+    const manager = await h.loginAs('manager')
+    const res = await get(manager, '/dashboard/working-now')
+
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.headers['cache-control']).toBe('private, no-store')
+    expect(res.json()).toEqual({
+      asOf: new Date(NOW_MS).toISOString(),
+      drivers: 1,
+      vehicles: 1,
+    })
+  })
+
+  it('is date-independent, branch-isolated and counts distinct driver and vehicle IDs', async () => {
+    await seedCountShift('overnight-first', 'open', {
+      driverId: 'driver-overnight',
+      vehicleId: 'vehicle-overnight',
+      businessDate: '2026-07-20',
+    })
+    await seedCountShift('overnight-distinct', 'open', {
+      driverId: 'driver-distinct',
+      vehicleId: 'vehicle-distinct',
+      businessDate: '2026-07-19',
+    })
+    await seedCountShift('other-branch-open', 'open', {
+      branchId: OTHER_BRANCH,
+      driverId: 'driver-other-branch',
+      vehicleId: 'vehicle-other-branch',
+      businessDate: '2026-07-20',
+    })
+
+    const manager = await h.loginAs('manager')
+    expect((await get(manager, '/dashboard/working-now')).json()).toMatchObject({ drivers: 2, vehicles: 2 })
+
+    const otherManager = await h.loginAs('manager2')
+    expect((await get(otherManager, '/dashboard/working-now')).json()).toMatchObject({ drivers: 1, vehicles: 1 })
+
+    const sysadmin = await h.loginAs('sysadmin')
+    expect((await get(sysadmin, '/dashboard/working-now')).statusCode).toBe(422)
+    expect((await get(sysadmin, `/dashboard/working-now?branchId=${BRANCH}`)).json()).toMatchObject({
+      drivers: 2,
+      vehicles: 2,
+    })
+  })
+
+  it('removes the driver and vehicle as soon as the end package is submitted, before approval', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const created = await h.app.inject({
+      method: 'POST', url: '/shifts', headers: { cookie: h.cookie(driver) },
+      payload: { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 },
+    })
+    const id = created.json().id as string
+    await h.uploadPhoto(driver, id, 'start', 'odometer')
+    await h.app.inject({
+      method: 'PUT', url: `/shifts/${id}/start-package`, headers: { cookie: h.cookie(driver) },
+      payload: { odometerKm: 100, batteryPercent: 90 },
+    })
+    await h.app.inject({
+      method: 'POST', url: `/shifts/${id}/approve-open`, headers: { cookie: h.cookie(manager) },
+      payload: { floatTranches: [], topupTranches: [] },
+    })
+    expect((await get(manager, '/dashboard/working-now')).json()).toMatchObject({ drivers: 1, vehicles: 1 })
+
+    h.stageCloseDraftFinancialFixture(id, {
+      managerToken: manager,
+      orders: [{
+        clientKey: 'working-count-close',
+        providerOrderNo: 'WORKING-COUNT-1',
+        payMode: 'free',
+        fee: sypStr(0),
+        occurredDate: today,
+        occurredMinute: '08:00',
+      }],
+    })
+    for (const slot of ['dashboard', 'wallet', 'odometer']) await h.uploadPhoto(driver, id, 'end', slot)
+    const submitted = await h.submitEndPackage(driver, id, {
+      odometerKm: 110,
+      batteryPercent: 70,
+      cashDeclared: sypStr(0),
+      walletDeclared: sypStr(0),
+    })
+    expect(submitted.statusCode, submitted.body).toBe(200)
+    expect(submitted.json().state).toBe('pending_review')
+    expect((await get(manager, '/dashboard/working-now')).json()).toMatchObject({ drivers: 0, vehicles: 0 })
+  })
+
   it('reports today’s revenue, orders and fleet after a completed shift', async () => {
     await runCanonicalShift()
     const manager = await h.loginAs('manager')
@@ -156,12 +332,172 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
     expect((await get(manager, '/dashboard')).statusCode).toBe(200)
   })
 
-  it('a driver sees neither', async () => {
+  it('a driver sees none of the dashboard endpoints', async () => {
     const driver = await h.loginAs('driver1')
     expect((await get(driver, '/dashboard')).statusCode).toBe(403)
+    expect((await get(driver, '/dashboard/working-now')).statusCode).toBe(403)
     expect((await get(driver, '/dashboard/profit')).statusCode).toBe(403)
   })
+
+  it('uses an inclusive cross-week range and excludes dates outside its partial weeks', async () => {
+    const addProfitEntry = (
+      businessDate: string,
+      occurrenceKey: string,
+      company: number,
+      driver: number,
+      yalago: number,
+    ): void => {
+      h.deps.ledger.entries.push({
+        id: 10_000 + h.deps.ledger.entries.length,
+        branchId: BRANCH,
+        eventType: 'manual',
+        shiftId: null,
+        occurrenceKey,
+        businessDate,
+        postingDate: businessDate,
+        weekStartDate: weekStartFor(businessDate),
+        fxDayId: 1,
+        weekLockId: null,
+        reason: 'profit range fixture',
+        createdBy: 'u-bm',
+        lines: [
+          { fundCode: 'office_cash', side: 'D', amount: syp(company + driver + yalago) },
+          { fundCode: 'company_revenue', side: 'C', amount: syp(company) },
+          { fundCode: `driver_share_payable:${DRIVER_ID}`, side: 'C', amount: syp(driver), role: 'driver_share' },
+          { fundCode: 'yalago_income', side: 'C', amount: syp(yalago) },
+        ],
+      })
+    }
+
+    addProfitEntry('2026-07-19', 'outside-start', 100, 10, 1)
+    addProfitEntry('2026-07-20', 'inclusive-start', 200, 20, 2)
+    addProfitEntry('2026-07-25', 'first-week', 300, 30, 3)
+    addProfitEntry('2026-07-26', 'second-week', 400, 40, 4)
+    addProfitEntry('2026-07-27', 'inclusive-end', 500, 50, 5)
+    addProfitEntry('2026-07-28', 'outside-end', 600, 60, 6)
+
+    const res = await get(await scopedProfitReader(), '/dashboard/profit?from=2026-07-20&to=2026-07-27')
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json()).toMatchObject({
+      from: '2026-07-20',
+      to: '2026-07-27',
+      weekStart: '2026-07-19',
+      companyShareSyp: sypStr(1_400),
+      driverShareSyp: sypStr(140),
+      yalagoShareSyp: sypStr(14),
+    })
+  })
+
+  it('reports net earned share after deductions without adding settlement variance', async () => {
+    // The deduction lowers earned share from 40,000 to 39,000. Declaring the old balanced cash
+    // amount creates a 1,000 surplus, so finalEmployeeCash is 40,000. Profit must still say 39,000.
+    await runCanonicalShift({ cashDeduction: 1_000, cashDeclared: 160_000 })
+
+    const res = await get(await scopedProfitReader(), '/dashboard/profit')
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json().driverShareSyp).toBe(sypStr(39_000))
+
+    const settlement = [...h.deps.settlements.rows.values()][0]
+    expect(settlement?.baseDriverShare).toBe(syp(39_000))
+    expect(settlement?.variance).toBe(syp(1_000))
+    expect(settlement?.finalEmployeeCash).toBe(syp(40_000))
+  })
+
+  it('loads settlements once for multiple shifts and retains the legacy ledger fallback', async () => {
+    await runCanonicalShift()
+    const settled = [...h.deps.settlements.rows.values()][0]
+    if (!settled) throw new Error('canonical settlement missing')
+
+    const legacyShiftId = 'legacy-profit-batch'
+    h.deps.ledger.entries.push({
+      id: 19_999,
+      branchId: BRANCH,
+      eventType: 'share_split',
+      shiftId: legacyShiftId,
+      occurrenceKey: 'legacy-profit-batch',
+      businessDate: today,
+      postingDate: today,
+      weekStartDate: weekStartFor(today),
+      fxDayId: 1,
+      weekLockId: null,
+      reason: 'legacy profit batch fixture',
+      createdBy: 'u-bm',
+      lines: [
+        { fundCode: 'fee_earned', side: 'D', amount: syp(250) },
+        { fundCode: `driver_share_payable:${DRIVER_ID}`, side: 'C', amount: syp(250), role: 'driver_share' },
+      ],
+    })
+
+    const batchLookup = vi.spyOn(h.deps.settlements, 'listByShiftIds')
+    const singleLookup = vi.spyOn(h.deps.settlements, 'findByShift')
+    const res = await get(await scopedProfitReader(), '/dashboard/profit')
+
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json().driverShareSyp).toBe(sypStr(40_250))
+    expect(batchLookup).toHaveBeenCalledTimes(1)
+    expect(new Set(batchLookup.mock.calls[0]?.[0])).toEqual(new Set([settled.shiftId, legacyShiftId]))
+    expect(singleLookup).not.toHaveBeenCalled()
+  })
+
+  it('includes deduction overflow when deriving a legacy shift net share', async () => {
+    const shiftId = 'legacy-deduction-overflow'
+    const common = {
+      branchId: BRANCH,
+      shiftId,
+      businessDate: today,
+      postingDate: today,
+      weekStartDate: weekStartFor(today),
+      fxDayId: 1,
+      weekLockId: null,
+      createdBy: 'u-bm',
+      reason: 'legacy profit fixture',
+    }
+    h.deps.ledger.entries.push(
+      {
+        ...common,
+        id: 20_001,
+        eventType: 'share_split',
+        occurrenceKey: 'legacy-share',
+        lines: [
+          { fundCode: 'fee_earned', side: 'D', amount: syp(400) },
+          { fundCode: `driver_share_payable:${DRIVER_ID}`, side: 'C', amount: syp(400), role: 'driver_share' },
+        ],
+      },
+      {
+        ...common,
+        id: 20_002,
+        eventType: 'driver_cash_deduction',
+        occurrenceKey: 'legacy-deduction',
+        lines: [
+          { fundCode: `driver_share_payable:${DRIVER_ID}`, side: 'D', amount: syp(400), role: 'cash_deduction_share' },
+          { fundCode: `driver_receivable_cash:${DRIVER_ID}`, side: 'D', amount: syp(100), role: 'cash_deduction_overflow' },
+          { fundCode: `driver_cash:${DRIVER_ID}`, side: 'C', amount: syp(500), role: 'cash_deduction' },
+        ],
+      },
+    )
+
+    const response = await get(await scopedProfitReader(), '/dashboard/profit')
+    expect(response.statusCode, response.body).toBe(200)
+    expect(response.json().driverShareSyp).toBe(sypStr(-100))
+  })
+
+  it('rejects reversed and impossible calendar ranges instead of silently truncating them', async () => {
+    const gm = await scopedProfitReader()
+    expect((await get(gm, '/dashboard/profit?from=2026-07-22&to=2026-07-21')).statusCode).toBe(400)
+    expect((await get(gm, '/dashboard/profit?from=2026-02-30&to=2026-03-01')).statusCode).toBe(400)
+    expect((await get(gm, '/dashboard/profit?from=2015-01-01&to=2026-07-27')).statusCode).toBe(400)
+  })
 })
+
+/** The seeded GM is org-wide; bind the test identity to Damascus for a single-branch read. */
+async function scopedProfitReader(): Promise<string> {
+  h.deps.users.seed({
+    id: 'u-gm', branchId: BRANCH, roleKey: 'general_manager', username: 'gm',
+    fullNameAr: 'gm', passwordHash: 'plain:secret', driverId: null,
+    failedAttempts: 0, lockedUntilMs: null, active: true,
+  })
+  return await h.loginAs('gm')
+}
 
 /**
  * «كشف الصندوق ورأس المال» — the owner's own sheet.

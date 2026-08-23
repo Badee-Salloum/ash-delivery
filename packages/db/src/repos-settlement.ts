@@ -183,4 +183,13 @@ export class PgShiftSettlementRepo implements ShiftSettlementRepo {
     )
     return result.rows[0] ? rowToSettlement(result.rows[0]) : null
   }
+
+  async listByShiftIds(shiftIds: readonly string[]): Promise<ShiftSettlementRecord[]> {
+    if (shiftIds.length === 0) return []
+    const result = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM shift_settlements WHERE shift_id = ANY($1::uuid[]) ORDER BY id',
+      [shiftIds],
+    )
+    return result.rows.map(rowToSettlement)
+  }
 }

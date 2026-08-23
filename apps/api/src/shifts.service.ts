@@ -14,6 +14,7 @@ import type {
   Deps,
   OrderPointRecord,
   DocumentRecord,
+  JournalEntryRecord,
   ShiftOrderRecord,
   ShiftCloseTransactionDeps,
   ShiftDecisionRecord,
@@ -155,6 +156,76 @@ export function ordersHash(
     )
     .join(';')
   return createHash('sha256').update(`${orderPart}#${movementPart}#${deductionPart}`).digest('hex').slice(0, 32)
+}
+
+/** Exact storage limits of every PostgreSQL `*_minor` and journal-line amount column. */
+const PG_MINOR_MAX = 9_223_372_036_854_775_807n
+const PG_MINOR_MIN = -9_223_372_036_854_775_808n
+
+function assertPersistableMinor(field: string, value: bigint): void {
+  if (value >= PG_MINOR_MIN && value <= PG_MINOR_MAX) return
+  throw new ServiceError(422, 'money_total_out_of_range', {
+    field,
+    value: value.toString(),
+    min: PG_MINOR_MIN.toString(),
+    max: PG_MINOR_MAX.toString(),
+  })
+}
+
+function assertPersistableMoney(scope: string, values: Readonly<Record<string, bigint>>): void {
+  for (const [field, value] of Object.entries(values)) assertPersistableMinor(`${scope}.${field}`, value)
+}
+
+/** Validate every aggregate PgShiftRepo writes, including the combined cash input BR1 consumes. */
+function assertPersistableTrancheTotals(input: {
+  floatTranches: readonly Minor[]
+  topupTranches: readonly Minor[]
+  carriedTranches: readonly Minor[]
+}): void {
+  const floatTotal = sum(input.floatTranches)
+  const topupTotal = sum(input.topupTranches)
+  const carriedTotal = sum(input.carriedTranches)
+  assertPersistableMoney('shift', {
+    floatTotal,
+    topupTotal,
+    carriedTotal,
+    openingCashTotal: add(floatTotal, carriedTotal),
+  })
+}
+
+function assertPositiveTranches(
+  kind: 'float' | 'topup' | 'carried',
+  values: readonly Minor[],
+): void {
+  const index = values.findIndex((amount) => amount <= 0n)
+  if (index !== -1) throw new ServiceError(422, 'tranche_amount_must_be_positive', { kind, index })
+}
+
+/** No generated journal amount may make it as far as a PostgreSQL bigint cast. */
+function assertPersistablePostings(postings: readonly Posting[]): void {
+  for (const posting of postings) {
+    posting.lines.forEach((line, index) => {
+      assertPersistableMinor(`journal.${posting.eventType}.${posting.occurrenceKey}.lines[${index}]`, line.amount)
+    })
+  }
+}
+
+function canonicalPostingLines(posting: Posting): string[] {
+  return posting.lines
+    .map((line) => `${fundCodeOf(line.fund)}\u0000${line.side}\u0000${line.amount}\u0000${line.role ?? ''}`)
+    .sort()
+}
+
+function canonicalJournalLines(entry: JournalEntryRecord): string[] {
+  return entry.lines
+    .map((line) => `${line.fundCode}\u0000${line.side}\u0000${line.amount}\u0000${line.role ?? ''}`)
+    .sort()
+}
+
+function journalMatchesPosting(entry: JournalEntryRecord, posting: Posting): boolean {
+  const expected = canonicalPostingLines(posting)
+  const actual = canonicalJournalLines(entry)
+  return expected.length === actual.length && expected.every((line, index) => line === actual[index])
 }
 
 /** Overlay only database repositories; clocks, crypto, blobs and notifications stay request-scoped. */
@@ -563,20 +634,74 @@ async function batteryContext(
         (slot) => slot.package === pkg && slot.slot === bmsSlot(battery.slotNo ?? i + 1),
       )?.mediaId ?? null
       // A replacement photo invalidates the old machine reading until the new file has been read.
-      // The explicit "app unavailable" path is the exception: it intentionally has no driver image
-      // and waits for the manager's reading at the gate.
+      // An explicit manager-reading handoff is the exception: it intentionally may have no driver
+      // image and waits for the manager's reading at the gate.
       const evidenceMatches =
         row?.unavailable === true ||
         (row?.mediaId !== null && row?.mediaId !== undefined && row.mediaId === currentMediaId)
       return {
         slotNo: battery.slotNo ?? i + 1,
         percent: evidenceMatches ? (row?.percent ?? null) : null,
-        // The driver's «التطبيق لا يعمل على جهازي». Carried into the gate so it can tell a pack
-        // nobody has done yet from one he has told us he CANNOT do — the first is his to close,
-        // the second is the manager's.
+        // A recorded handoff distinguishes a pack nobody has addressed from one deliberately sent
+        // to manager review — the first is the driver's to complete, the second is the manager's.
         unavailable: evidenceMatches && row?.unavailable === true,
       }
     }),
+  }
+}
+
+// ── Battery evidence handoff ───────────────────────────────────────────────────────────────
+
+/**
+ * Move incomplete closing battery evidence from the driver to the manager.
+ *
+ * This runs inside the shift-close unit of work. If any other close requirement fails, these writes
+ * roll back with the submission. A pack is complete only when a usable percentage belongs to the
+ * currently attached `bms_N` generation; a manual value without its photo is not evidenced.
+ * Complete rows retain every diagnostic field and their OCR provenance.
+ */
+async function deferIncompleteEndBatteryEvidence(deps: Deps, shift: ShiftRecord): Promise<void> {
+  const fitted = await deps.directory.listBatteriesForVehicle(shift.vehicleId)
+  if (fitted.length === 0) return
+
+  const [rows, attached] = await Promise.all([
+    deps.batteryReadings.listByShift(shift.id),
+    deps.media.listSlots(shift.id),
+  ])
+  const endRows = rows.filter((row) => row.package === 'end')
+
+  for (let index = 0; index < fitted.length; index += 1) {
+    const battery = fitted[index]!
+    const slotNo = battery.slotNo ?? index + 1
+    const currentMediaId = attached.find(
+      (slot) => slot.package === 'end' && slot.slot === bmsSlot(slotNo),
+    )?.mediaId ?? null
+    const existing = endRows.find((row) => row.batteryId === battery.id)
+    const complete =
+      currentMediaId !== null &&
+      existing?.mediaId === currentMediaId &&
+      existing.percent !== null
+    if (complete) continue
+
+    await deps.batteryReadings.upsert({
+      shiftId: shift.id,
+      batteryId: battery.id,
+      package: 'end',
+      slotNo,
+      percent: null,
+      packMillivolts: null,
+      cycleCount: null,
+      remainCapacityDah: null,
+      fullCapacityDah: null,
+      mosTempDc: null,
+      t1Dc: null,
+      t2Dc: null,
+      mediaId: currentMediaId,
+      source: 'manual',
+      unavailable: true,
+      ocrRaw: null,
+      batterySwapId: null,
+    })
   }
 }
 
@@ -743,6 +868,14 @@ async function approveOpenLocked(
    * typed the wrong figure should be told, not quietly corrected.
    */
   const carried = input.carriedTranches ?? []
+  assertPositiveTranches('float', input.floatTranches)
+  assertPositiveTranches('topup', input.topupTranches)
+  assertPositiveTranches('carried', carried)
+  assertPersistableTrancheTotals({
+    floatTranches: input.floatTranches,
+    topupTranches: input.topupTranches,
+    carriedTranches: carried,
+  })
   const carriedTotal = sum(carried)
   if (carriedTotal > 0n) {
     const owed = await deps.ledger.fundBalance(shift.branchId, `driver_receivable_cash:${shift.driverId}`)
@@ -778,17 +911,19 @@ async function approveOpenLocked(
   // The float and top-up postings land HERE, at approval — not when the driver typed the
   // amounts. Money moves when a manager says it moved.
   const fxDayId = await ensureFxDay(deps, withFunds.businessDate)
+  const openingPostings = postingsForOpen({
+    driverId: withFunds.driverId,
+    floatTranches: withFunds.floatTranches,
+    // Clears the receivable and raises his cash, WITHOUT the branch box paying again — it paid
+    // yesterday, which is exactly what the ذمة recorded.
+    carriedTranches: withFunds.carriedTranches,
+    topupTranches: withFunds.topupTranches,
+    orders: [],
+  })
+  assertPersistablePostings(openingPostings)
   await deps.ledger.post(
     withFunds.branchId,
-    postingsForOpen({
-      driverId: withFunds.driverId,
-      floatTranches: withFunds.floatTranches,
-      // Clears the receivable and raises his cash, WITHOUT the branch box paying again — it paid
-      // yesterday, which is exactly what the ذمة recorded.
-      carriedTranches: withFunds.carriedTranches,
-      topupTranches: withFunds.topupTranches,
-      orders: [],
-    }),
+    openingPostings,
     {
       shiftId: withFunds.id,
       businessDate: withFunds.businessDate,
@@ -819,7 +954,7 @@ async function recordDecision(
   actor: Actor,
   shiftId: string,
   gate: 'open' | 'close',
-  decision: 'approved' | 'rejected' | 'rephoto_requested' | 'force_close_prepared',
+  decision: 'approved' | 'rejected' | 'rephoto_requested' | 'force_close_prepared' | 'force_cancelled',
   notes: string | null,
 ): Promise<void> {
   await deps.decisions.record({ shiftId, gate, decision, notes, decidedBy: actor.userId, decidedAtMs: deps.clock.nowMs() })
@@ -1031,15 +1166,17 @@ export async function reportIncident(deps: Deps, _actor: Actor, shiftId: string,
  * A second (or later) cash-float or wallet top-up handed to the driver mid-day (SRS C-5). Each
  * tranche posts ONE balanced entry under its own occurrence key
  * — `(shift_id, event_type, occurrence_key)` — so a replay is idempotent and the second tranche is
- * never swallowed by an "idempotent" first. BR1's expected end cash/wallet move automatically,
- * because the equation sums the tranche arrays. Manager money, so this is `shift.approve` (route).
+ * never swallowed by an "idempotent" first. The application reserves the caller key across both
+ * tranche event types too, so changing float ↔ top-up after a lost response is a conflict rather
+ * than a second handover. BR1's expected end cash/wallet move automatically because the equation
+ * sums the tranche arrays. Manager money, so this is `shift.approve` (route).
  */
 export async function addTranche(
   deps: Deps,
   actor: Actor,
   shiftId: string,
   input: { kind: 'float' | 'topup'; amount: Minor; occurrenceKey?: string | undefined },
-): Promise<ShiftRecord> {
+): Promise<{ shift: ShiftRecord; replayed: boolean }> {
   return deps.closeUnitOfWork.run(
     { shiftId, actorId: actor.userId },
     async (transaction) => addTrancheLocked(withCloseTransaction(deps, transaction), actor, shiftId, input),
@@ -1051,28 +1188,55 @@ async function addTrancheLocked(
   actor: Actor,
   shiftId: string,
   input: { kind: 'float' | 'topup'; amount: Minor; occurrenceKey?: string | undefined },
-): Promise<ShiftRecord> {
+): Promise<{ shift: ShiftRecord; replayed: boolean }> {
   const shift = await mustFind(deps, shiftId)
-  // Money the driver is out with: only while he is live. Not before open, not after review.
+  const key = input.occurrenceKey?.trim()
+  if (!key) throw new ServiceError(428, 'admin_update_required', { field: 'occurrenceKey' })
+  if (input.amount <= minor(0n)) throw new ServiceError(422, 'tranche_amount_must_be_positive')
+  assertPersistableMinor('tranche.amount', input.amount)
+
+  // Opening approval numbers its tranches "1", "2", ... under the same ledger event types. Keep
+  // caller keys in a server-owned namespace so even a perfectly valid caller key such as "1"
+  // cannot be mistaken for money handed over when the shift first opened.
+  const journalOccurrenceKey = `admin-tranche:${key}`
+  const posting =
+    input.kind === 'float'
+      ? floatOut(shift.driverId, input.amount, journalOccurrenceKey)
+      : walletTopup(shift.driverId, input.amount, journalOccurrenceKey)
+  assertPersistablePostings([posting])
+
+  /*
+   * The ledger's unique key makes the write idempotent, but "write nothing" is not enough: the
+   * shift tranche list is a second persisted fact consumed by BR1. Recognise the exact existing
+   * event before appending anything, and reject a caller trying to reuse its key for new money.
+   * This check intentionally precedes the state gate so a lost-response retry remains successful
+   * even if the driver submitted the close before the response reached the manager.
+   */
+  const existingEntry = (await deps.ledger.listByShift(shift.id)).find(
+    (entry) =>
+      (entry.eventType === 'float_out' || entry.eventType === 'wallet_topup') &&
+      entry.occurrenceKey === journalOccurrenceKey,
+  )
+  if (existingEntry) {
+    if (existingEntry.eventType !== posting.eventType || !journalMatchesPosting(existingEntry, posting)) {
+      throw new ServiceError(409, 'idempotency_key_conflict', { occurrenceKey: key, kind: input.kind })
+    }
+    return { shift, replayed: true }
+  }
+
+  // New money may move only while the driver is live. Exact retries were handled above.
   if (shift.state !== 'open' && shift.state !== 'suspended') {
     throw new ServiceError(409, 'shift_not_open_for_tranche')
   }
-  if (input.amount <= minor(0n)) throw new ServiceError(422, 'tranche_amount_must_be_positive')
 
-  const existing = input.kind === 'float' ? shift.floatTranches : shift.topupTranches
-  const trancheNo = existing.length + 1
-  /*
-   * The CLIENT's key when it sent one. The ordinal is not an idempotency key: it is recomputed
-   * from the current row on every request, so a retry lands on the next number and disburses
-   * again. SRS C-5 genuinely allows several tranches a day, so the server cannot tell a second
-   * disbursement from a repeated one — only the caller knows, and now it says.
-   */
-  const key = input.occurrenceKey ?? String(trancheNo)
-  const posting =
-    input.kind === 'float' ? floatOut(shift.driverId, input.amount, key) : walletTopup(shift.driverId, input.amount, key)
+  const updated: ShiftRecord =
+    input.kind === 'float'
+      ? { ...shift, floatTranches: [...shift.floatTranches, input.amount] }
+      : { ...shift, topupTranches: [...shift.topupTranches, input.amount] }
+  assertPersistableTrancheTotals(updated)
 
   const fxDayId = await ensureFxDay(deps, shift.businessDate)
-  await deps.ledger.post(shift.branchId, [posting], {
+  const written = await deps.ledger.post(shift.branchId, [posting], {
     shiftId: shift.id,
     businessDate: shift.businessDate,
     postingDate: todayFor(deps),
@@ -1081,12 +1245,24 @@ async function addTrancheLocked(
     createdBy: actor.userId,
   })
 
-  const updated: ShiftRecord =
-    input.kind === 'float'
-      ? { ...shift, floatTranches: [...shift.floatTranches, input.amount] }
-      : { ...shift, topupTranches: [...shift.topupTranches, input.amount] }
+  // A conforming close unit of work serialises this shift, so zero here means a repository saw a
+  // replay we did not. Re-read and apply the same payload check instead of ever appending blindly.
+  if (written.length === 0) {
+    const racedEntry = (await deps.ledger.listByShift(shift.id)).find(
+      (entry) =>
+        (entry.eventType === 'float_out' || entry.eventType === 'wallet_topup') &&
+        entry.occurrenceKey === journalOccurrenceKey,
+    )
+    if (
+      racedEntry &&
+      racedEntry.eventType === posting.eventType &&
+      journalMatchesPosting(racedEntry, posting)
+    ) return { shift, replayed: true }
+    throw new ServiceError(409, 'idempotency_key_conflict', { occurrenceKey: key, kind: input.kind })
+  }
+
   await deps.shifts.update(updated, actor.userId)
-  return updated
+  return { shift: updated, replayed: false }
 }
 
 // ── Mid-shift battery swap (SRS §L seam) ────────────────────────────────────────────────────
@@ -1549,6 +1725,7 @@ export interface Br1View {
 }
 
 export async function evaluateShift(deps: Deps, shift: ShiftRecord): Promise<Br1View> {
+  assertPersistableTrancheTotals(shift)
   const orderRows = await deps.orders.listByShift(shift.id)
   const movementRows = await deps.movements.listByShift(shift.id)
   const deductionRows = await deps.cashDeductions.listByShift(shift.id)
@@ -1567,6 +1744,26 @@ export async function evaluateShift(deps: Deps, shift: ShiftRecord): Promise<Br1
     walletAdjustments,
     cashDeductions,
   })
+  assertPersistableMoney('br1', {
+    feeTotal: result.totals.feeTotal,
+    yalagoTotal: result.totals.yalagoTotal,
+    blockTotal: result.totals.blockTotal,
+    expectedCash: result.expectedCash,
+    expectedWallet: result.expectedWallet,
+    expectedTotal: result.expectedTotal,
+    actualTotal: result.actualTotal,
+    scalarDiff: result.scalarDiff,
+    cashDiff: result.cashDiff,
+    walletDiff: result.walletDiff,
+  })
+  const minimumWallet = minWalletBalance({
+    driverId: shift.driverId,
+    floatTranches: shift.floatTranches,
+    topupTranches: shift.topupTranches,
+    orders,
+  })
+  const cashDeductionTotal = sum(cashDeductions)
+  assertPersistableMoney('br1', { minimumWallet, cashDeductionTotal })
   return {
     result,
     causes: diagnoseBr1(
@@ -1582,14 +1779,9 @@ export async function evaluateShift(deps: Deps, shift: ShiftRecord): Promise<Br1
     // The trough the wallet reaches mid-shift still walks the ORDERS only: a movement carries a
     // minute but the orders do not carry a sequence, so interleaving them would be guesswork.
     // It therefore under-reports once adjustments are real — noted rather than faked.
-    minWallet: minWalletBalance({
-      driverId: shift.driverId,
-      floatTranches: shift.floatTranches,
-      topupTranches: shift.topupTranches,
-      orders,
-    }),
+    minWallet: minimumWallet,
     ordersHash: ordersHash(orderRows, movementRows, deductionRows),
-    cashDeductionTotal: sum(cashDeductions),
+    cashDeductionTotal,
   }
 }
 
@@ -1711,6 +1903,7 @@ async function unresolvedWindowRows(deps: Deps, shiftId: string): Promise<{ orde
 interface EndPackageInput {
   draftRevision?: number | undefined
   draftHash?: string | undefined
+  deferMissingBatteryEvidenceToManager?: boolean | undefined
   odometerKm: number
   batteryPercent: number | null
   cashDeclared: Minor
@@ -1917,6 +2110,10 @@ async function submitEndPackageLocked(
   }
 
   const submittedAt = new Date(deps.clock.nowMs()).toISOString()
+
+  if (effectiveInput.deferMissingBatteryEvidenceToManager === true) {
+    await deferIncompleteEndBatteryEvidence(deps, shift)
+  }
 
   const staged: ShiftRecord = {
     ...shift,
@@ -3331,6 +3528,30 @@ export async function settlementFor(deps: Deps, shift: ShiftRecord): Promise<Set
     actualCash: shift.endCashDeclared,
     actualWallet: shift.endWalletDeclared,
   })
+  assertPersistableMoney('settlement', {
+    deliveryFeeTotal: plan.deliveryFeeTotal,
+    fixedDriverShare: plan.fixedDriverShare,
+    manualDriverShare: plan.manualDriverShare,
+    grossDriverShare: plan.grossDriverShare,
+    cashDeductionTotal: plan.cashDeductionTotal,
+    baseDriverShare: plan.baseDriverShare,
+    expectedCash: plan.expectedCash,
+    expectedWallet: plan.expectedWallet,
+    expectedTotal: plan.expectedTotal,
+    actualCash: plan.actualCash,
+    actualWallet: plan.actualWallet,
+    actualTotal: plan.actualTotal,
+    variance: plan.variance,
+    finalEmployeeCash: plan.finalEmployeeCash,
+    officeEntitlement: plan.officeEntitlement,
+    cashToOffice: plan.cashToOffice,
+    walletToOffice: plan.walletToOffice,
+    walletAmount: plan.wallet.amount,
+    cashAmount: plan.cash.amount,
+    splitDriverShare: share.split.driverShare,
+    splitCompanyShare: share.split.companyShare,
+    splitYalagoShare: share.split.yalagoShare,
+  })
   const closeDraft = await deps.closeDrafts.findByShift(shift.id)
   const submittedCloseDraft = closeDraft?.submittedAtMs == null ? null : {
     revision: closeDraft.revision,
@@ -3552,6 +3773,7 @@ async function approveCloseLocked(
     settlement.split,
     settlement,
   )
+  assertPersistablePostings(postings)
 
   const written = await deps.ledger.post(shift.branchId, postings, {
     shiftId: shift.id,
@@ -3589,9 +3811,16 @@ async function approveCloseLocked(
  * were disbursed to the driver at open; here they are returned to the office so the ledger nets to
  * zero, the recorded orders are discarded (their fee/split only ever posts at approve-close, so
  * there's nothing to reverse there), and the shift ends `cancelled` — terminal, bike released,
- * never counted. Audited with a reason at the route. For test/abandoned/erroneous shifts.
+ * never counted. The mandatory reason is appended to the immutable decision log inside the same
+ * unit of work, so a lost HTTP response cannot leave a terminal shift without its explanation.
+ * For test/abandoned/erroneous shifts.
  */
-export async function voidShift(deps: Deps, actor: Actor, shiftId: string, reason: string): Promise<ShiftRecord> {
+export async function voidShift(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  reason: string,
+): Promise<{ shift: ShiftRecord; replayed: boolean }> {
   return deps.closeUnitOfWork.run(
     { shiftId, actorId: actor.userId },
     async (transaction) => voidShiftLocked(withCloseTransaction(deps, transaction), actor, shiftId, reason),
@@ -3603,12 +3832,22 @@ async function voidShiftLocked(
   actor: Actor,
   shiftId: string,
   reason: string,
-): Promise<ShiftRecord> {
+): Promise<{ shift: ShiftRecord; replayed: boolean }> {
   const shift = await mustFind(deps, shiftId)
+  if (shift.state === 'cancelled') {
+    const prior = (await deps.decisions.listByShift(shiftId)).find(
+      (decision) => decision.decision === 'force_cancelled',
+    )
+    if (prior?.notes === reason) return { shift, replayed: true }
+    throw new ServiceError(409, 'void_already_completed', {
+      reasonChanged: prior !== undefined,
+    })
+  }
   const result = await guard(deps, shift, 'manager_force_cancel', actor)
   if (!result.ok) fail(result)
 
   const postings: Posting[] = []
+  assertPersistableTrancheTotals(shift)
   const floatTotal = sum(shift.floatTranches)
   const topupTotal = sum(shift.topupTranches)
   const carriedTotal = sum(shift.carriedTranches)
@@ -3624,6 +3863,7 @@ async function voidShiftLocked(
   if (carriedTotal > minor(0n)) postings.push(reverse(floatCarry(shift.driverId, carriedTotal), `void-carry-${shift.id}`))
   if (topupTotal > minor(0n)) postings.push(walletReturn(shift.driverId, topupTotal))
   if (postings.length > 0) {
+    assertPersistablePostings(postings)
     const fxDayId = await ensureFxDay(deps, shift.businessDate)
     await deps.ledger.post(shift.branchId, postings, {
       shiftId: shift.id,
@@ -3646,7 +3886,8 @@ async function voidShiftLocked(
 
   const updated: ShiftRecord = { ...shift, state: result.next }
   await deps.shifts.update(updated, actor.userId)
-  return updated
+  await recordDecision(deps, actor, shiftId, 'close', 'force_cancelled', reason)
+  return { shift: updated, replayed: false }
 }
 
 /** Force-close uses the exact same fixed settlement as ordinary approval, but bypasses evidence gates. */
@@ -3731,6 +3972,14 @@ async function forceCloseLocked(
       ],
     })
   }
+  // Phase one makes the declared figures immutable. Refuse an aggregate that phase two could not
+  // store before claiming that boundary, otherwise the only recovery would be cancelling a real
+  // shift whose individual cash and wallet values were both valid.
+  assertPersistableMoney('forceClose', {
+    cashDeclared,
+    walletDeclared,
+    actualTotal: add(cashDeclared, walletDeclared),
+  })
   // A force-close is still a close boundary. Claim it first so no late PWA batch can slip in, then
   // classify every OCR operation against that exact minute. Unknown rows remain a human decision:
   // the force override bypasses BR1, not the requirement to say which operations belong here.
@@ -3842,6 +4091,7 @@ async function forceCloseLocked(
     cashDeductions: settlement.deductionPostings,
   }
   const postings = postingsForCashSettledApproval(shiftInput, settlement.split, settlement)
+  assertPersistablePostings(postings)
 
   const fxDayId = await ensureFxDay(deps, shift.businessDate)
   const written = await deps.ledger.post(shift.branchId, postings, {

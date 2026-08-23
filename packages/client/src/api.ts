@@ -590,11 +590,19 @@ export class ApiClient {
     return `${path}${sep}branchId=${encodeURIComponent(this.branchId)}`
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    headers: Record<string, string> = {},
+    options: { cache?: RequestCache; signal?: AbortSignal } = {},
+  ): Promise<T> {
     const init: RequestInit = {
       method,
       credentials: 'include', // the session cookie, always
       headers: body instanceof Uint8Array ? headers : { 'content-type': 'application/json', ...headers },
+      ...(options.cache === undefined ? {} : { cache: options.cache }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
     }
     if (body !== undefined) {
       init.body = body instanceof Uint8Array ? (body as BodyInit) : JSON.stringify(body)
@@ -644,8 +652,8 @@ export class ApiClient {
     return json as T
   }
 
-  get<T>(path: string): Promise<T> {
-    return this.request<T>('GET', this.scoped(path))
+  get<T>(path: string, options: { cache?: RequestCache; signal?: AbortSignal } = {}): Promise<T> {
+    return this.request<T>('GET', this.scoped(path), undefined, {}, options)
   }
   post<T>(path: string, body?: unknown): Promise<T> {
     return this.request<T>('POST', path, body)
@@ -1272,8 +1280,8 @@ export class ApiClient {
 
   // ── Mid-day float / top-up tranche (SRS C-5) ──────────────────────────────────────────────
   /** A manager disburses a second (or later) cash float or wallet top-up to a live shift. */
-  addTranche(shiftId: string, body: { kind: 'float' | 'topup'; amount: string; occurrenceKey?: string }) {
-    return this.post<{ id: string; kind: string }>(`/shifts/${shiftId}/tranche`, body)
+  addTranche(shiftId: string, body: { kind: 'float' | 'topup'; amount: string; occurrenceKey: string }) {
+    return this.post<{ id: string; kind: string; replayed: boolean }>(`/shifts/${shiftId}/tranche`, body)
   }
 
   // ── Upper-level shift override (stuck shift) ────────────────────────────────────────────────

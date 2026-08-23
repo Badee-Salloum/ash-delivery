@@ -6,6 +6,7 @@ import type {
   OcrReadClaimInput,
   OcrReadCompletion,
   OcrResult,
+  ShiftRecord,
 } from '@ash/contracts'
 import { type Posting, minor } from '@ash/domain'
 
@@ -135,6 +136,39 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
       }, USER)
       return deps
     }
+
+    describe('working-now shift counts', () => {
+      it('counts distinct open actors across dates and excludes suspended shifts', async () => {
+        const deps = await fresh()
+        const original = await deps.shifts.findById(SHIFT)
+        if (!original) throw new Error('conformance shift missing')
+
+        expect(await deps.shifts.countOpenActorsForBranch(BRANCH)).toEqual({ drivers: 0, vehicles: 0 })
+
+        await deps.shifts.update({ ...original, state: 'open' }, USER)
+        expect(await deps.shifts.countOpenActorsForBranch(BRANCH)).toEqual({ drivers: 1, vehicles: 1 })
+
+        // Production's partial unique indexes forbid two live shifts for the same driver or
+        // vehicle. Use the second seeded assignment to keep this fixture valid in PostgreSQL.
+        const distinct: ShiftRecord = {
+          ...original,
+          id: OTHER_SHIFT,
+          driverId: OTHER_DRIVER,
+          vehicleId: OTHER_VEHICLE,
+          state: 'open',
+          businessDate: '2026-07-20',
+          shiftNo: 1,
+        }
+        await deps.shifts.create(distinct, USER)
+        expect(await deps.shifts.countOpenActorsForBranch(BRANCH)).toEqual({ drivers: 2, vehicles: 2 })
+
+        await deps.shifts.update({ ...distinct, state: 'suspended' }, USER)
+        expect(await deps.shifts.countOpenActorsForBranch(BRANCH)).toEqual({ drivers: 1, vehicles: 1 })
+
+        await deps.shifts.update({ ...original, state: 'pending_review' }, USER)
+        expect(await deps.shifts.countOpenActorsForBranch(BRANCH)).toEqual({ drivers: 0, vehicles: 0 })
+      })
+    })
 
     describe('OCR paid-read reservations', () => {
       const claim = (overrides: Partial<OcrReadClaimInput> = {}): OcrReadClaimInput => ({
@@ -760,6 +794,11 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           expect(stored?.walletToOffice).toBe(syp(-10_000))
           expect(stored?.walletAction).toBe('fund')
           expect(typeof stored?.cashToOffice).toBe('bigint')
+          expect(await deps.settlements.listByShiftIds([
+            '00000000-0000-4000-8000-000000009999',
+            SHIFT,
+            SHIFT,
+          ])).toEqual([created])
         } finally {
           await ctx.cleanup?.(deps)
         }

@@ -3,6 +3,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import { migrate } from '../src/migrate.ts'
 import { bindPoolToTransaction, createPool, withTransaction } from '../src/pool.ts'
 import { PgMediaRepo } from '../src/repos-shift.ts'
+import { assertDisposableDatabaseUrl } from './disposable-database.ts'
 
 /**
  * The evidence attachment path, exercised at the privilege level the API actually runs with.
@@ -20,6 +21,7 @@ import { PgMediaRepo } from '../src/repos-shift.ts'
  * is invisible to a test running as a superuser.
  */
 const DATABASE_URL = process.env.DATABASE_URL
+if (DATABASE_URL) assertDisposableDatabaseUrl(DATABASE_URL)
 
 if (!DATABASE_URL) {
   describe('evidence attachment privileges', () => {

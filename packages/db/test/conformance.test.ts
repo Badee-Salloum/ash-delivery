@@ -7,6 +7,7 @@ import { migrate } from '../src/migrate.ts'
 import { PgShiftCloseUnitOfWork } from '../src/repos-close.ts'
 import { PgShiftSettlementRepo } from '../src/repos-settlement.ts'
 import { PgCloseDraftRepo } from '../src/repos-close-draft.ts'
+import { assertDisposableDatabaseConnection, assertDisposableDatabaseUrl } from './disposable-database.ts'
 import {
   PgAuditRepo,
   PgCashDeductionRepo,
@@ -49,6 +50,7 @@ import {
  * between the two implementations is a bug in one of them, and this is where it surfaces.
  */
 const DATABASE_URL = process.env.DATABASE_URL
+const DISPOSABLE_DATABASE = DATABASE_URL ? assertDisposableDatabaseUrl(DATABASE_URL) : null
 
 if (!DATABASE_URL) {
   describe('PostgreSQL conformance', () => {
@@ -60,6 +62,7 @@ if (!DATABASE_URL) {
 
   const ensureSchema = async (): Promise<void> => {
     schemaReady ??= (async () => {
+      await assertDisposableDatabaseConnection(pool, DISPOSABLE_DATABASE!)
       await assertBigIntParser(pool)
       await migrate(pool)
     })()

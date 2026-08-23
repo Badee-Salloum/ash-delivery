@@ -1,5 +1,82 @@
 # PROGRESS
 
+## 2026-08-23 — `0035` rollout authorized with an explicit historical exception
+
+The read-only production checker was rerun at 08:07 Damascus: 13 checks were clean and the same
+three cancelled 2026-08-11 shifts retained the previously confirmed exact 100× tranche/journal
+history. At 08:21 the owner explicitly directed the release to proceed while grandfathering exactly
+those three cancelled shifts. This is a deployment exception, not a ledger rewrite: the records
+remain unchanged, the checker continues to report them, and any new or different discrepancy still
+stops the rollout. Vercel project access was restored for the coordinated release.
+
+## 2026-08-23 — driver can finish despite mismatch or missing end-battery evidence
+
+Driver handoff and manager approval are now deliberately separate gates. A non-zero BR1 result was
+already allowed to reach `pending_review`; the driver UI now labels it as a manager-review warning
+instead of suggesting that it blocks submission. Missing/incomplete end-of-shift BMS pictures or
+readings also no longer keep the driver clocked in.
+
+The current driver sends `deferMissingBatteryEvidenceToManager: true`. Inside the close transaction,
+the API preserves every fitted pack whose percentage belongs to its current `bms_N` attachment and
+converts only incomplete packs to the existing `unavailable: true`, null-reading manager obligation.
+The shift then moves to `pending_review`, so working driver/vehicle counts fall immediately. Ordinary
+manager approval still refuses until the manager records each deferred reading. A money difference
+still requires the immutable fixed-40% settlement, physical confirmations, and a visible variance
+reason. Other end requirements—dashboard/wallet/odometer evidence and values, valid operations,
+confirmed order rows, current draft hash, stale-evidence acknowledgement, and odometer anomaly
+confirmation—remain blocking.
+
+The driver shows an amber list for money and battery issues and changes the CTA to “Finish and send
+for review” / “إنهاء وإرسال للمراجعة”. Manager copy now accurately says driver battery evidence was
+incomplete instead of always claiming the phone application failed.
+
+Final Node 24 gate: **1,916/1,916** tests (425 domain + 12 contracts + 256 client + 93 admin + 256
+driver + 119 adapters + 108 real-PostgreSQL DB + 647 API), zero DB skips. The combined API regression
+proves `1/1 → 0/0` working counts on a mismatched close with one complete pack and one missing BMS
+photo, preserves the complete pack, blocks manager approval, then succeeds after the manager supplies
+the deferred reading. Driver/admin production builds and the API bundle passed. This source remains
+undeployed because the previously documented production tranche/journal integrity blocker remains.
+
+## 2026-08-23 — working-count and shift-close candidate green; production blocked by preflight
+
+The release candidate implements the full dashboard/shift-money plan:
+
+- `GET /dashboard/working-now` counts distinct drivers and vehicles from exactly `state = 'open'`,
+  branch-scoped and date-independent. The admin dashboard adds localized cards after Orders and
+  polls only this endpoint every 7.75 seconds, refreshes on branch changes, preserves the last good
+  values on failure, and exposes a stale state instead of a false zero.
+- Zero opening float/top-up now means no tranches; every supplied opening/carried/top-up tranche is
+  strictly positive. Mid-shift event keys are mandatory (`428 admin_update_required`), exact and
+  concurrent retries are idempotent, and conflicting reuse is `409 idempotency_key_conflict`.
+- Aggregate money writes fail as named 422 errors before PostgreSQL overflow. Settlement variance
+  requires visible reasons, force-cancel decisions are transactional/immutable, and dashboard
+  profit ranges are inclusive across weeks with driver share reported net of cash deductions but
+  before variance.
+- Migration `0035` installs the variance guard and partial open-shift branch index. The permanent
+  read-only checker covers 14 settlement, double-entry, tranche/journal, approval, operation,
+  close-draft/hash, and residual-balance invariants. The demo seed now follows the modern fixed-40%
+  shift lifecycle and is idempotent.
+
+Final isolated evidence: Node `24.19.0`, pnpm `11.3.0`, PostgreSQL `17.11`; frozen install; full
+`pnpm check` **1,916/1,916** (425 domain + 12 contracts + 256 client + 93 admin + 256 driver + 119
+adapters + 108 real-PostgreSQL DB + 647 API), zero DB skips; both frontend builds and the API bundle
+green. Fresh `0001`–`0035` was 35/35 and its checksum rerun was 0 applied/all 35 present. `0035` is
+FNV `087c01d4`, SHA-256
+`D3958FCABB4886E390DBCD969E8BFA1241265A8CA661A843C80FA51176ECEF40`. A twice-seeded disposable
+database passed all 14 integrity checks.
+
+Focused browser acceptance passed English/Arabic at 390/768/1280 px: grid 2/3/6 columns, no
+overflow or page errors, `0/0 → 1/1` in 7,516 ms, failed refresh visibly stale while retaining
+`1/1`, recovery in 7,693 ms, and end submission `1/1 → 0/0` in 7,786 ms before approval. Seven
+lightweight count requests caused no periodic financial-data reload.
+
+Production was not changed. The mandatory read-only checker, run at 2026-08-23 01:07 Damascus,
+found three cancelled 2026-08-11 shifts with `300,000`/`30,000` minor-unit tranches but
+`30,000,000`/`3,000,000` journal events—exactly 100×. A validated local backup independently
+confirmed the history. This violates the tranche/journal invariant and blocks promotion by policy;
+there was no automatic repair, migration, deploy, or fabricated live transaction. Production
+remains at `0034`. Vercel CLI auth is unavailable and the next-real-staff-shift audit is pending.
+
 ## 2026-08-22 — the Gemini reader is LIVE (`dpl_6Rknpd6`)
 
 `OCR_DRIVER=openrouter`, `google/gemini-3.7-flash`, thinking uncapped. The entry below said

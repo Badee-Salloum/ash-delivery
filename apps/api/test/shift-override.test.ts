@@ -131,7 +131,8 @@ describe('shift override (stuck shift)', () => {
     // At open the driver holds the float + top-up.
     expect(await bal(driverCash)).toBeGreaterThan(0n)
 
-    const res = await post(manager, `/shifts/${id}/void`, { reason: 'الدراجة تعطلت والسائق غادر' })
+    const reason = 'الدراجة تعطلت والسائق غادر'
+    const res = await post(manager, `/shifts/${id}/void`, { reason })
     expect(res.statusCode, res.body).toBe(200)
     expect(res.json().state).toBe('cancelled')
 
@@ -141,8 +142,64 @@ describe('shift override (stuck shift)', () => {
     expect(await bal(fundCodeOf({ kind: 'office_cash' }))).toBe(0n)
     expect(await bal(fundCodeOf({ kind: 'office_wallet' }))).toBe(0n)
     expect(await h.deps.orders.listByShift(id)).toHaveLength(0)
+    expect(await h.deps.decisions.listByShift(id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ gate: 'close', decision: 'force_cancelled', notes: reason }),
+    ]))
     assertLedgerBalances()
+
+    const entriesAfterFirst = (await h.deps.ledger.listByShift(id)).length
+    const exactRetry = await post(manager, `/shifts/${id}/void`, { reason })
+    expect(exactRetry.statusCode, exactRetry.body).toBe(200)
+    expect(exactRetry.json()).toMatchObject({ state: 'cancelled', replayed: true })
+    expect(await h.deps.ledger.listByShift(id)).toHaveLength(entriesAfterFirst)
+    expect((await h.deps.decisions.listByShift(id)).filter(
+      (decision) => decision.decision === 'force_cancelled',
+    )).toHaveLength(1)
+
+    const changedRetry = await post(manager, `/shifts/${id}/void`, { reason: 'different reason' })
+    expect(changedRetry.statusCode, changedRetry.body).toBe(409)
+    expect(changedRetry.json().error).toBe('void_already_completed')
   })
+
+  it('recovers from a lost post-commit audit response using the transactional void decision', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await openShift(driver, manager)
+    const reason = 'manager verified the abandoned shift'
+    const originalAppend = h.deps.audit.append.bind(h.deps.audit)
+    let failOnce = true
+    h.deps.audit.append = async (record) => {
+      if (failOnce) {
+        failOnce = false
+        throw new Error('simulated lost response after commit')
+      }
+      await originalAppend(record)
+    }
+
+    const lostResponse = await post(manager, `/shifts/${id}/void`, { reason })
+    expect(lostResponse.statusCode, lostResponse.body).toBe(500)
+    expect((await h.deps.shifts.findById(id))?.state).toBe('cancelled')
+    expect(await h.deps.decisions.listByShift(id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ decision: 'force_cancelled', notes: reason }),
+    ]))
+
+    const retry = await post(manager, `/shifts/${id}/void`, { reason })
+    expect(retry.statusCode, retry.body).toBe(200)
+    expect(retry.json()).toMatchObject({ state: 'cancelled', replayed: true })
+  })
+
+  it.each(['   \t', '\u200B\u2060'])(
+    'rejects a blank-looking void reason at the request boundary: %j',
+    async (reason) => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await openShift(driver, manager)
+
+    const response = await post(manager, `/shifts/${id}/void`, { reason })
+    expect(response.statusCode, response.body).toBe(400)
+    expect((await h.deps.shifts.findById(id))?.state).toBe('open')
+    },
+  )
 
   it('FORCE-CLOSE with the correct figures settles like a normal close — no variance', async () => {
     const driver = await h.loginAs('driver1')

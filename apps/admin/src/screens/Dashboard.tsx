@@ -1,9 +1,11 @@
-import { type ReactNode, useCallback, useEffect, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { type RoleKey, can, minor, parseMinor } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { Badge, Card, Money, Pending, Stat } from '../ui.tsx'
+import { LatestRequestGuard } from '../latest-request.ts'
 import { differenceView } from '../treasury-view.ts'
+import { type WorkingNowSnapshot, startWorkingNowPolling } from '../working-now.ts'
 
 interface ExpiringDoc {
   id: string
@@ -63,7 +65,7 @@ interface TreasuryDigest {
   days: Array<{ businessDate: string; in: string; out: string; net: string }>
 }
 
-/** The five-indicator ops dashboard (SRS I-1). Total profit is a GM-only tile, fetched separately. */
+/** The operations dashboard (SRS I-1). Total profit is a GM-only tile, fetched separately. */
 export function Dashboard(): ReactNode {
   const { api, t, session, branchId } = useApp()
   const [data, setData] = useState<DashboardData | null>(null)
@@ -72,18 +74,31 @@ export function Dashboard(): ReactNode {
   const [treasury, setTreasury] = useState<TreasuryDigest | null>(null)
   const [expiring, setExpiring] = useState<ExpiringDoc[]>([])
   const [attendance, setAttendance] = useState<Attendee[]>([])
+  const [workingNow, setWorkingNow] = useState<WorkingNowSnapshot | null>(null)
+  const [workingNowUnavailable, setWorkingNowUnavailable] = useState(false)
+  const dashboardRequests = useRef(new LatestRequestGuard())
 
   // `branchId` is a dependency: an organisation-wide role picks his branch AFTER the first render,
   // and switching branches must refetch rather than leave last branch's figures on screen.
   const load = useCallback(() => {
+    const request = dashboardRequests.current.next()
+    // Clear every branch-bound panel together. Otherwise the fast working-count read can show the
+    // new branch beside financial cards left over from the previous one while their requests race.
+    setData(null)
     setError(null)
+    setProfit(null)
+    setTreasury(null)
+    setExpiring([])
+    setAttendance([])
     void api
-      .get<DashboardData>('/dashboard')
+      .get<DashboardData>('/dashboard', { cache: 'no-store', signal: request.signal })
       .then((d) => {
+        if (!request.isCurrent()) return
         setData(d)
         setError(null)
       })
       .catch((e: { error?: string }) => {
+        if (!request.isCurrent()) return
         setData(null)
         setError(e.error ?? 'error')
       })
@@ -96,17 +111,64 @@ export function Dashboard(): ReactNode {
       session != null &&
       can({ userId: session.userId, roleKey: session.roleKey as RoleKey, branchId: session.branchId }, 'profit.view_total', {}).allowed
     ) {
-      void api.get<typeof profit>('/dashboard/profit').then(setProfit).catch(() => setProfit(null))
-      void api.get<TreasuryDigest>('/dashboard/treasury').then(setTreasury).catch(() => setTreasury(null))
+      void api
+        .get<NonNullable<typeof profit>>('/dashboard/profit', { cache: 'no-store', signal: request.signal })
+        .then((next) => {
+          if (request.isCurrent()) setProfit(next)
+        })
+        .catch(() => {
+          if (request.isCurrent()) setProfit(null)
+        })
+      void api
+        .get<TreasuryDigest>('/dashboard/treasury', { cache: 'no-store', signal: request.signal })
+        .then((next) => {
+          if (request.isCurrent()) setTreasury(next)
+        })
+        .catch(() => {
+          if (request.isCurrent()) setTreasury(null)
+        })
     }
     // The expiry board (س37). Reading it also raises the bell for anything crossing a threshold,
     // so the alert fires automatically on the default landing screen — no scheduler needed.
-    void api.expiringDocuments().then((r) => setExpiring(r.documents)).catch(() => setExpiring([]))
+    void api
+      .get<{ documents: ExpiringDoc[] }>('/documents/expiring', { cache: 'no-store', signal: request.signal })
+      .then((r) => {
+        if (request.isCurrent()) setExpiring(r.documents)
+      })
+      .catch(() => {
+        if (request.isCurrent()) setExpiring([])
+      })
     // Today's admin-staff attendance (B-4).
-    void api.attendance().then((r) => setAttendance(r.attendance)).catch(() => setAttendance([]))
+    void api
+      .get<{ attendance: Attendee[] }>('/attendance', { cache: 'no-store', signal: request.signal })
+      .then((r) => {
+        if (request.isCurrent()) setAttendance(r.attendance)
+      })
+      .catch(() => {
+        if (request.isCurrent()) setAttendance([])
+      })
   }, [api, session])
 
-  useEffect(load, [load, branchId])
+  useEffect(() => {
+    load()
+    return () => dashboardRequests.current.cancel()
+  }, [load, branchId])
+
+  // This poll intentionally calls only the lightweight count endpoint. On a transient failure the
+  // last valid values stay on screen and are marked stale; a branch change clears the old branch's
+  // values and starts a new read immediately. Cleanup ignores any late response from that branch.
+  useEffect(() => {
+    setWorkingNow(null)
+    setWorkingNowUnavailable(false)
+    return startWorkingNowPolling({
+      load: (signal) => api.get<WorkingNowSnapshot>('/dashboard/working-now', { cache: 'no-store', signal }),
+      onSnapshot: (snapshot) => {
+        setWorkingNow(snapshot)
+        setWorkingNowUnavailable(false)
+      },
+      onUnavailable: () => setWorkingNowUnavailable(true),
+    })
+  }, [api, branchId])
 
   if (!data) {
     return (
@@ -121,21 +183,38 @@ export function Dashboard(): ReactNode {
   }
 
   const capitalDelta = treasury ? differenceView(treasury.capital.delta) : null
+  const workingCountsStatusText = workingNowUnavailable
+    ? workingNow
+      ? t.dashboard.workingCountsStale
+      : t.dashboard.workingCountsUnavailable
+    : null
+  const workingCountsStatus = workingCountsStatusText ? (
+    <span className="font-medium text-amber-700">{workingCountsStatusText}</span>
+  ) : undefined
+  const workingCountsAnnouncement = workingCountsStatusText ?? (
+    workingNow
+      ? `${t.dashboard.workingDrivers}: ${workingNow.drivers}; ${t.dashboard.workingVehicles}: ${workingNow.vehicles}`
+      : ''
+  )
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+      <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {workingCountsAnnouncement}
+      </span>
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
         <Stat
           label={t.dashboard.revenue}
           value={<Money value={data.revenue.feesSyp} />}
           sub={data.revenue.feesUsd ? <>${data.revenue.feesUsd}{data.revenue.fxProvisional ? ' ~' : ''}</> : undefined}
         />
         <Stat label={t.dashboard.orders} value={data.orders.total} />
+        <Stat label={t.dashboard.workingDrivers} value={workingNow?.drivers ?? '—'} sub={workingCountsStatus} />
+        <Stat label={t.dashboard.workingVehicles} value={workingNow?.vehicles ?? '—'} sub={workingCountsStatus} />
         <Stat label={t.dashboard.companyShare} value={<Money value={data.companyShareSinceSunday} />} />
         <Stat
           label={t.dashboard.awaitingApproval}
           value={data.completeness.awaitingApproval}
-          sub={`${t.dashboard.openShifts}: ${data.completeness.openShifts}`}
           href="#queue"
         />
       </div>

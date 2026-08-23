@@ -3,8 +3,10 @@ import { afterAll, describe, expect, it } from 'vitest'
 import { migrate } from '../src/migrate.ts'
 import { createPool, withTransaction } from '../src/pool.ts'
 import { PgOperationWindowRepo } from '../src/repos.ts'
+import { assertDisposableDatabaseUrl } from './disposable-database.ts'
 
 const DATABASE_URL = process.env.DATABASE_URL
+if (DATABASE_URL) assertDisposableDatabaseUrl(DATABASE_URL)
 
 if (!DATABASE_URL) {
   describe('PostgreSQL operation-window integrity', () => {
