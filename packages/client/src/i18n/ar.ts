@@ -231,6 +231,9 @@ export const ar = {
      */
     cloudReading: 'القارئ الذكي يقرأ الصورة…',
     cloudRead: 'قرأها القارئ الذكي',
+    cloudCancelled: 'أوقفت القراءة الذكية — الصورة محفوظة، أدخِل الرقم يدوياً أو أعد المحاولة',
+    continueManually: 'إكمال يدوياً',
+    continueManuallyHint: 'الصورة والمسودة محفوظتان ولن تحتاج إلى رفع الصورة من جديد',
     /** Distinct from a plain failure: it ANSWERED too slowly, so trying again may well work. */
     cloudTimeout: 'استغرقت القراءة وقتاً طويلاً — اضغط لإعادة المحاولة، أو أدخِل الرقم يدوياً',
     cloudUnavailable: 'تعذّر الوصول إلى القارئ الذكي — أعد المحاولة أو أدخِل الرقم يدوياً',

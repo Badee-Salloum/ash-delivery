@@ -36,7 +36,8 @@ export type CloudReadEvent =
   | { status: 'read'; response: CloudOcrResponse }
   | {
       status: 'failed'
-      reason: 'unavailable' | 'timeout' | 'no_fields' | 'refused' | 'wrong_screen'
+      /** `cancelled` is browser-owned: the driver left a slow read and continued manually. */
+      reason: 'unavailable' | 'timeout' | 'no_fields' | 'refused' | 'wrong_screen' | 'cancelled'
       retryable: boolean
     }
 

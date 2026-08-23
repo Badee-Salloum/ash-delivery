@@ -216,6 +216,9 @@ export const en: Catalog = {
     readingMayTake: '(may take 20 seconds)',
     cloudReading: 'The smart reader is reading the photo…',
     cloudRead: 'Read by the smart reader',
+    cloudCancelled: 'Smart reading was stopped — the photo is saved; type the number or try again',
+    continueManually: 'Continue manually',
+    continueManuallyHint: 'The photo and draft are saved; you will not need to upload the photo again',
     /** Distinct from a plain failure: it ANSWERED too slowly, so trying again may well work. */
     cloudTimeout: 'Reading took too long — tap to try again, or type the number in',
     cloudUnavailable: 'Could not reach the smart reader — try again or type the number in',

@@ -867,11 +867,19 @@ export class ApiClient {
   }
 
   /** One reading per pack. A retake corrects that pack's row rather than adding a second. */
-  putBatteryReadings(shiftId: string, pkg: 'start' | 'end', readings: BatteryReadingInput[]) {
-    return this.put<{ readings: BatteryReadingInput[] }>(`/shifts/${shiftId}/battery-readings`, {
-      package: pkg,
-      readings,
-    })
+  putBatteryReadings(
+    shiftId: string,
+    pkg: 'start' | 'end',
+    readings: BatteryReadingInput[],
+    options: { signal?: AbortSignal } = {},
+  ) {
+    return this.request<{ readings: BatteryReadingInput[] }>(
+      'PUT',
+      `/shifts/${shiftId}/battery-readings`,
+      { package: pkg, readings },
+      {},
+      options,
+    )
   }
 
   /**
@@ -987,12 +995,14 @@ export class ApiClient {
       field: CloudOcrField
       retryFailed?: boolean
     },
+    options: { signal?: AbortSignal } = {},
   ) {
     return this.request<CloseDraftReadResponse>(
       'POST',
       `/shifts/${id}/close-draft/media/${encodeURIComponent(slot)}/read`,
       body,
       { 'x-ash-orders-time-consensus': 'close-draft-v1' },
+      options,
     )
   }
 

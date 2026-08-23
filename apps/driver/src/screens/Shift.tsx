@@ -1657,6 +1657,7 @@ function EndPackage({
       field: 'orders' | 'payments_log' | 'wallet' | 'odometer' | 'bms',
       retryFailed: boolean,
       upload?: EvidenceUploadResponse,
+      signal?: AbortSignal,
     ): Promise<CloseDraftReadResponse | null> => {
       const uploadedDraft = upload?.draft
       if (uploadedDraft) applyCanonicalDraft(uploadedDraft)
@@ -1676,6 +1677,31 @@ function EndPackage({
       const revision = current?.revision ?? draftRef.current.closeDraftRevision
       if (!attachment || revision === null) return null
 
+      // A unique presentation id is the ownership token for this exact browser request. Reusing
+      // the persisted read id let an aborted older request restore over a newer retry of the same
+      // attachment token.
+      const pendingReadId = `pending-${attachment.attachmentToken}-${crypto.randomUUID()}`
+
+      /** Restore only the local marker installed below; keep the accepted image and canonical draft. */
+      const restorePendingRead = (): void => {
+        onDraft((state) => {
+          const owned = state.closeDraftAttachments[slot]
+          if (
+            owned?.attachmentToken !== attachment.attachmentToken ||
+            owned.read?.readId !== pendingReadId
+          ) return state
+          return {
+            ...state,
+            ...(field === 'wallet' ? { walletCloud: null } : {}),
+            ...(field === 'odometer' ? { odoCloud: null } : {}),
+            closeDraftAttachments: {
+              ...state.closeDraftAttachments,
+              [slot]: attachment,
+            },
+          }
+        })
+      }
+
       // A running marker is presentation only. It is deliberately not terminal, so the IndexedDB
       // copy remains until the server returns a persisted complete/failed read.
       onDraft((state) => ({
@@ -1685,9 +1711,9 @@ function EndPackage({
           [slot]: {
             ...attachment,
             read: attachment.read
-              ? { ...attachment.read, status: 'running', failure: null }
+              ? { ...attachment.read, readId: pendingReadId, status: 'running', failure: null }
               : {
-                  readId: `pending-${attachment.attachmentToken}`,
+                  readId: pendingReadId,
                   status: 'running',
                   field,
                   failure: null,
@@ -1696,34 +1722,43 @@ function EndPackage({
           },
         },
       }))
+      const onAbort = (): void => restorePendingRead()
+      signal?.addEventListener('abort', onAbort, { once: true })
       try {
+        if (signal?.aborted) {
+          restorePendingRead()
+          return null
+        }
         const response = await api.readCloseDraftAttachment(shift.id, slot, {
           expectedRevision: revision,
           mediaId: attachment.mediaId,
           attachmentToken: attachment.attachmentToken,
           field,
           ...(retryFailed ? { retryFailed: true } : {}),
+        }, signal ? { signal } : {})
+        if (signal?.aborted) return null
+        onDraft((state) => {
+          const owned = state.closeDraftAttachments[slot]
+          if (
+            owned?.attachmentToken !== attachment.attachmentToken ||
+            owned.read?.readId !== pendingReadId
+          ) return state
+          return applyLinkedScalarRead(state, response, field, attachment.attachmentToken)
         })
-        onDraft((state) => applyLinkedScalarRead(state, response, field, attachment.attachmentToken))
         return response
       } catch (error) {
+        if (signal?.aborted) {
+          restorePendingRead()
+          return null
+        }
         const apiError = error as { error?: string; detail?: unknown }
         const detail = apiError.detail as { current?: CloseDraftView } | undefined
         const latest = detail?.current
         if (latest) applyCanonicalDraft(latest)
-        else {
-          // Restore the last persisted read state and leave the pending blob retryable.
-          onDraft((state) => ({
-            ...state,
-            ...(field === 'wallet' ? { walletCloud: null } : {}),
-            ...(field === 'odometer' ? { odoCloud: null } : {}),
-            closeDraftAttachments: {
-              ...state.closeDraftAttachments,
-              [slot]: attachment,
-            },
-          }))
-        }
+        else restorePendingRead()
         return null
+      } finally {
+        signal?.removeEventListener('abort', onAbort)
       }
     },
     [api, shift.id, applyCanonicalDraft, onDraft],
@@ -2399,8 +2434,8 @@ function EndPackage({
         closeDraftAttachments={draft.closeDraftAttachments}
         closeDraftRevision={draft.closeDraftRevision}
         onCloseDraft={applyCanonicalDraft}
-        onLinkedRead={(slot, retryFailed, upload) =>
-          readLinkedAttachment(slot, 'bms', retryFailed, upload)
+        onLinkedRead={(slot, retryFailed, upload, signal) =>
+          readLinkedAttachment(slot, 'bms', retryFailed, upload, signal)
         }
         onMediaIdChanged={(batteryId, mediaId) =>
           onDraft((d) => ({

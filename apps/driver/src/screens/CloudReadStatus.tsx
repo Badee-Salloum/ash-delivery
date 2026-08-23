@@ -48,13 +48,15 @@ export function CloudReadStatus({
   if (event.status === 'read') return null
 
   const message =
-    event.reason === 'timeout'
-      ? t.shift.cloudTimeout
-      : event.reason === 'no_fields'
-        ? t.shift.cloudNoFields
-        : event.reason === 'refused'
-          ? t.shift.cloudRefused
-          : t.shift.cloudUnavailable
+    event.reason === 'cancelled'
+      ? t.shift.cloudCancelled
+      : event.reason === 'timeout'
+        ? t.shift.cloudTimeout
+        : event.reason === 'no_fields'
+          ? t.shift.cloudNoFields
+          : event.reason === 'refused'
+            ? t.shift.cloudRefused
+            : t.shift.cloudUnavailable
 
   return (
     <div className="flex flex-col items-start gap-1" aria-live="polite">
