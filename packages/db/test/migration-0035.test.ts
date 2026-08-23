@@ -125,6 +125,8 @@ if (!DATABASE_URL) {
              cash_deduction_total_minor, base_driver_share_minor,
              expected_total_minor, actual_cash_minor, actual_wallet_minor, actual_total_minor,
              variance_minor, variance_direction, final_employee_cash_minor,
+             cash_claim_to_office_minor, wallet_claim_to_office_minor,
+             cash_receivable_deferred_minor, wallet_receivable_deferred_minor,
              wallet_to_office_minor, cash_to_office_minor,
              wallet_action, wallet_amount_minor, cash_action, cash_amount_minor,
              reviewed_orders_hash, settlement_hash,
@@ -136,6 +138,7 @@ if (!DATABASE_URL) {
              0, 0, 0, 0, 0,
              0, 1, 0, 1,
              1, 'surplus', 1,
+             0, 0, 0, 0,
              0, 0, 'none', 0, 'none', 0,
              'reviewed', repeat('a', 64), true, true,
              $4, TIMESTAMPTZ '2026-08-22 12:01:00+00', $5

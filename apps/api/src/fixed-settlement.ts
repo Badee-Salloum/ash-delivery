@@ -5,7 +5,7 @@ import type {
   Minor,
 } from '@ash/domain'
 
-export const FIXED_SETTLEMENT_POLICY = 'fixed_40_cash_close_v1' as const
+export const FIXED_SETTLEMENT_POLICY = 'fixed_40_cash_close_v2_receivable' as const
 export const FIXED_SETTLEMENT_DRIVER_BPS = 4_000 as const
 
 export type SettlementVarianceDirection = 'surplus' | 'shortage' | 'balanced'
@@ -41,7 +41,7 @@ export function fixedSettlementHash(
   plan: FixedShareSettlementPlan,
 ): string {
   const canonical = {
-    version: 2,
+    version: 3,
     policyCode: FIXED_SETTLEMENT_POLICY,
     driverRateBps: FIXED_SETTLEMENT_DRIVER_BPS,
     ...context,
@@ -60,6 +60,10 @@ export function fixedSettlementHash(
     variance: String(plan.variance),
     finalEmployeeCash: String(plan.finalEmployeeCash),
     officeEntitlement: String(plan.officeEntitlement),
+    cashClaimToOffice: String(plan.cashClaimToOffice),
+    walletClaimToOffice: String(plan.walletClaimToOffice),
+    cashReceivableDeferred: String(plan.cashReceivableDeferred),
+    walletReceivableDeferred: String(plan.walletReceivableDeferred),
     walletToOffice: String(plan.walletToOffice),
     cashToOffice: String(plan.cashToOffice),
     walletAction: plan.wallet.action,

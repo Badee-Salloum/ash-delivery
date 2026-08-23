@@ -187,7 +187,7 @@ export class PgShiftRepo implements ShiftRepo {
       // where an off-by-one silently drops a cash handover.
       await client.query('DELETE FROM float_tranches WHERE shift_id = $1', [shift.id])
       const writeTranches = async (
-        kind: 'cash_float' | 'wallet_topup' | 'carried_receivable',
+        kind: 'cash_float' | 'wallet_topup' | 'carried_receivable' | 'carried_wallet_receivable',
         amounts: readonly Minor[],
       ) => {
         for (const [i, amount] of amounts.entries()) {
@@ -201,6 +201,7 @@ export class PgShiftRepo implements ShiftRepo {
       await writeTranches('cash_float', shift.floatTranches)
       await writeTranches('wallet_topup', shift.topupTranches)
       await writeTranches('carried_receivable', shift.carriedTranches)
+      await writeTranches('carried_wallet_receivable', shift.carriedWalletTranches ?? [])
 
       // shift_media is deliberately NOT written here. Evidence slots exist only because a photo
       // was uploaded, and PgMediaRepo owns that. Writing a caller-supplied slot list would let
@@ -294,6 +295,9 @@ export class PgShiftRepo implements ShiftRepo {
          COALESCE((SELECT json_agg(t.amount_minor::text ORDER BY t.seq_no)
                      FROM float_tranches t
                     WHERE t.shift_id = s.id AND t.kind = 'carried_receivable'), '[]') AS carried_tranches,
+         COALESCE((SELECT json_agg(t.amount_minor::text ORDER BY t.seq_no)
+                     FROM float_tranches t
+                    WHERE t.shift_id = s.id AND t.kind = 'carried_wallet_receivable'), '[]') AS carried_wallet_tranches,
          COALESCE((SELECT json_agg(m.slot ORDER BY m.slot)
                      FROM shift_media m
                     WHERE m.shift_id = s.id AND m.package = 'start'), '[]') AS media_start,
@@ -319,6 +323,7 @@ export class PgShiftRepo implements ShiftRepo {
       floatTranches: (r.float_tranches as string[]).map((a) => minor(BigInt(a))),
       topupTranches: (r.topup_tranches as string[]).map((a) => minor(BigInt(a))),
       carriedTranches: (r.carried_tranches as string[]).map((a) => minor(BigInt(a))),
+      carriedWalletTranches: (r.carried_wallet_tranches as string[]).map((a) => minor(BigInt(a))),
       keptAsReceivable: minor(BigInt((r.kept_as_receivable_minor as string | null) ?? '0')),
       driverSharePaid: minor(BigInt((r.driver_share_paid_minor as string | null) ?? '0')),
       mediaSlotsStart: r.media_start as string[],
@@ -1635,6 +1640,17 @@ export class PgExpenseRepo implements ExpenseRepo {
     }
   }
 
+  async get(id: string): Promise<ExpenseRecord | null> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT *, amount_minor::text AS amount
+         FROM expenses
+        WHERE id = $1`,
+      [id],
+    )
+    const row = rows[0]
+    return row ? expenseRecord(row) : null
+  }
+
   async create(expense: ExpenseRecord): Promise<void> {
     await this.pool.query(
       `INSERT INTO expenses (id, branch_id, category_id, cost_center_kind, vehicle_id, amount_minor,
@@ -1663,19 +1679,7 @@ export class PgExpenseRepo implements ExpenseRepo {
         ORDER BY business_date, id`,
       [branchId, from, to],
     )
-    return rows.map((r) => ({
-      id: String(r.id),
-      branchId: String(r.branch_id),
-      categoryId: String(r.category_id),
-      costCenterKind: r.cost_center_kind as ExpenseRecord['costCenterKind'],
-      vehicleId: (r.vehicle_id as string | null) ?? null,
-      amount: minor(BigInt(String(r.amount))),
-      businessDate: isoDate(r.business_date),
-      description: String(r.description),
-      receiptMediaId: (r.receipt_media_id as string | null) ?? null,
-      journalEntryId: r.journal_entry_id === null ? null : Number(r.journal_entry_id),
-      createdBy: String(r.created_by),
-    }))
+    return rows.map(expenseRecord)
   }
 
   /** Aggregated in the database: G-1's per-axis profitability over a year of rows is not a JS loop. */
@@ -1699,6 +1703,20 @@ export class PgExpenseRepo implements ExpenseRepo {
     }))
   }
 }
+
+const expenseRecord = (row: Record<string, unknown>): ExpenseRecord => ({
+  id: String(row.id),
+  branchId: String(row.branch_id),
+  categoryId: String(row.category_id),
+  costCenterKind: row.cost_center_kind as ExpenseRecord['costCenterKind'],
+  vehicleId: (row.vehicle_id as string | null) ?? null,
+  amount: minor(BigInt(String(row.amount))),
+  businessDate: isoDate(row.business_date),
+  description: String(row.description),
+  receiptMediaId: (row.receipt_media_id as string | null) ?? null,
+  journalEntryId: row.journal_entry_id === null ? null : Number(row.journal_entry_id),
+  createdBy: String(row.created_by),
+})
 
 export class PgSettingsRepo implements SettingsRepo {
   private readonly pool: Pool
@@ -1749,15 +1767,18 @@ export class PgCashCountRepo implements CashCountRepo {
     this.pool = pool
   }
 
-  async create(count: CashCountRecord): Promise<void> {
+  async create(count: CashCountRecord): Promise<CashCountRecord> {
     try {
-      await withTransaction(this.pool, { actorId: count.countedBy }, async (client) => {
-        await client.query(
-          `INSERT INTO cash_counts (id, branch_id, business_date, counted_by, counted_at, proof_sha256, sealed_at, notes)
-           VALUES ($1,$2,$3,$4, to_timestamp($5::double precision/1000), $6,
-                   CASE WHEN $7::bigint IS NULL THEN NULL ELSE to_timestamp($7::double precision/1000) END, $8)`,
+      const persistedId = await withTransaction(this.pool, { actorId: count.countedBy }, async (client) => {
+        // `cash_counts.id` is BIGINT GENERATED ALWAYS. The API's id generator emits UUIDs, so
+        // inserting the placeholder would fail in PostgreSQL even though the memory adapter works.
+        // Let the database own the identity and return the exact string audit/restoration must use.
+        const inserted = await client.query<{ id: string }>(
+          `INSERT INTO cash_counts (branch_id, business_date, counted_by, counted_at, proof_sha256, sealed_at, notes)
+           VALUES ($1,$2,$3, to_timestamp($4::double precision/1000), $5,
+                   CASE WHEN $6::bigint IS NULL THEN NULL ELSE to_timestamp($6::double precision/1000) END, $7)
+           RETURNING id::text AS id`,
           [
-            count.id,
             count.branchId,
             count.businessDate,
             count.countedBy,
@@ -1767,6 +1788,7 @@ export class PgCashCountRepo implements CashCountRepo {
             count.notes,
           ],
         )
+        const storedId = inserted.rows[0]!.id
         for (const line of count.lines) {
           // Resolve the fund by code; a count line naming a fund that does not exist is a bug
           // worth failing on rather than silently dropping.
@@ -1781,7 +1803,7 @@ export class PgCashCountRepo implements CashCountRepo {
             `INSERT INTO cash_count_lines (cash_count_id, fund_id, counted_minor, computed_minor, variance_minor, resolution)
              VALUES ($1,$2,$3,$4,$5,$6)`,
             [
-              count.id,
+              storedId,
               fundId,
               line.counted.toString(),
               line.computed.toString(),
@@ -1790,7 +1812,9 @@ export class PgCashCountRepo implements CashCountRepo {
             ],
           )
         }
+        return storedId
       })
+      return { ...count, id: persistedId }
     } catch (err) {
       if (isPgError(err, PG.UNIQUE_VIOLATION)) {
         throw Object.assign(new Error(`cash count already exists for ${count.businessDate}`), {

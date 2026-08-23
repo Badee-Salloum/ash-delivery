@@ -4,6 +4,7 @@ import {
   countDifference,
   countDraftReady,
   differenceView,
+  receivableDriverTotal,
   restoreCountDraft,
   summarizeRestoration,
 } from './treasury-view.ts'
@@ -50,6 +51,8 @@ describe('treasury presentation', () => {
     const summary = summarizeRestoration([
       {
         fundCode: 'office_cash',
+        counted: '4688592.00',
+        receivables: '400000.00',
         position: '5088592.00',
         capitalTarget: '4000000.00',
         delta: '1088592.00',
@@ -58,6 +61,8 @@ describe('treasury presentation', () => {
       },
       {
         fundCode: 'office_wallet',
+        counted: '983560.00',
+        receivables: '30000.00',
         position: '1013560.00',
         capitalTarget: '1000000.00',
         delta: '13560.00',
@@ -76,6 +81,8 @@ describe('treasury presentation', () => {
     const legs = [
       {
         fundCode: 'office_cash',
+        counted: '1050.00',
+        receivables: '50.00',
         position: '1100.00',
         capitalTarget: '1000.00',
         delta: '100.00',
@@ -84,6 +91,8 @@ describe('treasury presentation', () => {
       },
       {
         fundCode: 'office_wallet',
+        counted: '875.00',
+        receivables: '25.00',
         position: '900.00',
         capitalTarget: '1000.00',
         delta: '-100.00',
@@ -94,5 +103,10 @@ describe('treasury presentation', () => {
     expect(summarizeRestoration(legs).delta.direction).toBe('none')
     expect(legs.map((leg) => leg.direction)).toEqual(['to_company', 'from_company'])
     expect(differenceView('0.00')).toEqual({ direction: 'none', signed: '0.00', amount: '0.00' })
+  })
+
+  it('totals each driver receivable with integer money math', () => {
+    expect(receivableDriverTotal({ cash: '400000.00', wallet: '30000.00' })).toBe('430000.00')
+    expect(receivableDriverTotal({ cash: '9007199254740993.00', wallet: '7.00' })).toBe('9007199254741000.00')
   })
 })

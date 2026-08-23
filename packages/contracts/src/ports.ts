@@ -432,6 +432,8 @@ export interface ShiftRecord {
    * The repo loads them from separate `float_tranches.kind` values for exactly this reason.
    */
   carriedTranches: Minor[]
+  /** Wallet shift-funding consumed automatically at open without charging office_wallet twice. */
+  carriedWalletTranches?: Minor[]
   /** «يبقى ذمة على السائق» — what the manager left with him at close. Zero for every older shift. */
   keptAsReceivable: Minor
   /** «يُعاد للسائق» — the share he kept out of the cash in his hands (owner decision f). */
@@ -1519,6 +1521,8 @@ export interface ExpenseRecord {
 export interface ExpenseRepo {
   listCategories(): Promise<ExpenseCategoryRecord[]>
   createCategory(category: ExpenseCategoryRecord): Promise<void>
+  /** Lookup by the client-owned expense UUID, which is also its idempotency key. */
+  get(id: string): Promise<ExpenseRecord | null>
   create(expense: ExpenseRecord): Promise<void>
   listByBranchAndDate(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ExpenseRecord[]>
   /** Per-cost-centre totals — G-1's «تُغذي ربحية كل محور». */
@@ -1527,6 +1531,65 @@ export interface ExpenseRepo {
     from: CalendarDate,
     to: CalendarDate,
   ): Promise<Array<{ costCenterKind: string; vehicleId: string | null; total: Minor }>>
+}
+
+// â”€â”€ Direct receivable commands â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+export interface ReceivableEventRecord {
+  id: string
+  branchId: string
+  driverId: string
+  receivableKind: 'ordinary' | 'shift_funding'
+  channel: 'cash' | 'wallet'
+  direction: 'create' | 'collect'
+  amount: Minor
+  businessDate: CalendarDate
+  reason: string
+  idempotencyKey: string
+  journalEntryId: number
+  createdBy: string
+  createdAtMs: number
+}
+
+export interface ReceivableEventRepo {
+  findByIdempotencyKey(branchId: string, idempotencyKey: string): Promise<ReceivableEventRecord | null>
+  create(event: ReceivableEventRecord): Promise<void>
+  listByBranchAndDriver(
+    branchId: string,
+    driverId?: string,
+  ): Promise<ReceivableEventRecord[]>
+}
+
+/**
+ * Repositories that may participate in one financial write transaction.
+ *
+ * This starts with expenses, whose row and journal must never split. Keeping the unit generic
+ * lets later treasury/receivable commands join the same boundary without inventing a second
+ * transaction abstraction.
+ */
+export interface FinancialTransactionDeps {
+  ledger: LedgerRepo
+  expenses: ExpenseRepo
+  receivableEvents: ReceivableEventRepo
+  /** Restoration reads its sealed evidence and capital targets inside the same branch lock. */
+  cashCounts: CashCountRepo
+  capitalTargets: OfficeCapitalTargetRepo
+  /** The immutable fact and its journal entries must commit or roll back together. */
+  restorations: RestorationRepo
+}
+
+export interface FinancialUnitOfWorkInput {
+  /** Stable business-operation key; implementations serialize concurrent retries on it. */
+  lockKey: string
+  actorId: string | null
+  requestId?: string | null
+}
+
+export interface FinancialUnitOfWork {
+  run<T>(
+    input: FinancialUnitOfWorkInput,
+    work: (deps: FinancialTransactionDeps) => Promise<T>,
+  ): Promise<T>
 }
 
 // ── Daily cash count (SRS E-5 / س51) ──────────────────────────────────────────────────────
@@ -1555,7 +1618,11 @@ export interface CashCountRecord {
 }
 
 export interface CashCountRepo {
-  create(count: CashCountRecord): Promise<void>
+  /**
+   * Returns the persisted identity. PostgreSQL owns the BIGINT id; callers must not assume the
+   * client-generated placeholder survived, and audit/restoration must reference this returned id.
+   */
+  create(count: CashCountRecord): Promise<CashCountRecord>
   find(branchId: string, businessDate: CalendarDate): Promise<CashCountRecord | null>
   listDatesInRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<CalendarDate[]>
 }
@@ -1816,10 +1883,13 @@ export interface ShiftDecisionRepo {
  * This is deliberately versioned rather than named merely `fixed_40`: a future policy can coexist
  * with old, immutable settlement snapshots without silently changing what their figures mean.
  */
-export const FIXED_CASH_SETTLEMENT_POLICY = 'fixed_40_cash_close_v1' as const
+export const FIXED_CASH_SETTLEMENT_POLICY_V1 = 'fixed_40_cash_close_v1' as const
+export const FIXED_CASH_SETTLEMENT_POLICY = 'fixed_40_cash_close_v2_receivable' as const
 export const FIXED_DRIVER_RATE_BPS = 4_000 as const
 
-export type ShiftSettlementPolicy = typeof FIXED_CASH_SETTLEMENT_POLICY
+export type ShiftSettlementPolicy =
+  | typeof FIXED_CASH_SETTLEMENT_POLICY_V1
+  | typeof FIXED_CASH_SETTLEMENT_POLICY
 export type SettlementVarianceDirection = 'surplus' | 'shortage' | 'balanced'
 export type SettlementWalletAction = 'collect' | 'fund' | 'none'
 export type SettlementCashAction = 'collect' | 'pay' | 'none'
@@ -1858,9 +1928,17 @@ export interface ShiftSettlementRecord {
    * Current-shift shortages never become a carried receivable.
    */
   finalEmployeeCash: Minor
-  /** Full actual wallet balance, signed; collecting/funding this amount leaves the wallet at zero. */
+  /** Signed cash claim before any manager-confirmed deferral. */
+  cashClaimToOffice: Minor
+  /** Signed wallet claim before any manager-confirmed deferral. */
+  walletClaimToOffice: Minor
+  /** Positive cash amount deliberately left outstanding as an office receivable. */
+  cashReceivableDeferred: Minor
+  /** Positive wallet amount deliberately left outstanding as an office receivable. */
+  walletReceivableDeferred: Minor
+  /** Physical signed wallet movement after deferral. */
   walletToOffice: Minor
-  /** `actualCash - finalEmployeeCash`, signed. */
+  /** Physical signed cash movement after deferral. */
   cashToOffice: Minor
   walletAction: SettlementWalletAction
   walletAmount: Minor
@@ -1881,9 +1959,10 @@ export type NewShiftSettlementRecord = Omit<ShiftSettlementRecord, 'id'>
 
 export interface ShiftSettlementRepo {
   /**
-   * Insert once. An exact hash replay returns the existing row; any different second snapshot is
-   * rejected because an approved financial settlement is corrected by a new journal event, never
-   * rewritten in place.
+   * Insert once as part of the close unit of work that advances the shift to a terminal state.
+   * An exact hash replay of the resulting terminal settlement returns the existing row; any
+   * different second snapshot is rejected because an approved financial settlement is corrected
+   * by a new journal event, never rewritten in place.
    */
   create(record: NewShiftSettlementRecord): Promise<ShiftSettlementRecord>
   findByShift(shiftId: string): Promise<ShiftSettlementRecord | null>
@@ -1979,6 +2058,9 @@ export interface Deps {
   movements: WalletMovementRepo
   ledger: LedgerRepo
   expenses: ExpenseRepo
+  receivableEvents: ReceivableEventRepo
+  /** Atomic boundary for ledger-backed expenses and future treasury/receivable commands. */
+  financialUnitOfWork: FinancialUnitOfWork
   cashCounts: CashCountRepo
   /** «رأس مال المكتب» — the fixed target الترميم restores each box to. */
   capitalTargets: OfficeCapitalTargetRepo

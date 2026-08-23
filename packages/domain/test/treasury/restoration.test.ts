@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { type FundPosition, planRestoration, postingsForRestoration } from '../../src/treasury/restoration.ts'
+import {
+  type FundPosition,
+  planRestoration,
+  postingsForCashCountReconciliation,
+  postingsForRestoration,
+} from '../../src/treasury/restoration.ts'
 import { type Minor, ZERO, minor, sub } from '../../src/money/minor.ts'
 import { creditsOf, debitsOf, fundCode } from '../../src/ledger/recipes.ts'
 
@@ -24,6 +29,8 @@ describe('the owner`s own book, encoded', () => {
   /** كاش المكتب 3,600,000 + ذمم 400,000 = 4,000,000 — his `=SUM(I38:J48)-4000000` is zero. */
   it('a day already restored: cash lands exactly on capital', () => {
     const plan = planRestoration([box()])
+    expect(plan.legs[0]!.counted).toBe(syp(3_600_000))
+    expect(plan.legs[0]!.receivables).toBe(syp(400_000))
     expect(plan.legs[0]!.position).toBe(syp(4_000_000))
     expect(plan.legs[0]!.delta).toBe(ZERO)
     expect(plan.legs[0]!.direction).toBeNull()
@@ -119,6 +126,8 @@ describe('the guards', () => {
    */
   it('refuses a box with no رأس مال configured rather than sweeping everything', () => {
     const plan = planRestoration([box({ capitalTarget: null })])
+    expect(plan.legs[0]!.counted).toBe(syp(3_600_000))
+    expect(plan.legs[0]!.receivables).toBe(syp(400_000))
     expect(plan.legs[0]!.refusals).toContain('no_capital_target')
     expect(plan.feasible).toBe(false)
     expect(postingsForRestoration(plan, '2026-08-12')).toHaveLength(0)
@@ -150,5 +159,69 @@ describe('the guards', () => {
     expect(plan.feasible).toBe(false)
     expect(plan.netToCompany).toBe(syp(200_000)) // only the wallet leg counts
     expect(postingsForRestoration(plan, '2026-08-12')).toHaveLength(1)
+  })
+})
+
+describe('sealed cash-count variance reconciliation', () => {
+  const input = {
+    branchId: '11111111-1111-1111-1111-111111111111',
+    cashCountId: '42',
+    proofSha256: 'a'.repeat(64),
+  }
+
+  it('records a shortage against a dedicated variance cost centre, never company_box', () => {
+    const [posting] = postingsForCashCountReconciliation({
+      ...input,
+      lines: [{ fundCode: 'office_cash', variance: minor(-syp(100_000)), resolution: 'signed shortage' }],
+    })
+
+    expect(posting).toMatchObject({
+      eventType: 'correction',
+      occurrenceKey: `cash-count:42:${'a'.repeat(64)}:office_cash`,
+    })
+    expect(posting!.lines).toEqual([
+      {
+        fund: { kind: 'office_cash' },
+        side: 'C',
+        amount: syp(100_000),
+        role: 'cash_count_reconciled_fund',
+      },
+      {
+        fund: {
+          kind: 'cost_center',
+          costCenterId: 'cash_count_variance:11111111-1111-1111-1111-111111111111:office_cash',
+        },
+        side: 'D',
+        amount: syp(100_000),
+        role: 'cash_count_variance_counterpart',
+      },
+    ])
+    expect(posting!.lines.map((line) => fundCode(line.fund))).not.toContain('company_box')
+    expect(debitsOf(posting!)).toBe(creditsOf(posting!))
+  })
+
+  it('records an overage in the opposite direction and emits nothing for exact boxes', () => {
+    const postings = postingsForCashCountReconciliation({
+      ...input,
+      lines: [
+        { fundCode: 'office_cash', variance: syp(50_000), resolution: 'signed overage' },
+        { fundCode: 'office_wallet', variance: ZERO, resolution: null },
+      ],
+    })
+    expect(postings).toHaveLength(1)
+    expect(postings[0]!.lines[0]).toMatchObject({ fund: { kind: 'office_cash' }, side: 'D' })
+    expect(postings[0]!.lines[1]).toMatchObject({ fund: { kind: 'cost_center' }, side: 'C' })
+  })
+
+  it('requires the sealed proof and the manager`s line-specific explanation', () => {
+    expect(() => postingsForCashCountReconciliation({
+      ...input,
+      proofSha256: 'not-a-proof',
+      lines: [{ fundCode: 'office_cash', variance: syp(1), resolution: 'counted twice' }],
+    })).toThrow('SHA-256 proof')
+    expect(() => postingsForCashCountReconciliation({
+      ...input,
+      lines: [{ fundCode: 'office_cash', variance: syp(1), resolution: null }],
+    })).toThrow('requires a resolution')
   })
 })

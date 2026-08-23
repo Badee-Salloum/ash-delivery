@@ -2,13 +2,20 @@ import { describe, expect, it } from 'vitest'
 import type {
   BatteryReadingRecord,
   Deps,
+  ExpenseRecord,
   NewShiftSettlementRecord,
   OcrReadClaimInput,
   OcrReadCompletion,
   OcrResult,
   ShiftRecord,
 } from '@ash/contracts'
-import { type Posting, minor } from '@ash/domain'
+import {
+  type Posting,
+  cashSettledReturnPostings,
+  minor,
+  planFixedShareSettlement,
+  receivableAdjustment,
+} from '@ash/domain'
 
 /**
  * The conformance suite.
@@ -49,7 +56,7 @@ const settlement = (overrides: Partial<NewShiftSettlementRecord> = {}): NewShift
   branchId: BRANCH,
   driverId: DRIVER,
   businessDate: '2026-07-21',
-  policyCode: 'fixed_40_cash_close_v1',
+  policyCode: 'fixed_40_cash_close_v2_receivable',
   driverRateBps: 4_000,
   deliveryFeeTotal: syp(100_000),
   fixedDriverShare: syp(40_000),
@@ -64,6 +71,10 @@ const settlement = (overrides: Partial<NewShiftSettlementRecord> = {}): NewShift
   variance: syp(0),
   varianceDirection: 'balanced',
   finalEmployeeCash: syp(40_000),
+  cashClaimToOffice: syp(200_000),
+  walletClaimToOffice: syp(-10_000),
+  cashReceivableDeferred: syp(0),
+  walletReceivableDeferred: syp(0),
   walletToOffice: syp(-10_000),
   cashToOffice: syp(200_000),
   walletAction: 'fund',
@@ -135,6 +146,54 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
         submittedAt: '2026-07-21T05:00:00.000Z',
       }, USER)
       return deps
+    }
+
+    async function createAndApproveSettlement(
+      deps: Deps,
+      record: NewShiftSettlementRecord,
+    ): Promise<Awaited<ReturnType<Deps['settlements']['create']>>> {
+      return deps.closeUnitOfWork.run({ shiftId: SHIFT, actorId: USER }, async (transaction) => {
+        // Exercise the real close order and canonical return recipe in every port: journals first,
+        // immutable settlement second, terminal projection last. Pin expectedWallet to actualWallet
+        // so this repository-focused fixture has a known zero wallet split without fabricating the
+        // order/adjustment inputs that the API uses to calculate it.
+        const plan = planFixedShareSettlement({
+          deliveryFeeTotal: record.deliveryFeeTotal,
+          fixedDriverShare: record.fixedDriverShare,
+          manualDriverShare: record.manualDriverShare,
+          cashDeductionTotal: record.cashDeductionTotal,
+          expectedCash: minor(record.expectedTotal - record.actualWallet),
+          expectedWallet: record.actualWallet,
+          actualCash: record.actualCash,
+          actualWallet: record.actualWallet,
+          cashReceivableDeferred: record.cashReceivableDeferred,
+          walletReceivableDeferred: record.walletReceivableDeferred,
+        })
+        await transaction.ledger.post(
+          record.branchId,
+          cashSettledReturnPostings({ driverId: record.driverId, settlement: plan }),
+          {
+            shiftId: record.shiftId,
+            businessDate: record.businessDate,
+            postingDate: record.businessDate,
+            weekStartDate: '2026-07-19',
+            fxDayId: 1,
+            createdBy: USER,
+            ...(record.varianceReason === null ? {} : { reason: record.varianceReason }),
+          },
+        )
+        const created = await transaction.settlements.create(record)
+        const pending = await transaction.shifts.findById(SHIFT)
+        if (!pending) throw new Error('conformance shift missing while approving settlement')
+        await transaction.shifts.update({
+          ...pending,
+          state: 'approved',
+          approvedBy: USER,
+          keptAsReceivable: created.cashReceivableDeferred,
+          walletDiff: minor(0n),
+        }, USER)
+        return created
+      })
     }
 
     describe('working-now shift counts', () => {
@@ -507,7 +566,9 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
         const deps = await fresh()
         try {
           const posting: Posting = {
-            eventType: 'restoration',
+            // This test proves metadata round-trip only. A real restoration event is now coupled
+            // to sealed count evidence and its immutable fact at commit, so use a manual entry.
+            eventType: 'manual',
             occurrenceKey: 'role-round-trip',
             lines: [
               { fund: { kind: 'company_box' }, side: 'D', amount: syp(1_000), role: 'kaish' },
@@ -781,11 +842,353 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
       })
     })
 
+    describe('expenses', () => {
+      const expenseRecord = (): ExpenseRecord => ({
+        id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+        branchId: BRANCH,
+        categoryId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        costCenterKind: 'general',
+        vehicleId: null,
+        amount: syp(250),
+        businessDate: '2026-07-21',
+        description: 'Charging electricity',
+        receiptMediaId: null,
+        journalEntryId: null,
+        createdBy: USER,
+      })
+
+      it('finds a client-keyed expense exactly and refuses a duplicate identity', async () => {
+        const deps = await fresh()
+        try {
+          await deps.expenses.createCategory({
+            id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+            code: 'POWER',
+            nameAr: 'كهرباء الشحن',
+            active: true,
+          })
+          expect(await deps.expenses.get('dddddddd-dddd-4ddd-8ddd-dddddddddddd')).toBeNull()
+
+          const row = expenseRecord()
+          await deps.expenses.create(row)
+          expect(await deps.expenses.get(row.id)).toEqual(row)
+          await expect(deps.expenses.create(row)).rejects.toThrow()
+          expect(await deps.expenses.listByBranchAndDate(BRANCH, '2026-07-21', '2026-07-21')).toEqual([row])
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+    })
+
+    describe('receivable event commands', () => {
+      const eventId = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
+      const key = 'receivable-conformance-1'
+
+      it('round-trips an immutable event linked to its exact balanced journal', async () => {
+        const deps = await fresh()
+        try {
+          const fxDayId = (await deps.fx.idFor('2026-07-21')) ?? await deps.fx.upsert({
+            businessDate: '2026-07-21',
+            sypMinorPerUsd: 13_000n,
+            provisional: false,
+          })
+          const saved = await deps.financialUnitOfWork.run(
+            { lockKey: `receivable:${BRANCH}:${key}`, actorId: USER, requestId: 'receivable-conformance' },
+            async (tx) => {
+              const [entry] = await tx.ledger.post(
+                BRANCH,
+                [receivableAdjustment(DRIVER, 'ordinary', 'cash', 'create', syp(250), key)],
+                {
+                  ...META,
+                  shiftId: null,
+                  fxDayId,
+                  reason: 'direct driver debt',
+                },
+              )
+              const event = {
+                id: eventId,
+                branchId: BRANCH,
+                driverId: DRIVER,
+                receivableKind: 'ordinary' as const,
+                channel: 'cash' as const,
+                direction: 'create' as const,
+                amount: syp(250),
+                businessDate: '2026-07-21' as const,
+                reason: 'direct driver debt',
+                idempotencyKey: key,
+                journalEntryId: entry!.id,
+                createdBy: USER,
+                createdAtMs: 1_784_000_000_000,
+              }
+              await tx.receivableEvents.create(event)
+              return event
+            },
+          )
+
+          expect(await deps.receivableEvents.findByIdempotencyKey(BRANCH, key)).toEqual(saved)
+          expect(await deps.receivableEvents.listByBranchAndDriver(BRANCH, DRIVER)).toEqual([saved])
+          expect(await deps.receivableEvents.listByBranchAndDriver(BRANCH, OTHER_DRIVER)).toEqual([])
+          expect(
+            await deps.receivableEvents.listByBranchAndDriver(
+              '11111111-1111-1111-1111-111111111199',
+            ),
+          ).toEqual([])
+          await expect(deps.receivableEvents.create(saved)).rejects.toMatchObject({
+            code: 'DUPLICATE_IDEMPOTENCY_KEY',
+          })
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('rolls both the event and journal back when a later financial write fails', async () => {
+        const deps = await fresh()
+        try {
+          const rollbackKey = 'receivable-conformance-rollback'
+          const fxDayId = (await deps.fx.idFor('2026-07-21')) ?? await deps.fx.upsert({
+            businessDate: '2026-07-21',
+            sypMinorPerUsd: 13_000n,
+            provisional: false,
+          })
+          await expect(
+            deps.financialUnitOfWork.run(
+              { lockKey: `receivable:${BRANCH}:${rollbackKey}`, actorId: USER },
+              async (tx) => {
+                const [entry] = await tx.ledger.post(
+                  BRANCH,
+                  [receivableAdjustment(DRIVER, 'ordinary', 'wallet', 'create', syp(75), rollbackKey)],
+                  { ...META, shiftId: null, fxDayId, reason: 'rollback proof' },
+                )
+                await tx.receivableEvents.create({
+                  id: 'ffffffff-ffff-4fff-8fff-fffffffffffe',
+                  branchId: BRANCH,
+                  driverId: DRIVER,
+                  receivableKind: 'ordinary',
+                  channel: 'wallet',
+                  direction: 'create',
+                  amount: syp(75),
+                  businessDate: '2026-07-21',
+                  reason: 'rollback proof',
+                  idempotencyKey: rollbackKey,
+                  journalEntryId: entry!.id,
+                  createdBy: USER,
+                  createdAtMs: 1_784_000_000_001,
+                })
+                throw new Error('fail after receivable event')
+              },
+            ),
+          ).rejects.toThrow('fail after receivable event')
+
+          expect(await deps.receivableEvents.findByIdempotencyKey(BRANCH, rollbackKey)).toBeNull()
+          expect(
+            (await deps.ledger.listByWeek(BRANCH, META.weekStartDate))
+              .some((entry) => entry.occurrenceKey === rollbackKey),
+          ).toBe(false)
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+    })
+
+    describe('cash count identity and atomic restoration', () => {
+      const createCount = async (deps: Deps, businessDate: '2026-07-21' | '2026-07-22') =>
+        await (async () => {
+          await deps.financialUnitOfWork.run(
+            { lockKey: `receivables:${BRANCH}`, actorId: USER },
+            async (tx) => {
+              await tx.capitalTargets.upsert({
+                branchId: BRANCH,
+                fundCode: 'office_cash',
+                target: syp(10),
+                effectiveFrom: businessDate,
+                createdBy: USER,
+                note: 'restoration conformance target',
+              })
+              await tx.capitalTargets.upsert({
+                branchId: BRANCH,
+                fundCode: 'office_wallet',
+                target: minor(0n),
+                effectiveFrom: businessDate,
+                createdBy: USER,
+                note: 'restoration conformance target',
+              })
+            },
+          )
+          return deps.cashCounts.create({
+            // Memory may preserve this value; PostgreSQL must replace it with its generated BIGINT.
+            id: `client-placeholder-${businessDate}`,
+            branchId: BRANCH,
+            businessDate,
+            countedBy: USER,
+            countedAtMs: 1_784_000_000_000,
+            lines: [
+              {
+                fundCode: 'office_cash',
+                counted: syp(10),
+                computed: minor(0n),
+                variance: syp(10),
+                resolution: 'signed daily count variance',
+              },
+              {
+                fundCode: 'office_wallet',
+                counted: minor(0n),
+                computed: minor(0n),
+                variance: minor(0n),
+                resolution: null,
+              },
+            ],
+            proofSha256: 'c'.repeat(64),
+            sealedAtMs: 1_784_000_000_000,
+            notes: null,
+          })
+        })()
+
+      const reconciliation = (key: string): Posting => ({
+        eventType: 'correction',
+        occurrenceKey: key,
+        lines: [
+          { fund: { kind: 'office_cash' }, side: 'D', amount: syp(10), role: 'cash_count_reconciled_fund' },
+          {
+            fund: { kind: 'cost_center', costCenterId: `cash_count_variance:${BRANCH}:office_cash` },
+            side: 'C',
+            amount: syp(10),
+            role: 'cash_count_variance_counterpart',
+          },
+        ],
+      })
+
+      it('returns the persisted count id and commits a restoration record pointing to it', async () => {
+        const deps = await fresh()
+        try {
+          const count = await createCount(deps, '2026-07-21')
+          expect(count.id).toBeTruthy()
+          expect(await deps.cashCounts.find(BRANCH, '2026-07-21')).toEqual(count)
+
+          const key = `cash-count:${count.id}:${count.proofSha256}:office_cash`
+          await deps.financialUnitOfWork.run(
+            { lockKey: `receivables:${BRANCH}`, actorId: USER, requestId: 'restoration-conformance' },
+            async (tx) => {
+              expect(await tx.cashCounts.find(BRANCH, '2026-07-21')).toEqual(count)
+              const entries = await tx.ledger.post(BRANCH, [reconciliation(key)], {
+                ...META,
+                shiftId: null,
+                reason: 'signed daily count variance',
+              })
+              expect(entries).toHaveLength(1)
+              await tx.restorations.create({
+                branchId: BRANCH,
+                businessDate: '2026-07-21',
+                cashCountId: count.id,
+                plan: {
+                  schemaVersion: 2,
+                  cashCountProofSha256: count.proofSha256,
+                  cashCountSealedAt: new Date(count.sealedAtMs!).toISOString(),
+                  countReconciliation: [
+                    { fundCode: 'office_cash', variance: '10.00', resolution: 'signed daily count variance' },
+                    { fundCode: 'office_wallet', variance: '0.00', resolution: null },
+                  ],
+                  reconciliationJournalEntryIds: [entries[0]!.id],
+                  restorationJournalEntryIds: [],
+                  legs: [
+                    {
+                      fundCode: 'office_cash', counted: '10.00', receivables: '0.00',
+                      position: '10.00', capitalTarget: '10.00', delta: '0.00', direction: null,
+                      amount: '0.00', feasible: true, refusals: [],
+                    },
+                    {
+                      fundCode: 'office_wallet', counted: '0.00', receivables: '0.00',
+                      position: '0.00', capitalTarget: '0.00', delta: '0.00', direction: null,
+                      amount: '0.00', feasible: true, refusals: [],
+                    },
+                  ],
+                },
+                netToCompany: minor(0n),
+                reason: 'signed daily count variance',
+                performedBy: USER,
+              })
+            },
+          )
+
+          expect(await deps.restorations.find(BRANCH, '2026-07-21')).toMatchObject({
+            cashCountId: count.id,
+            reason: 'signed daily count variance',
+          })
+          expect(
+            (await deps.ledger.listByWeek(BRANCH, META.weekStartDate))
+              .filter((entry) => entry.occurrenceKey === key),
+          ).toHaveLength(1)
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('rolls both the restoration record and its journal back after a late failure', async () => {
+        const deps = await fresh()
+        try {
+          const count = await createCount(deps, '2026-07-22')
+          const key = `cash-count:${count.id}:${count.proofSha256}:office_cash`
+          await expect(
+            deps.financialUnitOfWork.run(
+              { lockKey: `receivables:${BRANCH}`, actorId: USER },
+              async (tx) => {
+                const entries = await tx.ledger.post(BRANCH, [reconciliation(key)], {
+                  ...META,
+                  shiftId: null,
+                  businessDate: '2026-07-22',
+                  postingDate: '2026-07-22',
+                  reason: 'signed daily count variance',
+                })
+                await tx.restorations.create({
+                  branchId: BRANCH,
+                  businessDate: '2026-07-22',
+                  cashCountId: count.id,
+                  plan: {
+                    schemaVersion: 2,
+                    cashCountProofSha256: count.proofSha256,
+                    cashCountSealedAt: new Date(count.sealedAtMs!).toISOString(),
+                    countReconciliation: [
+                      { fundCode: 'office_cash', variance: '10.00', resolution: 'signed daily count variance' },
+                      { fundCode: 'office_wallet', variance: '0.00', resolution: null },
+                    ],
+                    reconciliationJournalEntryIds: [entries[0]!.id],
+                    restorationJournalEntryIds: [],
+                    legs: [
+                      {
+                        fundCode: 'office_cash', counted: '10.00', receivables: '0.00',
+                        position: '10.00', capitalTarget: '10.00', delta: '0.00', direction: null,
+                        amount: '0.00', feasible: true, refusals: [],
+                      },
+                      {
+                        fundCode: 'office_wallet', counted: '0.00', receivables: '0.00',
+                        position: '0.00', capitalTarget: '0.00', delta: '0.00', direction: null,
+                        amount: '0.00', feasible: true, refusals: [],
+                      },
+                    ],
+                  },
+                  netToCompany: minor(0n),
+                  reason: 'signed daily count variance',
+                  performedBy: USER,
+                })
+                throw new Error('fail after restoration record')
+              },
+            ),
+          ).rejects.toThrow('fail after restoration record')
+
+          expect(await deps.restorations.find(BRANCH, '2026-07-22')).toBeNull()
+          expect(
+            (await deps.ledger.listByWeek(BRANCH, META.weekStartDate))
+              .some((entry) => entry.occurrenceKey === key),
+          ).toBe(false)
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+    })
+
     describe('immutable shift settlement', () => {
       it('round-trips every minor-unit field exactly, including a signed wallet action', async () => {
         const deps = await freshSettlement()
         try {
-          const created = await deps.settlements.create(settlement())
+          const created = await createAndApproveSettlement(deps, settlement())
           const stored = await deps.settlements.findByShift(SHIFT)
 
           expect(created.id).toBeGreaterThan(0)
@@ -807,7 +1210,7 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
       it('stores a shortage beyond the share as immediate signed employee cash, not a receivable', async () => {
         const deps = await freshSettlement()
         try {
-          const stored = await deps.settlements.create(
+          const stored = await createAndApproveSettlement(deps,
             settlement({
               actualCash: syp(110_000),
               actualWallet: syp(70_000),
@@ -815,6 +1218,8 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
               variance: syp(-50_000),
               varianceDirection: 'shortage',
               finalEmployeeCash: syp(-10_000),
+              cashClaimToOffice: syp(120_000),
+              walletClaimToOffice: syp(70_000),
               walletToOffice: syp(70_000),
               walletAction: 'collect',
               walletAmount: syp(70_000),
@@ -834,11 +1239,13 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
       it('supports a wallet-heavy close where the office collects the wallet and pays cash', async () => {
         const deps = await freshSettlement()
         try {
-          const stored = await deps.settlements.create(
+          const stored = await createAndApproveSettlement(deps,
             settlement({
               actualCash: syp(20_000),
               actualWallet: syp(210_000),
               actualTotal: syp(230_000),
+              cashClaimToOffice: syp(-20_000),
+              walletClaimToOffice: syp(210_000),
               walletToOffice: syp(210_000),
               walletAction: 'collect',
               walletAmount: syp(210_000),
@@ -849,6 +1256,35 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           )
           expect(stored.walletAction).toBe('collect')
           expect(stored.cashAction).toBe('pay')
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('stores reviewed cash and wallet receivables while moving only the remainder', async () => {
+        const deps = await freshSettlement()
+        try {
+          const stored = await createAndApproveSettlement(deps,
+            settlement({
+              actualCash: syp(220_000),
+              actualWallet: syp(10_000),
+              actualTotal: syp(230_000),
+              cashClaimToOffice: syp(180_000),
+              walletClaimToOffice: syp(10_000),
+              cashReceivableDeferred: syp(6_000),
+              walletReceivableDeferred: syp(1_000),
+              cashToOffice: syp(174_000),
+              walletToOffice: syp(9_000),
+              cashAction: 'collect',
+              cashAmount: syp(174_000),
+              walletAction: 'collect',
+              walletAmount: syp(9_000),
+            }),
+          )
+          expect(stored.cashReceivableDeferred).toBe(syp(6_000))
+          expect(stored.walletReceivableDeferred).toBe(syp(1_000))
+          expect(stored.cashToOffice).toBe(syp(174_000))
+          expect(stored.walletToOffice).toBe(syp(9_000))
         } finally {
           await ctx.cleanup?.(deps)
         }
@@ -894,7 +1330,7 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
       it('accepts an exact hash replay but refuses a different second snapshot for the shift', async () => {
         const deps = await freshSettlement()
         try {
-          const first = await deps.settlements.create(settlement())
+          const first = await createAndApproveSettlement(deps, settlement())
           const replay = await deps.settlements.create(settlement())
           expect(replay).toEqual(first)
 

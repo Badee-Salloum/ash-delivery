@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { type Deps, type JournalEntryRecord, type ShiftRecord, serializeMoney } from '@ash/contracts'
 import { REQUIRED_END_SLOTS, isLive, minor, toUsdMinor, weekStartFor } from '@ash/domain'
-import { includedOrders, todayFor } from './shifts.service.ts'
+import { ServiceError, includedOrders, todayFor } from './shifts.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
 
 /**
@@ -299,10 +299,20 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     // what الترميم settles against: both boxes plus everything out on ذمم.
     const officeCash = await deps.ledger.fundBalance(branchId, 'office_cash')
     const officeWallet = await deps.ledger.fundBalance(branchId, 'office_wallet')
-    const receivables = await deps.ledger.balancesByPrefix(branchId, 'driver_receivable_')
+    const [ordinaryReceivables, shiftFundingReceivables] = await Promise.all([
+      deps.ledger.balancesByPrefix(branchId, 'driver_receivable_'),
+      deps.ledger.balancesByPrefix(branchId, 'driver_shift_funding_'),
+    ])
+    const receivables = { ...ordinaryReceivables, ...shiftFundingReceivables }
+    for (const [fundCode, balance] of Object.entries(receivables)) {
+      if (balance < 0n) throw new ServiceError(500, 'receivable_balance_integrity_error', { fundCode })
+    }
     const sumReceivables = (suffix: string): bigint =>
       Object.entries(receivables)
-        .filter(([code]) => code.startsWith(`driver_receivable_${suffix}:`))
+        .filter(([code]) =>
+          code.startsWith(`driver_receivable_${suffix}:`) ||
+          code.startsWith(`driver_shift_funding_${suffix}:`),
+        )
         .reduce((acc, [, v]) => acc + v, 0n)
     const targets = await deps.capitalTargets.resolve(branchId, to)
     const targetTotal = (targets.office_cash ?? 0n) + (targets.office_wallet ?? 0n)

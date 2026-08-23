@@ -22,6 +22,9 @@ import type {
   DocumentRecord,
   DriverRecord,
   FxRepo,
+  FinancialTransactionDeps,
+  FinancialUnitOfWork,
+  FinancialUnitOfWorkInput,
   IdGen,
   JournalEntryRecord,
   LedgerRepo,
@@ -61,6 +64,7 @@ import type {
 } from '@ash/contracts'
 import {
   FIXED_CASH_SETTLEMENT_POLICY,
+  FIXED_CASH_SETTLEMENT_POLICY_V1,
   FIXED_DRIVER_RATE_BPS,
   classifyOperationWindow,
   includedByOperationWindow,
@@ -75,6 +79,7 @@ import { MemoryCashCountRepo } from './cashcount.ts'
 import { MemoryOfficeCapitalTargetRepo, MemoryRestorationRepo } from './restoration.ts'
 import { MemoryNotificationRepo, MemoryTierRepo } from './tiers.ts'
 import { MemoryCloseDraftRepo } from './close-draft.ts'
+import { MemoryReceivableEventRepo } from './receivables.ts'
 
 export { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 export { MemoryOcrReadRepo, MemoryOcrReader, ScriptedOcrReader } from '../ocr/memory.ts'
@@ -83,6 +88,7 @@ export { MemoryCashCountRepo } from './cashcount.ts'
 export { MemoryOfficeCapitalTargetRepo, MemoryRestorationRepo } from './restoration.ts'
 export { MemoryNotificationRepo, MemoryTierRepo } from './tiers.ts'
 export { MemoryCloseDraftRepo } from './close-draft.ts'
+export { MemoryReceivableEventRepo } from './receivables.ts'
 
 /**
  * In-memory implementations of every port.
@@ -1106,6 +1112,8 @@ export function fundCodeOf(fund: Posting['lines'][number]['fund']): string {
     // Same rule as the Pg repo and the domain: a ذمة is per driver, so it carries his id.
     case 'driver_receivable_cash':
     case 'driver_receivable_wallet':
+    case 'driver_shift_funding_cash':
+    case 'driver_shift_funding_wallet':
       return `${fund.kind}:${fund.driverId}`
     case 'cost_center':
       return `cost_center:${fund.costCenterId}`
@@ -1501,7 +1509,10 @@ const immutableSettlement = (shiftId: string): Error & { code: string } =>
   })
 
 function assertSettlement(record: NewShiftSettlementRecord): void {
-  if (record.policyCode !== FIXED_CASH_SETTLEMENT_POLICY || record.driverRateBps !== FIXED_DRIVER_RATE_BPS) {
+  if (
+    ![FIXED_CASH_SETTLEMENT_POLICY_V1, FIXED_CASH_SETTLEMENT_POLICY].includes(record.policyCode) ||
+    record.driverRateBps !== FIXED_DRIVER_RATE_BPS
+  ) {
     throw invalidSettlement('the fixed 40% settlement policy is required')
   }
   const nonnegative = [
@@ -1513,6 +1524,8 @@ function assertSettlement(record: NewShiftSettlementRecord): void {
     record.actualCash,
     record.walletAmount,
     record.cashAmount,
+    record.cashReceivableDeferred,
+    record.walletReceivableDeferred,
   ]
   if (nonnegative.some((amount) => amount < 0n)) throw invalidSettlement('settlement magnitudes must be non-negative')
   if (record.fixedDriverShare !== (record.deliveryFeeTotal * 4_000n) / 10_000n) {
@@ -1535,16 +1548,36 @@ function assertSettlement(record: NewShiftSettlementRecord): void {
   if (record.finalEmployeeCash !== record.baseDriverShare + record.variance) {
     throw invalidSettlement('final employee cash does not include the closing variance')
   }
-  if (record.walletToOffice !== record.actualWallet) {
-    throw invalidSettlement('the settlement does not empty the complete actual wallet')
+  if (record.cashClaimToOffice !== record.actualCash - record.finalEmployeeCash) {
+    throw invalidSettlement('cash claim does not equal actual cash less final employee cash')
+  }
+  if (record.walletClaimToOffice !== record.actualWallet) {
+    throw invalidSettlement('wallet claim does not equal the actual wallet')
+  }
+  if (
+    record.policyCode === FIXED_CASH_SETTLEMENT_POLICY_V1 &&
+    (record.cashReceivableDeferred !== 0n || record.walletReceivableDeferred !== 0n)
+  ) {
+    throw invalidSettlement('the legacy settlement policy cannot defer a receivable')
+  }
+  const maximumCashDeferral = record.cashClaimToOffice > 0n ? record.cashClaimToOffice : 0n
+  const maximumWalletDeferral = record.walletClaimToOffice > 0n ? record.walletClaimToOffice : 0n
+  if (
+    record.cashReceivableDeferred > maximumCashDeferral ||
+    record.walletReceivableDeferred > maximumWalletDeferral
+  ) {
+    throw invalidSettlement('settlement deferral exceeds the positive office claim')
+  }
+  if (record.walletToOffice !== record.walletClaimToOffice - record.walletReceivableDeferred) {
+    throw invalidSettlement('wallet movement does not subtract its deferred receivable')
   }
   const walletAction = record.walletToOffice > 0n ? 'collect' : record.walletToOffice < 0n ? 'fund' : 'none'
   const walletAmount = record.walletToOffice < 0n ? -record.walletToOffice : record.walletToOffice
   if (record.walletAction !== walletAction || record.walletAmount !== walletAmount) {
     throw invalidSettlement('wallet action does not match the signed wallet transfer')
   }
-  if (record.cashToOffice !== record.actualCash - record.finalEmployeeCash) {
-    throw invalidSettlement('cash action does not close the final employee cash')
+  if (record.cashToOffice !== record.cashClaimToOffice - record.cashReceivableDeferred) {
+    throw invalidSettlement('cash movement does not subtract its deferred receivable')
   }
   const cashAction = record.cashToOffice > 0n ? 'collect' : record.cashToOffice < 0n ? 'pay' : 'none'
   const cashAmount = record.cashToOffice < 0n ? -record.cashToOffice : record.cashToOffice
@@ -1675,6 +1708,8 @@ export interface MemoryDeps extends Deps {
   blobs: MemoryBlobStore
   ocrReads: MemoryOcrReadRepo
   expenses: MemoryExpenseRepo
+  receivableEvents: MemoryReceivableEventRepo
+  financialUnitOfWork: MemoryFinancialUnitOfWork
   cashCounts: MemoryCashCountRepo
   capitalTargets: MemoryOfficeCapitalTargetRepo
   restorations: MemoryRestorationRepo
@@ -1702,6 +1737,58 @@ export interface MemoryDeps extends Deps {
   settlements: MemoryShiftSettlementRepo
   closeDrafts: MemoryCloseDraftRepo
   gps: MemoryGpsPingRepo
+}
+
+/** In-memory parity for ledger-backed financial commands. */
+export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
+  private readonly deps: FinancialTransactionDeps
+  private readonly expenses: MemoryExpenseRepo
+  private readonly ledger: MemoryLedgerRepo
+  private readonly receivableEvents: MemoryReceivableEventRepo
+  private readonly capitalTargets: MemoryOfficeCapitalTargetRepo
+  private readonly restorations: MemoryRestorationRepo
+  private readonly gate: MemoryTransactionGate
+
+  constructor(
+    expenses: MemoryExpenseRepo,
+    ledger: MemoryLedgerRepo,
+    receivableEvents: MemoryReceivableEventRepo,
+    cashCounts: MemoryCashCountRepo,
+    capitalTargets: MemoryOfficeCapitalTargetRepo,
+    restorations: MemoryRestorationRepo,
+    gate: MemoryTransactionGate,
+  ) {
+    this.expenses = expenses
+    this.ledger = ledger
+    this.receivableEvents = receivableEvents
+    this.capitalTargets = capitalTargets
+    this.restorations = restorations
+    this.gate = gate
+    this.deps = { expenses, ledger, receivableEvents, cashCounts, capitalTargets, restorations }
+  }
+
+  async run<T>(
+    _input: FinancialUnitOfWorkInput,
+    work: (deps: FinancialTransactionDeps) => Promise<T>,
+  ): Promise<T> {
+    return this.gate.run(async () => {
+      const expenseSnapshot = this.expenses.snapshotRows()
+      const ledgerSnapshot = this.ledger.snapshotState()
+      const receivableSnapshot = this.receivableEvents.snapshot()
+      const capitalTargetSnapshot = this.capitalTargets.snapshotRows()
+      const restorationSnapshot = this.restorations.snapshotRows()
+      try {
+        return await work(this.deps)
+      } catch (error) {
+        this.expenses.restoreRows(expenseSnapshot)
+        this.ledger.restoreState(ledgerSnapshot)
+        this.receivableEvents.restore(receivableSnapshot)
+        this.capitalTargets.restoreRows(capitalTargetSnapshot)
+        this.restorations.restoreRows(restorationSnapshot)
+        throw error
+      }
+    })
+  }
 }
 
 /**
@@ -1835,6 +1922,20 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   const settlements = new MemoryShiftSettlementRepo()
   const closeDrafts = new MemoryCloseDraftRepo(media)
   const gate = new MemoryTransactionGate()
+  const expenses = new MemoryExpenseRepo()
+  const receivableEvents = new MemoryReceivableEventRepo()
+  const cashCounts = new MemoryCashCountRepo()
+  const capitalTargets = new MemoryOfficeCapitalTargetRepo()
+  const restorations = new MemoryRestorationRepo()
+  const financialUnitOfWork = new MemoryFinancialUnitOfWork(
+    expenses,
+    ledger,
+    receivableEvents,
+    cashCounts,
+    capitalTargets,
+    restorations,
+    gate,
+  )
   const transactionDeps: ShiftCloseTransactionDeps = {
     shifts,
     orders,
@@ -1889,10 +1990,12 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     closeUnitOfWork,
     movements,
     ledger,
-    expenses: new MemoryExpenseRepo(),
-    cashCounts: new MemoryCashCountRepo(),
-    capitalTargets: new MemoryOfficeCapitalTargetRepo(),
-    restorations: new MemoryRestorationRepo(),
+    expenses,
+    receivableEvents,
+    financialUnitOfWork,
+    cashCounts,
+    capitalTargets,
+    restorations,
     tiers,
     notifications: new MemoryNotificationRepo(),
     settings: new MemorySettingsRepo(),

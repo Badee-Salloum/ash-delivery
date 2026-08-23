@@ -4,6 +4,7 @@ import {
   approveOpenRequest,
   fixedSettlementConfirmationSchema,
   forceCloseRequest,
+  shiftFundingPreviewSchema,
   shiftSettlementViewSchema,
 } from '../src/wire.ts'
 
@@ -27,6 +28,10 @@ describe('fixed settlement wire contract', () => {
       variance: '0.00',
       varianceDirection: 'balanced',
       finalEmployeeCash: '40000.00',
+      cashClaimToOffice: '200000.00',
+      walletClaimToOffice: '-10000.00',
+      cashReceivableDeferred: '0.00',
+      walletReceivableDeferred: '0.00',
       walletToOffice: '-10000.00',
       cashToOffice: '200000.00',
       walletAction: 'fund',
@@ -64,12 +69,18 @@ describe('fixed settlement wire contract', () => {
     ).toThrow()
   })
 
-  it('rejects reasons made only from invisible Unicode formatting marks', () => {
-    for (const varianceReason of ['\u200B', '\u2060\uFEFF', ' \u200F\t']) {
-      expect(() => approveCloseRequest.parse({
+  it('accepts an omitted or blank ordinary variance reason while keeping force-close reasons strict', () => {
+    for (const varianceReason of [undefined, null, '', '   ', '\u200B', '\u2060\uFEFF', ' \u200F\t']) {
+      expect(approveCloseRequest.parse({
         reviewedOrdersHash: 'orders',
         varianceReason,
-      })).toThrow()
+      })).toMatchObject({ varianceReason: varianceReason == null ? null : varianceReason.trim() })
+      expect(() => fixedSettlementConfirmationSchema.parse({
+        reviewedSettlementHash: HASH,
+        walletTransferConfirmed: true,
+        cashSettlementConfirmed: true,
+        varianceReason,
+      })).not.toThrow()
       expect(() => forceCloseRequest.parse({
         prepareOnly: true,
         reason: varianceReason,
@@ -82,6 +93,18 @@ describe('fixed settlement wire contract', () => {
   it('bounds opening tranche arrays to the PostgreSQL smallint sequence range', () => {
     const tooMany = Array.from({ length: 32_768 }, () => '0.01')
     expect(approveOpenRequest.safeParse({ floatTranches: tooMany, topupTranches: [] }).success).toBe(false)
+  })
+
+  it('binds an older omitted funding preview to explicit zero tranches and keeps review money as text', () => {
+    expect(approveOpenRequest.parse({ floatTranches: [], topupTranches: [] })).toMatchObject({
+      carriedTranches: [],
+      carriedWalletTranches: [],
+    })
+    expect(shiftFundingPreviewSchema.parse({ cash: '0.00', wallet: '125.50' })).toEqual({
+      cash: '0.00',
+      wallet: '125.50',
+    })
+    expect(shiftFundingPreviewSchema.safeParse({ cash: 0, wallet: '0.00' }).success).toBe(false)
   })
 
   it('separates boundary preparation from the confirmed force-close', () => {

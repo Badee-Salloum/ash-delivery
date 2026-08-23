@@ -3,8 +3,10 @@ import { readFileSync } from 'node:fs'
 import { afterAll, describe, expect, it } from 'vitest'
 import { createPool } from '../src/pool.ts'
 import { assertDisposableDatabaseUrl } from './disposable-database.ts'
+import { fixedSettlementHash } from '../../../apps/api/src/fixed-settlement.ts'
 import {
   INTEGRITY_CHECKS,
+  LEGACY_INTEGRITY_CHECKS,
   canonicalSettlementHash,
   canonicalJson,
   closeDraftHash,
@@ -31,6 +33,9 @@ describe('read-only shift-money integrity checker', () => {
       'force_cancel_integrity',
       'unresolved_operations',
       'close_draft_boundaries',
+      'receivable_event_journals',
+      'receivable_fund_balances',
+      'shift_funding_open_carry',
       'residual_driver_balances',
     ])
     expect(script).toContain("id: 'settlement_hashes'")
@@ -83,13 +88,87 @@ describe('read-only shift-money integrity checker', () => {
     expect(boundaries).not.toContain("al.before ->> 'end_cash_declared_minor'")
   })
 
-  it('checks only each settled shift contribution and permits carried historical receivables', () => {
+  it('checks each settled contribution across ordinary and shift-funding cash/wallet funds', () => {
     const residuals = INTEGRITY_CHECKS.find((check) => check.id === 'residual_driver_balances').sql
     expect(residuals).toContain('je.shift_id = ss.shift_id')
     expect(residuals).toContain("ft.kind = 'carried_receivable'")
-    expect(residuals).toContain('sb.driver_receivable_cash <> -COALESCE(c.carried, 0)')
+    expect(residuals).toContain("ft.kind = 'carried_wallet_receivable'")
+    expect(residuals).toContain('sb.ordinary_cash <> ss.cash_receivable_deferred_minor::numeric - CASE')
+    expect(residuals).toContain('sb.ordinary_wallet <> ss.wallet_receivable_deferred_minor::numeric')
+    expect(residuals).toContain('sb.funding_cash <> -CASE')
+    expect(residuals).toContain('s.open_approved_at < rollout.applied_at')
+    expect(residuals).toContain('s.open_approved_at >= rollout.applied_at')
+    expect(residuals).toContain('sb.funding_wallet <> -COALESCE(c.carried_wallet, 0)')
     expect(residuals).toContain("f.type::text = 'driver_receivable_wallet'")
-    expect(residuals).toContain('sb.driver_receivable_wallet <> 0')
+    expect(residuals).toContain("f.type::text = 'driver_shift_funding_wallet'")
+  })
+
+  it('validates v2 claims, bounded deferrals, physical transfers, and office conservation', () => {
+    const formulas = INTEGRITY_CHECKS.find((check) => check.id === 'settlement_formulas').sql
+    expect(formulas).toContain("'fixed_40_cash_close_v1'")
+    expect(formulas).toContain("'fixed_40_cash_close_v2_receivable'")
+    expect(formulas).toContain('cash_claim_to_office_minor::numeric <>')
+    expect(formulas).toContain('actual_cash_minor::numeric - ss.final_employee_cash_minor::numeric')
+    expect(formulas).toContain('wallet_claim_to_office_minor::numeric <> ss.actual_wallet_minor::numeric')
+    expect(formulas).toContain('GREATEST(ss.cash_claim_to_office_minor::numeric, 0::numeric)')
+    expect(formulas).toContain('GREATEST(ss.wallet_claim_to_office_minor::numeric, 0::numeric)')
+    expect(formulas).toContain('ss.cash_claim_to_office_minor::numeric - ss.cash_receivable_deferred_minor::numeric')
+    expect(formulas).toContain('ss.wallet_claim_to_office_minor::numeric - ss.wallet_receivable_deferred_minor::numeric')
+    expect(formulas).toContain('ss.expected_total_minor::numeric - ss.base_driver_share_minor::numeric')
+  })
+
+  it('keeps cash and wallet carries distinct and changes counterpart funds only after 0037', () => {
+    const tranches = INTEGRITY_CHECKS.find((check) => check.id === 'tranche_journal_totals').sql
+    expect(tranches).toContain("filename = '0037_receivable_settlement_and_events.sql'")
+    expect(tranches).toContain("ft.kind = 'carried_receivable'")
+    expect(tranches).toContain("ft.kind = 'carried_wallet_receivable'")
+    expect(tranches).toContain("f.type::text = 'driver_receivable_cash'")
+    expect(tranches).toContain("f.type::text = 'driver_shift_funding_cash'")
+    expect(tranches).toContain("f.type::text = 'driver_shift_funding_wallet'")
+    expect(tranches).toContain('s.open_approved_at >= rollout.applied_at AS uses_shift_funding')
+    expect(tranches).toContain('COALESCE(jt.carried_wallet, 0)')
+  })
+
+  it('grandfathers only cancelled shifts that predate the 0035 integrity boundary', () => {
+    for (const checks of [LEGACY_INTEGRITY_CHECKS, INTEGRITY_CHECKS]) {
+      const tranches = checks.find((check) => check.id === 'tranche_journal_totals').sql
+      expect(tranches).toContain("filename = '0035_shift_money_integrity.sql'")
+      expect(tranches).toContain("s.state <> 'cancelled'")
+      expect(tranches).toContain('s.created_at >= rollout.applied_at')
+      expect(tranches).toContain("al.after ->> 'state' = 'cancelled'")
+      expect(tranches).toContain("sd.decision = 'force_cancelled'")
+      expect(tranches).toContain('FROM eligible_shifts s')
+      expect(tranches).toContain('JOIN eligible_shifts s ON s.id = je.shift_id')
+    }
+  })
+
+  it('matches every direct receivable command to its exact idempotent journal', () => {
+    const events = INTEGRITY_CHECKS.find((check) => check.id === 'receivable_event_journals').sql
+    expect(events).toContain('FROM receivable_events re')
+    expect(events).toContain("je.event_type::text IS DISTINCT FROM 'receivable_adjustment'")
+    expect(events).toContain('je.occurrence_key IS DISTINCT FROM re.idempotency_key')
+    expect(events).not.toContain('je.journal_entry_id')
+    expect(events).toContain('je.reason IS DISTINCT FROM re.reason')
+    expect(events).toContain("'driver_receivable_cash'")
+    expect(events).toContain("'driver_shift_funding_wallet'")
+    expect(events).toContain("'orphan_receivable_adjustment_journal'")
+    expect(events).toContain("'duplicate_receivable_idempotency_key'")
+    expect(events).toContain('actual.line_shape IS DISTINCT FROM expected.line_shape')
+  })
+
+  it('requires nonnegative named balances and complete automatic shift-funding consumption', () => {
+    const balances = INTEGRITY_CHECKS.find((check) => check.id === 'receivable_fund_balances').sql
+    expect(balances).toContain("f.owner_kind <> 'driver'")
+    expect(balances).toContain("f.code <> f.type::text || ':' || f.owner_id::text")
+    expect(balances).toContain("'driver_receivable_cash', 'driver_receivable_wallet'")
+    expect(balances).toContain("'driver_shift_funding_cash', 'driver_shift_funding_wallet'")
+    expect(balances).toContain("< 0")
+
+    const carry = INTEGRITY_CHECKS.find((check) => check.id === 'shift_funding_open_carry').sql
+    expect(carry).toContain("filename = '0037_receivable_settlement_and_events.sql'")
+    expect(carry).toContain('je.shift_id IS DISTINCT FROM c.shift_id')
+    expect(carry).toContain('ob.carried_cash IS DISTINCT FROM ob.cash_before_open')
+    expect(carry).toContain('ob.carried_wallet IS DISTINCT FROM ob.wallet_before_open')
   })
 
   it('compares the complete close-line multiset so extra balanced lines cannot hide', () => {
@@ -147,20 +226,26 @@ describe('read-only shift-money integrity checker', () => {
     expect(forceCancel).toContain('(fd.notes)[1] IS NOT NULL')
     expect(forceCancel).toContain('regexp_replace')
     expect(forceCancel).toContain("'void-carry-' || vc.id::text")
+    expect(forceCancel).toContain("'void-wallet-carry-' || vc.id::text")
+    expect(forceCancel).toContain("'driver_shift_funding_cash'")
+    expect(forceCancel).toContain("'driver_shift_funding_wallet'")
     expect(forceCancel).toContain("'float_return'::text, '1'::text")
     expect(forceCancel).toContain("'wallet_return', '1'")
     expect(forceCancel).toContain('actual.line_shape IS DISTINCT FROM expected.line_shape')
     expect(forceCancel).toContain('balances.driver_cash <> 0')
     expect(forceCancel).toContain('balances.driver_wallet <> 0')
     expect(forceCancel).toContain('balances.driver_share <> 0')
-    expect(forceCancel).toContain('balances.driver_receivable_cash <> 0')
+    expect(forceCancel).toContain('vc.cancel_decided_at < vc.receivable_rollout_at')
+    expect(forceCancel).toContain('vc.open_approved_at < vc.receivable_rollout_at')
+    expect(forceCancel).toContain('balances.driver_receivable_cash <> (')
+    expect(forceCancel).toContain('balances.driver_shift_funding_cash <> (')
     expect(forceCancel).not.toContain('shift_close_drafts')
     expect(forceCancel).not.toContain('shift_settlements')
   })
 
   it('contains only SELECT/CTE audit queries and enforces a read-only snapshot', () => {
     const mutation = /\b(?:INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|TRUNCATE|GRANT|REVOKE|CALL|COPY)\b/i
-    for (const check of INTEGRITY_CHECKS) {
+    for (const check of [...LEGACY_INTEGRITY_CHECKS, ...INTEGRITY_CHECKS]) {
       expect(check.sql.trim()).toMatch(/^(?:SELECT|WITH)\b/i)
       const executableSql = check.sql.replace(/'(?:''|[^'])*'/g, "''")
       expect(executableSql).not.toMatch(mutation)
@@ -171,10 +256,11 @@ describe('read-only shift-money integrity checker', () => {
   })
 
   it('does not require migration 0035 helpers during the pre-migration production audit', () => {
-    for (const check of INTEGRITY_CHECKS) {
+    for (const check of LEGACY_INTEGRITY_CHECKS) {
       expect(check.sql).not.toContain('ash_has_visible_text')
     }
     expect(script).toContain('Keep the pre-migration audit runnable on schema 0034')
+    expect(script).toContain('receivableV2 ? INTEGRITY_CHECKS : LEGACY_INTEGRITY_CHECKS')
   })
 
   it('opens and rolls back the read-only snapshot without ever committing', async () => {
@@ -205,7 +291,39 @@ describe('read-only shift-money integrity checker', () => {
     expect(calls[0].sql).toBe('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
     expect(calls.at(-1).sql).toBe('ROLLBACK')
     expect(calls.some(({ sql }) => /\bCOMMIT\b/.test(sql))).toBe(false)
+    expect(calls.some(({ sql }) => sql.includes('FROM receivable_events re'))).toBe(false)
+    expect(calls.some(({ sql }) => sql.includes("'0'::text AS cash_receivable_deferred_minor"))).toBe(true)
     expect(released).toBe(true)
+  })
+
+  it('selects the receivable-aware checks only after migration 0037', async () => {
+    const calls = []
+    const client = {
+      async query(sql, params) {
+        calls.push({ sql, params })
+        if (sql.includes('current_database()')) {
+          return {
+            rows: [{
+              database: 'disposable-v2',
+              database_user: 'auditor',
+              server_version: '17-test',
+              as_of: '2026-08-23 00:00:00+00',
+            }],
+          }
+        }
+        if (sql.includes('AS receivable_v2')) return { rows: [{ receivable_v2: true }] }
+        return { rows: [] }
+      },
+      release() {},
+    }
+    const pool = { async connect() { return client } }
+
+    const result = await runShiftMoneyIntegrity(pool, { sampleLimit: 5 })
+
+    expect(result.violations).toBe(0)
+    expect(calls.some(({ sql }) => sql.includes('FROM receivable_events re'))).toBe(true)
+    expect(calls.some(({ sql }) => sql.includes('ss.cash_claim_to_office_minor::text'))).toBe(true)
+    expect(calls.at(-1).sql).toBe('ROLLBACK')
   })
 
   it('uses the same recursively canonical SHA-256 shape as close-draft storage', () => {
@@ -265,6 +383,104 @@ describe('read-only shift-money integrity checker', () => {
 
     expect(settlementHashFailures([{ ...row, settlement_hash: computed }])).toEqual([])
   })
+
+  it('hash-binds both v2 claims, both deferrals, and their physical movements', () => {
+    const row = {
+      shift_id: '00000000-0000-4000-8000-000000000011',
+      branch_id: '00000000-0000-4000-8000-000000000012',
+      driver_id: '00000000-0000-4000-8000-000000000013',
+      business_date: '2026-08-23',
+      policy_code: 'fixed_40_cash_close_v2_receivable',
+      delivery_fee_total_minor: '10000',
+      fixed_driver_share_minor: '4000',
+      manual_driver_share_minor: '0',
+      gross_driver_share_minor: '4000',
+      cash_deduction_total_minor: '0',
+      base_driver_share_minor: '4000',
+      expected_total_minor: '12000',
+      actual_cash_minor: '10000',
+      actual_wallet_minor: '2000',
+      actual_total_minor: '12000',
+      variance_minor: '0',
+      final_employee_cash_minor: '4000',
+      cash_claim_to_office_minor: '6000',
+      wallet_claim_to_office_minor: '2000',
+      cash_receivable_deferred_minor: '1000',
+      wallet_receivable_deferred_minor: '500',
+      wallet_to_office_minor: '1500',
+      cash_to_office_minor: '5000',
+      wallet_action: 'collect',
+      wallet_amount_minor: '1500',
+      cash_action: 'collect',
+      cash_amount_minor: '5000',
+      reviewed_orders_hash: 'orders-hash-v2',
+      cash_diff_minor: '0',
+      wallet_diff_minor: '0',
+      close_draft_revision: '4',
+      close_draft_hash: 'c'.repeat(64),
+      close_draft_submitted_at: '2026-08-23T12:00:00.000Z',
+      confirmed_at: '2026-08-23T12:01:00.000Z',
+      close_draft_rollout_at: '2026-08-22T11:00:00.000Z',
+      settlement_hash: 'f'.repeat(64),
+    }
+
+    const canonical = canonicalSettlementHash(row)
+    expect(canonical).toMatch(/^[0-9a-f]{64}$/)
+    expect(canonical).toBe(fixedSettlementHash(
+      {
+        shiftId: row.shift_id,
+        branchId: row.branch_id,
+        driverId: row.driver_id,
+        businessDate: row.business_date,
+        reviewedOrdersHash: row.reviewed_orders_hash,
+        closeDraftRevision: 4,
+        closeDraftHash: row.close_draft_hash,
+        closeDraftSubmittedAt: row.close_draft_submitted_at,
+      },
+      {
+        deliveryFeeTotal: 10_000n,
+        fixedDriverShare: 4_000n,
+        manualDriverShare: 0n,
+        grossDriverShare: 4_000n,
+        cashDeductionTotal: 0n,
+        baseDriverShare: 4_000n,
+        expectedCash: 10_000n,
+        expectedWallet: 2_000n,
+        expectedTotal: 12_000n,
+        actualCash: 10_000n,
+        actualWallet: 2_000n,
+        actualTotal: 12_000n,
+        variance: 0n,
+        finalEmployeeCash: 4_000n,
+        officeEntitlement: 8_000n,
+        cashClaimToOffice: 6_000n,
+        walletClaimToOffice: 2_000n,
+        cashReceivableDeferred: 1_000n,
+        walletReceivableDeferred: 500n,
+        cashToOffice: 5_000n,
+        walletToOffice: 1_500n,
+        wallet: { action: 'collect', amount: 1_500n },
+        cash: { action: 'collect', amount: 5_000n },
+      },
+    ))
+    expect(canonicalSettlementHash({
+      ...row,
+      cash_receivable_deferred_minor: '1001',
+    })).not.toBe(canonical)
+    expect(canonicalSettlementHash({
+      ...row,
+      wallet_receivable_deferred_minor: '501',
+    })).not.toBe(canonical)
+    expect(canonicalSettlementHash({
+      ...row,
+      cash_claim_to_office_minor: '6001',
+    })).not.toBe(canonical)
+    expect(canonicalSettlementHash({
+      ...row,
+      wallet_to_office_minor: '1499',
+    })).not.toBe(canonical)
+    expect(settlementHashFailures([{ ...row, settlement_hash: canonical }])).toEqual([])
+  })
 })
 
 const DATABASE_URL = process.env.SHIFT_MONEY_TEST_DATABASE_URL ?? process.env.DATABASE_URL
@@ -291,6 +507,8 @@ if (!DATABASE_URL) {
         driverWallet: randomUUID(),
         driverCash: randomUUID(),
         sharePayable: randomUUID(),
+        receivableCash: randomUUID(),
+        receivableWallet: randomUUID(),
         officeWallet: randomUUID(),
         officeCash: randomUUID(),
       }
@@ -321,10 +539,14 @@ if (!DATABASE_URL) {
             shift_id uuid PRIMARY KEY,
             branch_id uuid NOT NULL,
             driver_id uuid NOT NULL,
+            policy_code text NOT NULL,
             actual_wallet_minor bigint NOT NULL,
             expected_total_minor bigint NOT NULL,
             base_driver_share_minor bigint NOT NULL,
-            cash_to_office_minor bigint NOT NULL
+            cash_to_office_minor bigint NOT NULL,
+            wallet_to_office_minor bigint NOT NULL,
+            cash_receivable_deferred_minor bigint NOT NULL,
+            wallet_receivable_deferred_minor bigint NOT NULL
           ) ON COMMIT DROP;
           CREATE TEMP TABLE journal_entries (
             id bigint PRIMARY KEY,
@@ -361,22 +583,28 @@ if (!DATABASE_URL) {
         )
         await client.query(
           `INSERT INTO shift_settlements
-             (shift_id, branch_id, driver_id, actual_wallet_minor, expected_total_minor,
-              base_driver_share_minor, cash_to_office_minor)
-           VALUES ($1, $2, $3, 300, 1000, 400, 300)`,
+             (shift_id, branch_id, driver_id, policy_code, actual_wallet_minor, expected_total_minor,
+              base_driver_share_minor, cash_to_office_minor, wallet_to_office_minor,
+              cash_receivable_deferred_minor, wallet_receivable_deferred_minor)
+           VALUES ($1, $2, $3, 'fixed_40_cash_close_v2_receivable', 300, 1000, 400,
+                   250, 200, 50, 100)`,
           [shiftId, branchId, driverId],
         )
         await client.query(
           `INSERT INTO funds (id, branch_id, type, owner_id) VALUES
-             ($1, $6, 'driver_wallet', $7),
-             ($2, $6, 'driver_cash', $7),
-             ($3, $6, 'driver_share_payable', $7),
-             ($4, $6, 'office_wallet', NULL),
-             ($5, $6, 'office_cash', NULL)`,
+             ($1, $8, 'driver_wallet', $9),
+             ($2, $8, 'driver_cash', $9),
+             ($3, $8, 'driver_share_payable', $9),
+             ($4, $8, 'driver_receivable_cash', $9),
+             ($5, $8, 'driver_receivable_wallet', $9),
+             ($6, $8, 'office_wallet', NULL),
+             ($7, $8, 'office_cash', NULL)`,
           [
             funds.driverWallet,
             funds.driverCash,
             funds.sharePayable,
+            funds.receivableCash,
+            funds.receivableWallet,
             funds.officeWallet,
             funds.officeCash,
             branchId,
@@ -397,15 +625,19 @@ if (!DATABASE_URL) {
              (1, 1, $1, 'D', 200, 'wallet_reclassification'),
              (2, 1, $2, 'C', 200, 'wallet_reclassification'),
              (3, 1, $1, 'C', 300, 'wallet_cleared'),
-             (4, 1, $3, 'D', 300, 'wallet_full_return'),
-             (5, 2, $2, 'C', 700, 'cash_cleared'),
-             (6, 2, $4, 'D', 400, 'driver_share_settled'),
-             (7, 2, $5, 'D', 300, 'cash_settlement')`,
+             (4, 1, $4, 'D', 200, 'wallet_settlement'),
+             (5, 1, $3, 'D', 100, 'wallet_settlement_deferred'),
+             (6, 2, $2, 'C', 700, 'cash_cleared'),
+             (7, 2, $5, 'D', 400, 'driver_share_settled'),
+             (8, 2, $6, 'D', 50, 'cash_settlement_deferred'),
+             (9, 2, $7, 'D', 250, 'cash_settlement')`,
           [
             funds.driverWallet,
             funds.driverCash,
+            funds.receivableWallet,
             funds.officeWallet,
             funds.sharePayable,
+            funds.receivableCash,
             funds.officeCash,
           ],
         )
@@ -416,8 +648,8 @@ if (!DATABASE_URL) {
 
         await client.query(
           `INSERT INTO journal_lines (id, entry_id, fund_id, side, amount_minor, line_role) VALUES
-             (8, 2, $1, 'D', 25, 'unexpected_debit'),
-             (9, 2, $2, 'C', 25, 'unexpected_credit')`,
+             (10, 2, $1, 'D', 25, 'unexpected_debit'),
+             (11, 2, $2, 'C', 25, 'unexpected_credit')`,
           [funds.officeCash, funds.officeWallet],
         )
 
@@ -432,7 +664,7 @@ if (!DATABASE_URL) {
       }
     })
 
-    it('accepts a no-draft force-cancel inverse and rejects extra balanced void lines', async () => {
+    it('accepts a cross-rollout force-cancel reclassified to shift funding and rejects extra balanced void lines', async () => {
       const client = await pool.connect()
       const shiftId = randomUUID()
       const branchId = randomUUID()
@@ -441,7 +673,7 @@ if (!DATABASE_URL) {
       const fundIds = {
         driverCash: randomUUID(),
         driverWallet: randomUUID(),
-        driverShare: randomUUID(),
+        fundingCash: randomUUID(),
         receivableCash: randomUUID(),
         receivableWallet: randomUUID(),
         officeCash: randomUUID(),
@@ -468,7 +700,8 @@ if (!DATABASE_URL) {
             business_date date NOT NULL,
             week_start_date date NOT NULL,
             state text NOT NULL,
-            created_at timestamptz NOT NULL
+            created_at timestamptz NOT NULL,
+            open_approved_at timestamptz
           ) ON COMMIT DROP;
           CREATE TEMP TABLE shift_decisions (
             id bigint PRIMARY KEY,
@@ -519,21 +752,22 @@ if (!DATABASE_URL) {
           ) ON COMMIT DROP
         `)
         await client.query(
-          `INSERT INTO schema_migrations (filename, applied_at)
-           VALUES ('0035_shift_money_integrity.sql', TIMESTAMPTZ '2026-08-23 08:00:00+00')`,
+          `INSERT INTO schema_migrations (filename, applied_at) VALUES
+             ('0035_shift_money_integrity.sql', TIMESTAMPTZ '2026-08-23 08:00:00+00'),
+             ('0037_receivable_settlement_and_events.sql', TIMESTAMPTZ '2026-08-23 10:00:00+00')`,
         )
         await client.query(
           `INSERT INTO shifts
-             (id, branch_id, driver_id, business_date, week_start_date, state, created_at)
+             (id, branch_id, driver_id, business_date, week_start_date, state, created_at, open_approved_at)
            VALUES ($1, $2, $3, DATE '2026-08-23', DATE '2026-08-23', 'cancelled',
-                   TIMESTAMPTZ '2026-08-23 08:05:00+00')`,
+                   TIMESTAMPTZ '2026-08-23 08:05:00+00', TIMESTAMPTZ '2026-08-23 08:30:00+00')`,
           [shiftId, branchId, driverId],
         )
         await client.query(
           `INSERT INTO shift_decisions
              (id, shift_id, gate, decision, notes, decided_by, decided_at)
            VALUES (1, $1, 'close', 'force_cancelled', 'vehicle failure', $2,
-                   TIMESTAMPTZ '2026-08-23 09:00:00+00')`,
+                   TIMESTAMPTZ '2026-08-23 11:00:00+00')`,
           [shiftId, managerId],
         )
         await client.query(
@@ -547,7 +781,7 @@ if (!DATABASE_URL) {
           `INSERT INTO funds (id, branch_id, type, owner_id) VALUES
              ($1, $8, 'driver_cash', $9),
              ($2, $8, 'driver_wallet', $9),
-             ($3, $8, 'driver_share_payable', $9),
+             ($3, $8, 'driver_shift_funding_cash', $9),
              ($4, $8, 'driver_receivable_cash', $9),
              ($5, $8, 'driver_receivable_wallet', $9),
              ($6, $8, 'office_cash', NULL),
@@ -555,7 +789,7 @@ if (!DATABASE_URL) {
           [
             fundIds.driverCash,
             fundIds.driverWallet,
-            fundIds.driverShare,
+            fundIds.fundingCash,
             fundIds.receivableCash,
             fundIds.receivableWallet,
             fundIds.officeCash,
@@ -593,13 +827,14 @@ if (!DATABASE_URL) {
              (9, 5, $5, 'D', 200, NULL),
              (10, 5, $2, 'C', 200, NULL),
              (11, 6, $1, 'C', 50, NULL),
-             (12, 6, $3, 'D', 50, NULL)`,
+             (12, 6, $6, 'D', 50, NULL)`,
           [
             fundIds.driverCash,
             fundIds.driverWallet,
             fundIds.receivableCash,
             fundIds.officeCash,
             fundIds.officeWallet,
+            fundIds.fundingCash,
           ],
         )
 

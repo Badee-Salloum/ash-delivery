@@ -7,6 +7,8 @@ import { migrate } from '../src/migrate.ts'
 import { PgShiftCloseUnitOfWork } from '../src/repos-close.ts'
 import { PgShiftSettlementRepo } from '../src/repos-settlement.ts'
 import { PgCloseDraftRepo } from '../src/repos-close-draft.ts'
+import { PgFinancialUnitOfWork } from '../src/repos-financial.ts'
+import { PgReceivableEventRepo } from '../src/repos-receivable.ts'
 import { assertDisposableDatabaseConnection, assertDisposableDatabaseUrl } from './disposable-database.ts'
 import {
   PgAuditRepo,
@@ -82,7 +84,7 @@ if (!DATABASE_URL) {
       // Truncate rather than re-migrate: orders of magnitude faster, and it exercises the real
       // constraints on every run instead of a freshly-empty database.
       await pool.query(`
-        TRUNCATE shift_settlements, journal_lines, journal_entries, cash_deductions, shift_orders, shift_media_attachment_history, shift_media, media, float_tranches, expenses, expense_categories, settings, cash_counts, cash_count_lines, tier_rules, notifications,
+        TRUNCATE receivable_events, shift_settlements, journal_lines, journal_entries, cash_deductions, shift_orders, shift_media_attachment_history, shift_media, media, float_tranches, expenses, expense_categories, settings, cash_counts, cash_count_lines, tier_rules, notifications,
                  shift_battery_readings, gps_pings, batteries,
                  shifts, funds, fx_days, week_locks, audit_log, sessions, drivers, vehicles,
                  vehicle_types, users, branches, governorates
@@ -103,9 +105,30 @@ if (!DATABASE_URL) {
          ON CONFLICT (key) DO NOTHING`,
       )
       await pool.query(
+        `INSERT INTO permissions (key, name_ar, name_en)
+         VALUES
+           ('journal.manual.write', 'القيد اليدوي', 'Manual journal'),
+           ('shift.approve', 'اعتماد النوبة', 'Approve shift')
+         ON CONFLICT (key) DO NOTHING`,
+      )
+      await pool.query(
+        `INSERT INTO role_permissions (role_key, permission_key, scope)
+         VALUES
+           ('system_admin', 'journal.manual.write', 'all'),
+           ('system_admin', 'shift.approve', 'all')
+         ON CONFLICT (role_key, permission_key) DO UPDATE SET scope = EXCLUDED.scope`,
+      )
+      await pool.query(
         `INSERT INTO users (id, branch_id, role_key, username, full_name_ar, password_hash)
          VALUES ($1, $2, 'system_admin', 'conformance', 'اختبار', 'x')`,
         [USER, BRANCH],
+      )
+      await pool.query(
+        `INSERT INTO funds (branch_id, type, owner_kind, owner_id, code, name_ar)
+         VALUES
+           ($1, 'office_cash', 'none', NULL, 'office_cash', 'office cash'),
+           ($1, 'office_wallet', 'none', NULL, 'office_wallet', 'office wallet')`,
+        [BRANCH],
       )
       await pool.query(
         `INSERT INTO vehicle_types (id, code, name_ar, name_en, type_no)
@@ -180,6 +203,8 @@ if (!DATABASE_URL) {
         movements: new PgWalletMovementRepo(pool),
         ledger: new PgLedgerRepo(pool),
         expenses: new PgExpenseRepo(pool),
+        receivableEvents: new PgReceivableEventRepo(pool),
+        financialUnitOfWork: new PgFinancialUnitOfWork(pool),
         cashCounts: new PgCashCountRepo(pool),
         capitalTargets: new PgOfficeCapitalTargetRepo(pool),
         restorations: new PgRestorationRepo(pool),
@@ -343,6 +368,10 @@ if (!DATABASE_URL) {
         variance: zero,
         varianceDirection: 'balanced',
         finalEmployeeCash: zero,
+        cashClaimToOffice: zero,
+        walletClaimToOffice: zero,
+        cashReceivableDeferred: zero,
+        walletReceivableDeferred: zero,
         walletToOffice: zero,
         cashToOffice: zero,
         walletAction: 'none',
@@ -388,12 +417,38 @@ if (!DATABASE_URL) {
       ).rejects.toMatchObject({ code: '55000' })
       expect(await deps.decisions.listByShift(SHIFT)).toContainEqual(preparedDecision)
 
-      const accepted = await deps.settlements.create(snapshot)
+      const accepted = await deps.closeUnitOfWork.run(
+        { shiftId: SHIFT, actorId: USER },
+        async (transaction) => {
+          const created = await transaction.settlements.create(snapshot)
+          const pending = await transaction.shifts.findById(SHIFT)
+          if (!pending) throw new Error('state-guard shift disappeared')
+          await transaction.shifts.update({
+            ...pending,
+            state: 'approved',
+            approvedBy: USER,
+            keptAsReceivable: created.cashReceivableDeferred,
+            // A canonical all-zero close has a known zero split difference and deliberately emits
+            // no wallet_return/float_return journal. The deferred journal guard accepts that exact
+            // empty multiset while still rejecting a missing non-zero close in the PG adversarial
+            // suite.
+            walletDiff: zero,
+          }, USER)
+          return created
+        },
+      )
       expect(accepted).toMatchObject({
         shiftId: SHIFT,
         settlementHash: snapshot.settlementHash,
         confirmedBy: USER,
       })
+      await expect(
+        pool.query(
+          `SELECT id FROM journal_entries
+            WHERE shift_id = $1 AND event_type IN ('wallet_return', 'float_return')`,
+          [SHIFT],
+        ),
+      ).resolves.toMatchObject({ rowCount: 0 })
     })
 
     it.each(['draft', 'awaiting_open_approval'] as const)(

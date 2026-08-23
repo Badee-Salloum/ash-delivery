@@ -68,6 +68,13 @@ export const nonblankReasonSchema = z
   .max(500)
   .refine((value) => /[^\p{White_Space}\p{Cf}]/u.test(value), 'reason must include a visible character')
 
+/**
+ * An ordinary variance reason may be left blank by the manager. The service converts a blank or
+ * invisible-only value into its deterministic system audit marker when the variance is nonzero;
+ * this wire schema only trims and bounds the optional human input.
+ */
+const optionalVarianceReasonSchema = z.string().trim().max(500).nullable().default(null)
+
 export const serializeMoney = (m: Minor): string => formatMinor(m)
 
 export const calendarDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'expected YYYY-MM-DD')
@@ -543,16 +550,23 @@ export const approveOpenRequest = z.object({
   /**
    * «الذمة المرحّلة» — cash the driver already holds from an earlier shift, consumed here.
    *
-   * The office hands over only the difference, so this is not new money leaving the box. Refused
-   * above what the receivable actually holds.
+   * The office hands over only the difference, so this is not new money leaving the box. It is the
+   * exact cash balance shown in the manager's review, expressed as one positive tranche or an
+   * explicit empty array for zero. An omitted field from an older client therefore asserts a
+   * reviewed balance of zero; the service compares that zero without treating it as a wildcard.
    */
   carriedTranches: z.array(positiveMoneySchema).max(32_767).default([]),
+  /** Exact reviewed wallet shift-funding balance; an empty array explicitly binds approval to zero. */
+  carriedWalletTranches: z.array(positiveMoneySchema).max(32_767).default([]),
 })
 
 export const settlementVarianceDirectionSchema = z.enum(['surplus', 'shortage', 'balanced'])
 export const settlementWalletActionSchema = z.enum(['collect', 'fund', 'none'])
 export const settlementCashActionSchema = z.enum(['collect', 'pay', 'none'])
-export const settlementPolicySchema = z.literal('fixed_40_cash_close_v1')
+export const settlementPolicySchema = z.enum([
+  'fixed_40_cash_close_v1',
+  'fixed_40_cash_close_v2_receivable',
+])
 
 /** Money in an API RESPONSE: validated decimal text which deliberately stays text. */
 export const settlementMoneyStringSchema = z
@@ -566,6 +580,12 @@ export const settlementMoneyStringSchema = z
       return false
     }
   }, 'money is larger than this system can store')
+
+/** Live branch+driver shift funding included in the manager's locked review snapshot. */
+export const shiftFundingPreviewSchema = z.object({
+  cash: settlementMoneyStringSchema,
+  wallet: settlementMoneyStringSchema,
+})
 
 /** The decision-complete settlement preview returned to the manager. */
 export const shiftSettlementViewSchema = z.object({
@@ -584,6 +604,10 @@ export const shiftSettlementViewSchema = z.object({
   variance: settlementMoneyStringSchema,
   varianceDirection: settlementVarianceDirectionSchema,
   finalEmployeeCash: settlementMoneyStringSchema,
+  cashClaimToOffice: settlementMoneyStringSchema,
+  walletClaimToOffice: settlementMoneyStringSchema,
+  cashReceivableDeferred: settlementMoneyStringSchema,
+  walletReceivableDeferred: settlementMoneyStringSchema,
   walletToOffice: settlementMoneyStringSchema,
   cashToOffice: settlementMoneyStringSchema,
   walletAction: settlementWalletActionSchema,
@@ -602,7 +626,7 @@ export const fixedSettlementConfirmationSchema = z.object({
   reviewedSettlementHash: z.string().regex(/^[0-9a-f]{64}$/, 'expected a sha256 hex digest'),
   walletTransferConfirmed: z.literal(true),
   cashSettlementConfirmed: z.literal(true),
-  varianceReason: nonblankReasonSchema.nullable().default(null),
+  varianceReason: optionalVarianceReasonSchema,
 })
 
 export const approveCloseRequest = z.object({
@@ -618,13 +642,16 @@ export const approveCloseRequest = z.object({
    * must remain distinguishable so the service can refuse the old leave-as-payable workflow.
    */
   payShareNow: z.boolean().optional(),
+  /** Amounts from positive collect actions deliberately left as office receivables. */
+  cashReceivableDeferred: nonnegativeMoneySchema.optional(),
+  walletReceivableDeferred: nonnegativeMoneySchema.optional(),
   /** Fixed-policy preview hash. Optional on the wire solely for a controlled old-client refusal. */
   reviewedSettlementHash: z.string().regex(/^[0-9a-f]{64}$/, 'expected a sha256 hex digest').optional(),
   /** Both physical actions must be explicitly confirmed before the service persists a settlement. */
   walletTransferConfirmed: z.boolean().default(false),
   cashSettlementConfirmed: z.boolean().default(false),
-  /** Required by the service whenever the immutable preview has a non-zero variance. */
-  varianceReason: nonblankReasonSchema.nullable().default(null),
+  /** Optional human context; a nonzero variance always receives a nonblank server audit marker. */
+  varianceReason: optionalVarianceReasonSchema,
 })
 
 const forceCloseBaseRequest = z.object({
@@ -650,6 +677,8 @@ export const commitForceCloseRequest = forceCloseBaseRequest.extend({
   reviewedSettlementHash: z.string().regex(/^[0-9a-f]{64}$/, 'expected a sha256 hex digest'),
   walletTransferConfirmed: z.literal(true),
   cashSettlementConfirmed: z.literal(true),
+  cashReceivableDeferred: nonnegativeMoneySchema.optional(),
+  walletReceivableDeferred: nonnegativeMoneySchema.optional(),
 })
 
 /** Upper-level force-close is an explicit prepare-then-settle protocol. */
@@ -952,17 +981,36 @@ export const createExpenseCategoryRequest = z.object({
   nameAr: z.string().min(1).max(120),
 })
 
+const positiveExpenseMoneySchema = moneySchema.refine(
+  (amount) => amount > 0n,
+  'expense amount must be strictly positive',
+)
+
 export const createExpenseRequest = z.object({
   branchId: z.string().optional(),
+  /** Client-owned UUID: exact retries reuse it; a new expense must generate a new one. */
+  idempotencyKey: z.string().uuid(),
   categoryId: z.string().min(1),
   /** G-1: vehicle / branch / general — these feed per-axis profitability. */
   costCenterKind: z.enum(['vehicle', 'branch', 'general']),
   vehicleId: z.string().nullable().default(null),
-  amount: moneySchema,
+  amount: positiveExpenseMoneySchema,
   businessDate: calendarDateSchema.optional(),
   description: z.string().min(1).max(500),
   /** Mandatory above the configured ceiling (G-3 / س52). */
   receiptMediaId: z.string().nullable().default(null),
+})
+
+/** Direct debt creation/collection, explicitly outside any shift. */
+export const createReceivableEventRequest = z.object({
+  branchId: z.string().optional(),
+  driverId: z.string().min(1),
+  receivableKind: z.enum(['ordinary', 'shift_funding']),
+  channel: z.enum(['cash', 'wallet']),
+  direction: z.enum(['create', 'collect']),
+  amount: positiveMoneySchema,
+  reason: nonblankReasonSchema,
+  idempotencyKey: z.string().uuid(),
 })
 
 // ── Treasury: daily count and manual entries (SRS E-3, E-5) ───────────────────────────────
@@ -1064,3 +1112,4 @@ export type PatchCloseDraftRequest = z.infer<typeof patchCloseDraftRequest>
 export type LinkedCloseDraftReadRequest = z.infer<typeof linkedCloseDraftReadRequest>
 export type RestoreCloseDraftAttachmentRequest = z.infer<typeof restoreCloseDraftAttachmentRequest>
 export type ApproveOpenRequest = z.infer<typeof approveOpenRequest>
+export type ShiftFundingPreview = z.infer<typeof shiftFundingPreviewSchema>

@@ -1,5 +1,13 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
-import { groupThousands, type RestorationView } from '@ash/client'
+import {
+  groupThousands,
+  type ReceivableChannel,
+  type ReceivableDirection,
+  type ReceivableEventView,
+  type ReceivableKind,
+  type ReceivablesView,
+  type RestorationView,
+} from '@ash/client'
 import { type RoleKey, can, formatMinor, minor, parseMinor } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { useConfirm, useToast } from '../feedback.tsx'
@@ -13,6 +21,19 @@ import {
   restoreCountDraft,
   summarizeRestoration,
 } from '../treasury-view.ts'
+import {
+  browserReceivableOperationMutex,
+  browserReceivableOperationStorage,
+  executeReceivableOperation,
+  loadPendingReceivableOperation,
+  pendingReceivableOperationMatches,
+  receivableDirectoryDrivers,
+  receivableDriverMaySubmit,
+  receivableOperationReady,
+  type PendingReceivableOperation,
+  type PendingReceivableRecovery,
+  type ReceivableOperationPayload,
+} from '../receivable-idempotency.ts'
 
 /** The branch-level funds a manual entry can move (the driver/cost-centre ones need an id suffix). */
 const MANUAL_FUNDS = ['office_cash', 'office_wallet', 'yalago_share', 'company_revenue', 'yalago_income', 'fee_earned', 'company_box'] as const
@@ -45,6 +66,14 @@ interface CashCountView {
   }>
 }
 
+interface TreasuryDriver {
+  id: string
+  code: string
+  fullNameAr: string
+  fullNameEn: string | null
+  active: boolean
+}
+
 /**
  * Treasury (SRS E-5, E-6): the daily cash count and the Sunday close. Both are branch-manager +
  * GM; the close itself is system-admin-only and its pre-flight blockers are shown before sealing.
@@ -73,11 +102,40 @@ export function Treasury(): ReactNode {
   const [restoration, setRestoration] = useState<RestorationView | null>(null)
   const [restorationError, setRestorationError] = useState<string | null>(null)
   const [restoreDone, setRestoreDone] = useState(false)
+  const [capitalTargetsDraft, setCapitalTargetsDraft] = useState({ cash: '', wallet: '' })
+  const [capitalTargetReason, setCapitalTargetReason] = useState('')
+  const [capitalTargetsBusy, setCapitalTargetsBusy] = useState(false)
+
+  // Outstanding driver balances are branch-scoped office assets, not physical cash in the box.
+  const [receivables, setReceivables] = useState<ReceivablesView | null>(null)
+  const [receivablesError, setReceivablesError] = useState<string | null>(null)
+  const [receivablesBranchId, setReceivablesBranchId] = useState<string | null>(null)
+  const [receivableDrivers, setReceivableDrivers] = useState<TreasuryDriver[]>([])
+  const [receivableDraft, setReceivableDraft] = useState<ReceivableOperationPayload>({
+    driverId: '',
+    receivableKind: 'ordinary',
+    channel: 'cash',
+    direction: 'create',
+    amount: '',
+    reason: '',
+  })
+  const [receivableEventBusy, setReceivableEventBusy] = useState(false)
+  const [receivableEventError, setReceivableEventError] = useState<string | null>(null)
+  const [receivableHistory, setReceivableHistory] = useState<ReceivableEventView[] | null>(null)
+  const [receivableHistoryError, setReceivableHistoryError] = useState<string | null>(null)
+  const [receivableHistoryBranchId, setReceivableHistoryBranchId] = useState<string | null>(null)
+  const [receivableOutboxRecovery, setReceivableOutboxRecovery] = useState<PendingReceivableRecovery>({
+    status: 'unavailable',
+  })
 
   const [sheetError, setSheetError] = useState<string | null>(null)
   const [balanceError, setBalanceError] = useState<string | null>(null)
   const loadVersion = useRef(0)
   const restorationLoadVersion = useRef(0)
+  const receivablesLoadVersion = useRef(0)
+  const receivableHistoryLoadVersion = useRef(0)
+  const receivableSubmitVersion = useRef(0)
+  const pendingReceivableEvent = useRef<PendingReceivableOperation | null>(null)
 
   // ── Manual entry + reversal (E-3) ────────────────────────────────────────────────────────
   const [reason, setReason] = useState('')
@@ -109,6 +167,9 @@ export function Treasury(): ReactNode {
   const canViewCompanyFund =
     session != null &&
     can({ userId: session.userId, roleKey: session.roleKey as RoleKey, branchId: session.branchId }, 'profit.view_total', {}).allowed
+
+  const receivableOutboxActorId = session?.userId ?? null
+  const receivableOutboxBranchId = branchId ?? session?.branchId ?? null
 
   const load = useCallback(() => {
     const version = ++loadVersion.current
@@ -167,11 +228,67 @@ export function Treasury(): ReactNode {
       if (version !== restorationLoadVersion.current) return
       setRestoration(preview)
       setRestoreDone(preview.alreadyRestored === true)
+      setCapitalTargetsDraft({
+        cash: preview.legs.find((leg) => leg.fundCode === 'office_cash')?.capitalTarget ?? '',
+        wallet: preview.legs.find((leg) => leg.fundCode === 'office_wallet')?.capitalTarget ?? '',
+      })
       setRestorationError(null)
     } catch (err) {
       if (version !== restorationLoadVersion.current) return
       setRestoration(null)
       setRestorationError((err as { error?: string }).error ?? 'error')
+    }
+  }, [api, branchId])
+
+  const loadReceivables = useCallback(async (): Promise<void> => {
+    const version = ++receivablesLoadVersion.current
+    const requestedBranch = branchId
+    setReceivables(null)
+    setReceivablesError(null)
+    setReceivablesBranchId(requestedBranch)
+    try {
+      const [next, directory] = await Promise.all([
+        api.receivables(),
+        api.get<{ drivers: TreasuryDriver[] }>('/drivers'),
+      ])
+      if (version !== receivablesLoadVersion.current) return
+      setReceivables(next)
+      const outstandingDriverIds = new Set(next.drivers.map((driver) => driver.driverId))
+      // A lost-response create may already have been consumed or collected, leaving no current
+      // balance. Keep its driver selectable so the immutable receipt can still be recovered.
+      const pendingDriverId = pendingReceivableEvent.current?.payload.driverId
+      if (pendingDriverId) outstandingDriverIds.add(pendingDriverId)
+      const availableDrivers = receivableDirectoryDrivers(directory.drivers, outstandingDriverIds)
+      setReceivableDrivers(availableDrivers)
+      setReceivableDraft((current) => {
+        const selected = availableDrivers.find((driver) => driver.id === current.driverId)
+        const exactRetry = pendingReceivableOperationMatches(pendingReceivableEvent.current, current)
+        return {
+          ...current,
+          driverId: receivableDriverMaySubmit(selected, current.direction) || exactRetry ? current.driverId : '',
+        }
+      })
+    } catch (err) {
+      if (version !== receivablesLoadVersion.current) return
+      setReceivables(null)
+      setReceivablesError((err as { error?: string }).error ?? 'error')
+    }
+  }, [api, branchId])
+
+  const loadReceivableHistory = useCallback(async (): Promise<void> => {
+    const version = ++receivableHistoryLoadVersion.current
+    const requestedBranch = branchId
+    setReceivableHistory(null)
+    setReceivableHistoryError(null)
+    setReceivableHistoryBranchId(requestedBranch)
+    try {
+      const next = await api.receivableEvents()
+      if (version !== receivableHistoryLoadVersion.current) return
+      setReceivableHistory(next.events)
+    } catch (err) {
+      if (version !== receivableHistoryLoadVersion.current) return
+      setReceivableHistory(null)
+      setReceivableHistoryError((err as { error?: string }).error ?? 'error')
     }
   }, [api, branchId])
 
@@ -182,6 +299,37 @@ export function Treasury(): ReactNode {
     setRestoreDone(false)
     void loadRestoration()
   }, [loadRestoration])
+  useEffect(() => {
+    void loadReceivables()
+  }, [loadReceivables])
+  useEffect(() => {
+    receivableSubmitVersion.current += 1
+    const recovery: PendingReceivableRecovery = receivableOutboxActorId && receivableOutboxBranchId
+      ? loadPendingReceivableOperation(
+          browserReceivableOperationStorage(),
+          receivableOutboxActorId,
+          receivableOutboxBranchId,
+        )
+      : { status: 'unavailable' }
+    const restored = recovery.status === 'pending' ? recovery.operation : null
+    pendingReceivableEvent.current = restored
+    setReceivableOutboxRecovery(recovery)
+    setReceivableEventBusy(false)
+    setReceivableDrivers([])
+    setReceivableDraft((current) => restored?.payload ?? { ...current, driverId: '' })
+    setReceivableEventError(
+      recovery.status === 'pending'
+        ? 'receivable_pending_retry'
+        : recovery.status === 'corrupt'
+          ? 'receivable_outbox_corrupt'
+          : recovery.status === 'unavailable'
+            ? 'receivable_outbox_unavailable'
+            : null,
+    )
+  }, [receivableOutboxActorId, receivableOutboxBranchId])
+  useEffect(() => {
+    void loadReceivableHistory()
+  }, [loadReceivableHistory])
 
   /** «كييش» — take the day's profit out of the branch box and into صندوق الشركة. */
   async function withdraw(target: 'cash' | 'wallet'): Promise<void> {
@@ -355,6 +503,200 @@ export function Treasury(): ReactNode {
     }
   }
 
+  async function submitReceivableEvent(): Promise<void> {
+    const payload: ReceivableOperationPayload = {
+      ...receivableDraft,
+      amount: receivableDraft.amount.trim(),
+      reason: receivableDraft.reason.trim(),
+    }
+    const outboxActorId = receivableOutboxActorId
+    const outboxBranchId = receivableOutboxBranchId
+    const storage = browserReceivableOperationStorage()
+    if (!outboxActorId || !outboxBranchId) {
+      setReceivableOutboxRecovery({ status: 'unavailable' })
+      setReceivableEventError('receivable_outbox_unavailable')
+      return
+    }
+
+    // Re-read immediately before every attempt. localStorage is shared by tabs, so a command
+    // created elsewhere must win over this page's older in-memory view and may never be overwritten.
+    const durable = loadPendingReceivableOperation(storage, outboxActorId, outboxBranchId)
+    if (durable.status === 'unavailable' || durable.status === 'corrupt') {
+      setReceivableOutboxRecovery(durable)
+      setReceivableEventError(
+        durable.status === 'corrupt' ? 'receivable_outbox_corrupt' : 'receivable_outbox_unavailable',
+      )
+      return
+    }
+    if (durable.status === 'pending') {
+      pendingReceivableEvent.current = durable.operation
+      setReceivableOutboxRecovery(durable)
+      if (!pendingReceivableOperationMatches(durable.operation, payload)) {
+        setReceivableDraft(durable.operation.payload)
+        setReceivableEventError('receivable_pending_retry')
+        void loadReceivables()
+        return
+      }
+    } else if (
+      pendingReceivableEvent.current &&
+      !pendingReceivableOperationMatches(pendingReceivableEvent.current, payload)
+    ) {
+      // A pending command is immutable even if another browser context removed its durable row.
+      setReceivableDraft(pendingReceivableEvent.current.payload)
+      setReceivableOutboxRecovery({ status: 'pending', operation: pendingReceivableEvent.current })
+      setReceivableEventError('receivable_pending_retry')
+      return
+    }
+
+    if (!receivableOperationReady(payload)) return
+    const driver = receivableDrivers.find((candidate) => candidate.id === payload.driverId)
+    if (!driver) return
+    const exactPendingRetry = pendingReceivableOperationMatches(pendingReceivableEvent.current, payload)
+    if (!receivableDriverMaySubmit(driver, payload.direction) && !exactPendingRetry) return
+
+    const actionLabel = t.treasury.receivableDirections[payload.direction]
+    const confirmedAgainstVersion = receivableSubmitVersion.current
+    const confirmed = await confirm({
+      title: t.treasury.receivableEventConfirmTitle,
+      body: `${actionLabel} — ${driver.fullNameAr} (${driver.code}) — ${t.treasury.receivableKinds[payload.receivableKind]} — ${t.treasury.receivableChannels[payload.channel]} — ${groupThousands(payload.amount)} — ${payload.reason}`,
+      confirmLabel: actionLabel,
+    })
+    // A branch/session switch while the modal was open invalidates its captured actor + branch.
+    if (!confirmed || confirmedAgainstVersion !== receivableSubmitVersion.current) return
+
+    const mutex = browserReceivableOperationMutex()
+    if (!mutex) {
+      setReceivableOutboxRecovery({ status: 'unavailable' })
+      setReceivableEventError('receivable_outbox_unavailable')
+      return
+    }
+
+    let submitVersion: number | null = null
+    setReceivableEventBusy(true)
+    setReceivableEventError(null)
+    const outcome = await executeReceivableOperation({
+      storage,
+      mutex,
+      actorId: outboxActorId,
+      branchId: outboxBranchId,
+      payload,
+      current: pendingReceivableEvent.current,
+      execute: async (operation) => {
+        // The final context check is inside the cross-tab lock and immediately before the POST.
+        if (confirmedAgainstVersion !== receivableSubmitVersion.current) {
+          throw { status: 400, error: 'receivable_context_changed' }
+        }
+        pendingReceivableEvent.current = operation
+        setReceivableOutboxRecovery({ status: 'pending', operation })
+        setReceivableDraft(operation.payload)
+        submitVersion = ++receivableSubmitVersion.current
+        return api.createReceivableEvent({ ...operation.payload, idempotencyKey: operation.idempotencyKey })
+      },
+    })
+
+    const activeVersion = submitVersion ?? confirmedAgainstVersion
+    if (activeVersion !== receivableSubmitVersion.current) return
+    setReceivableEventBusy(false)
+
+    if (outcome.status === 'success' || outcome.status === 'success_clear_failed') {
+      if (outcome.status === 'success') {
+        if (pendingReceivableEvent.current?.idempotencyKey === outcome.operation.idempotencyKey) {
+          pendingReceivableEvent.current = null
+        }
+        setReceivableOutboxRecovery({ status: 'none' })
+        setReceivableDraft((current) => ({ ...current, amount: '', reason: '' }))
+      } else {
+        // The server result is definitive, but a failed verified clear remains locked for a safe
+        // exact replay after reload rather than risking a second independently keyed operation.
+        pendingReceivableEvent.current = outcome.operation
+        setReceivableOutboxRecovery({ status: 'pending', operation: outcome.operation })
+        setReceivableEventError('receivable_outbox_unavailable')
+      }
+      toast.success(t.treasury.receivableEventSaved)
+      await Promise.all([loadReceivables(), loadReceivableHistory()])
+      return
+    }
+
+    if (outcome.status === 'definitive_rejection') {
+      if (pendingReceivableEvent.current?.idempotencyKey === outcome.operation.idempotencyKey) {
+        pendingReceivableEvent.current = null
+      }
+      setReceivableOutboxRecovery({ status: 'none' })
+      setReceivableEventError((outcome.error as { error?: string }).error ?? 'error')
+      return
+    }
+
+    if (outcome.status === 'ambiguous_failure' || outcome.status === 'definitive_rejection_clear_failed') {
+      pendingReceivableEvent.current = outcome.operation
+      setReceivableOutboxRecovery({ status: 'pending', operation: outcome.operation })
+      setReceivableDraft(outcome.operation.payload)
+      setReceivableEventError(
+        outcome.status === 'ambiguous_failure' ? 'receivable_pending_retry' : 'receivable_outbox_unavailable',
+      )
+      return
+    }
+
+    if (outcome.status === 'pending_conflict') {
+      pendingReceivableEvent.current = outcome.operation
+      setReceivableOutboxRecovery({ status: 'pending', operation: outcome.operation })
+      setReceivableDraft(outcome.operation.payload)
+      setReceivableEventError('receivable_pending_retry')
+      void loadReceivables()
+      return
+    }
+
+    if (outcome.status === 'busy') {
+      if (outcome.recovery.status === 'pending') {
+        pendingReceivableEvent.current = outcome.recovery.operation
+        setReceivableDraft(outcome.recovery.operation.payload)
+      }
+      setReceivableOutboxRecovery(outcome.recovery)
+      setReceivableEventError('receivable_outbox_busy')
+      return
+    }
+
+    setReceivableOutboxRecovery(outcome)
+    setReceivableEventError(outcome.status === 'corrupt' ? 'receivable_outbox_corrupt' : 'receivable_outbox_unavailable')
+  }
+
+  async function saveCapitalTargets(): Promise<void> {
+    const cashTarget = capitalTargetsDraft.cash.trim()
+    const walletTarget = capitalTargetsDraft.wallet.trim()
+    const reason = capitalTargetReason.trim()
+    try {
+      if (cashTarget === '' || walletTarget === '' || parseMinor(cashTarget) < 0n || parseMinor(walletTarget) < 0n) {
+        toast.error(t.errors.capital_target_negative)
+        return
+      }
+    } catch {
+      toast.error(t.errors.invalid_request)
+      return
+    }
+    if (reason === '') {
+      toast.error(t.errors.reason_required)
+      return
+    }
+
+    const ok = await confirm({
+      title: t.treasury.confirmCapitalTargets,
+      body: `${t.treasury.cashCapitalTarget}: ${groupThousands(cashTarget)} • ${t.treasury.walletCapitalTarget}: ${groupThousands(walletTarget)} • ${reason}`,
+      confirmLabel: t.treasury.saveCapitalTargets,
+    })
+    if (!ok) return
+
+    setCapitalTargetsBusy(true)
+    try {
+      await api.updateCapitalTargets(cashTarget, walletTarget, reason)
+      setCapitalTargetReason('')
+      toast.success(t.treasury.capitalTargetsSaved)
+      await loadRestoration()
+    } catch (err) {
+      toast.error(explainError((err as { error?: string }).error ?? 'error', t))
+    } finally {
+      setCapitalTargetsBusy(false)
+    }
+  }
+
   async function doRestore(): Promise<void> {
     if (!restoration) return
     const legText = restoration.legs.map((leg) => {
@@ -417,6 +759,54 @@ export function Treasury(): ReactNode {
   const countReady = sheet ? countDraftReady(sheet.funds, counted, countResolutions) : false
   const restorationSummary = restoration ? summarizeRestoration(restoration.legs) : null
   const restorationNet = restoration ? differenceView(restoration.netToCompany) : null
+  const capitalTargetsReady = (() => {
+    try {
+      return capitalTargetsDraft.cash.trim() !== '' &&
+        capitalTargetsDraft.wallet.trim() !== '' &&
+        capitalTargetReason.trim() !== '' &&
+        parseMinor(capitalTargetsDraft.cash) >= 0n &&
+        parseMinor(capitalTargetsDraft.wallet) >= 0n
+    } catch {
+      return false
+    }
+  })()
+  // A branch switch invalidates the painted data immediately, before the effect starts its fetch.
+  const selectedReceivables = receivablesBranchId === branchId ? receivables : null
+  const selectedReceivablesError = receivablesBranchId === branchId ? receivablesError : null
+  const selectedReceivableHistory = receivableHistoryBranchId === branchId ? receivableHistory : null
+  const selectedReceivableHistoryError = receivableHistoryBranchId === branchId ? receivableHistoryError : null
+  const selectedReceivableRow = selectedReceivables?.drivers.find(
+    (driver) => driver.driverId === receivableDraft.driverId,
+  )
+  const selectedReceivableDriver = receivableDrivers.find(
+    (driver) => driver.id === receivableDraft.driverId,
+  )
+  const selectedReceivableBalance = selectedReceivableRow
+    ? receivableDraft.receivableKind === 'ordinary'
+      ? receivableDraft.channel === 'cash'
+        ? selectedReceivableRow.ordinaryCash
+        : selectedReceivableRow.ordinaryWallet
+      : receivableDraft.channel === 'cash'
+        ? selectedReceivableRow.shiftFundingCash
+        : selectedReceivableRow.shiftFundingWallet
+    : '0.00'
+  const normalizedReceivableDraft: ReceivableOperationPayload = {
+    ...receivableDraft,
+    amount: receivableDraft.amount.trim(),
+    reason: receivableDraft.reason.trim(),
+  }
+  const exactPendingReceivableRetry = pendingReceivableOperationMatches(
+    pendingReceivableEvent.current,
+    normalizedReceivableDraft,
+  )
+  const receivableOutboxBlocked =
+    receivableOutboxRecovery.status === 'unavailable' || receivableOutboxRecovery.status === 'corrupt'
+  const receivableFingerprintLocked =
+    receivableEventBusy || receivableOutboxBlocked || receivableOutboxRecovery.status === 'pending'
+  const receivableEventReady = !receivableOutboxBlocked && (
+    receivableDriverMaySubmit(selectedReceivableDriver, receivableDraft.direction) ||
+    exactPendingReceivableRetry
+  ) && receivableOperationReady(normalizedReceivableDraft)
 
   const fundLabel = (fundCode: string): string =>
     t.treasury.fundCodes[fundCode as keyof typeof t.treasury.fundCodes] ?? fundCode
@@ -552,6 +942,254 @@ export function Treasury(): ReactNode {
         </div> : null}
       </Card>
 
+      <Card title={t.treasury.receivables} className="lg:col-span-2">
+        <p className="text-xs text-slate-600">{t.treasury.receivablesHint}</p>
+        {!selectedReceivables ? (
+          <Pending
+            error={selectedReceivablesError}
+            loadingLabel={t.common.loading}
+            errorLabel={explainError(selectedReceivablesError, t)}
+            onRetry={() => void loadReceivables()}
+            retryLabel={t.common.retry}
+          />
+        ) : (
+          <>
+            {canDeposit ? (
+              <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <h3 className="text-sm font-bold text-slate-700">{t.treasury.receivableEventTitle}</h3>
+                <p className="mt-1 text-xs text-slate-600">{t.treasury.receivableEventHint}</p>
+                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                  <Field label={t.treasury.driver}>
+                    <Select
+                      value={receivableDraft.driverId}
+                      disabled={receivableFingerprintLocked}
+                      onChange={(event) => setReceivableDraft((current) => ({ ...current, driverId: event.target.value }))}
+                    >
+                      <option value="">—</option>
+                      {receivableDrivers.map((driver) => (
+                        <option
+                          key={driver.id}
+                          value={driver.id}
+                          disabled={
+                            !receivableDriverMaySubmit(driver, receivableDraft.direction) &&
+                            !(exactPendingReceivableRetry && driver.id === receivableDraft.driverId)
+                          }
+                        >
+                          {driver.fullNameAr} ({driver.code})
+                          {driver.active ? '' : ` — ${t.accounts.inactive}; ${t.treasury.receivableDirections.collect}`}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                  <Field label={t.treasury.receivableKind}>
+                    <Select
+                      value={receivableDraft.receivableKind}
+                      disabled={receivableFingerprintLocked}
+                      onChange={(event) => setReceivableDraft((current) => ({
+                        ...current,
+                        receivableKind: event.target.value as ReceivableKind,
+                      }))}
+                    >
+                      <option value="ordinary">{t.treasury.receivableKinds.ordinary}</option>
+                      <option value="shift_funding">{t.treasury.receivableKinds.shift_funding}</option>
+                    </Select>
+                  </Field>
+                  <Field label={t.treasury.receivableChannel}>
+                    <Select
+                      value={receivableDraft.channel}
+                      disabled={receivableFingerprintLocked}
+                      onChange={(event) => setReceivableDraft((current) => ({
+                        ...current,
+                        channel: event.target.value as ReceivableChannel,
+                      }))}
+                    >
+                      <option value="cash">{t.treasury.receivableChannels.cash}</option>
+                      <option value="wallet">{t.treasury.receivableChannels.wallet}</option>
+                    </Select>
+                  </Field>
+                  <Field label={t.treasury.receivableDirection}>
+                    <Select
+                      value={receivableDraft.direction}
+                      disabled={receivableFingerprintLocked}
+                      onChange={(event) => {
+                        const direction = event.target.value as ReceivableDirection
+                        setReceivableDraft((current) => {
+                          const selected = receivableDrivers.find((driver) => driver.id === current.driverId)
+                          const changed = { ...current, direction }
+                          const exactRetry = pendingReceivableOperationMatches(
+                            pendingReceivableEvent.current,
+                            changed,
+                          )
+                          return {
+                            ...changed,
+                            driverId: receivableDriverMaySubmit(selected, direction) || exactRetry
+                              ? current.driverId
+                              : '',
+                          }
+                        })
+                      }}
+                    >
+                      <option value="create">{t.treasury.receivableDirections.create}</option>
+                      <option value="collect">{t.treasury.receivableDirections.collect}</option>
+                    </Select>
+                  </Field>
+                  <Field label={t.treasury.amount}>
+                    <MoneyInput
+                      value={receivableDraft.amount}
+                      disabled={receivableFingerprintLocked}
+                      onChange={(event) => setReceivableDraft((current) => ({ ...current, amount: event.target.value }))}
+                    />
+                  </Field>
+                </div>
+                <div className="mt-3 grid grid-cols-1 items-end gap-3 lg:grid-cols-[1fr_auto]">
+                  <Field label={t.treasury.receivableReason} hint={t.treasury.receivableReasonHint}>
+                    <TextInput
+                      value={receivableDraft.reason}
+                      disabled={receivableFingerprintLocked}
+                      onChange={(event) => setReceivableDraft((current) => ({ ...current, reason: event.target.value }))}
+                      maxLength={500}
+                    />
+                  </Field>
+                  <Button
+                    variant={receivableDraft.direction === 'create' ? 'primary' : 'success'}
+                    disabled={receivableEventBusy || !receivableEventReady}
+                    onClick={() => void submitReceivableEvent()}
+                  >
+                    {receivableOutboxRecovery.status === 'pending'
+                      ? t.common.retry
+                      : receivableDraft.direction === 'create'
+                      ? t.treasury.receivableDirections.create
+                      : t.treasury.receivableDirections.collect}
+                  </Button>
+                </div>
+                {receivableDraft.driverId ? (
+                  <p className="mt-2 text-xs text-slate-600">
+                    {t.treasury.currentReceivableBalance}: <Money value={selectedReceivableBalance} className="font-semibold" />
+                  </p>
+                ) : null}
+                {receivableEventError ? (
+                  <p className="mt-2 text-sm font-medium text-red-600">
+                    {receivableEventError === 'receivable_outbox_unavailable'
+                      ? t.treasury.receivableOutboxUnavailable
+                      : receivableEventError === 'receivable_outbox_corrupt'
+                        ? t.treasury.receivableOutboxCorrupt
+                        : receivableEventError === 'receivable_outbox_busy'
+                          ? t.treasury.receivableOutboxBusy
+                        : receivableEventError === 'receivable_pending_retry'
+                          ? t.treasury.receivablePendingRetry
+                          : receivableEventError === 'idempotency_key_conflict'
+                      ? t.treasury.receivableIdempotencyConflict
+                      : explainError(receivableEventError, t)}
+                  </p>
+                ) : null}
+              </div>
+            ) : (
+              <p className="mt-3 text-xs text-slate-600">{t.treasury.receivableWriteRoleHint}</p>
+            )}
+            <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <div className="rounded-lg bg-slate-50 p-3">
+                <div className="text-xs font-medium text-slate-500">{t.treasury.receivablesCashTotal}</div>
+                <div className="mt-1 text-lg font-bold"><Money value={selectedReceivables.cashTotal} /></div>
+              </div>
+              <div className="rounded-lg bg-slate-50 p-3">
+                <div className="text-xs font-medium text-slate-500">{t.treasury.receivablesWalletTotal}</div>
+                <div className="mt-1 text-lg font-bold"><Money value={selectedReceivables.walletTotal} /></div>
+              </div>
+              <div className="rounded-lg bg-brand/5 p-3 text-brand">
+                <div className="text-xs font-medium">{t.treasury.receivablesGrandTotal}</div>
+                <div className="mt-1 text-lg font-bold"><Money value={selectedReceivables.grandTotal} /></div>
+              </div>
+            </div>
+            <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="rounded-lg border border-slate-200 p-3">
+                <h3 className="text-sm font-semibold text-slate-700">{t.treasury.receivableKinds.ordinary}</h3>
+                <dl className="mt-2 grid grid-cols-2 gap-y-1 text-sm">
+                  <dt className="text-slate-600">{t.treasury.receivableChannels.cash}</dt>
+                  <dd className="text-end font-semibold"><Money value={selectedReceivables.ordinaryCashTotal} /></dd>
+                  <dt className="text-slate-600">{t.treasury.receivableChannels.wallet}</dt>
+                  <dd className="text-end font-semibold"><Money value={selectedReceivables.ordinaryWalletTotal} /></dd>
+                </dl>
+              </div>
+              <div className="rounded-lg border border-sky-200 bg-sky-50/50 p-3">
+                <h3 className="text-sm font-semibold text-sky-800">{t.treasury.receivableKinds.shift_funding}</h3>
+                <p className="mt-1 text-xs text-sky-700">{t.treasury.shiftFundingHint}</p>
+                <dl className="mt-2 grid grid-cols-2 gap-y-1 text-sm">
+                  <dt className="text-slate-600">{t.treasury.receivableChannels.cash}</dt>
+                  <dd className="text-end font-semibold"><Money value={selectedReceivables.shiftFundingCashTotal} /></dd>
+                  <dt className="text-slate-600">{t.treasury.receivableChannels.wallet}</dt>
+                  <dd className="text-end font-semibold"><Money value={selectedReceivables.shiftFundingWalletTotal} /></dd>
+                </dl>
+              </div>
+            </div>
+            <div className="mt-3">
+              <Table
+                head={[
+                  t.treasury.driver,
+                  t.treasury.driverCode,
+                  `${t.treasury.receivableKinds.ordinary} / ${t.treasury.receivableChannels.cash}`,
+                  `${t.treasury.receivableKinds.ordinary} / ${t.treasury.receivableChannels.wallet}`,
+                  `${t.treasury.receivableKinds.shift_funding} / ${t.treasury.receivableChannels.cash}`,
+                  `${t.treasury.receivableKinds.shift_funding} / ${t.treasury.receivableChannels.wallet}`,
+                  t.treasury.total,
+                ]}
+                isEmpty={selectedReceivables.drivers.length === 0}
+                empty={t.treasury.noReceivables}
+              >
+                {selectedReceivables.drivers.map((driver) => (
+                  <tr key={driver.driverId}>
+                    <td className="px-3 py-2 font-medium text-slate-800">{driver.nameAr}</td>
+                    <td className="px-3 py-2 text-slate-600" dir="ltr">{driver.code}</td>
+                    <td className="px-3 py-2"><Money value={driver.ordinaryCash} /></td>
+                    <td className="px-3 py-2"><Money value={driver.ordinaryWallet} /></td>
+                    <td className="px-3 py-2"><Money value={driver.shiftFundingCash} /></td>
+                    <td className="px-3 py-2"><Money value={driver.shiftFundingWallet} /></td>
+                    <td className="px-3 py-2 font-semibold"><Money value={driver.total} /></td>
+                  </tr>
+                ))}
+              </Table>
+            </div>
+            <div className="mt-5 border-t border-slate-200 pt-3">
+              <h3 className="text-sm font-bold text-slate-700">{t.treasury.receivableHistory}</h3>
+              {!selectedReceivableHistory ? (
+                <Pending
+                  error={selectedReceivableHistoryError}
+                  loadingLabel={t.common.loading}
+                  errorLabel={explainError(selectedReceivableHistoryError, t)}
+                  onRetry={() => void loadReceivableHistory()}
+                  retryLabel={t.common.retry}
+                />
+              ) : (
+                <Table
+                  head={[
+                    t.treasury.eventDate,
+                    t.treasury.driver,
+                    t.treasury.receivableKind,
+                    t.treasury.receivableChannel,
+                    t.treasury.receivableDirection,
+                    t.treasury.amount,
+                    t.treasury.receivableReason,
+                  ]}
+                  isEmpty={selectedReceivableHistory.length === 0}
+                  empty={t.treasury.noReceivableHistory}
+                >
+                  {selectedReceivableHistory.slice(0, 10).map((event) => (
+                    <tr key={event.id}>
+                      <td className="num px-3 py-2 text-slate-500">{event.businessDate}</td>
+                      <td className="px-3 py-2">{event.driverNameAr} ({event.driverCode})</td>
+                      <td className="px-3 py-2">{t.treasury.receivableKinds[event.receivableKind]}</td>
+                      <td className="px-3 py-2">{t.treasury.receivableChannels[event.channel]}</td>
+                      <td className="px-3 py-2">{t.treasury.receivableDirections[event.direction]}</td>
+                      <td className="px-3 py-2"><Money value={event.amount} /></td>
+                      <td className="px-3 py-2 text-slate-600">{event.reason}</td>
+                    </tr>
+                  ))}
+                </Table>
+              )}
+            </div>
+          </>
+        )}
+      </Card>
+
       {/*
         «الترميم» — the owner's own end-of-day process, in his own words.
 
@@ -571,6 +1209,56 @@ export function Treasury(): ReactNode {
           />
         ) : (
           <>
+            {canDeposit ? (
+              <section className="mt-3 rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-800">{t.treasury.editCapitalTargets}</h3>
+                    <p className="mt-0.5 text-xs text-slate-600">{t.treasury.capitalTargetsHint}</p>
+                  </div>
+                  {restoration.alreadyRestored === true ? (
+                    <span className="text-xs font-semibold text-amber-700">{t.treasury.capitalTargetsLocked}</span>
+                  ) : null}
+                </div>
+                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <label className="text-xs font-medium text-slate-600">
+                    {t.treasury.cashCapitalTarget}
+                    <MoneyInput
+                      className="mt-1 w-full"
+                      value={capitalTargetsDraft.cash}
+                      disabled={capitalTargetsBusy || restoration.alreadyRestored === true}
+                      onChange={(event) => setCapitalTargetsDraft((current) => ({ ...current, cash: event.target.value }))}
+                    />
+                  </label>
+                  <label className="text-xs font-medium text-slate-600">
+                    {t.treasury.walletCapitalTarget}
+                    <MoneyInput
+                      className="mt-1 w-full"
+                      value={capitalTargetsDraft.wallet}
+                      disabled={capitalTargetsBusy || restoration.alreadyRestored === true}
+                      onChange={(event) => setCapitalTargetsDraft((current) => ({ ...current, wallet: event.target.value }))}
+                    />
+                  </label>
+                  <label className="text-xs font-medium text-slate-600">
+                    {t.treasury.capitalTargetReason}
+                    <TextInput
+                      className="mt-1 w-full"
+                      value={capitalTargetReason}
+                      placeholder={t.treasury.capitalTargetReasonPlaceholder}
+                      disabled={capitalTargetsBusy || restoration.alreadyRestored === true}
+                      onChange={(event) => setCapitalTargetReason(event.target.value)}
+                    />
+                  </label>
+                  <Button
+                    className="self-end"
+                    disabled={capitalTargetsBusy || restoration.alreadyRestored === true || !capitalTargetsReady}
+                    onClick={() => void saveCapitalTargets()}
+                  >
+                    {t.treasury.saveCapitalTargets}
+                  </Button>
+                </div>
+              </section>
+            ) : null}
             {restorationSummary ? (
               <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
                 <div className="rounded-lg bg-slate-50 p-3">
@@ -604,13 +1292,16 @@ export function Treasury(): ReactNode {
                       {leg.fundCode === 'office_cash' ? t.treasury.cashBox : t.treasury.wallet}
                     </div>
                     <dl className="mt-2 grid grid-cols-2 gap-y-1 text-sm">
-                      <dt className="text-slate-600">
-                        {t.treasury.currentPosition}
-                        <span className="text-xs text-slate-400"> ({t.treasury.positionFormula})</span>
-                      </dt>
-                      <dd className="text-end font-semibold">
-                        <Money value={leg.position} />
-                      </dd>
+                      <div className="col-span-2 rounded-lg bg-slate-50 px-2 py-1.5">
+                        <dt className="text-xs text-slate-500">{t.treasury.positionFormula}</dt>
+                        <dd className="mt-1 flex flex-wrap items-center justify-end gap-1 font-semibold" dir="ltr">
+                          <Money value={leg.counted} />
+                          <span>+</span>
+                          <Money value={leg.receivables} />
+                          <span>=</span>
+                          <Money value={leg.position} />
+                        </dd>
+                      </div>
                       <dt className="text-slate-600">{t.treasury.capitalTarget}</dt>
                       <dd className="text-end">
                         <Money value={leg.capitalTarget} />

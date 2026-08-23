@@ -354,7 +354,7 @@ describe('money the system cannot store', () => {
     expect(response.statusCode).toBe(422)
     expect(response.json()).toMatchObject({
       error: 'money_total_out_of_range',
-      detail: { field: 'settlement.cashToOffice' },
+      detail: { field: 'settlement.cashClaimToOffice' },
     })
     expect(await h.deps.settlements.findByShift(id)).toBeNull()
     // Only the opening float exists; no close journal was attempted.

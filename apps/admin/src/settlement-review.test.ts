@@ -16,7 +16,7 @@ import {
 const HASH = 'a'.repeat(64)
 
 const settlement = (over: Partial<ShiftSettlementView> = {}): ShiftSettlementView => ({
-  policyCode: 'fixed_40_cash_close_v1',
+  policyCode: 'fixed_40_cash_close_v2_receivable',
   driverRateBps: 4000,
   deliveryFeeTotal: '1000.00',
   fixedDriverShare: '400.00',
@@ -31,6 +31,10 @@ const settlement = (over: Partial<ShiftSettlementView> = {}): ShiftSettlementVie
   variance: '0.00',
   varianceDirection: 'balanced',
   finalEmployeeCash: '400.00',
+  cashClaimToOffice: '900.00',
+  walletClaimToOffice: '500.00',
+  cashReceivableDeferred: '0.00',
+  walletReceivableDeferred: '0.00',
   walletToOffice: '500.00',
   cashToOffice: '900.00',
   walletAction: 'collect',
@@ -71,7 +75,7 @@ describe('manager settlement confirmation', () => {
   it.each([
     ['surplus', '25.00'],
     ['shortage', '-25.00'],
-  ] as const)('requires a reason for a %s and trims it into the request', (direction, variance) => {
+  ] as const)('allows an optional reason for a %s and trims it when supplied', (direction, variance) => {
     const hash = (direction === 'surplus' ? 'b' : 'c').repeat(64)
     const s = settlement({ varianceDirection: direction, variance, settlementHash: hash })
     expect(settlementHasVariance(s)).toBe(true)
@@ -79,7 +83,13 @@ describe('manager settlement confirmation', () => {
       walletTransferConfirmed: true,
       cashSettlementConfirmed: true,
       varianceReason: '   ',
-    })).toBe(false)
+    })).toBe(true)
+
+    expect(closeApprovalRequest('orders-hash', s, {
+      walletTransferConfirmed: true,
+      cashSettlementConfirmed: true,
+      varianceReason: '   ',
+    }).varianceReason).toBeNull()
 
     expect(closeApprovalRequest('orders-hash', s, {
       walletTransferConfirmed: true,
@@ -90,6 +100,8 @@ describe('manager settlement confirmation', () => {
       reviewedSettlementHash: hash,
       walletTransferConfirmed: true,
       cashSettlementConfirmed: true,
+      cashReceivableDeferred: '0.00',
+      walletReceivableDeferred: '0.00',
       varianceReason: 'counted with the employee',
     })
   })

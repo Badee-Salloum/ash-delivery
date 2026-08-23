@@ -38,6 +38,97 @@ describe('branch treasury screen contract', () => {
     expect(dashboardSource).toContain('capitalDelta.amount')
   })
 
+  it('shows the restoration position as the exact counted plus receivables equation', () => {
+    expect(treasurySource).toContain('<Money value={leg.counted} />')
+    expect(treasurySource).toContain('<Money value={leg.receivables} />')
+    expect(treasurySource).toContain('<Money value={leg.position} />')
+    expect(treasurySource).toContain("<span>=</span>")
+  })
+
+  it('lets an authorised manager edit both effective restoration targets with confirmation', () => {
+    expect(treasurySource).toContain('async function saveCapitalTargets()')
+    expect(treasurySource).toContain('await api.updateCapitalTargets(cashTarget, walletTarget, reason)')
+    expect(treasurySource).toContain('t.treasury.confirmCapitalTargets')
+    expect(treasurySource).toContain('restoration.alreadyRestored === true')
+    expect(treasurySource).toContain('await loadRestoration()')
+    for (const catalog of [ar, en]) {
+      expect(catalog.treasury.cashCapitalTarget.length).toBeGreaterThan(5)
+      expect(catalog.treasury.walletCapitalTarget.length).toBeGreaterThan(5)
+      expect(catalog.treasury.capitalTargetsHint.length).toBeGreaterThan(20)
+    }
+  })
+
+  it('loads a branch-scoped receivables table with totals, retry and stale-response protection', () => {
+    expect(treasurySource).toContain('const receivablesLoadVersion = useRef(0)')
+    expect(treasurySource).toContain('const version = ++receivablesLoadVersion.current')
+    expect(treasurySource).toContain('if (version !== receivablesLoadVersion.current) return')
+    expect(treasurySource).toContain('receivablesBranchId === branchId')
+    expect(treasurySource).toContain('api.receivables(),')
+    expect(treasurySource).toContain('onRetry={() => void loadReceivables()}')
+    expect(treasurySource).toContain('selectedReceivables.cashTotal')
+    expect(treasurySource).toContain('selectedReceivables.walletTotal')
+    expect(treasurySource).toContain('selectedReceivables.grandTotal')
+    expect(treasurySource).toContain('selectedReceivables.ordinaryCashTotal')
+    expect(treasurySource).toContain('selectedReceivables.ordinaryWalletTotal')
+    expect(treasurySource).toContain('selectedReceivables.shiftFundingCashTotal')
+    expect(treasurySource).toContain('selectedReceivables.shiftFundingWalletTotal')
+    expect(treasurySource).toContain('driver.ordinaryCash')
+    expect(treasurySource).toContain('driver.ordinaryWallet')
+    expect(treasurySource).toContain('driver.shiftFundingCash')
+    expect(treasurySource).toContain('driver.shiftFundingWallet')
+    expect(treasurySource).toContain('selectedReceivables.drivers.map((driver) =>')
+    for (const catalog of [ar, en]) {
+      expect(catalog.treasury.receivables.length).toBeGreaterThan(3)
+      expect(catalog.treasury.receivablesHint.length).toBeGreaterThan(20)
+      expect(catalog.treasury.noReceivables.length).toBeGreaterThan(5)
+    }
+  })
+
+  it('provides an audited direct receivable form with safe retries and compact history', () => {
+    const submit = treasurySource.slice(
+      treasurySource.indexOf('async function submitReceivableEvent'),
+      treasurySource.indexOf('async function saveCapitalTargets'),
+    )
+    expect(treasurySource).toContain('const mutex = browserReceivableOperationMutex()')
+    expect(treasurySource).toContain('const outcome = await executeReceivableOperation({')
+    expect(treasurySource).toContain('idempotencyKey: operation.idempotencyKey')
+    expect(treasurySource).toContain('return api.createReceivableEvent')
+    expect(treasurySource).toContain("receivableKind: 'ordinary'")
+    expect(treasurySource).toContain("direction: 'create'")
+    expect(treasurySource).toContain('receivableOperationReady(payload)')
+    expect(treasurySource).toContain('pendingReceivableEvent.current = null')
+    expect(treasurySource).toContain('const receivableSubmitVersion = useRef(0)')
+    expect(treasurySource).toContain('if (activeVersion !== receivableSubmitVersion.current) return')
+    expect(treasurySource).toContain('await api.receivableEvents()')
+    expect(treasurySource).toContain('const receivableHistoryLoadVersion = useRef(0)')
+    expect(treasurySource).toContain('if (version !== receivableHistoryLoadVersion.current) return')
+    expect(treasurySource).toContain('selectedReceivableHistory.slice(0, 10)')
+    expect(treasurySource).toContain('receivableEventConfirmTitle')
+    expect(treasurySource).toContain('receivableDirectoryDrivers(directory.drivers, outstandingDriverIds)')
+    expect(treasurySource).toContain('pendingDriverId = pendingReceivableEvent.current?.payload.driverId')
+    expect(treasurySource).toContain('loadPendingReceivableOperation(')
+    expect(treasurySource).toContain('...operation.payload, idempotencyKey: operation.idempotencyKey')
+    expect(treasurySource).toContain('exactPendingReceivableRetry && driver.id === receivableDraft.driverId')
+    expect(submit.indexOf('executeReceivableOperation({')).toBeLessThan(
+      submit.indexOf('api.createReceivableEvent'),
+    )
+    expect(submit).toContain("setReceivableEventError('receivable_outbox_busy')")
+    expect(submit).toContain("setReceivableEventError('receivable_pending_retry')")
+    expect(submit).toContain('confirmedAgainstVersion !== receivableSubmitVersion.current')
+    expect(treasurySource.match(/disabled=\{receivableFingerprintLocked\}/g)).toHaveLength(6)
+    expect(treasurySource).toContain("receivableOutboxRecovery.status === 'pending'")
+    for (const catalog of [ar, en]) {
+      expect(catalog.treasury.receivableKinds.ordinary).not.toBe(catalog.treasury.receivableKinds.shift_funding)
+      expect(catalog.treasury.receivableDirections.create).not.toBe(catalog.treasury.receivableDirections.collect)
+      expect(catalog.treasury.receivableReasonHint.length).toBeGreaterThan(20)
+      expect(catalog.treasury.shiftFundingHint.length).toBeGreaterThan(20)
+      expect(catalog.treasury.receivablePendingRetry.length).toBeGreaterThan(40)
+      expect(catalog.treasury.receivableOutboxUnavailable.length).toBeGreaterThan(40)
+      expect(catalog.treasury.receivableOutboxCorrupt.length).toBeGreaterThan(40)
+      expect(catalog.treasury.receivableOutboxBusy.length).toBeGreaterThan(40)
+    }
+  })
+
   it('reloads the persisted preview after restoration instead of pinning the pre-action POST plan', () => {
     const action = treasurySource.slice(treasurySource.indexOf('async function doRestore'), treasurySource.indexOf('async function closeWeek'))
     expect(action).toMatch(/await api\.restore\([^\n]+\)[\s\S]*?await loadRestoration\(\)/)

@@ -36,7 +36,7 @@ export function activeForcePreparation(
   return latest?.decision === 'force_close_prepared' ? latest : null
 }
 
-/** A signed variance needs a written, audited explanation before money can move. */
+/** Whether the statement contains a surplus/shortage worth offering an optional manager note for. */
 export function settlementHasVariance(settlement: ShiftSettlementView): boolean {
   return settlement.varianceDirection !== 'balanced'
 }
@@ -59,7 +59,7 @@ export function settlementApprovalReady(
 ): boolean {
   if (!settlement || !/^[0-9a-f]{64}$/.test(settlement.settlementHash)) return false
   if (!draft.walletTransferConfirmed || !draft.cashSettlementConfirmed) return false
-  return !settlementHasVariance(settlement) || draft.varianceReason.trim().length > 0
+  return true
 }
 
 /** Build the exact snapshot-bound close request after `settlementApprovalReady` succeeds. */
@@ -69,12 +69,18 @@ export function closeApprovalRequest(
   draft: SettlementConfirmationDraft,
 ): ApproveCloseRequest {
   if (!settlementApprovalReady(settlement, draft)) throw new Error('settlement_confirmation_incomplete')
+  const optionalVarianceReason = draft.varianceReason.trim()
   return {
     reviewedOrdersHash,
     reviewedSettlementHash: settlement.settlementHash,
     walletTransferConfirmed: true,
     cashSettlementConfirmed: true,
-    varianceReason: settlementHasVariance(settlement) ? draft.varianceReason.trim() : null,
+    cashReceivableDeferred: settlement.cashReceivableDeferred,
+    walletReceivableDeferred: settlement.walletReceivableDeferred,
+    varianceReason:
+      settlementHasVariance(settlement) && optionalVarianceReason !== ''
+        ? optionalVarianceReason
+        : null,
   }
 }
 

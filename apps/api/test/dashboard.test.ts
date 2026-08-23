@@ -533,15 +533,18 @@ describe('the owner’s treasury sheet (I-1, decision 10)', () => {
   it('reports رأس المال المدوّر as both boxes PLUS everything out on ذمم', async () => {
     const manager = await h.loginAs('manager')
     await seedFund(manager, 'office_cash', sypStr(3_600_000))
-    await seedFund(manager, `driver_receivable_cash:${DRIVER_ID}`, sypStr(400_000))
+    await seedFund(manager, `driver_receivable_cash:${DRIVER_ID}`, sypStr(350_000))
+    await seedFund(manager, `driver_shift_funding_cash:${DRIVER_ID}`, sypStr(50_000))
     await seedFund(manager, 'office_wallet', sypStr(970_000))
-    await seedFund(manager, `driver_receivable_wallet:${DRIVER_ID}`, sypStr(30_000))
+    await seedFund(manager, `driver_receivable_wallet:${DRIVER_ID}`, sypStr(20_000))
+    await seedFund(manager, `driver_shift_funding_wallet:${DRIVER_ID}`, sypStr(10_000))
 
     const res = await get(await scopedGm(), '/dashboard/treasury')
     expect(res.statusCode, res.body).toBe(200)
     const c = res.json().capital
     expect(c.officeCash).toBe(sypStr(3_600_000))
     expect(c.receivablesCash).toBe(sypStr(400_000))
+    expect(c.receivablesWallet).toBe(sypStr(30_000))
     // 3,600,000 + 400,000 + 970,000 + 30,000 — his 4,000,000 and 1,000,000, side by side.
     expect(c.total).toBe(sypStr(5_000_000))
     expect(c.target).toBe(sypStr(5_000_000))

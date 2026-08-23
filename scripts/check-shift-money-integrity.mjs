@@ -10,7 +10,6 @@ import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
 import { createPool } from '../packages/db/src/pool.ts'
-import { fixedSettlementHash } from '../apps/api/src/fixed-settlement.ts'
 
 const signed = (sideExpression, amountExpression) =>
   `(CASE WHEN ${sideExpression} = 'D' THEN ${amountExpression}::numeric ELSE -${amountExpression}::numeric END)`
@@ -27,7 +26,14 @@ const hasVisibleText = (valueExpression) => String.raw`(
   ) <> ''
 )`
 
-export const INTEGRITY_CHECKS = Object.freeze([
+/**
+ * Checks which use only the schema available through migration 0035.
+ *
+ * Keep these executable: rollout runs the integrity audit before 0036/0037 as well as after it,
+ * and PostgreSQL resolves every referenced column while planning a query even when a CASE branch
+ * would never execute. The v2 replacements below are selected only after 0037 is recorded.
+ */
+export const LEGACY_INTEGRITY_CHECKS = Object.freeze([
   {
     id: 'settlement_formulas',
     description: 'immutable settlement formulas, confirmations, directions, hashes, and variance reasons',
@@ -315,9 +321,34 @@ export const INTEGRITY_CHECKS = Object.freeze([
   },
   {
     id: 'tranche_journal_totals',
-    description: 'cash, carried receivable, and wallet tranche totals agree with their journals',
+    description: 'cash, carried receivable, and wallet tranche totals agree with their journals (excluding pre-integrity cancelled history)',
     sql: `
-      WITH tranche_totals AS (
+      WITH integrity_rollout AS (
+        SELECT COALESCE(
+          (SELECT applied_at FROM schema_migrations
+            WHERE filename = '0035_shift_money_integrity.sql'),
+          '-infinity'::timestamptz
+        ) AS applied_at
+      ), eligible_shifts AS (
+        SELECT s.*
+          FROM shifts s
+          CROSS JOIN integrity_rollout rollout
+         WHERE s.state <> 'cancelled'
+            OR s.created_at >= rollout.applied_at
+            OR EXISTS (
+              SELECT 1 FROM audit_log al
+               WHERE al.table_name = 'shifts' AND al.record_id = s.id::text
+                 AND al.action = 'UPDATE'
+                 AND al.after ->> 'state' = 'cancelled'
+                 AND COALESCE(al.before ->> 'state', '') <> 'cancelled'
+                 AND al.occurred_at >= rollout.applied_at
+            )
+            OR EXISTS (
+              SELECT 1 FROM shift_decisions sd
+               WHERE sd.shift_id = s.id AND sd.decision = 'force_cancelled'
+                 AND sd.decided_at >= rollout.applied_at
+            )
+      ), tranche_totals AS (
         SELECT ft.shift_id,
                COALESCE(sum(ft.amount_minor::numeric) FILTER (WHERE ft.kind = 'cash_float'), 0) AS cash_float,
                COALESCE(sum(ft.amount_minor::numeric) FILTER (WHERE ft.kind = 'carried_receivable'), 0) AS carried,
@@ -339,7 +370,7 @@ export const INTEGRITY_CHECKS = Object.freeze([
                COALESCE(bool_or(jl.side = 'C' AND f.type::text = 'office_wallet'), false) AS office_wallet_credit,
                count(jl.id) AS line_count
           FROM journal_entries je
-          JOIN shifts s ON s.id = je.shift_id
+          JOIN eligible_shifts s ON s.id = je.shift_id
           LEFT JOIN journal_lines jl ON jl.entry_id = je.id
           LEFT JOIN funds f ON f.id = jl.fund_id
          WHERE je.shift_id IS NOT NULL AND je.event_type IN ('float_out', 'wallet_topup')
@@ -374,7 +405,7 @@ export const INTEGRITY_CHECKS = Object.freeze([
              COALESCE(tt.wallet_topup, 0)::text AS tranche_wallet_topup,
              COALESCE(jt.wallet_topup, 0)::text AS journal_wallet_topup,
              COALESCE(jt.malformed_entries, 0)::text AS malformed_entries
-        FROM shifts s
+        FROM eligible_shifts s
         LEFT JOIN tranche_totals tt ON tt.shift_id = s.id
         LEFT JOIN journal_totals jt ON jt.shift_id = s.id
        WHERE s.start_cash_float_minor::numeric <> COALESCE(tt.cash_float, 0)
@@ -906,6 +937,777 @@ export const INTEGRITY_CHECKS = Object.freeze([
   },
 ])
 
+const legacyCheck = (id) => {
+  const check = LEGACY_INTEGRITY_CHECKS.find((candidate) => candidate.id === id)
+  if (!check) throw new Error(`missing legacy integrity check ${id}`)
+  return check
+}
+
+const RECEIVABLE_V2_CHECKS = Object.freeze({
+  settlement_formulas: {
+    id: 'settlement_formulas',
+    description: 'immutable v1/v2 settlement claims, deferrals, physical movements, confirmations, and reasons',
+    sql: `
+      SELECT ss.shift_id::text AS shift_id,
+             ss.policy_code,
+             ss.variance_minor::text AS variance_minor,
+             ss.cash_claim_to_office_minor::text AS cash_claim_to_office_minor,
+             ss.wallet_claim_to_office_minor::text AS wallet_claim_to_office_minor,
+             ss.cash_receivable_deferred_minor::text AS cash_receivable_deferred_minor,
+             ss.wallet_receivable_deferred_minor::text AS wallet_receivable_deferred_minor,
+             'settlement formula or confirmation mismatch' AS issue
+        FROM shift_settlements ss
+       WHERE ss.policy_code NOT IN (
+               'fixed_40_cash_close_v1',
+               'fixed_40_cash_close_v2_receivable'
+             )
+          OR ss.driver_rate_bps <> 4000
+          OR ss.delivery_fee_total_minor < 0
+          OR ss.fixed_driver_share_minor < 0
+          OR ss.manual_driver_share_minor < 0
+          OR ss.gross_driver_share_minor < 0
+          OR ss.cash_deduction_total_minor < 0
+          OR ss.actual_cash_minor < 0
+          OR ss.wallet_amount_minor < 0
+          OR ss.cash_amount_minor < 0
+          OR ss.cash_receivable_deferred_minor < 0
+          OR ss.wallet_receivable_deferred_minor < 0
+          OR (ss.policy_code = 'fixed_40_cash_close_v1' AND (
+               ss.cash_receivable_deferred_minor <> 0
+               OR ss.wallet_receivable_deferred_minor <> 0
+             ))
+          OR ss.fixed_driver_share_minor::numeric <>
+             floor(ss.delivery_fee_total_minor::numeric * ss.driver_rate_bps::numeric / 10000)
+          OR ss.gross_driver_share_minor::numeric <>
+             ss.fixed_driver_share_minor::numeric + ss.manual_driver_share_minor::numeric
+          OR ss.base_driver_share_minor::numeric <>
+             ss.gross_driver_share_minor::numeric - ss.cash_deduction_total_minor::numeric
+          OR ss.actual_total_minor::numeric <>
+             ss.actual_cash_minor::numeric + ss.actual_wallet_minor::numeric
+          OR ss.variance_minor::numeric <>
+             ss.actual_total_minor::numeric - ss.expected_total_minor::numeric
+          OR NOT (
+               (ss.variance_minor > 0 AND ss.variance_direction = 'surplus')
+            OR (ss.variance_minor < 0 AND ss.variance_direction = 'shortage')
+            OR (ss.variance_minor = 0 AND ss.variance_direction = 'balanced')
+          )
+          OR ss.final_employee_cash_minor::numeric <>
+             ss.base_driver_share_minor::numeric + ss.variance_minor::numeric
+          OR ss.cash_claim_to_office_minor::numeric <>
+             ss.actual_cash_minor::numeric - ss.final_employee_cash_minor::numeric
+          OR ss.wallet_claim_to_office_minor::numeric <> ss.actual_wallet_minor::numeric
+          OR ss.cash_receivable_deferred_minor::numeric >
+             GREATEST(ss.cash_claim_to_office_minor::numeric, 0::numeric)
+          OR ss.wallet_receivable_deferred_minor::numeric >
+             GREATEST(ss.wallet_claim_to_office_minor::numeric, 0::numeric)
+          OR ss.cash_to_office_minor::numeric <>
+             ss.cash_claim_to_office_minor::numeric - ss.cash_receivable_deferred_minor::numeric
+          OR ss.wallet_to_office_minor::numeric <>
+             ss.wallet_claim_to_office_minor::numeric - ss.wallet_receivable_deferred_minor::numeric
+          OR ss.cash_to_office_minor::numeric
+             + ss.wallet_to_office_minor::numeric
+             + ss.cash_receivable_deferred_minor::numeric
+             + ss.wallet_receivable_deferred_minor::numeric <>
+             ss.expected_total_minor::numeric - ss.base_driver_share_minor::numeric
+          OR NOT (
+               (ss.wallet_to_office_minor > 0 AND ss.wallet_action = 'collect'
+                 AND ss.wallet_amount_minor::numeric = ss.wallet_to_office_minor::numeric)
+            OR (ss.wallet_to_office_minor < 0 AND ss.wallet_action = 'fund'
+                 AND ss.wallet_amount_minor::numeric = -ss.wallet_to_office_minor::numeric)
+            OR (ss.wallet_to_office_minor = 0 AND ss.wallet_action = 'none'
+                 AND ss.wallet_amount_minor = 0)
+          )
+          OR NOT (
+               (ss.cash_to_office_minor > 0 AND ss.cash_action = 'collect'
+                 AND ss.cash_amount_minor::numeric = ss.cash_to_office_minor::numeric)
+            OR (ss.cash_to_office_minor < 0 AND ss.cash_action = 'pay'
+                 AND ss.cash_amount_minor::numeric = -ss.cash_to_office_minor::numeric)
+            OR (ss.cash_to_office_minor = 0 AND ss.cash_action = 'none'
+                 AND ss.cash_amount_minor = 0)
+          )
+          OR NOT ss.wallet_transfer_confirmed
+          OR NOT ss.cash_settlement_confirmed
+          OR char_length(ss.reviewed_orders_hash) NOT BETWEEN 1 AND 128
+          OR ss.settlement_hash !~ '^[0-9a-f]{64}$'
+          OR char_length(COALESCE(ss.variance_reason, '')) > 500
+          OR (ss.variance_minor <> 0 AND NOT ${hasVisibleText('ss.variance_reason')})
+    `,
+  },
+  settlement_state_coupling: {
+    ...legacyCheck('settlement_state_coupling'),
+    description: 'one settlement per terminal shift with matching identity, review, and cash projection',
+    sql: legacyCheck('settlement_state_coupling').sql.replace(
+      'OR s.orders_hash IS DISTINCT FROM ss.reviewed_orders_hash',
+      `OR s.orders_hash IS DISTINCT FROM ss.reviewed_orders_hash
+          OR s.kept_as_receivable_minor IS DISTINCT FROM ss.cash_receivable_deferred_minor`,
+    ),
+  },
+  br1_settlement_snapshot: {
+    ...legacyCheck('br1_settlement_snapshot'),
+    description: 'stored BR1 components include both cash and wallet carried shift-funding tranches',
+    sql: legacyCheck('br1_settlement_snapshot').sql
+      .replace(
+        "COALESCE(sum(ft.amount_minor::numeric) FILTER (WHERE ft.kind = 'wallet_topup'), 0) AS wallet_topup",
+        `COALESCE(sum(ft.amount_minor::numeric) FILTER (WHERE ft.kind = 'wallet_topup'), 0) AS wallet_topup,
+               COALESCE(sum(ft.amount_minor::numeric) FILTER (
+                 WHERE ft.kind = 'carried_wallet_receivable'
+               ), 0) AS carried_wallet`,
+      )
+      .replace(
+        'tt.wallet_topup + ot.wallet_from_orders AS expected_wallet',
+        'tt.wallet_topup + tt.carried_wallet + ot.wallet_from_orders AS expected_wallet',
+      ),
+  },
+  tranche_journal_totals: {
+    id: 'tranche_journal_totals',
+    description: 'cash/wallet tranches and legacy/new carried shift-funding agree with exact opening journals (excluding pre-integrity cancelled history)',
+    sql: `
+      WITH integrity_rollout AS (
+        SELECT COALESCE(
+          (SELECT applied_at FROM schema_migrations
+            WHERE filename = '0035_shift_money_integrity.sql'),
+          '-infinity'::timestamptz
+        ) AS applied_at
+      ), eligible_shifts AS (
+        SELECT s.*
+          FROM shifts s
+          CROSS JOIN integrity_rollout rollout
+         WHERE s.state <> 'cancelled'
+            OR s.created_at >= rollout.applied_at
+            OR EXISTS (
+              SELECT 1 FROM audit_log al
+               WHERE al.table_name = 'shifts' AND al.record_id = s.id::text
+                 AND al.action = 'UPDATE'
+                 AND al.after ->> 'state' = 'cancelled'
+                 AND COALESCE(al.before ->> 'state', '') <> 'cancelled'
+                 AND al.occurred_at >= rollout.applied_at
+            )
+            OR EXISTS (
+              SELECT 1 FROM shift_decisions sd
+               WHERE sd.shift_id = s.id AND sd.decision = 'force_cancelled'
+                 AND sd.decided_at >= rollout.applied_at
+            )
+      ), receivable_rollout AS (
+        SELECT applied_at
+          FROM schema_migrations
+         WHERE filename = '0037_receivable_settlement_and_events.sql'
+      ), tranche_totals AS (
+        SELECT ft.shift_id,
+               COALESCE(sum(ft.amount_minor::numeric) FILTER (WHERE ft.kind = 'cash_float'), 0) AS cash_float,
+               COALESCE(sum(ft.amount_minor::numeric) FILTER (WHERE ft.kind = 'carried_receivable'), 0) AS carried_cash,
+               COALESCE(sum(ft.amount_minor::numeric) FILTER (WHERE ft.kind = 'wallet_topup'), 0) AS wallet_topup,
+               COALESCE(sum(ft.amount_minor::numeric) FILTER (
+                 WHERE ft.kind = 'carried_wallet_receivable'
+               ), 0) AS carried_wallet
+          FROM float_tranches ft
+         GROUP BY ft.shift_id
+      ), entry_shapes AS (
+        SELECT je.id, je.shift_id, je.event_type::text AS event_type,
+               s.open_approved_at >= rollout.applied_at AS uses_shift_funding,
+               COALESCE(sum(jl.amount_minor::numeric) FILTER (
+                 WHERE jl.side = 'D' AND f.type::text = 'driver_cash'
+                   AND f.owner_id = s.driver_id
+               ), 0) AS driver_cash_debit,
+               COALESCE(sum(jl.amount_minor::numeric) FILTER (
+                 WHERE jl.side = 'D' AND f.type::text = 'driver_wallet'
+                   AND f.owner_id = s.driver_id
+               ), 0) AS driver_wallet_debit,
+               COALESCE(sum(jl.amount_minor::numeric) FILTER (
+                 WHERE jl.side = 'C' AND f.type::text = 'office_cash'
+               ), 0) AS office_cash_credit,
+               COALESCE(sum(jl.amount_minor::numeric) FILTER (
+                 WHERE jl.side = 'C' AND f.type::text = 'office_wallet'
+               ), 0) AS office_wallet_credit,
+               COALESCE(sum(jl.amount_minor::numeric) FILTER (
+                 WHERE jl.side = 'C' AND f.type::text = 'driver_receivable_cash'
+                   AND f.owner_id = s.driver_id
+               ), 0) AS legacy_receivable_cash_credit,
+               COALESCE(sum(jl.amount_minor::numeric) FILTER (
+                 WHERE jl.side = 'C' AND f.type::text = 'driver_shift_funding_cash'
+                   AND f.owner_id = s.driver_id
+               ), 0) AS funding_cash_credit,
+               COALESCE(sum(jl.amount_minor::numeric) FILTER (
+                 WHERE jl.side = 'C' AND f.type::text = 'driver_shift_funding_wallet'
+                   AND f.owner_id = s.driver_id
+               ), 0) AS funding_wallet_credit,
+               count(jl.id) AS line_count
+          FROM journal_entries je
+          JOIN eligible_shifts s ON s.id = je.shift_id
+          CROSS JOIN receivable_rollout rollout
+          LEFT JOIN journal_lines jl ON jl.entry_id = je.id
+          LEFT JOIN funds f ON f.id = jl.fund_id
+         WHERE je.shift_id IS NOT NULL AND je.event_type IN ('float_out', 'wallet_topup')
+         GROUP BY je.id, je.shift_id, je.event_type, s.open_approved_at, rollout.applied_at
+      ), classified AS (
+        SELECT es.*,
+               es.event_type = 'float_out'
+                 AND es.driver_cash_debit > 0
+                 AND es.office_cash_credit = es.driver_cash_debit
+                 AND es.legacy_receivable_cash_credit = 0
+                 AND es.funding_cash_credit = 0
+                 AND es.funding_wallet_credit = 0
+                 AND es.driver_wallet_debit = 0
+                 AND es.office_wallet_credit = 0
+                 AND es.line_count = 2 AS is_cash_float,
+               es.event_type = 'float_out'
+                 AND es.driver_cash_debit > 0
+                 AND es.office_cash_credit = 0
+                 AND es.driver_wallet_debit = 0
+                 AND es.office_wallet_credit = 0
+                 AND es.funding_wallet_credit = 0
+                 AND es.line_count = 2
+                 AND (
+                   (es.uses_shift_funding
+                     AND es.funding_cash_credit = es.driver_cash_debit
+                     AND es.legacy_receivable_cash_credit = 0)
+                   OR
+                   (NOT es.uses_shift_funding
+                     AND es.legacy_receivable_cash_credit = es.driver_cash_debit
+                     AND es.funding_cash_credit = 0)
+                 ) AS is_cash_carry,
+               es.event_type = 'wallet_topup'
+                 AND es.driver_wallet_debit > 0
+                 AND es.office_wallet_credit = es.driver_wallet_debit
+                 AND es.driver_cash_debit = 0
+                 AND es.office_cash_credit = 0
+                 AND es.legacy_receivable_cash_credit = 0
+                 AND es.funding_cash_credit = 0
+                 AND es.funding_wallet_credit = 0
+                 AND es.line_count = 2 AS is_wallet_topup,
+               es.event_type = 'wallet_topup'
+                 AND es.driver_wallet_debit > 0
+                 AND es.funding_wallet_credit = es.driver_wallet_debit
+                 AND es.driver_cash_debit = 0
+                 AND es.office_cash_credit = 0
+                 AND es.office_wallet_credit = 0
+                 AND es.legacy_receivable_cash_credit = 0
+                 AND es.funding_cash_credit = 0
+                 AND es.line_count = 2 AS is_wallet_carry
+          FROM entry_shapes es
+      ), journal_totals AS (
+        SELECT c.shift_id,
+               COALESCE(sum(c.driver_cash_debit) FILTER (WHERE c.is_cash_float), 0) AS cash_float,
+               COALESCE(sum(c.driver_cash_debit) FILTER (WHERE c.is_cash_carry), 0) AS carried_cash,
+               COALESCE(sum(c.driver_wallet_debit) FILTER (WHERE c.is_wallet_topup), 0) AS wallet_topup,
+               COALESCE(sum(c.driver_wallet_debit) FILTER (WHERE c.is_wallet_carry), 0) AS carried_wallet,
+               count(*) FILTER (WHERE NOT (
+                 c.is_cash_float OR c.is_cash_carry OR c.is_wallet_topup OR c.is_wallet_carry
+               )) AS malformed_entries
+          FROM classified c
+         GROUP BY c.shift_id
+      )
+      SELECT s.id::text AS shift_id,
+             s.start_cash_float_minor::text AS shift_cash_float,
+             COALESCE(tt.cash_float, 0)::text AS tranche_cash_float,
+             COALESCE(jt.cash_float, 0)::text AS journal_cash_float,
+             COALESCE(tt.carried_cash, 0)::text AS tranche_carried_cash,
+             COALESCE(jt.carried_cash, 0)::text AS journal_carried_cash,
+             s.start_wallet_topup_minor::text AS shift_wallet_topup,
+             COALESCE(tt.wallet_topup, 0)::text AS tranche_wallet_topup,
+             COALESCE(jt.wallet_topup, 0)::text AS journal_wallet_topup,
+             COALESCE(tt.carried_wallet, 0)::text AS tranche_carried_wallet,
+             COALESCE(jt.carried_wallet, 0)::text AS journal_carried_wallet,
+             COALESCE(jt.malformed_entries, 0)::text AS malformed_entries
+        FROM eligible_shifts s
+        LEFT JOIN tranche_totals tt ON tt.shift_id = s.id
+        LEFT JOIN journal_totals jt ON jt.shift_id = s.id
+       WHERE s.start_cash_float_minor::numeric <> COALESCE(tt.cash_float, 0)
+          OR COALESCE(tt.cash_float, 0) <> COALESCE(jt.cash_float, 0)
+          OR COALESCE(tt.carried_cash, 0) <> COALESCE(jt.carried_cash, 0)
+          OR s.start_wallet_topup_minor::numeric <> COALESCE(tt.wallet_topup, 0)
+          OR COALESCE(tt.wallet_topup, 0) <> COALESCE(jt.wallet_topup, 0)
+          OR COALESCE(tt.carried_wallet, 0) <> COALESCE(jt.carried_wallet, 0)
+          OR COALESCE(jt.malformed_entries, 0) <> 0
+    `,
+  },
+  expected_close_events: {
+    ...legacyCheck('expected_close_events'),
+    sql: legacyCheck('expected_close_events').sql
+      .replaceAll(
+        "OR ss.base_driver_share_minor <> 0 OR ss.cash_to_office_minor <> 0",
+        `OR ss.base_driver_share_minor <> 0 OR ss.cash_to_office_minor <> 0
+                            OR ss.cash_receivable_deferred_minor <> 0`,
+      ),
+  },
+  close_journal_alignment: {
+    id: 'close_journal_alignment',
+    description: 'v1/v2 close journals contain exactly the canonical claim, deferral, and physical line multiset',
+    sql: `
+      WITH expected_lines AS (
+        SELECT ss.shift_id, expected.event_type, '1'::text AS occurrence_key,
+               expected.line_role, expected.fund_type, expected.owner_id,
+               ss.branch_id::text AS fund_branch_id,
+               CASE WHEN expected.movement > 0 THEN 'D' ELSE 'C' END AS side,
+               abs(expected.movement)::text AS amount_minor
+          FROM shift_settlements ss
+          JOIN shifts s ON s.id = ss.shift_id
+          CROSS JOIN LATERAL (VALUES
+            ('wallet_return', 'wallet_reclassification', 'driver_wallet',
+             ss.driver_id::text, COALESCE(s.wallet_diff_minor::numeric, 0)),
+            ('wallet_return', 'wallet_reclassification', 'driver_cash',
+             ss.driver_id::text, -COALESCE(s.wallet_diff_minor::numeric, 0)),
+            ('wallet_return', 'wallet_cleared', 'driver_wallet',
+             ss.driver_id::text, -ss.actual_wallet_minor::numeric),
+            ('wallet_return',
+             CASE WHEN ss.policy_code = 'fixed_40_cash_close_v1'
+                  THEN 'wallet_full_return' ELSE 'wallet_settlement' END,
+             'office_wallet', NULL::text, ss.wallet_to_office_minor::numeric),
+            ('wallet_return', 'wallet_settlement_deferred', 'driver_receivable_wallet',
+             ss.driver_id::text, ss.wallet_receivable_deferred_minor::numeric),
+            ('float_return', 'cash_cleared', 'driver_cash',
+             ss.driver_id::text, -(ss.expected_total_minor::numeric - ss.actual_wallet_minor::numeric)),
+            ('float_return', 'driver_share_settled', 'driver_share_payable',
+             ss.driver_id::text, GREATEST(ss.base_driver_share_minor::numeric, 0)),
+            ('float_return', 'driver_receivable_settled', 'driver_receivable_cash',
+             ss.driver_id::text, LEAST(ss.base_driver_share_minor::numeric, 0)),
+            ('float_return', 'cash_settlement_deferred', 'driver_receivable_cash',
+             ss.driver_id::text, ss.cash_receivable_deferred_minor::numeric),
+            ('float_return', 'cash_settlement', 'office_cash',
+             NULL::text, ss.cash_to_office_minor::numeric)
+          ) AS expected(event_type, line_role, fund_type, owner_id, movement)
+         WHERE expected.movement <> 0
+      ), expected_shapes AS (
+        SELECT ss.shift_id,
+               COALESCE(jsonb_agg(jsonb_build_array(
+                 el.event_type, el.occurrence_key, el.line_role, el.fund_type, el.owner_id,
+                 el.fund_branch_id, el.side, el.amount_minor
+               ) ORDER BY el.event_type, el.occurrence_key, el.line_role, el.fund_type,
+                          el.owner_id, el.fund_branch_id, el.side, el.amount_minor
+               ) FILTER (WHERE el.event_type IS NOT NULL), '[]'::jsonb) AS line_shape,
+               CASE WHEN ss.actual_wallet_minor <> 0 OR COALESCE(s.wallet_diff_minor, 0) <> 0
+                          OR ss.wallet_receivable_deferred_minor <> 0
+                    THEN 1 ELSE 0 END AS wallet_entries,
+               CASE WHEN ss.expected_total_minor::numeric - ss.actual_wallet_minor::numeric <> 0
+                          OR ss.base_driver_share_minor <> 0 OR ss.cash_to_office_minor <> 0
+                          OR ss.cash_receivable_deferred_minor <> 0
+                    THEN 1 ELSE 0 END AS cash_entries
+          FROM shift_settlements ss
+          JOIN shifts s ON s.id = ss.shift_id
+          LEFT JOIN expected_lines el ON el.shift_id = ss.shift_id
+         GROUP BY ss.shift_id, ss.actual_wallet_minor, s.wallet_diff_minor,
+                  ss.expected_total_minor, ss.base_driver_share_minor, ss.cash_to_office_minor,
+                  ss.cash_receivable_deferred_minor, ss.wallet_receivable_deferred_minor
+      ), actual_shapes AS (
+        SELECT ss.shift_id,
+               COALESCE(jsonb_agg(jsonb_build_array(
+                 je.event_type::text, je.occurrence_key, jl.line_role, f.type::text,
+                 f.owner_id::text, f.branch_id::text, jl.side, jl.amount_minor::text
+               ) ORDER BY je.event_type::text, je.occurrence_key, jl.line_role, f.type::text,
+                          f.owner_id::text, f.branch_id::text, jl.side, jl.amount_minor::text
+               ) FILTER (WHERE jl.id IS NOT NULL), '[]'::jsonb) AS line_shape,
+               count(DISTINCT je.id) FILTER (WHERE je.event_type = 'wallet_return') AS wallet_entries,
+               count(DISTINCT je.id) FILTER (WHERE je.event_type = 'float_return') AS cash_entries
+          FROM shift_settlements ss
+          LEFT JOIN journal_entries je ON je.shift_id = ss.shift_id
+            AND je.event_type IN ('wallet_return', 'float_return')
+          LEFT JOIN journal_lines jl ON jl.entry_id = je.id
+          LEFT JOIN funds f ON f.id = jl.fund_id
+         GROUP BY ss.shift_id
+      )
+      SELECT expected.shift_id::text AS shift_id,
+             expected.wallet_entries::text AS expected_wallet_entries,
+             actual.wallet_entries::text AS actual_wallet_entries,
+             expected.cash_entries::text AS expected_cash_entries,
+             actual.cash_entries::text AS actual_cash_entries,
+             expected.line_shape AS expected_lines,
+             actual.line_shape AS actual_lines
+        FROM expected_shapes expected
+        JOIN actual_shapes actual ON actual.shift_id = expected.shift_id
+        JOIN shifts s ON s.id = expected.shift_id
+       WHERE s.wallet_diff_minor IS NULL
+          OR actual.wallet_entries <> expected.wallet_entries
+          OR actual.cash_entries <> expected.cash_entries
+          OR actual.line_shape IS DISTINCT FROM expected.line_shape
+    `,
+  },
+  force_cancel_integrity: {
+    ...legacyCheck('force_cancel_integrity'),
+    description: 'post-rollout force-cancels exactly reverse cash and wallet shift-funding carries',
+    sql: legacyCheck('force_cancel_integrity').sql
+      .replace(
+        '), force_decisions AS (',
+        `), receivable_rollout AS (
+        SELECT applied_at
+          FROM schema_migrations
+         WHERE filename = '0037_receivable_settlement_and_events.sql'
+      ), force_decisions AS (`,
+      )
+      .replace(
+        'SELECT s.*, rollout.applied_at AS rollout_at',
+        `SELECT s.*, rollout.applied_at AS rollout_at,
+               receivable_rollout.applied_at AS receivable_rollout_at`,
+      )
+      .replace(
+        'CROSS JOIN force_cancel_rollout rollout',
+        `CROSS JOIN force_cancel_rollout rollout
+          CROSS JOIN receivable_rollout`,
+      )
+      .replace(
+        `SELECT cc.*, (fd.actors)[1] AS cancel_actor, (fd.notes)[1] AS cancel_reason`,
+        `SELECT cc.*, (fd.actors)[1] AS cancel_actor, (fd.notes)[1] AS cancel_reason,
+               (fd.decided_at)[1] AS cancel_decided_at`,
+      )
+      .replace(
+        "COALESCE(sum(ft.amount_minor::numeric) FILTER (WHERE ft.kind = 'carried_receivable'), 0) AS carried",
+        `COALESCE(sum(ft.amount_minor::numeric) FILTER (WHERE ft.kind = 'carried_receivable'), 0) AS carried,
+               COALESCE(sum(ft.amount_minor::numeric) FILTER (
+                 WHERE ft.kind = 'carried_wallet_receivable'
+               ), 0) AS carried_wallet`,
+      )
+      .replace(
+        `('correction', 'void-carry-' || vc.id::text, NULL, 'driver_receivable_cash',
+             vc.driver_id::text, 'D', tt.carried)`,
+        `('correction', 'void-carry-' || vc.id::text, NULL,
+             CASE WHEN vc.cancel_decided_at >= vc.receivable_rollout_at
+                  THEN 'driver_shift_funding_cash' ELSE 'driver_receivable_cash' END,
+             vc.driver_id::text, 'D', tt.carried),
+            ('correction', 'void-wallet-carry-' || vc.id::text, NULL, 'driver_wallet',
+             vc.driver_id::text, 'C', tt.carried_wallet),
+            ('correction', 'void-wallet-carry-' || vc.id::text, NULL,
+             CASE WHEN vc.cancel_decided_at >= vc.receivable_rollout_at
+                  THEN 'driver_shift_funding_wallet' ELSE 'driver_receivable_wallet' END,
+             vc.driver_id::text, 'D', tt.carried_wallet)`,
+      )
+      .replace(
+        'CASE WHEN tt.carried <> 0 THEN 1 ELSE 0 END AS correction_entries',
+        `CASE WHEN tt.carried <> 0 THEN 1 ELSE 0 END
+                 + CASE WHEN tt.carried_wallet <> 0 THEN 1 ELSE 0 END AS correction_entries`,
+      )
+      .replace(
+        'GROUP BY vc.id, tt.cash_float, tt.wallet_topup, tt.carried',
+        'GROUP BY vc.id, tt.cash_float, tt.wallet_topup, tt.carried, tt.carried_wallet',
+      )
+      .replace(
+        `COALESCE(sum(${signed('jl.side', 'jl.amount_minor')}) FILTER (
+                 WHERE f.type::text = 'driver_receivable_wallet' AND f.owner_id = vc.driver_id
+               ), 0) AS driver_receivable_wallet`,
+        `COALESCE(sum(${signed('jl.side', 'jl.amount_minor')}) FILTER (
+                 WHERE f.type::text = 'driver_receivable_wallet' AND f.owner_id = vc.driver_id
+               ), 0) AS driver_receivable_wallet,
+               COALESCE(sum(${signed('jl.side', 'jl.amount_minor')}) FILTER (
+                 WHERE f.type::text = 'driver_shift_funding_cash' AND f.owner_id = vc.driver_id
+               ), 0) AS driver_shift_funding_cash,
+               COALESCE(sum(${signed('jl.side', 'jl.amount_minor')}) FILTER (
+                 WHERE f.type::text = 'driver_shift_funding_wallet' AND f.owner_id = vc.driver_id
+               ), 0) AS driver_shift_funding_wallet`,
+      )
+      .replace(
+        `'driverReceivableWallet', balances.driver_receivable_wallet::text`,
+        `'driverReceivableWallet', balances.driver_receivable_wallet::text,
+               'driverShiftFundingCash', balances.driver_shift_funding_cash::text,
+               'driverShiftFundingWallet', balances.driver_shift_funding_wallet::text`,
+      )
+      .replace(
+        'JOIN driver_balances balances ON balances.shift_id = vc.id',
+        `JOIN driver_balances balances ON balances.shift_id = vc.id
+        JOIN tranche_totals tt ON tt.shift_id = vc.id`,
+      )
+      .replace(
+        'OR balances.driver_receivable_cash <> 0',
+        `OR balances.driver_receivable_cash <> (
+               CASE WHEN vc.cancel_decided_at < vc.receivable_rollout_at THEN tt.carried ELSE 0 END
+               - CASE WHEN vc.open_approved_at < vc.receivable_rollout_at THEN tt.carried ELSE 0 END
+             )`,
+      )
+      .replace(
+        'OR balances.driver_receivable_wallet <> 0',
+        `OR balances.driver_receivable_wallet <> (
+               CASE WHEN vc.cancel_decided_at < vc.receivable_rollout_at THEN tt.carried_wallet ELSE 0 END
+               - CASE WHEN vc.open_approved_at < vc.receivable_rollout_at THEN tt.carried_wallet ELSE 0 END
+             )
+          OR balances.driver_shift_funding_cash <> (
+               CASE WHEN vc.cancel_decided_at >= vc.receivable_rollout_at THEN tt.carried ELSE 0 END
+               - CASE WHEN vc.open_approved_at >= vc.receivable_rollout_at THEN tt.carried ELSE 0 END
+             )
+          OR balances.driver_shift_funding_wallet <> (
+               CASE WHEN vc.cancel_decided_at >= vc.receivable_rollout_at THEN tt.carried_wallet ELSE 0 END
+               - CASE WHEN vc.open_approved_at >= vc.receivable_rollout_at THEN tt.carried_wallet ELSE 0 END
+             )`,
+      ),
+  },
+  residual_driver_balances: {
+    id: 'residual_driver_balances',
+    description: 'settled shifts clear operational balances and contribute only their explicit ordinary/funding receivables',
+    sql: `
+      WITH receivable_rollout AS (
+        SELECT applied_at
+          FROM schema_migrations
+         WHERE filename = '0037_receivable_settlement_and_events.sql'
+      ), carried AS (
+        SELECT ft.shift_id,
+               COALESCE(sum(ft.amount_minor::numeric) FILTER (
+                 WHERE ft.kind = 'carried_receivable'
+               ), 0) AS carried_cash,
+               COALESCE(sum(ft.amount_minor::numeric) FILTER (
+                 WHERE ft.kind = 'carried_wallet_receivable'
+               ), 0) AS carried_wallet
+          FROM float_tranches ft
+         GROUP BY ft.shift_id
+      ), shift_balances AS (
+        SELECT ss.shift_id, ss.driver_id,
+               COALESCE(sum(${signed('jl.side', 'jl.amount_minor')}) FILTER (
+                 WHERE f.type::text = 'driver_cash' AND f.owner_id = ss.driver_id
+               ), 0) AS driver_cash,
+               COALESCE(sum(${signed('jl.side', 'jl.amount_minor')}) FILTER (
+                 WHERE f.type::text = 'driver_wallet' AND f.owner_id = ss.driver_id
+               ), 0) AS driver_wallet,
+               COALESCE(sum(${signed('jl.side', 'jl.amount_minor')}) FILTER (
+                 WHERE f.type::text = 'driver_share_payable' AND f.owner_id = ss.driver_id
+               ), 0) AS driver_share,
+               COALESCE(sum(${signed('jl.side', 'jl.amount_minor')}) FILTER (
+                 WHERE f.type::text = 'driver_receivable_cash' AND f.owner_id = ss.driver_id
+               ), 0) AS ordinary_cash,
+               COALESCE(sum(${signed('jl.side', 'jl.amount_minor')}) FILTER (
+                 WHERE f.type::text = 'driver_receivable_wallet' AND f.owner_id = ss.driver_id
+               ), 0) AS ordinary_wallet,
+               COALESCE(sum(${signed('jl.side', 'jl.amount_minor')}) FILTER (
+                 WHERE f.type::text = 'driver_shift_funding_cash' AND f.owner_id = ss.driver_id
+               ), 0) AS funding_cash,
+               COALESCE(sum(${signed('jl.side', 'jl.amount_minor')}) FILTER (
+                 WHERE f.type::text = 'driver_shift_funding_wallet' AND f.owner_id = ss.driver_id
+               ), 0) AS funding_wallet
+          FROM shift_settlements ss
+          LEFT JOIN journal_entries je ON je.shift_id = ss.shift_id
+          LEFT JOIN journal_lines jl ON jl.entry_id = je.id
+          LEFT JOIN funds f ON f.id = jl.fund_id
+         GROUP BY ss.shift_id, ss.driver_id
+      )
+      SELECT sb.shift_id::text AS shift_id, sb.driver_id::text AS driver_id,
+             sb.driver_cash::text AS driver_cash_minor,
+             sb.driver_wallet::text AS driver_wallet_minor,
+             sb.driver_share::text AS driver_share_minor,
+             sb.ordinary_cash::text AS ordinary_cash_minor,
+             (ss.cash_receivable_deferred_minor::numeric - CASE
+                WHEN s.open_approved_at IS NULL OR s.open_approved_at < rollout.applied_at
+                  THEN COALESCE(c.carried_cash, 0)
+                ELSE 0
+              END)::text AS expected_ordinary_cash_minor,
+             sb.ordinary_wallet::text AS ordinary_wallet_minor,
+             ss.wallet_receivable_deferred_minor::text AS expected_ordinary_wallet_minor,
+             sb.funding_cash::text AS shift_funding_cash_minor,
+             (-CASE
+                WHEN s.open_approved_at >= rollout.applied_at THEN COALESCE(c.carried_cash, 0)
+                ELSE 0
+              END)::text AS expected_shift_funding_cash_minor,
+             sb.funding_wallet::text AS shift_funding_wallet_minor,
+             (-COALESCE(c.carried_wallet, 0))::text AS expected_shift_funding_wallet_minor
+        FROM shift_balances sb
+        JOIN shift_settlements ss ON ss.shift_id = sb.shift_id
+        JOIN shifts s ON s.id = sb.shift_id
+        CROSS JOIN receivable_rollout rollout
+        LEFT JOIN carried c ON c.shift_id = sb.shift_id
+       WHERE sb.driver_cash <> 0
+          OR sb.driver_wallet <> 0
+          OR sb.driver_share <> 0
+          OR sb.ordinary_cash <> ss.cash_receivable_deferred_minor::numeric - CASE
+               WHEN s.open_approved_at IS NULL OR s.open_approved_at < rollout.applied_at
+                 THEN COALESCE(c.carried_cash, 0)
+               ELSE 0
+             END
+          OR sb.ordinary_wallet <> ss.wallet_receivable_deferred_minor::numeric
+          OR sb.funding_cash <> -CASE
+               WHEN s.open_approved_at >= rollout.applied_at THEN COALESCE(c.carried_cash, 0)
+               ELSE 0
+             END
+          OR sb.funding_wallet <> -COALESCE(c.carried_wallet, 0)
+    `,
+  },
+})
+
+const RECEIVABLE_EVENT_JOURNALS = Object.freeze({
+  id: 'receivable_event_journals',
+  description: 'every immutable receivable command has one exact idempotent balanced journal and no journal is orphaned',
+  sql: `
+    WITH expected_lines AS (
+      SELECT re.id AS event_id, re.journal_entry_id,
+             expected.line_role, expected.fund_type, expected.owner_id,
+             re.branch_id::text AS fund_branch_id, expected.side,
+             re.amount_minor::text AS amount_minor
+        FROM receivable_events re
+        CROSS JOIN LATERAL (VALUES
+          (
+            CASE WHEN re.direction = 'create' THEN 'receivable_created' ELSE 'receivable_cleared' END,
+            CASE
+              WHEN re.receivable_kind = 'ordinary' AND re.channel = 'cash' THEN 'driver_receivable_cash'
+              WHEN re.receivable_kind = 'ordinary' AND re.channel = 'wallet' THEN 'driver_receivable_wallet'
+              WHEN re.receivable_kind = 'shift_funding' AND re.channel = 'cash' THEN 'driver_shift_funding_cash'
+              ELSE 'driver_shift_funding_wallet'
+            END,
+            re.driver_id::text,
+            CASE WHEN re.direction = 'create' THEN 'D' ELSE 'C' END
+          ),
+          (
+            CASE WHEN re.direction = 'create' THEN 'office_value_reclassified' ELSE 'receivable_collected' END,
+            CASE WHEN re.channel = 'cash' THEN 'office_cash' ELSE 'office_wallet' END,
+            NULL::text,
+            CASE WHEN re.direction = 'create' THEN 'C' ELSE 'D' END
+          )
+        ) AS expected(line_role, fund_type, owner_id, side)
+    ), expected_shapes AS (
+      SELECT re.id AS event_id,
+             jsonb_agg(jsonb_build_array(
+               el.line_role, el.fund_type, el.owner_id, el.fund_branch_id, el.side, el.amount_minor
+             ) ORDER BY el.line_role, el.fund_type, el.owner_id, el.fund_branch_id, el.side, el.amount_minor) AS line_shape
+        FROM receivable_events re
+        JOIN expected_lines el ON el.event_id = re.id
+       GROUP BY re.id
+    ), actual_shapes AS (
+      SELECT re.id AS event_id, count(DISTINCT je.id) AS entry_count,
+             COALESCE(jsonb_agg(jsonb_build_array(
+               jl.line_role, f.type::text, f.owner_id::text, f.branch_id::text,
+               jl.side, jl.amount_minor::text
+             ) ORDER BY jl.line_role, f.type::text, f.owner_id::text, f.branch_id::text,
+                        jl.side, jl.amount_minor::text
+             ) FILTER (WHERE jl.id IS NOT NULL), '[]'::jsonb) AS line_shape
+        FROM receivable_events re
+        LEFT JOIN journal_entries je ON je.id = re.journal_entry_id
+        LEFT JOIN journal_lines jl ON jl.entry_id = je.id
+        LEFT JOIN funds f ON f.id = jl.fund_id
+       GROUP BY re.id
+    )
+    SELECT re.id::text AS event_id, re.journal_entry_id::text AS journal_entry_id,
+           'receivable_event_journal_mismatch' AS issue,
+           expected.line_shape AS expected_lines,
+           actual.line_shape AS actual_lines
+      FROM receivable_events re
+      JOIN expected_shapes expected ON expected.event_id = re.id
+      JOIN actual_shapes actual ON actual.event_id = re.id
+      LEFT JOIN journal_entries je ON je.id = re.journal_entry_id
+     WHERE actual.entry_count <> 1
+        OR re.receivable_kind NOT IN ('ordinary', 'shift_funding')
+        OR re.channel NOT IN ('cash', 'wallet')
+        OR re.direction NOT IN ('create', 'collect')
+        OR re.amount_minor <= 0
+        OR NOT ${hasVisibleText('re.reason')}
+        OR char_length(re.reason) > 500
+        OR char_length(btrim(re.idempotency_key)) NOT BETWEEN 1 AND 64
+        OR je.shift_id IS NOT NULL
+        OR je.branch_id IS DISTINCT FROM re.branch_id
+        OR je.event_type::text IS DISTINCT FROM 'receivable_adjustment'
+        OR je.occurrence_key IS DISTINCT FROM re.idempotency_key
+        OR je.business_date IS DISTINCT FROM re.business_date
+        OR je.posting_date IS DISTINCT FROM re.business_date
+        OR je.week_start_date IS DISTINCT FROM
+           (re.business_date - extract(dow FROM re.business_date)::integer)
+        OR je.reason IS DISTINCT FROM re.reason
+        OR je.created_by IS DISTINCT FROM re.created_by
+        OR actual.line_shape IS DISTINCT FROM expected.line_shape
+    UNION ALL
+    SELECT NULL::text, je.id::text, 'orphan_receivable_adjustment_journal',
+           NULL::jsonb, NULL::jsonb
+      FROM journal_entries je
+      LEFT JOIN receivable_events re ON re.journal_entry_id = je.id
+     WHERE je.shift_id IS NULL
+       AND je.event_type::text = 'receivable_adjustment'
+       AND re.id IS NULL
+    UNION ALL
+    SELECT min(re.id::text), NULL::text, 'duplicate_receivable_idempotency_key',
+           NULL::jsonb, NULL::jsonb
+      FROM receivable_events re
+     GROUP BY re.branch_id, re.idempotency_key
+    HAVING count(*) <> 1
+  `,
+})
+
+const RECEIVABLE_FUND_BALANCES = Object.freeze({
+  id: 'receivable_fund_balances',
+  description: 'ordinary and shift-funding receivable balances are nonnegative and owned by their named driver',
+  sql: `
+    SELECT f.id::text AS fund_id, f.code, f.type::text AS fund_type,
+           f.owner_id::text AS driver_id,
+           COALESCE(sum(${signed('jl.side', 'jl.amount_minor')}), 0)::text AS balance_minor,
+           CASE
+             WHEN f.owner_kind <> 'driver' OR f.owner_id IS NULL THEN 'receivable_owner_invalid'
+             WHEN f.code <> f.type::text || ':' || f.owner_id::text THEN 'receivable_code_invalid'
+             ELSE 'receivable_balance_negative'
+           END AS issue
+      FROM funds f
+      LEFT JOIN journal_lines jl ON jl.fund_id = f.id
+     WHERE f.type::text IN (
+       'driver_receivable_cash', 'driver_receivable_wallet',
+       'driver_shift_funding_cash', 'driver_shift_funding_wallet'
+     )
+     GROUP BY f.id, f.code, f.type, f.owner_kind, f.owner_id
+    HAVING f.owner_kind <> 'driver'
+        OR f.owner_id IS NULL
+        OR f.code <> f.type::text || ':' || f.owner_id::text
+        OR COALESCE(sum(${signed('jl.side', 'jl.amount_minor')}), 0) < 0
+  `,
+})
+
+const SHIFT_FUNDING_OPEN_CARRY = Object.freeze({
+  id: 'shift_funding_open_carry',
+  description: 'every post-0037 open consumes the complete pre-existing cash and wallet shift-funding balances',
+  sql: `
+    WITH receivable_rollout AS (
+      SELECT applied_at
+        FROM schema_migrations
+       WHERE filename = '0037_receivable_settlement_and_events.sql'
+    ), candidates AS (
+      SELECT s.id AS shift_id, s.branch_id, s.driver_id, s.open_approved_at,
+             COALESCE(sum(ft.amount_minor::numeric) FILTER (
+               WHERE ft.kind = 'carried_receivable'
+             ), 0) AS carried_cash,
+             COALESCE(sum(ft.amount_minor::numeric) FILTER (
+               WHERE ft.kind = 'carried_wallet_receivable'
+             ), 0) AS carried_wallet
+        FROM shifts s
+        CROSS JOIN receivable_rollout rollout
+        LEFT JOIN float_tranches ft ON ft.shift_id = s.id
+       WHERE s.open_approved_at >= rollout.applied_at
+       GROUP BY s.id, s.branch_id, s.driver_id, s.open_approved_at
+    ), opening_balances AS (
+      SELECT c.*,
+             COALESCE(sum(${signed('jl.side', 'jl.amount_minor')}) FILTER (
+               WHERE f.type::text = 'driver_shift_funding_cash'
+                 AND f.owner_id = c.driver_id
+                 AND je.id IS NOT NULL
+             ), 0) AS cash_before_open,
+             COALESCE(sum(${signed('jl.side', 'jl.amount_minor')}) FILTER (
+               WHERE f.type::text = 'driver_shift_funding_wallet'
+                 AND f.owner_id = c.driver_id
+                 AND je.id IS NOT NULL
+             ), 0) AS wallet_before_open
+        FROM candidates c
+        LEFT JOIN funds f ON f.branch_id = c.branch_id
+          AND f.owner_id = c.driver_id
+          AND f.type::text IN ('driver_shift_funding_cash', 'driver_shift_funding_wallet')
+        LEFT JOIN journal_lines jl ON jl.fund_id = f.id
+        LEFT JOIN journal_entries je ON je.id = jl.entry_id
+          AND je.created_at <= c.open_approved_at
+          AND je.shift_id IS DISTINCT FROM c.shift_id
+       GROUP BY c.shift_id, c.branch_id, c.driver_id, c.open_approved_at,
+                c.carried_cash, c.carried_wallet
+    )
+    SELECT ob.shift_id::text AS shift_id, ob.driver_id::text AS driver_id,
+           ob.cash_before_open::text AS cash_before_open,
+           ob.carried_cash::text AS carried_cash,
+           ob.wallet_before_open::text AS wallet_before_open,
+           ob.carried_wallet::text AS carried_wallet,
+           'shift_funding_not_fully_consumed_at_open' AS issue
+      FROM opening_balances ob
+     WHERE ob.cash_before_open < 0
+        OR ob.wallet_before_open < 0
+        OR ob.carried_cash IS DISTINCT FROM ob.cash_before_open
+        OR ob.carried_wallet IS DISTINCT FROM ob.wallet_before_open
+  `,
+})
+
+/** Checks selected once migration 0037 is present. Unchanged evidence/BR1 checks are reused. */
+export const INTEGRITY_CHECKS = Object.freeze(
+  LEGACY_INTEGRITY_CHECKS.flatMap((check) => {
+    if (check.id === 'residual_driver_balances') {
+      return [
+        RECEIVABLE_EVENT_JOURNALS,
+        RECEIVABLE_FUND_BALANCES,
+        SHIFT_FUNDING_OPEN_CARRY,
+        RECEIVABLE_V2_CHECKS.residual_driver_balances,
+      ]
+    }
+    return [RECEIVABLE_V2_CHECKS[check.id] ?? check]
+  }),
+)
+
 export function canonicalJson(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value)
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
@@ -955,6 +1757,74 @@ function fixedSettlementHashV1(context, plan) {
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex')
 }
 
+/** Hash used by v1 policy rows confirmed after durable close drafts launched. */
+function fixedSettlementHashV2(context, plan) {
+  const canonical = {
+    version: 2,
+    policyCode: 'fixed_40_cash_close_v1',
+    driverRateBps: 4_000,
+    ...context,
+    deliveryFeeTotal: String(plan.deliveryFeeTotal),
+    fixedDriverShare: String(plan.fixedDriverShare),
+    manualDriverShare: String(plan.manualDriverShare),
+    grossDriverShare: String(plan.grossDriverShare),
+    cashDeductionTotal: String(plan.cashDeductionTotal),
+    baseDriverShare: String(plan.baseDriverShare),
+    expectedCash: String(plan.expectedCash),
+    expectedWallet: String(plan.expectedWallet),
+    expectedTotal: String(plan.expectedTotal),
+    actualCash: String(plan.actualCash),
+    actualWallet: String(plan.actualWallet),
+    actualTotal: String(plan.actualTotal),
+    variance: String(plan.variance),
+    finalEmployeeCash: String(plan.finalEmployeeCash),
+    officeEntitlement: String(plan.officeEntitlement),
+    walletToOffice: String(plan.walletToOffice),
+    cashToOffice: String(plan.cashToOffice),
+    walletAction: plan.wallet.action,
+    walletAmount: String(plan.wallet.amount),
+    cashAction: plan.cash.action,
+    cashAmount: String(plan.cash.amount),
+  }
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex')
+}
+
+/** Hash used by receivable-aware v2 policy rows. Kept local so historical checks never drift. */
+function fixedSettlementHashV3(context, plan) {
+  const canonical = {
+    version: 3,
+    policyCode: 'fixed_40_cash_close_v2_receivable',
+    driverRateBps: 4_000,
+    ...context,
+    deliveryFeeTotal: String(plan.deliveryFeeTotal),
+    fixedDriverShare: String(plan.fixedDriverShare),
+    manualDriverShare: String(plan.manualDriverShare),
+    grossDriverShare: String(plan.grossDriverShare),
+    cashDeductionTotal: String(plan.cashDeductionTotal),
+    baseDriverShare: String(plan.baseDriverShare),
+    expectedCash: String(plan.expectedCash),
+    expectedWallet: String(plan.expectedWallet),
+    expectedTotal: String(plan.expectedTotal),
+    actualCash: String(plan.actualCash),
+    actualWallet: String(plan.actualWallet),
+    actualTotal: String(plan.actualTotal),
+    variance: String(plan.variance),
+    finalEmployeeCash: String(plan.finalEmployeeCash),
+    officeEntitlement: String(plan.officeEntitlement),
+    cashClaimToOffice: String(plan.cashClaimToOffice),
+    walletClaimToOffice: String(plan.walletClaimToOffice),
+    cashReceivableDeferred: String(plan.cashReceivableDeferred),
+    walletReceivableDeferred: String(plan.walletReceivableDeferred),
+    walletToOffice: String(plan.walletToOffice),
+    cashToOffice: String(plan.cashToOffice),
+    walletAction: plan.wallet.action,
+    walletAmount: String(plan.wallet.amount),
+    cashAction: plan.cash.action,
+    cashAmount: String(plan.cash.amount),
+  }
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex')
+}
+
 /** Rebuild the exact v2 hash input used when the manager signed the immutable settlement. */
 export function canonicalSettlementHash(row) {
   const actualCash = bigintField(row, 'actual_cash_minor')
@@ -983,6 +1853,7 @@ export function canonicalSettlementHash(row) {
     businessDate: String(row.business_date),
     reviewedOrdersHash: String(row.reviewed_orders_hash),
   }
+  const policyCode = String(row.policy_code ?? 'fixed_40_cash_close_v1')
   const plan = {
     deliveryFeeTotal: bigintField(row, 'delivery_fee_total_minor'),
     fixedDriverShare: bigintField(row, 'fixed_driver_share_minor'),
@@ -999,6 +1870,18 @@ export function canonicalSettlementHash(row) {
     variance: bigintField(row, 'variance_minor'),
     finalEmployeeCash: bigintField(row, 'final_employee_cash_minor'),
     officeEntitlement: expectedTotal - baseDriverShare,
+    cashClaimToOffice: row.cash_claim_to_office_minor == null
+      ? bigintField(row, 'cash_to_office_minor')
+      : bigintField(row, 'cash_claim_to_office_minor'),
+    walletClaimToOffice: row.wallet_claim_to_office_minor == null
+      ? bigintField(row, 'wallet_to_office_minor')
+      : bigintField(row, 'wallet_claim_to_office_minor'),
+    cashReceivableDeferred: row.cash_receivable_deferred_minor == null
+      ? 0n
+      : bigintField(row, 'cash_receivable_deferred_minor'),
+    walletReceivableDeferred: row.wallet_receivable_deferred_minor == null
+      ? 0n
+      : bigintField(row, 'wallet_receivable_deferred_minor'),
     walletToOffice: bigintField(row, 'wallet_to_office_minor'),
     cashToOffice: bigintField(row, 'cash_to_office_minor'),
     wallet: {
@@ -1017,17 +1900,30 @@ export function canonicalSettlementHash(row) {
   if (!Number.isFinite(confirmedMs) || Number.isNaN(rolloutMs)) {
     throw new RangeError('invalid settlement hash-version timestamp')
   }
-  if (confirmedMs < rolloutMs) return fixedSettlementHashV1(context, plan)
-
-  return fixedSettlementHash(
-    {
-      ...context,
-      closeDraftRevision: submittedDraft?.revision ?? null,
-      closeDraftHash: submittedDraft?.hash ?? null,
-      closeDraftSubmittedAt: submittedDraft?.submittedAt ?? null,
-    },
-    plan,
-  )
+  if (policyCode === 'fixed_40_cash_close_v1') {
+    if (confirmedMs < rolloutMs) return fixedSettlementHashV1(context, plan)
+    return fixedSettlementHashV2(
+      {
+        ...context,
+        closeDraftRevision: submittedDraft?.revision ?? null,
+        closeDraftHash: submittedDraft?.hash ?? null,
+        closeDraftSubmittedAt: submittedDraft?.submittedAt ?? null,
+      },
+      plan,
+    )
+  }
+  if (policyCode === 'fixed_40_cash_close_v2_receivable') {
+    return fixedSettlementHashV3(
+      {
+        ...context,
+        closeDraftRevision: submittedDraft?.revision ?? null,
+        closeDraftHash: submittedDraft?.hash ?? null,
+        closeDraftSubmittedAt: submittedDraft?.submittedAt ?? null,
+      },
+      plan,
+    )
+  }
+  throw new RangeError(`unsupported settlement policy ${policyCode}`)
 }
 
 const sampledCheckSql = (sql) => `
@@ -1074,12 +1970,22 @@ async function runDraftHashCheck(client, sampleLimit) {
   }
 }
 
-async function runSettlementHashCheck(client, sampleLimit) {
+async function runSettlementHashCheck(client, sampleLimit, receivableV2) {
+  const receivableColumns = receivableV2
+    ? `ss.cash_claim_to_office_minor::text AS cash_claim_to_office_minor,
+           ss.wallet_claim_to_office_minor::text AS wallet_claim_to_office_minor,
+           ss.cash_receivable_deferred_minor::text AS cash_receivable_deferred_minor,
+           ss.wallet_receivable_deferred_minor::text AS wallet_receivable_deferred_minor,`
+    : `ss.cash_to_office_minor::text AS cash_claim_to_office_minor,
+           ss.wallet_to_office_minor::text AS wallet_claim_to_office_minor,
+           '0'::text AS cash_receivable_deferred_minor,
+           '0'::text AS wallet_receivable_deferred_minor,`
   const { rows } = await client.query(`
     SELECT ss.shift_id::text AS shift_id,
            ss.branch_id::text AS branch_id,
            ss.driver_id::text AS driver_id,
            to_char(ss.business_date, 'YYYY-MM-DD') AS business_date,
+           ss.policy_code,
            ss.delivery_fee_total_minor::text AS delivery_fee_total_minor,
            ss.fixed_driver_share_minor::text AS fixed_driver_share_minor,
            ss.manual_driver_share_minor::text AS manual_driver_share_minor,
@@ -1092,6 +1998,7 @@ async function runSettlementHashCheck(client, sampleLimit) {
            ss.actual_total_minor::text AS actual_total_minor,
            ss.variance_minor::text AS variance_minor,
            ss.final_employee_cash_minor::text AS final_employee_cash_minor,
+           ${receivableColumns}
            ss.wallet_to_office_minor::text AS wallet_to_office_minor,
            ss.cash_to_office_minor::text AS cash_to_office_minor,
            ss.wallet_action,
@@ -1120,7 +2027,7 @@ async function runSettlementHashCheck(client, sampleLimit) {
   const failures = settlementHashFailures(rows)
   return {
     id: 'settlement_hashes',
-    description: 'stored settlement hashes equal their canonical rollout-aware v1/v2 SHA-256 values',
+    description: 'stored settlement hashes equal their canonical rollout-aware v1/v2/v3 SHA-256 values',
     violations: failures.length,
     samples: failures.slice(0, sampleLimit),
   }
@@ -1160,9 +2067,18 @@ export async function collectShiftMoneyIntegrity(client, { sampleLimit = 20 } = 
             current_setting('server_version') AS server_version,
             clock_timestamp()::text AS as_of`,
   )
+  const schema = await client.query(
+    `SELECT EXISTS (
+       SELECT 1
+         FROM schema_migrations
+        WHERE filename = '0037_receivable_settlement_and_events.sql'
+     ) AS receivable_v2`,
+  )
+  const receivableV2 = schema.rows[0]?.receivable_v2 === true
+  const selectedChecks = receivableV2 ? INTEGRITY_CHECKS : LEGACY_INTEGRITY_CHECKS
   const checks = []
-  for (const check of INTEGRITY_CHECKS) checks.push(await runSqlCheck(client, check, sampleLimit))
-  checks.push(await runSettlementHashCheck(client, sampleLimit))
+  for (const check of selectedChecks) checks.push(await runSqlCheck(client, check, sampleLimit))
+  checks.push(await runSettlementHashCheck(client, sampleLimit, receivableV2))
   checks.push(await runDraftHashCheck(client, sampleLimit))
   return {
     ...metadata.rows[0],

@@ -20,11 +20,23 @@ export interface CountLineDraft {
 
 export interface RestorationLegLike {
   fundCode: string
+  counted: string
+  receivables: string
   position: string
   capitalTarget: string
   delta: string
   direction: 'to_company' | 'from_company' | null
   amount: string
+}
+
+export interface ReceivableDriverLike {
+  cash: string
+  wallet: string
+}
+
+/** Per-driver total, using minor-unit integer math so large balances never pass through Number. */
+export function receivableDriverTotal(driver: ReceivableDriverLike): string {
+  return formatMinor(minor(parseMinor(driver.cash) + parseMinor(driver.wallet)))
 }
 
 /** Turn a signed wire-money value into an explicit direction plus an unsigned amount. */

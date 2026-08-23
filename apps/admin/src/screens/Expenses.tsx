@@ -1,9 +1,10 @@
-import { type ReactNode, useCallback, useEffect, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import type { ExpenseCategoryView, ExpenseView } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
 import { explainError } from '../errors.ts'
 import { Button, Card, DateField, Field, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
+import { pendingExpenseOperation, type PendingExpenseOperation } from '../expense-idempotency.ts'
 
 /**
  * Expenses (SRS G) — «كل ليرة تخرج: مصنَّفة وموثَّقة ومنسوبة لمركز كلفتها». Recording is branch
@@ -36,6 +37,7 @@ export function Expenses(): ReactNode {
   const [description, setDescription] = useState('')
   const [busy, setBusy] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
+  const pendingExpense = useRef<PendingExpenseOperation | null>(null)
 
   const [catCode, setCatCode] = useState('')
   const [catName, setCatName] = useState('')
@@ -67,20 +69,31 @@ export function Expenses(): ReactNode {
   const add = async (): Promise<void> => {
     setBusy(true)
     setFormError(null)
+    const payload = {
+      categoryId,
+      costCenterKind: kind,
+      vehicleId: kind === 'vehicle' ? vehicleId : null,
+      amount,
+      description,
+    }
+    const operation = pendingExpenseOperation(pendingExpense.current, payload)
+    pendingExpense.current = operation
     try {
       await api.createExpense({
-        categoryId,
-        costCenterKind: kind,
-        vehicleId: kind === 'vehicle' ? vehicleId : null,
-        amount,
-        description,
+        ...payload,
+        idempotencyKey: operation.idempotencyKey,
       })
+      pendingExpense.current = null
       toast.success(t.expenses.added)
       setAmount('')
       setDescription('')
       load()
     } catch (e) {
-      setFormError((e as { error?: string }).error ?? 'error')
+      const code = (e as { error?: string }).error ?? 'error'
+      // A key conflict is definitive. Transport failures keep the key so a tap after a lost
+      // response asks the server for the same operation instead of spending twice.
+      if (code === 'idempotency_key_conflict') pendingExpense.current = null
+      setFormError(code)
     } finally {
       setBusy(false)
     }

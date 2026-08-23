@@ -27,6 +27,7 @@ import { PgShiftSettlementRepo } from './repos-settlement.ts'
 import { PgCloseDraftRepo } from './repos-close-draft.ts'
 
 type ShiftIdentity = {
+  branch_id: string
   driver_id: string
   business_date: string
 }
@@ -88,7 +89,8 @@ export class PgShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
       // Identity is immutable in repository code. Read it without a row lock solely to derive the
       // common driver/day key before taking the target lock; the locked reread below verifies it.
       const identityResult = await client.query<ShiftIdentity>(
-        `SELECT driver_id::text AS driver_id,
+        `SELECT branch_id::text AS branch_id,
+                driver_id::text AS driver_id,
                 to_char(business_date, 'YYYY-MM-DD') AS business_date
            FROM shifts
           WHERE id = $1`,
@@ -99,6 +101,13 @@ export class PgShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
       // (service commands use `shift_not_found`; the read-only review returns null/404).
       if (!identity) return work(deps)
 
+      // Opening consumes the driver's shift-funding receivables, while closing may create ordinary
+      // receivables. Direct create/collect commands take this exact branch key before reading their
+      // balance, so the two paths cannot both spend or consume the same outstanding amount.
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+        `ash:financial:receivables:${identity.branch_id}`,
+      ])
+
       if (input.serializeDriverDay) {
         // A collision only serializes unrelated approvals; it cannot weaken correctness. The prefix
         // reserves a namespace so other advisory-lock users do not accidentally share these keys.
@@ -108,7 +117,8 @@ export class PgShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
       }
 
       const lockedResult = await client.query<ShiftIdentity>(
-        `SELECT driver_id::text AS driver_id,
+        `SELECT branch_id::text AS branch_id,
+                driver_id::text AS driver_id,
                 to_char(business_date, 'YYYY-MM-DD') AS business_date
            FROM shifts
           WHERE id = $1
@@ -117,7 +127,11 @@ export class PgShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
       )
       const locked = lockedResult.rows[0]
       if (!locked) return work(deps)
-      if (locked.driver_id !== identity.driver_id || locked.business_date !== identity.business_date) {
+      if (
+        locked.branch_id !== identity.branch_id ||
+        locked.driver_id !== identity.driver_id ||
+        locked.business_date !== identity.business_date
+      ) {
         throw changedIdentity(input.shiftId)
       }
 

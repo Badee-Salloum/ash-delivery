@@ -206,6 +206,10 @@ export interface FixedShareSettlementInput {
   readonly actualCash: Minor
   /** The complete app-wallet balance. Positive is collected; negative must be funded to reach 0. */
   readonly actualWallet: Minor
+  /** Positive cash collection deliberately left outstanding as an office receivable. */
+  readonly cashReceivableDeferred?: Minor
+  /** Positive wallet collection deliberately left outstanding as an office receivable. */
+  readonly walletReceivableDeferred?: Minor
 }
 
 export interface FixedShareSettlementPlan {
@@ -232,9 +236,17 @@ export interface FixedShareSettlementPlan {
   readonly finalEmployeeCash: Minor
   /** The invariant office claim before choosing which physical box receives it. */
   readonly officeEntitlement: Minor
-  /** Signed office-cash movement. Positive collects; negative pays the employee. */
+  /** Signed cash claim before any amount is deliberately deferred. */
+  readonly cashClaimToOffice: Minor
+  /** Signed wallet claim before any amount is deliberately deferred. Equal to actualWallet. */
+  readonly walletClaimToOffice: Minor
+  /** Non-negative part of the cash claim left as a driver receivable. */
+  readonly cashReceivableDeferred: Minor
+  /** Non-negative part of the wallet claim left as a driver receivable. */
+  readonly walletReceivableDeferred: Minor
+  /** Signed physical office-cash movement after deferral. Positive collects; negative pays. */
   readonly cashToOffice: Minor
-  /** Signed full wallet movement. Equal to actualWallet. */
+  /** Signed physical office-wallet movement after deferral. */
   readonly walletToOffice: Minor
   readonly wallet: SettlementAction<WalletSettlementAction>
   readonly cash: SettlementAction<CashSettlementAction>
@@ -259,20 +271,21 @@ function cashAction(amount: Minor): SettlementAction<CashSettlementAction> {
 }
 
 /**
- * Settle a shift by emptying the wallet completely and using one signed cash action for everything
- * else. There is no "pay later" and no newly carried receivable: after the manager confirms the
- * two physical actions, the driver's cash, wallet, share payable and close-time receivable all end
- * at zero in the ledger.
+ * Settle a shift by clearing both operational funds. A manager may defer part of a positive office
+ * collection as an ordinary receivable; that asset stays outside the next shift until explicitly
+ * collected. Separate shift-funding receivables are the only balances auto-consumed at open.
  *
  * The essential identities are:
  *
  *     base share          B = 40% Yallago share + manual share − deductions
  *     scalar variance     V = actual total − expected total
  *     employee cash       N = B + V
- *     office cash         X = expected total − B − actual wallet
+ *     cash claim          X0 = expected total − B − actual wallet
+ *     physical cash       X  = X0 − deferred cash receivable
+ *     physical wallet     W  = actual wallet − deferred wallet receivable
  *
- * Therefore `actualCash − X === N`, and the full wallet plus the cash action always gives the
- * office exactly `expectedTotal − B`, independent of where the driver happened to hold the money.
+ * Therefore physical movements plus both receivables always give the office exactly
+ * `expectedTotal − B`, independent of where the driver happened to hold the money.
  */
 export function planFixedShareSettlement(input: FixedShareSettlementInput): FixedShareSettlementPlan {
   requireNonNegative('delivery fee total', input.deliveryFeeTotal)
@@ -280,6 +293,10 @@ export function planFixedShareSettlement(input: FixedShareSettlementInput): Fixe
   requireNonNegative('manual driver share', input.manualDriverShare)
   requireNonNegative('cash deduction total', input.cashDeductionTotal)
   requireNonNegative('actual cash', input.actualCash)
+  const cashReceivableDeferred = input.cashReceivableDeferred ?? ZERO
+  const walletReceivableDeferred = input.walletReceivableDeferred ?? ZERO
+  requireNonNegative('deferred cash receivable', cashReceivableDeferred)
+  requireNonNegative('deferred wallet receivable', walletReceivableDeferred)
 
   const canonicalFixedShare = allocate(input.deliveryFeeTotal, FIXED_DRIVER_BPS, 'floor')
   if (input.fixedDriverShare !== canonicalFixedShare) {
@@ -296,12 +313,41 @@ export function planFixedShareSettlement(input: FixedShareSettlementInput): Fixe
   const variance = sub(actualTotal, expectedTotal)
   const finalEmployeeCash = add(baseDriverShare, variance)
   const officeEntitlement = sub(expectedTotal, baseDriverShare)
-  const cashToOffice = sub(officeEntitlement, input.actualWallet)
+  const cashClaimToOffice = sub(officeEntitlement, input.actualWallet)
+  const walletClaimToOffice = input.actualWallet
+
+  // A receivable may replace only value the office was otherwise about to COLLECT. When a signed
+  // action is a payout/funding operation, deferring it would create an office liability, not an
+  // asset owed by the driver, and therefore belongs to a different workflow.
+  const maximumCashReceivable = cashClaimToOffice > ZERO ? cashClaimToOffice : ZERO
+  const maximumWalletReceivable = walletClaimToOffice > ZERO ? walletClaimToOffice : ZERO
+  if (cashReceivableDeferred > maximumCashReceivable) {
+    throw new RangeError(
+      `deferred cash receivable ${cashReceivableDeferred} exceeds collectible cash ${maximumCashReceivable}`,
+    )
+  }
+  if (walletReceivableDeferred > maximumWalletReceivable) {
+    throw new RangeError(
+      `deferred wallet receivable ${walletReceivableDeferred} exceeds collectible wallet ${maximumWalletReceivable}`,
+    )
+  }
+
+  const cashToOffice = sub(cashClaimToOffice, cashReceivableDeferred)
+  const walletToOffice = sub(walletClaimToOffice, walletReceivableDeferred)
 
   // This identity is kept executable rather than documentation-only. A future edit that changes
   // one side of the settlement cannot quietly invent or destroy a minor unit.
-  if (sub(input.actualCash, cashToOffice) !== finalEmployeeCash) {
+  if (sub(input.actualCash, cashToOffice) !== add(finalEmployeeCash, cashReceivableDeferred)) {
     throw new RangeError('fixed-share settlement does not conserve the closing cash')
+  }
+  if (sub(input.actualWallet, walletToOffice) !== walletReceivableDeferred) {
+    throw new RangeError('fixed-share settlement does not conserve the closing wallet')
+  }
+  if (
+    add(add(cashToOffice, walletToOffice), add(cashReceivableDeferred, walletReceivableDeferred)) !==
+    officeEntitlement
+  ) {
+    throw new RangeError('fixed-share settlement does not conserve the office entitlement')
   }
 
   return {
@@ -320,9 +366,13 @@ export function planFixedShareSettlement(input: FixedShareSettlementInput): Fixe
     variance,
     finalEmployeeCash,
     officeEntitlement,
+    cashClaimToOffice,
+    walletClaimToOffice,
+    cashReceivableDeferred,
+    walletReceivableDeferred,
     cashToOffice,
-    walletToOffice: input.actualWallet,
-    wallet: walletAction(input.actualWallet),
+    walletToOffice,
+    wallet: walletAction(walletToOffice),
     cash: cashAction(cashToOffice),
   }
 }

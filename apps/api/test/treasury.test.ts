@@ -244,6 +244,33 @@ describe('the daily cash count (E-5)', () => {
     expect(res.json().error).toBe('fund_not_countable')
   })
 
+  it('refuses negative physical cash while preserving a signed wallet count', async () => {
+    const manager = await h.loginAs('manager')
+    const negativeCash = await post(manager, '/cash-counts', {
+      lines: [
+        { fundCode: 'office_cash', counted: '-1.00', resolution: 'invalid physical cash' },
+        { fundCode: 'office_wallet', counted: sypStr(0) },
+      ],
+    })
+    expect(negativeCash.statusCode).toBe(422)
+    expect(negativeCash.json()).toEqual({
+      error: 'cash_count_negative',
+      detail: { fundCode: 'office_cash' },
+    })
+    expect(await h.deps.cashCounts.find(BRANCH, '2026-07-21')).toBeNull()
+
+    const signedWallet = await post(manager, '/cash-counts', {
+      lines: [
+        { fundCode: 'office_cash', counted: sypStr(0) },
+        { fundCode: 'office_wallet', counted: '-1.00', resolution: 'provider wallet liability' },
+      ],
+    })
+    expect(signedWallet.statusCode, signedWallet.body).toBe(201)
+    expect(signedWallet.json().lines).toContainEqual(
+      expect.objectContaining({ fundCode: 'office_wallet', counted: '-1.00' }),
+    )
+  })
+
   /** Decision 9 gave him `cash_count.perform`; being org-wide he must still say whose drawer. */
   it('the system admin may count a drawer he names (decision 9, was D-5)', async () => {
     const admin = await h.loginAs('sysadmin')

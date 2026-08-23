@@ -51,6 +51,8 @@ export type LedgerEvent =
   | 'restoration'
   /** The driver taking his share. */
   | 'driver_payout'
+  /** Direct driver receivable creation or later collection, outside a shift. */
+  | 'receivable_adjustment'
 
 export type FundRef =
   | { readonly kind: 'office_cash' }
@@ -79,10 +81,15 @@ export type FundRef =
    *
    * TWO kinds because the owner's own book has two: receivables sit against كاش المكتب (400,000)
    * AND against محفظة المكتب (30,000), and الترميم must know which capital target each counts
-   * toward. An asset of the office, owed by the driver, cleared when he opens his next shift.
+   * toward. This is the ordinary receivable: an office asset owed by the driver until an explicit
+   * later collection. It is never auto-consumed by opening a shift; `driver_shift_funding_*` below
+   * is the separate kind reserved for that workflow.
    */
   | { readonly kind: 'driver_receivable_cash'; readonly driverId: string }
   | { readonly kind: 'driver_receivable_wallet'; readonly driverId: string }
+  /** Money already advanced specifically for automatic use at the driver's next shift open. */
+  | { readonly kind: 'driver_shift_funding_cash'; readonly driverId: string }
+  | { readonly kind: 'driver_shift_funding_wallet'; readonly driverId: string }
   | { readonly kind: 'cost_center'; readonly costCenterId: string }
 
 /** The two branch funds that hold real value and are counted, restored and swept. */
@@ -257,7 +264,19 @@ export function floatCarry(driverId: string, amount: Minor, tranche: string | nu
     occurrenceKey: `carry-${tranche}`,
     lines: [
       D({ kind: 'driver_cash', driverId }, amount),
-      C({ kind: 'driver_receivable_cash', driverId }, amount),
+      C({ kind: 'driver_shift_funding_cash', driverId }, amount),
+    ],
+  })
+}
+
+/** Wallet funding already advanced for this driver's next shift; no office value leaves twice. */
+export function walletCarry(driverId: string, amount: Minor, tranche: string | number = 1): Posting {
+  return assertBalanced({
+    eventType: 'wallet_topup',
+    occurrenceKey: `carry-${tranche}`,
+    lines: [
+      D({ kind: 'driver_wallet', driverId }, amount),
+      C({ kind: 'driver_shift_funding_wallet', driverId }, amount),
     ],
   })
 }
@@ -292,6 +311,36 @@ export function walletReturn(driverId: string, amount: Minor): Posting {
   return assertBalanced({ eventType: 'wallet_return', occurrenceKey: '1', lines })
 }
 
+/**
+ * Create or collect a named driver's receivable without pretending it belonged to a shift.
+ *
+ * Creation reclassifies an office asset into a receivable, so total office capital is unchanged;
+ * collection performs the exact reverse. The immutable command record supplies the human reason
+ * and idempotency key, while the line roles make the direction obvious in the journal.
+ */
+export function receivableAdjustment(
+  driverId: string,
+  receivableKind: 'ordinary' | 'shift_funding',
+  channel: 'cash' | 'wallet',
+  direction: 'create' | 'collect',
+  amount: Minor,
+  occurrenceKey: string,
+): Posting {
+  if (amount <= ZERO) throw new RangeError(`receivable adjustment must be positive, got ${amount}`)
+  const office: FundRef = channel === 'cash' ? { kind: 'office_cash' } : { kind: 'office_wallet' }
+  const receivable: FundRef = receivableKind === 'shift_funding'
+    ? channel === 'cash'
+      ? { kind: 'driver_shift_funding_cash', driverId }
+      : { kind: 'driver_shift_funding_wallet', driverId }
+    : channel === 'cash'
+      ? { kind: 'driver_receivable_cash', driverId }
+      : { kind: 'driver_receivable_wallet', driverId }
+  const lines = direction === 'create'
+    ? [D(receivable, amount, 'receivable_created'), C(office, amount, 'office_value_reclassified')]
+    : [D(office, amount, 'receivable_collected'), C(receivable, amount, 'receivable_cleared')]
+  return assertBalanced({ eventType: 'receivable_adjustment', occurrenceKey, lines })
+}
+
 export interface CashSettledReturnInput {
   readonly driverId: string
   /** The exact immutable plan the manager reviewed and confirmed. */
@@ -314,6 +363,8 @@ function assertCanonicalFixedShareSettlement(settlement: FixedShareSettlementPla
     expectedWallet: settlement.expectedWallet,
     actualCash: settlement.actualCash,
     actualWallet: settlement.actualWallet,
+    cashReceivableDeferred: settlement.cashReceivableDeferred,
+    walletReceivableDeferred: settlement.walletReceivableDeferred,
   })
   const scalarFields = [
     'grossDriverShare',
@@ -323,6 +374,10 @@ function assertCanonicalFixedShareSettlement(settlement: FixedShareSettlementPla
     'variance',
     'finalEmployeeCash',
     'officeEntitlement',
+    'cashClaimToOffice',
+    'walletClaimToOffice',
+    'cashReceivableDeferred',
+    'walletReceivableDeferred',
     'cashToOffice',
     'walletToOffice',
   ] as const
@@ -372,9 +427,19 @@ export function cashSettledReturnPostings(input: CashSettledReturnInput): Postin
   // Reclassify the observed cash/wallet split before either fund is swept.
   signedLine(walletLines, { kind: 'driver_wallet', driverId }, walletDelta, 'wallet_reclassification')
   signedLine(walletLines, { kind: 'driver_cash', driverId }, neg(walletDelta), 'wallet_reclassification')
-  // Positive actual wallet is collected in full; a negative wallet is funded back to zero.
+  // Clear the operational wallet. A positive amount may be split between a transfer now and a
+  // reviewed receivable; a negative wallet is always funded in full.
   signedLine(walletLines, { kind: 'driver_wallet', driverId }, neg(settlement.actualWallet), 'wallet_cleared')
-  signedLine(walletLines, { kind: 'office_wallet' }, settlement.actualWallet, 'wallet_full_return')
+  signedLine(walletLines, { kind: 'office_wallet' }, settlement.walletToOffice, 'wallet_settlement')
+  if (settlement.walletReceivableDeferred > ZERO) {
+    walletLines.push(
+      D(
+        { kind: 'driver_receivable_wallet', driverId },
+        settlement.walletReceivableDeferred,
+        'wallet_settlement_deferred',
+      ),
+    )
+  }
   if (walletLines.length > 0) {
     postings.push(assertBalanced({ eventType: 'wallet_return', occurrenceKey: '1', lines: walletLines }))
   }
@@ -382,10 +447,16 @@ export function cashSettledReturnPostings(input: CashSettledReturnInput): Postin
   const cashAfterWallet = sub(settlement.expectedTotal, settlement.actualWallet)
   const payable = settlement.baseDriverShare > ZERO ? settlement.baseDriverShare : ZERO
   const receivable = settlement.baseDriverShare < ZERO ? abs(settlement.baseDriverShare) : ZERO
-  const cashToOffice = sub(cashAfterWallet, settlement.baseDriverShare)
+  const cashClaimToOffice = sub(cashAfterWallet, settlement.baseDriverShare)
+  if (cashClaimToOffice !== settlement.cashClaimToOffice) {
+    throw new RangeError(
+      `cash-settled claim disagrees with reviewed plan: ${cashClaimToOffice} vs ${settlement.cashClaimToOffice}`,
+    )
+  }
+  const cashToOffice = sub(cashClaimToOffice, settlement.cashReceivableDeferred)
   if (cashToOffice !== settlement.cashToOffice) {
     throw new RangeError(
-      `cash-settled return disagrees with reviewed plan: ${cashToOffice} vs ${settlement.cashToOffice}`,
+      `cash-settled movement disagrees with reviewed plan: ${cashToOffice} vs ${settlement.cashToOffice}`,
     )
   }
 
@@ -393,6 +464,15 @@ export function cashSettledReturnPostings(input: CashSettledReturnInput): Postin
   signedLine(cashLines, { kind: 'driver_cash', driverId }, neg(cashAfterWallet), 'cash_cleared')
   signedLine(cashLines, { kind: 'driver_share_payable', driverId }, payable, 'driver_share_settled')
   signedLine(cashLines, { kind: 'driver_receivable_cash', driverId }, neg(receivable), 'driver_receivable_settled')
+  if (settlement.cashReceivableDeferred > ZERO) {
+    cashLines.push(
+      D(
+        { kind: 'driver_receivable_cash', driverId },
+        settlement.cashReceivableDeferred,
+        'cash_settlement_deferred',
+      ),
+    )
+  }
   signedLine(cashLines, { kind: 'office_cash' }, cashToOffice, 'cash_settlement')
   if (cashLines.length > 0) {
     postings.push(assertBalanced({ eventType: 'float_return', occurrenceKey: '1', lines: cashLines }))
@@ -657,6 +737,8 @@ export interface ShiftPostingInput {
   readonly branchId?: string
   readonly floatTranches: readonly Minor[]
   readonly topupTranches: readonly Minor[]
+  /** Wallet value advanced earlier and consumed automatically at this shift's open. */
+  readonly carriedWalletTranches?: readonly Minor[]
   readonly orders: readonly ShiftOrder[]
   /** Wallet movements no order explains (incentive, top-up, withdrawal) — same term BR1 uses. */
   readonly walletAdjustments?: readonly Minor[]
@@ -686,6 +768,7 @@ export function postingsForOpen(input: ShiftPostingInput): Posting[] {
     // because it paid yesterday. Clears the receivable in the same movement.
     ...(input.carriedTranches ?? []).map((amount, i) => floatCarry(input.driverId, amount, i + 1)),
     ...input.topupTranches.map((amount, i) => walletTopup(input.driverId, amount, i + 1)),
+    ...(input.carriedWalletTranches ?? []).map((amount, i) => walletCarry(input.driverId, amount, i + 1)),
   ]
 }
 
@@ -844,7 +927,13 @@ export function closingBalances(input: ShiftPostingInput): ClosingBalances {
   )
   const walletFromOrders = sum(input.orders.map((o) => sub(orderWalletAmount(o), orderYalagoCut(o, rounding))))
   const adjustments = sum(input.walletAdjustments ?? [])
-  return { endCash, endWallet: add(add(sum(input.topupTranches), walletFromOrders), adjustments) }
+  return {
+    endCash,
+    endWallet: add(
+      add(add(sum(input.topupTranches), sum(input.carriedWalletTranches ?? [])), walletFromOrders),
+      adjustments,
+    ),
+  }
 }
 
 /**
@@ -862,7 +951,7 @@ export function closingBalances(input: ShiftPostingInput): ClosingBalances {
  */
 export function minWalletBalance(input: ShiftPostingInput): Minor {
   const rounding = input.rounding ?? 'floor'
-  let balance = sum(input.topupTranches)
+  let balance = add(sum(input.topupTranches), sum(input.carriedWalletTranches ?? []))
   let lowest = balance
   for (const order of input.orders) {
     balance = add(balance, sub(orderWalletAmount(order), orderYalagoCut(order, rounding)))
@@ -901,6 +990,8 @@ export function fundCode(fund: FundRef): string {
     // answer — becomes unanswerable while the totals still look right.
     case 'driver_receivable_cash':
     case 'driver_receivable_wallet':
+    case 'driver_shift_funding_cash':
+    case 'driver_shift_funding_wallet':
       return `${fund.kind}:${fund.driverId}`
     case 'cost_center':
       return `cost_center:${fund.costCenterId}`
@@ -943,6 +1034,8 @@ export function fundRefFromCode(code: string): FundRef {
     case 'driver_share_payable':
     case 'driver_receivable_cash':
     case 'driver_receivable_wallet':
+    case 'driver_shift_funding_cash':
+    case 'driver_shift_funding_wallet':
       if (tail === '') throw new RangeError(`${head} requires a driver id, got ${JSON.stringify(code)}`)
       return { kind: head, driverId: tail }
     case 'cost_center':

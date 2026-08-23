@@ -4,9 +4,9 @@ import { type CalendarDate, type Minor, minor } from '@ash/domain'
 /**
  * «رأس مال المكتب» in memory — effective-dated, resolved exactly as the Postgres repo resolves it.
  *
- * Seeded with the owner's own figures so a fresh harness behaves like the real branch: كاش المكتب
- * 4,000,000 and محفظة المكتب 1,000,000, effective from the epoch. A test that had to configure
- * capital before it could exercise الترميم would be testing its own setup.
+ * Seeded with the historical figures from the epoch and the owner's 2026-08-23 successor targets:
+ * كاش المكتب 50,000 and محفظة المكتب 10,000. Effective dating keeps older restoration fixtures
+ * truthful while current-day harnesses resolve exactly like production.
  */
 export class MemoryOfficeCapitalTargetRepo implements OfficeCapitalTargetRepo {
   private readonly rows: Array<{
@@ -21,7 +21,22 @@ export class MemoryOfficeCapitalTargetRepo implements OfficeCapitalTargetRepo {
     this.rows.push(
       { branchId, fundCode: 'office_cash', target: minor(400_000_000n), effectiveFrom: '2000-01-01' },
       { branchId, fundCode: 'office_wallet', target: minor(100_000_000n), effectiveFrom: '2000-01-01' },
+      { branchId, fundCode: 'office_cash', target: minor(5_000_000n), effectiveFrom: '2026-08-23' },
+      { branchId, fundCode: 'office_wallet', target: minor(1_000_000n), effectiveFrom: '2026-08-23' },
     )
+  }
+
+  snapshotRows(): Array<{
+    branchId: string
+    fundCode: 'office_cash' | 'office_wallet'
+    target: Minor
+    effectiveFrom: CalendarDate
+  }> {
+    return structuredClone(this.rows)
+  }
+
+  restoreRows(snapshot: ReturnType<MemoryOfficeCapitalTargetRepo['snapshotRows']>): void {
+    this.rows.splice(0, this.rows.length, ...structuredClone(snapshot))
   }
 
   async resolve(
@@ -60,14 +75,23 @@ export class MemoryOfficeCapitalTargetRepo implements OfficeCapitalTargetRepo {
 export class MemoryRestorationRepo implements RestorationRepo {
   private readonly rows: RestorationRecord[] = []
 
+  snapshotRows(): RestorationRecord[] {
+    return structuredClone(this.rows)
+  }
+
+  restoreRows(snapshot: readonly RestorationRecord[]): void {
+    this.rows.splice(0, this.rows.length, ...structuredClone(snapshot))
+  }
+
   async create(row: RestorationRecord): Promise<void> {
     if (this.rows.some((r) => r.branchId === row.branchId && r.businessDate === row.businessDate)) {
       throw Object.assign(new Error('already restored today'), { code: 'DUPLICATE_RESTORATION' })
     }
-    this.rows.push({ ...row })
+    this.rows.push(structuredClone(row))
   }
 
   async find(branchId: string, businessDate: CalendarDate): Promise<RestorationRecord | null> {
-    return this.rows.find((r) => r.branchId === branchId && r.businessDate === businessDate) ?? null
+    const found = this.rows.find((r) => r.branchId === branchId && r.businessDate === businessDate)
+    return found ? structuredClone(found) : null
   }
 }

@@ -63,6 +63,7 @@ import {
   postingsForOpen,
   reverse,
   walletReturn,
+  walletCarry,
   walletTopup,
   REQUIRED_END_SLOTS,
   resolveFxDay,
@@ -181,20 +182,24 @@ function assertPersistableTrancheTotals(input: {
   floatTranches: readonly Minor[]
   topupTranches: readonly Minor[]
   carriedTranches: readonly Minor[]
+  carriedWalletTranches?: readonly Minor[]
 }): void {
   const floatTotal = sum(input.floatTranches)
   const topupTotal = sum(input.topupTranches)
   const carriedTotal = sum(input.carriedTranches)
+  const carriedWalletTotal = sum(input.carriedWalletTranches ?? [])
   assertPersistableMoney('shift', {
     floatTotal,
     topupTotal,
     carriedTotal,
+    carriedWalletTotal,
     openingCashTotal: add(floatTotal, carriedTotal),
+    openingWalletTotal: add(topupTotal, carriedWalletTotal),
   })
 }
 
 function assertPositiveTranches(
-  kind: 'float' | 'topup' | 'carried',
+  kind: 'float' | 'topup' | 'carried' | 'carried_wallet',
   values: readonly Minor[],
 ): void {
   const index = values.findIndex((amount) => amount <= 0n)
@@ -541,6 +546,7 @@ export async function createShift(
     floatTranches: [],
     topupTranches: [],
     carriedTranches: [],
+    carriedWalletTranches: [],
     keptAsReceivable: minor(0n),
     driverSharePaid: minor(0n),
     mediaSlotsStart: [],
@@ -829,7 +835,13 @@ async function notifyBranch(deps: Deps, shift: ShiftRecord, kind: string): Promi
 
 export { notifyBranch }
 
-type ApproveOpenInput = { floatTranches: Minor[]; topupTranches: Minor[]; carriedTranches?: Minor[] }
+type ApproveOpenInput = {
+  floatTranches: Minor[]
+  topupTranches: Minor[]
+  /** Exact shift-funding balances from the manager's review; empty arrays bind to zero. */
+  carriedTranches: Minor[]
+  carriedWalletTranches: Minor[]
+}
 
 export async function approveOpen(
   deps: Deps,
@@ -867,25 +879,36 @@ async function approveOpenLocked(
    * hand the driver money the office never gave him. Refused rather than clamped — a manager who
    * typed the wrong figure should be told, not quietly corrected.
    */
-  const carried = input.carriedTranches ?? []
+  const [cashFundingBalance, walletFundingBalance] = await Promise.all([
+    deps.ledger.fundBalance(shift.branchId, `driver_shift_funding_cash:${shift.driverId}`),
+    deps.ledger.fundBalance(shift.branchId, `driver_shift_funding_wallet:${shift.driverId}`),
+  ])
+  if (cashFundingBalance < 0n || walletFundingBalance < 0n) {
+    throw new ServiceError(409, 'receivable_balance_invalid')
+  }
+  const carried = cashFundingBalance > 0n ? [cashFundingBalance] : []
+  const carriedWallet = walletFundingBalance > 0n ? [walletFundingBalance] : []
+  const requestedCashCarry = sum(input.carriedTranches)
+  const requestedWalletCarry = sum(input.carriedWalletTranches)
+  // Zero is a reviewed amount, never a wildcard. A direct funding event that committed after the
+  // manager loaded the review must force a fresh review before any journal, FX day, shift, or
+  // decision write can occur.
+  if (requestedCashCarry !== cashFundingBalance || requestedWalletCarry !== walletFundingBalance) {
+    throw new ServiceError(409, 'shift_funding_changed', {
+      cash: serializeMoney(cashFundingBalance),
+      wallet: serializeMoney(walletFundingBalance),
+    })
+  }
   assertPositiveTranches('float', input.floatTranches)
   assertPositiveTranches('topup', input.topupTranches)
   assertPositiveTranches('carried', carried)
+  assertPositiveTranches('carried_wallet', carriedWallet)
   assertPersistableTrancheTotals({
     floatTranches: input.floatTranches,
     topupTranches: input.topupTranches,
     carriedTranches: carried,
+    carriedWalletTranches: carriedWallet,
   })
-  const carriedTotal = sum(carried)
-  if (carriedTotal > 0n) {
-    const owed = await deps.ledger.fundBalance(shift.branchId, `driver_receivable_cash:${shift.driverId}`)
-    if (carriedTotal > owed) {
-      throw new ServiceError(422, 'carry_exceeds_receivable', {
-        owed: serializeMoney(owed),
-        asked: serializeMoney(carriedTotal),
-      })
-    }
-  }
 
   // The manager records the float + top-up here (the driver no longer types them). They are the
   // branch's money, disbursed by the manager, so they become part of the shift at approval time.
@@ -894,6 +917,7 @@ async function approveOpenLocked(
     floatTranches: input.floatTranches,
     topupTranches: input.topupTranches,
     carriedTranches: carried,
+    carriedWalletTranches: carriedWallet,
   }
   const result = await guard(deps, withFunds, 'manager_approve_open', actor, {
     startPackage: {
@@ -901,7 +925,7 @@ async function approveOpenLocked(
       batteryPercent: withFunds.batteryStart,
       odometerKm: withFunds.odoStart,
       floatTotal: sum(withFunds.floatTranches),
-      topupTotal: sum(withFunds.topupTranches),
+      topupTotal: add(sum(withFunds.topupTranches), sum(withFunds.carriedWalletTranches ?? [])),
       driverConfirmedAt: withFunds.driverConfirmedAt,
       ...(await batteryContext(deps, withFunds, 'start')),
     },
@@ -917,6 +941,7 @@ async function approveOpenLocked(
     // Clears the receivable and raises his cash, WITHOUT the branch box paying again — it paid
     // yesterday, which is exactly what the ذمة recorded.
     carriedTranches: withFunds.carriedTranches,
+    carriedWalletTranches: withFunds.carriedWalletTranches ?? [],
     topupTranches: withFunds.topupTranches,
     orders: [],
   })
@@ -1737,7 +1762,7 @@ export async function evaluateShift(deps: Deps, shift: ShiftRecord): Promise<Br1
     // equation exactly as it is for `closingBalances`. These two sums must never drift — the
     // ledger would otherwise return a different amount from the one BR1 just balanced.
     floatTotal: add(sum(shift.floatTranches), sum(shift.carriedTranches)),
-    topupTotal: sum(shift.topupTranches),
+    topupTotal: add(sum(shift.topupTranches), sum(shift.carriedWalletTranches ?? [])),
     endCashDeclared: shift.endCashDeclared ?? minor(0n),
     endWalletDeclared: shift.endWalletDeclared ?? minor(0n),
     orders,
@@ -1760,6 +1785,7 @@ export async function evaluateShift(deps: Deps, shift: ShiftRecord): Promise<Br1
     driverId: shift.driverId,
     floatTranches: shift.floatTranches,
     topupTranches: shift.topupTranches,
+    carriedWalletTranches: shift.carriedWalletTranches ?? [],
     orders,
   })
   const cashDeductionTotal = sum(cashDeductions)
@@ -3476,7 +3502,17 @@ export interface CloseSettlementConfirmation {
   /** Legacy fields are accepted by the wire only so the service can name the obsolete policy. */
   keepAsReceivable?: Minor
   payShareNow?: boolean
+  cashReceivableDeferred?: Minor
+  walletReceivableDeferred?: Minor
 }
+
+/**
+ * Honest, deterministic audit evidence for an approved nonzero variance when the manager supplied
+ * no explanation. It is persisted in the settlement, journal and decision log, so the database's
+ * nonblank variance guard remains authoritative rather than being weakened for an optional UI
+ * field.
+ */
+export const SYSTEM_VARIANCE_REASON_NOT_PROVIDED = 'system:manager_provided_no_variance_reason'
 
 interface FixedShiftShare {
   split: { driverShare: Minor; companyShare: Minor; yalagoShare: Minor }
@@ -3514,7 +3550,14 @@ export type SettlementView = FixedShareSettlementPlan & {
 }
 
 /** Compute the exact immutable preview approval will recompute under the same close transaction. */
-export async function settlementFor(deps: Deps, shift: ShiftRecord): Promise<SettlementView> {
+export async function settlementFor(
+  deps: Deps,
+  shift: ShiftRecord,
+  deferred: Pick<
+    CloseSettlementConfirmation,
+    'cashReceivableDeferred' | 'walletReceivableDeferred' | 'keepAsReceivable'
+  > = {},
+): Promise<SettlementView> {
   if (shift.endCashDeclared === null || shift.endWalletDeclared === null) {
     throw new ServiceError(422, 'settlement_figures_missing')
   }
@@ -3522,7 +3565,17 @@ export async function settlementFor(deps: Deps, shift: ShiftRecord): Promise<Set
   const rows = await deps.orders.listByShift(shift.id)
   const share = fixedShiftShare(rows)
   const deductions = allocateCashDeductions(await deps.cashDeductions.listByShift(shift.id), share.split.driverShare)
-  const plan = planFixedShareSettlement({
+  if (
+    deferred.keepAsReceivable !== undefined &&
+    deferred.cashReceivableDeferred !== undefined &&
+    deferred.keepAsReceivable !== deferred.cashReceivableDeferred
+  ) {
+    throw new ServiceError(422, 'receivable_amount_conflict')
+  }
+  const cashReceivableDeferred =
+    deferred.cashReceivableDeferred ?? deferred.keepAsReceivable ?? minor(0n)
+  const walletReceivableDeferred = deferred.walletReceivableDeferred ?? minor(0n)
+  const settlementInputs = {
     deliveryFeeTotal: share.deliveryFeeTotal,
     fixedDriverShare: share.fixedDriverShare,
     manualDriverShare: share.manualDriverShare,
@@ -3531,6 +3584,29 @@ export async function settlementFor(deps: Deps, shift: ShiftRecord): Promise<Set
     expectedWallet: br1.result.expectedWallet,
     actualCash: shift.endCashDeclared,
     actualWallet: shift.endWalletDeclared,
+  }
+  const withoutDeferral = planFixedShareSettlement(settlementInputs)
+  const maximumCashReceivable = withoutDeferral.cashClaimToOffice > 0n
+    ? withoutDeferral.cashClaimToOffice
+    : minor(0n)
+  const maximumWalletReceivable = withoutDeferral.walletClaimToOffice > 0n
+    ? withoutDeferral.walletClaimToOffice
+    : minor(0n)
+  if (
+    cashReceivableDeferred < 0n ||
+    walletReceivableDeferred < 0n ||
+    cashReceivableDeferred > maximumCashReceivable ||
+    walletReceivableDeferred > maximumWalletReceivable
+  ) {
+    throw new ServiceError(422, 'invalid_receivable_amount', {
+      maximumCash: serializeMoney(maximumCashReceivable),
+      maximumWallet: serializeMoney(maximumWalletReceivable),
+    })
+  }
+  const plan = planFixedShareSettlement({
+    ...settlementInputs,
+    cashReceivableDeferred,
+    walletReceivableDeferred,
   })
   assertPersistableMoney('settlement', {
     deliveryFeeTotal: plan.deliveryFeeTotal,
@@ -3548,6 +3624,10 @@ export async function settlementFor(deps: Deps, shift: ShiftRecord): Promise<Set
     variance: plan.variance,
     finalEmployeeCash: plan.finalEmployeeCash,
     officeEntitlement: plan.officeEntitlement,
+    cashClaimToOffice: plan.cashClaimToOffice,
+    walletClaimToOffice: plan.walletClaimToOffice,
+    cashReceivableDeferred: plan.cashReceivableDeferred,
+    walletReceivableDeferred: plan.walletReceivableDeferred,
     cashToOffice: plan.cashToOffice,
     walletToOffice: plan.walletToOffice,
     walletAmount: plan.wallet.amount,
@@ -3593,8 +3673,16 @@ function requireSettlementConfirmation(
   plan: SettlementView,
   input: CloseSettlementConfirmation,
 ): { varianceReason: string | null } {
-  if ((input.keepAsReceivable ?? minor(0n)) !== 0n || input.payShareNow === false) {
+  if (input.payShareNow === false) {
     throw new ServiceError(422, 'fixed_cash_settlement_required')
+  }
+  const requestedCash = input.cashReceivableDeferred ?? input.keepAsReceivable ?? minor(0n)
+  const requestedWallet = input.walletReceivableDeferred ?? minor(0n)
+  if (
+    requestedCash !== plan.cashReceivableDeferred ||
+    requestedWallet !== plan.walletReceivableDeferred
+  ) {
+    throw new ServiceError(409, 'settlement_changed_since_review', { receivableChanged: true })
   }
   const missing: string[] = []
   if (!input.walletTransferConfirmed) missing.push('walletTransferConfirmed')
@@ -3607,9 +3695,15 @@ function requireSettlementConfirmation(
       current: plan.settlementHash,
     })
   }
-  const reason = input.varianceReason?.trim() || null
-  if (plan.variance !== 0n && reason === null) throw new ServiceError(422, 'variance_reason_required')
+  const reason = normalizedVarianceReason(plan.variance, input.varianceReason)
   return { varianceReason: reason }
+}
+
+function normalizedVarianceReason(variance: Minor, supplied: string | null | undefined): string | null {
+  const trimmed = supplied?.trim() ?? ''
+  const humanReason = /[^\p{White_Space}\p{Cf}]/u.test(trimmed) ? trimmed : null
+  if (humanReason !== null) return humanReason
+  return variance === 0n ? null : SYSTEM_VARIANCE_REASON_NOT_PROVIDED
 }
 
 /** Exact retry after a committed response was lost: return success without posting a second time. */
@@ -3618,8 +3712,17 @@ function requireSettlementReplay(
   confirmation: CloseSettlementConfirmation,
   reviewedOrdersHash: string | null,
 ): void {
-  if ((confirmation.keepAsReceivable ?? minor(0n)) !== 0n || confirmation.payShareNow === false) {
+  if (confirmation.payShareNow === false) {
     throw new ServiceError(422, 'fixed_cash_settlement_required')
+  }
+  const requestedCash =
+    confirmation.cashReceivableDeferred ?? confirmation.keepAsReceivable ?? minor(0n)
+  const requestedWallet = confirmation.walletReceivableDeferred ?? minor(0n)
+  if (
+    requestedCash !== stored.cashReceivableDeferred ||
+    requestedWallet !== stored.walletReceivableDeferred
+  ) {
+    throw new ServiceError(409, 'settlement_changed_since_review', { receivableChanged: true })
   }
   if (!confirmation.walletTransferConfirmed || !confirmation.cashSettlementConfirmed) {
     throw new ServiceError(422, 'settlement_confirmation_required')
@@ -3633,8 +3736,10 @@ function requireSettlementReplay(
       current: stored.settlementHash,
     })
   }
-  const reason = confirmation.varianceReason?.trim() || null
-  if (stored.variance !== 0n && reason === null) throw new ServiceError(422, 'variance_reason_required')
+  // Lost-response retries normalize an omitted/blank value exactly as the original request did.
+  // Thus a system-marked settlement replays idempotently, while omitting a previously supplied
+  // human explanation correctly remains a changed confirmation.
+  const reason = normalizedVarianceReason(stored.variance, confirmation.varianceReason)
   if (reason !== stored.varianceReason) {
     throw new ServiceError(409, 'settlement_changed_since_review', {
       reasonChanged: true,
@@ -3669,6 +3774,10 @@ function settlementRecord(
     variance: plan.variance,
     varianceDirection: plan.varianceDirection,
     finalEmployeeCash: plan.finalEmployeeCash,
+    cashClaimToOffice: plan.cashClaimToOffice,
+    walletClaimToOffice: plan.walletClaimToOffice,
+    cashReceivableDeferred: plan.cashReceivableDeferred,
+    walletReceivableDeferred: plan.walletReceivableDeferred,
     walletToOffice: plan.walletToOffice,
     cashToOffice: plan.cashToOffice,
     walletAction: plan.wallet.action,
@@ -3728,7 +3837,7 @@ async function approveCloseLocked(
   await prepareShiftReview(deps, shift, actor.userId)
   const orderRows = await deps.orders.listByShift(shiftId)
   const br1 = await evaluateShift(deps, shift)
-  const settlement = await settlementFor(deps, shift)
+  const settlement = await settlementFor(deps, shift, confirmation)
   const evidenceWarnings = await unacknowledgedEvidenceWarnings(deps, shiftId, 'end')
   if (evidenceWarnings.length > 0) {
     throw new ServiceError(422, 'stale_evidence_confirmation_required', {
@@ -3769,6 +3878,7 @@ async function approveCloseLocked(
       branchId: shift.branchId,
       floatTranches: shift.floatTranches,
       carriedTranches: shift.carriedTranches,
+      carriedWalletTranches: shift.carriedWalletTranches ?? [],
       topupTranches: shift.topupTranches,
       orders: todaysOrders,
       walletAdjustments: toWalletAdjustments(await deps.movements.listByShift(shiftId)),
@@ -3796,7 +3906,7 @@ async function approveCloseLocked(
     ...shift,
     state: result.next,
     approvedBy: actor.userId,
-    keptAsReceivable: minor(0n),
+    keptAsReceivable: settlement.cashReceivableDeferred,
     driverSharePaid: settlement.finalEmployeeCash > 0n ? settlement.finalEmployeeCash : minor(0n),
     equationDiff: br1.result.scalarDiff,
     cashDiff: br1.result.cashDiff,
@@ -3855,6 +3965,7 @@ async function voidShiftLocked(
   const floatTotal = sum(shift.floatTranches)
   const topupTotal = sum(shift.topupTranches)
   const carriedTotal = sum(shift.carriedTranches)
+  const carriedWalletTotal = sum(shift.carriedWalletTranches ?? [])
   if (floatTotal > minor(0n)) postings.push(floatReturn(shift.driverId, floatTotal))
   /*
    * A CARRIED ذمة GOES BACK TO BEING A ذمة, not to the branch box.
@@ -3865,6 +3976,9 @@ async function voidShiftLocked(
    * the driver would still be holding the cash with nothing on the books saying so.
    */
   if (carriedTotal > minor(0n)) postings.push(reverse(floatCarry(shift.driverId, carriedTotal), `void-carry-${shift.id}`))
+  if (carriedWalletTotal > minor(0n)) {
+    postings.push(reverse(walletCarry(shift.driverId, carriedWalletTotal), `void-wallet-carry-${shift.id}`))
+  }
   if (topupTotal > minor(0n)) postings.push(walletReturn(shift.driverId, topupTotal))
   if (postings.length > 0) {
     assertPersistablePostings(postings)
@@ -3923,6 +4037,8 @@ async function forceCloseLocked(
     reviewedSettlementHash?: string
     walletTransferConfirmed?: boolean
     cashSettlementConfirmed?: boolean
+    cashReceivableDeferred?: Minor | undefined
+    walletReceivableDeferred?: Minor | undefined
     reason: string
   },
 ): Promise<
@@ -3945,6 +4061,8 @@ async function forceCloseLocked(
       ...(input.reviewedSettlementHash === undefined ? {} : { reviewedSettlementHash: input.reviewedSettlementHash }),
       ...(input.walletTransferConfirmed === undefined ? {} : { walletTransferConfirmed: input.walletTransferConfirmed }),
       ...(input.cashSettlementConfirmed === undefined ? {} : { cashSettlementConfirmed: input.cashSettlementConfirmed }),
+      ...(input.cashReceivableDeferred === undefined ? {} : { cashReceivableDeferred: input.cashReceivableDeferred }),
+      ...(input.walletReceivableDeferred === undefined ? {} : { walletReceivableDeferred: input.walletReceivableDeferred }),
       varianceReason: input.reason,
     }, null)
     return { shift, postings: 0, prepared: false, replayed: true }
@@ -4077,11 +4195,16 @@ async function forceCloseLocked(
     endCashDeclared: cashDeclared,
     endWalletDeclared: walletDeclared,
   }
-  const settlement = await settlementFor(deps, stagedShift)
+  const settlement = await settlementFor(deps, stagedShift, {
+    ...(input.cashReceivableDeferred === undefined ? {} : { cashReceivableDeferred: input.cashReceivableDeferred }),
+    ...(input.walletReceivableDeferred === undefined ? {} : { walletReceivableDeferred: input.walletReceivableDeferred }),
+  })
   requireSettlementConfirmation(settlement, {
     ...(input.reviewedSettlementHash === undefined ? {} : { reviewedSettlementHash: input.reviewedSettlementHash }),
     ...(input.walletTransferConfirmed === undefined ? {} : { walletTransferConfirmed: input.walletTransferConfirmed }),
     ...(input.cashSettlementConfirmed === undefined ? {} : { cashSettlementConfirmed: input.cashSettlementConfirmed }),
+    ...(input.cashReceivableDeferred === undefined ? {} : { cashReceivableDeferred: input.cashReceivableDeferred }),
+    ...(input.walletReceivableDeferred === undefined ? {} : { walletReceivableDeferred: input.walletReceivableDeferred }),
     varianceReason: input.reason,
   })
   const shiftInput = {
@@ -4089,6 +4212,7 @@ async function forceCloseLocked(
     branchId: shift.branchId,
     floatTranches: shift.floatTranches,
     carriedTranches: shift.carriedTranches,
+    carriedWalletTranches: shift.carriedWalletTranches ?? [],
     topupTranches: shift.topupTranches,
     orders: todaysOrders,
     walletAdjustments: toWalletAdjustments(await deps.movements.listByShift(shiftId)),
@@ -4115,7 +4239,7 @@ async function forceCloseLocked(
     ...stagedShift,
     state: result.next,
     approvedBy: actor.userId,
-    keptAsReceivable: minor(0n),
+    keptAsReceivable: settlement.cashReceivableDeferred,
     driverSharePaid: settlement.finalEmployeeCash > 0n ? settlement.finalEmployeeCash : minor(0n),
     odoEnd: finalOdometer,
     odoEndAnomalyConfirmedAt: anomalousOdometer

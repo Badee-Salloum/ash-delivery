@@ -1,8 +1,20 @@
 import { createHash } from 'node:crypto'
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
-import type { CashCountLine, CashCountRecord, Deps } from '@ash/contracts'
-import { createCashCountRequest, manualEntryRequest, moneySchema, serializeMoney } from '@ash/contracts'
+import type {
+  CashCountLine,
+  CashCountRecord,
+  Deps,
+  FinancialTransactionDeps,
+  ReceivableEventRecord,
+} from '@ash/contracts'
+import {
+  createCashCountRequest,
+  createReceivableEventRequest,
+  manualEntryRequest,
+  moneySchema,
+  serializeMoney,
+} from '@ash/contracts'
 import {
   type Minor,
   type Posting,
@@ -11,14 +23,57 @@ import {
   fundRefFromCode,
   isDateLocked,
   minor,
+  parseMinor,
   planRestoration,
+  postingsForCashCountReconciliation,
   postingsForRestoration,
+  receivableAdjustment,
   reverse,
   sweepToCompany,
   weekStartFor,
 } from '@ash/domain'
 import { ServiceError, assertWeekOpen, ensureFxDay, todayFor } from './shifts.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
+
+/** Exact storage range of PostgreSQL bigint-backed money columns and journal lines. */
+const PG_MINOR_MAX = 9_223_372_036_854_775_807n
+const PG_MINOR_MIN = -9_223_372_036_854_775_808n
+
+function assertPersistableTreasuryMinor(field: string, value: bigint): void {
+  if (value >= PG_MINOR_MIN && value <= PG_MINOR_MAX) return
+  throw new ServiceError(422, 'money_total_out_of_range', {
+    field,
+    value: value.toString(),
+    min: PG_MINOR_MIN.toString(),
+    max: PG_MINOR_MAX.toString(),
+  })
+}
+
+/** Guard both the immutable JSON snapshot and its bigint `net_to_company_minor` projection. */
+function assertPersistableRestorationPlan(plan: RestorationPlan): void {
+  for (const leg of plan.legs) {
+    const scope = `restoration.legs.${leg.fundCode}`
+    assertPersistableTreasuryMinor(`${scope}.counted`, leg.counted)
+    assertPersistableTreasuryMinor(`${scope}.receivables`, leg.receivables)
+    assertPersistableTreasuryMinor(`${scope}.position`, leg.position)
+    assertPersistableTreasuryMinor(`${scope}.capitalTarget`, leg.capitalTarget)
+    assertPersistableTreasuryMinor(`${scope}.delta`, leg.delta)
+    assertPersistableTreasuryMinor(`${scope}.amount`, leg.amount)
+  }
+  assertPersistableTreasuryMinor('restoration.netToCompany', plan.netToCompany)
+}
+
+/** No derived restoration or reconciliation line may reach a PostgreSQL bigint cast unchecked. */
+function assertPersistableTreasuryPostings(postings: readonly Posting[]): void {
+  for (const posting of postings) {
+    posting.lines.forEach((line, index) => {
+      assertPersistableTreasuryMinor(
+        `restoration.journal.${posting.eventType}.${posting.occurrenceKey}.lines[${index}]`,
+        line.amount,
+      )
+    })
+  }
+}
 
 /**
  * Treasury: the daily cash count (E-5 / س51) and disciplined manual entries (E-3 / س50).
@@ -67,6 +122,12 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       if (!(COUNTABLE_FUNDS as readonly string[]).includes(line.fundCode)) {
         throw new ServiceError(422, 'fund_not_countable', { fundCode: line.fundCode })
       }
+      // Physical cash cannot be negative. The wallet remains signed because the provider may
+      // legitimately report a negative balance/liability, but accepting a negative drawer count
+      // would make restoration manufacture an extra draw from the company box.
+      if (line.fundCode === 'office_cash' && line.counted < 0n) {
+        throw new ServiceError(422, 'cash_count_negative', { fundCode: line.fundCode })
+      }
       // The computed side is FROZEN here, not recomputed at read time. Otherwise a later
       // posting silently rewrites history and the variance the manager signed off disappears.
       const computed = await deps.ledger.fundBalance(branchId, line.fundCode)
@@ -106,8 +167,9 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     record.proofSha256 = sealProof(record)
     record.sealedAtMs = record.countedAtMs
 
+    let stored: CashCountRecord
     try {
-      await deps.cashCounts.create(record)
+      stored = await deps.cashCounts.create(record)
     } catch (err) {
       if ((err as { code?: string }).code === 'DUPLICATE_COUNT') {
         throw new ServiceError(409, 'already_counted_today', { businessDate })
@@ -117,18 +179,18 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
 
     await deps.audit.append({
       tableName: 'cash_counts',
-      recordId: record.id,
+      recordId: stored.id,
       action: 'INSERT',
       actorId: req.actor!.userId,
       actorKind: 'user',
       branchId,
       requestId: req.requestId,
       before: null,
-      after: serializeCount(record),
+      after: serializeCount(stored),
       occurredAtMs: deps.clock.nowMs(),
     })
 
-    return reply.code(201).send(serializeCount(record))
+    return reply.code(201).send(serializeCount(stored))
   })
 
   app.get('/cash-counts/:date', { config: { permission: 'cash_count.perform', subject: ownBranch } }, async (req) => {
@@ -359,24 +421,250 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
    * screen pre-fills from this, which is what makes «handled when he starts a new shift» automatic
    * rather than something a manager has to remember.
    */
-  app.get('/receivables', { config: { permission: 'branch_data.view', subject: ownBranch } }, async (req) => {
+  const listReceivables = async (req: FastifyRequest) => {
     const branchId = resolveBranch(req)
-    const drivers = await deps.directory.listDrivers(branchId)
-    const rows = await Promise.all(
-      drivers.map(async (d) => ({
+    const [drivers, ordinaryBalances, shiftFundingBalances] = await Promise.all([
+      deps.directory.listDrivers(branchId),
+      deps.ledger.balancesByPrefix(branchId, 'driver_receivable_'),
+      deps.ledger.balancesByPrefix(branchId, 'driver_shift_funding_'),
+    ])
+    const rows = drivers.map((d) => {
+      const ordinaryCash = minor(ordinaryBalances[`driver_receivable_cash:${d.id}`] ?? 0n)
+      const ordinaryWallet = minor(ordinaryBalances[`driver_receivable_wallet:${d.id}`] ?? 0n)
+      const shiftFundingCash = minor(shiftFundingBalances[`driver_shift_funding_cash:${d.id}`] ?? 0n)
+      const shiftFundingWallet = minor(shiftFundingBalances[`driver_shift_funding_wallet:${d.id}`] ?? 0n)
+      const amounts = [ordinaryCash, ordinaryWallet, shiftFundingCash, shiftFundingWallet]
+      if (amounts.some((amount) => amount < 0n)) {
+        throw new ServiceError(500, 'receivable_balance_integrity_error', { driverId: d.id })
+      }
+      return {
         driverId: d.id,
         code: d.code,
         nameAr: d.fullNameAr,
-        cash: serializeMoney(await deps.ledger.fundBalance(branchId, `driver_receivable_cash:${d.id}`)),
-        wallet: serializeMoney(await deps.ledger.fundBalance(branchId, `driver_receivable_wallet:${d.id}`)),
-      })),
-    )
+        ordinaryCash,
+        ordinaryWallet,
+        shiftFundingCash,
+        shiftFundingWallet,
+        cash: minor(ordinaryCash + shiftFundingCash),
+        wallet: minor(ordinaryWallet + shiftFundingWallet),
+      }
+    })
     // Only the drivers who actually owe something. A list of zeroes is noise on a screen a manager
     // reads at the counter with a driver waiting.
-    const owing = rows.filter((r) => r.cash !== '0.00' || r.wallet !== '0.00')
-    const total = owing.reduce((sum, r) => sum + BigInt(r.cash.replace('.', '')), 0n)
-    return { total: serializeMoney(minor(total)), drivers: owing }
+    const owing = rows.filter((r) => r.cash !== 0n || r.wallet !== 0n)
+    const cashTotal = minor(owing.reduce((sum, r) => sum + r.cash, 0n))
+    const walletTotal = minor(owing.reduce((sum, r) => sum + r.wallet, 0n))
+    const grandTotal = minor(cashTotal + walletTotal)
+    const ordinaryCashTotal = minor(owing.reduce((sum, r) => sum + r.ordinaryCash, 0n))
+    const ordinaryWalletTotal = minor(owing.reduce((sum, r) => sum + r.ordinaryWallet, 0n))
+    const shiftFundingCashTotal = minor(owing.reduce((sum, r) => sum + r.shiftFundingCash, 0n))
+    const shiftFundingWalletTotal = minor(owing.reduce((sum, r) => sum + r.shiftFundingWallet, 0n))
+    return {
+      // Backwards compatibility for cached/admin clients: `total` historically meant cash only.
+      total: serializeMoney(cashTotal),
+      cashTotal: serializeMoney(cashTotal),
+      walletTotal: serializeMoney(walletTotal),
+      grandTotal: serializeMoney(grandTotal),
+      ordinaryCashTotal: serializeMoney(ordinaryCashTotal),
+      ordinaryWalletTotal: serializeMoney(ordinaryWalletTotal),
+      shiftFundingCashTotal: serializeMoney(shiftFundingCashTotal),
+      shiftFundingWalletTotal: serializeMoney(shiftFundingWalletTotal),
+      drivers: owing.map((row) => ({
+        ...row,
+        ordinaryCash: serializeMoney(row.ordinaryCash),
+        ordinaryWallet: serializeMoney(row.ordinaryWallet),
+        shiftFundingCash: serializeMoney(row.shiftFundingCash),
+        shiftFundingWallet: serializeMoney(row.shiftFundingWallet),
+        cash: serializeMoney(row.cash),
+        wallet: serializeMoney(row.wallet),
+        total: serializeMoney(minor(row.cash + row.wallet)),
+      })),
+    }
+  }
+  const receivableReadOptions = { config: { permission: 'branch_data.view' as const, subject: ownBranch } }
+  app.get('/receivables', receivableReadOptions, listReceivables)
+  app.get('/treasury/receivables', receivableReadOptions, listReceivables)
+
+  /** Immutable command history, newest first, for explaining every direct debt and collection. */
+  const listReceivableEvents = async (req: FastifyRequest) => {
+    const query = z.object({ driverId: z.string().min(1).optional() }).parse(req.query)
+    const branchId = resolveBranch(req)
+    const [events, drivers] = await Promise.all([
+      deps.receivableEvents.listByBranchAndDriver(branchId, query.driverId),
+      deps.directory.listDrivers(branchId),
+    ])
+    const driverById = new Map(drivers.map((driver) => [driver.id, driver]))
+    return {
+      events: events.map((event) => {
+        const driver = driverById.get(event.driverId)
+        return {
+          id: event.id,
+          driverId: event.driverId,
+          driverCode: driver?.code ?? null,
+          driverNameAr: driver?.fullNameAr ?? null,
+          receivableKind: event.receivableKind,
+          channel: event.channel,
+          direction: event.direction,
+          amount: serializeMoney(event.amount),
+          businessDate: event.businessDate,
+          reason: event.reason,
+          journalEntryId: event.journalEntryId,
+          createdBy: event.createdBy,
+          createdAtMs: event.createdAtMs,
+        }
+      }),
+    }
+  }
+  app.get('/receivables/events', receivableReadOptions, listReceivableEvents)
+  app.get('/treasury/receivables/events', receivableReadOptions, listReceivableEvents)
+
+  const sameReceivableCommand = (
+    prior: ReceivableEventRecord,
+    input: {
+      driverId: string
+      receivableKind: 'ordinary' | 'shift_funding'
+      channel: 'cash' | 'wallet'
+      direction: 'create' | 'collect'
+      amount: Minor
+      reason: string
+    },
+  ): boolean =>
+    prior.driverId === input.driverId &&
+    prior.receivableKind === input.receivableKind &&
+    prior.channel === input.channel &&
+    prior.direction === input.direction &&
+    prior.amount === input.amount &&
+    prior.reason === input.reason
+
+  const sendReceivableEvent = (
+    reply: FastifyReply,
+    event: ReceivableEventRecord,
+    replayed: boolean,
+  ) => reply.code(replayed ? 200 : 201).send({
+    id: event.id,
+    driverId: event.driverId,
+    receivableKind: event.receivableKind,
+    channel: event.channel,
+    direction: event.direction,
+    amount: serializeMoney(event.amount),
+    businessDate: event.businessDate,
+    reason: event.reason,
+    journalEntryId: event.journalEntryId,
+    replayed,
   })
+
+  /**
+   * Create or collect a driver receivable without associating it with a shift.
+   *
+   * `ordinary` remains until a later collection. `shift_funding` is consumed automatically when
+   * this driver's next shift is approved open. Both are office assets and both retain the cash vs
+   * wallet channel so restoration adds them to the correct capital target.
+  */
+  const writeReceivableEvent = async (req: FastifyRequest, reply: FastifyReply) => {
+      const body = createReceivableEventRequest.parse(req.body)
+      const branchId = resolveBranch(req)
+
+      // A lost-response retry is a read of the immutable receipt, not a new business operation.
+      // Resolve it before mutable driver/week/FX rules so deactivating a debtor or closing the week
+      // cannot turn an already-committed command into a false failure. Branch authorisation and the
+      // complete command fingerprint still apply; a changed reuse of the key remains a conflict.
+      const committed = await deps.receivableEvents.findByIdempotencyKey(branchId, body.idempotencyKey)
+      if (committed) {
+        if (!sameReceivableCommand(committed, body)) {
+          throw new ServiceError(409, 'idempotency_key_conflict')
+        }
+        return sendReceivableEvent(reply, committed, true)
+      }
+
+      const driver = await deps.directory.driver(body.driverId)
+      if (!driver) throw new ServiceError(404, 'driver_not_found')
+      if (driver.branchId !== branchId) throw new ServiceError(422, 'driver_in_another_branch')
+      // An inactive driver may still owe office money. Keep that debt collectible, but never hand
+      // them a new ordinary advance or next-shift funding while they are disabled.
+      if (body.direction === 'create' && !driver.active) {
+        throw new ServiceError(404, 'driver_not_found')
+      }
+
+      const businessDate = todayFor(deps)
+      await assertWeekOpen(deps, branchId, businessDate)
+      const fxDayId = await ensureFxDay(deps, businessDate)
+      const result = await deps.financialUnitOfWork.run(
+        {
+          lockKey: `receivables:${branchId}`,
+          actorId: req.actor!.userId,
+          requestId: req.requestId,
+        },
+        async (transaction) => {
+          const prior = await transaction.receivableEvents.findByIdempotencyKey(
+            branchId,
+            body.idempotencyKey,
+          )
+          if (prior) {
+            if (!sameReceivableCommand(prior, body)) {
+              throw new ServiceError(409, 'idempotency_key_conflict')
+            }
+            return { event: prior, replayed: true }
+          }
+
+          const receivablePrefix = body.receivableKind === 'shift_funding'
+            ? 'driver_shift_funding'
+            : 'driver_receivable'
+          const receivableCode = `${receivablePrefix}_${body.channel}:${body.driverId}`
+          const officeCode = body.channel === 'cash' ? 'office_cash' : 'office_wallet'
+          const available = await transaction.ledger.fundBalance(
+            branchId,
+            body.direction === 'create' ? officeCode : receivableCode,
+          )
+          if (available < body.amount) {
+            throw new ServiceError(422, body.direction === 'create' ? 'insufficient_funds' : 'receivable_overcollection', {
+              available: serializeMoney(available),
+            })
+          }
+
+          const posting = receivableAdjustment(
+            body.driverId,
+            body.receivableKind,
+            body.channel,
+            body.direction,
+            body.amount,
+            body.idempotencyKey,
+          )
+          const [journal] = await transaction.ledger.post(branchId, [posting], {
+            shiftId: null,
+            businessDate,
+            postingDate: businessDate,
+            weekStartDate: weekStartFor(businessDate),
+            fxDayId,
+            createdBy: req.actor!.userId,
+            reason: body.reason,
+          })
+          if (!journal) throw new ServiceError(409, 'idempotency_key_conflict')
+
+          const event: ReceivableEventRecord = {
+            id: deps.ids.uuid(),
+            branchId,
+            driverId: body.driverId,
+            receivableKind: body.receivableKind,
+            channel: body.channel,
+            direction: body.direction,
+            amount: body.amount,
+            businessDate,
+            reason: body.reason,
+            idempotencyKey: body.idempotencyKey,
+            journalEntryId: journal.id,
+            createdBy: req.actor!.userId,
+            createdAtMs: deps.clock.nowMs(),
+          }
+          await transaction.receivableEvents.create(event)
+          return { event, replayed: false }
+        },
+      )
+
+      return sendReceivableEvent(reply, result.event, result.replayed)
+  }
+  const receivableWriteOptions = { config: { permission: 'journal.manual.write' as const, subject: targetBranch } }
+  app.post('/receivables/events', receivableWriteOptions, writeReceivableEvent)
+  app.post('/treasury/receivables/events', receivableWriteOptions, writeReceivableEvent)
 
   const companyMoveRequest = z.object({
     amount: moneySchema,
@@ -483,6 +771,71 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
   // ── «الترميم» — the daily restoration (owner decision 10) ──────────────────────────────────
 
   /**
+   * Publish today's effective restoration targets as one audited, branch-serialized command.
+   * The effective-dated rows leave prior restorations unchanged; once today is restored the target
+   * is frozen and a successor must start on a later business date.
+   */
+  app.put(
+    '/treasury/capital-targets',
+    { config: { permission: 'journal.manual.write', subject: targetBranch } },
+    async (req) => {
+      const capitalTargetText = z.string().trim().regex(/^-?\d+(\.\d{1,2})?$/)
+      const body = z.object({
+        cashTarget: capitalTargetText,
+        walletTarget: capitalTargetText,
+        reason: z.string().trim().min(1).max(500),
+      }).parse(req.body)
+      const branchId = resolveBranch(req)
+      const businessDate = todayFor(deps)
+      const actorId = req.actor!.userId
+      const cashTarget = parseMinor(body.cashTarget)
+      const walletTarget = parseMinor(body.walletTarget)
+
+      if (cashTarget < 0n || walletTarget < 0n) {
+        throw new ServiceError(422, 'capital_target_negative')
+      }
+      assertPersistableTreasuryMinor('capitalTargets.office_cash', cashTarget)
+      assertPersistableTreasuryMinor('capitalTargets.office_wallet', walletTarget)
+      await assertWeekOpen(deps, branchId, businessDate)
+
+      await deps.financialUnitOfWork.run(
+        {
+          lockKey: `receivables:${branchId}`,
+          actorId,
+          requestId: req.requestId,
+        },
+        async (tx: FinancialTransactionDeps) => {
+          if ((await tx.restorations.find(branchId, businessDate)) !== null) {
+            throw new ServiceError(409, 'capital_target_date_already_restored', { businessDate })
+          }
+          await tx.capitalTargets.upsert({
+            branchId,
+            fundCode: 'office_cash',
+            target: cashTarget,
+            effectiveFrom: businessDate,
+            createdBy: actorId,
+            note: body.reason,
+          })
+          await tx.capitalTargets.upsert({
+            branchId,
+            fundCode: 'office_wallet',
+            target: walletTarget,
+            effectiveFrom: businessDate,
+            createdBy: actorId,
+            note: body.reason,
+          })
+        },
+      )
+
+      return {
+        businessDate,
+        cashTarget: serializeMoney(cashTarget),
+        walletTarget: serializeMoney(walletTarget),
+      }
+    },
+  )
+
+  /**
    * Build the positions from the SEALED COUNT before posting, never from the request body.
    *
    * Owner decision (j): «count first, then ترميم». The whole point is that it settles against money
@@ -494,36 +847,55 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     branchId: string,
     businessDate: string,
     source: 'sealed_count' | 'live_ledger' = 'sealed_count',
+    readDeps: Pick<Deps, 'cashCounts' | 'capitalTargets' | 'ledger'> = deps,
   ) {
-    const [count, targets, receivables] = await Promise.all([
-      deps.cashCounts.find(branchId, businessDate),
-      deps.capitalTargets.resolve(branchId, businessDate),
-      deps.ledger.balancesByPrefix(branchId, 'driver_receivable_'),
+    const [count, targets, ordinaryReceivables, shiftFundingReceivables] = await Promise.all([
+      readDeps.cashCounts.find(branchId, businessDate),
+      readDeps.capitalTargets.resolve(branchId, businessDate),
+      readDeps.ledger.balancesByPrefix(branchId, 'driver_receivable_'),
+      readDeps.ledger.balancesByPrefix(branchId, 'driver_shift_funding_'),
     ])
-    const sumFor = (suffix: string): Minor =>
-      minor(
-        Object.entries(receivables)
-          .filter(([code]) => code.startsWith(`driver_receivable_${suffix}:`))
-          .reduce((acc, [, v]) => acc + v, 0n),
-      )
+    const sumFor = (suffix: string): Minor => {
+      const total = [...Object.entries(ordinaryReceivables), ...Object.entries(shiftFundingReceivables)]
+        .filter(([code]) =>
+          code.startsWith(`driver_receivable_${suffix}:`) ||
+          code.startsWith(`driver_shift_funding_${suffix}:`),
+        )
+        .reduce((acc, [, value]) => acc + value, 0n)
+      assertPersistableTreasuryMinor(`restoration.receivables.${suffix}`, total)
+      return minor(total)
+    }
+
+    for (const [fundCode, balance] of [
+      ...Object.entries(ordinaryReceivables),
+      ...Object.entries(shiftFundingReceivables),
+    ]) {
+      if (balance < 0n) throw new ServiceError(500, 'receivable_balance_integrity_error', { fundCode })
+    }
 
     return {
       count,
       positions: await Promise.all(
-        (['office_cash', 'office_wallet'] as const).map(async (fundCode) => ({
-          fundCode,
-          counted: source === 'live_ledger'
-            ? await deps.ledger.fundBalance(branchId, fundCode)
-            : count?.lines.find((l) => l.fundCode === fundCode)?.counted ?? minor(0n),
-          receivables: sumFor(fundCode === 'office_cash' ? 'cash' : 'wallet'),
-          capitalTarget: targets[fundCode] ?? null,
-        })),
+        (['office_cash', 'office_wallet'] as const).map(async (fundCode) => {
+          const counted = source === 'live_ledger'
+            ? await readDeps.ledger.fundBalance(branchId, fundCode)
+            : count?.lines.find((line) => line.fundCode === fundCode)?.counted ?? minor(0n)
+          const receivables = sumFor(fundCode === 'office_cash' ? 'cash' : 'wallet')
+          const capitalTarget = targets[fundCode] ?? null
+          assertPersistableTreasuryMinor(`restoration.counted.${fundCode}`, counted)
+          if (capitalTarget !== null) {
+            assertPersistableTreasuryMinor(`restoration.capitalTarget.${fundCode}`, capitalTarget)
+          }
+          return { fundCode, counted, receivables, capitalTarget }
+        }),
       ),
     }
   }
 
   const serializeLeg = (l: RestorationPlan['legs'][number]) => ({
     fundCode: l.fundCode,
+    counted: serializeMoney(l.counted),
+    receivables: serializeMoney(l.receivables),
     position: serializeMoney(l.position),
     capitalTarget: serializeMoney(l.capitalTarget),
     delta: serializeMoney(l.delta),
@@ -547,6 +919,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       completed === null ? 'sealed_count' : 'live_ledger',
     )
     const plan = planRestoration(positions)
+    assertPersistableRestorationPlan(plan)
     return {
       businessDate,
       counted: count !== null,
@@ -559,65 +932,153 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
   })
 
   app.post('/treasury/restoration', { config: { permission: 'journal.manual.write', subject: targetBranch } }, async (req, reply) => {
-    const body = z.object({ reason: z.string().min(1).max(500) }).parse(req.body)
+    const body = z.object({ reason: z.string().trim().min(1).max(500) }).parse(req.body)
     const branchId = resolveBranch(req)
     const businessDate = todayFor(deps)
     await assertWeekOpen(deps, branchId, businessDate)
+    const actorId = req.actor!.userId
+    const fxDayId = await ensureFxDay(deps, businessDate)
 
-    // BEFORE anything posts. The ledger's idempotency index would refuse the replay too, but as a
-    // constraint violation mid-transaction — the operator would see a 500 where the truth is a
-    // plain "already done today". Order matters here, not just the guard.
-    if ((await deps.restorations.find(branchId, businessDate)) !== null) {
-      throw new ServiceError(409, 'already_restored_today')
-    }
+    const outcome = await deps.financialUnitOfWork.run(
+      {
+        // This exact branch lock is shared by shift open/close, direct receivables, and every Pg
+        // ledger posting. The sealed-balance check and both journal phases therefore see one
+        // serial branch-money history.
+        lockKey: `receivables:${branchId}`,
+        actorId,
+        requestId: req.requestId,
+      },
+      async (tx: FinancialTransactionDeps) => {
+        // This check belongs inside the serialized transaction. Two concurrent managers both pass
+        // an outside check; here the waiter observes the winner's immutable record and returns 409.
+        if ((await tx.restorations.find(branchId, businessDate)) !== null) {
+          throw new ServiceError(409, 'already_restored_today')
+        }
 
-    const { count, positions } = await positionsFor(branchId, businessDate)
-    // Decision (j). Without the count this would settle against what the system BELIEVES is in the
-    // drawer, which is the one number a reconciliation must not take on trust.
-    if (count === null) throw new ServiceError(422, 'cash_count_required')
+        const { count, positions } = await positionsFor(branchId, businessDate, 'sealed_count', tx)
+        if (count === null) throw new ServiceError(422, 'cash_count_required')
+        if (count.sealedAtMs === null || count.proofSha256 === null || sealProof(count) !== count.proofSha256) {
+          throw new ServiceError(422, 'cash_count_proof_invalid')
+        }
 
-    const plan = planRestoration(positions)
-    if (!plan.feasible) throw new ServiceError(422, 'restoration_infeasible', { refusals: plan.refusals })
+        const requiredFunds = ['office_cash', 'office_wallet'] as const
+        const countLines = new Map(count.lines.map((line) => [line.fundCode, line]))
+        const reconciliationLines: Array<{
+          fundCode: typeof requiredFunds[number]
+          variance: Minor
+          resolution: string | null
+        }> = []
 
-    const postings = postingsForRestoration(plan, businessDate)
-    if (postings.length > 0) {
-      const fxDayId = await ensureFxDay(deps, businessDate)
-      await deps.ledger.post(branchId, postings, {
-        shiftId: null,
-        businessDate,
-        postingDate: businessDate,
-        weekStartDate: weekStartFor(businessDate),
-        fxDayId,
-        createdBy: req.actor!.userId,
-        reason: body.reason,
-      })
-    }
+        for (const fundCode of requiredFunds) {
+          const line = countLines.get(fundCode)
+          if (!line) throw new ServiceError(422, 'cash_count_incomplete', { fundCode })
+          const calculatedVariance = minor(line.counted - line.computed)
+          if (calculatedVariance !== line.variance) {
+            throw new ServiceError(422, 'cash_count_formula_invalid', { fundCode })
+          }
+          if (line.variance !== 0n && (!line.resolution || line.resolution.trim() === '')) {
+            throw new ServiceError(422, 'cash_count_resolution_required', {
+              fundCode,
+              variance: serializeMoney(line.variance),
+            })
+          }
 
-    // Once per branch per working day — the unique index refuses a replay rather than posting the
-    // sweep a second time. Recorded even when nothing moved: «we restored and it was already level»
-    // is a different fact from «nobody looked».
-    try {
-      await deps.restorations.create({
-        branchId,
-        businessDate,
-        cashCountId: count.id,
-        plan: { legs: plan.legs.map(serializeLeg) },
-        netToCompany: plan.netToCompany,
-        reason: body.reason,
-        performedBy: req.actor!.userId,
-      })
-    } catch (err) {
-      if ((err as { code?: string }).code === 'DUPLICATE_RESTORATION') {
-        throw new ServiceError(409, 'already_restored_today')
-      }
-      throw err
-    }
+          // Never fold a posting made after the count into the signed variance: that would repair
+          // a different number than the manager explained. The manager must recount instead.
+          const current = await tx.ledger.fundBalance(branchId, fundCode)
+          if (current !== line.computed) {
+            throw new ServiceError(409, 'cash_count_stale', {
+              fundCode,
+              counted: serializeMoney(line.counted),
+              computedAtCount: serializeMoney(line.computed),
+              current: serializeMoney(current),
+            })
+          }
+          reconciliationLines.push({ fundCode, variance: line.variance, resolution: line.resolution })
+        }
+
+        const plan = planRestoration(positions)
+        assertPersistableRestorationPlan(plan)
+        if (!plan.feasible) {
+          throw new ServiceError(422, 'restoration_infeasible', { refusals: plan.refusals })
+        }
+
+        const reconciliationPostings = postingsForCashCountReconciliation({
+          branchId,
+          cashCountId: count.id,
+          proofSha256: count.proofSha256,
+          lines: reconciliationLines,
+        })
+        const restorationPostings = postingsForRestoration(plan, businessDate)
+        const postings = [...reconciliationPostings, ...restorationPostings]
+        assertPersistableTreasuryPostings(postings)
+        const entries = postings.length === 0 ? [] : await tx.ledger.post(branchId, postings, {
+          shiftId: null,
+          businessDate,
+          postingDate: businessDate,
+          weekStartDate: weekStartFor(businessDate),
+          fxDayId,
+          createdBy: actorId,
+          reason: body.reason,
+        })
+
+        // A missing result means an occurrence key already existed without the restoration fact.
+        // Never bless an orphan/mismatched journal as this run's evidence.
+        if (entries.length !== postings.length) {
+          throw new ServiceError(409, 'restoration_journal_conflict')
+        }
+
+        const reconciliationKeys = new Set(reconciliationPostings.map((posting) => posting.occurrenceKey))
+        const restorationKeys = new Set(restorationPostings.map((posting) => posting.occurrenceKey))
+        const serializedLegs = plan.legs.map(serializeLeg)
+        try {
+          await tx.restorations.create({
+            branchId,
+            businessDate,
+            cashCountId: count.id,
+            plan: {
+              schemaVersion: 2,
+              cashCountProofSha256: count.proofSha256,
+              cashCountSealedAt: new Date(count.sealedAtMs).toISOString(),
+              countReconciliation: reconciliationLines.map((line) => ({
+                fundCode: line.fundCode,
+                variance: serializeMoney(line.variance),
+                resolution: line.resolution,
+              })),
+              reconciliationJournalEntryIds: entries
+                .filter((entry) => reconciliationKeys.has(entry.occurrenceKey))
+                .map((entry) => entry.id),
+              restorationJournalEntryIds: entries
+                .filter((entry) => restorationKeys.has(entry.occurrenceKey))
+                .map((entry) => entry.id),
+              legs: serializedLegs,
+            },
+            netToCompany: plan.netToCompany,
+            reason: body.reason,
+            performedBy: actorId,
+          })
+        } catch (err) {
+          if ((err as { code?: string }).code === 'DUPLICATE_RESTORATION') {
+            throw new ServiceError(409, 'already_restored_today')
+          }
+          throw err
+        }
+
+        return {
+          legs: serializedLegs,
+          netToCompany: plan.netToCompany,
+          restorationPostings: restorationPostings.length,
+          reconciliationPostings: reconciliationPostings.length,
+        }
+      },
+    )
 
     return reply.code(201).send({
       businessDate,
-      legs: plan.legs.map(serializeLeg),
-      netToCompany: serializeMoney(plan.netToCompany),
-      postings: postings.length,
+      legs: outcome.legs,
+      netToCompany: serializeMoney(outcome.netToCompany),
+      postings: outcome.restorationPostings,
+      reconciliationPostings: outcome.reconciliationPostings,
     })
   })
 

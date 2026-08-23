@@ -100,6 +100,126 @@ it('adds the selected branch exactly once to the restoration preview read', asyn
   })
 })
 
+it('publishes both restoration targets and their audited reason in one branch-scoped PUT', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({
+      businessDate: '2026-08-23',
+      cashTarget: '50000.00',
+      walletTarget: '10000.00',
+    }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+  api.setBranch('branch-1')
+
+  await api.updateCapitalTargets('50000.00', '10000.00', 'owner decision')
+
+  expect(fetchMock).toHaveBeenCalledWith('/api/treasury/capital-targets', {
+    method: 'PUT',
+    credentials: 'include',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      cashTarget: '50000.00',
+      walletTarget: '10000.00',
+      reason: 'owner decision',
+      branchId: 'branch-1',
+    }),
+  })
+})
+
+it('sends the client-owned expense idempotency key with the selected branch', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ id: 'expense-1', amount: '25.00' }), {
+      status: 201,
+      headers: { 'content-type': 'application/json' },
+    }),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+  api.setBranch('branch-1')
+  const body = {
+    idempotencyKey: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    categoryId: 'fuel',
+    costCenterKind: 'general' as const,
+    vehicleId: null,
+    amount: '25.00',
+    description: 'Charging electricity',
+  }
+
+  await api.createExpense(body)
+
+  expect(fetchMock).toHaveBeenCalledWith('/api/expenses', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ...body, branchId: 'branch-1' }),
+  })
+})
+
+it('scopes receivable balances and history to the selected branch', async () => {
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ drivers: [], grandTotal: '0.00' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ events: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }))
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+  api.setBranch('branch-1')
+
+  await api.receivables()
+  await api.receivableEvents('driver 1')
+
+  expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/treasury/receivables?branchId=branch-1', {
+    method: 'GET',
+    credentials: 'include',
+    headers: { 'content-type': 'application/json' },
+  })
+  expect(fetchMock).toHaveBeenNthCalledWith(
+    2,
+    '/api/treasury/receivables/events?driverId=driver%201&branchId=branch-1',
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+    },
+  )
+})
+
+it('posts a direct receivable event with its client key and selected branch', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ id: 'event-1', replayed: false }), {
+      status: 201,
+      headers: { 'content-type': 'application/json' },
+    }),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+  api.setBranch('branch-1')
+  const body = {
+    driverId: 'driver-1',
+    receivableKind: 'ordinary' as const,
+    channel: 'cash' as const,
+    direction: 'create' as const,
+    amount: '250.00',
+    reason: 'Cash handed to the driver',
+    idempotencyKey: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  }
+
+  await api.createReceivableEvent(body)
+
+  expect(fetchMock).toHaveBeenCalledWith('/api/treasury/receivables/events', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ...body, branchId: 'branch-1' }),
+  })
+})
+
 it('binds close approval to the reviewed settlement and both physical confirmations', async () => {
   const fetchMock = vi.fn().mockResolvedValue(
     new Response(JSON.stringify({ id: 'shift-1', state: 'approved', postings: 8 }), {
@@ -120,6 +240,48 @@ it('binds close approval to the reviewed settlement and both physical confirmati
 
   await expect(api.approveCloseShift('shift-1', body)).resolves.toMatchObject({ state: 'approved' })
   expect(fetchMock).toHaveBeenCalledWith('/api/shifts/shift-1/approve-close', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+})
+
+it('reads live shift funding and sends both reviewed open-approval balances including zero', async () => {
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({
+        id: 'shift-1',
+        shiftFunding: { cash: '12500.00', wallet: '0.00' },
+      }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    )
+    .mockResolvedValueOnce(
+      new Response(JSON.stringify({ id: 'shift-1', state: 'open' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    )
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+
+  const review = await api.shiftReview<{ id: string }>('shift-1', { cache: 'no-store' })
+  expect(review.shiftFunding).toEqual({ cash: '12500.00', wallet: '0.00' })
+  const body = {
+    floatTranches: [],
+    topupTranches: [],
+    carriedTranches: [review.shiftFunding.cash],
+    carriedWalletTranches: [],
+  }
+  await api.approveOpenShift('shift-1', body)
+
+  expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/shifts/shift-1/review', {
+    method: 'GET',
+    credentials: 'include',
+    headers: { 'content-type': 'application/json' },
+    cache: 'no-store',
+  })
+  expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/shifts/shift-1/approve-open', {
     method: 'POST',
     credentials: 'include',
     headers: { 'content-type': 'application/json' },
@@ -245,6 +407,28 @@ it('previews force-close settlement against the entered actual cash and wallet f
 
   expect(fetchMock).toHaveBeenCalledWith(
     '/api/shifts/shift-3/settlement?actualCash=120.00&actualWallet=30.50',
+    expect.objectContaining({ method: 'GET', credentials: 'include' }),
+  )
+})
+
+it('previews a close settlement with separate cash and wallet receivable deferrals', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ settlementHash: 'd'.repeat(64) }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+
+  await api.shiftSettlement(
+    'shift-4',
+    undefined,
+    { cashReceivableDeferred: '6000.00', walletReceivableDeferred: '1000.00' },
+  )
+
+  expect(fetchMock).toHaveBeenCalledWith(
+    '/api/shifts/shift-4/settlement?cashReceivableDeferred=6000.00&walletReceivableDeferred=1000.00',
     expect.objectContaining({ method: 'GET', credentials: 'include' }),
   )
 })

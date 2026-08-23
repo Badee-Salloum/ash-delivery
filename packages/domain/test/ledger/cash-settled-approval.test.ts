@@ -65,7 +65,7 @@ describe('cash-settled approval assembly', () => {
     expect(all.flatMap((posting) => posting.lines).some((line) => line.fund.kind === 'cost_center')).toBe(false)
 
     const walletReturn = all.find((posting) => posting.eventType === 'wallet_return')!
-    const fullWalletLine = walletReturn.lines.find((line) => line.role === 'wallet_full_return')!
+    const fullWalletLine = walletReturn.lines.find((line) => line.role === 'wallet_settlement')!
     expect(fullWalletLine).toMatchObject({ fund: { kind: 'office_wallet' }, side: 'D', amount: minor(27_950n) })
     const cashReturn = all.find((posting) => posting.eventType === 'float_return')!
     expect(cashReturn.lines.find((line) => line.role === 'cash_settlement')).toMatchObject({

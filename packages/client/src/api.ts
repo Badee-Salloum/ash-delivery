@@ -343,6 +343,20 @@ export interface ShiftStateView {
   lastDecision?: { decision: 'approved' | 'rejected' | 'rephoto_requested'; notes: string | null } | null
 }
 
+/** Live shift-funding balances captured with the manager's transactional shift review. */
+export type ShiftFundingPreviewView = import('@ash/contracts').ShiftFundingPreview
+
+/**
+ * Open approval binds to the exact funding preview. Zero is represented by an explicitly present
+ * empty tranche array, matching the wire's existing no-tranche representation.
+ */
+export interface ApproveOpenShiftBody {
+  floatTranches: string[]
+  topupTranches: string[]
+  carriedTranches: string[]
+  carriedWalletTranches: string[]
+}
+
 /**
  * The BMS phone apps a pack can ship with.
  *
@@ -451,7 +465,7 @@ export interface ExpenseView {
  * they are accounting facts in the explanatory breakdown.
  */
 export interface ShiftSettlementView {
-  policyCode: 'fixed_40_cash_close_v1'
+  policyCode: 'fixed_40_cash_close_v1' | 'fixed_40_cash_close_v2_receivable'
   driverRateBps: 4000
   deliveryFeeTotal: string
   fixedDriverShare: string
@@ -466,6 +480,10 @@ export interface ShiftSettlementView {
   variance: string
   varianceDirection: 'surplus' | 'shortage' | 'balanced'
   finalEmployeeCash: string
+  cashClaimToOffice: string
+  walletClaimToOffice: string
+  cashReceivableDeferred: string
+  walletReceivableDeferred: string
   walletToOffice: string
   cashToOffice: string
   walletAction: 'collect' | 'fund' | 'none'
@@ -481,6 +499,8 @@ export interface ApproveCloseRequest {
   reviewedSettlementHash: string
   walletTransferConfirmed: boolean
   cashSettlementConfirmed: boolean
+  cashReceivableDeferred?: string
+  walletReceivableDeferred?: string
   varianceReason?: string | null
 }
 
@@ -490,6 +510,10 @@ export interface ApproveCloseRequest {
  */
 export interface RestorationLegView {
   fundCode: 'office_cash' | 'office_wallet'
+  /** Physical amount from the sealed count (or the live box after a completed restoration). */
+  counted: string
+  /** Outstanding driver debt assigned to this box. */
+  receivables: string
   /** counted + الذمم — «الوضع الحالي». */
   position: string
   capitalTarget: string
@@ -511,6 +535,82 @@ export interface RestorationView {
   netToCompany: string
   feasible: boolean
   refusals: Array<'sweep_exceeds_counted' | 'no_capital_target'>
+}
+
+export interface CapitalTargetsView {
+  businessDate: string
+  cashTarget: string
+  walletTarget: string
+}
+
+export interface DriverReceivableView {
+  driverId: string
+  code: string
+  nameAr: string
+  ordinaryCash: string
+  ordinaryWallet: string
+  shiftFundingCash: string
+  shiftFundingWallet: string
+  cash: string
+  wallet: string
+  total: string
+}
+
+export interface ReceivablesView {
+  /** Backwards-compatible alias: this endpoint historically returned the cash total as `total`. */
+  total: string
+  ordinaryCashTotal: string
+  ordinaryWalletTotal: string
+  shiftFundingCashTotal: string
+  shiftFundingWalletTotal: string
+  cashTotal: string
+  walletTotal: string
+  grandTotal: string
+  drivers: DriverReceivableView[]
+}
+
+export type ReceivableKind = 'ordinary' | 'shift_funding'
+export type ReceivableChannel = 'cash' | 'wallet'
+export type ReceivableDirection = 'create' | 'collect'
+
+export interface ReceivableEventView {
+  id: string
+  driverId: string
+  driverCode: string
+  driverNameAr: string
+  receivableKind: ReceivableKind
+  channel: ReceivableChannel
+  direction: ReceivableDirection
+  amount: string
+  businessDate: string
+  reason: string
+  journalEntryId: number
+  createdBy: string
+  createdAtMs: number
+  replayed?: boolean
+}
+
+export interface CreateReceivableEventRequest {
+  driverId: string
+  receivableKind: ReceivableKind
+  channel: ReceivableChannel
+  direction: ReceivableDirection
+  amount: string
+  reason: string
+  idempotencyKey: string
+}
+
+export interface CreateReceivableEventResult {
+  id: string
+  driverId: string
+  receivableKind: ReceivableKind
+  channel: ReceivableChannel
+  direction: ReceivableDirection
+  amount: string
+  businessDate: string
+  reason: string
+  journalEntryId: number
+  replayed: boolean
 }
 
 /**
@@ -975,6 +1075,19 @@ export class ApiClient {
     return this.get<ShiftStateView>(`/shifts/${id}/state`)
   }
 
+  /** Manager-only review, including current branch+driver shift funding from the locked read path. */
+  shiftReview<T extends object>(
+    id: string,
+    options: { cache?: RequestCache; signal?: AbortSignal } = {},
+  ) {
+    return this.get<T & { shiftFunding: ShiftFundingPreviewView }>(`/shifts/${id}/review`, options)
+  }
+
+  /** Approve the open against the exact funding amounts returned by `shiftReview`. */
+  approveOpenShift(id: string, body: ApproveOpenShiftBody) {
+    return this.post<{ id: string; state: string }>(`/shifts/${id}/approve-open`, body)
+  }
+
   /** The durable, revisioned draft used by the driver's end-shift flow. */
   closeDraft(id: string) {
     return this.get<CloseDraftView>(`/shifts/${id}/close-draft`)
@@ -1100,6 +1213,7 @@ export class ApiClient {
     return this.get<{ totals: Array<{ costCenterKind: string; vehicleId: string | null; total: string }> }>(`/expenses/by-cost-center${q ? `?${q}` : ''}`)
   }
   createExpense(body: {
+    idempotencyKey: string
     categoryId: string
     costCenterKind: 'vehicle' | 'branch' | 'general'
     vehicleId?: string | null
@@ -1112,10 +1226,22 @@ export class ApiClient {
   }
 
   /** «كشف التسوية» — read-only and server-owned. Posts nothing until both handovers are confirmed. */
-  shiftSettlement(shiftId: string, actual?: { actualCash: string; actualWallet: string }) {
-    const query = actual
-      ? `?actualCash=${encodeURIComponent(actual.actualCash)}&actualWallet=${encodeURIComponent(actual.actualWallet)}`
-      : ''
+  shiftSettlement(
+    shiftId: string,
+    actual?: { actualCash: string; actualWallet: string },
+    deferred?: { cashReceivableDeferred: string; walletReceivableDeferred: string },
+  ) {
+    const params = new URLSearchParams()
+    if (actual) {
+      params.set('actualCash', actual.actualCash)
+      params.set('actualWallet', actual.actualWallet)
+    }
+    if (deferred) {
+      params.set('cashReceivableDeferred', deferred.cashReceivableDeferred)
+      params.set('walletReceivableDeferred', deferred.walletReceivableDeferred)
+    }
+    const encoded = params.toString()
+    const query = encoded === '' ? '' : `?${encoded}`
     return this.get<ShiftSettlementView>(`/shifts/${shiftId}/settlement${query}`)
   }
 
@@ -1148,6 +1274,19 @@ export class ApiClient {
   // ── Branch treasury (cash box + wallet) ─────────────────────────────────────────────────────
   treasuryBalances() {
     return this.get<{ cash: string; wallet: string }>('/treasury/balances')
+  }
+  receivables() {
+    return this.get<ReceivablesView>('/treasury/receivables')
+  }
+  receivableEvents(driverId?: string) {
+    const query = driverId ? `?driverId=${encodeURIComponent(driverId)}` : ''
+    return this.get<{ events: ReceivableEventView[] }>(`/treasury/receivables/events${query}`)
+  }
+  createReceivableEvent(body: CreateReceivableEventRequest) {
+    return this.post<CreateReceivableEventResult>('/treasury/receivables/events', {
+      ...body,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
   }
   treasuryDeposit(target: 'cash' | 'wallet', amount: string, note?: string) {
     // branchId is explicit here: the GM has scope 'all' and no session branch, so without it the
@@ -1200,6 +1339,15 @@ export class ApiClient {
     // `branchId` parameters for organisation-wide actors, which some query parsers expose as an
     // array and the server correctly refuses as an invalid branch selector.
     return this.get<RestorationView>('/treasury/restoration/preview')
+  }
+  /** Publishes today's effective targets atomically; prior restored dates remain immutable. */
+  updateCapitalTargets(cashTarget: string, walletTarget: string, reason: string) {
+    return this.put<CapitalTargetsView>('/treasury/capital-targets', {
+      cashTarget,
+      walletTarget,
+      reason,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
   }
   /** Performs it. The plan is re-derived server-side from the count — nothing here is trusted. */
   restore(reason: string) {
@@ -1313,6 +1461,8 @@ export class ApiClient {
         reviewedSettlementHash: string
         walletTransferConfirmed: true
         cashSettlementConfirmed: true
+        cashReceivableDeferred?: string
+        walletReceivableDeferred?: string
       }
   )) {
     return this.post<{ id: string; state: string; postings: number; prepared: boolean }>(

@@ -29,8 +29,9 @@ import {
   patchCloseDraftRequest,
   linkedCloseDraftReadRequest,
   restoreCloseDraftAttachmentRequest,
+  shiftFundingPreviewSchema,
 } from '@ash/contracts'
-import { addDays, bmsSlot, checkWeekClose, dayOfWeek, minor, resolveFxDay, sum, weekClosedOn, weekStartFor } from '@ash/domain'
+import { add, addDays, bmsSlot, checkWeekClose, dayOfWeek, minor, resolveFxDay, sum, weekClosedOn, weekStartFor } from '@ash/domain'
 import {
   SESSION_COOKIE,
   SESSION_IDLE_MS,
@@ -483,8 +484,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
             // shift so far. Money crosses as decimal strings, never JSON numbers.
             businessDate: s.businessDate,
             odometerStart: s.odoStart,
-            floatTotal: serializeMoney(sum(s.floatTranches)),
-            topupTotal: serializeMoney(sum(s.topupTranches)),
+            floatTotal: serializeMoney(add(sum(s.floatTranches), sum(s.carriedTranches))),
+            topupTotal: serializeMoney(add(sum(s.topupTranches), sum(s.carriedWalletTranches ?? []))),
             // How much work COUNTS on the shift. An unchecked operation is stored and visible but
             // is out of the money, so counting it here would tell the manager a shift is worth
             // more than the approval will post.
@@ -1360,8 +1361,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           // SRS D-3 baselines (readDashboard) — null unless OCR ran and the driver kept/changed it.
           odometerKmOcr: shift.odoStartOcr,
           batteryPercentOcr: shift.batteryStartOcr,
-          floatTotal: serializeMoney(sum(shift.floatTranches)),
-          topupTotal: serializeMoney(sum(shift.topupTranches)),
+          floatTotal: serializeMoney(add(sum(shift.floatTranches), sum(shift.carriedTranches))),
+          topupTotal: serializeMoney(add(sum(shift.topupTranches), sum(shift.carriedWalletTranches ?? []))),
           mediaSlots: shift.mediaSlotsStart,
           batteries: withPack('start'),
         },
@@ -1542,7 +1543,12 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     { config: { permission: 'shift.approve', subject: shiftSubject } },
     async (req, reply) => {
       const { id } = z.object({ id: z.string() }).parse(req.params)
-      const query = z.object({ actualCash: nonnegativeMoneySchema.optional(), actualWallet: moneySchema.optional() }).parse(req.query)
+      const query = z.object({
+        actualCash: nonnegativeMoneySchema.optional(),
+        actualWallet: moneySchema.optional(),
+        cashReceivableDeferred: nonnegativeMoneySchema.optional(),
+        walletReceivableDeferred: nonnegativeMoneySchema.optional(),
+      }).parse(req.query)
       const plan = await deps.closeUnitOfWork.run(
         { shiftId: id, actorId: req.actor!.userId },
         async (transaction) => {
@@ -1562,11 +1568,22 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           if (shift.state === 'approved' || shift.state === 'week_locked') {
             throw new ServiceError(409, 'legacy_settlement_read_only')
           }
-          return settlementFor(transactionDeps, {
-            ...shift,
-            ...(query.actualCash === undefined ? {} : { endCashDeclared: query.actualCash }),
-            ...(query.actualWallet === undefined ? {} : { endWalletDeclared: query.actualWallet }),
-          })
+          return settlementFor(
+            transactionDeps,
+            {
+              ...shift,
+              ...(query.actualCash === undefined ? {} : { endCashDeclared: query.actualCash }),
+              ...(query.actualWallet === undefined ? {} : { endWalletDeclared: query.actualWallet }),
+            },
+            {
+              ...(query.cashReceivableDeferred === undefined
+                ? {}
+                : { cashReceivableDeferred: query.cashReceivableDeferred }),
+              ...(query.walletReceivableDeferred === undefined
+                ? {}
+                : { walletReceivableDeferred: query.walletReceivableDeferred }),
+            },
+          )
         },
       )
       return {
@@ -1585,6 +1602,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         variance: serializeMoney(plan.variance),
         varianceDirection: plan.varianceDirection,
         finalEmployeeCash: serializeMoney(plan.finalEmployeeCash),
+        cashClaimToOffice: serializeMoney(plan.cashClaimToOffice),
+        walletClaimToOffice: serializeMoney(plan.walletClaimToOffice),
+        cashReceivableDeferred: serializeMoney(plan.cashReceivableDeferred),
+        walletReceivableDeferred: serializeMoney(plan.walletReceivableDeferred),
         walletToOffice: serializeMoney(plan.walletToOffice),
         cashToOffice: serializeMoney(plan.cashToOffice),
         walletAction: plan.wallet.action,
@@ -1613,8 +1634,25 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           if (!snapshot) return null
           const br1 = await evaluateShift(transactionDeps, snapshot.shift)
           const decisions = await transaction.decisions.listByShift(id)
+          // This read stays inside the close UOW. In PostgreSQL that UOW owns the same branch
+          // receivables advisory lock as direct receivable events, so cash and wallet belong to
+          // one coherent manager-review snapshot. Ordinary receivables are deliberately excluded.
+          const [shiftFundingCash, shiftFundingWallet] = await Promise.all([
+            transaction.ledger.fundBalance(
+              snapshot.shift.branchId,
+              `driver_shift_funding_cash:${snapshot.shift.driverId}`,
+            ),
+            transaction.ledger.fundBalance(
+              snapshot.shift.branchId,
+              `driver_shift_funding_wallet:${snapshot.shift.driverId}`,
+            ),
+          ])
           return {
             ...snapshot.body,
+            shiftFunding: shiftFundingPreviewSchema.parse({
+              cash: serializeMoney(shiftFundingCash),
+              wallet: serializeMoney(shiftFundingWallet),
+            }),
             br1: serializeBr1(br1),
             decisions: decisions.map((d) => ({
               gate: d.gate,
@@ -1639,6 +1677,12 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const result = await approveClose(deps, req.actor!, id, body.reviewedOrdersHash, opts.splitGate ?? 'advisory', {
         ...(body.keepAsReceivable === undefined ? {} : { keepAsReceivable: body.keepAsReceivable }),
         ...(body.payShareNow === undefined ? {} : { payShareNow: body.payShareNow }),
+        ...(body.cashReceivableDeferred === undefined
+          ? {}
+          : { cashReceivableDeferred: body.cashReceivableDeferred }),
+        ...(body.walletReceivableDeferred === undefined
+          ? {}
+          : { walletReceivableDeferred: body.walletReceivableDeferred }),
         ...(body.reviewedSettlementHash === undefined ? {} : { reviewedSettlementHash: body.reviewedSettlementHash }),
         walletTransferConfirmed: body.walletTransferConfirmed,
         cashSettlementConfirmed: body.cashSettlementConfirmed,

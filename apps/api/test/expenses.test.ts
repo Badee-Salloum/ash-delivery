@@ -34,6 +34,7 @@ const get = async (token: string, url: string): Promise<LightMyRequestResponse> 
   await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(token) } })
 
 const expense = (over: Record<string, unknown> = {}) => ({
+  idempotencyKey: crypto.randomUUID(),
   categoryId,
   costCenterKind: 'general',
   vehicleId: null,
@@ -106,6 +107,72 @@ describe('recording an expense', () => {
     const res = await post(manager, '/expenses', expense({ categoryId: 'no-such-category' }))
     expect(res.statusCode).toBe(422)
     expect(res.json().error).toBe('unknown_expense_category')
+  })
+
+  it.each(['0', '0.00', '-0.01', '-250.00'])('rejects non-positive amount %s at the request boundary', async (amount) => {
+    const manager = await h.loginAs('manager')
+    const res = await post(manager, '/expenses', expense({ amount }))
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toBe('invalid_request')
+    expect(h.deps.expenses.rows.size).toBe(0)
+    expect(h.deps.ledger.entries).toHaveLength(0)
+  })
+
+  it('returns an exact lost-response retry without adding another row or journal', async () => {
+    const manager = await h.loginAs('manager')
+    const key = crypto.randomUUID()
+    const payload = expense({ idempotencyKey: key })
+
+    const first = await post(manager, '/expenses', payload)
+    const retry = await post(manager, '/expenses', payload)
+
+    expect(first.statusCode, first.body).toBe(201)
+    expect(retry.statusCode, retry.body).toBe(200)
+    expect(retry.json()).toEqual(first.json())
+    expect(h.deps.expenses.rows.size).toBe(1)
+    expect(h.deps.ledger.entries.filter((entry) => entry.occurrenceKey === key)).toHaveLength(1)
+  })
+
+  it('rejects reuse of an expense key with a different immutable payload', async () => {
+    const manager = await h.loginAs('manager')
+    const key = crypto.randomUUID()
+    expect((await post(manager, '/expenses', expense({ idempotencyKey: key }))).statusCode).toBe(201)
+
+    const conflict = await post(manager, '/expenses', expense({ idempotencyKey: key, amount: sypStr(30_000) }))
+    expect(conflict.statusCode).toBe(409)
+    expect(conflict.json().error).toBe('idempotency_key_conflict')
+    expect(h.deps.expenses.rows.size).toBe(1)
+    expect(h.deps.ledger.entries.filter((entry) => entry.occurrenceKey === key)).toHaveLength(1)
+  })
+
+  it('serializes concurrent exact retries into one expense and one journal', async () => {
+    const manager = await h.loginAs('manager')
+    const key = crypto.randomUUID()
+    const payload = expense({ idempotencyKey: key })
+
+    const replies = await Promise.all([
+      post(manager, '/expenses', payload),
+      post(manager, '/expenses', payload),
+    ])
+
+    expect(replies.map((reply) => reply.statusCode).sort()).toEqual([200, 201])
+    expect(h.deps.expenses.rows.size).toBe(1)
+    expect(h.deps.ledger.entries.filter((entry) => entry.occurrenceKey === key)).toHaveLength(1)
+  })
+
+  it('rolls the journal back when creating the expense row fails', async () => {
+    const manager = await h.loginAs('manager')
+    const create = h.deps.expenses.create.bind(h.deps.expenses)
+    h.deps.expenses.create = async () => {
+      throw new Error('simulated expense row failure')
+    }
+
+    const failed = await post(manager, '/expenses', expense())
+    h.deps.expenses.create = create
+
+    expect(failed.statusCode).toBe(500)
+    expect(h.deps.expenses.rows.size).toBe(0)
+    expect(h.deps.ledger.entries).toHaveLength(0)
   })
 })
 

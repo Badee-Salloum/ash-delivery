@@ -14,13 +14,13 @@ import {
   splitSlot,
   formatDateTime,
 } from '@ash/client'
-import { add, formatMinor, parseMinor, sub } from '@ash/domain'
+import { add, formatMinor, minor, parseMinor, sub } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { evidenceReviewWarning } from '../evidence-warning.ts'
 import { useConfirm, useToast } from '../feedback.tsx'
 import { LatestRequestGuard } from '../latest-request.ts'
-import { isValidOpeningFundInput, openingFundTranches } from '../opening-funds.ts'
+import { isValidOpeningFundInput, openingApprovalRequest } from '../opening-funds.ts'
 import {
   buildOrderDuplicateRevision,
   buildOrderTimingRevision,
@@ -80,6 +80,8 @@ interface Review {
   /** Actual operation-window edges. Optional during a staggered API/admin rollout. */
   openApprovedAt?: string | null
   submittedAt?: string | null
+  /** Current branch+driver shift funding captured by the locked manager-review read. */
+  shiftFunding: { cash: string; wallet: string }
   startPackage: {
     odometerKm: number | null
     batteryPercent: number | null
@@ -209,6 +211,19 @@ interface Review {
   }
 }
 
+function isNonnegativeSettlementMoney(value: string): boolean {
+  try {
+    return value.trim() !== '' && parseMinor(value.trim()) >= 0n
+  } catch {
+    return false
+  }
+}
+
+function positiveSettlementClaim(value: string): string {
+  const amount = parseMinor(value)
+  return formatMinor(amount > 0n ? amount : minor(0n))
+}
+
 type SettlementView = Awaited<ReturnType<ReturnType<typeof useApp>['api']['shiftSettlement']>>
 
 /**
@@ -254,6 +269,9 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   const [walletTransferConfirmed, setWalletTransferConfirmed] = useState(false)
   const [cashSettlementConfirmed, setCashSettlementConfirmed] = useState(false)
   const [varianceReason, setVarianceReason] = useState('')
+  const [cashReceivableDeferred, setCashReceivableDeferred] = useState('0')
+  const [walletReceivableDeferred, setWalletReceivableDeferred] = useState('0')
+  const [settlementRecalculating, setSettlementRecalculating] = useState(false)
   /** Suggestion-only reads of exact stored dashboard slots, keyed by the reviewed operation. */
   const [orderRereads, setOrderRereads] = useState<Record<string, ManagerOrderEvidenceRereadResponse>>({})
   /** A copied AI time is only a draft until the audited revision endpoint accepts it. */
@@ -308,9 +326,12 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     setWalletTransferConfirmed(false)
     setCashSettlementConfirmed(false)
     setVarianceReason('')
+    setCashReceivableDeferred('0')
+    setWalletReceivableDeferred('0')
+    setSettlementRecalculating(false)
     setOrderRereads({})
     void api
-      .get<Review>(`/shifts/${shiftId}/review`, { cache: 'no-store', signal: request.signal })
+      .shiftReview<Review>(shiftId, { cache: 'no-store', signal: request.signal })
       .then((next) => {
         if (!request.isCurrent()) return
         // Local AI suggestions/drafts belong to the previous hash. Clear the guard and remount its
@@ -342,32 +363,47 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   // and blocks the close rather than silently falling back to an older cash-only flow.
   useEffect(() => {
     if (!review || review.state !== 'pending_review') return
+    if (
+      !isNonnegativeSettlementMoney(cashReceivableDeferred) ||
+      !isNonnegativeSettlementMoney(walletReceivableDeferred)
+    ) {
+      setSettlementLoadError('invalid_receivable_amount')
+      setSettlementRecalculating(false)
+      return
+    }
     let cancelled = false
-    setSettlement(null)
     setSettlementLoadError(null)
-    void api
-      .shiftSettlement(review.id)
-      .then((next) => {
-        if (cancelled) return
-        if (!isKnownSettlementAction(next)) throw new Error('invalid_settlement_action')
-        setSettlement(next)
-      })
-      .catch((e: { error?: string; message?: string }) => {
-        if (cancelled) return
-        setSettlement(null)
-        setSettlementLoadError(e.error ?? e.message ?? 'settlement_unavailable')
-      })
+    setSettlementRecalculating(true)
+    const timer = window.setTimeout(() => {
+      void api
+        .shiftSettlement(review.id, undefined, {
+          cashReceivableDeferred: cashReceivableDeferred.trim(),
+          walletReceivableDeferred: walletReceivableDeferred.trim(),
+        })
+        .then((next) => {
+          if (cancelled) return
+          if (!isKnownSettlementAction(next)) throw new Error('invalid_settlement_action')
+          setSettlement(next)
+          setSettlementRecalculating(false)
+        })
+        .catch((e: { error?: string; message?: string }) => {
+          if (cancelled) return
+          setSettlementLoadError(e.error ?? e.message ?? 'settlement_unavailable')
+          setSettlementRecalculating(false)
+        })
+    }, 250)
     return () => {
       cancelled = true
+      window.clearTimeout(timer)
     }
-  }, [api, review])
+  }, [api, cashReceivableDeferred, review, walletReceivableDeferred])
 
   // A changed hash means changed money. Earlier ticks must never carry across to a new statement.
   useEffect(() => {
     setWalletTransferConfirmed(false)
     setCashSettlementConfirmed(false)
     setVarianceReason('')
-  }, [review?.id, settlement?.settlementHash])
+  }, [cashReceivableDeferred, review?.id, settlement?.settlementHash, walletReceivableDeferred])
 
   useEffect(() => {
     const prepared = activeForcePreparation(review?.submittedAt, review?.decisions ?? [])
@@ -421,7 +457,16 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     cashSettlementConfirmed,
     varianceReason: forcePrepared ? notes : varianceReason,
   }
-  const closeSettlementReady = settlementApprovalReady(settlement, settlementDraft)
+  const deferralMatchesSettlement =
+    settlement !== null &&
+    isNonnegativeSettlementMoney(cashReceivableDeferred) &&
+    isNonnegativeSettlementMoney(walletReceivableDeferred) &&
+    parseMinor(cashReceivableDeferred.trim()) === parseMinor(settlement.cashReceivableDeferred) &&
+    parseMinor(walletReceivableDeferred.trim()) === parseMinor(settlement.walletReceivableDeferred)
+  const closeSettlementReady =
+    !settlementRecalculating &&
+    deferralMatchesSettlement &&
+    settlementApprovalReady(settlement, settlementDraft)
 
   /**
    * WHICH ORDERS DESERVE THE MANAGER'S EYE.
@@ -535,7 +580,12 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     if (opening) {
       const ok = await confirm({
         title: t.approval.confirmOpenTitle,
-        body: `${who.driver ?? ''} · ${t.shift.cashFloat}: ${floatText || '0'} · ${t.shift.walletTopup}: ${topupText || '0'}`,
+        body:
+          `${who.driver ?? ''} · ${t.shift.cashFloat}: ${floatText || '0'} · ` +
+          `${t.shift.walletTopup}: ${topupText || '0'} · ` +
+          `${t.treasury.receivableKinds.shift_funding} / ${t.treasury.receivableChannels.cash}: ` +
+          `${review.shiftFunding.cash} · ${t.treasury.receivableKinds.shift_funding} / ` +
+          `${t.treasury.receivableChannels.wallet}: ${review.shiftFunding.wallet}`,
         confirmLabel: t.common.approve,
       })
       if (!ok) return
@@ -544,7 +594,10 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     setError(null)
     try {
       if (opening) {
-        await api.post(`/shifts/${review.id}/approve-open`, openingFundTranches(floatText, topupText))
+        await api.approveOpenShift(
+          review.id,
+          openingApprovalRequest(floatText, topupText, review.shiftFunding),
+        )
       } else {
         await api.approveCloseShift(
           review.id,
@@ -559,7 +612,11 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       // Either hash changing means the money changed after these confirmations. Reload both the
       // operations and the settlement, then require two fresh ticks against the new snapshot.
       const code = (err as { error?: string }).error
-      if (code === 'orders_changed_since_review' || code === 'settlement_changed_since_review') {
+      if (
+        code === 'orders_changed_since_review' ||
+        code === 'settlement_changed_since_review' ||
+        code === 'shift_funding_changed'
+      ) {
         setError(code)
         load()
       } else {
@@ -592,6 +649,8 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         reviewedSettlementHash: settlement.settlementHash,
         walletTransferConfirmed: true,
         cashSettlementConfirmed: true,
+        cashReceivableDeferred: settlement.cashReceivableDeferred,
+        walletReceivableDeferred: settlement.walletReceivableDeferred,
       })
       toast.success(`${t.approval.approved} — ${who.driver ?? ''}`)
       onDone()
@@ -765,16 +824,20 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         who={{ driver: inlineDriver, vehicle: inlineVehicle }}
         settlement={settlement}
         settlementLoadError={settlementLoadError}
-        refreshing={refreshing}
+        refreshing={refreshing || settlementRecalculating}
         busy={busy}
         error={error ?? loadError}
         walletTransferConfirmed={walletTransferConfirmed}
         cashSettlementConfirmed={cashSettlementConfirmed}
         varianceReason={varianceReason}
+        cashReceivableDeferred={cashReceivableDeferred}
+        walletReceivableDeferred={walletReceivableDeferred}
         notes={notes}
         onWalletTransferConfirmed={setWalletTransferConfirmed}
         onCashSettlementConfirmed={setCashSettlementConfirmed}
         onVarianceReason={setVarianceReason}
+        onCashReceivableDeferred={setCashReceivableDeferred}
+        onWalletReceivableDeferred={setWalletReceivableDeferred}
         onNotes={setNotes}
         onBack={onDone}
         onRefresh={refreshVisible}
@@ -1012,9 +1075,6 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                 className="mt-2 w-full rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/15"
                 placeholder={t.settlement.varianceReasonPlaceholder}
               />
-              {varianceReason.trim() === '' ? (
-                <p className="mt-1 text-xs font-medium text-red-700">{t.settlement.varianceReasonRequired}</p>
-              ) : null}
             </div>
           ) : null}
 
@@ -1084,6 +1144,14 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                     />
                   </dd>
                 </div>
+                <Field
+                  label={`${t.treasury.receivableKinds.shift_funding} / ${t.treasury.receivableChannels.cash}`}
+                  value={review.shiftFunding.cash}
+                />
+                <Field
+                  label={`${t.treasury.receivableKinds.shift_funding} / ${t.treasury.receivableChannels.wallet}`}
+                  value={review.shiftFunding.wallet}
+                />
                 {!openingFundsValid ? (
                   <div className="col-span-2">
                     <dt className="sr-only">{t.liveShifts.openingAmountInvalid}</dt>
@@ -1464,9 +1532,6 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           {isClose && settlement && (!walletTransferConfirmed || !cashSettlementConfirmed) ? (
             <p className="mb-2 text-sm font-medium text-amber-800">{t.settlement.confirmBeforeApproval}</p>
           ) : null}
-          {isClose && settlement && settlementHasVariance(settlement) && settlementDraft.varianceReason.trim() === '' ? (
-            <p className="mb-2 text-sm font-medium text-red-700">{t.settlement.varianceReasonRequired}</p>
-          ) : null}
           {isClose && unresolvedWindowCount > 0 ? (
             <p className="mb-2 text-sm font-medium text-amber-800">
               {operationCopy.cannotApproveUnknown.replace('{n}', String(unresolvedWindowCount))}
@@ -1533,10 +1598,14 @@ interface CloseApprovalWorkspaceProps {
   walletTransferConfirmed: boolean
   cashSettlementConfirmed: boolean
   varianceReason: string
+  cashReceivableDeferred: string
+  walletReceivableDeferred: string
   notes: string
   onWalletTransferConfirmed(value: boolean): void
   onCashSettlementConfirmed(value: boolean): void
   onVarianceReason(value: string): void
+  onCashReceivableDeferred(value: string): void
+  onWalletReceivableDeferred(value: string): void
   onNotes(value: string): void
   onBack(): void
   onRefresh(): void
@@ -1564,10 +1633,14 @@ function CloseApprovalWorkspace({
   walletTransferConfirmed,
   cashSettlementConfirmed,
   varianceReason,
+  cashReceivableDeferred,
+  walletReceivableDeferred,
   notes,
   onWalletTransferConfirmed,
   onCashSettlementConfirmed,
   onVarianceReason,
+  onCashReceivableDeferred,
+  onWalletReceivableDeferred,
   onNotes,
   onBack,
   onRefresh,
@@ -1616,8 +1689,16 @@ function CloseApprovalWorkspace({
     cashSettlementConfirmed: physicalConfirmationGuard.cashSettlementConfirmed,
     varianceReason: forcePrepared ? notes : varianceReason,
   }
+  const deferralInputsValid =
+    isNonnegativeSettlementMoney(cashReceivableDeferred) &&
+    isNonnegativeSettlementMoney(walletReceivableDeferred)
+  const deferralMatchesSettlement =
+    settlement !== null &&
+    deferralInputsValid &&
+    parseMinor(cashReceivableDeferred.trim()) === parseMinor(settlement.cashReceivableDeferred) &&
+    parseMinor(walletReceivableDeferred.trim()) === parseMinor(settlement.walletReceivableDeferred)
   const approvalReady = closeWorkspaceApprovalReady({
-    settlementReady: settlementApprovalReady(settlement, settlementDraft),
+    settlementReady: deferralMatchesSettlement && settlementApprovalReady(settlement, settlementDraft),
     unresolvedOperationCount: unresolvedCount,
     managerBatteryReadingCount,
     pendingTimingDraftCount: pendingTimingDraftKeys.size,
@@ -1872,6 +1953,48 @@ function CloseApprovalWorkspace({
 
             {settlement ? (
               <>
+                <div className="mt-3 rounded-xl border border-violet-200 bg-violet-50 p-3">
+                  <p className="text-sm font-extrabold text-violet-950">{t.settlement.receivableDeferralTitle}</p>
+                  <p className="mt-1 text-xs text-violet-900">{t.settlement.receivableDeferralHint}</p>
+                  <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+                    <label className="flex flex-col gap-1 text-xs font-bold text-violet-950">
+                      <span>{t.settlement.cashReceivableDeferred}</span>
+                      <MoneyInput
+                        value={cashReceivableDeferred}
+                        min="0"
+                        aria-invalid={!isNonnegativeSettlementMoney(cashReceivableDeferred)}
+                        disabled={busy}
+                        onChange={(event) => onCashReceivableDeferred(event.target.value)}
+                        className="bg-white"
+                      />
+                      <span className="font-normal text-violet-800">
+                        {t.settlement.receivableMaximum}: <Money value={positiveSettlementClaim(settlement.cashClaimToOffice)} />
+                      </span>
+                    </label>
+                    <label className="flex flex-col gap-1 text-xs font-bold text-violet-950">
+                      <span>{t.settlement.walletReceivableDeferred}</span>
+                      <MoneyInput
+                        value={walletReceivableDeferred}
+                        min="0"
+                        aria-invalid={!isNonnegativeSettlementMoney(walletReceivableDeferred)}
+                        disabled={busy}
+                        onChange={(event) => onWalletReceivableDeferred(event.target.value)}
+                        className="bg-white"
+                      />
+                      <span className="font-normal text-violet-800">
+                        {t.settlement.receivableMaximum}: <Money value={positiveSettlementClaim(settlement.walletClaimToOffice)} />
+                      </span>
+                    </label>
+                  </div>
+                  {refreshing ? (
+                    <p className="mt-2 text-xs font-semibold text-violet-800">{t.settlement.receivableRecalculating}</p>
+                  ) : settlementLoadError ? (
+                    <p role="alert" className="mt-2 text-xs font-semibold text-red-700">
+                      {explainError(settlementLoadError, t)}
+                    </p>
+                  ) : null}
+                </div>
+
                 {physicalConfirmationsLocked ? (
                   <p role="alert" className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm font-bold text-amber-950">
                     {copy.resolveUnknownBeforeHandover.replace('{n}', String(unresolvedCount))}
@@ -2745,7 +2868,6 @@ function ApprovalBlockers({
   if (refreshing) blockers.push(copy.recalculating)
   else if (!settlement) blockers.push(t.settlement.unavailable)
   if (settlement && (!walletConfirmed || !cashConfirmed)) blockers.push(t.settlement.confirmBeforeApproval)
-  if (settlement && settlementHasVariance(settlement) && varianceReason.trim() === '') blockers.push(t.settlement.varianceReasonRequired)
   if (unresolvedCount > 0) blockers.push(operationCopy.cannotApproveUnknown.replace('{n}', String(unresolvedCount)))
   if (pendingTimingDraftCount > 0) blockers.push(copy.unsavedTimingDraft)
   if (managerBatteryReadingCount > 0) {

@@ -16,8 +16,22 @@ export class MemoryExpenseRepo implements ExpenseRepo {
     }
     this.categories.set(category.id, { ...category })
   }
+  async get(id: string): Promise<ExpenseRecord | null> {
+    const row = this.rows.get(id)
+    return row ? { ...row } : null
+  }
   async create(expense: ExpenseRecord): Promise<void> {
+    if (this.rows.has(expense.id)) {
+      throw Object.assign(new Error(`duplicate expense ${expense.id}`), { code: 'DUPLICATE_EXPENSE' })
+    }
     this.rows.set(expense.id, { ...expense })
+  }
+  snapshotRows(): Map<string, ExpenseRecord> {
+    return new Map([...this.rows].map(([id, row]) => [id, structuredClone(row)]))
+  }
+  restoreRows(snapshot: Map<string, ExpenseRecord>): void {
+    this.rows.clear()
+    for (const [id, row] of snapshot) this.rows.set(id, structuredClone(row))
   }
   async listByBranchAndDate(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ExpenseRecord[]> {
     return [...this.rows.values()]

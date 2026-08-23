@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { fundCodeOf } from '@ash/adapters/memory'
 import { minor } from '@ash/domain'
 import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
+import { SYSTEM_VARIANCE_REASON_NOT_PROVIDED } from '../src/shifts.service.ts'
 
 /** HTTP acceptance tests for the fixed-40 cash-close policy. */
 let h: Harness
@@ -15,7 +16,7 @@ afterEach(async () => {
 
 type Payload = Record<string, unknown>
 type Settlement = {
-  policyCode: 'fixed_40_cash_close_v1'
+  policyCode: 'fixed_40_cash_close_v2_receivable'
   driverRateBps: 4000
   deliveryFeeTotal: string
   fixedDriverShare: string
@@ -30,6 +31,10 @@ type Settlement = {
   variance: string
   varianceDirection: 'surplus' | 'shortage' | 'balanced'
   finalEmployeeCash: string
+  cashClaimToOffice: string
+  walletClaimToOffice: string
+  cashReceivableDeferred: string
+  walletReceivableDeferred: string
   walletToOffice: string
   cashToOffice: string
   walletAction: 'collect' | 'fund' | 'none'
@@ -207,6 +212,8 @@ async function approve(
     reviewedSettlementHash: settlement.settlementHash,
     walletTransferConfirmed: true,
     cashSettlementConfirmed: true,
+    cashReceivableDeferred: settlement.cashReceivableDeferred,
+    walletReceivableDeferred: settlement.walletReceivableDeferred,
     varianceReason,
   })
 }
@@ -218,7 +225,7 @@ describe('fixed 40% settlement preview', () => {
     const settlement = await preview(manager, shiftId)
 
     expect(settlement).toMatchObject({
-      policyCode: 'fixed_40_cash_close_v1',
+      policyCode: 'fixed_40_cash_close_v2_receivable',
       driverRateBps: 4000,
       deliveryFeeTotal: '10000.00',
       fixedDriverShare: '4000.00',
@@ -233,6 +240,10 @@ describe('fixed 40% settlement preview', () => {
       variance: '0.00',
       varianceDirection: 'balanced',
       finalEmployeeCash: '4000.00',
+      cashClaimToOffice: '16000.00',
+      walletClaimToOffice: '3000.00',
+      cashReceivableDeferred: '0.00',
+      walletReceivableDeferred: '0.00',
       walletToOffice: '3000.00',
       walletAction: 'collect',
       walletAmount: '3000.00',
@@ -394,19 +405,40 @@ describe('fixed 40% approval', () => {
     expect(stale.json().error).toBe('settlement_changed_since_review')
   })
 
-  it('requires a reason for a non-zero variance but lets the employee submit it for review', async () => {
+  it('audits an omitted variance reason with a deterministic marker and replays blank identically', async () => {
     const { manager, shiftId, reviewHash } = await pendingShift({ actualCash: 19_000, actualWallet: 3_000 })
     const settlement = await preview(manager, shiftId)
     expect(settlement).toMatchObject({ variance: '-1000.00', varianceDirection: 'shortage' })
     expect((await h.deps.shifts.findById(shiftId))?.state).toBe('pending_review')
 
-    const withoutReason = await approve(manager, shiftId, reviewHash, settlement, null)
-    expect(withoutReason.statusCode, withoutReason.body).toBe(422)
-    expect(withoutReason.json().error).toBe('variance_reason_required')
-
-    const accepted = await approve(manager, shiftId, reviewHash, settlement, 'counted with the employee')
+    const payload = {
+      reviewedOrdersHash: reviewHash,
+      reviewedSettlementHash: settlement.settlementHash,
+      walletTransferConfirmed: true,
+      cashSettlementConfirmed: true,
+    }
+    const accepted = await post(manager, `/shifts/${shiftId}/approve-close`, payload)
     expect(accepted.statusCode, accepted.body).toBe(200)
     expect(accepted.json().state).toBe('approved')
+    expect(await h.deps.settlements.findByShift(shiftId)).toMatchObject({
+      variance: minor(-100_000n),
+      varianceReason: SYSTEM_VARIANCE_REASON_NOT_PROVIDED,
+    })
+    expect((await h.deps.ledger.listByShift(shiftId)).some(
+      (entry) => entry.reason === SYSTEM_VARIANCE_REASON_NOT_PROVIDED,
+    )).toBe(true)
+    expect(await h.deps.decisions.listByShift(shiftId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ decision: 'approved', notes: SYSTEM_VARIANCE_REASON_NOT_PROVIDED }),
+    ]))
+
+    const entriesAfterApproval = await h.deps.ledger.listByShift(shiftId)
+    const replay = await post(manager, `/shifts/${shiftId}/approve-close`, {
+      ...payload,
+      varianceReason: ' \u200B\t',
+    })
+    expect(replay.statusCode, replay.body).toBe(200)
+    expect(replay.json()).toMatchObject({ state: 'approved', postings: 0 })
+    expect(await h.deps.ledger.listByShift(shiftId)).toEqual(entriesAfterApproval)
   })
 
   it('persists the confirmed snapshot and clears cash, wallet, share, and close receivable', async () => {
@@ -423,12 +455,12 @@ describe('fixed 40% approval', () => {
       cashAmount: '16000.00',
     })
 
-    const approved = await approve(manager, shiftId, reviewHash, settlement, 'employee paid the shortage')
+    const approved = await approve(manager, shiftId, reviewHash, settlement, '  employee paid the shortage  ')
     expect(approved.statusCode, approved.body).toBe(200)
 
     const snapshot = await h.deps.settlements.findByShift(shiftId)
     expect(snapshot).toMatchObject({
-      policyCode: 'fixed_40_cash_close_v1',
+      policyCode: 'fixed_40_cash_close_v2_receivable',
       driverRateBps: 4000,
       variance: minor(-500_000n),
       finalEmployeeCash: minor(-100_000n),
@@ -456,23 +488,74 @@ describe('fixed 40% approval', () => {
     }
   })
 
-  it('retires receivable and deferred-share choices with an explicit policy refusal', async () => {
+  it('supports combined partial cash/wallet deferral, exact replay, and immutable hash binding', async () => {
     const { manager, shiftId, reviewHash } = await pendingShift()
-    const settlement = await preview(manager, shiftId)
-    for (const legacyChoice of [
-      { payShareNow: false },
-      { keepAsReceivable: '1.00' },
+    const noDeferral = await preview(manager, shiftId)
+    const deferredResponse = await get(
+      manager,
+      `/shifts/${shiftId}/settlement?cashReceivableDeferred=6000.00&walletReceivableDeferred=1000.00`,
+    )
+    expect(deferredResponse.statusCode, deferredResponse.body).toBe(200)
+    const deferred = deferredResponse.json() as Settlement
+    expect(deferred).toMatchObject({
+      cashClaimToOffice: '16000.00',
+      walletClaimToOffice: '3000.00',
+      cashReceivableDeferred: '6000.00',
+      walletReceivableDeferred: '1000.00',
+      cashToOffice: '10000.00',
+      walletToOffice: '2000.00',
+      cashAction: 'collect',
+      cashAmount: '10000.00',
+      walletAction: 'collect',
+      walletAmount: '2000.00',
+    })
+    expect(deferred.settlementHash).not.toBe(noDeferral.settlementHash)
+
+    const stale = await post(manager, `/shifts/${shiftId}/approve-close`, {
+      reviewedOrdersHash: reviewHash,
+      reviewedSettlementHash: noDeferral.settlementHash,
+      walletTransferConfirmed: true,
+      cashSettlementConfirmed: true,
+      cashReceivableDeferred: deferred.cashReceivableDeferred,
+      walletReceivableDeferred: deferred.walletReceivableDeferred,
+    })
+    expect(stale.statusCode, stale.body).toBe(409)
+    expect(stale.json().error).toBe('settlement_changed_since_review')
+
+    const approved = await approve(manager, shiftId, reviewHash, deferred)
+    expect(approved.statusCode, approved.body).toBe(200)
+    expect(await h.deps.ledger.fundBalance('branch-damascus', `driver_receivable_cash:${DRIVER_ID}`)).toBe(600_000n)
+    expect(await h.deps.ledger.fundBalance('branch-damascus', `driver_receivable_wallet:${DRIVER_ID}`)).toBe(100_000n)
+    expect(await h.deps.shifts.findById(shiftId)).toMatchObject({ keptAsReceivable: 600_000n })
+
+    const entries = await h.deps.ledger.listByShift(shiftId)
+    const replay = await approve(manager, shiftId, reviewHash, deferred)
+    expect(replay.statusCode, replay.body).toBe(200)
+    expect(replay.json().postings).toBe(0)
+    expect(await h.deps.ledger.listByShift(shiftId)).toEqual(entries)
+  })
+
+  it('rejects deferral above either collectible claim and keeps deferred employee payout retired', async () => {
+    const { manager, shiftId, reviewHash } = await pendingShift()
+    for (const query of [
+      'cashReceivableDeferred=16000.01',
+      'walletReceivableDeferred=3000.01',
     ]) {
-      const response = await post(manager, `/shifts/${shiftId}/approve-close`, {
-        reviewedOrdersHash: reviewHash,
-        reviewedSettlementHash: settlement.settlementHash,
-        walletTransferConfirmed: true,
-        cashSettlementConfirmed: true,
-        ...legacyChoice,
-      })
+      const response = await get(manager, `/shifts/${shiftId}/settlement?${query}`)
       expect(response.statusCode, response.body).toBe(422)
-      expect(response.json().error).toBe('fixed_cash_settlement_required')
+      expect(response.json().error).toBe('invalid_receivable_amount')
     }
+
+    const settlement = await preview(manager, shiftId)
+    const response = await post(manager, `/shifts/${shiftId}/approve-close`, {
+      reviewedOrdersHash: reviewHash,
+      reviewedSettlementHash: settlement.settlementHash,
+      walletTransferConfirmed: true,
+      cashSettlementConfirmed: true,
+      payShareNow: false,
+    })
+    expect(response.statusCode, response.body).toBe(422)
+    expect(response.json().error).toBe('fixed_cash_settlement_required')
   })
 
   it('does not let archived payments affect approval postings', async () => {

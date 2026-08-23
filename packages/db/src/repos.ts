@@ -48,6 +48,8 @@ export function fundCodeOf(fund: Posting['lines'][number]['fund']): string {
     // a single fund and the totals stay right while «who owes this» becomes unanswerable.
     case 'driver_receivable_cash':
     case 'driver_receivable_wallet':
+    case 'driver_shift_funding_cash':
+    case 'driver_shift_funding_wallet':
       return `${fund.kind}:${fund.driverId}`
     case 'cost_center':
       return `cost_center:${fund.costCenterId}`
@@ -118,6 +120,14 @@ export class PgLedgerRepo implements LedgerRepo {
     meta: Parameters<LedgerRepo['post']>[2],
   ): Promise<JournalEntryRecord[]> {
     return withTransaction(this.pool, { actorId: meta.createdBy }, async (client) => {
+      // One branch-money lock covers every ledger writer. Restoration takes this same lock before
+      // comparing the sealed count's frozen balance with the live ledger, so a manual entry or
+      // expense cannot slip between that check and its reconciliation/restoration postings.
+      // Shift open/close and direct receivables already use this namespace; reacquiring the same
+      // transaction-scoped advisory lock is harmless and keeps lock ordering consistent.
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+        `ash:financial:receivables:${branchId}`,
+      ])
       const written: JournalEntryRecord[] = []
 
       for (const posting of postings) {
@@ -276,7 +286,7 @@ export class PgLedgerRepo implements LedgerRepo {
               COALESCE(SUM(CASE WHEN jl.side = 'D' THEN jl.amount_minor ELSE -jl.amount_minor END), 0)::text AS balance
          FROM funds f
          LEFT JOIN journal_lines jl ON jl.fund_id = f.id
-        WHERE f.branch_id = $1 AND f.code LIKE $2 || '%'
+        WHERE f.branch_id = $1 AND left(f.code, char_length($2)) = $2
         GROUP BY f.code`,
       [branchId, prefix],
     )
@@ -328,7 +338,13 @@ export class PgOfficeCapitalTargetRepo {
       `INSERT INTO office_capital_targets (branch_id, fund_code, target_minor, effective_from, created_by, note)
        VALUES ($1,$2,$3,$4,$5,$6)
        ON CONFLICT (branch_id, fund_code, effective_from)
-       DO UPDATE SET target_minor = EXCLUDED.target_minor, note = EXCLUDED.note`,
+       DO UPDATE SET target_minor = EXCLUDED.target_minor,
+                     note = EXCLUDED.note,
+                     created_by = EXCLUDED.created_by,
+                     created_at = now()
+       WHERE office_capital_targets.target_minor IS DISTINCT FROM EXCLUDED.target_minor
+          OR office_capital_targets.note IS DISTINCT FROM EXCLUDED.note
+          OR office_capital_targets.created_by IS DISTINCT FROM EXCLUDED.created_by`,
       [row.branchId, row.fundCode, row.target.toString(), row.effectiveFrom, row.createdBy, row.note],
     )
   }

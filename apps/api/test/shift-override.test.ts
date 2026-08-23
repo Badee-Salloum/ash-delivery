@@ -321,6 +321,11 @@ describe('shift override (stuck shift)', () => {
       expect((await h.deps.shifts.findById(id))?.state).toBe('pending_review')
       expect(await h.deps.settlements.findByShift(id)).toBeNull()
     }
+    for (const reason of ['', ' \u200B\t']) {
+      const refused = await post(manager, `/shifts/${id}/force-close`, { ...final, reason })
+      expect(refused.statusCode, refused.body).toBe(400)
+      expect(await h.deps.settlements.findByShift(id)).toBeNull()
+    }
 
     const approved = await post(manager, `/shifts/${id}/force-close`, final)
     expect(approved.statusCode, approved.body).toBe(200)

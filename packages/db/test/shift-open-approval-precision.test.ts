@@ -125,7 +125,9 @@ if (!DATABASE_URL) {
       openApprovedBy: managerId,
     })
 
-    await expect(shifts.update({ ...shift!, state: 'cancelled' }, managerId)).resolves.toBeUndefined()
+    // Exercise a later nonterminal write. A naked transition to `cancelled` is deliberately no
+    // longer valid: migration 0037 requires the exact canonical void journals and decision.
+    await expect(shifts.update({ ...shift!, state: 'suspended' }, managerId)).resolves.toBeUndefined()
 
     const { rows } = await pool.query<{ state: string; approved_at: string; approved_by: string }>(
       `SELECT state,
@@ -136,7 +138,7 @@ if (!DATABASE_URL) {
       [precisionShiftId],
     )
     expect(rows[0]).toEqual({
-      state: 'cancelled',
+      state: 'suspended',
       approved_at: '2026-08-13T16:48:06.268377Z',
       approved_by: managerId,
     })

@@ -1,5 +1,11 @@
-import { type Minor, ZERO, add, minor, sub } from '../money/minor.ts'
-import { type OfficeFund, type Posting, fundFromCompany, sweepToCompany } from '../ledger/recipes.ts'
+import { type Minor, ZERO, abs, add, minor, sub } from '../money/minor.ts'
+import {
+  type OfficeFund,
+  type Posting,
+  assertBalanced,
+  fundFromCompany,
+  sweepToCompany,
+} from '../ledger/recipes.ts'
 
 /**
  * «الترميم» — the daily restoration, in the owner's own words.
@@ -56,6 +62,10 @@ export interface FundPosition {
 
 export interface RestorationLeg {
   readonly fundCode: OfficeFund
+  /** The physical amount used by this plan, frozen from the sealed count before restoration. */
+  readonly counted: Minor
+  /** Outstanding driver debt assigned to this box and counted as office capital. */
+  readonly receivables: Minor
   /** counted + receivables — «الوضع الحالي». */
   readonly position: Minor
   readonly capitalTarget: Minor
@@ -77,6 +87,65 @@ export interface RestorationPlan {
   readonly refusals: readonly RestorationRefusalCode[]
 }
 
+export interface CashCountVarianceLine {
+  readonly fundCode: OfficeFund
+  /** Physical count minus the ledger balance frozen when the count was sealed. */
+  readonly variance: Minor
+  /** The manager's line-specific explanation from the immutable count evidence. */
+  readonly resolution: string | null
+}
+
+/**
+ * Make a signed cash-count variance explicit before restoration.
+ *
+ * A restoration plan is deliberately based on the physical count. Posting that plan directly
+ * against an unreconciled ledger leaves the office fund off target by exactly the count variance.
+ * These balanced corrections first align the ledger with the sealed physical fact. Their contra
+ * account is a dedicated variance cost centre, never `company_box`: a missing banknote is not a
+ * transfer to the company fund, and presenting it as one would overstate profit/restoration flow.
+ *
+ * The occurrence key binds each correction to the count id, its SHA-256 proof, and the exact box.
+ * The journal reason is supplied by the service from the manager's required restoration reason;
+ * the line-specific resolution remains frozen in the restoration record beside these postings.
+ */
+export function postingsForCashCountReconciliation(input: {
+  readonly branchId: string
+  readonly cashCountId: string
+  readonly proofSha256: string
+  readonly lines: readonly CashCountVarianceLine[]
+}): Posting[] {
+  if (input.branchId.trim() === '') throw new RangeError('cash-count reconciliation requires a branch id')
+  if (input.cashCountId.trim() === '') throw new RangeError('cash-count reconciliation requires a count id')
+  if (!/^[0-9a-f]{64}$/i.test(input.proofSha256)) {
+    throw new RangeError('cash-count reconciliation requires a SHA-256 proof')
+  }
+
+  return input.lines.flatMap((line): Posting[] => {
+    if (line.variance === ZERO) return []
+    if (!line.resolution || line.resolution.trim() === '') {
+      throw new RangeError(`cash-count variance for ${line.fundCode} requires a resolution`)
+    }
+
+    const amount = abs(line.variance)
+    const office = { kind: line.fundCode } as const
+    const variance = {
+      kind: 'cost_center' as const,
+      costCenterId: `cash_count_variance:${input.branchId}:${line.fundCode}`,
+    }
+    const officeSide = line.variance > ZERO ? 'D' : 'C'
+    const varianceSide = line.variance > ZERO ? 'C' : 'D'
+
+    return [assertBalanced({
+      eventType: 'correction',
+      occurrenceKey: `cash-count:${input.cashCountId}:${input.proofSha256}:${line.fundCode}`,
+      lines: [
+        { fund: office, side: officeSide, amount, role: 'cash_count_reconciled_fund' },
+        { fund: variance, side: varianceSide, amount, role: 'cash_count_variance_counterpart' },
+      ],
+    })]
+  })
+}
+
 /** Total function: it always returns a plan, and marks a leg infeasible rather than throwing. */
 export function planRestoration(positions: readonly FundPosition[]): RestorationPlan {
   const legs: RestorationLeg[] = positions.map((p) => {
@@ -86,6 +155,8 @@ export function planRestoration(positions: readonly FundPosition[]): Restoration
       // treasury to the company fund. Refusing is the only safe reading of "not configured".
       return {
         fundCode: p.fundCode,
+        counted: p.counted,
+        receivables: p.receivables,
         position: add(p.counted, p.receivables),
         capitalTarget: ZERO,
         delta: ZERO,
@@ -107,6 +178,8 @@ export function planRestoration(positions: readonly FundPosition[]): Restoration
 
     return {
       fundCode: p.fundCode,
+      counted: p.counted,
+      receivables: p.receivables,
       position,
       capitalTarget: p.capitalTarget,
       delta,

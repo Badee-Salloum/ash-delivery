@@ -45,6 +45,7 @@ describe('vehicle life log (SRS B-2 / س66)', () => {
 
     const manager = await h.loginAs('manager')
     const expense = await post(manager, '/expenses', {
+      idempotencyKey: crypto.randomUUID(),
       categoryId,
       costCenterKind: 'vehicle',
       vehicleId: VEHICLE_ID,

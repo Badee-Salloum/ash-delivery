@@ -24,7 +24,7 @@ const MUST_AUDIT = [
   'users', 'role_permissions', 'settings', 'approval_ceilings',
   'drivers', 'vehicles', 'documents',
   'funds', 'fx_days', 'week_locks', 'journal_entries', 'journal_lines',
-  'cash_counts', 'expenses',
+  'cash_counts', 'expenses', 'receivable_events',
   'shifts', 'shift_orders', 'cash_deductions', 'shift_media', 'float_tranches', 'tier_rules',
   // Decision-complete cash/wallet close snapshots. Append-only, but creation is a money decision.
   'shift_settlements',

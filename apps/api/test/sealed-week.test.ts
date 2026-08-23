@@ -89,6 +89,7 @@ describe('a sealed week refuses new postings', () => {
     expect(cat.statusCode, cat.body).toBe(201)
 
     const res = await post(manager, '/expenses', {
+      idempotencyKey: crypto.randomUUID(),
       categoryId: cat.json().id,
       costCenterKind: 'branch',
       vehicleId: null,

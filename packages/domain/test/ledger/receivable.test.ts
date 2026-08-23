@@ -8,6 +8,8 @@ import {
   fundCode,
   postingsForApproval,
   postingsForOpen,
+  receivableAdjustment,
+  walletCarry,
 } from '../../src/ledger/recipes.ts'
 import { type Minor, minor } from '../../src/money/minor.ts'
 import { splitBlock, totalFees } from '../../src/money/allocate.ts'
@@ -108,12 +110,21 @@ describe('حصة السائق finally settles', () => {
   })
 })
 
-describe('a ذمة carried into the next shift', () => {
+describe('shift-funding receivables carried into the next shift', () => {
   it('raises his cash without the branch box paying twice', () => {
     const p = floatCarry(DRIVER, syp(40_000))
     expect(balance([p], `driver_cash:${DRIVER}`)).toBe(syp(40_000))
-    expect(balance([p], `driver_receivable_cash:${DRIVER}`)).toBe(-syp(40_000))
+    expect(balance([p], `driver_shift_funding_cash:${DRIVER}`)).toBe(-syp(40_000))
+    expect(balance([p], `driver_receivable_cash:${DRIVER}`)).toBe(0n)
     expect(balance([p], 'office_cash')).toBe(0n) // the box already paid, yesterday
+  })
+
+  it('raises his wallet from wallet funding without touching an ordinary wallet debt', () => {
+    const p = walletCarry(DRIVER, syp(25_000))
+    expect(balance([p], `driver_wallet:${DRIVER}`)).toBe(syp(25_000))
+    expect(balance([p], `driver_shift_funding_wallet:${DRIVER}`)).toBe(-syp(25_000))
+    expect(balance([p], `driver_receivable_wallet:${DRIVER}`)).toBe(0n)
+    expect(balance([p], 'office_wallet')).toBe(0n)
   })
 
   it('counts as closing cash, exactly like a float tranche', () => {
@@ -132,52 +143,28 @@ describe('a ذمة carried into the next shift', () => {
 /**
  * THE ROUND TRIP — the property that makes this safe to run every night for a year.
  *
- * Close keeping a ذمة, open the next day consuming it, close flat. Every fund must return to where
- * it started: the receivable at zero, the driver's cash at zero, and the office no better or worse
- * off than if the money had simply been handed over and handed back.
+ * Advance shift funding, consume it at open, then return it at close. Every fund must return to
+ * where it started. Ordinary receivables are deliberately excluded from this automatic cycle.
  */
-describe('close with a ذمة, open with it, close flat', () => {
-  it('returns the receivable to zero and leaves nothing stranded', () => {
-    const kept = syp(40_000)
-
-    // Night one: he keeps 40,000.
-    const day1 = shift({ keptAsReceivable: kept })
-    const split1 = splitBlock(totalFees(day1.orders.map((o) => o.fee)), 4_000)
-    const night1 = [...postingsForOpen(day1), ...postingsForApproval(day1, split1)]
-
-    // Night two: the office hands over nothing new; the 40,000 he holds IS the float.
-    const day2 = shift({ floatTranches: [], carriedTranches: [kept] })
-    const split2 = splitBlock(totalFees(day2.orders.map((o) => o.fee)), 4_000)
-    const night2 = [...postingsForOpen(day2), ...postingsForApproval(day2, split2)]
-
-    const all = [...night1, ...night2]
+describe('create shift funding, open with it, close flat', () => {
+  it('returns cash funding to zero and leaves nothing stranded', () => {
+    const amount = syp(40_000)
+    const all = [
+      receivableAdjustment(DRIVER, 'shift_funding', 'cash', 'create', amount, 'cash-advance'),
+      floatCarry(DRIVER, amount),
+      floatReturnSplit(DRIVER, amount, minor(0n), minor(0n)),
+    ]
+    expect(balance(all, `driver_shift_funding_cash:${DRIVER}`)).toBe(0n)
     expect(balance(all, `driver_receivable_cash:${DRIVER}`)).toBe(0n)
     expect(balance(all, `driver_cash:${DRIVER}`)).toBe(0n)
+    expect(balance(all, 'office_cash')).toBe(0n)
   })
 
-  it('does not let the branch box pay the same float twice', () => {
-    const kept = syp(40_000)
-    const day1 = shift({ keptAsReceivable: kept })
-    const split1 = splitBlock(totalFees(day1.orders.map((o) => o.fee)), 4_000)
-    const day2 = shift({ floatTranches: [], carriedTranches: [kept] })
-    const split2 = splitBlock(totalFees(day2.orders.map((o) => o.fee)), 4_000)
-
-    const carried = balance(
-      [...postingsForOpen(day1), ...postingsForApproval(day1, split1), ...postingsForOpen(day2), ...postingsForApproval(day2, split2)],
-      'office_cash',
-    )
-    // The same two nights with NO ذمة at all: the office must end in exactly the same place.
-    const plain1 = shift()
-    const plain2 = shift()
-    const plain = balance(
-      [
-        ...postingsForOpen(plain1),
-        ...postingsForApproval(plain1, split1),
-        ...postingsForOpen(plain2),
-        ...postingsForApproval(plain2, split2),
-      ],
-      'office_cash',
-    )
-    expect(carried).toBe(plain)
+  it('does not auto-consume an ordinary receivable', () => {
+    const amount = syp(40_000)
+    const ordinary = receivableAdjustment(DRIVER, 'ordinary', 'cash', 'create', amount, 'ordinary-debt')
+    const open = floatCarry(DRIVER, amount)
+    expect(balance([ordinary, open], `driver_receivable_cash:${DRIVER}`)).toBe(amount)
+    expect(balance([ordinary, open], `driver_shift_funding_cash:${DRIVER}`)).toBe(-amount)
   })
 })

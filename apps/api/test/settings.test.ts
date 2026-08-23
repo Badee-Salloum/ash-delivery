@@ -110,18 +110,19 @@ describe('the ceiling set through /settings is actually enforced', () => {
     const manager = await h.loginAs('manager')
     const base = { categoryId, costCenterKind: 'general', vehicleId: null, description: 'وقود' }
 
-    const over = await post(manager, '/expenses', { ...base, amount: sypStr(25_000) })
+    const over = await post(manager, '/expenses', { ...base, idempotencyKey: crypto.randomUUID(), amount: sypStr(25_000) })
     expect(over.statusCode).toBe(422)
     expect(over.json().error).toBe('receipt_required')
 
     const withReceipt = await post(manager, '/expenses', {
       ...base,
+      idempotencyKey: crypto.randomUUID(),
       amount: sypStr(25_000),
       receiptMediaId: '00000000-0000-4000-8000-000000000abc',
     })
     expect(withReceipt.statusCode, withReceipt.body).toBe(201)
 
-    const under = await post(manager, '/expenses', { ...base, amount: sypStr(5_000) })
+    const under = await post(manager, '/expenses', { ...base, idempotencyKey: crypto.randomUUID(), amount: sypStr(5_000) })
     expect(under.statusCode, under.body).toBe(201)
   })
 })
