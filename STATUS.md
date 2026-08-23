@@ -113,6 +113,7 @@ conformance at production because it truncates application tables.
 | First real `0035` close audit | — | Two ordinary shifts were open when deployment completed. Audit their working-count reversal and first completed settlement without fabricating production data. |
 | Audit Muhammad/Thaer after `0034` | — | Pending and deliberately separate from deployment; use only audited API workflows, never direct SQL or automatic approval. |
 | Broader physical-device QA | — | The focused 390/768/1280 px Arabic/English release flow passed; physical camera, offline, install, and long-session testing remain broader follow-up work. |
+| Portable local restore runner | small | `scripts/restore-db.mjs` currently targets Neon HTTP. The verified local PostgreSQL rehearsal used a temporary out-of-repository `pg` adapter; add a checked-in local mode before the next rehearsal. |
 | Historical tier admin | retired | Tier tables remain readable for approved history; editing and publication are intentionally disabled by the fixed 40% policy. |
 | QR code on 2FA enrolment | ~1 h | The secret is shown for manual entry; a QR renderer is a nicety. |
 | Attendance (B-4) | ~0.5 day | Table only. |

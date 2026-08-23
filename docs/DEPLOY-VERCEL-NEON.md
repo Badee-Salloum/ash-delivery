@@ -118,6 +118,11 @@ psql '<disposable-postgres-url>' -v ON_ERROR_STOP=1 -f packages/db/verify-guards
 
 Never substitute the live URL into either command above.
 
+`scripts/restore-db.mjs` currently uses Neon's HTTP adapter and does not target a localhost
+PostgreSQL server. The `0035` local restore rehearsal therefore used a temporary, out-of-repository
+copy wired to `pg`. The restored fingerprints and invariants passed, but adding a checked-in local
+mode remains deferred.
+
 ---
 
 ## 2. Environment variables (project `ash-api`)

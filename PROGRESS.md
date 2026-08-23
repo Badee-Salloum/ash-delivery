@@ -21,8 +21,10 @@ distinct working drivers and two working vehicles.
 The post-backup was restored into the explicitly named local disposable database
 `ash_restore_0035_post_20260823_0849`. All 58 table fingerprints and 3,853 rows matched, all 27
 sequences were positioned safely, no trigger remained disabled, journals balanced, and a rolled-back
-write probe left no object. The scratch database was dropped and its PostgreSQL server stopped. The
-next required evidence is the real-staff close of the two open shifts; no transaction was fabricated.
+write probe left no object. Because the checked-in restore utility targets Neon HTTP, this localhost
+rehearsal used a temporary out-of-repository `pg` adapter; adding a portable checked-in local mode is
+deferred. The scratch database was dropped and its PostgreSQL server stopped. The next required
+evidence is the real-staff close of the two open shifts; no transaction was fabricated.
 
 ## 2026-08-23 — `0035` rollout authorized with an explicit historical exception
 

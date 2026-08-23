@@ -53,7 +53,9 @@ then completed with the exception set unchanged. Validated backups contained
 58 tables / 3,852 pre-migration rows and 58 / 3,853 post-migration rows. Production smokes passed,
 and the post-backup restore reproduced all 3,853 rows and every table fingerprint with 27 safe
 sequences, no disabled triggers, zero unbalanced entries, and a clean rollback probe. The two shifts
-open during deployment remain the real-staff close acceptance cases.
+open during deployment remain the real-staff close acceptance cases. The checked-in restore utility
+is Neon-HTTP-only, so the localhost rehearsal used a temporary out-of-repository `pg` adapter; a
+portable checked-in local restore mode remains deferred.
 
 ### Driver end handoff follow-up
 
