@@ -1262,6 +1262,45 @@ describe('removed and migrated evidence', () => {
 })
 
 describe('atomic final materialization', () => {
+  it('keeps an excluded unpriced OCR ghost as evidence without blocking real priced orders', async () => {
+    const priced = { ...orderRow('155.00', { rowIndex: 0, time: '08:00' }), rowCount: 2 }
+    const ghost = {
+      ...orderRow('0.00', { route: 'reader ghost without money', rowIndex: 1, time: '09:00' }),
+      printed: '? SYP',
+      value: null,
+      rowCount: 2,
+    }
+    reader.push(ok(priced, ghost))
+    const { driver, shiftId } = await openShift()
+    let draft = await getDraft(driver, shiftId)
+    draft = draftFromUpload(await uploadEnd(driver, shiftId, 'dashboard', image('unpriced-excluded-row'), draft))
+    draft = draftFromRead(await readSlot(driver, shiftId, 'dashboard', 'orders', draft))
+
+    const unpriced = draft.operations.orders.find((row) => row.fee === null)
+    expect(unpriced).toMatchObject({ included: false })
+    expect(unpriced?.reviewReasons).toContain('missing_money')
+
+    for (const slot of ['wallet', 'odometer']) {
+      draft = draftFromUpload(await uploadEnd(driver, shiftId, slot, image(`unpriced-${slot}`), draft))
+    }
+    const figures = await patchDraft(driver, shiftId, {
+      expectedRevision: draft.revision,
+      figures: { odometerKm: 1_010, cashDeclared: '155.00', walletDeclared: '0.00' },
+    })
+    expect(figures.statusCode, figures.body).toBe(200)
+    draft = figures.json() as CloseDraftView
+
+    const submitted = await inject('PUT', driver, `/shifts/${shiftId}/end-package`, endPayload(draft))
+    expect(submitted.statusCode, submitted.body).toBe(200)
+    expect(submitted.json().state).toBe('pending_review')
+    const materialized = await h.deps.orders.listByShift(shiftId)
+    expect(materialized).toHaveLength(1)
+    expect(materialized[0]).toMatchObject({ fee: 15_500n, included: true })
+    expect((await h.deps.closeDrafts.findByShift(shiftId))?.data.operations.orders).toContainEqual(
+      expect.objectContaining({ clientKey: unpriced?.clientKey, fee: null, included: false }),
+    )
+  })
+
   it('never lets force-close preparation silently bypass an unsubmitted durable draft operation', async () => {
     reader.push(ok(orderRow('155.00', { route: 'force-close draft row' })))
     const { driver, manager, shiftId } = await openShift()

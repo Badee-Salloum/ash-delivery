@@ -1920,7 +1920,11 @@ function closeDraftOperationsInput(shiftId: string, closeDraft: CloseDraftRecord
     ? supplied
     : `YAL-${createHash('sha256').update(`${shiftId}|${clientKey}`).digest('hex').slice(0, 32)}`
   return {
-    orders: closeDraft.data.operations.orders.map((row) => ({
+    // A reader can retain an unpriced ghost/cancelled row as excluded review evidence. It belongs
+    // in the immutable close draft and OCR observations, but it is not a financial operation and
+    // cannot be parsed into one without inventing an amount. Included rows are checked below and
+    // therefore can never disappear through this filter.
+    orders: closeDraft.data.operations.orders.filter((row) => row.fee !== null).map((row) => ({
       providerOrderNo: providerNo(row.clientKey, row.providerOrderNo),
       payMode: row.payMode,
       fee: parseMinor(row.fee!),
@@ -1937,7 +1941,7 @@ function closeDraftOperationsInput(shiftId: string, closeDraft: CloseDraftRecord
       closeDraftReviewReasons: row.reviewReasons,
       closeDraftClientKey: row.clientKey,
     })),
-    cashDeductions: closeDraft.data.operations.cashDeductions.map((row) => ({
+    cashDeductions: closeDraft.data.operations.cashDeductions.filter((row) => row.amount !== null).map((row) => ({
       operationKey: row.operationKey,
       amount: parseMinor(row.amount!),
       source: row.source === 'manual' ? 'manual' : 'ocr',
@@ -1969,10 +1973,10 @@ function closeDraftOperationsInput(shiftId: string, closeDraft: CloseDraftRecord
 
 function assertCloseDraftMoneyComplete(closeDraft: CloseDraftRecord): void {
   const incompleteOrders = closeDraft.data.operations.orders
-    .filter((row) => row.fee === null)
+    .filter((row) => row.included && row.fee === null)
     .map((row) => row.clientKey)
   const incompleteDeductions = closeDraft.data.operations.cashDeductions
-    .filter((row) => row.amount === null)
+    .filter((row) => row.included && row.amount === null)
     .map((row) => row.clientKey)
   if (incompleteOrders.length > 0 || incompleteDeductions.length > 0) {
     throw new ServiceError(422, 'close_draft_money_incomplete', {
