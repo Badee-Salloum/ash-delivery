@@ -220,7 +220,12 @@ export class ChatCompletionsOcrReader implements OcrReader {
     return event.detail
   }
 
-  async read(request: { field: OcrField; bytes: Uint8Array; mimeType: string }): Promise<OcrReading> {
+  async read(request: {
+    field: OcrField
+    bytes: Uint8Array
+    mimeType: string
+    signal?: AbortSignal
+  }): Promise<OcrReading> {
     const startedAt = Date.now()
     let passes: ModelPass[]
     let result: OcrResult
@@ -250,7 +255,7 @@ export class ChatCompletionsOcrReader implements OcrReader {
   }
 
   private async readOrders(
-    request: { field: OcrField; bytes: Uint8Array; mimeType: string },
+    request: { field: OcrField; bytes: Uint8Array; mimeType: string; signal?: AbortSignal },
   ): Promise<{ result: OcrResult; passes: ModelPass[] }> {
     const routeAbort = new AbortController()
     const routePromise = this.runPass(request, readPrompt('orders'), {
@@ -292,7 +297,7 @@ export class ChatCompletionsOcrReader implements OcrReader {
   }
 
   private async runPass(
-    request: { field: OcrField; bytes: Uint8Array; mimeType: string },
+    request: { field: OcrField; bytes: Uint8Array; mimeType: string; signal?: AbortSignal },
     prompt: string,
     options: PassOptions = {},
   ): Promise<ModelPass> {
@@ -364,13 +369,11 @@ export class ChatCompletionsOcrReader implements OcrReader {
          * dies at the same instant the platform gives up, turning a clean timeout into an opaque
          * transport error nobody can diagnose from a log line.
          */
-        signal:
-          options.signal === undefined
-            ? AbortSignal.timeout(options.timeoutMs ?? this.config.timeoutMs)
-            : AbortSignal.any([
-                AbortSignal.timeout(options.timeoutMs ?? this.config.timeoutMs),
-                options.signal,
-              ]),
+        signal: AbortSignal.any([
+          AbortSignal.timeout(options.timeoutMs ?? this.config.timeoutMs),
+          ...(options.signal === undefined ? [] : [options.signal]),
+          ...(request.signal === undefined ? [] : [request.signal as AbortSignal]),
+        ]),
       })
 
       if (!res.ok) {
@@ -397,6 +400,7 @@ export class ChatCompletionsOcrReader implements OcrReader {
       const name = (err as { name?: string })?.name
       const timedOut = name === 'TimeoutError' || name === 'AbortError'
       const budget = options.timeoutMs ?? this.config.timeoutMs
+      const callerDeadline = request.signal?.aborted === true
       /*
        * A DELIBERATE abort is not a failure and must not raise an alarm.
        *
@@ -413,7 +417,9 @@ export class ChatCompletionsOcrReader implements OcrReader {
             kind: timedOut ? 'timeout' : 'http',
             pass,
             detail: timedOut
-              ? `timeout ${budget}ms ${pass}`
+              ? callerDeadline
+                ? `caller deadline ${pass}`
+                : `timeout ${budget}ms ${pass}`
               : `transport ${pass}: ${safeProviderDetail(String((err as { message?: string })?.message ?? name ?? ''), this.config.apiKey)}`,
           })
       return failedPass(timedOut ? 'timeout' : 'unavailable', 0, 0, detail)

@@ -1007,6 +1007,55 @@ describe('a failed pass says what happened', () => {
     expect(events[0]).toMatchObject({ kind: 'http', status: 400 })
   })
 
+  it('turns a provider low-balance response into an immediate non-throwing fallback', async () => {
+    const events: OcrProviderErrorEvent[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ error: { code: 'insufficient_credits', message: 'credit balance too low' } }), {
+          status: 402,
+        }),
+      ),
+    )
+    const reading = await providerReader('openrouter', (e) => events.push(e)).read({
+      field: 'bms',
+      bytes: new Uint8Array([1]),
+      mimeType: 'image/jpeg',
+    })
+
+    expect(reading.result).toMatchObject({ ok: false, reason: 'unavailable' })
+    expect((reading.result as { detail?: string }).detail).toContain('http 402')
+    expect((reading.result as { detail?: string }).detail).toContain('insufficient_credits')
+    expect(events).toEqual([
+      expect.objectContaining({ provider: 'openrouter', kind: 'http', status: 402, pass: 'bms' }),
+    ])
+  })
+
+  it('honours the API lifecycle abort instead of leaving provider fetch open', async () => {
+    const events: OcrProviderErrorEvent[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) =>
+      await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('API deadline', 'AbortError'))
+        }, { once: true })
+      }),
+    ))
+    const controller = new AbortController()
+    const pending = providerReader('openrouter', (event) => events.push(event)).read({
+      field: 'bms',
+      bytes: new Uint8Array([1]),
+      mimeType: 'image/jpeg',
+      signal: controller.signal,
+    })
+
+    controller.abort()
+    const reading = await pending
+    expect(reading.result).toMatchObject({ ok: false, reason: 'timeout' })
+    expect(events).toEqual([
+      expect.objectContaining({ kind: 'timeout', pass: 'bms', detail: 'caller deadline bms' }),
+    ])
+  })
+
   it('never fires the sink on a good read', async () => {
     const events: OcrProviderErrorEvent[] = []
     vi.stubGlobal('fetch', vi.fn(async () => completion(screen(walletRow('1', '1')))))

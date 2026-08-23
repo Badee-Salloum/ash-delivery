@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ScriptedOcrReader } from '@ash/adapters/memory'
 import type { OcrReader, OcrReading } from '@ash/contracts'
 import { DRIVER_ID, type Harness, TINY_JPEG, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
+import { readScreen } from '../src/ocr.service.ts'
 
 /**
  * The paid reader, and the four things that keep it from being dangerous.
@@ -523,6 +524,60 @@ describe('cloud OCR: a failure never blocks a shift', () => {
     const duplicate = await read(driver, shiftId, 'orders')
     expect(duplicate.json()).toMatchObject({ ok: false, reason: 'unavailable', cached: true })
     expect(calls).toBe(1)
+  })
+
+  it('ends a stalled BMS read at the API deadline and durably caches a named timeout', async () => {
+    let calls = 0
+    let providerSignal: Parameters<OcrReader['read']>[0]['signal']
+    let markEntered!: () => void
+    const entered = new Promise<void>((resolve) => { markEntered = resolve })
+    const stalled: OcrReader = {
+      available: true,
+      model: 'stalled-bms',
+      cacheSignature: (field) => `stalled-bms-v1:${field}`,
+      read: async (request): Promise<OcrReading> => {
+        calls += 1
+        providerSignal = request.signal
+        markEntered()
+        // Deliberately ignore AbortSignal. The API lifecycle guard must still settle the response
+        // and complete the paid reservation instead of waiting for Vercel to kill the socket.
+        return await new Promise<OcrReading>(() => undefined)
+      },
+    }
+    h = await makeHarness({ ocr: stalled })
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = await openShift(driver, manager)
+
+    const pending = readScreen(h.deps, {
+      shiftId,
+      field: 'bms',
+      bytes: TINY_JPEG,
+      requestedBy: 'u-d1',
+      maxReadsPerShift: 15,
+      deadlineMs: 10,
+    })
+    await entered
+    const timedOut = await pending
+
+    expect(timedOut).toMatchObject({
+      result: { ok: false, reason: 'timeout' },
+      cached: false,
+      retryable: true,
+      reads: { used: 1 },
+    })
+    expect(providerSignal?.aborted).toBe(true)
+
+    const duplicate = await readScreen(h.deps, {
+      shiftId,
+      field: 'bms',
+      bytes: TINY_JPEG,
+      requestedBy: 'u-d1',
+      maxReadsPerShift: 15,
+      deadlineMs: 10,
+    })
+    expect(duplicate).toMatchObject({ result: { ok: false, reason: 'timeout' }, cached: true })
+    expect(calls, 'the completed timeout reservation must prevent an automatic second bill').toBe(1)
   })
 })
 

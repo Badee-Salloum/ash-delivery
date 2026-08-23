@@ -76,6 +76,15 @@ export type OcrField = 'orders' | 'payments_log' | 'wallet' | 'odometer' | 'bms'
 export type OcrFailure = 'unavailable' | 'timeout' | 'no_fields' | 'refused' | 'wrong_screen'
 
 /**
+ * AbortSignal's infrastructure-neutral surface. The contracts package deliberately has no DOM or
+ * Node globals; the API passes the platform AbortSignal, which structurally satisfies this port.
+ */
+export interface OcrAbortSignal {
+  readonly aborted: boolean
+  addEventListener(type: 'abort', listener: () => void, options?: { once?: boolean }): void
+}
+
+/**
  * One money row as the reader saw it.
  *
  * `printed` is transcription and `value` is arithmetic, and they are separate fields because they
@@ -171,7 +180,16 @@ export interface OcrReader {
   readonly model: string
   /** Includes model/config plus the field-specific prompt and validation versions. */
   cacheSignature(field: OcrField): string
-  read(request: { field: OcrField; bytes: Uint8Array; mimeType: string }): Promise<OcrReading>
+  read(request: {
+    field: OcrField
+    bytes: Uint8Array
+    mimeType: string
+    /**
+     * The API's request-lifecycle ceiling. Adapters still own their provider-specific timeout,
+     * but must also stop network work when the caller can no longer wait for the result.
+     */
+    signal?: OcrAbortSignal
+  }): Promise<OcrReading>
 }
 
 /** What `read` returns: the result, plus what it cost. There is no other cost meter in this API. */

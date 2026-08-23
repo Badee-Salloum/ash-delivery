@@ -1,4 +1,4 @@
-import type { Deps, OcrField, OcrReadRecord, OcrResult } from '@ash/contracts'
+import type { Deps, OcrField, OcrReading, OcrReadRecord, OcrResult } from '@ash/contracts'
 import { ServiceError } from './shifts.service.ts'
 import { MAX_UPLOAD_BYTES, sha256Of, sniffImageType } from './media.service.ts'
 
@@ -18,6 +18,13 @@ const OCR_ATTEMPT_LEASE_MS = 55_000
 const OCR_RUNNING_INITIAL_POLL_MS = 500
 const OCR_RUNNING_MAX_POLL_MS = 3_000
 const OCR_RUNNING_MAX_WAIT_MS = 50_000
+/**
+ * Leave enough time to durably complete the reservation before Vercel's 60-second function
+ * ceiling. BMS is an optional prefill with an immediate manual fallback, so it gets a much
+ * shorter UX ceiling than the multi-pass order reader.
+ */
+const OCR_READ_DEADLINE_MS = 52_000
+const BMS_READ_DEADLINE_MS = 30_000
 
 export interface ReadInput {
   shiftId: string
@@ -28,6 +35,8 @@ export interface ReadInput {
   maxReadsPerShift: number
   /** Only an explicit user action may consume the single second attempt. */
   retryFailed?: boolean
+  /** Internal override for deterministic lifecycle tests; production uses the field deadline. */
+  deadlineMs?: number
 }
 
 export interface ReadOutput {
@@ -108,17 +117,7 @@ export async function readScreen(deps: Deps, input: ReadInput): Promise<ReadOutp
     return unavailable(input, refreshed.used, true)
   }
 
-  const startedAt = Date.now()
-  let reading
-  try {
-    reading = await deps.ocr.read({ field: input.field, bytes: input.bytes, mimeType })
-  } catch {
-    // The port promises not to throw, but a future adapter bug still must release the lease.
-    reading = {
-      result: { ok: false as const, reason: 'unavailable' as const },
-      usage: { tokensIn: 0, tokensOut: 0, latencyMs: Date.now() - startedAt },
-    }
-  }
+  const reading = await readWithinDeadline(deps, input.field, input.bytes, mimeType, input.deadlineMs)
 
   const result = safeFieldResult(input.field, reading.result)
   const completed = await deps.ocrReads.completeReadAttempt({
@@ -137,6 +136,62 @@ export async function readScreen(deps: Deps, input: ReadInput): Promise<ReadOutp
     cached: false,
     retryable: canRetry(finalRead?.result ?? result),
     reads: { used, max: input.maxReadsPerShift },
+  }
+}
+
+/**
+ * The provider adapter has its own fetch timeout, but the API owns the HTTP lifecycle and the OCR
+ * reservation. This outer ceiling is intentionally independent: even a future adapter that
+ * ignores AbortSignal cannot keep the driver's request open until the platform kills the socket.
+ */
+async function readWithinDeadline(
+  deps: Deps,
+  field: OcrField,
+  bytes: Uint8Array,
+  mimeType: string,
+  deadlineOverrideMs?: number,
+): Promise<OcrReading> {
+  const startedAt = Date.now()
+  const deadlineMs = deadlineOverrideMs ?? (field === 'bms' ? BMS_READ_DEADLINE_MS : OCR_READ_DEADLINE_MS)
+  const controller = new AbortController()
+  let deadlineReached = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<OcrReading>((resolve) => {
+    timer = setTimeout(() => {
+      deadlineReached = true
+      controller.abort(new DOMException(`OCR ${field} deadline exceeded`, 'TimeoutError'))
+      resolve(timeoutReading(field, deadlineMs, Date.now() - startedAt))
+    }, deadlineMs)
+    timer.unref?.()
+  })
+
+  try {
+    return await Promise.race([
+      deps.ocr.read({ field, bytes, mimeType, signal: controller.signal }),
+      deadline,
+    ])
+  } catch {
+    // The port promises not to throw. Preserve timeout semantics if it rejected in response to our
+    // abort; every other adapter bug is unavailable. Either way, the caller completes the lease.
+    return deadlineReached
+      ? timeoutReading(field, deadlineMs, Date.now() - startedAt)
+      : {
+          result: { ok: false, reason: 'unavailable' },
+          usage: { tokensIn: 0, tokensOut: 0, latencyMs: Date.now() - startedAt },
+        }
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+function timeoutReading(field: OcrField, deadlineMs: number, latencyMs: number): OcrReading {
+  return {
+    result: {
+      ok: false,
+      reason: 'timeout',
+      detail: `api deadline ${deadlineMs}ms ${field}`,
+    },
+    usage: { tokensIn: 0, tokensOut: 0, latencyMs },
   }
 }
 
