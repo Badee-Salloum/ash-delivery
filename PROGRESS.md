@@ -1,5 +1,43 @@
 # PROGRESS
 
+## 2026-08-23 — battery-close hang hotfix is live
+
+Thaer's end-BMS incident had two independent, read-only-confirmed facts. The close-draft OCR had
+saved 47% remaining charge and 36 cycles, but the per-pack end reading was still
+null/`unavailable` because the linked read response/persist lifecycle stalled. The close draft
+otherwise held complete declared values, but it also retained an
+excluded, unpriced OCR ghost; the old money-completeness check wrongly treated that evidence-only
+row as a financial operation and refused close materialization.
+
+Three commits address those exact failures:
+
+- `cee0fca` gives the API an outer BMS lifecycle deadline, propagates abort to the provider adapter,
+  and durably resolves a stalled read as timeout before the platform kills the request.
+- `0699581` keeps excluded null-money OCR rows as draft evidence, omits null-money rows from final
+  operation materialization, and treats a null amount as incomplete only when that row is included.
+- `512b6bf` bounds the driver's linked-read task, adds an immediate “continue manually” action,
+  forwards cancellation through the linked read and battery persistence calls, restores only its
+  own local pending marker, and ignores late results without deleting the accepted photo.
+
+The API fixes are live at `dpl_4jybXd5p791i9JpEEF2orikiz3cW`. Driver preview
+`dpl_DYt4hwQX7G4WxKaTyd6skhjSgjZA` was promoted, and the resulting driver production deployment is
+`dpl_DmFY6NfdgX4fUcPtNv8VZP9ppphh`. Stable driver index, manifest, service worker, and API proxy all
+returned 200. Production HTML and the service-worker cache both name the new driver asset
+`index-2arO8j3S.js`.
+
+The full gate ran under Node `24.19.0`: domain 425, contracts 12, client 257, admin 93, driver 263,
+adapters 121, and API 649 passed. The local database package passed 63 and skipped 8 because
+`DATABASE_URL` was absent. Both frontend builds and the API bundle passed. There is no database code
+or migration in this hotfix, so the previous real disposable-PostgreSQL evidence remains 108/108;
+it was not rerun or presented as new evidence. A read-only production database recheck after deploy
+could not complete because the local Neon connection ended with `ECONNRESET`. The public smokes
+remained green, so this is recorded as an unavailable database recheck, not an application-health
+failure.
+
+This entry records deployed code and smokes only. Thaer's live shift is **not** recorded as closed,
+and the existing null/`unavailable` per-pack end row is **not** recorded as repaired. Completion and
+manager settlement still require the ordinary audited production workflow.
+
 ## 2026-08-23 — `0035` is live
 
 The coordinated Vercel + Neon release completed from frozen commit `6389816`. API writes paused and

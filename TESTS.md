@@ -7,6 +7,40 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 
 **Legend:** ✅ implemented and green · ⚠ written but never executed · 🔜 planned, milestone named.
 
+## 2026-08-23 same-day battery-close hotfix
+
+The hotfix is frozen in commits `cee0fca`, `0699581`, and `512b6bf`. Node `24.19.0` full
+`pnpm check` passed domain 425, contracts 12, shared client 257, admin 93, driver 263, adapters 121,
+and API 649. The local database package passed 63 tests and skipped 8 because no `DATABASE_URL` was
+available. Both frontend production builds and the standalone API bundle passed.
+
+The new regressions cover both halves of the hang instead of assuming every promise eventually
+settles:
+
+- `api/ocr-read.test.ts` and `adapters/chat-completions-ocr.test.ts` prove that the API-owned BMS
+  deadline aborts provider work and returns a terminal timeout even when the provider would stall.
+- `driver/linked-read-task.test.ts` advances the clock against a never-resolving request, proves
+  immediate manual cancellation, and ignores a late answer.
+- `driver/linked-bms-escape-wiring.test.ts` proves that cancellation reaches the linked read and
+  evidence-bound battery write, restores only the request-owned pending marker, preserves the
+  accepted photo, and exposes the escape only on the end-BMS flow.
+- `client/api-abort-signal.test.ts` proves that the same `AbortSignal` reaches both HTTP requests.
+- `api/close-draft-adversarial.test.ts` proves an excluded unpriced OCR ghost remains evidence but
+  does not block materialization of real priced orders.
+
+Incident evidence is narrower than a successful close: Thaer's close-draft OCR held 47% and 36
+cycles, while the per-pack end row remained null/`unavailable` after the linked read/persist
+lifecycle stalled. His close draft also held complete values and an excluded unpriced OCR ghost,
+which the previous money-completeness check rejected. Tests and production deployment verify the
+fixes; they do **not** prove that the live shift closed or that the stored battery row was repaired.
+
+The hotfix contains no database code or migration. The prior disposable-PostgreSQL 17.11 evidence
+remains 108/108 with zero skips; it was not rerun and must not be relabelled as a hotfix database
+run. A production read-only post-deploy recheck was attempted but the local Neon connection ended
+with `ECONNRESET`. Stable index, manifest, service worker, and API-proxy smokes still returned 200,
+so the transport failure is not recorded as an application-health failure or a successful database
+check.
+
 ## 2026-08-23 release gate — dashboard working counts and shift-close integrity
 
 All release-gate commands ran under Node `24.19.0` / pnpm `11.3.0`. The frozen-install full
@@ -155,19 +189,19 @@ real protection either way.
 ```
 domain       425 tests
 contracts     12 tests
-client       256 tests
+client       257 tests
 admin         93 tests
-driver       256 tests
-adapters     119 tests
-database     108 tests   (real disposable PostgreSQL 17.11; zero skips)
-api          647 tests
-             ─────────
-           1,916 tests
+driver       263 tests
+adapters     121 tests
+database      63 passed / 8 skipped locally (no DATABASE_URL)
+api          649 tests
 ```
 
-`packages/db/verify-guards.sql` was executed against a positively identified disposable PostgreSQL
-17.11 database. It attempted the forbidden writes and passed every guard; destructive conformance
-was never pointed at production. The production integrity checker is read-only and separately
-continues to report only the exact owner-accepted historical exceptions documented above.
+The unchanged pre-hotfix database evidence remains 108/108 on a positively identified disposable
+PostgreSQL 17.11 database. `packages/db/verify-guards.sql` attempted the forbidden writes and passed
+every guard; destructive conformance was never pointed at production. The hotfix has no database
+code or migration, and the local hotfix run's 8 skips are stated rather than folded into the earlier
+zero-skip result. The production integrity checker is read-only and separately continues to report
+only the exact owner-accepted historical exceptions documented above.
 
 Run the full gate with `pnpm check`.

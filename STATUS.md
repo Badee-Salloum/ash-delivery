@@ -8,7 +8,31 @@ end package to manager review even when its money differs or end-battery evidenc
 Incomplete packs become explicit manager-reading obligations; this does not bypass manager approval
 or settlement.
 
-The final isolated gate ran on Node `24.19.0`, pnpm `11.3.0`, and PostgreSQL `17.11`. A frozen
+The same-day battery-close hotfix is also live. Backend commits `cee0fca` and `0699581` bound a
+stalled BMS provider call and allow excluded OCR rows with null money to remain evidence without
+blocking close materialization. Driver commit `512b6bf` adds a bounded read lifecycle and an
+immediate “continue manually” escape while preserving the accepted photo and draft. The live API is
+`dpl_4jybXd5p791i9JpEEF2orikiz3cW`; the live driver is
+`dpl_DmFY6NfdgX4fUcPtNv8VZP9ppphh`. Preview deployment
+`dpl_DYt4hwQX7G4WxKaTyd6skhjSgjZA` was promoted to that driver production deployment.
+
+Thaer's incident was diagnosed without rewriting it: OCR had saved 47% and 36 cycles in the close
+draft, but the per-pack end row was null/`unavailable` because the linked read response/persist
+lifecycle stalled. The same draft contained complete declared values plus an excluded, unpriced OCR
+ghost that the old materializer incorrectly treated as incomplete money. The hotfix is deployed;
+this document does **not** claim that Thaer's shift has closed or that its battery row was repaired.
+
+The hotfix gate ran under Node `24.19.0`: domain 425, contracts 12, shared client 257, admin 93,
+driver 263, adapters 121, and API 649 all passed. The local database package passed 63 tests and
+skipped 8 because `DATABASE_URL` was absent. Both frontend production builds and the API bundle
+passed. This hotfix has no database code or migration, so the earlier disposable-PostgreSQL
+`108/108` evidence remains unchanged. Stable driver index, manifest, service worker, and API proxy
+all returned 200; `index-2arO8j3S.js` appears in both production HTML and the service-worker cache.
+A post-deploy production read-only database recheck could not complete because the local Neon
+connection ended with `ECONNRESET`; that is not an application-health failure and is not recorded as
+a successful database recheck.
+
+The original `0035` isolated gate ran on Node `24.19.0`, pnpm `11.3.0`, and PostgreSQL `17.11`. A frozen
 install, full `pnpm check`, and required real-PostgreSQL rerun passed **1,916/1,916 tests**: domain
 425, contracts 12, shared client 256, admin 93, driver 256, adapters 119, real PostgreSQL database
 108, and API 647. Both frontend
@@ -46,17 +70,17 @@ Any new or changed exception still blocks a future promotion.
 
 ## The one-line answer
 
-**The working-count and shift-money-integrity release (`0035`) is live on Vercel + Neon + Vercel
-Blob.** The three known cancelled shifts remain explicit historical exceptions; they were neither
-rewritten nor hidden.
+**The working-count and shift-money-integrity release (`0035`) and the same-day battery-close
+hotfix are live on Vercel + Neon + Vercel Blob.** The three known cancelled shifts remain explicit
+historical exceptions; they were neither rewritten nor hidden.
 
 ## Live URLs (team `hadis-projects-3c86ccdb`, all public)
 
 | Surface | URL | Live deployment |
 | --- | --- | --- |
 | Admin console | https://ash-admin-eta.vercel.app | `dpl_9d5Zp8QHMwuKiUB5SxJXgR5xWvpw` |
-| Driver PWA | https://ash-driver.vercel.app | `dpl_GzB3CyzkjEFBeYyP1WaHQwZYHccw` |
-| API | https://ash-api-xi.vercel.app | `dpl_9DnbaiswA4bPP1bCEJ8H2eLi4Fub` |
+| Driver PWA | https://ash-driver.vercel.app | `dpl_DmFY6NfdgX4fUcPtNv8VZP9ppphh` |
+| API | https://ash-api-xi.vercel.app | `dpl_4jybXd5p791i9JpEEF2orikiz3cW` |
 
 Neon (PostgreSQL **18.4**, eu-central-1) has the **35-migration live baseline** and is bootstrapped
 with the §3 permission matrix, the Damascus branch, the historical tier table, and two admins
@@ -77,12 +101,12 @@ migrations) and `Desktop\ash-backups\2026-08-23-post-0035\2026-08-23T05-44-48-74
 | --- | --- |
 | **Domain** (money, BR1, settlement, ledger, shifts, RBAC, dates, FX, week, fleet, TOTP) | ✅ 425 tests, property-based |
 | **Contracts** | ✅ 12 tests |
-| **Shared client** (API client, i18n ar/en, order-entry model) | ✅ 256 tests |
-| **Driver PWA** | ✅ 256 tests + production build |
+| **Shared client** (API client, i18n ar/en, order-entry model) | ✅ 257 tests |
+| **Driver PWA** | ✅ 263 tests + production build |
 | **Admin console** | ✅ 93 tests + production build + focused responsive browser acceptance |
-| **Adapters** | ✅ 119 tests, including atomic OCR and idempotency races |
-| **API** — A, B, C, E, F, G plus fixed settlement and evidence flows | ✅ 647 tests over real HTTP |
-| **Database** | ✅ 108/108 on real PostgreSQL 17, zero skips; guards and migrations through `0035` |
+| **Adapters** | ✅ 121 tests, including the outer OCR abort/deadline regressions |
+| **API** — A, B, C, E, F, G plus fixed settlement and evidence flows | ✅ 649 tests over real HTTP |
+| **Database** | ✅ Prior 108/108 real-PostgreSQL evidence unchanged; hotfix local run 63 pass / 8 skip without `DATABASE_URL`; no DB code or migration in the hotfix |
 
 ### By SRS section — all in scope for Bundle 1a, all done
 
@@ -110,7 +134,7 @@ conformance at production because it truncates application tables.
 
 | Item | Effort | Note |
 | --- | --- | --- |
-| First real `0035` close audit | — | Two ordinary shifts were open when deployment completed. Audit their working-count reversal and first completed settlement without fabricating production data. |
+| First real `0035` close audit | — | The battery hotfix is live, but Thaer's shift is not documented as closed and its null/`unavailable` end-battery row was not repaired. Audit the eventual working-count reversal and settlement without fabricating or directly rewriting production data. |
 | Audit Muhammad/Thaer after `0034` | — | Pending and deliberately separate from deployment; use only audited API workflows, never direct SQL or automatic approval. |
 | Broader physical-device QA | — | The focused 390/768/1280 px Arabic/English release flow passed; physical camera, offline, install, and long-session testing remain broader follow-up work. |
 | Portable local restore runner | small | `scripts/restore-db.mjs` currently targets Neon HTTP. The verified local PostgreSQL rehearsal used a temporary out-of-repository `pg` adapter; add a checked-in local mode before the next rehearsal. |
