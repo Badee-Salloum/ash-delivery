@@ -6,10 +6,12 @@ const migration36 = readFileSync(new URL('0036_receivable_ledger_event.sql', mig
 const migration37 = readFileSync(new URL('0037_receivable_settlement_and_events.sql', migrationDir), 'utf8')
 const migration38 = readFileSync(new URL('0038_restoration_atomicity_guards.sql', migrationDir), 'utf8')
 const migration39 = readFileSync(new URL('0039_editable_office_capital_targets.sql', migrationDir), 'utf8')
+const migration40 = readFileSync(new URL('0040_preapproved_shift_rules.sql', migrationDir), 'utf8')
 const compact36 = migration36.replace(/\s+/g, ' ')
 const compact37 = migration37.replace(/\s+/g, ' ')
 const compact38 = migration38.replace(/\s+/g, ' ')
 const compact39 = migration39.replace(/\s+/g, ' ')
+const compact40 = migration40.replace(/\s+/g, ' ')
 
 const fnv1a = (text: string): string => {
   let hash = 0x811c9dc5
@@ -23,13 +25,14 @@ const fnv1a = (text: string): string => {
 describe('migrations 0036/0037 receivable release', () => {
   it('commits enum values before any migration uses them', () => {
     const files = readdirSync(migrationDir).filter((file) => file.endsWith('.sql')).sort()
-    expect(files.slice(-6)).toEqual([
+    expect(files.slice(-7)).toEqual([
       '0034_durable_shift_close_drafts.sql',
       '0035_shift_money_integrity.sql',
       '0036_receivable_ledger_event.sql',
       '0037_receivable_settlement_and_events.sql',
       '0038_restoration_atomicity_guards.sql',
       '0039_editable_office_capital_targets.sql',
+      '0040_preapproved_shift_rules.sql',
     ])
     expect(compact36).toContain("ALTER TYPE ledger_event ADD VALUE IF NOT EXISTS 'receivable_adjustment'")
     expect(compact36).toContain("ALTER TYPE fund_type ADD VALUE IF NOT EXISTS 'driver_shift_funding_cash'")
@@ -74,6 +77,27 @@ describe('migrations 0036/0037 receivable release', () => {
     expect(compact39).toContain("business_date >= DATE '2026-08-23'")
     expect(compact39).toContain("('office_cash', 5000000::bigint)")
     expect(compact39).toContain("('office_wallet', 1000000::bigint)")
+  })
+
+  it('stores immutable, scoped and single-use custom-date shift authorizations', () => {
+    expect(compact40).toContain('CREATE TABLE preapproved_shift_rules (')
+    expect(compact40).toContain('cash_float_minor bigint NOT NULL CHECK (cash_float_minor >= 0)')
+    expect(compact40).toContain('wallet_topup_minor bigint NOT NULL CHECK (wallet_topup_minor >= 0)')
+    expect(compact40).toContain('CHECK (window_start_minute < window_end_minute)')
+    expect(compact40).toContain('UNIQUE (consumed_by_shift_id)')
+    expect(compact40).toContain("rp.permission_key = 'shift.approve'")
+    expect(compact40).toContain("CONSTRAINT = 'preapproved_shift_rule_publication_shape'")
+    expect(compact40).toContain("CONSTRAINT = 'preapproved_shift_rule_publication_actor'")
+    expect(compact40).toContain('AND d.active')
+    expect(compact40).toContain("CONSTRAINT = 'preapproved_shift_rule_consumption_actor'")
+    expect(compact40).toContain("CONSTRAINT = 'preapproved_shift_rule_consumption_identity'")
+    expect(compact40).toContain("s.state = 'awaiting_open_approval'")
+    expect(compact40).toContain('s.driver_confirmed_at IS NOT NULL')
+    expect(compact40).toContain('OLD.created_at <= s.driver_confirmed_at')
+    expect(compact40).toContain('BETWEEN OLD.window_start_minute AND OLD.window_end_minute')
+    expect(compact40).toContain("'ash:preapproved-shift:' || NEW.driver_id::text")
+    expect(compact40).toContain('REVOKE DELETE, TRUNCATE ON preapproved_shift_rules FROM app_user')
+    expect(compact40).toContain('CREATE TRIGGER audit_preapproved_shift_rules')
   })
 
   it('pins the reviewed claims, bounded deferrals, and physical actions with overflow-safe checks', () => {
@@ -201,5 +225,6 @@ describe('migrations 0036/0037 receivable release', () => {
     expect(fnv1a(migration37)).toBe('5fdf1556')
     expect(fnv1a(migration38)).toBe('b2dd47f0')
     expect(fnv1a(migration39)).toBe('ec71e10c')
+    expect(fnv1a(migration40)).toBe('e1d2b547')
   })
 })

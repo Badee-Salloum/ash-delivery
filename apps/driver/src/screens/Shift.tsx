@@ -75,6 +75,7 @@ import {
 import { endReviewWarningKeys } from '../end-review.ts'
 import type { AiPageReadState } from '../ai-page-read-state.ts'
 import { deletePendingEvidenceForShift } from '../pending-evidence-storage.ts'
+import { openedShiftState, type OpenedShiftFunds, type OpenedShiftState } from '../opened-shift.ts'
 
 /**
  * The driver's shift flow: start package → order entry → end package.
@@ -90,20 +91,7 @@ import { deletePendingEvidenceForShift } from '../pending-evidence-storage.ts'
  */
 type Phase = 'start' | 'awaiting' | 'orders' | 'suspended' | 'end' | 'done'
 
-interface ShiftState {
-  id: string
-  floatText: string
-  topupText: string
-  /** The shift's own day — what a scanned row's date is compared against. */
-  businessDate: string
-  /**
-   * The odometer the shift OPENED on, so the close can be checked against it.
-   *
-   * A closing reading below the opening one means the bike drove backwards; a jump of hundreds of
-   * kilometres means a digit read twice. Neither is knowable from the closing figure alone.
-   */
-  odoStart: number | null
-}
+type ShiftState = OpenedShiftState
 
 /** Server-owned opening evidence used when a draft shift is resumed after a browser remount. */
 interface StartPackageRestore {
@@ -1037,7 +1025,7 @@ export function ShiftFlow({
         onApproved={(funds) => {
           // The manager entered the float + top-up at approval; carry them into the order screen so
           // the live BR1 preview is right.
-          setShift((s) => (s ? { ...s, ...funds } : s))
+          setShift((current) => openedShiftState(current, funds))
           setPhase('orders')
         }}
       />
@@ -1213,7 +1201,7 @@ function StartPackage({
    * it in hand, and without it the operations list compares every scanned row's date against an
    * empty string and stamps «يوم آخر» on all of them.
    */
-  onApproved(funds: { floatText: string; topupText: string; businessDate: string }): void
+  onApproved(funds: OpenedShiftFunds): void
 }): ReactNode {
   const { api, t } = useApp()
   const toast = useToast()
@@ -1361,7 +1349,12 @@ function StartPackage({
       // The driver submits only the odometer + photo. The cash float and wallet top-up are the
       // branch's money, entered by the manager at approval. Charge is captured per pack, so the
       // bike-level battery % is gone (sent null — the column stays a nullable seam).
-      await api.put(`/shifts/${shiftId}/start-package`, {
+      const submitted = await api.put<{
+        id: string
+        state: string
+        businessDate: string
+        startPackage: { odometerKm: number | null; floatTotal: string; topupTotal: string }
+      }>(`/shifts/${shiftId}/start-package`, {
         odometerKm,
         batteryPercent: null,
         // SRS D-3: the odometer OCR baseline (null when OCR never ran).
@@ -1370,7 +1363,17 @@ function StartPackage({
         // What the reader was looking at, so the correction he just made becomes an example.
         odometerStrip: odoStrip,
       })
-      onOpened(shiftId)
+      if (submitted.state === 'open') {
+        onApproved({
+          shiftId: submitted.id,
+          floatText: submitted.startPackage.floatTotal,
+          topupText: submitted.startPackage.topupTotal,
+          businessDate: submitted.businessDate,
+          odoStart: submitted.startPackage.odometerKm,
+        })
+      } else {
+        onOpened(shiftId)
+      }
     } catch (e) {
       // A driver can't read a console — a failed upload must show on the glass, not vanish.
       const code = (e as { error?: string }).error
@@ -1402,9 +1405,11 @@ function StartPackage({
           .catch(() => null)
         if (s?.state === 'open') {
           onApproved({
+            shiftId: s.id,
             floatText: s.startPackage.floatTotal,
             topupText: s.startPackage.topupTotal,
             businessDate: s.businessDate,
+            odoStart: s.startPackage.odometerKm,
           })
         }
       } catch {

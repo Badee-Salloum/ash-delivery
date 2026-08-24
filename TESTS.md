@@ -242,15 +242,43 @@ real protection either way.
 ## Current state
 
 ```
-domain       429 tests
+domain       430 tests
 contracts     19 tests
-client       263 tests
-admin        136 tests
-driver       263 tests
+client       264 tests
+admin        148 tests
+driver       265 tests
 adapters     130 tests
-database      88 passed / 11 skipped by default; 141/141 on disposable PostgreSQL at release
-api          675 tests
+database      89 passed / 11 skipped by default; 141/141 on disposable PostgreSQL at release
+api          696 tests
 ```
+
+### 2026-08-24 feature regressions
+
+- `api/preapproved-shift.test.ts` (21 cases) covers custom-date CRUD and scope, real-date and money
+  validation, inclusive boundaries, nonmatches, complete evidence, manager BMS handoff, current
+  carried funding, revoked permissions, rule/journal rollback, single use, and automatic/manual
+  approval races. It also rejects malformed identifiers without reaching PostgreSQL, hides
+  out-of-branch driver identities, refuses a rule signed after driver confirmation, and proves an
+  auto-open response contains the exact approved funding and odometer needed by the driver app.
+- `db/migration-0036-0037.test.ts` statically pins migration `0040`'s publication shape, active
+  actor/driver, immutable terms, advance-signature ordering, scoped consumption identity,
+  inclusive window, overlap lock, audit trigger, and delete/truncate revocation. The migration
+  still requires a real PostgreSQL 17 run before deployment.
+- `admin/preapproved-shifts.test.ts` and `client/preapproved-shifts.test.ts` cover manager-only
+  navigation, form semantics, rule status and branch-scoped API wiring.
+- `driver/opened-shift.test.ts` proves an immediate auto-open creates complete local running-shift
+  state with the confirmed opening odometer even though no waiting screen existed first, and that
+  a later poll preserves the restored opening odometer.
+- `admin/completed-shifts.test.ts` (8 cases) covers valid/leap/impossible/bounded ranges,
+  `approved`/`week_locked` classification, separate cancellation history, navigation, branch reads,
+  detail opening, and bilingual copy.
+- `domain/ledger/cash-settled-approval.test.ts` names the capital invariant directly: driver share
+  is paid from returned shift money, office cash + wallet net to company share, the payable clears,
+  and no `company_box` posting exists.
+
+The 2026-08-24 local `pnpm check` passed **2,041 tests** with 11 expected PostgreSQL-only skips.
+Both frontend production builds and the API bundle also passed. Node 25.8 emitted the documented
+engine warning because production is pinned to Node 24.
 
 The release database evidence is 141/141 on a positively identified disposable PostgreSQL database,
 with zero skips. Destructive conformance and guard suites were never pointed at production. The 11

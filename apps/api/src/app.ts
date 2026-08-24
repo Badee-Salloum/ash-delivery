@@ -788,7 +788,18 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const { id } = z.object({ id: z.string() }).parse(req.params)
       const body = startPackageRequest.parse(req.body)
       const shift = await submitStartPackage(deps, req.actor!, id, body)
-      return { id: shift.id, state: shift.state }
+      return {
+        id: shift.id,
+        state: shift.state,
+        businessDate: shift.businessDate,
+        startPackage: {
+          // Return the approved totals on the same response that may auto-open the shift. The
+          // driver must not need a second network round trip merely to leave the waiting screen.
+          odometerKm: shift.odoStart,
+          floatTotal: serializeMoney(add(sum(shift.floatTranches), sum(shift.carriedTranches))),
+          topupTotal: serializeMoney(add(sum(shift.topupTranches), sum(shift.carriedWalletTranches ?? []))),
+        },
+      }
     },
   )
 

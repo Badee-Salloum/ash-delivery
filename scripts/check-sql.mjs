@@ -28,6 +28,8 @@ const MUST_AUDIT = [
   'shifts', 'shift_orders', 'cash_deductions', 'shift_media', 'float_tranches', 'tier_rules',
   // Decision-complete cash/wallet close snapshots. Append-only, but creation is a money decision.
   'shift_settlements',
+  // Advance authority plus the exact cash/wallet values a driver may receive automatically.
+  'preapproved_shift_rules',
   // Renumbering a type restates the printed code of every vehicle of that type; a pack moving
   // between bikes is an asset transfer; a corrected reading changes evidence already approved.
   'vehicle_types', 'batteries', 'shift_battery_readings',

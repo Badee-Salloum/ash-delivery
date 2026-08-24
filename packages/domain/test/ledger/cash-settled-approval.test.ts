@@ -26,6 +26,46 @@ function fundBalance(postings: readonly Posting[], kind: Parameters<typeof isFun
 }
 
 describe('cash-settled approval assembly', () => {
+  it('pays the driver share out of returned shift money without reducing company capital', () => {
+    const fee = syp(100)
+    const orders: ShiftOrder[] = [{ orderNo: 'capital-1', payMode: 'cash', fee }]
+    const split = splitFixedDriverShare([fee])
+    const input = {
+      driverId: DRIVER,
+      branchId: BRANCH,
+      floatTranches: [syp(100)],
+      topupTranches: [syp(20)],
+      orders,
+    }
+    const expected = closingBalances(input)
+    const settlement = planFixedShareSettlement({
+      deliveryFeeTotal: fee,
+      fixedDriverShare: split.driverShare,
+      manualDriverShare: ZERO,
+      cashDeductionTotal: ZERO,
+      expectedCash: expected.endCash,
+      expectedWallet: expected.endWallet,
+      actualCash: expected.endCash,
+      actualWallet: expected.endWallet,
+    })
+    const all = [
+      ...postingsForOpen(input),
+      ...postingsForCashSettledApproval(input, split, settlement),
+    ]
+
+    // The employee keeps the share from the money being returned. The office receives only the
+    // residual, while its combined cash/wallet gain is exactly the company's earned share.
+    expect(settlement.finalEmployeeCash).toBe(split.driverShare)
+    expect(settlement.cashToOffice).toBe(minor(settlement.actualCash - split.driverShare))
+    expect(sum([
+      fundBalance(all, 'office_cash'),
+      fundBalance(all, 'office_wallet'),
+    ])).toBe(split.companyShare)
+
+    expect(fundBalance(all, 'driver_share_payable')).toBe(ZERO)
+    expect(all.flatMap((posting) => posting.lines).some((line) => line.fund.kind === 'company_box')).toBe(false)
+  })
+
   it('posts the Thaer close exactly as reviewed and leaves every employee account at zero', () => {
     const fees = [425, 240, 370, 175, 145, 190].map(syp)
     const orders: ShiftOrder[] = fees.map((fee, i) => ({ orderNo: `T-${i + 1}`, payMode: 'cash', fee }))

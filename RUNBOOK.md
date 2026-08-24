@@ -612,6 +612,15 @@ Budget, measured per field off `ocr_reads` at 15 reads a shift and 26 shifts a m
 | `gpt-5.4` | $0.309 | **$80/month** | $804/month |
 | `google/gemini-3.7-flash` | $0.076 | **$20/month** | $199/month |
 
+Price check, **2026-08-24**: the [OpenRouter model page](https://openrouter.ai/google/gemini-3.7-flash)
+lists Google Vertex at **$0.375/M input + $1.875/M output (75% promotional discount)** and Google
+AI Studio at **$0.75/M + $3.75/M (50% promotional discount)**. The table above assumes the Vertex
+route: `10 drivers × 26 shifts × $0.076 = $19.76/month`. If every read fell back to the currently
+listed AI Studio route, the same workload would be about **$39.52/month**; at the displayed
+undiscounted list price it would be about **$79.04/month**. Spend scales with completed OCR reads,
+not with licensed drivers. `ocr_reads` stores model and tokens but not the selected upstream or the
+provider's charged amount, so the SQL estimate is not a substitute for the OpenRouter invoice.
+
 **Orders is 53% of that bill** — 4 pages × 4 passes = 16 model calls a shift, before anything else
 runs. That is a bigger lever than the model choice, and cutting a pass needs instrumenting first:
 `ocr_reads` keeps only the consensus outcome, not what each pass said.

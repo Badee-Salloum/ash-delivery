@@ -158,6 +158,7 @@ export async function withTransaction<T>(
 /** Postgres error codes this codebase reacts to by name rather than by string matching. */
 export const PG = {
   UNIQUE_VIOLATION: '23505',
+  EXCLUSION_VIOLATION: '23P01',
   CHECK_VIOLATION: '23514',
   FOREIGN_KEY_VIOLATION: '23503',
   /** Raised by the week-lock guard in migration 0006. */

@@ -1953,6 +1953,9 @@ function CloseApprovalWorkspace({
 
             {settlement ? (
               <>
+                <p className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs font-semibold text-emerald-900">
+                  {t.settlement.shareFromReturnedMoney}
+                </p>
                 <div className="mt-3 rounded-xl border border-violet-200 bg-violet-50 p-3">
                   <p className="text-sm font-extrabold text-violet-950">{t.settlement.receivableDeferralTitle}</p>
                   <p className="mt-1 text-xs text-violet-900">{t.settlement.receivableDeferralHint}</p>

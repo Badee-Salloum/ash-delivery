@@ -27,6 +27,7 @@ import {
 import {
   PgCashCountRepo,
   PgNotificationRepo,
+  PgPreapprovedShiftRuleRepo,
   PgDirectoryRepo,
   PgExpenseRepo,
   PgMediaRepo,
@@ -84,7 +85,7 @@ if (!DATABASE_URL) {
       // Truncate rather than re-migrate: orders of magnitude faster, and it exercises the real
       // constraints on every run instead of a freshly-empty database.
       await pool.query(`
-        TRUNCATE receivable_events, shift_settlements, journal_lines, journal_entries, cash_deductions, shift_orders, shift_media_attachment_history, shift_media, media, float_tranches, expenses, expense_categories, settings, cash_counts, cash_count_lines, tier_rules, notifications,
+        TRUNCATE preapproved_shift_rules, receivable_events, shift_settlements, journal_lines, journal_entries, cash_deductions, shift_orders, shift_media_attachment_history, shift_media, media, float_tranches, expenses, expense_categories, settings, cash_counts, cash_count_lines, tier_rules, notifications,
                  shift_battery_readings, gps_pings, batteries,
                  shifts, funds, fx_days, week_locks, audit_log, sessions, drivers, vehicles,
                  vehicle_types, users, branches, governorates
@@ -193,6 +194,7 @@ if (!DATABASE_URL) {
         users: new PgUserRepo(pool),
         sessions: new PgSessionRepo(pool),
         shifts: new PgShiftRepo(pool),
+        preapprovedShiftRules: new PgPreapprovedShiftRuleRepo(pool),
         batteryReadings: new PgBatteryReadingRepo(pool),
         batterySwaps: new PgBatterySwapRepo(pool),
         assignments: new PgAssignmentRepo(pool),

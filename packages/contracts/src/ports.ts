@@ -799,6 +799,57 @@ export interface AssignmentRepo {
   delete(id: string): Promise<void>
 }
 
+/**
+ * One manager authorization for one driver on one custom business date.
+ *
+ * The time window is represented as minutes after local midnight. Both ends are inclusive: a
+ * driver confirming at exactly 08:00 or 10:00 matches an 08:00â€“10:00 rule. Money is the ordinary
+ * opening cash float / wallet top-up and therefore uses the same bigint-minor representation as a
+ * manual open approval.
+ *
+ * Rules are immutable once created. `active = false` revokes an unused rule; consumption records
+ * the shift that exercised the advance approval instead of deleting the authorization evidence.
+ */
+export interface PreapprovedShiftRuleRecord {
+  id: string
+  branchId: string
+  driverId: string
+  businessDate: CalendarDate
+  windowStartMinute: number
+  windowEndMinute: number
+  cashFloat: Minor
+  walletTopup: Minor
+  active: boolean
+  authorizedBy: string
+  /** Authorization identity is snapshotted when the rule is signed. */
+  authorizedByRole: RoleKey
+  authorizedByBranchId: string | null
+  createdAtMs: number
+  consumedByShiftId: string | null
+  consumedAtMs: number | null
+}
+
+export interface PreapprovedShiftRuleRepo {
+  /** All dates in one manager command commit together or not at all. */
+  createMany(rules: readonly PreapprovedShiftRuleRecord[]): Promise<void>
+  listByBranch(branchId: string): Promise<PreapprovedShiftRuleRecord[]>
+  findById(id: string): Promise<PreapprovedShiftRuleRecord | null>
+  /**
+   * Read the matching authorization without consuming it so the service can run every manager gate
+   * before money moves. Active, unconsumed overlapping rules are forbidden at storage time.
+   */
+  findMatching(input: {
+    branchId: string
+    driverId: string
+    businessDate: CalendarDate
+    localMinute: number
+  }): Promise<PreapprovedShiftRuleRecord | null>
+  /** Atomically consume this still-active rule for this shift; null means it was revoked or won. */
+  consume(id: string, shiftId: string, consumedAtMs: number): Promise<PreapprovedShiftRuleRecord | null>
+  /** Revoke an unused rule. A consumed authorization is immutable and returns null. */
+  deactivate(id: string, actorId: string): Promise<PreapprovedShiftRuleRecord | null>
+}
+
 export interface OrderRepo {
   create(order: ShiftOrderRecord, actorId: string | null): Promise<void>
   /**
@@ -2002,6 +2053,7 @@ export interface GpsPingRepo {
  */
 export interface ShiftCloseTransactionDeps {
   shifts: ShiftRepo
+  preapprovedShiftRules: PreapprovedShiftRuleRepo
   orders: OrderRepo
   cashDeductions: CashDeductionRepo
   operationWindows: OperationWindowRepo
@@ -2044,6 +2096,7 @@ export interface Deps {
   users: UserRepo
   sessions: SessionRepo
   shifts: ShiftRepo
+  preapprovedShiftRules: PreapprovedShiftRuleRepo
   assignments: AssignmentRepo
   batteryReadings: BatteryReadingRepo
   batterySwaps: BatterySwapRepo

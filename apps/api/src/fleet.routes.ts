@@ -8,6 +8,7 @@ import {
   createDocumentRequest,
   createDriverRequest,
   createGovernorateRequest,
+  createPreapprovedShiftRulesRequest,
   createVehicleEventRequest,
   createVehicleRequest,
   createVehicleTypeRequest,
@@ -24,6 +25,7 @@ import type {
   BatteryRecord,
   BranchRecord,
   GovernorateRecord,
+  PreapprovedShiftRuleRecord,
   VehicleRecord,
   VehicleTypeRecord,
 } from '@ash/contracts'
@@ -725,6 +727,111 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
     return { ok: true }
   })
 
+  // â”€â”€ Pre-approved shift opening â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+  app.post(
+    '/preapproved-shift-rules',
+    { config: { permission: 'shift.approve', subject: targetBranch } },
+    async (req, reply) => {
+      const body = createPreapprovedShiftRulesRequest.parse(req.body)
+      const branchId = resolveBranch(req)
+      const driver = await deps.directory.driver(body.driverId)
+      // A caller scoped to this branch must not be able to distinguish an unknown driver id from
+      // a real driver belonging to another branch.
+      if (!driver || driver.branchId !== branchId) throw new ServiceError(404, 'driver_not_found')
+      if (!driver.active) throw new ServiceError(409, 'preapproved_shift_rule_driver_inactive')
+
+      const today = todayFor(deps)
+      if (body.dates.some((date) => date < today)) {
+        throw new ServiceError(422, 'preapproved_shift_rule_past_date', { today })
+      }
+
+      const actor = req.actor!
+      const createdAtMs = deps.clock.nowMs()
+      const rules: PreapprovedShiftRuleRecord[] = [...body.dates]
+        .sort()
+        .map((businessDate) => ({
+          id: deps.ids.uuid(),
+          branchId,
+          driverId: body.driverId,
+          businessDate,
+          windowStartMinute: minuteOfDay(body.windowStart),
+          windowEndMinute: minuteOfDay(body.windowEnd),
+          cashFloat: body.cashFloat,
+          walletTopup: body.walletTopup,
+          active: true,
+          authorizedBy: actor.userId,
+          authorizedByRole: actor.roleKey,
+          authorizedByBranchId: actor.branchId,
+          createdAtMs,
+          consumedByShiftId: null,
+          consumedAtMs: null,
+        }))
+      try {
+        await deps.preapprovedShiftRules.createMany(rules)
+      } catch (err) {
+        if ((err as { code?: string }).code === 'PREAPPROVED_SHIFT_RULE_OVERLAP') {
+          throw new ServiceError(409, 'preapproved_shift_rule_overlap')
+        }
+        throw err
+      }
+
+      for (const rule of rules) {
+        await auditPreapprovedRule(deps, req, rule, 'INSERT', null, presentPreapprovedShiftRule(rule))
+      }
+      return reply.code(201).send({ rules: rules.map(presentPreapprovedShiftRule) })
+    },
+  )
+
+  app.get(
+    '/preapproved-shift-rules',
+    { config: { permission: 'shift.approve', subject: ownBranch } },
+    async (req) => {
+      const branchId = resolveBranch(req)
+      return {
+        rules: (await deps.preapprovedShiftRules.listByBranch(branchId)).map(presentPreapprovedShiftRule),
+      }
+    },
+  )
+
+  app.delete(
+    '/preapproved-shift-rules/:id',
+    { config: { permission: 'shift.approve', subject: ownBranch } },
+    async (req) => {
+      // PostgreSQL's uuid comparison raises 22P02 for arbitrary text. Reject it at the HTTP
+      // boundary so memory and production cannot diverge into 404 versus 500 behavior.
+      const { id } = z.object({ id: z.string().uuid() }).parse(req.params)
+      const branchId = resolveBranch(req)
+      const before = await deps.preapprovedShiftRules.findById(id)
+      // Treat another branch exactly like a missing row; the id must not become a branch oracle.
+      if (!before || before.branchId !== branchId) {
+        throw new ServiceError(404, 'preapproved_shift_rule_not_found')
+      }
+      if (before.consumedByShiftId !== null) {
+        throw new ServiceError(409, 'preapproved_shift_rule_consumed', { shiftId: before.consumedByShiftId })
+      }
+      if (!before.active) return { ok: true }
+
+      const after = await deps.preapprovedShiftRules.deactivate(id, req.actor!.userId)
+      if (!after) {
+        const raced = await deps.preapprovedShiftRules.findById(id)
+        if (raced?.consumedByShiftId) {
+          throw new ServiceError(409, 'preapproved_shift_rule_consumed', { shiftId: raced.consumedByShiftId })
+        }
+        return { ok: true }
+      }
+      await auditPreapprovedRule(
+        deps,
+        req,
+        after,
+        'UPDATE',
+        presentPreapprovedShiftRule(before),
+        presentPreapprovedShiftRule(after),
+      )
+      return { ok: true }
+    },
+  )
+
   // ── Documents with expiry (B-1 / س37) ───────────────────────────────────────────────────
 
   app.post('/documents', { config: { permission: 'fleet.manage', subject: targetBranch } }, async (req, reply) => {
@@ -830,6 +937,49 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
         lastSeenAt: new Date(r.lastSeenAtMs).toISOString(),
       })),
     }
+  })
+}
+
+const minuteOfDay = (time: string): number => Number(time.slice(0, 2)) * 60 + Number(time.slice(3, 5))
+
+const minuteText = (minute: number): string =>
+  `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`
+
+const presentPreapprovedShiftRule = (rule: PreapprovedShiftRuleRecord): Record<string, unknown> => ({
+  id: rule.id,
+  branchId: rule.branchId,
+  driverId: rule.driverId,
+  businessDate: rule.businessDate,
+  windowStart: minuteText(rule.windowStartMinute),
+  windowEnd: minuteText(rule.windowEndMinute),
+  cashFloat: serializeMoney(rule.cashFloat),
+  walletTopup: serializeMoney(rule.walletTopup),
+  active: rule.active,
+  consumedByShiftId: rule.consumedByShiftId,
+  consumedAt: rule.consumedAtMs === null ? null : new Date(rule.consumedAtMs).toISOString(),
+  authorizedBy: rule.authorizedBy,
+  createdAt: new Date(rule.createdAtMs).toISOString(),
+})
+
+async function auditPreapprovedRule(
+  deps: Deps,
+  req: { actor?: { userId: string }; requestId: string },
+  rule: PreapprovedShiftRuleRecord,
+  action: 'INSERT' | 'UPDATE',
+  before: unknown,
+  after: unknown,
+): Promise<void> {
+  await deps.audit.append({
+    tableName: 'preapproved_shift_rules',
+    recordId: rule.id,
+    action,
+    actorId: req.actor?.userId ?? null,
+    actorKind: req.actor ? 'user' : 'system',
+    branchId: rule.branchId,
+    requestId: req.requestId,
+    before,
+    after,
+    occurredAtMs: deps.clock.nowMs(),
   })
 }
 

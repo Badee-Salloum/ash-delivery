@@ -746,15 +746,26 @@ export async function submitStartPackage(
   shiftId: string,
   input: SubmitStartPackageInput,
 ): Promise<ShiftRecord> {
-  const updated = await deps.closeUnitOfWork.run(
+  const confirmed = await deps.closeUnitOfWork.run(
     { shiftId, actorId: actor.userId },
     async (transaction) =>
       submitStartPackageLocked(withCloseTransaction(deps, transaction), actor, shiftId, input),
   )
   // Research samples and notifications are deliberately outside the transaction: they are
   // best-effort side effects and must never make a committed state transition look failed.
-  await keepShiftOcrSample(deps, updated.id, 'start', 'odometer', input.odometerStrip, input.odometerKmOcr)
-  await notifyBranch(deps, updated, 'shift_awaiting_open_approval')
+  await keepShiftOcrSample(deps, confirmed.id, 'start', 'odometer', input.odometerStrip, input.odometerKmOcr)
+
+  // The driver's signature commits first. Advance approval is then exercised in a separate
+  // manager-attributed transaction; any failure leaves this complete package in the normal queue.
+  let updated = confirmed
+  try {
+    updated = (await tryPreapprovedOpen(deps, confirmed)) ?? (await deps.shifts.findById(confirmed.id)) ?? confirmed
+  } catch {
+    updated = (await deps.shifts.findById(confirmed.id)) ?? confirmed
+  }
+  if (updated.state === 'awaiting_open_approval') {
+    await notifyBranch(deps, updated, 'shift_awaiting_open_approval')
+  }
   return updated
 }
 
@@ -843,6 +854,8 @@ type ApproveOpenInput = {
   carriedWalletTranches: Minor[]
 }
 
+type OpenApprovalSource = { kind: 'manual' } | { kind: 'preapproved'; ruleId: string }
+
 export async function approveOpen(
   deps: Deps,
   actor: Actor,
@@ -860,6 +873,7 @@ async function approveOpenLocked(
   actor: Actor,
   shiftId: string,
   input: ApproveOpenInput,
+  source: OpenApprovalSource = { kind: 'manual' },
 ): Promise<ShiftRecord> {
   const shift = await mustFind(deps, shiftId)
 
@@ -934,6 +948,11 @@ async function approveOpenLocked(
 
   // The float and top-up postings land HERE, at approval — not when the driver typed the
   // amounts. Money moves when a manager says it moved.
+  if (source.kind === 'preapproved') {
+    const consumed = await deps.preapprovedShiftRules.consume(source.ruleId, withFunds.id, deps.clock.nowMs())
+    if (!consumed) throw new ServiceError(409, 'preapproved_shift_rule_unavailable')
+  }
+
   const fxDayId = await ensureFxDay(deps, withFunds.businessDate)
   const openingPostings = postingsForOpen({
     driverId: withFunds.driverId,
@@ -967,13 +986,120 @@ async function approveOpenLocked(
     openApprovedBy: actor.userId,
   }
   await deps.shifts.update(updated, actor.userId)
-  await recordDecision(deps, actor, shiftId, 'open', 'approved', null)
+  await recordDecision(
+    deps,
+    actor,
+    shiftId,
+    'open',
+    'approved',
+    source.kind === 'preapproved' ? `preapproved_shift_rule:${source.ruleId}` : null,
+  )
   return updated
 }
 
-// ── Manager decisions: re-shoot request, reject, and the decision log (C-7) ─────────────────
+// ── Pre-approved opening and manager decisions ──────────────────────────────────────────────
 
-/** Append one entry to a shift's decision log («سجل قرارات»). */
+/** Branch-local date/minute of the driver's immutable first signature. */
+async function confirmedLocalMinute(
+  deps: Deps,
+  shift: ShiftRecord,
+): Promise<{ businessDate: CalendarDate; minute: number } | null> {
+  const branch = await deps.directory.branch(shift.branchId)
+  const key = localMinuteKey(shift.driverConfirmedAt, branch?.timezone, deps.clock.offsetMinutes())
+  if (!key) return null
+  const businessDate = key.slice(0, 10) as CalendarDate
+  const hour = Number(key.slice(11, 13))
+  const minute = Number(key.slice(14, 16))
+  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null
+  return { businessDate, minute: hour * 60 + minute }
+}
+
+/** Exercise a matching advance authorization; null leaves the ordinary approval queue intact. */
+async function tryPreapprovedOpen(deps: Deps, confirmed: ShiftRecord): Promise<ShiftRecord | null> {
+  if (confirmed.state !== 'awaiting_open_approval' || confirmed.driverConfirmedAt === null) return null
+  const confirmedAtMs = Date.parse(confirmed.driverConfirmedAt)
+  if (!Number.isFinite(confirmedAtMs)) return null
+  const local = await confirmedLocalMinute(deps, confirmed)
+  if (!local || local.businessDate !== confirmed.businessDate) return null
+
+  const candidate = await deps.preapprovedShiftRules.findMatching({
+    branchId: confirmed.branchId,
+    driverId: confirmed.driverId,
+    businessDate: confirmed.businessDate,
+    localMinute: local.minute,
+  })
+  if (!candidate) return null
+  // This is advance authority, not a way to approve a confirmation retrospectively during the
+  // short best-effort OCR/notification gap after the driver's signature commits.
+  if (candidate.createdAtMs > confirmedAtMs) return null
+
+  // Disabled or re-scoped accounts cannot keep exercising old advance rules. The immutable row
+  // still records who originally signed it and ordinary manager approval remains available.
+  const author = await deps.users.findById(candidate.authorizedBy)
+  if (
+    !author?.active ||
+    author.roleKey !== candidate.authorizedByRole ||
+    author.branchId !== candidate.authorizedByBranchId
+  ) {
+    return null
+  }
+  const manager: Actor = { userId: author.id, roleKey: author.roleKey, branchId: author.branchId }
+  const grants = grantsFromRows(await deps.directory.grants())
+  if (!can(manager, 'shift.approve', { branchId: confirmed.branchId }, grants).allowed) return null
+
+  return deps.closeUnitOfWork.run(
+    { shiftId: confirmed.id, actorId: manager.userId },
+    async (transaction) => {
+      const tx = withCloseTransaction(deps, transaction)
+      const shift = await mustFind(tx, confirmed.id)
+      if (
+        shift.state !== 'awaiting_open_approval' ||
+        shift.driverConfirmedAt === null ||
+        shift.driverConfirmedAt !== confirmed.driverConfirmedAt
+      ) {
+        return null
+      }
+      const lockedConfirmedAtMs = Date.parse(shift.driverConfirmedAt)
+      if (!Number.isFinite(lockedConfirmedAtMs)) return null
+
+      // Repeat the read under the shift lock. `consume` below is the final atomic revocation/race
+      // check and shares this transaction with the journal and state transition.
+      const rule = await tx.preapprovedShiftRules.findById(candidate.id)
+      if (
+        !rule?.active ||
+        rule.consumedByShiftId !== null ||
+        rule.branchId !== shift.branchId ||
+        rule.driverId !== shift.driverId ||
+        rule.businessDate !== shift.businessDate ||
+        rule.createdAtMs > lockedConfirmedAtMs ||
+        local.minute < rule.windowStartMinute ||
+        local.minute > rule.windowEndMinute
+      ) {
+        return null
+      }
+
+      const [cashFundingBalance, walletFundingBalance] = await Promise.all([
+        tx.ledger.fundBalance(shift.branchId, `driver_shift_funding_cash:${shift.driverId}`),
+        tx.ledger.fundBalance(shift.branchId, `driver_shift_funding_wallet:${shift.driverId}`),
+      ])
+      if (cashFundingBalance < 0n || walletFundingBalance < 0n) return null
+
+      return approveOpenLocked(
+        tx,
+        manager,
+        shift.id,
+        {
+          floatTranches: rule.cashFloat === 0n ? [] : [rule.cashFloat],
+          topupTranches: rule.walletTopup === 0n ? [] : [rule.walletTopup],
+          carriedTranches: cashFundingBalance === 0n ? [] : [cashFundingBalance],
+          carriedWalletTranches: walletFundingBalance === 0n ? [] : [walletFundingBalance],
+        },
+        { kind: 'preapproved', ruleId: rule.id },
+      )
+    },
+  )
+}
+
 async function recordDecision(
   deps: Deps,
   actor: Actor,

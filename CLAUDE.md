@@ -95,6 +95,8 @@ independently to every shift that was not approved when the policy launched.
 | 11 | **Operation window** (2026-08-14): included Yallago rows fall within the inclusive branch-local interval from manager open approval through driver close submission. Ambiguous rows block approval until an audited manager decision; a driver cannot exclude a confirmed in-window row. |
 | 12 | **Negative Recent Orders row** (2026-08-14): a timed negative row is one cash deduction, never an order, tier input, Yallago share, or wallet movement. Untouched OCR sightings match by known printed date + minute + OCR amount; route text only enriches evidence. This applies to current and legacy automatic keys. The older rule that excess becomes a receivable and that Payments Log rows affect money is superseded by decision 13. |
 | 13 | **Fixed 40% cash settlement** (2026-08-14): every unapproved shift uses fixed 40%, with no tier or day true-up. Sweep the full actual wallet, apply surplus/shortage to the employee, and close the rest with exactly one signed cash transaction. No current-shift cash, wallet, share payable, or receivable may remain. Payments Log evidence is optional and archival only. Preview, ordinary approval, and exceptional close must use the same pure calculation and atomic posting recipe. |
+| 14 | **Pre-approved shift opening** (2026-08-24): a manager may authorize one driver on explicitly selected local dates, within one inclusive same-day start window, with exact cash-float and wallet-top-up values. The driver must still submit and confirm the complete BR5 start package. A matching confirmation exercises the manager's advance signature through the ordinary opening gate and journal recipe, consumes the rule exactly once in the same transaction, and otherwise falls back to the normal approval queue. |
+| 15 | **Driver share comes from returned shift money, never company capital** (2026-08-24): at close the employee keeps or receives his settlement from the actual cash being returned. The office receives only the residual `actualCash - employeeSettlement`; the close does not post a company-capital withdrawal and daily restoration must not reinterpret the share as a capital shortfall. This clarifies, rather than replaces, decision 13. |
 
 ---
 
@@ -118,7 +120,8 @@ independently to every shift that was not approved when the policy launched.
    `variance = actualCash + actualWallet − expectedTotal`; `employeeSettlement = baseShare + variance`;
    `walletToOffice = actualWallet`; `cashToOffice = actualCash − employeeSettlement`. Positive cash
    means collect from the employee; negative means pay the employee. Deductions appear exactly once
-   in expected total and exactly once in base share.
+   in expected total and exactly once in base share. The employee amount is retained/paid from the
+   returned shift cash; it is not a debit to company capital.
 7. **Payments Log evidence is optional and archival.** It never changes orders, expected value,
    wallet movements, shares, or settlement, and its absence never blocks close submission.
 

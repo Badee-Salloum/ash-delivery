@@ -30,6 +30,8 @@ import type {
   LedgerRepo,
   OrderRepo,
   PasswordHasher,
+  PreapprovedShiftRuleRecord,
+  PreapprovedShiftRuleRepo,
   RoleGrantRecord,
   SessionRecord,
   SessionRepo,
@@ -563,6 +565,98 @@ export class MemoryCashDeductionRepo implements CashDeductionRepo {
 
   async delete(id: string, _actorId: string | null): Promise<void> {
     this.rows.delete(id)
+  }
+}
+
+/** In-memory parity for immutable, custom-date advance shift approvals. */
+export class MemoryPreapprovedShiftRuleRepo implements PreapprovedShiftRuleRepo {
+  readonly rows = new Map<string, PreapprovedShiftRuleRecord>()
+
+  async createMany(rules: readonly PreapprovedShiftRuleRecord[]): Promise<void> {
+    // Validate the complete batch against existing rows and itself before the first write, matching
+    // PostgreSQL's one-statement all-or-nothing insert.
+    const candidates = [...this.rows.values(), ...rules]
+    for (let left = 0; left < candidates.length; left += 1) {
+      const a = candidates[left]!
+      if (!a.active || a.consumedByShiftId !== null) continue
+      for (let right = left + 1; right < candidates.length; right += 1) {
+        const b = candidates[right]!
+        if (!b.active || b.consumedByShiftId !== null) continue
+        const sameDriverDate = a.driverId === b.driverId && a.businessDate === b.businessDate
+        const overlaps = a.windowStartMinute <= b.windowEndMinute && b.windowStartMinute <= a.windowEndMinute
+        if (sameDriverDate && overlaps) {
+          throw Object.assign(new Error('overlapping pre-approved shift rule'), {
+            code: 'PREAPPROVED_SHIFT_RULE_OVERLAP',
+          })
+        }
+      }
+    }
+    for (const rule of rules) this.rows.set(rule.id, structuredClone(rule))
+  }
+
+  async listByBranch(branchId: string): Promise<PreapprovedShiftRuleRecord[]> {
+    return [...this.rows.values()]
+      .filter((rule) => rule.branchId === branchId)
+      .sort(
+        (a, b) =>
+          a.businessDate.localeCompare(b.businessDate) ||
+          a.windowStartMinute - b.windowStartMinute ||
+          a.createdAtMs - b.createdAtMs ||
+          a.id.localeCompare(b.id),
+      )
+      .map((rule) => structuredClone(rule))
+  }
+
+  async findById(id: string): Promise<PreapprovedShiftRuleRecord | null> {
+    const rule = this.rows.get(id)
+    return rule ? structuredClone(rule) : null
+  }
+
+  async findMatching(input: {
+    branchId: string
+    driverId: string
+    businessDate: CalendarDate
+    localMinute: number
+  }): Promise<PreapprovedShiftRuleRecord | null> {
+    const rule = [...this.rows.values()]
+      .filter(
+        (candidate) =>
+          candidate.branchId === input.branchId &&
+          candidate.driverId === input.driverId &&
+          candidate.businessDate === input.businessDate &&
+          candidate.active &&
+          candidate.consumedByShiftId === null &&
+          candidate.windowStartMinute <= input.localMinute &&
+          candidate.windowEndMinute >= input.localMinute,
+      )
+      .sort((a, b) => a.windowStartMinute - b.windowStartMinute || a.createdAtMs - b.createdAtMs)[0]
+    return rule ? structuredClone(rule) : null
+  }
+
+  async consume(id: string, shiftId: string, consumedAtMs: number): Promise<PreapprovedShiftRuleRecord | null> {
+    const rule = this.rows.get(id)
+    if (!rule || !rule.active || rule.consumedByShiftId !== null) return null
+    if ([...this.rows.values()].some((candidate) => candidate.consumedByShiftId === shiftId)) return null
+    const consumed = { ...rule, consumedByShiftId: shiftId, consumedAtMs }
+    this.rows.set(id, consumed)
+    return structuredClone(consumed)
+  }
+
+  async deactivate(id: string, _actorId: string): Promise<PreapprovedShiftRuleRecord | null> {
+    const rule = this.rows.get(id)
+    if (!rule || !rule.active || rule.consumedByShiftId !== null) return null
+    const deactivated = { ...rule, active: false }
+    this.rows.set(id, deactivated)
+    return structuredClone(deactivated)
+  }
+
+  snapshot(): Map<string, PreapprovedShiftRuleRecord> {
+    return new Map([...this.rows].map(([id, rule]) => [id, structuredClone(rule)]))
+  }
+
+  restore(snapshot: ReadonlyMap<string, PreapprovedShiftRuleRecord>): void {
+    this.rows.clear()
+    for (const [id, rule] of snapshot) this.rows.set(id, structuredClone(rule))
   }
 }
 
@@ -1729,6 +1823,7 @@ export interface MemoryDeps extends Deps {
   audit: MemoryAuditRepo
   directory: MemoryDirectoryRepo
   assignments: MemoryAssignmentRepo
+  preapprovedShiftRules: MemoryPreapprovedShiftRuleRepo
   batteryReadings: MemoryBatteryReadingRepo
   batterySwaps: MemoryBatterySwapRepo
   vehicleEvents: MemoryVehicleEventRepo
@@ -1813,6 +1908,7 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
   private readonly directory: MemoryDirectoryRepo
   private readonly closeDrafts: MemoryCloseDraftRepo
   private readonly media: MemoryMediaRepo
+  private readonly preapprovedShiftRules: MemoryPreapprovedShiftRuleRepo
   private readonly gate: MemoryTransactionGate
 
   constructor(
@@ -1830,6 +1926,7 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
     directory: MemoryDirectoryRepo,
     closeDrafts: MemoryCloseDraftRepo,
     media: MemoryMediaRepo,
+    preapprovedShiftRules: MemoryPreapprovedShiftRuleRepo,
     gate: MemoryTransactionGate,
   ) {
     this.deps = deps
@@ -1846,6 +1943,7 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
     this.directory = directory
     this.closeDrafts = closeDrafts
     this.media = media
+    this.preapprovedShiftRules = preapprovedShiftRules
     this.gate = gate
   }
 
@@ -1868,6 +1966,7 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
       const batterySnapshot = this.directory.snapshotBatteries(this.directory.batteries.keys())
       const closeDraftSnapshot = this.closeDrafts.snapshot()
       const mediaSnapshot = this.media.snapshotState()
+      const preapprovedRuleSnapshot = this.preapprovedShiftRules.snapshot()
 
       const restoreMap = <V>(target: Map<string, V>, snapshot: Map<string, V>): void => {
         target.clear()
@@ -1891,6 +1990,7 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
         this.directory.restoreBatteries(batterySnapshot)
         this.closeDrafts.restore(closeDraftSnapshot)
         this.media.restoreState(mediaSnapshot)
+        this.preapprovedShiftRules.restore(preapprovedRuleSnapshot)
         throw error
       }
     })
@@ -1927,6 +2027,8 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   const cashCounts = new MemoryCashCountRepo()
   const capitalTargets = new MemoryOfficeCapitalTargetRepo()
   const restorations = new MemoryRestorationRepo()
+  const assignments = new MemoryAssignmentRepo()
+  const preapprovedShiftRules = new MemoryPreapprovedShiftRuleRepo()
   const financialUnitOfWork = new MemoryFinancialUnitOfWork(
     expenses,
     ledger,
@@ -1938,6 +2040,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   )
   const transactionDeps: ShiftCloseTransactionDeps = {
     shifts,
+    preapprovedShiftRules,
     orders,
     cashDeductions,
     operationWindows,
@@ -1970,6 +2073,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     directory,
     closeDrafts,
     media,
+    preapprovedShiftRules,
     gate,
   )
   return {
@@ -1980,7 +2084,8 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     users: new MemoryUserRepo(),
     sessions: new MemorySessionRepo(),
     shifts,
-    assignments: new MemoryAssignmentRepo(),
+    assignments,
+    preapprovedShiftRules,
     batteryReadings,
     batterySwaps,
     orders,

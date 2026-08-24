@@ -18,6 +18,7 @@ import {
   PgBatterySwapRepo,
   PgDirectoryRepo,
   PgMediaRepo,
+  PgPreapprovedShiftRuleRepo,
   PgShiftDecisionRepo,
   PgShiftRepo,
   PgTierRepo,
@@ -40,6 +41,7 @@ const changedIdentity = (shiftId: string): Error & { code: string } =>
 function transactionDeps(pool: Pool): ShiftCloseTransactionDeps {
   return {
     shifts: new PgShiftRepo(pool),
+    preapprovedShiftRules: new PgPreapprovedShiftRuleRepo(pool),
     orders: new PgOrderRepo(pool),
     cashDeductions: new PgCashDeductionRepo(pool),
     operationWindows: new PgOperationWindowRepo(pool),

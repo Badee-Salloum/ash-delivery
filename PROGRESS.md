@@ -1,5 +1,50 @@
 # PROGRESS
 
+## 2026-08-24 — pre-approved openings, completed-shift history, and share clarification (not deployed)
+
+**Done and verified locally:** managers can publish single-use pre-approved opening rules for one
+driver over explicit custom dates, an inclusive same-day time window, and exact cash-float/wallet-
+top-up amounts. The driver's complete BR5 package and confirmation remain mandatory. A match runs
+the ordinary manager gate and opening journal atomically, includes current shift-funding carry,
+records the original author, consumes the rule once, and falls back safely to the ordinary queue
+after revocation, changed authority, incomplete evidence, a race, or a posting failure. The driver
+receives the opened state and approved funding in the submission response without a misleading poll
+delay.
+
+The admin console now has separate **Pre-approved shifts** and **Completed shifts** sections.
+Completed history defaults to seven business dates, permits a bounded 31-date custom range, shows
+`approved`/`week_locked` settlements, and keeps `cancelled` shifts visibly separate. The close
+workspace now states the owner's rule that the driver share is retained/paid from returned shift
+cash and never deducted from company capital. A ledger regression proves the office net equals the
+company share, `driver_share_payable` clears, and no `company_box` line is posted.
+
+The OCR budget was rechecked against OpenRouter's 2026-08-24 published rates. At the measured
+`$0.076/shift`, ten drivers working 26 shifts each are **$19.76/month** on the current Vertex
+promotion; the currently listed AI Studio fallback is about **$39.52**, and displayed
+undiscounted list pricing would be about **$79.04** for the same workload. `RUNBOOK.md` now records
+that range and that actual spend follows OCR reads rather than licensed headcount.
+
+`pnpm check` passes **2,041 tests** with the expected 11 PostgreSQL-only skips. TypeScript, domain
+purity, 40-migration SQL static checks, wire-money, strippable TypeScript, bilingual parity, RTL CSS,
+glyph checks, all package tests, both production frontend builds, and the API bundle pass. The
+feature-specific API suite is 21/21. The machine is Node 25.8 while the production target is Node
+24, so pnpm emitted the existing engine warning.
+
+**Next:** execute migrations `0001`–`0040` and the PostgreSQL conformance/guard suites on a fresh
+PostgreSQL 17 database, then deploy migration + API + driver + admin in that order. No deployment or
+production write was performed in this work.
+
+**Risk:** migration `0040_preapproved_shift_rules.sql` passed static and source-contract checks but
+has not executed here: `DATABASE_URL` is unset and Docker is unavailable. OpenRouter's displayed
+rates are promotional and its routed alias may use a differently priced upstream; the provider
+invoice remains the billing authority.
+
+**See it in 2 minutes:** sign in as a branch manager, open **Pre-approved shifts**, select a driver,
+today, a window containing the current branch time, and funding amounts. On the driver's phone,
+submit the complete start package; it opens immediately and the rule becomes **Used**. In admin,
+open **Completed shifts**, choose a recent range, and open any approved row. The settlement panel
+shows that the driver's share comes from returned shift money, not company capital.
+
 ## 2026-08-23 — receivables/restoration release `0039` is live
 
 The complete same-day release is live from frozen application commit

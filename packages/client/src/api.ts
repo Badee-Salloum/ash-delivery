@@ -357,6 +357,34 @@ export interface ApproveOpenShiftBody {
   carriedWalletTranches: string[]
 }
 
+/** A manager-authored rule that may open and fund one driver's shift without a live approval. */
+export interface PreapprovedShiftRuleView {
+  id: string
+  branchId: string
+  driverId: string
+  businessDate: string
+  windowStart: string
+  windowEnd: string
+  cashFloat: string
+  walletTopup: string
+  active: boolean
+  consumedByShiftId: string | null
+  consumedAt: string | null
+  authorizedBy: string
+  createdAt: string
+}
+
+/** One form submission expands into one pre-approved shift rule for each custom date. */
+export interface CreatePreapprovedShiftRulesBody {
+  branchId?: string
+  driverId: string
+  dates: string[]
+  windowStart: string
+  windowEnd: string
+  cashFloat: string
+  walletTopup: string
+}
+
 /**
  * The BMS phone apps a pack can ship with.
  *
@@ -1028,6 +1056,20 @@ export class ApiClient {
   }
   deleteAssignment(id: string) {
     return this.del<{ ok: boolean }>(`/assignments/${id}`)
+  }
+
+  // -- Pre-approved shifts --------------------------------------------------------------------
+  preapprovedShiftRules(options: { cache?: RequestCache; signal?: AbortSignal } = {}) {
+    return this.get<{ rules: PreapprovedShiftRuleView[] }>('/preapproved-shift-rules', options)
+  }
+  createPreapprovedShiftRules(body: Omit<CreatePreapprovedShiftRulesBody, 'branchId'>) {
+    return this.post<{ rules: PreapprovedShiftRuleView[] }>('/preapproved-shift-rules', {
+      ...body,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+  deletePreapprovedShiftRule(id: string) {
+    return this.del<{ ok: true }>(`/preapproved-shift-rules/${encodeURIComponent(id)}`)
   }
 
   /**

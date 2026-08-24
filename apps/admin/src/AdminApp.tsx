@@ -6,6 +6,8 @@ import { Login } from './screens/Login.tsx'
 import { Dashboard } from './screens/Dashboard.tsx'
 import { AWAITING_STATES, Queue } from './screens/Queue.tsx'
 import { LiveShifts } from './screens/LiveShifts.tsx'
+import { CompletedShifts } from './screens/CompletedShifts.tsx'
+import { PreapprovedShifts } from './screens/PreapprovedShifts.tsx'
 import { GpsLive } from './screens/GpsLive.tsx'
 import { Approval } from './screens/Approval.tsx'
 import { Fleet } from './screens/Fleet.tsx'
@@ -16,11 +18,14 @@ import { Accounts } from './screens/Accounts.tsx'
 import { Audit } from './screens/Audit.tsx'
 import { Permissions } from './screens/Permissions.tsx'
 import { Settings } from './screens/Settings.tsx'
+import { canManagePreapprovedShifts } from './preapproved-shifts.ts'
 
 const SECTIONS = [
   'dashboard',
   'queue',
   'liveShifts',
+  'completedShifts',
+  'preapprovedShifts',
   'gpsLive',
   'fleet',
   'fleetConfig',
@@ -138,12 +143,17 @@ export function AdminApp(): ReactNode {
 
   // Account management is a sysadmin/GM permission (user.manage), so the tab only shows for them.
   const canManageUsers = session.roleKey === 'system_admin' || session.roleKey === 'general_manager'
+  const canManagePreapproved = canManagePreapprovedShifts(session.roleKey)
   // gps.view — the same two roles; the branch manager no longer has it.
   const canSeeMap = canManageUsers
   const nav: Array<{ key: Section; label: string; badge?: number | undefined }> = [
     { key: 'dashboard', label: t.dashboard.title },
     { key: 'queue', label: t.approval.queue, badge: queueCount || undefined },
     { key: 'liveShifts', label: t.liveShifts.title },
+    { key: 'completedShifts', label: t.completedShifts.title },
+    ...(canManagePreapproved
+      ? [{ key: 'preapprovedShifts' as const, label: t.preapprovedShifts.title }]
+      : []),
     // The live map is gps.view — the GM and the system admin only. The branch manager runs his
     // branch from the shift screens. (The API enforces it too; this only stops offering a 403.)
     ...(canSeeMap ? [{ key: 'gpsLive' as const, label: t.gpsLive.title }] : []),
@@ -273,6 +283,10 @@ export function AdminApp(): ReactNode {
           <Queue onOpen={setOpenShift} />
         ) : section === 'liveShifts' ? (
           <LiveShifts onOpen={setOpenShift} />
+        ) : section === 'completedShifts' ? (
+          <CompletedShifts onOpen={setOpenShift} />
+        ) : section === 'preapprovedShifts' && canManagePreapproved ? (
+          <PreapprovedShifts />
         ) : section === 'gpsLive' ? (
           <GpsLive />
         ) : section === 'fleet' ? (

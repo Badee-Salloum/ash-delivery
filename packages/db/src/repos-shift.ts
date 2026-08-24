@@ -31,6 +31,8 @@ import type {
   ExpenseRepo,
   NotificationRecord,
   NotificationRepo,
+  PreapprovedShiftRuleRecord,
+  PreapprovedShiftRuleRepo,
   SettingsRepo,
   TierRepo,
   TierRuleRecord,
@@ -2216,6 +2218,144 @@ const toAssignment = (r: Record<string, unknown>): AssignmentRecord => ({
   businessDate: isoDate(r.business_date),
   shiftNo: Number(r.shift_no),
   createdBy: (r.created_by as string | null) ?? null,
+})
+
+/** Custom-date advance approvals, consumed inside the same transaction that opens the shift. */
+export class PgPreapprovedShiftRuleRepo implements PreapprovedShiftRuleRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async createMany(rules: readonly PreapprovedShiftRuleRecord[]): Promise<void> {
+    if (rules.length === 0) return
+    const params: unknown[] = []
+    const tuples = rules.map((rule, index) => {
+      const base = index * 12
+      params.push(
+        rule.id,
+        rule.branchId,
+        rule.driverId,
+        rule.businessDate,
+        rule.windowStartMinute,
+        rule.windowEndMinute,
+        rule.cashFloat.toString(),
+        rule.walletTopup.toString(),
+        rule.authorizedBy,
+        rule.authorizedByRole,
+        rule.authorizedByBranchId,
+        rule.createdAtMs,
+      )
+      return `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},` +
+        `$${base + 7},$${base + 8},$${base + 9},$${base + 10},$${base + 11},` +
+        `to_timestamp($${base + 12}::double precision/1000))`
+    })
+    try {
+      // One statement makes a multi-date manager command atomic: an overlap on any date rolls all
+      // dates back. The database trigger serializes concurrent publishers for each driver/date.
+      await withTransaction(this.pool, { actorId: rules[0]!.authorizedBy }, async (client) => {
+        await client.query(
+          `INSERT INTO preapproved_shift_rules
+             (id, branch_id, driver_id, business_date, window_start_minute, window_end_minute,
+              cash_float_minor, wallet_topup_minor, authorized_by, authorized_by_role,
+              authorized_by_branch_id, created_at)
+           VALUES ${tuples.join(',')}`,
+          params,
+        )
+      })
+    } catch (err) {
+      if (isPgError(err, PG.EXCLUSION_VIOLATION)) {
+        throw Object.assign(new Error('overlapping pre-approved shift rule'), {
+          code: 'PREAPPROVED_SHIFT_RULE_OVERLAP',
+        })
+      }
+      throw err
+    }
+  }
+
+  async listByBranch(branchId: string): Promise<PreapprovedShiftRuleRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM preapproved_shift_rules
+        WHERE branch_id = $1
+        ORDER BY business_date, window_start_minute, created_at, id`,
+      [branchId],
+    )
+    return rows.map(toPreapprovedShiftRule)
+  }
+
+  async findById(id: string): Promise<PreapprovedShiftRuleRecord | null> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM preapproved_shift_rules WHERE id = $1',
+      [id],
+    )
+    return rows[0] ? toPreapprovedShiftRule(rows[0]) : null
+  }
+
+  async findMatching(input: {
+    branchId: string
+    driverId: string
+    businessDate: CalendarDate
+    localMinute: number
+  }): Promise<PreapprovedShiftRuleRecord | null> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT *
+         FROM preapproved_shift_rules
+        WHERE branch_id = $1
+          AND driver_id = $2
+          AND business_date = $3
+          AND active
+          AND consumed_by_shift_id IS NULL
+          AND window_start_minute <= $4
+          AND window_end_minute >= $4
+        ORDER BY window_start_minute, created_at, id
+        LIMIT 1`,
+      [input.branchId, input.driverId, input.businessDate, input.localMinute],
+    )
+    return rows[0] ? toPreapprovedShiftRule(rows[0]) : null
+  }
+
+  async consume(id: string, shiftId: string, consumedAtMs: number): Promise<PreapprovedShiftRuleRecord | null> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `UPDATE preapproved_shift_rules
+          SET consumed_by_shift_id = $2,
+              consumed_at = to_timestamp($3::double precision/1000)
+        WHERE id = $1 AND active AND consumed_by_shift_id IS NULL
+        RETURNING *`,
+      [id, shiftId, consumedAtMs],
+    )
+    return rows[0] ? toPreapprovedShiftRule(rows[0]) : null
+  }
+
+  async deactivate(id: string, actorId: string): Promise<PreapprovedShiftRuleRecord | null> {
+    return withTransaction(this.pool, { actorId }, async (client) => {
+      const { rows } = await client.query<Record<string, unknown>>(
+        `UPDATE preapproved_shift_rules
+            SET active = false
+          WHERE id = $1 AND active AND consumed_by_shift_id IS NULL
+          RETURNING *`,
+        [id],
+      )
+      return rows[0] ? toPreapprovedShiftRule(rows[0]) : null
+    })
+  }
+}
+
+const toPreapprovedShiftRule = (r: Record<string, unknown>): PreapprovedShiftRuleRecord => ({
+  id: String(r.id),
+  branchId: String(r.branch_id),
+  driverId: String(r.driver_id),
+  businessDate: isoDate(r.business_date),
+  windowStartMinute: Number(r.window_start_minute),
+  windowEndMinute: Number(r.window_end_minute),
+  cashFloat: minor(BigInt(String(r.cash_float_minor))),
+  walletTopup: minor(BigInt(String(r.wallet_topup_minor))),
+  active: Boolean(r.active),
+  authorizedBy: String(r.authorized_by),
+  authorizedByRole: r.authorized_by_role as PreapprovedShiftRuleRecord['authorizedByRole'],
+  authorizedByBranchId: (r.authorized_by_branch_id as string | null) ?? null,
+  createdAtMs: (r.created_at as Date).getTime(),
+  consumedByShiftId: (r.consumed_by_shift_id as string | null) ?? null,
+  consumedAtMs: r.consumed_at === null ? null : (r.consumed_at as Date).getTime(),
 })
 
 

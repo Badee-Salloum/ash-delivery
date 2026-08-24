@@ -78,6 +78,15 @@ const optionalVarianceReasonSchema = z.string().trim().max(500).nullable().defau
 export const serializeMoney = (m: Minor): string => formatMinor(m)
 
 export const calendarDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'expected YYYY-MM-DD')
+export const realCalendarDateSchema = calendarDateSchema.refine((value) => {
+  const [year, month, day] = value.split('-').map(Number) as [number, number, number]
+  const parsed = new Date(Date.UTC(year, month - 1, day))
+  return (
+    parsed.getUTCFullYear() === year &&
+    parsed.getUTCMonth() === month - 1 &&
+    parsed.getUTCDate() === day
+  )
+}, 'expected a real calendar date')
 export const uuidSchema = z.string().min(1)
 
 export const payModeSchema = z.enum(['cash', 'electronic', 'free'])
@@ -237,18 +246,7 @@ export const closeFiguresRequest = z.object({
 /** «HH:MM» as read off a screenshot. `''` on a movement means the clock was not legible. */
 const minuteSchema = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, 'expected HH:MM (00:00-23:59)')
 /** «YYYY-MM-DD», the day PRINTED on the screen — already local, never converted. */
-const isoDateSchema = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/)
-  .refine((value) => {
-    const [year, month, day] = value.split('-').map(Number) as [number, number, number]
-    const parsed = new Date(Date.UTC(year, month - 1, day))
-    return (
-      parsed.getUTCFullYear() === year &&
-      parsed.getUTCMonth() === month - 1 &&
-      parsed.getUTCDate() === day
-    )
-  }, 'expected a real calendar date')
+const isoDateSchema = realCalendarDateSchema
 
 /** Server-derived classification against the immutable open/close instants. */
 export const operationWindowStatusSchema = z.enum([
@@ -951,6 +949,40 @@ export const createAssignmentRequest = z.object({
   branchId: z.string().optional(),
 })
 
+const localTimeSchema = z
+  .string()
+  .regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, 'expected a 24-hour local time (HH:MM)')
+
+/**
+ * Advance manager authorization for automatic opening on explicitly selected dates.
+ *
+ * Windows never wrap midnight. The shift's business date is a written local date, so a wrapping
+ * window would otherwise make it ambiguous which custom date owns the after-midnight half. A
+ * manager who needs both sides can create two explicit date rules instead.
+ */
+export const createPreapprovedShiftRulesRequest = z
+  .object({
+    branchId: z.string().min(1).optional(),
+    driverId: z.string().min(1),
+    dates: z.array(realCalendarDateSchema).min(1).max(62),
+    windowStart: localTimeSchema,
+    windowEnd: localTimeSchema,
+    cashFloat: nonnegativeMoneySchema,
+    walletTopup: nonnegativeMoneySchema,
+  })
+  .superRefine((value, ctx) => {
+    if (new Set(value.dates).size !== value.dates.length) {
+      ctx.addIssue({ code: 'custom', path: ['dates'], message: 'custom dates must be unique' })
+    }
+    if (value.windowStart >= value.windowEnd) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['windowEnd'],
+        message: 'window end must be after window start on the same day',
+      })
+    }
+  })
+
 export const createDocumentRequest = z.object({
   ownerKind: z.enum(['driver', 'vehicle']),
   driverId: z.string().nullable().default(null),
@@ -1112,4 +1144,5 @@ export type PatchCloseDraftRequest = z.infer<typeof patchCloseDraftRequest>
 export type LinkedCloseDraftReadRequest = z.infer<typeof linkedCloseDraftReadRequest>
 export type RestoreCloseDraftAttachmentRequest = z.infer<typeof restoreCloseDraftAttachmentRequest>
 export type ApproveOpenRequest = z.infer<typeof approveOpenRequest>
+export type CreatePreapprovedShiftRulesRequest = z.infer<typeof createPreapprovedShiftRulesRequest>
 export type ShiftFundingPreview = z.infer<typeof shiftFundingPreviewSchema>
