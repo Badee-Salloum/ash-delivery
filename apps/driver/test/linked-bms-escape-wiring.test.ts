@@ -30,7 +30,7 @@ describe('end-BMS slow-reader escape wiring', () => {
   })
 
   it('restores only the pending marker owned by the cancelled request', () => {
-    expect(shift).toContain('const pendingReadId = `pending-${attachment.attachmentToken}-${crypto.randomUUID()}`')
+    expect(shift).toContain('const pendingReadId = `pending-${attachment.attachmentToken}-${clientUuid()}`')
     expect(shift).toContain('owned?.attachmentToken !== attachment.attachmentToken')
     expect(shift).toContain('owned.read?.readId !== pendingReadId')
     expect(shift).toContain('[slot]: attachment')

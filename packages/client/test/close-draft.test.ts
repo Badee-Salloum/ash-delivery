@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { CloseDraftPatch, CloseDraftRowEdit, CloseDraftView } from '../src/api.ts'
 import {
   applyCloseDraftOperationsOverlay,
+  closeDraftEditableFingerprint,
   closeDraftOperations,
   closeDraftOperationsPatch,
   closeOperationsSummary,
@@ -29,6 +30,51 @@ const emptyView = (): CloseDraftView => ({
 })
 
 describe('durable close-draft view model', () => {
+  it('converges after the server canonicalizes equivalent money text', () => {
+    const canonical = closeDraftEditableFingerprint({
+      figures: {
+        cashDeclared: '500.00',
+        walletDeclared: '125.50',
+        odometerKm: 1_234,
+        odometerAnomalyConfirmed: false,
+      },
+      orders: [{
+        localId: 'manual-1',
+        providerOrderNo: '',
+        payMode: 'cash',
+        feeText: '25.00',
+        draftSource: 'manual',
+        included: true,
+      }],
+      cashDeductions: [],
+      movements: [],
+    })
+
+    // rebaseCloseDraft deliberately preserves the driver's text overlay (`500`, `25`) while
+    // advancing the persisted baseline to the server's canonical snapshot (`500.00`, `25.00`).
+    // Those values are the same money, so autosave must consider the successful PATCH settled.
+    const rebasedPhoneOverlay = closeDraftEditableFingerprint({
+      figures: {
+        cashDeclared: '500',
+        walletDeclared: '125.5',
+        odometerKm: 1_234,
+        odometerAnomalyConfirmed: false,
+      },
+      orders: [{
+        localId: 'manual-1',
+        providerOrderNo: '',
+        payMode: 'cash',
+        feeText: '25',
+        draftSource: 'manual',
+        included: true,
+      }],
+      cashDeductions: [],
+      movements: [],
+    })
+
+    expect(rebasedPhoneOverlay).toBe(canonical)
+  })
+
   it('exposes only the server allowlist for human PATCH fields', () => {
     type Figures = NonNullable<CloseDraftPatch['figures']>
     type ForbiddenFigure = Extract<keyof Figures, 'walletDeclaredOcr' | 'odometerKmOcr' | 'batteryPercent'>

@@ -357,9 +357,107 @@ describe('durable close-draft identity', () => {
     expect(current.revision).toBe(draft.revision + 1)
     expect(['111.00', '222.00']).toContain(current.figures.cashDeclared)
   })
+
+  it('does not advance the revision for a canonical-equivalent autosave', async () => {
+    const { driver, shiftId } = await openShift()
+    const draft = await getDraft(driver, shiftId)
+    const first = await patchDraft(driver, shiftId, {
+      expectedRevision: draft.revision,
+      figures: { cashDeclared: '500' },
+    })
+    expect(first.statusCode, first.body).toBe(200)
+    expect(first.json()).toMatchObject({
+      revision: draft.revision + 1,
+      figures: { cashDeclared: '500.00' },
+    })
+
+    // A cached phone can retain its raw `500` overlay after receiving canonical `500.00`.
+    // Repeating that semantic no-op must not keep invalidating evidence upload revisions.
+    const repeated = await patchDraft(driver, shiftId, {
+      expectedRevision: first.json().revision,
+      figures: { cashDeclared: '500' },
+    })
+    expect(repeated.statusCode, repeated.body).toBe(200)
+    expect(repeated.json()).toMatchObject({
+      revision: first.json().revision,
+      draftHash: first.json().draftHash,
+      figures: { cashDeclared: '500.00' },
+    })
+  })
 })
 
 describe('attachment/read races and screen safety', () => {
+  it('rebases an end-photo upload over an autosave that lands during slow OCR', async () => {
+    reader.push(ok())
+    const { driver, shiftId } = await openShift()
+    const draft = await getDraft(driver, shiftId)
+    const blocked = reader.block(1)
+    const uploadPromise = uploadEnd(driver, shiftId, 'odometer', image('autosave-during-ocr'), draft)
+    await blocked.entered
+
+    const saved = await patchDraft(driver, shiftId, {
+      expectedRevision: draft.revision,
+      figures: { cashDeclared: '500' },
+    })
+    expect(saved.statusCode, saved.body).toBe(200)
+    blocked.release()
+
+    const uploaded = await uploadPromise
+    expect(uploaded.statusCode, uploaded.body).toBe(201)
+    expect(uploaded.json().draft).toMatchObject({
+      revision: saved.json().revision + 1,
+      figures: { cashDeclared: '500.00' },
+    })
+    expect(uploaded.json().draft.attachments).toEqual(
+      expect.arrayContaining([expect.objectContaining({ slot: 'odometer' })]),
+    )
+  })
+
+  it('retries the evidence draft CAS when an autosave wins after attachment commit starts', async () => {
+    reader.push(ok())
+    const { driver, shiftId } = await openShift()
+    const draft = await getDraft(driver, shiftId)
+    const repo = h.deps.closeDrafts
+    const originalUpdate = repo.update.bind(repo)
+    let release!: () => void
+    let entered!: () => void
+    const updateEntered = new Promise<void>((resolve) => { entered = resolve })
+    const waitForAutosave = new Promise<void>((resolve) => { release = resolve })
+    let blocked = false
+    repo.update = async (input) => {
+      if (!blocked && input.data.evidence.odometer !== undefined) {
+        blocked = true
+        entered()
+        await waitForAutosave
+      }
+      return originalUpdate(input)
+    }
+
+    try {
+      const uploadPromise = uploadEnd(driver, shiftId, 'odometer', image('autosave-after-attach'), draft)
+      await updateEntered
+      const saved = await patchDraft(driver, shiftId, {
+        expectedRevision: draft.revision,
+        figures: { cashDeclared: '700' },
+      })
+      expect(saved.statusCode, saved.body).toBe(200)
+      release()
+
+      const uploaded = await uploadPromise
+      expect(uploaded.statusCode, uploaded.body).toBe(201)
+      expect(uploaded.json().draft).toMatchObject({
+        revision: saved.json().revision + 1,
+        figures: { cashDeclared: '700.00' },
+      })
+      expect(uploaded.json().draft.attachments).toEqual(
+        expect.arrayContaining([expect.objectContaining({ slot: 'odometer' })]),
+      )
+    } finally {
+      release()
+      repo.update = originalUpdate
+    }
+  })
+
   it('rechecks media reuse after slow OCR and preserves the occupied slot on a stale confirmation', async () => {
     reader.push(ok(), ok())
     const { driver, shiftId } = await openShift()

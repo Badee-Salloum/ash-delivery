@@ -38,6 +38,19 @@ describe('branch treasury screen contract', () => {
     expect(dashboardSource).toContain('capitalDelta.amount')
   })
 
+  it('keeps open-shift custody inside working capital while showing it separately from the office position', () => {
+    expect(dashboardSource).toContain('value={<Money value={treasury.capital.total} />}')
+    expect(dashboardSource).toContain('treasury.capital.officePosition')
+    expect(dashboardSource).toContain('treasury.capital.activeCustodyTotal')
+    expect(dashboardSource).toContain('treasury.capital.activeCustodyCash')
+    expect(dashboardSource).toContain('treasury.capital.activeCustodyWallet')
+    expect(dashboardSource).toContain('treasury.capital.activeShiftCount')
+    for (const catalog of [ar, en]) {
+      expect(catalog.dashboard.officePosition.length).toBeGreaterThan(10)
+      expect(catalog.dashboard.activeShiftCustody).toContain('{n}')
+    }
+  })
+
   it('shows the restoration position as the exact counted plus receivables equation', () => {
     expect(treasurySource).toContain('<Money value={leg.counted} />')
     expect(treasurySource).toContain('<Money value={leg.receivables} />')

@@ -15,6 +15,8 @@ import type {
   SessionRepo,
   OrderPointRecord,
   ShiftOrderRecord,
+  TreasuryPositionRecord,
+  TreasuryPositionSource,
   UserRecord,
   UserRepo,
   WalletMovementInput,
@@ -601,6 +603,14 @@ export class PgOrderRepo implements OrderRepo {
     )
     return rows.map(toOrder)
   }
+  async listByShiftIds(shiftIds: readonly string[]): Promise<ShiftOrderRecord[]> {
+    if (shiftIds.length === 0) return []
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `${ORDER_COLUMNS} WHERE o.shift_id = ANY($1::uuid[]) ORDER BY o.shift_id, o.provider_order_no`,
+      [shiftIds],
+    )
+    return rows.map(toOrder)
+  }
   async findByProviderNo(providerOrderNo: string): Promise<ShiftOrderRecord | null> {
     const { rows } = await this.pool.query<Record<string, unknown>>(
       `${ORDER_COLUMNS} WHERE provider_order_no = $1`,
@@ -903,6 +913,111 @@ export class PgOperationWindowRepo implements OperationWindowRepo {
     return this.transactionClient
       ? run(this.transactionClient)
       : withTransaction(this.pool, { actorId }, run)
+  }
+}
+
+/**
+ * Read the full working-capital position in one PostgreSQL statement snapshot.
+ *
+ * The office boxes and receivables alone are the restoration position. Driver cash/wallet remains
+ * company working capital after approval moves it out of those boxes, so it is added only while a
+ * shift has both the immutable open marker and a financially-live state.
+ */
+export class PgTreasuryPositionSource implements TreasuryPositionSource {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async readCurrent(branchId: string): Promise<TreasuryPositionRecord> {
+    const { rows } = await this.pool.query<{
+      office_cash: string
+      office_wallet: string
+      receivables_cash: string
+      receivables_wallet: string
+      active_custody_cash: string
+      active_custody_wallet: string
+      active_shift_count: number
+      negative_receivable_fund_code: string | null
+    }>(
+      `WITH active_shifts AS (
+         SELECT driver_id
+           FROM shifts
+          WHERE branch_id = $1
+            AND open_approved_at IS NOT NULL
+            AND state IN ('open', 'pending_review', 'suspended')
+       ),
+       active_drivers AS (
+         SELECT DISTINCT driver_id FROM active_shifts
+       ),
+       fund_balances AS (
+         SELECT f.code,
+                f.type::text AS fund_type,
+                f.owner_id,
+                COALESCE(SUM(
+                  CASE WHEN jl.side = 'D' THEN jl.amount_minor ELSE -jl.amount_minor END
+                ), 0) AS balance
+           FROM funds f
+           LEFT JOIN journal_lines jl ON jl.fund_id = f.id
+          WHERE f.branch_id = $1
+            AND f.type::text IN (
+              'office_cash',
+              'office_wallet',
+              'driver_receivable_cash',
+              'driver_receivable_wallet',
+              'driver_shift_funding_cash',
+              'driver_shift_funding_wallet',
+              'driver_cash',
+              'driver_wallet'
+            )
+          GROUP BY f.id, f.code, f.type, f.owner_id
+       )
+       SELECT COALESCE(SUM(balance) FILTER (
+                WHERE fund_type = 'office_cash'
+              ), 0)::text AS office_cash,
+              COALESCE(SUM(balance) FILTER (
+                WHERE fund_type = 'office_wallet'
+              ), 0)::text AS office_wallet,
+              COALESCE(SUM(balance) FILTER (
+                WHERE fund_type IN ('driver_receivable_cash', 'driver_shift_funding_cash')
+              ), 0)::text AS receivables_cash,
+              COALESCE(SUM(balance) FILTER (
+                WHERE fund_type IN ('driver_receivable_wallet', 'driver_shift_funding_wallet')
+              ), 0)::text AS receivables_wallet,
+              COALESCE(SUM(balance) FILTER (
+                WHERE fund_type = 'driver_cash'
+                  AND EXISTS (SELECT 1 FROM active_drivers ad WHERE ad.driver_id = fund_balances.owner_id)
+              ), 0)::text AS active_custody_cash,
+              COALESCE(SUM(balance) FILTER (
+                WHERE fund_type = 'driver_wallet'
+                  AND EXISTS (SELECT 1 FROM active_drivers ad WHERE ad.driver_id = fund_balances.owner_id)
+              ), 0)::text AS active_custody_wallet,
+              (SELECT COUNT(*)::int FROM active_shifts) AS active_shift_count,
+              (SELECT code
+                 FROM fund_balances
+                WHERE balance < 0
+                  AND fund_type IN (
+                    'driver_receivable_cash',
+                    'driver_receivable_wallet',
+                    'driver_shift_funding_cash',
+                    'driver_shift_funding_wallet'
+                  )
+                ORDER BY code
+                LIMIT 1) AS negative_receivable_fund_code
+         FROM fund_balances`,
+      [branchId],
+    )
+    const row = rows[0]
+    return {
+      officeCash: minor(BigInt(row?.office_cash ?? '0')),
+      officeWallet: minor(BigInt(row?.office_wallet ?? '0')),
+      receivablesCash: minor(BigInt(row?.receivables_cash ?? '0')),
+      receivablesWallet: minor(BigInt(row?.receivables_wallet ?? '0')),
+      activeCustodyCash: minor(BigInt(row?.active_custody_cash ?? '0')),
+      activeCustodyWallet: minor(BigInt(row?.active_custody_wallet ?? '0')),
+      activeShiftCount: Number(row?.active_shift_count ?? 0),
+      negativeReceivableFundCode: row?.negative_receivable_fund_code ?? null,
+    }
   }
 }
 

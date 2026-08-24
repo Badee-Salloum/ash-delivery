@@ -47,6 +47,34 @@ describe('photo upload and OCR attempt ownership', () => {
     expect(photoAttemptSource).toContain('const accepted = await actions.upload(attempt)')
   })
 
+  it('distinguishes local image preparation failures from requests that reached the upload path', () => {
+    expect(photoSlot).toContain('t.shift.photoPreparationFailed')
+    expect(photoSlot).toContain('image_too_large_after_compression')
+    expect(photoSlot).toContain('t.shift.uploadFailed')
+    // Keep native camera capture broad; HEIC/WebView compatibility is decided from decoded bytes,
+    // not an `accept` hint that some installed Android pickers interpret as "no camera".
+    expect(photoSlot).toContain('accept="image/*"')
+    expect(photoSlot).toContain("typeof URL.createObjectURL !== 'function'")
+    expect(photoSlot).toContain('URL.revokeObjectURL(url)')
+  })
+
+  it('never relabels a reader failure after an accepted PUT as preparation or upload failure', () => {
+    const preparationCatch = photoSlot.indexOf('setUploadError(`${t.shift.photoPreparationFailed}${reason}`)')
+    const execute = photoSlot.indexOf("await execute(attempt, 'selection')")
+    expect(preparationCatch).toBeGreaterThan(-1)
+    expect(execute).toBeGreaterThan(preparationCatch)
+    expect(photoSlot).toContain('the server accepted the evidence')
+    expect(photoSlot).toContain("setState('done')")
+  })
+
+  it('cannot retry the previous photo when preparation of a new selection fails', () => {
+    const onPick = photoSlot.indexOf('const onPick = useCallback')
+    const clearOldAttempt = photoSlot.indexOf('currentAttempt.current = null', onPick)
+    const prepare = photoSlot.indexOf("setState('preparing')", onPick)
+    expect(clearOldAttempt).toBeGreaterThan(onPick)
+    expect(clearOldAttempt).toBeLessThan(prepare)
+  })
+
   it('keeps a failed replacement retryable after reload while showing the accepted thumbnail', async () => {
     const recovered = nextPhotoAttempt(0, { name: 'pending-replacement.jpg' })
     const upload = vi.fn().mockResolvedValue(true)

@@ -52,6 +52,8 @@ import type {
   NewShiftSettlementRecord,
   ShiftSettlementRecord,
   ShiftSettlementRepo,
+  TreasuryPositionRecord,
+  TreasuryPositionSource,
   UserRecord,
   UserRepo,
   VehicleEventRecord,
@@ -513,6 +515,11 @@ export class MemoryOrderRepo implements OrderRepo {
   }
   async listByShift(shiftId: string): Promise<ShiftOrderRecord[]> {
     return [...this.rows.values()].filter((o) => o.shiftId === shiftId)
+  }
+  async listByShiftIds(shiftIds: readonly string[]): Promise<ShiftOrderRecord[]> {
+    if (shiftIds.length === 0) return []
+    const requested = new Set(shiftIds)
+    return [...this.rows.values()].filter((o) => requested.has(o.shiftId))
   }
   async findByProviderNo(providerOrderNo: string): Promise<ShiftOrderRecord | null> {
     for (const o of this.rows.values()) if (o.providerOrderNo === providerOrderNo) return { ...o }
@@ -1197,6 +1204,75 @@ export class MemoryLedgerRepo implements LedgerRepo {
   }
 }
 
+/** In-memory parity for the dashboard's one-statement PostgreSQL position snapshot. */
+export class MemoryTreasuryPositionSource implements TreasuryPositionSource {
+  private readonly ledger: MemoryLedgerRepo
+  private readonly shifts: MemoryShiftRepo
+  private readonly gate: MemoryTransactionGate
+
+  constructor(ledger: MemoryLedgerRepo, shifts: MemoryShiftRepo, gate: MemoryTransactionGate) {
+    this.ledger = ledger
+    this.shifts = shifts
+    this.gate = gate
+  }
+
+  async readCurrent(branchId: string): Promise<TreasuryPositionRecord> {
+    return this.gate.run(async () => this.readSnapshot(branchId))
+  }
+
+  private readSnapshot(branchId: string): TreasuryPositionRecord {
+    // No await inside this method: shifts and journal lines are observed as one event-loop snapshot.
+    const activeShifts = [...this.shifts.rows.values()].filter(
+      (shift) =>
+        shift.branchId === branchId &&
+        shift.openApprovedAt !== null &&
+        (shift.state === 'open' || shift.state === 'pending_review' || shift.state === 'suspended'),
+    )
+    const activeDriverIds = new Set(activeShifts.map((shift) => shift.driverId))
+    const balances = new Map<string, bigint>()
+    for (const entry of this.ledger.entries) {
+      if (entry.branchId !== branchId) continue
+      for (const line of entry.lines) {
+        balances.set(
+          line.fundCode,
+          (balances.get(line.fundCode) ?? 0n) + (line.side === 'D' ? line.amount : -line.amount),
+        )
+      }
+    }
+
+    const receivableCodes = [...balances.keys()]
+      .filter(
+        (code) =>
+          code.startsWith('driver_receivable_cash:') ||
+          code.startsWith('driver_receivable_wallet:') ||
+          code.startsWith('driver_shift_funding_cash:') ||
+          code.startsWith('driver_shift_funding_wallet:'),
+      )
+      .sort()
+    const totalForPrefixes = (prefixes: readonly string[]): bigint =>
+      [...balances.entries()]
+        .filter(([code]) => prefixes.some((prefix) => code.startsWith(prefix)))
+        .reduce((total, [, balance]) => total + balance, 0n)
+    const totalActiveCustody = (channel: 'cash' | 'wallet'): bigint =>
+      [...activeDriverIds].reduce(
+        (total, driverId) => total + (balances.get(`driver_${channel}:${driverId}`) ?? 0n),
+        0n,
+      )
+
+    return {
+      officeCash: minor(balances.get('office_cash') ?? 0n),
+      officeWallet: minor(balances.get('office_wallet') ?? 0n),
+      receivablesCash: minor(totalForPrefixes(['driver_receivable_cash:', 'driver_shift_funding_cash:'])),
+      receivablesWallet: minor(totalForPrefixes(['driver_receivable_wallet:', 'driver_shift_funding_wallet:'])),
+      activeCustodyCash: minor(totalActiveCustody('cash')),
+      activeCustodyWallet: minor(totalActiveCustody('wallet')),
+      activeShiftCount: activeShifts.length,
+      negativeReceivableFundCode:
+        receivableCodes.find((code) => (balances.get(code) ?? 0n) < 0n) ?? null,
+    }
+  }
+}
+
 /** Stable fund identity, mirroring `funds.code` in the schema. */
 export function fundCodeOf(fund: Posting['lines'][number]['fund']): string {
   switch (fund.kind) {
@@ -1818,6 +1894,7 @@ export interface MemoryDeps extends Deps {
   operationBatches: MemoryOperationBatchRepo
   closeUnitOfWork: MemoryShiftCloseUnitOfWork
   ledger: MemoryLedgerRepo
+  treasuryPosition: MemoryTreasuryPositionSource
   fx: MemoryFxRepo
   weekLocks: MemoryWeekLockRepo
   audit: MemoryAuditRepo
@@ -2022,6 +2099,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   const settlements = new MemoryShiftSettlementRepo()
   const closeDrafts = new MemoryCloseDraftRepo(media)
   const gate = new MemoryTransactionGate()
+  const treasuryPosition = new MemoryTreasuryPositionSource(ledger, shifts, gate)
   const expenses = new MemoryExpenseRepo()
   const receivableEvents = new MemoryReceivableEventRepo()
   const cashCounts = new MemoryCashCountRepo()
@@ -2095,6 +2173,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     closeUnitOfWork,
     movements,
     ledger,
+    treasuryPosition,
     expenses,
     receivableEvents,
     financialUnitOfWork,

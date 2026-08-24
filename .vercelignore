@@ -4,6 +4,7 @@
 .git/
 .github/
 .vercel/
+.release/
 backups
 backups/
 **/backups/

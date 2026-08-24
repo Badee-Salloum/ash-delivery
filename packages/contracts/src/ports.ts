@@ -918,6 +918,8 @@ export interface OrderRepo {
    */
   replacePoints(orderId: string, points: readonly OrderPointRecord[], actorId: string | null): Promise<void>
   listByShift(shiftId: string): Promise<ShiftOrderRecord[]>
+  /** Resolve a reporting batch in one read; rows remain grouped by their `shiftId`. */
+  listByShiftIds(shiftIds: readonly string[]): Promise<ShiftOrderRecord[]>
   findByProviderNo(providerOrderNo: string): Promise<ShiftOrderRecord | null>
   delete(id: string, actorId: string | null): Promise<void>
 }
@@ -1063,6 +1065,31 @@ export interface LedgerRepo {
    * because this runs on the evening screen with a manager waiting.
    */
   balancesByPrefix(branchId: string, prefix: string): Promise<Record<string, bigint>>
+}
+
+/**
+ * One statement-snapshot of the branch assets that make up working capital.
+ *
+ * `office*` and `receivables*` are the position the nightly restoration already uses. Active
+ * custody is deliberately separate: it is cash/wallet that left those office funds when a shift
+ * opened but is still company capital while the driver holds it. Only a shift with the immutable
+ * open marker and a financially-live state contributes custody.
+ */
+export interface TreasuryPositionRecord {
+  officeCash: Minor
+  officeWallet: Minor
+  receivablesCash: Minor
+  receivablesWallet: Minor
+  activeCustodyCash: Minor
+  activeCustodyWallet: Minor
+  activeShiftCount: number
+  /** Preserve the existing per-fund receivable integrity check inside the atomic read. */
+  negativeReceivableFundCode: string | null
+}
+
+/** Cross-table read model: funds/journal lines and financially-open shifts in one snapshot. */
+export interface TreasuryPositionSource {
+  readCurrent(branchId: string): Promise<TreasuryPositionRecord>
 }
 
 // ── «رأس مال المكتب» and «الترميم» (owner decision 10) ────────────────────────────────────
@@ -2110,6 +2137,8 @@ export interface Deps {
   /** «سجل المدفوعات» — what the wallet actually did, beside what the orders imply it should have. */
   movements: WalletMovementRepo
   ledger: LedgerRepo
+  /** Atomic statement-snapshot behind the working-capital dashboard. */
+  treasuryPosition: TreasuryPositionSource
   expenses: ExpenseRepo
   receivableEvents: ReceivableEventRepo
   /** Atomic boundary for ledger-backed expenses and future treasury/receivable commands. */

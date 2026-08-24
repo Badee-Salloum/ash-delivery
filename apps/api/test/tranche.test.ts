@@ -1,5 +1,5 @@
 import type { LightMyRequestResponse } from 'fastify'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fundCodeOf } from '@ash/adapters/memory'
 import { DRIVER2_ID, DRIVER_ID, type Harness, VEHICLE_ID, approveFixedClose, makeHarness, sypStr, today } from './harness.ts'
 
@@ -29,11 +29,14 @@ const get = async (token: string, url: string): Promise<LightMyRequestResponse> 
   await h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(token) } })
 
 /** Open with the SRS §2.3 funds: float 100,000, top-up 50,000. */
-async function openShift(driver: string, manager: string): Promise<string> {
+async function openShift(driver: string, manager: string, walletTopup = 50_000): Promise<string> {
   const id = (await post(driver, '/shifts', { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 })).json().id as string
   await h.uploadPhoto(driver, id, 'start', 'odometer')
   await put(driver, `/shifts/${id}/start-package`, { odometerKm: 15_320, batteryPercent: 95 })
-  await post(manager, `/shifts/${id}/approve-open`, { floatTranches: [sypStr(100_000)], topupTranches: [sypStr(50_000)] })
+  await post(manager, `/shifts/${id}/approve-open`, {
+    floatTranches: [sypStr(100_000)],
+    topupTranches: walletTopup === 0 ? [] : [sypStr(walletTopup)],
+  })
   return id
 }
 
@@ -90,6 +93,8 @@ async function approveClose(manager: string, id: string): Promise<LightMyRequest
 
 const cashOf = async (driverId: string): Promise<bigint> =>
   await h.deps.ledger.fundBalance('branch-damascus', fundCodeOf({ kind: 'driver_cash', driverId }))
+const walletOf = async (driverId: string): Promise<bigint> =>
+  await h.deps.ledger.fundBalance('branch-damascus', fundCodeOf({ kind: 'driver_wallet', driverId }))
 const trancheJournalKey = (callerKey: string): string => `admin-tranche:${callerKey}`
 
 describe('mid-day tranche (C-5)', () => {
@@ -217,6 +222,146 @@ describe('mid-day tranche (C-5)', () => {
  * disbursement from a repeated one by looking at the amount. Only the caller knows. So the caller
  * says, with a key it mints once per intended disbursement and reuses on every retry.
  */
+describe('wallet top-up corrections', () => {
+  beforeEach(() => {
+    seq = 0
+    fixtureOrders.clear()
+  })
+
+  it('atomically corrects a pending-review wallet from 600 to 500 and refreshes BR1', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await openShift(driver, manager, 600)
+
+    await addTwentyOrders(driver, id)
+    const submitted = await submitEnd(driver, id, 160_000, 20_500)
+    expect(submitted.statusCode, submitted.body).toBe(200)
+    expect(submitted.json().state).toBe('pending_review')
+    expect(submitted.json().br1.walletDifference).toBe(sypStr(-100))
+
+    const adjustment = {
+      expectedCurrentTotal: sypStr(600),
+      targetTotal: sypStr(500),
+      occurrenceKey: 'wallet-600-to-500',
+      reason: 'manager confirmed the opening top-up was overstated',
+    }
+    const adjusted = await post(manager, `/shifts/${id}/wallet-topup-adjustments`, adjustment)
+    expect(adjusted.statusCode, adjusted.body).toBe(201)
+    expect(adjusted.json()).toMatchObject({
+      id,
+      from: sypStr(600),
+      to: sypStr(500),
+      reduction: sypStr(100),
+      currentTotal: sypStr(500),
+      replayed: false,
+    })
+
+    const stored = await h.deps.shifts.findById(id)
+    expect(stored?.state).toBe('pending_review')
+    expect(stored?.topupTranches).toEqual([50_000n])
+    expect(stored?.equationDiff).toBe(0n)
+    expect(stored?.cashDiff).toBe(0n)
+    expect(stored?.walletDiff).toBe(0n)
+    expect(await walletOf(DRIVER_ID)).toBe(50_000n)
+    expect(await h.deps.ledger.fundBalance('branch-damascus', 'office_wallet')).toBe(-50_000n)
+
+    const correction = h.deps.ledger.entries.find(
+      (entry) => entry.eventType === 'correction' && entry.occurrenceKey === 'wallet-topup-adjustment:wallet-600-to-500',
+    )
+    expect(correction).toMatchObject({
+      shiftId: id,
+      createdBy: 'u-bm',
+      reason: expect.stringContaining('manager confirmed the opening top-up was overstated'),
+    })
+    expect(correction?.lines).toEqual(expect.arrayContaining([
+      expect.objectContaining({ fundCode: 'office_wallet', side: 'D', amount: 10_000n }),
+      expect.objectContaining({ fundCode: `driver_wallet:${DRIVER_ID}`, side: 'C', amount: 10_000n }),
+    ]))
+    expect((await h.deps.audit.list({ tableName: 'shifts', recordId: id })).at(-1)?.after).toMatchObject({
+      walletTopupTotal: sypStr(500),
+      reduction: sypStr(100),
+      occurrenceKey: 'wallet-600-to-500',
+    })
+
+    expect((await approveClose(manager, id)).json().state).toBe('approved')
+
+    // A client may retry after the close was committed. Exact replay is success even though a new
+    // adjustment is no longer legal in the approved state, and it must not duplicate money/audit.
+    const replay = await post(manager, `/shifts/${id}/wallet-topup-adjustments`, adjustment)
+    expect(replay.statusCode, replay.body).toBe(200)
+    expect(replay.json()).toMatchObject({
+      correctionEntryId: correction?.id,
+      currentTotal: sypStr(500),
+      replayed: true,
+    })
+    expect(h.deps.ledger.entries.filter(
+      (entry) => entry.eventType === 'correction'
+        && entry.occurrenceKey === 'wallet-topup-adjustment:wallet-600-to-500',
+    )).toHaveLength(1)
+    expect((await h.deps.audit.list({ tableName: 'shifts', recordId: id })).filter(
+      (entry) => (entry.after as Record<string, unknown> | null)?.occurrenceKey === 'wallet-600-to-500',
+    )).toHaveLength(1)
+  })
+
+  it('requires manager permission and a visible reason, and rejects key reuse with different money', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await openShift(driver, manager, 600)
+    const body = {
+      expectedCurrentTotal: sypStr(600),
+      targetTotal: sypStr(500),
+      occurrenceKey: 'permission-and-conflict',
+      reason: 'correct the wallet funding amount',
+    }
+
+    expect((await post(driver, `/shifts/${id}/wallet-topup-adjustments`, body)).statusCode).toBe(403)
+    const blankReason = await post(manager, `/shifts/${id}/wallet-topup-adjustments`, {
+      ...body,
+      reason: '\u200b',
+    })
+    expect(blankReason.statusCode, blankReason.body).toBe(400)
+    expect(blankReason.json().error).toBe('invalid_request')
+
+    expect((await post(manager, `/shifts/${id}/wallet-topup-adjustments`, body)).statusCode).toBe(201)
+    const conflict = await post(manager, `/shifts/${id}/wallet-topup-adjustments`, {
+      ...body,
+      targetTotal: sypStr(400),
+    })
+    expect(conflict.statusCode, conflict.body).toBe(409)
+    expect(conflict.json().error).toBe('idempotency_key_conflict')
+    expect((await h.deps.shifts.findById(id))?.topupTranches).toEqual([50_000n])
+    expect(h.deps.ledger.entries.filter(
+      (entry) => entry.eventType === 'correction'
+        && entry.occurrenceKey === 'wallet-topup-adjustment:permission-and-conflict',
+    )).toHaveLength(1)
+  })
+
+  it('rolls the journal back when the shift projection cannot be persisted', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await openShift(driver, manager, 600)
+    const update = vi.spyOn(h.deps.shifts, 'update').mockRejectedValueOnce(new Error('forced shift write failure'))
+
+    const response = await post(manager, `/shifts/${id}/wallet-topup-adjustments`, {
+      expectedCurrentTotal: sypStr(600),
+      targetTotal: sypStr(500),
+      occurrenceKey: 'rollback-wallet-correction',
+      reason: 'test the financial transaction boundary',
+    })
+    update.mockRestore()
+
+    expect(response.statusCode, response.body).toBe(500)
+    expect((await h.deps.shifts.findById(id))?.topupTranches).toEqual([60_000n])
+    expect(await walletOf(DRIVER_ID)).toBe(60_000n)
+    expect(h.deps.ledger.entries.some(
+      (entry) => entry.occurrenceKey === 'wallet-topup-adjustment:rollback-wallet-correction',
+    )).toBe(false)
+    expect((await h.deps.audit.list({ tableName: 'shifts', recordId: id })).some(
+      (entry) => (entry.after as Record<string, unknown> | null)?.occurrenceKey === 'rollback-wallet-correction',
+    )).toBe(false)
+  })
+})
+
 describe('a tranche sent twice', () => {
   beforeEach(() => {
     seq = 0

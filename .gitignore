@@ -10,6 +10,7 @@ coverage/
 Thumbs.db
 
 .vercel
+.release/
 .env*
 
 # Generated Vercel function bundle (scripts/build-api.mjs)

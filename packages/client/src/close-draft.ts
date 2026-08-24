@@ -3,6 +3,7 @@ import type {
   CloseDraftView,
   CloseDraftWindowBasis,
 } from './api.ts'
+import { formatMinor, parseMinor } from '@ash/domain'
 import type { DraftCashDeduction, DraftMovement, DraftOrder } from './order-entry.ts'
 
 export type OperationDecisionState = 'included' | 'pending' | 'excluded'
@@ -422,6 +423,17 @@ export function applyCloseDraftOperationsOverlay(
   return { orders, cashDeductions, movements }
 }
 
+/**
+ * Match the server's wire representation before comparing a local overlay with a saved snapshot.
+ * The server accepts `500` and persists `500.00`; treating those as different keeps autosave dirty
+ * forever after a successful PATCH. Invalid/incomplete input stays byte-for-byte distinct so it
+ * cannot be mistaken for persisted data.
+ */
+const canonicalFingerprintMoney = (value: string | null): string | null => {
+  if (value === null || !/^-?\d+(?:\.\d{1,2})?$/u.test(value)) return value
+  return formatMinor(parseMinor(value))
+}
+
 /** Stable comparison payload for debounced persistence; no transient Files or reader promises. */
 export function closeDraftEditableFingerprint(input: {
   figures: {
@@ -434,9 +446,25 @@ export function closeDraftEditableFingerprint(input: {
   cashDeductions: readonly DraftCashDeduction[]
   movements: readonly DraftMovement[]
 }): string {
+  const orders = input.orders.map((row) => ({
+    ...row,
+    feeText: canonicalFingerprintMoney(row.feeText) ?? '',
+  }))
+  const cashDeductions = input.cashDeductions.map((row) => ({
+    ...row,
+    amountText: canonicalFingerprintMoney(row.amountText) ?? '',
+  }))
+  const movements = input.movements.map((row) => ({
+    ...row,
+    amountText: canonicalFingerprintMoney(row.amountText) ?? '',
+  }))
   return JSON.stringify({
-    figures: input.figures,
-    operations: closeDraftOperationsPatch(input.orders, input.cashDeductions, input.movements),
+    figures: {
+      ...input.figures,
+      cashDeclared: canonicalFingerprintMoney(input.figures.cashDeclared),
+      walletDeclared: canonicalFingerprintMoney(input.figures.walletDeclared),
+    },
+    operations: closeDraftOperationsPatch(orders, cashDeductions, movements),
   })
 }
 

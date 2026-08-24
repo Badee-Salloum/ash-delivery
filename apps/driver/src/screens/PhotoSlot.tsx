@@ -9,6 +9,7 @@ import {
   type EvidenceUploadResponse,
   type OcrImageFocus,
   closeDraftThumbnailPath,
+  clientUuid,
   compressForOcr,
   compressImage,
   evidenceUploadHeaders,
@@ -190,12 +191,27 @@ export function PhotoSlot({
 
   const [preview, setPreview] = useState<string | null>(null)
   useEffect(() => {
-    if (picked === null || variant !== 'tile') return
-    const url = URL.createObjectURL(picked)
+    setPreview(null)
+    if (
+      picked === null ||
+      variant !== 'tile' ||
+      typeof URL === 'undefined' ||
+      typeof URL.createObjectURL !== 'function'
+    ) return
+    let url: string
+    try {
+      url = URL.createObjectURL(picked)
+    } catch {
+      // A preview is cosmetic. Private/old WebViews may refuse object URLs; upload still proceeds.
+      return
+    }
     setPreview(url)
     return () => {
-      URL.revokeObjectURL(url)
-      setPreview(null)
+      try {
+        URL.revokeObjectURL(url)
+      } catch {
+        // Cleanup must not crash the evidence tile in a partial WebView implementation.
+      }
     }
   }, [picked, variant])
 
@@ -411,15 +427,20 @@ export function PhotoSlot({
         acknowledgedFiles.current.add(file)
       }
 
+      // Selection itself supersedes the old generation. If this file cannot be decoded, retaining
+      // the old attempt would paint "retry upload" and send the PREVIOUS photo when the driver taps.
+      currentAttempt.current = null
+      acceptedResult.current = null
       setPicked(file)
       setUploadResult(null)
       setUploadError(null)
       setState('preparing')
+      let attempt: PhotoAttempt<PreparedEvidence>
       try {
         const focus = recognitionFocus ?? (recognitionQuality ? 'full' : null)
         const compressed = focus ? await compressForOcr(file, focus) : await compressImage(file)
         if (!compressed) throw new Error('image_too_large_after_compression')
-        const generationId = crypto.randomUUID()
+        const generationId = clientUuid()
         const prepared: PreparedEvidence = {
           file,
           bytes: compressed.bytes,
@@ -439,13 +460,31 @@ export function PhotoSlot({
           })
           setPendingGenerationId(generationId)
         }
-        const attempt = nextPhotoAttempt(attemptSequence.current, prepared)
+        attempt = nextPhotoAttempt(attemptSequence.current, prepared)
         attemptSequence.current = attempt.id
         currentAttempt.current = attempt
+      } catch (error) {
+        const reason = error instanceof Error && /^[a-z0-9_]+$/i.test(error.message)
+          ? ` (${error.message})`
+          : ''
+        setUploadError(`${t.shift.photoPreparationFailed}${reason}`)
+        setState('error')
+        return
+      }
+
+      try {
         await execute(attempt, 'selection')
       } catch {
-        setUploadError(t.shift.uploadFailed)
-        setState('error')
+        /*
+         * `upload()` owns and reports every PUT failure. A rejection escaping `execute` therefore
+         * happened only after the server accepted the evidence, while a local/cloud reader was
+         * starting. Never repaint accepted evidence as a preparation/upload failure or offer a
+         * duplicate PUT; the separate read state and its retry control own that failure.
+         */
+        if (isCurrentPhotoAttempt(currentAttempt.current, attempt)) {
+          setUploadError(null)
+          setState('done')
+        }
       }
     },
     [t, recognitionQuality, recognitionFocus, pkg, shiftId, slot, execute],

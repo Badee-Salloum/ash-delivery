@@ -129,6 +129,23 @@ describe('read-only shift-money integrity checker', () => {
     expect(tranches).toContain('COALESCE(jt.carried_wallet, 0)')
   })
 
+  it('nets only exact wallet top-up correction journals against the opening total', () => {
+    for (const checks of [LEGACY_INTEGRITY_CHECKS, INTEGRITY_CHECKS]) {
+      const tranches = checks.find((check) => check.id === 'tranche_journal_totals').sql
+      expect(tranches).toContain("je.event_type = 'correction'")
+      expect(tranches).toContain("je.occurrence_key LIKE 'wallet-topup-adjustment:%'")
+      expect(tranches).toContain("f.type::text = 'office_wallet'")
+      expect(tranches).toContain("f.type::text = 'driver_wallet'")
+      expect(tranches).toContain('es.driver_wallet_credit = es.office_wallet_debit')
+      expect(tranches).toContain('es.line_count = 2')
+    }
+
+    const tranches = INTEGRITY_CHECKS.find((check) => check.id === 'tranche_journal_totals').sql
+    expect(tranches).toContain('AS is_wallet_topup_adjustment')
+    expect(tranches).toContain('WHERE c.is_wallet_topup_adjustment')
+    expect(tranches).toContain('OR c.is_wallet_topup_adjustment')
+  })
+
   it('grandfathers only cancelled shifts that predate the 0035 integrity boundary', () => {
     for (const checks of [LEGACY_INTEGRITY_CHECKS, INTEGRITY_CHECKS]) {
       const tranches = checks.find((check) => check.id === 'tranche_journal_totals').sql
@@ -658,6 +675,123 @@ if (!DATABASE_URL) {
 
         await client.query("UPDATE journal_entries SET business_date = DATE '2026-08-23' WHERE id = 2")
         expect(await violationCount(metadata)).toBe(1)
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+      }
+    })
+
+    it('nets an exact wallet top-up correction and rejects a malformed prefixed correction', async () => {
+      const client = await pool.connect()
+      const shiftId = randomUUID()
+      const driverId = randomUUID()
+      const driverWalletId = randomUUID()
+      const officeWalletId = randomUUID()
+      const officeCashId = randomUUID()
+      const tranches = INTEGRITY_CHECKS.find((check) => check.id === 'tranche_journal_totals').sql
+      const violationCount = async () => {
+        const { rows } = await client.query(`SELECT count(*)::text AS count FROM (${tranches}) violation`)
+        return Number(rows[0].count)
+      }
+
+      try {
+        await client.query('BEGIN')
+        await client.query(`
+          CREATE TEMP TABLE schema_migrations (
+            filename text PRIMARY KEY,
+            applied_at timestamptz NOT NULL
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE shifts (
+            id uuid PRIMARY KEY,
+            driver_id uuid NOT NULL,
+            state text NOT NULL,
+            created_at timestamptz NOT NULL,
+            open_approved_at timestamptz,
+            start_cash_float_minor bigint NOT NULL,
+            start_wallet_topup_minor bigint NOT NULL
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE audit_log (
+            table_name text NOT NULL,
+            record_id text NOT NULL,
+            action text NOT NULL,
+            before jsonb,
+            after jsonb,
+            occurred_at timestamptz NOT NULL
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE shift_decisions (
+            shift_id uuid NOT NULL,
+            decision text NOT NULL,
+            decided_at timestamptz NOT NULL
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE float_tranches (
+            shift_id uuid NOT NULL,
+            kind text NOT NULL,
+            amount_minor bigint NOT NULL
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE journal_entries (
+            id bigint PRIMARY KEY,
+            shift_id uuid,
+            event_type text NOT NULL,
+            occurrence_key text NOT NULL
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE funds (
+            id uuid PRIMARY KEY,
+            type text NOT NULL,
+            owner_id uuid
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE journal_lines (
+            id bigint PRIMARY KEY,
+            entry_id bigint NOT NULL,
+            fund_id uuid NOT NULL,
+            side char(1) NOT NULL,
+            amount_minor bigint NOT NULL
+          ) ON COMMIT DROP
+        `)
+        await client.query(
+          `INSERT INTO schema_migrations (filename, applied_at) VALUES
+             ('0035_shift_money_integrity.sql', TIMESTAMPTZ '2026-08-23 08:00:00+00'),
+             ('0037_receivable_settlement_and_events.sql', TIMESTAMPTZ '2026-08-23 10:00:00+00')`,
+        )
+        await client.query(
+          `INSERT INTO shifts
+             (id, driver_id, state, created_at, open_approved_at,
+              start_cash_float_minor, start_wallet_topup_minor)
+           VALUES ($1, $2, 'open', TIMESTAMPTZ '2026-08-24 07:00:00+00',
+                   TIMESTAMPTZ '2026-08-24 07:30:00+00', 0, 500)`,
+          [shiftId, driverId],
+        )
+        await client.query(
+          `INSERT INTO float_tranches (shift_id, kind, amount_minor)
+           VALUES ($1, 'wallet_topup', 500)`,
+          [shiftId],
+        )
+        await client.query(
+          `INSERT INTO funds (id, type, owner_id) VALUES
+             ($1, 'driver_wallet', $4),
+             ($2, 'office_wallet', NULL),
+             ($3, 'office_cash', NULL)`,
+          [driverWalletId, officeWalletId, officeCashId, driverId],
+        )
+        await client.query(
+          `INSERT INTO journal_entries (id, shift_id, event_type, occurrence_key) VALUES
+             (1, $1, 'wallet_topup', '1'),
+             (2, $1, 'correction', 'wallet-topup-adjustment:manager-fix')`,
+          [shiftId],
+        )
+        await client.query(
+          `INSERT INTO journal_lines (id, entry_id, fund_id, side, amount_minor) VALUES
+             (1, 1, $1, 'D', 600),
+             (2, 1, $2, 'C', 600),
+             (3, 2, $2, 'D', 100),
+             (4, 2, $1, 'C', 100)`,
+          [driverWalletId, officeWalletId],
+        )
+
+        expect(await violationCount()).toBe(0)
+
+        // The prefix alone is not enough: only D office_wallet / C this driver's wallet is netted.
+        await client.query('UPDATE journal_lines SET fund_id = $1 WHERE id = 4', [officeCashId])
+        expect(await violationCount()).toBe(1)
       } finally {
         await client.query('ROLLBACK').catch(() => undefined)
         client.release()

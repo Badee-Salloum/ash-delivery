@@ -8,6 +8,7 @@ export * from './ocr-delta.ts'
 export * from './fleet.ts'
 export * from './reading-checks.ts'
 export * from './numerals.ts'
+export * from './client-uuid.ts'
 
 /** Pluralization travels with the catalogues, but app code imports it from the root. */
 export { plural, pluralCategory, type PluralForms } from './i18n/index.ts'

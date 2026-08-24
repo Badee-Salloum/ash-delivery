@@ -356,7 +356,7 @@ export const LEGACY_INTEGRITY_CHECKS = Object.freeze([
           FROM float_tranches ft
          GROUP BY ft.shift_id
       ), entry_shapes AS (
-        SELECT je.id, je.shift_id, je.event_type::text AS event_type,
+        SELECT je.id, je.shift_id, je.event_type::text AS event_type, je.occurrence_key,
                COALESCE(sum(jl.amount_minor::numeric) FILTER (
                  WHERE jl.side = 'D' AND f.type::text = 'driver_cash'
                    AND f.owner_id = s.driver_id
@@ -365,6 +365,13 @@ export const LEGACY_INTEGRITY_CHECKS = Object.freeze([
                  WHERE jl.side = 'D' AND f.type::text = 'driver_wallet'
                    AND f.owner_id = s.driver_id
                ), 0) AS driver_wallet_debit,
+               COALESCE(sum(jl.amount_minor::numeric) FILTER (
+                 WHERE jl.side = 'C' AND f.type::text = 'driver_wallet'
+                   AND f.owner_id = s.driver_id
+               ), 0) AS driver_wallet_credit,
+               COALESCE(sum(jl.amount_minor::numeric) FILTER (
+                 WHERE jl.side = 'D' AND f.type::text = 'office_wallet'
+               ), 0) AS office_wallet_debit,
                COALESCE(bool_or(jl.side = 'C' AND f.type::text = 'office_cash'), false) AS office_cash_credit,
                COALESCE(bool_or(jl.side = 'C' AND f.type::text = 'driver_receivable_cash'), false) AS receivable_credit,
                COALESCE(bool_or(jl.side = 'C' AND f.type::text = 'office_wallet'), false) AS office_wallet_credit,
@@ -373,8 +380,12 @@ export const LEGACY_INTEGRITY_CHECKS = Object.freeze([
           JOIN eligible_shifts s ON s.id = je.shift_id
           LEFT JOIN journal_lines jl ON jl.entry_id = je.id
           LEFT JOIN funds f ON f.id = jl.fund_id
-         WHERE je.shift_id IS NOT NULL AND je.event_type IN ('float_out', 'wallet_topup')
-         GROUP BY je.id, je.shift_id, je.event_type, s.driver_id
+         WHERE je.shift_id IS NOT NULL AND (
+               je.event_type IN ('float_out', 'wallet_topup')
+               OR (je.event_type = 'correction'
+                   AND je.occurrence_key LIKE 'wallet-topup-adjustment:%')
+         )
+         GROUP BY je.id, je.shift_id, je.event_type, je.occurrence_key, s.driver_id
       ), journal_totals AS (
         SELECT es.shift_id,
                COALESCE(sum(es.driver_cash_debit) FILTER (
@@ -385,11 +396,23 @@ export const LEGACY_INTEGRITY_CHECKS = Object.freeze([
                ), 0) AS carried,
                COALESCE(sum(es.driver_wallet_debit) FILTER (
                  WHERE es.event_type = 'wallet_topup' AND es.office_wallet_credit
+               ), 0) - COALESCE(sum(es.driver_wallet_credit) FILTER (
+                 WHERE es.event_type = 'correction'
+                   AND es.occurrence_key LIKE 'wallet-topup-adjustment:%'
+                   AND es.office_wallet_debit > 0
+                   AND es.driver_wallet_credit = es.office_wallet_debit
+                   AND es.line_count = 2
                ), 0) AS wallet_topup,
                count(*) FILTER (
                  WHERE (es.event_type = 'float_out'
                         AND es.office_cash_credit = es.receivable_credit)
                     OR (es.event_type = 'wallet_topup' AND NOT es.office_wallet_credit)
+                    OR (es.event_type = 'correction' AND NOT (
+                         es.occurrence_key LIKE 'wallet-topup-adjustment:%'
+                         AND es.office_wallet_debit > 0
+                         AND es.driver_wallet_credit = es.office_wallet_debit
+                         AND es.line_count = 2
+                       ))
                     OR es.line_count <> 2
                ) AS malformed_entries
           FROM entry_shapes es
@@ -1102,7 +1125,7 @@ const RECEIVABLE_V2_CHECKS = Object.freeze({
           FROM float_tranches ft
          GROUP BY ft.shift_id
       ), entry_shapes AS (
-        SELECT je.id, je.shift_id, je.event_type::text AS event_type,
+        SELECT je.id, je.shift_id, je.event_type::text AS event_type, je.occurrence_key,
                s.open_approved_at >= rollout.applied_at AS uses_shift_funding,
                COALESCE(sum(jl.amount_minor::numeric) FILTER (
                  WHERE jl.side = 'D' AND f.type::text = 'driver_cash'
@@ -1112,6 +1135,13 @@ const RECEIVABLE_V2_CHECKS = Object.freeze({
                  WHERE jl.side = 'D' AND f.type::text = 'driver_wallet'
                    AND f.owner_id = s.driver_id
                ), 0) AS driver_wallet_debit,
+               COALESCE(sum(jl.amount_minor::numeric) FILTER (
+                 WHERE jl.side = 'C' AND f.type::text = 'driver_wallet'
+                   AND f.owner_id = s.driver_id
+               ), 0) AS driver_wallet_credit,
+               COALESCE(sum(jl.amount_minor::numeric) FILTER (
+                 WHERE jl.side = 'D' AND f.type::text = 'office_wallet'
+               ), 0) AS office_wallet_debit,
                COALESCE(sum(jl.amount_minor::numeric) FILTER (
                  WHERE jl.side = 'C' AND f.type::text = 'office_cash'
                ), 0) AS office_cash_credit,
@@ -1136,8 +1166,13 @@ const RECEIVABLE_V2_CHECKS = Object.freeze({
           CROSS JOIN receivable_rollout rollout
           LEFT JOIN journal_lines jl ON jl.entry_id = je.id
           LEFT JOIN funds f ON f.id = jl.fund_id
-         WHERE je.shift_id IS NOT NULL AND je.event_type IN ('float_out', 'wallet_topup')
-         GROUP BY je.id, je.shift_id, je.event_type, s.open_approved_at, rollout.applied_at
+         WHERE je.shift_id IS NOT NULL AND (
+               je.event_type IN ('float_out', 'wallet_topup')
+               OR (je.event_type = 'correction'
+                   AND je.occurrence_key LIKE 'wallet-topup-adjustment:%')
+         )
+         GROUP BY je.id, je.shift_id, je.event_type, je.occurrence_key,
+                  s.open_approved_at, rollout.applied_at
       ), classified AS (
         SELECT es.*,
                es.event_type = 'float_out'
@@ -1182,16 +1217,32 @@ const RECEIVABLE_V2_CHECKS = Object.freeze({
                  AND es.office_wallet_credit = 0
                  AND es.legacy_receivable_cash_credit = 0
                  AND es.funding_cash_credit = 0
-                 AND es.line_count = 2 AS is_wallet_carry
+                 AND es.line_count = 2 AS is_wallet_carry,
+               es.event_type = 'correction'
+                 AND es.occurrence_key LIKE 'wallet-topup-adjustment:%'
+                 AND es.office_wallet_debit > 0
+                 AND es.driver_wallet_credit = es.office_wallet_debit
+                 AND es.driver_cash_debit = 0
+                 AND es.driver_wallet_debit = 0
+                 AND es.office_cash_credit = 0
+                 AND es.office_wallet_credit = 0
+                 AND es.legacy_receivable_cash_credit = 0
+                 AND es.funding_cash_credit = 0
+                 AND es.funding_wallet_credit = 0
+                 AND es.line_count = 2 AS is_wallet_topup_adjustment
           FROM entry_shapes es
       ), journal_totals AS (
         SELECT c.shift_id,
                COALESCE(sum(c.driver_cash_debit) FILTER (WHERE c.is_cash_float), 0) AS cash_float,
                COALESCE(sum(c.driver_cash_debit) FILTER (WHERE c.is_cash_carry), 0) AS carried_cash,
-               COALESCE(sum(c.driver_wallet_debit) FILTER (WHERE c.is_wallet_topup), 0) AS wallet_topup,
+               COALESCE(sum(c.driver_wallet_debit) FILTER (WHERE c.is_wallet_topup), 0)
+                 - COALESCE(sum(c.driver_wallet_credit) FILTER (
+                     WHERE c.is_wallet_topup_adjustment
+                   ), 0) AS wallet_topup,
                COALESCE(sum(c.driver_wallet_debit) FILTER (WHERE c.is_wallet_carry), 0) AS carried_wallet,
                count(*) FILTER (WHERE NOT (
                  c.is_cash_float OR c.is_cash_carry OR c.is_wallet_topup OR c.is_wallet_carry
+                   OR c.is_wallet_topup_adjustment
                )) AS malformed_entries
           FROM classified c
          GROUP BY c.shift_id

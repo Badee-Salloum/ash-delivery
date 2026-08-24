@@ -5,6 +5,7 @@ import {
   type DraftOrder,
   allProblems,
   closeOperationsSummary,
+  clientUuid,
   feeSourceOf,
   frequentFees,
   groupThousands,
@@ -88,7 +89,7 @@ export function OperationsList({
   const addRow = (): void => {
     // The key is machinery, generated here and never shown: `provider_order_no` is globally unique,
     // so it cannot be left empty and must not be anything two rows could ever arrive at.
-    const localId = crypto.randomUUID()
+    const localId = clientUuid()
     onOrders([
       ...orders,
       { localId, providerOrderNo: newOrderKey(localId), payMode: 'cash', feeText: defaultFee, included: true },

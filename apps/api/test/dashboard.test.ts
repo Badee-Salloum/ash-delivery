@@ -530,6 +530,37 @@ describe('the owner’s treasury sheet (I-1, decision 10)', () => {
     expect(res.statusCode, res.body).toBe(201)
   }
 
+  async function openFundedShift(): Promise<string> {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const created = await post(driver, '/shifts', {
+      driverId: DRIVER_ID,
+      vehicleId: VEHICLE_ID,
+      shiftNo: 1,
+    })
+    expect(created.statusCode, created.body).toBe(201)
+    const shiftId = created.json().id as string
+    await h.uploadPhoto(driver, shiftId, 'start', 'odometer')
+    const submitted = await h.app.inject({
+      method: 'PUT',
+      url: `/shifts/${shiftId}/start-package`,
+      headers: { cookie: h.cookie(driver) },
+      payload: { odometerKm: 1, batteryPercent: 95 },
+    })
+    expect(submitted.statusCode, submitted.body).toBe(200)
+    const review = await get(manager, `/shifts/${shiftId}/review`)
+    expect(review.statusCode, review.body).toBe(200)
+    const funding = review.json().shiftFunding as { cash: string; wallet: string }
+    const opened = await post(manager, `/shifts/${shiftId}/approve-open`, {
+      floatTranches: [sypStr(100_000)],
+      topupTranches: [sypStr(50_000)],
+      carriedTranches: funding.cash === sypStr(0) ? [] : [funding.cash],
+      carriedWalletTranches: funding.wallet === sypStr(0) ? [] : [funding.wallet],
+    })
+    expect(opened.statusCode, opened.body).toBe(200)
+    return shiftId
+  }
+
   it('reports رأس المال المدوّر as both boxes PLUS everything out on ذمم', async () => {
     const manager = await h.loginAs('manager')
     await seedFund(manager, 'office_cash', sypStr(3_600_000))
@@ -545,10 +576,119 @@ describe('the owner’s treasury sheet (I-1, decision 10)', () => {
     expect(c.officeCash).toBe(sypStr(3_600_000))
     expect(c.receivablesCash).toBe(sypStr(400_000))
     expect(c.receivablesWallet).toBe(sypStr(30_000))
+    expect(c.officePosition).toBe(sypStr(5_000_000))
+    expect(c.activeCustodyCash).toBe(sypStr(0))
+    expect(c.activeCustodyWallet).toBe(sypStr(0))
+    expect(c.activeCustodyTotal).toBe(sypStr(0))
+    expect(c.activeShiftCount).toBe(0)
+    expect(c.workingCapitalTotal).toBe(sypStr(5_000_000))
     // 3,600,000 + 400,000 + 970,000 + 30,000 — his 4,000,000 and 1,000,000, side by side.
     expect(c.total).toBe(sypStr(5_000_000))
     expect(c.target).toBe(sypStr(5_000_000))
+    expect(c.workingCapitalDelta).toBe(sypStr(0))
     expect(c.delta).toBe(sypStr(0))
+    expect(c.restorationDelta).toBe(sypStr(0))
+  })
+
+  it('keeps approved shift custody in working capital after it leaves the office boxes', async () => {
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(4_000_000))
+    await seedFund(manager, 'office_wallet', sypStr(1_000_000))
+    await openFundedShift()
+
+    const res = await get(await scopedGm(), '/dashboard/treasury')
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json().capital).toMatchObject({
+      officeCash: sypStr(3_900_000),
+      officeWallet: sypStr(950_000),
+      receivablesCash: sypStr(0),
+      receivablesWallet: sypStr(0),
+      officePosition: sypStr(4_850_000),
+      activeCustodyCash: sypStr(100_000),
+      activeCustodyWallet: sypStr(50_000),
+      activeCustodyTotal: sypStr(150_000),
+      activeShiftCount: 1,
+      workingCapitalTotal: sypStr(5_000_000),
+      total: sypStr(5_000_000),
+      target: sypStr(5_000_000),
+      workingCapitalDelta: sypStr(0),
+      delta: sypStr(0),
+      restorationDelta: sypStr(-150_000),
+    })
+  })
+
+  it('moves carried shift funding from receivables to active custody without changing capital', async () => {
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(3_990_000))
+    await seedFund(manager, 'office_wallet', sypStr(997_000))
+    await seedFund(manager, `driver_shift_funding_cash:${DRIVER_ID}`, sypStr(10_000))
+    await seedFund(manager, `driver_shift_funding_wallet:${DRIVER_ID}`, sypStr(3_000))
+
+    const before = (await get(await scopedGm(), '/dashboard/treasury')).json().capital
+    expect(before.officePosition).toBe(sypStr(5_000_000))
+    expect(before.activeCustodyTotal).toBe(sypStr(0))
+    expect(before.total).toBe(sypStr(5_000_000))
+
+    await openFundedShift()
+    const after = (await get(await scopedGm(), '/dashboard/treasury')).json().capital
+    expect(after).toMatchObject({
+      officeCash: sypStr(3_890_000),
+      officeWallet: sypStr(947_000),
+      receivablesCash: sypStr(0),
+      receivablesWallet: sypStr(0),
+      officePosition: sypStr(4_837_000),
+      activeCustodyCash: sypStr(110_000),
+      activeCustodyWallet: sypStr(53_000),
+      activeCustodyTotal: sypStr(163_000),
+      workingCapitalTotal: sypStr(5_000_000),
+      total: sypStr(5_000_000),
+      delta: sypStr(0),
+    })
+  })
+
+  it('counts review and suspended custody only when the immutable open marker exists', async () => {
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(4_000_000))
+    await seedFund(manager, 'office_wallet', sypStr(1_000_000))
+    const shiftId = await openFundedShift()
+    const gm = await scopedGm()
+    const stored = h.deps.shifts.rows.get(shiftId)!
+
+    for (const state of ['pending_review', 'suspended'] as const) {
+      h.deps.shifts.rows.set(shiftId, { ...stored, state })
+      const capital = (await get(gm, '/dashboard/treasury')).json().capital
+      expect(capital.activeShiftCount).toBe(1)
+      expect(capital.activeCustodyTotal).toBe(sypStr(150_000))
+      expect(capital.total).toBe(sypStr(5_000_000))
+    }
+
+    h.deps.shifts.rows.set(shiftId, { ...stored, state: 'suspended', openApprovedAt: null })
+    const withoutOpenMarker = (await get(gm, '/dashboard/treasury')).json().capital
+    expect(withoutOpenMarker.activeShiftCount).toBe(0)
+    expect(withoutOpenMarker.activeCustodyTotal).toBe(sypStr(0))
+    expect(withoutOpenMarker.total).toBe(sypStr(4_850_000))
+    expect(withoutOpenMarker.delta).toBe(sypStr(-150_000))
+  })
+
+  it('drops cancelled custody after the void restores both office boxes', async () => {
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(4_000_000))
+    await seedFund(manager, 'office_wallet', sypStr(1_000_000))
+    const shiftId = await openFundedShift()
+
+    const voided = await post(manager, `/shifts/${shiftId}/void`, { reason: 'cancel before work' })
+    expect(voided.statusCode, voided.body).toBe(200)
+    const capital = (await get(await scopedGm(), '/dashboard/treasury')).json().capital
+    expect(capital).toMatchObject({
+      officePosition: sypStr(5_000_000),
+      activeCustodyCash: sypStr(0),
+      activeCustodyWallet: sypStr(0),
+      activeCustodyTotal: sypStr(0),
+      activeShiftCount: 0,
+      workingCapitalTotal: sypStr(5_000_000),
+      total: sypStr(5_000_000),
+      delta: sypStr(0),
+    })
   })
 
   it('sums «كييش» and «شحن من الصندوق» from the ledger event, not from a typed word', async () => {

@@ -3,12 +3,14 @@ import { useApp } from '../app-context.tsx'
 import {
   MAX_COMPLETED_SHIFT_RANGE_DAYS,
   classifyShiftHistory,
+  completedShiftFinancialTotals,
   completedShiftDates,
   defaultCompletedShiftRange,
+  type CompletedShiftFinancial,
   type CompletedShiftRangeError,
 } from '../completed-shifts.ts'
 import { explainError } from '../errors.ts'
-import { Badge, Button, Card, DateField, Money, Pending, Table } from '../ui.tsx'
+import { Badge, Button, Card, DateField, Money, Pending, Stat, Table } from '../ui.tsx'
 
 interface ShiftHistoryRow {
   id: string
@@ -20,6 +22,8 @@ interface ShiftHistoryRow {
   floatTotal: string
   topupTotal: string
   orderCount: number
+  /** Optional during the additive API/admin rollout; old API rows are treated as unavailable. */
+  financial?: CompletedShiftFinancial | null
 }
 
 interface DriverLite {
@@ -138,6 +142,7 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
   }
   const vehicleCode = (id: string): string => vehicles[id]?.code ?? id.slice(0, 8)
   const history = classifyShiftHistory(rows ?? [])
+  const financialTotals = completedShiftFinancialTotals(history.completed)
 
   const table = (items: ShiftHistoryRow[], showDetails: boolean): ReactNode => (
     <Table
@@ -149,6 +154,14 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
         t.completedShifts.orders,
         t.shift.cashFloat,
         t.shift.walletTopup,
+        ...(showDetails ? [
+          t.completedShifts.deliveryFees,
+          t.completedShifts.companyShare,
+          t.completedShifts.netDriverShare,
+          t.completedShifts.deductions,
+          t.completedShifts.variance,
+          t.completedShifts.officeReturn,
+        ] : []),
         t.completedShifts.status,
         ...(showDetails ? [t.completedShifts.action] : []),
       ]}
@@ -164,6 +177,35 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
           <td className="num px-3 py-2">{shift.orderCount}</td>
           <td className="px-3 py-2"><Money value={shift.floatTotal} /></td>
           <td className="px-3 py-2"><Money value={shift.topupTotal} /></td>
+          {showDetails ? (
+            shift.financial ? (
+              <>
+                <td className="px-3 py-2"><Money value={shift.financial.deliveryFees} /></td>
+                <td className="px-3 py-2"><Money value={shift.financial.companyShare} /></td>
+                <td className="px-3 py-2"><Money value={shift.financial.netDriverShare} /></td>
+                <td className="px-3 py-2"><Money value={shift.financial.deductions} /></td>
+                <td className="px-3 py-2">
+                  <Money
+                    value={shift.financial.variance}
+                    className={
+                      shift.financial.varianceDirection === 'shortage'
+                        ? 'text-red-700'
+                        : shift.financial.varianceDirection === 'surplus'
+                          ? 'text-emerald-700'
+                          : ''
+                    }
+                  />
+                </td>
+                <td className="px-3 py-2"><Money value={shift.financial.officeReturn} /></td>
+              </>
+            ) : (
+              <>
+                {Array.from({ length: 6 }, (_, index) => (
+                  <td key={index} className="px-3 py-2 text-center text-slate-400">—</td>
+                ))}
+              </>
+            )
+          ) : null}
           <td className="px-3 py-2">
             <Badge tone={shift.state === 'week_locked' ? 'slate' : shift.state === 'cancelled' ? 'red' : 'green'}>
               {t.shift.states[shift.state as keyof typeof t.shift.states] ?? shift.state}
@@ -208,6 +250,21 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
         />
       ) : (
         <>
+          <Card title={t.completedShifts.financialSummary}>
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
+              <Stat label={t.completedShifts.deliveryFees} value={<Money value={financialTotals.deliveryFees} />} />
+              <Stat label={t.completedShifts.companyShare} value={<Money value={financialTotals.companyShare} />} />
+              <Stat label={t.completedShifts.netDriverShare} value={<Money value={financialTotals.netDriverShare} />} />
+              <Stat label={t.completedShifts.deductions} value={<Money value={financialTotals.deductions} />} />
+              <Stat label={t.completedShifts.variance} value={<Money value={financialTotals.variance} />} />
+              <Stat label={t.completedShifts.officeReturn} value={<Money value={financialTotals.officeReturn} />} />
+            </div>
+            {financialTotals.missingCount > 0 ? (
+              <p className="mt-3 text-xs font-medium text-amber-700">
+                {t.completedShifts.financialUnavailable.replace('{n}', String(financialTotals.missingCount))}
+              </p>
+            ) : null}
+          </Card>
           <Card title={t.completedShifts.completedTitle}>
             {table(history.completed, true)}
           </Card>

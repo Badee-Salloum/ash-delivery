@@ -1416,6 +1416,202 @@ async function addTrancheLocked(
   return { shift: updated, replayed: false }
 }
 
+// ── Correct an overstated live wallet top-up ───────────────────────────────────────────────
+
+export interface WalletTopupAdjustmentResult {
+  shift: ShiftRecord
+  from: Minor
+  to: Minor
+  reduction: Minor
+  currentTotal: Minor
+  correctionEntryId: number
+  replayed: boolean
+}
+
+/**
+ * Return part of an office-funded wallet top-up while the shift is still financially open.
+ *
+ * This cannot use the generic journal reversal route: reversing money without changing the shift's
+ * tranche projection would make BR1 expect the old wallet total at close. The shift row and the
+ * visible correction therefore commit under the same shift lock and transaction.
+ */
+export async function adjustWalletTopup(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: {
+    expectedCurrentTotal: Minor
+    targetTotal: Minor
+    occurrenceKey: string
+    reason: string
+  },
+  requestId: string | null = null,
+): Promise<WalletTopupAdjustmentResult> {
+  return deps.closeUnitOfWork.run(
+    { shiftId, actorId: actor.userId, requestId },
+    async (transaction) =>
+      adjustWalletTopupLocked(withCloseTransaction(deps, transaction), actor, shiftId, input),
+  )
+}
+
+function reduceTranchesFromTail(tranches: readonly Minor[], targetTotal: Minor): Minor[] {
+  const next = [...tranches]
+  let remaining = sum(tranches) - targetTotal
+  for (let index = next.length - 1; index >= 0 && remaining > 0n; index -= 1) {
+    const amount = next[index]!
+    if (amount <= remaining) {
+      remaining -= amount
+      next.splice(index, 1)
+    } else {
+      next[index] = minor(amount - remaining)
+      remaining = 0n
+    }
+  }
+  if (remaining !== 0n) throw new Error('wallet top-up reduction exceeds recorded tranches')
+  return next
+}
+
+async function adjustWalletTopupLocked(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: {
+    expectedCurrentTotal: Minor
+    targetTotal: Minor
+    occurrenceKey: string
+    reason: string
+  },
+): Promise<WalletTopupAdjustmentResult> {
+  const shift = await mustFind(deps, shiftId)
+  const key = input.occurrenceKey.trim()
+  const reason = input.reason.trim()
+  if (!key) throw new ServiceError(422, 'wallet_topup_adjustment_key_required')
+  if (!/[^\p{White_Space}\p{Cf}]/u.test(reason)) {
+    throw new ServiceError(422, 'wallet_topup_adjustment_reason_required')
+  }
+  assertPersistableMinor('walletTopupAdjustment.expectedCurrentTotal', input.expectedCurrentTotal)
+  assertPersistableMinor('walletTopupAdjustment.targetTotal', input.targetTotal)
+  if (input.targetTotal > input.expectedCurrentTotal) {
+    throw new ServiceError(422, 'wallet_topup_increase_use_tranche')
+  }
+  if (input.targetTotal === input.expectedCurrentTotal) {
+    throw new ServiceError(422, 'wallet_topup_reduction_required')
+  }
+
+  const reduction = minor(input.expectedCurrentTotal - input.targetTotal)
+  const journalOccurrenceKey = `wallet-topup-adjustment:${key}`
+  const posting = reverse(
+    walletTopup(shift.driverId, reduction, journalOccurrenceKey),
+    journalOccurrenceKey,
+  )
+  assertPersistablePostings([posting])
+  // Persist the optimistic before/after values with the human reason. The ledger has no arbitrary
+  // metadata column, and this canonical prefix lets an idempotency retry distinguish 600→500 from
+  // 700→600 even though both reverse the same amount.
+  const auditReason =
+    `wallet-topup-adjustment:${input.expectedCurrentTotal.toString()}:${input.targetTotal.toString()}\n${reason}`
+
+  const existingEntry = (await deps.ledger.listByShift(shift.id)).find(
+    (entry) => entry.eventType === 'correction' && entry.occurrenceKey === journalOccurrenceKey,
+  )
+  if (existingEntry) {
+    if (!journalMatchesPosting(existingEntry, posting) || existingEntry.reason !== auditReason) {
+      throw new ServiceError(409, 'idempotency_key_conflict', { occurrenceKey: key, kind: 'wallet_topup_adjustment' })
+    }
+    return {
+      shift,
+      from: input.expectedCurrentTotal,
+      to: input.targetTotal,
+      reduction,
+      currentTotal: sum(shift.topupTranches),
+      correctionEntryId: existingEntry.id,
+      replayed: true,
+    }
+  }
+
+  if (
+    shift.openApprovedAt === null ||
+    (shift.state !== 'open' && shift.state !== 'suspended' && shift.state !== 'pending_review')
+  ) {
+    throw new ServiceError(409, 'shift_not_open_for_wallet_topup_adjustment')
+  }
+
+  assertPositiveTranches('topup', shift.topupTranches)
+  const currentTotal = sum(shift.topupTranches)
+  if (currentTotal !== input.expectedCurrentTotal) {
+    throw new ServiceError(409, 'wallet_topup_total_changed', {
+      currentTotal: serializeMoney(currentTotal),
+    })
+  }
+
+  const driverWalletBalance = await deps.ledger.fundBalance(
+    shift.branchId,
+    `driver_wallet:${shift.driverId}`,
+  )
+  if (driverWalletBalance < reduction) {
+    throw new ServiceError(409, 'wallet_topup_reduction_exceeds_driver_balance', {
+      available: serializeMoney(driverWalletBalance),
+      requested: serializeMoney(reduction),
+    })
+  }
+
+  let updated: ShiftRecord = {
+    ...shift,
+    topupTranches: reduceTranchesFromTail(shift.topupTranches, input.targetTotal),
+  }
+  assertPersistableTrancheTotals(updated)
+  if (updated.state === 'pending_review') {
+    const br1 = await evaluateShift(deps, updated)
+    updated = {
+      ...updated,
+      equationDiff: br1.result.scalarDiff,
+      cashDiff: br1.result.cashDiff,
+      walletDiff: br1.result.walletDiff,
+      ordersHash: br1.ordersHash,
+    }
+  }
+
+  const fxDayId = await ensureFxDay(deps, shift.businessDate)
+  const written = await deps.ledger.post(shift.branchId, [posting], {
+    shiftId: shift.id,
+    businessDate: shift.businessDate,
+    postingDate: todayFor(deps),
+    weekStartDate: shift.weekStartDate,
+    fxDayId,
+    createdBy: actor.userId,
+    reason: auditReason,
+  })
+  const correction = written[0]
+  if (!correction) {
+    const racedEntry = (await deps.ledger.listByShift(shift.id)).find(
+      (entry) => entry.eventType === 'correction' && entry.occurrenceKey === journalOccurrenceKey,
+    )
+    if (racedEntry && journalMatchesPosting(racedEntry, posting) && racedEntry.reason === auditReason) {
+      return {
+        shift,
+        from: input.expectedCurrentTotal,
+        to: input.targetTotal,
+        reduction,
+        currentTotal: sum(shift.topupTranches),
+        correctionEntryId: racedEntry.id,
+        replayed: true,
+      }
+    }
+    throw new ServiceError(409, 'idempotency_key_conflict', { occurrenceKey: key, kind: 'wallet_topup_adjustment' })
+  }
+
+  await deps.shifts.update(updated, actor.userId)
+  return {
+    shift: updated,
+    from: input.expectedCurrentTotal,
+    to: input.targetTotal,
+    reduction,
+    currentTotal: sum(updated.topupTranches),
+    correctionEntryId: correction.id,
+    replayed: false,
+  }
+}
+
 // ── Mid-shift battery swap (SRS §L seam) ────────────────────────────────────────────────────
 
 /**

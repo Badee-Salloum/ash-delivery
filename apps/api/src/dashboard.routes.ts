@@ -295,41 +295,43 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     const fundIn = [...perDay.values()].reduce((a, d) => a + d.in, 0n)
     const fundOut = [...perDay.values()].reduce((a, d) => a + d.out, 0n)
 
-    // «راس المال المدور» is a POSITION, read as it stands now — not a flow over the range. It is
-    // what الترميم settles against: both boxes plus everything out on ذمم.
-    const officeCash = await deps.ledger.fundBalance(branchId, 'office_cash')
-    const officeWallet = await deps.ledger.fundBalance(branchId, 'office_wallet')
-    const [ordinaryReceivables, shiftFundingReceivables] = await Promise.all([
-      deps.ledger.balancesByPrefix(branchId, 'driver_receivable_'),
-      deps.ledger.balancesByPrefix(branchId, 'driver_shift_funding_'),
-    ])
-    const receivables = { ...ordinaryReceivables, ...shiftFundingReceivables }
-    for (const [fundCode, balance] of Object.entries(receivables)) {
-      if (balance < 0n) throw new ServiceError(500, 'receivable_balance_integrity_error', { fundCode })
+    // Working capital is a POSITION, read as it stands now rather than a flow over the range.
+    // Restoration still settles only the office boxes plus receivables; active custody is exposed
+    // separately because it remains company capital but cannot be swept while a shift is live.
+    const position = await deps.treasuryPosition.readCurrent(branchId)
+    if (position.negativeReceivableFundCode !== null) {
+      throw new ServiceError(500, 'receivable_balance_integrity_error', {
+        fundCode: position.negativeReceivableFundCode,
+      })
     }
-    const sumReceivables = (suffix: string): bigint =>
-      Object.entries(receivables)
-        .filter(([code]) =>
-          code.startsWith(`driver_receivable_${suffix}:`) ||
-          code.startsWith(`driver_shift_funding_${suffix}:`),
-        )
-        .reduce((acc, [, v]) => acc + v, 0n)
     const targets = await deps.capitalTargets.resolve(branchId, to)
     const targetTotal = (targets.office_cash ?? 0n) + (targets.office_wallet ?? 0n)
-    const capitalTotal = officeCash + officeWallet + sumReceivables('cash') + sumReceivables('wallet')
+    const officePosition =
+      position.officeCash + position.officeWallet + position.receivablesCash + position.receivablesWallet
+    const activeCustodyTotal = position.activeCustodyCash + position.activeCustodyWallet
+    const workingCapitalTotal = officePosition + activeCustodyTotal
 
     return {
       from,
       to,
       capital: {
-        officeCash: serializeMoney(officeCash),
-        officeWallet: serializeMoney(officeWallet),
-        receivablesCash: serializeMoney(minor(sumReceivables('cash'))),
-        receivablesWallet: serializeMoney(minor(sumReceivables('wallet'))),
-        total: serializeMoney(minor(capitalTotal)),
+        officeCash: serializeMoney(position.officeCash),
+        officeWallet: serializeMoney(position.officeWallet),
+        receivablesCash: serializeMoney(position.receivablesCash),
+        receivablesWallet: serializeMoney(position.receivablesWallet),
+        officePosition: serializeMoney(minor(officePosition)),
+        activeCustodyCash: serializeMoney(position.activeCustodyCash),
+        activeCustodyWallet: serializeMoney(position.activeCustodyWallet),
+        activeCustodyTotal: serializeMoney(minor(activeCustodyTotal)),
+        activeShiftCount: position.activeShiftCount,
+        workingCapitalTotal: serializeMoney(minor(workingCapitalTotal)),
+        total: serializeMoney(minor(workingCapitalTotal)),
         target: serializeMoney(minor(targetTotal)),
-        /** Positive means the branch is over its capital and tonight's ترميم will sweep. */
-        delta: serializeMoney(minor(capitalTotal - targetTotal)),
+        /** Existing consumers receive the full working-capital delta. */
+        workingCapitalDelta: serializeMoney(minor(workingCapitalTotal - targetTotal)),
+        delta: serializeMoney(minor(workingCapitalTotal - targetTotal)),
+        /** Only this office/receivables delta is actionable by tonight's restoration. */
+        restorationDelta: serializeMoney(minor(officePosition - targetTotal)),
       },
       companyProfit: serializeMoney(minor(profit)),
       companyFund: serializeMoney(await deps.ledger.fundBalance(branchId, 'company_box')),

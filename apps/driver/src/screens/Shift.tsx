@@ -22,6 +22,7 @@ import {
   br1DifferencePresentation,
   cashDeductionsAreValid,
   checkOdometer,
+  clientUuid,
   applyCloseDraftOperationsOverlay,
   closeDraftEditableFingerprint,
   closeDraftOperations,
@@ -1685,7 +1686,7 @@ function EndPackage({
       // A unique presentation id is the ownership token for this exact browser request. Reusing
       // the persisted read id let an aborted older request restore over a newer retry of the same
       // attachment token.
-      const pendingReadId = `pending-${attachment.attachmentToken}-${crypto.randomUUID()}`
+      const pendingReadId = `pending-${attachment.attachmentToken}-${clientUuid()}`
 
       /** Restore only the local marker installed below; keep the accepted image and canonical draft. */
       const restorePendingRead = (): void => {

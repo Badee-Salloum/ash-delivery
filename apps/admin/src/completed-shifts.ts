@@ -1,3 +1,5 @@
+import { formatMinor, parseMinor, sum } from '@ash/domain'
+
 /** A manager-facing shift is financially complete only after the close settlement was approved. */
 export const FINANCIALLY_COMPLETED_SHIFT_STATES = new Set(['approved', 'week_locked'])
 
@@ -14,6 +16,42 @@ export interface CompletedShiftHistoryRow {
   businessDate: string
   shiftNo: number
   state: string
+}
+
+/** Additive financial snapshot returned by GET /shifts for rows with an immutable settlement. */
+export interface CompletedShiftFinancial {
+  policyCode: string
+  deliveryFees: string
+  companyShare: string
+  yalagoShare: string
+  grossDriverShare: string
+  deductions: string
+  netDriverShare: string
+  expectedTotal: string
+  actualCash: string
+  actualWallet: string
+  actualTotal: string
+  variance: string
+  varianceDirection: 'surplus' | 'shortage' | 'balanced'
+  finalEmployeeCash: string
+  cashClaimToOffice: string
+  walletClaimToOffice: string
+  cashReceivableDeferred: string
+  walletReceivableDeferred: string
+  cashToOffice: string
+  walletToOffice: string
+  officeReturn: string
+}
+
+export interface CompletedShiftFinancialTotals {
+  availableCount: number
+  missingCount: number
+  deliveryFees: string
+  companyShare: string
+  netDriverShare: string
+  deductions: string
+  variance: string
+  officeReturn: string
 }
 
 export interface CompletedShiftRangeResult {
@@ -91,5 +129,28 @@ export function classifyShiftHistory<T extends CompletedShiftHistoryRow>(rows: r
   return {
     completed: rows.filter((row) => FINANCIALLY_COMPLETED_SHIFT_STATES.has(row.state)).sort(newestFirst),
     cancelled: rows.filter((row) => row.state === 'cancelled').sort(newestFirst),
+  }
+}
+
+/**
+ * Sum the selected completed period without ever converting money to floating-point `Number`.
+ * Missing legacy snapshots stay visible via `missingCount` and do not invent zero-valued detail.
+ */
+export function completedShiftFinancialTotals<T extends { financial?: CompletedShiftFinancial | null }>(
+  rows: readonly T[],
+): CompletedShiftFinancialTotals {
+  const financial = rows.flatMap((row) => row.financial == null ? [] : [row.financial])
+  const total = (pick: (row: CompletedShiftFinancial) => string): string =>
+    formatMinor(sum(financial.map((row) => parseMinor(pick(row)))))
+
+  return {
+    availableCount: financial.length,
+    missingCount: rows.length - financial.length,
+    deliveryFees: total((row) => row.deliveryFees),
+    companyShare: total((row) => row.companyShare),
+    netDriverShare: total((row) => row.netDriverShare),
+    deductions: total((row) => row.deductions),
+    variance: total((row) => row.variance),
+    officeReturn: total((row) => row.officeReturn),
   }
 }

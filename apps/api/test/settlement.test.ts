@@ -1,5 +1,5 @@
 import type { LightMyRequestResponse } from 'fastify'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fundCodeOf } from '@ash/adapters/memory'
 import { minor } from '@ash/domain'
 import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
@@ -370,6 +370,47 @@ describe('fixed 40% settlement preview', () => {
 })
 
 describe('fixed 40% approval', () => {
+  it('lists the immutable close finances in one batched order and settlement read', async () => {
+    const { manager, shiftId, reviewHash } = await pendingShift({
+      deduction: 500,
+      manual: { fee: 3_000, driverShare: 1_200, companyShare: 1_800 },
+    })
+    const settlement = await preview(manager, shiftId)
+    const approved = await approve(manager, shiftId, reviewHash, settlement)
+    expect(approved.statusCode, approved.body).toBe(200)
+
+    const orderBatch = vi.spyOn(h.deps.orders, 'listByShiftIds')
+    const settlementBatch = vi.spyOn(h.deps.settlements, 'listByShiftIds')
+    const perShiftOrders = vi.spyOn(h.deps.orders, 'listByShift')
+    const listed = await get(manager, '/shifts?date=2026-07-21')
+    expect(listed.statusCode, listed.body).toBe(200)
+
+    const row = (listed.json().shifts as Array<{ id: string; financial: Record<string, string> | null }>)
+      .find((candidate) => candidate.id === shiftId)
+    expect(row?.financial).toMatchObject({
+      policyCode: 'fixed_40_cash_close_v2_receivable',
+      deliveryFees: '13000.00',
+      companyShare: '5800.00',
+      yalagoShare: '2000.00',
+      grossDriverShare: '5200.00',
+      deductions: '500.00',
+      netDriverShare: '4700.00',
+      expectedTotal: '25500.00',
+      actualCash: '22500.00',
+      actualWallet: '3000.00',
+      actualTotal: '25500.00',
+      variance: '0.00',
+      varianceDirection: 'balanced',
+      finalEmployeeCash: '4700.00',
+      cashToOffice: '17800.00',
+      walletToOffice: '3000.00',
+      officeReturn: '20800.00',
+    })
+    expect(orderBatch).toHaveBeenCalledTimes(1)
+    expect(settlementBatch).toHaveBeenCalledTimes(1)
+    expect(perShiftOrders).not.toHaveBeenCalled()
+  })
+
   it('gives old clients a named refusal until both actions and the immutable hash are confirmed', async () => {
     const { manager, shiftId, reviewHash } = await pendingShift()
     const oldClient = await post(manager, `/shifts/${shiftId}/approve-close`, {

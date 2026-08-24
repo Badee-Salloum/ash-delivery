@@ -53,6 +53,14 @@ interface TreasuryDigest {
     officeWallet: string
     receivablesCash: string
     receivablesWallet: string
+    officePosition: string
+    activeCustodyCash: string
+    activeCustodyWallet: string
+    activeCustodyTotal: string
+    activeShiftCount: number
+    workingCapitalTotal: string
+    workingCapitalDelta: string
+    restorationDelta: string
     total: string
     target: string
     delta: string
@@ -283,6 +291,20 @@ export function Dashboard(): ReactNode {
               <span className="text-slate-500">
                 {' + '}
                 {t.treasury.receivablesShort} <Money value={treasury.capital.receivablesWallet} />
+              </span>
+            </dd>
+            <dt className="text-slate-600">{t.dashboard.officePosition}</dt>
+            <dd className="text-end font-semibold sm:col-span-2">
+              <Money value={treasury.capital.officePosition} />
+            </dd>
+            <dt className="text-slate-600">
+              {t.dashboard.activeShiftCustody.replace('{n}', String(treasury.capital.activeShiftCount))}
+            </dt>
+            <dd className="text-end font-semibold text-sky-700 sm:col-span-2">
+              <Money value={treasury.capital.activeCustodyTotal} />
+              <span className="ms-2 text-xs font-normal text-slate-500">
+                ({t.treasury.cashBox}: <Money value={treasury.capital.activeCustodyCash} />
+                {' · '}{t.treasury.wallet}: <Money value={treasury.capital.activeCustodyWallet} />)
               </span>
             </dd>
             <dt className="text-slate-600">{t.treasury.companyFund}</dt>

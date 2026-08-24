@@ -530,11 +530,17 @@ export async function patchCloseDraft(
     openMinute: localMinuteKey(Date.parse(shift.openApprovedAt), branch.timezone),
     closeMinute: localMinuteKey(deps.clock.nowMs(), branch.timezone),
   })
+  const draftHash = closeDraftHash(data)
+  // Cached driver bundles used to keep sending an equivalent human overlay after the server
+  // canonicalised money text (`500` -> `500.00`). Advancing the global draft revision for that
+  // no-op lets the autosave loop continually invalidate an evidence upload. Keep PATCH
+  // idempotent: only a semantic data change owns a new revision.
+  if (draftHash === current.draftHash) return recordView(deps, current, true)
   const updated = await deps.closeDrafts.update({
     shiftId,
     expectedRevision: patch.expectedRevision,
     data,
-    draftHash: closeDraftHash(data),
+    draftHash,
     updatedAtMs: deps.clock.nowMs(),
     updatedBy: actor.userId,
   })
@@ -1195,24 +1201,37 @@ export async function syncCloseDraftEvidence(
   actor: Actor,
   shiftId: string,
   expectedRevision: number,
+  options: { rebaseConcurrentEdits?: boolean } = {},
 ): Promise<CloseDraftView> {
-  const current = await deps.closeDrafts.findByShift(shiftId)
-  if (!current || current.revision !== expectedRevision) {
-    throw new ServiceError(409, 'close_draft_revision_conflict', {
-      current: current ? await recordView(deps, current, true) : null,
+  let revision = expectedRevision
+  // Upload validation may spend seconds in OCR before its small attachment transaction begins.
+  // When requested by that path, merge the evidence generation over a scalar autosave that won
+  // either side of `beforeCommit`. The repository CAS still makes each attempt atomic; retrying
+  // never overwrites the human figures from the winning revision.
+  const attempts = options.rebaseConcurrentEdits ? 8 : 1
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const current = await deps.closeDrafts.findByShift(shiftId)
+    if (!current || (!options.rebaseConcurrentEdits && current.revision !== revision)) {
+      throw new ServiceError(409, 'close_draft_revision_conflict', {
+        current: current ? await recordView(deps, current, true) : null,
+      })
+    }
+    revision = current.revision
+    const data = invalidateMissingEvidence(current.data, await deps.media.listSlots(shiftId))
+    const draftHash = closeDraftHash(data)
+    if (draftHash === current.draftHash) return recordView(deps, current, true)
+    const updated = await deps.closeDrafts.update({
+      shiftId,
+      expectedRevision: revision,
+      data,
+      draftHash,
+      updatedAtMs: deps.clock.nowMs(),
+      updatedBy: actor.userId,
     })
+    if (updated) return recordView(deps, updated, true)
   }
-  const data = invalidateMissingEvidence(current.data, await deps.media.listSlots(shiftId))
-  const draftHash = closeDraftHash(data)
-  if (draftHash === current.draftHash) return recordView(deps, current, true)
-  const updated = await deps.closeDrafts.update({
-    shiftId,
-    expectedRevision,
-    data,
-    draftHash,
-    updatedAtMs: deps.clock.nowMs(),
-    updatedBy: actor.userId,
+  const latest = await deps.closeDrafts.findByShift(shiftId)
+  throw new ServiceError(409, 'close_draft_revision_conflict', {
+    current: latest ? await recordView(deps, latest, true) : null,
   })
-  if (!updated) throw new ServiceError(409, 'close_draft_revision_conflict')
-  return recordView(deps, updated, true)
 }

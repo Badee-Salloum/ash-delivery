@@ -706,6 +706,20 @@ export const addTrancheRequest = z.object({
 })
 
 /**
+ * Correct an overstated office-funded wallet top-up on a financially open shift.
+ *
+ * Both totals are supplied so a manager cannot overwrite a tranche added after the screen was
+ * loaded. Increases remain ordinary `/tranche` disbursements; this command only returns a positive
+ * difference from the driver's wallet to the office wallet as a visible correction.
+ */
+export const adjustWalletTopupRequest = z.object({
+  expectedCurrentTotal: nonnegativeMoneySchema,
+  targetTotal: nonnegativeMoneySchema,
+  occurrenceKey: z.string().trim().min(1).max(64),
+  reason: nonblankReasonSchema,
+})
+
+/**
  * One live GPS fix from the driver's phone while a shift is open (SRS K). lat/lng/accuracy are plain
  * numbers — coordinates, not money — so `z.number()` is correct here.
  */

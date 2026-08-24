@@ -9,6 +9,8 @@ import {
 
 afterEach(() => vi.unstubAllGlobals())
 
+const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1])
+
 const failedRead = (reason: NonNullable<CloudOcrResponse['reason']>): CloudOcrResponse => ({
   ok: false,
   cached: false,
@@ -25,7 +27,7 @@ describe('cloud OCR transport', () => {
     const putBytes = vi.fn().mockResolvedValue(response)
     const api = { putBytes } as unknown as ApiClient
 
-    await expect(readInCloud(api, 'shift-1', 'odometer', new Blob([new Uint8Array([1])]))).resolves.toBe(response)
+    await expect(readInCloud(api, 'shift-1', 'odometer', new Blob([JPEG]))).resolves.toBe(response)
     expect(putBytes).toHaveBeenCalledWith(
       '/shifts/shift-1/ocr/odometer',
       expect.any(Uint8Array),
@@ -41,7 +43,7 @@ describe('cloud OCR transport', () => {
     const api = { putBytes } as unknown as ApiClient
 
     await expect(
-      readInCloud(api, 'shift-1', 'orders', new Blob([new Uint8Array([1])]), true),
+      readInCloud(api, 'shift-1', 'orders', new Blob([JPEG]), true),
     ).resolves.toBe(response)
     expect(putBytes).toHaveBeenCalledWith(
       '/shifts/shift-1/ocr/orders',
@@ -54,7 +56,7 @@ describe('cloud OCR transport', () => {
 
   it('uses null only when no structured response arrives', async () => {
     const api = { putBytes: vi.fn().mockRejectedValue(new Error('offline')) } as unknown as ApiClient
-    await expect(readInCloud(api, 'shift-1', 'odometer', new Blob([new Uint8Array([1])]))).resolves.toBeNull()
+    await expect(readInCloud(api, 'shift-1', 'odometer', new Blob([JPEG]))).resolves.toBeNull()
   })
 })
 

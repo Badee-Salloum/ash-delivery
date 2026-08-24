@@ -1,10 +1,11 @@
 import cookie from '@fastify/cookie'
 import Fastify, { type FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import type { Deps } from '@ash/contracts'
+import type { Deps, ShiftOrderRecord, ShiftSettlementRecord } from '@ash/contracts'
 import {
   addOrderRequest,
   addTrancheRequest,
+  adjustWalletTopupRequest,
   gpsPingRequest,
   approveCloseRequest,
   forceCloseRequest,
@@ -31,7 +32,19 @@ import {
   restoreCloseDraftAttachmentRequest,
   shiftFundingPreviewSchema,
 } from '@ash/contracts'
-import { add, addDays, bmsSlot, checkWeekClose, dayOfWeek, minor, resolveFxDay, sum, weekClosedOn, weekStartFor } from '@ash/domain'
+import {
+  add,
+  addDays,
+  bmsSlot,
+  checkWeekClose,
+  dayOfWeek,
+  minor,
+  resolveFxDay,
+  splitFixedDriverShare,
+  sum,
+  weekClosedOn,
+  weekStartFor,
+} from '@ash/domain'
 import {
   SESSION_COOKIE,
   SESSION_IDLE_MS,
@@ -73,6 +86,7 @@ import {
   addOrder,
   addManualOrder,
   addTranche,
+  adjustWalletTopup,
   approveClose,
   approveOpen,
   cancelShift,
@@ -105,6 +119,50 @@ export interface AppOptions {
   splitGate?: 'advisory' | 'strict'
   /** Runaway guard on paid cloud OCR. Defaults here so a test never has to think about spend. */
   maxOcrReadsPerShift?: number
+}
+
+/**
+ * Historical financial detail derived from the immutable close snapshot plus the exact included
+ * order split that produced it. Manual jobs carry their agreed split on the order; Yallago jobs
+ * retain the fixed 40/40/20 calculation. Every amount stays in minor units until serialization.
+ */
+function completedShiftFinancial(
+  settlement: ShiftSettlementRecord,
+  rows: readonly ShiftOrderRecord[],
+): Record<string, string> {
+  const counted = includedOrders(rows)
+  const yallago = splitFixedDriverShare(
+    counted.filter((row) => row.kind !== 'manual').map((row) => row.fee),
+  )
+  const manualCompanyShare = sum(
+    counted
+      .filter((row) => row.kind === 'manual')
+      .map((row) => row.companyShare ?? minor(0n)),
+  )
+
+  return {
+    policyCode: settlement.policyCode,
+    deliveryFees: serializeMoney(sum(counted.map((row) => row.fee))),
+    companyShare: serializeMoney(add(yallago.companyShare, manualCompanyShare)),
+    yalagoShare: serializeMoney(yallago.yalagoShare),
+    grossDriverShare: serializeMoney(settlement.grossDriverShare),
+    deductions: serializeMoney(settlement.cashDeductionTotal),
+    netDriverShare: serializeMoney(settlement.baseDriverShare),
+    expectedTotal: serializeMoney(settlement.expectedTotal),
+    actualCash: serializeMoney(settlement.actualCash),
+    actualWallet: serializeMoney(settlement.actualWallet),
+    actualTotal: serializeMoney(settlement.actualTotal),
+    variance: serializeMoney(settlement.variance),
+    varianceDirection: settlement.varianceDirection,
+    finalEmployeeCash: serializeMoney(settlement.finalEmployeeCash),
+    cashClaimToOffice: serializeMoney(settlement.cashClaimToOffice),
+    walletClaimToOffice: serializeMoney(settlement.walletClaimToOffice),
+    cashReceivableDeferred: serializeMoney(settlement.cashReceivableDeferred),
+    walletReceivableDeferred: serializeMoney(settlement.walletReceivableDeferred),
+    cashToOffice: serializeMoney(settlement.cashToOffice),
+    walletToOffice: serializeMoney(settlement.walletToOffice),
+    officeReturn: serializeMoney(add(settlement.cashToOffice, settlement.walletToOffice)),
+  }
 }
 
 /**
@@ -470,10 +528,28 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           : live === '1'
             ? await deps.shifts.listLiveForBranch(target)
             : await deps.shifts.listByBranchAndDate(target, businessDate)
+      // Reporting is a batch read: one order query and one settlement query for the whole page.
+      // Apart from avoiding a per-shift round trip, reading both sets before shaping rows means the
+      // order count and the financial split always come from the same in-memory order snapshot.
+      const shiftIds = shifts.map((shift) => shift.id)
+      const [orderRows, settlementRows] = await Promise.all([
+        deps.orders.listByShiftIds(shiftIds),
+        deps.settlements.listByShiftIds(shiftIds),
+      ])
+      const ordersByShift = new Map<string, ShiftOrderRecord[]>()
+      for (const order of orderRows) {
+        const grouped = ordersByShift.get(order.shiftId) ?? []
+        grouped.push(order)
+        ordersByShift.set(order.shiftId, grouped)
+      }
+      const settlementsByShift = new Map(settlementRows.map((row) => [row.shiftId, row]))
       return {
         businessDate,
-        shifts: await Promise.all(
-          shifts.map(async (s) => ({
+        shifts: shifts.map((s) => {
+          const shiftOrders = ordersByShift.get(s.id) ?? []
+          const countedOrders = includedOrders(shiftOrders)
+          const settlement = settlementsByShift.get(s.id)
+          return {
             id: s.id,
             driverId: s.driverId,
             vehicleId: s.vehicleId,
@@ -489,14 +565,20 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
             // How much work COUNTS on the shift. An unchecked operation is stored and visible but
             // is out of the money, so counting it here would tell the manager a shift is worth
             // more than the approval will post.
-            orderCount: includedOrders(await deps.orders.listByShift(s.id)).length,
+            orderCount: countedOrders.length,
+            // Additive and nullable for old/cancelled rows that have no immutable close snapshot.
+            // Existing clients ignore it; the completed-shifts view uses it without another API
+            // call per row.
+            financial: settlement
+              ? completedShiftFinancial(settlement, shiftOrders)
+              : null,
             // WHICH SHIFT TO OPEN FIRST. The queue showed a driver, a vehicle and a count, so a
             // manager could not tell a clean shift from a broken one without opening every single
             // one — and approving from the list is deliberately not offered. The difference is
             // already stored on the row by `evaluateShift`; serving it costs nothing.
             equationDiff: s.equationDiff === null ? null : serializeMoney(s.equationDiff),
-          })),
-        ),
+          }
+        }),
       }
     },
   )
@@ -1042,15 +1124,20 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           (slot) => slot.package === 'start' && slot.slot === params.slot,
         )?.attachmentToken ?? null
       }
-      let expectedRevision: number | null = null
+      let clientExpectedRevision: number | null = null
+      // Filled while the close UOW owns the shift lock. A photo is conditional on its slot
+      // attachment token; unrelated scalar autosaves may legitimately advance the draft meanwhile.
+      let commitRevision: number | null = null
       let draftBefore: Awaited<ReturnType<typeof getCloseDraft>> | null = null
       if (params.package === 'end') {
         if (typeof revisionHeader !== 'string' || !/^\d+$/.test(revisionHeader)) {
           return reply.code(428).send({ error: 'driver_update_required' })
         }
-        expectedRevision = Number(revisionHeader)
+        clientExpectedRevision = Number(revisionHeader)
         draftBefore = await getCloseDraft(deps, req.actor!, params.id)
-        if (draftBefore.revision !== expectedRevision) {
+        // A future generation can never have been observed by this client. A merely older one is
+        // safe to rebase because `expectedAttachmentToken` is the slot-scoped compare-and-swap.
+        if (draftBefore.revision < clientExpectedRevision) {
           throw new ServiceError(409, 'close_draft_revision_conflict', { current: draftBefore })
         }
       }
@@ -1081,7 +1168,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           staleAcknowledged: acknowledgedHeader === 'true',
           replaceConfirmed: req.headers['x-replace-confirmed'] === 'true',
           expectedAttachmentToken,
-          ...(expectedRevision === null ? {} : {
+          ...(clientExpectedRevision === null ? {} : {
             runCommit: <T>(work: (transactionDeps: Deps) => Promise<T>): Promise<T> =>
               deps.closeUnitOfWork.run(
                 { shiftId: params.id, actorId: req.actor!.userId, requestId: req.requestId },
@@ -1089,14 +1176,26 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
               ),
             beforeCommit: async (transactionDeps: Deps) => {
               const current = await transactionDeps.closeDrafts.findByShift(params.id)
-              if (!current || current.revision !== expectedRevision) {
+              if (!current || current.revision < clientExpectedRevision!) {
                 throw new ServiceError(409, 'close_draft_revision_conflict', {
                   current: current ? await getCloseDraft(transactionDeps, req.actor!, params.id) : null,
                 })
               }
+              // Do not make a global draft revision the CAS for one evidence slot. Holding the UOW
+              // lock plus the repository's attachment-token CAS lets a concurrent autosave and
+              // this upload merge, while two writes to this same slot still cannot both win.
+              commitRevision = current.revision
             },
-            afterAttach: (transactionDeps: Deps) =>
-              syncCloseDraftEvidence(transactionDeps, req.actor!, params.id, expectedRevision),
+            afterAttach: (transactionDeps: Deps) => {
+              if (commitRevision === null) throw new Error('close draft commit revision was not captured')
+              return syncCloseDraftEvidence(
+                transactionDeps,
+                req.actor!,
+                params.id,
+                commitRevision,
+                { rebaseConcurrentEdits: true },
+              )
+            },
           }),
           ...(preflightField === null ? {} : {
             beforeAttach: async () => {
@@ -2095,6 +2194,47 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       return reply.code(result.replayed ? 200 : 201).send({
         id: result.shift.id,
         kind: body.kind,
+        replayed: result.replayed,
+      })
+    },
+  )
+
+  // Correct an overstated office-funded wallet top-up. The immutable journal correction and the
+  // shift's BR1 tranche projection commit together; the expected total prevents stale overwrites.
+  app.post(
+    '/shifts/:id/wallet-topup-adjustments',
+    { config: { permission: 'shift.approve', subject: shiftSubject } },
+    async (req, reply) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const body = adjustWalletTopupRequest.parse(req.body)
+      const result = await adjustWalletTopup(deps, req.actor!, id, body, req.requestId)
+      if (!result.replayed) {
+        await deps.audit.append({
+          tableName: 'shifts',
+          recordId: result.shift.id,
+          action: 'UPDATE',
+          actorId: req.actor!.userId,
+          actorKind: 'user',
+          branchId: result.shift.branchId,
+          requestId: req.requestId,
+          before: { walletTopupTotal: serializeMoney(result.from) },
+          after: {
+            walletTopupTotal: serializeMoney(result.to),
+            reduction: serializeMoney(result.reduction),
+            occurrenceKey: body.occurrenceKey,
+            reason: body.reason,
+            correctionEntryId: result.correctionEntryId,
+          },
+          occurredAtMs: deps.clock.nowMs(),
+        })
+      }
+      return reply.code(result.replayed ? 200 : 201).send({
+        id: result.shift.id,
+        from: serializeMoney(result.from),
+        to: serializeMoney(result.to),
+        reduction: serializeMoney(result.reduction),
+        currentTotal: serializeMoney(result.currentTotal),
+        correctionEntryId: result.correctionEntryId,
         replayed: result.replayed,
       })
     },
