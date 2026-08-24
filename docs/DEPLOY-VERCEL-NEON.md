@@ -12,13 +12,14 @@ Team `hadis-projects-3c86ccdb`, three projects, all public (no deployment protec
 
 | Surface | URL | Live deployment / notes |
 | --- | --- | --- |
-| Admin console | https://ash-admin-eta.vercel.app | `dpl_9d5Zp8QHMwuKiUB5SxJXgR5xWvpw`; React SPA, `/api/*` proxied to API |
-| Driver PWA | https://ash-driver.vercel.app | `dpl_GzB3CyzkjEFBeYyP1WaHQwZYHccw`; installable PWA, `/api/*` proxied to API |
-| API | https://ash-api-xi.vercel.app | `dpl_9DnbaiswA4bPP1bCEJ8H2eLi4Fub`; Fastify serverless function |
-| Database | Neon `ep-billowing-butterfly-…` (eu-central-1, **Postgres 18**) | live at `0035` (35 migrations) + bootstrapped |
+| Admin console | https://ash-admin-eta.vercel.app | `dpl_EyNqnL7gSKWpqcwnCZ5Zva58iqis`; React SPA, `/api/*` proxied to API |
+| Driver PWA | https://ash-driver.vercel.app | `dpl_5B2gE3LH6gDvKADzMf6ZehX5yJ65`; installable PWA, `/api/*` proxied to API |
+| API | https://ash-api-xi.vercel.app | `dpl_HEfzBBSRd78SpB14PJuKfatPhyci`; Fastify serverless function |
+| Database | Neon `ep-billowing-butterfly-…` (eu-central-1, **Postgres 18**) | live at `0040` (40 migrations) + bootstrapped |
 | Evidence | Vercel Blob store `ash-evidence` (private) | linked to `ash-api` |
 
-**Version boundary:** production is at `0035`, deployed 2026-08-23 from commit `6389816`. The three
+**Version boundary:** production is at `0040`, deployed 2026-08-24 from commit
+`8222b6aad437e1de6df0d51999f4026808e395ab`. The three
 known cancelled-shift tranche/journal discrepancies remain explicit owner-accepted historical
 exceptions: `0df7c7f1-105c-40b3-97ec-3fc81f83874c`,
 `f51cd7a1-ffa5-4e72-b0e4-a1761531b11b`, and `b81ad711-835b-479a-8ee1-37105ca96c21`. The owner
@@ -220,7 +221,33 @@ redeploy a front-end: `pnpm build:apps`, copy `apps/<app>/dist/*` into a staging
 
 ## 7. Deploy checklist
 
-### Validated live `0035` checklist — 2026-08-23
+### Validated live `0040` checklist — 2026-08-24
+
+- [x] Frozen commit `8222b6aad437e1de6df0d51999f4026808e395ab`
+- [x] [CI run 32737035699](https://github.com/Badee-Salloum/ash-delivery/actions/runs/32737035699)
+      passed static checks, unit/property tests, and the real PostgreSQL 17 job
+- [x] Fresh PostgreSQL 17 applied `0001`–`0040`; guard proofs, harness negative test, and adapter
+      conformance all passed
+- [x] Validated pre-backup
+      `Desktop\ash-backups\release-0040-20260824\pre\2026-08-24T14-32-31-942Z`:
+      59 tables / 4,884 rows / 39 migrations
+- [x] Applied only `0040_preapproved_shift_rules.sql`, checksum `e1d2b547`
+- [x] Validated post-backup
+      `Desktop\ash-backups\release-0040-20260824\post\2026-08-24T14-37-29-598Z`:
+      60 tables / 4,885 rows / 40 migrations; all existing business-table fingerprints unchanged
+- [x] Promoted API `dpl_HEfzBBSRd78SpB14PJuKfatPhyci`, then driver
+      `dpl_5B2gE3LH6gDvKADzMf6ZehX5yJ65`, then admin `dpl_EyNqnL7gSKWpqcwnCZ5Zva58iqis`
+- [x] Stable API, driver, and admin URLs point to the coordinated release
+- [x] Restored the post-backup into `ash_release_gate_0040_restore_20260824_1748`; re-backup
+      `Desktop\ash-backups\release-0040-20260824\restore-check\2026-08-24T14-49-09-297Z`
+      matched all 60 table fingerprints, 4,885 rows, and 40 migrations
+- [x] Verified all 27 owned sequences, passed an audited write/rollback probe, dropped the exact
+      scratch database at zero connections, and confirmed it absent
+- [x] Final production integrity: zero violations in all 17 groups; API/frontends/proxies healthy
+- [ ] Exercise the first real pre-approved opening and completed-history review through the ordinary
+      audited workflow; do not fabricate a production shift as release evidence
+
+### Validated live `0035` checklist — historical production record (2026-08-23)
 
 - [x] Frozen commit `6389816`: Node 24 gate, both frontend builds, API bundle, and 108/108 real-DB tests
 - [x] Read-only preflight and inventory; two open shifts identified before maintenance

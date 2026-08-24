@@ -28,7 +28,7 @@ docker compose -f infra/compose/docker-compose.dev.yml up -d
 | Path | What |
 | --- | --- |
 | [packages/domain/](packages/domain/) | ★ The money core. Pure, zero-dependency. Every rule that decides where money goes. |
-| [packages/db/migrations/](packages/db/migrations/) | 34 forward-only, hand-written SQL migrations in source; production is still live through `0033`. |
+| [packages/db/migrations/](packages/db/migrations/) | 40 forward-only, hand-written SQL migrations; production is live through `0040`. |
 | [packages/db/verify-guards.sql](packages/db/verify-guards.sql) | Attempts every illegal write and fails if the database allows one. |
 | [scripts/](scripts/) | `check-domain-pure.mjs`, `check-sql.mjs`, `db-verify.sh` — all negative-tested. |
 | [CLAUDE.md](CLAUDE.md) | Business rules BR1–BR8 + conventions. Read this first. |
@@ -54,34 +54,21 @@ Authoritative specs: [SRSv1.0.md](SRSv1.0.md) (Arabic) and [CLAUDECODEKICKOFF.md
 
 ## Current state, honestly
 
-**Bundle 1a now has a Fastify API, an Arabic-first admin console, and a driver PWA.** All three have
-live Vercel projects, and Neon is live at migration `0033` (33 total) after release `a150380`; the
-source of truth for rollout state and remaining acceptance work is [PROGRESS.md](PROGRESS.md), not
-the older milestone estimates below.
+**Bundle 1a has a live Fastify API, Arabic-first admin console, and driver PWA on Vercel.** Neon is
+live through migration `0040`, deployed on 2026-08-24 from frozen commit
+`8222b6aad437e1de6df0d51999f4026808e395ab`. This release adds single-use pre-approved shift
+openings, completed-shift history, and the explicit rule that the driver's share comes from returned
+shift money rather than company capital.
 
-**The repository head is an unpublished `0034` release candidate.** It adds a durable server-side
-shift-close draft, attachment-linked OCR and restoration, and a `428 driver_update_required`
-response for an old driver attempting the new linked order-reader flow. The candidate must be
-released as one maintenance operation in this order: migration `0034` → API → driver/admin, with
-writes paused until all three application surfaces agree. Production has not received `0034`, and
-no live Muhammad/Thaer shift has been changed by this work.
+[GitHub Actions run 32737035699](https://github.com/Badee-Salloum/ash-delivery/actions/runs/32737035699)
+passed all three Node 24 jobs, including fresh PostgreSQL 17 migrations `0001`–`0040`, the guard
+harness, its negative test, and PostgreSQL adapter conformance. Migration `0040` is recorded in
+production with checksum `e1d2b547`; the validated post-release backup was restored into an isolated
+database with all 60 table fingerprints and 4,885 rows matching.
 
-The final candidate database gate used Node `24.19.0` and PostgreSQL `17.11`: a fresh database
-applied all 34 migrations, a rerun reported `0 applied / 34 present`, all database guards passed,
-and the real-PostgreSQL suite passed **76/76** across 15 files. Migration `0034` recorded checksum
-`5bc30a31` and SHA-256
-`228F090D8FCF2DC0CA1B7EDF6FA500D679CA19ED9E388D2DE9054B7EE2E8659A` on the disposable gate.
-
-On 2026-08-15 the full Node 24 gates passed, and the complete 69/69 database suite passed on a real,
-disposable PostgreSQL 17 database after all 33 migrations. Production migration and postflight were
-read-only apart from the migration itself; never run the destructive conformance suite against
-production. The earlier isolated Neon restore/fingerprint rehearsal remains the recovery evidence
-for that historical baseline.
-
-The live `0033` Recent Orders OCR requires two agreeing observations from three independent time-evidence
-passes. It votes on the literal printed clock before deterministic AM/PM conversion; disagreement
-or insufficient evidence leaves the operation `unknown` and outside BR1 and settlement until an
-audited manager action resolves it. See [RUNBOOK.md](RUNBOOK.md) for retry and stored-image reread
-rules.
+The source of truth for rollout evidence and remaining acceptance work is
+[PROGRESS.md](PROGRESS.md). Operational procedures, stable URLs, deployment ids, backup locations,
+and rollback rules are in [RUNBOOK.md](RUNBOOK.md) and
+[docs/DEPLOY-VERCEL-NEON.md](docs/DEPLOY-VERCEL-NEON.md).
 
 See [STATUS.md](STATUS.md) for the full breakdown, including the six bugs the tests caught.

@@ -1,8 +1,8 @@
 # PROGRESS
 
-## 2026-08-24 — pre-approved openings, completed-shift history, and share clarification (not deployed)
+## 2026-08-24 — pre-approved openings, completed-shift history, and share clarification are live
 
-**Done and verified locally:** managers can publish single-use pre-approved opening rules for one
+**Done, verified, and deployed:** managers can publish single-use pre-approved opening rules for one
 driver over explicit custom dates, an inclusive same-day time window, and exact cash-float/wallet-
 top-up amounts. The driver's complete BR5 package and confirmation remain mandatory. A match runs
 the ordinary manager gate and opening journal atomically, includes current shift-funding carry,
@@ -24,20 +24,46 @@ promotion; the currently listed AI Studio fallback is about **$39.52**, and disp
 undiscounted list pricing would be about **$79.04** for the same workload. `RUNBOOK.md` now records
 that range and that actual spend follows OCR reads rather than licensed headcount.
 
-`pnpm check` passes **2,041 tests** with the expected 11 PostgreSQL-only skips. TypeScript, domain
+The local Node 24 `pnpm check` passes **2,041 tests** with the expected 11 PostgreSQL-only skips. TypeScript, domain
 purity, 40-migration SQL static checks, wire-money, strippable TypeScript, bilingual parity, RTL CSS,
 glyph checks, all package tests, both production frontend builds, and the API bundle pass. The
-feature-specific API suite is 21/21. The machine is Node 25.8 while the production target is Node
-24, so pnpm emitted the existing engine warning.
+feature-specific API suite is 21/21.
 
-**Next:** execute migrations `0001`–`0040` and the PostgreSQL conformance/guard suites on a fresh
-PostgreSQL 17 database, then deploy migration + API + driver + admin in that order. No deployment or
-production write was performed in this work.
+The frozen release commit is `8222b6aad437e1de6df0d51999f4026808e395ab`. [CI run
+32737035699](https://github.com/Badee-Salloum/ash-delivery/actions/runs/32737035699) passed all three
+Node 24 jobs: static checks, unit/property tests, and the real-PostgreSQL gate. PostgreSQL 17 applied
+fresh migrations `0001`–`0040`, passed every guard and the harness negative test, and passed adapter
+conformance. Production migration `0040_preapproved_shift_rules.sql` is recorded with checksum
+`e1d2b547`.
 
-**Risk:** migration `0040_preapproved_shift_rules.sql` passed static and source-contract checks but
-has not executed here: `DATABASE_URL` is unset and Docker is unavailable. OpenRouter's displayed
-rates are promotional and its routed alias may use a differently priced upstream; the provider
-invoice remains the billing authority.
+The validated pre-backup is
+`Desktop\ash-backups\release-0040-20260824\pre\2026-08-24T14-32-31-942Z` (59 tables / 4,884 rows /
+39 migrations). The validated post-backup is
+`Desktop\ash-backups\release-0040-20260824\post\2026-08-24T14-37-29-598Z` (60 / 4,885 / 40). The
+schema-only comparison found exactly the new `preapproved_shift_rules` table and migration row, with
+all 58 existing business-table fingerprints unchanged. The post-backup was restored into isolated
+database `ash_release_gate_0040_restore_20260824_1748`; its re-backup at
+`Desktop\ash-backups\release-0040-20260824\restore-check\2026-08-24T14-49-09-297Z` matched all 60
+table fingerprints, all 4,885 rows, and all 40 migrations. All 27 owned sequences matched
+`max(column)+1` with `is_called=false`; an audited write/rollback probe left both the row and audit
+count unchanged. The scratch database was then dropped and confirmed absent.
+
+The final production audit reports zero violations across all 17 financial-integrity groups. All
+three approved shifts already use `fixed_40_cash_close_v2_receivable`, so no immutable historical
+settlement was rewritten; the current `cash_deductions` table is empty. API, driver, admin, and both
+frontend API proxies are healthy, while the unauthenticated `/me` boundary returns the expected
+`401`.
+
+The stable Vercel deployments are API `dpl_HEfzBBSRd78SpB14PJuKfatPhyci`, driver
+`dpl_5B2gE3LH6gDvKADzMf6ZehX5yJ65`, and admin `dpl_EyNqnL7gSKWpqcwnCZ5Zva58iqis` at
+`https://ash-api-xi.vercel.app`, `https://ash-driver.vercel.app`, and
+`https://ash-admin-eta.vercel.app`.
+
+**Next:** exercise the first real pre-approved opening and completed-history review through the
+ordinary audited workflow; no production transaction was fabricated for release evidence.
+
+**Risk:** OpenRouter's displayed rates are promotional and its routed alias may use a differently
+priced upstream; the provider invoice remains the billing authority.
 
 **See it in 2 minutes:** sign in as a branch manager, open **Pre-approved shifts**, select a driver,
 today, a window containing the current branch time, and funding amounts. On the driver's phone,

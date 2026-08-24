@@ -26,17 +26,19 @@ allows one** — then drops a trigger and confirms verification now FAILS, provi
 teeth. The same three steps run in CI (`.github/workflows/pr.yml` › `database`), so pushing the
 branch verifies them too.
 
-For release `a150380`, the full Node 24 gates passed and the complete database suite ran **69/69**
-green on a real, disposable **PostgreSQL 17** database after all 33 migrations; every guard group
-also passed. An isolated Neon scratch database separately passed the historical release-backup
-restore, fingerprint, invariant, and rollback rehearsal. None of those targets was production; the
-conformance suite truncates its database and must never be pointed at the live Neon URL.
+For the live 2026-08-24 release at commit
+`8222b6aad437e1de6df0d51999f4026808e395ab`, [CI run
+32737035699](https://github.com/Badee-Salloum/ash-delivery/actions/runs/32737035699) passed all three
+Node 24 jobs. Its PostgreSQL 17 job applied fresh migrations `0001`–`0040`, passed every guard,
+negative-tested the guard harness, and passed PostgreSQL adapter conformance. Production now ends at
+`0040_preapproved_shift_rules.sql`, checksum `e1d2b547`.
 
-For the **unpublished** `0034` candidate, Node `24.19.0` and PostgreSQL `17.11` applied a fresh
-`0001`–`0034`, reran with `0 applied / 34 present`, passed every guard, and passed **76/76** real-DB
-tests across 15 files. The disposable ledger checksum for `0034` was `5bc30a31`; the migration file
-SHA-256 was `228F090D8FCF2DC0CA1B7EDF6FA500D679CA19ED9E388D2DE9054B7EE2E8659A`.
-Production remains on `0033`; do not treat this candidate gate as a production postflight.
+The validated post-release backup was restored into isolated database
+`ash_release_gate_0040_restore_20260824_1748`: 60 tables, 4,885 rows, 40 migrations, and all 60
+canonical fingerprints matched production. All 27 sequences and an audited rollback probe passed;
+the scratch database was then dropped and confirmed absent. None of the destructive CI targets was
+production; the conformance suite truncates its database and must never be pointed at the live Neon
+URL.
 
 **If a guard fails**, do not weaken the guard. The guard is the requirement (kickoff brief §4:
 immutability "in the app layer AND a DB-level guard"). Fix the schema.
@@ -214,9 +216,27 @@ and reconstructed attachment provenance cannot be removed and later recreated ex
 old API deployment available for a code rollback, but restore the database when crossing this
 schema boundary.
 
-### Staged durable close-draft rollout (`0034` — not deployed)
+### Pre-approved openings release (`0040` — deployed 2026-08-24)
 
-Source contains `0034`; the live Neon ledger still ends at `0033`. This release adds durable
+Frozen commit `8222b6aad437e1de6df0d51999f4026808e395ab` was promoted in the coordinated order API,
+driver, then admin. The stable deployments are API `dpl_HEfzBBSRd78SpB14PJuKfatPhyci`, driver
+`dpl_5B2gE3LH6gDvKADzMf6ZehX5yJ65`, and admin `dpl_EyNqnL7gSKWpqcwnCZ5Zva58iqis` at
+`https://ash-api-xi.vercel.app`, `https://ash-driver.vercel.app`, and
+`https://ash-admin-eta.vercel.app` respectively.
+
+The fully validated backups are:
+
+- pre-migration: `Desktop\ash-backups\release-0040-20260824\pre\2026-08-24T14-32-31-942Z`
+  (59 tables, 4,884 rows, 39 migrations);
+- post-migration: `Desktop\ash-backups\release-0040-20260824\post\2026-08-24T14-37-29-598Z`
+  (60 tables, 4,885 rows, 40 migrations);
+- restore comparison: `Desktop\ash-backups\release-0040-20260824\restore-check\2026-08-24T14-49-09-297Z`,
+  restored into `ash_release_gate_0040_restore_20260824_1748` with all 60 table fingerprints equal;
+  all 27 sequences and the audited rollback probe passed before the scratch database was dropped.
+
+### Historical durable close-draft rollout (`0034` — deployed 2026-08-17)
+
+Migration `0034` added durable
 `closeDraft` state, attachment-token-linked OCR and restoration, atomic draft materialisation, and
 an explicit old-driver refusal. A linked order-read request that omits
 `X-ASH-ORDERS-TIME-CONSENSUS: close-draft-v1` must receive

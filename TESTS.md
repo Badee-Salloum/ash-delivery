@@ -262,8 +262,9 @@ api          696 tests
   auto-open response contains the exact approved funding and odometer needed by the driver app.
 - `db/migration-0036-0037.test.ts` statically pins migration `0040`'s publication shape, active
   actor/driver, immutable terms, advance-signature ordering, scoped consumption identity,
-  inclusive window, overlap lock, audit trigger, and delete/truncate revocation. The migration
-  still requires a real PostgreSQL 17 run before deployment.
+  inclusive window, overlap lock, audit trigger, and delete/truncate revocation. [CI run
+  32737035699](https://github.com/Badee-Salloum/ash-delivery/actions/runs/32737035699) applied it in a
+  fresh `0001`–`0040` PostgreSQL 17 gate before production deployment.
 - `admin/preapproved-shifts.test.ts` and `client/preapproved-shifts.test.ts` cover manager-only
   navigation, form semantics, rule status and branch-scoped API wiring.
 - `driver/opened-shift.test.ts` proves an immediate auto-open creates complete local running-shift
