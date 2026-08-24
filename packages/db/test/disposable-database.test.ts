@@ -47,4 +47,22 @@ describe('disposable PostgreSQL test guard', () => {
       { database: 'ash_conformance', host: '127.0.0.1' },
     )).rejects.toThrow(/identity does not match/)
   })
+
+  it('requires the remote opt-in when a loopback proxy reaches a non-loopback server', async () => {
+    const query = async () => ({
+      rows: [{ database: 'ash_conformance', serverAddress: '172.17.0.2/32' }],
+    })
+
+    await expect(assertDisposableDatabaseConnection(
+      { query },
+      { database: 'ash_conformance', host: 'localhost' },
+      optedIn,
+    )).rejects.toThrow(/loopback URL resolved to a non-loopback/)
+
+    await expect(assertDisposableDatabaseConnection(
+      { query },
+      { database: 'ash_conformance', host: 'localhost' },
+      { ...optedIn, ASH_ALLOW_REMOTE_DESTRUCTIVE_DATABASE_TESTS: '1' },
+    )).resolves.toBeUndefined()
+  })
 })

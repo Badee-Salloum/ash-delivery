@@ -158,6 +158,10 @@ jobs:
           PGPASSWORD: postgres
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/ash_conformance
           ASH_ALLOW_DESTRUCTIVE_DATABASE_TESTS: '1'
+          # GitHub service containers are reached through a loopback port mapped to
+          # Docker's bridge address. Keep the second loud opt-in explicit so the
+          # connection guard still fails closed everywhere else.
+          ASH_ALLOW_REMOTE_DESTRUCTIVE_DATABASE_TESTS: '1'
         run: |
           set -euo pipefail
           psql -v ON_ERROR_STOP=1 -h localhost -U postgres -d postgres \

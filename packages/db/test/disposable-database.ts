@@ -36,6 +36,7 @@ export function assertDisposableDatabaseUrl(
 export async function assertDisposableDatabaseConnection(
   database: { query(sql: string): Promise<{ rows: unknown[] }> },
   expected: { database: string; host: string },
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
   const { rows } = await database.query(
     `SELECT current_database() AS database,
@@ -49,7 +50,8 @@ export async function assertDisposableDatabaseConnection(
     LOCAL_HOSTS.has(expected.host) &&
     actual.serverAddress !== null &&
     actual.serverAddress !== '::1/128' &&
-    !actual.serverAddress.startsWith('127.')
+    !actual.serverAddress.startsWith('127.') &&
+    env.ASH_ALLOW_REMOTE_DESTRUCTIVE_DATABASE_TESTS !== '1'
   ) {
     throw new Error('refusing database tests: loopback URL resolved to a non-loopback PostgreSQL server')
   }
