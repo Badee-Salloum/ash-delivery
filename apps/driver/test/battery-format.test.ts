@@ -245,6 +245,27 @@ describe('cloud AI is the only automatic BMS authority', () => {
     expect(applied.fieldsFound).toBe(0)
     expect(applied.state).toEqual(initial())
   })
+
+  it('never accepts an Ah capacity even when the cloud mislabels it as percent', () => {
+    for (const capacity of ['50.0Ah', '19.8 AH', '50.0 A·h', '50 أمبير ساعة']) {
+      const applied = applyCloudBmsFields(initial(), { percent: capacity })
+      expect(applied.fieldsFound).toBe(0)
+      expect(applied.state).toEqual(initial())
+    }
+  })
+
+  it('accepts the real central 40% while ignoring the 50Ah capacity cards', () => {
+    const applied = applyCloudBmsFields(initial(), {
+      percent: '40%',
+      voltage: '71.72V',
+      '(Ah)Rem. Cap.': '19.8',
+      '(Ah)Capacity': '50.0',
+    })
+
+    expect(applied.fieldsFound).toBe(1)
+    expect(applied.state.values).toEqual({ percent: '40', cycleCount: '' })
+    expect(applied.state.ocrRaw).toEqual({ percent: 40 })
+  })
 })
 
 describe('a resumed BMS reading keeps its server evidence generation', () => {

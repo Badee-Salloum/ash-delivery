@@ -49,6 +49,23 @@ const ARABIC_PACK: Record<string, string | null> = {
   'الطاقة المتبقية': '100%',
 }
 
+/** The black/green circular-gauge app used by the fleet's 50Ah packs. */
+const GAUGE_50_PACK: Record<string, string | null> = {
+  percent: '40%',
+  voltage: '71.72V',
+  'Bal.-Curr.(A)': '0.659',
+  'Volt.-Diff(V)': '0.008',
+  'Low Cell(V)': '3.582',
+  'High Cell(V)': '3.590',
+  'Cell Type': 'NCM/NCA',
+  '(℃)High Temp.': '46.4',
+  '(Ah)Rem. Cap.': '19.8',
+  '(Ah)Capacity': '50.0',
+  'Power (W)': '0.0',
+  'Current (A)': '0.00',
+  Status: 'Idle',
+}
+
 describe('the BMS labels production actually returned', () => {
   it('reads the charge and cycles off the ENGLISH pack', () => {
     expect(pickBmsField(ENGLISH_PACK, 'percent')).toBe('100%')
@@ -66,6 +83,16 @@ describe('the BMS labels production actually returned', () => {
     // for when it answers in the app's own words anyway — which is what it did the first time.
     expect(pickBmsField({ percent: '87', cycles: '412' }, 'percent')).toBe('87')
     expect(pickBmsField({ percent: '87', cycles: '412' }, 'cycleCount')).toBe('412')
+  })
+
+  it('reads the large central charge from the black/green 50Ah gauge', () => {
+    expect(pickBmsField(GAUGE_50_PACK, 'percent')).toBe('40%')
+    expect(pickBmsField(GAUGE_50_PACK, 'cycleCount')).toBeNull()
+  })
+
+  it('accepts safe names for an unlabelled state-of-charge gauge', () => {
+    expect(pickBmsField({ 'State of Charge': '40%' }, 'percent')).toBe('40%')
+    expect(pickBmsField({ 'Remaining Charge': '40%' }, 'percent')).toBe('40%')
   })
 
   it('NEVER reads a capacity in Ah as a percentage', () => {

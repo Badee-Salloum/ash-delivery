@@ -205,6 +205,12 @@ export class ChatCompletionsOcrReader implements OcrReader {
     if (field === 'wallet') {
       return `${prefix}:wallet-consensus-v1:money-validation-v2:${budget}`
     }
+    // The BMS v2 prompt knows the fleet's black/green 50Ah gauge and, critically, separates its
+    // central charge percentage from «Rem. Cap.» / «Capacity» values expressed in Ah. Old cached
+    // reads predate that distinction and must not satisfy a new screenshot read.
+    if (field === 'bms') {
+      return `${prefix}:bms-prompt-v2:validation-v1:${budget}`
+    }
     return `${prefix}:${field}-prompt-v1:validation-v1:${budget}`
   }
 

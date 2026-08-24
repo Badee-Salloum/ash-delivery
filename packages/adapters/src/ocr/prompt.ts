@@ -76,11 +76,15 @@ const FIELD_HINT: Record<OcrField, string> = {
   bms:
     'a BMS battery-management app screenshot, in English or in Arabic. There is NO money on it.\n\n' +
     'In `fields` you MUST use these exact keys, wherever the screen shows the value:\n' +
-    '  percent  — the REMAINING CHARGE as a percentage. Printed «Remain Battery», «Battery Level», «SOC», or «الطاقة المتبقية». Give the number only, without the % sign.\n' +
+    '  percent  — the REMAINING CHARGE as a percentage. Printed «Remain Battery», «Battery Level», «SOC», or «الطاقة المتبقية». It may also be a large unlabelled percentage in the centre of a circular gauge. Give the number only, without the % sign.\n' +
     '  cycles   — the cycle count. Printed «Cycle Count», «Cycles», or «الدورات».\n' +
     '  voltage  — total pack voltage. Printed «Battery Voltage», «Total Voltage», or «إجمالي الجهد».\n\n' +
-    'Do NOT put a capacity in Ah («Remain Capacity», «Battery Capacity», «السعة») under `percent` — ' +
-    'a 50.0Ah capacity is not a 50% charge. If the percentage is not shown, omit `percent` entirely.\n\n' +
+    'One black-and-green 50Ah app used by this fleet shows a large «40%» in the circular gauge, ' +
+    '«71.72V» directly below it, «(Ah)Rem. Cap. 19.8», and «(Ah)Capacity 50.0». In that layout ' +
+    '`percent` is 40 and `voltage` is 71.72. The two Ah values are capacities, not percentages.\n\n' +
+    'Do NOT put a capacity in Ah («Remain Capacity», «Rem. Cap.», «Battery Capacity», «Capacity», «السعة») under `percent` — ' +
+    '19.8Ah is not 19.8%, and a 50.0Ah capacity is not a 50% charge. If the percentage is not shown, omit `percent` entirely. ' +
+    'The cycle count may be absent from this Home screen; never invent it.\n\n' +
     'Anything else readable may be added under its own printed label.',
 }
 

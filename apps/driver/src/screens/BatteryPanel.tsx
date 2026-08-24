@@ -81,7 +81,7 @@ type FieldKey = (typeof FIELDS)[number]['key']
  * cleans to a plausible «50» and would report a full pack as half empty.
  */
 export const BMS_ALIASES: Record<FieldKey, readonly string[]> = {
-  percent: ['percent', 'remainbattery', 'remainingbattery', 'batterylevel', 'batterypercent', 'soc', 'الطاقةالمتبقية', 'الشحنالمتبقية', 'نسبةالشحن'],
+  percent: ['percent', 'remainbattery', 'remainingbattery', 'remainingcharge', 'stateofcharge', 'chargepercentage', 'batterylevel', 'batterypercent', 'soc', 'الطاقةالمتبقية', 'الشحنالمتبقية', 'نسبةالشحن'],
   cycleCount: ['cycles', 'cyclecount', 'cyclecounts', 'الدورات', 'عدددورات', 'عددالدورات'],
 }
 
@@ -283,6 +283,15 @@ export function applyCloudBmsFields(
   for (const field of FIELDS) {
     const said = pickBmsField(fields as Record<string, string | null>, field.key)
     if (said === null) continue
+    // A model can disobey the pinned-key prompt and place «50.0Ah» under `percent`. On the fleet's
+    // black/green gauge that value is the pack's full capacity while the real charge is the large
+    // central «40%». Reject the unit before stripping letters, otherwise both become plausible 50.
+    if (
+      field.key === 'percent' &&
+      (/(?:^|[^a-z])a\s*[·.\-]?\s*h(?:$|[^a-z])/iu.test(said) || /(?:أمبير|امبير)\s*ساعة/u.test(said))
+    ) {
+      continue
+    }
     const cleaned = said.replace(/[^\d.]/g, '')
     if (cleaned === '') continue
     const number = Number(cleaned)

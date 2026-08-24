@@ -297,6 +297,7 @@ describe('orders fast financial pass', () => {
     )
     expect(reader(2_000).cacheSignature('orders')).not.toBe(reader().cacheSignature('orders'))
     expect(reader(2_000).cacheSignature('wallet')).not.toBe(reader().cacheSignature('wallet'))
+    expect(reader().cacheSignature('bms')).toContain(':bms-prompt-v2:')
   })
 
   it('returns wrong_screen with no rows when the independent pass identifies a payments log', async () => {

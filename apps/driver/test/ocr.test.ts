@@ -58,6 +58,29 @@ describe('the English BMS app', () => {
   })
 })
 
+/** The 50Ah app shown by the owner: a black page with a large green circular charge gauge. */
+const GAUGE_50 = `
+ON Bal.   ON Dsg   ON Chg
+40%
+71.72V
+0.00A
+0.659 Bal.-Curr.(A)   0.008 Volt.-Diff(V)   3.582 Low Cell(V)   3.590 High Cell(V)
+NCM/NCA Cell Type   46.4 High Temp.   19.8 (Ah)Rem. Cap.   50.0 (Ah)Capacity
+0.0 Power (W)   0.00 Current (A)
+Idle Status
+`
+
+describe('the black/green 50Ah circular-gauge BMS app', () => {
+  it('reads the large 40% gauge and leaves the absent cycle count blank', () => {
+    expect(parseBms(GAUGE_50)).toEqual({ percent: 40, cycleCount: null })
+  })
+
+  it('never substitutes 19.8Ah or 50.0Ah when the central percentage is missing', () => {
+    const withoutGauge = GAUGE_50.replace('40%', '')
+    expect(parseBms(withoutGauge)).toEqual({ percent: null, cycleCount: null })
+  })
+})
+
 /**
  * The Arabic app puts the VALUE first and the label second, because the layout is right-to-left.
  * "The number after the label" is therefore the wrong rule; "the number on the same line" is right
