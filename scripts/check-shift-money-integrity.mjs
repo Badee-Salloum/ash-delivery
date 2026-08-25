@@ -1303,7 +1303,7 @@ const RECEIVABLE_V2_CHECKS = Object.freeze({
              CASE WHEN ss.policy_code = 'fixed_40_cash_close_v1'
                   THEN 'wallet_full_return' ELSE 'wallet_settlement' END,
              'office_wallet', NULL::text, ss.wallet_to_office_minor::numeric),
-            ('wallet_return', 'wallet_settlement_deferred', 'driver_receivable_wallet',
+            ('wallet_return', 'wallet_settlement_deferred', 'driver_shift_funding_wallet',
              ss.driver_id::text, ss.wallet_receivable_deferred_minor::numeric),
             ('float_return', 'cash_cleared', 'driver_cash',
              ss.driver_id::text, -(ss.expected_total_minor::numeric - ss.actual_wallet_minor::numeric)),
@@ -1311,7 +1311,7 @@ const RECEIVABLE_V2_CHECKS = Object.freeze({
              ss.driver_id::text, GREATEST(ss.base_driver_share_minor::numeric, 0)),
             ('float_return', 'driver_receivable_settled', 'driver_receivable_cash',
              ss.driver_id::text, LEAST(ss.base_driver_share_minor::numeric, 0)),
-            ('float_return', 'cash_settlement_deferred', 'driver_receivable_cash',
+            ('float_return', 'cash_settlement_deferred', 'driver_shift_funding_cash',
              ss.driver_id::text, ss.cash_receivable_deferred_minor::numeric),
             ('float_return', 'cash_settlement', 'office_cash',
              NULL::text, ss.cash_to_office_minor::numeric)
@@ -1528,20 +1528,21 @@ const RECEIVABLE_V2_CHECKS = Object.freeze({
              sb.driver_wallet::text AS driver_wallet_minor,
              sb.driver_share::text AS driver_share_minor,
              sb.ordinary_cash::text AS ordinary_cash_minor,
-             (ss.cash_receivable_deferred_minor::numeric - CASE
+             (- CASE
                 WHEN s.open_approved_at IS NULL OR s.open_approved_at < rollout.applied_at
                   THEN COALESCE(c.carried_cash, 0)
                 ELSE 0
               END)::text AS expected_ordinary_cash_minor,
              sb.ordinary_wallet::text AS ordinary_wallet_minor,
-             ss.wallet_receivable_deferred_minor::text AS expected_ordinary_wallet_minor,
+             '0' AS expected_ordinary_wallet_minor,
              sb.funding_cash::text AS shift_funding_cash_minor,
-             (-CASE
+             (ss.cash_receivable_deferred_minor::numeric - CASE
                 WHEN s.open_approved_at >= rollout.applied_at THEN COALESCE(c.carried_cash, 0)
                 ELSE 0
               END)::text AS expected_shift_funding_cash_minor,
              sb.funding_wallet::text AS shift_funding_wallet_minor,
-             (-COALESCE(c.carried_wallet, 0))::text AS expected_shift_funding_wallet_minor
+             (ss.wallet_receivable_deferred_minor::numeric
+                - COALESCE(c.carried_wallet, 0))::text AS expected_shift_funding_wallet_minor
         FROM shift_balances sb
         JOIN shift_settlements ss ON ss.shift_id = sb.shift_id
         JOIN shifts s ON s.id = sb.shift_id
@@ -1550,17 +1551,23 @@ const RECEIVABLE_V2_CHECKS = Object.freeze({
        WHERE sb.driver_cash <> 0
           OR sb.driver_wallet <> 0
           OR sb.driver_share <> 0
-          OR sb.ordinary_cash <> ss.cash_receivable_deferred_minor::numeric - CASE
+          -- Since 0041 a deferred collection is SHIFT FUNDING, not an ordinary debt: the driver
+          -- keeps money he will spend on the next shift, and the next open must consume it. The
+          -- only ordinary-cash movement a settled shift may still show is the legacy pre-0037
+          -- carry, which used to be drawn from this fund. On a database still at 0040, a shift
+          -- carrying a deferral fails here — which is precisely the defect 0041 exists to fix.
+          OR sb.ordinary_cash <> - CASE
                WHEN s.open_approved_at IS NULL OR s.open_approved_at < rollout.applied_at
                  THEN COALESCE(c.carried_cash, 0)
                ELSE 0
              END
-          OR sb.ordinary_wallet <> ss.wallet_receivable_deferred_minor::numeric
-          OR sb.funding_cash <> -CASE
+          OR sb.ordinary_wallet <> 0
+          OR sb.funding_cash <> ss.cash_receivable_deferred_minor::numeric - CASE
                WHEN s.open_approved_at >= rollout.applied_at THEN COALESCE(c.carried_cash, 0)
                ELSE 0
              END
-          OR sb.funding_wallet <> -COALESCE(c.carried_wallet, 0)
+          OR sb.funding_wallet <> ss.wallet_receivable_deferred_minor::numeric
+               - COALESCE(c.carried_wallet, 0)
     `,
   },
 })

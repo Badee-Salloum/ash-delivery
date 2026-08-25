@@ -565,8 +565,14 @@ describe('fixed 40% approval', () => {
 
     const approved = await approve(manager, shiftId, reviewHash, deferred)
     expect(approved.statusCode, approved.body).toBe(200)
-    expect(await h.deps.ledger.fundBalance('branch-damascus', `driver_receivable_cash:${DRIVER_ID}`)).toBe(600_000n)
-    expect(await h.deps.ledger.fundBalance('branch-damascus', `driver_receivable_wallet:${DRIVER_ID}`)).toBe(100_000n)
+    // A deferral is money the driver still HOLDS and will spend on his next shift, so it lands in
+    // the shift-funding funds the next open consumes — not in the ordinary debt funds, which are
+    // cleared only by an explicit later collection and would leave the carried money invisible to
+    // BR1. See `cashSettledReturnPostings` and the cross-shift test below.
+    expect(await h.deps.ledger.fundBalance('branch-damascus', `driver_shift_funding_cash:${DRIVER_ID}`)).toBe(600_000n)
+    expect(await h.deps.ledger.fundBalance('branch-damascus', `driver_shift_funding_wallet:${DRIVER_ID}`)).toBe(100_000n)
+    expect(await h.deps.ledger.fundBalance('branch-damascus', `driver_receivable_cash:${DRIVER_ID}`)).toBe(0n)
+    expect(await h.deps.ledger.fundBalance('branch-damascus', `driver_receivable_wallet:${DRIVER_ID}`)).toBe(0n)
     expect(await h.deps.shifts.findById(shiftId)).toMatchObject({ keptAsReceivable: 600_000n })
 
     const entries = await h.deps.ledger.listByShift(shiftId)

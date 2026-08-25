@@ -566,7 +566,7 @@ if (!DATABASE_URL) {
               { fund: { kind: 'driver_wallet', driverId }, side: 'C', amount: minor(2_000n), role: 'wallet_cleared' },
               { fund: { kind: 'office_wallet' }, side: 'D', amount: minor(1_500n), role: 'wallet_settlement' },
               {
-                fund: { kind: 'driver_receivable_wallet', driverId },
+                fund: { kind: 'driver_shift_funding_wallet', driverId },
                 side: 'D',
                 amount: minor(500n),
                 role: 'wallet_settlement_deferred',
@@ -704,7 +704,7 @@ if (!DATABASE_URL) {
                 { fund: { kind: 'driver_wallet', driverId }, side: 'C', amount: minor(2_000n), role: 'wallet_cleared' },
                 { fund: { kind: 'office_wallet' }, side: 'D', amount: minor(1_500n), role: 'wallet_settlement' },
                 {
-                  fund: { kind: 'driver_receivable_wallet', driverId },
+                  fund: { kind: 'driver_shift_funding_wallet', driverId },
                   side: 'D',
                   amount: minor(500n),
                   role: 'wallet_settlement_deferred',
@@ -723,7 +723,7 @@ if (!DATABASE_URL) {
                   role: 'driver_share_settled',
                 },
                 {
-                  fund: { kind: 'driver_receivable_cash', driverId },
+                  fund: { kind: 'driver_shift_funding_cash', driverId },
                   side: 'D',
                   amount: minor(600n),
                   role: 'cash_settlement_deferred',
@@ -1689,7 +1689,7 @@ if (!DATABASE_URL) {
                   { fund: { kind: 'driver_wallet', driverId }, side: 'C', amount: minor(2_000n), role: 'wallet_cleared' },
                   { fund: { kind: 'office_wallet' }, side: 'D', amount: minor(1_500n), role: 'wallet_settlement' },
                   {
-                    fund: { kind: 'driver_receivable_wallet', driverId },
+                    fund: { kind: 'driver_shift_funding_wallet', driverId },
                     side: 'D',
                     amount: minor(500n),
                     role: 'wallet_settlement_deferred',
@@ -1708,7 +1708,7 @@ if (!DATABASE_URL) {
                     role: 'driver_share_settled',
                   },
                   {
-                    fund: { kind: 'driver_receivable_cash', driverId },
+                    fund: { kind: 'driver_shift_funding_cash', driverId },
                     side: 'D',
                     amount: minor(600n),
                     role: 'cash_settlement_deferred',

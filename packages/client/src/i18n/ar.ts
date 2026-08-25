@@ -896,6 +896,8 @@ orderNo: 'رقم الطلب',
       company_box: 'صندوق الشركة',
       driver_receivable_cash: 'ذمة نقدية على السائق',
       driver_receivable_wallet: 'ذمة محفظة على السائق',
+      driver_shift_funding_cash: 'نقد مُرحَّل للوردية القادمة',
+      driver_shift_funding_wallet: 'محفظة مُرحَّلة للوردية القادمة',
     },
     // «صندوق الشركة» و«كييش» و«شحن من الصندوق» — كلمات المالك نفسها من دفتره.
     companyFund: 'صندوق الشركة',

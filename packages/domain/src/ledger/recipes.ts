@@ -432,9 +432,15 @@ export function cashSettledReturnPostings(input: CashSettledReturnInput): Postin
   signedLine(walletLines, { kind: 'driver_wallet', driverId }, neg(settlement.actualWallet), 'wallet_cleared')
   signedLine(walletLines, { kind: 'office_wallet' }, settlement.walletToOffice, 'wallet_settlement')
   if (settlement.walletReceivableDeferred > ZERO) {
+    // `driver_shift_funding_wallet`, NOT `driver_receivable_wallet`. A deferred wallet collection is
+    // balance the driver still physically holds in the Yallago app and will spend on the next
+    // shift's per-order cuts — which is the definition of shift funding, not of an ordinary debt.
+    // Booked as an ordinary receivable it is invisible to `postingsForOpen`, so no carry tranche
+    // reaches `topupTotal`, BR1 reads the money as a SURPLUS, and decision 13 pays the driver his
+    // own debt. See `walletCarry` above for the consuming half.
     walletLines.push(
       D(
-        { kind: 'driver_receivable_wallet', driverId },
+        { kind: 'driver_shift_funding_wallet', driverId },
         settlement.walletReceivableDeferred,
         'wallet_settlement_deferred',
       ),
@@ -465,9 +471,13 @@ export function cashSettledReturnPostings(input: CashSettledReturnInput): Postin
   signedLine(cashLines, { kind: 'driver_share_payable', driverId }, payable, 'driver_share_settled')
   signedLine(cashLines, { kind: 'driver_receivable_cash', driverId }, neg(receivable), 'driver_receivable_settled')
   if (settlement.cashReceivableDeferred > ZERO) {
+    // Same reasoning as the wallet deferral above, and the same fund distinction: cash the driver
+    // kept past the close is his next float, which is what `shifts.kept_as_receivable_minor` has
+    // always promised — «Cleared when he opens his next shift» (0025). 0036 moved that carry
+    // behaviour to `driver_shift_funding_*` and this posting was left behind on the old name.
     cashLines.push(
       D(
-        { kind: 'driver_receivable_cash', driverId },
+        { kind: 'driver_shift_funding_cash', driverId },
         settlement.cashReceivableDeferred,
         'cash_settlement_deferred',
       ),
