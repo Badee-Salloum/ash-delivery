@@ -8,6 +8,16 @@ import { z } from 'zod'
  * defaulted: if `SESSION_SECRET` or `DATABASE_URL` is absent in production, the app refuses to
  * start rather than running with something guessable.
  */
+/**
+ * The per-shift OCR read ceiling, in ONE place.
+ *
+ * It was written as a literal here and as `?? 15` in five route handlers. Raising the real default
+ * while five fallbacks stayed at 15 would have looked like a fix and changed nothing on any request
+ * that did not pass the option — which is exactly the kind of half-applied change this incident
+ * cost a night's work to.
+ */
+export const DEFAULT_MAX_OCR_READS_PER_SHIFT = 40
+
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(3000),
@@ -157,11 +167,17 @@ const schema = z.object({
   /**
    * A runaway guard, not a business rule — the same framing `MAX_SHIFTS_PER_DAY` uses.
    *
-   * A three-pack bike needs ten mandatory photos a shift plus extra dashboard and payments-log
-   * pages. Fifteen covers that with room for retakes; past it the driver still has the on-device
-   * reader and a keyboard.
+   * RAISED FROM 15 AFTER 2026-08-24, WHERE 15 COST A NIGHT'S WORK. امجد عبدالله's shift spent
+   * exactly fifteen — three at open, then five dashboard pages, four payments-log pages, wallet and
+   * odometer at close — so the two BMS reads BR5 actually REQUIRES were refused, and his close was
+   * never submitted. Fifteen was measured against a bike's mandatory photos and did not allow for
+   * a real scrollable Recent-Orders list.
+   *
+   * The cost of raising it is small: most shifts use 6–11 reads, so the ceiling only binds on a
+   * heavy night. `MANDATORY_READ_RESERVE` in `ocr.service.ts` is the other half — a budget that is
+   * merely larger would still let optional pages crowd out the readings the gate depends on.
    */
-  OCR_MAX_READS_PER_SHIFT: z.coerce.number().int().positive().default(15),
+  OCR_MAX_READS_PER_SHIFT: z.coerce.number().int().positive().default(DEFAULT_MAX_OCR_READS_PER_SHIFT),
 })
 
 export type Config = z.infer<typeof schema>

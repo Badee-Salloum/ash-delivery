@@ -56,7 +56,10 @@ export function CloudReadStatus({
           ? t.shift.cloudNoFields
           : event.reason === 'refused'
             ? t.shift.cloudRefused
-            : t.shift.cloudUnavailable
+            // Never «أعد المحاولة» for a spent budget: the retry button below is hidden for it.
+            : event.reason === 'read_budget_exhausted'
+              ? t.shift.cloudBudgetSpent
+              : t.shift.cloudUnavailable
 
   return (
     <div className="flex flex-col items-start gap-1" aria-live="polite">

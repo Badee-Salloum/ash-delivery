@@ -43,6 +43,7 @@ import {
   uploadEvidencePath,
 } from '@ash/client'
 import { closeGateBlockers } from '../close-gate.ts'
+import { LINKED_READ_UI_TIMEOUT_MS } from '../linked-read-task.ts'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
 import { useGpsBeacon } from '../use-gps-beacon.ts'
@@ -1734,10 +1735,28 @@ function EndPackage({
           },
         },
       }))
+      /*
+       * A BROWSER-SIDE DEADLINE FOR EVERY READ, NOT JUST THE BATTERY ONE.
+       *
+       * `signal` is optional and exactly one of the nine call sites passes one — the BMS panel,
+       * which wraps its read in `createLinkedReadTask`. Orders, payments-log, wallet and odometer
+       * reads ran bare: no deadline, no cancel. A fetch whose connection never settles therefore
+       * left the `running` marker installed above in place FOREVER, and a running read is a hard
+       * close blocker (`readingInFlight` in `close-gate.ts`) whose retry button is hidden.
+       *
+       * That is unrecoverable without closing the app, at the end of a shift, standing at the
+       * branch. Provider and API deadlines cannot help — they bound the server, not this socket.
+       * So a caller that brings no lifetime of its own gets one here.
+       */
+      const ownDeadline = signal ? null : new AbortController()
+      const deadlineTimer = ownDeadline
+        ? setTimeout(() => ownDeadline.abort('timeout'), LINKED_READ_UI_TIMEOUT_MS)
+        : null
+      const effectiveSignal = signal ?? ownDeadline?.signal
       const onAbort = (): void => restorePendingRead()
-      signal?.addEventListener('abort', onAbort, { once: true })
+      effectiveSignal?.addEventListener('abort', onAbort, { once: true })
       try {
-        if (signal?.aborted) {
+        if (effectiveSignal?.aborted) {
           restorePendingRead()
           return null
         }
@@ -1747,8 +1766,8 @@ function EndPackage({
           attachmentToken: attachment.attachmentToken,
           field,
           ...(retryFailed ? { retryFailed: true } : {}),
-        }, signal ? { signal } : {})
-        if (signal?.aborted) return null
+        }, effectiveSignal ? { signal: effectiveSignal } : {})
+        if (effectiveSignal?.aborted) return null
         onDraft((state) => {
           const owned = state.closeDraftAttachments[slot]
           if (
@@ -1759,7 +1778,7 @@ function EndPackage({
         })
         return response
       } catch (error) {
-        if (signal?.aborted) {
+        if (effectiveSignal?.aborted) {
           restorePendingRead()
           return null
         }
@@ -1770,7 +1789,8 @@ function EndPackage({
         else restorePendingRead()
         return null
       } finally {
-        signal?.removeEventListener('abort', onAbort)
+        if (deadlineTimer !== null) clearTimeout(deadlineTimer)
+        effectiveSignal?.removeEventListener('abort', onAbort)
       }
     },
     [api, shift.id, applyCanonicalDraft, onDraft],

@@ -38,7 +38,9 @@ export type CloudReadEvent =
   | {
       status: 'failed'
       /** `cancelled` is browser-owned: the driver left a slow read and continued manually. */
-      reason: 'unavailable' | 'timeout' | 'no_fields' | 'refused' | 'wrong_screen' | 'cancelled'
+      reason:
+        | 'unavailable' | 'timeout' | 'no_fields' | 'refused' | 'wrong_screen' | 'cancelled'
+        | 'read_budget_exhausted'
       retryable: boolean
     }
 

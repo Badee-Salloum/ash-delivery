@@ -26,6 +26,26 @@ const OCR_RUNNING_MAX_WAIT_MS = 50_000
 const OCR_READ_DEADLINE_MS = 52_000
 const BMS_READ_DEADLINE_MS = 30_000
 
+/**
+ * Fields whose read is ARCHIVAL, and the headroom kept back from them.
+ *
+ * «سجل المدفوعات» is optional by rule — CLAUDE.md money rule 7: "Payments Log evidence is optional
+ * and archival … its absence never blocks close submission." Yet on 2026-08-24 its four pages ate
+ * four of امجد عبدالله's fifteen reads, and the two BMS reads the BR5 gate DOES require were then
+ * refused as capped. An optional page must never be able to spend the budget a mandatory one needs.
+ *
+ * So optional fields see a lower ceiling. The shift's total spend stays bounded by
+ * `OCR_MAX_READS_PER_SHIFT`; what changes is who may reach the last few.
+ */
+const ARCHIVAL_FIELDS: ReadonlySet<OcrField> = new Set<OcrField>(['payments_log'])
+const MANDATORY_READ_RESERVE = 8
+
+/** The ceiling THIS field may spend up to, leaving the reserve for the gate's own readings. */
+export function effectiveReadCeiling(field: OcrField, maxReadsPerShift: number): number {
+  if (maxReadsPerShift <= 0 || !ARCHIVAL_FIELDS.has(field)) return maxReadsPerShift
+  return Math.max(1, maxReadsPerShift - MANDATORY_READ_RESERVE)
+}
+
 export interface ReadInput {
   shiftId: string
   field: OcrField
@@ -87,12 +107,13 @@ export async function readScreen(deps: Deps, input: ReadInput): Promise<ReadOutp
       nowMs: Date.now(),
       leaseMs: OCR_ATTEMPT_LEASE_MS,
       retryFailed,
-      maxReadsPerShift: input.maxReadsPerShift,
+      // The archival fields stop short, so the gate's own readings always have room.
+      maxReadsPerShift: effectiveReadCeiling(input.field, input.maxReadsPerShift),
     })
 
   const current = await claim()
   if (current.kind === 'cached') return cachedOutput(input, current.record.result, current.used)
-  if (current.kind === 'capped') return unavailable(input, current.used)
+  if (current.kind === 'capped') return budgetExhausted(input, current.used)
 
   if (current.kind === 'running') {
     const finished = await waitForRunningRead(
@@ -114,6 +135,9 @@ export async function readScreen(deps: Deps, input: ReadInput): Promise<ReadOutp
     // attempt two inside this already-aged request; a later request will observe/expire it.
     const refreshed = await claim(false)
     if (refreshed.kind === 'cached') return cachedOutput(input, refreshed.record.result, refreshed.used)
+    // Deliberately `unavailable`, not the budget reason: another attempt is still in flight or was
+    // just expired. Nothing has been spent that the driver could act on.
+    if (refreshed.kind === 'capped') return budgetExhausted(input, refreshed.used, true)
     return unavailable(input, refreshed.used, true)
   }
 
@@ -240,6 +264,27 @@ function cachedOutput(input: ReadInput, result: OcrResult, used: number): ReadOu
 function unavailable(input: ReadInput, used: number, cached = false): ReadOutput {
   return {
     result: { ok: false, reason: 'unavailable' },
+    cached,
+    retryable: false,
+    reads: { used, max: input.maxReadsPerShift },
+  }
+}
+
+/**
+ * The per-shift budget is spent — which is NOT the reader being unreachable.
+ *
+ * Both are `retryable: false`, and the driver app hides the retry button for both; but the
+ * `unavailable` copy says «أعد المحاولة». Telling a driver to retry while removing the retry
+ * button is what stranded امجد عبدالله at 01:35 on 2026-08-25 with two refused BMS reads. This
+ * reason has its own sentence, and it points at manual entry — which works.
+ */
+function budgetExhausted(input: ReadInput, used: number, cached = false): ReadOutput {
+  return {
+    result: {
+      ok: false,
+      reason: 'read_budget_exhausted',
+      detail: `per-shift read budget spent: ${used}/${input.maxReadsPerShift} (${input.field} ceiling ${effectiveReadCeiling(input.field, input.maxReadsPerShift)})`,
+    },
     cached,
     retryable: false,
     reads: { used, max: input.maxReadsPerShift },

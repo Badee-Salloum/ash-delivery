@@ -73,7 +73,22 @@ export type OcrField = 'orders' | 'payments_log' | 'wallet' | 'odometer' | 'bms'
  * a missing asset, a dead worker, a timeout and a clean read that matched nothing all used to
  * return `null` alike, and the UI could say nothing more useful than "it didn't work".
  */
-export type OcrFailure = 'unavailable' | 'timeout' | 'no_fields' | 'refused' | 'wrong_screen'
+/**
+ * `read_budget_exhausted` is deliberately its OWN reason and not `unavailable`.
+ *
+ * They mean opposite things to the driver. `unavailable` says the reader could not be reached and
+ * the copy tells him to retry; a spent per-shift budget means retrying can never work, and the
+ * client hides the retry button for it (`retryable: false`) — so the app told امجد عبدالله to do
+ * the one thing it had just made impossible, at 01:35 on 2026-08-25, and his shift never closed.
+ * The number he needed was typeable all along; only the message failed him.
+ */
+export type OcrFailure =
+  | 'unavailable'
+  | 'timeout'
+  | 'no_fields'
+  | 'refused'
+  | 'wrong_screen'
+  | 'read_budget_exhausted'
 
 /**
  * AbortSignal's infrastructure-neutral surface. The contracts package deliberately has no DOM or

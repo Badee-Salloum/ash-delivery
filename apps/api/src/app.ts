@@ -56,6 +56,7 @@ import {
   resolveSession,
   verifySecondFactor,
 } from './auth.ts'
+import { DEFAULT_MAX_OCR_READS_PER_SHIFT } from './config.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
 import { assertEveryRouteDeclaresPermission, collectRoutes, makeAuthorize, resetRouteRegistry } from './rbac.ts'
 import { registerExpenseRoutes } from './expenses.routes.ts'
@@ -1010,7 +1011,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         id,
         slot,
         body,
-        opts.maxOcrReadsPerShift ?? 15,
+        opts.maxOcrReadsPerShift ?? DEFAULT_MAX_OCR_READS_PER_SHIFT,
       )
     },
   )
@@ -1063,7 +1064,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           field: expectedField,
           bytes,
           requestedBy: req.actor!.userId,
-          maxReadsPerShift: opts.maxOcrReadsPerShift ?? 15,
+          maxReadsPerShift: opts.maxOcrReadsPerShift ?? DEFAULT_MAX_OCR_READS_PER_SHIFT,
           retryFailed: false,
         })
         if (!classified.result.ok && classified.result.reason === 'wrong_screen') {
@@ -1223,7 +1224,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
                 field: preflightField,
                 bytes,
                 requestedBy: req.actor!.userId,
-                maxReadsPerShift: opts.maxOcrReadsPerShift ?? 15,
+                maxReadsPerShift: opts.maxOcrReadsPerShift ?? DEFAULT_MAX_OCR_READS_PER_SHIFT,
                 retryFailed: false,
               })
               if (!screen.result.ok && screen.result.reason === 'wrong_screen') {
@@ -1325,7 +1326,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         field: params.field,
         bytes: new Uint8Array(req.body as Buffer),
         requestedBy: req.actor!.userId,
-        maxReadsPerShift: opts.maxOcrReadsPerShift ?? 15,
+        maxReadsPerShift: opts.maxOcrReadsPerShift ?? DEFAULT_MAX_OCR_READS_PER_SHIFT,
         retryFailed: req.headers['x-ocr-retry'] === 'true',
       })
       return reply.send({
@@ -1874,7 +1875,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         target: body.target,
         reason: body.reason,
         requestId: req.requestId,
-        maxReadsPerShift: opts.maxOcrReadsPerShift ?? 15,
+        maxReadsPerShift: opts.maxOcrReadsPerShift ?? DEFAULT_MAX_OCR_READS_PER_SHIFT,
       })
       return reply.send({
         ok: out.result.ok,

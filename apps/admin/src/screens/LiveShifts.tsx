@@ -166,6 +166,9 @@ function LiveRow({
   const [cashDeclared, setCashDeclared] = useState('')
   const [walletDeclared, setWalletDeclared] = useState('')
   const [forcePrefillFailed, setForcePrefillFailed] = useState(false)
+  // How much work this void is about to destroy. Null until known; 0 means "nothing recorded".
+  const [voidOrderCount, setVoidOrderCount] = useState<number | null>(null)
+  const [voidAcknowledged, setVoidAcknowledged] = useState(false)
   const forceValuesEdited = useRef(false)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<LiveShiftApiError | null>(null)
@@ -187,6 +190,35 @@ function LiveRow({
       })
       .catch(() => {
         if (!cancelled) setForcePrefillFailed(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [api, panel, shift.id])
+
+  /*
+   * WHAT THIS VOID IS ABOUT TO THROW AWAY.
+   *
+   * `voidHint` has always said «يتجاهل طلباتها», but it never said HOW MANY — and on the morning of
+   * 2026-08-25 four shifts whose drivers had worked all night were voided one after another,
+   * discarding 4,325 SYP of deliveries. `force-close` was available the whole time and preserves
+   * them: `forceCloseLocked` submits the close draft's operations before settling.
+   *
+   * A count and a named alternative are what turn "use only when the shift produced no real
+   * deliveries" from a sentence into a decision the manager can actually make.
+   */
+  useEffect(() => {
+    if (panel !== 'void') return
+    let cancelled = false
+    setVoidOrderCount(null)
+    void api
+      .get<{ orders?: unknown[] }>(`/shifts/${shift.id}/review`)
+      .then((review) => {
+        if (!cancelled) setVoidOrderCount(review.orders?.length ?? 0)
+      })
+      .catch(() => {
+        // Unknown is not zero. Leaving it null keeps the acknowledgement required.
+        if (!cancelled) setVoidOrderCount(null)
       })
     return () => {
       cancelled = true
@@ -526,12 +558,39 @@ function LiveRow({
       {panel === 'void' ? (
         <div className="flex flex-col gap-2 border-t border-slate-200 pt-2">
           <p className="text-sm text-red-700">{t.liveShifts.voidHint}</p>
+          {voidOrderCount !== null && voidOrderCount > 0 ? (
+            <p className="rounded-xl bg-red-50 px-3 py-2 text-sm font-medium text-red-800" role="alert">
+              {t.liveShifts.voidDiscardsOrders.replace('{n}', String(voidOrderCount))}
+            </p>
+          ) : null}
+          <p className="text-sm text-slate-700">{t.liveShifts.voidUseForceClose}</p>
           <Field label={t.liveShifts.overrideReason}>
             <TextInput value={reason} onChange={(e) => setReason(e.target.value)} />
           </Field>
+          {/* Unknown counts still require the acknowledgement: not knowing is not the same as zero. */}
+          {voidOrderCount === null || voidOrderCount > 0 ? (
+            <label className="flex items-start gap-2 text-sm text-red-800">
+              <input
+                type="checkbox"
+                className="mt-1"
+                checked={voidAcknowledged}
+                onChange={(e) => setVoidAcknowledged(e.target.checked)}
+              />
+              <span>{t.liveShifts.voidAcknowledge}</span>
+            </label>
+          ) : null}
           {err ? <p className="text-sm text-red-600">{explainLiveShiftActionError(err, 'void', lang, t)}</p> : null}
           <div className="flex gap-2">
-            <Button variant="danger" className="flex-1" disabled={busy || reason.trim() === ''} onClick={voidShift}>
+            <Button
+              variant="danger"
+              className="flex-1"
+              disabled={
+                busy ||
+                reason.trim() === '' ||
+                ((voidOrderCount === null || voidOrderCount > 0) && !voidAcknowledged)
+              }
+              onClick={voidShift}
+            >
               {busy ? t.common.loading : t.liveShifts.void}
             </Button>
             <Button variant="ghost" className="flex-1" onClick={() => setPanel('none')}>

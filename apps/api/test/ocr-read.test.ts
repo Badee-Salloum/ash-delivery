@@ -262,7 +262,7 @@ describe('cloud OCR: a shift cannot spend without limit', () => {
     expect(await h.deps.ocrReads.countBilledForShift(shiftId)).toBe(1)
   })
 
-  it('stops calling out at the cap and answers unavailable instead of an error', async () => {
+  it('stops calling out at the cap and names the spent budget instead of an outage', async () => {
     const reader = scripted()
     // Cap of 2, and every image distinct so the cache never absorbs a call.
     h = await makeHarness({ ocr: reader, maxOcrReadsPerShift: 2 })
@@ -282,7 +282,7 @@ describe('cloud OCR: a shift cannot spend without limit', () => {
     // that is the same thing it does when the network is gone — one code path, not two.
     expect(third.statusCode).toBe(200)
     expect(third.json().ok).toBe(false)
-    expect(third.json().reason).toBe('unavailable')
+    expect(third.json().reason).toBe('read_budget_exhausted')
     expect(reader.calls, 'past the cap nothing may be billed').toBe(2)
   })
 
@@ -431,9 +431,12 @@ describe('cloud OCR: a failure never blocks a shift', () => {
 
     const distinct = Buffer.from([...TINY_JPEG, 7])
     const capped = await read(driver, shiftId, 'orders', distinct)
+    // Its OWN reason, not `unavailable`. Both hide the retry button, but the `unavailable` copy
+    // says «أعد المحاولة» — telling the driver to do the one thing that cannot work. That is what
+    // stranded امجد عبدالله's close on 2026-08-25; the number was typeable the whole time.
     expect(capped.json()).toMatchObject({
       ok: false,
-      reason: 'unavailable',
+      reason: 'read_budget_exhausted',
       retryable: false,
       reads: { used: 2, max: 2 },
     })
