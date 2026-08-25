@@ -42,7 +42,7 @@ const applyMigrationsThrough0040 = async (client: PoolClient): Promise<void> => 
 
 const insertFixture = async (
   client: PoolClient,
-  state: 'draft' | 'pending_review' = 'draft',
+  state: 'draft' | 'open' | 'pending_review' = 'draft',
 ): Promise<Fixture> => {
   const branchId = randomUUID()
   const managerId = randomUUID()
@@ -346,7 +346,7 @@ if (!DATABASE_URL) {
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
-        const fixture = await insertFixture(client)
+        const fixture = await insertFixture(client, 'open')
         const mediaId = randomUUID()
         const readId = randomUUID()
         const attachmentToken = randomUUID()
