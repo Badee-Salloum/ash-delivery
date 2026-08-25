@@ -27,6 +27,8 @@ export interface EndSubmitFailureCopy {
   shiftMissing: string
   otherShiftOrder: string
   invalidRequest: string
+  evidenceReadRequired: string
+  evidenceWrongScreen: string
   unknown: string
 }
 
@@ -102,6 +104,32 @@ function unresolvedCount(detail: unknown): number {
   return orders + deductions
 }
 
+function evidenceReadLines(
+  detail: unknown,
+  copy: EndSubmitFailureCopy,
+  evidenceLabel: (slot: string) => string,
+): string[] {
+  const raw = recordOf(detail)?.slots
+  if (!Array.isArray(raw)) return [fill(copy.evidenceReadRequired, { items: '—' })]
+  const issues = raw.flatMap((value) => {
+    const issue = recordOf(value)
+    const slot = stringOf(issue?.slot)
+    const reason = stringOf(issue?.reason)
+    return slot === null ? [] : [{ slot, reason }]
+  })
+  const wrong = [...new Set(
+    issues.filter((issue) => issue.reason === 'wrong_screen').map((issue) => evidenceLabel(issue.slot)),
+  )]
+  const unread = [...new Set(
+    issues.filter((issue) => issue.reason !== 'wrong_screen').map((issue) => evidenceLabel(issue.slot)),
+  )]
+  const lines = [
+    ...(unread.length > 0 ? [fill(copy.evidenceReadRequired, { items: unread.join(' · ') })] : []),
+    ...(wrong.length > 0 ? [fill(copy.evidenceWrongScreen, { items: wrong.join(' · ') })] : []),
+  ]
+  return lines.length > 0 ? lines : [fill(copy.evidenceReadRequired, { items: '—' })]
+}
+
 /**
  * Turn every close-path API refusal into something the driver can act on.
  *
@@ -142,6 +170,8 @@ export function describeEndSubmitFailure(
     lines = [copy.shiftMissing]
   } else if (code === 'order_belongs_to_other_shift') {
     lines = [copy.otherShiftOrder]
+  } else if (code === 'end_evidence_read_required') {
+    lines = evidenceReadLines(detail, copy, evidenceLabel)
   } else if (code === 'invalid_request' || code === 'operations_batch_shift_mismatch') {
     lines = [copy.invalidRequest]
   } else {

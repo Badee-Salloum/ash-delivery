@@ -156,6 +156,17 @@ export class PgCloseDraftRepo implements CloseDraftRepo {
       )
       if (!updated.rows[0]) return null
 
+      // Keep the accounting interpretation beside the immutable observations. The draft view is
+      // intentionally replaceable when a photo is retaken; this row is the durable explanation of
+      // whether a page produced orders, deductions, or only cancelled rows. Falling back to the
+      // observation count preserves records written by callers that predate the richer counters.
+      const readResult = {
+        rowCount: input.read.rowCount ?? input.observations.length,
+        ...(input.read.ordersCount === undefined ? {} : { ordersCount: input.read.ordersCount }),
+        ...(input.read.deductionsCount === undefined ? {} : { deductionsCount: input.read.deductionsCount }),
+        ...(input.read.cancelledCount === undefined ? {} : { cancelledCount: input.read.cancelledCount }),
+      }
+
       await client.query(
         `INSERT INTO shift_close_draft_reads
            (id, shift_id, media_id, attachment_token, package, slot, field, status, failure,
@@ -172,7 +183,7 @@ export class PgCloseDraftRepo implements CloseDraftRepo {
           input.read.status,
           input.read.failure,
           input.read.attempts,
-          JSON.stringify({ rowCount: input.observations.length }),
+          JSON.stringify(readResult),
           input.updatedAtMs,
           input.updatedBy,
         ],

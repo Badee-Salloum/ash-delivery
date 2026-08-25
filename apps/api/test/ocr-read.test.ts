@@ -244,6 +244,55 @@ describe('cloud OCR: wallet publication guard', () => {
   })
 })
 
+describe('cloud OCR: orders publication guard', () => {
+  it('never reports a green orders read when the provider published zero rows', async () => {
+    const emptySuccess = {
+      ok: true as const,
+      rows: [],
+      // A status-bar or unrelated scalar must not turn an empty orders transcription into success.
+      fields: { statusBattery: '30' },
+      raw: null,
+    }
+    const reader = new ScriptedOcrReader([emptySuccess, emptySuccess])
+    h = await makeHarness({ ocr: reader })
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = await openShift(driver, manager)
+
+    const first = await read(driver, shiftId, 'orders')
+    expect(first.json()).toMatchObject({
+      ok: false,
+      reason: 'no_fields',
+      cached: false,
+      retryable: true,
+      rows: [],
+    })
+    const again = await read(driver, shiftId, 'orders')
+    expect(again.json()).toMatchObject({
+      ok: false,
+      reason: 'no_fields',
+      cached: true,
+      retryable: true,
+      rows: [],
+    })
+    const retried = await read(driver, shiftId, 'orders', TINY_JPEG, true)
+    expect(retried.json()).toMatchObject({
+      ok: false,
+      reason: 'no_fields',
+      cached: false,
+      retryable: false,
+    })
+    const afterRetry = await read(driver, shiftId, 'orders', TINY_JPEG, true)
+    expect(afterRetry.json()).toMatchObject({
+      ok: false,
+      reason: 'no_fields',
+      cached: true,
+      retryable: false,
+    })
+    expect(reader.calls).toBe(2)
+  })
+})
+
 describe('cloud OCR: a shift cannot spend without limit', () => {
   it('atomically caps concurrent initial reads of different pixels', async () => {
     const reader = scripted()

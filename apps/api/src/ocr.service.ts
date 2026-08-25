@@ -154,11 +154,12 @@ export async function readScreen(deps: Deps, input: ReadInput): Promise<ReadOutp
     usage: reading.usage,
   })
   const finalRead = completed ?? (await deps.ocrReads.findBySha(shift.branchId, sha256, input.field, cacheSignature))
+  const finalResult = safeFieldResult(input.field, finalRead?.result ?? result)
   const used = await deps.ocrReads.countBilledForShift(input.shiftId)
   return {
-    result: safeFieldResult(input.field, finalRead?.result ?? result),
+    result: finalResult,
     cached: false,
-    retryable: canRetry(finalRead?.result ?? result),
+    retryable: canRetry(finalResult),
     reads: { used, max: input.maxReadsPerShift },
   }
 }
@@ -243,20 +244,40 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-/** A wallet screen has exactly one live balance; never let a status-bar number win by position. */
+/** Field-level publication invariants independent of any one OCR adapter implementation. */
 function safeFieldResult(field: OcrField, result: OcrResult): OcrResult {
-  if (field !== 'wallet' || !result.ok) return result
-  if (result.rows.length !== 1 || result.rows[0]?.cancelled || result.rows[0]?.value === null) {
-    return { ok: false, reason: 'no_fields' }
+  if (!result.ok) return result
+  // An orders read cannot be "complete" solely because a provider returned unrelated scalar
+  // fields. That green/zero state tells the driver the page was understood while publishing no
+  // accounting row at all.
+  if (field === 'orders' && result.rows.length === 0) {
+    return {
+      ok: false,
+      reason: 'no_fields',
+      detail: 'orders publication guard: successful result contained 0 rows',
+      ...(result.attemptCount === undefined ? {} : { attemptCount: result.attemptCount }),
+    }
+  }
+  // A wallet screen has exactly one live balance; never let a status-bar number win by position.
+  if (field === 'wallet' && (
+    result.rows.length !== 1 || result.rows[0]?.cancelled || result.rows[0]?.value === null
+  )) {
+    return {
+      ok: false,
+      reason: 'no_fields',
+      detail: `wallet publication guard: expected 1 live balance, received ${result.rows.length}`,
+      ...(result.attemptCount === undefined ? {} : { attemptCount: result.attemptCount }),
+    }
   }
   return result
 }
 
 function cachedOutput(input: ReadInput, result: OcrResult, used: number): ReadOutput {
+  const safeResult = safeFieldResult(input.field, result)
   return {
-    result: safeFieldResult(input.field, result),
+    result: safeResult,
     cached: true,
-    retryable: canRetry(result),
+    retryable: canRetry(safeResult),
     reads: { used, max: input.maxReadsPerShift },
   }
 }

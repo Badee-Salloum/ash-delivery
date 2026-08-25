@@ -156,7 +156,8 @@ describe('manager re-read of stored Recent Orders evidence', () => {
     expect(response.statusCode, response.body).toBe(200)
     expect(response.json()).toMatchObject({
       ok: true,
-      // Upload screen-kind validation already read these exact bytes with the same current reader.
+      // The current driver runs the evidence-bound read before submission. A manager asking for
+      // the same pixels and prompt receives that immutable result without another provider bill.
       cached: true,
       evidence: { package: 'end', slot: 'dashboard' },
       target: { kind: 'order', providerOrderNo: 'order-7', provenanceLinked: false },
@@ -167,8 +168,6 @@ describe('manager re-read of stored Recent Orders evidence', () => {
     })
     expect(response.json().reviewedOrdersHash).toEqual(expect.any(String))
     expect(response.json().settlementHash).toEqual(expect.any(String))
-    // Screen-kind checks may also inspect the wallet/odometer fixtures. This page itself is cached,
-    // so the manager action must not invoke the provider again.
     expect(reader.calls).toBe(callsBeforeReread)
 
     const after = await h.deps.orders.listByShift(shiftId)
@@ -245,8 +244,8 @@ describe('manager re-read of stored Recent Orders evidence', () => {
     const shiftId = await pendingReviewShift(driver, manager)
     const callsAfterUploads = reader.calls
 
-    // Upload validation consumed/cached the first failed attempt. The manager's explicit reread is
-    // the one permitted retry, and the next call must be the immutable cached terminal result.
+    // Driver submission already linked attempt one (`no_fields`) to this dashboard. The first
+    // explicit manager action owns the single permitted retry; later calls get it from cache.
     const first = await post(manager, `/shifts/${shiftId}/ocr/orders/evidence-reread`, body())
     expect(first.statusCode, first.body).toBe(200)
     expect(first.json()).toMatchObject({ ok: false, reason: 'refused', cached: false, retryable: false })

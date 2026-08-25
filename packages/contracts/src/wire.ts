@@ -636,7 +636,7 @@ export const fixedSettlementConfirmationSchema = z.object({
 export const approveCloseRequest = z.object({
   /** The hash the manager actually reviewed. Re-checked inside the approval transaction. */
   reviewedOrdersHash: z.string().min(1),
-  /** «يبقى ذمة على السائق» — how much of tonight's cash stays with him. The manager decides. */
+  /** Legacy field: cash kept with the driver as funding auto-consumed by his next shift. */
   keepAsReceivable: moneySchema.optional(),
   /**
    * «يُعاد للسائق» — pay his share tonight out of the cash in his hands (owner decision f).
@@ -646,7 +646,7 @@ export const approveCloseRequest = z.object({
    * must remain distinguishable so the service can refuse the old leave-as-payable workflow.
    */
   payShareNow: z.boolean().optional(),
-  /** Amounts from positive collect actions deliberately left as office receivables. */
+  /** Legacy-named positive collections retained as funding auto-consumed by the next shift. */
   cashReceivableDeferred: nonnegativeMoneySchema.optional(),
   walletReceivableDeferred: nonnegativeMoneySchema.optional(),
   /** Fixed-policy preview hash. Optional on the wire solely for a controlled old-client refusal. */

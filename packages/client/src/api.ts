@@ -35,6 +35,10 @@ export interface CloseDraftAttachmentRead {
   field: CloudOcrField
   failure: CloseDraftReadFailure | null
   attempts: number
+  rowCount?: number
+  ordersCount?: number
+  deductionsCount?: number
+  cancelledCount?: number
 }
 
 export interface CloseDraftAttachment {

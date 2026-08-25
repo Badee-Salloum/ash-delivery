@@ -83,6 +83,22 @@ describe('driver end-shift failure copy', () => {
     expect(inEnglish({ error: 'future_close_failure' }).lines[0]).toContain('(future_close_failure)')
     expect(inEnglish(new TypeError('offline')).lines[0]).toContain('check the connection')
   })
+
+  it('names unread and wrong-screen evidence separately instead of exposing the API code', () => {
+    const notice = inEnglish({
+      error: 'end_evidence_read_required',
+      detail: {
+        slots: [
+          { slot: 'wallet', field: 'wallet', reason: 'missing' },
+          { slot: 'dashboard_2', field: 'orders', reason: 'wrong_screen' },
+        ],
+      },
+    })
+    expect(notice.lines).toEqual([
+      'Finish reading the current photo, then submit again: Wallet',
+      'This photo does not belong in its slot — retake it: Dashboard 2',
+    ])
+  })
 })
 
 const shiftSource = readFileSync(new URL('../src/screens/Shift.tsx', import.meta.url), 'utf8')

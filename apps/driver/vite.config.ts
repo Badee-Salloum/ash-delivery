@@ -3,10 +3,21 @@ import tailwind from '@tailwindcss/vite'
 import { defineConfig } from 'vite'
 import { VitePWA } from 'vite-plugin-pwa'
 
+const builtAt = new Date().toISOString()
+const buildStamp = `${builtAt.slice(2, 10).replaceAll('-', '')}.${builtAt.slice(11, 19).replaceAll(':', '')}Z`
+const processEnvironment = (globalThis as typeof globalThis & {
+  process?: { env?: Record<string, string | undefined> }
+}).process?.env
+const revision = processEnvironment?.VERCEL_GIT_COMMIT_SHA?.slice(0, 7)
+const driverBuildId = revision ? `${buildStamp}-${revision}` : buildStamp
+
 // The driver app is a separate bundle with a tight budget: no component library, no chart lib.
 // `registerType: 'prompt'` — a money app must never silently serve a stale service worker
 // mid-shift; the app shows an Arabic "new version" bar instead.
 export default defineConfig({
+  define: {
+    __ASH_DRIVER_BUILD_ID__: JSON.stringify(driverBuildId),
+  },
   plugins: [
     react(),
     tailwind(),

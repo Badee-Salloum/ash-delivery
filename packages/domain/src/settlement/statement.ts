@@ -14,7 +14,7 @@ import { type Minor, ZERO, abs, add, minor, sub } from '../money/minor.ts'
  * questions with different inputs. BR1 compares DECLARED against EXPECTED; this one distributes the
  * declared cash between three destinations that must sum back to it exactly:
  *
- *     يدخل إلى خزينة الفرع  +  يُعاد للسائق  +  يبقى ذمة  ===  النقد المصرَّح به
+ *     يدخل إلى خزينة الفرع  +  يُعاد للسائق  +  يبقى تمويل النوبة التالية  ===  النقد المصرَّح به
  *
  * That identity is the whole safety property, and it is property-tested. Anything that does not
  * conserve the driver's cash is inventing or destroying money on the way to the box.
@@ -23,7 +23,8 @@ import { type Minor, ZERO, abs, add, minor, sub } from '../money/minor.ts'
  *
  * `canApproveClose` refuses unless BR1 is EXACTLY zero (`shift/state.ts`, reason `br1_not_zero`).
  * So on the ordinary path `endCashDeclared === expectedCash`, the shortfall and surplus branches
- * below are dead, and the statement is a pure distribution: the box, his share, and any ذمة.
+ * below are dead, and the statement is a pure distribution: the box, his share, and any funding
+ * retained for his next shift.
  *
  * They come alive only on FORCE-CLOSE, which is the one path that admits a gap — and that is
  * exactly what owner decision (k) asks for: the refusal stays the default, the manager closes
@@ -38,13 +39,13 @@ import { type Minor, ZERO, abs, add, minor, sub } from '../money/minor.ts'
 export type SettlementLineCode =
   /** النقد المصرَّح به — what the driver says is in his hands. The thing being distributed. */
   | 'end_cash_declared'
-  /** ذمة مرحّلة من اليوم السابق, already inside the float and shown so the total reconciles. */
+  /** تمويل مرحّل من النوبة السابقة, already inside the float and shown so the total reconciles. */
   | 'opening_receivable'
   /** حصة السائق for this shift — the day-tier delta, and it MAY be negative. */
   | 'driver_share'
   /** يدخل إلى خزينة الفرع. */
   | 'to_office_cash'
-  /** يبقى ذمة على السائق — the manager's decision. */
+  /** يبقى كتمويل للنوبة القادمة — the manager's decision. */
   | 'kept_as_receivable'
   /** يُعاد للسائق: his share, plus any surplus he is carrying. */
   | 'paid_to_driver'
@@ -74,9 +75,9 @@ export interface SettlementInput {
    * is written for that; see `recipes.ts:280-308` for the measured case.
    */
   readonly driverShare: Minor
-  /** ذمة carried IN at open. Already inside `floatTotal`; carried here only so the statement reads. */
+  /** Next-shift funding carried IN at open. Already inside `floatTotal`; shown here for reconciliation. */
   readonly openingReceivable: Minor
-  /** How much of tonight's cash stays with him. The MANAGER decides this (owner decision (g)). */
+  /** How much of tonight's cash stays with him as next-shift funding. The manager decides. */
   readonly keepAsReceivable: Minor
   /** Owner decision (f) is per-shift payment, so this is normally true. */
   readonly payShareNow: boolean
@@ -92,7 +93,7 @@ export interface SettlementLine {
 export interface SettlementPlan {
   /** يدخل إلى خزينة الفرع. */
   readonly toOfficeCash: Minor
-  /** يبقى ذمة على السائق. */
+  /** يبقى كتمويل للنوبة القادمة، ويُستهلك تلقائياً عند فتحها. */
   readonly keptAsReceivable: Minor
   /** يُعاد للسائق. */
   readonly paidToDriver: Minor
@@ -206,9 +207,9 @@ export interface FixedShareSettlementInput {
   readonly actualCash: Minor
   /** The complete app-wallet balance. Positive is collected; negative must be funded to reach 0. */
   readonly actualWallet: Minor
-  /** Positive cash collection deliberately left outstanding as an office receivable. */
+  /** Legacy-named positive cash collection retained as automatically consumed next-shift funding. */
   readonly cashReceivableDeferred?: Minor
-  /** Positive wallet collection deliberately left outstanding as an office receivable. */
+  /** Legacy-named positive wallet collection retained as automatically consumed next-shift funding. */
   readonly walletReceivableDeferred?: Minor
 }
 
@@ -240,9 +241,9 @@ export interface FixedShareSettlementPlan {
   readonly cashClaimToOffice: Minor
   /** Signed wallet claim before any amount is deliberately deferred. Equal to actualWallet. */
   readonly walletClaimToOffice: Minor
-  /** Non-negative part of the cash claim left as a driver receivable. */
+  /** Legacy-named non-negative cash claim posted to the driver's next-shift funding. */
   readonly cashReceivableDeferred: Minor
-  /** Non-negative part of the wallet claim left as a driver receivable. */
+  /** Legacy-named non-negative wallet claim posted to the driver's next-shift funding. */
   readonly walletReceivableDeferred: Minor
   /** Signed physical office-cash movement after deferral. Positive collects; negative pays. */
   readonly cashToOffice: Minor
@@ -271,9 +272,11 @@ function cashAction(amount: Minor): SettlementAction<CashSettlementAction> {
 }
 
 /**
- * Settle a shift by clearing both operational funds. A manager may defer part of a positive office
- * collection as an ordinary receivable; that asset stays outside the next shift until explicitly
- * collected. Separate shift-funding receivables are the only balances auto-consumed at open.
+ * Settle a shift by clearing both operational funds. A manager may let the driver retain part of a
+ * positive office collection as next-shift funding. It posts to `driver_shift_funding_cash` or
+ * `driver_shift_funding_wallet` and is consumed automatically when that driver opens the next
+ * shift; it is not an ordinary receivable awaiting a separate collection command. The public
+ * `*ReceivableDeferred` identifiers are retained only as legacy wire/database names.
  *
  * The essential identities are:
  *
@@ -281,10 +284,10 @@ function cashAction(amount: Minor): SettlementAction<CashSettlementAction> {
  *     scalar variance     V = actual total − expected total
  *     employee cash       N = B + V
  *     cash claim          X0 = expected total − B − actual wallet
- *     physical cash       X  = X0 − deferred cash receivable
- *     physical wallet     W  = actual wallet − deferred wallet receivable
+ *     physical cash       X  = X0 − deferred cash funding
+ *     physical wallet     W  = actual wallet − deferred wallet funding
  *
- * Therefore physical movements plus both receivables always give the office exactly
+ * Therefore physical movements plus both retained funding balances always give the office exactly
  * `expectedTotal − B`, independent of where the driver happened to hold the money.
  */
 export function planFixedShareSettlement(input: FixedShareSettlementInput): FixedShareSettlementPlan {
@@ -295,8 +298,8 @@ export function planFixedShareSettlement(input: FixedShareSettlementInput): Fixe
   requireNonNegative('actual cash', input.actualCash)
   const cashReceivableDeferred = input.cashReceivableDeferred ?? ZERO
   const walletReceivableDeferred = input.walletReceivableDeferred ?? ZERO
-  requireNonNegative('deferred cash receivable', cashReceivableDeferred)
-  requireNonNegative('deferred wallet receivable', walletReceivableDeferred)
+  requireNonNegative('deferred cash funding', cashReceivableDeferred)
+  requireNonNegative('deferred wallet funding', walletReceivableDeferred)
 
   const canonicalFixedShare = allocate(input.deliveryFeeTotal, FIXED_DRIVER_BPS, 'floor')
   if (input.fixedDriverShare !== canonicalFixedShare) {
@@ -316,19 +319,19 @@ export function planFixedShareSettlement(input: FixedShareSettlementInput): Fixe
   const cashClaimToOffice = sub(officeEntitlement, input.actualWallet)
   const walletClaimToOffice = input.actualWallet
 
-  // A receivable may replace only value the office was otherwise about to COLLECT. When a signed
-  // action is a payout/funding operation, deferring it would create an office liability, not an
-  // asset owed by the driver, and therefore belongs to a different workflow.
+  // Retained next-shift funding may replace only value the office was otherwise about to COLLECT.
+  // When a signed action is already a payout/funding operation, deferring it would create an office
+  // liability rather than retain office value with the driver, and belongs to a different workflow.
   const maximumCashReceivable = cashClaimToOffice > ZERO ? cashClaimToOffice : ZERO
   const maximumWalletReceivable = walletClaimToOffice > ZERO ? walletClaimToOffice : ZERO
   if (cashReceivableDeferred > maximumCashReceivable) {
     throw new RangeError(
-      `deferred cash receivable ${cashReceivableDeferred} exceeds collectible cash ${maximumCashReceivable}`,
+      `deferred cash funding ${cashReceivableDeferred} exceeds collectible cash ${maximumCashReceivable}`,
     )
   }
   if (walletReceivableDeferred > maximumWalletReceivable) {
     throw new RangeError(
-      `deferred wallet receivable ${walletReceivableDeferred} exceeds collectible wallet ${maximumWalletReceivable}`,
+      `deferred wallet funding ${walletReceivableDeferred} exceeds collectible wallet ${maximumWalletReceivable}`,
     )
   }
 

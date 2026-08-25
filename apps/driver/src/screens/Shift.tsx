@@ -44,6 +44,11 @@ import {
 } from '@ash/client'
 import { closeGateBlockers } from '../close-gate.ts'
 import { LINKED_READ_UI_TIMEOUT_MS } from '../linked-read-task.ts'
+import {
+  isStaleCloseDraftView,
+  ownsPendingCloseDraftRead,
+  preservePendingCloseDraftReads,
+} from '../close-draft-revision.ts'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
 import { useGpsBeacon } from '../use-gps-beacon.ts'
@@ -273,7 +278,14 @@ function restoredPageReadState(
 /** Apply one canonical close-draft snapshot; no local-only OCR row can enter through this path. */
 function restoreCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
   const operations = closeDraftOperations(view)
-  const attachments = Object.fromEntries(view.attachments.map((attachment) => [attachment.slot, attachment]))
+  const canonicalAttachments = Object.fromEntries(
+    view.attachments.map((attachment) => [attachment.slot, attachment]),
+  )
+  const attachments = preservePendingCloseDraftReads(
+    current.closeDraftAttachments,
+    canonicalAttachments,
+  )
+  const restoredAttachments = Object.values(attachments)
   const orderRefusals = operations.orders.filter(
     (row) => row.feeText.trim() === '' || row.timeReviewRequired === true,
   ).length
@@ -327,12 +339,12 @@ function restoreCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
     cashDeductions: operations.cashDeductions,
     movements: operations.movements,
     dash: restoredPageReadState(
-      view.attachments,
+      restoredAttachments,
       'dashboard',
       operations.orders.length + operations.cashDeductions.length,
       orderRefusals + deductionRefusals,
     ),
-    log: restoredPageReadState(view.attachments, PAYMENTS_LOG_SLOT, operations.movements.length, 0),
+    log: restoredPageReadState(restoredAttachments, PAYMENTS_LOG_SLOT, operations.movements.length, 0),
   }
 }
 
@@ -391,7 +403,11 @@ export function applyLinkedScalarRead(
 }
 
 /** Rebase local human input over a newer canonical revision without retaining withdrawn OCR rows. */
-function rebaseCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
+export function rebaseCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
+  // Upload, autosave and linked-read requests can finish out of order. A late older response is
+  // not a new base: applying it would rewind attachment generations, canonical rows and the CAS
+  // revision, after which the next legitimate save conflicts or publishes withdrawn OCR rows.
+  if (isStaleCloseDraftView(current.closeDraftRevision, view.revision)) return current
   const cashDirty = (current.cash.trim() === '' ? null : current.cash) !== current.persistedCashDeclared
   const walletDirty =
     (current.wallet.trim() === '' ? null : current.wallet) !== current.persistedWalletDeclared
@@ -1698,11 +1714,12 @@ function EndPackage({
       /** Restore only the local marker installed below; keep the accepted image and canonical draft. */
       const restorePendingRead = (): void => {
         onDraft((state) => {
-          const owned = state.closeDraftAttachments[slot]
-          if (
-            owned?.attachmentToken !== attachment.attachmentToken ||
-            owned.read?.readId !== pendingReadId
-          ) return state
+          if (!ownsPendingCloseDraftRead(
+            state.closeDraftAttachments,
+            slot,
+            attachment.attachmentToken,
+            pendingReadId,
+          )) return state
           return {
             ...state,
             ...(field === 'wallet' ? { walletCloud: null } : {}),
@@ -1769,11 +1786,12 @@ function EndPackage({
         }, effectiveSignal ? { signal: effectiveSignal } : {})
         if (effectiveSignal?.aborted) return null
         onDraft((state) => {
-          const owned = state.closeDraftAttachments[slot]
-          if (
-            owned?.attachmentToken !== attachment.attachmentToken ||
-            owned.read?.readId !== pendingReadId
-          ) return state
+          if (!ownsPendingCloseDraftRead(
+            state.closeDraftAttachments,
+            slot,
+            attachment.attachmentToken,
+            pendingReadId,
+          )) return state
           return applyLinkedScalarRead(state, response, field, attachment.attachmentToken)
         })
         return response

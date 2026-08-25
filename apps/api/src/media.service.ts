@@ -276,7 +276,14 @@ export async function uploadEvidence(deps: Deps, input: UploadInput): Promise<Up
     })
   }
 
-  if (!exactRetry) await input.beforeAttach?.(media)
+  // The first photo in an empty slot has nothing trustworthy to protect. Attach it immediately
+  // and let the evidence-bound read report a wrong screen afterwards. Running the full cloud read
+  // before every first attachment used almost the whole 60-second function lifetime, so the row
+  // could commit while the phone lost the 201 response and kept showing a red upload tile.
+  //
+  // Replacements are different: a wrong candidate must not rotate the current attachment token or
+  // withdraw the accepted rows. Keep the preflight only for that destructive case.
+  if (!exactRetry && currentSlot) await input.beforeAttach?.(media)
 
   const commitMutation = async (commitDeps: Deps): Promise<UploadResult> => {
     await input.beforeCommit?.(commitDeps)
@@ -298,12 +305,18 @@ export async function uploadEvidence(deps: Deps, input: UploadInput): Promise<Up
     }
     try {
       await commitDeps.media.attach(input.shiftId, input.package, input.slot, media.id, {
-      actorId: input.uploadedBy,
-      attachedAtMs: receivedAtMs,
-      reusedFromShiftId: committedPrior?.shiftId ?? null,
-      expectedAttachmentToken: input.expectedAttachmentToken === undefined
-        ? (exactRetry ? currentSlot!.attachmentToken : null)
-        : input.expectedAttachmentToken,
+        actorId: input.uploadedBy,
+        attachedAtMs: receivedAtMs,
+        reusedFromShiftId: committedPrior?.shiftId ?? null,
+        // A retry after a dropped 201 cannot know the token that the first request created. Once the
+        // bytes prove this is the exact current generation, use that generation's token for the CAS
+        // regardless of whether the client sent null/omitted the header. Different bytes still use
+        // the caller's token and retain the replacement race protection above.
+        ...(exactRetry
+          ? { expectedAttachmentToken: currentSlot!.attachmentToken }
+          : input.expectedAttachmentToken === undefined
+            ? {}
+            : { expectedAttachmentToken: input.expectedAttachmentToken }),
       })
     } catch (error) {
       rethrowMediaMutation(error)

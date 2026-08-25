@@ -2343,6 +2343,44 @@ function assertCloseDraftMoneyComplete(closeDraft: CloseDraftRecord): void {
   }
 }
 
+type EndEvidenceReadIssueReason = 'missing' | 'not_final' | 'wrong_screen'
+
+/**
+ * A photo being attached is not proof that it belongs in that slot. The first upload deliberately
+ * returns before OCR so a slow reader cannot turn a successful upload into a phone-side failure;
+ * consequently the close transaction must require the separate evidence-bound read to have
+ * reached a terminal state for the exact current attachment generation.
+ *
+ * Terminal reader failures other than `wrong_screen` remain admissible. In particular
+ * `no_fields`, `timeout` and `unavailable` must leave the driver able to type the value manually.
+ * The optional payments log is intentionally absent from this gate.
+ */
+function assertCloseDraftEvidenceReadsFinal(closeDraft: CloseDraftRecord): void {
+  const expectedField = (slot: string): 'orders' | 'wallet' | 'odometer' | 'bms' | null => {
+    if (slot === 'dashboard' || /^dashboard_[1-9][0-9]*$/.test(slot)) return 'orders'
+    if (slot === 'wallet') return 'wallet'
+    if (slot === 'odometer') return 'odometer'
+    if (/^bms_[1-9][0-9]*$/.test(slot)) return 'bms'
+    return null
+  }
+  const issues: Array<{ slot: string; field: string; reason: EndEvidenceReadIssueReason }> = []
+  for (const [slot, evidence] of Object.entries(closeDraft.data.evidence)) {
+    const field = expectedField(slot)
+    if (field === null) continue
+    const read = closeDraft.data.reads[`${evidence.attachmentToken}|${field}`]
+    if (read === undefined) {
+      issues.push({ slot, field, reason: 'missing' })
+    } else if (read.status !== 'complete' && read.status !== 'failed') {
+      issues.push({ slot, field, reason: 'not_final' })
+    } else if (read.status === 'failed' && read.failure === 'wrong_screen') {
+      issues.push({ slot, field, reason: 'wrong_screen' })
+    }
+  }
+  if (issues.length > 0) {
+    throw new ServiceError(422, 'end_evidence_read_required', { slots: issues })
+  }
+}
+
 async function assertCloseDraftEvidenceCurrent(
   deps: Deps,
   shiftId: string,
@@ -2433,6 +2471,9 @@ async function submitEndPackageLocked(
       })
     }
     assertCloseDraftMoneyComplete(closeDraft)
+    // Keep this before canonical operation materialisation: an unread or wrong-screen attachment
+    // must not write even provisional order/money rows into the close transaction.
+    assertCloseDraftEvidenceReadsFinal(closeDraft)
     const figures = closeDraft.data.figures
     if (figures.odometerKm === null || figures.cashDeclared === null || figures.walletDeclared === null) {
       throw new ServiceError(422, 'close_draft_figures_incomplete')

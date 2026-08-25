@@ -204,6 +204,29 @@ async function readSlot(
   }, field === 'orders' ? { 'x-ash-orders-time-consensus': 'close-draft-v1' } : {})
 }
 
+async function finishCurrentEvidenceReads(
+  driver: string,
+  shiftId: string,
+  initial: CloseDraftView,
+): Promise<CloseDraftView> {
+  let draft = initial
+  for (const attachment of initial.attachments) {
+    const field: OcrField | null =
+      attachment.slot === 'dashboard' || /^dashboard_[1-9][0-9]*$/.test(attachment.slot)
+        ? 'orders'
+        : attachment.slot === 'wallet'
+          ? 'wallet'
+          : attachment.slot === 'odometer'
+            ? 'odometer'
+            : /^bms_[1-9][0-9]*$/.test(attachment.slot)
+              ? 'bms'
+              : null
+    if (field === null || attachment.read?.status === 'complete' || attachment.read?.status === 'failed') continue
+    draft = draftFromRead(await readSlot(driver, shiftId, attachment.slot, field, draft))
+  }
+  return draft
+}
+
 function draftFromUpload(response: LightMyRequestResponse): CloseDraftView {
   expect(response.statusCode, response.body).toBe(201)
   return response.json().draft as CloseDraftView
@@ -218,6 +241,7 @@ async function readyManualDraft(
   driver: string,
   shiftId: string,
   key = 'manual-order-1',
+  readEvidence = true,
 ): Promise<CloseDraftView> {
   let draft = await getDraft(driver, shiftId)
   for (const slot of ['dashboard', 'wallet', 'odometer']) {
@@ -247,7 +271,8 @@ async function readyManualDraft(
     },
   })
   expect(patched.statusCode, patched.body).toBe(200)
-  return patched.json() as CloseDraftView
+  const ready = patched.json() as CloseDraftView
+  return readEvidence ? finishCurrentEvidenceReads(driver, shiftId, ready) : ready
 }
 
 const endPayload = (draft: CloseDraftView): Record<string, unknown> => ({
@@ -387,30 +412,249 @@ describe('durable close-draft identity', () => {
 })
 
 describe('attachment/read races and screen safety', () => {
-  it('rebases an end-photo upload over an autosave that lands during slow OCR', async () => {
-    reader.push(ok())
+  it('refuses manual figures when current evidence skipped its linked reads, before materialising operations', async () => {
+    const { driver, shiftId } = await openShift()
+    let draft = await readyManualDraft(driver, shiftId, 'unread-evidence', false)
+    // This archive-only attachment deliberately has no linked read and must not appear in the gate.
+    draft = draftFromUpload(await uploadEnd(driver, shiftId, 'payments_log', image('optional-log'), draft))
+    draft = draftFromUpload(await uploadEnd(driver, shiftId, 'bms_1', image('unread-bms'), draft))
+
+    const submitted = await inject('PUT', driver, `/shifts/${shiftId}/end-package`, endPayload(draft))
+    expect(submitted.statusCode, submitted.body).toBe(422)
+    expect(submitted.json()).toEqual({
+      error: 'end_evidence_read_required',
+      detail: {
+        slots: [
+          { slot: 'dashboard', field: 'orders', reason: 'missing' },
+          { slot: 'wallet', field: 'wallet', reason: 'missing' },
+          { slot: 'odometer', field: 'odometer', reason: 'missing' },
+          { slot: 'bms_1', field: 'bms', reason: 'missing' },
+        ],
+      },
+    })
+    expect(await h.deps.orders.listByShift(shiftId)).toEqual([])
+    expect(await h.deps.shifts.findById(shiftId)).toMatchObject({ state: 'open' })
+  })
+
+  it('refuses a terminal wrong-screen read even when the driver typed every figure manually', async () => {
+    reader.push(
+      { ok: false, reason: 'wrong_screen' },
+      { ok: false, reason: 'no_fields' },
+      { ok: false, reason: 'no_fields' },
+    )
+    const { driver, shiftId } = await openShift()
+    let draft = await getDraft(driver, shiftId)
+    for (const [slot, field] of [
+      ['dashboard', 'orders'],
+      ['wallet', 'wallet'],
+      ['odometer', 'odometer'],
+    ] as const) {
+      draft = draftFromUpload(await uploadEnd(driver, shiftId, slot, image(`wrong-screen-${slot}`), draft))
+      draft = draftFromRead(await readSlot(driver, shiftId, slot, field, draft))
+    }
+    const saved = await patchDraft(driver, shiftId, {
+      expectedRevision: draft.revision,
+      figures: { odometerKm: 1_010, cashDeclared: '155.00', walletDeclared: '0.00' },
+      operations: {
+        manualOrders: [{
+          clientKey: 'wrong-screen-manual',
+          providerOrderNo: 'YAL-WRONG-SCREEN-MANUAL',
+          payMode: 'cash',
+          fee: '155.00',
+          occurredMinute: '08:00',
+          occurredDate: today,
+          pointA: 'A',
+          pointB: 'B',
+        }],
+        manualCashDeductions: [],
+        manualMovements: [],
+      },
+    })
+    expect(saved.statusCode, saved.body).toBe(200)
+    draft = saved.json() as CloseDraftView
+
+    const submitted = await inject('PUT', driver, `/shifts/${shiftId}/end-package`, endPayload(draft))
+    expect(submitted.statusCode, submitted.body).toBe(422)
+    expect(submitted.json()).toEqual({
+      error: 'end_evidence_read_required',
+      detail: { slots: [{ slot: 'dashboard', field: 'orders', reason: 'wrong_screen' }] },
+    })
+    expect(await h.deps.orders.listByShift(shiftId)).toEqual([])
+  })
+
+  it('allows terminal no-fields reads to reach the ordinary close gates and preserve manual entry', async () => {
+    reader.push(
+      { ok: false, reason: 'no_fields' },
+      { ok: false, reason: 'no_fields' },
+      { ok: false, reason: 'no_fields' },
+    )
+    const { driver, shiftId } = await openShift()
+    let draft = await getDraft(driver, shiftId)
+    for (const [slot, field] of [
+      ['dashboard', 'orders'],
+      ['wallet', 'wallet'],
+      ['odometer', 'odometer'],
+    ] as const) {
+      draft = draftFromUpload(await uploadEnd(driver, shiftId, slot, image(`no-fields-${slot}`), draft))
+      draft = draftFromRead(await readSlot(driver, shiftId, slot, field, draft))
+    }
+    const saved = await patchDraft(driver, shiftId, {
+      expectedRevision: draft.revision,
+      figures: { odometerKm: 1_010, cashDeclared: '0.00', walletDeclared: '0.00' },
+    })
+    expect(saved.statusCode, saved.body).toBe(200)
+    draft = saved.json() as CloseDraftView
+
+    const submitted = await inject('PUT', driver, `/shifts/${shiftId}/end-package`, endPayload(draft))
+    expect(submitted.statusCode, submitted.body).toBe(422)
+    expect(submitted.json().error).toBe('end_package_incomplete')
+    expect(submitted.json().detail).toContainEqual({ kind: 'no_orders' })
+  })
+
+  it('requires the linked read for a replacement generation and accepts it once the current token is read', async () => {
+    reader.push(
+      ok(orderRow('155.00', { route: 'old generation' })),
+      ok(orderRow('155.00', { route: 'current generation' })),
+      { ok: false, reason: 'no_fields' },
+      { ok: false, reason: 'no_fields' },
+    )
+    const { driver, shiftId } = await openShift()
+    let draft = await getDraft(driver, shiftId)
+    draft = draftFromUpload(await uploadEnd(driver, shiftId, 'dashboard', image('generation-old'), draft))
+    draft = draftFromRead(await readSlot(driver, shiftId, 'dashboard', 'orders', draft))
+    const oldToken = draft.attachments.find((row) => row.slot === 'dashboard')!.attachmentToken
+    draft = draftFromUpload(await uploadEnd(
+      driver,
+      shiftId,
+      'dashboard',
+      image('generation-current'),
+      draft,
+      { replace: true },
+    ))
+    expect(draft.attachments.find((row) => row.slot === 'dashboard')!.attachmentToken).not.toBe(oldToken)
+    for (const [slot, field] of [['wallet', 'wallet'], ['odometer', 'odometer']] as const) {
+      draft = draftFromUpload(await uploadEnd(driver, shiftId, slot, image(`generation-${slot}`), draft))
+      draft = draftFromRead(await readSlot(driver, shiftId, slot, field, draft))
+    }
+    let saved = await patchDraft(driver, shiftId, {
+      expectedRevision: draft.revision,
+      figures: { odometerKm: 1_010, cashDeclared: '155.00', walletDeclared: '0.00' },
+      operations: {
+        manualOrders: [{
+          clientKey: 'replacement-manual',
+          providerOrderNo: 'YAL-REPLACEMENT-MANUAL',
+          payMode: 'cash',
+          fee: '155.00',
+          occurredMinute: '08:00',
+          occurredDate: today,
+          pointA: 'A',
+          pointB: 'B',
+        }],
+        manualCashDeductions: [],
+        manualMovements: [],
+      },
+    })
+    expect(saved.statusCode, saved.body).toBe(200)
+    draft = saved.json() as CloseDraftView
+
+    const unread = await inject('PUT', driver, `/shifts/${shiftId}/end-package`, endPayload(draft))
+    expect(unread.statusCode, unread.body).toBe(422)
+    expect(unread.json()).toMatchObject({
+      error: 'end_evidence_read_required',
+      detail: { slots: [{ slot: 'dashboard', field: 'orders', reason: 'missing' }] },
+    })
+    expect(await h.deps.orders.listByShift(shiftId)).toEqual([])
+
+    draft = draftFromRead(await readSlot(driver, shiftId, 'dashboard', 'orders', draft))
+    saved = await inject('PUT', driver, `/shifts/${shiftId}/end-package`, endPayload(draft))
+    expect(saved.statusCode, saved.body).toBe(200)
+  })
+
+  it('returns the first attachment before OCR and runs the evidence-bound read separately', async () => {
+    reader.push(ok(orderRow()))
     const { driver, shiftId } = await openShift()
     const draft = await getDraft(driver, shiftId)
     const blocked = reader.block(1)
-    const uploadPromise = uploadEnd(driver, shiftId, 'odometer', image('autosave-during-ocr'), draft)
-    await blocked.entered
+    const uploaded = await uploadEnd(driver, shiftId, 'dashboard', image('attach-before-ocr'), draft)
+    expect(uploaded.statusCode, uploaded.body).toBe(201)
+    expect(reader.calls, 'an empty slot has no accepted generation that needs a blocking preflight').toBe(0)
 
+    const accepted = uploaded.json().draft as CloseDraftView
+    const readPromise = readSlot(driver, shiftId, 'dashboard', 'orders', accepted)
+    await blocked.entered
+    blocked.release()
+    const read = await readPromise
+    expect(read.statusCode, read.body).toBe(200)
+    expect(read.json().draft.operations.orders).toHaveLength(1)
+    expect(read.json().draft.attachments[0]?.read).toMatchObject({
+      status: 'complete',
+      rowCount: 1,
+      ordersCount: 1,
+      deductionsCount: 0,
+      cancelledCount: 0,
+    })
+  })
+
+  it('makes an end-photo retry idempotent when the first 201 was lost', async () => {
+    const { driver, shiftId } = await openShift()
+    const before = await getDraft(driver, shiftId)
+    const bytes = image('lost-201')
+    const first = await uploadEnd(driver, shiftId, 'dashboard', bytes, before)
+    const accepted = draftFromUpload(first)
+    const attachment = accepted.attachments.find((row) => row.slot === 'dashboard')!
+    const historyBefore = await h.deps.media.listAttachmentHistory(shiftId)
+
+    // Simulate the phone that never received the response: it still has the old draft revision and
+    // therefore cannot know the attachment token created by the first request.
+    const retry = await uploadEnd(driver, shiftId, 'dashboard', bytes, before, { expectedToken: null })
+    expect(retry.statusCode, retry.body).toBe(201)
+    expect(retry.json()).toMatchObject({
+      deduped: true,
+      mediaId: attachment.mediaId,
+      attachmentToken: attachment.attachmentToken,
+      draft: { revision: accepted.revision, draftHash: accepted.draftHash },
+    })
+    expect(await h.deps.media.listAttachmentHistory(shiftId)).toEqual(historyBefore)
+  })
+
+  it('does not treat different bytes without the current token as a lost-response retry', async () => {
+    const { driver, shiftId } = await openShift()
+    let draft = await getDraft(driver, shiftId)
+    draft = draftFromUpload(await uploadEnd(driver, shiftId, 'dashboard', image('current'), draft))
+
+    const rejected = await uploadEnd(
+      driver,
+      shiftId,
+      'dashboard',
+      image('different-candidate'),
+      draft,
+      { replace: true, expectedToken: null },
+    )
+    expect(rejected.statusCode).toBe(409)
+    expect(rejected.json().error).toBe('evidence_attachment_changed')
+    expect((await getDraft(driver, shiftId)).attachments[0]?.attachmentToken).toBe(
+      draft.attachments[0]?.attachmentToken,
+    )
+  })
+
+  it('accepts a stale global revision for the same attachment and preserves the newer autosave', async () => {
+    reader.push(ok(orderRow('155.00', { route: 'stale revision, current token' })))
+    const { driver, shiftId } = await openShift()
+    const empty = await getDraft(driver, shiftId)
+    const attached = draftFromUpload(
+      await uploadEnd(driver, shiftId, 'dashboard', image('stale-revision-read'), empty),
+    )
     const saved = await patchDraft(driver, shiftId, {
-      expectedRevision: draft.revision,
-      figures: { cashDeclared: '500' },
+      expectedRevision: attached.revision,
+      figures: { cashDeclared: '700' },
     })
     expect(saved.statusCode, saved.body).toBe(200)
-    blocked.release()
 
-    const uploaded = await uploadPromise
-    expect(uploaded.statusCode, uploaded.body).toBe(201)
-    expect(uploaded.json().draft).toMatchObject({
-      revision: saved.json().revision + 1,
-      figures: { cashDeclared: '500.00' },
-    })
-    expect(uploaded.json().draft.attachments).toEqual(
-      expect.arrayContaining([expect.objectContaining({ slot: 'odometer' })]),
-    )
+    const read = await readSlot(driver, shiftId, 'dashboard', 'orders', attached)
+    const merged = draftFromRead(read)
+    expect(merged.figures.cashDeclared).toBe('700.00')
+    expect(merged.operations.orders).toHaveLength(1)
+    expect(merged.revision).toBe(saved.json().revision + 1)
   })
 
   it('retries the evidence draft CAS when an autosave wins after attachment commit starts', async () => {
@@ -466,7 +710,7 @@ describe('attachment/read races and screen safety', () => {
     const currentAttachment = draft.attachments.find((row) => row.slot === 'dashboard')!
 
     const replacementBytes = image('reuse-race-replacement')
-    const blocked = reader.block(2)
+    const blocked = reader.block(1)
     const replacementPromise = uploadEnd(
       driver,
       shiftId,
@@ -497,7 +741,7 @@ describe('attachment/read races and screen safety', () => {
   })
 
   it('rejects restoring a wrong historical screen without rotating the current attachment', async () => {
-    reader.push(ok(), ok(), { ok: false, reason: 'wrong_screen' })
+    reader.push(ok(), { ok: false, reason: 'wrong_screen' })
     const { driver, shiftId } = await openShift()
     let draft = await getDraft(driver, shiftId)
     draft = draftFromUpload(await uploadEnd(driver, shiftId, 'dashboard', image('restore-history-old'), draft))
@@ -569,13 +813,13 @@ describe('attachment/read races and screen safety', () => {
   })
 
   it('commits exactly one of two replacement uploads racing on one draft revision', async () => {
-    reader.push(ok(), ok(), ok())
+    reader.push(ok(), ok())
     const { driver, shiftId } = await openShift()
     let draft = await getDraft(driver, shiftId)
     draft = draftFromUpload(await uploadEnd(driver, shiftId, 'dashboard', image('race-original'), draft))
     const originalToken = draft.attachments[0]!.attachmentToken
-    const second = reader.block(2)
-    const third = reader.block(3)
+    const second = reader.block(1)
+    const third = reader.block(2)
 
     const leftPromise = uploadEnd(driver, shiftId, 'dashboard', image('race-left'), draft, { replace: true })
     const rightPromise = uploadEnd(driver, shiftId, 'dashboard', image('race-right'), draft, { replace: true })
@@ -594,13 +838,13 @@ describe('attachment/read races and screen safety', () => {
   })
 
   it('refuses a linked read result when the attachment is replaced while OCR is running', async () => {
-    reader.push(ok(), ok(orderRow('155.00', { route: 'stale result' })), ok())
+    reader.push(ok(orderRow('155.00', { route: 'stale result' })), ok())
     const { driver, shiftId } = await openShift()
     let draft = await getDraft(driver, shiftId)
     draft = draftFromUpload(await uploadEnd(driver, shiftId, 'dashboard', image('swap-original'), draft))
 
     reader.bumpSignature()
-    const blocked = reader.block(2)
+    const blocked = reader.block(1)
     const staleReadPromise = readSlot(driver, shiftId, 'dashboard', 'orders', draft)
     await blocked.entered
     const replaced = await uploadEnd(
@@ -673,6 +917,7 @@ describe('canonical row provenance', () => {
     })
     expect(figures.statusCode, figures.body).toBe(200)
     draft = figures.json() as CloseDraftView
+    draft = await finishCurrentEvidenceReads(driver, shiftId, draft)
     const submitted = await inject('PUT', driver, `/shifts/${shiftId}/end-package`, endPayload(draft))
     expect(submitted.statusCode, submitted.body).toBe(200)
     expect(await h.deps.orders.findByProviderNo(row.providerOrderNo)).toMatchObject({
@@ -739,6 +984,7 @@ describe('canonical row provenance', () => {
     expect(draft.operations.cashDeductions[0]).toMatchObject({ included: false, reviewRequired: true })
     expect(draft.operations.cashDeductions[0]!.reviewReasons).toContain('human_time_edit')
 
+    draft = await finishCurrentEvidenceReads(driver, shiftId, draft)
     const submitted = await inject('PUT', driver, `/shifts/${shiftId}/end-package`, endPayload(draft))
     expect(submitted.statusCode, submitted.body).toBe(200)
     const review = await inject('GET', manager, `/shifts/${shiftId}/review`)
@@ -1014,6 +1260,27 @@ describe('canonical row provenance', () => {
     expect(draft.operations.orders[0]!.reviewReasons).toContain('cancelled_conflict')
   })
 
+  it('records why a completed orders page produced no accounting row', async () => {
+    reader.push(ok({
+      ...orderRow('155.00', { route: 'uncontested cancelled order' }),
+      cancelled: true,
+    }))
+    const { driver, shiftId } = await openShift()
+    let draft = await getDraft(driver, shiftId)
+    draft = draftFromUpload(await uploadEnd(driver, shiftId, 'dashboard', image('cancelled-only'), draft))
+    draft = draftFromRead(await readSlot(driver, shiftId, 'dashboard', 'orders', draft))
+
+    expect(draft.operations.orders).toHaveLength(0)
+    expect(draft.operations.cashDeductions).toHaveLength(0)
+    expect(draft.attachments[0]?.read).toMatchObject({
+      status: 'complete',
+      rowCount: 1,
+      ordersCount: 0,
+      deductionsCount: 0,
+      cancelledCount: 1,
+    })
+  })
+
   it('blocks approval of a cancelled conflict until a manager records a fresh window decision', async () => {
     reader.push(ok({
       ...orderRow('155.00', { route: 'cancelled approval gate' }),
@@ -1039,6 +1306,7 @@ describe('canonical row provenance', () => {
     })
     expect(figures.statusCode, figures.body).toBe(200)
     draft = figures.json() as CloseDraftView
+    draft = await finishCurrentEvidenceReads(driver, shiftId, draft)
     const submitted = await inject('PUT', driver, `/shifts/${shiftId}/end-package`, endPayload(draft))
     expect(submitted.statusCode, submitted.body).toBe(200)
 
@@ -1112,6 +1380,7 @@ describe('removed and migrated evidence', () => {
     })
     expect(figures.statusCode, figures.body).toBe(200)
     draft = figures.json() as CloseDraftView
+    draft = await finishCurrentEvidenceReads(driver, shiftId, draft)
     const submitted = await inject('PUT', driver, `/shifts/${shiftId}/end-package`, endPayload(draft))
     expect(submitted.statusCode, submitted.body).toBe(200)
     const persisted = await h.deps.orders.findByProviderNo(providerOrderNo)
@@ -1178,6 +1447,7 @@ describe('removed and migrated evidence', () => {
     })
     expect(figures.statusCode, figures.body).toBe(200)
     draft = figures.json() as CloseDraftView
+    draft = await finishCurrentEvidenceReads(driver, shiftId, draft)
     const submitted = await inject('PUT', driver, `/shifts/${shiftId}/end-package`, endPayload(draft))
     expect(submitted.statusCode, submitted.body).toBe(200)
     expect(await h.deps.orders.findByProviderNo('LEGACY-OCR-ABSENT')).toMatchObject({ included: false })
@@ -1257,6 +1527,7 @@ describe('removed and migrated evidence', () => {
     })
     expect(figures.statusCode, figures.body).toBe(200)
     draft = figures.json() as CloseDraftView
+    draft = await finishCurrentEvidenceReads(driver, shiftId, draft)
     const submitted = await inject('PUT', driver, `/shifts/${shiftId}/end-package`, {
       ...endPayload(draft),
       cashDeclared: '0.00',
@@ -1343,6 +1614,7 @@ describe('removed and migrated evidence', () => {
     })
     expect(figures.statusCode, figures.body).toBe(200)
     draft = figures.json() as CloseDraftView
+    draft = await finishCurrentEvidenceReads(driver, shiftId, draft)
     const submitted = await inject('PUT', driver, `/shifts/${shiftId}/end-package`, endPayload(draft))
     expect(submitted.statusCode, submitted.body).toBe(200)
     const top = (await h.deps.orders.listByShift(shiftId)).find((row) => row.fee === 22_000n)
@@ -1388,6 +1660,7 @@ describe('atomic final materialization', () => {
     expect(figures.statusCode, figures.body).toBe(200)
     draft = figures.json() as CloseDraftView
 
+    draft = await finishCurrentEvidenceReads(driver, shiftId, draft)
     const submitted = await inject('PUT', driver, `/shifts/${shiftId}/end-package`, endPayload(draft))
     expect(submitted.statusCode, submitted.body).toBe(200)
     expect(submitted.json().state).toBe('pending_review')
@@ -1524,6 +1797,7 @@ describe('atomic final materialization', () => {
     })
     expect(figures.statusCode, figures.body).toBe(200)
     draft = figures.json() as CloseDraftView
+    draft = await finishCurrentEvidenceReads(driver, shiftId, draft)
     const resubmitted = await inject('PUT', driver, `/shifts/${shiftId}/end-package`, endPayload(draft))
     expect(resubmitted.statusCode, resubmitted.body).toBe(200)
 
@@ -1543,8 +1817,8 @@ describe('atomic final materialization', () => {
         ...orderRow('155.00', { route: 'timing heals', printedTime: '1:00' }),
         time: null,
       }),
-      ok(),
-      ok(),
+      { ok: false, reason: 'no_fields' },
+      { ok: false, reason: 'no_fields' },
       ok(orderRow('155.00', { route: 'timing heals', printedTime: '1:00 PM', time: '13:00' })),
     )
     const { driver, manager, shiftId } = await openShift()
@@ -1574,6 +1848,7 @@ describe('atomic final materialization', () => {
     })
     expect(figures.statusCode, figures.body).toBe(200)
     draft = figures.json() as CloseDraftView
+    draft = await finishCurrentEvidenceReads(driver, shiftId, draft)
     const first = await inject('PUT', driver, `/shifts/${shiftId}/end-package`, endPayload(draft))
     expect(first.statusCode, first.body).toBe(200)
 
@@ -1745,6 +2020,7 @@ describe('atomic final materialization', () => {
     firstDraft = figures.json() as CloseDraftView
     expect(firstDraft.operations.orders).toHaveLength(1)
     expect(firstDraft.operations.orders[0]).toMatchObject({ fee: '0.00', included: true })
+    firstDraft = await finishCurrentEvidenceReads(driver, shiftId, firstDraft)
     const first = await inject('PUT', driver, `/shifts/${shiftId}/end-package`, endPayload(firstDraft))
     expect(first.statusCode, first.body).toBe(200)
     const firstSettlement = await inject('GET', manager, `/shifts/${shiftId}/settlement`)
@@ -1764,6 +2040,7 @@ describe('atomic final materialization', () => {
       reopened,
       { replace: true },
     ))
+    reopened = await finishCurrentEvidenceReads(driver, shiftId, reopened)
     const second = await inject('PUT', driver, `/shifts/${shiftId}/end-package`, endPayload(reopened))
     expect(second.statusCode, second.body).toBe(200)
 

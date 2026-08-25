@@ -21,8 +21,11 @@ import { useApp } from '../app-context.tsx'
 import {
   deletePendingEvidence,
   getPendingEvidence,
+  markPendingEvidenceAccepted,
   pendingEvidenceBlob,
   putPendingEvidence,
+  terminalPendingEvidenceCleanup,
+  type PendingEvidenceOwner,
 } from '../pending-evidence-storage.ts'
 import {
   executePhotoAttempt,
@@ -92,10 +95,6 @@ export interface PhotoSlotProps {
   recognitionFocus?: OcrImageFocus
 }
 
-function terminalRead(attachment: CloseDraftAttachment | null | undefined): boolean {
-  return attachment?.read?.status === 'complete' || attachment?.read?.status === 'failed'
-}
-
 function attachmentLabel(slot: string, labels: { dashboardShot: string; paymentsLog: string }): string {
   const match = /^(dashboard|payments_log)(?:_([0-9]+))?$/.exec(slot)
   if (!match) return slot
@@ -137,7 +136,7 @@ export function PhotoSlot({
   const [confirming, setConfirming] = useState(false)
   const [uploadResult, setUploadResult] = useState<EvidenceUploadResponse | null>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
-  const [pendingGenerationId, setPendingGenerationId] = useState<string | null>(null)
+  const [pendingEvidence, setPendingEvidence] = useState<PendingEvidenceOwner | null>(null)
   const acknowledgedFiles = useRef<WeakSet<File>>(new WeakSet())
   const attemptSequence = useRef(0)
   const currentAttempt = useRef<PhotoAttempt<PreparedEvidence> | null>(null)
@@ -173,7 +172,10 @@ export function PhotoSlot({
       attemptSequence.current = attempt.id
       currentAttempt.current = attempt
       setPicked(file)
-      setPendingGenerationId(record.generationId)
+      setPendingEvidence({
+        generationId: record.generationId,
+        acceptedAttachmentToken: record.acceptedAttachmentToken ?? null,
+      })
       // A retained generation means its upload never reached a persisted terminal outcome. This is
       // still an upload failure even when the slot has an older accepted attachment: hiding the
       // retry behind that old green thumbnail strands an offline replacement after reload.
@@ -184,12 +186,34 @@ export function PhotoSlot({
     }
   }, [shiftId, pkg, slot, picked, attached])
 
-  /** A persisted read outcome owns the bytes now; conditional deletion protects a newer retake. */
+  /** A persisted read outcome owns only bytes accepted as this exact attachment generation. */
   useEffect(() => {
-    if (pkg !== 'end' || pendingGenerationId === null || !terminalRead(attachment)) return
-    void deletePendingEvidence(shiftId, pkg, slot, pendingGenerationId)
-    setPendingGenerationId(null)
-  }, [shiftId, pkg, slot, attachment, pendingGenerationId])
+    if (pkg !== 'end') return
+    const cleanup = terminalPendingEvidenceCleanup(pendingEvidence, attachment)
+    if (cleanup === null) return
+    let cancelled = false
+    void deletePendingEvidence(shiftId, pkg, slot, cleanup.generationId).then(() => {
+      if (
+        cancelled ||
+        currentAttempt.current?.file.generationId !== cleanup.generationId
+      ) return
+      // The same accepted generation has a durable terminal read. Drop its retry attempt and
+      // settle the tile immediately; otherwise a reload leaves a red "retry upload" over a green
+      // server attachment until the driver reloads a second time.
+      currentAttempt.current = null
+      acceptedResult.current = null
+      setPicked(null)
+      setUploadResult(null)
+      setUploadError(null)
+      setPendingEvidence((current) =>
+        current?.generationId === cleanup.generationId ? null : current,
+      )
+      setState('done')
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [shiftId, pkg, slot, attachment, pendingEvidence])
 
   const [preview, setPreview] = useState<string | null>(null)
   useEffect(() => {
@@ -284,7 +308,9 @@ export function PhotoSlot({
               setUploadResult(null)
               setState(attached ? 'done' : 'idle')
               await deletePendingEvidence(shiftId, pkg, slot, prepared.generationId)
-              setPendingGenerationId(null)
+              setPendingEvidence((current) =>
+                current?.generationId === prepared.generationId ? null : current,
+              )
               return false
             }
             if (preflight.error === 'evidence_replacement_confirmation_required') {
@@ -321,6 +347,22 @@ export function PhotoSlot({
         const accepted = result
         acceptedResult.current = accepted
         setUploadResult(accepted)
+        if (pkg === 'end') {
+          setPendingEvidence((current) =>
+            current?.generationId === prepared.generationId
+              ? { ...current, acceptedAttachmentToken: accepted.attachmentToken }
+              : current,
+          )
+          // Crash recovery metadata must never delay propagation of a PUT the server accepted.
+          // IndexedDB is best-effort; the in-memory token already protects this live screen.
+          void markPendingEvidenceAccepted(
+            shiftId,
+            pkg,
+            slot,
+            prepared.generationId,
+            accepted.attachmentToken,
+          )
+        }
         onUploadResult?.(slot, accepted)
         if (accepted.draft) onCloseDraft?.(accepted.draft)
         await onUploaded(slot, accepted, prepared.file)
@@ -328,7 +370,9 @@ export function PhotoSlot({
         setState('done')
         if (pkg === 'end' && !onImage && !ocrField) {
           await deletePendingEvidence(shiftId, pkg, slot, prepared.generationId)
-          setPendingGenerationId(null)
+          setPendingEvidence((current) =>
+            current?.generationId === prepared.generationId ? null : current,
+          )
         }
         return true
       } catch (error) {
@@ -379,7 +423,9 @@ export function PhotoSlot({
             currentAttempt.current = null
             setPicked(null)
             setUploadResult(null)
-            setPendingGenerationId(null)
+            setPendingEvidence((current) =>
+              current?.generationId === prepared.generationId ? null : current,
+            )
           }
         }
         setState('error')
@@ -460,7 +506,7 @@ export function PhotoSlot({
             lastModified: file.lastModified,
             bytes: compressed.bytes,
           })
-          setPendingGenerationId(generationId)
+          setPendingEvidence({ generationId, acceptedAttachmentToken: null })
         }
         attempt = nextPhotoAttempt(attemptSequence.current, prepared)
         attemptSequence.current = attempt.id
@@ -534,7 +580,7 @@ export function PhotoSlot({
       setState('idle')
       onDelete(slot)
       await deletePendingEvidence(shiftId, pkg, slot, generationId)
-      setPendingGenerationId(null)
+      setPendingEvidence(null)
     } catch (error) {
       const apiError = error as ApiError
       const detail = apiError.detail as { current?: CloseDraftView } | undefined
@@ -591,7 +637,7 @@ export function PhotoSlot({
         const generationId = currentAttempt.current?.file.generationId
         currentAttempt.current = null
         setPicked(null)
-        setPendingGenerationId(null)
+        setPendingEvidence(null)
         setUploadResult(null)
         setUploadError(null)
         setRestoreReason('')
@@ -645,13 +691,25 @@ export function PhotoSlot({
         )
       : null
   const read = attachment?.read ?? null
+  const completedOrdersLabel =
+    read?.status === 'complete' &&
+    read.field === 'orders' &&
+    read.rowCount !== undefined &&
+    read.ordersCount !== undefined &&
+    read.deductionsCount !== undefined &&
+    read.cancelledCount !== undefined
+      ? t.shift.readStateCompleteOrders
+          .replace('{orders}', String(read.ordersCount))
+          .replace('{deductions}', String(read.deductionsCount))
+          .replace('{cancelled}', String(read.cancelledCount))
+      : null
   const readLabel =
     read === null || read.status === 'idle'
       ? t.shift.readStateIdle
       : read.status === 'running'
         ? t.shift.readStateRunning
         : read.status === 'complete'
-          ? t.shift.readStateComplete
+          ? completedOrdersLabel ?? t.shift.readStateComplete
           : read.failure === 'wrong_screen'
             ? t.shift.wrongScreen
             : t.shift.readStateFailed
