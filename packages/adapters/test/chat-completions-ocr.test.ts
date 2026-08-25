@@ -331,6 +331,10 @@ describe('orders fast financial pass', () => {
     const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
 
     expect(reading.result).toMatchObject({ ok: false, reason: 'no_fields' })
+    // …and it says so. `no_fields` alone reads identically to a blank screen and to a completion
+    // truncated by its ceiling; only the detail distinguishes an unsure classifier from either.
+    expect((reading.result as { detail?: string }).detail).toContain('screen-kind gate')
+    expect((reading.result as { detail?: string }).detail).toContain('unknown')
   })
 
   it('publishes agreed marker-less evidence and candidates without guessing AM or PM', async () => {
@@ -984,6 +988,46 @@ describe('a failed pass says what happened', () => {
     expect((reading.result as { detail?: string }).detail).toContain('8192/8192')
     expect(events).toHaveLength(1)
     expect(events[0]).toMatchObject({ provider: 'openrouter', kind: 'ceiling' })
+  })
+
+  /**
+   * Three different situations reach `ocr_reads` as `no_fields`: a completion cut off by its token
+   * ceiling, a screen the model could not identify, and a screen it read as genuinely empty. In
+   * production three of four failed reads carried NO `detail` at all, so «the model transcribed
+   * rows and verification rejected every one» could not be told apart from «the driver
+   * photographed a blank screen» — the same shape as the evidence-upload outage, where every
+   * distinct cause collapsed into one message and it took three days to name.
+   */
+  it('says WHICH kind of nothing it got when the model returns an empty transcription', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => completion({ rows: [], fields: [], notes: null })))
+    const reading = await reader().read({
+      field: 'odometer',
+      bytes: new Uint8Array([1]),
+      mimeType: 'image/jpeg',
+    })
+    expect(reading.result).toMatchObject({ ok: false, reason: 'no_fields' })
+    const detail = (reading.result as { detail?: string }).detail ?? ''
+    expect(detail).toContain('odometer')
+    expect(detail).toContain('0 rows, 0 fields')
+    // The distinction that matters: this is NOT the ceiling case.
+    expect(detail).not.toContain('finish_reason=length')
+  })
+
+  it('names an out-of-enum screen kind — the tell that a provider ignored the strict schema', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const prompt = requestedPrompt(init)
+      if (isScreenKindPrompt(prompt)) {
+        return completion({ screenKind: 'a_totally_unexpected_value' } as unknown as ParsedScreen)
+      }
+      return completion(screen(orderRow('155')))
+    }))
+    const reading = await reader().read({
+      field: 'orders',
+      bytes: new Uint8Array([1]),
+      mimeType: 'image/jpeg',
+    })
+    expect(reading.result).toMatchObject({ ok: false, reason: 'no_fields' })
+    expect((reading.result as { detail?: string }).detail).toContain('a_totally_unexpected_value')
   })
 
   it('carries the provider error code on a 4xx, and fires the sink exactly once', async () => {

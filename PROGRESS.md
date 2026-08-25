@@ -1,5 +1,109 @@
 # PROGRESS
 
+## 2026-08-25 — four confirmed review findings fixed, and a fifth the fixing uncovered
+
+An adversarial review of the 15 Codex commits (~24k insertions) produced 18 candidates. **14 were
+refuted, 4 confirmed.** Fixing them found a fifth. Migrations `0041`–`0043`; nothing deployed yet.
+
+### The one that moved money
+
+At close a manager may defer part of the collection, and the driver keeps that cash and that Yallago
+balance. The postings booked it to the **ordinary** receivable — which 0036 documents as never
+auto-consumed by an open — while the next open reads only `driver_shift_funding_*`. So no carry
+tranche was created, `floatTotal`/`topupTotal` omitted it, BR1 at the next close read money the
+driver already owed as a **surplus**, and decision 13 assigned that surplus to the employee. The
+system paid the driver his own debt, once, in full. The receivable still counted toward the capital
+target, so الترميم read whole and nothing rang.
+
+**Both channels were affected**, and it was a rename regression rather than a design:
+`shifts.kept_as_receivable_minor` still carries its 0025 comment «Cleared when he opens his next
+shift». 0036 moved that behaviour to the new fund names and this one posting was left behind.
+
+The regression test that would have caught it did not exist. It does now, and it fails on the old
+routing.
+
+### The other three
+
+- **BR5 battery evidence could be bypassed from a driver's own token.** `requiredPhotoSlots` waived
+  the `bms_N` screenshot on `unavailable` alone; `batteryGaps` raised the compensating gap only
+  while the percent was null. A reading carrying **both** fell between them — no photo, no gap, both
+  gates satisfied, no evidence of any kind. It could not simply be refused: that is the legitimate
+  shape of a pack the MANAGER read, and production holds 18 of them. The real defect was that
+  `source` is recorded faithfully everywhere and then **discarded** in `batteryContext`.
+- **Three definitions of «a reason was given»** — JS `.trim()`, one-argument `btrim()`, and
+  `ash_has_visible_text` — disagreeing about the same column. In an Arabic-first product U+200F rides
+  along in pasted text constantly and `'‏'.trim()` is truthy, so a fee could enter BR1 with an
+  unreadable audit trail while the release blocker judged the same row blank and reported the
+  settlement as wrong. Now one predicate, from the wire to the CHECK constraints.
+- **Ten of fifteen integrity checks had never touched a query planner** — asserted only with
+  `expect(sql).toContain(...)`, and the five that ran used TEMP tables typed `state text` /
+  `event_type text` with no `amount_minor > 0` and no foreign keys. It was the only
+  Postgres-touching test in `packages/db` that never called `migrate()`.
+
+### What that last one immediately found
+
+Running all fifteen against production for the first time failed a cancelled shift whose driver
+cash, driver wallet, office cash and office wallet **all net to zero**, and for which the database's
+own `shift_void_journals_match` returns `true`. `force_cancel_integrity` swept every `correction`
+entry into the void's actual line set, so an unrelated audited wallet top-up adjustment recorded
+before the cancel («تصحيح القيمة الفعلية لشحن المحفظة حسب توجيه الإدارة: 500.00 بدل 600.00») became
+an unexpected line against a recipe that never described it.
+
+So `check-shift-money-integrity.mjs` **exited 2 on a correct ledger** — which is how a release
+blocker stops being read. `tranche_journal_totals` already nets exactly these adjustments; this
+check was the only one that did not.
+
+**Done**
+
+- `0041` re-points the close matcher at the funding funds. No rollout gate: 0037 filters expected
+  lines by `movement <> 0`, so a zero-deferral settlement is unaffected by the fund name, and the
+  migration **refuses to apply** if a non-zero deferral is already on the ordinary funds.
+- `0042` makes the battery invariant a CHECK; `0021` had left it as an index predicate.
+- `0043` puts two CHECK constraints and five guard functions on `ash_has_visible_text` — 11
+  occurrences, each definition otherwise byte-identical to its predecessor.
+- Every integrity check now runs against the real migrated schema in CI, and a clean ledger must
+  report clean.
+- A failed OCR pass now says WHICH kind of nothing it got. Three of four failed production reads
+  carried `reason: no_fields` with no `detail` at all, leaving "the model transcribed rows and
+  verification rejected every one" indistinguishable from "the screen was blank" — the same shape as
+  the upload outage.
+
+**Verified against production, read-only (2026-08-25)**
+
+| what | result |
+| --- | --- |
+| all 17 integrity checks | run, **0 violations** (was 1 false positive) |
+| replacement `shift_close_journals_match` | `true` for all 4 settled shifts, agreeing with the installed one |
+| deferrals already on the ordinary funds | **0** — `0041` applies cleanly |
+| rows violating the new battery CHECK | **0** of 75 |
+| rows violating either new reason CHECK | **0** — in fact no order or deduction has a reason yet |
+
+**Next**
+
+1. Apply `0041`–`0043` and deploy. Nothing is live yet.
+2. Rotate the credentials pasted in that session — Neon, OpenRouter, Vercel.
+3. Confirm prompt logging is off on the OpenRouter account (A-30 still records this as unconfirmed).
+
+**Risks**
+
+- 🟠 **The DB-gated tests could not run on this machine** — no Docker, no local Postgres, and Neon is
+  TCP-geo-blocked from Damascus. 11 tests skip locally and CI is their only gate. The SQL itself was
+  executed against production Postgres 17 through the HTTP driver, so the queries are known-good;
+  what is unverified here is the vitest plumbing around them.
+- 🟠 **`fixed_40_cash_close_v2_receivable` re-introduces the receivable decision 13 abolished**
+  («No current-shift cash, wallet, share payable, or receivable may remain»). This work makes the
+  feature behave correctly; whether it should exist is a product-owner question under the authority
+  order in `CLAUDE.md`.
+- 🟡 36 orphaned media rows (~4.2 MB) remain; RUNBOOK §7b explains why that signal is ambiguous.
+
+**See it in 2 minutes**
+
+```bash
+pnpm check                                   # 2,101 tests, 11 PostgreSQL-only skips
+node scripts/check-shift-money-integrity.mjs # exit 0 — and it no longer cries wolf
+```
+
+
 ## 2026-08-24 — pre-approved openings, completed-shift history, and share clarification are live
 
 **Done, verified, and deployed:** managers can publish single-use pre-approved opening rules for one
