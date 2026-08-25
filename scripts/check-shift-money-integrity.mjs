@@ -768,7 +768,7 @@ export const LEGACY_INTEGRITY_CHECKS = Object.freeze([
            COALESCE(jsonb_array_length(o.close_draft_review_reasons), 0) > 0
            OR (o.window_status = 'unknown' AND NOT (
              o.decided_by IS NOT NULL AND o.decided_at IS NOT NULL
-             AND NULLIF(btrim(o.decision_reason), '') IS NOT NULL
+             AND ${hasVisibleText('o.decision_reason')}
            ))
          )
       UNION ALL
@@ -781,7 +781,7 @@ export const LEGACY_INTEGRITY_CHECKS = Object.freeze([
            COALESCE(jsonb_array_length(d.close_draft_review_reasons), 0) > 0
            OR (d.window_status = 'unknown' AND NOT (
              d.decided_by IS NOT NULL AND d.decided_at IS NOT NULL
-             AND NULLIF(btrim(d.decision_reason), '') IS NOT NULL
+             AND ${hasVisibleText('d.decision_reason')}
            ))
          )
     `,

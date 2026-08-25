@@ -1,3 +1,5 @@
+import { hasVisibleText } from '@ash/domain'
+
 export type OperationWindowStatus =
   | 'in_window'
   | 'pre_open'
@@ -20,7 +22,7 @@ export interface WindowReviewRow {
 export function isUnresolvedWindowRow(row: WindowReviewRow): boolean {
   return (
     (row.closeDraftReviewReasons?.length ?? 0) > 0 ||
-    (row.windowStatus === 'unknown' && !row.decisionReason?.trim())
+    (row.windowStatus === 'unknown' && !hasVisibleText(row.decisionReason))
   )
 }
 

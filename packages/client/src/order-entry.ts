@@ -1,4 +1,4 @@
-import { type Minor, type PayMode, WALLET_LOG_FEEDS_BR1, evaluateBr1, minor, parseMinor } from '@ash/domain'
+import { type Minor, type PayMode, WALLET_LOG_FEEDS_BR1, evaluateBr1, hasVisibleText, minor, parseMinor } from '@ash/domain'
 
 /**
  * The driver's order-entry model — the single most-used screen in the product, and the one that
@@ -253,7 +253,7 @@ export function syncRecordedCashDeductions(
     const auditedUnknownDecision = row.windowStatus === 'unknown'
       && row.decidedBy != null
       && row.decidedAt != null
-      && Boolean(row.decisionReason?.trim())
+      && hasVisibleText(row.decisionReason)
     const unresolvedBoundary = row.windowStatus === 'unknown'
       ? !auditedUnknownDecision
       : row.windowStatus === undefined && row.source === 'ocr' && missingBoundary
@@ -555,7 +555,7 @@ export function resumedOrderWindowState(row: {
   decidedAt: string | null
 }): Pick<DraftOrder, 'included' | 'timeReviewRequired'> {
   const unresolvedUnknown = row.windowStatus === 'unknown'
-    && (row.decidedBy === null || row.decidedAt === null || !row.decisionReason?.trim())
+    && (row.decidedBy === null || row.decidedAt === null || !hasVisibleText(row.decisionReason))
   return unresolvedUnknown
     ? { included: false, timeReviewRequired: true }
     : { included: row.included }

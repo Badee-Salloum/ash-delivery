@@ -15,7 +15,7 @@ import type {
   ShiftRecord,
 } from '@ash/contracts'
 import { moneySchema, serializeMoney } from '@ash/contracts'
-import { minor, parseMinor, type Actor, type Minor } from '@ash/domain'
+import { hasVisibleText, minor, parseMinor, type Actor, type Minor } from '@ash/domain'
 import { readEvidence } from './media.service.ts'
 import { readScreen } from './ocr.service.ts'
 import { ServiceError } from './shifts.service.ts'
@@ -58,7 +58,7 @@ const initialData = async (
     deps.movements.listByShift(shift.id),
   ])
   const audited = (row: { decisionReason: string | null; decidedBy: string | null; decidedAt: string | null }) =>
-    row.decidedBy !== null && row.decidedAt !== null && Boolean(row.decisionReason?.trim())
+    row.decidedBy !== null && row.decidedAt !== null && hasVisibleText(row.decisionReason)
   data.figures = {
     odometerKm: shift.odoEnd,
     odometerKmOcr: shift.odoEndOcr,

@@ -1,4 +1,4 @@
-import { add, formatMinor, parseMinor } from '@ash/domain'
+import { add, formatMinor, hasVisibleText, parseMinor } from '@ash/domain'
 import type { OperationWindowStatus } from './operation-window.ts'
 
 export type CloseDraftReviewReason =
@@ -198,7 +198,7 @@ export function summarizeOrders(orders: readonly ReviewOrderSummaryInput[]): Ord
   // Keeping it in «unknown» after that would make the included total disagree with settlement.
   const needsDecision = (order: ReviewOrderSummaryInput): boolean =>
     (order.closeDraftReviewReasons?.length ?? 0) > 0 ||
-    (order.windowStatus === 'unknown' && !order.decisionReason?.trim())
+    (order.windowStatus === 'unknown' && !hasVisibleText(order.decisionReason))
 
   return {
     included: summarize((order) => !needsDecision(order) && order.included !== false),

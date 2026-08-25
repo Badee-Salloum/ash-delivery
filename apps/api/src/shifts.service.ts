@@ -54,6 +54,7 @@ import {
   floatCarry,
   floatOut,
   floatReturn,
+  hasVisibleText,
   isDateLocked,
   minWalletBalance,
   minor,
@@ -304,7 +305,7 @@ const hasAuditedWindowDecision = (row: {
   decidedBy: string | null
   decidedAt: string | null
 }): boolean =>
-  row.decidedBy !== null && row.decidedAt !== null && Boolean(row.decisionReason?.trim())
+  row.decidedBy !== null && row.decidedAt !== null && hasVisibleText(row.decisionReason)
 
 /**
  * `included=true` is not enough for an unknown-time legacy row. Older API/database versions wrote
