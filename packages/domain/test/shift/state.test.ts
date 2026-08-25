@@ -128,11 +128,49 @@ describe('the OPEN gate (BR5, AC #1)', () => {
         ctx({
           startPackage: completeStart({
             batterySlots: 1,
-            batteryReadings: [{ slotNo: 1, percent: 88, unavailable: true }],
+            // `source: 'manager'` is what makes this legitimate rather than a bypass: a figure the
+            // manager took on his own device genuinely has no driver screenshot behind it. The
+            // declaration stays on the row as the record of WHY a manager's figure is here.
+            batteryReadings: [{ slotNo: 1, percent: 88, unavailable: true, source: 'manager' as const }],
             mediaSlots: ['odometer'],
           }),
         }))
       expect(result).toEqual({ ok: true, next: 'open' })
+    })
+
+    /**
+     * The bypass this pair of gates used to allow. `requiredPhotoSlots` waived `bms_N` on
+     * `unavailable` alone, while `batteryGaps` raised `awaiting_manager_reading` only while the
+     * percent was still null — so a reading carrying BOTH fell between them: no missing photo, no
+     * gap, both BR5 gates satisfied with no evidence at all. The driver holds `shift.operate` and
+     * could PUT exactly this shape from his own phone.
+     */
+    it('refuses a percent the driver typed onto a pack he declared unreadable', () => {
+      for (const source of [undefined, 'manual' as const, 'ocr' as const]) {
+        const result = transition('awaiting_open_approval', 'manager_approve_open',
+          ctx({
+            startPackage: completeStart({
+              batterySlots: 1,
+              batteryReadings: [{ slotNo: 1, percent: 87, unavailable: true, ...(source ? { source } : {}) }],
+              mediaSlots: ['odometer'],
+            }),
+          }))
+        expect(result, `source=${String(source)}`).toMatchObject({ ok: false, reason: 'start_package_incomplete' })
+        expect(result.ok === false && result.gaps).toContainEqual({ kind: 'missing_photo', slot: 'bms_1' })
+      }
+    })
+
+    it('closes the same hole at the END gate, where the money is', () => {
+      const result = transition('pending_review', 'manager_approve_close',
+        ctx({
+          endPackage: completeEnd({
+            batterySlots: 1,
+            batteryReadings: [{ slotNo: 1, percent: 42, unavailable: true, source: 'manual' as const }],
+            mediaSlots: ['dashboard', 'wallet', 'odometer'],
+          }),
+        }))
+      expect(result).toMatchObject({ ok: false, reason: 'end_package_incomplete' })
+      expect(result.ok === false && result.gaps).toContainEqual({ kind: 'missing_photo', slot: 'bms_1' })
     })
 
     it('does NOT waive a pack he simply has not done yet — that is still his to close', () => {

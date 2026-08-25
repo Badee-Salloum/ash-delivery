@@ -642,8 +642,14 @@ async function batteryContext(
       // A replacement photo invalidates the old machine reading until the new file has been read.
       // An explicit manager-reading handoff is the exception: it intentionally may have no driver
       // image and waits for the manager's reading at the gate.
+      //
+      // That exception is exactly as wide as its justification and no wider. A handoff earns it
+      // while it still carries no figure, and the MANAGER earns it because he read the pack on his
+      // own device. A driver row claiming both a percent and the handoff is neither, and used to
+      // pass here — turning the one branch that nulls an unevidenced percent into a way around it.
+      const handoff = row?.unavailable === true && (row.percent === null || row.source === 'manager')
       const evidenceMatches =
-        row?.unavailable === true ||
+        handoff ||
         (row?.mediaId !== null && row?.mediaId !== undefined && row.mediaId === currentMediaId)
       return {
         slotNo: battery.slotNo ?? i + 1,
@@ -651,6 +657,8 @@ async function batteryContext(
         // A recorded handoff distinguishes a pack nobody has addressed from one deliberately sent
         // to manager review — the first is the driver's to complete, the second is the manager's.
         unavailable: evidenceMatches && row?.unavailable === true,
+        // The gate cannot tell a manager's own reading from a driver's forged one without this.
+        ...(row?.source === undefined ? {} : { source: row.source }),
       }
     }),
   }

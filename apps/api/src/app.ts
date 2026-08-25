@@ -670,6 +670,25 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         if (!battery) {
           throw new ServiceError(422, 'battery_not_on_this_vehicle', { batteryId: reading.batteryId })
         }
+        /*
+         * «تطبيق البطارية لا يعمل على جهازي» says the driver has NO figure, so a figure alongside it
+         * is a contradiction — and it used to be a way past BR5 entirely: the declaration waived the
+         * `bms_N` photo while the percent suppressed `awaiting_manager_reading`, leaving the pack
+         * with no evidence and both gates satisfied. The driver's own PWA never sends this shape
+         * (`declareUnavailable` hard-codes `percent: null`), so refusing it costs a real client
+         * nothing. The domain fails safe on the same combination; this names it at the boundary.
+         */
+        if (reading.unavailable && reading.percent !== null) {
+          throw new ServiceError(422, 'battery_reading_unavailable_with_percent', { batteryId: battery.id })
+        }
+        /*
+         * `source` is a fact about WHO read the pack, and this is the route only the driver may
+         * call. Stamping `manager` here would let him claim the one source that legitimately waives
+         * the screenshot. The manager has his own route, under his own permission, which forces it.
+         */
+        if (reading.source === 'manager') {
+          throw new ServiceError(422, 'battery_reading_source_not_permitted', { batteryId: battery.id })
+        }
         const currentMediaId =
           attached.find((a) => a.package === body.package && a.slot === bmsSlot(battery.slotNo ?? 1))?.mediaId ?? null
         // A current PWA names the attachment returned by its own upload. Refuse rather than bind a

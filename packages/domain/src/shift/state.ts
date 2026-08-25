@@ -166,6 +166,16 @@ export interface BatteryReading {
    * device that works. See `awaiting_manager_reading`.
    */
   readonly unavailable?: boolean
+  /**
+   * Who produced the charge figure. The gate needs it because `unavailable` alone cannot tell two
+   * opposite situations apart: a manager who read the pack on his own device (legitimately a figure
+   * with no driver screenshot behind it) and a driver who declared the pack unreadable and then
+   * supplied a figure anyway (a number with no evidence of any kind).
+   *
+   * OPTIONAL AND FAIL-SAFE ON PURPOSE: an absent source is never treated as the manager, so a
+   * caller that forgets to pass it gets the strict gate rather than the waiver.
+   */
+  readonly source?: 'ocr' | 'manual' | 'manager'
 }
 
 export interface StartPackage {
@@ -238,12 +248,26 @@ function batteryGaps(pkg: {
  * is demanding the impossible — and a required photo nobody can supply is how a driver ends up
  * uploading a picture of something else to get past the gate. The obligation moves to the manager
  * with `awaiting_manager_reading`; it is not dropped.
+ *
+ * WHICH IS EXACTLY WHY `unavailable` ALONE MAY NOT WAIVE THE PHOTO. The waiver's whole justification
+ * is that `batteryGaps` raises the compensating gap — and it raises it only while the percent is
+ * still null. A reading carrying BOTH a percent and `unavailable` produced no gap and no required
+ * photo, so both BR5 gates passed with no evidence whatsoever for that pack, and a driver holding
+ * `shift.operate` could send that shape himself.
+ *
+ * The combination cannot simply be rejected: it is the legitimate shape of a pack the MANAGER read
+ * on his own device, which by design has no driver screenshot. `source` is what separates the two,
+ * so the waiver now costs either a still-missing figure or the manager's own signature.
  */
 function requiredPhotoSlots(
   all: readonly string[],
   readings: readonly BatteryReading[],
 ): readonly string[] {
-  const waived = new Set(readings.filter((r) => r.unavailable === true).map((r) => bmsSlot(r.slotNo)))
+  const waived = new Set(
+    readings
+      .filter((r) => r.unavailable === true && (r.percent === null || r.source === 'manager'))
+      .map((r) => bmsSlot(r.slotNo)),
+  )
   return all.filter((slot) => !waived.has(slot))
 }
 
