@@ -771,6 +771,70 @@ always partial. Confirm the query before raising the alarm.
 
 ---
 
+## 7d. A driver cannot close — what to do, and what NOT to do
+
+**Read this before touching a stuck shift. On 2026-08-25 the wrong choice was made four times and
+cost 4,325 SYP of deliveries.**
+
+### The two overrides are not interchangeable
+
+| | «إلغاء النوبة» (void / force-cancel) | «إغلاق قسري» (force-close) |
+| --- | --- | --- |
+| shift ends | `cancelled` | `approved` |
+| its deliveries | **discarded — gone** | **posted and paid** |
+| float / top-up | returned to the office | settled properly |
+| when to use | the shift produced **no real work** | the driver worked and cannot finish the evidence |
+
+`force-close` bypasses the BR5 evidence gate — that is its entire purpose — but it still submits the
+close draft's operations (`forceCloseLocked`). It asks for cash, wallet and odometer, which the
+manager may type when the driver's figures are missing.
+
+**A driver who worked is ALWAYS a force-close.** Since the 08-25 fix the void panel names how many
+deliveries it is about to discard and requires an explicit acknowledgement, but the judgement is
+still yours.
+
+### Before overriding, try this — it is usually two taps
+
+1. **Ask the driver to tap «تحديث» if the update bar is showing.** The PWA is `registerType: 'prompt'`
+   deliberately, so a phone keeps running the bundle it started the shift on. A fix deployed at
+   19:50 did not reach three drivers who were still closing at 01:30.
+2. **A battery the reader will not read is not a blocker.** «تطبيق البطارية لا يعمل على جهازي» hands
+   that pack to the manager and lets the driver submit.
+3. **A number the reader refused can simply be typed.** Manual entry always works, including after
+   the per-shift read budget is spent.
+
+### Why a close gets stuck
+
+```sql
+-- Which shifts are stuck, and how much work is inside them.
+SELECT d.full_name_ar AS driver, s.state, cd.revision,
+       jsonb_array_length(COALESCE(cd.payload->'operations'->'orders','[]'::jsonb)) AS orders_in_draft,
+       cd.payload->'figures'->>'cashDeclared'   AS cash,
+       cd.payload->'figures'->>'walletDeclared' AS wallet,
+       cd.payload->'figures'->>'odometerKm'     AS odometer
+  FROM shifts s
+  LEFT JOIN drivers d ON d.id = s.driver_id
+  LEFT JOIN shift_close_drafts cd ON cd.shift_id = s.id
+ WHERE s.state IN ('open', 'suspended') ORDER BY s.open_approved_at;
+
+-- Has the shift spent its OCR read budget? (default 40 since 2026-08-25; it was 15)
+SELECT count(*) FROM ocr_reads WHERE shift_id = $1;
+
+-- Which end photos exist, and which battery packs still have no usable reading.
+SELECT sm.slot FROM shift_media sm WHERE sm.shift_id = $1 AND sm.package = 'end' ORDER BY sm.slot;
+SELECT b.slot_no, r.percent, r.unavailable, r.source
+  FROM batteries b
+  LEFT JOIN shift_battery_readings r ON r.battery_id = b.id AND r.shift_id = $1 AND r.package = 'end'
+ WHERE b.vehicle_id = (SELECT vehicle_id FROM shifts WHERE id = $1) ORDER BY b.slot_no;
+```
+
+**A draft revision in the hundreds means the autosave could not converge** — that was the 2026-08-24
+signature (حيدر محمد reached 258 in thirteen minutes, one every three seconds). Since `644306a` the
+fingerprint compares canonical money, so `500` and `500.00` no longer disagree forever. If you ever
+see a revision climbing again, that is the bug returning and the driver's submit button is dead.
+
+---
+
 ## 8. Known operational gaps
 
 | Gap | Impact | Owner action |

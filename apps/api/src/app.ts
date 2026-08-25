@@ -56,6 +56,7 @@ import {
   resolveSession,
   verifySecondFactor,
 } from './auth.ts'
+import { DEFAULT_MAX_OCR_READS_PER_SHIFT } from './config.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
 import { assertEveryRouteDeclaresPermission, collectRoutes, makeAuthorize, resetRouteRegistry } from './rbac.ts'
 import { registerExpenseRoutes } from './expenses.routes.ts'
@@ -670,6 +671,25 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         if (!battery) {
           throw new ServiceError(422, 'battery_not_on_this_vehicle', { batteryId: reading.batteryId })
         }
+        /*
+         * «تطبيق البطارية لا يعمل على جهازي» says the driver has NO figure, so a figure alongside it
+         * is a contradiction — and it used to be a way past BR5 entirely: the declaration waived the
+         * `bms_N` photo while the percent suppressed `awaiting_manager_reading`, leaving the pack
+         * with no evidence and both gates satisfied. The driver's own PWA never sends this shape
+         * (`declareUnavailable` hard-codes `percent: null`), so refusing it costs a real client
+         * nothing. The domain fails safe on the same combination; this names it at the boundary.
+         */
+        if (reading.unavailable && reading.percent !== null) {
+          throw new ServiceError(422, 'battery_reading_unavailable_with_percent', { batteryId: battery.id })
+        }
+        /*
+         * `source` is a fact about WHO read the pack, and this is the route only the driver may
+         * call. Stamping `manager` here would let him claim the one source that legitimately waives
+         * the screenshot. The manager has his own route, under his own permission, which forces it.
+         */
+        if (reading.source === 'manager') {
+          throw new ServiceError(422, 'battery_reading_source_not_permitted', { batteryId: battery.id })
+        }
         const currentMediaId =
           attached.find((a) => a.package === body.package && a.slot === bmsSlot(battery.slotNo ?? 1))?.mediaId ?? null
         // A current PWA names the attachment returned by its own upload. Refuse rather than bind a
@@ -991,7 +1011,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         id,
         slot,
         body,
-        opts.maxOcrReadsPerShift ?? 15,
+        opts.maxOcrReadsPerShift ?? DEFAULT_MAX_OCR_READS_PER_SHIFT,
       )
     },
   )
@@ -1044,7 +1064,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           field: expectedField,
           bytes,
           requestedBy: req.actor!.userId,
-          maxReadsPerShift: opts.maxOcrReadsPerShift ?? 15,
+          maxReadsPerShift: opts.maxOcrReadsPerShift ?? DEFAULT_MAX_OCR_READS_PER_SHIFT,
           retryFailed: false,
         })
         if (!classified.result.ok && classified.result.reason === 'wrong_screen') {
@@ -1204,7 +1224,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
                 field: preflightField,
                 bytes,
                 requestedBy: req.actor!.userId,
-                maxReadsPerShift: opts.maxOcrReadsPerShift ?? 15,
+                maxReadsPerShift: opts.maxOcrReadsPerShift ?? DEFAULT_MAX_OCR_READS_PER_SHIFT,
                 retryFailed: false,
               })
               if (!screen.result.ok && screen.result.reason === 'wrong_screen') {
@@ -1306,7 +1326,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         field: params.field,
         bytes: new Uint8Array(req.body as Buffer),
         requestedBy: req.actor!.userId,
-        maxReadsPerShift: opts.maxOcrReadsPerShift ?? 15,
+        maxReadsPerShift: opts.maxOcrReadsPerShift ?? DEFAULT_MAX_OCR_READS_PER_SHIFT,
         retryFailed: req.headers['x-ocr-retry'] === 'true',
       })
       return reply.send({
@@ -1855,7 +1875,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         target: body.target,
         reason: body.reason,
         requestId: req.requestId,
-        maxReadsPerShift: opts.maxOcrReadsPerShift ?? 15,
+        maxReadsPerShift: opts.maxOcrReadsPerShift ?? DEFAULT_MAX_OCR_READS_PER_SHIFT,
       })
       return reply.send({
         ok: out.result.ok,

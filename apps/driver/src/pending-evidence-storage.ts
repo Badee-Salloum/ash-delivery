@@ -13,6 +13,8 @@ export interface PendingEvidenceRecord {
   package: 'start' | 'end'
   slot: string
   generationId: string
+  /** Server attachment generation accepted for these bytes; absent on records from older clients. */
+  acceptedAttachmentToken?: string | null
   fileName: string
   mimeType: string
   lastModified: number
@@ -55,6 +57,7 @@ export function pendingEvidenceRecord(input: PendingEvidenceInput, now = Date.no
     package: input.package,
     slot: input.slot,
     generationId: input.generationId,
+    acceptedAttachmentToken: null,
     fileName: input.fileName,
     mimeType: input.mimeType,
     lastModified: input.lastModified,
@@ -74,6 +77,9 @@ export function isPendingEvidenceRecord(value: unknown): value is PendingEvidenc
     (row.package === 'start' || row.package === 'end') &&
     typeof row.slot === 'string' &&
     typeof row.generationId === 'string' &&
+    (row.acceptedAttachmentToken === undefined ||
+      row.acceptedAttachmentToken === null ||
+      typeof row.acceptedAttachmentToken === 'string') &&
     typeof row.fileName === 'string' &&
     typeof row.mimeType === 'string' &&
     typeof row.lastModified === 'number' &&
@@ -151,6 +157,72 @@ export async function putPendingEvidence(input: PendingEvidenceInput): Promise<v
   })
 }
 
+/**
+ * Link retained bytes to the exact server attachment generation that accepted them.
+ *
+ * The generation comparison is part of the same IndexedDB transaction as the update. Therefore a
+ * late accepted PUT cannot tag a newer replacement that has already occupied this slot locally.
+ */
+export async function markPendingEvidenceAccepted(
+  shiftId: string,
+  pkg: 'start' | 'end',
+  slot: string,
+  expectedGenerationId: string,
+  attachmentToken: string,
+): Promise<boolean> {
+  const key = pendingEvidenceKey(shiftId, pkg, slot)
+  const updated = await withStore<boolean>('readwrite', (store, resolve, reject) => {
+    const get = store.get(key)
+    get.onerror = () => reject(get.error)
+    get.onsuccess = () => {
+      const current = get.result
+      if (!isPendingEvidenceRecord(current) || current.generationId !== expectedGenerationId) {
+        resolve(false)
+        return
+      }
+      const put = store.put({
+        ...current,
+        acceptedAttachmentToken: attachmentToken,
+        savedAt: Date.now(),
+      })
+      put.onsuccess = () => resolve(true)
+      put.onerror = () => reject(put.error)
+    }
+  })
+  return updated ?? false
+}
+
+export interface PendingEvidenceOwner {
+  generationId: string
+  acceptedAttachmentToken: string | null
+}
+
+interface AttachmentReadOwner {
+  attachmentToken: string
+  read: { status: string } | null
+}
+
+/**
+ * Return the local generation whose bytes may be removed after a persisted terminal read.
+ *
+ * The attachment token is the ownership boundary. A terminal result from the thumbnail currently
+ * visible behind an offline replacement says nothing about that replacement and must retain it.
+ */
+export function terminalPendingEvidenceCleanup(
+  pending: PendingEvidenceOwner | null,
+  attachment: AttachmentReadOwner | null | undefined,
+): PendingEvidenceOwner | null {
+  if (
+    pending === null ||
+    pending.acceptedAttachmentToken === null ||
+    attachment?.attachmentToken !== pending.acceptedAttachmentToken ||
+    (attachment.read?.status !== 'complete' && attachment.read?.status !== 'failed')
+  ) {
+    return null
+  }
+  return pending
+}
+
 export async function getPendingEvidence(
   shiftId: string,
   pkg: 'start' | 'end',
@@ -161,8 +233,11 @@ export async function getPendingEvidence(
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error)
   })
-  if (!isPendingEvidenceRecord(value) || pendingEvidenceExpired(value)) {
-    if (value !== null) await deletePendingEvidence(shiftId, pkg, slot)
+  // Leave corrupt legacy rows for the transactional sweep. An unconditional delete after this
+  // readonly transaction could otherwise erase a valid replacement written in between.
+  if (!isPendingEvidenceRecord(value)) return null
+  if (pendingEvidenceExpired(value)) {
+    await deletePendingEvidence(shiftId, pkg, slot, value.generationId)
     return null
   }
   return value

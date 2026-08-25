@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { afterAll, describe, expect, it } from 'vitest'
+import { migrate } from '../src/migrate.ts'
 import { createPool } from '../src/pool.ts'
-import { assertDisposableDatabaseUrl } from './disposable-database.ts'
+import { assertDisposableDatabaseConnection, assertDisposableDatabaseUrl } from './disposable-database.ts'
 import { fixedSettlementHash } from '../../../apps/api/src/fixed-settlement.ts'
 import {
   INTEGRITY_CHECKS,
@@ -10,6 +11,7 @@ import {
   canonicalSettlementHash,
   canonicalJson,
   closeDraftHash,
+  collectShiftMoneyIntegrity,
   runShiftMoneyIntegrity,
   settlementHashFailures,
 } from '../../../scripts/check-shift-money-integrity.mjs'
@@ -93,12 +95,15 @@ describe('read-only shift-money integrity checker', () => {
     expect(residuals).toContain('je.shift_id = ss.shift_id')
     expect(residuals).toContain("ft.kind = 'carried_receivable'")
     expect(residuals).toContain("ft.kind = 'carried_wallet_receivable'")
-    expect(residuals).toContain('sb.ordinary_cash <> ss.cash_receivable_deferred_minor::numeric - CASE')
-    expect(residuals).toContain('sb.ordinary_wallet <> ss.wallet_receivable_deferred_minor::numeric')
-    expect(residuals).toContain('sb.funding_cash <> -CASE')
+    // Since 0041 a deferred collection is SHIFT FUNDING, so a settled shift's ordinary funds must
+    // move only by the legacy pre-0037 carry, and the deferral belongs on the funding side.
+    expect(residuals).toContain('sb.ordinary_cash <> - CASE')
+    expect(residuals).toContain('sb.ordinary_wallet <> 0')
+    expect(residuals).toContain('sb.funding_cash <> ss.cash_receivable_deferred_minor::numeric - CASE')
     expect(residuals).toContain('s.open_approved_at < rollout.applied_at')
     expect(residuals).toContain('s.open_approved_at >= rollout.applied_at')
-    expect(residuals).toContain('sb.funding_wallet <> -COALESCE(c.carried_wallet, 0)')
+    expect(residuals).toContain('sb.funding_wallet <> ss.wallet_receivable_deferred_minor::numeric')
+    expect(residuals).toContain('- COALESCE(c.carried_wallet, 0)')
     expect(residuals).toContain("f.type::text = 'driver_receivable_wallet'")
     expect(residuals).toContain("f.type::text = 'driver_shift_funding_wallet'")
   })
@@ -258,6 +263,30 @@ describe('read-only shift-money integrity checker', () => {
     expect(forceCancel).toContain('balances.driver_shift_funding_cash <> (')
     expect(forceCancel).not.toContain('shift_close_drafts')
     expect(forceCancel).not.toContain('shift_settlements')
+  })
+
+  /**
+   * The void recipe describes the carry reversals and nothing else, so only THOSE corrections may
+   * count as its actual lines. A cancelled shift may legitimately also carry an unrelated audited
+   * correction; in production that is a wallet top-up adjustment
+   * («تصحيح القيمة الفعلية لشحن المحفظة حسب توجيه الإدارة»), recorded before the cancel.
+   *
+   * Scoping every `correction` into the actual set made that adjustment an unexpected line and
+   * failed a shift whose driver cash, driver wallet, office cash and office wallet all net to
+   * zero — while the database's own `shift_void_journals_match` returned true for the same shift.
+   * The release blocker exited 2 on a correct ledger, which is how a release blocker stops being
+   * read. `tranche_journal_totals` already nets exactly these adjustments.
+   */
+  it('counts only the void carry reversals as corrections, not every correction on the shift', () => {
+    for (const check of [
+      LEGACY_INTEGRITY_CHECKS.find((c) => c.id === 'force_cancel_integrity').sql,
+      INTEGRITY_CHECKS.find((c) => c.id === 'force_cancel_integrity').sql,
+    ]) {
+      expect(check).toContain("je.occurrence_key LIKE 'void-carry-%'")
+      expect(check).toContain("je.occurrence_key LIKE 'void-wallet-carry-%'")
+      // The unscoped form is what swept in the unrelated adjustment.
+      expect(check).not.toContain("je.event_type IN ('float_return', 'wallet_return', 'correction')")
+    }
   })
 
   it('contains only SELECT/CTE audit queries and enforces a read-only snapshot', () => {
@@ -501,7 +530,11 @@ describe('read-only shift-money integrity checker', () => {
 })
 
 const DATABASE_URL = process.env.SHIFT_MONEY_TEST_DATABASE_URL ?? process.env.DATABASE_URL
-if (DATABASE_URL) assertDisposableDatabaseUrl(DATABASE_URL)
+// Positively identify the database as disposable BOTH by its URL and, once connected, by the
+// server actually on the other end — the pattern every other real-Postgres test here follows.
+// This file previously checked only the URL and never called `migrate`, which is why it was the
+// only Postgres-touching test running against hand-built stand-ins instead of the real schema.
+const disposable = DATABASE_URL ? assertDisposableDatabaseUrl(DATABASE_URL) : null
 
 if (!DATABASE_URL) {
   describe('close journal multiset on PostgreSQL', () => {
@@ -514,6 +547,64 @@ if (!DATABASE_URL) {
     await pool.end()
   })
 
+  /**
+   * Every check, executed by a real query planner against the real schema.
+   *
+   * This is the gap this file used to have. Ten of the fifteen checks were asserted only with
+   * `expect(sql).toContain(...)`, and the five that ran did so against hand-built `ON COMMIT DROP`
+   * TEMP tables typed `state text` / `event_type text` / no `amount_minor > 0`. So a check could
+   * name a column that does not exist, compare a value against the wrong enum, or fail to parse at
+   * all, and every test here would still be green.
+   *
+   * That is not hypothetical: running these against production for the first time immediately
+   * surfaced `force_cancel_integrity` failing a shift whose funds all net to zero, because it swept
+   * an unrelated audited wallet-top-up correction into a void recipe that never described it.
+   *
+   * `migrate(pool)` gives the genuine enums, CHECK constraints, triggers and foreign keys. An empty
+   * database is deliberately enough here: the assertion is that all fifteen PARSE AND RUN, which is
+   * what no test previously established. The behavioural cases follow below.
+   */
+  describe('every integrity check runs against the real migrated schema', () => {
+    it('parses and executes all fifteen, plus both hash checks', async () => {
+      await assertDisposableDatabaseConnection(pool, disposable)
+      await migrate(pool)
+      const result = await runShiftMoneyIntegrity(pool, { sampleLimit: 5 })
+
+      // Every selected check reported a real, numeric result — i.e. Postgres accepted the query.
+      expect(result.checks.length).toBe(INTEGRITY_CHECKS.length + 2)
+      for (const check of result.checks) {
+        expect(Number.isInteger(check.violations), `${check.id} did not return a count`).toBe(true)
+      }
+      expect(result.checks.map((check) => check.id)).toEqual([
+        ...INTEGRITY_CHECKS.map((check) => check.id),
+        'settlement_hashes',
+        'close_draft_hashes',
+      ])
+    })
+
+    it('reports a clean database as clean rather than merely running', async () => {
+      await migrate(pool)
+      const client = await pool.connect()
+      try {
+        // Isolate from whatever another serial test file left behind, then assert on an empty
+        // ledger. `collectShiftMoneyIntegrity` takes the client directly and only ever SELECTs, so
+        // it composes inside this transaction — `runShiftMoneyIntegrity` would open a READ ONLY
+        // transaction of its own and its ROLLBACK would discard the fixture around it.
+        await client.query('BEGIN')
+        await client.query(`
+          TRUNCATE shift_settlements, shift_close_drafts, journal_lines, journal_entries,
+                   cash_deductions, shift_orders, shift_decisions, float_tranches, shifts
+                   RESTART IDENTITY CASCADE`)
+        const result = await collectShiftMoneyIntegrity(client, { sampleLimit: 5 })
+        const dirty = result.checks.filter((check) => check.violations > 0)
+        expect(dirty.map((check) => check.id), JSON.stringify(dirty)).toEqual([])
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+      }
+    })
+  })
+
   describe('close journal multiset on PostgreSQL', () => {
     it('accepts a canonical close and rejects extra balanced lines', async () => {
       const client = await pool.connect()
@@ -524,8 +615,8 @@ if (!DATABASE_URL) {
         driverWallet: randomUUID(),
         driverCash: randomUUID(),
         sharePayable: randomUUID(),
-        receivableCash: randomUUID(),
-        receivableWallet: randomUUID(),
+        fundingCash: randomUUID(),
+        fundingWallet: randomUUID(),
         officeWallet: randomUUID(),
         officeCash: randomUUID(),
       }
@@ -612,16 +703,16 @@ if (!DATABASE_URL) {
              ($1, $8, 'driver_wallet', $9),
              ($2, $8, 'driver_cash', $9),
              ($3, $8, 'driver_share_payable', $9),
-             ($4, $8, 'driver_receivable_cash', $9),
-             ($5, $8, 'driver_receivable_wallet', $9),
+             ($4, $8, 'driver_shift_funding_cash', $9),
+             ($5, $8, 'driver_shift_funding_wallet', $9),
              ($6, $8, 'office_wallet', NULL),
              ($7, $8, 'office_cash', NULL)`,
           [
             funds.driverWallet,
             funds.driverCash,
             funds.sharePayable,
-            funds.receivableCash,
-            funds.receivableWallet,
+            funds.fundingCash,
+            funds.fundingWallet,
             funds.officeWallet,
             funds.officeCash,
             branchId,
@@ -651,10 +742,10 @@ if (!DATABASE_URL) {
           [
             funds.driverWallet,
             funds.driverCash,
-            funds.receivableWallet,
+            funds.fundingWallet,
             funds.officeWallet,
             funds.sharePayable,
-            funds.receivableCash,
+            funds.fundingCash,
             funds.officeCash,
           ],
         )

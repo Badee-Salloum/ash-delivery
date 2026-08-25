@@ -228,6 +228,76 @@ describe('ordinary and shift-funding receivable commands', () => {
     expect(await h.deps.ledger.fundBalance(BRANCH, `driver_wallet:${DRIVER_ID}`)).toBe(0n)
   })
 
+  /**
+   * THE regression test for the deferred-collection defect, and the one whose absence let it ship.
+   *
+   * A deferral leaves money physically with the driver — banknotes in his pocket, balance in his
+   * Yallago app. Booked to the ORDINARY receivable it was invisible to the next open, so BR1 at the
+   * next close counted money he already owed as a SURPLUS and decision 13 paid it to him. Here that
+   * is worth exactly 4,000: expected 5,000 against 8,000 actually held.
+   *
+   * Everything below is arithmetic, not a golden file. Shift 1 defers 3,000 cash + 1,000 wallet.
+   * Shift 2 opens on that money alone and takes one 5,000 cash delivery, so it expects
+   * 3,000 + 5,000 = 8,000 cash and 1,000 − 1,000 = 0 wallet. `submitBalancedShift` asserts BR1's
+   * difference is zero, which is the whole point: the carried money must be EXPECTED, not a windfall.
+   */
+  it('carries a deferred collection into the next shift instead of paying it back as a surplus', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    await seedOffice(manager)
+
+    const first = await awaitingEmptyShift(driver)
+    expect((await post(manager, `/shifts/${first}/approve-open`, {
+      floatTranches: [sypStr(10_000)],
+      topupTranches: [sypStr(5_000)],
+    })).statusCode).toBe(200)
+    const firstHash = await submitBalancedShift(driver, manager, first, 15_000, 4_000)
+
+    // Claims are cash 13,000 (15,000 held less the 2,000 fixed share) and wallet 4,000.
+    const deferredPreview = await get(
+      manager,
+      `/shifts/${first}/settlement?cashReceivableDeferred=${sypStr(3_000)}`
+        + `&walletReceivableDeferred=${sypStr(1_000)}`,
+    )
+    expect(deferredPreview.statusCode, deferredPreview.body).toBe(200)
+    const deferred = deferredPreview.json() as {
+      settlementHash: string
+      cashReceivableDeferred: string
+      walletReceivableDeferred: string
+    }
+    const closed = await post(manager, `/shifts/${first}/approve-close`, {
+      reviewedOrdersHash: firstHash,
+      reviewedSettlementHash: deferred.settlementHash,
+      walletTransferConfirmed: true,
+      cashSettlementConfirmed: true,
+      cashReceivableDeferred: deferred.cashReceivableDeferred,
+      walletReceivableDeferred: deferred.walletReceivableDeferred,
+    })
+    expect(closed.statusCode, closed.body).toBe(200)
+
+    // The deferral is SHIFT FUNDING, so the next open can see it. The ordinary debt funds — which
+    // are cleared only by an explicit collection command — must stay untouched by a close.
+    expect(await h.deps.ledger.fundBalance(BRANCH, `driver_shift_funding_cash:${DRIVER_ID}`)).toBe(300_000n)
+    expect(await h.deps.ledger.fundBalance(BRANCH, `driver_shift_funding_wallet:${DRIVER_ID}`)).toBe(100_000n)
+    expect(await h.deps.ledger.fundBalance(BRANCH, `driver_receivable_cash:${DRIVER_ID}`)).toBe(0n)
+    expect(await h.deps.ledger.fundBalance(BRANCH, `driver_receivable_wallet:${DRIVER_ID}`)).toBe(0n)
+
+    const second = await openEmptyShift(driver, manager)
+    const carried = await h.deps.shifts.findById(second)
+    expect(carried?.carriedTranches).toEqual([300_000n])
+    expect(carried?.carriedWalletTranches).toEqual([100_000n])
+    expect(await h.deps.ledger.fundBalance(BRANCH, `driver_shift_funding_cash:${DRIVER_ID}`)).toBe(0n)
+    expect(await h.deps.ledger.fundBalance(BRANCH, `driver_shift_funding_wallet:${DRIVER_ID}`)).toBe(0n)
+
+    // Zero difference is the assertion. On the old routing this read as a 4,000 surplus.
+    const secondHash = await submitBalancedShift(driver, manager, second, 8_000, 0)
+    const settled = await approveFixedClose(h, manager, second, secondHash)
+    expect(settled.statusCode, settled.body).toBe(200)
+    expect(await h.deps.ledger.fundBalance(BRANCH, `driver_cash:${DRIVER_ID}`)).toBe(0n)
+    expect(await h.deps.ledger.fundBalance(BRANCH, `driver_wallet:${DRIVER_ID}`)).toBe(0n)
+    expect(await h.deps.ledger.fundBalance(BRANCH, `driver_share_payable:${DRIVER_ID}`)).toBe(0n)
+  })
+
   it('rejects a stale funding preview after a concurrent direct event without opening or posting', async () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')

@@ -81,7 +81,8 @@ describe('photo upload and OCR attempt ownership', () => {
     const startReaders = vi.fn()
 
     // The recovery effect must not let an older attachment turn this pending upload green.
-    expect(photoSlot).toContain("setPendingGenerationId(record.generationId)\n      // A retained generation")
+    expect(photoSlot).toContain('generationId: record.generationId')
+    expect(photoSlot).toContain('acceptedAttachmentToken: record.acceptedAttachmentToken ?? null')
     expect(photoSlot).toContain("setState('error')")
     expect(photoSlot).toContain("!(state === 'error' && currentAttempt.current)")
     expect(photoSlot.indexOf('{restoredThumbnail ? (')).toBeLessThan(

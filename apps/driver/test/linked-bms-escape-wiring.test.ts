@@ -11,7 +11,7 @@ describe('end-BMS slow-reader escape wiring', () => {
     expect(batteryPanel).toContain('onLinkedRead(slot, retryFailed, upload, signal)')
     expect(batteryPanel).toContain('push(battery.id, applied.state, signal)')
     expect(shift).toContain('api.readCloseDraftAttachment(shift.id, slot, {')
-    expect(shift).toContain("}, signal ? { signal } : {})")
+    expect(shift).toContain("}, effectiveSignal ? { signal: effectiveSignal } : {})")
   })
 
   it('gives only the end-package battery reader a manual escape without deleting its photo', () => {
@@ -31,14 +31,30 @@ describe('end-BMS slow-reader escape wiring', () => {
 
   it('restores only the pending marker owned by the cancelled request', () => {
     expect(shift).toContain('const pendingReadId = `pending-${attachment.attachmentToken}-${clientUuid()}`')
-    expect(shift).toContain('owned?.attachmentToken !== attachment.attachmentToken')
-    expect(shift).toContain('owned.read?.readId !== pendingReadId')
+    expect(shift).toContain('ownsPendingCloseDraftRead(')
+    expect(shift).toContain('attachment.attachmentToken,')
+    expect(shift).toContain('pendingReadId,')
     expect(shift).toContain('[slot]: attachment')
-    expect(shift).toContain("signal?.addEventListener('abort', onAbort, { once: true })")
-    expect(shift).toContain("signal?.removeEventListener('abort', onAbort)")
+    expect(shift).toContain("effectiveSignal?.addEventListener('abort', onAbort, { once: true })")
+    expect(shift).toContain("effectiveSignal?.removeEventListener('abort', onAbort)")
 
     // The task identity is a second fence: even the same pack/slot cannot let an older late answer
     // clear or replace the visible outcome of a newer retry.
     expect(batteryPanel).toContain('if (linkedReadTasks.current[battery.id] !== task) return')
+  })
+
+  /**
+   * The BMS read was the ONLY one with a browser-side lifetime. Orders, payments-log, wallet and
+   * odometer ran bare, so a fetch whose connection never settled left the `running` marker in place
+   * forever — and a running read is a hard close blocker whose retry button is hidden. Unrecoverable
+   * without closing the app, at the end of a shift, at the branch.
+   */
+  it('bounds a read even when the caller brings no lifetime of its own', () => {
+    expect(shift).toContain('const ownDeadline = signal ? null : new AbortController()')
+    expect(shift).toContain("ownDeadline.abort('timeout')")
+    expect(shift).toContain('LINKED_READ_UI_TIMEOUT_MS')
+    expect(shift).toContain('const effectiveSignal = signal ?? ownDeadline?.signal')
+    // The caller's own signal still wins when there is one — cancellation must not be weakened.
+    expect(shift).toContain('if (deadlineTimer !== null) clearTimeout(deadlineTimer)')
   })
 })

@@ -25,6 +25,7 @@ export type CloseDraftReadFailure =
   | 'no_fields'
   | 'refused'
   | 'wrong_screen'
+  | 'read_budget_exhausted'
 
 export type CloseDraftReadStatus = 'idle' | 'running' | 'complete' | 'failed'
 
@@ -34,6 +35,10 @@ export interface CloseDraftAttachmentRead {
   field: CloudOcrField
   failure: CloseDraftReadFailure | null
   attempts: number
+  rowCount?: number
+  ordersCount?: number
+  deductionsCount?: number
+  cancelledCount?: number
 }
 
 export interface CloseDraftAttachment {
@@ -1631,7 +1636,7 @@ export interface CloudOcrResponse {
     pointB: string | null
   }>
   fields: Record<string, string | null>
-  reason?: 'unavailable' | 'timeout' | 'no_fields' | 'refused' | 'wrong_screen'
+  reason?: 'unavailable' | 'timeout' | 'no_fields' | 'refused' | 'wrong_screen' | 'read_budget_exhausted'
 }
 
 /** A read-only, audited manager read of one explicit stored dashboard evidence attachment. */

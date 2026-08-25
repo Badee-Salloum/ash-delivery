@@ -54,6 +54,7 @@ import {
   floatCarry,
   floatOut,
   floatReturn,
+  hasVisibleText,
   isDateLocked,
   minWalletBalance,
   minor,
@@ -304,7 +305,7 @@ const hasAuditedWindowDecision = (row: {
   decidedBy: string | null
   decidedAt: string | null
 }): boolean =>
-  row.decidedBy !== null && row.decidedAt !== null && Boolean(row.decisionReason?.trim())
+  row.decidedBy !== null && row.decidedAt !== null && hasVisibleText(row.decisionReason)
 
 /**
  * `included=true` is not enough for an unknown-time legacy row. Older API/database versions wrote
@@ -642,8 +643,14 @@ async function batteryContext(
       // A replacement photo invalidates the old machine reading until the new file has been read.
       // An explicit manager-reading handoff is the exception: it intentionally may have no driver
       // image and waits for the manager's reading at the gate.
+      //
+      // That exception is exactly as wide as its justification and no wider. A handoff earns it
+      // while it still carries no figure, and the MANAGER earns it because he read the pack on his
+      // own device. A driver row claiming both a percent and the handoff is neither, and used to
+      // pass here — turning the one branch that nulls an unevidenced percent into a way around it.
+      const handoff = row?.unavailable === true && (row.percent === null || row.source === 'manager')
       const evidenceMatches =
-        row?.unavailable === true ||
+        handoff ||
         (row?.mediaId !== null && row?.mediaId !== undefined && row.mediaId === currentMediaId)
       return {
         slotNo: battery.slotNo ?? i + 1,
@@ -651,6 +658,8 @@ async function batteryContext(
         // A recorded handoff distinguishes a pack nobody has addressed from one deliberately sent
         // to manager review — the first is the driver's to complete, the second is the manager's.
         unavailable: evidenceMatches && row?.unavailable === true,
+        // The gate cannot tell a manager's own reading from a driver's forged one without this.
+        ...(row?.source === undefined ? {} : { source: row.source }),
       }
     }),
   }
@@ -2334,6 +2343,44 @@ function assertCloseDraftMoneyComplete(closeDraft: CloseDraftRecord): void {
   }
 }
 
+type EndEvidenceReadIssueReason = 'missing' | 'not_final' | 'wrong_screen'
+
+/**
+ * A photo being attached is not proof that it belongs in that slot. The first upload deliberately
+ * returns before OCR so a slow reader cannot turn a successful upload into a phone-side failure;
+ * consequently the close transaction must require the separate evidence-bound read to have
+ * reached a terminal state for the exact current attachment generation.
+ *
+ * Terminal reader failures other than `wrong_screen` remain admissible. In particular
+ * `no_fields`, `timeout` and `unavailable` must leave the driver able to type the value manually.
+ * The optional payments log is intentionally absent from this gate.
+ */
+function assertCloseDraftEvidenceReadsFinal(closeDraft: CloseDraftRecord): void {
+  const expectedField = (slot: string): 'orders' | 'wallet' | 'odometer' | 'bms' | null => {
+    if (slot === 'dashboard' || /^dashboard_[1-9][0-9]*$/.test(slot)) return 'orders'
+    if (slot === 'wallet') return 'wallet'
+    if (slot === 'odometer') return 'odometer'
+    if (/^bms_[1-9][0-9]*$/.test(slot)) return 'bms'
+    return null
+  }
+  const issues: Array<{ slot: string; field: string; reason: EndEvidenceReadIssueReason }> = []
+  for (const [slot, evidence] of Object.entries(closeDraft.data.evidence)) {
+    const field = expectedField(slot)
+    if (field === null) continue
+    const read = closeDraft.data.reads[`${evidence.attachmentToken}|${field}`]
+    if (read === undefined) {
+      issues.push({ slot, field, reason: 'missing' })
+    } else if (read.status !== 'complete' && read.status !== 'failed') {
+      issues.push({ slot, field, reason: 'not_final' })
+    } else if (read.status === 'failed' && read.failure === 'wrong_screen') {
+      issues.push({ slot, field, reason: 'wrong_screen' })
+    }
+  }
+  if (issues.length > 0) {
+    throw new ServiceError(422, 'end_evidence_read_required', { slots: issues })
+  }
+}
+
 async function assertCloseDraftEvidenceCurrent(
   deps: Deps,
   shiftId: string,
@@ -2424,6 +2471,9 @@ async function submitEndPackageLocked(
       })
     }
     assertCloseDraftMoneyComplete(closeDraft)
+    // Keep this before canonical operation materialisation: an unread or wrong-screen attachment
+    // must not write even provisional order/money rows into the close transaction.
+    assertCloseDraftEvidenceReadsFinal(closeDraft)
     const figures = closeDraft.data.figures
     if (figures.odometerKm === null || figures.cashDeclared === null || figures.walletDeclared === null) {
       throw new ServiceError(422, 'close_draft_figures_incomplete')

@@ -522,7 +522,13 @@ export function safeProviderDetail(raw: string, apiKey: string): string {
 function parsedScreenKindResult(parsed: ParsedScreen): OcrResult {
   return parsed.screenKind === 'orders' || parsed.screenKind === 'payments_log' || parsed.screenKind === 'unknown'
     ? { ok: true, rows: [], fields: {}, raw: parsed }
-    : { ok: false, reason: 'no_fields' }
+    : {
+        ok: false,
+        reason: 'no_fields',
+        // The model returned a screenKind outside the schema's enum. Worth naming rather than
+        // folding into the generic `no_fields`: it means the provider ignored the strict schema.
+        detail: `screen-kind pass: model answered ${JSON.stringify(parsed.screenKind ?? null)}, outside the permitted enum`,
+      }
 }
 
 async function routePassWithinGrace(
@@ -563,7 +569,16 @@ function ordersPassResult(
   if (screenKind.raw?.screenKind === 'payments_log') return { ok: false, reason: 'wrong_screen' }
   // `unknown` is not proof that the driver selected the wrong screen. Keep that distinction so the
   // UI asks for a clearer/retryable image instead of confidently naming an unrelated source.
-  if (screenKind.raw?.screenKind !== 'orders') return { ok: false, reason: 'no_fields' }
+  if (screenKind.raw?.screenKind !== 'orders') {
+    return {
+      ok: false,
+      reason: 'no_fields',
+      // Named, because the driver's screen is fine in this case and the shape is not: the
+      // screen-kind gate could not identify the image. Reported as `no_fields` like a blank
+      // screen and a truncated completion, so only this sentence tells them apart.
+      detail: `screen-kind gate: ${String(screenKind.raw?.screenKind ?? 'absent')} — not an orders screen`,
+    }
+  }
 
   // The compact money pass is the sole financial authority. Route transcription is optional
   // enrichment and can neither rescue a failed money read nor replace/refuse a verified fee.
@@ -1092,7 +1107,17 @@ export function parsedResult(field: OcrField, parsed: ParsedScreen): OcrResult {
     if (f?.label) fields[String(f.label)] = f.value == null ? null : String(f.value)
   }
 
-  if (rows.length === 0 && Object.keys(fields).length === 0) return { ok: false, reason: 'no_fields' }
+  if (rows.length === 0 && Object.keys(fields).length === 0) {
+    // The model answered, and its answer was "nothing here". Say so, because the same `no_fields`
+    // reason is also what a ceiling-truncated completion and an unidentifiable screen produce, and
+    // in production three of four failed reads carried no `detail` at all — leaving "the model
+    // transcribed rows and verification rejected every one" indistinguishable from a blank screen.
+    return {
+      ok: false,
+      reason: 'no_fields',
+      detail: `pass ${field}: model returned a well-formed but empty transcription (0 rows, 0 fields)`,
+    }
+  }
   return field === 'orders'
     ? { ok: true, retryable: ordersRowsRetryable(rows), rows, fields, raw: parsed }
     : { ok: true, rows, fields, raw: parsed }

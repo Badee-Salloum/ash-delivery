@@ -67,13 +67,28 @@ export interface BlobStore {
 export type OcrField = 'orders' | 'payments_log' | 'wallet' | 'odometer' | 'bms'
 
 /**
- * Why a read produced nothing. Four states, not one, because each wants a different response.
+ * Why a read produced nothing. Distinct states, because each wants a different response.
  *
  * The same vocabulary `apps/driver/src/ocr.ts` already uses, and for the reason its header gives:
  * a missing asset, a dead worker, a timeout and a clean read that matched nothing all used to
  * return `null` alike, and the UI could say nothing more useful than "it didn't work".
  */
-export type OcrFailure = 'unavailable' | 'timeout' | 'no_fields' | 'refused' | 'wrong_screen'
+/**
+ * `read_budget_exhausted` is deliberately its OWN reason and not `unavailable`.
+ *
+ * They mean opposite things to the driver. `unavailable` says the reader could not be reached and
+ * the copy tells him to retry; a spent per-shift budget means retrying can never work, and the
+ * client hides the retry button for it (`retryable: false`) — so the app told امجد عبدالله to do
+ * the one thing it had just made impossible, at 01:35 on 2026-08-25, and his shift never closed.
+ * The number he needed was typeable all along; only the message failed him.
+ */
+export type OcrFailure =
+  | 'unavailable'
+  | 'timeout'
+  | 'no_fields'
+  | 'refused'
+  | 'wrong_screen'
+  | 'read_budget_exhausted'
 
 /**
  * AbortSignal's infrastructure-neutral surface. The contracts package deliberately has no DOM or
@@ -434,7 +449,7 @@ export interface ShiftRecord {
   carriedTranches: Minor[]
   /** Wallet shift-funding consumed automatically at open without charging office_wallet twice. */
   carriedWalletTranches?: Minor[]
-  /** «يبقى ذمة على السائق» — what the manager left with him at close. Zero for every older shift. */
+  /** Legacy projection: cash retained as funding auto-consumed when this driver opens his next shift. */
   keptAsReceivable: Minor
   /** «يُعاد للسائق» — the share he kept out of the cash in his hands (owner decision f). */
   driverSharePaid: Minor
@@ -1258,6 +1273,11 @@ export interface CloseDraftReadRecord {
   field: OcrField
   failure: OcrFailure | null
   attempts: number
+  /** Orders-page diagnostics: source rows and the accounting rows they produced. */
+  rowCount?: number
+  ordersCount?: number
+  deductionsCount?: number
+  cancelledCount?: number
 }
 
 export interface CloseDraftAttachment {
@@ -2010,9 +2030,9 @@ export interface ShiftSettlementRecord {
   cashClaimToOffice: Minor
   /** Signed wallet claim before any manager-confirmed deferral. */
   walletClaimToOffice: Minor
-  /** Positive cash amount deliberately left outstanding as an office receivable. */
+  /** Legacy-named positive cash amount retained as automatically consumed next-shift funding. */
   cashReceivableDeferred: Minor
-  /** Positive wallet amount deliberately left outstanding as an office receivable. */
+  /** Legacy-named positive wallet amount retained as automatically consumed next-shift funding. */
   walletReceivableDeferred: Minor
   /** Physical signed wallet movement after deferral. */
   walletToOffice: Minor

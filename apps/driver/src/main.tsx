@@ -3,7 +3,6 @@ import { createRoot } from 'react-dom/client'
 import { AppProvider } from './app-context.tsx'
 import { ToastProvider } from './feedback.tsx'
 import { DriverApp } from './DriverApp.tsx'
-import { UpdateBar } from './UpdateBar.tsx'
 import { ErrorBoundary } from './ErrorBoundary.tsx'
 import { BOOTED_FLAG } from './boot.ts'
 import './styles.css'
@@ -24,8 +23,6 @@ createRoot(document.getElementById('root')!).render(
     <ErrorBoundary>
       <AppProvider>
         <ToastProvider>
-          {/* Above everything: a driver must never be running yesterday's code without being told. */}
-          <UpdateBar />
           <DriverApp />
         </ToastProvider>
       </AppProvider>

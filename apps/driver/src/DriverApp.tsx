@@ -8,6 +8,7 @@ import {
   sweepExpiredPendingEvidence,
 } from './pending-evidence-storage.ts'
 import { clearAllEndDrafts, sweepExpiredEndDrafts } from './end-draft-storage.ts'
+import { UpdateBar } from './UpdateBar.tsx'
 
 interface Assignment {
   driverId: string
@@ -118,9 +119,18 @@ export function DriverApp(): ReactNode {
   const [vehicleId, setVehicleId] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!session?.driverId) return
-    void api.get<Assignment>('/me/assignment').then(setAssignment).catch(() => setAssignment(null))
-  }, [api, session])
+    let cancelled = false
+    const driverId = session?.driverId
+    setAssignment(null)
+    setVehicleId(null)
+    if (!driverId) return () => { cancelled = true }
+    void api.get<Assignment>('/me/assignment').then((next) => {
+      if (!cancelled) setAssignment(next)
+    }).catch(() => {
+      if (!cancelled) setAssignment(null)
+    })
+    return () => { cancelled = true }
+  }, [api, session?.driverId])
 
   /**
    * Absorb the Android/browser Back button while a shift is in flight.
@@ -143,7 +153,19 @@ export function DriverApp(): ReactNode {
     return () => window.removeEventListener('popstate', onPop)
   }, [inFlight])
 
-  if (!session) return <Login />
+  // Unknown is unsafe: wait for the current driver's assignment before deciding that this is an
+  // idle boundary. UpdateBar performs a second, storage-level check for unsaved drafts/photos.
+  const safeUpdateBoundary = !session?.driverId || (
+    assignment?.driverId === session.driverId && !inFlight
+  )
+  const withUpdateBar = (content: ReactNode): ReactNode => (
+    <>
+      <UpdateBar safeBoundary={safeUpdateBoundary} />
+      {content}
+    </>
+  )
+
+  if (!session) return withUpdateBar(<Login />)
 
   const bar = (
     <>
@@ -190,7 +212,7 @@ export function DriverApp(): ReactNode {
   )
 
   if (!session.driverId) {
-    return (
+    return withUpdateBar(
       <div>
         {bar}
         <Screen title={t.app.title}>
@@ -212,7 +234,7 @@ export function DriverApp(): ReactNode {
    */
   if (assignment?.liveShiftId) {
     const bike = assignment.vehicles.find((v) => v.busyByMe) ?? null
-    return (
+    return withUpdateBar(
       <div>
         {bar}
         <ShiftFlow
@@ -235,7 +257,7 @@ export function DriverApp(): ReactNode {
   // unbacked shift.
   if (!vehicleId) {
     const assigned = assignment?.assigned === true
-    return (
+    return withUpdateBar(
       <div>
         {bar}
         <Screen title={t.shift.myAssignment}>
@@ -293,7 +315,7 @@ export function DriverApp(): ReactNode {
     )
   }
 
-  return (
+  return withUpdateBar(
     <div>
       {bar}
       <ShiftFlow

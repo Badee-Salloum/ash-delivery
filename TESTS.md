@@ -7,6 +7,65 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 
 **Legend:** ✅ implemented and green · ⚠ written but never executed · 🔜 planned, milestone named.
 
+## 2026-08-25 incident gate — the shift-close failures of 2026-08-24
+
+Five drivers could not submit their close; four shifts were force-cancelled, discarding 4,325 SYP of
+deliveries. Full `pnpm check` passes **2,123 tests** with the same 11 PostgreSQL-only skips.
+
+| # | What it pins | Named test | Result |
+| --- | --- | --- | --- |
+| C1 | A refused close always names a reason — the regression that trapped امجد | `close-gate.test.ts` › *names an unsaved draft instead of disabling the button in silence* | ✅ |
+| C1 | Readiness is the blocker list being empty, and the panel renders on `!ready` | `close-gate.test.ts` › *the screen cannot re-open the silent-refusal hole* (proven to fail if either half returns) | ✅ |
+| C1 | Every single-cause refusal produces at least one named reason | `close-gate.test.ts` › *never refuses without a reason, across every single-cause case* | ✅ |
+| C2 | «٧٠٠٠٠» off an Arabic keyboard is usable, not merely diagnosed | `numerals.test.ts` › *money text the wire can actually accept* | ✅ |
+| C3 | An excluded deduction row stops blocking, exactly as the server already allowed | `order-entry.test.ts` › *exempts an excluded row exactly as the server does* | ✅ |
+| C4 | The archival field keeps headroom back for the readings BR5 requires | `ocr-read-budget.test.ts` › *keeps headroom back from the archival field, and only from it* | ✅ |
+| C4 | One default for the read cap — no route re-states it | `ocr-read-budget.test.ts` › *has exactly one default, and no route re-states it* | ✅ |
+| C5 | A spent budget is named as such, not as an outage | `ocr-read.test.ts` › *stops calling out at the cap and names the spent budget instead of an outage* | ✅ |
+| C6 | Every read is bounded, not just the battery one | `linked-bms-escape-wiring.test.ts` › *bounds a read even when the caller brings no lifetime of its own* | ✅ |
+| C7 | Voiding states what it destroys and offers force-close | `void-guard.test.ts` › *voiding a shift states what it destroys* | ✅ |
+| C7 | An unknown order count is treated as dangerous, not as zero | `void-guard.test.ts` › *treats an unknown count as dangerous, not as zero* | ✅ |
+
+**Verified against production Postgres 17, read-only:** the root cause (`500` vs `500.00`) is
+confirmed by `644306a`'s own commit message; its deployment before the 01:2x window is confirmed by
+`bms-prompt-v2` cache signatures appearing in `ocr_reads` from 01:26.
+
+## 2026-08-25 review gate — four confirmed findings, and one the fix itself uncovered
+
+An adversarial review of the 15 Codex commits produced 18 candidates; 14 were refuted and 4
+confirmed. Fixing them surfaced a fifth. Full default `pnpm check` passes **2,101 tests** with the
+same 11 PostgreSQL-only skips (no Docker or local Postgres on this machine — CI is their gate).
+
+| Package | Tests |
+| --- | ---: |
+| Domain | 433 |
+| Contracts | 29 |
+| Shared client | 277 |
+| Admin | 153 |
+| Driver | 274 |
+| Adapters | 133 |
+| Database, default run | 92 passed / 11 skipped |
+| API | 710 |
+
+| # | What it pins | Named test | Result |
+| --- | --- | --- | --- |
+| F1 | A deferred collection funds the next shift instead of being paid back as a surplus | `receivables.test.ts` › *carries a deferred collection into the next shift instead of paying it back as a surplus* | ✅ |
+| F1 | The deferral postings land in the shift-funding funds, never the ordinary debt funds | `cash-settled-approval.test.ts` › *books a deferred collection as next-shift funding, never as an ordinary debt* | ✅ |
+| F1 | The close settlement writes the funding funds end to end over HTTP | `settlement.test.ts` › *supports combined partial cash/wallet deferral, exact replay, and immutable hash binding* | ✅ |
+| F2 | A driver cannot type a charge onto a pack he declared unreadable | `state.test.ts` › *refuses a percent the driver typed onto a pack he declared unreadable* | ✅ |
+| F2 | The same hole is closed at the CLOSE gate, where the money is | `state.test.ts` › *closes the same hole at the END gate, where the money is* | ✅ |
+| F2 | The driver route refuses the contradictory shape and a claimed manager source | `battery-app-wont-run.test.ts` › *refuses a driver who declares a pack unreadable and then types a charge for it anyway* · *refuses a driver claiming the manager as the source of his own reading* | ✅ |
+| F2 | A manager-completed pack still opens the shift — the legitimate case survives | `state.test.ts` › *and once the manager supplies the charge, the shift opens* | ✅ |
+| F3 | An invisible decision reason is not an audit trail, and real Arabic is unaffected | `decision-reason.test.ts` › *a decision reason must contain something a human can read* | ✅ |
+| F4 | Every integrity check parses and executes against the real migrated schema | `shift-money-integrity-script.test.mjs` › *parses and executes all fifteen, plus both hash checks* | ⚠ CI-only (needs `DATABASE_URL`) |
+| F4 | A clean ledger reports clean, not merely "ran" | `shift-money-integrity-script.test.mjs` › *reports a clean database as clean rather than merely running* | ⚠ CI-only (needs `DATABASE_URL`) |
+| F5 | Only the void's own carry reversals count as its corrections | `shift-money-integrity-script.test.mjs` › *counts only the void carry reversals as corrections, not every correction on the shift* | ✅ |
+| — | A failed OCR pass says WHICH kind of nothing it got | `chat-completions-ocr.test.ts` › *says WHICH kind of nothing it got when the model returns an empty transcription* · *names an out-of-enum screen kind* | ✅ |
+
+**Executed against production Postgres 17, read-only, 2026-08-25:** all 17 integrity checks run and
+report 0 violations; the replacement `shift_close_journals_match` returns `true` for all 4 settled
+shifts, agreeing with the installed one; 0 rows would violate either new CHECK constraint.
+
 ## 2026-08-23 release gate — receivables, restoration, and editable targets (`0036`–`0039`)
 
 Application artifacts were frozen at commit `1407676b9802382b926b9b4f07f59636cb0ea0ee` and tested

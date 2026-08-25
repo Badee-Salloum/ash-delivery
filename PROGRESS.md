@@ -1,5 +1,198 @@
 # PROGRESS
 
+## 2026-08-25 — five drivers could not close, and why the fix did not reach them
+
+**On the night of 2026-08-24 five drivers finished work and could not submit their shift close.**
+Four shifts were force-CANCELLED the next morning (10:35, 12:10, 12:18, 14:01), which **discards the
+orders**: 1,870 SYP of امجد عبدالله's deliveries and 2,455 SYP of ثائر قدورة's are gone from the
+books. محمد البلح's shift is still open with 5,250 SYP unposted.
+
+### The root cause, and the thing that made it survive a fix
+
+The driver types `160000`; the server canonicalises to `160000.00`. The phone compared those two
+strings **as text** when deciding whether the draft was saved, so from the first successful save the
+draft was dirty forever. `draftSaved` is a hard condition on the submit button — and it was the one
+condition with no words anywhere on the page, because the "what is still missing" panel rendered
+only when the named list was non-empty.
+
+So a driver with a complete package saw a dead green button, an empty list, and a 12px grey
+«حفظ المسودة» that never went away. That is امجد at 01:39 with thirteen photos, fifteen orders and
+every figure filled in.
+
+**The fix already existed.** `644306a` (24 Aug, 19:50) canonicalises money in the fingerprint, and
+its own comment says so: *"The server accepts 500 and persists 500.00; treating those as different
+keeps autosave dirty forever after a successful PATCH."* It was deployed before 01:26 — proven
+independently: `bms-prompt-v2` cache signatures appear in `ocr_reads` from 01:26, and that prompt
+version ships in `c33e775`, a descendant.
+
+**It did not reach three of the four drivers, because the driver app is a PWA that updates only when
+the driver taps «تحديث».** `registerType: 'prompt'` is deliberate — a money app must not swap its
+code mid-shift. محمد عقيل's phone had taken the update and he closed successfully at 01:33. The
+others were tapping a button whose logic lived in yesterday's JavaScript.
+
+**A server fix is not a fix for the driver app.** That is the operational lesson, and it is now in
+RUNBOOK §7d.
+
+### What else was found on the way
+
+- **The OCR read budget starved the readings BR5 requires.** امجد's shift spent exactly 15 — the cap
+  — and read #15 was his odometer at 01:33:43, so the two BMS reads at 01:35 were refused. Four of
+  those fifteen were payments-log pages, which the rules call archival and non-blocking.
+- **A spent budget reported itself as `unavailable`**, whose copy says «أعد المحاولة» — while the
+  retry button is hidden for it. The app told him to do the one thing it had made impossible.
+- **Only the BMS read had a browser deadline.** The other four fields ran bare, so a socket that
+  never settled left a `running` marker that blocks the close permanently.
+- **Cash and wallet accepted «٧٠٠٠٠»** — natural on an Arabic keyboard, rejected by the ASCII money
+  schema, 400ing every autosave. The odometer field had normalised digits since forever; these two
+  never did.
+- **A cash-deduction row the driver was not claiming still had to be priced**, though the server
+  explicitly exempts exactly those rows. The client was stricter than the server it talks to.
+- **The start-package gate carried the identical silent-condition flaw** (`shiftId !== null`).
+
+### What was NOT the cause
+
+Checked and cleared, so nobody re-opens them: the OCR provider was healthy (every BMS read ever
+recorded returned OK; latency normal), the 50Ah packs read *better* than the 30Ah ones (42/43 vs
+33/36), and the API was current that night. `docs/DEPLOY-VERCEL-NEON.md` was simply stale.
+
+**Done**
+
+- `9efd500` — the close gate is a pure module returning codes, so `ready` is that list being empty
+  and the panel renders the same list. They cannot drift apart, because there is only one of them.
+  Money fields normalise; an unrescuable figure names itself; excluded deduction rows stop blocking.
+- `8d1e84b` — archival reads keep back a reserve, the budget default rises 15 → 40 with the five
+  `?? 15` route fallbacks unified onto it, a spent budget gets its own reason and copy, every read
+  gets a browser deadline, and voiding a shift now states how many deliveries it will destroy,
+  names force-close as the alternative, and requires an acknowledgement.
+
+**Next**
+
+1. **Deploy, and make sure the drivers actually take the update.** The driver bundle is the half that
+   does not arrive on its own.
+2. Rescue محمد البلح's open shift (5,250 SYP) before it is voted off with the others.
+3. Decide how to recover the 4,325 SYP already discarded — the close drafts still hold every order.
+
+**Risks**
+
+- 🔴 **A fix in the driver app reaches a phone only when its driver taps «تحديث».** Nothing here
+  changes that, and it is what turned a fixed bug into a lost night. Worth a version indicator the
+  branch manager can read.
+- 🟠 Force-cancel is still one tap from force-close. The warning is new and untested in the field.
+- 🟡 The read budget is now 40 with a reserve of 8; both numbers are judgement, not measurement.
+
+**See it in 2 minutes**
+
+```bash
+pnpm check   # 2,123 tests, 11 expected PostgreSQL-only skips
+```
+
+Then read RUNBOOK §7d before anyone touches a stuck shift again.
+
+
+## 2026-08-25 — four confirmed review findings fixed, and a fifth the fixing uncovered
+
+An adversarial review of the 15 Codex commits (~24k insertions) produced 18 candidates. **14 were
+refuted, 4 confirmed.** Fixing them found a fifth. Migrations `0041`–`0043`; nothing deployed yet.
+
+### The one that moved money
+
+At close a manager may defer part of the collection, and the driver keeps that cash and that Yallago
+balance. The postings booked it to the **ordinary** receivable — which 0036 documents as never
+auto-consumed by an open — while the next open reads only `driver_shift_funding_*`. So no carry
+tranche was created, `floatTotal`/`topupTotal` omitted it, BR1 at the next close read money the
+driver already owed as a **surplus**, and decision 13 assigned that surplus to the employee. The
+system paid the driver his own debt, once, in full. The receivable still counted toward the capital
+target, so الترميم read whole and nothing rang.
+
+**Both channels were affected**, and it was a rename regression rather than a design:
+`shifts.kept_as_receivable_minor` still carries its 0025 comment «Cleared when he opens his next
+shift». 0036 moved that behaviour to the new fund names and this one posting was left behind.
+
+The regression test that would have caught it did not exist. It does now, and it fails on the old
+routing.
+
+### The other three
+
+- **BR5 battery evidence could be bypassed from a driver's own token.** `requiredPhotoSlots` waived
+  the `bms_N` screenshot on `unavailable` alone; `batteryGaps` raised the compensating gap only
+  while the percent was null. A reading carrying **both** fell between them — no photo, no gap, both
+  gates satisfied, no evidence of any kind. It could not simply be refused: that is the legitimate
+  shape of a pack the MANAGER read, and production holds 18 of them. The real defect was that
+  `source` is recorded faithfully everywhere and then **discarded** in `batteryContext`.
+- **Three definitions of «a reason was given»** — JS `.trim()`, one-argument `btrim()`, and
+  `ash_has_visible_text` — disagreeing about the same column. In an Arabic-first product U+200F rides
+  along in pasted text constantly and `'‏'.trim()` is truthy, so a fee could enter BR1 with an
+  unreadable audit trail while the release blocker judged the same row blank and reported the
+  settlement as wrong. Now one predicate, from the wire to the CHECK constraints.
+- **Ten of fifteen integrity checks had never touched a query planner** — asserted only with
+  `expect(sql).toContain(...)`, and the five that ran used TEMP tables typed `state text` /
+  `event_type text` with no `amount_minor > 0` and no foreign keys. It was the only
+  Postgres-touching test in `packages/db` that never called `migrate()`.
+
+### What that last one immediately found
+
+Running all fifteen against production for the first time failed a cancelled shift whose driver
+cash, driver wallet, office cash and office wallet **all net to zero**, and for which the database's
+own `shift_void_journals_match` returns `true`. `force_cancel_integrity` swept every `correction`
+entry into the void's actual line set, so an unrelated audited wallet top-up adjustment recorded
+before the cancel («تصحيح القيمة الفعلية لشحن المحفظة حسب توجيه الإدارة: 500.00 بدل 600.00») became
+an unexpected line against a recipe that never described it.
+
+So `check-shift-money-integrity.mjs` **exited 2 on a correct ledger** — which is how a release
+blocker stops being read. `tranche_journal_totals` already nets exactly these adjustments; this
+check was the only one that did not.
+
+**Done**
+
+- `0041` re-points the close matcher at the funding funds. No rollout gate: 0037 filters expected
+  lines by `movement <> 0`, so a zero-deferral settlement is unaffected by the fund name, and the
+  migration **refuses to apply** if a non-zero deferral is already on the ordinary funds.
+- `0042` makes the battery invariant a CHECK; `0021` had left it as an index predicate.
+- `0043` puts two CHECK constraints and five guard functions on `ash_has_visible_text` — 11
+  occurrences, each definition otherwise byte-identical to its predecessor.
+- Every integrity check now runs against the real migrated schema in CI, and a clean ledger must
+  report clean.
+- A failed OCR pass now says WHICH kind of nothing it got. Three of four failed production reads
+  carried `reason: no_fields` with no `detail` at all, leaving "the model transcribed rows and
+  verification rejected every one" indistinguishable from "the screen was blank" — the same shape as
+  the upload outage.
+
+**Verified against production, read-only (2026-08-25)**
+
+| what | result |
+| --- | --- |
+| all 17 integrity checks | run, **0 violations** (was 1 false positive) |
+| replacement `shift_close_journals_match` | `true` for all 4 settled shifts, agreeing with the installed one |
+| deferrals already on the ordinary funds | **0** — `0041` applies cleanly |
+| rows violating the new battery CHECK | **0** of 75 |
+| rows violating either new reason CHECK | **0** — in fact no order or deduction has a reason yet |
+
+**Next**
+
+1. Apply `0041`–`0043` and deploy. Nothing is live yet.
+2. Rotate the credentials pasted in that session — Neon, OpenRouter, Vercel.
+3. Confirm prompt logging is off on the OpenRouter account (A-30 still records this as unconfirmed).
+
+**Risks**
+
+- 🟠 **The DB-gated tests could not run on this machine** — no Docker, no local Postgres, and Neon is
+  TCP-geo-blocked from Damascus. 11 tests skip locally and CI is their only gate. The SQL itself was
+  executed against production Postgres 17 through the HTTP driver, so the queries are known-good;
+  what is unverified here is the vitest plumbing around them.
+- 🟠 **`fixed_40_cash_close_v2_receivable` re-introduces the receivable decision 13 abolished**
+  («No current-shift cash, wallet, share payable, or receivable may remain»). This work makes the
+  feature behave correctly; whether it should exist is a product-owner question under the authority
+  order in `CLAUDE.md`.
+- 🟡 36 orphaned media rows (~4.2 MB) remain; RUNBOOK §7b explains why that signal is ambiguous.
+
+**See it in 2 minutes**
+
+```bash
+pnpm check                                   # 2,101 tests, 11 PostgreSQL-only skips
+node scripts/check-shift-money-integrity.mjs # exit 0 — and it no longer cries wolf
+```
+
+
 ## 2026-08-24 — pre-approved openings, completed-shift history, and share clarification are live
 
 **Done, verified, and deployed:** managers can publish single-use pre-approved opening rules for one

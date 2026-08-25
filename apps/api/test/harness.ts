@@ -261,6 +261,12 @@ export async function makeHarness(
         revision: number
         draftHash: string
         submittedAt: string | null
+        attachments: Array<{
+          slot: string
+          mediaId: string
+          attachmentToken: string
+          read: { status: 'idle' | 'running' | 'complete' | 'failed'; failure: string | null } | null
+        }>
       }
       if (current.submittedAt === null) {
         const figureKeys = [
@@ -386,6 +392,38 @@ export async function makeHarness(
         if (saved.statusCode === 200) {
           current = saved.json() as typeof current
         }
+      }
+      // Model the current driver build: every accounting evidence upload starts its own linked
+      // read, and terminal reader failures still permit manual entry. Individual evidence tests
+      // use direct injection when they intentionally need to skip this step.
+      for (const attachment of current.attachments) {
+        const field = attachment.slot === 'dashboard' || /^dashboard_[1-9][0-9]*$/.test(attachment.slot)
+          ? 'orders'
+          : attachment.slot === 'wallet'
+            ? 'wallet'
+            : attachment.slot === 'odometer'
+              ? 'odometer'
+              : /^bms_[1-9][0-9]*$/.test(attachment.slot)
+                ? 'bms'
+                : null
+        if (field === null || attachment.read?.status === 'complete' || attachment.read?.status === 'failed') continue
+        const read = await app.inject({
+          method: 'POST',
+          url: `/shifts/${shiftId}/close-draft/media/${attachment.slot}/read`,
+          headers: {
+            cookie: cookieFor(token),
+            ...(field === 'orders' ? { 'x-ash-orders-time-consensus': 'close-draft-v1' } : {}),
+          },
+          payload: {
+            expectedRevision: current.revision,
+            mediaId: attachment.mediaId,
+            attachmentToken: attachment.attachmentToken,
+            field,
+            retryFailed: false,
+          },
+        })
+        if (read.statusCode !== 200) return read
+        current = read.json().draft as typeof current
       }
       const submitted = await app.inject({
         method: 'PUT',

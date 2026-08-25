@@ -15,7 +15,7 @@ import type {
   ShiftRecord,
 } from '@ash/contracts'
 import { moneySchema, serializeMoney } from '@ash/contracts'
-import { minor, parseMinor, type Actor, type Minor } from '@ash/domain'
+import { hasVisibleText, minor, parseMinor, type Actor, type Minor } from '@ash/domain'
 import { readEvidence } from './media.service.ts'
 import { readScreen } from './ocr.service.ts'
 import { ServiceError } from './shifts.service.ts'
@@ -58,7 +58,7 @@ const initialData = async (
     deps.movements.listByShift(shift.id),
   ])
   const audited = (row: { decisionReason: string | null; decidedBy: string | null; decidedAt: string | null }) =>
-    row.decidedBy !== null && row.decidedAt !== null && Boolean(row.decisionReason?.trim())
+    row.decidedBy !== null && row.decidedAt !== null && hasVisibleText(row.decisionReason)
   data.figures = {
     odometerKm: shift.odoEnd,
     odometerKmOcr: shift.odoEndOcr,
@@ -1079,7 +1079,11 @@ export async function readCloseDraftAttachment(
 ): Promise<{ draft: CloseDraftView; rows: OcrRow[]; fields: Readonly<Record<string, string | null>> }> {
   await assertEditable(deps, shiftId)
   const current = await deps.closeDrafts.findByShift(shiftId)
-  if (!current || current.revision !== input.expectedRevision) {
+  // A read is scoped by the immutable media id + attachment token below. Unrelated autosaves and
+  // reads of another page may legitimately advance the global draft revision between the upload's
+  // 201 and this request. Accept such an older revision and merge into the latest draft with the
+  // bounded CAS loop below; reject only a client claiming a revision the server has never seen.
+  if (!current || current.revision < input.expectedRevision) {
     throw new ServiceError(409, 'close_draft_revision_conflict', {
       current: current ? await recordView(deps, current, true) : null,
     })
@@ -1172,6 +1176,12 @@ export async function readCloseDraftAttachment(
       field: input.field,
       failure: output.result.ok ? null : output.result.reason,
       attempts: Math.max(priorAttempts + 1, output.result.attemptCount ?? 1),
+      ...(input.field === 'orders' ? {
+        rowCount: rows.length,
+        ordersCount: linked.orders.length,
+        deductionsCount: linked.deductions.length,
+        cancelledCount: rows.filter((row) => row.cancelled && row.reviewRequired !== true).length,
+      } : {}),
     }
     data.reads[key] = read
     const saved = await deps.closeDrafts.saveRead({

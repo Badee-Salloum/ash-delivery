@@ -728,9 +728,25 @@ describe('negative Recent Orders operations', () => {
     expect(cashDeductionMagnitude('1')).toBeNull()
   })
 
-  it('validates even a read-only excluded row because every deduction remains in the payload', () => {
+  /**
+   * Every deduction really does stay in the payload — but the SERVER only validates the ones the
+   * driver is claiming: `assertCloseDraftMoneyComplete` filters `row.included && row.amount === null`
+   * (apps/api/src/shifts.service.ts:2335), and the draft schema makes `amount` nullable
+   * (packages/contracts/src/wire.ts:488).
+   *
+   * So refusing an excluded blank row here was the client being stricter than the server it talks
+   * to, and it cost a real close: the row cannot be priced, cannot be deleted, and the footer
+   * misdirected the driver to «أصلح صفوف الطلبات». Orders have carried this exemption all along —
+   * `validateRow`: "A row the driver is NOT claiming needs no price."
+   */
+  it('exempts an excluded row exactly as the server does, and still refuses a claimed bad one', () => {
     const [deduction] = mergeScannedCashDeductions([], [scanned()], () => 'deduction-local')
-    expect(cashDeductionsAreValid([{ ...deduction!, included: false, amountText: '' }])).toBe(false)
+    expect(cashDeductionsAreValid([{ ...deduction!, included: false, amountText: '' }])).toBe(true)
+    // A row he IS claiming must still be priced — the exemption is about intent, not about laxity.
+    expect(cashDeductionsAreValid([{ ...deduction!, included: true, amountText: '' }])).toBe(false)
+    expect(cashDeductionsAreValid([{ ...deduction!, included: true, amountText: '0' }])).toBe(false)
+    // The default (flag absent) means included, matching `validateRow`'s convention.
+    expect(cashDeductionsAreValid([{ ...deduction!, amountText: '' }])).toBe(false)
   })
 
   it('infers only a blank run enclosed by the same known date', () => {

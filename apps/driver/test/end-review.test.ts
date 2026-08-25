@@ -20,6 +20,7 @@ describe('driver end-shift review warnings', () => {
     // The opening gate remains strict; only EndPackage stops treating this as a blocker.
     expect(endPackageSource).not.toContain('...(batteriesReady ? [] : [t.battery.percent])')
     // Other in-flight evidence is still a real submission blocker.
-    expect(endPackageSource).toContain('...(readingAttachment ? [t.shift.reading] : [])')
+    // Same intent, new shape: the gate is now a code list (`close-gate.ts`) and this is its input.
+    expect(endPackageSource).toContain('readingInFlight: readingAttachment')
   })
 })

@@ -34,6 +34,7 @@ import {
   reconcileLocalCashDeductions,
   resumedOrderWindowState,
   syncRecordedCashDeductions,
+  isUsableMoneyText,
   normalizeDecimalDigits,
   odometerFromCloudFields,
   parseNonNegativeInteger,
@@ -41,6 +42,13 @@ import {
   splitSlot,
   uploadEvidencePath,
 } from '@ash/client'
+import { closeGateBlockers } from '../close-gate.ts'
+import { LINKED_READ_UI_TIMEOUT_MS } from '../linked-read-task.ts'
+import {
+  isStaleCloseDraftView,
+  ownsPendingCloseDraftRead,
+  preservePendingCloseDraftReads,
+} from '../close-draft-revision.ts'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
 import { useGpsBeacon } from '../use-gps-beacon.ts'
@@ -270,7 +278,14 @@ function restoredPageReadState(
 /** Apply one canonical close-draft snapshot; no local-only OCR row can enter through this path. */
 function restoreCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
   const operations = closeDraftOperations(view)
-  const attachments = Object.fromEntries(view.attachments.map((attachment) => [attachment.slot, attachment]))
+  const canonicalAttachments = Object.fromEntries(
+    view.attachments.map((attachment) => [attachment.slot, attachment]),
+  )
+  const attachments = preservePendingCloseDraftReads(
+    current.closeDraftAttachments,
+    canonicalAttachments,
+  )
+  const restoredAttachments = Object.values(attachments)
   const orderRefusals = operations.orders.filter(
     (row) => row.feeText.trim() === '' || row.timeReviewRequired === true,
   ).length
@@ -324,12 +339,12 @@ function restoreCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
     cashDeductions: operations.cashDeductions,
     movements: operations.movements,
     dash: restoredPageReadState(
-      view.attachments,
+      restoredAttachments,
       'dashboard',
       operations.orders.length + operations.cashDeductions.length,
       orderRefusals + deductionRefusals,
     ),
-    log: restoredPageReadState(view.attachments, PAYMENTS_LOG_SLOT, operations.movements.length, 0),
+    log: restoredPageReadState(restoredAttachments, PAYMENTS_LOG_SLOT, operations.movements.length, 0),
   }
 }
 
@@ -388,7 +403,11 @@ export function applyLinkedScalarRead(
 }
 
 /** Rebase local human input over a newer canonical revision without retaining withdrawn OCR rows. */
-function rebaseCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
+export function rebaseCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
+  // Upload, autosave and linked-read requests can finish out of order. A late older response is
+  // not a new base: applying it would rewind attachment generations, canonical rows and the CAS
+  // revision, after which the next legitimate save conflicts or publishes withdrawn OCR rows.
+  if (isStaleCloseDraftView(current.closeDraftRevision, view.revision)) return current
   const cashDirty = (current.cash.trim() === '' ? null : current.cash) !== current.persistedCashDeclared
   const walletDirty =
     (current.wallet.trim() === '' ? null : current.wallet) !== current.persistedWalletDeclared
@@ -1458,15 +1477,19 @@ function StartPackage({
     ...(parseNonNegativeInteger(odo) === null ? [t.shift.odometer] : []),
     ...(batteriesReady ? [] : [t.battery.percent]),
     ...(odoCloud?.status === 'reading' ? [t.shift.reading] : []),
+    // `shiftId` was a silent term of `ready` while the panel below rendered only for a non-empty
+    // list — the same shape that stranded five drivers at the CLOSING gate on 2026-08-24. A driver
+    // whose shift never got created could fill everything in and tap a dead button forever.
+    ...(shiftId === null ? [t.shift.shiftNotCreated] : []),
   ]
-  const ready = shiftId !== null && missing.length === 0
+  const ready = missing.length === 0
 
   return (
     <Screen
       title={t.shift.startShift}
       footer={
         <div className="flex flex-col gap-2">
-          {!ready && missing.length > 0 ? (
+          {!ready ? (
             <p className="text-sm font-medium text-amber-800">
               {t.shift.stillMissing} {missing.join(' · ')}
             </p>
@@ -1691,11 +1714,12 @@ function EndPackage({
       /** Restore only the local marker installed below; keep the accepted image and canonical draft. */
       const restorePendingRead = (): void => {
         onDraft((state) => {
-          const owned = state.closeDraftAttachments[slot]
-          if (
-            owned?.attachmentToken !== attachment.attachmentToken ||
-            owned.read?.readId !== pendingReadId
-          ) return state
+          if (!ownsPendingCloseDraftRead(
+            state.closeDraftAttachments,
+            slot,
+            attachment.attachmentToken,
+            pendingReadId,
+          )) return state
           return {
             ...state,
             ...(field === 'wallet' ? { walletCloud: null } : {}),
@@ -1728,10 +1752,28 @@ function EndPackage({
           },
         },
       }))
+      /*
+       * A BROWSER-SIDE DEADLINE FOR EVERY READ, NOT JUST THE BATTERY ONE.
+       *
+       * `signal` is optional and exactly one of the nine call sites passes one — the BMS panel,
+       * which wraps its read in `createLinkedReadTask`. Orders, payments-log, wallet and odometer
+       * reads ran bare: no deadline, no cancel. A fetch whose connection never settles therefore
+       * left the `running` marker installed above in place FOREVER, and a running read is a hard
+       * close blocker (`readingInFlight` in `close-gate.ts`) whose retry button is hidden.
+       *
+       * That is unrecoverable without closing the app, at the end of a shift, standing at the
+       * branch. Provider and API deadlines cannot help — they bound the server, not this socket.
+       * So a caller that brings no lifetime of its own gets one here.
+       */
+      const ownDeadline = signal ? null : new AbortController()
+      const deadlineTimer = ownDeadline
+        ? setTimeout(() => ownDeadline.abort('timeout'), LINKED_READ_UI_TIMEOUT_MS)
+        : null
+      const effectiveSignal = signal ?? ownDeadline?.signal
       const onAbort = (): void => restorePendingRead()
-      signal?.addEventListener('abort', onAbort, { once: true })
+      effectiveSignal?.addEventListener('abort', onAbort, { once: true })
       try {
-        if (signal?.aborted) {
+        if (effectiveSignal?.aborted) {
           restorePendingRead()
           return null
         }
@@ -1741,19 +1783,20 @@ function EndPackage({
           attachmentToken: attachment.attachmentToken,
           field,
           ...(retryFailed ? { retryFailed: true } : {}),
-        }, signal ? { signal } : {})
-        if (signal?.aborted) return null
+        }, effectiveSignal ? { signal: effectiveSignal } : {})
+        if (effectiveSignal?.aborted) return null
         onDraft((state) => {
-          const owned = state.closeDraftAttachments[slot]
-          if (
-            owned?.attachmentToken !== attachment.attachmentToken ||
-            owned.read?.readId !== pendingReadId
-          ) return state
+          if (!ownsPendingCloseDraftRead(
+            state.closeDraftAttachments,
+            slot,
+            attachment.attachmentToken,
+            pendingReadId,
+          )) return state
           return applyLinkedScalarRead(state, response, field, attachment.attachmentToken)
         })
         return response
       } catch (error) {
-        if (signal?.aborted) {
+        if (effectiveSignal?.aborted) {
           restorePendingRead()
           return null
         }
@@ -1764,7 +1807,8 @@ function EndPackage({
         else restorePendingRead()
         return null
       } finally {
-        signal?.removeEventListener('abort', onAbort)
+        if (deadlineTimer !== null) clearTimeout(deadlineTimer)
+        effectiveSignal?.removeEventListener('abort', onAbort)
       }
     },
     [api, shift.id, applyCanonicalDraft, onDraft],
@@ -1840,25 +1884,63 @@ function EndPackage({
    * said nothing about the blank battery field or the one bad fee twenty rows up.
    *
    * The list IS the gate: `ready` is now "nothing missing", so the two can never drift apart.
+   *
+   * ── AND IT MUST STAY THAT WAY. On the night of 2026-08-24 it did not. ──────────────────────
+   * `ready` was `missing.length === 0 && !odometerNeedsConfirmation && draftSaved`: three
+   * conditions, one list. When the list was EMPTY and `draftSaved` was false, the explanation
+   * below rendered nothing at all — it was guarded on `missing.length > 0` — so the driver got a
+   * dead green button, no words, and a 12px grey «حفظ المسودة» that never went away.
+   *
+   * That is precisely how امجد عبدالله was stranded at 01:39 with thirteen photos, fifteen orders
+   * and every figure filled in. The cause behind it (a `500` / `500.00` fingerprint mismatch that
+   * kept autosave permanently dirty) is fixed in `closeDraftEditableFingerprint`; this is the
+   * guarantee that the NEXT such mismatch names itself instead of hiding behind a grey button.
+   *
+   * So every condition lives in the list. `ready` is the list being empty, and nothing else.
    */
-  const missing: string[] = [
-    // A missing PHOTO and a missing NUMBER are different jobs, and the catalogue gives «العداد» to
-    // both — so the footer read «العداد · … · العداد» and the driver had no way to tell which one
-    // he still owed, or that he owed two things at all. The photo is named as a photo.
-    ...required.filter((s) => !slots.has(s)).map((s) => `${t.shift.photoOf} ${labelOf(s)}`),
-    ...(cash === '' ? [t.shift.cashHandover] : []),
-    ...(wallet === '' ? [t.shift.walletBalance] : []),
-    ...(odometerKm === null ? [t.shift.odometer] : []),
-    ...(named === 0 ? [t.orders.title] : []),
-    ...(allProblems(draft.orders).size > 0 ? [t.shift.fixOrderRows] : []),
-    ...(!cashDeductionsAreValid(draft.cashDeductions) ? [t.shift.fixOrderRows] : []),
-    // A read in flight is a reason to WAIT, not a thing to go and fix — but submitting through it
-    // silently drops every order it was about to add, which is the shift closing short.
-    ...(readingAttachment ? [t.shift.reading] : []),
-  ]
   const odometerQuestion = checkOdometer(shift.odoStart, odometerKm)
   const odometerNeedsConfirmation = odometerQuestion?.kind === 'odometer_went_backwards' && !odoConfirmed
-  const ready = missing.length === 0 && !odometerNeedsConfirmation && draftSaved
+  const blockers = closeGateBlockers({
+    requiredSlots: required,
+    presentSlots: slots,
+    cashText: cash,
+    walletText: wallet,
+    moneyIsUsable: isUsableMoneyText,
+    odometerKm,
+    namedOrderCount: named,
+    hasBadOrderRows: allProblems(draft.orders).size > 0,
+    hasBadDeductionRows: !cashDeductionsAreValid(draft.cashDeductions),
+    readingInFlight: readingAttachment,
+    odometerNeedsConfirmation,
+    draftSaved,
+  })
+  const missing = blockers.map((blocker) => {
+    switch (blocker.kind) {
+      // The photo is named AS a photo — the slot catalogue gives «العداد» to both the picture and
+      // the number, so the footer used to read «العداد · … · العداد» with no way to tell them apart.
+      case 'missing_photo':
+        return `${t.shift.photoOf} ${labelOf(blocker.slot)}`
+      case 'missing_value':
+        return blocker.field === 'cash'
+          ? t.shift.cashHandover
+          : blocker.field === 'wallet'
+            ? t.shift.walletBalance
+            : t.shift.odometer
+      case 'unreadable_money':
+        return `${blocker.field === 'cash' ? t.shift.cashHandover : t.shift.walletBalance} — ${t.shift.badMoneyFigure}`
+      case 'no_orders':
+        return t.orders.title
+      case 'bad_rows':
+        return t.shift.fixOrderRows
+      case 'reading_in_flight':
+        return t.shift.reading
+      case 'confirm_odometer':
+        return t.shift.confirmOdometerReading
+      case 'draft_not_saved':
+        return t.shift.draftNotSaved
+    }
+  })
+  const ready = blockers.length === 0
 
   const preview = previewBr1({
     floatText: shift.floatText,
@@ -2150,8 +2232,14 @@ function EndPackage({
             </div>
           ) : null}
           {/* NAMED, not merely absent. Tapping the footer's dead button is how a driver concludes
-              the app is broken; this says which thing to go and do. */}
-          {!ready && missing.length > 0 ? (
+              the app is broken; this says which thing to go and do.
+
+              Guarded on `!ready` ALONE. It used to also require `missing.length > 0`, which was
+              the same condition twice while `ready` had two extra terms — so a driver blocked by
+              `draftSaved` got a disabled button and an empty page. `ready` is now exactly
+              "the list is empty", making the two forms equivalent by construction rather than by
+              a coincidence that already broke once. */}
+          {!ready ? (
             <details className="text-sm text-amber-800">
               <summary className="cursor-pointer font-medium">
                 {t.shift.remainingCount.replace('{n}', String(missing.length))}
@@ -2328,7 +2416,10 @@ function EndPackage({
               <MoneyInput
                 value={wallet}
                 onChange={(e) => {
-                  const value = e.target.value
+                  // Normalised like the odometer field above: «٧٠٠٠٠» is what an Arabic keyboard
+                  // produces, and the wire's money schema is ASCII-only, so leaving it raw 400s
+                  // every autosave and silently strands the close.
+                  const value = normalizeDecimalDigits(e.target.value)
                   onDraft((d) =>
                     withWalletAuthority(
                       d,
@@ -2423,7 +2514,8 @@ function EndPackage({
         })()}
 
         <Field label={t.shift.cashHandover}>
-          <MoneyInput value={cash} onChange={(e) => patch({ cash: e.target.value })} />
+          {/* Same normalisation as the wallet and odometer fields — see `isUsableMoneyText`. */}
+          <MoneyInput value={cash} onChange={(e) => patch({ cash: normalizeDecimalDigits(e.target.value) })} />
         </Field>
       </Card>
       {/* The close gate asks for the same per-pack evidence the open gate did. */}

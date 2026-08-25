@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { MAX_BATTERY_SLOTS, type Minor, formatMinor, parseMinor } from '@ash/domain'
+import { MAX_BATTERY_SLOTS, type Minor, formatMinor, hasVisibleText, parseMinor } from '@ash/domain'
 
 /**
  * Wire schemas.
@@ -66,7 +66,7 @@ export const nonblankReasonSchema = z
   .trim()
   .min(1)
   .max(500)
-  .refine((value) => /[^\p{White_Space}\p{Cf}]/u.test(value), 'reason must include a visible character')
+  .refine(hasVisibleText, 'reason must include a visible character')
 
 /**
  * An ordinary variance reason may be left blank by the manager. The service converts a blank or
@@ -358,8 +358,13 @@ export const reviseOperationsRequest = z.object({
         fee: moneySchema.refine((v) => v >= 0n, 'fee cannot be negative').optional(),
         occurredMinute: minuteSchema.nullable().optional(),
         occurredDate: isoDateSchema.nullable().optional(),
-        /** Required by the service whenever inclusion or timing is changed. */
-        reason: z.string().trim().min(1).max(500).optional(),
+        /**
+         * Required by the service whenever inclusion or timing is changed, and the ONLY record of
+         * why a delivery fee entered or left BR1. `nonblankReasonSchema` rather than a bare trim:
+         * an Arabic-first UI routinely carries invisible bidi marks through copy-paste, and
+         * `'‏'.trim()` is truthy — so a reason nobody can read used to be an audit trail.
+         */
+        reason: nonblankReasonSchema.optional(),
       }),
     )
     .max(400)
@@ -371,7 +376,8 @@ export const reviseOperationsRequest = z.object({
         included: z.boolean().optional(),
         occurredMinute: minuteSchema.nullable().optional(),
         occurredDate: isoDateSchema.nullable().optional(),
-        reason: z.string().trim().min(1).max(500),
+        /** Same reasoning as the order decision reason above. */
+        reason: nonblankReasonSchema,
       }),
     )
     .max(400)
@@ -630,7 +636,7 @@ export const fixedSettlementConfirmationSchema = z.object({
 export const approveCloseRequest = z.object({
   /** The hash the manager actually reviewed. Re-checked inside the approval transaction. */
   reviewedOrdersHash: z.string().min(1),
-  /** «يبقى ذمة على السائق» — how much of tonight's cash stays with him. The manager decides. */
+  /** Legacy field: cash kept with the driver as funding auto-consumed by his next shift. */
   keepAsReceivable: moneySchema.optional(),
   /**
    * «يُعاد للسائق» — pay his share tonight out of the cash in his hands (owner decision f).
@@ -640,7 +646,7 @@ export const approveCloseRequest = z.object({
    * must remain distinguishable so the service can refuse the old leave-as-payable workflow.
    */
   payShareNow: z.boolean().optional(),
-  /** Amounts from positive collect actions deliberately left as office receivables. */
+  /** Legacy-named positive collections retained as funding auto-consumed by the next shift. */
   cashReceivableDeferred: nonnegativeMoneySchema.optional(),
   walletReceivableDeferred: nonnegativeMoneySchema.optional(),
   /** Fixed-policy preview hash. Optional on the wire solely for a controlled old-client refusal. */

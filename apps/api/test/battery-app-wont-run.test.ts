@@ -164,6 +164,53 @@ describe('a pack the driver cannot read on his own phone', () => {
     expect(refused.json().detail).toContainEqual({ kind: 'awaiting_manager_reading', slotNo: 1 })
   })
 
+  /**
+   * The bypass. A driver holds `shift.operate` on his own shift, so he can PUT any body this route
+   * accepts. Declaring the pack unreadable waived the `bms_N` screenshot; supplying a percent
+   * suppressed `awaiting_manager_reading`. Together they satisfied BOTH BR5 gates with no evidence
+   * of any kind for that pack — no photo, no manager reading, nothing.
+   *
+   * His own PWA never sends this: `declareUnavailable` hard-codes `percent: null`. Only a
+   * hand-made request produces it.
+   */
+  it('refuses a driver who declares a pack unreadable and then types a charge for it anyway', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const { id, batteryId } = await shiftWithOnePack(driver, manager)
+
+    const forged = await put(driver, `/shifts/${id}/battery-readings`, {
+      package: 'start',
+      readings: [{ batteryId, percent: 87, unavailable: true }],
+    })
+    expect(forged.statusCode, forged.body).toBe(422)
+    expect(forged.json().error).toBe('battery_reading_unavailable_with_percent')
+
+    // Nothing was written, so the pack is still simply undone: the driver owes it, exactly as if he
+    // had never touched it — not handed to the manager, and certainly not waved through.
+    expect(await h.deps.batteryReadings.listByShift(id)).toEqual([])
+    const submitted = await put(driver, `/shifts/${id}/start-package`, {
+      odometerKm: 100,
+      batteryPercent: null,
+    })
+    expect(submitted.statusCode, submitted.body).toBe(422)
+    expect(submitted.json().detail).toContainEqual({ kind: 'missing_battery_reading', slotNo: 1 })
+  })
+
+  it('refuses a driver claiming the manager as the source of his own reading', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const { id, batteryId } = await shiftWithOnePack(driver, manager)
+
+    // `manager` is the one source that legitimately waives the screenshot, so it must be earned by
+    // calling the manager's route under `shift.approve` — never claimed in a driver's payload.
+    const claimed = await put(driver, `/shifts/${id}/battery-readings`, {
+      package: 'start',
+      readings: [{ batteryId, percent: 61, unavailable: false, source: 'manager' }],
+    })
+    expect(claimed.statusCode, claimed.body).toBe(422)
+    expect(claimed.json().error).toBe('battery_reading_source_not_permitted')
+  })
+
   it('opens once the manager supplies the reading, and records that HE produced it', async () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')

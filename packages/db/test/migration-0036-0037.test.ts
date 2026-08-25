@@ -25,7 +25,12 @@ const fnv1a = (text: string): string => {
 describe('migrations 0036/0037 receivable release', () => {
   it('commits enum values before any migration uses them', () => {
     const files = readdirSync(migrationDir).filter((file) => file.endsWith('.sql')).sort()
-    expect(files.slice(-7)).toEqual([
+    // Anchored to this range, NOT to the tail of the list. What this asserts is that the enum
+    // values land in 0036 and nothing uses them before 0037 — an ORDERING fact, which a later
+    // migration must not be able to falsify simply by existing.
+    const first = files.indexOf('0034_durable_shift_close_drafts.sql')
+    const last = files.indexOf('0040_preapproved_shift_rules.sql')
+    expect(files.slice(first, last + 1)).toEqual([
       '0034_durable_shift_close_drafts.sql',
       '0035_shift_money_integrity.sql',
       '0036_receivable_ledger_event.sql',

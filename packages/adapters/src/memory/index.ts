@@ -74,7 +74,7 @@ import {
   includedByOperationWindow,
   normalizeUsername,
 } from '@ash/contracts'
-import { type CalendarDate, type FxDay, type Minor, type Posting, isAwaitingDecision, isLive, minor } from '@ash/domain'
+import { type CalendarDate, type FxDay, type Minor, type Posting, hasVisibleText, isAwaitingDecision, isLive, minor } from '@ash/domain'
 import { memoryCipher } from '../crypto.ts'
 import { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 import { MemoryOcrReadRepo, MemoryOcrReader } from '../ocr/memory.ts'
@@ -718,7 +718,7 @@ export class MemoryOperationWindowRepo implements OperationWindowRepo {
       const windowStatus = classify(order.occurredDate, order.occurredMinute)
       const auditedDecision = order.decidedBy !== null
         && order.decidedAt !== null
-        && Boolean(order.decisionReason?.trim())
+        && hasVisibleText(order.decisionReason)
       const included = auditedDecision ? order.included : includedByOperationWindow(windowStatus)
       if (windowStatus === order.windowStatus && included === order.included) continue
       await this.orders.update({ ...order, windowStatus, included }, actorId)
@@ -734,7 +734,7 @@ export class MemoryOperationWindowRepo implements OperationWindowRepo {
       const windowStatus = classify(deduction.occurredDate, deduction.occurredMinute)
       const auditedDecision = deduction.decidedBy !== null
         && deduction.decidedAt !== null
-        && Boolean(deduction.decisionReason?.trim())
+        && hasVisibleText(deduction.decisionReason)
       const included = auditedDecision ? deduction.included : includedByOperationWindow(windowStatus)
       if (windowStatus === deduction.windowStatus && included === deduction.included) continue
       await this.deductions.update({ ...deduction, windowStatus, included }, actorId)

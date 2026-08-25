@@ -292,4 +292,56 @@ describe('cash-settled return properties', () => {
       { numRuns: 1_000 },
     )
   })
+
+  /**
+   * A deferred collection is money the driver KEEPS. It must therefore land in the shift-funding
+   * funds, which `postingsForOpen` consumes at his next open as a carried tranche BR1 then expects.
+   * Booked to the ordinary receivable — which is cleared only by an explicit collection command —
+   * the carried money is invisible at the next open, so BR1 reads it as a surplus and decision 13
+   * pays the driver his own debt. Before this test the deferral had no domain coverage at all.
+   */
+  it('books a deferred collection as next-shift funding, never as an ordinary debt', () => {
+    const fee = syp(5_000)
+    const orders: ShiftOrder[] = [{ orderNo: 'defer-1', payMode: 'cash', fee }]
+    const split = splitFixedDriverShare([fee])
+    const input = {
+      driverId: DRIVER,
+      branchId: BRANCH,
+      floatTranches: [syp(10_000)],
+      topupTranches: [syp(5_000)],
+      orders,
+    }
+    const expected = closingBalances(input)
+    const cashDeferred = syp(3_000)
+    const walletDeferred = syp(1_000)
+    const settlement = planFixedShareSettlement({
+      deliveryFeeTotal: fee,
+      fixedDriverShare: split.driverShare,
+      manualDriverShare: ZERO,
+      cashDeductionTotal: ZERO,
+      expectedCash: expected.endCash,
+      expectedWallet: expected.endWallet,
+      actualCash: expected.endCash,
+      actualWallet: expected.endWallet,
+      cashReceivableDeferred: cashDeferred,
+      walletReceivableDeferred: walletDeferred,
+    })
+    const returns = cashSettledReturnPostings({ driverId: DRIVER, settlement })
+    for (const posting of returns) expect(debitsOf(posting)).toBe(creditsOf(posting))
+
+    expect(fundBalance(returns, 'driver_shift_funding_cash')).toBe(cashDeferred)
+    expect(fundBalance(returns, 'driver_shift_funding_wallet')).toBe(walletDeferred)
+    // The share here is positive, so the only ordinary-cash movement would be a settle-down.
+    expect(fundBalance(returns, 'driver_receivable_cash')).toBe(ZERO)
+    expect(fundBalance(returns, 'driver_receivable_wallet')).toBe(ZERO)
+
+    // The office receives only what physically moved; the deferral is the difference.
+    expect(fundBalance(returns, 'office_cash')).toBe(settlement.cashToOffice)
+    expect(fundBalance(returns, 'office_wallet')).toBe(settlement.walletToOffice)
+    expect(settlement.walletToOffice).toBe(minor(settlement.actualWallet - walletDeferred))
+
+    // And the driver's operational funds still finish flat: value moved, none was invented.
+    expect(fundBalance(returns, 'driver_cash')).toBe(-expected.endCash)
+    expect(fundBalance(returns, 'driver_wallet')).toBe(-expected.endWallet)
+  })
 })
