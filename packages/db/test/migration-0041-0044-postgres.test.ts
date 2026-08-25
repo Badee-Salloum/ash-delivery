@@ -359,6 +359,12 @@ if (!DATABASE_URL) {
           [mediaId, fixture.branchId, `migration/read-budget/${mediaId}`, fixture.managerId],
         )
         await client.query(
+          `INSERT INTO shift_media
+             (shift_id, media_id, package, slot, attachment_token)
+           VALUES ($1, $2, 'end', 'dashboard', $3)`,
+          [fixture.shiftId, mediaId, attachmentToken],
+        )
+        await client.query(
           `INSERT INTO shift_close_drafts
              (shift_id, revision, draft_hash, payload, updated_at, updated_by)
            VALUES ($1, 0, repeat('b', 64), '{}'::jsonb,
