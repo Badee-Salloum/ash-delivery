@@ -7,6 +7,29 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 
 **Legend:** ✅ implemented and green · ⚠ written but never executed · 🔜 planned, milestone named.
 
+## 2026-08-25 incident gate — the shift-close failures of 2026-08-24
+
+Five drivers could not submit their close; four shifts were force-cancelled, discarding 4,325 SYP of
+deliveries. Full `pnpm check` passes **2,123 tests** with the same 11 PostgreSQL-only skips.
+
+| # | What it pins | Named test | Result |
+| --- | --- | --- | --- |
+| C1 | A refused close always names a reason — the regression that trapped امجد | `close-gate.test.ts` › *names an unsaved draft instead of disabling the button in silence* | ✅ |
+| C1 | Readiness is the blocker list being empty, and the panel renders on `!ready` | `close-gate.test.ts` › *the screen cannot re-open the silent-refusal hole* (proven to fail if either half returns) | ✅ |
+| C1 | Every single-cause refusal produces at least one named reason | `close-gate.test.ts` › *never refuses without a reason, across every single-cause case* | ✅ |
+| C2 | «٧٠٠٠٠» off an Arabic keyboard is usable, not merely diagnosed | `numerals.test.ts` › *money text the wire can actually accept* | ✅ |
+| C3 | An excluded deduction row stops blocking, exactly as the server already allowed | `order-entry.test.ts` › *exempts an excluded row exactly as the server does* | ✅ |
+| C4 | The archival field keeps headroom back for the readings BR5 requires | `ocr-read-budget.test.ts` › *keeps headroom back from the archival field, and only from it* | ✅ |
+| C4 | One default for the read cap — no route re-states it | `ocr-read-budget.test.ts` › *has exactly one default, and no route re-states it* | ✅ |
+| C5 | A spent budget is named as such, not as an outage | `ocr-read.test.ts` › *stops calling out at the cap and names the spent budget instead of an outage* | ✅ |
+| C6 | Every read is bounded, not just the battery one | `linked-bms-escape-wiring.test.ts` › *bounds a read even when the caller brings no lifetime of its own* | ✅ |
+| C7 | Voiding states what it destroys and offers force-close | `void-guard.test.ts` › *voiding a shift states what it destroys* | ✅ |
+| C7 | An unknown order count is treated as dangerous, not as zero | `void-guard.test.ts` › *treats an unknown count as dangerous, not as zero* | ✅ |
+
+**Verified against production Postgres 17, read-only:** the root cause (`500` vs `500.00`) is
+confirmed by `644306a`'s own commit message; its deployment before the 01:2x window is confirmed by
+`bms-prompt-v2` cache signatures appearing in `ocr_reads` from 01:26.
+
 ## 2026-08-25 review gate — four confirmed findings, and one the fix itself uncovered
 
 An adversarial review of the 15 Codex commits produced 18 candidates; 14 were refuted and 4

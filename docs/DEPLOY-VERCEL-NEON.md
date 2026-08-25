@@ -18,8 +18,12 @@ Team `hadis-projects-3c86ccdb`, three projects, all public (no deployment protec
 | Database | Neon `ep-billowing-butterfly-…` (eu-central-1, **Postgres 18**) | live at `0040` (40 migrations) + bootstrapped |
 | Evidence | Vercel Blob store `ash-evidence` (private) | linked to `ash-api` |
 
-**Version boundary:** production is at `0040`, deployed 2026-08-24 from commit
-`8222b6aad437e1de6df0d51999f4026808e395ab`. The three
+**Version boundary:** production is at `0040`. The API build moved on the evening of 2026-08-24 —
+`ocr_reads` carries `bms-prompt-v2` cache signatures from 2026-08-25 01:26, which ships in
+`c33e775`, so at least `c33e775` (and its ancestor `644306a`) were live by then. **The driver PWA
+is a separate bundle and reaches a phone only when its driver taps «تحديث» — see RUNBOOK §7d;
+assuming otherwise is what made the 2026-08-24 close failures survive their own fix.** The
+earlier recorded boundary was `8222b6aad437e1de6df0d51999f4026808e395ab`. The three
 known cancelled-shift tranche/journal discrepancies remain explicit owner-accepted historical
 exceptions: `0df7c7f1-105c-40b3-97ec-3fc81f83874c`,
 `f51cd7a1-ffa5-4e72-b0e4-a1761531b11b`, and `b81ad711-835b-479a-8ee1-37105ca96c21`. The owner

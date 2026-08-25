@@ -1,5 +1,94 @@
 # PROGRESS
 
+## 2026-08-25 — five drivers could not close, and why the fix did not reach them
+
+**On the night of 2026-08-24 five drivers finished work and could not submit their shift close.**
+Four shifts were force-CANCELLED the next morning (10:35, 12:10, 12:18, 14:01), which **discards the
+orders**: 1,870 SYP of امجد عبدالله's deliveries and 2,455 SYP of ثائر قدورة's are gone from the
+books. محمد البلح's shift is still open with 5,250 SYP unposted.
+
+### The root cause, and the thing that made it survive a fix
+
+The driver types `160000`; the server canonicalises to `160000.00`. The phone compared those two
+strings **as text** when deciding whether the draft was saved, so from the first successful save the
+draft was dirty forever. `draftSaved` is a hard condition on the submit button — and it was the one
+condition with no words anywhere on the page, because the "what is still missing" panel rendered
+only when the named list was non-empty.
+
+So a driver with a complete package saw a dead green button, an empty list, and a 12px grey
+«حفظ المسودة» that never went away. That is امجد at 01:39 with thirteen photos, fifteen orders and
+every figure filled in.
+
+**The fix already existed.** `644306a` (24 Aug, 19:50) canonicalises money in the fingerprint, and
+its own comment says so: *"The server accepts 500 and persists 500.00; treating those as different
+keeps autosave dirty forever after a successful PATCH."* It was deployed before 01:26 — proven
+independently: `bms-prompt-v2` cache signatures appear in `ocr_reads` from 01:26, and that prompt
+version ships in `c33e775`, a descendant.
+
+**It did not reach three of the four drivers, because the driver app is a PWA that updates only when
+the driver taps «تحديث».** `registerType: 'prompt'` is deliberate — a money app must not swap its
+code mid-shift. محمد عقيل's phone had taken the update and he closed successfully at 01:33. The
+others were tapping a button whose logic lived in yesterday's JavaScript.
+
+**A server fix is not a fix for the driver app.** That is the operational lesson, and it is now in
+RUNBOOK §7d.
+
+### What else was found on the way
+
+- **The OCR read budget starved the readings BR5 requires.** امجد's shift spent exactly 15 — the cap
+  — and read #15 was his odometer at 01:33:43, so the two BMS reads at 01:35 were refused. Four of
+  those fifteen were payments-log pages, which the rules call archival and non-blocking.
+- **A spent budget reported itself as `unavailable`**, whose copy says «أعد المحاولة» — while the
+  retry button is hidden for it. The app told him to do the one thing it had made impossible.
+- **Only the BMS read had a browser deadline.** The other four fields ran bare, so a socket that
+  never settled left a `running` marker that blocks the close permanently.
+- **Cash and wallet accepted «٧٠٠٠٠»** — natural on an Arabic keyboard, rejected by the ASCII money
+  schema, 400ing every autosave. The odometer field had normalised digits since forever; these two
+  never did.
+- **A cash-deduction row the driver was not claiming still had to be priced**, though the server
+  explicitly exempts exactly those rows. The client was stricter than the server it talks to.
+- **The start-package gate carried the identical silent-condition flaw** (`shiftId !== null`).
+
+### What was NOT the cause
+
+Checked and cleared, so nobody re-opens them: the OCR provider was healthy (every BMS read ever
+recorded returned OK; latency normal), the 50Ah packs read *better* than the 30Ah ones (42/43 vs
+33/36), and the API was current that night. `docs/DEPLOY-VERCEL-NEON.md` was simply stale.
+
+**Done**
+
+- `9efd500` — the close gate is a pure module returning codes, so `ready` is that list being empty
+  and the panel renders the same list. They cannot drift apart, because there is only one of them.
+  Money fields normalise; an unrescuable figure names itself; excluded deduction rows stop blocking.
+- `8d1e84b` — archival reads keep back a reserve, the budget default rises 15 → 40 with the five
+  `?? 15` route fallbacks unified onto it, a spent budget gets its own reason and copy, every read
+  gets a browser deadline, and voiding a shift now states how many deliveries it will destroy,
+  names force-close as the alternative, and requires an acknowledgement.
+
+**Next**
+
+1. **Deploy, and make sure the drivers actually take the update.** The driver bundle is the half that
+   does not arrive on its own.
+2. Rescue محمد البلح's open shift (5,250 SYP) before it is voted off with the others.
+3. Decide how to recover the 4,325 SYP already discarded — the close drafts still hold every order.
+
+**Risks**
+
+- 🔴 **A fix in the driver app reaches a phone only when its driver taps «تحديث».** Nothing here
+  changes that, and it is what turned a fixed bug into a lost night. Worth a version indicator the
+  branch manager can read.
+- 🟠 Force-cancel is still one tap from force-close. The warning is new and untested in the field.
+- 🟡 The read budget is now 40 with a reserve of 8; both numbers are judgement, not measurement.
+
+**See it in 2 minutes**
+
+```bash
+pnpm check   # 2,123 tests, 11 expected PostgreSQL-only skips
+```
+
+Then read RUNBOOK §7d before anyone touches a stuck shift again.
+
+
 ## 2026-08-25 — four confirmed review findings fixed, and a fifth the fixing uncovered
 
 An adversarial review of the 15 Codex commits (~24k insertions) produced 18 candidates. **14 were
