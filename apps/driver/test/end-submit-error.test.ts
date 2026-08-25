@@ -90,8 +90,8 @@ const shiftSource = readFileSync(new URL('../src/screens/Shift.tsx', import.meta
 describe('end-shift failure and optional-log source guards', () => {
   it('keeps the payment log out of the close gate and labels it archive-only', () => {
     const endStart = shiftSource.indexOf('function EndPackage(')
-    const missingStart = shiftSource.indexOf('const missing: string[]', endStart)
-    const missingEnd = shiftSource.indexOf('const odometerQuestion', missingStart)
+    const missingStart = shiftSource.indexOf('const blockers = closeGateBlockers(', endStart)
+    const missingEnd = shiftSource.indexOf('const ready = blockers.length === 0', missingStart)
     const closeGate = shiftSource.slice(missingStart, missingEnd)
 
     expect(closeGate).not.toContain("draft.log.kind === 'reading'")

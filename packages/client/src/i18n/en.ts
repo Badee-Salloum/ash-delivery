@@ -385,6 +385,11 @@ export const en: Catalog = {
     draftChangedRetry: 'The draft changed — try again',
     draftRestored: 'Your closing draft was restored; the images do not need to be uploaded again.',
     savingDraft: 'saving the draft',
+    // The two conditions that used to disable the submit button without ever appearing in the list.
+    draftNotSaved: 'The draft has not finished saving',
+    shiftNotCreated: 'The shift has not been created yet — check your connection',
+    confirmOdometerReading: 'Confirm the odometer reading',
+    badMoneyFigure: 'An unreadable figure — type it in digits',
     draftSaveFailed: 'Changes could not be saved; they remain protected on this device.',
     retryDraftSave: 'Retry save',
     closeSummary: 'Account summary',

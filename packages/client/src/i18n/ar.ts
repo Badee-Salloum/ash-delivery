@@ -401,6 +401,11 @@ export const ar = {
     draftChangedRetry: 'تغيرت المسودة — أعد المحاولة',
     draftRestored: 'تمت استعادة مسودة الإغلاق؛ لا يلزم رفع الصور مجدداً.',
     savingDraft: 'حفظ المسودة',
+    // The two conditions that used to disable «تسليم» without ever appearing in the missing list.
+    draftNotSaved: 'حفظ المسودة لم يكتمل',
+    shiftNotCreated: 'لم تُنشأ النوبة بعد — تحقّق من الاتصال',
+    confirmOdometerReading: 'أكّد قراءة العداد',
+    badMoneyFigure: 'رقم غير مقروء — اكتبه بالأرقام',
     draftSaveFailed: 'تعذّر حفظ التعديلات؛ بقيت محفوظة على هذا الجهاز.',
     retryDraftSave: 'إعادة الحفظ',
     closeSummary: 'ملخص الحساب',

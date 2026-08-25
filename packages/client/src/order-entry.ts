@@ -921,6 +921,11 @@ export function healCashDeductionDetails(
 /** Every deduction sent to the server must remain a strictly positive magnitude after correction. */
 export function cashDeductionsAreValid(rows: readonly DraftCashDeduction[]): boolean {
   return rows.every((row) => {
+    // A row the driver is NOT claiming needs no amount — the same exemption `validateRow` gives an
+    // unchecked order, and for the same reason. Without it a deduction the operation window had
+    // already excluded still blocked the close, with the footer misdirecting the driver to
+    // «أصلح صفوف الطلبات» — a row he cannot price, cannot delete, and was never claiming.
+    if (row.included === false) return true
     try {
       return parseMinor(row.amountText) > 0n
     } catch {

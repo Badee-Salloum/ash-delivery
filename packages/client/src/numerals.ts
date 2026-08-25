@@ -30,3 +30,19 @@ export function odometerFromCloudFields(fields: Readonly<Record<string, string |
   }
   return null
 }
+
+/**
+ * Can this text actually be sent as money, or will it 400 the request?
+ *
+ * The wire's `moneySchema` is `/^-?\d+(\.\d{1,2})?$/` — ASCII digits only. The close screen used to
+ * ask nothing more of the cash and wallet boxes than `!== ''`, so «٧٠٠٠٠» — the natural thing to
+ * type on an Arabic keyboard — passed the gate, failed the schema, and 400'd every autosave PATCH.
+ * The draft then never became "saved", which on the night of 2026-08-24 meant a permanently dead
+ * submit button with no field named.
+ *
+ * Digits are normalised first, so the honest Arabic-keyboard case is USABLE rather than merely
+ * diagnosed; what stays false is text no normalisation can rescue.
+ */
+export function isUsableMoneyText(value: string): boolean {
+  return /^-?\d+(\.\d{1,2})?$/.test(normalizeDecimalDigits(value).trim())
+}

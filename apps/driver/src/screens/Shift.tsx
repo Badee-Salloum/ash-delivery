@@ -34,6 +34,7 @@ import {
   reconcileLocalCashDeductions,
   resumedOrderWindowState,
   syncRecordedCashDeductions,
+  isUsableMoneyText,
   normalizeDecimalDigits,
   odometerFromCloudFields,
   parseNonNegativeInteger,
@@ -41,6 +42,7 @@ import {
   splitSlot,
   uploadEvidencePath,
 } from '@ash/client'
+import { closeGateBlockers } from '../close-gate.ts'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
 import { useGpsBeacon } from '../use-gps-beacon.ts'
@@ -1458,15 +1460,19 @@ function StartPackage({
     ...(parseNonNegativeInteger(odo) === null ? [t.shift.odometer] : []),
     ...(batteriesReady ? [] : [t.battery.percent]),
     ...(odoCloud?.status === 'reading' ? [t.shift.reading] : []),
+    // `shiftId` was a silent term of `ready` while the panel below rendered only for a non-empty
+    // list — the same shape that stranded five drivers at the CLOSING gate on 2026-08-24. A driver
+    // whose shift never got created could fill everything in and tap a dead button forever.
+    ...(shiftId === null ? [t.shift.shiftNotCreated] : []),
   ]
-  const ready = shiftId !== null && missing.length === 0
+  const ready = missing.length === 0
 
   return (
     <Screen
       title={t.shift.startShift}
       footer={
         <div className="flex flex-col gap-2">
-          {!ready && missing.length > 0 ? (
+          {!ready ? (
             <p className="text-sm font-medium text-amber-800">
               {t.shift.stillMissing} {missing.join(' · ')}
             </p>
@@ -1840,25 +1846,63 @@ function EndPackage({
    * said nothing about the blank battery field or the one bad fee twenty rows up.
    *
    * The list IS the gate: `ready` is now "nothing missing", so the two can never drift apart.
+   *
+   * ── AND IT MUST STAY THAT WAY. On the night of 2026-08-24 it did not. ──────────────────────
+   * `ready` was `missing.length === 0 && !odometerNeedsConfirmation && draftSaved`: three
+   * conditions, one list. When the list was EMPTY and `draftSaved` was false, the explanation
+   * below rendered nothing at all — it was guarded on `missing.length > 0` — so the driver got a
+   * dead green button, no words, and a 12px grey «حفظ المسودة» that never went away.
+   *
+   * That is precisely how امجد عبدالله was stranded at 01:39 with thirteen photos, fifteen orders
+   * and every figure filled in. The cause behind it (a `500` / `500.00` fingerprint mismatch that
+   * kept autosave permanently dirty) is fixed in `closeDraftEditableFingerprint`; this is the
+   * guarantee that the NEXT such mismatch names itself instead of hiding behind a grey button.
+   *
+   * So every condition lives in the list. `ready` is the list being empty, and nothing else.
    */
-  const missing: string[] = [
-    // A missing PHOTO and a missing NUMBER are different jobs, and the catalogue gives «العداد» to
-    // both — so the footer read «العداد · … · العداد» and the driver had no way to tell which one
-    // he still owed, or that he owed two things at all. The photo is named as a photo.
-    ...required.filter((s) => !slots.has(s)).map((s) => `${t.shift.photoOf} ${labelOf(s)}`),
-    ...(cash === '' ? [t.shift.cashHandover] : []),
-    ...(wallet === '' ? [t.shift.walletBalance] : []),
-    ...(odometerKm === null ? [t.shift.odometer] : []),
-    ...(named === 0 ? [t.orders.title] : []),
-    ...(allProblems(draft.orders).size > 0 ? [t.shift.fixOrderRows] : []),
-    ...(!cashDeductionsAreValid(draft.cashDeductions) ? [t.shift.fixOrderRows] : []),
-    // A read in flight is a reason to WAIT, not a thing to go and fix — but submitting through it
-    // silently drops every order it was about to add, which is the shift closing short.
-    ...(readingAttachment ? [t.shift.reading] : []),
-  ]
   const odometerQuestion = checkOdometer(shift.odoStart, odometerKm)
   const odometerNeedsConfirmation = odometerQuestion?.kind === 'odometer_went_backwards' && !odoConfirmed
-  const ready = missing.length === 0 && !odometerNeedsConfirmation && draftSaved
+  const blockers = closeGateBlockers({
+    requiredSlots: required,
+    presentSlots: slots,
+    cashText: cash,
+    walletText: wallet,
+    moneyIsUsable: isUsableMoneyText,
+    odometerKm,
+    namedOrderCount: named,
+    hasBadOrderRows: allProblems(draft.orders).size > 0,
+    hasBadDeductionRows: !cashDeductionsAreValid(draft.cashDeductions),
+    readingInFlight: readingAttachment,
+    odometerNeedsConfirmation,
+    draftSaved,
+  })
+  const missing = blockers.map((blocker) => {
+    switch (blocker.kind) {
+      // The photo is named AS a photo — the slot catalogue gives «العداد» to both the picture and
+      // the number, so the footer used to read «العداد · … · العداد» with no way to tell them apart.
+      case 'missing_photo':
+        return `${t.shift.photoOf} ${labelOf(blocker.slot)}`
+      case 'missing_value':
+        return blocker.field === 'cash'
+          ? t.shift.cashHandover
+          : blocker.field === 'wallet'
+            ? t.shift.walletBalance
+            : t.shift.odometer
+      case 'unreadable_money':
+        return `${blocker.field === 'cash' ? t.shift.cashHandover : t.shift.walletBalance} — ${t.shift.badMoneyFigure}`
+      case 'no_orders':
+        return t.orders.title
+      case 'bad_rows':
+        return t.shift.fixOrderRows
+      case 'reading_in_flight':
+        return t.shift.reading
+      case 'confirm_odometer':
+        return t.shift.confirmOdometerReading
+      case 'draft_not_saved':
+        return t.shift.draftNotSaved
+    }
+  })
+  const ready = blockers.length === 0
 
   const preview = previewBr1({
     floatText: shift.floatText,
@@ -2150,8 +2194,14 @@ function EndPackage({
             </div>
           ) : null}
           {/* NAMED, not merely absent. Tapping the footer's dead button is how a driver concludes
-              the app is broken; this says which thing to go and do. */}
-          {!ready && missing.length > 0 ? (
+              the app is broken; this says which thing to go and do.
+
+              Guarded on `!ready` ALONE. It used to also require `missing.length > 0`, which was
+              the same condition twice while `ready` had two extra terms — so a driver blocked by
+              `draftSaved` got a disabled button and an empty page. `ready` is now exactly
+              "the list is empty", making the two forms equivalent by construction rather than by
+              a coincidence that already broke once. */}
+          {!ready ? (
             <details className="text-sm text-amber-800">
               <summary className="cursor-pointer font-medium">
                 {t.shift.remainingCount.replace('{n}', String(missing.length))}
@@ -2328,7 +2378,10 @@ function EndPackage({
               <MoneyInput
                 value={wallet}
                 onChange={(e) => {
-                  const value = e.target.value
+                  // Normalised like the odometer field above: «٧٠٠٠٠» is what an Arabic keyboard
+                  // produces, and the wire's money schema is ASCII-only, so leaving it raw 400s
+                  // every autosave and silently strands the close.
+                  const value = normalizeDecimalDigits(e.target.value)
                   onDraft((d) =>
                     withWalletAuthority(
                       d,
@@ -2423,7 +2476,8 @@ function EndPackage({
         })()}
 
         <Field label={t.shift.cashHandover}>
-          <MoneyInput value={cash} onChange={(e) => patch({ cash: e.target.value })} />
+          {/* Same normalisation as the wallet and odometer fields — see `isUsableMoneyText`. */}
+          <MoneyInput value={cash} onChange={(e) => patch({ cash: normalizeDecimalDigits(e.target.value) })} />
         </Field>
       </Card>
       {/* The close gate asks for the same per-pack evidence the open gate did. */}
