@@ -680,7 +680,24 @@ export const LEGACY_INTEGRITY_CHECKS = Object.freeze([
                count(DISTINCT je.id) FILTER (WHERE je.event_type = 'correction') AS correction_entries
           FROM valid_cancelled vc
           LEFT JOIN journal_entries je ON je.shift_id = vc.id
-            AND je.event_type IN ('float_return', 'wallet_return', 'correction')
+            -- The correction event is in scope ONLY for the void's own carry reversals. A cancelled
+            -- shift may also carry an unrelated, audited correction — a wallet top-up adjustment is
+            -- the one that actually happens («تصحيح القيمة الفعلية لشحن المحفظة») — and sweeping
+            -- that into the actual set made it an unexpected line against a void recipe which never
+            -- claimed to describe it. tranche_journal_totals already nets exactly these, and the
+            -- database's own shift_void_journals_match already scopes correctly; this check was the
+            -- only one that did not, and it failed a production shift whose funds all net to zero.
+            -- A release blocker that cries wolf is a release blocker nobody reads.
+            AND (
+              je.event_type IN ('float_return', 'wallet_return')
+              OR (
+                je.event_type = 'correction'
+                AND (
+                  je.occurrence_key LIKE 'void-carry-%'
+                  OR je.occurrence_key LIKE 'void-wallet-carry-%'
+                )
+              )
+            )
           LEFT JOIN journal_lines jl ON jl.entry_id = je.id
           LEFT JOIN funds f ON f.id = jl.fund_id
          GROUP BY vc.id
