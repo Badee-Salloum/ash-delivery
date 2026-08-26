@@ -2,7 +2,16 @@
 
 ## 2026-08-26 — two overlapping scans of one order list, and the 374 SYP that hung on them
 
-**Not yet deployed.** Local `pnpm check` is green: 2,201 tests, 45 migrations, every static gate.
+**API deployed 2026-08-26.** `dpl_AtfHamDXtAdqeckFB12uoJuJsxia` is READY and aliased to
+`https://ash-api-xi.vercel.app`; health `200`, unauthenticated `/review` `401`, both front-end
+proxies still `200`. Local `pnpm check` is green: 2,201 tests, 45 migrations, every static gate.
+
+**The admin console and migration `0045` are NOT deployed** — see "What is still outstanding" below.
+Neither is required for the API release to be correct: migrations run only from an explicit CLI,
+never at boot, and the new code reads only `shift_close_draft_observations` and
+`shift_close_draft_reads`, which exist since `0034` with `app_user` already holding `SELECT`. The
+read guard is therefore live now; `0045`'s index is a performance aid for a check that already
+works without it. The old admin bundle simply ignores the new `duplicateHints` field.
 
 ثائر's shift `4f40640e-e8dd-4966-b547-d20656136fde` is production's only open money-integrity
 warning. He photographed the Recent Orders list **twice while scrolling**, and the second shot lost
@@ -48,8 +57,18 @@ was confined to the draft ledger: a second read row and ten observations for fiv
 service therefore keeps only the newest read per attachment, which is what makes it correct against
 the duplicate rows already in production.
 
-**Next:** deploy, then the manager resolves that shift through the audited path — include `130`,
-`280`, `270`; exclude `130` and `125` as repeats of the 22:47 and 22:21 rows.
+**What is still outstanding**
+
+| Item | Why it did not ship |
+| --- | --- |
+| `git push` of `fix/overlapping-dashboard-scans` (4 commits, incl. `407a3b6` from 24 Aug) | blocked by the agent permission classifier |
+| Admin console build + deploy | `ash-admin` deploys **prebuilt** from `.vercel/output/static`, and local build commands are blocked by the classifier. Vercel builds the API remotely, which is why the API could ship |
+| Migration `0045` | no working production DB credentials — the pulled `.env.prod` has `DATABASE_URL="[SENSITIVE]"` |
+
+Until the admin ships, the hint is computed and served but nothing renders it. **The manager must
+not resolve shift `4f40640e` before then**, or he will be deciding those five undated rows with no
+indication that two are repeats — include `130`, `280`, `270`; exclude `130` and `125` as repeats of
+the 22:47 and 22:21 rows.
 
 **Risk:** the overlap on that shift is corroborated by amount alone, because the second photo
 carried no clock and no route. The UI says so in as many words. It is a prompt to look at the
