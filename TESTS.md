@@ -7,6 +7,34 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 
 **Legend:** ✅ implemented and green · ⚠ written but never executed · 🔜 planned, milestone named.
 
+## 2026-08-26 overlapping-scan gate — the duplicate hint and the read guard (`0045`)
+
+Full `pnpm check` passes **2,201 tests** with the same 12 PostgreSQL-only skips. Each test below was
+proven to fail before its fix; the domain detector was additionally mutation-checked — inverting the
+maximal-overlap search, comparing magnitudes instead of signed amounts, letting an unread amount
+match, and dropping the clock refutation each fail a distinct named test.
+
+| # | What it pins | Named test | Result |
+| --- | --- | --- | --- |
+| D1 | The two rows ثائر photographed twice are found, and the match is labelled amount-only | `page-overlap.test.ts` › *finds the two rows photographed twice, and says the match is amount-only* | ✅ |
+| D2 | The answer does not depend on which page is passed first, or on slot names | `page-overlap.test.ts` › *does not care which page it is handed first* | ✅ |
+| D3 | A deduction never matches an order of the same magnitude | `page-overlap.test.ts` › *keeps a deduction distinct from an order of the same magnitude* | ✅ |
+| D4 | A disagreeing clock or route refutes; a missing one is neutral | `page-overlap.test.ts` › *is refuted by a printed clock that disagrees* | ✅ |
+| D5 | Pairs are a contiguous suffix/prefix run of equal amounts (fast-check) | `page-overlap.test.ts` › *pairs are a contiguous suffix/prefix run of equal amounts* | ✅ |
+| D6 | The manager's review names both duplicated orders and the page each came from | `scan-page-overlap.test.ts` › *names the two rows the second photo repeated…* | ✅ |
+| D7 | **The hint changes nothing** — br1, ordersHash, every `included`, every decision field | `scan-page-overlap.test.ts` › *changes no money, no inclusion and no hash by being there* | ✅ |
+| D8 | A page read twice is still one page, not ten rows | `scan-page-overlap.test.ts` › *reads a twice-read page as one page, not as ten rows* | ✅ |
+| D9 | The hint never reaches the driver's own shift state | `scan-page-overlap.test.ts` › *keeps the hint off the driver-facing shift state* | ✅ |
+| D10 | The hint component has no button, no `revise(`, no `included` | `approval-duplicate-hint-wiring.test.ts` › *never lets the hint itself change an operation* | ✅ |
+| D11 | The incident replayed: a second read writes no row and no sightings | `close-draft-repeat-read.test.ts` › *replays the incident: a second read of the same photo changes nothing* | ✅ |
+| D12 | Two in-flight reads of one photo coalesce | `close-draft-repeat-read.test.ts` › *coalesces two in-flight reads of the same photo* | ✅ |
+| D13 | A genuinely failed read is still retryable; a replaced photo is a new page | `close-draft-repeat-read.test.ts` › *still allows a retry after a failed read* | ✅ |
+| D14 | Where two reads do land, `clientKey` still collapses them to one order per row | `close-draft-repeat-read.test.ts` › *still collapses duplicate sightings to one order per row…* | ✅ |
+| D15 | `0045` is an index and a comment — never a UNIQUE index or a raising trigger | `migration-0045.test.ts` › *never turns the invariant into a constraint that could abort a deploy or a close* | ✅ |
+
+**CI-only:** the `PgCloseDraftRepo` half of `listObservationsByShift` and the SQL guard inside
+`saveRead` run only against real PostgreSQL. There is no local Postgres on the build machine.
+
 ## 2026-08-26 live release gate — attachment-bound OCR and funding (`0041`–`0044`)
 
 Release commit `5d76a539af517a914c59a455cdc8c2d3bafb4ce6` passed the full local Node 24

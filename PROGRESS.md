@@ -1,5 +1,60 @@
 # PROGRESS
 
+## 2026-08-26 — two overlapping scans of one order list, and the 374 SYP that hung on them
+
+**Not yet deployed.** Local `pnpm check` is green: 2,201 tests, 45 migrations, every static gate.
+
+ثائر's shift `4f40640e-e8dd-4966-b547-d20656136fde` is production's only open money-integrity
+warning. He photographed the Recent Orders list **twice while scrolling**, and the second shot lost
+its date header, so none of its five rows carried a clock. All five became `unknown` and excluded —
+decision 11 working exactly as intended. But its first two rows were the first shot's last two, and
+nothing on the manager's screen said so:
+
+| his choice | orders | expected | variance | employee keeps | office cash |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| approve as-is (4 orders) | 62,000 | 594,600 | +58,120 | **779.20** | 5,245.80 |
+| include the 3 genuinely new | 130,000 | 649,000 | +3,720 | **507.20** | 5,517.80 |
+| include all 5 | 155,500 | 669,400 | −16,680 | 405.20 | 5,619.80 |
+
+Under decision 13 the variance is paid straight to the employee, so **37,400 minor units swing on
+one manager's reading of five undated rows.** The stored `equation_diff=58,120`, `cash_diff=45,500`
+and `wallet_diff=12,620` all reproduce BR1 exactly — the engine is right, the inputs are incomplete.
+
+**What shipped**
+
+- **`packages/domain/src/shift/page-overlap.ts`** — a pure detector for the one shape a re-scroll
+  always makes: a maximal *suffix* of one page equal to the *prefix* of another. Every existing
+  matcher in this codebase is time-keyed (`matchKey`, `isTimedCashDeductionDuplicate`,
+  `reconcileLocalCashDeductions`), and every row on the second page had a null clock, which is
+  precisely why none of them could see it. Amount equality including sign anchors a pair; a clock or
+  route present on both sides and disagreeing refutes it; a field missing on one side is neutral.
+  Emits cause codes only.
+- **`apps/api/src/duplicate-hints.service.ts`** — resolves rows to operations through the *same*
+  `closeDraftClientKeyFor` the linked reader writes, so the two cannot drift. Read-only: no order,
+  no deduction, no audit row. Served on `/shifts/:id/review` inside the close UOW, and deliberately
+  not on the driver's `/state`.
+- **Admin review** — an amber «يُحتمل أنه مكرّر» badge and one line naming the counterpart row and
+  page, on both the order and deduction attention cards. The action stays the existing audited
+  «تثبيت كتكرار» with its required reason. A test asserts the hint component contains no button, no
+  `revise(`, and no `included`.
+- **Migration `0045` + `PgCloseDraftRepo.saveRead`** — at most one *complete* read per
+  `(shift, media, attachment generation, field)`, enforced inside the `FOR UPDATE` the transaction
+  already takes. Index and comment only: a UNIQUE index would abort the deploy on ثائر's existing
+  violating pair, and a raising trigger would abort a driver's close.
+
+**Corrected during the work:** the double read did *not* cost OCR budget. `ocr_reads` holds nine
+billed rows for that shift and none at 22:33 — the second call hit the `sha256` cache. The damage
+was confined to the draft ledger: a second read row and ten observations for five rows. The hint
+service therefore keeps only the newest read per attachment, which is what makes it correct against
+the duplicate rows already in production.
+
+**Next:** deploy, then the manager resolves that shift through the audited path — include `130`,
+`280`, `270`; exclude `130` and `125` as repeats of the 22:47 and 22:21 rows.
+
+**Risk:** the overlap on that shift is corroborated by amount alone, because the second photo
+carried no clock and no route. The UI says so in as many words. It is a prompt to look at the
+images, not a verdict, and no code path can act on it.
+
 ## 2026-08-26 — release `0044` is live: durable evidence reads and correct next-shift funding
 
 **Outcome:** commit `5d76a539af517a914c59a455cdc8c2d3bafb4ce6` is live on the API, driver

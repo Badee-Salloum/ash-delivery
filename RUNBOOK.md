@@ -240,6 +240,17 @@ scratch database was dropped. Production's only current money-integrity warning 
 `unknown` orders on Thaer's submitted shift. Do not resolve those by editing timestamps or amounts:
 the manager must inspect the immutable images and record an attributed include/exclude decision.
 
+**Two of those five rows are the same deliveries twice.** The `dashboard` and `dashboard_2` photos
+are two scans of one list taken while scrolling, and they overlap: `130` and `125` on the undated
+page are the `22:47` and `22:21` rows already counted on the dated page. Only `130`, `280` and `270`
+are new. After release `0045` the review screen says so itself, on the affected rows.
+
+Resolving it: include `130`, `280`, `270`; exclude `130` and `125` as duplicates, each with a reason
+naming the row it repeats. Expect the variance to fall from **+58,120** to **+3,720** and the
+employee's settlement from **779.20** to **507.20**. Including all five instead would take it to
+**405.20** — over-collecting 102.00 from the driver. Use the audited `markDuplicate` action; never
+SQL.
+
 ### Pre-approved openings release (`0040` — deployed 2026-08-24)
 
 Frozen commit `8222b6aad437e1de6df0d51999f4026808e395ab` was promoted in the coordinated order API,
