@@ -1,5 +1,45 @@
 # PROGRESS
 
+## 2026-08-26 — release `0044` is live: durable evidence reads and correct next-shift funding
+
+**Outcome:** commit `5d76a539af517a914c59a455cdc8c2d3bafb4ce6` is live on the API, driver
+PWA, and admin console. Production is at 44 migrations. The close flow now binds every OCR result
+to the exact active attachment, survives a lost upload acknowledgement, persists terminal read
+failures (including an exhausted read budget), and refuses submission while mandatory evidence has
+no terminal result. The 50 Ah BMS screen is handled as a distinct profile instead of being forced
+through the older battery layout.
+
+The accounting fix is also live: cash or wallet retained at close is posted to
+`driver_shift_funding_*` and is consumed automatically when that driver opens the next shift. It is
+not ordinary debt and cannot reduce company capital by being paid back as a later surplus. Driver
+share continues to come from returned shift money rather than from the office-capital principal.
+
+**Release proof**
+
+- GitHub Actions run `32909487259` passed the static, unit/property, and real PostgreSQL 17 jobs.
+- API `dpl_8s5w8kubRfYx4SLSjwuvL53JahMP`, driver
+  `dpl_H8mXPQAUd5fjqNwSZzas6g9fACpj`, and admin
+  `dpl_AoziBU6U4ubjxugPRafwAVu8iUc6` are the current public deployments on the same commit.
+- The API was paused and the database drained twice before backup. The validated pre-backup is
+  `Desktop\ash-backups\release-0044-20260826\pre\2026-08-25T23-29-11-398Z`
+  (60 tables, 6,233 rows, 40 migrations). The validated post-backup is
+  `Desktop\ash-backups\release-0044-20260826\post\2026-08-25T23-32-12-584Z`
+  (60 tables, 6,237 rows, 44 migrations). All 59 business-table fingerprints are identical; the
+  only four added rows are the migration ledger entries.
+- The post-backup was restored into the isolated database
+  `ash_release_gate_0044_restore_20260826_0239`. A new backup matched all 60 table fingerprints and
+  all 6,237 rows exactly; all 27 sequences, enabled triggers, zero trial balance, and the audited
+  write/rollback probe passed. The scratch database was disconnected, dropped, and confirmed absent.
+- Stable health, unauthenticated `401`, both front-end proxies and SPA fallbacks, the PWA manifest,
+  service worker, and exact deployed bundles passed after resume.
+
+**Historical data was not guessed.** The two submitted shifts for Anas and Thaer remain in manager
+review. Thaer's shift `4f40640e-e8dd-4966-b547-d20656136fde` has five orders deliberately excluded
+as `unknown` because their time is missing and the readers conflict. Those five rows are the only
+current integrity warnings; the other 16 money-integrity groups are clean. A manager must inspect
+the stored images and record an attributed include/exclude decision. No ledger or capital value was
+changed to make the warning disappear.
+
 ## 2026-08-25 — five drivers could not close, and why the fix did not reach them
 
 **On the night of 2026-08-24 five drivers finished work and could not submit their shift close.**

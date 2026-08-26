@@ -95,7 +95,7 @@ carries the correction sequence so repeated corrections remain possible.
 
 ---
 
-## 5. Deploy / rollback / restore — Vercel + Neon exercised through 2026-08-15
+## 5. Deploy / rollback / restore — Vercel + Neon exercised through 2026-08-26
 
 The live Vercel + Neon procedure below has been exercised, including a production migration,
 three deployments, smoke tests, and an isolated restore rehearsal. The separate VPS pipeline
@@ -215,6 +215,30 @@ backup, then pointing the API at it. There is no honest lossless `DOWN`: enum va
 and reconstructed attachment provenance cannot be removed and later recreated exactly. Keep the
 old API deployment available for a code rollback, but restore the database when crossing this
 schema boundary.
+
+### Evidence-attachment and next-shift-funding release (`0044` — deployed 2026-08-26)
+
+Frozen commit `5d76a539af517a914c59a455cdc8c2d3bafb4ce6` is current on API
+`dpl_8s5w8kubRfYx4SLSjwuvL53JahMP`, driver `dpl_H8mXPQAUd5fjqNwSZzas6g9fACpj`, and admin
+`dpl_AoziBU6U4ubjxugPRafwAVu8iUc6`. Migration 0041 routes retained cash and wallet collections to
+the same `driver_shift_funding_*` funds consumed by the next open. Migration 0042 closes the
+driver-entered unavailable-plus-percent battery bypass. Migration 0043 uses one visible-text rule
+for attributed operation decisions. Migration 0044 makes `read_budget_exhausted` a durable terminal
+OCR result.
+
+The validated backups are:
+
+- pre: `Desktop\ash-backups\release-0044-20260826\pre\2026-08-25T23-29-11-398Z`
+  (60 tables, 6,233 rows, 40 migrations);
+- post: `Desktop\ash-backups\release-0044-20260826\post\2026-08-25T23-32-12-584Z`
+  (60 tables, 6,237 rows, 44 migrations);
+- restore check: `Desktop\ash-backups\release-0044-20260826\restore-check\2026-08-26T08-20-20-245Z`
+  (all 60 fingerprints and 6,237 rows equal to the post-backup).
+
+The isolated restore passed all 27 sequence checks and the audited rollback probe, then the exact
+scratch database was dropped. Production's only current money-integrity warning is five excluded
+`unknown` orders on Thaer's submitted shift. Do not resolve those by editing timestamps or amounts:
+the manager must inspect the immutable images and record an attributed include/exclude decision.
 
 ### Pre-approved openings release (`0040` — deployed 2026-08-24)
 

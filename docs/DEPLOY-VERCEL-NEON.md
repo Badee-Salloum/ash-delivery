@@ -12,13 +12,14 @@ Team `hadis-projects-3c86ccdb`, three projects, all public (no deployment protec
 
 | Surface | URL | Live deployment / notes |
 | --- | --- | --- |
-| Admin console | https://ash-admin-eta.vercel.app | `dpl_EyNqnL7gSKWpqcwnCZ5Zva58iqis`; React SPA, `/api/*` proxied to API |
-| Driver PWA | https://ash-driver.vercel.app | `dpl_5B2gE3LH6gDvKADzMf6ZehX5yJ65`; installable PWA, `/api/*` proxied to API |
-| API | https://ash-api-xi.vercel.app | `dpl_HEfzBBSRd78SpB14PJuKfatPhyci`; Fastify serverless function |
-| Database | Neon `ep-billowing-butterfly-…` (eu-central-1, **Postgres 18**) | live at `0040` (40 migrations) + bootstrapped |
+| Admin console | https://ash-admin-eta.vercel.app | `dpl_AoziBU6U4ubjxugPRafwAVu8iUc6`; React SPA, `/api/*` proxied to API |
+| Driver PWA | https://ash-driver.vercel.app | `dpl_H8mXPQAUd5fjqNwSZzas6g9fACpj`; installable PWA, `/api/*` proxied to API |
+| API | https://ash-api-xi.vercel.app | `dpl_8s5w8kubRfYx4SLSjwuvL53JahMP`; Fastify serverless function |
+| Database | Neon `ep-billowing-butterfly-…` (eu-central-1, **Postgres 18**) | live at `0044` (44 migrations) + bootstrapped |
 | Evidence | Vercel Blob store `ash-evidence` (private) | linked to `ash-api` |
 
-**Version boundary:** production is at `0040`. The API build moved on the evening of 2026-08-24 —
+**Version boundary:** production is at `0044`, and all three public surfaces are on commit
+`5d76a539af517a914c59a455cdc8c2d3bafb4ce6`. Historical boundary evidence: the API build moved on the evening of 2026-08-24 —
 `ocr_reads` carries `bms-prompt-v2` cache signatures from 2026-08-25 01:26, which ships in
 `c33e775`, so at least `c33e775` (and its ancestor `644306a`) were live by then. **The driver PWA
 is a separate bundle and reaches a phone only when its driver taps «تحديث» — see RUNBOOK §7d;
@@ -224,6 +225,33 @@ redeploy a front-end: `pnpm build:apps`, copy `apps/<app>/dist/*` into a staging
 ---
 
 ## 7. Deploy checklist
+
+### Validated live `0044` checklist — 2026-08-26
+
+- [x] Frozen commit `5d76a539af517a914c59a455cdc8c2d3bafb4ce6`; CI run
+      [32909487259](https://github.com/Badee-Salloum/ash-delivery/actions/runs/32909487259) passed
+      static checks, unit/property tests, and real PostgreSQL 17 guards
+- [x] Staged all three production candidates with `--skip-domain`, then paused only `ash-api` and
+      observed 503 plus two zero-active/zero-transaction database samples
+- [x] Validated pre-backup
+      `Desktop\ash-backups\release-0044-20260826\pre\2026-08-25T23-29-11-398Z`:
+      60 tables / 6,233 rows / 40 migrations
+- [x] Applied exactly 0041–0044; the immediate checksum rerun applied 0 and found all 44 present
+- [x] Postflight proved release constraints/functions/triggers/comments, zero trial balance, no
+      mismatched close journals, and least-privilege runtime denial probes
+- [x] Validated post-backup
+      `Desktop\ash-backups\release-0044-20260826\post\2026-08-25T23-32-12-584Z`:
+      60 tables / 6,237 rows / 44 migrations; all 59 business fingerprints unchanged
+- [x] Promoted API `dpl_8s5w8kubRfYx4SLSjwuvL53JahMP`, driver
+      `dpl_H8mXPQAUd5fjqNwSZzas6g9fACpj`, and admin `dpl_AoziBU6U4ubjxugPRafwAVu8iUc6`
+- [x] Stable health/auth, both proxies, both SPA fallbacks, driver manifest/service worker, and exact
+      deployed assets passed after resume
+- [x] Restored 6,237/6,237 rows into `ash_release_gate_0044_restore_20260826_0239`; re-backup
+      `Desktop\ash-backups\release-0044-20260826\restore-check\2026-08-26T08-20-20-245Z`
+      matched all 60 fingerprints; all 27 sequences and the rollback probe passed
+- [x] Disconnected, dropped, and confirmed the exact scratch database absent
+- [ ] Manager reviews the five deliberately excluded `unknown` orders on Thaer's submitted shift;
+      never invent time or money merely to clear the integrity warning
 
 ### Validated live `0040` checklist — 2026-08-24
 

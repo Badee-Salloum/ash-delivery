@@ -7,6 +7,28 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 
 **Legend:** ✅ implemented and green · ⚠ written but never executed · 🔜 planned, milestone named.
 
+## 2026-08-26 live release gate — attachment-bound OCR and funding (`0041`–`0044`)
+
+Release commit `5d76a539af517a914c59a455cdc8c2d3bafb4ce6` passed the full local Node 24
+`pnpm check`, both front-end production builds, and the standalone API build. GitHub Actions run
+[`32909487259`](https://github.com/Badee-Salloum/ash-delivery/actions/runs/32909487259) passed all
+three jobs, including the disposable PostgreSQL 17 migration/guard suite. The final major suites
+include API 724/724, driver 301/301, shared client 284/284, and admin 157/157.
+
+| Gate | Production / restore evidence | Result |
+| --- | --- | --- |
+| Migration identity | exactly 0041–0044; checksums `71092d71`, `41a5736c`, `f9b1273d`, `ef30d32e`; idempotent rerun 0 applied / 44 present | ✅ |
+| Pre/post preservation | 60 tables; 59 business fingerprints equal; 6,233 → 6,237 rows, exactly four migration rows | ✅ |
+| Ledger and guards | trial balance 0; all user triggers enabled; runtime cannot TEMP, mutate journal rows, or delete rules | ✅ |
+| HTTP release | health 200, direct and proxied auth 401, both SPAs/fallbacks/proxies, manifest, service worker, and exact bundles | ✅ |
+| Restore | 6,237/6,237 rows; 60/60 fingerprints; 27/27 sequences; rollback probe left audit and data unchanged | ✅ |
+
+The post-release production audit has one explicit non-zero group: five `unresolved_operations` on
+Thaer's submitted shift `4f40640e-e8dd-4966-b547-d20656136fde`. All five are `unknown` and excluded;
+the other 16 integrity groups are zero. The restore reproduces the same baseline exactly. This is a
+manager-review queue, not a ledger mismatch, and the release did not fabricate timestamps or money
+to make the checker green.
+
 ## 2026-08-25 incident gate — the shift-close failures of 2026-08-24
 
 Five drivers could not submit their close; four shifts were force-cancelled, discarding 4,325 SYP of
