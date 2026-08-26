@@ -935,32 +935,59 @@ export function ShiftFlow({
           batteryMediaIds: Object.fromEntries(
             st.endPackage.batteries.map((reading) => [reading.batteryId, reading.mediaId]),
           ),
-          orders: st.orders.map((o) => ({
-            // `already-<no>` rather than a random id: the list is rebuilt from the server on every
-            // resume, and a stable key keeps React from remounting rows the driver is editing.
-            localId: `already-${o.providerOrderNo}`,
-            providerOrderNo: o.providerOrderNo,
-            payMode: o.payMode,
-            feeText: o.fee,
-            recorded: true,
-            ...resumedOrderWindowState(o),
-            walletAmountText: o.walletAmount ?? '',
-            timeText: o.occurredMinute ?? '',
-            dateText: o.occurredDate ?? '',
-            // «A» و«B» come back from the stored route, so a resumed shift still shows where each
-            // order went — the only thing on the row a person can recognise.
-            pointA: o.points?.find((p) => p.role === 'start')?.label ?? null,
-            pointB: o.points?.find((p) => p.role === 'end')?.label ?? null,
-          })),
-          movements: (st.movements ?? []).map((m) => ({
-            localId: `already-${m.id}`,
-            amountText: m.amount,
-            timeText: m.occurredMinute,
-            included: m.included,
-            role: m.role,
-            ambiguous: m.ambiguous,
-          })),
-          cashDeductions: syncRecordedCashDeductions([], st.cashDeductions ?? []),
+          /*
+           * THE THREE ROW LISTS BELONG TO THE CLOSE DRAFT, NOT TO THIS ENDPOINT.
+           *
+           * `st.orders` is the COMMITTED orders table (`orders.listByShift`, app.ts), and draft
+           * rows only reach that table at close submit. For a shift that is still open it is
+           * therefore ALWAYS EMPTY — so writing it unconditionally replaced the driver's real list
+           * with nothing, every time this effect re-ran.
+           *
+           * That is what emptied محمد المسلماني's «الطلبات» on 2026-08-25: both dashboard reads
+           * completed at 18:24, the server draft held 7 orders at 18:28, and his screen showed
+           * «0 طلبات» at 18:31. The photo badges still said «القراءة: تمت» because
+           * `closeDraftAttachments` is not one of the fields this block writes — so the read record
+           * survived while the rows it produced did not.
+           *
+           * Nothing repaired it either: the close-draft fetch below is skipped once
+           * `closeDraftRevision` is set, and the autosave fingerprint only covers MANUAL rows, so
+           * deleting canonical OCR rows produced an identical fingerprint and sent nothing.
+           *
+           * The typed figures above were already protected — «a resume can never clobber something
+           * he is in the middle of correcting». The row lists were simply left out of that promise.
+           * Once a draft is loaded it is the owner; before that, restoring the committed rows is
+           * still exactly right, which is what this endpoint is for.
+           */
+          ...(d.closeDraftRevision === null
+            ? {
+                orders: st.orders.map((o) => ({
+                  // `already-<no>` rather than a random id: the list is rebuilt from the server on
+                  // every resume, and a stable key keeps React from remounting rows he is editing.
+                  localId: `already-${o.providerOrderNo}`,
+                  providerOrderNo: o.providerOrderNo,
+                  payMode: o.payMode,
+                  feeText: o.fee,
+                  recorded: true,
+                  ...resumedOrderWindowState(o),
+                  walletAmountText: o.walletAmount ?? '',
+                  timeText: o.occurredMinute ?? '',
+                  dateText: o.occurredDate ?? '',
+                  // «A» و«B» come back from the stored route, so a resumed shift still shows where
+                  // each order went — the only thing on the row a person can recognise.
+                  pointA: o.points?.find((p) => p.role === 'start')?.label ?? null,
+                  pointB: o.points?.find((p) => p.role === 'end')?.label ?? null,
+                })),
+                movements: (st.movements ?? []).map((m) => ({
+                  localId: `already-${m.id}`,
+                  amountText: m.amount,
+                  timeText: m.occurredMinute,
+                  included: m.included,
+                  role: m.role,
+                  ambiguous: m.ambiguous,
+                })),
+                cashDeductions: syncRecordedCashDeductions([], st.cashDeductions ?? []),
+              }
+            : {}),
         }))
         // Trust the server's state over the one the assignment reported: the manager may have
         // approved between the two calls. A shift that is no longer LIVE goes through the same
