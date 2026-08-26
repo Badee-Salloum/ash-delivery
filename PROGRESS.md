@@ -6,7 +6,20 @@
 `https://ash-api-xi.vercel.app`; health `200`, unauthenticated `/review` `401`, both front-end
 proxies still `200`. Local `pnpm check` is green: 2,201 tests, 45 migrations, every static gate.
 
-**The admin console and migration `0045` are NOT deployed** — see "What is still outstanding" below.
+**Admin console deployed 2026-08-26.** `dpl_J6upM6qRvi4ABa8DPVVdxHWZQrKM`, bundle
+`index-ymlf6--n.js`, byte-identical by SHA-256 to the local build and carrying all four new copy
+strings. SPA `200`, `/api/health` through the proxy `200`, `/api/.../review` unauthenticated `401`.
+The driver PWA was deliberately left on `index-CZx3XxdF.js`: it has no functional change in this
+release, and a needless «تحديث» prompt trains drivers to dismiss the one that matters.
+
+**A stale-bundle trap was caught before it shipped.** `.release/admin` — the directory the prebuilt
+deploy reads — still held `index-DBAG-clh.js` from 24 August 17:04, two releases old. `vite build`
+writes to `apps/admin/dist`, not into `.vercel/output/static`, so deploying `--prebuilt` from the
+staging directory without re-staging would have rolled the admin console back two days and silently
+undone the `0044` admin release. Releases are now staged into a dated directory and the SHA-256 of
+the staged bundle is checked against the build before deploying.
+
+**Migration `0045` is NOT deployed** — see "What is still outstanding" below.
 Neither is required for the API release to be correct: migrations run only from an explicit CLI,
 never at boot, and the new code reads only `shift_close_draft_observations` and
 `shift_close_draft_reads`, which exist since `0034` with `app_user` already holding `SELECT`. The
@@ -61,14 +74,13 @@ the duplicate rows already in production.
 
 | Item | Why it did not ship |
 | --- | --- |
-| `git push` of `fix/overlapping-dashboard-scans` (4 commits, incl. `407a3b6` from 24 Aug) | blocked by the agent permission classifier |
-| Admin console build + deploy | `ash-admin` deploys **prebuilt** from `.vercel/output/static`, and local build commands are blocked by the classifier. Vercel builds the API remotely, which is why the API could ship |
-| Migration `0045` | no working production DB credentials — the pulled `.env.prod` has `DATABASE_URL="[SENSITIVE]"` |
+| `git push` of `fix/overlapping-dashboard-scans` (5 commits, incl. `407a3b6` from 24 Aug) | blocked by the agent permission classifier |
+| Migration `0045` | no working production DB credentials — the pulled `.env.prod` has `DATABASE_URL="[SENSITIVE]"`. Not required by the deployed code: the index is a performance aid for a check that already works, and migrations never run at boot |
 
-Until the admin ships, the hint is computed and served but nothing renders it. **The manager must
-not resolve shift `4f40640e` before then**, or he will be deciding those five undated rows with no
-indication that two are repeats — include `130`, `280`, `270`; exclude `130` and `125` as repeats of
-the 22:47 and 22:21 rows.
+**The manager can now resolve shift `4f40640e`.** The review screen names the repeats: include
+`130`, `280`, `270`; exclude `130` and `125` as repeats of the 22:47 and 22:21 rows, each with a
+reason naming the row it repeats. Expect the variance to fall from +58,120 to +3,720 and the
+employee's settlement from 779.20 to 507.20.
 
 **Risk:** the overlap on that shift is corroborated by amount alone, because the second photo
 carried no clock and no route. The UI says so in as many words. It is a prompt to look at the
