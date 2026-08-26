@@ -561,6 +561,20 @@ const stableKey = (parts: readonly (string | number | null | undefined)[]): stri
   return createHash('sha256').update(framed).digest('hex').slice(0, 32)
 }
 
+/**
+ * The page-scoped identity of one scanned row.
+ *
+ * This is what `mergeLinkedRows` matches on, so re-reading a page updates its rows in place instead
+ * of duplicating them. Exported because the duplicate-hint service has to resolve an observation
+ * back to the operation it produced; deriving that key anywhere else would let the two drift, and a
+ * drifted key silently resolves to nothing rather than failing loudly.
+ */
+export const closeDraftClientKeyFor = (
+  field: string,
+  attachmentToken: string,
+  rowIndex: number,
+): string => `${field}:${stableKey([attachmentToken, rowIndex])}`
+
 const normalizePrintedClock = (printedTime: string | null | undefined): string | null => {
   if (printedTime == null) return null
   const ascii = printedTime.normalize('NFKC').replace(/[٠-٩۰-۹]/g, (digit) => {
@@ -734,7 +748,7 @@ function linkedRows(
     const matchKey = row.dateIso !== null && printedClock !== null && row.value !== null
       ? stableKey([field, row.dateIso, printedClock, row.value])
       : null
-    const clientKey = `${field}:${stableKey([attachmentToken, observation.rowIndex])}`
+    const clientKey = closeDraftClientKeyFor(field, attachmentToken, observation.rowIndex)
     const position = positionAt(index)
     const reviewReasons = [...new Set([
       ...(row.reviewRequired === true ? [row.cancelled ? 'cancelled_conflict' as const : 'reader_conflict' as const] : []),
@@ -1076,7 +1090,12 @@ export async function readCloseDraftAttachment(
   slot: string,
   input: LinkedCloseDraftReadRequest,
   maxReadsPerShift: number,
-): Promise<{ draft: CloseDraftView; rows: OcrRow[]; fields: Readonly<Record<string, string | null>> }> {
+): Promise<{
+  draft: CloseDraftView
+  rows: OcrRow[]
+  fields: Readonly<Record<string, string | null>>
+  alreadyRead?: boolean
+}> {
   await assertEditable(deps, shiftId)
   const current = await deps.closeDrafts.findByShift(shiftId)
   // A read is scoped by the immutable media id + attachment token below. Unrelated autosaves and
@@ -1102,9 +1121,16 @@ export async function readCloseDraftAttachment(
   const shift = await deps.shifts.findById(shiftId)
   const branch = shift ? await deps.directory.branch(shift.branchId) : null
   if (!shift || !branch || shift.openApprovedAt === null) throw new ServiceError(409, 'shift_window_unavailable')
+  const key = readKey(attached.attachmentToken, input.field)
+  // Already read to completion? Then this call adds nothing and must cost nothing. The repository
+  // enforces the same rule under the shift row lock; this only spares the blob fetch and the
+  // provider round-trip when the answer is already durable. `retryFailed` cannot reach a complete
+  // read — the driver UI hides retry once a read succeeds — but honour the flag rather than assume.
+  if (current.data.reads[key]?.status === 'complete' && input.retryFailed !== true) {
+    return { draft: await recordView(deps, current, true), rows: [], fields: {}, alreadyRead: true }
+  }
   const { bytes } = await readEvidence(deps, attached.mediaId)
   const readId = deps.ids.uuid()
-  const key = readKey(attached.attachmentToken, input.field)
   // The provider call can take a minute. Persisting an unleased `running` row first leaves the
   // draft permanently stuck if this process dies. The local request state shows progress; only a
   // terminal immutable read is committed, with a CAS retry that preserves concurrent autosaves.
@@ -1191,6 +1217,7 @@ export async function readCloseDraftAttachment(
       attachmentToken: attached.attachmentToken,
       slot,
       read,
+      replacesCompletedRead: input.retryFailed === true,
       observations: output.result.ok ? linked.observations : [],
       data,
       draftHash: closeDraftHash(data),

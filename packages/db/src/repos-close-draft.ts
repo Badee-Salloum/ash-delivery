@@ -1,7 +1,9 @@
 import type {
   CloseDraftData,
+  CloseDraftObservationRecord,
   CloseDraftRecord,
   CloseDraftRepo,
+  OcrField,
   OcrRow,
 } from '@ash/contracts'
 import { bindPoolToTransaction, type Pool, withTransaction } from './pool.ts'
@@ -24,6 +26,40 @@ const toDraft = (row: DraftRow): CloseDraftRecord => ({
   updatedAtMs: row.updated_at.getTime(),
   updatedBy: row.updated_by,
   submittedAtMs: row.submitted_at?.getTime() ?? null,
+})
+
+type ObservationRow = {
+  id: string
+  read_id: string
+  shift_id: string
+  media_id: string
+  attachment_token: string
+  slot: string
+  field: OcrField
+  row_index: number
+  row_count: number
+  date_section: string | null
+  y_top: number | null
+  y_bottom: number | null
+  row_data: OcrRow
+  created_at: Date
+}
+
+const toObservation = (row: ObservationRow): CloseDraftObservationRecord => ({
+  id: row.id,
+  readId: row.read_id,
+  shiftId: row.shift_id,
+  mediaId: row.media_id,
+  attachmentToken: row.attachment_token,
+  slot: row.slot,
+  field: row.field,
+  rowIndex: Number(row.row_index),
+  rowCount: Number(row.row_count),
+  dateSection: row.date_section,
+  yTop: row.y_top === null ? null : Number(row.y_top),
+  yBottom: row.y_bottom === null ? null : Number(row.y_bottom),
+  row: structuredClone(row.row_data),
+  createdAtMs: row.created_at.getTime(),
 })
 
 const selectDraft = async (pool: Pool, shiftId: string): Promise<CloseDraftRecord | null> => {
@@ -129,6 +165,20 @@ export class PgCloseDraftRepo implements CloseDraftRepo {
     })
   }
 
+  async listObservationsByShift(shiftId: string): Promise<CloseDraftObservationRecord[]> {
+    const { rows } = await this.pool.query<ObservationRow>(
+      `SELECT o.id, o.read_id, o.shift_id, o.media_id, o.attachment_token, o.slot,
+              o.row_index, o.row_count, o.date_section, o.y_top, o.y_bottom, o.row_data,
+              o.created_at, r.field
+         FROM shift_close_draft_observations o
+         JOIN shift_close_draft_reads r ON r.id = o.read_id
+        WHERE o.shift_id = $1
+        ORDER BY o.attachment_token, o.row_index`,
+      [shiftId],
+    )
+    return rows.map(toObservation)
+  }
+
   async saveRead(input: Parameters<CloseDraftRepo['saveRead']>[0]): Promise<CloseDraftRecord | null> {
     return withTransaction(this.pool, { actorId: input.updatedBy }, async (client) => {
       await client.query('SELECT id FROM shifts WHERE id = $1 FOR UPDATE', [input.shiftId])
@@ -143,6 +193,23 @@ export class PgCloseDraftRepo implements CloseDraftRepo {
         [input.shiftId, input.expectedRevision, input.slot, input.mediaId, input.attachmentToken],
       )
       if (!current.rows[0]) return null
+
+      // At most one COMPLETE read per (shift, media, attachment generation, field). The OCR layer
+      // already refuses to pay twice for identical bytes, so a repeat call arrives here carrying a
+      // cache hit; appending it again would double the immutable sightings for a single page and
+      // make two scans of one list look like two lists. Inside the shift row lock taken above, so
+      // two concurrent reads serialise instead of racing. A genuinely failed read leaves no
+      // complete row and stays retryable; a retaken photo rotates the token and is a new page.
+      if (input.read.status === 'complete' && input.replacesCompletedRead !== true) {
+        const settled = await client.query<{ id: string }>(
+          `SELECT id FROM shift_close_draft_reads
+            WHERE shift_id = $1 AND media_id = $2 AND attachment_token = $3
+              AND field = $4 AND status = 'complete'
+            LIMIT 1`,
+          [input.shiftId, input.mediaId, input.attachmentToken, input.read.field],
+        )
+        if (settled.rows[0]) return toDraft(current.rows[0])
+      }
 
       // Advance the optimistic draft before appending immutable provenance. If the CAS loses,
       // return without leaving a detached read row that a retry can neither reuse nor delete.

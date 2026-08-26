@@ -1491,6 +1491,12 @@ export interface CloseDraftRepo {
     attachmentToken: string
     slot: string
     read: CloseDraftReadRecord
+    /**
+     * The caller explicitly asked to re-read an attachment that already read to completion — a
+     * reader/prompt upgrade, not the accidental repeat the idempotency rule exists to absorb.
+     * Without it, a second complete read for the same page is refused.
+     */
+    replacesCompletedRead?: boolean
     observations: Array<{
       id: string
       rowIndex: number
@@ -1505,6 +1511,32 @@ export interface CloseDraftRepo {
     updatedAtMs: number
     updatedBy: string
   }): Promise<CloseDraftRecord | null>
+  /**
+   * Every immutable row sighting for one shift, ordered by `(attachmentToken, rowIndex)`.
+   *
+   * Read-only: this is the provenance the manager review reads to spot two scans of one list that
+   * overlap. It never feeds money — orders and deductions keep their own canonical rows.
+   */
+  listObservationsByShift(shiftId: string): Promise<CloseDraftObservationRecord[]>
+}
+
+/** One scanned row exactly as a reader saw it, bound to the page generation it came from. */
+export interface CloseDraftObservationRecord {
+  id: string
+  readId: string
+  shiftId: string
+  mediaId: string
+  /** The evidence generation. A retaken photo rotates it, so rows never merge across retakes. */
+  attachmentToken: string
+  slot: string
+  field: OcrField
+  rowIndex: number
+  rowCount: number
+  dateSection: string | null
+  yTop: number | null
+  yBottom: number | null
+  row: OcrRow
+  createdAtMs: number
 }
 
 export interface OcrReadRecord {
