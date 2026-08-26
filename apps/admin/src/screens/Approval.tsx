@@ -18,6 +18,12 @@ import { add, formatMinor, minor, parseMinor, sub } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { evidenceReviewWarning } from '../evidence-warning.ts'
+import {
+  type ResolvedDuplicateHint,
+  type ScanDuplicateHintWire,
+  duplicateHintsForDeduction,
+  duplicateHintsForOrder,
+} from '../duplicate-hints.ts'
 import { useConfirm, useToast } from '../feedback.tsx'
 import { LatestRequestGuard } from '../latest-request.ts'
 import { isValidOpeningFundInput, openingApprovalRequest } from '../opening-funds.ts'
@@ -67,6 +73,8 @@ interface BatteryReadingView {
 }
 
 interface Review {
+  /** Advisory overlap hints; absent on an API that predates them. */
+  duplicateHints?: ScanDuplicateHintWire[]
   id: string
   state: string
   driverId: string
@@ -1808,6 +1816,7 @@ function CloseApprovalWorkspace({
                     operationCopy={operationCopy}
                     onRevise={onRevise}
                     dashboardEvidence={dashboardEvidence}
+                    duplicateHints={duplicateHintsForOrder(review.duplicateHints, order.providerOrderNo)}
                     {...(orderRereads[`order:${order.providerOrderNo}`]
                       ? { reread: orderRereads[`order:${order.providerOrderNo}`] }
                       : {})}
@@ -1825,6 +1834,7 @@ function CloseApprovalWorkspace({
                     operationCopy={operationCopy}
                     onRevise={onRevise}
                     dashboardEvidence={dashboardEvidence}
+                    duplicateHints={duplicateHintsForDeduction(review.duplicateHints, deduction.id)}
                     {...(orderRereads[`cash_deduction:${deduction.id}`]
                       ? { reread: orderRereads[`cash_deduction:${deduction.id}`] }
                       : {})}
@@ -2140,6 +2150,10 @@ interface CloseWorkspaceCopy {
   auditReasonPlaceholder: string
   includeException: string
   markDuplicate: string
+  duplicateHintBadge: string
+  duplicateHintMatches: string
+  duplicateHintAmountOnly: string
+  duplicateHintAdvisory: string
   excludeOrder: string
   saveTimingPreserve: string
   correctAndInclude: string
@@ -2178,6 +2192,10 @@ function closeWorkspaceCopy(lang: 'ar' | 'en'): CloseWorkspaceCopy {
       auditReasonPlaceholder: 'What did you verify in the image or record?',
       includeException: 'Include exceptionally',
       markDuplicate: 'Mark as duplicate',
+      duplicateHintBadge: 'Possible duplicate',
+      duplicateHintMatches: 'Matches row {row} on {page} — two scans of this list overlap.',
+      duplicateHintAmountOnly: 'Amounts match only; no clock or route to confirm it.',
+      duplicateHintAdvisory: 'A hint only — nothing is counted or excluded automatically. The decision, and the reason, are yours.',
       excludeOrder: 'Exclude order',
       saveTimingPreserve: 'Save time and keep current decision',
       correctAndInclude: 'Correct time and include',
@@ -2215,6 +2233,10 @@ function closeWorkspaceCopy(lang: 'ar' | 'en'): CloseWorkspaceCopy {
     auditReasonPlaceholder: 'ما الذي تحققت منه في الصورة أو السجل؟',
     includeException: 'تضمين استثنائي',
     markDuplicate: 'تثبيت كتكرار',
+    duplicateHintBadge: 'يُحتمل أنه مكرّر',
+    duplicateHintMatches: 'يطابق الصف {row} في {page} — صورتان لهذه اللائحة متداخلتان.',
+    duplicateHintAmountOnly: 'التطابق على المبلغ فقط؛ لا وقت ولا مسار يؤكّده.',
+    duplicateHintAdvisory: 'إشارة فقط — لا شيء يُحتسب أو يُستبعد تلقائياً. القرار والسبب لك.',
     excludeOrder: 'استبعاد الطلب',
     saveTimingPreserve: 'حفظ الوقت مع إبقاء القرار الحالي',
     correctAndInclude: 'تصحيح الوقت وتضمين الطلب',
@@ -2287,6 +2309,33 @@ function managerEvidenceRereadCopy(lang: 'ar' | 'en') {
   }
 }
 
+/**
+ * The advisory duplicate line.
+ *
+ * A badge plus one sentence naming the row this one appears to repeat. It deliberately offers no
+ * action of its own: the audited «تثبيت كتكرار» button below already does that, with the reason the
+ * 0033 trigger requires. A hint that could exclude a row by itself would stop being a hint.
+ */
+function DuplicateHintNote({ hints, copy }: {
+  hints: ResolvedDuplicateHint[]
+  copy: CloseWorkspaceCopy
+}): ReactNode {
+  const first = hints[0]
+  if (!first) return null
+  const line = copy.duplicateHintMatches
+    .replace('{row}', String(first.counterpartRowIndex + 1))
+    .replace('{page}', first.counterpartSlot)
+  return (
+    <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+      <p className="font-semibold">{line}</p>
+      {first.pageCauses.includes('scan_overlap_amount_only')
+        ? <p className="mt-1">{copy.duplicateHintAmountOnly}</p>
+        : null}
+      <p className="mt-1 text-amber-800">{copy.duplicateHintAdvisory}</p>
+    </div>
+  )
+}
+
 function OrderAttentionCard({
   order,
   index,
@@ -2296,6 +2345,7 @@ function OrderAttentionCard({
   operationCopy,
   onRevise,
   dashboardEvidence,
+  duplicateHints,
   reread,
   onReread,
   timingDraftPending,
@@ -2309,6 +2359,7 @@ function OrderAttentionCard({
   operationCopy: OperationReviewCopy
   onRevise(body: Record<string, unknown>): Promise<boolean>
   dashboardEvidence: Review['media']
+  duplicateHints: ResolvedDuplicateHint[]
   reread?: ManagerOrderEvidenceRereadResponse
   onReread(target: ManagerOrderEvidenceRereadTarget, slot: string, reason: string): Promise<void>
   timingDraftPending: boolean
@@ -2436,6 +2487,7 @@ function OrderAttentionCard({
         {order.included === false ? <Badge tone="slate">{operationCopy.excluded}</Badge> : null}
         {order.kind === 'manual' ? <Badge tone="sky">{operationCopy.manual}</Badge> : null}
         {order.feeOcr != null && order.feeOcr !== order.fee ? <Badge tone="amber">{copy.changedByManager}</Badge> : null}
+        {duplicateHints.length > 0 ? <Badge tone="amber">{copy.duplicateHintBadge}</Badge> : null}
         {reviewReasons.map((reviewReason) => (
           <Badge
             key={reviewReason}
@@ -2445,6 +2497,7 @@ function OrderAttentionCard({
           </Badge>
         ))}
       </div>
+      <DuplicateHintNote hints={duplicateHints} copy={copy} />
       {order.windowBasis === 'screen_position' ? (
         <p className="num mt-2 text-xs text-sky-800">
           {operationCopy.positionBasis}{positionalBounds ? ` · ${positionalBounds}` : ''}
@@ -2599,6 +2652,7 @@ function DeductionAttentionCard({
   operationCopy,
   onRevise,
   dashboardEvidence,
+  duplicateHints,
   reread,
   onReread,
   timingDraftPending,
@@ -2610,6 +2664,7 @@ function DeductionAttentionCard({
   operationCopy: OperationReviewCopy
   onRevise(body: Record<string, unknown>): Promise<boolean>
   dashboardEvidence: Review['media']
+  duplicateHints: ResolvedDuplicateHint[]
   reread?: ManagerOrderEvidenceRereadResponse
   onReread(target: ManagerOrderEvidenceRereadTarget, slot: string, reason: string): Promise<void>
   timingDraftPending: boolean
@@ -2653,6 +2708,7 @@ function DeductionAttentionCard({
         <WindowStatusBadge status={deduction.windowStatus} copy={operationCopy} />
         {deduction.windowBasis === 'screen_position' ? <Badge tone="sky">{operationCopy.positionBasis}</Badge> : null}
         {!deduction.included ? <Badge tone="slate">{operationCopy.excluded}</Badge> : null}
+        {duplicateHints.length > 0 ? <Badge tone="amber">{copy.duplicateHintBadge}</Badge> : null}
         {reviewReasons.map((reviewReason) => (
           <Badge
             key={reviewReason}
@@ -2662,6 +2718,7 @@ function DeductionAttentionCard({
           </Badge>
         ))}
       </div>
+      <DuplicateHintNote hints={duplicateHints} copy={copy} />
       {deduction.windowBasis === 'screen_position' ? (
         <p className="num mt-2 text-xs text-sky-800">
           {operationCopy.positionBasis}{positionalBounds ? ` · ${positionalBounds}` : ''}

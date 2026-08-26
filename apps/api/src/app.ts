@@ -30,6 +30,7 @@ import {
   patchCloseDraftRequest,
   linkedCloseDraftReadRequest,
   restoreCloseDraftAttachmentRequest,
+  scanDuplicateHintSchema,
   shiftFundingPreviewSchema,
 } from '@ash/contracts'
 import {
@@ -82,6 +83,7 @@ import {
   readCloseDraftAttachment,
   syncCloseDraftEvidence,
 } from './close-draft.service.ts'
+import { buildScanDuplicateHints } from './duplicate-hints.service.ts'
 import {
   ServiceError,
   addOrder,
@@ -1777,8 +1779,15 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
               `driver_shift_funding_wallet:${snapshot.shift.driverId}`,
             ),
           ])
+          // Computed inside the close UOW so the hints and the operations they point at come from
+          // one locked snapshot. Read-only and deliberately absent from `shiftSnapshot`, which also
+          // serves the driver's own /state — this is manager review material.
+          const duplicateHints = z
+            .array(scanDuplicateHintSchema)
+            .parse(await buildScanDuplicateHints(transactionDeps, id))
           return {
             ...snapshot.body,
+            duplicateHints,
             shiftFunding: shiftFundingPreviewSchema.parse({
               cash: serializeMoney(shiftFundingCash),
               wallet: serializeMoney(shiftFundingWallet),

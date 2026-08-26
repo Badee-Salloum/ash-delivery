@@ -258,6 +258,61 @@ export const operationWindowStatusSchema = z.enum([
   'unknown',
 ])
 
+/**
+ * Advisory hint that two scans of one list share rows. Read-only: it changes no money, no
+ * inclusion, and no order. Cause codes come straight from the domain; the UI resolves the strings.
+ */
+export const scanOverlapCauseSchema = z.enum([
+  'scan_overlap_suffix_prefix',
+  'scan_overlap_amount_only',
+  'scan_overlap_direction_ambiguous',
+])
+
+export const scanOverlapPairCauseSchema = z.enum([
+  'scan_overlap_pair_amount_agrees',
+  'scan_overlap_pair_minute_agrees',
+  'scan_overlap_pair_route_agrees',
+])
+
+const scanDuplicateHintPageSchema = z.object({
+  slot: z.string().min(1).max(64),
+  mediaId: z.string().min(1).max(64),
+})
+
+export const scanDuplicateHintOperationRefSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('order'),
+    providerOrderNo: z.string().min(1).max(160),
+    observationId: z.string().min(1).max(64),
+    rowIndex: z.number().int(),
+  }),
+  z.object({
+    kind: z.literal('cash_deduction'),
+    id: z.string().min(1).max(64),
+    observationId: z.string().min(1).max(64),
+    rowIndex: z.number().int(),
+  }),
+  z.object({
+    kind: z.literal('unmatched_row'),
+    observationId: z.string().min(1).max(64),
+    rowIndex: z.number().int(),
+  }),
+])
+
+export const scanDuplicateHintSchema = z.object({
+  earlier: scanDuplicateHintPageSchema,
+  later: scanDuplicateHintPageSchema,
+  length: z.number().int().positive(),
+  causes: z.array(scanOverlapCauseSchema),
+  pairs: z.array(z.object({
+    earlier: scanDuplicateHintOperationRefSchema,
+    later: scanDuplicateHintOperationRefSchema,
+    causes: z.array(scanOverlapPairCauseSchema),
+  })),
+})
+
+export type ScanDuplicateHintWire = z.infer<typeof scanDuplicateHintSchema>
+
 const cashDeductionRequest = z.object({
   /** Stable across overlapping OCR pages and retries. */
   operationKey: z.string().min(1).max(160),
