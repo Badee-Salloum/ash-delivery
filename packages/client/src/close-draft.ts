@@ -31,38 +31,26 @@ export function operationDecisionState(row: {
   return row.included === false ? 'excluded' : 'included'
 }
 
-/** The printed identity the canonical merge keys on: day, clock and amount (decision 16). */
-const printedIdentity = (row: {
-  dateText?: string | undefined
-  timeText?: string | undefined
-  feeText?: string
-  amount?: string
-}): string | null => {
-  const date = row.dateText?.trim() ?? ''
-  const time = row.timeText?.trim() ?? ''
-  const money = (row.feeText ?? row.amount ?? '').trim()
-  if (date === '' || time === '' || money === '') return null
-  return `${date}|${time}|${money}`
-}
-
 const hasEvidence = (row: { sightings?: readonly unknown[] | undefined }): boolean =>
   (row.sightings?.length ?? 0) > 0
 
 /**
- * A row whose evidence generation is gone and whose identity another EVIDENCED row already carries.
+ * A second copy of an order that has already lost its evidence.
  *
- * It is not a decision. There is no photo behind it, nothing a manager could look at, and the
- * delivery it describes is already counted on the row that still holds the screenshot.
+ * IDENTITY IS `providerOrderNo`. It is the provider's own number and is unique by construction —
+ * `order-entry.ts` records that there is no delete endpoint precisely because it is globally
+ * unique. Two draft rows carrying the same one are not similar deliveries; they are one delivery
+ * written down twice, and no heuristic is needed to say so.
  *
- * Shift d0a5a7ec showed its driver «محسوبة 10 من 21» — ten deliveries rendered twice, each green
- * «محسوبة» beside a red «بانتظار المدير» at the same minute for the same amount. He had retaken the
- * dashboard photos; the attachment token rotated and the old rows lost every sighting, keeping only
- * `human_time_edit`, which `operationDecisionState` reports as pending.
+ * Shift d0a5a7ec showed its driver «محسوبة 10 من 21» — 21 rows over 11 provider numbers, ten of
+ * them written twice. He had retaken the dashboard photos: the attachment token rotated, the old
+ * rows lost every sighting, and because he had also hand-corrected their times they had become
+ * `source: 'manual'` with a null `matchKey`. That is why neither the canonical merge nor a
+ * printed-identity heuristic could reach them — and why this keys on the provider number instead.
  *
- * Deliberately narrow. A sightingless row with NO evidenced twin is a genuine `evidence_removed`
- * case and must stay visible — it is the one signal telling the driver to photograph that delivery
- * again. And a `manual` row is his own testimony: a reader that happens to match it does not get to
- * erase it from his screen.
+ * Within a group the survivor is the row that still has evidence; failing that, the first. So a
+ * delivery whose every photo is gone still appears ONCE, which is the signal telling the driver to
+ * photograph that page again — it is not silently swallowed.
  */
 export function isSupersededRemnant(
   row: DraftOrder | DraftCashDeduction,
@@ -70,12 +58,14 @@ export function isSupersededRemnant(
 ): boolean {
   if (hasEvidence(row)) return false
   if (row.included !== false) return false
-  if (row.draftSource === 'manual') return false
-  const identity = printedIdentity(row)
-  if (identity === null) return false
-  return siblings.some(
-    (other) => other !== row && hasEvidence(other) && printedIdentity(other) === identity,
+  const id = 'providerOrderNo' in row ? row.providerOrderNo : undefined
+  if (id === undefined || id === '') return false
+  const group = siblings.filter(
+    (other) => 'providerOrderNo' in other && other.providerOrderNo === id,
   )
+  if (group.length < 2) return false
+  const survivor = group.find(hasEvidence) ?? group[0]
+  return survivor !== row
 }
 
 /** The rows worth putting in front of the driver: everything except superseded remnants. */

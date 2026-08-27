@@ -3,26 +3,25 @@ import type { DraftOrder } from '../src/order-entry.ts'
 import { isSupersededRemnant, withoutSupersededRemnants } from '../src/close-draft.ts'
 
 /**
- * Shift d0a5a7ec, 2026-08-27. The driver's screen read «محسوبة 10 من 21» and showed every delivery
- * twice — a green «محسوبة» beside a red «بانتظار المدير» at the same minute for the same amount.
+ * Shift d0a5a7ec, 2026-08-27. The driver's screen read «محسوبة 10 من 21»: 21 rows over 11 provider
+ * order numbers, ten deliveries written down twice.
  *
- * The red ten were remnants of an earlier evidence generation: he retook the dashboard photos, the
- * attachment token rotated, and the old rows lost every sighting. They carry `human_time_edit`, and
- * any row with `timeReviewRequired` renders as a manager decision — but there is no photo behind
- * them and nothing anyone could look at.
+ * He had retaken the dashboard photos. The attachment token rotated, the old rows lost every
+ * sighting, and because he had also hand-corrected their times they had become `source: 'manual'`
+ * with a null `matchKey`. Both the canonical merge and a printed date/clock/amount heuristic are
+ * blind to that shape — the provider's own order number is not.
  */
 
-const sighting = (slot: string) => ({
+const sighting = () => ({
   readId: 'r1',
   observationId: 'o1',
   rowIndex: 0,
   dateSection: '2026-08-27',
-  evidence: { mediaId: 'm1', attachmentToken: 't1', slot },
+  evidence: { mediaId: 'm1', attachmentToken: 't1', slot: 'dashboard' },
 })
 
-const row = (over: Partial<DraftOrder> = {}): DraftOrder => ({
-  localId: over.localId ?? 'l1',
-  providerOrderNo: over.providerOrderNo ?? 'YAL-1',
+const row = (over: Partial<DraftOrder> & { providerOrderNo: string }): DraftOrder => ({
+  localId: over.localId ?? over.providerOrderNo,
   payMode: 'cash',
   feeText: over.feeText ?? '225.00',
   timeText: over.timeText ?? '14:39',
@@ -30,106 +29,90 @@ const row = (over: Partial<DraftOrder> = {}): DraftOrder => ({
   ...over,
 })
 
-/** The evidenced row that survived the retake. */
-const evidenced = row({ localId: 'live', sightings: [sighting('dashboard')], included: true })
-
-/** Its remnant: same printed identity, no evidence left, excluded, flagged for time review. */
-const remnant = row({
+/** The pair exactly as production holds it: same provider number, one evidenced, one stranded. */
+const evidenced = row({ providerOrderNo: 'YAL-cca8', localId: 'live', sightings: [sighting()], included: true })
+const stranded = row({
+  providerOrderNo: 'YAL-cca8',
   localId: 'stale',
-  providerOrderNo: 'YAL-2',
   sightings: [],
   included: false,
   timeReviewRequired: true,
+  draftSource: 'manual', // what a hand-corrected TIME turns a scanned row into
 })
 
 describe('isSupersededRemnant', () => {
-  it('recognises the shape that showed Taha 21 deliveries instead of 10', () => {
-    expect(isSupersededRemnant(remnant, [evidenced, remnant])).toBe(true)
+  it('recognises the pair that showed Taha 21 rows for 11 orders', () => {
+    expect(isSupersededRemnant(stranded, [evidenced, stranded])).toBe(true)
   })
 
-  it('leaves a row that still holds evidence alone', () => {
-    expect(isSupersededRemnant(evidenced, [evidenced, remnant])).toBe(false)
+  it('is not fooled by the stranded copy being marked manual', () => {
+    // `source: 'manual'` here means "a scanned row whose time a human corrected", NOT "a row the
+    // driver added himself". Treating the two as the same thing is what made the first version of
+    // this predicate a no-op on the real shift.
+    expect(stranded.draftSource).toBe('manual')
+    expect(isSupersededRemnant(stranded, [evidenced, stranded])).toBe(true)
   })
 
-  it('keeps a lost row the driver must actually retake', () => {
-    // No evidenced twin carries this identity, so the row is a real `evidence_removed` case. Hiding
-    // it would hide the one signal telling him to photograph that delivery again.
-    const orphan = row({ localId: 'orphan', feeText: '999.00', sightings: [], included: false, timeReviewRequired: true })
-    expect(isSupersededRemnant(orphan, [evidenced, orphan])).toBe(false)
+  it('never hides the row that still holds the photo', () => {
+    expect(isSupersededRemnant(evidenced, [evidenced, stranded])).toBe(false)
   })
 
-  it('never treats a hand-typed order as a remnant', () => {
-    // A manual row is the driver's own testimony. A reader that happens to match it does not get to
-    // erase it from his screen.
-    const manual = row({ localId: 'manual', draftSource: 'manual', sightings: [], included: false })
-    expect(isSupersededRemnant(manual, [evidenced, manual])).toBe(false)
+  it('keeps one copy when a delivery has lost ALL of its evidence', () => {
+    // Taha has exactly one of these: provider YAL-efd2, 125.00, both copies stranded. The driver
+    // must still be told a delivery lost its page — once, not twice, and never zero times.
+    const a = row({ providerOrderNo: 'YAL-efd2', localId: 'a', feeText: '125.00', sightings: [], included: false })
+    const b = row({ providerOrderNo: 'YAL-efd2', localId: 'b', feeText: '125.00', sightings: [], included: false })
+    const shown = withoutSupersededRemnants([a, b])
+    expect(shown).toHaveLength(1)
+    expect(shown[0]!.localId).toBe('a')
   })
 
-  it('needs the whole printed identity — date, clock and amount', () => {
-    for (const differing of [
-      { dateText: '2026-08-26' },
-      { timeText: '14:40' },
-      { feeText: '226.00' },
-    ]) {
-      const other = row({ localId: 'other', sightings: [], included: false, timeReviewRequired: true, ...differing })
-      expect(isSupersededRemnant(other, [evidenced, other])).toBe(false)
-    }
+  it('leaves a lone order alone, evidence or not', () => {
+    const lone = row({ providerOrderNo: 'YAL-baa4', localId: 'lone', sightings: [], included: false })
+    expect(isSupersededRemnant(lone, [evidenced, stranded, lone])).toBe(false)
   })
 
-  it('does not supersede an included row, whatever else matches it', () => {
-    const included = row({ localId: 'kept', sightings: [], included: true })
+  it('never hides an included row', () => {
+    const included = row({ providerOrderNo: 'YAL-cca8', localId: 'kept', sightings: [], included: true })
     expect(isSupersededRemnant(included, [evidenced, included])).toBe(false)
   })
 
-  it('does not let two evidence-less rows erase each other', () => {
-    // Neither has a photo, so neither can supersede the other. Without this the pair would cancel
-    // out and a delivery would vanish from the screen entirely.
-    const twinA = row({ localId: 'a', providerOrderNo: 'A', sightings: [], included: false, timeReviewRequired: true })
-    const twinB = row({ localId: 'b', providerOrderNo: 'B', sightings: [], included: false, timeReviewRequired: true })
-    expect(isSupersededRemnant(twinA, [twinA, twinB])).toBe(false)
-    expect(isSupersededRemnant(twinB, [twinA, twinB])).toBe(false)
-    expect(withoutSupersededRemnants([twinA, twinB])).toHaveLength(2)
+  it('does not group two genuinely different orders that cost the same', () => {
+    // Same money, same minute, different provider numbers — two real deliveries. The old
+    // printed-identity heuristic would have merged these; the provider number does not.
+    const one = row({ providerOrderNo: 'YAL-aaaa', localId: 'one', sightings: [sighting()], included: true })
+    const two = row({ providerOrderNo: 'YAL-bbbb', localId: 'two', sightings: [], included: false })
+    expect(isSupersededRemnant(two, [one, two])).toBe(false)
+    expect(withoutSupersededRemnants([one, two])).toHaveLength(2)
   })
 
-  it('keeps an excluded row that still has its photo', () => {
-    // Excluded is not the same as evidence-less. This row was unchecked by a human but the
-    // screenshot behind it still exists, so the manager can look at it and change his mind.
-    const excludedButEvidenced = row({
-      localId: 'unchecked',
-      providerOrderNo: 'UNCHECKED',
-      sightings: [sighting('dashboard_2')],
-      included: false,
-      timeReviewRequired: true,
-    })
-    expect(isSupersededRemnant(excludedButEvidenced, [evidenced, excludedButEvidenced])).toBe(false)
-    expect(withoutSupersededRemnants([evidenced, excludedButEvidenced])).toHaveLength(2)
-  })
-
-  it('is not fooled by a row matching itself', () => {
-    expect(isSupersededRemnant(remnant, [remnant])).toBe(false)
+  it('ignores a row with no provider number rather than grouping it with others', () => {
+    const blank = row({ providerOrderNo: '', localId: 'blank', sightings: [], included: false })
+    const other = row({ providerOrderNo: '', localId: 'other', sightings: [], included: false })
+    expect(isSupersededRemnant(blank, [blank, other])).toBe(false)
   })
 })
 
-describe('withoutSupersededRemnants', () => {
-  it('collapses Taha shift to the ten deliveries he actually made', () => {
+describe('withoutSupersededRemnants on the real shift', () => {
+  it('reduces Taha 21 rows to the 11 orders he actually has', () => {
+    // Nine pairs where one copy kept its photo, one pair where neither did, and one lone evidenced
+    // order — exactly the production shape.
     const rows: DraftOrder[] = []
-    const fees = ['225.00', '210.00', '305.00', '135.00', '120.00', '210.00', '120.00', '135.00', '135.00', '125.00']
-    const times = ['14:39', '14:05', '13:17', '12:02', '11:34', '18:08', '17:33', '16:37', '16:07', '15:19']
-    for (const [i, fee] of fees.entries()) {
-      rows.push(row({ localId: `live-${i}`, providerOrderNo: `L${i}`, feeText: fee, timeText: times[i]!, sightings: [sighting('dashboard')], included: true }))
-      rows.push(row({ localId: `stale-${i}`, providerOrderNo: `S${i}`, feeText: fee, timeText: times[i]!, sightings: [], included: false, timeReviewRequired: true }))
+    for (let i = 0; i < 9; i += 1) {
+      const id = `YAL-pair-${i}`
+      rows.push(row({ providerOrderNo: id, localId: `live-${i}`, sightings: [sighting()], included: true }))
+      rows.push(row({ providerOrderNo: id, localId: `stale-${i}`, sightings: [], included: false, draftSource: 'manual' }))
     }
-    // Plus the one genuine orphan his shift also carries: no twin, so it must survive.
-    rows.push(row({ localId: 'real-orphan', providerOrderNo: 'ORPH', feeText: '125.00', timeText: '15:19', dateText: '2026-08-26', sightings: [], included: false, timeReviewRequired: true }))
+    rows.push(row({ providerOrderNo: 'YAL-lost', localId: 'lost-a', sightings: [], included: false }))
+    rows.push(row({ providerOrderNo: 'YAL-lost', localId: 'lost-b', sightings: [], included: false, draftSource: 'manual' }))
+    rows.push(row({ providerOrderNo: 'YAL-lone', localId: 'lone', sightings: [sighting()], included: true }))
+    expect(rows).toHaveLength(21)
 
     const shown = withoutSupersededRemnants(rows)
     expect(shown).toHaveLength(11)
     expect(shown.filter((r) => r.localId.startsWith('stale-'))).toHaveLength(0)
-    expect(shown.some((r) => r.localId === 'real-orphan')).toBe(true)
-  })
-
-  it('returns the list untouched when nothing is superseded', () => {
-    const rows = [evidenced]
-    expect(withoutSupersededRemnants(rows)).toEqual(rows)
+    // The delivery that lost every photo survives exactly once — the driver must still see it.
+    expect(shown.filter((r) => r.providerOrderNo === 'YAL-lost')).toHaveLength(1)
+    expect(shown.filter((r) => r.included)).toHaveLength(10)
   })
 })
