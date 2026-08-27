@@ -35,22 +35,42 @@ const hasEvidence = (row: { sightings?: readonly unknown[] | undefined }): boole
   (row.sightings?.length ?? 0) > 0
 
 /**
- * A second copy of an order that has already lost its evidence.
+ * AN ORDER IS ITS PRINTED TIME AND ITS COST — decision 16, the owner's rule.
  *
- * IDENTITY IS `providerOrderNo`. It is the provider's own number and is unique by construction —
- * `order-entry.ts` records that there is no delete endpoint precisely because it is globally
- * unique. Two draft rows carrying the same one are not similar deliveries; they are one delivery
- * written down twice, and no heuristic is needed to say so.
+ * `providerOrderNo` looks like an identity and is not one. It is synthesised as
+ * `YAL-${stableKey([shiftId, clientKey])}` (`close-draft.service.ts:814`), and `clientKey` is
+ * page-scoped, so the SAME delivery photographed on two evidence generations carries two different
+ * numbers. Keying on it left Taha looking at 125.00 at 15:19 twice.
+ */
+const printedIdentity = (row: {
+  dateText?: string | undefined
+  timeText?: string | undefined
+  feeText?: string
+  amount?: string
+}): string | null => {
+  const date = row.dateText?.trim() ?? ''
+  const time = row.timeText?.trim() ?? ''
+  const money = (row.feeText ?? row.amount ?? '').trim()
+  if (date === '' || time === '' || money === '') return null
+  return `${date}|${time}|${money}`
+}
+
+/**
+ * A copy of a delivery that has already lost its evidence, while another copy still holds it.
  *
- * Shift d0a5a7ec showed its driver «محسوبة 10 من 21» — 21 rows over 11 provider numbers, ten of
- * them written twice. He had retaken the dashboard photos: the attachment token rotated, the old
- * rows lost every sighting, and because he had also hand-corrected their times they had become
- * `source: 'manual'` with a null `matchKey`. That is why neither the canonical merge nor a
- * printed-identity heuristic could reach them — and why this keys on the provider number instead.
+ * Shift d0a5a7ec showed its driver «محسوبة 10 من 21». He retook the dashboard photos: the
+ * attachment token rotated, the old rows lost every sighting, and because he had also hand-edited
+ * their times they became `source: 'manual'` with a null `matchKey`.
  *
- * Within a group the survivor is the row that still has evidence; failing that, the first. So a
- * delivery whose every photo is gone still appears ONCE, which is the signal telling the driver to
- * photograph that page again — it is not silently swallowed.
+ * There is deliberately NO exemption for `manual` here. In this codebase `manual` marks a scanned
+ * row whose time a human corrected, not a row the driver invented — exempting it made an earlier
+ * version of this predicate a no-op on the very shift it was written for. A row the driver really
+ * did add by hand carries its own printed time and cost and forms a group of one, so it is safe
+ * without a special case.
+ *
+ * The survivor is the copy that still has evidence, else the first. A delivery whose every photo is
+ * gone therefore still appears ONCE — that is the signal telling the driver to rephotograph the
+ * page, and it must never be swallowed.
  */
 export function isSupersededRemnant(
   row: DraftOrder | DraftCashDeduction,
@@ -58,11 +78,9 @@ export function isSupersededRemnant(
 ): boolean {
   if (hasEvidence(row)) return false
   if (row.included !== false) return false
-  const id = 'providerOrderNo' in row ? row.providerOrderNo : undefined
-  if (id === undefined || id === '') return false
-  const group = siblings.filter(
-    (other) => 'providerOrderNo' in other && other.providerOrderNo === id,
-  )
+  const identity = printedIdentity(row)
+  if (identity === null) return false
+  const group = siblings.filter((other) => printedIdentity(other) === identity)
   if (group.length < 2) return false
   const survivor = group.find(hasEvidence) ?? group[0]
   return survivor !== row
