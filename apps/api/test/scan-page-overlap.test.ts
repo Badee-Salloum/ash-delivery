@@ -1,6 +1,8 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { CloseDraftView, OcrField, OcrReader, OcrReading, OcrResult } from '@ash/contracts'
+import { scanOverlapCauseSchema, scanOverlapPairCauseSchema } from '@ash/contracts'
+import { SCAN_OVERLAP_CAUSES, SCAN_OVERLAP_PAIR_CAUSES } from '@ash/domain'
 import { DRIVER_ID, type Harness, TINY_JPEG, VEHICLE_ID, makeHarness, today } from './harness.ts'
 
 // Shift 4f40640e, 2026-08-25: one Recent Orders list photographed twice while scrolling. The second
@@ -351,5 +353,15 @@ describe('overlapping dashboard scans are surfaced to the manager', () => {
     expect(body.duplicateHints[0].later.slot).toBe('dashboard_2')
     expect(body.duplicateHints[0].pairs.map((pair: any) => pair.earlier.rowIndex)).toEqual([3, 4])
     expect(body.duplicateHints[0].pairs.map((pair: any) => pair.later.rowIndex)).toEqual([0, 1])
+  })
+})
+
+describe('the wire contract cannot drift from the domain', () => {
+  it('accepts every cause code the detector can emit', () => {
+    // A cause the enum does not know throws inside `scanDuplicateHintSchema.parse` on the review
+    // endpoint — a 500 on the exact screen this feature exists to serve. Adding a code to the
+    // domain without adding it here must fail in CI, not in front of a manager.
+    expect([...scanOverlapCauseSchema.options].sort()).toEqual([...SCAN_OVERLAP_CAUSES].sort())
+    expect([...scanOverlapPairCauseSchema.options].sort()).toEqual([...SCAN_OVERLAP_PAIR_CAUSES].sort())
   })
 })

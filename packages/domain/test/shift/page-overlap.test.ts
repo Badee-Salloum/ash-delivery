@@ -42,6 +42,9 @@ const DASHBOARD = page('b', [
   row('b4', 4, 27_000),
 ])
 
+const DASHBOARD_2_NO_CLOCKS = DASHBOARD_2
+const DASHBOARD_NO_CLOCKS = DASHBOARD
+
 describe('detectScannedPageOverlap', () => {
   it('finds the two rows photographed twice, and says the match is amount-only', () => {
     const overlap = detectScannedPageOverlap(DASHBOARD_2, DASHBOARD)
@@ -151,6 +154,84 @@ describe('detectScannedPageOverlap', () => {
 
   it('never reports a page as overlapping itself', () => {
     expect(detectScannedPageOverlaps([DASHBOARD, DASHBOARD])).toEqual([])
+  })
+
+  // Shift 7be4dbb5, 2026-08-26. Two scans of one list that genuinely share a row, and the first
+  // detector missed them: the shared row sits behind a row the screenshot cut in half, so the
+  // contiguous run broke at the very first comparison. Both pages carry clocks here, so the printed
+  // date and minute identify the row directly — which is what the merge already keys on.
+  describe('matching on the printed date and minute', () => {
+    const DASHBOARD_2 = page('e9fbc614', [
+      row('b0', 0, null, { occurredDate: '2026-08-27', occurredMinute: '00:55' }),
+      row('b1', 1, 15_000, { occurredDate: '2026-08-27', occurredMinute: '00:40' }),
+      row('b2', 2, 18_000, { occurredDate: '2026-08-26', occurredMinute: '23:40' }),
+      row('b3', 3, 13_500, { occurredDate: '2026-08-26', occurredMinute: '23:04' }),
+      row('b4', 4, 13_000, { occurredDate: '2026-08-26', occurredMinute: '22:26' }),
+    ])
+    const DASHBOARD = page('d155c437', [
+      row('a0', 0, null),
+      row('a1', 1, 13_000, { occurredDate: '2026-08-26', occurredMinute: '22:26' }),
+      row('a2', 2, 13_000, { occurredDate: '2026-08-26', occurredMinute: '21:03' }),
+      row('a3', 3, 15_000, { occurredDate: '2026-08-26', occurredMinute: '20:30' }),
+      row('a4', 4, -5_000, { occurredDate: '2026-08-26', occurredMinute: '19:24' }),
+      row('a5', 5, null),
+    ])
+
+    it('finds the shared row that the contiguous run could not reach', () => {
+      const overlap = detectScannedPageOverlap(DASHBOARD_2, DASHBOARD)
+      expect(overlap).not.toBeNull()
+      expect(overlap!.length).toBe(1)
+      expect(overlap!.pairs.map((pair) => [pair.earlierRowRef, pair.laterRowRef])).toEqual([['b4', 'a1']])
+      expect(overlap!.causes).toContain('scan_overlap_timed_match')
+      expect(overlap!.pairs[0]!.causes).toContain('scan_overlap_pair_minute_agrees')
+      // The clock agreed, so this is not the weak amount-only coincidence.
+      expect(overlap!.causes).not.toContain('scan_overlap_amount_only')
+    })
+
+    it('puts the page whose shared rows sit at the bottom first', () => {
+      // The list is newest-first, so the page still showing newer orders above the shared row is
+      // the one captured earlier. Getting this backwards would name the wrong row as the repeat.
+      const overlap = detectScannedPageOverlap(DASHBOARD_2, DASHBOARD)
+      expect(overlap!.earlierPageRef).toBe('e9fbc614')
+      expect(overlap!.laterPageRef).toBe('d155c437')
+      expect(detectScannedPageOverlap(DASHBOARD, DASHBOARD_2)).toEqual(overlap)
+    })
+
+    it('needs the amount to agree too — a shared minute is not enough', () => {
+      const a = page('a', [row('a0', 0, 13_000, { occurredDate: '2026-08-26', occurredMinute: '22:26' })])
+      const b = page('b', [row('b0', 0, 99_000, { occurredDate: '2026-08-26', occurredMinute: '22:26' })])
+      expect(detectScannedPageOverlap(a, b)).toBeNull()
+    })
+
+    it('needs the date too — the same minute on a different day is a different delivery', () => {
+      const a = page('a', [row('a0', 0, 13_000, { occurredDate: '2026-08-26', occurredMinute: '22:26' })])
+      const b = page('b', [row('b0', 0, 13_000, { occurredDate: '2026-08-25', occurredMinute: '22:26' })])
+      expect(detectScannedPageOverlap(a, b)).toBeNull()
+    })
+
+    it('is still refuted by a route that disagrees on an otherwise perfect timed match', () => {
+      const when = { occurredDate: '2026-08-26', occurredMinute: '22:26' }
+      const a = page('a', [row('a0', 0, 13_000, { ...when, pointA: 'Golden', pointB: 'Mastaba' })])
+      const b = page('b', [row('b0', 0, 13_000, { ...when, pointA: 'Golden', pointB: 'Shaalan' })])
+      expect(detectScannedPageOverlap(a, b)).toBeNull()
+    })
+
+    it('pairs each row at most once when a page repeats the same amount and minute', () => {
+      const when = { occurredDate: '2026-08-26', occurredMinute: '22:26' }
+      const a = page('a', [row('a0', 0, 13_000, when), row('a1', 1, 13_000, when)])
+      const b = page('b', [row('b0', 0, 13_000, when)])
+      const overlap = detectScannedPageOverlap(a, b)
+      expect(overlap!.length).toBe(1)
+      expect(overlap!.pairs.map((pair) => pair.laterRowRef)).toEqual(['b0'])
+    })
+
+    it('still falls back to the contiguous run when no row carries a clock', () => {
+      // Shift 4f40640e is the reason this feature exists: its second page lost the date header, so
+      // every row had a null clock and no timed match is possible. That path must not regress.
+      const overlap = detectScannedPageOverlap(DASHBOARD_2_NO_CLOCKS, DASHBOARD_NO_CLOCKS)
+      expect(overlap!.length).toBe(2)
+      expect(overlap!.causes).toContain('scan_overlap_suffix_prefix')
+    })
   })
 
   describe('properties', () => {

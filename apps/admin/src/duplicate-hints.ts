@@ -5,6 +5,7 @@
  * the same reason `operation-window.ts` restates `OperationWindowStatus` instead of importing it.
  */
 export type ScanOverlapCause =
+  | 'scan_overlap_timed_match'
   | 'scan_overlap_suffix_prefix'
   | 'scan_overlap_amount_only'
   | 'scan_overlap_direction_ambiguous'

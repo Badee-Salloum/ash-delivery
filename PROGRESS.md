@@ -1,5 +1,45 @@
 # PROGRESS
 
+## 2026-08-26 — the duplicate detector was blind on the first real shift it met
+
+Shift `7be4dbb5` (أنس رميح, still open) has two dashboard scans that genuinely share a row:
+`130 @22:26` is printed on both — the last row of `dashboard_2` and the second row of `dashboard`.
+**The detector shipped this morning found nothing.** Run against the real stored rows, it returned
+zero overlaps.
+
+The cause was my own design. I required a CONTIGUOUS suffix-to-prefix run, and `dashboard` opens on
+a row the screenshot cut in half — no amount, so no anchor. One unreadable row at the edge of a
+photo, which is the ordinary shape of a scrolling list, ended the search at its first comparison.
+
+No money was hidden by it: the canonical merge keys on date, printed clock and value, so
+`130 @22:26` was correctly counted once and the six committed orders are right.
+
+**Owner instruction, taken:** match on the printed date and minute. That is now the primary rule,
+and it is the same identity the merge already trusts. The contiguous run stays as the fallback and
+is exercised by its own test, because the shift that motivated the feature — `4f40640e` — had NO
+clock on any row of its second page; date matching is impossible there by construction.
+
+Direction is decided by where the shared rows sit: the list is newest-first, so the page still
+showing newer orders above them was captured first. Slot names and read timestamps both point the
+wrong way and are still ignored.
+
+`SCAN_OVERLAP_CAUSES` / `SCAN_OVERLAP_PAIR_CAUSES` are now runtime lists, and an API test asserts
+the wire enum equals them. A cause the schema does not know throws inside
+`scanDuplicateHintSchema.parse` — a 500 on the exact review screen this feature serves. That is now
+a failing test rather than an incident.
+
+### Also found on that shift, and NOT fixed here
+
+- The draft carries **16 order rows for 6 orders**. Both dashboards were retaken, so there are four
+  attachment generations; the stale generation's rows survive excluded, tagged `human_time_edit`.
+  The cash deduction is duplicated the same way (two 50.00 at 19:24, one included). Money is
+  currently correct, but a manager who "helpfully" includes the six excluded rows would double the
+  order total and move the driver share by 304.00 SYP.
+- BR1 on the shift as it stands: expected **6,150.00**, held **6,956.65**, **surplus 806.65** — about
+  1,008 SYP of orders unaccounted for, alongside three rows the reader could not price (two cut off
+  at the edges of `dashboard`, one cancelled). The shift should not be approved until أنس supplies
+  the missing page.
+
 ## 2026-08-26 — the closing battery reading had been dead for twelve days
 
 An operator reported that "many battery readings failed today". They had not. **The reader

@@ -263,6 +263,7 @@ export const operationWindowStatusSchema = z.enum([
  * inclusion, and no order. Cause codes come straight from the domain; the UI resolves the strings.
  */
 export const scanOverlapCauseSchema = z.enum([
+  'scan_overlap_timed_match',
   'scan_overlap_suffix_prefix',
   'scan_overlap_amount_only',
   'scan_overlap_direction_ambiguous',

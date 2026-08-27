@@ -37,15 +37,30 @@ export interface ScannedPage {
   readonly rows: readonly ScannedPageRow[]
 }
 
-export type ScanOverlapCause =
-  | 'scan_overlap_suffix_prefix'
-  | 'scan_overlap_amount_only'
-  | 'scan_overlap_direction_ambiguous'
+/**
+ * Runtime lists, not bare unions, so the wire schema can be checked against them by a test.
+ *
+ * A cause the wire enum does not know makes the manager's review throw on parse — a 500 on the one
+ * screen this feature exists to serve. That must be a failing test, not a production incident.
+ */
+export const SCAN_OVERLAP_CAUSES = [
+  /** The printed date and minute identified the same operation on both pages. The strong one. */
+  'scan_overlap_timed_match',
+  /** No row carried a clock, so the pages were aligned end-to-start instead. */
+  'scan_overlap_suffix_prefix',
+  'scan_overlap_amount_only',
+  'scan_overlap_direction_ambiguous',
+] as const
 
-export type ScanOverlapPairCause =
-  | 'scan_overlap_pair_amount_agrees'
-  | 'scan_overlap_pair_minute_agrees'
-  | 'scan_overlap_pair_route_agrees'
+export const SCAN_OVERLAP_PAIR_CAUSES = [
+  'scan_overlap_pair_amount_agrees',
+  'scan_overlap_pair_minute_agrees',
+  'scan_overlap_pair_route_agrees',
+] as const
+
+export type ScanOverlapCause = (typeof SCAN_OVERLAP_CAUSES)[number]
+
+export type ScanOverlapPairCause = (typeof SCAN_OVERLAP_PAIR_CAUSES)[number]
 
 export interface ScanOverlapPair {
   readonly earlierRowRef: string
@@ -109,6 +124,56 @@ const rowsMayBeTheSameOperation = (earlier: ScannedPageRow, later: ScannedPageRo
 
 type Directed = { readonly length: number; readonly pairs: ScanOverlapPair[] }
 
+/** A row the printed screen identifies on its own: an amount, a day and a minute. */
+const isTimed = (row: ScannedPageRow): boolean =>
+  row.amount !== null && row.occurredDate !== null && row.occurredMinute !== null
+
+/**
+ * Rows the two pages identify as the same operation by what is PRINTED on them.
+ *
+ * This is the primary rule, and it is the one the canonical merge already keys on — date, printed
+ * clock and amount. It needs no assumption about how the two photos line up, which is what the
+ * contiguous run below could not survive: on shift 7be4dbb5 the shared row sat directly behind a
+ * row the screenshot had cut in half, and one unreadable row at the edge ended the search.
+ *
+ * Greedy and one-to-one: a page that legitimately shows the same amount at the same minute twice
+ * must not have one of those rows answer for both.
+ */
+const timedMatches = (earlier: ScannedPage, later: ScannedPage): Directed => {
+  const taken = new Set<string>()
+  const pairs: ScanOverlapPair[] = []
+  for (const left of earlier.rows) {
+    if (!isTimed(left)) continue
+    for (const right of later.rows) {
+      if (taken.has(right.rowRef) || !isTimed(right)) continue
+      if (left.occurredDate !== right.occurredDate || left.occurredMinute !== right.occurredMinute) continue
+      const verdict = rowsMayBeTheSameOperation(left, right)
+      if (!verdict.matches) continue
+      taken.add(right.rowRef)
+      pairs.push({ earlierRowRef: left.rowRef, laterRowRef: right.rowRef, causes: verdict.causes })
+      break
+    }
+  }
+  return { length: pairs.length, pairs }
+}
+
+/**
+ * How far down its own page the matched rows sit, 0 at the top and 1 at the bottom.
+ *
+ * The list is newest-first, so the capture still showing newer orders ABOVE the shared rows is the
+ * one taken first. Position is the only evidence of capture order — slot names and read timestamps
+ * both pointed the wrong way on the shift that motivated this.
+ */
+const meanPosition = (page: ScannedPage, refs: readonly string[]): number => {
+  if (page.rows.length <= 1 || refs.length === 0) return 0
+  const wanted = new Set(refs)
+  const positions = page.rows
+    .map((row, index) => (wanted.has(row.rowRef) ? index / (page.rows.length - 1) : null))
+    .filter((value): value is number => value !== null)
+  if (positions.length === 0) return 0
+  return positions.reduce((total, value) => total + value, 0) / positions.length
+}
+
 /** The longest run where `earlier` ends exactly where `later` begins. */
 const suffixPrefixRun = (earlier: ScannedPage, later: ScannedPage): Directed => {
   const limit = Math.min(earlier.rows.length, later.rows.length)
@@ -136,6 +201,30 @@ const suffixPrefixRun = (earlier: ScannedPage, later: ScannedPage): Directed => 
  */
 export function detectScannedPageOverlap(a: ScannedPage, b: ScannedPage): ScanPageOverlap | null {
   if (a.pageRef === b.pageRef) return null
+
+  // What the pages PRINT about themselves comes first. Only when no row on either page carries a
+  // clock — the shift-4f40640e case, where the date header had scrolled out of the capture — is
+  // there nothing to match on but the order of the rows.
+  const timed = timedMatches(a, b)
+  if (timed.length > 0) {
+    const aPos = meanPosition(a, timed.pairs.map((pair) => pair.earlierRowRef))
+    const bPos = meanPosition(b, timed.pairs.map((pair) => pair.laterRowRef))
+    const tied = aPos === bPos
+    const aIsEarlier = tied ? a.pageRef <= b.pageRef : aPos > bPos
+    const causes: ScanOverlapCause[] = ['scan_overlap_timed_match']
+    if (!timed.pairs.some((pair) => pair.causes.length > 1)) causes.push('scan_overlap_amount_only')
+    if (tied) causes.push('scan_overlap_direction_ambiguous')
+    return {
+      earlierPageRef: aIsEarlier ? a.pageRef : b.pageRef,
+      laterPageRef: aIsEarlier ? b.pageRef : a.pageRef,
+      length: timed.length,
+      pairs: aIsEarlier
+        ? timed.pairs
+        : timed.pairs.map((pair) => ({ ...pair, earlierRowRef: pair.laterRowRef, laterRowRef: pair.earlierRowRef })),
+      causes,
+    }
+  }
+
   const forward = suffixPrefixRun(a, b)
   const backward = suffixPrefixRun(b, a)
   if (forward.length === 0 && backward.length === 0) return null
