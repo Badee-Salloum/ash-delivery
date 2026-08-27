@@ -28,6 +28,11 @@ the wire enum equals them. A cause the schema does not know throws inside
 `scanDuplicateHintSchema.parse` — a 500 on the exact review screen this feature serves. That is now
 a failing test rather than an incident.
 
+**Deployed 2026-08-27** — API `dpl_GCPZ8oiBztyyoE1c1CVytzxdfjS5`, admin
+`dpl_2tB87PiQhk4WPkxzzCQaTez68Txk`. Verified against the CDN: the served admin bundle
+`index-V491UlzR.js` carries `scan_overlap_timed_match` and is SHA-256 identical to the local build.
+The driver PWA was not rebuilt — it has no part in this change.
+
 ### Also found on that shift, and NOT fixed here
 
 - The draft carries **16 order rows for 6 orders**. Both dashboards were retaken, so there are four
