@@ -5,6 +5,7 @@ import {
   type DraftOrder,
   allProblems,
   closeOperationsSummary,
+  withoutSupersededRemnants,
   clientUuid,
   feeSourceOf,
   frequentFees,
@@ -109,9 +110,23 @@ export function OperationsList({
     typed: '✎',
   }
 
+  /**
+   * What the driver is actually shown.
+   *
+   * A retake rotates the evidence token, and until the merge learned to re-match on the printed
+   * time and cost the old rows survived beside the fresh ones — carrying `human_time_edit`, which
+   * renders as «بانتظار المدير». Shift d0a5a7ec read «محسوبة 10 من 21»: ten deliveries, each shown
+   * twice, and half of them announcing a manager decision with no photo behind it to decide on.
+   *
+   * A row with no evidence whose printed identity an evidenced row already carries is a remnant,
+   * not work. A row with no evidenced twin is NOT hidden — that one is a genuine lost photo and the
+   * driver must retake it.
+   */
+  const visibleOrders = useMemo(() => withoutSupersededRemnants(orders), [orders])
+  const visibleDeductions = useMemo(() => withoutSupersededRemnants(cashDeductions), [cashDeductions])
   const summary = useMemo(
-    () => closeOperationsSummary(orders, cashDeductions),
-    [orders, cashDeductions],
+    () => closeOperationsSummary(visibleOrders, visibleDeductions),
+    [visibleOrders, visibleDeductions],
   )
   const summaryText = t.orders.compactSummary
     .replace('{total}', String(summary.orders.total))
@@ -133,7 +148,7 @@ export function OperationsList({
    */
   const sorted = useMemo(() => {
     const key = (o: DraftOrder): string => `${o.dateText ?? ''} ${o.timeText ?? ''}`
-    return orders
+    return visibleOrders
       .map((o, i) => ({ o, i }))
       .sort((a, b) => {
         const ka = key(a.o)
@@ -144,7 +159,7 @@ export function OperationsList({
         return ka < kb ? 1 : ka > kb ? -1 : a.i - b.i
       })
       .map((x) => x.o)
-  }, [orders])
+  }, [visibleOrders])
 
   /** Rows whose own date is not the shift's — the ones a driver most often has to take out. */
   return (
@@ -173,7 +188,7 @@ export function OperationsList({
         <span className="text-sm font-semibold">
           {t.orders.countedOf
             .replace('{n}', String(summary.orders.included))
-            .replace('{total}', String(orders.length))}
+            .replace('{total}', String(visibleOrders.length))}
         </span>
         {/* WHAT HE WORKED. The screen showed him ten rows and a count but never the day's own
             total — the one number he actually wants, and the term BR1 multiplies by 0.80. It sits

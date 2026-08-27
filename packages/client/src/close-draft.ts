@@ -31,6 +31,60 @@ export function operationDecisionState(row: {
   return row.included === false ? 'excluded' : 'included'
 }
 
+/** The printed identity the canonical merge keys on: day, clock and amount (decision 16). */
+const printedIdentity = (row: {
+  dateText?: string | undefined
+  timeText?: string | undefined
+  feeText?: string
+  amount?: string
+}): string | null => {
+  const date = row.dateText?.trim() ?? ''
+  const time = row.timeText?.trim() ?? ''
+  const money = (row.feeText ?? row.amount ?? '').trim()
+  if (date === '' || time === '' || money === '') return null
+  return `${date}|${time}|${money}`
+}
+
+const hasEvidence = (row: { sightings?: readonly unknown[] | undefined }): boolean =>
+  (row.sightings?.length ?? 0) > 0
+
+/**
+ * A row whose evidence generation is gone and whose identity another EVIDENCED row already carries.
+ *
+ * It is not a decision. There is no photo behind it, nothing a manager could look at, and the
+ * delivery it describes is already counted on the row that still holds the screenshot.
+ *
+ * Shift d0a5a7ec showed its driver «محسوبة 10 من 21» — ten deliveries rendered twice, each green
+ * «محسوبة» beside a red «بانتظار المدير» at the same minute for the same amount. He had retaken the
+ * dashboard photos; the attachment token rotated and the old rows lost every sighting, keeping only
+ * `human_time_edit`, which `operationDecisionState` reports as pending.
+ *
+ * Deliberately narrow. A sightingless row with NO evidenced twin is a genuine `evidence_removed`
+ * case and must stay visible — it is the one signal telling the driver to photograph that delivery
+ * again. And a `manual` row is his own testimony: a reader that happens to match it does not get to
+ * erase it from his screen.
+ */
+export function isSupersededRemnant(
+  row: DraftOrder | DraftCashDeduction,
+  siblings: readonly (DraftOrder | DraftCashDeduction)[],
+): boolean {
+  if (hasEvidence(row)) return false
+  if (row.included !== false) return false
+  if (row.draftSource === 'manual') return false
+  const identity = printedIdentity(row)
+  if (identity === null) return false
+  return siblings.some(
+    (other) => other !== row && hasEvidence(other) && printedIdentity(other) === identity,
+  )
+}
+
+/** The rows worth putting in front of the driver: everything except superseded remnants. */
+export function withoutSupersededRemnants<T extends DraftOrder | DraftCashDeduction>(
+  rows: readonly T[],
+): T[] {
+  return rows.filter((row) => !isSupersededRemnant(row, rows))
+}
+
 function summarize(
   rows: readonly {
     included: boolean | undefined
