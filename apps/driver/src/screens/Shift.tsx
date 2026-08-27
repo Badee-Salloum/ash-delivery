@@ -19,6 +19,7 @@ import type {
 } from '@ash/client'
 import {
   allProblems,
+  withoutSupersededRemnants,
   br1DifferencePresentation,
   cashDeductionsAreValid,
   checkOdometer,
@@ -1935,8 +1936,12 @@ function EndPackage({
     moneyIsUsable: isUsableMoneyText,
     odometerKm,
     namedOrderCount: named,
-    hasBadOrderRows: allProblems(draft.orders).size > 0,
-    hasBadDeductionRows: !cashDeductionsAreValid(draft.cashDeductions),
+    // The gate must judge exactly the rows on his screen. A copy superseded by a retake raises
+    // `duplicate_order_no` against the row that replaced it — on shift d0a5a7ec that was ten such
+    // collisions, none of them visible to the driver, refusing a close he could not repair. That is
+    // the shape that stranded امجد: a refusal naming something he cannot find.
+    hasBadOrderRows: allProblems(withoutSupersededRemnants(draft.orders)).size > 0,
+    hasBadDeductionRows: !cashDeductionsAreValid(withoutSupersededRemnants(draft.cashDeductions)),
     readingInFlight: readingAttachment,
     odometerNeedsConfirmation,
     draftSaved,
