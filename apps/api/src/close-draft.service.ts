@@ -969,9 +969,26 @@ function mergeLinkedRows<T extends DraftOperation>(
       !used.has(candidateIndex) && candidate.clientKey === freshRow.clientKey,
     )
     if (index === -1) {
+      // AN ORDER IS ITS PRINTED TIME AND ITS COST. Owner decision, 2026-08-27:
+      // «use time and cost to merge — no need for route».
+      //
+      // This deliberately does NOT require the candidate to still hold sightings. Requiring them
+      // made the fallback blind to the one case it exists for: replacing a photo rotates the
+      // attachment token, which empties `sightings`, so a re-read of the SAME screen matched
+      // nothing and was appended as a second row. Shift d0a5a7ec carried 21 rows for 10 deliveries
+      // that way, each duplicate holding the driver's hand-corrected time on a row that no longer
+      // had any evidence. The orphan rebind below could not cover it either: it demands a strong
+      // route match, and route text is enrichment that two reads of one screen routinely disagree
+      // about — present on one page, absent or reworded on the next.
+      //
+      // The remaining guards are what keep this safe. `matchKey` is null unless date, printed clock
+      // AND value are all present, so a page whose date header scrolled out of frame still cannot
+      // match on it and the DATE continues to separate genuinely different days;
+      // `source !== 'manual'` protects a hand-typed order from ever being taken over by a reader;
+      // and `used` keeps the pairing one-to-one, so a page that legitimately shows the same amount
+      // at the same minute twice never collapses into a single operation.
       index = out.findIndex((candidate, candidateIndex) =>
         !used.has(candidateIndex) &&
-        (candidate.sightings?.length ?? 0) > 0 &&
         candidate.source !== 'manual' &&
         candidate.matchKey !== null &&
         candidate.matchKey === freshRow.matchKey,

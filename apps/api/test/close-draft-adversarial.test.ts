@@ -1124,13 +1124,12 @@ describe('canonical row provenance', () => {
     expect(reread.operations.orders[0]!.reviewReasons).toContain('human_time_edit')
   })
 
+  // OWNER DECISION, 2026-08-27: an order is identified by its printed TIME and its COST. Route text
+  // is enrichment and is not stable between two reads of one screen, so it no longer blocks a
+  // merge. The `different route` case that used to live in this table now merges, and is pinned
+  // below as `heals equal money and clock even when the route text differs`. The DATE still
+  // separates rows, because the date is part of the identity itself.
   it.each([
-    {
-      label: 'different route',
-      newDate: today,
-      oldRoute: 'generation old route',
-      newRoute: 'generation genuinely different route',
-    },
     {
       label: 'different date',
       newDate: new Date(Date.parse(`${today}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10),
@@ -1193,6 +1192,32 @@ describe('canonical row provenance', () => {
     expect(newRow.providerOrderNo).not.toBe(oldRow.providerOrderNo)
   })
 
+  it('heals equal money and clock even when the route text differs', async () => {
+    // OWNER DECISION, 2026-08-27: «use time and cost to merge — no need for route». Two reads of one
+    // screen routinely disagree about route text (present on one page, absent or reworded on the
+    // next), so treating that disagreement as proof of two different deliveries produced duplicate
+    // rows. Shift d0a5a7ec carried 21 rows for 10 deliveries this way.
+    reader.push(
+      ok(orderRow('155.00', { route: 'route as first read', printedTime: '1:00 PM', time: '13:00' })),
+      ok(orderRow('155.00', { route: 'route worded differently', printedTime: '1:00 PM', time: '13:00' })),
+    )
+    const { driver, shiftId } = await openShift()
+    h.deps.clock.set(h.deps.clock.nowMs() + 6 * 60 * 60 * 1_000)
+    let draft = await getDraft(driver, shiftId)
+    draft = draftFromUpload(await uploadEnd(driver, shiftId, 'dashboard', image('route-drift-old'), draft))
+    draft = draftFromRead(await readSlot(driver, shiftId, 'dashboard', 'orders', draft))
+    expect(draft.operations.orders).toHaveLength(1)
+
+    reader.bumpSignature()
+    draft = draftFromUpload(
+      await uploadEnd(driver, shiftId, 'dashboard', image('route-drift-new'), draft, { replace: true }),
+    )
+    draft = draftFromRead(await readSlot(driver, shiftId, 'dashboard', 'orders', draft))
+
+    expect(draft.operations.orders).toHaveLength(1)
+    expect(draft.operations.orders[0]).toMatchObject({ fee: '155.00', occurredMinute: '13:00' })
+  })
+
   it('does not guess which equal orphan a replacement row belongs to', async () => {
     const equal = orderRow('155.00', { route: 'identical repeated route', printedTime: '8:00 AM', time: '08:00' })
     reader.push(
@@ -1220,14 +1245,17 @@ describe('canonical row provenance', () => {
     ))
     draft = draftFromRead(await readSlot(driver, shiftId, 'dashboard', 'orders', draft))
 
-    expect(draft.operations.orders).toHaveLength(3)
-    const oldRows = draft.operations.orders.filter((row) => oldKeys.has(row.clientKey))
-    expect(oldRows).toHaveLength(2)
-    for (const row of oldRows) {
-      expect(row.included).toBe(false)
-      expect(row.reviewReasons).toContain('evidence_removed')
-    }
-    expect(draft.operations.orders.filter((row) => !oldKeys.has(row.clientKey))).toHaveLength(1)
+    // OWNER DECISION, 2026-08-27: time and cost merge. The replacement row therefore rebinds to one
+    // of the two orphans rather than becoming a third row. The fixture makes the two orphans
+    // identical in every printed field, so there is nothing to choose between them; what must not
+    // happen is a THIRD row appearing for a page that shows two.
+    expect(draft.operations.orders).toHaveLength(2)
+    const rebound = draft.operations.orders.filter((row) => (row.sightings?.length ?? 0) > 0)
+    expect(rebound).toHaveLength(1)
+    const stranded = draft.operations.orders.filter((row) => (row.sightings?.length ?? 0) === 0)
+    expect(stranded).toHaveLength(1)
+    expect(stranded[0]!.included).toBe(false)
+    expect(oldKeys.has(stranded[0]!.clientKey)).toBe(true)
   })
 
   it('assigns distinct stable keys to equal cash-deduction rows on the same page', async () => {
@@ -2097,5 +2125,72 @@ describe('atomic final materialization', () => {
       windowStatus: 'unknown',
       closeDraftReviewReasons: expect.arrayContaining(['evidence_removed']),
     })
+  })
+})
+
+/**
+ * Shift d0a5a7ec, 2026-08-27: 21 order rows for 10 deliveries.
+ *
+ * Ten rows carried evidence and were included; ten more held the SAME amounts at the SAME minutes,
+ * excluded, with no sightings and a `human_time_edit` tag. Retaking the dashboard rotated the
+ * attachment token, and the fresh rows matched nothing:
+ *   - `clientKey` is page-scoped, so a rotated token can never match it;
+ *   - the `matchKey` fallback — date + printed clock + value — was guarded by `sightings.length > 0`,
+ *     and a retake is precisely what empties `sightings`;
+ *   - the orphan rebind needs `evidence_removed`, which a time-edited row does not carry.
+ * So every retake duplicated every row the driver had time-edited.
+ */
+describe('retaking a page the driver has time-edited', () => {
+  it('merges the re-read row instead of duplicating it when the route is not re-read', async () => {
+    // Shift d0a5a7ec held 21 rows for 10 deliveries. Route text is enrichment and is NOT stable
+    // between two reads of one screen — production shows it present on one page and absent on the
+    // next — so the orphan rebind, which demands a strong route match, cannot be the safety net.
+    const withRoute = ok(orderRow('225.00', { route: 'Baniyas', printedTime: '8:00 AM', time: '08:00' }))
+    const withoutRoute = ok({
+      ...orderRow('225.00', { printedTime: '8:00 AM', time: '08:00' }),
+      pointA: null,
+      pointB: null,
+    })
+    reader.push(withRoute, withoutRoute)
+    const { driver, shiftId } = await openShift()
+    let draft = await getDraft(driver, shiftId)
+    draft = draftFromUpload(await uploadEnd(driver, shiftId, 'dashboard', image('taha-1'), draft))
+    draft = draftFromRead(await readSlot(driver, shiftId, 'dashboard', 'orders', draft))
+    expect(draft.operations.orders).toHaveLength(1)
+
+    // The driver corrects the printed time by hand — the edit the merge must carry across a retake.
+    const target = draft.operations.orders[0]!
+    const edited = await patchDraft(driver, shiftId, {
+      expectedRevision: draft.revision,
+      operations: { rowEdits: [{ kind: 'order', clientKey: target.clientKey, occurredMinute: '08:02' }] },
+    })
+    expect(edited.statusCode, edited.body).toBe(200)
+    draft = edited.json() as CloseDraftView
+    expect(draft.operations.orders[0]!.reviewReasons).toContain('human_time_edit')
+
+    // He retakes the same screen. The token rotates and the reader omits the route this time.
+    draft = draftFromUpload(
+      await uploadEnd(driver, shiftId, 'dashboard', image('taha-2'), draft, { replace: true }),
+    )
+    draft = draftFromRead(await readSlot(driver, shiftId, 'dashboard', 'orders', draft))
+
+    // ONE delivery was photographed, so one row must exist. Today there are two: the fresh read is
+    // appended because the matchKey fallback skips any candidate whose sightings a retake emptied.
+    expect(draft.operations.orders).toHaveLength(1)
+    expect(draft.operations.orders[0]!.occurredMinute).toBe('08:02')
+    expect(draft.operations.orders[0]!.reviewReasons).toContain('human_time_edit')
+  })
+
+  it('never absorbs a manually entered order into a fresh read', async () => {
+    // A hand-typed order is the driver's own testimony. A reader that happens to produce the same
+    // date, clock and amount must not silently take it over.
+    const page = ok(orderRow('155.00', { route: 'M', printedTime: '8:00 AM', time: '08:00' }))
+    reader.push(page)
+    const { driver, shiftId } = await openShift()
+    let draft = await readyManualDraft(driver, shiftId, 'manual-vs-read', false)
+    const before = draft.operations.orders.filter((order) => order.source === 'manual').length
+    expect(before).toBe(1)
+    draft = draftFromRead(await readSlot(driver, shiftId, 'dashboard', 'orders', draft))
+    expect(draft.operations.orders.filter((order) => order.source === 'manual')).toHaveLength(before)
   })
 })
