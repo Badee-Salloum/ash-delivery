@@ -42,6 +42,14 @@ compile errors, which were the two call sites.
 `apps/driver/test/linked-bms-read-state.test.ts` drives the decision on the shape the server really
 returns and asserts the old expression throws on it.
 
+**Deployed 2026-08-26** — driver `dpl_GXC2VrJCjT9WSmuRJGFcPH4tmegi`. Verified against the CDN, not
+just the local build: the served battery chunk `index-Dayo5gPb.js` contains zero occurrences of
+`.read.status` and two of the per-slot `attachments…find` lookup. API and admin untouched, both 200.
+
+**The fleet does not have this yet.** The driver app is `registerType: 'prompt'` — every phone keeps
+its old bundle until the driver taps «تحديث». Until he does, his closing battery reading still
+fails. Tell the drivers.
+
 **Not changed, deliberately:** the `fieldsFound === 0` path leaves `persistedMediaId` null without a
 push, so the pack stays un-ready until the driver types. That is correct — a reading must be bound
 to the media generation it describes — and the close gate names the pack if he does not.
