@@ -38,9 +38,12 @@ describe('LatestRequestGuard', () => {
   })
 
   it('guards every branch-bound dashboard read with the same request generation', () => {
+    // The first two carry the selected business day, so they are template literals rather than
+    // plain strings. Matched on the opening backtick so a read that quietly drops the day
+    // parameter — and starts answering for today while the picker says otherwise — fails here.
     for (const endpoint of [
-      "'/dashboard'",
-      "'/dashboard/profit'",
+      '`/dashboard${dayQuery}`',
+      '`/dashboard/profit${range}`',
       "'/dashboard/treasury'",
       "'/documents/expiring'",
       "'/attendance'",

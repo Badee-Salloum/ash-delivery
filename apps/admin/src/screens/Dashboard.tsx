@@ -84,6 +84,19 @@ export function Dashboard(): ReactNode {
   const [attendance, setAttendance] = useState<Attendee[]>([])
   const [workingNow, setWorkingNow] = useState<WorkingNowSnapshot | null>(null)
   const [workingNowUnavailable, setWorkingNowUnavailable] = useState(false)
+  /**
+   * Which business day the financial panels describe. `null` means "whatever the server calls
+   * today", and the first response fills it in from its own `to`.
+   *
+   * Deliberately NOT computed here. The business day rolls at 04:00, not midnight, so at 01:30
+   * «today» is still yesterday's date — and that rule lives in `businessDateFor` on the server.
+   * Re-deriving it in the browser would be a second copy free to drift, and the four hours either
+   * side of the boundary are exactly when a manager is closing shifts.
+   *
+   * The picker DISPLAYS `day ?? data.to` rather than adopting the server's date into this state:
+   * writing it back here would change `load`, refetch, and show the manager a flicker for nothing.
+   */
+  const [day, setDay] = useState<string | null>(null)
   const dashboardRequests = useRef(new LatestRequestGuard())
 
   // `branchId` is a dependency: an organisation-wide role picks his branch AFTER the first render,
@@ -98,8 +111,12 @@ export function Dashboard(): ReactNode {
     setTreasury(null)
     setExpiring([])
     setAttendance([])
+    // One day, not a range: `from` and `to` are the same date. Omitted entirely until the user
+    // picks one, so the server's own «today» stays the default.
+    const range = day === null ? '' : `?from=${encodeURIComponent(day)}&to=${encodeURIComponent(day)}`
+    const dayQuery = day === null ? '' : `?day=${encodeURIComponent(day)}`
     void api
-      .get<DashboardData>('/dashboard', { cache: 'no-store', signal: request.signal })
+      .get<DashboardData>(`/dashboard${dayQuery}`, { cache: 'no-store', signal: request.signal })
       .then((d) => {
         if (!request.isCurrent()) return
         setData(d)
@@ -120,7 +137,7 @@ export function Dashboard(): ReactNode {
       can({ userId: session.userId, roleKey: session.roleKey as RoleKey, branchId: session.branchId }, 'profit.view_total', {}).allowed
     ) {
       void api
-        .get<NonNullable<typeof profit>>('/dashboard/profit', { cache: 'no-store', signal: request.signal })
+        .get<NonNullable<typeof profit>>(`/dashboard/profit${range}`, { cache: 'no-store', signal: request.signal })
         .then((next) => {
           if (request.isCurrent()) setProfit(next)
         })
@@ -155,7 +172,7 @@ export function Dashboard(): ReactNode {
       .catch(() => {
         if (request.isCurrent()) setAttendance([])
       })
-  }, [api, session])
+  }, [api, session, day])
 
   useEffect(() => {
     load()
@@ -191,6 +208,8 @@ export function Dashboard(): ReactNode {
   }
 
   const capitalDelta = treasury ? differenceView(treasury.capital.delta) : null
+  // `data.businessDate` is the server's own answer, already past the 04:00 rule.
+  const shownDay = day ?? data.businessDate
   const workingCountsStatusText = workingNowUnavailable
     ? workingNow
       ? t.dashboard.workingCountsStale
@@ -210,6 +229,27 @@ export function Dashboard(): ReactNode {
       <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {workingCountsAnnouncement}
       </span>
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="text-sm font-medium text-slate-700" htmlFor="dashboard-day">
+          {t.dashboard.day}
+        </label>
+        <input
+          id="dashboard-day"
+          type="date"
+          className="rounded-md border border-slate-300 px-2 py-1 text-sm"
+          value={shownDay}
+          onChange={(e) => setDay(e.target.value === '' ? null : e.target.value)}
+        />
+        <button
+          type="button"
+          className="rounded-md border border-slate-300 px-2 py-1 text-sm disabled:opacity-50"
+          onClick={() => setDay(null)}
+          disabled={day === null}
+        >
+          {t.dashboard.today}
+        </button>
+        <span className="text-xs text-slate-500">{t.dashboard.dayEndsAtFour}</span>
+      </div>
       <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
         <Stat
           label={t.dashboard.revenue}

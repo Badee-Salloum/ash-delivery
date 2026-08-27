@@ -44,7 +44,17 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     // the §3 matrix grants `branch_data.view` at scope 'all'.
     const branchId = resolveBranchId(req)
 
-    const today = todayFor(deps)
+    /*
+     * Which business day to describe. Omitted means today — and «today» rolls at 04:00, not
+     * midnight (`businessDateFor`), so a manager reading this at 01:30 sees the day he is still
+     * working rather than an empty one that began ninety minutes ago.
+     *
+     * Only the day-scoped panels follow it. Fleet readiness below is deliberately left live:
+     * `vehicles.state` is a current fact with no history, so pretending to show yesterday's
+     * readiness would be inventing data.
+     */
+    const q = z.object({ day: realCalendarDate.optional() }).parse(req.query)
+    const today = q.day ?? todayFor(deps)
     const shifts = await deps.shifts.listByBranchAndDate(branchId, today)
 
     // ── Orders and revenue, from today's approved shifts ────────────────────────────────────

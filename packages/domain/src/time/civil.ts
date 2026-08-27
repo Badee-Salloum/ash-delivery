@@ -13,6 +13,21 @@ export type CalendarDate = string
 
 export const DAMASCUS_OFFSET_MINUTES = 180
 
+/**
+ * When one business day gives way to the next, in minutes past branch-local midnight.
+ *
+ * A delivery fleet does not stop at midnight. The owner's day runs 04:00 → 04:00, so a shift
+ * closed at 01:30 belongs to the day it was WORKED, not to the calendar date the clock had just
+ * rolled onto. Booking that close under the next day would split one night's takings across two
+ * business dates — and, on a Saturday night, across two FINANCIAL WEEKS, which is the one place
+ * BR7 makes entries immutable.
+ *
+ * INJECTED AS A VALUE for the same reason as the UTC offset: rows already written under a
+ * different boundary must stay reproducible. `business_date` is a written column, so changing
+ * this never re-buckets stored money — it only decides where NEW entries land.
+ */
+export const DAY_START_MINUTES = 240
+
 const isLeap = (y: number): boolean => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0
 
 /** Days since 1970-01-01. Howard Hinnant's `days_from_civil`, valid for the full proleptic range. */
@@ -69,8 +84,14 @@ export function parseCalendarDate(date: CalendarDate): { y: number; m: number; d
  * is STABLE, not IMMUTABLE, and Postgres refuses it in a generated column. Computing it here
  * and storing it also means a tz-database update can never silently re-bucket historical money.
  */
-export function businessDateFor(epochMs: number, offsetMinutes = DAMASCUS_OFFSET_MINUTES): CalendarDate {
-  const localMs = epochMs + offsetMinutes * 60_000
+export function businessDateFor(
+  epochMs: number,
+  offsetMinutes = DAMASCUS_OFFSET_MINUTES,
+  dayStartMinutes = DAY_START_MINUTES,
+): CalendarDate {
+  // Rolling the clock BACK by the day-start pushes the small hours onto the previous date, which
+  // is the whole rule: 01:30 on the 28th is hour 21.5 of the 27th's working day.
+  const localMs = epochMs + (offsetMinutes - dayStartMinutes) * 60_000
   const { y, m, d } = civilFromDays(Math.floor(localMs / 86_400_000))
   return toCalendarDate(y, m, d)
 }

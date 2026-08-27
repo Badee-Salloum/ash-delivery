@@ -132,7 +132,7 @@ export async function buildDeps(config: Config): Promise<BuiltDeps> {
   assertDurableBlobStore(blobs, config.NODE_ENV)
   const ocr = buildOcrReader(config)
 
-  const clock = new SystemClock(config.TZ_OFFSET_MINUTES)
+  const clock = new SystemClock(config.TZ_OFFSET_MINUTES, config.DAY_START_MINUTES)
   const ids = new CryptoIdGen()
   const hasher = new BcryptHasher(config.BCRYPT_ROUNDS)
   // A parse error here (wrong-length key) stops the boot naming the variable, per config's contract.

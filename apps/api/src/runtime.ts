@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import bcrypt from 'bcryptjs'
 import type { Clock, IdGen, PasswordHasher } from '@ash/contracts'
+import { DAY_START_MINUTES } from '@ash/domain'
 
 /**
  * Production implementations of the infrastructure ports.
@@ -12,14 +13,19 @@ import type { Clock, IdGen, PasswordHasher } from '@ash/contracts'
 
 export class SystemClock implements Clock {
   private readonly offset: number
-  constructor(offset: number) {
+  private readonly dayStart: number
+  constructor(offset: number, dayStart = DAY_START_MINUTES) {
     this.offset = offset
+    this.dayStart = dayStart
   }
   nowMs(): number {
     return Date.now()
   }
   offsetMinutes(): number {
     return this.offset
+  }
+  dayStartMinutes(): number {
+    return this.dayStart
   }
 }
 

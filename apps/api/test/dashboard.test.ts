@@ -168,6 +168,35 @@ describe('the operational dashboard', () => {
     })
   })
 
+  it('describes the business day asked for, and today when none is asked for', async () => {
+    // `today` comes from the harness clock through `businessDateFor`, so it already carries the
+    // 04:00 boundary. A manager reading the board at 01:30 must see the day he is still working.
+    const yesterday = '2026-07-19'
+    await seedCountShift('picked-day-open', 'open', {
+      driverId: 'driver-picked-day',
+      vehicleId: 'vehicle-picked-day',
+      businessDate: yesterday,
+    })
+
+    const manager = await h.loginAs('manager')
+
+    const untouched = (await get(manager, '/dashboard')).json()
+    expect(untouched.businessDate).toBe(today)
+
+    const picked = await get(manager, `/dashboard?day=${yesterday}`)
+    expect(picked.statusCode).toBe(200)
+    expect(picked.json().businessDate).toBe(yesterday)
+    // The day-scoped panel followed the selection rather than staying on today.
+    expect(picked.json().completeness.openShifts).toBe(1)
+    expect(untouched.completeness.openShifts).toBe(0)
+  })
+
+  it('refuses a day that is not a calendar date rather than silently showing today', async () => {
+    const manager = await h.loginAs('manager')
+    expect((await get(manager, '/dashboard?day=not-a-date')).statusCode).toBe(400)
+    expect((await get(manager, '/dashboard?day=2026-02-30')).statusCode).toBe(400)
+  })
+
   it('is date-independent, branch-isolated and counts distinct driver and vehicle IDs', async () => {
     await seedCountShift('overnight-first', 'open', {
       driverId: 'driver-overnight',

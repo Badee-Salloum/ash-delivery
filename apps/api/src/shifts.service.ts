@@ -385,7 +385,7 @@ const manualShareTotals = (rows: readonly ShiftOrderRecord[]): { driverShare: Mi
 }
 
 export function todayFor(deps: Deps): CalendarDate {
-  return businessDateFor(deps.clock.nowMs(), deps.clock.offsetMinutes())
+  return businessDateFor(deps.clock.nowMs(), deps.clock.offsetMinutes(), deps.clock.dayStartMinutes())
 }
 
 /**

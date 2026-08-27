@@ -28,6 +28,11 @@ export interface Clock {
   nowMs(): number
   /** Asia/Damascus offset for `businessDateFor`. A value, so history stays reproducible. */
   offsetMinutes(): number
+  /**
+   * Minutes past branch-local midnight at which the business day rolls over — 240, i.e. 04:00.
+   * A value for the same reason as the offset: entries already written must stay reproducible.
+   */
+  dayStartMinutes(): number
 }
 
 export interface IdGen {

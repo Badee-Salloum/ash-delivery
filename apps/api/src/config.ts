@@ -37,6 +37,12 @@ const schema = z.object({
 
   /** Asia/Damascus is UTC+3 year-round since October 2022. Injected, never assumed. */
   TZ_OFFSET_MINUTES: z.coerce.number().int().default(180),
+  /**
+   * Minutes past branch-local midnight at which the business day rolls over. 240 = 04:00, the
+   * owner's own day: a shift closed at 01:30 books under the day it was worked. Configurable
+   * rather than constant so a branch that changes its hours does not need a deploy.
+   */
+  DAY_START_MINUTES: z.coerce.number().int().min(0).max(1439).default(240),
 
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 

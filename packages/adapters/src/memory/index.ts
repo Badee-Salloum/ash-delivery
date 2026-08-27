@@ -110,16 +110,21 @@ export class FixedClock implements Clock {
   // cannot erase those, and this code is executed as source in development.
   private ms: number
   private readonly offset: number
-  constructor(ms: number, offset = 180) {
-    // Asia/Damascus, UTC+3 year-round since Oct 2022
+  private readonly dayStart: number
+  constructor(ms: number, offset = 180, dayStart = 240) {
+    // Asia/Damascus, UTC+3 year-round since Oct 2022; the business day rolls at 04:00.
     this.ms = ms
     this.offset = offset
+    this.dayStart = dayStart
   }
   nowMs(): number {
     return this.ms
   }
   offsetMinutes(): number {
     return this.offset
+  }
+  dayStartMinutes(): number {
+    return this.dayStart
   }
   advance(ms: number): void {
     this.ms += ms

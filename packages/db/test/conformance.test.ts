@@ -187,7 +187,7 @@ if (!DATABASE_URL) {
         })
 
       return {
-        clock: { nowMs: () => Date.UTC(2026, 6, 21, 5, 0, 0), offsetMinutes: () => 180 },
+        clock: { nowMs: () => Date.UTC(2026, 6, 21, 5, 0, 0), offsetMinutes: () => 180, dayStartMinutes: () => 240 },
         ids: { uuid: () => crypto.randomUUID(), token: () => 'token' },
         hasher: { hash: async (p: string) => p, verify: async (p: string, h: string) => p === h },
         // The suite never encrypts (it writes/reads document bytes directly), so a stub suffices.
