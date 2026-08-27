@@ -1,5 +1,56 @@
 # PROGRESS
 
+## 2026-08-26 — the closing battery reading had been dead for twelve days
+
+An operator reported that "many battery readings failed today". They had not. **The reader
+succeeded every time; the driver's phone threw before it could use the answer.**
+
+| production, 2026-08-26 | |
+| --- | ---: |
+| BMS reads billed | 18 — **17 succeeded** (one real `no choice in response`) |
+| `shift_close_draft_reads` for `bms` | 12 rows, **every one `complete`, zero failed** |
+| model returned the `percent` key | **17 of 17** |
+| battery readings from OCR — **start** | **9** |
+| battery readings from OCR — **end** | **0** (7 typed by hand, 3 by a manager) |
+
+End-package readings sourced from OCR, by day: `08-14: 2` · `08-21: 0` · `08-22: 0` · `08-23: 0` ·
+`08-24: 0` · `08-25: 0` · `08-26: 0`. Start-package over the same days: `3, 3, 8, 9, 9, 9`.
+**The closing reading auto-filled exactly zero times between 2026-08-14 and 2026-08-26.**
+
+Shift `f61f4d73` shows the whole shape on one driver. Start: `88` and `65`, both `source: ocr`,
+cycle counts 25 and 30 stored. Close: the reader returned `17` and `9`, both `ok`, both stored
+`complete` — and what landed was `9, source: manual, cycles: null` plus a second pack marked
+`unavailable`. **The answer `17` was in the database and was never put in front of him.**
+
+**Root cause.** `BatteryPanel.tsx` asked `response.read.status`. The API has never returned a
+top-level `read` — both return sites give `{draft, rows, fields}`. `undefined.status` threw,
+`createLinkedReadTask` converted the throw into a failed read, and `applyCloudBmsFields` was never
+reached. The retry button took the identical path and failed identically.
+
+It hid for twelve days because **`packages/client/src/api.ts` declared `read` on
+`CloseDraftReadResponse`** — a field the server never sends — so the compiler had no reason to
+object, and the only test over this path (`linked-bms-escape-wiring.test.ts`) matches source text
+without executing it. The start package was unaffected because it uses a different response type
+that really does carry `status`, which is exactly the asymmetry the production numbers show.
+
+**Fix.** The client type now describes what the API actually sends (and gains the `alreadyRead` flag
+it really returns). The read is taken from where it genuinely lives — `draft.attachments[].read`,
+per slot — through a new total function `apps/driver/src/bms-linked-read.ts`, so the decision is
+executable in a unit test and cannot throw. Making the type honest immediately produced two
+compile errors, which were the two call sites.
+
+`apps/driver/test/linked-bms-read-state.test.ts` drives the decision on the shape the server really
+returns and asserts the old expression throws on it.
+
+**Not changed, deliberately:** the `fieldsFound === 0` path leaves `persistedMediaId` null without a
+push, so the pack stays un-ready until the driver types. That is correct — a reading must be bound
+to the media generation it describes — and the close gate names the pack if he does not.
+
+**No money was at risk.** The battery never touches BR1, the settlement or the ledger. What was lost
+is fleet-health data: twelve days of closing cycle counts, and packs recorded `unavailable` whose
+charge the reader had already read. History is not reprocessed; the typed values are the drivers'
+own attested readings.
+
 ## 2026-08-26 — two overlapping scans of one order list, and the 374 SYP that hung on them
 
 **API deployed 2026-08-26.** `dpl_AtfHamDXtAdqeckFB12uoJuJsxia` is READY and aliased to

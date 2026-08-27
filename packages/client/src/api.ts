@@ -225,11 +225,19 @@ export interface CloseDraftPatch {
   }
 }
 
+/**
+ * The linked-read reply, exactly as the API sends it.
+ *
+ * There is NO top-level `read`. It was declared here once and never sent, so `response.read.status`
+ * compiled cleanly and threw at runtime on every end-package battery read for twelve days. The read
+ * belongs to a slot, and lives on `draft.attachments[].read`.
+ */
 export interface CloseDraftReadResponse {
   draft: CloseDraftView
-  read: CloseDraftAttachmentRead
   rows: CloudOcrResponse['rows']
   fields: Record<string, string | null>
+  /** The server already had a complete read for this attachment and did no work. */
+  alreadyRead?: boolean
 }
 
 export interface CloseDraftAttachmentHistoryItem {

@@ -7,6 +7,18 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 
 **Legend:** ✅ implemented and green · ⚠ written but never executed · 🔜 planned, milestone named.
 
+## 2026-08-26 closing-battery gate — the read the driver never saw
+
+Full `pnpm check` passes **2,207 tests**. The regression had been live since 2026-08-14 and no test
+caught it, because the only test over that path matched source text without executing it.
+
+| # | What it pins | Named test | Result |
+| --- | --- | --- | --- |
+| B1 | The shape the API really sends (`{draft, rows, fields}`) yields a COMPLETE read, and the old expression throws on it | `linked-bms-read-state.test.ts` › *accepts the response shape the API really sends* | ✅ |
+| B2 | The status is read for the requested slot, so one pack cannot suppress the other | `linked-bms-read-state.test.ts` › *reads the status of the requested slot, not of some other pack* | ✅ |
+| B3 | A terminal failure reports its own reason, not a blanket `unavailable` | `linked-bms-read-state.test.ts` › *reports the server-recorded failure reason…* | ✅ |
+| B4 | The decision never throws on any malformed payload — the defect was an exception, not a wrong answer | `linked-bms-read-state.test.ts` › *never throws, whatever the server sends* | ✅ |
+
 ## 2026-08-26 overlapping-scan gate — the duplicate hint and the read guard (`0045`)
 
 Full `pnpm check` passes **2,201 tests** with the same 12 PostgreSQL-only skips. Each test below was

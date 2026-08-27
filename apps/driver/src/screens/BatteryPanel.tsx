@@ -11,6 +11,7 @@ import {
 } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { createLinkedReadTask, type LinkedReadTask } from '../linked-read-task.ts'
+import { linkedBmsReadState } from '../bms-linked-read.ts'
 import { Button, Card, Field, TextInput } from '../ui.tsx'
 import { CloudReadStatus } from './CloudReadStatus.tsx'
 import { ReadingLock } from './ReadingLock.tsx'
@@ -753,7 +754,7 @@ export function BatteryPanel({
       const task = createLinkedReadTask<LinkedBmsReadOutcome>(async (signal) => {
         const response = await onLinkedRead(slot, retryFailed, upload, signal)
         if (signal.aborted) throw signal.reason
-        if (response === null || response.read.status !== 'complete') {
+        if (response === null || !linkedBmsReadState(response, slot).complete) {
           return { kind: 'read_failed', response }
         }
 
@@ -806,7 +807,8 @@ export function BatteryPanel({
         return
       }
       if (result.value.kind === 'read_failed') {
-        const failure = result.value.response?.read.failure ?? 'unavailable'
+        const state = linkedBmsReadState(result.value.response, slot)
+        const failure = state.complete ? 'unavailable' : state.reason
         setCloudEvents((current) => ({
           ...current,
           [battery.id]: {
