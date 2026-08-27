@@ -1,5 +1,60 @@
 # PROGRESS
 
+## 2026-08-27 — Taha's shift: two corrected figures, and a display that lied twice
+
+**The shift.** `d0a5a7ec` (طه قبلان). The owner's calculator and the system disagreed on two inputs
+and agreed on everything else — orders `172,000` and Yallago's cut `34,400` matched to the unit.
+
+| | system | bot | resolution |
+| --- | ---: | ---: | --- |
+| كاش السائق | 68,100 | **681,000** | driver typed `681.00` for `6,810.00` — a dropped digit |
+| الكاش المشحون | 300,000 | **500,000** | every other driver that day got 500,000; Taha alone 300,000 |
+
+Corrected through the audited API as `admin` (system_admin holds `shift.operate` at scope `all` per
+decision 9 — the only role that can do both):
+
+- `PATCH /shifts/:id/close-draft` → `cashDeclared: "6810.00"`, draft revision 28 → 29.
+- `POST /shifts/:id/tranche` → a **second** float tranche of `2,000.00`, never an edit of the first.
+  Journal entry `#329` posted `driver_cash D 200000 / office_cash C 200000`; the whole ledger's
+  trial balance is **0**. A raw `UPDATE` would have left `#309` saying 300,000 with no `#329` at
+  all — 2,000.00 out of the office in the projection and not in the books, and the trial balance
+  would still have read zero, which is what makes that failure mode dangerous.
+
+`end_cash_declared_minor` and the variance recompute only at close **submission**, so the admin
+screen still shows −3,985.20 until Taha submits. After submission: **+143.80**.
+
+### The display: wrong twice before it was right
+
+His screen read «محسوبة 10 من 21» — ten deliveries drawn twice, one «محسوبة» beside one
+«بانتظار المدير». The stale copies had lost every sighting to a photo retake and kept only
+`human_time_edit`, which `operationDecisionState` reports as pending: a manager decision with no
+photo behind it to decide on.
+
+1. **First attempt keyed on date/clock/cost but exempted `source: 'manual'`.** In this codebase
+   `manual` marks a scanned row whose TIME a human corrected — which is exactly what every stale
+   copy was. The filter was a **no-op on the only shift it existed for**, and it shipped.
+2. **Second attempt keyed on `providerOrderNo`,** on the belief that it was the provider's own
+   unique number. It is synthesised as `YAL-${stableKey([shiftId, clientKey])}`
+   (`close-draft.service.ts:814`) and `clientKey` is page-scoped, so one delivery photographed on
+   two generations carries two numbers. `125.00 @15:19` stayed on the screen twice.
+3. **Third is correct:** the printed date, clock and cost — decision 16, which the owner had stated
+   twice — with no `manual` exemption, and the survivor chosen by evidence rather than by position
+   in the array. Verified against the stored rows **before** deploying: 21 → 10, all counted, all
+   evidenced. A delivery that lost every photo still appears once; swallowing it would hide real
+   work from the driver.
+
+**Both wrong attempts had green tests**, because the tests encoded the same false premise. What
+caught them was running the code against production data. Mutation checking then found two
+unprotected guards in the third attempt — the survivor preference and the evidenced-row exemption —
+and both now have failing tests behind them.
+
+**Risk:** the filter is presentational. The remnants remain in the draft and the manager's review
+still shows them; only the driver's grid and counter are filtered. `shift_orders` holds 10 committed
+rows and no money moved at any point.
+
+**Next:** Taha taps «تحديث» and submits. Then retire one of his two driver records — `Taha`
+(`6aaf6199`) and `Taha2` (`35ccd38c`) are the same man, and the ledger posted against `Taha2`.
+
 ## 2026-08-26 — the duplicate detector was blind on the first real shift it met
 
 Shift `7be4dbb5` (أنس رميح, still open) has two dashboard scans that genuinely share a row:
