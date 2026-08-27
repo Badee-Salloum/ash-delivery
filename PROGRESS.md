@@ -48,6 +48,13 @@ caught them was running the code against production data. Mutation checking then
 unprotected guards in the third attempt — the survivor preference and the evidenced-row exemption —
 and both now have failing tests behind them.
 
+**And hiding them broke the gate.** His summary then read «متبقي 1 — صفوف فيها خطأ» over ten clean
+rows: `hasBadOrderRows` still ran over all 21, and every stale copy raised `duplicate_order_no`
+against the row that superseded it — ten collisions, none on his screen, refusing a close he had no
+way to repair. That is the shape that stranded امجد on 2026-08-24, and this time it was introduced
+by filtering the display without filtering the gate. Both gate inputs now take the same list the
+grid renders; a problem on a visible row still blocks.
+
 **Risk:** the filter is presentational. The remnants remain in the draft and the manager's review
 still shows them; only the driver's grid and counter are filtered. `shift_orders` holds 10 committed
 rows and no money moved at any point.
