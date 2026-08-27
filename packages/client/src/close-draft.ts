@@ -3,7 +3,12 @@ import type {
   CloseDraftView,
   CloseDraftWindowBasis,
 } from './api.ts'
-import { formatMinor, parseMinor } from '@ash/domain'
+import {
+  type SupersedableRow,
+  formatMinor,
+  isSupersededScanRow,
+  parseMinor,
+} from '@ash/domain'
 import type { DraftCashDeduction, DraftMovement, DraftOrder } from './order-entry.ts'
 
 export type OperationDecisionState = 'included' | 'pending' | 'excluded'
@@ -31,66 +36,39 @@ export function operationDecisionState(row: {
   return row.included === false ? 'excluded' : 'included'
 }
 
-const hasEvidence = (row: { sightings?: readonly unknown[] | undefined }): boolean =>
-  (row.sightings?.length ?? 0) > 0
-
 /**
- * AN ORDER IS ITS PRINTED TIME AND ITS COST — decision 16, the owner's rule.
+ * The driver's view of the domain rule.
  *
- * `providerOrderNo` looks like an identity and is not one. It is synthesised as
- * `YAL-${stableKey([shiftId, clientKey])}` (`close-draft.service.ts:814`), and `clientKey` is
- * page-scoped, so the SAME delivery photographed on two evidence generations carries two different
- * numbers. Keying on it left Taha looking at 125.00 at 15:19 twice.
+ * The decision itself lives in `@ash/domain` (`isSupersededScanRow`) and is shared with the
+ * server's close-draft materialisation, because this exact rule has drifted between server and
+ * driver three times in this codebase already. This only adapts the driver's row shape to it.
  */
-const printedIdentity = (row: {
-  dateText?: string | undefined
-  timeText?: string | undefined
-  feeText?: string
-  amount?: string
-}): string | null => {
+const supersedable = (row: DraftOrder | DraftCashDeduction): SupersedableRow => {
+  // The driver's identity is what is PRINTED, because a retake gives the same delivery a new
+  // providerOrderNo — it is synthesised from a page-scoped clientKey.
   const date = row.dateText?.trim() ?? ''
-  const time = row.timeText?.trim() ?? ''
-  const money = (row.feeText ?? row.amount ?? '').trim()
-  if (date === '' || time === '' || money === '') return null
-  return `${date}|${time}|${money}`
+  const minute = row.timeText?.trim() ?? ''
+  const money = (('feeText' in row ? row.feeText : row.amountText) ?? '').trim()
+  return {
+    identity: date === '' || minute === '' || money === '' ? null : `${date}|${minute}|${money}`,
+    included: row.included !== false,
+    sightingCount: row.sightings?.length ?? 0,
+  }
 }
 
-/**
- * A copy of a delivery that has already lost its evidence, while another copy still holds it.
- *
- * Shift d0a5a7ec showed its driver «محسوبة 10 من 21». He retook the dashboard photos: the
- * attachment token rotated, the old rows lost every sighting, and because he had also hand-edited
- * their times they became `source: 'manual'` with a null `matchKey`.
- *
- * There is deliberately NO exemption for `manual` here. In this codebase `manual` marks a scanned
- * row whose time a human corrected, not a row the driver invented — exempting it made an earlier
- * version of this predicate a no-op on the very shift it was written for. A row the driver really
- * did add by hand carries its own printed time and cost and forms a group of one, so it is safe
- * without a special case.
- *
- * The survivor is the copy that still has evidence, else the first. A delivery whose every photo is
- * gone therefore still appears ONCE — that is the signal telling the driver to rephotograph the
- * page, and it must never be swallowed.
- */
 export function isSupersededRemnant(
   row: DraftOrder | DraftCashDeduction,
   siblings: readonly (DraftOrder | DraftCashDeduction)[],
 ): boolean {
-  if (hasEvidence(row)) return false
-  if (row.included !== false) return false
-  const identity = printedIdentity(row)
-  if (identity === null) return false
-  const group = siblings.filter((other) => printedIdentity(other) === identity)
-  if (group.length < 2) return false
-  const survivor = group.find(hasEvidence) ?? group[0]
-  return survivor !== row
+  return isSupersededScanRow(supersedable(row), siblings.map(supersedable))
 }
 
-/** The rows worth putting in front of the driver: everything except superseded remnants. */
+/** The rows worth putting in front of the driver: everything except superseded copies. */
 export function withoutSupersededRemnants<T extends DraftOrder | DraftCashDeduction>(
   rows: readonly T[],
 ): T[] {
-  return rows.filter((row) => !isSupersededRemnant(row, rows))
+  const shapes = rows.map(supersedable)
+  return rows.filter((_, index) => !isSupersededScanRow(shapes[index]!, shapes))
 }
 
 function summarize(

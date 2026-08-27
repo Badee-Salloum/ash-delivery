@@ -72,6 +72,7 @@ import {
   sum,
   transition,
   weekStartFor,
+  withoutSupersededScanRows,
 } from '@ash/domain'
 import { fundCodeOf } from '@ash/adapters/memory'
 import { grantsFromRows } from './rbac.ts'
@@ -2281,7 +2282,22 @@ function closeDraftOperationsInput(shiftId: string, closeDraft: CloseDraftRecord
     // in the immutable close draft and OCR observations, but it is not a financial operation and
     // cannot be parsed into one without inventing an amount. Included rows are checked below and
     // therefore can never disappear through this filter.
-    orders: closeDraft.data.operations.orders.filter((row) => row.fee !== null).map((row) => ({
+    // A copy a retake left behind carries a printed identity and nothing else — no evidence, no
+    // inclusion, and the SAME synthesised providerOrderNo lineage as the row that replaced it. Sent
+    // as-is it trips `duplicate_order_in_submission` and the driver cannot close at all: shift
+    // d0a5a7ec held ten such pairs and refused every submission. Dropping them here rather than in
+    // a client is deliberate — the same rule already drifted between server and driver three times.
+    orders: withoutSupersededScanRows(
+      closeDraft.data.operations.orders.map((row) => ({
+        ...row,
+        // The server's identity is the number it refuses to see twice. NOT the printed time and
+        // cost: twenty deliveries at one minute for one fare is an ordinary day, and grouping by
+        // that here would drop nineteen real orders from the submission.
+        identity: providerNo(row.clientKey, row.providerOrderNo),
+        included: row.included !== false,
+        sightingCount: (row.sightings ?? []).length,
+      })),
+    ).filter((row) => row.fee !== null).map((row) => ({
       providerOrderNo: providerNo(row.clientKey, row.providerOrderNo),
       payMode: row.payMode,
       fee: parseMinor(row.fee!),
