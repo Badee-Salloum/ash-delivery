@@ -1,5 +1,70 @@
 # PROGRESS
 
+## 2026-08-28 — the business day ends at 04:00, and the dashboard picks its day
+
+Deployed to production (API `ash-api`, admin, driver — all `● Ready`, `/health` `{"ok":true}`,
+`ash-admin-eta` verified serving `index-BFoVL-v0.js`). Commit `75c32ab`.
+
+### The day boundary
+
+The owner: «اليوم لا ينتهي على الساعة 12 بل على الساعة 4 صباحا». A delivery fleet does not stop at
+midnight, so a shift closed at 01:30 belongs to the day it was **worked**.
+
+`businessDateFor` now rolls the clock back by the day-start before taking the calendar date:
+
+```ts
+const localMs = epochMs + (offsetMinutes - dayStartMinutes) * 60_000
+```
+
+**Injected as a value**, exactly like the UTC offset and for the same reason: `business_date` is a
+WRITTEN column, so rows already stored under the midnight boundary must stay reproducible — a named
+test pins that `dayStartMinutes: 0` reproduces the old rule exactly. `DAY_START_MINUTES` is config,
+so a branch changing its hours needs no deploy.
+
+The change went on the `Clock` port rather than into a constant, which made the compiler enumerate
+every implementation — and it found one (`packages/db/test/conformance.test.ts`) that would
+otherwise have been missed.
+
+**The case that mattered most.** 2026-08-29 is a Saturday. Under the midnight rule a close at 01:30
+on Sunday the 30th booked into the week starting the 30th — a *different financial week*, and BR7
+makes a closed week immutable. Now it books to Saturday the 29th, week starting the 23rd. That is a
+named test, because an off-by-one where entries become immutable is the worst failure available.
+
+Existing data is untouched: 84 journal entries, 14 orders and 1 shift sit in the 00:00–03:59 window
+and keep the dates they were written with. The rule is forward-only; no migration.
+
+### Day selection on the dashboard
+
+`/dashboard` accepted no date at all — it pinned `todayFor(deps)`. It now takes `?day=`, defaulting
+to today. The financial panels follow the selection; **fleet readiness deliberately does not**,
+because `vehicles.state` is a current fact with no history and rendering it as yesterday's would be
+inventing data.
+
+The picker takes "today" from the server's own `businessDate` rather than recomputing it in the
+browser. A second copy of the 04:00 rule is free to drift, and the four hours either side of the
+boundary are exactly when a manager is closing shifts.
+
+**2,253 tests pass** · typecheck · domain purity · CSS logical-properties · i18n · wire · sql · glyphs.
+
+### Not done, and why
+
+The recoveries for محمد المسلماني (744.00) and حيدر محمد (666.00) are **not** posted. They are also
+not "special income": from `recipes.ts`,
+
+```
+Δoffice_cash + Δoffice_wallet = blockTotal − grossDriverShare = companyShare
+```
+
+so حيدر needs a **credit** to `office_wallet` (−811.80). An income recipe (`D office / C revenue`)
+cannot express that leg; forcing it would book the driver's share and Yallago's cut as a company
+**cost**, misstating the very profit the work exists to protect. The right instrument is the
+existing `POST /journal/manual`, which takes balanced multi-line entries and needs no new code.
+
+Related trap, found and avoided: `/treasury/deposit`'s `owner_funding` contra would have understated
+reported profit permanently — all three profit readers enumerate **fund codes**, not event types, so
+there would have been no error and no failing test, just a wrong number.
+
+
 ## 2026-08-27 — Taha's shift: two corrected figures, and a display that lied twice
 
 **The shift.** `d0a5a7ec` (طه قبلان). The owner's calculator and the system disagreed on two inputs
