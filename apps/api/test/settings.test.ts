@@ -219,3 +219,84 @@ describe('the go-live date (تاريخ بدء التطبيق)', () => {
     expect(blockers, res.body).not.toContain('cash_count_missing')
   })
 })
+
+/**
+ * The second proof: the position is ALREADY on capital.
+ *
+ * Requiring the ceremony alone was a design error. The restoration settles the office boxes and
+ * deliberately excludes active custody, so it can only run when no shift is live — at the END of a
+ * day. That made declaring go-live ON the first day impossible, and a first day is exactly when an
+ * owner declares one. Working capital equal to the target with an empty صندوق الشركة proves the
+ * same fact the ceremony proves: nothing is carried in from before.
+ */
+describe('the go-live date accepts a position already on capital', () => {
+  const seedFund = async (token: string, fundCode: string, amount: string): Promise<void> => {
+    const res = await post(token, '/journal/manual', {
+      reason: 'رصيد افتتاحي',
+      lines: [
+        { fundCode, side: 'D', amount },
+        { fundCode: 'opening_balance', side: 'C', amount },
+      ],
+    })
+    expect(res.statusCode, res.body).toBe(201)
+  }
+
+  /** Put the boxes exactly on the configured capital, with no company fund and no receivables. */
+  const putOnCapital = async (): Promise<void> => {
+    const admin = await h.loginAs('sysadmin')
+    const targets = await put(admin, '/treasury/capital-targets', {
+      cashTarget: sypStr(4_000_000),
+      walletTarget: sypStr(1_000_000),
+      reason: 'رأس المال عند بدء التطبيق',
+      branchId: BRANCH,
+    })
+    expect(targets.statusCode, targets.body).toBe(200)
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(4_000_000))
+    await seedFund(manager, 'office_wallet', sypStr(1_000_000))
+  }
+
+  it('accepts the date with no count and no restoration when the position is exactly on capital', async () => {
+    await putOnCapital()
+    const admin = await h.loginAs('sysadmin')
+    const today = (await get(admin, '/fx')).json().businessDate
+
+    const res = await put(admin, '/settings', { goLiveBusinessDate: today, branchId: BRANCH })
+    expect(res.statusCode, res.body).toBe(200)
+    expect((await get(admin, '/settings')).json().goLiveBusinessDate).toBe(today)
+  })
+
+  it('still refuses when the position carries accumulation, and says how far off it is', async () => {
+    await putOnCapital()
+    // One lira more than capital is accumulation carried in from before. Refuse it.
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(1))
+
+    const admin = await h.loginAs('sysadmin')
+    const today = (await get(admin, '/fx')).json().businessDate
+    const res = await put(admin, '/settings', { goLiveBusinessDate: today, branchId: BRANCH })
+    expect(res.statusCode, res.body).toBe(422)
+    expect(res.json().error).toBe('go_live_requires_opening_ceremony')
+    expect(res.json().detail.workingCapital).toBe(sypStr(5_000_001))
+    expect(res.json().detail.capitalTarget).toBe(sypStr(5_000_000))
+  })
+
+  it('refuses while صندوق الشركة still holds anything', async () => {
+    // A non-empty company fund is exactly the shape of carried-over profit this rule exists to
+    // keep out of a fresh start.
+    await putOnCapital()
+    const manager = await h.loginAs('manager')
+    await post(manager, '/journal/manual', {
+      reason: 'ربح متراكم',
+      lines: [
+        { fundCode: 'company_box', side: 'D', amount: sypStr(100) },
+        { fundCode: 'opening_balance', side: 'C', amount: sypStr(100) },
+      ],
+    })
+    const admin = await h.loginAs('sysadmin')
+    const today = (await get(admin, '/fx')).json().businessDate
+    const res = await put(admin, '/settings', { goLiveBusinessDate: today, branchId: BRANCH })
+    expect(res.statusCode, res.body).toBe(422)
+    expect(res.json().detail.companyBox).toBe(sypStr(100))
+  })
+})

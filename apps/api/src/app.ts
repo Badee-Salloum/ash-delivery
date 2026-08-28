@@ -2395,15 +2395,54 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         // system-admin-only, a role with no branch of its own. So the caller names the branch he
         // opened, exactly as `/weeks/close` makes him name the one he is sealing.
         const branchId = resolveBranchId(req)
-        const [count, restoration] = await Promise.all([
+        const [count, restoration, position, targets, companyBox] = await Promise.all([
           deps.cashCounts.find(branchId, date),
           deps.restorations.find(branchId, date),
+          deps.treasuryPosition.readCurrent(branchId),
+          deps.capitalTargets.resolve(branchId, date),
+          deps.ledger.fundBalance(branchId, 'company_box'),
         ])
-        const missing: string[] = []
-        if (count === null || count.sealedAtMs === null) missing.push('sealed_cash_count')
-        if (restoration === null) missing.push('restoration')
-        if (missing.length > 0) {
-          throw new ServiceError(422, 'go_live_requires_opening_ceremony', { businessDate: date, missing })
+
+        /*
+         * TWO PROOFS, either will do — because they establish the same fact.
+         *
+         * (a) THE CEREMONY: a sealed count plus a restoration on that date. The ordinary path, and
+         *     the stronger one, because a count is a PHYSICAL attestation that somebody opened the
+         *     drawer and looked.
+         *
+         * (b) THE POSITION IS ALREADY ON CAPITAL: working capital equals the target exactly and
+         *     صندوق الشركة is empty, so there is demonstrably nothing carried in from before.
+         *
+         * (b) exists because requiring (a) alone was a design error. The restoration settles the
+         * office boxes and deliberately excludes active custody, so it can only run when no shift
+         * is live — at the END of a day. Demanding it made declaring go-live ON the first day
+         * impossible, and a first day is exactly when an owner declares one.
+         */
+        const target = (targets.office_cash ?? 0n) + (targets.office_wallet ?? 0n)
+        const working =
+          position.officeCash +
+          position.officeWallet +
+          position.receivablesCash +
+          position.receivablesWallet +
+          position.activeCustodyCash +
+          position.activeCustodyWallet
+        const alreadyOnCapital = target > 0n && working === target && companyBox === 0n
+
+        if (!alreadyOnCapital) {
+          const missing: string[] = []
+          if (count === null || count.sealedAtMs === null) missing.push('sealed_cash_count')
+          if (restoration === null) missing.push('restoration')
+          if (missing.length > 0) {
+            throw new ServiceError(422, 'go_live_requires_opening_ceremony', {
+              businessDate: date,
+              missing,
+              // The numbers, so the screen can say HOW FAR OFF the position is rather than only
+              // that a ceremony is owed. A reader who is already on capital never sees this.
+              workingCapital: serializeMoney(minor(working)),
+              capitalTarget: serializeMoney(minor(target)),
+              companyBox: serializeMoney(companyBox),
+            })
+          }
         }
         await deps.settings.set(GO_LIVE_SETTING_KEY, date, actorId)
         written[GO_LIVE_SETTING_KEY] = date
