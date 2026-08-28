@@ -85,6 +85,11 @@ export function Treasury(): ReactNode {
   const [sheet, setSheet] = useState<CashCountSheet | null>(null)
   const [counted, setCounted] = useState<Record<string, string>>({})
   const [countResolutions, setCountResolutions] = useState<Record<string, string>>({})
+  /** «إعادة الجرد» / «إلغاء الجرد» — the two answers a variance deserves beside proceeding. */
+  const [recounting, setRecounting] = useState(false)
+  const [recountReason, setRecountReason] = useState('')
+  const [cancelling, setCancelling] = useState(false)
+  const [cancelReason, setCancelReason] = useState('')
   const [result, setResult] = useState<CashCountView | null>(null)
   const [closeResult, setCloseResult] = useState<{ error?: string; blockers?: Array<{ kind: string }>; weekStart?: string } | null>(null)
   const [balances, setBalances] = useState<{ cash: string; wallet: string } | null>(null)
@@ -467,6 +472,41 @@ export function Treasury(): ReactNode {
     }
   }
 
+  /**
+   * «إعادة الجرد» — supersede the sealed count with a fresh one.
+   *
+   * Reopens the fields so the manager types what he counted the second time; the reason rides with
+   * the submission. Until this existed a posting after the seal deadlocked the day: the restoration
+   * refused with `cash_count_stale` telling him to recount, and the count route refused that with
+   * `already_counted_today`.
+   */
+  function beginRecount(): void {
+    setRecounting(true)
+    setResult(null)
+    setSheet((current) => (current ? { ...current, alreadyCounted: false } : current))
+  }
+
+  /** «إلغاء الجرد» — withdraw it, leaving the day uncounted until the error is fixed. */
+  async function cancelCount(): Promise<void> {
+    if (!sheet || cancelReason.trim() === '') return
+    try {
+      await api.post(`/cash-counts/${sheet.businessDate}/cancel`, {
+        ...(branchId ? { branchId } : {}),
+        reason: cancelReason.trim(),
+      })
+      toast.success(t.treasury.countCancelled)
+      setCancelReason('')
+      setCancelling(false)
+      setResult(null)
+      setCounted({})
+      setCountResolutions({})
+      setSheet((current) => (current ? { ...current, alreadyCounted: false } : current))
+      void loadRestoration()
+    } catch (err) {
+      toast.error(explainError((err as { error?: string }).error ?? 'error', t))
+    }
+  }
+
   async function submitCount(): Promise<void> {
     if (!sheet) return
     const lines = buildCountLines(sheet.funds, counted, countResolutions)
@@ -477,7 +517,12 @@ export function Treasury(): ReactNode {
         ...(branchId ? { branchId } : {}),
         businessDate: sheet.businessDate,
         lines,
+        // A REASON, not a flag: replacing a signed count is an audited act, and «true» would
+        // explain nothing to whoever reads the record later.
+        ...(recounting && recountReason.trim() ? { recountReason: recountReason.trim() } : {}),
       })
+      setRecounting(false)
+      setRecountReason('')
       const draft = restoreCountDraft(saved.lines)
       setResult(saved)
       setCounted(draft.counted)
@@ -1452,14 +1497,61 @@ export function Treasury(): ReactNode {
               })}
             </div>
             {!countIsSealed ? (
-              <Button className="mt-3" onClick={submitCount} disabled={!countReady}>
-                {t.common.confirm}
-              </Button>
+              <>
+                {recounting ? (
+                  <Field label={t.treasury.recountReason} hint={t.treasury.recountReasonHint} className="mt-3">
+                    <TextInput value={recountReason} onChange={(e) => setRecountReason(e.target.value)} />
+                  </Field>
+                ) : null}
+                <Button
+                  className="mt-3"
+                  onClick={submitCount}
+                  disabled={!countReady || (recounting && recountReason.trim() === '')}
+                >
+                  {recounting ? t.treasury.saveRecount : t.common.confirm}
+                </Button>
+              </>
             ) : null}
             {result ? (
               <p className={`mt-2 text-sm font-medium ${result.balanced ? 'text-emerald-700' : 'text-amber-700'}`}>
                 {result.balanced ? t.treasury.noDifference : t.treasury.variance}
               </p>
+            ) : null}
+
+            {/*
+              The three answers a variance deserves. Offered on a SEALED count, because that is
+              where the manager actually is when he discovers the figure is wrong — and until now
+              his only route was a deadlock: the restoration told him to recount, and the count
+              route told him he already had.
+            */}
+            {countIsSealed ? (
+              <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50/70 p-3">
+                <h3 className="text-sm font-bold text-slate-700">{t.treasury.countActionsTitle}</h3>
+                <p className="mt-1 text-xs text-slate-600">{t.treasury.countActionsHint}</p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <Button variant="ghost" onClick={beginRecount}>
+                    {t.treasury.recount}
+                  </Button>
+                  <Button variant="ghost" onClick={() => setCancelling((v) => !v)}>
+                    {t.treasury.cancelCount}
+                  </Button>
+                </div>
+                {cancelling ? (
+                  <div className="mt-3">
+                    <Field label={t.treasury.cancelReason} hint={t.treasury.cancelReasonHint}>
+                      <TextInput value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} />
+                    </Field>
+                    <Button
+                      variant="danger"
+                      className="mt-2"
+                      disabled={cancelReason.trim() === ''}
+                      onClick={cancelCount}
+                    >
+                      {t.treasury.confirmCancelCount}
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
           </>
         )}
