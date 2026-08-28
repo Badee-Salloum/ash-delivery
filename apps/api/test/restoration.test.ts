@@ -506,3 +506,135 @@ describe('الترميم — the daily restoration', () => {
     expect(named.json().error).toBe('cash_count_required')
   })
 })
+
+/**
+ * The three answers a variance deserves (owner request, 2026-08-29):
+ * proceed, recount, or withdraw the count until the error is fixed.
+ *
+ * «في حال الفرق يجب اقتراح اما الاكمال مع اضافة عملية تصلح الفرق او اعادة الجرد او الغائه لحين اصلاح الخطا»
+ */
+describe('a cash count that shows a variance', () => {
+  const countBody = (cash: number, wallet: number, extra: Record<string, unknown> = {}) => ({
+    lines: [
+      { fundCode: 'office_cash', counted: sypStr(cash), resolution: 'عُدّ يدوياً' },
+      { fundCode: 'office_wallet', counted: sypStr(wallet), resolution: 'من شاشة المزوّد' },
+    ],
+    ...extra,
+  })
+
+  it('THE DEADLOCK THIS BREAKS: a posting after the count no longer strands the day', async () => {
+    // Before recounting existed: the restoration refused with `cash_count_stale` telling the
+    // manager to recount, while the count route refused that with `already_counted_today`. The day
+    // could never be restored, and nothing said why.
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(60_000))
+    await seedFund(manager, 'office_wallet', sypStr(10_000))
+    expect((await post(manager, '/cash-counts', countBody(60_000, 10_000))).statusCode).toBe(201)
+
+    // A late movement lands after the seal.
+    await seedFund(manager, 'office_cash', sypStr(500))
+
+    const stale = await post(manager, '/treasury/restoration', { reason: 'ترميم' })
+    expect(stale.statusCode, stale.body).toBe(409)
+    expect(stale.json().error).toBe('cash_count_stale')
+
+    // The way out: recount, naming why.
+    const again = await post(manager, '/cash-counts', countBody(60_500, 10_000, {
+      recountReason: 'حركة متأخرة بعد الجرد الأول',
+    }))
+    expect(again.statusCode, again.body).toBe(201)
+
+    const restored = await post(manager, '/treasury/restoration', { reason: 'ترميم بعد إعادة الجرد' })
+    expect(restored.statusCode, restored.body).toBe(201)
+  })
+
+  it('refuses a second count that does not say why it is replacing the first', async () => {
+    // Replacing a signed count must be deliberate. The refusal now names the way out.
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(60_000))
+    await seedFund(manager, 'office_wallet', sypStr(10_000))
+    expect((await post(manager, '/cash-counts', countBody(60_000, 10_000))).statusCode).toBe(201)
+
+    const second = await post(manager, '/cash-counts', countBody(60_000, 10_000))
+    expect(second.statusCode, second.body).toBe(409)
+    expect(second.json().error).toBe('already_counted_today')
+    expect(second.json().detail.hint).toContain('recountReason')
+  })
+
+  it('keeps the superseded count readable, with its own proof', async () => {
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(60_000))
+    await seedFund(manager, 'office_wallet', sypStr(10_000))
+    const first = await post(manager, '/cash-counts', countBody(60_000, 10_000))
+    const firstProof = first.json().proofSha256
+
+    const second = await post(manager, '/cash-counts', countBody(59_000, 10_000, {
+      recountReason: 'أُعيد العدّ',
+    }))
+    expect(second.statusCode, second.body).toBe(201)
+
+    // `find` returns only the ACTIVE count — the restoration must never reconcile against a
+    // superseded one.
+    const active = await get(manager, `/cash-counts/${second.json().businessDate}`)
+    expect(active.json().id).toBe(second.json().id)
+    expect(active.json().status).toBe('active')
+    // …and the first keeps the proof it always had, unaltered.
+    expect(firstProof).not.toBe(second.json().proofSha256)
+  })
+
+  it('withdrawing the count leaves the day uncounted, so nothing settles against it', async () => {
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(60_000))
+    await seedFund(manager, 'office_wallet', sypStr(10_000))
+    const created = await post(manager, '/cash-counts', countBody(60_000, 10_000))
+    const date = created.json().businessDate as string
+
+    const cancelled = await post(manager, `/cash-counts/${date}/cancel`, { reason: 'الفرق غير مفسَّر — نعيد بعد المراجعة' })
+    expect(cancelled.statusCode, cancelled.body).toBe(200)
+    expect(cancelled.json().status).toBe('cancelled')
+    expect(cancelled.json().closedReason).toContain('نعيد بعد المراجعة')
+
+    // The day is uncounted again: the restoration refuses rather than settling on withdrawn figures.
+    const blocked = await post(manager, '/treasury/restoration', { reason: 'ترميم' })
+    expect(blocked.statusCode, blocked.body).toBe(422)
+    expect(blocked.json().error).toBe('cash_count_required')
+
+    // And counting again is a plain first count, needing no recount reason.
+    expect((await post(manager, '/cash-counts', countBody(60_000, 10_000))).statusCode).toBe(201)
+  })
+
+  it('a withdrawn count must NOT let a financial week seal', async () => {
+    // The silent failure this guards. `listDatesInRange` feeds the week-close blocker; if it
+    // counted withdrawn rows, a week would seal on evidence its own author retracted — and BR7
+    // makes that seal immutable.
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(60_000))
+    await seedFund(manager, 'office_wallet', sypStr(10_000))
+    const created = await post(manager, '/cash-counts', countBody(60_000, 10_000))
+    const date = created.json().businessDate as string
+    await post(manager, `/cash-counts/${date}/cancel`, { reason: 'سُحب' })
+
+    const admin = await h.loginAs('sysadmin')
+    const res = await post(admin, '/weeks/close', { closeDate: '2026-07-26', branchId: BRANCH })
+    const missing = (res.json().blockers ?? []).find(
+      (b: { kind: string }) => b.kind === 'missing_cash_counts',
+    )
+    // The withdrawn day is reported UNCOUNTED, which is the whole point: a week must not seal on
+    // evidence its own author retracted.
+    expect(missing, res.body).toBeDefined()
+    expect(missing.dates).toContain(date)
+  })
+
+  it('refuses to withdraw a count the restoration already settled against', async () => {
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(60_000))
+    await seedFund(manager, 'office_wallet', sypStr(10_000))
+    const created = await post(manager, '/cash-counts', countBody(60_000, 10_000))
+    const date = created.json().businessDate as string
+    expect((await post(manager, '/treasury/restoration', { reason: 'ترميم' })).statusCode).toBe(201)
+
+    const res = await post(manager, `/cash-counts/${date}/cancel`, { reason: 'تراجع' })
+    expect(res.statusCode, res.body).toBe(409)
+    expect(res.json().error).toBe('already_restored_today')
+  })
+})

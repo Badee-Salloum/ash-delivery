@@ -1160,6 +1160,20 @@ export const createCashCountRequest = z.object({
     )
     .min(1),
   notes: z.string().max(1000).nullable().default(null),
+  /**
+   * «إعادة الجرد» — supersede the day's existing count with this one.
+   *
+   * Required to replace a sealed count, and required to be a REASON rather than a flag: replacing
+   * a signed count is an audited act, and «true» explains nothing to whoever reads it later.
+   * Omitted, a second count for the day is refused as before.
+   */
+  recountReason: z.string().trim().min(1).max(500).optional(),
+})
+
+/** «إلغاء الجرد» — withdraw the day's count until the underlying error is fixed. */
+export const cancelCashCountRequest = z.object({
+  branchId: z.string().optional(),
+  reason: z.string().trim().min(1).max(500),
 })
 
 export const manualEntryRequest = z.object({

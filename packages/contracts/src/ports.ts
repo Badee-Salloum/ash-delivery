@@ -1794,7 +1794,19 @@ export interface CashCountRecord {
   proofSha256: string | null
   sealedAtMs: number | null
   notes: string | null
+  /**
+   * `active` until a recount supersedes it or someone withdraws it. Exactly one active count per
+   * branch per business date; the others stay readable with their proof intact.
+   */
+  status: CashCountStatus
+  /** The count that replaced this one. Set only on `superseded`. */
+  supersededById: string | null
+  closedAtMs: number | null
+  closedBy: string | null
+  closedReason: string | null
 }
+
+export type CashCountStatus = 'active' | 'superseded' | 'cancelled'
 
 export interface CashCountRepo {
   /**
@@ -1802,8 +1814,36 @@ export interface CashCountRepo {
    * client-generated placeholder survived, and audit/restoration must reference this returned id.
    */
   create(count: CashCountRecord): Promise<CashCountRecord>
+  /**
+   * The ACTIVE count for that day, or null.
+   *
+   * Never a superseded or cancelled one. The restoration reconciles against whatever this returns,
+   * and the go-live gate treats it as proof the boxes were counted — a dead count in either place
+   * is money moved on figures nobody stands behind.
+   */
   find(branchId: string, businessDate: CalendarDate): Promise<CashCountRecord | null>
+  /** Days with an ACTIVE count. A withdrawn count must not let a financial week seal. */
   listDatesInRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<CalendarDate[]>
+  /**
+   * Replace the active count for a day with a fresh one, in a single transaction.
+   *
+   * Two steps that must not separate: a crash between them would leave the day with two active
+   * counts (which the partial unique index refuses) or none (which strands the restoration).
+   */
+  supersede(input: {
+    priorId: string
+    replacement: CashCountRecord
+    closedBy: string
+    closedAtMs: number
+    reason: string
+  }): Promise<CashCountRecord>
+  /** Withdraw the active count, leaving the day uncounted until the underlying error is fixed. */
+  cancel(input: {
+    id: string
+    closedBy: string
+    closedAtMs: number
+    reason: string
+  }): Promise<CashCountRecord | null>
 }
 
 // ── Tier rules (SRS F) ────────────────────────────────────────────────────────────────────

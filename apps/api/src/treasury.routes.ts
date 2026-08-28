@@ -9,6 +9,7 @@ import type {
   ReceivableEventRecord,
 } from '@ash/contracts'
 import {
+  cancelCashCountRequest,
   createCashCountRequest,
   createReceivableEventRequest,
   manualEntryRequest,
@@ -161,20 +162,56 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       lines,
       proofSha256: null,
       sealedAtMs: null,
+      status: 'active',
+      supersededById: null,
+      closedAtMs: null,
+      closedBy: null,
+      closedReason: null,
       notes: body.notes,
     }
     // «إثبات الجرد» — a sha256 over the frozen lines, so the count cannot be quietly restated.
     record.proofSha256 = sealProof(record)
     record.sealedAtMs = record.countedAtMs
 
+    /*
+     * A RECOUNT supersedes the day's active count instead of colliding with it.
+     *
+     * Until this existed the day could deadlock: a posting after a sealed count made the
+     * restoration refuse with `cash_count_stale` telling the manager to "recount instead", while
+     * this route refused that with `already_counted_today`. Recounting is deliberate and audited —
+     * `recountReason` is required, so nobody replaces a signed count by accident.
+     */
     let stored: CashCountRecord
-    try {
-      stored = await deps.cashCounts.create(record)
-    } catch (err) {
-      if ((err as { code?: string }).code === 'DUPLICATE_COUNT') {
-        throw new ServiceError(409, 'already_counted_today', { businessDate })
+    const prior = await deps.cashCounts.find(branchId, businessDate)
+    if (prior !== null && body.recountReason !== undefined) {
+      try {
+        stored = await deps.cashCounts.supersede({
+          priorId: prior.id,
+          replacement: record,
+          closedBy: req.actor!.userId,
+          closedAtMs: deps.clock.nowMs(),
+          reason: body.recountReason,
+        })
+      } catch (err) {
+        // Somebody else recounted or withdrew it between our read and our write.
+        if ((err as { code?: string }).code === 'COUNT_NOT_ACTIVE') {
+          throw new ServiceError(409, 'cash_count_changed', { businessDate })
+        }
+        throw err
       }
-      throw err
+    } else {
+      try {
+        stored = await deps.cashCounts.create(record)
+      } catch (err) {
+        if ((err as { code?: string }).code === 'DUPLICATE_COUNT') {
+          // Names the way out, which the old error did not: send `recountReason` to replace it.
+          throw new ServiceError(409, 'already_counted_today', {
+            businessDate,
+            hint: 'send recountReason to supersede the existing count',
+          })
+        }
+        throw err
+      }
     }
 
     await deps.audit.append({
@@ -200,6 +237,56 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     if (!found) throw new ServiceError(404, 'cash_count_not_found')
     return serializeCount(found)
   })
+
+  /**
+   * «إلغاء الجرد» — withdraw the day's count until the underlying error is fixed.
+   *
+   * The third answer a variance deserves, beside proceeding and recounting: sometimes the right
+   * move is to stop, fix what is wrong, and count again later. The withdrawn count keeps its rows,
+   * its resolutions and its proof — only its standing changes — and the day goes back to uncounted,
+   * so the restoration refuses with `cash_count_required` rather than settling against figures
+   * nobody stands behind.
+   */
+  app.post(
+    '/cash-counts/:date/cancel',
+    { config: { permission: 'cash_count.perform', subject: targetBranch } },
+    async (req) => {
+      const { date } = z.object({ date: z.string() }).parse(req.params)
+      const body = cancelCashCountRequest.parse(req.body)
+      const branchId = resolveBranch(req)
+      await assertWeekOpen(deps, branchId, date)
+
+      const active = await deps.cashCounts.find(branchId, date)
+      if (!active) throw new ServiceError(404, 'cash_count_not_found')
+
+      // A restored day's count is the evidence that restoration settled against. Withdrawing it
+      // afterwards would leave a posted restoration explained by nothing.
+      const restored = await deps.restorations.find(branchId, date)
+      if (restored !== null) throw new ServiceError(409, 'already_restored_today', { businessDate: date })
+
+      const cancelled = await deps.cashCounts.cancel({
+        id: active.id,
+        closedBy: req.actor!.userId,
+        closedAtMs: deps.clock.nowMs(),
+        reason: body.reason,
+      })
+      if (!cancelled) throw new ServiceError(409, 'cash_count_changed', { businessDate: date })
+
+      await deps.audit.append({
+        tableName: 'cash_counts',
+        recordId: cancelled.id,
+        action: 'UPDATE',
+        actorId: req.actor!.userId,
+        actorKind: 'user',
+        branchId,
+        requestId: req.requestId,
+        before: serializeCount(active),
+        after: serializeCount(cancelled),
+        occurredAtMs: deps.clock.nowMs(),
+      })
+      return serializeCount(cancelled)
+    },
+  )
 
   // ── Manual entries and corrections (E-3 / س50) ──────────────────────────────────────────
 
@@ -1145,6 +1232,11 @@ function serializeCount(record: CashCountRecord) {
     countedBy: record.countedBy,
     countedAt: new Date(record.countedAtMs).toISOString(),
     proofSha256: record.proofSha256,
+    status: record.status,
+    supersededById: record.supersededById,
+    closedAt: record.closedAtMs === null ? null : new Date(record.closedAtMs).toISOString(),
+    closedBy: record.closedBy,
+    closedReason: record.closedReason,
     notes: record.notes,
     lines: record.lines.map((l) => ({
       fundCode: l.fundCode,

@@ -1866,51 +1866,8 @@ export class PgCashCountRepo implements CashCountRepo {
 
   async create(count: CashCountRecord): Promise<CashCountRecord> {
     try {
-      const persistedId = await withTransaction(this.pool, { actorId: count.countedBy }, async (client) => {
-        // `cash_counts.id` is BIGINT GENERATED ALWAYS. The API's id generator emits UUIDs, so
-        // inserting the placeholder would fail in PostgreSQL even though the memory adapter works.
-        // Let the database own the identity and return the exact string audit/restoration must use.
-        const inserted = await client.query<{ id: string }>(
-          `INSERT INTO cash_counts (branch_id, business_date, counted_by, counted_at, proof_sha256, sealed_at, notes)
-           VALUES ($1,$2,$3, to_timestamp($4::double precision/1000), $5,
-                   CASE WHEN $6::bigint IS NULL THEN NULL ELSE to_timestamp($6::double precision/1000) END, $7)
-           RETURNING id::text AS id`,
-          [
-            count.branchId,
-            count.businessDate,
-            count.countedBy,
-            count.countedAtMs,
-            count.proofSha256,
-            count.sealedAtMs,
-            count.notes,
-          ],
-        )
-        const storedId = inserted.rows[0]!.id
-        for (const line of count.lines) {
-          // Resolve the fund by code; a count line naming a fund that does not exist is a bug
-          // worth failing on rather than silently dropping.
-          const { rows } = await client.query<{ id: string }>(
-            'SELECT id FROM funds WHERE branch_id = $1 AND code = $2',
-            [count.branchId, line.fundCode],
-          )
-          const fundId = rows[0]?.id
-          if (!fundId) throw new Error(`cash count names an unknown fund: ${line.fundCode}`)
-
-          await client.query(
-            `INSERT INTO cash_count_lines (cash_count_id, fund_id, counted_minor, computed_minor, variance_minor, resolution)
-             VALUES ($1,$2,$3,$4,$5,$6)`,
-            [
-              storedId,
-              fundId,
-              line.counted.toString(),
-              line.computed.toString(),
-              line.variance.toString(),
-              line.resolution,
-            ],
-          )
-        }
-        return storedId
-      })
+      const persistedId = await withTransaction(this.pool, { actorId: count.countedBy }, async (client) =>
+        await insertCashCount(client, count))
       return { ...count, id: persistedId }
     } catch (err) {
       if (isPgError(err, PG.UNIQUE_VIOLATION)) {
@@ -1935,37 +1892,168 @@ export class PgCashCountRepo implements CashCountRepo {
          FROM cash_counts c
          LEFT JOIN cash_count_lines l ON l.cash_count_id = c.id
          LEFT JOIN funds f ON f.id = l.fund_id
-        WHERE c.branch_id = $1 AND c.business_date = $2
+        WHERE c.branch_id = $1 AND c.business_date = $2 AND c.status = 'active'
         GROUP BY c.id`,
       [branchId, businessDate],
     )
     const r = rows[0]
     if (!r) return null
-    return {
-      id: String(r.id),
-      branchId: String(r.branch_id),
-      businessDate: isoDate(r.business_date),
-      countedBy: String(r.counted_by),
-      countedAtMs: (r.counted_at as Date).getTime(),
-      proofSha256: (r.proof_sha256 as string | null) ?? null,
-      sealedAtMs: r.sealed_at === null ? null : (r.sealed_at as Date).getTime(),
-      notes: (r.notes as string | null) ?? null,
-      lines: (r.lines as Array<Record<string, string | null>>).map((l) => ({
-        fundCode: String(l.fundCode),
-        counted: minor(BigInt(String(l.counted))),
-        computed: minor(BigInt(String(l.computed))),
-        variance: minor(BigInt(String(l.variance))),
-        resolution: l.resolution ?? null,
-      })),
-    }
+    return rowToCashCount(r)
   }
 
   async listDatesInRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<CalendarDate[]> {
+    // `status = 'active'` is load-bearing, not tidiness: without it a financial week could seal on
+    // a count its own author withdrew, and BR7 makes that seal immutable.
     const { rows } = await this.pool.query<{ business_date: unknown }>(
-      'SELECT business_date FROM cash_counts WHERE branch_id = $1 AND business_date BETWEEN $2 AND $3 ORDER BY business_date',
+      `SELECT business_date FROM cash_counts
+        WHERE branch_id = $1 AND business_date BETWEEN $2 AND $3 AND status = 'active'
+        ORDER BY business_date`,
       [branchId, from, to],
     )
     return rows.map((r) => isoDate(r.business_date))
+  }
+
+  /**
+   * Close the active count and insert its replacement inside ONE transaction.
+   *
+   * Splitting them would leave the day with two active counts — which the partial unique index
+   * refuses, aborting halfway — or with none, stranding the restoration behind
+   * `cash_count_required` with no way back.
+   */
+  async supersede(input: {
+    priorId: string
+    replacement: CashCountRecord
+    closedBy: string
+    closedAtMs: number
+    reason: string
+  }): Promise<CashCountRecord> {
+    const id = await withTransaction(this.pool, { actorId: input.closedBy }, async (client) => {
+      const inserted = await insertCashCount(client, input.replacement)
+      const closed = await client.query(
+        `UPDATE cash_counts
+            SET status = 'superseded', superseded_by_id = $2,
+                closed_at = to_timestamp($3::double precision/1000), closed_by = $4, closed_reason = $5
+          WHERE id = $1 AND status = 'active'`,
+        [input.priorId, inserted, input.closedAtMs, input.closedBy, input.reason],
+      )
+      // The prior count moved under us — another recount, or a withdrawal. Roll the whole thing
+      // back rather than leave a replacement whose predecessor is still live somewhere else.
+      if (closed.rowCount !== 1) throw Object.assign(new Error('prior count not active'), { code: 'COUNT_NOT_ACTIVE' })
+      return inserted
+    })
+    return { ...input.replacement, id: String(id) }
+  }
+
+  async cancel(input: {
+    id: string
+    closedBy: string
+    closedAtMs: number
+    reason: string
+  }): Promise<CashCountRecord | null> {
+    const { rowCount } = await this.pool.query(
+      `UPDATE cash_counts
+          SET status = 'cancelled',
+              closed_at = to_timestamp($2::double precision/1000), closed_by = $3, closed_reason = $4
+        WHERE id = $1 AND status = 'active'`,
+      [input.id, input.closedAtMs, input.closedBy, input.reason],
+    )
+    if (rowCount !== 1) return null
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT c.*,
+              COALESCE(json_agg(json_build_object(
+                'fundCode', f.code,
+                'counted',  l.counted_minor::text,
+                'computed', l.computed_minor::text,
+                'variance', l.variance_minor::text,
+                'resolution', l.resolution
+              ) ORDER BY f.code) FILTER (WHERE l.id IS NOT NULL), '[]') AS lines
+         FROM cash_counts c
+         LEFT JOIN cash_count_lines l ON l.cash_count_id = c.id
+         LEFT JOIN funds f ON f.id = l.fund_id
+        WHERE c.id = $1
+        GROUP BY c.id`,
+      [input.id],
+    )
+    return rows[0] ? rowToCashCount(rows[0]) : null
+  }
+}
+
+/**
+ * Insert a count and its lines. Shared by `create` and `supersede` so a recount cannot drift from
+ * a first count — they must produce byte-identical rows or the proof stops being comparable.
+ *
+ * `cash_counts.id` is BIGINT GENERATED ALWAYS, and the API's id generator emits UUIDs, so the
+ * database owns the identity and returns the exact string audit and restoration must reference.
+ */
+async function insertCashCount(
+  client: { query: PoolClient['query'] },
+  count: CashCountRecord,
+): Promise<string> {
+  const inserted = await client.query<{ id: string }>(
+    `INSERT INTO cash_counts (branch_id, business_date, counted_by, counted_at, proof_sha256, sealed_at, notes)
+     VALUES ($1,$2,$3, to_timestamp($4::double precision/1000), $5,
+             CASE WHEN $6::bigint IS NULL THEN NULL ELSE to_timestamp($6::double precision/1000) END, $7)
+     RETURNING id::text AS id`,
+    [
+      count.branchId,
+      count.businessDate,
+      count.countedBy,
+      count.countedAtMs,
+      count.proofSha256,
+      count.sealedAtMs,
+      count.notes,
+    ],
+  )
+  const storedId = inserted.rows[0]!.id
+  for (const line of count.lines) {
+    // Resolve the fund by code; a count line naming a fund that does not exist is a bug worth
+    // failing on rather than silently dropping.
+    const { rows } = await client.query<{ id: string }>(
+      'SELECT id FROM funds WHERE branch_id = $1 AND code = $2',
+      [count.branchId, line.fundCode],
+    )
+    const fundId = rows[0]?.id
+    if (!fundId) throw new Error(`cash count names an unknown fund: ${line.fundCode}`)
+
+    await client.query(
+      `INSERT INTO cash_count_lines (cash_count_id, fund_id, counted_minor, computed_minor, variance_minor, resolution)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [
+        storedId,
+        fundId,
+        line.counted.toString(),
+        line.computed.toString(),
+        line.variance.toString(),
+        line.resolution,
+      ],
+    )
+  }
+  return storedId
+}
+
+/** One shape for every read, so a new column cannot be mapped in one place and forgotten in another. */
+function rowToCashCount(r: Record<string, unknown>): CashCountRecord {
+  return {
+    id: String(r.id),
+    branchId: String(r.branch_id),
+    businessDate: isoDate(r.business_date),
+    countedBy: String(r.counted_by),
+    countedAtMs: (r.counted_at as Date).getTime(),
+    proofSha256: (r.proof_sha256 as string | null) ?? null,
+    sealedAtMs: r.sealed_at === null ? null : (r.sealed_at as Date).getTime(),
+    notes: (r.notes as string | null) ?? null,
+    status: (r.status as CashCountRecord['status'] | undefined) ?? 'active',
+    supersededById: r.superseded_by_id === null || r.superseded_by_id === undefined ? null : String(r.superseded_by_id),
+    closedAtMs: r.closed_at === null || r.closed_at === undefined ? null : (r.closed_at as Date).getTime(),
+    closedBy: (r.closed_by as string | null) ?? null,
+    closedReason: (r.closed_reason as string | null) ?? null,
+    lines: (r.lines as Array<Record<string, string | null>>).map((l) => ({
+      fundCode: String(l.fundCode),
+      counted: minor(BigInt(String(l.counted))),
+      computed: minor(BigInt(String(l.computed))),
+      variance: minor(BigInt(String(l.variance))),
+      resolution: l.resolution ?? null,
+    })),
   }
 }
 

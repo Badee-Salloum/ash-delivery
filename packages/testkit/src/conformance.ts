@@ -1038,6 +1038,11 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
             ],
             proofSha256: 'c'.repeat(64),
             sealedAtMs: 1_784_000_000_000,
+            status: 'active',
+            supersededById: null,
+            closedAtMs: null,
+            closedBy: null,
+            closedReason: null,
             notes: null,
           })
         })()
