@@ -1,5 +1,75 @@
 # PROGRESS
 
+## 2026-08-28 — the go-live date, and direct income
+
+Deployed: migrations `0045`–`0047` applied to production (`3 applied, 44 already present`), then
+API, admin and driver — all `● Ready`, `/health` `{"ok":true}`, `ash-admin-eta` verified serving
+`index-CcX-kASL.js`. Trial balance after migration: **0.00**. Commits `831fbdf`, `e273fd3`.
+
+### «تاريخ بدء التطبيق» — and why a date alone is a half-truth
+
+The first five days of production were a trial. The owner asked for a setting naming the real
+go-live date, with everything before it ignored.
+
+A date alone cannot do that, and the proof was already on his screen. `PgLedgerRepo.fundBalance`
+(`repos.ts:273`) and `PgTreasuryPositionSource.readCurrent` (`:932`) sum **every** journal line for a
+fund with no date predicate — and `fundBalance` is a **control** read, not a report: it feeds the
+insufficient-funds guards, the cash-count baseline, `cash_count_stale` and the restoration plan.
+Date-filtering it would make the drawer look empty and break all four. So flows clamp; positions
+never do. What makes the two agree from the epoch forward is a sealed cash count plus a restoration,
+which puts each box on its capital target — so **the date is refused until that has happened**,
+naming what is missing.
+
+It is a business DATE, not a time: every money column is keyed on `business_date`, which now rolls
+at 04:00, and a second go-live instant would be a competing time rule.
+
+**The worst failure it could have introduced, now a named test.** The week close demands a sealed
+cash count for every day of the week. A day before go-live was never operated and can never acquire
+one, so a mid-week go-live would have made that week permanently unsealable and blocked BR7 from the
+first week onward.
+
+### «المدخول المباشر» — direct income
+
+Money arriving that is not a delivery fee. Until now it was recorded as an uncategorised manual
+journal entry, which is how a scrap sale becomes indistinguishable from a correction.
+
+**The operator names a CHANNEL, never a fund.** Which box received it is a physical fact he knows;
+the recipe picks the account. Letting him type a fund code is the trap `fundRefFromCode`'s own header
+describes — its default clause turns any unrecognised string into `cost_center:<code>`, a look-alike
+account no profit reader sums and no error is raised about.
+
+It credits **`other_income`, not `company_revenue`**: BR4 reserves that for the company's residual
+share of *delivery fees*, and folding a battery sale into it would silently overstate the delivery
+business. `fundTypeOf` files the new account under `cost_center` beside `company_revenue`, so no
+`fund_type` enum value is needed — but the `case` **is**, or the first income raises 22P02.
+
+Modelled on `receivable_events`, not on `expenses`: `journal_entry_id` is NOT NULL UNIQUE, so an
+income without its journal cannot exist and the expense route's runtime `assertCompleteExpense`
+guard has no counterpart to need. The replay comparison includes the channel — without it, a retry
+that flipped cash to wallet returns 200 while the original row stands against the wrong box.
+
+No new permission and no RBAC migration: `branch_manager` already holds `expense.write` at branch
+scope, and recording income is the same act.
+
+### A real bug the work uncovered
+
+`Expenses.tsx:45` gated writing on `roleKey === 'branch_manager' || 'general_manager'`, but decision
+9 grants `expense.write` to `system_admin` at scope `all` — so the system admin was shown a
+read-only screen. The identical bug was already found and fixed once in `Dashboard.tsx:131`. It now
+asks the rule via `can()` instead of restating it.
+
+### Deliberately not done
+
+Receivables keep their card on the treasury screen, linked from the money hub. Their client-side
+outbox (mutex + durable storage, `receivable-idempotency.ts`) is what stops a lost response charging
+a driver twice; a second copy of that machinery was not worth the risk. The hub instead warns that
+entries must precede the cash count — which the server enforces with `cash_count_stale`, and which
+the treasury screen's card order currently contradicts.
+
+**2,281 tests pass**; typecheck, domain purity, CSS logical-properties, i18n, wire, sql and glyph
+gates all clean.
+
+
 ## 2026-08-28 — the business day ends at 04:00, and the dashboard picks its day
 
 Deployed to production (API `ash-api`, admin, driver — all `● Ready`, `/health` `{"ok":true}`,
