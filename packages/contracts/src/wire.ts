@@ -1109,6 +1109,29 @@ export const createExpenseRequest = z.object({
   receiptMediaId: z.string().nullable().default(null),
 })
 
+// ── «المدخول المباشر» — direct income, the mirror of an expense ───────────────────────────────
+
+export const createIncomeCategoryRequest = z.object({
+  code: z.string().min(1).max(32),
+  nameAr: z.string().min(1).max(120),
+})
+
+export const createIncomeRequest = z.object({
+  branchId: z.string().optional(),
+  /** Client-owned UUID: exact retries reuse it; a new income must generate a new one. */
+  idempotencyKey: z.string().uuid(),
+  categoryId: z.string().min(1),
+  /**
+   * WHICH BOX received the money. A channel, not a fund code — the operator states a physical fact
+   * and the recipe picks the account, so an unrecognised string can never mint a look-alike.
+   */
+  channel: z.enum(['office_cash', 'office_wallet']),
+  amount: moneySchema.refine((amount) => amount > 0n, 'income amount must be strictly positive'),
+  businessDate: calendarDateSchema.optional(),
+  description: z.string().min(1).max(500),
+  evidenceMediaId: z.string().nullable().default(null),
+})
+
 /** Direct debt creation/collection, explicitly outside any shift. */
 export const createReceivableEventRequest = z.object({
   branchId: z.string().optional(),

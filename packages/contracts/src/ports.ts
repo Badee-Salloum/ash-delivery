@@ -1653,6 +1653,49 @@ export interface ExpenseRecord {
   createdBy: string
 }
 
+// ── «المدخول المباشر» — direct income (owner request, 2026-08-28) ────────────────────────────
+//
+// The mirror of an expense: money arriving at the branch that is not a delivery fee. Kept as its
+// own entity rather than a signed expense, because SRS G defines an expense as «كل ليرة تخرج» and
+// generalising that would make «الصرفيات» correct only while every reader remembers to filter.
+
+export interface IncomeCategoryRecord {
+  id: string
+  code: string
+  nameAr: string
+  active: boolean
+}
+
+export interface IncomeRecord {
+  id: string
+  branchId: string
+  categoryId: string
+  /**
+   * WHICH BOX received the money — a physical fact, not a ledger fund.
+   *
+   * The operator never names a fund: `fundRefFromCode`'s default clause turns any unrecognised
+   * string into `cost_center:<code>`, a look-alike account no profit reader sums and no error is
+   * raised about.
+   */
+  channel: 'office_cash' | 'office_wallet'
+  amount: Minor
+  businessDate: CalendarDate
+  description: string
+  evidenceMediaId: string | null
+  /** NOT NULL in the schema, unlike an expense's: an income without its journal cannot exist. */
+  journalEntryId: number
+  createdBy: string
+}
+
+export interface IncomeRepo {
+  listCategories(): Promise<IncomeCategoryRecord[]>
+  createCategory(category: IncomeCategoryRecord): Promise<void>
+  /** Lookup by the client-owned income UUID, which is also its idempotency key. */
+  get(id: string): Promise<IncomeRecord | null>
+  create(income: IncomeRecord): Promise<void>
+  listByBranchAndDate(branchId: string, from: CalendarDate, to: CalendarDate): Promise<IncomeRecord[]>
+}
+
 export interface ExpenseRepo {
   listCategories(): Promise<ExpenseCategoryRecord[]>
   createCategory(category: ExpenseCategoryRecord): Promise<void>
@@ -1705,6 +1748,7 @@ export interface ReceivableEventRepo {
 export interface FinancialTransactionDeps {
   ledger: LedgerRepo
   expenses: ExpenseRepo
+  incomes: IncomeRepo
   receivableEvents: ReceivableEventRepo
   /** Restoration reads its sealed evidence and capital targets inside the same branch lock. */
   cashCounts: CashCountRepo
@@ -2197,6 +2241,7 @@ export interface Deps {
   /** Atomic statement-snapshot behind the working-capital dashboard. */
   treasuryPosition: TreasuryPositionSource
   expenses: ExpenseRepo
+  incomes: IncomeRepo
   receivableEvents: ReceivableEventRepo
   /** Atomic boundary for ledger-backed expenses and future treasury/receivable commands. */
   financialUnitOfWork: FinancialUnitOfWork

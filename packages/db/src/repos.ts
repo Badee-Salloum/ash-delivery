@@ -66,6 +66,10 @@ function fundTypeOf(fund: Posting['lines'][number]['fund']): string {
     case 'company_revenue':
     case 'yalago_income':
     case 'fee_earned':
+    // `other_income` joins them for the same reason, and WITHOUT this line the first direct income
+    // would try to insert 'other_income'::fund_type and fail at 22P02 — the enum has no such value
+    // and deliberately gains none, because this is a P&L account and not a box anyone counts.
+    case 'other_income':
       // Not in the client's literal E-1 tree; they are the P&L accounts the tree implies.
       return 'cost_center'
     default:

@@ -482,6 +482,30 @@ export interface ExpenseCategoryView {
   nameAr: string
   active: boolean
 }
+/** «مدخول مباشر» — money arriving that is not a delivery fee. The mirror of an expense. */
+export interface IncomeView {
+  id: string
+  branchId: string
+  categoryId: string
+  /** WHICH BOX received it. A physical fact the operator knows, never a ledger fund code. */
+  channel: 'office_cash' | 'office_wallet'
+  /** Decimal string. */
+  amount: string
+  businessDate: string
+  description: string
+  evidenceMediaId: string | null
+  /** Never null, unlike an expense's — the column is NOT NULL. */
+  journalEntryId: number
+  createdBy: string
+}
+
+export interface IncomeCategoryView {
+  id: string
+  code: string
+  nameAr: string
+  active: boolean
+}
+
 export interface ExpenseView {
   id: string
   branchId: string
@@ -1268,6 +1292,31 @@ export class ApiClient {
   }
 
   // ── Expenses (SRS G) — create is expense.write (BM+GM); categories are settings.write (sysadmin) ──
+  // ── «المدخول المباشر» — the mirror of an expense ──────────────────────────────────────────
+  incomeCategories() {
+    return this.get<{ categories: IncomeCategoryView[] }>('/income-categories')
+  }
+  createIncomeCategory(body: { code: string; nameAr: string }) {
+    return this.post<IncomeCategoryView>('/income-categories', body)
+  }
+  incomes(from?: string, to?: string) {
+    const q = [from && `from=${from}`, to && `to=${to}`].filter(Boolean).join('&')
+    return this.get<{ from: string; to: string; incomes: IncomeView[]; total: string }>(`/incomes${q ? `?${q}` : ''}`)
+  }
+  /** `channel` is the box that received the money; the recipe picks the ledger account. */
+  createIncome(body: {
+    idempotencyKey: string
+    categoryId: string
+    channel: 'office_cash' | 'office_wallet'
+    amount: string
+    description: string
+    businessDate?: string
+    evidenceMediaId?: string | null
+    branchId?: string
+  }) {
+    return this.post<IncomeView>('/incomes', body)
+  }
+
   expenseCategories() {
     return this.get<{ categories: ExpenseCategoryView[] }>('/expense-categories')
   }

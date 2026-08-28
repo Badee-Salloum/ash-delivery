@@ -1018,6 +1018,23 @@ orderNo: 'رقم الطلب',
     companyDelta: 'أثر الشركة',
   },
 
+  /** «الحركات المالية» — one place for the money a branch manager records. */
+  movements: {
+    add: 'تسجيل حركة مالية',
+    modeExpense: 'صرفية',
+    modeIncome: 'مدخول مباشر',
+    channel: 'وصل إلى',
+    channelCash: 'صندوق الكاش',
+    channelWallet: 'محفظة المكتب',
+    receivablesElsewhere: 'الذمم في شاشة الخزينة ←',
+    beforeCountHint: 'سجّل كل الحركات قبل جرد الصندوق — أي حركة بعد الجرد تُلزم بإعادته قبل الترميم.',
+  },
+  incomes: {
+    title: 'المداخيل المباشرة',
+    add: 'تسجيل مدخول',
+    added: 'سُجّل المدخول',
+    none: 'لا مداخيل في هذه الفترة',
+  },
   expenses: {
     title: 'الصرفيات',
     add: 'إضافة صرفية',

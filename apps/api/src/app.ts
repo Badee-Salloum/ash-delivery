@@ -62,6 +62,7 @@ import { branchSubject, resolveBranchId } from './branch-scope.ts'
 import { GO_LIVE_SETTING_KEY, goLiveDate } from './go-live.ts'
 import { assertEveryRouteDeclaresPermission, collectRoutes, makeAuthorize, resetRouteRegistry } from './rbac.ts'
 import { registerExpenseRoutes } from './expenses.routes.ts'
+import { registerIncomeRoutes } from './incomes.routes.ts'
 import { registerFleetRoutes } from './fleet.routes.ts'
 import { registerUserRoutes } from './users.routes.ts'
 import { registerDashboardRoutes } from './dashboard.routes.ts'
@@ -2278,6 +2279,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   // ── Expenses (SRS G) ────────────────────────────────────────────────────────────
   registerExpenseRoutes(app, deps)
+  // «المدخول المباشر» — the mirror of an expense, registered beside it on purpose.
+  registerIncomeRoutes(app, deps)
 
   // ── Treasury: daily cash count + manual entries (SRS E-3, E-5) ──────────────────
   registerTreasuryRoutes(app, deps)

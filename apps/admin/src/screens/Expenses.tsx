@@ -1,5 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
-import type { ExpenseCategoryView, ExpenseView } from '@ash/client'
+import type { ExpenseCategoryView, ExpenseView, IncomeCategoryView, IncomeView } from '@ash/client'
+import { type RoleKey, can } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
 import { explainError } from '../errors.ts'
@@ -42,7 +43,36 @@ export function Expenses(): ReactNode {
   const [catCode, setCatCode] = useState('')
   const [catName, setCatName] = useState('')
 
-  const canWrite = session?.roleKey === 'branch_manager' || session?.roleKey === 'general_manager'
+  /*
+   * «الحركات المالية» — one place for the money a branch manager records.
+   *
+   * `expense` and `income` are the same act in opposite directions, so they share this screen and
+   * this date range. Receivables keep their own card in the treasury screen: their client-side
+   * outbox (mutex + durable storage, `receivable-idempotency.ts`) is what stops a lost response
+   * charging a driver twice, and a second copy of that machinery is not worth the risk.
+   */
+  const [mode, setMode] = useState<'expense' | 'income'>('expense')
+  const [incomeRows, setIncomeRows] = useState<IncomeView[]>([])
+  const [incomeTotal, setIncomeTotal] = useState('0.00')
+  const [incomeCats, setIncomeCats] = useState<IncomeCategoryView[]>([])
+  const [incomeCategoryId, setIncomeCategoryId] = useState('')
+  const [channel, setChannel] = useState<'office_cash' | 'office_wallet'>('office_cash')
+  const pendingIncomeKey = useRef<string | null>(null)
+
+  /*
+   * ASK THE RULE, do not restate it.
+   *
+   * This read `roleKey === 'branch_manager' || 'general_manager'`, which owner decision 9 made
+   * wrong on 2026-08-12: the system admin holds `expense.write` at scope 'all' and was shown a
+   * read-only screen anyway. Exactly the bug already found and fixed in Dashboard.tsx.
+   */
+  const canWrite =
+    session != null &&
+    can(
+      { userId: session.userId, roleKey: session.roleKey as RoleKey, branchId: session.branchId },
+      'expense.write',
+      { branchId: branchId ?? session.branchId },
+    ).allowed
   const isSysadmin = session?.roleKey === 'system_admin'
 
   const load = useCallback(() => {
@@ -59,6 +89,14 @@ export function Expenses(): ReactNode {
       })
     void api.expenseCategories().then((r) => setCats(r.categories)).catch(() => undefined)
     void api.get<{ vehicles: VehicleLite[] }>('/vehicles').then((r) => setVehicles(r.vehicles)).catch(() => undefined)
+    void api
+      .incomes(from || undefined, to || undefined)
+      .then((r) => {
+        setIncomeRows(r.incomes)
+        setIncomeTotal(r.total)
+      })
+      .catch(() => setIncomeRows([]))
+    void api.incomeCategories().then((r) => setIncomeCats(r.categories)).catch(() => undefined)
   }, [api, from, to])
   useEffect(load, [load, branchId])
 
@@ -99,6 +137,35 @@ export function Expenses(): ReactNode {
     }
   }
 
+  const addIncome = async (): Promise<void> => {
+    setBusy(true)
+    setFormError(null)
+    // The key is held across a failed attempt for the same reason as the expense one: a tap after
+    // a lost response must ask the server for the SAME operation rather than record a second one.
+    const key = pendingIncomeKey.current ?? crypto.randomUUID()
+    pendingIncomeKey.current = key
+    try {
+      await api.createIncome({
+        idempotencyKey: key,
+        categoryId: incomeCategoryId,
+        channel,
+        amount,
+        description,
+      })
+      pendingIncomeKey.current = null
+      toast.success(t.incomes.added)
+      setAmount('')
+      setDescription('')
+      load()
+    } catch (e) {
+      const code = (e as { error?: string }).error ?? 'error'
+      if (code === 'idempotency_key_conflict') pendingIncomeKey.current = null
+      setFormError(code)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const addCategory = async (): Promise<void> => {
     try {
       await api.createExpenseCategory({ code: catCode, nameAr: catName })
@@ -114,13 +181,62 @@ export function Expenses(): ReactNode {
     return <Pending error={error} loadingLabel={t.common.loading} errorLabel={explainError(error, t)} onRetry={load} retryLabel={t.common.retry} />
   }
 
-  const ready = categoryId !== '' && amount.trim() !== '' && description.trim() !== '' && (kind !== 'vehicle' || vehicleId !== '')
+  const ready =
+    mode === 'expense'
+      ? categoryId !== '' && amount.trim() !== '' && description.trim() !== '' && (kind !== 'vehicle' || vehicleId !== '')
+      : incomeCategoryId !== '' && amount.trim() !== '' && description.trim() !== ''
 
   return (
     <div className="flex flex-col gap-4">
       {canWrite ? (
-        <Card title={t.expenses.add}>
+        <Card title={t.movements.add}>
           <div className="flex flex-col gap-3">
+            {/* One form, two directions. Money out and money in are the same act of recording. */}
+            <div className="flex flex-wrap gap-2" role="group" aria-label={t.movements.add}>
+              {(['expense', 'income'] as const).map((m) => (
+                <Button
+                  key={m}
+                  variant={mode === m ? 'primary' : 'ghost'}
+                  onClick={() => {
+                    setMode(m)
+                    setFormError(null)
+                  }}
+                >
+                  {m === 'expense' ? t.movements.modeExpense : t.movements.modeIncome}
+                </Button>
+              ))}
+              <a className="ms-auto self-center text-sm text-sky-700 underline" href="#treasury">
+                {t.movements.receivablesElsewhere}
+              </a>
+            </div>
+
+            {mode === 'income' ? (
+              <div className="flex flex-wrap gap-3">
+                <Field label={t.expenses.category}>
+                  <Select value={incomeCategoryId} onChange={(e) => setIncomeCategoryId(e.target.value)}>
+                    <option value="">—</option>
+                    {incomeCats.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.nameAr}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                {/* WHICH BOX received it — a physical fact, never a ledger fund code. */}
+                <Field label={t.movements.channel}>
+                  <Select
+                    value={channel}
+                    onChange={(e) => setChannel(e.target.value as 'office_cash' | 'office_wallet')}
+                  >
+                    <option value="office_cash">{t.movements.channelCash}</option>
+                    <option value="office_wallet">{t.movements.channelWallet}</option>
+                  </Select>
+                </Field>
+                <Field label={t.expenses.amount}>
+                  <MoneyInput value={amount} onChange={(e) => setAmount(e.target.value)} className="w-32" />
+                </Field>
+              </div>
+            ) : (
             <div className="flex flex-wrap gap-3">
               <Field label={t.expenses.category}>
                 <Select value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
@@ -155,13 +271,26 @@ export function Expenses(): ReactNode {
                 <MoneyInput value={amount} onChange={(e) => setAmount(e.target.value)} className="w-32" />
               </Field>
             </div>
+            )}
             <Field label={t.expenses.description}>
               <TextInput value={description} onChange={(e) => setDescription(e.target.value)} />
             </Field>
             {formError ? <p className="text-sm text-red-600">{explainError(formError, t)}</p> : null}
-            <Button variant="primary" className="self-start" disabled={busy || !ready} onClick={add}>
-              {t.expenses.add}
+            <Button
+              variant="primary"
+              className="self-start"
+              disabled={busy || !ready}
+              onClick={mode === 'expense' ? add : addIncome}
+            >
+              {mode === 'expense' ? t.expenses.add : t.incomes.add}
             </Button>
+            {/*
+              Entries must be recorded BEFORE the box is counted: the server refuses a restoration
+              whose count no longer matches the ledger (`cash_count_stale`), and there is no route
+              to count a day twice. Saying so here is cheaper than discovering it at the restoration
+              button — the count and restoration live on the treasury screen.
+            */}
+            <p className="text-xs text-slate-500">{t.movements.beforeCountHint}</p>
           </div>
         </Card>
       ) : null}
@@ -182,6 +311,31 @@ export function Expenses(): ReactNode {
               <td className="px-3 py-1">
                 {kindLabel(e.costCenterKind)}
                 {e.costCenterKind === 'vehicle' ? ` · ${vehicleCode(e.vehicleId)}` : ''}
+              </td>
+              <td className="px-3 py-1 text-slate-600">{e.description}</td>
+              <td className="px-3 py-1"><Money value={e.amount} /></td>
+            </tr>
+          ))}
+        </Table>
+      </Card>
+
+      <Card title={t.incomes.title}>
+        <div className="mb-3 flex flex-wrap items-end gap-3">
+          <span className="ms-auto text-sm text-slate-600">
+            {t.expenses.total}: <Money value={incomeTotal} className="font-semibold" />
+          </span>
+        </div>
+        <Table
+          head={[t.expenses.date, t.expenses.category, t.movements.channel, t.expenses.description, t.expenses.amount]}
+          isEmpty={incomeRows.length === 0}
+          empty={t.incomes.none}
+        >
+          {incomeRows.map((e) => (
+            <tr key={e.id}>
+              <td className="num px-3 py-1 text-slate-500">{e.businessDate}</td>
+              <td className="px-3 py-1">{incomeCats.find((c) => c.id === e.categoryId)?.nameAr ?? e.categoryId.slice(0, 8)}</td>
+              <td className="px-3 py-1">
+                {e.channel === 'office_cash' ? t.movements.channelCash : t.movements.channelWallet}
               </td>
               <td className="px-3 py-1 text-slate-600">{e.description}</td>
               <td className="px-3 py-1"><Money value={e.amount} /></td>

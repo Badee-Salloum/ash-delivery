@@ -1,0 +1,11 @@
+-- 0046 - a dedicated ledger event for «المدخول المباشر» (direct income)
+--
+-- Enum-only, for the reason 0023 and 0036 both record: a PostgreSQL enum value must be committed
+-- before a later migration can use it in an index, a constraint or an insert, and the migrator
+-- wraps each file in exactly one transaction. Everything that USES this value lives in 0047.
+--
+-- NO fund_type value is added, and that is deliberate. `other_income` is a profit-and-loss account,
+-- not a box the owner counts, so `fundTypeOf` files it under 'cost_center' exactly as it already
+-- files company_revenue, yalago_income and fee_earned — while `fundCodeOf` keeps the flat code
+-- `other_income` that the profit readers sum by name.
+ALTER TYPE ledger_event ADD VALUE IF NOT EXISTS 'income';

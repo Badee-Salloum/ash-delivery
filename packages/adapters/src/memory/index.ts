@@ -79,6 +79,7 @@ import { memoryCipher } from '../crypto.ts'
 import { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 import { MemoryOcrReadRepo, MemoryOcrReader } from '../ocr/memory.ts'
 import { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
+import { MemoryIncomeRepo } from './incomes.ts'
 import { MemoryCashCountRepo } from './cashcount.ts'
 import { MemoryOfficeCapitalTargetRepo, MemoryRestorationRepo } from './restoration.ts'
 import { MemoryNotificationRepo, MemoryTierRepo } from './tiers.ts'
@@ -88,6 +89,7 @@ import { MemoryReceivableEventRepo } from './receivables.ts'
 export { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 export { MemoryOcrReadRepo, MemoryOcrReader, ScriptedOcrReader } from '../ocr/memory.ts'
 export { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
+export { MemoryIncomeRepo } from './incomes.ts'
 export { MemoryCashCountRepo } from './cashcount.ts'
 export { MemoryOfficeCapitalTargetRepo, MemoryRestorationRepo } from './restoration.ts'
 export { MemoryNotificationRepo, MemoryTierRepo } from './tiers.ts'
@@ -1883,6 +1885,7 @@ export interface MemoryDeps extends Deps {
   blobs: MemoryBlobStore
   ocrReads: MemoryOcrReadRepo
   expenses: MemoryExpenseRepo
+  incomes: MemoryIncomeRepo
   receivableEvents: MemoryReceivableEventRepo
   financialUnitOfWork: MemoryFinancialUnitOfWork
   cashCounts: MemoryCashCountRepo
@@ -1920,6 +1923,7 @@ export interface MemoryDeps extends Deps {
 export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
   private readonly deps: FinancialTransactionDeps
   private readonly expenses: MemoryExpenseRepo
+  private readonly incomes: MemoryIncomeRepo
   private readonly ledger: MemoryLedgerRepo
   private readonly receivableEvents: MemoryReceivableEventRepo
   private readonly capitalTargets: MemoryOfficeCapitalTargetRepo
@@ -1928,6 +1932,7 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
 
   constructor(
     expenses: MemoryExpenseRepo,
+    incomes: MemoryIncomeRepo,
     ledger: MemoryLedgerRepo,
     receivableEvents: MemoryReceivableEventRepo,
     cashCounts: MemoryCashCountRepo,
@@ -1936,12 +1941,13 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
     gate: MemoryTransactionGate,
   ) {
     this.expenses = expenses
+    this.incomes = incomes
     this.ledger = ledger
     this.receivableEvents = receivableEvents
     this.capitalTargets = capitalTargets
     this.restorations = restorations
     this.gate = gate
-    this.deps = { expenses, ledger, receivableEvents, cashCounts, capitalTargets, restorations }
+    this.deps = { expenses, incomes, ledger, receivableEvents, cashCounts, capitalTargets, restorations }
   }
 
   async run<T>(
@@ -1950,6 +1956,7 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
   ): Promise<T> {
     return this.gate.run(async () => {
       const expenseSnapshot = this.expenses.snapshotRows()
+      const incomeSnapshot = this.incomes.snapshotRows()
       const ledgerSnapshot = this.ledger.snapshotState()
       const receivableSnapshot = this.receivableEvents.snapshot()
       const capitalTargetSnapshot = this.capitalTargets.snapshotRows()
@@ -1958,6 +1965,7 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
         return await work(this.deps)
       } catch (error) {
         this.expenses.restoreRows(expenseSnapshot)
+        this.incomes.restoreRows(incomeSnapshot)
         this.ledger.restoreState(ledgerSnapshot)
         this.receivableEvents.restore(receivableSnapshot)
         this.capitalTargets.restoreRows(capitalTargetSnapshot)
@@ -2106,6 +2114,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   const gate = new MemoryTransactionGate()
   const treasuryPosition = new MemoryTreasuryPositionSource(ledger, shifts, gate)
   const expenses = new MemoryExpenseRepo()
+  const incomes = new MemoryIncomeRepo()
   const receivableEvents = new MemoryReceivableEventRepo()
   const cashCounts = new MemoryCashCountRepo()
   const capitalTargets = new MemoryOfficeCapitalTargetRepo()
@@ -2114,6 +2123,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   const preapprovedShiftRules = new MemoryPreapprovedShiftRuleRepo()
   const financialUnitOfWork = new MemoryFinancialUnitOfWork(
     expenses,
+    incomes,
     ledger,
     receivableEvents,
     cashCounts,
@@ -2180,6 +2190,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     ledger,
     treasuryPosition,
     expenses,
+    incomes,
     receivableEvents,
     financialUnitOfWork,
     cashCounts,

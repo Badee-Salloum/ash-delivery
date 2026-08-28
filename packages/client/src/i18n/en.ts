@@ -990,6 +990,22 @@ orderNo: 'Order no.',
     companyDelta: 'Company impact',
   },
 
+  movements: {
+    add: 'Record a money movement',
+    modeExpense: 'Expense',
+    modeIncome: 'Direct income',
+    channel: 'Received into',
+    channelCash: 'Cash box',
+    channelWallet: 'Office wallet',
+    receivablesElsewhere: 'Receivables are on the treasury screen →',
+    beforeCountHint: 'Record every movement before counting the box — anything after the count forces a recount before the restoration.',
+  },
+  incomes: {
+    title: 'Direct income',
+    add: 'Record income',
+    added: 'Income recorded',
+    none: 'No income in this period',
+  },
   expenses: {
     title: 'Expenses',
     add: 'Add expense',

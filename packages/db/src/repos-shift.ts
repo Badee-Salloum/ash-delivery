@@ -29,6 +29,9 @@ import type {
   ExpenseCategoryRecord,
   ExpenseRecord,
   ExpenseRepo,
+  IncomeCategoryRecord,
+  IncomeRecord,
+  IncomeRepo,
   NotificationRecord,
   NotificationRepo,
   PreapprovedShiftRuleRecord,
@@ -1717,6 +1720,96 @@ const expenseRecord = (row: Record<string, unknown>): ExpenseRecord => ({
   description: String(row.description),
   receiptMediaId: (row.receipt_media_id as string | null) ?? null,
   journalEntryId: row.journal_entry_id === null ? null : Number(row.journal_entry_id),
+  createdBy: String(row.created_by),
+})
+
+/**
+ * «المدخول المباشر» — direct income. Deliberately a near-copy of `PgExpenseRepo`: the two are the
+ * same shape of fact in opposite directions, and a reader who knows one should recognise the other.
+ */
+export class PgIncomeRepo implements IncomeRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async listCategories(): Promise<IncomeCategoryRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT id, code, name_ar, active FROM income_categories WHERE active ORDER BY code',
+    )
+    return rows.map((r) => ({
+      id: String(r.id),
+      code: String(r.code),
+      nameAr: String(r.name_ar),
+      active: Boolean(r.active),
+    }))
+  }
+
+  async createCategory(category: IncomeCategoryRecord): Promise<void> {
+    try {
+      await this.pool.query(
+        'INSERT INTO income_categories (id, code, name_ar, active) VALUES ($1,$2,$3,$4)',
+        [category.id, category.code, category.nameAr, category.active],
+      )
+    } catch (err) {
+      if (isPgError(err, PG.UNIQUE_VIOLATION)) {
+        throw Object.assign(new Error(`duplicate category ${category.code}`), { code: 'DUPLICATE_CODE' })
+      }
+      throw err
+    }
+  }
+
+  async get(id: string): Promise<IncomeRecord | null> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT *, amount_minor::text AS amount FROM incomes WHERE id = $1',
+      [id],
+    )
+    const row = rows[0]
+    return row ? incomeRecord(row) : null
+  }
+
+  async create(income: IncomeRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO incomes (id, branch_id, category_id, channel, amount_minor,
+                            business_date, description, evidence_media_id, journal_entry_id, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [
+        income.id,
+        income.branchId,
+        income.categoryId,
+        income.channel,
+        income.amount.toString(),
+        income.businessDate,
+        income.description,
+        income.evidenceMediaId,
+        income.journalEntryId,
+        income.createdBy,
+      ],
+    )
+  }
+
+  async listByBranchAndDate(branchId: string, from: CalendarDate, to: CalendarDate): Promise<IncomeRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT *, amount_minor::text AS amount FROM incomes
+        WHERE branch_id = $1 AND business_date BETWEEN $2 AND $3
+        ORDER BY business_date, id`,
+      [branchId, from, to],
+    )
+    return rows.map(incomeRecord)
+  }
+}
+
+const incomeRecord = (row: Record<string, unknown>): IncomeRecord => ({
+  id: String(row.id),
+  branchId: String(row.branch_id),
+  categoryId: String(row.category_id),
+  channel: row.channel as IncomeRecord['channel'],
+  amount: minor(BigInt(String(row.amount))),
+  businessDate: isoDate(row.business_date),
+  description: String(row.description),
+  evidenceMediaId: (row.evidence_media_id as string | null) ?? null,
+  // NOT NULL in the schema, unlike an expense's — an income without its journal cannot exist.
+  journalEntryId: Number(row.journal_entry_id),
   createdBy: String(row.created_by),
 })
 

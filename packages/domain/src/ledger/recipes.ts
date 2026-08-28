@@ -45,6 +45,8 @@ export type LedgerEvent =
   | 'float_return'
   | 'wallet_return'
   | 'expense'
+  /** «مدخول مباشر» — money reaching the branch that is not a delivery fee. The mirror of `expense`. */
+  | 'income'
   | 'manual'
   | 'correction'
   /** «الترميم» — the daily sweep of profit to صندوق الشركة, or the replenishment of office capital. */
@@ -64,6 +66,14 @@ export type FundRef =
   | { readonly kind: 'company_revenue' }
   | { readonly kind: 'yalago_income' }
   | { readonly kind: 'fee_earned' }
+  /**
+   * «مدخول مباشر» — income that is NOT a delivery fee: a scrap sale, a damage recovery, a sponsor.
+   *
+   * Deliberately its own account rather than `company_revenue`. BR4 defines `company_revenue` as
+   * the company's residual share of delivery fees, and `/dashboard/profit` reports it under that
+   * name; folding a battery sale into it would silently overstate the delivery business.
+   */
+  | { readonly kind: 'other_income' }
   /**
    * «صندوق الشركة» — where profit goes, and where an office capital shortfall is funded from.
    *
@@ -679,6 +689,27 @@ export function expense(costCenterId: string, amount: Minor, occurrenceKey = '1'
   })
 }
 
+/**
+ * «مدخول مباشر» — the mirror of `expense`: money arriving that is not a delivery fee.
+ *
+ * THE CALLER NAMES A CHANNEL, NEVER A FUND. `channel` is a physical fact the person recording it
+ * knows — the notes went into the drawer, or the transfer landed in the branch wallet. Letting an
+ * operator type a fund code instead is the trap `fundRefFromCode`'s own header describes: its
+ * default clause turns any unrecognised string into `cost_center:<code>`, a look-alike account no
+ * profit reader sums and no error is ever raised about.
+ *
+ * The wallet channel is not decoration. An office wallet can also be the side that FALLS on a
+ * correction — which is precisely why a cash-only income recipe could not express Haidar's shift.
+ */
+export function income(channel: OfficeFund, amount: Minor, occurrenceKey = '1'): Posting {
+  if (amount <= ZERO) throw new RangeError(`income must be positive, got ${amount}`)
+  return assertBalanced({
+    eventType: 'income',
+    occurrenceKey,
+    lines: [D({ kind: channel }, amount), C({ kind: 'other_income' }, amount)],
+  })
+}
+
 // ── «الترميم» — the daily restoration (owner decision 10) ─────────────────────────────────
 //
 // The owner's own process, in his own words: «راس مال المكتب رقم ثابت لكل من المحفظة و كاش المكتب.
@@ -1034,6 +1065,7 @@ export function fundRefFromCode(code: string): FundRef {
     case 'company_revenue':
     case 'yalago_income':
     case 'fee_earned':
+    case 'other_income':
     // WITHOUT THIS LINE a manual entry naming «company_box» silently becomes
     // `cost_center:company_box` — a different account that looks right in the UI and never moves
     // the fund the operator meant. Exactly the failure this function's own header describes.

@@ -24,7 +24,7 @@ const MUST_AUDIT = [
   'users', 'role_permissions', 'settings', 'approval_ceilings',
   'drivers', 'vehicles', 'documents',
   'funds', 'fx_days', 'week_locks', 'journal_entries', 'journal_lines',
-  'cash_counts', 'expenses', 'receivable_events',
+  'cash_counts', 'expenses', 'incomes', 'receivable_events',
   'shifts', 'shift_orders', 'cash_deductions', 'shift_media', 'float_tranches', 'tier_rules',
   // Decision-complete cash/wallet close snapshots. Append-only, but creation is a money decision.
   'shift_settlements',
@@ -53,6 +53,7 @@ const AUDIT_EXEMPT = {
   roles: 'reference data; the grants in role_permissions are what carry authority',
   permissions: 'reference data, defined in code',
   expense_categories: 'reference data',
+  income_categories: 'reference data',
   sessions: 'high churn; login/logout is covered by login_attempts',
   login_attempts: 'already an append-only audit record in its own right',
   notifications: 'derived from audited events; auditing them would double the write volume',
