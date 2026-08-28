@@ -4,6 +4,7 @@ import { type Deps, type JournalEntryRecord, type ShiftRecord, serializeMoney } 
 import { REQUIRED_END_SLOTS, isLive, minor, toUsdMinor, weekStartFor } from '@ash/domain'
 import { ServiceError, includedOrders, todayFor } from './shifts.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
+import { clampToGoLive, goLiveDate } from './go-live.ts'
 
 /**
  * The minimal ops dashboard (SRS I-1, in scope per the brief's "minimal ops dashboard").
@@ -86,9 +87,14 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     // `company_revenue` is credited at each approval, so its balance (negated to a positive)
     // over the current financial week is exactly the accrual the GM watches.
     const weekStart = weekStartFor(today)
+    const goLive = await goLiveDate(deps)
+    const accrualFrom = clampToGoLive(weekStart, goLive)
     const weekEntries = await deps.ledger.listByWeek(branchId, weekStart)
     let companyShareWeek = 0n
     for (const e of weekEntries) {
+      // The week is the query unit (BR7 seals weeks), so a go-live mid-week is filtered per entry
+      // rather than by asking for a shorter week the ledger has no way to address.
+      if (e.businessDate < accrualFrom) continue
       for (const l of e.lines) {
         if (l.fundCode === 'company_revenue') companyShareWeek += l.side === 'C' ? l.amount : -l.amount
       }
@@ -114,6 +120,13 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
 
     return {
       businessDate: today,
+      /**
+       * The configured go-live date, so the screen can MARK a day that predates it rather than
+       * hide it. The day picker is a deliberate historical lookup; silently blanking it would be
+       * worse than labelling it «قبل بدء التطبيق».
+       */
+      goLiveBusinessDate: goLive,
+      beforeGoLive: goLive !== null && today < goLive,
       revenue: {
         feesSyp: serializeMoney(minor(feeTotal)),
         feesUsd: revenueUsd,
@@ -149,7 +162,9 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     const q = z.object({ from: realCalendarDate.optional(), to: realCalendarDate.optional() }).parse(req.query)
     const today = todayFor(deps)
     const to = q.to ?? today
-    const from = q.from ?? weekStartFor(to)
+    // Clamped to go-live: the trial period stays in the database and stays readable, but it is
+    // never totalled into a profit figure. Clamping the START only — the caller's `to` is his own.
+    const from = clampToGoLive(q.from ?? weekStartFor(to), await goLiveDate(deps))
     if (from > to) {
       throw new z.ZodError([{
         code: 'custom',
@@ -230,7 +245,9 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     const branchId = resolveBranchId(req)
     const today = todayFor(deps)
     const to = q.to ?? today
-    const from = q.from ?? weekStartFor(to)
+    // Clamped to go-live, like the profit report. The CAPITAL block below is deliberately NOT
+    // clamped: it is a position read as it stands, made true at go-live by the opening ceremony.
+    const from = clampToGoLive(q.from ?? weekStartFor(to), await goLiveDate(deps))
 
     // No port reads a date RANGE — the ledger is addressed by week, because that is the unit BR7
     // seals. Walking the weeks the range touches keeps this to existing queries; a month is five.

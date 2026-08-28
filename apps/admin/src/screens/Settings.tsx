@@ -11,6 +11,7 @@ interface Fx {
 interface GeneralSettings {
   receiptCeilingMinor: string | null
   kwhPriceMinor: string | null
+  goLiveBusinessDate: string | null
 }
 
 /**
@@ -59,6 +60,7 @@ export function Settings(): ReactNode {
     <div className="flex flex-col gap-4">
       {fx ? <FxCard fx={fx} canEdit={canEdit} onSaved={load} /> : null}
       {general ? <GeneralCard general={general} canEdit={canEdit} onSaved={load} /> : null}
+      {general ? <GoLiveCard current={general.goLiveBusinessDate} canEdit={canEdit} onSaved={load} /> : null}
     </div>
   )
 }
@@ -219,5 +221,98 @@ function MoneySetting({
         ) : null}
       </div>
     </div>
+  )
+}
+
+/**
+ * «تاريخ بدء التطبيق» — the go-live date.
+ *
+ * Reports start here; the trial period before it stays in the record and stays readable, but it is
+ * never totalled into a figure. A DATE, not a time: the business day already rolls at 04:00, and a
+ * second go-live instant would be a competing time rule.
+ *
+ * The server refuses the date until that day's boxes have been counted and restored. That is not
+ * ceremony for its own sake — declaring a date only clamps the FLOW reports, while balances stay
+ * cumulative because they are positions. The count and restoration are what put the boxes on their
+ * capital target, so the two agree from that day forward instead of drifting apart.
+ */
+function GoLiveCard({
+  current,
+  canEdit,
+  onSaved,
+}: {
+  current: string | null
+  canEdit: boolean
+  onSaved(): void
+}): ReactNode {
+  const { api, t, branchId } = useApp()
+  const [text, setText] = useState('')
+  const [msg, setMsg] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [missing, setMissing] = useState<string[]>([])
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => setText(''), [current])
+
+  const save = async (value: string | null): Promise<void> => {
+    setBusy(true)
+    setErr(null)
+    setMsg(null)
+    setMissing([])
+    try {
+      await api.updateSettings({
+        goLiveBusinessDate: value,
+        ...(branchId === null || branchId === undefined ? {} : { branchId }),
+      })
+      setMsg(t.settings.saved)
+      onSaved()
+    } catch (e) {
+      const failure = e as { error?: string; detail?: { missing?: string[] } }
+      setErr(failure.error ?? 'error')
+      setMissing(failure.detail?.missing ?? [])
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card title={t.settings.goLiveTitle}>
+      <div className="rounded-lg border border-slate-200 p-3">
+        <div className="text-xs text-slate-600">{t.settings.goLiveHint}</div>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <span className="num text-lg font-bold">{current ?? t.settings.goLiveUnset}</span>
+          {current ? <Badge tone="green">{t.settings.goLiveActive}</Badge> : null}
+          {canEdit ? (
+            <>
+              <TextInput
+                type="date"
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                className="w-44"
+                aria-label={t.settings.goLiveTitle}
+              />
+              <Button variant="ghost" disabled={busy || text.trim() === ''} onClick={() => void save(text)}>
+                {t.common.save}
+              </Button>
+              {current ? (
+                <Button variant="ghost" disabled={busy} onClick={() => void save(null)}>
+                  {t.settings.goLiveClear}
+                </Button>
+              ) : null}
+            </>
+          ) : null}
+        </div>
+        <p className="mt-2 text-xs text-slate-500">{t.settings.goLiveKeepsHistory}</p>
+      </div>
+      {msg ? <p className="mt-3 text-sm font-medium text-emerald-700">{msg}</p> : null}
+      {err ? <p className="mt-3 text-sm font-medium text-red-600">{explainError(err, t)}</p> : null}
+      {missing.length > 0 ? (
+        <ul className="mt-2 list-disc text-sm text-red-600 ps-5">
+          {missing.map((m) => (
+            <li key={m}>{m === 'sealed_cash_count' ? t.settings.goLiveNeedsCount : t.settings.goLiveNeedsRestoration}</li>
+          ))}
+        </ul>
+      ) : null}
+    </Card>
   )
 }

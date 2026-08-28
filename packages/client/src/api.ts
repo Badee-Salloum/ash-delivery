@@ -1230,10 +1230,25 @@ export class ApiClient {
   }
 
   settings() {
-    return this.get<{ receiptCeilingMinor: string | null; kwhPriceMinor: string | null }>('/settings')
+    return this.get<{
+      receiptCeilingMinor: string | null
+      kwhPriceMinor: string | null
+      goLiveBusinessDate: string | null
+    }>('/settings')
   }
-  /** Money fields are decimal strings ("50000.00"); only what is sent changes. */
-  updateSettings(body: { receiptCeilingMinor?: string; kwhPriceMinor?: string }) {
+  /**
+   * Money fields are decimal strings ("50000.00"); only what is sent changes.
+   *
+   * `goLiveBusinessDate` needs `branchId`: the setting is global but its opening ceremony (a sealed
+   * cash count plus a restoration) is per-branch, and `settings.write` belongs to the system admin,
+   * who has no branch of his own. `null` clears the date.
+   */
+  updateSettings(body: {
+    receiptCeilingMinor?: string
+    kwhPriceMinor?: string
+    goLiveBusinessDate?: string | null
+    branchId?: string
+  }) {
     return this.put<{ updated: string[] }>('/settings', body)
   }
 

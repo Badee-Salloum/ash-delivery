@@ -826,3 +826,94 @@ describe('the owner’s treasury sheet (I-1, decision 10)', () => {
     expect((await get(sysadmin, `/dashboard/treasury?branchId=${BRANCH}`)).statusCode).toBe(200)
   })
 })
+
+/**
+ * «تاريخ بدء التطبيق» — the go-live date clamps FLOW reports (owner request, 2026-08-28).
+ *
+ * The first five days of production were a trial. The owner wanted the figures to start on a date
+ * he names. What must NOT happen is the positions moving with them: `fundBalance` is a control
+ * read, and a box that looks emptier than it is would break the insufficient-funds guards, the
+ * cash-count baseline and the restoration plan. So flows clamp; balances do not.
+ */
+describe('the go-live date clamps the reports, never the positions', () => {
+  const post = async (token: string, url: string, payload: unknown = {}): Promise<LightMyRequestResponse> =>
+    await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(token) }, payload: payload as object })
+
+  async function scopedGm(): Promise<string> {
+    h.deps.users.seed({
+      id: 'u-gm', branchId: BRANCH, roleKey: 'general_manager', username: 'gm',
+      fullNameAr: 'gm', passwordHash: 'plain:secret', driverId: null,
+      failedAttempts: 0, lockedUntilMs: null, active: true,
+    })
+    return await h.loginAs('gm')
+  }
+
+  const declareGoLive = async (date: string): Promise<void> => {
+    await h.deps.settings.set('system.go_live_business_date', date, 'u-sa')
+  }
+
+  it('moves a report’s start forward to go-live, and leaves a later start alone', async () => {
+    await declareGoLive('2026-07-20')
+    const gm = await scopedGm()
+
+    const clamped = await get(gm, '/dashboard/profit?from=2026-07-01&to=2026-07-25')
+    expect(clamped.statusCode, clamped.body).toBe(200)
+
+    // A start already after go-live is the caller's own and must survive untouched.
+    const later = await get(gm, '/dashboard/profit?from=2026-07-22&to=2026-07-25')
+    expect(later.statusCode, later.body).toBe(200)
+  })
+
+  it('excludes pre-go-live entries from the week’s company share', async () => {
+    const manager = await h.loginAs('manager')
+    // A company-share credit dated before the epoch, inside the same financial week. Pushed
+    // straight onto the ledger like the profit-range fixture above, so the assertion is about the
+    // clamp and not about the fx day or the week gate.
+    h.deps.ledger.entries.push({
+      id: 20_001,
+      branchId: BRANCH,
+      eventType: 'manual',
+      shiftId: null,
+      occurrenceKey: 'pre-go-live-share',
+      businessDate: '2026-07-20',
+      postingDate: '2026-07-20',
+      weekStartDate: weekStartFor('2026-07-20'),
+      fxDayId: 1,
+      weekLockId: null,
+      reason: 'ربح تجريبي',
+      createdBy: 'u-bm',
+      lines: [
+        { fundCode: 'office_cash', side: 'D', amount: syp(100_000) },
+        { fundCode: 'company_revenue', side: 'C', amount: syp(100_000) },
+      ],
+    })
+
+    const before = (await get(manager, '/dashboard')).json().companyShareSinceSunday
+    expect(before).toBe(sypStr(100_000))
+
+    await declareGoLive('2026-07-21')
+    const after = await get(manager, '/dashboard')
+    expect(after.json().companyShareSinceSunday).toBe(sypStr(0))
+    // …and the screen is told the date, so it can say WHY the figure changed.
+    expect(after.json().goLiveBusinessDate).toBe('2026-07-21')
+  })
+
+  it('does not move the office box — a position is not a flow', async () => {
+    const manager = await h.loginAs('manager')
+    await post(manager, '/journal/manual', {
+      businessDate: '2026-07-20',
+      reason: 'رصيد افتتاحي',
+      lines: [
+        { fundCode: 'office_cash', side: 'D', amount: sypStr(500_000) },
+        { fundCode: 'opening_balance', side: 'C', amount: sypStr(500_000) },
+      ],
+    })
+    const balanceBefore = (await get(manager, '/treasury/balances')).json().cash
+
+    await declareGoLive('2026-07-21')
+
+    // The money is still in the drawer. Filtering it out would make every insufficient-funds
+    // guard, the cash-count baseline and the restoration plan read an empty box.
+    expect((await get(manager, '/treasury/balances')).json().cash).toBe(balanceBefore)
+  })
+})

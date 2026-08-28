@@ -115,6 +115,7 @@ export const ar = {
 
   /** API error codes → an actionable message. Unmapped codes fall back to a generic line. */
   errors: {
+    go_live_requires_opening_ceremony: 'لا يمكن تحديد تاريخ البدء قبل جرد الصناديق وترميمها في ذلك اليوم',
     driver_in_another_branch: 'هذا السائق تابع لفرع آخر',
     preapproved_shift_rule_driver_branch_mismatch: 'هذا السائق تابع لفرع آخر',
     preapproved_shift_rule_driver_inactive: 'لا يمكن إنشاء قاعدة لسائق غير فعال',
@@ -749,6 +750,14 @@ orderNo: 'رقم الطلب',
     receiptCeiling: 'سقف الإيصال المطلوب (ل.س)',
     receiptCeilingHint: 'فوق هذا المبلغ يجب إرفاق صورة إيصال للصرفية أو القيد اليدوي',
     kwhPrice: 'سعر الكيلوواط-ساعة (ل.س)',
+    goLiveTitle: 'تاريخ بدء التطبيق',
+    goLiveHint: 'تبدأ التقارير من هذا التاريخ. يوم العمل يبدأ الساعة ٤:٠٠ صباحاً بتوقيت دمشق.',
+    goLiveUnset: 'لم يُحدَّد',
+    goLiveActive: 'مُفعَّل',
+    goLiveClear: 'إلغاء التحديد',
+    goLiveKeepsHistory: 'الحركات السابقة تبقى في السجل ولا تُحذف — تُستثنى من الأرقام فقط.',
+    goLiveNeedsCount: 'يجب جرد الصندوق والمحفظة في ذلك التاريخ أولاً.',
+    goLiveNeedsRestoration: 'يجب تنفيذ الترميم في ذلك التاريخ أولاً.',
     saved: 'تم الحفظ',
     saveFailed: 'تعذّر الحفظ',
   },

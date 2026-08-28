@@ -114,6 +114,7 @@ export const en: Catalog = {
 
   /** API error codes → an actionable message. Unmapped codes fall back to a generic line. */
   errors: {
+    go_live_requires_opening_ceremony: 'The go-live date needs that day’s boxes counted and restored first',
     duplicate_driver_code: 'That driver code is already in use',
     duplicate_vehicle_code: 'That vehicle number is already in use',
     duplicate_category_code: 'That category code is already in use',
@@ -715,6 +716,14 @@ orderNo: 'Order no.',
     receiptCeiling: 'Receipt-required ceiling (SYP)',
     receiptCeilingHint: 'Above this, an expense or manual entry needs a photographed receipt',
     kwhPrice: 'kWh price (SYP)',
+    goLiveTitle: 'Go-live date',
+    goLiveHint: 'Reports start from this date. The business day begins at 04:00 Damascus time.',
+    goLiveUnset: 'Not set',
+    goLiveActive: 'Active',
+    goLiveClear: 'Clear',
+    goLiveKeepsHistory: 'Earlier movements stay in the record and are never deleted — only excluded from the figures.',
+    goLiveNeedsCount: 'The cash box and wallet must be counted on that date first.',
+    goLiveNeedsRestoration: 'The restoration must be run on that date first.',
     saved: 'Saved',
     saveFailed: 'Could not save',
   },

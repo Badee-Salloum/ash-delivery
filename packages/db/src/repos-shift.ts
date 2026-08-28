@@ -1748,9 +1748,11 @@ export class PgSettingsRepo implements SettingsRepo {
   }
 
   async set(key: string, value: unknown, actorId: string): Promise<void> {
-    // A money setting arrives as a string of minor units (see money() above); anything else is a
-    // plain scalar. Label it so the column's value_type stays honest rather than always 'json'.
-    const valueType = typeof value === 'string' && /^-?\d+$/.test(value) ? 'money_minor' : 'json'
+    // A money setting arrives as a string of minor units (see money() above); any other string is
+    // a plain scalar — a calendar date, for one. Label it so the column's value_type stays honest
+    // rather than filing every non-money string as 'json'.
+    const valueType =
+      typeof value === 'string' ? (/^-?\d+$/.test(value) ? 'money_minor' : 'string') : 'json'
     await this.pool.query(
       `INSERT INTO settings (key, value, value_type, updated_by, updated_at)
        VALUES ($1, $2::jsonb, $3, $4, now())

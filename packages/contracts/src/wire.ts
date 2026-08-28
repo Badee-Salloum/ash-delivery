@@ -1196,6 +1196,15 @@ export const updateSettingsRequest = z.object({
   receiptCeilingMinor: moneySchema.optional(),
   /** «سعر الكيلوواط-ساعة» — fixed kWh price for charging cost (G-2 / س64). */
   kwhPriceMinor: moneySchema.optional(),
+  /**
+   * «تاريخ بدء التطبيق» — the business date the system really went live on. Reports start here;
+   * everything before it is trial data, kept and readable but excluded from the figures.
+   *
+   * A DATE, deliberately not a timestamp. Every money column in this system is keyed on
+   * `business_date`, which rolls at 04:00 — a separate go-live instant would be a second, competing
+   * time rule, which is the failure BR7's Sunday boundary exists to warn about.
+   */
+  goLiveBusinessDate: realCalendarDateSchema.nullable().optional(),
 })
 
 export const closeWeekRequest = z.object({

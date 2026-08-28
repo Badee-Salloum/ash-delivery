@@ -59,6 +59,7 @@ import {
 } from './auth.ts'
 import { DEFAULT_MAX_OCR_READS_PER_SHIFT } from './config.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
+import { GO_LIVE_SETTING_KEY, goLiveDate } from './go-live.ts'
 import { assertEveryRouteDeclaresPermission, collectRoutes, makeAuthorize, resetRouteRegistry } from './rbac.ts'
 import { registerExpenseRoutes } from './expenses.routes.ts'
 import { registerFleetRoutes } from './fleet.routes.ts'
@@ -2338,10 +2339,15 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   /** The receipt ceiling and the kWh price, as decimal strings for the settings screen. */
   app.get('/settings', { config: { permission: 'settings.write' } }, async () => {
-    const [ceiling, kwh] = await Promise.all([deps.settings.receiptRequiredAbove(''), deps.settings.kwhPriceMinor()])
+    const [ceiling, kwh, goLive] = await Promise.all([
+      deps.settings.receiptRequiredAbove(''),
+      deps.settings.kwhPriceMinor(),
+      goLiveDate(deps),
+    ])
     return {
       receiptCeilingMinor: ceiling === null ? null : serializeMoney(ceiling),
       kwhPriceMinor: kwh === null ? null : serializeMoney(kwh),
+      goLiveBusinessDate: goLive,
     }
   })
 
@@ -2352,7 +2358,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
     // A fixed key map — never write an arbitrary key. Money is stored as a STRING of minor units,
     // matching how PgSettingsRepo.money() reads it back, so a large ceiling keeps its precision.
-    const fields: Array<[keyof typeof body, string]> = [
+    // Money keys only — spelled out rather than `keyof typeof body`, so adding a non-money setting
+    // below cannot silently fall into `serializeMoney` and be written as a number of minor units.
+    const fields: Array<['receiptCeilingMinor' | 'kwhPriceMinor', string]> = [
       ['receiptCeilingMinor', 'expense.receipt_required_above_minor'],
       ['kwhPriceMinor', 'vehicle.kwh_price_minor'],
     ]
@@ -2362,6 +2370,43 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       await deps.settings.set(key, value.toString(), actorId)
       written[key] = serializeMoney(value)
     }
+
+    /*
+     * «تاريخ بدء التطبيق». Not in the money loop above: it is a calendar date, and it is the only
+     * setting with a precondition.
+     *
+     * THE CEREMONY GATE. Declaring a go-live date only clamps FLOW reports. Balances stay
+     * cumulative — `fundBalance` sums every line for a fund, because a balance is a position and
+     * pre-epoch entries are what put the money in the box. What makes flows and balances agree from
+     * that date forward is a sealed cash count plus a restoration, which sets each office box to
+     * its capital target. Without it, "ignore everything before" would be a half-truth: the
+     * headline figures would restart while the boxes silently carried the trial period.
+     */
+    if (body.goLiveBusinessDate !== undefined) {
+      const date = body.goLiveBusinessDate
+      if (date === null) {
+        await deps.settings.set(GO_LIVE_SETTING_KEY, null, actorId)
+        written[GO_LIVE_SETTING_KEY] = 'null'
+      } else {
+        // The setting is global, but the ceremony is per-branch — and `settings.write` is
+        // system-admin-only, a role with no branch of its own. So the caller names the branch he
+        // opened, exactly as `/weeks/close` makes him name the one he is sealing.
+        const branchId = resolveBranchId(req)
+        const [count, restoration] = await Promise.all([
+          deps.cashCounts.find(branchId, date),
+          deps.restorations.find(branchId, date),
+        ])
+        const missing: string[] = []
+        if (count === null || count.sealedAtMs === null) missing.push('sealed_cash_count')
+        if (restoration === null) missing.push('restoration')
+        if (missing.length > 0) {
+          throw new ServiceError(422, 'go_live_requires_opening_ceremony', { businessDate: date, missing })
+        }
+        await deps.settings.set(GO_LIVE_SETTING_KEY, date, actorId)
+        written[GO_LIVE_SETTING_KEY] = date
+      }
+    }
+
     if (Object.keys(written).length > 0) {
       await deps.audit.append({
         tableName: 'settings',
@@ -2419,8 +2464,18 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     // This was a placeholder until cash counts existed; leaving it empty would have let a week
     // close with drawers nobody ever opened.
     const counted = new Set(await deps.cashCounts.listDatesInRange(branchId, start, end))
+    /*
+     * A day BEFORE go-live was never operated, so no drawer was ever opened to count.
+     *
+     * Without this skip, a go-live falling mid-week makes that week permanently unsealable: the
+     * pre-epoch days can never acquire a cash count (there is no route to count a past date), the
+     * blocker never clears, and BR7's Sunday close is blocked forever from the very first week.
+     * Nothing is weakened for real days — an operated day still has to be counted.
+     */
+    const goLive = await goLiveDate(deps)
     const daysMissingCashCount: string[] = []
     for (let d = start; d <= end; d = addDays(d, 1)) {
+      if (goLive !== null && d < goLive) continue
       if (!counted.has(d)) daysMissingCashCount.push(d)
     }
 
