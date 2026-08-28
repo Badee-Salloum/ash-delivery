@@ -1,4 +1,4 @@
-import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { type RoleKey, can, minor, parseMinor } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
@@ -54,6 +54,12 @@ interface TreasuryDigest {
     receivablesCash: string
     receivablesWallet: string
     officePosition: string
+    cashPosition: string
+    walletPosition: string
+    cashTarget: string
+    walletTarget: string
+    cashDelta: string
+    walletDelta: string
     activeCustodyCash: string
     activeCustodyWallet: string
     activeCustodyTotal: string
@@ -337,6 +343,51 @@ export function Dashboard(): ReactNode {
             <dd className="text-end font-semibold sm:col-span-2">
               <Money value={treasury.capital.officePosition} />
             </dd>
+
+            {/*
+              The surplus, split by BOX. The two are restored against separate targets, so a
+              surplus on one side and a shortfall on the other can cancel to a reassuring total
+              while both boxes are wrong. Each side carries its own custody and receivables.
+            */}
+            <dt className="col-span-full mt-2 text-xs font-semibold text-slate-500">
+              {t.dashboard.capitalByBox}
+            </dt>
+            {([
+              ['cash', t.treasury.cashBox, treasury.capital.cashPosition, treasury.capital.cashTarget, treasury.capital.cashDelta],
+              ['wallet', t.treasury.wallet, treasury.capital.walletPosition, treasury.capital.walletTarget, treasury.capital.walletDelta],
+            ] as const).map(([key, label, position, target, delta]) => {
+              const view = differenceView(delta)
+              return (
+                <Fragment key={key}>
+                  <dt className="text-slate-600">{label}</dt>
+                  <dd className="text-end sm:col-span-2">
+                    <Money value={position} />
+                    <span className="text-slate-500">
+                      {' / '}
+                      <Money value={target} />
+                    </span>
+                    <span
+                      className={
+                        view.direction === 'increase'
+                          ? 'ms-2 font-semibold text-emerald-700'
+                          : view.direction === 'shortage'
+                            ? 'ms-2 font-semibold text-amber-700'
+                            : 'ms-2 text-slate-500'
+                      }
+                    >
+                      {view.direction === 'none' ? (
+                        t.treasury.onTarget
+                      ) : (
+                        <>
+                          {view.direction === 'increase' ? '+' : '−'}
+                          <Money value={view.amount} />
+                        </>
+                      )}
+                    </span>
+                  </dd>
+                </Fragment>
+              )
+            })}
             <dt className="text-slate-600">
               {t.dashboard.activeShiftCustody.replace('{n}', String(treasury.capital.activeShiftCount))}
             </dt>

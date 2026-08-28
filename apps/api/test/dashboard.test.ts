@@ -917,3 +917,76 @@ describe('the go-live date clamps the reports, never the positions', () => {
     expect((await get(manager, '/treasury/balances')).json().cash).toBe(balanceBefore)
   })
 })
+
+/**
+ * The capital position, split by BOX (owner request, 2026-08-29).
+ *
+ * A single «زيادة عن رأس المال» hides which side it sits on, and the two boxes are restored
+ * against separate targets — so a surplus in cash and a shortfall in the wallet can cancel to a
+ * reassuring total while both boxes are wrong.
+ */
+describe('the capital position is reported per box', () => {
+  const post = async (token: string, url: string, payload: unknown = {}): Promise<LightMyRequestResponse> =>
+    await h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(token) }, payload: payload as object })
+  const put = async (token: string, url: string, payload: unknown = {}): Promise<LightMyRequestResponse> =>
+    await h.app.inject({ method: 'PUT', url, headers: { cookie: h.cookie(token) }, payload: payload as object })
+
+  async function scopedGm(): Promise<string> {
+    h.deps.users.seed({
+      id: 'u-gm', branchId: BRANCH, roleKey: 'general_manager', username: 'gm',
+      fullNameAr: 'gm', passwordHash: 'plain:secret', driverId: null,
+      failedAttempts: 0, lockedUntilMs: null, active: true,
+    })
+    return await h.loginAs('gm')
+  }
+
+  const seedFund = async (token: string, fundCode: string, amount: string): Promise<void> => {
+    const res = await post(token, '/journal/manual', {
+      reason: 'رصيد افتتاحي',
+      lines: [
+        { fundCode, side: 'D', amount },
+        { fundCode: 'opening_balance', side: 'C', amount },
+      ],
+    })
+    expect(res.statusCode, res.body).toBe(201)
+  }
+
+  it('splits the surplus between cash and wallet instead of only totalling it', async () => {
+    const admin = await h.loginAs('sysadmin')
+    await put(admin, '/treasury/capital-targets', {
+      cashTarget: sypStr(50_000), walletTarget: sypStr(10_000),
+      reason: 'رأس المال', branchId: BRANCH,
+    })
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(50_900))   // +900 over its own target
+    await seedFund(manager, 'office_wallet', sypStr(10_565)) // +565 over its own target
+
+    const res = await get(await scopedGm(), `/dashboard/treasury?branchId=${BRANCH}`)
+    expect(res.statusCode, res.body).toBe(200)
+    const c = res.json().capital
+    expect(c.cashTarget).toBe(sypStr(50_000))
+    expect(c.walletTarget).toBe(sypStr(10_000))
+    expect(c.cashDelta).toBe(sypStr(900))
+    expect(c.walletDelta).toBe(sypStr(565))
+    // And the two still reconcile to the headline figure.
+    expect(c.delta).toBe(sypStr(1_465))
+  })
+
+  it('shows a cash surplus and a wallet shortfall separately, not cancelled', async () => {
+    // The failure this exists to prevent: +900 and −900 read as «on target» while both boxes are
+    // wrong and tonight's restoration has two legs to move, not none.
+    const admin = await h.loginAs('sysadmin')
+    await put(admin, '/treasury/capital-targets', {
+      cashTarget: sypStr(50_000), walletTarget: sypStr(10_000),
+      reason: 'رأس المال', branchId: BRANCH,
+    })
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(50_900))
+    await seedFund(manager, 'office_wallet', sypStr(9_100))
+
+    const c = (await get(await scopedGm(), `/dashboard/treasury?branchId=${BRANCH}`)).json().capital
+    expect(c.delta).toBe(sypStr(0))          // the total says "nothing to do"…
+    expect(c.cashDelta).toBe(sypStr(900))    // …while cash is over
+    expect(c.walletDelta).toBe(sypStr(-900)) // …and the wallet is short
+  })
+})

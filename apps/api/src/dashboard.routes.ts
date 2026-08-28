@@ -338,6 +338,19 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     const activeCustodyTotal = position.activeCustodyCash + position.activeCustodyWallet
     const workingCapitalTotal = officePosition + activeCustodyTotal
 
+    /*
+     * The same position, split by BOX.
+     *
+     * A single «زيادة عن رأس المال» hides which side it sits on, and the two boxes are restored
+     * against separate targets — so a surplus in cash and a shortfall in the wallet can cancel to
+     * a reassuring total while both boxes are wrong. Each side carries its own custody and its own
+     * receivables, exactly as `planRestoration` reads them.
+     */
+    const cashPosition = position.officeCash + position.receivablesCash + position.activeCustodyCash
+    const walletPosition = position.officeWallet + position.receivablesWallet + position.activeCustodyWallet
+    const cashTarget = targets.office_cash ?? 0n
+    const walletTarget = targets.office_wallet ?? 0n
+
     return {
       from,
       to,
@@ -359,6 +372,13 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
         delta: serializeMoney(minor(workingCapitalTotal - targetTotal)),
         /** Only this office/receivables delta is actionable by tonight's restoration. */
         restorationDelta: serializeMoney(minor(officePosition - targetTotal)),
+        /** Per box, so a surplus on one side cannot hide a shortfall on the other. */
+        cashPosition: serializeMoney(minor(cashPosition)),
+        walletPosition: serializeMoney(minor(walletPosition)),
+        cashTarget: serializeMoney(minor(cashTarget)),
+        walletTarget: serializeMoney(minor(walletTarget)),
+        cashDelta: serializeMoney(minor(cashPosition - cashTarget)),
+        walletDelta: serializeMoney(minor(walletPosition - walletTarget)),
       },
       companyProfit: serializeMoney(minor(profit)),
       companyFund: serializeMoney(await deps.ledger.fundBalance(branchId, 'company_box')),
