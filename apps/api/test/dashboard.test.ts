@@ -972,6 +972,52 @@ describe('the capital position is reported per box', () => {
     expect(c.delta).toBe(sypStr(1_465))
   })
 
+  it('marks the surplus provisional while a shift is open, because the day has earned nothing yet', async () => {
+    /*
+     * PRODUCTION, 2026-08-29. The card asserted «زيادة عن رأس المال: 6,502.00» with five shifts
+     * open. The ledger said today had moved working capital by exactly 0.00 — every lira of that
+     * surplus accumulated between 22 and 28 August, before the epoch was declared.
+     *
+     * An open shift posts nothing after its float leaves the box: orders, share and variance all
+     * land at approval. So a surplus read off the position mid-shift is true about the balance and
+     * false about the day, and the day is what the reader takes from it.
+     */
+    const admin = await h.loginAs('sysadmin')
+    await put(admin, '/treasury/capital-targets', {
+      cashTarget: sypStr(50_000), walletTarget: sypStr(10_000),
+      reason: 'رأس المال', branchId: BRANCH,
+    })
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(56_502))
+    await seedFund(manager, 'office_wallet', sypStr(10_000))
+
+    // Nothing open yet: the surplus is a fact and is stated as one.
+    const before = (await get(await scopedGm(), `/dashboard/treasury?branchId=${BRANCH}`)).json().capital
+    expect(before.delta).toBe(sypStr(6_502))
+    expect(before.deltaProvisional).toBe(false)
+
+    // One shift opens. The float leaves the box for the driver's hands, so working capital — and
+    // therefore the surplus — is UNCHANGED. What changed is that it is no longer a settled fact.
+    const driver = await h.loginAs('driver1')
+    const created = await post(driver, '/shifts', { driverId: DRIVER_ID, vehicleId: VEHICLE_ID })
+    expect(created.statusCode, created.body).toBe(201)
+    const shiftId = created.json().id as string
+    await h.uploadPhoto(driver, shiftId, 'start', 'odometer')
+    expect((await put(driver, `/shifts/${shiftId}/start-package`, {
+      odometerKm: 1_000,
+      batteryPercent: 90,
+    })).statusCode).toBe(200)
+    expect((await post(manager, `/shifts/${shiftId}/approve-open`, {
+      floatTranches: [sypStr(25_000)],
+      topupTranches: [],
+    })).statusCode).toBe(200)
+
+    const during = (await get(await scopedGm(), `/dashboard/treasury?branchId=${BRANCH}`)).json().capital
+    expect(during.delta).toBe(sypStr(6_502))
+    expect(during.deltaProvisional).toBe(true)
+    expect(during.activeShiftCount).toBe(1)
+  })
+
   it('leaves active custody OUT of the per-box lines, because the restoration cannot move it', async () => {
     /*
      * PRODUCTION, 2026-08-29. The cash line read «58,218.37 / 50,000.00  +8,218.37» in green while

@@ -63,6 +63,8 @@ interface TreasuryDigest {
     activeCustodyCash: string
     activeCustodyWallet: string
     activeCustodyTotal: string
+    /** True while a shift is open: the position is mid-sentence, so a surplus is not yet a fact. */
+    deltaProvisional: boolean
     activeShiftCount: number
     workingCapitalTotal: string
     workingCapitalDelta: string
@@ -297,7 +299,25 @@ export function Dashboard(): ReactNode {
               sub={
                 <span className="flex flex-col gap-1">
                   <span>{t.treasury.capitalTarget}: <Money value={treasury.capital.target} /></span>
-                  {capitalDelta ? (
+                  {/*
+                    A SURPLUS IS NOT ASSERTED WHILE A SHIFT IS OPEN.
+
+                    An open shift has posted nothing since its float left the box — its orders, its
+                    share and its variance all land at approval — so any «زيادة» read off the
+                    position now is money the day has not earned. On 2026-08-29 this said
+                    «زيادة عن رأس المال: 6,502.00» with five shifts open, while the ledger showed
+                    today had moved working capital by exactly 0.00: every lira of it had
+                    accumulated before the epoch. True about the balance, false about the day, and
+                    the day is what a reader takes from it.
+
+                    A SHORTFALL still shows. Holding back premature good news protects the reader;
+                    holding back bad news hides the one direction that means money is missing.
+                  */}
+                  {capitalDelta && capitalDelta.direction === 'increase' && treasury.capital.deltaProvisional ? (
+                    <span className="text-slate-500">
+                      {t.dashboard.surplusPending.replace('{n}', String(treasury.capital.activeShiftCount))}
+                    </span>
+                  ) : capitalDelta ? (
                     <span
                       className={
                         capitalDelta.direction === 'increase'

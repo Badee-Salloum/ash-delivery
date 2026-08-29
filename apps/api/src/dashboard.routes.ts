@@ -375,6 +375,23 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
         activeCustodyWallet: serializeMoney(position.activeCustodyWallet),
         activeCustodyTotal: serializeMoney(minor(activeCustodyTotal)),
         activeShiftCount: position.activeShiftCount,
+        /*
+         * A SURPLUS CANNOT BE ASSERTED WHILE A SHIFT IS OPEN.
+         *
+         * An open shift has posted nothing since its float left the box; its orders, its share and
+         * its variance all land at approval. So the position is a snapshot taken mid-sentence, and
+         * any «زيادة» read off it is money the day has not yet earned.
+         *
+         * Production proved it on 2026-08-29: the card showed «زيادة عن رأس المال 6,502.00» with
+         * five shifts open, and the ledger says today moved working capital by exactly 0.00 — every
+         * lira of that surplus accumulated between 22 and 28 August, before the epoch. The figure
+         * was true about the balance and false about the day, and the day is what a reader takes
+         * from it.
+         *
+         * A SHORTFALL still shows. Suppressing premature good news protects the reader; suppressing
+         * bad news hides the one direction that means money is missing.
+         */
+        deltaProvisional: position.activeShiftCount > 0,
         workingCapitalTotal: serializeMoney(minor(workingCapitalTotal)),
         total: serializeMoney(minor(workingCapitalTotal)),
         target: serializeMoney(minor(targetTotal)),
