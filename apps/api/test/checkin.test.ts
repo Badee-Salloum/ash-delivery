@@ -311,6 +311,86 @@ describe('only the system admin defines the check', () => {
     })
   }
 
+  /**
+   * «مدير الفرع يجب ان يظهر لديه فقط زر التفقد و مواعيد تفقده».
+   *
+   * Enforced on the SERVER, not by hiding cards. A branch manager who can request another
+   * manager's rounds is one URL away from them however the screen is drawn, and this repo's rule
+   * is that UI hiding is not security.
+   *
+   * The narrowing keys on the SCOPE the authorisation granted, never on a role name: branch-wide
+   * sight makes an auditor, anything narrower makes a subject. If the §3 matrix is ever edited to
+   * widen someone, he becomes an auditor by that same act rather than by a second edit here that
+   * somebody would have to remember.
+   */
+  const secondManager = async (): Promise<string> => {
+    const admin = await h.loginAs('sysadmin')
+    const res = await post(admin, '/users', {
+      username: 'manager_b',
+      // `createUserRequest` demands eight characters, and the harness's hasher is `plain:<password>`
+      // — so the account is created with a compliant password and then signed in with the harness's
+      // own, set directly on the record. A second manager who cannot log in cannot prove that his
+      // check-in stays out of his colleague's report.
+      password: 'placeholder-password',
+      roleKey: 'branch_manager',
+      fullNameAr: 'مدير ثانٍ',
+      branchId: BRANCH,
+    })
+    expect(res.statusCode, res.body).toBe(201)
+    const id = res.json().id as string
+    const stored = h.deps.users.rows.get(id)!
+    h.deps.users.rows.set(id, { ...stored, passwordHash: 'plain:secret' })
+    return id
+  }
+
+  it('shows the branch manager his own rounds and not a colleague’s', async () => {
+    const otherId = await secondManager()
+    await addWindow(NOW_MINUTE) // u-bm
+    await addWindow(720, { userId: otherId }) // 12:00, the colleague's
+
+    const manager = await h.loginAs('manager')
+    const mine = await get(manager, '/checkins')
+    expect(mine.statusCode, mine.body).toBe(200)
+    expect(mine.json().scope).toBe('own')
+    expect(mine.json().people.map((p: { userId: string }) => p.userId)).toEqual(['u-bm'])
+
+    // Naming the colleague explicitly does not widen it — the query is ignored, not obeyed.
+    const asked = await get(manager, `/checkins?userId=${otherId}`)
+    expect(asked.json().people.map((p: { userId: string }) => p.userId)).toEqual(['u-bm'])
+
+    // And the rota read is narrowed the same way, or the colleague's schedule leaks there instead.
+    const rota = await get(manager, `/checkin-windows?userId=${otherId}`)
+    expect(rota.json().windows.map((w: { userId: string }) => w.userId)).toEqual(['u-bm'])
+  })
+
+  it('shows the general manager both, because branch-wide sight is what makes an auditor', async () => {
+    const otherId = await secondManager()
+    await addWindow(NOW_MINUTE)
+    await addWindow(720, { userId: otherId })
+
+    const gm = await h.loginAs('gm')
+    const res = await get(gm, `/checkins?branchId=${BRANCH}`)
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json().scope).toBe('all')
+    expect(res.json().people.map((p: { userId: string }) => p.userId).sort()).toEqual([otherId, 'u-bm'].sort())
+  })
+
+  it('keeps a colleague’s check-ins out of the log, not merely out of the roll-call', async () => {
+    await placeBranch()
+    const otherId = await secondManager()
+    await addWindow(NOW_MINUTE)
+    await addWindow(NOW_MINUTE, { userId: otherId })
+
+    // The colleague checks in. `POST /checkins` always attributes to the caller, so this goes
+    // through HIS OWN session — proving the filter rather than stepping around it.
+    const other = await h.loginAs('manager_b')
+    expect((await post(other, '/checkins', { branchId: BRANCH, ...AT_BRANCH })).statusCode).toBe(201)
+
+    const manager = await h.loginAs('manager')
+    expect((await get(manager, '/checkins')).json().checkIns).toEqual([])
+    expect((await get(await h.loginAs('gm'), `/checkins?branchId=${BRANCH}`)).json().checkIns).toHaveLength(1)
+  })
+
   it('still lets the branch manager do the one thing he is for: answer a round', async () => {
     await placeBranch()
     await addWindow(NOW_MINUTE)

@@ -50,11 +50,17 @@ export function CheckIn(): ReactNode {
 
   // The rota and the fence are settings.write — the same gate as the rest of the system's shape,
   // so a branch manager cannot move his own goalposts.
+  //
+  // `.allowed` is not optional politeness: `can()` returns a Decision OBJECT, and every object is
+  // truthy. Without it this read `session != null && {allowed: false, reason: 'no_grant_for_role'}`
+  // — permanently true — and the branch manager was shown the rota editor and the fence for a rule
+  // he does not hold. The server refused every button, so nothing could be changed; he was simply
+  // offered controls that could only fail.
   const canConfigure =
     session != null &&
     can({ userId: session.userId, roleKey: session.roleKey as RoleKey, branchId: session.branchId }, 'settings.write', {
       branchId: branchId ?? session.branchId,
-    })
+    }).allowed
 
   const [userId, setUserId] = useState('')
   const [hour, setHour] = useState(9)
@@ -273,6 +279,12 @@ export function CheckIn(): ReactNode {
         )}
       </Card>
 
+      {/*
+        The per-ping log is an AUDITOR's view — exact times, accuracy, every attempt including the
+        one from the road. The person being checked gets «زر التفقد و مواعيد تفقده»: the button and
+        his own rounds, which already carry the verdict, the distance and how early or late he was.
+      */}
+      {report.scope === 'all' ? (
       <Card title={t.checkin.log}>
         <Table
           head={[t.checkin.time, t.checkin.result, t.checkin.distance, t.checkin.accuracy]}
@@ -297,6 +309,7 @@ export function CheckIn(): ReactNode {
           ))}
         </Table>
       </Card>
+      ) : null}
 
       {canConfigure ? (
         <>

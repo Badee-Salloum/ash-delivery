@@ -84,10 +84,19 @@ export function registerCheckInRoutes(app: FastifyInstance, deps: Deps): void {
     return { id: branchId, ...shape(updated) }
   })
 
-  /** The rota: which rounds this branch expects, and from whom. */
+  /**
+   * The rota: which rounds this branch expects, and from whom.
+   *
+   * A caller whose grant is scoped to his branch sees ONLY HIS OWN rounds — he is the subject of
+   * the check, not its auditor, and the owner's rule is that he gets «زر التفقد و مواعيد تفقده»
+   * and nothing further. Narrowing by the SCOPE the authorisation granted, rather than by a role
+   * name, keeps this true if the matrix is ever edited: whoever is given branch-wide sight becomes
+   * an auditor by the same act.
+   */
   app.get('/checkin-windows', { config: { permission: 'branch_data.view', subject: ownBranch } }, async (req) => {
     const branchId = resolveBranchId(req)
-    const { userId } = z.object({ userId: z.string().optional() }).parse(req.query)
+    const asked = z.object({ userId: z.string().optional() }).parse(req.query).userId
+    const userId = req.grantedScope === 'all' ? asked : req.actor!.userId
     const windows = await deps.checkIns.listWindows(branchId, userId)
     return { windows: windows.map(serializeWindow) }
   })
@@ -227,15 +236,27 @@ export function registerCheckInRoutes(app: FastifyInstance, deps: Deps): void {
     const { date, userId } = z.object({ date: z.string().optional(), userId: z.string().optional() }).parse(req.query)
     const businessDate = date ?? todayFor(deps)
 
-    const [checkIns, users] = await Promise.all([
+    // Branch-wide sight makes an auditor; anything narrower makes a subject, who sees himself only.
+    // Enforced HERE and not in the screen: hiding another manager's rounds in the client would
+    // leave them one request away, and UI hiding is not security.
+    const auditor = req.grantedScope === 'all'
+    const only = auditor ? null : req.actor!.userId
+
+    const [allCheckIns, users] = await Promise.all([
       deps.checkIns.listByBranchAndDate(branchId, businessDate),
       deps.users.list(branchId),
     ])
+    const checkIns = only === null ? allCheckIns : allCheckIns.filter((c) => c.userId === only)
     const named = new Map(users.map((u) => [u.id, u.fullNameAr]))
 
     // One roll-call per person who has a rota, so the report reads as "who was where" rather than
     // as a flat list of pings.
-    const subjects = userId ? [userId] : [...new Set((await deps.checkIns.listWindows(branchId)).map((w) => w.userId))]
+    const subjects =
+      only !== null
+        ? [only]
+        : userId
+          ? [userId]
+          : [...new Set((await deps.checkIns.listWindows(branchId)).map((w) => w.userId))]
     const people = await Promise.all(
       subjects.map(async (subject) => {
         const windows = await deps.checkIns.listWindows(branchId, subject)
@@ -258,6 +279,9 @@ export function registerCheckInRoutes(app: FastifyInstance, deps: Deps): void {
 
     return {
       businessDate,
+      // The screen decides what to render from what the server says the caller may see, rather
+      // than re-deriving the rule from the session and risking a second, divergent answer.
+      scope: auditor ? ('all' as const) : ('own' as const),
       radiusM: (await deps.directory.branch(branchId))?.checkinRadiusM ?? null,
       people,
       checkIns: checkIns.map(serializeCheckIn),

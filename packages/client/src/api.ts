@@ -1854,6 +1854,11 @@ export interface CheckInView {
 
 export interface CheckInReportView {
   businessDate: string
+  /**
+   * What the server let this caller see: `all` for an auditor, `own` for the person being checked.
+   * The screen renders from this rather than re-deriving it, so the two can never disagree.
+   */
+  scope: 'all' | 'own'
   radiusM: number | null
   people: Array<{
     userId: string

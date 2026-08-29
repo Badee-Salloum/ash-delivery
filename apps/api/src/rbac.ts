@@ -25,6 +25,15 @@ declare module 'fastify' {
     sessionToken?: string
     /** Whether the current session has cleared its second factor (SRS §7, admin roles). */
     mfaSatisfied?: boolean
+    /**
+     * The scope the authorisation actually granted — 'all', 'branch' or 'own'.
+     *
+     * Set once the decision is allowed, so a handler can narrow WHAT IT ANSWERS by the same rule
+     * that let the caller in, instead of restating a role list. The difference between a person
+     * who may audit a branch and a person who is himself the subject of the audit is exactly this
+     * scope, and nothing else on the request carries it.
+     */
+    grantedScope?: Scope
     requestId: string
   }
   interface FastifyContextConfig {
@@ -84,6 +93,8 @@ export function makeAuthorize(deps: Deps) {
       await reply.code(403).send({ error: 'forbidden', permission, reason: decision.reason })
       return
     }
+
+    req.grantedScope = decision.scope
   }
 }
 
