@@ -14,6 +14,7 @@ import { Fleet } from './screens/Fleet.tsx'
 import { FleetConfig } from './screens/FleetConfig.tsx'
 import { Treasury } from './screens/Treasury.tsx'
 import { Expenses } from './screens/Expenses.tsx'
+import { CheckIn } from './screens/CheckIn.tsx'
 import { Accounts } from './screens/Accounts.tsx'
 import { Audit } from './screens/Audit.tsx'
 import { Permissions } from './screens/Permissions.tsx'
@@ -31,6 +32,7 @@ const SECTIONS = [
   'fleetConfig',
   'treasury',
   'expenses',
+  'checkin',
   'accounts',
   'audit',
   'permissions',
@@ -160,6 +162,9 @@ export function AdminApp(): ReactNode {
     { key: 'fleet', label: `${t.fleet.drivers} / ${t.fleet.vehicles}` },
     { key: 'treasury', label: t.treasury.branchTreasury },
     { key: 'expenses', label: t.expenses.title },
+    // «التفقّد» — the branch manager's own rounds. Drivers never see it; they are out on the road
+    // and their whereabouts already ride on their shift.
+    ...(session.roleKey !== 'driver' ? [{ key: 'checkin' as const, label: t.checkin.title }] : []),
     ...(canManageUsers ? [{ key: 'accounts' as const, label: t.accounts.title }] : []),
     // audit.view is granted to the sysadmin and the GM — the same two roles.
     ...(canManageUsers ? [{ key: 'audit' as const, label: t.audit.title }] : []),
@@ -295,6 +300,8 @@ export function AdminApp(): ReactNode {
           <FleetConfig />
         ) : section === 'expenses' ? (
           <Expenses />
+        ) : section === 'checkin' ? (
+          <CheckIn />
         ) : section === 'accounts' ? (
           <Accounts />
         ) : section === 'audit' ? (

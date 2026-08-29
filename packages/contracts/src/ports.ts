@@ -239,6 +239,13 @@ export interface BranchRecord {
   /** The second segment of the vehicle number. Unique within the governorate. */
   governorateId: string
   branchNo: number
+  /**
+   * Where the branch is, for «التفقّد». Null until someone sets it — a branch with no fence has no
+   * check-in to fail, rather than every round failing against a default point in the ocean.
+   */
+  lat: number | null
+  lng: number | null
+  checkinRadiusM: number
 }
 
 export interface VehicleTypeRecord {
@@ -1974,9 +1981,59 @@ export interface AttendanceRepo {
   listByBranchAndDate(branchId: string, businessDate: CalendarDate): Promise<AttendanceRecord[]>
 }
 
+// ── «التفقّد» — manager check-in rounds ────────────────────────────────────────────────────
+
+/** One round a named user is expected to answer, in minutes past branch-local midnight. */
+export interface CheckInWindowRecord {
+  id: string
+  branchId: string
+  userId: string
+  atMinute: number
+  toleranceMinutes: number
+  active: boolean
+  label: string | null
+  createdBy: string
+}
+
+/** Where somebody was, and what that meant for the round it answered. Append-only. */
+export interface CheckInRecord {
+  id: string
+  branchId: string
+  userId: string
+  businessDate: CalendarDate
+  capturedAtMs: number
+  lat: number
+  lng: number
+  accuracyM: number | null
+  windowId: string | null
+  distanceM: number
+  insideArea: boolean
+  minutesFromTarget: number | null
+  verdict: 'on_time' | 'outside_window' | 'outside_area' | 'outside_both'
+  note: string | null
+}
+
+export interface CheckInRepo {
+  listWindows(branchId: string, userId?: string): Promise<CheckInWindowRecord[]>
+  createWindow(window: CheckInWindowRecord): Promise<CheckInWindowRecord>
+  /** Retiring a round keeps its history: `active` goes false, the row stays. */
+  deactivateWindow(id: string): Promise<boolean>
+  record(checkIn: CheckInRecord): Promise<CheckInRecord>
+  listByBranchAndDate(branchId: string, businessDate: CalendarDate): Promise<CheckInRecord[]>
+  listByUserAndDate(userId: string, businessDate: CalendarDate): Promise<CheckInRecord[]>
+}
+
 export interface DirectoryRepo {
   branch(id: string): Promise<BranchRecord | null>
   listBranches(): Promise<BranchRecord[]>
+  /**
+   * Where the branch is, for «التفقّد». A null point means no fence — and therefore no round any
+   * manager can fail, which is the right behaviour for a branch nobody has placed on the map yet.
+   */
+  setBranchLocation(
+    id: string,
+    location: { lat: number | null; lng: number | null; checkinRadiusM: number },
+  ): Promise<BranchRecord | null>
   driver(id: string): Promise<DriverRecord | null>
   vehicle(id: string): Promise<VehicleRecord | null>
   grants(): Promise<RoleGrantRecord[]>
@@ -2305,6 +2362,7 @@ export interface Deps {
   directory: DirectoryRepo
   vehicleEvents: VehicleEventRepo
   attendance: AttendanceRepo
+  checkIns: CheckInRepo
   decisions: ShiftDecisionRepo
   /** Immutable cash/wallet action the manager confirmed when approving the close. */
   settlements: ShiftSettlementRepo

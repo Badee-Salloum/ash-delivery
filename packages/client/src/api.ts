@@ -1344,6 +1344,35 @@ export class ApiClient {
     return this.post<ExpenseView>('/expenses', { ...body, ...(this.branchId ? { branchId: this.branchId } : {}) })
   }
 
+  // ── «التفقّد» — manager check-in rounds ───────────────────────────────────────────────
+
+  checkinWindows(userId?: string) {
+    return this.get<{ windows: CheckInWindowView[] }>(`/checkin-windows${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`)
+  }
+  createCheckinWindow(body: { userId: string; atMinute: number; toleranceMinutes: number; label: string | null }) {
+    return this.post<CheckInWindowView>('/checkin-windows', { ...body, ...(this.branchId ? { branchId: this.branchId } : {}) })
+  }
+  deleteCheckinWindow(id: string) {
+    // A DELETE carries no body, so an organisation-wide role names the branch on the query string
+    // — the one channel `namedBranch` reads that a bodiless method still has.
+    const q = this.branchId ? `?branchId=${encodeURIComponent(this.branchId)}` : ''
+    return this.del<{ id: string; active: boolean }>(`/checkin-windows/${id}${q}`)
+  }
+  /** The manager presses «تفقّد»; the browser supplies the fix. Never blocks — it records. */
+  checkin(body: { lat: number; lng: number; accuracyM: number | null; note: string | null }) {
+    return this.post<CheckInView>('/checkins', { ...body, ...(this.branchId ? { branchId: this.branchId } : {}) })
+  }
+  checkinReport(date?: string, userId?: string) {
+    const q = [date && `date=${date}`, userId && `userId=${encodeURIComponent(userId)}`].filter(Boolean).join('&')
+    return this.get<CheckInReportView>(`/checkins${q ? `?${q}` : ''}`)
+  }
+  setBranchLocation(body: { lat: number | null; lng: number | null; checkinRadiusM: number }) {
+    return this.put<{ id: string; lat: number | null; lng: number | null; checkinRadiusM: number }>('/branch-location', {
+      ...body,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+
   /** «كشف التسوية» — read-only and server-owned. Posts nothing until both handovers are confirmed. */
   shiftSettlement(
     shiftId: string,
@@ -1794,4 +1823,49 @@ export async function readInCloud(
   } catch {
     return null
   }
+}
+
+// ── «التفقّد» ───────────────────────────────────────────────────────────────────────────
+
+export interface CheckInWindowView {
+  id: string
+  userId: string
+  /** Minutes past branch-local midnight. 600 = 10:00. */
+  atMinute: number
+  toleranceMinutes: number
+  label: string | null
+}
+
+export interface CheckInView {
+  id: string
+  userId: string
+  businessDate: string
+  capturedAt: string
+  lat: number
+  lng: number
+  accuracyM: number | null
+  windowId: string | null
+  distanceM: number
+  insideArea: boolean
+  minutesFromTarget: number | null
+  verdict: 'on_time' | 'outside_window' | 'outside_area' | 'outside_both'
+  note: string | null
+}
+
+export interface CheckInReportView {
+  businessDate: string
+  radiusM: number | null
+  people: Array<{
+    userId: string
+    name: string
+    rounds: Array<{
+      windowRef: string
+      atMinute: number
+      /** `missed` is the absence of a check-in, not a failure — the row with no answer. */
+      status: 'on_time' | 'outside_area' | 'missed'
+      distanceMetres: number | null
+      minutesFromTarget: number | null
+    }>
+  }>
+  checkIns: CheckInView[]
 }

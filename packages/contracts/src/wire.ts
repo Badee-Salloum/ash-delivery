@@ -1271,3 +1271,37 @@ export type RestoreCloseDraftAttachmentRequest = z.infer<typeof restoreCloseDraf
 export type ApproveOpenRequest = z.infer<typeof approveOpenRequest>
 export type CreatePreapprovedShiftRulesRequest = z.infer<typeof createPreapprovedShiftRulesRequest>
 export type ShiftFundingPreview = z.infer<typeof shiftFundingPreviewSchema>
+
+// ── «التفقّد» — manager check-in rounds ────────────────────────────────────────────────────
+
+/** One expected round, in minutes past branch-local midnight. 60 = 01:00, 600 = 10:00. */
+export const createCheckInWindowRequest = z.object({
+  branchId: z.string().optional(),
+  userId: z.string().min(1),
+  atMinute: z.number().int().min(0).max(1439),
+  /** Symmetric: "be there at one" means around one, not "any time after one". */
+  toleranceMinutes: z.number().int().min(1).max(720).default(30),
+  label: z.string().trim().min(1).max(60).nullable().default(null),
+})
+
+/**
+ * A check-in. lat/lng/accuracy are coordinates and metres, not money, so plain numbers are right.
+ *
+ * `accuracyM` is evidence, never a gate: refusing a low-confidence fix would punish a manager for
+ * standing under a roof.
+ */
+export const createCheckInRequest = z.object({
+  branchId: z.string().optional(),
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+  accuracyM: z.number().min(0).max(100_000).nullable().default(null),
+  note: z.string().trim().max(500).nullable().default(null),
+})
+
+/** Where the branch is, for «التفقّد». Null coordinates mean no fence, so no round can fail. */
+export const setBranchLocationRequest = z.object({
+  branchId: z.string().optional(),
+  lat: z.number().min(-90).max(90).nullable(),
+  lng: z.number().min(-180).max(180).nullable(),
+  checkinRadiusM: z.number().int().min(10).max(20_000).default(150),
+})

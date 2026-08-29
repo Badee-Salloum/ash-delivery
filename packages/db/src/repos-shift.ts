@@ -5,6 +5,9 @@ import type {
   AttachmentHistoryRecord,
   AttendanceRecord,
   AttendanceRepo,
+  CheckInRepo,
+  CheckInRecord,
+  CheckInWindowRecord,
   BatteryReadingRecord,
   BatteryReadingRepo,
   BatteryRecord,
@@ -438,6 +441,20 @@ export class PgDirectoryRepo implements DirectoryRepo {
 
   async branch(id: string): Promise<BranchRecord | null> {
     const { rows } = await this.pool.query<Record<string, unknown>>('SELECT * FROM branches WHERE id = $1', [id])
+    const r = rows[0]
+    return r ? toBranch(r) : null
+  }
+
+  /** The geofence for «التفقّد». `branches_geo_ck` refuses half a coordinate; pair them here. */
+  async setBranchLocation(
+    id: string,
+    location: { lat: number | null; lng: number | null; checkinRadiusM: number },
+  ): Promise<BranchRecord | null> {
+    const paired = location.lat === null || location.lng === null ? [null, null] : [location.lat, location.lng]
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'UPDATE branches SET lat = $2, lng = $3, checkin_radius_m = $4 WHERE id = $1 RETURNING *',
+      [id, paired[0], paired[1], location.checkinRadiusM],
+    )
     const r = rows[0]
     return r ? toBranch(r) : null
   }
@@ -882,6 +899,9 @@ const toBranch = (r: Record<string, unknown>): BranchRecord => ({
   timezone: String(r.timezone),
   governorateId: String(r.governorate_id),
   branchNo: Number(r.branch_no),
+  lat: r.lat === null || r.lat === undefined ? null : Number(r.lat),
+  lng: r.lng === null || r.lng === undefined ? null : Number(r.lng),
+  checkinRadiusM: r.checkin_radius_m === undefined ? 150 : Number(r.checkin_radius_m),
 })
 
 const toGovernorate = (r: Record<string, unknown>): GovernorateRecord => ({
@@ -2668,3 +2688,98 @@ export class PgBatterySwapRepo implements BatterySwapRepo {
 }
 
 const numOrNull = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v))
+
+// ── «التفقّد» — manager check-in rounds ────────────────────────────────────────────────────
+
+export class PgCheckInRepo implements CheckInRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async listWindows(branchId: string, userId?: string): Promise<CheckInWindowRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM checkin_windows
+        WHERE branch_id = $1 AND active AND ($2::uuid IS NULL OR user_id = $2)
+        ORDER BY at_minute`,
+      [branchId, userId ?? null],
+    )
+    return rows.map(toCheckInWindow)
+  }
+
+  async createWindow(w: CheckInWindowRecord): Promise<CheckInWindowRecord> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `INSERT INTO checkin_windows (id, branch_id, user_id, at_minute, tolerance_minutes, active, label, created_by)
+       VALUES ($1,$2,$3,$4,$5,true,$6,$7) RETURNING *`,
+      [w.id, w.branchId, w.userId, w.atMinute, w.toleranceMinutes, w.label, w.createdBy],
+    )
+    return toCheckInWindow(rows[0]!)
+  }
+
+  /** Retiring a round keeps its history: the row stays, only `active` moves. */
+  async deactivateWindow(id: string): Promise<boolean> {
+    const { rowCount } = await this.pool.query(
+      'UPDATE checkin_windows SET active = false WHERE id = $1 AND active',
+      [id],
+    )
+    return rowCount === 1
+  }
+
+  async record(c: CheckInRecord): Promise<CheckInRecord> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `INSERT INTO checkins (id, branch_id, user_id, business_date, captured_at, lat, lng, accuracy_m,
+                             window_id, distance_m, inside_area, minutes_from_target, verdict, note)
+       VALUES ($1,$2,$3,$4, to_timestamp($5::double precision/1000), $6,$7,$8,$9,$10,$11,$12,$13,$14)
+       RETURNING *`,
+      [
+        c.id, c.branchId, c.userId, c.businessDate, c.capturedAtMs, c.lat, c.lng, c.accuracyM,
+        c.windowId, c.distanceM, c.insideArea, c.minutesFromTarget, c.verdict, c.note,
+      ],
+    )
+    return toCheckIn(rows[0]!)
+  }
+
+  async listByBranchAndDate(branchId: string, businessDate: CalendarDate): Promise<CheckInRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM checkins WHERE branch_id = $1 AND business_date = $2 ORDER BY captured_at',
+      [branchId, businessDate],
+    )
+    return rows.map(toCheckIn)
+  }
+
+  async listByUserAndDate(userId: string, businessDate: CalendarDate): Promise<CheckInRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM checkins WHERE user_id = $1 AND business_date = $2 ORDER BY captured_at',
+      [userId, businessDate],
+    )
+    return rows.map(toCheckIn)
+  }
+}
+
+const toCheckInWindow = (r: Record<string, unknown>): CheckInWindowRecord => ({
+  id: String(r.id),
+  branchId: String(r.branch_id),
+  userId: String(r.user_id),
+  atMinute: Number(r.at_minute),
+  toleranceMinutes: Number(r.tolerance_minutes),
+  active: Boolean(r.active),
+  label: (r.label as string | null) ?? null,
+  createdBy: String(r.created_by),
+})
+
+const toCheckIn = (r: Record<string, unknown>): CheckInRecord => ({
+  id: String(r.id),
+  branchId: String(r.branch_id),
+  userId: String(r.user_id),
+  businessDate: isoDate(r.business_date),
+  capturedAtMs: (r.captured_at as Date).getTime(),
+  lat: Number(r.lat),
+  lng: Number(r.lng),
+  accuracyM: r.accuracy_m === null || r.accuracy_m === undefined ? null : Number(r.accuracy_m),
+  windowId: (r.window_id as string | null) ?? null,
+  distanceM: Number(r.distance_m),
+  insideArea: Boolean(r.inside_area),
+  minutesFromTarget: r.minutes_from_target === null || r.minutes_from_target === undefined ? null : Number(r.minutes_from_target),
+  verdict: r.verdict as CheckInRecord['verdict'],
+  note: (r.note as string | null) ?? null,
+})

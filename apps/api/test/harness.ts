@@ -113,8 +113,8 @@ export async function makeHarness(
     id: VEHICLE_TYPE, code: 'e_motorbike', nameAr: 'دراجة كهربائية', nameEn: 'Electric Motorbike',
     typeNo: 1, batterySlots: 3, active: true,
   })
-  deps.directory.branches.set(BRANCH, { id: BRANCH, code: 'DAM', nameAr: 'دمشق', nameEn: 'Damascus', governorateId: GOV_DAMASCUS, branchNo: 1, timezone: 'Asia/Damascus' })
-  deps.directory.branches.set(OTHER_BRANCH, { id: OTHER_BRANCH, code: 'ALP', nameAr: 'حلب', nameEn: 'Aleppo', governorateId: GOV_ALEPPO, branchNo: 1, timezone: 'Asia/Damascus' })
+  deps.directory.branches.set(BRANCH, { id: BRANCH, code: 'DAM', nameAr: 'دمشق', nameEn: 'Damascus', governorateId: GOV_DAMASCUS, branchNo: 1, timezone: 'Asia/Damascus', lat: 33.5138, lng: 36.2765, checkinRadiusM: 150 })
+  deps.directory.branches.set(OTHER_BRANCH, { id: OTHER_BRANCH, code: 'ALP', nameAr: 'حلب', nameEn: 'Aleppo', governorateId: GOV_ALEPPO, branchNo: 1, timezone: 'Asia/Damascus', lat: null, lng: null, checkinRadiusM: 150 })
   // «رأس مال المكتب» — the owner's own figures, seeded exactly as migration 0026 seeds production.
   // A test that had to configure capital before it could exercise الترميم would be testing its setup.
   deps.capitalTargets.seed(BRANCH)

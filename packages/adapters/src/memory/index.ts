@@ -81,6 +81,7 @@ import { MemoryOcrReadRepo, MemoryOcrReader } from '../ocr/memory.ts'
 import { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
 import { MemoryIncomeRepo } from './incomes.ts'
 import { MemoryCashCountRepo } from './cashcount.ts'
+import { MemoryCheckInRepo } from './checkin.ts'
 import { MemoryOfficeCapitalTargetRepo, MemoryRestorationRepo } from './restoration.ts'
 import { MemoryNotificationRepo, MemoryTierRepo } from './tiers.ts'
 import { MemoryCloseDraftRepo } from './close-draft.ts'
@@ -1386,6 +1387,21 @@ export class MemoryDirectoryRepo implements DirectoryRepo {
   async listBranches(): Promise<BranchRecord[]> {
     return [...this.branches.values()].map((b) => ({ ...b }))
   }
+  async setBranchLocation(
+    id: string,
+    location: { lat: number | null; lng: number | null; checkinRadiusM: number },
+  ): Promise<BranchRecord | null> {
+    const found = this.branches.get(id)
+    if (!found) return null
+    // Both or neither, mirroring branches_geo_ck: half a coordinate is a fence centred on the
+    // equator, which would fail every round with no way to see why.
+    const paired = location.lat === null || location.lng === null
+      ? { lat: null, lng: null }
+      : { lat: location.lat, lng: location.lng }
+    const updated: BranchRecord = { ...found, ...paired, checkinRadiusM: location.checkinRadiusM }
+    this.branches.set(id, updated)
+    return { ...updated }
+  }
   async driver(id: string): Promise<DriverRecord | null> {
     return this.drivers.get(id) ?? null
   }
@@ -1913,6 +1929,7 @@ export interface MemoryDeps extends Deps {
   batterySwaps: MemoryBatterySwapRepo
   vehicleEvents: MemoryVehicleEventRepo
   attendance: MemoryAttendanceRepo
+  checkIns: MemoryCheckInRepo
   decisions: MemoryShiftDecisionRepo
   settlements: MemoryShiftSettlementRepo
   closeDrafts: MemoryCloseDraftRepo
@@ -2211,6 +2228,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     directory,
     vehicleEvents: new MemoryVehicleEventRepo(),
     attendance: new MemoryAttendanceRepo(),
+    checkIns: new MemoryCheckInRepo(),
     decisions,
     settlements,
     closeDrafts,
