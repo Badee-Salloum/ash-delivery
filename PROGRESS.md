@@ -76,6 +76,31 @@ On the screen, a manager looking at an unplaced branch was shown «لم يُحد
 to act and no hint of who could — which reads as a broken system rather than as a step somebody owes
 him. He is now told it is the system admin's to set.
 
+### The truthy-object bug, and the half that hiding could not fix
+
+The owner opened the screen as a branch manager and found the rota editor there: an add form and an
+«إيقاف» button on every round.
+
+`can()` returns a Decision **object**, and every object is truthy. `canConfigure` read
+`session != null && can(...)` — permanently true. `Treasury.tsx` and `Expenses.tsx` end the same
+call in `.allowed`; this one did not, and nothing catches it: the expression typechecks, and the
+server refused every button anyway. He could change nothing; he was offered controls that could only
+fail. A sweep of every `can()` call site in both apps found no other instance.
+
+Hiding the cards would not have been enough. Both reads answered with **every** person on the
+branch's rota, so a colleague's rounds and check-ins were one request away however the screen was
+drawn — and UI hiding is not security. Both are now narrowed on the server, keyed on the SCOPE the
+authorisation granted rather than a role name: branch-wide sight makes an auditor, anything narrower
+makes a subject who sees himself only. `req.grantedScope` carries `decision.scope` out of the RBAC
+preHandler, which was the only place that fact existed. A `?userId=` naming a colleague is ignored,
+not obeyed — and if the §3 matrix is ever edited to widen someone, he becomes an auditor by that same
+act rather than by a second edit here that somebody would have to remember.
+
+The per-ping log is an auditor's view, so the response states the caller's scope and the screen
+renders from it instead of re-deriving the rule. Three new tests, including the one a client-side
+filter would have passed: a colleague's real check-in, written through his own session, must not
+appear in the manager's log.
+
 ### Next
 
 - **The branch has no point yet** (`DAM`: `lat` null, radius 150), so «التفقّد» is inert by
