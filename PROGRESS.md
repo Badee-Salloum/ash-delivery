@@ -5,6 +5,27 @@
 Deployed: migration `0050` applied (`1 applied, 49 already present`), then API and admin. Commits
 `ead5558`, `1c884a6`. `pnpm check` green — 820 API tests, 498 domain.
 
+### No surplus is claimed while today's shifts are open
+
+Owner: «لا يجب ان يظهر اي زيادة بالصندوق طالما لم تنتهي النوبات اليوم». He was right and my earlier
+explanation to him was wrong — I had told him the surplus above capital was the day's earnings. An
+open shift posts NOTHING after its float leaves the box: orders, share and variance all land at
+approval.
+
+The ledger settled it. Walking working capital day by day, **2026-08-29 moved it by exactly 0.00**,
+not one entry. Every lira of the 6,502.00 the card called «زيادة عن رأس المال» accumulated between
+22 and 28 August, before the epoch. True about the balance, false about the day — and the day is
+what a reader takes from a dashboard.
+
+While any shift is open the headline now reads «تُحتسب الزيادة بعد إقفال نوبات اليوم (N مفتوحة)».
+A SHORTFALL still shows: holding back premature good news protects the reader, holding back bad news
+hides the one direction that means money is missing. `deltaProvisional` comes from the API rather
+than being re-derived in the screen, so the two cannot drift.
+
+**Still owed tonight:** that 6,502.00 is pre-epoch accumulation sitting in working capital. It is
+not sweepable right now — the office boxes are short by 20,998.00 because 27,500.00 is out on the
+road — so the restoration after the shifts close is where it lands.
+
 ### A box with its money in drivers' pockets is not in surplus
 
 Reported off the screen. The cash line read «58,218.37 / 50,000.00  +8,218.37» in green while the
