@@ -4,8 +4,10 @@ import {
   type CheckInWindow,
   assessCheckIn,
   distanceMetres,
+  isWithinOperatingRegion,
   localMinuteOfDay,
   rollCall,
+  swapWouldBeInRegion,
   windowFor,
 } from '../../src/attendance/checkin.ts'
 
@@ -177,5 +179,39 @@ describe('the day’s roll-call', () => {
 
   it('reports every window as missed when nobody checked in at all', () => {
     expect(rollCall(WINDOWS, []).every((o) => o.status === 'missed')).toBe(true)
+  })
+})
+
+describe('a swapped latitude and longitude', () => {
+  /**
+   * The real one, read out of production on 2026-08-29: the Damascus branch was stored at
+   * lat 36.29297 / lng 33.52239 — the two fields filled the wrong way round. Every schema passed
+   * it, and the fence landed roughly 300 km away in southern Turkey.
+   */
+  const damascus = { lat: 33.52239, lng: 36.29297 }
+  const swapped = { lat: 36.29297, lng: 33.52239 }
+
+  it('accepts the branch as it actually is', () => {
+    expect(isWithinOperatingRegion(damascus)).toBe(true)
+    expect(swapWouldBeInRegion(damascus)).toBe(false)
+  })
+
+  it('catches the swap that every range check lets through', () => {
+    // Both numbers are individually legal in both fields — which is exactly why ±90/±180 cannot
+    // see this, and why the check has to be about WHERE the point is, not how big the numbers are.
+    expect(swapped.lat).toBeGreaterThanOrEqual(-90)
+    expect(swapped.lat).toBeLessThanOrEqual(90)
+    expect(isWithinOperatingRegion(swapped)).toBe(false)
+    expect(swapWouldBeInRegion(swapped)).toBe(true)
+  })
+
+  it('does not offer a swap that would not help', () => {
+    // London: outside the region, and reversing it lands in the Indian Ocean. Refuse, but do not
+    // suggest — a suggestion that is also wrong is worse than none.
+    expect(swapWouldBeInRegion({ lat: 51.5, lng: -0.12 })).toBe(false)
+  })
+
+  it('measures the damage, so the refusal is not a matter of taste', () => {
+    expect(Math.round(distanceMetres(damascus, swapped) / 1000)).toBeGreaterThan(250)
   })
 })

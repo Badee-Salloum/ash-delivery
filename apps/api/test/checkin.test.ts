@@ -235,6 +235,69 @@ describe('the fence itself', () => {
     expect(res.json()).toMatchObject({ lat: null, lng: null })
   })
 
+  /**
+   * PRODUCTION, 2026-08-29: the branch was placed at lat 36.29297 / lng 33.52239 — the two fields
+   * filled the wrong way round. Damascus is 33.5 N, 36.3 E, so the fence landed about 300 km away
+   * in southern Turkey and every round would have read «خارج الفرع» with nothing to explain it.
+   *
+   * No schema could have caught it: `lat` is bounded by ±90 and `lng` by ±180, and both numbers are
+   * legal in both fields. The check therefore has to be about WHERE the point is.
+   */
+  it('refuses a reversed pair, and hands back the reversal', async () => {
+    const admin = await h.loginAs('sysadmin')
+    const res = await put(admin, '/branch-location', {
+      branchId: BRANCH,
+      lat: 36.29297,
+      lng: 33.52239,
+      checkinRadiusM: 150,
+    })
+    expect(res.statusCode, res.body).toBe(422)
+    expect(res.json().error).toBe('location_outside_operating_region')
+    expect(res.json().detail).toMatchObject({
+      swapSuggested: true,
+      suggestedLat: 33.52239,
+      suggestedLng: 36.29297,
+    })
+  })
+
+  it('accepts the same two numbers the right way round', async () => {
+    const admin = await h.loginAs('sysadmin')
+    const res = await put(admin, '/branch-location', {
+      branchId: BRANCH,
+      lat: 33.52239,
+      lng: 36.29297,
+      checkinRadiusM: 150,
+    })
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json()).toMatchObject({ lat: 33.52239, lng: 36.29297 })
+  })
+
+  it('takes yes for an answer, because a branch may one day be outside the region', async () => {
+    const admin = await h.loginAs('sysadmin')
+    const res = await put(admin, '/branch-location', {
+      branchId: BRANCH,
+      lat: 51.5,
+      lng: -0.12,
+      checkinRadiusM: 150,
+      confirmOutsideRegion: true,
+    })
+    expect(res.statusCode, res.body).toBe(200)
+    // London reversed is the Indian Ocean, so no swap is offered — a wrong suggestion is worse
+    // than none. It is simply refused until confirmed, which it was.
+    expect(res.json()).toMatchObject({ lat: 51.5, lng: -0.12 })
+  })
+
+  it('never stands between a manager and clearing the fence', async () => {
+    const admin = await h.loginAs('sysadmin')
+    const res = await put(admin, '/branch-location', {
+      branchId: BRANCH,
+      lat: null,
+      lng: null,
+      checkinRadiusM: 150,
+    })
+    expect(res.statusCode, res.body).toBe(200)
+  })
+
   it('is settings.write, so a branch manager cannot move his own goalposts', async () => {
     const manager = await h.loginAs('manager')
     const res = await put(manager, '/branch-location', {

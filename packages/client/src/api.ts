@@ -1366,7 +1366,12 @@ export class ApiClient {
     const q = [date && `date=${date}`, userId && `userId=${encodeURIComponent(userId)}`].filter(Boolean).join('&')
     return this.get<CheckInReportView>(`/checkins${q ? `?${q}` : ''}`)
   }
-  setBranchLocation(body: { lat: number | null; lng: number | null; checkinRadiusM: number }) {
+  setBranchLocation(body: {
+    lat: number | null
+    lng: number | null
+    checkinRadiusM: number
+    confirmOutsideRegion?: boolean
+  }) {
     return this.put<{ id: string; lat: number | null; lng: number | null; checkinRadiusM: number }>('/branch-location', {
       ...body,
       ...(this.branchId ? { branchId: this.branchId } : {}),

@@ -199,3 +199,42 @@ export interface CheckInDay {
   readonly businessDate: CalendarDate
   readonly outcomes: readonly WindowOutcome[]
 }
+
+/**
+ * The ground this business operates on.
+ *
+ * Syria's bounding box, padded a little. This exists for ONE failure that range validation cannot
+ * catch: a swapped latitude and longitude. `lat` is checked against ±90 and `lng` against ±180, and
+ * at almost every inhabited place on earth the two numbers are each valid in the other's field.
+ * Damascus is the worst possible case — 33.5 and 36.3 are both legal as either — so a swap passes
+ * every schema, stores cleanly, and moves the branch several hundred kilometres without a word.
+ *
+ * The cost of that silence is total: every round reads «خارج الفرع», and the only evidence is a
+ * distance nobody thinks to read as "this fence is in the wrong country".
+ */
+export const OPERATING_REGION = {
+  minLat: 32.0,
+  maxLat: 37.5,
+  minLng: 35.5,
+  maxLng: 42.5,
+} as const
+
+export function isWithinOperatingRegion(point: GeoPoint): boolean {
+  return (
+    point.lat >= OPERATING_REGION.minLat &&
+    point.lat <= OPERATING_REGION.maxLat &&
+    point.lng >= OPERATING_REGION.minLng &&
+    point.lng <= OPERATING_REGION.maxLng
+  )
+}
+
+/**
+ * Would swapping these two numbers put the point back on the map?
+ *
+ * Returning this alongside the refusal is what turns "that is wrong" into a one-press correction.
+ * It answers only when the swap is UNAMBIGUOUSLY better — the pair as given is outside and the pair
+ * reversed is inside — so it never talks someone out of a point that was right to begin with.
+ */
+export function swapWouldBeInRegion(point: GeoPoint): boolean {
+  return !isWithinOperatingRegion(point) && isWithinOperatingRegion({ lat: point.lng, lng: point.lat })
+}

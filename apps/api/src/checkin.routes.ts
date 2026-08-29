@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { CheckInRecord, CheckInWindowRecord, Deps } from '@ash/contracts'
 import { createCheckInRequest, createCheckInWindowRequest, setBranchLocationRequest } from '@ash/contracts'
-import { assessCheckIn, rollCall } from '@ash/domain'
+import { assessCheckIn, isWithinOperatingRegion, rollCall, swapWouldBeInRegion } from '@ash/domain'
 import { ServiceError, todayFor } from './shifts.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
 
@@ -58,6 +58,31 @@ export function registerCheckInRoutes(app: FastifyInstance, deps: Deps): void {
     const branchId = resolveBranchId(req)
     const before = await deps.directory.branch(branchId)
     if (!before) throw new ServiceError(404, 'branch_not_found')
+
+    /*
+     * The one error a range check cannot see: latitude and longitude entered the wrong way round.
+     *
+     * `lat` is bounded by ±90 and `lng` by ±180, and at nearly every inhabited place both numbers
+     * are legal in both fields. Damascus is the worst case — 33.5 and 36.3 are each valid as either
+     * — so a swap passes every schema, stores cleanly, and moves the fence several hundred
+     * kilometres. It did, in production, on the day this branch was first placed: the point landed
+     * in southern Turkey and every round would have read «خارج الفرع» with nothing to say why.
+     *
+     * Refuse once and hand back the swap when reversing the pair would land inside, which turns the
+     * refusal into a correction the operator can accept with one press.
+     */
+    if (body.lat !== null && body.lng !== null && !body.confirmOutsideRegion) {
+      const point = { lat: body.lat, lng: body.lng }
+      if (!isWithinOperatingRegion(point)) {
+        throw new ServiceError(422, 'location_outside_operating_region', {
+          lat: body.lat,
+          lng: body.lng,
+          swapSuggested: swapWouldBeInRegion(point),
+          suggestedLat: body.lng,
+          suggestedLng: body.lat,
+        })
+      }
+    }
 
     const updated = await deps.directory.setBranchLocation(branchId, {
       lat: body.lat,

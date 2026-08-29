@@ -1304,4 +1304,12 @@ export const setBranchLocationRequest = z.object({
   lat: z.number().min(-90).max(90).nullable(),
   lng: z.number().min(-180).max(180).nullable(),
   checkinRadiusM: z.number().int().min(10).max(20_000).default(150),
+  /**
+   * Save a point outside the region this business operates in, having been told.
+   *
+   * The guard exists for swapped fields, not to decide where a branch may be; a future branch
+   * genuinely outside the box must still be possible to record. So it refuses once, names what it
+   * saw, and takes yes for an answer.
+   */
+  confirmOutsideRegion: z.boolean().default(false),
 })

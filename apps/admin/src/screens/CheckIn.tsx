@@ -71,6 +71,8 @@ export function CheckIn(): ReactNode {
   const [lat, setLat] = useState('')
   const [lng, setLng] = useState('')
   const [radius, setRadius] = useState('150')
+  /** Set when the server refused the point as out of region, carrying the reversal it suggests. */
+  const [swap, setSwap] = useState<{ lat: number; lng: number; suggested: boolean } | null>(null)
 
   const load = useCallback(async () => {
     setError(null)
@@ -179,21 +181,30 @@ export function CheckIn(): ReactNode {
     }
   }
 
-  const saveLocation = async (clear: boolean): Promise<void> => {
+  const saveLocation = async (clear: boolean, confirmOutsideRegion = false): Promise<void> => {
     setBusy(true)
     try {
       await api.setBranchLocation({
         lat: clear ? null : Number(lat),
         lng: clear ? null : Number(lng),
         checkinRadiusM: Number(radius) || 150,
+        confirmOutsideRegion,
       })
       if (clear) {
         setLat('')
         setLng('')
       }
+      setSwap(null)
       await load()
       toast.success(t.common.saved)
     } catch (e) {
+      const detail = (e as { detail?: { suggestedLat?: number; suggestedLng?: number; swapSuggested?: boolean } }).detail
+      if (codeOf(e) === 'location_outside_operating_region' && detail) {
+        // Keep the refusal beside the fields it is about, with the correction already computed.
+        // A toast that vanishes would leave the operator with a wrong point and no idea why.
+        setSwap({ lat: detail.suggestedLat!, lng: detail.suggestedLng!, suggested: detail.swapSuggested === true })
+        return
+      }
       reportFailure(e)
     } finally {
       setBusy(false)
@@ -395,6 +406,37 @@ export function CheckIn(): ReactNode {
                 </Button>
               </div>
             </div>
+            {swap ? (
+              <div className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                <p>{t.checkin.outsideRegion}</p>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {swap.suggested ? (
+                    <>
+                      <span>
+                        {t.checkin.swapSuggest
+                          .replace('{{lat}}', swap.lat.toFixed(5))
+                          .replace('{{lng}}', swap.lng.toFixed(5))}
+                      </span>
+                      <Button
+                        onClick={() => {
+                          setLat(String(swap.lat))
+                          setLng(String(swap.lng))
+                          setSwap(null)
+                        }}
+                        disabled={busy}
+                      >
+                        {t.checkin.applySwap}
+                      </Button>
+                    </>
+                  ) : null}
+                  {/* A branch genuinely outside the region must still be recordable — the guard is
+                      for reversed fields, not for deciding where a branch may be. */}
+                  <Button variant="ghost" onClick={() => void saveLocation(false, true)} disabled={busy}>
+                    {t.checkin.saveAnyway}
+                  </Button>
+                </div>
+              </div>
+            ) : null}
             <div className="mt-3 flex gap-2">
               <Button onClick={() => void saveLocation(false)} disabled={busy || !lat || !lng}>
                 {t.checkin.saveLocation}
