@@ -1,5 +1,55 @@
 # PROGRESS
 
+## 2026-08-29 (later) — «تعديل الذمم المسجلة», the map picker, and two bugs found by looking
+
+Deployed: migration `0050` applied (`1 applied, 49 already present`), then API and admin. Commits
+`ead5558`, `1c884a6`. `pnpm check` green — 820 API tests, 498 domain.
+
+### Correcting a receivable: restate the balance, never edit an event
+
+A driver's receivable balance is a LEDGER FUND BALANCE, not the sum of `receivable_events`. Seven
+places emit receivable fund lines and only ONE writes an event row — so "edit the event" is
+arithmetically incapable of touching the commonest wrong number of all, a `shift_funding` carry,
+which has no event to point at. There is a test for precisely that: a carry created entirely by a
+shift close, corrected, asserting no command row existed beforehand and that the next shift opens on
+the corrected figure.
+
+So the correction names the balance and posts the difference through the UNCHANGED
+`receivableAdjustment` recipe — one way to move a receivable, and every 0037 guard applies
+untouched. `expectedCurrentBalance` is re-read inside the lock: if a shift closed in between, the
+correction is refused with both numbers, because a correction that silently erases a real event is
+worse than the balance it was meant to fix. `intent` exists so the driver's history does not read
+«تحصيل ٦٬٠٠٠» for an event where no money came back.
+
+Migration 0050 deliberately does NOT relax 0037's inactive-driver guard: that meant rewriting a
+200-line security trigger to change one clause. A hand-copied guard that drifts from the original is
+a worse risk than the workflow it saves — a first draft of this migration did drift, inventing
+`jl.role` where the original checks `jl.line_role`, and would have weakened production.
+
+### A 300 km fence, and a map so it cannot happen again
+
+The branch was placed at lat 36.29297 / lng 33.52239 — the fields filled the wrong way round.
+Damascus is 33.5 N, 36.3 E, so the fence landed in southern Turkey and every round would have read
+«خارج الفرع». No schema could catch it: both numbers are legal in both fields. The guard is now a
+bounding box for the ground this business operates on, and when reversing the pair would land inside
+the refusal hands back the swap for one press. And the fence can now be picked off a Leaflet map —
+already a dependency, so no new weight — with the radius drawn at true scale.
+
+### An unknown route was a 500
+
+`authorize` is a global preHandler and Fastify runs preHandler hooks on its not-found route, which
+declares no permission. So every typo, stale client URL and scanner probe answered
+`500 route_misconfigured` — the server confessing to its own fault for a thing that does not exist.
+Real 500s are how breakage gets found.
+
+### Go-live: refused, correctly
+
+The owner asked to move the epoch to 2026-08-29. `PUT /settings` refused with
+`go_live_requires_opening_ceremony`: that date has no sealed cash count and no restoration, and the
+alternative proof does not hold either — working capital is **66,502.00** against a target of
+**60,000.00**, i.e. 6,502.00 ABOVE it. Five shifts were still open at the time. The gate is the whole
+reason "ignore everything before" is honest, so the move waits for tonight's close-out.
+
 ## 2026-08-29 — «التفقّد», the branch manager's rounds
 
 Deployed: migration `0049` applied to production on the direct Neon endpoint (`1 applied, 48
