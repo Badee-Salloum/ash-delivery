@@ -2,8 +2,18 @@
 
 ## 2026-08-29 — «التفقّد», the branch manager's rounds
 
-Built, tested, committed (`51446af`). **Not yet deployed**: migration `0049` still has to reach
-production, and the credentials in this workspace no longer open it.
+Deployed: migration `0049` applied to production on the direct Neon endpoint (`1 applied, 48
+already present`), then API and admin. `/health` `{"ok":true}`; `/checkin-windows`, `/checkins` and
+`/branch-location` all answer `401` (registered, authenticating) where an unknown route answers
+`500`; `ash-admin-eta` serves `index-_MPebcql.js`. **Trial balance after migration: 0.** Commits
+`51446af`, `708f17f`.
+
+`checkins` came up with `INSERT, SELECT` and nothing else for `app_user` — the append-only grant
+took. The Postgres conformance suite is skipped without Docker, so the row mappers were the one part
+no test had exercised against a real database; every column they dereference was checked to exist
+(`8/8`, `14/14`, `3/3`) and `captured_at` confirmed to be `timestamp with time zone`, since a mapper
+reading a missing column does not throw — `String(undefined)` is `"undefined"`, and the failure
+would have been a check-in attributed to a user of that name.
 
 The owner's rule: several rounds a day — «تسجيل الدخول عالساعة 1 و 5 و 10» — each within a
 tolerance and each from inside the branch's own patch of ground, «على حساب مدير الفرع و ليس
@@ -50,7 +60,9 @@ round moves `active` and keeps the row, so yesterday still explains itself.
 
 ### Next
 
-- Apply `0049` on the DIRECT Neon endpoint, then deploy API + admin.
+- **The branch has no point yet** (`DAM`: `lat` null, radius 150), so «التفقّد» is inert by
+  construction — no round can be failed. The owner sets it from the branch itself with «استخدم
+  موقعي الحالي»; a coordinate guessed from here would fence the wrong ground.
 - «تعديل الذمم المسجلة» — designed, not built. The finding that shapes it: a driver's receivable
   balance is **not** the sum of `receivable_events` (seven sites emit receivable fund lines, one
   writes an event row), so an event-pointer correction cannot touch the commonest case — a
