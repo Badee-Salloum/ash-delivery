@@ -58,6 +58,24 @@ round moves `active` and keeps the row, so yesterday still explains itself.
 
 **Verification:** 17 domain tests, 15 API tests, `pnpm check` green (791 API tests, 494 domain).
 
+### The person being checked on does not own the check
+
+Owner amendment, same day: «لا يجب ان يستطيع مدير الفرع تغير اعدادت التفقد فقط مدير النظام / مدير
+الفرع فقط يسجل الدخول».
+
+The server already behaved this way — every write that DEFINES the check (add a round, retire a
+round, move the fence) is `settings.write`, and production's `role_permissions` holds exactly one
+row for it: `system_admin / all`. But only one of the three writes had a test, so the rule was true
+by accident of a shared gate rather than pinned. All three are now asserted, and the **general
+manager** is tested separately on purpose: he holds `branch_data.view` at scope 'all', so a leak of
+configuration to "whoever can see the branch" would have passed every branch-manager assertion and
+still handed him the rota. The success half is asserted too, so a future tightening cannot quietly
+take away the one thing the branch manager is here to do.
+
+On the screen, a manager looking at an unplaced branch was shown «لم يُحدَّد موقع الفرع» with no way
+to act and no hint of who could — which reads as a broken system rather than as a step somebody owes
+him. He is now told it is the system admin's to set.
+
 ### Next
 
 - **The branch has no point yet** (`DAM`: `lat` null, radius 150), so «التفقّد» is inert by
