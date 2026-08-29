@@ -537,3 +537,248 @@ describe('ordinary and shift-funding receivable commands', () => {
     expect(tooMuch.json().error).toBe('receivable_overcollection')
   })
 })
+
+/**
+ * «تعديل الذمم المسجلة» (owner request, 2026-08-29) — restating a receivable balance that was
+ * recorded wrongly.
+ *
+ * THE FINDING THAT DECIDED THE SHAPE. A driver's receivable balance is a LEDGER FUND BALANCE fed
+ * from seven places, and only ONE of them writes a `receivable_events` row. So a correction that
+ * points at an event cannot touch the commonest wrong number of all — a `shift_funding` carry,
+ * which has no event to point at. The correction therefore names the BALANCE, and the last test
+ * here is the proof: it corrects a carry created entirely by a shift close, with no command row in
+ * existence.
+ */
+describe('correcting a recorded receivable', () => {
+  const correction = (over: Partial<Payload> = {}): Payload => ({
+    driverId: DRIVER_ID,
+    receivableKind: 'ordinary',
+    channel: 'cash',
+    expectedCurrentBalance: sypStr(10_000),
+    targetBalance: sypStr(4_000),
+    reason: 'أُدخلت ١٠٬٠٠٠ والصحيح ٤٬٠٠٠',
+    idempotencyKey: nextKey(),
+    ...over,
+  })
+
+  const balance = async (manager: string): Promise<string> => {
+    const res = await get(manager, '/treasury/receivables')
+    expect(res.statusCode, res.body).toBe(200)
+    const row = res.json().drivers.find((d: { driverId: string }) => d.driverId === DRIVER_ID)
+    return row.cash as string
+  }
+
+  it('lowers a balance that was entered too high, and moves the value back to the office', async () => {
+    const manager = await h.loginAs('manager')
+    await seedOffice(manager)
+    await createReceivable(manager)
+    expect(await balance(manager)).toBe(sypStr(10_000))
+
+    const res = await post(manager, '/receivables/adjustments', correction())
+    expect(res.statusCode, res.body).toBe(201)
+    // The posting is a `collect` of the difference — the ledger has one way to move a receivable,
+    // and this reuses it rather than inventing a second.
+    expect(res.json()).toMatchObject({
+      direction: 'collect',
+      amount: sypStr(6_000),
+      intent: 'correction',
+      priorBalance: sypStr(10_000),
+      targetBalance: sypStr(4_000),
+    })
+    expect(await balance(manager)).toBe(sypStr(4_000))
+  })
+
+  it('raises a balance that was entered too low', async () => {
+    const manager = await h.loginAs('manager')
+    await seedOffice(manager)
+    await createReceivable(manager)
+
+    const res = await post(
+      manager,
+      '/receivables/adjustments',
+      correction({ targetBalance: sypStr(17_500) }),
+    )
+    expect(res.statusCode, res.body).toBe(201)
+    expect(res.json()).toMatchObject({ direction: 'create', amount: sypStr(7_500), intent: 'correction' })
+    expect(await balance(manager)).toBe(sypStr(17_500))
+  })
+
+  it('records it as a correction, so the history never claims money came back', async () => {
+    const manager = await h.loginAs('manager')
+    await seedOffice(manager)
+    await createReceivable(manager)
+    await post(manager, '/receivables/adjustments', correction())
+
+    const events = (await get(manager, '/treasury/receivables/events')).json().events
+    const restatement = events.find((e: { intent: string }) => e.intent === 'correction')
+    // Same posting shape as a collection — and that is exactly why the label has to exist. Without
+    // it the driver's history reads «تحصيل ٦٬٠٠٠», money returned, for an event where none did.
+    expect(restatement).toMatchObject({
+      direction: 'collect',
+      intent: 'correction',
+      priorBalance: sypStr(10_000),
+      targetBalance: sypStr(4_000),
+    })
+    expect(events.filter((e: { intent: string }) => e.intent === 'command')).toHaveLength(1)
+  })
+
+  it('refuses when the balance moved under the operator between reading and pressing', async () => {
+    const manager = await h.loginAs('manager')
+    await seedOffice(manager)
+    await createReceivable(manager)
+    // Something else happens — a collection lands.
+    await post(manager, '/receivables/events', receivableBody({ direction: 'collect', amount: sypStr(3_000) }))
+
+    // He is still looking at 10,000. Applying "set it to 4,000" now would silently erase the
+    // collection, and a correction that erases a real event is worse than the number it fixes.
+    const res = await post(manager, '/receivables/adjustments', correction())
+    expect(res.statusCode).toBe(409)
+    expect(res.json().error).toBe('receivable_balance_changed')
+    expect(res.json().detail).toMatchObject({ expected: sypStr(10_000), actual: sypStr(7_000) })
+    expect(await balance(manager)).toBe(sypStr(7_000))
+  })
+
+  it('refuses a correction that changes nothing', async () => {
+    const manager = await h.loginAs('manager')
+    await seedOffice(manager)
+    await createReceivable(manager)
+    const res = await post(manager, '/receivables/adjustments', correction({ targetBalance: sypStr(10_000) }))
+    expect(res.statusCode).toBe(422)
+    expect(res.json().error).toBe('receivable_already_at_target')
+  })
+
+  it('replays a lost response instead of restating the balance twice', async () => {
+    const manager = await h.loginAs('manager')
+    await seedOffice(manager)
+    await createReceivable(manager)
+    const body = correction()
+
+    const first = await post(manager, '/receivables/adjustments', body)
+    expect(first.statusCode, first.body).toBe(201)
+    const again = await post(manager, '/receivables/adjustments', body)
+    expect(again.statusCode).toBe(200)
+    expect(again.json()).toMatchObject({ id: first.json().id, replayed: true })
+    // The whole risk of a retried correction: 10,000 → 4,000 applied twice would land on -2,000.
+    expect(await balance(manager)).toBe(sypStr(4_000))
+  })
+
+  it('refuses a reused key that means something else', async () => {
+    const manager = await h.loginAs('manager')
+    await seedOffice(manager)
+    await createReceivable(manager)
+    const key = nextKey()
+    expect((await post(manager, '/receivables/adjustments', correction({ idempotencyKey: key }))).statusCode).toBe(201)
+    const changed = await post(
+      manager,
+      '/receivables/adjustments',
+      correction({ idempotencyKey: key, expectedCurrentBalance: sypStr(4_000), targetBalance: sypStr(1_000) }),
+    )
+    expect(changed.statusCode).toBe(409)
+    expect(changed.json().error).toBe('idempotency_key_conflict')
+  })
+
+  it('will not raise a receivable the office box cannot fund', async () => {
+    const manager = await h.loginAs('manager')
+    await seedOffice(manager, 12_000, 12_000)
+    await createReceivable(manager)
+    const res = await post(manager, '/receivables/adjustments', correction({ targetBalance: sypStr(500_000) }))
+    expect(res.statusCode).toBe(422)
+    expect(res.json().error).toBe('insufficient_funds')
+  })
+
+  it('names the inactive driver rather than failing on a database guard', async () => {
+    const manager = await h.loginAs('manager')
+    await seedOffice(manager)
+    await createReceivable(manager)
+    await deactivateDriver()
+
+    // Lowering is fine — an inactive driver's debt stays collectible.
+    expect((await post(manager, '/receivables/adjustments', correction())).statusCode).toBe(201)
+
+    // Raising is refused, matching 0037's `create` guard, with a name the operator can act on.
+    const raise = await post(
+      manager,
+      '/receivables/adjustments',
+      correction({ expectedCurrentBalance: sypStr(4_000), targetBalance: sypStr(9_000) }),
+    )
+    expect(raise.statusCode).toBe(422)
+    expect(raise.json().error).toBe('receivable_correction_needs_active_driver')
+  })
+
+  /**
+   * THE TEST THAT DECIDED THE DESIGN.
+   *
+   * This `shift_funding` carry is created entirely by a shift close. There is no `receivable_events`
+   * row for it and there never will be — the close posts the fund line directly. An "edit this
+   * event" correction would have nothing to edit, which is why the correction names the BALANCE.
+   *
+   * The number is the same one the deferral test above produces: 3,000 cash carried, held in the
+   * driver's own pocket. Say the manager meant 2,000.
+   */
+  it('corrects a shift-funding carry, which has no event row to point at', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    await seedOffice(manager)
+
+    const first = await awaitingEmptyShift(driver)
+    expect((await post(manager, `/shifts/${first}/approve-open`, {
+      floatTranches: [sypStr(10_000)],
+      topupTranches: [sypStr(5_000)],
+    })).statusCode).toBe(200)
+    const firstHash = await submitBalancedShift(driver, manager, first, 15_000, 4_000)
+    const preview = await get(
+      manager,
+      `/shifts/${first}/settlement?cashReceivableDeferred=${sypStr(3_000)}&walletReceivableDeferred=${sypStr(0)}`,
+    )
+    expect(preview.statusCode, preview.body).toBe(200)
+    const deferred = preview.json() as {
+      settlementHash: string
+      cashReceivableDeferred: string
+      walletReceivableDeferred: string
+    }
+    expect((await post(manager, `/shifts/${first}/approve-close`, {
+      reviewedOrdersHash: firstHash,
+      reviewedSettlementHash: deferred.settlementHash,
+      walletTransferConfirmed: true,
+      cashSettlementConfirmed: true,
+      cashReceivableDeferred: deferred.cashReceivableDeferred,
+      walletReceivableDeferred: deferred.walletReceivableDeferred,
+    })).statusCode).toBe(200)
+
+    expect(await h.deps.ledger.fundBalance(BRANCH, `driver_shift_funding_cash:${DRIVER_ID}`)).toBe(300_000n)
+    // Not one command row exists for that 3,000 — the premise of the whole design.
+    const before = (await get(manager, '/treasury/receivables/events')).json().events
+    expect(before).toHaveLength(0)
+
+    const res = await post(manager, '/receivables/adjustments', {
+      driverId: DRIVER_ID,
+      receivableKind: 'shift_funding',
+      channel: 'cash',
+      expectedCurrentBalance: sypStr(3_000),
+      targetBalance: sypStr(2_000),
+      reason: 'رُحّل ٣٬٠٠٠ والصحيح ٢٬٠٠٠',
+      idempotencyKey: nextKey(),
+    })
+    expect(res.statusCode, res.body).toBe(201)
+    expect(res.json()).toMatchObject({
+      receivableKind: 'shift_funding',
+      direction: 'collect',
+      amount: sypStr(1_000),
+      intent: 'correction',
+    })
+    expect(await h.deps.ledger.fundBalance(BRANCH, `driver_shift_funding_cash:${DRIVER_ID}`)).toBe(200_000n)
+
+    // And the corrected carry is what the next shift actually opens on — the correction reaches the
+    // number that matters, not a parallel record of it.
+    const second = await openEmptyShift(driver, manager)
+    expect((await h.deps.shifts.findById(second))?.carriedTranches).toEqual([200_000n])
+  })
+
+  it('is journal.manual.write, like every other hand-entered movement of money', async () => {
+    const manager = await h.loginAs('manager')
+    await seedOffice(manager)
+    await createReceivable(manager)
+    const driver = await h.loginAs('driver1')
+    expect((await post(driver, '/receivables/adjustments', correction())).statusCode).toBe(403)
+  })
+})

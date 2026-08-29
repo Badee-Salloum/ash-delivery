@@ -1,4 +1,6 @@
-import { type ReactNode, useCallback, useEffect, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
 import type { CheckInReportView, CheckInWindowView } from '@ash/client'
 import { type RoleKey, can } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
@@ -38,6 +40,85 @@ const toneFor = (status: string): 'green' | 'amber' | 'red' | 'slate' =>
 
 /** The server's error code, or null — the shape `explainError` reads. */
 const codeOf = (e: unknown): string | null => (e as { error?: string }).error ?? null
+
+
+/** Damascus, for a map that has to open somewhere before a branch has been placed. */
+const DAMASCUS: [number, number] = [33.5138, 36.2765]
+
+/**
+ * Pick the branch off the map.
+ *
+ * This exists because of a real 300 km error: the two coordinate fields were filled the wrong way
+ * round, and no schema could see it — both numbers are legal in both fields. A map cannot be filled
+ * in the wrong order. The typed fields stay for anyone who has an exact pair, and the region guard
+ * still covers them.
+ *
+ * The circle is the check-in radius at its true scale, so the person setting the fence sees the
+ * ground it actually covers instead of guessing what 150 m means. Leaflet with `circleMarker` and
+ * no image asset, exactly as the live map does it — no marker-icon bundling problem, no new
+ * dependency.
+ */
+function FencePicker({
+  lat,
+  lng,
+  radiusM,
+  hint,
+  onPick,
+}: {
+  lat: number | null
+  lng: number | null
+  radiusM: number
+  hint: string
+  onPick: (lat: number, lng: number) => void
+}): ReactNode {
+  const div = useRef<HTMLDivElement | null>(null)
+  const map = useRef<L.Map | null>(null)
+  const layer = useRef<L.LayerGroup | null>(null)
+  // Read through a ref so the click handler is installed once and still sees the current callback;
+  // re-registering it on every keystroke would leak handlers and fire a pick several times.
+  const pick = useRef(onPick)
+  pick.current = onPick
+
+  useEffect(() => {
+    if (!div.current || map.current) return
+    const created = L.map(div.current).setView(lat !== null && lng !== null ? [lat, lng] : DAMASCUS, 15)
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap',
+      maxZoom: 19,
+    }).addTo(created)
+    layer.current = L.layerGroup().addTo(created)
+    created.on('click', (e: L.LeafletMouseEvent) => pick.current(e.latlng.lat, e.latlng.lng))
+    map.current = created
+    return () => {
+      created.remove()
+      map.current = null
+      layer.current = null
+    }
+    // Mount once. The point and radius are drawn by the effect below, which is what has to react.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    const group = layer.current
+    if (!group) return
+    group.clearLayers()
+    if (lat === null || lng === null) return
+    L.circle([lat, lng], { radius: radiusM, color: '#1d4ed8', weight: 1, fillOpacity: 0.12 }).addTo(group)
+    L.circleMarker([lat, lng], { radius: 6, color: '#1d4ed8', fillColor: '#1d4ed8', fillOpacity: 1 }).addTo(group)
+  }, [lat, lng, radiusM])
+
+  // Follow the point when it is set from outside the map — the device fix, or the swap correction.
+  useEffect(() => {
+    if (map.current && lat !== null && lng !== null) map.current.setView([lat, lng], map.current.getZoom())
+  }, [lat, lng])
+
+  return (
+    <div>
+      <p className="mb-2 text-sm text-slate-500">{hint}</p>
+      <div ref={div} className="h-72 w-full rounded-lg border border-slate-200" />
+    </div>
+  )
+}
 
 export function CheckIn(): ReactNode {
   const { api, t, session, branchId } = useApp()
@@ -390,7 +471,20 @@ export function CheckIn(): ReactNode {
           </Card>
 
           <Card title={t.checkin.location}>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <FencePicker
+              lat={Number.isFinite(Number(lat)) && lat !== '' ? Number(lat) : null}
+              lng={Number.isFinite(Number(lng)) && lng !== '' ? Number(lng) : null}
+              radiusM={Number(radius) || 150}
+              hint={t.checkin.pickOnMap}
+              onPick={(pickedLat, pickedLng) => {
+                setLat(pickedLat.toFixed(6))
+                setLng(pickedLng.toFixed(6))
+                // A point taken off the map cannot be reversed, so any standing warning about the
+                // pair is stale the moment one is picked.
+                setSwap(null)
+              }}
+            />
+            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <Field label={t.checkin.lat}>
                 <TextInput inputMode="decimal" value={lat} onChange={(e) => setLat(e.target.value)} />
               </Field>

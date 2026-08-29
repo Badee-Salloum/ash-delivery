@@ -124,6 +124,21 @@ export function Treasury(): ReactNode {
     amount: '',
     reason: '',
   })
+  /*
+   * «تعديل الذمم المسجلة» — a restatement, kept beside the command form but deliberately separate.
+   *
+   * It shares nothing with the command draft on purpose: a command says "move this much", a
+   * correction says "the balance should read this". Folding one into the other would produce a form
+   * whose «المبلغ» means two different things depending on a dropdown, which is how an operator
+   * ends up moving 4,000 when he meant to set the balance TO 4,000.
+   */
+  const [correctionDriverId, setCorrectionDriverId] = useState('')
+  const [correctionKind, setCorrectionKind] = useState<ReceivableKind>('ordinary')
+  const [correctionChannel, setCorrectionChannel] = useState<ReceivableChannel>('cash')
+  const [correctionTarget, setCorrectionTarget] = useState('')
+  const [correctionReason, setCorrectionReason] = useState('')
+  const [correctionBusy, setCorrectionBusy] = useState(false)
+  const [correctionError, setCorrectionError] = useState<string | null>(null)
   const [receivableEventBusy, setReceivableEventBusy] = useState(false)
   const [receivableEventError, setReceivableEventError] = useState<string | null>(null)
   const [receivableHistory, setReceivableHistory] = useState<ReceivableEventView[] | null>(null)
@@ -818,6 +833,58 @@ export function Treasury(): ReactNode {
   // A branch switch invalidates the painted data immediately, before the effect starts its fetch.
   const selectedReceivables = receivablesBranchId === branchId ? receivables : null
   const selectedReceivablesError = receivablesBranchId === branchId ? receivablesError : null
+  /**
+   * The balance the correction is about, straight off the loaded view.
+   *
+   * Shown read-only rather than typed. The whole point of `expectedCurrentBalance` is that it is
+   * what the operator was LOOKING AT — letting him type it would turn an optimistic-concurrency
+   * check into a second chance to get a number wrong.
+   */
+  const correctionRow = (receivablesBranchId === branchId ? receivables : null)?.drivers.find(
+    (d) => d.driverId === correctionDriverId,
+  )
+  const correctionCurrent = correctionRow
+    ? correctionKind === 'ordinary'
+      ? correctionChannel === 'cash'
+        ? correctionRow.ordinaryCash
+        : correctionRow.ordinaryWallet
+      : correctionChannel === 'cash'
+        ? correctionRow.shiftFundingCash
+        : correctionRow.shiftFundingWallet
+    : null
+
+  const submitCorrection = async (): Promise<void> => {
+    if (!correctionRow || correctionCurrent === null) return
+    setCorrectionError(null)
+    const confirmed = await confirm({
+      title: t.treasury.correctionConfirmTitle,
+      body: `${correctionRow.nameAr} (${correctionRow.code}) — ${t.treasury.receivableKinds[correctionKind]} — ${t.treasury.receivableChannels[correctionChannel]} — ${groupThousands(correctionCurrent)} → ${groupThousands(correctionTarget)} — ${correctionReason}`,
+    })
+    if (!confirmed) return
+    setCorrectionBusy(true)
+    try {
+      await api.correctReceivable({
+        driverId: correctionDriverId,
+        receivableKind: correctionKind,
+        channel: correctionChannel,
+        expectedCurrentBalance: correctionCurrent,
+        targetBalance: correctionTarget,
+        reason: correctionReason.trim(),
+        // A fresh key per attempt: the server treats a repeat of the SAME key as a replay, which is
+        // what protects a lost response from restating the balance twice.
+        idempotencyKey: crypto.randomUUID(),
+      })
+      setCorrectionTarget('')
+      setCorrectionReason('')
+      await Promise.all([loadReceivables(), loadReceivableHistory()])
+      toast.success(t.treasury.correctionSaved)
+    } catch (error) {
+      setCorrectionError((error as { error?: string }).error ?? 'error')
+    } finally {
+      setCorrectionBusy(false)
+    }
+  }
+
   const selectedReceivableHistory = receivableHistoryBranchId === branchId ? receivableHistory : null
   const selectedReceivableHistoryError = receivableHistoryBranchId === branchId ? receivableHistoryError : null
   const selectedReceivableRow = selectedReceivables?.drivers.find(
@@ -1194,6 +1261,70 @@ export function Treasury(): ReactNode {
               </Table>
             </div>
             <div className="mt-5 border-t border-slate-200 pt-3">
+              <h3 className="text-sm font-bold text-slate-700">{t.treasury.correctionTitle}</h3>
+              <p className="mt-1 text-xs text-slate-600">{t.treasury.correctionHint}</p>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <Field label={t.treasury.driver}>
+                  <Select value={correctionDriverId} onChange={(e) => setCorrectionDriverId(e.target.value)}>
+                    <option value="">—</option>
+                    {(receivablesBranchId === branchId ? receivables?.drivers ?? [] : []).map((d) => (
+                      <option key={d.driverId} value={d.driverId}>
+                        {d.nameAr} ({d.code})
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label={t.treasury.receivableKind}>
+                  <Select value={correctionKind} onChange={(e) => setCorrectionKind(e.target.value as ReceivableKind)}>
+                    <option value="ordinary">{t.treasury.receivableKinds.ordinary}</option>
+                    <option value="shift_funding">{t.treasury.receivableKinds.shift_funding}</option>
+                  </Select>
+                </Field>
+                <Field label={t.treasury.receivableChannel}>
+                  <Select
+                    value={correctionChannel}
+                    onChange={(e) => setCorrectionChannel(e.target.value as ReceivableChannel)}
+                  >
+                    <option value="cash">{t.treasury.receivableChannels.cash}</option>
+                    <option value="wallet">{t.treasury.receivableChannels.wallet}</option>
+                  </Select>
+                </Field>
+                <Field label={t.treasury.correctionCurrent}>
+                  {/* Read-only by design — see `correctionCurrent`. */}
+                  <div className="num flex min-h-10 items-center rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm text-slate-700">
+                    {correctionCurrent === null ? '—' : <Money value={correctionCurrent} />}
+                  </div>
+                </Field>
+                <Field label={t.treasury.correctionTarget}>
+                  <MoneyInput value={correctionTarget} onChange={(e) => setCorrectionTarget(e.target.value)} />
+                </Field>
+                <Field label={t.treasury.receivableReason} hint={t.treasury.receivableReasonHint}>
+                  <TextInput value={correctionReason} onChange={(e) => setCorrectionReason(e.target.value)} />
+                </Field>
+              </div>
+              {correctionError ? (
+                <p className="mt-2 text-sm text-red-600">{explainError(correctionError, t)}</p>
+              ) : null}
+              {correctionCurrent !== null && correctionTarget.trim() === correctionCurrent ? (
+                <p className="mt-2 text-sm text-amber-700">{t.treasury.correctionNoChange}</p>
+              ) : null}
+              <div className="mt-3">
+                <Button
+                  onClick={() => void submitCorrection()}
+                  disabled={
+                    correctionBusy ||
+                    correctionCurrent === null ||
+                    correctionTarget.trim() === '' ||
+                    correctionTarget.trim() === correctionCurrent ||
+                    correctionReason.trim() === ''
+                  }
+                >
+                  {t.treasury.correctionSave}
+                </Button>
+              </div>
+            </div>
+
+            <div className="mt-5 border-t border-slate-200 pt-3">
               <h3 className="text-sm font-bold text-slate-700">{t.treasury.receivableHistory}</h3>
               {!selectedReceivableHistory ? (
                 <Pending
@@ -1223,7 +1354,21 @@ export function Treasury(): ReactNode {
                       <td className="px-3 py-2">{event.driverNameAr} ({event.driverCode})</td>
                       <td className="px-3 py-2">{t.treasury.receivableKinds[event.receivableKind]}</td>
                       <td className="px-3 py-2">{t.treasury.receivableChannels[event.channel]}</td>
-                      <td className="px-3 py-2">{t.treasury.receivableDirections[event.direction]}</td>
+                      <td className="px-3 py-2">
+                        {/*
+                          A correction posts as a collection, and rendering it as one would tell the
+                          driver his debt was paid when nothing was paid. Name it, and show the
+                          restatement it actually was.
+                        */}
+                        {event.intent === 'correction' ? (
+                          <span className="num text-slate-700">
+                            {t.treasury.correctionIntent}: <Money value={event.priorBalance ?? '0.00'} /> →{' '}
+                            <Money value={event.targetBalance ?? '0.00'} />
+                          </span>
+                        ) : (
+                          t.treasury.receivableDirections[event.direction]
+                        )}
+                      </td>
                       <td className="px-3 py-2"><Money value={event.amount} /></td>
                       <td className="px-3 py-2 text-slate-600">{event.reason}</td>
                     </tr>

@@ -1730,6 +1730,18 @@ export interface ReceivableEventRecord {
   amount: Minor
   businessDate: CalendarDate
   reason: string
+  /**
+   * What this row IS, as opposed to what it does to the ledger.
+   *
+   * A `correction` restates a balance that was recorded wrongly; nothing physically moved. Without
+   * this distinction the driver's history reads «تحصيل ٥٠٠» — money came back — for an event where
+   * no money came back, which is the exact lie the ledger exists to prevent. The posting is
+   * identical either way; only the account of it differs.
+   */
+  intent: 'command' | 'correction'
+  /** Corrections only: what the balance read, and what it was restated to. */
+  priorBalance: Minor | null
+  targetBalance: Minor | null
   idempotencyKey: string
   journalEntryId: number
   createdBy: string

@@ -11,6 +11,7 @@ import type {
 import {
   cancelCashCountRequest,
   createCashCountRequest,
+  correctReceivableRequest,
   createReceivableEventRequest,
   manualEntryRequest,
   moneySchema,
@@ -595,6 +596,11 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
           amount: serializeMoney(event.amount),
           businessDate: event.businessDate,
           reason: event.reason,
+          // The history has to say which this was. A correction rendered as a collection tells the
+          // driver his debt was paid when nothing was paid.
+          intent: event.intent,
+          priorBalance: event.priorBalance === null ? null : serializeMoney(event.priorBalance),
+          targetBalance: event.targetBalance === null ? null : serializeMoney(event.targetBalance),
           journalEntryId: event.journalEntryId,
           createdBy: event.createdBy,
           createdAtMs: event.createdAtMs,
@@ -636,6 +642,9 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     amount: serializeMoney(event.amount),
     businessDate: event.businessDate,
     reason: event.reason,
+    intent: event.intent,
+    priorBalance: event.priorBalance === null ? null : serializeMoney(event.priorBalance),
+    targetBalance: event.targetBalance === null ? null : serializeMoney(event.targetBalance),
     journalEntryId: event.journalEntryId,
     replayed,
   })
@@ -737,6 +746,11 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
             amount: body.amount,
             businessDate,
             reason: body.reason,
+            // A direct command, not a restatement: money genuinely moves between the office box and
+            // the driver's account, so the balances a correction records do not apply.
+            intent: 'command',
+            priorBalance: null,
+            targetBalance: null,
             idempotencyKey: body.idempotencyKey,
             journalEntryId: journal.id,
             createdBy: req.actor!.userId,
@@ -752,6 +766,156 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
   const receivableWriteOptions = { config: { permission: 'journal.manual.write' as const, subject: targetBranch } }
   app.post('/receivables/events', receivableWriteOptions, writeReceivableEvent)
   app.post('/treasury/receivables/events', receivableWriteOptions, writeReceivableEvent)
+
+  /**
+   * «تعديل الذمم المسجلة» — restate a receivable balance that was recorded wrongly.
+   *
+   * The operator names the BALANCE, not a movement. That is the only form that can work: a driver's
+   * receivable balance is a LEDGER FUND BALANCE fed from seven places — this route, the shift
+   * close's deferral, the shift-funding carry consumed at the next open, the cash-deduction
+   * overflow, and more — and only ONE of them writes a `receivable_events` row. A correction that
+   * pointed at an event could not touch the commonest wrong number of all, a `shift_funding` carry,
+   * because there is no event to point at.
+   *
+   * So: read the balance, refuse if it is not what the operator was looking at, and post the
+   * difference through the UNCHANGED `receivableAdjustment` recipe. One way of moving a receivable,
+   * no second arithmetic to keep in step, and every guard 0037 installed applies untouched — the
+   * actor check against the live RBAC matrix, the journal-identity check, the two-line recipe
+   * check, the over-collection row lock. A correction IS one of those postings; it is only
+   * LABELLED differently, so the driver's history does not claim money came back when none did.
+   */
+  const correctReceivable = async (req: FastifyRequest, reply: FastifyReply) => {
+    const body = correctReceivableRequest.parse(req.body)
+    const branchId = resolveBranch(req)
+
+    const replayMatches = (prior: ReceivableEventRecord): boolean =>
+      prior.intent === 'correction' &&
+      prior.driverId === body.driverId &&
+      prior.receivableKind === body.receivableKind &&
+      prior.channel === body.channel &&
+      prior.priorBalance === body.expectedCurrentBalance &&
+      prior.targetBalance === body.targetBalance &&
+      prior.reason === body.reason
+
+    // A lost-response retry reads the immutable receipt rather than restating the balance a second
+    // time — which, on a correction, would move it twice as far.
+    const committed = await deps.receivableEvents.findByIdempotencyKey(branchId, body.idempotencyKey)
+    if (committed) {
+      if (!replayMatches(committed)) throw new ServiceError(409, 'idempotency_key_conflict')
+      return sendReceivableEvent(reply, committed, true)
+    }
+
+    const driver = await deps.directory.driver(body.driverId)
+    if (!driver) throw new ServiceError(404, 'driver_not_found')
+    if (driver.branchId !== branchId) throw new ServiceError(422, 'driver_in_another_branch')
+
+    const raising = body.targetBalance > body.expectedCurrentBalance
+    if (raising && !driver.active) {
+      // 0037's database guard refuses `create` for an inactive driver and is not relaxed here — see
+      // the note in migration 0050. Name it, so the operator reads "reactivate him first" instead
+      // of a constraint violation.
+      throw new ServiceError(422, 'receivable_correction_needs_active_driver', { driverId: body.driverId })
+    }
+
+    const businessDate = todayFor(deps)
+    await assertWeekOpen(deps, branchId, businessDate)
+    const fxDayId = await ensureFxDay(deps, businessDate)
+
+    const result = await deps.financialUnitOfWork.run(
+      { lockKey: `receivables:${branchId}`, actorId: req.actor!.userId, requestId: req.requestId },
+      async (transaction) => {
+        const prior = await transaction.receivableEvents.findByIdempotencyKey(branchId, body.idempotencyKey)
+        if (prior) {
+          if (!replayMatches(prior)) throw new ServiceError(409, 'idempotency_key_conflict')
+          return { event: prior, replayed: true }
+        }
+
+        const receivablePrefix = body.receivableKind === 'shift_funding' ? 'driver_shift_funding' : 'driver_receivable'
+        const receivableCode = receivablePrefix + '_' + body.channel + ':' + body.driverId
+        const officeCode = body.channel === 'cash' ? 'office_cash' : 'office_wallet'
+
+        /*
+         * Read INSIDE the lock and compare with what the operator saw.
+         *
+         * "Set it to 500" is a statement about a number he was looking at. If a shift closed or a
+         * collection landed between his reading and his pressing, applying it anyway would silently
+         * discard that movement — and a correction that erases a real event is worse than the wrong
+         * balance it was meant to fix. So: refuse, and hand back what it actually reads.
+         */
+        const current = await transaction.ledger.fundBalance(branchId, receivableCode)
+        if (current !== body.expectedCurrentBalance) {
+          throw new ServiceError(409, 'receivable_balance_changed', {
+            expected: serializeMoney(body.expectedCurrentBalance),
+            actual: serializeMoney(current),
+          })
+        }
+
+        const delta = body.targetBalance - current
+        if (delta === 0n) {
+          // Nothing to restate. The recipe refuses a zero amount anyway; saying so plainly beats a
+          // RangeError, and a correction that changes nothing is a mistake worth naming.
+          throw new ServiceError(422, 'receivable_already_at_target', { balance: serializeMoney(current) })
+        }
+
+        const direction = delta > 0n ? ('create' as const) : ('collect' as const)
+        const amount = minor(delta > 0n ? delta : -delta)
+
+        // Raising a receivable takes value out of the office box, exactly as an ordinary advance
+        // does; the office must actually hold it. Lowering one is bounded by the balance itself,
+        // which `targetBalance >= 0` already guarantees.
+        if (direction === 'create') {
+          const available = await transaction.ledger.fundBalance(branchId, officeCode)
+          if (available < amount) {
+            throw new ServiceError(422, 'insufficient_funds', { available: serializeMoney(available) })
+          }
+        }
+
+        const posting = receivableAdjustment(
+          body.driverId,
+          body.receivableKind,
+          body.channel,
+          direction,
+          amount,
+          body.idempotencyKey,
+        )
+        const [journal] = await transaction.ledger.post(branchId, [posting], {
+          shiftId: null,
+          businessDate,
+          postingDate: businessDate,
+          weekStartDate: weekStartFor(businessDate),
+          fxDayId,
+          createdBy: req.actor!.userId,
+          reason: body.reason,
+        })
+        if (!journal) throw new ServiceError(409, 'idempotency_key_conflict')
+
+        const event: ReceivableEventRecord = {
+          id: deps.ids.uuid(),
+          branchId,
+          driverId: body.driverId,
+          receivableKind: body.receivableKind,
+          channel: body.channel,
+          direction,
+          amount,
+          businessDate,
+          reason: body.reason,
+          intent: 'correction',
+          priorBalance: current,
+          targetBalance: body.targetBalance,
+          idempotencyKey: body.idempotencyKey,
+          journalEntryId: journal.id,
+          createdBy: req.actor!.userId,
+          createdAtMs: deps.clock.nowMs(),
+        }
+        await transaction.receivableEvents.create(event)
+        return { event, replayed: false }
+      },
+    )
+
+    return sendReceivableEvent(reply, result.event, result.replayed)
+  }
+  app.post('/receivables/adjustments', receivableWriteOptions, correctReceivable)
+  app.post('/treasury/receivables/adjustments', receivableWriteOptions, correctReceivable)
 
   const companyMoveRequest = z.object({
     amount: moneySchema,

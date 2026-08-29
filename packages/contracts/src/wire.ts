@@ -1147,6 +1147,30 @@ export const createReceivableEventRequest = z.object({
   idempotencyKey: z.string().uuid(),
 })
 
+/**
+ * «تعديل الذمم المسجلة» — restate a receivable balance that was recorded wrongly.
+ *
+ * The operator names the BALANCE, not a movement: "it reads X, it should be Y". That is the only
+ * form that works, because a driver's receivable balance is a ledger fund balance fed from seven
+ * places and only one of them writes an event to point at — the commonest wrong number of all, a
+ * `shift_funding` carry, has no event at all.
+ *
+ * `expectedCurrentBalance` is what the screen showed him. If the real balance has moved since — a
+ * shift closed, a collection landed — the correction is refused rather than applied to a number he
+ * never saw. Without it, "set the balance to 500" silently discards whatever happened in between.
+ */
+export const correctReceivableRequest = z.object({
+  branchId: z.string().optional(),
+  driverId: z.string().min(1),
+  receivableKind: z.enum(['ordinary', 'shift_funding']),
+  channel: z.enum(['cash', 'wallet']),
+  /** Both are balances, so both may be zero; neither may be negative. */
+  expectedCurrentBalance: nonnegativeMoneySchema,
+  targetBalance: nonnegativeMoneySchema,
+  reason: nonblankReasonSchema,
+  idempotencyKey: z.string().uuid(),
+})
+
 // ── Treasury: daily count and manual entries (SRS E-3, E-5) ───────────────────────────────
 
 export const createCashCountRequest = z.object({

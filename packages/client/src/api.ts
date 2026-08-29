@@ -649,6 +649,14 @@ export interface ReceivableEventView {
   amount: string
   businessDate: string
   reason: string
+  /**
+   * `correction` restates a balance that was recorded wrongly — no money moved. Rendering it as a
+   * collection would tell the driver his debt was paid when it was not.
+   */
+  intent: 'command' | 'correction'
+  /** Corrections only: what the balance read, and what it was restated to. */
+  priorBalance: string | null
+  targetBalance: string | null
   journalEntryId: number
   createdBy: string
   createdAtMs: number
@@ -674,8 +682,30 @@ export interface CreateReceivableEventResult {
   amount: string
   businessDate: string
   reason: string
+  intent: 'command' | 'correction'
+  priorBalance: string | null
+  targetBalance: string | null
   journalEntryId: number
   replayed: boolean
+}
+
+/**
+ * «تعديل الذمم المسجلة» — restate a balance, rather than record a movement.
+ *
+ * A driver's receivable balance is a ledger fund balance fed from seven places, only one of which
+ * writes an event; the commonest wrong number of all — a `shift_funding` carry — has no event to
+ * point at. So the correction names the balance, and `expectedCurrentBalance` is what the operator
+ * had on screen: if it has moved since, the server refuses rather than applying his instruction to
+ * a number he never saw.
+ */
+export interface CorrectReceivableRequest {
+  driverId: string
+  receivableKind: ReceivableKind
+  channel: ReceivableChannel
+  expectedCurrentBalance: string
+  targetBalance: string
+  reason: string
+  idempotencyKey: string
 }
 
 /**
@@ -1437,6 +1467,12 @@ export class ApiClient {
   }
   createReceivableEvent(body: CreateReceivableEventRequest) {
     return this.post<CreateReceivableEventResult>('/treasury/receivables/events', {
+      ...body,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+  correctReceivable(body: CorrectReceivableRequest) {
+    return this.post<CreateReceivableEventResult>('/treasury/receivables/adjustments', {
       ...body,
       ...(this.branchId ? { branchId: this.branchId } : {}),
     })

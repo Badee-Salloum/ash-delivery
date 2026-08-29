@@ -28,6 +28,13 @@ const rowToEvent = (row: Record<string, unknown>): ReceivableEventRecord => ({
   amount: minor(BigInt(String(row.amount_minor))),
   businessDate: isoDate(row.business_date),
   reason: String(row.reason),
+  intent: String(row.intent ?? 'command') as ReceivableEventRecord['intent'],
+  priorBalance: row.prior_balance_minor === null || row.prior_balance_minor === undefined
+    ? null
+    : minor(BigInt(String(row.prior_balance_minor))),
+  targetBalance: row.target_balance_minor === null || row.target_balance_minor === undefined
+    ? null
+    : minor(BigInt(String(row.target_balance_minor))),
   idempotencyKey: String(row.idempotency_key),
   journalEntryId: Number(row.journal_entry_id),
   createdBy: String(row.created_by),
@@ -65,8 +72,9 @@ export class PgReceivableEventRepo implements ReceivableEventRepo {
       await this.pool.query(
         `INSERT INTO receivable_events (
            id, branch_id, driver_id, receivable_kind, channel, direction, amount_minor,
-           business_date, reason, idempotency_key, journal_entry_id, created_by, created_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::timestamptz)`,
+           business_date, reason, idempotency_key, journal_entry_id, created_by, created_at,
+           intent, prior_balance_minor, target_balance_minor
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::timestamptz,$14,$15,$16)`,
         [
           event.id,
           event.branchId,
@@ -81,6 +89,9 @@ export class PgReceivableEventRepo implements ReceivableEventRepo {
           event.journalEntryId,
           event.createdBy,
           new Date(event.createdAtMs).toISOString(),
+          event.intent,
+          event.priorBalance === null ? null : event.priorBalance.toString(),
+          event.targetBalance === null ? null : event.targetBalance.toString(),
         ],
       )
     } catch (error) {
