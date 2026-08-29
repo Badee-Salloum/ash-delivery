@@ -227,7 +227,11 @@ export function CheckIn(): ReactNode {
       <Card title={t.checkin.title}>
         <p className="mb-3 text-sm text-slate-500">{t.checkin.neverBlocks}</p>
         {report.radiusM === null ? (
-          <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">{t.checkin.notSet}</p>
+          // Name whose job it is. A manager who cannot act on a warning, and is not told who can,
+          // reads it as the system being broken rather than as a step somebody still owes him.
+          <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            {canConfigure ? t.checkin.notSet : t.checkin.notSetAdmin}
+          </p>
         ) : null}
         <Button onClick={() => void checkInNow()} disabled={busy}>
           {busy ? t.checkin.locating : t.checkin.now}

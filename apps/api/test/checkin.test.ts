@@ -246,3 +246,79 @@ describe('the fence itself', () => {
     expect(res.statusCode).toBe(403)
   })
 })
+
+/**
+ * OWNER RULE (2026-08-29): «لا يجب ان يستطيع مدير الفرع تغير اعدادت التفقد فقط مدير النظام /
+ * مدير الفرع فقط يسجل الدخول».
+ *
+ * The person being checked on must not own the check. Every write that DEFINES the check — when a
+ * round is expected, whether it still stands, and where "here" is — is `settings.write`, which the
+ * §3 matrix grants to the system admin alone; production's `role_permissions` was read on the day
+ * this was written and holds exactly that one row. Everything the branch manager needs in order to
+ * ANSWER a round is `branch_data.view`, which he already has.
+ *
+ * The general manager is refused too, and that is the point of testing him separately: he holds
+ * `branch_data.view` at scope 'all', so an authorisation bug that leaked configuration to "whoever
+ * can see the branch" would pass every branch-manager test above and still hand him the rota.
+ */
+describe('only the system admin defines the check', () => {
+  const configWrites = (branch: string) =>
+    [
+      {
+        what: 'adding a round',
+        call: (token: string) =>
+          post(token, '/checkin-windows', {
+            branchId: branch,
+            userId: 'u-bm',
+            atMinute: 300,
+            toleranceMinutes: 30,
+            label: null,
+          }),
+      },
+      {
+        what: 'retiring a round',
+        call: (token: string) => del(token, `/checkin-windows/some-id?branchId=${branch}`),
+      },
+      {
+        what: 'moving the fence',
+        call: (token: string) =>
+          put(token, '/branch-location', {
+            branchId: branch,
+            lat: BRANCH_LAT,
+            lng: BRANCH_LNG,
+            checkinRadiusM: 20_000,
+          }),
+      },
+    ] as const
+
+  for (const { what, call } of configWrites(BRANCH)) {
+    it(`refuses the branch manager: ${what}`, async () => {
+      const res = await call(await h.loginAs('manager'))
+      expect(res.statusCode, res.body).toBe(403)
+    })
+
+    it(`refuses the general manager: ${what}`, async () => {
+      const res = await call(await h.loginAs('gm'))
+      expect(res.statusCode, res.body).toBe(403)
+    })
+
+    it(`allows the system admin: ${what}`, async () => {
+      const res = await call(await h.loginAs('sysadmin'))
+      // 403 is the only forbidden answer. A 404 for the invented window id is a correct outcome
+      // for a permitted caller, and asserting a single success code here would make this test
+      // about the route's shape rather than about who may reach it.
+      expect(res.statusCode, res.body).not.toBe(403)
+    })
+  }
+
+  it('still lets the branch manager do the one thing he is for: answer a round', async () => {
+    await placeBranch()
+    await addWindow(NOW_MINUTE)
+    const manager = await h.loginAs('manager')
+
+    // Reading his own rota, and checking in against it. Both `branch_data.view`.
+    expect((await get(manager, '/checkin-windows')).statusCode).toBe(200)
+    expect((await post(manager, '/checkins', { branchId: BRANCH, ...AT_BRANCH })).statusCode).toBe(201)
+    expect((await get(manager, '/checkins')).statusCode).toBe(200)
+  })
+})
