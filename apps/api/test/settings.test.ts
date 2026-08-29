@@ -221,15 +221,25 @@ describe('the go-live date (تاريخ بدء التطبيق)', () => {
 })
 
 /**
- * The second proof: the position is ALREADY on capital.
+ * The second proof: NOTHING IS MISSING.
  *
  * Requiring the ceremony alone was a design error. The restoration settles the office boxes and
  * deliberately excludes active custody, so it can only run when no shift is live — at the END of a
  * day. That made declaring go-live ON the first day impossible, and a first day is exactly when an
- * owner declares one. Working capital equal to the target with an empty صندوق الشركة proves the
- * same fact the ceremony proves: nothing is carried in from before.
+ * owner declares one.
+ *
+ * IT FIRST DEMANDED EXACT EQUALITY, AND THAT WAS STILL WRONG. Working capital equals the target
+ * only at the instant a restoration finishes. One shift collecting one delivery fee puts it above,
+ * and that is EARNINGS — on the first day, the very thing the owner wants attributed to the new
+ * epoch. The owner asked for the epoch mid-morning and was refused for a state that is not a
+ * problem.
+ *
+ * The asymmetry is the argument. A SHORTFALL hidden by an epoch means real money vanished before it
+ * with no record and no way to see it after — the failure this gate exists to prevent. A SURPLUS
+ * hidden means the office holds more than its declared capital: not a loss of control. So the rule
+ * is `working >= target`, and the position at the moment of the decision goes into the audit entry.
  */
-describe('the go-live date accepts a position already on capital', () => {
+describe('the go-live date accepts a position with nothing missing', () => {
   const seedFund = async (token: string, fundCode: string, amount: string): Promise<void> => {
     const res = await post(token, '/journal/manual', {
       reason: 'رصيد افتتاحي',
@@ -266,19 +276,54 @@ describe('the go-live date accepts a position already on capital', () => {
     expect((await get(admin, '/settings')).json().goLiveBusinessDate).toBe(today)
   })
 
-  it('still refuses when the position carries accumulation, and says how far off it is', async () => {
+  it('accepts a position ABOVE capital, because a surplus is the day’s work, not a hidden loss', async () => {
+    /*
+     * THIS TEST WAS THE OPPOSITE, and the reversal is deliberate.
+     *
+     * It read «one lira more than capital is accumulation carried in from before. Refuse it.» But
+     * the gate cannot tell carried-in accumulation from money earned this morning, and on the first
+     * day it is nearly always the latter: the epoch is declared while shifts are running, and every
+     * fee collected puts working capital above target. Refusing that made the ordinary case
+     * impossible — it refused the owner at 12:39 on his own first day, for 6,502 of earnings.
+     *
+     * What the gate is FOR is the other direction, asserted in the next test.
+     */
     await putOnCapital()
-    // One lira more than capital is accumulation carried in from before. Refuse it.
     const manager = await h.loginAs('manager')
-    await seedFund(manager, 'office_cash', sypStr(1))
+    await seedFund(manager, 'office_cash', sypStr(6_502))
 
     const admin = await h.loginAs('sysadmin')
     const today = (await get(admin, '/fx')).json().businessDate
     const res = await put(admin, '/settings', { goLiveBusinessDate: today, branchId: BRANCH })
+    expect(res.statusCode, res.body).toBe(200)
+    expect((await get(admin, '/settings')).json().goLiveBusinessDate).toBe(today)
+  })
+
+  it('refuses a position BELOW capital, and says how far short — the case it exists for', async () => {
+    /*
+     * The failure worth blocking. Money went missing before the epoch; declaring the epoch would
+     * drop every pre-epoch flow out of the reports while the balances keep carrying the hole, so
+     * the shortfall becomes permanent and unattributable. Refuse, and name the number.
+     */
+    const admin = await h.loginAs('sysadmin')
+    const targets = await put(admin, '/treasury/capital-targets', {
+      cashTarget: sypStr(4_000_000),
+      walletTarget: sypStr(1_000_000),
+      reason: 'رأس المال عند بدء التطبيق',
+      branchId: BRANCH,
+    })
+    expect(targets.statusCode, targets.body).toBe(200)
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(3_999_999))
+    await seedFund(manager, 'office_wallet', sypStr(1_000_000))
+
+    const today = (await get(admin, '/fx')).json().businessDate
+    const res = await put(admin, '/settings', { goLiveBusinessDate: today, branchId: BRANCH })
     expect(res.statusCode, res.body).toBe(422)
     expect(res.json().error).toBe('go_live_requires_opening_ceremony')
-    expect(res.json().detail.workingCapital).toBe(sypStr(5_000_001))
+    expect(res.json().detail.workingCapital).toBe(sypStr(4_999_999))
     expect(res.json().detail.capitalTarget).toBe(sypStr(5_000_000))
+    expect(res.json().detail.shortfall).toBe(sypStr(1))
   })
 
   it('refuses while صندوق الشركة still holds anything', async () => {

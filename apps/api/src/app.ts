@@ -2462,13 +2462,29 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
          *     the stronger one, because a count is a PHYSICAL attestation that somebody opened the
          *     drawer and looked.
          *
-         * (b) THE POSITION IS ALREADY ON CAPITAL: working capital equals the target exactly and
-         *     صندوق الشركة is empty, so there is demonstrably nothing carried in from before.
+         * (b) NOTHING IS MISSING: working capital is AT OR ABOVE the target and صندوق الشركة is
+         *     empty, so no shortfall from before is being carried in and buried.
          *
          * (b) exists because requiring (a) alone was a design error. The restoration settles the
          * office boxes and deliberately excludes active custody, so it can only run when no shift
          * is live — at the END of a day. Demanding it made declaring go-live ON the first day
          * impossible, and a first day is exactly when an owner declares one.
+         *
+         * IT WAS `working === target`, AND THAT WAS STILL WRONG. Exact equality holds only at the
+         * instant a restoration finishes. The moment one shift collects one delivery fee, working
+         * capital rises above target — that is EARNINGS, and on the first day it is the very thing
+         * the owner wants attributed to the new epoch. So the epoch could only be declared at a
+         * frozen moment that a working day never has, and the owner asking for it mid-morning was
+         * refused for a state that is not a problem.
+         *
+         * The asymmetry is the whole argument. A SHORTFALL hidden by an epoch means real money
+         * vanished before it with no record and no way to see it afterwards — that is the failure
+         * this gate exists to prevent. A SURPLUS hidden means the office holds more than its
+         * declared capital, which is not a loss of control; it is today's work. Refusing a surplus
+         * protects nothing and blocks the ordinary case.
+         *
+         * The surplus is carried into the audit entry, so absorbing it is recorded rather than
+         * silent.
          */
         const target = (targets.office_cash ?? 0n) + (targets.office_wallet ?? 0n)
         const working =
@@ -2478,9 +2494,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           position.receivablesWallet +
           position.activeCustodyCash +
           position.activeCustodyWallet
-        const alreadyOnCapital = target > 0n && working === target && companyBox === 0n
+        const nothingMissing = target > 0n && working >= target && companyBox === 0n
 
-        if (!alreadyOnCapital) {
+        if (!nothingMissing) {
           const missing: string[] = []
           if (count === null || count.sealedAtMs === null) missing.push('sealed_cash_count')
           if (restoration === null) missing.push('restoration')
@@ -2488,16 +2504,22 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
             throw new ServiceError(422, 'go_live_requires_opening_ceremony', {
               businessDate: date,
               missing,
-              // The numbers, so the screen can say HOW FAR OFF the position is rather than only
-              // that a ceremony is owed. A reader who is already on capital never sees this.
+              // The numbers, so the screen can say HOW FAR SHORT the position is rather than only
+              // that a ceremony is owed. A reader who is whole never sees this.
               workingCapital: serializeMoney(minor(working)),
               capitalTarget: serializeMoney(minor(target)),
+              shortfall: serializeMoney(minor(target > working ? target - working : 0n)),
               companyBox: serializeMoney(companyBox),
             })
           }
         }
         await deps.settings.set(GO_LIVE_SETTING_KEY, date, actorId)
         written[GO_LIVE_SETTING_KEY] = date
+        // What the boxes held when the epoch was declared. Everything before this date drops out of
+        // the flow reports, so the position at the moment of the decision is the one number that
+        // makes the decision reviewable a year later.
+        written[`${GO_LIVE_SETTING_KEY}.working_capital`] = serializeMoney(minor(working))
+        written[`${GO_LIVE_SETTING_KEY}.capital_target`] = serializeMoney(minor(target))
       }
     }
 

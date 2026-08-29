@@ -137,6 +137,7 @@ export function Treasury(): ReactNode {
   const [correctionChannel, setCorrectionChannel] = useState<ReceivableChannel>('cash')
   const [correctionTarget, setCorrectionTarget] = useState('')
   const [correctionReason, setCorrectionReason] = useState('')
+  const correctionFormRef = useRef<HTMLDivElement | null>(null)
   const [correctionBusy, setCorrectionBusy] = useState(false)
   const [correctionError, setCorrectionError] = useState<string | null>(null)
   const [receivableEventBusy, setReceivableEventBusy] = useState(false)
@@ -853,6 +854,34 @@ export function Treasury(): ReactNode {
         : correctionRow.shiftFundingWallet
     : null
 
+  /**
+   * Point the correction form at one specific balance.
+   *
+   * A driver row carries FOUR balances — ordinary and shift-funding, each in cash and wallet — so a
+   * button that only knew the driver would leave the operator to re-pick the pair he had just
+   * clicked on, which is how the wrong one gets corrected. Each button therefore carries its own
+   * kind and channel.
+   *
+   * `clear` is the same act with the target already at zero. Nothing is deleted, because nothing in
+   * this ledger can be: the balance is restated to zero and both the original and the restatement
+   * stay in the history. The reason is still required — it is the only record of WHY the debt
+   * should not have been there, and the server refuses without it.
+   */
+  const aimCorrection = (
+    driverId: string,
+    kind: ReceivableKind,
+    channel: ReceivableChannel,
+    clear: boolean,
+  ): void => {
+    setCorrectionDriverId(driverId)
+    setCorrectionKind(kind)
+    setCorrectionChannel(channel)
+    setCorrectionTarget(clear ? '0.00' : '')
+    setCorrectionReason('')
+    setCorrectionError(null)
+    correctionFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+
   const submitCorrection = async (): Promise<void> => {
     if (!correctionRow || correctionCurrent === null) return
     setCorrectionError(null)
@@ -1243,6 +1272,7 @@ export function Treasury(): ReactNode {
                   `${t.treasury.receivableKinds.shift_funding} / ${t.treasury.receivableChannels.cash}`,
                   `${t.treasury.receivableKinds.shift_funding} / ${t.treasury.receivableChannels.wallet}`,
                   t.treasury.total,
+                  t.accounts.actions,
                 ]}
                 isEmpty={selectedReceivables.drivers.length === 0}
                 empty={t.treasury.noReceivables}
@@ -1256,13 +1286,56 @@ export function Treasury(): ReactNode {
                     <td className="px-3 py-2"><Money value={driver.shiftFundingCash} /></td>
                     <td className="px-3 py-2"><Money value={driver.shiftFundingWallet} /></td>
                     <td className="px-3 py-2 font-semibold"><Money value={driver.total} /></td>
+                    <td className="px-3 py-2">
+                      {/*
+                        One pair of buttons per balance the driver ACTUALLY has. A driver with a
+                        single 5,000 carry gets one pair, not four; a driver with none gets «—»
+                        rather than buttons that would correct a zero to a zero.
+                      */}
+                      <div className="flex flex-col gap-1">
+                        {([
+                          ['ordinary', 'cash', driver.ordinaryCash],
+                          ['ordinary', 'wallet', driver.ordinaryWallet],
+                          ['shift_funding', 'cash', driver.shiftFundingCash],
+                          ['shift_funding', 'wallet', driver.shiftFundingWallet],
+                        ] as const)
+                          .filter(([, , value]) => Number(value) !== 0)
+                          .map(([kind, channel]) => (
+                            <div key={`${kind}-${channel}`} className="flex items-center gap-1">
+                              <span className="text-xs text-slate-500">
+                                {t.treasury.receivableKinds[kind]} / {t.treasury.receivableChannels[channel]}
+                              </span>
+                              <Button
+                                variant="ghost"
+                                className="min-h-8 px-2 text-xs"
+                                onClick={() => aimCorrection(driver.driverId, kind, channel, false)}
+                              >
+                                {t.treasury.correctionEdit}
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                className="min-h-8 px-2 text-xs"
+                                onClick={() => aimCorrection(driver.driverId, kind, channel, true)}
+                              >
+                                {t.treasury.correctionClear}
+                              </Button>
+                            </div>
+                          ))}
+                        {Number(driver.total) === 0 ? <span className="text-xs text-slate-400">—</span> : null}
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </Table>
             </div>
-            <div className="mt-5 border-t border-slate-200 pt-3">
+            <div ref={correctionFormRef} className="mt-5 border-t border-slate-200 pt-3">
               <h3 className="text-sm font-bold text-slate-700">{t.treasury.correctionTitle}</h3>
               <p className="mt-1 text-xs text-slate-600">{t.treasury.correctionHint}</p>
+              {correctionTarget.trim() === '0.00' && correctionCurrent !== null ? (
+                <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  {t.treasury.correctionClearing}
+                </p>
+              ) : null}
               <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 <Field label={t.treasury.driver}>
                   <Select value={correctionDriverId} onChange={(e) => setCorrectionDriverId(e.target.value)}>
