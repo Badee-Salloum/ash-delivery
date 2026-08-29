@@ -1456,12 +1456,37 @@ export async function adjustWalletTopup(
     reason: string
   },
   requestId: string | null = null,
+  kind: TrancheAdjustmentKind = 'wallet_topup',
 ): Promise<WalletTopupAdjustmentResult> {
   return deps.closeUnitOfWork.run(
     { shiftId, actorId: actor.userId, requestId },
     async (transaction) =>
-      adjustWalletTopupLocked(withCloseTransaction(deps, transaction), actor, shiftId, input),
+      adjustWalletTopupLocked(withCloseTransaction(deps, transaction), actor, shiftId, input, kind),
   )
+}
+
+/**
+ * «تصحيح سلفة الكاش» — return part of an office-funded cash float while the shift is still open.
+ *
+ * The float had no correction path until now, and the wallet's own doc comment says why a generic
+ * journal reversal will not do: reversing the money without changing the shift's tranche projection
+ * leaves BR1 expecting the old total at close, so the whole difference lands on the driver's
+ * settlement. On shift cd7b8fe9 a second float tranche of 1,500.00 that was recorded but not handed
+ * over turned a 228.10 wallet difference into a 1,728.10 shortfall against the driver.
+ */
+export async function adjustCashFloat(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: {
+    expectedCurrentTotal: Minor
+    targetTotal: Minor
+    occurrenceKey: string
+    reason: string
+  },
+  requestId: string | null = null,
+): Promise<WalletTopupAdjustmentResult> {
+  return adjustWalletTopup(deps, actor, shiftId, input, requestId, 'cash_float')
 }
 
 function reduceTranchesFromTail(tranches: readonly Minor[], targetTotal: Minor): Minor[] {
@@ -1481,6 +1506,55 @@ function reduceTranchesFromTail(tranches: readonly Minor[], targetTotal: Minor):
   return next
 }
 
+/**
+ * The two office-funded totals a shift carries, and everything that differs between them.
+ *
+ * A mis-entered CASH tranche was unfixable until this existed: the wallet had a correction path and
+ * the float had none, so an extra float tranche left BR1 expecting money the driver never received
+ * and the whole difference fell on his settlement. Both are the same act — return part of what the
+ * office handed out, while the shift is still financially open — so they are one implementation.
+ */
+const TRANCHE_KINDS = {
+  wallet_topup: {
+    recipe: walletTopup,
+    journalPrefix: 'wallet-topup-adjustment',
+    driverFund: (driverId: string) => `driver_wallet:${driverId}`,
+    tranchesOf: (shift: ShiftRecord) => shift.topupTranches,
+    withTranches: (shift: ShiftRecord, tranches: Minor[]) => ({ ...shift, topupTranches: tranches }),
+    label: 'topup' as const,
+    errors: {
+      keyRequired: 'wallet_topup_adjustment_key_required',
+      reasonRequired: 'wallet_topup_adjustment_reason_required',
+      increase: 'wallet_topup_increase_use_tranche',
+      noReduction: 'wallet_topup_reduction_required',
+      notOpen: 'shift_not_open_for_wallet_topup_adjustment',
+      totalChanged: 'wallet_topup_total_changed',
+      exceedsBalance: 'wallet_topup_reduction_exceeds_driver_balance',
+      conflictKind: 'wallet_topup_adjustment',
+    },
+  },
+  cash_float: {
+    recipe: floatOut,
+    journalPrefix: 'cash-float-adjustment',
+    driverFund: (driverId: string) => `driver_cash:${driverId}`,
+    tranchesOf: (shift: ShiftRecord) => shift.floatTranches,
+    withTranches: (shift: ShiftRecord, tranches: Minor[]) => ({ ...shift, floatTranches: tranches }),
+    label: 'float' as const,
+    errors: {
+      keyRequired: 'cash_float_adjustment_key_required',
+      reasonRequired: 'cash_float_adjustment_reason_required',
+      increase: 'cash_float_increase_use_tranche',
+      noReduction: 'cash_float_reduction_required',
+      notOpen: 'shift_not_open_for_cash_float_adjustment',
+      totalChanged: 'cash_float_total_changed',
+      exceedsBalance: 'cash_float_reduction_exceeds_driver_balance',
+      conflictKind: 'cash_float_adjustment',
+    },
+  },
+} as const
+
+export type TrancheAdjustmentKind = keyof typeof TRANCHE_KINDS
+
 async function adjustWalletTopupLocked(
   deps: Deps,
   actor: Actor,
@@ -1491,27 +1565,29 @@ async function adjustWalletTopupLocked(
     occurrenceKey: string
     reason: string
   },
+  kind: TrancheAdjustmentKind = 'wallet_topup',
 ): Promise<WalletTopupAdjustmentResult> {
+  const spec = TRANCHE_KINDS[kind]
   const shift = await mustFind(deps, shiftId)
   const key = input.occurrenceKey.trim()
   const reason = input.reason.trim()
-  if (!key) throw new ServiceError(422, 'wallet_topup_adjustment_key_required')
+  if (!key) throw new ServiceError(422, spec.errors.keyRequired)
   if (!/[^\p{White_Space}\p{Cf}]/u.test(reason)) {
-    throw new ServiceError(422, 'wallet_topup_adjustment_reason_required')
+    throw new ServiceError(422, spec.errors.reasonRequired)
   }
-  assertPersistableMinor('walletTopupAdjustment.expectedCurrentTotal', input.expectedCurrentTotal)
-  assertPersistableMinor('walletTopupAdjustment.targetTotal', input.targetTotal)
+  assertPersistableMinor(`${spec.journalPrefix}.expectedCurrentTotal`, input.expectedCurrentTotal)
+  assertPersistableMinor(`${spec.journalPrefix}.targetTotal`, input.targetTotal)
   if (input.targetTotal > input.expectedCurrentTotal) {
-    throw new ServiceError(422, 'wallet_topup_increase_use_tranche')
+    throw new ServiceError(422, spec.errors.increase)
   }
   if (input.targetTotal === input.expectedCurrentTotal) {
-    throw new ServiceError(422, 'wallet_topup_reduction_required')
+    throw new ServiceError(422, spec.errors.noReduction)
   }
 
   const reduction = minor(input.expectedCurrentTotal - input.targetTotal)
-  const journalOccurrenceKey = `wallet-topup-adjustment:${key}`
+  const journalOccurrenceKey = `${spec.journalPrefix}:${key}`
   const posting = reverse(
-    walletTopup(shift.driverId, reduction, journalOccurrenceKey),
+    spec.recipe(shift.driverId, reduction, journalOccurrenceKey),
     journalOccurrenceKey,
   )
   assertPersistablePostings([posting])
@@ -1519,14 +1595,14 @@ async function adjustWalletTopupLocked(
   // metadata column, and this canonical prefix lets an idempotency retry distinguish 600→500 from
   // 700→600 even though both reverse the same amount.
   const auditReason =
-    `wallet-topup-adjustment:${input.expectedCurrentTotal.toString()}:${input.targetTotal.toString()}\n${reason}`
+    `${spec.journalPrefix}:${input.expectedCurrentTotal.toString()}:${input.targetTotal.toString()}\n${reason}`
 
   const existingEntry = (await deps.ledger.listByShift(shift.id)).find(
     (entry) => entry.eventType === 'correction' && entry.occurrenceKey === journalOccurrenceKey,
   )
   if (existingEntry) {
     if (!journalMatchesPosting(existingEntry, posting) || existingEntry.reason !== auditReason) {
-      throw new ServiceError(409, 'idempotency_key_conflict', { occurrenceKey: key, kind: 'wallet_topup_adjustment' })
+      throw new ServiceError(409, 'idempotency_key_conflict', { occurrenceKey: key, kind: spec.errors.conflictKind })
     }
     return {
       shift,
@@ -1543,32 +1619,31 @@ async function adjustWalletTopupLocked(
     shift.openApprovedAt === null ||
     (shift.state !== 'open' && shift.state !== 'suspended' && shift.state !== 'pending_review')
   ) {
-    throw new ServiceError(409, 'shift_not_open_for_wallet_topup_adjustment')
+    throw new ServiceError(409, spec.errors.notOpen)
   }
 
-  assertPositiveTranches('topup', shift.topupTranches)
-  const currentTotal = sum(shift.topupTranches)
+  assertPositiveTranches(spec.label, spec.tranchesOf(shift))
+  const currentTotal = sum(spec.tranchesOf(shift))
   if (currentTotal !== input.expectedCurrentTotal) {
-    throw new ServiceError(409, 'wallet_topup_total_changed', {
+    throw new ServiceError(409, spec.errors.totalChanged, {
       currentTotal: serializeMoney(currentTotal),
     })
   }
 
-  const driverWalletBalance = await deps.ledger.fundBalance(
-    shift.branchId,
-    `driver_wallet:${shift.driverId}`,
-  )
-  if (driverWalletBalance < reduction) {
-    throw new ServiceError(409, 'wallet_topup_reduction_exceeds_driver_balance', {
-      available: serializeMoney(driverWalletBalance),
+  // You cannot take back money the driver no longer holds — he may already have spent the float on
+  // the goods he was collecting. Refusing here is cheaper than a negative driver fund.
+  const driverBalance = await deps.ledger.fundBalance(shift.branchId, spec.driverFund(shift.driverId))
+  if (driverBalance < reduction) {
+    throw new ServiceError(409, spec.errors.exceedsBalance, {
+      available: serializeMoney(driverBalance),
       requested: serializeMoney(reduction),
     })
   }
 
-  let updated: ShiftRecord = {
-    ...shift,
-    topupTranches: reduceTranchesFromTail(shift.topupTranches, input.targetTotal),
-  }
+  let updated: ShiftRecord = spec.withTranches(
+    shift,
+    reduceTranchesFromTail(spec.tranchesOf(shift), input.targetTotal),
+  )
   assertPersistableTrancheTotals(updated)
   if (updated.state === 'pending_review') {
     const br1 = await evaluateShift(deps, updated)
@@ -1602,12 +1677,12 @@ async function adjustWalletTopupLocked(
         from: input.expectedCurrentTotal,
         to: input.targetTotal,
         reduction,
-        currentTotal: sum(shift.topupTranches),
+        currentTotal: sum(spec.tranchesOf(shift)),
         correctionEntryId: racedEntry.id,
         replayed: true,
       }
     }
-    throw new ServiceError(409, 'idempotency_key_conflict', { occurrenceKey: key, kind: 'wallet_topup_adjustment' })
+    throw new ServiceError(409, 'idempotency_key_conflict', { occurrenceKey: key, kind: spec.errors.conflictKind })
   }
 
   await deps.shifts.update(updated, actor.userId)
@@ -1616,7 +1691,7 @@ async function adjustWalletTopupLocked(
     from: input.expectedCurrentTotal,
     to: input.targetTotal,
     reduction,
-    currentTotal: sum(updated.topupTranches),
+    currentTotal: sum(spec.tranchesOf(updated)),
     correctionEntryId: correction.id,
     replayed: false,
   }

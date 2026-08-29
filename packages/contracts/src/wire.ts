@@ -781,6 +781,9 @@ export const adjustWalletTopupRequest = z.object({
   reason: nonblankReasonSchema,
 })
 
+/** «تصحيح سلفة الكاش» — the cash counterpart, identical in shape and in guarantees. */
+export const adjustCashFloatRequest = adjustWalletTopupRequest
+
 /**
  * One live GPS fix from the driver's phone while a shift is open (SRS K). lat/lng/accuracy are plain
  * numbers — coordinates, not money — so `z.number()` is correct here.

@@ -5,6 +5,7 @@ import type { Deps, ShiftOrderRecord, ShiftSettlementRecord } from '@ash/contrac
 import {
   addOrderRequest,
   addTrancheRequest,
+  adjustCashFloatRequest,
   adjustWalletTopupRequest,
   gpsPingRequest,
   approveCloseRequest,
@@ -91,6 +92,7 @@ import {
   addOrder,
   addManualOrder,
   addTranche,
+  adjustCashFloat,
   adjustWalletTopup,
   approveClose,
   approveOpen,
@@ -2251,6 +2253,52 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           before: { walletTopupTotal: serializeMoney(result.from) },
           after: {
             walletTopupTotal: serializeMoney(result.to),
+            reduction: serializeMoney(result.reduction),
+            occurrenceKey: body.occurrenceKey,
+            reason: body.reason,
+            correctionEntryId: result.correctionEntryId,
+          },
+          occurredAtMs: deps.clock.nowMs(),
+        })
+      }
+      return reply.code(result.replayed ? 200 : 201).send({
+        id: result.shift.id,
+        from: serializeMoney(result.from),
+        to: serializeMoney(result.to),
+        reduction: serializeMoney(result.reduction),
+        currentTotal: serializeMoney(result.currentTotal),
+        correctionEntryId: result.correctionEntryId,
+        replayed: result.replayed,
+      })
+    },
+  )
+
+  /**
+   * «تصحيح سلفة الكاش» — return part of an office-funded cash float while the shift is still open.
+   *
+   * The wallet had this and the float did not, so a float tranche recorded but never handed over
+   * was unfixable: reversing the money alone leaves BR1 expecting the old total at close, and the
+   * whole difference falls on the driver's settlement. Same shape, same guarantees, same lock.
+   */
+  app.post(
+    '/shifts/:id/cash-float-adjustments',
+    { config: { permission: 'shift.approve', subject: shiftSubject } },
+    async (req, reply) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const body = adjustCashFloatRequest.parse(req.body)
+      const result = await adjustCashFloat(deps, req.actor!, id, body, req.requestId)
+      if (!result.replayed) {
+        await deps.audit.append({
+          tableName: 'shifts',
+          recordId: result.shift.id,
+          action: 'UPDATE',
+          actorId: req.actor!.userId,
+          actorKind: 'user',
+          branchId: result.shift.branchId,
+          requestId: req.requestId,
+          before: { cashFloatTotal: serializeMoney(result.from) },
+          after: {
+            cashFloatTotal: serializeMoney(result.to),
             reduction: serializeMoney(result.reduction),
             occurrenceKey: body.occurrenceKey,
             reason: body.reason,
