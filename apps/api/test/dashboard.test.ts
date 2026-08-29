@@ -972,6 +972,57 @@ describe('the capital position is reported per box', () => {
     expect(c.delta).toBe(sypStr(1_465))
   })
 
+  it('leaves active custody OUT of the per-box lines, because the restoration cannot move it', async () => {
+    /*
+     * PRODUCTION, 2026-08-29. The cash line read «58,218.37 / 50,000.00  +8,218.37» in green while
+     * the box held 33,218.37 against that same 50,000 target — SHORT by 16,781.63. The difference
+     * was 25,000 of active custody: money in drivers' pockets, folded into the box's position.
+     *
+     * `planRestoration` takes the position as `counted + receivables`, because custody cannot be
+     * swept while a shift is live. So a green surplus on this line sent a manager to sweep money
+     * that was not in the drawer, and the restoration would have refused him with
+     * `sweep_exceeds_counted` — if he was lucky enough to try through the system.
+     */
+    const admin = await h.loginAs('sysadmin')
+    await put(admin, '/treasury/capital-targets', {
+      cashTarget: sypStr(50_000), walletTarget: sypStr(10_000),
+      reason: 'رأس المال', branchId: BRANCH,
+    })
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(60_000))
+    await seedFund(manager, 'office_wallet', sypStr(10_000))
+
+    // One live shift takes 25,000 cash out of the box and into the driver's hands.
+    const driver = await h.loginAs('driver1')
+    const created = await post(driver, '/shifts', { driverId: DRIVER_ID, vehicleId: VEHICLE_ID })
+    expect(created.statusCode, created.body).toBe(201)
+    const shiftId = created.json().id as string
+    await h.uploadPhoto(driver, shiftId, 'start', 'odometer')
+    expect((await put(driver, `/shifts/${shiftId}/start-package`, {
+      odometerKm: 1_000,
+      batteryPercent: 90,
+    })).statusCode).toBe(200)
+    expect((await post(manager, `/shifts/${shiftId}/approve-open`, {
+      floatTranches: [sypStr(25_000)],
+      topupTranches: [],
+    })).statusCode).toBe(200)
+
+    const c = (await get(await scopedGm(), `/dashboard/treasury?branchId=${BRANCH}`)).json().capital
+
+    // The box, and what the restoration will actually see: 35,000 against a 50,000 target.
+    expect(c.cashPosition).toBe(sypStr(35_000))
+    expect(c.cashDelta).toBe(sypStr(-15_000))
+
+    // The custody is not lost — it has its own line, and it still counts as working capital.
+    expect(c.activeCustodyCash).toBe(sypStr(25_000))
+    expect(c.activeShiftCount).toBe(1)
+    expect(c.workingCapitalTotal).toBe(sypStr(70_000))
+    expect(c.delta).toBe(sypStr(10_000))
+
+    // And the actionable figure agrees with the per-box lines rather than with the headline.
+    expect(c.restorationDelta).toBe(sypStr(-15_000))
+  })
+
   it('shows a cash surplus and a wallet shortfall separately, not cancelled', async () => {
     // The failure this exists to prevent: +900 and −900 read as «on target» while both boxes are
     // wrong and tonight's restoration has two legs to move, not none.

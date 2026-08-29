@@ -339,15 +339,26 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     const workingCapitalTotal = officePosition + activeCustodyTotal
 
     /*
-     * The same position, split by BOX.
+     * The same position, split by BOX — and split the way THE RESTORATION reads it.
      *
      * A single «زيادة عن رأس المال» hides which side it sits on, and the two boxes are restored
-     * against separate targets — so a surplus in cash and a shortfall in the wallet can cancel to
-     * a reassuring total while both boxes are wrong. Each side carries its own custody and its own
-     * receivables, exactly as `planRestoration` reads them.
+     * against separate targets, so a surplus in cash and a shortfall in the wallet can cancel to a
+     * reassuring total while both boxes are wrong.
+     *
+     * ACTIVE CUSTODY IS NOT IN THESE LINES, AND USED TO BE. `planRestoration` takes the position as
+     * `counted + receivables` — money in the drawer and money owed to it — because custody is out
+     * in a driver's pocket and cannot be swept while his shift is live. Adding it here made a box
+     * read as a surplus while the drawer was empty: on 2026-08-29 the cash line showed
+     * «58,218.37 / 50,000.00  +8,218.37» in green, when the box held 33,218.37 against the same
+     * 50,000 target — SHORT by 16,781.63. A manager reading that green figure would go to sweep a
+     * surplus that is not there, and the restoration would refuse him with `sweep_exceeds_counted`
+     * if he was lucky.
+     *
+     * Custody keeps its own line directly beneath, split by box, because it is still company money
+     * — it is simply not money tonight's restoration can move.
      */
-    const cashPosition = position.officeCash + position.receivablesCash + position.activeCustodyCash
-    const walletPosition = position.officeWallet + position.receivablesWallet + position.activeCustodyWallet
+    const cashPosition = position.officeCash + position.receivablesCash
+    const walletPosition = position.officeWallet + position.receivablesWallet
     const cashTarget = targets.office_cash ?? 0n
     const walletTarget = targets.office_wallet ?? 0n
 
