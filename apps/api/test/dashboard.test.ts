@@ -776,8 +776,12 @@ describe('the owner’s treasury sheet (I-1, decision 10)', () => {
       expect(moved.statusCode, moved.body).toBe(201)
     }
 
-    const restorations = h.deps.ledger.entries.filter((entry) => entry.eventType === 'restoration')
-    const corrected = restorations[1]!
+    // Hand sweeps are `manual` entries carrying the `kaish` line role — see `manualKaish`.
+    const sweeps = h.deps.ledger.entries.filter((entry) =>
+      entry.lines.some((line) => line.fundCode === 'company_box' && line.role === 'kaish'),
+    )
+    expect(sweeps).toHaveLength(2)
+    const corrected = sweeps[1]!
     const reversed = await post(manager, `/journal/${corrected.id}/reverse`, { reason: 'visible correction' })
     expect(reversed.statusCode, reversed.body).toBe(201)
     const correction = h.deps.ledger.entries.find((entry) => entry.id === reversed.json().reversalEntryId)!

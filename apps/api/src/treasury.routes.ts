@@ -31,7 +31,7 @@ import {
   postingsForRestoration,
   receivableAdjustment,
   reverse,
-  sweepToCompany,
+  manualKaish,
   weekStartFor,
 } from '@ash/domain'
 import { ServiceError, assertWeekOpen, ensureFxDay, todayFor } from './shifts.service.ts'
@@ -984,7 +984,8 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
   /**
    * Take money OUT of خزينة الفرع — the manual half of «كييش».
    *
-   * Uses the same `sweepToCompany` recipe الترميم will use, so a hand-made sweep and an automatic
+   * Uses the same LINES and the same `kaish` line role الترميم will use, so a hand-made sweep and an
+   * automatic
    * one are the same event type and the same shape in the ledger. A dashboard that sums «كييش» must
    * not have to know which of the two produced a row.
    */
@@ -1003,7 +1004,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
 
     const posting =
       body.to === 'company_box'
-        ? sweepToCompany(office, body.amount, deps.ids.uuid())
+        ? manualKaish(office, body.amount, deps.ids.uuid())
         : assertBalanced({
             eventType: 'manual',
             occurrenceKey: deps.ids.uuid(),

@@ -108,6 +108,41 @@ describe('«كييش» — withdrawing from خزينة الفرع', () => {
     expect((await get(gm, '/company-fund')).json().total).toBe(sypStr(300_000))
   })
 
+  it('posts a hand sweep as `manual`, never as `restoration`', async () => {
+    /*
+     * PRODUCTION, 2026-08-29: this route answered 500 every time it was pressed.
+     *
+     * `sweepToCompany` stamps `event_type = 'restoration'`, and
+     * `restoration_journal_fact_from_entry` refuses any restoration entry without an immutable
+     * `restorations` row in the same transaction — a sealed count, a feasible plan, the whole
+     * atomic ceremony. A hand sweep has none of that. The tests above passed anyway because the
+     * memory ledger has no triggers, so nothing here could see it: the Postgres guard suite is
+     * skipped without Docker.
+     *
+     * `restoration` is not a label, it is a promise. This asserts the type directly, because the
+     * type is the exact thing the database keys on.
+     */
+    const gm = await h.loginAs('gm')
+    await fundBox(gm, 'cash', sypStr(1_000_000))
+    const res = await post(gm, '/treasury/withdraw', {
+      target: 'cash',
+      amount: sypStr(300_000),
+      to: 'company_box',
+      reason: 'كييش — سحب أرباح اليوم',
+      branchId: BRANCH,
+    })
+    expect(res.statusCode, res.body).toBe(201)
+
+    const swept = h.deps.ledger.entries.filter((e) => e.reason === 'كييش — سحب أرباح اليوم')
+    expect(swept).toHaveLength(1)
+    expect(swept[0]!.eventType).toBe('manual')
+
+    // The MEANING still travels, on the line role the dashboard actually classifies by — which is
+    // what sharing a recipe was for.
+    const debit = swept[0]!.lines.find((l) => l.side === 'D')
+    expect(debit?.role).toBe('kaish')
+  })
+
   /** Both boxes settle directly against صندوق الشركة — owner decision (l). */
   it('does the same for the wallet box', async () => {
     const gm = await h.loginAs('gm')

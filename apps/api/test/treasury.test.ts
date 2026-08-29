@@ -395,7 +395,11 @@ describe('corrections are visible reversals, never edits (BR7)', () => {
     })
     expect(moved.statusCode, moved.body).toBe(201)
 
-    const original = h.deps.ledger.entries.find((entry) => entry.eventType === 'restoration')!
+    // Selected by the role it carries, not by its event type: a hand sweep is a `manual` entry —
+    // `restoration` is reserved for the atomic ceremony the database enforces a fact row for.
+    const original = h.deps.ledger.entries.find((entry) =>
+      entry.lines.some((line) => line.fundCode === 'company_box' && line.role === 'kaish'),
+    )!
     expect(original.lines.find((line) => line.fundCode === 'company_box')?.role).toBe('kaish')
 
     const res = await post(manager, `/journal/${original.id}/reverse`, { reason: 'reverse sweep' })

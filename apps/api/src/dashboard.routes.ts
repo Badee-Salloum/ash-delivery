@@ -306,7 +306,20 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
       if (e.businessDate < from || e.businessDate > to) continue
       for (const l of e.lines) {
         if (l.fundCode === 'company_revenue') profit += l.side === 'C' ? l.amount : -l.amount
-        if ((e.eventType !== 'restoration' && e.eventType !== 'correction') || l.fundCode !== 'company_box') continue
+        /*
+         * A treasury flow is identified by its LINE ROLE first, and by event type only as a
+         * fallback for legacy rows that predate roles.
+         *
+         * This used to gate on event type alone, which was fine only while a hand «كييش» borrowed
+         * `restoration`. It cannot: `restoration_journal_fact_from_entry` refuses any restoration
+         * entry without an immutable `restorations` row, so the hand route 500'd in production on
+         * every press. Moving it to `manual` fixes that — and would have made every hand sweep
+         * vanish from «دخل الصندوق» if this line had kept guessing from the type.
+         */
+        const carriesTreasuryRole = l.role === 'kaish' || l.role === 'shahn'
+        const isTreasuryEntry =
+          carriesTreasuryRole || e.eventType === 'restoration' || e.eventType === 'correction'
+        if (!isTreasuryEntry || l.fundCode !== 'company_box') continue
         const role = await treasuryRoleOf(e, l)
         // A correction of an unrelated manual company-box entry is not a restoration flow.
         if (role === null) continue

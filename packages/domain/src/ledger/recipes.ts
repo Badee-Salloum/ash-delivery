@@ -735,6 +735,28 @@ export function sweepToCompany(office: OfficeFund, amount: Minor, occurrenceKey 
   })
 }
 
+/**
+ * «كييش» BY HAND — the manager moving money out of a box without running الترميم.
+ *
+ * Identical lines and identical roles to `sweepToCompany`, and deliberately a DIFFERENT event type.
+ * `restoration` is not a label, it is a promise: `restoration_journal_fact_from_entry` refuses any
+ * `restoration` entry that does not have an immutable `restorations` row in the same transaction —
+ * a sealed count, a feasible plan, the whole atomic ceremony. A hand sweep has none of that, so
+ * calling it one made the route answer 500 in production every time it was pressed, while the
+ * memory-backed tests passed because no trigger exists there.
+ *
+ * The shared MEANING lives where the reader actually looks: the `kaish` line role. The dashboard
+ * classifies by role first and falls back to event type, so «كييش» still sums as «كييش» whichever
+ * of the two produced the row — which was the point of sharing a recipe in the first place.
+ */
+export function manualKaish(office: OfficeFund, amount: Minor, occurrenceKey = '1'): Posting {
+  return assertBalanced({
+    eventType: 'manual',
+    occurrenceKey,
+    lines: [D({ kind: 'company_box' }, amount, 'kaish'), C({ kind: office }, amount)],
+  })
+}
+
 /** «شحن من الصندوق» — صندوق الشركة restores the office box to its capital. The exact inverse. */
 export function fundFromCompany(office: OfficeFund, amount: Minor, occurrenceKey = '1'): Posting {
   return assertBalanced({
