@@ -5,6 +5,31 @@
 Deployed: migration `0050` applied (`1 applied, 49 already present`), then API and admin. Commits
 `ead5558`, `1c884a6`. `pnpm check` green — 820 API tests, 498 domain.
 
+### A box with its money in drivers' pockets is not in surplus
+
+Reported off the screen. The cash line read «58,218.37 / 50,000.00  +8,218.37» in green while the
+box held 33,218.37 against that same target — SHORT by 16,781.63. The difference was 25,000 of
+active custody, folded into the box's position.
+
+`planRestoration` takes a box's position as `counted + receivables`, because custody is out in a
+driver's pocket and cannot be swept while his shift is live. The per-box lines added custody on top,
+so the one figure a manager reads before deciding whether to sweep said the opposite of what the
+restoration would do. Green means "you may take money out"; the drawer was short.
+
+Fixed, relabelled «ما في الصندوق والذمم / الهدف», and negative-tested: on the old arithmetic the new
+test reports 60,000.00 where the box holds 35,000.00. Live now:
+
+```
+cash    33,218.37 / 50,000.00   −16,781.63
+wallet   5,783.63 / 10,000.00    −4,216.37
+custody (5 shifts)  25,000.00 + 2,500.00      ← not actionable tonight
+working capital  66,502.00 / 60,000.00  +6,502.00
+restoration delta (actionable)          −20,998.00
+```
+
+Checked and NOT a bug: receivables reading 0.00 on the same card is correct — API and ledger agree
+to the lira, and the 16,290.00 seen earlier in the day was collected in between.
+
 ### Correcting a receivable: restate the balance, never edit an event
 
 A driver's receivable balance is a LEDGER FUND BALANCE, not the sum of `receivable_events`. Seven
