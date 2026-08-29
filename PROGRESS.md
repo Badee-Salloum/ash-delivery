@@ -42,13 +42,26 @@ declares no permission. So every typo, stale client URL and scanner probe answer
 `500 route_misconfigured` — the server confessing to its own fault for a thing that does not exist.
 Real 500s are how breakage gets found.
 
-### Go-live: refused, correctly
+### Go-live: refused for the wrong reason, then set
 
-The owner asked to move the epoch to 2026-08-29. `PUT /settings` refused with
-`go_live_requires_opening_ceremony`: that date has no sealed cash count and no restoration, and the
-alternative proof does not hold either — working capital is **66,502.00** against a target of
-**60,000.00**, i.e. 6,502.00 ABOVE it. Five shifts were still open at the time. The gate is the whole
-reason "ignore everything before" is honest, so the move waits for tonight's close-out.
+The owner asked to move the epoch to 2026-08-29 and the gate refused —
+`go_live_requires_opening_ceremony`, with working capital **66,502.00** against a target of
+**60,000.00**, i.e. 6,502.00 ABOVE it. The refusal was my design error, not his mistake. The second
+proof demanded working capital EQUAL the target, and that holds only at the instant a restoration
+finishes: one shift collecting one delivery fee puts it above, which on the first day is exactly the
+earnings being attributed to the new epoch. The epoch could only be declared at a frozen moment a
+working day never has.
+
+The asymmetry decides it. A shortfall hidden by an epoch means money vanished with no record and no
+way to see it afterwards — what the gate is for. A surplus hidden means the office holds more than
+its declared capital, which is not a loss of control. The rule is now `working >= target`, the
+refusal names the shortfall, and the position at the decision is written into the audit entry. The
+test that asserted the opposite is reversed in place, and a new one pins the case that still fails:
+one lira BELOW capital.
+
+Set to **2026-08-29**. `/dashboard/profit` asked for 2026-08-01 answers `from: 2026-08-29`, so the
+flows start at the epoch while the box balances still reconcile to capital. Shares read 0.00 because
+all five of today's shifts are still open — they post at approval.
 
 ## 2026-08-29 — «التفقّد», the branch manager's rounds
 
