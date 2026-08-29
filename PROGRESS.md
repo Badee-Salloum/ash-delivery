@@ -1,5 +1,63 @@
 # PROGRESS
 
+## 2026-08-29 — «التفقّد», the branch manager's rounds
+
+Built, tested, committed (`51446af`). **Not yet deployed**: migration `0049` still has to reach
+production, and the credentials in this workspace no longer open it.
+
+The owner's rule: several rounds a day — «تسجيل الدخول عالساعة 1 و 5 و 10» — each within a
+tolerance and each from inside the branch's own patch of ground, «على حساب مدير الفرع و ليس
+السائقين». Three choices he made: a «تفقّد» button the manager presses, a branch point plus a
+radius, and record-and-report rather than block.
+
+### It never blocks, and that is the design, not a softness
+
+A refused GPS permission, a manager genuinely away, a round nobody answered — each produces a
+recorded row saying exactly that. A check-in that could stop a manager working would be one GPS
+outage away from stopping the branch. The single refusal is a branch with **no** coordinates:
+measuring against `(0,0)` puts the fence in the Gulf of Guinea and fails every round with a distance
+of several thousand kilometres and no explanation, so `branch_location_not_set` says so instead.
+
+### Drivers are excluded by name, not by omission
+
+They are on the road all day and their whereabouts already ride on their shift's GPS pings. A rota
+of office rounds for a driver would be a queue of guaranteed misses, so `POST /checkin-windows`
+refuses one with `checkin_not_for_drivers` and the admin never offers a driver in the picker.
+
+### The two decisions in the pure code
+
+**Haversine, not a flat-earth fit.** A geofence is decided at its edge — precisely where an
+approximation is least trustworthy — and the error of treating degrees as a plane grows with
+latitude.
+
+**Closest open window, not the first.** Tolerances overlap: 01:00 ± 45 and 02:00 ± 45 both accept
+01:30. A manager checking in at 01:55 means the two o'clock round, not the one o'clock round he is
+nearly an hour late for. Ties break on the earlier target, then on the ref, so the same inputs
+always give the same answer.
+
+### The roll-call is built from the windows
+
+The interesting row is the one with **no** check-in against it, and a report driven by what happened
+can never show what didn't. Where a round has two answers the best one stands — a manager who checked
+in from the road and again from the office was, in the end, at the office for that round — and both
+rows survive in the log. `checkins` is append-only at the database (`REVOKE UPDATE, DELETE,
+TRUNCATE`), like every other piece of evidence.
+
+Rota and fence are `settings.write`, so a branch manager cannot move his own goalposts. Retiring a
+round moves `active` and keeps the row, so yesterday still explains itself.
+
+**Verification:** 17 domain tests, 15 API tests, `pnpm check` green (791 API tests, 494 domain).
+
+### Next
+
+- Apply `0049` on the DIRECT Neon endpoint, then deploy API + admin.
+- «تعديل الذمم المسجلة» — designed, not built. The finding that shapes it: a driver's receivable
+  balance is **not** the sum of `receivable_events` (seven sites emit receivable fund lines, one
+  writes an event row), so an event-pointer correction cannot touch the commonest case — a
+  `shift_funding` carry. The design is a balance **restatement**: `POST /receivables/adjustments`
+  from an expected current balance to a target, reusing the unchanged `receivableAdjustment()`
+  recipe, with `intent='correction'` so a driver's history never reads "collected".
+
 ## 2026-08-28 — the go-live date, and direct income
 
 Deployed: migrations `0045`–`0047` applied to production (`3 applied, 44 already present`), then
