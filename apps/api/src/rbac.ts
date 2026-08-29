@@ -62,7 +62,23 @@ export function makeAuthorize(deps: Deps) {
     if (permission === null) return // explicitly public
 
     if (permission === undefined) {
-      // Should be unreachable: the boot assertion refuses to start in this state. Fail closed.
+      /*
+       * No route matched at all.
+       *
+       * This hook is global, and Fastify runs preHandler hooks on its NOT-FOUND route too — which
+       * declares no permission, because it is not a route anyone wrote. So every typo, every stale
+       * client URL and every scanner probe was answering `500 route_misconfigured`: the server
+       * reporting its own fault for a thing that simply does not exist. Real 500s are how you find
+       * real breakage, and burying them under 404s costs exactly that.
+       *
+       * `routeOptions.url` is the discriminator: Fastify leaves it undefined when nothing matched.
+       */
+      if (req.routeOptions.url === undefined) {
+        await reply.code(404).send({ error: 'not_found' })
+        return
+      }
+      // A REGISTERED route that declares no permission is the real misconfiguration, and the boot
+      // assertion refuses to start in that state. Fail closed if one ever slips through.
       req.log.error({ url: req.url }, 'route declares no permission')
       await reply.code(500).send({ error: 'route_misconfigured' })
       return
