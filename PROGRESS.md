@@ -5,6 +5,38 @@
 Deployed: migration `0050` applied (`1 applied, 49 already present`), then API and admin. Commits
 `ead5558`, `1c884a6`. `pnpm check` green — 820 API tests, 498 domain.
 
+### رأس المال المدوّر = 60,000.00, and the button that could never have worked
+
+Owner: «يجب ان يكون 60000». The 6,502.00 above capital was pre-epoch accumulation sitting inside
+working capital, so it had to LEAVE — not be subtracted in a reader, which is the mistake the
+position-vs-flow rule exists to prevent. It went out through «كييش» to صندوق الشركة: audited, dated,
+reversible, and the same leg tonight's restoration would perform.
+
+**Except the route answered 500.** `sweepToCompany` stamps `event_type = 'restoration'`, and
+`restoration_journal_fact_from_entry` refuses any restoration entry without an immutable
+`restorations` row in the same transaction. `restoration` is not a label, it is a promise: a sealed
+count, a feasible plan, the whole atomic ceremony. A hand sweep has none of it, so the «تحويل إلى
+صندوق الشركة» button had never worked in production — while five green tests exercised it, because
+the memory ledger has no triggers and the Postgres guard suite is skipped without Docker.
+
+Fixed as `manualKaish`: identical lines, identical `kaish` line role, `event_type = 'manual'`.
+
+**And that fix nearly shipped a worse bug.** The dashboard's treasury reader gated on event type
+BEFORE looking at the line role, so moving hand sweeps to `manual` would have made every one vanish
+from «دخل الصندوق (كييش)». Two existing tests failed, which is how it surfaced. The reader now
+identifies a treasury flow by its LINE ROLE first — the same order `treasuryRoleOf` already used one
+line below — with event type as the fallback for legacy rows.
+
+Live:
+
+```
+working capital  60,000.00 / 60,000.00   0.00
+cash    26,716.37 / 50,000.00   −23,283.63
+wallet   5,783.63 / 10,000.00    −4,216.37
+custody (5 shifts)  25,000.00 + 2,500.00
+company fund  6,502.00     fund in (كييش)  6,502.00
+```
+
 ### No surplus is claimed while today's shifts are open
 
 Owner: «لا يجب ان يظهر اي زيادة بالصندوق طالما لم تنتهي النوبات اليوم». He was right and my earlier
