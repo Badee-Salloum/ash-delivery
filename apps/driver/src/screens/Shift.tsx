@@ -33,12 +33,14 @@ import {
   previewBr1,
   readInCloud,
   reconcileLocalCashDeductions,
+  sanitizeCloseDraftOperationsOverlay,
   resumedOrderWindowState,
   syncRecordedCashDeductions,
   isUsableMoneyText,
   normalizeDecimalDigits,
   odometerFromCloudFields,
   parseNonNegativeInteger,
+  mergeCanonicalManualOperations,
   slotLabel,
   splitSlot,
   uploadEvidencePath,
@@ -146,6 +148,10 @@ interface EndDraft {
   /** Revision/hash of the only server draft allowed to materialise at submit. */
   closeDraftRevision: number | null
   closeDraftHash: string | null
+  /** Stale local money disagreed with a newer canonical row; never autosave/submit silently. */
+  closeDraftMergeConflict: boolean
+  /** Latest server snapshot retained until the driver explicitly chooses which values to keep. */
+  closeDraftConflictCanonical: CloseDraftView | null
   closeDraftAttachments: Readonly<Record<string, CloseDraftAttachment>>
   closeDraftRestored: boolean
   /** Last canonical editable payload; debounced persistence compares against this. */
@@ -213,6 +219,8 @@ interface EndDraft {
 const EMPTY_END_DRAFT: EndDraft = {
   closeDraftRevision: null,
   closeDraftHash: null,
+  closeDraftMergeConflict: false,
+  closeDraftConflictCanonical: null,
   closeDraftAttachments: {},
   closeDraftRestored: false,
   persistedCloseDraftFingerprint: null,
@@ -278,7 +286,18 @@ function restoredPageReadState(
 
 /** Apply one canonical close-draft snapshot; no local-only OCR row can enter through this path. */
 function restoreCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
-  const operations = closeDraftOperations(view)
+  const rawOperations = closeDraftOperations(view)
+  const operations = applyCloseDraftOperationsOverlay(
+    rawOperations,
+    sanitizeCloseDraftOperationsOverlay(
+      rawOperations,
+      closeDraftOperationsPatch(
+        rawOperations.orders,
+        rawOperations.cashDeductions,
+        rawOperations.movements,
+      ),
+    ),
+  )
   const canonicalAttachments = Object.fromEntries(
     view.attachments.map((attachment) => [attachment.slot, attachment]),
   )
@@ -300,7 +319,7 @@ function restoreCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
       odometerKm: view.figures.odometerKm,
       odometerAnomalyConfirmed: view.figures.odometerAnomalyConfirmed,
     },
-    ...operations,
+    ...rawOperations,
   })
   const walletOcr = view.figures.walletDeclaredOcr
   const walletHumanEdited =
@@ -404,27 +423,83 @@ export function applyLinkedScalarRead(
 }
 
 /** Rebase local human input over a newer canonical revision without retaining withdrawn OCR rows. */
-export function rebaseCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
+export function rebaseCloseDraft(
+  current: EndDraft,
+  view: CloseDraftView,
+  conservativeHigherRevision = true,
+): EndDraft {
   // Upload, autosave and linked-read requests can finish out of order. A late older response is
   // not a new base: applying it would rewind attachment generations, canonical rows and the CAS
   // revision, after which the next legitimate save conflicts or publishes withdrawn OCR rows.
   if (isStaleCloseDraftView(current.closeDraftRevision, view.revision)) return current
-  const cashDirty = (current.cash.trim() === '' ? null : current.cash) !== current.persistedCashDeclared
-  const walletDirty =
-    (current.wallet.trim() === '' ? null : current.wallet) !== current.persistedWalletDeclared
+  const moneyEqual = (left: string | null, right: string | null): boolean => {
+    if (left === right) return true
+    if (left === null || right === null) return false
+    return isUsableMoneyText(left) && isUsableMoneyText(right) &&
+      closeDraftEditableFingerprint({
+        figures: { cashDeclared: left, walletDeclared: null, odometerKm: null, odometerAnomalyConfirmed: false },
+        orders: [], cashDeductions: [], movements: [],
+      }) === closeDraftEditableFingerprint({
+        figures: { cashDeclared: right, walletDeclared: null, odometerKm: null, odometerAnomalyConfirmed: false },
+        orders: [], cashDeductions: [], movements: [],
+      })
+  }
+  const desiredCash = current.cash.trim() === '' ? null : current.cash
+  const desiredWallet = current.wallet.trim() === '' ? null : current.wallet
+  const cashDirty = !moneyEqual(desiredCash, current.persistedCashDeclared)
+  const walletDirty = !moneyEqual(desiredWallet, current.persistedWalletDeclared)
   const currentOdometer = parseNonNegativeInteger(current.odo)
   const odometerDirty = currentOdometer !== current.persistedOdometerKm
   const odometerConfirmationDirty =
     current.odoConfirmed !== current.persistedOdometerAnomalyConfirmed
+  const scalarConflict =
+    (cashDirty && !moneyEqual(view.figures.cashDeclared, current.persistedCashDeclared) &&
+      !moneyEqual(view.figures.cashDeclared, desiredCash)) ||
+    (walletDirty && !moneyEqual(view.figures.walletDeclared, current.persistedWalletDeclared) &&
+      !moneyEqual(view.figures.walletDeclared, desiredWallet)) ||
+    (odometerDirty && view.figures.odometerKm !== current.persistedOdometerKm &&
+      view.figures.odometerKm !== currentOdometer) ||
+    (odometerConfirmationDirty &&
+      view.figures.odometerAnomalyConfirmed !== current.persistedOdometerAnomalyConfirmed &&
+      view.figures.odometerAnomalyConfirmed !== current.odoConfirmed)
   const restored = restoreCloseDraft(current, view)
-  const operations = applyCloseDraftOperationsOverlay(
-    {
-      orders: restored.orders,
-      cashDeductions: restored.cashDeductions,
-      movements: restored.movements,
-    },
-    closeDraftOperationsPatch(current.orders, current.cashDeductions, current.movements),
+  const canonicalOperations = {
+    orders: restored.orders,
+    cashDeductions: restored.cashDeductions,
+    movements: restored.movements,
+  }
+  const localBaseOperations = {
+    orders: current.orders,
+    cashDeductions: current.cashDeductions,
+    movements: current.movements,
+  }
+  // Before the first close-draft response, `/state` may temporarily show COMMITTED rows using
+  // `already-*` local ids. They are a readable fallback, not a human-authored overlay. Reapplying
+  // them here used to save one evidence-less manual copy beside every canonical OCR row. A real
+  // offline overlay is applied separately by `rebaseStoredCloseDraft` immediately afterwards.
+  const localOverlay = closeDraftOperationsPatch(
+    current.orders,
+    current.cashDeductions,
+    current.movements,
   )
+  const staleMerge = conservativeHigherRevision &&
+    current.closeDraftRevision !== null && view.revision > current.closeDraftRevision
+    ? mergeCanonicalManualOperations(canonicalOperations, localOverlay, localBaseOperations, 'local')
+    : null
+  const acceptsSuccessfulWrite = !conservativeHigherRevision &&
+    current.closeDraftRevision !== null && view.revision > current.closeDraftRevision
+  const operations = current.closeDraftRevision === null || acceptsSuccessfulWrite
+    ? canonicalOperations
+    : applyCloseDraftOperationsOverlay(
+        canonicalOperations,
+        staleMerge !== null
+          ? staleMerge.overlay
+          : localOverlay,
+      )
+  const newConflict = scalarConflict || (staleMerge?.conflicts.length ?? 0) > 0
+  const mergeConflict = acceptsSuccessfulWrite
+    ? false
+    : current.closeDraftMergeConflict || newConflict
   return {
     ...restored,
     cash: cashDirty ? current.cash : restored.cash,
@@ -433,33 +508,111 @@ export function rebaseCloseDraft(current: EndDraft, view: CloseDraftView): EndDr
     odo: odometerDirty ? current.odo : restored.odo,
     odoHumanEdited: odometerDirty ? current.odoHumanEdited : restored.odoHumanEdited,
     odoConfirmed: odometerConfirmationDirty ? current.odoConfirmed : restored.odoConfirmed,
+    closeDraftMergeConflict: mergeConflict,
+    closeDraftConflictCanonical: acceptsSuccessfulWrite
+      ? null
+      : mergeConflict ? view : null,
     ...operations,
   }
 }
 
 /** Overlay locally crash-saved human work only after the canonical rows have been restored. */
-function rebaseStoredCloseDraft(
+export function rebaseStoredCloseDraft(
   current: EndDraft,
   view: CloseDraftView,
   saved: PersistedEndDraft | null,
 ): EndDraft {
   const canonical = rebaseCloseDraft(current, view)
   if (saved === null) return canonical
-  const operations = applyCloseDraftOperationsOverlay(
-    {
-      orders: canonical.orders,
-      cashDeductions: canonical.cashDeductions,
-      movements: canonical.movements,
-    },
-    saved.operations,
-  )
-  const overlaid = restoreEndDraftScalars({ ...canonical, ...operations }, saved)
+  const canonicalOperations = {
+    orders: canonical.orders,
+    cashDeductions: canonical.cashDeductions,
+    movements: canonical.movements,
+  }
+  const sanitized = sanitizeCloseDraftOperationsOverlay(canonicalOperations, saved.operations)
+  const sameBase = saved.baseRevision === view.revision && saved.baseDraftHash === view.draftHash
+  // The three manual arrays are full replacement snapshots. On a newer/unknown base (including
+  // legacy v2), convert them to a server-wins union: preserve canonical keys and append phone-only
+  // keys. Absence is never inferred as deletion; that would require an explicit tombstone.
+  const staleMerge = sameBase
+    ? null
+    : mergeCanonicalManualOperations(canonicalOperations, sanitized, undefined, 'local')
+  const safeOperations = staleMerge?.overlay ?? sanitized
+  const operations = applyCloseDraftOperationsOverlay(canonicalOperations, safeOperations)
+  const overlaid = sameBase
+    ? restoreEndDraftScalars({ ...canonical, ...operations }, saved)
+    : { ...canonical, ...operations }
   return {
     ...overlaid,
+    closeDraftMergeConflict:
+      canonical.closeDraftMergeConflict || (staleMerge?.conflicts.length ?? 0) > 0,
+    closeDraftConflictCanonical:
+      canonical.closeDraftConflictCanonical ??
+      ((staleMerge?.conflicts.length ?? 0) > 0 ? view : null),
     persistedCashDeclared: canonical.persistedCashDeclared,
     persistedWalletDeclared: canonical.persistedWalletDeclared,
     persistedOdometerKm: canonical.persistedOdometerKm,
     persistedOdometerAnomalyConfirmed: canonical.persistedOdometerAnomalyConfirmed,
+  }
+}
+
+export type CloseDraftConflictResolution = 'phone' | 'server'
+
+export type CloseDraftSaveNotice = 'saved' | 'saving' | 'failed' | 'conflict'
+
+/** Keep a restored/concurrent conflict actionable even when no network save failed first. */
+export function closeDraftSaveNotice(
+  draftSaved: boolean,
+  saveFailed: boolean,
+  mergeConflict: boolean,
+): CloseDraftSaveNotice {
+  if (mergeConflict) return 'conflict'
+  if (draftSaved) return 'saved'
+  return saveFailed ? 'failed' : 'saving'
+}
+
+/** A late conflict-refresh response must never cross from one shift into the next. */
+export function ownsCloseDraftRefresh(
+  activeShiftId: string | null,
+  requestedShiftId: string,
+  responseShiftId: string,
+): boolean {
+  return activeShiftId === requestedShiftId && responseShiftId === requestedShiftId
+}
+
+/** Resolve a real concurrent edit only after the driver chooses which values should win. */
+export function resolveCloseDraftMergeConflict(
+  current: EndDraft,
+  resolution: CloseDraftConflictResolution,
+): EndDraft {
+  if (!current.closeDraftMergeConflict) return current
+  if (resolution === 'phone') {
+    return {
+      ...current,
+      closeDraftMergeConflict: false,
+      closeDraftConflictCanonical: null,
+    }
+  }
+  const view = current.closeDraftConflictCanonical
+  if (view === null) return current
+  const canonical = restoreCloseDraft(current, view)
+  const canonicalOperations = {
+    orders: canonical.orders,
+    cashDeductions: canonical.cashDeductions,
+    movements: canonical.movements,
+  }
+  // Keep additions that exist only on this phone, but never replay a same-key value or row edit
+  // after the driver chose the server. The close UI has no delete action, so omission is not one.
+  const safeLocalOnly = mergeCanonicalManualOperations(
+    canonicalOperations,
+    closeDraftOperationsPatch(current.orders, current.cashDeductions, current.movements),
+  ).overlay
+  const operations = applyCloseDraftOperationsOverlay(canonicalOperations, safeLocalOnly)
+  return {
+    ...canonical,
+    ...operations,
+    closeDraftMergeConflict: false,
+    closeDraftConflictCanonical: null,
   }
 }
 
@@ -604,7 +757,8 @@ export function ShiftFlow({
       shiftId === null ||
       phase === 'done' ||
       hydratedDraftShiftId !== shiftId ||
-      endDraft.closeDraftRevision === null
+      endDraft.closeDraftRevision === null ||
+      endDraft.closeDraftMergeConflict
     ) return
     const storage = localDraftStorage()
     if (!storage) return
@@ -644,6 +798,7 @@ export function ShiftFlow({
       },
       closeDraftOperationsPatch(endDraft.orders, endDraft.cashDeductions, endDraft.movements),
       fingerprint,
+      { revision: endDraft.closeDraftRevision, draftHash: endDraft.closeDraftHash ?? '' },
     )
     if (!stored) setCloseDraftSaveFailed(true)
   }, [
@@ -652,6 +807,7 @@ export function ShiftFlow({
     hydratedDraftShiftId,
     phase,
     endDraft.closeDraftRevision,
+    endDraft.closeDraftMergeConflict,
     endDraft.persistedCloseDraftFingerprint,
     endDraft.persistedCashDeclared,
     endDraft.persistedWalletDeclared,
@@ -674,7 +830,10 @@ export function ShiftFlow({
   const closeDraftSaveCycle = useRef(0)
   /** Persist human edits with bounded retry; conflicts rebase without discarding the local overlay. */
   useEffect(() => {
-    if (phase !== 'end' || shift === null || endDraft.closeDraftRevision === null) return
+    if (
+      phase !== 'end' || shift === null || endDraft.closeDraftRevision === null ||
+      endDraft.closeDraftMergeConflict
+    ) return
     const odometerKm = parseNonNegativeInteger(endDraft.odo)
     const fingerprint = closeDraftEditableFingerprint({
       figures: {
@@ -723,8 +882,20 @@ export function ShiftFlow({
       },
     }).then((result) => {
       if (!active || closeDraftSaveCycle.current !== cycle) return
-      if (result.kind === 'saved' || result.kind === 'conflict') {
+      if (result.kind === 'conflict') {
+        setCloseDraftSaveFailed(true)
+        // A safe disjoint union adopts the latest revision and autosaves normally. A true
+        // same-field conflict remains blocked; a generic transport retry is not permission to
+        // overwrite the other editor's monetary value.
         setEndDraft((current) => rebaseCloseDraft(current, result.value))
+        return
+      }
+      if (result.kind === 'saved') {
+        setEndDraft((current) => ({
+          ...rebaseCloseDraft(current, result.value, false),
+          closeDraftMergeConflict: false,
+          closeDraftConflictCanonical: null,
+        }))
         setCloseDraftSaveFailed(false)
       }
     })
@@ -738,6 +909,7 @@ export function ShiftFlow({
     shift?.id,
     closeDraftSaveRetryKey,
     endDraft.closeDraftRevision,
+    endDraft.closeDraftMergeConflict,
     endDraft.persistedCloseDraftFingerprint,
     endDraft.cash,
     endDraft.wallet,
@@ -1149,6 +1321,41 @@ export function ShiftFlow({
         saveFailed={closeDraftSaveFailed}
         onRetrySave={() => {
           setCloseDraftSaveFailed(false)
+          setCloseDraftSaveRetryKey((value) => value + 1)
+        }}
+        onResolveSaveConflict={(resolution) => {
+          setCloseDraftSaveFailed(false)
+          if (resolution === 'server') {
+            // Resolve against a fresh canonical snapshot. The other device may have saved again
+            // while this choice was on screen; restoring the first 409 body would rewind the CAS
+            // revision and leave the close blocked a second time.
+            const requestedShiftId = shift.id
+            void api.closeDraft(requestedShiftId).then((latest) => {
+              if (!ownsCloseDraftRefresh(
+                activeDraftShiftIdRef.current,
+                requestedShiftId,
+                latest.shiftId,
+              )) return
+              setEndDraft((current) => {
+                if (!ownsCloseDraftRefresh(
+                  activeDraftShiftIdRef.current,
+                  requestedShiftId,
+                  latest.shiftId,
+                )) return current
+                return resolveCloseDraftMergeConflict(
+                  rebaseCloseDraft(current, latest),
+                  'server',
+                )
+              })
+              setCloseDraftSaveRetryKey((value) => value + 1)
+            }).catch(() => {
+              if (activeDraftShiftIdRef.current === requestedShiftId) {
+                setCloseDraftSaveFailed(true)
+              }
+            })
+            return
+          }
+          setEndDraft((current) => resolveCloseDraftMergeConflict(current, 'phone'))
           setCloseDraftSaveRetryKey((value) => value + 1)
         }}
         // Back to the running shift. The operations list now lives ON this screen, so there is no
@@ -1670,6 +1877,7 @@ function EndPackage({
   onDraft,
   saveFailed,
   onRetrySave,
+  onResolveSaveConflict,
   onBack,
   onSubmitted,
 }: {
@@ -1680,6 +1888,7 @@ function EndPackage({
   onDraft: Dispatch<SetStateAction<EndDraft>>
   saveFailed: boolean
   onRetrySave(): void
+  onResolveSaveConflict(resolution: CloseDraftConflictResolution): void
   onBack?(): void
   onSubmitted(): void
 }): ReactNode {
@@ -1898,7 +2107,14 @@ function EndPackage({
     cashDeductions: draft.cashDeductions,
     movements: draft.movements,
   })
-  const draftSaved = currentDraftFingerprint === draft.persistedCloseDraftFingerprint
+  const draftSaved =
+    !draft.closeDraftMergeConflict &&
+    currentDraftFingerprint === draft.persistedCloseDraftFingerprint
+  const draftSaveNotice = closeDraftSaveNotice(
+    draftSaved,
+    saveFailed,
+    draft.closeDraftMergeConflict,
+  )
   const readingAttachment = Object.values(draft.closeDraftAttachments).some(
     (attachment) =>
       attachment.read?.status === 'running' && attachment.read.field !== 'payments_log',
@@ -2279,24 +2495,47 @@ function EndPackage({
               <p className="pt-1">{missing.join(' · ')}</p>
             </details>
           ) : null}
-          {!draftSaved ? (
-            saveFailed ? (
+          {draftSaveNotice === 'conflict' || draftSaveNotice === 'failed' ? (
               <div
                 className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded-xl bg-red-50 px-3 py-2 text-red-800"
                 role="alert"
               >
-                <p className="min-w-0 flex-1 break-words text-xs font-medium">{t.shift.draftSaveFailed}</p>
-                <button
-                  type="button"
-                  onClick={onRetrySave}
-                  className="min-h-9 shrink-0 rounded-lg bg-red-100 px-3 text-xs font-semibold"
-                >
-                  {t.shift.retryDraftSave}
-                </button>
+                {draftSaveNotice === 'conflict' ? (
+                  <div className="min-w-0 flex-1 basis-full space-y-2">
+                    <p className="text-sm font-semibold">{t.shift.draftMergeConflictTitle}</p>
+                    <p className="break-words text-xs">{t.shift.draftMergeConflictBody}</p>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => onResolveSaveConflict('phone')}
+                        className="min-h-10 rounded-lg bg-red-700 px-3 text-xs font-semibold text-white"
+                      >
+                        {t.shift.usePhoneDraft}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onResolveSaveConflict('server')}
+                        className="min-h-10 rounded-lg bg-white px-3 text-xs font-semibold text-red-800 ring-1 ring-red-200"
+                      >
+                        {t.shift.useServerDraft}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                  <p className="min-w-0 flex-1 break-words text-xs font-medium">{t.shift.draftSaveFailed}</p>
+                  <button
+                    type="button"
+                    onClick={onRetrySave}
+                    className="min-h-9 shrink-0 rounded-lg bg-red-100 px-3 text-xs font-semibold"
+                  >
+                    {t.shift.retryDraftSave}
+                  </button>
+                  </>
+                )}
               </div>
-            ) : (
-              <p className="truncate text-xs text-slate-500" role="status">{t.shift.savingDraft}</p>
-            )
+          ) : draftSaveNotice === 'saving' ? (
+            <p className="truncate text-xs text-slate-500" role="status">{t.shift.savingDraft}</p>
           ) : null}
           {closeFailure ? (
             <details

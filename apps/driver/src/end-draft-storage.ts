@@ -14,6 +14,9 @@ export interface PersistedEndDraft {
   savedAt: number
   expiresAt: number
   fingerprint: string
+  /** Missing on legacy v2 records. Such records must never replay full-replacement arrays. */
+  baseRevision?: number
+  baseDraftHash?: string
   persistedCashDeclared: string | null
   persistedWalletDeclared: string | null
   persistedOdometerKm: number | null
@@ -172,6 +175,9 @@ export function parseEndDraft(
       !Number.isFinite(value.expiresAt) ||
       value.expiresAt <= now ||
       typeof value.fingerprint !== 'string' ||
+      !optional(value as Record<string, unknown>, 'baseRevision', (field) =>
+        typeof field === 'number' && Number.isSafeInteger(field) && field >= 0) ||
+      !optional(value as Record<string, unknown>, 'baseDraftHash', (field) => typeof field === 'string') ||
       !nullableString(value.persistedCashDeclared) ||
       !nullableString(value.persistedWalletDeclared) ||
       !validOcr(value.persistedOdometerKm) ||
@@ -219,6 +225,7 @@ export function writeEndDraft(
   draft: EndDraftScalars,
   operations: PersistedCloseDraftOperations,
   fingerprint: string,
+  base: { revision: number; draftHash: string },
   now = Date.now(),
 ): boolean {
   try {
@@ -229,6 +236,8 @@ export function writeEndDraft(
       savedAt: now,
       expiresAt: now + END_DRAFT_TTL_MS,
       fingerprint,
+      baseRevision: base.revision,
+      baseDraftHash: base.draftHash,
       ...draft,
       operations,
     }

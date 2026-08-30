@@ -39,6 +39,42 @@ describe('the close gate judges the rows the driver can see', () => {
     expect(allProblems(shown).size).toBe(0)
   })
 
+  it('does not let a clockless already-YAL remnant block Taha from resubmitting', () => {
+    const providerOrderNo = 'YAL-903d7b56dcf5122968608a5154db16ce'
+    const rows: DraftOrder[] = [
+      {
+        localId: 'orders:c1270421415835b2b13473b43ccf967e',
+        providerOrderNo,
+        payMode: 'cash',
+        feeText: '415.00',
+        timeText: '',
+        dateText: '2026-08-30',
+        sightings: [sighting()],
+        included: false,
+        timeReviewRequired: true,
+        draftSource: 'cloud_ocr',
+      },
+      {
+        localId: `already-${providerOrderNo}`,
+        providerOrderNo,
+        payMode: 'cash',
+        feeText: '415.00',
+        timeText: '',
+        dateText: '2026-08-30',
+        sightings: [],
+        included: false,
+        timeReviewRequired: true,
+        draftSource: 'manual',
+      },
+    ]
+
+    expect([...allProblems(rows).values()]).toEqual([{ kind: 'duplicate_order_no', firstIndex: 0 }])
+    const shown = withoutSupersededRemnants(rows)
+    expect(shown).toHaveLength(1)
+    expect(shown[0]!.localId).toBe('orders:c1270421415835b2b13473b43ccf967e')
+    expect(allProblems(shown).size).toBe(0)
+  })
+
   it('Shift.tsx feeds the gate the filtered rows, not the raw draft', () => {
     // The regression is invisible at runtime without a DOM, so it is pinned at the wiring: the gate
     // must never be handed `draft.orders` directly again.

@@ -43,7 +43,7 @@ export function operationDecisionState(row: {
  * server's close-draft materialisation, because this exact rule has drifted between server and
  * driver three times in this codebase already. This only adapts the driver's row shape to it.
  */
-const supersedable = (row: DraftOrder | DraftCashDeduction): SupersedableRow => {
+const printedSupersedable = (row: DraftOrder | DraftCashDeduction): SupersedableRow => {
   // The driver's identity is what is PRINTED, because a retake gives the same delivery a new
   // providerOrderNo — it is synthesised from a page-scoped clientKey.
   const date = row.dateText?.trim() ?? ''
@@ -56,19 +56,312 @@ const supersedable = (row: DraftOrder | DraftCashDeduction): SupersedableRow => 
   }
 }
 
+const sameMoney = (left: string | null | undefined, right: string | null | undefined): boolean => {
+  const a = (left ?? '').trim()
+  const b = (right ?? '').trim()
+  if (a === '' || b === '') return a === b
+  try {
+    return parseMinor(a) === parseMinor(b)
+  } catch {
+    return a === b
+  }
+}
+
+/**
+ * A very narrow compatibility rule for the exact recovery artifact emitted by old clients.
+ * Provider number alone is not identity: two legitimate rows may share it while differing in a
+ * corrected amount, payment mode, date or time. Cash deductions never used this recovery shape.
+ */
+const isAlreadyRecoveryShadow = (row: DraftOrder, siblings: readonly DraftOrder[]): boolean => {
+  const providerOrderNo = row.providerOrderNo.trim()
+  const key = row.clientKey ?? row.localId
+  if (
+    providerOrderNo === '' ||
+    row.draftSource !== 'manual' ||
+    key !== `already-${providerOrderNo}`
+  ) return false
+  return siblings.some((candidate) =>
+    candidate !== row &&
+    candidate.draftSource !== undefined &&
+    candidate.draftSource !== 'manual' &&
+    candidate.providerOrderNo.trim() === providerOrderNo &&
+    candidate.payMode === row.payMode &&
+    sameMoney(candidate.feeText, row.feeText) &&
+    (candidate.dateText ?? '').trim() === (row.dateText ?? '').trim() &&
+    (candidate.timeText ?? '').trim() === (row.timeText ?? '').trim(),
+  )
+}
+
+const supersededBy = <T extends DraftOrder | DraftCashDeduction>(
+  row: T,
+  siblings: readonly T[],
+  shape: (candidate: T) => SupersedableRow,
+): boolean => {
+  const existingIndex = siblings.indexOf(row)
+  const rows = existingIndex === -1 ? [...siblings, row] : siblings
+  const index = existingIndex === -1 ? rows.length - 1 : existingIndex
+  const shapes = rows.map(shape)
+  return isSupersededScanRow(shapes[index]!, shapes)
+}
+
+const withoutBy = <T extends DraftOrder | DraftCashDeduction>(
+  rows: readonly T[],
+  shape: (candidate: T) => SupersedableRow,
+): T[] => {
+  const shapes = rows.map(shape)
+  return rows.filter((_, index) => !isSupersededScanRow(shapes[index]!, shapes))
+}
+
 export function isSupersededRemnant(
   row: DraftOrder | DraftCashDeduction,
   siblings: readonly (DraftOrder | DraftCashDeduction)[],
 ): boolean {
-  return isSupersededScanRow(supersedable(row), siblings.map(supersedable))
+  return ('providerOrderNo' in row && isAlreadyRecoveryShadow(
+    row,
+    siblings.filter((candidate): candidate is DraftOrder => 'providerOrderNo' in candidate),
+  )) || supersededBy(row, siblings, printedSupersedable)
 }
 
 /** The rows worth putting in front of the driver: everything except superseded copies. */
 export function withoutSupersededRemnants<T extends DraftOrder | DraftCashDeduction>(
   rows: readonly T[],
 ): T[] {
-  const shapes = rows.map(supersedable)
-  return rows.filter((_, index) => !isSupersededScanRow(shapes[index]!, shapes))
+  const orders = rows.filter((row): row is T & DraftOrder => 'providerOrderNo' in row)
+  return withoutBy(rows.filter((row) => !('providerOrderNo' in row && isAlreadyRecoveryShadow(row, orders))), printedSupersedable)
+}
+
+/** Remove only old `already-*` manual order snapshots that exactly mirror a canonical OCR row. */
+export function sanitizeCloseDraftOperationsOverlay(
+  current: EditableCloseDraftOperations,
+  overlay: NonNullable<CloseDraftPatch['operations']>,
+): NonNullable<CloseDraftPatch['operations']> {
+  if (overlay.manualOrders === undefined) return overlay
+  const canonical = current.orders.filter(
+    (row) => row.draftSource !== undefined && row.draftSource !== 'manual',
+  )
+  return {
+    ...overlay,
+    manualOrders: overlay.manualOrders.filter((saved) => {
+      const shadow: DraftOrder = {
+        localId: saved.clientKey,
+        clientKey: saved.clientKey,
+        draftSource: 'manual',
+        providerOrderNo: saved.providerOrderNo,
+        payMode: saved.payMode,
+        feeText: saved.fee ?? '',
+        timeText: saved.occurredMinute ?? '',
+        dateText: saved.occurredDate ?? '',
+      }
+      return !isAlreadyRecoveryShadow(shadow, [...canonical, shadow])
+    }),
+  }
+}
+
+/**
+ * Merge a possibly stale human snapshot without interpreting absence as deletion. The close UI has
+ * no delete operation, so canonical rows win same-key conflicts and phone-only keys are additions.
+ */
+export function mergeCanonicalManualOperations(
+  current: EditableCloseDraftOperations,
+  overlay: NonNullable<CloseDraftPatch['operations']>,
+  base?: EditableCloseDraftOperations,
+  conflictPreference: 'canonical' | 'local' = 'canonical',
+): { overlay: NonNullable<CloseDraftPatch['operations']>; conflicts: string[] } {
+  const cleaned = sanitizeCloseDraftOperationsOverlay(current, overlay)
+  const conflicts: string[] = []
+  const semanticRow = (kind: string, row: Record<string, unknown>): string => {
+    const moneyKey = kind === 'order' ? 'fee' : 'amount'
+    return JSON.stringify(Object.fromEntries(
+      Object.entries(row)
+        .filter(([key]) => key !== moneyKey)
+        .sort(([left], [right]) => left.localeCompare(right)),
+    ))
+  }
+  const sameManualRow = (kind: string, left: Record<string, unknown>, right: Record<string, unknown>): boolean =>
+    semanticRow(kind, left) === semanticRow(kind, right) &&
+    sameMoney(
+      left[kind === 'order' ? 'fee' : 'amount'] as string | null,
+      right[kind === 'order' ? 'fee' : 'amount'] as string | null,
+    )
+  const appendMissing = <T extends { clientKey: string }>(
+    kind: string,
+    canonical: readonly T[],
+    local: readonly T[],
+    prior: readonly T[],
+  ): T[] => {
+    const result = [...canonical]
+    const byKey = new Map(canonical.map((row, index) => [row.clientKey, { row, index }]))
+    const priorByKey = new Map(prior.map((row) => [row.clientKey, row]))
+    for (const row of local) {
+      const held = byKey.get(row.clientKey)
+      if (held === undefined) {
+        result.push(row)
+        byKey.set(row.clientKey, { row, index: result.length - 1 })
+        continue
+      }
+      const server = held.row
+      if (sameManualRow(kind, server, row)) continue
+      const baseline = priorByKey.get(row.clientKey)
+      if (baseline !== undefined && sameManualRow(kind, server, baseline)) {
+        // Only this phone changed the row. Reapply it over an unrelated newer revision.
+        result[held.index] = row
+        byKey.set(row.clientKey, { row, index: held.index })
+        continue
+      }
+      if (baseline !== undefined && sameManualRow(kind, row, baseline)) {
+        // Only the server changed the row. The phone has no edit to replay.
+        continue
+      }
+      conflicts.push(`${kind}:${row.clientKey}`)
+      if (conflictPreference === 'local') {
+        result[held.index] = row
+        byKey.set(row.clientKey, { row, index: held.index })
+      }
+    }
+    return result
+  }
+  const canonicalPatch = closeDraftOperationsPatch(
+    current.orders,
+    current.cashDeductions,
+    current.movements,
+  )
+  const baselinePatch = base === undefined
+    ? null
+    : closeDraftOperationsPatch(
+        base.orders
+          .filter((row) =>
+            row.persistedFeeText !== undefined &&
+            row.persistedTimeText !== undefined &&
+            row.persistedDateText !== undefined,
+          )
+          .map((row) => ({
+            ...row,
+            feeText: row.persistedFeeText ?? '',
+            timeText: row.persistedTimeText ?? '',
+            dateText: row.persistedDateText ?? '',
+          })),
+        base.cashDeductions
+          .filter((row) =>
+            row.persistedAmountText !== undefined &&
+            row.persistedTimeText !== undefined &&
+            row.persistedDateText !== undefined,
+          )
+          .map((row) => ({
+            ...row,
+            amountText: row.persistedAmountText ?? '',
+            timeText: row.persistedTimeText ?? '',
+            dateText: row.persistedDateText ?? '',
+          })),
+        base.movements
+          .filter((row) =>
+            row.persistedAmountText !== undefined &&
+            row.persistedTimeText !== undefined &&
+            'persistedNotes' in row &&
+            'persistedAmbiguous' in row,
+          )
+          .map((row) => ({
+            ...row,
+            amountText: row.persistedAmountText ?? '',
+            timeText: row.persistedTimeText ?? '',
+            notes: row.persistedNotes ?? null,
+            ambiguous: row.persistedAmbiguous ?? false,
+          })),
+      )
+  const safeRowEdits = (cleaned.rowEdits ?? []).filter((edit) => {
+    const serverRows = edit.kind === 'order'
+      ? current.orders
+      : edit.kind === 'cash_deduction'
+        ? current.cashDeductions
+        : current.movements
+    const server = serverRows.find((row) => (row.clientKey ?? row.localId) === edit.clientKey)
+    // A canonical OCR row withdrawn by a newer server revision cannot be resurrected by a row
+    // edit: its evidence identity and inclusion decision are server-owned. Treat the withdrawal as
+    // authoritative instead of offering a phone choice that the API cannot actually materialise.
+    if (server === undefined) return false
+    if (base === undefined) {
+      conflicts.push(`row_edit:${edit.clientKey}`)
+      return conflictPreference === 'local'
+    }
+    const baseRows = edit.kind === 'order'
+      ? base.orders
+      : edit.kind === 'cash_deduction'
+        ? base.cashDeductions
+        : base.movements
+    const prior = baseRows.find((row) => (row.clientKey ?? row.localId) === edit.clientKey)
+    if (prior === undefined) {
+      conflicts.push(`row_edit:${edit.clientKey}`)
+      return conflictPreference === 'local'
+    }
+    const checks: Array<[unknown, unknown, unknown, boolean]> = []
+    if (edit.kind === 'order' && 'feeText' in prior && 'feeText' in server) {
+      if ('fee' in edit) checks.push([prior.persistedFeeText, server.feeText, edit.fee, true])
+      if ('occurredMinute' in edit) checks.push([prior.persistedTimeText ?? '', server.timeText ?? '', edit.occurredMinute ?? '', false])
+      if ('occurredDate' in edit) checks.push([prior.persistedDateText ?? '', server.dateText ?? '', edit.occurredDate ?? '', false])
+    } else if (
+      edit.kind === 'cash_deduction' && 'amountText' in prior && 'amountText' in server &&
+      'dateText' in prior && 'dateText' in server
+    ) {
+      if ('amount' in edit) checks.push([prior.persistedAmountText, server.amountText, edit.amount, true])
+      if ('occurredMinute' in edit) checks.push([prior.persistedTimeText ?? '', server.timeText, edit.occurredMinute ?? '', false])
+      if ('occurredDate' in edit) checks.push([prior.persistedDateText ?? '', server.dateText, edit.occurredDate ?? '', false])
+    } else if (
+      edit.kind === 'movement' && 'amountText' in prior && 'amountText' in server &&
+      'notes' in prior && 'notes' in server
+    ) {
+      if ('amount' in edit) checks.push([prior.persistedAmountText, server.amountText, edit.amount, true])
+      if ('occurredMinute' in edit) checks.push([prior.persistedTimeText ?? '', server.timeText, edit.occurredMinute ?? '', false])
+      if ('notes' in edit) checks.push([prior.persistedNotes ?? null, server.notes ?? null, edit.notes ?? null, false])
+      if ('ambiguous' in edit) checks.push([prior.persistedAmbiguous ?? false, server.ambiguous ?? false, edit.ambiguous, false])
+    }
+    const divergent = checks.some(([baseline, latest, desired, money]) => {
+      const unchanged = money
+        ? sameMoney(baseline as string | null, latest as string | null)
+        : baseline === latest
+      const alreadyApplied = money
+        ? sameMoney(latest as string | null, desired as string | null)
+        : latest === desired
+      return !unchanged && !alreadyApplied
+    })
+    if (divergent) conflicts.push(`row_edit:${edit.clientKey}`)
+    return !divergent || conflictPreference === 'local'
+  })
+  const merged: NonNullable<CloseDraftPatch['operations']> = {
+    ...cleaned,
+    // A row edit is a write against a prior canonical value. Without its base row value it cannot
+    // be three-way merged silently; the caller decides which side an explicit resolution shows.
+    rowEdits: safeRowEdits,
+    ...(cleaned.manualOrders !== undefined
+      ? {
+          manualOrders: appendMissing(
+            'order',
+            canonicalPatch.manualOrders ?? [],
+            cleaned.manualOrders,
+            baselinePatch?.manualOrders ?? [],
+          ),
+        }
+      : {}),
+    ...(cleaned.manualCashDeductions !== undefined
+      ? {
+          manualCashDeductions: appendMissing(
+            'cash_deduction',
+            canonicalPatch.manualCashDeductions ?? [],
+            cleaned.manualCashDeductions,
+            baselinePatch?.manualCashDeductions ?? [],
+          ),
+        }
+      : {}),
+    ...(cleaned.manualMovements !== undefined
+      ? {
+          manualMovements: appendMissing(
+            'movement',
+            canonicalPatch.manualMovements ?? [],
+            cleaned.manualMovements,
+            baselinePatch?.manualMovements ?? [],
+          ),
+        }
+      : {}),
+  }
+  return { overlay: merged, conflicts }
 }
 
 function summarize(

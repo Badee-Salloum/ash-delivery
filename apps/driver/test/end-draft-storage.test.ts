@@ -62,11 +62,12 @@ const operations = {
   manualMovements: [],
   rowEdits: [{ clientKey: 'ocr-1', kind: 'order' as const, fee: '225' }],
 }
+const base = { revision: 7, draftHash: 'hash-7' }
 
 describe('closing draft crash recovery', () => {
   it('round-trips an owner-scoped human overlay without storing File/image bytes', () => {
     const storage = new MemoryStorage()
-    expect(writeEndDraft(storage, 'driver-a', 'shift/a', scalars, operations, 'dirty-1', 1234)).toBe(true)
+    expect(writeEndDraft(storage, 'driver-a', 'shift/a', scalars, operations, 'dirty-1', base, 1234)).toBe(true)
     expect(storage.values.has(endDraftStorageKey('driver-a', 'shift/a'))).toBe(true)
     expect(readEndDraft(storage, 'driver-a', 'shift/a', 1235)).toMatchObject({
       version: 2,
@@ -75,6 +76,8 @@ describe('closing draft crash recovery', () => {
       savedAt: 1234,
       expiresAt: 1234 + END_DRAFT_TTL_MS,
       fingerprint: 'dirty-1',
+      baseRevision: 7,
+      baseDraftHash: 'hash-7',
       operations,
       ...scalars,
     })
@@ -84,7 +87,7 @@ describe('closing draft crash recovery', () => {
 
   it('restores unsaved scalars over a canonical/default draft', () => {
     const storage = new MemoryStorage()
-    writeEndDraft(storage, 'driver-a', 'shift-1', scalars, operations, 'dirty', 100)
+    writeEndDraft(storage, 'driver-a', 'shift-1', scalars, operations, 'dirty', base, 100)
     const saved = readEndDraft(storage, 'driver-a', 'shift-1', 101)!
     expect(
       restoreEndDraftScalars(
@@ -100,6 +103,21 @@ describe('closing draft crash recovery', () => {
     ).toEqual({ ...scalars, untouched: 'kept' })
   })
 
+  it('keeps legacy v2 records readable but marks their base as unknown', () => {
+    const storage = new MemoryStorage()
+    writeEndDraft(storage, 'driver-a', 'shift-1', scalars, operations, 'dirty', base, 100)
+    const key = endDraftStorageKey('driver-a', 'shift-1')
+    const legacy = JSON.parse(storage.getItem(key)!) as Record<string, unknown>
+    delete legacy.baseRevision
+    delete legacy.baseDraftHash
+    storage.setItem(key, JSON.stringify(legacy))
+
+    const read = readEndDraft(storage, 'driver-a', 'shift-1', 101)!
+    expect(read.version).toBe(2)
+    expect(read.baseRevision).toBeUndefined()
+    expect(read.baseDraftHash).toBeUndefined()
+  })
+
   it('fails closed and removes a corrupt, expired or cross-identity record', () => {
     const storage = new MemoryStorage()
     const key = endDraftStorageKey('driver-a', 'shift-1')
@@ -107,15 +125,15 @@ describe('closing draft crash recovery', () => {
     expect(readEndDraft(storage, 'driver-a', 'shift-1')).toBeNull()
     expect(storage.getItem(key)).toBeNull()
 
-    writeEndDraft(storage, 'driver-a', 'shift-1', scalars, operations, 'dirty', 100)
+    writeEndDraft(storage, 'driver-a', 'shift-1', scalars, operations, 'dirty', base, 100)
     expect(readEndDraft(storage, 'driver-a', 'shift-1', 100 + END_DRAFT_TTL_MS)).toBeNull()
     expect(parseEndDraft('not json')).toBeNull()
   })
 
   it('clears a canonical/terminal shift and all retained work at the logout privacy boundary', () => {
     const storage = new MemoryStorage()
-    writeEndDraft(storage, 'driver-a', 'shift-1', scalars, operations, 'one', 1)
-    writeEndDraft(storage, 'driver-a', 'shift-2', scalars, operations, 'two', 2)
+    writeEndDraft(storage, 'driver-a', 'shift-1', scalars, operations, 'one', base, 1)
+    writeEndDraft(storage, 'driver-a', 'shift-2', scalars, operations, 'two', base, 2)
     clearEndDraft(storage, 'driver-a', 'shift-1')
     expect(readEndDraft(storage, 'driver-a', 'shift-1', 3)).toBeNull()
     expect(readEndDraft(storage, 'driver-a', 'shift-2', 3)).not.toBeNull()
@@ -127,8 +145,8 @@ describe('closing draft crash recovery', () => {
 
   it('sweeps TTL-expired and legacy unscoped work while preserving a live owner-scoped overlay', () => {
     const storage = new MemoryStorage()
-    writeEndDraft(storage, 'driver-a', 'expired', scalars, operations, 'old', 0)
-    writeEndDraft(storage, 'driver-a', 'live', scalars, operations, 'new', END_DRAFT_TTL_MS)
+    writeEndDraft(storage, 'driver-a', 'expired', scalars, operations, 'old', base, 0)
+    writeEndDraft(storage, 'driver-a', 'live', scalars, operations, 'new', base, END_DRAFT_TTL_MS)
     storage.setItem('ash:driver:end-draft:v1:legacy', '{}')
     sweepExpiredEndDrafts(storage, END_DRAFT_TTL_MS + 1)
     expect(readEndDraft(storage, 'driver-a', 'expired', END_DRAFT_TTL_MS + 1)).toBeNull()
@@ -145,7 +163,7 @@ describe('closing draft crash recovery', () => {
       removeItem(): void { throw new Error('blocked') },
     }
     expect(readEndDraft(blocked, 'driver-a', 'shift-1')).toBeNull()
-    expect(writeEndDraft(blocked, 'driver-a', 'shift-1', scalars, operations, 'dirty')).toBe(false)
+    expect(writeEndDraft(blocked, 'driver-a', 'shift-1', scalars, operations, 'dirty', base)).toBe(false)
     expect(() => clearEndDraft(blocked, 'driver-a', 'shift-1')).not.toThrow()
     expect(() => clearAllEndDrafts(blocked)).not.toThrow()
   })
