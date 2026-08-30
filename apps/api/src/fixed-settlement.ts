@@ -41,7 +41,7 @@ export function fixedSettlementHash(
   plan: FixedShareSettlementPlan,
 ): string {
   const canonical = {
-    version: 3,
+    version: 4,
     policyCode: FIXED_SETTLEMENT_POLICY,
     driverRateBps: FIXED_SETTLEMENT_DRIVER_BPS,
     ...context,
@@ -64,6 +64,8 @@ export function fixedSettlementHash(
     walletClaimToOffice: String(plan.walletClaimToOffice),
     cashReceivableDeferred: String(plan.cashReceivableDeferred),
     walletReceivableDeferred: String(plan.walletReceivableDeferred),
+    maximumCashShortageReceivable: String(plan.maximumCashShortageReceivable),
+    cashShortageReceivable: String(plan.cashShortageReceivable),
     walletToOffice: String(plan.walletToOffice),
     cashToOffice: String(plan.cashToOffice),
     walletAction: plan.wallet.action,

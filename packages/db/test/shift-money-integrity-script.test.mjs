@@ -8,6 +8,8 @@ import { fixedSettlementHash } from '../../../apps/api/src/fixed-settlement.ts'
 import {
   INTEGRITY_CHECKS,
   LEGACY_INTEGRITY_CHECKS,
+  SHORTAGE_RECEIVABLE_INTEGRITY_CHECKS,
+  WRITEOFF_RECEIVABLE_INTEGRITY_CHECKS,
   canonicalSettlementHash,
   canonicalJson,
   closeDraftHash,
@@ -108,6 +110,24 @@ describe('read-only shift-money integrity checker', () => {
     expect(residuals).toContain("f.type::text = 'driver_shift_funding_wallet'")
   })
 
+  it('audits a close-owned shortage as ordinary debt without confusing it with shift funding', () => {
+    const formulas = SHORTAGE_RECEIVABLE_INTEGRITY_CHECKS
+      .find((check) => check.id === 'settlement_formulas').sql
+    expect(formulas).toContain('maximum_cash_shortage_receivable_minor::numeric <>')
+    expect(formulas).toContain('GREATEST(-ss.final_employee_cash_minor::numeric, 0::numeric)')
+    expect(formulas).toContain('ss.cash_shortage_receivable_minor::numeric >')
+    expect(formulas).toContain('- ss.cash_shortage_receivable_minor::numeric')
+
+    const alignment = SHORTAGE_RECEIVABLE_INTEGRITY_CHECKS
+      .find((check) => check.id === 'close_journal_alignment').sql
+    expect(alignment).toContain("'cash_shortage_receivable', 'driver_receivable_cash'")
+
+    const residuals = SHORTAGE_RECEIVABLE_INTEGRITY_CHECKS
+      .find((check) => check.id === 'residual_driver_balances').sql
+    expect(residuals).toContain('sb.ordinary_cash <> ss.cash_shortage_receivable_minor::numeric - CASE')
+    expect(residuals).toContain('sb.funding_cash <> ss.cash_receivable_deferred_minor::numeric - CASE')
+  })
+
   it('validates v2 claims, bounded deferrals, physical transfers, and office conservation', () => {
     const formulas = INTEGRITY_CHECKS.find((check) => check.id === 'settlement_formulas').sql
     expect(formulas).toContain("'fixed_40_cash_close_v1'")
@@ -175,6 +195,21 @@ describe('read-only shift-money integrity checker', () => {
     expect(events).toContain("'driver_shift_funding_wallet'")
     expect(events).toContain("'orphan_receivable_adjustment_journal'")
     expect(events).toContain("'duplicate_receivable_idempotency_key'")
+    expect(events).toContain('actual.line_shape IS DISTINCT FROM expected.line_shape')
+  })
+
+  it('matches write-offs only to the dedicated loss code and never to an office fund', () => {
+    const events = WRITEOFF_RECEIVABLE_INTEGRITY_CHECKS
+      .find((check) => check.id === 'receivable_event_journals').sql
+
+    expect(events).toContain("re.intent NOT IN ('command', 'correction', 'writeoff')")
+    expect(events).toContain("re.intent = 'writeoff'")
+    expect(events).toContain("re.receivable_kind <> 'ordinary' OR re.direction <> 'collect'")
+    expect(events).toContain("'receivable_written_off'")
+    expect(events).toContain("'receivable_writeoff_loss'")
+    expect(events).toContain("'cost_center:receivable_writeoff_loss'")
+    expect(events).toContain('el.fund_code')
+    expect(events).toContain('f.code')
     expect(events).toContain('actual.line_shape IS DISTINCT FROM expected.line_shape')
   })
 
@@ -291,7 +326,11 @@ describe('read-only shift-money integrity checker', () => {
 
   it('contains only SELECT/CTE audit queries and enforces a read-only snapshot', () => {
     const mutation = /\b(?:INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|TRUNCATE|GRANT|REVOKE|CALL|COPY)\b/i
-    for (const check of [...LEGACY_INTEGRITY_CHECKS, ...INTEGRITY_CHECKS]) {
+    for (const check of [
+      ...LEGACY_INTEGRITY_CHECKS,
+      ...INTEGRITY_CHECKS,
+      ...SHORTAGE_RECEIVABLE_INTEGRITY_CHECKS,
+    ]) {
       expect(check.sql.trim()).toMatch(/^(?:SELECT|WITH)\b/i)
       const executableSql = check.sql.replace(/'(?:''|[^'])*'/g, "''")
       expect(executableSql).not.toMatch(mutation)
@@ -306,7 +345,10 @@ describe('read-only shift-money integrity checker', () => {
       expect(check.sql).not.toContain('ash_has_visible_text')
     }
     expect(script).toContain('Keep the pre-migration audit runnable on schema 0034')
-    expect(script).toContain('receivableV2 ? INTEGRITY_CHECKS : LEGACY_INTEGRITY_CHECKS')
+    expect(script).toContain('shortageReceivableV4')
+    expect(script).toContain('? SHORTAGE_RECEIVABLE_INTEGRITY_CHECKS')
+    expect(script).toContain('? INTEGRITY_CHECKS')
+    expect(script).toContain(': LEGACY_INTEGRITY_CHECKS')
   })
 
   it('opens and rolls back the read-only snapshot without ever committing', async () => {
@@ -372,6 +414,76 @@ describe('read-only shift-money integrity checker', () => {
     expect(calls.at(-1).sql).toBe('ROLLBACK')
   })
 
+  it('selects the write-off recipe only after migration 0051', async () => {
+    const calls = []
+    const client = {
+      async query(sql, params) {
+        calls.push({ sql, params })
+        if (sql.includes('current_database()')) {
+          return {
+            rows: [{
+              database: 'disposable-v3',
+              database_user: 'auditor',
+              server_version: '17-test',
+              as_of: '2026-08-30 00:00:00+00',
+            }],
+          }
+        }
+        if (sql.includes('AS receivable_v2')) {
+          return {
+            rows: [{
+              receivable_v2: true,
+              writeoff_receivable_v3: true,
+              shortage_receivable_v4: false,
+            }],
+          }
+        }
+        return { rows: [] }
+      },
+      release() {},
+    }
+    const pool = { async connect() { return client } }
+
+    const result = await runShiftMoneyIntegrity(pool, { sampleLimit: 5 })
+
+    expect(result.violations).toBe(0)
+    expect(calls.some(({ sql }) => sql.includes("re.intent = 'writeoff'"))).toBe(true)
+    expect(calls.some(({ sql }) => sql.includes("'cost_center:receivable_writeoff_loss'"))).toBe(true)
+    expect(calls.at(-1).sql).toBe('ROLLBACK')
+  })
+
+  it('selects close-shortage-aware checks only after migration 0052', async () => {
+    const calls = []
+    const client = {
+      async query(sql, params) {
+        calls.push({ sql, params })
+        if (sql.includes('current_database()')) {
+          return {
+            rows: [{
+              database: 'disposable-v4',
+              database_user: 'auditor',
+              server_version: '17-test',
+              as_of: '2026-08-30 00:00:00+00',
+            }],
+          }
+        }
+        if (sql.includes('AS receivable_v2')) {
+          return { rows: [{ receivable_v2: true, shortage_receivable_v4: true }] }
+        }
+        return { rows: [] }
+      },
+      release() {},
+    }
+    const pool = { async connect() { return client } }
+
+    const result = await runShiftMoneyIntegrity(pool, { sampleLimit: 5 })
+
+    expect(result.violations).toBe(0)
+    expect(calls.some(({ sql }) => sql.includes('ss.cash_shortage_receivable_minor::text'))).toBe(true)
+    expect(calls.some(({ sql }) => sql.includes("'cash_shortage_receivable'"))).toBe(true)
+    expect(calls.at(-1).sql).toBe('ROLLBACK')
+  })
+
   it('uses the same recursively canonical SHA-256 shape as close-draft storage', () => {
     const payload = {
       z: [{ b: 2, a: 1 }],
@@ -415,6 +527,9 @@ describe('read-only shift-money integrity checker', () => {
       close_draft_submitted_at: '2026-08-22T12:00:00.000Z',
       confirmed_at: '2026-08-22T12:01:00.000Z',
       close_draft_rollout_at: '2026-08-22T11:00:00.000Z',
+      shortage_receivable_rollout_at: '2026-08-23T11:00:00.000Z',
+      maximum_cash_shortage_receivable_minor: '0',
+      cash_shortage_receivable_minor: '0',
       settlement_hash: 'f'.repeat(64),
     }
 
@@ -467,6 +582,9 @@ describe('read-only shift-money integrity checker', () => {
       close_draft_submitted_at: '2026-08-23T12:00:00.000Z',
       confirmed_at: '2026-08-23T12:01:00.000Z',
       close_draft_rollout_at: '2026-08-22T11:00:00.000Z',
+      shortage_receivable_rollout_at: '2026-08-23T11:00:00.000Z',
+      maximum_cash_shortage_receivable_minor: '0',
+      cash_shortage_receivable_minor: '0',
       settlement_hash: 'f'.repeat(64),
     }
 
@@ -503,6 +621,8 @@ describe('read-only shift-money integrity checker', () => {
         walletClaimToOffice: 2_000n,
         cashReceivableDeferred: 1_000n,
         walletReceivableDeferred: 500n,
+        maximumCashShortageReceivable: 0n,
+        cashShortageReceivable: 0n,
         cashToOffice: 5_000n,
         walletToOffice: 1_500n,
         wallet: { action: 'collect', amount: 1_500n },
@@ -524,6 +644,10 @@ describe('read-only shift-money integrity checker', () => {
     expect(canonicalSettlementHash({
       ...row,
       wallet_to_office_minor: '1499',
+    })).not.toBe(canonical)
+    expect(canonicalSettlementHash({
+      ...row,
+      cash_shortage_receivable_minor: '1',
     })).not.toBe(canonical)
     expect(settlementHashFailures([{ ...row, settlement_hash: canonical }])).toEqual([])
   })
@@ -598,6 +722,127 @@ if (!DATABASE_URL) {
         const result = await collectShiftMoneyIntegrity(client, { sampleLimit: 5 })
         const dirty = result.checks.filter((check) => check.violations > 0)
         expect(dirty.map((check) => check.id), JSON.stringify(dirty)).toEqual([])
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+      }
+    })
+  })
+
+  describe('receivable write-off journal on PostgreSQL', () => {
+    it('accepts the exact loss recipe and rejects an office-fund forgery', async () => {
+      const client = await pool.connect()
+      const eventId = randomUUID()
+      const branchId = randomUUID()
+      const driverId = randomUUID()
+      const managerId = randomUUID()
+      const receivableFundId = randomUUID()
+      const lossFundId = randomUUID()
+      const officeCashFundId = randomUUID()
+      const events = WRITEOFF_RECEIVABLE_INTEGRITY_CHECKS
+        .find((check) => check.id === 'receivable_event_journals').sql
+      const violationCount = async () => {
+        const { rows } = await client.query(`SELECT count(*)::text AS count FROM (${events}) violation`)
+        return Number(rows[0].count)
+      }
+
+      try {
+        await client.query('BEGIN')
+        await client.query(`
+          CREATE TEMP TABLE receivable_events (
+            id uuid PRIMARY KEY,
+            journal_entry_id bigint NOT NULL,
+            branch_id uuid NOT NULL,
+            driver_id uuid NOT NULL,
+            receivable_kind text NOT NULL,
+            channel text NOT NULL,
+            direction text NOT NULL,
+            amount_minor bigint NOT NULL,
+            business_date date NOT NULL,
+            reason text NOT NULL,
+            intent text NOT NULL,
+            idempotency_key text NOT NULL,
+            created_by uuid NOT NULL
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE journal_entries (
+            id bigint PRIMARY KEY,
+            shift_id uuid,
+            branch_id uuid NOT NULL,
+            event_type text NOT NULL,
+            occurrence_key text NOT NULL,
+            business_date date NOT NULL,
+            posting_date date NOT NULL,
+            week_start_date date NOT NULL,
+            reason text,
+            created_by uuid NOT NULL
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE funds (
+            id uuid PRIMARY KEY,
+            branch_id uuid NOT NULL,
+            code text NOT NULL,
+            type text NOT NULL,
+            owner_id uuid
+          ) ON COMMIT DROP;
+          CREATE TEMP TABLE journal_lines (
+            id bigint PRIMARY KEY,
+            entry_id bigint NOT NULL,
+            fund_id uuid NOT NULL,
+            side char(1) NOT NULL,
+            amount_minor bigint NOT NULL,
+            line_role text
+          ) ON COMMIT DROP
+        `)
+        await client.query(
+          `INSERT INTO journal_entries
+             (id, shift_id, branch_id, event_type, occurrence_key, business_date,
+              posting_date, week_start_date, reason, created_by)
+           VALUES (1, NULL, $1, 'receivable_adjustment', 'writeoff-audit-1',
+                   DATE '2026-08-30', DATE '2026-08-30', DATE '2026-08-30',
+                   'approved bad-debt loss', $2)`,
+          [branchId, managerId],
+        )
+        await client.query(
+          `INSERT INTO funds (id, branch_id, code, type, owner_id) VALUES
+             ($1, $4, $5, 'driver_receivable_cash', $6),
+             ($2, $4, 'cost_center:receivable_writeoff_loss', 'cost_center', NULL),
+             ($3, $4, 'office_cash', 'office_cash', NULL)`,
+          [
+            receivableFundId,
+            lossFundId,
+            officeCashFundId,
+            branchId,
+            `driver_receivable_cash:${driverId}`,
+            driverId,
+          ],
+        )
+        await client.query(
+          `INSERT INTO journal_lines (id, entry_id, fund_id, side, amount_minor, line_role) VALUES
+             (1, 1, $1, 'D', 500, 'receivable_writeoff_loss'),
+             (2, 1, $2, 'C', 500, 'receivable_written_off')`,
+          [lossFundId, receivableFundId],
+        )
+        await client.query(
+          `INSERT INTO receivable_events
+             (id, journal_entry_id, branch_id, driver_id, receivable_kind, channel, direction,
+              amount_minor, business_date, reason, intent, idempotency_key, created_by)
+           VALUES ($1, 1, $2, $3, 'ordinary', 'cash', 'collect', 500,
+                   DATE '2026-08-30', 'approved bad-debt loss', 'writeoff',
+                   'writeoff-audit-1', $4)`,
+          [eventId, branchId, driverId, managerId],
+        )
+
+        expect(await violationCount()).toBe(0)
+
+        // A cost-centre-looking role on office cash is still an office movement and must fail.
+        await client.query('UPDATE journal_lines SET fund_id = $1 WHERE id = 1', [officeCashFundId])
+        expect(await violationCount()).toBe(1)
+
+        await client.query('UPDATE journal_lines SET fund_id = $1 WHERE id = 1', [lossFundId])
+        await client.query("UPDATE receivable_events SET receivable_kind = 'shift_funding'")
+        expect(await violationCount()).toBe(1)
+
+        await client.query("UPDATE receivable_events SET receivable_kind = 'ordinary', intent = 'forged'")
+        expect(await violationCount()).toBe(1)
       } finally {
         await client.query('ROLLBACK').catch(() => undefined)
         client.release()

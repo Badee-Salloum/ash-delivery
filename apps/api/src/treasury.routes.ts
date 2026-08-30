@@ -16,6 +16,7 @@ import {
   manualEntryRequest,
   moneySchema,
   serializeMoney,
+  writeoffReceivableRequest,
 } from '@ash/contracts'
 import {
   type Minor,
@@ -30,6 +31,7 @@ import {
   postingsForCashCountReconciliation,
   postingsForRestoration,
   receivableAdjustment,
+  receivableWriteoff,
   reverse,
   manualKaish,
   weekStartFor,
@@ -573,7 +575,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
   app.get('/receivables', receivableReadOptions, listReceivables)
   app.get('/treasury/receivables', receivableReadOptions, listReceivables)
 
-  /** Immutable command history, newest first, for explaining every direct debt and collection. */
+  /** Immutable history, newest first, for explaining debts, collections, corrections, and losses. */
   const listReceivableEvents = async (req: FastifyRequest) => {
     const query = z.object({ driverId: z.string().min(1).optional() }).parse(req.query)
     const branchId = resolveBranch(req)
@@ -622,6 +624,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       reason: string
     },
   ): boolean =>
+    prior.intent === 'command' &&
     prior.driverId === input.driverId &&
     prior.receivableKind === input.receivableKind &&
     prior.channel === input.channel &&
@@ -916,6 +919,109 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
   }
   app.post('/receivables/adjustments', receivableWriteOptions, correctReceivable)
   app.post('/treasury/receivables/adjustments', receivableWriteOptions, correctReceivable)
+
+  /**
+   * Recognise an ordinary receivable as a loss without recording a fictitious collection.
+   *
+   * The receivable is credited and the dedicated loss cost centre is debited. Neither office box
+   * participates: the office gave up the money when the debt was first created, and a write-off
+   * must not remove it a second time (nor pretend that it came back).
+   */
+  const writeoffReceivable = async (req: FastifyRequest, reply: FastifyReply) => {
+    const body = writeoffReceivableRequest.parse(req.body)
+    const branchId = resolveBranch(req)
+
+    const replayMatches = (prior: ReceivableEventRecord): boolean =>
+      prior.intent === 'writeoff' &&
+      prior.driverId === body.driverId &&
+      prior.receivableKind === 'ordinary' &&
+      prior.channel === body.channel &&
+      prior.direction === 'collect' &&
+      prior.amount === body.amount &&
+      prior.reason === body.reason
+
+    // Replay the immutable receipt before mutable week/driver checks. A successful write-off does
+    // not become un-retryable because the debtor was later disabled or the week was locked.
+    const committed = await deps.receivableEvents.findByIdempotencyKey(branchId, body.idempotencyKey)
+    if (committed) {
+      if (!replayMatches(committed)) throw new ServiceError(409, 'idempotency_key_conflict')
+      return sendReceivableEvent(reply, committed, true)
+    }
+
+    const driver = await deps.directory.driver(body.driverId)
+    if (!driver) throw new ServiceError(404, 'driver_not_found')
+    if (driver.branchId !== branchId) throw new ServiceError(422, 'driver_in_another_branch')
+    // Inactive drivers can still have bad debt. Unlike creating a receivable, recognising its loss
+    // does not hand them any new value, so activity is deliberately not required.
+
+    const businessDate = todayFor(deps)
+    await assertWeekOpen(deps, branchId, businessDate)
+    const fxDayId = await ensureFxDay(deps, businessDate)
+
+    const result = await deps.financialUnitOfWork.run(
+      { lockKey: `receivables:${branchId}`, actorId: req.actor!.userId, requestId: req.requestId },
+      async (transaction) => {
+        const prior = await transaction.receivableEvents.findByIdempotencyKey(
+          branchId,
+          body.idempotencyKey,
+        )
+        if (prior) {
+          if (!replayMatches(prior)) throw new ServiceError(409, 'idempotency_key_conflict')
+          return { event: prior, replayed: true }
+        }
+
+        const receivableCode = `driver_receivable_${body.channel}:${body.driverId}`
+        const current = await transaction.ledger.fundBalance(branchId, receivableCode)
+        if (current < body.amount) {
+          throw new ServiceError(422, 'receivable_writeoff_exceeds_balance', {
+            available: serializeMoney(current),
+          })
+        }
+
+        const posting = receivableWriteoff(
+          body.driverId,
+          body.channel,
+          body.amount,
+          body.idempotencyKey,
+        )
+        const [journal] = await transaction.ledger.post(branchId, [posting], {
+          shiftId: null,
+          businessDate,
+          postingDate: businessDate,
+          weekStartDate: weekStartFor(businessDate),
+          fxDayId,
+          createdBy: req.actor!.userId,
+          reason: body.reason,
+        })
+        if (!journal) throw new ServiceError(409, 'idempotency_key_conflict')
+
+        const event: ReceivableEventRecord = {
+          id: deps.ids.uuid(),
+          branchId,
+          driverId: body.driverId,
+          receivableKind: 'ordinary',
+          channel: body.channel,
+          direction: 'collect',
+          amount: body.amount,
+          businessDate,
+          reason: body.reason,
+          intent: 'writeoff',
+          priorBalance: current,
+          targetBalance: minor(current - body.amount),
+          idempotencyKey: body.idempotencyKey,
+          journalEntryId: journal.id,
+          createdBy: req.actor!.userId,
+          createdAtMs: deps.clock.nowMs(),
+        }
+        await transaction.receivableEvents.create(event)
+        return { event, replayed: false }
+      },
+    )
+
+    return sendReceivableEvent(reply, result.event, result.replayed)
+  }
+  app.post('/receivables/writeoffs', receivableWriteOptions, writeoffReceivable)
+  app.post('/treasury/receivables/writeoffs', receivableWriteOptions, writeoffReceivable)
 
   const companyMoveRequest = z.object({
     amount: moneySchema,

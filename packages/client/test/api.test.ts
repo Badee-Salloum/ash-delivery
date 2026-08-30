@@ -222,6 +222,34 @@ it('posts a direct receivable event with its client key and selected branch', as
   })
 })
 
+it('posts a receivable write-off without disguising it as a collection', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ id: 'writeoff-1', replayed: false }), {
+      status: 201,
+      headers: { 'content-type': 'application/json' },
+    }),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+  api.setBranch('branch-1')
+  const body = {
+    driverId: 'driver-1',
+    channel: 'wallet' as const,
+    amount: '125.00',
+    reason: 'Approved uncollectible debt',
+    idempotencyKey: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+  }
+
+  await api.writeoffReceivable(body)
+
+  expect(fetchMock).toHaveBeenCalledWith('/api/treasury/receivables/writeoffs', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ...body, branchId: 'branch-1' }),
+  })
+})
+
 it('binds close approval to the reviewed settlement and both physical confirmations', async () => {
   const fetchMock = vi.fn().mockResolvedValue(
     new Response(JSON.stringify({ id: 'shift-1', state: 'approved', postings: 8 }), {
@@ -413,7 +441,7 @@ it('previews force-close settlement against the entered actual cash and wallet f
   )
 })
 
-it('previews a close settlement with separate cash and wallet receivable deferrals', async () => {
+it('previews next-shift funding separately from an ordinary close shortage receivable', async () => {
   const fetchMock = vi.fn().mockResolvedValue(
     new Response(JSON.stringify({ settlementHash: 'd'.repeat(64) }), {
       status: 200,
@@ -426,11 +454,15 @@ it('previews a close settlement with separate cash and wallet receivable deferra
   await api.shiftSettlement(
     'shift-4',
     undefined,
-    { cashReceivableDeferred: '6000.00', walletReceivableDeferred: '1000.00' },
+    {
+      cashReceivableDeferred: '6000.00',
+      walletReceivableDeferred: '1000.00',
+      cashShortageReceivable: '400.00',
+    },
   )
 
   expect(fetchMock).toHaveBeenCalledWith(
-    '/api/shifts/shift-4/settlement?cashReceivableDeferred=6000.00&walletReceivableDeferred=1000.00',
+    '/api/shifts/shift-4/settlement?cashReceivableDeferred=6000.00&walletReceivableDeferred=1000.00&cashShortageReceivable=400.00',
     expect.objectContaining({ method: 'GET', credentials: 'include' }),
   )
 })

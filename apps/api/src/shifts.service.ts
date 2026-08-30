@@ -3967,6 +3967,7 @@ export interface CloseSettlementConfirmation {
   payShareNow?: boolean
   cashReceivableDeferred?: Minor
   walletReceivableDeferred?: Minor
+  cashShortageReceivable?: Minor
 }
 
 /**
@@ -3976,6 +3977,8 @@ export interface CloseSettlementConfirmation {
  * field.
  */
 export const SYSTEM_VARIANCE_REASON_NOT_PROVIDED = 'system:manager_provided_no_variance_reason'
+export const SYSTEM_SHORTAGE_RECEIVABLE_REASON_NOT_PROVIDED =
+  'system:manager_provided_no_shortage_receivable_reason'
 
 interface FixedShiftShare {
   split: { driverShare: Minor; companyShare: Minor; yalagoShare: Minor }
@@ -4018,7 +4021,7 @@ export async function settlementFor(
   shift: ShiftRecord,
   deferred: Pick<
     CloseSettlementConfirmation,
-    'cashReceivableDeferred' | 'walletReceivableDeferred' | 'keepAsReceivable'
+    'cashReceivableDeferred' | 'walletReceivableDeferred' | 'cashShortageReceivable' | 'keepAsReceivable'
   > = {},
 ): Promise<SettlementView> {
   if (shift.endCashDeclared === null || shift.endWalletDeclared === null) {
@@ -4038,6 +4041,7 @@ export async function settlementFor(
   const cashReceivableDeferred =
     deferred.cashReceivableDeferred ?? deferred.keepAsReceivable ?? minor(0n)
   const walletReceivableDeferred = deferred.walletReceivableDeferred ?? minor(0n)
+  const cashShortageReceivable = deferred.cashShortageReceivable ?? minor(0n)
   const settlementInputs = {
     deliveryFeeTotal: share.deliveryFeeTotal,
     fixedDriverShare: share.fixedDriverShare,
@@ -4066,10 +4070,19 @@ export async function settlementFor(
       maximumWallet: serializeMoney(maximumWalletReceivable),
     })
   }
+  if (
+    cashShortageReceivable < 0n ||
+    cashShortageReceivable > withoutDeferral.maximumCashShortageReceivable
+  ) {
+    throw new ServiceError(422, 'invalid_shortage_receivable_amount', {
+      maximumCashShortageReceivable: serializeMoney(withoutDeferral.maximumCashShortageReceivable),
+    })
+  }
   const plan = planFixedShareSettlement({
     ...settlementInputs,
     cashReceivableDeferred,
     walletReceivableDeferred,
+    cashShortageReceivable,
   })
   assertPersistableMoney('settlement', {
     deliveryFeeTotal: plan.deliveryFeeTotal,
@@ -4091,6 +4104,8 @@ export async function settlementFor(
     walletClaimToOffice: plan.walletClaimToOffice,
     cashReceivableDeferred: plan.cashReceivableDeferred,
     walletReceivableDeferred: plan.walletReceivableDeferred,
+    maximumCashShortageReceivable: plan.maximumCashShortageReceivable,
+    cashShortageReceivable: plan.cashShortageReceivable,
     cashToOffice: plan.cashToOffice,
     walletToOffice: plan.walletToOffice,
     walletAmount: plan.wallet.amount,
@@ -4141,9 +4156,11 @@ function requireSettlementConfirmation(
   }
   const requestedCash = input.cashReceivableDeferred ?? input.keepAsReceivable ?? minor(0n)
   const requestedWallet = input.walletReceivableDeferred ?? minor(0n)
+  const requestedShortage = input.cashShortageReceivable ?? minor(0n)
   if (
     requestedCash !== plan.cashReceivableDeferred ||
-    requestedWallet !== plan.walletReceivableDeferred
+    requestedWallet !== plan.walletReceivableDeferred ||
+    requestedShortage !== plan.cashShortageReceivable
   ) {
     throw new ServiceError(409, 'settlement_changed_since_review', { receivableChanged: true })
   }
@@ -4158,14 +4175,23 @@ function requireSettlementConfirmation(
       current: plan.settlementHash,
     })
   }
-  const reason = normalizedVarianceReason(plan.variance, input.varianceReason)
+  const reason = normalizedSettlementReason(
+    plan.variance,
+    plan.cashShortageReceivable,
+    input.varianceReason,
+  )
   return { varianceReason: reason }
 }
 
-function normalizedVarianceReason(variance: Minor, supplied: string | null | undefined): string | null {
+function normalizedSettlementReason(
+  variance: Minor,
+  cashShortageReceivable: Minor,
+  supplied: string | null | undefined,
+): string | null {
   const trimmed = supplied?.trim() ?? ''
   const humanReason = /[^\p{White_Space}\p{Cf}]/u.test(trimmed) ? trimmed : null
   if (humanReason !== null) return humanReason
+  if (cashShortageReceivable > 0n) return SYSTEM_SHORTAGE_RECEIVABLE_REASON_NOT_PROVIDED
   return variance === 0n ? null : SYSTEM_VARIANCE_REASON_NOT_PROVIDED
 }
 
@@ -4181,9 +4207,11 @@ function requireSettlementReplay(
   const requestedCash =
     confirmation.cashReceivableDeferred ?? confirmation.keepAsReceivable ?? minor(0n)
   const requestedWallet = confirmation.walletReceivableDeferred ?? minor(0n)
+  const requestedShortage = confirmation.cashShortageReceivable ?? minor(0n)
   if (
     requestedCash !== stored.cashReceivableDeferred ||
-    requestedWallet !== stored.walletReceivableDeferred
+    requestedWallet !== stored.walletReceivableDeferred ||
+    requestedShortage !== stored.cashShortageReceivable
   ) {
     throw new ServiceError(409, 'settlement_changed_since_review', { receivableChanged: true })
   }
@@ -4202,7 +4230,11 @@ function requireSettlementReplay(
   // Lost-response retries normalize an omitted/blank value exactly as the original request did.
   // Thus a system-marked settlement replays idempotently, while omitting a previously supplied
   // human explanation correctly remains a changed confirmation.
-  const reason = normalizedVarianceReason(stored.variance, confirmation.varianceReason)
+  const reason = normalizedSettlementReason(
+    stored.variance,
+    stored.cashShortageReceivable,
+    confirmation.varianceReason,
+  )
   if (reason !== stored.varianceReason) {
     throw new ServiceError(409, 'settlement_changed_since_review', {
       reasonChanged: true,
@@ -4241,6 +4273,8 @@ function settlementRecord(
     walletClaimToOffice: plan.walletClaimToOffice,
     cashReceivableDeferred: plan.cashReceivableDeferred,
     walletReceivableDeferred: plan.walletReceivableDeferred,
+    maximumCashShortageReceivable: plan.maximumCashShortageReceivable,
+    cashShortageReceivable: plan.cashShortageReceivable,
     walletToOffice: plan.walletToOffice,
     cashToOffice: plan.cashToOffice,
     walletAction: plan.wallet.action,
@@ -4502,6 +4536,7 @@ async function forceCloseLocked(
     cashSettlementConfirmed?: boolean
     cashReceivableDeferred?: Minor | undefined
     walletReceivableDeferred?: Minor | undefined
+    cashShortageReceivable?: Minor | undefined
     reason: string
   },
 ): Promise<
@@ -4526,6 +4561,7 @@ async function forceCloseLocked(
       ...(input.cashSettlementConfirmed === undefined ? {} : { cashSettlementConfirmed: input.cashSettlementConfirmed }),
       ...(input.cashReceivableDeferred === undefined ? {} : { cashReceivableDeferred: input.cashReceivableDeferred }),
       ...(input.walletReceivableDeferred === undefined ? {} : { walletReceivableDeferred: input.walletReceivableDeferred }),
+      ...(input.cashShortageReceivable === undefined ? {} : { cashShortageReceivable: input.cashShortageReceivable }),
       varianceReason: input.reason,
     }, null)
     return { shift, postings: 0, prepared: false, replayed: true }
@@ -4661,6 +4697,7 @@ async function forceCloseLocked(
   const settlement = await settlementFor(deps, stagedShift, {
     ...(input.cashReceivableDeferred === undefined ? {} : { cashReceivableDeferred: input.cashReceivableDeferred }),
     ...(input.walletReceivableDeferred === undefined ? {} : { walletReceivableDeferred: input.walletReceivableDeferred }),
+    ...(input.cashShortageReceivable === undefined ? {} : { cashShortageReceivable: input.cashShortageReceivable }),
   })
   requireSettlementConfirmation(settlement, {
     ...(input.reviewedSettlementHash === undefined ? {} : { reviewedSettlementHash: input.reviewedSettlementHash }),
@@ -4668,6 +4705,7 @@ async function forceCloseLocked(
     ...(input.cashSettlementConfirmed === undefined ? {} : { cashSettlementConfirmed: input.cashSettlementConfirmed }),
     ...(input.cashReceivableDeferred === undefined ? {} : { cashReceivableDeferred: input.cashReceivableDeferred }),
     ...(input.walletReceivableDeferred === undefined ? {} : { walletReceivableDeferred: input.walletReceivableDeferred }),
+    ...(input.cashShortageReceivable === undefined ? {} : { cashShortageReceivable: input.cashShortageReceivable }),
     varianceReason: input.reason,
   })
   const shiftInput = {

@@ -68,6 +68,18 @@ describe('i18n parity', () => {
     expect(en.settlement.line.residual_receivable).toContain('receivable')
   })
 
+  it('distinguishes a loss write-off from collection and warns that correction moves the office ledger', () => {
+    expect(ar.treasury.receivableDirections.writeoff).toContain('دون تحصيل')
+    expect(ar.treasury.receivableWriteoffHint).toContain('لا يدخل')
+    expect(ar.treasury.writeoffIntent).toContain('المكتب لم يستلم')
+    expect(ar.treasury.correctionHint).toContain('ينعكس على رصيد المكتب')
+
+    expect(en.treasury.receivableDirections.writeoff).toContain('without collection')
+    expect(en.treasury.receivableWriteoffHint).toContain('No cash or wallet')
+    expect(en.treasury.writeoffIntent).toContain('received no money')
+    expect(en.treasury.correctionHint).toContain('office balance')
+  })
+
   it('keeps ordinary receivables distinct in the independent treasury screen', () => {
     expect(ar.treasury.receivableKinds.ordinary).toBe('ذمة عادية')
     expect(ar.treasury.receivableKinds.shift_funding).toBe('تمويل النوبة القادمة')

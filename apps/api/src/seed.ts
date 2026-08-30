@@ -433,6 +433,8 @@ export async function seed(pool: Pool, opts: SeedOptions): Promise<{ br1Differen
     walletClaimToOffice: demo.settlement.walletClaimToOffice,
     cashReceivableDeferred: demo.settlement.cashReceivableDeferred,
     walletReceivableDeferred: demo.settlement.walletReceivableDeferred,
+    maximumCashShortageReceivable: demo.settlement.maximumCashShortageReceivable,
+    cashShortageReceivable: demo.settlement.cashShortageReceivable,
     walletToOffice: demo.settlement.walletToOffice,
     cashToOffice: demo.settlement.cashToOffice,
     walletAction: demo.settlement.wallet.action,

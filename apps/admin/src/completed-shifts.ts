@@ -38,6 +38,7 @@ export interface CompletedShiftFinancial {
   walletClaimToOffice: string
   cashReceivableDeferred: string
   walletReceivableDeferred: string
+  cashShortageReceivable: string
   cashToOffice: string
   walletToOffice: string
   officeReturn: string
@@ -51,6 +52,7 @@ export interface CompletedShiftFinancialTotals {
   netDriverShare: string
   deductions: string
   variance: string
+  cashShortageReceivable: string
   officeReturn: string
 }
 
@@ -151,6 +153,7 @@ export function completedShiftFinancialTotals<T extends { financial?: CompletedS
     netDriverShare: total((row) => row.netDriverShare),
     deductions: total((row) => row.deductions),
     variance: total((row) => row.variance),
+    cashShortageReceivable: total((row) => row.cashShortageReceivable),
     officeReturn: total((row) => row.officeReturn),
   }
 }

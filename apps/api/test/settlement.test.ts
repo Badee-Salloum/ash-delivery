@@ -3,7 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fundCodeOf } from '@ash/adapters/memory'
 import { minor } from '@ash/domain'
 import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
-import { SYSTEM_VARIANCE_REASON_NOT_PROVIDED } from '../src/shifts.service.ts'
+import {
+  SYSTEM_SHORTAGE_RECEIVABLE_REASON_NOT_PROVIDED,
+  SYSTEM_VARIANCE_REASON_NOT_PROVIDED,
+} from '../src/shifts.service.ts'
 
 /** HTTP acceptance tests for the fixed-40 cash-close policy. */
 let h: Harness
@@ -35,6 +38,8 @@ type Settlement = {
   walletClaimToOffice: string
   cashReceivableDeferred: string
   walletReceivableDeferred: string
+  maximumCashShortageReceivable: string
+  cashShortageReceivable: string
   walletToOffice: string
   cashToOffice: string
   walletAction: 'collect' | 'fund' | 'none'
@@ -214,6 +219,7 @@ async function approve(
     cashSettlementConfirmed: true,
     cashReceivableDeferred: settlement.cashReceivableDeferred,
     walletReceivableDeferred: settlement.walletReceivableDeferred,
+    cashShortageReceivable: settlement.cashShortageReceivable,
     varianceReason,
   })
 }
@@ -244,6 +250,8 @@ describe('fixed 40% settlement preview', () => {
       walletClaimToOffice: '3000.00',
       cashReceivableDeferred: '0.00',
       walletReceivableDeferred: '0.00',
+      maximumCashShortageReceivable: '0.00',
+      cashShortageReceivable: '0.00',
       walletToOffice: '3000.00',
       walletAction: 'collect',
       walletAmount: '3000.00',
@@ -527,6 +535,167 @@ describe('fixed 40% approval', () => {
     ]) {
       expect(await h.deps.ledger.fundBalance('branch-damascus', fund), fund).toBe(0n)
     }
+  })
+
+  it('converts a reviewed close shortage to ordinary debt without charging office cash twice', async () => {
+    // A 5,000 total shortage consumes the 4,000 share; the remaining 1,000 is the only amount that
+    // may be left unpaid. The 15,000 already in custody must be the complete physical cash receipt.
+    const { manager, shiftId, reviewHash } = await pendingShift({ actualCash: 15_000, actualWallet: 3_000 })
+    const immediate = await preview(manager, shiftId)
+    expect(immediate).toMatchObject({
+      finalEmployeeCash: '-1000.00',
+      maximumCashShortageReceivable: '1000.00',
+      cashShortageReceivable: '0.00',
+      cashToOffice: '16000.00',
+    })
+
+    const partialResponse = await get(
+      manager,
+      `/shifts/${shiftId}/settlement?cashShortageReceivable=400.00`,
+    )
+    expect(partialResponse.statusCode, partialResponse.body).toBe(200)
+    expect(partialResponse.json()).toMatchObject({
+      maximumCashShortageReceivable: '1000.00',
+      cashShortageReceivable: '400.00',
+      cashToOffice: '15600.00',
+    })
+
+    const over = await get(manager, `/shifts/${shiftId}/settlement?cashShortageReceivable=1000.01`)
+    expect(over.statusCode, over.body).toBe(422)
+    expect(over.json()).toMatchObject({
+      error: 'invalid_shortage_receivable_amount',
+      detail: { maximumCashShortageReceivable: '1000.00' },
+    })
+
+    const fullResponse = await get(manager, `/shifts/${shiftId}/settlement?cashShortageReceivable=1000.00`)
+    expect(fullResponse.statusCode, fullResponse.body).toBe(200)
+    const full = fullResponse.json() as Settlement
+    expect(full).toMatchObject({
+      maximumCashShortageReceivable: '1000.00',
+      cashShortageReceivable: '1000.00',
+      cashToOffice: '15000.00',
+      cashAction: 'collect',
+      cashAmount: '15000.00',
+    })
+    expect(full.settlementHash).not.toBe(immediate.settlementHash)
+
+    const stale = await post(manager, `/shifts/${shiftId}/approve-close`, {
+      reviewedOrdersHash: reviewHash,
+      reviewedSettlementHash: immediate.settlementHash,
+      walletTransferConfirmed: true,
+      cashSettlementConfirmed: true,
+      cashShortageReceivable: full.cashShortageReceivable,
+      varianceReason: 'driver will pay the remaining shortage later',
+    })
+    expect(stale.statusCode, stale.body).toBe(409)
+    expect(stale.json().error).toBe('settlement_changed_since_review')
+
+    const officeBeforeClose = await h.deps.ledger.fundBalance('branch-damascus', 'office_cash')
+    const approved = await approve(
+      manager,
+      shiftId,
+      reviewHash,
+      full,
+      'driver will pay the remaining shortage later',
+    )
+    expect(approved.statusCode, approved.body).toBe(200)
+    expect(await h.deps.ledger.fundBalance('branch-damascus', 'office_cash')).toBe(
+      officeBeforeClose + minor(1_500_000n),
+    )
+    expect(await h.deps.ledger.fundBalance(
+      'branch-damascus',
+      `driver_receivable_cash:${DRIVER_ID}`,
+    )).toBe(minor(100_000n))
+    expect(await h.deps.ledger.fundBalance(
+      'branch-damascus',
+      `driver_shift_funding_cash:${DRIVER_ID}`,
+    )).toBe(0n)
+    expect(await h.deps.settlements.findByShift(shiftId)).toMatchObject({
+      maximumCashShortageReceivable: minor(100_000n),
+      cashShortageReceivable: minor(100_000n),
+      cashToOffice: minor(1_500_000n),
+      varianceReason: 'driver will pay the remaining shortage later',
+      settlementHash: full.settlementHash,
+    })
+    const closeEntries = await h.deps.ledger.listByShift(shiftId)
+    expect(closeEntries.flatMap((entry) => entry.lines)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        fundCode: `driver_receivable_cash:${DRIVER_ID}`,
+        side: 'D',
+        amount: minor(100_000n),
+        role: 'cash_shortage_receivable',
+      }),
+    ]))
+
+    const replay = await approve(
+      manager,
+      shiftId,
+      reviewHash,
+      full,
+      'driver will pay the remaining shortage later',
+    )
+    expect(replay.statusCode, replay.body).toBe(200)
+    expect(replay.json().postings).toBe(0)
+    expect(await h.deps.ledger.listByShift(shiftId)).toEqual(closeEntries)
+
+    const officeBeforeCollection = await h.deps.ledger.fundBalance('branch-damascus', 'office_cash')
+    const collected = await post(manager, '/receivables/events', {
+      driverId: DRIVER_ID,
+      receivableKind: 'ordinary',
+      channel: 'cash',
+      direction: 'collect',
+      amount: '1000.00',
+      reason: 'driver paid the shortage recorded by the completed shift',
+      idempotencyKey: '00000000-0000-4000-8000-000000000901',
+    })
+    expect(collected.statusCode, collected.body).toBe(201)
+    expect(await h.deps.ledger.fundBalance(
+      'branch-damascus',
+      `driver_receivable_cash:${DRIVER_ID}`,
+    )).toBe(0n)
+    expect(await h.deps.ledger.fundBalance('branch-damascus', 'office_cash')).toBe(
+      officeBeforeCollection + minor(100_000n),
+    )
+  })
+
+  it('replaces the settled deduction debt with one shortage debt and audits a blank reason', async () => {
+    // The 5,000 deduction first creates a 1,000 ordinary receivable beyond the 4,000 share. Close
+    // settles that pre-existing balance, then preserves exactly one new 1,000 shortage receivable.
+    const { manager, shiftId, reviewHash } = await pendingShift({ deduction: 5_000 })
+    const base = await preview(manager, shiftId)
+    expect(base).toMatchObject({
+      variance: '0.00',
+      baseDriverShare: '-1000.00',
+      finalEmployeeCash: '-1000.00',
+      maximumCashShortageReceivable: '1000.00',
+    })
+
+    const selectedResponse = await get(
+      manager,
+      `/shifts/${shiftId}/settlement?cashShortageReceivable=1000.00`,
+    )
+    expect(selectedResponse.statusCode, selectedResponse.body).toBe(200)
+    const selected = selectedResponse.json() as Settlement
+    const approved = await approve(manager, shiftId, reviewHash, selected, null)
+    expect(approved.statusCode, approved.body).toBe(200)
+
+    expect(await h.deps.ledger.fundBalance(
+      'branch-damascus',
+      `driver_receivable_cash:${DRIVER_ID}`,
+    )).toBe(minor(100_000n))
+    expect(await h.deps.settlements.findByShift(shiftId)).toMatchObject({
+      cashShortageReceivable: minor(100_000n),
+      varianceReason: SYSTEM_SHORTAGE_RECEIVABLE_REASON_NOT_PROVIDED,
+    })
+    expect((await h.deps.ledger.listByShift(shiftId)).some(
+      (entry) => entry.reason === SYSTEM_SHORTAGE_RECEIVABLE_REASON_NOT_PROVIDED,
+    )).toBe(true)
+    expect(await h.deps.decisions.listByShift(shiftId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        decision: 'approved',
+        notes: SYSTEM_SHORTAGE_RECEIVABLE_REASON_NOT_PROVIDED,
+      }),
+    ]))
   })
 
   it('supports combined partial cash/wallet deferral, exact replay, and immutable hash binding', async () => {

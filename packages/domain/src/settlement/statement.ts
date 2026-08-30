@@ -211,6 +211,14 @@ export interface FixedShareSettlementInput {
   readonly cashReceivableDeferred?: Minor
   /** Legacy-named positive wallet collection retained as automatically consumed next-shift funding. */
   readonly walletReceivableDeferred?: Minor
+  /**
+   * Closing shortage the manager deliberately leaves as an ordinary cash receivable.
+   *
+   * This is not new money handed to the driver and is not next-shift funding. The operational
+   * custody already left the office earlier in this shift, so this amount replaces only the
+   * employee's missing close-time contribution and must never credit the office a second time.
+   */
+  readonly cashShortageReceivable?: Minor
 }
 
 export interface FixedShareSettlementPlan {
@@ -245,6 +253,10 @@ export interface FixedShareSettlementPlan {
   readonly cashReceivableDeferred: Minor
   /** Legacy-named non-negative wallet claim posted to the driver's next-shift funding. */
   readonly walletReceivableDeferred: Minor
+  /** Maximum current-shift shortage that may remain unpaid: `max(-finalEmployeeCash, 0)`. */
+  readonly maximumCashShortageReceivable: Minor
+  /** Current-shift shortage posted to the ordinary cash receivable instead of collected now. */
+  readonly cashShortageReceivable: Minor
   /** Signed physical office-cash movement after deferral. Positive collects; negative pays. */
   readonly cashToOffice: Minor
   /** Signed physical office-wallet movement after deferral. */
@@ -298,8 +310,10 @@ export function planFixedShareSettlement(input: FixedShareSettlementInput): Fixe
   requireNonNegative('actual cash', input.actualCash)
   const cashReceivableDeferred = input.cashReceivableDeferred ?? ZERO
   const walletReceivableDeferred = input.walletReceivableDeferred ?? ZERO
+  const cashShortageReceivable = input.cashShortageReceivable ?? ZERO
   requireNonNegative('deferred cash funding', cashReceivableDeferred)
   requireNonNegative('deferred wallet funding', walletReceivableDeferred)
+  requireNonNegative('cash shortage receivable', cashShortageReceivable)
 
   const canonicalFixedShare = allocate(input.deliveryFeeTotal, FIXED_DRIVER_BPS, 'floor')
   if (input.fixedDriverShare !== canonicalFixedShare) {
@@ -315,6 +329,7 @@ export function planFixedShareSettlement(input: FixedShareSettlementInput): Fixe
   const actualTotal = add(input.actualCash, input.actualWallet)
   const variance = sub(actualTotal, expectedTotal)
   const finalEmployeeCash = add(baseDriverShare, variance)
+  const maximumCashShortageReceivable = finalEmployeeCash < ZERO ? abs(finalEmployeeCash) : ZERO
   const officeEntitlement = sub(expectedTotal, baseDriverShare)
   const cashClaimToOffice = sub(officeEntitlement, input.actualWallet)
   const walletClaimToOffice = input.actualWallet
@@ -334,20 +349,31 @@ export function planFixedShareSettlement(input: FixedShareSettlementInput): Fixe
       `deferred wallet funding ${walletReceivableDeferred} exceeds collectible wallet ${maximumWalletReceivable}`,
     )
   }
+  if (cashShortageReceivable > maximumCashShortageReceivable) {
+    throw new RangeError(
+      `cash shortage receivable ${cashShortageReceivable} exceeds unpaid employee cash ${maximumCashShortageReceivable}`,
+    )
+  }
 
-  const cashToOffice = sub(cashClaimToOffice, cashReceivableDeferred)
+  const cashToOffice = sub(sub(cashClaimToOffice, cashReceivableDeferred), cashShortageReceivable)
   const walletToOffice = sub(walletClaimToOffice, walletReceivableDeferred)
 
   // This identity is kept executable rather than documentation-only. A future edit that changes
   // one side of the settlement cannot quietly invent or destroy a minor unit.
-  if (sub(input.actualCash, cashToOffice) !== add(finalEmployeeCash, cashReceivableDeferred)) {
+  if (
+    sub(input.actualCash, cashToOffice) !==
+    add(add(finalEmployeeCash, cashReceivableDeferred), cashShortageReceivable)
+  ) {
     throw new RangeError('fixed-share settlement does not conserve the closing cash')
   }
   if (sub(input.actualWallet, walletToOffice) !== walletReceivableDeferred) {
     throw new RangeError('fixed-share settlement does not conserve the closing wallet')
   }
   if (
-    add(add(cashToOffice, walletToOffice), add(cashReceivableDeferred, walletReceivableDeferred)) !==
+    add(
+      add(cashToOffice, walletToOffice),
+      add(add(cashReceivableDeferred, walletReceivableDeferred), cashShortageReceivable),
+    ) !==
     officeEntitlement
   ) {
     throw new RangeError('fixed-share settlement does not conserve the office entitlement')
@@ -373,6 +399,8 @@ export function planFixedShareSettlement(input: FixedShareSettlementInput): Fixe
     walletClaimToOffice,
     cashReceivableDeferred,
     walletReceivableDeferred,
+    maximumCashShortageReceivable,
+    cashShortageReceivable,
     cashToOffice,
     walletToOffice,
     wallet: walletAction(walletToOffice),

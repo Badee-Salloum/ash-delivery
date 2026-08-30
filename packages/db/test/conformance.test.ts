@@ -380,6 +380,8 @@ if (!DATABASE_URL) {
         walletClaimToOffice: zero,
         cashReceivableDeferred: zero,
         walletReceivableDeferred: zero,
+        maximumCashShortageReceivable: zero,
+        cashShortageReceivable: zero,
         walletToOffice: zero,
         cashToOffice: zero,
         walletAction: 'none',

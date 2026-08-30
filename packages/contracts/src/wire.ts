@@ -668,6 +668,8 @@ export const shiftSettlementViewSchema = z.object({
   walletClaimToOffice: settlementMoneyStringSchema,
   cashReceivableDeferred: settlementMoneyStringSchema,
   walletReceivableDeferred: settlementMoneyStringSchema,
+  maximumCashShortageReceivable: settlementMoneyStringSchema,
+  cashShortageReceivable: settlementMoneyStringSchema,
   walletToOffice: settlementMoneyStringSchema,
   cashToOffice: settlementMoneyStringSchema,
   walletAction: settlementWalletActionSchema,
@@ -705,6 +707,8 @@ export const approveCloseRequest = z.object({
   /** Legacy-named positive collections retained as funding auto-consumed by the next shift. */
   cashReceivableDeferred: nonnegativeMoneySchema.optional(),
   walletReceivableDeferred: nonnegativeMoneySchema.optional(),
+  /** Unpaid current-shift shortage converted to an ordinary cash receivable at close. */
+  cashShortageReceivable: nonnegativeMoneySchema.optional(),
   /** Fixed-policy preview hash. Optional on the wire solely for a controlled old-client refusal. */
   reviewedSettlementHash: z.string().regex(/^[0-9a-f]{64}$/, 'expected a sha256 hex digest').optional(),
   /** Both physical actions must be explicitly confirmed before the service persists a settlement. */
@@ -739,6 +743,7 @@ export const commitForceCloseRequest = forceCloseBaseRequest.extend({
   cashSettlementConfirmed: z.literal(true),
   cashReceivableDeferred: nonnegativeMoneySchema.optional(),
   walletReceivableDeferred: nonnegativeMoneySchema.optional(),
+  cashShortageReceivable: nonnegativeMoneySchema.optional(),
 })
 
 /** Upper-level force-close is an explicit prepare-then-settle protocol. */
@@ -1172,6 +1177,21 @@ export const correctReceivableRequest = z.object({
 })
 
 // ── Treasury: daily count and manual entries (SRS E-3, E-5) ───────────────────────────────
+
+/**
+ * Forgive an ordinary driver receivable without pretending that cash was collected.
+ *
+ * The kind is intentionally not caller-selectable: next-shift funding is operational custody,
+ * while this command is an audited loss decision that applies only to ordinary debt.
+ */
+export const writeoffReceivableRequest = z.object({
+  branchId: z.string().optional(),
+  driverId: z.string().min(1),
+  channel: z.enum(['cash', 'wallet']),
+  amount: positiveMoneySchema,
+  reason: nonblankReasonSchema,
+  idempotencyKey: z.string().uuid(),
+})
 
 export const createCashCountRequest = z.object({
   branchId: z.string().optional(),

@@ -279,6 +279,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   const [varianceReason, setVarianceReason] = useState('')
   const [cashReceivableDeferred, setCashReceivableDeferred] = useState('0')
   const [walletReceivableDeferred, setWalletReceivableDeferred] = useState('0')
+  const [cashShortageReceivable, setCashShortageReceivable] = useState('0')
   const [settlementRecalculating, setSettlementRecalculating] = useState(false)
   /** Suggestion-only reads of exact stored dashboard slots, keyed by the reviewed operation. */
   const [orderRereads, setOrderRereads] = useState<Record<string, ManagerOrderEvidenceRereadResponse>>({})
@@ -336,6 +337,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     setVarianceReason('')
     setCashReceivableDeferred('0')
     setWalletReceivableDeferred('0')
+    setCashShortageReceivable('0')
     setSettlementRecalculating(false)
     setOrderRereads({})
     void api
@@ -373,7 +375,8 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     if (!review || review.state !== 'pending_review') return
     if (
       !isNonnegativeSettlementMoney(cashReceivableDeferred) ||
-      !isNonnegativeSettlementMoney(walletReceivableDeferred)
+      !isNonnegativeSettlementMoney(walletReceivableDeferred) ||
+      !isNonnegativeSettlementMoney(cashShortageReceivable)
     ) {
       setSettlementLoadError('invalid_receivable_amount')
       setSettlementRecalculating(false)
@@ -387,6 +390,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         .shiftSettlement(review.id, undefined, {
           cashReceivableDeferred: cashReceivableDeferred.trim(),
           walletReceivableDeferred: walletReceivableDeferred.trim(),
+          cashShortageReceivable: cashShortageReceivable.trim(),
         })
         .then((next) => {
           if (cancelled) return
@@ -404,14 +408,14 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [api, cashReceivableDeferred, review, walletReceivableDeferred])
+  }, [api, cashReceivableDeferred, cashShortageReceivable, review, walletReceivableDeferred])
 
   // A changed hash means changed money. Earlier ticks must never carry across to a new statement.
   useEffect(() => {
     setWalletTransferConfirmed(false)
     setCashSettlementConfirmed(false)
     setVarianceReason('')
-  }, [cashReceivableDeferred, review?.id, settlement?.settlementHash, walletReceivableDeferred])
+  }, [cashReceivableDeferred, cashShortageReceivable, review?.id, settlement?.settlementHash, walletReceivableDeferred])
 
   useEffect(() => {
     const prepared = activeForcePreparation(review?.submittedAt, review?.decisions ?? [])
@@ -469,8 +473,10 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     settlement !== null &&
     isNonnegativeSettlementMoney(cashReceivableDeferred) &&
     isNonnegativeSettlementMoney(walletReceivableDeferred) &&
+    isNonnegativeSettlementMoney(cashShortageReceivable) &&
     parseMinor(cashReceivableDeferred.trim()) === parseMinor(settlement.cashReceivableDeferred) &&
-    parseMinor(walletReceivableDeferred.trim()) === parseMinor(settlement.walletReceivableDeferred)
+    parseMinor(walletReceivableDeferred.trim()) === parseMinor(settlement.walletReceivableDeferred) &&
+    parseMinor(cashShortageReceivable.trim()) === parseMinor(settlement.cashShortageReceivable)
   const closeSettlementReady =
     !settlementRecalculating &&
     deferralMatchesSettlement &&
@@ -659,6 +665,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         cashSettlementConfirmed: true,
         cashReceivableDeferred: settlement.cashReceivableDeferred,
         walletReceivableDeferred: settlement.walletReceivableDeferred,
+        cashShortageReceivable: settlement.cashShortageReceivable,
       })
       toast.success(`${t.approval.approved} — ${who.driver ?? ''}`)
       onDone()
@@ -840,12 +847,14 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         varianceReason={varianceReason}
         cashReceivableDeferred={cashReceivableDeferred}
         walletReceivableDeferred={walletReceivableDeferred}
+        cashShortageReceivable={cashShortageReceivable}
         notes={notes}
         onWalletTransferConfirmed={setWalletTransferConfirmed}
         onCashSettlementConfirmed={setCashSettlementConfirmed}
         onVarianceReason={setVarianceReason}
         onCashReceivableDeferred={setCashReceivableDeferred}
         onWalletReceivableDeferred={setWalletReceivableDeferred}
+        onCashShortageReceivable={setCashShortageReceivable}
         onNotes={setNotes}
         onBack={onDone}
         onRefresh={refreshVisible}
@@ -1608,12 +1617,14 @@ interface CloseApprovalWorkspaceProps {
   varianceReason: string
   cashReceivableDeferred: string
   walletReceivableDeferred: string
+  cashShortageReceivable: string
   notes: string
   onWalletTransferConfirmed(value: boolean): void
   onCashSettlementConfirmed(value: boolean): void
   onVarianceReason(value: string): void
   onCashReceivableDeferred(value: string): void
   onWalletReceivableDeferred(value: string): void
+  onCashShortageReceivable(value: string): void
   onNotes(value: string): void
   onBack(): void
   onRefresh(): void
@@ -1643,12 +1654,14 @@ function CloseApprovalWorkspace({
   varianceReason,
   cashReceivableDeferred,
   walletReceivableDeferred,
+  cashShortageReceivable,
   notes,
   onWalletTransferConfirmed,
   onCashSettlementConfirmed,
   onVarianceReason,
   onCashReceivableDeferred,
   onWalletReceivableDeferred,
+  onCashShortageReceivable,
   onNotes,
   onBack,
   onRefresh,
@@ -1699,12 +1712,14 @@ function CloseApprovalWorkspace({
   }
   const deferralInputsValid =
     isNonnegativeSettlementMoney(cashReceivableDeferred) &&
-    isNonnegativeSettlementMoney(walletReceivableDeferred)
+    isNonnegativeSettlementMoney(walletReceivableDeferred) &&
+    isNonnegativeSettlementMoney(cashShortageReceivable)
   const deferralMatchesSettlement =
     settlement !== null &&
     deferralInputsValid &&
     parseMinor(cashReceivableDeferred.trim()) === parseMinor(settlement.cashReceivableDeferred) &&
-    parseMinor(walletReceivableDeferred.trim()) === parseMinor(settlement.walletReceivableDeferred)
+    parseMinor(walletReceivableDeferred.trim()) === parseMinor(settlement.walletReceivableDeferred) &&
+    parseMinor(cashShortageReceivable.trim()) === parseMinor(settlement.cashShortageReceivable)
   const approvalReady = closeWorkspaceApprovalReady({
     settlementReady: deferralMatchesSettlement && settlementApprovalReady(settlement, settlementDraft),
     unresolvedOperationCount: unresolvedCount,
@@ -2007,6 +2022,30 @@ function CloseApprovalWorkspace({
                     </p>
                   ) : null}
                 </div>
+
+                {parseMinor(settlement.maximumCashShortageReceivable) > 0n ? (
+                  <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3">
+                    <p className="text-sm font-extrabold text-red-950">{t.settlement.shortageReceivableTitle}</p>
+                    <p className="mt-1 text-xs text-red-900">{t.settlement.shortageReceivableHint}</p>
+                    <label className="mt-3 flex flex-col gap-1 text-xs font-bold text-red-950">
+                      <span>{t.settlement.cashShortageReceivable}</span>
+                      <MoneyInput
+                        value={cashShortageReceivable}
+                        min="0"
+                        aria-invalid={!isNonnegativeSettlementMoney(cashShortageReceivable)}
+                        disabled={busy}
+                        onChange={(event) => onCashShortageReceivable(event.target.value)}
+                        className="bg-white"
+                      />
+                      <span className="font-normal text-red-800">
+                        {t.settlement.receivableMaximum}: <Money value={settlement.maximumCashShortageReceivable} />
+                      </span>
+                    </label>
+                    <p className="mt-2 rounded-lg bg-white/80 px-3 py-2 text-xs font-semibold text-red-900">
+                      {t.settlement.shortageReceivableOfficeUnchanged}
+                    </p>
+                  </div>
+                ) : null}
 
                 {physicalConfirmationsLocked ? (
                   <p role="alert" className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm font-bold text-amber-950">

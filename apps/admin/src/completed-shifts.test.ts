@@ -87,6 +87,7 @@ describe('completed shift financial totals', () => {
     walletClaimToOffice: '0.00',
     cashReceivableDeferred: '0.00',
     walletReceivableDeferred: '0.00',
+    cashShortageReceivable: '0.00',
     cashToOffice: '0.00',
     walletToOffice: '0.00',
     officeReturn: '0.00',
@@ -98,10 +99,12 @@ describe('completed shift financial totals', () => {
       { financial: financial({
         deliveryFees: '13000.00', companyShare: '5800.00', netDriverShare: '4700.00',
         deductions: '500.00', variance: '-100.00', officeReturn: '20800.00',
+        cashShortageReceivable: '100.00',
       }) },
       { financial: financial({
         deliveryFees: '7000.00', companyShare: '2800.00', netDriverShare: '2800.00',
         variance: '200.00', officeReturn: '11000.00',
+        cashShortageReceivable: '0.00',
       }) },
       { financial: null },
       {}, // additive rollout: an older API omits the field entirely
@@ -113,6 +116,7 @@ describe('completed shift financial totals', () => {
       netDriverShare: '7500.00',
       deductions: '500.00',
       variance: '100.00',
+      cashShortageReceivable: '100.00',
       officeReturn: '31800.00',
     })
   })
@@ -126,6 +130,7 @@ describe('completed shift financial totals', () => {
       netDriverShare: '0.00',
       deductions: '0.00',
       variance: '0.00',
+      cashShortageReceivable: '0.00',
       officeReturn: '0.00',
     })
   })
@@ -162,6 +167,8 @@ describe('completed shift history screen wiring', () => {
     expect(screenSource).toContain('shift.financial.deductions')
     expect(screenSource).toContain('shift.financial.variance')
     expect(screenSource).toContain('shift.financial.officeReturn')
+    expect(screenSource).toContain('shift.financial.cashShortageReceivable')
+    expect(screenSource).toContain('financialTotals.cashShortageReceivable')
   })
 
   it('has matching Arabic-first and English copy for completed and separately cancelled shifts', () => {

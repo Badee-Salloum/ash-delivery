@@ -35,6 +35,8 @@ const settlement = (over: Partial<ShiftSettlementView> = {}): ShiftSettlementVie
   walletClaimToOffice: '500.00',
   cashReceivableDeferred: '0.00',
   walletReceivableDeferred: '0.00',
+  maximumCashShortageReceivable: '0.00',
+  cashShortageReceivable: '0.00',
   walletToOffice: '500.00',
   cashToOffice: '900.00',
   walletAction: 'collect',
@@ -102,6 +104,7 @@ describe('manager settlement confirmation', () => {
       cashSettlementConfirmed: true,
       cashReceivableDeferred: '0.00',
       walletReceivableDeferred: '0.00',
+      cashShortageReceivable: '0.00',
       varianceReason: 'counted with the employee',
     })
   })
@@ -109,6 +112,25 @@ describe('manager settlement confirmation', () => {
   it('presents surplus and shortage as labelled absolute magnitudes', () => {
     expect(settlementVarianceMagnitude(settlement({ varianceDirection: 'surplus', variance: '25.00' }))).toBe('25.00')
     expect(settlementVarianceMagnitude(settlement({ varianceDirection: 'shortage', variance: '-25.00' }))).toBe('25.00')
+  })
+
+  it('binds a close approval to the reviewed shortage receivable amount', () => {
+    const s = settlement({
+      varianceDirection: 'shortage',
+      variance: '-125.00',
+      finalEmployeeCash: '-25.00',
+      maximumCashShortageReceivable: '25.00',
+      cashShortageReceivable: '20.00',
+      settlementHash: 'd'.repeat(64),
+    })
+    expect(closeApprovalRequest('orders-hash', s, {
+      walletTransferConfirmed: true,
+      cashSettlementConfirmed: true,
+      varianceReason: 'driver will repay later',
+    })).toMatchObject({
+      reviewedSettlementHash: 'd'.repeat(64),
+      cashShortageReceivable: '20.00',
+    })
   })
 
   it('sends a null reason for a balanced settlement and rejects a missing snapshot hash', () => {

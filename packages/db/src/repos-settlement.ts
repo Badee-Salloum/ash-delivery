@@ -57,6 +57,8 @@ function rowToSettlement(row: Record<string, unknown>): ShiftSettlementRecord {
     walletClaimToOffice: money('wallet_claim_to_office_minor'),
     cashReceivableDeferred: money('cash_receivable_deferred_minor'),
     walletReceivableDeferred: money('wallet_receivable_deferred_minor'),
+    maximumCashShortageReceivable: money('maximum_cash_shortage_receivable_minor'),
+    cashShortageReceivable: money('cash_shortage_receivable_minor'),
     walletToOffice: money('wallet_to_office_minor'),
     cashToOffice: money('cash_to_office_minor'),
     walletAction: row.wallet_action as ShiftSettlementRecord['walletAction'],
@@ -108,6 +110,7 @@ export class PgShiftSettlementRepo implements ShiftSettlementRepo {
              variance_minor, variance_direction, final_employee_cash_minor,
              cash_claim_to_office_minor, wallet_claim_to_office_minor,
              cash_receivable_deferred_minor, wallet_receivable_deferred_minor,
+             maximum_cash_shortage_receivable_minor, cash_shortage_receivable_minor,
              wallet_to_office_minor, cash_to_office_minor,
              wallet_action, wallet_amount_minor, cash_action, cash_amount_minor,
              reviewed_orders_hash, settlement_hash,
@@ -122,10 +125,11 @@ export class PgShiftSettlementRepo implements ShiftSettlementRepo {
              $17, $18, $19,
              $20, $21, $22, $23,
              $24, $25,
-             $26, $27, $28, $29,
-             $30, $31,
+             $26, $27,
+             $28, $29, $30, $31,
              $32, $33,
-             $34, $35::timestamptz, $36
+             $34, $35,
+             $36, $37::timestamptz, $38
            )
            ON CONFLICT (shift_id) DO NOTHING
            RETURNING *`,
@@ -153,6 +157,8 @@ export class PgShiftSettlementRepo implements ShiftSettlementRepo {
             record.walletClaimToOffice.toString(),
             record.cashReceivableDeferred.toString(),
             record.walletReceivableDeferred.toString(),
+            record.maximumCashShortageReceivable.toString(),
+            record.cashShortageReceivable.toString(),
             record.walletToOffice.toString(),
             record.cashToOffice.toString(),
             record.walletAction,

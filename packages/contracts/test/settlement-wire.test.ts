@@ -32,6 +32,8 @@ describe('fixed settlement wire contract', () => {
       walletClaimToOffice: '-10000.00',
       cashReceivableDeferred: '0.00',
       walletReceivableDeferred: '0.00',
+      maximumCashShortageReceivable: '0.00',
+      cashShortageReceivable: '0.00',
       walletToOffice: '-10000.00',
       cashToOffice: '200000.00',
       walletAction: 'fund',
@@ -50,6 +52,27 @@ describe('fixed settlement wire contract', () => {
     expect(parsed.reviewedSettlementHash).toBeUndefined()
     expect(parsed.walletTransferConfirmed).toBe(false)
     expect(parsed.cashSettlementConfirmed).toBe(false)
+    expect(parsed.cashShortageReceivable).toBeUndefined()
+  })
+
+  it('keeps an unpaid shift shortage separate from next-shift funding on both close paths', () => {
+    expect(approveCloseRequest.parse({
+      reviewedOrdersHash: 'orders',
+      cashReceivableDeferred: '125.00',
+      cashShortageReceivable: '75.00',
+    })).toMatchObject({
+      cashReceivableDeferred: 12_500n,
+      cashShortageReceivable: 7_500n,
+    })
+    expect(forceCloseRequest.parse({
+      reason: 'verified shortage',
+      cashDeclared: '100.00',
+      walletDeclared: '20.00',
+      reviewedSettlementHash: HASH,
+      walletTransferConfirmed: true,
+      cashSettlementConfirmed: true,
+      cashShortageReceivable: '75.00',
+    })).toMatchObject({ cashShortageReceivable: 7_500n })
   })
 
   it('offers a strict confirmation schema for the fixed-policy approval path', () => {

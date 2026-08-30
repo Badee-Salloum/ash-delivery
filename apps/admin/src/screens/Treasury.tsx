@@ -2,7 +2,6 @@ import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import {
   groupThousands,
   type ReceivableChannel,
-  type ReceivableDirection,
   type ReceivableEventView,
   type ReceivableKind,
   type ReceivablesView,
@@ -30,6 +29,7 @@ import {
   receivableDirectoryDrivers,
   receivableDriverMaySubmit,
   receivableOperationReady,
+  receivableWriteoffAmountWithinBalance,
   type PendingReceivableOperation,
   type PendingReceivableRecovery,
   type ReceivableOperationPayload,
@@ -619,8 +619,9 @@ export function Treasury(): ReactNode {
     const confirmedAgainstVersion = receivableSubmitVersion.current
     const confirmed = await confirm({
       title: t.treasury.receivableEventConfirmTitle,
-      body: `${actionLabel} — ${driver.fullNameAr} (${driver.code}) — ${t.treasury.receivableKinds[payload.receivableKind]} — ${t.treasury.receivableChannels[payload.channel]} — ${groupThousands(payload.amount)} — ${payload.reason}`,
+      body: `${actionLabel} — ${driver.fullNameAr} (${driver.code}) — ${t.treasury.receivableKinds[payload.receivableKind]} — ${t.treasury.receivableChannels[payload.channel]} — ${groupThousands(payload.amount)} — ${payload.reason}${payload.direction === 'writeoff' ? ` — ${t.treasury.receivableWriteoffHint}` : ''}`,
       confirmLabel: actionLabel,
+      danger: payload.direction === 'writeoff',
     })
     // A branch/session switch while the modal was open invalidates its captured actor + branch.
     if (!confirmed || confirmedAgainstVersion !== receivableSubmitVersion.current) return
@@ -651,7 +652,20 @@ export function Treasury(): ReactNode {
         setReceivableOutboxRecovery({ status: 'pending', operation })
         setReceivableDraft(operation.payload)
         submitVersion = ++receivableSubmitVersion.current
-        return api.createReceivableEvent({ ...operation.payload, idempotencyKey: operation.idempotencyKey })
+        if (operation.payload.direction === 'writeoff') {
+          return api.writeoffReceivable({
+            driverId: operation.payload.driverId,
+            channel: operation.payload.channel,
+            amount: operation.payload.amount,
+            reason: operation.payload.reason,
+            idempotencyKey: operation.idempotencyKey,
+          })
+        }
+        return api.createReceivableEvent({
+          ...operation.payload,
+          direction: operation.payload.direction === 'create' ? 'create' : 'collect',
+          idempotencyKey: operation.idempotencyKey,
+        })
       },
     })
 
@@ -923,7 +937,7 @@ export function Treasury(): ReactNode {
     (driver) => driver.id === receivableDraft.driverId,
   )
   const selectedReceivableBalance = selectedReceivableRow
-    ? receivableDraft.receivableKind === 'ordinary'
+    ? receivableDraft.direction === 'writeoff' || receivableDraft.receivableKind === 'ordinary'
       ? receivableDraft.channel === 'cash'
         ? selectedReceivableRow.ordinaryCash
         : selectedReceivableRow.ordinaryWallet
@@ -944,10 +958,15 @@ export function Treasury(): ReactNode {
     receivableOutboxRecovery.status === 'unavailable' || receivableOutboxRecovery.status === 'corrupt'
   const receivableFingerprintLocked =
     receivableEventBusy || receivableOutboxBlocked || receivableOutboxRecovery.status === 'pending'
+  const writeoffAmountWithinBalance = receivableWriteoffAmountWithinBalance(
+    normalizedReceivableDraft,
+    selectedReceivableBalance,
+    exactPendingReceivableRetry,
+  )
   const receivableEventReady = !receivableOutboxBlocked && (
     receivableDriverMaySubmit(selectedReceivableDriver, receivableDraft.direction) ||
     exactPendingReceivableRetry
-  ) && receivableOperationReady(normalizedReceivableDraft)
+  ) && receivableOperationReady(normalizedReceivableDraft) && writeoffAmountWithinBalance
 
   const fundLabel = (fundCode: string): string =>
     t.treasury.fundCodes[fundCode as keyof typeof t.treasury.fundCodes] ?? fundCode
@@ -1117,7 +1136,7 @@ export function Treasury(): ReactNode {
                           }
                         >
                           {driver.fullNameAr} ({driver.code})
-                          {driver.active ? '' : ` — ${t.accounts.inactive}; ${t.treasury.receivableDirections.collect}`}
+                          {driver.active ? '' : ` — ${t.accounts.inactive}; ${t.treasury.receivableDirections[receivableDraft.direction === 'create' ? 'collect' : receivableDraft.direction]}`}
                         </option>
                       ))}
                     </Select>
@@ -1125,7 +1144,7 @@ export function Treasury(): ReactNode {
                   <Field label={t.treasury.receivableKind}>
                     <Select
                       value={receivableDraft.receivableKind}
-                      disabled={receivableFingerprintLocked}
+                      disabled={receivableFingerprintLocked || receivableDraft.direction === 'writeoff'}
                       onChange={(event) => setReceivableDraft((current) => ({
                         ...current,
                         receivableKind: event.target.value as ReceivableKind,
@@ -1153,10 +1172,14 @@ export function Treasury(): ReactNode {
                       value={receivableDraft.direction}
                       disabled={receivableFingerprintLocked}
                       onChange={(event) => {
-                        const direction = event.target.value as ReceivableDirection
+                        const direction = event.target.value as ReceivableOperationPayload['direction']
                         setReceivableDraft((current) => {
                           const selected = receivableDrivers.find((driver) => driver.id === current.driverId)
-                          const changed = { ...current, direction }
+                          const changed = {
+                            ...current,
+                            direction,
+                            ...(direction === 'writeoff' ? { receivableKind: 'ordinary' as const } : {}),
+                          }
                           const exactRetry = pendingReceivableOperationMatches(
                             pendingReceivableEvent.current,
                             changed,
@@ -1172,6 +1195,7 @@ export function Treasury(): ReactNode {
                     >
                       <option value="create">{t.treasury.receivableDirections.create}</option>
                       <option value="collect">{t.treasury.receivableDirections.collect}</option>
+                      <option value="writeoff">{t.treasury.receivableDirections.writeoff}</option>
                     </Select>
                   </Field>
                   <Field label={t.treasury.amount}>
@@ -1192,7 +1216,11 @@ export function Treasury(): ReactNode {
                     />
                   </Field>
                   <Button
-                    variant={receivableDraft.direction === 'create' ? 'primary' : 'success'}
+                    variant={receivableDraft.direction === 'writeoff'
+                      ? 'danger'
+                      : receivableDraft.direction === 'create'
+                        ? 'primary'
+                        : 'success'}
                     disabled={receivableEventBusy || !receivableEventReady}
                     onClick={() => void submitReceivableEvent()}
                   >
@@ -1200,12 +1228,24 @@ export function Treasury(): ReactNode {
                       ? t.common.retry
                       : receivableDraft.direction === 'create'
                       ? t.treasury.receivableDirections.create
-                      : t.treasury.receivableDirections.collect}
+                      : receivableDraft.direction === 'collect'
+                        ? t.treasury.receivableDirections.collect
+                        : t.treasury.receivableDirections.writeoff}
                   </Button>
                 </div>
+                {receivableDraft.direction === 'writeoff' ? (
+                  <p className="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-800">
+                    {t.treasury.receivableWriteoffHint}
+                  </p>
+                ) : null}
                 {receivableDraft.driverId ? (
                   <p className="mt-2 text-xs text-slate-600">
                     {t.treasury.currentReceivableBalance}: <Money value={selectedReceivableBalance} className="font-semibold" />
+                  </p>
+                ) : null}
+                {receivableDraft.direction === 'writeoff' && !writeoffAmountWithinBalance ? (
+                  <p className="mt-2 text-xs font-medium text-red-700">
+                    {t.treasury.receivableWriteoffBalanceHint} <Money value={selectedReceivableBalance} />
                   </p>
                 ) : null}
                 {receivableEventError ? (
@@ -1433,7 +1473,9 @@ export function Treasury(): ReactNode {
                           driver his debt was paid when nothing was paid. Name it, and show the
                           restatement it actually was.
                         */}
-                        {event.intent === 'correction' ? (
+                        {event.intent === 'writeoff' ? (
+                          <span className="text-red-700">{t.treasury.writeoffIntent}</span>
+                        ) : event.intent === 'correction' ? (
                           <span className="num text-slate-700">
                             {t.treasury.correctionIntent}: <Money value={event.priorBalance ?? '0.00'} /> →{' '}
                             <Money value={event.targetBalance ?? '0.00'} />

@@ -351,6 +351,47 @@ export function receivableAdjustment(
   return assertBalanced({ eventType: 'receivable_adjustment', occurrenceKey, lines })
 }
 
+/**
+ * Dedicated loss account for an ordinary receivable the company deliberately writes off.
+ *
+ * It is a cost centre rather than either office fund because no cash or wallet moved. Keeping one
+ * stable code also prevents callers from choosing an arbitrary counterpart and disguising a
+ * collection, withdrawal, or owner movement as a write-off.
+ */
+export const RECEIVABLE_WRITEOFF_LOSS_COST_CENTER = 'receivable_writeoff_loss' as const
+
+/**
+ * Write off part of a named driver's ordinary receivable without pretending it was collected.
+ *
+ * The receivable asset falls (credit) and the dedicated loss rises (debit). `office_cash` and
+ * `office_wallet` are deliberately absent: a write-off is an accounting loss, not money returning
+ * to either box. Shift-funding is intentionally unsupported because it represents money the driver
+ * still physically holds for the next shift, not an ordinary debt eligible for this workflow.
+ */
+export function receivableWriteoff(
+  driverId: string,
+  channel: 'cash' | 'wallet',
+  amount: Minor,
+  occurrenceKey: string,
+): Posting {
+  if (amount <= ZERO) throw new RangeError(`receivable write-off must be positive, got ${amount}`)
+  const receivable: FundRef = channel === 'cash'
+    ? { kind: 'driver_receivable_cash', driverId }
+    : { kind: 'driver_receivable_wallet', driverId }
+  return assertBalanced({
+    eventType: 'receivable_adjustment',
+    occurrenceKey,
+    lines: [
+      D(
+        { kind: 'cost_center', costCenterId: RECEIVABLE_WRITEOFF_LOSS_COST_CENTER },
+        amount,
+        'receivable_writeoff_loss',
+      ),
+      C(receivable, amount, 'receivable_written_off'),
+    ],
+  })
+}
+
 export interface CashSettledReturnInput {
   readonly driverId: string
   /** The exact immutable plan the manager reviewed and confirmed. */
@@ -375,6 +416,7 @@ function assertCanonicalFixedShareSettlement(settlement: FixedShareSettlementPla
     actualWallet: settlement.actualWallet,
     cashReceivableDeferred: settlement.cashReceivableDeferred,
     walletReceivableDeferred: settlement.walletReceivableDeferred,
+    cashShortageReceivable: settlement.cashShortageReceivable,
   })
   const scalarFields = [
     'grossDriverShare',
@@ -388,6 +430,8 @@ function assertCanonicalFixedShareSettlement(settlement: FixedShareSettlementPla
     'walletClaimToOffice',
     'cashReceivableDeferred',
     'walletReceivableDeferred',
+    'maximumCashShortageReceivable',
+    'cashShortageReceivable',
     'cashToOffice',
     'walletToOffice',
   ] as const
@@ -469,7 +513,10 @@ export function cashSettledReturnPostings(input: CashSettledReturnInput): Postin
       `cash-settled claim disagrees with reviewed plan: ${cashClaimToOffice} vs ${settlement.cashClaimToOffice}`,
     )
   }
-  const cashToOffice = sub(cashClaimToOffice, settlement.cashReceivableDeferred)
+  const cashToOffice = sub(
+    sub(cashClaimToOffice, settlement.cashReceivableDeferred),
+    settlement.cashShortageReceivable,
+  )
   if (cashToOffice !== settlement.cashToOffice) {
     throw new RangeError(
       `cash-settled movement disagrees with reviewed plan: ${cashToOffice} vs ${settlement.cashToOffice}`,
@@ -490,6 +537,19 @@ export function cashSettledReturnPostings(input: CashSettledReturnInput): Postin
         { kind: 'driver_shift_funding_cash', driverId },
         settlement.cashReceivableDeferred,
         'cash_settlement_deferred',
+      ),
+    )
+  }
+  if (settlement.cashShortageReceivable > ZERO) {
+    // The operational custody is cleared exactly once below. This debit preserves the unpaid part
+    // as an ordinary receivable while office_cash records only what was physically received. It is
+    // deliberately not a direct receivable adjustment (which would credit office_cash again) and
+    // not shift funding (which would be consumed automatically at the next open).
+    cashLines.push(
+      D(
+        { kind: 'driver_receivable_cash', driverId },
+        settlement.cashShortageReceivable,
+        'cash_shortage_receivable',
       ),
     )
   }

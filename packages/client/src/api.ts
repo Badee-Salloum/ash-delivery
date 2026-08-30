@@ -549,6 +549,8 @@ export interface ShiftSettlementView {
   walletClaimToOffice: string
   cashReceivableDeferred: string
   walletReceivableDeferred: string
+  maximumCashShortageReceivable: string
+  cashShortageReceivable: string
   walletToOffice: string
   cashToOffice: string
   walletAction: 'collect' | 'fund' | 'none'
@@ -566,6 +568,7 @@ export interface ApproveCloseRequest {
   cashSettlementConfirmed: boolean
   cashReceivableDeferred?: string
   walletReceivableDeferred?: string
+  cashShortageReceivable?: string
   varianceReason?: string | null
 }
 
@@ -651,10 +654,11 @@ export interface ReceivableEventView {
   reason: string
   /**
    * `correction` restates a balance that was recorded wrongly — no money moved. Rendering it as a
-   * collection would tell the driver his debt was paid when it was not.
+   * collection would tell the driver his debt was paid when it was not. `writeoff` clears a real
+   * debt against loss and, unlike collection, never moves an office box.
    */
-  intent: 'command' | 'correction'
-  /** Corrections only: what the balance read, and what it was restated to. */
+  intent: 'command' | 'correction' | 'writeoff'
+  /** Corrections/write-offs: what the balance read, and what it became. */
   priorBalance: string | null
   targetBalance: string | null
   journalEntryId: number
@@ -673,6 +677,14 @@ export interface CreateReceivableEventRequest {
   idempotencyKey: string
 }
 
+export interface WriteoffReceivableRequest {
+  driverId: string
+  channel: ReceivableChannel
+  amount: string
+  reason: string
+  idempotencyKey: string
+}
+
 export interface CreateReceivableEventResult {
   id: string
   driverId: string
@@ -682,7 +694,7 @@ export interface CreateReceivableEventResult {
   amount: string
   businessDate: string
   reason: string
-  intent: 'command' | 'correction'
+  intent: 'command' | 'correction' | 'writeoff'
   priorBalance: string | null
   targetBalance: string | null
   journalEntryId: number
@@ -1412,7 +1424,11 @@ export class ApiClient {
   shiftSettlement(
     shiftId: string,
     actual?: { actualCash: string; actualWallet: string },
-    deferred?: { cashReceivableDeferred: string; walletReceivableDeferred: string },
+    deferred?: {
+      cashReceivableDeferred: string
+      walletReceivableDeferred: string
+      cashShortageReceivable?: string
+    },
   ) {
     const params = new URLSearchParams()
     if (actual) {
@@ -1422,6 +1438,9 @@ export class ApiClient {
     if (deferred) {
       params.set('cashReceivableDeferred', deferred.cashReceivableDeferred)
       params.set('walletReceivableDeferred', deferred.walletReceivableDeferred)
+      if (deferred.cashShortageReceivable !== undefined) {
+        params.set('cashShortageReceivable', deferred.cashShortageReceivable)
+      }
     }
     const encoded = params.toString()
     const query = encoded === '' ? '' : `?${encoded}`
@@ -1467,6 +1486,12 @@ export class ApiClient {
   }
   createReceivableEvent(body: CreateReceivableEventRequest) {
     return this.post<CreateReceivableEventResult>('/treasury/receivables/events', {
+      ...body,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+  writeoffReceivable(body: WriteoffReceivableRequest) {
+    return this.post<CreateReceivableEventResult>('/treasury/receivables/writeoffs', {
       ...body,
       ...(this.branchId ? { branchId: this.branchId } : {}),
     })
@@ -1652,6 +1677,7 @@ export class ApiClient {
         cashSettlementConfirmed: true
         cashReceivableDeferred?: string
         walletReceivableDeferred?: string
+        cashShortageReceivable?: string
       }
   )) {
     return this.post<{ id: string; state: string; postings: number; prepared: boolean }>(

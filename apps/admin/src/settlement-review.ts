@@ -77,6 +77,7 @@ export function closeApprovalRequest(
     cashSettlementConfirmed: true,
     cashReceivableDeferred: settlement.cashReceivableDeferred,
     walletReceivableDeferred: settlement.walletReceivableDeferred,
+    cashShortageReceivable: settlement.cashShortageReceivable,
     varianceReason:
       settlementHasVariance(settlement) && optionalVarianceReason !== ''
         ? optionalVarianceReason

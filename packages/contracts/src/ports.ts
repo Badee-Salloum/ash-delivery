@@ -1735,11 +1735,12 @@ export interface ReceivableEventRecord {
    *
    * A `correction` restates a balance that was recorded wrongly; nothing physically moved. Without
    * this distinction the driver's history reads «تحصيل ٥٠٠» — money came back — for an event where
-   * no money came back, which is the exact lie the ledger exists to prevent. The posting is
-   * identical either way; only the account of it differs.
+   * no money came back, which is the exact lie the ledger exists to prevent. A `writeoff` also
+   * moves no money, but recognises a real debt as a loss through its dedicated cost centre. A
+   * `command` is the only intent here that reports a physical advance or collection.
    */
-  intent: 'command' | 'correction'
-  /** Corrections only: what the balance read, and what it was restated to. */
+  intent: 'command' | 'correction' | 'writeoff'
+  /** Corrections and write-offs: what the balance read, and its resulting balance. */
   priorBalance: Minor | null
   targetBalance: Minor | null
   idempotencyKey: string
@@ -2212,8 +2213,7 @@ export interface ShiftSettlementRecord {
   variance: Minor
   varianceDirection: SettlementVarianceDirection
   /**
-   * Signed final cash: positive is kept/paid to the employee; negative is collected from him now.
-   * Current-shift shortages never become a carried receivable.
+   * Signed final cash: positive is kept/paid to the employee; negative is due from him at close.
    */
   finalEmployeeCash: Minor
   /** Signed cash claim before any manager-confirmed deferral. */
@@ -2224,6 +2224,10 @@ export interface ShiftSettlementRecord {
   cashReceivableDeferred: Minor
   /** Legacy-named positive wallet amount retained as automatically consumed next-shift funding. */
   walletReceivableDeferred: Minor
+  /** Frozen upper bound reviewed by the manager for the current-shift ordinary receivable. */
+  maximumCashShortageReceivable: Minor
+  /** Unpaid current-shift shortage retained as an ordinary cash receivable. */
+  cashShortageReceivable: Minor
   /** Physical signed wallet movement after deferral. */
   walletToOffice: Minor
   /** Physical signed cash movement after deferral. */

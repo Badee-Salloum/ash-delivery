@@ -1719,6 +1719,8 @@ function assertSettlement(record: NewShiftSettlementRecord): void {
     record.cashAmount,
     record.cashReceivableDeferred,
     record.walletReceivableDeferred,
+    record.maximumCashShortageReceivable,
+    record.cashShortageReceivable,
   ]
   if (nonnegative.some((amount) => amount < 0n)) throw invalidSettlement('settlement magnitudes must be non-negative')
   if (record.fixedDriverShare !== (record.deliveryFeeTotal * 4_000n) / 10_000n) {
@@ -1749,7 +1751,11 @@ function assertSettlement(record: NewShiftSettlementRecord): void {
   }
   if (
     record.policyCode === FIXED_CASH_SETTLEMENT_POLICY_V1 &&
-    (record.cashReceivableDeferred !== 0n || record.walletReceivableDeferred !== 0n)
+    (
+      record.cashReceivableDeferred !== 0n ||
+      record.walletReceivableDeferred !== 0n ||
+      record.cashShortageReceivable !== 0n
+    )
   ) {
     throw invalidSettlement('the legacy settlement policy cannot defer a receivable')
   }
@@ -1761,6 +1767,13 @@ function assertSettlement(record: NewShiftSettlementRecord): void {
   ) {
     throw invalidSettlement('settlement deferral exceeds the positive office claim')
   }
+  const maximumCashShortageReceivable = record.finalEmployeeCash < 0n ? -record.finalEmployeeCash : 0n
+  if (record.maximumCashShortageReceivable !== maximumCashShortageReceivable) {
+    throw invalidSettlement('maximum cash shortage receivable does not match final employee cash')
+  }
+  if (record.cashShortageReceivable > maximumCashShortageReceivable) {
+    throw invalidSettlement('cash shortage receivable exceeds the unpaid employee cash')
+  }
   if (record.walletToOffice !== record.walletClaimToOffice - record.walletReceivableDeferred) {
     throw invalidSettlement('wallet movement does not subtract its deferred receivable')
   }
@@ -1769,8 +1782,11 @@ function assertSettlement(record: NewShiftSettlementRecord): void {
   if (record.walletAction !== walletAction || record.walletAmount !== walletAmount) {
     throw invalidSettlement('wallet action does not match the signed wallet transfer')
   }
-  if (record.cashToOffice !== record.cashClaimToOffice - record.cashReceivableDeferred) {
-    throw invalidSettlement('cash movement does not subtract its deferred receivable')
+  if (
+    record.cashToOffice !==
+    record.cashClaimToOffice - record.cashReceivableDeferred - record.cashShortageReceivable
+  ) {
+    throw invalidSettlement('cash movement does not subtract funding and the unpaid shortage receivable')
   }
   const cashAction = record.cashToOffice > 0n ? 'collect' : record.cashToOffice < 0n ? 'pay' : 'none'
   const cashAmount = record.cashToOffice < 0n ? -record.cashToOffice : record.cashToOffice

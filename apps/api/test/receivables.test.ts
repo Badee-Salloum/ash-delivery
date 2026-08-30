@@ -782,3 +782,151 @@ describe('correcting a recorded receivable', () => {
     expect((await post(driver, '/receivables/adjustments', correction())).statusCode).toBe(403)
   })
 })
+
+describe('writing off an ordinary receivable without collection', () => {
+  const writeoff = (over: Partial<Payload> = {}): Payload => ({
+    driverId: DRIVER_ID,
+    channel: 'cash',
+    amount: sypStr(4_000),
+    reason: 'uncollectible balance approved for write-off',
+    idempotencyKey: nextKey(),
+    ...over,
+  })
+
+  it.each(['cash', 'wallet'] as const)(
+    'reduces ordinary %s debt into the loss account without moving either office box',
+    async (channel) => {
+      const manager = await h.loginAs('manager')
+      await seedOffice(manager)
+      await createReceivable(manager, { channel, amount: sypStr(10_000) })
+      await createReceivable(manager, {
+        receivableKind: 'shift_funding',
+        channel,
+        amount: sypStr(2_000),
+      })
+
+      const ordinaryCode = `driver_receivable_${channel}:${DRIVER_ID}`
+      const fundingCode = `driver_shift_funding_${channel}:${DRIVER_ID}`
+      const officeCashBefore = await h.deps.ledger.fundBalance(BRANCH, 'office_cash')
+      const officeWalletBefore = await h.deps.ledger.fundBalance(BRANCH, 'office_wallet')
+
+      const response = await post(
+        manager,
+        '/treasury/receivables/writeoffs',
+        writeoff({ channel }),
+      )
+      expect(response.statusCode, response.body).toBe(201)
+      expect(response.json()).toMatchObject({
+        driverId: DRIVER_ID,
+        receivableKind: 'ordinary',
+        channel,
+        direction: 'collect',
+        amount: sypStr(4_000),
+        reason: 'uncollectible balance approved for write-off',
+        intent: 'writeoff',
+        priorBalance: sypStr(10_000),
+        targetBalance: sypStr(6_000),
+        replayed: false,
+      })
+
+      expect(await h.deps.ledger.fundBalance(BRANCH, ordinaryCode)).toBe(600_000n)
+      expect(await h.deps.ledger.fundBalance(BRANCH, fundingCode)).toBe(200_000n)
+      expect(await h.deps.ledger.fundBalance(BRANCH, 'cost_center:receivable_writeoff_loss')).toBe(400_000n)
+      expect(await h.deps.ledger.fundBalance(BRANCH, 'office_cash')).toBe(officeCashBefore)
+      expect(await h.deps.ledger.fundBalance(BRANCH, 'office_wallet')).toBe(officeWalletBefore)
+
+      const history = await get(manager, `/receivables/events?driverId=${DRIVER_ID}`)
+      expect(history.statusCode, history.body).toBe(200)
+      expect(history.json().events).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          intent: 'writeoff',
+          receivableKind: 'ordinary',
+          channel,
+          direction: 'collect',
+          reason: 'uncollectible balance approved for write-off',
+          priorBalance: sypStr(10_000),
+          targetBalance: sypStr(6_000),
+        }),
+      ]))
+    },
+  )
+
+  it('can fully write off an inactive driver balance', async () => {
+    const manager = await h.loginAs('manager')
+    await seedOffice(manager)
+    await createReceivable(manager, { amount: sypStr(10_000) })
+    await deactivateDriver()
+
+    const response = await post(manager, '/receivables/writeoffs', writeoff({ amount: sypStr(10_000) }))
+    expect(response.statusCode, response.body).toBe(201)
+    expect(response.json()).toMatchObject({ targetBalance: sypStr(0), intent: 'writeoff' })
+    expect(await h.deps.ledger.fundBalance(BRANCH, `driver_receivable_cash:${DRIVER_ID}`)).toBe(0n)
+  })
+
+  it('refuses to write off more than the selected ordinary channel balance atomically', async () => {
+    const manager = await h.loginAs('manager')
+    await seedOffice(manager)
+    await createReceivable(manager, { amount: sypStr(10_000) })
+    const officeBefore = await h.deps.ledger.fundBalance(BRANCH, 'office_cash')
+
+    const response = await post(manager, '/receivables/writeoffs', writeoff({ amount: sypStr(10_001) }))
+    expect(response.statusCode, response.body).toBe(422)
+    expect(response.json()).toMatchObject({
+      error: 'receivable_writeoff_exceeds_balance',
+      detail: { available: sypStr(10_000) },
+    })
+    expect(await h.deps.ledger.fundBalance(BRANCH, `driver_receivable_cash:${DRIVER_ID}`)).toBe(1_000_000n)
+    expect(await h.deps.ledger.fundBalance(BRANCH, 'cost_center:receivable_writeoff_loss')).toBe(0n)
+    expect(await h.deps.ledger.fundBalance(BRANCH, 'office_cash')).toBe(officeBefore)
+  })
+
+  it('replays an identical key once and rejects every changed or cross-intent reuse', async () => {
+    const manager = await h.loginAs('manager')
+    await seedOffice(manager)
+    await createReceivable(manager, { amount: sypStr(10_000) })
+    const body = writeoff()
+
+    const first = await post(manager, '/receivables/writeoffs', body)
+    expect(first.statusCode, first.body).toBe(201)
+    const replay = await post(manager, '/treasury/receivables/writeoffs', body)
+    expect(replay.statusCode, replay.body).toBe(200)
+    expect(replay.json()).toMatchObject({ id: first.json().id, replayed: true })
+    expect(await h.deps.ledger.fundBalance(BRANCH, `driver_receivable_cash:${DRIVER_ID}`)).toBe(600_000n)
+    expect(await h.deps.ledger.fundBalance(BRANCH, 'cost_center:receivable_writeoff_loss')).toBe(400_000n)
+
+    const changed = await post(manager, '/receivables/writeoffs', {
+      ...body,
+      amount: sypStr(3_000),
+    })
+    expect(changed.statusCode).toBe(409)
+    expect(changed.json().error).toBe('idempotency_key_conflict')
+
+    const disguisedCollection = await post(manager, '/receivables/events', receivableBody({
+      direction: 'collect',
+      amount: sypStr(4_000),
+      reason: body.reason,
+      idempotencyKey: body.idempotencyKey,
+    }))
+    expect(disguisedCollection.statusCode).toBe(409)
+    expect(disguisedCollection.json().error).toBe('idempotency_key_conflict')
+  })
+
+  it('requires positive money, an audited reason, and journal.manual.write permission', async () => {
+    const manager = await h.loginAs('manager')
+    await seedOffice(manager)
+    await createReceivable(manager, { amount: sypStr(10_000) })
+
+    for (const amount of ['0', '0.00', '-1.00']) {
+      const response = await post(manager, '/receivables/writeoffs', writeoff({ amount }))
+      expect(response.statusCode, response.body).toBe(400)
+    }
+    for (const reason of ['', '   ', 'x'.repeat(501)]) {
+      const response = await post(manager, '/receivables/writeoffs', writeoff({ reason }))
+      expect(response.statusCode, response.body).toBe(400)
+    }
+
+    const driver = await h.loginAs('driver1')
+    const forbidden = await post(driver, '/receivables/writeoffs', writeoff())
+    expect(forbidden.statusCode).toBe(403)
+  })
+})

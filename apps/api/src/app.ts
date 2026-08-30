@@ -167,6 +167,7 @@ function completedShiftFinancial(
     walletClaimToOffice: serializeMoney(settlement.walletClaimToOffice),
     cashReceivableDeferred: serializeMoney(settlement.cashReceivableDeferred),
     walletReceivableDeferred: serializeMoney(settlement.walletReceivableDeferred),
+    cashShortageReceivable: serializeMoney(settlement.cashShortageReceivable),
     cashToOffice: serializeMoney(settlement.cashToOffice),
     walletToOffice: serializeMoney(settlement.walletToOffice),
     officeReturn: serializeMoney(add(settlement.cashToOffice, settlement.walletToOffice)),
@@ -1685,6 +1686,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         actualWallet: moneySchema.optional(),
         cashReceivableDeferred: nonnegativeMoneySchema.optional(),
         walletReceivableDeferred: nonnegativeMoneySchema.optional(),
+        cashShortageReceivable: nonnegativeMoneySchema.optional(),
       }).parse(req.query)
       const plan = await deps.closeUnitOfWork.run(
         { shiftId: id, actorId: req.actor!.userId },
@@ -1719,6 +1721,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
               ...(query.walletReceivableDeferred === undefined
                 ? {}
                 : { walletReceivableDeferred: query.walletReceivableDeferred }),
+              ...(query.cashShortageReceivable === undefined
+                ? {}
+                : { cashShortageReceivable: query.cashShortageReceivable }),
             },
           )
         },
@@ -1743,6 +1748,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         walletClaimToOffice: serializeMoney(plan.walletClaimToOffice),
         cashReceivableDeferred: serializeMoney(plan.cashReceivableDeferred),
         walletReceivableDeferred: serializeMoney(plan.walletReceivableDeferred),
+        maximumCashShortageReceivable: serializeMoney(plan.maximumCashShortageReceivable),
+        cashShortageReceivable: serializeMoney(plan.cashShortageReceivable),
         walletToOffice: serializeMoney(plan.walletToOffice),
         cashToOffice: serializeMoney(plan.cashToOffice),
         walletAction: plan.wallet.action,
@@ -1827,6 +1834,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         ...(body.walletReceivableDeferred === undefined
           ? {}
           : { walletReceivableDeferred: body.walletReceivableDeferred }),
+        ...(body.cashShortageReceivable === undefined
+          ? {}
+          : { cashShortageReceivable: body.cashShortageReceivable }),
         ...(body.reviewedSettlementHash === undefined ? {} : { reviewedSettlementHash: body.reviewedSettlementHash }),
         walletTransferConfirmed: body.walletTransferConfirmed,
         cashSettlementConfirmed: body.cashSettlementConfirmed,

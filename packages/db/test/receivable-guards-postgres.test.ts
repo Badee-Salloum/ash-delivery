@@ -7,6 +7,7 @@ import {
   floatReturn,
   minor,
   receivableAdjustment,
+  receivableWriteoff,
   reverse,
   walletCarry,
   walletReturn,
@@ -436,6 +437,8 @@ if (!DATABASE_URL) {
           walletClaimToOffice: minor(2_000n),
           cashReceivableDeferred: minor(600n),
           walletReceivableDeferred: minor(500n),
+          maximumCashShortageReceivable: zero,
+          cashShortageReceivable: zero,
           cashToOffice: minor(7_000n),
           walletToOffice: minor(1_500n),
           cashAction: 'collect',
@@ -995,6 +998,115 @@ if (!DATABASE_URL) {
             [createdEvent.id],
           ),
         ).toMatchObject({ rows: [{ count: 1 }] })
+
+        await client.query('SAVEPOINT valid_receivable_writeoff')
+        const writeoffKey = 'receivable-writeoff-1'
+        const receivableBeforeWriteoff = await ledger.fundBalance(
+          branchId,
+          `driver_receivable_cash:${driverId}`,
+        )
+        const officeCashBeforeWriteoff = await ledger.fundBalance(branchId, 'office_cash')
+        const officeWalletBeforeWriteoff = await ledger.fundBalance(branchId, 'office_wallet')
+        const writtenOffEvent = await financial.run(
+          {
+            lockKey: `receivables:${branchId}`,
+            actorId: managerId,
+            requestId: 'receivable-guard-test',
+          },
+          async (tx) => {
+            const amount = minor(50n)
+            const [entry] = await tx.ledger.post(
+              branchId,
+              [receivableWriteoff(driverId, 'cash', amount, writeoffKey)],
+              {
+                shiftId: null,
+                businessDate: '2026-08-23',
+                postingDate: '2026-08-23',
+                weekStartDate: '2026-08-23',
+                fxDayId,
+                createdBy: managerId,
+                reason: 'approved bad-debt loss',
+              },
+            )
+            const event: ReceivableEventRecord = {
+              id: randomUUID(),
+              branchId,
+              driverId,
+              receivableKind: 'ordinary',
+              channel: 'cash',
+              direction: 'collect',
+              amount,
+              businessDate: '2026-08-23',
+              reason: 'approved bad-debt loss',
+              intent: 'writeoff',
+              priorBalance: receivableBeforeWriteoff,
+              targetBalance: minor(receivableBeforeWriteoff - amount),
+              idempotencyKey: writeoffKey,
+              journalEntryId: entry!.id,
+              createdBy: managerId,
+              createdAtMs: Date.UTC(2026, 7, 23, 9, 2),
+            }
+            await tx.receivableEvents.create(event)
+            return event
+          },
+        )
+        await client.query(
+          'SET CONSTRAINTS receivable_journal_event_from_entry, receivable_journal_lines_from_line IMMEDIATE',
+        )
+        expect(await receivableRepo.findByIdempotencyKey(branchId, writeoffKey)).toEqual(writtenOffEvent)
+        expect(await ledger.fundBalance(branchId, `driver_receivable_cash:${driverId}`)).toBe(
+          receivableBeforeWriteoff - 50n,
+        )
+        expect(await ledger.fundBalance(branchId, 'cost_center:receivable_writeoff_loss')).toBe(50n)
+        expect(await ledger.fundBalance(branchId, 'office_cash')).toBe(officeCashBeforeWriteoff)
+        expect(await ledger.fundBalance(branchId, 'office_wallet')).toBe(officeWalletBeforeWriteoff)
+        expect(
+          await client.query(
+            "SELECT count(*)::int AS count FROM audit_log WHERE table_name = 'receivable_events' AND record_id = $1",
+            [writtenOffEvent.id],
+          ),
+        ).toMatchObject({ rows: [{ count: 1 }] })
+
+        // Merely labelling an office collection as a write-off cannot pass the canonical matcher.
+        await client.query('SAVEPOINT forged_writeoff_collection')
+        const forgedWriteoffKey = 'receivable-forged-writeoff-1'
+        const [forgedWriteoffJournal] = await ledger.post(
+          branchId,
+          [
+            receivableAdjustment(
+              driverId,
+              'ordinary',
+              'cash',
+              'collect',
+              minor(1n),
+              forgedWriteoffKey,
+            ),
+          ],
+          {
+            shiftId: null,
+            businessDate: '2026-08-23',
+            postingDate: '2026-08-23',
+            weekStartDate: '2026-08-23',
+            fxDayId,
+            createdBy: managerId,
+            reason: 'forged write-off collection',
+          },
+        )
+        await expect(
+          receivableRepo.create({
+            ...writtenOffEvent,
+            id: randomUUID(),
+            amount: minor(1n),
+            reason: 'forged write-off collection',
+            priorBalance: minor(receivableBeforeWriteoff - 50n),
+            targetBalance: minor(receivableBeforeWriteoff - 51n),
+            idempotencyKey: forgedWriteoffKey,
+            journalEntryId: forgedWriteoffJournal!.id,
+          }),
+        ).rejects.toMatchObject({ code: '23514', constraint: 'receivable_events_lines_guard' })
+        await client.query('ROLLBACK TO SAVEPOINT forged_writeoff_collection')
+        await client.query('ROLLBACK TO SAVEPOINT valid_receivable_writeoff')
+        await client.query('SET CONSTRAINTS ALL DEFERRED')
 
         await client.query('SAVEPOINT post_commit_extra_receivable_lines')
         await client.query(
@@ -1783,6 +1895,8 @@ if (!DATABASE_URL) {
             walletClaimToOffice: minor(2_000n),
             cashReceivableDeferred: minor(600n),
             walletReceivableDeferred: minor(500n),
+            maximumCashShortageReceivable: minor(0n),
+            cashShortageReceivable: minor(0n),
             cashToOffice: minor(7_000n),
             walletToOffice: minor(1_500n),
             cashAction: 'collect',

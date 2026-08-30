@@ -160,6 +160,7 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
           t.completedShifts.netDriverShare,
           t.completedShifts.deductions,
           t.completedShifts.variance,
+          t.completedShifts.shortageReceivable,
           t.completedShifts.officeReturn,
         ] : []),
         t.completedShifts.status,
@@ -196,11 +197,12 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
                     }
                   />
                 </td>
+                <td className="px-3 py-2"><Money value={shift.financial.cashShortageReceivable} /></td>
                 <td className="px-3 py-2"><Money value={shift.financial.officeReturn} /></td>
               </>
             ) : (
               <>
-                {Array.from({ length: 6 }, (_, index) => (
+                {Array.from({ length: 7 }, (_, index) => (
                   <td key={index} className="px-3 py-2 text-center text-slate-400">—</td>
                 ))}
               </>
@@ -251,12 +253,13 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
       ) : (
         <>
           <Card title={t.completedShifts.financialSummary}>
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-7">
               <Stat label={t.completedShifts.deliveryFees} value={<Money value={financialTotals.deliveryFees} />} />
               <Stat label={t.completedShifts.companyShare} value={<Money value={financialTotals.companyShare} />} />
               <Stat label={t.completedShifts.netDriverShare} value={<Money value={financialTotals.netDriverShare} />} />
               <Stat label={t.completedShifts.deductions} value={<Money value={financialTotals.deductions} />} />
               <Stat label={t.completedShifts.variance} value={<Money value={financialTotals.variance} />} />
+              <Stat label={t.completedShifts.shortageReceivable} value={<Money value={financialTotals.cashShortageReceivable} />} />
               <Stat label={t.completedShifts.officeReturn} value={<Money value={financialTotals.officeReturn} />} />
             </div>
             {financialTotals.missingCount > 0 ? (
