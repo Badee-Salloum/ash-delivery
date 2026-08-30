@@ -1053,6 +1053,12 @@ if (!DATABASE_URL) {
         await client.query(
           'SET CONSTRAINTS receivable_journal_event_from_entry, receivable_journal_lines_from_line IMMEDIATE',
         )
+        // The assertion above deliberately flushes the valid journal-first transaction. Restore
+        // the production mode before the forged pair below: its journal must be allowed to exist
+        // until the event insert can reject the falsely labelled write-off recipe.
+        await client.query(
+          'SET CONSTRAINTS receivable_journal_event_from_entry, receivable_journal_lines_from_line DEFERRED',
+        )
         expect(await receivableRepo.findByIdempotencyKey(branchId, writeoffKey)).toEqual(writtenOffEvent)
         expect(await ledger.fundBalance(branchId, `driver_receivable_cash:${driverId}`)).toBe(
           receivableBeforeWriteoff - 50n,
