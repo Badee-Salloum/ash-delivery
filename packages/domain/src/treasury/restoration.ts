@@ -13,8 +13,8 @@ import {
  * «راس مال المكتب رقم ثابت لكل من المحفظة و كاش المكتب. في نهاية كل يوم عمل يتم عملية اسمها ترميم،
  * الهدف منها سحب الارباح و ترميم النقص و اعادة راس المال على وضعه السابق مع مراعاة توزع الذمم.»
  *
- * Office capital is a FIXED TARGET per box. Every working day, after the physical count, each box
- * is settled against صندوق الشركة: a surplus is withdrawn as profit («كييش»), a shortfall is
+ * Office capital is a FIXED TARGET per box. Every working day each live office-ledger balance is
+ * settled against صندوق الشركة: a surplus is withdrawn as profit («كييش»), a shortfall is
  * replenished («شحن من الصندوق»), and الذمم COUNT TOWARD the capital.
  *
  * His own spreadsheet is the specification, and it verifies exactly:
@@ -27,12 +27,12 @@ import {
  *
  * ── THE SUBTLETY THE ذمم INTRODUCE, WHICH IS NOT A BUG ────────────────────────────────────────
  *
- * The sweep is computed on `counted + receivables`, so a box holding 5,000,000 cash with 400,000
+ * The sweep is computed on `officeBalance + receivables`, so a box holding 5,000,000 cash with 400,000
  * out on ذمم against a 4,000,000 target sweeps 1,400,000 and is LEFT BELOW its own target, at
  * 3,600,000. That is correct: the missing 400,000 is not lost, it is in a driver's pocket and
  * returns tomorrow when he opens on it. Counting it is exactly why the owner's formula adds الذمم.
  *
- * What must never happen is sweeping money that is not physically there — hence
+ * What must never happen is sweeping more than the live office fund holds — hence the retained
  * `sweep_exceeds_counted`.
  *
  * PURE and string-free: it emits codes and postings, and the UI resolves the words.
@@ -45,15 +45,15 @@ export type RestorationDirection =
   | 'from_company'
 
 export type RestorationRefusalCode =
-  /** The surplus is real but the cash is not in the drawer — it is out on ذمم. */
+  /** The surplus is real but the live office fund cannot cover the transfer — it is out on ذمم. */
   | 'sweep_exceeds_counted'
   /** No رأس مال is configured for this box, so there is nothing to restore TO. */
   | 'no_capital_target'
 
 export interface FundPosition {
   readonly fundCode: OfficeFund
-  /** من الجرد الفعلي — what was physically counted. */
-  readonly counted: Minor
+  /** The office fund's live double-entry balance, read inside the branch-money transaction. */
+  readonly officeBalance: Minor
   /** Σ الذمم outstanding against THIS box. Counts toward the capital (the owner's own rule). */
   readonly receivables: Minor
   /** رأس مال المكتب — the fixed target. `null` ⇒ not configured, and the leg is refused. */
@@ -62,11 +62,11 @@ export interface FundPosition {
 
 export interface RestorationLeg {
   readonly fundCode: OfficeFund
-  /** The physical amount used by this plan, frozen from the sealed count before restoration. */
-  readonly counted: Minor
+  /** The live opening office balance frozen in the immutable restoration snapshot. */
+  readonly officeBalance: Minor
   /** Outstanding driver debt assigned to this box and counted as office capital. */
   readonly receivables: Minor
-  /** counted + receivables — «الوضع الحالي». */
+  /** officeBalance + receivables — «الوضع الحالي». */
   readonly position: Minor
   readonly capitalTarget: Minor
   /** position − target. SIGNED: positive is a surplus, negative a shortfall. */
@@ -155,9 +155,9 @@ export function planRestoration(positions: readonly FundPosition[]): Restoration
       // treasury to the company fund. Refusing is the only safe reading of "not configured".
       return {
         fundCode: p.fundCode,
-        counted: p.counted,
+        officeBalance: p.officeBalance,
         receivables: p.receivables,
-        position: add(p.counted, p.receivables),
+        position: add(p.officeBalance, p.receivables),
         capitalTarget: ZERO,
         delta: ZERO,
         direction: null,
@@ -167,18 +167,18 @@ export function planRestoration(positions: readonly FundPosition[]): Restoration
       }
     }
 
-    const position = add(p.counted, p.receivables)
+    const position = add(p.officeBalance, p.receivables)
     const delta = sub(position, p.capitalTarget)
     const amount = delta < ZERO ? minor(-delta) : delta
     const direction: RestorationDirection | null = delta === ZERO ? null : delta > ZERO ? 'to_company' : 'from_company'
 
-    // You cannot hand over cash you are not holding. A surplus funded entirely by ذمم is real on
-    // paper and absent from the drawer.
-    if (direction === 'to_company' && amount > p.counted) refusals.push('sweep_exceeds_counted')
+    // You cannot transfer more than the office fund holds. A surplus funded entirely by ذمم is
+    // real on paper but unavailable in the office account.
+    if (direction === 'to_company' && amount > p.officeBalance) refusals.push('sweep_exceeds_counted')
 
     return {
       fundCode: p.fundCode,
-      counted: p.counted,
+      officeBalance: p.officeBalance,
       receivables: p.receivables,
       position,
       capitalTarget: p.capitalTarget,

@@ -8,7 +8,7 @@ const treasurySource = readFileSync(new URL('./screens/Treasury.tsx', import.met
 const dashboardSource = readFileSync(new URL('./screens/Dashboard.tsx', import.meta.url), 'utf8')
 
 describe('branch treasury screen contract', () => {
-  it('uses unambiguous funding, count and directional transfer copy in both languages', () => {
+  it('uses unambiguous funding and directional transfer copy in both languages', () => {
     for (const catalog of [ar, en]) {
       expect(catalog.treasury.ownerFunding).not.toBe(catalog.treasury.deposit)
       expect(catalog.treasury.transferToCompany.length).toBeGreaterThan(10)
@@ -19,10 +19,15 @@ describe('branch treasury screen contract', () => {
     }
   })
 
-  it('reloads the sealed count instead of replacing its details with a check mark', () => {
-    expect(treasurySource).toContain("api.get<CashCountView>(`/cash-counts/${d.businessDate}`)")
-    expect(treasurySource).toContain('restoreCountDraft(saved.lines)')
-    expect(treasurySource).toContain('savedCountDetails')
+  it('shows only the expected office balances and omits the daily cash-count form', () => {
+    expect(treasurySource).toContain('.treasuryBalances()')
+    expect(treasurySource).toContain("target === 'cash' ? t.treasury.expectedCashBox : t.treasury.expectedWallet")
+    expect(treasurySource).not.toContain('<Card title={t.treasury.cashCount}>')
+    expect(treasurySource).not.toContain('/cash-counts')
+    expect(ar.treasury.expectedCashBox).toContain('يجب')
+    expect(ar.treasury.expectedWallet).toContain('يجب')
+    expect(en.treasury.expectedCashBox.toLowerCase()).toContain('expected')
+    expect(en.treasury.expectedWallet.toLowerCase()).toContain('expected')
   })
 
   it('does not fetch or render the company fund for a branch-only role', () => {
@@ -51,11 +56,26 @@ describe('branch treasury screen contract', () => {
     }
   })
 
-  it('shows the restoration position as the exact counted plus receivables equation', () => {
-    expect(treasurySource).toContain('<Money value={leg.counted} />')
+  it('shows the restoration position as system balance plus receivables without count semantics', () => {
+    expect(treasurySource).toContain('<Money value={leg.officeBalance} />')
     expect(treasurySource).toContain('<Money value={leg.receivables} />')
     expect(treasurySource).toContain('<Money value={leg.position} />')
     expect(treasurySource).toContain("<span>=</span>")
+    expect(treasurySource).not.toContain('leg.counted')
+    expect(treasurySource).not.toContain('restoration.counted')
+    expect(treasurySource).not.toContain('t.treasury.countFirst')
+    expect(ar.treasury.positionFormula).toBe('رصيد النظام + الذمم')
+    expect(ar.treasury.restorationHint).not.toMatch(/جرد|مجرود/)
+    expect(en.treasury.positionFormula).toBe('system balance + receivables')
+    expect(en.treasury.restorationHint.toLowerCase()).not.toContain('count')
+  })
+
+  it('gates restoration on a ledger-backed response, feasibility, and the persisted completed state', () => {
+    expect(treasurySource).toContain("restoration.source !== 'live_ledger'")
+    expect(treasurySource).toContain("if (!restoration || restoration.source !== 'live_ledger') return")
+    expect(treasurySource).toContain('restoration.alreadyRestored === true ? (')
+    expect(treasurySource).toContain('<Button onClick={doRestore} disabled={!restoration.feasible}>')
+    expect(treasurySource).not.toContain('restoreDone')
   })
 
   it('lets an authorised manager edit both effective restoration targets with confirmation', () => {

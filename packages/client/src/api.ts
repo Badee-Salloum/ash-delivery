@@ -560,6 +560,30 @@ export interface ShiftSettlementView {
   settlementHash: string
 }
 
+/**
+ * Rolling-deploy shape from the API before close-shortage receivables were introduced.
+ *
+ * Those two fields were added together. Treating their absence as zero is the only truthful
+ * compatibility value: the older server could neither preview nor publish that kind of debt.
+ * A positive value typed by a new client still cannot match this normalized preview, so approval
+ * remains blocked until a server that actually supports the feature answers with the same value.
+ */
+type ShiftSettlementWireView = Omit<
+  ShiftSettlementView,
+  'maximumCashShortageReceivable' | 'cashShortageReceivable'
+> & {
+  maximumCashShortageReceivable?: string
+  cashShortageReceivable?: string
+}
+
+function normalizeShiftSettlementView(view: ShiftSettlementWireView): ShiftSettlementView {
+  return {
+    ...view,
+    maximumCashShortageReceivable: view.maximumCashShortageReceivable ?? '0.00',
+    cashShortageReceivable: view.cashShortageReceivable ?? '0.00',
+  }
+}
+
 /** The two physical handovers the manager must attest before close approval can post. */
 export interface ApproveCloseRequest {
   reviewedOrdersHash: string
@@ -578,11 +602,13 @@ export interface ApproveCloseRequest {
  */
 export interface RestorationLegView {
   fundCode: 'office_cash' | 'office_wallet'
-  /** Physical amount from the sealed count (or the live box after a completed restoration). */
-  counted: string
+  /** Current office-fund balance from the system ledger. */
+  officeBalance: string
+  /** Transitional compatibility for older API deployments; UI code must use `officeBalance`. */
+  counted?: string
   /** Outstanding driver debt assigned to this box. */
   receivables: string
-  /** counted + الذمم — «الوضع الحالي». */
+  /** officeBalance + الذمم — «الوضع الحالي». */
   position: string
   capitalTarget: string
   /** Signed: positive is «كييش», negative «شحن من الصندوق». */
@@ -595,14 +621,46 @@ export interface RestorationLegView {
 }
 export interface RestorationView {
   businessDate: string
-  /** Preview only: whether tonight's count has been sealed yet (decision j gates on this). */
-  counted?: boolean
+  /** Present only on the ledger-backed restoration API. Missing means the server is still legacy. */
+  source?: 'live_ledger'
   /** True after today's immutable restoration posting exists; prevents a fresh-looking replay after reload. */
   alreadyRestored?: boolean
   legs: RestorationLegView[]
   netToCompany: string
   feasible: boolean
   refusals: Array<'sweep_exceeds_counted' | 'no_capital_target'>
+}
+
+/** Rolling-deploy shape accepted from both the old count-based API and the ledger-based API. */
+interface RestorationWireView extends Omit<RestorationView, 'legs' | 'feasible' | 'refusals'> {
+  /** Old previews exposed this gate; it is intentionally absent from the normalized view. */
+  counted?: boolean
+  feasible?: boolean
+  refusals?: RestorationView['refusals']
+  legs: Array<Omit<RestorationLegView, 'officeBalance'> & { officeBalance?: string }>
+}
+
+function normalizeRestorationView(view: RestorationWireView): RestorationView {
+  const legs = view.legs.map((leg) => {
+    const officeBalance = leg.officeBalance ?? leg.counted
+    if (officeBalance === undefined) {
+      throw {
+        status: 502,
+        error: 'malformed_response',
+        detail: 'restoration leg is missing officeBalance',
+      } satisfies ApiError
+    }
+    return { ...leg, officeBalance }
+  })
+  return {
+    businessDate: view.businessDate,
+    ...(view.source === undefined ? {} : { source: view.source }),
+    ...(view.alreadyRestored === undefined ? {} : { alreadyRestored: view.alreadyRestored }),
+    legs,
+    netToCompany: view.netToCompany,
+    feasible: view.feasible ?? legs.every((leg) => leg.feasible),
+    refusals: view.refusals ?? [...new Set(legs.flatMap((leg) => leg.refusals))],
+  }
 }
 
 export interface CapitalTargetsView {
@@ -1421,7 +1479,7 @@ export class ApiClient {
   }
 
   /** «كشف التسوية» — read-only and server-owned. Posts nothing until both handovers are confirmed. */
-  shiftSettlement(
+  async shiftSettlement(
     shiftId: string,
     actual?: { actualCash: string; actualWallet: string },
     deferred?: {
@@ -1429,7 +1487,7 @@ export class ApiClient {
       walletReceivableDeferred: string
       cashShortageReceivable?: string
     },
-  ) {
+  ): Promise<ShiftSettlementView> {
     const params = new URLSearchParams()
     if (actual) {
       params.set('actualCash', actual.actualCash)
@@ -1444,7 +1502,8 @@ export class ApiClient {
     }
     const encoded = params.toString()
     const query = encoded === '' ? '' : `?${encoded}`
-    return this.get<ShiftSettlementView>(`/shifts/${shiftId}/settlement${query}`)
+    const view = await this.get<ShiftSettlementWireView>(`/shifts/${shiftId}/settlement${query}`)
+    return normalizeShiftSettlementView(view)
   }
 
   /**
@@ -1547,12 +1606,13 @@ export class ApiClient {
 
   // ── «الترميم» — the daily restoration (owner decision 10) ───────────────────────────────────
 
-  /** What tonight's ترميم WOULD do, read from the sealed count. Posts nothing. */
-  restorationPreview() {
+  /** What tonight's ترميم would do from the ledger-backed office position. Posts nothing. */
+  async restorationPreview(): Promise<RestorationView> {
     // `get()` already scopes branch reads. Building the query here as well produced duplicate
     // `branchId` parameters for organisation-wide actors, which some query parsers expose as an
     // array and the server correctly refuses as an invalid branch selector.
-    return this.get<RestorationView>('/treasury/restoration/preview')
+    const view = await this.get<RestorationWireView>('/treasury/restoration/preview')
+    return normalizeRestorationView(view)
   }
   /** Publishes today's effective targets atomically; prior restored dates remain immutable. */
   updateCapitalTargets(cashTarget: string, walletTarget: string, reason: string) {
@@ -1563,12 +1623,20 @@ export class ApiClient {
       ...(this.branchId ? { branchId: this.branchId } : {}),
     })
   }
-  /** Performs it. The plan is re-derived server-side from the count — nothing here is trusted. */
-  restore(reason: string) {
-    return this.post<RestorationView & { postings: number }>('/treasury/restoration', {
-      reason,
-      ...(this.branchId ? { branchId: this.branchId } : {}),
-    })
+  /** Performs it. The plan is re-derived server-side from the ledger — nothing here is trusted. */
+  async restore(reason: string): Promise<RestorationView & { postings: number; reconciliationPostings?: number }> {
+    const result = await this.post<RestorationWireView & { postings: number; reconciliationPostings?: number }>(
+      '/treasury/restoration',
+      {
+        reason,
+        ...(this.branchId ? { branchId: this.branchId } : {}),
+      },
+    )
+    return {
+      ...normalizeRestorationView(result),
+      postings: result.postings,
+      ...(result.reconciliationPostings === undefined ? {} : { reconciliationPostings: result.reconciliationPostings }),
+    }
   }
 
   // ── Manual journal entry + BR7 correction (SRS E-3) — branch manager + GM ───────────────────

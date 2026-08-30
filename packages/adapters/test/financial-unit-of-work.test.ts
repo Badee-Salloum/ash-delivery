@@ -31,6 +31,32 @@ const meta = {
 }
 
 describe('in-memory financial unit of work', () => {
+  it('preserves the nullable evidence discriminator and returns an immutable v3 snapshot copy', async () => {
+    const deps = createMemoryDeps(Date.UTC(2026, 7, 31))
+    const plan = {
+      schemaVersion: 3,
+      source: 'live_ledger',
+      openingBalances: [
+        { fundCode: 'office_cash', balance: '50000.00' },
+        { fundCode: 'office_wallet', balance: '10000.00' },
+      ],
+    }
+    await deps.restorations.create({
+      branchId: BRANCH,
+      businessDate: '2026-08-31',
+      cashCountId: null,
+      plan,
+      netToCompany: minor(0n),
+      reason: 'ledger-backed restoration',
+      performedBy: USER,
+    })
+
+    const first = await deps.restorations.find(BRANCH, '2026-08-31')
+    expect(first).toMatchObject({ cashCountId: null, plan })
+    ;(first!.plan as { source: string }).source = 'mutated-copy'
+    await expect(deps.restorations.find(BRANCH, '2026-08-31')).resolves.toMatchObject({ plan })
+  })
+
   it('rolls back a journal when the expense row does not complete', async () => {
     const deps = createMemoryDeps(Date.UTC(2026, 7, 23))
     const failure = new Error('expense insert failed')

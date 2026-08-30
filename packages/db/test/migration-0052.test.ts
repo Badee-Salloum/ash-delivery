@@ -11,7 +11,8 @@ const compact = migration.replace(/\s+/g, ' ')
 describe('migration 0052 close-time ordinary shortage receivable', () => {
   it('follows the write-off migration without rewriting history', () => {
     const files = readdirSync(migrationDir).filter((file) => file.endsWith('.sql')).sort()
-    expect(files.slice(-2)).toEqual([
+    const index = files.indexOf('0052_shift_shortage_ordinary_receivable.sql')
+    expect(files.slice(index - 1, index + 1)).toEqual([
       '0051_receivable_writeoff.sql',
       '0052_shift_shortage_ordinary_receivable.sql',
     ])

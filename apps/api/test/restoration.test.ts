@@ -9,9 +9,9 @@ const ONE_MINOR = '0.01'
  * «الترميم» — the daily restoration, at the HTTP level (owner decision 10).
  *
  * The domain suite proves the arithmetic. What is only provable here is the part the owner's own
- * process depends on: that the plan is built from the SEALED COUNT and not from the request body,
- * that it refuses before it is counted, that it runs once a day, and that the money it moves
- * actually lands in صندوق الشركة.
+ * process depends on: that the plan is built from the branch-locked live ledger and not from the
+ * request body or cash count, that it runs once a day, and that the money it moves actually lands
+ * in صندوق الشركة.
  */
 
 let h: Harness
@@ -54,6 +54,9 @@ async function countBoxes(token: string, cash: string, wallet: string): Promise<
 
 interface LegView {
   fundCode: string
+  officeBalance: string
+  openingOfficeBalance: string
+  /** Transitional alias retained for the old Admin. */
   counted: string
   receivables: string
   position: string
@@ -164,16 +167,61 @@ describe('الترميم — the daily restoration', () => {
     })).statusCode).toBe(403)
   })
 
-  it('refuses before the boxes are counted (decision j)', async () => {
+  it('previews and executes from live ledger balances without any cash count, and freezes snapshot v3', async () => {
     const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(4_500_000))
+    await seedFund(manager, 'office_wallet', sypStr(900_000))
+    expect(await h.deps.cashCounts.find(BRANCH, '2026-07-21')).toBeNull()
 
     const preview = await get(manager, '/treasury/restoration/preview')
     expect(preview.statusCode, preview.body).toBe(200)
-    expect(preview.json().counted).toBe(false)
+    expect(preview.json()).toMatchObject({
+      source: 'live_ledger',
+      counted: true,
+      alreadyRestored: false,
+      netToCompany: sypStr(400_000),
+    })
+    expect(preview.json().openingBalances).toEqual([
+      { fundCode: 'office_cash', balance: sypStr(4_500_000) },
+      { fundCode: 'office_wallet', balance: sypStr(900_000) },
+    ])
+    expect(legOf(preview.json(), 'office_cash')).toMatchObject({
+      officeBalance: sypStr(4_500_000),
+      openingOfficeBalance: sypStr(4_500_000),
+      counted: sypStr(4_500_000),
+      direction: 'to_company',
+      amount: sypStr(500_000),
+    })
 
     const res = await post(manager, '/treasury/restoration', { reason: 'ترميم اليوم' })
-    expect(res.statusCode).toBe(422)
-    expect(res.json().error).toBe('cash_count_required')
+    expect(res.statusCode, res.body).toBe(201)
+    expect(res.json()).toMatchObject({
+      source: 'live_ledger',
+      counted: true,
+      netToCompany: sypStr(400_000),
+      postings: 2,
+      reconciliationPostings: 0,
+    })
+    expect(h.deps.ledger.entries.filter((entry) => entry.eventType === 'correction')).toEqual([])
+
+    const stored = await h.deps.restorations.find(BRANCH, '2026-07-21')
+    expect(stored?.cashCountId).toBeNull()
+    const snapshot = stored?.plan as {
+      schemaVersion: number
+      source: string
+      openingBalances: Array<{ fundCode: string; balance: string }>
+      restorationJournalEntryIds: number[]
+      legs: Array<Record<string, unknown>>
+    }
+    expect(snapshot).toMatchObject({
+      schemaVersion: 3,
+      source: 'live_ledger',
+      openingBalances: preview.json().openingBalances,
+    })
+    expect(snapshot.restorationJournalEntryIds).toHaveLength(2)
+    expect(snapshot.legs.every((leg) => 'officeBalance' in leg && !('counted' in leg))).toBe(true)
+    expect(snapshot).not.toHaveProperty('countReconciliation')
+    expect(snapshot).not.toHaveProperty('reconciliationJournalEntryIds')
   })
 
   /**
@@ -189,13 +237,12 @@ describe('الترميم — the daily restoration', () => {
     await seedFund(manager, 'office_wallet', sypStr(970_000))
     await seedFund(manager, `driver_receivable_wallet:${DRIVER_ID}`, sypStr(20_000))
     await seedFund(manager, `driver_shift_funding_wallet:${DRIVER_ID}`, sypStr(10_000))
-    await countBoxes(manager, sypStr(3_600_000), sypStr(970_000))
-
     const res = await post(manager, '/treasury/restoration', { reason: 'ترميم اليوم' })
     expect(res.statusCode, res.body).toBe(201)
 
     const cash = legOf(res.json(), 'office_cash')
-    expect(cash.counted).toBe(sypStr(3_600_000))
+    expect(cash.officeBalance).toBe(sypStr(3_600_000))
+    expect(cash.counted).toBe(cash.officeBalance)
     expect(cash.receivables).toBe(sypStr(400_000))
     expect(cash.position).toBe(sypStr(4_000_000))
     expect(cash.capitalTarget).toBe(sypStr(4_000_000))
@@ -223,7 +270,6 @@ describe('الترميم — the daily restoration', () => {
       const manager = await h.loginAs('manager')
       await seedFund(manager, `${ordinaryFund}:${DRIVER_ID}`, MAX_MINOR)
       await seedFund(manager, `${shiftFundingFund}:${DRIVER_ID}`, ONE_MINOR)
-      await countBoxes(manager, sypStr(0), sypStr(0))
 
       const preview = await get(manager, '/treasury/restoration/preview')
       expect(preview.statusCode, preview.body).toBe(422)
@@ -243,11 +289,10 @@ describe('الترميم — the daily restoration', () => {
     },
   )
 
-  it('rejects an overflowing counted-plus-receivable position before snapshot or journal writes', async () => {
+  it('rejects an overflowing live-office-plus-receivable position before snapshot or journal writes', async () => {
     const manager = await h.loginAs('manager')
     await seedFund(manager, 'office_cash', MAX_MINOR)
     await seedFund(manager, `driver_receivable_cash:${DRIVER_ID}`, ONE_MINOR)
-    await countBoxes(manager, MAX_MINOR, sypStr(0))
 
     const response = await post(manager, '/treasury/restoration', { reason: 'range guard' })
     expect(response.statusCode, response.body).toBe(422)
@@ -263,7 +308,6 @@ describe('الترميم — the daily restoration', () => {
     const manager = await h.loginAs('manager')
     await seedFund(manager, 'office_cash', MAX_MINOR)
     await seedFund(manager, 'office_wallet', MAX_MINOR)
-    await countBoxes(manager, MAX_MINOR, MAX_MINOR)
 
     const response = await post(manager, '/treasury/restoration', { reason: 'range guard' })
     expect(response.statusCode, response.body).toBe(422)
@@ -328,13 +372,12 @@ describe('الترميم — the daily restoration', () => {
     expect(await companyFund()).toBe(sypStr(200_000))
   })
 
-  it('refuses to sweep money the box does not physically hold', async () => {
+  it('refuses to sweep more than the live office balance', async () => {
     const manager = await h.loginAs('manager')
-    // The ledger believes there is plenty; the drawer holds 100,000 and the ذمم carry the rest.
+    // The receivable creates a paper surplus larger than the office fund can transfer.
     await seedFund(manager, 'office_cash', sypStr(4_000_000))
     await seedFund(manager, `driver_receivable_cash:${DRIVER_ID}`, sypStr(5_000_000))
     await seedFund(manager, 'office_wallet', sypStr(1_000_000))
-    await countBoxes(manager, sypStr(100_000), sypStr(1_000_000))
 
     const preview = await get(manager, '/treasury/restoration/preview')
     expect(preview.json().feasible).toBe(false)
@@ -359,7 +402,7 @@ describe('الترميم — the daily restoration', () => {
     expect(await companyFund()).toBe(sypStr(500_000))
   })
 
-  it('reconciles a signed nonzero count variance explicitly before restoration without touching company_box', async () => {
+  it('ignores cash-count variance and creates no reconciliation when live ledger is authoritative', async () => {
     const manager = await h.loginAs('manager')
     await seedFund(manager, 'office_cash', sypStr(4_100_000))
     await seedFund(manager, 'office_wallet', sypStr(1_000_000))
@@ -367,47 +410,29 @@ describe('الترميم — the daily restoration', () => {
 
     const count = await h.deps.cashCounts.find(BRANCH, '2026-07-21')
     expect(count?.lines.find((line) => line.fundCode === 'office_cash')?.variance).toBe(-10_000_000n)
-    const res = await post(manager, '/treasury/restoration', { reason: 'manager approved signed shortage' })
+    const res = await post(manager, '/treasury/restoration', { reason: 'live ledger restoration' })
     expect(res.statusCode, res.body).toBe(201)
-    expect(res.json().postings).toBe(0)
-    expect(res.json().reconciliationPostings).toBe(1)
+    expect(res.json().postings).toBe(1)
+    expect(res.json().reconciliationPostings).toBe(0)
+    expect(legOf(res.json(), 'office_cash')).toMatchObject({
+      officeBalance: sypStr(4_100_000),
+      delta: sypStr(100_000),
+      direction: 'to_company',
+    })
 
     expect(await h.deps.ledger.fundBalance(BRANCH, 'office_cash')).toBe(400_000_000n)
-    expect(await h.deps.ledger.fundBalance(BRANCH, 'company_box')).toBe(0n)
-    expect(
-      await h.deps.ledger.fundBalance(
-        BRANCH,
-        `cost_center:cash_count_variance:${BRANCH}:office_cash`,
-      ),
-    ).toBe(10_000_000n)
-
-    const correction = h.deps.ledger.entries.find(
-      (entry) => entry.eventType === 'correction' && entry.occurrenceKey.startsWith(`cash-count:${count!.id}:`),
-    )
-    expect(correction).toMatchObject({
-      reason: 'manager approved signed shortage',
-      lines: [
-        { fundCode: 'office_cash', side: 'C', role: 'cash_count_reconciled_fund' },
-        {
-          fundCode: `cost_center:cash_count_variance:${BRANCH}:office_cash`,
-          side: 'D',
-          role: 'cash_count_variance_counterpart',
-        },
-      ],
-    })
-    expect(correction!.occurrenceKey).toContain(count!.proofSha256)
+    expect(await h.deps.ledger.fundBalance(BRANCH, 'company_box')).toBe(10_000_000n)
+    expect(h.deps.ledger.entries.filter((entry) => entry.eventType === 'correction')).toEqual([])
 
     const restoration = await h.deps.restorations.find(BRANCH, '2026-07-21')
-    expect(restoration?.cashCountId).toBe(count!.id)
+    expect(restoration?.cashCountId).toBeNull()
     expect(restoration?.plan).toMatchObject({
-      schemaVersion: 2,
-      cashCountProofSha256: count!.proofSha256,
-      countReconciliation: [
-        { fundCode: 'office_cash', variance: sypStr(-100_000), resolution: 'جرد اليوم' },
-        { fundCode: 'office_wallet', variance: sypStr(0), resolution: 'جرد اليوم' },
+      schemaVersion: 3,
+      source: 'live_ledger',
+      openingBalances: [
+        { fundCode: 'office_cash', balance: sypStr(4_100_000) },
+        { fundCode: 'office_wallet', balance: sypStr(1_000_000) },
       ],
-      reconciliationJournalEntryIds: [correction!.id],
-      restorationJournalEntryIds: [],
     })
   })
 
@@ -450,18 +475,79 @@ describe('الترميم — the daily restoration', () => {
     expect(await h.deps.restorations.find(BRANCH, '2026-07-21')).not.toBeNull()
   })
 
-  it('refuses a stale sealed count after a later branch-money posting', async () => {
+  it('recalculates from the live ledger inside POST after balances change since preview', async () => {
     const manager = await h.loginAs('manager')
     await seedFund(manager, 'office_cash', sypStr(4_000_000))
     await seedFund(manager, 'office_wallet', sypStr(1_000_000))
-    await countBoxes(manager, sypStr(4_000_000), sypStr(1_000_000))
+
+    const preview = await get(manager, '/treasury/restoration/preview')
+    expect(preview.statusCode, preview.body).toBe(200)
+    expect(legOf(preview.json(), 'office_cash')).toMatchObject({
+      officeBalance: sypStr(4_000_000),
+      delta: sypStr(0),
+    })
+
+    // This posting lands after preview. POST must take a fresh balance under the branch lock.
     await seedFund(manager, 'office_cash', sypStr(100_000))
 
-    const res = await post(manager, '/treasury/restoration', { reason: 'stale count must not repair silently' })
-    expect(res.statusCode, res.body).toBe(409)
-    expect(res.json().error).toBe('cash_count_stale')
-    expect(await h.deps.restorations.find(BRANCH, '2026-07-21')).toBeNull()
-    expect(h.deps.ledger.entries.filter((entry) => entry.eventType === 'restoration')).toHaveLength(0)
+    const res = await post(manager, '/treasury/restoration', { reason: 'fresh locked ledger balance' })
+    expect(res.statusCode, res.body).toBe(201)
+    expect(legOf(res.json(), 'office_cash')).toMatchObject({
+      officeBalance: sypStr(4_100_000),
+      delta: sypStr(100_000),
+      direction: 'to_company',
+      amount: sypStr(100_000),
+    })
+    expect(await companyFund()).toBe(sypStr(100_000))
+    expect((await h.deps.restorations.find(BRANCH, '2026-07-21'))?.plan).toMatchObject({
+      openingBalances: [
+        { fundCode: 'office_cash', balance: sypStr(4_100_000) },
+        { fundCode: 'office_wallet', balance: sypStr(1_000_000) },
+      ],
+    })
+  })
+
+  it('reads both opening office balances inside the shared atomic branch lock', async () => {
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(4_500_000))
+    await seedFund(manager, 'office_wallet', sypStr(1_000_000))
+
+    const unit = h.deps.financialUnitOfWork
+    const originalRun = unit.run.bind(unit)
+    let observedLockKey: string | null = null
+    let insideLockedWork = false
+    let officeBalanceReads = 0
+
+    unit.run = (async (input, work) => {
+      observedLockKey = input.lockKey
+      return originalRun(input, async (tx) => {
+        insideLockedWork = true
+        const originalBalance = tx.ledger.fundBalance.bind(tx.ledger)
+        tx.ledger.fundBalance = async (branchId, fundCode) => {
+          if (fundCode === 'office_cash' || fundCode === 'office_wallet') {
+            expect(insideLockedWork).toBe(true)
+            officeBalanceReads += 1
+          }
+          return originalBalance(branchId, fundCode)
+        }
+        try {
+          return await work(tx)
+        } finally {
+          tx.ledger.fundBalance = originalBalance
+          insideLockedWork = false
+        }
+      })
+    }) as typeof unit.run
+
+    try {
+      const res = await post(manager, '/treasury/restoration', { reason: 'atomic live snapshot' })
+      expect(res.statusCode, res.body).toBe(201)
+    } finally {
+      unit.run = originalRun
+    }
+
+    expect(observedLockKey).toBe(`receivables:${BRANCH}`)
+    expect(officeBalanceReads).toBe(2)
   })
 
   it('returns the live post-action position after reload while keeping the restoration record immutable', async () => {
@@ -502,8 +588,8 @@ describe('الترميم — the daily restoration', () => {
     expect(unnamed.json().error).toBe('branch_required')
 
     const named = await post(sysadmin, `/treasury/restoration?branchId=${BRANCH}`, { reason: 'ترميم' })
-    // He may act — he is stopped by the count gate, not by his role (decision 9).
-    expect(named.json().error).toBe('cash_count_required')
+    expect(named.statusCode, named.body).toBe(201)
+    expect(named.json()).toMatchObject({ source: 'live_ledger', counted: true })
   })
 })
 
@@ -522,30 +608,19 @@ describe('a cash count that shows a variance', () => {
     ...extra,
   })
 
-  it('THE DEADLOCK THIS BREAKS: a posting after the count no longer strands the day', async () => {
-    // Before recounting existed: the restoration refused with `cash_count_stale` telling the
-    // manager to recount, while the count route refused that with `already_counted_today`. The day
-    // could never be restored, and nothing said why.
+  it('a posting after cash count does not stale or gate live-ledger restoration', async () => {
     const manager = await h.loginAs('manager')
     await seedFund(manager, 'office_cash', sypStr(60_000))
     await seedFund(manager, 'office_wallet', sypStr(10_000))
     expect((await post(manager, '/cash-counts', countBody(60_000, 10_000))).statusCode).toBe(201)
 
-    // A late movement lands after the seal.
+    // A late movement lands after the seal, but v3 reads the ledger and does not reconcile count.
     await seedFund(manager, 'office_cash', sypStr(500))
 
-    const stale = await post(manager, '/treasury/restoration', { reason: 'ترميم' })
-    expect(stale.statusCode, stale.body).toBe(409)
-    expect(stale.json().error).toBe('cash_count_stale')
-
-    // The way out: recount, naming why.
-    const again = await post(manager, '/cash-counts', countBody(60_500, 10_000, {
-      recountReason: 'حركة متأخرة بعد الجرد الأول',
-    }))
-    expect(again.statusCode, again.body).toBe(201)
-
-    const restored = await post(manager, '/treasury/restoration', { reason: 'ترميم بعد إعادة الجرد' })
+    const restored = await post(manager, '/treasury/restoration', { reason: 'ترميم من الدفتر الحي' })
     expect(restored.statusCode, restored.body).toBe(201)
+    expect(legOf(restored.json(), 'office_cash').officeBalance).toBe(sypStr(60_500))
+    expect(restored.json().reconciliationPostings).toBe(0)
   })
 
   it('refuses a second count that does not say why it is replacing the first', async () => {
@@ -573,8 +648,7 @@ describe('a cash count that shows a variance', () => {
     }))
     expect(second.statusCode, second.body).toBe(201)
 
-    // `find` returns only the ACTIVE count — the restoration must never reconcile against a
-    // superseded one.
+    // `find` returns only the ACTIVE count for the independent weekly-count workflow.
     const active = await get(manager, `/cash-counts/${second.json().businessDate}`)
     expect(active.json().id).toBe(second.json().id)
     expect(active.json().status).toBe('active')
@@ -582,7 +656,7 @@ describe('a cash count that shows a variance', () => {
     expect(firstProof).not.toBe(second.json().proofSha256)
   })
 
-  it('withdrawing the count leaves the day uncounted, so nothing settles against it', async () => {
+  it('withdrawing the count leaves the weekly workflow uncounted but does not block restoration', async () => {
     const manager = await h.loginAs('manager')
     await seedFund(manager, 'office_cash', sypStr(60_000))
     await seedFund(manager, 'office_wallet', sypStr(10_000))
@@ -594,10 +668,9 @@ describe('a cash count that shows a variance', () => {
     expect(cancelled.json().status).toBe('cancelled')
     expect(cancelled.json().closedReason).toContain('نعيد بعد المراجعة')
 
-    // The day is uncounted again: the restoration refuses rather than settling on withdrawn figures.
-    const blocked = await post(manager, '/treasury/restoration', { reason: 'ترميم' })
-    expect(blocked.statusCode, blocked.body).toBe(422)
-    expect(blocked.json().error).toBe('cash_count_required')
+    const restored = await post(manager, '/treasury/restoration', { reason: 'ترميم من الدفتر الحي' })
+    expect(restored.statusCode, restored.body).toBe(201)
+    expect(restored.json()).toMatchObject({ source: 'live_ledger', reconciliationPostings: 0 })
 
     // And counting again is a plain first count, needing no recount reason.
     expect((await post(manager, '/cash-counts', countBody(60_000, 10_000))).statusCode).toBe(201)
@@ -625,16 +698,17 @@ describe('a cash count that shows a variance', () => {
     expect(missing.dates).toContain(date)
   })
 
-  it('refuses to withdraw a count the restoration already settled against', async () => {
+  it('allows withdrawing a count after v3 restoration because the snapshot does not reference it', async () => {
     const manager = await h.loginAs('manager')
     await seedFund(manager, 'office_cash', sypStr(60_000))
     await seedFund(manager, 'office_wallet', sypStr(10_000))
     const created = await post(manager, '/cash-counts', countBody(60_000, 10_000))
     const date = created.json().businessDate as string
     expect((await post(manager, '/treasury/restoration', { reason: 'ترميم' })).statusCode).toBe(201)
+    expect((await h.deps.restorations.find(BRANCH, date))?.cashCountId).toBeNull()
 
     const res = await post(manager, `/cash-counts/${date}/cancel`, { reason: 'تراجع' })
-    expect(res.statusCode, res.body).toBe(409)
-    expect(res.json().error).toBe('already_restored_today')
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json()).toMatchObject({ status: 'cancelled', closedReason: 'تراجع' })
   })
 })

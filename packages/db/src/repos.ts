@@ -366,7 +366,7 @@ export class PgRestorationRepo {
   async create(row: {
     branchId: string
     businessDate: string
-    cashCountId: string
+    cashCountId: string | null
     plan: unknown
     netToCompany: Minor
     reason: string
@@ -404,7 +404,7 @@ export class PgRestorationRepo {
     return {
       branchId: String(r.branch_id),
       businessDate: String(r.business_date).slice(0, 10),
-      cashCountId: String(r.cash_count_id),
+      cashCountId: r.cash_count_id === null ? null : String(r.cash_count_id),
       plan: r.plan,
       netToCompany: minor(BigInt(String(r.net_to_company_minor))),
       reason: String(r.reason),

@@ -79,6 +79,7 @@ it('adds the selected branch exactly once to the restoration preview read', asyn
     new Response(
       JSON.stringify({
         businessDate: '2026-08-15',
+        source: 'live_ledger',
         counted: true,
         alreadyRestored: false,
         legs: [],
@@ -93,13 +94,52 @@ it('adds the selected branch exactly once to the restoration preview read', asyn
   const api = new ApiClient('/api')
   api.setBranch('branch-1')
 
-  await api.restorationPreview()
+  const preview = await api.restorationPreview()
+
+  expect(preview.source).toBe('live_ledger')
 
   expect(fetchMock).toHaveBeenCalledWith('/api/treasury/restoration/preview?branchId=branch-1', {
     method: 'GET',
     credentials: 'include',
     headers: { 'content-type': 'application/json' },
   })
+})
+
+it('normalizes the legacy restoration balance field without exposing the old count gate', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        businessDate: '2026-08-31',
+        counted: false,
+        alreadyRestored: false,
+        legs: [
+          {
+            fundCode: 'office_cash',
+            counted: '52030.00',
+            receivables: '7970.00',
+            position: '60000.00',
+            capitalTarget: '60000.00',
+            delta: '0.00',
+            direction: null,
+            amount: '0.00',
+            feasible: true,
+            refusals: [],
+          },
+        ],
+        netToCompany: '0.00',
+        feasible: true,
+        refusals: [],
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+
+  const preview = await new ApiClient('/api').restorationPreview()
+
+  expect(preview).not.toHaveProperty('counted')
+  expect(preview.source).toBeUndefined()
+  expect(preview.legs[0]).toMatchObject({ officeBalance: '52030.00' })
 })
 
 it('publishes both restoration targets and their audited reason in one branch-scoped PUT', async () => {
@@ -463,6 +503,59 @@ it('previews next-shift funding separately from an ordinary close shortage recei
 
   expect(fetchMock).toHaveBeenCalledWith(
     '/api/shifts/shift-4/settlement?cashReceivableDeferred=6000.00&walletReceivableDeferred=1000.00&cashShortageReceivable=400.00',
+    expect.objectContaining({ method: 'GET', credentials: 'include' }),
+  )
+})
+
+it('normalizes an older settlement response without close-shortage fields instead of crashing review', async () => {
+  const legacy = {
+    policyCode: 'fixed_40_cash_close_v2_receivable',
+    driverRateBps: 4000,
+    deliveryFeeTotal: '1000.00',
+    fixedDriverShare: '400.00',
+    manualDriverShare: '0.00',
+    grossDriverShare: '400.00',
+    cashDeductionTotal: '0.00',
+    baseDriverShare: '400.00',
+    expectedTotal: '1800.00',
+    actualCash: '1300.00',
+    actualWallet: '500.00',
+    actualTotal: '1800.00',
+    variance: '0.00',
+    varianceDirection: 'balanced',
+    finalEmployeeCash: '400.00',
+    cashClaimToOffice: '900.00',
+    walletClaimToOffice: '500.00',
+    cashReceivableDeferred: '0.00',
+    walletReceivableDeferred: '0.00',
+    walletToOffice: '500.00',
+    cashToOffice: '900.00',
+    walletAction: 'collect',
+    walletAmount: '500.00',
+    cashAction: 'collect',
+    cashAmount: '900.00',
+    settlementHash: 'e'.repeat(64),
+  }
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(JSON.stringify(legacy), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+
+  await expect(api.shiftSettlement('shift-legacy', undefined, {
+    cashReceivableDeferred: '0',
+    walletReceivableDeferred: '0',
+    cashShortageReceivable: '0',
+  })).resolves.toMatchObject({
+    maximumCashShortageReceivable: '0.00',
+    cashShortageReceivable: '0.00',
+    settlementHash: legacy.settlementHash,
+  })
+  expect(fetchMock).toHaveBeenCalledWith(
+    '/api/shifts/shift-legacy/settlement?cashReceivableDeferred=0&walletReceivableDeferred=0&cashShortageReceivable=0',
     expect.objectContaining({ method: 'GET', credentials: 'include' }),
   )
 })

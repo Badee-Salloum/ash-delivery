@@ -71,7 +71,11 @@ export class MemoryOfficeCapitalTargetRepo implements OfficeCapitalTargetRepo {
   }
 }
 
-/** One ترميم per branch per working day — the same rule the unique index enforces in Postgres. */
+/**
+ * One ترميم per branch per working day — the same rule the unique index enforces in Postgres.
+ * `RestorationRecord` preserves both evidence generations: v2 has a cash-count id, while v3 keeps
+ * it null and freezes the opening live-ledger balances inside its cloned plan.
+ */
 export class MemoryRestorationRepo implements RestorationRepo {
   private readonly rows: RestorationRecord[] = []
 

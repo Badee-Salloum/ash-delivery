@@ -1143,7 +1143,13 @@ export interface OfficeCapitalTargetRepo {
 export interface RestorationRecord {
   branchId: string
   businessDate: CalendarDate
-  cashCountId: string
+  /**
+   * Historical schema-v2 restorations are backed by an immutable sealed cash count. Schema v3
+   * snapshots the live office ledger instead, so it deliberately has no cash-count identity.
+   * The plan's schemaVersion is the durable discriminator; keeping this nullable lets old facts
+   * remain readable without inventing evidence for new ledger-backed restorations.
+   */
+  cashCountId: string | null
   plan: unknown
   /** SIGNED: positive is «كييش», negative is «شحن من الصندوق». */
   netToCompany: Minor

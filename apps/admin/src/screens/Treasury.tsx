@@ -12,14 +12,7 @@ import { useApp } from '../app-context.tsx'
 import { useConfirm, useToast } from '../feedback.tsx'
 import { explainError } from '../errors.ts'
 import { Button, Card, Field, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
-import {
-  buildCountLines,
-  countDifference,
-  countDraftReady,
-  differenceView,
-  restoreCountDraft,
-  summarizeRestoration,
-} from '../treasury-view.ts'
+import { differenceView, summarizeRestoration } from '../treasury-view.ts'
 import {
   browserReceivableOperationMutex,
   browserReceivableOperationStorage,
@@ -43,29 +36,6 @@ interface EntryLine {
   amount: string
 }
 
-interface CashCountSheet {
-  businessDate: string
-  alreadyCounted: boolean
-  funds: Array<{ fundCode: string; computed: string }>
-}
-
-interface CashCountView {
-  id: string
-  businessDate: string
-  countedBy: string
-  countedAt: string
-  proofSha256: string | null
-  notes: string | null
-  balanced: boolean
-  lines: Array<{
-    fundCode: string
-    counted: string
-    computed: string
-    variance: string
-    resolution: string | null
-  }>
-}
-
 interface TreasuryDriver {
   id: string
   code: string
@@ -75,22 +45,13 @@ interface TreasuryDriver {
 }
 
 /**
- * Treasury (SRS E-5, E-6): the daily cash count and the Sunday close. Both are branch-manager +
- * GM; the close itself is system-admin-only and its pre-flight blockers are shown before sealing.
+ * Branch treasury management and the Sunday close. The close itself is system-admin-only and its
+ * pre-flight blockers are shown before sealing.
  */
 export function Treasury(): ReactNode {
   const { api, t, session, branchId } = useApp()
   const toast = useToast()
   const confirm = useConfirm()
-  const [sheet, setSheet] = useState<CashCountSheet | null>(null)
-  const [counted, setCounted] = useState<Record<string, string>>({})
-  const [countResolutions, setCountResolutions] = useState<Record<string, string>>({})
-  /** «إعادة الجرد» / «إلغاء الجرد» — the two answers a variance deserves beside proceeding. */
-  const [recounting, setRecounting] = useState(false)
-  const [recountReason, setRecountReason] = useState('')
-  const [cancelling, setCancelling] = useState(false)
-  const [cancelReason, setCancelReason] = useState('')
-  const [result, setResult] = useState<CashCountView | null>(null)
   const [closeResult, setCloseResult] = useState<{ error?: string; blockers?: Array<{ kind: string }>; weekStart?: string } | null>(null)
   const [balances, setBalances] = useState<{ cash: string; wallet: string } | null>(null)
   const [depositAmt, setDepositAmt] = useState<{ cash: string; wallet: string }>({ cash: '', wallet: '' })
@@ -106,7 +67,6 @@ export function Treasury(): ReactNode {
   // ── «الترميم» ─────────────────────────────────────────────────────────────────────────────
   const [restoration, setRestoration] = useState<RestorationView | null>(null)
   const [restorationError, setRestorationError] = useState<string | null>(null)
-  const [restoreDone, setRestoreDone] = useState(false)
   const [capitalTargetsDraft, setCapitalTargetsDraft] = useState({ cash: '', wallet: '' })
   const [capitalTargetReason, setCapitalTargetReason] = useState('')
   const [capitalTargetsBusy, setCapitalTargetsBusy] = useState(false)
@@ -149,7 +109,6 @@ export function Treasury(): ReactNode {
     status: 'unavailable',
   })
 
-  const [sheetError, setSheetError] = useState<string | null>(null)
   const [balanceError, setBalanceError] = useState<string | null>(null)
   const loadVersion = useRef(0)
   const restorationLoadVersion = useRef(0)
@@ -194,41 +153,8 @@ export function Treasury(): ReactNode {
 
   const load = useCallback(() => {
     const version = ++loadVersion.current
-    setSheetError(null)
     setBalanceError(null)
-    setSheet(null)
-    setResult(null)
-    setCounted({})
-    setCountResolutions({})
     setBalances(null)
-    void api
-      .get<CashCountSheet>('/cash-counts/sheet')
-      .then(async (d) => {
-        if (version !== loadVersion.current) return
-        setSheet(d)
-        if (!d.alreadyCounted) {
-          setResult(null)
-          setCounted({})
-          setCountResolutions({})
-          return
-        }
-
-        // The sheet only says that today's count exists. Load the sealed record as well so a
-        // refresh restores the frozen system balance, the physical count, every variance and its
-        // audited explanation instead of replacing the whole card with a bare check mark.
-        const saved = await api.get<CashCountView>(`/cash-counts/${d.businessDate}`)
-        if (version !== loadVersion.current) return
-        const draft = restoreCountDraft(saved.lines)
-        setResult(saved)
-        setCounted(draft.counted)
-        setCountResolutions(draft.resolutions)
-      })
-      .catch((e: { error?: string }) => {
-        if (version !== loadVersion.current) return
-        setSheet(null)
-        setResult(null)
-        setSheetError(e.error ?? 'error')
-      })
     void api
       .treasuryBalances()
       .then((next) => {
@@ -248,7 +174,6 @@ export function Treasury(): ReactNode {
       const preview = await api.restorationPreview()
       if (version !== restorationLoadVersion.current) return
       setRestoration(preview)
-      setRestoreDone(preview.alreadyRestored === true)
       setCapitalTargetsDraft({
         cash: preview.legs.find((leg) => leg.fundCode === 'office_cash')?.capitalTarget ?? '',
         wallet: preview.legs.find((leg) => leg.fundCode === 'office_wallet')?.capitalTarget ?? '',
@@ -317,7 +242,6 @@ export function Treasury(): ReactNode {
   // showing branch A's cash box under branch B's name is the worst kind of wrong.
   useEffect(load, [load, branchId])
   useEffect(() => {
-    setRestoreDone(false)
     void loadRestoration()
   }, [loadRestoration])
   useEffect(() => {
@@ -469,98 +393,6 @@ export function Treasury(): ReactNode {
       load()
     } catch (err) {
       setRevMsg(explainError((err as { error?: string }).error ?? 'error', t))
-    }
-  }
-
-  async function reloadCountSheetPreservingDraft(): Promise<void> {
-    try {
-      const latest = await api.get<CashCountSheet>('/cash-counts/sheet')
-      setSheet(latest)
-      if (!latest.alreadyCounted) return
-      const saved = await api.get<CashCountView>(`/cash-counts/${latest.businessDate}`)
-      const draft = restoreCountDraft(saved.lines)
-      setResult(saved)
-      setCounted(draft.counted)
-      setCountResolutions(draft.resolutions)
-    } catch {
-      // Keep the manager's draft intact. The actionable refusal remains visible in the toast and a
-      // later manual retry can refresh without forcing the physical count to be typed again.
-    }
-  }
-
-  /**
-   * «إعادة الجرد» — supersede the sealed count with a fresh one.
-   *
-   * Reopens the fields so the manager types what he counted the second time; the reason rides with
-   * the submission. Until this existed a posting after the seal deadlocked the day: the restoration
-   * refused with `cash_count_stale` telling him to recount, and the count route refused that with
-   * `already_counted_today`.
-   */
-  function beginRecount(): void {
-    setRecounting(true)
-    setResult(null)
-    setSheet((current) => (current ? { ...current, alreadyCounted: false } : current))
-  }
-
-  /** «إلغاء الجرد» — withdraw it, leaving the day uncounted until the error is fixed. */
-  async function cancelCount(): Promise<void> {
-    if (!sheet || cancelReason.trim() === '') return
-    try {
-      await api.post(`/cash-counts/${sheet.businessDate}/cancel`, {
-        ...(branchId ? { branchId } : {}),
-        reason: cancelReason.trim(),
-      })
-      toast.success(t.treasury.countCancelled)
-      setCancelReason('')
-      setCancelling(false)
-      setResult(null)
-      setCounted({})
-      setCountResolutions({})
-      setSheet((current) => (current ? { ...current, alreadyCounted: false } : current))
-      void loadRestoration()
-    } catch (err) {
-      toast.error(explainError((err as { error?: string }).error ?? 'error', t))
-    }
-  }
-
-  async function submitCount(): Promise<void> {
-    if (!sheet) return
-    const lines = buildCountLines(sheet.funds, counted, countResolutions)
-    // Swallowed before: the manager typed the day's counted cash, pressed «تأكيد», and nothing
-    // whatsoever happened — no error, no result — on the seal of the cash box.
-    try {
-      const saved = await api.post<CashCountView>('/cash-counts', {
-        ...(branchId ? { branchId } : {}),
-        businessDate: sheet.businessDate,
-        lines,
-        // A REASON, not a flag: replacing a signed count is an audited act, and «true» would
-        // explain nothing to whoever reads the record later.
-        ...(recounting && recountReason.trim() ? { recountReason: recountReason.trim() } : {}),
-      })
-      setRecounting(false)
-      setRecountReason('')
-      const draft = restoreCountDraft(saved.lines)
-      setResult(saved)
-      setCounted(draft.counted)
-      setCountResolutions(draft.resolutions)
-      setSheet((current) => (current ? { ...current, alreadyCounted: true } : current))
-      // الترميم is computed FROM the count (decision j), so sealing one changes the other.
-      void loadRestoration()
-    } catch (err) {
-      const failure = err as { error?: string; detail?: unknown }
-      if (failure.error === 'cash_count_resolution_required') {
-        if (isCountResolutionDetail(failure.detail)) {
-          const fund = t.treasury.fundCodes[failure.detail.fundCode as keyof typeof t.treasury.fundCodes] ?? failure.detail.fundCode
-          const variance = differenceView(failure.detail.variance)
-          const direction = variance.direction === 'increase' ? t.treasury.increase : t.treasury.shortage
-          toast.error(`${t.errors.cash_count_resolution_required}: ${fund} — ${direction} ${groupThousands(variance.amount)}`)
-        } else {
-          toast.error(t.errors.cash_count_resolution_required)
-        }
-        void reloadCountSheetPreservingDraft()
-      } else {
-        toast.error(explainError(failure.error ?? 'error', t))
-      }
     }
   }
 
@@ -773,7 +605,7 @@ export function Treasury(): ReactNode {
   }
 
   async function doRestore(): Promise<void> {
-    if (!restoration) return
+    if (!restoration || restoration.source !== 'live_ledger') return
     const legText = restoration.legs.map((leg) => {
       const fund = leg.fundCode === 'office_cash' ? t.treasury.cashBox : t.treasury.wallet
       const action =
@@ -812,7 +644,7 @@ export function Treasury(): ReactNode {
 
   async function closeWeek(): Promise<void> {
     // The API expects the FOLLOWING Sunday; the server validates it, so send today's next Sunday.
-    const closeDate = nextSunday(sheet?.businessDate ?? new Date().toISOString().slice(0, 10))
+    const closeDate = nextSunday(session?.businessDate ?? new Date().toISOString().slice(0, 10))
     // BR7 seals the week: every entry inside it becomes immutable and corrections after this are
     // dated correction entries only. It was a bare red button with no question asked.
     const ok = await confirm({
@@ -830,8 +662,6 @@ export function Treasury(): ReactNode {
     }
   }
 
-  const countIsSealed = sheet?.alreadyCounted === true || result !== null
-  const countReady = sheet ? countDraftReady(sheet.funds, counted, countResolutions) : false
   const restorationSummary = restoration ? summarizeRestoration(restoration.legs) : null
   const restorationNet = restoration ? differenceView(restoration.netToCompany) : null
   const capitalTargetsReady = (() => {
@@ -968,9 +798,6 @@ export function Treasury(): ReactNode {
     exactPendingReceivableRetry
   ) && receivableOperationReady(normalizedReceivableDraft) && writeoffAmountWithinBalance
 
-  const fundLabel = (fundCode: string): string =>
-    t.treasury.fundCodes[fundCode as keyof typeof t.treasury.fundCodes] ?? fundCode
-
   const directionLabel = (direction: 'increase' | 'shortage' | 'none', capital = false): string => {
     if (direction === 'increase') return capital ? t.treasury.capitalSurplus : t.treasury.increase
     if (direction === 'shortage') return capital ? t.treasury.capitalShortage : t.treasury.shortage
@@ -990,7 +817,7 @@ export function Treasury(): ReactNode {
           {(['cash', 'wallet'] as const).map((target) => (
             <div key={target} className="rounded-lg border border-slate-200 p-3">
               <div className="text-xs font-semibold text-slate-500">
-                {target === 'cash' ? t.treasury.cashBox : t.treasury.wallet}
+                {target === 'cash' ? t.treasury.expectedCashBox : t.treasury.expectedWallet}
               </div>
               <div className="mt-1 text-2xl font-bold">
                 {balances ? (
@@ -1498,9 +1325,8 @@ export function Treasury(): ReactNode {
       {/*
         «الترميم» — the owner's own end-of-day process, in his own words.
 
-        It reads the SEALED COUNT and shows the two boxes side by side: what is physically there,
-        what is out on ذمم, and how far that stands from رأس مال المكتب. The button is deliberately
-        dead until the count exists — decision (j), and the whole reason the figure is trustworthy.
+        It reads the ledger-backed office balance and shows the two boxes side by side: what the
+        system says is in each box, what is out on ذمم, and how far that stands from رأس مال المكتب.
       */}
       <Card title={t.treasury.restoration} className="lg:col-span-2">
         <p className="text-xs text-slate-600">{t.treasury.restorationHint}</p>
@@ -1512,6 +1338,10 @@ export function Treasury(): ReactNode {
             onRetry={() => void loadRestoration()}
             retryLabel={t.common.retry}
           />
+        ) : restoration.source !== 'live_ledger' ? (
+          <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-800">
+            {t.treasury.restorationServerUpdateRequired}
+          </div>
         ) : (
           <>
             {canDeposit ? (
@@ -1600,7 +1430,7 @@ export function Treasury(): ReactNode {
                       <div className="col-span-2 rounded-lg bg-slate-50 px-2 py-1.5">
                         <dt className="text-xs text-slate-500">{t.treasury.positionFormula}</dt>
                         <dd className="mt-1 flex flex-wrap items-center justify-end gap-1 font-semibold" dir="ltr">
-                          <Money value={leg.counted} />
+                          <Money value={leg.officeBalance} />
                           <span>+</span>
                           <Money value={leg.receivables} />
                           <span>=</span>
@@ -1659,160 +1489,14 @@ export function Treasury(): ReactNode {
                   {restorationNet.direction === 'none' ? null : <> — <Money value={restorationNet.amount} /></>}
                 </span>
               ) : null}
-              {restoreDone || restoration.alreadyRestored === true ? (
+              {restoration.alreadyRestored === true ? (
                 <span className="text-sm font-semibold text-emerald-700">{t.treasury.restored} ✓</span>
               ) : (
-                <Button onClick={doRestore} disabled={restoration.counted === false || !restoration.feasible}>
+                <Button onClick={doRestore} disabled={!restoration.feasible}>
                   {t.treasury.doRestore}
                 </Button>
               )}
             </div>
-            {restoration.counted === false ? (
-              // Not an error — an order of operations. The count comes first, always.
-              <p className="mt-2 text-xs text-amber-700">{t.treasury.countFirst}</p>
-            ) : null}
-          </>
-        )}
-      </Card>
-
-      <Card title={t.treasury.cashCount}>
-        {!sheet ? (
-          <Pending
-            error={sheetError}
-            loadingLabel={t.common.loading}
-            errorLabel={explainError(sheetError, t)}
-            onRetry={load}
-            retryLabel={t.common.retry}
-          />
-        ) : (
-          <>
-            {countIsSealed ? (
-              <p className="mb-3 text-sm font-semibold text-emerald-700">
-                {t.treasury.savedCountDetails} — {t.treasury.sealProof} ✓
-              </p>
-            ) : null}
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              {sheet.funds.map((fund) => {
-                const saved = result?.lines.find((line) => line.fundCode === fund.fundCode)
-                const computed = saved?.computed ?? fund.computed
-                const countedValue = saved?.counted ?? counted[fund.fundCode] ?? ''
-                const variance = saved ? differenceView(saved.variance) : countDifference(countedValue, computed)
-                const resolution = saved?.resolution ?? countResolutions[fund.fundCode] ?? ''
-                const needsReason = variance != null && variance.direction !== 'none'
-                return (
-                  <div key={fund.fundCode} className="rounded-lg border border-slate-200 p-3">
-                    <h3 className="text-sm font-bold text-slate-700">{fundLabel(fund.fundCode)}</h3>
-                    <dl className="mt-2 grid grid-cols-2 gap-y-1 text-sm">
-                      <dt className="text-slate-600">{t.treasury.systemBalance}</dt>
-                      <dd className="text-end font-semibold"><Money value={computed} /></dd>
-                    </dl>
-                    <Field label={t.treasury.counted} className="mt-2">
-                      <MoneyInput
-                        value={countedValue}
-                        disabled={countIsSealed}
-                        aria-label={`${t.treasury.counted} — ${fundLabel(fund.fundCode)}`}
-                        onChange={(e) => setCounted((current) => ({ ...current, [fund.fundCode]: e.target.value }))}
-                        className="w-full"
-                      />
-                    </Field>
-                    {variance ? (
-                      <div
-                        className={`mt-2 rounded-md px-3 py-2 text-sm font-semibold ${
-                          variance.direction === 'increase'
-                            ? 'bg-emerald-50 text-emerald-800'
-                            : variance.direction === 'shortage'
-                              ? 'bg-amber-50 text-amber-800'
-                              : 'bg-slate-50 text-slate-700'
-                        }`}
-                      >
-                        {directionLabel(variance.direction)}
-                        {variance.direction === 'none' ? null : <>: <Money value={variance.amount} /></>}
-                      </div>
-                    ) : null}
-                    {needsReason ? (
-                      countIsSealed ? (
-                        <dl className="mt-2 text-sm">
-                          <dt className="text-xs text-slate-500">{t.treasury.varianceReason}</dt>
-                          <dd className="mt-1 text-slate-700">{resolution}</dd>
-                        </dl>
-                      ) : (
-                        <Field
-                          label={t.treasury.varianceReason}
-                          hint={t.treasury.varianceReasonHint}
-                          error={resolution.trim() ? null : t.errors.cash_count_resolution_required}
-                          className="mt-2"
-                        >
-                          <TextInput
-                            value={resolution}
-                            aria-label={`${t.treasury.varianceReason} — ${fundLabel(fund.fundCode)}`}
-                            onChange={(e) =>
-                              setCountResolutions((current) => ({ ...current, [fund.fundCode]: e.target.value }))
-                            }
-                          />
-                        </Field>
-                      )
-                    ) : null}
-                  </div>
-                )
-              })}
-            </div>
-            {!countIsSealed ? (
-              <>
-                {recounting ? (
-                  <Field label={t.treasury.recountReason} hint={t.treasury.recountReasonHint} className="mt-3">
-                    <TextInput value={recountReason} onChange={(e) => setRecountReason(e.target.value)} />
-                  </Field>
-                ) : null}
-                <Button
-                  className="mt-3"
-                  onClick={submitCount}
-                  disabled={!countReady || (recounting && recountReason.trim() === '')}
-                >
-                  {recounting ? t.treasury.saveRecount : t.common.confirm}
-                </Button>
-              </>
-            ) : null}
-            {result ? (
-              <p className={`mt-2 text-sm font-medium ${result.balanced ? 'text-emerald-700' : 'text-amber-700'}`}>
-                {result.balanced ? t.treasury.noDifference : t.treasury.variance}
-              </p>
-            ) : null}
-
-            {/*
-              The three answers a variance deserves. Offered on a SEALED count, because that is
-              where the manager actually is when he discovers the figure is wrong — and until now
-              his only route was a deadlock: the restoration told him to recount, and the count
-              route told him he already had.
-            */}
-            {countIsSealed ? (
-              <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50/70 p-3">
-                <h3 className="text-sm font-bold text-slate-700">{t.treasury.countActionsTitle}</h3>
-                <p className="mt-1 text-xs text-slate-600">{t.treasury.countActionsHint}</p>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  <Button variant="ghost" onClick={beginRecount}>
-                    {t.treasury.recount}
-                  </Button>
-                  <Button variant="ghost" onClick={() => setCancelling((v) => !v)}>
-                    {t.treasury.cancelCount}
-                  </Button>
-                </div>
-                {cancelling ? (
-                  <div className="mt-3">
-                    <Field label={t.treasury.cancelReason} hint={t.treasury.cancelReasonHint}>
-                      <TextInput value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} />
-                    </Field>
-                    <Button
-                      variant="danger"
-                      className="mt-2"
-                      disabled={cancelReason.trim() === ''}
-                      onClick={cancelCount}
-                    >
-                      {t.treasury.confirmCancelCount}
-                    </Button>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
           </>
         )}
       </Card>
@@ -1927,16 +1611,4 @@ function nextSunday(date: string): string {
   const next = new Date(ms + add * 86_400_000)
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${next.getUTCFullYear()}-${pad(next.getUTCMonth() + 1)}-${pad(next.getUTCDate())}`
-}
-
-function isCountResolutionDetail(value: unknown): value is { fundCode: string; variance: string } {
-  if (typeof value !== 'object' || value === null) return false
-  const detail = value as Record<string, unknown>
-  if (typeof detail.fundCode !== 'string' || typeof detail.variance !== 'string') return false
-  try {
-    parseMinor(detail.variance)
-    return true
-  } catch {
-    return false
-  }
 }

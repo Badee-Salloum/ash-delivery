@@ -28,7 +28,6 @@ import {
   minor,
   parseMinor,
   planRestoration,
-  postingsForCashCountReconciliation,
   postingsForRestoration,
   receivableAdjustment,
   receivableWriteoff,
@@ -57,7 +56,7 @@ function assertPersistableTreasuryMinor(field: string, value: bigint): void {
 function assertPersistableRestorationPlan(plan: RestorationPlan): void {
   for (const leg of plan.legs) {
     const scope = `restoration.legs.${leg.fundCode}`
-    assertPersistableTreasuryMinor(`${scope}.counted`, leg.counted)
+    assertPersistableTreasuryMinor(`${scope}.officeBalance`, leg.officeBalance)
     assertPersistableTreasuryMinor(`${scope}.receivables`, leg.receivables)
     assertPersistableTreasuryMinor(`${scope}.position`, leg.position)
     assertPersistableTreasuryMinor(`${scope}.capitalTarget`, leg.capitalTarget)
@@ -179,10 +178,9 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     /*
      * A RECOUNT supersedes the day's active count instead of colliding with it.
      *
-     * Until this existed the day could deadlock: a posting after a sealed count made the
-     * restoration refuse with `cash_count_stale` telling the manager to "recount instead", while
-     * this route refused that with `already_counted_today`. Recounting is deliberate and audited —
-     * `recountReason` is required, so nobody replaces a signed count by accident.
+     * Recounting is deliberate and audited: `recountReason` is required, so nobody replaces a
+     * signed count by accident. Restoration v3 is live-ledger based, but the count remains weekly
+     * operational evidence and keeps its own append-only history.
      */
     let stored: CashCountRecord
     const prior = await deps.cashCounts.find(branchId, businessDate)
@@ -246,9 +244,8 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
    *
    * The third answer a variance deserves, beside proceeding and recounting: sometimes the right
    * move is to stop, fix what is wrong, and count again later. The withdrawn count keeps its rows,
-   * its resolutions and its proof — only its standing changes — and the day goes back to uncounted,
-   * so the restoration refuses with `cash_count_required` rather than settling against figures
-   * nobody stands behind.
+   * its resolutions and its proof — only its standing changes — and the weekly count workflow
+   * treats the day as uncounted. Live-ledger restoration remains independent of that evidence.
    */
   app.post(
     '/cash-counts/:date/cancel',
@@ -262,10 +259,13 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       const active = await deps.cashCounts.find(branchId, date)
       if (!active) throw new ServiceError(404, 'cash_count_not_found')
 
-      // A restored day's count is the evidence that restoration settled against. Withdrawing it
-      // afterwards would leave a posted restoration explained by nothing.
+      // Legacy v2 restorations still point at their sealed count and keep that evidence immutable.
+      // A v3 live-ledger restoration has `cashCountId = null`, so an unrelated operational count
+      // remains withdrawable and continues to serve the weekly count workflow independently.
       const restored = await deps.restorations.find(branchId, date)
-      if (restored !== null) throw new ServiceError(409, 'already_restored_today', { businessDate: date })
+      if (restored?.cashCountId === active.id) {
+        throw new ServiceError(409, 'already_restored_today', { businessDate: date })
+      }
 
       const cancelled = await deps.cashCounts.cancel({
         id: active.id,
@@ -1194,24 +1194,26 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
   )
 
   /**
-   * Build the positions from the SEALED COUNT before posting, never from the request body.
+   * Build the restoration position from the live double-entry ledger.
    *
-   * Owner decision (j): «count first, then ترميم». The whole point is that it settles against money
-   * somebody physically counted — computing the actionable plan from the ledger would make it a
-   * tautology that can never find anything. The live-ledger mode is read-only and used only after
-   * the immutable restoration exists, so a reloaded card describes the post-action position.
+   * The caller supplies transaction-bound repositories for execution and preview, so the office
+   * balances, receivables and effective targets are all read while holding the same branch-money
+   * lock used by every financial writer. Nothing monetary comes from the request body.
    */
   async function positionsFor(
     branchId: string,
     businessDate: string,
-    source: 'sealed_count' | 'live_ledger' = 'sealed_count',
-    readDeps: Pick<Deps, 'cashCounts' | 'capitalTargets' | 'ledger'> = deps,
+    readDeps: Pick<Deps, 'capitalTargets' | 'ledger'> = deps,
   ) {
-    const [count, targets, ordinaryReceivables, shiftFundingReceivables] = await Promise.all([
-      readDeps.cashCounts.find(branchId, businessDate),
+    const officeFunds = ['office_cash', 'office_wallet'] as const
+    const [targets, ordinaryReceivables, shiftFundingReceivables, openingBalances] = await Promise.all([
       readDeps.capitalTargets.resolve(branchId, businessDate),
       readDeps.ledger.balancesByPrefix(branchId, 'driver_receivable_'),
       readDeps.ledger.balancesByPrefix(branchId, 'driver_shift_funding_'),
+      Promise.all(officeFunds.map(async (fundCode) => ({
+        fundCode,
+        balance: await readDeps.ledger.fundBalance(branchId, fundCode),
+      }))),
     ])
     const sumFor = (suffix: string): Minor => {
       const total = [...Object.entries(ordinaryReceivables), ...Object.entries(shiftFundingReceivables)]
@@ -1231,28 +1233,20 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       if (balance < 0n) throw new ServiceError(500, 'receivable_balance_integrity_error', { fundCode })
     }
 
-    return {
-      count,
-      positions: await Promise.all(
-        (['office_cash', 'office_wallet'] as const).map(async (fundCode) => {
-          const counted = source === 'live_ledger'
-            ? await readDeps.ledger.fundBalance(branchId, fundCode)
-            : count?.lines.find((line) => line.fundCode === fundCode)?.counted ?? minor(0n)
-          const receivables = sumFor(fundCode === 'office_cash' ? 'cash' : 'wallet')
-          const capitalTarget = targets[fundCode] ?? null
-          assertPersistableTreasuryMinor(`restoration.counted.${fundCode}`, counted)
-          if (capitalTarget !== null) {
-            assertPersistableTreasuryMinor(`restoration.capitalTarget.${fundCode}`, capitalTarget)
-          }
-          return { fundCode, counted, receivables, capitalTarget }
-        }),
-      ),
-    }
+    return openingBalances.map(({ fundCode, balance: officeBalance }) => {
+      const receivables = sumFor(fundCode === 'office_cash' ? 'cash' : 'wallet')
+      const capitalTarget = targets[fundCode] ?? null
+      assertPersistableTreasuryMinor(`restoration.officeBalance.${fundCode}`, officeBalance)
+      if (capitalTarget !== null) {
+        assertPersistableTreasuryMinor(`restoration.capitalTarget.${fundCode}`, capitalTarget)
+      }
+      return { fundCode, officeBalance, receivables, capitalTarget }
+    })
   }
 
-  const serializeLeg = (l: RestorationPlan['legs'][number]) => ({
+  const serializeSnapshotLeg = (l: RestorationPlan['legs'][number]) => ({
     fundCode: l.fundCode,
-    counted: serializeMoney(l.counted),
+    officeBalance: serializeMoney(l.officeBalance),
     receivables: serializeMoney(l.receivables),
     position: serializeMoney(l.position),
     capitalTarget: serializeMoney(l.capitalTarget),
@@ -1263,29 +1257,50 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     refusals: l.refusals,
   })
 
-  /** What tonight's ترميم WOULD do. Reads the sealed count; posts nothing. */
+  /** Keep the old Admin readable while naming the live-ledger source explicitly on the new wire. */
+  const serializeResponseLeg = (l: RestorationPlan['legs'][number]) => ({
+    ...serializeSnapshotLeg(l),
+    openingOfficeBalance: serializeMoney(l.officeBalance),
+    /** Transitional alias: old clients render this field as the available office amount. */
+    counted: serializeMoney(l.officeBalance),
+  })
+
+  const openingBalancesFor = (plan: RestorationPlan) => plan.legs.map((leg) => ({
+    fundCode: leg.fundCode,
+    balance: serializeMoney(leg.officeBalance),
+  }))
+
+  /** What tonight's ترميم WOULD do. Reads a branch-locked live-ledger snapshot; posts nothing. */
   app.get('/treasury/restoration/preview', { config: { permission: 'cash_count.perform', subject: ownBranch } }, async (req) => {
     const branchId = resolveBranch(req)
     const businessDate = todayFor(deps)
-    const completed = await deps.restorations.find(branchId, businessDate)
-    // Before execution, only the sealed physical count is authoritative. Afterwards the posting
-    // has moved the funds, so a card labelled "current position" must use live ledger balances;
-    // `alreadyRestored` still disables a second execution and the stored record remains immutable.
-    const { count, positions } = await positionsFor(
-      branchId,
-      businessDate,
-      completed === null ? 'sealed_count' : 'live_ledger',
+    const preview = await deps.financialUnitOfWork.run(
+      {
+        lockKey: `receivables:${branchId}`,
+        actorId: req.actor!.userId,
+        requestId: req.requestId,
+      },
+      async (tx: FinancialTransactionDeps) => {
+        const [completed, positions] = await Promise.all([
+          tx.restorations.find(branchId, businessDate),
+          positionsFor(branchId, businessDate, tx),
+        ])
+        const plan = planRestoration(positions)
+        assertPersistableRestorationPlan(plan)
+        return { completed, plan }
+      },
     )
-    const plan = planRestoration(positions)
-    assertPersistableRestorationPlan(plan)
     return {
       businessDate,
-      counted: count !== null,
-      alreadyRestored: completed !== null,
-      legs: plan.legs.map(serializeLeg),
-      netToCompany: serializeMoney(plan.netToCompany),
-      feasible: plan.feasible,
-      refusals: plan.refusals,
+      source: 'live_ledger',
+      /** Transitional truthy alias so the old Admin does not wait for a cash count. */
+      counted: true,
+      alreadyRestored: preview.completed !== null,
+      openingBalances: openingBalancesFor(preview.plan),
+      legs: preview.plan.legs.map(serializeResponseLeg),
+      netToCompany: serializeMoney(preview.plan.netToCompany),
+      feasible: preview.plan.feasible,
+      refusals: preview.plan.refusals,
     }
   })
 
@@ -1299,8 +1314,8 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
 
     const outcome = await deps.financialUnitOfWork.run(
       {
-        // This exact branch lock is shared by shift open/close, direct receivables, and every Pg
-        // ledger posting. The sealed-balance check and both journal phases therefore see one
+        // This exact branch lock is shared by shift open/close, direct receivables, target edits and
+        // every Pg ledger posting. The opening live balances and journals therefore belong to one
         // serial branch-money history.
         lockKey: `receivables:${branchId}`,
         actorId,
@@ -1313,64 +1328,16 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
           throw new ServiceError(409, 'already_restored_today')
         }
 
-        const { count, positions } = await positionsFor(branchId, businessDate, 'sealed_count', tx)
-        if (count === null) throw new ServiceError(422, 'cash_count_required')
-        if (count.sealedAtMs === null || count.proofSha256 === null || sealProof(count) !== count.proofSha256) {
-          throw new ServiceError(422, 'cash_count_proof_invalid')
-        }
-
-        const requiredFunds = ['office_cash', 'office_wallet'] as const
-        const countLines = new Map(count.lines.map((line) => [line.fundCode, line]))
-        const reconciliationLines: Array<{
-          fundCode: typeof requiredFunds[number]
-          variance: Minor
-          resolution: string | null
-        }> = []
-
-        for (const fundCode of requiredFunds) {
-          const line = countLines.get(fundCode)
-          if (!line) throw new ServiceError(422, 'cash_count_incomplete', { fundCode })
-          const calculatedVariance = minor(line.counted - line.computed)
-          if (calculatedVariance !== line.variance) {
-            throw new ServiceError(422, 'cash_count_formula_invalid', { fundCode })
-          }
-          if (line.variance !== 0n && (!line.resolution || line.resolution.trim() === '')) {
-            throw new ServiceError(422, 'cash_count_resolution_required', {
-              fundCode,
-              variance: serializeMoney(line.variance),
-            })
-          }
-
-          // Never fold a posting made after the count into the signed variance: that would repair
-          // a different number than the manager explained. The manager must recount instead.
-          const current = await tx.ledger.fundBalance(branchId, fundCode)
-          if (current !== line.computed) {
-            throw new ServiceError(409, 'cash_count_stale', {
-              fundCode,
-              counted: serializeMoney(line.counted),
-              computedAtCount: serializeMoney(line.computed),
-              current: serializeMoney(current),
-            })
-          }
-          reconciliationLines.push({ fundCode, variance: line.variance, resolution: line.resolution })
-        }
-
+        const positions = await positionsFor(branchId, businessDate, tx)
         const plan = planRestoration(positions)
         assertPersistableRestorationPlan(plan)
         if (!plan.feasible) {
           throw new ServiceError(422, 'restoration_infeasible', { refusals: plan.refusals })
         }
 
-        const reconciliationPostings = postingsForCashCountReconciliation({
-          branchId,
-          cashCountId: count.id,
-          proofSha256: count.proofSha256,
-          lines: reconciliationLines,
-        })
         const restorationPostings = postingsForRestoration(plan, businessDate)
-        const postings = [...reconciliationPostings, ...restorationPostings]
-        assertPersistableTreasuryPostings(postings)
-        const entries = postings.length === 0 ? [] : await tx.ledger.post(branchId, postings, {
+        assertPersistableTreasuryPostings(restorationPostings)
+        const entries = restorationPostings.length === 0 ? [] : await tx.ledger.post(branchId, restorationPostings, {
           shiftId: null,
           businessDate,
           postingDate: businessDate,
@@ -1382,34 +1349,27 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
 
         // A missing result means an occurrence key already existed without the restoration fact.
         // Never bless an orphan/mismatched journal as this run's evidence.
-        if (entries.length !== postings.length) {
+        if (entries.length !== restorationPostings.length) {
           throw new ServiceError(409, 'restoration_journal_conflict')
         }
 
-        const reconciliationKeys = new Set(reconciliationPostings.map((posting) => posting.occurrenceKey))
         const restorationKeys = new Set(restorationPostings.map((posting) => posting.occurrenceKey))
-        const serializedLegs = plan.legs.map(serializeLeg)
+        const snapshotLegs = plan.legs.map(serializeSnapshotLeg)
+        const responseLegs = plan.legs.map(serializeResponseLeg)
+        const openingBalances = openingBalancesFor(plan)
         try {
           await tx.restorations.create({
             branchId,
             businessDate,
-            cashCountId: count.id,
+            cashCountId: null,
             plan: {
-              schemaVersion: 2,
-              cashCountProofSha256: count.proofSha256,
-              cashCountSealedAt: new Date(count.sealedAtMs).toISOString(),
-              countReconciliation: reconciliationLines.map((line) => ({
-                fundCode: line.fundCode,
-                variance: serializeMoney(line.variance),
-                resolution: line.resolution,
-              })),
-              reconciliationJournalEntryIds: entries
-                .filter((entry) => reconciliationKeys.has(entry.occurrenceKey))
-                .map((entry) => entry.id),
+              schemaVersion: 3,
+              source: 'live_ledger',
+              openingBalances,
               restorationJournalEntryIds: entries
                 .filter((entry) => restorationKeys.has(entry.occurrenceKey))
                 .map((entry) => entry.id),
-              legs: serializedLegs,
+              legs: snapshotLegs,
             },
             netToCompany: plan.netToCompany,
             reason: body.reason,
@@ -1423,20 +1383,25 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
         }
 
         return {
-          legs: serializedLegs,
+          legs: responseLegs,
+          openingBalances,
           netToCompany: plan.netToCompany,
           restorationPostings: restorationPostings.length,
-          reconciliationPostings: reconciliationPostings.length,
         }
       },
     )
 
     return reply.code(201).send({
       businessDate,
+      source: 'live_ledger',
+      /** Transitional truthy alias matching preview for the old Admin. */
+      counted: true,
+      openingBalances: outcome.openingBalances,
       legs: outcome.legs,
       netToCompany: serializeMoney(outcome.netToCompany),
       postings: outcome.restorationPostings,
-      reconciliationPostings: outcome.reconciliationPostings,
+      /** Transitional zero: v3 never creates cash-count reconciliation journals. */
+      reconciliationPostings: 0,
     })
   })
 
