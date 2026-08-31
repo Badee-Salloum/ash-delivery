@@ -74,7 +74,11 @@ const initialData = async (
     const fee = serializeMoney(row.fee)
     return {
       clientKey: row.closeDraftClientKey ?? `legacy:order:${row.id}`,
-      matchKey: protectedManual ? null : stableKey(['orders', row.occurredDate, row.occurredMinute, fee]),
+      // Canonicalised exactly as the scan path is, which is the whole point: these two recipes
+      // described the same delivery in two different strings and therefore never matched.
+      matchKey: protectedManual
+        ? null
+        : identityKeyFor('orders', row.occurredDate, row.occurredMinute, fee),
       providerOrderNo: row.providerOrderNo,
       payMode: row.payMode,
       fee,
@@ -104,7 +108,7 @@ const initialData = async (
     const signed = serializeMoney(minor(-row.amount))
     return {
       clientKey: row.closeDraftClientKey ?? `legacy:deduction:${row.id}`,
-      matchKey: stableKey(['orders', row.occurredDate, row.occurredMinute, signed]),
+      matchKey: identityKeyFor('orders', row.occurredDate, row.occurredMinute, signed),
       operationKey: row.operationKey,
       amount,
       amountOcr: row.amountOcr === null ? null : serializeMoney(row.amountOcr),
@@ -525,9 +529,9 @@ export async function patchCloseDraft(
   }
   const shift = await deps.shifts.findById(shiftId)
   const branch = shift ? await deps.directory.branch(shift.branchId) : null
-  if (!shift || !branch || shift.openApprovedAt === null) throw new ServiceError(409, 'shift_window_unavailable')
+  if (!shift || !branch || windowOpensAtOf(shift) === null) throw new ServiceError(409, 'shift_window_unavailable')
   const data = mergeHumanPatch(current.data, patch, {
-    openMinute: localMinuteKey(Date.parse(shift.openApprovedAt), branch.timezone),
+    openMinute: localMinuteKey(Date.parse(windowOpensAtOf(shift)!), branch.timezone),
     closeMinute: localMinuteKey(deps.clock.nowMs(), branch.timezone),
   })
   const draftHash = closeDraftHash(data)
@@ -574,6 +578,70 @@ export const closeDraftClientKeyFor = (
   attachmentToken: string,
   rowIndex: number,
 ): string => `${field}:${stableKey([attachmentToken, rowIndex])}`
+
+/**
+ * The instant this shift's operation window opens.
+ *
+ * Decision 11 as amended 2026-08-31: the driver's confirmation, not the manager's approval. The
+ * fallback keeps a pre-0054 shift on exactly its old behaviour rather than making it unclassifiable.
+ * A single helper because this file compares against the bound in two independent places, and two
+ * copies of one rule is how they drift.
+ */
+const windowOpensAtOf = (shift: { windowOpensAt: string | null; openApprovedAt: string | null }): string | null =>
+  shift.windowOpensAt ?? shift.openApprovedAt
+
+/**
+ * The printed identity of one scanned row: date + clock + cost (decision 16).
+ *
+ * ONE builder for both paths, because there were two and they could not agree. The fresh-scan path
+ * used an UNPADDED hour and the raw OCR money string (`8:00` / `155`); the path that rehydrates a
+ * draft from `shift_orders` used the stored padded minute and `serializeMoney` (`08:00` / `155.00`).
+ * Different strings, different SHA-256, so a rehydrated row could never match a freshly scanned one
+ * for any hour 0-9 — every morning shift — and never at all unless the reader happened to emit two
+ * decimals. Nothing asserted either key's value, so nothing caught it.
+ *
+ * The clock is folded to a marker-blind 12-hour form on purpose: `1:00` and `1:00 PM` are the same
+ * printed row, and a retake that finally makes the marker legible must merge rather than duplicate.
+ * That is the property the pass-3 comment relies on, and it is why the RESOLVED minute cannot be
+ * the identity — resolution applies the marker.
+ */
+const printedIdentityClock = (clock: string | null): string | null => {
+  if (clock === null) return null
+  const match = /^(\d{1,2}):([0-5]\d)$/.exec(clock)
+  if (!match) return null
+  const hour = Number(match[1])
+  if (!Number.isInteger(hour) || hour > 23) return null
+  return `${String(hour % 12 === 0 ? 12 : hour % 12).padStart(2, '0')}:${match[2]}`
+}
+
+/** Money as one canonical decimal, so `155` and `155.00` are the same cost. */
+const identityMoney = (value: string | null): string | null => {
+  if (value === null) return null
+  try {
+    return serializeMoney(parseMinor(value))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The overlap identity, or null when any of date, clock or cost is missing.
+ *
+ * Exported for the same reason `closeDraftClientKeyFor` is: two paths build this key, and a test
+ * that cannot compare them is how they drifted in the first place.
+ */
+export const identityKeyFor = (
+  field: string,
+  dateIso: string | null,
+  clock: string | null,
+  money: string | null,
+): string | null => {
+  const identityClock = printedIdentityClock(clock)
+  const identityValue = identityMoney(money)
+  return dateIso !== null && identityClock !== null && identityValue !== null
+    ? stableKey([field, dateIso, identityClock, identityValue])
+    : null
+}
 
 const normalizePrintedClock = (printedTime: string | null | undefined): string | null => {
   if (printedTime == null) return null
@@ -650,6 +718,11 @@ function linkedRows(
     ? resolveSamePageOrderTimes(
         rows.map((row) => ({ printedTime: row.printedTime, dateIso: row.dateIso })),
         { dateIso: receivedLocal.slice(0, 10), time: receivedLocal.slice(11) },
+        // The shift's own lower edge, which this function has held as `shiftOpenMinute` all along
+        // and used at `positionAt` — but never handed to the resolver. A delivery cannot predate
+        // the shift it belongs to, so this is what settles a marker-less `1:18` into 13:18 instead
+        // of leaving it unresolved and, on the next retake, duplicated.
+        { dateIso: shiftOpenMinute.slice(0, 10), time: shiftOpenMinute.slice(11) },
       )
     : rows.map(() => ({ time: null, candidates: [], basis: 'unknown' as const, conflict: false }))
   const observations = rows.map((row, index) => ({
@@ -745,7 +818,17 @@ function linkedRows(
     // only printed accounting/time evidence; a one-to-one merge below preserves repeated equal
     // rows as separate operations without baking volatile text or page-relative ordinals into it.
     const printedClock = normalizePrintedClock(row.printedTime)
-    const matchKey = row.dateIso !== null && printedClock !== null && row.value !== null
+    const matchKey = identityKeyFor(field, row.dateIso, printedClock, row.value)
+    /*
+     * The key this row would have had before the identity was canonicalised.
+     *
+     * A draft saved before that change carries old-shape keys, and a retake rotates the attachment
+     * token so `clientKey` cannot match either. Without this the first retake after deploy would
+     * duplicate every row on every in-flight draft — introducing, for one shift each, exactly the
+     * failure being fixed. Fresh rows therefore carry both shapes and `mergeLinkedRows` accepts
+     * either; nothing already stored has to be migrated.
+     */
+    const legacyMatchKey = row.dateIso !== null && printedClock !== null && row.value !== null
       ? stableKey([field, row.dateIso, printedClock, row.value])
       : null
     const clientKey = closeDraftClientKeyFor(field, attachmentToken, observation.rowIndex)
@@ -785,6 +868,7 @@ function linkedRows(
         deductions.push({
           clientKey,
           matchKey,
+          legacyMatchKey,
           operationKey: `draft:${stableKey([shiftId, clientKey])}`,
           amount: magnitude,
           amountOcr: magnitude,
@@ -811,6 +895,7 @@ function linkedRows(
         orders.push({
           clientKey,
           matchKey,
+          legacyMatchKey,
           providerOrderNo: `YAL-${stableKey([shiftId, clientKey])}`,
           payMode: 'cash',
           fee: money,
@@ -987,11 +1072,17 @@ function mergeLinkedRows<T extends DraftOperation>(
       // `source !== 'manual'` protects a hand-typed order from ever being taken over by a reader;
       // and `used` keeps the pairing one-to-one, so a page that legitimately shows the same amount
       // at the same minute twice never collapses into a single operation.
-      index = out.findIndex((candidate, candidateIndex) =>
+      // Either shape of the identity. A draft saved before it was canonicalised holds the old one;
+      // a fresh row carries both, so a retake across the change merges instead of duplicating.
+      const freshKeys = new Set(
+        [freshRow.matchKey, 'legacyMatchKey' in freshRow ? freshRow.legacyMatchKey : null]
+          .filter((key): key is string => key !== null && key !== undefined),
+      )
+      index = freshKeys.size === 0 ? -1 : out.findIndex((candidate, candidateIndex) =>
         !used.has(candidateIndex) &&
         candidate.source !== 'manual' &&
         candidate.matchKey !== null &&
-        candidate.matchKey === freshRow.matchKey,
+        freshKeys.has(candidate.matchKey),
       )
     }
     if (index === -1) {
@@ -1137,7 +1228,7 @@ export async function readCloseDraftAttachment(
   }
   const shift = await deps.shifts.findById(shiftId)
   const branch = shift ? await deps.directory.branch(shift.branchId) : null
-  if (!shift || !branch || shift.openApprovedAt === null) throw new ServiceError(409, 'shift_window_unavailable')
+  if (!shift || !branch || windowOpensAtOf(shift) === null) throw new ServiceError(409, 'shift_window_unavailable')
   const key = readKey(attached.attachmentToken, input.field)
   // Already read to completion? Then this call adds nothing and must cost nothing. The repository
   // enforces the same rule under the shift row lock; this only spares the blob fetch and the
@@ -1171,7 +1262,7 @@ export async function readCloseDraftAttachment(
     attached.attachmentToken,
     readId,
     attached.attachedAtMs,
-    localMinuteKey(Date.parse(shift.openApprovedAt), branch.timezone),
+    localMinuteKey(Date.parse(windowOpensAtOf(shift)!), branch.timezone),
     branch.timezone,
   )
   const shouldReplaceRows = output.result.ok || (!output.result.ok && output.result.reason === 'wrong_screen')

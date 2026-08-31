@@ -279,6 +279,70 @@ describe('printed order time normalization', () => {
     })
   })
 
+  /**
+   * The shift's own lower edge, added 2026-08-31.
+   *
+   * Eleven production rows worth 2,715.00 stayed unresolved because a marker-less clock has two
+   * readings and the resolver will not guess — and a row with no time has no merge identity, so
+   * 45% of them duplicated on the next retake against 0.6% of timed rows. A delivery cannot predate
+   * its own shift, which settles the choice without anyone guessing a marker.
+   */
+  it('settles a marker-less clock against the minute the shift opened', () => {
+    expect(resolveSamePageOrderTimes(
+      [{ printedTime: '1:18', dateIso: '2026-08-16' }],
+      { dateIso: '2026-08-16', time: '22:00' },
+      { dateIso: '2026-08-16', time: '12:00' },
+    )[0]).toEqual({
+      time: '13:18',
+      candidates: ['13:18'],
+      basis: 'screen_position',
+      conflict: false,
+    })
+  })
+
+  it('keeps the delivery printed at the exact opening minute', () => {
+    // INCLUSIVE, like the operation window itself. A strict comparison here would throw away the
+    // first delivery of every shift — and every default close-draft fixture is an 08:00 row on a
+    // shift that opens at 08:00.
+    expect(resolveSamePageOrderTimes(
+      [{ printedTime: '8:00 AM', dateIso: '2026-08-16' }],
+      { dateIso: '2026-08-16', time: '22:00' },
+      { dateIso: '2026-08-16', time: '08:00' },
+    )[0]).toMatchObject({ time: '08:00', basis: 'printed_time', conflict: false })
+  })
+
+  it('never lets the shift bound delete the only reading a row has', () => {
+    /*
+     * The bound exists to CHOOSE between two candidates, not to erase one.
+     *
+     * A `1:00 PM` printed under the previous day's header is a perfectly legible time that simply
+     * falls outside this shift — deciding what to do about that belongs to the window classifier,
+     * which has `pre_open` for exactly it. Taking the minute away instead would cost the row its
+     * merge identity and duplicate it on the next retake: the failure this bound was added to stop.
+     *
+     * Caught by a real test in `close-draft-adversarial` before this rule was written down.
+     */
+    expect(resolveSamePageOrderTimes(
+      [{ printedTime: '1:00 PM', dateIso: '2026-07-20' }],
+      { dateIso: '2026-07-21', time: '14:00' },
+      { dateIso: '2026-07-21', time: '08:00' },
+    )[0]).toMatchObject({ time: '13:00', conflict: false })
+  })
+
+  it('is unchanged when no shift bound is supplied, which is how the cached adapter pass calls it', () => {
+    // The adapter's own pass stays context-free so its result remains cacheable — the reason
+    // `cache_signature` does not move for this change and no page is re-read.
+    expect(resolveSamePageOrderTimes([
+      { printedTime: '01:18', dateIso: '2026-08-16' },
+      { printedTime: '00:57', dateIso: '2026-08-16' },
+    ])[0]).toEqual({
+      time: null,
+      candidates: ['01:18', '13:18'],
+      basis: 'unknown',
+      conflict: false,
+    })
+  })
+
   it('rejects trusted times that invert the newest-first screen order', () => {
     expect(resolveSamePageOrderTimes([
       { printedTime: '00:57', dateIso: '2026-08-16' },

@@ -900,18 +900,34 @@ export interface SamePageOrderTimeResolution {
  *
  * Recent Orders is newest first. For `1:18` the only candidates are 01:18 and 13:18 on the row's
  * own date. A candidate survives only if there is a complete non-increasing path through all other
- * dated clocks on this same screenshot and it is no later than the evidence receipt time. The
- * function is deliberately context-free with respect to shifts, so its output can be cached and a
- * linked-read service can call it again with the authoritative attachment time.
+ * dated clocks on this same screenshot, no later than the evidence receipt time, and no earlier
+ * than the moment the shift's operation window opened. The function is deliberately context-free
+ * with respect to shifts, so its output can be cached and a linked-read service can call it again
+ * with the authoritative attachment time.
+ *
+ * `windowOpensAt` is the LOWER bound, and it is optional for exactly that reason. The adapter's own
+ * call omits it and stays context-free — its output is what `ocr_reads` caches, so the cache
+ * signature is unaffected and no page is ever re-read because of this argument. Only the linked-read
+ * service, which recomputes on every read and caches nothing, supplies it.
+ *
+ * It matters because the marker is the thing that goes missing. Two readers may agree the card says
+ * `1:18` without either proving AM or PM, and on production 11 rows worth 2,715.00 stayed unresolved
+ * for that reason alone — then duplicated on the next retake, because a row with no time has no
+ * merge identity. A delivery cannot predate its own shift, so on a shift that opened at 12:00 the
+ * 01:18 candidate is impossible and 13:18 settles without anyone guessing.
  */
 export function resolveSamePageOrderTimes(
   rows: readonly SamePageOrderTimeInput[],
   receivedAt: OrdersEvidenceReceivedAt | null = null,
+  windowOpensAt: OrdersEvidenceReceivedAt | null = null,
 ): SamePageOrderTimeResolution[] {
   const receivedMinute = receivedAt === null ? null : receivedAtMinute(receivedAt)
+  const openedMinute = windowOpensAt === null ? null : receivedAtMinute(windowOpensAt)
   const states = rows.map((row) => {
     const evidence = printedOrderTimeEvidence(row.printedTime)
     const allCandidates = evidence === null ? [] : timeCandidates(evidence)
+    // The receipt bound DELETES: a clock later than the screenshot that shows it is impossible
+    // evidence, and the caller is told so as a conflict.
     const datedCandidates = allCandidates
       .map((time) => ({ time, absoluteMinute: datedMinute(row.dateIso, time) }))
       .filter((candidate) =>
@@ -919,11 +935,32 @@ export function resolveSamePageOrderTimes(
         candidate.absoluteMinute === null ||
         candidate.absoluteMinute <= receivedMinute,
       )
+    /*
+     * The shift bound only DISAMBIGUATES. It never deletes the last candidate.
+     *
+     * Its whole job is choosing between the two readings of a marker-less `1:18`, and for that it
+     * needs to remove one of two. Letting it empty a single-candidate row would take the time away
+     * from a clock that was read perfectly well — a `1:00 PM` printed on the previous day's section
+     * is a legible time that simply falls outside this shift, and deciding what to DO about that
+     * belongs to `classifyOperationWindow`, one layer up, which has `pre_open` for exactly this.
+     *
+     * Taking the time away instead would be the worse outcome twice over: the row loses its merge
+     * identity — date + printed clock + value — and duplicates on the next retake, which is the very
+     * failure this bound was added to prevent.
+     *
+     * INCLUSIVE, matching the operation window and the two comparisons in `close-draft.service.ts`
+     * that bracket a row against the same edges. A strict `>` would reject a shift's first delivery.
+     */
+    const withinWindow = openedMinute === null
+      ? datedCandidates
+      : datedCandidates.filter((candidate) =>
+          candidate.absoluteMinute === null || candidate.absoluteMinute >= openedMinute,
+        )
     return {
       evidence,
       allCandidates,
-      candidates: datedCandidates,
-      rejectedByReceipt: allCandidates.length > 0 && datedCandidates.length === 0,
+      candidates: withinWindow.length > 0 ? withinWindow : datedCandidates,
+      rejectedByBounds: allCandidates.length > 0 && datedCandidates.length === 0,
     }
   })
 
@@ -973,7 +1010,7 @@ export function resolveSamePageOrderTimes(
     if (state.evidence === null) {
       return { time: null, candidates: [], basis: 'unknown', conflict: false }
     }
-    if (state.rejectedByReceipt) {
+    if (state.rejectedByBounds) {
       return { time: null, candidates: [], basis: 'unknown', conflict: true }
     }
 

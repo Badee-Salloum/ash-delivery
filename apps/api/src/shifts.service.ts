@@ -278,15 +278,26 @@ export const classifyOperationWindow = classifyStoredOperationWindow
 
 const includedByWindow = includedByOperationWindow
 
+/**
+ * The one seam that supplies both window edges.
+ *
+ * Every `classifyOperationWindow` call site takes this by spread, so the lower bound moves here and
+ * nowhere else — which is the whole reason the 2026-08-31 amendment to decision 11 is a one-line
+ * change rather than five.
+ *
+ * `windowOpensAt ?? openApprovedAt` degrades a pre-0054 row to exactly today's behaviour instead of
+ * to `null`, which the classifier reads as `unknown` and which would exclude a whole shift's orders
+ * rather than one row.
+ */
 async function operationWindowContext(deps: Deps, shift: ShiftRecord): Promise<{
-  openApprovedAt: string | null
+  windowOpensAt: string | null
   submittedAt: string | null
   timeZone?: string
   offsetMinutes: number
 }> {
   const branch = await deps.directory.branch(shift.branchId)
   return {
-    openApprovedAt: shift.openApprovedAt,
+    windowOpensAt: shift.windowOpensAt ?? shift.openApprovedAt,
     submittedAt: shift.submittedAt,
     ...(branch?.timezone ? { timeZone: branch.timezone } : {}),
     offsetMinutes: deps.clock.offsetMinutes(),
@@ -567,6 +578,7 @@ export async function createShift(
     endWalletDeclaredOcr: null,
     driverConfirmedAt: null,
     openApprovedAt: null,
+    windowOpensAt: null,
     openApprovedBy: null,
     submittedAt: null,
     equationDiff: null,
@@ -993,6 +1005,18 @@ async function approveOpenLocked(
     ...withFunds,
     state: result.next,
     openApprovedAt,
+    /*
+     * The window opens when the DRIVER confirmed, not now (decision 11 as amended 2026-08-31).
+     *
+     * Stamped here rather than at confirmation because this is the transition that makes the shift
+     * operational — a shift that never gets approved has no window at all — and because freezing
+     * the bound at the same instant as `openApprovedAt` means the pair can never disagree about
+     * which shift they describe.
+     *
+     * The fallback keeps a shift whose confirmation instant is somehow missing on exactly today's
+     * behaviour; `null` here would classify its every row as `unknown`.
+     */
+    windowOpensAt: withFunds.driverConfirmedAt ?? openApprovedAt,
     openApprovedBy: actor.userId,
   }
   await deps.shifts.update(updated, actor.userId)

@@ -150,6 +150,9 @@ export class PgShiftRepo implements ShiftRepo {
            -- Fill either missing half, but preserve the database's exact value once present.
            open_approved_at = COALESCE(open_approved_at, $16::timestamptz),
            open_approved_by = COALESCE(open_approved_by, $17::uuid),
+           -- Write-once for the same reason: it is the bound this shift's rows were judged by, and
+           -- a settled shift must keep the exact instant it was judged by.
+           window_opens_at = COALESCE(window_opens_at, $28::timestamptz),
            submitted_at = $18::timestamptz,
            approved_by = $19,
            odo_start_ocr = $20, odo_end_ocr = $21,
@@ -188,6 +191,7 @@ export class PgShiftRepo implements ShiftRepo {
           shift.endWalletDeclaredOcr?.toString() ?? null,
           shift.keptAsReceivable.toString(),
           shift.driverSharePaid.toString(),
+          shift.windowOpensAt,
         ],
       )
 
@@ -353,6 +357,7 @@ export class PgShiftRepo implements ShiftRepo {
       endWalletDeclaredOcr: bigintOrNull(r.end_wallet_declared_ocr_minor),
       driverConfirmedAt: r.driver_confirmed_at === null ? null : (r.driver_confirmed_at as Date).toISOString(),
       openApprovedAt: r.open_approved_at === null ? null : (r.open_approved_at as Date).toISOString(),
+      windowOpensAt: r.window_opens_at == null ? null : (r.window_opens_at as Date).toISOString(),
       openApprovedBy: (r.open_approved_by as string | null) ?? null,
       submittedAt: r.submitted_at === null ? null : (r.submitted_at as Date).toISOString(),
       equationDiff: bigintOrNull(r.equation_diff_minor),

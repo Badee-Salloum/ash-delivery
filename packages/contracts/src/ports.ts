@@ -497,6 +497,17 @@ export interface ShiftRecord {
   driverConfirmedAt: string | null
   /** The one manager-approved instant at which this shift first became operational. */
   openApprovedAt: string | null
+  /**
+   * Lower bound of the operation window — the driver's confirmation, not the manager's approval.
+   *
+   * Separate from `openApprovedAt` because the two answer different questions. `openApprovedAt` is
+   * an audit fact about WHO authorised the shift and WHEN, and it must never move. This is the
+   * instant from which the driver's deliveries count, and the owner moved it on 2026-08-31 because
+   * the approval routinely arrived hours after the driver had started working.
+   *
+   * A settled shift keeps the bound it was judged by, so the amendment cannot reach backwards.
+   */
+  windowOpensAt: string | null
   /** Manager who approved the initial open. Never replaced by resume/review decisions. */
   openApprovedBy: string | null
   /** Driver's most recent close-package submission instant. */
@@ -1362,6 +1373,12 @@ export interface CloseDraftOrder {
   clientKey: string
   /** Server-only overlap key; null for human-created rows. */
   matchKey: string | null
+  /**
+   * The same identity in the shape it had before it was canonicalised, carried on freshly scanned
+   * rows only. It exists so a retake of a draft saved before that change still merges rather than
+   * duplicating; nothing stored needs migrating, and it can be dropped once no such draft is open.
+   */
+  legacyMatchKey?: string | null
   providerOrderNo: string
   payMode: PayMode
   fee: string | null
@@ -1389,6 +1406,8 @@ export interface CloseDraftOrder {
 export interface CloseDraftCashDeduction {
   clientKey: string
   matchKey: string | null
+  /** The pre-canonicalisation shape of the same identity; see `CloseDraftOrder`. */
+  legacyMatchKey?: string | null
   operationKey: string
   amount: string | null
   amountOcr: string | null
@@ -1413,6 +1432,8 @@ export interface CloseDraftCashDeduction {
 export interface CloseDraftMovement {
   clientKey: string
   matchKey: string | null
+  /** The pre-canonicalisation shape of the same identity; see `CloseDraftOrder`. */
+  legacyMatchKey?: string | null
   amount: string
   occurredMinute: string | null
   role: WalletMovementRole

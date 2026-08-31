@@ -36,6 +36,7 @@ const conformanceShift = (): ShiftRecord => ({
   endWalletDeclaredOcr: null,
   driverConfirmedAt: null,
   openApprovedAt: null,
+  windowOpensAt: null,
   openApprovedBy: null,
   submittedAt: null,
   equationDiff: null,

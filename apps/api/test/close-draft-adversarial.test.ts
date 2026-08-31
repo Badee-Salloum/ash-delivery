@@ -1855,8 +1855,19 @@ describe('atomic final materialization', () => {
     draft = draftFromUpload(await uploadEnd(driver, shiftId, 'dashboard', image('timing-heal-old'), draft))
     draft = draftFromRead(await readSlot(driver, shiftId, 'dashboard', 'orders', draft))
     expect(draft.operations.orders).toHaveLength(1)
+    /*
+     * This asserted `occurredMinute: null` until 2026-08-31, on the reasoning that a marker-less
+     * `1:00` leaves both 01:00 and 13:00 open. That stopped being true once the resolver was given
+     * the shift's own lower edge: the shift opened at 08:00, so 01:00 is not a candidate at all and
+     * 13:00 settles without anyone guessing a marker. It is the exact case the owner reported — a
+     * row that lost its time, and with it the merge identity that stops a retake duplicating it.
+     *
+     * It is still `included: false` with `missing_time`: `positionAt` needs a same-page neighbour to
+     * prove a screen position and this page has one row, so the minute is known but not yet proven
+     * to fall inside the window. The rephoto below is what proves it.
+     */
     expect(draft.operations.orders[0]).toMatchObject({
-      occurredMinute: null,
+      occurredMinute: '13:00',
       included: false,
       reviewRequired: true,
     })
@@ -1888,9 +1899,12 @@ describe('atomic final materialization', () => {
       }],
     })
     expect(valueOnly.statusCode, valueOnly.body).toBe(200)
+    // The manager corrected the MONEY only, so the minute the resolver settled from the shift's own
+    // lower edge survives untouched — and the row stays excluded until its window is proven, which
+    // is what the rephoto below does.
     expect(await h.deps.orders.findByProviderNo(providerOrderNo)).toMatchObject({
       fee: 20_000n,
-      occurredMinute: null,
+      occurredMinute: '13:00',
       included: false,
       decidedBy: 'u-bm',
     })

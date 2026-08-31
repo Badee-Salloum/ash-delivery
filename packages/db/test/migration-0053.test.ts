@@ -10,11 +10,13 @@ const compact = migration.replace(/\s+/g, ' ')
 
 describe('migration 0053 ledger-backed restoration', () => {
   it('is the forward migration after 0052', () => {
+    // Asserts the ORDER, not that 0053 is the newest file. Pinning it to the tip made every later
+    // migration fail a test about 0053, which says nothing about 0053 and trains people to edit a
+    // passing assertion out of the way.
     const files = readdirSync(migrationDir).filter((file) => file.endsWith('.sql')).sort()
-    expect(files.slice(-2)).toEqual([
-      '0052_shift_shortage_ordinary_receivable.sql',
-      '0053_ledger_backed_restoration.sql',
-    ])
+    const after = files.indexOf('0053_ledger_backed_restoration.sql')
+    expect(after).toBeGreaterThan(0)
+    expect(files[after - 1]).toBe('0052_shift_shortage_ordinary_receivable.sql')
   })
 
   it('keeps schema v2 on its original count-backed guard and makes only v3 count-less', () => {

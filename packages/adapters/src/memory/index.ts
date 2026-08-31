@@ -710,7 +710,9 @@ export class MemoryOperationWindowRepo implements OperationWindowRepo {
       classifyOperationWindow({
         occurredDate,
         occurredMinute,
-        openApprovedAt: shift.openApprovedAt,
+        // Same fallback as `operationWindowContext`: a pre-0054 shift keeps today's behaviour
+        // rather than classifying every row `unknown`.
+        windowOpensAt: shift.windowOpensAt ?? shift.openApprovedAt,
         submittedAt: shift.submittedAt,
         ...(branch?.timezone ? { timeZone: branch.timezone } : {}),
         offsetMinutes: this.clock.offsetMinutes(),

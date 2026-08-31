@@ -2041,6 +2041,23 @@ function CloseApprovalWorkspace({
                         {t.settlement.receivableMaximum}: <Money value={settlement.maximumCashShortageReceivable} />
                       </span>
                     </label>
+                    {/*
+                      One press for the whole amount. This block only appears when the employee ends
+                      the shift owing the office, which is rare — one of eight shifts on 2026-08-30 —
+                      so the manager meets it seldom and should not have to retype a figure the
+                      settlement already knows. Typing stays available for a part payment.
+                    */}
+                    {parseMinor(cashShortageReceivable.trim() || '0') !==
+                      parseMinor(settlement.maximumCashShortageReceivable) ? (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => onCashShortageReceivable(settlement.maximumCashShortageReceivable)}
+                        className="mt-2 inline-flex min-h-9 items-center rounded-lg border border-red-300 bg-white px-3 text-xs font-bold text-red-900 disabled:opacity-40"
+                      >
+                        {t.settlement.shortageReceivableAll}
+                      </button>
+                    ) : null}
                     <p className="mt-2 rounded-lg bg-white/80 px-3 py-2 text-xs font-semibold text-red-900">
                       {t.settlement.shortageReceivableOfficeUnchanged}
                     </p>

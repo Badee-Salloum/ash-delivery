@@ -111,8 +111,13 @@ async function seedHistoricalOcrDeductionOverlap(
 }
 
 describe('operation minute window', () => {
+  /*
+   * `windowOpensAt` was `openApprovedAt` until the owner amended decision 11 on 2026-08-31. Only
+   * the SOURCE of the lower bound moved — to the driver's confirmation — so this truth table is
+   * unchanged, deliberately, and is what proves the rule itself was not touched.
+   */
   const base = {
-    openApprovedAt: new Date(OPEN_MS).toISOString(),
+    windowOpensAt: new Date(OPEN_MS).toISOString(),
     submittedAt: new Date(CLOSE_MS).toISOString(),
     timeZone: 'Asia/Damascus',
     offsetMinutes: 180,
@@ -132,7 +137,7 @@ describe('operation minute window', () => {
   it('preserves uncertainty when either the operation or canonical open time is missing', () => {
     expect(classifyOperationWindow({ ...base, occurredDate: null, occurredMinute: '20:00' })).toBe('unknown')
     expect(classifyOperationWindow({ ...base, occurredDate: '2026-08-13', occurredMinute: null })).toBe('unknown')
-    expect(classifyOperationWindow({ ...base, occurredDate: '2026-08-13', occurredMinute: '20:00', openApprovedAt: null })).toBe('unknown')
+    expect(classifyOperationWindow({ ...base, occurredDate: '2026-08-13', occurredMinute: '20:00', windowOpensAt: null })).toBe('unknown')
   })
 })
 
@@ -196,7 +201,12 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
     expect(review.json().submittedAt).toBe(new Date(CLOSE_MS).toISOString())
     expect(review.json().orders).toHaveLength(6)
     expect(review.json().orders.every((order: { included: boolean }) => order.included)).toBe(true)
-    expect(review.json().orders[0].windowStatus).toBe('open_minute_boundary')
+    // 19:49 was the boundary minute while the window opened at the MANAGER's approval. The fixture
+    // has always confirmed the driver ten minutes earlier (`OPEN_MS - 10 * 60_000`), and since the
+    // 2026-08-31 amendment that confirmation is the bound — so 19:49 now sits inside the window
+    // rather than on its edge. Both statuses are included, so the money below is unchanged; the
+    // boundary semantics themselves stay pinned by the truth table above.
+    expect(review.json().orders[0].windowStatus).toBe('in_window')
     expect(review.json().orders[4].windowStatus).toBe('in_window')
     expect(review.json().cashDeductions).toHaveLength(1)
     expect(review.json().cashDeductions[0]).toMatchObject({ amount: '50.00', included: true, windowStatus: 'in_window' })
@@ -774,7 +784,21 @@ describe('cash deduction compatibility and approval allocation', () => {
           payMode: 'cash',
           fee: '10.00',
           occurredDate: '2026-08-13',
-          occurredMinute: '19:48',
+          // 19:38 — one minute before the DRIVER confirmed. This read 19:48 while the window opened
+          // at the manager's approval; the 2026-08-31 amendment moved the bound back ten minutes to
+          // the confirmation, so 19:48 is now a real delivery inside the shift and the sample had to
+          // move with the rule it is testing. What is under test here is the HEALER, not this minute.
+          occurredMinute: '19:38',
+        },
+        {
+          // The row the amendment exists for: made after the driver confirmed at 19:39 and before
+          // the manager approved at 19:49. It used to heal to `pre_open` and be dropped from the
+          // money; it must now heal to `in_window` and count.
+          providerOrderNo: 'OLD-API-CONFIRM-GAP',
+          payMode: 'cash',
+          fee: '10.00',
+          occurredDate: '2026-08-13',
+          occurredMinute: '19:44',
         },
         { providerOrderNo: 'OLD-API-UNKNOWN', payMode: 'cash', fee: '10.00' },
       ],
@@ -816,6 +840,7 @@ describe('cash deduction compatibility and approval allocation', () => {
     expect(first.statusCode, first.body).toBe(200)
     expect(first.json().orders).toEqual(expect.arrayContaining([
       expect.objectContaining({ providerOrderNo: 'OLD-API-PRE-OPEN', windowStatus: 'pre_open', included: false }),
+      expect.objectContaining({ providerOrderNo: 'OLD-API-CONFIRM-GAP', windowStatus: 'in_window', included: true }),
       expect.objectContaining({ providerOrderNo: 'OLD-API-UNKNOWN', windowStatus: 'unknown', included: false }),
     ]))
     expect(first.json().cashDeductions[0]).toMatchObject({ windowStatus: 'post_close', included: false })
@@ -823,7 +848,7 @@ describe('cash deduction compatibility and approval allocation', () => {
     const second = await get(manager, `/shifts/${id}/review`)
     expect(second.statusCode, second.body).toBe(200)
     expect(counts).toEqual([
-      { orders: 2, cashDeductions: 1 },
+      { orders: 3, cashDeductions: 1 },
       { orders: 0, cashDeductions: 0 },
     ])
     const blocked = await approveFixedClose(h, manager, id, second.json().br1.ordersHash)
