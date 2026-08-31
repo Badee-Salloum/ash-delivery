@@ -451,6 +451,35 @@ describe('a payments-log minute the database can actually store', () => {
     expect(movement!.occurredMinute ?? '').toMatch(STORABLE)
   })
 
+  it('heals a draft that already holds a raw clock, without asking the driver to re-read', async () => {
+    /*
+     * The half that actually unblocked Majd. Fixing only the read path would have left every draft
+     * already holding «٢:٣١ م» permanently unsubmittable — his only way out being to redo evidence
+     * he had already given. Normalising again at the moment of persistence heals them on the next
+     * press, so this drives the value in the way a poisoned draft would: straight into the
+     * materialisation input.
+     */
+    reader.push(ok(paymentRow('٢:٣١ م')))
+    const { driver, shiftId } = await openShift()
+    let draft = await getDraft(driver, shiftId)
+    draft = draftFromUpload(await uploadEnd(driver, shiftId, 'payments_log', image('heal-raw-clock'), draft))
+    draft = draftFromRead(await readSlot(driver, shiftId, 'payments_log', 'payments_log', draft))
+
+    // Put the raw clock back exactly as a pre-fix draft holds it. `findByShift` hands out a CLONE,
+    // so the stored row has to be reached directly — a first version of this test mutated the copy
+    // and passed with the fix reverted, which is worse than no test at all.
+    const stored = h.deps.closeDrafts.rows.get(shiftId)!
+    for (const movement of stored.data.operations.movements) movement.occurredMinute = '٢:٣١ م'
+    expect(h.deps.closeDrafts.rows.get(shiftId)!.data.operations.movements[0]!.occurredMinute).toBe('٢:٣١ م')
+
+    draft = await readyManualDraft(driver, shiftId, 'heal-raw-clock-figures', true)
+    const submitted = await inject('PUT', driver, `/shifts/${shiftId}/end-package`, endPayload(draft))
+    expect(submitted.statusCode, submitted.body).toBe(200)
+    for (const movement of await h.deps.movements.listByShift(shiftId)) {
+      expect(movement.occurredMinute ?? '').toMatch(STORABLE)
+    }
+  })
+
   it('falls back to no minute rather than a value the column would reject', async () => {
     // The constraint permits `''` explicitly, and the movement is flagged `ambiguous` anyway. An
     // unreadable clock must cost the minute, never the driver's whole submission.

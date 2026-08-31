@@ -74,6 +74,7 @@ import {
   weekStartFor,
   withoutSupersededScanRows,
 } from '@ash/domain'
+import { normalizePrintedOrderTime } from '@ash/adapters/ocr'
 import { fundCodeOf } from '@ash/adapters/memory'
 import { grantsFromRows } from './rbac.ts'
 import {
@@ -289,6 +290,16 @@ const includedByWindow = includedByOperationWindow
  * to `null`, which the classifier reads as `unknown` and which would exclude a whole shift's orders
  * rather than one row.
  */
+/**
+ * A wallet movement's minute, in the only shapes `shift_wallet_movements_minute_ck` accepts.
+ *
+ * `normalizePrintedOrderTime` is the adapter's tested clock parser — Arabic-Indic digits, ص/م and
+ * AM/PM. An already-canonical `HH:MM` passes through it unchanged; anything it cannot read becomes
+ * `''`, which the constraint permits and which costs a minute rather than a driver's whole shift.
+ */
+const storableMovementMinute = (value: string | null | undefined): string =>
+  normalizePrintedOrderTime(value ?? null) ?? ''
+
 async function operationWindowContext(deps: Deps, shift: ShiftRecord): Promise<{
   windowOpensAt: string | null
   submittedAt: string | null
@@ -3699,7 +3710,18 @@ export async function submitOperations(
         transitionTargets.get(m.providerOrderNo) === 'cash_deduction'
       return {
         amount: m.amount,
-        occurredMinute: m.occurredMinute,
+        /*
+         * Normalised HERE as well as where the draft is written, and that is the point.
+         *
+         * `shift_wallet_movements.occurred_minute` accepts `''` or `HH:MM`. Fixing only the read
+         * path leaves every draft already holding a raw printed clock — «٢:٣١ م» — permanently
+         * unsubmittable, so the driver's only way out would be to redo evidence he has already
+         * given. Normalising at the moment of persistence heals those drafts on the next press.
+         *
+         * It is also the honest place for it: this is the last line before a value the column has
+         * an opinion about, and a value the column will reject must never get past it.
+         */
+        occurredMinute: storableMovementMinute(m.occurredMinute),
         orderId: providerBecameDeduction ? null : orderId,
         // A wallet row formerly matched to a provider order is retained as evidence when that row
         // proves to be a cash deduction, but cannot silently become another BR1 adjustment.
