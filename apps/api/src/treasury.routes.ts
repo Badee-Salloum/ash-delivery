@@ -12,6 +12,7 @@ import {
   cancelCashCountRequest,
   createCashCountRequest,
   correctReceivableRequest,
+  officeTransferRequest,
   createReceivableEventRequest,
   manualEntryRequest,
   moneySchema,
@@ -33,6 +34,7 @@ import {
   receivableWriteoff,
   reverse,
   manualKaish,
+  officeTransfer,
   weekStartFor,
 } from '@ash/domain'
 import { ServiceError, assertWeekOpen, ensureFxDay, todayFor } from './shifts.service.ts'
@@ -1077,6 +1079,42 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     })
     await postOne(branchId, businessDate, posting, req.actor!.userId, body.reason)
     return reply.code(201).send({ balance: serializeMoney(await deps.ledger.fundBalance(branchId, 'company_box')) })
+  })
+
+  /**
+   * Move money between the branch's own two boxes.
+   *
+   * Everyday work: Yallago's cut comes out of the wallet while the drivers hand back notes, so the
+   * wallet empties as the cash box fills and the office tops one from the other. WORKING CAPITAL
+   * IS UNCHANGED by design — both legs are office funds — so the capital card, the restoration and
+   * the go-live gate all see exactly what they saw a second ago. Only the SHAPE of the money moves.
+   *
+   * `journal.manual.write`, like every other hand-entered movement, with a reason that has to say
+   * something: a transfer with no explanation is indistinguishable next month from a mistake.
+   */
+  app.post('/treasury/transfer', { config: { permission: 'journal.manual.write', subject: targetBranch } }, async (req, reply) => {
+    const body = officeTransferRequest.parse(req.body)
+    const branchId = resolveBranch(req)
+    const from = body.direction === 'cash_to_wallet' ? 'office_cash' : 'office_wallet'
+    const to = body.direction === 'cash_to_wallet' ? 'office_wallet' : 'office_cash'
+    const businessDate = todayFor(deps)
+    await assertWeekOpen(deps, branchId, businessDate)
+
+    // You cannot move money the box is not holding. The ledger would carry a negative balance
+    // without complaint — arithmetic has no opinion — and a box that owes itself money is a
+    // data-entry mistake every time, cheapest to refuse at the moment it is made.
+    const held = await deps.ledger.fundBalance(branchId, from)
+    if (body.amount > held) {
+      throw new ServiceError(422, 'insufficient_funds', { held: serializeMoney(held), from })
+    }
+
+    await postOne(branchId, businessDate, officeTransfer(from, to, body.amount, deps.ids.uuid()), req.actor!.userId, body.reason)
+    return reply.code(201).send({
+      direction: body.direction,
+      amount: serializeMoney(body.amount),
+      cash: serializeMoney(await deps.ledger.fundBalance(branchId, 'office_cash')),
+      wallet: serializeMoney(await deps.ledger.fundBalance(branchId, 'office_wallet')),
+    })
   })
 
   const withdrawRequest = z.object({

@@ -57,6 +57,9 @@ export function Treasury(): ReactNode {
   const [depositAmt, setDepositAmt] = useState<{ cash: string; wallet: string }>({ cash: '', wallet: '' })
   const [depositMsg, setDepositMsg] = useState<string | null>(null)
   const [withdrawAmt, setWithdrawAmt] = useState<{ cash: string; wallet: string }>({ cash: '', wallet: '' })
+  const [moveDirection, setMoveDirection] = useState<'cash_to_wallet' | 'wallet_to_cash'>('cash_to_wallet')
+  const [moveAmt, setMoveAmt] = useState('')
+  const [moveReason, setMoveReason] = useState('')
 
   // ── «صندوق الشركة» ────────────────────────────────────────────────────────────────────────
   const [company, setCompany] = useState<{ total: string; branches: Array<{ branchId: string; nameAr: string; balance: string }> } | null>(null)
@@ -344,6 +347,27 @@ export function Treasury(): ReactNode {
       // It used to set the SAME state as success, which renders in emerald — so a rejected
       // deposit printed «forbidden» in green under the cash box and the manager believed the
       // money had gone in.
+      setDepositMsg(null)
+      toast.error(explainError((err as { error?: string }).error ?? 'error', t))
+    }
+  }
+
+  /**
+   * «نقل بين الصندوق والمحفظة» — reshape the branch's own money, both directions.
+   *
+   * Not «كييش»: nothing leaves for صندوق الشركة, so the treasury total, the capital target and
+   * الترميم all see exactly what they saw a second ago. Only the two boxes change.
+   */
+  async function moveBetweenBoxes(): Promise<void> {
+    if (!moveAmt || !moveReason.trim()) return
+    setDepositMsg(null)
+    try {
+      const res = await api.treasuryTransfer(moveDirection, moveAmt, moveReason.trim())
+      setBalances((b) => (b ? { ...b, cash: res.cash, wallet: res.wallet } : b))
+      setMoveAmt('')
+      setMoveReason('')
+      setDepositMsg(t.treasury.moved)
+    } catch (err) {
       setDepositMsg(null)
       toast.error(explainError((err as { error?: string }).error ?? 'error', t))
     }
@@ -867,6 +891,37 @@ export function Treasury(): ReactNode {
             </div>
           ))}
         </div>
+        {canDeposit ? (
+          <div className="mt-4 rounded-lg border border-slate-200 p-3">
+            <div className="text-xs font-semibold text-slate-500">{t.treasury.moveBetweenBoxes}</div>
+            <p className="mt-1 text-xs text-slate-600">{t.treasury.moveBetweenBoxesHint}</p>
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">
+              <Select
+                value={moveDirection}
+                onChange={(e) => setMoveDirection(e.target.value as 'cash_to_wallet' | 'wallet_to_cash')}
+                className="min-w-0 flex-1"
+              >
+                <option value="cash_to_wallet">{t.treasury.cashToWallet}</option>
+                <option value="wallet_to_cash">{t.treasury.walletToCash}</option>
+              </Select>
+              <MoneyInput
+                value={moveAmt}
+                onChange={(e) => setMoveAmt(e.target.value)}
+                className="min-w-0 flex-1"
+                placeholder={t.treasury.depositAmount}
+              />
+              <TextInput
+                value={moveReason}
+                onChange={(e) => setMoveReason(e.target.value)}
+                className="min-w-0 flex-1"
+                placeholder={t.treasury.moveBetweenBoxesReason}
+              />
+              <Button variant="ghost" onClick={() => void moveBetweenBoxes()} disabled={!moveAmt || !moveReason.trim()}>
+                {t.treasury.moveBetweenBoxes}
+              </Button>
+            </div>
+          </div>
+        ) : null}
         {depositMsg ? <p className="mt-3 text-sm font-medium text-emerald-700">{depositMsg}</p> : null}
 
         {/* «صندوق الشركة» — where «كييش» lands and where «شحن من الصندوق» comes from. Sits inside

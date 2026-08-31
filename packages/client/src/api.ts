@@ -1561,6 +1561,18 @@ export class ApiClient {
       ...(this.branchId ? { branchId: this.branchId } : {}),
     })
   }
+  /**
+   * «نقل بين الصندوق والمحفظة» — reshape the branch's money without changing how much it holds.
+   *
+   * The direction names both ends so no fund code crosses the wire: the generic withdraw route
+   * takes a free-form `to`, and an unrecognised code lands in a look-alike account nothing sums.
+   */
+  treasuryTransfer(direction: 'cash_to_wallet' | 'wallet_to_cash', amount: string, reason: string) {
+    return this.post<{ direction: string; amount: string; cash: string; wallet: string }>(
+      '/treasury/transfer',
+      { direction, amount, reason, ...(this.branchId ? { branchId: this.branchId } : {}) },
+    )
+  }
   treasuryDeposit(target: 'cash' | 'wallet', amount: string, note?: string) {
     // branchId is explicit here: the GM has scope 'all' and no session branch, so without it the
     // deposit 422s — the money would have nowhere to land.

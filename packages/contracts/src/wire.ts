@@ -1176,6 +1176,20 @@ export const correctReceivableRequest = z.object({
   idempotencyKey: z.string().uuid(),
 })
 
+/**
+ * «نقل بين الصندوق والمحفظة» — reshape the branch's own money without changing how much it has.
+ *
+ * `direction` names both ends, so no fund code crosses the wire. The route this would otherwise
+ * ride on takes a free-form `to`, and `fundRefFromCode` silently turns anything it does not know
+ * into `cost_center:<code>` — money moved into an account nothing sums and nothing complains about.
+ */
+export const officeTransferRequest = z.object({
+  branchId: z.string().optional(),
+  direction: z.enum(['cash_to_wallet', 'wallet_to_cash']),
+  amount: positiveMoneySchema,
+  reason: nonblankReasonSchema,
+})
+
 // ── Treasury: daily count and manual entries (SRS E-3, E-5) ───────────────────────────────
 
 /**

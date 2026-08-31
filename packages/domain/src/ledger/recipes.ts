@@ -796,6 +796,36 @@ export function sweepToCompany(office: OfficeFund, amount: Minor, occurrenceKey 
 }
 
 /**
+ * Move money between the branch's two office boxes — cash to wallet, or wallet to cash.
+ *
+ * Owner request, 2026-08-31. It is an everyday act: the wallet runs dry while cash piles up because
+ * Yallago takes its cut from the wallet and the drivers hand back notes, so the office tops one from
+ * the other. Until now the only route that could do it took a free-form fund code, and
+ * `fundRefFromCode` turns any string it does not recognise into `cost_center:<code>` — a look-alike
+ * account no reader sums and no error is raised about. Naming the two ends closes that door.
+ *
+ * WORKING CAPITAL DOES NOT MOVE, and that is the whole character of this posting: both legs are
+ * office funds, so the branch holds exactly what it held a second ago. It is a reshaping, not an
+ * income, an expense, or a sweep — which is why it carries its own line roles rather than borrowing
+ * `kaish`/`shahn`. Those two mean «money left for صندوق الشركة» and the treasury reader classifies
+ * by them; a transfer wearing one would be counted as company money that never moved.
+ */
+export function officeTransfer(
+  from: OfficeFund,
+  to: OfficeFund,
+  amount: Minor,
+  occurrenceKey = '1',
+): Posting {
+  if (amount <= ZERO) throw new RangeError(`office transfer must be positive, got ${amount}`)
+  if (from === to) throw new RangeError(`office transfer needs two different boxes, got ${from} twice`)
+  return assertBalanced({
+    eventType: 'manual',
+    occurrenceKey,
+    lines: [D({ kind: to }, amount, 'office_transfer_in'), C({ kind: from }, amount, 'office_transfer_out')],
+  })
+}
+
+/**
  * «كييش» BY HAND — the manager moving money out of a box without running الترميم.
  *
  * Identical lines and identical roles to `sweepToCompany`, and deliberately a DIFFERENT event type.
