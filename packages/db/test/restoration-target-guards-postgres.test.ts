@@ -832,17 +832,19 @@ if (!DATABASE_URL) {
         await targetWaiter.query("SET LOCAL statement_timeout = '5s'")
         await setActor(targetWaiter, fixture.managerId)
         const targetPid = await targetWaiter.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
-        const targetUpdate = targetWaiter.query(
-          `UPDATE office_capital_targets SET note = 'concurrent rewrite'
-            WHERE branch_id = $1 AND fund_code = 'office_cash' AND effective_from = $2`,
-          [fixture.branchId, DATE],
-        )
-        await waitForLock(pool, targetPid.rows[0]!.pid)
-        await setup.query('COMMIT')
-        await expect(targetUpdate).rejects.toMatchObject({
+        const targetUpdateRejection = expect(
+          targetWaiter.query(
+            `UPDATE office_capital_targets SET note = 'concurrent rewrite'
+              WHERE branch_id = $1 AND fund_code = 'office_cash' AND effective_from = $2`,
+            [fixture.branchId, DATE],
+          ),
+        ).rejects.toMatchObject({
           code: '55000',
           constraint: 'office_capital_targets_history_guard',
         })
+        await waitForLock(pool, targetPid.rows[0]!.pid)
+        await setup.query('COMMIT')
+        await targetUpdateRejection
         await targetWaiter.query('ROLLBACK')
       } finally {
         await setup.query('ROLLBACK').catch(() => undefined)
@@ -869,19 +871,21 @@ if (!DATABASE_URL) {
         await lineWaiter.query("SET LOCAL statement_timeout = '5s'")
         await setActor(lineWaiter, fixture.managerId)
         const linePid = await lineWaiter.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
-        const lineUpdate = lineWaiter.query(
-          `UPDATE cash_count_lines SET counted_minor = counted_minor + 1
-            WHERE cash_count_id = $1 AND fund_id = (
-              SELECT id FROM funds WHERE branch_id = $2 AND code = 'office_cash'
-            )`,
-          [evidence.countId, fixture.branchId],
-        )
-        await waitForLock(pool, linePid.rows[0]!.pid)
-        await publisher.query('COMMIT')
-        await expect(lineUpdate).rejects.toMatchObject({
+        const lineUpdateRejection = expect(
+          lineWaiter.query(
+            `UPDATE cash_count_lines SET counted_minor = counted_minor + 1
+              WHERE cash_count_id = $1 AND fund_id = (
+                SELECT id FROM funds WHERE branch_id = $2 AND code = 'office_cash'
+              )`,
+            [evidence.countId, fixture.branchId],
+          ),
+        ).rejects.toMatchObject({
           code: '55000',
           constraint: 'restorations_cash_count_immutable_guard',
         })
+        await waitForLock(pool, linePid.rows[0]!.pid)
+        await publisher.query('COMMIT')
+        await lineUpdateRejection
         await lineWaiter.query('ROLLBACK')
       } finally {
         await publisher.query('ROLLBACK').catch(() => undefined)
