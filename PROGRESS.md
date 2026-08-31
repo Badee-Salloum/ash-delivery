@@ -1,5 +1,88 @@
 # PROGRESS
 
+## 2026-08-31 — the order-time pipeline: the window, the clock, the duplicate
+
+Deployed: migration `0054`, API, admin. Commits `3409622`, `2ea8f8f`. `pnpm check` green — 838 API
+tests, 138 adapters, 118 db, 330 driver, 173 admin, 307 client, 505 domain.
+
+Owner: «صمم حل مناسب … تأكد من اصلاح كلشيء و عدم حدوث اخطاء جديدة **لان النسخة مستخدمة الان**».
+
+Measured first, on 330 production order rows — all from OCR, zero manual — of which 35 (10.6%) were
+excluded. Three defects behind one complaint, and the third caused by the second.
+
+### 1. The window, not the reader — 29 rows, 6,795.00
+
+The clock was read correctly; the delivery simply fell before the manager pressed approve.
+Driver-confirm→approve gaps reached **426 minutes**. Six of Nazeer's rows on 2026-08-28 were
+re-included by hand as «توصيل بين تأكيد السائق 12:46 واعتماد المدير …». **A rule a human overrides
+every shift is the wrong rule**, so the owner moved the bound to the driver's confirmation
+(decision 11, amended).
+
+The bound lived in **four** places — the TS classifier, a full SQL mirror of it, and two comparisons
+in the close-draft service. `shifts.window_opens_at` is now the one instant they all read; the
+six-value truth table is untouched in both implementations. The four SQL callers were extracted
+**verbatim** and re-emitted with exactly five tokens substituted, proved by diff — after I caught
+myself, twice this session, rewriting a security function from memory.
+
+### 2. The clock — 11 rows, 2,715.00
+
+The resolver had the upper bound (the screenshot's own time) and never the shift's lower edge, which
+`linkedRows` has held as `shiftOpenMinute` all along. A delivery cannot predate its shift, so `1:18`
+on a shift opened at 12:00 settles as 13:18 without guessing a marker. Only the linked-read caller
+passes it; the adapter's cached pass stays context-free, so `cache_signature` does not move — no
+re-read, no OCR re-billing.
+
+**The bound disambiguates; it never deletes.** A first draft filtered unconditionally and stripped
+the minute from a legible `1:00 PM` printed under the previous day's header — costing the row its
+merge identity and duplicating it on the next retake, the exact failure being fixed. An existing
+test caught it.
+
+### 3. The duplicate follows from 2 — and a second cause nobody knew
+
+5 of 11 no-time rows were marked duplicate against 2 of 319 timed rows — **72×**. Found while
+fixing it: `matchKey` was built by two recipes that could not agree. The scan path used an unpadded
+printed hour and raw OCR money (`8:00`/`155`); rehydration used the stored padded minute and
+`serializeMoney` (`08:00`/`155.00`). **A rehydrated row could never match a scanned one for any hour
+0–9 — every morning shift** — and nothing asserted either key's value. One builder now serves both,
+marker-blind so a retake that makes ص/م legible still merges, and fresh rows also carry the old
+shape so a draft saved before this lands is not stranded.
+
+### The rehearsal earned its keep
+
+No Docker on this machine, so the PostgreSQL guard suite is skipped and 427 lines of replaced
+PL/pgSQL had never been parsed. Running the whole migration against production **inside a
+transaction that was rolled back** found two faults that would have hit at deploy time:
+
+- `55006 pending trigger events` — two deferred constraint triggers re-validate a shift's close
+  journals on ANY update. Flushing them made it worse: the guard then raised on an existing
+  cancelled shift, so a derivation would have surfaced unrelated history. Both are suspended across
+  the backfill and restored in the same transaction, as 0037 does.
+- **`cancelled` is a real state holding 33 of production's 70 shifts.** The enum in 0005 does not
+  list it; a later migration added it. The backfill treated it as work in progress and moved every
+  one of those bounds.
+
+After the real run: **70 shifts, all bounded, `moved 0`** — every settled shift keeps the exact
+instant it was judged by. 4/4 functions read the new column, none the old. Trial balance 0.
+
+### Also
+
+A one-press action to book the whole close shortage as an ordinary receivable. The control existed
+and worked; it only appears when the employee ends owing the office — one of eight shifts on
+2026-08-30 — which is why the owner had never met it.
+
+### New tests
+
+TS/SQL parity over the whole truth table (**there was none** — 0030's test only asserted the SQL
+text *contains* the call); the merge identity in both shapes and its null guards; the resolver bound
+settling, respecting the inclusive open minute, and never deleting a lone candidate; a delivery in
+the confirm→approve gap healing to `in_window`.
+
+### Correction to an earlier claim
+
+I told the owner that `close_draft_review_reasons` being empty in production was worth investigating.
+It is not. The approval gate refuses while any row carries a reason, and the only way past it clears
+the column — so every approved row necessarily ends `[]`.
+
 ## 2026-08-29 (later) — «تعديل الذمم المسجلة», the map picker, and two bugs found by looking
 
 Deployed: migration `0050` applied (`1 applied, 49 already present`), then API and admin. Commits
