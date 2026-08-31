@@ -29,12 +29,28 @@ ALTER TABLE shifts ADD COLUMN window_opens_at timestamptz;
 COMMENT ON COLUMN shifts.window_opens_at IS
   'Lower bound of the operation window: driver confirmation for shifts opened after 2026-08-31, and the manager open-approval instant for everything settled before it.';
 
--- Settled shifts keep the instant they were actually judged by, to the millisecond. `week_locked`
--- sits beside `approved` because BR7 makes those entries immutable — so their classification must
--- be immutable too.
+-- The two DEFERRED constraint triggers on `shifts` re-validate a shift's close journals and its
+-- receivable projection on ANY update, including one that only writes a derived column. Left on,
+-- they queue an event per row, which (a) makes the ALTER below fail with 55006 `pending trigger
+-- events` and (b) re-runs a business validation over history this migration does not touch — one
+-- production shift already fails it, and a derivation must not be the thing that surfaces that.
+--
+-- Same precedent as 0037's backfill: suspend only the guard that has nothing to say about this
+-- change, and restore it inside the same transaction, so any failure rolls the whole thing back.
+-- `audit_shifts` deliberately stays ON: this writes a real column and the change is auditable.
+ALTER TABLE shifts DISABLE TRIGGER shift_close_journals_from_shift;
+ALTER TABLE shifts DISABLE TRIGGER shift_receivable_projection_from_shift;
+
+-- Finished shifts keep the instant they were actually judged by, to the millisecond.
+--
+-- `week_locked` sits beside `approved` because BR7 makes those entries immutable, so their
+-- classification must be too. `cancelled` sits there for the same reason: it is a closed outcome,
+-- not work in progress, and re-judging its rows would restate a shift nobody can act on. The
+-- enum in 0005 did not have `cancelled` — a later migration added it — and a first draft of this
+-- file left it out and moved all 33 of production's cancelled shifts. The rehearsal caught it.
 UPDATE shifts
    SET window_opens_at = open_approved_at
- WHERE state IN ('approved', 'week_locked');
+ WHERE state IN ('approved', 'week_locked', 'cancelled');
 
 -- Everything still in flight gets the corrected rule now. Nobody has been paid out on these, so no
 -- settlement can be contradicted — and a shift open at deploy time is exactly the one that should
@@ -46,7 +62,10 @@ UPDATE shifts
 -- than one row.
 UPDATE shifts
    SET window_opens_at = COALESCE(driver_confirmed_at, open_approved_at)
- WHERE state NOT IN ('approved', 'week_locked');
+ WHERE state NOT IN ('approved', 'week_locked', 'cancelled');
+
+ALTER TABLE shifts ENABLE TRIGGER shift_close_journals_from_shift;
+ALTER TABLE shifts ENABLE TRIGGER shift_receivable_projection_from_shift;
 
 -- A shift that has been approved-open must carry a bound, or every one of its rows classifies as
 -- `unknown` and the shift cannot be approved at all.
