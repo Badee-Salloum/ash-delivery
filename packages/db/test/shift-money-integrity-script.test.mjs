@@ -171,6 +171,23 @@ describe('read-only shift-money integrity checker', () => {
     expect(tranches).toContain('OR c.is_wallet_topup_adjustment')
   })
 
+  it('nets only exact cash-float correction journals against the opening total', () => {
+    for (const checks of [LEGACY_INTEGRITY_CHECKS, INTEGRITY_CHECKS]) {
+      const tranches = checks.find((check) => check.id === 'tranche_journal_totals').sql
+      expect(tranches).toContain("je.event_type = 'correction'")
+      expect(tranches).toContain("je.occurrence_key LIKE 'cash-float-adjustment:%'")
+      expect(tranches).toContain("f.type::text = 'office_cash'")
+      expect(tranches).toContain("f.type::text = 'driver_cash'")
+      expect(tranches).toContain('es.driver_cash_credit = es.office_cash_debit')
+      expect(tranches).toContain('es.line_count = 2')
+    }
+
+    const tranches = INTEGRITY_CHECKS.find((check) => check.id === 'tranche_journal_totals').sql
+    expect(tranches).toContain('AS is_cash_float_adjustment')
+    expect(tranches).toContain('WHERE c.is_cash_float_adjustment')
+    expect(tranches).toContain('OR c.is_cash_float_adjustment')
+  })
+
   it('grandfathers only cancelled shifts that predate the 0035 integrity boundary', () => {
     for (const checks of [LEGACY_INTEGRITY_CHECKS, INTEGRITY_CHECKS]) {
       const tranches = checks.find((check) => check.id === 'tranche_journal_totals').sql
@@ -1017,11 +1034,12 @@ if (!DATABASE_URL) {
       }
     })
 
-    it('nets an exact wallet top-up correction and rejects a malformed prefixed correction', async () => {
+    it('nets exact wallet/cash opening corrections and rejects malformed prefixed corrections', async () => {
       const client = await pool.connect()
       const shiftId = randomUUID()
       const driverId = randomUUID()
       const driverWalletId = randomUUID()
+      const driverCashId = randomUUID()
       const officeWalletId = randomUUID()
       const officeCashId = randomUUID()
       const tranches = INTEGRITY_CHECKS.find((check) => check.id === 'tranche_journal_totals').sql
@@ -1093,25 +1111,28 @@ if (!DATABASE_URL) {
              (id, driver_id, state, created_at, open_approved_at,
               start_cash_float_minor, start_wallet_topup_minor)
            VALUES ($1, $2, 'open', TIMESTAMPTZ '2026-08-24 07:00:00+00',
-                   TIMESTAMPTZ '2026-08-24 07:30:00+00', 0, 500)`,
+                    TIMESTAMPTZ '2026-08-24 07:30:00+00', 500, 500)`,
           [shiftId, driverId],
         )
         await client.query(
           `INSERT INTO float_tranches (shift_id, kind, amount_minor)
-           VALUES ($1, 'wallet_topup', 500)`,
+           VALUES ($1, 'wallet_topup', 500), ($1, 'cash_float', 500)`,
           [shiftId],
         )
         await client.query(
           `INSERT INTO funds (id, type, owner_id) VALUES
-             ($1, 'driver_wallet', $4),
+             ($1, 'driver_wallet', $5),
              ($2, 'office_wallet', NULL),
-             ($3, 'office_cash', NULL)`,
-          [driverWalletId, officeWalletId, officeCashId, driverId],
+             ($3, 'office_cash', NULL),
+             ($4, 'driver_cash', $5)`,
+          [driverWalletId, officeWalletId, officeCashId, driverCashId, driverId],
         )
         await client.query(
           `INSERT INTO journal_entries (id, shift_id, event_type, occurrence_key) VALUES
              (1, $1, 'wallet_topup', '1'),
-             (2, $1, 'correction', 'wallet-topup-adjustment:manager-fix')`,
+             (2, $1, 'correction', 'wallet-topup-adjustment:manager-fix'),
+             (3, $1, 'float_out', '1'),
+             (4, $1, 'correction', 'cash-float-adjustment:manager-fix')`,
           [shiftId],
         )
         await client.query(
@@ -1119,14 +1140,25 @@ if (!DATABASE_URL) {
              (1, 1, $1, 'D', 600),
              (2, 1, $2, 'C', 600),
              (3, 2, $2, 'D', 100),
-             (4, 2, $1, 'C', 100)`,
-          [driverWalletId, officeWalletId],
+             (4, 2, $1, 'C', 100),
+             (5, 3, $3, 'D', 600),
+             (6, 3, $4, 'C', 600),
+             (7, 4, $4, 'D', 100),
+             (8, 4, $3, 'C', 100)`,
+          [driverWalletId, officeWalletId, driverCashId, officeCashId],
         )
 
         expect(await violationCount()).toBe(0)
 
         // The prefix alone is not enough: only D office_wallet / C this driver's wallet is netted.
         await client.query('UPDATE journal_lines SET fund_id = $1 WHERE id = 4', [officeCashId])
+        expect(await violationCount()).toBe(1)
+
+        await client.query('UPDATE journal_lines SET fund_id = $1 WHERE id = 4', [driverWalletId])
+        expect(await violationCount()).toBe(0)
+
+        // The cash correction is similarly exact: D office_cash / C this driver's cash.
+        await client.query('UPDATE journal_lines SET fund_id = $1 WHERE id = 8', [officeWalletId])
         expect(await violationCount()).toBe(1)
       } finally {
         await client.query('ROLLBACK').catch(() => undefined)
