@@ -411,6 +411,61 @@ describe('durable close-draft identity', () => {
   })
 })
 
+describe('a payments-log minute the database can actually store', () => {
+  /*
+   * PRODUCTION, 2026-08-31. Majd could not submit his shift: «حدث فشل غير متوقع (internal_error)».
+   *
+   * `shift_wallet_movements.occurred_minute` accepts `''` or `HH:MM` and nothing else. Orders pass
+   * through `resolveSamePageOrderTimes`, which returns a strict 24-hour clock; MOVEMENTS took the
+   * reader's raw `row.time` straight through, so a payments-log row read as «٢:٣١ م» was written
+   * verbatim. The insert raised 23514, nothing mapped it, and the driver met a 500 on the one
+   * screen he cannot get past — with ten delivered orders and his whole shift stuck behind it.
+   *
+   * The failing production row, verbatim from the server log:
+   *   (…, 24000, ٢:٣١ م, 1, null, unmatched, t, t, ocr, …)
+   */
+  const paymentRow = (time: string) => ({
+    printed: '240.00 SYP',
+    printedTime: time,
+    value: '240.00',
+    cancelled: false,
+    time,
+    dateIso: today,
+    pointA: null,
+    pointB: null,
+  })
+
+  const STORABLE = /^$|^([01][0-9]|2[0-3]):[0-5][0-9]$/
+
+  it('normalises an Arabic printed clock instead of storing it raw', async () => {
+    reader.push(ok(paymentRow('٢:٣١ م')))
+    const { driver, shiftId } = await openShift()
+    let draft = await getDraft(driver, shiftId)
+    draft = draftFromUpload(await uploadEnd(driver, shiftId, 'payments_log', image('arabic-clock'), draft))
+    draft = draftFromRead(await readSlot(driver, shiftId, 'payments_log', 'payments_log', draft))
+
+    const [movement] = draft.operations.movements
+    expect(movement, 'the page produced a movement').toBeDefined()
+    // ٢:٣١ م is 14:31 — the marker is what the raw string carried and the column cannot.
+    expect(movement!.occurredMinute).toBe('14:31')
+    expect(movement!.occurredMinute ?? '').toMatch(STORABLE)
+  })
+
+  it('falls back to no minute rather than a value the column would reject', async () => {
+    // The constraint permits `''` explicitly, and the movement is flagged `ambiguous` anyway. An
+    // unreadable clock must cost the minute, never the driver's whole submission.
+    reader.push(ok(paymentRow('وقت غير واضح')))
+    const { driver, shiftId } = await openShift()
+    let draft = await getDraft(driver, shiftId)
+    draft = draftFromUpload(await uploadEnd(driver, shiftId, 'payments_log', image('unreadable-clock'), draft))
+    draft = draftFromRead(await readSlot(driver, shiftId, 'payments_log', 'payments_log', draft))
+
+    const [movement] = draft.operations.movements
+    expect(movement, 'the page still produced a movement').toBeDefined()
+    expect(movement!.occurredMinute ?? '').toMatch(STORABLE)
+  })
+})
+
 describe('attachment/read races and screen safety', () => {
   it('refuses manual figures when current evidence skipped its linked reads, before materialising operations', async () => {
     const { driver, shiftId } = await openShift()

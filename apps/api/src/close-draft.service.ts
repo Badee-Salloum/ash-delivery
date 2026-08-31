@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { resolveSamePageOrderTimes } from '@ash/adapters/ocr'
+import { normalizePrintedOrderTime, resolveSamePageOrderTimes } from '@ash/adapters/ocr'
 import type {
   AttachedSlot,
   CloseDraftCashDeduction,
@@ -932,7 +932,23 @@ function linkedRows(
         clientKey,
         matchKey,
         amount: money,
-        occurredMinute: row.time,
+        /*
+         * A MOVEMENT'S MINUTE MUST BE A MINUTE, NOT WHAT WAS PRINTED.
+         *
+         * Orders go through `resolveSamePageOrderTimes`, which returns a strict 24-hour clock.
+         * Movements took the reader's raw `row.time` straight through, so a payments-log row that
+         * came back as «٢:٣١ م» was written verbatim into a column whose CHECK accepts only
+         * `''` or `HH:MM`. The insert raised 23514, nothing mapped it, and the driver got
+         * «حدث فشل غير متوقع (internal_error)» on the one screen he cannot get past — with his
+         * whole shift stuck behind it.
+         *
+         * `normalizePrintedOrderTime` is the adapter's own tested parser: Arabic-Indic digits,
+         * ص/م and AM/PM, already covered by a table of cases including this exact shape. When it
+         * cannot read the text the minute becomes `''` — which the constraint explicitly permits
+         * and which the movement is anyway flagged `ambiguous` about — rather than a value that
+         * cannot be stored.
+         */
+        occurredMinute: normalizePrintedOrderTime(row.time) ?? '',
         role: 'unmatched',
         providerOrderNo: null,
         ambiguous: true,
