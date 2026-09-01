@@ -44,6 +44,10 @@ export interface ScanDuplicateHintWire {
  */
 
 export interface ResolvedDuplicateHint {
+  /** The page THIS operation was scanned from, and its ordinal there — the side-by-side needs both
+   *  sides labelled, and only the hint knows which page each sighting came off. */
+  selfSlot: string
+  selfRowIndex: number
   /** The page the counterpart row was scanned from. */
   counterpartSlot: string
   /** 0-based row index of the counterpart on its own page. */
@@ -82,6 +86,8 @@ const resolve = (
         if (!matches(pair[side], target)) continue
         const other: Side = side === 'earlier' ? 'later' : 'earlier'
         found.push({
+          selfSlot: side === 'earlier' ? hint.earlier.slot : hint.later.slot,
+          selfRowIndex: pair[side].rowIndex,
           counterpartSlot: other === 'earlier' ? hint.earlier.slot : hint.later.slot,
           counterpartRowIndex: pair[other].rowIndex,
           counterpart: pair[other],

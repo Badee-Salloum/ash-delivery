@@ -25,6 +25,13 @@ import {
   duplicateHintsForDeduction,
   duplicateHintsForOrder,
 } from '../duplicate-hints.ts'
+import {
+  duplicateChoiceRevision,
+  duplicateChoiceView,
+  type DuplicateChoiceRow,
+  type DuplicateChoiceTarget,
+  type DuplicateChoiceView,
+} from '../duplicate-choice.ts'
 import { useConfirm, useToast } from '../feedback.tsx'
 import { LatestRequestGuard } from '../latest-request.ts'
 import { isValidOpeningFundInput, openingApprovalRequest } from '../opening-funds.ts'
@@ -1603,6 +1610,16 @@ function CloseApprovalWorkspace({
     return occurrenceKey(a).localeCompare(occurrenceKey(b))
   })
   const split = br1SplitView(review.br1)
+  // A duplicate hint names a row somewhere else in this same snapshot; the card that shows the
+  // hint has only its own row, so the list resolves the other one.
+  const lookupDuplicateRow = (target: DuplicateChoiceTarget): DuplicateChoiceRow | null => {
+    if (target.kind === 'order') {
+      const found = orders.find((item) => item.providerOrderNo === target.providerOrderNo)
+      return found ? duplicateRowFromOrder(found) : null
+    }
+    const found = cashDeductions.find((item) => item.id === target.id)
+    return found ? duplicateRowFromDeduction(found) : null
+  }
   const summary = summarizeOrders(orders)
   const attentionOrders = orders.filter(orderNeedsAttention)
   const ordinaryOrders = orders.filter((order) => !orderNeedsAttention(order))
@@ -1691,6 +1708,7 @@ function CloseApprovalWorkspace({
                 {attentionOrders.map((order, index) => (
                   <OrderAttentionCard
                     key={order.providerOrderNo}
+                    lookupDuplicateRow={lookupDuplicateRow}
                     order={order}
                     index={orders.indexOf(order) + 1 || index + 1}
                     businessDate={day}
@@ -1711,6 +1729,7 @@ function CloseApprovalWorkspace({
                 {cashDeductions.map((deduction) => (
                   <DeductionAttentionCard
                     key={deduction.id}
+                    lookupDuplicateRow={lookupDuplicateRow}
                     deduction={deduction}
                     disabled={busy || refreshing}
                     copy={copy}
@@ -2147,6 +2166,27 @@ interface CloseWorkspaceCopy {
   duplicateHintMatches: string
   duplicateHintAmountOnly: string
   duplicateHintAdvisory: string
+  /* The side-by-side choice. A hint names a POSITION today — «يطابق الصف ٣ في صفحة ١» — and a
+     manager cannot judge two readings of one delivery without seeing both. */
+  duplicateChoiceTitle: string
+  duplicateChoiceQuestion: string
+  duplicateChoiceThisRow: string
+  duplicateChoiceOtherRow: string
+  duplicateChoiceSave: string
+  duplicateChoiceReversible: string
+  duplicateChoiceTimedNote: string
+  duplicateChoiceNoClock: string
+  duplicateChoiceIncludedNow: string
+  duplicateChoiceExcludedNow: string
+  duplicateChoiceAgree: string
+  duplicateChoiceDiffer: string
+  duplicateChoiceSettled: string
+  duplicateChoicePage: string
+  duplicateFactAmount: string
+  duplicateFactMinute: string
+  duplicateFactRoute: string
+  duplicateFactDate: string
+  duplicateFactInclusion: string
   excludeOrder: string
   saveTimingPreserve: string
   correctAndInclude: string
@@ -2189,6 +2229,25 @@ function closeWorkspaceCopy(lang: 'ar' | 'en'): CloseWorkspaceCopy {
       duplicateHintMatches: 'Matches row {row} on {page} — two scans of this list overlap.',
       duplicateHintAmountOnly: 'Amounts match only; no clock or route to confirm it.',
       duplicateHintAdvisory: 'A hint only — nothing is counted or excluded automatically. The decision, and the reason, are yours.',
+      duplicateChoiceTitle: 'These may be two rows for one delivery',
+      duplicateChoiceQuestion: 'Which row is the real delivery?',
+      duplicateChoiceThisRow: 'This row',
+      duplicateChoiceOtherRow: 'The other row',
+      duplicateChoiceSave: 'Save — the selected row stays, the other is excluded',
+      duplicateChoiceReversible: 'The excluded row keeps its reason and stays in the record. Nothing is deleted.',
+      duplicateChoiceTimedNote: 'carries a printed clock',
+      duplicateChoiceNoClock: 'no clock',
+      duplicateChoiceIncludedNow: 'counted now',
+      duplicateChoiceExcludedNow: 'excluded now',
+      duplicateChoiceAgree: 'Agree on: {list}',
+      duplicateChoiceDiffer: 'Differ on: {list}',
+      duplicateChoiceSettled: 'That answer already matches the record — nothing to save.',
+      duplicateChoicePage: '{page} · row {row}',
+      duplicateFactAmount: 'the amount',
+      duplicateFactMinute: 'the clock',
+      duplicateFactRoute: 'the route',
+      duplicateFactDate: 'the date',
+      duplicateFactInclusion: 'whether it is counted',
       excludeOrder: 'Exclude order',
       saveTimingPreserve: 'Save time and keep current decision',
       correctAndInclude: 'Correct time and include',
@@ -2230,6 +2289,25 @@ function closeWorkspaceCopy(lang: 'ar' | 'en'): CloseWorkspaceCopy {
     duplicateHintMatches: 'يطابق الصف {row} في {page} — صورتان لهذه اللائحة متداخلتان.',
     duplicateHintAmountOnly: 'التطابق على المبلغ فقط؛ لا وقت ولا مسار يؤكّده.',
     duplicateHintAdvisory: 'إشارة فقط — لا شيء يُحتسب أو يُستبعد تلقائياً. القرار والسبب لك.',
+    duplicateChoiceTitle: 'يُحتمل أنّ هذين صفّان لتوصيلة واحدة',
+    duplicateChoiceQuestion: 'أيّ الصفّين هو التوصيلة الحقيقية؟',
+    duplicateChoiceThisRow: 'هذا الصفّ',
+    duplicateChoiceOtherRow: 'الصفّ المقابل',
+    duplicateChoiceSave: 'احفظ — يبقى المحدَّد ويُستبعد الآخر',
+    duplicateChoiceReversible: 'الصفّ المستبعَد يبقى في السجلّ بسببه، ولا يُحذف.',
+    duplicateChoiceTimedNote: 'يحمل وقتاً مطبوعاً',
+    duplicateChoiceNoClock: 'بلا وقت',
+    duplicateChoiceIncludedNow: 'محتسَب الآن',
+    duplicateChoiceExcludedNow: 'مستبعَد الآن',
+    duplicateChoiceAgree: 'يتّفقان في: {list}',
+    duplicateChoiceDiffer: 'يختلفان في: {list}',
+    duplicateChoiceSettled: 'هذا الجواب مطابق لما هو مسجَّل — لا شيء ليُحفظ.',
+    duplicateChoicePage: '{page} · سطر {row}',
+    duplicateFactAmount: 'المبلغ',
+    duplicateFactMinute: 'الوقت',
+    duplicateFactRoute: 'المسار',
+    duplicateFactDate: 'التاريخ',
+    duplicateFactInclusion: 'الاحتساب',
     excludeOrder: 'استبعاد الطلب',
     saveTimingPreserve: 'حفظ الوقت مع إبقاء القرار الحالي',
     correctAndInclude: 'تصحيح الوقت وتضمين الطلب',
@@ -2329,6 +2407,236 @@ function DuplicateHintNote({ hints, copy }: {
   )
 }
 
+/**
+ * One side of the comparison: the figures, the page it was read from, and its own band.
+ *
+ * Both columns are rendered by the SAME component on purpose. «هذا الصفّ» and «المقابل» look
+ * different only in the words above them; if the two sides were built by different code, one of
+ * them would eventually stop matching the other and the manager would be comparing two things that
+ * are not comparable.
+ */
+/**
+ * The two money rows, reduced to what a comparison needs.
+ *
+ * Kept next to each other so the order and the deduction stay describable in the same terms — the
+ * whole point of the side-by-side is that both columns are comparable.
+ */
+function duplicateRowFromOrder(order: Review['orders'][number]): DuplicateChoiceRow {
+  return {
+    amount: order.fee,
+    occurredMinute: order.occurredMinute ?? null,
+    occurredDate: order.occurredDate ?? null,
+    included: order.included !== false,
+    evidenceSlot: order.evidenceSlot,
+    evidenceMediaId: order.evidenceMediaId,
+    positionEvidence: order.positionEvidence,
+    hasScanOrigin: orderHasDashboardEvidenceOrigin(order),
+  }
+}
+
+function duplicateRowFromDeduction(
+  deduction: NonNullable<Review['cashDeductions']>[number],
+): DuplicateChoiceRow {
+  return {
+    amount: deduction.amount,
+    occurredMinute: deduction.occurredMinute,
+    occurredDate: deduction.occurredDate,
+    included: deduction.included,
+    evidenceSlot: deduction.evidenceSlot,
+    evidenceMediaId: deduction.evidenceMediaId,
+    positionEvidence: deduction.positionEvidence,
+    hasScanOrigin: deductionHasDashboardEvidenceOrigin(deduction),
+  }
+}
+
+/**
+ * The first hint that resolves to a real second operation, if any.
+ *
+ * A row can carry several hints — two pages can both overlap it. The card asks ONE question, so it
+ * asks about the first pair it can actually show; the rest stay reachable through the other card.
+ * A hint whose counterpart is an `unmatched_row`, or names a row not in this snapshot, resolves to
+ * nothing and the card falls back to the plain position note.
+ */
+function duplicateChoiceFor(
+  target: DuplicateChoiceTarget,
+  row: DuplicateChoiceRow,
+  hints: ResolvedDuplicateHint[],
+  lookup: (target: DuplicateChoiceTarget) => DuplicateChoiceRow | null,
+): DuplicateChoiceView | null {
+  for (const hint of hints) {
+    const view = duplicateChoiceView({
+      self: { target, row, slot: hint.selfSlot, rowIndex: hint.selfRowIndex },
+      hint,
+      lookup,
+    })
+    if (view) return view
+  }
+  return null
+}
+
+function DuplicateChoiceColumn({
+  side,
+  heading,
+  pages,
+  copy,
+  timed,
+}: {
+  side: DuplicateChoiceView['self']
+  heading: string
+  pages: Review['media']
+  copy: CloseWorkspaceCopy
+  timed: boolean
+}): ReactNode {
+  const { t, lang } = useApp()
+  return (
+    <div className="min-w-0 flex-1 rounded-lg border border-amber-200 bg-white p-2">
+      <p className="text-[11px] font-bold text-amber-900">{heading}</p>
+      <p dir="ltr" className="num mt-1 text-lg font-extrabold text-slate-800">
+        <Money value={side.row.amount} />
+      </p>
+      <p className="num text-xs text-slate-700">
+        {side.row.occurredMinute || copy.duplicateChoiceNoClock}
+        {timed ? <span className="text-slate-500"> · {copy.duplicateChoiceTimedNote}</span> : null}
+      </p>
+      <p className="num text-[11px] text-slate-500">
+        {copy.duplicateChoicePage
+          .replace('{page}', slotLabel(side.slot, t.shift.slotNames, lang))
+          .replace('{row}', String(side.rowIndex + 1))}
+      </p>
+      <RowEvidencePanel
+        pages={pages}
+        row={{
+          evidenceSlot: side.row.evidenceSlot,
+          evidenceMediaId: side.row.evidenceMediaId,
+          hasScanOrigin: side.row.hasScanOrigin,
+        }}
+        position={side.row.positionEvidence}
+      />
+      <p className={`mt-1 text-[11px] font-semibold ${side.row.included ? 'text-emerald-700' : 'text-slate-500'}`}>
+        {side.row.included ? copy.duplicateChoiceIncludedNow : copy.duplicateChoiceExcludedNow}
+      </p>
+    </div>
+  )
+}
+
+/**
+ * «أيّ الصفّين هو التوصيلة الحقيقية؟»
+ *
+ * The question is asked the way a manager actually thinks about it. Two buttons — «استبعد هذا» /
+ * «استبعد المقابل» — were tried and are not clear: «المقابل» is an abstract word he has to resolve
+ * by counting columns, and both buttons describe EXCLUSION while he is deciding which row is real.
+ * So: one question, two options each carrying the fact that tells them apart, and one button that
+ * states both outcomes before he presses it.
+ *
+ * NOTHING IS PRE-SELECTED. `timedKey` is rendered as a note on the option that carries a printed
+ * clock — a fact read off the table under decision 16, never a verdict — because a pre-checked
+ * radio beside a save button means one click excludes a real delivery.
+ *
+ * Both directions cost the same, and that is the point. «تثبيت كتكرار» acts only on the row being
+ * displayed, so a manager who finds the DISPLAYED row is the good one has to go hunt for the other
+ * card — which is how a shift ends up carrying 21 rows for 10 deliveries.
+ */
+function DuplicateChoicePanel({
+  view,
+  pages,
+  copy,
+  disabled,
+  reason,
+  onSave,
+}: {
+  view: DuplicateChoiceView
+  pages: Review['media']
+  copy: CloseWorkspaceCopy
+  disabled: boolean
+  reason: string
+  onSave(revision: ReturnType<typeof duplicateChoiceRevision>): Promise<void>
+}): ReactNode {
+  const { t, lang } = useApp()
+  const groupName = useId()
+  const [keepKey, setKeepKey] = useState('')
+  const factLabel = {
+    amount: copy.duplicateFactAmount,
+    minute: copy.duplicateFactMinute,
+    date: copy.duplicateFactDate,
+    inclusion: copy.duplicateFactInclusion,
+  }
+  const agreeLabel = {
+    scan_overlap_pair_amount_agrees: copy.duplicateFactAmount,
+    scan_overlap_pair_minute_agrees: copy.duplicateFactMinute,
+    scan_overlap_pair_route_agrees: copy.duplicateFactRoute,
+  }
+  const sides = [view.self, view.counterpart]
+  const revision = keepKey === '' ? null : duplicateChoiceRevision(view, keepKey, reason.trim())
+  // A chosen answer the books already hold posts nothing: re-asserting a value still rotates
+  // `orders_hash` and forces a full re-review. Say so rather than offering a button that lies.
+  const settled = keepKey !== '' && revision === null
+
+  return (
+    <section className="mt-2 rounded-lg border-2 border-amber-300 bg-amber-50 p-2 text-xs">
+      <p className="font-bold text-amber-900">{copy.duplicateChoiceTitle}</p>
+
+      <div className="mt-2 flex min-w-0 flex-col gap-2 sm:flex-row">
+        <DuplicateChoiceColumn side={view.self} heading={copy.duplicateChoiceThisRow} pages={pages} copy={copy} timed={view.timedKey === view.self.key} />
+        <DuplicateChoiceColumn side={view.counterpart} heading={copy.duplicateChoiceOtherRow} pages={pages} copy={copy} timed={view.timedKey === view.counterpart.key} />
+      </div>
+
+      {view.agreements.length > 0 ? (
+        <p className="mt-2 text-amber-900">
+          {copy.duplicateChoiceAgree.replace('{list}', view.agreements.map((cause) => agreeLabel[cause]).join(' · '))}
+        </p>
+      ) : null}
+      {view.differences.length > 0 ? (
+        <p className="text-amber-900">
+          {copy.duplicateChoiceDiffer.replace('{list}', view.differences.map((difference) => factLabel[difference]).join(' · '))}
+        </p>
+      ) : null}
+
+      <fieldset className="mt-2 border-t border-amber-200 pt-2">
+        <legend className="px-1 font-bold text-amber-900">{copy.duplicateChoiceQuestion}</legend>
+        {sides.map((side) => (
+          <label
+            key={side.key}
+            /* `FOCUS_RING` is `focus-visible:`, which never fires on the label when the RADIO takes
+               focus — so the keyboard ring is drawn from `focus-within` here. The chosen option
+               also carries a visible border: this is the one control on the card where reading the
+               wrong state costs a real delivery. */
+            className={`mt-1 flex min-w-0 cursor-pointer items-center gap-2 rounded-md border-2 bg-white p-2 focus-within:ring-2 focus-within:ring-brand/40 ${
+              keepKey === side.key ? 'border-brand' : 'border-transparent'
+            }`}
+          >
+            <input
+              type="radio"
+              name={groupName}
+              value={side.key}
+              checked={keepKey === side.key}
+              disabled={disabled}
+              onChange={() => setKeepKey(side.key)}
+              className="size-4 shrink-0"
+            />
+            <span className="num min-w-0 flex-1 truncate">
+              {side.row.occurredMinute || copy.duplicateChoiceNoClock} · <Money value={side.row.amount} /> ·{' '}
+              {copy.duplicateChoicePage
+                .replace('{page}', slotLabel(side.slot, t.shift.slotNames, lang))
+                .replace('{row}', String(side.rowIndex + 1))}
+            </span>
+          </label>
+        ))}
+      </fieldset>
+
+      {settled ? <p className="mt-2 text-slate-600">{copy.duplicateChoiceSettled}</p> : null}
+      <Button
+        variant="primary"
+        className="mt-2"
+        disabled={disabled || revision === null || reason.trim() === ''}
+        onClick={() => void onSave(revision)}
+      >
+        {copy.duplicateChoiceSave}
+      </Button>
+      <p className="mt-1 text-amber-800">{copy.duplicateChoiceReversible}</p>
+    </section>
+  )
+}
+
 function OrderAttentionCard({
   order,
   index,
@@ -2339,6 +2647,7 @@ function OrderAttentionCard({
   onRevise,
   dashboardEvidence,
   duplicateHints,
+  lookupDuplicateRow,
   reread,
   onReread,
   timingDraftPending,
@@ -2353,6 +2662,7 @@ function OrderAttentionCard({
   onRevise(body: Record<string, unknown>): Promise<boolean>
   dashboardEvidence: Review['media']
   duplicateHints: ResolvedDuplicateHint[]
+  lookupDuplicateRow(target: DuplicateChoiceTarget): DuplicateChoiceRow | null
   reread?: ManagerOrderEvidenceRereadResponse
   onReread(target: ManagerOrderEvidenceRereadTarget, slot: string, reason: string): Promise<void>
   timingDraftPending: boolean
@@ -2379,6 +2689,12 @@ function OrderAttentionCard({
     hasScanOrigin: canRereadStoredDashboard,
   }
   const positionalBounds = positionEvidenceLabel(order.positionEvidence)
+  const duplicateChoice = duplicateChoiceFor(
+    { kind: 'order', providerOrderNo: order.providerOrderNo },
+    duplicateRowFromOrder(order),
+    duplicateHints,
+    lookupDuplicateRow,
+  )
   const reviewReasons = order.closeDraftReviewReasons ?? []
   const date = order.occurredDate ?? businessDate
   const route = [
@@ -2500,7 +2816,7 @@ function OrderAttentionCard({
           </Badge>
         ))}
       </div>
-      <DuplicateHintNote hints={duplicateHints} copy={copy} />
+      {duplicateChoice ? null : <DuplicateHintNote hints={duplicateHints} copy={copy} />}
       {order.windowBasis === 'screen_position' ? (
         <p className="num mt-2 text-xs text-sky-800">
           {operationCopy.positionBasis}{positionalBounds ? ` · ${positionalBounds}` : ''}
@@ -2517,6 +2833,16 @@ function OrderAttentionCard({
         <span className="text-xs font-semibold text-slate-600">{copy.auditReason}</span>
         <TextInput value={reason} onChange={(event) => setReason(event.target.value)} disabled={disabled} maxLength={500} placeholder={copy.auditReasonPlaceholder} className="w-full" />
       </label>
+      {duplicateChoice ? (
+        <DuplicateChoicePanel
+          view={duplicateChoice}
+          pages={dashboardEvidence}
+          copy={copy}
+          disabled={disabled}
+          reason={reason}
+          onSave={async (revision) => { if (revision) await onRevise(revision as unknown as Record<string, unknown>) }}
+        />
+      ) : null}
       <div className="mt-2 flex flex-wrap gap-2">
         {order.included === false ? <Button variant="ghost" disabled={disabled || !reasonReady} onClick={() => void revise({ included: true })}>{copy.includeException}</Button> : null}
         {order.kind === 'manual' && order.included !== false ? <Button variant="ghost" disabled={disabled || !reasonReady} onClick={() => void revise({ included: false })}>{copy.excludeOrder}</Button> : null}
@@ -2659,6 +2985,7 @@ function DeductionAttentionCard({
   onRevise,
   dashboardEvidence,
   duplicateHints,
+  lookupDuplicateRow,
   reread,
   onReread,
   timingDraftPending,
@@ -2671,6 +2998,7 @@ function DeductionAttentionCard({
   onRevise(body: Record<string, unknown>): Promise<boolean>
   dashboardEvidence: Review['media']
   duplicateHints: ResolvedDuplicateHint[]
+  lookupDuplicateRow(target: DuplicateChoiceTarget): DuplicateChoiceRow | null
   reread?: ManagerOrderEvidenceRereadResponse
   onReread(target: ManagerOrderEvidenceRereadTarget, slot: string, reason: string): Promise<void>
   timingDraftPending: boolean
@@ -2699,6 +3027,12 @@ function DeductionAttentionCard({
     hasScanOrigin: canRereadStoredDashboard,
   }
   const positionalBounds = positionEvidenceLabel(deduction.positionEvidence)
+  const duplicateChoice = duplicateChoiceFor(
+    { kind: 'cash_deduction', id: deduction.id },
+    duplicateRowFromDeduction(deduction),
+    duplicateHints,
+    lookupDuplicateRow,
+  )
   const reviewReasons = deduction.closeDraftReviewReasons ?? []
   const revise = (patch: Record<string, unknown>): Promise<boolean> =>
     onRevise({ cashDeductions: [{ id: deduction.id, ...patch, reason: reason.trim() }] })
@@ -2734,7 +3068,7 @@ function DeductionAttentionCard({
           </Badge>
         ))}
       </div>
-      <DuplicateHintNote hints={duplicateHints} copy={copy} />
+      {duplicateChoice ? null : <DuplicateHintNote hints={duplicateHints} copy={copy} />}
       {deduction.windowBasis === 'screen_position' ? (
         <p className="num mt-2 text-xs text-sky-800">
           {operationCopy.positionBasis}{positionalBounds ? ` · ${positionalBounds}` : ''}
@@ -2742,6 +3076,16 @@ function DeductionAttentionCard({
       ) : null}
       {deduction.decisionReason ? <p className="mt-2 text-xs text-slate-600">{operationCopy.decisionReason}: {deduction.decisionReason}</p> : null}
       <RowEvidencePanel pages={dashboardEvidence} row={evidenceOrigin} position={deduction.positionEvidence} />
+      {duplicateChoice ? (
+        <DuplicateChoicePanel
+          view={duplicateChoice}
+          pages={dashboardEvidence}
+          copy={copy}
+          disabled={disabled}
+          reason={reason}
+          onSave={async (revision) => { if (revision) await onRevise(revision as unknown as Record<string, unknown>) }}
+        />
+      ) : null}
       <label className="mt-3 flex min-w-0 flex-col gap-1">
         <span className="text-xs font-semibold text-slate-600">{copy.auditReason}</span>
         <TextInput value={reason} onChange={(event) => setReason(event.target.value)} disabled={disabled} maxLength={500} placeholder={copy.auditReasonPlaceholder} className="w-full" />

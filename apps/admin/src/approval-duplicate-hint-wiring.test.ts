@@ -17,10 +17,19 @@ const stripComments = (text: string): string =>
 const code = stripComments(source)
 
 /** The body of one top-level `function Name(` declaration, by brace matching. */
+/**
+ * The body of one top-level `function Name(...)`, by brace matching.
+ *
+ * From the RETURN TYPE, not from the first brace after the name — that one opens the destructured
+ * parameter list, and matching it hands back the props instead of the code. Every `not.toContain`
+ * below then passes against a slice that could never have contained what it forbids.
+ */
 const bodyOf = (name: string): string => {
   const start = code.indexOf(`function ${name}(`)
   expect(start, `${name} not found`).toBeGreaterThan(-1)
-  const open = code.indexOf('{', start)
+  const signature = code.indexOf('): ReactNode {', start)
+  expect(signature, `${name} has no ReactNode signature`).toBeGreaterThan(-1)
+  const open = code.indexOf('{', signature + '): ReactNode'.length)
   let depth = 0
   for (let i = open; i < code.length; i += 1) {
     if (code[i] === '{') depth += 1
