@@ -670,6 +670,22 @@ SELECT shift_id, count(*) FROM ocr_reads WHERE shift_id IS NOT NULL
  GROUP BY 1 HAVING count(*) >= 15;
 ```
 
+**MEASURED, 2026-09-01** — 640 real reads across 72 shifts over 11 days, from `ocr_reads` tokens at
+the Vertex rate below. This supersedes the projection that follows it, which assumed 15 reads a
+shift; the fleet actually averages **8.7**, and the real bill is about a third lower.
+
+| | per shift | 10 shifts/day | 100 shifts/day |
+| --- | --- | --- | --- |
+| median | $0.0435 | **$13.06/month** | $130.61/month |
+| mean | $0.0442 | **$13.26/month** | $132.64/month |
+| p90 — plan on this | $0.0744 | **$22.32/month** | $223.20/month |
+
+A busy full day (2026-08-27, 2026-08-28) ran $0.060–0.063 a shift, so the honest planning range at
+ten shifts a day is **$13–19/month**, budgeted at **$22**. Spend follows READS, not drivers: the
+worst single shift used 18 reads, and every retake and every failed read costs a whole one.
+
+Older projection, kept because it names the price assumptions:
+
 Budget, measured per field off `ocr_reads` at 15 reads a shift and 26 shifts a month:
 
 | | per shift | 10 bikes | 100 bikes |
