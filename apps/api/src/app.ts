@@ -1556,6 +1556,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           // manager instead of handing him the whole end package to search.
           evidenceSlot: evidenceSources.orders.get(o.providerOrderNo)?.slot ?? null,
           evidenceMediaId: evidenceSources.orders.get(o.providerOrderNo)?.mediaId ?? null,
+          // «هذا الصفّ ليس توصيلة». Distinct from `included: false` — see the wire schema.
+          removedAt: o.removedAt ?? null,
+          removalReason: o.removalReason ?? null,
           closeDraftReviewReasons: o.closeDraftReviewReasons ?? [],
         })),
         cashDeductions: cashDeductions.map((d) => ({
@@ -1578,6 +1581,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           observationId: d.observationId ?? null,
           evidenceSlot: evidenceSources.deductions.get(d.id)?.slot ?? null,
           evidenceMediaId: evidenceSources.deductions.get(d.id)?.mediaId ?? null,
+          removedAt: d.removedAt ?? null,
+          removalReason: d.removalReason ?? null,
           closeDraftReviewReasons: d.closeDraftReviewReasons ?? [],
         })),
         // «سجل المدفوعات» as read: what the wallet actually did, beside what the orders imply.
@@ -2646,6 +2651,42 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   })
 
   // ── Audit viewer (A-5) ──────────────────────────────────────────────────────────────────
+  /**
+   * The register of rows a manager declared were never deliveries.
+   *
+   * `audit.view` — already granted to `system_admin` and `general_manager` at scope `all`, which is
+   * exactly the audience the owner named, so no new permission key. The existing `/audit` route
+   * cannot serve this: it needs a table name and a record UUID you must already know, which is a
+   * forensic tool rather than something a person checks.
+   */
+  app.get('/operation-removals', { config: { permission: 'audit.view' } }, async (req) => {
+    const q = z
+      .object({ branchId: z.string().uuid().optional(), limit: z.coerce.number().int().min(1).max(500).default(100) })
+      .parse(req.query ?? {})
+    const rows = await deps.operationRemovals.list({ branchId: q.branchId, limit: q.limit })
+    const drivers = new Map(
+      (await deps.users.list()).map((user) => [user.id, user.fullNameAr || user.username]),
+    )
+    return {
+      rows: rows.map((row) => ({
+        id: row.id,
+        kind: row.kind,
+        operationKind: row.operationKind,
+        operationRef: row.operationRef,
+        shiftId: row.shiftId,
+        branchId: row.branchId,
+        businessDate: row.businessDate,
+        driverName: row.driverId === null ? null : (drivers.get(row.driverId) ?? null),
+        amount: serializeMoney(row.amount),
+        reason: row.reason,
+        evidenceSlot: row.evidenceSlot,
+        evidenceMediaId: row.evidenceMediaId,
+        actedByName: drivers.get(row.actedBy) ?? null,
+        actedAt: new Date(row.actedAtMs).toISOString(),
+      })),
+    }
+  })
+
   app.get('/audit', { config: { permission: 'audit.view' } }, async (req) => {
     const q = z
       .object({ tableName: z.string().optional(), recordId: z.string().optional(), actorId: z.string().optional() })

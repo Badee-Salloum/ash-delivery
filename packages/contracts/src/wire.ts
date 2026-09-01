@@ -418,6 +418,19 @@ export const reviseOperationsRequest = z.object({
         occurredMinute: minuteSchema.nullable().optional(),
         occurredDate: isoDateSchema.nullable().optional(),
         /**
+         * «هذا الصفّ ليس توصيلة» — a stronger statement than `included: false`.
+         *
+         * Exclusion says a real delivery is not being counted on this shift. Removal says the row
+         * describes nothing that happened: a reading of a page seam, a duplicate the OCR invented.
+         * The service forces a removed row to be excluded too, so the money side is the one that is
+         * already tested; what removal adds is the meaning, and a report the general manager reads.
+         *
+         * `false` restores the row to an ordinary excluded one. It does NOT re-include it — putting
+         * money back is a separate decision the manager makes deliberately.
+         */
+        removed: z.boolean().optional(),
+
+        /**
          * Required by the service whenever inclusion or timing is changed, and the ONLY record of
          * why a delivery fee entered or left BR1. `nonblankReasonSchema` rather than a bare trim:
          * an Arabic-first UI routinely carries invisible bidi marks through copy-paste, and
@@ -435,6 +448,8 @@ export const reviseOperationsRequest = z.object({
         included: z.boolean().optional(),
         occurredMinute: minuteSchema.nullable().optional(),
         occurredDate: isoDateSchema.nullable().optional(),
+        /** See the order patch above — the same instrument on a negative row. */
+        removed: z.boolean().optional(),
         /** Same reasoning as the order decision reason above. */
         reason: nonblankReasonSchema,
       }),

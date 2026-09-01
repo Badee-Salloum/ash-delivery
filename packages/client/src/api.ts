@@ -1113,6 +1113,38 @@ export class ApiClient {
     }>(`/audit${qs ? `?${qs}` : ''}`)
   }
 
+  /**
+   * The register of rows a manager declared were never deliveries.
+   *
+   * Separate from `audit()` on purpose. The audit trail answers «what happened to THIS record», and
+   * you must already know the table and the UUID to ask it. This answers «what has been removed
+   * lately», which is the question a general manager actually has.
+   */
+  operationRemovals(filter: { branchId?: string; limit?: number } = {}) {
+    const q = new URLSearchParams()
+    if (filter.branchId) q.set('branchId', filter.branchId)
+    if (filter.limit) q.set('limit', String(filter.limit))
+    const qs = q.toString()
+    return this.get<{
+      rows: Array<{
+        id: string
+        kind: 'removed' | 'restored'
+        operationKind: 'order' | 'cash_deduction'
+        operationRef: string
+        shiftId: string
+        branchId: string
+        businessDate: string
+        driverName: string | null
+        amount: string
+        reason: string
+        evidenceSlot: string | null
+        evidenceMediaId: string | null
+        actedByName: string | null
+        actedAt: string
+      }>
+    }>(`/operation-removals${qs ? `?${qs}` : ''}`)
+  }
+
   // -- The fleet: numbering, types, batteries (SRS B-2 / L) ------------------------------------
   governorates() {
     return this.get<{ governorates: Array<{ id: string; no: number; nameAr: string; nameEn: string; active: boolean }> }>(

@@ -57,6 +57,9 @@ export const en: Catalog = {
     },
   },
 
+  removals: {
+    title: 'Removals',
+  },
   audit: {
     title: 'Audit trail',
     table: 'Table',

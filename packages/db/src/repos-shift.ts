@@ -48,6 +48,8 @@ import type {
   TierRuleRecord,
   DriverRecord,
   RoleGrantRecord,
+  OperationRemovalRecord,
+  OperationRemovalRepo,
   ShiftDecisionRecord,
   ShiftDecisionRepo,
   GpsPingRecord,
@@ -2404,6 +2406,83 @@ export class PgShiftDecisionRepo implements ShiftDecisionRepo {
       notes: (r.notes as string | null) ?? null,
       decidedBy: String(r.decided_by),
       decidedAtMs: (r.decided_at as Date).getTime(),
+    }))
+  }
+}
+
+/**
+ * The register the system admin reads: every row a manager declared was never a delivery.
+ *
+ * Append-only in the database (`REVOKE UPDATE, DELETE` plus a trigger), so there is no `update` and
+ * no `delete` here to write. A restore is a second row, never an edit of the first — «removed, then
+ * put back» is two acts by two people for two reasons, and one row could only ever tell half of it.
+ */
+export class PgOperationRemovalRepo implements OperationRemovalRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async append(
+    entry: Omit<OperationRemovalRecord, 'id' | 'actedAtMs'> & { actedAtMs: number },
+  ): Promise<OperationRemovalRecord> {
+    const { rows } = await this.pool.query<{ id: string }>(
+      `INSERT INTO operation_removals
+         (kind, operation_kind, operation_id, operation_ref, shift_id, branch_id, business_date,
+          driver_id, amount_minor, reason, evidence_slot, evidence_media_id, acted_by, acted_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7::date,$8,$9,$10,$11,$12,$13,
+               to_timestamp($14::double precision / 1000))
+       RETURNING id`,
+      [
+        entry.kind,
+        entry.operationKind,
+        entry.operationId,
+        entry.operationRef,
+        entry.shiftId,
+        entry.branchId,
+        entry.businessDate,
+        entry.driverId,
+        entry.amount.toString(),
+        entry.reason,
+        entry.evidenceSlot,
+        entry.evidenceMediaId,
+        entry.actedBy,
+        entry.actedAtMs,
+      ],
+    )
+    return { ...entry, id: String(rows[0]!.id) }
+  }
+
+  async list(filter: { branchId?: string | undefined; limit: number }): Promise<OperationRemovalRecord[]> {
+    // Newest first, and bounded by the caller. An unbounded register is a screen that stops loading
+    // in the month the fleet reaches a hundred bikes.
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT id, kind, operation_kind, operation_id, operation_ref, shift_id, branch_id,
+              to_char(business_date, 'YYYY-MM-DD') AS business_date, driver_id,
+              amount_minor::text AS amount, reason, evidence_slot, evidence_media_id,
+              acted_by, acted_at
+         FROM operation_removals
+        WHERE ($1::uuid IS NULL OR branch_id = $1::uuid)
+        ORDER BY acted_at DESC, id DESC
+        LIMIT $2`,
+      [filter.branchId ?? null, filter.limit],
+    )
+    return rows.map((r) => ({
+      id: String(r.id),
+      kind: r.kind as OperationRemovalRecord['kind'],
+      operationKind: r.operation_kind as OperationRemovalRecord['operationKind'],
+      operationId: String(r.operation_id),
+      operationRef: String(r.operation_ref),
+      shiftId: String(r.shift_id),
+      branchId: String(r.branch_id),
+      businessDate: String(r.business_date),
+      driverId: (r.driver_id as string | null) ?? null,
+      amount: minor(BigInt(String(r.amount))),
+      reason: String(r.reason),
+      evidenceSlot: (r.evidence_slot as string | null) ?? null,
+      evidenceMediaId: (r.evidence_media_id as string | null) ?? null,
+      actedBy: String(r.acted_by),
+      actedAtMs: (r.acted_at as Date).getTime(),
     }))
   }
 }

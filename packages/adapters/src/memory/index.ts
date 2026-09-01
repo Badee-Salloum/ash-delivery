@@ -35,6 +35,8 @@ import type {
   RoleGrantRecord,
   SessionRecord,
   SessionRepo,
+  OperationRemovalRecord,
+  OperationRemovalRepo,
   ShiftDecisionRecord,
   ShiftDecisionRepo,
   ShiftCloseTransactionDeps,
@@ -489,7 +491,15 @@ export class MemoryOrderRepo implements OrderRepo {
         })
       }
     }
-    this.rows.set(order.id, { ...order })
+    // Normalised the way a Postgres SELECT normalises: the columns exist, so the record has the
+    // keys. Without this a row read straight after `create` is a different SHAPE from the same row
+    // read after any `update`, and `toEqual` in a test starts depending on which happened.
+    this.rows.set(order.id, {
+      removedAt: null,
+      removedBy: null,
+      removalReason: null,
+      ...order,
+    })
   }
   /** Identity is never changed — only what a human may correct. Mirrors `PgOrderRepo.update`. */
   async update(order: ShiftOrderRecord, _actorId: string | null): Promise<void> {
@@ -516,6 +526,9 @@ export class MemoryOrderRepo implements OrderRepo {
       observationId: order.observationId ?? null,
       closeDraftClientKey: order.closeDraftClientKey ?? null,
       closeDraftReviewReasons: [...(order.closeDraftReviewReasons ?? [])],
+      removedAt: order.removedAt ?? null,
+      removedBy: order.removedBy ?? null,
+      removalReason: order.removalReason ?? null,
     })
   }
   async replacePoints(orderId: string, points: readonly OrderPointRecord[], _actorId: string | null): Promise<void> {
@@ -551,7 +564,7 @@ export class MemoryCashDeductionRepo implements CashDeductionRepo {
         })
       }
     }
-    this.rows.set(deduction.id, { ...deduction })
+    this.rows.set(deduction.id, { removedAt: null, removedBy: null, removalReason: null, ...deduction })
   }
 
   async update(deduction: CashDeductionRecord, _actorId: string | null): Promise<void> {
@@ -1681,6 +1694,41 @@ export class MemoryVehicleEventRepo implements VehicleEventRepo {
 }
 
 /** The manager's decision log on a shift (SRS C-7): append-only, read newest-first. */
+/**
+ * The register a manager's removal is written into. Append-only in the database, and here too:
+ * there is deliberately no update or delete to mirror.
+ */
+export class MemoryOperationRemovalRepo implements OperationRemovalRepo {
+  readonly rows: OperationRemovalRecord[] = []
+  private nextId = 1
+
+  snapshotState(): { rows: OperationRemovalRecord[]; nextId: number } {
+    return { rows: structuredClone(this.rows), nextId: this.nextId }
+  }
+
+  restoreState(state: { rows: OperationRemovalRecord[]; nextId: number }): void {
+    this.rows.splice(0, this.rows.length, ...structuredClone(state.rows))
+    this.nextId = state.nextId
+  }
+
+  async append(
+    entry: Omit<OperationRemovalRecord, 'id' | 'actedAtMs'> & { actedAtMs: number },
+  ): Promise<OperationRemovalRecord> {
+    const row: OperationRemovalRecord = { ...entry, id: String(this.nextId++) }
+    this.rows.push(row)
+    return structuredClone(row)
+  }
+
+  async list(filter: { branchId?: string | undefined; limit: number }): Promise<OperationRemovalRecord[]> {
+    return structuredClone(
+      this.rows
+        .filter((row) => filter.branchId === undefined || row.branchId === filter.branchId)
+        .sort((a, b) => b.actedAtMs - a.actedAtMs || Number(b.id) - Number(a.id))
+        .slice(0, filter.limit),
+    )
+  }
+}
+
 export class MemoryShiftDecisionRepo implements ShiftDecisionRepo {
   readonly rows: ShiftDecisionRecord[] = []
   private nextId = 1
@@ -1963,6 +2011,7 @@ export interface MemoryDeps extends Deps {
   attendance: MemoryAttendanceRepo
   checkIns: MemoryCheckInRepo
   decisions: MemoryShiftDecisionRepo
+  operationRemovals: MemoryOperationRemovalRepo
   settlements: MemoryShiftSettlementRepo
   closeDrafts: MemoryCloseDraftRepo
   gps: MemoryGpsPingRepo
@@ -2203,11 +2252,13 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     restorations,
     gate,
   )
+  const operationRemovals = new MemoryOperationRemovalRepo()
   const transactionDeps: ShiftCloseTransactionDeps = {
     shifts,
     preapprovedShiftRules,
     orders,
     cashDeductions,
+    operationRemovals,
     operationWindows,
     movements,
     ledger,
@@ -2286,6 +2337,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     attendance: new MemoryAttendanceRepo(),
     checkIns: new MemoryCheckInRepo(),
     decisions,
+    operationRemovals,
     settlements,
     closeDrafts,
     gps: new MemoryGpsPingRepo(),

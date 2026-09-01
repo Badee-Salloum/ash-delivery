@@ -18,6 +18,7 @@ import { Expenses } from './screens/Expenses.tsx'
 import { CheckIn } from './screens/CheckIn.tsx'
 import { Accounts } from './screens/Accounts.tsx'
 import { Audit } from './screens/Audit.tsx'
+import { Removals } from './screens/Removals.tsx'
 import { Permissions } from './screens/Permissions.tsx'
 import { Settings } from './screens/Settings.tsx'
 import { canManagePreapprovedShifts } from './preapproved-shifts.ts'
@@ -36,6 +37,7 @@ const SECTIONS = [
   'checkin',
   'accounts',
   'audit',
+  'removals',
   'permissions',
   'settings',
 ] as const
@@ -169,6 +171,9 @@ export function AdminApp(): ReactNode {
     ...(canManageUsers ? [{ key: 'accounts' as const, label: t.accounts.title }] : []),
     // audit.view is granted to the sysadmin and the GM — the same two roles.
     ...(canManageUsers ? [{ key: 'audit' as const, label: t.audit.title }] : []),
+    // «سجلّ الحذف» — same permission, and beside the audit trail because it is the readable
+    // half of it: the audit log needs a table name and a UUID before it answers anything.
+    ...(canManageUsers ? [{ key: 'removals' as const, label: t.removals.title }] : []),
     ...(canManageUsers ? [{ key: 'permissions' as const, label: t.permissions.title }] : []),
     // The numbering scheme is settings.write — the system admin alone. Renumbering a type or a
     // branch restates printed vehicle numbers, so it does not belong beside day-to-day fleet work.
@@ -314,6 +319,8 @@ export function AdminApp(): ReactNode {
           <Accounts />
         ) : section === 'audit' ? (
           <Audit />
+        ) : section === 'removals' ? (
+          <Removals />
         ) : section === 'permissions' ? (
           <Permissions />
         ) : section === 'settings' ? (

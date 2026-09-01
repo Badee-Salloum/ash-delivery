@@ -58,6 +58,9 @@ export const ar = {
     },
   },
 
+  removals: {
+    title: 'سجلّ الحذف',
+  },
   audit: {
     title: 'سجل التدقيق',
     table: 'الجدول',

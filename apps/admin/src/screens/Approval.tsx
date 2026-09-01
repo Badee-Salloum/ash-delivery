@@ -175,6 +175,9 @@ interface Review {
     /** WHICH stored screenshot this row was read from. Null for a hand-typed row. */
     evidenceSlot?: string | null
     evidenceMediaId?: string | null
+    /** «هذا الصفّ ليس توصيلة» — stronger than `included: false`. See the wire schema. */
+    removedAt?: string | null
+    removalReason?: string | null
     closeDraftReviewReasons?: CloseDraftReviewReason[]
   }>
   /** A negative Recent-Orders row: positive magnitude, but a distinct cash deduction operation. */
@@ -206,6 +209,9 @@ interface Review {
     /** WHICH stored screenshot this row was read from. Null for a hand-typed row. */
     evidenceSlot?: string | null
     evidenceMediaId?: string | null
+    /** «هذا الصفّ ليس توصيلة» — stronger than `included: false`. See the wire schema. */
+    removedAt?: string | null
+    removalReason?: string | null
     closeDraftReviewReasons?: CloseDraftReviewReason[]
   }>
   /** «سجل المدفوعات» as read: archival evidence only, never a financial input. */
@@ -2203,6 +2209,11 @@ interface CloseWorkspaceCopy {
   duplicateFactDate: string
   duplicateFactInclusion: string
   excludeOrder: string
+  removeRow: string
+  removeRowConfirm: string
+  removeRowNote: string
+  removedBadge: string
+  restoreRow: string
   saveTimingPreserve: string
   correctAndInclude: string
   excludeDeduction: string
@@ -2265,6 +2276,11 @@ function closeWorkspaceCopy(lang: 'ar' | 'en'): CloseWorkspaceCopy {
       duplicateFactDate: 'the date',
       duplicateFactInclusion: 'whether it is counted',
       excludeOrder: 'Exclude order',
+      removeRow: 'Remove — this is not a delivery',
+      removeRowConfirm: 'Remove this row? It stays in the record with your reason, it is taken out of the money, and the system admin is told. You can restore it.',
+      removeRowNote: 'Use this only when the row describes nothing that happened — a duplicate reading, a misread. To leave a REAL delivery uncounted, exclude it instead.',
+      removedBadge: 'Removed — not a delivery',
+      restoreRow: 'Restore the row',
       saveTimingPreserve: 'Save time and keep current decision',
       correctAndInclude: 'Correct time and include',
       excludeDeduction: 'Exclude deduction',
@@ -2326,6 +2342,11 @@ function closeWorkspaceCopy(lang: 'ar' | 'en'): CloseWorkspaceCopy {
     duplicateFactDate: 'التاريخ',
     duplicateFactInclusion: 'الاحتساب',
     excludeOrder: 'استبعاد الطلب',
+    removeRow: 'احذف — ليست توصيلة',
+    removeRowConfirm: 'أتحذف هذا الصفّ؟ يبقى في السجلّ بسببك، ويخرج من الحساب، ويُبلَّغ مديرُ النظام. ويمكنك استرجاعه.',
+    removeRowNote: 'استعمله فقط حين لا يصف الصفّ شيئاً حدث — قراءة مكرّرة أو خاطئة. أمّا توصيلة حقيقية لا تُحتسب فاستبعِدها.',
+    removedBadge: 'محذوف — ليست توصيلة',
+    restoreRow: 'استرجع الصفّ',
     saveTimingPreserve: 'حفظ الوقت مع إبقاء القرار الحالي',
     correctAndInclude: 'تصحيح الوقت وتضمين الطلب',
     excludeDeduction: 'استبعاد الحسم',
@@ -2699,6 +2720,9 @@ function OrderAttentionCard({
   onTimingDraftPending(pending: boolean): void
 }): ReactNode {
   const { t, lang } = useApp()
+  // The hook, not the DOM global of the same name — `window.confirm` takes a string and this card
+  // would have typechecked against it while showing a browser dialog nobody styled.
+  const confirm = useConfirm()
   const rereadCopy = managerEvidenceRereadCopy(lang)
   const [reason, setReason] = useState('')
   const [timingDate, setTimingDate] = useState(order.occurredDate ?? businessDate)
@@ -2833,7 +2857,7 @@ function OrderAttentionCard({
       <div className="mt-2 flex flex-wrap gap-1.5">
         {order.windowStatus ? <WindowStatusBadge status={order.windowStatus} copy={operationCopy} /> : null}
         {order.windowBasis === 'screen_position' ? <Badge tone="sky">{operationCopy.positionBasis}</Badge> : null}
-        {order.included === false ? <Badge tone="slate">{operationCopy.excluded}</Badge> : null}
+        {order.removedAt ? <Badge tone="red">{copy.removedBadge}</Badge> : order.included === false ? <Badge tone="slate">{operationCopy.excluded}</Badge> : null}
         {order.kind === 'manual' ? <Badge tone="sky">{operationCopy.manual}</Badge> : null}
         {order.feeOcr != null && order.feeOcr !== order.fee ? <Badge tone="amber">{copy.changedByManager}</Badge> : null}
         {duplicateHints.length > 0 ? <Badge tone="amber">{copy.duplicateHintBadge}</Badge> : null}
@@ -2876,6 +2900,28 @@ function OrderAttentionCard({
       <div className="mt-2 flex flex-wrap gap-2">
         {order.included === false ? <Button variant="ghost" disabled={disabled || !reasonReady} onClick={() => void revise({ included: true })}>{copy.includeException}</Button> : null}
         {order.kind === 'manual' && order.included !== false ? <Button variant="ghost" disabled={disabled || !reasonReady} onClick={() => void revise({ included: false })}>{copy.excludeOrder}</Button> : null}
+        {/*
+          «احذف» beside «استبعد», never instead of it. Exclusion is a decision about a delivery that
+          happened; removal says the row describes nothing that did. The confirm step is here
+          because the two are one click apart and only one of them is reported to the general
+          manager — and because the manager should read what does NOT happen before he presses it.
+        */}
+        {order.removedAt ? (
+          <Button variant="ghost" disabled={disabled || !reasonReady} onClick={() => void revise({ removed: false })}>
+            {copy.restoreRow}
+          </Button>
+        ) : (
+          <Button
+            variant="danger"
+            disabled={disabled || !reasonReady}
+            onClick={async () => {
+              const ok = await confirm({ title: copy.removeRow, body: copy.removeRowConfirm })
+              if (ok) await revise({ removed: true })
+            }}
+          >
+            {copy.removeRow}
+          </Button>
+        )}
         {order.kind !== 'manual' ? (
           <Button
             variant="ghost"

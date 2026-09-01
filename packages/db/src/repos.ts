@@ -578,7 +578,8 @@ export class PgOrderRepo implements OrderRepo {
                 decided_by = $14, decided_at = $15::timestamptz,
                 window_basis = $16, position_evidence = $17::jsonb,
                 close_draft_observation_id = $18, close_draft_client_key = $19,
-                close_draft_review_reasons = $20::jsonb
+                close_draft_review_reasons = $20::jsonb,
+                removed_at = $21::timestamptz, removed_by = $22, removal_reason = $23
           WHERE id = $1`,
         [
           order.id,
@@ -603,6 +604,9 @@ export class PgOrderRepo implements OrderRepo {
           order.observationId ?? null,
           order.closeDraftClientKey ?? null,
           JSON.stringify(order.closeDraftReviewReasons ?? []),
+          order.removedAt ?? null,
+          order.removedBy ?? null,
+          order.removalReason ?? null,
         ],
       )
     })
@@ -669,6 +673,7 @@ const ORDER_COLUMNS = `
          o.window_status, o.decision_reason, o.decided_by, o.decided_at,
          o.window_basis, o.position_evidence, o.close_draft_observation_id,
          o.close_draft_client_key, o.close_draft_review_reasons,
+         o.removed_at, o.removed_by, o.removal_reason,
          COALESCE(
            (SELECT json_agg(json_build_object('role', p.role, 'label', p.label, 'lat', p.lat, 'lng', p.lng)
                             ORDER BY p.seq)
@@ -711,6 +716,9 @@ const toOrder = (r: Record<string, unknown>): ShiftOrderRecord => ({
   positionEvidence: (r.position_evidence as ShiftOrderRecord['positionEvidence'] | null) ?? null,
   observationId: (r.close_draft_observation_id as string | null) ?? null,
   closeDraftClientKey: (r.close_draft_client_key as string | null) ?? null,
+  removedAt: r.removed_at === null || r.removed_at === undefined ? null : new Date(r.removed_at as string).toISOString(),
+  removedBy: (r.removed_by as string | null) ?? null,
+  removalReason: (r.removal_reason as string | null) ?? null,
   closeDraftReviewReasons:
     (r.close_draft_review_reasons as ShiftOrderRecord['closeDraftReviewReasons'] | null) ?? [],
 })
@@ -787,7 +795,8 @@ export class PgCashDeductionRepo implements CashDeductionRepo {
                 window_status = $10, decision_reason = $11, decided_by = $12,
                 decided_at = $13::timestamptz, window_basis = $14,
                 position_evidence = $15::jsonb, close_draft_observation_id = $16,
-                close_draft_client_key = $17, close_draft_review_reasons = $18::jsonb
+                close_draft_client_key = $17, close_draft_review_reasons = $18::jsonb,
+                removed_at = $19::timestamptz, removed_by = $20, removal_reason = $21
           WHERE id = $1`,
         [
           deduction.id,
@@ -810,6 +819,9 @@ export class PgCashDeductionRepo implements CashDeductionRepo {
           deduction.observationId ?? null,
           deduction.closeDraftClientKey ?? null,
           JSON.stringify(deduction.closeDraftReviewReasons ?? []),
+          deduction.removedAt ?? null,
+          deduction.removedBy ?? null,
+          deduction.removalReason ?? null,
         ],
       )
     })
@@ -846,7 +858,7 @@ const CASH_DEDUCTION_COLUMNS = `
          amount_ocr_minor::text AS amount_ocr, point_a, point_b, included, window_status,
          decision_reason, decided_by, decided_at, created_by, window_basis,
          position_evidence, close_draft_observation_id, close_draft_client_key,
-         close_draft_review_reasons
+         close_draft_review_reasons, removed_at, removed_by, removal_reason
     FROM cash_deductions`
 
 const toCashDeduction = (r: Record<string, unknown>): CashDeductionRecord => ({
@@ -870,6 +882,9 @@ const toCashDeduction = (r: Record<string, unknown>): CashDeductionRecord => ({
   positionEvidence: (r.position_evidence as CashDeductionRecord['positionEvidence'] | null) ?? null,
   observationId: (r.close_draft_observation_id as string | null) ?? null,
   closeDraftClientKey: (r.close_draft_client_key as string | null) ?? null,
+  removedAt: r.removed_at === null || r.removed_at === undefined ? null : new Date(r.removed_at as string).toISOString(),
+  removedBy: (r.removed_by as string | null) ?? null,
+  removalReason: (r.removal_reason as string | null) ?? null,
   closeDraftReviewReasons:
     (r.close_draft_review_reasons as CashDeductionRecord['closeDraftReviewReasons'] | null) ?? [],
 })

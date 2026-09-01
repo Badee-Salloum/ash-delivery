@@ -579,6 +579,18 @@ export interface ShiftOrderRecord {
   closeDraftReviewReasons?: CloseDraftReviewReason[]
   /** Stable server draft identity; null on operations predating durable close drafts. */
   closeDraftClientKey?: string | null
+  /**
+   * A manager declared that this row is not a delivery at all — a reading of something that never
+   * happened, not a real job left uncounted.
+   *
+   * DISTINCT from `included: false`, which is an accounting decision about a delivery that did
+   * happen. The database forces a removed row to also be excluded, so no money path had to learn a
+   * second rule; what removal adds is the MEANING and the report to the general manager. Set and
+   * cleared together with `removedBy` and `removalReason`, all three or none.
+   */
+  removedAt?: string | null
+  removedBy?: string | null
+  removalReason?: string | null
 }
 
 /**
@@ -628,6 +640,42 @@ export interface CashDeductionRecord {
   observationId?: string | null
   closeDraftReviewReasons?: CloseDraftReviewReason[]
   closeDraftClientKey?: string | null
+  /** Same meaning as on an order: read as something that never happened. See `ShiftOrderRecord`. */
+  removedAt?: string | null
+  removedBy?: string | null
+  removalReason?: string | null
+}
+
+/**
+ * One append-only entry in the register the system admin reads.
+ *
+ * Denormalised on purpose. The screen answers «what was removed, from whose shift, for how much»
+ * without joining four tables, and it must keep answering after a shift is voided and its rows are
+ * gone — a register that dies with the thing it records is not a register.
+ */
+export interface OperationRemovalRecord {
+  id: string
+  kind: 'removed' | 'restored'
+  operationKind: 'order' | 'cash_deduction'
+  operationId: string
+  /** The provider order number, or the deduction id — whichever a human would recognise. */
+  operationRef: string
+  shiftId: string
+  branchId: string
+  businessDate: string
+  driverId: string | null
+  amount: Minor
+  reason: string
+  evidenceSlot: string | null
+  evidenceMediaId: string | null
+  actedBy: string
+  actedAtMs: number
+}
+
+export interface OperationRemovalRepo {
+  append(entry: Omit<OperationRemovalRecord, 'id' | 'actedAtMs'> & { actedAtMs: number }): Promise<OperationRemovalRecord>
+  /** Newest first. `branchId` narrows to one branch; omitted means every branch. */
+  list(filter: { branchId?: string | undefined; limit: number }): Promise<OperationRemovalRecord[]>
 }
 
 /** What a captured payment-log movement appears to be; retained for archival review/matching. */
@@ -2439,6 +2487,8 @@ export interface ShiftCloseTransactionDeps {
   preapprovedShiftRules: PreapprovedShiftRuleRepo
   orders: OrderRepo
   cashDeductions: CashDeductionRepo
+  /** The register a manager's removal is written into, in the same transaction as the removal. */
+  operationRemovals: OperationRemovalRepo
   operationWindows: OperationWindowRepo
   movements: WalletMovementRepo
   ledger: LedgerRepo
@@ -2486,6 +2536,8 @@ export interface Deps {
   orders: OrderRepo
   /** Positive cash deductions read from the provider's operation history. */
   cashDeductions: CashDeductionRepo
+  /** Append-only record of rows a manager declared were never deliveries. */
+  operationRemovals: OperationRemovalRepo
   /** Deterministic, audited refresh of stored operation-window classifications. */
   operationWindows: OperationWindowRepo
   /** Atomic writer for one complete driver operations submission. */

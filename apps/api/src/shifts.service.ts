@@ -19,6 +19,7 @@ import type {
   ShiftCloseTransactionDeps,
   ShiftDecisionRecord,
   WalletMovementRecord,
+  OperationRemovalRecord,
   ShiftRecord,
   VehicleEventKind,
   VehicleEventRecord,
@@ -76,6 +77,7 @@ import {
 } from '@ash/domain'
 import { normalizePrintedOrderTime } from '@ash/adapters/ocr'
 import { fundCodeOf } from '@ash/adapters/memory'
+import { evidenceSourcesForShift } from './duplicate-hints.service.ts'
 import { grantsFromRows } from './rbac.ts'
 import {
   FIXED_SETTLEMENT_DRIVER_BPS,
@@ -861,6 +863,49 @@ async function submitStartPackageLocked(
  * counter. Best-effort: a notification failure must never roll back the shift transition that
  * triggered it — the bell is a convenience, the state change is the record.
  */
+/**
+ * Tell the system admin that a manager declared a row was never a delivery.
+ *
+ * Addressed to each `system_admin` USER ID, not to a branch. The bell's other producers use the
+ * pseudo-recipient `branch:<id>`, and a system admin has `branch_id = NULL` — so until now nothing
+ * in this system could reach him at all. That is why «report it to the system admin» needed more
+ * than one line.
+ *
+ * Best-effort by design, and the same swallow `notifyBranch` uses. The durable record is the
+ * `operation_removals` row written a moment earlier plus the audit trigger behind it; a bell that
+ * failed must never be able to roll back the removal it was announcing.
+ */
+async function notifySystemAdminsOfRemoval(
+  deps: Deps,
+  entry: { id: string; kind: 'removed' | 'restored'; shiftId: string; branchId: string; businessDate: string; operationRef: string; amount: Minor; reason: string; actedBy: string },
+): Promise<void> {
+  try {
+    const admins = (await deps.users.list()).filter((user) => user.roleKey === 'system_admin' && user.active)
+    for (const admin of admins) {
+      await deps.notifications.push({
+        recipientId: admin.id,
+        branchId: entry.branchId,
+        kind: entry.kind === 'removed' ? 'operation_removed' : 'operation_restored',
+        payload: {
+          removalId: entry.id,
+          shiftId: entry.shiftId,
+          businessDate: entry.businessDate,
+          operationRef: entry.operationRef,
+          amount: entry.amount.toString(),
+          reason: entry.reason,
+          actedBy: entry.actedBy,
+        },
+        // The register id: one bell per act, and a retry of the same act cannot ring twice.
+        dedupeKey: `operation_removal:${entry.id}`,
+        readAtMs: null,
+        createdAtMs: deps.clock.nowMs(),
+      })
+    }
+  } catch {
+    // swallow — the bell is a convenience; the register and the audit row are the record
+  }
+}
+
 async function notifyBranch(deps: Deps, shift: ShiftRecord, kind: string): Promise<void> {
   try {
     await deps.notifications.push({
@@ -3815,6 +3860,7 @@ async function reviseOperationsLocked(
       fee?: Minor | undefined
       occurredMinute?: string | null | undefined
       occurredDate?: string | null | undefined
+      removed?: boolean | undefined
       reason?: string | undefined
     }[]
     cashDeductions?: readonly {
@@ -3822,6 +3868,7 @@ async function reviseOperationsLocked(
       included?: boolean | undefined
       occurredMinute?: string | null | undefined
       occurredDate?: string | null | undefined
+      removed?: boolean | undefined
       reason: string
     }[]
     movements?: readonly {
@@ -3846,13 +3893,34 @@ async function reviseOperationsLocked(
   if (!decision.allowed) throw new ServiceError(403, 'forbidden')
   const windowContext = await operationWindowContext(deps, shift)
 
+  /*
+    Removals and restores, collected as we go and appended to the register below.
+    They are written inside this same call so a row can never be marked removed without the general
+    manager's copy of the fact existing: the register is what makes «reported clearly» true, and a
+    second request that might not arrive would make it a promise instead.
+  */
+  const removalEntries: Array<Omit<OperationRemovalRecord, 'id' | 'actedAtMs'> & { actedAtMs: number }> = []
+  const evidenceSources = await evidenceSourcesForShift(deps, shiftId)
+
   const rows = await deps.orders.listByShift(shiftId)
   const byNo = new Map(rows.map((o) => [o.providerOrderNo, o]))
   for (const patch of input.orders ?? []) {
     const current = byNo.get(patch.providerOrderNo)
     if (!current) throw new ServiceError(404, 'order_not_found', { providerOrderNo: patch.providerOrderNo })
+    // A removal is a strictly stronger claim than an exclusion and carries the same mandatory
+    // reason. It is also the reason itself that lands in the register the general manager reads,
+    // so a blank one is refused here as well as by the CHECK constraint behind it.
+    if (patch.removed === true && !patch.reason?.trim()) {
+      throw new ServiceError(422, 'operation_decision_reason_required')
+    }
+    // A removal changes whether the row counts, and `guard_shift_order_window_decision_reason`
+    // (0054) refuses ANY inclusion change without a fresh, attributed, visibly-non-blank reason
+    // from an active manager of the right scope. Routing removal through the same decision
+    // machinery is therefore not tidiness — without it every removal is refused by the database,
+    // and no in-memory test can show that because the memory adapter has no triggers.
     const changesWindow =
-      patch.included !== undefined || patch.occurredMinute !== undefined || patch.occurredDate !== undefined
+      patch.included !== undefined || patch.occurredMinute !== undefined ||
+      patch.occurredDate !== undefined || patch.removed !== undefined
     const resolvesHumanMoney = patch.fee !== undefined &&
       (current.closeDraftReviewReasons ?? []).includes('human_money_edit')
     const authoritativeChange = changesWindow || patch.fee !== undefined || patch.walletAmount !== undefined
@@ -3868,11 +3936,70 @@ async function reviseOperationsLocked(
           ...windowContext,
         })
       : current.windowStatus
+    // The database refuses a removed row that is still counted, so removal decides inclusion
+    // outright. Restoring does NOT re-include: putting money back is its own decision, made
+    // deliberately, and inferring it here would let one click both clear a flag and change a total.
+    const removalNow =
+      patch.removed === true
+        ? { removedAt: new Date(deps.clock.nowMs()).toISOString(), removedBy: actor.userId, removalReason: patch.reason!.trim() }
+        : patch.removed === false
+          ? { removedAt: null, removedBy: null, removalReason: null }
+          : {}
+    if (patch.removed === true && !current.removedAt) {
+      const source = evidenceSources.orders.get(current.providerOrderNo)
+      removalEntries.push({
+        kind: 'removed',
+        operationKind: 'order',
+        operationId: current.id,
+        operationRef: current.providerOrderNo,
+        shiftId,
+        branchId: shift.branchId,
+        businessDate: shift.businessDate,
+        driverId: shift.driverId,
+        amount: current.fee,
+        reason: patch.reason!.trim(),
+        evidenceSlot: source?.slot ?? null,
+        evidenceMediaId: source?.mediaId ?? null,
+        actedBy: actor.userId,
+        actedAtMs: deps.clock.nowMs(),
+      })
+    }
+    if (patch.removed === false && current.removedAt) {
+      const source = evidenceSources.orders.get(current.providerOrderNo)
+      removalEntries.push({
+        kind: 'restored',
+        operationKind: 'order',
+        operationId: current.id,
+        operationRef: current.providerOrderNo,
+        shiftId,
+        branchId: shift.branchId,
+        businessDate: shift.businessDate,
+        driverId: shift.driverId,
+        amount: current.fee,
+        reason: patch.reason?.trim() || current.removalReason || '-',
+        evidenceSlot: source?.slot ?? null,
+        evidenceMediaId: source?.mediaId ?? null,
+        actedBy: actor.userId,
+        actedAtMs: deps.clock.nowMs(),
+      })
+    }
     await deps.orders.update({
       ...current,
-      included: patch.included ?? (changesWindow || resolvesHumanMoney
-        ? includedByWindow(windowStatus)
-        : current.included),
+      ...removalNow,
+      // Removal decides inclusion outright — the database refuses a removed row that still counts.
+      // RESTORING deliberately does not re-include: putting money back is its own decision, and
+      // letting `includedByWindow` make it here would have one click clear a flag AND change a
+      // total. An explicit `included` in the same patch still wins, because that IS the manager
+      // saying both things on purpose.
+      included: patch.included ?? (
+        patch.removed === true
+          ? false
+          : patch.removed === false
+            ? current.included
+            : changesWindow || resolvesHumanMoney
+              ? includedByWindow(windowStatus)
+              : current.included
+      ),
       // The manager's own correction. He verifies against the cash in his hand, so he is the one
       // placed to say what a fee actually was — and until now his only move against a wrong one was
       // to exclude the whole delivery. The audit trigger attributes the change, and it moves
@@ -3928,12 +4055,64 @@ async function reviseOperationsLocked(
       occurredMinute,
       ...windowContext,
     })
+    const removalNow =
+      patch.removed === true
+        ? { removedAt: new Date(deps.clock.nowMs()).toISOString(), removedBy: actor.userId, removalReason: patch.reason.trim() }
+        : patch.removed === false
+          ? { removedAt: null, removedBy: null, removalReason: null }
+          : {}
+    if (patch.removed === true && !current.removedAt) {
+      const source = evidenceSources.deductions.get(current.id)
+      removalEntries.push({
+        kind: 'removed',
+        operationKind: 'cash_deduction',
+        operationId: current.id,
+        operationRef: current.id,
+        shiftId,
+        branchId: shift.branchId,
+        businessDate: shift.businessDate,
+        driverId: shift.driverId,
+        amount: current.amount,
+        reason: patch.reason.trim(),
+        evidenceSlot: source?.slot ?? null,
+        evidenceMediaId: source?.mediaId ?? null,
+        actedBy: actor.userId,
+        actedAtMs: deps.clock.nowMs(),
+      })
+    }
+    if (patch.removed === false && current.removedAt) {
+      const source = evidenceSources.deductions.get(current.id)
+      removalEntries.push({
+        kind: 'restored',
+        operationKind: 'cash_deduction',
+        operationId: current.id,
+        operationRef: current.id,
+        shiftId,
+        branchId: shift.branchId,
+        businessDate: shift.businessDate,
+        driverId: shift.driverId,
+        amount: current.amount,
+        reason: patch.reason.trim(),
+        evidenceSlot: source?.slot ?? null,
+        evidenceMediaId: source?.mediaId ?? null,
+        actedBy: actor.userId,
+        actedAtMs: deps.clock.nowMs(),
+      })
+    }
     await deps.cashDeductions.update({
       ...current,
+      ...removalNow,
       occurredMinute,
       occurredDate,
       windowStatus,
-      included: patch.included ?? includedByWindow(windowStatus),
+      // Same rule as the order path: removal decides inclusion, a restore leaves the money alone.
+      included: patch.included ?? (
+        patch.removed === true
+          ? false
+          : patch.removed === false
+            ? current.included
+            : includedByWindow(windowStatus)
+      ),
       decisionReason: patch.reason.trim(),
       decidedBy: actor.userId,
       decidedAt: nextOperationDecisionAt(deps.clock.nowMs(), current.decidedAt),
@@ -3957,6 +4136,12 @@ async function reviseOperationsLocked(
         ? {}
         : { orderId: patch.providerOrderNo === null ? null : (orderIds.get(patch.providerOrderNo) ?? null) }),
     }, actor.userId)
+  }
+
+  // The register, in the same call as the rows it describes.
+  for (const entry of removalEntries) {
+    const appended = await deps.operationRemovals.append(entry)
+    await notifySystemAdminsOfRemoval(deps, { ...entry, id: appended.id })
   }
 
   const br1 = await evaluateShift(deps, shift)
