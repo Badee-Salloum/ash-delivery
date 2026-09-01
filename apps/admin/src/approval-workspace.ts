@@ -274,3 +274,65 @@ export function countAwaitingCloseBatteryReadings(
 ): number {
   return endReadings.filter((reading) => reading.unavailable === true && reading.percent === null).length
 }
+
+/** One stored screenshot of the end package, as the review screen receives it. */
+export interface EvidencePageInput {
+  slot: string
+  mediaId: string
+}
+
+export interface RowEvidenceOriginInput {
+  /** The page the reader actually read this row from, when the snapshot could resolve one. */
+  evidenceSlot?: string | null | undefined
+  evidenceMediaId?: string | null | undefined
+  /** Whether the row came from a screenshot at all — a hand-typed row must never borrow a page. */
+  hasScanOrigin: boolean
+}
+
+/**
+ * Which stored page to put in front of the manager for one money row.
+ *
+ * Preference order, and each step is a different fact:
+ *
+ * 1. `evidenceMediaId` — the exact bytes the reader read. Authoritative.
+ * 2. `evidenceSlot` — the page currently in that slot. A RETAKE rotates the attachment token and
+ *    stores new bytes, so the id from the read no longer names anything on the screen; the slot
+ *    still names the right page, and the retaken photo is the one the manager wants to look at.
+ * 3. The only page there is, but ONLY for a row that came from a screenshot. This covers rows read
+ *    before the snapshot carried the link, and it is unambiguous exactly because there is nothing
+ *    else it could have been.
+ *
+ * A hand-typed row falls through to `null`, and so does a row on a multi-page shift with no link:
+ * showing a manager the wrong screenshot is worse than showing him none, because he believes it.
+ */
+export function rowEvidencePage<Page extends EvidencePageInput>(
+  pages: readonly Page[],
+  row: RowEvidenceOriginInput,
+): Page | null {
+  if (row.evidenceMediaId) {
+    const exact = pages.find((page) => page.mediaId === row.evidenceMediaId)
+    if (exact) return exact
+  }
+  if (row.evidenceSlot) {
+    const retaken = pages.find((page) => page.slot === row.evidenceSlot)
+    if (retaken) return retaken
+  }
+  if (row.hasScanOrigin && pages.length === 1) return pages[0]!
+  return null
+}
+
+/**
+ * The page a re-read should target, chosen rather than asked for.
+ *
+ * Nothing today stops a manager on a two-page shift from re-reading the page the row did not come
+ * from — the `<Select>` starts empty and both options look alike. When the row names its own page,
+ * select it. Otherwise keep the old behaviour exactly: one page selects itself, several ask.
+ */
+export function defaultRereadSlot(
+  pages: readonly EvidencePageInput[],
+  row: RowEvidenceOriginInput,
+): string {
+  const resolved = rowEvidencePage(pages, row)
+  if (resolved) return resolved.slot
+  return pages.length === 1 ? pages[0]!.slot : ''
+}

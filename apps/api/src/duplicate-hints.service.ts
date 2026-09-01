@@ -98,6 +98,75 @@ const pagesFrom = (observations: readonly CloseDraftObservationRecord[]): Scanne
     .sort((a, b) => (a.pageRef < b.pageRef ? -1 : a.pageRef > b.pageRef ? 1 : 0))
 }
 
+/** Which stored screenshot a money row was read from, and where on it. */
+export interface RowEvidenceSource {
+  slot: string
+  mediaId: string
+}
+
+export interface ShiftEvidenceSources {
+  orders: Map<string, RowEvidenceSource>
+  deductions: Map<string, RowEvidenceSource>
+}
+
+/**
+ * Resolve every scanned row back to the page it came from.
+ *
+ * The link has always existed — an observation records `{mediaId, attachmentToken, slot}` and each
+ * row carries `observationId` — it simply never reached the client, so the approval screen could
+ * only offer a manager the whole end package and let him find the right page himself. With two
+ * dashboard pages that is also a way to re-read the WRONG one.
+ *
+ * Resolved through the SAME two keys `buildScanDuplicateHints` uses, in the same order, so the
+ * thumbnail on a row and the duplicate hint about it can never point at different pages: the
+ * client key first, the observation id as the pre-0034 fallback.
+ */
+export async function evidenceSourcesForShift(deps: Deps, shiftId: string): Promise<ShiftEvidenceSources> {
+  const empty: ShiftEvidenceSources = { orders: new Map(), deductions: new Map() }
+  const observations = await deps.closeDrafts.listObservationsByShift(shiftId)
+  if (observations.length === 0) return empty
+
+  const [orders, deductions] = await Promise.all([
+    deps.orders.listByShift(shiftId),
+    deps.cashDeductions.listByShift(shiftId),
+  ])
+
+  const byClientKey = new Map<string, CloseDraftObservationRecord>()
+  const byId = new Map<string, CloseDraftObservationRecord>()
+  for (const observation of observations) {
+    byId.set(observation.id, observation)
+    byClientKey.set(
+      closeDraftClientKeyFor(observation.field, observation.attachmentToken, observation.rowIndex),
+      observation,
+    )
+  }
+
+  const sourceFor = (
+    field: 'orders' | 'cash_deductions',
+    clientKey: string | null | undefined,
+    observationId: string | null | undefined,
+  ): RowEvidenceSource | null => {
+    const observation =
+      (clientKey ? byClientKey.get(clientKey) : undefined) ??
+      (observationId ? byId.get(observationId) : undefined)
+    // A row typed by hand has no observation at all, and must stay without a page rather than
+    // borrow one: showing a manager the wrong screenshot is worse than showing him none.
+    if (!observation || observation.field !== field) return null
+    return { slot: observation.slot, mediaId: observation.mediaId }
+  }
+
+  const result: ShiftEvidenceSources = { orders: new Map(), deductions: new Map() }
+  for (const order of orders) {
+    const source = sourceFor('orders', order.closeDraftClientKey, order.observationId)
+    if (source) result.orders.set(order.providerOrderNo, source)
+  }
+  for (const deduction of deductions) {
+    const source = sourceFor('cash_deductions', deduction.closeDraftClientKey, deduction.observationId)
+    if (source) result.deductions.set(deduction.id, source)
+  }
+  return result
+}
+
 export async function buildScanDuplicateHints(deps: Deps, shiftId: string): Promise<ScanDuplicateHint[]> {
   const all = await deps.closeDrafts.listObservationsByShift(shiftId)
   const observations = all.filter((observation) => observation.field === 'orders')

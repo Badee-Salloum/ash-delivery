@@ -252,6 +252,58 @@ describe('overlapping dashboard scans are surfaced to the manager', () => {
     expect(hint.pairs.map((pair: any) => pair.later.rowIndex)).toEqual([0, 1])
   })
 
+  it('tells the manager which page each row was read from', async () => {
+    /*
+     * The link has always existed in the database — an observation records `{mediaId, slot}` and
+     * each row carries `observationId` — but it never reached the client, so the review screen
+     * could only offer the whole end package and let the manager find the page himself. On a shift
+     * with TWO dashboard pages, as here, that is also how he re-reads the wrong one.
+     */
+    const { manager, shiftId } = await submitOverlappingClose()
+    const body = await review(manager, shiftId)
+
+    const scanned = body.orders.filter((order: any) => order.evidenceSlot !== null)
+    expect(scanned.length).toBeGreaterThan(0)
+    for (const order of scanned) {
+      expect(['dashboard', 'dashboard_2']).toContain(order.evidenceSlot)
+      expect(typeof order.evidenceMediaId).toBe('string')
+    }
+
+    // Both pages are represented — the resolution is per row, not one page applied to everything.
+    expect(new Set(scanned.map((order: any) => order.evidenceSlot)).size).toBe(2)
+
+    // And it agrees with the duplicate hint about the same rows, because both resolve through the
+    // same keys in the same order. A thumbnail and a hint naming different pages would be worse
+    // than either alone.
+    const byOrderNo = new Map<string, any>(
+      body.orders.map((order: any) => [order.providerOrderNo as string, order]),
+    )
+    for (const pair of body.duplicateHints[0].pairs as any[]) {
+      expect(byOrderNo.get(pair.earlier.providerOrderNo).evidenceSlot).toBe(body.duplicateHints[0].earlier.slot)
+      expect(byOrderNo.get(pair.later.providerOrderNo).evidenceSlot).toBe(body.duplicateHints[0].later.slot)
+    }
+  })
+
+  it('leaves a hand-typed row without a page rather than lending it one', async () => {
+    // Showing a manager the wrong screenshot is worse than showing him none, so a row with no
+    // observation stays null instead of borrowing whichever page happens to exist.
+    const { manager, shiftId } = await submitOverlappingClose()
+    const added = await inject('POST', manager, `/shifts/${shiftId}/orders/manual`, {
+      providerOrderNo: 'MANUAL-EVIDENCE-1',
+      kind: 'manual',
+      fee: '1000.00',
+      driverShare: '400.00',
+      companyShare: '600.00',
+      payMode: 'cash',
+    })
+    expect(added.statusCode, added.body).toBe(201)
+
+    const body = await review(manager, shiftId)
+    const manual = body.orders.find((order: any) => order.providerOrderNo === 'MANUAL-EVIDENCE-1')
+    expect(manual.evidenceSlot).toBeNull()
+    expect(manual.evidenceMediaId).toBeNull()
+  })
+
   it('changes no money, no inclusion and no hash by being there', async () => {
     const { manager, shiftId } = await submitOverlappingClose()
     const first = await review(manager, shiftId)

@@ -41,6 +41,9 @@ import {
   orderHasDashboardEvidenceOrigin,
   orderNeedsAttention,
   positionEvidenceLabel,
+  rowEvidencePage,
+  defaultRereadSlot,
+  type RowEvidenceOriginInput,
   summarizeOrders,
   type CloseDraftReviewReason,
 } from '../approval-workspace.ts'
@@ -155,7 +158,15 @@ interface Review {
       lowerInstant?: string | null
       upperInstant?: string | null
       anchorObservationIds?: string[]
+      /** Normalized 0..1 vertical bounds from deterministic image geometry — the band's position. */
+      yTop?: number | null
+      yBottom?: number | null
+      rowIndex?: number
+      rowCount?: number
     } | null
+    /** WHICH stored screenshot this row was read from. Null for a hand-typed row. */
+    evidenceSlot?: string | null
+    evidenceMediaId?: string | null
     closeDraftReviewReasons?: CloseDraftReviewReason[]
   }>
   /** A negative Recent-Orders row: positive magnitude, but a distinct cash deduction operation. */
@@ -178,7 +189,15 @@ interface Review {
       lowerInstant?: string | null
       upperInstant?: string | null
       anchorObservationIds?: string[]
+      /** Normalized 0..1 vertical bounds from deterministic image geometry — the band's position. */
+      yTop?: number | null
+      yBottom?: number | null
+      rowIndex?: number
+      rowCount?: number
     } | null
+    /** WHICH stored screenshot this row was read from. Null for a hand-typed row. */
+    evidenceSlot?: string | null
+    evidenceMediaId?: string | null
     closeDraftReviewReasons?: CloseDraftReviewReason[]
   }>
   /** «سجل المدفوعات» as read: archival evidence only, never a financial input. */
@@ -2345,11 +2364,20 @@ function OrderAttentionCard({
   const [timingDate, setTimingDate] = useState(order.occurredDate ?? businessDate)
   const [timingMinute, setTimingMinute] = useState(order.occurredMinute ?? '')
   const [timingEditorOpen, setTimingEditorOpen] = useState(false)
-  const [selectedEvidenceSlot, setSelectedEvidenceSlot] = useState(
-    dashboardEvidence.length === 1 ? dashboardEvidence[0]!.slot : '',
+  const [selectedEvidenceSlot, setSelectedEvidenceSlot] = useState(() =>
+    defaultRereadSlot(dashboardEvidence, {
+      evidenceSlot: order.evidenceSlot,
+      evidenceMediaId: order.evidenceMediaId,
+      hasScanOrigin: orderHasDashboardEvidenceOrigin(order),
+    }),
   )
   const reasonReady = reason.trim() !== ''
   const canRereadStoredDashboard = orderHasDashboardEvidenceOrigin(order)
+  const evidenceOrigin: RowEvidenceOriginInput = {
+    evidenceSlot: order.evidenceSlot,
+    evidenceMediaId: order.evidenceMediaId,
+    hasScanOrigin: canRereadStoredDashboard,
+  }
   const positionalBounds = positionEvidenceLabel(order.positionEvidence)
   const reviewReasons = order.closeDraftReviewReasons ?? []
   const date = order.occurredDate ?? businessDate
@@ -2367,9 +2395,10 @@ function OrderAttentionCard({
   useEffect(() => {
     setSelectedEvidenceSlot((current) => {
       if (dashboardEvidence.some((item) => item.slot === current)) return current
-      return dashboardEvidence.length === 1 ? dashboardEvidence[0]!.slot : ''
+      return defaultRereadSlot(dashboardEvidence, evidenceOrigin)
     })
-  }, [dashboardEvidence])
+    // `evidenceOrigin` is rebuilt every render; the three values inside it are the real inputs.
+  }, [dashboardEvidence, order.evidenceSlot, order.evidenceMediaId, canRereadStoredDashboard])
   const timingChanged =
     timingDate !== (order.occurredDate ?? businessDate) || timingMinute !== (order.occurredMinute ?? '')
   const timingRevision = (decision: 'preserve' | 'include' | 'duplicate'): Record<string, unknown> =>
@@ -2481,6 +2510,9 @@ function OrderAttentionCard({
       {order.kind === 'manual' ? (
         <p className="num mt-2 text-xs text-slate-600">{t.orders.driverShare}: {order.driverShare ?? '—'} · {t.orders.companyShare}: {order.companyShare ?? '—'}</p>
       ) : null}
+      {/* The page this row was read from, with its own line marked — the manager's first question
+          about a disputed row is «what did the screen say», and it used to take four steps. */}
+      <RowEvidencePanel pages={dashboardEvidence} row={evidenceOrigin} position={order.positionEvidence} />
       <label className="mt-3 flex min-w-0 flex-col gap-1">
         <span className="text-xs font-semibold text-slate-600">{copy.auditReason}</span>
         <TextInput value={reason} onChange={(event) => setReason(event.target.value)} disabled={disabled} maxLength={500} placeholder={copy.auditReasonPlaceholder} className="w-full" />
@@ -2647,8 +2679,12 @@ function DeductionAttentionCard({
   const { t, lang } = useApp()
   const rereadCopy = managerEvidenceRereadCopy(lang)
   const [reason, setReason] = useState('')
-  const [selectedEvidenceSlot, setSelectedEvidenceSlot] = useState(
-    dashboardEvidence.length === 1 ? dashboardEvidence[0]!.slot : '',
+  const [selectedEvidenceSlot, setSelectedEvidenceSlot] = useState(() =>
+    defaultRereadSlot(dashboardEvidence, {
+      evidenceSlot: deduction.evidenceSlot,
+      evidenceMediaId: deduction.evidenceMediaId,
+      hasScanOrigin: deductionHasDashboardEvidenceOrigin(deduction),
+    }),
   )
   const [timingSuggestion, setTimingSuggestion] = useState<{
     key: string
@@ -2657,6 +2693,11 @@ function DeductionAttentionCard({
   } | null>(null)
   const reasonReady = reason.trim() !== ''
   const canRereadStoredDashboard = deductionHasDashboardEvidenceOrigin(deduction)
+  const evidenceOrigin: RowEvidenceOriginInput = {
+    evidenceSlot: deduction.evidenceSlot,
+    evidenceMediaId: deduction.evidenceMediaId,
+    hasScanOrigin: canRereadStoredDashboard,
+  }
   const positionalBounds = positionEvidenceLabel(deduction.positionEvidence)
   const reviewReasons = deduction.closeDraftReviewReasons ?? []
   const revise = (patch: Record<string, unknown>): Promise<boolean> =>
@@ -2664,9 +2705,10 @@ function DeductionAttentionCard({
   useEffect(() => {
     setSelectedEvidenceSlot((current) => {
       if (dashboardEvidence.some((item) => item.slot === current)) return current
-      return dashboardEvidence.length === 1 ? dashboardEvidence[0]!.slot : ''
+      return defaultRereadSlot(dashboardEvidence, evidenceOrigin)
     })
-  }, [dashboardEvidence])
+    // `evidenceOrigin` is rebuilt every render; the three values inside it are the real inputs.
+  }, [dashboardEvidence, deduction.evidenceSlot, deduction.evidenceMediaId, canRereadStoredDashboard])
 
   return (
     <article className="min-w-0 rounded-xl border border-red-200 bg-red-50/40 p-3">
@@ -2699,6 +2741,7 @@ function DeductionAttentionCard({
         </p>
       ) : null}
       {deduction.decisionReason ? <p className="mt-2 text-xs text-slate-600">{operationCopy.decisionReason}: {deduction.decisionReason}</p> : null}
+      <RowEvidencePanel pages={dashboardEvidence} row={evidenceOrigin} position={deduction.positionEvidence} />
       <label className="mt-3 flex min-w-0 flex-col gap-1">
         <span className="text-xs font-semibold text-slate-600">{copy.auditReason}</span>
         <TextInput value={reason} onChange={(event) => setReason(event.target.value)} disabled={disabled} maxLength={500} placeholder={copy.auditReasonPlaceholder} className="w-full" />
@@ -3718,6 +3761,102 @@ function PhotoRow({ pkg, media }: { pkg: 'start' | 'end'; media: Review['media']
  * image itself dismissed it. Comparing the start odometer against the end one — the whole point —
  * meant open, close, scroll, open, and holding five digits in your head.
  */
+/**
+ * The page this row was read from, with the disputed line marked — inside the card that asks about
+ * it.
+ *
+ * Before this, the photos lived in a collapsed «الأدلّة والتفاصيل» far below: the manager scrolled,
+ * opened it, picked the right page out of several, opened the viewer, and then matched it back to
+ * the row from memory. Four steps for one question, on the screen where he decides whether a
+ * delivery happened.
+ *
+ * The band is positioned as a PERCENTAGE of the image's own height, over an image left at its
+ * natural aspect ratio — so it lands on the right line whatever the screenshot's dimensions. A
+ * fixed-size `object-contain` thumbnail letterboxes, and the band would drift off the row.
+ */
+function RowEvidence({
+  page,
+  position,
+  label,
+  onZoom,
+}: {
+  page: Review['media'][number]
+  position?: { yTop?: number | null; yBottom?: number | null } | null | undefined
+  label: string
+  onZoom(mediaId: string): void
+}): ReactNode {
+  const top = position?.yTop
+  const bottom = position?.yBottom
+  // Only draw a band when the geometry is real. A guessed band pointing at the wrong line is worse
+  // than no band, because the manager believes it.
+  const band =
+    typeof top === 'number' && typeof bottom === 'number' && bottom > top
+      ? { top: `${Math.max(0, top) * 100}%`, height: `${Math.min(1, bottom - top) * 100}%` }
+      : null
+  return (
+    <button
+      type="button"
+      onClick={() => onZoom(page.mediaId)}
+      aria-label={label}
+      className={`mt-2 block w-40 overflow-hidden rounded-lg border border-slate-300 bg-slate-100 ${FOCUS_RING}`}
+    >
+      <span className="relative block">
+        <img src={`/api/media/${page.mediaId}`} alt={label} loading="lazy" className="block w-full" />
+        {band ? (
+          <span
+            aria-hidden="true"
+            className="absolute inset-x-0 border-y-2 border-amber-500 bg-amber-400/30"
+            style={band}
+          />
+        ) : null}
+      </span>
+      <span className="block px-1 py-0.5 text-[10px] text-slate-600">{label}</span>
+    </button>
+  )
+}
+
+/**
+ * The thumbnail plus the viewer it opens, as one unit an attention card drops in.
+ *
+ * The zoom state is local to the row deliberately: two cards open independently, and a manager
+ * comparing them is not fighting one shared «which photo is showing» flag.
+ */
+function RowEvidencePanel({
+  pages,
+  row,
+  position,
+}: {
+  pages: Review['media']
+  row: RowEvidenceOriginInput
+  position?: { yTop?: number | null; yBottom?: number | null; rowIndex?: number } | null | undefined
+}): ReactNode {
+  const { t, lang } = useApp()
+  const [zoom, setZoom] = useState<string | null>(null)
+  const page = rowEvidencePage(pages, row)
+  if (!page) return null
+  const rowNumber = typeof position?.rowIndex === 'number' ? ` · #${position.rowIndex + 1}` : ''
+  const zoomIndex = pages.findIndex((item) => item.mediaId === zoom)
+  return (
+    <>
+      <RowEvidence
+        page={page}
+        position={position}
+        label={`${slotLabel(page.slot, t.shift.slotNames, lang)}${rowNumber}`}
+        onZoom={setZoom}
+      />
+      {zoomIndex >= 0 ? (
+        <Lightbox
+          shots={pages}
+          index={zoomIndex}
+          label={(slot) => slotLabel(slot, t.shift.slotNames, lang)}
+          onIndex={(i) => setZoom(pages[i]?.mediaId ?? null)}
+          onClose={() => setZoom(null)}
+        />
+      ) : null}
+    </>
+  )
+}
+
 function Lightbox({
   shots,
   index,

@@ -88,7 +88,7 @@ import {
   readCloseDraftAttachment,
   syncCloseDraftEvidence,
 } from './close-draft.service.ts'
-import { buildScanDuplicateHints } from './duplicate-hints.service.ts'
+import { buildScanDuplicateHints, evidenceSourcesForShift } from './duplicate-hints.service.ts'
 import {
   ServiceError,
   addOrder,
@@ -1426,6 +1426,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   const shiftSnapshot = async (shiftId: string, sourceDeps: Deps = deps) => {
     const shift = await sourceDeps.shifts.findById(shiftId)
     if (!shift) return null
+    // Which stored screenshot each money row was read from. Resolved once for the whole snapshot,
+    // through the same keys the duplicate hints use, so a row's thumbnail and the hint about it can
+    // never name different pages.
+    const evidenceSources = await evidenceSourcesForShift(sourceDeps, shiftId)
     // Per-pack readings, joined to the packs so a slot and a capacity are shown rather than a
     // uuid. A two-pack bike hands back two of these at each end of the shift.
     const [orders, movements, cashDeductions, readings, fitted, slots, swaps, allBatteries, driver, vehicle] = await Promise.all([
@@ -1547,6 +1551,11 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           windowBasis: o.windowBasis ?? null,
           positionEvidence: o.positionEvidence ?? null,
           observationId: o.observationId ?? null,
+          // WHICH stored screenshot this row was read from. `positionEvidence` already says WHERE
+          // on the page; together they let the review screen put the disputed line in front of the
+          // manager instead of handing him the whole end package to search.
+          evidenceSlot: evidenceSources.orders.get(o.providerOrderNo)?.slot ?? null,
+          evidenceMediaId: evidenceSources.orders.get(o.providerOrderNo)?.mediaId ?? null,
           closeDraftReviewReasons: o.closeDraftReviewReasons ?? [],
         })),
         cashDeductions: cashDeductions.map((d) => ({
@@ -1567,6 +1576,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           windowBasis: d.windowBasis ?? null,
           positionEvidence: d.positionEvidence ?? null,
           observationId: d.observationId ?? null,
+          evidenceSlot: evidenceSources.deductions.get(d.id)?.slot ?? null,
+          evidenceMediaId: evidenceSources.deductions.get(d.id)?.mediaId ?? null,
           closeDraftReviewReasons: d.closeDraftReviewReasons ?? [],
         })),
         // «سجل المدفوعات» as read: what the wallet actually did, beside what the orders imply.
