@@ -10,6 +10,7 @@ import { CompletedShifts } from './screens/CompletedShifts.tsx'
 import { PreapprovedShifts } from './screens/PreapprovedShifts.tsx'
 import { GpsLive } from './screens/GpsLive.tsx'
 import { Approval } from './screens/Approval.tsx'
+import { ErrorBoundary } from './ErrorBoundary.tsx'
 import { Fleet } from './screens/Fleet.tsx'
 import { FleetConfig } from './screens/FleetConfig.tsx'
 import { Treasury } from './screens/Treasury.tsx'
@@ -280,8 +281,15 @@ export function AdminApp(): ReactNode {
         {openShift ? (
           /* A notification can replace `openShift` while a review is already mounted. Keying the
              workspace prevents typed cash/top-up or confirmations from one driver surviving into
-             another driver's shift. */
-          <Approval key={openShift} shiftId={openShift} onDone={() => setOpenShift(null)} />
+             another driver's shift.
+
+             ITS OWN BOUNDARY. The root one in `main.tsx` catches everything, but a throw here takes
+             the whole console down with it — the rail, the queue, the treasury. This screen is the
+             one under active rebuild and the one a manager is standing at a counter using, so a
+             throw should cost him this shift's review and nothing else. */
+          <ErrorBoundary key={`boundary:${openShift}`}>
+            <Approval key={openShift} shiftId={openShift} onDone={() => setOpenShift(null)} />
+          </ErrorBoundary>
         ) : section === 'dashboard' ? (
           <Dashboard />
         ) : section === 'queue' ? (

@@ -72,13 +72,70 @@ export function guardPhysicalSettlementConfirmations(
 
 /** One local timing draft is enough to keep the financial close button unavailable. */
 export function closeWorkspaceApprovalReady(input: CloseWorkspaceApprovalGateInput): boolean {
-  return (
-    input.settlementReady &&
-    input.unresolvedOperationCount === 0 &&
-    input.managerBatteryReadingCount === 0 &&
-    input.pendingTimingDraftCount === 0 &&
-    !input.refreshing
-  )
+  return approvalBlockerCodes(input).length === 0
+}
+
+export type ApprovalBlockerCode =
+  | 'recalculating'
+  | 'settlement_unavailable'
+  | 'settlement_amounts_pending'
+  | 'confirm_before_approval'
+  | 'unresolved_operations'
+  | 'unsaved_timing_draft'
+  | 'manager_battery_required'
+  | 'force_reason_required'
+
+export interface ApprovalBlockerInput extends CloseWorkspaceApprovalGateInput {
+  /** Split out of `settlementReady` so each half can name itself. */
+  settlementLoaded?: boolean
+  deferralMatches?: boolean
+  confirmationsComplete?: boolean
+  forcePrepared?: boolean
+  forceReason?: string
+}
+
+/**
+ * WHY the close button is dead — every reason, by code, in reading order.
+ *
+ * `closeWorkspaceApprovalReady` is defined AS "this list is empty", so the button and its
+ * explanation cannot disagree. That is not tidiness: two of the five gate terms —
+ * `deferralMatchesSettlement` and the settlement-hash shape — used to disable the button while
+ * contributing nothing to the displayed list, and a manager reading a dead button with no reason
+ * concludes the console is broken and goes looking for a way around the gate.
+ *
+ * The caller resolves each code through `t.close.blocker.*`; the domain emits codes, the UI
+ * resolves them.
+ */
+export function approvalBlockerCodes(input: ApprovalBlockerInput): ApprovalBlockerCode[] {
+  const codes: ApprovalBlockerCode[] = []
+  if (input.refreshing) codes.push('recalculating')
+  else if (input.settlementLoaded === false) codes.push('settlement_unavailable')
+
+  if (!input.settlementReady && input.settlementLoaded !== false && !input.refreshing) {
+    // The statement loaded, so say which half of "ready" is missing rather than one vague line.
+    if (input.deferralMatches === false) codes.push('settlement_amounts_pending')
+    if (input.confirmationsComplete === false) codes.push('confirm_before_approval')
+    if (input.deferralMatches !== false && input.confirmationsComplete !== false) {
+      // Neither half explains it: the hash is malformed, which is a server or transport fault the
+      // manager cannot fix by typing. Name it as an unavailable statement rather than stay silent.
+      codes.push('settlement_unavailable')
+    }
+  }
+
+  if (input.unresolvedOperationCount > 0) codes.push('unresolved_operations')
+  if (input.pendingTimingDraftCount > 0) codes.push('unsaved_timing_draft')
+  if (input.managerBatteryReadingCount > 0) codes.push('manager_battery_required')
+  /*
+   * `hasVisibleText`, not `.trim()`. An exceptional close is the one path where the reason is
+   * MANDATORY, and `'‏'.trim()` is truthy — an RTL mark pasted along with Arabic used to pass
+   * as an audit trail. The server already refuses it (`normalizedSettlementReason` tests
+   * `\p{White_Space}|\p{Cf}`); this makes the button agree with the server instead of letting the
+   * manager write something the ledger will not keep.
+   */
+  if (input.forcePrepared === true && !hasVisibleText(input.forceReason ?? '')) {
+    codes.push('force_reason_required')
+  }
+  return codes
 }
 
 export type TimingRevisionDecision = 'preserve' | 'include' | 'duplicate'

@@ -31,6 +31,8 @@ import {
   buildOrderDuplicateRevision,
   buildOrderTimingRevision,
   closeDraftReviewReasonLabel,
+  type ApprovalBlockerCode,
+  approvalBlockerCodes,
   closeWorkspaceApprovalReady,
   countAwaitingCloseBatteryReadings,
   deductionHasDashboardEvidenceOrigin,
@@ -47,6 +49,8 @@ import {
 } from '../operation-window.ts'
 import {
   activeForcePreparation,
+  deferralMatchesSettlement as deferralMatchesSettlementInputs,
+  isNonnegativeSettlementMoney,
   closeApprovalRequest,
   isKnownSettlementAction,
   settlementApprovalReady,
@@ -216,14 +220,6 @@ interface Review {
     causes: Array<{ code: string; confidence: string; amount: string; candidateOrderNos: string[] }>
     ordersHash: string
     cashDeductionTotal?: string
-  }
-}
-
-function isNonnegativeSettlementMoney(value: string): boolean {
-  try {
-    return value.trim() !== '' && parseMinor(value.trim()) >= 0n
-  } catch {
-    return false
   }
 }
 
@@ -469,14 +465,10 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     cashSettlementConfirmed,
     varianceReason: forcePrepared ? notes : varianceReason,
   }
-  const deferralMatchesSettlement =
-    settlement !== null &&
-    isNonnegativeSettlementMoney(cashReceivableDeferred) &&
-    isNonnegativeSettlementMoney(walletReceivableDeferred) &&
-    isNonnegativeSettlementMoney(cashShortageReceivable) &&
-    parseMinor(cashReceivableDeferred.trim()) === parseMinor(settlement.cashReceivableDeferred) &&
-    parseMinor(walletReceivableDeferred.trim()) === parseMinor(settlement.walletReceivableDeferred) &&
-    parseMinor(cashShortageReceivable.trim()) === parseMinor(settlement.cashShortageReceivable)
+  const deferralMatchesSettlement = deferralMatchesSettlementInputs(
+    { cashReceivableDeferred, walletReceivableDeferred, cashShortageReceivable },
+    settlement,
+  )
   const closeSettlementReady =
     !settlementRecalculating &&
     deferralMatchesSettlement &&
@@ -1714,19 +1706,30 @@ function CloseApprovalWorkspace({
     isNonnegativeSettlementMoney(cashReceivableDeferred) &&
     isNonnegativeSettlementMoney(walletReceivableDeferred) &&
     isNonnegativeSettlementMoney(cashShortageReceivable)
-  const deferralMatchesSettlement =
-    settlement !== null &&
-    deferralInputsValid &&
-    parseMinor(cashReceivableDeferred.trim()) === parseMinor(settlement.cashReceivableDeferred) &&
-    parseMinor(walletReceivableDeferred.trim()) === parseMinor(settlement.walletReceivableDeferred) &&
-    parseMinor(cashShortageReceivable.trim()) === parseMinor(settlement.cashShortageReceivable)
-  const approvalReady = closeWorkspaceApprovalReady({
+  const deferralMatchesSettlement = deferralMatchesSettlementInputs(
+    { cashReceivableDeferred, walletReceivableDeferred, cashShortageReceivable },
+    settlement,
+  )
+  /*
+   * ONE description of the gate, used for both the button and its explanation.
+   *
+   * `closeWorkspaceApprovalReady` is now defined as "this list is empty", so a reason that disables
+   * the button and says nothing has become impossible to write. Two used to exist.
+   */
+  const blockerInput = {
     settlementReady: deferralMatchesSettlement && settlementApprovalReady(settlement, settlementDraft),
+    settlementLoaded: settlement !== null,
+    deferralMatches: deferralMatchesSettlement,
+    confirmationsComplete:
+      physicalConfirmationGuard.walletTransferConfirmed && physicalConfirmationGuard.cashSettlementConfirmed,
     unresolvedOperationCount: unresolvedCount,
     managerBatteryReadingCount,
     pendingTimingDraftCount: pendingTimingDraftKeys.size,
     refreshing,
-  })
+    forcePrepared,
+    forceReason: settlementDraft.varianceReason,
+  }
+  const approvalReady = closeWorkspaceApprovalReady(blockerInput)
 
   const day = review.businessDate.slice(0, 10)
   const occurrenceKey = (order: Review['orders'][number]): string =>
@@ -2142,15 +2145,9 @@ function CloseApprovalWorkspace({
             ) : null}
 
             <ApprovalBlockers
-              refreshing={refreshing}
-              settlement={settlement}
-              walletConfirmed={physicalConfirmationGuard.walletTransferConfirmed}
-              cashConfirmed={physicalConfirmationGuard.cashSettlementConfirmed}
+              codes={approvalBlockerCodes(blockerInput)}
               unresolvedCount={unresolvedCount}
               managerBatteryReadingCount={managerBatteryReadingCount}
-              pendingTimingDraftCount={pendingTimingDraftKeys.size}
-              varianceReason={settlementDraft.varianceReason}
-              forcePrepared={forcePrepared}
               copy={copy}
               operationCopy={operationCopy}
             />
@@ -2954,42 +2951,42 @@ function SettlementConfirmationCard({
   )
 }
 
+/** Renders the codes `approvalBlockerCodes` produced. It decides nothing; it only resolves them. */
 function ApprovalBlockers({
-  refreshing,
-  settlement,
-  walletConfirmed,
-  cashConfirmed,
+  codes,
   unresolvedCount,
   managerBatteryReadingCount,
-  pendingTimingDraftCount,
-  varianceReason,
-  forcePrepared,
   copy,
   operationCopy,
 }: {
-  refreshing: boolean
-  settlement: SettlementView | null
-  walletConfirmed: boolean
-  cashConfirmed: boolean
+  codes: readonly ApprovalBlockerCode[]
   unresolvedCount: number
   managerBatteryReadingCount: number
-  pendingTimingDraftCount: number
-  varianceReason: string
-  forcePrepared: boolean
   copy: CloseWorkspaceCopy
   operationCopy: OperationReviewCopy
 }): ReactNode {
   const { t } = useApp()
-  const blockers: string[] = []
-  if (refreshing) blockers.push(copy.recalculating)
-  else if (!settlement) blockers.push(t.settlement.unavailable)
-  if (settlement && (!walletConfirmed || !cashConfirmed)) blockers.push(t.settlement.confirmBeforeApproval)
-  if (unresolvedCount > 0) blockers.push(operationCopy.cannotApproveUnknown.replace('{n}', String(unresolvedCount)))
-  if (pendingTimingDraftCount > 0) blockers.push(copy.unsavedTimingDraft)
-  if (managerBatteryReadingCount > 0) {
-    blockers.push(copy.managerBatteryRequired.replace('{n}', String(managerBatteryReadingCount)))
+  const label = (code: ApprovalBlockerCode): string => {
+    switch (code) {
+      case 'recalculating':
+        return copy.recalculating
+      case 'settlement_unavailable':
+        return t.settlement.unavailable
+      case 'settlement_amounts_pending':
+        return t.settlement.amountsPending
+      case 'confirm_before_approval':
+        return t.settlement.confirmBeforeApproval
+      case 'unresolved_operations':
+        return operationCopy.cannotApproveUnknown.replace('{n}', String(unresolvedCount))
+      case 'unsaved_timing_draft':
+        return copy.unsavedTimingDraft
+      case 'manager_battery_required':
+        return copy.managerBatteryRequired.replace('{n}', String(managerBatteryReadingCount))
+      case 'force_reason_required':
+        return t.approval.forceReasonRequired
+    }
   }
-  if (forcePrepared && varianceReason.trim() === '') blockers.push(t.approval.forceReasonRequired)
+  const blockers = [...new Set(codes)].map(label)
   if (blockers.length === 0) return null
   return (
     <ul className="mt-3 flex flex-col gap-1 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs font-medium text-amber-900">

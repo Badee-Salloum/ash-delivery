@@ -11,7 +11,14 @@ describe('close-time ordinary shortage receivable UI', () => {
     expect(approvalSource).toContain("const [cashShortageReceivable, setCashShortageReceivable] = useState('0')")
     expect(approvalSource).toContain('cashShortageReceivable: cashShortageReceivable.trim()')
     expect(approvalSource).toContain('cashShortageReceivable: settlement.cashShortageReceivable')
-    expect(approvalSource).toContain('parseMinor(cashShortageReceivable.trim()) === parseMinor(settlement.cashShortageReceivable)')
+    /*
+     * The invariant this line used to assert — that the typed amount must equal the priced one —
+     * now lives in `deferralMatchesSettlement`, where `approval-blockers.test.ts` exercises it
+     * against trailing zeros, whitespace, negatives and a missing statement. What is left to check
+     * here is only that the screen still ASKS.
+     */
+    expect(approvalSource).toContain('deferralMatchesSettlementInputs(')
+    expect(approvalSource).toContain('cashShortageReceivable,')
     expect(approvalSource).toContain('settlement.maximumCashShortageReceivable')
     expect(approvalSource).toContain('onCashShortageReceivable(event.target.value)')
   })

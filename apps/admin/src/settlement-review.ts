@@ -46,6 +46,50 @@ export function settlementVarianceMagnitude(settlement: ShiftSettlementView): st
   return formatMinor(abs(parseMinor(settlement.variance)))
 }
 
+/** A receivable box holds a non-negative decimal, or the screen has nothing to compare. */
+export function isNonnegativeSettlementMoney(value: string): boolean {
+  try {
+    return value.trim() !== '' && parseMinor(value.trim()) >= 0n
+  } catch {
+    return false
+  }
+}
+
+export interface SettlementDeferralInputs {
+  cashReceivableDeferred: string
+  walletReceivableDeferred: string
+  cashShortageReceivable: string
+}
+
+/**
+ * Do the three typed amounts describe the statement the server actually priced?
+ *
+ * `closeApprovalRequest` posts the values from `settlement`, never from the boxes — so the boxes
+ * only have to AGREE. Until they do, the displayed instructions belong to a different arithmetic
+ * than the one the manager typed, and approving would confirm a handover he did not read.
+ *
+ * Compared in minor units rather than as text: `'0'`, `'0.00'` and `' 0.00 '` are the same amount,
+ * and a screen that refused them would be refusing for a reason no manager could see.
+ */
+export function deferralMatchesSettlement(
+  inputs: SettlementDeferralInputs,
+  settlement: ShiftSettlementView | null,
+): boolean {
+  if (!settlement) return false
+  if (
+    !isNonnegativeSettlementMoney(inputs.cashReceivableDeferred) ||
+    !isNonnegativeSettlementMoney(inputs.walletReceivableDeferred) ||
+    !isNonnegativeSettlementMoney(inputs.cashShortageReceivable)
+  ) {
+    return false
+  }
+  return (
+    parseMinor(inputs.cashReceivableDeferred.trim()) === parseMinor(settlement.cashReceivableDeferred) &&
+    parseMinor(inputs.walletReceivableDeferred.trim()) === parseMinor(settlement.walletReceivableDeferred) &&
+    parseMinor(inputs.cashShortageReceivable.trim()) === parseMinor(settlement.cashShortageReceivable)
+  )
+}
+
 /**
  * The close button is a physical handover gate, not merely a ledger action.
  *
