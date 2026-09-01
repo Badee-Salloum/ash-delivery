@@ -982,146 +982,6 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       </Card>
       ) : null}
 
-      {/* The physical handover comes immediately after BR1: first what to transfer, then why. */}
-      {settlement ? (
-        <Card title={t.settlement.title}>
-          <p className="text-xs text-slate-600">{t.settlement.hint}</p>
-
-          <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
-            <div
-              className={`rounded-xl border-2 p-4 ${
-                settlement.walletAction === 'collect'
-                  ? 'border-sky-300 bg-sky-50'
-                  : settlement.walletAction === 'fund'
-                    ? 'border-amber-300 bg-amber-50'
-                    : 'border-emerald-300 bg-emerald-50'
-              }`}
-            >
-              <p className="text-xs font-bold text-slate-600">{t.settlement.walletInstruction}</p>
-              <p className="mt-1 text-base font-bold text-slate-900">
-                {t.settlement.walletAction[settlement.walletAction]}
-              </p>
-              <Money value={settlement.walletAmount} className="mt-2 block text-3xl font-extrabold text-sky-800" />
-            </div>
-            <div
-              className={`rounded-xl border-2 p-4 ${
-                settlement.cashAction === 'collect'
-                  ? 'border-emerald-300 bg-emerald-50'
-                  : settlement.cashAction === 'pay'
-                    ? 'border-amber-300 bg-amber-50'
-                    : 'border-slate-300 bg-slate-50'
-              }`}
-            >
-              <p className="text-xs font-bold text-slate-600">{t.settlement.cashInstruction}</p>
-              <p className="mt-1 text-base font-bold text-slate-900">
-                {t.settlement.cashAction[settlement.cashAction]}
-              </p>
-              <Money
-                value={settlement.cashAmount}
-                className={`mt-2 block text-3xl font-extrabold ${
-                  settlement.cashAction === 'pay' ? 'text-amber-800' : 'text-emerald-800'
-                }`}
-              />
-            </div>
-          </div>
-
-          <div className="mt-4 rounded-lg border border-slate-200 bg-white p-3">
-            <p className="text-sm font-bold text-slate-800">{t.settlement.breakdown}</p>
-            <div className="mt-2 grid grid-cols-1 gap-x-6 gap-y-1 md:grid-cols-2">
-              {(
-                [
-                  ['deliveryFeeTotal', settlement.deliveryFeeTotal],
-                  ['fixedDriverShare', settlement.fixedDriverShare],
-                  ['manualDriverShare', settlement.manualDriverShare],
-                  ['grossDriverShare', settlement.grossDriverShare],
-                  ['cashDeductionTotal', settlement.cashDeductionTotal],
-                  ['baseDriverShare', settlement.baseDriverShare],
-                  ['expectedTotal', settlement.expectedTotal],
-                  ['actualTotal', settlement.actualTotal],
-                ] as const
-              ).map(([key, value]) => (
-                <div key={key} className="flex items-baseline gap-2 border-b border-slate-100 py-1 text-sm">
-                  <span className="text-slate-600">{t.settlement[key]}</span>
-                  <Money value={value} className="ms-auto font-semibold text-slate-900" />
-                </div>
-              ))}
-              <div
-                className={`flex items-baseline gap-2 border-b py-1 text-sm font-bold md:col-span-2 ${
-                  settlement.varianceDirection === 'surplus'
-                    ? 'border-emerald-200 text-emerald-800'
-                    : settlement.varianceDirection === 'shortage'
-                      ? 'border-red-200 text-red-800'
-                      : 'border-slate-100 text-slate-700'
-                }`}
-              >
-                <span>{t.settlement.varianceDirection[settlement.varianceDirection]}</span>
-                <Money value={settlementVarianceMagnitude(settlement)} className="ms-auto text-lg" />
-              </div>
-              <div className="flex items-baseline gap-2 pt-2 text-base font-extrabold md:col-span-2">
-                <span>{t.settlement.finalEmployeeCash}</span>
-                <Money
-                  value={settlement.finalEmployeeCash}
-                  className={`ms-auto text-2xl ${
-                    parseMinor(settlement.finalEmployeeCash) < 0n ? 'text-red-700' : 'text-brand'
-                  }`}
-                />
-              </div>
-            </div>
-          </div>
-
-          {settlementHasVariance(settlement) && !forcePrepared ? (
-            <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3">
-              <label className="text-sm font-bold text-amber-950" htmlFor="settlement-variance-reason">
-                {t.settlement.varianceReason}
-              </label>
-              <textarea
-                id="settlement-variance-reason"
-                value={varianceReason}
-                onChange={(event) => setVarianceReason(event.target.value)}
-                disabled={busy}
-                maxLength={500}
-                rows={2}
-                className="mt-2 w-full rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/15"
-                placeholder={t.settlement.varianceReasonPlaceholder}
-              />
-            </div>
-          ) : null}
-
-          <fieldset className="mt-4 flex flex-col gap-2" disabled={busy}>
-            <legend className="mb-1 text-sm font-bold text-slate-800">{t.settlement.confirmationsTitle}</legend>
-            <label className="flex min-h-12 cursor-pointer items-center gap-3 rounded-lg border border-slate-200 p-3 text-sm font-semibold text-slate-800">
-              <input
-                type="checkbox"
-                checked={walletTransferConfirmed}
-                onChange={(event) => setWalletTransferConfirmed(event.target.checked)}
-                className="size-5 shrink-0 accent-emerald-600"
-              />
-              <span>{t.settlement.walletConfirmed}</span>
-            </label>
-            <label className="flex min-h-12 cursor-pointer items-center gap-3 rounded-lg border border-slate-200 p-3 text-sm font-semibold text-slate-800">
-              <input
-                type="checkbox"
-                checked={cashSettlementConfirmed}
-                onChange={(event) => setCashSettlementConfirmed(event.target.checked)}
-                className="size-5 shrink-0 accent-emerald-600"
-              />
-              <span>{t.settlement.cashConfirmed}</span>
-            </label>
-          </fieldset>
-        </Card>
-      ) : isClose ? (
-        <Card title={t.settlement.title}>
-          <p className="text-sm font-medium text-red-700">
-            {settlementLoadError ? explainError(settlementLoadError, t) : t.settlement.loading}
-          </p>
-          {settlementLoadError ? (
-            <Button variant="ghost" className="mt-3" onClick={load} disabled={busy}>
-              {t.common.retry}
-            </Button>
-          ) : null}
-        </Card>
-      ) : null}
-
       {/* ── Start vs end, side by side — the odometer delta is the anti-fraud read ──────── */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <Card title={t.shift.startPackage}>
@@ -1206,9 +1066,6 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
               <span className="num">{formatDateTime(review.endPackage.odometerAnomalyConfirmedAt, lang)}</span>
               {' · '}{review.endPackage.odometerAnomalyConfirmedBy ?? '—'}
             </p>
-          ) : null}
-          {isClose && !forcePrepared ? (
-            <ReviseFigures shiftId={review.id} review={review} onRevised={refreshVisible} />
           ) : null}
           {/* Both close readers now preserve their baseline; a manual correction remains visible. */}
           <OcrDeltaLines
@@ -1533,46 +1390,19 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           className="sticky bottom-0 z-50 -mx-4 border-t border-slate-200 bg-white/95 px-4 py-3 backdrop-blur"
           style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
         >
-          {/* WHY the button is dead. A 40%-opacity ghost with no explanation is how a manager
-              concludes the console is broken and goes looking for a way around the gate. */}
-          {isClose && !settlement ? (
-            <p className="mb-2 text-sm font-medium text-red-700">{t.settlement.unavailable}</p>
-          ) : null}
-          {isClose && settlement && (!walletTransferConfirmed || !cashSettlementConfirmed) ? (
-            <p className="mb-2 text-sm font-medium text-amber-800">{t.settlement.confirmBeforeApproval}</p>
-          ) : null}
-          {isClose && unresolvedWindowCount > 0 ? (
-            <p className="mb-2 text-sm font-medium text-amber-800">
-              {operationCopy.cannotApproveUnknown.replace('{n}', String(unresolvedWindowCount))}
-            </p>
-          ) : null}
-          {isClose && forcePrepared && settlementDraft.varianceReason.trim() === '' ? (
-            <p className="mb-2 text-sm font-medium text-red-700">{t.approval.forceReasonRequired}</p>
-          ) : null}
-          {isClose && forcePrepared ? (
-            <p className="mb-2 text-sm font-medium text-amber-800">{t.approval.forcePreparedHint}</p>
-          ) : null}
+          {/* The open gate's own disable — an invalid float or top-up — is signalled on the
+              inputs with aria-invalid. It has no sentence here, which is the same silent-dead-button
+              defect the close gate just had; left alone deliberately, so this commit deletes and
+              changes nothing else. */}
           <div className="flex flex-wrap gap-3">
-            {isClose && forcePrepared ? null : (
-              <Button
-                variant="success"
-                disabled={busy || (!isClose && !openingFundsValid) || (isClose && (unresolvedWindowCount > 0 || !closeSettlementReady))}
-                onClick={approve}
-                className="flex-1"
-              >
-                {isClose ? t.approval.approveClose : t.common.approve}
-              </Button>
-            )}
-            {isClose && forcePrepared ? (
-              <Button
-                variant="danger"
-                disabled={busy || unresolvedWindowCount > 0 || !closeSettlementReady || notes.trim() === ''}
-                onClick={forceApprove}
-                className="flex-1"
-              >
-                {t.approval.forceApprove}
-              </Button>
-            ) : null}
+            <Button
+              variant="success"
+              disabled={busy || !openingFundsValid}
+              onClick={approve}
+              className="flex-1"
+            >
+              {t.common.approve}
+            </Button>
             {/* Re-shoot is legal on both gates. */}
             <Button variant="ghost" disabled={busy} onClick={() => decide('request-rephoto')}>
               {t.approval.requestRetake}
@@ -1581,14 +1411,12 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                 للسائق» and neither is red. Red is now reserved for the one action that destroys
                 a shift — the manager used to learn «رفض» = send back at one gate and meet
                 «رفض نهائي» = void at the other, one word apart. */}
-            <Button variant="ghost" disabled={busy} onClick={() => decide(isClose ? 'reject-close' : 'reject-open')}>
+            <Button variant="ghost" disabled={busy} onClick={() => decide('reject-open')}>
               {t.approval.sendBack}
             </Button>
-            {isClose ? null : (
-              <Button variant="danger" disabled={busy} onClick={refuse}>
-                {t.approval.refuse}
-              </Button>
-            )}
+            <Button variant="danger" disabled={busy} onClick={refuse}>
+              {t.approval.refuse}
+            </Button>
           </div>
         </div>
       ) : null}
