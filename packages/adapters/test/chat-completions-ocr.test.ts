@@ -357,7 +357,7 @@ describe('printed order time normalization', () => {
 describe('orders fast financial pass', () => {
   it('versions the cache by model configuration and all orders pass versions and budgets', () => {
     expect(reader().cacheSignature('orders')).toBe(
-      'openai@ocr.test:gpt-test:medium:medium:orders-screen-kind-v1:orders-money-v5:orders-time-v3:orders-route-v4:money-authority-v1:money-validation-v2:time-validation-v3:position-evidence-v1:cancellation-consensus-v1:kind-timeout-1000:money-timeout-1000:time-timeout-1000:route-timeout-1000:route-grace-12000:kind-max-512:money-max-8192:time-max-4096:route-max-8192',
+      'openai@ocr.test:gpt-test:medium:medium:orders-screen-kind-v1:orders-money-v5:orders-money-2-v1:orders-time-v3:orders-route-v4:money-consensus-v1:money-validation-v2:time-validation-v3:position-evidence-v1:cancellation-consensus-v1:kind-timeout-1000:money-timeout-1000:time-timeout-1000:route-timeout-1000:route-grace-12000:kind-max-512:money-max-8192:time-max-4096:route-max-8192',
     )
     expect(reader(2_000).cacheSignature('orders')).not.toBe(reader().cacheSignature('orders'))
     expect(reader(2_000).cacheSignature('wallet')).not.toBe(reader().cacheSignature('wallet'))
@@ -453,7 +453,10 @@ describe('orders fast financial pass', () => {
 
     const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
 
-    expect(fetch).toHaveBeenCalledTimes(4)
+    // FIVE: screen-kind, two independent money readings, the printed-time verifier, and routes.
+    // The second money pass was added after a single unchecked reading published 230 for a fee of
+    // 330 on 2026-09-01 — the wallet and the clock had needed two agreeing readers for weeks.
+    expect(fetch).toHaveBeenCalledTimes(5)
     const fastCall = vi.mocked(fetch).mock.calls.find(([, init]) =>
       requestedPrompt(init).includes('ORDERS MONEY/TIME/DATE FAST PASS'),
     )
@@ -475,12 +478,16 @@ describe('orders fast financial pass', () => {
     ])
     expect(reading.result.rows.reduce((sum, row) => sum + Number(row.value), 0)).toBe(1_415)
     expect(reading.result.raw).toMatchObject({
-      reader: 'orders-ai-time-consensus-v4',
+      reader: 'orders-ai-money-and-time-consensus-v5',
       routesAligned: false,
       route: { ok: false, reason: 'timeout' },
       timeAgreementCounts: [2, 2, 2, 2, 2],
     })
-    expect(reading.usage).toMatchObject({ tokensIn: 16, tokensOut: 8 })
+    // The price of the second opinion, summed across every pass exactly as `ocr_reads` records it:
+    // 16/8 before, 24/12 after — the new pass costs what the first money pass costs. Measured
+    // against production the same ratio came to +$1.63/month at ten shifts a day, against a single
+    // misread fee that moved one employee settlement by 92.00.
+    expect(reading.usage).toMatchObject({ tokensIn: 24, tokensOut: 12 })
   })
 
   it('normalizes the exact midnight incident only after money and time passes agree', async () => {
@@ -957,6 +964,149 @@ describe('orders fast financial pass', () => {
     const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
 
     expect(reading.result).toMatchObject({ ok: false, reason: 'unavailable' })
+  })
+
+  /*
+   * The fee, voted on — added 2026-09-01 after a single unchecked reading put a phantom delivery
+   * into a settlement.
+   *
+   * Shift a3728815 photographed one Recent Orders list twice. On the second page the 14:50 row was
+   * scrolled under the sticky header and rendered faded, the top of a ٣ was lost, and the money
+   * pass returned 230 where the screen said 330 — while transcribing the clock and both address
+   * lines perfectly. Nothing checked it, so both rows became orders: ten orders for nine
+   * deliveries. The phantom raised `expectedTotal` by 0.8 × 230, which pulled a real 218.25 surplus
+   * down to 34.25 and made the shift look almost exact.
+   *
+   * Yallago's own payments log settles the fee beyond argument: exactly one 20% deduction at that
+   * minute, −66.00 = 20% of 330, and no −46.00 anywhere in it.
+   *
+   * The wallet has needed two agreeing readers since `٢٧٩٫٥٠` came back as `٣٧٩٫٥٠` — the same ٢/٣
+   * confusion — and the printed clock since 0033. The fee, which the whole settlement is built
+   * from, was the one field with no vote.
+   */
+  describe('the fee is voted on, not taken from one reader', () => {
+    const twoPages = (first: string, second: string): ParsedScreen => ({
+      rows: [
+        orderRow(first, { time: '02:50 م', dateIso: '2026-09-01' }),
+        orderRow(second, { time: '02:00 م', dateIso: '2026-09-01' }),
+      ],
+      fields: [],
+      notes: null,
+    })
+
+    /** Stage the two money readings independently; everything else agrees. */
+    const stage = (primary: ParsedScreen, second: ParsedScreen, route?: ParsedScreen): void => {
+      vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        const prompt = requestedPrompt(init)
+        if (isScreenKindPrompt(prompt)) return completion(screenKind())
+        // The second prompt embeds the first, so the specific marker must be tested FIRST.
+        if (prompt.includes('SECOND FINANCIAL READING')) return completion(second)
+        if (prompt.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return completion(primary)
+        if (prompt.includes('ORDERS PRINTED-TIME VERIFIER')) return completion(primary)
+        if (route !== undefined) return completion(route)
+        return new Response('', { status: 504 })
+      }))
+    }
+
+    it('refuses a fee the two readers disagree about, and says why', async () => {
+      // The incident, reproduced: 330 on one reading, 230 on the other, everything else identical.
+      stage(twoPages('330', '120'), twoPages('230', '120'))
+      const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+
+      expect(reading.result.ok).toBe(true)
+      if (!reading.result.ok) throw new Error('expected an orders result')
+
+      // NOT 330, and emphatically not 230. Neither reader is trusted over the other, so the row
+      // goes to a human — `reviewRequired` reaches the manager as `reader_conflict` and the driver
+      // as a fee to type. Before this, 230 was published with nothing to show anyone disagreed.
+      expect(reading.result.rows[0]).toMatchObject({ value: null, reviewRequired: true })
+      // The row the readers agreed on is untouched. A conflict is per row, never per screen.
+      expect(reading.result.rows[1]).toMatchObject({ value: '120' })
+      expect(reading.result.raw).toMatchObject({ moneyDisagreementIndexes: [0] })
+      // And the whole image stays retryable, because a refused fee is an unread one.
+      expect(reading.result.retryable).toBe(true)
+    })
+
+    it('publishes a fee both readers saw', async () => {
+      stage(twoPages('330', '120'), twoPages('330', '120'))
+      const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+      expect(reading.result.ok && reading.result.rows.map((row) => row.value)).toEqual(['330', '120'])
+      expect(reading.result.ok && reading.result.raw).toMatchObject({ moneyDisagreementIndexes: [] })
+    })
+
+    it('counts 330 and 330.00 as one reading, not two disagreeing ones', async () => {
+      // The vote is over the parsed money key. Two readers who wrote the same amount differently
+      // agree, and treating that as a conflict would send honest rows to a human every night.
+      stage(twoPages('330', '120'), twoPages('330.00', '120.00'))
+      const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+      expect(reading.result.ok && reading.result.rows.map((row) => row.value)).toEqual(['330', '120'])
+      expect(reading.result.ok && reading.result.raw).toMatchObject({ moneyDisagreementIndexes: [] })
+    })
+
+    it('still publishes when only ONE reader could read the fee', async () => {
+      /*
+       * Availability, stated as a deliberate limit rather than left implicit. If the second reading
+       * fails — a timeout, a refusal, a truncated completion — the first is published as before.
+       * Refusing here would turn every flaky-network shift into a page of hand-typed fees, and a
+       * lone reading is not the failure this exists to catch. A CONTRADICTED one is.
+       */
+      vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        const prompt = requestedPrompt(init)
+        if (isScreenKindPrompt(prompt)) return completion(screenKind())
+        if (prompt.includes('SECOND FINANCIAL READING')) return new Response('', { status: 504 })
+        if (prompt.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return completion(twoPages('330', '120'))
+        if (prompt.includes('ORDERS PRINTED-TIME VERIFIER')) return completion(twoPages('330', '120'))
+        return new Response('', { status: 504 })
+      }))
+      const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+      expect(reading.result.ok && reading.result.rows.map((row) => row.value)).toEqual(['330', '120'])
+    })
+
+    it('lets two agreeing readers outvote a third that disagrees', async () => {
+      // The wallet's rule exactly: two independent readers who saw the same amount outweigh one who
+      // did not. Without this, any single bad pass could veto a whole screen.
+      stage(twoPages('330', '120'), twoPages('330', '120'), twoPages('230', '120'))
+      const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+      expect(reading.result.ok && reading.result.rows[0]).toMatchObject({ value: '330' })
+    })
+
+    it('keeps the second reading out of the printed-time vote', async () => {
+      /*
+       * The second money prompt is the first one plus a financial appendix, so its time
+       * instructions are the first's verbatim. It is a genuinely independent reader of the FEE and
+       * not of the clock — counting it would turn one reader's time into two votes and retire the
+       * rule 0033 exists for.
+       *
+       * Here the two money passes agree on a clock the verifier contradicts. That is one reader
+       * against one, so no time may be published.
+       */
+      const money = twoPages('330', '120')
+      const verifier: ParsedScreen = {
+        rows: [
+          orderRow('330', { time: '03:50 م', dateIso: '2026-09-01' }),
+          orderRow('120', { time: '02:00 م', dateIso: '2026-09-01' }),
+        ],
+        fields: [],
+        notes: null,
+      }
+      vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        const prompt = requestedPrompt(init)
+        if (isScreenKindPrompt(prompt)) return completion(screenKind())
+        if (prompt.includes('SECOND FINANCIAL READING')) return completion(money)
+        if (prompt.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return completion(money)
+        if (prompt.includes('ORDERS PRINTED-TIME VERIFIER')) return completion(verifier)
+        return new Response('', { status: 504 })
+      }))
+      const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+      expect(reading.result.ok).toBe(true)
+      if (!reading.result.ok) throw new Error('expected an orders result')
+      // The contested clock is refused; the money the two readers agreed on is published.
+      expect(reading.result.rows[0]).toMatchObject({ value: '330', time: null })
+      // Zero, not two. `consensusValue` reports the WINNER's votes, and a contested clock has no
+      // winner — so this is the direct statement that the second money pass did not get to second
+      // its own copy of the time. Row 1, which the verifier really did corroborate, still shows 2.
+      expect(reading.result.raw).toMatchObject({ timeAgreementCounts: [0, 2] })
+    })
   })
 })
 

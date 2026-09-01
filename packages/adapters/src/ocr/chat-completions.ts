@@ -44,6 +44,7 @@ import {
   ORDERS_TIME_READ_SCHEMA,
   READ_SCHEMA,
   ordersMoneyReadPrompt,
+  ordersMoneySecondReadPrompt,
   ordersScreenKindPrompt,
   ordersTimeReadPrompt,
   readPrompt,
@@ -207,7 +208,7 @@ export class ChatCompletionsOcrReader implements OcrReader {
       const timeTimeout = Math.min(this.config.timeoutMs, ORDERS_TIME_TIMEOUT_MS)
       const kindTimeout = Math.min(this.config.timeoutMs, ORDERS_SCREEN_KIND_TIMEOUT_MS)
       const routeTimeout = Math.min(this.config.timeoutMs, ORDERS_ROUTE_TIMEOUT_MS)
-      return `${prefix}:orders-screen-kind-v1:orders-money-v5:orders-time-v3:orders-route-v4:money-authority-v1:money-validation-v2:time-validation-v3:position-evidence-v1:cancellation-consensus-v1:kind-timeout-${kindTimeout}:money-timeout-${moneyTimeout}:time-timeout-${timeTimeout}:route-timeout-${routeTimeout}:route-grace-${ORDERS_ROUTE_GRACE_AFTER_MONEY_MS}:kind-max-${ORDERS_SCREEN_KIND_MAX_COMPLETION_TOKENS}:money-max-${ORDERS_MONEY_MAX_COMPLETION_TOKENS}:time-max-${ORDERS_TIME_MAX_COMPLETION_TOKENS}:route-max-${MAX_COMPLETION_TOKENS}`
+      return `${prefix}:orders-screen-kind-v1:orders-money-v5:orders-money-2-v1:orders-time-v3:orders-route-v4:money-consensus-v1:money-validation-v2:time-validation-v3:position-evidence-v1:cancellation-consensus-v1:kind-timeout-${kindTimeout}:money-timeout-${moneyTimeout}:time-timeout-${timeTimeout}:route-timeout-${routeTimeout}:route-grace-${ORDERS_ROUTE_GRACE_AFTER_MONEY_MS}:kind-max-${ORDERS_SCREEN_KIND_MAX_COMPLETION_TOKENS}:money-max-${ORDERS_MONEY_MAX_COMPLETION_TOKENS}:time-max-${ORDERS_TIME_MAX_COMPLETION_TOKENS}:route-max-${MAX_COMPLETION_TOKENS}`
     }
     const budget = `timeout-${this.config.timeoutMs}:max-${MAX_COMPLETION_TOKENS}`
     if (field === 'wallet') {
@@ -283,6 +284,14 @@ export class ChatCompletionsOcrReader implements OcrReader {
       schema: ORDERS_MONEY_READ_SCHEMA,
       schemaName: 'orders_money_time_date',
     })
+    // The SECOND financial reading. Started in parallel with the first, differently worded, and
+    // never shown its answer — an independent vote, not a retry of a failure.
+    const moneySecondPromise = this.runPass(request, ordersMoneySecondReadPrompt(), {
+      timeoutMs: Math.min(this.config.timeoutMs, ORDERS_MONEY_TIMEOUT_MS),
+      maxCompletionTokens: ORDERS_MONEY_MAX_COMPLETION_TOKENS,
+      schema: ORDERS_MONEY_READ_SCHEMA,
+      schemaName: 'orders_money_second_reading',
+    })
     const timePromise = this.runPass(request, ordersTimeReadPrompt(), {
       timeoutMs: Math.min(this.config.timeoutMs, ORDERS_TIME_TIMEOUT_MS),
       maxCompletionTokens: ORDERS_TIME_MAX_COMPLETION_TOKENS,
@@ -299,14 +308,19 @@ export class ChatCompletionsOcrReader implements OcrReader {
 
     // All three calls start above. Once both compact passes settle, routes get only a short grace;
     // if both fail, the already-running full pass gets its complete (still <45s) fallback budget.
-    const [screenKind, money, time] = await Promise.all([screenKindPromise, moneyPromise, timePromise])
+    const [screenKind, money, moneySecond, time] = await Promise.all([
+      screenKindPromise,
+      moneyPromise,
+      moneySecondPromise,
+      timePromise,
+    ])
     const route = screenKind.result.ok || money.result.ok || time.result.ok
       ? await routePassWithinGrace(routePromise, routeAbort)
       : await routePromise
 
     return {
-      result: ordersPassResult(screenKind, money, time, route),
-      passes: [screenKind, money, time, route],
+      result: ordersPassResult(screenKind, money, moneySecond, time, route),
+      passes: [screenKind, money, moneySecond, time, route],
     }
   }
 
@@ -568,6 +582,7 @@ async function routePassWithinGrace(
 function ordersPassResult(
   screenKind: ModelPass,
   money: ModelPass,
+  moneySecond: ModelPass,
   time: ModelPass,
   route: ModelPass,
 ): OcrResult {
@@ -594,7 +609,22 @@ function ordersPassResult(
   const base = money as ModelPass & { result: Extract<OcrResult, { ok: true }> }
 
   const baseLength = base.result.rows.length
+  /*
+    TWO ELECTORATES, deliberately.
+
+    `alignedPasses` votes on the CLOCK and on cancellation, and it must not contain the second money
+    pass: that prompt is the first one plus a financial appendix, so its time instructions are the
+    first pass's verbatim. Counting it would turn one reader's clock into two votes and quietly
+    retire the rule 0033 exists for — a time only one model actually saw must never be published.
+
+    `moneyPasses` votes on the FEE, where the second pass is a genuinely independent reading: a
+    different prompt attacking the digits adversarially, never shown the other's answer.
+  */
   const alignedPasses = [money, time, route].filter(
+    (pass): pass is ModelPass & { result: Extract<OcrResult, { ok: true }> } =>
+      pass.result.ok && pass.result.rows.length === baseLength,
+  )
+  const moneyPasses = [money, moneySecond, route].filter(
     (pass): pass is ModelPass & { result: Extract<OcrResult, { ok: true }> } =>
       pass.result.ok && pass.result.rows.length === baseLength,
   )
@@ -603,6 +633,8 @@ function ordersPassResult(
   const timeDisagreementIndexes: number[] = []
   const dateDisagreementIndexes: number[] = []
   const timeAgreementCounts: number[] = []
+  const moneyAgreementCounts: number[] = []
+  const moneyDisagreementIndexes: number[] = []
   const cancellationAgreementCounts: number[] = []
   const cancellationDisagreementIndexes: number[] = []
   const cancellationUnverifiedIndexes: number[] = []
@@ -620,8 +652,15 @@ function ordersPassResult(
     const cancellationContested = cancellation.disagreement
     const cancellationNeedsReview = cancellationContested || cancellation.value === null
     const cancelled = cancellationContested ? false : (cancellation.value ?? false)
+    // The fee, voted on. `orderMoneyConsensus` publishes an agreed or a lone reading and refuses a
+    // contradicted one — see its own comment for why a lone reading is still published.
+    const fee = cancelled || cancellationContested
+      ? { value: null, votes: 0, conflict: false }
+      : orderMoneyConsensus(moneyPasses, index)
+    moneyAgreementCounts.push(fee.votes)
+    if (fee.conflict) moneyDisagreementIndexes.push(index)
     const printedMoneyRefused =
-      !cancelled && baseRow.value === null && baseRow.printed.trim() !== ''
+      !cancelled && fee.value === null && baseRow.printed.trim() !== ''
     const consensus = orderDateTimeConsensus(alignedPasses, index, cancelled)
     timeAgreementCounts.push(consensus.timeVotes)
     if (consensus.dateIso === null && !cancelled) dateDisagreementIndexes.push(index)
@@ -629,9 +668,11 @@ function ordersPassResult(
     let row: OcrRow = {
       ...baseRow,
       printedTime: consensus.printedTime,
-      value: cancelled || cancellationContested ? null : baseRow.value,
+      value: fee.value,
       cancelled,
-      ...(cancellationNeedsReview || printedMoneyRefused ? { reviewRequired: true } : {}),
+      // A contradicted fee is a `reader_conflict` on the manager's screen and a number the driver
+      // types. Under the old rule the first pass's answer was published with no trace of dissent.
+      ...(cancellationNeedsReview || printedMoneyRefused || fee.conflict ? { reviewRequired: true } : {}),
       time: consensus.time,
       dateIso: consensus.dateIso,
       rowIndex: index,
@@ -675,7 +716,7 @@ function ordersPassResult(
     rows,
     fields: base.result.fields,
     raw: {
-      reader: 'orders-ai-time-consensus-v4',
+      reader: 'orders-ai-money-and-time-consensus-v5',
       screenKind: screenKind.raw,
       routesAligned:
         routePositionsAligned && routeAgreementIndexes.length === baseLength,
@@ -683,6 +724,10 @@ function ordersPassResult(
       timeDisagreementIndexes,
       dateDisagreementIndexes,
       timeAgreementCounts,
+      // How many readers agreed on each FEE, and which rows they contradicted each other on. Kept
+      // beside the time counts because the same question about money had no answer until now.
+      moneyAgreementCounts,
+      moneyDisagreementIndexes,
       timeCandidates: timePosition.map(({ candidates }) => candidates),
       timeBases: timePosition.map(({ basis }) => basis),
       monotonicConflictIndexes: timePosition
@@ -692,6 +737,7 @@ function ordersPassResult(
       cancellationDisagreementIndexes,
       cancellationUnverifiedIndexes,
       money: money.result.ok ? money.raw : money.result,
+      moneySecond: moneySecond.result.ok ? moneySecond.raw : moneySecond.result,
       time: time.result.ok ? time.raw : time.result,
       route: route.result.ok ? route.raw : route.result,
     },
@@ -750,6 +796,57 @@ function orderDateTimeConsensus(
     dateIso: dateWinner.value,
     timeVotes: timeWinner.votes,
   }
+}
+
+/**
+ * The fee, voted on rather than taken from one reader.
+ *
+ * The wallet has needed two agreeing passes since a screenshot printing `٢٧٩٫٥٠` came back as
+ * `٣٧٩٫٥٠`, and the printed clock since 0033. The fee — the number the entire settlement is built
+ * from — had neither, and on 2026-09-01 a single pass read a row faded under a sticky header and
+ * returned 230 where the screen said 330. Yallago's payments log later showed one 20% deduction of
+ * 66.00 at that minute, so the true fee was never in doubt; nothing in the pipeline had asked.
+ *
+ * THREE OUTCOMES, and the middle one is the whole point:
+ *
+ *   agreement   — two or more readable passes read the same amount. Published.
+ *   CONFLICT    — two passes both read an amount and the amounts differ. Refused: `value` null and
+ *                 the row marked for review, which reaches the manager as `reader_conflict`
+ *                 («اختلفت قراءات الذكاء الاصطناعي») and the driver as a fee to type. Under the old
+ *                 rule this published the first pass's answer with no trace that anything disagreed.
+ *   lone read   — exactly one pass could read it. PUBLISHED, unchanged from today. Refusing here
+ *                 would make every flaky-network shift a page of hand-typed fees, and a lone read
+ *                 is not the failure this exists to catch; a contradicted one is.
+ *
+ * Voting is over the parsed money KEY, so `330`, `330.00` and `٣٣٠` are one vote and not three.
+ * A cancelled card has no amount and is settled by `orderCancellationConsensus` before this runs.
+ */
+function orderMoneyConsensus(
+  passes: ReadonlyArray<ModelPass & { result: Extract<OcrResult, { ok: true }> }>,
+  index: number,
+): { value: string | null; votes: number; conflict: boolean } {
+  const readings = passes
+    .map((pass) => pass.result.rows[index])
+    .filter((row): row is OcrRow => row !== undefined && !row.cancelled)
+    .map((row) => row.value)
+    .filter((value): value is string => value !== null)
+
+  if (readings.length === 0) return { value: null, votes: 0, conflict: false }
+
+  const keys = readings.map((value) => moneyKey(value) ?? value.trim())
+  const winner = consensusValue(keys)
+  if (winner.value !== null) {
+    // Agreement wins even when a third pass dissents: two readers who independently saw the same
+    // amount outweigh one who did not, which is exactly the wallet's rule.
+    const index = keys.indexOf(winner.value)
+    return { value: readings[index]!, votes: winner.votes, conflict: false }
+  }
+
+  // No majority. With one reading that is simply an unverified read; with two or more it means the
+  // readers contradict each other about money, and no arithmetic can decide between them.
+  const distinct = new Set(keys)
+  if (distinct.size <= 1) return { value: readings[0]!, votes: readings.length, conflict: false }
+  return { value: null, votes: 0, conflict: true }
 }
 
 function consensusValue(values: readonly (string | null)[]): { value: string | null; votes: number } {

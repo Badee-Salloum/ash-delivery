@@ -232,6 +232,44 @@ Never infer "orders" merely because SYP, dates, times, or stacked white cards ar
  * tend to repeat the same visual shortcut. These variants make each pass approach the orange card
  * differently while keeping the exact same strict response schema.
  */
+/**
+ * The SECOND financial reading of a Recent Orders screen — an independent vote, not a retry.
+ *
+ * The wallet has been read by three differently-worded passes since a live screenshot printing
+ * `٢٧٩٫٥٠` came back as `٣٧٩٫٥٠`, and the printed clock has needed two agreeing passes since 0033.
+ * The fee had neither: one pass, published unchecked. On 2026-09-01 that pass read a row faded
+ * under a sticky header and returned 230 where the fee was 330 — the same ٢/٣ confusion the wallet
+ * was hardened against a fortnight earlier, on the one number the whole settlement is built from.
+ *
+ * DIFFERENTLY WORDED ON PURPOSE. Asking the same question twice mostly buys the same answer twice;
+ * the wallet's checks work because each attacks the ambiguity from a different side. This one reads
+ * the digits adversarially and refuses anything it cannot see at full height, where the primary
+ * pass reads the row as a whole.
+ */
+export function ordersMoneySecondReadPrompt(): string {
+  return `${ordersMoneyReadPrompt()}
+
+SECOND FINANCIAL READING — an independent check, not a repetition.
+
+Another reader has already transcribed this screen. You cannot see its answer and must not try to
+produce a plausible one: your value is compared against it, and two readings that disagree send the
+row to a human instead of into the accounts. A refusal costs a driver ten seconds of typing. A
+confident wrong digit is counted as money and nobody finds it.
+
+Work digit by digit, and decide each one from the strokes actually rendered:
+
+- ٢ has TWO teeth; ٣ has THREE. They differ only in the topmost tooth, so a row clipped by the frame
+  or dimmed under a sticky header loses exactly the stroke that separates them. Where a digit's top
+  is not fully drawn, you are looking at an incomplete glyph — not at the shorter digit.
+- ٦ / ٧, and ٤ / ٥, fail the same way. Compare against the same digit elsewhere on this screen, at
+  full height, before committing.
+- The FIRST and LAST card of the screen are the ones a scroll cuts. Give both extra scrutiny, and if
+  either card's fee is not rendered at the same height and brightness as the cards between them,
+  return "?" for \`printed\` and null for \`value\`.
+
+Read every visible card, in the same top-to-bottom order, so the two readings line up row for row.`
+}
+
 export function walletReadPrompts(): readonly [string, string, string] {
   const base = readPrompt('wallet')
   return [
