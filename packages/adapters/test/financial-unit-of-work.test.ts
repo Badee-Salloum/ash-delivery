@@ -18,6 +18,7 @@ const record = (): ExpenseRecord => ({
   description: 'Charging electricity',
   receiptMediaId: null,
   journalEntryId: null,
+  advanceId: null,
   createdBy: USER,
 })
 

@@ -72,7 +72,7 @@ not selectable rules for a new or pending shift.
 
 | # | Assumption | Rationale | Reversal |
 | --- | --- | --- | --- |
-| A-16 | **No driver salaries, advances or penalties.** Honoured by deliberate omission. | SRS B-1 / س35 / س38–40: the relationship is «نسبة فقط» — share only. Recorded so a future session does not "helpfully" add them. | `moderate` |
+| A-16 | ~~**No driver salaries, advances or penalties.**~~ **Superseded 2026-09-01 by decision 17** for advances only: «السلفة» exists as a party-agnostic recoverable payment, and a driver may be named like anyone else. Salaries and penalties remain out of scope. | SRS B-1 / س35 / س38–40 said «نسبة فقط». The owner was shown that conflict in writing and chose the instrument anyway; see CLAUDE.md decision 17. | `moderate` |
 | A-17 | **The optional accountant role («محاسب») is seeded inactive** with an empty grant set. | SRS §3 and س77 name it for later. Seeding it as data means enabling it is a row, not a migration. | `cheap` |
 | A-18 | **`shift_no` is capped at 2 by a setting, not by a DB constraint.** | SRS س23 says "up to two shifts daily", but a hard constraint would block a legitimate third shift on an exceptional day. | `cheap` |
 | A-19 | ~~Tier editing is system-admin only.~~ **Historical only after D-13:** tier data remains readable to reproduce approved entries, while active editing and publication are disabled. | The old SRS §3/F rule is retained as provenance, not as an active permission. | `cheap` |

@@ -55,6 +55,16 @@ export type LedgerEvent =
   | 'driver_payout'
   /** Direct driver receivable creation or later collection, outside a shift. */
   | 'receivable_adjustment'
+  /**
+   * «السلفة» — money paid out like a صرفية that must come back in full (owner decision 17).
+   *
+   * Three events rather than one because they are three different facts about the same money and a
+   * reader must be able to tell them apart without reconstructing the lines: it went out, some of
+   * it came back, or the company gave up on the rest and finally spent it.
+   */
+  | 'advance'
+  | 'advance_repayment'
+  | 'advance_conversion'
 
 export type FundRef =
   | { readonly kind: 'office_cash' }
@@ -100,6 +110,27 @@ export type FundRef =
   /** Money already advanced specifically for automatic use at the driver's next shift open. */
   | { readonly kind: 'driver_shift_funding_cash'; readonly driverId: string }
   | { readonly kind: 'driver_shift_funding_wallet'; readonly driverId: string }
+  /**
+   * «السلفة» — one named advance, still outstanding (owner decision 17).
+   *
+   * NOT a ذمة and not `driver_shift_funding_*`. A ذمة belongs to a driver by uuid and is forgivable
+   * by write-off; shift funding is money already handed over for a specific next shift open. An
+   * advance belongs to whoever the manager wrote on the line — a driver, a workshop, a landlord —
+   * and its only endings are repayment or an audited conversion into an ordinary صرفية.
+   *
+   * SUFFIXED BY THE ADVANCE, not by the party. The party is free text, so it has no id and two
+   * spellings of one name would otherwise be two funds. Suffixing by the advance also buys back the
+   * proven guard: `0037`'s over-collection trigger refuses to drive a NAMED asset below zero, and a
+   * single pooled fund would hide over-repaying one advance behind another still outstanding.
+   *
+   * Two kinds, like the ذمم, because الترميم restores each box against its own capital target and
+   * must know which one an outstanding advance counts toward.
+   *
+   * In the database these carry `owner_kind='none'` with the identity in the code — the shape
+   * `cost_center:cash_count_variance:<branchId>:<fundCode>` already uses.
+   */
+  | { readonly kind: 'advance_receivable_cash'; readonly advanceId: string }
+  | { readonly kind: 'advance_receivable_wallet'; readonly advanceId: string }
   | { readonly kind: 'cost_center'; readonly costCenterId: string }
 
 /** The two branch funds that hold real value and are counted, restored and swept. */
@@ -770,6 +801,108 @@ export function income(channel: OfficeFund, amount: Minor, occurrenceKey = '1'):
   })
 }
 
+// ── «السلفة» — an expense that must come back (owner decision 17) ─────────────────────────
+//
+// The owner's own framing: «هوي صرفية دفعت لكنها يجب ان ترد كاملة». Money leaves the box the way a
+// صرفية does — a named person, a category, a receipt — but unlike a صرفية it is NOT consumed. It is
+// still company property until it is handed back, so it stays counted as office capital and الترميم
+// must not read the emptier box as a shortfall.
+//
+// The arithmetic carries the whole rule, so nobody has to enforce it:
+//
+//   pay 100,000    box 3,900,000 + ذمم 400,000 + سلف 100,000 = target → nothing moves
+//   repay it       box 4,000,000 + ذمم 400,000 + سلف       0 = target → nothing moves
+//   convert it     box 3,900,000 + ذمم 400,000 + سلف       0 < target → one «شحن» of 100,000
+//
+// Capital falls at the conversion and not one moment earlier — which is exactly what «يجب أن ترد»
+// means in double entry.
+//
+// None of the three touches `company_box`, and none borrows the `kaish`/`shahn` line roles: the
+// treasury dashboard classifies a flow by those roles, and an advance wearing one would be read as
+// money that left for صندوق الشركة when it never left the branch.
+
+/** The advance asset for one advance, on the side of the box the money left from. */
+function advanceFund(channel: OfficeFund, advanceId: string): FundRef {
+  return channel === 'office_cash'
+    ? { kind: 'advance_receivable_cash', advanceId }
+    : { kind: 'advance_receivable_wallet', advanceId }
+}
+
+/**
+ * Pay an advance out of a named box. The box falls; a named advance asset rises by the same amount.
+ *
+ * Working capital is unchanged by construction — that is the whole point, and a test pins it.
+ */
+export function advance(
+  channel: OfficeFund,
+  advanceId: string,
+  amount: Minor,
+  occurrenceKey = '1',
+): Posting {
+  if (amount <= ZERO) throw new RangeError(`advance must be positive, got ${amount}`)
+  return assertBalanced({
+    eventType: 'advance',
+    occurrenceKey,
+    lines: [
+      D(advanceFund(channel, advanceId), amount, 'advance_created'),
+      C({ kind: channel }, amount, 'office_value_advanced'),
+    ],
+  })
+}
+
+/**
+ * Money coming back — the exact reverse of the payment, whole or in part.
+ *
+ * IT RETURNS TO THE BOX IT LEFT. Not tidiness: الترميم plans each box against its own target, so an
+ * advance repaid into the other box would push one leg up and the other down at different moments,
+ * letting a single advance's own balance go negative in between — which every reader in the system
+ * treats as corruption. If the notes are physically handed over for a wallet advance, record the
+ * repayment to the wallet and move it with `officeTransfer`, which is proven to leave capital alone.
+ */
+export function advanceRepayment(
+  channel: OfficeFund,
+  advanceId: string,
+  amount: Minor,
+  occurrenceKey = '1',
+): Posting {
+  if (amount <= ZERO) throw new RangeError(`advance repayment must be positive, got ${amount}`)
+  return assertBalanced({
+    eventType: 'advance_repayment',
+    occurrenceKey,
+    lines: [
+      D({ kind: channel }, amount, 'advance_repaid'),
+      C(advanceFund(channel, advanceId), amount, 'advance_cleared'),
+    ],
+  })
+}
+
+/**
+ * The advance is never coming back: recognise it as the صرفية it turned out to be.
+ *
+ * No box moves — the cash left weeks ago. The advance asset falls and the cost centre rises, which
+ * is the moment office capital finally drops. `costCenterId` is derived the way an ordinary expense
+ * derives it (`vehicleId ?? '<costCenterKind>:<branchId>'`), never from the category: the category
+ * is a column on `expenses` and has never been an account, so debiting it would mint a look-alike
+ * cost centre that no profitability reader sums.
+ */
+export function advanceConversion(
+  channel: OfficeFund,
+  advanceId: string,
+  costCenterId: string,
+  amount: Minor,
+  occurrenceKey = '1',
+): Posting {
+  if (amount <= ZERO) throw new RangeError(`advance conversion must be positive, got ${amount}`)
+  return assertBalanced({
+    eventType: 'advance_conversion',
+    occurrenceKey,
+    lines: [
+      D({ kind: 'cost_center', costCenterId }, amount, 'advance_converted_cost'),
+      C(advanceFund(channel, advanceId), amount, 'advance_converted'),
+    ],
+  })
+}
+
 // ── «الترميم» — the daily restoration (owner decision 10) ─────────────────────────────────
 //
 // The owner's own process, in his own words: «راس مال المكتب رقم ثابت لكل من المحفظة و كاش المكتب.
@@ -1146,6 +1279,10 @@ export function fundCode(fund: FundRef): string {
     case 'driver_shift_funding_cash':
     case 'driver_shift_funding_wallet':
       return `${fund.kind}:${fund.driverId}`
+    // An advance is suffixed by the ADVANCE, not the party — the party is free text and has no id.
+    case 'advance_receivable_cash':
+    case 'advance_receivable_wallet':
+      return `${fund.kind}:${fund.advanceId}`
     case 'cost_center':
       return `cost_center:${fund.costCenterId}`
     default:
@@ -1192,6 +1329,14 @@ export function fundRefFromCode(code: string): FundRef {
     case 'driver_shift_funding_wallet':
       if (tail === '') throw new RangeError(`${head} requires a driver id, got ${JSON.stringify(code)}`)
       return { kind: head, driverId: tail }
+    // WITHOUT THESE TWO LINES an advance fund read back from the ledger becomes
+    // `cost_center:advance_receivable_cash:<uuid>` — a look-alike account that الترميم does not
+    // count toward office capital, so every night would read a phantom shortfall and «شحن» real
+    // money out of صندوق الشركة. Nothing would raise; the totals would simply be wrong.
+    case 'advance_receivable_cash':
+    case 'advance_receivable_wallet':
+      if (tail === '') throw new RangeError(`${head} requires an advance id, got ${JSON.stringify(code)}`)
+      return { kind: head, advanceId: tail }
     case 'cost_center':
       if (tail === '') throw new RangeError(`cost_center requires an id, got ${JSON.stringify(code)}`)
       return { kind: 'cost_center', costCenterId: tail }

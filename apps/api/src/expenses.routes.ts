@@ -20,6 +20,7 @@ const sameExpenseRequest = (
   (!businessDateWasExplicit || existing.businessDate === requested.businessDate) &&
   existing.description === requested.description &&
   existing.receiptMediaId === requested.receiptMediaId &&
+  existing.advanceId === requested.advanceId &&
   existing.createdBy === requested.createdBy
 
 const assertCompleteExpense = (record: ExpenseRecord): void => {
@@ -89,6 +90,9 @@ export function registerExpenseRoutes(app: FastifyInstance, deps: Deps): void {
       description: body.description,
       receiptMediaId: body.receiptMediaId,
       journalEntryId: null,
+      // Always null here. A conversion expense — a «سلفة» finally recognised as spent — is written
+      // by the advances route, which is the only place that may set it.
+      advanceId: null,
       createdBy: req.actor!.userId,
     }
 

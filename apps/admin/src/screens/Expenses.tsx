@@ -51,13 +51,25 @@ export function Expenses(): ReactNode {
    * outbox (mutex + durable storage, `receivable-idempotency.ts`) is what stops a lost response
    * charging a driver twice, and a second copy of that machinery is not worth the risk.
    */
-  const [mode, setMode] = useState<'expense' | 'income'>('expense')
+  const [mode, setMode] = useState<'expense' | 'income' | 'advance'>('expense')
   const [incomeRows, setIncomeRows] = useState<IncomeView[]>([])
   const [incomeTotal, setIncomeTotal] = useState('0.00')
   const [incomeCats, setIncomeCats] = useState<IncomeCategoryView[]>([])
   const [incomeCategoryId, setIncomeCategoryId] = useState('')
   const [channel, setChannel] = useState<'office_cash' | 'office_wallet'>('office_cash')
   const pendingIncomeKey = useRef<string | null>(null)
+
+  /*
+   * «السلفة» — an expense that must come back (owner decision 17).
+   *
+   * It lives here because it is RECORDED like a صرفية: same category, same cost centre, same
+   * receipt. It is READ from the treasury screen, because while it is outstanding it is still
+   * office capital. It reuses `amount` and `description` with the other two directions; what it
+   * adds is a party and a channel.
+   */
+  const [partyName, setPartyName] = useState('')
+  const [advanceParties, setAdvanceParties] = useState<Array<{ partyName: string; partyKey: string }>>([])
+  const pendingAdvanceKey = useRef<string | null>(null)
 
   /*
    * ASK THE RULE, do not restate it.
@@ -97,6 +109,9 @@ export function Expenses(): ReactNode {
       })
       .catch(() => setIncomeRows([]))
     void api.incomeCategories().then((r) => setIncomeCats(r.categories)).catch(() => undefined)
+    // Names already used at this branch, so the manager picks rather than retypes. Nothing
+    // financial rests on the match — every advance balance is keyed by the advance itself.
+    void api.advances().then((r) => setAdvanceParties(r.parties)).catch(() => undefined)
   }, [api, from, to])
   useEffect(load, [load, branchId])
 
@@ -166,6 +181,39 @@ export function Expenses(): ReactNode {
     }
   }
 
+  const addAdvance = async (): Promise<void> => {
+    setBusy(true)
+    setFormError(null)
+    // Same key discipline as the other two: held across a failed attempt, so a tap after a lost
+    // response asks the server for the SAME advance rather than handing the money over twice.
+    const key = pendingAdvanceKey.current ?? crypto.randomUUID()
+    pendingAdvanceKey.current = key
+    try {
+      await api.createAdvance({
+        idempotencyKey: key,
+        partyName,
+        categoryId,
+        costCenterKind: kind,
+        vehicleId: kind === 'vehicle' ? vehicleId : null,
+        channel,
+        amount,
+        description,
+      })
+      pendingAdvanceKey.current = null
+      toast.success(t.treasury.advanceAdded)
+      setAmount('')
+      setDescription('')
+      setPartyName('')
+      load()
+    } catch (e) {
+      const code = (e as { error?: string }).error ?? 'error'
+      if (code === 'idempotency_key_conflict') pendingAdvanceKey.current = null
+      setFormError(code)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const addCategory = async (): Promise<void> => {
     try {
       await api.createExpenseCategory({ code: catCode, nameAr: catName })
@@ -182,9 +230,13 @@ export function Expenses(): ReactNode {
   }
 
   const ready =
-    mode === 'expense'
-      ? categoryId !== '' && amount.trim() !== '' && description.trim() !== '' && (kind !== 'vehicle' || vehicleId !== '')
-      : incomeCategoryId !== '' && amount.trim() !== '' && description.trim() !== ''
+    mode === 'income'
+      ? incomeCategoryId !== '' && amount.trim() !== '' && description.trim() !== ''
+      : categoryId !== '' &&
+        amount.trim() !== '' &&
+        description.trim() !== '' &&
+        (kind !== 'vehicle' || vehicleId !== '') &&
+        (mode !== 'advance' || partyName.trim() !== '')
 
   return (
     <div className="flex flex-col gap-4">
@@ -193,7 +245,7 @@ export function Expenses(): ReactNode {
           <div className="flex flex-col gap-3">
             {/* One form, two directions. Money out and money in are the same act of recording. */}
             <div className="flex flex-wrap gap-2" role="group" aria-label={t.movements.add}>
-              {(['expense', 'income'] as const).map((m) => (
+              {(['expense', 'income', 'advance'] as const).map((m) => (
                 <Button
                   key={m}
                   variant={mode === m ? 'primary' : 'ghost'}
@@ -202,7 +254,11 @@ export function Expenses(): ReactNode {
                     setFormError(null)
                   }}
                 >
-                  {m === 'expense' ? t.movements.modeExpense : t.movements.modeIncome}
+                  {m === 'expense'
+                    ? t.movements.modeExpense
+                    : m === 'income'
+                      ? t.movements.modeIncome
+                      : t.treasury.advances}
                 </Button>
               ))}
               <a className="ms-auto self-center text-sm text-sky-700 underline" href="#treasury">
@@ -238,6 +294,38 @@ export function Expenses(): ReactNode {
               </div>
             ) : (
             <div className="flex flex-wrap gap-3">
+              {mode === 'advance' ? (
+                <>
+                  {/*
+                    Free text by the owner's own choice. The datalist offers names already used at
+                    this branch so «أبو محمد» does not become two rows in the outstanding list —
+                    but no money depends on the match: every balance is per advance.
+                  */}
+                  <Field label={t.treasury.advanceParty}>
+                    <TextInput
+                      value={partyName}
+                      onChange={(e) => setPartyName(e.target.value)}
+                      list="advance-parties"
+                      className="w-44"
+                    />
+                    <datalist id="advance-parties">
+                      {advanceParties.map((p) => (
+                        <option key={p.partyKey} value={p.partyName} />
+                      ))}
+                    </datalist>
+                  </Field>
+                  {/* WHICH BOX pays. A repayment must later return to this same box. */}
+                  <Field label={t.movements.channel}>
+                    <Select
+                      value={channel}
+                      onChange={(e) => setChannel(e.target.value as 'office_cash' | 'office_wallet')}
+                    >
+                      <option value="office_cash">{t.movements.channelCash}</option>
+                      <option value="office_wallet">{t.movements.channelWallet}</option>
+                    </Select>
+                  </Field>
+                </>
+              ) : null}
               <Field label={t.expenses.category}>
                 <Select value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
                   <option value="">—</option>
@@ -280,10 +368,13 @@ export function Expenses(): ReactNode {
               variant="primary"
               className="self-start"
               disabled={busy || !ready}
-              onClick={mode === 'expense' ? add : addIncome}
+              onClick={mode === 'expense' ? add : mode === 'income' ? addIncome : addAdvance}
             >
-              {mode === 'expense' ? t.expenses.add : t.incomes.add}
+              {mode === 'expense' ? t.expenses.add : mode === 'income' ? t.incomes.add : t.treasury.advanceAdd}
             </Button>
+            {mode === 'advance' ? (
+              <p className="text-xs text-slate-600">{t.treasury.advancesHint}</p>
+            ) : null}
             {/*
               Entries must be recorded BEFORE the box is counted: the server refuses a restoration
               whose count no longer matches the ledger (`cash_count_stale`), and there is no route

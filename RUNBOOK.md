@@ -140,6 +140,16 @@ docker compose -p ash-prod --env-file .env.prod -f infra/compose/docker-compose.
 migration, confirm the new schema is still compatible with the older image — additive changes
 usually are, a dropped or renamed column is not.
 
+> **Do not roll the API back past the «السلفة» release (0055–0057) while any advance is
+> outstanding.** The older image emits a schema-v3 restoration plan, which has no `advances` term
+> and would read money out on a سلفة as a capital shortfall — «شحن»ing real money out of صندوق
+> الشركة to refill a box that is not short, and sweeping it back out when the advance is repaid.
+> 0057's dispatcher refuses such a plan by name (`restorations_plan_version_guard`, *"schema-v3
+> restoration cannot ignore an outstanding advance"*), so الترميم **stops** rather than lies. That
+> is the recoverable direction, but it does stop: roll forward, or settle the advances first.
+> Outstanding advances: `SELECT id, party_name, amount_minor FROM advances a WHERE EXISTS (…)` —
+> or read them from Treasury → «السلف».
+
 ### Backing up (Vercel + Neon — the live platform)
 
 The restic block below belongs to the docker-compose stack, which is **not deployed**. Production

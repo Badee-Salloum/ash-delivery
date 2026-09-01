@@ -52,6 +52,10 @@ interface TreasuryDigest {
     officeCash: string
     officeWallet: string
     receivablesCash: string
+    // «السلف» — money out on loan, still office capital. Optional for a rolling deploy.
+    advancesCash?: string
+    advancesWallet?: string
+    advancesTotal?: string
     receivablesWallet: string
     officePosition: string
     cashPosition: string
@@ -350,6 +354,12 @@ export function Dashboard(): ReactNode {
                 {' + '}
                 {t.treasury.receivablesShort} <Money value={treasury.capital.receivablesCash} />
               </span>
+              {treasury.capital.advancesCash && treasury.capital.advancesCash !== '0.00' ? (
+                <span className="text-slate-500">
+                  {' + '}
+                  {t.treasury.advances} <Money value={treasury.capital.advancesCash} />
+                </span>
+              ) : null}
             </dd>
             <dt className="text-slate-600">{t.treasury.wallet}</dt>
             <dd className="text-end sm:col-span-2">
@@ -358,6 +368,12 @@ export function Dashboard(): ReactNode {
                 {' + '}
                 {t.treasury.receivablesShort} <Money value={treasury.capital.receivablesWallet} />
               </span>
+              {treasury.capital.advancesWallet && treasury.capital.advancesWallet !== '0.00' ? (
+                <span className="text-slate-500">
+                  {' + '}
+                  {t.treasury.advances} <Money value={treasury.capital.advancesWallet} />
+                </span>
+              ) : null}
             </dd>
             <dt className="text-slate-600">{t.dashboard.officePosition}</dt>
             <dd className="text-end font-semibold sm:col-span-2">

@@ -57,6 +57,11 @@ export function Treasury(): ReactNode {
   const [depositAmt, setDepositAmt] = useState<{ cash: string; wallet: string }>({ cash: '', wallet: '' })
   const [depositMsg, setDepositMsg] = useState<string | null>(null)
   const [withdrawAmt, setWithdrawAmt] = useState<{ cash: string; wallet: string }>({ cash: '', wallet: '' })
+  const [advances, setAdvances] = useState<Awaited<ReturnType<typeof api.advances>> | null>(null)
+  const [advancesError, setAdvancesError] = useState<string | null>(null)
+  const [advanceRepayAmt, setAdvanceRepayAmt] = useState<Record<string, string>>({})
+  const [advanceReason, setAdvanceReason] = useState<Record<string, string>>({})
+  const [advanceBusy, setAdvanceBusy] = useState<string | null>(null)
   const [moveDirection, setMoveDirection] = useState<'cash_to_wallet' | 'wallet_to_cash'>('cash_to_wallet')
   const [moveAmt, setMoveAmt] = useState('')
   const [moveReason, setMoveReason] = useState('')
@@ -293,6 +298,71 @@ export function Treasury(): ReactNode {
     } catch (err) {
       setDepositMsg(null)
       toast.error(explainError((err as { error?: string }).error ?? 'error', t))
+    }
+  }
+
+  const loadAdvances = useCallback(async (): Promise<void> => {
+    try {
+      setAdvances(await api.advances())
+      setAdvancesError(null)
+    } catch (err) {
+      setAdvances(null)
+      setAdvancesError((err as { error?: string }).error ?? 'error')
+    }
+  }, [api])
+
+  useEffect(() => {
+    void loadAdvances()
+  }, [loadAdvances])
+
+  /**
+   * «تسجيل إعادة» — money coming back on one advance.
+   *
+   * Targets the ADVANCE, never the party: the party is free text, and two spellings of one name
+   * must never be able to merge or split what is owed.
+   */
+  async function repayAdvance(advanceId: string): Promise<void> {
+    const amount = advanceRepayAmt[advanceId]
+    const reason = (advanceReason[advanceId] ?? '').trim()
+    if (!amount || !reason) return
+    setAdvanceBusy(advanceId)
+    try {
+      await api.repayAdvance(advanceId, { idempotencyKey: crypto.randomUUID(), amount, reason })
+      setAdvanceRepayAmt({ ...advanceRepayAmt, [advanceId]: '' })
+      setAdvanceReason({ ...advanceReason, [advanceId]: '' })
+      toast.success(t.treasury.advanceRepaidOk)
+      await Promise.all([loadAdvances(), load()])
+    } catch (err) {
+      toast.error(explainError((err as { error?: string }).error ?? 'error', t))
+    } finally {
+      setAdvanceBusy(null)
+    }
+  }
+
+  /** «تحويل إلى صرفية» — the only act in this instrument's life that reduces office capital. */
+  async function convertAdvance(advanceId: string): Promise<void> {
+    const reason = (advanceReason[advanceId] ?? '').trim()
+    if (!reason) return
+    if (
+      !(await confirm({
+        title: t.treasury.advanceConvert,
+        body: t.treasury.advanceConvertConfirm,
+        confirmLabel: t.treasury.advanceConvert,
+        danger: true,
+      }))
+    ) {
+      return
+    }
+    setAdvanceBusy(advanceId)
+    try {
+      await api.convertAdvance(advanceId, { idempotencyKey: crypto.randomUUID(), reason })
+      setAdvanceReason({ ...advanceReason, [advanceId]: '' })
+      toast.success(t.treasury.advanceConvertedOk)
+      await Promise.all([loadAdvances(), load()])
+    } catch (err) {
+      toast.error(explainError((err as { error?: string }).error ?? 'error', t))
+    } finally {
+      setAdvanceBusy(null)
     }
   }
 
@@ -982,6 +1052,87 @@ export function Treasury(): ReactNode {
             </div>
           ) : null}
         </div> : null}
+      </Card>
+
+      <Card title={t.treasury.advances} className="lg:col-span-2">
+        <p className="text-xs text-slate-600">{t.treasury.advancesHint}</p>
+        {advancesError ? (
+          <p className="mt-3 text-sm text-red-600">{explainError(advancesError, t)}</p>
+        ) : (
+          <>
+            <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 text-sm sm:grid-cols-4">
+              <dt className="text-slate-600">{t.treasury.advanceOutstandingCash}</dt>
+              <dd className="text-end font-semibold">
+                <Money value={advances?.outstandingCash ?? '0.00'} />
+              </dd>
+              <dt className="text-slate-600">{t.treasury.advanceOutstandingWallet}</dt>
+              <dd className="text-end font-semibold">
+                <Money value={advances?.outstandingWallet ?? '0.00'} />
+              </dd>
+            </dl>
+            <div className="mt-3">
+              <Table
+                head={[
+                  t.treasury.advanceParty,
+                  t.expenses.description,
+                  t.treasury.withdrawTo,
+                  t.treasury.advanceOutstanding,
+                  t.treasury.advanceRepaid,
+                  t.accounts.actions,
+                ]}
+                isEmpty={(advances?.outstanding.length ?? 0) === 0}
+                empty={t.treasury.advanceNone}
+              >
+                {(advances?.outstanding ?? []).map((row) => (
+                  <tr key={row.id}>
+                    <td className="px-3 py-2 font-medium text-slate-800">{row.partyName}</td>
+                    <td className="px-3 py-2 text-slate-600">{row.description}</td>
+                    <td className="px-3 py-2 text-slate-600">
+                      {row.channel === 'office_cash' ? t.treasury.cashBox : t.treasury.wallet}
+                    </td>
+                    <td className="px-3 py-2 font-semibold"><Money value={row.outstanding} /></td>
+                    <td className="px-3 py-2 text-slate-600"><Money value={row.repaid} /></td>
+                    <td className="px-3 py-2">
+                      {canDeposit ? (
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                          <MoneyInput
+                            value={advanceRepayAmt[row.id] ?? ''}
+                            onChange={(e) => setAdvanceRepayAmt({ ...advanceRepayAmt, [row.id]: e.target.value })}
+                            className="w-32"
+                            placeholder={t.treasury.advanceOutstanding}
+                          />
+                          <TextInput
+                            value={advanceReason[row.id] ?? ''}
+                            onChange={(e) => setAdvanceReason({ ...advanceReason, [row.id]: e.target.value })}
+                            className="w-40"
+                            placeholder={t.treasury.advanceReason}
+                          />
+                          <Button
+                            onClick={() => void repayAdvance(row.id)}
+                            disabled={advanceBusy === row.id || !advanceRepayAmt[row.id] || !(advanceReason[row.id] ?? '').trim()}
+                          >
+                            {t.treasury.advanceRepay}
+                          </Button>
+                          {/* Capital drops here and nowhere else, so it asks first and needs a reason. */}
+                          <Button
+                            variant="ghost"
+                            onClick={() => void convertAdvance(row.id)}
+                            disabled={advanceBusy === row.id || !(advanceReason[row.id] ?? '').trim()}
+                          >
+                            {t.treasury.advanceConvert}
+                          </Button>
+                        </div>
+                      ) : (
+                        <span className="text-slate-400">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </Table>
+            </div>
+            {canDeposit ? <p className="mt-2 text-xs text-slate-600">{t.treasury.advanceRepayHint}</p> : null}
+          </>
+        )}
       </Card>
 
       <Card title={t.treasury.receivables} className="lg:col-span-2">

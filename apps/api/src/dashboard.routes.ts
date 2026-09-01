@@ -346,8 +346,15 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     }
     const targets = await deps.capitalTargets.resolve(branchId, to)
     const targetTotal = (targets.office_cash ?? 0n) + (targets.office_wallet ?? 0n)
+    const advancesTotal = position.advancesCash + position.advancesWallet
     const officePosition =
-      position.officeCash + position.officeWallet + position.receivablesCash + position.receivablesWallet
+      position.officeCash +
+      position.officeWallet +
+      position.receivablesCash +
+      position.receivablesWallet +
+      // «السلف»: money that left a box but is still the company's, so الترميم counts it exactly as
+      // it counts a ذمة. Omit it and paying an advance would read as a capital shortfall.
+      advancesTotal
     const activeCustodyTotal = position.activeCustodyCash + position.activeCustodyWallet
     const workingCapitalTotal = officePosition + activeCustodyTotal
 
@@ -370,8 +377,8 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
      * Custody keeps its own line directly beneath, split by box, because it is still company money
      * — it is simply not money tonight's restoration can move.
      */
-    const cashPosition = position.officeCash + position.receivablesCash
-    const walletPosition = position.officeWallet + position.receivablesWallet
+    const cashPosition = position.officeCash + position.receivablesCash + position.advancesCash
+    const walletPosition = position.officeWallet + position.receivablesWallet + position.advancesWallet
     const cashTarget = targets.office_cash ?? 0n
     const walletTarget = targets.office_wallet ?? 0n
 
@@ -383,6 +390,9 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
         officeWallet: serializeMoney(position.officeWallet),
         receivablesCash: serializeMoney(position.receivablesCash),
         receivablesWallet: serializeMoney(position.receivablesWallet),
+        advancesCash: serializeMoney(position.advancesCash),
+        advancesWallet: serializeMoney(position.advancesWallet),
+        advancesTotal: serializeMoney(minor(advancesTotal)),
         officePosition: serializeMoney(minor(officePosition)),
         activeCustodyCash: serializeMoney(position.activeCustodyCash),
         activeCustodyWallet: serializeMoney(position.activeCustodyWallet),

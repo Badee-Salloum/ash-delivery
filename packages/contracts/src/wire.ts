@@ -1140,6 +1140,56 @@ export const createIncomeRequest = z.object({
   evidenceMediaId: z.string().nullable().default(null),
 })
 
+// ── «السلفة» — an expense that must come back (owner decision 17) ─────────────────────────────
+//
+// The shape mirrors an expense, because that is what it becomes if it is never repaid: a category,
+// a cost centre, a description, a receipt. What it adds is a party and a channel.
+//
+// NO FUND CODE AND NO PARTY KEY CROSS THE WIRE. The channel is an enum, so `fundRefFromCode` can
+// never be handed a string it does not know and silently mint `cost_center:<code>`. And `partyKey`
+// is DERIVED from `partyName` on the server: accepting one would let a client send a key that
+// disagrees with the name it is supposed to normalise, and the grouped view and the list would
+// then disagree with each other for ever.
+
+export const createAdvanceRequest = z.object({
+  branchId: z.string().optional(),
+  /** Client-owned UUID: exact retries reuse it; a new advance must generate a new one. */
+  idempotencyKey: z.string().uuid(),
+  /** Whoever must pay it back — free text by the owner's own choice. */
+  partyName: z.string().trim().min(1).max(120).refine(hasVisibleText, 'party name must be visible'),
+  categoryId: z.string().min(1),
+  /** G-1: vehicle / branch / general — where the cost lands if it is ever converted. */
+  costCenterKind: z.enum(['vehicle', 'branch', 'general']),
+  vehicleId: z.string().nullable().default(null),
+  /** WHICH BOX paid. A repayment must return to this same box. */
+  channel: z.enum(['office_cash', 'office_wallet']),
+  amount: positiveExpenseMoneySchema,
+  businessDate: calendarDateSchema.optional(),
+  description: z.string().min(1).max(500),
+  receiptMediaId: z.string().nullable().default(null),
+})
+
+/** Money coming back. Partial is normal; the channel is the advance's own, never the caller's. */
+export const repayAdvanceRequest = z.object({
+  branchId: z.string().optional(),
+  idempotencyKey: z.string().uuid(),
+  amount: positiveMoneySchema,
+  reason: nonblankReasonSchema,
+  businessDate: calendarDateSchema.optional(),
+})
+
+/**
+ * «تحويل السلفة إلى صرفية» — it is never coming back, so recognise it as the expense it turned out
+ * to be. No amount: the whole outstanding remainder converts, read inside the lock. Letting the
+ * caller name an amount would invite converting more than is left, or leaving a stub nobody chases.
+ */
+export const convertAdvanceRequest = z.object({
+  branchId: z.string().optional(),
+  idempotencyKey: z.string().uuid(),
+  reason: nonblankReasonSchema,
+  businessDate: calendarDateSchema.optional(),
+})
+
 /** Direct debt creation/collection, explicitly outside any shift. */
 export const createReceivableEventRequest = z.object({
   branchId: z.string().optional(),

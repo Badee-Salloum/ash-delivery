@@ -214,10 +214,14 @@ describe('الترميم — the daily restoration', () => {
       legs: Array<Record<string, unknown>>
     }
     expect(snapshot).toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: 4,
       source: 'live_ledger',
       openingBalances: preview.json().openingBalances,
     })
+    // Every leg carries السلف as its own term — never folded into `receivables`, which the Treasury
+    // screen labels «الذمم» and which a manager would then read as driver debt.
+    expect(snapshot.legs.every((leg) => 'advances' in leg)).toBe(true)
+    expect(snapshot.legs.every((leg) => leg.advances === sypStr(0))).toBe(true)
     expect(snapshot.restorationJournalEntryIds).toHaveLength(2)
     expect(snapshot.legs.every((leg) => 'officeBalance' in leg && !('counted' in leg))).toBe(true)
     expect(snapshot).not.toHaveProperty('countReconciliation')
@@ -427,7 +431,7 @@ describe('الترميم — the daily restoration', () => {
     const restoration = await h.deps.restorations.find(BRANCH, '2026-07-21')
     expect(restoration?.cashCountId).toBeNull()
     expect(restoration?.plan).toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: 4,
       source: 'live_ledger',
       openingBalances: [
         { fundCode: 'office_cash', balance: sypStr(4_100_000) },

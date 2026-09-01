@@ -1118,6 +1118,16 @@ export interface TreasuryPositionRecord {
   officeWallet: Minor
   receivablesCash: Minor
   receivablesWallet: Minor
+  /**
+   * Σ السلف outstanding against each box (owner decision 17).
+   *
+   * Its own pair rather than folded into `receivables*`, because the Treasury screen labels
+   * `receivables` «الذمم» and a manager reading an advance as driver debt is a lie the numbers
+   * would never reveal. Counted as capital for the same reason a ذمة is: the money is still the
+   * company's, it is simply not in the drawer tonight.
+   */
+  advancesCash: Minor
+  advancesWallet: Minor
   activeCustodyCash: Minor
   activeCustodyWallet: Minor
   activeShiftCount: number
@@ -1684,6 +1694,15 @@ export interface ExpenseRecord {
   /** Required above the configured ceiling (G-3 / س52). */
   receiptMediaId: string | null
   journalEntryId: number | null
+  /**
+   * Set only when this expense is a «سلفة» finally recognised as spent (owner decision 17).
+   *
+   * Such a row is an expense with NO same-day cash outflow — the money left the box weeks ago — so
+   * it has to be able to say so to anyone reconciling today's expenses against today's office
+   * credits. A partial unique index also makes a SECOND conversion of one advance impossible in
+   * the schema rather than only in a route check.
+   */
+  advanceId: string | null
   createdBy: string
 }
 
@@ -1728,6 +1747,82 @@ export interface IncomeRepo {
   get(id: string): Promise<IncomeRecord | null>
   create(income: IncomeRecord): Promise<void>
   listByBranchAndDate(branchId: string, from: CalendarDate, to: CalendarDate): Promise<IncomeRecord[]>
+}
+
+// ── «السلفة» — an expense that must come back (owner decision 17) ────────────────────────────
+//
+// «هوي صرفية دفعت لكنها يجب ان ترد كاملة». Recorded from the Expenses screen with a category, a
+// description and a receipt, because it becomes an ordinary صرفية if it is never repaid. Read from
+// the Treasury screen, because while it is outstanding it is still office capital.
+//
+// THE ADVANCE IS THE UNIT, NOT THE PARTY. The party is free text by the owner's own choice — a
+// driver, a workshop, a landlord — so it has no id, and every balance is per advance. Nothing
+// financial keys on a name, which is why two spellings of one name can neither merge two people's
+// debts nor split one person's.
+
+export interface AdvanceRecord {
+  /** The client-owned UUID: identity, idempotency key, and the journal's occurrence key. */
+  id: string
+  branchId: string
+  /** Whoever the manager wrote on the line. */
+  partyName: string
+  /** Normalised `partyName`, for search and grouping in the UI ONLY. No money depends on it. */
+  partyKey: string
+  /** The classification a conversion will file it under if it is never repaid. */
+  categoryId: string
+  costCenterKind: 'vehicle' | 'branch' | 'general'
+  vehicleId: string | null
+  /** WHICH BOX paid — a physical fact. The operator never names a ledger fund. */
+  channel: 'office_cash' | 'office_wallet'
+  amount: Minor
+  businessDate: CalendarDate
+  description: string
+  receiptMediaId: string | null
+  /** NOT NULL in the schema, unlike an expense's: an advance without its journal cannot exist. */
+  journalEntryId: number
+  createdBy: string
+}
+
+export interface AdvanceEventRecord {
+  id: string
+  advanceId: string
+  branchId: string
+  /** Money coming back, or the company declaring that it never will. */
+  kind: 'repayment' | 'conversion'
+  amount: Minor
+  businessDate: CalendarDate
+  reason: string
+  /** The ordinary `expenses` row a conversion writes; null for a repayment. */
+  expenseId: string | null
+  journalEntryId: number
+  createdBy: string
+}
+
+/**
+ * One advance and what it still owes.
+ *
+ * `outstanding` is read from the advance's OWN ledger fund, not computed from the event rows: the
+ * fund is the record, and a second arithmetic would be one more thing to keep in step with it.
+ */
+export interface AdvanceOutstandingRecord {
+  advance: AdvanceRecord
+  outstanding: Minor
+  repaid: Minor
+  converted: Minor
+}
+
+export interface AdvanceRepo {
+  /** Lookup by the client-owned advance UUID, which is also its idempotency key. */
+  get(id: string): Promise<AdvanceRecord | null>
+  create(advance: AdvanceRecord): Promise<void>
+  listByBranchAndDate(branchId: string, from: CalendarDate, to: CalendarDate): Promise<AdvanceRecord[]>
+  /** Everything still owed to the branch — what the Treasury card renders. */
+  listOutstanding(branchId: string): Promise<AdvanceOutstandingRecord[]>
+  /** Distinct party names already used at this branch, for the UI's autocomplete. */
+  listParties(branchId: string): Promise<Array<{ partyName: string; partyKey: string }>>
+  getEvent(id: string): Promise<AdvanceEventRecord | null>
+  createEvent(event: AdvanceEventRecord): Promise<void>
+  listEvents(advanceId: string): Promise<AdvanceEventRecord[]>
 }
 
 export interface ExpenseRepo {
@@ -1796,6 +1891,7 @@ export interface FinancialTransactionDeps {
   ledger: LedgerRepo
   expenses: ExpenseRepo
   incomes: IncomeRepo
+  advances: AdvanceRepo
   receivableEvents: ReceivableEventRepo
   /** Restoration reads its sealed evidence and capital targets inside the same branch lock. */
   cashCounts: CashCountRepo
@@ -2382,6 +2478,7 @@ export interface Deps {
   treasuryPosition: TreasuryPositionSource
   expenses: ExpenseRepo
   incomes: IncomeRepo
+  advances: AdvanceRepo
   receivableEvents: ReceivableEventRepo
   /** Atomic boundary for ledger-backed expenses and future treasury/receivable commands. */
   financialUnitOfWork: FinancialUnitOfWork

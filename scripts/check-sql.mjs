@@ -41,6 +41,10 @@ const MUST_AUDIT = [
   // «رأس مال المكتب» decides how much «كييش» is swept out of the branch every single day, and
   // «الترميم» is the record of it having happened. Editing a target silently restates the profit.
   'office_capital_targets', 'restorations',
+  // «السلفة» — office money paid out that must come back. It is counted as capital while it is
+  // outstanding, so who created one, for how much, and who later declared it spent are all money
+  // decisions of exactly the kind this list exists for.
+  'advances', 'advance_events',
 ]
 
 /**

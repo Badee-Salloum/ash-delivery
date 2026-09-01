@@ -60,6 +60,7 @@ function assertPersistableRestorationPlan(plan: RestorationPlan): void {
     const scope = `restoration.legs.${leg.fundCode}`
     assertPersistableTreasuryMinor(`${scope}.officeBalance`, leg.officeBalance)
     assertPersistableTreasuryMinor(`${scope}.receivables`, leg.receivables)
+    assertPersistableTreasuryMinor(`${scope}.advances`, leg.advances)
     assertPersistableTreasuryMinor(`${scope}.position`, leg.position)
     assertPersistableTreasuryMinor(`${scope}.capitalTarget`, leg.capitalTarget)
     assertPersistableTreasuryMinor(`${scope}.delta`, leg.delta)
@@ -1244,10 +1245,15 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     readDeps: Pick<Deps, 'capitalTargets' | 'ledger'> = deps,
   ) {
     const officeFunds = ['office_cash', 'office_wallet'] as const
-    const [targets, ordinaryReceivables, shiftFundingReceivables, openingBalances] = await Promise.all([
+    const [targets, ordinaryReceivables, shiftFundingReceivables, advanceBalances, openingBalances] =
+      await Promise.all([
       readDeps.capitalTargets.resolve(branchId, businessDate),
       readDeps.ledger.balancesByPrefix(branchId, 'driver_receivable_'),
       readDeps.ledger.balancesByPrefix(branchId, 'driver_shift_funding_'),
+      // «السلف» count toward رأس مال المكتب exactly as الذمم do (owner decision 17). Leave them out
+      // and every night reads the emptier box as a shortfall and «شحن» real money out of
+      // صندوق الشركة to refill it — then sweeps it back the day the advance is repaid.
+      readDeps.ledger.balancesByPrefix(branchId, 'advance_receivable_'),
       Promise.all(officeFunds.map(async (fundCode) => ({
         fundCode,
         balance: await readDeps.ledger.fundBalance(branchId, fundCode),
@@ -1264,21 +1270,34 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       return minor(total)
     }
 
+    const advancesFor = (suffix: string): Minor => {
+      const total = Object.entries(advanceBalances)
+        .filter(([code]) => code.startsWith(`advance_receivable_${suffix}:`))
+        .reduce((acc, [, value]) => acc + value, 0n)
+      assertPersistableTreasuryMinor(`restoration.advances.${suffix}`, total)
+      return minor(total)
+    }
+
+    // A counted asset that has gone negative is corruption whichever kind it is, and the fund code
+    // is what makes it actionable. An advance repaid twice would land here.
     for (const [fundCode, balance] of [
       ...Object.entries(ordinaryReceivables),
       ...Object.entries(shiftFundingReceivables),
+      ...Object.entries(advanceBalances),
     ]) {
       if (balance < 0n) throw new ServiceError(500, 'receivable_balance_integrity_error', { fundCode })
     }
 
     return openingBalances.map(({ fundCode, balance: officeBalance }) => {
-      const receivables = sumFor(fundCode === 'office_cash' ? 'cash' : 'wallet')
+      const channel = fundCode === 'office_cash' ? 'cash' : 'wallet'
+      const receivables = sumFor(channel)
+      const advances = advancesFor(channel)
       const capitalTarget = targets[fundCode] ?? null
       assertPersistableTreasuryMinor(`restoration.officeBalance.${fundCode}`, officeBalance)
       if (capitalTarget !== null) {
         assertPersistableTreasuryMinor(`restoration.capitalTarget.${fundCode}`, capitalTarget)
       }
-      return { fundCode, officeBalance, receivables, capitalTarget }
+      return { fundCode, officeBalance, receivables, advances, capitalTarget }
     })
   }
 
@@ -1286,6 +1305,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     fundCode: l.fundCode,
     officeBalance: serializeMoney(l.officeBalance),
     receivables: serializeMoney(l.receivables),
+    advances: serializeMoney(l.advances),
     position: serializeMoney(l.position),
     capitalTarget: serializeMoney(l.capitalTarget),
     delta: serializeMoney(l.delta),
@@ -1401,7 +1421,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
             businessDate,
             cashCountId: null,
             plan: {
-              schemaVersion: 3,
+              schemaVersion: 4,
               source: 'live_ledger',
               openingBalances,
               restorationJournalEntryIds: entries

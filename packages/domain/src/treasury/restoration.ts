@@ -56,6 +56,15 @@ export interface FundPosition {
   readonly officeBalance: Minor
   /** Σ الذمم outstanding against THIS box. Counts toward the capital (the owner's own rule). */
   readonly receivables: Minor
+  /**
+   * Σ السلف still outstanding against THIS box (owner decision 17).
+   *
+   * Its own term rather than folded into `receivables`, because the stored plan is the audit
+   * artifact and the Treasury screen renders `receivables` as «الذمم» — a manager would read an
+   * advance as driver debt. It counts toward capital for the same reason a ذمة does: the money is
+   * still the company's, it is simply not in the drawer tonight.
+   */
+  readonly advances: Minor
   /** رأس مال المكتب — the fixed target. `null` ⇒ not configured, and the leg is refused. */
   readonly capitalTarget: Minor | null
 }
@@ -66,7 +75,9 @@ export interface RestorationLeg {
   readonly officeBalance: Minor
   /** Outstanding driver debt assigned to this box and counted as office capital. */
   readonly receivables: Minor
-  /** officeBalance + receivables — «الوضع الحالي». */
+  /** Outstanding السلف assigned to this box and counted as office capital. */
+  readonly advances: Minor
+  /** officeBalance + receivables + advances — «الوضع الحالي». */
   readonly position: Minor
   readonly capitalTarget: Minor
   /** position − target. SIGNED: positive is a surplus, negative a shortfall. */
@@ -157,7 +168,8 @@ export function planRestoration(positions: readonly FundPosition[]): Restoration
         fundCode: p.fundCode,
         officeBalance: p.officeBalance,
         receivables: p.receivables,
-        position: add(p.officeBalance, p.receivables),
+        advances: p.advances,
+        position: add(add(p.officeBalance, p.receivables), p.advances),
         capitalTarget: ZERO,
         delta: ZERO,
         direction: null,
@@ -167,19 +179,21 @@ export function planRestoration(positions: readonly FundPosition[]): Restoration
       }
     }
 
-    const position = add(p.officeBalance, p.receivables)
+    const position = add(add(p.officeBalance, p.receivables), p.advances)
     const delta = sub(position, p.capitalTarget)
     const amount = delta < ZERO ? minor(-delta) : delta
     const direction: RestorationDirection | null = delta === ZERO ? null : delta > ZERO ? 'to_company' : 'from_company'
 
-    // You cannot transfer more than the office fund holds. A surplus funded entirely by ذمم is
-    // real on paper but unavailable in the office account.
+    // You cannot transfer more than the office fund holds. A surplus funded entirely by ذمم — or,
+    // since decision 17, by an outstanding سلفة — is real on paper but unavailable in the office
+    // account. Advances make this reachable by a deliberate act, so it fires more often now.
     if (direction === 'to_company' && amount > p.officeBalance) refusals.push('sweep_exceeds_counted')
 
     return {
       fundCode: p.fundCode,
       officeBalance: p.officeBalance,
       receivables: p.receivables,
+      advances: p.advances,
       position,
       capitalTarget: p.capitalTarget,
       delta,
@@ -226,11 +240,12 @@ export function postingsForRestoration(plan: RestorationPlan, keyPrefix: string)
 /**
  * The post-condition, and the acceptance test for the whole feature:
  *
- *     fundBalance(box) + Σ ذمم  ===  رأس مال المكتب
+ *     fundBalance(box) + Σ ذمم + Σ سلف  ===  رأس مال المكتب
  *
- * This is his `=SUM(I38:J48)-4000000` evaluating to zero, expressed as a system invariant.
+ * This is his `=SUM(I38:J48)-4000000` evaluating to zero, expressed as a system invariant — with
+ * one more term since decision 17, for money that is out on a سلفة rather than a ذمة.
  */
-export function restoredPosition(leg: RestorationLeg, receivables: Minor): Minor {
+export function restoredPosition(leg: RestorationLeg, receivables: Minor, advances: Minor = ZERO): Minor {
   const after = leg.direction === 'to_company' ? sub(leg.position, leg.amount) : add(leg.position, leg.amount)
-  return sub(after, add(receivables, ZERO))
+  return sub(after, add(receivables, advances))
 }

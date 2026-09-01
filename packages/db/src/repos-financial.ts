@@ -5,13 +5,14 @@ import type {
 } from '@ash/contracts'
 import { bindPoolToTransaction, type Pool, withTransaction } from './pool.ts'
 import { PgLedgerRepo, PgOfficeCapitalTargetRepo, PgRestorationRepo } from './repos.ts'
-import { PgCashCountRepo, PgExpenseRepo, PgIncomeRepo } from './repos-shift.ts'
+import { PgAdvanceRepo, PgCashCountRepo, PgExpenseRepo, PgIncomeRepo } from './repos-shift.ts'
 import { PgReceivableEventRepo } from './repos-receivable.ts'
 
 const transactionDeps = (pool: Pool): FinancialTransactionDeps => ({
   ledger: new PgLedgerRepo(pool),
   expenses: new PgExpenseRepo(pool),
   incomes: new PgIncomeRepo(pool),
+  advances: new PgAdvanceRepo(pool),
   receivableEvents: new PgReceivableEventRepo(pool),
   cashCounts: new PgCashCountRepo(pool),
   capitalTargets: new PgOfficeCapitalTargetRepo(pool),

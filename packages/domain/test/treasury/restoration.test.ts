@@ -21,6 +21,9 @@ const box = (over: Partial<FundPosition> = {}): FundPosition => ({
   fundCode: 'office_cash',
   officeBalance: syp(3_600_000),
   receivables: syp(400_000),
+  // His book predates السلف, so his rows carry none. Every existing assertion below therefore
+  // still measures exactly what it measured before decision 17.
+  advances: ZERO,
   capitalTarget: syp(4_000_000),
   ...over,
 })

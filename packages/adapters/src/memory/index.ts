@@ -79,6 +79,7 @@ import { memoryCipher } from '../crypto.ts'
 import { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 import { MemoryOcrReadRepo, MemoryOcrReader } from '../ocr/memory.ts'
 import { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
+import { MemoryAdvanceRepo, fundCodeForAdvance } from './advances.ts'
 import { MemoryIncomeRepo } from './incomes.ts'
 import { MemoryCashCountRepo } from './cashcount.ts'
 import { MemoryCheckInRepo } from './checkin.ts'
@@ -90,6 +91,7 @@ import { MemoryReceivableEventRepo } from './receivables.ts'
 export { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 export { MemoryOcrReadRepo, MemoryOcrReader, ScriptedOcrReader } from '../ocr/memory.ts'
 export { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
+export { MemoryAdvanceRepo, fundCodeForAdvance } from './advances.ts'
 export { MemoryIncomeRepo } from './incomes.ts'
 export { MemoryCashCountRepo } from './cashcount.ts'
 export { MemoryOfficeCapitalTargetRepo, MemoryRestorationRepo } from './restoration.ts'
@@ -1250,13 +1252,17 @@ export class MemoryTreasuryPositionSource implements TreasuryPositionSource {
       }
     }
 
+    // Advance funds join the integrity probe: a negative counted asset is corruption whichever
+    // kind it is, and naming the exact fund is what makes it actionable.
     const receivableCodes = [...balances.keys()]
       .filter(
         (code) =>
           code.startsWith('driver_receivable_cash:') ||
           code.startsWith('driver_receivable_wallet:') ||
           code.startsWith('driver_shift_funding_cash:') ||
-          code.startsWith('driver_shift_funding_wallet:'),
+          code.startsWith('driver_shift_funding_wallet:') ||
+          code.startsWith('advance_receivable_cash:') ||
+          code.startsWith('advance_receivable_wallet:'),
       )
       .sort()
     const totalForPrefixes = (prefixes: readonly string[]): bigint =>
@@ -1274,6 +1280,8 @@ export class MemoryTreasuryPositionSource implements TreasuryPositionSource {
       officeWallet: minor(balances.get('office_wallet') ?? 0n),
       receivablesCash: minor(totalForPrefixes(['driver_receivable_cash:', 'driver_shift_funding_cash:'])),
       receivablesWallet: minor(totalForPrefixes(['driver_receivable_wallet:', 'driver_shift_funding_wallet:'])),
+      advancesCash: minor(totalForPrefixes(['advance_receivable_cash:'])),
+      advancesWallet: minor(totalForPrefixes(['advance_receivable_wallet:'])),
       activeCustodyCash: minor(totalActiveCustody('cash')),
       activeCustodyWallet: minor(totalActiveCustody('wallet')),
       activeShiftCount: activeShifts.length,
@@ -1295,6 +1303,11 @@ export function fundCodeOf(fund: Posting['lines'][number]['fund']): string {
     case 'driver_shift_funding_cash':
     case 'driver_shift_funding_wallet':
       return `${fund.kind}:${fund.driverId}`
+    // Same rule again: per ADVANCE, because the party is free text. This is the third copy of this
+    // switch — the conformance suite compares the strings, which is what stops the three drifting.
+    case 'advance_receivable_cash':
+    case 'advance_receivable_wallet':
+      return `${fund.kind}:${fund.advanceId}`
     case 'cost_center':
       return `cost_center:${fund.costCenterId}`
     default:
@@ -1920,6 +1933,7 @@ export interface MemoryDeps extends Deps {
   ocrReads: MemoryOcrReadRepo
   expenses: MemoryExpenseRepo
   incomes: MemoryIncomeRepo
+  advances: MemoryAdvanceRepo
   receivableEvents: MemoryReceivableEventRepo
   financialUnitOfWork: MemoryFinancialUnitOfWork
   cashCounts: MemoryCashCountRepo
@@ -1959,6 +1973,7 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
   private readonly deps: FinancialTransactionDeps
   private readonly expenses: MemoryExpenseRepo
   private readonly incomes: MemoryIncomeRepo
+  private readonly advances: MemoryAdvanceRepo
   private readonly ledger: MemoryLedgerRepo
   private readonly receivableEvents: MemoryReceivableEventRepo
   private readonly capitalTargets: MemoryOfficeCapitalTargetRepo
@@ -1968,6 +1983,7 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
   constructor(
     expenses: MemoryExpenseRepo,
     incomes: MemoryIncomeRepo,
+    advances: MemoryAdvanceRepo,
     ledger: MemoryLedgerRepo,
     receivableEvents: MemoryReceivableEventRepo,
     cashCounts: MemoryCashCountRepo,
@@ -1977,12 +1993,15 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
   ) {
     this.expenses = expenses
     this.incomes = incomes
+    this.advances = advances
     this.ledger = ledger
     this.receivableEvents = receivableEvents
     this.capitalTargets = capitalTargets
     this.restorations = restorations
     this.gate = gate
-    this.deps = { expenses, incomes, ledger, receivableEvents, cashCounts, capitalTargets, restorations }
+    this.deps = {
+      expenses, incomes, advances, ledger, receivableEvents, cashCounts, capitalTargets, restorations,
+    }
   }
 
   async run<T>(
@@ -1992,6 +2011,7 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
     return this.gate.run(async () => {
       const expenseSnapshot = this.expenses.snapshotRows()
       const incomeSnapshot = this.incomes.snapshotRows()
+      const advanceSnapshot = this.advances.snapshotRows()
       const ledgerSnapshot = this.ledger.snapshotState()
       const receivableSnapshot = this.receivableEvents.snapshot()
       const capitalTargetSnapshot = this.capitalTargets.snapshotRows()
@@ -2001,6 +2021,7 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
       } catch (error) {
         this.expenses.restoreRows(expenseSnapshot)
         this.incomes.restoreRows(incomeSnapshot)
+        this.advances.restoreRows(advanceSnapshot)
         this.ledger.restoreState(ledgerSnapshot)
         this.receivableEvents.restore(receivableSnapshot)
         this.capitalTargets.restoreRows(capitalTargetSnapshot)
@@ -2150,6 +2171,21 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   const treasuryPosition = new MemoryTreasuryPositionSource(ledger, shifts, gate)
   const expenses = new MemoryExpenseRepo()
   const incomes = new MemoryIncomeRepo()
+  const advances = new MemoryAdvanceRepo()
+  // What an advance still owes is a LEDGER fact, exactly as it is in Postgres. Reading it from
+  // the fund rather than from the event rows keeps one source of truth, so a divergence between
+  // the two adapters cannot hide behind a second arithmetic that happens to agree.
+  advances.bindLedger((branchId, fundCode) => {
+    let balance = 0n
+    for (const entry of ledger.entries) {
+      if (entry.branchId !== branchId) continue
+      for (const line of entry.lines) {
+        if (line.fundCode !== fundCode) continue
+        balance += line.side === 'D' ? line.amount : -line.amount
+      }
+    }
+    return balance
+  })
   const receivableEvents = new MemoryReceivableEventRepo()
   const cashCounts = new MemoryCashCountRepo()
   const capitalTargets = new MemoryOfficeCapitalTargetRepo()
@@ -2159,6 +2195,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   const financialUnitOfWork = new MemoryFinancialUnitOfWork(
     expenses,
     incomes,
+    advances,
     ledger,
     receivableEvents,
     cashCounts,
@@ -2226,6 +2263,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     treasuryPosition,
     expenses,
     incomes,
+    advances,
     receivableEvents,
     financialUnitOfWork,
     cashCounts,

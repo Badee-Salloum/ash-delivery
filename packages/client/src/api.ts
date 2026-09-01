@@ -483,6 +483,54 @@ export interface ExpenseCategoryView {
   active: boolean
 }
 /** «مدخول مباشر» — money arriving that is not a delivery fee. The mirror of an expense. */
+/**
+ * «السلفة» — an expense that was paid but must come back in full (owner decision 17).
+ *
+ * Recorded like a صرفية and read like a ذمة. `outstanding` is a LEDGER fact from the advance's own
+ * fund, so it is authoritative even if the event rows are ever incomplete.
+ */
+export interface AdvanceView {
+  id: string
+  branchId: string
+  /** Whoever must pay it back — free text. */
+  partyName: string
+  /** Normalised `partyName`. For grouping and search only; no money depends on it. */
+  partyKey: string
+  categoryId: string
+  costCenterKind: 'vehicle' | 'branch' | 'general'
+  vehicleId: string | null
+  /** WHICH BOX paid. A repayment must return to this same box. */
+  channel: 'office_cash' | 'office_wallet'
+  /** Decimal string — what was originally handed over. */
+  amount: string
+  businessDate: string
+  description: string
+  receiptMediaId: string | null
+  journalEntryId: number
+  createdBy: string
+}
+
+/** One outstanding advance, with what the ledger says is still owed on it. */
+export interface AdvanceOutstandingView extends AdvanceView {
+  outstanding: string
+  repaid: string
+  converted: string
+}
+
+export interface AdvanceEventView {
+  id: string
+  advanceId: string
+  branchId: string
+  kind: 'repayment' | 'conversion'
+  amount: string
+  businessDate: string
+  reason: string
+  /** The ordinary expense row a conversion writes; null for a repayment. */
+  expenseId: string | null
+  journalEntryId: number
+  createdBy: string
+}
+
 export interface IncomeView {
   id: string
   branchId: string
@@ -608,7 +656,15 @@ export interface RestorationLegView {
   counted?: string
   /** Outstanding driver debt assigned to this box. */
   receivables: string
-  /** officeBalance + الذمم — «الوضع الحالي». */
+  /**
+   * Outstanding السلف assigned to this box (owner decision 17).
+   *
+   * Its own field, never folded into `receivables`: the screen labels that «الذمم», and a سلفة
+   * shown there would read as a driver's debt. Optional so a page served during a rolling deploy
+   * against the previous API still renders.
+   */
+  advances?: string
+  /** officeBalance + الذمم + السلف — «الوضع الحالي». */
   position: string
   capitalTarget: string
   /** Signed: positive is «كييش», negative «شحن من الصندوق». */
@@ -1415,6 +1471,67 @@ export class ApiClient {
     branchId?: string
   }) {
     return this.post<IncomeView>('/incomes', body)
+  }
+
+  // ── «السلفة» ──────────────────────────────────────────────────────────────────────────
+  advances(from?: string, to?: string) {
+    const q = [from && `from=${from}`, to && `to=${to}`].filter(Boolean).join('&')
+    return this.get<{
+      from: string
+      to: string
+      advances: AdvanceView[]
+      total: string
+      outstanding: AdvanceOutstandingView[]
+      outstandingCash: string
+      outstandingWallet: string
+      parties: Array<{ partyName: string; partyKey: string }>
+    }>(`/advances${q ? `?${q}` : ''}`)
+  }
+  /**
+   * `channel` is the box the money comes OUT of; the recipe picks the ledger account, and a
+   * repayment must later return to that same box.
+   *
+   * `partyKey` is deliberately absent: the server derives it from `partyName`, so a client can
+   * never send a key that disagrees with the name it is supposed to normalise.
+   */
+  createAdvance(body: {
+    idempotencyKey: string
+    partyName: string
+    categoryId: string
+    costCenterKind: 'vehicle' | 'branch' | 'general'
+    vehicleId?: string | null
+    channel: 'office_cash' | 'office_wallet'
+    amount: string
+    description: string
+    businessDate?: string
+    receiptMediaId?: string | null
+    branchId?: string
+  }) {
+    return this.post<AdvanceView>('/advances', body)
+  }
+  /** Partial is normal. The amount may not exceed what the ledger still says is outstanding. */
+  repayAdvance(advanceId: string, body: { idempotencyKey: string; amount: string; reason: string }) {
+    return this.post<AdvanceEventView>(`/advances/${advanceId}/repayments`, {
+      ...body,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+  /**
+   * It is never coming back: recognise the remainder as the صرفية it turned out to be.
+   *
+   * No amount — the whole outstanding balance converts, read server-side inside the lock. Office
+   * capital drops here and nowhere else in this instrument's life.
+   */
+  convertAdvance(advanceId: string, body: { idempotencyKey: string; reason: string }) {
+    return this.post<AdvanceEventView>(`/advances/${advanceId}/conversion`, {
+      ...body,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+  advanceEvents(advanceId: string) {
+    return this.get<{ advance: AdvanceView; outstanding: string; events: AdvanceEventView[] }>(
+      `/advances/${advanceId}/events`,
+    )
   }
 
   expenseCategories() {

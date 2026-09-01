@@ -35,6 +35,10 @@ import type {
   IncomeCategoryRecord,
   IncomeRecord,
   IncomeRepo,
+  AdvanceEventRecord,
+  AdvanceOutstandingRecord,
+  AdvanceRecord,
+  AdvanceRepo,
   NotificationRecord,
   NotificationRepo,
   PreapprovedShiftRuleRecord,
@@ -1684,8 +1688,9 @@ export class PgExpenseRepo implements ExpenseRepo {
   async create(expense: ExpenseRecord): Promise<void> {
     await this.pool.query(
       `INSERT INTO expenses (id, branch_id, category_id, cost_center_kind, vehicle_id, amount_minor,
-                             business_date, description, receipt_media_id, journal_entry_id, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+                             business_date, description, receipt_media_id, journal_entry_id,
+                             advance_id, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [
         expense.id,
         expense.branchId,
@@ -1697,6 +1702,7 @@ export class PgExpenseRepo implements ExpenseRepo {
         expense.description,
         expense.receiptMediaId,
         expense.journalEntryId,
+        expense.advanceId,
         expense.createdBy,
       ],
     )
@@ -1745,6 +1751,7 @@ const expenseRecord = (row: Record<string, unknown>): ExpenseRecord => ({
   description: String(row.description),
   receiptMediaId: (row.receipt_media_id as string | null) ?? null,
   journalEntryId: row.journal_entry_id === null ? null : Number(row.journal_entry_id),
+  advanceId: (row.advance_id as string | null) ?? null,
   createdBy: String(row.created_by),
 })
 
@@ -1834,6 +1841,179 @@ const incomeRecord = (row: Record<string, unknown>): IncomeRecord => ({
   description: String(row.description),
   evidenceMediaId: (row.evidence_media_id as string | null) ?? null,
   // NOT NULL in the schema, unlike an expense's — an income without its journal cannot exist.
+  journalEntryId: Number(row.journal_entry_id),
+  createdBy: String(row.created_by),
+})
+
+/**
+ * «السلفة» — an expense that must come back (owner decision 17).
+ *
+ * `listOutstanding` reads what is still owed from the advance's OWN LEDGER FUND, never by
+ * subtracting the event rows. The fund IS the record — the same rule `listReceivables` states in
+ * its own header — and a second arithmetic would be one more thing to keep in step with it.
+ */
+export class PgAdvanceRepo implements AdvanceRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async get(id: string): Promise<AdvanceRecord | null> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT *, amount_minor::text AS amount FROM advances WHERE id = $1',
+      [id],
+    )
+    const row = rows[0]
+    return row ? advanceRecord(row) : null
+  }
+
+  async create(advance: AdvanceRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO advances (id, branch_id, party_name, party_key, category_id, cost_center_kind,
+                             vehicle_id, channel, amount_minor, business_date, description,
+                             receipt_media_id, journal_entry_id, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+      [
+        advance.id,
+        advance.branchId,
+        advance.partyName,
+        advance.partyKey,
+        advance.categoryId,
+        advance.costCenterKind,
+        advance.vehicleId,
+        advance.channel,
+        advance.amount.toString(),
+        advance.businessDate,
+        advance.description,
+        advance.receiptMediaId,
+        advance.journalEntryId,
+        advance.createdBy,
+      ],
+    )
+  }
+
+  async listByBranchAndDate(branchId: string, from: CalendarDate, to: CalendarDate): Promise<AdvanceRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT *, amount_minor::text AS amount FROM advances
+        WHERE branch_id = $1 AND business_date BETWEEN $2 AND $3
+        ORDER BY business_date, id`,
+      [branchId, from, to],
+    )
+    return rows.map(advanceRecord)
+  }
+
+  async listOutstanding(branchId: string): Promise<AdvanceOutstandingRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT a.*, a.amount_minor::text AS amount,
+              COALESCE(bal.balance, 0)::text AS outstanding,
+              COALESCE(ev.repaid, 0)::text   AS repaid,
+              COALESCE(ev.converted, 0)::text AS converted
+         FROM advances a
+         LEFT JOIN LATERAL (
+           SELECT SUM(CASE jl.side WHEN 'D' THEN jl.amount_minor ELSE -jl.amount_minor END) AS balance
+             FROM journal_lines jl
+             JOIN funds f ON f.id = jl.fund_id
+            WHERE f.branch_id = a.branch_id
+              AND f.code = 'advance_receivable_'
+                          || CASE a.channel WHEN 'office_cash' THEN 'cash' ELSE 'wallet' END
+                          || ':' || a.id::text
+         ) bal ON true
+         LEFT JOIN LATERAL (
+           SELECT SUM(amount_minor) FILTER (WHERE kind = 'repayment')  AS repaid,
+                  SUM(amount_minor) FILTER (WHERE kind = 'conversion') AS converted
+             FROM advance_events ae WHERE ae.advance_id = a.id
+         ) ev ON true
+        WHERE a.branch_id = $1
+          AND COALESCE(bal.balance, 0) <> 0
+        ORDER BY a.business_date DESC, a.created_at DESC`,
+      [branchId],
+    )
+    return rows.map((row) => ({
+      advance: advanceRecord(row),
+      outstanding: minor(BigInt(String(row.outstanding))),
+      repaid: minor(BigInt(String(row.repaid))),
+      converted: minor(BigInt(String(row.converted))),
+    }))
+  }
+
+  async listParties(branchId: string): Promise<Array<{ partyName: string; partyKey: string }>> {
+    // DISTINCT ON keeps the FIRST spelling anyone used, so the suggestion list shows a real name
+    // rather than a normalised key nobody typed.
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT DISTINCT ON (party_key) party_key, party_name
+         FROM advances WHERE branch_id = $1
+        ORDER BY party_key, created_at`,
+      [branchId],
+    )
+    return rows.map((r) => ({ partyKey: String(r.party_key), partyName: String(r.party_name) }))
+  }
+
+  async getEvent(id: string): Promise<AdvanceEventRecord | null> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT *, amount_minor::text AS amount FROM advance_events WHERE id = $1',
+      [id],
+    )
+    const row = rows[0]
+    return row ? advanceEventRecord(row) : null
+  }
+
+  async createEvent(event: AdvanceEventRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO advance_events (id, advance_id, branch_id, kind, amount_minor, business_date,
+                                   reason, expense_id, journal_entry_id, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [
+        event.id,
+        event.advanceId,
+        event.branchId,
+        event.kind,
+        event.amount.toString(),
+        event.businessDate,
+        event.reason,
+        event.expenseId,
+        event.journalEntryId,
+        event.createdBy,
+      ],
+    )
+  }
+
+  async listEvents(advanceId: string): Promise<AdvanceEventRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT *, amount_minor::text AS amount FROM advance_events
+        WHERE advance_id = $1 ORDER BY business_date, created_at`,
+      [advanceId],
+    )
+    return rows.map(advanceEventRecord)
+  }
+}
+
+const advanceRecord = (row: Record<string, unknown>): AdvanceRecord => ({
+  id: String(row.id),
+  branchId: String(row.branch_id),
+  partyName: String(row.party_name),
+  partyKey: String(row.party_key),
+  categoryId: String(row.category_id),
+  costCenterKind: row.cost_center_kind as AdvanceRecord['costCenterKind'],
+  vehicleId: (row.vehicle_id as string | null) ?? null,
+  channel: row.channel as AdvanceRecord['channel'],
+  amount: minor(BigInt(String(row.amount))),
+  businessDate: isoDate(row.business_date),
+  description: String(row.description),
+  receiptMediaId: (row.receipt_media_id as string | null) ?? null,
+  // NOT NULL in the schema, unlike an expense's: an advance without its journal cannot exist.
+  journalEntryId: Number(row.journal_entry_id),
+  createdBy: String(row.created_by),
+})
+
+const advanceEventRecord = (row: Record<string, unknown>): AdvanceEventRecord => ({
+  id: String(row.id),
+  advanceId: String(row.advance_id),
+  branchId: String(row.branch_id),
+  kind: row.kind as AdvanceEventRecord['kind'],
+  amount: minor(BigInt(String(row.amount))),
+  businessDate: isoDate(row.business_date),
+  reason: String(row.reason),
+  expenseId: (row.expense_id as string | null) ?? null,
   journalEntryId: Number(row.journal_entry_id),
   createdBy: String(row.created_by),
 })

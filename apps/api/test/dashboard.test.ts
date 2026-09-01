@@ -620,6 +620,59 @@ describe('the owner’s treasury sheet (I-1, decision 10)', () => {
     expect(c.restorationDelta).toBe(sypStr(0))
   })
 
+  it('counts an outstanding «سلفة» as capital, on its own line beside الذمم', async () => {
+    /*
+     * The owner's own spreadsheet row, with one more term. Fold advances into `receivablesCash`
+     * and the totals would still be right while the screen told a manager that a workshop's loan
+     * was a driver's debt; leave them out altogether and paying one reads as a capital shortfall
+     * that الترميم would «شحن» out of صندوق الشركة every night.
+     */
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(3_500_000))
+    await seedFund(manager, `driver_receivable_cash:${DRIVER_ID}`, sypStr(400_000))
+    await seedFund(manager, 'advance_receivable_cash:11111111-1111-4111-8111-111111111111', sypStr(100_000))
+    await seedFund(manager, 'office_wallet', sypStr(970_000))
+    await seedFund(manager, 'advance_receivable_wallet:22222222-2222-4222-8222-222222222222', sypStr(30_000))
+
+    const c = (await get(await scopedGm(), '/dashboard/treasury')).json().capital
+    expect(c.advancesCash).toBe(sypStr(100_000))
+    expect(c.advancesWallet).toBe(sypStr(30_000))
+    expect(c.advancesTotal).toBe(sypStr(130_000))
+    // Its own line — never added into الذمم, which stay exactly what the drivers owe.
+    expect(c.receivablesCash).toBe(sypStr(400_000))
+    expect(c.receivablesWallet).toBe(sypStr(0))
+
+    // …and every total that decides whether money moves tonight includes it.
+    expect(c.cashPosition).toBe(sypStr(4_000_000))
+    expect(c.walletPosition).toBe(sypStr(1_000_000))
+    expect(c.officePosition).toBe(sypStr(5_000_000))
+    expect(c.workingCapitalTotal).toBe(sypStr(5_000_000))
+    expect(c.restorationDelta).toBe(sypStr(0))
+    expect(c.cashDelta).toBe(sypStr(0))
+    expect(c.walletDelta).toBe(sypStr(0))
+  })
+
+  it('reports a negative advance fund as an integrity error, naming the fund', async () => {
+    // A counted asset that has gone negative is corruption whichever kind it is, and the fund code
+    // is the difference between an actionable alert and a shrug about "the branch".
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(100_000))
+    const bad = 'advance_receivable_cash:33333333-3333-4333-8333-333333333333'
+    const res = await post(manager, '/journal/manual', {
+      reason: 'كسر متعمَّد',
+      lines: [
+        { fundCode: 'office_cash', side: 'D', amount: sypStr(5_000) },
+        { fundCode: bad, side: 'C', amount: sypStr(5_000) },
+      ],
+    })
+    expect(res.statusCode, res.body).toBe(201)
+
+    const broken = await get(await scopedGm(), '/dashboard/treasury')
+    expect(broken.statusCode).toBe(500)
+    expect(broken.json().error).toBe('receivable_balance_integrity_error')
+    expect(broken.json().detail).toMatchObject({ fundCode: bad })
+  })
+
   it('keeps approved shift custody in working capital after it leaves the office boxes', async () => {
     const manager = await h.loginAs('manager')
     await seedFund(manager, 'office_cash', sypStr(4_000_000))

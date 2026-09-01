@@ -53,6 +53,13 @@ export function fundCodeOf(fund: Posting['lines'][number]['fund']): string {
     case 'driver_shift_funding_cash':
     case 'driver_shift_funding_wallet':
       return `${fund.kind}:${fund.driverId}`
+    // A سلفة is suffixed by the ADVANCE, not by the party: the party is free text and has no id.
+    // `fundTypeOf` deliberately gets no case — its default returns the kind, which is exactly the
+    // enum value 0055 commits, because an outstanding advance is a COUNTED asset like a ذمة and
+    // not a P&L account.
+    case 'advance_receivable_cash':
+    case 'advance_receivable_wallet':
+      return `${fund.kind}:${fund.advanceId}`
     case 'cost_center':
       return `cost_center:${fund.costCenterId}`
     default:
@@ -939,6 +946,8 @@ export class PgTreasuryPositionSource implements TreasuryPositionSource {
       office_wallet: string
       receivables_cash: string
       receivables_wallet: string
+      advances_cash: string
+      advances_wallet: string
       active_custody_cash: string
       active_custody_wallet: string
       active_shift_count: number
@@ -971,6 +980,8 @@ export class PgTreasuryPositionSource implements TreasuryPositionSource {
               'driver_receivable_wallet',
               'driver_shift_funding_cash',
               'driver_shift_funding_wallet',
+              'advance_receivable_cash',
+              'advance_receivable_wallet',
               'driver_cash',
               'driver_wallet'
             )
@@ -989,6 +1000,12 @@ export class PgTreasuryPositionSource implements TreasuryPositionSource {
                 WHERE fund_type IN ('driver_receivable_wallet', 'driver_shift_funding_wallet')
               ), 0)::text AS receivables_wallet,
               COALESCE(SUM(balance) FILTER (
+                WHERE fund_type = 'advance_receivable_cash'
+              ), 0)::text AS advances_cash,
+              COALESCE(SUM(balance) FILTER (
+                WHERE fund_type = 'advance_receivable_wallet'
+              ), 0)::text AS advances_wallet,
+              COALESCE(SUM(balance) FILTER (
                 WHERE fund_type = 'driver_cash'
                   AND EXISTS (SELECT 1 FROM active_drivers ad WHERE ad.driver_id = fund_balances.owner_id)
               ), 0)::text AS active_custody_cash,
@@ -1004,7 +1021,9 @@ export class PgTreasuryPositionSource implements TreasuryPositionSource {
                     'driver_receivable_cash',
                     'driver_receivable_wallet',
                     'driver_shift_funding_cash',
-                    'driver_shift_funding_wallet'
+                    'driver_shift_funding_wallet',
+                    'advance_receivable_cash',
+                    'advance_receivable_wallet'
                   )
                 ORDER BY code
                 LIMIT 1) AS negative_receivable_fund_code
@@ -1017,6 +1036,8 @@ export class PgTreasuryPositionSource implements TreasuryPositionSource {
       officeWallet: minor(BigInt(row?.office_wallet ?? '0')),
       receivablesCash: minor(BigInt(row?.receivables_cash ?? '0')),
       receivablesWallet: minor(BigInt(row?.receivables_wallet ?? '0')),
+      advancesCash: minor(BigInt(row?.advances_cash ?? '0')),
+      advancesWallet: minor(BigInt(row?.advances_wallet ?? '0')),
       activeCustodyCash: minor(BigInt(row?.active_custody_cash ?? '0')),
       activeCustodyWallet: minor(BigInt(row?.active_custody_wallet ?? '0')),
       activeShiftCount: Number(row?.active_shift_count ?? 0),
