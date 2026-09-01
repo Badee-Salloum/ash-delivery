@@ -18,6 +18,7 @@ import { add, formatMinor, minor, parseMinor, sub } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { evidenceReviewWarning } from '../evidence-warning.ts'
+import { br1SplitView, employeeShareChain } from '../money-story.ts'
 import {
   type ResolvedDuplicateHint,
   type ScanDuplicateHintWire,
@@ -57,7 +58,19 @@ import {
   settlementHasVariance,
   settlementVarianceMagnitude,
 } from '../settlement-review.ts'
-import { FOCUS_RING, Badge, Button, Card, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
+import {
+  FOCUS_RING,
+  Badge,
+  Button,
+  Card,
+  Figure,
+  Money,
+  MoneyInput,
+  Pending,
+  Select,
+  Table,
+  TextInput,
+} from '../ui.tsx'
 
 /** Where the map opens when no point has been pinned yet. */
 const DAMASCUS: readonly [number, number] = [33.5138, 36.2765]
@@ -986,7 +999,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <Card title={t.shift.startPackage}>
           <dl className="grid grid-cols-2 gap-2 text-sm">
-            <Field label={t.shift.odometer} value={String(review.startPackage.odometerKm ?? '—')} />
+            <Figure label={t.shift.odometer} value={String(review.startPackage.odometerKm ?? '—')} />
             {review.state === 'awaiting_open_approval' ? (
               <>
                 <div>
@@ -1013,11 +1026,11 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                     />
                   </dd>
                 </div>
-                <Field
+                <Figure
                   label={`${t.treasury.receivableKinds.shift_funding} / ${t.treasury.receivableChannels.cash}`}
                   value={review.shiftFunding.cash}
                 />
-                <Field
+                <Figure
                   label={`${t.treasury.receivableKinds.shift_funding} / ${t.treasury.receivableChannels.wallet}`}
                   value={review.shiftFunding.wallet}
                 />
@@ -1030,8 +1043,8 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
               </>
             ) : (
               <>
-                <Field label={t.shift.cashFloat} value={review.startPackage.floatTotal} />
-                <Field label={t.shift.walletTopup} value={review.startPackage.topupTotal} />
+                <Figure label={t.shift.cashFloat} value={review.startPackage.floatTotal} />
+                <Figure label={t.shift.walletTopup} value={review.startPackage.topupTotal} />
               </>
             )}
           </dl>
@@ -1048,17 +1061,17 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         </Card>
         <Card title={t.shift.endPackage}>
           <dl className="grid grid-cols-2 gap-2 text-sm">
-            <Field label={t.shift.odometer} value={String(review.endPackage.odometerKm ?? '—')} />
+            <Figure label={t.shift.odometer} value={String(review.endPackage.odometerKm ?? '—')} />
             {/* The sign was unconditional, so a tampered end-odometer rendered as «+-5 كم»; and the
                 unit was a literal in the TSX, unreachable by the English catalogue. A delta that is
                 zero or negative is the anti-fraud read failing, so it is coloured. */}
-            <Field
+            <Figure
               label={t.approval.startVsEnd}
               value={odoDelta === null ? '—' : `${odoDelta} ${t.shift.km}`}
               {...(odoDelta !== null && odoDelta <= 0 ? { tone: 'red' as const } : {})}
             />
-            <Field label={t.shift.cashHandover} value={review.endPackage.cashDeclared ?? '—'} />
-            <Field label={t.shift.walletBalance} value={review.endPackage.walletDeclared ?? '—'} />
+            <Figure label={t.shift.cashHandover} value={review.endPackage.cashDeclared ?? '—'} />
+            <Figure label={t.shift.walletBalance} value={review.endPackage.walletDeclared ?? '—'} />
           </dl>
           {review.endPackage.odometerAnomalyConfirmedAt ? (
             <p className="mt-2 text-xs font-medium text-red-700">
@@ -1390,10 +1403,14 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           className="sticky bottom-0 z-50 -mx-4 border-t border-slate-200 bg-white/95 px-4 py-3 backdrop-blur"
           style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
         >
-          {/* The open gate's own disable — an invalid float or top-up — is signalled on the
-              inputs with aria-invalid. It has no sentence here, which is the same silent-dead-button
-              defect the close gate just had; left alone deliberately, so this commit deletes and
-              changes nothing else. */}
+          {/* WHY the button is dead. `aria-invalid` on the two inputs tells a screen reader and
+              nobody else; a 40%-opacity ghost with no explanation is how a manager concludes the
+              console is broken and goes looking for a way around the gate. */}
+          {!openingFundsValid ? (
+            <p role="alert" className="mb-2 text-sm font-medium text-amber-800">
+              {t.approval.openingFundsInvalid}
+            </p>
+          ) : null}
           <div className="flex flex-wrap gap-3">
             <Button
               variant="success"
@@ -1566,6 +1583,7 @@ function CloseApprovalWorkspace({
     if (!a.occurredMinute !== !b.occurredMinute) return a.occurredMinute ? -1 : 1
     return occurrenceKey(a).localeCompare(occurrenceKey(b))
   })
+  const split = br1SplitView(review.br1)
   const summary = summarizeOrders(orders)
   const attentionOrders = orders.filter(orderNeedsAttention)
   const ordinaryOrders = orders.filter((order) => !orderNeedsAttention(order))
@@ -1641,8 +1659,8 @@ function CloseApprovalWorkspace({
             </div>
 
             <div className="mt-3 grid grid-cols-1 gap-2 rounded-lg bg-sky-50 p-3 text-xs sm:grid-cols-2">
-              <Field label={operationCopy.opened} value={review.openApprovedAt ? formatDateTime(review.openApprovedAt, lang) : '—'} />
-              <Field label={operationCopy.submitted} value={review.submittedAt ? formatDateTime(review.submittedAt, lang) : operationCopy.notSubmitted} />
+              <Figure label={operationCopy.opened} value={review.openApprovedAt ? formatDateTime(review.openApprovedAt, lang) : '—'} />
+              <Figure label={operationCopy.submitted} value={review.submittedAt ? formatDateTime(review.submittedAt, lang) : operationCopy.notSubmitted} />
             </div>
 
             {attentionCount === 0 ? (
@@ -1722,9 +1740,9 @@ function CloseApprovalWorkspace({
               <section className="min-w-0 rounded-lg border border-slate-200 p-3">
                 <h3 className="text-sm font-bold text-slate-700">{t.shift.startPackage}</h3>
                 <dl className="mt-2 grid grid-cols-2 gap-2 text-sm">
-                  <Field label={t.shift.odometer} value={String(review.startPackage.odometerKm ?? '—')} />
-                  <Field label={t.shift.cashFloat} value={review.startPackage.floatTotal} />
-                  <Field label={t.shift.walletTopup} value={review.startPackage.topupTotal} />
+                  <Figure label={t.shift.odometer} value={String(review.startPackage.odometerKm ?? '—')} />
+                  <Figure label={t.shift.cashFloat} value={review.startPackage.floatTotal} />
+                  <Figure label={t.shift.walletTopup} value={review.startPackage.topupTotal} />
                 </dl>
                 <OcrDeltaLines deltas={scalarDelta(t.shift.odometer, review.startPackage.odometerKmOcr === null ? null : String(review.startPackage.odometerKmOcr), review.startPackage.odometerKm === null ? null : String(review.startPackage.odometerKm))} />
                 <PhotoRow pkg="start" media={review.media} />
@@ -1733,10 +1751,10 @@ function CloseApprovalWorkspace({
               <section className="min-w-0 rounded-lg border border-slate-200 p-3">
                 <h3 className="text-sm font-bold text-slate-700">{t.shift.endPackage}</h3>
                 <dl className="mt-2 grid grid-cols-2 gap-2 text-sm">
-                  <Field label={t.shift.odometer} value={String(review.endPackage.odometerKm ?? '—')} />
-                  <Field label={t.approval.startVsEnd} value={odoDelta === null ? '—' : `${odoDelta} ${t.shift.km}`} {...(odoDelta !== null && odoDelta <= 0 ? { tone: 'red' as const } : {})} />
-                  <Field label={t.shift.cashHandover} value={review.endPackage.cashDeclared ?? '—'} />
-                  <Field label={t.shift.walletBalance} value={review.endPackage.walletDeclared ?? '—'} />
+                  <Figure label={t.shift.odometer} value={String(review.endPackage.odometerKm ?? '—')} />
+                  <Figure label={t.approval.startVsEnd} value={odoDelta === null ? '—' : `${odoDelta} ${t.shift.km}`} {...(odoDelta !== null && odoDelta <= 0 ? { tone: 'red' as const } : {})} />
+                  <Figure label={t.shift.cashHandover} value={review.endPackage.cashDeclared ?? '—'} />
+                  <Figure label={t.shift.walletBalance} value={review.endPackage.walletDeclared ?? '—'} />
                 </dl>
                 <ReviseFigures shiftId={review.id} review={review} onRevised={onRefresh} />
                 <OcrDeltaLines deltas={[
@@ -1799,19 +1817,94 @@ function CloseApprovalWorkspace({
             </div>
 
             <dl className="mt-3 grid grid-cols-2 gap-2 rounded-lg bg-slate-50 p-3 text-sm">
-              <Field label={t.br1.expected} value={formatMinor(add(parseMinor(review.br1.expectedCash), parseMinor(review.br1.expectedWallet)))} />
-              <Field label={t.br1.declared} value={formatMinor(add(parseMinor(review.endPackage.cashDeclared || '0'), parseMinor(review.endPackage.walletDeclared || '0')))} />
+              <Figure label={t.br1.expected} value={formatMinor(add(parseMinor(review.br1.expectedCash), parseMinor(review.br1.expectedWallet)))} />
+              <Figure label={t.br1.declared} value={formatMinor(add(parseMinor(review.endPackage.cashDeclared || '0'), parseMinor(review.endPackage.walletDeclared || '0')))} />
               <div className="col-span-2 flex items-baseline justify-between border-t border-slate-200 pt-2">
                 <dt className={`font-bold ${differenceColour}`}>{t.br1[difference.direction]}</dt>
                 <dd dir="ltr" className={`num text-2xl font-extrabold ${differenceColour}`}>{difference.amountText}</dd>
               </div>
+              {/*
+                WHERE the difference sits — money rule 4's other two terms, which this screen has
+                never rendered. Deliberately SLATE, never the difference's colour: since decision 8
+                retired pay mode, `expectedCash` assumes every order was cash, so an electronic one
+                moves these apart on a perfectly correct shift. `br1Verdict` suppresses its own
+                `split_off` verdict for that reason; colouring them would alarm on every honest close.
+              */}
+              {split.cash !== '' ? (
+                <div className="col-span-2 border-t border-slate-200 pt-2 text-xs text-slate-600">
+                  <p dir="ltr" className="num text-start">
+                    {t.br1.whereItSits
+                      .replace('{cash}', groupThousands(split.cash))
+                      .replace('{wallet}', groupThousands(split.wallet))}
+                  </p>
+                  {/*
+                    Two arithmetic facts, never a hypothesis: an amount that appears in one box and
+                    is missing from the other by exactly as much, and what is left over. The ranked
+                    `br1.causes` are deliberately NOT shown — under decision 8 their only branch that
+                    names candidate orders filters on `payMode !== 'cash'`, which is never true, so
+                    they resolve to a low-confidence restatement of figures already on this line.
+                  */}
+                  {split.offsetting ? (
+                    <p className="mt-1">
+                      {t.br1.offsetting.replace('{amount}', groupThousands(split.offsetting.amount))}{' '}
+                      {t.br1.realDifference
+                        .replace('{amount}', groupThousands(split.offsetting.remainder))
+                        .replace(
+                          '{direction}',
+                          split.offsetting.remainderDirection === 'balanced'
+                            ? t.br1.noDifference
+                            : t.br1[split.offsetting.remainderDirection],
+                        )}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
             </dl>
+
+            {/*
+              HOW THE EMPLOYEE'S FIGURE WAS REACHED, in the open. It used to live inside a collapsed
+              «تفاصيل حصة 40% والمحاسبة», so the one derivation of the number being signed for was
+              behind a disclosure nobody opens. Three lines on an ordinary shift; the manual-share
+              and deduction pairs appear only when they are non-zero, and `grossDriverShare` — shown
+              nowhere on this screen today — appears with them.
+            */}
+            {settlement ? (
+              <dl className="mt-3 rounded-lg border border-slate-200 p-3 text-sm">
+                {employeeShareChain(settlement).map((step) => {
+                  const last = step.code === 'takes'
+                  const negative = step.signed === true && parseMinor(step.amount) < 0n
+                  return (
+                    <div
+                      key={step.code}
+                      className={`flex items-baseline justify-between gap-3 ${
+                        last ? 'mt-2 border-t border-slate-300 pt-2' : 'mt-1 first:mt-0'
+                      }`}
+                    >
+                      <dt className={last ? 'font-bold text-slate-700' : 'text-xs text-slate-600'}>
+                        {step.code === 'fees_to_share'
+                          ? t.settlement.share.fees_to_share.replace('{from}', groupThousands(step.from ?? '0'))
+                          : step.code === 'variance'
+                            ? t.settlement.share.variance[step.direction ?? 'balanced']
+                            : t.settlement.share[step.code]}
+                      </dt>
+                      <dd
+                        dir="ltr"
+                        className={`num shrink-0 ${
+                          last ? `text-xl font-extrabold ${negative ? 'text-red-700' : 'text-brand'}` : 'text-slate-700'
+                        }`}
+                      >
+                        <Money value={step.amount} />
+                      </dd>
+                    </div>
+                  )
+                })}
+                {/* Decision 15, as a clause on the row it qualifies rather than a competing card. */}
+                <p className="mt-1 text-xs text-slate-500">{t.settlement.share.fromReturnedMoney}</p>
+              </dl>
+            ) : null}
 
             {settlement ? (
               <>
-                <p className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs font-semibold text-emerald-900">
-                  {t.settlement.shareFromReturnedMoney}
-                </p>
                 <div className="mt-3 rounded-xl border border-violet-200 bg-violet-50 p-3">
                   <p className="text-sm font-extrabold text-violet-950">{t.settlement.receivableDeferralTitle}</p>
                   <p className="mt-1 text-xs text-violet-900">{t.settlement.receivableDeferralHint}</p>
@@ -2975,8 +3068,8 @@ function OperationWindowAdvisory({
       <aside role="note" className="rounded-lg border border-sky-200 bg-sky-50 p-3">
         <p className="text-sm text-sky-950">{copy.windowHint}</p>
         <dl className="mt-2 grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
-          <Field label={copy.opened} value={openApprovedAt ? formatDateTime(openApprovedAt, lang) : '—'} />
-          <Field
+          <Figure label={copy.opened} value={openApprovedAt ? formatDateTime(openApprovedAt, lang) : '—'} />
+          <Figure
             label={copy.submitted}
             value={submittedAt ? formatDateTime(submittedAt, lang) : copy.notSubmitted}
           />
@@ -3501,19 +3594,6 @@ function MapPin({
       ) : null}
       {open ? <div ref={host} className="h-64 w-full rounded-lg" /> : null}
     </>
-  )
-}
-
-function Field({ label, value, tone }: { label: string; value: string; tone?: 'green' | 'red' }): ReactNode {
-  return (
-    <div>
-      <dt className="text-xs text-slate-500">{label}</dt>
-      {/* dir=ltr: every value here is a figure (money, %, «+12 كم») — numbers read left-to-right in
-          both languages, so this keeps a sign/unit from landing on the wrong side in RTL. */}
-      <dd dir="ltr" className={`num text-lg font-semibold ${tone === 'green' ? 'text-emerald-700' : tone === 'red' ? 'text-red-700' : ''}`}>
-        {value}
-      </dd>
-    </div>
   )
 }
 

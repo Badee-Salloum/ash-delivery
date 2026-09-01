@@ -560,6 +560,13 @@ orderNo: 'رقم الطلب',
     notBalanced: 'المعادلة غير متوازنة',
     expected: 'المتوقع',
     declared: 'المُصرَّح',
+    /* All three differences, which money rule 4 requires and the screen never showed. The two
+       components are stated NEUTRALLY: since decision 8 retired pay mode, an electronic order moves
+       them apart on a perfectly correct shift, so colouring them would alarm on every honest close. */
+    whereItSits: 'كاش {cash} · محفظة {wallet}',
+    offsetting: '{amount} ظهرت في صندوق وغابت عن الآخر بالقدر نفسه.',
+    realDifference: 'الفرق الحقيقي: {amount} {direction}.',
+    noDifference: 'لا فرق',
     surplus: 'فائض',
     shortage: 'نقص',
     /** Scalar zero, legs not: a pay-mode error hides here and only this line reveals it. */
@@ -818,6 +825,19 @@ orderNo: 'رقم الطلب',
     cashConfirmed: 'أؤكد أنني نفّذت تعليمات الكاش بالقيمة والاتجاه الموضحين بعد إبقاء تمويل النوبة القادمة الموضح، والذي سيُستهلك تلقائياً عند فتحها.',
     confirmBeforeApproval: 'أكّد تنفيذ معاملتي المحفظة والكاش قبل اعتماد الإنهاء.',
     amountsPending: 'مبالغ التسليم قيد إعادة الحساب — انتظر لحظة قبل الاعتماد.',
+    /* How the employee's figure was reached — three lines on an ordinary shift, five when a manual
+       job or a cash deduction exists. A zero addend contributes nothing, so omitting it hides no
+       fact; that is NOT true of an order row, which is why every order bucket is counted. */
+    share: {
+      fees_to_share: 'أجور يلاغو {from} ← ٤٠٪',
+      manual_share: '+ حصص الطلبات اليدوية',
+      gross: '= إجمالي حصته',
+      deductions: '− الحسومات النقدية',
+      base: '= حصته بعد الحسومات',
+      variance: { surplus: '+ الفائض (يخصّه)', shortage: '− النقص (عليه)', balanced: 'لا فائض ولا نقص' },
+      takes: 'يأخذ الموظف',
+      fromReturnedMoney: 'من مال النوبة المُعاد، لا من رأس مال الشركة.',
+    },
     unavailable: 'لا يمكن الاعتماد قبل تحميل كشف التسوية كاملاً.',
     loading: 'جارٍ احتساب مبلغ المحفظة ومعاملة الكاش…',
     /* Legacy labels remain for historical approved-shift renderers during the additive rollout. */
@@ -1246,6 +1266,7 @@ orderNo: 'رقم الطلب',
     confirmForceCloseTitle: 'تأكيد الإغلاق الاستثنائي؟',
     forceApprove: 'اعتماد الإغلاق الاستثنائي',
     forcePreparedHint: 'جُهّزت هذه النوبة لإغلاق استثنائي. راجع التسوية النهائية، نفّذ المعاملتين، ثم استخدم الاعتماد الاستثنائي.',
+    openingFundsInvalid: 'العهدة والشحن: أدخل مبلغاً غير سالب، أو اترك الحقل فارغاً إن لم يُسلَّم شيء.',
     forceReasonRequired: 'الإغلاق الاستثنائي يحتاج دائماً إلى سبب مسجّل.',
     confirmVoidTitle: 'إلغاء النوبة نهائياً؟',
     confirmVoidBody: 'ستُلغى النوبة وتُحرَّر الآلية، ولا يمكن التراجع.',

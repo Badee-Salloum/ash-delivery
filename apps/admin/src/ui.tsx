@@ -165,6 +165,38 @@ export function Field({
   )
 }
 
+/**
+ * A labelled READ-ONLY figure inside a `<dl>` — not to be confused with `Field` above, which wraps
+ * an input.
+ *
+ * `dir="ltr"` plus `.num`: every value here is a figure (money, a percentage, «+12 كم»), numbers
+ * read left-to-right in both languages, and without the isolation a sign or a unit lands on the
+ * wrong side of the number in RTL.
+ */
+export function Figure({
+  label,
+  value,
+  tone,
+}: {
+  label: string
+  value: string
+  tone?: 'green' | 'red'
+}): ReactNode {
+  return (
+    <div>
+      <dt className="text-xs text-slate-500">{label}</dt>
+      <dd
+        dir="ltr"
+        className={`num text-lg font-semibold ${
+          tone === 'green' ? 'text-emerald-700' : tone === 'red' ? 'text-red-700' : ''
+        }`}
+      >
+        {value}
+      </dd>
+    </div>
+  )
+}
+
 export function Card({ title, children, className = '' }: { title?: string; children: ReactNode; className?: string }): ReactNode {
   return (
     <section className={`rounded-xl bg-white p-4 shadow-sm ${className}`}>
