@@ -1684,8 +1684,21 @@ function CloseApprovalWorkspace({
         <Badge tone={readyTone}>{readyLabel}</Badge>
       </header>
 
-      <div className="grid min-w-0 grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(22rem,28rem)]">
-        <main className="order-2 flex min-w-0 flex-col gap-4 xl:order-1">
+      {/*
+        TWO COLUMNS FROM 1536px, NOT 1280px. The nav rail is `w-60` and goes static at 1024px, so at
+        exactly `xl` the main pane is about 992px and `minmax(22rem,28rem)` claims up to 448 of it —
+        the first width at which two columns fire is also the width at which they are worst. And a
+        landscape tablet, 1024–1180px, is the manager's actual device: it never reaches `xl`, so
+        below is the layout he really uses, not a fallback.
+
+        In that one column the screen leads with WHATEVER IS HIS JOB RIGHT NOW. With rows still
+        open, that is the decisions; with nothing open, it is the two amounts he hands over and the
+        approve button. Today the money panel is `order-1` unconditionally, so on a shift with open
+        rows he scrolls past the figures, their inputs and the approve button to reach the work he
+        has to do before any of them mean anything.
+      */}
+      <div className="grid min-w-0 grid-cols-1 items-start gap-4 2xl:grid-cols-[minmax(0,1fr)_minmax(22rem,28rem)]">
+        <main className={`flex min-w-0 flex-col gap-4 2xl:order-1 ${unresolvedCount > 0 ? 'order-1' : 'order-2'}`}>
           <Card title={`${copy.attentionTitle} — ${attentionCount}`}>
             <p className="mb-3 text-xs text-slate-600">{copy.attentionHint}</p>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
@@ -1842,7 +1855,7 @@ function CloseApprovalWorkspace({
           </details>
         </main>
 
-        <aside className="order-1 min-w-0 xl:order-2 xl:sticky xl:top-2">
+        <aside className={`min-w-0 2xl:order-2 2xl:sticky 2xl:top-2 ${unresolvedCount > 0 ? 'order-2' : 'order-1'}`}>
           <Card className={`ring-2 ${br1State === 'balanced' ? 'ring-emerald-300' : 'ring-amber-300'}`}>
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -1946,7 +1959,7 @@ function CloseApprovalWorkspace({
                 <div className="mt-3 rounded-xl border border-violet-200 bg-violet-50 p-3">
                   <p className="text-sm font-extrabold text-violet-950">{t.settlement.receivableDeferralTitle}</p>
                   <p className="mt-1 text-xs text-violet-900">{t.settlement.receivableDeferralHint}</p>
-                  <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+                  <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-1">
                     <label className="flex flex-col gap-1 text-xs font-bold text-violet-950">
                       <span>{t.settlement.cashReceivableDeferred}</span>
                       <MoneyInput
@@ -2031,7 +2044,7 @@ function CloseApprovalWorkspace({
                     {copy.resolveUnknownBeforeHandover.replace('{n}', String(unresolvedCount))}
                   </p>
                 ) : null}
-                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-1">
                   <SettlementConfirmationCard
                     label={t.settlement.walletInstruction}
                     action={t.settlement.walletAction[settlement.walletAction]}
@@ -2127,7 +2140,7 @@ function CloseApprovalWorkspace({
               {!forcePrepared ? (
                 <textarea value={notes} onChange={(event) => onNotes(event.target.value)} placeholder={t.approval.notes} aria-label={t.approval.notes} rows={2} className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/15" />
               ) : null}
-              <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+              <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 2xl:grid-cols-1">
                 <Button variant="ghost" disabled={busy} onClick={() => void onRequestRephoto()}>{t.approval.requestRetake}</Button>
                 <Button variant="ghost" disabled={busy} onClick={onSendBack}>{t.approval.sendBack}</Button>
               </div>
