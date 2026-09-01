@@ -269,3 +269,139 @@ describe('detectScannedPageOverlap', () => {
     })
   })
 })
+
+// Shift a3728815, 2026-09-01 — the misread that reached settlement.
+//
+// Two captures of one list. The FIRST row of page 2 was scrolled under the sticky header and
+// rendered faded: the top of a ٣ was lost and the reader returned 230 where page 1 read 330, while
+// the clock and both address lines survived on both sides. The amount is the anchor of
+// `rowsMayBeTheSameOperation`, so the pair was refused; `suffixPrefixRun` then abandoned the run at
+// that first position, taking the perfectly good 120⟷120 pair behind it. Zero hints, and no manager
+// approved anything — the phantom simply raised `expectedTotal` by 0.8 × 230, turning a real 218.25
+// surplus into 34.25 and making the shift look almost exact.
+//
+// Yallago's own payments log settles which reading is true: exactly one 20% deduction at 14:50,
+// −66.00 = 20% of 330. There is no −46.00 anywhere in the log.
+describe('a seam row whose amount the capture corrupted', () => {
+  const ROUTE = { pointA: 'fulfulji, almuhajirin, nazim basha', pointB: 'almadkhal 6' }
+
+  const PAGE_1 = page('dashboard', [
+    row('p1r0', 0, 12_000, { occurredDate: '2026-09-01', occurredMinute: '17:48', pointA: 'Ibn Nafis', pointB: 'Salhiyeh' }),
+    row('p1r1', 1, 13_000, { occurredDate: '2026-09-01', occurredMinute: '17:21', pointA: 'Barada', pointB: 'G7' }),
+    row('p1r2', 2, 29_500, { occurredDate: '2026-09-01', occurredMinute: '16:00', pointA: 'Sham Sharif', pointB: 'H84J' }),
+    row('p1r3', 3, 21_000, { occurredDate: '2026-09-01', occurredMinute: '15:24', pointA: 'Damascus', pointB: 'Adawi Zoo' }),
+    // Read correctly here — the row is fully rendered.
+    row('p1r4', 4, 33_000, { occurredDate: '2026-09-01', occurredMinute: '14:50', ...ROUTE }),
+    // Cut by the BOTTOM edge: the amount survived, the clock and the route did not.
+    row('p1r5', 5, 12_000, { occurredDate: '2026-09-01' }),
+  ])
+
+  const PAGE_2 = page('dashboard_2', [
+    // The same delivery as `p1r4`, faded under the header: 33_000 read as 23_000.
+    row('p2r0', 0, 23_000, { occurredDate: '2026-09-01', occurredMinute: '14:50', ...ROUTE }),
+    row('p2r1', 1, 12_000, { occurredDate: '2026-09-01', occurredMinute: '14:00', pointA: 'G7FH', pointB: 'G78M' }),
+    row('p2r2', 2, 28_000, { occurredDate: '2026-09-01', occurredMinute: '13:18', pointA: 'Midan', pointB: 'Rawda' }),
+    row('p2r3', 3, 28_500, { occurredDate: '2026-09-01', occurredMinute: '12:20', pointA: 'Zahraa', pointB: 'Tamayoz' }),
+    row('p2r4', 4, 19_500, { occurredDate: '2026-09-01', occurredMinute: '11:34', pointA: 'fulfulji', pointB: 'Ibn Jubayr' }),
+  ])
+
+  it('pairs the two readings of the row whose amount was corrupted', () => {
+    const overlap = detectScannedPageOverlap(PAGE_1, PAGE_2)
+    expect(overlap, 'this returned null in production and both rows were counted').not.toBeNull()
+    const pair = overlap!.pairs.find((candidate) => candidate.earlierRowRef === 'p1r4')
+    expect(pair, 'the 330/230 row must be paired').toBeDefined()
+    expect(pair!.laterRowRef).toBe('p2r0')
+    expect(pair!.causes).toContain('scan_overlap_pair_amount_disagrees')
+    // What made it identifiable despite the money: the clock and the whole route agreed.
+    expect(pair!.causes).toContain('scan_overlap_pair_minute_agrees')
+    expect(pair!.causes).toContain('scan_overlap_pair_route_agrees')
+    expect(overlap!.causes).toContain('scan_overlap_amount_disagrees')
+  })
+
+  it('carries the second seam row with it, which the abandoned run had dropped', () => {
+    // `p1r5` lost its clock to the bottom edge, so nothing about it alone identifies it. The
+    // alignment established by the misread row above does: it is `p2r1`, the 14:00 delivery.
+    const overlap = detectScannedPageOverlap(PAGE_1, PAGE_2)
+    const pair = overlap!.pairs.find((candidate) => candidate.earlierRowRef === 'p1r5')
+    expect(pair, 'the clockless 120 belongs to the same seam').toBeDefined()
+    expect(pair!.laterRowRef).toBe('p2r1')
+    expect(pair!.causes).toContain('scan_overlap_pair_amount_agrees')
+  })
+
+  it('names the earlier page as the one still showing newer orders', () => {
+    const overlap = detectScannedPageOverlap(PAGE_1, PAGE_2)
+    expect(overlap!.earlierPageRef).toBe('dashboard')
+    expect(overlap!.laterPageRef).toBe('dashboard_2')
+  })
+
+  it('reports the same overlap whichever way the caller passes the pages', () => {
+    expect(detectScannedPageOverlap(PAGE_2, PAGE_1)).toEqual(detectScannedPageOverlap(PAGE_1, PAGE_2))
+  })
+
+  it('does not claim the rows outside the seam', () => {
+    // Only the two shared rows. 11:34 and 17:48 are on one page each and must stay unpaired, or a
+    // manager would be asked to choose between deliveries that never overlapped.
+    const overlap = detectScannedPageOverlap(PAGE_1, PAGE_2)
+    expect(overlap!.pairs.map((pair) => pair.earlierRowRef).sort()).toEqual(['p1r4', 'p1r5'])
+  })
+
+  it('counts the anchor but not what the sweep found behind it', () => {
+    // `length` is what the winning strategy asserted, and it orders the hints a manager sees. The
+    // anchor is one shared row, so 1. The second seam row came from the alignment rather than from
+    // a strategy, and must not inflate the count — a hint that grew because a corrupted row was
+    // reported would outrank a genuine four-row overlap for no reason a manager could name.
+    const overlap = detectScannedPageOverlap(PAGE_1, PAGE_2)!
+    expect(overlap.length).toBe(1)
+    expect(overlap.pairs).toHaveLength(2)
+  })
+
+  it('refuses the pairing when the route differs', () => {
+    // Same minute, different amounts, different route: two deliveries in one minute is ordinary and
+    // must never be offered as a duplicate.
+    const other = page('dashboard_2', [
+      row('p2r0', 0, 23_000, { occurredDate: '2026-09-01', occurredMinute: '14:50', pointA: 'Somewhere', pointB: 'Else' }),
+      ...PAGE_2.rows.slice(1),
+    ])
+    expect(detectScannedPageOverlap(PAGE_1, other)).toBeNull()
+  })
+
+  it('refuses the pairing when either route was never read', () => {
+    // The amount is in doubt here, so the route has to carry the identity by itself. A missing one
+    // proves nothing, and guessing would let one bad OCR pass retire a real delivery.
+    const other = page('dashboard_2', [
+      row('p2r0', 0, 23_000, { occurredDate: '2026-09-01', occurredMinute: '14:50' }),
+      ...PAGE_2.rows.slice(1),
+    ])
+    expect(detectScannedPageOverlap(PAGE_1, other)).toBeNull()
+  })
+})
+
+// The variant that is worse than the shift above, because its hint looks healthy.
+describe('a corrupted row inside an overlap that otherwise matched cleanly', () => {
+  const day = { occurredDate: '2026-09-01' }
+  const EARLIER = page('one', [
+    row('e0', 0, 50_000, { ...day, occurredMinute: '18:00', pointA: 'A0', pointB: 'B0' }),
+    row('e1', 1, 40_000, { ...day, occurredMinute: '17:00', pointA: 'A1', pointB: 'B1' }),
+    row('e2', 2, 30_000, { ...day, occurredMinute: '16:00', pointA: 'A2', pointB: 'B2' }),
+    row('e3', 3, 20_000, { ...day, occurredMinute: '15:00', pointA: 'A3', pointB: 'B3' }),
+  ])
+  const LATER = page('two', [
+    row('l0', 0, 40_000, { ...day, occurredMinute: '17:00', pointA: 'A1', pointB: 'B1' }),
+    // The corrupted one, in the middle of an otherwise clean run.
+    row('l1', 1, 33_000, { ...day, occurredMinute: '16:00', pointA: 'A2', pointB: 'B2' }),
+    row('l2', 2, 20_000, { ...day, occurredMinute: '15:00', pointA: 'A3', pointB: 'B3' }),
+  ])
+
+  it('does not let the clean pairs bury it', () => {
+    // `timedMatches` returns as soon as it has any pair and never reaches the run search, so before
+    // the window sweep this reported length 2 and the third row was counted twice behind a hint
+    // that looked entirely healthy — harder to catch than a shift with no hint at all.
+    const overlap = detectScannedPageOverlap(EARLIER, LATER)
+    expect(overlap!.length).toBe(2)
+    const pair = overlap!.pairs.find((candidate) => candidate.earlierRowRef === 'e2')
+    expect(pair, 'the corrupted row sits inside the overlap and must be reported').toBeDefined()
+    expect(pair!.laterRowRef).toBe('l1')
+    expect(pair!.causes).toContain('scan_overlap_pair_amount_disagrees')
+    expect(overlap!.causes).toContain('scan_overlap_amount_disagrees')
+  })
+})

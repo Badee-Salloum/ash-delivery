@@ -9,11 +9,14 @@ export type ScanOverlapCause =
   | 'scan_overlap_suffix_prefix'
   | 'scan_overlap_amount_only'
   | 'scan_overlap_direction_ambiguous'
+  | 'scan_overlap_amount_disagrees'
 
 export type ScanOverlapPairCause =
   | 'scan_overlap_pair_amount_agrees'
   | 'scan_overlap_pair_minute_agrees'
   | 'scan_overlap_pair_route_agrees'
+  | 'scan_overlap_pair_amount_disagrees'
+  | 'scan_overlap_pair_unaccounted'
 
 export type ScanDuplicateHintOperationRef =
   | { kind: 'order'; providerOrderNo: string; observationId: string; rowIndex: number }

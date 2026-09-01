@@ -81,6 +81,7 @@ describe('the side-by-side duplicate choice', () => {
   it('keeps every string bilingual, as the rest of this screen is', () => {
     for (const key of [
       'duplicateChoiceTitle',
+      'duplicateChoiceMisread',
       'duplicateChoiceQuestion',
       'duplicateChoiceThisRow',
       'duplicateChoiceOtherRow',

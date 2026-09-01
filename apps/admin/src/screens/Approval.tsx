@@ -22,6 +22,7 @@ import { br1SplitView, employeeShareChain } from '../money-story.ts'
 import {
   type ResolvedDuplicateHint,
   type ScanDuplicateHintWire,
+  type ScanOverlapPairCause,
   duplicateHintsForDeduction,
   duplicateHintsForOrder,
 } from '../duplicate-hints.ts'
@@ -2182,6 +2183,7 @@ interface CloseWorkspaceCopy {
   /* The side-by-side choice. A hint names a POSITION today — «يطابق الصف ٣ في صفحة ١» — and a
      manager cannot judge two readings of one delivery without seeing both. */
   duplicateChoiceTitle: string
+  duplicateChoiceMisread: string
   duplicateChoiceQuestion: string
   duplicateChoiceThisRow: string
   duplicateChoiceOtherRow: string
@@ -2243,6 +2245,7 @@ function closeWorkspaceCopy(lang: 'ar' | 'en'): CloseWorkspaceCopy {
       duplicateHintAmountOnly: 'Amounts match only; no clock or route to confirm it.',
       duplicateHintAdvisory: 'A hint only — nothing is counted or excluded automatically. The decision, and the reason, are yours.',
       duplicateChoiceTitle: 'These may be two rows for one delivery',
+      duplicateChoiceMisread: 'Same minute, same route, two different amounts — almost certainly ONE delivery read twice, with one reading wrong. Yallago deducts 20% per delivery, so its payments log will show one deduction here, not two.',
       duplicateChoiceQuestion: 'Which row is the real delivery?',
       duplicateChoiceThisRow: 'This row',
       duplicateChoiceOtherRow: 'The other row',
@@ -2303,6 +2306,7 @@ function closeWorkspaceCopy(lang: 'ar' | 'en'): CloseWorkspaceCopy {
     duplicateHintAmountOnly: 'التطابق على المبلغ فقط؛ لا وقت ولا مسار يؤكّده.',
     duplicateHintAdvisory: 'إشارة فقط — لا شيء يُحتسب أو يُستبعد تلقائياً. القرار والسبب لك.',
     duplicateChoiceTitle: 'يُحتمل أنّ هذين صفّان لتوصيلة واحدة',
+    duplicateChoiceMisread: 'نفس الدقيقة ونفس المسار، ومبلغان مختلفان — على الأرجح توصيلة واحدة قُرئت مرّتين وإحدى القراءتين خاطئة. يلاغو يحسم ٢٠٪ عن كل توصيلة، فسجلّ المدفوعات سيُظهر هنا حسماً واحداً لا حسمين.',
     duplicateChoiceQuestion: 'أيّ الصفّين هو التوصيلة الحقيقية؟',
     duplicateChoiceThisRow: 'هذا الصفّ',
     duplicateChoiceOtherRow: 'الصفّ المقابل',
@@ -2573,10 +2577,18 @@ function DuplicateChoicePanel({
     date: copy.duplicateFactDate,
     inclusion: copy.duplicateFactInclusion,
   }
-  const agreeLabel = {
+  /*
+    Exhaustive on purpose. `duplicateChoiceView` filters the two non-agreement causes out of
+    `agreements` before they reach here, but the annotation makes a future cause a compile error at
+    THIS line rather than an `undefined` rendered inside a `join(' · ')` — a dangling separator on
+    the one line a manager reads to decide whether two rows are one delivery.
+  */
+  const agreeLabel: Record<ScanOverlapPairCause, string> = {
     scan_overlap_pair_amount_agrees: copy.duplicateFactAmount,
     scan_overlap_pair_minute_agrees: copy.duplicateFactMinute,
     scan_overlap_pair_route_agrees: copy.duplicateFactRoute,
+    scan_overlap_pair_amount_disagrees: copy.duplicateFactAmount,
+    scan_overlap_pair_unaccounted: copy.duplicateFactMinute,
   }
   const sides = [view.self, view.counterpart]
   const revision = keepKey === '' ? null : duplicateChoiceRevision(view, keepKey, reason.trim())
@@ -2587,6 +2599,11 @@ function DuplicateChoicePanel({
   return (
     <section className="mt-2 rounded-lg border-2 border-amber-300 bg-amber-50 p-2 text-xs">
       <p className="font-bold text-amber-900">{copy.duplicateChoiceTitle}</p>
+      {/* Only when the evidence has this exact shape. Said on every duplicate it would be noise;
+          said here it is the difference between «choose one» and «one of these never happened». */}
+      {view.likelyOneRowMisread ? (
+        <p className="mt-1 text-amber-800">{copy.duplicateChoiceMisread}</p>
+      ) : null}
 
       <div className="mt-2 flex min-w-0 flex-col gap-2 sm:flex-row">
         <DuplicateChoiceColumn side={view.self} heading={copy.duplicateChoiceThisRow} pages={pages} copy={copy} timed={view.timedKey === view.self.key} />

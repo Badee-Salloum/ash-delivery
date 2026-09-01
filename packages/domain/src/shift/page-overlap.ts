@@ -50,12 +50,43 @@ export const SCAN_OVERLAP_CAUSES = [
   'scan_overlap_suffix_prefix',
   'scan_overlap_amount_only',
   'scan_overlap_direction_ambiguous',
+  /**
+   * The pages overlap, and a row inside the overlap was read with two DIFFERENT amounts.
+   *
+   * Its own cause because it is a different fact from every other one here: not «these pages share
+   * rows», but «these pages disagree about what one row says», which is a reader error a manager
+   * must settle before either number is counted.
+   */
+  'scan_overlap_amount_disagrees',
 ] as const
 
 export const SCAN_OVERLAP_PAIR_CAUSES = [
   'scan_overlap_pair_amount_agrees',
   'scan_overlap_pair_minute_agrees',
   'scan_overlap_pair_route_agrees',
+  /**
+   * Same day, same printed clock, same full route — and two different amounts.
+   *
+   * The amount is the anchor of `rowsMayBeTheSameOperation`, and on 2026-09-01 the amount was the
+   * one field a clipped capture corrupted: the top of a `٣` faded under a sticky header and read as
+   * `٢`, so 330 became 230 while the clock and both address lines survived intact. The pair was
+   * refused, both rows were counted, and the phantom raised `expectedTotal` by 0.8 × its fee —
+   * which pulled a real 218.25 surplus down to 34.25 and made the shift look almost perfect.
+   *
+   * A HINT ONLY, and deliberately never an input to run length or page direction: two readings that
+   * disagree about the money cannot be evidence of where two pages align. Decision 16 is untouched —
+   * nothing merges on this, and the manager still chooses which row is the real delivery.
+   */
+  'scan_overlap_pair_amount_disagrees',
+  /**
+   * A row that falls INSIDE the established overlap window but paired with nothing.
+   *
+   * Once the alignment is known, every row in the shared span is claimed by the other page whether
+   * or not the two readings agree. An unclaimed one is either a real row the other capture missed
+   * or a reading too corrupted to pair — and the second is exactly the case that reaches settlement
+   * as a duplicate. It is reported so a manager looks, never acted on.
+   */
+  'scan_overlap_pair_unaccounted',
 ] as const
 
 export type ScanOverlapCause = (typeof SCAN_OVERLAP_CAUSES)[number]
@@ -122,6 +153,44 @@ const rowsMayBeTheSameOperation = (earlier: ScannedPageRow, later: ScannedPageRo
   return { matches: true, causes }
 }
 
+/**
+ * Two readings of ONE row that disagree about the money.
+ *
+ * Everything the screen prints to identify a delivery agrees — the day, the printed clock, and both
+ * address lines in full — and only the amount differs. That is not two deliveries; it is one row
+ * read twice with one reading corrupted, and it is what a clipped or header-faded capture does.
+ *
+ * DELIBERATELY STRICT. The full route must be present and equal on both sides, not merely
+ * compatible: a missing route is neutral for `rowsMayBeTheSameOperation` because the amount already
+ * anchors that rule, but here the amount is the thing in doubt, so the route has to carry the whole
+ * identity by itself. Two genuine deliveries would need the same minute AND the same pickup AND the
+ * same dropoff while charging different fees. Measured against production rather than assumed: zero
+ * occurrences across 59 shifts other than the misread this exists for.
+ */
+const rowsAreOneRowMisread = (earlier: ScannedPageRow, later: ScannedPageRow): PairVerdict => {
+  if (earlier.amount === null || later.amount === null) return REFUTED
+  if (earlier.amount === later.amount) return REFUTED
+
+  if (earlier.occurredDate === null || later.occurredDate === null) return REFUTED
+  if (earlier.occurredMinute === null || later.occurredMinute === null) return REFUTED
+  if (earlier.occurredDate !== later.occurredDate) return REFUTED
+  if (earlier.occurredMinute !== later.occurredMinute) return REFUTED
+
+  if (earlier.pointA === null || earlier.pointB === null) return REFUTED
+  if (later.pointA === null || later.pointB === null) return REFUTED
+  if (normalizeText(earlier.pointA) !== normalizeText(later.pointA)) return REFUTED
+  if (normalizeText(earlier.pointB) !== normalizeText(later.pointB)) return REFUTED
+
+  return {
+    matches: true,
+    causes: [
+      'scan_overlap_pair_amount_disagrees',
+      'scan_overlap_pair_minute_agrees',
+      'scan_overlap_pair_route_agrees',
+    ],
+  }
+}
+
 type Directed = { readonly length: number; readonly pairs: ScanOverlapPair[] }
 
 /** A row the printed screen identifies on its own: an amount, a day and a minute. */
@@ -148,6 +217,107 @@ const timedMatches = (earlier: ScannedPage, later: ScannedPage): Directed => {
       if (taken.has(right.rowRef) || !isTimed(right)) continue
       if (left.occurredDate !== right.occurredDate || left.occurredMinute !== right.occurredMinute) continue
       const verdict = rowsMayBeTheSameOperation(left, right)
+      if (!verdict.matches) continue
+      taken.add(right.rowRef)
+      pairs.push({ earlierRowRef: left.rowRef, laterRowRef: right.rowRef, causes: verdict.causes })
+      break
+    }
+  }
+  return { length: pairs.length, pairs }
+}
+
+/**
+ * The single row offset every confirmed pair agrees on, or null.
+ *
+ * Two captures of one scrolling list are related by ONE shift: row `i` on the earlier page is row
+ * `i + offset` on the later one. When every confirmed pair reports the same offset the alignment is
+ * known, and every other row in the shared span can be checked against it. When they disagree the
+ * pages are not a simple re-scroll — a retake, a filter change, a different day — and nothing is
+ * inferred, because a wrong alignment would manufacture pairs out of unrelated rows.
+ */
+const sharedOffset = (
+  earlier: ScannedPage,
+  later: ScannedPage,
+  pairs: readonly ScanOverlapPair[],
+): number | null => {
+  if (pairs.length === 0) return null
+  const leftIndex = new Map(earlier.rows.map((row, index) => [row.rowRef, index]))
+  const rightIndex = new Map(later.rows.map((row, index) => [row.rowRef, index]))
+  let offset: number | null = null
+  for (const pair of pairs) {
+    const left = leftIndex.get(pair.earlierRowRef)
+    const right = rightIndex.get(pair.laterRowRef)
+    if (left === undefined || right === undefined) return null
+    const candidate = right - left
+    if (offset === null) offset = candidate
+    else if (offset !== candidate) return null
+  }
+  return offset
+}
+
+/**
+ * Every row the known alignment says the two pages SHARE, whether or not the readings agree.
+ *
+ * This is the guard that was missing on 2026-09-01. Both existing strategies stop at the rows they
+ * can confirm: `timedMatches` returns the moment it has one pair and never reaches the run search,
+ * and `suffixPrefixRun` abandons a whole run at its first mismatched position. So a single row the
+ * capture corrupted — the top of a `٣` faded under a sticky header, read as `٢` — was
+ * simply not in anybody's output, and both copies of one delivery reached settlement.
+ *
+ * Once the offset is known there is nothing left to infer. Any row inside the shared span belongs
+ * to the other page by position alone, so it is reported: with the ordinary causes when the two
+ * readings still agree, as `amount_disagrees` when only the money differs, and otherwise as
+ * `unaccounted` — «the alignment says these are the same row and the readings do not match».
+ *
+ * ADVISORY, like everything else here. It adds rows a manager must look at; it never removes one,
+ * never merges, and never touches `length`, which stays the count of CONFIRMED pairs so that every
+ * existing caller ordering or tie-breaking on it behaves exactly as before.
+ */
+const accountForWindow = (
+  earlier: ScannedPage,
+  later: ScannedPage,
+  confirmed: readonly ScanOverlapPair[],
+  offset: number,
+): ScanOverlapPair[] => {
+  const claimed = new Set(confirmed.map((pair) => pair.earlierRowRef))
+  const extra: ScanOverlapPair[] = []
+  for (let left = 0; left < earlier.rows.length; left += 1) {
+    const right = left + offset
+    if (right < 0 || right >= later.rows.length) continue
+    const leftRow = earlier.rows[left]!
+    const rightRow = later.rows[right]!
+    if (claimed.has(leftRow.rowRef)) continue
+    // Both sides must carry an amount. This exists to catch a row COUNTED TWICE, and a row whose
+    // amount no reader could make out is never counted once — it reaches the manager as a missing
+    // value, not as money. Reporting those would bury the real signal under every half-cut row at
+    // the edge of every capture, which is most of them.
+    if (leftRow.amount === null || rightRow.amount === null) continue
+    const same = rowsMayBeTheSameOperation(leftRow, rightRow)
+    const misread = same.matches ? REFUTED : rowsAreOneRowMisread(leftRow, rightRow)
+    const causes: readonly ScanOverlapPairCause[] = same.matches
+      ? same.causes
+      : misread.matches
+        ? misread.causes
+        : ['scan_overlap_pair_unaccounted']
+    extra.push({ earlierRowRef: leftRow.rowRef, laterRowRef: rightRow.rowRef, causes })
+  }
+  return extra
+}
+
+/**
+ * One row read twice with the money corrupted — used ONLY to find an alignment nothing else could.
+ *
+ * Tried last, and only when both ordinary strategies came back empty, so it can add hints where
+ * there were none and can never change one that already exists. The pair it returns is not evidence
+ * of page order either: `meanPosition` decides that, from where the rows sit.
+ */
+const misreadAnchors = (earlier: ScannedPage, later: ScannedPage): Directed => {
+  const taken = new Set<string>()
+  const pairs: ScanOverlapPair[] = []
+  for (const left of earlier.rows) {
+    for (const right of later.rows) {
+      if (taken.has(right.rowRef)) continue
+      const verdict = rowsAreOneRowMisread(left, right)
       if (!verdict.matches) continue
       taken.add(right.rowRef)
       pairs.push({ earlierRowRef: left.rowRef, laterRowRef: right.rowRef, causes: verdict.causes })
@@ -212,38 +382,90 @@ export function detectScannedPageOverlap(a: ScannedPage, b: ScannedPage): ScanPa
     const tied = aPos === bPos
     const aIsEarlier = tied ? a.pageRef <= b.pageRef : aPos > bPos
     const causes: ScanOverlapCause[] = ['scan_overlap_timed_match']
+    // Derived from the CONFIRMED pairs only, and computed before the window is swept: the window
+    // adds pairs carrying a route or a minute, and letting those count here would silently retire
+    // the «matched on the amount alone» warning on hints that are exactly as weak as before.
     if (!timed.pairs.some((pair) => pair.causes.length > 1)) causes.push('scan_overlap_amount_only')
     if (tied) causes.push('scan_overlap_direction_ambiguous')
-    return {
-      earlierPageRef: aIsEarlier ? a.pageRef : b.pageRef,
-      laterPageRef: aIsEarlier ? b.pageRef : a.pageRef,
-      length: timed.length,
-      pairs: aIsEarlier
-        ? timed.pairs
-        : timed.pairs.map((pair) => ({ ...pair, earlierRowRef: pair.laterRowRef, laterRowRef: pair.earlierRowRef })),
-      causes,
-    }
+    return finish(a, b, aIsEarlier, timed, causes)
   }
 
   const forward = suffixPrefixRun(a, b)
   const backward = suffixPrefixRun(b, a)
-  if (forward.length === 0 && backward.length === 0) return null
+  if (forward.length > 0 || backward.length > 0) {
+    const ambiguous = forward.length === backward.length && forward.length > 0
+    // On a tie the page order is genuinely unknown, so say so and break it on the opaque refs. The
+    // alternative — picking by argument order — would make the same two pages answer differently
+    // depending on how the caller happened to iterate them.
+    const forwardWins = ambiguous ? a.pageRef <= b.pageRef : forward.length > backward.length
+    const chosen = forwardWins ? forward : backward
+    const causes: ScanOverlapCause[] = ['scan_overlap_suffix_prefix']
+    if (!chosen.pairs.some((pair) => pair.causes.length > 1)) causes.push('scan_overlap_amount_only')
+    if (ambiguous) causes.push('scan_overlap_direction_ambiguous')
+    // `suffixPrefixRun` already reports its pairs in (earlier, later) order for the direction it
+    // won, so the window is swept in that same direction and nothing is flipped again.
+    return forwardWins
+      ? finish(a, b, true, chosen, causes)
+      : finish(b, a, true, chosen, causes)
+  }
 
-  const ambiguous = forward.length === backward.length && forward.length > 0
-  // On a tie the page order is genuinely unknown, so say so and break it on the opaque refs. The
-  // alternative — picking by argument order — would make the same two pages answer differently
-  // depending on how the caller happened to iterate them.
-  const forwardWins = ambiguous ? a.pageRef <= b.pageRef : forward.length > backward.length
-  const chosen = forwardWins ? forward : backward
-  const earlierPageRef = forwardWins ? a.pageRef : b.pageRef
-  const laterPageRef = forwardWins ? b.pageRef : a.pageRef
+  // LAST, and only when nothing else found anything, so this can add hints where there were none
+  // and can never alter one that already exists. This is the 2026-09-01 case: the only shared row
+  // either page could be identified by had its amount corrupted, so both strategies above returned
+  // empty and two copies of one delivery went to settlement uncontested.
+  const misreadForward = misreadAnchors(a, b)
+  const misreadBackward = misreadAnchors(b, a)
+  if (misreadForward.length === 0 && misreadBackward.length === 0) return null
 
-  const causes: ScanOverlapCause[] = ['scan_overlap_suffix_prefix']
-  const corroborated = chosen.pairs.some((pair) => pair.causes.length > 1)
-  if (!corroborated) causes.push('scan_overlap_amount_only')
-  if (ambiguous) causes.push('scan_overlap_direction_ambiguous')
+  const misTied = misreadForward.length === misreadBackward.length
+  const misForwardWins = misTied ? a.pageRef <= b.pageRef : misreadForward.length > misreadBackward.length
+  const misChosen = misForwardWins ? misreadForward : misreadBackward
+  const [misEarlier, misLater] = misForwardWins ? [a, b] : [b, a]
+  const misPos = meanPosition(misEarlier, misChosen.pairs.map((pair) => pair.earlierRowRef))
+  const misOther = meanPosition(misLater, misChosen.pairs.map((pair) => pair.laterRowRef))
+  const misCauses: ScanOverlapCause[] = ['scan_overlap_amount_disagrees']
+  if (misPos === misOther) misCauses.push('scan_overlap_direction_ambiguous')
+  return finish(misEarlier, misLater, misPos >= misOther, misChosen, misCauses)
+}
 
-  return { earlierPageRef, laterPageRef, length: chosen.length, pairs: chosen.pairs, causes }
+/**
+ * Orient the result, sweep the shared window, and say what the sweep found.
+ *
+ * Every exit above funnels through here so the window is accounted for exactly once, in exactly one
+ * place. `length` stays the count of CONFIRMED pairs — callers order and tie-break on it, and a
+ * number that grew because a corrupted row was reported would change which hint a manager sees
+ * first for reasons that have nothing to do with how much the pages actually share.
+ */
+const finish = (
+  a: ScannedPage,
+  b: ScannedPage,
+  aIsEarlier: boolean,
+  confirmed: Directed,
+  causes: ScanOverlapCause[],
+): ScanPageOverlap => {
+  const earlier = aIsEarlier ? a : b
+  const later = aIsEarlier ? b : a
+  const pairs = aIsEarlier
+    ? confirmed.pairs
+    : confirmed.pairs.map((pair) => ({ ...pair, earlierRowRef: pair.laterRowRef, laterRowRef: pair.earlierRowRef }))
+
+  const offset = sharedOffset(earlier, later, pairs)
+  const extra = offset === null ? [] : accountForWindow(earlier, later, pairs, offset)
+  const all = [...pairs, ...extra]
+  if (
+    extra.some((pair) => pair.causes.includes('scan_overlap_pair_amount_disagrees')) &&
+    !causes.includes('scan_overlap_amount_disagrees')
+  ) {
+    causes.push('scan_overlap_amount_disagrees')
+  }
+
+  return {
+    earlierPageRef: earlier.pageRef,
+    laterPageRef: later.pageRef,
+    length: confirmed.length,
+    pairs: all,
+    causes,
+  }
 }
 
 /**

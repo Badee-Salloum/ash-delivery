@@ -267,12 +267,15 @@ export const scanOverlapCauseSchema = z.enum([
   'scan_overlap_suffix_prefix',
   'scan_overlap_amount_only',
   'scan_overlap_direction_ambiguous',
+  'scan_overlap_amount_disagrees',
 ])
 
 export const scanOverlapPairCauseSchema = z.enum([
   'scan_overlap_pair_amount_agrees',
   'scan_overlap_pair_minute_agrees',
   'scan_overlap_pair_route_agrees',
+  'scan_overlap_pair_amount_disagrees',
+  'scan_overlap_pair_unaccounted',
 ])
 
 const scanDuplicateHintPageSchema = z.object({

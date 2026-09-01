@@ -66,6 +66,16 @@ export interface DuplicateChoiceView {
    * delivery; the manager picks, and this only tells him what distinguishes the two.
    */
   timedKey: string | null
+  /**
+   * The two readings are almost certainly ONE row, and one of them got the money wrong.
+   *
+   * True when the only thing that differs is the amount, while the printed clock and the whole
+   * route agree. That is not a judgement about which figure is right — it is the shape of a capture
+   * clipped or faded at a page seam, which is how 330 was read as 230 on 2026-09-01 and both copies
+   * reached settlement. The panel says so plainly, because «two rows for one delivery» and «two
+   * deliveries a minute apart» call for completely different reading of the same screen.
+   */
+  likelyOneRowMisread: boolean
 }
 
 export const duplicateChoiceKey = (target: DuplicateChoiceTarget): string =>
@@ -126,11 +136,24 @@ export function duplicateChoiceView(input: {
   const timed = (side: DuplicateChoiceSide): boolean =>
     side.row.occurredMinute !== null && side.row.occurredMinute !== ''
 
+  // A DISagreement is not an agreement. `scan_overlap_pair_amount_disagrees` travels in the same
+  // `causes` array because the wire has one field for both, but rendering it under «they agree on»
+  // would state the opposite of the fact. `differences` already carries `'amount'`, derived from
+  // the rows themselves, so nothing is lost by dropping it here.
+  const agreements = input.hint.causes.filter(
+    (cause) => cause !== 'scan_overlap_pair_amount_disagrees' && cause !== 'scan_overlap_pair_unaccounted',
+  )
+  const amountOnly = differences.length === 1 && differences[0] === 'amount'
+
   return {
     self,
     counterpart,
-    agreements: input.hint.causes,
+    agreements,
     differences,
+    likelyOneRowMisread:
+      amountOnly &&
+      agreements.includes('scan_overlap_pair_minute_agrees') &&
+      agreements.includes('scan_overlap_pair_route_agrees'),
     timedKey:
       timed(self) === timed(counterpart) ? null : timed(self) ? self.key : counterpart.key,
   }

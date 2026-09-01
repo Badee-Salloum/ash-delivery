@@ -194,12 +194,20 @@ export class ChatCompletionsOcrReader implements OcrReader {
      * falsified is not an identity.
      */
     const prefix = `${this.config.provider}@${this.endpointHost}:${this.model}:${this.config.effort}:${this.config.verbosity}`
+    // `orders-money-v5` / `orders-route-v4`, 2026-09-01: both prompts now refuse a fee whose digits
+    // are clipped or faded rather than reading them. Shift a3728815 had a row scrolled under a
+    // sticky header where the top of a ٣ was lost and came back as ٢ — 330 read as 230, with the
+    // clock and route perfect on both sides, so it survived every downstream check and was counted
+    // as a second delivery. Bumping the tokens is the point: a cached answer from a reader that
+    // would have accepted that number must not satisfy a new screenshot. Every stored orders image
+    // is read once more at the new prompt, which at the measured $0.044 a shift is not a reason to
+    // keep serving the old answer.
     if (field === 'orders') {
       const moneyTimeout = Math.min(this.config.timeoutMs, ORDERS_MONEY_TIMEOUT_MS)
       const timeTimeout = Math.min(this.config.timeoutMs, ORDERS_TIME_TIMEOUT_MS)
       const kindTimeout = Math.min(this.config.timeoutMs, ORDERS_SCREEN_KIND_TIMEOUT_MS)
       const routeTimeout = Math.min(this.config.timeoutMs, ORDERS_ROUTE_TIMEOUT_MS)
-      return `${prefix}:orders-screen-kind-v1:orders-money-v4:orders-time-v3:orders-route-v3:money-authority-v1:money-validation-v2:time-validation-v3:position-evidence-v1:cancellation-consensus-v1:kind-timeout-${kindTimeout}:money-timeout-${moneyTimeout}:time-timeout-${timeTimeout}:route-timeout-${routeTimeout}:route-grace-${ORDERS_ROUTE_GRACE_AFTER_MONEY_MS}:kind-max-${ORDERS_SCREEN_KIND_MAX_COMPLETION_TOKENS}:money-max-${ORDERS_MONEY_MAX_COMPLETION_TOKENS}:time-max-${ORDERS_TIME_MAX_COMPLETION_TOKENS}:route-max-${MAX_COMPLETION_TOKENS}`
+      return `${prefix}:orders-screen-kind-v1:orders-money-v5:orders-time-v3:orders-route-v4:money-authority-v1:money-validation-v2:time-validation-v3:position-evidence-v1:cancellation-consensus-v1:kind-timeout-${kindTimeout}:money-timeout-${moneyTimeout}:time-timeout-${timeTimeout}:route-timeout-${routeTimeout}:route-grace-${ORDERS_ROUTE_GRACE_AFTER_MONEY_MS}:kind-max-${ORDERS_SCREEN_KIND_MAX_COMPLETION_TOKENS}:money-max-${ORDERS_MONEY_MAX_COMPLETION_TOKENS}:time-max-${ORDERS_TIME_MAX_COMPLETION_TOKENS}:route-max-${MAX_COMPLETION_TOKENS}`
     }
     const budget = `timeout-${this.config.timeoutMs}:max-${MAX_COMPLETION_TOKENS}`
     if (field === 'wallet') {

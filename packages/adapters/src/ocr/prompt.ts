@@ -113,6 +113,7 @@ Other rules, each of which corresponds to a real screen:
 
 - A CANCELLED order ("Cancelled" / "تم إلغاؤه") has NO amount: \`value\` null, \`cancelled\` true, \`digitCount\` 0. Never copy a number from a neighbouring row.
 - A card SLICED by the top or bottom edge may show its addresses but not its fee: \`value\` null, and say so in \`notes\`.
+- A fee whose DIGITS are cut, faded, or dimmed under a header is UNREADABLE even though a number is visible. This is the dangerous case: shaving the top off Arabic-Indic ٣ leaves something shaped exactly like ٢, so a confident wrong number replaces a right one. If the first or last card on the screen is scrolled under a sticky header or clipped by the frame, and its digits are not rendered in full height and full brightness like the cards around it, set \`value\` null, keep \`printed\` as what you can see, and say so in \`notes\`. A refusal a human resolves is always safer than a number nobody can question.
 - A screen may carry MORE THAN ONE date header ("Friday, August 7" … then lower down "Thursday, August 6"). Each row takes the nearest header ABOVE it. Month names may be Arabic (أغسطس, آب), Maghrebi (غشت) or English. The year is 2026.
 ${timeRule}
 - On the ORDERS list each card shows two address lines, A (pickup) then B (dropoff). Copy each into \`pointA\` / \`pointB\` exactly as printed. On every other screen both are null.
@@ -158,6 +159,12 @@ Only a number beside "SYP" is a fee. Never use a number from an address, coordin
 bar, date header, or time. A cancelled card has \`value\` null, \`cancelled\` true and
 \`digitCount\` 0. Include an edge-sliced card when its fee is visible; if the card is visible but
 its fee is genuinely unreadable, use "?" for \`printed\` and null for \`value\`.
+
+A fee is NOT "visible" merely because a number appears there. The first or last card of a scrolled
+screen is often clipped by the frame or faded under a sticky header, and a digit missing its top is
+still a shape: take the crown off Arabic-Indic ٣ and what is left reads as ٢, turning 330 into 230
+with nothing to show it happened. When a card's digits are not rendered at the same full height and
+brightness as the cards around it, that fee is unreadable: "?" for \`printed\`, null for \`value\`.
 
 A screenshot can contain multiple date headers. Each row takes the closest header ABOVE it. The
 year is 2026. Month names can be Arabic, Maghrebi, or English. In \`time\`, copy the complete time

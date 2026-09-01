@@ -190,3 +190,68 @@ describe('duplicateChoiceKey', () => {
     expect(duplicateChoiceKey({ kind: 'cash_deduction', id: 'B' })).toBe('cash_deduction:B')
   })
 })
+
+describe('likelyOneRowMisread', () => {
+  const seam = (selfAmount: string, otherAmount: string, causes: any[]) =>
+    duplicateChoiceView({
+      self: { target: ORDER_A, row: row({ amount: selfAmount, occurredMinute: '14:50' }), slot: 'dashboard', rowIndex: 4 },
+      hint: {
+        counterpart: { kind: 'order', providerOrderNo: 'B', observationId: 'o2', rowIndex: 0 },
+        counterpartSlot: 'dashboard_2',
+        counterpartRowIndex: 0,
+        causes,
+      },
+      lookup: () => row({ amount: otherAmount, occurredMinute: '14:50' }),
+    })!
+
+  const SEAM_CAUSES = [
+    'scan_overlap_pair_amount_disagrees',
+    'scan_overlap_pair_minute_agrees',
+    'scan_overlap_pair_route_agrees',
+  ] as any[]
+
+  it('recognises the shape that produced the 330/230 misread', () => {
+    // Only the money differs, and the clock and the whole route agree on both sides. That is a
+    // capture clipped at a page seam, not two deliveries.
+    const view = seam('330.00', '230.00', SEAM_CAUSES)
+    expect(view.likelyOneRowMisread).toBe(true)
+    expect(view.differences).toEqual(['amount'])
+  })
+
+  it('never files a disagreement under «they agree on»', () => {
+    // The wire carries agreements and the one disagreement in a single `causes` array. Rendering
+    // `amount_disagrees` in the agreements line would tell the manager the exact opposite.
+    const view = seam('330.00', '230.00', SEAM_CAUSES)
+    expect(view.agreements).toEqual([
+      'scan_overlap_pair_minute_agrees',
+      'scan_overlap_pair_route_agrees',
+    ])
+  })
+
+  it('stays silent when the route was never compared', () => {
+    // With the amount in doubt, the route is what carries the identity. Without it this is just
+    // two rows at one minute, which is ordinary.
+    expect(seam('330.00', '230.00', ['scan_overlap_pair_amount_disagrees', 'scan_overlap_pair_minute_agrees'] as any[]).likelyOneRowMisread).toBe(false)
+  })
+
+  it('stays silent when something other than the amount also differs', () => {
+    const view = duplicateChoiceView({
+      self: { target: ORDER_A, row: row({ amount: '330.00', occurredMinute: '14:50' }), slot: 'dashboard', rowIndex: 4 },
+      hint: {
+        counterpart: { kind: 'order', providerOrderNo: 'B', observationId: 'o2', rowIndex: 0 },
+        counterpartSlot: 'dashboard_2',
+        counterpartRowIndex: 0,
+        causes: SEAM_CAUSES,
+      },
+      // A different DAY as well as a different amount: not one row seen twice. (`row()` defaults to
+      // 2026-08-31, so the date has to be moved deliberately for this to differ at all.)
+      lookup: () => row({ amount: '230.00', occurredMinute: '14:50', occurredDate: '2026-09-01' }),
+    })!
+    expect(view.likelyOneRowMisread).toBe(false)
+  })
+
+  it('stays silent on an ordinary duplicate, where the amounts agree', () => {
+    const view = build(row(), row({ occurredMinute: '12:08' }))!
+    expect(view.likelyOneRowMisread).toBe(false)
+  })
+})
