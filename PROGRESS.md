@@ -1,5 +1,100 @@
 # PROGRESS
 
+## 2026-09-01 — «السلفة»: an expense that must come back
+
+Deployed: migrations `0055`–`0057`, API, admin. Commit `e04dca4`. `pnpm check` green — 885 API
+tests, 560 domain, plus the new static migration suite.
+
+Owner: «اضف شي خليط بين الصرفية و الذمة — هوي صرفية دفعت لكنها يجب ان ترد كاملة».
+
+A third money instrument beside the صرفية and the ذمة. It leaves the box the way a صرفية does — a
+named person, a category, a receipt — but it is **not consumed**: it stays company property, and
+therefore office capital, until it is handed back.
+
+### A scope amendment, not a feature
+
+`SRSv1.0.md:62` and `:176` place «السلف» out of scope, and `ASSUMPTIONS.md` A-16 recorded the
+omission as deliberate, *"so a future session does not helpfully add them"*. That conflict was put
+to the owner before any code was written, with four scoping questions. His answers, now
+**decision 17**: any party named as free text; recorded from Expenses and read from Treasury;
+repaid only by cash back into the box; converted to an ordinary صرفية if it never returns. A-16 is
+superseded in place for advances only — salaries and penalties remain out of scope.
+
+### The property the whole thing rests on
+
+```
+pay 100,000   box 3,900,000 + ذمم 400,000 + سلف 100,000 = target -> nothing moves
+repay it      box 4,000,000 + ذمم 400,000 + سلف       0 = target -> nothing moves
+convert it    box 3,900,000 + ذمم 400,000 + سلف       0 < target -> one «شحن» of 100,000
+```
+
+Get this wrong and صندوق الشركة finances every advance invisibly: «شحن» in each night to refill a
+box that is not short, swept back out the day the money returns. So capital gains the term in all
+**four** places that compute it — the dashboard read model, the restoration's own `positionsFor`,
+the go-live gate, and the guard inside PostgreSQL. An end-to-end test runs three nights around one
+advance and asserts the company fund never moves; a second asserts conversion moves it exactly once.
+
+### Three design decisions worth keeping
+
+**The fund is keyed by the ADVANCE, not the party.** The party is free text and has no id. Keying by
+the advance also inherits `0037`'s production-tested over-collection guard, which refuses to drive a
+*named* asset below zero — a single pooled fund would hide over-repaying one advance behind another
+still outstanding, because the pool never goes negative. `party_key` (a pure Arabic normaliser:
+hamza, harakat, tatweel, ة/ه, ى/ي, Arabic-Indic digits) exists only for autocomplete, is derived
+server-side, and no figure depends on it.
+
+**A repayment returns to the box the money left from.** الترميم plans each box against its own
+target, so crossing boxes would raise one leg and lower the other at different moments and let one
+advance's own balance go negative in between — which every reader treats as corruption. The physical
+case is served by composing with `POST /treasury/transfer` from the previous commit.
+
+**Conversion writes a real `expenses` row**, carrying the advance's own category, cost centre and
+receipt, so SRS G's «كل ليرة تخرج: مصنَّفة وموثَّقة ومنسوبة لمركز كلفتها» is honoured at the moment
+the lira is finally recognised as spent. Its cost centre is derived as an ordinary expense derives
+it (`vehicleId ?? '<kind>:<branchId>'`) — never from the category, which has never been an account.
+
+### Re-emitting a SECURITY DEFINER guard without retyping it
+
+`0053` cannot be edited: `migrate.ts` checksums applied migrations. So its v3 restoration guard is
+re-emitted as v4 — **extracted verbatim with `sed`, changed by seven named hunks, proved by
+`diff -u`: 40 lines of 332.** The driver-receivable derivation inside it is byte-identical, and a
+test slices that fragment out of both files and demands equality, so the proof outlives the session
+that made it. Four whole blocks — the actor check, the advisory lock, the opening-snapshot reversal,
+the net computation — are untouched, and being able to say that precisely is the evidence.
+
+The dispatcher gained one genuinely new rule, which is the whole safety story: **a v3 plan is refused
+while any advance is outstanding.** An API rolled back past this release can only emit v3, which has
+no advances term; refusing it by name stops الترميم loudly instead of paying for the same advance
+twice. RUNBOOK carries the operator note.
+
+### Verified on production, then rolled back
+
+No Docker on this machine, so the guards had never met a real PostgreSQL. Two passes, both against
+production inside transactions that were rolled back — the technique that caught two faults in 0054:
+
+1. **Rehearsal** — 0056 and 0057 parsed and ran together, all six functions present with the right
+   `SECURITY DEFINER`/`search_path`, ten triggers, `expenses.advance_id` and its partial unique
+   index, and all 11 existing expenses still ordinary.
+2. **Guard exercise** — paid a 1.00 advance through the real triggers, then proved each refusal
+   fires by name: `advances_actor_guard` (attributed to somebody else), `advances_lines_guard`
+   (journal disagrees with the row), `advance_events_overrepayment_guard` (repaying more than is
+   owed). Repaid it; `office_cash` returned exactly to `51,520.65`. **11/11, then rolled back.**
+
+### See it in 2 minutes
+
+**الصرفيات** → a third button «السلف» beside «صرفية» and «مدخول»: recipient, box, category, amount.
+**الخزينة** → the «السلف» card above «الذمم»: what each still owes, with «تسجيل إعادة» and
+«تحويل إلى صرفية» (which asks first — capital drops only there).
+
+### Deliberately not done
+
+No deduction from a driver's shift settlement: that would reach into the settlement snapshot
+decision 13 froze, and the owner chose cash repayment only. No write-off path — an advance that will
+not return becomes an *expense*, with its cost centre, rather than a loss beside the receivable
+write-offs it has nothing to do with.
+
+---
+
 ## 2026-08-31 — the order-time pipeline: the window, the clock, the duplicate
 
 Deployed: migration `0054`, API, admin. Commits `3409622`, `2ea8f8f`. `pnpm check` green — 838 API
