@@ -1,5 +1,96 @@
 # PROGRESS
 
+## 2026-09-01 (later) — the close approval screen: the picture, the pair, and the tablet
+
+Deployed: API `ash-api-xi` and admin `ash-admin-eta` (bundle `index-BhqiR3_5.js`, verified live).
+Commits `d1b1602`, `613b6f2`, `d484f7b`. `pnpm check` green — 895 API tests, 232 admin, 537 domain.
+
+Owner: «اعد تصميم واجهة انهاء النوبة بالنسبة للادارة لتصبح بشكل اوضح و ابسط / راجع الموضوع كخبير
+UI/UX software and finance».
+
+Three shipped changes, each fixing something a manager pays for on a real shift. **No financial
+rule moved.** Every money figure comes from the same tested pure modules it came from yesterday.
+
+### 1. The disputed row now carries its own page
+
+The manager's first question about a row is «what did the screen say». That took four steps: scroll
+past the cards, open «الأدلّة والتفاصيل», pick the right page out of several, open the viewer, then
+match it back to the row from memory. On a two-page shift, step three is also how he looks at the
+wrong page and decides confidently.
+
+The link already existed — an observation records `{mediaId, attachmentToken, slot}` and every
+scanned row carries `observationId` — it simply never reached the client. `evidenceSourcesForShift`
+resolves it through the **same two keys** `buildScanDuplicateHints` uses, in the same order, so a
+row's thumbnail and a hint about that row can never name different pages.
+
+`rowEvidencePage` decides what to show, and each fallback is a different fact: the exact bytes read;
+failing that the page now in that slot, because a **retake** rotates the attachment token and stores
+a new image while the slot still names the right page; failing that the only page there is, but only
+for a row that came from a screenshot at all. A hand-typed row, and a linkless row on a multi-page
+shift, get **nothing** — showing a manager the wrong screenshot is worse than showing him none,
+because he believes it.
+
+The band is a percentage of the image's own height over an image left at its natural aspect, so it
+lands on the disputed line whatever the screenshot's dimensions, and it is drawn only when
+`yTop`/`yBottom` are real. `defaultRereadSlot` targets that same page instead of asking — nothing
+previously stopped a re-read of the page the row did not come from.
+
+### 2. «أيّ الصفّين هو التوصيلة الحقيقية؟»
+
+A hint named a **position**: «يطابق الصف ٣ في صفحة ١». And «تثبيت كتكرار» acted only on the row
+being displayed — so when the displayed row was the good one, the manager had to go find the other
+card. He did not. That is how shift `d0a5a7ec` came to carry **21 rows for 10 deliveries** and
+Haidar's 205.00 was counted twice.
+
+Both operations are now shown side by side, each with its own figures, its own page and a band over
+its own line, under one question and one button that states both outcomes before it is pressed:
+«احفظ — يبقى المحدَّد ويُستبعد الآخر», with a line saying what does **not** happen — the excluded
+row keeps its reason and stays in the record. Two buttons («استبعد هذا» / «استبعد المقابل») were
+tried and rejected: «المقابل» is a word a manager resolves by counting columns, and both buttons
+named exclusion while he was deciding which row is *real*.
+
+**Nothing is pre-selected.** The side carrying a printed clock — the identity under decision 16 — is
+marked as a note on the option, never as the answer: a radio checked on arrival beside a save button
+means one click excludes a real delivery the system merely suspected.
+
+`duplicateChoiceRevision` posts only rows that actually change (re-asserting a held value still
+rotates `orders_hash` and forces a full re-review), and it can bring the chosen row back when the
+chosen one was the excluded one — a case a single-row control cannot express at all.
+
+### 3. The layout a landscape tablet actually gets
+
+Two columns fired at `xl` = 1280px. The nav rail is `w-60` and static from 1024px, so at exactly
+1280 the main pane is ~992px and `minmax(22rem,28rem)` claims up to 448 of it: the first width at
+which two columns appear is also the width at which they are worst. Moved to `2xl` = 1536px, which
+makes the single column the layout the manager's real device (1024–1180px) always gets.
+
+There the money panel was `order-1` unconditionally, so on a shift with open rows he scrolled past
+the figures, their inputs and the approve button to reach the work that has to happen before any of
+those numbers mean anything. The column now leads with whatever is his job at that moment.
+
+### One test was weaker than it looked
+
+`bodyOf` in the duplicate-hint wiring test brace-matched from the first `{` after the function name
+— the **destructured parameter list**. Its `not.toContain` assertions, which guard «an advisory hint
+may never post a revision», were running against the props, where they could not have failed. Fixed
+in both wiring tests; both still pass.
+
+**Next**
+
+1. Ship 3b of the approval plan — extract `screens/close/*` and move the 67 inline copy keys into
+   `packages/client/src/i18n`. Pure mechanics, no user-visible change, so it waits for a quiet day
+   rather than moving 3,900 lines of a screen managers use tonight.
+2. Branch coordinates are still swapped in production (`lat 36.29297 / lng 33.52239`).
+3. Yaman's 226,000 and Ibrahim's 50,000 / 43,500 remain unrecorded, pending the owner's answers.
+
+**Risks**
+
+- 🟠 **Credentials exposed in session transcripts and warranting rotation** — the `neondb_owner`
+  connection string, the Vercel token, and the admin password. Only the owner can rotate them.
+- 🟡 The admin bundle is 884 kB (249 kB gzipped) and has no `manualChunks`. Not urgent on a branch
+  laptop, but the driver PWA's size budget does not protect this one.
+
+
 ## 2026-09-01 — «السلفة»: an expense that must come back
 
 Deployed: migrations `0055`–`0057`, API, admin. Commit `e04dca4`. `pnpm check` green — 885 API
