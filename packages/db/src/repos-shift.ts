@@ -1871,8 +1871,8 @@ export class PgAdvanceRepo implements AdvanceRepo {
     await this.pool.query(
       `INSERT INTO advances (id, branch_id, party_name, party_key, category_id, cost_center_kind,
                              vehicle_id, channel, amount_minor, business_date, description,
-                             receipt_media_id, journal_entry_id, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+                             receipt_media_id, journal_entry_id, source_driver_id, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
       [
         advance.id,
         advance.branchId,
@@ -1887,6 +1887,7 @@ export class PgAdvanceRepo implements AdvanceRepo {
         advance.description,
         advance.receiptMediaId,
         advance.journalEntryId,
+        advance.sourceDriverId,
         advance.createdBy,
       ],
     )
@@ -2000,6 +2001,7 @@ const advanceRecord = (row: Record<string, unknown>): AdvanceRecord => ({
   businessDate: isoDate(row.business_date),
   description: String(row.description),
   receiptMediaId: (row.receipt_media_id as string | null) ?? null,
+  sourceDriverId: (row.source_driver_id as string | null) ?? null,
   // NOT NULL in the schema, unlike an expense's: an advance without its journal cannot exist.
   journalEntryId: Number(row.journal_entry_id),
   createdBy: String(row.created_by),

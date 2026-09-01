@@ -1772,7 +1772,19 @@ export interface AdvanceRecord {
   categoryId: string
   costCenterKind: 'vehicle' | 'branch' | 'general'
   vehicleId: string | null
-  /** WHICH BOX paid — a physical fact. The operator never names a ledger fund. */
+  /**
+   * Set when this advance was reclassified from that driver's «ذمة» instead of paid out of a box.
+   *
+   * The credit leg is then his receivable fund, no money moved, and office capital is unchanged —
+   * the same debt, filed differently.
+   */
+  sourceDriverId: string | null
+  /**
+   * WHICH BOX paid — a physical fact. The operator never names a ledger fund.
+   *
+   * For a reclassified receivable this is INHERITED from the debt, never chosen: a debt owed in
+   * cash stays owed in cash, so a later repayment lands in the box it was always owed to.
+   */
   channel: 'office_cash' | 'office_wallet'
   amount: Minor
   businessDate: CalendarDate

@@ -11,6 +11,7 @@ import {
   type Minor,
   type Posting,
   advance as advancePosting,
+  advanceFromReceivable as advanceFromReceivablePosting,
   advanceConversion as advanceConversionPosting,
   advanceRepayment as advanceRepaymentPosting,
   fundCode,
@@ -61,6 +62,7 @@ const sameAdvanceRequest = (
   existing.categoryId === requested.categoryId &&
   existing.costCenterKind === requested.costCenterKind &&
   existing.vehicleId === requested.vehicleId &&
+  existing.sourceDriverId === requested.sourceDriverId &&
   // Compared, and it matters: without the channel a replay that flipped cash to wallet would
   // return 200 and quietly leave the ORIGINAL row standing against the wrong box.
   existing.channel === requested.channel &&
@@ -128,6 +130,7 @@ export function registerAdvanceRoutes(app: FastifyInstance, deps: Deps): void {
       categoryId: body.categoryId,
       costCenterKind: body.costCenterKind,
       vehicleId: body.vehicleId,
+      sourceDriverId: body.sourceDriverId,
       channel: body.channel,
       amount: body.amount,
       businessDate,
@@ -162,11 +165,34 @@ export function registerAdvanceRoutes(app: FastifyInstance, deps: Deps): void {
       if (vehicle.branchId !== branchId) throw new ServiceError(422, 'vehicle_in_another_branch')
     }
 
+    if (record.sourceDriverId !== null) {
+      const driver = await deps.directory.driver(record.sourceDriverId)
+      if (!driver) throw new ServiceError(404, 'driver_not_found')
+      if (driver.branchId !== branchId) throw new ServiceError(422, 'driver_in_another_branch')
+    }
+
     // BR7: a back-dated entry is the likeliest way into a sealed week, and this route lets the
     // caller supply the date.
     await assertWeekOpen(deps, branchId, businessDate)
 
-    const posting: Posting = advancePosting(record.channel, record.id, record.amount, record.id)
+    /*
+     * WHERE THE VALUE COMES FROM.
+     *
+     * A box, or a «ذمة» being reclassified — and in the second case NOTHING PHYSICAL HAPPENS. One
+     * counted asset falls, another rises, no box is touched, office capital is unchanged. Composing
+     * the two existing routes instead (collect, then pay) would reach the same balances while
+     * writing a COLLECTION into the driver's history for money that never came back.
+     */
+    const posting: Posting =
+      record.sourceDriverId === null
+        ? advancePosting(record.channel, record.id, record.amount, record.id)
+        : advanceFromReceivablePosting(
+            record.channel,
+            record.id,
+            record.sourceDriverId,
+            record.amount,
+            record.id,
+          )
     const fxDayId = await ensureFxDay(deps, businessDate)
 
     const outcome = await deps.financialUnitOfWork.run(
@@ -188,13 +214,34 @@ export function registerAdvanceRoutes(app: FastifyInstance, deps: Deps): void {
          * arithmetic has no opinion — and this is the cheapest place to catch an extra zero, which
          * is the mistake this form invites.
          */
-        const held = await tx.ledger.fundBalance(branchId, record.channel)
-        if (record.amount > held) {
-          throw new ServiceError(422, 'insufficient_funds', {
-            from: record.channel,
-            held: serializeMoney(minor(held)),
-            requested: serializeMoney(record.amount),
-          })
+        if (record.sourceDriverId === null) {
+          const held = await tx.ledger.fundBalance(branchId, record.channel)
+          if (record.amount > held) {
+            throw new ServiceError(422, 'insufficient_funds', {
+              from: record.channel,
+              held: serializeMoney(minor(held)),
+              requested: serializeMoney(record.amount),
+            })
+          }
+        } else {
+          /*
+           * A reclassification is bounded by the DEBT, not by the box: no box is being drawn on.
+           * Converting more than he owes would invent office capital out of nothing and leave his
+           * «ذمة» negative — which every reader in this system treats as corruption. Re-read inside
+           * the lock, because the interesting case is a collection racing a conversion.
+           */
+          const channel = record.channel === 'office_cash' ? 'cash' : 'wallet'
+          const owed = await tx.ledger.fundBalance(
+            branchId,
+            `driver_receivable_${channel}:${record.sourceDriverId}`,
+          )
+          if (record.amount > owed) {
+            throw new ServiceError(422, 'receivable_too_small', {
+              driverId: record.sourceDriverId,
+              owed: serializeMoney(minor(owed)),
+              requested: serializeMoney(record.amount),
+            })
+          }
         }
 
         const [entry] = await tx.ledger.post(branchId, [posting], {

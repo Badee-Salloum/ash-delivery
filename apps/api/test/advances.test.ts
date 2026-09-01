@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BRANCH, type Harness, makeHarness, sypStr } from './harness.ts'
+import { BRANCH, DRIVER_ID, type Harness, makeHarness, sypStr } from './harness.ts'
 
 /**
  * «السلفة» (owner decision 17) — an expense that was paid but must come back in full.
@@ -371,6 +371,150 @@ describe('giving up on it', () => {
     await post(token, `/advances/${id}/conversion`, { idempotencyKey: crypto.randomUUID(), reason: 'ضاعت' })
     const codes = h.deps.ledger.entries.slice(before).flatMap((e) => e.lines.map((l) => l.fundCode))
     expect(codes).toContain(`cost_center:branch:${BRANCH}`)
+  })
+})
+
+describe('reclassifying a «ذمة» as a «سلفة»', () => {
+  /*
+   * «حول ذمة انس رميح إلى سلفة» (owner, 2026-09-01).
+   *
+   * The same debt, filed differently. The temptation is to compose the two routes that already
+   * exist — collect the receivable, then pay an advance — which reaches the same balances in one
+   * line of code. It also writes a COLLECTION into the driver's history for money that never came
+   * back, and shows cash entering and leaving the box on a day neither happened. So there is a
+   * posting for it, and these tests pin what makes it honest.
+   */
+  const owing = async (amount: number): Promise<string> => {
+    const manager = await h.loginAs('manager')
+    await seed(manager, 500_000, 100_000)
+    const res = await post(manager, '/receivables/events', {
+      driverId: DRIVER_ID,
+      receivableKind: 'ordinary',
+      channel: 'cash',
+      direction: 'create',
+      amount: sypStr(amount),
+      reason: 'ذمة قائمة',
+      idempotencyKey: crypto.randomUUID(),
+    })
+    expect(res.statusCode, res.body).toBe(201)
+    return manager
+  }
+
+  const convert = (categoryId: string, over: Record<string, unknown> = {}): Record<string, unknown> =>
+    body(categoryId, { sourceDriverId: DRIVER_ID, channel: 'office_cash', ...over })
+
+  it('moves the debt without touching a box, and without moving capital', async () => {
+    const categoryId = await category()
+    const token = await owing(80_000)
+    const capitalBefore = capitalOf()
+    const cashBefore = await h.deps.ledger.fundBalance(BRANCH, 'office_cash')
+
+    const res = await post(token, '/advances', convert(categoryId, { amount: sypStr(80_000) }))
+    expect(res.statusCode, res.body).toBe(201)
+    const id = res.json().id as string
+
+    // The debt is now an advance…
+    expect(await h.deps.ledger.fundBalance(BRANCH, `driver_receivable_cash:${DRIVER_ID}`)).toBe(0n)
+    expect(await h.deps.ledger.fundBalance(BRANCH, `advance_receivable_cash:${id}`)).toBe(8_000_000n)
+    // …and NOTHING physical happened. No box moved; capital is untouched.
+    expect(await h.deps.ledger.fundBalance(BRANCH, 'office_cash')).toBe(cashBefore)
+    expect(capitalOf()).toBe(capitalBefore)
+  })
+
+  it('never writes a collection that did not happen', async () => {
+    /*
+     * The whole reason this route exists rather than composing the two that already do. A driver's
+     * history saying «تحصيل» for money that never came back is the exact lie the ledger exists to
+     * prevent — `ReceivableEventRecord.intent` says so in its own doc comment.
+     */
+    const categoryId = await category()
+    const token = await owing(80_000)
+    const before = h.deps.ledger.entries.length
+    expect((await post(token, '/advances', convert(categoryId, { amount: sypStr(80_000) }))).statusCode).toBe(201)
+
+    const written = h.deps.ledger.entries.slice(before)
+    expect(written).toHaveLength(1)
+    const roles = written.flatMap((e) => e.lines.map((l) => l.role))
+    expect(roles).not.toContain('receivable_collected')
+    expect(roles).toEqual(expect.arrayContaining(['advance_created', 'receivable_converted_to_advance']))
+    // And no office line at all: the box was never involved.
+    expect(written[0]!.lines.map((l) => l.fundCode)).not.toContain('office_cash')
+  })
+
+  it('converts part of a debt and leaves the rest a «ذمة»', async () => {
+    const categoryId = await category()
+    const token = await owing(80_000)
+    const res = await post(token, '/advances', convert(categoryId, { amount: sypStr(30_000) }))
+    expect(res.statusCode, res.body).toBe(201)
+    expect(await h.deps.ledger.fundBalance(BRANCH, `driver_receivable_cash:${DRIVER_ID}`)).toBe(5_000_000n)
+  })
+
+  it('refuses to convert more than the driver actually owes', async () => {
+    // Otherwise it invents office capital out of nothing and leaves his «ذمة» negative — which
+    // every reader in this system treats as corruption.
+    const categoryId = await category()
+    const token = await owing(80_000)
+    const res = await post(token, '/advances', convert(categoryId, { amount: sypStr(80_001) }))
+    expect(res.statusCode).toBe(422)
+    expect(res.json().error).toBe('receivable_too_small')
+  })
+
+  it('is not bounded by what the box holds, because no box is being drawn on', async () => {
+    // A cash payout of this size would be refused with `insufficient_funds`. A reclassification
+    // takes nothing out of the drawer, so the drawer has no say.
+    const categoryId = await category()
+    const manager = await h.loginAs('manager')
+    await seed(manager, 1_000, 1_000)
+    expect(
+      (await post(manager, '/receivables/events', {
+        driverId: DRIVER_ID,
+        receivableKind: 'ordinary',
+        channel: 'cash',
+        direction: 'create',
+        amount: sypStr(500),
+        reason: 'ذمة',
+        idempotencyKey: crypto.randomUUID(),
+      })).statusCode,
+    ).toBe(201)
+
+    const res = await post(manager, '/advances', convert(categoryId, { amount: sypStr(500) }))
+    expect(res.statusCode, res.body).toBe(201)
+  })
+
+  it('is repaid into the box the debt was always owed to', async () => {
+    // The channel is inherited from the receivable, never chosen, so no leg of الترميم moves
+    // sideways when he finally pays.
+    const categoryId = await category()
+    const token = await owing(80_000)
+    const created = await post(token, '/advances', convert(categoryId, { amount: sypStr(80_000) }))
+    const cashBefore = await h.deps.ledger.fundBalance(BRANCH, 'office_cash')
+
+    const back = await post(token, `/advances/${created.json().id}/repayments`, {
+      idempotencyKey: crypto.randomUUID(),
+      amount: sypStr(80_000),
+      reason: 'سدّد الذمة',
+    })
+    expect(back.statusCode, back.body).toBe(201)
+    expect(await h.deps.ledger.fundBalance(BRANCH, 'office_cash')).toBe(cashBefore + 8_000_000n)
+  })
+
+  it('refuses a replay that changed the origin', async () => {
+    // The same key turning a reclassified debt into a cash payout would post against a completely
+    // different account while telling the caller nothing changed.
+    const categoryId = await category()
+    const token = await owing(80_000)
+    const first = convert(categoryId, { amount: sypStr(80_000) })
+    expect((await post(token, '/advances', first)).statusCode).toBe(201)
+    const res = await post(token, '/advances', { ...first, sourceDriverId: null })
+    expect(res.statusCode).toBe(409)
+    expect(res.json().error).toBe('idempotency_key_conflict')
+  })
+
+  it('refuses a driver from another branch', async () => {
+    const categoryId = await category()
+    const token = await owing(80_000)
+    const res = await post(token, '/advances', convert(categoryId, { sourceDriverId: crypto.randomUUID() }))
+    expect(res.statusCode).toBe(404)
   })
 })
 

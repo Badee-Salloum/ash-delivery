@@ -366,6 +366,53 @@ export function Treasury(): ReactNode {
     }
   }
 
+  /**
+   * «تحويل الذمة إلى سلفة» — the same debt, filed differently (owner request, 2026-09-01).
+   *
+   * NO MONEY MOVES. One counted asset falls and another rises; no box is touched and office capital
+   * is unchanged. It goes through its own route rather than composing collect-then-pay, because
+   * that would write a collection into the driver's history for money that never came back.
+   */
+  async function convertReceivableToAdvance(
+    driverId: string,
+    driverName: string,
+    channel: 'cash' | 'wallet',
+    amount: string,
+  ): Promise<void> {
+    const categories = await api.expenseCategories().catch(() => null)
+    const categoryId = categories?.categories[0]?.id
+    if (!categoryId) {
+      toast.error(explainError('unknown_expense_category', t))
+      return
+    }
+    const confirmed = await confirm({
+      title: t.treasury.advanceFromReceivable,
+      body: t.treasury.advanceFromReceivableConfirm
+        .replace('{driver}', driverName)
+        .replace('{amount}', groupThousands(amount)),
+      confirmLabel: t.treasury.advanceFromReceivable,
+    })
+    if (!confirmed) return
+    try {
+      await api.createAdvance({
+        idempotencyKey: crypto.randomUUID(),
+        partyName: driverName,
+        categoryId,
+        costCenterKind: 'general',
+        vehicleId: null,
+        sourceDriverId: driverId,
+        // Inherited from the debt, never chosen: a debt owed in cash stays owed in cash.
+        channel: channel === 'cash' ? 'office_cash' : 'office_wallet',
+        amount,
+        description: `${t.treasury.advanceFromReceivable} — ${driverName}`,
+      })
+      toast.success(t.treasury.advanceFromReceivableOk)
+      await Promise.all([loadAdvances(), loadReceivables(), load()])
+    } catch (err) {
+      toast.error(explainError((err as { error?: string }).error ?? 'error', t))
+    }
+  }
+
   const refreshCompany = useCallback(async (): Promise<void> => {
     if (!canViewCompanyFund) {
       setCompany(null)
@@ -1392,6 +1439,27 @@ export function Treasury(): ReactNode {
                               >
                                 {t.treasury.correctionClear}
                               </Button>
+                              {/*
+                                Ordinary debts only. Shift funding is money the driver physically
+                                holds for his next shift, not a debt to be re-filed — the same
+                                reason the write-off path refuses it.
+                              */}
+                              {kind === 'ordinary' ? (
+                                <Button
+                                  variant="ghost"
+                                  className="min-h-8 px-2 text-xs"
+                                  onClick={() =>
+                                    void convertReceivableToAdvance(
+                                      driver.driverId,
+                                      driver.nameAr,
+                                      channel,
+                                      channel === 'cash' ? driver.ordinaryCash : driver.ordinaryWallet,
+                                    )
+                                  }
+                                >
+                                  {t.treasury.advanceFromReceivable}
+                                </Button>
+                              ) : null}
                             </div>
                           ))}
                         {Number(driver.total) === 0 ? <span className="text-xs text-slate-400">—</span> : null}

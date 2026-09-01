@@ -499,7 +499,9 @@ export interface AdvanceView {
   categoryId: string
   costCenterKind: 'vehicle' | 'branch' | 'general'
   vehicleId: string | null
-  /** WHICH BOX paid. A repayment must return to this same box. */
+  /** Set when this advance was reclassified from that driver's «ذمة»; no money moved. */
+  sourceDriverId: string | null
+  /** WHICH BOX paid — or, for a reclassified receivable, which of his debts it was. */
   channel: 'office_cash' | 'office_wallet'
   /** Decimal string — what was originally handed over. */
   amount: string
@@ -1500,6 +1502,8 @@ export class ApiClient {
     categoryId: string
     costCenterKind: 'vehicle' | 'branch' | 'general'
     vehicleId?: string | null
+    /** Reclassify this driver's «ذمة» instead of paying out of a box. No money moves. */
+    sourceDriverId?: string | null
     channel: 'office_cash' | 'office_wallet'
     amount: string
     description: string

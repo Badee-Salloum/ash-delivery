@@ -851,6 +851,42 @@ export function advance(
 }
 
 /**
+ * Reclassify a driver's «ذمة» as a «سلفة» — the debt is the same money, filed differently.
+ *
+ * NOTHING PHYSICAL HAPPENS HERE, and the posting says so: one counted asset falls and another
+ * rises, no box is touched, and office capital is unchanged. That is the whole reason this recipe
+ * exists rather than composing the two routes that already exist. Collecting the receivable and
+ * then paying an advance reaches the same end state, but it writes a COLLECTION into the driver's
+ * history — «تحصيل» for money that never came back — and shows cash entering and leaving the box
+ * on a day neither happened. `ReceivableEventRecord.intent` carries a comment naming that exact lie
+ * as the thing the ledger exists to prevent.
+ *
+ * The channel is inherited from the receivable, never chosen: a debt owed in cash stays owed in
+ * cash, so a later repayment lands in the box it was always owed to.
+ */
+export function advanceFromReceivable(
+  channel: OfficeFund,
+  advanceId: string,
+  driverId: string,
+  amount: Minor,
+  occurrenceKey = '1',
+): Posting {
+  if (amount <= ZERO) throw new RangeError(`advance from receivable must be positive, got ${amount}`)
+  const receivable: FundRef =
+    channel === 'office_cash'
+      ? { kind: 'driver_receivable_cash', driverId }
+      : { kind: 'driver_receivable_wallet', driverId }
+  return assertBalanced({
+    eventType: 'advance',
+    occurrenceKey,
+    lines: [
+      D(advanceFund(channel, advanceId), amount, 'advance_created'),
+      C(receivable, amount, 'receivable_converted_to_advance'),
+    ],
+  })
+}
+
+/**
  * Money coming back — the exact reverse of the payment, whole or in part.
  *
  * IT RETURNS TO THE BOX IT LEFT. Not tidiness: الترميم plans each box against its own target, so an

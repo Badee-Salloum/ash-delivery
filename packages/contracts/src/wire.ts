@@ -1161,6 +1161,13 @@ export const createAdvanceRequest = z.object({
   /** G-1: vehicle / branch / general — where the cost lands if it is ever converted. */
   costCenterKind: z.enum(['vehicle', 'branch', 'general']),
   vehicleId: z.string().nullable().default(null),
+  /**
+   * Reclassify this driver's «ذمة» instead of paying out of a box.
+   *
+   * When present, no money moves: the debt is simply filed as an advance. The channel then names
+   * WHICH receivable — his cash one or his wallet one — rather than which box pays.
+   */
+  sourceDriverId: z.string().min(1).nullable().default(null),
   /** WHICH BOX paid. A repayment must return to this same box. */
   channel: z.enum(['office_cash', 'office_wallet']),
   amount: positiveExpenseMoneySchema,

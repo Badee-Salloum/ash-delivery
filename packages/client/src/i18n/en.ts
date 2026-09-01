@@ -902,6 +902,12 @@ orderNo: 'Order no.',
     advanceConvertedOk: 'Converted to an expense',
     advanceNone: 'No outstanding advances',
     advanceReason: 'Why',
+    advanceFromReceivable: 'Convert to an advance',
+    advanceFromReceivableConfirm:
+      "Convert {driver}'s receivable ({amount}) into an advance? No money moves: the same debt is filed as an advance in his name, and office capital is unchanged.",
+    advanceFromReceivableOk: 'Receivable converted to an advance',
+    receivable_too_small: 'More than the recorded receivable',
+    driver_in_another_branch: 'That driver belongs to another branch',
     moveBetweenBoxes: 'Move between the cash box and the wallet',
     moveBetweenBoxesHint:
       "Yallago's cut leaves the wallet while the drivers hand back notes, so the wallet empties as the box fills. This only reshapes what the branch already holds — the treasury total is unchanged, and the company fund is not involved.",

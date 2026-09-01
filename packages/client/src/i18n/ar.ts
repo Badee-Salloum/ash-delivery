@@ -993,6 +993,12 @@ orderNo: 'رقم الطلب',
     advanceConvertedOk: 'تم التحويل إلى صرفية',
     advanceNone: 'لا سلف قائمة',
     advanceReason: 'السبب',
+    advanceFromReceivable: 'تحويل إلى سلفة',
+    advanceFromReceivableConfirm:
+      'تحويل ذمة {driver} ({amount}) إلى سلفة؟ لا يتحرّك أيّ مال: الدين نفسه يُقيَّد سلفةً باسمه، ورأس مال المكتب لا يتغيّر.',
+    advanceFromReceivableOk: 'تم تحويل الذمة إلى سلفة',
+    receivable_too_small: 'المبلغ أكبر من الذمة المسجّلة',
+    driver_in_another_branch: 'السائق من فرع آخر',
     // «نقل بين الصندوق والمحفظة» — إعادة توزيع داخل الفرع لا تغيّر مجموع ما يملكه.
     moveBetweenBoxes: 'نقل بين الصندوق والمحفظة',
     moveBetweenBoxesHint:
