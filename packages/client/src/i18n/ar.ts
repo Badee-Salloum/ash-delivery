@@ -994,6 +994,9 @@ orderNo: 'رقم الطلب',
     advanceNone: 'لا سلف قائمة',
     advanceReason: 'السبب',
     advanceFromReceivable: 'تحويل إلى سلفة',
+    advanceFromReceivableParty: 'باسم مَن؟',
+    advanceFromReceivablePartyHint:
+      'الذمّة مربوطة بسائق مسجَّل؛ السلفة تقبل أيّ اسم. إن كان الدين في الحقيقة على شخص آخر فاكتب اسمه هنا.',
     advanceFromReceivableConfirm:
       'تحويل ذمة {driver} ({amount}) إلى سلفة؟ لا يتحرّك أيّ مال: الدين نفسه يُقيَّد سلفةً باسمه، ورأس مال المكتب لا يتغيّر.',
     advanceFromReceivableOk: 'تم تحويل الذمة إلى سلفة',

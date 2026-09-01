@@ -1688,6 +1688,13 @@ export interface ExpenseRecord {
   /** G-1 cost centres: vehicle / branch / general — these feed per-axis profitability. */
   costCenterKind: 'vehicle' | 'branch' | 'general'
   vehicleId: string | null
+  /**
+   * WHICH BOX paid — a physical fact, never a ledger fund.
+   *
+   * Every row predating migration 0059 is `office_cash` by construction: the recipe could credit
+   * nothing else.
+   */
+  channel: 'office_cash' | 'office_wallet'
   amount: Minor
   businessDate: CalendarDate
   description: string

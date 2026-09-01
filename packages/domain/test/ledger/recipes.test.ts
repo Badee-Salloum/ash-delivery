@@ -17,6 +17,7 @@ import {
   orderFee,
   postingsForApproval,
   postingsForOpen,
+  expense,
   income,
   reverse,
 } from '../../src/ledger/recipes.ts'
@@ -462,6 +463,31 @@ describe('property: every posting balances under random event streams (brief §5
  *
  * Money reaching the branch that is not a delivery fee: a scrap sale, a damage recovery, a sponsor.
  */
+describe('expense — and which box paid for it', () => {
+  it('credits the box the recorder named', () => {
+    // Cash was the only possibility until 0059, and it is still the common one; the wallet is not
+    // exotic here, because Yallago's cut leaves the wallet and costs fall on it.
+    for (const channel of ['office_cash', 'office_wallet'] as const) {
+      const posting = expense(channel, 'branch:b1', syp(1_000))
+      expect(posting.eventType).toBe('expense')
+      expect(debitsOf(posting)).toBe(creditsOf(posting))
+      expect(posting.lines.filter((l) => l.side === 'C').map((l) => l.fund.kind)).toEqual([channel])
+    }
+  })
+
+  it('debits the cost centre it was told, never anything else', () => {
+    const posting = expense('office_wallet', 'branch:b1', minor(6_381n))
+    expect(posting.lines.filter((l) => l.side === 'D').map((l) => l.fund)).toEqual([
+      { kind: 'cost_center', costCenterId: 'branch:b1' },
+    ])
+  })
+
+  it('refuses a zero or negative amount', () => {
+    expect(() => expense('office_cash', 'branch:b1', minor(0n))).toThrow(RangeError)
+    expect(() => expense('office_cash', 'branch:b1', minor(-1n))).toThrow(RangeError)
+  })
+})
+
 describe('income — the mirror of expense', () => {
   const fundsOn = (posting: Posting, side: 'D' | 'C'): string[] =>
     posting.lines.filter((l) => l.side === side).map((l) => l.fund.kind)

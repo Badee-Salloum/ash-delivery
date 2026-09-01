@@ -1110,6 +1110,11 @@ export const createExpenseRequest = z.object({
   /** G-1: vehicle / branch / general — these feed per-axis profitability. */
   costCenterKind: z.enum(['vehicle', 'branch', 'general']),
   vehicleId: z.string().nullable().default(null),
+  /**
+   * WHICH BOX paid. Defaults to cash, which is what every expense meant before 0059 — so an older
+   * client deployed against a newer API keeps recording exactly what it always recorded.
+   */
+  channel: z.enum(['office_cash', 'office_wallet']).default('office_cash'),
   amount: positiveExpenseMoneySchema,
   businessDate: calendarDateSchema.optional(),
   description: z.string().min(1).max(500),

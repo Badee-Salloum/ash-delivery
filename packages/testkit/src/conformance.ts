@@ -855,7 +855,8 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
         businessDate: '2026-07-21',
         description: 'Charging electricity',
         receiptMediaId: null,
-        journalEntryId: null,
+        channel: 'office_cash',
+    journalEntryId: null,
   advanceId: null,
         createdBy: USER,
       })

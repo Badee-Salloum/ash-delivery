@@ -16,6 +16,9 @@ const sameExpenseRequest = (
   existing.categoryId === requested.categoryId &&
   existing.costCenterKind === requested.costCenterKind &&
   existing.vehicleId === requested.vehicleId &&
+  // Compared, and it matters for the reason the income route records: without it a replay that
+  // flipped cash to wallet would return 200 and leave the ORIGINAL row against the wrong box.
+  existing.channel === requested.channel &&
   existing.amount === requested.amount &&
   (!businessDateWasExplicit || existing.businessDate === requested.businessDate) &&
   existing.description === requested.description &&
@@ -85,6 +88,7 @@ export function registerExpenseRoutes(app: FastifyInstance, deps: Deps): void {
       categoryId: body.categoryId,
       costCenterKind: body.costCenterKind,
       vehicleId: body.vehicleId,
+      channel: body.channel,
       amount: body.amount,
       businessDate,
       description: body.description,
@@ -140,7 +144,7 @@ export function registerExpenseRoutes(app: FastifyInstance, deps: Deps): void {
     // The ledger posting and the expense row belong together: an expense that is not in the
     // ledger is a number nobody's balance sheet knows about.
     const costCenterId = record.vehicleId ?? `${record.costCenterKind}:${branchId}`
-    const posting: Posting = expensePosting(costCenterId, record.amount, record.id)
+    const posting: Posting = expensePosting(record.channel, costCenterId, record.amount, record.id)
     const fxDayId = await ensureFxDay(deps, businessDate)
 
     const outcome = await deps.financialUnitOfWork.run(

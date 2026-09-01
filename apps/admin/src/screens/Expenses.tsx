@@ -126,6 +126,7 @@ export function Expenses(): ReactNode {
       categoryId,
       costCenterKind: kind,
       vehicleId: kind === 'vehicle' ? vehicleId : null,
+      channel,
       amount,
       description,
     }
@@ -336,6 +337,17 @@ export function Expenses(): ReactNode {
                   ))}
                 </Select>
               </Field>
+              {mode === 'expense' ? (
+                <Field label={t.movements.channel}>
+                  <Select
+                    value={channel}
+                    onChange={(e) => setChannel(e.target.value as 'office_cash' | 'office_wallet')}
+                  >
+                    <option value="office_cash">{t.movements.channelCash}</option>
+                    <option value="office_wallet">{t.movements.channelWallet}</option>
+                  </Select>
+                </Field>
+              ) : null}
               <Field label={t.expenses.costCenter}>
                 <Select value={kind} onChange={(e) => setKind(e.target.value as Kind)}>
                   <option value="general">{t.expenses.kindGeneral}</option>

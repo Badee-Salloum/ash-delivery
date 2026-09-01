@@ -1689,8 +1689,8 @@ export class PgExpenseRepo implements ExpenseRepo {
     await this.pool.query(
       `INSERT INTO expenses (id, branch_id, category_id, cost_center_kind, vehicle_id, amount_minor,
                              business_date, description, receipt_media_id, journal_entry_id,
-                             advance_id, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+                             advance_id, channel, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [
         expense.id,
         expense.branchId,
@@ -1703,6 +1703,7 @@ export class PgExpenseRepo implements ExpenseRepo {
         expense.receiptMediaId,
         expense.journalEntryId,
         expense.advanceId,
+        expense.channel,
         expense.createdBy,
       ],
     )
@@ -1746,6 +1747,7 @@ const expenseRecord = (row: Record<string, unknown>): ExpenseRecord => ({
   categoryId: String(row.category_id),
   costCenterKind: row.cost_center_kind as ExpenseRecord['costCenterKind'],
   vehicleId: (row.vehicle_id as string | null) ?? null,
+  channel: (row.channel as ExpenseRecord['channel'] | undefined) ?? 'office_cash',
   amount: minor(BigInt(String(row.amount))),
   businessDate: isoDate(row.business_date),
   description: String(row.description),

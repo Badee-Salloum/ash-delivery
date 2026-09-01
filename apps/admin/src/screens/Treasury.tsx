@@ -60,6 +60,7 @@ export function Treasury(): ReactNode {
   const [advances, setAdvances] = useState<Awaited<ReturnType<typeof api.advances>> | null>(null)
   const [advancesError, setAdvancesError] = useState<string | null>(null)
   const [advanceRepayAmt, setAdvanceRepayAmt] = useState<Record<string, string>>({})
+  const [convertParty, setConvertParty] = useState<Record<string, string>>({})
   const [advanceReason, setAdvanceReason] = useState<Record<string, string>>({})
   const [advanceBusy, setAdvanceBusy] = useState<string | null>(null)
   const [moveDirection, setMoveDirection] = useState<'cash_to_wallet' | 'wallet_to_cash'>('cash_to_wallet')
@@ -379,6 +380,10 @@ export function Treasury(): ReactNode {
     channel: 'cash' | 'wallet',
     amount: string,
   ): Promise<void> {
+    // Whose debt it REALLY is. A ذمة can only name a registered driver, so a debt somebody else
+    // owes has always had to sit under whichever driver's row the manager picked; this is the
+    // first point at which it can be filed under the right name.
+    const partyName = (convertParty[driverId] ?? '').trim() || driverName
     const categories = await api.expenseCategories().catch(() => null)
     const categoryId = categories?.categories[0]?.id
     if (!categoryId) {
@@ -388,7 +393,7 @@ export function Treasury(): ReactNode {
     const confirmed = await confirm({
       title: t.treasury.advanceFromReceivable,
       body: t.treasury.advanceFromReceivableConfirm
-        .replace('{driver}', driverName)
+        .replace('{driver}', partyName === driverName ? driverName : `${driverName} → ${partyName}`)
         .replace('{amount}', groupThousands(amount)),
       confirmLabel: t.treasury.advanceFromReceivable,
     })
@@ -396,7 +401,7 @@ export function Treasury(): ReactNode {
     try {
       await api.createAdvance({
         idempotencyKey: crypto.randomUUID(),
-        partyName: driverName,
+        partyName,
         categoryId,
         costCenterKind: 'general',
         vehicleId: null,
@@ -406,6 +411,7 @@ export function Treasury(): ReactNode {
         amount,
         description: `${t.treasury.advanceFromReceivable} — ${driverName}`,
       })
+      setConvertParty({ ...convertParty, [driverId]: '' })
       toast.success(t.treasury.advanceFromReceivableOk)
       await Promise.all([loadAdvances(), loadReceivables(), load()])
     } catch (err) {
@@ -1445,6 +1451,15 @@ export function Treasury(): ReactNode {
                                 reason the write-off path refuses it.
                               */}
                               {kind === 'ordinary' ? (
+                                <>
+                                <TextInput
+                                  value={convertParty[driver.driverId] ?? ''}
+                                  onChange={(e) =>
+                                    setConvertParty({ ...convertParty, [driver.driverId]: e.target.value })
+                                  }
+                                  className="w-32"
+                                  placeholder={`${t.treasury.advanceFromReceivableParty} ${driver.nameAr}`}
+                                />
                                 <Button
                                   variant="ghost"
                                   className="min-h-8 px-2 text-xs"
@@ -1459,6 +1474,7 @@ export function Treasury(): ReactNode {
                                 >
                                   {t.treasury.advanceFromReceivable}
                                 </Button>
+                                </>
                               ) : null}
                             </div>
                           ))}

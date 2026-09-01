@@ -76,6 +76,7 @@ if (!DATABASE_URL) {
     businessDate: '2026-08-23',
     description: 'Charging electricity',
     receiptMediaId: null,
+    channel: 'office_cash',
     journalEntryId: null,
     advanceId: null,
     createdBy: USER,
@@ -85,7 +86,7 @@ if (!DATABASE_URL) {
     await unit.run({ lockKey: `expense:${EXPENSE}`, actorId: USER, requestId: 'expense-test' }, async (tx) => {
       const [entry] = await tx.ledger.post(
         BRANCH,
-        [expensePosting(`general:${BRANCH}`, minor(25_000n), EXPENSE)],
+        [expensePosting('office_cash', `general:${BRANCH}`, minor(25_000n), EXPENSE)],
         {
           shiftId: null,
           businessDate: '2026-08-23',

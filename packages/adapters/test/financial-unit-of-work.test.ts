@@ -17,7 +17,8 @@ const record = (): ExpenseRecord => ({
   businessDate: '2026-08-23',
   description: 'Charging electricity',
   receiptMediaId: null,
-  journalEntryId: null,
+  channel: 'office_cash',
+    journalEntryId: null,
   advanceId: null,
   createdBy: USER,
 })
@@ -66,7 +67,7 @@ describe('in-memory financial unit of work', () => {
       deps.financialUnitOfWork.run({ lockKey: `expense:${EXPENSE}`, actorId: USER }, async (tx) => {
         const [entry] = await tx.ledger.post(
           BRANCH,
-          [expensePosting(`general:${BRANCH}`, minor(25_000n), EXPENSE)],
+          [expensePosting('office_cash', `general:${BRANCH}`, minor(25_000n), EXPENSE)],
           meta,
         )
         await tx.expenses.create({ ...record(), journalEntryId: entry!.id })
@@ -84,7 +85,7 @@ describe('in-memory financial unit of work', () => {
     await deps.financialUnitOfWork.run({ lockKey: `expense:${EXPENSE}`, actorId: USER }, async (tx) => {
       const [entry] = await tx.ledger.post(
         BRANCH,
-        [expensePosting(`general:${BRANCH}`, minor(25_000n), EXPENSE)],
+        [expensePosting('office_cash', `general:${BRANCH}`, minor(25_000n), EXPENSE)],
         meta,
       )
       await tx.expenses.create({ ...record(), journalEntryId: entry!.id })

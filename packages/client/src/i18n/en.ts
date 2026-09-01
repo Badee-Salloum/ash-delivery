@@ -903,6 +903,9 @@ orderNo: 'Order no.',
     advanceNone: 'No outstanding advances',
     advanceReason: 'Why',
     advanceFromReceivable: 'Convert to an advance',
+    advanceFromReceivableParty: 'In whose name?',
+    advanceFromReceivablePartyHint:
+      'A receivable is tied to a registered driver; an advance takes any name. If the debt is really somebody else\'s, write their name here.',
     advanceFromReceivableConfirm:
       "Convert {driver}'s receivable ({amount}) into an advance? No money moves: the same debt is filed as an advance in his name, and office capital is unchanged.",
     advanceFromReceivableOk: 'Receivable converted to an advance',

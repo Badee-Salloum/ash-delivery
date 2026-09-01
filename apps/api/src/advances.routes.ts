@@ -464,6 +464,9 @@ export function registerAdvanceRoutes(app: FastifyInstance, deps: Deps): void {
             categoryId: advanceRow.categoryId,
             costCenterKind: advanceRow.costCenterKind,
             vehicleId: advanceRow.vehicleId,
+            // The box the money originally left. No box moves now — it left weeks ago — but the
+            // cost belongs to whichever one paid.
+            channel: advanceRow.channel,
             amount: outstanding,
             businessDate,
             description: `${advanceRow.description} — ${body.reason}`,

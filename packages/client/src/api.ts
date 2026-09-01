@@ -562,6 +562,8 @@ export interface ExpenseView {
   categoryId: string
   costCenterKind: 'vehicle' | 'branch' | 'general'
   vehicleId: string | null
+  /** WHICH BOX paid. Absent on rows recorded before the wallet channel existed (0059). */
+  channel?: 'office_cash' | 'office_wallet'
   /** Decimal string. */
   amount: string
   businessDate: string
@@ -1557,6 +1559,8 @@ export class ApiClient {
     categoryId: string
     costCenterKind: 'vehicle' | 'branch' | 'general'
     vehicleId?: string | null
+    /** WHICH BOX pays. Omitted means cash — what every expense meant before 0059. */
+    channel?: 'office_cash' | 'office_wallet'
     amount: string
     description: string
     businessDate?: string

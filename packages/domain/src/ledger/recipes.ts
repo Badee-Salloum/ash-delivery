@@ -772,11 +772,29 @@ export function shareSplit(driverId: string, totals: FeeTotals, split: BlockSpli
 
 // ── Expenses (G) ──────────────────────────────────────────────────────────────────────────
 
-export function expense(costCenterId: string, amount: Minor, occurrenceKey = '1'): Posting {
+/**
+ * «كل ليرة تخرج» (SRS G) — and it does not always leave the cash box.
+ *
+ * THE CALLER NAMES A CHANNEL, NEVER A FUND, for the reason `income` states below: an operator who
+ * types a fund code instead reaches `fundRefFromCode`'s default clause, which turns anything it
+ * does not recognise into `cost_center:<code>` — a look-alike account no cost report sums and no
+ * error is ever raised about.
+ *
+ * The wallet channel is not decoration. Yallago's cut leaves the wallet, so a cost that falls on
+ * the wallet is ordinary here; before it existed the only honest record of one was a raw manual
+ * entry, which never appears in «الصرفيات» and so silently understates every cost report.
+ */
+export function expense(
+  channel: OfficeFund,
+  costCenterId: string,
+  amount: Minor,
+  occurrenceKey = '1',
+): Posting {
+  if (amount <= ZERO) throw new RangeError(`expense must be positive, got ${amount}`)
   return assertBalanced({
     eventType: 'expense',
     occurrenceKey,
-    lines: [D({ kind: 'cost_center', costCenterId }, amount), C({ kind: 'office_cash' }, amount)],
+    lines: [D({ kind: 'cost_center', costCenterId }, amount), C({ kind: channel }, amount)],
   })
 }
 
