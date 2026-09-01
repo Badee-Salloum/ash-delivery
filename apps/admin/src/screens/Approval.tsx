@@ -1773,9 +1773,43 @@ function CloseApprovalWorkspace({
                 {copy.ordinaryOrders.replace('{n}', String(ordinaryOrders.length))}
               </summary>
               <p className="mt-1 text-xs text-slate-600">{copy.ordinaryHint}</p>
+              {/*
+                EVERY row can be acted on, and only the ones that need attention are open.
+                Before this the ordinary list was display-only, so a scanned row that was clean by
+                all eight attention rules had no controls at all — and shift a3728815's phantom 230
+                was exactly such a row: in window, printed clock, no review reason, unedited fee.
+                Ten of its eleven rows were unreachable, including the one that had to be removed.
+                Opening a row costs one click and closes again; nothing about the default view moves.
+              */}
               <ul className="mt-3 flex min-w-0 flex-col gap-2">
                 {ordinaryOrders.map((order) => (
-                  <OrdinaryOrderRow key={order.providerOrderNo} order={order} businessDate={day} />
+                  <li key={order.providerOrderNo} className="min-w-0">
+                    <details className="min-w-0 rounded-lg border border-slate-200 bg-white">
+                      <summary className={`cursor-pointer list-none p-2 ${FOCUS_RING}`}>
+                        <OrdinaryOrderRow order={order} businessDate={day} />
+                      </summary>
+                      <div className="border-t border-slate-200 p-2">
+                        <OrderAttentionCard
+                          order={order}
+                          index={orders.indexOf(order) + 1}
+                          businessDate={day}
+                          disabled={busy || refreshing}
+                          copy={copy}
+                          operationCopy={operationCopy}
+                          onRevise={onRevise}
+                          dashboardEvidence={dashboardEvidence}
+                          duplicateHints={duplicateHintsForOrder(review.duplicateHints, order.providerOrderNo)}
+                          lookupDuplicateRow={lookupDuplicateRow}
+                          {...(orderRereads[`order:${order.providerOrderNo}`]
+                            ? { reread: orderRereads[`order:${order.providerOrderNo}`] }
+                            : {})}
+                          onReread={onRereadOrder}
+                          timingDraftPending={pendingTimingDraftKeys.has(`order:${order.providerOrderNo}`)}
+                          onTimingDraftPending={(pending) => onTimingDraftPending(`order:${order.providerOrderNo}`, pending)}
+                        />
+                      </div>
+                    </details>
+                  </li>
                 ))}
               </ul>
             </details>
@@ -2899,7 +2933,13 @@ function OrderAttentionCard({
       ) : null}
       <div className="mt-2 flex flex-wrap gap-2">
         {order.included === false ? <Button variant="ghost" disabled={disabled || !reasonReady} onClick={() => void revise({ included: true })}>{copy.includeException}</Button> : null}
-        {order.kind === 'manual' && order.included !== false ? <Button variant="ghost" disabled={disabled || !reasonReady} onClick={() => void revise({ included: false })}>{copy.excludeOrder}</Button> : null}
+        {/*
+          EVERY included row, not just a manual one. A scanned row's only exclude control used to be
+          «تثبيت كتكرار» — so a manager who wanted to leave a real delivery uncounted had to press a
+          button that said it was a duplicate, and the audited reason went into the record under a
+          claim he had not made.
+        */}
+        {order.included !== false ? <Button variant="ghost" disabled={disabled || !reasonReady} onClick={() => void revise({ included: false })}>{copy.excludeOrder}</Button> : null}
         {/*
           «احذف» beside «استبعد», never instead of it. Exclusion is a decision about a delivery that
           happened; removal says the row describes nothing that did. The confirm step is here
@@ -3287,14 +3327,21 @@ function OrdinaryOrderRow({ order, businessDate }: { order: Review['orders'][num
     (order.points ?? []).find((point) => point.role === 'start')?.label,
     (order.points ?? []).find((point) => point.role === 'end')?.label,
   ].filter(Boolean).join(' ← ')
+  /*
+    A `<span>`, not a `<li>`. This is now the SUMMARY of a row that opens into its full card, and a
+    list item nested inside a `<summary>` is invalid markup — the browser reparents it and the row
+    silently loses its layout. The `<li>` moved out to the caller, which is where the list is.
+  */
   return (
-    <li className="flex min-w-0 items-start gap-3 rounded-lg border border-slate-200 bg-white p-3 text-sm">
-      <div className="min-w-0 flex-1">
-        <p className="num font-semibold">{order.occurredDate ?? businessDate} · {order.occurredMinute ?? '—'}</p>
-        {route ? <p className="truncate text-xs text-slate-500" title={route}>{route}</p> : null}
-      </div>
+    <span className="flex min-w-0 items-start gap-3 text-sm">
+      <span className="min-w-0 flex-1">
+        <span className="num block font-semibold">{order.occurredDate ?? businessDate} · {order.occurredMinute ?? '—'}</span>
+        {route ? <span className="block truncate text-xs text-slate-500" title={route}>{route}</span> : null}
+      </span>
       <Money value={order.fee} className="shrink-0 font-bold" />
-    </li>
+      {/* The affordance. A `<summary>` with `list-none` shows no marker of its own. */}
+      <span aria-hidden="true" className="shrink-0 text-xs text-slate-400">▾</span>
+    </span>
   )
 }
 
