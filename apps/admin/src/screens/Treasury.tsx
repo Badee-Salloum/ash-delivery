@@ -76,6 +76,7 @@ export function Treasury(): ReactNode {
   // ── «الترميم» ─────────────────────────────────────────────────────────────────────────────
   const [restoration, setRestoration] = useState<RestorationView | null>(null)
   const [movements, setMovements] = useState<Awaited<ReturnType<typeof api.treasuryMovements>>['rows'] | null>(null)
+  const [movementsError, setMovementsError] = useState<string | null>(null)
   const [restorationError, setRestorationError] = useState<string | null>(null)
   const [capitalTargetsDraft, setCapitalTargetsDraft] = useState({ cash: '', wallet: '' })
   const [capitalTargetReason, setCapitalTargetReason] = useState('')
@@ -177,14 +178,27 @@ export function Treasury(): ReactNode {
       })
   }, [api, branchId])
 
-  /** What the two office boxes did lately. Read-only; the decisions live where the money moves. */
+  /**
+   * What the two office boxes did lately. Read-only; the decisions live where the money moves.
+   *
+   * `branchId` is in the dependency list, not just `api`. An organisation-wide role has no branch
+   * of its own and the picker supplies one a moment after mount — so a loader that runs once on
+   * `[api]` fires before the branch exists, gets `422 branch_required`, and never tries again.
+   *
+   * And the error is SHOWN, never swallowed. The first draft of this card caught everything into an
+   * empty array, so a refused request and a genuinely quiet day looked identical: it said
+   * «لا حركات» while four duplicate transfers sat behind it. That is the same fault as an audit
+   * screen nobody can search — a failure that reports itself as an absence.
+   */
   const loadMovements = useCallback(async (): Promise<void> => {
+    setMovementsError(null)
     try {
       setMovements((await api.treasuryMovements(50)).rows)
-    } catch {
-      setMovements([])
+    } catch (err) {
+      setMovements(null)
+      setMovementsError((err as { error?: string }).error ?? 'error')
     }
-  }, [api])
+  }, [api, branchId])
 
   const loadRestoration = useCallback(async (): Promise<void> => {
     const version = ++restorationLoadVersion.current
@@ -265,7 +279,7 @@ export function Treasury(): ReactNode {
   }, [loadRestoration])
   useEffect(() => {
     void loadMovements()
-  }, [loadMovements])
+  }, [loadMovements, branchId])
   useEffect(() => {
     void loadReceivables()
   }, [loadReceivables])
@@ -1826,7 +1840,15 @@ export function Treasury(): ReactNode {
       */}
       <Card title={t.treasury.movements} className="lg:col-span-2">
         <p className="text-xs text-slate-600">{t.treasury.movementsHint}</p>
-        {movements === null ? (
+        {movementsError !== null ? (
+          <Pending
+            error={movementsError}
+            loadingLabel={t.common.loading}
+            errorLabel={explainError(movementsError, t)}
+            onRetry={() => void loadMovements()}
+            retryLabel={t.common.retry}
+          />
+        ) : movements === null ? (
           <p className="mt-3 text-sm text-slate-500">{t.common.loading}</p>
         ) : movements.length === 0 ? (
           <p className="mt-3 text-sm text-slate-500">{t.treasury.movementsEmpty}</p>
