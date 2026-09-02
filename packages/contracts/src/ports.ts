@@ -1224,12 +1224,24 @@ export interface RestorationRecord {
   netToCompany: Minor
   reason: string
   performedBy: string
+  /**
+   * Which run of that business day this was, from 1.
+   *
+   * الترميم used to be once a day, and the owner asked for it «متاح دوما» after finding the button
+   * gone at 02:27 — the business day starts at 04:00, so he was still inside a day already restored
+   * that morning while a full day's takings sat in the boxes. The run number is what keeps each
+   * run's ledger occurrence key distinct, so repetition can never become double posting.
+   */
+  runNo: number
 }
 
 export interface RestorationRepo {
-  /** Throws `{ code: 'DUPLICATE_RESTORATION' }` on a second run for the same branch and day. */
+  /** Throws `{ code: 'DUPLICATE_RESTORATION' }` when that run number is already taken. */
   create(row: RestorationRecord): Promise<void>
+  /** The LATEST run of that day, or null. Callers wanting the count use `runsOnDay`. */
   find(branchId: string, businessDate: CalendarDate): Promise<RestorationRecord | null>
+  /** How many runs that business date already holds. The next run is this plus one. */
+  runsOnDay(branchId: string, businessDate: CalendarDate): Promise<number>
 }
 
 export interface FxRepo {

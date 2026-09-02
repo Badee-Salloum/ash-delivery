@@ -1037,6 +1037,8 @@ orderNo: 'Order no.',
     netToCompany: 'Net to the company fund',
     doRestore: 'Restore',
     restored: 'Restored',
+    restoredRunsToday: 'restored {n} time(s) today',
+    doRestoreAgain: 'Restore again now',
     restorationRefusal: {
       sweep_exceeds_counted:
         'The surplus is larger than the system balance available in the box — the difference is out with drivers as receivables and cannot be transferred now.',

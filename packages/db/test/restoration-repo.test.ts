@@ -29,6 +29,7 @@ describe('PgRestorationRepo evidence versions', () => {
       netToCompany: minor(1234n),
       reason: 'ledger restoration',
       performedBy: 'manager-1',
+      runNo: 1,
     })
     const restored = await repo.find('branch-1', '2026-08-31')
 

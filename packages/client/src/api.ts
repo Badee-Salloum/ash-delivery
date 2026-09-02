@@ -683,8 +683,17 @@ export interface RestorationView {
   businessDate: string
   /** Present only on the ledger-backed restoration API. Missing means the server is still legacy. */
   source?: 'live_ledger'
-  /** True after today's immutable restoration posting exists; prevents a fresh-looking replay after reload. */
+  /**
+   * Whether this business date already holds a restoration.
+   *
+   * It no longer means «you may not run another». Since 0061 a date may hold several runs, and the
+   * screen says how many instead of hiding the button — the owner asked for الترميم «متاح دوما»
+   * after finding it gone at 02:27, still inside a day restored that morning while a full day's
+   * takings sat in the boxes.
+   */
   alreadyRestored?: boolean
+  /** How many runs this business date already holds. Absent from a server older than 0061. */
+  runsToday?: number
   legs: RestorationLegView[]
   netToCompany: string
   feasible: boolean
@@ -716,6 +725,7 @@ function normalizeRestorationView(view: RestorationWireView): RestorationView {
     businessDate: view.businessDate,
     ...(view.source === undefined ? {} : { source: view.source }),
     ...(view.alreadyRestored === undefined ? {} : { alreadyRestored: view.alreadyRestored }),
+    ...(view.runsToday === undefined ? {} : { runsToday: view.runsToday }),
     legs,
     netToCompany: view.netToCompany,
     feasible: view.feasible ?? legs.every((leg) => leg.feasible),

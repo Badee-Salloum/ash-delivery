@@ -1339,13 +1339,14 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
         requestId: req.requestId,
       },
       async (tx: FinancialTransactionDeps) => {
-        const [completed, positions] = await Promise.all([
+        const [completed, runsToday, positions] = await Promise.all([
           tx.restorations.find(branchId, businessDate),
+          tx.restorations.runsOnDay(branchId, businessDate),
           positionsFor(branchId, businessDate, tx),
         ])
         const plan = planRestoration(positions)
         assertPersistableRestorationPlan(plan)
-        return { completed, plan }
+        return { completed, runsToday, plan }
       },
     )
     return {
@@ -1353,7 +1354,13 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       source: 'live_ledger',
       /** Transitional truthy alias so the old Admin does not wait for a cash count. */
       counted: true,
+      /**
+        * Retained, but it no longer means «you may not». Since 0061 a business date may hold several
+        * runs, and the screen shows how many rather than hiding the button — the owner asked for
+        * الترميم «متاح دوما» after finding it gone at 02:27 inside a day restored that morning.
+        */
       alreadyRestored: preview.completed !== null,
+      runsToday: preview.runsToday,
       openingBalances: openingBalancesFor(preview.plan),
       legs: preview.plan.legs.map(serializeResponseLeg),
       netToCompany: serializeMoney(preview.plan.netToCompany),
@@ -1380,11 +1387,18 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
         requestId: req.requestId,
       },
       async (tx: FinancialTransactionDeps) => {
-        // This check belongs inside the serialized transaction. Two concurrent managers both pass
-        // an outside check; here the waiter observes the winner's immutable record and returns 409.
-        if ((await tx.restorations.find(branchId, businessDate)) !== null) {
-          throw new ServiceError(409, 'already_restored_today')
-        }
+        /*
+          WHICH RUN OF THE DAY THIS IS. Owner, 2026-09-02: «اجعل خيار الترميم متاح دوما». الترميم
+          was once per business date, and with the day starting at 04:00 he found the button gone at
+          02:27 — still inside a day restored that morning, with a full day's takings sitting in the
+          boxes waiting on a clock.
+
+          Read inside the serialized transaction, like the refusal it replaces. Two managers racing
+          both compute the same number, and the loser hits `restorations_run_per_day` — a clean
+          unique violation instead of a second posting. And the run number is what makes each run's
+          ledger occurrence key distinct, so repetition can never become double posting.
+        */
+        const runNo = (await tx.restorations.runsOnDay(branchId, businessDate)) + 1
 
         const positions = await positionsFor(branchId, businessDate, tx)
         const plan = planRestoration(positions)
@@ -1393,7 +1407,9 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
           throw new ServiceError(422, 'restoration_infeasible', { refusals: plan.refusals })
         }
 
-        const restorationPostings = postingsForRestoration(plan, businessDate)
+        // `<date>#<run>` — the guard in 0061 demands exactly this shape, so an API rolled back past
+        // it makes الترميم refuse loudly rather than post under a key the guard cannot check.
+        const restorationPostings = postingsForRestoration(plan, `${businessDate}#${runNo}`)
         assertPersistableTreasuryPostings(restorationPostings)
         const entries = restorationPostings.length === 0 ? [] : await tx.ledger.post(branchId, restorationPostings, {
           shiftId: null,
@@ -1432,10 +1448,13 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
             netToCompany: plan.netToCompany,
             reason: body.reason,
             performedBy: actorId,
+            runNo,
           })
         } catch (err) {
           if ((err as { code?: string }).code === 'DUPLICATE_RESTORATION') {
-            throw new ServiceError(409, 'already_restored_today')
+            // Only reachable when another manager took this run number between the count above and
+            // the insert — inside the same branch lock, so a genuine race and not a repeat request.
+            throw new ServiceError(409, 'restoration_run_conflict')
           }
           throw err
         }

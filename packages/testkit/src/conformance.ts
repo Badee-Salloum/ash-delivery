@@ -1092,6 +1092,7 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
               await tx.restorations.create({
                 branchId: BRANCH,
                 businessDate: '2026-07-21',
+                runNo: 1,
                 cashCountId: count.id,
                 plan: {
                   schemaVersion: 2,
@@ -1155,7 +1156,8 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
                 await tx.restorations.create({
                   branchId: BRANCH,
                   businessDate: '2026-07-22',
-                  cashCountId: count.id,
+                  runNo: 1,
+                cashCountId: count.id,
                   plan: {
                     schemaVersion: 2,
                     cashCountProofSha256: count.proofSha256,

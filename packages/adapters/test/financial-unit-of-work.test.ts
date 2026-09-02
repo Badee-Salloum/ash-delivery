@@ -51,7 +51,8 @@ describe('in-memory financial unit of work', () => {
       netToCompany: minor(0n),
       reason: 'ledger-backed restoration',
       performedBy: USER,
-    })
+        runNo: 1,
+      })
 
     const first = await deps.restorations.find(BRANCH, '2026-08-31')
     expect(first).toMatchObject({ cashCountId: null, plan })
@@ -120,6 +121,7 @@ describe('in-memory financial unit of work', () => {
           netToCompany: minor(0n),
           reason: 'daily restoration',
           performedBy: USER,
+          runNo: 1,
         })
         throw failure
       }),

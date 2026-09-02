@@ -378,11 +378,12 @@ export class PgRestorationRepo {
     netToCompany: Minor
     reason: string
     performedBy: string
+    runNo: number
   }): Promise<void> {
     try {
       await this.pool.query(
-        `INSERT INTO restorations (branch_id, business_date, cash_count_id, plan, net_to_company_minor, reason, performed_by)
-         VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7)`,
+        `INSERT INTO restorations (branch_id, business_date, cash_count_id, plan, net_to_company_minor, reason, performed_by, run_no)
+         VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8)`,
         [
           row.branchId,
           row.businessDate,
@@ -391,19 +392,32 @@ export class PgRestorationRepo {
           row.netToCompany.toString(),
           row.reason,
           row.performedBy,
+          row.runNo,
         ],
       )
     } catch (err) {
       if (isPgError(err, PG.UNIQUE_VIOLATION)) {
-        throw Object.assign(new Error('already restored today'), { code: 'DUPLICATE_RESTORATION' })
+        // Two managers racing the same run number inside the branch-money lock. The loser is told,
+        // rather than quietly posting the same movement twice under a different key.
+        throw Object.assign(new Error('restoration run already recorded'), { code: 'DUPLICATE_RESTORATION' })
       }
       throw err
     }
   }
 
+  /** How many runs that business date already holds; the next run is this plus one. */
+  async runsOnDay(branchId: string, businessDate: string): Promise<number> {
+    const { rows } = await this.pool.query<{ n: string }>(
+      'SELECT count(*)::text AS n FROM restorations WHERE branch_id = $1 AND business_date = $2',
+      [branchId, businessDate],
+    )
+    return Number(rows[0]?.n ?? '0')
+  }
+
+  /** The LATEST run of that day. Since 0061 a day may hold several. */
   async find(branchId: string, businessDate: string) {
     const { rows } = await this.pool.query<Record<string, unknown>>(
-      'SELECT * FROM restorations WHERE branch_id = $1 AND business_date = $2',
+      'SELECT * FROM restorations WHERE branch_id = $1 AND business_date = $2 ORDER BY run_no DESC LIMIT 1',
       [branchId, businessDate],
     )
     const r = rows[0]
@@ -416,6 +430,7 @@ export class PgRestorationRepo {
       netToCompany: minor(BigInt(String(r.net_to_company_minor))),
       reason: String(r.reason),
       performedBy: String(r.performed_by),
+      runNo: Number(r.run_no ?? 1),
     }
   }
 }

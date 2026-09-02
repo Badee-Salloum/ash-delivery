@@ -1072,6 +1072,8 @@ orderNo: 'رقم الطلب',
     netToCompany: 'الصافي إلى صندوق الشركة',
     doRestore: 'تنفيذ الترميم',
     restored: 'تم الترميم',
+    restoredRunsToday: 'رُمِّم {n} مرّة في هذا اليوم',
+    doRestoreAgain: 'رمِّم مرّة أخرى الآن',
     restorationRefusal: {
       sweep_exceeds_counted: 'مبلغ الفائض أكبر من رصيد النظام المتاح في الصندوق — الفرق عند السائقين كذمم ولا يمكن تحويله الآن.',
       no_capital_target: 'لم يُحدَّد رأس مال لهذا الصندوق، فلا شيء يُرمَّم إليه.',

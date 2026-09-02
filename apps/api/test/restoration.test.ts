@@ -392,18 +392,50 @@ describe('الترميم — the daily restoration', () => {
     expect(res.json().error).toBe('restoration_infeasible')
   })
 
-  it('runs once per working day', async () => {
+  it('runs as often as the manager asks, and moves the money exactly once', async () => {
+    /*
+     * الترميم used to be once per business date. Owner, 2026-09-02 at 02:27: «اجعل خيار الترميم
+     * متاح دوما بغض النظر عن الوقت و هل يوجد نوبة مفتوحة او لا». With the business day starting at
+     * 04:00 he was still inside 2026-09-01 — restored that morning at 09:10 — while a full day's
+     * takings sat in the boxes: a 5,880.11 cash surplus and a 3,958.11 wallet shortfall, waiting on
+     * a clock.
+     *
+     * THE ONCE-A-DAY RULE WAS NEVER THE SAFETY PROPERTY. What prevents a double posting is the
+     * ledger's `(shift_id, event_type, occurrence_key)` idempotency key, and each run now carries
+     * its own run number in that key. So the second run is allowed — and, reading a position the
+     * first run already brought to target, it correctly moves nothing. That is what this asserts.
+     */
     const manager = await h.loginAs('manager')
     await seedFund(manager, 'office_cash', sypStr(4_500_000))
     await seedFund(manager, 'office_wallet', sypStr(1_000_000))
     await countBoxes(manager, sypStr(4_500_000), sypStr(1_000_000))
 
     expect((await post(manager, '/treasury/restoration', { reason: 'ترميم اليوم' })).statusCode).toBe(201)
-    const second = await post(manager, '/treasury/restoration', { reason: 'مرة ثانية' })
-    expect(second.statusCode).toBe(409)
-    expect(second.json().error).toBe('already_restored_today')
-    // And the sweep did not happen twice.
+    const second = await post(manager, '/treasury/restoration', { reason: 'مرة ثانية بعد إغلاق نوبة' })
+    expect(second.statusCode, second.body).toBe(201)
+
+    // The sweep did NOT happen twice — the second run found the boxes already at target.
     expect(await companyFund()).toBe(sypStr(500_000))
+    expect(second.json().netToCompany).toBe(sypStr(0))
+
+    // Both runs are on the record, numbered, so «كم مرّة رُمِّم اليوم» has an answer.
+    expect(await h.deps.restorations.runsOnDay(BRANCH, '2026-07-21')).toBe(2)
+    expect((await h.deps.restorations.find(BRANCH, '2026-07-21'))?.runNo).toBe(2)
+
+    /*
+     * THE KEY CARRIES THE RUN, and this is the half no in-memory test could otherwise reach.
+     * `guard_ledger_restoration_insert_v4` demands
+     *   `business_date || '#' || run_no || ':' || fundCode`
+     * of every moving leg's journal (migration 0061, verified against production Postgres). The
+     * memory adapter has no triggers, so if this expectation and that guard ever disagree, الترميم
+     * fails only in production — which is precisely how the removal feature broke earlier the same
+     * night. Pin the emitting half here; the guard pins the demanding half.
+     */
+    const keys = h.deps.ledger.entries
+      .filter((entry) => entry.eventType === 'restoration')
+      .map((entry) => entry.occurrenceKey)
+    expect(keys.length).toBeGreaterThan(0)
+    for (const key of keys) expect(key).toMatch(/^2026-07-21#\d+:office_(cash|wallet)$/)
   })
 
   it('ignores cash-count variance and creates no reconciliation when live ledger is authoritative', async () => {
@@ -463,7 +495,16 @@ describe('الترميم — the daily restoration', () => {
     expect(h.deps.ledger.entries.filter((entry) => entry.eventType === 'restoration')).toHaveLength(0)
   })
 
-  it('serializes concurrent restoration attempts and commits exactly one immutable result', async () => {
+  it('serializes concurrent restoration attempts and moves the money exactly once', async () => {
+    /*
+     * Since الترميم may run several times a day, two concurrent requests no longer race for the
+     * ONLY slot — they are simply two runs. What must still hold, and is the whole reason the branch
+     * lock exists, is that the money moves exactly once: the second request runs after the first has
+     * committed, reads a position already at target, and posts nothing.
+     *
+     * If this ever fails with two journals, the lock is not serializing and a double sweep is one
+     * double-click away.
+     */
     const manager = await h.loginAs('manager')
     await seedFund(manager, 'office_cash', sypStr(4_500_000))
     await seedFund(manager, 'office_wallet', sypStr(1_000_000))
@@ -473,10 +514,11 @@ describe('الترميم — the daily restoration', () => {
       post(manager, '/treasury/restoration', { reason: 'concurrent restoration' }),
       post(manager, '/treasury/restoration', { reason: 'concurrent restoration' }),
     ])
-    expect([left.statusCode, right.statusCode].sort()).toEqual([201, 409])
+    expect([left.statusCode, right.statusCode]).toEqual([201, 201])
     expect(await companyFund()).toBe(sypStr(500_000))
+    // ONE journal, not two. The second run had nothing left to move.
     expect(h.deps.ledger.entries.filter((entry) => entry.eventType === 'restoration')).toHaveLength(1)
-    expect(await h.deps.restorations.find(BRANCH, '2026-07-21')).not.toBeNull()
+    expect(await h.deps.restorations.runsOnDay(BRANCH, '2026-07-21')).toBe(2)
   })
 
   it('recalculates from the live ledger inside POST after balances change since preview', async () => {

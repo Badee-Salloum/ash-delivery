@@ -88,14 +88,27 @@ export class MemoryRestorationRepo implements RestorationRepo {
   }
 
   async create(row: RestorationRecord): Promise<void> {
-    if (this.rows.some((r) => r.branchId === row.branchId && r.businessDate === row.businessDate)) {
-      throw Object.assign(new Error('already restored today'), { code: 'DUPLICATE_RESTORATION' })
+    // Since 0061 a business date may hold several runs; what stays unique is the RUN, mirroring
+    // `restorations_run_per_day`. Uniqueness never was the thing that prevented a double posting —
+    // the ledger's `(shift_id, event_type, occurrence_key)` key is, and each run has its own.
+    const taken = this.rows.some(
+      (r) => r.branchId === row.branchId && r.businessDate === row.businessDate && r.runNo === row.runNo,
+    )
+    if (taken) {
+      throw Object.assign(new Error('restoration run already recorded'), { code: 'DUPLICATE_RESTORATION' })
     }
     this.rows.push(structuredClone(row))
   }
 
+  async runsOnDay(branchId: string, businessDate: CalendarDate): Promise<number> {
+    return this.rows.filter((r) => r.branchId === branchId && r.businessDate === businessDate).length
+  }
+
+  /** The LATEST run of that day, which is what «هل رُمِّم؟» actually asks. */
   async find(branchId: string, businessDate: CalendarDate): Promise<RestorationRecord | null> {
-    const found = this.rows.find((r) => r.branchId === branchId && r.businessDate === businessDate)
+    const found = this.rows
+      .filter((r) => r.branchId === branchId && r.businessDate === businessDate)
+      .sort((a, b) => b.runNo - a.runNo)[0]
     return found ? structuredClone(found) : null
   }
 }

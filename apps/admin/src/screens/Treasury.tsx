@@ -1779,13 +1779,26 @@ export function Treasury(): ReactNode {
                   {restorationNet.direction === 'none' ? null : <> — <Money value={restorationNet.amount} /></>}
                 </span>
               ) : null}
-              {restoration.alreadyRestored === true ? (
-                <span className="text-sm font-semibold text-emerald-700">{t.treasury.restored} ✓</span>
-              ) : (
+              {/*
+                THE BUTTON IS ALWAYS HERE. It used to be replaced by «تم الترميم ✓» once the business
+                date held a restoration — and with the day starting at 04:00, the owner found it gone
+                at 02:27 while a full day's takings sat in the boxes: he was still inside a day
+                restored at 09:10 that morning. Since 0061 a date may hold several runs, so the
+                screen states what has happened and leaves the decision to him.
+              */}
+              <div className="flex flex-wrap items-center gap-3">
+                {restoration.alreadyRestored === true ? (
+                  <span className="text-sm font-semibold text-emerald-700">
+                    {t.treasury.restored} ✓
+                    {restoration.runsToday === undefined
+                      ? ''
+                      : ` · ${t.treasury.restoredRunsToday.replace('{n}', String(restoration.runsToday))}`}
+                  </span>
+                ) : null}
                 <Button onClick={doRestore} disabled={!restoration.feasible}>
-                  {t.treasury.doRestore}
+                  {restoration.alreadyRestored === true ? t.treasury.doRestoreAgain : t.treasury.doRestore}
                 </Button>
-              )}
+              </div>
             </div>
           </>
         )}
