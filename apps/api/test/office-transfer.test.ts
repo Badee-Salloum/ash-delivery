@@ -120,4 +120,74 @@ describe('moving money between the office boxes', () => {
     expect(roles).not.toContain('shahn')
     expect(roles).toEqual(expect.arrayContaining(['office_transfer_in', 'office_transfer_out']))
   })
+
+  it('records one entry when the same transfer is submitted twice', async () => {
+    /*
+     * 2026-09-02, 02:42:37 · :37 · :38 · :39 — this route recorded «تسكير نوبة عمران», the same
+     * 461.15 from the wallet to the cash box, FOUR times. One button, four presses, two seconds.
+     * Three phantom entries moved 1,383.45 between the boxes and put the ledger that far from the
+     * counted drawer, and nothing in the system objected: the occurrence key was a fresh UUID on
+     * every call, so the ledger's idempotency guard could not see a repeat as a repeat. Every other
+     * posting in this codebase is protected by that guard; this one opted out of it.
+     */
+    const manager = await h.loginAs('manager')
+    await seed(manager, 100_000, 100_000)
+
+    const body = transfer({ direction: 'wallet_to_cash', amount: sypStr(461), reason: 'تسكير نوبة عمران' })
+    const first = await post(manager, '/treasury/transfer', body)
+    expect(first.statusCode, first.body).toBe(201)
+    expect(first.json().applied).toBe(true)
+
+    // The double-click. Accepted, because a retry must not be an error — and applied nothing.
+    const second = await post(manager, '/treasury/transfer', body)
+    expect(second.statusCode, second.body).toBe(200)
+    expect(second.json().applied, 'the second press must not move money again').toBe(false)
+
+    // One journal for THIS transfer, and the boxes moved once. Counted by reason, because the
+    // opening-balance seed is itself a `manual` entry.
+    expect(h.deps.ledger.entries.filter((entry) => entry.reason === 'تسكير نوبة عمران')).toHaveLength(1)
+    expect(second.json().cash).toBe(sypStr(100_461))
+    expect(second.json().wallet).toBe(sypStr(99_539))
+  })
+
+  it('still allows a second, genuinely different transfer on the same day', async () => {
+    // The key is derived from what the transfer IS, so the way to say «this one is different» is to
+    // say why — which the reason field exists for and which good bookkeeping wants regardless.
+    const manager = await h.loginAs('manager')
+    await seed(manager, 100_000, 100_000)
+
+    const a = await post(manager, '/treasury/transfer', transfer({ amount: sypStr(1_000), reason: 'تعبئة الصباح' }))
+    const b = await post(manager, '/treasury/transfer', transfer({ amount: sypStr(1_000), reason: 'تعبئة المساء' }))
+    expect([a.statusCode, b.statusCode]).toEqual([201, 201])
+    expect(b.json().applied).toBe(true)
+    expect(h.deps.ledger.entries.filter((entry) => entry.reason?.startsWith('تعبئة '))).toHaveLength(2)
+
+    // A different AMOUNT is likewise its own transfer.
+    const c = await post(manager, '/treasury/transfer', transfer({ amount: sypStr(1_500), reason: 'تعبئة الصباح' }))
+    expect(c.statusCode, c.body).toBe(201)
+    expect(c.json().applied).toBe(true)
+  })
+
+  it('shows the movements back, which is how a repeat would have been noticed', async () => {
+    // The Treasury screen could post a transfer and never show one. Asked «أين أرى عمليات عمران»,
+    // the answer was nowhere: `/audit` needs a table name and a record id and returns everything
+    // ever, oldest first. Four duplicates sat in the ledger, correct and invisible.
+    const manager = await h.loginAs('manager')
+    await seed(manager, 100_000, 100_000)
+    await post(manager, '/treasury/transfer', transfer({ amount: sypStr(700), reason: 'تعبئة المحفظة' }))
+
+    const res = await h.app.inject({
+      method: 'GET',
+      url: '/treasury/movements?limit=10',
+      headers: { cookie: h.cookie(manager) },
+    })
+    expect(res.statusCode, res.body).toBe(200)
+    const rows = res.json().rows
+    const moved = rows.find((row: any) => row.reason === 'تعبئة المحفظة')
+    expect(moved, 'the transfer just posted must be visible').toBeDefined()
+    // Signed from each box's own point of view, so the direction reads off the row.
+    expect(moved.cash).toBe(sypStr(-700))
+    expect(moved.wallet).toBe(sypStr(700))
+    expect(moved.actorName, 'who did it is the whole point').toBeTruthy()
+  })
 })

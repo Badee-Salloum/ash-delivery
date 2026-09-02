@@ -1124,6 +1124,28 @@ export class ApiClient {
   }
 
   /**
+   * What the two office boxes actually did, most recent first.
+   *
+   * The Treasury screen could post a transfer and never show one. That is how four identical
+   * «تسكير نوبة عمران» transfers — one button pressed four times in two seconds — sat in the ledger
+   * unseen until the boxes disagreed with a hand count.
+   */
+  treasuryMovements(limit = 50) {
+    return this.get<{
+      rows: Array<{
+        id: number
+        businessDate: string
+        eventType: string
+        reason: string | null
+        shiftId: string | null
+        actorName: string | null
+        cash: string
+        wallet: string
+      }>
+    }>(`/treasury/movements?limit=${limit}`)
+  }
+
+  /**
    * The register of rows a manager declared were never deliveries.
    *
    * Separate from `audit()` on purpose. The audit trail answers «what happened to THIS record», and

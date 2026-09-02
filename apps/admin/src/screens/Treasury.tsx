@@ -75,6 +75,7 @@ export function Treasury(): ReactNode {
 
   // ── «الترميم» ─────────────────────────────────────────────────────────────────────────────
   const [restoration, setRestoration] = useState<RestorationView | null>(null)
+  const [movements, setMovements] = useState<Awaited<ReturnType<typeof api.treasuryMovements>>['rows'] | null>(null)
   const [restorationError, setRestorationError] = useState<string | null>(null)
   const [capitalTargetsDraft, setCapitalTargetsDraft] = useState({ cash: '', wallet: '' })
   const [capitalTargetReason, setCapitalTargetReason] = useState('')
@@ -176,6 +177,15 @@ export function Treasury(): ReactNode {
       })
   }, [api, branchId])
 
+  /** What the two office boxes did lately. Read-only; the decisions live where the money moves. */
+  const loadMovements = useCallback(async (): Promise<void> => {
+    try {
+      setMovements((await api.treasuryMovements(50)).rows)
+    } catch {
+      setMovements([])
+    }
+  }, [api])
+
   const loadRestoration = useCallback(async (): Promise<void> => {
     const version = ++restorationLoadVersion.current
     setRestoration(null)
@@ -253,6 +263,9 @@ export function Treasury(): ReactNode {
   useEffect(() => {
     void loadRestoration()
   }, [loadRestoration])
+  useEffect(() => {
+    void loadMovements()
+  }, [loadMovements])
   useEffect(() => {
     void loadReceivables()
   }, [loadReceivables])
@@ -1801,6 +1814,37 @@ export function Treasury(): ReactNode {
               </div>
             </div>
           </>
+        )}
+      </Card>
+
+      {/*
+        «حركات الخزينة» — what the two boxes actually did.
+        Asked «أين أرى عمليات عمران», the answer was nowhere: this screen could post a transfer and
+        never show one, and `/audit` needs a table name and a record id and returns everything ever,
+        oldest first. Four identical transfers in two seconds sat here unseen until a hand count
+        disagreed with the ledger.
+      */}
+      <Card title={t.treasury.movements} className="lg:col-span-2">
+        <p className="text-xs text-slate-600">{t.treasury.movementsHint}</p>
+        {movements === null ? (
+          <p className="mt-3 text-sm text-slate-500">{t.common.loading}</p>
+        ) : movements.length === 0 ? (
+          <p className="mt-3 text-sm text-slate-500">{t.treasury.movementsEmpty}</p>
+        ) : (
+          <div className="mt-3">
+            <Table head={[t.treasury.movementDate, t.treasury.movementKind, t.treasury.cashBox, t.treasury.wallet, t.treasury.movementReason, t.treasury.movementBy]}>
+              {movements.map((row) => (
+                <tr key={row.id}>
+                  <td className="num px-3 py-2 text-xs">{row.businessDate}</td>
+                  <td className="px-3 py-2 text-xs">{row.eventType}</td>
+                  <td dir="ltr" className="num px-3 py-2 text-xs"><Money value={row.cash} /></td>
+                  <td dir="ltr" className="num px-3 py-2 text-xs"><Money value={row.wallet} /></td>
+                  <td className="px-3 py-2 text-xs text-slate-700">{row.reason ?? '—'}</td>
+                  <td className="px-3 py-2 text-xs">{row.actorName ?? '—'}</td>
+                </tr>
+              ))}
+            </Table>
+          </div>
         )}
       </Card>
 

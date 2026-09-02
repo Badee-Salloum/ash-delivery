@@ -35,6 +35,7 @@ import {
   reverse,
   manualKaish,
   officeTransfer,
+  addDays,
   weekStartFor,
 } from '@ash/domain'
 import { ServiceError, assertWeekOpen, ensureFxDay, todayFor } from './shifts.service.ts'
@@ -1093,6 +1094,58 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
    * `journal.manual.write`, like every other hand-entered movement, with a reason that has to say
    * something: a transfer with no explanation is indistinguishable next month from a mistake.
    */
+  /**
+   * What the two office boxes actually did, most recent first.
+   *
+   * The screen could post a transfer and never show one. Asked «أين أرى عمليات عمران», the honest
+   * answer was nowhere: the Treasury card shows balances only, and `/audit` needs a table name and
+   * a record id and returns 1,405 rows oldest-first with no paging. So four duplicate transfers sat
+   * in the ledger, correct and invisible, until the boxes disagreed with a hand count.
+   *
+   * Read-only, and deliberately about the OFFICE boxes rather than the whole ledger: this answers
+   * «ماذا جرى لصندوقي», which is the question someone standing at the drawer actually has.
+   */
+  app.get('/treasury/movements', { config: { permission: 'branch_data.view', subject: ownBranch } }, async (req) => {
+    const q = z.object({ limit: z.coerce.number().int().min(1).max(200).default(50) }).parse(req.query ?? {})
+    const branchId = resolveBranch(req)
+    const today = todayFor(deps)
+
+    // This week and the one before it — enough to answer «what happened lately» without scanning
+    // the whole ledger, and `listByWeek` is the index the entries are stored under.
+    const thisWeek = weekStartFor(today)
+    const previous = weekStartFor(addDays(thisWeek, -1))
+    const entries = [
+      ...(await deps.ledger.listByWeek(branchId, thisWeek)),
+      ...(await deps.ledger.listByWeek(branchId, previous)),
+    ]
+
+    const OFFICE = new Set(['office_cash', 'office_wallet'])
+    const touching = entries.filter((entry) => entry.lines.some((line) => OFFICE.has(line.fundCode)))
+    touching.sort((a, b) => b.id - a.id)
+    const page = touching.slice(0, q.limit)
+
+    const names = new Map(
+      (await deps.users.list()).map((user) => [user.id, user.fullNameAr || user.username]),
+    )
+    const effect = (entry: (typeof page)[number], fundCode: string): Minor =>
+      entry.lines
+        .filter((line) => line.fundCode === fundCode)
+        .reduce((sum, line) => (line.side === 'D' ? sum + line.amount : sum - line.amount), 0n) as Minor
+
+    return {
+      rows: page.map((entry) => ({
+        id: entry.id,
+        businessDate: entry.businessDate,
+        eventType: entry.eventType,
+        reason: entry.reason,
+        shiftId: entry.shiftId,
+        actorName: names.get(entry.createdBy) ?? null,
+        cash: serializeMoney(effect(entry, 'office_cash')),
+        wallet: serializeMoney(effect(entry, 'office_wallet')),
+      })),
+    }
+  })
+
   app.post('/treasury/transfer', { config: { permission: 'journal.manual.write', subject: targetBranch } }, async (req, reply) => {
     const body = officeTransferRequest.parse(req.body)
     const branchId = resolveBranch(req)
@@ -1109,12 +1162,43 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       throw new ServiceError(422, 'insufficient_funds', { held: serializeMoney(held), from })
     }
 
-    await postOne(branchId, businessDate, officeTransfer(from, to, body.amount, deps.ids.uuid()), req.actor!.userId, body.reason)
-    return reply.code(201).send({
+    /*
+     * THE KEY IS DERIVED FROM WHAT THE TRANSFER IS, not freshly invented.
+     *
+     * On 2026-09-02 at 02:42:37, :37, :38 and :39 this route recorded «تسكير نوبة عمران» — the same
+     * 461.15 from the wallet to the cash box — FOUR times. It was one button pressed four times in
+     * two seconds. Every other posting in this system is protected by the ledger's idempotency key
+     * `(shift_id, event_type, occurrence_key)`; this one handed it a fresh UUID each call, so the
+     * guard could not see a repeat as a repeat. Three phantom entries moved 1,383.45 between the
+     * boxes and put the system 1,383.45 of cash away from the counted drawer.
+     *
+     * Branch, direction, amount, reason and the BUSINESS DATE. The date is in it so the same
+     * routine transfer may recur tomorrow; a genuine second transfer of the same amount on the same
+     * day is expressed by saying why it is different, which the reason field exists for and which
+     * good bookkeeping wants anyway.
+     *
+     * A minute-bucketed clock was the other candidate and is worse: two clicks either side of
+     * :59/:00 straddle the bucket and both post, which is exactly the case this has to stop.
+     */
+    const occurrenceKey = createHash('sha256')
+      .update([branchId, businessDate, from, to, body.amount.toString(), body.reason.trim()].join(' '))
+      .digest('hex')
+      .slice(0, 32)
+
+    const before = await deps.ledger.fundBalance(branchId, to)
+    await postOne(branchId, businessDate, officeTransfer(from, to, body.amount, occurrenceKey), req.actor!.userId, body.reason)
+    const cash = await deps.ledger.fundBalance(branchId, 'office_cash')
+    const wallet = await deps.ledger.fundBalance(branchId, 'office_wallet')
+
+    // The ledger swallows a replayed key silently, which is right for a retry and wrong for a
+    // person: the balances would come back unchanged and the screen would say «تمّ» twice. Say so.
+    const applied = (to === 'office_cash' ? cash : wallet) !== before
+    return reply.code(applied ? 201 : 200).send({
       direction: body.direction,
       amount: serializeMoney(body.amount),
-      cash: serializeMoney(await deps.ledger.fundBalance(branchId, 'office_cash')),
-      wallet: serializeMoney(await deps.ledger.fundBalance(branchId, 'office_wallet')),
+      applied,
+      cash: serializeMoney(cash),
+      wallet: serializeMoney(wallet),
     })
   })
 
