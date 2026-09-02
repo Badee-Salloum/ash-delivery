@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ChatCompletionsOcrReader,
+  ORDERS_MONEY_TIMEOUT_MS,
+  ORDERS_SCREEN_KIND_RETRY_TIMEOUT_MS,
+  ORDERS_SCREEN_KIND_TIMEOUT_MS,
   normalizePrintedOrderTime,
   parsedResult,
   resolveSamePageOrderTimes,
@@ -357,7 +360,7 @@ describe('printed order time normalization', () => {
 describe('orders fast financial pass', () => {
   it('versions the cache by model configuration and all orders pass versions and budgets', () => {
     expect(reader().cacheSignature('orders')).toBe(
-      'openai@ocr.test:gpt-test:medium:medium:orders-screen-kind-v1:orders-money-v5:orders-money-2-v1:orders-time-v3:orders-route-v4:money-consensus-v1:money-validation-v2:time-validation-v3:position-evidence-v1:cancellation-consensus-v1:kind-timeout-1000:money-timeout-1000:time-timeout-1000:route-timeout-1000:route-grace-12000:kind-max-512:money-max-8192:time-max-4096:route-max-8192',
+      'openai@ocr.test:gpt-test:medium:medium:orders-screen-kind-v1:orders-money-v5:orders-money-2-v1:orders-time-v3:orders-route-v4:money-consensus-v1:money-validation-v2:time-validation-v3:position-evidence-v1:cancellation-consensus-v1:kind-timeout-1000:kind-retry-1000:money-timeout-1000:time-timeout-1000:route-timeout-1000:route-grace-12000:kind-max-512:money-max-8192:time-max-4096:route-max-8192',
     )
     expect(reader(2_000).cacheSignature('orders')).not.toBe(reader().cacheSignature('orders'))
     expect(reader(2_000).cacheSignature('wallet')).not.toBe(reader().cacheSignature('wallet'))
@@ -1373,4 +1376,121 @@ describe('a deliberate cancellation is not an alarm', () => {
     expect(isDeliberateAbort('TypeError', caller.signal)).toBe(false)
     expect(isDeliberateAbort(undefined, caller.signal)).toBe(false)
   })
+
+  /*
+   * Shift 7813ec86, مجد الرفاعي, 2026-09-02 17:56 — the read that was thrown away.
+   *
+   * Stored result: {"reason":"timeout","detail":"timeout 12000ms orders_screen_kind"}. Latency
+   * 41,586ms, output 15,546 tokens — money, time and route had all answered. The whole read died
+   * because a 512-token classifier missed a 12-second budget, and it was the FIRST orders timeout
+   * in 160 reads. The repo's own pre-flight had measured screen-kind at 7,646ms against that
+   * 12,000ms budget — 1.57x headroom where every other pass had 4.5x to 7x — so a provider running
+   * 30% slower that day (measured on four fields whose prompts never changed) made it arithmetic.
+   */
+  describe('the screen-kind gate is asked twice before its silence sinks the read', () => {
+    const rows: ParsedScreen = {
+      rows: [
+        orderRow('330', { time: '02:50 م', dateIso: '2026-09-01' }),
+        orderRow('120', { time: '02:00 م', dateIso: '2026-09-01' }),
+      ],
+      fields: [],
+      notes: null,
+    }
+
+    /** Screen-kind answers per call from `kinds`; every other pass always answers. */
+    const stage = (kinds: Array<ParsedScreen | 'silent'>): void => {
+      let asked = 0
+      vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        const prompt = requestedPrompt(init)
+        if (isScreenKindPrompt(prompt)) {
+          const answer = kinds[asked] ?? 'silent'
+          asked += 1
+          return answer === 'silent' ? new Response('', { status: 504 }) : completion(answer, 2, 1)
+        }
+        if (prompt.includes('SECOND FINANCIAL READING')) return completion(rows)
+        if (prompt.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return completion(rows)
+        if (prompt.includes('ORDERS PRINTED-TIME VERIFIER')) return completion(rows)
+        return completion(rows)
+      }))
+    }
+
+    it('publishes the read when the gate answers on the second ask', async () => {
+      // The incident, and the test that would have saved that shift: everything else succeeded and
+      // was discarded over one unanswered 512-token call.
+      stage(['silent', screenKind()])
+      const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+
+      expect(reading.result.ok, 'the four successful passes must not be thrown away').toBe(true)
+      if (!reading.result.ok) throw new Error('expected an orders result')
+      expect(reading.result.rows.map((row) => row.value)).toEqual(['330', '120'])
+      // Six calls: the gate twice, plus money, money-2, time and route.
+      expect(fetch).toHaveBeenCalledTimes(6)
+      // And the discarded attempt is still billed — a paid call missing from `usage` is a call the
+      // cost meter cannot see.
+      expect(reading.usage.tokensIn).toBeGreaterThan(0)
+    })
+
+    it('NEVER re-asks a gate that answered — this one must not be deleted', async () => {
+      /*
+       * The safety property the whole gate exists for. A payments-log screenshot carries plausible
+       * signed money and times, so a refusal must be final. Re-asking an answered gate would turn
+       * «no» into «ask until yes», which is the one thing this fix must not become.
+       *
+       * The second staged answer is `orders` precisely so that a wrong implementation would pass
+       * the read and fail this assertion loudly.
+       */
+      stage([screenKind('payments_log'), screenKind()])
+      const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+
+      expect(reading.result.ok).toBe(false)
+      if (reading.result.ok) throw new Error('a payments-log screen must never publish money')
+      expect(reading.result.reason).toBe('wrong_screen')
+      // FIVE, not six: the gate spoke, so it was not asked again.
+      expect(fetch).toHaveBeenCalledTimes(5)
+    })
+
+    it('still fails closed when the gate is silent twice, and says whose silence it was', async () => {
+      // The refusal is unchanged — `ordersPassResult` still returns the gate's failure. What changed
+      // is that the driver is told the image was not JUDGED, so he does not retake a correct screen.
+      stage(['silent', 'silent'])
+      const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+
+      expect(reading.result.ok).toBe(false)
+      if (reading.result.ok) throw new Error('expected a refusal')
+      expect(reading.result.reason).toBe('timeout')
+      expect(reading.result.detail).toContain('screen-kind gate did not answer')
+      expect(fetch).toHaveBeenCalledTimes(6)
+    })
+
+    it('does not spend a second call once the caller has given up', async () => {
+      // An aborted request means the API's deadline already fired; a retry could not be observed by
+      // anyone and would be pure spend against the driver's per-shift read budget.
+      stage(['silent', screenKind()])
+      const controller = new AbortController()
+      controller.abort()
+      const reading = await reader().read({
+        field: 'orders',
+        bytes: new Uint8Array([1]),
+        mimeType: 'image/jpeg',
+        signal: controller.signal,
+      })
+      expect(reading.result.ok).toBe(false)
+      const asks = vi.mocked(fetch).mock.calls.filter(([, init]) => isScreenKindPrompt(requestedPrompt(init)))
+      expect(asks).toHaveLength(1)
+    })
+
+    it('keeps both asks inside the budget the money pass already bounds', () => {
+      /*
+       * The invariant the whole design rests on, asserted so a future tuner cannot break it by
+       * editing one constant. `readOrders` settles `Promise.all([screenKind, money, moneySecond,
+       * time])`, which money bounds at 30s. While the two gate asks sum to no more than that, the
+       * settle bound, the route grace and the whole-read worst case are all exactly what they were
+       * before this fix. Raise either number past it and every read creeps toward the platform's
+       * 60s function ceiling — the failure this fix exists to prevent, not to cause.
+       */
+      expect(ORDERS_SCREEN_KIND_TIMEOUT_MS + ORDERS_SCREEN_KIND_RETRY_TIMEOUT_MS)
+        .toBeLessThanOrEqual(ORDERS_MONEY_TIMEOUT_MS)
+    })
+  })
+
 })

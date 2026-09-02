@@ -255,7 +255,10 @@ console.log('PER-PASS BUDGETS — what production actually gives each call')
 console.log('='.repeat(78))
 console.log('pass                 calls   max out / ceiling      max ms   ceiling hits   statuses')
 const GATE = {
-  'orders:screen-kind': { out: 307, ms: 7_200 },
+  // 60% of the pass's production budget, which moved 12,000 -> 15,000 on 2026-09-02 after the
+  // gate's silence killed two whole reads. Left at 7,200 this gate would keep passing while
+  // describing a budget that no longer exists.
+  'orders:screen-kind': { out: 307, ms: 9_000 },
   'orders:money': { out: 2458, ms: 18_000 },
   'orders:time': { out: 1229, ms: 14_400 },
   'orders:route': { out: 4915, ms: 26_400 },

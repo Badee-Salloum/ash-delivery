@@ -142,9 +142,36 @@ const MAX_COMPLETION_TOKENS = 8192
  * enrich routes. A disagreement is refused rather than resolved by an arbitrary tie-break. Even
  * with a 50-second adapter configuration, routes cannot hold the read to the platform ceiling.
  */
-const ORDERS_MONEY_TIMEOUT_MS = 30_000
+export const ORDERS_MONEY_TIMEOUT_MS = 30_000
 const ORDERS_TIME_TIMEOUT_MS = 24_000
-const ORDERS_SCREEN_KIND_TIMEOUT_MS = 12_000
+/*
+ * 15s, raised from 12s on 2026-09-02 — and a second 15s attempt beside it.
+ *
+ * The repo's own pre-flight (PROGRESS.md, 2026-08-22) measured every orders pass through the
+ * shipped adapter:
+ *
+ *     orders:screen-kind   7,646ms / 12,000   1.57x headroom   <-- four times tighter than any other
+ *     orders:money         4,277ms / 30,000   7.0x
+ *     orders:time          5,317ms / 24,000   4.5x
+ *     orders:route         6,628ms / 44,000   6.6x
+ *
+ * Apply the +30% measured across every field on 2026-09-02 and screen-kind lands at ~9,940ms —
+ * 83% of a 12,000ms budget, before tail variance. The two timeouts that day were arithmetic, not
+ * luck, and a retry alone would only have drawn twice from a distribution whose median had become
+ * most of the budget. Both numbers had to move.
+ *
+ * THE SUM IS THE LOAD-BEARING QUANTITY, not either half:
+ *
+ *     first attempt + retry <= ORDERS_MONEY_TIMEOUT_MS
+ *
+ * `readOrders` settles `Promise.all([screenKind, money, moneySecond, time])`, which money already
+ * bounds at 30s. Keep the sum at or under 30s and the settle bound is unchanged, the route grace
+ * starts where it always did, and the whole-read worst case is byte-identical to before the fix.
+ * Raise either number past that and the retry silently extends every read toward the platform's
+ * 60s function ceiling — which is the failure this fix exists to avoid, not to cause.
+ */
+export const ORDERS_SCREEN_KIND_TIMEOUT_MS = 15_000
+export const ORDERS_SCREEN_KIND_RETRY_TIMEOUT_MS = 15_000
 const ORDERS_ROUTE_TIMEOUT_MS = 44_000
 const ORDERS_ROUTE_GRACE_AFTER_MONEY_MS = 12_000
 /*
@@ -207,8 +234,9 @@ export class ChatCompletionsOcrReader implements OcrReader {
       const moneyTimeout = Math.min(this.config.timeoutMs, ORDERS_MONEY_TIMEOUT_MS)
       const timeTimeout = Math.min(this.config.timeoutMs, ORDERS_TIME_TIMEOUT_MS)
       const kindTimeout = Math.min(this.config.timeoutMs, ORDERS_SCREEN_KIND_TIMEOUT_MS)
+      const kindRetryTimeout = Math.min(this.config.timeoutMs, ORDERS_SCREEN_KIND_RETRY_TIMEOUT_MS)
       const routeTimeout = Math.min(this.config.timeoutMs, ORDERS_ROUTE_TIMEOUT_MS)
-      return `${prefix}:orders-screen-kind-v1:orders-money-v5:orders-money-2-v1:orders-time-v3:orders-route-v4:money-consensus-v1:money-validation-v2:time-validation-v3:position-evidence-v1:cancellation-consensus-v1:kind-timeout-${kindTimeout}:money-timeout-${moneyTimeout}:time-timeout-${timeTimeout}:route-timeout-${routeTimeout}:route-grace-${ORDERS_ROUTE_GRACE_AFTER_MONEY_MS}:kind-max-${ORDERS_SCREEN_KIND_MAX_COMPLETION_TOKENS}:money-max-${ORDERS_MONEY_MAX_COMPLETION_TOKENS}:time-max-${ORDERS_TIME_MAX_COMPLETION_TOKENS}:route-max-${MAX_COMPLETION_TOKENS}`
+      return `${prefix}:orders-screen-kind-v1:orders-money-v5:orders-money-2-v1:orders-time-v3:orders-route-v4:money-consensus-v1:money-validation-v2:time-validation-v3:position-evidence-v1:cancellation-consensus-v1:kind-timeout-${kindTimeout}:kind-retry-${kindRetryTimeout}:money-timeout-${moneyTimeout}:time-timeout-${timeTimeout}:route-timeout-${routeTimeout}:route-grace-${ORDERS_ROUTE_GRACE_AFTER_MONEY_MS}:kind-max-${ORDERS_SCREEN_KIND_MAX_COMPLETION_TOKENS}:money-max-${ORDERS_MONEY_MAX_COMPLETION_TOKENS}:time-max-${ORDERS_TIME_MAX_COMPLETION_TOKENS}:route-max-${MAX_COMPLETION_TOKENS}`
     }
     const budget = `timeout-${this.config.timeoutMs}:max-${MAX_COMPLETION_TOKENS}`
     if (field === 'wallet') {
@@ -269,8 +297,47 @@ export class ChatCompletionsOcrReader implements OcrReader {
     return { result, usage: { ...usage, latencyMs: Date.now() - startedAt } }
   }
 
+  /**
+   * The screen-kind gate, asked twice when the first ask goes unanswered.
+   *
+   * The gate is the cheapest call in the pipeline — 512 output tokens against the ~29,000 the other
+   * four spend — and its silence discards all of them. On 2026-09-02 that happened twice: shift
+   * 7813ec86 spent 15,546 output tokens on money, time and route, all of which answered, and the
+   * whole read was thrown away because a 512-token classifier missed a 12-second budget.
+   *
+   * ONLY SILENCE IS RETRIED. A gate that answered is final, whatever it answered — re-asking one
+   * that said `payments_log` would turn a refusal into «ask until it says yes», which is exactly the
+   * safety property the gate exists to provide. `ordersPassResult` is unchanged: a gate still silent
+   * after both asks fails the read closed, as before.
+   *
+   * Runs INSIDE `readOrders`'s `Promise.all`, so both attempts overlap the money passes that bound
+   * the settle at 30s. Two 15s asks therefore cost zero wall-clock milliseconds even in the worst
+   * case — see `ORDERS_SCREEN_KIND_TIMEOUT_MS` for why the sum, not either half, is the constraint.
+   */
+  private async screenKindWithRetry(
+    request: { field: OcrField; bytes: Uint8Array; mimeType: string; signal?: AbortSignal },
+  ): Promise<ModelPass & { discarded?: ModelPass[] }> {
+    const ask = (timeoutMs: number, schemaName: string): Promise<ModelPass> =>
+      this.runPass(request, ordersScreenKindPrompt(), {
+        timeoutMs: Math.min(this.config.timeoutMs, timeoutMs),
+        maxCompletionTokens: ORDERS_SCREEN_KIND_MAX_COMPLETION_TOKENS,
+        schema: ORDERS_SCREEN_KIND_SCHEMA,
+        schemaName,
+        screenKind: true,
+      })
+
+    const first = await ask(ORDERS_SCREEN_KIND_TIMEOUT_MS, 'orders_screen_kind')
+    // An answered gate is never asked again, and an aborted request is never spent on: the caller's
+    // deadline has already passed, so a second call could not be observed by anyone.
+    if (first.result.ok || request.signal?.aborted === true) return first
+
+    const second = await ask(ORDERS_SCREEN_KIND_RETRY_TIMEOUT_MS, 'orders_screen_kind_retry')
+    return { ...second, discarded: [first] }
+  }
+
   private async readOrders(
     request: { field: OcrField; bytes: Uint8Array; mimeType: string; signal?: AbortSignal },
+
   ): Promise<{ result: OcrResult; passes: ModelPass[] }> {
     const routeAbort = new AbortController()
     const routePromise = this.runPass(request, readPrompt('orders'), {
@@ -298,13 +365,7 @@ export class ChatCompletionsOcrReader implements OcrReader {
       schema: ORDERS_TIME_READ_SCHEMA,
       schemaName: 'orders_printed_time_verifier',
     })
-    const screenKindPromise = this.runPass(request, ordersScreenKindPrompt(), {
-      timeoutMs: Math.min(this.config.timeoutMs, ORDERS_SCREEN_KIND_TIMEOUT_MS),
-      maxCompletionTokens: ORDERS_SCREEN_KIND_MAX_COMPLETION_TOKENS,
-      schema: ORDERS_SCREEN_KIND_SCHEMA,
-      schemaName: 'orders_screen_kind',
-      screenKind: true,
-    })
+    const screenKindPromise = this.screenKindWithRetry(request)
 
     // All three calls start above. Once both compact passes settle, routes get only a short grace;
     // if both fail, the already-running full pass gets its complete (still <45s) fallback budget.
@@ -314,13 +375,18 @@ export class ChatCompletionsOcrReader implements OcrReader {
       moneySecondPromise,
       timePromise,
     ])
+
     const route = screenKind.result.ok || money.result.ok || time.result.ok
       ? await routePassWithinGrace(routePromise, routeAbort)
       : await routePromise
 
     return {
       result: ordersPassResult(screenKind, money, moneySecond, time, route),
-      passes: [screenKind, money, moneySecond, time, route],
+      // The retry, when it happened, is listed too: `read()` sums this array into the usage row, and
+      // a paid call missing from it is a call the cost meter cannot see.
+      // The discarded first attempt is billed too: `read()` sums this array into the usage row, and
+      // a paid call missing from it is a call the cost meter cannot see.
+      passes: [screenKind, money, moneySecond, time, route, ...(screenKind.discarded ?? [])],
     }
   }
 
@@ -586,9 +652,28 @@ function ordersPassResult(
   time: ModelPass,
   route: ModelPass,
 ): OcrResult {
-  // Screen identity is a separate inspection. A payments ledger contains plausible signed money and
-  // times, so no monetary row is published unless this independent gate proves Recent Orders.
-  if (!screenKind.result.ok) return screenKind.result
+  /*
+   * Screen identity is a separate inspection. A payments ledger contains plausible signed money and
+   * times, so no monetary row is published unless this independent gate proves Recent Orders. That
+   * requirement is absolute and nothing below relaxes it — the gate must SAY «orders».
+   *
+   * What changed on 2026-09-02 is the difference between the gate saying the wrong thing and the
+   * gate saying nothing. Silence was reported as a bare `timeout`, indistinguishable from a money
+   * pass that died, so a driver whose screen was perfectly correct was told his read had timed out
+   * and retook the same screenshot. The refusal still stands; it now says whose silence it was.
+   */
+  if (!screenKind.result.ok) {
+    return screenKind.result.reason === 'timeout'
+      ? {
+          ok: false,
+          reason: 'timeout',
+          // The gate is retried once before we get here, so this is its second silence. Naming it
+          // matters to the person holding the phone: the image is not the problem, and retaking it
+          // will not help — waiting or retrying will.
+          detail: 'screen-kind gate did not answer twice — the image was not judged, not rejected',
+        }
+      : screenKind.result
+  }
   if (screenKind.raw?.screenKind === 'payments_log') return { ok: false, reason: 'wrong_screen' }
   // `unknown` is not proof that the driver selected the wrong screen. Keep that distinction so the
   // UI asks for a clearer/retryable image instead of confidently naming an unrelated source.
