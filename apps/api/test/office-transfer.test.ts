@@ -190,4 +190,49 @@ describe('moving money between the office boxes', () => {
     expect(moved.wallet).toBe(sypStr(700))
     expect(moved.actorName, 'who did it is the whole point').toBeTruthy()
   })
+
+  it('records one manual entry when the same one is submitted twice', async () => {
+    /*
+     * `/journal/manual` had the same fault the transfer route did: `occurrenceKey: deps.ids.uuid()`
+     * on every call, so the ledger's idempotency guard could not see a double submit. It is the
+     * most dangerous place for it — a manual entry's lines are arbitrary, so a repeat can move any
+     * amount between any two funds. Found while preparing a ground-count adjustment: posting that
+     * correction twice would have left the books 1,114.74 above a drawer that does not hold it, and
+     * الترميم would then have swept the difference to the company box as «كييش».
+     */
+    const manager = await h.loginAs('manager')
+    await seed(manager, 100_000, 100_000)
+
+    const entry = {
+      branchId: BRANCH,
+      reason: 'مطابقة أرضية',
+      lines: [
+        { fundCode: 'office_cash', side: 'D', amount: sypStr(300) },
+        { fundCode: 'cost_center:office_ground_reconciliation:' + BRANCH, side: 'C', amount: sypStr(300) },
+      ],
+    }
+    expect((await post(manager, '/journal/manual', entry)).statusCode).toBe(201)
+    const second = await post(manager, '/journal/manual', entry)
+    expect([200, 201], second.body).toContain(second.statusCode)
+
+    // One entry with that reason, whatever the second call answered.
+    expect(h.deps.ledger.entries.filter((e) => e.reason === 'مطابقة أرضية')).toHaveLength(1)
+  })
+
+  it('still allows a manual entry that genuinely differs', async () => {
+    const manager = await h.loginAs('manager')
+    await seed(manager, 100_000, 100_000)
+    const line = (amount: string) => ({
+      branchId: BRANCH,
+      reason: 'مطابقة أرضية ' + amount,
+      lines: [
+        { fundCode: 'office_cash', side: 'D', amount },
+        { fundCode: 'cost_center:office_ground_reconciliation:' + BRANCH, side: 'C', amount },
+      ],
+    })
+    expect((await post(manager, '/journal/manual', line(sypStr(100)))).statusCode).toBe(201)
+    expect((await post(manager, '/journal/manual', line(sypStr(200)))).statusCode).toBe(201)
+    expect(h.deps.ledger.entries.filter((e) => (e.reason ?? '').startsWith('مطابقة أرضية '))).toHaveLength(2)
+  })
+
 })

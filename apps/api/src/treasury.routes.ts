@@ -316,9 +316,31 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       })
     }
 
+    /*
+     * Derived from the entry itself, for the reason the office-transfer route beside it now is: a
+     * fresh UUID per call means the ledger's idempotency key `(shift_id, event_type,
+     * occurrence_key)` cannot see a double submit as a repeat. That is not hypothetical here — on
+     * 2026-09-02 one Treasury button pressed four times in two seconds posted the same 461.15 four
+     * times and put the books 1,383.45 away from the counted drawer.
+     *
+     * A manual entry is the most dangerous place for it: the lines are arbitrary, so a repeat can
+     * move any amount between any two funds. Branch, business date, reason and the exact lines —
+     * the same transfer on the same day is expressed by saying why it differs, which a manual
+     * entry's mandatory reason already exists for.
+     */
+    const occurrenceKey = createHash('sha256')
+      .update([
+        branchId,
+        body.businessDate ?? todayFor(deps),
+        body.reason.trim(),
+        ...body.lines.map((l) => `${l.fundCode}|${l.side}|${l.amount.toString()}`),
+      ].join(' '))
+      .digest('hex')
+      .slice(0, 32)
+
     const posting: Posting = assertBalanced({
       eventType: 'manual',
-      occurrenceKey: deps.ids.uuid(),
+      occurrenceKey,
       // fundRefFromCode, NOT a blanket cost-centre wrap: naming `office_cash` must move the
       // office cash fund, not a look-alike called `cost_center:office_cash`.
       lines: body.lines.map((l) => ({
