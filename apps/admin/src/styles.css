@@ -24,3 +24,72 @@ body {
   /* Western digits for money regardless of language (ar-SY-u-nu-latn policy). */
   font-variant-numeric: tabular-nums;
 }
+
+/*
+ * Below 40rem a data table becomes a list of cards, and every cell grows its own column label.
+ *
+ * The console is a desktop and tablet app, but a branch manager opens it on a phone often enough
+ * that a seven-column table scrolling sideways is a real failure. The labels arrive as custom
+ * properties published by the `Table` primitive, which already knows the header array — see the
+ * comment there for why the labels are not `data-label` attributes on 158 hand-written cells.
+ *
+ * Logical properties throughout: `check:css` fails the build on a physical one, and it scans this
+ * file.
+ */
+@media (width < 40rem) {
+  /* Hidden visually, kept for assistive technology. A table that stops being a table for a screen
+     reader is a worse outcome than one that scrolls. */
+  .ash-table-reflow > thead {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .ash-table-reflow > tbody {
+    display: block;
+  }
+  .ash-table-reflow > tbody > tr {
+    display: block;
+    margin-block-end: 0.5rem;
+    border: 1px solid var(--ash-line);
+    border-radius: 0.75rem;
+    background: var(--ash-surface-card);
+    padding-block: 0.5rem;
+    padding-inline: 0.75rem;
+  }
+  .ash-table-reflow > tbody > tr > td {
+    display: grid;
+    grid-template-columns: minmax(6rem, 40%) 1fr;
+    gap: 0.75rem;
+    align-items: baseline;
+    padding-block: 0.25rem;
+    padding-inline: 0;
+    border: 0;
+    text-align: start;
+  }
+  .ash-table-reflow > tbody > tr > td::before {
+    content: var(--ash-col-label, '');
+    color: var(--ash-ink-muted);
+    font-size: 0.75rem;
+    font-weight: 500;
+  }
+  .ash-table-reflow > tbody > tr > td:nth-child(1) { --ash-col-label: var(--ash-th-1); }
+  .ash-table-reflow > tbody > tr > td:nth-child(2) { --ash-col-label: var(--ash-th-2); }
+  .ash-table-reflow > tbody > tr > td:nth-child(3) { --ash-col-label: var(--ash-th-3); }
+  .ash-table-reflow > tbody > tr > td:nth-child(4) { --ash-col-label: var(--ash-th-4); }
+  .ash-table-reflow > tbody > tr > td:nth-child(5) { --ash-col-label: var(--ash-th-5); }
+  .ash-table-reflow > tbody > tr > td:nth-child(6) { --ash-col-label: var(--ash-th-6); }
+  .ash-table-reflow > tbody > tr > td:nth-child(7) { --ash-col-label: var(--ash-th-7); }
+  .ash-table-reflow > tbody > tr > td:nth-child(8) { --ash-col-label: var(--ash-th-8); }
+
+  /* The empty-state row spans every column: it has no single label and must not be gridded. */
+  .ash-table-reflow > tbody > tr > td[colspan] {
+    display: block;
+    text-align: center;
+  }
+  .ash-table-reflow > tbody > tr > td[colspan]::before {
+    content: none;
+  }
+}

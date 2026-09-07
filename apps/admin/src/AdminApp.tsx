@@ -1,6 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useState } from 'react'
 import { useApp } from './app-context.tsx'
-import { Badge, Wordmark } from './ui.tsx'
+import { Badge, FOCUS_RING, Wordmark } from './ui.tsx'
+import { Icon, type IconName } from './icons.tsx'
 import { type Notif, NotificationBell } from './NotificationBell.tsx'
 import { Login } from './screens/Login.tsx'
 import { Dashboard } from './screens/Dashboard.tsx'
@@ -55,7 +56,8 @@ function viewFromHash(): { section: Section; openShift: string | null } {
  * the main pane when a queue item is opened, then returns.
  */
 export function AdminApp(): ReactNode {
-  const { session, t, lang, setLang, api, setSession, branches, branchId, setBranchId } = useApp()
+  const { session, t, lang, setLang, theme, setTheme, api, setSession, branches, branchId, setBranchId } =
+    useApp()
   // Initialise from the URL hash so a refresh or a shared link restores the view immediately —
   // before the reflect effect runs, so a deep link is never overwritten by the default.
   const [section, setSection] = useState<Section>(() => viewFromHash().section)
@@ -151,35 +153,49 @@ export function AdminApp(): ReactNode {
   const canManagePreapproved = canManagePreapprovedShifts(session.roleKey)
   // gps.view — the same two roles; the branch manager no longer has it.
   const canSeeMap = canManageUsers
-  const nav: Array<{ key: Section; label: string; badge?: number | undefined }> = [
-    { key: 'dashboard', label: t.dashboard.title },
-    { key: 'queue', label: t.approval.queue, badge: queueCount || undefined },
-    { key: 'liveShifts', label: t.liveShifts.title },
-    { key: 'completedShifts', label: t.completedShifts.title },
+  /*
+   * Grouped by FUNCTION, and every item carries a glyph.
+   *
+   * It was a flat list of sixteen text lines in which «الإعدادات» and «مصفوفة الصلاحيات» — touched
+   * a few times a year — sat in the same undifferentiated run as «قائمة الاعتماد», which is opened
+   * every shift. Daily work keeps the unlabelled first group because it is the default; the rest
+   * are named, and an empty group disappears with the role that could not see it.
+   */
+  const nav: Array<{
+    key: Section
+    label: string
+    icon: IconName
+    group?: 'money' | 'fleet' | 'system'
+    badge?: number | undefined
+  }> = [
+    { key: 'dashboard', label: t.dashboard.title, icon: 'dashboard' },
+    { key: 'queue', label: t.approval.queue, icon: 'queue', badge: queueCount || undefined },
+    { key: 'liveShifts', label: t.liveShifts.title, icon: 'live' },
+    { key: 'completedShifts', label: t.completedShifts.title, icon: 'completed' },
     ...(canManagePreapproved
-      ? [{ key: 'preapprovedShifts' as const, label: t.preapprovedShifts.title }]
+      ? [{ key: 'preapprovedShifts' as const, label: t.preapprovedShifts.title, icon: 'calendar' as const }]
       : []),
     // The live map is gps.view — the GM and the system admin only. The branch manager runs his
     // branch from the shift screens. (The API enforces it too; this only stops offering a 403.)
-    ...(canSeeMap ? [{ key: 'gpsLive' as const, label: t.gpsLive.title }] : []),
-    { key: 'fleet', label: `${t.fleet.drivers} / ${t.fleet.vehicles}` },
-    { key: 'treasury', label: t.treasury.branchTreasury },
-    { key: 'expenses', label: t.expenses.title },
+    ...(canSeeMap ? [{ key: 'gpsLive' as const, label: t.gpsLive.title, icon: 'map' as const }] : []),
+    { key: 'fleet', label: `${t.fleet.drivers} / ${t.fleet.vehicles}`, icon: 'bike', group: 'fleet' },
+    { key: 'treasury', label: t.treasury.branchTreasury, icon: 'treasury', group: 'money' },
+    { key: 'expenses', label: t.expenses.title, icon: 'expenses', group: 'money' },
     // «التفقّد» — the branch manager's own rounds. Drivers never see it; they are out on the road
     // and their whereabouts already ride on their shift.
-    ...(session.roleKey !== 'driver' ? [{ key: 'checkin' as const, label: t.checkin.title }] : []),
-    ...(canManageUsers ? [{ key: 'accounts' as const, label: t.accounts.title }] : []),
+    ...(session.roleKey !== 'driver' ? [{ key: 'checkin' as const, label: t.checkin.title, icon: 'checkin' as const }] : []),
+    ...(canManageUsers ? [{ key: 'accounts' as const, label: t.accounts.title, icon: 'accounts' as const, group: 'system' as const }] : []),
     // audit.view is granted to the sysadmin and the GM — the same two roles.
-    ...(canManageUsers ? [{ key: 'audit' as const, label: t.audit.title }] : []),
+    ...(canManageUsers ? [{ key: 'audit' as const, label: t.audit.title, icon: 'audit' as const, group: 'system' as const }] : []),
     // «سجلّ الحذف» — same permission, and beside the audit trail because it is the readable
     // half of it: the audit log needs a table name and a UUID before it answers anything.
-    ...(canManageUsers ? [{ key: 'removals' as const, label: t.removals.title }] : []),
-    ...(canManageUsers ? [{ key: 'permissions' as const, label: t.permissions.title }] : []),
+    ...(canManageUsers ? [{ key: 'removals' as const, label: t.removals.title, icon: 'removals' as const, group: 'system' as const }] : []),
+    ...(canManageUsers ? [{ key: 'permissions' as const, label: t.permissions.title, icon: 'permissions' as const, group: 'system' as const }] : []),
     // The numbering scheme is settings.write — the system admin alone. Renumbering a type or a
     // branch restates printed vehicle numbers, so it does not belong beside day-to-day fleet work.
-    ...(session.roleKey === 'system_admin' ? [{ key: 'fleetConfig' as const, label: t.fleet.numberingTitle }] : []),
+    ...(session.roleKey === 'system_admin' ? [{ key: 'fleetConfig' as const, label: t.fleet.numberingTitle, icon: 'hash' as const, group: 'fleet' as const }] : []),
     // FX rate + general settings are settings.write / fx_rate.write — system admin only.
-    ...(session.roleKey === 'system_admin' ? [{ key: 'settings' as const, label: t.settings.title }] : []),
+    ...(session.roleKey === 'system_admin' ? [{ key: 'settings' as const, label: t.settings.title, icon: 'settings' as const, group: 'system' as const }] : []),
   ]
 
   return (
@@ -223,23 +239,78 @@ export function AdminApp(): ReactNode {
             </select>
           ) : null}
         </div>
-        {nav.map((n) => (
-          <button
-            key={n.key}
-            onClick={() => {
-              setSection(n.key)
-              setOpenShift(null)
-              setNavOpen(false)
-            }}
-            className={`flex items-center justify-between rounded-lg px-3 py-2 text-start text-sm font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-brand/40 ${
-              section === n.key && !openShift ? 'bg-brand text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100'
-            }`}
-          >
-            <span>{n.label}</span>
-            {n.badge ? <Badge tone="red">{n.badge}</Badge> : null}
-          </button>
-        ))}
-        <div className="mt-auto flex flex-col gap-1 border-t border-slate-100 pt-2">
+        {([undefined, 'money', 'fleet', 'system'] as const).map((group) => {
+          const items = nav.filter((n) => n.group === group)
+          // A group whose every item was filtered out by role disappears with them, rather than
+          // leaving a heading over nothing.
+          if (items.length === 0) return null
+          const heading =
+            group === 'money'
+              ? t.common.navMoney
+              : group === 'fleet'
+                ? t.common.navFleet
+                : group === 'system'
+                  ? t.common.navSystem
+                  : null
+          return (
+            <div key={group ?? 'daily'} className="flex flex-col gap-1">
+              {heading ? (
+                // No `uppercase`, no `tracking-wider`: Arabic has no letter case, and extra tracking
+                // pulls apart the joins that make the script legible. Weight and colour do the work.
+                <div className="mt-3 px-3 pb-0.5 text-label font-semibold text-ink-faint">{heading}</div>
+              ) : null}
+              {items.map((n) => (
+                <button
+                  key={n.key}
+                  onClick={() => {
+                    setSection(n.key)
+                    setOpenShift(null)
+                    setNavOpen(false)
+                  }}
+                  aria-current={section === n.key && !openShift ? 'page' : undefined}
+                  className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-start text-body font-medium outline-none transition-colors ${FOCUS_RING} ${
+                    section === n.key && !openShift
+                      ? 'bg-brand text-ink-inverse shadow-sm'
+                      : 'text-ink-secondary hover:bg-surface-raised'
+                  }`}
+                >
+                  <Icon name={n.icon} />
+                  <span className="min-w-0 flex-1 truncate">{n.label}</span>
+                  {n.badge ? <Badge tone="danger">{n.badge}</Badge> : null}
+                </button>
+              ))}
+            </div>
+          )
+        })}
+        <div className="mt-auto flex flex-col gap-1 border-t border-line-subtle pt-2">
+          {/*
+            Three states, not a switch. «Auto» is the default and follows the device, so a manager
+            who never thinks about this still gets the right thing at night; the other two are a
+            deliberate override that survives reloads. A two-way toggle would have forced everyone
+            to make a choice they mostly do not have.
+          */}
+          <div className="px-3 pb-1 pt-1 text-label font-medium text-ink-muted">{t.common.theme}</div>
+          <div role="group" aria-label={t.common.theme} className="flex gap-1 px-2 pb-1">
+            {([
+              ['system', t.common.themeSystem],
+              ['light', t.common.themeLight],
+              ['dark', t.common.themeDark],
+            ] as const).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setTheme(value)}
+                aria-pressed={theme === value}
+                className={`flex-1 rounded-lg px-2 py-1.5 text-label font-medium outline-none transition-colors ${FOCUS_RING} ${
+                  theme === value
+                    ? 'bg-brand text-ink-inverse'
+                    : 'text-ink-secondary hover:bg-surface-raised'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <button
             onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}
             className="rounded-lg px-3 py-2 text-start text-sm text-slate-600 outline-none hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-brand/40"
@@ -282,7 +353,24 @@ export function AdminApp(): ReactNode {
             <NotificationBell notifications={notifs} onMarkRead={markRead} onNavigate={openNotif} />
           </div>
         </div>
+        {/*
+          * `max-w-[110rem]` and a page title, neither of which existed.
+          *
+          * The frame was `p-3 lg:p-6` with no width bound, so on a 27-inch monitor the treasury
+          * tables ran to two thousand pixels and a seven-column row became a horizon. And the name
+          * of the screen you were on appeared nowhere except the highlighted pill in the rail — on
+          * a phone, where the rail is a closed drawer, it appeared nowhere at all.
+          *
+          * The shift review is exempt: it carries its own header, and a second one above it would
+          * be two titles for one screen.
+          */}
         <main className="flex-1 overflow-y-auto p-3 lg:p-6">
+        <div className="mx-auto w-full max-w-[110rem]">
+        {!openShift ? (
+          <h1 className="mb-4 text-page font-bold text-ink">
+            {nav.find((n) => n.key === section)?.label ?? t.dashboard.title}
+          </h1>
+        ) : null}
         {openShift ? (
           /* A notification can replace `openShift` while a review is already mounted. Keying the
              workspace prevents typed cash/top-up or confirmations from one driver surviving into
@@ -328,6 +416,7 @@ export function AdminApp(): ReactNode {
         ) : (
           <Treasury />
         )}
+        </div>
         </main>
       </div>
     </div>

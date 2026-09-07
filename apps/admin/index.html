@@ -3,6 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!-- Runs before the body paints so a chosen dark theme never flashes white. External rather
+         than inline because the production CSP blocks inline scripts; see the file for why. -->
+    <script src="/theme-boot.js"></script>
     <title>ASH Delivery — الإدارة</title>
   </head>
   <body>

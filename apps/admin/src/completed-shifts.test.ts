@@ -147,7 +147,10 @@ describe('completed shift financial totals', () => {
 describe('completed shift history screen wiring', () => {
   it('is reachable from the admin rail and opens a completed shift in the existing detail view', () => {
     expect(appSource).toContain("'completedShifts',")
-    expect(appSource).toContain("{ key: 'completedShifts', label: t.completedShifts.title }")
+    // Asserted WITHOUT the surrounding braces: the claim is that the rail wires this key to this
+    // label, not that the entry never gains another field. Pinning the whole object literal made
+    // this fail the day nav items grew an icon, which is not what the test is about.
+    expect(appSource).toContain("key: 'completedShifts', label: t.completedShifts.title")
     expect(appSource).toContain('<CompletedShifts onOpen={setOpenShift} />')
     expect(screenSource).toContain('onClick={() => onOpen(shift.id)}')
   })

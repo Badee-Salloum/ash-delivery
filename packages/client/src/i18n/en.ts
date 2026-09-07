@@ -72,6 +72,13 @@ export const en: Catalog = {
   },
 
   common: {
+    navMoney: 'Money',
+    navFleet: 'Fleet',
+    navSystem: 'System',
+    theme: 'Theme',
+    themeLight: 'Light',
+    themeDark: 'Dark',
+    themeSystem: 'Auto',
     save: 'Save',
     cancel: 'Cancel',
     confirm: 'Confirm',
