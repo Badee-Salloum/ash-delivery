@@ -362,6 +362,99 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
     expect((await get(manager, '/dashboard')).statusCode).toBe(200)
   })
 
+  it('counts operating costs as expenses and never the owner’s capital', async () => {
+    /*
+     * The trap this test exists for.
+     *
+     * The obvious way to total expenses from the ledger is `fundCode.startsWith('cost_center:')`,
+     * and it is wrong: `fundRefFromCode` turns every code it does not recognise into
+     * `cost_center:<code>`, so that prefix also carries `owner_funding`, `owner_drawings` and
+     * `opening_balance` — the owner putting capital in and taking it out.
+     *
+     * Measured on production before this was written: the real cost centres total 36,988.81, which
+     * is exactly what the `expenses` table holds, while the blanket prefix returns 7,778.39. That is
+     * a 79% understatement of cost and an identical overstatement of profit, on the one number the
+     * general manager opens the screen to read.
+     */
+    const post = (occurrenceKey: string, fundCode: string, amount: number): void => {
+      h.deps.ledger.entries.push({
+        id: 20_000 + h.deps.ledger.entries.length,
+        branchId: BRANCH,
+        eventType: 'manual',
+        shiftId: null,
+        occurrenceKey,
+        businessDate: '2026-07-22',
+        postingDate: '2026-07-22',
+        weekStartDate: weekStartFor('2026-07-22'),
+        fxDayId: 1,
+        weekLockId: null,
+        reason: 'cost centre fixture',
+        createdBy: 'u-bm',
+        lines: [
+          { fundCode, side: 'D', amount: syp(amount) },
+          { fundCode: 'office_cash', side: 'C', amount: syp(amount) },
+        ],
+      })
+    }
+
+    // Revenue to measure the cost against.
+    h.deps.ledger.entries.push({
+      id: 21_000, branchId: BRANCH, eventType: 'manual', shiftId: null,
+      occurrenceKey: 'cost-centre-revenue', businessDate: '2026-07-22', postingDate: '2026-07-22',
+      weekStartDate: weekStartFor('2026-07-22'), fxDayId: 1, weekLockId: null,
+      reason: 'cost centre fixture', createdBy: 'u-bm',
+      lines: [
+        { fundCode: 'office_cash', side: 'D', amount: syp(1_000) },
+        { fundCode: 'company_revenue', side: 'C', amount: syp(1_000) },
+      ],
+    })
+
+    // Real operating costs — these MUST reduce profit.
+    post('cc-branch', `cost_center:branch:${BRANCH}`, 100)
+    post('cc-general', `cost_center:general:${BRANCH}`, 30)
+    post('cc-vehicle', 'cost_center:vehicle:v-1', 20)
+    post('cc-writeoff', 'cost_center:receivable_writeoff_loss', 10)
+    post('cc-wallet-adj', `cost_center:wallet_adjustment:${BRANCH}`, 5)
+
+    // Capital movements wearing the same prefix — these must NOT.
+    post('cc-owner-funding', 'cost_center:owner_funding', 9_000)
+    post('cc-owner-drawings', 'cost_center:owner_drawings', 4_000)
+    post('cc-opening', 'cost_center:opening_balance', 2_000)
+
+    const gm = await h.loginAs('gm')
+    const res = await get(gm, `/dashboard/profit?from=2026-07-22&to=2026-07-22&branchId=${BRANCH}`)
+    expect(res.statusCode, res.body).toBe(200)
+
+    // 100 + 30 + 20 + 10 + 5 — and not one lira of the 15,000 in capital movements.
+    expect(res.json().expenseSyp).toBe('165.00')
+    expect(res.json().companyShareSyp).toBe('1000.00')
+    expect(res.json().netProfitSyp).toBe('835.00')
+  })
+
+  it('adds non-delivery income to profit and reports it on its own line', async () => {
+    // `other_income` is a separate fund by design so a battery sale cannot overstate the delivery
+    // business. It is still the company’s money, so a profit figure that omits it is simply
+    // short — by 5,692.37 on production when this was measured.
+    h.deps.ledger.entries.push({
+      id: 22_000, branchId: BRANCH, eventType: 'income', shiftId: null,
+      occurrenceKey: 'other-income-fixture', businessDate: '2026-07-22', postingDate: '2026-07-22',
+      weekStartDate: weekStartFor('2026-07-22'), fxDayId: 1, weekLockId: null,
+      reason: 'office share of an outside job', createdBy: 'u-bm',
+      lines: [
+        { fundCode: 'office_cash', side: 'D', amount: syp(250) },
+        { fundCode: 'other_income', side: 'C', amount: syp(250) },
+      ],
+    })
+
+    const gm = await h.loginAs('gm')
+    const res = await get(gm, `/dashboard/profit?from=2026-07-22&to=2026-07-22&branchId=${BRANCH}`)
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json().otherIncomeSyp).toBe('250.00')
+    // Its own line, and inside the net.
+    expect(res.json().netProfitSyp).toBe('250.00')
+    expect(res.json().companyShareSyp).toBe('0.00')
+  })
+
   it('a driver sees none of the dashboard endpoints', async () => {
     const driver = await h.loginAs('driver1')
     expect((await get(driver, '/dashboard')).statusCode).toBe(403)

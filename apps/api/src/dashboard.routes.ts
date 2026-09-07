@@ -1,7 +1,14 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { type Deps, type JournalEntryRecord, type ShiftRecord, serializeMoney } from '@ash/contracts'
-import { REQUIRED_END_SLOTS, isLive, minor, toUsdMinor, weekStartFor } from '@ash/domain'
+import {
+  RECEIVABLE_WRITEOFF_LOSS_COST_CENTER,
+  REQUIRED_END_SLOTS,
+  isLive,
+  minor,
+  toUsdMinor,
+  weekStartFor,
+} from '@ash/domain'
 import { ServiceError, includedOrders, todayFor } from './shifts.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
 import { clampToGoLive, goLiveDate } from './go-live.ts'
@@ -183,15 +190,55 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     }
     let company = 0n
     let yalago = 0n
+    let otherIncome = 0n
+    let expense = 0n
+    /*
+     * The GROSS block share, and it has to be its own accumulator.
+     *
+     * `driverShareSyp` below is the SETTLEMENT figure — net of cash deductions — while `shareSplit`
+     * credits the gross 40%. Building the fee bridge on the settlement number would leave it short
+     * by every deduction ever taken: measured here, 83,195.50 against a gross 82,698.00. A waterfall
+     * whose rows do not sum is worse than no waterfall.
+     */
+    let driverBlock = 0n
+    /*
+     * Cost-centre LINES, not their total. «No expense has been recorded» and «the expenses recorded
+     * net to zero» are different facts about a day, and only one of them is a warning: a recorded
+     * expense that was later reversed gives two lines and a zero total, and must not be flagged.
+     */
+    let expenseLineCount = 0
+    /** Per business date, so the screen can show WHY one day differs from its neighbours. */
+    const perDay = new Map<string, { company: bigint; otherIncome: bigint; expense: bigint }>()
+    const dayOf = (date: string): { company: bigint; otherIncome: bigint; expense: bigint } => {
+      const found = perDay.get(date)
+      if (found !== undefined) return found
+      const fresh = { company: 0n, otherIncome: 0n, expense: 0n }
+      perDay.set(date, fresh)
+      return fresh
+    }
     const legacyDriverShareByShift = new Map<string | null, bigint>()
     const shiftIds = new Set<string>()
     for (const e of entries) {
       if (e.businessDate < from || e.businessDate > to) continue
       if (e.shiftId !== null) shiftIds.add(e.shiftId)
+      const day = dayOf(e.businessDate)
       for (const l of e.lines) {
         const signed = l.side === 'C' ? l.amount : -l.amount
-        if (l.fundCode === 'company_revenue') company += signed
-        else if (l.fundCode === 'yalago_income') yalago += signed
+        if (l.fundCode === 'company_revenue') {
+          company += signed
+          day.company += signed
+        } else if (l.fundCode === 'other_income') {
+          // Deliberately its own line, never folded into `company_revenue` — `recipes.ts` keeps them
+          // apart so a battery sale cannot silently overstate the delivery business. It is still the
+          // company's money, so profit has to add it back or it disappears from every report.
+          otherIncome += signed
+          day.otherIncome += signed
+        } else if (isOperatingCost(l.fundCode)) {
+          // A cost is a DEBIT, so the sign flips relative to revenue.
+          expense += -signed
+          day.expense += -signed
+          expenseLineCount += 1
+        } else if (l.fundCode === 'yalago_income') yalago += signed
         else if (
           (
             l.fundCode.startsWith('driver_share_payable:') &&
@@ -205,6 +252,11 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
             e.shiftId,
             (legacyDriverShareByShift.get(e.shiftId) ?? 0n) + signed,
           )
+        }
+        // NOT part of the chain above: that branch also claims `cash_deduction_share`, and this
+        // wants strictly the `share_split` credit. Two different questions about one line.
+        if (l.fundCode.startsWith('driver_share_payable:') && l.role === 'driver_share') {
+          driverBlock += signed
         }
       }
     }
@@ -226,6 +278,30 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
       companyShareSyp: serializeMoney(minor(company)),
       driverShareSyp: serializeMoney(minor(driverShare)),
       yalagoShareSyp: serializeMoney(minor(yalago)),
+      otherIncomeSyp: serializeMoney(minor(otherIncome)),
+      expenseSyp: serializeMoney(minor(expense)),
+      expenseLineCount,
+      driverBlockShareSyp: serializeMoney(minor(driverBlock)),
+      // DERIVED, never read from `fee_earned`: `orderFee` credits that fund and `shareSplit` debits
+      // it in the same batch, so its balance over any period is exactly zero. Deriving it from the
+      // three shares instead makes the bridge reconcile by construction — `shareSplit` already
+      // refuses to post a split that does not exhaust the fee total.
+      feeTotalSyp: serializeMoney(minor(driverBlock + company + yalago)),
+      // The whole point of the endpoint, and the one figure the general manager opens it for.
+      // Company share is GROSS — expenses never touch `company_revenue` — so it is not profit and
+      // was never presented as any. This is.
+      netProfitSyp: serializeMoney(minor(company + otherIncome - expense)),
+      // One row per business date that moved, so a day can be read against its neighbours. It is
+      // what turns «we lost 13,543 on the 3rd» into «salaries were paid on the 3rd».
+      days: [...perDay.entries()]
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([businessDate, d]) => ({
+          businessDate,
+          companyShareSyp: serializeMoney(minor(d.company)),
+          otherIncomeSyp: serializeMoney(minor(d.otherIncome)),
+          expenseSyp: serializeMoney(minor(d.expense)),
+          netProfitSyp: serializeMoney(minor(d.company + d.otherIncome - d.expense)),
+        })),
     }
   })
 
@@ -462,6 +538,44 @@ const realCalendarDate = z
   }, 'expected a real calendar date')
 
 /** Every financial-week start the inclusive range [from, to] touches, in order. */
+/**
+ * Is this fund a real operating cost — something that reduces profit?
+ *
+ * AN ALLOWLIST, AND IT HAS TO BE. The obvious implementation is
+ * `fundCode.startsWith('cost_center:')`, and it is wrong in a way that is invisible until someone
+ * checks the arithmetic against the books. `fundRefFromCode` turns any code it does not recognise
+ * into `cost_center:<code>` — the "look-alike account" its own comments warn about — so the
+ * `cost_center:` prefix also carries the OWNER'S CAPITAL:
+ *
+ *     cost_center:branch:<id>        35,695.00   a real expense
+ *     cost_center:general:<id>        1,293.81   a real expense
+ *     cost_center:owner_funding     -63,980.00   the owner putting capital IN
+ *     cost_center:owner_drawings      9,904.00   the owner taking capital OUT
+ *     cost_center:opening_balance     9,464.00   an opening balance
+ *
+ * Measured on production: the two real ones total 36,988.81, which is exactly what the `expenses`
+ * table holds. The blanket prefix returns 7,778.39 — understating cost by 79% and inflating profit
+ * by the same amount. Capital movements are not costs and must never reach a profit figure.
+ *
+ * The allowlist is wider than the `expenses` table on purpose, and that is the reason for reading
+ * the ledger instead of that table: a receivable write-off, an unexplained wallet adjustment and a
+ * force-close gap are all real money gone with no expense row behind them.
+ */
+function isOperatingCost(fundCode: string): boolean {
+  if (!fundCode.startsWith('cost_center:')) return false
+  const centre = fundCode.slice('cost_center:'.length)
+  return (
+    // The three `cost_center_kind` values an expense can carry.
+    centre.startsWith('vehicle:') ||
+    centre.startsWith('branch:') ||
+    centre.startsWith('general:') ||
+    // Real losses that never write an `expenses` row.
+    centre === RECEIVABLE_WRITEOFF_LOSS_COST_CENTER ||
+    centre.startsWith('wallet_adjustment:') ||
+    centre.startsWith('cash_count_variance:')
+  )
+}
+
 function weekStartsBetween(from: string, to: string): string[] {
   const starts: string[] = []
   let cursor = weekStartFor(from)

@@ -2,7 +2,7 @@ import { Fragment, type ReactNode, useCallback, useEffect, useRef, useState } fr
 import { type RoleKey, can, minor, parseMinor } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
-import { Badge, Card, Money, Pending, Stat } from '../ui.tsx'
+import { Badge, Card, Figure, Money, Pending, Stat } from '../ui.tsx'
 import { LatestRequestGuard } from '../latest-request.ts'
 import { differenceView } from '../treasury-view.ts'
 import { type WorkingNowSnapshot, startWorkingNowPolling } from '../working-now.ts'
@@ -85,12 +85,97 @@ interface TreasuryDigest {
   days: Array<{ businessDate: string; in: string; out: string; net: string }>
 }
 
+interface ProfitDay {
+  businessDate: string
+  companyShareSyp: string
+  otherIncomeSyp: string
+  expenseSyp: string
+  netProfitSyp: string
+}
+
+interface ProfitDigest {
+  from: string
+  to: string
+  weekStart: string
+  companyShareSyp: string
+  driverShareSyp: string
+  yalagoShareSyp: string
+  otherIncomeSyp: string
+  expenseSyp: string
+  netProfitSyp: string
+  days: ProfitDay[]
+}
+
+/**
+ * Fourteen days of net, as bars on a zero baseline.
+ *
+ * BARS, NOT A LINE, and the reason is in the data: measured net swings from −13,543 to +8,479, and
+ * the low day is not a slump — it is the day a month of salaries was paid. A polyline renders that
+ * as a dip in a trend. A bar crossing a zero rule renders it as what it is: one day below the line
+ * among days above it, which is a fact a manager can act on instead of an alarm.
+ *
+ * Drawn here rather than pulled from a chart library. `apps/admin` has four runtime dependencies and
+ * its vite config says charts must be lazy-loaded per route; seven rectangles do not justify either.
+ *
+ * `fill="currentColor"` with a role-token class, so no palette literal ever reaches the SVG and the
+ * bars follow the theme like everything else.
+ */
+function ProfitTrend({ days }: { days: ProfitDay[] }): ReactNode {
+  const values = days.map((d) => Number(parseMinor(d.netProfitSyp)))
+  const peak = Math.max(1, ...values.map((v) => Math.abs(v)))
+  const width = 100
+  const height = 40
+  const zeroY = height / 2
+  const slot = width / Math.max(1, days.length)
+  const barWidth = Math.max(1, slot * 0.62)
+
+  return (
+    // Time reads left-to-right in both languages, exactly as every other figure in this console.
+    <div dir="ltr">
+      <svg
+        role="img"
+        aria-label={days.map((d) => `${d.businessDate}: ${d.netProfitSyp}`).join(', ')}
+        viewBox={`0 0 ${width} ${height}`}
+        preserveAspectRatio="none"
+        className="block h-24 w-full"
+      >
+        {/* A rect, not a stroked line: `preserveAspectRatio="none"` scales a stroke
+            anisotropically and the baseline would come out wedge-shaped. */}
+        <rect x="0" y={zeroY - 0.15} width={width} height="0.3" className="text-line-strong" fill="currentColor" />
+        {days.map((d, i) => {
+          const value = values[i] ?? 0
+          const magnitude = (Math.abs(value) / peak) * (height / 2 - 1)
+          return (
+            <rect
+              key={d.businessDate}
+              x={i * slot + (slot - barWidth) / 2}
+              y={value < 0 ? zeroY : zeroY - magnitude}
+              width={barWidth}
+              height={Math.max(0.4, magnitude)}
+              className={value < 0 ? 'text-danger-ink' : 'text-success-ink'}
+              fill="currentColor"
+            />
+          )
+        })}
+      </svg>
+    </div>
+  )
+}
+
 /** The operations dashboard (SRS I-1). Total profit is a GM-only tile, fetched separately. */
 export function Dashboard(): ReactNode {
   const { api, t, session, branchId } = useApp()
   const [data, setData] = useState<DashboardData | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [profit, setProfit] = useState<{ companyShareSyp: string; driverShareSyp: string; yalagoShareSyp: string } | null>(null)
+  /*
+   * `from`/`to` are declared because the card MUST say which period it is showing.
+   *
+   * They were always on the wire and always discarded, and that is how «الأرباح الإجمالية» came to
+   * sit beside a date input showing today while reporting the whole financial week: with no range
+   * sent, the server defaults `from` to the Sunday. Reading a day and being handed a week is the
+   * kind of quiet wrongness a manager only catches by doing the arithmetic himself.
+   */
+  const [profit, setProfit] = useState<ProfitDigest | null>(null)
   const [treasury, setTreasury] = useState<TreasuryDigest | null>(null)
   const [expiring, setExpiring] = useState<ExpiringDoc[]>([])
   const [attendance, setAttendance] = useState<Attendee[]>([])
@@ -157,7 +242,10 @@ export function Dashboard(): ReactNode {
           if (request.isCurrent()) setProfit(null)
         })
       void api
-        .get<TreasuryDigest>('/dashboard/treasury', { cache: 'no-store', signal: request.signal })
+        // The same range as the profit card. It used to be called bare, so «كشف الصندوق ورأس المال»
+        // answered for the week no matter which day was picked — disclosed, since it prints its own
+        // from → to, but never actually responsive.
+        .get<TreasuryDigest>(`/dashboard/treasury${range}`, { cache: 'no-store', signal: request.signal })
         .then((next) => {
           if (request.isCurrent()) setTreasury(next)
         })
@@ -222,6 +310,45 @@ export function Dashboard(): ReactNode {
   const capitalDelta = treasury ? differenceView(treasury.capital.delta) : null
   // `data.businessDate` is the server's own answer, already past the 04:00 rule.
   const shownDay = day ?? data.businessDate
+
+  /*
+   * The day's own row out of the period, so one call answers both tiles.
+   *
+   * Falls back to the last day that moved: on a quiet morning the current business date has no
+   * ledger entry yet, and «—» is a truer answer than someone else's day dressed as today.
+   */
+  const profitToday = profit?.days.find((d) => d.businessDate === shownDay) ?? null
+
+  /** Margin on what the company actually took in — share plus other income, not delivery fees. */
+  const profitMargin = ((): number | null => {
+    if (!profit) return null
+    const revenue = parseMinor(profit.companyShareSyp) + parseMinor(profit.otherIncomeSyp)
+    if (revenue <= minor(0n)) return null
+    return Math.round((Number(parseMinor(profit.netProfitSyp)) / Number(revenue)) * 100)
+  })()
+
+  /*
+   * Why today's net may not mean what it looks like.
+   *
+   * Measured on this branch: fifteen of twenty-four business days carry no expense row at all, so
+   * on most days a «net» is silently the gross. And approval postings are stamped with the SHIFT's
+   * business date, not the approval date, so a day keeps changing while its shifts are unapproved.
+   * Both are stated rather than left for the reader to discover.
+   */
+  const dayProfitCaveat = ((): ReactNode => {
+    if (!profitToday) return undefined
+    if (parseMinor(profitToday.expenseSyp) === minor(0n)) {
+      return <span className="text-warning-ink">{t.dashboard.noExpensesYet}</span>
+    }
+    if (data.completeness.awaitingApproval > 0) {
+      return (
+        <span className="text-warning-ink">
+          {t.dashboard.notFinalYet.replace('{n}', String(data.completeness.awaitingApproval))}
+        </span>
+      )
+    }
+    return undefined
+  })()
   const workingCountsStatusText = workingNowUnavailable
     ? workingNow
       ? t.dashboard.workingCountsStale
@@ -262,6 +389,84 @@ export function Dashboard(): ReactNode {
         </button>
         <span className="text-xs text-slate-500">{t.dashboard.dayEndsAtFour}</span>
       </div>
+      {/*
+        PROFIT FIRST. The screen used to open with six equally weighted tiles — revenue, orders,
+        drivers, vehicles, company share, awaiting approval — and not one of them was profit. The
+        general manager opens this screen for one question, so it is answered before anything else.
+      */}
+      {profit ? (
+        <div className="flex flex-col gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <Stat
+              lead
+              className="sm:col-span-2"
+              label={t.dashboard.netProfit}
+              value={<Money value={profit.netProfitSyp} />}
+              tone={parseMinor(profit.netProfitSyp) < minor(0n) ? 'danger' : 'success'}
+              sub={
+                <span className="flex flex-wrap items-center gap-x-2">
+                  {profitMargin === null ? null : <span>{t.dashboard.margin} {profitMargin}%</span>}
+                  {/* The period, stated. Without it this tile silently reported the whole financial
+                      week while the date input beside it showed today. */}
+                  <span className="num" dir="ltr">
+                    {profit.from} → {profit.to}
+                  </span>
+                </span>
+              }
+            />
+            <Stat
+              label={t.dashboard.netToday}
+              value={profitToday ? <Money value={profitToday.netProfitSyp} /> : '—'}
+              {...(profitToday && parseMinor(profitToday.netProfitSyp) < minor(0n)
+                ? { tone: 'danger' as const }
+                : {})}
+              sub={dayProfitCaveat}
+            />
+          </div>
+
+          {/*
+            The bridge, and it is built ENTIRELY from ledger figures so it adds up on screen.
+            Building it downward from delivery fees was the obvious shape and it does not reconcile:
+            fees 206,745 at a 20% Yallago cut and a 40% driver share leaves 82,698, but the ledger
+            holds 81,108.50 — a manual journal entry can move `company_revenue` with no shift behind
+            it. A bridge whose own rows do not sum costs the reader his trust in every other number
+            on the page, so the fee split is shown as CONTEXT in the subtitle instead.
+          */}
+          <Card
+            title={t.dashboard.profitBridge}
+            subtitle={`${t.dashboard.feeSplit}: ${t.dashboard.companyShareLabel} ${profit.companyShareSyp} · ${t.orders.driverShare} ${profit.driverShareSyp} · ${t.dashboard.yalagoShareLabel} ${profit.yalagoShareSyp}`}
+          >
+            <dl className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-4">
+              <Figure
+                label={t.dashboard.companyShareLabel}
+                value={<Money value={profit.companyShareSyp} />}
+              />
+              <Figure
+                label={t.dashboard.otherIncome}
+                value={<Money value={profit.otherIncomeSyp} />}
+              />
+              <Figure
+                label={t.dashboard.expensesLabel}
+                value={<Money value={profit.expenseSyp} />}
+                {...(parseMinor(profit.expenseSyp) > minor(0n) ? { tone: 'danger' as const } : {})}
+              />
+              <Figure
+                label={t.dashboard.netProfit}
+                value={<Money value={profit.netProfitSyp} />}
+                size="lg"
+                tone={parseMinor(profit.netProfitSyp) < minor(0n) ? 'danger' : 'success'}
+              />
+            </dl>
+          </Card>
+
+          {profit.days.length > 1 ? (
+            <Card title={t.dashboard.last14Days}>
+              <ProfitTrend days={profit.days.slice(-14)} />
+            </Card>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
         <Stat
           label={t.dashboard.revenue}
@@ -278,16 +483,6 @@ export function Dashboard(): ReactNode {
           href="#queue"
         />
       </div>
-
-      {profit ? (
-        <Card title={t.dashboard.totalProfit}>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <Stat label={t.tiers.driverShare} value={<Money value={profit.driverShareSyp} />} />
-            <Stat label={t.dashboard.companyShareLabel} value={<Money value={profit.companyShareSyp} />} />
-            <Stat label={t.dashboard.yalagoShareLabel} value={<Money value={profit.yalagoShareSyp} />} />
-          </div>
-        </Card>
-      ) : null}
 
       {/*
         The owner's own sheet, in his own words. «راس المال المدور» is a position — both boxes plus
