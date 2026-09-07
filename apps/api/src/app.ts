@@ -46,6 +46,7 @@ import {
   sum,
   weekClosedOn,
   weekStartFor,
+  workedTime,
 } from '@ash/domain'
 import {
   SESSION_COOKIE,
@@ -519,8 +520,23 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     '/shifts',
     { config: { permission: 'branch_data.view', subject: branchSubject } },
     async (req) => {
-      const { date, live, pending } = z
-        .object({ date: z.string().optional(), live: z.string().optional(), pending: z.string().optional() })
+      const { date, from, to, driverId, state, live, pending } = z
+        .object({
+          date: z.string().optional(),
+          // A RANGE, over the existing week-close repo read. The history screen was asking for one
+          // date at a time and fanning out seven at a time to cover a month — 33 requests where
+          // `listByBranchAndDateRange` answers in one, and it is the same call the Sunday close
+          // already trusts.
+          from: z.string().optional(),
+          to: z.string().optional(),
+          // Filtered HERE, not in the browser. The screen was fetching every state for every date
+          // and discarding what it did not want, so a month of drafts and cancelled shifts crossed
+          // the wire to be thrown away.
+          driverId: z.string().optional(),
+          state: z.string().optional(),
+          live: z.string().optional(),
+          pending: z.string().optional(),
+        })
         .parse(req.query)
       const target = resolveBranchId(req)
       const businessDate = date ?? todayFor(deps)
@@ -532,12 +548,18 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       // a question about today's date. The approval queue asked the date-filtered list and dropped
       // everything the manager did not get to before midnight: the shift stayed `pending_review`
       // with its money unposted, and the one screen whose job is to surface it stopped showing it.
-      const shifts =
+      const wanted = state === undefined ? null : new Set(state.split(',').filter((v) => v !== ''))
+      const all =
         pending === '1'
           ? await deps.shifts.listAwaitingDecisionForBranch(target)
           : live === '1'
             ? await deps.shifts.listLiveForBranch(target)
-            : await deps.shifts.listByBranchAndDate(target, businessDate)
+            : from !== undefined && to !== undefined
+              ? await deps.shifts.listByBranchAndDateRange(target, from, to)
+              : await deps.shifts.listByBranchAndDate(target, businessDate)
+      const shifts = all.filter(
+        (s) => (driverId === undefined || s.driverId === driverId) && (wanted === null || wanted.has(s.state)),
+      )
       // Reporting is a batch read: one order query and one settlement query for the whole page.
       // Apart from avoiding a per-shift round trip, reading both sets before shaping rows means the
       // order count and the financial split always come from the same in-memory order snapshot.
@@ -587,6 +609,23 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
             // one — and approving from the list is deliberately not offered. The difference is
             // already stored on the row by `evaluateShift`; serving it costs nothing.
             equationDiff: s.equationDiff === null ? null : serializeMoney(s.equationDiff),
+            /*
+             * WHEN it ran, and therefore WHICH of the fleet's three patterns it was.
+             *
+             * The history screen showed a business date and «#1» and nothing else, so thirteen
+             * shifts on one day were thirteen identical rows. These two instants are the operation
+             * window the system already reasons about — the driver's own confirmation through his
+             * close submission — and `workedTime` turns them into a pattern and a length.
+             *
+             * `submittedAt` is null for a live shift AND for one whose close was rejected, since
+             * that path clears it; either way there is no length yet, which is the honest answer.
+             */
+            windowOpensAt: s.windowOpensAt,
+            submittedAt: s.submittedAt,
+            worked: workedTime(
+              s.windowOpensAt === null ? null : Date.parse(s.windowOpensAt),
+              s.submittedAt === null ? null : Date.parse(s.submittedAt),
+            ),
           }
         }),
       }
@@ -1774,6 +1813,30 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         cashAction: plan.cash.action,
         cashAmount: serializeMoney(plan.cash.amount),
         settlementHash: plan.settlementHash,
+        /*
+         * WHO SIGNED IT, WHEN, AND WHY THE DIFFERENCE.
+         *
+         * These five live in the immutable snapshot and were serialized by nothing — the explicit
+         * whitelist above simply never listed them, so the provenance of a settled shift existed
+         * only in the audit trigger's raw JSON. A completed shift's page could show every figure of
+         * the handover and not the fact that a named manager confirmed it at a named minute, or the
+         * audited reason he gave for a non-zero variance, which BR5 required him to write.
+         *
+         * Undefined on a live preview: nothing has been confirmed yet, and a preview must not look
+         * like a signature.
+         */
+        confirmedAt: 'confirmedAt' in plan ? (plan as { confirmedAt?: string | null }).confirmedAt ?? null : null,
+        confirmedBy: 'confirmedBy' in plan ? (plan as { confirmedBy?: string | null }).confirmedBy ?? null : null,
+        varianceReason:
+          'varianceReason' in plan ? (plan as { varianceReason?: string | null }).varianceReason ?? null : null,
+        walletTransferConfirmed:
+          'walletTransferConfirmed' in plan
+            ? (plan as { walletTransferConfirmed?: boolean }).walletTransferConfirmed ?? false
+            : false,
+        cashSettlementConfirmed:
+          'cashSettlementConfirmed' in plan
+            ? (plan as { cashSettlementConfirmed?: boolean }).cashSettlementConfirmed ?? false
+            : false,
       }
     },
   )

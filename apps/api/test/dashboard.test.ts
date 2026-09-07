@@ -75,6 +75,7 @@ async function seedCountShift(
     walletDiff: null,
     ordersHash: null,
     approvedBy: null,
+    approvedAt: null,
     ...overrides,
   }, null)
 }

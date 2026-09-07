@@ -161,6 +161,9 @@ export class PgShiftRepo implements ShiftRepo {
            window_opens_at = COALESCE(window_opens_at, $28::timestamptz),
            submitted_at = $18::timestamptz,
            approved_by = $19,
+           -- Write-once, like the open pair above: the instant a close was signed is historical
+           -- identity, and re-saving a loaded record must not restamp it.
+           approved_at = COALESCE(approved_at, $29::timestamptz),
            odo_start_ocr = $20, odo_end_ocr = $21,
            odo_end_anomaly_confirmed_at = $22::timestamptz,
            odo_end_anomaly_confirmed_by = $23::uuid,
@@ -198,6 +201,7 @@ export class PgShiftRepo implements ShiftRepo {
           shift.keptAsReceivable.toString(),
           shift.driverSharePaid.toString(),
           shift.windowOpensAt,
+          shift.approvedAt,
         ],
       )
 
@@ -371,6 +375,7 @@ export class PgShiftRepo implements ShiftRepo {
       walletDiff: bigintOrNull(r.wallet_diff_minor),
       ordersHash: (r.orders_hash as string | null) ?? null,
       approvedBy: (r.approved_by as string | null) ?? null,
+      approvedAt: r.approved_at == null ? null : (r.approved_at as Date).toISOString(),
     }))
   }
 }

@@ -599,6 +599,7 @@ export async function createShift(
     walletDiff: null,
     ordersHash: null,
     approvedBy: null,
+    approvedAt: null,
   }
   try {
     await deps.shifts.create(shift, actor.userId)
@@ -4634,6 +4635,10 @@ async function approveCloseLocked(
     ...shift,
     state: result.next,
     approvedBy: actor.userId,
+    // The column has been there since 0005 and nothing ever wrote it — 112 approved shifts carry
+    // an approver and no instant. This is the same moment the settlement snapshot is confirmed at,
+    // so the two can never disagree about when the close was signed.
+    approvedAt: new Date(confirmedAtMs).toISOString(),
     keptAsReceivable: settlement.cashReceivableDeferred,
     driverSharePaid: settlement.finalEmployeeCash > 0n ? settlement.finalEmployeeCash : minor(0n),
     equationDiff: br1.result.scalarDiff,
@@ -4971,6 +4976,10 @@ async function forceCloseLocked(
     ...stagedShift,
     state: result.next,
     approvedBy: actor.userId,
+    // The column has been there since 0005 and nothing ever wrote it — 112 approved shifts carry
+    // an approver and no instant. This is the same moment the settlement snapshot is confirmed at,
+    // so the two can never disagree about when the close was signed.
+    approvedAt: new Date(confirmedAtMs).toISOString(),
     keptAsReceivable: settlement.cashReceivableDeferred,
     driverSharePaid: settlement.finalEmployeeCash > 0n ? settlement.finalEmployeeCash : minor(0n),
     odoEnd: finalOdometer,

@@ -24,9 +24,47 @@ export { plural, pluralCategory, type PluralForms } from './i18n/index.ts'
 export function formatDateTime(iso: string, lang: 'ar' | 'en'): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return iso
-  const pad = (n: number): string => String(n).padStart(2, '0')
   void lang // the shape is identical in both; the parameter keeps call sites honest
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return damascusParts(d).stamp
+}
+
+/**
+ * The branch's wall clock, from an instant.
+ *
+ * The fix that removed the browser's LOCALE left the browser's ZONE in place: `getHours()` and
+ * friends are local-time getters, and there was no `Asia/Damascus` anywhere in the admin app. On a
+ * laptop set to UTC a close confirmed at 01:30 in Damascus rendered as 22:30 — the PREVIOUS DAY —
+ * beside a business-date column that correctly said otherwise. Two dates for one event, and the
+ * one a manager would have trusted was the wrong one.
+ *
+ * `Intl` rather than a fixed +3: the offset is the adapter layer's job to know, and a formatter
+ * that reads the tz database stays right if Syria ever restores DST. This is the client package,
+ * not `packages/domain` — the domain stays free of `Intl` by rule.
+ */
+export function damascusParts(value: Date): {
+  readonly date: string
+  readonly time: string
+  readonly stamp: string
+  /** 0 = Sunday. For naming the day, which is how a manager actually recalls a shift. */
+  readonly weekday: number
+} {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Damascus',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    weekday: 'short',
+  }).formatToParts(value)
+  const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? ''
+  // `hour12: false` still yields "24" at midnight in some engines; normalise it to "00".
+  const hour = get('hour') === '24' ? '00' : get('hour')
+  const date = `${get('year')}-${get('month')}-${get('day')}`
+  const time = `${hour}:${get('minute')}`
+  const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+  return { date, time, stamp: `${date} ${time}`, weekday: Math.max(0, WEEKDAYS.indexOf(get('weekday'))) }
 }
 
 /**

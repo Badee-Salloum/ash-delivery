@@ -517,6 +517,19 @@ export interface ShiftRecord {
   walletDiff: Minor | null
   ordersHash: string | null
   approvedBy: string | null
+  /**
+   * When the close was approved.
+   *
+   * The column has existed since migration 0005 and no code path ever wrote it — `approved_by` was
+   * set on all 112 approved production shifts and `approved_at` on none of them, because the field
+   * was missing from this record and so the UPDATE below could not carry it. Anything that needed
+   * the instant had to reach for `shift_settlements.confirmed_at` instead.
+   *
+   * Rows approved before this fix stay null; they are not backfilled, because the settlement
+   * snapshot already holds their true confirmation instant and inventing one here would be worse
+   * than an honest gap.
+   */
+  approvedAt: string | null
 }
 
 export interface ShiftOrderRecord {

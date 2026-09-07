@@ -51,6 +51,7 @@ const shift = (): ShiftRecord => ({
   walletDiff: null,
   ordersHash: null,
   approvedBy: null,
+  approvedAt: null,
 })
 
 const order = (
