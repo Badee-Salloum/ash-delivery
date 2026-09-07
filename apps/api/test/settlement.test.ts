@@ -537,6 +537,60 @@ describe('fixed 40% approval', () => {
     }
   })
 
+  it('re-reads a settled shift as a closing record: who signed it, when, and why the difference', async () => {
+    /*
+     * WHAT A COMPLETED SHIFT'S PAGE IS FOR.
+     *
+     * The route already returned every figure of the handover and none of its provenance: the five
+     * snapshot columns naming the manager, the minute, the audited variance reason and the two
+     * attestations were simply never listed in the response's explicit whitelist, so they existed
+     * only inside the audit trigger's raw JSON. The console could show what was handed over and not
+     * that anyone had signed for it.
+     *
+     * `confirmedBy` is resolved to a NAME here rather than in the browser: it is a uuid, and only
+     * drivers are listable to the console — the manager who signs a close is not one.
+     */
+    const { manager, shiftId, reviewHash } = await pendingShift({ actualCash: 15_000, actualWallet: 3_000 })
+    const settlement = await preview(manager, shiftId)
+
+    // A PREVIEW MUST NOT LOOK LIKE A SIGNATURE. Nothing has been confirmed yet.
+    expect(settlement).toMatchObject({
+      confirmedAt: null,
+      confirmedBy: null,
+      confirmedByName: null,
+      varianceReason: null,
+      walletTransferConfirmed: false,
+      cashSettlementConfirmed: false,
+    })
+
+    const approved = await approve(manager, shiftId, reviewHash, settlement, 'counted twice with the driver')
+    expect(approved.statusCode, approved.body).toBe(200)
+
+    const record = await get(manager, `/shifts/${shiftId}/settlement`)
+    expect(record.statusCode, record.body).toBe(200)
+    const closed = record.json() as Settlement & {
+      confirmedAt: string | null
+      confirmedBy: string | null
+      confirmedByName: string | null
+      varianceReason: string | null
+      walletTransferConfirmed: boolean
+      cashSettlementConfirmed: boolean
+    }
+    expect(closed).toMatchObject({
+      confirmedBy: 'u-bm',
+      varianceReason: 'counted twice with the driver',
+      walletTransferConfirmed: true,
+      cashSettlementConfirmed: true,
+    })
+    expect(closed.confirmedByName).not.toBeNull()
+    expect(closed.confirmedByName).not.toBe('u-bm')
+    expect(Date.parse(closed.confirmedAt!)).toBe(h.deps.clock.nowMs())
+
+    // …and it is the FROZEN snapshot, not a recomputation: the hash the manager signed survives.
+    expect(closed.settlementHash).toBe(settlement.settlementHash)
+    expect(closed.finalEmployeeCash).toBe(settlement.finalEmployeeCash)
+  })
+
   it('converts a reviewed close shortage to ordinary debt without charging office cash twice', async () => {
     // A 5,000 total shortage consumes the 4,000 share; the remaining 1,000 is the only amount that
     // may be left unpaid. The 15,000 already in custody must be the complete physical cash receipt.

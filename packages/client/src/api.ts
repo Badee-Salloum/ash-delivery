@@ -610,6 +610,20 @@ export interface ShiftSettlementView {
   cashAction: 'collect' | 'pay' | 'none'
   cashAmount: string
   settlementHash: string
+  /*
+   * WHO SIGNED IT, WHEN, AND WHY THE DIFFERENCE — present only on a settled shift.
+   *
+   * These live in the immutable close snapshot. On a live preview they are absent by design: a
+   * preview must not carry a signature. Optional so a page served during a rolling deploy against
+   * the previous API, which did not serialize them at all, still renders.
+   */
+  confirmedAt?: string | null
+  confirmedBy?: string | null
+  /** Resolved server-side: the browser cannot look a manager's id up, and a uuid tells nobody anything. */
+  confirmedByName?: string | null
+  varianceReason?: string | null
+  walletTransferConfirmed?: boolean
+  cashSettlementConfirmed?: boolean
 }
 
 /**

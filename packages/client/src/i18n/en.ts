@@ -1242,6 +1242,19 @@ orderNo: 'Order no.',
   },
 
   approval: {
+    /*
+     * THE CLOSING STATEMENT — an approved shift's page as a record of its close.
+     *
+     * The gate panels are suppressed once a shift leaves `pending_review`, so a manager who opened
+     * an approved shift left seven financial columns behind to reach a photo report. These name the
+     * provenance the frozen snapshot carries; every figure beside them reuses `t.settlement.*`.
+     */
+    closingTitle: 'Closing statement',
+    closingConfirmedBy: 'Confirmed by {name} · {at}',
+    closingConfirmedAt: 'Confirmed {at}',
+    closingVarianceReason: 'Reason recorded for the difference',
+    closingHandover: 'The physical handover, as attested',
+    closingDone: 'Done',
     queue: 'Approval queue',
     queueEmpty: 'Nothing waiting for your approval — all clear ✓',
     review: 'Shift review',

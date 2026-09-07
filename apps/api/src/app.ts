@@ -620,10 +620,15 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
              * `submittedAt` is null for a live shift AND for one whose close was rejected, since
              * that path clears it; either way there is no length yet, which is the honest answer.
              */
-            windowOpensAt: s.windowOpensAt,
+            windowOpensAt: s.windowOpensAt ?? s.openApprovedAt,
             submittedAt: s.submittedAt,
             worked: workedTime(
-              s.windowOpensAt === null ? null : Date.parse(s.windowOpensAt),
+              // Same fallback the close draft's own window uses (`close-draft.service.ts`): a shift
+              // opened before `window_opens_at` existed still has the manager's approval instant,
+              // and without it the row would lose its pattern for no reason.
+              (s.windowOpensAt ?? s.openApprovedAt) === null
+                ? null
+                : Date.parse((s.windowOpensAt ?? s.openApprovedAt)!),
               s.submittedAt === null ? null : Date.parse(s.submittedAt),
             ),
           }
@@ -1536,6 +1541,15 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         shiftNo: shift.shiftNo,
         businessDate: shift.businessDate,
         openApprovedAt: shift.openApprovedAt,
+        /*
+         * The operation window's own start, so the shift page can state WHEN the shift ran.
+         *
+         * `openApprovedAt` is the manager's signature, not the driver's; for a pre-approved opening
+         * (decision 14) they are minutes or hours apart. The close draft already prefers this one
+         * (`windowOpensAt ?? openApprovedAt`), and the history screen measures from it — a page that
+         * used the other value would disagree with both about how long the same shift ran.
+         */
+        windowOpensAt: shift.windowOpensAt ?? shift.openApprovedAt,
         submittedAt: shift.submittedAt,
         startPackage: {
           odometerKm: shift.odoStart,
@@ -1784,6 +1798,19 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           )
         },
       )
+      /*
+       * Resolve the signer to a NAME — outside the unit of work, because it is not a financial read.
+       *
+       * `confirmed_by` is a uuid, and a screen that prints one has told the reader nothing. "Who
+       * closed this" is the question, and the browser cannot answer it: only drivers are listable
+       * to it, and the manager who signs a close is not one.
+       */
+      const confirmedById = 'confirmedBy' in plan ? (plan as { confirmedBy?: string | null }).confirmedBy ?? null : null
+      // The snapshot stores an epoch (`confirmed_at_ms`); the wire carries instants as ISO strings.
+      const confirmedAtMs =
+        'confirmedAtMs' in plan ? (plan as { confirmedAtMs?: number | null }).confirmedAtMs ?? null : null
+      const signer = confirmedById === null ? null : await deps.users.findById(confirmedById)
+
       return {
         policyCode: plan.policyCode,
         driverRateBps: plan.driverRateBps,
@@ -1825,8 +1852,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
          * Undefined on a live preview: nothing has been confirmed yet, and a preview must not look
          * like a signature.
          */
-        confirmedAt: 'confirmedAt' in plan ? (plan as { confirmedAt?: string | null }).confirmedAt ?? null : null,
+        confirmedAt: confirmedAtMs === null ? null : new Date(confirmedAtMs).toISOString(),
         confirmedBy: 'confirmedBy' in plan ? (plan as { confirmedBy?: string | null }).confirmedBy ?? null : null,
+        confirmedByName: signer?.fullNameAr ?? null,
         varianceReason:
           'varianceReason' in plan ? (plan as { varianceReason?: string | null }).varianceReason ?? null : null,
         walletTransferConfirmed:

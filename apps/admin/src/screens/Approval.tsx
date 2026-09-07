@@ -12,9 +12,10 @@ import {
   ocrReadingDelta,
   slotLabel,
   splitSlot,
+  damascusParts,
   formatDateTime,
 } from '@ash/client'
-import { add, formatMinor, minor, parseMinor, sub } from '@ash/domain'
+import { abs, add, formatMinor, minor, parseMinor, sub, workedTime } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { evidenceReviewWarning } from '../evidence-warning.ts'
@@ -115,6 +116,8 @@ interface Review {
   businessDate: string
   /** Actual operation-window edges. Optional during a staggered API/admin rollout. */
   openApprovedAt?: string | null
+  /** The operation window's start — the driver's own confirmation, not the manager's signature. */
+  windowOpensAt?: string | null
   submittedAt?: string | null
   /** Current branch+driver shift funding captured by the locked manager-review read. */
   shiftFunding: { cash: string; wallet: string }
@@ -452,6 +455,35 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     }
   }, [api, cashReceivableDeferred, cashShortageReceivable, review, walletReceivableDeferred])
 
+  /*
+   * THE CLOSING STATEMENT OF A SHIFT THAT IS ALREADY CLOSED.
+   *
+   * The live effect above returns early for anything but `pending_review`, so a manager who pressed
+   * «عرض» on an approved shift left seven financial columns behind to reach a photo report and a
+   * meter reading. The frozen snapshot is right there — `/shifts/:id/settlement` returns the STORED
+   * row for a settled shift and recomputes nothing.
+   *
+   * `legacy_settlement_read_only` is not an error to show. Approvals from before the fixed-40%
+   * policy have no stored snapshot, and the route refuses to manufacture a 40% receipt for a
+   * journal posted under a former tier rule — correctly. The card simply does not appear.
+   */
+  useEffect(() => {
+    if (!review) return
+    if (review.state !== 'approved' && review.state !== 'week_locked') return
+    let cancelled = false
+    void api
+      .shiftSettlement(review.id)
+      .then((next) => {
+        if (!cancelled) setSettlement(next)
+      })
+      .catch(() => {
+        if (!cancelled) setSettlement(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [api, review])
+
   // A changed hash means changed money. Earlier ticks must never carry across to a new statement.
   useEffect(() => {
     setWalletTransferConfirmed(false)
@@ -501,6 +533,23 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
 
   const operationCopy = operationReviewCopy(lang)
   const openingFundsValid = isValidOpeningFundInput(floatText) && isValidOpeningFundInput(topupText)
+  /*
+   * The shift's own clock, in the BRANCH's timezone rather than the reader's.
+   *
+   * `windowOpensAt` is the driver's confirmation and `submittedAt` his close submission — the same
+   * operation window the close draft reasons about, and the same pair the history screen measures,
+   * so the two screens cannot disagree about how long a shift ran.
+   */
+  const shiftStart = review.windowOpensAt ?? review.openApprovedAt ?? null
+  const shiftEnd = review.submittedAt ?? null
+  const shiftClock = shiftStart
+    ? `${damascusParts(new Date(shiftStart)).time} → ${shiftEnd ? damascusParts(new Date(shiftEnd)).time : '…'}`
+    : null
+  const shiftWorked = workedTime(
+    shiftStart === null ? null : Date.parse(shiftStart),
+    shiftEnd === null ? null : Date.parse(shiftEnd),
+  )
+
   const cashDeductions = review.cashDeductions ?? []
   const unresolvedWindowCount = countUnresolvedWindowRows(review.orders, cashDeductions)
   const operationReasonReady = operationReason.trim().length > 0
@@ -927,8 +976,25 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             {who.driver ?? t.approval.review}
             {who.vehicle ? <span className="num ms-2 text-base font-medium text-slate-500">{who.vehicle}</span> : null}
           </h1>
-          <p className="num text-sm text-slate-600">
-            {review.businessDate} · #{review.shiftNo}
+          {/*
+            * WHEN, not just which day. A business date and «#1» identified nothing on a day the
+            * fleet ran thirteen shifts, and it reads a day early for a night one, because the
+            * business day ends at 04:00. The branch-local clock is what separates them.
+            */}
+          <p className="text-sm text-ink-secondary">
+            <span className="num" dir="ltr">
+              {review.businessDate} #{review.shiftNo}
+            </span>
+            {shiftClock ? (
+              <span className="num ms-2" dir="ltr">
+                {shiftClock}
+              </span>
+            ) : null}
+            {shiftWorked.minutes !== null && !shiftWorked.abandoned ? (
+              <span className="num ms-2 font-semibold" dir="ltr">
+                {Math.floor(shiftWorked.minutes / 60)}:{String(shiftWorked.minutes % 60).padStart(2, '0')}
+              </span>
+            ) : null}
           </p>
         </div>
         <Badge tone="slate">{t.shift.states[review.state as keyof typeof t.shift.states] ?? review.state}</Badge>
@@ -944,6 +1010,9 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         lang={lang}
         copy={operationCopy}
       />
+
+      {/* A settled shift’s page IS its closing record; the gate panels below stay suppressed. */}
+      {!atGate && settlement ? <ClosingStatement settlement={settlement} /> : null}
 
       {/* ── The BR1 panel, pinned first — it is what the decision hinges on ───────────────
           Only once the shift is AT a gate. Mid-shift the driver has declared no closing cash or
@@ -1471,6 +1540,150 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         </div>
       ) : null}
     </div>
+  )
+}
+
+/**
+ * WHAT ACTUALLY HAPPENED AT CLOSE — read-only, for a shift that is already settled.
+ *
+ * The BR1 panel and the whole close workspace are suppressed once a shift leaves `pending_review`,
+ * because mid-shift they would read the driver's undeclared cash as zero and shout a difference the
+ * size of the float. The side effect was that an APPROVED shift lost them too: pressing «عرض» on a
+ * completed shift left seven financial columns behind to arrive at a photo report and an odometer
+ * reading. The one thing a manager opens a closed shift to see — what was handed over, and why —
+ * was the one thing the page did not show.
+ *
+ * Every figure here is the frozen snapshot, never a recomputation: `settlementFor` is not called at
+ * all for a settled shift, and a pre-policy approval (which has no stored snapshot) renders nothing
+ * rather than a freshly-computed 40% receipt for a journal posted under a former tier rule.
+ *
+ * Zero new financial strings: the labels are `t.settlement.*`, written for the gate and equally
+ * true in the past tense. Only the provenance line needed words of its own.
+ */
+function ClosingStatement({ settlement }: { settlement: SettlementView }): ReactNode {
+  const { t, lang } = useApp()
+  const variance = parseMinor(settlement.variance)
+  const employeeNegative = parseMinor(settlement.finalEmployeeCash) < 0n
+  const signedAt = settlement.confirmedAt ? formatDateTime(settlement.confirmedAt, lang) : null
+
+  return (
+    <Card title={t.approval.closingTitle}>
+      {signedAt ? (
+        <p className="text-label text-ink-muted">
+          {settlement.confirmedByName
+            ? t.approval.closingConfirmedBy
+                .replace('{name}', settlement.confirmedByName)
+                .replace('{at}', signedAt)
+            : t.approval.closingConfirmedAt.replace('{at}', signedAt)}
+        </p>
+      ) : null}
+
+      {/* Expected against actual, and the difference — the three numbers the close turned on. */}
+      <dl className="mt-3 flex flex-col gap-1 text-sm">
+        {[
+          { key: 'expected', label: t.settlement.expectedTotal, value: settlement.expectedTotal },
+          { key: 'actual', label: t.settlement.actualTotal, value: settlement.actualTotal },
+        ].map((line) => (
+          <div key={line.key} className="flex items-baseline justify-between gap-2">
+            <dt className="text-ink-secondary">{line.label}</dt>
+            <dd className="num font-semibold" dir="ltr">
+              <Money value={line.value} />
+            </dd>
+          </div>
+        ))}
+        <div className="mt-2 flex items-baseline justify-between gap-2 border-t border-line pt-2">
+          <dt
+            className={`font-semibold ${
+              settlement.varianceDirection === 'balanced'
+                ? 'text-ink-secondary'
+                : settlement.varianceDirection === 'surplus'
+                  ? 'text-success-ink'
+                  : 'text-danger-ink'
+            }`}
+          >
+            {t.settlement.varianceDirection[settlement.varianceDirection]}
+          </dt>
+          <dd className="num shrink-0 text-xl font-bold" dir="ltr">
+            <Money value={formatMinor(abs(variance))} />
+          </dd>
+        </div>
+      </dl>
+
+      {settlement.varianceReason ? (
+        <p className="mt-3 rounded-lg border border-line bg-surface-muted p-3 text-label">
+          <span className="font-semibold text-ink-secondary">{t.approval.closingVarianceReason}: </span>
+          {settlement.varianceReason}
+        </p>
+      ) : null}
+
+      {/* The same derivation the gate showed, reused verbatim — the employee's figure IS the chain. */}
+      <dl className="mt-3 rounded-lg border border-line p-3 text-sm">
+        {employeeShareChain(settlement).map((step) => {
+          const last = step.code === 'takes'
+          return (
+            <div
+              key={step.code}
+              className={`flex items-baseline justify-between gap-3 ${
+                last ? 'mt-2 border-t border-line-strong pt-2' : 'mt-1 first:mt-0'
+              }`}
+            >
+              <dt className={last ? 'font-bold text-ink-secondary' : 'text-label text-ink-muted'}>
+                {step.code === 'fees_to_share'
+                  ? t.settlement.share.fees_to_share.replace('{from}', groupThousands(step.from ?? '0'))
+                  : step.code === 'variance'
+                    ? t.settlement.share.variance[step.direction ?? 'balanced']
+                    : t.settlement.share[step.code]}
+              </dt>
+              <dd
+                dir="ltr"
+                className={`num shrink-0 ${
+                  last
+                    ? `text-xl font-extrabold ${employeeNegative ? 'text-danger-ink' : 'text-brand'}`
+                    : 'text-ink-secondary'
+                }`}
+              >
+                <Money value={step.amount} />
+              </dd>
+            </div>
+          )
+        })}
+        {/* Decision 15: the share came out of the money being returned, not out of company capital. */}
+        <p className="mt-1 text-label text-ink-faint">{t.settlement.share.fromReturnedMoney}</p>
+      </dl>
+
+      {/*
+        The two transactions, and the fact that a manager attested to each.
+        BR5 requires both ticks before a close can post, so a `false` here would be a stored snapshot
+        that could not have been approved — worth showing rather than assuming.
+      */}
+      <p className="mt-4 text-label font-semibold text-ink-secondary">{t.approval.closingHandover}</p>
+      <ul className="mt-1 flex flex-col gap-1 text-sm">
+        {[
+          {
+            key: 'wallet',
+            label: t.settlement.walletAction[settlement.walletAction],
+            amount: settlement.walletAmount,
+            done: settlement.walletTransferConfirmed === true,
+          },
+          {
+            key: 'cash',
+            label: t.settlement.cashAction[settlement.cashAction],
+            amount: settlement.cashAmount,
+            done: settlement.cashSettlementConfirmed === true,
+          },
+        ].map((row) => (
+          <li key={row.key} className="flex items-baseline justify-between gap-2">
+            <span className="text-ink-secondary">
+              {row.done ? <span className="text-success-ink">✓ </span> : null}
+              {row.label}
+            </span>
+            <span className="num shrink-0 font-semibold" dir="ltr">
+              <Money value={row.amount} />
+            </span>
+          </li>
+        ))}
+      </ul>
+    </Card>
   )
 }
 
