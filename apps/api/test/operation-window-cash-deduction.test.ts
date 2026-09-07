@@ -1124,6 +1124,116 @@ describe('cash deduction compatibility and approval allocation', () => {
     })
   })
 
+  it('lets the manager create a «حسم» during review, and only during review', async () => {
+    /*
+     * THE MANAGER COULD NOT DEDUCT ANYTHING.
+     *
+     * Every entry on `/operations/revise` is a patch: it takes an id and 404s on one it does not
+     * know, and creating a deduction lived behind `shift.operate` on an `open` or `suspended`
+     * shift — the driver's own screen. So a manager who found at review that something had to come
+     * off the settlement had exactly two instruments: exclude a real delivery, or refuse the whole
+     * close. Neither says what happened.
+     *
+     * The window is `pending_review` and nothing wider. Before approval there is no settlement
+     * snapshot to violate (decision 13) and no sealed week to reopen (BR7).
+     */
+    const { id, driver, manager } = await openShift({ float: 100, topup: 20 })
+    // Evidence first, then the operations read off it: uploading after would rotate the attachment
+    // token and strand the row as `evidence_removed`, which is a different test's subject.
+    await uploadEnd(driver, id)
+    await put(driver, `/shifts/${id}/operations`, {
+      orders: [{
+        providerOrderNo: 'DED-1',
+        payMode: 'cash',
+        fee: '100.00',
+        occurredDate: '2026-08-13',
+        occurredMinute: '20:00',
+      }],
+      movements: [],
+    })
+    h.deps.clock.set(CLOSE_MS)
+    expect((await put(driver, `/shifts/${id}/end-package`, {
+      odometerKm: 6_050,
+      batteryPercent: null,
+      cashDeclared: '200.00',
+      walletDeclared: '0.00',
+    })).statusCode).toBe(200)
+
+    // The order needs the manager's own audited inclusion before it is money — it was typed rather
+    // than read, so it carries no evidence slot and no verifiable printed minute.
+    expect((await post(manager, `/shifts/${id}/operations/revise`, {
+      orders: [{
+        providerOrderNo: 'DED-1',
+        included: true,
+        occurredDate: '2026-08-13',
+        occurredMinute: '20:00',
+        reason: 'verified against the original Yallago screenshot',
+      }],
+    })).statusCode).toBe(200)
+
+    // 100 float + 20 top-up + the 80 residual after Yallago's per-order 20% cut.
+    const before = (await get(manager, `/shifts/${id}/settlement`)).json()
+    expect(before).toMatchObject({ cashDeductionTotal: '0.00', expectedTotal: '200.00', variance: '0.00' })
+
+    // A deduction of nothing is not a deduction.
+    const zero = await post(manager, `/shifts/${id}/operations/revise`, {
+      cashDeductionsAdded: [{ amount: '0.00', reason: 'nothing at all' }],
+    })
+    expect(zero.statusCode, zero.body).toBe(400)
+
+    // …and it carries its reason, because a manager's deduction has no scanned row behind it: the
+    // audited reason is its entire evidence.
+    const noReason = await post(manager, `/shifts/${id}/operations/revise`, {
+      cashDeductionsAdded: [{ amount: '30.00' }],
+    })
+    expect(noReason.statusCode, noReason.body).toBe(400)
+
+    const created = await post(manager, `/shifts/${id}/operations/revise`, {
+      cashDeductionsAdded: [{ amount: '30.00', reason: 'broken phone mount charged to the driver' }],
+    })
+    expect(created.statusCode, created.body).toBe(200)
+
+    const review = await get(manager, `/shifts/${id}/review`)
+    const deductions = review.json().cashDeductions as Array<Record<string, unknown>>
+    expect(deductions).toHaveLength(1)
+    expect(deductions[0]).toMatchObject({
+      amount: '30.00',
+      included: true,
+      // No printed clock, so the window cannot classify it…
+      windowStatus: 'unknown',
+      // …and the attributed decision is what makes it count anyway, exactly as it does for an
+      // unreadable scanned row. Without it, decision 11 would block the close on a row the manager
+      // himself had just created.
+      decisionReason: 'broken phone mount charged to the driver',
+      decidedBy: 'u-bm',
+    })
+
+    /*
+     * It moves the money, once.
+     *
+     * Expected total falls by exactly the deduction — CLAUDE.md's rule 6 has it appear once in the
+     * expected total and once in the base share, and 30 leaving one side while 200 is still in the
+     * driver's hands is a 30 surplus that belongs to him under decision 13.
+     */
+    const after = (await get(manager, `/shifts/${id}/settlement`)).json()
+    expect(after).toMatchObject({
+      cashDeductionTotal: '30.00',
+      expectedTotal: '170.00',
+      variance: '30.00',
+      varianceDirection: 'surplus',
+    })
+
+    const approved = await approveFixedClose(h, manager, id, review.json().br1.ordersHash)
+    expect(approved.statusCode, approved.body).toBe(200)
+
+    // AFTER approval the door is shut: the snapshot is immutable and the journal has posted.
+    const late = await post(manager, `/shifts/${id}/operations/revise`, {
+      cashDeductionsAdded: [{ amount: '10.00', reason: 'an afterthought' }],
+    })
+    expect(late.statusCode, late.body).toBe(409)
+    expect(late.json().error).toBe('shift_not_under_review')
+  })
+
   it('blocks unresolved rows until a manager supplies an audited reason and decision', async () => {
     const { id, driver, manager } = await openShift({ float: 100, topup: 20 })
     await put(driver, `/shifts/${id}/operations`, {

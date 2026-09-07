@@ -3872,6 +3872,12 @@ async function reviseOperationsLocked(
       removed?: boolean | undefined
       reason: string
     }[]
+    cashDeductionsAdded?: readonly {
+      amount: Minor
+      occurredMinute?: string | null | undefined
+      occurredDate?: string | null | undefined
+      reason: string
+    }[]
     movements?: readonly {
       id: string
       included?: boolean | undefined
@@ -4121,6 +4127,59 @@ async function reviseOperationsLocked(
       positionEvidence: null,
       closeDraftReviewReasons: [],
     }, actor.userId)
+  }
+
+  /*
+   * «الحسم» — deductions the manager creates himself, after the patches above have run.
+   *
+   * After, so that a create can never collide with a patch in the same request: the patch loop
+   * reads `deductionsById`, which is a snapshot taken before either loop, and a row created here is
+   * not in it.
+   *
+   * The row is born with a complete audited decision — reason, actor and minute — for two reasons
+   * that happen to be the same reason. It is what makes an untimed deduction count at all
+   * (`operationCounts` requires an audited decision once `windowStatus` is `unknown`), and it is
+   * what keeps it from joining the unresolved rows that block approval. A manager creating a
+   * deduction has, by the act, decided that it belongs to this shift.
+   *
+   * `included` is therefore `true` and not derived from the window: he is not classifying a scanned
+   * row, he is stating an amount that must come off. If he was wrong, the instrument for that is
+   * the ordinary patch loop above, which can exclude or remove it with its own audited reason.
+   */
+  for (const created of input.cashDeductionsAdded ?? []) {
+    const id = deps.ids.uuid()
+    const decidedAt = nextOperationDecisionAt(deps.clock.nowMs(), null)
+    await deps.cashDeductions.create(
+      {
+        id,
+        shiftId,
+        // Keyed by the row's own id: unique within the shift by construction, and it can never
+        // collide with a provider key, which is what the OCR merge matches on.
+        operationKey: `manager:${id}`,
+        amount: created.amount,
+        occurredDate: created.occurredDate ?? null,
+        occurredMinute: created.occurredMinute ?? null,
+        source: 'manual',
+        // Nothing was read. A zero here would claim a reader proposed this amount.
+        amountOcr: null,
+        pointA: null,
+        pointB: null,
+        included: true,
+        windowStatus: classifyOperationWindow({
+          occurredDate: created.occurredDate ?? null,
+          occurredMinute: created.occurredMinute ?? null,
+          ...windowContext,
+        }),
+        decisionReason: created.reason.trim(),
+        decidedBy: actor.userId,
+        decidedAt,
+        createdBy: actor.userId,
+        windowBasis: 'manager',
+        positionEvidence: null,
+        closeDraftReviewReasons: [],
+      },
+      actor.userId,
+    )
   }
 
   const known = new Set((await deps.movements.listByShift(shiftId)).map((m) => m.id))

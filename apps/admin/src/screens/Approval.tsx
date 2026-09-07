@@ -64,6 +64,7 @@ import {
   activeForcePreparation,
   deferralMatchesSettlement as deferralMatchesSettlementInputs,
   isNonnegativeSettlementMoney,
+  isPositiveMoneyInput,
   closeApprovalRequest,
   isKnownSettlementAction,
   settlementApprovalReady,
@@ -1014,6 +1015,27 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       {/* A settled shift’s page IS its closing record; the gate panels below stay suppressed. */}
       {!atGate && settlement ? <ClosingStatement settlement={settlement} /> : null}
 
+      {/*
+        * …and a RUNNING shift's page says where the manager can act on it, rather than looking
+        * broken. Force-close is not rebuilt here: it prefills from the close draft, handles the
+        * odometer anomaly and prepares in two stages, and a second copy of that would drift from
+        * the first. One instrument, one place, and a way to reach it from here.
+        */}
+      {review.state === 'open' || review.state === 'suspended' ? (
+        <Card title={t.shift.states[review.state as keyof typeof t.shift.states] ?? review.state}>
+          <p className="text-sm leading-6 text-ink-secondary">{t.approval.stillRunning}</p>
+          <Button
+            variant="ghost"
+            className="mt-2"
+            onClick={() => {
+              location.hash = 'liveShifts'
+            }}
+          >
+            {t.liveShifts.title}
+          </Button>
+        </Card>
+      ) : null}
+
       {/* ── The BR1 panel, pinned first — it is what the decision hinges on ───────────────
           Only once the shift is AT a gate. Mid-shift the driver has declared no closing cash or
           wallet yet, those nulls are read as zero, and the panel would show an alarming red
@@ -1218,7 +1240,11 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         </Card>
       ) : null}
 
-      {cashDeductions.length > 0 ? (
+      {/*
+        * Rendered while under review even with nothing in it, because «add» lives inside it.
+        * A card that appears only once a deduction exists cannot be where the first one is made.
+        */}
+      {cashDeductions.length > 0 || underReview ? (
         <Card title={`${operationCopy.cashDeductions} — ${cashDeductions.length}`}>
           <p className="mb-2 text-xs text-slate-600">{operationCopy.cashDeductionHint}</p>
           <Table
@@ -1303,6 +1329,18 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
               </tr>
             ))}
           </Table>
+          {underReview ? (
+            <AddDeduction
+              disabled={busy || !operationReasonReady}
+              reasonRequired={!operationReasonReady}
+              copy={operationCopy}
+              onSave={(amount) =>
+                reviseOps({
+                  cashDeductionsAdded: [{ amount, reason: operationReason.trim() }],
+                })
+              }
+            />
+          ) : null}
         </Card>
       ) : null}
 
@@ -3650,6 +3688,10 @@ function EvidenceList({ title, hint, children }: { title: string; hint?: string;
 }
 
 interface OperationReviewCopy {
+  addDeduction: string
+  addDeductionHint: string
+  addDeductionAmount: string
+  saveDeduction: string
   windowTitle: string
   windowHint: string
   opened: string
@@ -3684,6 +3726,11 @@ interface OperationReviewCopy {
 function operationReviewCopy(lang: 'ar' | 'en'): OperationReviewCopy {
   if (lang === 'en') {
     return {
+      addDeduction: 'Deduct an amount',
+      addDeductionHint:
+        'For something with no row behind it — damage, a fine, an item not returned. It reduces the expected total and the employee’s share, once each. Only while the shift is under review: after approval the settlement is sealed.',
+      addDeductionAmount: 'Amount to deduct',
+      saveDeduction: 'Record the deduction',
       windowTitle: 'Operations window',
       windowHint:
         'All provider operations from open approval through close submission are included, including after midnight. Boundary-minute rows count; an unknown time needs a manager decision.',
@@ -3726,6 +3773,11 @@ function operationReviewCopy(lang: 'ar' | 'en'): OperationReviewCopy {
     }
   }
   return {
+    addDeduction: 'إضافة حسم',
+    addDeductionHint:
+      'لِما لا صفَّ خلفه — عطل أو مخالفة أو شيء لم يُعَد. ينقص المتوقَّع وحصة الموظف، مرّة واحدة لكلٍّ منهما. متاح ما دامت النوبة قيد المراجعة فقط: بعد الاعتماد تُختم التسوية.',
+    addDeductionAmount: 'المبلغ المحسوم',
+    saveDeduction: 'تسجيل الحسم',
     windowTitle: 'نافذة عمليات النوبة',
     windowHint:
       'تُشمل جميع عمليات المزود من لحظة اعتماد الفتح حتى تسليم الإغلاق، بما فيها ما بعد منتصف الليل. دقيقة الحد محسوبة، أما التوقيت المجهول فيحتاج قرار المدير.',
@@ -3825,6 +3877,77 @@ function WindowStatusBadge({ status, copy }: { status: OperationWindowStatus; co
         ? 'red'
         : 'amber'
   return <Badge tone={tone}>{copy.statuses[status]}</Badge>
+}
+
+/**
+ * «الحسم» — an amount the manager takes off, for something with no row behind it.
+ *
+ * Until now he could not. Every operation revision is a patch keyed by an id, and CREATING a
+ * deduction lived behind `shift.operate` on an `open` or `suspended` shift — the driver's own
+ * screen. A manager who found at review that something had to come off the settlement had two
+ * instruments: exclude a real delivery, or refuse the whole close. Neither says what happened.
+ *
+ * It reuses the card's existing audited reason rather than carrying one of its own — the same field
+ * that already justifies including or excluding a row, and the only evidence a deduction with no
+ * scanned row can have. The amount is a magnitude: the direction is the instrument, not the sign.
+ *
+ * No date or minute is offered. A manager's deduction is not a printed dashboard row and has no
+ * clock to give; the server classifies it `unknown` and the attributed reason is what makes it
+ * count, exactly as it does for an unreadable scanned row.
+ */
+function AddDeduction({
+  disabled,
+  reasonRequired,
+  copy,
+  onSave,
+}: {
+  disabled: boolean
+  reasonRequired: boolean
+  copy: OperationReviewCopy
+  onSave(amount: string): Promise<boolean | void>
+}): ReactNode {
+  const [amount, setAmount] = useState('')
+  const [open, setOpen] = useState(false)
+  const ready = isPositiveMoneyInput(amount)
+
+  const save = async (): Promise<void> => {
+    const saved = await onSave(amount.trim())
+    if (saved === false) return
+    setAmount('')
+    setOpen(false)
+  }
+
+  return (
+    <details
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+      className="mt-3 text-xs"
+    >
+      <summary className={`cursor-pointer text-brand ${FOCUS_RING}`}>{copy.addDeduction}</summary>
+      <p className="mt-2 text-ink-muted">{copy.addDeductionHint}</p>
+      <div className="mt-2 flex flex-wrap items-end gap-2">
+        <label className="flex flex-col gap-1">
+          <span className="text-ink-muted">{copy.addDeductionAmount}</span>
+          <MoneyInput
+            value={amount}
+            min="0"
+            disabled={disabled}
+            aria-invalid={amount.trim() !== '' && !ready}
+            onChange={(event) => setAmount(event.target.value)}
+            className="w-40"
+          />
+        </label>
+        <Button
+          variant="ghost"
+          disabled={disabled || !ready}
+          title={reasonRequired ? copy.reasonRequired : undefined}
+          onClick={() => void save()}
+        >
+          {copy.saveDeduction}
+        </Button>
+      </div>
+    </details>
+  )
 }
 
 function WindowCorrection({

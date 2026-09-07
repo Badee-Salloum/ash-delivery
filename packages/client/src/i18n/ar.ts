@@ -1291,6 +1291,12 @@ orderNo: 'رقم الطلب',
      * provenance the frozen snapshot carries; every figure beside them reuses `t.settlement.*`.
      */
     closingTitle: 'كشف الإغلاق',
+    /*
+     * A running shift's page has no gate controls, correctly — mid-shift the driver has declared no
+     * closing cash and BR1 would shout a difference the size of the float. But it also said nothing
+     * about where the manager CAN act, so the page looked broken rather than deliberately empty.
+     */
+    stillRunning: 'النوبة ما زالت جارية. التعليق والإغلاق القسريّ والإلغاء في شاشة النوبات الجارية، كلٌّ منها خلف سببه المدقَّق.',
     closingConfirmedBy: 'أكّدها {name} · {at}',
     closingConfirmedAt: 'أُكّدت {at}',
     closingVarianceReason: 'السبب المسجَّل للفرق',

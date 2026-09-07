@@ -456,6 +456,46 @@ export const reviseOperationsRequest = z.object({
     )
     .max(400)
     .default([]),
+  /**
+   * «الحسم» — a deduction the MANAGER creates during close review.
+   *
+   * Until now he could not. Every entry above is a PATCH: it takes an `id` and returns 404 for one
+   * it does not recognise, and creating a deduction was reachable only through `shift.operate` on
+   * an `open` or `suspended` shift — i.e. through the driver's own screen. So a manager who found,
+   * at review, that something had to come off the settlement had no way to say so. His only
+   * instruments were excluding a real delivery or refusing the whole close.
+   *
+   * Deliberately confined to `pending_review` by the same guard as the rest of this route (decision
+   * 3 of the plan the owner approved): before approval there is no settlement snapshot to violate
+   * and no locked week to reopen. `orders_hash` moves with it, so the manager must review the close
+   * again against the new figure before the ledger can post — the same staleness gate every other
+   * revision passes through.
+   *
+   * The reason is REQUIRED, not optional. This is the one deduction with no scanned row behind it:
+   * the audited reason is its entire evidence.
+   */
+  cashDeductionsAdded: z
+    .array(
+      z.object({
+        /**
+         * A magnitude, never a signed amount. `cash_deductions.amount` is positive by contract and
+         * the direction lives in the record type, which is what stops a double negation at the BR1
+         * and ledger boundaries.
+         */
+        amount: nonnegativeMoneySchema.refine((v) => v > 0n, 'a deduction of zero is not a deduction'),
+        /**
+         * Optional, and usually absent: a manager's deduction is not a printed dashboard row, so
+         * there may be no clock to give it. An untimed row classifies `unknown`, which by decision
+         * 11 would normally block approval — the attributed reason below is what resolves it, the
+         * same mechanism a manager already uses on an unreadable scanned row.
+         */
+        occurredDate: isoDateSchema.nullable().default(null),
+        occurredMinute: minuteSchema.nullable().default(null),
+        reason: nonblankReasonSchema,
+      }),
+    )
+    .max(20)
+    .default([]),
   movements: z
     .array(
       z.object({

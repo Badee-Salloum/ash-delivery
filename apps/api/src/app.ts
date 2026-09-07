@@ -2150,6 +2150,11 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
             ? {}
             : { walletAmount: order.walletAmount === null ? null : serializeMoney(order.walletAmount) }),
         })),
+        // A manager-created deduction's amount is a bigint the audit row cannot serialize as-is.
+        cashDeductionsAdded: body.cashDeductionsAdded.map((created) => ({
+          ...created,
+          amount: serializeMoney(created.amount),
+        })),
       }
       await deps.audit.append({
         tableName: 'shifts',
