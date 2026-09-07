@@ -1254,6 +1254,14 @@ orderNo: 'رقم الطلب',
     workingCountsUnavailable: 'العدد المباشر غير متاح',
     day: 'اليوم',
     today: 'اليوم الحالي',
+    /*
+      * «من لم يحقق الوقت» on the day the dashboard is showing.
+      *
+      * Seventy of 113 measured shifts ran under eight hours — the norm, not the incident — so this
+      * is a standing figure rather than an alarm, and it links to the screen that names them.
+      */
+    shiftsUnderTarget: 'نوبات لم تُكمل الوقت',
+    shiftsUnderTargetSub: 'مجموع النقص {t}',
     dayEndsAtFour: 'يوم العمل ينتهي ٤:٠٠ صباحاً',
     companyShare: 'حصة الشركة منذ الأحد',
     fleetReadiness: 'جاهزية الأسطول',

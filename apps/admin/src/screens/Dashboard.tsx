@@ -1,5 +1,5 @@
 import { Fragment, type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
-import { type RoleKey, can, minor, parseMinor } from '@ash/domain'
+import { type RoleKey, type ShiftPattern, can, minor, parseMinor, shortfallMinutes } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { Badge, Card, Figure, Money, Pending, Stat } from '../ui.tsx'
@@ -34,6 +34,26 @@ interface Attendee {
 /** «HH:MM» in the viewer's locale — attendance is a time of day, not a full timestamp. */
 const hhmm = (iso: string): string =>
   new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+
+/**
+ * The same per-pattern targets the completed-shifts screen applies.
+ *
+ * Duplicated deliberately and briefly: both belong in `settings` beside the FX rate, and until they
+ * are there a shared constant in a third module would be a home for a rule that has no home yet.
+ * `unknown` is null — a shift with no pattern cannot be short of anything.
+ */
+const DASHBOARD_TARGET_MINUTES: Record<ShiftPattern, number | null> = {
+  day: 8 * 60,
+  evening: 8 * 60,
+  full: 16 * 60,
+  unknown: null,
+}
+
+interface WorkedTime {
+  minutes: number | null
+  pattern: ShiftPattern
+  abandoned: boolean
+}
 
 interface DashboardData {
   businessDate: string
@@ -181,6 +201,8 @@ export function Dashboard(): ReactNode {
   const [attendance, setAttendance] = useState<Attendee[]>([])
   const [workingNow, setWorkingNow] = useState<WorkingNowSnapshot | null>(null)
   const [workingNowUnavailable, setWorkingNowUnavailable] = useState(false)
+  /** How many of the day's finished shifts fell short of their own pattern's target, and by how much. */
+  const [underTarget, setUnderTarget] = useState<{ count: number; minutes: number } | null>(null)
   /**
    * Which business day the financial panels describe. `null` means "whatever the server calls
    * today", and the first response fills it in from its own `to`.
@@ -278,6 +300,52 @@ export function Dashboard(): ReactNode {
     load()
     return () => dashboardRequests.current.cancel()
   }, [load, branchId])
+
+  /*
+   * WHO DID NOT MAKE THE HOURS, on the day this screen is showing.
+   *
+   * Keyed on the RESOLVED business date rather than on `day`, because `day` is null until the
+   * manager picks one and the server's own «today» is the default — reading the wrong date here
+   * would put yesterday's shortfall beside today's profit.
+   *
+   * Each shift is judged against its own pattern's target: a `full` shift covers both slots, so
+   * against one slot's eight hours a 13-hour shift would read as five hours of overtime when it is
+   * three hours short of the two it replaced. A live shift, an unclassified one and one whose close
+   * was simply forgotten all return null and are counted as neither short nor met.
+   */
+  useEffect(() => {
+    const businessDate = data?.businessDate
+    if (!businessDate) return
+    let cancelled = false
+    void api
+      .get<{ shifts: Array<{ worked?: WorkedTime }> }>(
+        `/shifts?from=${encodeURIComponent(businessDate)}&to=${encodeURIComponent(businessDate)}`,
+        { cache: 'no-store' },
+      )
+      .then((page) => {
+        if (cancelled) return
+        let count = 0
+        let minutes = 0
+        for (const shift of page.shifts) {
+          if (!shift.worked) continue
+          const target = DASHBOARD_TARGET_MINUTES[shift.worked.pattern]
+          if (target === null) continue
+          const short = shortfallMinutes(shift.worked, target)
+          if (short !== null && short > 0) {
+            count += 1
+            minutes += short
+          }
+        }
+        setUnderTarget({ count, minutes })
+      })
+      .catch(() => {
+        // An older API serves no `worked`, and a failed read is not a claim that nobody was short.
+        if (!cancelled) setUnderTarget(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [api, branchId, data?.businessDate])
 
   // This poll intentionally calls only the lightweight count endpoint. On a transient failure the
   // last valid values stay on screen and are marked stale; a branch change clears the old branch's
@@ -482,6 +550,19 @@ export function Dashboard(): ReactNode {
           value={data.completeness.awaitingApproval}
           href="#queue"
         />
+        {/* Only when there is something to say. A standing «0» in a six-tile row is noise. */}
+        {underTarget && underTarget.count > 0 ? (
+          <Stat
+            label={t.dashboard.shiftsUnderTarget}
+            value={<span className="num">{underTarget.count}</span>}
+            sub={t.dashboard.shiftsUnderTargetSub.replace(
+              '{t}',
+              `${Math.floor(underTarget.minutes / 60)}:${String(underTarget.minutes % 60).padStart(2, '0')}`,
+            )}
+            tone="warning"
+            href="#completedShifts"
+          />
+        ) : null}
       </div>
 
       {/*

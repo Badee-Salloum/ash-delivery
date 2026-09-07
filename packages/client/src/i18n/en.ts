@@ -1214,6 +1214,14 @@ orderNo: 'Order no.',
     workingCountsUnavailable: 'Live count unavailable',
     day: 'Day',
     today: 'Today',
+    /*
+      * «من لم يحقق الوقت» on the day the dashboard is showing.
+      *
+      * Seventy of 113 measured shifts ran under eight hours — the norm, not the incident — so this
+      * is a standing figure rather than an alarm, and it links to the screen that names them.
+      */
+    shiftsUnderTarget: 'Shifts under target',
+    shiftsUnderTargetSub: '{t} short in total',
     dayEndsAtFour: 'The business day ends at 04:00',
     companyShare: 'Company share since Sunday',
     fleetReadiness: 'Fleet readiness',
