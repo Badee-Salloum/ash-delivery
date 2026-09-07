@@ -262,7 +262,7 @@ function BareSelect({
 }): ReactNode {
   return (
     <select
-      className="min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm outline-none focus:border-brand"
+      className="min-h-10 w-full rounded-lg border border-slate-300 bg-surface-card px-3 text-sm outline-none focus:border-brand"
       value={value}
       onChange={(e) => onChange(e.target.value)}
     >

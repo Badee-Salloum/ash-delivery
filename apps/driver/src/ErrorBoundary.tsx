@@ -33,7 +33,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error: E
     if (!error) return this.props.children
     return (
       <div className="grid min-h-dvh place-items-center bg-slate-100 p-6" dir="rtl">
-        <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-surface-card p-5 shadow-sm">
           <h1 className="text-lg font-bold text-red-700">تعذّر فتح التطبيق</h1>
           <p className="mt-2 text-sm text-slate-600">
             حدث خطأ أثناء العرض. لم تتأثر أي بيانات ولم يُفقد أي شيء رفعته. اضغط الزر بالأسفل لإعادة

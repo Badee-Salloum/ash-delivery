@@ -41,8 +41,8 @@ export function Button({
   const styles: Record<string, string> = {
     primary: 'bg-brand text-white active:bg-brand-700',
     ghost: 'bg-slate-100 text-brand active:bg-slate-200',
-    danger: 'bg-red-600 text-white active:bg-red-700',
-    success: 'bg-emerald-600 text-white active:bg-emerald-700',
+    danger: 'bg-danger-solid text-white active:bg-danger-solid-hover',
+    success: 'bg-success-solid text-white active:bg-success-solid-hover',
   }
   return (
     <button
@@ -75,7 +75,7 @@ export function Field({
 export function TextInput({ className = '', ...rest }: InputHTMLAttributes<HTMLInputElement>): ReactNode {
   return (
     <input
-      className={`min-h-14 rounded-2xl border border-slate-300 bg-white px-4 text-lg outline-none focus:border-slate-900 ${className}`}
+      className={`min-h-14 rounded-2xl border border-slate-300 bg-surface-card px-4 text-lg outline-none focus:border-slate-900 ${className}`}
       {...rest}
     />
   )
@@ -89,7 +89,7 @@ export function MoneyInput({ className = '', ...rest }: InputHTMLAttributes<HTML
 }
 
 export function Card({ children, className = '' }: { children: ReactNode; className?: string }): ReactNode {
-  return <div className={`rounded-3xl bg-white p-4 shadow-sm ${className}`}>{children}</div>
+  return <div className={`rounded-3xl bg-surface-card p-4 shadow-sm ${className}`}>{children}</div>
 }
 
 /**
@@ -139,14 +139,14 @@ export function Sheet({
 
   if (!open) return null
   return (
-    <div className="fixed inset-0 z-50 flex flex-col justify-end bg-slate-900/40" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex flex-col justify-end bg-scrim/40" onClick={onClose}>
       <div
         role="dialog"
         aria-modal="true"
         aria-label={title}
         // Stop a tap inside the panel from reaching the backdrop's close handler.
         onClick={(e) => e.stopPropagation()}
-        className="mx-auto max-h-[85dvh] w-full max-w-md overflow-y-auto rounded-t-3xl bg-white p-4"
+        className="mx-auto max-h-[85dvh] w-full max-w-md overflow-y-auto rounded-t-3xl bg-surface-card p-4"
         style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}
       >
         {/* The grab handle is decorative, but it is the thing that makes a panel read as draggable-
@@ -215,7 +215,7 @@ export function Screen({
            the primary button sat UNDER the home indicator: the driver's tap dismissed the app
            instead of submitting his shift. */
         <footer
-          className="fixed inset-x-0 bottom-0 mx-auto w-full min-w-0 max-w-md overflow-x-hidden border-t border-slate-200 bg-white/95 p-3 backdrop-blur"
+          className="fixed inset-x-0 bottom-0 mx-auto w-full min-w-0 max-w-md overflow-x-hidden border-t border-line bg-surface-card p-3"
           style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
         >
           {footer}

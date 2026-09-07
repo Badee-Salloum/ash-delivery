@@ -187,10 +187,10 @@ export function AdminApp(): ReactNode {
       {/* On a phone/tablet the rail is an off-canvas drawer; a dim overlay closes it. On lg+ it is
           a normal static column and the overlay/hamburger never show. */}
       {navOpen ? (
-        <div className="fixed inset-0 z-30 bg-slate-900/40 lg:hidden" onClick={() => setNavOpen(false)} aria-hidden="true" />
+        <div className="fixed inset-0 z-30 bg-scrim/40 lg:hidden" onClick={() => setNavOpen(false)} aria-hidden="true" />
       ) : null}
       <aside
-        className={`fixed inset-y-0 start-0 z-40 flex w-60 flex-col gap-1 overflow-y-auto border-e border-slate-200 bg-white p-3 transition-transform lg:static lg:z-auto lg:translate-x-0 ${
+        className={`fixed inset-y-0 start-0 z-40 flex w-60 flex-col gap-1 overflow-y-auto border-e border-slate-200 bg-surface-card p-3 transition-transform lg:static lg:z-auto lg:translate-x-0 ${
           navOpen ? 'translate-x-0' : 'ltr:-translate-x-full rtl:translate-x-full lg:ltr:translate-x-0 lg:rtl:translate-x-0'
         }`}
       >
@@ -267,7 +267,7 @@ export function AdminApp(): ReactNode {
 
       <div className="flex min-w-0 flex-1 flex-col">
         {/* Mobile top bar: a hamburger to open the rail. Hidden on lg where the rail is static. */}
-        <div className="flex items-center gap-3 border-b border-slate-200 bg-white p-3 lg:hidden">
+        <div className="flex items-center gap-3 border-b border-slate-200 bg-surface-card p-3 lg:hidden">
           <button
             aria-label={t.common.menu}
             onClick={() => setNavOpen(true)}

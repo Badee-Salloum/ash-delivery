@@ -57,9 +57,9 @@ export function Button({
 }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'ghost' | 'danger' | 'success' }): ReactNode {
   const styles: Record<string, string> = {
     primary: 'bg-brand text-white shadow-sm hover:bg-brand-700',
-    ghost: 'bg-white text-brand border border-slate-300 hover:border-brand hover:bg-slate-50',
-    danger: 'bg-red-600 text-white hover:bg-red-700',
-    success: 'bg-emerald-600 text-white hover:bg-emerald-700',
+    ghost: 'bg-surface-card text-brand border border-slate-300 hover:border-brand hover:bg-slate-50',
+    danger: 'bg-danger-solid text-white hover:bg-danger-solid-hover',
+    success: 'bg-success-solid text-white hover:bg-success-solid-hover',
   }
   return (
     <button
@@ -74,7 +74,7 @@ export function Button({
 export function TextInput({ className = '', ...rest }: InputHTMLAttributes<HTMLInputElement>): ReactNode {
   return (
     <input
-      className={`min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm outline-none transition-colors focus:border-brand focus:ring-2 focus:ring-brand/15 ${className}`}
+      className={`min-h-10 rounded-lg border border-slate-300 bg-surface-card px-3 text-sm outline-none transition-colors focus:border-brand focus:ring-2 focus:ring-brand/15 ${className}`}
       {...rest}
     />
   )
@@ -92,7 +92,7 @@ export function MoneyInput({ className = '', ...rest }: InputHTMLAttributes<HTML
 export function Select({ className = '', children, ...rest }: SelectHTMLAttributes<HTMLSelectElement>): ReactNode {
   return (
     <select
-      className={`min-h-10 rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none transition-colors focus:border-brand focus:ring-2 focus:ring-brand/15 ${className}`}
+      className={`min-h-10 rounded-lg border border-slate-300 bg-surface-card px-2 text-sm outline-none transition-colors focus:border-brand focus:ring-2 focus:ring-brand/15 ${className}`}
       {...rest}
     >
       {children}
@@ -127,7 +127,7 @@ export function DateField({
         value={value}
         aria-label={label}
         onChange={(e) => onChange(e.target.value)}
-        className="num min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm outline-none transition-colors focus:border-brand focus:ring-2 focus:ring-brand/15"
+        className="num min-h-10 rounded-lg border border-slate-300 bg-surface-card px-3 text-sm outline-none transition-colors focus:border-brand focus:ring-2 focus:ring-brand/15"
       />
     </Field>
   )
@@ -199,7 +199,7 @@ export function Figure({
 
 export function Card({ title, children, className = '' }: { title?: string; children: ReactNode; className?: string }): ReactNode {
   return (
-    <section className={`rounded-xl bg-white p-4 shadow-sm ${className}`}>
+    <section className={`rounded-xl bg-surface-card p-4 shadow-sm ${className}`}>
       {title ? <h2 className="mb-3 text-sm font-bold text-slate-500">{title}</h2> : null}
       {children}
     </section>
@@ -225,7 +225,7 @@ export function Stat({
       {sub ? <div className="mt-1 text-xs text-slate-500">{sub}</div> : null}
     </>
   )
-  const cls = 'block rounded-xl bg-white p-4 shadow-sm'
+  const cls = 'block rounded-xl bg-surface-card p-4 shadow-sm'
   return href ? (
     <a href={href} className={`${cls} transition hover:shadow-md focus-visible:ring-2 focus-visible:ring-brand/40`}>
       {body}

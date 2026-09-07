@@ -85,7 +85,7 @@ export function BikeCard({
 
   return (
     <div
-      className={`flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm border-s-4 ${
+      className={`flex flex-col gap-3 rounded-xl border border-slate-200 bg-surface-card p-4 shadow-sm border-s-4 ${
         held ? 'border-s-amber-400' : vehicle.state === 'ready' && vehicle.active ? 'border-s-emerald-400' : 'border-s-slate-300'
       }`}
     >

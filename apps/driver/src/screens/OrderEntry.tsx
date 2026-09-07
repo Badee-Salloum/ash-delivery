@@ -166,7 +166,7 @@ export function OperationsList({
     <>
       {/* Inclusion is shown but never edited here. The server owns the shift window and the manager
           owns any reasoned override, so a cached client cannot change accounting with a checkbox. */}
-      <Card className="flex flex-col gap-1 bg-white">
+      <Card className="flex flex-col gap-1 bg-surface-card">
         <p className="text-sm font-semibold text-slate-800">{summaryText}</p>
         {summary.cashDeductions.total > 0 ? (
           <p className="text-sm text-slate-600">{deductionSummaryText}</p>
@@ -232,8 +232,8 @@ export function OperationsList({
                     : otherDay
                       ? 'border-amber-400 bg-amber-50'
                       : suspect
-                        ? 'border-amber-300 bg-white'
-                        : 'border-slate-200 bg-white',
+                        ? 'border-amber-300 bg-surface-card'
+                        : 'border-slate-200 bg-surface-card',
                 off ? 'opacity-50' : '',
               ].join(' ')}
             >
@@ -342,7 +342,7 @@ export function OperationsList({
               {open.feeStrip ? (
                 <>
                   <p className="mt-1 text-[10px] text-slate-500">{t.orders.ocrSaw}</p>
-                  <img src={open.feeStrip} alt={t.orders.ocrSaw} className="mt-1 max-w-full rounded-lg bg-white" />
+                  <img src={open.feeStrip} alt={t.orders.ocrSaw} className="mt-1 max-w-full rounded-lg bg-surface-card" />
                 </>
               ) : null}
             </div>

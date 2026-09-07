@@ -2508,14 +2508,14 @@ function EndPackage({
                       <button
                         type="button"
                         onClick={() => onResolveSaveConflict('phone')}
-                        className="min-h-10 rounded-lg bg-red-700 px-3 text-xs font-semibold text-white"
+                        className="min-h-10 rounded-lg bg-danger-solid px-3 text-xs font-semibold text-white"
                       >
                         {t.shift.usePhoneDraft}
                       </button>
                       <button
                         type="button"
                         onClick={() => onResolveSaveConflict('server')}
-                        className="min-h-10 rounded-lg bg-white px-3 text-xs font-semibold text-red-800 ring-1 ring-red-200"
+                        className="min-h-10 rounded-lg bg-surface-card px-3 text-xs font-semibold text-red-800 ring-1 ring-red-200"
                       >
                         {t.shift.useServerDraft}
                       </button>

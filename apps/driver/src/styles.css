@@ -1,38 +1,33 @@
 @import 'tailwindcss';
 
 /*
+ * The design tokens live in `@ash/theme` and are shared with the admin console. Only the TOKENS are
+ * shared: this app's controls are sized for a cheap Android held in one hand (min-h-14, big tap
+ * targets) and the admin's for desktop density (min-h-10), so one component could not serve both.
+ * Sharing the palette keeps the two recognisably one product. Before this, the two stylesheets were
+ * a copy-paste of each other and every fix had to be written twice.
+ */
+@import '@ash/theme/fonts.css';
+@import '@ash/theme/tokens.css';
+
+/*
  * RTL-first. Tailwind 4 logical properties are used throughout the components (ps-/pe-/ms-/me-,
  * start-/end-, text-start/text-end) so a single stylesheet serves both directions — CI fails the
  * build on any physical utility (ml-/mr-/left-/right-/text-left/text-right).
  */
 
-/* ASH GROUP brand — the navy hexagon and its blue bar-chart accent. */
-@theme {
-  --color-brand: #1b2a5c;
-  --color-brand-700: #22347a;
-  --color-brand-300: #6b7bb0;
-  --color-accent: #2d6cb0;
-  --color-accent-600: #245a97;
-}
-
 :root {
-  color-scheme: light;
-  --ash-bg: #eef1f8;
-  --ash-ink: #0f172a;
+  /* `OrderEntry` reaches for this directly as `bg-[var(--ash-bg,#eef1f8)]`. Kept as an alias so
+     that call site keeps working — and it now follows the theme instead of being a fixed grey. */
+  --ash-bg: var(--ash-surface-page);
 }
 
 body {
   margin: 0;
-  font-family: 'IBM Plex Sans Arabic', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  background: var(--ash-bg);
+  font-family: var(--font-sans);
+  background: var(--ash-surface-page);
   color: var(--ash-ink);
   /* Western digits for money regardless of language (ar-SY-u-nu-latn policy). */
-  font-variant-numeric: tabular-nums;
-}
-
-/* Money and order numbers isolate as bidi runs so an Arabic label never reorders a figure. */
-.num {
-  unicode-bidi: isolate;
   font-variant-numeric: tabular-nums;
 }
 

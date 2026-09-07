@@ -1,26 +1,26 @@
 @import 'tailwindcss';
 
-/* ASH GROUP brand — the navy hexagon and its blue bar-chart accent. */
-@theme {
-  --color-brand: #1b2a5c;
-  --color-brand-700: #22347a;
-  --color-brand-300: #6b7bb0;
-  --color-accent: #2d6cb0;
-  --color-accent-600: #245a97;
-}
+/*
+ * The design tokens live in `@ash/theme` and are shared with the driver PWA. Only the TOKENS are
+ * shared: the two apps' controls are sized for different hands — the driver's for a phone held one
+ * -handed (min-h-14), the admin's for desktop density (min-h-10) — and one component cannot serve
+ * both. Sharing the palette keeps them recognisably one product without pretending they are one
+ * interface. Before this, these two stylesheets were a copy-paste of each other.
+ */
+@import '@ash/theme/fonts.css';
+@import '@ash/theme/tokens.css';
 
-:root {
-  color-scheme: light;
-  --ash-ink: #0f172a;
-}
+/*
+ * RTL-first. Tailwind 4 logical properties are used throughout the components (ps-/pe-/ms-/me-,
+ * start-/end-, text-start/text-end) so a single stylesheet serves both directions — CI fails the
+ * build on any physical utility (ml-/mr-/left-/right-/text-left/text-right).
+ */
+
 body {
   margin: 0;
-  font-family: 'IBM Plex Sans Arabic', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  background: #eef1f8;
+  font-family: var(--font-sans);
+  background: var(--ash-surface-page);
   color: var(--ash-ink);
-  font-variant-numeric: tabular-nums;
-}
-.num {
-  unicode-bidi: isolate;
+  /* Western digits for money regardless of language (ar-SY-u-nu-latn policy). */
   font-variant-numeric: tabular-nums;
 }

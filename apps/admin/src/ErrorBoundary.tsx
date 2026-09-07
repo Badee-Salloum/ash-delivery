@@ -37,7 +37,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error: E
     if (!error) return this.props.children
     return (
       <div className="grid min-h-dvh place-items-center bg-slate-100 p-6" dir="rtl">
-        <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="w-full max-w-md rounded-xl border border-slate-200 bg-surface-card p-5 shadow-sm">
           <h1 className="text-lg font-bold text-red-700">حدث خطأ في العرض</h1>
           <p className="mt-2 text-sm text-slate-600">
             تعذّر عرض هذه الشاشة. لم يُحفظ أي تغيير ولم تتأثر أي بيانات. أعد تحميل الصفحة، وإذا تكرر

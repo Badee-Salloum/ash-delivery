@@ -1,0 +1,14 @@
+{
+  "name": "@ash/theme",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./tokens.css": "./tokens.css",
+    "./fonts.css": "./fonts.css"
+  },
+  "comment": "CSS-only. The design tokens both front-ends share, and nothing else. Components are deliberately NOT shared: the driver's controls are sized for a phone held in one hand (min-h-14) and the admin's for desktop density (min-h-10), and one component cannot serve both. Sharing the tokens keeps the two apps recognisably one product without pretending they are one interface.",
+  "dependencies": {
+    "@fontsource/ibm-plex-sans-arabic": "^5.1.0"
+  }
+}

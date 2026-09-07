@@ -1433,7 +1433,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
              landing squarely on top of the approve button. And the safe-area padding, because
              `viewport-fit=cover` is now set — without it this bar sits under an Android gesture bar,
              where the tap that should approve a shift dismisses the app instead. */
-          className="sticky bottom-0 z-50 -mx-4 border-t border-slate-200 bg-white/95 px-4 py-3 backdrop-blur"
+          className="sticky bottom-0 z-50 -mx-4 border-t border-line bg-surface-card px-4 py-3"
           style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
         >
           {/* WHY the button is dead. `aria-invalid` on the two inputs tells a screen reader and
@@ -1675,7 +1675,7 @@ function CloseApprovalWorkspace({
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
-      <header className="flex min-w-0 flex-wrap items-center gap-3 rounded-xl bg-white p-3 shadow-sm">
+      <header className="flex min-w-0 flex-wrap items-center gap-3 rounded-xl bg-surface-card p-3 shadow-sm">
         <Button variant="ghost" onClick={onBack} aria-label={t.common.back} className="shrink-0 px-3">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true" className="rtl:-scale-x-100">
             <path d="M15 6l-6 6 6 6" strokeLinecap="round" strokeLinejoin="round" />
@@ -1784,7 +1784,7 @@ function CloseApprovalWorkspace({
               <ul className="mt-3 flex min-w-0 flex-col gap-2">
                 {ordinaryOrders.map((order) => (
                   <li key={order.providerOrderNo} className="min-w-0">
-                    <details className="min-w-0 rounded-lg border border-slate-200 bg-white">
+                    <details className="min-w-0 rounded-lg border border-slate-200 bg-surface-card">
                       <summary className={`cursor-pointer list-none p-2 ${FOCUS_RING}`}>
                         <OrdinaryOrderRow order={order} businessDate={day} />
                       </summary>
@@ -1822,7 +1822,7 @@ function CloseApprovalWorkspace({
 
           <details
             open={evidenceHasAnomaly ? true : undefined}
-            className={`rounded-xl bg-white p-4 shadow-sm ${evidenceHasAnomaly ? 'ring-2 ring-amber-300' : ''}`}
+            className={`rounded-xl bg-surface-card p-4 shadow-sm ${evidenceHasAnomaly ? 'ring-2 ring-amber-300' : ''}`}
           >
             <summary className={`cursor-pointer text-sm font-bold text-slate-700 ${FOCUS_RING}`}>
               {copy.evidenceTitle}
@@ -2009,7 +2009,7 @@ function CloseApprovalWorkspace({
                         aria-invalid={!isNonnegativeSettlementMoney(cashReceivableDeferred)}
                         disabled={busy}
                         onChange={(event) => onCashReceivableDeferred(event.target.value)}
-                        className="bg-white"
+                        className="bg-surface-card"
                       />
                       <span className="font-normal text-violet-800">
                         {t.settlement.receivableMaximum}: <Money value={positiveSettlementClaim(settlement.cashClaimToOffice)} />
@@ -2023,7 +2023,7 @@ function CloseApprovalWorkspace({
                         aria-invalid={!isNonnegativeSettlementMoney(walletReceivableDeferred)}
                         disabled={busy}
                         onChange={(event) => onWalletReceivableDeferred(event.target.value)}
-                        className="bg-white"
+                        className="bg-surface-card"
                       />
                       <span className="font-normal text-violet-800">
                         {t.settlement.receivableMaximum}: <Money value={positiveSettlementClaim(settlement.walletClaimToOffice)} />
@@ -2051,7 +2051,7 @@ function CloseApprovalWorkspace({
                         aria-invalid={!isNonnegativeSettlementMoney(cashShortageReceivable)}
                         disabled={busy}
                         onChange={(event) => onCashShortageReceivable(event.target.value)}
-                        className="bg-white"
+                        className="bg-surface-card"
                       />
                       <span className="font-normal text-red-800">
                         {t.settlement.receivableMaximum}: <Money value={settlement.maximumCashShortageReceivable} />
@@ -2069,12 +2069,12 @@ function CloseApprovalWorkspace({
                         type="button"
                         disabled={busy}
                         onClick={() => onCashShortageReceivable(settlement.maximumCashShortageReceivable)}
-                        className="mt-2 inline-flex min-h-9 items-center rounded-lg border border-red-300 bg-white px-3 text-xs font-bold text-red-900 disabled:opacity-40"
+                        className="mt-2 inline-flex min-h-9 items-center rounded-lg border border-red-300 bg-surface-card px-3 text-xs font-bold text-red-900 disabled:opacity-40"
                       >
                         {t.settlement.shortageReceivableAll}
                       </button>
                     ) : null}
-                    <p className="mt-2 rounded-lg bg-white/80 px-3 py-2 text-xs font-semibold text-red-900">
+                    <p className="mt-2 rounded-lg bg-surface-card/80 px-3 py-2 text-xs font-semibold text-red-900">
                       {t.settlement.shortageReceivableOfficeUnchanged}
                     </p>
                   </div>
@@ -2111,7 +2111,7 @@ function CloseApprovalWorkspace({
                 {settlementHasVariance(settlement) && !forcePrepared ? (
                   <label className="mt-3 flex flex-col gap-1 rounded-lg border border-amber-300 bg-amber-50 p-3">
                     <span className="text-sm font-bold text-amber-950">{t.settlement.varianceReason}</span>
-                    <textarea value={varianceReason} onChange={(event) => onVarianceReason(event.target.value)} disabled={busy || refreshing} maxLength={500} rows={2} className="w-full rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/15" placeholder={t.settlement.varianceReasonPlaceholder} />
+                    <textarea value={varianceReason} onChange={(event) => onVarianceReason(event.target.value)} disabled={busy || refreshing} maxLength={500} rows={2} className="w-full rounded-lg border border-amber-300 bg-surface-card px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/15" placeholder={t.settlement.varianceReasonPlaceholder} />
                   </label>
                 ) : null}
 
@@ -2153,7 +2153,7 @@ function CloseApprovalWorkspace({
             {forcePrepared ? (
               <label className="mt-3 flex flex-col gap-1 rounded-lg border border-red-200 bg-red-50 p-3">
                 <span className="text-sm font-bold text-red-900">{t.approval.forceReasonRequired}</span>
-                <textarea value={notes} onChange={(event) => onNotes(event.target.value)} disabled={busy || refreshing} maxLength={500} rows={2} className="rounded-lg border border-red-300 bg-white px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/15" />
+                <textarea value={notes} onChange={(event) => onNotes(event.target.value)} disabled={busy || refreshing} maxLength={500} rows={2} className="rounded-lg border border-red-300 bg-surface-card px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/15" />
               </label>
             ) : null}
 
@@ -2561,7 +2561,7 @@ function DuplicateChoiceColumn({
 }): ReactNode {
   const { t, lang } = useApp()
   return (
-    <div className="min-w-0 flex-1 rounded-lg border border-amber-200 bg-white p-2">
+    <div className="min-w-0 flex-1 rounded-lg border border-amber-200 bg-surface-card p-2">
       <p className="text-[11px] font-bold text-amber-900">{heading}</p>
       <p dir="ltr" className="num mt-1 text-lg font-extrabold text-slate-800">
         <Money value={side.row.amount} />
@@ -2685,7 +2685,7 @@ function DuplicateChoicePanel({
                focus — so the keyboard ring is drawn from `focus-within` here. The chosen option
                also carries a visible border: this is the one control on the card where reading the
                wrong state costs a real delivery. */
-            className={`mt-1 flex min-w-0 cursor-pointer items-center gap-2 rounded-md border-2 bg-white p-2 focus-within:ring-2 focus-within:ring-brand/40 ${
+            className={`mt-1 flex min-w-0 cursor-pointer items-center gap-2 rounded-md border-2 bg-surface-card p-2 focus-within:ring-2 focus-within:ring-brand/40 ${
               keepKey === side.key ? 'border-brand' : 'border-transparent'
             }`}
           >
@@ -2872,7 +2872,7 @@ function OrderAttentionCard({
   )
 
   return (
-    <article className={`min-w-0 rounded-xl border p-3 ${reviewReasons.length > 0 || order.windowStatus === 'unknown' ? 'border-amber-300 bg-amber-50/40' : order.included === false ? 'border-slate-300 bg-slate-50' : 'border-sky-200 bg-white'}`}>
+    <article className={`min-w-0 rounded-xl border p-3 ${reviewReasons.length > 0 || order.windowStatus === 'unknown' ? 'border-amber-300 bg-amber-50/40' : order.included === false ? 'border-slate-300 bg-slate-50' : 'border-sky-200 bg-surface-card'}`}>
       <div className="flex min-w-0 flex-wrap items-start gap-2">
         <span className="num rounded bg-slate-100 px-2 py-1 text-xs font-bold">#{index}</span>
         <div className="min-w-0 flex-1">
@@ -3040,7 +3040,7 @@ function OrderAttentionCard({
                   {reread.rows.map((row, rowIndex) => {
                     const rereadRoute = [row.pointA, row.pointB].filter(Boolean).join(' → ')
                     return (
-                      <li key={`${rowIndex}:${row.value ?? ''}:${row.time ?? ''}`} className="rounded-md bg-white p-2">
+                      <li key={`${rowIndex}:${row.value ?? ''}:${row.time ?? ''}`} className="rounded-md bg-surface-card p-2">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <span className="num font-bold">
                             #{rowIndex + 1} · {row.value ?? '—'} · {row.dateIso ?? '—'} {row.time ?? '—'}
@@ -3270,7 +3270,7 @@ function DeductionAttentionCard({
                   {reread.rows.map((row, rowIndex) => {
                     const suggestionKey = `${rowIndex}:${row.value ?? ''}:${row.dateIso ?? ''}:${row.time ?? ''}`
                     return (
-                      <li key={suggestionKey} className="rounded-md bg-white p-2">
+                      <li key={suggestionKey} className="rounded-md bg-surface-card p-2">
                         <p className="num font-bold">
                           #{rowIndex + 1} · {row.value ?? '—'} · {row.dateIso ?? '—'} {row.time ?? '—'}
                         </p>
@@ -4359,7 +4359,7 @@ function Lightbox({
   if (!shot) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-slate-900/90" role="dialog" aria-modal="true">
+    <div className="fixed inset-0 z-50 flex flex-col bg-scrim/90" role="dialog" aria-modal="true">
       <div className="flex items-center gap-3 p-3 text-white">
         <span className="font-semibold">{label(shot.slot)}</span>
         <span className="num text-sm text-white/70">

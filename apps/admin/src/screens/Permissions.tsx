@@ -91,7 +91,7 @@ export function Permissions(): ReactNode {
                     aria-label={`${perm} — ${t.roles[role as keyof typeof t.roles] ?? role}`}
                     value={scopeOf(role, perm)}
                     onChange={(e) => void change(role, perm, e.target.value)}
-                    className="min-h-9 rounded-lg border border-slate-300 bg-white px-2 text-xs outline-none focus:border-brand focus-visible:ring-2 focus-visible:ring-brand/40"
+                    className="min-h-9 rounded-lg border border-slate-300 bg-surface-card px-2 text-xs outline-none focus:border-brand focus-visible:ring-2 focus-visible:ring-brand/40"
                   >
                     <option value="">—</option>
                     <option value="own">{t.permissions.scopes.own}</option>

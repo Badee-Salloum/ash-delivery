@@ -101,7 +101,7 @@ export function PageGrid({
             type="button"
             onClick={onAddPage}
             aria-label={t.shift.addPage}
-            className="flex aspect-square min-w-0 items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-white text-2xl text-slate-400"
+            className="flex aspect-square min-w-0 items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-surface-card text-2xl text-slate-400"
           >
             +
           </button>

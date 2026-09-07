@@ -100,7 +100,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }): ReactNo
               key={toast.id}
               role="status"
               className={`pointer-events-auto max-w-sm rounded-lg px-4 py-2.5 text-sm font-medium text-white shadow-lg ${
-                toast.kind === 'error' ? 'bg-red-600' : 'bg-emerald-600'
+                toast.kind === 'error' ? 'bg-danger-solid' : 'bg-success-solid'
               }`}
             >
               {toast.msg}
@@ -111,14 +111,14 @@ export function FeedbackProvider({ children }: { children: ReactNode }): ReactNo
         {/* Confirm dialog */}
         {pending ? (
           <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-scrim/40 p-4"
             onClick={() => settle(false)}
           >
             <div
               role="dialog"
               aria-modal="true"
               aria-label={pending.title}
-              className="w-full max-w-sm rounded-xl bg-white p-5 shadow-xl"
+              className="w-full max-w-sm rounded-xl bg-surface-card p-5 shadow-xl"
               onClick={(e) => e.stopPropagation()}
             >
               <h2 className="text-base font-bold text-slate-800">{pending.title}</h2>
