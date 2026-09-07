@@ -155,11 +155,41 @@ describe('completed shift history screen wiring', () => {
     expect(screenSource).toContain('onClick={() => onOpen(shift.id)}')
   })
 
-  it('reads every selected business date through the branch-scoped API client and bounds fan-out', () => {
-    expect(screenSource).toContain('completedShiftDates(applied.from, applied.to)')
-    expect(screenSource).toContain('index += READ_BATCH_SIZE')
-    expect(screenSource).toContain('`/shifts?date=${encodeURIComponent(date)}`')
+  it('reads the whole period in ONE branch-scoped request, not one per business date', () => {
+    // This walked the range a date at a time, seven in parallel: 33 `no-store` requests to cover a
+    // month, each returning every state so the browser could discard most of it. The range read the
+    // Sunday close already relies on covers it in one. The negative assertions are the point — a
+    // reinstated loop would still satisfy the positive one.
+    expect(screenSource).toContain(
+      '`/shifts?from=${encodeURIComponent(applied.from)}&to=${encodeURIComponent(applied.to)}`',
+    )
     expect(screenSource).toContain("{ cache: 'no-store', signal: controller.signal }")
+    expect(screenSource).not.toContain('READ_BATCH_SIZE')
+    expect(screenSource).not.toContain('/shifts?date=')
+    // The 31-day cap still guards the request; it is now the SERVER's scan it bounds, not the fan-out.
+    expect(screenSource).toContain('completedShiftDates(from, to)')
+    expect(screenSource).toContain('completedShiftDates(applied.from, applied.to)')
+  })
+
+  it('identifies a shift by its clock, because a business date alone cannot', () => {
+    // Thirteen shifts ran on 2026-09-06 and every row read «2026-09-06» and «#1». The screen now
+    // shows the branch-local start→end, so the nine day shifts and four evening ones are separable.
+    expect(screenSource).toContain('damascusParts(new Date(row.windowOpensAt))')
+    expect(screenSource).toContain('damascusParts(new Date(row.submittedAt))')
+    // A night shift carries the PREVIOUS date by design (the business day ends at 04:00), which looks
+    // like an off-by-one until the screen says so.
+    expect(screenSource).toContain('t.completedShifts.businessDayNote')
+    expect(ar.completedShifts.businessDayNote).toContain('٤:٠٠')
+  })
+
+  it('judges each pattern against its own target, so a full shift is not read as overtime', () => {
+    // A 13-hour `full` shift covers both slots. Against one slot's eight hours it looks like five
+    // hours of overtime; against the two it replaces it is three hours short.
+    expect(screenSource).toContain('TARGET_MINUTES[row.worked.pattern]')
+    expect(screenSource).toContain("full: 16 * 60")
+    expect(screenSource).toContain('shortfallMinutes(row.worked, target)')
+    // …and nothing is judged that cannot be judged honestly.
+    expect(screenSource).toContain('t.completedShifts.notClosedOnTime')
   })
 
   it('shows an exact period summary and the core financial columns without per-row detail reads', () => {

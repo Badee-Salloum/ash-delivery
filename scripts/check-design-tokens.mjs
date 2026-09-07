@@ -47,7 +47,6 @@ const BASELINE = {
   'apps/admin/src/screens/Approval.tsx': 273,
   'apps/admin/src/screens/Audit.tsx': 4,
   'apps/admin/src/screens/CheckIn.tsx': 9,
-  'apps/admin/src/screens/CompletedShifts.tsx': 10,
   'apps/admin/src/screens/Dashboard.tsx': 40,
   'apps/admin/src/screens/Expenses.tsx': 10,
   'apps/admin/src/screens/fleet/AddBike.tsx': 9,
