@@ -645,6 +645,15 @@ const withWalletAuthority = (
 })
 
 /** Where a shift already in flight puts the driver back. */
+/**
+ * Server states in which location may be recorded — the client half of the domain's
+ * `TRACKED_STATES`, which the ingest route enforces with a 409.
+ *
+ * `pending_review` IS here: the driver is at the counter handing over the close package, and that
+ * is exactly the presence evidence the close wants.
+ */
+const TRACKED_SHIFT_STATES = new Set(['open', 'suspended', 'pending_review'])
+
 const PHASE_FOR: Record<string, Phase> = {
   draft: 'start',
   awaiting_open_approval: 'awaiting',
@@ -685,6 +694,7 @@ export function ShiftFlow({
   const { api, t } = useApp()
   const toast = useToast()
   const [phase, setPhase] = useState<Phase>(resume ? (PHASE_FOR[resume.state] ?? 'start') : 'start')
+  const [serverState, setServerState] = useState<string | null>(resume?.state ?? null)
   // The fitted set can change mid-shift when the driver swaps a pack, so it lives in state: the
   // swap panel hands back the new fitment and the close screen then reads THAT, not the old pack.
   const [fitted, setFitted] = useState<readonly FittedBattery[]>(batteries)
@@ -936,8 +946,33 @@ export function ShiftFlow({
   const phaseRef = useRef(phase)
   phaseRef.current = phase
 
+  /*
+   * SRS K — the beacon follows the SHIFT, not the screen.
+   *
+   * It used to be a component rendered inside `if (phase === 'orders')`, so it stopped the moment
+   * the driver tapped «إنهاء النوبة», the moment a shift was suspended, and on any navigation —
+   * while the server still called the shift open. The state poll two hundred lines below already
+   * used a wider condition, so the two disagreed about the same shift.
+   *
+   * That mismatch also made proof-of-presence at close structurally impossible: the driver stands
+   * at the branch for the whole close package with the beacon unmounted.
+   *
+   * Called unconditionally, as a hook must be, and given `null` when the shift is not in a tracked
+   * state. `draft` and `awaiting_open_approval` are deliberately NOT tracked: the shift holds the
+   * driver, but he has not been approved to start working and where he is then is not ours to know.
+   */
+  // Renders nothing. The driver was once shown a live «التتبع يعمل / متوقف» line and the owner
+  // did not want the tracking state on his screen; the browser's own location prompt is his notice,
+  // and consent was given. That decision is unchanged — only where the hook is called has moved.
+  useGpsBeacon(shift && serverState && TRACKED_SHIFT_STATES.has(serverState) ? shift.id : null)
+
   const applyServerState = useCallback(
     (state: string): boolean => {
+      // What the SERVER says the shift is. The local `phase` is a rendering decision derived from
+      // it and is deliberately not the same thing — `end` is a phase the driver enters while the
+      // server still says `open`, and `done` covers both `pending_review` and an approved shift.
+      // Anything that must follow the shift's real life, like the GPS beacon, reads this.
+      setServerState(state)
       // The decision itself is pure and tested (`driverPhaseFor`), so the screen and the rule
       // cannot drift; this only carries out what it decides.
       const { gone, phase: next } = driverPhaseFor(state, phaseRef.current)
@@ -1289,8 +1324,6 @@ export function ShiftFlow({
         {/* «بلاغ حادثة» (C-1): the driver can't suspend himself — he flags the incident to the
             branch, which rings the bell so a manager can put the shift on hold. */}
         <ReportIncident shiftId={shift.id} />
-        {/* SRS K: stream location while the shift is open (foreground-only). */}
-        <GpsBeacon shiftId={shift.id} />
       </Screen>
     )
   }
@@ -2910,15 +2943,6 @@ function ReportIncident({ shiftId }: { shiftId: string }): ReactNode {
  * The live-GPS indicator. Mounting it starts the beacon (SRS K); unmounting — when the shift leaves
  * the open/orders phase — stops it. Foreground-only, per the PWA limitation.
  */
-function GpsBeacon({ shiftId }: { shiftId: string }): ReactNode {
-  // Runs the beacon and renders NOTHING. The driver used to be shown a live «التتبع يعمل / متوقف»
-  // line; the owner does not want the tracking state on his screen. Mounting still starts it and
-  // unmounting still stops it, so behaviour is unchanged — only the readout is gone. The location
-  // permission the browser itself asks for is the driver's real notice, and consent was given.
-  useGpsBeacon(shiftId)
-  return null
-}
-
 /**
  * Abandon a shift that never opened.
  *

@@ -1991,6 +1991,28 @@ export class ApiClient {
 
   // ── Live GPS (SRS K) ────────────────────────────────────────────────────────────────────────
   /** The driver's phone posts a location fix while his shift is open (foreground-only). */
+  /**
+   * Send a buffered run of fixes in one request.
+   *
+   * A background uploader produces runs, not singles: a phone with no signal keeps working and
+   * keeps its fixes. One request carrying four costs the API a fraction of four carrying one, and
+   * the server dedupes on `(shift_id, captured_at)` so a retry after a lost response is free.
+   *
+   * 409 means the shift is over and these fixes will never be accepted — the caller must drop them
+   * and stop, never retry.
+   */
+  sendGpsBatch(
+    shiftId: string,
+    body: {
+      source: 'phone_fg' | 'phone_bg' | 'tracker'
+      fixes: Array<{ lat: number; lng: number; accuracyM: number | null; capturedAtMs: number }>
+    },
+  ) {
+    return this.post<{ ok: true; accepted: number; duplicates: number; rejected: number }>(
+      `/shifts/${shiftId}/gps`,
+      body,
+    )
+  }
   sendGps(shiftId: string, body: { lat: number; lng: number; accuracyM: number | null; capturedAtMs: number }) {
     return this.post(`/shifts/${shiftId}/gps`, body)
   }
