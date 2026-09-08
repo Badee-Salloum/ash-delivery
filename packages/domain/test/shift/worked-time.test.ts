@@ -39,6 +39,26 @@ describe('which of the three patterns a shift was', () => {
     expect(workedTime(damascus('2026-09-06', '15:00'), damascus('2026-09-06', '21:00')).pattern).toBe('evening')
   })
 
+  it('does not call a SHORT morning shift a double', () => {
+    /*
+     * The bug this pins. The rule demanded an end at or after 15:00 to be a day shift, so an
+     * ordinary 08:00 -> 14:00 fell through to `full`, took the sixteen-hour target, and was
+     * presented as ten hours short under a driver's name. Six hours of work, read as dereliction.
+     */
+    expect(workedTime(damascus('2026-09-06', '08:00'), damascus('2026-09-06', '14:00')).pattern).toBe('day')
+    expect(workedTime(damascus('2026-09-06', '06:00'), damascus('2026-09-06', '11:00')).pattern).toBe('day')
+    // …including one that ends in the small hours of its OWN day, which is a very short shift and
+    // still not a double.
+    expect(workedTime(damascus('2026-09-06', '05:00'), damascus('2026-09-06', '07:30')).pattern).toBe('day')
+  })
+
+  it('separates the two slots by the day he came back on, not by a duration', () => {
+    // The second half of the same bug: `minutes <= DAY_END_LIMIT_MINUTES` compared a DURATION
+    // against a MINUTE-OF-DAY. Crossing midnight is what makes a morning start a double.
+    expect(workedTime(damascus('2026-09-06', '12:00'), damascus('2026-09-07', '00:01')).pattern).toBe('full')
+    expect(workedTime(damascus('2026-09-06', '12:00'), damascus('2026-09-06', '23:59')).pattern).toBe('full')
+  })
+
   it('calls a morning start that ran past 22:00 a full shift, not a long day', () => {
     // This is the distinction the whole feature turns on. Both start in the morning; only the end
     // says whether the driver covered one slot or two, which is also why a live shift cannot be

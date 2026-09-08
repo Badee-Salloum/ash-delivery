@@ -192,7 +192,18 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
 
   const history = classifyShiftHistory((rows ?? []).filter(matches))
   const financialTotals = completedShiftFinancialTotals(history.completed)
-  const shortRows = history.completed.filter((row) => (shortOf(row) ?? 0) > 0)
+  /*
+   * Only shifts the classifier actually JUDGED may appear on either side of this count.
+   *
+   * «مكتملة» was `completed.length - shortRows.length`, a subtraction from the whole population —
+   * so every row `shortOf` returns null for (an unknown pattern, a forgotten close, a row from an
+   * older API with no `worked` at all) fell into the complement and was reported as having MET its
+   * target. The screen was crediting drivers for shifts it had explicitly refused to judge.
+   */
+  const judgedRows = history.completed.filter((row) => shortOf(row) !== null)
+  const shortRows = judgedRows.filter((row) => (shortOf(row) ?? 0) > 0)
+  const metRows = judgedRows.filter((row) => shortOf(row) === 0)
+  const unjudgedCount = history.completed.length - judgedRows.length
   const shortMinutes = shortRows.reduce((total, row) => total + (shortOf(row) ?? 0), 0)
 
   // Only drivers who actually worked inside the chosen range. Offering the whole roster would fill
@@ -462,7 +473,10 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
                 />
                 <Stat
                   label={t.completedShifts.metTarget}
-                  value={<span className="num">{history.completed.length - shortRows.length}</span>}
+                  value={<span className="num">{metRows.length}</span>}
+                  {...(unjudgedCount > 0
+                    ? { sub: t.completedShifts.notJudged.replace('{n}', String(unjudgedCount)) }
+                    : {})}
                 />
               </div>
             ) : null}

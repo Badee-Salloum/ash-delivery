@@ -236,6 +236,10 @@ export function Dashboard(): ReactNode {
     setTreasury(null)
     setExpiring([])
     setAttendance([])
+    // …and the day's shifts with them. Without this the under-target tile and every «دبل» badge
+    // repaint with the PREVIOUS branch's drivers the instant the new branch's `data` lands, and
+    // correct themselves a round trip later — which is the window a manager reads them in.
+    setDayShifts(null)
     // One day, not a range: `from` and `to` are the same date. Omitted entirely until the user
     // picks one, so the server's own «today» stays the default.
     const range = day === null ? '' : `?from=${encodeURIComponent(day)}&to=${encodeURIComponent(day)}`

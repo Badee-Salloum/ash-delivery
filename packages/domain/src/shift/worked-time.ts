@@ -18,10 +18,13 @@
  * and 63 in the evening one. That gap is why 15:00 splits day from evening and why the split is
  * safe. The end boundaries separate an evening return from a night one.
  *
- *     day       starts < 15:00, ends 15:00–22:00      39 shifts, 6.18–8.69 h
- *     evening   starts >= 15:00                        43 shifts
- *     full      starts < 15:00, ends after 22:00        29 shifts, 11.49–14.46 h
- *               or before 08:00
+ *     day       starts < 15:00, back the same day before 22:00   39 shifts, 6.18–8.69 h
+ *     evening   starts >= 15:00                                  43 shifts
+ *     full      starts < 15:00, back after 22:00 or the next day  29 shifts, 11.49–14.46 h
+ *
+ * The `day` row once read «ends 15:00–22:00», which is what the code enforced and is wrong at
+ * the bottom end: a driver who starts at 08:00 and is back by 14:00 has worked one ordinary slot,
+ * and calling that `full` doubles his target and invents ten hours of shortfall.
  *
  * The dominant `full` is 12:00 → 01:00, fifteen times over. It is one shift covering both slots,
  * which is why it cannot be judged against a single slot's hours.
@@ -53,9 +56,6 @@ export const EVENING_START_MINUTES = 15 * 60
 /** A day shift that has not ended by this local minute is a `full` shift, not a late day one. */
 export const DAY_END_LIMIT_MINUTES = 22 * 60
 
-/** An end before this local minute is the small hours — the far side of a `full` shift. */
-export const NIGHT_END_LIMIT_MINUTES = 8 * 60
-
 /**
  * Longer than this and the close package was forgotten, not worked.
  *
@@ -81,6 +81,17 @@ function localMinuteOfDay(epochMs: number, offsetMinutes: number): number {
   const minutes = Math.floor(localMs / 60_000)
   return ((minutes % 1440) + 1440) % 1440
 }
+
+/**
+ * Which branch-local calendar day an instant falls on, as an integer that can be compared.
+ *
+ * `Math.floor` rather than a truncation, so an instant before 1970 lands on the day before rather
+ * than the day after — the same reason `localMinuteOfDay` normalises its modulo twice.
+ */
+function localDayIndex(epochMs: number, offsetMinutes: number): number {
+  return Math.floor((epochMs + offsetMinutes * 60_000) / 86_400_000)
+}
+
 
 /**
  * Classify one shift and measure it.
@@ -116,10 +127,21 @@ export function workedTime(
 
   if (startMinute >= EVENING_START_MINUTES) return { minutes, pattern: 'evening', abandoned }
 
-  const endedInTheEvening = endMinute >= EVENING_START_MINUTES && endMinute < DAY_END_LIMIT_MINUTES
-  // A day start that came back before dark AND inside one day is the day pattern. Anything else
-  // from a morning start ran into the night, which is the full pattern.
-  const pattern: ShiftPattern = endedInTheEvening && minutes <= DAY_END_LIMIT_MINUTES ? 'day' : 'full'
+  /*
+   * A morning start that came back the SAME local day and before 22:00 worked one slot.
+   *
+   * This asks the only two questions that separate one slot from two, and asks them in the units
+   * they belong to: a minute-of-day against a minute-of-day, a day index against a day index.
+   *
+   * It replaces a rule that got both wrong. `endedInTheEvening` demanded an end at or after 15:00,
+   * so an ordinary 08:00 → 14:00 shift fell through to `full` and was judged against sixteen hours
+   * — six hours of work presented as ten hours short, under a driver's name. And the guard beside it
+   * compared `minutes`, a DURATION, against `DAY_END_LIMIT_MINUTES`, a MINUTE OF DAY: it read as
+   * «and it wasn't absurdly long» but meant «and it ran under 22 hours», which
+   * `ABANDONED_AFTER_MINUTES` already catches six hours earlier. Two units, one constant, no error.
+   */
+  const cameBackSameDay = localDayIndex(endedAtMs, offsetMinutes) === localDayIndex(startedAtMs, offsetMinutes)
+  const pattern: ShiftPattern = cameBackSameDay && endMinute < DAY_END_LIMIT_MINUTES ? 'day' : 'full'
   return { minutes, pattern, abandoned }
 }
 
