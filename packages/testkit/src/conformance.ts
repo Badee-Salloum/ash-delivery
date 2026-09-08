@@ -3,6 +3,7 @@ import type {
   BatteryReadingRecord,
   Deps,
   ExpenseRecord,
+  GpsPingRecord,
   NewShiftSettlementRecord,
   OcrReadClaimInput,
   OcrReadCompletion,
@@ -229,6 +230,90 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
 
         await deps.shifts.update({ ...original, state: 'pending_review' }, USER)
         expect(await deps.shifts.countOpenActorsForBranch(BRANCH)).toEqual({ drivers: 0, vehicles: 0 })
+      })
+    })
+
+    describe('GPS pings (SRS K)', () => {
+      /*
+       * These two implementations had NEVER been compared. `gps_pings` carried no conformance case
+       * at all, which mattered little while the repo only appended one row and read the latest —
+       * and matters a great deal now that it dedupes on a natural key and orders a trail.
+       *
+       * Every API test in the system runs against the memory adapter. A rule that holds there and
+       * not in PostgreSQL is a rule CI proves and production does not have.
+       */
+      const fix = (capturedAtMs: number, over: Partial<Omit<GpsPingRecord, 'id'>> = {}) => ({
+        shiftId: SHIFT,
+        driverId: DRIVER,
+        branchId: BRANCH,
+        lat: 33.5138,
+        lng: 36.2765,
+        accuracyM: 10,
+        capturedAtMs,
+        receivedAtMs: capturedAtMs + 1_000,
+        source: 'phone_fg' as const,
+        ...over,
+      })
+
+      it('ignores a fix it already holds — the retried batch must be free', async () => {
+        const deps = await fresh()
+        expect(await deps.gps.appendMany([fix(1_000), fix(2_000)])).toEqual({ inserted: 2 })
+        // The same bytes again: a 202 that never reached the phone.
+        expect(await deps.gps.appendMany([fix(1_000), fix(2_000)])).toEqual({ inserted: 0 })
+        // …and a batch straddling the boundary inserts only what is new.
+        expect(await deps.gps.appendMany([fix(2_000), fix(3_000)])).toEqual({ inserted: 1 })
+        expect(await deps.gps.countForShift(SHIFT)).toBe(3)
+      })
+
+      it('dedupes WITHIN one batch, the way a single INSERT does', async () => {
+        // Where parity is most easily lost: PostgreSQL resolves the conflict inside the statement,
+        // so a naive in-memory loop that only checks already-stored rows would insert both.
+        const deps = await fresh()
+        expect(await deps.gps.appendMany([fix(5_000), fix(5_000)])).toEqual({ inserted: 1 })
+        expect(await deps.gps.countForShift(SHIFT)).toBe(1)
+      })
+
+      it('reads a trail in CAPTURE order, whatever order it arrived in', async () => {
+        const deps = await fresh()
+        // A buffered run flushed late, interleaved with fixes that arrived live.
+        await deps.gps.appendMany([fix(30_000, { receivedAtMs: 90_000 })])
+        await deps.gps.appendMany([fix(10_000, { receivedAtMs: 95_000 })])
+        await deps.gps.appendMany([fix(20_000, { receivedAtMs: 20_500 })])
+        const trail = await deps.gps.listForShift(SHIFT)
+        expect(trail.map((p) => p.capturedAtMs)).toEqual([10_000, 20_000, 30_000])
+      })
+
+      it('returns the latest fix per named driver, and nothing older than the window', async () => {
+        const deps = await fresh()
+        await deps.gps.appendMany([
+          fix(1_000, { receivedAtMs: 1_000, lat: 33.1 }),
+          fix(2_000, { receivedAtMs: 2_000, lat: 33.2 }),
+        ])
+        const latest = await deps.gps.latestForDriversInBranch(BRANCH, [DRIVER], 0)
+        expect(latest).toHaveLength(1)
+        expect(latest[0]!.lat).toBeCloseTo(33.2)
+
+        // A driver nobody asked about is not returned, even though his fix exists.
+        expect(await deps.gps.latestForDriversInBranch(BRANCH, [OTHER_DRIVER], 0)).toEqual([])
+        // And a fix older than the window is a memory, not a position.
+        expect(await deps.gps.latestForDriversInBranch(BRANCH, [DRIVER], 3_000)).toEqual([])
+      })
+
+      it('round-trips every field, including the capture layer', async () => {
+        const deps = await fresh()
+        await deps.gps.appendMany([fix(7_000, { accuracyM: null, source: 'phone_bg' })])
+        const [stored] = await deps.gps.listForShift(SHIFT)
+        expect(stored).toMatchObject({
+          shiftId: SHIFT,
+          driverId: DRIVER,
+          branchId: BRANCH,
+          accuracyM: null,
+          capturedAtMs: 7_000,
+          receivedAtMs: 8_000,
+          source: 'phone_bg',
+        })
+        expect(stored!.lat).toBeCloseTo(33.5138)
+        expect(stored!.lng).toBeCloseTo(36.2765)
       })
     })
 
