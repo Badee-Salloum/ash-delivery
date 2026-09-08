@@ -1220,6 +1220,21 @@ orderNo: 'Order no.',
       * Seventy of 113 measured shifts ran under eight hours — the norm, not the incident — so this
       * is a standing figure rather than an alarm, and it links to the screen that names them.
       */
+    /*
+     * «شيفت عادية او دبل» — the owner's own question, in his own word.
+     *
+     * A driver is DOUBLE two different ways and both must count: one `full` shift that covers both
+     * slots (12:00 → 01:00, the commonest shape in the data), or two separate shifts on the same
+     * business date. Reading only the pattern would miss the second; counting only rows would miss
+     * the first.
+     *
+     * `pending` is not a hedge. A morning start that is still running is genuinely undecided — it
+     * becomes a single or a double depending on when he comes back — and guessing would relabel
+     * itself at midnight in front of the manager.
+     */
+    shiftSingle: 'Single',
+    shiftDouble: 'Double',
+    shiftPending: 'Not yet known',
     shiftsUnderTarget: 'Shifts under target',
     shiftsUnderTargetSub: '{t} short in total',
     dayEndsAtFour: 'The business day ends at 04:00',
@@ -1365,7 +1380,7 @@ orderNo: 'Order no.',
     pattern: 'Pattern',
     patternDay: 'Day',
     patternEvening: 'Evening',
-    patternFull: 'Full',
+    patternFull: 'Full — double',
     patternUnknown: 'Undetermined',
     worked: 'Worked',
     target: 'Target',

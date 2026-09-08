@@ -1,5 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useId, useRef, useState } from 'react'
+import type { ShiftPattern } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
+import { shiftShapeOf } from '../shift-shape.ts'
 import { explainError } from '../errors.ts'
 import { explainLiveShiftActionError, type LiveShiftApiError } from '../live-shift-error.ts'
 import {
@@ -27,6 +29,17 @@ interface ShiftRow {
   floatTotal?: string
   topupTotal?: string
   orderCount?: number
+  /**
+   * Which pattern the shift is, as far as it can be known while it is still running.
+   *
+   * An EVENING start is unambiguous immediately — nothing it could still turn into is a day shift.
+   * A morning start is genuinely undecided: 12:00 is a single or a double and only the end says
+   * which, so it reads «غير محدّد» rather than guessing `day` and silently relabelling at midnight.
+   *
+   * Optional: a console served during a rolling deploy against the previous API gets no `worked`.
+   */
+  worked?: { minutes: number | null; pattern: ShiftPattern; abandoned: boolean }
+  windowOpensAt?: string | null
 }
 interface DriverLite {
   id: string
@@ -371,6 +384,23 @@ function LiveRow({
         <span className="num text-sm text-slate-500">
           {vehicleCode} · #{shift.shiftNo}
         </span>
+        {/*
+          * SINGLE OR DOUBLE, while he is still out.
+          *
+          * An evening start is already unambiguous — nothing it can still become is a day shift —
+          * so the manager knows immediately. A morning start is genuinely undecided until the
+          * driver comes back, and «لم تتحدّد بعد» is the honest answer rather than a guess that
+          * would quietly relabel itself at midnight.
+          */}
+        {shiftShapeOf(shift) === null ? null : (
+          <Badge tone={shiftShapeOf(shift) === 'double' ? 'info' : 'neutral'}>
+            {shiftShapeOf(shift) === 'double'
+              ? t.dashboard.shiftDouble
+              : shiftShapeOf(shift) === 'pending'
+                ? t.dashboard.shiftPending
+                : t.dashboard.shiftSingle}
+          </Badge>
+        )}
         {canApprove ? (
           <div className="flex flex-wrap gap-2 ms-auto">
             {/* Opens the shift's own screen — where a manager records an order on a driver who is

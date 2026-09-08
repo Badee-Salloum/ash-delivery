@@ -36,6 +36,7 @@ import {
 } from '../duplicate-choice.ts'
 import { useConfirm, useToast } from '../feedback.tsx'
 import { LatestRequestGuard } from '../latest-request.ts'
+import { shiftShapeOf } from '../shift-shape.ts'
 import { isValidOpeningFundInput, openingApprovalRequest } from '../opening-funds.ts'
 import {
   buildOrderDuplicateRevision,
@@ -550,6 +551,9 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     shiftStart === null ? null : Date.parse(shiftStart),
     shiftEnd === null ? null : Date.parse(shiftEnd),
   )
+  // One shift judged alone, so it cannot see a second one that day — the dashboard, which holds
+  // the whole day per driver, is where a two-row double is caught.
+  const shiftShape = shiftShapeOf({ worked: shiftWorked })
 
   const cashDeductions = review.cashDeductions ?? []
   const unresolvedWindowCount = countUnresolvedWindowRows(review.orders, cashDeductions)
@@ -998,7 +1002,27 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             ) : null}
           </p>
         </div>
-        <Badge tone="slate">{t.shift.states[review.state as keyof typeof t.shift.states] ?? review.state}</Badge>
+        {/*
+          * SINGLE OR DOUBLE, on the page a manager actually opens.
+          *
+          * The pattern shipped on the history table and nowhere else, so the one screen you reach by
+          * pressing «عرض» — the screen where the money is signed for — could not tell you whether
+          * you were looking at one slot or two. That is the difference between a driver who is two
+          * hours short and one who covered a colleague's evening.
+          *
+          * `unknown` is shown rather than hidden. On a RUNNING morning shift it is the honest
+          * answer: a 12:00 start is a day shift or a full one, and only the end says which.
+          */}
+        <span className="flex flex-col items-end gap-1">
+          <Badge tone="slate">{t.shift.states[review.state as keyof typeof t.shift.states] ?? review.state}</Badge>
+          <Badge tone={shiftShape === 'double' ? 'info' : 'neutral'}>
+            {shiftShape === 'double'
+              ? t.dashboard.shiftDouble
+              : shiftShape === 'pending'
+                ? t.dashboard.shiftPending
+                : t.dashboard.shiftSingle}
+          </Badge>
+        </span>
       </div>
 
       <OperationWindowAdvisory

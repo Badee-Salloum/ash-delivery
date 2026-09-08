@@ -4,6 +4,7 @@ import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { Badge, Card, Figure, Money, Pending, Stat } from '../ui.tsx'
 import { LatestRequestGuard } from '../latest-request.ts'
+import { type ShiftShape, shiftShapeForDay, shiftsByDriver } from '../shift-shape.ts'
 import { differenceView } from '../treasury-view.ts'
 import { type WorkingNowSnapshot, startWorkingNowPolling } from '../working-now.ts'
 
@@ -201,8 +202,13 @@ export function Dashboard(): ReactNode {
   const [attendance, setAttendance] = useState<Attendee[]>([])
   const [workingNow, setWorkingNow] = useState<WorkingNowSnapshot | null>(null)
   const [workingNowUnavailable, setWorkingNowUnavailable] = useState(false)
-  /** How many of the day's finished shifts fell short of their own pattern's target, and by how much. */
-  const [underTarget, setUnderTarget] = useState<{ count: number; minutes: number } | null>(null)
+  /**
+   * The day's shifts, kept raw.
+   *
+   * Two questions are answered from them — who fell short of his target, and who worked a double —
+   * and deriving both here beats storing two aggregates that could disagree about the same day.
+   */
+  const [dayShifts, setDayShifts] = useState<Array<{ driverId: string; worked?: WorkedTime }> | null>(null)
   /**
    * Which business day the financial panels describe. `null` means "whatever the server calls
    * today", and the first response fills it in from its own `to`.
@@ -318,29 +324,16 @@ export function Dashboard(): ReactNode {
     if (!businessDate) return
     let cancelled = false
     void api
-      .get<{ shifts: Array<{ worked?: WorkedTime }> }>(
+      .get<{ shifts: Array<{ driverId: string; worked?: WorkedTime }> }>(
         `/shifts?from=${encodeURIComponent(businessDate)}&to=${encodeURIComponent(businessDate)}`,
         { cache: 'no-store' },
       )
       .then((page) => {
-        if (cancelled) return
-        let count = 0
-        let minutes = 0
-        for (const shift of page.shifts) {
-          if (!shift.worked) continue
-          const target = DASHBOARD_TARGET_MINUTES[shift.worked.pattern]
-          if (target === null) continue
-          const short = shortfallMinutes(shift.worked, target)
-          if (short !== null && short > 0) {
-            count += 1
-            minutes += short
-          }
-        }
-        setUnderTarget({ count, minutes })
+        if (!cancelled) setDayShifts(page.shifts)
       })
       .catch(() => {
         // An older API serves no `worked`, and a failed read is not a claim that nobody was short.
-        if (!cancelled) setUnderTarget(null)
+        if (!cancelled) setDayShifts(null)
       })
     return () => {
       cancelled = true
@@ -362,6 +355,31 @@ export function Dashboard(): ReactNode {
       onUnavailable: () => setWorkingNowUnavailable(true),
     })
   }, [api, branchId])
+
+  /*
+   * WAS IT A SINGLE OR A DOUBLE — per driver, for the day on screen.
+   *
+   * Two shapes both mean he worked both slots, and reading only one of them would be wrong half the
+   * time: a single `full` shift (12:00 → 01:00, 36 of 129 measured shifts) OR two separate shifts
+   * on the same business date. `pending` is the honest answer for a morning shift still running.
+   */
+  const byDriver = shiftsByDriver(dayShifts ?? [])
+  const shiftShape = (driverId: string): ShiftShape | null => shiftShapeForDay(byDriver.get(driverId) ?? [])
+
+  // The tile's own figures, from the same rows.
+  let shortCount = 0
+  let shortMinutes = 0
+  for (const shift of dayShifts ?? []) {
+    if (!shift.worked) continue
+    const target = DASHBOARD_TARGET_MINUTES[shift.worked.pattern]
+    if (target === null) continue
+    const short = shortfallMinutes(shift.worked, target)
+    if (short !== null && short > 0) {
+      shortCount += 1
+      shortMinutes += short
+    }
+  }
+  const underTarget = dayShifts === null ? null : { count: shortCount, minutes: shortMinutes }
 
   if (!data) {
     return (
@@ -741,14 +759,28 @@ export function Dashboard(): ReactNode {
 
         <Card title={t.dashboard.ordersPerDriver}>
           <ul className="flex flex-col gap-1 text-sm">
-            {data.orders.perDriver.map((d) => (
-              <li key={d.driverId} className="flex items-center justify-between">
-                <span className="text-slate-600">{d.name}</span>
-                <span>
-                  {d.orders} — <Money value={d.feesSyp} />
-                </span>
-              </li>
-            ))}
+            {data.orders.perDriver.map((d) => {
+              const shape = shiftShape(d.driverId)
+              return (
+                <li key={d.driverId} className="flex items-center justify-between gap-2">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="truncate text-ink-secondary">{d.name}</span>
+                    {shape === null ? null : (
+                      <Badge tone={shape === 'double' ? 'info' : shape === 'pending' ? 'neutral' : 'neutral'}>
+                        {shape === 'double'
+                          ? t.dashboard.shiftDouble
+                          : shape === 'single'
+                            ? t.dashboard.shiftSingle
+                            : t.dashboard.shiftPending}
+                      </Badge>
+                    )}
+                  </span>
+                  <span className="shrink-0">
+                    {d.orders} — <Money value={d.feesSyp} />
+                  </span>
+                </li>
+              )
+            })}
           </ul>
         </Card>
       </div>
