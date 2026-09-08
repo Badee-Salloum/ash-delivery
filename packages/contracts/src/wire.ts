@@ -471,6 +471,28 @@ export const reviseOperationsRequest = z.object({
     .default([]),
 })
 
+/**
+ * «الحسم» — set or clear the charge a manager makes against the employee at close.
+ *
+ * A REPLACEMENT, not an increment: the request carries the shift's whole charge, so a retried POST
+ * is idempotent by construction. Its predecessor minted a fresh uuid per call and booked a second
+ * money row on a replay.
+ *
+ * `amount: '0.00'` clears it, and only then may the reason be absent — a non-zero charge without an
+ * audited reason is an unexplained deduction from a person's pay, and the reason is the only
+ * evidence this instrument has: nothing was scanned and nothing was counted.
+ */
+export const setManagerChargeRequest = z
+  .object({
+    /** A magnitude. The direction is the instrument, never the sign. */
+    amount: nonnegativeMoneySchema,
+    reason: nonblankReasonSchema.nullable().default(null),
+  })
+  .refine((value) => value.amount === 0n || value.reason !== null, {
+    message: 'a charge requires an audited reason',
+    path: ['reason'],
+  })
+
 export const endPackageRequest = z.object({
   /** Optimistic close-draft identity. Required by the service once a durable draft exists. */
   draftRevision: z.number().int().min(0).optional(),

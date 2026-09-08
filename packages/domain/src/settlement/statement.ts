@@ -219,6 +219,29 @@ export interface FixedShareSettlementInput {
    * employee's missing close-time contribution and must never credit the office a second time.
    */
   readonly cashShortageReceivable?: Minor
+  /**
+   * «الحسم» — a charge the manager makes against the employee at close. A positive magnitude.
+   *
+   * IT IS NOT A CASH DEDUCTION, and the difference is the whole reason it exists. A cash deduction
+   * asserts that money physically LEFT the driver's hands during the shift, so it is subtracted on
+   * BOTH sides — from the expected total and from his share — and the office entitlement is
+   * deliberately unchanged (see the note above this interface). That is right for a negative row on
+   * the provider's own screen, and it is why the driver's declared cash is already lower by it.
+   *
+   * A manager's charge is the opposite case: damage, a fine, an item not returned. The money is
+   * still in the driver's hands at the count. So it must move the office entitlement, and it must
+   * touch ONE side only — his earnings. Subtracting it from the expected total as well would
+   * inflate the variance by exactly the charge, and under decision 13 a surplus belongs to the
+   * employee, which hands the money straight back to him. That is not a hypothetical: it shipped
+   * on 2026-09-08 as a cash deduction and charged nobody anything. See
+   * `packages/domain/test/settlement/deduction-cancels.test.ts`, which exists to keep it from
+   * coming back.
+   *
+   * The employee's earned share is NOT reduced by it. He earned his 40 and paid 30 out of it; the
+   * ledger records 30 of `other_income` rather than silently swelling the cash box, so the books
+   * say what happened.
+   */
+  readonly managerChargeTotal?: Minor
 }
 
 export interface FixedShareSettlementPlan {
@@ -228,8 +251,10 @@ export interface FixedShareSettlementPlan {
   /** fixedDriverShare + manualDriverShare. */
   readonly grossDriverShare: Minor
   readonly cashDeductionTotal: Minor
-  /** Signed: grossDriverShare − cashDeductionTotal. */
+  /** Signed: grossDriverShare − cashDeductionTotal. Deliberately NOT reduced by a manager charge. */
   readonly baseDriverShare: Minor
+  /** «الحسم» — non-negative charge against the employee's settlement, added at close. */
+  readonly managerChargeTotal: Minor
   readonly expectedCash: Minor
   readonly expectedWallet: Minor
   readonly expectedTotal: Minor
@@ -314,6 +339,7 @@ export function planFixedShareSettlement(input: FixedShareSettlementInput): Fixe
   requireNonNegative('deferred cash funding', cashReceivableDeferred)
   requireNonNegative('deferred wallet funding', walletReceivableDeferred)
   requireNonNegative('cash shortage receivable', cashShortageReceivable)
+  requireNonNegative('manager charge total', input.managerChargeTotal ?? ZERO)
 
   const canonicalFixedShare = allocate(input.deliveryFeeTotal, FIXED_DRIVER_BPS, 'floor')
   if (input.fixedDriverShare !== canonicalFixedShare) {
@@ -328,9 +354,19 @@ export function planFixedShareSettlement(input: FixedShareSettlementInput): Fixe
   const expectedTotal = add(input.expectedCash, input.expectedWallet)
   const actualTotal = add(input.actualCash, input.actualWallet)
   const variance = sub(actualTotal, expectedTotal)
-  const finalEmployeeCash = add(baseDriverShare, variance)
+  /*
+   * The charge touches ONE side, and that is the entire point.
+   *
+   * `expectedTotal` is untouched, so the variance still measures only what the count actually
+   * disagreed about. The employee's figure falls by the charge and the office's claim rises by it,
+   * which is what «يُنقص من حصّته فوراً» means. Subtract it from the expected total as well —
+   * the way a genuine cash deduction is subtracted — and the variance rises by the same amount, the
+   * surplus goes to the employee under decision 13, and the charge refunds itself.
+   */
+  const managerChargeTotal = input.managerChargeTotal ?? ZERO
+  const finalEmployeeCash = sub(add(baseDriverShare, variance), managerChargeTotal)
   const maximumCashShortageReceivable = finalEmployeeCash < ZERO ? abs(finalEmployeeCash) : ZERO
-  const officeEntitlement = sub(expectedTotal, baseDriverShare)
+  const officeEntitlement = add(sub(expectedTotal, baseDriverShare), managerChargeTotal)
   const cashClaimToOffice = sub(officeEntitlement, input.actualWallet)
   const walletClaimToOffice = input.actualWallet
 
@@ -386,6 +422,7 @@ export function planFixedShareSettlement(input: FixedShareSettlementInput): Fixe
     grossDriverShare,
     cashDeductionTotal: input.cashDeductionTotal,
     baseDriverShare,
+    managerChargeTotal,
     expectedCash: input.expectedCash,
     expectedWallet: input.expectedWallet,
     expectedTotal,

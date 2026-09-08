@@ -52,6 +52,8 @@ const shift = (): ShiftRecord => ({
   ordersHash: null,
   approvedBy: null,
   approvedAt: null,
+  managerCharge: minor(0n),
+  managerChargeReason: null,
 })
 
 const order = (

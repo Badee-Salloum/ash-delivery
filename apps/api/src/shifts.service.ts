@@ -600,6 +600,8 @@ export async function createShift(
     ordersHash: null,
     approvedBy: null,
     approvedAt: null,
+  managerCharge: minor(0n),
+  managerChargeReason: null,
   }
   try {
     await deps.shifts.create(shift, actor.userId)
@@ -3829,6 +3831,62 @@ export async function submitOperations(
  * put a row back — or take one out — without bouncing the shift or force-closing it. The state stays
  * `pending_review`, so the close gate still has to pass on its own afterwards.
  */
+/**
+ * Set or clear «الحسم» on a shift under review.
+ *
+ * Confined to `pending_review` by the same reasoning as every other close revision: before approval
+ * there is no immutable settlement snapshot to violate (decision 13) and no sealed week to reopen
+ * (BR7). After approval the charge is frozen with the rest of the close and a correction is a new,
+ * dated journal entry — never a rewrite.
+ *
+ * Deliberately NOT a cash deduction. See `packages/domain/src/settlement/statement.ts` and the test
+ * `deduction-cancels.test.ts`: a deduction is subtracted from the expected total AND the share, so
+ * for money still in the driver's hands at the count it inflates the variance by its own amount and
+ * decision 13 hands it straight back to him.
+ */
+export async function setManagerCharge(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: { amount: Minor; reason: string | null },
+): Promise<ShiftRecord> {
+  return deps.closeUnitOfWork.run({ shiftId, actorId: actor.userId }, async (transaction) => {
+    const scoped = withCloseTransaction(deps, transaction)
+    const shift = await mustFind(scoped, shiftId)
+    if (shift.state !== 'pending_review') throw new ServiceError(409, 'shift_not_under_review')
+
+    const grants = grantsFromRows(await scoped.directory.grants())
+    const decision = can(
+      actor,
+      'shift.approve',
+      { driverId: shift.driverId, branchId: shift.branchId, ownerUserId: null },
+      grants,
+    )
+    if (!decision.allowed) throw new ServiceError(403, 'forbidden')
+
+    if (input.amount < 0n) throw new ServiceError(422, 'invalid_manager_charge_amount')
+    const reason = input.reason === null ? null : input.reason.trim()
+    if (input.amount > 0n && (reason === null || reason === '')) {
+      throw new ServiceError(422, 'manager_charge_reason_required')
+    }
+
+    /*
+     * A charge may exceed the driver's whole share — damage costs what it costs — and the close
+     * already knows how to handle a negative employee figure: it becomes a collectible shortfall,
+     * or an ordinary receivable the manager may choose to leave outstanding. So there is no upper
+     * bound here beyond what the money type itself can carry.
+     */
+    const updated: ShiftRecord = {
+      ...shift,
+      managerCharge: input.amount,
+      // Cleared together, so the CHECK constraint's pairing can never be violated from this path.
+      managerChargeReason: input.amount === 0n ? null : reason,
+    }
+    await scoped.shifts.update(updated, actor.userId)
+    return updated
+  })
+}
+
 export async function reviseOperations(
   deps: Deps,
   actor: Actor,
@@ -4283,6 +4341,15 @@ export async function settlementFor(
     expectedWallet: br1.result.expectedWallet,
     actualCash: shift.endCashDeclared,
     actualWallet: shift.endWalletDeclared,
+    /*
+     * «الحسم» — read from the shift, not from the request.
+     *
+     * The preview, the ordinary approval and the exceptional close all reach this one function, so
+     * the charge is part of the calculation for all three by construction (decision 13: «Preview,
+     * ordinary approval, and exceptional close must use the same pure calculation»). Passing it in
+     * per-request instead would let a close post a charge the manager never previewed.
+     */
+    managerChargeTotal: shift.managerCharge,
   }
   const withoutDeferral = planFixedShareSettlement(settlementInputs)
   const maximumCashReceivable = withoutDeferral.cashClaimToOffice > 0n
@@ -4323,6 +4390,7 @@ export async function settlementFor(
     grossDriverShare: plan.grossDriverShare,
     cashDeductionTotal: plan.cashDeductionTotal,
     baseDriverShare: plan.baseDriverShare,
+    managerCharge: plan.managerChargeTotal,
     expectedCash: plan.expectedCash,
     expectedWallet: plan.expectedWallet,
     expectedTotal: plan.expectedTotal,
@@ -4494,6 +4562,7 @@ function settlementRecord(
     grossDriverShare: plan.grossDriverShare,
     cashDeductionTotal: plan.cashDeductionTotal,
     baseDriverShare: plan.baseDriverShare,
+    managerCharge: plan.managerChargeTotal,
     expectedTotal: plan.expectedTotal,
     actualCash: plan.actualCash,
     actualWallet: plan.actualWallet,

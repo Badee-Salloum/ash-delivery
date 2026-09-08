@@ -1784,6 +1784,7 @@ function assertSettlement(record: NewShiftSettlementRecord): void {
     record.walletReceivableDeferred,
     record.maximumCashShortageReceivable,
     record.cashShortageReceivable,
+    record.managerCharge,
   ]
   if (nonnegative.some((amount) => amount < 0n)) throw invalidSettlement('settlement magnitudes must be non-negative')
   if (record.fixedDriverShare !== (record.deliveryFeeTotal * 4_000n) / 10_000n) {
@@ -1803,8 +1804,17 @@ function assertSettlement(record: NewShiftSettlementRecord): void {
   }
   const direction = record.variance > 0n ? 'surplus' : record.variance < 0n ? 'shortage' : 'balanced'
   if (record.varianceDirection !== direction) throw invalidSettlement('variance direction disagrees with its sign')
-  if (record.finalEmployeeCash !== record.baseDriverShare + record.variance) {
-    throw invalidSettlement('final employee cash does not include the closing variance')
+  /*
+   * «الحسم» touches the employee's figure and the office's claim, and nothing else.
+   *
+   * `baseDriverShare` deliberately excludes it — he EARNED his share and paid the charge out of
+   * it, which is why the journal credits `other_income` instead of quietly swelling office_cash.
+   * These two identities are the in-memory twin of 0062's
+   * `shift_settlements_manager_charge_claim_ck`; if they ever drift apart, the fake passes a close
+   * that PostgreSQL would refuse.
+   */
+  if (record.finalEmployeeCash !== record.baseDriverShare + record.variance - record.managerCharge) {
+    throw invalidSettlement('final employee cash does not include the closing variance and the manager charge')
   }
   if (record.cashClaimToOffice !== record.actualCash - record.finalEmployeeCash) {
     throw invalidSettlement('cash claim does not equal actual cash less final employee cash')

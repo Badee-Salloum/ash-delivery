@@ -28,12 +28,14 @@ import {
   closeFiguresRequest,
   operationsRequest,
   reviseOperationsRequest,
+  setManagerChargeRequest,
   patchCloseDraftRequest,
   linkedCloseDraftReadRequest,
   restoreCloseDraftAttachmentRequest,
   scanDuplicateHintSchema,
   shiftFundingPreviewSchema,
 } from '@ash/contracts'
+import type { Minor } from '@ash/domain'
 import {
   add,
   addDays,
@@ -107,6 +109,7 @@ import {
   rejectClose,
   reviseCloseFigures,
   reviseOperations,
+  setManagerCharge,
   submitOperations,
   rejectOpen,
   reportIncident,
@@ -1820,6 +1823,14 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         grossDriverShare: serializeMoney(plan.grossDriverShare),
         cashDeductionTotal: serializeMoney(plan.cashDeductionTotal),
         baseDriverShare: serializeMoney(plan.baseDriverShare),
+        // A freshly computed plan names it `managerChargeTotal`; a stored snapshot names it
+        // `managerCharge`. Both are the same frozen figure, exactly like the five provenance
+        // fields below, which read the same way.
+        managerCharge: serializeMoney(
+          'managerChargeTotal' in plan
+            ? plan.managerChargeTotal
+            : (plan as { managerCharge?: Minor }).managerCharge ?? minor(0n),
+        ),
         expectedTotal: serializeMoney(plan.expectedTotal),
         actualCash: serializeMoney(plan.actualCash),
         actualWallet: serializeMoney(plan.actualWallet),
@@ -2134,6 +2145,47 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
    * its order. The shift stays `pending_review` and the close gate still has to pass afterwards.
    * Audited: every one of these moves BR1.
    */
+  /**
+   * «الحسم» — the amount a manager charges the employee at close.
+   *
+   * A PUT rather than a POST because it replaces the shift's whole charge: sending it twice leaves
+   * the same single figure, which is what its withdrawn predecessor got wrong by minting a new row
+   * per call. Clearing it is `amount: '0.00'`.
+   */
+  app.put(
+    '/shifts/:id/manager-charge',
+    { config: { permission: 'shift.approve', subject: shiftSubject } },
+    async (req) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const body = setManagerChargeRequest.parse(req.body)
+      const before = await deps.shifts.findById(id)
+      const shift = await setManagerCharge(deps, req.actor!, id, body)
+      await deps.audit.append({
+        tableName: 'shifts',
+        recordId: shift.id,
+        action: 'UPDATE',
+        actorId: req.actor!.userId,
+        actorKind: 'user',
+        branchId: shift.branchId,
+        requestId: req.requestId,
+        occurredAtMs: deps.clock.nowMs(),
+        before: before === null ? null : {
+          managerCharge: serializeMoney(before.managerCharge),
+          managerChargeReason: before.managerChargeReason,
+        },
+        after: {
+          managerCharge: serializeMoney(shift.managerCharge),
+          managerChargeReason: shift.managerChargeReason,
+        },
+      })
+      return {
+        id: shift.id,
+        managerCharge: serializeMoney(shift.managerCharge),
+        managerChargeReason: shift.managerChargeReason,
+      }
+    },
+  )
+
   app.post(
     '/shifts/:id/operations/revise',
     { config: { permission: 'shift.approve', subject: shiftSubject } },

@@ -46,6 +46,7 @@ function rowToSettlement(row: Record<string, unknown>): ShiftSettlementRecord {
     grossDriverShare: money('gross_driver_share_minor'),
     cashDeductionTotal: money('cash_deduction_total_minor'),
     baseDriverShare: money('base_driver_share_minor'),
+    managerCharge: money('manager_charge_minor'),
     expectedTotal: money('expected_total_minor'),
     actualCash: money('actual_cash_minor'),
     actualWallet: money('actual_wallet_minor'),

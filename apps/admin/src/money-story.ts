@@ -86,6 +86,7 @@ export type ShareStepCode =
   | 'deductions'
   | 'base'
   | 'variance'
+  | 'manager_charge'
   | 'takes'
 
 export interface ShareStep {
@@ -131,6 +132,13 @@ export function employeeShareChain(settlement: ShiftSettlementView): ShareStep[]
     amount: formatMinor(abs(variance)),
     direction: settlement.varianceDirection,
   })
+  /*
+   * «الحسم» comes off AFTER the variance, because that is the order the money actually moves in:
+   * the count settles what he is owed, and the charge is then paid out of it. Shown only when it
+   * is non-zero — a zero addend hides no fact.
+   */
+  const charge = parseMinor(settlement.managerCharge ?? '0')
+  if (charge !== 0n) steps.push({ code: 'manager_charge', amount: settlement.managerCharge ?? '0' })
   steps.push({ code: 'takes', amount: settlement.finalEmployeeCash, signed: true })
   return steps
 }
@@ -144,7 +152,10 @@ export function employeeShareChain(settlement: ShiftSettlementView): ShareStep[]
 export function shareChainReconciles(settlement: ShiftSettlementView): boolean {
   const gross = add(parseMinor(settlement.fixedDriverShare), parseMinor(settlement.manualDriverShare))
   const base = sub(gross, parseMinor(settlement.cashDeductionTotal))
-  const final = add(base, parseMinor(settlement.variance))
+  const final = sub(
+    add(base, parseMinor(settlement.variance)),
+    parseMinor(settlement.managerCharge ?? '0'),
+  )
   return (
     gross === parseMinor(settlement.grossDriverShare) &&
     base === parseMinor(settlement.baseDriverShare) &&

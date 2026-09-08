@@ -448,10 +448,12 @@ function assertCanonicalFixedShareSettlement(settlement: FixedShareSettlementPla
     cashReceivableDeferred: settlement.cashReceivableDeferred,
     walletReceivableDeferred: settlement.walletReceivableDeferred,
     cashShortageReceivable: settlement.cashShortageReceivable,
+    managerChargeTotal: settlement.managerChargeTotal,
   })
   const scalarFields = [
     'grossDriverShare',
     'baseDriverShare',
+    'managerChargeTotal',
     'expectedTotal',
     'actualTotal',
     'variance',
@@ -538,7 +540,16 @@ export function cashSettledReturnPostings(input: CashSettledReturnInput): Postin
   const cashAfterWallet = sub(settlement.expectedTotal, settlement.actualWallet)
   const payable = settlement.baseDriverShare > ZERO ? settlement.baseDriverShare : ZERO
   const receivable = settlement.baseDriverShare < ZERO ? abs(settlement.baseDriverShare) : ZERO
-  const cashClaimToOffice = sub(cashAfterWallet, settlement.baseDriverShare)
+  /*
+   * «الحسم» raises what the office collects without touching what the employee EARNED.
+   *
+   * `baseDriverShare` stays his earned share — he earned it — and the charge is money he pays out
+   * of it. Folding the charge into `baseDriverShare` instead would post a smaller
+   * `driver_share_payable` and let the extra cash land in `office_cash` unnamed, so the books would
+   * show the company holding more money for no stated reason. The credit below is that reason.
+   */
+  const managerCharge = settlement.managerChargeTotal
+  const cashClaimToOffice = add(sub(cashAfterWallet, settlement.baseDriverShare), managerCharge)
   if (cashClaimToOffice !== settlement.cashClaimToOffice) {
     throw new RangeError(
       `cash-settled claim disagrees with reviewed plan: ${cashClaimToOffice} vs ${settlement.cashClaimToOffice}`,
@@ -583,6 +594,21 @@ export function cashSettledReturnPostings(input: CashSettledReturnInput): Postin
         'cash_shortage_receivable',
       ),
     )
+  }
+  if (managerCharge > ZERO) {
+    /*
+     * The charge, as INCOME — not as a quietly larger cash box.
+     *
+     * `other_income` and deliberately not `company_revenue`: BR4 defines that account as the
+     * company's residual share of DELIVERY fees and `/dashboard/profit` reports it under that name,
+     * so booking damage recovered from a driver there would overstate the delivery business by
+     * exactly the charge. It is the same account a battery sale uses, for the same reason.
+     *
+     * This is also the line that makes the posting balance. The driver's full earned share still
+     * debits `driver_share_payable` while `office_cash` receives the charge on top, so without a
+     * credit of the same size the entry would be out by exactly `managerCharge`.
+     */
+    cashLines.push(C({ kind: 'other_income' }, managerCharge, 'manager_charge'))
   }
   signedLine(cashLines, { kind: 'office_cash' }, cashToOffice, 'cash_settlement')
   if (cashLines.length > 0) {

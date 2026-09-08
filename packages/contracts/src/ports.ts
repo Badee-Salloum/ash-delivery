@@ -462,6 +462,15 @@ export interface ShiftRecord {
   /** Wallet shift-funding consumed automatically at open without charging office_wallet twice. */
   carriedWalletTranches?: Minor[]
   /** Legacy projection: cash retained as funding auto-consumed when this driver opens his next shift. */
+  /**
+   * «الحسم» pending on this shift: a positive charge against the employee's close settlement.
+   *
+   * Lives here rather than in `shift_settlements` because it is set DURING review, before any
+   * snapshot exists. It is frozen into the settlement at approval like every other close figure.
+   */
+  managerCharge: Minor
+  /** Audited reason for the pending charge. Required by the database whenever the amount is non-zero. */
+  managerChargeReason: string | null
   keptAsReceivable: Minor
   /** «يُعاد للسائق» — the share he kept out of the cash in his hands (owner decision f). */
   driverSharePaid: Minor
@@ -2451,6 +2460,14 @@ export interface ShiftSettlementRecord {
   walletAmount: Minor
   cashAction: SettlementCashAction
   cashAmount: Minor
+  /**
+   * «الحسم» as frozen at approval: charged to the employee, credited to `other_income`.
+   *
+   * Reduces `finalEmployeeCash` and raises `cashClaimToOffice`. Deliberately does NOT reduce
+   * `baseDriverShare` — the driver earned his share and paid the charge out of it, so the journal
+   * names the money as income instead of quietly swelling the office cash box.
+   */
+  managerCharge: Minor
   reviewedOrdersHash: string
   /** sha256 over the complete canonical snapshot, including shift identity and policy. */
   settlementHash: string

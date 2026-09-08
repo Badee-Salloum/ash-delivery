@@ -64,6 +64,7 @@ const settlement = (overrides: Partial<NewShiftSettlementRecord> = {}): NewShift
   grossDriverShare: syp(40_000),
   cashDeductionTotal: syp(0),
   baseDriverShare: syp(40_000),
+  managerCharge: syp(0),
   expectedTotal: syp(230_000),
   actualCash: syp(240_000),
   actualWallet: syp(-10_000),
@@ -1092,7 +1093,8 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
               await tx.restorations.create({
                 branchId: BRANCH,
                 businessDate: '2026-07-21',
-                runNo: 1,
+                runNo: 1,
+
                 cashCountId: count.id,
                 plan: {
                   schemaVersion: 2,
@@ -1156,7 +1158,8 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
                 await tx.restorations.create({
                   branchId: BRANCH,
                   businessDate: '2026-07-22',
-                  runNo: 1,
+                  runNo: 1,
+
                 cashCountId: count.id,
                   plan: {
                     schemaVersion: 2,

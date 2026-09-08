@@ -609,6 +609,14 @@ export interface ShiftSettlementView {
   walletAmount: string
   cashAction: 'collect' | 'pay' | 'none'
   cashAmount: string
+  /**
+   * «الحسم» — a charge the manager made against the employee at close.
+   *
+   * Reduces `finalEmployeeCash` and raises `cashClaimToOffice`; deliberately NOT reflected in
+   * `baseDriverShare`, because he earned his share and paid the charge out of it. Optional so a
+   * page served during a rolling deploy against the previous API still renders.
+   */
+  managerCharge?: string
   settlementHash: string
   /*
    * WHO SIGNED IT, WHEN, AND WHY THE DIFFERENCE — present only on a settled shift.
@@ -1727,6 +1735,18 @@ export class ApiClient {
       `/shifts/${shiftId}/ocr/orders/evidence-reread`,
       body,
       { 'x-ash-orders-time-consensus': 'close-draft-v1' },
+    )
+  }
+
+  /**
+   * «الحسم» — set or clear the charge against the employee. `'0.00'` clears it.
+   *
+   * A REPLACEMENT: the request carries the shift's whole charge, so a retry is idempotent.
+   */
+  setManagerCharge(shiftId: string, body: { amount: string; reason: string | null }) {
+    return this.put<{ id: string; managerCharge: string; managerChargeReason: string | null }>(
+      `/shifts/${shiftId}/manager-charge`,
+      body,
     )
   }
 

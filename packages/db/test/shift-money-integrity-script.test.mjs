@@ -625,6 +625,9 @@ describe('read-only shift-money integrity checker', () => {
         grossDriverShare: 4_000n,
         cashDeductionTotal: 0n,
         baseDriverShare: 4_000n,
+        // Explicit: this file is .mjs, so nothing typechecks the hand-built plan and an omitted
+        // field would stringify to "undefined" and silently diverge from the real hash.
+        managerChargeTotal: 0n,
         expectedCash: 10_000n,
         expectedWallet: 2_000n,
         expectedTotal: 12_000n,

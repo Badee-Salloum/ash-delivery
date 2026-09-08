@@ -65,6 +65,7 @@ import {
   activeForcePreparation,
   deferralMatchesSettlement as deferralMatchesSettlementInputs,
   isNonnegativeSettlementMoney,
+  isPositiveMoneyInput,
   closeApprovalRequest,
   isKnownSettlementAction,
   settlementApprovalReady,
@@ -797,6 +798,30 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     refreshVisible()
   }
 
+  /**
+   * «الحسم». Mirrors `reviseOps`: one audited write, then a visible refresh.
+   *
+   * The refresh is not cosmetic. The charge moves `finalEmployeeCash`, `cashToOffice` and the
+   * settlement hash, so the two ticks the manager has already given belong to a settlement that no
+   * longer exists — `setSettlement` landing a new hash is what clears them.
+   */
+  async function setCharge(amount: string, reason: string | null): Promise<boolean> {
+    if (!review) return false
+    setBusy(true)
+    setError(null)
+    try {
+      await api.setManagerCharge(review.id, { amount, reason })
+      toast.success(t.approval.recomputed)
+      refreshVisible()
+      return true
+    } catch (err) {
+      setError((err as { error?: string }).error ?? 'error')
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function reviseOps(body: Record<string, unknown>): Promise<boolean> {
     if (!review) return false
     setBusy(true)
@@ -950,6 +975,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         onBack={onDone}
         onRefresh={refreshVisible}
         onRevise={reviseOps}
+        onSetManagerCharge={setCharge}
         onManagerRead={managerRead}
         onApprove={approve}
         onForceApprove={forceApprove}
@@ -1732,6 +1758,112 @@ function ClosingStatement({ settlement }: { settlement: SettlementView }): React
   )
 }
 
+/**
+ * «الحسم» — the amount a manager charges the employee at this close.
+ *
+ * PLACED INSIDE THE CLOSE WORKSPACE, and that is not incidental. Its withdrawn predecessor was
+ * rendered in the ordinary review JSX, which is only reached AFTER `if (isClose) return
+ * <CloseApprovalWorkspace/>` has already returned for `pending_review` — the exact state the form
+ * required. It was unreachable dead code: the feature shipped with no user interface at all, and
+ * nobody noticed because the money it moved was zero either way.
+ *
+ * It sits beside the settlement figures rather than with the operation rows, because it is not an
+ * operation. Nothing was scanned and nothing was counted; it is a decision about the settlement,
+ * and it belongs where the settlement is read.
+ */
+function ManagerChargeBox({
+  settlement,
+  disabled,
+  copy,
+  onSave,
+}: {
+  settlement: SettlementView
+  disabled: boolean
+  copy: ReturnType<typeof useApp>['t']['settlement']
+  onSave(amount: string, reason: string | null): Promise<boolean>
+}): ReactNode {
+  const applied = parseMinor(settlement.managerCharge ?? '0')
+  const [amount, setAmount] = useState(applied === 0n ? '' : (settlement.managerCharge ?? ''))
+  const [reason, setReason] = useState('')
+  const amountReady = isPositiveMoneyInput(amount)
+  const reasonReady = reason.trim() !== ''
+
+  return (
+    <div className="mt-3 rounded-xl border border-warning-line bg-warning-surface p-3">
+      <p className="text-sm font-extrabold text-warning-ink">{copy.chargeTitle}</p>
+      <p className="mt-1 text-label text-warning-ink">{copy.chargeHint}</p>
+
+      {applied > 0n ? (
+        <p className="mt-2 flex items-baseline justify-between gap-2 text-sm font-bold text-warning-ink">
+          <span>{copy.chargeApplied}</span>
+          <span dir="ltr" className="num">
+            <Money value={settlement.managerCharge ?? '0'} />
+          </span>
+        </p>
+      ) : null}
+
+      <label className="mt-3 flex flex-col gap-1 text-label font-bold text-warning-ink">
+        <span>{copy.chargeAmount}</span>
+        <MoneyInput
+          value={amount}
+          min="0"
+          disabled={disabled}
+          aria-invalid={amount.trim() !== '' && !amountReady}
+          onChange={(event) => setAmount(event.target.value)}
+          className="bg-surface-card"
+        />
+      </label>
+      <label className="mt-2 flex flex-col gap-1 text-label font-bold text-warning-ink">
+        <span>{copy.chargeReason}</span>
+        <TextInput
+          value={reason}
+          disabled={disabled}
+          placeholder={copy.chargeReasonPlaceholder}
+          onChange={(event) => setReason(event.target.value)}
+          className="bg-surface-card"
+        />
+      </label>
+      {/* Why the button is dead, in words. An `aria-invalid` outline tells a screen reader and
+          nobody else, and a 40%-opacity ghost is how a manager concludes the console is broken. */}
+      {amountReady && !reasonReady ? (
+        <p role="alert" className="mt-2 text-label font-semibold text-warning-ink">
+          {copy.chargeReasonRequired}
+        </p>
+      ) : null}
+      <div className="mt-2 flex flex-wrap gap-2">
+        <Button
+          variant="ghost"
+          disabled={disabled || !amountReady || !reasonReady}
+          onClick={() => {
+            void onSave(amount.trim(), reason.trim()).then((saved) => {
+              if (saved) setReason('')
+            })
+          }}
+        >
+          {copy.chargeSave}
+        </Button>
+        {applied > 0n ? (
+          <Button
+            variant="ghost"
+            disabled={disabled}
+            onClick={() => {
+              // Clearing needs no reason: removing a charge takes nothing from anyone.
+              void onSave('0.00', null).then((saved) => {
+                if (saved) {
+                  setAmount('')
+                  setReason('')
+                }
+              })
+            }}
+          >
+            {copy.chargeClear}
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
 interface CloseApprovalWorkspaceProps {
   review: Review
   who: { driver: string | null; vehicle: string | null }
@@ -1757,6 +1889,7 @@ interface CloseApprovalWorkspaceProps {
   onBack(): void
   onRefresh(): void
   onRevise(body: Record<string, unknown>): Promise<boolean>
+  onSetManagerCharge(amount: string, reason: string | null): Promise<boolean>
   onManagerRead(pkg: 'start' | 'end', batteryId: string, percent: number): Promise<void>
   onApprove(): Promise<void>
   onForceApprove(): Promise<void>
@@ -1794,6 +1927,7 @@ function CloseApprovalWorkspace({
   onBack,
   onRefresh,
   onRevise,
+  onSetManagerCharge,
   onManagerRead,
   onApprove,
   onForceApprove,
@@ -2251,6 +2385,15 @@ function CloseApprovalWorkspace({
                 {/* Decision 15, as a clause on the row it qualifies rather than a competing card. */}
                 <p className="mt-1 text-xs text-slate-500">{t.settlement.share.fromReturnedMoney}</p>
               </dl>
+            ) : null}
+
+            {settlement ? (
+              <ManagerChargeBox
+                settlement={settlement}
+                disabled={busy || refreshing}
+                copy={t.settlement}
+                onSave={onSetManagerCharge}
+              />
             ) : null}
 
             {settlement ? (

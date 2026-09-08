@@ -422,6 +422,7 @@ export async function seed(pool: Pool, opts: SeedOptions): Promise<{ br1Differen
     grossDriverShare: demo.settlement.grossDriverShare,
     cashDeductionTotal: demo.settlement.cashDeductionTotal,
     baseDriverShare: demo.settlement.baseDriverShare,
+    managerCharge: demo.settlement.managerChargeTotal,
     expectedTotal: demo.settlement.expectedTotal,
     actualCash: demo.settlement.actualCash,
     actualWallet: demo.settlement.actualWallet,

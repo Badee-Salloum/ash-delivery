@@ -55,6 +55,18 @@ export function isNonnegativeSettlementMoney(value: string): boolean {
   }
 }
 
+/**
+ * A charge box holds a POSITIVE decimal. Zero is not a charge — the server refuses it, and the
+ * button should never have been enabled to find that out. Clearing has its own explicit control.
+ */
+export function isPositiveMoneyInput(value: string): boolean {
+  try {
+    return value.trim() !== '' && parseMinor(value.trim()) > 0n
+  } catch {
+    return false
+  }
+}
+
 export interface SettlementDeferralInputs {
   cashReceivableDeferred: string
   walletReceivableDeferred: string

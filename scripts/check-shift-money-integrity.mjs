@@ -2231,7 +2231,9 @@ function fixedSettlementHashV3(context, plan) {
 /** Hash used by settlements confirmed after close-time ordinary shortage receivables launched. */
 function fixedSettlementHashV4(context, plan) {
   const canonical = {
-    version: 4,
+    // 5: «الحسم». See `apps/api/src/fixed-settlement.ts` — this reconstruction is deliberately an
+    // INDEPENDENT implementation, and the parity test is what keeps the two honest.
+    version: 5,
     policyCode: 'fixed_40_cash_close_v2_receivable',
     driverRateBps: 4_000,
     ...context,
@@ -2241,6 +2243,7 @@ function fixedSettlementHashV4(context, plan) {
     grossDriverShare: String(plan.grossDriverShare),
     cashDeductionTotal: String(plan.cashDeductionTotal),
     baseDriverShare: String(plan.baseDriverShare),
+    managerChargeTotal: String(plan.managerChargeTotal),
     expectedCash: String(plan.expectedCash),
     expectedWallet: String(plan.expectedWallet),
     expectedTotal: String(plan.expectedTotal),
@@ -2302,6 +2305,9 @@ export function canonicalSettlementHash(row) {
     grossDriverShare: bigintField(row, 'gross_driver_share_minor'),
     cashDeductionTotal: bigintField(row, 'cash_deduction_total_minor'),
     baseDriverShare,
+    // Absent on every row written before 0062, and zero is the whole truth for those: the
+    // instrument did not exist, so no historical close could have carried one.
+    managerChargeTotal: row.manager_charge_minor == null ? 0n : bigintField(row, 'manager_charge_minor'),
     expectedCash,
     expectedWallet,
     expectedTotal,
@@ -2310,7 +2316,8 @@ export function canonicalSettlementHash(row) {
     actualTotal: bigintField(row, 'actual_total_minor'),
     variance: bigintField(row, 'variance_minor'),
     finalEmployeeCash: bigintField(row, 'final_employee_cash_minor'),
-    officeEntitlement: expectedTotal - baseDriverShare,
+    officeEntitlement: expectedTotal - baseDriverShare
+      + (row.manager_charge_minor == null ? 0n : bigintField(row, 'manager_charge_minor')),
     cashClaimToOffice: row.cash_claim_to_office_minor == null
       ? bigintField(row, 'cash_to_office_minor')
       : bigintField(row, 'cash_claim_to_office_minor'),

@@ -373,6 +373,7 @@ if (!DATABASE_URL) {
         grossDriverShare: zero,
         cashDeductionTotal: zero,
         baseDriverShare: zero,
+        managerCharge: minor(0n),
         expectedTotal: zero,
         actualCash: zero,
         actualWallet: zero,

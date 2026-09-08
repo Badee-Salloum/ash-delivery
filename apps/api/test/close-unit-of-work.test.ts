@@ -298,6 +298,8 @@ async function clonePendingShift(harness: Harness, firstId: string, prefix: stri
     shiftNo: 2,
     approvedBy: null,
     approvedAt: null,
+  managerCharge: 0n as never,
+  managerChargeReason: null,
   }, 'u-d1')
 
   const sourceOrders = await harness.deps.orders.listByShift(firstId)

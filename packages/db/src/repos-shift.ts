@@ -170,7 +170,12 @@ export class PgShiftRepo implements ShiftRepo {
            battery_start_ocr = $24,
            end_wallet_declared_ocr_minor = $25,
            kept_as_receivable_minor = $26,
-           driver_share_paid_minor = $27
+           driver_share_paid_minor = $27,
+           -- «الحسم» is set and cleared freely while the shift is under review, so unlike the
+           -- write-once identity columns above it is an ordinary assignment. The CHECK constraint
+           -- refuses a non-zero amount without a reason, so the pair always moves together.
+           manager_charge_minor = $30,
+           manager_charge_reason = $31
          WHERE id = $1`,
         [
           shift.id,
@@ -202,6 +207,8 @@ export class PgShiftRepo implements ShiftRepo {
           shift.driverSharePaid.toString(),
           shift.windowOpensAt,
           shift.approvedAt,
+          String(shift.managerCharge),
+          shift.managerChargeReason,
         ],
       )
 
@@ -376,6 +383,8 @@ export class PgShiftRepo implements ShiftRepo {
       ordersHash: (r.orders_hash as string | null) ?? null,
       approvedBy: (r.approved_by as string | null) ?? null,
       approvedAt: r.approved_at == null ? null : (r.approved_at as Date).toISOString(),
+      managerCharge: minor(BigInt((r.manager_charge_minor as string | null) ?? '0')),
+      managerChargeReason: (r.manager_charge_reason as string | null) ?? null,
     }))
   }
 }

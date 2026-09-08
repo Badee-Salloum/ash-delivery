@@ -76,6 +76,8 @@ async function seedCountShift(
     ordersHash: null,
     approvedBy: null,
     approvedAt: null,
+  managerCharge: minor(0n),
+  managerChargeReason: null,
     ...overrides,
   }, null)
 }

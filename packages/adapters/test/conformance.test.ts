@@ -45,6 +45,8 @@ const conformanceShift = (): ShiftRecord => ({
   ordersHash: null,
   approvedBy: null,
   approvedAt: null,
+  managerCharge: minor(0n),
+  managerChargeReason: null,
 })
 
 // The same suite the PostgreSQL adapters must pass. If these two ever disagree, one is wrong.
