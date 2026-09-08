@@ -1443,6 +1443,9 @@ orderNo: 'Order no.',
     title: 'Live map',
     drivers: 'Drivers',
     none: 'No drivers are reporting a location right now',
+    // The fix's own age. The map used to print when the OFFICE received it, which made a
+    // half-hour-old position look thirty seconds old.
+    lastSeen: '{n} min ago',
   },
 
   checkin: {

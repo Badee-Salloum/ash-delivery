@@ -4,6 +4,7 @@ import 'leaflet/dist/leaflet.css'
 import type { GpsLiveDriver } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
+import { type GpsFreshness, gpsAgeMinutes, gpsFreshness } from '../gps-freshness.ts'
 import { Badge, Card } from '../ui.tsx'
 
 /**
@@ -21,6 +22,14 @@ interface DriverLite {
   fullNameEn: string | null
 }
 const DAMASCUS: [number, number] = [33.5138, 36.2765]
+
+/** Leaflet takes literal colours, so these cannot be theme tokens; they are the map's own ink. */
+const MARKER_PAINT: Record<GpsFreshness, { color: string; fillColor: string; fillOpacity: number }> = {
+  fresh: { color: '#1d4ed8', fillColor: '#3b82f6', fillOpacity: 0.9 },
+  recent: { color: '#b45309', fillColor: '#f59e0b', fillOpacity: 0.75 },
+  // Hollow: still where he last was, which is worth seeing — but not where he is.
+  stale: { color: '#64748b', fillColor: '#94a3b8', fillOpacity: 0.15 },
+}
 
 export function GpsLive(): ReactNode {
   const { api, t, lang, branchId } = useApp()
@@ -83,9 +92,16 @@ export function GpsLive(): ReactNode {
     for (const d of drivers) {
       const pt: [number, number] = [d.lat, d.lng]
       pts.push(pt)
-      L.circleMarker(pt, { radius: 8, color: '#1d4ed8', fillColor: '#3b82f6', fillOpacity: 0.9, weight: 2 })
+      /*
+       * The pin's colour IS its freshness, because a manager reads the map before he reads the
+       * list. A stale fix is drawn hollow and grey: it is still where the driver last was, which is
+       * worth seeing, but it must not look like where he is.
+       */
+      const age = gpsFreshness(Date.parse(d.capturedAt), Date.now())
+      const paint = MARKER_PAINT[age]
+      L.circleMarker(pt, { radius: 8, weight: 2, fillOpacity: paint.fillOpacity, color: paint.color, fillColor: paint.fillColor })
         .bindTooltip(driverName(d.driverId))
-        .bindPopup(`${driverName(d.driverId)}<br>${new Date(d.receivedAt).toLocaleTimeString()}`)
+        .bindPopup(`${driverName(d.driverId)}<br>${new Date(d.capturedAt).toLocaleTimeString()}`)
         .addTo(layer)
     }
     if (pts.length > 0 && mapRef.current) mapRef.current.fitBounds(L.latLngBounds(pts).pad(0.3), { maxZoom: 15 })
@@ -109,7 +125,15 @@ export function GpsLive(): ReactNode {
                   {d.lat.toFixed(5)}, {d.lng.toFixed(5)}
                 </span>
                 {d.accuracyM !== null ? <Badge tone="slate">±{Math.round(d.accuracyM)}m</Badge> : null}
-                <span className="num ms-auto text-xs text-slate-600">{new Date(d.receivedAt).toLocaleTimeString()}</span>
+                <span className="num ms-auto text-xs text-slate-600" dir="ltr">
+                  {new Date(d.capturedAt).toLocaleTimeString()}
+                </span>
+                {/* Named, not merely coloured: «قبل ٣٢ دقيقة» is the fact the old screen hid. */}
+                {gpsFreshness(Date.parse(d.capturedAt), Date.now()) !== 'fresh' ? (
+                  <Badge tone={gpsFreshness(Date.parse(d.capturedAt), Date.now()) === 'stale' ? 'danger' : 'warning'}>
+                    {t.gpsLive.lastSeen.replace('{n}', String(gpsAgeMinutes(Date.parse(d.capturedAt), Date.now())))}
+                  </Badge>
+                ) : null}
               </li>
             ))}
           </ul>

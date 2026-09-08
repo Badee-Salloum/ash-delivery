@@ -1486,6 +1486,9 @@ orderNo: 'رقم الطلب',
     title: 'الخريطة الحية',
     drivers: 'السائقون',
     none: 'لا سائق يبثّ موقعه الآن',
+    // The fix's own age. The map used to print when the OFFICE received it, which made a
+    // half-hour-old position look thirty seconds old.
+    lastSeen: 'قبل {n} دقيقة',
   },
 
   checkin: {
