@@ -44,7 +44,8 @@ describe('live GPS (SRS K)', () => {
     const gm = await h.loginAs('gm')
     const id = await toOpen(driver, manager)
 
-    const res = await post(driver, `/shifts/${id}/gps`, { lat: 33.5138, lng: 36.2765, accuracyM: 12, capturedAtMs: 1_000 })
+    const at = h.deps.clock.nowMs()
+    const res = await post(driver, `/shifts/${id}/gps`, { lat: 33.5138, lng: 36.2765, accuracyM: 12, capturedAtMs: at })
     expect(res.statusCode, res.body).toBe(202)
 
     // Stored, stamped with the server's receive time (not the phone's captured_at).
@@ -64,8 +65,9 @@ describe('live GPS (SRS K)', () => {
     const gm = await h.loginAs('gm')
     const id = await toOpen(driver, manager)
 
-    await post(driver, `/shifts/${id}/gps`, { lat: 33.5, lng: 36.2, accuracyM: null, capturedAtMs: 1_000 })
-    await post(driver, `/shifts/${id}/gps`, { lat: 33.6, lng: 36.3, accuracyM: null, capturedAtMs: 2_000 })
+    const at = h.deps.clock.nowMs()
+    await post(driver, `/shifts/${id}/gps`, { lat: 33.5, lng: 36.2, accuracyM: null, capturedAtMs: at - 60_000 })
+    await post(driver, `/shifts/${id}/gps`, { lat: 33.6, lng: 36.3, accuracyM: null, capturedAtMs: at })
 
     const live = (await get(gm, `/gps/live?branchId=${BRANCH}`)).json().drivers as LiveDriver[]
     expect(live.filter((x) => x.driverId === DRIVER_ID)).toHaveLength(1)
@@ -77,7 +79,7 @@ describe('live GPS (SRS K)', () => {
     const manager = await h.loginAs('manager')
     const gm = await h.loginAs('gm')
     const id = await toOpen(driver, manager)
-    await post(driver, `/shifts/${id}/gps`, { lat: 33.5, lng: 36.2, accuracyM: null, capturedAtMs: 1_000 })
+    await post(driver, `/shifts/${id}/gps`, { lat: 33.5, lng: 36.2, accuracyM: null, capturedAtMs: h.deps.clock.nowMs() })
 
     // While the shift is live he is on the map.
     let live = (await get(gm, `/gps/live?branchId=${BRANCH}`)).json().drivers as LiveDriver[]
@@ -97,7 +99,7 @@ describe('live GPS (SRS K)', () => {
     const manager = await h.loginAs('manager')
     const id = await toOpen(driver, manager) // driver1's shift
 
-    const res = await post(driver2, `/shifts/${id}/gps`, { lat: 1, lng: 1, capturedAtMs: 1 })
+    const res = await post(driver2, `/shifts/${id}/gps`, { lat: 1, lng: 1, capturedAtMs: h.deps.clock.nowMs() })
     expect(res.statusCode).toBe(403)
   })
 
@@ -106,10 +108,132 @@ describe('live GPS (SRS K)', () => {
     expect((await get(driver, '/gps/live')).statusCode).toBe(403)
   })
 
-  it('a BRANCH MANAGER is refused too — live tracking is an upper-level view', async () => {
-    // The owner's decision: a branch manager runs his branch from the shift screens, not by
-    // watching where each driver is standing. Enforced by the grant, not by hiding a menu item.
+  it('a BRANCH MANAGER sees his own branch — he is the one who dispatches', async () => {
+    /*
+     * Reverses the earlier «upper-level view» decision, on the owner's instruction of 2026-09-08.
+     * The branch manager is the person who actually sends a driver to a delivery, and a live map he
+     * cannot open is a dispatch tool with no dispatcher.
+     *
+     * It also restores SRS §3, which granted him this all along («التتبع الحي GPS | BM ✓ (فرعه)»).
+     */
+    const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
-    expect((await get(manager, '/gps/live')).statusCode).toBe(403)
+    const id = await toOpen(driver, manager)
+    await post(driver, `/shifts/${id}/gps`, {
+      lat: 33.5, lng: 36.2, accuracyM: null, capturedAtMs: h.deps.clock.nowMs(),
+    })
+
+    const res = await get(manager, '/gps/live')
+    expect(res.statusCode, res.body).toBe(200)
+    expect((res.json().drivers as LiveDriver[]).find((x) => x.driverId === DRIVER_ID)).toBeDefined()
+  })
+
+  it('…and only his own branch: naming another one is refused', async () => {
+    // The grant is `branch`, so the scope check — not a hidden menu item — is what stops him.
+    const manager = await h.loginAs('manager')
+    const res = await get(manager, '/gps/live?branchId=00000000-0000-4000-8000-0000000000ff')
+    expect(res.statusCode).toBe(403)
+  })
+
+  describe('a buffered uploader, which is what background tracking actually produces', () => {
+    it('accepts a batch, stores it in CAPTURE order, and counts what was new', async () => {
+      const driver = await h.loginAs('driver1')
+      const manager = await h.loginAs('manager')
+      const id = await toOpen(driver, manager)
+      const at = h.deps.clock.nowMs()
+
+      // Deliberately out of order, the way a phone that reconnects mid-flush sends them.
+      const res = await post(driver, `/shifts/${id}/gps`, {
+        source: 'phone_bg',
+        fixes: [
+          { lat: 33.52, lng: 36.30, accuracyM: 8, capturedAtMs: at - 30_000 },
+          { lat: 33.50, lng: 36.28, accuracyM: 9, capturedAtMs: at - 90_000 },
+          { lat: 33.51, lng: 36.29, accuracyM: 7, capturedAtMs: at - 60_000 },
+        ],
+      })
+      expect(res.statusCode, res.body).toBe(202)
+      expect(res.json()).toMatchObject({ accepted: 3, duplicates: 0, rejected: 0 })
+
+      /*
+       * The whole reason the trail reads by `captured_at`. A batch that arrives late must not sort
+       * after fixes it happened before — that zigzag is what inflates the measured distance, and
+       * the distance is a number a manager acts on.
+       */
+      const trail = await h.deps.gps.listForShift(id)
+      expect(trail.map((p) => p.capturedAtMs)).toEqual([at - 90_000, at - 60_000, at - 30_000])
+      expect(trail.map((p) => p.source)).toEqual(['phone_bg', 'phone_bg', 'phone_bg'])
+    })
+
+    it('a replayed batch stores nothing twice — the retry is free', async () => {
+      const driver = await h.loginAs('driver1')
+      const manager = await h.loginAs('manager')
+      const id = await toOpen(driver, manager)
+      const at = h.deps.clock.nowMs()
+      const batch = {
+        fixes: [
+          { lat: 33.5, lng: 36.2, accuracyM: 10, capturedAtMs: at - 20_000 },
+          { lat: 33.5, lng: 36.2, accuracyM: 10, capturedAtMs: at - 10_000 },
+        ],
+      }
+
+      expect((await post(driver, `/shifts/${id}/gps`, batch)).json()).toMatchObject({ accepted: 2 })
+      // The 202 that never reached the phone. It sends the same bytes again.
+      expect((await post(driver, `/shifts/${id}/gps`, batch)).json()).toMatchObject({
+        accepted: 0,
+        duplicates: 2,
+      })
+      expect(await h.deps.gps.countForShift(id)).toBe(2)
+    })
+
+    it('drops a fix from a broken clock without losing the rest of the batch', async () => {
+      const driver = await h.loginAs('driver1')
+      const manager = await h.loginAs('manager')
+      const id = await toOpen(driver, manager)
+      const at = h.deps.clock.nowMs()
+
+      const res = await post(driver, `/shifts/${id}/gps`, {
+        fixes: [
+          { lat: 33.5, lng: 36.2, accuracyM: 10, capturedAtMs: 1_000 }, // 1970
+          { lat: 33.5, lng: 36.2, accuracyM: 10, capturedAtMs: at + 7 * 24 * 60 * 60_000 }, // next week
+          { lat: 33.5, lng: 36.2, accuracyM: 10, capturedAtMs: at }, // the real one
+        ],
+      })
+      expect(res.json()).toMatchObject({ accepted: 1, rejected: 2 })
+    })
+
+    it('refuses a closed shift with 409 — the uploader’s only reliable stop signal', async () => {
+      /*
+       * A native service outlives the WebView, so JS may never get to call stop(). This status is
+       * what tells it to drop its buffer and shut down, and the client contract turns on it:
+       * 409 → clear and stop; a network error → keep and back off. Reverse the two and a phone
+       * hammers a closed shift every minute for weeks with nobody watching.
+       */
+      const driver = await h.loginAs('driver1')
+      const manager = await h.loginAs('manager')
+      const id = await toOpen(driver, manager)
+      expect((await post(manager, `/shifts/${id}/void`, { reason: 'stuck shift' })).statusCode).toBe(200)
+
+      const res = await post(driver, `/shifts/${id}/gps`, {
+        lat: 33.5, lng: 36.2, accuracyM: null, capturedAtMs: h.deps.clock.nowMs(),
+      })
+      expect(res.statusCode, res.body).toBe(409)
+      expect(res.json().error).toBe('shift_not_live')
+    })
+
+    it('still accepts the single-fix body an installed phone keeps sending', async () => {
+      // The driver PWA reaches a phone only when its driver taps «تحديث». Assuming otherwise is
+      // what let the 2026-08-24 close failures survive their own fix.
+      const driver = await h.loginAs('driver1')
+      const manager = await h.loginAs('manager')
+      const id = await toOpen(driver, manager)
+
+      const res = await post(driver, `/shifts/${id}/gps`, {
+        lat: 33.5138, lng: 36.2765, accuracyM: 12, capturedAtMs: h.deps.clock.nowMs(),
+      })
+      expect(res.statusCode, res.body).toBe(202)
+      const trail = await h.deps.gps.listForShift(id)
+      expect(trail).toHaveLength(1)
+      expect(trail[0]!.source).toBe('phone_fg')
+    })
   })
 })

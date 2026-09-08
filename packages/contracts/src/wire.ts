@@ -841,6 +841,31 @@ export const gpsPingRequest = z.object({
   capturedAtMs: z.number().int(),
 })
 
+/** Where a fix came from. `phone_fg` is the foreground beacon — see the 0063 column comment. */
+export const gpsSourceSchema = z.enum(['phone_fg', 'phone_bg', 'tracker']).default('phone_fg')
+
+/**
+ * A buffered run of fixes, which is what a background uploader actually produces.
+ *
+ * A phone with no signal keeps working and keeps its fixes; the batch is how they arrive when it
+ * comes back. 500 is roughly two hours at a fix every 15 s — long enough to ride out a dead zone,
+ * and about 45 KB, so the route's own `bodyLimit` refuses anything hostile before Zod ever runs.
+ */
+export const gpsBatchRequest = z.object({
+  fixes: z.array(gpsPingRequest).min(1).max(500),
+  source: gpsSourceSchema,
+})
+
+/**
+ * What the ingest route accepts.
+ *
+ * The batch shape is tried FIRST, and the single ping is kept forever rather than deprecated: the
+ * driver PWA is a separate bundle that reaches a phone only when its driver taps «تحديث», and
+ * assuming otherwise is what made the 2026-08-24 close failures survive their own fix. Phones in
+ * the field will post singles for weeks after this ships, and they must keep working.
+ */
+export const gpsIngestRequest = z.union([gpsBatchRequest, gpsPingRequest])
+
 // ── Fleet (SRS B) ─────────────────────────────────────────────────────────────────────────
 
 /** A driver's profile fields (B-1). `nationalId` is plaintext in transit (HTTPS); stored encrypted. */

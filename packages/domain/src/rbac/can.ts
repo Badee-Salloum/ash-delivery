@@ -105,10 +105,11 @@ export const DEFAULT_GRANTS: GrantTable = {
   'week.close': { system_admin: 'all' },
   'profit.view_total': { system_admin: 'all', general_manager: 'all' },
   'branch_data.view': { branch_manager: 'branch', system_admin: 'all', general_manager: 'all' },
-  // Live tracking is an UPPER-LEVEL view (owner's decision): the branch manager runs his branch from
-  // the shift screens, not by watching where each driver is standing. Removing the grant — rather
-  // than hiding the menu item — is what actually withholds it, since `GET /gps/live` checks this.
-  'gps.view': { system_admin: 'all', general_manager: 'all' },
+  // The branch manager is the one who actually dispatches, so he sees his own branch (owner,
+  // 2026-09-08). This RESTORES SRS §3, which granted him «التتبع الحي GPS ✓ (فرعه)» all along; the
+  // earlier «upper-level only» reading had been carried into the SRS transcription in
+  // `matrix.test.ts` as well, which is what quietly defeated that file's independent cross-check.
+  'gps.view': { branch_manager: 'branch', system_admin: 'all', general_manager: 'all' },
   'user.manage': { system_admin: 'all', general_manager: 'all' },
   'driver_earnings.view': {
     driver: 'own',

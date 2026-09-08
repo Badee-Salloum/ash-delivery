@@ -1938,13 +1938,38 @@ export class MemoryGpsPingRepo implements GpsPingRepo {
   private nextId = 1
 
   async append(ping: Omit<GpsPingRecord, 'id'>): Promise<void> {
-    this.rows.push({ ...ping, id: this.nextId++ })
+    await this.appendMany([ping])
   }
 
-  async latestPerDriverForBranch(branchId: string): Promise<GpsPingRecord[]> {
+  /**
+   * Mirrors `ON CONFLICT (shift_id, captured_at) DO NOTHING`, deliberately and exactly.
+   *
+   * Every API test runs against this class, so a divergence here is a rule CI proves and production
+   * does not have. The natural key is checked against rows already stored AND against earlier fixes
+   * in the same batch, because one INSERT statement in PostgreSQL behaves that way too.
+   */
+  async appendMany(pings: readonly Omit<GpsPingRecord, 'id'>[]): Promise<{ inserted: number }> {
+    const seen = new Set(this.rows.map((r) => `${r.shiftId}:${r.capturedAtMs}`))
+    let inserted = 0
+    for (const ping of pings) {
+      const key = `${ping.shiftId}:${ping.capturedAtMs}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      this.rows.push({ ...ping, id: this.nextId++ })
+      inserted += 1
+    }
+    return { inserted }
+  }
+
+  async latestForDriversInBranch(
+    branchId: string,
+    driverIds: readonly string[],
+    sinceMs: number,
+  ): Promise<GpsPingRecord[]> {
+    const wanted = new Set(driverIds)
     const latest = new Map<string, GpsPingRecord>()
     for (const r of this.rows) {
-      if (r.branchId !== branchId) continue
+      if (r.branchId !== branchId || !wanted.has(r.driverId) || r.receivedAtMs < sinceMs) continue
       const seen = latest.get(r.driverId)
       // Tie-break on id (insertion order) so a fixed clock still resolves the newest — the Pg repo
       // does the same with `ORDER BY received_at DESC, id DESC`.
@@ -1956,10 +1981,16 @@ export class MemoryGpsPingRepo implements GpsPingRepo {
   }
 
   async listForShift(shiftId: string): Promise<GpsPingRecord[]> {
+    // CAPTURE order, matching `ORDER BY captured_at ASC, id ASC`. Receive order corrupts a
+    // buffered trail: a late batch would sort after fixes it happened before.
     return this.rows
       .filter((r) => r.shiftId === shiftId)
-      .sort((a, b) => a.receivedAtMs - b.receivedAtMs || a.id - b.id)
+      .sort((a, b) => a.capturedAtMs - b.capturedAtMs || a.id - b.id)
       .map((r) => structuredClone(r))
+  }
+
+  async countForShift(shiftId: string): Promise<number> {
+    return this.rows.filter((r) => r.shiftId === shiftId).length
   }
 }
 

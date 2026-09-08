@@ -2507,14 +2507,46 @@ export interface GpsPingRecord {
   capturedAtMs: number
   /** Server receive time (ms), stamped by the clock — a skewed phone can't rewrite it. */
   receivedAtMs: number
+  /** Which capture layer produced it. See the 0063 column comment. */
+  source: GpsPingSource
 }
+
+export type GpsPingSource = 'phone_fg' | 'phone_bg' | 'tracker'
 
 export interface GpsPingRepo {
   append(ping: Omit<GpsPingRecord, 'id'>): Promise<void>
-  /** The most recent fix per driver in the branch — what the live map draws. */
-  latestPerDriverForBranch(branchId: string): Promise<GpsPingRecord[]>
-  /** A shift's whole trail, oldest first (for the route view). */
+  /**
+   * Insert a buffered run in one statement, ignoring fixes already stored.
+   *
+   * `(shift_id, captured_at)` is a natural key — two fixes at the same millisecond on one shift are
+   * physically meaningless — so a retried batch costs nothing and cannot duplicate a trail. Returns
+   * how many were actually new, which is what the route reports back so a client can log rather
+   * than guess.
+   */
+  appendMany(pings: readonly Omit<GpsPingRecord, 'id'>[]): Promise<{ inserted: number }>
+  /**
+   * The latest fix for each of the named drivers — what the live map draws.
+   *
+   * Takes the driver ids because the caller already knows who is live, and a seek per driver is
+   * O(drivers) forever. Its predecessor was `DISTINCT ON (driver_id)` over the whole branch, which
+   * does not skip: it reads every tuple the branch has ever written, so it degraded with history.
+   * `sinceMs` bounds it further — a fix older than that is not a live position, it is a memory.
+   */
+  latestForDriversInBranch(
+    branchId: string,
+    driverIds: readonly string[],
+    sinceMs: number,
+  ): Promise<GpsPingRecord[]>
+  /**
+   * A shift's whole trail, in CAPTURE order.
+   *
+   * Deliberately not receive order. Once anything buffers, a batch received at 14:00 holding fixes
+   * captured 12:00–13:00 sorts after fixes captured at 13:30 that arrived live — the trail zigzags
+   * and the summed distance inflates without bound. That number is one a manager acts on.
+   */
   listForShift(shiftId: string): Promise<GpsPingRecord[]>
+  /** How many fixes a shift has stored. Guards one wedged handset from filling the table. */
+  countForShift(shiftId: string): Promise<number>
 }
 
 /**

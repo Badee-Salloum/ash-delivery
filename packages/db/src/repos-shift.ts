@@ -2509,32 +2509,91 @@ export class PgGpsPingRepo implements GpsPingRepo {
   }
 
   async append(ping: Omit<GpsPingRecord, 'id'>): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO gps_pings (shift_id, driver_id, branch_id, lat, lng, accuracy_m, captured_at, received_at)
-       VALUES ($1,$2,$3,$4,$5,$6, to_timestamp($7::double precision / 1000), to_timestamp($8::double precision / 1000))`,
-      [ping.shiftId, ping.driverId, ping.branchId, ping.lat, ping.lng, ping.accuracyM, ping.capturedAtMs, ping.receivedAtMs],
-    )
+    await this.appendMany([ping])
   }
 
-  async latestPerDriverForBranch(branchId: string): Promise<GpsPingRecord[]> {
+  /**
+   * One statement for a whole buffered run, and a replay costs nothing.
+   *
+   * `ON CONFLICT DO NOTHING` against the natural key `(shift_id, captured_at)` is what makes the
+   * client's retry safe: a batch that was stored but whose 202 never arrived can be sent again
+   * verbatim. `rowCount` then tells the caller how many were genuinely new.
+   */
+  async appendMany(pings: readonly Omit<GpsPingRecord, 'id'>[]): Promise<{ inserted: number }> {
+    if (pings.length === 0) return { inserted: 0 }
+    const params: unknown[] = []
+    const tuples = pings.map((ping, index) => {
+      const base = index * 9
+      params.push(
+        ping.shiftId, ping.driverId, ping.branchId, ping.lat, ping.lng,
+        ping.accuracyM, ping.capturedAtMs, ping.receivedAtMs, ping.source,
+      )
+      return (
+        `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},` +
+        `to_timestamp($${base + 7}::double precision / 1000),` +
+        `to_timestamp($${base + 8}::double precision / 1000),$${base + 9})`
+      )
+    })
+    const { rowCount } = await this.pool.query(
+      `INSERT INTO gps_pings
+         (shift_id, driver_id, branch_id, lat, lng, accuracy_m, captured_at, received_at, source)
+       VALUES ${tuples.join(',')}
+       ON CONFLICT (shift_id, captured_at) DO NOTHING`,
+      params,
+    )
+    return { inserted: rowCount ?? 0 }
+  }
+
+  /**
+   * One index seek per live driver — flat forever, whatever the history.
+   *
+   * Its predecessor was `SELECT DISTINCT ON (driver_id) ... WHERE branch_id = $1`, which reads
+   * EVERY tuple the branch has ever written: `DISTINCT ON` does not skip ahead, so the cost of
+   * drawing ten dots grew with every ping ever stored. The lateral turns it into one seek per
+   * driver against `(branch_id, driver_id, received_at DESC)`.
+   */
+  async latestForDriversInBranch(
+    branchId: string,
+    driverIds: readonly string[],
+    sinceMs: number,
+  ): Promise<GpsPingRecord[]> {
+    if (driverIds.length === 0) return []
     const { rows } = await this.pool.query<Record<string, unknown>>(
-      `SELECT DISTINCT ON (driver_id) * FROM gps_pings
-       WHERE branch_id = $1 ORDER BY driver_id, received_at DESC, id DESC`,
-      [branchId],
+      `SELECT p.* FROM unnest($2::uuid[]) AS d(driver_id)
+         CROSS JOIN LATERAL (
+           SELECT * FROM gps_pings g
+            WHERE g.branch_id = $1
+              AND g.driver_id = d.driver_id
+              AND g.received_at >= to_timestamp($3::double precision / 1000)
+            ORDER BY g.received_at DESC, g.id DESC
+            LIMIT 1
+         ) p`,
+      [branchId, [...driverIds], sinceMs],
     )
     return rows.map(toGpsPing)
   }
 
   async listForShift(shiftId: string): Promise<GpsPingRecord[]> {
+    // CAPTURE order. See the port's note: receive order corrupts a buffered trail.
     const { rows } = await this.pool.query<Record<string, unknown>>(
-      'SELECT * FROM gps_pings WHERE shift_id = $1 ORDER BY received_at ASC, id ASC',
+      'SELECT * FROM gps_pings WHERE shift_id = $1 ORDER BY captured_at ASC, id ASC',
       [shiftId],
     )
     return rows.map(toGpsPing)
   }
+
+  async countForShift(shiftId: string): Promise<number> {
+    const { rows } = await this.pool.query<{ n: string }>(
+      'SELECT count(*)::text AS n FROM gps_pings WHERE shift_id = $1',
+      [shiftId],
+    )
+    return Number(rows[0]?.n ?? 0)
+  }
 }
 
 const toGpsPing = (r: Record<string, unknown>): GpsPingRecord => ({
+  // Older rows predate the column and default to the foreground beacon, which is what they were.
+  source: (r.source as GpsPingRecord['source'] | null) ?? 'phone_fg',
   id: Number(r.id),
   shiftId: String(r.shift_id),
   driverId: String(r.driver_id),

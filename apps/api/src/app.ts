@@ -7,7 +7,7 @@ import {
   addTrancheRequest,
   adjustCashFloatRequest,
   adjustWalletTopupRequest,
-  gpsPingRequest,
+  gpsIngestRequest,
   approveCloseRequest,
   forceCloseRequest,
   approveOpenRequest,
@@ -36,6 +36,7 @@ import {
   shiftFundingPreviewSchema,
 } from '@ash/contracts'
 import type { Minor } from '@ash/domain'
+import { isTracked } from '@ash/domain'
 import {
   add,
   addDays,
@@ -2321,28 +2322,91 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     },
   )
 
+  /*
+   * Ceilings for the GPS stream, named rather than buried.
+   *
+   * A ten-hour shift at a fix every 15 s is ~2,400 rows, so 20,000 is a wide margin over any honest
+   * day and still bounds what one wedged handset can cost. The live window is what «now» means to
+   * the map: older than this and a fix is a memory, not a position.
+   */
+  const MAX_GPS_PINGS_PER_SHIFT = 20_000
+  const GPS_LIVE_WINDOW_MS = 60 * 60_000
+
   // ── Live GPS (SRS K) — the driver's phone streams its location while the shift is open ────────
-  // Ingest: the driver's own shift (shift.operate). The server stamps received_at, so a skewed
-  // phone clock can't rewrite when the office actually saw him.
+  /*
+   * Ingest: the driver's own shift (shift.operate). The server stamps received_at, so a skewed
+   * phone clock can't rewrite when the office actually saw him.
+   *
+   * Accepts a BATCH or a single fix. The batch is what a background uploader actually produces —
+   * a phone with no signal keeps working and keeps its fixes — and the single shape is kept
+   * forever rather than deprecated, because the driver PWA reaches a phone only when its driver
+   * taps «تحديث». Assuming otherwise is what let the 2026-08-24 close failures survive their fix.
+   *
+   * `bodyLimit` refuses a hostile body in Fastify before Zod ever runs, the same way the two
+   * evidence-upload routes do.
+   */
   app.post(
     '/shifts/:id/gps',
-    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    {
+      bodyLimit: 256 * 1024,
+      config: { permission: 'shift.operate', subject: shiftSubject },
+    },
     async (req, reply) => {
       const { id } = z.object({ id: z.string() }).parse(req.params)
-      const body = gpsPingRequest.parse(req.body)
+      const body = gpsIngestRequest.parse(req.body)
+      const parsed = 'fixes' in body ? body : { fixes: [body], source: 'phone_fg' as const }
       const shift = await deps.shifts.findById(id)
       if (!shift) return reply.code(404).send({ error: 'shift_not_found' })
-      await deps.gps.append({
-        shiftId: shift.id,
-        driverId: shift.driverId,
-        branchId: shift.branchId,
-        lat: body.lat,
-        lng: body.lng,
-        accuracyM: body.accuracyM,
-        capturedAtMs: body.capturedAtMs,
-        receivedAtMs: deps.clock.nowMs(),
+
+      /*
+       * THE STOP SIGNAL. A native uploader outlives the WebView, so JS may never get the chance to
+       * call stop(); this 409 is the only thing that reliably tells it to drop its buffer and shut
+       * down. The client contract is exact and belongs in the same breath: 409 → clear and stop;
+       * network error → keep and back off. Reverse those two and a phone hammers a closed shift
+       * every minute for weeks with nobody watching.
+       *
+       * Everything inside a live shift is accepted, including `pending_review` — a driver standing
+       * at the counter through his close package is precisely the presence evidence we want.
+       * Clipping to the operation window is the distance function's job, not ingest's.
+       */
+      if (!isTracked(shift.state)) {
+        return reply.code(409).send({ error: 'shift_not_live', detail: { state: shift.state } })
+      }
+
+      // One wedged handset must not be able to fill the table. A count against the natural-key
+      // index costs microseconds at batch cadence.
+      const stored = await deps.gps.countForShift(shift.id)
+      if (stored >= MAX_GPS_PINGS_PER_SHIFT) {
+        return reply.code(429).send({ error: 'gps_shift_quota_exhausted', detail: { stored } })
+      }
+
+      const nowMs = deps.clock.nowMs()
+      // A fix from tomorrow or from last week is a broken clock, not a position. Dropped rather
+      // than refused, so one bad reading never costs the whole batch.
+      const usable = parsed.fixes.filter(
+        (fix) => fix.capturedAtMs <= nowMs + 5 * 60_000 && fix.capturedAtMs >= nowMs - 24 * 60 * 60_000,
+      )
+      // Sorted so IDENTITY runs in capture order, which keeps `captured_at ASC, id ASC` stable.
+      const ordered = [...usable].sort((a, b) => a.capturedAtMs - b.capturedAtMs)
+      const { inserted } = await deps.gps.appendMany(
+        ordered.map((fix) => ({
+          shiftId: shift.id,
+          driverId: shift.driverId,
+          branchId: shift.branchId,
+          lat: fix.lat,
+          lng: fix.lng,
+          accuracyM: fix.accuracyM,
+          capturedAtMs: fix.capturedAtMs,
+          receivedAtMs: nowMs,
+          source: parsed.source,
+        })),
+      )
+      return reply.code(202).send({
+        ok: true,
+        accepted: inserted,
+        duplicates: ordered.length - inserted,
+        rejected: parsed.fixes.length - usable.length,
       })
-      return reply.code(202).send({ ok: true })
     },
   )
   // The manager's live map: the latest fix per driver in the branch (gps.view — BM/GM/sysadmin).
@@ -2353,11 +2417,20 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     // on the map at his last-known spot forever (gps_pings is append-only). Keyed on the shift id, not
     // just the driver, so a stale ping from an already-ended shift is dropped even when the driver has
     // since opened a fresh one that has not pinged yet.
-    const [pings, liveShifts] = await Promise.all([
-      deps.gps.latestPerDriverForBranch(branchId),
-      deps.shifts.listLiveForBranch(branchId),
-    ])
+    const liveShifts = await deps.shifts.listLiveForBranch(branchId)
     const liveShiftByDriver = new Map(liveShifts.map((s) => [s.driverId, s.id]))
+    /*
+     * Ask for the drivers who are actually out, rather than scanning the branch's whole history.
+     *
+     * The window is generous on purpose: a fix older than it is not a live position but a memory,
+     * and the screen decides what counts as fresh — it now shows the CAPTURE time, so a stale pin
+     * announces its own staleness instead of borrowing the arrival time's credibility.
+     */
+    const pings = await deps.gps.latestForDriversInBranch(
+      branchId,
+      [...liveShiftByDriver.keys()],
+      deps.clock.nowMs() - GPS_LIVE_WINDOW_MS,
+    )
     return {
       drivers: pings
         .filter((p) => liveShiftByDriver.get(p.driverId) === p.shiftId)
@@ -2366,6 +2439,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           lat: p.lat,
           lng: p.lng,
           accuracyM: p.accuracyM,
+          source: p.source,
           capturedAt: new Date(p.capturedAtMs).toISOString(),
           receivedAt: new Date(p.receivedAtMs).toISOString(),
         })),
