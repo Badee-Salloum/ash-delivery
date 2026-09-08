@@ -1,0 +1,65 @@
+# Build the driver's Android shell.
+#
+# Manual only. This is not part of the PR gate: the shell changes rarely — a UI fix still ships by
+# web deploy and a driver tapping «تحديث», because the APK loads the deployed site rather than
+# bundling it — and an Android toolchain on every pull request would cost minutes to prove nothing.
+#
+# It also exists because nobody on this project has the Android SDK installed. The APK is produced
+# here, downloaded from the run, and sideloaded onto the handsets.
+name: android
+
+on:
+  workflow_dispatch:
+    inputs:
+      driverUrl:
+        description: 'Which deployment the shell loads'
+        required: true
+        default: 'https://ash-driver.vercel.app'
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: install capacitor
+        working-directory: android
+        run: npm install
+
+      # The platform is generated, never committed: `cap add android` writes a few thousand files
+      # that nobody would review and that cannot be verified without this toolchain. What the
+      # repository holds is only what we wrote — two Kotlin files, two string resources, an offline
+      # page and the script that places them.
+      - name: generate the android platform
+        working-directory: android
+        env:
+          ASH_DRIVER_URL: ${{ inputs.driverUrl }}
+        run: npx cap add android
+
+      - name: apply our native sources
+        working-directory: android
+        run: node apply-native.mjs
+
+      - name: assemble
+        working-directory: android/android
+        run: ./gradlew --no-daemon assembleDebug
+
+      # Debug-signed on purpose. These handsets are company property and the APK is sideloaded, so
+      # a release keystore would add a secret to manage and a signing identity to lose for no gain
+      # that anyone here would notice. Revisit if it ever goes near Play.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ash-driver-apk
+          path: android/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

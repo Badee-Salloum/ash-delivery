@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  What the driver reads on his own phone, for the whole of his shift.
+
+  Android requires a visible notification for a location foreground service, and that requirement
+  is exactly right here: a man is being followed while he works and he can see that he is, for as
+  long as it is happening. So these strings are written to be true and plain rather than reassuring
+  — «أثناء النوبة» is the promise, and the notification disappearing at close is the proof.
+
+  Arabic only: the driver app is Arabic-first and every driver on this fleet reads Arabic. The
+  English file exists so a future non-Arabic handset is not left with a raw key on its lock screen.
+-->
+<resources>
+  <string name="tracking_channel_name">تتبّع النوبة</string>
+  <string name="tracking_title">النوبة مفتوحة</string>
+  <string name="tracking_text">يُسجَّل موقعك أثناء النوبة، ويتوقّف عند إغلاقها.</string>
+</resources>

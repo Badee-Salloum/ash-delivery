@@ -54,6 +54,7 @@ import {
 } from '../close-draft-revision.ts'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
+import { syncNativeTracking } from '../native-tracker.ts'
 import { useGpsBeacon } from '../use-gps-beacon.ts'
 import { Button, Card, Field, Money, MoneyInput, Screen, TextInput } from '../ui.tsx'
 import { OperationsList } from './OrderEntry.tsx'
@@ -964,7 +965,20 @@ export function ShiftFlow({
   // Renders nothing. The driver was once shown a live «التتبع يعمل / متوقف» line and the owner
   // did not want the tracking state on his screen; the browser's own location prompt is his notice,
   // and consent was given. That decision is unchanged — only where the hook is called has moved.
-  useGpsBeacon(shift && serverState && TRACKED_SHIFT_STATES.has(serverState) ? shift.id : null)
+  const trackedShiftId = shift && serverState && TRACKED_SHIFT_STATES.has(serverState) ? shift.id : null
+  useGpsBeacon(trackedShiftId)
+
+  /*
+   * …and the Android shell's foreground service, driven by exactly the same condition.
+   *
+   * One source of truth for «is this shift being tracked», so the web beacon and the native service
+   * can never disagree about it. Stating the desired state on every change is safe: starting an
+   * already-running service just re-delivers the intent. In a browser or an installed PWA there is
+   * no plugin and this does nothing at all.
+   */
+  useEffect(() => {
+    void syncNativeTracking(trackedShiftId)
+  }, [trackedShiftId])
 
   const applyServerState = useCallback(
     (state: string): boolean => {

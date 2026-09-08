@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useApp } from './app-context.tsx'
 import { dropFixes, dropShift, enqueueFix, peekFixes, sweepOutbox } from './gps-outbox.ts'
+import { nativeTrackerAvailable } from './native-tracker.ts'
 
 /**
  * Live GPS beacon (SRS K).
@@ -30,17 +31,6 @@ const INTERVAL_MS = 15_000
 /** One request may carry this many buffered fixes — the server's own cap on a batch. */
 const FLUSH_MAX = 500
 
-/**
- * Whether a native capture layer is running in this shell.
- *
- * The Android app captures and uploads from a foreground service that outlives the WebView, so the
- * web beacon must not also capture: two layers writing the same shift would double the battery cost
- * to produce rows the server would then dedupe on `(shift_id, captured_at)` anyway.
- */
-function nativeCaptureActive(): boolean {
-  return (globalThis as { AshTracker?: { active?: boolean } }).AshTracker?.active === true
-}
-
 export function useGpsBeacon(shiftId: string | null): { tracking: boolean } {
   const { api } = useApp()
   const [tracking, setTracking] = useState(false)
@@ -50,7 +40,10 @@ export function useGpsBeacon(shiftId: string | null): { tracking: boolean } {
   useEffect(() => {
     if (shiftId === null) return
     if (typeof navigator === 'undefined' || !navigator.geolocation) return
-    if (nativeCaptureActive()) return
+    // The Android shell captures and uploads from a foreground service that outlives this
+    // WebView. Two layers writing the same shift would double the battery cost of a ride to
+    // produce rows the server then discards on `(shift_id, captured_at)`.
+    if (nativeTrackerAvailable()) return
     let stopped = false
     let wakeLock: WakeLockSentinel | null = null
 

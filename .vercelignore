@@ -33,3 +33,4 @@ tools/
 **/*.test.ts
 **/vitest.config.ts
 *.md
+android/
