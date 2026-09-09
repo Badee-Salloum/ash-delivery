@@ -34,8 +34,12 @@ import type { CapacitorConfig } from '@capacitor/cli'
 const config: CapacitorConfig = {
   appId: 'com.ashdelivery.driver',
   appName: 'ASH Delivery — السائق',
-  // Unused while `server.url` is set, but the CLI insists on a value.
-  webDir: 'unused',
+  /*
+   * Almost nothing: the app itself is loaded from `server.url`. This directory exists so the CLI
+   * has something to copy, and so `errorPath` below resolves against a real bundled file — the one
+   * page that must work when the network does not.
+   */
+  webDir: 'shell',
   android: {
     // The driver PWA is served over HTTPS; there is no reason to permit cleartext anywhere.
     allowMixedContent: false,

@@ -9,6 +9,13 @@
 name: android
 
 on:
+  # `workflow_dispatch` alone is not enough: GitHub only offers it once the workflow file is on the
+  # DEFAULT branch, and this lives on a feature branch. The push trigger is what makes the APK
+  # buildable today, and it is scoped so ordinary work never pays for an Android toolchain.
+  push:
+    paths:
+      - 'android/**'
+      - '.github/workflows/android.yml'
   workflow_dispatch:
     inputs:
       driverUrl:
@@ -29,7 +36,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - uses: android-actions/setup-android@v3
 
@@ -38,9 +45,8 @@ jobs:
         run: npm install
 
       # The platform is generated, never committed: `cap add android` writes a few thousand files
-      # that nobody would review and that cannot be verified without this toolchain. What the
-      # repository holds is only what we wrote — two Kotlin files, two string resources, an offline
-      # page and the script that places them.
+      # that nobody would review. What the repository holds is only what we wrote — three Java
+      # files, two string resources, an offline page and the script that places them.
       - name: generate the android platform
         working-directory: android
         env:

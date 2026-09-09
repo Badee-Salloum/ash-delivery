@@ -7,9 +7,13 @@
  * review and none of which could be verified on a machine without the Android SDK. Committing that
  * would be checking in a large binary-ish artefact and calling it source.
  *
- * So the repository holds only what is genuinely ours — two Kotlin files, two string resources, an
+ * So the repository holds only what is genuinely ours — three Java files, two string resources, an
  * offline page, and this script — and CI regenerates the rest from a pinned Capacitor version. What
  * a reviewer reads is exactly what we wrote.
+ *
+ * Java rather than Kotlin, deliberately: Capacitor's template ships no Kotlin plugin, and adding one
+ * drags in a Kotlin/AGP version matrix somebody would have to keep matched — on an Android surface
+ * of three files that will be opened once a year by people who are not Android developers.
  *
  * Everything below is IDEMPOTENT. It is run after every `cap add`/`cap sync`, and running it twice
  * must not produce two `<service>` elements or two permission lines.
@@ -27,7 +31,7 @@ if (!existsSync(main)) {
   process.exit(1)
 }
 
-// ── 1. our Kotlin, into the package Capacitor already made ──────────────────────────────────────
+// ── 1. our Java, into the package Capacitor already made ────────────────────────────────────────
 const javaTarget = join(main, 'java', 'com', 'ashdelivery', 'driver')
 mkdirSync(javaTarget, { recursive: true })
 cpSync(join(here, 'native', 'java', 'com', 'ashdelivery', 'driver'), javaTarget, { recursive: true })
@@ -39,12 +43,7 @@ for (const dir of ['values', 'values-en']) {
   copyFileSync(join(here, 'native', 'res', dir, 'strings_tracking.xml'), join(target, 'strings_tracking.xml'))
 }
 
-// ── 3. the offline page, which `server.errorPath` resolves against the bundled assets ────────────
-const assets = join(main, 'assets', 'public')
-mkdirSync(assets, { recursive: true })
-copyFileSync(join(here, 'offline.html'), join(assets, 'offline.html'))
-
-// ── 4. the manifest ─────────────────────────────────────────────────────────────────────────────
+// ── 3. the manifest ─────────────────────────────────────────────────────────────────────────────
 const manifestPath = join(main, 'AndroidManifest.xml')
 let manifest = readFileSync(manifestPath, 'utf8')
 
@@ -83,7 +82,7 @@ if (!manifest.includes('.TrackerService')) {
 
 writeFileSync(manifestPath, manifest)
 
-// ── 5. Play Services location, which `FusedLocationProviderClient` comes from ────────────────────
+// ── 4. Play Services location, which `FusedLocationProviderClient` comes from ────────────────────
 const gradlePath = join(platform, 'app', 'build.gradle')
 let gradle = readFileSync(gradlePath, 'utf8')
 const dependency = "    implementation 'com.google.android.gms:play-services-location:21.3.0'"
@@ -99,4 +98,4 @@ if (!gradle.includes('play-services-location')) {
   writeFileSync(gradlePath, gradle)
 }
 
-console.log('native sources applied: 2 Kotlin files, 2 string resources, offline page, manifest, gradle')
+console.log('native sources applied: 3 Java files, 2 string resources, manifest, gradle')
