@@ -97,6 +97,25 @@ describe('close pre-flight blockers', () => {
     expect(check.canClose).toBe(true)
   })
 
+  it('refuses a company week whose branch mirror does not cancel (C2)', () => {
+    const check = checkWeekClose(
+      clean({
+        companyClearing: [
+          { branchId: 'dam', companyBox: minor(7_905_726n), clearing: minor(-7_905_726n) },
+          { branchId: 'alp', companyBox: minor(500n), clearing: minor(-400n) },
+        ],
+      }),
+    )
+    expect(check.canClose).toBe(false)
+    expect(check.blockers).toEqual([
+      { kind: 'company_clearing_mismatch', branchId: 'alp', companyBox: 500n, clearing: -400n },
+    ])
+    expect(checkWeekClose(clean({ companyClearing: [] })).canClose).toBe(true)
+    expect(
+      checkWeekClose(clean({ companyClearing: [{ branchId: 'dam', companyBox: minor(0n), clearing: minor(0n) }] })).canClose,
+    ).toBe(true)
+  })
+
   it('refuses to close a week twice', () => {
     expect(checkWeekClose(clean({ alreadyClosed: true })).blockers).toContainEqual({ kind: 'already_closed' })
   })

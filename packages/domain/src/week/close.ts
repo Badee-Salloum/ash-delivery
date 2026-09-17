@@ -32,6 +32,16 @@ export interface WeekCloseFacts {
    * sum to zero and are still two broken books. Each non-zero currency is its own blocker.
    */
   readonly trialBalanceByCurrency?: readonly { readonly currency: Currency; readonly diff: Minor }[]
+  /**
+   * The company ledger only (C2): every branch that has been cut over, with its `company_box` and the
+   * company's `branch_clearing` for it. The two must sum to zero — the mirror invariant 0067 enforces
+   * at every COMMIT. The Sunday close checks it again, so a week never seals over a broken mirror.
+   */
+  readonly companyClearing?: readonly {
+    readonly branchId: string
+    readonly companyBox: Minor
+    readonly clearing: Minor
+  }[]
   /** Already closed? Closing twice must be a no-op, not a second seal. */
   readonly alreadyClosed: boolean
 }
@@ -44,6 +54,13 @@ export type CloseBlocker =
   | { readonly kind: 'provisional_fx'; readonly dates: readonly CalendarDate[] }
   | { readonly kind: 'prior_week_open' }
   | { readonly kind: 'trial_balance_not_zero'; readonly diff: Minor; readonly currency?: Currency }
+  /** A cut-over branch whose company_box and the company's clearing account do not cancel. */
+  | {
+      readonly kind: 'company_clearing_mismatch'
+      readonly branchId: string
+      readonly companyBox: Minor
+      readonly clearing: Minor
+    }
 
 export interface WeekCloseCheck {
   readonly weekStart: CalendarDate
@@ -91,6 +108,16 @@ export function checkWeekClose(facts: WeekCloseFacts): WeekCloseCheck {
     }
   } else if (!isZero(facts.trialBalanceDiff)) {
     blockers.push({ kind: 'trial_balance_not_zero', diff: facts.trialBalanceDiff })
+  }
+  for (const row of facts.companyClearing ?? []) {
+    if (row.companyBox + row.clearing !== 0n) {
+      blockers.push({
+        kind: 'company_clearing_mismatch',
+        branchId: row.branchId,
+        companyBox: row.companyBox,
+        clearing: row.clearing,
+      })
+    }
   }
 
   return {

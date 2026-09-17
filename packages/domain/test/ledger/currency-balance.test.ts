@@ -6,6 +6,7 @@ import {
   COMPANY_FUND_KINDS,
   MixedCurrencyPostingError,
   type Posting,
+  TWO_CURRENCY_EVENTS,
   UnbalancedPostingError,
   assertBalanced,
   currencyBalances,
@@ -62,10 +63,22 @@ describe('assertBalanced — per currency', () => {
     }
   })
 
-  it('refuses a balanced two-currency entry that is not an exchange', () => {
-    for (const eventType of ['manual', 'company_correction', 'company_deposit'] as const) {
+  it('refuses a balanced two-currency entry that is not an exchange or its reversal', () => {
+    // `company_correction` left this list in C2: the reversal of an exchange is a two-currency
+    // correction, and 0067 requires every company_correction to be the exact inverse of a command.
+    for (const eventType of ['manual', 'correction', 'company_deposit', 'company_expense'] as const) {
       expect(() => assertBalanced(exchange(100n, 13_000n, eventType))).toThrow(MixedCurrencyPostingError)
     }
+    expect(TWO_CURRENCY_EVENTS).toEqual(['company_fx_exchange', 'company_correction'])
+  })
+
+  it('accepts a balanced two-currency company_correction — an exchange taken back (C2)', () => {
+    const posting = exchange(100n, 13_000n, 'company_correction')
+    expect(assertBalanced(posting)).toBe(posting)
+    // Still balanced per currency, with no exception to THAT half of the rule.
+    const skewed = exchange(100n, 13_000n, 'company_correction')
+    const broken: Posting = { ...skewed, lines: [...skewed.lines.slice(0, 3), { ...skewed.lines[3]!, amount: m(12_999n) }] }
+    expect(() => assertBalanced(broken)).toThrow(UnbalancedPostingError)
   })
 
   it('accepts a four-line exchange whose sides differ in amount but each balance', () => {

@@ -398,7 +398,7 @@ export class MixedCurrencyPostingError extends Error {
   constructor(posting: Posting, currencies: readonly Currency[]) {
     super(
       `posting ${posting.eventType}/${posting.occurrenceKey} spans ${currencies.join(' + ')}; ` +
-        'only company_fx_exchange may span exactly two currencies',
+        'only company_fx_exchange (or its company_correction reversal) may span exactly two currencies',
     )
     this.name = 'MixedCurrencyPostingError'
     this.posting = posting
@@ -440,14 +440,25 @@ export function currencyBalances(posting: Posting): CurrencyBalance[] {
     })
 }
 
-/** Only an exchange may move two currencies at once — and never more than two. */
+/**
+ * The only events that may move two currencies at once — and never more than two.
+ *
+ * An exchange, and its reversal (C2). `company_correction` undoes a company command line for line,
+ * and the undo of a four-line exchange is itself a four-line, two-currency entry. Each currency still
+ * balances on its own — that part of the rule has no exception — and the database requires every
+ * `company_correction` to be the exact inverse of a reversible command (migration 0067), so a
+ * two-currency correction can only ever be an exchange taken back.
+ */
+export const TWO_CURRENCY_EVENTS = ['company_fx_exchange', 'company_correction'] as const satisfies readonly LedgerEvent[]
+
 const mayCrossCurrencies = (posting: Posting, currencies: number): boolean =>
-  currencies <= 1 || (currencies === 2 && posting.eventType === 'company_fx_exchange')
+  currencies <= 1 ||
+  (currencies === 2 && (TWO_CURRENCY_EVENTS as readonly LedgerEvent[]).includes(posting.eventType))
 
 /**
- * The balance rule the database enforces at COMMIT (0066's `assert_entry_balanced`), without the
- * throw: per currency, debits equal credits; and a posting spans two currencies only as an
- * exchange. `null` when the posting is sound. Shared by `assertBalanced` and both ledger adapters so
+ * The balance rule the database enforces at COMMIT (0066's `assert_entry_balanced`, widened by 0067),
+ * without the throw: per currency, debits equal credits; and a posting spans two currencies only as
+ * an exchange or its reversal. `null` when the posting is sound. Shared by `assertBalanced` and both ledger adapters so
  * the three can never disagree about what «balanced» means.
  */
 export function postingBalanceProblem(

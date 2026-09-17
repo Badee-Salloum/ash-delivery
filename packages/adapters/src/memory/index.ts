@@ -1419,7 +1419,7 @@ function assertMemoryPostingBalances(posting: Posting, sypMinorPerUsd: bigint | 
   }
   if (problem?.kind === 'mixed_currency') {
     throw new Error(
-      `posting ${posting.eventType} spans ${problem.currencies.join(' + ')}; only company_fx_exchange may span two currencies`,
+      `posting ${posting.eventType} spans ${problem.currencies.join(' + ')}; only company_fx_exchange (or its company_correction reversal) may span two currencies`,
     )
   }
   const hasUsd = posting.lines.some((line) => currencyOf(line.fund) === 'USD')
