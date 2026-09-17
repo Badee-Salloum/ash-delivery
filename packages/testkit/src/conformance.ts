@@ -14,8 +14,12 @@ import type {
 import type { JournalEntryRecord, LedgerRangeRecord } from '@ash/contracts'
 import { serializeMoney } from '@ash/contracts'
 import {
+  type Currency,
+  type FundRef,
   type Posting,
   cashSettledReturnPostings,
+  currencyOf,
+  fundCode,
   minor,
   planFixedShareSettlement,
   receivableAdjustment,
@@ -40,12 +44,28 @@ import {
  */
 
 export interface ConformanceContext {
-  /** A fresh, empty set of dependencies. Called before every test. */
+  /**
+   * A fresh, empty set of dependencies. Called before every test.
+   *
+   * The directory must hold exactly two rows: the operating branch `BRANCH` (DAM, kind `branch`) and
+   * the company row `COMPANY_BRANCH` (HQ, kind `company`, branch number 0) — what migration 0066 and
+   * `seedReferenceData` leave in a real database.
+   */
   makeDeps(): Promise<Deps> | Deps
   /** Optional teardown (close a pool, drop a schema). */
   cleanup?(deps: Deps): Promise<void> | void
+  /**
+   * Plant a fund row whose stored currency is `currency`, as a hand-written SQL insert could have
+   * left it — so the suite can prove both adapters refuse to post through a mismatched fund.
+   */
+  plantFund(deps: Deps, branchId: string, fund: { code: string; type: string; currency: Currency }): Promise<void>
   label: string
 }
+
+/** The company (HQ) row — the fixed id migration 0066 and `seedReferenceData` both write. */
+export const COMPANY_BRANCH = '10000000-0000-4000-8000-000000000100'
+/** The operating branch every conformance fixture uses. */
+export const CONFORMANCE_BRANCH = '11111111-1111-1111-1111-111111111111'
 
 const syp = (n: number) => minor(BigInt(n) * 100n)
 
@@ -141,6 +161,7 @@ const META = {
   postingDate: '2026-07-21',
   weekStartDate: '2026-07-19',
   fxDayId: 1,
+  sypMinorPerUsd: null,
   createdBy: USER,
 }
 
@@ -192,6 +213,7 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
             postingDate: record.businessDate,
             weekStartDate: '2026-07-19',
             fxDayId: 1,
+            sypMinorPerUsd: null,
             createdBy: USER,
             ...(record.varianceReason === null ? {} : { reason: record.varianceReason }),
           },
@@ -1129,10 +1151,12 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           expect(found!.id).toBe(written!.id)
           expect(found!.shiftId).toBeNull()
           expect(found!.reason).toBe('conformance receipt')
+          // Every line reports its fund's currency (0066); every branch fund is new lira.
           expect(found!.lines).toEqual([
-            { fundCode: 'company_box', side: 'D', amount: syp(2_500) },
-            { fundCode: 'cost_center:owner_funding', side: 'C', amount: syp(2_500) },
+            { fundCode: 'company_box', side: 'D', amount: syp(2_500), currency: 'SYP_NEW' },
+            { fundCode: 'cost_center:owner_funding', side: 'C', amount: syp(2_500), currency: 'SYP_NEW' },
           ])
+          expect(found!.sypMinorPerUsd).toBeNull()
 
           expect(await deps.ledger.findStandaloneEntry(BRANCH, 'manual', 'no-such-key')).toBeNull()
           expect(await deps.ledger.findStandaloneEntry(BRANCH, 'income', 'company-fund-receipt')).toBeNull()
@@ -1239,6 +1263,226 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           const huge = minor(9_007_199_254_740_993n)
           await deps.ledger.post(BRANCH, [transfer('1', huge)], META)
           expect(await deps.ledger.fundBalance(BRANCH, `driver_cash:${DRIVER}`)).toBe(huge)
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+    })
+
+    /**
+     * «صندوق الشركة» as its own ledger (C1). Both adapters must store every fund under the DOMAIN's
+     * code — there is one `fundCode` now, not three — report each line's currency from its fund,
+     * freeze the USD rate on the entry, and refuse the same malformed postings.
+     */
+    describe('company ledger foundation (C1)', () => {
+      const HQ_META = { ...META, shiftId: null, reason: 'company ledger conformance' }
+      const RATE = 13_050n
+      const cash = (currency: Currency) => ({ kind: 'company_cash', currency }) as const
+      const line = (fund: FundRef, side: 'D' | 'C', amount: bigint) => ({ fund, side, amount: minor(amount) })
+
+      const branchFunds: FundRef[] = [
+        { kind: 'office_cash' },
+        { kind: 'office_wallet' },
+        { kind: 'yalago_share' },
+        { kind: 'company_revenue' },
+        { kind: 'yalago_income' },
+        { kind: 'fee_earned' },
+        { kind: 'other_income' },
+        { kind: 'company_box' },
+        { kind: 'driver_cash', driverId: DRIVER },
+        { kind: 'driver_wallet', driverId: DRIVER },
+        { kind: 'driver_share_payable', driverId: DRIVER },
+        { kind: 'cost_center', costCenterId: 'owner_funding' },
+      ]
+      /** Every company kind but the clearing account, which moves only under its two events. */
+      const companyFunds = (currency: Currency): FundRef[] => [
+        { kind: 'company_cash', currency },
+        { kind: 'depreciation_reserve', currency },
+        { kind: 'company_fx_position', currency },
+        { kind: 'company_equity', currency, account: 'owner_funding' },
+        { kind: 'company_equity', currency, account: 'opening' },
+        { kind: 'company_expense', currency, centre: 'general' },
+        { kind: 'company_expense', currency, centre: `vehicle:${OTHER_VEHICLE}` },
+        { kind: 'company_expense', currency, centre: 'receivable_writeoff' },
+        { kind: 'company_income', currency, account: 'general' },
+        { kind: 'company_income', currency, account: 'payable_forgiven' },
+        { kind: 'company_payable', currency, debtId: ORDER_1 },
+        { kind: 'company_receivable', currency, debtId: ORDER_2 },
+        { kind: 'fixed_asset', currency, assetId: BATTERY },
+      ]
+      /** All debits but the last, one credit that balances them: no company pocket is ever lowered. */
+      const spread = (funds: FundRef[], unit: bigint): Posting['lines'] => {
+        const [first, ...rest] = funds
+        return [
+          ...rest.map((fund) => line(fund, 'D', unit)),
+          line(first!, 'C', unit * BigInt(rest.length)),
+        ]
+      }
+      const expectStored = (
+        stored: { lines: Array<{ fundCode: string; currency: Currency; side: 'D' | 'C'; amount: bigint }> },
+        posting: Posting,
+      ) => {
+        expect(stored.lines.map((l) => [l.fundCode, l.currency, l.side, l.amount])).toEqual(
+          posting.lines.map((l) => [fundCode(l.fund), currencyOf(l.fund), l.side, l.amount]),
+        )
+      }
+
+      it('lists only operating branches, and names the company row apart', async () => {
+        const deps = await fresh()
+        try {
+          const listed = await deps.directory.listBranches()
+          expect(listed.map((b) => [b.id, b.kind])).toEqual([[BRANCH, 'branch']])
+          const company = await deps.directory.companyBranch()
+          expect(company).toMatchObject({ id: COMPANY_BRANCH, kind: 'company', branchNo: 0, code: 'HQ' })
+          expect(await deps.directory.branch(COMPANY_BRANCH)).toMatchObject({ kind: 'company' })
+          expect(await deps.directory.branch(BRANCH)).toMatchObject({ kind: 'branch' })
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('stores every fund kind under the domain code, with its fund currency and the frozen rate', async () => {
+        const deps = await fresh()
+        try {
+          // A branch entry: every line new lira, no rate.
+          const branchEntry: Posting = { eventType: 'manual', occurrenceKey: 'c1-branch-kinds', lines: spread(branchFunds, 100n) }
+          const [branchWritten] = await deps.ledger.post(BRANCH, [branchEntry], HQ_META)
+          expectStored(branchWritten!, branchEntry)
+          expect(branchWritten!.sypMinorPerUsd).toBeNull()
+          expect(branchWritten!.lines.every((l) => l.currency === 'SYP_NEW')).toBe(true)
+
+          // The company ledger, in the order a real day would need: cutover, a dollar deposit, then
+          // an exchange that spends some of those dollars.
+          const cutover: Posting = {
+            eventType: 'company_opening_transfer',
+            occurrenceKey: 'c1-cutover',
+            lines: [
+              line(cash('SYP_NEW'), 'D', 7_905_726n),
+              line({ kind: 'branch_clearing', branchId: BRANCH }, 'C', 7_905_726n),
+            ],
+          }
+          const sypKinds: Posting = {
+            eventType: 'company_correction',
+            occurrenceKey: 'c1-syp-kinds',
+            lines: spread([{ kind: 'company_equity', currency: 'SYP_NEW', account: 'owner_drawings' }, ...companyFunds('SYP_NEW')], 100n),
+          }
+          const usdKinds: Posting = {
+            eventType: 'company_correction',
+            occurrenceKey: 'c1-usd-kinds',
+            lines: spread([{ kind: 'company_equity', currency: 'USD', account: 'owner_drawings' }, ...companyFunds('USD')], 10_000n),
+          }
+          const exchange: Posting = {
+            eventType: 'company_fx_exchange',
+            occurrenceKey: 'c1-exchange',
+            lines: [
+              line({ kind: 'company_fx_position', currency: 'USD' }, 'D', 5_000n),
+              line(cash('USD'), 'C', 5_000n),
+              line(cash('SYP_NEW'), 'D', 652_500n),
+              line({ kind: 'company_fx_position', currency: 'SYP_NEW' }, 'C', 652_500n),
+            ],
+          }
+
+          const [cutoverWritten] = await deps.ledger.post(COMPANY_BRANCH, [cutover], HQ_META)
+          const [sypWritten] = await deps.ledger.post(COMPANY_BRANCH, [sypKinds], HQ_META)
+          const [usdWritten] = await deps.ledger.post(COMPANY_BRANCH, [usdKinds], { ...HQ_META, sypMinorPerUsd: RATE })
+          const [exchangeWritten] = await deps.ledger.post(COMPANY_BRANCH, [exchange], {
+            ...HQ_META,
+            sypMinorPerUsd: 13_050n,
+          })
+          for (const [written, posting] of [
+            [cutoverWritten, cutover],
+            [sypWritten, sypKinds],
+            [usdWritten, usdKinds],
+            [exchangeWritten, exchange],
+          ] as const) {
+            expectStored(written!, posting)
+            // What was returned is what a reader gets back.
+            const found = await deps.ledger.findStandaloneEntry(COMPANY_BRANCH, posting.eventType, posting.occurrenceKey)
+            expectStored(found!, posting)
+            expect(found!.sypMinorPerUsd).toBe(written!.sypMinorPerUsd)
+          }
+          expect(cutoverWritten!.sypMinorPerUsd).toBeNull()
+          expect(sypWritten!.sypMinorPerUsd).toBeNull()
+          expect(usdWritten!.sypMinorPerUsd).toBe(RATE)
+          expect(exchangeWritten!.lines.map((l) => l.currency)).toEqual(['USD', 'USD', 'SYP_NEW', 'SYP_NEW'])
+
+          // Balances are per code, and the two pockets never mix.
+          expect(await deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:USD')).toBe(10_000n - 5_000n)
+          expect(await deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:SYP_NEW')).toBe(7_905_726n + 100n + 652_500n)
+          expect(await deps.ledger.fundBalance(COMPANY_BRANCH, `branch_clearing:${BRANCH}`)).toBe(-7_905_726n)
+          // The company ledger is not the branch's: nothing of it shows under DAM.
+          expect(await deps.ledger.fundBalance(BRANCH, 'company_cash:SYP_NEW')).toBe(0n)
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('refuses a USD line without a rate, a rate without a USD line, and currencies that do not balance', async () => {
+        const deps = await fresh()
+        try {
+          const deposit: Posting = {
+            eventType: 'company_deposit',
+            occurrenceKey: 'c1-refused',
+            lines: [
+              line(cash('USD'), 'D', 100n),
+              line({ kind: 'company_equity', currency: 'USD', account: 'owner_funding' }, 'C', 100n),
+            ],
+          }
+          await expect(deps.ledger.post(COMPANY_BRANCH, [deposit], HQ_META)).rejects.toThrow(/syp_minor_per_usd/)
+          const sypDeposit: Posting = {
+            ...deposit,
+            lines: [
+              line(cash('SYP_NEW'), 'D', 100n),
+              line({ kind: 'company_equity', currency: 'SYP_NEW', account: 'owner_funding' }, 'C', 100n),
+            ],
+          }
+          await expect(
+            deps.ledger.post(COMPANY_BRANCH, [sypDeposit], { ...HQ_META, sypMinorPerUsd: RATE }),
+          ).rejects.toThrow(/no USD line/)
+          const crossed: Posting = {
+            eventType: 'company_correction',
+            occurrenceKey: 'c1-crossed',
+            lines: [line(cash('USD'), 'D', 100n), line(cash('SYP_NEW'), 'C', 100n)],
+          }
+          await expect(
+            deps.ledger.post(COMPANY_BRANCH, [crossed], { ...HQ_META, sypMinorPerUsd: RATE }),
+          ).rejects.toThrow(/unbalanced/)
+          const balancedButMixed: Posting = {
+            eventType: 'company_correction',
+            occurrenceKey: 'c1-mixed',
+            lines: [
+              line(cash('USD'), 'D', 100n),
+              line({ kind: 'company_fx_position', currency: 'USD' }, 'C', 100n),
+              line(cash('SYP_NEW'), 'D', 13_050n),
+              line({ kind: 'company_fx_position', currency: 'SYP_NEW' }, 'C', 13_050n),
+            ],
+          }
+          await expect(
+            deps.ledger.post(COMPANY_BRANCH, [balancedButMixed], { ...HQ_META, sypMinorPerUsd: RATE }),
+          ).rejects.toThrow(/company_fx_exchange/)
+          expect(await deps.ledger.findStandaloneEntry(COMPANY_BRANCH, 'company_deposit', 'c1-refused')).toBeNull()
+          expect(await deps.ledger.findStandaloneEntry(COMPANY_BRANCH, 'company_correction', 'c1-mixed')).toBeNull()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('refuses to post through a fund whose stored currency disagrees with its reference', async () => {
+        const deps = await fresh()
+        try {
+          await ctx.plantFund(deps, COMPANY_BRANCH, { code: 'company_cash:USD', type: 'company_cash', currency: 'SYP_NEW' })
+          const deposit: Posting = {
+            eventType: 'company_deposit',
+            occurrenceKey: 'c1-mismatch',
+            lines: [
+              line(cash('USD'), 'D', 100n),
+              line({ kind: 'company_equity', currency: 'USD', account: 'owner_funding' }, 'C', 100n),
+            ],
+          }
+          await expect(
+            deps.ledger.post(COMPANY_BRANCH, [deposit], { ...HQ_META, sypMinorPerUsd: RATE }),
+          ).rejects.toMatchObject({ code: 'fund_currency_mismatch' })
+          expect(await deps.ledger.findStandaloneEntry(COMPANY_BRANCH, 'company_deposit', 'c1-mismatch')).toBeNull()
         } finally {
           await ctx.cleanup?.(deps)
         }

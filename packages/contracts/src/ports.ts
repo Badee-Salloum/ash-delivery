@@ -1,5 +1,6 @@
 import type {
   CalendarDate,
+  Currency,
   FxDay,
   Minor,
   OrderKind,
@@ -246,7 +247,15 @@ export interface BranchRecord {
   lat: number | null
   lng: number | null
   checkinRadiusM: number
+  /**
+   * `branch` for an operating branch. `company` for the ONE HQ row that holds the company ledger
+   * («صندوق الشركة», USD and SYP — migration 0066). Immutable. The HQ row is never listed as a branch,
+   * never created or edited through the branch screens, and never addressable by a branch permission.
+   */
+  kind: BranchKind
 }
+
+export type BranchKind = 'branch' | 'company'
 
 export interface VehicleTypeRecord {
   id: string
@@ -760,10 +769,16 @@ export interface JournalEntryRecord {
   postingDate: CalendarDate
   weekStartDate: CalendarDate
   fxDayId: number
+  /**
+   * The SYP-minor-per-USD rate frozen on an entry with a USD line (0066), and `null` on every other
+   * entry — every branch entry among them. Never re-read from `fx_days`, which is corrected in place.
+   */
+  sypMinorPerUsd: bigint | null
   weekLockId: number | null
   reason: string | null
   createdBy: string
-  lines: Array<{ fundCode: string; side: 'D' | 'C'; amount: Minor; role?: string }>
+  /** `currency` is the FUND's — a line has no currency of its own (0066). */
+  lines: Array<{ fundCode: string; side: 'D' | 'C'; amount: Minor; currency: Currency; role?: string }>
 }
 
 export interface WeekLockRecord {
@@ -1165,6 +1180,12 @@ export interface LedgerRepo {
       postingDate: CalendarDate
       weekStartDate: CalendarDate
       fxDayId: number
+      /**
+       * The rate frozen on the entry. REQUIRED, and `null` for everything that is not a USD company
+       * entry, so no caller can forget to decide. The database refuses a USD line without it and a
+       * rate without a USD line (0066); the memory adapter mirrors both.
+       */
+      sypMinorPerUsd: bigint | null
       createdBy: string
       reason?: string
     },
@@ -2369,7 +2390,10 @@ export interface CheckInRepo {
 
 export interface DirectoryRepo {
   branch(id: string): Promise<BranchRecord | null>
+  /** Operating branches only (`kind = 'branch'`). The company (HQ) row is never a branch to pick. */
   listBranches(): Promise<BranchRecord[]>
+  /** The single company (HQ) row that holds «صندوق الشركة», or null before it exists. */
+  companyBranch(): Promise<BranchRecord | null>
   /**
    * Where the branch is, for «التفقّد». A null point means no fence — and therefore no round any
    * manager can fail, which is the right behaviour for a branch nobody has placed on the map yet.

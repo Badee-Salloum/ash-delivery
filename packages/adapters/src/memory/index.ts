@@ -78,7 +78,21 @@ import {
   includedByOperationWindow,
   normalizeUsername,
 } from '@ash/contracts'
-import { type CalendarDate, type FxDay, type Minor, type Posting, hasVisibleText, isAwaitingDecision, isLive, minor } from '@ash/domain'
+import {
+  type CalendarDate,
+  type Currency,
+  type FundRef,
+  type FxDay,
+  type Minor,
+  type Posting,
+  currencyOf,
+  fundCode,
+  hasVisibleText,
+  isAwaitingDecision,
+  isLive,
+  minor,
+  postingBalanceProblem,
+} from '@ash/domain'
 import { memoryCipher } from '../crypto.ts'
 import { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 import { MemoryOcrReadRepo, MemoryOcrReader } from '../ocr/memory.ts'
@@ -1155,20 +1169,58 @@ export class MemoryLedgerRepo implements LedgerRepo {
    * never be wrong in.
    */
   private readonly seen = new Set<string>()
+  /**
+   * `funds.currency`, keyed `<branchId>|<code>` — the fake's copy of the fund rows `ensureFund`
+   * creates, so a code seen under two currencies is refused here exactly as PostgreSQL refuses it.
+   */
+  private readonly fundCurrencies = new Map<string, Currency>()
 
-  snapshotState(): { entries: JournalEntryRecord[]; seen: Set<string>; nextId: number } {
+  snapshotState(): {
+    entries: JournalEntryRecord[]
+    seen: Set<string>
+    nextId: number
+    fundCurrencies: Map<string, Currency>
+  } {
     return {
       entries: structuredClone(this.entries),
       seen: new Set(this.seen),
       nextId: this.nextId,
+      fundCurrencies: new Map(this.fundCurrencies),
     }
   }
 
-  restoreState(state: { entries: JournalEntryRecord[]; seen: Set<string>; nextId: number }): void {
+  restoreState(state: {
+    entries: JournalEntryRecord[]
+    seen: Set<string>
+    nextId: number
+    fundCurrencies: Map<string, Currency>
+  }): void {
     this.entries.splice(0, this.entries.length, ...structuredClone(state.entries))
     this.seen.clear()
     for (const key of state.seen) this.seen.add(key)
     this.nextId = state.nextId
+    this.fundCurrencies.clear()
+    for (const [key, currency] of state.fundCurrencies) this.fundCurrencies.set(key, currency)
+  }
+
+  /** The memory twin of `ensureFund`'s currency rule: refuse before anything is written. */
+  private assertFundCurrencies(branchId: string, posting: Posting): void {
+    for (const line of posting.lines) {
+      const code = fundCode(line.fund)
+      const currency = currencyOf(line.fund)
+      const stored = this.fundCurrencies.get(`${branchId}|${code}`)
+      if (stored !== undefined && stored !== currency) {
+        throw Object.assign(
+          new Error(`fund_currency_mismatch: fund ${code} is stored in ${stored}, the posting expects ${currency}`),
+          { code: 'fund_currency_mismatch' },
+        )
+      }
+    }
+  }
+
+  /** Test seam: a fund row as a hand-written SQL insert could have left it. */
+  setFundCurrency(branchId: string, code: string, currency: Currency): void {
+    this.fundCurrencies.set(`${branchId}|${code}`, currency)
   }
 
   async post(
@@ -1178,18 +1230,17 @@ export class MemoryLedgerRepo implements LedgerRepo {
   ): Promise<JournalEntryRecord[]> {
     const written: JournalEntryRecord[] = []
     for (const posting of postings) {
-      // Balance, exactly as the deferred constraint trigger does at COMMIT.
-      let d = 0n
-      let c = 0n
-      for (const l of posting.lines) {
-        if (l.side === 'D') d += l.amount
-        else c += l.amount
-      }
-      if (d !== c) throw new Error(`unbalanced posting ${posting.eventType}: D ${d} <> C ${c}`)
+      // Balance, exactly as the deferred constraint trigger does at COMMIT: per currency, two
+      // currencies only for an exchange, and a USD line exactly when a rate is frozen (0066).
+      assertMemoryPostingBalances(posting, meta.sypMinorPerUsd)
 
       const key = `${branchId}|${posting.eventType}|${meta.shiftId ?? ''}|${posting.occurrenceKey}`
       if (this.seen.has(key)) continue // idempotent replay: write nothing
+      this.assertFundCurrencies(branchId, posting)
       this.seen.add(key)
+      for (const line of posting.lines) {
+        this.fundCurrencies.set(`${branchId}|${fundCode(line.fund)}`, currencyOf(line.fund))
+      }
 
       const entry: JournalEntryRecord = {
         id: this.nextId++,
@@ -1201,13 +1252,15 @@ export class MemoryLedgerRepo implements LedgerRepo {
         postingDate: meta.postingDate,
         weekStartDate: meta.weekStartDate,
         fxDayId: meta.fxDayId,
+        sypMinorPerUsd: meta.sypMinorPerUsd,
         weekLockId: null,
         reason: meta.reason ?? null,
         createdBy: meta.createdBy,
         lines: posting.lines.map((l) => ({
-          fundCode: fundCodeOf(l.fund),
+          fundCode: fundCode(l.fund),
           side: l.side,
           amount: l.amount,
+          currency: currencyOf(l.fund),
           ...(l.role === undefined ? {} : { role: l.role }),
         })),
       }
@@ -1349,27 +1402,35 @@ export class MemoryTreasuryPositionSource implements TreasuryPositionSource {
   }
 }
 
-/** Stable fund identity, mirroring `funds.code` in the schema. */
-export function fundCodeOf(fund: Posting['lines'][number]['fund']): string {
-  switch (fund.kind) {
-    case 'driver_cash':
-    case 'driver_wallet':
-    case 'driver_share_payable':
-    // Same rule as the Pg repo and the domain: a ذمة is per driver, so it carries his id.
-    case 'driver_receivable_cash':
-    case 'driver_receivable_wallet':
-    case 'driver_shift_funding_cash':
-    case 'driver_shift_funding_wallet':
-      return `${fund.kind}:${fund.driverId}`
-    // Same rule again: per ADVANCE, because the party is free text. This is the third copy of this
-    // switch — the conformance suite compares the strings, which is what stops the three drifting.
-    case 'advance_receivable_cash':
-    case 'advance_receivable_wallet':
-      return `${fund.kind}:${fund.advanceId}`
-    case 'cost_center':
-      return `cost_center:${fund.costCenterId}`
-    default:
-      return fund.kind
+/**
+ * Stable fund identity, mirroring `funds.code` in the schema — the domain's `fundCode` under its
+ * historical name. This used to be the third copy of the switch; now there is one.
+ */
+export const fundCodeOf: (fund: FundRef) => string = fundCode
+
+/** The memory copy of `packages/db`'s `assertPostingBalances` — same rules, same messages. */
+function assertMemoryPostingBalances(posting: Posting, sypMinorPerUsd: bigint | null): void {
+  const problem = postingBalanceProblem(posting)
+  if (problem?.kind === 'unbalanced') {
+    throw new Error(
+      `unbalanced posting ${posting.eventType}: D ${problem.debits} <> C ${problem.credits}` +
+        (problem.currency === 'SYP_NEW' ? '' : ` in ${problem.currency}`),
+    )
+  }
+  if (problem?.kind === 'mixed_currency') {
+    throw new Error(
+      `posting ${posting.eventType} spans ${problem.currencies.join(' + ')}; only company_fx_exchange may span two currencies`,
+    )
+  }
+  const hasUsd = posting.lines.some((line) => currencyOf(line.fund) === 'USD')
+  if (hasUsd && sypMinorPerUsd === null) {
+    throw new Error(`posting ${posting.eventType} has a USD line but no frozen syp_minor_per_usd`)
+  }
+  if (!hasUsd && sypMinorPerUsd !== null) {
+    throw new Error(`posting ${posting.eventType} freezes a USD rate but has no USD line`)
+  }
+  if (sypMinorPerUsd !== null && sypMinorPerUsd <= 0n) {
+    throw new Error(`posting ${posting.eventType} freezes a non-positive rate ${sypMinorPerUsd}`)
   }
 }
 
@@ -1458,7 +1519,12 @@ export class MemoryDirectoryRepo implements DirectoryRepo {
     return this.branches.get(id) ?? null
   }
   async listBranches(): Promise<BranchRecord[]> {
-    return [...this.branches.values()].map((b) => ({ ...b }))
+    // Operating branches only — the company (HQ) row is not a branch anyone picks (C1).
+    return [...this.branches.values()].filter((b) => b.kind === 'branch').map((b) => ({ ...b }))
+  }
+  async companyBranch(): Promise<BranchRecord | null> {
+    const company = [...this.branches.values()].find((b) => b.kind === 'company')
+    return company ? { ...company } : null
   }
   async setBranchLocation(
     id: string,
@@ -1547,9 +1613,18 @@ export class MemoryDirectoryRepo implements DirectoryRepo {
   }
   async createBranch(branch: BranchRecord): Promise<void> {
     this.assertBranchNumberFree(branch)
+    // Mirrors branches_single_company_uq: one company row.
+    if (branch.kind === 'company' && [...this.branches.values()].some((b) => b.kind === 'company')) {
+      throw Object.assign(new Error('a company branch already exists'), { code: 'DUPLICATE_NUMBER' })
+    }
     this.branches.set(branch.id, { ...branch })
   }
   async updateBranch(branch: BranchRecord): Promise<void> {
+    // Mirrors branches_kind_immutable: the Pg UPDATE never writes `kind`, and the trigger refuses it.
+    const existing = this.branches.get(branch.id)
+    if (existing && existing.kind !== branch.kind) {
+      throw Object.assign(new Error(`branch ${branch.id} cannot change kind`), { code: 'BRANCH_KIND_IMMUTABLE' })
+    }
     this.assertBranchNumberFree(branch)
     this.branches.set(branch.id, { ...branch })
   }

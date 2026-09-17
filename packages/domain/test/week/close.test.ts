@@ -67,6 +67,36 @@ describe('close pre-flight blockers', () => {
     expect(check.blockers).toContainEqual({ kind: 'trial_balance_not_zero', diff: 1n })
   })
 
+  it('judges a multi-currency ledger per currency, one blocker for each that does not foot', () => {
+    // $1.00 up and 100 minor lira down sum to zero — and are two broken books.
+    const check = checkWeekClose(
+      clean({
+        trialBalanceDiff: minor(0n),
+        trialBalanceByCurrency: [
+          { currency: 'SYP_NEW', diff: minor(-100n) },
+          { currency: 'USD', diff: minor(100n) },
+        ],
+      }),
+    )
+    expect(check.canClose).toBe(false)
+    expect(check.blockers.filter((b) => b.kind === 'trial_balance_not_zero')).toEqual([
+      { kind: 'trial_balance_not_zero', diff: -100n, currency: 'SYP_NEW' },
+      { kind: 'trial_balance_not_zero', diff: 100n, currency: 'USD' },
+    ])
+  })
+
+  it('closes a multi-currency ledger whose every currency foots', () => {
+    const check = checkWeekClose(
+      clean({
+        trialBalanceByCurrency: [
+          { currency: 'SYP_NEW', diff: minor(0n) },
+          { currency: 'USD', diff: minor(0n) },
+        ],
+      }),
+    )
+    expect(check.canClose).toBe(true)
+  })
+
   it('refuses to close a week twice', () => {
     expect(checkWeekClose(clean({ alreadyClosed: true })).blockers).toContainEqual({ kind: 'already_closed' })
   })

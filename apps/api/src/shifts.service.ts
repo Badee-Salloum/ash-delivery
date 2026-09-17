@@ -1055,6 +1055,7 @@ async function approveOpenLocked(
       postingDate: todayFor(deps),
       weekStartDate: withFunds.weekStartDate,
       fxDayId,
+      sypMinorPerUsd: null,
       createdBy: actor.userId,
     },
   )
@@ -1486,6 +1487,7 @@ async function addTrancheLocked(
     postingDate: todayFor(deps),
     weekStartDate: shift.weekStartDate,
     fxDayId,
+    sypMinorPerUsd: null,
     createdBy: actor.userId,
   })
 
@@ -1746,6 +1748,7 @@ async function adjustWalletTopupLocked(
     postingDate: todayFor(deps),
     weekStartDate: shift.weekStartDate,
     fxDayId,
+    sypMinorPerUsd: null,
     createdBy: actor.userId,
     reason: auditReason,
   })
@@ -4693,6 +4696,7 @@ async function approveCloseLocked(
     postingDate: todayFor(deps),
     weekStartDate: shift.weekStartDate,
     fxDayId,
+    sypMinorPerUsd: null,
     createdBy: actor.userId,
     ...(varianceReason === null ? {} : { reason: varianceReason }),
   })
@@ -4791,6 +4795,7 @@ async function voidShiftLocked(
       postingDate: todayFor(deps),
       weekStartDate: shift.weekStartDate,
       fxDayId,
+      sypMinorPerUsd: null,
       createdBy: actor.userId,
       reason,
     })
@@ -5034,6 +5039,7 @@ async function forceCloseLocked(
     postingDate: todayFor(deps),
     weekStartDate: shift.weekStartDate,
     fxDayId,
+    sypMinorPerUsd: null,
     createdBy: actor.userId,
     reason: input.reason,
   })

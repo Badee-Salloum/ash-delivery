@@ -7,6 +7,11 @@ import type { Catalog } from './ar.ts'
 export const en: Catalog = {
   app: { title: 'ASH Delivery', tagline: 'Delivery & financial operations platform', updateAvailable: 'A new version is available', updateNow: 'Update' },
 
+  currency: {
+    SYP_NEW: 'SYP',
+    USD: '$',
+  },
+
   roles: {
     general_manager: 'General Manager',
     system_admin: 'System Admin',
@@ -161,6 +166,8 @@ export const en: Catalog = {
     company_fund_not_manual:
       'The company fund cannot be moved by a manual entry — use the company fund deposit or withdrawal (general manager and system admin only)',
     company_fund_forbidden: 'Only the general manager and the system admin may move the company fund',
+    invalid_fund_code: 'One of the lines names an account that does not exist — pick it from the list',
+    company_branch_not_addressable: 'The company fund is not a branch — it cannot be opened from branch screens',
     vehicle_type_not_found: 'Vehicle type not found — add it first',
     cross_branch_assignment: 'Driver and vehicle are in different branches',
     vehicle_in_another_branch: 'That vehicle is in another branch',

@@ -332,7 +332,17 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
   app.post('/branches', { config: { permission: 'settings.write' } }, async (req, reply) => {
     const body = createBranchRequest.parse(req.body)
     // No fence until someone sets one: a branch with no coordinates has no «تفقّد» to fail.
-    const branch: BranchRecord = { id: deps.ids.uuid(), timezone: 'Asia/Damascus', lat: null, lng: null, checkinRadiusM: 150, ...body }
+    // Always an operating branch: the company (HQ) row exists once, from migration 0066, and is never
+    // created through this screen. `kind` goes last so nothing in the body can override it.
+    const branch: BranchRecord = {
+      id: deps.ids.uuid(),
+      timezone: 'Asia/Damascus',
+      lat: null,
+      lng: null,
+      checkinRadiusM: 150,
+      ...body,
+      kind: 'branch',
+    }
     await createOrConflict(() => deps.directory.createBranch(branch), 'duplicate_branch')
     await audit(deps, req, 'branches', branch.id, 'INSERT', null, branch)
     return reply.code(201).send(branch)
@@ -342,7 +352,9 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
     const { id } = z.object({ id: z.string() }).parse(req.params)
     const body = updateBranchRequest.parse(req.body)
     const before = await deps.directory.branch(id)
-    if (!before) throw new ServiceError(404, 'branch_not_found')
+    // The company (HQ) row is not a branch: it has no number to edit and no name a screen should
+    // change. To this route it does not exist.
+    if (!before || before.kind !== 'branch') throw new ServiceError(404, 'branch_not_found')
 
     const after: BranchRecord = {
       ...before,

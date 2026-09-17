@@ -93,6 +93,7 @@ if (!DATABASE_URL) {
           postingDate: '2026-08-23',
           weekStartDate: '2026-08-23',
           fxDayId,
+          sypMinorPerUsd: null,
           createdBy: USER,
         },
       )

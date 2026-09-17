@@ -123,6 +123,12 @@ export function assertSeedAllowed(env: NodeJS.ProcessEnv, force = false): void {
 export const DAMASCUS_BRANCH = BRANCH
 
 /**
+ * The stable id of the company (HQ) row that holds «صندوق الشركة» (finance redesign C1). Fixed by
+ * migration 0066; `kind = 'company'`, branch number 0. Never a branch anyone picks or addresses.
+ */
+export const COMPANY_BRANCH = '10000000-0000-4000-8000-000000000100'
+
+/**
  * Reference data that EVERY environment needs — production included: the one branch, the five
  * roles, and the §3 permission matrix (from the domain's authoritative `ALL_PERMISSIONS` /
  * `DEFAULT_GRANTS`, so it can never drift from the RBAC the code enforces). No users, no fleet,
@@ -134,6 +140,17 @@ export async function seedReferenceData(pool: Pool): Promise<{ branchId: string 
      VALUES ($1,'DAM','دمشق','Damascus',(SELECT id FROM governorates WHERE no = 1),1)
      ON CONFLICT (code) DO NOTHING`,
     [BRANCH],
+  )
+  // «صندوق الشركة» — the company (HQ) row. Migration 0066 already inserts it; this mirrors that insert
+  // exactly (same fixed id, DAM's governorate, number 0) so a database whose company row was removed
+  // — a test harness that truncates `branches` — gets back the one the code expects.
+  await pool.query(
+    `INSERT INTO branches (id, code, name_ar, name_en, governorate_id, branch_no, kind)
+     SELECT $1, 'HQ', 'صندوق الشركة', 'Company', b.governorate_id, 0, 'company'
+       FROM branches b
+      WHERE b.code = 'DAM'
+     ON CONFLICT DO NOTHING`,
+    [COMPANY_BRANCH],
   )
 
   // Roles and the §3 permission matrix, stored as DATA (SRS A-2 requires it be editable).
@@ -405,6 +422,7 @@ export async function seed(pool: Pool, opts: SeedOptions): Promise<{ br1Differen
       postingDate: effectiveBusinessDate,
       weekStartDate: effectiveWeekStart,
       fxDayId,
+      sypMinorPerUsd: null,
       createdBy: U(3),
     },
   )

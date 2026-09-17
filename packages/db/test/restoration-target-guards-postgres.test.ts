@@ -121,6 +121,7 @@ const post = async (
     postingDate: DATE,
     weekStartDate: WEEK,
     fxDayId: Number(fx.rows[0]!.id),
+    sypMinorPerUsd: null,
     createdBy: fixture.managerId,
     reason,
   })

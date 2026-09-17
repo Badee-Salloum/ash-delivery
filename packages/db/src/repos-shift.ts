@@ -506,8 +506,20 @@ export class PgDirectoryRepo implements DirectoryRepo {
   }
 
   async listBranches(): Promise<BranchRecord[]> {
-    const { rows } = await this.pool.query<Record<string, unknown>>('SELECT * FROM branches ORDER BY code')
+    // Operating branches only. The company (HQ) row (0066) is not a branch anyone picks.
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      "SELECT * FROM branches WHERE kind = 'branch' ORDER BY code",
+    )
     return rows.map(toBranch)
+  }
+
+  async companyBranch(): Promise<BranchRecord | null> {
+    // `branches_single_company_uq` guarantees at most one.
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      "SELECT * FROM branches WHERE kind = 'company'",
+    )
+    const r = rows[0]
+    return r ? toBranch(r) : null
   }
 
   async branch(id: string): Promise<BranchRecord | null> {
@@ -737,9 +749,9 @@ export class PgDirectoryRepo implements DirectoryRepo {
     await this.uniqueOr(
       () =>
         this.pool.query(
-          `INSERT INTO branches (id, code, name_ar, name_en, timezone, governorate_id, branch_no)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-          [b.id, b.code, b.nameAr, b.nameEn, b.timezone, b.governorateId, b.branchNo],
+          `INSERT INTO branches (id, code, name_ar, name_en, timezone, governorate_id, branch_no, kind)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+          [b.id, b.code, b.nameAr, b.nameEn, b.timezone, b.governorateId, b.branchNo, b.kind],
         ),
       `branch ${b.code} or number ${b.branchNo} is taken`,
     )
@@ -973,6 +985,7 @@ const toBranch = (r: Record<string, unknown>): BranchRecord => ({
   lat: r.lat === null || r.lat === undefined ? null : Number(r.lat),
   lng: r.lng === null || r.lng === undefined ? null : Number(r.lng),
   checkinRadiusM: r.checkin_radius_m === undefined ? 150 : Number(r.checkin_radius_m),
+  kind: r.kind === 'company' ? 'company' : 'branch',
 })
 
 const toGovernorate = (r: Record<string, unknown>): GovernorateRecord => ({

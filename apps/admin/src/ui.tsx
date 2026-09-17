@@ -1,5 +1,7 @@
 import { type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, useId } from 'react'
 import { groupThousands } from '@ash/client'
+import type { Currency } from '@ash/domain'
+import { useApp } from './app-context.tsx'
 
 /** Admin console primitives — desktop/tablet, denser than the driver app, logical properties only. */
 
@@ -49,11 +51,47 @@ export function Wordmark({ size = 34 }: { size?: number }): ReactNode {
   )
 }
 
-export function Money({ value, className = '' }: { value: string; className?: string }): ReactNode {
+export function Money({
+  value,
+  className = '',
+  currency,
+}: {
+  value: string
+  className?: string
+  /**
+   * Say which currency the figure is in — «ل.س» or «$». Omitted, the figure is shown bare, as every
+   * branch screen always has: the branch ledger is new lira only. «صندوق الشركة» holds dollars too
+   * (C1), and there a bare number is ambiguous, so its screens pass this.
+   */
+  currency?: Currency
+}): ReactNode {
   // GROUPED. Seven-digit figures were read by counting zeros — «1500000.00» against «150000.00» —
   // at the moment a manager decides whether a shift balances. Display only: the wire string the
   // caller holds is untouched, and every parse still happens on that.
-  return <span className={`num ${className}`}>{groupThousands(value)}</span>
+  if (currency === undefined) return <span className={`num ${className}`}>{groupThousands(value)}</span>
+  return (
+    <span className={`num ${className}`}>
+      {groupThousands(value)}
+      <CurrencyMark currency={currency} />
+    </span>
+  )
+}
+
+/** The currency mark, from the catalog (`currency.SYP_NEW` / `currency.USD`). */
+function CurrencyMark({ currency }: { currency: Currency }): ReactNode {
+  const { t } = useApp()
+  return <span className="ms-1 text-[0.85em] font-normal text-ink-muted">{t.currency[currency]}</span>
+}
+
+/** An amount that carries its currency on the wire: `{ currency, amount }`. */
+export function CurrencyMoney({
+  value,
+  className = '',
+}: {
+  value: { currency: Currency; amount: string }
+  className?: string
+}): ReactNode {
+  return <Money value={value.amount} currency={value.currency} className={className} />
 }
 
 export function Button({

@@ -1,4 +1,5 @@
 import { type Minor, isZero } from '../money/minor.ts'
+import type { Currency } from '../money/currency.ts'
 import { type CalendarDate, addDays, dayOfWeek, weekClosedOn } from '../time/civil.ts'
 
 /**
@@ -25,6 +26,12 @@ export interface WeekCloseFacts {
   readonly priorWeekClosed: boolean
   /** Σ debits − Σ credits over the week. Must be exactly zero. */
   readonly trialBalanceDiff: Minor
+  /**
+   * The same difference PER CURRENCY, for a ledger that holds more than one (the company ledger, C1).
+   * When given it replaces `trialBalanceDiff`: a dollar surplus and a lira deficit of the same digits
+   * sum to zero and are still two broken books. Each non-zero currency is its own blocker.
+   */
+  readonly trialBalanceByCurrency?: readonly { readonly currency: Currency; readonly diff: Minor }[]
   /** Already closed? Closing twice must be a no-op, not a second seal. */
   readonly alreadyClosed: boolean
 }
@@ -36,7 +43,7 @@ export type CloseBlocker =
   | { readonly kind: 'missing_cash_counts'; readonly dates: readonly CalendarDate[] }
   | { readonly kind: 'provisional_fx'; readonly dates: readonly CalendarDate[] }
   | { readonly kind: 'prior_week_open' }
-  | { readonly kind: 'trial_balance_not_zero'; readonly diff: Minor }
+  | { readonly kind: 'trial_balance_not_zero'; readonly diff: Minor; readonly currency?: Currency }
 
 export interface WeekCloseCheck {
   readonly weekStart: CalendarDate
@@ -78,7 +85,11 @@ export function checkWeekClose(facts: WeekCloseFacts): WeekCloseCheck {
     blockers.push({ kind: 'provisional_fx', dates: facts.provisionalFxDays })
   }
   if (!facts.priorWeekClosed) blockers.push({ kind: 'prior_week_open' })
-  if (!isZero(facts.trialBalanceDiff)) {
+  if (facts.trialBalanceByCurrency !== undefined) {
+    for (const { currency, diff } of facts.trialBalanceByCurrency) {
+      if (!isZero(diff)) blockers.push({ kind: 'trial_balance_not_zero', diff, currency })
+    }
+  } else if (!isZero(facts.trialBalanceDiff)) {
     blockers.push({ kind: 'trial_balance_not_zero', diff: facts.trialBalanceDiff })
   }
 

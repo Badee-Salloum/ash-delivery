@@ -29,6 +29,7 @@ const meta = {
   postingDate: '2026-08-23' as const,
   weekStartDate: '2026-08-23' as const,
   fxDayId: 1,
+  sypMinorPerUsd: null,
   createdBy: USER,
 }
 
