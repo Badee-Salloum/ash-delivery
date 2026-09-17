@@ -51,6 +51,7 @@ const MUST_AUDIT = [
   // Purchase price, financing link and schedule are financial facts; the deterministic schedule
   // rows themselves are immutable derived data and are exempted below.
   'fixed_assets',
+  'depreciation_transfers', 'depreciation_releases',
   // A manager declaring that a row is not a delivery at all removes a fee from the shift's money.
   // The register is append-only and can only be added to, but «who removed what, and when did the
   // general manager get told» is precisely a money decision — and the audit row is the second,
@@ -92,6 +93,8 @@ const AUDIT_EXEMPT = {
   vehicle_events: 'append-only life log; is itself the audit trail (B-2)',
   asset_depreciation_schedule:
     'deterministic immutable rows derived from an audited fixed asset; a deferred trigger proves all 36 sum to price',
+  depreciation_allocations:
+    'deterministic immutable FIFO detail of an audited reserve transfer; deferred guards prove it totals the parent',
   assignments: 'covered by the audited shift it produces',
   shift_decisions: 'append-only decision log; is itself the audit trail (C-7)',
   cash_count_lines: 'sealed with a sha256 proof on the parent cash_count',
