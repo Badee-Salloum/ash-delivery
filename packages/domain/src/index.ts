@@ -33,3 +33,6 @@ export * from './time/range.ts'
 export * from './reporting/profit.ts'
 export * from './reporting/treasury-flow.ts'
 export * from './reporting/ledger-range.ts'
+
+// P3 — kilometres per shift, behind the dashboard's fleet table (P6 extends it).
+export * from './fleet/odometer.ts'

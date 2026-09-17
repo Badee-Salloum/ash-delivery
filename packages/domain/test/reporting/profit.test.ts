@@ -9,7 +9,9 @@ import {
   isProfitCost,
   isUuid,
   netProfit,
+  signedCost,
   totalCost,
+  vehicleIdOfCostLine,
 } from '../../src/reporting/profit.ts'
 
 const VEHICLE_UUID = '3f2b8c1e-4d5a-4b6c-9d7e-8f9a0b1c2d3e'
@@ -155,5 +157,71 @@ describe('profit totals', () => {
   it('only the three cost classes are costs', () => {
     const all: Array<ProfitLineClass | null> = ['company', 'other_income', 'yalago', 'operating_cost', 'vehicle_cost', 'loss', null]
     expect(all.filter(isProfitCost)).toEqual(['operating_cost', 'vehicle_cost', 'loss'])
+  })
+})
+
+describe('vehicleIdOfCostLine (P3 — the fleet table)', () => {
+  it('names the vehicle of every line the profit figure calls a vehicle cost', () => {
+    expect(vehicleIdOfCostLine(`cost_center:${VEHICLE_UUID}`, none)).toBe(VEHICLE_UUID)
+    // The legacy spelling carries the id after its prefix.
+    expect(vehicleIdOfCostLine(`cost_center:vehicle:${VEHICLE_UUID}`, none)).toBe(VEHICLE_UUID)
+    // The harness names vehicles `vehicle-1`; membership is what makes them vehicles there.
+    expect(vehicleIdOfCostLine('cost_center:vehicle-1', { vehicleIds: new Set(['vehicle-1']) })).toBe('vehicle-1')
+  })
+
+  it('answers null for everything that is not a vehicle cost', () => {
+    for (const code of [
+      'company_revenue',
+      'other_income',
+      'office_cash',
+      `cost_center:branch:${BRANCH_UUID}`,
+      `cost_center:general:${BRANCH_UUID}`,
+      `cost_center:${RECEIVABLE_WRITEOFF_LOSS_COST_CENTER}`,
+      'cost_center:owner_funding',
+      'cost_center:owner_drawings',
+      'cost_center:opening_balance',
+      'cost_center:vehicle-1',
+      'cost_center:vehicle:',
+    ]) {
+      expect(vehicleIdOfCostLine(code, none), code).toBeNull()
+    }
+  })
+
+  it('property: per-vehicle costs add up to the vehicle cost of the profit totals', () => {
+    const ids = ['vehicle-1', 'vehicle-2', VEHICLE_UUID]
+    const ctx = { vehicleIds: new Set(['vehicle-1', 'vehicle-2']) }
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.tuple(
+            fc.constantFrom(
+              ...ids.map((id) => `cost_center:${id}`),
+              `cost_center:vehicle:${VEHICLE_UUID}`,
+              `cost_center:general:${BRANCH_UUID}`,
+              'cost_center:owner_funding',
+              'company_revenue',
+            ),
+            fc.constantFrom<'D' | 'C'>('D', 'C'),
+            fc.bigInt({ min: 1n, max: 10n ** 12n }),
+          ),
+        ),
+        (lines) => {
+          const totals = emptyProfitTotals()
+          const perVehicle = new Map<string, bigint>()
+          for (const [code, side, amount] of lines) {
+            addProfitLine(totals, classifyProfitLine(code, ctx), side, amount)
+            const id = vehicleIdOfCostLine(code, ctx)
+            if (id !== null) perVehicle.set(id, (perVehicle.get(id) ?? 0n) + signedCost(side, amount))
+          }
+          const sum = [...perVehicle.values()].reduce((a, b) => a + b, 0n)
+          expect(sum).toBe(totals.vehicleCost)
+        },
+      ),
+    )
+  })
+
+  it('signedCost adds a debit and takes a credit away', () => {
+    expect(signedCost('D', 500n)).toBe(500n)
+    expect(signedCost('C', 500n)).toBe(-500n)
   })
 })

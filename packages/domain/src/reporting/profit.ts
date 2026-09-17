@@ -82,6 +82,30 @@ export function classifyProfitLine(fundCode: string, ctx: ProfitClassificationCo
   return null
 }
 
+const LEGACY_VEHICLE_PREFIX = 'vehicle:'
+
+/**
+ * WHICH vehicle a vehicle-cost line belongs to (P3 — the fleet table's «كلف» column).
+ *
+ * Answers only for a line `classifyProfitLine` already calls `vehicle_cost`, so a per-vehicle
+ * breakdown can never count a line the profit figure does not, and the two always reconcile. The
+ * id is the bare centre `POST /expenses` writes, or the part after the legacy `vehicle:` spelling.
+ */
+export function vehicleIdOfCostLine(fundCode: string, ctx: ProfitClassificationContext): string | null {
+  if (classifyProfitLine(fundCode, ctx) !== 'vehicle_cost') return null
+  const centre = fundCode.slice(COST_CENTER_PREFIX.length)
+  const id = centre.startsWith(LEGACY_VEHICLE_PREFIX) ? centre.slice(LEGACY_VEHICLE_PREFIX.length) : centre
+  return id === '' ? null : id
+}
+
+/**
+ * A cost line's contribution to a cost total, positive when it is a cost: a DEBIT adds, a credit
+ * (a reversal) takes away — exactly as `addProfitLine` moves `vehicleCost`.
+ */
+export function signedCost(side: 'D' | 'C', amount: bigint): bigint {
+  return side === 'D' ? amount : -amount
+}
+
 /** The three classes that reduce profit. */
 export function isProfitCost(cls: ProfitLineClass | null): cls is 'operating_cost' | 'vehicle_cost' | 'loss' {
   return cls === 'operating_cost' || cls === 'vehicle_cost' || cls === 'loss'
