@@ -65,6 +65,60 @@ export type LedgerEvent =
   | 'advance'
   | 'advance_repayment'
   | 'advance_conversion'
+  | CompanyLedgerEvent
+
+/**
+ * «صندوق الشركة» as its own ledger (finance redesign C1, migration 0065).
+ *
+ * Every one of these belongs to the company (HQ) ledger and to no branch: migration 0066 refuses
+ * them in a branch and refuses every other event in the company ledger. They are listed apart so
+ * the API, the recipes and the database guard can all name the same set.
+ */
+export type CompanyLedgerEvent =
+  /** The branch `company_box` balance moved as-is into the company SYP pocket at cutover. */
+  | 'company_opening_transfer'
+  /** The HQ half of a branch entry that moved `company_box` («كييش» / «شحن») after cutover. */
+  | 'company_restoration_mirror'
+  | 'company_deposit'
+  | 'company_withdrawal'
+  | 'company_expense'
+  | 'company_income'
+  /** USD⇄SYP: both actual amounts, the resulting rate frozen on the entry. The only two-currency event. */
+  | 'company_fx_exchange'
+  | 'company_debt_open'
+  | 'company_debt_payment'
+  | 'company_debt_writeoff'
+  | 'asset_purchase'
+  /** «نقل الاهتلاك» — the month's depreciation from the company pocket into «الاهتلاك». */
+  | 'depreciation_transfer'
+  /** Money released back from «الاهتلاك» to the company pocket, with a written reason. */
+  | 'depreciation_release'
+  | 'company_correction'
+
+export const COMPANY_LEDGER_EVENTS = [
+  'company_opening_transfer',
+  'company_restoration_mirror',
+  'company_deposit',
+  'company_withdrawal',
+  'company_expense',
+  'company_income',
+  'company_fx_exchange',
+  'company_debt_open',
+  'company_debt_payment',
+  'company_debt_writeoff',
+  'asset_purchase',
+  'depreciation_transfer',
+  'depreciation_release',
+  'company_correction',
+] as const satisfies readonly CompanyLedgerEvent[]
+
+type MissingCompanyEvents = Exclude<CompanyLedgerEvent, (typeof COMPANY_LEDGER_EVENTS)[number]>
+/** Compile-time proof that the list above names every company event. */
+const COMPANY_EVENTS_EXHAUSTIVE: [MissingCompanyEvents] extends [never] ? true : false = true
+void COMPANY_EVENTS_EXHAUSTIVE
+
+export const isCompanyLedgerEvent = (event: LedgerEvent): event is CompanyLedgerEvent =>
+  (COMPANY_LEDGER_EVENTS as readonly LedgerEvent[]).includes(event)
 
 export type FundRef =
   | { readonly kind: 'office_cash' }
