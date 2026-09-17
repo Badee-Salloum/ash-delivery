@@ -54,7 +54,44 @@ export function grantsFromRows(rows: readonly RoleGrantRecord[]): GrantTable {
   return table as GrantTable
 }
 
+/**
+ * The only permissions that may name the company (HQ) row as their subject (finance redesign C1).
+ *
+ * The HQ row holds «صندوق الشركة» and nothing else: no drivers, no shifts, no cash counts, no
+ * expenses. A branch permission pointed at it — `?branchId=<HQ>` on a treasury or dashboard read, a
+ * manual entry, a cash count — would read or write branch machinery against the company ledger. So
+ * everything is refused there except managing the company fund itself, sealing its week, and
+ * auditing it.
+ */
+export const COMPANY_ADDRESSABLE_PERMISSIONS: ReadonlySet<PermissionKey> = new Set<PermissionKey>([
+  'company_fund.manage',
+  'week.close',
+  'audit.view',
+])
+
+/**
+ * The `branchId` a request names, from the query or the body — the same two channels
+ * `branch-scope.ts` reads. Kept local: that module imports the service layer, which must not be
+ * pulled into the authorization hook.
+ */
+function requestedBranchId(req: FastifyRequest): string | null {
+  for (const source of [req.query, req.body]) {
+    if (typeof source !== 'object' || source === null) continue
+    const value = (source as { branchId?: unknown }).branchId
+    if (typeof value === 'string' && value !== '') return value
+  }
+  return null
+}
+
 export function makeAuthorize(deps: Deps) {
+  // The HQ id never changes (0066 fixes it), so it is read once. Only a FOUND id is cached: an
+  // environment that has no company row yet keeps asking, and starts refusing the moment one exists.
+  let companyBranchId: string | null = null
+  const isCompanyBranch = async (branchId: string): Promise<boolean> => {
+    companyBranchId ??= (await deps.directory.companyBranch())?.id ?? null
+    return companyBranchId !== null && companyBranchId === branchId
+  }
+
   return async function authorize(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const config = req.routeOptions.config as { permission?: PermissionKey | null; subject?: (r: FastifyRequest) => Promise<Subject> | Subject }
     const permission = config.permission
@@ -97,6 +134,24 @@ export function makeAuthorize(deps: Deps) {
     }
 
     const subject: Subject = config.subject ? await config.subject(req) : {}
+
+    // Before the grant, so the refusal says what is actually wrong — for the general manager too,
+    // whose `all` scope would otherwise wave the company row through as one more branch. Both the
+    // resolved subject AND the branch the request names are judged: a few organisation-wide reads
+    // (`/dashboard/profit`, `/dashboard/treasury`) declare an empty subject and still read
+    // `?branchId=` in the handler.
+    if (!COMPANY_ADDRESSABLE_PERMISSIONS.has(permission)) {
+      for (const branchId of new Set([subject.branchId, requestedBranchId(req)])) {
+        if (typeof branchId !== 'string' || !(await isCompanyBranch(branchId))) continue
+        req.log.warn(
+          { actor: req.actor.userId, role: req.actor.roleKey, permission, branchId },
+          'authorization denied: the company branch is not addressable by this permission',
+        )
+        await reply.code(403).send({ error: 'company_branch_not_addressable', permission })
+        return
+      }
+    }
+
     const grants = grantsFromRows(await deps.directory.grants())
     const decision = can(req.actor, permission, subject, grants)
 
