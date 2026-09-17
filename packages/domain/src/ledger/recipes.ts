@@ -1,4 +1,5 @@
 import { type Minor, ZERO, abs, add, minor, neg, sub, sum } from '../money/minor.ts'
+import { type Currency, isCurrency } from '../money/currency.ts'
 import { type FeeTotals, type Rounding } from '../money/allocate.ts'
 import type { BlockSplit } from '../money/allocate.ts'
 import { type PayMode, type ShiftOrder, orderWalletAmount, orderYalagoCut, totalFeesOfOrders } from '../br1/equation.ts'
@@ -186,6 +187,165 @@ export type FundRef =
   | { readonly kind: 'advance_receivable_cash'; readonly advanceId: string }
   | { readonly kind: 'advance_receivable_wallet'; readonly advanceId: string }
   | { readonly kind: 'cost_center'; readonly costCenterId: string }
+  | CompanyFundRef
+
+/**
+ * «صندوق الشركة» — the company (HQ) ledger's accounts (finance redesign C1, migrations 0065/0066).
+ *
+ * They live ONLY in the company branch row and never in a branch; the database refuses both
+ * directions. Each carries its currency where it has one — the currency is part of the fund's
+ * identity and of its code, so `company_cash:SYP_NEW` and `company_cash:USD` are two pockets and a
+ * code read back from the ledger always says which.
+ *
+ * Codes (the enum literal is the `<CUR>` segment):
+ *   company_cash:<CUR>                       the company's own cash, per currency
+ *   depreciation_reserve:<CUR>               «الاهتلاك»
+ *   company_fx_position:<CUR>                the transit account an exchange passes through
+ *   company_equity:<CUR>:<account>           owner_funding | owner_drawings | opening
+ *   company_expense:<CUR>:<centre>           general | receivable_writeoff | vehicle:<id> | asset:<id>
+ *   company_income:<CUR>:<account>           general | payable_forgiven
+ *   branch_clearing:<branchId>               «حساب الشركة لدى الفرع», SYP only
+ *   company_payable:<CUR>:<debtId>           one debt the company owes
+ *   company_receivable:<CUR>:<debtId>        one debt owed to the company
+ *   fixed_asset:<CUR>:<assetId>              one purchased asset
+ */
+export type CompanyFundRef =
+  | { readonly kind: 'company_cash'; readonly currency: Currency }
+  | { readonly kind: 'depreciation_reserve'; readonly currency: Currency }
+  | { readonly kind: 'company_fx_position'; readonly currency: Currency }
+  | { readonly kind: 'company_equity'; readonly currency: Currency; readonly account: CompanyEquityAccount }
+  | { readonly kind: 'company_expense'; readonly currency: Currency; readonly centre: CompanyExpenseCentre }
+  | { readonly kind: 'company_income'; readonly currency: Currency; readonly account: CompanyIncomeAccount }
+  | { readonly kind: 'branch_clearing'; readonly branchId: string }
+  | { readonly kind: 'company_payable'; readonly debtId: string; readonly currency: Currency }
+  | { readonly kind: 'company_receivable'; readonly debtId: string; readonly currency: Currency }
+  | { readonly kind: 'fixed_asset'; readonly assetId: string; readonly currency: Currency }
+
+export type CompanyEquityAccount = 'owner_funding' | 'owner_drawings' | 'opening'
+export const COMPANY_EQUITY_ACCOUNTS = ['owner_funding', 'owner_drawings', 'opening'] as const satisfies readonly CompanyEquityAccount[]
+
+export type CompanyIncomeAccount = 'general' | 'payable_forgiven'
+export const COMPANY_INCOME_ACCOUNTS = ['general', 'payable_forgiven'] as const satisfies readonly CompanyIncomeAccount[]
+
+/** Where a company expense is filed. A vehicle or asset centre names its id. */
+export type CompanyExpenseCentre = 'general' | 'receivable_writeoff' | `vehicle:${string}` | `asset:${string}`
+
+export type CompanyFundKind = CompanyFundRef['kind']
+
+/** Every company account kind — the same ten `fund_type` values 0065 added. */
+export const COMPANY_FUND_KINDS = [
+  'company_cash',
+  'depreciation_reserve',
+  'company_fx_position',
+  'branch_clearing',
+  'company_payable',
+  'company_receivable',
+  'fixed_asset',
+  'company_expense',
+  'company_income',
+  'company_equity',
+] as const satisfies readonly CompanyFundKind[]
+
+/**
+ * Which company events may move which company account — the domain copy of 0066's
+ * `ash_company_fund_event_allowed`. A PostgreSQL test compares every pair between the two.
+ */
+export const COMPANY_FUND_ALLOWED_EVENTS: Readonly<Record<CompanyFundKind, readonly CompanyLedgerEvent[]>> = {
+  company_cash: [
+    'company_deposit',
+    'company_withdrawal',
+    'company_expense',
+    'company_income',
+    'company_fx_exchange',
+    'company_opening_transfer',
+    'company_restoration_mirror',
+    'company_debt_open',
+    'company_debt_payment',
+    'asset_purchase',
+    'depreciation_transfer',
+    'depreciation_release',
+    'company_correction',
+  ],
+  depreciation_reserve: [
+    'depreciation_transfer',
+    'depreciation_release',
+    'company_expense',
+    'company_debt_payment',
+    'asset_purchase',
+    'company_correction',
+  ],
+  company_fx_position: ['company_fx_exchange', 'company_correction'],
+  branch_clearing: ['company_opening_transfer', 'company_restoration_mirror'],
+  company_payable: [
+    'company_debt_open',
+    'company_debt_payment',
+    'company_debt_writeoff',
+    'asset_purchase',
+    'company_correction',
+  ],
+  company_receivable: [
+    'company_debt_open',
+    'company_debt_payment',
+    'company_debt_writeoff',
+    'asset_purchase',
+    'company_correction',
+  ],
+  fixed_asset: ['asset_purchase', 'company_correction'],
+  company_expense: ['company_expense', 'company_debt_open', 'company_debt_writeoff', 'company_correction'],
+  company_income: ['company_income', 'company_debt_open', 'company_debt_writeoff', 'company_correction'],
+  company_equity: [
+    'company_deposit',
+    'company_withdrawal',
+    'company_expense',
+    'company_debt_open',
+    'company_debt_payment',
+    'asset_purchase',
+    'company_correction',
+  ],
+}
+
+export const isCompanyFund = (fund: FundRef): fund is CompanyFundRef =>
+  (COMPANY_FUND_KINDS as readonly string[]).includes(fund.kind)
+
+/**
+ * Every fund kind, branch and company. Exhaustive by construction — the check below fails to
+ * compile the day a `FundRef` kind is added without being listed — so a test iterating it covers
+ * every code `fundCode` can produce.
+ */
+export const FUND_KINDS = [
+  'office_cash',
+  'office_wallet',
+  'driver_cash',
+  'driver_wallet',
+  'yalago_share',
+  'driver_share_payable',
+  'company_revenue',
+  'yalago_income',
+  'fee_earned',
+  'other_income',
+  'company_box',
+  'driver_receivable_cash',
+  'driver_receivable_wallet',
+  'driver_shift_funding_cash',
+  'driver_shift_funding_wallet',
+  'advance_receivable_cash',
+  'advance_receivable_wallet',
+  'cost_center',
+  ...COMPANY_FUND_KINDS,
+] as const satisfies readonly FundRef['kind'][]
+
+type MissingFundKinds = Exclude<FundRef['kind'], (typeof FUND_KINDS)[number]>
+/** Compile-time proof that `FUND_KINDS` names every `FundRef` kind. */
+const FUND_KINDS_EXHAUSTIVE: [MissingFundKinds] extends [never] ? true : false = true
+void FUND_KINDS_EXHAUSTIVE
+
+/**
+ * The currency a fund holds. Every branch fund is new lira; a company fund says so itself, and the
+ * branch clearing account mirrors a branch's SYP `company_box`.
+ */
+export function currencyOf(fund: FundRef): Currency {
+  return 'currency' in fund ? fund.currency : 'SYP_NEW'
+}
 
 /** The two branch funds that hold real value and are counted, restored and swept. */
 export type OfficeFund = 'office_cash' | 'office_wallet'
@@ -216,32 +376,109 @@ export class UnbalancedPostingError extends Error {
   readonly posting: Posting
   readonly debits: Minor
   readonly credits: Minor
-  constructor(posting: Posting, debits: Minor, credits: Minor) {
-    super(`posting ${posting.eventType}/${posting.occurrenceKey} is unbalanced: D ${debits} <> C ${credits}`)
+  /** The currency whose debits and credits disagree. */
+  readonly currency: Currency
+  constructor(posting: Posting, debits: Minor, credits: Minor, currency: Currency = 'SYP_NEW') {
+    super(
+      `posting ${posting.eventType}/${posting.occurrenceKey} is unbalanced: D ${debits} <> C ${credits}` +
+        (currency === 'SYP_NEW' ? '' : ` (${currency})`),
+    )
     this.name = 'UnbalancedPostingError'
     this.posting = posting
     this.debits = debits
     this.credits = credits
+    this.currency = currency
   }
 }
 
+/** A posting that spans currencies without being a two-currency exchange. */
+export class MixedCurrencyPostingError extends Error {
+  readonly posting: Posting
+  readonly currencies: readonly Currency[]
+  constructor(posting: Posting, currencies: readonly Currency[]) {
+    super(
+      `posting ${posting.eventType}/${posting.occurrenceKey} spans ${currencies.join(' + ')}; ` +
+        'only company_fx_exchange may span exactly two currencies',
+    )
+    this.name = 'MixedCurrencyPostingError'
+    this.posting = posting
+    this.currencies = currencies
+  }
+}
+
+/** Σ debits over every line, currency-blind. Meaningful for a single-currency posting. */
 export function debitsOf(posting: Posting): Minor {
   return sum(posting.lines.filter((l) => l.side === 'D').map((l) => l.amount))
 }
 
+/** Σ credits over every line, currency-blind. Meaningful for a single-currency posting. */
 export function creditsOf(posting: Posting): Minor {
   return sum(posting.lines.filter((l) => l.side === 'C').map((l) => l.amount))
+}
+
+export interface CurrencyBalance {
+  readonly currency: Currency
+  readonly debits: Minor
+  readonly credits: Minor
+}
+
+/** Debits and credits per currency, in `CURRENCIES` order, for the currencies the posting uses. */
+export function currencyBalances(posting: Posting): CurrencyBalance[] {
+  const totals = new Map<Currency, { debits: bigint; credits: bigint }>()
+  for (const line of posting.lines) {
+    const currency = currencyOf(line.fund)
+    const total = totals.get(currency) ?? { debits: 0n, credits: 0n }
+    if (line.side === 'D') total.debits += line.amount
+    else total.credits += line.amount
+    totals.set(currency, total)
+  }
+  return (['SYP_NEW', 'USD'] as const)
+    .filter((currency) => totals.has(currency))
+    .map((currency) => {
+      const total = totals.get(currency)!
+      return { currency, debits: minor(total.debits), credits: minor(total.credits) }
+    })
+}
+
+/** Only an exchange may move two currencies at once — and never more than two. */
+const mayCrossCurrencies = (posting: Posting, currencies: number): boolean =>
+  currencies <= 1 || (currencies === 2 && posting.eventType === 'company_fx_exchange')
+
+/**
+ * The balance rule the database enforces at COMMIT (0066's `assert_entry_balanced`), without the
+ * throw: per currency, debits equal credits; and a posting spans two currencies only as an
+ * exchange. `null` when the posting is sound. Shared by `assertBalanced` and both ledger adapters so
+ * the three can never disagree about what «balanced» means.
+ */
+export function postingBalanceProblem(
+  posting: Posting,
+):
+  | { readonly kind: 'unbalanced'; readonly currency: Currency; readonly debits: Minor; readonly credits: Minor }
+  | { readonly kind: 'mixed_currency'; readonly currencies: readonly Currency[] }
+  | null {
+  const balances = currencyBalances(posting)
+  const unbalanced = balances.find((b) => b.debits !== b.credits)
+  if (unbalanced) return { kind: 'unbalanced', ...unbalanced }
+  if (!mayCrossCurrencies(posting, balances.length)) {
+    return { kind: 'mixed_currency', currencies: balances.map((b) => b.currency) }
+  }
+  return null
 }
 
 /**
  * The invariant the database also enforces with a deferred constraint trigger. Checked here so
  * a recipe bug fails in a unit test rather than at COMMIT in production.
+ *
+ * Balanced PER CURRENCY (0066): $100 against 100 lira is not a balanced entry, it is two unbalanced
+ * ones. For a single-currency posting this is exactly the old Σ D = Σ C.
  */
 export function assertBalanced(posting: Posting): Posting {
-  const d = debitsOf(posting)
-  const c = creditsOf(posting)
-  if (d !== c) throw new UnbalancedPostingError(posting, d, c)
-  if (posting.lines.length === 0) throw new UnbalancedPostingError(posting, d, c)
+  const problem = postingBalanceProblem(posting)
+  if (problem?.kind === 'unbalanced') {
+    throw new UnbalancedPostingError(posting, problem.debits, problem.credits, problem.currency)
+  }
+  if (posting.lines.length === 0) throw new UnbalancedPostingError(posting, ZERO, ZERO)
+  if (problem?.kind === 'mixed_currency') throw new MixedCurrencyPostingError(posting, problem.currencies)
   for (const line of posting.lines) {
     if (line.amount <= 0n) {
       throw new RangeError(
@@ -1397,11 +1634,57 @@ export const isFund =
   (fund: FundRef): boolean =>
     fund.kind === kind
 
+/** A company fund's id segment: present, and free of the `:` that separates code segments. */
+function codeId(kind: string, what: string, id: string): string {
+  if (id === '' || id.includes(':')) {
+    throw new RangeError(`${kind} requires a ${what} without ':', got ${JSON.stringify(id)}`)
+  }
+  return id
+}
+
+function codeCurrency(kind: string, currency: string | undefined): Currency {
+  if (!isCurrency(currency)) {
+    throw new RangeError(`${kind} requires a currency (SYP_NEW or USD), got ${JSON.stringify(currency)}`)
+  }
+  return currency
+}
+
+function expenseCentre(centre: string): CompanyExpenseCentre {
+  if (centre === 'general' || centre === 'receivable_writeoff') return centre
+  const [scope, id, ...extra] = centre.split(':')
+  if ((scope === 'vehicle' || scope === 'asset') && id !== undefined && extra.length === 0) {
+    return `${scope}:${codeId('company_expense', `${scope} id`, id)}`
+  }
+  throw new RangeError(
+    `company_expense requires a centre (general | receivable_writeoff | vehicle:<id> | asset:<id>), got ${JSON.stringify(centre)}`,
+  )
+}
+
+function oneOf<T extends string>(kind: string, what: string, allowed: readonly T[], value: string | undefined): T {
+  if (value === undefined || !(allowed as readonly string[]).includes(value)) {
+    throw new RangeError(`${kind} requires ${what} (${allowed.join(' | ')}), got ${JSON.stringify(value)}`)
+  }
+  return value as T
+}
+
 /**
  * Stable string identity for a fund. The database stores this in `funds.code`.
+ *
+ * THE ONE COPY. `packages/db` and the memory adapter both import this; the conformance suite
+ * compares what each stores against it. A company code is validated on the way out as well as on
+ * the way in, so a malformed id can never become a fund that `fundRefFromCode` cannot read back.
  */
 export function fundCode(fund: FundRef): string {
   switch (fund.kind) {
+    case 'office_cash':
+    case 'office_wallet':
+    case 'yalago_share':
+    case 'company_revenue':
+    case 'yalago_income':
+    case 'fee_earned':
+    case 'other_income':
+    case 'company_box':
+      return fund.kind
     case 'driver_cash':
     case 'driver_wallet':
     case 'driver_share_payable':
@@ -1419,8 +1702,28 @@ export function fundCode(fund: FundRef): string {
       return `${fund.kind}:${fund.advanceId}`
     case 'cost_center':
       return `cost_center:${fund.costCenterId}`
-    default:
-      return fund.kind
+    // ── The company ledger. The enum literal is the currency segment. ──────────────────────
+    case 'company_cash':
+    case 'depreciation_reserve':
+    case 'company_fx_position':
+      return `${fund.kind}:${codeCurrency(fund.kind, fund.currency)}`
+    case 'company_equity':
+      return `${fund.kind}:${codeCurrency(fund.kind, fund.currency)}:${oneOf(fund.kind, 'an account', COMPANY_EQUITY_ACCOUNTS, fund.account)}`
+    case 'company_income':
+      return `${fund.kind}:${codeCurrency(fund.kind, fund.currency)}:${oneOf(fund.kind, 'an account', COMPANY_INCOME_ACCOUNTS, fund.account)}`
+    case 'company_expense':
+      return `${fund.kind}:${codeCurrency(fund.kind, fund.currency)}:${expenseCentre(fund.centre)}`
+    case 'branch_clearing':
+      return `${fund.kind}:${codeId(fund.kind, 'branch id', fund.branchId)}`
+    case 'company_payable':
+    case 'company_receivable':
+      return `${fund.kind}:${codeCurrency(fund.kind, fund.currency)}:${codeId(fund.kind, 'debt id', fund.debtId)}`
+    case 'fixed_asset':
+      return `${fund.kind}:${codeCurrency(fund.kind, fund.currency)}:${codeId(fund.kind, 'asset id', fund.assetId)}`
+    default: {
+      const unreachable: never = fund
+      throw new RangeError(`unknown fund kind ${JSON.stringify(unreachable)}`)
+    }
   }
 }
 
@@ -1436,10 +1739,21 @@ export function fundCode(fund: FundRef): string {
  * ("opening_balance", "adjustments") that are not part of the client's fixed tree, and refusing
  * them would make E-3 unusable. What must never happen is a *known* fund name being silently
  * re-pointed.
+ *
+ * STRICT for every known name (C1). A known name with a segment it does not take — `company_box:x`,
+ * `office_cash:x` — used to be read as the bare fund with the suffix silently dropped; it now
+ * throws, exactly as a missing driver id always has. A company code must carry a valid currency,
+ * id and account, or it throws: a company account read back wrong is a different pocket.
  */
 export function fundRefFromCode(code: string): FundRef {
-  const [head, ...rest] = code.split(':')
+  const [head = '', ...rest] = code.split(':')
   const tail = rest.join(':')
+  const noSuffix = (): void => {
+    if (rest.length > 0) throw new RangeError(`${head} takes no suffix, got ${JSON.stringify(code)}`)
+  }
+  const segments = (count: number, shape: string): void => {
+    if (rest.length !== count) throw new RangeError(`${head} is ${shape}, got ${JSON.stringify(code)}`)
+  }
 
   switch (head) {
     case 'office_cash':
@@ -1453,6 +1767,7 @@ export function fundRefFromCode(code: string): FundRef {
     // `cost_center:company_box` — a different account that looks right in the UI and never moves
     // the fund the operator meant. Exactly the failure this function's own header describes.
     case 'company_box':
+      noSuffix()
       return { kind: head }
     case 'driver_cash':
     case 'driver_wallet':
@@ -1474,6 +1789,39 @@ export function fundRefFromCode(code: string): FundRef {
     case 'cost_center':
       if (tail === '') throw new RangeError(`cost_center requires an id, got ${JSON.stringify(code)}`)
       return { kind: 'cost_center', costCenterId: tail }
+    // ── The company ledger ──────────────────────────────────────────────────────────────────
+    case 'company_cash':
+    case 'depreciation_reserve':
+    case 'company_fx_position':
+      segments(1, `${head}:<CUR>`)
+      return { kind: head, currency: codeCurrency(head, rest[0]) }
+    case 'company_equity':
+      segments(2, `${head}:<CUR>:<account>`)
+      return {
+        kind: head,
+        currency: codeCurrency(head, rest[0]),
+        account: oneOf(head, 'an account', COMPANY_EQUITY_ACCOUNTS, rest[1]),
+      }
+    case 'company_income':
+      segments(2, `${head}:<CUR>:<account>`)
+      return {
+        kind: head,
+        currency: codeCurrency(head, rest[0]),
+        account: oneOf(head, 'an account', COMPANY_INCOME_ACCOUNTS, rest[1]),
+      }
+    case 'company_expense':
+      if (rest.length < 2) throw new RangeError(`${head} is ${head}:<CUR>:<centre>, got ${JSON.stringify(code)}`)
+      return { kind: head, currency: codeCurrency(head, rest[0]), centre: expenseCentre(rest.slice(1).join(':')) }
+    case 'branch_clearing':
+      segments(1, `${head}:<branchId>`)
+      return { kind: head, branchId: codeId(head, 'branch id', rest[0] ?? '') }
+    case 'company_payable':
+    case 'company_receivable':
+      segments(2, `${head}:<CUR>:<debtId>`)
+      return { kind: head, currency: codeCurrency(head, rest[0]), debtId: codeId(head, 'debt id', rest[1] ?? '') }
+    case 'fixed_asset':
+      segments(2, `${head}:<CUR>:<assetId>`)
+      return { kind: head, currency: codeCurrency(head, rest[0]), assetId: codeId(head, 'asset id', rest[1] ?? '') }
     default:
       return { kind: 'cost_center', costCenterId: code }
   }
