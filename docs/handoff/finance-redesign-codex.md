@@ -114,9 +114,11 @@ branch managers never see purchase prices/instalments/book values; company debts
       (worktree `.claude/worktrees/agent-ae074aa887cf11d96`), 8 commits ending `4d47ffc`: 0065 enum-only, 0066
       foundation (HQ row `10000000-0000-4000-8000-000000000100`, `branches.kind`, per-currency balance trigger,
       ledger partition + pocket guards), `money/currency.ts`, strict fund codes, HQ refusal in rbac, HQ week close
-      per currency. NOT YET MERGED into `feat/finance-redesign` (merge after P2 is committed; expect conflicts in
-      ports.ts, memory adapter, conformance, repos.ts, dashboard routes/tests, i18n; C1 made
-      `LedgerRepo.post` meta `sypMinorPerUsd` REQUIRED — new callers must pass `null`).
+      per currency. MERGED into `feat/finance-redesign` as `2e6dedc` (no textual conflicts); the follow-up
+      commit adds `sypMinorPerUsd: null` / line `currency: 'SYP_NEW'` to P2's range fixtures. C1 made
+      `LedgerRepo.post` meta `sypMinorPerUsd` REQUIRED — every new caller must pass `null` for branch postings.
+      Merged state verified: domain 743, client 314, adapters 162, admin 318, driver 341, db 244, api 977,
+      typecheck + all checks green.
 - [ ] **C2** company transactions + FX exchange + restoration mirror + cutover — IN PROGRESS on the same worktree
       branch, on top of `4d47ffc`.
 - [ ] **C3** debts register

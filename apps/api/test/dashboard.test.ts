@@ -1328,22 +1328,22 @@ describe('GET /dashboard/meta — the dates every time filter is built from (P2)
     h.deps.ledger.entries.push({
       id: 30_001, branchId: BRANCH, eventType: 'manual', shiftId: null,
       occurrenceKey: 'meta-first-activity', businessDate: '2026-07-02', postingDate: '2026-07-02',
-      weekStartDate: weekStartFor('2026-07-02'), fxDayId: 1, weekLockId: null,
+      weekStartDate: weekStartFor('2026-07-02'), fxDayId: 1, sypMinorPerUsd: null, weekLockId: null,
       reason: 'meta fixture', createdBy: 'u-bm',
       lines: [
-        { fundCode: 'office_cash', side: 'D', amount: syp(1) },
-        { fundCode: 'cost_center:opening_balance', side: 'C', amount: syp(1) },
+        { fundCode: 'office_cash', side: 'D', amount: syp(1), currency: 'SYP_NEW' },
+        { fundCode: 'cost_center:opening_balance', side: 'C', amount: syp(1), currency: 'SYP_NEW' },
       ],
     })
     // Another branch's older activity is not this branch's epoch.
     h.deps.ledger.entries.push({
       id: 30_002, branchId: OTHER_BRANCH, eventType: 'manual', shiftId: null,
       occurrenceKey: 'meta-other-branch', businessDate: '2026-06-01', postingDate: '2026-06-01',
-      weekStartDate: weekStartFor('2026-06-01'), fxDayId: 1, weekLockId: null,
+      weekStartDate: weekStartFor('2026-06-01'), fxDayId: 1, sypMinorPerUsd: null, weekLockId: null,
       reason: 'meta fixture', createdBy: 'u-bm2',
       lines: [
-        { fundCode: 'office_cash', side: 'D', amount: syp(1) },
-        { fundCode: 'cost_center:opening_balance', side: 'C', amount: syp(1) },
+        { fundCode: 'office_cash', side: 'D', amount: syp(1), currency: 'SYP_NEW' },
+        { fundCode: 'cost_center:opening_balance', side: 'C', amount: syp(1), currency: 'SYP_NEW' },
       ],
     })
     const manager = await h.loginAs('manager')
@@ -1411,7 +1411,7 @@ describe('the range read behind /dashboard/profit and /dashboard/treasury (P2)',
 
   it('reports a legacy restoration and its reversal chain in the original column', async () => {
     const common = {
-      branchId: BRANCH, shiftId: null, postingDate: '2026-07-20', fxDayId: 1, weekLockId: null,
+      branchId: BRANCH, shiftId: null, postingDate: '2026-07-20', fxDayId: 1, sypMinorPerUsd: null, weekLockId: null,
       createdBy: 'u-bm', reason: 'legacy restoration fixture',
     }
     h.deps.ledger.entries.push(
@@ -1420,24 +1420,24 @@ describe('the range read behind /dashboard/profit and /dashboard/treasury (P2)',
         businessDate: '2026-07-12', weekStartDate: '2026-07-12',
         // A legacy row: no roles at all. D company_box is «كييش».
         lines: [
-          { fundCode: 'company_box', side: 'D', amount: syp(700) },
-          { fundCode: 'office_cash', side: 'C', amount: syp(700) },
+          { fundCode: 'company_box', side: 'D', amount: syp(700), currency: 'SYP_NEW' },
+          { fundCode: 'office_cash', side: 'C', amount: syp(700), currency: 'SYP_NEW' },
         ],
       },
       {
         ...common, id: 40_002, eventType: 'correction', occurrenceKey: 'reversal-of-40001',
         businessDate: '2026-07-20', weekStartDate: '2026-07-19',
         lines: [
-          { fundCode: 'office_cash', side: 'D', amount: syp(700) },
-          { fundCode: 'company_box', side: 'C', amount: syp(700) },
+          { fundCode: 'office_cash', side: 'D', amount: syp(700), currency: 'SYP_NEW' },
+          { fundCode: 'company_box', side: 'C', amount: syp(700), currency: 'SYP_NEW' },
         ],
       },
       {
         ...common, id: 40_003, eventType: 'correction', occurrenceKey: 'reversal-of-40002',
         businessDate: '2026-07-21', weekStartDate: '2026-07-19',
         lines: [
-          { fundCode: 'company_box', side: 'D', amount: syp(700) },
-          { fundCode: 'office_cash', side: 'C', amount: syp(700) },
+          { fundCode: 'company_box', side: 'D', amount: syp(700), currency: 'SYP_NEW' },
+          { fundCode: 'office_cash', side: 'C', amount: syp(700), currency: 'SYP_NEW' },
         ],
       },
     )

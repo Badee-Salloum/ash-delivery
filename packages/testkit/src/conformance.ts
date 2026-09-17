@@ -296,6 +296,8 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           postingDate: businessDate,
           weekStartDate: weekStartFor(businessDate),
           fxDayId,
+          // Branch postings carry no USD line, so they freeze no rate (C1: the field is required).
+          sypMinorPerUsd: null,
           createdBy: USER,
           ...(reason === undefined ? {} : { reason }),
         })

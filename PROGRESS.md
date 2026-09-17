@@ -1,5 +1,31 @@
 # PROGRESS
 
+## 2026-09-17 — C1: the company ledger and the second currency (foundation only — no new money moves)
+
+**A separate book.** The company is now its own ledger: one `branches` row of `kind='company'` (HQ,
+`branch_no` 0, fixed id `10000000-0000-4000-8000-000000000100`) that no branch route can address
+(`company_branch_not_addressable`) and that `listBranches` never returns. Triggers keep branch tables
+branch-only and company fund types / events HQ-only (`assert_ledger_partition`).
+
+**Two currencies.** `funds.currency` accepts `USD` for company fund types only; a fund's identity is
+immutable. The balance trigger now balances **per currency**; only `company_fx_exchange` may span two, and
+any entry with a USD line must freeze its rate in `journal_entries.syp_minor_per_usd`. A company cash or
+reserve pocket may not go negative, except through the restoration mirror (owner decision). The migration
+proves every existing entry still balances before it commits.
+
+**Code.** `money/currency.ts` (typed `Money<C>`, `usdToSypMinor`), strict `fundRefFromCode`, per-currency
+`assertBalanced`; `LedgerRepo.post` requires `sypMinorPerUsd` (branch postings pass `null`); HQ week close
+has no cash count and a per-currency trial balance; the admin `Money` component shows its currency when
+told. No route moves money in HQ yet — that is C2.
+
+**Verified.** Merged with P1+P2 (`2e6dedc`); the range fixtures now carry the frozen rate and line currency.
+Full suite with local PostgreSQL green (domain 743, client 314, adapters 162, admin 318, driver 341,
+db 244, api 977), typecheck and every `check:*`. Not deployed: migrations 0064–0066 wait for the owner's
+go-ahead.
+
+**Next.** P3 (dashboard redesign) on the merged tree; C2 (company transactions, FX exchange, restoration
+mirror, cutover) in its worktree.
+
 ## 2026-09-17 — P2: any period, one read — links that carry their filters, and vehicle costs in the profit
 
 **Links carry filters.** The console router understood only `#section` and `#shift:<id>` and rewrote
