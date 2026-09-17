@@ -2,6 +2,7 @@
 // Every rule that decides where money goes lives here and nowhere else.
 
 export * from './money/minor.ts'
+export * from './money/currency.ts'
 export * from './money/allocate.ts'
 export * from './br1/equation.ts'
 export * from './br1/diagnose.ts'
