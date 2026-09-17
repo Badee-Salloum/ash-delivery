@@ -105,7 +105,7 @@ branch managers never see purchase prices/instalments/book values; company debts
 - [x] **Step 0** mockups — `docs/design/2026-09-redesign/index.html` (commit `ef81c65`). Owner sign-off: owner said "don't stop", proceed.
 - [x] Local PostgreSQL + baseline; stale db fixtures fixed (commit `b0c469f`).
 - [x] **P0** company-fund permission gap — committed (`fix(treasury): only company-fund managers move company money`). Migration 0064 NOT applied to production.
-- [ ] **P1** schedule & targets
+- [x] **P1** schedule & targets — committed (`feat(shifts): the owner's schedule …`). 212 prod shifts measured: 7 change pattern.
 - [ ] **P2** router params + time filter + range read model + profit fix
 - [ ] **P3** dashboard redesign + drill-down
 - [ ] **C1** HQ ledger + currency foundation (can run in parallel with P1–P3; no UI-lane migrations)

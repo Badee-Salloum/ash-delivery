@@ -621,8 +621,14 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
              * window the system already reasons about — the driver's own confirmation through his
              * close submission — and `workedTime` turns them into a pattern and a length.
              *
+             * `worked` is `{ minutes, pattern, slot, abandoned }`. `slot` (additive; older consoles
+             * ignore it) is the half of the day the shift STARTED in, known even while it runs, so the
+             * live board can say «جارية — صباحية» without guessing a pattern.
+             *
              * `submittedAt` is null for a live shift AND for one whose close was rejected, since
              * that path clears it; either way there is no length yet, which is the honest answer.
+             * The branch offset and business-day start are the server's own, the same pair that
+             * decides `businessDate`, so a 02:00 start is the evening slot of the day it belongs to.
              */
             windowOpensAt: s.windowOpensAt ?? s.openApprovedAt,
             submittedAt: s.submittedAt,
@@ -634,6 +640,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
                 ? null
                 : Date.parse((s.windowOpensAt ?? s.openApprovedAt)!),
               s.submittedAt === null ? null : Date.parse(s.submittedAt),
+              deps.clock.offsetMinutes(),
+              deps.clock.dayStartMinutes(),
             ),
           }
         }),

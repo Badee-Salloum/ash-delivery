@@ -3,6 +3,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { ar, en } from '@ash/client/i18n'
+import { SHIFT_TARGET_MINUTES } from '@ash/domain'
 import {
   MAX_COMPLETED_SHIFT_RANGE_DAYS,
   classifyShiftHistory,
@@ -14,6 +15,7 @@ import {
 
 const appSource = readFileSync(new URL('./AdminApp.tsx', import.meta.url), 'utf8')
 const screenSource = readFileSync(new URL('./screens/CompletedShifts.tsx', import.meta.url), 'utf8')
+const dashboardSource = readFileSync(new URL('./screens/Dashboard.tsx', import.meta.url), 'utf8')
 
 describe('completed shift history date range', () => {
   it('defaults to the latest seven business dates, including the session business date', () => {
@@ -183,11 +185,22 @@ describe('completed shift history screen wiring', () => {
   })
 
   it('judges each pattern against its own target, so a full shift is not read as overtime', () => {
-    // A 13-hour `full` shift covers both slots. Against one slot's eight hours it looks like five
-    // hours of overtime; against the two it replaces it is three hours short.
-    expect(screenSource).toContain('TARGET_MINUTES[row.worked.pattern]')
-    expect(screenSource).toContain("full: 16 * 60")
+    // A double covers both slots, so it is held to the owner's twelve hours (2026-09-17), not one
+    // slot's eight. The table is the domain's, shared with the dashboard: each screen used to keep
+    // its own copy with `full: 16 * 60`, so a change of rule had to be found and made twice.
+    expect(screenSource).toContain("import { SHIFT_TARGET_MINUTES, type ShiftPattern, type ShiftSlot, shortfallMinutes } from '@ash/domain'")
+    expect(screenSource).toContain('SHIFT_TARGET_MINUTES[row.worked.pattern]')
+    expect(screenSource).not.toContain('const TARGET_MINUTES')
+    expect(screenSource).not.toContain('16 * 60')
+    expect(dashboardSource).toContain('SHIFT_TARGET_MINUTES[shift.worked.pattern]')
+    expect(dashboardSource).not.toContain('DASHBOARD_TARGET_MINUTES')
+    expect(dashboardSource).not.toContain('16 * 60')
+    expect(SHIFT_TARGET_MINUTES).toEqual({ day: 480, evening: 480, full: 720, unknown: null })
     expect(screenSource).toContain('shortfallMinutes(row.worked, target)')
+    // The badge shows the pattern WITH its target: «صباحية · 8س», «دبل · 12س».
+    expect(screenSource).toContain('shiftPatternLabel(shift.worked, t.completedShifts)')
+    expect(ar.completedShifts.patternDay).toBe('صباحية')
+    expect(ar.completedShifts.patternWithTarget).toBe('{pattern} · {h}س')
     // …and nothing is judged that cannot be judged honestly.
     expect(screenSource).toContain('t.completedShifts.notClosedOnTime')
   })

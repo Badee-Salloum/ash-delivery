@@ -1,5 +1,32 @@
 # PROGRESS
 
+## 2026-09-17 — P1: the owner's schedule — 09–17, 18–02, and a double is twelve hours
+
+**Rule (owner decision, automatic from the times).** A closed shift lasting **≥ 600 minutes is a double**
+(`full`, target 720). Anything shorter is its **slot**: morning (`day`) when it started before 15:00,
+evening when it started at/after 15:00 or between 00:00 and 03:59 — both target 480. A running shift is
+`unknown` with its slot and reads «جارية — صباحية/مسائية». A close forgotten for more than 16 hours keeps
+its slot and is not judged.
+
+**Why the old classifier had to go.** It called a shift `day` whenever the driver came back the same day
+before 22:00, so a 09:00→21:00 double read «عادية» and was judged against eight hours; and the double's
+target was sixteen hours, duplicated in two screens.
+
+**Now.** `packages/domain/src/shift/worked-time.ts` exposes `SLOT_SPLIT_MINUTES`,
+`DOUBLE_SHIFT_MIN_MINUTES`, `SHIFT_TARGET_MINUTES` (one table for every screen), `slotOfStart`,
+`workedTime → {minutes, pattern, slot, abandoned}`, `shiftTargetMinutes`, `shortfallMinutes`. The shift
+shape helpers moved into the domain (`shift/shape.ts`). `GET /shifts` serialises `worked.slot` using the
+injected clock offset and day start. Completed shifts, the approval screen and live shifts show the
+pattern with its target («صباحية · 8س», «مسائية · 8س», «دبل · 12س»).
+
+**Measured on production (read-only), 212 finished shifts:** 7 change pattern — 4 evening → double
+(they ran ≥ 10 h), 3 double → morning (under 10 h). Shifts shown under target drop from 192 to 129,
+because a double is now judged against 12 h instead of 16; the displayed shortfall changes on 69 rows.
+No money figure is affected — the classifier only labels and judges hours.
+
+**Verified.** Full suite with local PostgreSQL green (domain 595 incl. three fast-check properties,
+api 949), typecheck and every `check:*`.
+
 ## 2026-09-17 — P0: only company-fund managers move company money
 
 First phase of the owner-approved finance & fleet redesign (brief: `docs/handoff/finance-redesign-codex.md`,

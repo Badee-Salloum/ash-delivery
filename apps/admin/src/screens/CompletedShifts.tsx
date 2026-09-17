@@ -9,9 +9,10 @@ import {
   type CompletedShiftFinancial,
   type CompletedShiftRangeError,
 } from '../completed-shifts.ts'
-import { type ShiftPattern, shortfallMinutes } from '@ash/domain'
+import { SHIFT_TARGET_MINUTES, type ShiftPattern, type ShiftSlot, shortfallMinutes } from '@ash/domain'
 import { damascusParts } from '@ash/client'
 import { explainError } from '../errors.ts'
+import { shiftPatternLabel, shiftPatternTone } from '../shift-shape.ts'
 import { Badge, Button, Card, DateField, Field, Money, Pending, Select, Stat, Table } from '../ui.tsx'
 
 interface ShiftHistoryRow {
@@ -29,25 +30,17 @@ interface ShiftHistoryRow {
   /** When it ran. Absent on a bundle talking to an older API; the columns then read «—». */
   windowOpensAt?: string | null
   submittedAt?: string | null
-  worked?: { minutes: number | null; pattern: ShiftPattern; abandoned: boolean }
+  /** `slot` is absent on an older API; the badge then reads the pattern alone. */
+  worked?: { minutes: number | null; pattern: ShiftPattern; slot?: ShiftSlot | null; abandoned: boolean }
 }
 
-/**
- * How long each pattern is expected to run.
- *
- * The owner's rule is eight hours, and a `full` shift covers both slots — so judging it against one
- * slot would present a 13-hour shift as five hours of overtime when it is three hours short of the
- * two slots it replaced. Measured medians for context: day 8.10 h, evening 6.73 h, full ~13 h.
- *
- * Named here as the policy default. Making it editable per branch belongs in `settings`, beside the
- * FX rate, and is not yet wired.
+/*
+ * How long each pattern is expected to run comes from the domain's `SHIFT_TARGET_MINUTES` — the
+ * owner's schedule of 2026-09-17: eight hours for a morning or an evening, twelve for a double. A
+ * double is judged against its own twelve, so a 10.5-hour double reads ninety minutes short rather
+ * than two and a half hours of overtime. One table, shared with the dashboard, so the two screens
+ * cannot disagree. Making it editable per branch belongs in `settings`, and is not yet wired.
  */
-const TARGET_MINUTES: Record<ShiftPattern, number | null> = {
-  day: 8 * 60,
-  evening: 8 * 60,
-  full: 16 * 60,
-  unknown: null,
-}
 
 /** «7:24». Latin digits and a fixed shape, like every other figure in the console. */
 function hoursAndMinutes(minutes: number): string {
@@ -178,7 +171,7 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
   /** How far short of its own pattern's target, or null when there is nothing honest to say. */
   const shortOf = (row: ShiftHistoryRow): number | null => {
     if (!row.worked) return null
-    const target = TARGET_MINUTES[row.worked.pattern]
+    const target = SHIFT_TARGET_MINUTES[row.worked.pattern]
     if (target === null) return null
     return shortfallMinutes(row.worked, target)
   }
@@ -211,13 +204,6 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
   const driverOptions = [...new Set((rows ?? []).map((row) => row.driverId))]
     .map((id) => ({ id, name: driverName(id) }))
     .sort((a, b) => a.name.localeCompare(b.name))
-
-  const PATTERN_LABEL: Record<ShiftPattern, string> = {
-    day: t.completedShifts.patternDay,
-    evening: t.completedShifts.patternEvening,
-    full: t.completedShifts.patternFull,
-    unknown: t.completedShifts.patternUnknown,
-  }
 
   /*
    * The date column, which is the whole reason this screen was unreadable.
@@ -302,8 +288,10 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
           <td className="px-3 py-2 font-medium">{driverName(shift.driverId)}</td>
           <td className="num px-3 py-2">{vehicleCode(shift.vehicleId)}</td>
           <td className="px-3 py-2">
-            <Badge tone={shift.worked?.pattern === 'unknown' || !shift.worked ? 'neutral' : 'info'}>
-              {PATTERN_LABEL[shift.worked?.pattern ?? 'unknown']}
+            {/* «صباحية · 8س» — the pattern beside the target it is judged against. Every row here is
+                approved or cancelled, never running, so an unclassified one reads «غير محدّد». */}
+            <Badge tone={shiftPatternTone(shift.worked)}>
+              {shiftPatternLabel(shift.worked, t.completedShifts)}
             </Badge>
           </td>
           <td className="whitespace-nowrap px-3 py-2">{workedCell(shift)}</td>

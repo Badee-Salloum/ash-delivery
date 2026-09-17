@@ -1,5 +1,14 @@
 import { Fragment, type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
-import { type RoleKey, type ShiftPattern, can, minor, parseMinor, shortfallMinutes } from '@ash/domain'
+import {
+  type RoleKey,
+  SHIFT_TARGET_MINUTES,
+  type ShiftPattern,
+  type ShiftSlot,
+  can,
+  minor,
+  parseMinor,
+  shortfallMinutes,
+} from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { Badge, Card, Figure, Money, Pending, Stat } from '../ui.tsx'
@@ -36,23 +45,17 @@ interface Attendee {
 const hhmm = (iso: string): string =>
   new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 
-/**
- * The same per-pattern targets the completed-shifts screen applies.
- *
- * Duplicated deliberately and briefly: both belong in `settings` beside the FX rate, and until they
- * are there a shared constant in a third module would be a home for a rule that has no home yet.
- * `unknown` is null — a shift with no pattern cannot be short of anything.
+/*
+ * Per-pattern targets are the domain's `SHIFT_TARGET_MINUTES` — the same table the completed-shifts
+ * screen applies, so the tile and the list it links to cannot disagree. `unknown` is null: a shift
+ * with no pattern cannot be short of anything.
  */
-const DASHBOARD_TARGET_MINUTES: Record<ShiftPattern, number | null> = {
-  day: 8 * 60,
-  evening: 8 * 60,
-  full: 16 * 60,
-  unknown: null,
-}
 
 interface WorkedTime {
   minutes: number | null
   pattern: ShiftPattern
+  /** Absent on an older API. */
+  slot?: ShiftSlot | null
   abandoned: boolean
 }
 
@@ -319,9 +322,9 @@ export function Dashboard(): ReactNode {
    * would put yesterday's shortfall beside today's profit.
    *
    * Each shift is judged against its own pattern's target: a `full` shift covers both slots, so
-   * against one slot's eight hours a 13-hour shift would read as five hours of overtime when it is
-   * three hours short of the two it replaced. A live shift, an unclassified one and one whose close
-   * was simply forgotten all return null and are counted as neither short nor met.
+   * it is held to twelve hours rather than one slot's eight — a 10.5-hour double is ninety minutes
+   * short, not two and a half hours over. A live shift, an unclassified one and one whose close was
+   * simply forgotten all return null and are counted as neither short nor met.
    */
   useEffect(() => {
     const businessDate = data?.businessDate
@@ -364,8 +367,8 @@ export function Dashboard(): ReactNode {
    * WAS IT A SINGLE OR A DOUBLE — per driver, for the day on screen.
    *
    * Two shapes both mean he worked both slots, and reading only one of them would be wrong half the
-   * time: a single `full` shift (12:00 → 01:00, 36 of 129 measured shifts) OR two separate shifts
-   * on the same business date. `pending` is the honest answer for a morning shift still running.
+   * time: a single `full` shift (closed after ten hours or more) OR two separate shifts on the same
+   * business date. `pending` is the honest answer for any shift still running.
    */
   const byDriver = shiftsByDriver(dayShifts ?? [])
   const shiftShape = (driverId: string): ShiftShape | null => shiftShapeForDay(byDriver.get(driverId) ?? [])
@@ -375,7 +378,7 @@ export function Dashboard(): ReactNode {
   let shortMinutes = 0
   for (const shift of dayShifts ?? []) {
     if (!shift.worked) continue
-    const target = DASHBOARD_TARGET_MINUTES[shift.worked.pattern]
+    const target = SHIFT_TARGET_MINUTES[shift.worked.pattern]
     if (target === null) continue
     const short = shortfallMinutes(shift.worked, target)
     if (short !== null && short > 0) {

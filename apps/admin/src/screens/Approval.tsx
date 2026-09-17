@@ -36,7 +36,7 @@ import {
 } from '../duplicate-choice.ts'
 import { useConfirm, useToast } from '../feedback.tsx'
 import { LatestRequestGuard } from '../latest-request.ts'
-import { shiftShapeOf } from '../shift-shape.ts'
+import { shiftPatternLabel, shiftPatternTone } from '../shift-shape.ts'
 import { isValidOpeningFundInput, openingApprovalRequest } from '../opening-funds.ts'
 import {
   buildOrderDuplicateRevision,
@@ -552,8 +552,9 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     shiftEnd === null ? null : Date.parse(shiftEnd),
   )
   // One shift judged alone, so it cannot see a second one that day — the dashboard, which holds
-  // the whole day per driver, is where a two-row double is caught.
-  const shiftShape = shiftShapeOf({ worked: shiftWorked })
+  // the whole day per driver, is where a two-row double is caught. Only an open or suspended shift
+  // is RUNNING; an unclassified row in any other state has simply not started.
+  const shiftRunning = review.state === 'open' || review.state === 'suspended'
 
   const cashDeductions = review.cashDeductions ?? []
   const unresolvedWindowCount = countUnresolvedWindowRows(review.orders, cashDeductions)
@@ -1035,17 +1036,14 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           * you were looking at one slot or two. That is the difference between a driver who is two
           * hours short and one who covered a colleague's evening.
           *
-          * `unknown` is shown rather than hidden. On a RUNNING morning shift it is the honest
-          * answer: a 12:00 start is a day shift or a full one, and only the end says which.
+          * It reads «صباحية · 8س», «مسائية · 8س» or «دبل · 12س»: the pattern and the target it is
+          * judged against. A RUNNING shift reads «جارية — صباحية» — its slot is certain, its pattern
+          * is not, because any shift that runs ten hours becomes a double.
           */}
         <span className="flex flex-col items-end gap-1">
           <Badge tone="slate">{t.shift.states[review.state as keyof typeof t.shift.states] ?? review.state}</Badge>
-          <Badge tone={shiftShape === 'double' ? 'info' : 'neutral'}>
-            {shiftShape === 'double'
-              ? t.dashboard.shiftDouble
-              : shiftShape === 'pending'
-                ? t.dashboard.shiftPending
-                : t.dashboard.shiftSingle}
+          <Badge tone={shiftPatternTone(shiftWorked)}>
+            {shiftPatternLabel(shiftWorked, t.completedShifts, shiftRunning)}
           </Badge>
         </span>
       </div>

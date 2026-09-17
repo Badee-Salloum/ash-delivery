@@ -1,72 +1,81 @@
+/// <reference types="node" />
+
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { shiftShapeForDay, shiftShapeOf, shiftsByDriver } from './shift-shape.ts'
+import * as domain from '@ash/domain'
+import { ar, en } from '@ash/client/i18n'
+import {
+  shiftPatternLabel,
+  shiftPatternTone,
+  shiftShapeForDay,
+  shiftShapeOf,
+  shiftsByDriver,
+} from './shift-shape.ts'
 
-const shift = (pattern?: 'day' | 'evening' | 'full' | 'unknown') =>
-  pattern === undefined ? {} : { worked: { pattern } }
+/*
+ * The shape rules moved to the domain (`packages/domain/test/shift/shape.test.ts` holds their
+ * behaviour). What stays here is the proof that the console uses THOSE rules rather than a copy,
+ * and the words the badges are built from.
+ */
 
-describe('«شيفت عادية او دبل» — the two shapes of a double', () => {
-  it('reads ONE full shift as a double', () => {
-    // The dominant shape in the data: 12:00 → 01:00, one row, both slots. 36 of 129 measured.
-    expect(shiftShapeForDay([shift('full')])).toBe('double')
-    expect(shiftShapeOf(shift('full'))).toBe('double')
-  })
+const shiftShapeSource = readFileSync(new URL('./shift-shape.ts', import.meta.url), 'utf8')
+const liveSource = readFileSync(new URL('./screens/LiveShifts.tsx', import.meta.url), 'utf8')
+const approvalSource = readFileSync(new URL('./screens/Approval.tsx', import.meta.url), 'utf8')
 
-  it('reads TWO ordinary shifts on one day as a double too', () => {
-    // The shape a pattern-only reading misses entirely. Whatever either one is, he worked twice.
-    expect(shiftShapeForDay([shift('day'), shift('evening')])).toBe('double')
-    expect(shiftShapeForDay([shift('day'), shift('day')])).toBe('double')
-  })
-
-  it('counts the rows BEFORE asking the pattern', () => {
-    // A closed morning shift plus a live second one is already a double. Asking `workedTime` about
-    // the live row would answer `pending` and hide a fact the row count has already settled.
-    expect(shiftShapeForDay([shift('day'), shift('unknown')])).toBe('double')
-  })
-
-  it('reads a single day or evening shift as normal', () => {
-    expect(shiftShapeForDay([shift('day')])).toBe('single')
-    expect(shiftShapeForDay([shift('evening')])).toBe('single')
-  })
-
-  it('says «not yet known» for a running morning shift rather than guessing', () => {
-    /*
-     * This is the whole reason `unknown` exists. A 12:00 start is a single or a double and only the
-     * end says which — a badge that read «عادية» at noon and «دبل» after midnight would be changing
-     * its story in front of the manager who is about to settle real cash on it.
-     */
-    expect(shiftShapeForDay([shift('unknown')])).toBe('pending')
-    expect(shiftShapeOf(shift('unknown'))).toBe('pending')
-  })
-
-  it('distinguishes «we know nothing» from «عادية»', () => {
-    // A driver with orders but no shift row must NOT be labelled as having worked a normal shift.
-    expect(shiftShapeForDay([])).toBeNull()
-    expect(shiftShapeOf(undefined)).toBeNull()
-    expect(shiftShapeOf(null)).toBeNull()
-    // An API old enough to serve no `worked` is the same case, not a normal shift.
-    expect(shiftShapeOf(shift())).toBeNull()
-    expect(shiftShapeForDay([shift()])).toBeNull()
-  })
-
-  it('cannot see a second shift when judging one alone', () => {
-    // The documented limit of `shiftShapeOf`: it is what the running-shifts board can say about a
-    // card, and it is why the dashboard groups by driver first.
-    expect(shiftShapeOf(shift('day'))).toBe('single')
-    expect(shiftShapeForDay([shift('day'), shift('day')])).toBe('double')
+describe('the console’s shift shape is the domain’s', () => {
+  it('re-exports the domain functions rather than keeping a copy', () => {
+    expect(shiftShapeOf).toBe(domain.shiftShapeOf)
+    expect(shiftShapeForDay).toBe(domain.shiftShapeForDay)
+    expect(shiftsByDriver).toBe(domain.shiftsByDriver)
+    expect(shiftShapeSource).not.toContain('export function shiftShapeOf')
+    expect(shiftShapeSource).not.toContain('16 * 60')
   })
 })
 
-describe('grouping a day by driver', () => {
-  it('keeps every row, including a driver who worked twice', () => {
-    const grouped = shiftsByDriver([
-      { driverId: 'a', worked: { pattern: 'day' as const } },
-      { driverId: 'b', worked: { pattern: 'full' as const } },
-      { driverId: 'a', worked: { pattern: 'evening' as const } },
-    ])
-    expect(grouped.get('a')).toHaveLength(2)
-    expect(grouped.get('b')).toHaveLength(1)
-    expect(shiftShapeForDay(grouped.get('a') ?? [])).toBe('double')
-    expect(shiftShapeForDay(grouped.get('b') ?? [])).toBe('double')
-    expect(shiftShapeForDay(grouped.get('nobody') ?? [])).toBeNull()
+describe('the pattern badge — «صباحية · 8س»', () => {
+  const labels = ar.completedShifts
+
+  it('names the pattern beside the owner’s target', () => {
+    expect(shiftPatternLabel({ pattern: 'day', slot: 'day', abandoned: false }, labels)).toBe('صباحية · 8س')
+    expect(shiftPatternLabel({ pattern: 'evening', slot: 'evening', abandoned: false }, labels)).toBe('مسائية · 8س')
+    expect(shiftPatternLabel({ pattern: 'full', slot: 'day', abandoned: false }, labels)).toBe('دبل · 12س')
+    expect(shiftPatternLabel({ pattern: 'full', slot: 'day', abandoned: false }, en.completedShifts)).toBe(
+      'Double · 12h',
+    )
+  })
+
+  it('says a running shift is running, with its slot, and guesses no pattern', () => {
+    expect(shiftPatternLabel({ pattern: 'unknown', slot: 'day', abandoned: false }, labels, true)).toBe(
+      'جارية — صباحية',
+    )
+    expect(shiftPatternLabel({ pattern: 'unknown', slot: 'evening', abandoned: false }, labels, true)).toBe(
+      'جارية — مسائية',
+    )
+    // An API one version older serves no slot; the badge still says it is running.
+    expect(shiftPatternLabel({ pattern: 'unknown', abandoned: false }, labels, true)).toBe('جارية')
+  })
+
+  it('never calls a shift running unless the caller knows it is', () => {
+    // On the history screen an unclassified row is cancelled or never started — not running.
+    expect(shiftPatternLabel({ pattern: 'unknown', slot: 'day', abandoned: false }, labels)).toBe('غير محدّد')
+    expect(shiftPatternLabel(undefined, labels)).toBe('غير محدّد')
+    expect(shiftPatternLabel(undefined, labels, true)).toBe('جارية')
+  })
+
+  it('drops the target for a forgotten close, which is never judged', () => {
+    expect(shiftPatternLabel({ pattern: 'day', slot: 'day', abandoned: true }, labels)).toBe('صباحية')
+  })
+
+  it('makes a double stand out and nothing else', () => {
+    expect(shiftPatternTone({ pattern: 'full' })).toBe('info')
+    expect(shiftPatternTone({ pattern: 'day' })).toBe('neutral')
+    expect(shiftPatternTone({ pattern: 'unknown', slot: 'evening' })).toBe('neutral')
+    expect(shiftPatternTone(undefined)).toBe('neutral')
+  })
+
+  it('is what the live board and the approval page show', () => {
+    expect(liveSource).toContain('shiftPatternLabel(shift.worked, t.completedShifts, true)')
+    expect(approvalSource).toContain('shiftPatternLabel(shiftWorked, t.completedShifts, shiftRunning)')
+    expect(approvalSource).toContain("review.state === 'open' || review.state === 'suspended'")
   })
 })

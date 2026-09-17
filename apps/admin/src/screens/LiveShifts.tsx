@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useId, useRef, useState } from 'react'
-import type { ShiftPattern } from '@ash/domain'
+import type { ShiftPattern, ShiftSlot } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
-import { shiftShapeOf } from '../shift-shape.ts'
+import { shiftPatternLabel, shiftPatternTone } from '../shift-shape.ts'
 import { explainError } from '../errors.ts'
 import { explainLiveShiftActionError, type LiveShiftApiError } from '../live-shift-error.ts'
 import {
@@ -32,13 +32,14 @@ interface ShiftRow {
   /**
    * Which pattern the shift is, as far as it can be known while it is still running.
    *
-   * An EVENING start is unambiguous immediately — nothing it could still turn into is a day shift.
-   * A morning start is genuinely undecided: 12:00 is a single or a double and only the end says
-   * which, so it reads «غير محدّد» rather than guessing `day` and silently relabelling at midnight.
+   * The SLOT is known the moment the driver starts (before 15:00 local is the morning, otherwise the
+   * evening); the pattern is not, because any shift that runs ten hours becomes a double. So a
+   * running shift is `unknown` with its slot, and reads «جارية — صباحية».
    *
-   * Optional: a console served during a rolling deploy against the previous API gets no `worked`.
+   * Optional: a console served during a rolling deploy against the previous API gets no `worked`,
+   * and an API one version older serves no `slot`.
    */
-  worked?: { minutes: number | null; pattern: ShiftPattern; abandoned: boolean }
+  worked?: { minutes: number | null; pattern: ShiftPattern; slot?: ShiftSlot | null; abandoned: boolean }
   windowOpensAt?: string | null
 }
 interface DriverLite {
@@ -385,20 +386,15 @@ function LiveRow({
           {vehicleCode} · #{shift.shiftNo}
         </span>
         {/*
-          * SINGLE OR DOUBLE, while he is still out.
+          * WHICH SLOT, while he is still out: «جارية — صباحية» or «جارية — مسائية».
           *
-          * An evening start is already unambiguous — nothing it can still become is a day shift —
-          * so the manager knows immediately. A morning start is genuinely undecided until the
-          * driver comes back, and «لم تتحدّد بعد» is the honest answer rather than a guess that
-          * would quietly relabel itself at midnight.
+          * The slot is certain from the start; single or double is not — any shift that runs ten
+          * hours becomes a double — so the badge names the slot and says the shift is running
+          * rather than guessing a pattern that would relabel itself later.
           */}
-        {shiftShapeOf(shift) === null ? null : (
-          <Badge tone={shiftShapeOf(shift) === 'double' ? 'info' : 'neutral'}>
-            {shiftShapeOf(shift) === 'double'
-              ? t.dashboard.shiftDouble
-              : shiftShapeOf(shift) === 'pending'
-                ? t.dashboard.shiftPending
-                : t.dashboard.shiftSingle}
+        {shift.worked === undefined ? null : (
+          <Badge tone={shiftPatternTone(shift.worked)}>
+            {shiftPatternLabel(shift.worked, t.completedShifts, true)}
           </Badge>
         )}
         {canApprove ? (

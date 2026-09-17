@@ -1237,14 +1237,13 @@ orderNo: 'Order no.',
     /*
      * «شيفت عادية او دبل» — the owner's own question, in his own word.
      *
-     * A driver is DOUBLE two different ways and both must count: one `full` shift that covers both
-     * slots (12:00 → 01:00, the commonest shape in the data), or two separate shifts on the same
-     * business date. Reading only the pattern would miss the second; counting only rows would miss
-     * the first.
+     * A driver is DOUBLE two different ways and both must count: one `full` shift — closed after
+     * ten hours or more — that covers both slots, or two separate shifts on the same business date.
+     * Reading only the pattern would miss the second; counting only rows would miss the first.
      *
-     * `pending` is not a hedge. A morning start that is still running is genuinely undecided — it
-     * becomes a single or a double depending on when he comes back — and guessing would relabel
-     * itself at midnight in front of the manager.
+     * `pending` is not a hedge. ANY shift that is still running is genuinely undecided — morning or
+     * evening, it becomes a single or a double depending on how long it runs — and guessing would
+     * relabel itself in front of the manager.
      */
     shiftSingle: 'Single',
     shiftDouble: 'Double',
@@ -1392,10 +1391,13 @@ orderNo: 'Order no.',
 
   completedShifts: {
     pattern: 'Pattern',
-    patternDay: 'Day',
+    patternDay: 'Morning',
     patternEvening: 'Evening',
-    patternFull: 'Full — double',
+    patternFull: 'Double',
     patternUnknown: 'Undetermined',
+    patternWithTarget: '{pattern} · {h}h',
+    running: 'Running',
+    runningSlot: 'Running — {slot}',
     worked: 'Worked',
     target: 'Target',
     shortBy: 'Short by {t}',

@@ -1,69 +1,68 @@
 /**
- * «شيفت عادية او دبل» — the owner's question, and it has two right answers that look different.
+ * The console's view of a shift's shape and pattern.
  *
- * A driver has worked a DOUBLE in two distinct shapes, and a screen that reads only one of them is
- * wrong about roughly half the cases:
- *
- *   1. ONE `full` shift. The dominant shape in the data — 12:00 → 01:00, 36 of 129 measured shifts
- *      over a fortnight. One shift row, one driver, both slots.
- *   2. TWO shift rows on the same business date. Two ordinary shifts, same driver, same day.
- *
- * Reading only the pattern misses (2); counting only rows misses (1). Both are here.
- *
- * `pending` is not a hedge, it is the honest state. A morning start that is still running becomes a
- * single or a double depending on when the driver comes back, and `workedTime` deliberately refuses
- * to guess — a badge that said «عادية» at noon and «دبل» after midnight would be changing its story
- * in front of the manager. An EVENING start, by contrast, is unambiguous the moment it opens:
- * nothing it can still turn into is a day shift.
- *
- * `null` means «we know nothing», which is not the same as «عادية». A driver with orders but no
- * shift row in the range — a shift outside the window read, or one not yet created — must not be
- * labelled as having worked a normal shift.
+ * The rules themselves — single/double/pending, and the per-pattern targets — are the domain's
+ * (`packages/domain/src/shift/shape.ts` and `worked-time.ts`), so the API, the dashboard and every
+ * screen judge a shift the same way. This module re-exports them for the screens that already
+ * import from here, and adds the one thing the domain may not hold: the words.
  */
 
-import type { ShiftPattern } from '@ash/domain'
+import { SHIFT_TARGET_MINUTES, type ShiftPattern, type ShiftSlot } from '@ash/domain'
 
-export type ShiftShape = 'single' | 'double' | 'pending'
+export { type ShapedShift, type ShiftShape, shiftShapeForDay, shiftShapeOf, shiftsByDriver } from '@ash/domain'
 
-/** Just enough of a shift row to judge its shape. */
-export interface ShapedShift {
-  readonly worked?: { readonly pattern: ShiftPattern } | undefined
+/** The strings a pattern badge is built from — `t.completedShifts` satisfies this. */
+export interface ShiftPatternLabels {
+  readonly patternDay: string
+  readonly patternEvening: string
+  readonly patternFull: string
+  readonly patternUnknown: string
+  /** «{pattern} · {h}س» — a judged pattern beside the owner's target for it. */
+  readonly patternWithTarget: string
+  /** «جارية» — a running shift whose slot is not known. */
+  readonly running: string
+  /** «جارية — {slot}» — a running shift: its slot is certain, its pattern is not yet. */
+  readonly runningSlot: string
+}
+
+/** As much of the API's `worked` object as a badge reads. An older API serves no `slot`. */
+export interface LabelledWorked {
+  readonly pattern: ShiftPattern
+  readonly slot?: ShiftSlot | null | undefined
+  readonly abandoned?: boolean | undefined
 }
 
 /**
- * One shift, judged alone — what the running-shifts board and a shift's own page can say.
+ * «صباحية · 8س», «مسائية · 8س», «دبل · 12س», or «جارية — صباحية» for a shift still out.
  *
- * This cannot see a second shift on the same day, so it can never return `double` for shape (2).
- * Use `shiftShapeForDay` wherever all of a driver's shifts for the date are in hand.
- */
-export function shiftShapeOf(shift: ShapedShift | null | undefined): ShiftShape | null {
-  const pattern = shift?.worked?.pattern
-  if (pattern === undefined) return null
-  if (pattern === 'full') return 'double'
-  if (pattern === 'unknown') return 'pending'
-  return 'single'
-}
-
-/**
- * All of ONE driver's shifts on ONE business date.
+ * `running` comes from the caller because only the caller knows the shift's STATE: an `unknown`
+ * pattern on the live board is a shift in progress, while on the history screen it is a cancelled
+ * or pre-window row that must not be presented as running.
  *
- * Two rows settle it immediately: whatever either pattern turns out to be, he worked twice. That is
- * why the count is checked before the pattern — a driver with a running morning shift AND a closed
- * one is a double already, and asking `workedTime` about the live row would only return `pending`.
+ * A forgotten close keeps its slot's name but loses the target — it is never judged against one.
  */
-export function shiftShapeForDay(rows: readonly ShapedShift[]): ShiftShape | null {
-  if (rows.length === 0) return null
-  if (rows.length > 1) return 'double'
-  return shiftShapeOf(rows[0])
-}
-
-/** Group a day's shifts by driver, ready for `shiftShapeForDay`. */
-export function shiftsByDriver<T extends { driverId: string }>(rows: readonly T[]): Map<string, T[]> {
-  const grouped = new Map<string, T[]>()
-  for (const row of rows) {
-    const existing = grouped.get(row.driverId)
-    if (existing) existing.push(row)
-    else grouped.set(row.driverId, [row])
+export function shiftPatternLabel(
+  worked: LabelledWorked | null | undefined,
+  labels: ShiftPatternLabels,
+  running = false,
+): string {
+  const name: Record<ShiftSlot | 'full', string> = {
+    day: labels.patternDay,
+    evening: labels.patternEvening,
+    full: labels.patternFull,
   }
-  return grouped
+  if (!worked || worked.pattern === 'unknown') {
+    if (!running) return labels.patternUnknown
+    const slot = worked?.slot ?? null
+    return slot === null ? labels.running : labels.runningSlot.replace('{slot}', name[slot])
+  }
+  const label = name[worked.pattern]
+  const target = SHIFT_TARGET_MINUTES[worked.pattern]
+  if (worked.abandoned === true || target === null) return label
+  return labels.patternWithTarget.replace('{pattern}', label).replace('{h}', String(target / 60))
+}
+
+/** A double stands out; everything else — including a shift not yet classified — reads neutral. */
+export function shiftPatternTone(worked: LabelledWorked | null | undefined): 'info' | 'neutral' {
+  return worked?.pattern === 'full' ? 'info' : 'neutral'
 }
