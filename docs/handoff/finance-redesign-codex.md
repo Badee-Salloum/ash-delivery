@@ -128,12 +128,15 @@ branch managers never see purchase prices/instalments/book values; company debts
 - [ ] **C4** fixed assets
 - [ ] **C5** depreciation
 - [ ] **P6** vehicle history
-- [ ] **P4** branch recurring expenses + receipt upload
+- [ ] **P4** branch recurring expenses + receipt upload — IN PROGRESS in an agent worktree based on `4a3cec8`
+      (migration `0075`, local DB `ash_test_p4`; the dashboard "due" card is a follow-up after P3 merges).
 - [ ] **C6** company recurring expenses + full company dashboard section
 - [ ] Docs: CLAUDE.md decisions 18–23 + money rules 9–12, ASSUMPTIONS, RUNBOOK «صندوق الشركة», PROGRESS, TESTS.md
 - [ ] **Production** (owner go-ahead required): deploy api/admin/driver, run migrations 0064+, cutover.
 
-Migration numbers are assigned in ship order: 0064 = P0 permission; later ones follow whatever lands next.
+Migration numbers (none applied to production yet; `migrate.ts` applies files in sorted order, gaps are fine):
+0064 P0 permission · 0065–0066 C1 · 0067 C2 (0068 spare) · 0069–0071 reserved C3–C5 · 0072–0074 reserved P6 ·
+0075(–0076) P4 · 0077+ C6.
 
 ---
 
