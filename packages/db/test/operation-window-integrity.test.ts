@@ -78,10 +78,11 @@ if (!DATABASE_URL) {
       await pool.query(
         `INSERT INTO shifts
            (id, branch_id, driver_id, vehicle_id, shift_no, business_date, week_start_date, state,
-            open_approved_at, open_approved_by, submitted_at)
+            open_approved_at, open_approved_by, submitted_at, window_opens_at)
          VALUES
            ($1, $2, $3, $4, 1, DATE '2026-08-13', DATE '2026-08-09', 'pending_review',
-            TIMESTAMPTZ '2026-08-13 16:49:30+00', $5, TIMESTAMPTZ '2026-08-13 22:30:45+00')`,
+            TIMESTAMPTZ '2026-08-13 16:49:30+00', $5, TIMESTAMPTZ '2026-08-13 22:30:45+00',
+            TIMESTAMPTZ '2026-08-13 16:49:30+00')`,
         [shiftId, branchId, driverId, vehicleId, managerId],
       )
       await pool.query(

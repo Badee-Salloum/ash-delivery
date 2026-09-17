@@ -73,11 +73,11 @@ if (!DATABASE_URL) {
     await pool.query(
       `INSERT INTO shifts
          (id, branch_id, driver_id, vehicle_id, shift_no, business_date, week_start_date, state,
-          open_approved_at, open_approved_by)
+          open_approved_at, open_approved_by, window_opens_at)
        VALUES
-         ($1, $3, $4, $5, 1, DATE '2026-08-13', DATE '2026-08-09', 'awaiting_open_approval', NULL, NULL),
+         ($1, $3, $4, $5, 1, DATE '2026-08-13', DATE '2026-08-09', 'awaiting_open_approval', NULL, NULL, NULL),
          ($2, $3, $6, $7, 1, DATE '2026-08-13', DATE '2026-08-09', 'open',
-          TIMESTAMPTZ '2026-08-13 16:48:06.268377+00', $8)`,
+          TIMESTAMPTZ '2026-08-13 16:48:06.268377+00', $8, TIMESTAMPTZ '2026-08-13 16:48:06.268377+00')`,
       [
         initialShiftId,
         precisionShiftId,
@@ -105,6 +105,8 @@ if (!DATABASE_URL) {
         state: 'open',
         openApprovedAt: '2026-08-13T16:48:06.268Z',
         openApprovedBy: managerId,
+        // approveOpen always stamps the window bound with the approval (shifts_window_opens_at_ck, 0054).
+        windowOpensAt: '2026-08-13T16:48:06.268Z',
       },
       managerId,
     )

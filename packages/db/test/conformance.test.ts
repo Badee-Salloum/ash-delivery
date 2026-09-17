@@ -356,6 +356,8 @@ if (!DATABASE_URL) {
         state: 'open',
         openApprovedAt: '2026-07-21T04:00:00.000Z',
         openApprovedBy: USER,
+        // Since 0054 an approved shift must carry its window bound (shifts_window_opens_at_ck).
+        windowOpensAt: '2026-07-21T04:00:00.000Z',
         submittedAt: null,
       }, USER)
 
