@@ -21,6 +21,8 @@ import {
   writeoffReceivableRequest,
 } from '@ash/contracts'
 import {
+  COMPANY_FUND_KINDS,
+  type FundRef,
   type Minor,
   type Posting,
   type RestorationPlan,
@@ -86,16 +88,35 @@ function assertPersistableTreasuryPostings(postings: readonly Posting[]): void {
   }
 }
 
+/** Every code head that names company money: صندوق الشركة in a branch, and the whole HQ ledger. */
+const COMPANY_CODE_HEADS: ReadonlySet<string> = new Set(['company_box', ...COMPANY_FUND_KINDS])
+
 /**
- * Whether a client-named fund code resolves to صندوق الشركة — through the SAME parser the posting
- * uses, so `company_box:anything` cannot pass a string comparison and still move the fund. A code
- * the parser refuses is not the company fund; building the posting refuses it exactly as before.
+ * Whether a client-named fund code names صندوق الشركة — or any account of the company ledger.
+ *
+ * By its FIRST SEGMENT, deliberately. This used to ask the posting's own parser, so that
+ * `company_box:anything` could not slip past a string comparison. Since C1 that parser is strict and
+ * REFUSES `company_box:anything`, so asking it would call the alias «not the company fund» and turn
+ * the named 422 below into an anonymous 500. The head is what the parser keys on, so the two can
+ * never disagree about which codes are company money. `company_cash:USD` and every other company
+ * ledger account are refused the same way: they live only in the HQ ledger, which a branch entry
+ * can never reach.
  */
 function namesCompanyBox(code: string): boolean {
+  return COMPANY_CODE_HEADS.has(code.split(':')[0] ?? '')
+}
+
+/**
+ * The fund a client named, or a 422 naming the line. `fundRefFromCode` throws a RangeError for a
+ * known account written wrong (`driver_cash` with no driver, `office_cash:x`); that is the caller's
+ * mistake, not a server fault.
+ */
+function clientFundRef(code: string, line: number): FundRef {
   try {
-    return fundRefFromCode(code).kind === 'company_box'
-  } catch {
-    return false
+    return fundRefFromCode(code)
+  } catch (error) {
+    if (error instanceof RangeError) throw new ServiceError(422, 'invalid_fund_code', { line, fundCode: code })
+    throw error
   }
 }
 
@@ -430,8 +451,8 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       occurrenceKey,
       // fundRefFromCode, NOT a blanket cost-centre wrap: naming `office_cash` must move the
       // office cash fund, not a look-alike called `cost_center:office_cash`.
-      lines: body.lines.map((l) => ({
-        fund: fundRefFromCode(l.fundCode),
+      lines: body.lines.map((l, index) => ({
+        fund: clientFundRef(l.fundCode, index),
         side: l.side,
         amount: l.amount,
       })),
@@ -448,6 +469,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       postingDate: todayFor(deps),
       weekStartDate: weekStartFor(businessDate),
       fxDayId,
+      sypMinorPerUsd: null,
       createdBy: req.actor!.userId,
       reason: body.reason,
     })
@@ -526,6 +548,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
         postingDate,
         weekStartDate,
         fxDayId,
+        sypMinorPerUsd: null,
         createdBy: req.actor!.userId,
         reason,
       })
@@ -600,6 +623,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
           postingDate: businessDate,
           weekStartDate: weekStartFor(businessDate),
           fxDayId,
+          sypMinorPerUsd: null,
           createdBy: actorId,
           reason,
         })
@@ -906,6 +930,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
             postingDate: businessDate,
             weekStartDate: weekStartFor(businessDate),
             fxDayId,
+            sypMinorPerUsd: null,
             createdBy: req.actor!.userId,
             reason: body.reason,
           })
@@ -1059,6 +1084,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
           postingDate: businessDate,
           weekStartDate: weekStartFor(businessDate),
           fxDayId,
+          sypMinorPerUsd: null,
           createdBy: req.actor!.userId,
           reason: body.reason,
         })
@@ -1162,6 +1188,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
           postingDate: businessDate,
           weekStartDate: weekStartFor(businessDate),
           fxDayId,
+          sypMinorPerUsd: null,
           createdBy: req.actor!.userId,
           reason: body.reason,
         })
@@ -1208,12 +1235,24 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
   const companyFundWrite = { config: { permission: 'company_fund.manage' as const, subject: targetBranch } }
 
   /**
+   * These two routes move `company_box`, a BRANCH account («حساب الشركة لدى الفرع»). The company (HQ)
+   * row may be named under `company_fund.manage`, but it holds no `company_box` and the database
+   * refuses one there (0066) — so say so here instead of failing at COMMIT. C2 replaces both routes.
+   */
+  const assertOperatingBranch = async (branchId: string): Promise<void> => {
+    if ((await deps.directory.branch(branchId))?.kind === 'company') {
+      throw new ServiceError(403, 'company_branch_not_addressable')
+    }
+  }
+
+  /**
    * Put the owner's own money into صندوق الشركة. Its counterpart is `owner_funding`, the same
    * contra account a branch deposit uses — so «where did this come from» has one answer, not two.
    */
   app.post('/company-fund/deposit', companyFundWrite, async (req, reply) => {
     const body = companyMoveRequest.parse(req.body)
     const branchId = resolveBranch(req)
+    await assertOperatingBranch(branchId)
     if (body.amount <= 0n) throw new ServiceError(422, 'amount_must_be_positive')
 
     const posting = assertBalanced({
@@ -1235,6 +1274,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
   app.post('/company-fund/withdraw', companyFundWrite, async (req, reply) => {
     const body = companyMoveRequest.parse(req.body)
     const branchId = resolveBranch(req)
+    await assertOperatingBranch(branchId)
     if (body.amount <= 0n) throw new ServiceError(422, 'amount_must_be_positive')
 
     const posting = assertBalanced({
@@ -1699,6 +1739,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
           postingDate: businessDate,
           weekStartDate: weekStartFor(businessDate),
           fxDayId,
+          sypMinorPerUsd: null,
           createdBy: actorId,
           reason: body.reason,
         })
@@ -1782,6 +1823,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       postingDate: businessDate,
       weekStartDate: weekStartFor(businessDate),
       fxDayId,
+      sypMinorPerUsd: null,
       createdBy,
       reason,
     })

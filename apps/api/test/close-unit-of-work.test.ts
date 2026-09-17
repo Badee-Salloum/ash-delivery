@@ -345,6 +345,7 @@ async function clonePendingShift(harness: Harness, firstId: string, prefix: stri
     postingDate: first.businessDate,
     weekStartDate: first.weekStartDate,
     fxDayId,
+    sypMinorPerUsd: null,
     createdBy: 'u-bm',
   })
   return secondId

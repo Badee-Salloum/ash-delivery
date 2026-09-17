@@ -120,6 +120,7 @@ export function registerIncomeRoutes(app: FastifyInstance, deps: Deps): void {
           postingDate: todayFor(deps),
           weekStartDate: weekStartFor(businessDate),
           fxDayId,
+          sypMinorPerUsd: null,
           createdBy: req.actor!.userId,
           reason: record.description,
         })

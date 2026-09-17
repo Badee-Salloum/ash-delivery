@@ -250,6 +250,7 @@ export function registerAdvanceRoutes(app: FastifyInstance, deps: Deps): void {
           postingDate: todayFor(deps),
           weekStartDate: weekStartFor(businessDate),
           fxDayId,
+          sypMinorPerUsd: null,
           createdBy: req.actor!.userId,
           reason: record.description,
         })
@@ -349,6 +350,7 @@ export function registerAdvanceRoutes(app: FastifyInstance, deps: Deps): void {
               postingDate: todayFor(deps),
               weekStartDate: weekStartFor(businessDate),
               fxDayId,
+              sypMinorPerUsd: null,
               createdBy: req.actor!.userId,
               reason: body.reason,
             },
@@ -442,6 +444,7 @@ export function registerAdvanceRoutes(app: FastifyInstance, deps: Deps): void {
               postingDate: todayFor(deps),
               weekStartDate: weekStartFor(businessDate),
               fxDayId,
+              sypMinorPerUsd: null,
               createdBy: req.actor!.userId,
               reason: body.reason,
             },

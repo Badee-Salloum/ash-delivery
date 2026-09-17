@@ -389,13 +389,13 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
         businessDate: '2026-07-22',
         postingDate: '2026-07-22',
         weekStartDate: weekStartFor('2026-07-22'),
-        fxDayId: 1,
+        fxDayId: 1, sypMinorPerUsd: null,
         weekLockId: null,
         reason: 'cost centre fixture',
         createdBy: 'u-bm',
         lines: [
-          { fundCode, side: 'D', amount: syp(amount) },
-          { fundCode: 'office_cash', side: 'C', amount: syp(amount) },
+          { fundCode, side: 'D', amount: syp(amount), currency: 'SYP_NEW' },
+          { fundCode: 'office_cash', side: 'C', amount: syp(amount), currency: 'SYP_NEW' },
         ],
       })
     }
@@ -404,11 +404,11 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
     h.deps.ledger.entries.push({
       id: 21_000, branchId: BRANCH, eventType: 'manual', shiftId: null,
       occurrenceKey: 'cost-centre-revenue', businessDate: '2026-07-22', postingDate: '2026-07-22',
-      weekStartDate: weekStartFor('2026-07-22'), fxDayId: 1, weekLockId: null,
+      weekStartDate: weekStartFor('2026-07-22'), fxDayId: 1, sypMinorPerUsd: null, weekLockId: null,
       reason: 'cost centre fixture', createdBy: 'u-bm',
       lines: [
-        { fundCode: 'office_cash', side: 'D', amount: syp(1_000) },
-        { fundCode: 'company_revenue', side: 'C', amount: syp(1_000) },
+        { fundCode: 'office_cash', side: 'D', amount: syp(1_000), currency: 'SYP_NEW' },
+        { fundCode: 'company_revenue', side: 'C', amount: syp(1_000), currency: 'SYP_NEW' },
       ],
     })
 
@@ -441,11 +441,11 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
     h.deps.ledger.entries.push({
       id: 22_000, branchId: BRANCH, eventType: 'income', shiftId: null,
       occurrenceKey: 'other-income-fixture', businessDate: '2026-07-22', postingDate: '2026-07-22',
-      weekStartDate: weekStartFor('2026-07-22'), fxDayId: 1, weekLockId: null,
+      weekStartDate: weekStartFor('2026-07-22'), fxDayId: 1, sypMinorPerUsd: null, weekLockId: null,
       reason: 'office share of an outside job', createdBy: 'u-bm',
       lines: [
-        { fundCode: 'office_cash', side: 'D', amount: syp(250) },
-        { fundCode: 'other_income', side: 'C', amount: syp(250) },
+        { fundCode: 'office_cash', side: 'D', amount: syp(250), currency: 'SYP_NEW' },
+        { fundCode: 'other_income', side: 'C', amount: syp(250), currency: 'SYP_NEW' },
       ],
     })
 
@@ -482,15 +482,15 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
         businessDate,
         postingDate: businessDate,
         weekStartDate: weekStartFor(businessDate),
-        fxDayId: 1,
+        fxDayId: 1, sypMinorPerUsd: null,
         weekLockId: null,
         reason: 'profit range fixture',
         createdBy: 'u-bm',
         lines: [
-          { fundCode: 'office_cash', side: 'D', amount: syp(company + driver + yalago) },
-          { fundCode: 'company_revenue', side: 'C', amount: syp(company) },
-          { fundCode: `driver_share_payable:${DRIVER_ID}`, side: 'C', amount: syp(driver), role: 'driver_share' },
-          { fundCode: 'yalago_income', side: 'C', amount: syp(yalago) },
+          { fundCode: 'office_cash', side: 'D', amount: syp(company + driver + yalago), currency: 'SYP_NEW' },
+          { fundCode: 'company_revenue', side: 'C', amount: syp(company), currency: 'SYP_NEW' },
+          { fundCode: `driver_share_payable:${DRIVER_ID}`, side: 'C', amount: syp(driver), currency: 'SYP_NEW', role: 'driver_share' },
+          { fundCode: 'yalago_income', side: 'C', amount: syp(yalago), currency: 'SYP_NEW' },
         ],
       })
     }
@@ -544,13 +544,13 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
       businessDate: today,
       postingDate: today,
       weekStartDate: weekStartFor(today),
-      fxDayId: 1,
+      fxDayId: 1, sypMinorPerUsd: null,
       weekLockId: null,
       reason: 'legacy profit batch fixture',
       createdBy: 'u-bm',
       lines: [
-        { fundCode: 'fee_earned', side: 'D', amount: syp(250) },
-        { fundCode: `driver_share_payable:${DRIVER_ID}`, side: 'C', amount: syp(250), role: 'driver_share' },
+        { fundCode: 'fee_earned', side: 'D', amount: syp(250), currency: 'SYP_NEW' },
+        { fundCode: `driver_share_payable:${DRIVER_ID}`, side: 'C', amount: syp(250), currency: 'SYP_NEW', role: 'driver_share' },
       ],
     })
 
@@ -573,7 +573,7 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
       businessDate: today,
       postingDate: today,
       weekStartDate: weekStartFor(today),
-      fxDayId: 1,
+      fxDayId: 1, sypMinorPerUsd: null,
       weekLockId: null,
       createdBy: 'u-bm',
       reason: 'legacy profit fixture',
@@ -585,8 +585,8 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
         eventType: 'share_split',
         occurrenceKey: 'legacy-share',
         lines: [
-          { fundCode: 'fee_earned', side: 'D', amount: syp(400) },
-          { fundCode: `driver_share_payable:${DRIVER_ID}`, side: 'C', amount: syp(400), role: 'driver_share' },
+          { fundCode: 'fee_earned', side: 'D', amount: syp(400), currency: 'SYP_NEW' },
+          { fundCode: `driver_share_payable:${DRIVER_ID}`, side: 'C', amount: syp(400), currency: 'SYP_NEW', role: 'driver_share' },
         ],
       },
       {
@@ -595,9 +595,9 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
         eventType: 'driver_cash_deduction',
         occurrenceKey: 'legacy-deduction',
         lines: [
-          { fundCode: `driver_share_payable:${DRIVER_ID}`, side: 'D', amount: syp(400), role: 'cash_deduction_share' },
-          { fundCode: `driver_receivable_cash:${DRIVER_ID}`, side: 'D', amount: syp(100), role: 'cash_deduction_overflow' },
-          { fundCode: `driver_cash:${DRIVER_ID}`, side: 'C', amount: syp(500), role: 'cash_deduction' },
+          { fundCode: `driver_share_payable:${DRIVER_ID}`, side: 'D', amount: syp(400), currency: 'SYP_NEW', role: 'cash_deduction_share' },
+          { fundCode: `driver_receivable_cash:${DRIVER_ID}`, side: 'D', amount: syp(100), currency: 'SYP_NEW', role: 'cash_deduction_overflow' },
+          { fundCode: `driver_cash:${DRIVER_ID}`, side: 'C', amount: syp(500), currency: 'SYP_NEW', role: 'cash_deduction' },
         ],
       },
     )
@@ -1041,13 +1041,13 @@ describe('the go-live date clamps the reports, never the positions', () => {
       businessDate: '2026-07-20',
       postingDate: '2026-07-20',
       weekStartDate: weekStartFor('2026-07-20'),
-      fxDayId: 1,
+      fxDayId: 1, sypMinorPerUsd: null,
       weekLockId: null,
       reason: 'ربح تجريبي',
       createdBy: 'u-bm',
       lines: [
-        { fundCode: 'office_cash', side: 'D', amount: syp(100_000) },
-        { fundCode: 'company_revenue', side: 'C', amount: syp(100_000) },
+        { fundCode: 'office_cash', side: 'D', amount: syp(100_000), currency: 'SYP_NEW' },
+        { fundCode: 'company_revenue', side: 'C', amount: syp(100_000), currency: 'SYP_NEW' },
       ],
     })
 
