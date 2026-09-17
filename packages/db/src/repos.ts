@@ -25,7 +25,18 @@ import type {
   WalletMovementRole,
 } from '@ash/contracts'
 import { normalizeUsername } from '@ash/contracts'
-import { type CalendarDate, type FxDay, type Minor, type Posting, minor } from '@ash/domain'
+import {
+  type CalendarDate,
+  type Currency,
+  type FundRef,
+  type FxDay,
+  type Minor,
+  type Posting,
+  currencyOf,
+  fundCode,
+  minor,
+  postingBalanceProblem,
+} from '@ash/domain'
 import { PG, type Pool, type PoolClient, isPgError, withTransaction } from './pool.ts'
 
 /**
@@ -38,37 +49,19 @@ import { PG, type Pool, type PoolClient, isPgError, withTransaction } from './po
  */
 
 /**
- * Stable fund identity. Matches `fundCodeOf` in the memory adapter exactly — the conformance
- * suite asserts balances by these strings, so they must not drift.
+ * Stable fund identity — the domain's `fundCode`, re-exported under its historical name.
+ *
+ * There used to be three copies of this switch (domain, here, memory adapter) held together only by
+ * the conformance suite comparing strings. Now there is one: a new fund kind cannot be coded one way
+ * in PostgreSQL and another in the fake.
  */
-export function fundCodeOf(fund: Posting['lines'][number]['fund']): string {
-  switch (fund.kind) {
-    case 'driver_cash':
-    case 'driver_wallet':
-    case 'driver_share_payable':
-    // A ذمة belongs to one named driver; without the suffix every driver's receivable merges into
-    // a single fund and the totals stay right while «who owes this» becomes unanswerable.
-    case 'driver_receivable_cash':
-    case 'driver_receivable_wallet':
-    case 'driver_shift_funding_cash':
-    case 'driver_shift_funding_wallet':
-      return `${fund.kind}:${fund.driverId}`
-    // A سلفة is suffixed by the ADVANCE, not by the party: the party is free text and has no id.
-    // `fundTypeOf` deliberately gets no case — its default returns the kind, which is exactly the
-    // enum value 0055 commits, because an outstanding advance is a COUNTED asset like a ذمة and
-    // not a P&L account.
-    case 'advance_receivable_cash':
-    case 'advance_receivable_wallet':
-      return `${fund.kind}:${fund.advanceId}`
-    case 'cost_center':
-      return `cost_center:${fund.costCenterId}`
-    default:
-      return fund.kind
-  }
-}
+export const fundCodeOf: (fund: FundRef) => string = fundCode
 
-/** Which `fund_type` enum value a code maps to. */
-function fundTypeOf(fund: Posting['lines'][number]['fund']): string {
+/**
+ * Which `fund_type` enum value a fund maps to. EXHAUSTIVE: a new kind that is not decided here
+ * fails to compile rather than quietly landing under some default.
+ */
+export function fundTypeOf(fund: FundRef): string {
   switch (fund.kind) {
     case 'company_revenue':
     case 'yalago_income':
@@ -77,10 +70,55 @@ function fundTypeOf(fund: Posting['lines'][number]['fund']): string {
     // would try to insert 'other_income'::fund_type and fail at 22P02 — the enum has no such value
     // and deliberately gains none, because this is a P&L account and not a box anyone counts.
     case 'other_income':
+    case 'cost_center':
       // Not in the client's literal E-1 tree; they are the P&L accounts the tree implies.
       return 'cost_center'
-    default:
+    case 'office_cash':
+    case 'office_wallet':
+    case 'driver_cash':
+    case 'driver_wallet':
+    case 'yalago_share':
+    case 'driver_share_payable':
+    case 'company_box':
+    case 'driver_receivable_cash':
+    case 'driver_receivable_wallet':
+    case 'driver_shift_funding_cash':
+    case 'driver_shift_funding_wallet':
+    // A سلفة is a COUNTED asset like a ذمة, not a P&L account: its own enum value (0055).
+    case 'advance_receivable_cash':
+    case 'advance_receivable_wallet':
+    // The company ledger (0065). Each is its own enum value — none may hide under cost_center,
+    // because 0066's partition and pocket guards read the TYPE.
+    case 'company_cash':
+    case 'depreciation_reserve':
+    case 'company_fx_position':
+    case 'branch_clearing':
+    case 'company_payable':
+    case 'company_receivable':
+    case 'fixed_asset':
+    case 'company_expense':
+    case 'company_income':
+    case 'company_equity':
       return fund.kind
+    default: {
+      const unreachable: never = fund
+      throw new RangeError(`no fund_type for ${JSON.stringify(unreachable)}`)
+    }
+  }
+}
+
+/** Raised when a stored fund's currency disagrees with the currency its reference implies. */
+export class FundCurrencyMismatchError extends Error {
+  readonly code = 'fund_currency_mismatch'
+  readonly fundCode: string
+  readonly stored: string
+  readonly expected: Currency
+  constructor(fundCode: string, stored: string, expected: Currency) {
+    super(`fund_currency_mismatch: fund ${fundCode} is stored in ${stored}, the posting expects ${expected}`)
+    this.name = 'FundCurrencyMismatchError'
+    this.fundCode = fundCode
+    this.stored = stored
+    this.expected = expected
   }
 }
 
@@ -91,29 +129,70 @@ function fundTypeOf(fund: Posting['lines'][number]['fund']): string {
  * lazily is simpler and less error-prone than a trigger on `drivers` that has to be kept in
  * step with every future fund type.
  */
-async function ensureFund(client: PoolClient, branchId: string, fund: Posting['lines'][number]['fund']): Promise<string> {
-  const code = fundCodeOf(fund)
+async function ensureFund(client: PoolClient, branchId: string, fund: FundRef): Promise<string> {
+  const code = fundCode(fund)
+  const currency = currencyOf(fund)
   // A cost centre owned by a VEHICLE carries that vehicle's uuid; a NAMED contra account
   // ("opening_balance", "owner_funding", "adjustments") has no owner and is owner_kind='none'.
   // Getting this wrong trips funds_owner_ck: CHECK ((owner_kind='none') = (owner_id IS NULL)).
+  // Every company account is owner_kind='none' with its identity in the code, as an advance is.
   const costUuid = 'costCenterId' in fund ? toUuidOrNull(fund.costCenterId) : null
   const ownerId = 'driverId' in fund ? fund.driverId : costUuid
   const ownerKind = 'driverId' in fund ? 'driver' : costUuid !== null ? 'vehicle' : 'none'
 
-  const found = await client.query<{ id: string }>(
-    'SELECT id FROM funds WHERE branch_id = $1 AND code = $2',
+  const found = await client.query<{ id: string; currency: string }>(
+    'SELECT id, currency FROM funds WHERE branch_id = $1 AND code = $2',
     [branchId, code],
   )
-  if (found.rows[0]) return found.rows[0].id
+  const existing = found.rows[0]
+  if (existing) {
+    // The fund's currency is its lines' currency. A row that disagrees with the reference would
+    // silently post dollars into a lira account, or the reverse — refuse by name instead.
+    if (existing.currency !== currency) throw new FundCurrencyMismatchError(code, existing.currency, currency)
+    return existing.id
+  }
 
-  const inserted = await client.query<{ id: string }>(
-    `INSERT INTO funds (branch_id, type, owner_kind, owner_id, code, name_ar)
-     VALUES ($1, $2::fund_type, $3, $4, $5, $5)
+  const inserted = await client.query<{ id: string; currency: string }>(
+    `INSERT INTO funds (branch_id, type, owner_kind, owner_id, code, name_ar, currency)
+     VALUES ($1, $2::fund_type, $3, $4, $5, $5, $6)
      ON CONFLICT (branch_id, code) DO UPDATE SET code = EXCLUDED.code
-     RETURNING id`,
-    [branchId, fundTypeOf(fund), ownerKind, ownerId, code],
+     RETURNING id, currency`,
+    [branchId, fundTypeOf(fund), ownerKind, ownerId, code, currency],
   )
-  return inserted.rows[0]!.id
+  const row = inserted.rows[0]!
+  // A concurrent writer may have created the row first; the conflict path returns ITS currency.
+  if (row.currency !== currency) throw new FundCurrencyMismatchError(code, row.currency, currency)
+  return row.id
+}
+
+/**
+ * The application-side copy of 0066's COMMIT-time rules, so a bad posting fails with a clear error
+ * before any row is staged: balanced per currency, two currencies only for an exchange, and a USD
+ * line exactly when the entry freezes a rate. The memory adapter runs the same checks.
+ */
+function assertPostingBalances(posting: Posting, sypMinorPerUsd: bigint | null): void {
+  const problem = postingBalanceProblem(posting)
+  if (problem?.kind === 'unbalanced') {
+    throw new Error(
+      `unbalanced posting ${posting.eventType}: D ${problem.debits} <> C ${problem.credits}` +
+        (problem.currency === 'SYP_NEW' ? '' : ` in ${problem.currency}`),
+    )
+  }
+  if (problem?.kind === 'mixed_currency') {
+    throw new Error(
+      `posting ${posting.eventType} spans ${problem.currencies.join(' + ')}; only company_fx_exchange may span two currencies`,
+    )
+  }
+  const hasUsd = posting.lines.some((line) => currencyOf(line.fund) === 'USD')
+  if (hasUsd && sypMinorPerUsd === null) {
+    throw new Error(`posting ${posting.eventType} has a USD line but no frozen syp_minor_per_usd`)
+  }
+  if (!hasUsd && sypMinorPerUsd !== null) {
+    throw new Error(`posting ${posting.eventType} freezes a USD rate but has no USD line`)
+  }
+  if (sypMinorPerUsd !== null && sypMinorPerUsd <= 0n) {
+    throw new Error(`posting ${posting.eventType} freezes a non-positive rate ${sypMinorPerUsd}`)
+  }
 }
 
 /** Driver ids in this system are uuids; a non-uuid (test fixture) becomes NULL rather than an error. */
@@ -146,11 +225,9 @@ export class PgLedgerRepo implements LedgerRepo {
       for (const posting of postings) {
         // Balance is ALSO enforced by a deferred constraint trigger at COMMIT. Checking here
         // first turns it into a clear application error instead of a transaction that fails at
-        // the very end with every other posting already staged.
-        let d = 0n
-        let c = 0n
-        for (const l of posting.lines) (l.side === 'D' ? (d += l.amount) : (c += l.amount))
-        if (d !== c) throw new Error(`unbalanced posting ${posting.eventType}: D ${d} <> C ${c}`)
+        // the very end with every other posting already staged. Per currency, with the one
+        // two-currency exception, exactly as 0066's trigger — through the domain's single rule.
+        assertPostingBalances(posting, meta.sypMinorPerUsd)
 
         /*
          * ON CONFLICT DO NOTHING, not a caught unique violation.
@@ -177,8 +254,8 @@ export class PgLedgerRepo implements LedgerRepo {
         const res = await client.query<{ id: string }>(
           `INSERT INTO journal_entries
              (branch_id, event_type, shift_id, occurrence_key, business_date, posting_date,
-              week_start_date, fx_day_id, reason, created_by)
-           VALUES ($1, $2::ledger_event, $3, $4, $5, $6, $7, $8, $9, $10)
+              week_start_date, fx_day_id, reason, created_by, syp_minor_per_usd)
+           VALUES ($1, $2::ledger_event, $3, $4, $5, $6, $7, $8, $9, $10, $11)
            ON CONFLICT DO NOTHING
            RETURNING id`,
           [
@@ -192,6 +269,7 @@ export class PgLedgerRepo implements LedgerRepo {
             meta.fxDayId,
             meta.reason ?? null,
             meta.createdBy,
+            meta.sypMinorPerUsd === null ? null : meta.sypMinorPerUsd.toString(),
           ],
         )
         // Already posted. Writing nothing and carrying on is the whole point — a retried
@@ -217,13 +295,15 @@ export class PgLedgerRepo implements LedgerRepo {
           postingDate: meta.postingDate,
           weekStartDate: meta.weekStartDate,
           fxDayId: meta.fxDayId,
+          sypMinorPerUsd: meta.sypMinorPerUsd,
           weekLockId: null,
           reason: meta.reason ?? null,
           createdBy: meta.createdBy,
           lines: posting.lines.map((l) => ({
-            fundCode: fundCodeOf(l.fund),
+            fundCode: fundCode(l.fund),
             side: l.side,
             amount: l.amount,
+            currency: currencyOf(l.fund),
             ...(l.role === undefined ? {} : { role: l.role }),
           })),
         })
@@ -259,7 +339,8 @@ export class PgLedgerRepo implements LedgerRepo {
       `SELECT je.*,
               COALESCE(
                 json_agg(json_build_object('fundCode', f.code, 'side', jl.side,
-                                           'amount', jl.amount_minor::text, 'role', jl.line_role)
+                                           'amount', jl.amount_minor::text, 'role', jl.line_role,
+                                           'currency', f.currency)
                          ORDER BY jl.id) FILTER (WHERE jl.id IS NOT NULL), '[]'
               ) AS lines
          FROM journal_entries je
@@ -280,18 +361,23 @@ export class PgLedgerRepo implements LedgerRepo {
       postingDate: isoDate(r.posting_date),
       weekStartDate: isoDate(r.week_start_date),
       fxDayId: Number(r.fx_day_id),
+      // int8 is parsed to bigint by the pool (pool.ts), so this is already exact.
+      sypMinorPerUsd: r.syp_minor_per_usd === null || r.syp_minor_per_usd === undefined
+        ? null
+        : BigInt(r.syp_minor_per_usd as bigint),
       weekLockId: r.week_lock_id === null ? null : Number(r.week_lock_id),
       reason: (r.reason as string | null) ?? null,
       createdBy: String(r.created_by),
       // amount comes back as ::text and is parsed to BigInt here — never through Number().
-      lines: (r.lines as Array<{ fundCode: string; side: 'D' | 'C'; amount: string; role: string | null }>).map(
-        (l) => ({
-          fundCode: l.fundCode,
-          side: l.side,
-          amount: minor(BigInt(l.amount)),
-          ...(l.role === null ? {} : { role: l.role }),
-        }),
-      ),
+      lines: (
+        r.lines as Array<{ fundCode: string; side: 'D' | 'C'; amount: string; role: string | null; currency: Currency }>
+      ).map((l) => ({
+        fundCode: l.fundCode,
+        side: l.side,
+        amount: minor(BigInt(l.amount)),
+        currency: l.currency,
+        ...(l.role === null ? {} : { role: l.role }),
+      })),
     }))
   }
 

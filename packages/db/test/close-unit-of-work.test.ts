@@ -87,6 +87,7 @@ describe('PgShiftCloseUnitOfWork', () => {
             postingDate: '2026-08-14',
             weekStartDate: '2026-08-09',
             fxDayId: 1,
+            sypMinorPerUsd: null,
             createdBy: 'actor-1',
           }),
         ).toEqual([])

@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Deps, NewShiftSettlementRecord } from '@ash/contracts'
 import { minor } from '@ash/domain'
-import { runConformanceSuite } from '@ash/testkit/conformance'
+import { COMPANY_BRANCH, runConformanceSuite } from '@ash/testkit/conformance'
 import { assertBigIntParser, createPool } from '../src/pool.ts'
 import { migrate } from '../src/migrate.ts'
 import { PgShiftCloseUnitOfWork } from '../src/repos-close.ts'
@@ -105,6 +105,12 @@ if (!DATABASE_URL) {
         `INSERT INTO branches (id, code, name_ar, name_en, governorate_id, branch_no)
          VALUES ($1, 'DAM', 'دمشق', 'Damascus', '99999999-9999-9999-9999-999999999999', 1)`,
         [BRANCH],
+      )
+      // TRUNCATE branches took the company (HQ) row 0066 created with it; put it back as 0066 does.
+      await pool.query(
+        `INSERT INTO branches (id, code, name_ar, name_en, governorate_id, branch_no, kind)
+         VALUES ($1, 'HQ', 'صندوق الشركة', 'Company', '99999999-9999-9999-9999-999999999999', 0, 'company')`,
+        [COMPANY_BRANCH],
       )
       await pool.query(
         `INSERT INTO roles (key, name_ar, name_en) VALUES ('system_admin','مدير النظام','System Admin')
@@ -247,6 +253,13 @@ if (!DATABASE_URL) {
   runConformanceSuite({
     label: 'postgres',
     makeDeps,
+    plantFund: async (_deps, branchId, fund) => {
+      await pool.query(
+        `INSERT INTO funds (branch_id, type, owner_kind, owner_id, code, name_ar, currency)
+         VALUES ($1, $2::fund_type, 'none', NULL, $3, $3, $4)`,
+        [branchId, fund.type, fund.code, fund.currency],
+      )
+    },
   })
 
   describe('PostgreSQL OCR cache ownership', () => {
