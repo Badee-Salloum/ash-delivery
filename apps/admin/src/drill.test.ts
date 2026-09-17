@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { completedShiftsHref, drill, expensesHref, liveShiftsHref, shiftHref } from './drill.ts'
+import { completedShiftsHref, drill, expensesHref, liveShiftsHref, shiftHref, vehicleHref } from './drill.ts'
 import { parseHash } from './route.ts'
 
 const UUID = '3f2b8c1e-4d5a-4b6c-9d7e-8f9a0b1c2d3e'
@@ -55,10 +55,23 @@ describe('drill-down links', () => {
     expect(parseHash(shiftHref(UUID)).openShift).toBe(UUID)
   })
 
+  it('keeps period context in expense and vehicle drill-downs', () => {
+    expect(expensesHref({ from: '2026-09-01', to: '2026-09-17' })).toBe(
+      '#expenses?range=custom&from=2026-09-01&to=2026-09-17',
+    )
+    expect(vehicleHref({ id: 'vehicle-1', from: '2026-09-01', to: '2026-09-17' })).toBe(
+      '#vehicle?range=custom&from=2026-09-01&to=2026-09-17&id=vehicle-1',
+    )
+    expect(parseHash(vehicleHref({ id: 'vehicle-1' }))).toEqual({
+      section: 'vehicle', openShift: null, params: { id: 'vehicle-1' },
+    })
+  })
+
   it('exposes the builders as one object', () => {
     expect(drill.completedShifts).toBe(completedShiftsHref)
     expect(drill.liveShifts).toBe(liveShiftsHref)
     expect(drill.expenses).toBe(expensesHref)
+    expect(drill.vehicle).toBe(vehicleHref)
     expect(drill.shift).toBe(shiftHref)
   })
 })

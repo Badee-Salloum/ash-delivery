@@ -27,6 +27,7 @@ export const SECTIONS = [
   'preapprovedShifts',
   'gpsLive',
   'fleet',
+  'vehicle',
   'fleetConfig',
   'treasury',
   'expenses',

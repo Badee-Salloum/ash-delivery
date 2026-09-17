@@ -27,7 +27,17 @@ export interface LiveShiftsLink {
 }
 
 export interface ExpensesLink {
+  readonly range?: RangePreset
+  readonly from?: CalendarDate
+  readonly to?: CalendarDate
   readonly tab?: string
+}
+
+export interface VehicleLink {
+  readonly id: string
+  readonly range?: RangePreset
+  readonly from?: CalendarDate
+  readonly to?: CalendarDate
 }
 
 /** Drop `undefined`s and `false` flags, so the params object has only what the link means. */
@@ -69,7 +79,11 @@ export function liveShiftsHref(link: LiveShiftsLink = {}): string {
 }
 
 export function expensesHref(link: ExpensesLink = {}): string {
-  return `#${formatHash({ section: 'expenses', openShift: null, params: paramsOf({ tab: link.tab }) })}`
+  return `#${formatHash({ section: 'expenses', openShift: null, params: paramsOf({ ...rangeOf(link), tab: link.tab }) })}`
+}
+
+export function vehicleHref(link: VehicleLink): string {
+  return `#${formatHash({ section: 'vehicle', openShift: null, params: paramsOf({ ...rangeOf(link), id: link.id }) })}`
 }
 
 export function shiftHref(id: string): string {
@@ -81,5 +95,6 @@ export const drill = {
   completedShifts: completedShiftsHref,
   liveShifts: liveShiftsHref,
   expenses: expensesHref,
+  vehicle: vehicleHref,
   shift: shiftHref,
 } as const

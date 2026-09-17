@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import { ar, en } from '@ash/client/i18n'
 
 const treasurySource = readFileSync(new URL('./screens/Treasury.tsx', import.meta.url), 'utf8')
-const dashboardSource = readFileSync(new URL('./screens/Dashboard.tsx', import.meta.url), 'utf8')
+const dashboardSource = readFileSync(new URL('./screens/dashboard/CapitalSection.tsx', import.meta.url), 'utf8')
 
 describe('branch treasury screen contract', () => {
   it('uses unambiguous funding and directional transfer copy in both languages', () => {
@@ -98,17 +98,17 @@ describe('branch treasury screen contract', () => {
   it('keeps both restoration legs in the confirmation and displays the dashboard capital delta', () => {
     expect(treasurySource).toContain('restoration.legs.map((leg) =>')
     expect(treasurySource).toContain("legText.join(' • ')")
-    expect(dashboardSource).toContain('differenceView(treasury.capital.delta)')
+    expect(dashboardSource).toContain('differenceView(data.capital.delta)')
     expect(dashboardSource).toContain('capitalDelta.amount')
   })
 
   it('keeps open-shift custody inside working capital while showing it separately from the office position', () => {
-    expect(dashboardSource).toContain('value={<Money value={treasury.capital.total} />}')
-    expect(dashboardSource).toContain('treasury.capital.officePosition')
-    expect(dashboardSource).toContain('treasury.capital.activeCustodyTotal')
-    expect(dashboardSource).toContain('treasury.capital.activeCustodyCash')
-    expect(dashboardSource).toContain('treasury.capital.activeCustodyWallet')
-    expect(dashboardSource).toContain('treasury.capital.activeShiftCount')
+    expect(dashboardSource).toContain('value={<Money value={data.capital.total} />}')
+    expect(dashboardSource).toContain('data.capital.officePosition')
+    expect(dashboardSource).toContain('data.capital.activeCustodyTotal')
+    expect(dashboardSource).toContain('data.capital.activeCustodyCash')
+    expect(dashboardSource).toContain('data.capital.activeCustodyWallet')
+    expect(dashboardSource).toContain('data.capital.activeShiftCount')
     for (const catalog of [ar, en]) {
       expect(catalog.dashboard.officePosition.length).toBeGreaterThan(10)
       expect(catalog.dashboard.activeShiftCustody).toContain('{n}')

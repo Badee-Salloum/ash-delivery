@@ -404,7 +404,7 @@ export function AdminApp(): ReactNode {
             <Approval key={openShift} shiftId={openShift} onDone={() => setOpenShift(null)} />
           </ErrorBoundary>
         ) : section === 'dashboard' ? (
-          <Dashboard />
+          <Dashboard key={mountKey} initial={liveParams.current} />
         ) : section === 'queue' ? (
           <Queue onOpen={setOpenShift} />
         ) : section === 'liveShifts' ? (

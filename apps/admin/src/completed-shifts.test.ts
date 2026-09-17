@@ -15,7 +15,6 @@ import {
 
 const appSource = readFileSync(new URL('./AdminApp.tsx', import.meta.url), 'utf8')
 const screenSource = readFileSync(new URL('./screens/CompletedShifts.tsx', import.meta.url), 'utf8')
-const dashboardSource = readFileSync(new URL('./screens/Dashboard.tsx', import.meta.url), 'utf8')
 const timeRangeBarSource = readFileSync(new URL('./components/TimeRangeBar.tsx', import.meta.url), 'utf8')
 
 describe('completed shift history date range', () => {
@@ -215,9 +214,6 @@ describe('completed shift history screen wiring', () => {
     expect(screenSource).toContain('SHIFT_TARGET_MINUTES[row.worked.pattern]')
     expect(screenSource).not.toContain('const TARGET_MINUTES')
     expect(screenSource).not.toContain('16 * 60')
-    expect(dashboardSource).toContain('SHIFT_TARGET_MINUTES[shift.worked.pattern]')
-    expect(dashboardSource).not.toContain('DASHBOARD_TARGET_MINUTES')
-    expect(dashboardSource).not.toContain('16 * 60')
     expect(SHIFT_TARGET_MINUTES).toEqual({ day: 480, evening: 480, full: 720, unknown: null })
     expect(screenSource).toContain('shortfallMinutes(row.worked, target)')
     // The badge shows the pattern WITH its target: «صباحية · 8س», «دبل · 12س».

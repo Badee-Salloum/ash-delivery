@@ -10,7 +10,7 @@ import {
   startWorkingNowPolling,
 } from './working-now.ts'
 
-const dashboardSource = readFileSync(new URL('./screens/Dashboard.tsx', import.meta.url), 'utf8')
+const dashboardSource = readFileSync(new URL('./screens/dashboard/NowSection.tsx', import.meta.url), 'utf8')
 
 const snapshot = (drivers: number, vehicles: number): WorkingNowSnapshot => ({
   asOf: '2026-08-22T09:00:00.000Z',
@@ -115,7 +115,7 @@ describe('working-now dashboard polling', () => {
 
   it('uses the lightweight endpoint and clears/restarts it when the branch changes', () => {
     const pollStart = dashboardSource.indexOf('// This poll intentionally calls only')
-    const pollEnd = dashboardSource.indexOf('if (!data)', pollStart)
+    const pollEnd = dashboardSource.indexOf('return (', pollStart)
     const pollSource = dashboardSource.slice(pollStart, pollEnd)
 
     expect(pollSource).toContain("api.get<WorkingNowSnapshot>('/dashboard/working-now',")
@@ -138,17 +138,12 @@ describe('working-now dashboard presentation', () => {
     }
   })
 
-  it('places both live KPIs after Orders in a responsive 2/3/6-column row', () => {
-    const orders = dashboardSource.indexOf('label={t.dashboard.orders}')
+  it('places both live KPIs in a responsive live row', () => {
     const drivers = dashboardSource.indexOf('label={t.dashboard.workingDrivers}')
     const vehicles = dashboardSource.indexOf('label={t.dashboard.workingVehicles}')
-    const company = dashboardSource.indexOf('label={t.dashboard.companyShare}')
 
-    expect(dashboardSource).toContain('grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6')
-    expect(orders).toBeGreaterThan(-1)
-    expect(orders).toBeLessThan(drivers)
+    expect(dashboardSource).toContain('grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5')
     expect(drivers).toBeLessThan(vehicles)
-    expect(vehicles).toBeLessThan(company)
     expect(dashboardSource).toContain("workingNow?.drivers ?? '—'")
     expect(dashboardSource).toContain("workingNow?.vehicles ?? '—'")
   })
