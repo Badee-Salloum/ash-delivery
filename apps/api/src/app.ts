@@ -21,6 +21,7 @@ import {
   uploadEvidenceParams,
   serializeMoney,
   setFxRequest,
+  serializeFxRateNumber,
   updateSettingsRequest,
   startPackageRequest,
   putBatteryReadingsRequest,
@@ -35,9 +36,10 @@ import {
   scanDuplicateHintSchema,
   shiftFundingPreviewSchema,
 } from '@ash/contracts'
-import type { Minor } from '@ash/domain'
+import type { CloseBlocker, Currency, Minor } from '@ash/domain'
 import { isTracked } from '@ash/domain'
 import {
+  CURRENCIES,
   add,
   addDays,
   bmsSlot,
@@ -126,6 +128,14 @@ import {
   prepareShiftReview,
   todayFor,
 } from './shifts.service.ts'
+
+/**
+ * A week-close blocker as it crosses the wire. A trial-balance difference is money, so it goes as a
+ * decimal string like every other amount — a bigint here would make the refusal itself a 500.
+ */
+function wireCloseBlocker(blocker: CloseBlocker) {
+  return blocker.kind === 'trial_balance_not_zero' ? { ...blocker, diff: serializeMoney(blocker.diff) } : blocker
+}
 
 export interface AppOptions {
   deps: Deps
@@ -2602,9 +2612,12 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     try {
       const rate = resolveFxDay(days, today)
       // The FX rate is a bounded integer the wire carries as a number by design (setFxRequest),
-      // NOT a cash-minor amount — so a plain integer here is correct, not a precision hazard.
-      const perUsd = rate.sypMinorPerUsd
-      return { businessDate: today, sypMinorPerUsd: Number(perUsd), provisional: rate.provisional }
+      // NOT a cash-minor amount — converted at the sanctioned wire boundary, which bounds it.
+      return {
+        businessDate: today,
+        sypMinorPerUsd: serializeFxRateNumber(rate.sypMinorPerUsd),
+        provisional: rate.provisional,
+      }
     } catch {
       return { businessDate: today, sypMinorPerUsd: null, provisional: true }
     }
@@ -2808,8 +2821,18 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         trialBalanceDiff: minor(0n),
         alreadyClosed: false,
       })
-      return reply.code(422).send({ error: 'week_not_closable', blockers: check.blockers })
+      return reply.code(422).send({ error: 'week_not_closable', blockers: check.blockers.map(wireCloseBlocker) })
     }
+
+    /*
+     * The company (HQ) row closes its week too (C1), but it is not a branch: nobody opens a drawer
+     * there, so it owes no daily cash count — the owner's own decision exempts صندوق الشركة from
+     * counts. And it holds two currencies, so its trial balance is judged per currency: a dollar
+     * surplus and a lira deficit of the same digits sum to zero and are still two broken books.
+     * (C2 adds the branch-clearing invariant to this same pre-flight.)
+     */
+    const company = await deps.directory.companyBranch()
+    const isCompany = company !== null && company.id === branchId
 
     const { start, end } = weekClosedOn(body.closeDate)
     // The WHOLE week, not the Sunday. A single-day query left Monday-to-Saturday invisible, so a
@@ -2821,7 +2844,14 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
     const entries = await deps.ledger.listByWeek(branchId, start)
     let diff = 0n
-    for (const e of entries) for (const l of e.lines) diff += l.side === 'D' ? l.amount : -l.amount
+    const diffByCurrency = new Map<Currency, bigint>()
+    for (const e of entries) {
+      for (const l of e.lines) {
+        const signed = l.side === 'D' ? l.amount : -l.amount
+        diff += signed
+        diffByCurrency.set(l.currency, (diffByCurrency.get(l.currency) ?? 0n) + signed)
+      }
+    }
 
     // Every day of the week must have been physically counted (E-5) before it can be sealed.
     // This was a placeholder until cash counts existed; leaving it empty would have let a week
@@ -2837,7 +2867,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
      */
     const goLive = await goLiveDate(deps)
     const daysMissingCashCount: string[] = []
-    for (let d = start; d <= end; d = addDays(d, 1)) {
+    for (let d = start; d <= end && !isCompany; d = addDays(d, 1)) {
       if (goLive !== null && d < goLive) continue
       if (!counted.has(d)) daysMissingCashCount.push(d)
     }
@@ -2851,10 +2881,20 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         .map((d) => d.businessDate),
       priorWeekClosed: closedStarts.length === 0 || closedStarts.some((s) => s < start),
       trialBalanceDiff: minor(diff),
+      ...(isCompany
+        ? {
+            trialBalanceByCurrency: CURRENCIES.map((currency) => ({
+              currency,
+              diff: minor(diffByCurrency.get(currency) ?? 0n),
+            })),
+          }
+        : {}),
       alreadyClosed: existing?.closedAtMs !== null && existing !== null,
     })
 
-    if (!check.canClose) return reply.code(422).send({ error: 'week_not_closable', blockers: check.blockers })
+    if (!check.canClose) {
+      return reply.code(422).send({ error: 'week_not_closable', blockers: check.blockers.map(wireCloseBlocker) })
+    }
 
     const lock = existing ?? (await deps.weekLocks.create({
       branchId,

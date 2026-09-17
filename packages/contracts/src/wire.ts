@@ -1,5 +1,15 @@
 import { z } from 'zod'
-import { MAX_BATTERY_SLOTS, type Minor, formatMinor, hasVisibleText, parseMinor } from '@ash/domain'
+import {
+  CURRENCIES,
+  type Currency,
+  MAX_BATTERY_SLOTS,
+  type Minor,
+  type Money,
+  formatMinor,
+  hasVisibleText,
+  money,
+  parseMinor,
+} from '@ash/domain'
 
 /**
  * Wire schemas.
@@ -76,6 +86,27 @@ export const nonblankReasonSchema = z
 const optionalVarianceReasonSchema = z.string().trim().max(500).nullable().default(null)
 
 export const serializeMoney = (m: Minor): string => formatMinor(m)
+
+/**
+ * The two currencies «صندوق الشركة» holds (finance redesign C1). The literal strings are the ones
+ * `funds.currency` stores, so what crosses the wire is what the ledger means.
+ */
+export const currencySchema = z.enum(CURRENCIES)
+
+/**
+ * An amount that carries its currency: `{ "currency": "USD", "amount": "12.50" }`. The amount is
+ * the same decimal string as every other money field — two places, cents for USD — and is parsed
+ * into `Minor` here, once. Nothing may add two of these without comparing `currency` first; the
+ * domain's `addMoney` refuses.
+ */
+export const currencyMoneySchema = z
+  .object({ currency: currencySchema, amount: moneySchema })
+  .transform(({ currency, amount }): Money => money(currency, amount))
+
+export const serializeCurrencyMoney = (value: Money): { currency: Currency; amount: string } => ({
+  currency: value.currency,
+  amount: serializeMoney(value.amount),
+})
 
 export const calendarDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'expected YYYY-MM-DD')
 export const realCalendarDateSchema = calendarDateSchema.refine((value) => {
@@ -1409,6 +1440,20 @@ export const setFxRequest = z.object({
   /** SYP minor units per USD. 13000 = 130 new SYP/USD. */
   sypMinorPerUsd: z.number().int().positive(),
 })
+
+/**
+ * The daily rate as `GET /fx` has always sent it: a JSON integer, the shape `setFxRequest` reads back.
+ *
+ * A rate is not an amount and a real one has five or six digits, but turning a bigint into a number is
+ * exactly what `check-wire-money` forbids outside this file — so the one conversion lives here, at the
+ * sanctioned boundary, and refuses anything a JSON number could not carry exactly.
+ */
+export function serializeFxRateNumber(sypMinorPerUsd: bigint): number {
+  if (sypMinorPerUsd <= 0n || sypMinorPerUsd > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new RangeError(`FX rate ${sypMinorPerUsd} cannot cross the wire as an exact integer`)
+  }
+  return Number(sypMinorPerUsd)
+}
 
 /**
  * General operating constants (SRS A-4). A FIXED set of known keys — never an arbitrary
