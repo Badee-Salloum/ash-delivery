@@ -634,6 +634,53 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
         }
       })
 
+      /*
+       * A command whose only record is its journal entry (صندوق الشركة, a treasury deposit) reads its
+       * receipt back through this to tell a lost-response retry from a reused key. It must find the
+       * shift-less row under exactly the idempotency index's key — and never a shift's row, another
+       * event type's, or another branch's.
+       */
+      it('finds a shift-less posting by (branch, event, occurrence) and nothing else', async () => {
+        const deps = await fresh()
+        try {
+          const standalone: Posting = {
+            eventType: 'manual',
+            occurrenceKey: 'company-fund-receipt',
+            lines: [
+              { fund: { kind: 'company_box' }, side: 'D', amount: syp(2_500) },
+              { fund: { kind: 'cost_center', costCenterId: 'owner_funding' }, side: 'C', amount: syp(2_500) },
+            ],
+          }
+          const standaloneMeta = { ...META, shiftId: null, reason: 'conformance receipt' }
+          const [written] = await deps.ledger.post(BRANCH, [standalone], standaloneMeta)
+          expect(written).toBeDefined()
+          // A shift posting under the same event and key is a different row the lookup must ignore.
+          await deps.ledger.post(BRANCH, [{ ...standalone }], { ...META, reason: 'shift twin' })
+
+          const found = await deps.ledger.findStandaloneEntry(BRANCH, 'manual', 'company-fund-receipt')
+          expect(found).not.toBeNull()
+          expect(found!.id).toBe(written!.id)
+          expect(found!.shiftId).toBeNull()
+          expect(found!.reason).toBe('conformance receipt')
+          expect(found!.lines).toEqual([
+            { fundCode: 'company_box', side: 'D', amount: syp(2_500) },
+            { fundCode: 'cost_center:owner_funding', side: 'C', amount: syp(2_500) },
+          ])
+
+          expect(await deps.ledger.findStandaloneEntry(BRANCH, 'manual', 'no-such-key')).toBeNull()
+          expect(await deps.ledger.findStandaloneEntry(BRANCH, 'income', 'company-fund-receipt')).toBeNull()
+          expect(
+            await deps.ledger.findStandaloneEntry(
+              '11111111-1111-1111-1111-111111111112',
+              'manual',
+              'company-fund-receipt',
+            ),
+          ).toBeNull()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
       it('what post() RETURNS is what was actually committed', async () => {
         // The silent half of the same defect: rows reported as written that a rolled-back
         // transaction never kept. Whatever comes back must be readable afterwards.

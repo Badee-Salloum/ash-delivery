@@ -158,6 +158,9 @@ export const en: Catalog = {
     receivable_balance_invalid: 'The driver receivable balance is invalid — stop and contact the system manager',
     receivable_balance_integrity_error: 'Receivables cannot be shown because an accounting balance is invalid — contact the system manager',
     amount_must_be_positive: 'Enter an amount greater than zero',
+    company_fund_not_manual:
+      'The company fund cannot be moved by a manual entry — use the company fund deposit or withdrawal (general manager and system admin only)',
+    company_fund_forbidden: 'Only the general manager and the system admin may move the company fund',
     vehicle_type_not_found: 'Vehicle type not found — add it first',
     cross_branch_assignment: 'Driver and vehicle are in different branches',
     vehicle_in_another_branch: 'That vehicle is in another branch',
@@ -178,7 +181,7 @@ export const en: Catalog = {
     cash_count_negative: 'The counted office cash cannot be negative',
     capital_target_date_already_restored: 'Today has already been restored — its target cannot change after the financial movement is frozen',
     admin_update_required: 'This admin build is outdated — fully refresh it before retrying',
-    idempotency_key_conflict: 'This operation key was already used with a different tranche type or amount — refresh and verify the recorded funds',
+    idempotency_key_conflict: 'This request was already sent with different values — reload and try again.',
     invalid_rate: 'Enter a positive numeric rate',
     invalid_band_table: 'The tier bands are invalid (driver share can’t exceed 80%)',
     effective_from_must_be_future: 'The effective date must be in the future',

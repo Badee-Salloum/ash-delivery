@@ -330,14 +330,16 @@ describe('the go-live date accepts a position with nothing missing', () => {
     // A non-empty company fund is exactly the shape of carried-over profit this rule exists to
     // keep out of a fresh start.
     await putOnCapital()
-    const manager = await h.loginAs('manager')
-    await post(manager, '/journal/manual', {
+    // Through the company fund's own command: since 2026-09-17 a manual entry may not name
+    // `company_box` at all, and a branch manager may not move it.
+    const gm = await h.loginAs('gm')
+    const funded = await post(gm, '/company-fund/deposit', {
+      idempotencyKey: crypto.randomUUID(),
+      amount: sypStr(100),
       reason: 'ربح متراكم',
-      lines: [
-        { fundCode: 'company_box', side: 'D', amount: sypStr(100) },
-        { fundCode: 'opening_balance', side: 'C', amount: sypStr(100) },
-      ],
+      branchId: BRANCH,
     })
+    expect(funded.statusCode, funded.body).toBe(201)
     const admin = await h.loginAs('sysadmin')
     const today = (await get(admin, '/fx')).json().businessDate
     const res = await put(admin, '/settings', { goLiveBusinessDate: today, branchId: BRANCH })

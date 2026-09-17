@@ -129,7 +129,7 @@ describe('the GM can fund a branch he names', () => {
       method: 'POST',
       url: '/treasury/deposit',
       headers: { cookie: h.cookie(gm) },
-      payload: { target: 'cash', amount: '500000.00', branchId: BRANCH },
+      payload: { idempotencyKey: crypto.randomUUID(), target: 'cash', amount: '500000.00', branchId: BRANCH },
     })
     expect(res.statusCode, res.body).toBe(201)
     expect(res.json().balance).toBe('500000.00')
@@ -144,7 +144,7 @@ describe('the GM can fund a branch he names', () => {
       method: 'POST',
       url: '/treasury/deposit',
       headers: { cookie: h.cookie(gm) },
-      payload: { target: 'cash', amount: '500000.00' },
+      payload: { idempotencyKey: crypto.randomUUID(), target: 'cash', amount: '500000.00' },
     })
     expect(res.statusCode).toBe(422)
     expect(res.json().error).toBe('branch_required')
@@ -157,7 +157,7 @@ describe('the GM can fund a branch he names', () => {
       method: 'POST',
       url: '/treasury/deposit',
       headers: { cookie: h.cookie(sa) },
-      payload: { target: 'cash', amount: '1.00', branchId: BRANCH },
+      payload: { idempotencyKey: crypto.randomUUID(), target: 'cash', amount: '1.00', branchId: BRANCH },
     })
     expect(res.statusCode, res.body).toBe(201)
 
@@ -165,7 +165,7 @@ describe('the GM can fund a branch he names', () => {
       method: 'POST',
       url: '/treasury/deposit',
       headers: { cookie: h.cookie(sa) },
-      payload: { target: 'cash', amount: '1.00' },
+      payload: { idempotencyKey: crypto.randomUUID(), target: 'cash', amount: '1.00' },
     })
     expect(unnamed.statusCode).toBe(422)
     expect(unnamed.json().error).toBe('branch_required')

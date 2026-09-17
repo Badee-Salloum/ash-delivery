@@ -146,6 +146,9 @@ export const ar = {
     receivable_balance_invalid: 'رصيد ذمم السائق غير سليم — أوقف العملية وراجع مدير النظام',
     receivable_balance_integrity_error: 'تعذّر عرض الذمم بسبب رصيد محاسبي غير سليم — راجع مدير النظام',
     amount_must_be_positive: 'أدخل مبلغاً أكبر من الصفر',
+    company_fund_not_manual:
+      'لا يُحرَّك صندوق الشركة بقيد يدوي — استخدم إيداع صندوق الشركة أو سحبه (المدير العام ومدير النظام فقط)',
+    company_fund_forbidden: 'تحريك صندوق الشركة للمدير العام ومدير النظام فقط',
     duplicate_driver_code: 'رمز السائق مستخدم مسبقاً',
     duplicate_vehicle_code: 'رقم الآلية مستخدم مسبقاً',
     duplicate_category_code: 'رمز التصنيف مستخدم مسبقاً',
@@ -186,7 +189,7 @@ export const ar = {
     cash_count_negative: 'قيمة كاش المكتب المجرودة لا يمكن أن تكون سالبة',
     capital_target_date_already_restored: 'تم ترميم هذا اليوم بالفعل — لا يمكن تغيير هدفه بعد تثبيت الحركة المالية',
     admin_update_required: 'نسخة لوحة الإدارة قديمة — حدّث الصفحة تحديثاً كاملاً قبل إعادة المحاولة',
-    idempotency_key_conflict: 'استُخدم مفتاح العملية بنوع عهدة أو مبلغ مختلف — حدّث النوبة وتحقق من العهدة المسجلة',
+    idempotency_key_conflict: 'هذا الطلب أُرسل سابقاً بقيم مختلفة — أعد تحميل الصفحة وأعد المحاولة',
     invalid_rate: 'أدخل سعراً رقمياً موجباً',
     invalid_band_table: 'شرائح الحصص غير صحيحة (حصة السائق لا تتجاوز 80%)',
     effective_from_must_be_future: 'يجب أن يكون تاريخ السريان في المستقبل',

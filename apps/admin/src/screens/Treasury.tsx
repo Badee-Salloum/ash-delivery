@@ -27,9 +27,15 @@ import {
   type PendingReceivableRecovery,
   type ReceivableOperationPayload,
 } from '../receivable-idempotency.ts'
+import { pendingAfterAttempt, pendingMoneyMove, type PendingMoneyMove } from '../money-move-idempotency.ts'
 
-/** The branch-level funds a manual entry can move (the driver/cost-centre ones need an id suffix). */
-const MANUAL_FUNDS = ['office_cash', 'office_wallet', 'yalago_share', 'company_revenue', 'yalago_income', 'fee_earned', 'company_box'] as const
+/**
+ * The branch-level funds a manual entry can move (the driver/cost-centre ones need an id suffix).
+ *
+ * NOT `company_box`: صندوق الشركة moves only through its own commands (`company_fund.manage`), and
+ * the server refuses it in a manual entry with `company_fund_not_manual` for every role.
+ */
+const MANUAL_FUNDS = ['office_cash', 'office_wallet', 'yalago_share', 'company_revenue', 'yalago_income', 'fee_earned'] as const
 interface EntryLine {
   fundCode: string
   side: 'D' | 'C'
@@ -56,7 +62,12 @@ export function Treasury(): ReactNode {
   const [balances, setBalances] = useState<{ cash: string; wallet: string } | null>(null)
   const [depositAmt, setDepositAmt] = useState<{ cash: string; wallet: string }>({ cash: '', wallet: '' })
   const [depositMsg, setDepositMsg] = useState<string | null>(null)
+  // One key per unresolved submission, per box — reused when the same deposit is pressed again after
+  // a lost response, so the server answers with the original entry instead of depositing twice.
+  const pendingDeposit = useRef<Record<'cash' | 'wallet', PendingMoneyMove | null>>({ cash: null, wallet: null })
   const [withdrawAmt, setWithdrawAmt] = useState<{ cash: string; wallet: string }>({ cash: '', wallet: '' })
+  // The same held-key rule for «كييش» by hand: a second press after a lost response sweeps once.
+  const pendingKaish = useRef<Record<'cash' | 'wallet', PendingMoneyMove | null>>({ cash: null, wallet: null })
   const [advances, setAdvances] = useState<Awaited<ReturnType<typeof api.advances>> | null>(null)
   const [advancesError, setAdvancesError] = useState<string | null>(null)
   const [advanceRepayAmt, setAdvanceRepayAmt] = useState<Record<string, string>>({})
@@ -72,6 +83,11 @@ export function Treasury(): ReactNode {
   const [companyError, setCompanyError] = useState<string | null>(null)
   const [companyAmt, setCompanyAmt] = useState('')
   const [companyReason, setCompanyReason] = useState('')
+  const [companyBusy, setCompanyBusy] = useState(false)
+  const pendingCompanyMove = useRef<Record<'deposit' | 'withdraw', PendingMoneyMove | null>>({
+    deposit: null,
+    withdraw: null,
+  })
 
   // ── «الترميم» ─────────────────────────────────────────────────────────────────────────────
   const [restoration, setRestoration] = useState<RestorationView | null>(null)
@@ -155,9 +171,11 @@ export function Treasury(): ReactNode {
       branchId: branchId ?? session.branchId,
     }).allowed
 
-  const canViewCompanyFund =
+  // صندوق الشركة is `company_fund.manage` for the read AND both writes (2026-09-17) — the same key the
+  // server checks, so the card is shown to exactly the people who may use it.
+  const canManageCompanyFund =
     session != null &&
-    can({ userId: session.userId, roleKey: session.roleKey as RoleKey, branchId: session.branchId }, 'profit.view_total', {}).allowed
+    can({ userId: session.userId, roleKey: session.roleKey as RoleKey, branchId: session.branchId }, 'company_fund.manage', {}).allowed
 
   const receivableOutboxActorId = session?.userId ?? null
   const receivableOutboxBranchId = branchId ?? session?.branchId ?? null
@@ -312,20 +330,35 @@ export function Treasury(): ReactNode {
     void loadReceivableHistory()
   }, [loadReceivableHistory])
 
-  /** «كييش» — take the day's profit out of the branch box and into صندوق الشركة. */
+  /**
+   * «كييش» — take the day's profit out of the branch box and into صندوق الشركة.
+   *
+   * Moving the company fund is `company_fund.manage` (GM + system admin, 2026-09-17): the server
+   * answers anyone else with 403 `company_fund_forbidden`, and the row is only rendered for holders.
+   */
   async function withdraw(target: 'cash' | 'wallet'): Promise<void> {
     const amount = withdrawAmt[target]
     if (!amount) return
     setDepositMsg(null)
+    const operation = pendingMoneyMove(pendingKaish.current[target], {
+      command: `treasury_kaish:${target}`,
+      branchId: branchId ?? session?.branchId ?? null,
+      amount,
+      reason: t.treasury.kaish,
+    })
+    pendingKaish.current[target] = operation
     try {
-      const res = await api.treasuryWithdraw(target, amount, t.treasury.kaish)
+      const res = await api.treasuryWithdraw(target, amount, t.treasury.kaish, 'company_box', operation.idempotencyKey)
+      pendingKaish.current[target] = pendingAfterAttempt(operation, { ok: true })
       setBalances((b) => (b ? { ...b, [target]: res.balance } : b))
       setWithdrawAmt({ ...withdrawAmt, [target]: '' })
       setDepositMsg(t.treasury.withdrawn)
       void refreshCompany()
     } catch (err) {
+      const code = (err as { error?: string }).error
+      pendingKaish.current[target] = pendingAfterAttempt(operation, { ok: false, error: code })
       setDepositMsg(null)
-      toast.error(explainError((err as { error?: string }).error ?? 'error', t))
+      toast.error(explainError(code ?? 'error', t))
     }
   }
 
@@ -447,7 +480,7 @@ export function Treasury(): ReactNode {
   }
 
   const refreshCompany = useCallback(async (): Promise<void> => {
-    if (!canViewCompanyFund) {
+    if (!canManageCompanyFund) {
       setCompany(null)
       setCompanyError(null)
       return
@@ -456,12 +489,12 @@ export function Treasury(): ReactNode {
       setCompany(await api.companyFund())
       setCompanyError(null)
     } catch (err) {
-      // `profit.view_total` — the GM and, since decision 9, the system admin. A branch manager
-      // gets 403 here, and saying so beats an empty card he reads as broken.
+      // `company_fund.manage` — the GM and the system admin. If the live matrix was narrowed the
+      // server answers 403, and saying so beats an empty card read as broken.
       setCompany(null)
       setCompanyError((err as { error?: string }).error ?? 'error')
     }
-  }, [api, canViewCompanyFund])
+  }, [api, canManageCompanyFund])
 
   // صندوق الشركة is company-wide, so it does NOT depend on the selected branch. Declared after
   // `refreshCompany` because a `const` callback is not hoisted — the effect would read it before
@@ -471,16 +504,32 @@ export function Treasury(): ReactNode {
   }, [refreshCompany])
 
   async function moveCompany(direction: 'deposit' | 'withdraw'): Promise<void> {
-    if (!companyAmt || !companyReason.trim()) return
+    const reasonText = companyReason.trim()
+    if (!companyAmt || !reasonText || companyBusy) return
+    // Held until the server has answered: pressing again after a lost response re-sends the SAME
+    // key, and the server returns the original entry instead of moving the money twice.
+    const operation = pendingMoneyMove(pendingCompanyMove.current[direction], {
+      command: `company_${direction}`,
+      branchId: branchId ?? session?.branchId ?? null,
+      amount: companyAmt,
+      reason: reasonText,
+    })
+    pendingCompanyMove.current[direction] = operation
+    setCompanyBusy(true)
     try {
-      if (direction === 'deposit') await api.companyFundDeposit(companyAmt, companyReason.trim())
-      else await api.companyFundWithdraw(companyAmt, companyReason.trim())
+      if (direction === 'deposit') await api.companyFundDeposit(companyAmt, reasonText, operation.idempotencyKey)
+      else await api.companyFundWithdraw(companyAmt, reasonText, operation.idempotencyKey)
+      pendingCompanyMove.current[direction] = pendingAfterAttempt(operation, { ok: true })
       setCompanyAmt('')
       setCompanyReason('')
       await refreshCompany()
       void load()
     } catch (err) {
-      toast.error(explainError((err as { error?: string }).error ?? 'error', t))
+      const code = (err as { error?: string }).error
+      pendingCompanyMove.current[direction] = pendingAfterAttempt(operation, { ok: false, error: code })
+      toast.error(explainError(code ?? 'error', t))
+    } finally {
+      setCompanyBusy(false)
     }
   }
 
@@ -488,8 +537,16 @@ export function Treasury(): ReactNode {
     const amount = depositAmt[target]
     if (!amount) return
     setDepositMsg(null)
+    const operation = pendingMoneyMove(pendingDeposit.current[target], {
+      command: `treasury_deposit:${target}`,
+      branchId: branchId ?? session?.branchId ?? null,
+      amount,
+      reason: '',
+    })
+    pendingDeposit.current[target] = operation
     try {
-      const res = await api.treasuryDeposit(target, amount)
+      const res = await api.treasuryDeposit(target, amount, operation.idempotencyKey)
+      pendingDeposit.current[target] = pendingAfterAttempt(operation, { ok: true })
       setBalances((b) => (b ? { ...b, [target]: res.balance } : b))
       setDepositAmt({ ...depositAmt, [target]: '' })
       setDepositMsg(t.treasury.deposited)
@@ -497,8 +554,10 @@ export function Treasury(): ReactNode {
       // It used to set the SAME state as success, which renders in emerald — so a rejected
       // deposit printed «forbidden» in green under the cash box and the manager believed the
       // money had gone in.
+      const code = (err as { error?: string }).error
+      pendingDeposit.current[target] = pendingAfterAttempt(operation, { ok: false, error: code })
       setDepositMsg(null)
-      toast.error(explainError((err as { error?: string }).error ?? 'error', t))
+      toast.error(explainError(code ?? 'error', t))
     }
   }
 
@@ -1015,24 +1074,27 @@ export function Treasury(): ReactNode {
                       {t.treasury.ownerFunding}
                     </Button>
                   </div>
-                  {/* «كييش» by hand. The owner's book moves money out of the box every day; until
-                      now the screen could only put money in. الترميم automates the decision later
-                      and posts through the very same recipe, so the two are one thing in the ledger. */}
-                  <div className="flex flex-col gap-2 sm:flex-row">
-                    <MoneyInput
-                      value={withdrawAmt[target]}
-                      onChange={(e) => setWithdrawAmt({ ...withdrawAmt, [target]: e.target.value })}
-                      className="min-w-0 flex-1"
-                      placeholder={t.treasury.kaish}
-                    />
-                    <Button
-                      variant="ghost"
-                      onClick={() => withdraw(target)}
-                      disabled={!withdrawAmt[target]}
-                    >
-                      {t.treasury.transferToCompanyKaish}
-                    </Button>
-                  </div>
+                  {/* «كييش» by hand. The owner's book moves money out of the box every day; الترميم
+                      posts through the very same recipe, so the two are one thing in the ledger.
+                      Only for `company_fund.manage` — it moves صندوق الشركة, which the branch
+                      manager may not (2026-09-17). */}
+                  {canManageCompanyFund ? (
+                    <div className="flex flex-col gap-2 sm:flex-row">
+                      <MoneyInput
+                        value={withdrawAmt[target]}
+                        onChange={(e) => setWithdrawAmt({ ...withdrawAmt, [target]: e.target.value })}
+                        className="min-w-0 flex-1"
+                        placeholder={t.treasury.kaish}
+                      />
+                      <Button
+                        variant="ghost"
+                        onClick={() => withdraw(target)}
+                        disabled={!withdrawAmt[target]}
+                      >
+                        {t.treasury.transferToCompanyKaish}
+                      </Button>
+                    </div>
+                  ) : null}
                 </div>
               ) : (
                 // Saying why beats an empty card somebody reads as a broken screen.
@@ -1076,7 +1138,7 @@ export function Treasury(): ReactNode {
 
         {/* «صندوق الشركة» — where «كييش» lands and where «شحن من الصندوق» comes from. Sits inside
             the treasury card because the two are one flow: money leaves the box and arrives here. */}
-        {canViewCompanyFund ? <div className="mt-4 rounded-lg border border-slate-300 bg-slate-50 p-3">
+        {canManageCompanyFund ? <div className="mt-4 rounded-lg border border-slate-300 bg-slate-50 p-3">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <span className="text-xs font-semibold text-slate-500">{t.treasury.companyFund}</span>
             <span className="text-2xl font-bold">
@@ -1118,13 +1180,16 @@ export function Treasury(): ReactNode {
               <div className="flex gap-2">
                 {/* A reason is mandatory on both: the database enforces it for these events, so a
                     button that submits without one only ever produces a 400 the operator must decode. */}
-                <Button onClick={() => moveCompany('deposit')} disabled={!companyAmt || !companyReason.trim()}>
+                <Button
+                  onClick={() => moveCompany('deposit')}
+                  disabled={companyBusy || !companyAmt || !companyReason.trim()}
+                >
                   {t.treasury.deposit}
                 </Button>
                 <Button
                   variant="ghost"
                   onClick={() => moveCompany('withdraw')}
-                  disabled={!companyAmt || !companyReason.trim()}
+                  disabled={companyBusy || !companyAmt || !companyReason.trim()}
                 >
                   {t.treasury.withdraw}
                 </Button>

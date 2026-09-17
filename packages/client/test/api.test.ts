@@ -169,6 +169,47 @@ it('publishes both restoration targets and their audited reason in one branch-sc
   })
 })
 
+it('sends the client-owned key on company-fund moves, treasury deposits and withdrawals, with the selected branch', async () => {
+  const fetchMock = vi.fn().mockImplementation(async () =>
+    new Response(JSON.stringify({ balance: '10.00', replayed: false }), {
+      status: 201,
+      headers: { 'content-type': 'application/json' },
+    }),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+  api.setBranch('branch-1')
+  const key = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+  const posted = (url: string, body: Record<string, unknown>) => [
+    url,
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  ]
+
+  await api.companyFundDeposit('10.00', 'رأس مال', key)
+  await api.companyFundWithdraw('10.00', 'مسحوبات', key)
+  await api.treasuryDeposit('cash', '10.00', key)
+  await api.treasuryWithdraw('wallet', '10.00', 'كييش', 'company_box', key)
+
+  expect(fetchMock.mock.calls).toEqual([
+    posted('/api/company-fund/deposit', { idempotencyKey: key, amount: '10.00', reason: 'رأس مال', branchId: 'branch-1' }),
+    posted('/api/company-fund/withdraw', { idempotencyKey: key, amount: '10.00', reason: 'مسحوبات', branchId: 'branch-1' }),
+    posted('/api/treasury/deposit', { idempotencyKey: key, target: 'cash', amount: '10.00', branchId: 'branch-1' }),
+    posted('/api/treasury/withdraw', {
+      idempotencyKey: key,
+      target: 'wallet',
+      amount: '10.00',
+      to: 'company_box',
+      reason: 'كييش',
+      branchId: 'branch-1',
+    }),
+  ])
+})
+
 it('sends the client-owned expense idempotency key with the selected branch', async () => {
   const fetchMock = vi.fn().mockResolvedValue(
     new Response(JSON.stringify({ id: 'expense-1', amount: '25.00' }), {

@@ -1,5 +1,39 @@
 # PROGRESS
 
+## 2026-09-17 — P0: only company-fund managers move company money
+
+First phase of the owner-approved finance & fleet redesign (brief: `docs/handoff/finance-redesign-codex.md`,
+mockups: `docs/design/2026-09-redesign/index.html`).
+
+**The gap.** صندوق الشركة was readable only by the general manager and the system admin, but a branch
+manager could deposit into it, withdraw from it, name it in a manual journal line, sweep an office box
+into it by hand, and reverse any entry that touched it — all through `journal.manual.write`. Deposits and
+withdrawals posted under a fresh server UUID, so a double click moved the money twice, and the withdraw
+balance check ran outside the lock.
+
+**Now.**
+- New permission `company_fund.manage` (GM + sysadmin, scope `all`); migration `0064` seeds it only when
+  `role_permissions` is already populated, so a fresh database keeps its default matrix.
+- `/company-fund` read, deposit and withdraw require it. The hand «كييش» (`/treasury/withdraw` with
+  `to=company_box`) and any reversal of an entry with a `company_box` line require it as a second gate
+  (403 `company_fund_forbidden`). `/journal/manual` refuses `company_box` for every role
+  (422 `company_fund_not_manual`). The `to` field of `/treasury/withdraw` is a closed list.
+- The four money-move routes take a client idempotency key: a replay answers 200 without posting, a
+  changed request 409; the balance check runs inside the `receivables:<branch>` lock.
+- Admin: held keys per submission (`money-move-idempotency.ts`); company-fund controls and the hand
+  sweep show only for `company_fund.manage`.
+
+**Verified.** Full suite against a local disposable PostgreSQL 17.6 (db 219 passed, 0 skipped — including
+0064 on a real database), api 948, typecheck and every `check:*`. Mutation checks: removing the reversal
+gate breaks 4 tests, the sweep gate 1, moving the balance check out of the lock 3. Also fixed four stale
+PostgreSQL fixtures that lacked `window_opens_at` (`b0c469f`).
+
+**Next.** P1 (schedule 09–17 / 18–02, double ≥ 10 h → target 12 h) and, in parallel, C1 (HQ ledger and
+USD/SYP foundation).
+
+**Risk.** Not deployed. Production must apply migration 0064 before the new API ships, or the GM and the
+system admin lose the company-fund card (the key would be missing from their live grants).
+
 ## 2026-09-08 — للنوبة ساعةٌ، ونمطٌ، وكشفُ إغلاق
 
 Commits `b452840`, `b74e2ea`, `274996d`, `9fd1918`, plus the dashboard tile. `pnpm check` green —

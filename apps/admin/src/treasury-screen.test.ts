@@ -30,10 +30,69 @@ describe('branch treasury screen contract', () => {
     expect(en.treasury.expectedWallet.toLowerCase()).toContain('expected')
   })
 
-  it('does not fetch or render the company fund for a branch-only role', () => {
-    expect(treasurySource).toContain("'profit.view_total'")
-    expect(treasurySource).toContain('if (!canViewCompanyFund)')
-    expect(treasurySource).toContain('{canViewCompanyFund ? <div')
+  // Was `profit.view_total` for the card while the writes needed only `journal.manual.write`; since
+  // 2026-09-17 one key, `company_fund.manage`, gates the read and both writes on the server.
+  it('does not fetch or render the company fund without company_fund.manage (was profit.view_total)', () => {
+    expect(treasurySource).toContain("'company_fund.manage'")
+    expect(treasurySource).not.toContain("'profit.view_total'")
+    expect(treasurySource).toContain('if (!canManageCompanyFund)')
+    expect(treasurySource).toContain('{canManageCompanyFund ? <div')
+  })
+
+  it('never offers صندوق الشركة as a manual-entry fund', () => {
+    const manualFunds = /const MANUAL_FUNDS = \[([^\]]*)\]/.exec(treasurySource)?.[1]
+    expect(manualFunds).toBeDefined()
+    expect(manualFunds).toContain("'office_cash'")
+    expect(manualFunds).not.toContain('company_box')
+  })
+
+  // The hand «كييش» row used to render for anyone with `journal.manual.write`, the branch manager
+  // included; it moves صندوق الشركة, so it now renders only under `company_fund.manage`.
+  it('renders the hand «كييش» only for company_fund.manage and sends it with a held key', () => {
+    const kaishButton = treasurySource.indexOf('{t.treasury.transferToCompanyKaish}')
+    expect(kaishButton).toBeGreaterThan(-1)
+    expect(treasurySource.indexOf('{t.treasury.transferToCompanyKaish}', kaishButton + 1)).toBe(-1)
+    const guard = treasurySource.lastIndexOf('{canManageCompanyFund ? (', kaishButton)
+    expect(guard).toBeGreaterThan(-1)
+    // Nothing closes that guard between it and the button.
+    expect(treasurySource.slice(guard, kaishButton)).not.toContain(') : null}')
+
+    const kaish = treasurySource.slice(
+      treasurySource.indexOf('async function withdraw('),
+      treasurySource.indexOf('const loadAdvances'),
+    )
+    expect(kaish).toContain('pendingMoneyMove(pendingKaish.current[target], {')
+    expect(kaish).toContain(
+      "api.treasuryWithdraw(target, amount, t.treasury.kaish, 'company_box', operation.idempotencyKey)",
+    )
+    expect(kaish).toContain('pendingAfterAttempt(operation, { ok: false, error: code })')
+    expect(treasurySource).not.toMatch(/treasuryWithdraw\([^)]*randomUUID/)
+    for (const catalog of [ar, en]) {
+      expect(catalog.errors.company_fund_forbidden.length).toBeGreaterThan(20)
+    }
+  })
+
+  it('sends one held idempotency key per company-fund move and treasury deposit', () => {
+    const company = treasurySource.slice(
+      treasurySource.indexOf('async function moveCompany'),
+      treasurySource.indexOf('async function deposit('),
+    )
+    expect(company).toContain('pendingMoneyMove(pendingCompanyMove.current[direction], {')
+    expect(company).toContain('command: `company_${direction}`')
+    expect(company).toContain('api.companyFundDeposit(companyAmt, reasonText, operation.idempotencyKey)')
+    expect(company).toContain('api.companyFundWithdraw(companyAmt, reasonText, operation.idempotencyKey)')
+    expect(company).toContain('pendingAfterAttempt(operation, { ok: false, error: code })')
+
+    const deposit = treasurySource.slice(
+      treasurySource.indexOf('async function deposit('),
+      treasurySource.indexOf('async function moveBetweenBoxes'),
+    )
+    expect(deposit).toContain('pendingMoneyMove(pendingDeposit.current[target], {')
+    expect(deposit).toContain('api.treasuryDeposit(target, amount, operation.idempotencyKey)')
+    expect(deposit).toContain('pendingAfterAttempt(operation, { ok: false, error: code })')
+    // A fresh key per press is exactly the double-deposit this replaces.
+    expect(treasurySource).not.toMatch(/companyFund(Deposit|Withdraw)\([^)]*randomUUID/)
+    expect(treasurySource).not.toMatch(/treasuryDeposit\([^)]*randomUUID/)
   })
 
   it('keeps both restoration legs in the confirmation and displays the dashboard capital delta', () => {

@@ -1796,19 +1796,42 @@ export class ApiClient {
       { direction, amount, reason, ...(this.branchId ? { branchId: this.branchId } : {}) },
     )
   }
-  treasuryDeposit(target: 'cash' | 'wallet', amount: string, note?: string) {
+  /**
+   * Owner funding into the branch box.
+   *
+   * `idempotencyKey` is one UUID per logical submission, REUSED when the same submission is retried
+   * after a lost response — the server then answers with the original entry instead of depositing
+   * twice. A new submission (any changed field) needs a new key; see the admin's
+   * `pendingMoneyMove`.
+   */
+  treasuryDeposit(target: 'cash' | 'wallet', amount: string, idempotencyKey: string, note?: string) {
     // branchId is explicit here: the GM has scope 'all' and no session branch, so without it the
     // deposit 422s — the money would have nowhere to land.
-    return this.post<{ target: string; balance: string }>('/treasury/deposit', {
+    return this.post<{ target: string; balance: string; replayed: boolean }>('/treasury/deposit', {
+      idempotencyKey,
       target,
       amount,
       note,
       ...(this.branchId ? { branchId: this.branchId } : {}),
     })
   }
-  /** «كييش» when `to` is the company fund — the same recipe الترميم uses automatically. */
-  treasuryWithdraw(target: 'cash' | 'wallet', amount: string, reason: string, to = 'company_box') {
-    return this.post<{ target: string; balance: string }>('/treasury/withdraw', {
+  /**
+   * Take money out of the branch box to a closed destination.
+   *
+   * `company_box` is «كييش» by hand — the same recipe الترميم uses — and the server accepts it only
+   * from a holder of `company_fund.manage` (GM + system admin); anyone else gets 403
+   * `company_fund_forbidden`. No default: the caller always says where the money goes. Same key
+   * contract as `treasuryDeposit`: one per submission, reused on retry.
+   */
+  treasuryWithdraw(
+    target: 'cash' | 'wallet',
+    amount: string,
+    reason: string,
+    to: 'company_box' | 'owner_drawings',
+    idempotencyKey: string,
+  ) {
+    return this.post<{ target: string; balance: string; replayed: boolean }>('/treasury/withdraw', {
+      idempotencyKey,
       target,
       amount,
       to,
@@ -1818,21 +1841,26 @@ export class ApiClient {
   }
 
   // ── «صندوق الشركة» — company-wide, so it is NOT scoped to the session branch on read ────────
+  // Every call here needs `company_fund.manage` (GM + system admin).
   companyFund() {
     return this.get<{
       total: string
       branches: Array<{ branchId: string; code: string; nameAr: string; balance: string }>
     }>('/company-fund')
   }
-  companyFundDeposit(amount: string, reason: string) {
-    return this.post<{ balance: string }>('/company-fund/deposit', {
+  /** Same key contract as `treasuryDeposit`: one per submission, reused on retry. */
+  companyFundDeposit(amount: string, reason: string, idempotencyKey: string) {
+    return this.post<{ balance: string; replayed: boolean }>('/company-fund/deposit', {
+      idempotencyKey,
       amount,
       reason,
       ...(this.branchId ? { branchId: this.branchId } : {}),
     })
   }
-  companyFundWithdraw(amount: string, reason: string) {
-    return this.post<{ balance: string }>('/company-fund/withdraw', {
+  /** Same key contract as `treasuryDeposit`: one per submission, reused on retry. */
+  companyFundWithdraw(amount: string, reason: string, idempotencyKey: string) {
+    return this.post<{ balance: string; replayed: boolean }>('/company-fund/withdraw', {
+      idempotencyKey,
       amount,
       reason,
       ...(this.branchId ? { branchId: this.branchId } : {}),

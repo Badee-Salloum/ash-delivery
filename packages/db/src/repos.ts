@@ -240,6 +240,20 @@ export class PgLedgerRepo implements LedgerRepo {
     return this.load('je.branch_id = $1 AND je.week_start_date = $2', [branchId, weekStartDate])
   }
 
+  async findStandaloneEntry(
+    branchId: string,
+    eventType: JournalEntryRecord['eventType'],
+    occurrenceKey: string,
+  ): Promise<JournalEntryRecord | null> {
+    // `shift_id IS NULL` is the COALESCE(shift_id::text, '') = '' half of je_idempotency_uq (0017),
+    // so this can match at most one row.
+    const rows = await this.load(
+      'je.branch_id = $1 AND je.event_type = $2::ledger_event AND je.shift_id IS NULL AND je.occurrence_key = $3',
+      [branchId, eventType, occurrenceKey],
+    )
+    return rows[0] ?? null
+  }
+
   private async load(where: string, params: unknown[]): Promise<JournalEntryRecord[]> {
     const { rows } = await this.pool.query<Record<string, unknown>>(
       `SELECT je.*,

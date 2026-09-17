@@ -6,6 +6,7 @@ import type {
   CashCountRecord,
   Deps,
   FinancialTransactionDeps,
+  JournalEntryRecord,
   ReceivableEventRecord,
 } from '@ash/contracts'
 import {
@@ -24,6 +25,8 @@ import {
   type Posting,
   type RestorationPlan,
   assertBalanced,
+  can,
+  fundCode,
   fundRefFromCode,
   isDateLocked,
   minor,
@@ -40,6 +43,7 @@ import {
 } from '@ash/domain'
 import { ServiceError, assertWeekOpen, ensureFxDay, todayFor } from './shifts.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
+import { grantsFromRows } from './rbac.ts'
 
 /** Exact storage range of PostgreSQL bigint-backed money columns and journal lines. */
 const PG_MINOR_MAX = 9_223_372_036_854_775_807n
@@ -83,6 +87,51 @@ function assertPersistableTreasuryPostings(postings: readonly Posting[]): void {
 }
 
 /**
+ * Whether a client-named fund code resolves to صندوق الشركة — through the SAME parser the posting
+ * uses, so `company_box:anything` cannot pass a string comparison and still move the fund. A code
+ * the parser refuses is not the company fund; building the posting refuses it exactly as before.
+ */
+function namesCompanyBox(code: string): boolean {
+  try {
+    return fundRefFromCode(code).kind === 'company_box'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * One occurrence-key namespace for every client-keyed treasury command.
+ *
+ * Shared on purpose: a key sent to a deposit and then to a withdrawal must find the first entry and
+ * be refused as a conflict, not post twice under two different keys. Lower-cased because a UUID's
+ * letter case carries no meaning. The `client:` prefix keeps these apart from the hashed keys of
+ * `/journal/manual` and `/treasury/transfer`, and from the server-random UUIDs older entries carry.
+ */
+const clientOccurrenceKey = (idempotencyKey: string): string => `client:${idempotencyKey.toLowerCase()}`
+
+/** A stored entry IS this command only if every money-relevant fact matches, line for line. */
+function sameCommandEntry(entry: JournalEntryRecord, posting: Posting, reason: string, createdBy: string): boolean {
+  return (
+    entry.shiftId === null &&
+    entry.eventType === posting.eventType &&
+    entry.occurrenceKey === posting.occurrenceKey &&
+    entry.reason === reason &&
+    entry.createdBy === createdBy &&
+    entry.lines.length === posting.lines.length &&
+    posting.lines.every((line, index) => {
+      const stored = entry.lines[index]
+      return (
+        stored !== undefined &&
+        stored.fundCode === fundCode(line.fund) &&
+        stored.side === line.side &&
+        stored.amount === line.amount &&
+        (stored.role ?? null) === (line.role ?? null)
+      )
+    })
+  )
+}
+
+/**
  * Treasury: the daily cash count (E-5 / س51) and disciplined manual entries (E-3 / س50).
  *
  * Both are branch manager + GM per the §3 matrix and decision D-5 — explicitly NOT the system
@@ -98,6 +147,28 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
 
   /** The funds a physical count covers. Driver funds are counted through the shift close. */
   const COUNTABLE_FUNDS = ['office_cash', 'office_wallet'] as const
+
+  /**
+   * The SECOND gate for a route whose own permission is broader than صندوق الشركة.
+   *
+   * `/treasury/withdraw` and `/journal/:id/reverse` are `journal.manual.write`, which the branch
+   * manager holds; only some of what they do touches `company_box`. When it does, the actor must ALSO
+   * hold `company_fund.manage` — read from the live matrix, exactly as the route preHandler reads it,
+   * so a system admin's edit to `role_permissions` governs this as well.
+   */
+  async function assertManagesCompanyFund(req: FastifyRequest, branchId: string): Promise<void> {
+    const grants = grantsFromRows(await deps.directory.grants())
+    const decision = can(req.actor!, 'company_fund.manage', { branchId }, grants)
+    if (decision.allowed) return
+    req.log.warn(
+      { actor: req.actor!.userId, role: req.actor!.roleKey, permission: 'company_fund.manage', reason: decision.reason },
+      'company fund movement refused',
+    )
+    throw new ServiceError(403, 'company_fund_forbidden', {
+      permission: 'company_fund.manage',
+      reason: decision.reason,
+    })
+  }
 
   // ── The daily count (E-5) ───────────────────────────────────────────────────────────────
 
@@ -305,6 +376,22 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     // database CHECK requires it too — this is the third layer, and the one with a clear error.
     if (body.reason.trim().length === 0) throw new ServiceError(422, 'reason_required')
 
+    /*
+     * صندوق الشركة moves only through its own commands, under `company_fund.manage`.
+     *
+     * This route is `journal.manual.write`, which the branch manager holds, and its lines are free
+     * text — so naming `company_box` here was a back door to a fund he may not even see. Refused for
+     * EVERY role, the general manager included: his deposit and withdrawal have dedicated routes
+     * with a replay key and a balance check, and a hand-built entry has neither.
+     */
+    const companyLine = body.lines.findIndex((l) => namesCompanyBox(l.fundCode))
+    if (companyLine !== -1) {
+      throw new ServiceError(422, 'company_fund_not_manual', {
+        line: companyLine,
+        fundCode: body.lines[companyLine]!.fundCode,
+      })
+    }
+
     const ceiling = await deps.settings.receiptRequiredAbove(branchId)
     const total = body.lines
       .filter((l) => l.side === 'D')
@@ -386,6 +473,13 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       const original = await findEntry(deps, branchId, entryId)
       if (!original) throw new ServiceError(404, 'entry_not_found')
 
+      // Reversing an entry that moved صندوق الشركة moves it again, the other way — a GM's deposit, a
+      // hand «كييش», a الترميم run. That is company-fund management, so it needs the fund's own
+      // permission on top of this route's. Entries that never touched the fund keep today's rule.
+      if (original.lines.some((line) => namesCompanyBox(line.fundCode))) {
+        await assertManagesCompanyFund(req, branchId)
+      }
+
       const posting = reverse(
         {
           eventType: original.eventType,
@@ -457,7 +551,69 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     }
   })
 
+  /**
+   * Post ONE shift-less command entry under the client's idempotency key — exactly once.
+   *
+   * The routes that use this have no business table: the journal entry IS the record. They used to
+   * post under `deps.ids.uuid()`, a fresh key per call, so the ledger's idempotency index could not
+   * see a double click as a repeat and the same money moved twice. Now the key comes from the client
+   * and survives a retry:
+   *
+   *  • same key, same command  → the original entry, `replayed: true`, nothing posted;
+   *  • same key, anything else → 409 `idempotency_key_conflict`, nothing posted.
+   *
+   * The committed receipt is read BEFORE the week gate, so a retry after Sunday's close still gets
+   * its original answer. Everything that decides whether new money may move — the receipt re-read,
+   * the caller's `guard` (a balance check) and the posting — runs inside the branch-money lock every
+   * `PgLedgerRepo.post` takes, so two concurrent requests cannot both pass the same balance.
+   */
+  async function postClientKeyedCommand(
+    req: FastifyRequest,
+    branchId: string,
+    posting: Posting,
+    reason: string,
+    guard?: (tx: FinancialTransactionDeps) => Promise<void>,
+  ): Promise<{ entry: JournalEntryRecord; replayed: boolean }> {
+    const actorId = req.actor!.userId
+    const receipt = (entry: JournalEntryRecord) => {
+      if (!sameCommandEntry(entry, posting, reason, actorId)) {
+        throw new ServiceError(409, 'idempotency_key_conflict')
+      }
+      return { entry, replayed: true }
+    }
+
+    const committed = await deps.ledger.findStandaloneEntry(branchId, posting.eventType, posting.occurrenceKey)
+    if (committed) return receipt(committed)
+
+    const businessDate = todayFor(deps)
+    await assertWeekOpen(deps, branchId, businessDate)
+    const fxDayId = await ensureFxDay(deps, businessDate)
+    return deps.financialUnitOfWork.run(
+      { lockKey: `receivables:${branchId}`, actorId, requestId: req.requestId },
+      async (tx) => {
+        const prior = await tx.ledger.findStandaloneEntry(branchId, posting.eventType, posting.occurrenceKey)
+        if (prior) return receipt(prior)
+        if (guard) await guard(tx)
+        const [entry] = await tx.ledger.post(branchId, [posting], {
+          shiftId: null,
+          businessDate,
+          postingDate: businessDate,
+          weekStartDate: weekStartFor(businessDate),
+          fxDayId,
+          createdBy: actorId,
+          reason,
+        })
+        // Unreachable under the lock unless the key is held by a row this lookup cannot see. Never
+        // report money as moved when it was not.
+        if (!entry) throw new ServiceError(409, 'idempotency_key_conflict')
+        return { entry, replayed: false }
+      },
+    )
+  }
+
   const depositRequest = z.object({
+    /** One per logical submission, reused on retry — see `postClientKeyedCommand`. */
+    idempotencyKey: z.string().uuid(),
     target: z.enum(['cash', 'wallet']),
     amount: moneySchema,
     note: z.string().max(200).optional(),
@@ -468,40 +624,28 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     const branchId = resolveBranch(req)
     if (body.amount <= 0n) throw new ServiceError(422, 'amount_must_be_positive')
     const officeCode = body.target === 'cash' ? 'office_cash' : 'office_wallet'
-    // BR7, and it was MISSING here while every other posting route had it. The date is always
-    // today so it rarely bit — but on the Sunday a week is sealed, a deposit would have gone
-    // straight through the application and been refused by the database trigger instead, surfacing
-    // as a raw 25006 rather than «الأسبوع مقفل».
-    await assertWeekOpen(deps, branchId, todayFor(deps))
 
     // A deposit increases the office box/wallet (DEBIT) against an owner-funding contra account
     // (CREDIT), so the ledger stays balanced and the source of the money is recorded. `owner_funding`
     // is an unrecognised code, which fundRefFromCode maps to a contra cost centre by design.
     const posting = assertBalanced({
       eventType: 'manual',
-      occurrenceKey: deps.ids.uuid(),
+      occurrenceKey: clientOccurrenceKey(body.idempotencyKey),
       lines: [
         { fund: fundRefFromCode(officeCode), side: 'D', amount: body.amount },
         { fund: fundRefFromCode('owner_funding'), side: 'C', amount: body.amount },
       ],
     })
-
-    const businessDate = todayFor(deps)
-    const fxDayId = await ensureFxDay(deps, businessDate)
     const reason = body.note?.trim() || (body.target === 'cash' ? 'deposit to cash box' : 'top up branch wallet')
-    await deps.ledger.post(branchId, [posting], {
-      shiftId: null,
-      businessDate,
-      postingDate: businessDate,
-      weekStartDate: weekStartFor(businessDate),
-      fxDayId,
-      createdBy: req.actor!.userId,
-      reason,
-    })
 
-    return reply.code(201).send({
+    // BR7 is checked inside: it was once MISSING here while every other posting route had it, and on
+    // the Sunday a week is sealed a deposit surfaced as a raw 25006 rather than «الأسبوع مقفل».
+    const { replayed } = await postClientKeyedCommand(req, branchId, posting, reason)
+
+    return reply.code(replayed ? 200 : 201).send({
       target: body.target,
       balance: serializeMoney(await deps.ledger.fundBalance(branchId, officeCode)),
+      replayed,
     })
   })
 
@@ -514,8 +658,10 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
 
   /** Aggregated across branches: with one branch this simply IS صندوق الشركة. */
   // No `subject`: صندوق الشركة is company-wide by definition, so there is no branch to scope it to.
-  // `profit.view_total` is the gate — GM and, since decision 9, the system admin.
-  app.get('/company-fund', { config: { permission: 'profit.view_total' } }, async () => {
+  // `company_fund.manage` is the gate — GM and system admin (2026-09-17) — the SAME key as the two
+  // writes below. It used to be `profit.view_total` here and `journal.manual.write` there, which let
+  // a branch manager move money in and out of a fund he could not see.
+  app.get('/company-fund', { config: { permission: 'company_fund.manage' } }, async () => {
     const branches = await deps.directory.listBranches()
     const perBranch = await Promise.all(
       branches.map(async (b) => ({
@@ -1050,59 +1196,69 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
   app.post('/treasury/receivables/writeoffs', receivableWriteOptions, writeoffReceivable)
 
   const companyMoveRequest = z.object({
+    /** One per logical submission, reused on retry — see `postClientKeyedCommand`. */
+    idempotencyKey: z.string().uuid(),
     amount: moneySchema,
     reason: z.string().min(1).max(500),
   })
+
+  // `company_fund.manage` (GM + system admin), NOT `journal.manual.write`: the branch manager holds
+  // the latter, and this is the gap it opened. The subject stays the named branch — an 'all' grant
+  // ignores it, and a narrower grant the system admin might one day write is still confined to it.
+  const companyFundWrite = { config: { permission: 'company_fund.manage' as const, subject: targetBranch } }
 
   /**
    * Put the owner's own money into صندوق الشركة. Its counterpart is `owner_funding`, the same
    * contra account a branch deposit uses — so «where did this come from» has one answer, not two.
    */
-  app.post('/company-fund/deposit', { config: { permission: 'journal.manual.write', subject: targetBranch } }, async (req, reply) => {
+  app.post('/company-fund/deposit', companyFundWrite, async (req, reply) => {
     const body = companyMoveRequest.parse(req.body)
     const branchId = resolveBranch(req)
     if (body.amount <= 0n) throw new ServiceError(422, 'amount_must_be_positive')
-    const businessDate = todayFor(deps)
-    await assertWeekOpen(deps, branchId, businessDate)
 
     const posting = assertBalanced({
       eventType: 'manual',
-      occurrenceKey: deps.ids.uuid(),
+      occurrenceKey: clientOccurrenceKey(body.idempotencyKey),
       lines: [
         { fund: { kind: 'company_box' }, side: 'D', amount: body.amount },
         { fund: fundRefFromCode('owner_funding'), side: 'C', amount: body.amount },
       ],
     })
-    await postOne(branchId, businessDate, posting, req.actor!.userId, body.reason)
-    return reply.code(201).send({ balance: serializeMoney(await deps.ledger.fundBalance(branchId, 'company_box')) })
+    const { replayed } = await postClientKeyedCommand(req, branchId, posting, body.reason)
+    return reply.code(replayed ? 200 : 201).send({
+      balance: serializeMoney(await deps.ledger.fundBalance(branchId, 'company_box')),
+      replayed,
+    })
   })
 
   /** Take money out of صندوق الشركة — the owner's drawings. Refused below zero. */
-  app.post('/company-fund/withdraw', { config: { permission: 'journal.manual.write', subject: targetBranch } }, async (req, reply) => {
+  app.post('/company-fund/withdraw', companyFundWrite, async (req, reply) => {
     const body = companyMoveRequest.parse(req.body)
     const branchId = resolveBranch(req)
     if (body.amount <= 0n) throw new ServiceError(422, 'amount_must_be_positive')
-    const businessDate = todayFor(deps)
-    await assertWeekOpen(deps, branchId, businessDate)
-
-    // You cannot hand over money the fund does not hold. The ledger would happily carry a negative
-    // balance — arithmetic has no opinion about it — but a company fund that owes itself money is
-    // a data-entry mistake every time, and it is cheapest to refuse at the moment it is made.
-    const held = await deps.ledger.fundBalance(branchId, 'company_box')
-    if (body.amount > held) {
-      throw new ServiceError(422, 'insufficient_funds', { held: serializeMoney(held) })
-    }
 
     const posting = assertBalanced({
       eventType: 'manual',
-      occurrenceKey: deps.ids.uuid(),
+      occurrenceKey: clientOccurrenceKey(body.idempotencyKey),
       lines: [
         { fund: fundRefFromCode('owner_drawings'), side: 'D', amount: body.amount },
         { fund: { kind: 'company_box' }, side: 'C', amount: body.amount },
       ],
     })
-    await postOne(branchId, businessDate, posting, req.actor!.userId, body.reason)
-    return reply.code(201).send({ balance: serializeMoney(await deps.ledger.fundBalance(branchId, 'company_box')) })
+    const { replayed } = await postClientKeyedCommand(req, branchId, posting, body.reason, async (tx) => {
+      // You cannot hand over money the fund does not hold. The ledger would happily carry a negative
+      // balance — arithmetic has no opinion about it — but a company fund that owes itself money is
+      // a data-entry mistake every time. Read INSIDE the branch lock: checked outside it, two
+      // withdrawals of the whole balance could both pass and the fund would go negative.
+      const held = await tx.ledger.fundBalance(branchId, 'company_box')
+      if (body.amount > held) {
+        throw new ServiceError(422, 'insufficient_funds', { held: serializeMoney(held) })
+      }
+    })
+    return reply.code(replayed ? 200 : 201).send({
+      balance: serializeMoney(await deps.ledger.fundBalance(branchId, 'company_box')),
+      replayed,
+    })
   })
 
   /**
@@ -1224,50 +1380,70 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     })
   })
 
+  /**
+   * Where money taken out of خزينة الفرع may go — a CLOSED list.
+   *
+   * `to` used to be free text, and an unrecognised code silently became `cost_center:<code>`, an
+   * account no report sums. Two destinations exist:
+   *
+   *  • `company_box` — «كييش» by hand, into صندوق الشركة. The route is `journal.manual.write`, which
+   *    the branch manager holds, and that was the gap: he could move money into a fund only the GM
+   *    and the system admin manage (2026-09-17). This destination now ALSO needs
+   *    `company_fund.manage`; without it the answer is 403 `company_fund_forbidden`.
+   *  • `owner_drawings` — the owner taking cash straight out of the branch box: the inverse of
+   *    `/treasury/deposit`'s `owner_funding`, and the contra `/company-fund/withdraw` already uses.
+   */
+  const WITHDRAW_DESTINATIONS = ['company_box', 'owner_drawings'] as const
+
   const withdrawRequest = z.object({
+    /** One per logical submission, reused on retry — see `postClientKeyedCommand`. */
+    idempotencyKey: z.string().uuid(),
     target: z.enum(['cash', 'wallet']),
     amount: moneySchema,
-    /** Where it goes. `company_box` is «كييش»; anything else is a named contra account. */
-    to: z.string().min(1).max(64).default('company_box'),
+    /** Required: there is no longer a default a caller could land in without saying so. */
+    to: z.enum(WITHDRAW_DESTINATIONS),
     reason: z.string().min(1).max(500),
   })
 
   /**
-   * Take money OUT of خزينة الفرع — the manual half of «كييش».
+   * Take money OUT of خزينة الفرع to one of the closed destinations above.
    *
-   * Uses the same LINES and the same `kaish` line role الترميم will use, so a hand-made sweep and an
-   * automatic
-   * one are the same event type and the same shape in the ledger. A dashboard that sums «كييش» must
-   * not have to know which of the two produced a row.
+   * A hand sweep uses the same LINES and the same `kaish` line role الترميم uses, so a dashboard that
+   * sums «كييش» need not know which of the two produced a row. Client-keyed like the company-fund
+   * commands: it used to post under a fresh server UUID, so a double click swept twice.
    */
   app.post('/treasury/withdraw', { config: { permission: 'journal.manual.write', subject: targetBranch } }, async (req, reply) => {
     const body = withdrawRequest.parse(req.body)
     const branchId = resolveBranch(req)
+    // Authority first: a branch manager naming the company fund is refused before anything is read.
+    if (body.to === 'company_box') await assertManagesCompanyFund(req, branchId)
     if (body.amount <= 0n) throw new ServiceError(422, 'amount_must_be_positive')
     const office = body.target === 'cash' ? 'office_cash' : 'office_wallet'
-    const businessDate = todayFor(deps)
-    await assertWeekOpen(deps, branchId, businessDate)
-
-    const held = await deps.ledger.fundBalance(branchId, office)
-    if (body.amount > held) {
-      throw new ServiceError(422, 'insufficient_funds', { held: serializeMoney(held) })
-    }
+    const occurrenceKey = clientOccurrenceKey(body.idempotencyKey)
 
     const posting =
       body.to === 'company_box'
-        ? manualKaish(office, body.amount, deps.ids.uuid())
+        ? manualKaish(office, body.amount, occurrenceKey)
         : assertBalanced({
             eventType: 'manual',
-            occurrenceKey: deps.ids.uuid(),
+            occurrenceKey,
             lines: [
               { fund: fundRefFromCode(body.to), side: 'D', amount: body.amount },
               { fund: fundRefFromCode(office), side: 'C', amount: body.amount },
             ],
           })
-    await postOne(branchId, businessDate, posting, req.actor!.userId, body.reason)
-    return reply.code(201).send({
+    const { replayed } = await postClientKeyedCommand(req, branchId, posting, body.reason, async (tx) => {
+      // You cannot move money the box is not holding. Read INSIDE the branch lock, so two
+      // concurrent sweeps of the whole box cannot both pass.
+      const held = await tx.ledger.fundBalance(branchId, office)
+      if (body.amount > held) {
+        throw new ServiceError(422, 'insufficient_funds', { held: serializeMoney(held) })
+      }
+    })
+    return reply.code(replayed ? 200 : 201).send({
       target: body.target,
       balance: serializeMoney(await deps.ledger.fundBalance(branchId, office)),
+      replayed,
     })
   })
 
@@ -1588,7 +1764,10 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     })
   })
 
-  /** The four routes above post one balanced entry on today's date; only the lines differ. */
+  /**
+   * `/treasury/transfer` posts one balanced entry on today's date. The client-keyed commands (the
+   * deposits and withdrawals) use `postClientKeyedCommand` instead.
+   */
   async function postOne(
     branchId: string,
     businessDate: string,

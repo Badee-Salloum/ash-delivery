@@ -104,7 +104,7 @@ branch managers never see purchase prices/instalments/book values; company debts
 - [x] Plan approved (owner) — full Arabic plan kept outside the repo; this file is the English source of truth.
 - [x] **Step 0** mockups — `docs/design/2026-09-redesign/index.html` (commit `ef81c65`). Owner sign-off: owner said "don't stop", proceed.
 - [x] Local PostgreSQL + baseline; stale db fixtures fixed (commit `b0c469f`).
-- [ ] **P0** company-fund permission gap — implemented, under review/fixes (not yet committed). See §4.
+- [x] **P0** company-fund permission gap — committed (`fix(treasury): only company-fund managers move company money`). Migration 0064 NOT applied to production.
 - [ ] **P1** schedule & targets
 - [ ] **P2** router params + time filter + range read model + profit fix
 - [ ] **P3** dashboard redesign + drill-down
@@ -127,7 +127,7 @@ Migration numbers are assigned in ship order: 0064 = P0 permission; later ones f
 
 Everything below was verified against the code (file:line at `f953906`; lines may drift a little).
 
-### P0 — Close the company-fund permission gap  (IN PROGRESS)
+### P0 — Close the company-fund permission gap  (DONE — kept here for context)
 Problem: `POST /company-fund/deposit|withdraw` (`apps/api/src/treasury.routes.ts` ~1061-1106) needed only
 `journal.manual.write`, which **branch managers** hold (`packages/domain/src/rbac/can.ts` ~101), though they cannot
 read the fund. Random idempotency keys (`deps.ids.uuid()` ~1070/1098); balance check outside the lock; `/journal/manual`

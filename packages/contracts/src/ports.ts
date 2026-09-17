@@ -1164,6 +1164,20 @@ export interface LedgerRepo {
   ): Promise<JournalEntryRecord[]>
   listByShift(shiftId: string): Promise<JournalEntryRecord[]>
   listByWeek(branchId: string, weekStartDate: CalendarDate): Promise<JournalEntryRecord[]>
+  /**
+   * The one shift-less entry stored under `(branchId, eventType, occurrenceKey)`, or null.
+   *
+   * `post()` answers a replay with an empty array and nothing else, which is right for a retry and
+   * useless to a command that must tell «the same request again» (200, the original receipt) from
+   * «this key with different money» (409). A command whose only record IS its journal entry —
+   * صندوق الشركة, a treasury deposit — reads the receipt through this. Same key the idempotency
+   * index uses (0017), so there is at most one row to find.
+   */
+  findStandaloneEntry(
+    branchId: string,
+    eventType: JournalEntryRecord['eventType'],
+    occurrenceKey: string,
+  ): Promise<JournalEntryRecord | null>
   fundBalance(branchId: string, fundCode: string): Promise<Minor>
   /**
    * Every fund whose code starts with `prefix`, and its balance.

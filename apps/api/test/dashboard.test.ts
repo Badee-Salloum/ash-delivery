@@ -912,12 +912,16 @@ describe('the owner’s treasury sheet (I-1, decision 10)', () => {
     expect(res.json().fundNet).toBe(sypStr(-1_000_000))
   })
 
-  it('nets a reversed kaish in fundIn and supports a legacy correction without line roles', async () => {
+  // Since 2026-09-17 a hand sweep, and reversing one, both move صندوق الشركة and so need
+  // `company_fund.manage`: the GM does here what the branch manager used to.
+  it('nets a reversed kaish in fundIn and supports a legacy correction without line roles (GM sweeps and reverses)', async () => {
     const manager = await h.loginAs('manager')
     await seedFund(manager, 'office_cash', sypStr(9_582_553))
+    const gm = await scopedGm()
 
     for (const amount of [9_078_231, 504_322]) {
-      const moved = await post(manager, '/treasury/withdraw', {
+      const moved = await post(gm, '/treasury/withdraw', {
+        idempotencyKey: crypto.randomUUID(),
         target: 'cash',
         amount: sypStr(amount),
         to: 'company_box',
@@ -932,7 +936,11 @@ describe('the owner’s treasury sheet (I-1, decision 10)', () => {
     )
     expect(sweeps).toHaveLength(2)
     const corrected = sweeps[1]!
-    const reversed = await post(manager, `/journal/${corrected.id}/reverse`, { reason: 'visible correction' })
+    // The branch manager may no longer reverse it: the reversal moves صندوق الشركة back.
+    const refused = await post(manager, `/journal/${corrected.id}/reverse`, { reason: 'visible correction' })
+    expect(refused.statusCode, refused.body).toBe(403)
+    expect(refused.json().error).toBe('company_fund_forbidden')
+    const reversed = await post(gm, `/journal/${corrected.id}/reverse`, { reason: 'visible correction' })
     expect(reversed.statusCode, reversed.body).toBe(201)
     const correction = h.deps.ledger.entries.find((entry) => entry.id === reversed.json().reversalEntryId)!
     expect(correction.lines.find((line) => line.fundCode === 'company_box')?.role).toBe('kaish')
@@ -948,7 +956,8 @@ describe('the owner’s treasury sheet (I-1, decision 10)', () => {
     expect(res.json().fundNet).toBe(sypStr(9_078_231))
   })
 
-  it('nets a reversed shahn in fundOut instead of reporting it as new fundIn', async () => {
+  // A الترميم run touches صندوق الشركة, so reversing one is the GM's since 2026-09-17.
+  it('nets a reversed shahn in fundOut instead of reporting it as new fundIn (GM reverses)', async () => {
     const manager = await h.loginAs('manager')
     await seedFund(manager, 'office_cash', sypStr(3_000_000))
     await seedFund(manager, 'office_wallet', sypStr(1_000_000))
@@ -962,7 +971,7 @@ describe('the owner’s treasury sheet (I-1, decision 10)', () => {
     expect(restored.statusCode, restored.body).toBe(201)
 
     const original = h.deps.ledger.entries.find((entry) => entry.eventType === 'restoration')!
-    const reversed = await post(manager, `/journal/${original.id}/reverse`, { reason: 'reverse shahn' })
+    const reversed = await post(await scopedGm(), `/journal/${original.id}/reverse`, { reason: 'reverse shahn' })
     expect(reversed.statusCode, reversed.body).toBe(201)
 
     const res = await get(await scopedGm(), '/dashboard/treasury')

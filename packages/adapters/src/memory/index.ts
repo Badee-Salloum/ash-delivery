@@ -1193,6 +1193,21 @@ export class MemoryLedgerRepo implements LedgerRepo {
   async listByWeek(branchId: string, weekStartDate: CalendarDate): Promise<JournalEntryRecord[]> {
     return this.entries.filter((e) => e.branchId === branchId && e.weekStartDate === weekStartDate)
   }
+  async findStandaloneEntry(
+    branchId: string,
+    eventType: JournalEntryRecord['eventType'],
+    occurrenceKey: string,
+  ): Promise<JournalEntryRecord | null> {
+    return (
+      this.entries.find(
+        (e) =>
+          e.branchId === branchId &&
+          e.eventType === eventType &&
+          e.shiftId === null &&
+          e.occurrenceKey === occurrenceKey,
+      ) ?? null
+    )
+  }
   async fundBalance(branchId: string, fundCode: string): Promise<Minor> {
     let total = 0n
     for (const e of this.entries) {
