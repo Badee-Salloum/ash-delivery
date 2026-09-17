@@ -1575,4 +1575,59 @@ describe('GET /dashboard/shifts-summary (P2)', () => {
     const other = await get(await h.loginAs('manager2'), `/dashboard/shifts-summary?from=${day}&to=${day}&branchId=${BRANCH}`)
     expect(other.statusCode).toBe(403)
   })
+
+  it('reports fleet work while omitting BR8 money from a branch manager', async () => {
+    await seedSummaryFixture()
+    const res = await get(await h.loginAs('manager'), `/dashboard/fleet-performance?from=${dayBefore}&to=${day}`)
+
+    expect(res.statusCode, res.body).toBe(200)
+    const body = res.json()
+    expect(body.financeVisible).toBe(false)
+    expect(body).not.toHaveProperty('costsFrom')
+    expect(body).not.toHaveProperty('unattributedVehicleCostSyp')
+    expect(body.totals).toMatchObject({ shifts: 4, km: 171, kmUnrecorded: 2, orders: 20, feesSyp: sypStr(100_000) })
+    expect(body.totals).not.toHaveProperty('companyShareSyp')
+    expect(body.totals).not.toHaveProperty('vehicleCostSyp')
+    expect(body.totals).not.toHaveProperty('contributionSyp')
+    expect(
+      (body.vehicles as Array<Record<string, unknown>>).map((vehicle) => [
+        vehicle.vehicleId,
+        vehicle.shifts,
+        vehicle.km,
+        vehicle.kmUnrecorded,
+      ]),
+    ).toEqual([
+      [VEHICLE_ID, 1, 91, 0],
+      ['vehicle-2', 2, 80, 1],
+      ['vehicle-sum-abandoned', 1, 0, 1],
+    ])
+    expect(body.vehicles[0]).not.toHaveProperty('companyShareSyp')
+  })
+
+  it('adds contribution only for a profit reader and applies the range/RBAC guard', async () => {
+    await seedSummaryFixture()
+    const gm = await get(await scopedProfitReader(), `/dashboard/fleet-performance?from=${day}&to=${day}`)
+    expect(gm.statusCode, gm.body).toBe(200)
+    expect(gm.json()).toMatchObject({
+      financeVisible: true,
+      costsFrom: day,
+      unattributedVehicleCostSyp: sypStr(0),
+      totals: {
+        shifts: 3,
+        km: 171,
+        kmUnrecorded: 1,
+        companyShareSyp: sypStr(40_000),
+        vehicleCostSyp: sypStr(0),
+        contributionSyp: sypStr(40_000),
+      },
+    })
+    const manager = await h.loginAs('manager')
+    expect((await get(manager, '/dashboard/fleet-performance')).statusCode).toBe(400)
+    expect((await get(manager, `/dashboard/fleet-performance?from=${day}&to=${dayBefore}`)).statusCode).toBe(400)
+    expect((await get(await h.loginAs('driver1'), `/dashboard/fleet-performance?from=${day}&to=${day}`)).statusCode).toBe(403)
+    expect(
+      (await get(await h.loginAs('manager2'), `/dashboard/fleet-performance?from=${day}&to=${day}&branchId=${BRANCH}`))
+        .statusCode,
+    ).toBe(403)
+  })
 })

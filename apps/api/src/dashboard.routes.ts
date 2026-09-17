@@ -12,12 +12,16 @@ import {
   type CalendarDate,
   type ShiftPattern,
   type WorkedTime,
+  type DistanceTotal,
+  type FxDay,
   REQUIRED_END_SLOTS,
   SHIFT_TARGET_MINUTES,
   addProfitLine,
+  addShiftDistance,
   can,
   classifyProfitLine,
   daysBetween,
+  EMPTY_DISTANCE_TOTAL,
   emptyProfitTotals,
   isCalendarDate,
   isDriverBlockLine,
@@ -25,11 +29,15 @@ import {
   minor,
   monthStartFor,
   netProfit,
+  resolveFxDay,
+  shiftDistance,
   shiftShapeForDay,
   shortfallMinutes,
+  signedCost,
   splitFixedDriverShare,
   toUsdMinor,
   totalCost,
+  vehicleIdOfCostLine,
   weekStartFor,
   workedTime,
 } from '@ash/domain'
@@ -281,6 +289,8 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     let unjudged = 0
     let abandoned = 0
 
+    /** Fees per business date, so the USD equivalent uses each day's own rate (BR6). */
+    const feesByDay = new Map<CalendarDate, bigint>()
     for (const shift of completed) {
       const worked = workedOf(shift)
       byPattern[worked.pattern] += 1
@@ -292,6 +302,7 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
       // What the shift was APPROVED on — an unchecked operation never entered the money.
       const counted = includedOrders(ordersByShift.get(shift.id) ?? [])
       const fees = counted.reduce((acc, o) => acc + o.fee, 0n)
+      feesByDay.set(shift.businessDate, (feesByDay.get(shift.businessDate) ?? 0n) + fees)
       // The company's share exactly as the shift's financial block states it (`GET /shifts`):
       // fixed 40% over the Yallago fees, plus the company part of every manual order.
       let companyShare = 0n
@@ -300,11 +311,10 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
           splitFixedDriverShare(counted.filter((o) => o.kind !== 'manual').map((o) => o.fee)).companyShare +
           counted.filter((o) => o.kind === 'manual').reduce((acc, o) => acc + (o.companyShare ?? 0n), 0n)
       }
-      // Distance only when both readings exist and run forwards; a reset odometer is not negative km.
-      const km =
-        shift.odoStart !== null && shift.odoEnd !== null && shift.odoEnd >= shift.odoStart
-          ? shift.odoEnd - shift.odoStart
-          : 0
+      // Distance only when both readings exist and run forwards; a reset odometer is not negative
+      // km. The rule is the domain's (`shiftDistance`), shared with `/dashboard/fleet-performance`.
+      const distance = shiftDistance({ start: shift.odoStart, end: shift.odoEnd })
+      const km = distance.recorded ? distance.km : 0
 
       for (const tally of [total, tallyFor(byDriver, shift.driverId), tallyFor(byVehicle, shift.vehicleId)]) {
         tally.shifts += 1
@@ -355,6 +365,7 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     const vehicleInfo = new Map(vehicles.map((v) => [v.id, v]))
     const money = (value: bigint): string => serializeMoney(minor(value))
     const shareOf = (tally: ShiftTally): string | null => (showCompanyShare ? money(tally.companyShare) : null)
+    const feesUsd = usdEquivalentByDay(feesByDay, feesByDay.size === 0 ? [] : await deps.fx.list())
     const byName = (a: { name: string }, b: { name: string }): number => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
 
     return {
@@ -379,6 +390,13 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
       totals: {
         orders: total.orders,
         feesSyp: money(total.fees),
+        /**
+         * P3 — the fees in dollars, each business day at ITS OWN rate (BR6), the way the old
+         * day tile showed «≈ $». Null when some day of the range has no rate on or before it:
+         * a partial dollar total would read as the whole one.
+         */
+        feesUsd: feesUsd === null ? null : money(feesUsd.usd),
+        fxProvisional: feesUsd?.provisional ?? false,
         companyShareSyp: shareOf(total),
         km: total.km,
         workedMinutes: total.workedMinutes,
@@ -424,6 +442,157 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     // `profit.view_total` routes declare an empty subject; ask the same question they ask.
     return can(req.actor, permission, {}, grants).allowed
   }
+
+  /**
+   * P3 — «أداء الآليات»: how each bike of the branch worked over a range.
+   *
+   * `branch_data.view`, like the shifts summary, over the SAME population (approved and
+   * week-locked shifts) and with the same fee rule, so a bike's row agrees with the completed-shifts
+   * list its link opens. Per vehicle: shifts, kilometres (the domain's `shiftDistance`: both
+   * readings present and running forwards; every other shift counted as `kmUnrecorded`), orders and
+   * fees.
+   *
+   * THE MONEY COLUMNS ARE BR8 FIGURES and are OMITTED — the keys are absent, not null — for a
+   * caller without `profit.view_total`. Hiding a column in the browser is not security.
+   *   - `companyShareSyp`: exactly the shifts summary's company share (settled shifts only).
+   *   - `vehicleCostSyp`: every ledger line `classifyProfitLine` calls a vehicle cost, attributed by
+   *     `vehicleIdOfCostLine`, read through the range source and clamped to go-live exactly as
+   *     `/dashboard/profit` clamps it — so the column always sums to that report's `vehicleCostSyp`
+   *     for the same dates (a line whose vehicle cannot be named is reported beside the rows).
+   *   - `contributionSyp` = company share − vehicle costs.
+   * Book value and unpaid instalments arrive with the fixed-asset register (C4), not here.
+   *
+   * RANGE CAP: `LEDGER_RANGE_MAX_DAYS`, the same bound as `/dashboard/shifts-summary` and the profit
+   * report. This is an aggregate the dashboard asks for over «الكل منذ البدء»; the 31/400-day cap
+   * belongs to `GET /shifts`, which returns rows.
+   */
+  app.get('/dashboard/fleet-performance', { config: { permission: 'branch_data.view', subject: ownBranch } }, async (req) => {
+    const q = z.object({ from: realCalendarDate, to: realCalendarDate }).parse(req.query)
+    if (q.from > q.to) {
+      throw new z.ZodError([{ code: 'custom', path: ['from'], message: '`from` must be on or before `to`' }])
+    }
+    assertWithinRangeCap(q.from, q.to)
+    const branchId = resolveBranchId(req)
+    const showFinance = await holdsPermission(req, 'profit.view_total')
+
+    const timing = await deps.shifts.listTimingBetween(branchId, q.from, q.to)
+    const completed = timing.filter((s) => COMPLETED_SHIFT_STATES.has(s.state))
+    const completedIds = completed.map((s) => s.id)
+    // Clamped like the profit report: the trial period is readable but never totalled as cost.
+    const costsFrom = showFinance ? clampToGoLive(q.from, await goLiveDate(deps)) : null
+    const [orderRows, settlementRows, vehicles, range] = await Promise.all([
+      deps.orders.listByShiftIds(completedIds),
+      showFinance ? deps.settlements.listByShiftIds(completedIds) : Promise.resolve([]),
+      // Every vehicle of the branch, retired ones included: a stopped bike's old work is work.
+      deps.directory.listVehicles(branchId),
+      costsFrom !== null && costsFrom <= q.to
+        ? deps.ledgerRange.readRange(branchId, costsFrom, q.to)
+        : Promise.resolve(null),
+    ])
+    const ordersByShift = new Map<string, ShiftOrderRecord[]>()
+    for (const order of orderRows) {
+      const grouped = ordersByShift.get(order.shiftId) ?? []
+      grouped.push(order)
+      ordersByShift.set(order.shiftId, grouped)
+    }
+    const settled = new Set(settlementRows.map((row) => row.shiftId))
+
+    const rows = new Map<string, FleetTally>()
+    const rowFor = (vehicleId: string): FleetTally => {
+      const found = rows.get(vehicleId)
+      if (found) return found
+      const fresh = emptyFleetTally()
+      rows.set(vehicleId, fresh)
+      return fresh
+    }
+    const total = emptyFleetTally()
+
+    for (const shift of completed) {
+      const counted = includedOrders(ordersByShift.get(shift.id) ?? [])
+      const fees = counted.reduce((acc, o) => acc + o.fee, 0n)
+      let companyShare = 0n
+      if (settled.has(shift.id)) {
+        companyShare =
+          splitFixedDriverShare(counted.filter((o) => o.kind !== 'manual').map((o) => o.fee)).companyShare +
+          counted.filter((o) => o.kind === 'manual').reduce((acc, o) => acc + (o.companyShare ?? 0n), 0n)
+      }
+      const distance = shiftDistance({ start: shift.odoStart, end: shift.odoEnd })
+      for (const tally of [total, rowFor(shift.vehicleId)]) {
+        tally.shifts += 1
+        tally.distance = addShiftDistance(tally.distance, distance)
+        tally.orders += counted.length
+        tally.fees += fees
+        tally.companyShare += companyShare
+      }
+    }
+
+    // Vehicle costs, only for a caller who may see them — and only then does a bike with costs but
+    // no shifts in the range earn a row.
+    const classification = { vehicleIds: new Set(vehicles.map((vehicle) => vehicle.id)) }
+    let allVehicleCost = 0n
+    for (const line of range?.lines ?? []) {
+      if (classifyProfitLine(line.fundCode, classification) !== 'vehicle_cost') continue
+      const cost = signedCost(line.side, line.amount)
+      allVehicleCost += cost
+      const vehicleId = vehicleIdOfCostLine(line.fundCode, classification)
+      if (vehicleId === null) continue
+      rowFor(vehicleId).cost += cost
+      total.cost += cost
+    }
+
+    const vehicleInfo = new Map(vehicles.map((v) => [v.id, v]))
+    const money = (value: bigint): string => serializeMoney(minor(value))
+    const shape = (tally: FleetTally) => ({
+      shifts: tally.shifts,
+      km: tally.distance.km,
+      kmUnrecorded: tally.distance.unrecordedShifts,
+      orders: tally.orders,
+      feesSyp: money(tally.fees),
+      ...(showFinance
+        ? {
+            companyShareSyp: money(tally.companyShare),
+            vehicleCostSyp: money(tally.cost),
+            contributionSyp: money(tally.companyShare - tally.cost),
+          }
+        : {}),
+    })
+    // Code-unit order on the printed code; a bike the directory cannot name sorts after them, by id.
+    const byCode = ([a]: [string, FleetTally], [b]: [string, FleetTally]): number => {
+      const ca = vehicleInfo.get(a)?.code ?? null
+      const cb = vehicleInfo.get(b)?.code ?? null
+      if (ca !== cb) {
+        if (ca === null) return 1
+        if (cb === null) return -1
+        return ca < cb ? -1 : 1
+      }
+      return a < b ? -1 : a > b ? 1 : 0
+    }
+
+    return {
+      from: q.from,
+      to: q.to,
+      financeVisible: showFinance,
+      ...(showFinance
+        ? {
+            /** Where the cost read started — `from` moved forward to go-live, if it had to be. */
+            costsFrom,
+            /** Vehicle costs no row could name. Zero unless a cost centre is malformed. */
+            unattributedVehicleCostSyp: money(allVehicleCost - total.cost),
+          }
+        : {}),
+      totals: shape(total),
+      vehicles: [...rows.entries()].sort(byCode).map(([vehicleId, tally]) => {
+        const vehicle = vehicleInfo.get(vehicleId)
+        return {
+          vehicleId,
+          code: vehicle?.code ?? null,
+          groundNo: vehicle?.groundNo ?? null,
+          active: vehicle?.active ?? null,
+          ...shape(tally),
+        }
+      }),
+    }
+  })
 
   /**
    * Total profit / share is General-Manager-only (BR8). Everyone else who reaches the dashboard
@@ -720,6 +889,46 @@ function assertWithinRangeCap(from: CalendarDate, to: CalendarDate): void {
       message: `range cannot exceed ${LEDGER_RANGE_MAX_DAYS} days`,
     }])
   }
+}
+
+/**
+ * Σ per business date of `toUsdMinor(amount, that day's rate)` — BR6's one daily rate, applied to
+ * that day's figures, never one rate across a range. A day with no rate on or before it makes the
+ * whole equivalent unknowable (`null`); a carried-forward or provisional rate marks it provisional.
+ */
+function usdEquivalentByDay(
+  amounts: ReadonlyMap<CalendarDate, bigint>,
+  fxDays: readonly FxDay[],
+): { usd: bigint; provisional: boolean } | null {
+  let usd = 0n
+  let provisional = false
+  for (const [businessDate, amount] of amounts) {
+    // Nothing to convert: a day of zero fees needs no rate, and must not make the total unknown.
+    if (amount === 0n) continue
+    let fx: FxDay
+    try {
+      fx = resolveFxDay(fxDays, businessDate)
+    } catch {
+      return null
+    }
+    usd += toUsdMinor(minor(amount), fx)
+    if (fx.provisional) provisional = true
+  }
+  return { usd, provisional }
+}
+
+/** Per-vehicle counters of `/dashboard/fleet-performance`. */
+interface FleetTally {
+  shifts: number
+  distance: DistanceTotal
+  orders: number
+  fees: bigint
+  companyShare: bigint
+  cost: bigint
+}
+
+function emptyFleetTally(): FleetTally {
+  return { shifts: 0, distance: EMPTY_DISTANCE_TOTAL, orders: 0, fees: 0n, companyShare: 0n, cost: 0n }
 }
 
 /** The population the completed-shifts screen lists: a close that was actually settled. */
