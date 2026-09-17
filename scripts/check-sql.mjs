@@ -48,6 +48,9 @@ const MUST_AUDIT = [
   // Company debts are isolated per debt UUID; both their opening facts and every settlement are
   // immutable money decisions guarded against overpayment in PostgreSQL.
   'company_debts', 'company_debt_events',
+  // Purchase price, financing link and schedule are financial facts; the deterministic schedule
+  // rows themselves are immutable derived data and are exempted below.
+  'fixed_assets',
   // A manager declaring that a row is not a delivery at all removes a fee from the shift's money.
   // The register is append-only and can only be added to, but «who removed what, and when did the
   // general manager get told» is precisely a money decision — and the audit row is the second,
@@ -87,6 +90,8 @@ const AUDIT_EXEMPT = {
     'transaction-scoped exact-draft capability; guarded writes are matched to the locked revision and the marker is removed before commit',
   attendance_days: 'derived from session activity',
   vehicle_events: 'append-only life log; is itself the audit trail (B-2)',
+  asset_depreciation_schedule:
+    'deterministic immutable rows derived from an audited fixed asset; a deferred trigger proves all 36 sum to price',
   assignments: 'covered by the audited shift it produces',
   shift_decisions: 'append-only decision log; is itself the audit trail (C-7)',
   cash_count_lines: 'sealed with a sha256 proof on the parent cash_count',
