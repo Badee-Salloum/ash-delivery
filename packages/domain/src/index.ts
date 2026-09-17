@@ -36,3 +36,6 @@ export * from './reporting/ledger-range.ts'
 
 // P3 — kilometres per shift, behind the dashboard's fleet table (P6 extends it).
 export * from './fleet/odometer.ts'
+
+// P4 — recurring («ثابتة») expenses: when one falls due. Computed on read; nothing posts itself.
+export * from './expenses/recurrence.ts'
