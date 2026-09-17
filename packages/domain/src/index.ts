@@ -14,6 +14,7 @@ export * from './rbac/can.ts'
 export * from './ledger/recipes.ts'
 export * from './ledger/company.ts'
 export * from './ledger/debt.ts'
+export * from './ledger/asset.ts'
 export * from './settlement/statement.ts'
 export * from './treasury/restoration.ts'
 export * from './shift/page-overlap.ts'
@@ -37,6 +38,9 @@ export * from './reporting/ledger-range.ts'
 
 // P3 — kilometres per shift, behind the dashboard's fleet table (P6 extends it).
 export * from './fleet/odometer.ts'
+
+// C4/C5 — fixed-asset schedules, book value and FIFO depreciation funding.
+export * from './assets/depreciation.ts'
 
 // P4 — recurring («ثابتة») expenses: when one falls due. Computed on read; nothing posts itself.
 export * from './expenses/recurrence.ts'
