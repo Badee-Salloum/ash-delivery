@@ -45,6 +45,9 @@ const MUST_AUDIT = [
   // outstanding, so who created one, for how much, and who later declared it spent are all money
   // decisions of exactly the kind this list exists for.
   'advances', 'advance_events',
+  // Company debts are isolated per debt UUID; both their opening facts and every settlement are
+  // immutable money decisions guarded against overpayment in PostgreSQL.
+  'company_debts', 'company_debt_events',
   // A manager declaring that a row is not a delivery at all removes a fee from the shift's money.
   // The register is append-only and can only be added to, but «who removed what, and when did the
   // general manager get told» is precisely a money decision — and the audit row is the second,
