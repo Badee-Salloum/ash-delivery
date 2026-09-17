@@ -1,5 +1,37 @@
 # PROGRESS
 
+## 2026-09-17 — P2: any period, one read — links that carry their filters, and vehicle costs in the profit
+
+**Links carry filters.** The console router understood only `#section` and `#shift:<id>` and rewrote
+everything else back to the bare section, so no button could open a screen already filtered.
+`apps/admin/src/route.ts` now parses and formats validated parameters (dates, preset, driver, vehicle,
+pattern, short, abandoned, state, over, tab, id); filters live in the URL (`history.replaceState`), a
+closed shift overlay returns to the filtered list, and `drill.ts` builds the hrefs the dashboard will use.
+
+**One time filter for every screen.** `TimeRangeBar` offers «الكل منذ البدء» (default) · اليوم · أمس ·
+هذا الأسبوع · الأسبوع الماضي · هذا الشهر · الشهر الماضي · مخصّص, a Sunday-start week navigator and a
+custom range. "Today" comes from the server (`GET /dashboard/meta`), never from the browser clock or the
+session stamp that goes stale after 04:00. Month helpers and `resolveRange` live in the pure domain.
+
+**One read for any period.** `/dashboard/profit` walked the range a week at a time (capped at 520 weeks).
+`LedgerRangeSource` answers any range with one aggregate — conformance-tested against the old week walk
+on a fixture with restorations, corrections, a double reversal, legacy shares and a vehicle expense.
+
+**Vehicle costs count** (decision 19): `classifyProfitLine` recognises `cost_center:<vehicleId>`.
+Measured read-only: production has no vehicle cost-centre expense yet — 42 branch and 3 general
+expenses — so no past figure moves; the fix protects the first one.
+
+**Shift screens.** `GET /dashboard/shifts-summary`; `GET /shifts` gains a vehicle filter, the odometer
+end and a server cap (31 days; 400 with a driver or vehicle → otherwise 422 `range_too_large`).
+Completed shifts use the shared filter and a vehicle filter; a period longer than the cap shows its most
+recent days with a note that says which days (not an empty page). Live shifts gain driver / vehicle /
+state / slot filters, an over-target counter and elapsed-versus-target per row.
+
+**Verified.** Full suite with local PostgreSQL green (domain 647, admin 314, api 965, db 222),
+typecheck and every `check:*`.
+
+**Next.** Merge C1 (company ledger foundation, verified separately and together with P1), then P3.
+
 ## 2026-09-17 — P1: the owner's schedule — 09–17, 18–02, and a double is twelve hours
 
 **Rule (owner decision, automatic from the times).** A closed shift lasting **≥ 600 minutes is a double**

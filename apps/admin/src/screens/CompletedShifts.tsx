@@ -1,19 +1,34 @@
-import { type ReactNode, useEffect, useMemo, useState } from 'react'
+import { type ReactNode, useEffect, useState } from 'react'
 import { useApp } from '../app-context.tsx'
 import {
   MAX_COMPLETED_SHIFT_RANGE_DAYS,
+  MAX_NARROWED_SHIFT_RANGE_DAYS,
   classifyShiftHistory,
   completedShiftFinancialTotals,
   completedShiftDates,
-  defaultCompletedShiftRange,
   type CompletedShiftFinancial,
   type CompletedShiftRangeError,
 } from '../completed-shifts.ts'
 import { SHIFT_TARGET_MINUTES, type ShiftPattern, type ShiftSlot, shortfallMinutes } from '@ash/domain'
+import type { RangeSelection } from '@ash/domain'
+import { type RouteParams, sanitizeParams } from '../route.ts'
+import { useHashParams } from '../use-hash-params.ts'
+import {
+  browserStorage,
+  cappedRange,
+  initialSelection,
+  narrowedSelection,
+  paramsFromSelection,
+  rangeDays,
+  resolveSelection,
+  sameSelection,
+  writeStoredSelection,
+} from '../time-range.ts'
+import { TimeRangeBar, useRangeMeta } from '../components/TimeRangeBar.tsx'
 import { damascusParts } from '@ash/client'
 import { explainError } from '../errors.ts'
 import { shiftPatternLabel, shiftPatternTone } from '../shift-shape.ts'
-import { Badge, Button, Card, DateField, Field, Money, Pending, Select, Stat, Table } from '../ui.tsx'
+import { Badge, Button, Card, FOCUS_RING, Field, Money, Pending, Select, Stat, Table } from '../ui.tsx'
 
 interface ShiftHistoryRow {
   id: string
@@ -66,19 +81,27 @@ interface AppliedRange {
 /**
  * Prior financially completed shifts for the selected branch.
  *
- * GET /shifts is intentionally date-scoped, so this view reads a bounded range in small batches.
+ * The period comes from the shared time filter (P2): the URL first, then this manager's last
+ * choice, then «الكل منذ البدء». The server reads at most 31 days for the whole branch and 400 once
+ * a driver or a vehicle narrows it; a longer selection shows «ضيّق الفترة» instead of a request.
+ *
  * It never treats `cancelled` as a completed settlement: cancellation reverses funding and discards
  * the work, and is therefore displayed separately below the completed list.
  */
-export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): ReactNode {
+export function CompletedShifts({
+  onOpen,
+  initial = {},
+}: {
+  onOpen(shiftId: string): void
+  /** The filters the link that opened this screen carried. Read once, at mount. */
+  initial?: RouteParams
+}): ReactNode {
   const { api, t, lang, session, branchId } = useApp()
-  const initialRange = useMemo(
-    () => defaultCompletedShiftRange(session?.businessDate ?? ''),
-    [session?.businessDate],
+  const replaceParams = useHashParams()
+  const { meta, error: metaError, retry: retryMeta } = useRangeMeta()
+  const [selection, setSelection] = useState<RangeSelection>(() =>
+    initialSelection({ params: initial, storage: browserStorage(), userId: session?.userId }),
   )
-  const [from, setFrom] = useState(initialRange.from)
-  const [to, setTo] = useState(initialRange.to)
-  const [applied, setApplied] = useState<AppliedRange>(initialRange)
   const [retry, setRetry] = useState(0)
   const [rows, setRows] = useState<ShiftHistoryRow[] | null>(null)
   const [drivers, setDrivers] = useState<Record<string, DriverLite>>({})
@@ -88,16 +111,74 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
   /*
    * Filters applied in the browser, over one range read.
    *
-   * The range is the server's job because it decides how much crosses the wire; these three decide
-   * what a manager is looking for inside it, and re-reading the month to hide a driver would be a
-   * round trip for something already in memory.
+   * The range is the server's job because it decides how much crosses the wire; these decide what
+   * a manager is looking for inside it, and re-reading the month to hide a driver would be a round
+   * trip for something already in memory. Only a range longer than a month hands the driver and
+   * vehicle to the server as well, because that is what lets the server read it at all.
    */
-  const [driverFilter, setDriverFilter] = useState('')
-  const [patternFilter, setPatternFilter] = useState<'' | ShiftPattern>('')
-  const [onlyShort, setOnlyShort] = useState(false)
+  const [driverFilter, setDriverFilter] = useState(initial.driver ?? '')
+  const [vehicleFilter, setVehicleFilter] = useState(initial.vehicle ?? '')
+  const [patternFilter, setPatternFilter] = useState<'' | ShiftPattern>(initial.pattern ?? '')
+  const [onlyShort, setOnlyShort] = useState(initial.short === true)
+  const [onlyAbandoned, setOnlyAbandoned] = useState(initial.abandoned === true)
+
+  const applied: AppliedRange | null = meta ? resolveSelection(selection, meta) : null
+  const narrowed = driverFilter !== '' || vehicleFilter !== ''
+  const maxDays = narrowed ? MAX_NARROWED_SHIFT_RANGE_DAYS : MAX_COMPLETED_SHIFT_RANGE_DAYS
+  /*
+   * What is actually read. «الكل منذ البدء» is the default and soon outgrows the cap; an empty page
+   * that only says so would greet every manager every morning. So a longer period shows its most
+   * recent `maxDays` days, and the note above the list says exactly which days those are.
+   */
+  const capped = applied !== null && rangeDays(applied) > maxDays
+  const shown: AppliedRange | null = applied !== null && capped ? cappedRange(applied, maxDays) : applied
+  const serverNarrowed = shown !== null && rangeDays(shown) > MAX_COMPLETED_SHIFT_RANGE_DAYS
+  const narrowQuery = serverNarrowed
+    ? `${driverFilter !== '' ? `&driverId=${encodeURIComponent(driverFilter)}` : ''}${
+        vehicleFilter !== '' ? `&vehicleId=${encodeURIComponent(vehicleFilter)}` : ''
+      }`
+    : ''
+
+  // The selection and the filters live in the URL (replaced, not pushed) and the period in this
+  // manager's browser, so a refresh, a shared link and the next visit all show the same thing.
+  useEffect(() => {
+    replaceParams(
+      sanitizeParams({
+        ...paramsFromSelection(selection),
+        driver: driverFilter,
+        vehicle: vehicleFilter,
+        pattern: patternFilter,
+        short: onlyShort,
+        abandoned: onlyAbandoned,
+      }),
+    )
+    if (session?.userId) writeStoredSelection(browserStorage(), session.userId, selection)
+  }, [replaceParams, selection, driverFilter, vehicleFilter, patternFilter, onlyShort, onlyAbandoned, session?.userId])
+
+  // Names for the rows and the filters. Independent of the range: a manager whose period is too
+  // long still needs the lists to pick the driver or bike that makes it readable.
+  useEffect(() => {
+    let active = true
+    const controller = new AbortController()
+    void Promise.all([
+      api.get<{ drivers: DriverLite[] }>('/drivers', { cache: 'no-store', signal: controller.signal }),
+      api.get<{ vehicles: VehicleLite[] }>('/vehicles', { cache: 'no-store', signal: controller.signal }),
+    ])
+      .then(([driverResponse, vehicleResponse]) => {
+        if (!active) return
+        setDrivers(Object.fromEntries(driverResponse.drivers.map((driver) => [driver.id, driver])))
+        setVehicles(Object.fromEntries(vehicleResponse.vehicles.map((vehicle) => [vehicle.id, vehicle])))
+      })
+      .catch(() => undefined)
+    return () => {
+      active = false
+      controller.abort()
+    }
+  }, [api, branchId])
 
   useEffect(() => {
-    const range = completedShiftDates(applied.from, applied.to)
+    if (!shown) return
+    const range = completedShiftDates(shown.from, shown.to, maxDays)
     if (!range.ok) {
       setRows([])
       setRangeError(range.reason)
@@ -108,6 +189,7 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
     const controller = new AbortController()
     setRows(null)
     setError(null)
+    setRangeError(null)
 
     const load = async (): Promise<void> => {
       try {
@@ -116,22 +198,15 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
          *
          * This walked the range a date at a time, seven in parallel — 33 requests to cover a month,
          * every one `no-store`, all of them returning every state so the browser could throw most of
-         * it away. `GET /shifts` now takes `from`/`to` over the same repo read the Sunday close
-         * already uses.
+         * it away. `GET /shifts` takes `from`/`to` over the same repo read the Sunday close
+         * already uses, and caps it: a month for the branch, 400 days for one driver or bike.
          */
         const page = await api.get<{ shifts: ShiftHistoryRow[] }>(
-          `/shifts?from=${encodeURIComponent(applied.from)}&to=${encodeURIComponent(applied.to)}`,
+          `/shifts?from=${encodeURIComponent(shown.from)}&to=${encodeURIComponent(shown.to)}${narrowQuery}`,
           { cache: 'no-store', signal: controller.signal },
         )
-
-        const [driverResponse, vehicleResponse] = await Promise.all([
-          api.get<{ drivers: DriverLite[] }>('/drivers', { cache: 'no-store', signal: controller.signal }),
-          api.get<{ vehicles: VehicleLite[] }>('/vehicles', { cache: 'no-store', signal: controller.signal }),
-        ])
         if (!active) return
         setRows(page.shifts)
-        setDrivers(Object.fromEntries(driverResponse.drivers.map((driver) => [driver.id, driver])))
-        setVehicles(Object.fromEntries(vehicleResponse.vehicles.map((vehicle) => [vehicle.id, vehicle])))
       } catch (cause) {
         if (!active || (cause as { name?: string }).name === 'AbortError') return
         setError((cause as { error?: string }).error ?? 'error')
@@ -143,23 +218,17 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
       active = false
       controller.abort()
     }
-  }, [api, applied.from, applied.to, branchId, retry])
+  }, [api, shown?.from, shown?.to, maxDays, narrowQuery, branchId, retry])
 
-  const applyRange = (): void => {
-    const range = completedShiftDates(from, to)
-    if (!range.ok) {
-      setRangeError(range.reason)
-      return
-    }
-    setRangeError(null)
-    if (from === applied.from && to === applied.to) setRetry((value) => value + 1)
-    else setApplied({ from, to })
+  const changeSelection = (next: RangeSelection): void => {
+    if (sameSelection(next, selection)) setRetry((value) => value + 1)
+    else setSelection(next)
   }
 
   const rangeErrorLabel = (reason: CompletedShiftRangeError): string => {
     if (reason === 'dates_required') return t.completedShifts.datesRequired
     if (reason === 'date_order') return t.completedShifts.dateOrder
-    return t.completedShifts.rangeTooLarge.replace('{n}', String(MAX_COMPLETED_SHIFT_RANGE_DAYS))
+    return t.completedShifts.rangeTooLarge.replace('{n}', String(maxDays))
   }
 
   const driverName = (id: string): string => {
@@ -178,8 +247,10 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
 
   const matches = (row: ShiftHistoryRow): boolean => {
     if (driverFilter !== '' && row.driverId !== driverFilter) return false
+    if (vehicleFilter !== '' && row.vehicleId !== vehicleFilter) return false
     if (patternFilter !== '' && (row.worked?.pattern ?? 'unknown') !== patternFilter) return false
     if (onlyShort && (shortOf(row) ?? 0) <= 0) return false
+    if (onlyAbandoned && row.worked?.abandoned !== true) return false
     return true
   }
 
@@ -200,10 +271,16 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
   const shortMinutes = shortRows.reduce((total, row) => total + (shortOf(row) ?? 0), 0)
 
   // Only drivers who actually worked inside the chosen range. Offering the whole roster would fill
-  // the list with names that can only ever return an empty table.
-  const driverOptions = [...new Set((rows ?? []).map((row) => row.driverId))]
+  // the list with names that can only ever return an empty table — except when the period is too
+  // long for the branch, where picking one from the roster is exactly what makes it readable.
+  const optionIds = (fromRows: string[], directory: string[], selected: string): string[] =>
+    [...new Set([...(serverNarrowed || rangeError === 'range_too_large' ? directory : fromRows), ...(selected === '' ? [] : [selected])])]
+  const driverOptions = optionIds((rows ?? []).map((row) => row.driverId), Object.keys(drivers), driverFilter)
     .map((id) => ({ id, name: driverName(id) }))
     .sort((a, b) => a.name.localeCompare(b.name))
+  const vehicleOptions = optionIds((rows ?? []).map((row) => row.vehicleId), Object.keys(vehicles), vehicleFilter)
+    .map((id) => ({ id, code: vehicleCode(id) }))
+    .sort((a, b) => a.code.localeCompare(b.code))
 
   /*
    * The date column, which is the whole reason this screen was unreadable.
@@ -349,21 +426,42 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
     <div className="flex flex-col gap-4">
       <Card title={t.completedShifts.title}>
         <p className="mb-3 text-sm leading-6 text-ink-secondary">{t.completedShifts.intro}</p>
-        <div className="flex flex-wrap items-end gap-3">
-          <DateField label={t.completedShifts.from} value={from} onChange={setFrom} />
-          <DateField label={t.completedShifts.to} value={to} onChange={setTo} />
-          <Button variant="primary" onClick={applyRange}>{t.completedShifts.show}</Button>
-          {rows ? (
-            <span className="ms-auto text-sm text-ink-secondary">
-              {t.completedShifts.count}: <strong className="num text-ink">{history.completed.length}</strong>
-            </span>
-          ) : null}
-        </div>
-        {rangeError ? <p className="mt-2 text-label font-medium text-danger-ink">{rangeErrorLabel(rangeError)}</p> : null}
+        <TimeRangeBar
+          selection={selection}
+          onChange={changeSelection}
+          meta={meta}
+          metaError={metaError}
+          onRetryMeta={retryMeta}
+          maxDays={maxDays}
+        />
+        {rows ? (
+          <p className="mt-2 text-sm text-ink-secondary">
+            {t.completedShifts.count}: <strong className="num text-ink">{history.completed.length}</strong>
+          </p>
+        ) : null}
+        {capped && applied && shown ? (
+          // Say exactly which days are on screen, what would show more, and offer to keep this period.
+          <div role="status" className="mt-3 rounded-lg border border-info-line bg-info-surface p-3 text-sm text-info-ink">
+            {t.completedShifts.rangeCapShown
+              .replace(/\{n\}/g, String(maxDays))
+              .replace('{from}', shown.from)
+              .replace('{to}', shown.to)}{' '}
+            {narrowed ? null : t.completedShifts.rangeCapHint.replace('{m}', String(MAX_NARROWED_SHIFT_RANGE_DAYS))}{' '}
+            <button
+              type="button"
+              className={`font-semibold underline ${FOCUS_RING}`}
+              onClick={() => changeSelection(narrowedSelection(applied, maxDays))}
+            >
+              {t.completedShifts.narrowRange}
+            </button>
+          </div>
+        ) : rangeError ? (
+          <p className="mt-2 text-label font-medium text-danger-ink">{rangeErrorLabel(rangeError)}</p>
+        ) : null}
         {/*
           * The range is one read; these narrow it without another. Kept on a second line so the
-          * dates — the only controls that cost a round trip — stay visually separate from the ones
-          * that do not.
+          * period — the only control that costs a round trip — stays visually separate from the
+          * ones that do not.
           */}
         {rows ? (
           <div className="mt-3 flex flex-wrap items-end gap-3 border-t border-line pt-3">
@@ -373,6 +471,16 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
                 {driverOptions.map((driver) => (
                   <option key={driver.id} value={driver.id}>
                     {driver.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label={t.completedShifts.vehicle}>
+              <Select value={vehicleFilter} onChange={(event) => setVehicleFilter(event.target.value)}>
+                <option value="">{t.completedShifts.allVehicles}</option>
+                {vehicleOptions.map((vehicle) => (
+                  <option key={vehicle.id} value={vehicle.id}>
+                    {vehicle.code}
                   </option>
                 ))}
               </Select>
@@ -398,14 +506,25 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
               />
               {t.completedShifts.onlyShort}
             </label>
-            {driverFilter !== '' || patternFilter !== '' || onlyShort ? (
+            <label className="flex min-h-10 items-center gap-2 text-sm text-ink-secondary">
+              <input
+                type="checkbox"
+                className="size-4 accent-brand"
+                checked={onlyAbandoned}
+                onChange={(event) => setOnlyAbandoned(event.target.checked)}
+              />
+              {t.completedShifts.onlyAbandoned}
+            </label>
+            {driverFilter !== '' || vehicleFilter !== '' || patternFilter !== '' || onlyShort || onlyAbandoned ? (
               <Button
                 variant="ghost"
                 className="min-h-10 px-3"
                 onClick={() => {
                   setDriverFilter('')
+                  setVehicleFilter('')
                   setPatternFilter('')
                   setOnlyShort(false)
+                  setOnlyAbandoned(false)
                 }}
               >
                 {t.completedShifts.clearFilters}
@@ -419,10 +538,10 @@ export function CompletedShifts({ onOpen }: { onOpen(shiftId: string): void }): 
 
       {!rows ? (
         <Pending
-          error={error}
+          error={error ?? metaError}
           loadingLabel={t.common.loading}
-          errorLabel={explainError(error, t)}
-          onRetry={() => setRetry((value) => value + 1)}
+          errorLabel={explainError(error ?? metaError, t)}
+          onRetry={() => (error ? setRetry((value) => value + 1) : retryMeta())}
           retryLabel={t.common.retry}
         />
       ) : (

@@ -1,4 +1,4 @@
-import { type ReactNode, useCallback, useEffect, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { useApp } from './app-context.tsx'
 import { Badge, FOCUS_RING, Wordmark } from './ui.tsx'
 import { Icon, type IconName } from './icons.tsx'
@@ -23,32 +23,15 @@ import { Removals } from './screens/Removals.tsx'
 import { Permissions } from './screens/Permissions.tsx'
 import { Settings } from './screens/Settings.tsx'
 import { canManagePreapprovedShifts } from './preapproved-shifts.ts'
+import { type RouteParams, type RouteView, type Section, formatHash, paramsKey, parseHash } from './route.ts'
+import { HashParamsContext, replaceHashParams } from './use-hash-params.ts'
 
-const SECTIONS = [
-  'dashboard',
-  'queue',
-  'liveShifts',
-  'completedShifts',
-  'preapprovedShifts',
-  'gpsLive',
-  'fleet',
-  'fleetConfig',
-  'treasury',
-  'expenses',
-  'checkin',
-  'accounts',
-  'audit',
-  'removals',
-  'permissions',
-  'settings',
-] as const
-type Section = (typeof SECTIONS)[number]
-
-/** The view encoded in the URL hash: a section, or `shift:<id>` for the review overlay. */
-function viewFromHash(): { section: Section; openShift: string | null } {
-  const raw = decodeURIComponent(location.hash.slice(1))
-  if (raw.startsWith('shift:')) return { section: 'dashboard', openShift: raw.slice('shift:'.length) }
-  return { section: (SECTIONS as readonly string[]).includes(raw) ? (raw as Section) : 'dashboard', openShift: null }
+/**
+ * The view encoded in the URL hash: a section with its filter params, or `shift:<id>` for the
+ * review overlay. Parsing and validation live in `route.ts` (pure, unit-tested).
+ */
+function viewFromHash(): RouteView {
+  return parseHash(location.hash)
 }
 
 /**
@@ -60,8 +43,38 @@ export function AdminApp(): ReactNode {
     useApp()
   // Initialise from the URL hash so a refresh or a shared link restores the view immediately —
   // before the reflect effect runs, so a deep link is never overwritten by the default.
-  const [section, setSection] = useState<Section>(() => viewFromHash().section)
+  const [section, setSectionState] = useState<Section>(() => viewFromHash().section)
   const [openShift, setOpenShift] = useState<string | null>(() => viewFromHash().openShift)
+  /*
+   * P2 — the filters a screen was MOUNTED with (its `key` and `initial`), and the filters it holds
+   * NOW. A screen narrowing its list replaces the URL without a history step and reports here, so
+   * closing a shift overlay returns to the filtered view rather than the one first opened, while
+   * the screen itself is not remounted by its own typing.
+   */
+  const [mountedParams, setMountedParams] = useState<RouteParams>(() => viewFromHash().params)
+  // Every navigation mounts afresh — even the rail item already on screen, which must drop the
+  // filters it holds rather than keep them under a bare URL.
+  const [mountNonce, setMountNonce] = useState(0)
+  const mountKey = `${mountNonce}:${paramsKey(mountedParams)}`
+  const liveParams = useRef<RouteParams>(mountedParams)
+  // The section as the hashchange handler must see it: synchronously, not from a stale closure.
+  const sectionRef = useRef<Section>(section)
+  sectionRef.current = section
+  /** Navigate to a section, with the params a link carries (none from the rail). */
+  const setSection = useCallback((next: Section, params: RouteParams = {}) => {
+    sectionRef.current = next
+    setSectionState(next)
+    setMountedParams(params)
+    setMountNonce((n) => n + 1)
+    liveParams.current = params
+  }, [])
+  const replaceParams = useCallback(
+    (params: RouteParams) => {
+      liveParams.current = params
+      replaceHashParams(section, params, window)
+    },
+    [section],
+  )
   const [notifs, setNotifs] = useState<Notif[]>([])
   const [queueCount, setQueueCount] = useState(0)
   const [navOpen, setNavOpen] = useState(false) // the rail is a drawer below lg
@@ -72,28 +85,34 @@ export function AdminApp(): ReactNode {
    * restores the view — not always the dashboard — and Back/forward still walk the console instead
    * of leaving the app. No router dependency: the SPA's catch-all `index.html` fallback is enough.
    */
-  const view = openShift ? `shift:${openShift}` : section
+  // `formatHash`, not the bare section: the filters survive the reflect, which used to strip them.
+  const view = formatHash({ section, openShift, params: liveParams.current })
   useEffect(() => {
     if (!session) return
-    if (decodeURIComponent(location.hash.slice(1)) !== view) location.hash = view
+    // Compared NORMALISED, so an equivalent spelling (or one carrying dropped junk) is rewritten
+    // once and never fought over.
+    if (formatHash(viewFromHash()) !== view) location.hash = view
   }, [session, view])
   useEffect(() => {
     if (!session) return
     // Back/forward and manual hash edits fire `hashchange`; apply it to state. A `shift:` hash only
     // toggles the overlay — the section behind it is left as-is, so closing the review returns to
-    // wherever it was opened from (the queue), not the dashboard.
+    // wherever it was opened from (the queue, or a filtered list), not the dashboard.
     const apply = (): void => {
-      const raw = decodeURIComponent(location.hash.slice(1))
-      if (raw.startsWith('shift:')) {
-        setOpenShift(raw.slice('shift:'.length))
-      } else {
-        setOpenShift(null)
-        setSection((SECTIONS as readonly string[]).includes(raw) ? (raw as Section) : 'dashboard')
+      const next = viewFromHash()
+      if (next.openShift !== null) {
+        setOpenShift(next.openShift)
+        return
       }
+      setOpenShift(null)
+      // Arriving back at the view the screen already shows (closing the overlay with Back) keeps
+      // the mounted screen; any other section or filter set mounts it afresh.
+      if (sectionRef.current === next.section && paramsKey(next.params) === paramsKey(liveParams.current)) return
+      setSection(next.section, next.params)
     }
     window.addEventListener('hashchange', apply)
     return () => window.removeEventListener('hashchange', apply)
-  }, [session])
+  }, [session, setSection])
 
   const refreshNotifs = useCallback(() => {
     void api.notifications().then((n) => setNotifs(n.notifications)).catch(() => undefined)
@@ -365,6 +384,7 @@ export function AdminApp(): ReactNode {
           * be two titles for one screen.
           */}
         <main className="flex-1 overflow-y-auto p-3 lg:p-6">
+        <HashParamsContext.Provider value={replaceParams}>
         <div className="mx-auto w-full max-w-[110rem]">
         {!openShift ? (
           <h1 className="mb-4 text-page font-bold text-ink">
@@ -388,9 +408,9 @@ export function AdminApp(): ReactNode {
         ) : section === 'queue' ? (
           <Queue onOpen={setOpenShift} />
         ) : section === 'liveShifts' ? (
-          <LiveShifts onOpen={setOpenShift} />
+          <LiveShifts key={mountKey} initial={liveParams.current} onOpen={setOpenShift} />
         ) : section === 'completedShifts' ? (
-          <CompletedShifts onOpen={setOpenShift} />
+          <CompletedShifts key={mountKey} initial={liveParams.current} onOpen={setOpenShift} />
         ) : section === 'preapprovedShifts' && canManagePreapproved ? (
           <PreapprovedShifts />
         ) : section === 'gpsLive' ? (
@@ -417,6 +437,7 @@ export function AdminApp(): ReactNode {
           <Treasury />
         )}
         </div>
+        </HashParamsContext.Provider>
         </main>
       </div>
     </div>

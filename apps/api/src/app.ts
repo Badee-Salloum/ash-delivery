@@ -41,6 +41,8 @@ import {
   add,
   addDays,
   bmsSlot,
+  daysBetween,
+  isCalendarDate,
   checkWeekClose,
   dayOfWeek,
   minor,
@@ -134,6 +136,13 @@ export interface AppOptions {
   /** Runaway guard on paid cloud OCR. Defaults here so a test never has to think about spend. */
   maxOcrReadsPerShift?: number
 }
+
+/**
+ * P2 — how many business dates one `GET /shifts?from&to` may span: a month for the whole branch,
+ * about thirteen months once a driver or a vehicle narrows the rows.
+ */
+export const SHIFT_LIST_MAX_DAYS = 31
+export const SHIFT_LIST_MAX_DAYS_NARROWED = 400
 
 /**
  * Historical financial detail derived from the immutable close snapshot plus the exact included
@@ -524,7 +533,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     '/shifts',
     { config: { permission: 'branch_data.view', subject: branchSubject } },
     async (req) => {
-      const { date, from, to, driverId, state, live, pending } = z
+      const { date, from, to, driverId, vehicleId, state, live, pending } = z
         .object({
           date: z.string().optional(),
           // A RANGE, over the existing week-close repo read. The history screen was asking for one
@@ -537,6 +546,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           // and discarding what it did not want, so a month of drafts and cancelled shifts crossed
           // the wire to be thrown away.
           driverId: z.string().optional(),
+          // P2 — the bike's own history («سجل الآلية») and the drill-down from a fleet row.
+          vehicleId: z.string().optional(),
           state: z.string().optional(),
           live: z.string().optional(),
           pending: z.string().optional(),
@@ -544,6 +555,22 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         .parse(req.query)
       const target = resolveBranchId(req)
       const businessDate = date ?? todayFor(deps)
+      /*
+       * P2 — a range read is BOUNDED. Every row costs an order and a settlement lookup, and the
+       * time filter now offers «الكل منذ البدء», so an unnamed range must not become a scan of the
+       * whole history: 31 days for the branch, 400 once a driver or a vehicle narrows it. Refused
+       * with a code the console explains («ضيّق الفترة»), never silently truncated.
+       */
+      if (pending !== '1' && live !== '1' && from !== undefined && to !== undefined) {
+        if (!isCalendarDate(from) || !isCalendarDate(to) || to < from) {
+          throw new z.ZodError([{ code: 'custom', path: ['from', 'to'], message: 'expected real dates with from <= to' }])
+        }
+        const maxDays = driverId !== undefined || vehicleId !== undefined
+          ? SHIFT_LIST_MAX_DAYS_NARROWED
+          : SHIFT_LIST_MAX_DAYS
+        const days = daysBetween(from, to) + 1
+        if (days > maxDays) throw new ServiceError(422, 'range_too_large', { from, to, days, maxDays })
+      }
       // `?live=1` asks "who is out RIGHT NOW", which is NOT a question about today's date: a shift
       // that opened before midnight and is still running belongs to yesterday's business date, and
       // the date-filtered list dropped it — the bike looked free and the shift unreachable from the
@@ -562,7 +589,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
               ? await deps.shifts.listByBranchAndDateRange(target, from, to)
               : await deps.shifts.listByBranchAndDate(target, businessDate)
       const shifts = all.filter(
-        (s) => (driverId === undefined || s.driverId === driverId) && (wanted === null || wanted.has(s.state)),
+        (s) =>
+          (driverId === undefined || s.driverId === driverId) &&
+          (vehicleId === undefined || s.vehicleId === vehicleId) &&
+          (wanted === null || wanted.has(s.state)),
       )
       // Reporting is a batch read: one order query and one settlement query for the whole page.
       // Apart from avoiding a per-shift round trip, reading both sets before shaping rows means the
@@ -596,6 +626,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
             // shift so far. Money crosses as decimal strings, never JSON numbers.
             businessDate: s.businessDate,
             odometerStart: s.odoStart,
+            // P2 — with the start reading, the distance a shift covered on its bike.
+            odometerEnd: s.odoEnd,
             floatTotal: serializeMoney(add(sum(s.floatTranches), sum(s.carriedTranches))),
             topupTotal: serializeMoney(add(sum(s.topupTranches), sum(s.carriedWalletTranches ?? []))),
             // How much work COUNTS on the shift. An unchecked operation is stored and visible but

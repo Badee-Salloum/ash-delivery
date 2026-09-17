@@ -15,7 +15,17 @@ import {
   trancheRejectionDefinitelyDidNotCommit,
   writePendingTranche,
 } from '../pending-tranche.ts'
-import { Badge, Button, Card, Field, MoneyInput, Pending, Select, TextInput } from '../ui.tsx'
+import { Badge, Button, Card, Field, MoneyInput, Pending, Select, Stat, TextInput } from '../ui.tsx'
+import { type LiveStateParam, type RouteParams, sanitizeParams } from '../route.ts'
+import { useHashParams } from '../use-hash-params.ts'
+import {
+  hoursMinutes,
+  liveCounts,
+  liveElapsedMinutes,
+  liveOverMinutes,
+  liveTargetMinutes,
+  matchesLiveFilters,
+} from '../live-shifts.ts'
 
 interface ShiftRow {
   id: string
@@ -70,12 +80,37 @@ const LIVE_STATES = new Set(['open', 'suspended'])
  * (SRS C-1 / س29) here; the driver resumes it himself from his phone once he can carry on. A
  * suspended shift still closes under the same BR1 — suspension is never a way around the equation.
  */
-export function LiveShifts({ onOpen }: { onOpen(shiftId: string): void }): ReactNode {
+export function LiveShifts({
+  onOpen,
+  initial = {},
+}: {
+  onOpen(shiftId: string): void
+  /** The filters the link that opened this board carried (P2). Read once, at mount. */
+  initial?: RouteParams
+}): ReactNode {
   const { api, t, lang, session, branchId } = useApp()
+  const replaceParams = useHashParams()
   const [rows, setRows] = useState<ShiftRow[] | null>(null)
   const [drivers, setDrivers] = useState<Record<string, DriverLite>>({})
   const [vehicles, setVehicles] = useState<Record<string, VehicleLite>>({})
   const [error, setError] = useState<string | null>(null)
+  // The instant the rows were read — what «over target now» is measured at.
+  const [readAtMs, setReadAtMs] = useState(() => Date.now())
+  /*
+   * Filters over the live read (P2). Driver, vehicle, status and «over target» travel in the URL,
+   * so a dashboard tile can open the board already narrowed; the slot is a local view choice.
+   */
+  const [driverFilter, setDriverFilter] = useState(initial.driver ?? '')
+  const [vehicleFilter, setVehicleFilter] = useState(initial.vehicle ?? '')
+  const [stateFilter, setStateFilter] = useState<'' | LiveStateParam>(initial.state ?? '')
+  const [slotFilter, setSlotFilter] = useState<'' | ShiftSlot>('')
+  const [onlyOver, setOnlyOver] = useState(initial.over === true)
+
+  useEffect(() => {
+    replaceParams(
+      sanitizeParams({ state: stateFilter, driver: driverFilter, vehicle: vehicleFilter, over: onlyOver }),
+    )
+  }, [replaceParams, stateFilter, driverFilter, vehicleFilter, onlyOver])
 
   // Suspend / tranche are `shift.approve` — held by the branch manager (his branch), the GM and the
   // system admin (both organisation-wide), per the §3 matrix. UI hiding is not security; the API
@@ -90,7 +125,10 @@ export function LiveShifts({ onOpen }: { onOpen(shiftId: string): void }): React
       // midnight and is still running is exactly the one a manager needs to reach, and the
       // date-filtered list dropped it.
       .get<{ shifts: ShiftRow[] }>('/shifts?live=1')
-      .then((r) => setRows(r.shifts.filter((s) => LIVE_STATES.has(s.state))))
+      .then((r) => {
+        setRows(r.shifts.filter((s) => LIVE_STATES.has(s.state)))
+        setReadAtMs(Date.now())
+      })
       .catch((e: { error?: string }) => {
         setRows([])
         setError(e.error ?? 'error')
@@ -131,19 +169,94 @@ export function LiveShifts({ onOpen }: { onOpen(shiftId: string): void }): React
     )
   }
 
+  const filters = { driver: driverFilter, vehicle: vehicleFilter, state: stateFilter, slot: slotFilter, over: onlyOver }
+  const shown = rows.filter((row) => matchesLiveFilters(row, filters, readAtMs))
+  const counts = liveCounts(rows, readAtMs)
+  // Everyone on the board, plus whoever a link named — so a filter is never a value the list lacks.
+  const withSelected = (ids: string[], selected: string): string[] =>
+    [...new Set([...ids, ...(selected === '' ? [] : [selected])])]
+  const driverOptions = withSelected(rows.map((row) => row.driverId), driverFilter)
+    .map((id) => ({ id, name: driverName(id) }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+  const vehicleOptions = withSelected(rows.map((row) => row.vehicleId), vehicleFilter)
+    .map((id) => ({ id, code: vehicleCode(id) }))
+    .sort((a, b) => a.code.localeCompare(b.code))
+
   return (
-    <div className="flex flex-col gap-2">
-      {rows.map((s) => (
-        <LiveRow
-          key={s.id}
-          shift={s}
-          driverName={driverName(s.driverId)}
-          vehicleCode={vehicleCode(s.vehicleId)}
-          canApprove={canApprove}
-          onChanged={load}
-          onOpen={onOpen}
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-end gap-3">
+        <Field label={t.liveShifts.filterDriver}>
+          <Select value={driverFilter} onChange={(e) => setDriverFilter(e.target.value)}>
+            <option value="">{t.liveShifts.all}</option>
+            {driverOptions.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label={t.liveShifts.filterVehicle}>
+          <Select value={vehicleFilter} onChange={(e) => setVehicleFilter(e.target.value)}>
+            <option value="">{t.liveShifts.all}</option>
+            {vehicleOptions.map((v) => (
+              <option key={v.id} value={v.id}>
+                {v.code}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label={t.liveShifts.filterState}>
+          <Select value={stateFilter} onChange={(e) => setStateFilter(e.target.value as '' | LiveStateParam)}>
+            <option value="">{t.liveShifts.all}</option>
+            <option value="open">{t.liveShifts.stateOpen}</option>
+            <option value="suspended">{t.liveShifts.stateSuspended}</option>
+          </Select>
+        </Field>
+        <Field label={t.liveShifts.filterSlot}>
+          <Select value={slotFilter} onChange={(e) => setSlotFilter(e.target.value as '' | ShiftSlot)}>
+            <option value="">{t.liveShifts.all}</option>
+            <option value="day">{t.completedShifts.patternDay}</option>
+            <option value="evening">{t.completedShifts.patternEvening}</option>
+          </Select>
+        </Field>
+        <label className="flex min-h-10 items-center gap-2 text-sm text-ink-secondary">
+          <input
+            type="checkbox"
+            className="size-4 accent-brand"
+            checked={onlyOver}
+            onChange={(e) => setOnlyOver(e.target.checked)}
+          />
+          {t.liveShifts.onlyOver}
+        </label>
+      </div>
+      <div className="grid grid-cols-3 gap-3">
+        <Stat label={t.liveShifts.countOpen} value={<span className="num">{counts.open}</span>} />
+        <Stat label={t.liveShifts.countSuspended} value={<span className="num">{counts.suspended}</span>} />
+        <Stat
+          label={t.liveShifts.countOver}
+          value={<span className="num">{counts.over}</span>}
+          {...(counts.over > 0 ? { tone: 'danger' as const } : {})}
         />
-      ))}
+      </div>
+      {shown.length === 0 ? (
+        <Card>
+          <p className="py-6 text-center text-ink-muted">{t.liveShifts.noneMatching}</p>
+        </Card>
+      ) : null}
+      <div className="flex flex-col gap-2">
+        {shown.map((s) => (
+          <LiveRow
+            key={s.id}
+            shift={s}
+            driverName={driverName(s.driverId)}
+            vehicleCode={vehicleCode(s.vehicleId)}
+            canApprove={canApprove}
+            onChanged={load}
+            onOpen={onOpen}
+            readAtMs={readAtMs}
+          />
+        ))}
+      </div>
     </div>
   )
 }
@@ -155,6 +268,7 @@ function LiveRow({
   canApprove,
   onChanged,
   onOpen,
+  readAtMs,
 }: {
   shift: ShiftRow
   driverName: string
@@ -162,6 +276,8 @@ function LiveRow({
   canApprove: boolean
   onChanged: () => void
   onOpen(shiftId: string): void
+  /** When the board was read; elapsed time and «over target» are measured at this instant. */
+  readAtMs: number
 }): ReactNode {
   const { api, t, lang } = useApp()
   const [panel, setPanel] = useState<'none' | 'suspend' | 'tranche' | 'void' | 'forceClose'>('none')
@@ -187,6 +303,9 @@ function LiveRow({
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<LiveShiftApiError | null>(null)
   const forceCloseReady = forceClosePreparationReady(cashDeclared, walletDeclared)
+  const elapsedMinutes = liveElapsedMinutes(shift.windowOpensAt, readAtMs)
+  const targetMinutes = liveTargetMinutes(shift)
+  const overMinutes = liveOverMinutes(shift, readAtMs)
 
   // A partially completed driver close may already contain real counted figures. Bring those
   // forward before asking the manager to type them again, but never overwrite a value the manager
@@ -397,6 +516,10 @@ function LiveRow({
             {shiftPatternLabel(shift.worked, t.completedShifts, true)}
           </Badge>
         )}
+        {/* P2 — past the slot's eight hours: a double only becomes one once it closes. */}
+        {overMinutes !== null && overMinutes > 0 ? (
+          <Badge tone="danger">{t.liveShifts.overBy.replace('{t}', hoursMinutes(overMinutes))}</Badge>
+        ) : null}
         {canApprove ? (
           <div className="flex flex-wrap gap-2 ms-auto">
             {/* Opens the shift's own screen — where a manager records an order on a driver who is
@@ -441,6 +564,13 @@ function LiveRow({
           {t.shift.odometer}: {shift.odometerStart ?? '—'}
         </span>
         {shift.businessDate ? <span className="text-slate-600">{shift.businessDate}</span> : null}
+        {elapsedMinutes !== null && targetMinutes !== null ? (
+          <span dir="ltr">
+            {t.liveShifts.elapsedOfTarget
+              .replace('{elapsed}', hoursMinutes(elapsedMinutes))
+              .replace('{target}', hoursMinutes(targetMinutes))}
+          </span>
+        ) : null}
       </div>
       {shift.state === 'suspended' ? <p className="text-sm text-amber-700">{t.liveShifts.suspendedHint}</p> : null}
       {panel === 'suspend' ? (

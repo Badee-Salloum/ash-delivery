@@ -61,6 +61,7 @@ import type {
   VehicleRecord,
   WeekLockRecord,
   WeekLockRepo,
+  ShiftTimingRecord,
 } from '@ash/contracts'
 import { AWAITING_DECISION_STATES, type CalendarDate, LIVE_STATES, type Minor, minor } from '@ash/domain'
 import type { Pool, PoolClient } from './pool.ts'
@@ -308,6 +309,51 @@ export class PgShiftRepo implements ShiftRepo {
       [driverId, businessDate],
     )
     return Number(rows[0]!.next)
+  }
+
+  /**
+   * P2 — the timing-only read behind `/dashboard/shifts-summary`.
+   *
+   * One scan of `shifts` with no tranche or media subqueries: a year of shifts judged for their
+   * pattern needs two instants and two odometer readings, not the whole aggregate. The window
+   * start falls back to the open approval exactly as `GET /shifts` does.
+   */
+  async listTimingBetween(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftTimingRecord[]> {
+    const { rows } = await this.pool.query<{
+      id: string
+      branch_id: string
+      driver_id: string
+      vehicle_id: string
+      shift_no: number
+      business_date: string
+      state: string
+      window_opens_at: Date | null
+      submitted_at: Date | null
+      odo_start: number | string | null
+      odo_end: number | string | null
+    }>(
+      `SELECT s.id, s.branch_id, s.driver_id, s.vehicle_id, s.shift_no,
+              s.business_date::text AS business_date, s.state::text AS state,
+              COALESCE(s.window_opens_at, s.open_approved_at) AS window_opens_at,
+              s.submitted_at, s.odo_start, s.odo_end
+         FROM shifts s
+        WHERE s.branch_id = $1 AND s.business_date BETWEEN $2 AND $3
+        ORDER BY s.business_date, s.shift_no, s.id`,
+      [branchId, from, to],
+    )
+    return rows.map((r) => ({
+      id: String(r.id),
+      branchId: String(r.branch_id),
+      driverId: String(r.driver_id),
+      vehicleId: String(r.vehicle_id),
+      shiftNo: Number(r.shift_no),
+      businessDate: isoDate(r.business_date),
+      state: r.state as ShiftTimingRecord['state'],
+      windowOpensAt: r.window_opens_at === null ? null : r.window_opens_at.toISOString(),
+      submittedAt: r.submitted_at === null ? null : r.submitted_at.toISOString(),
+      odoStart: r.odo_start === null ? null : Number(r.odo_start),
+      odoEnd: r.odo_end === null ? null : Number(r.odo_end),
+    }))
   }
 
   private async load(where: string, params: unknown[]): Promise<ShiftRecord[]> {

@@ -1,4 +1,4 @@
-import { formatMinor, parseMinor, sum } from '@ash/domain'
+import { addDays, daysBetween, formatMinor, isCalendarDate, parseMinor, sum } from '@ash/domain'
 
 /** A manager-facing shift is financially complete only after the close settlement was approved. */
 export const FINANCIALLY_COMPLETED_SHIFT_STATES = new Set(['approved', 'week_locked'])
@@ -8,6 +8,9 @@ export const FINANCIALLY_COMPLETED_SHIFT_STATES = new Set(['approved', 'week_loc
  * unbounded number of requests (and each shift row asks the API for its included-order count).
  */
 export const MAX_COMPLETED_SHIFT_RANGE_DAYS = 31
+
+/** P2 — the server allows about thirteen months once a driver or a vehicle narrows the read. */
+export const MAX_NARROWED_SHIFT_RANGE_DAYS = 400
 
 export type CompletedShiftRangeError = 'dates_required' | 'date_order' | 'range_too_large'
 
@@ -66,25 +69,13 @@ export interface InvalidCompletedShiftRangeResult {
   reason: CompletedShiftRangeError
 }
 
-const DAY_MS = 86_400_000
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
-
-/** Parse a written business date without involving the browser's timezone. */
-function businessDateMs(value: string): number | null {
-  if (!ISO_DATE.test(value)) return null
-  const ms = Date.parse(`${value}T00:00:00.000Z`)
-  if (!Number.isFinite(ms)) return null
-  // Date.parse normalises impossible dates such as 2026-02-31; a business date must not.
-  return new Date(ms).toISOString().slice(0, 10) === value ? ms : null
-}
-
-function dateFromMs(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 10)
-}
-
+/**
+ * Calendar arithmetic through the domain, never through `Date` (P2): a business date is a
+ * written `YYYY-MM-DD` with no zone, and the domain's parser refuses an impossible one such as
+ * 2026-02-31 instead of normalising it into March.
+ */
 export function addBusinessDays(value: string, days: number): string {
-  const ms = businessDateMs(value)
-  return ms === null ? value : dateFromMs(ms + days * DAY_MS)
+  return isCalendarDate(value) ? addDays(value, days) : value
 }
 
 /** The most recent seven business dates, including today. */
@@ -98,16 +89,14 @@ export function completedShiftDates(
   to: string,
   maxDays = MAX_COMPLETED_SHIFT_RANGE_DAYS,
 ): CompletedShiftRangeResult | InvalidCompletedShiftRangeResult {
-  const fromMs = businessDateMs(from)
-  const toMs = businessDateMs(to)
-  if (fromMs === null || toMs === null) return { ok: false, reason: 'dates_required' }
-  if (fromMs > toMs) return { ok: false, reason: 'date_order' }
+  if (!isCalendarDate(from) || !isCalendarDate(to)) return { ok: false, reason: 'dates_required' }
+  if (from > to) return { ok: false, reason: 'date_order' }
 
-  const count = Math.floor((toMs - fromMs) / DAY_MS) + 1
+  const count = daysBetween(from, to) + 1
   if (count > maxDays) return { ok: false, reason: 'range_too_large' }
   return {
     ok: true,
-    dates: Array.from({ length: count }, (_, index) => dateFromMs(fromMs + index * DAY_MS)),
+    dates: Array.from({ length: count }, (_, index) => addDays(from, index)),
   }
 }
 

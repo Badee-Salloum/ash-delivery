@@ -10,12 +10,22 @@ import type {
   OcrResult,
   ShiftRecord,
 } from '@ash/contracts'
+// P2 — the range read model conformance.
+import type { JournalEntryRecord, LedgerRangeRecord } from '@ash/contracts'
+import { serializeMoney } from '@ash/contracts'
 import {
   type Posting,
   cashSettledReturnPostings,
   minor,
   planFixedShareSettlement,
   receivableAdjustment,
+} from '@ash/domain'
+import {
+  expense as expensePosting,
+  planRestoration,
+  postingsForRestoration,
+  reverse,
+  weekStartFor,
 } from '@ash/domain'
 
 /**
@@ -230,6 +240,463 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
 
         await deps.shifts.update({ ...original, state: 'pending_review' }, USER)
         expect(await deps.shifts.countOpenActorsForBranch(BRANCH)).toEqual({ drivers: 0, vehicles: 0 })
+      })
+    })
+
+    // ── P2: the range read model and the timing-only shift read ──────────────────────────────
+    describe('P2 range read model (LedgerRangeSource) and shift timing', () => {
+      const WEEK_ONE = '2026-07-19'
+      const WEEK_TWO = '2026-07-26'
+      const RANGE_REASON = 'range read model conformance'
+
+      interface RangeFixture {
+        kaishAmount: bigint
+        shahnAmount: bigint
+      }
+
+      /**
+       * Everything the dashboard's range read has to get right, posted through the real ports:
+       * a settled shift approval (its share_split must NOT count as legacy share), a legacy shift
+       * with a deduction overflow, a shift-less legacy share line, a vehicle expense on a bare-uuid
+       * cost centre, owner funding into the office boxes and the company fund, a ledger-backed
+       * restoration (one كييش leg, one شحن leg), corrections of both, and a reversal of the شحن
+       * correction in the NEXT financial week — whose original lives outside a second-week range.
+       */
+      async function seedRangeFixture(deps: Deps): Promise<RangeFixture> {
+        const fxDayId = (await deps.fx.idFor('2026-07-21')) ?? await deps.fx.upsert({
+          businessDate: '2026-07-21',
+          sypMinorPerUsd: 13_000n,
+          provisional: false,
+        })
+        const on = (businessDate: string, shiftId: string | null, reason?: string) => ({
+          shiftId,
+          businessDate,
+          postingDate: businessDate,
+          weekStartDate: weekStartFor(businessDate),
+          fxDayId,
+          createdBy: USER,
+          ...(reason === undefined ? {} : { reason }),
+        })
+
+        // A settled shift: its gross share_split is on the ledger, but its settlement decides.
+        await deps.ledger.post(BRANCH, [{
+          eventType: 'share_split',
+          occurrenceKey: 'range-split',
+          lines: [
+            { fund: { kind: 'fee_earned' }, side: 'D', amount: syp(100_000) },
+            { fund: { kind: 'driver_share_payable', driverId: DRIVER }, side: 'C', amount: syp(40_000), role: 'driver_share' },
+            { fund: { kind: 'company_revenue' }, side: 'C', amount: syp(40_000) },
+            { fund: { kind: 'yalago_income' }, side: 'C', amount: syp(20_000) },
+          ],
+        }], on('2026-07-21', SHIFT))
+        await createAndApproveSettlement(deps, settlement())
+
+        // A legacy shift with no settlement, one day earlier, on the other seeded driver and bike.
+        const original = await deps.shifts.findById(SHIFT)
+        if (!original) throw new Error('conformance shift missing')
+        await deps.shifts.create({
+          ...original,
+          id: OTHER_SHIFT,
+          driverId: OTHER_DRIVER,
+          vehicleId: OTHER_VEHICLE,
+          state: 'draft',
+          businessDate: '2026-07-20',
+          shiftNo: 1,
+          submittedAt: null,
+          approvedBy: null,
+          keptAsReceivable: minor(0n),
+          walletDiff: null,
+        }, USER)
+        await deps.ledger.post(BRANCH, [
+          {
+            eventType: 'share_split',
+            occurrenceKey: 'legacy-split',
+            lines: [
+              { fund: { kind: 'fee_earned' }, side: 'D', amount: syp(5_000) },
+              { fund: { kind: 'driver_share_payable', driverId: OTHER_DRIVER }, side: 'C', amount: syp(2_000), role: 'driver_share' },
+              { fund: { kind: 'company_revenue' }, side: 'C', amount: syp(2_000) },
+              { fund: { kind: 'yalago_income' }, side: 'C', amount: syp(1_000) },
+            ],
+          },
+          {
+            eventType: 'driver_cash_deduction',
+            occurrenceKey: 'legacy-deduction',
+            lines: [
+              { fund: { kind: 'driver_share_payable', driverId: OTHER_DRIVER }, side: 'D', amount: syp(300), role: 'cash_deduction_share' },
+              { fund: { kind: 'driver_receivable_cash', driverId: OTHER_DRIVER }, side: 'D', amount: syp(100), role: 'cash_deduction_overflow' },
+              { fund: { kind: 'driver_cash', driverId: OTHER_DRIVER }, side: 'C', amount: syp(400), role: 'cash_deduction' },
+            ],
+          },
+        ], on('2026-07-20', OTHER_SHIFT))
+
+        // Shift-less: a legacy share line, the owner's capital, and a vehicle expense.
+        await deps.ledger.post(BRANCH, [{
+          eventType: 'manual',
+          occurrenceKey: 'legacy-shiftless-share',
+          lines: [
+            { fund: { kind: 'office_cash' }, side: 'D', amount: syp(50) },
+            { fund: { kind: 'driver_share_payable', driverId: DRIVER }, side: 'C', amount: syp(50), role: 'driver_share' },
+          ],
+        }], on('2026-07-22', null, RANGE_REASON))
+        await deps.ledger.post(BRANCH, [{
+          eventType: 'manual',
+          occurrenceKey: 'range-owner-funding',
+          lines: [
+            { fund: { kind: 'office_cash' }, side: 'D', amount: syp(90_000) },
+            { fund: { kind: 'office_wallet' }, side: 'D', amount: syp(20_000) },
+            { fund: { kind: 'company_box' }, side: 'D', amount: syp(5_000) },
+            { fund: { kind: 'cost_center', costCenterId: 'owner_funding' }, side: 'C', amount: syp(115_000) },
+          ],
+        }], on('2026-07-21', null, RANGE_REASON))
+        await deps.ledger.post(
+          BRANCH,
+          [expensePosting('office_cash', OTHER_VEHICLE, syp(700), 'range-vehicle-expense')],
+          on('2026-07-22', null, 'charging D2'),
+        )
+
+        // A ledger-backed restoration exactly as the API performs it: sweep 50 of cash, fund 30 of wallet.
+        const kaishAmount = syp(50)
+        const shahnAmount = syp(30)
+        const restoration = await deps.financialUnitOfWork.run(
+          { lockKey: `receivables:${BRANCH}`, actorId: USER, requestId: 'range-restoration' },
+          async (tx) => {
+            const [ordinary, funding, advances] = await Promise.all([
+              tx.ledger.balancesByPrefix(BRANCH, 'driver_receivable_'),
+              tx.ledger.balancesByPrefix(BRANCH, 'driver_shift_funding_'),
+              tx.ledger.balancesByPrefix(BRANCH, 'advance_receivable_'),
+            ])
+            const prefixed = (balances: Record<string, bigint>, prefix: string): bigint =>
+              Object.entries(balances)
+                .filter(([code]) => code.startsWith(prefix))
+                .reduce((total, [, balance]) => total + balance, 0n)
+            const positionOf = async (fundCode: 'office_cash' | 'office_wallet') => {
+              const channel = fundCode === 'office_cash' ? 'cash' : 'wallet'
+              return {
+                fundCode,
+                officeBalance: await tx.ledger.fundBalance(BRANCH, fundCode),
+                receivables: minor(
+                  prefixed(ordinary, `driver_receivable_${channel}:`) + prefixed(funding, `driver_shift_funding_${channel}:`),
+                ),
+                advances: minor(prefixed(advances, `advance_receivable_${channel}:`)),
+              }
+            }
+            const cash = await positionOf('office_cash')
+            const wallet = await positionOf('office_wallet')
+            const cashTarget = minor(cash.officeBalance + cash.receivables + cash.advances - kaishAmount)
+            const walletTarget = minor(wallet.officeBalance + wallet.receivables + wallet.advances + shahnAmount)
+            for (const [fundCode, target] of [['office_cash', cashTarget], ['office_wallet', walletTarget]] as const) {
+              await tx.capitalTargets.upsert({
+                branchId: BRANCH,
+                fundCode,
+                target,
+                effectiveFrom: '2026-07-21',
+                createdBy: USER,
+                note: RANGE_REASON,
+              })
+            }
+            const plan = planRestoration([
+              { ...cash, capitalTarget: cashTarget },
+              { ...wallet, capitalTarget: walletTarget },
+            ])
+            if (!plan.feasible) throw new Error(`range restoration infeasible: ${plan.refusals.join(',')}`)
+            const postings = postingsForRestoration(plan, '2026-07-21#1')
+            const entries = await tx.ledger.post(BRANCH, postings, on('2026-07-21', null, RANGE_REASON))
+            if (entries.length !== 2) throw new Error('range restoration did not post both legs')
+            await tx.restorations.create({
+              branchId: BRANCH,
+              businessDate: '2026-07-21',
+              runNo: 1,
+              cashCountId: null,
+              plan: {
+                schemaVersion: 4,
+                source: 'live_ledger',
+                openingBalances: plan.legs.map((leg) => ({
+                  fundCode: leg.fundCode,
+                  balance: serializeMoney(leg.officeBalance),
+                })),
+                restorationJournalEntryIds: entries.map((entry) => entry.id),
+                legs: plan.legs.map((leg) => ({
+                  fundCode: leg.fundCode,
+                  officeBalance: serializeMoney(leg.officeBalance),
+                  receivables: serializeMoney(leg.receivables),
+                  advances: serializeMoney(leg.advances),
+                  position: serializeMoney(leg.position),
+                  capitalTarget: serializeMoney(leg.capitalTarget),
+                  delta: serializeMoney(leg.delta),
+                  direction: leg.direction,
+                  amount: serializeMoney(leg.amount),
+                  feasible: leg.feasible,
+                  refusals: leg.refusals,
+                })),
+              },
+              netToCompany: plan.netToCompany,
+              reason: RANGE_REASON,
+              performedBy: USER,
+            })
+            return { postings, entries }
+          },
+        )
+        const kaishIndex = restoration.postings.findIndex((posting) => posting.lines.some((line) => line.role === 'kaish'))
+        const shahnIndex = kaishIndex === 0 ? 1 : 0
+        const kaishPosting = restoration.postings[kaishIndex]!
+        const shahnPosting = restoration.postings[shahnIndex]!
+        const kaishEntry = restoration.entries.find((entry) => entry.occurrenceKey === kaishPosting.occurrenceKey)!
+        const shahnEntry = restoration.entries.find((entry) => entry.occurrenceKey === shahnPosting.occurrenceKey)!
+
+        // Corrections of both legs two days later. The شحن leg's company_box line carries no role,
+        // so its correction can only be classified by following the reversal link.
+        const shahnCorrection = reverse(shahnPosting, `reversal-of-${shahnEntry.id}`)
+        const [, shahnCorrectionEntry] = await deps.ledger.post(
+          BRANCH,
+          [reverse(kaishPosting, `reversal-of-${kaishEntry.id}`), shahnCorrection],
+          on('2026-07-23', null, RANGE_REASON),
+        )
+        if (!shahnCorrectionEntry) throw new Error('range correction did not post')
+        // The double reversal, in the next financial week.
+        await deps.ledger.post(
+          BRANCH,
+          [reverse(shahnCorrection, `reversal-of-${shahnCorrectionEntry.id}`)],
+          on('2026-07-27', null, RANGE_REASON),
+        )
+        return { kaishAmount, shahnAmount }
+      }
+
+      /**
+       * The REFERENCE: the week-walking algorithm `/dashboard/profit` and `/dashboard/treasury` ran
+       * before the range source existed, restated here on purpose rather than imported.
+       */
+      async function referenceRange(deps: Deps, from: string, to: string): Promise<LedgerRangeRecord> {
+        const all: JournalEntryRecord[] = []
+        for (const week of [WEEK_ONE, WEEK_TWO]) all.push(...(await deps.ledger.listByWeek(BRANCH, week)))
+        const byId = new Map(all.map((entry) => [entry.id, entry]))
+        const entries = all.filter((entry) => entry.businessDate >= from && entry.businessDate <= to)
+
+        const keep = (fundCode: string, role: string | undefined): boolean =>
+          ['company_revenue', 'other_income', 'yalago_income', 'company_box'].includes(fundCode) ||
+          fundCode.startsWith('cost_center:') ||
+          legacyShare(fundCode, role)
+        const legacyShare = (fundCode: string, role: string | undefined): boolean =>
+          (fundCode.startsWith('driver_share_payable:') && (role === 'driver_share' || role === 'cash_deduction_share')) ||
+          (fundCode.startsWith('driver_receivable_cash:') && role === 'cash_deduction_overflow')
+
+        const groups = new Map<string, LedgerRangeRecord['lines'][number]>()
+        const legacyByShift = new Map<string | null, bigint>()
+        const shiftIds = new Set<string>()
+        const perDay = new Map<string, { kaish: bigint; shahn: bigint }>()
+
+        const roleOf = (entry: JournalEntryRecord, line: JournalEntryRecord['lines'][number], visited = new Set<number>()): 'kaish' | 'shahn' | null => {
+          if (line.role === 'kaish' || line.role === 'shahn') return line.role
+          if (entry.eventType === 'restoration') return line.side === 'D' ? 'kaish' : 'shahn'
+          if (entry.eventType !== 'correction' || visited.has(entry.id)) return null
+          const match = /^reversal-of-(\d+)$/.exec(entry.occurrenceKey)
+          if (!match) return null
+          visited.add(entry.id)
+          const found = byId.get(Number(match[1]))
+          const foundLine = found?.lines.find((candidate) => candidate.fundCode === 'company_box')
+          return found && foundLine ? roleOf(found, foundLine, visited) : null
+        }
+
+        for (const entry of entries) {
+          if (entry.shiftId !== null) shiftIds.add(entry.shiftId)
+          for (const line of entry.lines) {
+            const signed = line.side === 'C' ? line.amount : -line.amount
+            if (legacyShare(line.fundCode, line.role)) {
+              legacyByShift.set(entry.shiftId, (legacyByShift.get(entry.shiftId) ?? 0n) + signed)
+            }
+            if (keep(line.fundCode, line.role)) {
+              const key = JSON.stringify([entry.businessDate, entry.eventType, line.fundCode, line.role ?? null, line.side])
+              const group = groups.get(key)
+              if (group) {
+                group.amount = minor(group.amount + line.amount)
+                group.lineCount += 1
+              } else {
+                groups.set(key, {
+                  businessDate: entry.businessDate,
+                  eventType: entry.eventType,
+                  fundCode: line.fundCode,
+                  role: line.role ?? null,
+                  side: line.side,
+                  currency: 'SYP_NEW',
+                  amount: minor(line.amount),
+                  lineCount: 1,
+                })
+              }
+            }
+            const carriesRole = line.role === 'kaish' || line.role === 'shahn'
+            if (line.fundCode !== 'company_box') continue
+            if (!carriesRole && entry.eventType !== 'restoration' && entry.eventType !== 'correction') continue
+            const role = roleOf(entry, line)
+            if (role === null) continue
+            const day = perDay.get(entry.businessDate) ?? { kaish: 0n, shahn: 0n }
+            if (role === 'kaish') day.kaish += line.side === 'D' ? line.amount : -line.amount
+            else day.shahn += line.side === 'C' ? line.amount : -line.amount
+            perDay.set(entry.businessDate, day)
+          }
+        }
+
+        const settlements = await deps.settlements.listByShiftIds([...shiftIds])
+        const bySettledShift = new Map(settlements.map((row) => [row.shiftId, row]))
+        let settled = 0n
+        let legacy = legacyByShift.get(null) ?? 0n
+        for (const shiftId of shiftIds) {
+          const row = bySettledShift.get(shiftId)
+          if (row) settled += row.baseDriverShare
+          else legacy += legacyByShift.get(shiftId) ?? 0n
+        }
+
+        const order = (a: string | null, b: string | null): number =>
+          a === b ? 0 : a === null ? -1 : b === null ? 1 : a < b ? -1 : 1
+        return {
+          from,
+          to,
+          lines: [...groups.values()].sort((a, b) =>
+            order(a.businessDate, b.businessDate) ||
+            order(a.eventType, b.eventType) ||
+            order(a.fundCode, b.fundCode) ||
+            order(a.role, b.role) ||
+            order(a.side, b.side),
+          ),
+          settledDriverShare: minor(settled),
+          legacyDriverShare: minor(legacy),
+          treasuryDays: [...perDay.entries()]
+            .sort(([a], [b]) => order(a, b))
+            .map(([businessDate, day]) => ({ businessDate, kaish: minor(day.kaish), shahn: minor(day.shahn) })),
+        }
+      }
+
+      it('equals the week-by-week reference for every range, including chains that leave the range', async () => {
+        const deps = await freshSettlement()
+        try {
+          const { kaishAmount, shahnAmount } = await seedRangeFixture(deps)
+          for (const [from, to] of [
+            ['2026-07-19', '2026-07-31'],
+            ['2026-07-20', '2026-07-20'],
+            ['2026-07-21', '2026-07-21'],
+            ['2026-07-22', '2026-07-23'],
+            ['2026-07-26', '2026-07-27'],
+            ['2026-07-28', '2026-08-30'],
+          ] as const) {
+            const actual = await deps.ledgerRange.readRange(BRANCH, from, to)
+            expect(actual, `${from}..${to}`).toEqual(await referenceRange(deps, from, to))
+          }
+
+          // And the reference itself says what the fixture means.
+          const whole = await deps.ledgerRange.readRange(BRANCH, '2026-07-19', '2026-07-31')
+          expect(whole.settledDriverShare).toBe(syp(40_000))
+          // 2,000 − 300 − 100 on the legacy shift, + 50 shift-less. The settled shift's 40,000 split is NOT here.
+          expect(whole.legacyDriverShare).toBe(syp(1_650))
+          expect(whole.treasuryDays).toEqual([
+            { businessDate: '2026-07-21', kaish: kaishAmount, shahn: shahnAmount },
+            { businessDate: '2026-07-23', kaish: minor(-kaishAmount), shahn: minor(-shahnAmount) },
+            { businessDate: '2026-07-27', kaish: minor(0n), shahn: shahnAmount },
+          ])
+          // The owner's company-fund deposit is on the ledger but is not a restoration flow.
+          expect(whole.lines.some((line) => line.fundCode === 'company_box' && line.eventType === 'manual')).toBe(true)
+          expect(whole.lines.find((line) => line.fundCode === `cost_center:${OTHER_VEHICLE}`)).toMatchObject({
+            businessDate: '2026-07-22',
+            eventType: 'expense',
+            side: 'D',
+            amount: syp(700),
+            lineCount: 1,
+            currency: 'SYP_NEW',
+          })
+          // Positions never enter the aggregate.
+          expect(whole.lines.some((line) => line.fundCode.startsWith('office_') || line.fundCode.startsWith('driver_cash:'))).toBe(false)
+
+          // A second-week range still classifies the double reversal through first-week originals.
+          const second = await deps.ledgerRange.readRange(BRANCH, '2026-07-26', '2026-07-27')
+          expect(second.treasuryDays).toEqual([{ businessDate: '2026-07-27', kaish: minor(0n), shahn: shahnAmount }])
+          expect(second.settledDriverShare).toBe(minor(0n))
+          expect(second.legacyDriverShare).toBe(minor(0n))
+
+          // Another branch sees nothing.
+          const elsewhere = await deps.ledgerRange.readRange('11111111-1111-1111-1111-111111111112', '2026-07-19', '2026-07-31')
+          expect(elsewhere).toEqual({
+            from: '2026-07-19',
+            to: '2026-07-31',
+            lines: [],
+            settledDriverShare: minor(0n),
+            legacyDriverShare: minor(0n),
+            treasuryDays: [],
+          })
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('knows the first day the branch ledger moved', async () => {
+        const deps = await fresh()
+        try {
+          expect(await deps.ledgerRange.firstActivityDate(BRANCH)).toBeNull()
+          await deps.ledger.post(BRANCH, [transfer('first-activity')], { ...META, businessDate: '2026-07-22' })
+          await deps.ledger.post(BRANCH, [transfer('earlier-activity')], { ...META, businessDate: '2026-07-20' })
+          expect(await deps.ledgerRange.firstActivityDate(BRANCH)).toBe('2026-07-20')
+          expect(await deps.ledgerRange.firstActivityDate('11111111-1111-1111-1111-111111111112')).toBeNull()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('lists shift timing for a date range, every state, with the window fallback', async () => {
+        const deps = await fresh()
+        try {
+          const original = await deps.shifts.findById(SHIFT)
+          if (!original) throw new Error('conformance shift missing')
+          await deps.shifts.update({
+            ...original,
+            state: 'pending_review',
+            openApprovedAt: '2026-07-21T05:00:00.000Z',
+            openApprovedBy: USER,
+            // The driver confirmed after the approval: the window opens at his confirmation.
+            windowOpensAt: '2026-07-21T05:30:00.000Z',
+            submittedAt: '2026-07-21T13:45:00.000Z',
+            odoStart: 1_200,
+            odoEnd: 1_275,
+          }, USER)
+          await deps.shifts.create({
+            ...original,
+            id: OTHER_SHIFT,
+            driverId: OTHER_DRIVER,
+            vehicleId: OTHER_VEHICLE,
+            state: 'draft',
+            businessDate: '2026-07-20',
+            shiftNo: 1,
+          }, USER)
+
+          expect(await deps.shifts.listTimingBetween(BRANCH, '2026-07-20', '2026-07-21')).toEqual([
+            {
+              id: OTHER_SHIFT,
+              branchId: BRANCH,
+              driverId: OTHER_DRIVER,
+              vehicleId: OTHER_VEHICLE,
+              shiftNo: 1,
+              businessDate: '2026-07-20',
+              state: 'draft',
+              windowOpensAt: null,
+              submittedAt: null,
+              odoStart: null,
+              odoEnd: null,
+            },
+            {
+              id: SHIFT,
+              branchId: BRANCH,
+              driverId: DRIVER,
+              vehicleId: '88888888-8888-8888-8888-888888888888',
+              shiftNo: 1,
+              businessDate: '2026-07-21',
+              state: 'pending_review',
+              windowOpensAt: '2026-07-21T05:30:00.000Z',
+              submittedAt: '2026-07-21T13:45:00.000Z',
+              odoStart: 1_200,
+              odoEnd: 1_275,
+            },
+          ])
+          expect((await deps.shifts.listTimingBetween(BRANCH, '2026-07-21', '2026-07-21')).map((row) => row.id)).toEqual([SHIFT])
+          expect(await deps.shifts.listTimingBetween(BRANCH, '2026-07-22', '2026-08-30')).toEqual([])
+          expect(await deps.shifts.listTimingBetween('11111111-1111-1111-1111-111111111112', '2026-07-01', '2026-07-31')).toEqual([])
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
       })
     })
 

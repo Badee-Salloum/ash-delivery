@@ -34,6 +34,8 @@ const get = async (token: string, url: string): Promise<LightMyRequestResponse> 
 const BRANCH_SCOPED_READS = [
   '/dashboard',
   '/dashboard/working-now',
+  // P2 — every filtered screen reads its dates from here.
+  '/dashboard/meta',
   '/drivers',
   '/vehicles',
   '/assignments',

@@ -16,10 +16,20 @@ import {
 const appSource = readFileSync(new URL('./AdminApp.tsx', import.meta.url), 'utf8')
 const screenSource = readFileSync(new URL('./screens/CompletedShifts.tsx', import.meta.url), 'utf8')
 const dashboardSource = readFileSync(new URL('./screens/Dashboard.tsx', import.meta.url), 'utf8')
+const timeRangeBarSource = readFileSync(new URL('./components/TimeRangeBar.tsx', import.meta.url), 'utf8')
 
 describe('completed shift history date range', () => {
   it('defaults to the latest seven business dates, including the session business date', () => {
     expect(defaultCompletedShiftRange('2026-08-24')).toEqual({ from: '2026-08-18', to: '2026-08-24' })
+  })
+
+  it('computes dates through the domain, never through Date (P2)', () => {
+    const helperSource = readFileSync(new URL('./completed-shifts.ts', import.meta.url), 'utf8')
+    expect(helperSource).not.toContain('Date.parse')
+    expect(helperSource).not.toContain('new Date(')
+    expect(helperSource).toContain("import { addDays, daysBetween, formatMinor, isCalendarDate, parseMinor, sum } from '@ash/domain'")
+    expect(completedShiftDates('2026-01-01', '2027-02-04', 400)).toMatchObject({ ok: true })
+    expect(completedShiftDates('2026-01-01', '2027-02-05', 400)).toEqual({ ok: false, reason: 'range_too_large' })
   })
 
   it('enumerates an inclusive range without browser-timezone date arithmetic', () => {
@@ -153,7 +163,8 @@ describe('completed shift history screen wiring', () => {
     // label, not that the entry never gains another field. Pinning the whole object literal made
     // this fail the day nav items grew an icon, which is not what the test is about.
     expect(appSource).toContain("key: 'completedShifts', label: t.completedShifts.title")
-    expect(appSource).toContain('<CompletedShifts onOpen={setOpenShift} />')
+    // P2: mounted with the params the link carried, keyed so a different link starts it afresh.
+    expect(appSource).toContain('<CompletedShifts key={mountKey} initial={liveParams.current} onOpen={setOpenShift} />')
     expect(screenSource).toContain('onClick={() => onOpen(shift.id)}')
   })
 
@@ -162,15 +173,27 @@ describe('completed shift history screen wiring', () => {
     // month, each returning every state so the browser could discard most of it. The range read the
     // Sunday close already relies on covers it in one. The negative assertions are the point — a
     // reinstated loop would still satisfy the positive one.
+    // P2: a range longer than the branch cap hands the driver/vehicle to the server as well.
     expect(screenSource).toContain(
-      '`/shifts?from=${encodeURIComponent(applied.from)}&to=${encodeURIComponent(applied.to)}`',
+      '`/shifts?from=${encodeURIComponent(shown.from)}&to=${encodeURIComponent(shown.to)}${narrowQuery}`',
     )
     expect(screenSource).toContain("{ cache: 'no-store', signal: controller.signal }")
     expect(screenSource).not.toContain('READ_BATCH_SIZE')
     expect(screenSource).not.toContain('/shifts?date=')
-    // The 31-day cap still guards the request; it is now the SERVER's scan it bounds, not the fan-out.
-    expect(screenSource).toContain('completedShiftDates(from, to)')
-    expect(screenSource).toContain('completedShiftDates(applied.from, applied.to)')
+    // The cap still guards the request; it is now the SERVER's scan it bounds, not the fan-out. The
+    // custom form lives in the shared time filter and refuses a period longer than the screen's cap.
+    expect(timeRangeBarSource).toContain('validateCustom(from, to, maxDays)')
+    expect(screenSource).toContain('maxDays={maxDays}')
+    expect(screenSource).toContain('completedShiftDates(shown.from, shown.to, maxDays)')
+    // A period longer than the cap shows its most recent days instead of an empty page.
+    expect(screenSource).toContain('capped ? cappedRange(applied, maxDays) : applied')
+    expect(screenSource).toContain('t.completedShifts.rangeCapShown')
+    expect(screenSource).toContain('narrowed ? MAX_NARROWED_SHIFT_RANGE_DAYS : MAX_COMPLETED_SHIFT_RANGE_DAYS')
+    // «today» is the server's, never the session's stale stamp or the browser clock.
+    expect(screenSource).not.toContain('session?.businessDate')
+    expect(screenSource).toContain('resolveSelection(selection, meta)')
+    expect(timeRangeBarSource).toContain("'/dashboard/meta'")
+    expect(timeRangeBarSource).not.toContain('new Date(')
   })
 
   it('identifies a shift by its clock, because a business date alone cannot', () => {

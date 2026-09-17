@@ -25,3 +25,9 @@ export * from './fleet/numbering.ts'
 export * from './auth/totp.ts'
 export * from './text/visible.ts'
 export * from './text/party-key.ts'
+
+// P2 — the shared time filter and the range read model's reporting rules.
+export * from './time/range.ts'
+export * from './reporting/profit.ts'
+export * from './reporting/treasury-flow.ts'
+export * from './reporting/ledger-range.ts'

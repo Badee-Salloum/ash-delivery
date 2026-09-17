@@ -68,6 +68,8 @@ import type {
   WeekLockRecord,
   WeekLockRepo,
 } from '@ash/contracts'
+// P2 — the timing-only shift read.
+import type { ShiftTimingRecord } from '@ash/contracts'
 import {
   FIXED_CASH_SETTLEMENT_POLICY,
   FIXED_CASH_SETTLEMENT_POLICY_V1,
@@ -89,6 +91,8 @@ import { MemoryOfficeCapitalTargetRepo, MemoryRestorationRepo } from './restorat
 import { MemoryNotificationRepo, MemoryTierRepo } from './tiers.ts'
 import { MemoryCloseDraftRepo } from './close-draft.ts'
 import { MemoryReceivableEventRepo } from './receivables.ts'
+// P2 — the range read model behind the time filter.
+import { MemoryLedgerRangeSource } from './ledger-range.ts'
 
 export { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 export { MemoryOcrReadRepo, MemoryOcrReader, ScriptedOcrReader } from '../ocr/memory.ts'
@@ -100,6 +104,8 @@ export { MemoryOfficeCapitalTargetRepo, MemoryRestorationRepo } from './restorat
 export { MemoryNotificationRepo, MemoryTierRepo } from './tiers.ts'
 export { MemoryCloseDraftRepo } from './close-draft.ts'
 export { MemoryReceivableEventRepo } from './receivables.ts'
+// P2 — the range read model behind the time filter.
+export { MemoryLedgerRangeSource } from './ledger-range.ts'
 
 /**
  * In-memory implementations of every port.
@@ -306,6 +312,30 @@ export class MemoryShiftRepo implements ShiftRepo {
   }
   async delete(id: string, _actorId: string | null): Promise<void> {
     this.rows.delete(id)
+  }
+
+  // P2 — timing-only read for the shifts summary; same ordering as the PostgreSQL query.
+  async listTimingBetween(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftTimingRecord[]> {
+    return [...this.rows.values()]
+      .filter((s) => s.branchId === branchId && s.businessDate >= from && s.businessDate <= to)
+      .sort((a, b) =>
+        (a.businessDate < b.businessDate ? -1 : a.businessDate > b.businessDate ? 1 : 0) ||
+        a.shiftNo - b.shiftNo ||
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+      )
+      .map((s) => ({
+        id: s.id,
+        branchId: s.branchId,
+        driverId: s.driverId,
+        vehicleId: s.vehicleId,
+        shiftNo: s.shiftNo,
+        businessDate: s.businessDate,
+        state: s.state,
+        windowOpensAt: s.windowOpensAt ?? s.openApprovedAt,
+        submittedAt: s.submittedAt,
+        odoStart: s.odoStart,
+        odoEnd: s.odoEnd,
+      }))
   }
 }
 
@@ -2055,6 +2085,8 @@ export interface MemoryDeps extends Deps {
   closeUnitOfWork: MemoryShiftCloseUnitOfWork
   ledger: MemoryLedgerRepo
   treasuryPosition: MemoryTreasuryPositionSource
+  /** P2 — one aggregate over a business-date range. */
+  ledgerRange: MemoryLedgerRangeSource
   fx: MemoryFxRepo
   weekLocks: MemoryWeekLockRepo
   audit: MemoryAuditRepo
@@ -2368,6 +2400,8 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     movements,
     ledger,
     treasuryPosition,
+    // P2 — reads the live ledger and resolves settlements in one batch.
+    ledgerRange: new MemoryLedgerRangeSource(ledger, settlements),
     expenses,
     incomes,
     advances,

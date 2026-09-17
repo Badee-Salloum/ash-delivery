@@ -1,17 +1,42 @@
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { z } from 'zod'
-import { type Deps, type JournalEntryRecord, type ShiftRecord, serializeMoney } from '@ash/contracts'
 import {
-  RECEIVABLE_WRITEOFF_LOSS_COST_CENTER,
+  type Deps,
+  LEDGER_RANGE_MAX_DAYS,
+  type ShiftOrderRecord,
+  type ShiftRecord,
+  type ShiftTimingRecord,
+  serializeMoney,
+} from '@ash/contracts'
+import {
+  type CalendarDate,
+  type ShiftPattern,
+  type WorkedTime,
   REQUIRED_END_SLOTS,
+  SHIFT_TARGET_MINUTES,
+  addProfitLine,
+  can,
+  classifyProfitLine,
+  daysBetween,
+  emptyProfitTotals,
+  isCalendarDate,
+  isDriverBlockLine,
   isLive,
   minor,
+  monthStartFor,
+  netProfit,
+  shiftShapeForDay,
+  shortfallMinutes,
+  splitFixedDriverShare,
   toUsdMinor,
+  totalCost,
   weekStartFor,
+  workedTime,
 } from '@ash/domain'
 import { ServiceError, includedOrders, todayFor } from './shifts.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
 import { clampToGoLive, goLiveDate } from './go-live.ts'
+import { grantsFromRows } from './rbac.ts'
 
 /**
  * The minimal ops dashboard (SRS I-1, in scope per the brief's "minimal ops dashboard").
@@ -43,6 +68,38 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     return {
       asOf: new Date(deps.clock.nowMs()).toISOString(),
       ...counts,
+    }
+  })
+
+  /**
+   * P2 — the dates every time filter is built from.
+   *
+   * «Today» is the SERVER's business date (the day starts at 04:00 Damascus). The console used to
+   * take it from the session, which is stamped at sign-in and goes stale at 04:00 for a manager
+   * who stays signed in, and a browser clock knows neither the zone nor the day start.
+   *
+   * `epoch` is where «الكل منذ البدء» begins: the go-live date, else the branch's first ledger
+   * activity, else today.
+   */
+  app.get('/dashboard/meta', { config: { permission: 'branch_data.view', subject: ownBranch } }, async (req, reply) => {
+    reply.header('cache-control', 'private, no-store')
+    const branchId = resolveBranchId(req)
+    const today = todayFor(deps)
+    const [goLive, firstActivity] = await Promise.all([
+      goLiveDate(deps),
+      deps.ledgerRange.firstActivityDate(branchId),
+    ])
+    return {
+      today,
+      goLiveBusinessDate: goLive,
+      firstActivityDate: firstActivity,
+      epoch: goLive ?? firstActivity ?? today,
+      weekStart: weekStartFor(today),
+      monthStart: monthStartFor(today),
+      /** Minutes past local midnight at which the business day turns over (240 = 04:00). */
+      dayStartMinutes: deps.clock.dayStartMinutes(),
+      /** The widest range the range-based reports accept. */
+      maxRangeDays: LEDGER_RANGE_MAX_DAYS,
     }
   })
 
@@ -161,6 +218,214 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
   })
 
   /**
+   * P2 — «النوبات» over a date range: how the fleet actually worked, for the dashboard's operations
+   * section and the drill-downs into the completed/live shift screens.
+   *
+   * Judged exactly as `GET /shifts` judges a row — `workedTime` over the operation window, with the
+   * owner's targets — and over the SAME population the completed-shifts screen lists (approved and
+   * week-locked), so a count here is the count a manager sees after clicking it.
+   *
+   * `branch_data.view`, like the shift list. The company-share columns are BR8 figures, so they are
+   * filled only for a caller who ALSO holds `profit.view_total`; everyone else gets `null`.
+   */
+  app.get('/dashboard/shifts-summary', { config: { permission: 'branch_data.view', subject: ownBranch } }, async (req) => {
+    const q = z.object({ from: realCalendarDate, to: realCalendarDate }).parse(req.query)
+    if (q.from > q.to) {
+      throw new z.ZodError([{ code: 'custom', path: ['from'], message: '`from` must be on or before `to`' }])
+    }
+    assertWithinRangeCap(q.from, q.to)
+    const branchId = resolveBranchId(req)
+    const showCompanyShare = await holdsPermission(req, 'profit.view_total')
+
+    const timing = await deps.shifts.listTimingBetween(branchId, q.from, q.to)
+    const offset = deps.clock.offsetMinutes()
+    const dayStart = deps.clock.dayStartMinutes()
+    const nowMs = deps.clock.nowMs()
+    const workedOf = (s: ShiftTimingRecord): WorkedTime =>
+      workedTime(
+        s.windowOpensAt === null ? null : Date.parse(s.windowOpensAt),
+        s.submittedAt === null ? null : Date.parse(s.submittedAt),
+        offset,
+        dayStart,
+      )
+
+    const completed = timing.filter((s) => COMPLETED_SHIFT_STATES.has(s.state))
+    const live = timing.filter((s) => s.state === 'open' || s.state === 'suspended')
+    const completedIds = completed.map((s) => s.id)
+    const [orderRows, settlementRows, drivers, vehicles] = await Promise.all([
+      deps.orders.listByShiftIds(completedIds),
+      showCompanyShare ? deps.settlements.listByShiftIds(completedIds) : Promise.resolve([]),
+      deps.directory.listDrivers(branchId),
+      deps.directory.listVehicles(branchId),
+    ])
+    const ordersByShift = new Map<string, ShiftOrderRecord[]>()
+    for (const order of orderRows) {
+      const grouped = ordersByShift.get(order.shiftId) ?? []
+      grouped.push(order)
+      ordersByShift.set(order.shiftId, grouped)
+    }
+    const settled = new Set(settlementRows.map((row) => row.shiftId))
+
+    const byDriver = new Map<string, ShiftTally>()
+    const byVehicle = new Map<string, ShiftTally>()
+    const tallyFor = (map: Map<string, ShiftTally>, key: string): ShiftTally => {
+      const found = map.get(key)
+      if (found) return found
+      const fresh = emptyShiftTally()
+      map.set(key, fresh)
+      return fresh
+    }
+    const total = emptyShiftTally()
+    const byPattern: Record<ShiftPattern, number> = { day: 0, evening: 0, full: 0, unknown: 0 }
+    let met = 0
+    let unjudged = 0
+    let abandoned = 0
+
+    for (const shift of completed) {
+      const worked = workedOf(shift)
+      byPattern[worked.pattern] += 1
+      if (worked.abandoned) abandoned += 1
+      const short = shortfallMinutes(worked)
+      if (short === null) unjudged += 1
+      else if (short === 0) met += 1
+
+      // What the shift was APPROVED on — an unchecked operation never entered the money.
+      const counted = includedOrders(ordersByShift.get(shift.id) ?? [])
+      const fees = counted.reduce((acc, o) => acc + o.fee, 0n)
+      // The company's share exactly as the shift's financial block states it (`GET /shifts`):
+      // fixed 40% over the Yallago fees, plus the company part of every manual order.
+      let companyShare = 0n
+      if (settled.has(shift.id)) {
+        companyShare =
+          splitFixedDriverShare(counted.filter((o) => o.kind !== 'manual').map((o) => o.fee)).companyShare +
+          counted.filter((o) => o.kind === 'manual').reduce((acc, o) => acc + (o.companyShare ?? 0n), 0n)
+      }
+      // Distance only when both readings exist and run forwards; a reset odometer is not negative km.
+      const km =
+        shift.odoStart !== null && shift.odoEnd !== null && shift.odoEnd >= shift.odoStart
+          ? shift.odoEnd - shift.odoStart
+          : 0
+
+      for (const tally of [total, tallyFor(byDriver, shift.driverId), tallyFor(byVehicle, shift.vehicleId)]) {
+        tally.shifts += 1
+        if (worked.pattern === 'full') tally.doubles += 1
+        if (short !== null && short > 0) {
+          tally.shortCount += 1
+          tally.shortMinutes += short
+        }
+        // A forgotten close has a duration that means nothing; it is not worked time.
+        if (worked.minutes !== null && !worked.abandoned) tally.workedMinutes += worked.minutes
+        tally.orders += counted.length
+        tally.fees += fees
+        tally.companyShare += companyShare
+        tally.km += km
+      }
+    }
+
+    // «شيفت عادية او دبل» per driver-day: one ten-hour shift OR two shifts on one date.
+    const driverDays = new Map<string, ShiftTimingRecord[]>()
+    for (const shift of completed) {
+      const key = `${shift.driverId}|${shift.businessDate}`
+      const rows = driverDays.get(key) ?? []
+      rows.push(shift)
+      driverDays.set(key, rows)
+    }
+    let doubleDays = 0
+    let multiShiftDays = 0
+    for (const rows of driverDays.values()) {
+      if (rows.length > 1) multiShiftDays += 1
+      if (shiftShapeForDay(rows.map((row) => ({ worked: workedOf(row) }))) === 'double') doubleDays += 1
+    }
+
+    // Running now: its slot is certain, its pattern is not. «Over» is measured against the slot's
+    // own eight hours, the same way the live board draws its progress bar.
+    let overTarget = 0
+    const runningSlots = { day: 0, evening: 0, unknown: 0 }
+    for (const shift of live) {
+      const worked = workedOf(shift)
+      runningSlots[worked.slot ?? 'unknown'] += 1
+      if (shift.windowOpensAt !== null && worked.slot !== null) {
+        const elapsed = Math.floor((nowMs - Date.parse(shift.windowOpensAt)) / 60_000)
+        const target = SHIFT_TARGET_MINUTES[worked.slot]
+        if (target !== null && elapsed > target) overTarget += 1
+      }
+    }
+
+    const driverInfo = new Map(drivers.map((d) => [d.id, d]))
+    const vehicleInfo = new Map(vehicles.map((v) => [v.id, v]))
+    const money = (value: bigint): string => serializeMoney(minor(value))
+    const shareOf = (tally: ShiftTally): string | null => (showCompanyShare ? money(tally.companyShare) : null)
+    const byName = (a: { name: string }, b: { name: string }): number => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+
+    return {
+      from: q.from,
+      to: q.to,
+      companyShareVisible: showCompanyShare,
+      completed: completed.length,
+      byPattern,
+      doubles: { total: doubleDays, fullShifts: byPattern.full, multiShiftDays },
+      short: { count: total.shortCount, minutes: total.shortMinutes },
+      met,
+      unjudged,
+      abandoned,
+      running: {
+        count: live.length,
+        open: live.filter((s) => s.state === 'open').length,
+        suspended: live.filter((s) => s.state === 'suspended').length,
+        overTarget,
+        slots: runningSlots,
+      },
+      pendingReview: timing.filter((s) => s.state === 'pending_review').length,
+      totals: {
+        orders: total.orders,
+        feesSyp: money(total.fees),
+        companyShareSyp: shareOf(total),
+        km: total.km,
+        workedMinutes: total.workedMinutes,
+      },
+      byDriver: [...byDriver.entries()]
+        .map(([driverId, t]) => ({
+          driverId,
+          name: driverInfo.get(driverId)?.fullNameAr ?? driverId,
+          nameEn: driverInfo.get(driverId)?.fullNameEn ?? null,
+          code: driverInfo.get(driverId)?.code ?? null,
+          shifts: t.shifts,
+          doubles: t.doubles,
+          short: { count: t.shortCount, minutes: t.shortMinutes },
+          workedMinutes: t.workedMinutes,
+          orders: t.orders,
+          feesSyp: money(t.fees),
+          companyShareSyp: shareOf(t),
+        }))
+        .sort(byName),
+      byVehicle: [...byVehicle.entries()]
+        .map(([vehicleId, t]) => ({
+          vehicleId,
+          name: vehicleInfo.get(vehicleId)?.code ?? vehicleId,
+          code: vehicleInfo.get(vehicleId)?.code ?? null,
+          groundNo: vehicleInfo.get(vehicleId)?.groundNo ?? null,
+          shifts: t.shifts,
+          doubles: t.doubles,
+          short: { count: t.shortCount, minutes: t.shortMinutes },
+          km: t.km,
+          workedMinutes: t.workedMinutes,
+          orders: t.orders,
+          feesSyp: money(t.fees),
+          companyShareSyp: shareOf(t),
+        }))
+        .sort(byName),
+    }
+  })
+
+  /** Does the caller hold `permission` at all? The same grant table the route guard reads. */
+  const holdsPermission = async (req: FastifyRequest, permission: 'profit.view_total'): Promise<boolean> => {
+    if (!req.actor) return false
+    const grants = grantsFromRows(await deps.directory.grants())
+    // `profit.view_total` routes declare an empty subject; ask the same question they ask.
+    return can(req.actor, permission, {}, grants).allowed
+  }
+
+  /**
    * Total profit / share is General-Manager-only (BR8). Everyone else who reaches the dashboard
    * sees the operational tiles above but not this figure — hence a SEPARATE endpoint with a
    * SEPARATE permission, rather than a field the branch dashboard hides.
@@ -179,19 +444,26 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
         message: '`from` must be on or before `to`',
       }])
     }
+    assertWithinRangeCap(from, to)
     // The GM is org-wide; totalling across every branch would need a fan-out. Single branch
     // today, so he names the one he means and the figure stays unambiguous.
     const branchId = resolveBranchId(req)
 
     const weekStart = weekStartFor(from)
-    const entries: JournalEntryRecord[] = []
-    for (const start of weekStartsBetween(from, to)) {
-      entries.push(...(await deps.ledger.listByWeek(branchId, start)))
-    }
-    let company = 0n
-    let yalago = 0n
-    let otherIncome = 0n
-    let expense = 0n
+    /*
+     * ONE aggregate over the range (P2). This walked the ledger a financial week at a time — up to
+     * 520 reads — and totalled every line here. The range source groups the lines in the database
+     * and resolves the driver share exactly as this route used to: the immutable settlement's
+     * `baseDriverShare` for every shift the range touches, and the legacy share lines otherwise.
+     */
+    const [range, vehicles] = await Promise.all([
+      deps.ledgerRange.readRange(branchId, from, to),
+      // Every vehicle of the branch, retired ones included: a stopped bike's old costs are costs.
+      deps.directory.listVehicles(branchId),
+    ])
+    const classification = { vehicleIds: new Set(vehicles.map((vehicle) => vehicle.id)) }
+
+    const totals = emptyProfitTotals()
     /*
      * The GROSS block share, and it has to be its own accumulator.
      *
@@ -201,96 +473,62 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
      * whose rows do not sum is worse than no waterfall.
      */
     let driverBlock = 0n
-    /*
-     * Cost-centre LINES, not their total. «No expense has been recorded» and «the expenses recorded
-     * net to zero» are different facts about a day, and only one of them is a warning: a recorded
-     * expense that was later reversed gives two lines and a zero total, and must not be flagged.
-     */
-    let expenseLineCount = 0
     /** Per business date, so the screen can show WHY one day differs from its neighbours. */
-    const perDay = new Map<string, { company: bigint; otherIncome: bigint; expense: bigint }>()
-    const dayOf = (date: string): { company: bigint; otherIncome: bigint; expense: bigint } => {
-      const found = perDay.get(date)
-      if (found !== undefined) return found
-      const fresh = { company: 0n, otherIncome: 0n, expense: 0n }
-      perDay.set(date, fresh)
-      return fresh
-    }
-    const legacyDriverShareByShift = new Map<string | null, bigint>()
-    const shiftIds = new Set<string>()
-    for (const e of entries) {
-      if (e.businessDate < from || e.businessDate > to) continue
-      if (e.shiftId !== null) shiftIds.add(e.shiftId)
-      const day = dayOf(e.businessDate)
-      for (const l of e.lines) {
-        const signed = l.side === 'C' ? l.amount : -l.amount
-        if (l.fundCode === 'company_revenue') {
-          company += signed
-          day.company += signed
-        } else if (l.fundCode === 'other_income') {
-          // Deliberately its own line, never folded into `company_revenue` — `recipes.ts` keeps them
-          // apart so a battery sale cannot silently overstate the delivery business. It is still the
-          // company's money, so profit has to add it back or it disappears from every report.
-          otherIncome += signed
-          day.otherIncome += signed
-        } else if (isOperatingCost(l.fundCode)) {
-          // A cost is a DEBIT, so the sign flips relative to revenue.
-          expense += -signed
-          day.expense += -signed
-          expenseLineCount += 1
-        } else if (l.fundCode === 'yalago_income') yalago += signed
-        else if (
-          (
-            l.fundCode.startsWith('driver_share_payable:') &&
-            (l.role === 'driver_share' || l.role === 'cash_deduction_share')
-          ) || (
-            l.fundCode.startsWith('driver_receivable_cash:') &&
-            l.role === 'cash_deduction_overflow'
-          )
-        ) {
-          legacyDriverShareByShift.set(
-            e.shiftId,
-            (legacyDriverShareByShift.get(e.shiftId) ?? 0n) + signed,
-          )
-        }
-        // NOT part of the chain above: that branch also claims `cash_deduction_share`, and this
-        // wants strictly the `share_split` credit. Two different questions about one line.
-        if (l.fundCode.startsWith('driver_share_payable:') && l.role === 'driver_share') {
-          driverBlock += signed
-        }
+    const perDay = new Map<string, ReturnType<typeof emptyProfitTotals>>()
+    for (const line of range.lines) {
+      /*
+       * `classifyProfitLine` is the allowlist this route used to keep inline, with the fix of
+       * 2026-09-17: a vehicle expense lands on `cost_center:<vehicle id>`, which the old list never
+       * matched, so every vehicle cost was missing from net profit. Capital movements wearing the
+       * same prefix (`owner_funding`, `owner_drawings`, `opening_balance`) still classify as null.
+       *
+       * «No cost recorded» and «costs that net to zero» stay different facts: the aggregate carries
+       * how many LINES it summarises, and `costLineCount` counts those, not the total.
+       */
+      const cls = classifyProfitLine(line.fundCode, classification)
+      if (cls !== null) {
+        addProfitLine(totals, cls, line.side, line.amount, line.lineCount)
+        const day = perDay.get(line.businessDate) ?? emptyProfitTotals()
+        addProfitLine(day, cls, line.side, line.amount, line.lineCount)
+        perDay.set(line.businessDate, day)
+      }
+      // NOT part of the classification above: the gross block share is a question about the
+      // `share_split` credit only, never about the deduction lines the legacy share also reads.
+      if (isDriverBlockLine(line.fundCode, line.role)) {
+        driverBlock += line.side === 'C' ? line.amount : -line.amount
       }
     }
-    let driverShare = legacyDriverShareByShift.get(null) ?? 0n
-    const settlements = await deps.settlements.listByShiftIds([...shiftIds])
-    const settlementByShift = new Map(settlements.map((settlement) => [settlement.shiftId, settlement]))
-    for (const shiftId of shiftIds) {
-      // A surplus/shortage is a settlement difference, not earned driver share. New immutable
-      // snapshots expose the exact net earned share after cash deductions and before variance.
-      // Legacy approvals have no snapshot and retain their historical share_split less
-      // cash-deduction calculation. Payout/return debits are settlement, not reduced earnings.
-      const settlement = settlementByShift.get(shiftId)
-      driverShare += settlement?.baseDriverShare ?? legacyDriverShareByShift.get(shiftId) ?? 0n
-    }
+    // A surplus/shortage is a settlement difference, not earned driver share. New immutable
+    // snapshots expose the exact net earned share after cash deductions and before variance.
+    // Legacy approvals have no snapshot and retain their historical share_split less
+    // cash-deduction calculation. Payout/return debits are settlement, not reduced earnings.
+    const driverShare = range.settledDriverShare + range.legacyDriverShare
     return {
       from,
       to,
       weekStart,
-      companyShareSyp: serializeMoney(minor(company)),
+      companyShareSyp: serializeMoney(minor(totals.company)),
       driverShareSyp: serializeMoney(minor(driverShare)),
-      yalagoShareSyp: serializeMoney(minor(yalago)),
-      otherIncomeSyp: serializeMoney(minor(otherIncome)),
-      expenseSyp: serializeMoney(minor(expense)),
-      expenseLineCount,
+      yalagoShareSyp: serializeMoney(minor(totals.yalago)),
+      otherIncomeSyp: serializeMoney(minor(totals.otherIncome)),
+      // Every cost together, as it has always meant — now including the vehicles.
+      expenseSyp: serializeMoney(minor(totalCost(totals))),
+      /** P2 — the parts of `expenseSyp`, so a screen can show the fleet's running cost on its own. */
+      operatingCostSyp: serializeMoney(minor(totals.operatingCost)),
+      vehicleCostSyp: serializeMoney(minor(totals.vehicleCost)),
+      lossSyp: serializeMoney(minor(totals.loss)),
+      expenseLineCount: totals.costLineCount,
       driverBlockShareSyp: serializeMoney(minor(driverBlock)),
       // DERIVED, never read from `fee_earned`: `orderFee` credits that fund and `shareSplit` debits
       // it in the same batch, so its balance over any period is exactly zero. Deriving it from the
       // three shares instead makes the bridge reconcile by construction — `shareSplit` already
       // refuses to post a split that does not exhaust the fee total.
-      feeTotalSyp: serializeMoney(minor(driverBlock + company + yalago)),
+      feeTotalSyp: serializeMoney(minor(driverBlock + totals.company + totals.yalago)),
       // The whole point of the endpoint, and the one figure the general manager opens it for.
       // Company share is GROSS — expenses never touch `company_revenue` — so it is not profit and
-      // was never presented as any. This is.
-      netProfitSyp: serializeMoney(minor(company + otherIncome - expense)),
+      // was never presented as any. This is: company + other income − (operating + vehicle + loss).
+      // Depreciation is not subtracted (owner decision 2026-09-17); it is shown beside profit.
+      netProfitSyp: serializeMoney(minor(netProfit(totals))),
       // One row per business date that moved, so a day can be read against its neighbours. It is
       // what turns «we lost 13,543 on the 3rd» into «salaries were paid on the 3rd».
       days: [...perDay.entries()]
@@ -299,8 +537,9 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
           businessDate,
           companyShareSyp: serializeMoney(minor(d.company)),
           otherIncomeSyp: serializeMoney(minor(d.otherIncome)),
-          expenseSyp: serializeMoney(minor(d.expense)),
-          netProfitSyp: serializeMoney(minor(d.company + d.otherIncome - d.expense)),
+          expenseSyp: serializeMoney(minor(totalCost(d))),
+          vehicleCostSyp: serializeMoney(minor(d.vehicleCost)),
+          netProfitSyp: serializeMoney(minor(netProfit(d))),
         })),
     }
   })
@@ -317,99 +556,38 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
    * the system admin. The branch manager sees his own box's position on the الترميم card instead.
    */
   app.get('/dashboard/treasury', { config: { permission: 'profit.view_total', subject: () => ({}) } }, async (req) => {
-    const q = z.object({ from: z.string().optional(), to: z.string().optional() }).parse(req.query)
+    // Real calendar dates or a 400 — an impossible date used to reach `weekStartFor` and 500.
+    const q = z.object({ from: realCalendarDate.optional(), to: realCalendarDate.optional() }).parse(req.query)
     const branchId = resolveBranchId(req)
     const today = todayFor(deps)
     const to = q.to ?? today
     // Clamped to go-live, like the profit report. The CAPITAL block below is deliberately NOT
     // clamped: it is a position read as it stands, made true at go-live by the opening ceremony.
+    // A range that ends before go-live clamps past its own end and simply reads no flows.
     const from = clampToGoLive(q.from ?? weekStartFor(to), await goLiveDate(deps))
+    if (from <= to) assertWithinRangeCap(from, to)
 
-    // No port reads a date RANGE — the ledger is addressed by week, because that is the unit BR7
-    // seals. Walking the weeks the range touches keeps this to existing queries; a month is five.
-    const rangeWeekStarts = weekStartsBetween(from, to)
-    const entries: JournalEntryRecord[] = []
-    for (const start of rangeWeekStarts) entries.push(...(await deps.ledger.listByWeek(branchId, start)))
-
-    // New corrections keep the original treasury role on every reversed line. Corrections written
-    // before that guarantee have no role, however, so resolve their `reversal-of-<id>` link back to
-    // the visible original entry. Weeks are loaded lazily and cached; the ordinary path performs no
-    // extra ledger reads, while a legacy row remains explainable without a schema migration.
-    const entriesById = new Map(entries.map((entry) => [entry.id, entry]))
-    const loadedWeekStarts = new Set(rangeWeekStarts)
-    let legacyLookupStarts: string[] | null = null
-    const findEntryById = async (entryId: number): Promise<JournalEntryRecord | null> => {
-      const loaded = entriesById.get(entryId)
-      if (loaded) return loaded
-      legacyLookupStarts ??= [
-        ...new Set([
-          weekStartFor(today),
-          ...(await deps.weekLocks.listClosedStarts(branchId)).sort().reverse(),
-        ]),
-      ]
-      for (const start of legacyLookupStarts) {
-        if (loadedWeekStarts.has(start)) continue
-        loadedWeekStarts.add(start)
-        const batch = await deps.ledger.listByWeek(branchId, start)
-        for (const entry of batch) entriesById.set(entry.id, entry)
-        const found = entriesById.get(entryId)
-        if (found) return found
-      }
-      return null
-    }
-
-    type TreasuryRole = 'kaish' | 'shahn'
-    const treasuryRoleOf = async (
-      entry: JournalEntryRecord,
-      line: JournalEntryRecord['lines'][number],
-      visited = new Set<number>(),
-    ): Promise<TreasuryRole | null> => {
-      if (line.role === 'kaish' || line.role === 'shahn') return line.role
-      if (entry.eventType === 'restoration') return line.side === 'D' ? 'kaish' : 'shahn'
-      if (entry.eventType !== 'correction' || visited.has(entry.id)) return null
-
-      const match = /^reversal-of-(\d+)$/.exec(entry.occurrenceKey)
-      if (!match) return null
-      visited.add(entry.id)
-      const original = await findEntryById(Number(match[1]))
-      const originalLine = original?.lines.find((candidate) => candidate.fundCode === 'company_box')
-      return original && originalLine ? treasuryRoleOf(original, originalLine, visited) : null
-    }
-
-    const perDay = new Map<string, { in: bigint; out: bigint }>()
+    /*
+     * ONE range read (P2) instead of walking the financial weeks the range touches — and, for a
+     * legacy correction, walking every closed week back to find its original.
+     *
+     * The range source classifies each `company_box` line with the domain's `treasuryRoleOf`:
+     * its LINE ROLE first (every current writer stamps `kaish`/`shahn` — the hand «كييش» moved to
+     * `manual` because `restoration_journal_fact_from_entry` refuses a restoration entry without an
+     * immutable `restorations` row, and would have vanished from «دخل الصندوق» had this kept
+     * guessing from the event type), then a legacy `restoration` by side, then a legacy
+     * `correction` through its `reversal-of-<id>` link to the original. A correction stays in its
+     * original's column with the opposite sign; a correction of an unrelated manual company-box
+     * entry is not a restoration flow at all.
+     */
+    const range = from <= to ? await deps.ledgerRange.readRange(branchId, from, to) : null
     let profit = 0n
-    for (const e of entries) {
-      if (e.businessDate < from || e.businessDate > to) continue
-      for (const l of e.lines) {
-        if (l.fundCode === 'company_revenue') profit += l.side === 'C' ? l.amount : -l.amount
-        /*
-         * A treasury flow is identified by its LINE ROLE first, and by event type only as a
-         * fallback for legacy rows that predate roles.
-         *
-         * This used to gate on event type alone, which was fine only while a hand «كييش» borrowed
-         * `restoration`. It cannot: `restoration_journal_fact_from_entry` refuses any restoration
-         * entry without an immutable `restorations` row, so the hand route 500'd in production on
-         * every press. Moving it to `manual` fixes that — and would have made every hand sweep
-         * vanish from «دخل الصندوق» if this line had kept guessing from the type.
-         */
-        const carriesTreasuryRole = l.role === 'kaish' || l.role === 'shahn'
-        const isTreasuryEntry =
-          carriesTreasuryRole || e.eventType === 'restoration' || e.eventType === 'correction'
-        if (!isTreasuryEntry || l.fundCode !== 'company_box') continue
-        const role = await treasuryRoleOf(e, l)
-        // A correction of an unrelated manual company-box entry is not a restoration flow.
-        if (role === null) continue
-        const day = perDay.get(e.businessDate) ?? { in: 0n, out: 0n }
-        // D company_box is money ARRIVING in صندوق الشركة — «كييش». C is «شحن من الصندوق».
-        // Keep corrections in the same column as their original movement, with the opposite sign.
-        // Otherwise reversing kaish would be misreported as new shahn (and vice versa).
-        if (role === 'kaish') day.in += l.side === 'D' ? l.amount : -l.amount
-        else day.out += l.side === 'C' ? l.amount : -l.amount
-        perDay.set(e.businessDate, day)
-      }
+    for (const line of range?.lines ?? []) {
+      if (line.fundCode === 'company_revenue') profit += line.side === 'C' ? line.amount : -line.amount
     }
-    const fundIn = [...perDay.values()].reduce((a, d) => a + d.in, 0n)
-    const fundOut = [...perDay.values()].reduce((a, d) => a + d.out, 0n)
+    const treasuryDays = range?.treasuryDays ?? []
+    const fundIn = treasuryDays.reduce((a, d) => a + d.kaish, 0n)
+    const fundOut = treasuryDays.reduce((a, d) => a + d.shahn, 0n)
 
     // Working capital is a POSITION, read as it stands now rather than a flow over the range.
     // Restoration still settles only the office boxes plus receivables; active custody is exposed
@@ -512,14 +690,13 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
       fundIn: serializeMoney(minor(fundIn)),
       fundOut: serializeMoney(minor(fundOut)),
       fundNet: serializeMoney(minor(fundIn - fundOut)),
-      days: [...perDay.entries()]
-        .sort(([a], [b]) => (a < b ? -1 : 1))
-        .map(([businessDate, d]) => ({
-          businessDate,
-          in: serializeMoney(minor(d.in)),
-          out: serializeMoney(minor(d.out)),
-          net: serializeMoney(minor(d.in - d.out)),
-        })),
+      // D company_box is money ARRIVING in صندوق الشركة — «كييش» (`in`). C is «شحن من الصندوق» (`out`).
+      days: treasuryDays.map((d) => ({
+        businessDate: d.businessDate,
+        in: serializeMoney(d.kaish),
+        out: serializeMoney(d.shahn),
+        net: serializeMoney(minor(d.kaish - d.shahn)),
+      })),
     }
   })
 }
@@ -527,81 +704,52 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
 const realCalendarDate = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, 'expected YYYY-MM-DD')
-  .refine((value) => {
-    const [year, month, day] = value.split('-').map(Number) as [number, number, number]
-    const parsed = new Date(Date.UTC(year, month - 1, day))
-    return (
-      parsed.getUTCFullYear() === year &&
-      parsed.getUTCMonth() === month - 1 &&
-      parsed.getUTCDate() === day
-    )
-  }, 'expected a real calendar date')
+  // The domain's own parser: 2026-02-31 is refused here exactly as everywhere else.
+  .refine((value) => isCalendarDate(value), 'expected a real calendar date')
 
-/** Every financial-week start the inclusive range [from, to] touches, in order. */
 /**
- * Is this fund a real operating cost — something that reduces profit?
- *
- * AN ALLOWLIST, AND IT HAS TO BE. The obvious implementation is
- * `fundCode.startsWith('cost_center:')`, and it is wrong in a way that is invisible until someone
- * checks the arithmetic against the books. `fundRefFromCode` turns any code it does not recognise
- * into `cost_center:<code>` — the "look-alike account" its own comments warn about — so the
- * `cost_center:` prefix also carries the OWNER'S CAPITAL:
- *
- *     cost_center:branch:<id>        35,695.00   a real expense
- *     cost_center:general:<id>        1,293.81   a real expense
- *     cost_center:owner_funding     -63,980.00   the owner putting capital IN
- *     cost_center:owner_drawings      9,904.00   the owner taking capital OUT
- *     cost_center:opening_balance     9,464.00   an opening balance
- *
- * Measured on production: the two real ones total 36,988.81, which is exactly what the `expenses`
- * table holds. The blanket prefix returns 7,778.39 — understating cost by 79% and inflating profit
- * by the same amount. Capital movements are not costs and must never reach a profit figure.
- *
- * The allowlist is wider than the `expenses` table on purpose, and that is the reason for reading
- * the ledger instead of that table: a receivable write-off, an unexplained wallet adjustment and a
- * force-close gap are all real money gone with no expense row behind them.
+ * P2 — the widest range a range-based report answers: `LEDGER_RANGE_MAX_DAYS` (3653 days, ten
+ * years and change) inclusive. It replaces the 520-financial-week walk, whose limit existed only
+ * because each week was a separate ledger read. Wider is a 400, never a silently partial total.
  */
-function isOperatingCost(fundCode: string): boolean {
-  if (!fundCode.startsWith('cost_center:')) return false
-  const centre = fundCode.slice('cost_center:'.length)
-  return (
-    // The three `cost_center_kind` values an expense can carry.
-    centre.startsWith('vehicle:') ||
-    centre.startsWith('branch:') ||
-    centre.startsWith('general:') ||
-    // Real losses that never write an `expenses` row.
-    centre === RECEIVABLE_WRITEOFF_LOSS_COST_CENTER ||
-    centre.startsWith('wallet_adjustment:') ||
-    centre.startsWith('cash_count_variance:')
-  )
-}
-
-function weekStartsBetween(from: string, to: string): string[] {
-  const starts: string[] = []
-  let cursor = weekStartFor(from)
-  const last = weekStartFor(to)
-  while (cursor <= last) {
-    // Never return a plausible-looking partial total. A ten-year reporting window is already far
-    // beyond the operational use case and means 520 weekly ledger reads with the current port; a
-    // wider request must be narrowed (or served by a future range-query adapter) explicitly.
-    if (starts.length >= 520) {
-      throw new z.ZodError([{
-        code: 'custom',
-        path: ['from', 'to'],
-        message: 'profit range cannot exceed 520 financial weeks',
-      }])
-    }
-    starts.push(cursor)
-    cursor = addDays(cursor, 7)
+function assertWithinRangeCap(from: CalendarDate, to: CalendarDate): void {
+  if (daysBetween(from, to) + 1 > LEDGER_RANGE_MAX_DAYS) {
+    throw new z.ZodError([{
+      code: 'custom',
+      path: ['from', 'to'],
+      message: `range cannot exceed ${LEDGER_RANGE_MAX_DAYS} days`,
+    }])
   }
-  return starts
 }
 
-function addDays(date: string, days: number): string {
-  const [y, m, d] = date.split('-').map(Number) as [number, number, number]
-  const next = new Date(Date.UTC(y, m - 1, d + days))
-  const pad = (n: number): string => String(n).padStart(2, '0')
-  return `${next.getUTCFullYear()}-${pad(next.getUTCMonth() + 1)}-${pad(next.getUTCDate())}`
+/** The population the completed-shifts screen lists: a close that was actually settled. */
+const COMPLETED_SHIFT_STATES = new Set<string>(['approved', 'week_locked'])
+
+/** Per-driver / per-vehicle / whole-range counters of `/dashboard/shifts-summary`. */
+interface ShiftTally {
+  shifts: number
+  doubles: number
+  shortCount: number
+  shortMinutes: number
+  workedMinutes: number
+  orders: number
+  fees: bigint
+  companyShare: bigint
+  km: number
+}
+
+function emptyShiftTally(): ShiftTally {
+  return {
+    shifts: 0,
+    doubles: 0,
+    shortCount: 0,
+    shortMinutes: 0,
+    workedMinutes: 0,
+    orders: 0,
+    fees: 0n,
+    companyShare: 0n,
+    km: 0,
+  }
 }
 
 function hasCompleteEndPackage(shift: ShiftRecord): boolean {

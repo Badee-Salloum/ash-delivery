@@ -106,10 +106,19 @@ branch managers never see purchase prices/instalments/book values; company debts
 - [x] Local PostgreSQL + baseline; stale db fixtures fixed (commit `b0c469f`).
 - [x] **P0** company-fund permission gap — committed (`fix(treasury): only company-fund managers move company money`). Migration 0064 NOT applied to production.
 - [x] **P1** schedule & targets — committed (`feat(shifts): the owner's schedule …`). 212 prod shifts measured: 7 change pattern.
-- [ ] **P2** router params + time filter + range read model + profit fix
+- [x] **P2** router params + time filter + range read model + profit fix — committed
+      (`feat(dashboard): any period, one read …`). Production has NO vehicle cost-centre expenses yet, so the
+      profit fix restates nothing.
 - [ ] **P3** dashboard redesign + drill-down
-- [ ] **C1** HQ ledger + currency foundation (can run in parallel with P1–P3; no UI-lane migrations)
-- [ ] **C2** company transactions + FX exchange + restoration mirror + cutover
+- [x] **C1** HQ ledger + currency foundation — DONE on branch `worktree-agent-ae074aa887cf11d96`
+      (worktree `.claude/worktrees/agent-ae074aa887cf11d96`), 8 commits ending `4d47ffc`: 0065 enum-only, 0066
+      foundation (HQ row `10000000-0000-4000-8000-000000000100`, `branches.kind`, per-currency balance trigger,
+      ledger partition + pocket guards), `money/currency.ts`, strict fund codes, HQ refusal in rbac, HQ week close
+      per currency. NOT YET MERGED into `feat/finance-redesign` (merge after P2 is committed; expect conflicts in
+      ports.ts, memory adapter, conformance, repos.ts, dashboard routes/tests, i18n; C1 made
+      `LedgerRepo.post` meta `sypMinorPerUsd` REQUIRED — new callers must pass `null`).
+- [ ] **C2** company transactions + FX exchange + restoration mirror + cutover — IN PROGRESS on the same worktree
+      branch, on top of `4d47ffc`.
 - [ ] **C3** debts register
 - [ ] **C4** fixed assets
 - [ ] **C5** depreciation

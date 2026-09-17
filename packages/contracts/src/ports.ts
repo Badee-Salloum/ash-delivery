@@ -883,6 +883,13 @@ export interface ShiftRepo {
    * the unique constraint means, and reusing it would collide all over again.
    */
   nextShiftNo(driverId: string, businessDate: CalendarDate): Promise<number>
+  /**
+   * P2 — every shift of the branch with `business_date` in the inclusive range, EVERY state,
+   * reduced to its timing and odometer. What the shifts summary judges patterns from: loading
+   * whole `ShiftRecord`s (tranches, media) for a year of shifts would be most of the cost.
+   * Ordered by business date, then shift number, then id.
+   */
+  listTimingBetween(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftTimingRecord[]>
 }
 
 /**
@@ -1222,6 +1229,92 @@ export interface TreasuryPositionRecord {
 /** Cross-table read model: funds/journal lines and financially-open shifts in one snapshot. */
 export interface TreasuryPositionSource {
   readCurrent(branchId: string): Promise<TreasuryPositionRecord>
+}
+
+// ── P2: the range read model behind the time filter ───────────────────────────────────────
+//
+// `/dashboard/profit` and `/dashboard/treasury` used to walk the ledger one financial week at a
+// time (up to 520 reads for a ten-year window) and total the lines in the route. This port
+// answers the same question with ONE aggregate between two business dates. The route still owns
+// the go-live clamp and the profit classification (`classifyProfitLine`); the source owns only
+// what needs the database: the grouped lines, the driver share, and the company-fund flows.
+
+/** The widest range the source is ever asked for — ten years and change. A route answers 400 above it. */
+export const LEDGER_RANGE_MAX_DAYS = 3653
+
+/**
+ * One aggregated group of journal lines. Only the funds `isRangeReportLine` keeps are present,
+ * in `compareLedgerRangeLines` order, so both adapters return identical arrays.
+ */
+export interface LedgerRangeLine {
+  businessDate: CalendarDate
+  eventType: Posting['eventType']
+  fundCode: string
+  role: string | null
+  side: 'D' | 'C'
+  /**
+   * `funds.currency` — every branch fund is `SYP_NEW` today. Carried as a grouping dimension so a
+   * multi-currency ledger (the HQ company fund, C1/C6) can reuse this shape without a second
+   * aggregate; frozen FX rates belong to that ledger's own entries, not to this read.
+   */
+  currency: string
+  /** Σ amount of the group, positive, minor units. */
+  amount: Minor
+  /** How many journal lines the group summarises. */
+  lineCount: number
+}
+
+/** «كييش» (`kaish`) and «شحن من الصندوق» (`shahn`) per business date, signed as the treasury sheet shows them. */
+export interface LedgerRangeTreasuryDay {
+  businessDate: CalendarDate
+  kaish: Minor
+  shahn: Minor
+}
+
+export interface LedgerRangeRecord {
+  from: CalendarDate
+  to: CalendarDate
+  lines: LedgerRangeLine[]
+  /**
+   * Σ `shift_settlements.base_driver_share` over every shift with ANY journal entry in the range —
+   * the net earned share after cash deductions, before the closing variance. Exactly the set the
+   * week-walking profit route summed.
+   */
+  settledDriverShare: Minor
+  /**
+   * The legacy fallback, as `/dashboard/profit` always read it: shift-less legacy share lines plus,
+   * for each touched shift WITHOUT a settlement, its in-range `share_split`/deduction lines.
+   */
+  legacyDriverShare: Minor
+  /** Company-fund flows classified by `treasuryRoleOf`, oldest first; a day appears once it has one. */
+  treasuryDays: LedgerRangeTreasuryDay[]
+}
+
+export interface LedgerRangeSource {
+  /** Inclusive business-date range, `from <= to`, at most `LEDGER_RANGE_MAX_DAYS` days. */
+  readRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<LedgerRangeRecord>
+  /** The earliest `business_date` any journal entry of the branch carries, or null for an empty ledger. */
+  firstActivityDate(branchId: string): Promise<CalendarDate | null>
+}
+
+/**
+ * Just enough of a shift to judge WHEN it ran and on what — no tranches, no media, no money.
+ *
+ * `windowOpensAt` already applies the fallback the rest of the system uses (the manager's open
+ * approval for a shift opened before `window_opens_at` existed).
+ */
+export interface ShiftTimingRecord {
+  id: string
+  branchId: string
+  driverId: string
+  vehicleId: string
+  shiftNo: number
+  businessDate: CalendarDate
+  state: ShiftState
+  windowOpensAt: string | null
+  submittedAt: string | null
+  odoStart: number | null
+  odoEnd: number | null
 }
 
 // ── «رأس مال المكتب» and «الترميم» (owner decision 10) ────────────────────────────────────
@@ -2635,6 +2728,8 @@ export interface Deps {
   ledger: LedgerRepo
   /** Atomic statement-snapshot behind the working-capital dashboard. */
   treasuryPosition: TreasuryPositionSource
+  /** P2 — one aggregate over a business-date range, behind the time filter. */
+  ledgerRange: LedgerRangeSource
   expenses: ExpenseRepo
   incomes: IncomeRepo
   advances: AdvanceRepo

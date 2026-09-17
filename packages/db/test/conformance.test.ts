@@ -9,6 +9,7 @@ import { PgShiftSettlementRepo } from '../src/repos-settlement.ts'
 import { PgCloseDraftRepo } from '../src/repos-close-draft.ts'
 import { PgFinancialUnitOfWork } from '../src/repos-financial.ts'
 import { PgReceivableEventRepo } from '../src/repos-receivable.ts'
+import { PgLedgerRangeSource } from '../src/repos-range.ts'
 import { assertDisposableDatabaseConnection, assertDisposableDatabaseUrl } from './disposable-database.ts'
 import {
   PgAuditRepo,
@@ -210,6 +211,7 @@ if (!DATABASE_URL) {
         movements: new PgWalletMovementRepo(pool),
         ledger: new PgLedgerRepo(pool),
         treasuryPosition: new PgTreasuryPositionSource(pool),
+        ledgerRange: new PgLedgerRangeSource(pool),
         expenses: new PgExpenseRepo(pool),
         incomes: new PgIncomeRepo(pool),
     advances: new PgAdvanceRepo(pool),
