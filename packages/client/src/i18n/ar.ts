@@ -8,6 +8,12 @@
 export const ar = {
   app: { title: 'ASH Delivery', tagline: 'منصة التوصيل والإدارة المالية', updateAvailable: 'يتوفر إصدار جديد', updateNow: 'تحديث' },
 
+  /** The mark shown beside an amount whose currency is known (`Money currency=…`). Keys are the ledger literals. */
+  currency: {
+    SYP_NEW: 'ل.س',
+    USD: '$',
+  },
+
   roles: {
     general_manager: 'المدير العام',
     system_admin: 'مدير النظام',
@@ -149,6 +155,8 @@ export const ar = {
     company_fund_not_manual:
       'لا يُحرَّك صندوق الشركة بقيد يدوي — استخدم إيداع صندوق الشركة أو سحبه (المدير العام ومدير النظام فقط)',
     company_fund_forbidden: 'تحريك صندوق الشركة للمدير العام ومدير النظام فقط',
+    invalid_fund_code: 'اسم الحساب في أحد الأسطر غير صحيح — اختر الحساب من القائمة',
+    company_branch_not_addressable: 'صندوق الشركة ليس فرعاً — لا يُفتح من شاشات الفرع',
     duplicate_driver_code: 'رمز السائق مستخدم مسبقاً',
     duplicate_vehicle_code: 'رقم الآلية مستخدم مسبقاً',
     duplicate_category_code: 'رمز التصنيف مستخدم مسبقاً',
