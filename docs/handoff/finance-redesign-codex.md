@@ -109,7 +109,10 @@ branch managers never see purchase prices/instalments/book values; company debts
 - [x] **P2** router params + time filter + range read model + profit fix — committed
       (`feat(dashboard): any period, one read …`). Production has NO vehicle cost-centre expenses yet, so the
       profit fix restates nothing.
-- [ ] **P3** dashboard redesign + drill-down
+- [ ] **P3** dashboard redesign + drill-down — IN PROGRESS in an agent worktree based on `a1ba9e4`
+      (sections under `screens/dashboard/`, `TrendBars`, `GET /dashboard/fleet-performance`, domain `fleet/odometer.ts`;
+      tests on local DB `ash_test_ui`). If this line is still unchecked when you pick this up, check
+      `git branch --list "worktree-agent-*"` for its commits before starting over.
 - [x] **C1** HQ ledger + currency foundation — DONE on branch `worktree-agent-ae074aa887cf11d96`
       (worktree `.claude/worktrees/agent-ae074aa887cf11d96`), 8 commits ending `4d47ffc`: 0065 enum-only, 0066
       foundation (HQ row `10000000-0000-4000-8000-000000000100`, `branches.kind`, per-currency balance trigger,
