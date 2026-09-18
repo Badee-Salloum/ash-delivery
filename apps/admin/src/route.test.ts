@@ -65,6 +65,22 @@ describe('parseHash — filter params', () => {
     expect(parseHash('#liveShifts?state=suspended&over=1').params).toEqual({ state: 'suspended', over: true })
     expect(parseHash('#expenses?tab=due').params).toEqual({ tab: 'due' })
     expect(parseHash(`#fleet?id=${UUID}`).params).toEqual({ id: UUID })
+    expect(
+      parseHash(
+        `#treasuryMovements?range=this_month&eventType=restoration&channel=wallet&flow=out&actor=${UUID}&q=${encodeURIComponent('ترميم الفرع')}`,
+      ),
+    ).toEqual({
+      section: 'treasuryMovements',
+      openShift: null,
+      params: {
+        range: 'this_month',
+        eventType: 'restoration',
+        channel: 'wallet',
+        flow: 'out',
+        actor: UUID,
+        q: 'ترميم الفرع',
+      },
+    })
   })
 
   it('drops unknown keys and invalid values, keeping the rest', () => {
@@ -73,6 +89,9 @@ describe('parseHash — filter params', () => {
     )
     expect(view).toEqual({ section: 'completedShifts', openShift: null, params: {} })
     expect(parseHash('#completedShifts?driver=ok-1&pattern=night').params).toEqual({ driver: 'ok-1' })
+    expect(
+      parseHash('#treasuryMovements?eventType=nope&channel=bank&flow=sideways&actor=bad%20id&q=%20%20').params,
+    ).toEqual({})
   })
 
   it('validates dates with the domain parser and keeps ranges coherent', () => {
@@ -120,6 +139,7 @@ describe('formatHash — one spelling per view', () => {
       { section: 'liveShifts', openShift: null, params: { state: 'open', driver: UUID, over: true } },
       { section: 'expenses', openShift: null, params: { tab: 'due' } },
       { section: 'treasury', openShift: null, params: {} },
+      { section: 'treasuryMovements', openShift: null, params: { range: 'this_month', eventType: 'manual', channel: 'cash', flow: 'in', actor: UUID, q: 'opening' } },
     ] as const
     for (const view of views) {
       expect(parseHash(`#${formatHash(view)}`)).toEqual(view)

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BRANCH, COMPANY_BRANCH, type Harness, makeHarness, sypStr } from './harness.ts'
+import { BRANCH, COMPANY_BRANCH, type Harness, VEHICLE_TYPE, makeHarness, sypStr } from './harness.ts'
 
 let h: Harness
 let gm: string
@@ -75,6 +75,43 @@ describe('company ledger commands', () => {
 })
 
 describe('company debts, assets, and depreciation', () => {
+  it('lets a general manager create a branch vehicle, then link it to a separately confirmed asset purchase', async () => {
+    const batteriesBefore = await h.deps.directory.listBatteries(BRANCH)
+    const vehicle = await post('/vehicles', {
+      branchId: BRANCH,
+      vehicleTypeId: VEHICLE_TYPE,
+      groundNo: 'YARD-3',
+      plateNo: 'DAM-1003',
+    })
+    expect(vehicle.statusCode, vehicle.body).toBe(201)
+    expect(vehicle.json()).toMatchObject({ branchId: BRANCH, groundNo: 'YARD-3', state: 'ready' })
+
+    const vehicleId = vehicle.json().id as string
+    expect(await h.deps.companyFinance.getAssetByVehicle(vehicleId)).toBeNull()
+    expect(await h.deps.directory.listBatteries(BRANCH)).toEqual(batteriesBefore)
+    expect(await h.deps.audit.list({ tableName: 'vehicles', recordId: vehicleId })).toHaveLength(1)
+
+    const assetBody = {
+      idempotencyKey: crypto.randomUUID(),
+      kind: 'vehicle',
+      vehicleId,
+      name: 'YARD-3',
+      currency: 'SYP_NEW',
+      price: sypStr(5_000),
+      purchasedOn: '2026-07-21',
+      paidNow: sypStr(5_000),
+      paidFrom: 'owner_outside',
+      description: 'New branch vehicle',
+    }
+    const manager = await h.loginAs('manager')
+    expect((await post('/company/assets', assetBody, manager)).statusCode).toBe(403)
+
+    const asset = await post('/company/assets', assetBody)
+    expect(asset.statusCode, asset.body).toBe(201)
+    expect(asset.json().asset).toMatchObject({ kind: 'vehicle', vehicleId, name: 'YARD-3' })
+    expect(await h.deps.companyFinance.getAssetByVehicle(vehicleId)).not.toBeNull()
+  })
+
   it('opens a payable and records payments without allowing overpayment', async () => {
     await post('/company/deposits', {
       idempotencyKey: crypto.randomUUID(), currency: 'SYP_NEW', amount: sypStr(5_000), reason: 'seed',

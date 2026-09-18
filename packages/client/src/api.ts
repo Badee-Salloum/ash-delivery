@@ -15,6 +15,46 @@ export interface ApiError {
   detail?: unknown
 }
 
+export type TreasuryMovementChannel = 'cash' | 'wallet'
+export type TreasuryMovementFlow = 'in' | 'out' | 'internal'
+
+export interface TreasuryMovementFilter {
+  from?: string
+  to?: string
+  eventType?: string
+  channel?: TreasuryMovementChannel
+  flow?: TreasuryMovementFlow
+  actorId?: string
+  q?: string
+  beforeId?: number
+  limit?: number
+}
+
+export interface TreasuryMovementRow {
+  id: number
+  createdAt: string
+  businessDate: string
+  eventType: string
+  reason: string | null
+  shiftId: string | null
+  actorId: string | null
+  actorName: string | null
+  cash: string
+  wallet: string
+  flow: TreasuryMovementFlow
+}
+
+export interface TreasuryMovementResponse {
+  from: string
+  to: string
+  rows: TreasuryMovementRow[]
+  nextCursor: number | null
+  facets: {
+    eventTypes: string[]
+    actors: Array<{ id: string; name: string }>
+  }
+}
+
 /** Server-derived position of one provider operation relative to the shift's canonical window. */
 export type OperationWindowStatus = import('@ash/contracts').OperationWindowStatus
 
@@ -1209,19 +1249,23 @@ export class ApiClient {
    * «تسكير نوبة عمران» transfers — one button pressed four times in two seconds — sat in the ledger
    * unseen until the boxes disagreed with a hand count.
    */
-  treasuryMovements(limit = 50) {
-    return this.get<{
-      rows: Array<{
-        id: number
-        businessDate: string
-        eventType: string
-        reason: string | null
-        shiftId: string | null
-        actorName: string | null
-        cash: string
-        wallet: string
-      }>
-    }>(`/treasury/movements?limit=${limit}`)
+  treasuryMovements(
+    filter: TreasuryMovementFilter | number = {},
+    options: { cache?: RequestCache; signal?: AbortSignal } = {},
+  ) {
+    const normalized: TreasuryMovementFilter = typeof filter === 'number' ? { limit: filter } : filter
+    const q = new URLSearchParams()
+    if (normalized.from) q.set('from', normalized.from)
+    if (normalized.to) q.set('to', normalized.to)
+    if (normalized.eventType) q.set('eventType', normalized.eventType)
+    if (normalized.channel) q.set('channel', normalized.channel)
+    if (normalized.flow) q.set('flow', normalized.flow)
+    if (normalized.actorId) q.set('actorId', normalized.actorId)
+    if (normalized.q) q.set('q', normalized.q)
+    if (normalized.beforeId !== undefined) q.set('beforeId', String(normalized.beforeId))
+    if (normalized.limit !== undefined) q.set('limit', String(normalized.limit))
+    const query = q.toString()
+    return this.get<TreasuryMovementResponse>(`/treasury/movements${query ? `?${query}` : ''}`, options)
   }
 
   /**
@@ -1308,7 +1352,17 @@ export class ApiClient {
     )
   }
   createVehicle(body: { vehicleTypeId: string; machineNo?: number; plateNo?: string | null; groundNo?: string | null }) {
-    return this.post<{ id: string; code: string; machineNo: number }>('/vehicles', {
+    return this.post<{
+      id: string
+      branchId: string
+      vehicleTypeId: string
+      code: string
+      machineNo: number
+      plateNo: string | null
+      groundNo: string | null
+      state: string
+      active: boolean
+    }>('/vehicles', {
       ...body,
       ...(this.branchId ? { branchId: this.branchId } : {}),
     })

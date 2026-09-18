@@ -28,6 +28,14 @@ export function formatDateTime(iso: string, lang: 'ar' | 'en'): string {
   return damascusParts(d).stamp
 }
 
+/** Audit-grade Damascus timestamp; seconds distinguish rapid consecutive money movements. */
+export function formatDateTimeSeconds(iso: string, lang: 'ar' | 'en'): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  void lang
+  return damascusParts(d).stampSeconds
+}
+
 /**
  * The branch's wall clock, from an instant.
  *
@@ -45,6 +53,7 @@ export function damascusParts(value: Date): {
   readonly date: string
   readonly time: string
   readonly stamp: string
+  readonly stampSeconds: string
   /** 0 = Sunday. For naming the day, which is how a manager actually recalls a shift. */
   readonly weekday: number
 } {
@@ -55,6 +64,7 @@ export function damascusParts(value: Date): {
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
+    second: '2-digit',
     hour12: false,
     weekday: 'short',
   }).formatToParts(value)
@@ -64,7 +74,13 @@ export function damascusParts(value: Date): {
   const date = `${get('year')}-${get('month')}-${get('day')}`
   const time = `${hour}:${get('minute')}`
   const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-  return { date, time, stamp: `${date} ${time}`, weekday: Math.max(0, WEEKDAYS.indexOf(get('weekday'))) }
+  return {
+    date,
+    time,
+    stamp: `${date} ${time}`,
+    stampSeconds: `${date} ${time}:${get('second')}`,
+    weekday: Math.max(0, WEEKDAYS.indexOf(get('weekday'))),
+  }
 }
 
 /**

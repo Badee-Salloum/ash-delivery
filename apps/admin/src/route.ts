@@ -1,4 +1,11 @@
-import { type CalendarDate, type RangePreset, isCalendarDate, isRangePreset } from '@ash/domain'
+import {
+  LEDGER_EVENTS,
+  type CalendarDate,
+  type LedgerEvent,
+  type RangePreset,
+  isCalendarDate,
+  isRangePreset,
+} from '@ash/domain'
 
 /**
  * The console's URL-hash router, pure (P2).
@@ -30,6 +37,7 @@ export const SECTIONS = [
   'vehicle',
   'fleetConfig',
   'treasury',
+  'treasuryMovements',
   'companyFund',
   'expenses',
   'checkin',
@@ -47,12 +55,19 @@ export function isSection(value: string): value is Section {
 
 export type PatternParam = 'day' | 'evening' | 'full'
 export type LiveStateParam = 'open' | 'suspended'
+export type TreasuryChannelParam = 'cash' | 'wallet'
+export type TreasuryFlowParam = 'in' | 'out' | 'internal'
 
 /** The filters a view may carry. Every field optional; absence means «no filter». */
 export interface RouteParams {
   readonly range?: RangePreset
   readonly from?: CalendarDate
   readonly to?: CalendarDate
+  readonly eventType?: LedgerEvent
+  readonly channel?: TreasuryChannelParam
+  readonly flow?: TreasuryFlowParam
+  readonly actor?: string
+  readonly q?: string
   readonly driver?: string
   readonly vehicle?: string
   readonly pattern?: PatternParam
@@ -76,6 +91,11 @@ export const PARAM_KEYS = [
   'range',
   'from',
   'to',
+  'eventType',
+  'channel',
+  'flow',
+  'actor',
+  'q',
   'driver',
   'vehicle',
   'pattern',
@@ -96,6 +116,8 @@ const SHIFT_ID = /^[A-Za-z0-9._:-]{1,128}$/
 
 const PATTERNS: readonly PatternParam[] = ['day', 'evening', 'full']
 const LIVE_STATES: readonly LiveStateParam[] = ['open', 'suspended']
+const TREASURY_CHANNELS: readonly TreasuryChannelParam[] = ['cash', 'wallet']
+const TREASURY_FLOWS: readonly TreasuryFlowParam[] = ['in', 'out', 'internal']
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] }
 
@@ -139,6 +161,23 @@ export function sanitizeParams(input: Readonly<Record<string, unknown>>): RouteP
     out.from = validFrom
     out.to = validTo
   }
+
+  const eventType = text('eventType')
+  if (eventType !== null && (LEDGER_EVENTS as readonly string[]).includes(eventType)) {
+    out.eventType = eventType as LedgerEvent
+  }
+  const channel = text('channel')
+  if (channel !== null && (TREASURY_CHANNELS as readonly string[]).includes(channel)) {
+    out.channel = channel as TreasuryChannelParam
+  }
+  const flow = text('flow')
+  if (flow !== null && (TREASURY_FLOWS as readonly string[]).includes(flow)) {
+    out.flow = flow as TreasuryFlowParam
+  }
+  const actor = text('actor')
+  if (actor !== null && ID.test(actor)) out.actor = actor
+  const query = text('q')?.trim()
+  if (query && query.length <= 200) out.q = query
 
   const driver = text('driver')
   if (driver !== null && ID.test(driver)) out.driver = driver

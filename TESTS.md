@@ -7,6 +7,31 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 
 **Legend:** ✅ implemented and green · ⚠ written but never executed · 🔜 planned, milestone named.
 
+## 2026-09-18 vehicle creation from fixed assets
+
+| Gate | Named test | Result |
+| --- | --- | --- |
+| The add-vehicle control exists only for vehicle assets and lazily loads active types plus the server number preview | `admin/company-assets-vehicle.test.ts` | ✅ |
+| Creating from Assets sends the selected branch and exposes the returned ground number to the picker | `client/api.test.ts` › “creates a vehicle in the selected branch…” | ✅ |
+| The new vehicle is selected immediately while asset purchase remains a separate command and no battery call exists | `admin/company-assets-vehicle.test.ts` | ✅ |
+| Branch changes clear stale vehicle state and reload the branch-scoped vehicle list | `admin/company-assets-vehicle.test.ts` | ✅ |
+| GM vehicle→asset linking succeeds; branch-manager asset access is refused; vehicle audit exists; no battery or premature asset is created | `api/company-finance.test.ts` › “lets a general manager create a branch vehicle…” | ✅ |
+| Arabic and English creation, success and batteries-later guidance stay in parity | `admin/company-assets-vehicle.test.ts`, `check:i18n` | ✅ |
+| Full repository gate | `pnpm check`: every static check plus 3,205 passed tests; 19 expected PostgreSQL-only skips | ✅ |
+
+## 2026-09-18 standalone treasury movements
+
+| Gate | Named test | Result |
+| --- | --- | --- |
+| API dates and individual/combined event, channel, direction, actor and Arabic reason filters return signed effects and the real `created_at` | `api/office-transfer.test.ts` — *filters the independent register…* | ✅ |
+| Permission and branch isolation hold; a business day remains separate from an after-midnight registration instant | `api/office-transfer.test.ts` | ✅ |
+| Cursor pages are stable and non-overlapping; response facets include branch/range event types and performers | `api/office-transfer.test.ts` | ✅ |
+| PostgreSQL performs filtering directly, retains exact timestamps and isolates branches | `db/treasury-movements-postgres.test.ts` | ✅ PostgreSQL 17.6 |
+| Route parameters validate and round-trip all movement filters | `admin/route.test.ts` | ✅ |
+| Separate navigation, Treasury link, old-table removal, this-month default, page-specific persistence, reset, branch actor clearing and load-more remain wired | `admin/treasury-movements-screen.test.ts` | ✅ |
+| Damascus formatting includes seconds and the client serializes every query field with cancellation | `client/damascus-time.test.ts`, `client/api.test.ts` | ✅ |
+| Full repository gate | `pnpm check`: every static check plus 3,198 passed tests; 19 expected PostgreSQL-only skips | ✅ |
+
 ## 2026-09-18 driver self-registration
 
 | Gate | Named test | Result |

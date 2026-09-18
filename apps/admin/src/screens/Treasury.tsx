@@ -91,8 +91,6 @@ export function Treasury(): ReactNode {
 
   // ── «الترميم» ─────────────────────────────────────────────────────────────────────────────
   const [restoration, setRestoration] = useState<RestorationView | null>(null)
-  const [movements, setMovements] = useState<Awaited<ReturnType<typeof api.treasuryMovements>>['rows'] | null>(null)
-  const [movementsError, setMovementsError] = useState<string | null>(null)
   const [restorationError, setRestorationError] = useState<string | null>(null)
   const [capitalTargetsDraft, setCapitalTargetsDraft] = useState({ cash: '', wallet: '' })
   const [capitalTargetReason, setCapitalTargetReason] = useState('')
@@ -196,28 +194,6 @@ export function Treasury(): ReactNode {
       })
   }, [api, branchId])
 
-  /**
-   * What the two office boxes did lately. Read-only; the decisions live where the money moves.
-   *
-   * `branchId` is in the dependency list, not just `api`. An organisation-wide role has no branch
-   * of its own and the picker supplies one a moment after mount — so a loader that runs once on
-   * `[api]` fires before the branch exists, gets `422 branch_required`, and never tries again.
-   *
-   * And the error is SHOWN, never swallowed. The first draft of this card caught everything into an
-   * empty array, so a refused request and a genuinely quiet day looked identical: it said
-   * «لا حركات» while four duplicate transfers sat behind it. That is the same fault as an audit
-   * screen nobody can search — a failure that reports itself as an absence.
-   */
-  const loadMovements = useCallback(async (): Promise<void> => {
-    setMovementsError(null)
-    try {
-      setMovements((await api.treasuryMovements(50)).rows)
-    } catch (err) {
-      setMovements(null)
-      setMovementsError((err as { error?: string }).error ?? 'error')
-    }
-  }, [api, branchId])
-
   const loadRestoration = useCallback(async (): Promise<void> => {
     const version = ++restorationLoadVersion.current
     setRestoration(null)
@@ -295,9 +271,6 @@ export function Treasury(): ReactNode {
   useEffect(() => {
     void loadRestoration()
   }, [loadRestoration])
-  useEffect(() => {
-    void loadMovements()
-  }, [loadMovements, branchId])
   useEffect(() => {
     void loadReceivables()
   }, [loadReceivables])
@@ -1045,7 +1018,18 @@ export function Treasury(): ReactNode {
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-      <Card title={t.treasury.branchTreasury} className="lg:col-span-2">
+      <Card
+        title={t.treasury.branchTreasury}
+        className="lg:col-span-2"
+        actions={
+          <a
+            className="inline-flex min-h-10 items-center rounded-lg border border-line-strong bg-surface-card px-4 text-body font-semibold text-brand hover:bg-surface-muted"
+            href="#treasuryMovements"
+          >
+            {t.treasuryMovements.open}
+          </a>
+        }
+      >
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           {(['cash', 'wallet'] as const).map((target) => (
             <div key={target} className="rounded-lg border border-slate-200 p-3">
@@ -1898,45 +1882,6 @@ export function Treasury(): ReactNode {
               </div>
             </div>
           </>
-        )}
-      </Card>
-
-      {/*
-        «حركات الخزينة» — what the two boxes actually did.
-        Asked «أين أرى عمليات عمران», the answer was nowhere: this screen could post a transfer and
-        never show one, and `/audit` needs a table name and a record id and returns everything ever,
-        oldest first. Four identical transfers in two seconds sat here unseen until a hand count
-        disagreed with the ledger.
-      */}
-      <Card title={t.treasury.movements} className="lg:col-span-2">
-        <p className="text-xs text-slate-600">{t.treasury.movementsHint}</p>
-        {movementsError !== null ? (
-          <Pending
-            error={movementsError}
-            loadingLabel={t.common.loading}
-            errorLabel={explainError(movementsError, t)}
-            onRetry={() => void loadMovements()}
-            retryLabel={t.common.retry}
-          />
-        ) : movements === null ? (
-          <p className="mt-3 text-sm text-slate-500">{t.common.loading}</p>
-        ) : movements.length === 0 ? (
-          <p className="mt-3 text-sm text-slate-500">{t.treasury.movementsEmpty}</p>
-        ) : (
-          <div className="mt-3">
-            <Table head={[t.treasury.movementDate, t.treasury.movementKind, t.treasury.cashBox, t.treasury.wallet, t.treasury.movementReason, t.treasury.movementBy]}>
-              {movements.map((row) => (
-                <tr key={row.id}>
-                  <td className="num px-3 py-2 text-xs">{row.businessDate}</td>
-                  <td className="px-3 py-2 text-xs">{row.eventType}</td>
-                  <td dir="ltr" className="num px-3 py-2 text-xs"><Money value={row.cash} /></td>
-                  <td dir="ltr" className="num px-3 py-2 text-xs"><Money value={row.wallet} /></td>
-                  <td className="px-3 py-2 text-xs text-slate-700">{row.reason ?? '—'}</td>
-                  <td className="px-3 py-2 text-xs">{row.actorName ?? '—'}</td>
-                </tr>
-              ))}
-            </Table>
-          </div>
         )}
       </Card>
 

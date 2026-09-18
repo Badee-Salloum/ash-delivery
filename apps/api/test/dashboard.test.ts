@@ -398,7 +398,7 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
         fxDayId: 1, sypMinorPerUsd: null,
         weekLockId: null,
         reason: 'cost centre fixture',
-        createdBy: 'u-bm',
+        createdBy: 'u-bm', createdAtMs: NOW_MS,
         lines: [
           { fundCode, side: 'D', amount: syp(amount), currency: 'SYP_NEW' },
           { fundCode: 'office_cash', side: 'C', amount: syp(amount), currency: 'SYP_NEW' },
@@ -411,7 +411,7 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
       id: 21_000, branchId: BRANCH, eventType: 'manual', shiftId: null,
       occurrenceKey: 'cost-centre-revenue', businessDate: '2026-07-22', postingDate: '2026-07-22',
       weekStartDate: weekStartFor('2026-07-22'), fxDayId: 1, sypMinorPerUsd: null, weekLockId: null,
-      reason: 'cost centre fixture', createdBy: 'u-bm',
+      reason: 'cost centre fixture', createdBy: 'u-bm', createdAtMs: NOW_MS,
       lines: [
         { fundCode: 'office_cash', side: 'D', amount: syp(1_000), currency: 'SYP_NEW' },
         { fundCode: 'company_revenue', side: 'C', amount: syp(1_000), currency: 'SYP_NEW' },
@@ -497,7 +497,7 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
       id: 22_000, branchId: BRANCH, eventType: 'income', shiftId: null,
       occurrenceKey: 'other-income-fixture', businessDate: '2026-07-22', postingDate: '2026-07-22',
       weekStartDate: weekStartFor('2026-07-22'), fxDayId: 1, sypMinorPerUsd: null, weekLockId: null,
-      reason: 'office share of an outside job', createdBy: 'u-bm',
+      reason: 'office share of an outside job', createdBy: 'u-bm', createdAtMs: NOW_MS,
       lines: [
         { fundCode: 'office_cash', side: 'D', amount: syp(250), currency: 'SYP_NEW' },
         { fundCode: 'other_income', side: 'C', amount: syp(250), currency: 'SYP_NEW' },
@@ -585,7 +585,7 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
         fxDayId: 1, sypMinorPerUsd: null,
         weekLockId: null,
         reason: 'profit range fixture',
-        createdBy: 'u-bm',
+        createdBy: 'u-bm', createdAtMs: NOW_MS,
         lines: [
           { fundCode: 'office_cash', side: 'D', amount: syp(company + driver + yalago), currency: 'SYP_NEW' },
           { fundCode: 'company_revenue', side: 'C', amount: syp(company), currency: 'SYP_NEW' },
@@ -647,7 +647,7 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
       fxDayId: 1, sypMinorPerUsd: null,
       weekLockId: null,
       reason: 'legacy profit batch fixture',
-      createdBy: 'u-bm',
+      createdBy: 'u-bm', createdAtMs: NOW_MS,
       lines: [
         { fundCode: 'fee_earned', side: 'D', amount: syp(250), currency: 'SYP_NEW' },
         { fundCode: `driver_share_payable:${DRIVER_ID}`, side: 'C', amount: syp(250), currency: 'SYP_NEW', role: 'driver_share' },
@@ -675,7 +675,7 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
       weekStartDate: weekStartFor(today),
       fxDayId: 1, sypMinorPerUsd: null,
       weekLockId: null,
-      createdBy: 'u-bm',
+      createdBy: 'u-bm', createdAtMs: NOW_MS,
       reason: 'legacy profit fixture',
     }
     h.deps.ledger.entries.push(
@@ -1144,7 +1144,7 @@ describe('the go-live date clamps the reports, never the positions', () => {
       fxDayId: 1, sypMinorPerUsd: null,
       weekLockId: null,
       reason: 'ربح تجريبي',
-      createdBy: 'u-bm',
+      createdBy: 'u-bm', createdAtMs: NOW_MS,
       lines: [
         { fundCode: 'office_cash', side: 'D', amount: syp(100_000), currency: 'SYP_NEW' },
         { fundCode: 'company_revenue', side: 'C', amount: syp(100_000), currency: 'SYP_NEW' },
@@ -1377,7 +1377,7 @@ describe('GET /dashboard/meta — the dates every time filter is built from (P2)
       id: 30_001, branchId: BRANCH, eventType: 'manual', shiftId: null,
       occurrenceKey: 'meta-first-activity', businessDate: '2026-07-02', postingDate: '2026-07-02',
       weekStartDate: weekStartFor('2026-07-02'), fxDayId: 1, sypMinorPerUsd: null, weekLockId: null,
-      reason: 'meta fixture', createdBy: 'u-bm',
+      reason: 'meta fixture', createdBy: 'u-bm', createdAtMs: NOW_MS,
       lines: [
         { fundCode: 'office_cash', side: 'D', amount: syp(1), currency: 'SYP_NEW' },
         { fundCode: 'cost_center:opening_balance', side: 'C', amount: syp(1), currency: 'SYP_NEW' },
@@ -1388,7 +1388,7 @@ describe('GET /dashboard/meta — the dates every time filter is built from (P2)
       id: 30_002, branchId: OTHER_BRANCH, eventType: 'manual', shiftId: null,
       occurrenceKey: 'meta-other-branch', businessDate: '2026-06-01', postingDate: '2026-06-01',
       weekStartDate: weekStartFor('2026-06-01'), fxDayId: 1, sypMinorPerUsd: null, weekLockId: null,
-      reason: 'meta fixture', createdBy: 'u-bm2',
+      reason: 'meta fixture', createdBy: 'u-bm2', createdAtMs: NOW_MS,
       lines: [
         { fundCode: 'office_cash', side: 'D', amount: syp(1), currency: 'SYP_NEW' },
         { fundCode: 'cost_center:opening_balance', side: 'C', amount: syp(1), currency: 'SYP_NEW' },
@@ -1460,7 +1460,7 @@ describe('the range read behind /dashboard/profit and /dashboard/treasury (P2)',
   it('reports a legacy restoration and its reversal chain in the original column', async () => {
     const common = {
       branchId: BRANCH, shiftId: null, postingDate: '2026-07-20', fxDayId: 1, sypMinorPerUsd: null, weekLockId: null,
-      createdBy: 'u-bm', reason: 'legacy restoration fixture',
+      createdBy: 'u-bm', createdAtMs: NOW_MS, reason: 'legacy restoration fixture',
     }
     h.deps.ledger.entries.push(
       {

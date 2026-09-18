@@ -16,6 +16,7 @@ import { ErrorBoundary } from './ErrorBoundary.tsx'
 import { Fleet } from './screens/Fleet.tsx'
 import { FleetConfig } from './screens/FleetConfig.tsx'
 import { Treasury } from './screens/Treasury.tsx'
+import { TreasuryMovements } from './screens/TreasuryMovements.tsx'
 import { CompanyFund } from './screens/CompanyFund.tsx'
 import { Expenses } from './screens/Expenses.tsx'
 import { CheckIn } from './screens/CheckIn.tsx'
@@ -173,6 +174,8 @@ export function AdminApp(): ReactNode {
   const canManageUsers = session.roleKey === 'system_admin' || session.roleKey === 'general_manager'
   const canManagePreapproved = canManagePreapprovedShifts(session.roleKey)
   const canManageCompanyFund = session.roleKey === 'system_admin' || session.roleKey === 'general_manager'
+  const canSeeTreasuryMovements =
+    session.roleKey === 'system_admin' || session.roleKey === 'general_manager' || session.roleKey === 'branch_manager'
   // gps.view — the same two roles; the branch manager no longer has it.
   const canSeeMap = canManageUsers
   /*
@@ -202,6 +205,9 @@ export function AdminApp(): ReactNode {
     ...(canSeeMap ? [{ key: 'gpsLive' as const, label: t.gpsLive.title, icon: 'map' as const }] : []),
     { key: 'fleet', label: `${t.fleet.drivers} / ${t.fleet.vehicles}`, icon: 'bike', group: 'fleet' },
     { key: 'treasury', label: t.treasury.branchTreasury, icon: 'treasury', group: 'money' },
+    ...(canSeeTreasuryMovements
+      ? [{ key: 'treasuryMovements' as const, label: t.treasuryMovements.title, icon: 'audit' as const, group: 'money' as const }]
+      : []),
     ...(canManageCompanyFund
       ? [{ key: 'companyFund' as const, label: t.companyFinance.title, icon: 'treasury' as const, group: 'money' as const }]
       : []),
@@ -427,6 +433,8 @@ export function AdminApp(): ReactNode {
           <FleetConfig />
         ) : section === 'vehicle' ? (
           <VehicleHistory key={mountKey} initial={liveParams.current} />
+        ) : section === 'treasuryMovements' && canSeeTreasuryMovements ? (
+          <TreasuryMovements key={mountKey} initial={liveParams.current} />
         ) : section === 'expenses' ? (
           <Expenses />
         ) : section === 'companyFund' && canManageCompanyFund ? (

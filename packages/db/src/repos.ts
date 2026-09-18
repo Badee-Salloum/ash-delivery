@@ -17,6 +17,8 @@ import type {
   ShiftOrderRecord,
   TreasuryPositionRecord,
   TreasuryPositionSource,
+  TreasuryMovementFilter,
+  TreasuryMovementPage,
   UserRecord,
   UserRepo,
   WalletMovementInput,
@@ -231,6 +233,7 @@ export function journalEntryFromRow(r: Record<string, unknown>): JournalEntryRec
     weekLockId: r.week_lock_id === null ? null : Number(r.week_lock_id),
     reason: (r.reason as string | null) ?? null,
     createdBy: String(r.created_by),
+    createdAtMs: r.created_at instanceof Date ? r.created_at.getTime() : Date.parse(String(r.created_at)),
     // amount comes back as ::text and is parsed to BigInt here — never through Number().
     lines: (
       r.lines as Array<{ fundCode: string; side: 'D' | 'C'; amount: string; role: string | null; currency: Currency }>
@@ -295,13 +298,13 @@ export class PgLedgerRepo implements LedgerRepo {
          * An empty `rows` is now the replay signal, no exception is raised, and the transaction
          * stays healthy. `DO NOTHING` with no conflict target covers the idempotency index.
          */
-        const res = await client.query<{ id: string }>(
+        const res = await client.query<{ id: string; created_at: Date }>(
           `INSERT INTO journal_entries
              (branch_id, event_type, shift_id, occurrence_key, business_date, posting_date,
               week_start_date, fx_day_id, reason, created_by, syp_minor_per_usd)
            VALUES ($1, $2::ledger_event, $3, $4, $5, $6, $7, $8, $9, $10, $11)
            ON CONFLICT DO NOTHING
-           RETURNING id`,
+           RETURNING id, created_at`,
           [
             branchId,
             posting.eventType,
@@ -343,6 +346,7 @@ export class PgLedgerRepo implements LedgerRepo {
           weekLockId: null,
           reason: meta.reason ?? null,
           createdBy: meta.createdBy,
+          createdAtMs: res.rows[0]!.created_at.getTime(),
           lines: posting.lines.map((l) => ({
             fundCode: fundCode(l.fund),
             side: l.side,
@@ -362,6 +366,96 @@ export class PgLedgerRepo implements LedgerRepo {
 
   async listByWeek(branchId: string, weekStartDate: CalendarDate): Promise<JournalEntryRecord[]> {
     return this.load('je.branch_id = $1 AND je.week_start_date = $2', [branchId, weekStartDate])
+  }
+
+  async listTreasuryMovements(
+    branchId: string,
+    filter: TreasuryMovementFilter,
+  ): Promise<TreasuryMovementPage> {
+    const params: unknown[] = [branchId, filter.from, filter.to]
+    // A journal that debits and credits the same office fund by the same amount mentions the
+    // treasury but does not move it. It must not become a misleading “internal transfer”.
+    const conditions: string[] = ['(office.cash <> 0 OR office.wallet <> 0)']
+    const add = (value: unknown): string => {
+      params.push(value)
+      return `$${params.length}`
+    }
+    if (filter.eventType !== undefined) conditions.push(`je.event_type::text = ${add(filter.eventType)}`)
+    if (filter.actorId !== undefined) conditions.push(`je.created_by::text = ${add(filter.actorId)}`)
+    if (filter.query !== undefined) {
+      conditions.push(`strpos(lower(COALESCE(je.reason, '')), lower(${add(filter.query)})) > 0`)
+    }
+    if (filter.beforeId !== undefined) conditions.push(`je.id < ${add(filter.beforeId)}`)
+    if (filter.channel === 'cash') conditions.push('office.cash <> 0')
+    if (filter.channel === 'wallet') conditions.push('office.wallet <> 0')
+    if (filter.flow === 'in') conditions.push('(office.cash + office.wallet) > 0')
+    if (filter.flow === 'out') conditions.push('(office.cash + office.wallet) < 0')
+    if (filter.flow === 'internal') {
+      conditions.push('(office.cash + office.wallet) = 0 AND (office.cash <> 0 OR office.wallet <> 0)')
+    }
+    const limitParam = add(filter.limit + 1)
+    const filteredWhere = `WHERE ${conditions.join(' AND ')}`
+
+    const rowsQuery = this.pool.query<Record<string, unknown>>(
+      `WITH office AS (
+         SELECT je.id,
+                COALESCE(SUM(CASE WHEN f.code = 'office_cash'
+                                  THEN CASE WHEN jl.side = 'D' THEN jl.amount_minor ELSE -jl.amount_minor END
+                                  ELSE 0 END), 0)::bigint AS cash,
+                COALESCE(SUM(CASE WHEN f.code = 'office_wallet'
+                                  THEN CASE WHEN jl.side = 'D' THEN jl.amount_minor ELSE -jl.amount_minor END
+                                  ELSE 0 END), 0)::bigint AS wallet
+           FROM journal_entries je
+           JOIN journal_lines jl ON jl.entry_id = je.id
+           JOIN funds f ON f.id = jl.fund_id
+          WHERE je.branch_id = $1
+            AND je.business_date BETWEEN $2 AND $3
+            AND f.code IN ('office_cash', 'office_wallet')
+          GROUP BY je.id
+       )
+       SELECT je.*, ${JOURNAL_LINES_JSON} AS lines
+         FROM office
+         JOIN journal_entries je ON je.id = office.id
+         LEFT JOIN journal_lines jl ON jl.entry_id = je.id
+         LEFT JOIN funds f ON f.id = jl.fund_id
+         ${filteredWhere}
+        GROUP BY je.id, office.cash, office.wallet
+        ORDER BY je.id DESC
+        LIMIT ${limitParam}`,
+      params,
+    )
+    const facetsQuery = this.pool.query<{ event_types: string[] | null; actor_ids: string[] | null }>(
+      `SELECT array_agg(DISTINCT je.event_type::text ORDER BY je.event_type::text) AS event_types,
+              array_agg(DISTINCT je.created_by::text ORDER BY je.created_by::text) AS actor_ids
+         FROM journal_entries je
+        WHERE je.branch_id = $1
+          AND je.business_date BETWEEN $2 AND $3
+          AND EXISTS (
+            SELECT 1
+              FROM journal_lines jl
+              JOIN funds f ON f.id = jl.fund_id
+             WHERE jl.entry_id = je.id AND f.code IN ('office_cash', 'office_wallet')
+             GROUP BY jl.entry_id
+            HAVING SUM(CASE WHEN f.code = 'office_cash'
+                             THEN CASE WHEN jl.side = 'D' THEN jl.amount_minor ELSE -jl.amount_minor END
+                             ELSE 0 END) <> 0
+                OR SUM(CASE WHEN f.code = 'office_wallet'
+                             THEN CASE WHEN jl.side = 'D' THEN jl.amount_minor ELSE -jl.amount_minor END
+                             ELSE 0 END) <> 0
+          )`,
+      [branchId, filter.from, filter.to],
+    )
+    const [pageResult, facetResult] = await Promise.all([rowsQuery, facetsQuery])
+    const page = pageResult.rows.map(journalEntryFromRow)
+    const hasMore = page.length > filter.limit
+    const entries = hasMore ? page.slice(0, filter.limit) : page
+    const facets = facetResult.rows[0]
+    return {
+      entries,
+      nextBeforeId: hasMore ? (entries.at(-1)?.id ?? null) : null,
+      eventTypes: (facets?.event_types ?? []) as TreasuryMovementPage['eventTypes'],
+      actorIds: facets?.actor_ids ?? [],
+    }
   }
 
   async findStandaloneEntry(

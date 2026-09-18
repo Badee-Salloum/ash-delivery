@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BRANCH, type Harness, makeHarness, sypStr } from './harness.ts'
+import { BRANCH, NOW_MS, type Harness, makeHarness, sypStr, today } from './harness.ts'
 
 /**
  * «نقل الأموال من الصندوق للمحفظة و بالعكس» (owner request, 2026-08-31).
@@ -189,6 +189,99 @@ describe('moving money between the office boxes', () => {
     expect(moved.cash).toBe(sypStr(-700))
     expect(moved.wallet).toBe(sypStr(700))
     expect(moved.actorName, 'who did it is the whole point').toBeTruthy()
+    expect(moved.actorId).toBe('u-bm')
+    expect(moved.flow).toBe('internal')
+    expect(moved.createdAt).toBe(new Date(NOW_MS).toISOString())
+    expect(res.json().facets.actors).toContainEqual({ id: 'u-bm', name: 'manager' })
+    expect(res.json().facets.eventTypes).toContain('manual')
+  })
+
+  it('filters the independent register and pages by a stable id cursor without mixing branches', async () => {
+    const manager = await h.loginAs('manager')
+    const otherManager = await h.loginAs('manager2')
+    const driver = await h.loginAs('driver1')
+    await seed(manager, 100_000, 20_000)
+    await post(manager, '/treasury/transfer', transfer({ amount: sypStr(700), reason: 'تحويل داخلي مسائي' }))
+    const outgoing = await post(manager, '/journal/manual', {
+      branchId: BRANCH,
+      reason: 'إخراج نقدي لاختبار البحث العربي',
+      lines: [
+        { fundCode: 'office_cash', side: 'C', amount: sypStr(300) },
+        { fundCode: 'cost_center:test', side: 'D', amount: sypStr(300) },
+      ],
+    })
+    expect(outgoing.statusCode, outgoing.body).toBe(201)
+
+    // The posting happened after midnight, but it still belongs to the prior business day. The API
+    // must expose both facts rather than deriving one from the other.
+    const outgoingEntry = h.deps.ledger.entries.find((entry) => entry.reason?.startsWith('إخراج نقدي'))!
+    outgoingEntry.createdAtMs = Date.UTC(2026, 6, 21, 22, 4, 5)
+    expect(outgoingEntry.businessDate).toBe(today)
+
+    const read = async (query: string, token = manager): Promise<LightMyRequestResponse> =>
+      await h.app.inject({
+        method: 'GET',
+        url: `/treasury/movements?from=${today}&to=${today}&${query}`,
+        headers: { cookie: h.cookie(token) },
+      })
+
+    const searched = await read(
+      `eventType=manual&channel=cash&flow=out&actorId=u-bm&q=${encodeURIComponent('البحث العربي')}`,
+    )
+    expect(searched.statusCode, searched.body).toBe(200)
+    expect(searched.json().rows).toHaveLength(1)
+    expect(searched.json().rows[0]).toMatchObject({
+      id: outgoingEntry.id,
+      businessDate: today,
+      createdAt: '2026-07-21T22:04:05.000Z',
+      actorId: 'u-bm',
+      flow: 'out',
+      cash: sypStr(-300),
+      wallet: sypStr(0),
+    })
+
+    const internal = await read('channel=wallet&flow=internal')
+    expect(internal.statusCode, internal.body).toBe(200)
+    expect(internal.json().rows.map((row: { reason: string }) => row.reason)).toEqual(['تحويل داخلي مسائي'])
+
+    const first = await read('limit=1')
+    expect(first.statusCode, first.body).toBe(200)
+    expect(first.json().rows).toHaveLength(1)
+    expect(first.json().nextCursor).toBe(first.json().rows[0].id)
+    const second = await read(`limit=1&beforeId=${first.json().nextCursor}`)
+    expect(second.statusCode, second.body).toBe(200)
+    expect(second.json().rows).toHaveLength(1)
+    expect(second.json().rows[0].id).not.toBe(first.json().rows[0].id)
+
+    // Actor facets describe the journal, not today's account directory. A deactivated employee's
+    // historical movement must remain attributable instead of disappearing from the filter.
+    h.deps.users.rows.get('u-d2')!.active = false
+    h.deps.ledger.entries.push({
+      ...structuredClone(outgoingEntry),
+      id: Math.max(...h.deps.ledger.entries.map((entry) => entry.id)) + 1,
+      occurrenceKey: 'inactive-actor-history',
+      reason: 'حركة تاريخية لمنفذ غير نشط',
+      createdBy: 'u-d2',
+    })
+    const inactiveActor = await read('actorId=u-d2')
+    expect(inactiveActor.statusCode, inactiveActor.body).toBe(200)
+    expect(inactiveActor.json().rows).toHaveLength(1)
+    expect(inactiveActor.json().facets.actors).toContainEqual({ id: 'u-d2', name: 'driver2' })
+
+    // Permission and branch selection are applied before the repository read.
+    expect((await read('limit=50', otherManager)).json().rows).toEqual([])
+    expect((await read('limit=50', driver)).statusCode).toBe(403)
+
+    expect((await read('flow=sideways')).statusCode).toBe(400)
+    expect(
+      (
+        await h.app.inject({
+          method: 'GET',
+          url: `/treasury/movements?from=${today}`,
+          headers: { cookie: h.cookie(manager) },
+        })
+      ).statusCode,
+    ).toBe(400)
   })
 
   it('records one manual entry when the same one is submitted twice', async () => {

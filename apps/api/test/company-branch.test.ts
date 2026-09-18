@@ -197,6 +197,7 @@ describe('the company week closes on its own terms', () => {
     weekLockId: null,
     reason: 'company week fixture',
     createdBy: 'u-gm',
+    createdAtMs: Date.UTC(2026, 6, 21, 9),
     lines,
   })
 

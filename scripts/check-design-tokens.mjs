@@ -63,7 +63,7 @@ const BASELINE = {
   'apps/admin/src/screens/Removals.tsx': 11,
   'apps/admin/src/screens/Settings.tsx': 15,
   'apps/admin/src/screens/Tiers.tsx': 8,
-  'apps/admin/src/screens/Treasury.tsx': 119,
+  'apps/admin/src/screens/Treasury.tsx': 115,
   'apps/admin/src/settlement-optional-reason.test.ts': 1,
   'apps/admin/src/ui.tsx': 4,
   'apps/driver/src/DriverApp.tsx': 6,

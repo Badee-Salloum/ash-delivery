@@ -113,6 +113,35 @@ export const COMPANY_LEDGER_EVENTS = [
   'company_correction',
 ] as const satisfies readonly CompanyLedgerEvent[]
 
+/** Every value PostgreSQL's `ledger_event` enum accepts, in one runtime list for strict APIs. */
+export const LEDGER_EVENTS = [
+  'float_out',
+  'wallet_topup',
+  'order_fee',
+  'yalago_cut',
+  'wallet_adjustment',
+  'driver_cash_deduction',
+  'share_split',
+  'float_return',
+  'wallet_return',
+  'expense',
+  'income',
+  'manual',
+  'correction',
+  'restoration',
+  'driver_payout',
+  'receivable_adjustment',
+  'advance',
+  'advance_repayment',
+  'advance_conversion',
+  ...COMPANY_LEDGER_EVENTS,
+] as const satisfies readonly LedgerEvent[]
+
+type MissingLedgerEvents = Exclude<LedgerEvent, (typeof LEDGER_EVENTS)[number]>
+/** Compile-time proof that a newly-added ledger event cannot be omitted from strict filters. */
+const LEDGER_EVENTS_EXHAUSTIVE: [MissingLedgerEvents] extends [never] ? true : false = true
+void LEDGER_EVENTS_EXHAUSTIVE
+
 type MissingCompanyEvents = Exclude<CompanyLedgerEvent, (typeof COMPANY_LEDGER_EVENTS)[number]>
 /** Compile-time proof that the list above names every company event. */
 const COMPANY_EVENTS_EXHAUSTIVE: [MissingCompanyEvents] extends [never] ? true : false = true

@@ -72,13 +72,27 @@ interface RecurringDue extends RecurringTemplate {
   status: 'overdue' | 'today' | 'upcoming' | 'later'
 }
 
+interface VehicleOption {
+  id: string
+  code: string
+  groundNo?: string | null
+}
+
+interface VehicleTypeOption {
+  id: string
+  nameAr: string
+  nameEn: string
+  typeNo: number
+  active: boolean
+}
+
 interface CompanyData {
   overview: Overview
   movements: Movement[]
   debts: Debt[]
   assets: Asset[]
   depreciation: DepreciationPlan
-  vehicles: Array<{ id: string; code: string; groundNo?: string | null }>
+  vehicles: VehicleOption[]
   recurring: RecurringTemplate[]
   recurringDue: RecurringDue[]
   categories: Array<{ id: string; nameAr: string; code: string }>
@@ -87,7 +101,7 @@ interface CompanyData {
 const tabs: readonly Tab[] = ['overview', 'movements', 'debts', 'assets', 'depreciation', 'recurring']
 
 export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactNode {
-  const { api, session, t } = useApp()
+  const { api, session, t, branchId } = useApp()
   const today = session?.businessDate ?? ''
   const month = today === '' ? '' : `${today.slice(0, 7)}-01`
   const [tab, setTab] = useState<Tab>(() => tabs.includes(initial.tab as Tab) ? initial.tab as Tab : 'overview')
@@ -97,6 +111,7 @@ export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactN
   const [notice, setNotice] = useState<string | null>(null)
 
   const load = useCallback(() => {
+    if (branchId === null) return
     setError(null)
     const range = `from=2000-01-01&to=${encodeURIComponent(today)}`
     void Promise.all([
@@ -105,7 +120,7 @@ export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactN
       api.get<{ debts: Debt[] }>('/company/debts'),
       api.get<{ assets: Asset[] }>('/company/assets'),
       api.get<DepreciationPlan>(`/company/depreciation?asOfMonth=${encodeURIComponent(month)}`),
-      api.get<{ vehicles: Array<{ id: string; code: string; groundNo?: string | null }> }>('/vehicles'),
+      api.get<{ vehicles: VehicleOption[] }>('/vehicles'),
       api.get<{ templates: RecurringTemplate[] }>('/company/recurring-expenses?includeInactive=true'),
       api.get<{ due: RecurringDue[] }>('/company/recurring-expenses/due'),
       api.get<{ categories: Array<{ id: string; nameAr: string; code: string }> }>('/expense-categories'),
@@ -119,9 +134,15 @@ export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactN
       setData(null)
       setError(cause.error ?? 'error')
     })
-  }, [api, month, today])
+  }, [api, branchId, month, today])
 
-  useEffect(load, [load])
+  useEffect(() => {
+    // Company finance is global, but its vehicle picker is branch-scoped. Blank the prior branch
+    // while the next read is in flight so an old vehicle can never be submitted under a new branch.
+    setData(null)
+    setNotice(null)
+    load()
+  }, [load])
 
   const mutate = async (operation: () => Promise<unknown>, success: string): Promise<void> => {
     setBusy(true)
@@ -303,10 +324,99 @@ function DebtsTab({ rows, today, busy, mutate }: { rows: Debt[]; today: string; 
   )
 }
 
+function AssetVehicleCreator({ onCreated }: { onCreated(vehicle: VehicleOption): void }): ReactNode {
+  const { api, t, lang } = useApp()
+  const [types, setTypes] = useState<VehicleTypeOption[] | null>(null)
+  const [typeId, setTypeId] = useState('')
+  const [groundNo, setGroundNo] = useState('')
+  const [plateNo, setPlateNo] = useState('')
+  const [preview, setPreview] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let current = true
+    setError(null)
+    void api.vehicleTypes()
+      .then(({ vehicleTypes }) => {
+        if (!current) return
+        const active = vehicleTypes.filter((type) => type.active)
+        setTypes(active)
+        if (active.length === 1) setTypeId(active[0]!.id)
+      })
+      .catch((cause: { error?: string }) => {
+        if (!current) return
+        setTypes([])
+        setError(cause.error ?? 'error')
+      })
+    return () => { current = false }
+  }, [api])
+
+  useEffect(() => {
+    let current = true
+    setPreview(null)
+    if (typeId !== '') {
+      void api.nextVehicleNumber(typeId)
+        .then((result) => { if (current) setPreview(result.code) })
+        .catch(() => { if (current) setPreview(null) })
+    }
+    return () => { current = false }
+  }, [api, typeId])
+
+  const create = async (): Promise<void> => {
+    if (typeId === '') return
+    setBusy(true)
+    setError(null)
+    try {
+      const vehicle = await api.createVehicle({
+        vehicleTypeId: typeId,
+        groundNo: groundNo.trim() === '' ? null : groundNo.trim(),
+        plateNo: plateNo.trim() === '' ? null : plateNo.trim(),
+      })
+      onCreated({ id: vehicle.id, code: vehicle.code, groundNo: vehicle.groundNo })
+    } catch (cause) {
+      setError((cause as { error?: string }).error ?? 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-line-strong bg-surface-muted p-3" role="region" aria-label={t.companyFinance.addNewVehicle}>
+      <p className="text-sm text-ink-muted">{t.companyFinance.vehicleOnlyHint}</p>
+      <Field label={t.fleet.vehicleType}>
+        <Select value={typeId} disabled={busy || types === null} onChange={(event) => setTypeId(event.target.value)} aria-label={t.fleet.vehicleType}>
+          <option value="">—</option>
+          {(types ?? []).map((type) => (
+            <option key={type.id} value={type.id}>{type.typeNo} — {lang === 'ar' ? type.nameAr : type.nameEn}</option>
+          ))}
+        </Select>
+      </Field>
+      {types?.length === 0 && error === null ? <p className="text-sm text-warning-ink">{t.companyFinance.noActiveVehicleTypes}</p> : null}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <Field label={t.fleet.groundNo} hint={t.fleet.groundNoHint}>
+          <TextInput value={groundNo} disabled={busy} onChange={(event) => setGroundNo(event.target.value)} aria-label={t.fleet.groundNo} />
+        </Field>
+        <Field label={t.fleet.plateNo}>
+          <TextInput value={plateNo} disabled={busy} onChange={(event) => setPlateNo(event.target.value)} aria-label={t.fleet.plateNo} />
+        </Field>
+      </div>
+      {preview ? <p className="text-sm text-ink-muted">{t.fleet.numberPreview}: <span className="num font-semibold text-brand">{preview}</span></p> : null}
+      {error ? <p role="alert" className="text-sm text-danger-ink">{explainError(error, t)}</p> : null}
+      <Button type="button" className="self-start" disabled={busy || typeId === '' || types === null} onClick={() => void create()}>
+        {busy ? t.common.loading : t.companyFinance.createVehicleOnly}
+      </Button>
+    </div>
+  )
+}
+
 function AssetsTab({ rows, vehicles, today, busy, mutate }: { rows: Asset[]; vehicles: CompanyData['vehicles']; today: string; busy: boolean; mutate: Mutate }): ReactNode {
-  const { api, t } = useApp()
+  const { api, t, branchId } = useApp()
   const [kind, setKind] = useState<Asset['kind']>('equipment')
   const [vehicleId, setVehicleId] = useState('')
+  const [createdVehicles, setCreatedVehicles] = useState<VehicleOption[]>([])
+  const [showVehicleCreator, setShowVehicleCreator] = useState(false)
+  const [vehicleNotice, setVehicleNotice] = useState<string | null>(null)
   const [name, setName] = useState('')
   const [currency, setCurrency] = useState<Currency>('SYP_NEW')
   const [price, setPrice] = useState('')
@@ -315,7 +425,29 @@ function AssetsTab({ rows, vehicles, today, busy, mutate }: { rows: Asset[]; veh
   const [paidFrom, setPaidFrom] = useState<'pocket' | 'reserve' | 'owner_outside' | 'opening'>('pocket')
   const [financedPartyName, setFinancedPartyName] = useState('')
   const [financedDueOn, setFinancedDueOn] = useState('')
-  const selectedVehicle = useMemo(() => vehicles.find((vehicle) => vehicle.id === vehicleId), [vehicleId, vehicles])
+  const availableVehicles = useMemo(() => {
+    const byId = new Map(vehicles.map((vehicle) => [vehicle.id, vehicle]))
+    for (const vehicle of createdVehicles) byId.set(vehicle.id, vehicle)
+    return [...byId.values()]
+  }, [createdVehicles, vehicles])
+  const selectedVehicle = useMemo(
+    () => availableVehicles.find((vehicle) => vehicle.id === vehicleId),
+    [availableVehicles, vehicleId],
+  )
+
+  useEffect(() => {
+    setVehicleId('')
+    setCreatedVehicles([])
+    setShowVehicleCreator(false)
+    setVehicleNotice(null)
+  }, [branchId])
+
+  const vehicleCreated = (vehicle: VehicleOption): void => {
+    setCreatedVehicles((current) => [...current.filter((row) => row.id !== vehicle.id), vehicle])
+    setVehicleId(vehicle.id)
+    setShowVehicleCreator(false)
+    setVehicleNotice(t.companyFinance.vehicleCreatedAndSelected)
+  }
   const submit = (event: FormEvent): void => {
     event.preventDefault()
     void mutate(() => api.post('/company/assets', {
@@ -332,8 +464,45 @@ function AssetsTab({ rows, vehicles, today, busy, mutate }: { rows: Asset[]; veh
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(20rem,1fr)_2fr]">
       <Card title={t.companyFinance.addAsset}>
         <form className="flex flex-col gap-3" onSubmit={submit}>
-          <Field label={t.companyFinance.assetKind}><Select value={kind} onChange={(event) => setKind(event.target.value as Asset['kind'])} aria-label={t.companyFinance.assetKind}><option value="equipment">{t.companyFinance.equipment}</option><option value="property">{t.companyFinance.property}</option><option value="other">{t.companyFinance.other}</option><option value="vehicle">{t.companyFinance.vehicle}</option></Select></Field>
-          {kind === 'vehicle' ? <Field label={t.companyFinance.vehicle}><Select required value={vehicleId} onChange={(event) => setVehicleId(event.target.value)} aria-label={t.companyFinance.vehicle}><option value="">—</option>{vehicles.map((vehicle) => <option key={vehicle.id} value={vehicle.id}>{vehicle.groundNo ?? vehicle.code}</option>)}</Select></Field> : <Field label={t.companyFinance.name}><TextInput required value={name} onChange={(event) => setName(event.target.value)} aria-label={t.companyFinance.name} /></Field>}
+          <Field label={t.companyFinance.assetKind}>
+            <Select
+              value={kind}
+              onChange={(event) => {
+                const next = event.target.value as Asset['kind']
+                setKind(next)
+                if (next !== 'vehicle') {
+                  setShowVehicleCreator(false)
+                  setVehicleNotice(null)
+                }
+              }}
+              aria-label={t.companyFinance.assetKind}
+            >
+              <option value="equipment">{t.companyFinance.equipment}</option><option value="property">{t.companyFinance.property}</option><option value="other">{t.companyFinance.other}</option><option value="vehicle">{t.companyFinance.vehicle}</option>
+            </Select>
+          </Field>
+          {kind === 'vehicle' ? (
+            <div className="flex flex-col gap-2">
+              <Field label={t.companyFinance.vehicle}>
+                <Select required value={vehicleId} onChange={(event) => setVehicleId(event.target.value)} aria-label={t.companyFinance.vehicle}>
+                  <option value="">—</option>
+                  {availableVehicles.map((vehicle) => <option key={vehicle.id} value={vehicle.id}>{vehicle.groundNo ?? vehicle.code}</option>)}
+                </Select>
+              </Field>
+              <Button
+                type="button"
+                variant="ghost"
+                className="self-start"
+                onClick={() => {
+                  setShowVehicleCreator((current) => !current)
+                  setVehicleNotice(null)
+                }}
+              >
+                {showVehicleCreator ? t.common.cancel : t.companyFinance.addNewVehicle}
+              </Button>
+              {showVehicleCreator ? <AssetVehicleCreator key={branchId ?? 'no-branch'} onCreated={vehicleCreated} /> : null}
+              {vehicleNotice ? <p role="status" className="text-sm font-medium text-success-ink">{vehicleNotice}</p> : null}
+            </div>
+          ) : <Field label={t.companyFinance.name}><TextInput required value={name} onChange={(event) => setName(event.target.value)} aria-label={t.companyFinance.name} /></Field>}
           <div className="grid grid-cols-2 gap-3">
             <Field label={t.companyFinance.currency}><Select value={currency} onChange={(event) => setCurrency(event.target.value as Currency)} aria-label={t.companyFinance.currency}><option value="SYP_NEW">{t.currency.SYP_NEW}</option><option value="USD">{t.currency.USD}</option></Select></Field>
             <Field label={t.companyFinance.price}><MoneyInput required value={price} onChange={(event) => setPrice(event.target.value)} aria-label={t.companyFinance.price} /></Field>

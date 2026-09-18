@@ -2,6 +2,7 @@ import type {
   CalendarDate,
   Currency,
   FxDay,
+  LedgerEvent,
   Minor,
   OrderKind,
   PayMode,
@@ -797,8 +798,33 @@ export interface JournalEntryRecord {
   weekLockId: number | null
   reason: string | null
   createdBy: string
+  /** Actual database insertion instant, distinct from the accounting business date. */
+  createdAtMs: number
   /** `currency` is the FUND's — a line has no currency of its own (0066). */
   lines: Array<{ fundCode: string; side: 'D' | 'C'; amount: Minor; currency: Currency; role?: string }>
+}
+
+export type TreasuryMovementChannel = 'cash' | 'wallet'
+export type TreasuryMovementFlow = 'in' | 'out' | 'internal'
+
+export interface TreasuryMovementFilter {
+  from: CalendarDate
+  to: CalendarDate
+  eventType?: LedgerEvent
+  channel?: TreasuryMovementChannel
+  flow?: TreasuryMovementFlow
+  actorId?: string
+  query?: string
+  beforeId?: number
+  limit: number
+}
+
+export interface TreasuryMovementPage {
+  entries: JournalEntryRecord[]
+  nextBeforeId: number | null
+  /** Facets are range-scoped but deliberately ignore the other active filters. */
+  eventTypes: LedgerEvent[]
+  actorIds: string[]
 }
 
 export interface WeekLockRecord {
@@ -1225,6 +1251,8 @@ export interface LedgerRepo {
   ): Promise<JournalEntryRecord[]>
   listByShift(shiftId: string): Promise<JournalEntryRecord[]>
   listByWeek(branchId: string, weekStartDate: CalendarDate): Promise<JournalEntryRecord[]>
+  /** Signed movements touching either office box, newest first and cursor-paged. */
+  listTreasuryMovements(branchId: string, filter: TreasuryMovementFilter): Promise<TreasuryMovementPage>
   /**
    * The one shift-less entry stored under `(branchId, eventType, occurrenceKey)`, or null.
    *

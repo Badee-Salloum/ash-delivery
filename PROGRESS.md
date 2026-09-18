@@ -1,5 +1,50 @@
 # PROGRESS
 
+## 2026-09-18 — vehicle creation from fixed assets complete locally
+
+**Done.** The fixed-assets tab now offers a compact, bilingual «إضافة آلية جديدة» flow when the
+asset kind is vehicle. It loads active vehicle types on demand, previews the server-assigned fleet
+number, and creates a ready vehicle in the branch selected in the admin shell. Ground and plate
+numbers remain optional. The new vehicle is inserted into the picker and selected immediately;
+the purchase, financing and depreciation facts are still a separate explicit asset submission.
+
+This path deliberately creates no batteries and says so in the form. A branch change clears the
+selected/new vehicle state and reloads the branch-scoped picker before it can be used again. The
+existing `fleet.manage` and `company_fund.manage` server checks remain the authority, and the
+vehicle mutation retains its audit fact. No API route, migration or production deployment was
+needed.
+
+**Proof.** `admin/company-assets-vehicle.test.ts` pins the conditional form, active-type load,
+number preview, no-battery boundary, immediate selection, separate asset command, branch reset and
+bilingual guidance. `client/api.test.ts` proves the selected branch and returned ground number.
+`api/company-finance.test.ts` proves a GM can create the vehicle then link it to an asset, a branch
+manager cannot record the asset, the vehicle is audited, and no battery or asset appears during the
+first step. Full `pnpm check` passed: **3,205 tests**, with 19 expected PostgreSQL-only skips. The
+local Node 25.8 engine warning remains; the repository targets Node 24.
+
+## 2026-09-18 — standalone treasury movement register complete locally
+
+**Done.** «حركات الخزينة» is now a separate, read-only Finance page for branch managers, general
+managers and system administrators. The Treasury page keeps a direct link but no longer loads or
+renders the old embedded table. The register defaults to this month, remembers its own last period,
+stores the applied period and filters in the URL, clears an invalid actor after a branch switch, and
+loads 50 rows at a time by stable journal id.
+
+`GET /treasury/movements` now performs the branch/date/filter aggregation in PostgreSQL and supports
+event type, cash/wallet channel, incoming/outgoing/internal direction, actor, literal partial reason
+search and `beforeId`. It returns signed office effects, branch/range-scoped facets, the actual
+`journal_entries.created_at` instant and a cursor. Omitted dates retain the former rolling two-week
+contract for an older admin bundle.
+
+The table shows the Damascus registration time through seconds separately from the business day,
+translates every ledger event with a raw-code fallback, and keeps the cash and wallet effects signed.
+No migration is needed: the timestamp already exists.
+
+**Verified.** `pnpm check` passes every static gate and 3,198 default tests; the 19 skips are the
+expected PostgreSQL-gated cases. The new disposable PostgreSQL test was also run separately on local
+PostgreSQL 17.6 and passed, proving direct SQL filtering, Arabic search, branch isolation, exact
+`created_at`, and cursor paging without duplicates. Production deployment remains separate.
+
 ## 2026-09-18 — driver self-registration complete locally
 
 **Done.** The logged-out driver app now switches between login and a bilingual account form for Arabic full

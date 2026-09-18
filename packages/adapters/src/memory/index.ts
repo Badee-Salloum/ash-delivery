@@ -58,6 +58,8 @@ import type {
   ShiftSettlementRepo,
   TreasuryPositionRecord,
   TreasuryPositionSource,
+  TreasuryMovementFilter,
+  TreasuryMovementPage,
   UserRecord,
   UserRepo,
   VehicleEventRecord,
@@ -1261,6 +1263,10 @@ const staleMemoryOperation = (kind: 'order' | 'cash_deduction', id: string): Err
 export class MemoryLedgerRepo implements LedgerRepo {
   readonly entries: JournalEntryRecord[] = []
   private nextId = 1
+  private readonly nowMs: () => number
+  constructor(nowMs: () => number = () => Date.now()) {
+    this.nowMs = nowMs
+  }
   /**
    * Mirrors `journal_entries_idem_uq` as migration 0017 REDEFINED it:
    * `UNIQUE (branch_id, event_type, COALESCE(shift_id::text, ''), occurrence_key)`.
@@ -1359,6 +1365,7 @@ export class MemoryLedgerRepo implements LedgerRepo {
         weekLockId: null,
         reason: meta.reason ?? null,
         createdBy: meta.createdBy,
+        createdAtMs: this.nowMs(),
         lines: posting.lines.map((l) => ({
           fundCode: fundCode(l.fund),
           side: l.side,
@@ -1378,6 +1385,48 @@ export class MemoryLedgerRepo implements LedgerRepo {
   }
   async listByWeek(branchId: string, weekStartDate: CalendarDate): Promise<JournalEntryRecord[]> {
     return this.entries.filter((e) => e.branchId === branchId && e.weekStartDate === weekStartDate)
+  }
+  async listTreasuryMovements(
+    branchId: string,
+    filter: TreasuryMovementFilter,
+  ): Promise<TreasuryMovementPage> {
+    const effect = (entry: JournalEntryRecord, code: string): bigint =>
+      entry.lines
+        .filter((line) => line.fundCode === code)
+        .reduce((sum, line) => sum + (line.side === 'D' ? line.amount : -line.amount), 0n)
+    const officeRows = this.entries.filter((entry) => {
+      if (entry.branchId !== branchId || entry.businessDate < filter.from || entry.businessDate > filter.to) {
+        return false
+      }
+      return effect(entry, 'office_cash') !== 0n || effect(entry, 'office_wallet') !== 0n
+    })
+    const eventTypes = [...new Set(officeRows.map((entry) => entry.eventType))].sort()
+    const actorIds = [...new Set(officeRows.map((entry) => entry.createdBy))].sort()
+    const query = filter.query?.toLocaleLowerCase()
+    const matches = officeRows.filter((entry) => {
+      const cash = effect(entry, 'office_cash')
+      const wallet = effect(entry, 'office_wallet')
+      const net = cash + wallet
+      if (filter.eventType !== undefined && entry.eventType !== filter.eventType) return false
+      if (filter.channel === 'cash' && cash === 0n) return false
+      if (filter.channel === 'wallet' && wallet === 0n) return false
+      if (filter.flow === 'in' && net <= 0n) return false
+      if (filter.flow === 'out' && net >= 0n) return false
+      if (filter.flow === 'internal' && (net !== 0n || (cash === 0n && wallet === 0n))) return false
+      if (filter.actorId !== undefined && entry.createdBy !== filter.actorId) return false
+      if (query !== undefined && !(entry.reason ?? '').toLocaleLowerCase().includes(query)) return false
+      if (filter.beforeId !== undefined && entry.id >= filter.beforeId) return false
+      return true
+    }).sort((left, right) => right.id - left.id)
+    const page = matches.slice(0, filter.limit + 1)
+    const hasMore = page.length > filter.limit
+    const entries = hasMore ? page.slice(0, filter.limit) : page
+    return {
+      entries,
+      nextBeforeId: hasMore ? (entries.at(-1)?.id ?? null) : null,
+      eventTypes,
+      actorIds,
+    }
   }
   async findStandaloneEntry(
     branchId: string,
@@ -2486,7 +2535,7 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
 
 export function createMemoryDeps(nowMs: number): MemoryDeps {
   const clock = new FixedClock(nowMs)
-  const ledger = new MemoryLedgerRepo()
+  const ledger = new MemoryLedgerRepo(() => clock.nowMs())
   const media = new MemoryMediaRepo()
   const shifts = new MemoryShiftRepo(media)
   const orders = new MemoryOrderRepo()

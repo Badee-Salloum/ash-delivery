@@ -132,6 +132,11 @@ branch managers never see purchase prices/instalments/book values; company debts
 - [x] Docs: CLAUDE.md decisions 18–23 + money rules 9–12, ASSUMPTIONS, RUNBOOK «صندوق الشركة», PROGRESS, TESTS.md.
 - [x] **Production release** (2026-09-18): API/admin/driver deployed; migrations 0064–0078 applied and
       checksum-idempotence, financial integrity, backups, stable-route smokes, and an isolated full restore passed.
+- [x] **Standalone treasury movements (local, not deployed):** the branch register moved out of Treasury into
+      its own Finance route; PostgreSQL now filters business dates, type, channel, direction, actor and reason,
+      pages by journal id, and returns the actual creation instant. The UI shows Damascus time through seconds
+      beside the separate business day. No migration is required. `pnpm check` and the focused real-PostgreSQL
+      suite pass; production deployment remains a separate step.
 - [ ] **Company-ledger cutover:** still requires the owner-supplied expected opening balance and audited reason.
       Do not invent either and do not bypass `POST /company/cutover` with SQL.
 

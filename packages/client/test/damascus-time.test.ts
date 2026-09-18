@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { damascusParts, formatDateTime } from '../src/index.ts'
+import { damascusParts, formatDateTime, formatDateTimeSeconds } from '../src/index.ts'
 
 /**
  * Every timestamp in this console is the BRANCH's wall clock, never the reader's.
@@ -29,6 +29,11 @@ describe('timestamps are the branch’s wall clock, not the reader’s', () => {
   it('gives both languages the same shape', () => {
     const iso = '2026-09-06T15:15:00.000Z'
     expect(formatDateTime(iso, 'ar')).toBe(formatDateTime(iso, 'en'))
+  })
+
+  it('offers seconds for audit records without changing the ordinary formatter', () => {
+    expect(formatDateTimeSeconds('2026-09-18T11:32:07.000Z', 'ar')).toBe('2026-09-18 14:32:07')
+    expect(formatDateTime('2026-09-18T11:32:07.000Z', 'ar')).toBe('2026-09-18 14:32')
   })
 
   it('returns the input unchanged when it is not a date at all', () => {

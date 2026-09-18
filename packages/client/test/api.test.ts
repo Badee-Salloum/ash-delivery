@@ -105,6 +105,77 @@ it('adds the selected branch exactly once to the restoration preview read', asyn
   })
 })
 
+it('creates a vehicle in the selected branch and preserves its returned ground number', async () => {
+  const created = {
+    id: 'vehicle-3',
+    branchId: 'branch-1',
+    vehicleTypeId: 'type-1',
+    code: '1-1-1-3',
+    machineNo: 3,
+    plateNo: 'DAM-1003',
+    groundNo: 'YARD-3',
+    state: 'ready',
+    active: true,
+  }
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(JSON.stringify(created), { status: 201, headers: { 'content-type': 'application/json' } }),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+  api.setBranch('branch-1')
+
+  await expect(api.createVehicle({ vehicleTypeId: 'type-1', plateNo: 'DAM-1003', groundNo: 'YARD-3' }))
+    .resolves.toEqual(created)
+
+  const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit]
+  expect(url).toBe('/api/vehicles')
+  expect(JSON.parse(options.body as string)).toEqual({
+    vehicleTypeId: 'type-1',
+    plateNo: 'DAM-1003',
+    groundNo: 'YARD-3',
+    branchId: 'branch-1',
+  })
+})
+
+it('serializes every treasury movement filter and forwards cancellation', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        from: '2026-09-01',
+        to: '2026-09-18',
+        rows: [],
+        nextCursor: null,
+        facets: { eventTypes: [], actors: [] },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+  const controller = new AbortController()
+
+  await api.treasuryMovements(
+    {
+      from: '2026-09-01',
+      to: '2026-09-18',
+      eventType: 'restoration',
+      channel: 'wallet',
+      flow: 'out',
+      actorId: 'u-bm',
+      q: 'ترميم الفرع',
+      beforeId: 42,
+      limit: 50,
+    },
+    { signal: controller.signal },
+  )
+
+  const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit]
+  expect(url).toBe(
+    '/api/treasury/movements?from=2026-09-01&to=2026-09-18&eventType=restoration&channel=wallet&flow=out&actorId=u-bm&q=%D8%AA%D8%B1%D9%85%D9%8A%D9%85+%D8%A7%D9%84%D9%81%D8%B1%D8%B9&beforeId=42&limit=50',
+  )
+  expect(options.signal).toBe(controller.signal)
+})
+
 it('normalizes the legacy restoration balance field without exposing the old count gate', async () => {
   const fetchMock = vi.fn().mockResolvedValue(
     new Response(

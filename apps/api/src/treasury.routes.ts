@@ -10,6 +10,7 @@ import type {
   ReceivableEventRecord,
 } from '@ash/contracts'
 import {
+  LEDGER_RANGE_MAX_DAYS,
   cancelCashCountRequest,
   createCashCountRequest,
   correctReceivableRequest,
@@ -22,6 +23,7 @@ import {
 } from '@ash/contracts'
 import {
   COMPANY_FUND_KINDS,
+  LEDGER_EVENTS,
   type FundRef,
   type Minor,
   type Posting,
@@ -41,6 +43,8 @@ import {
   manualKaish,
   officeTransfer,
   addDays,
+  daysBetween,
+  isCalendarDate,
   companyBoxMovement,
   mirrorOrder,
   restorationMirror,
@@ -1378,17 +1382,6 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
   })
 
   /**
-   * Move money between the branch's own two boxes.
-   *
-   * Everyday work: Yallago's cut comes out of the wallet while the drivers hand back notes, so the
-   * wallet empties as the cash box fills and the office tops one from the other. WORKING CAPITAL
-   * IS UNCHANGED by design — both legs are office funds — so the capital card, the restoration and
-   * the go-live gate all see exactly what they saw a second ago. Only the SHAPE of the money moves.
-   *
-   * `journal.manual.write`, like every other hand-entered movement, with a reason that has to say
-   * something: a transfer with no explanation is indistinguishable next month from a mistake.
-   */
-  /**
    * What the two office boxes actually did, most recent first.
    *
    * The screen could post a transfer and never show one. Asked «أين أرى عمليات عمران», the honest
@@ -1400,46 +1393,97 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
    * «ماذا جرى لصندوقي», which is the question someone standing at the drawer actually has.
    */
   app.get('/treasury/movements', { config: { permission: 'branch_data.view', subject: ownBranch } }, async (req) => {
-    const q = z.object({ limit: z.coerce.number().int().min(1).max(200).default(50) }).parse(req.query ?? {})
+    const calendarDate = z.string().refine(isCalendarDate, 'expected a real YYYY-MM-DD date')
+    const q = z.object({
+      from: calendarDate.optional(),
+      to: calendarDate.optional(),
+      eventType: z.enum(LEDGER_EVENTS).optional(),
+      channel: z.enum(['cash', 'wallet']).optional(),
+      flow: z.enum(['in', 'out', 'internal']).optional(),
+      actorId: z.string().regex(/^[A-Za-z0-9-]{1,64}$/).optional(),
+      q: z.string().trim().min(1).max(200).optional(),
+      beforeId: z.coerce.number().int().positive().optional(),
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+    }).superRefine((value, context) => {
+      if ((value.from === undefined) !== (value.to === undefined)) {
+        context.addIssue({ code: 'custom', path: ['from', 'to'], message: '`from` and `to` must be supplied together' })
+      }
+      if (value.from !== undefined && value.to !== undefined && value.from > value.to) {
+        context.addIssue({ code: 'custom', path: ['from'], message: '`from` must be on or before `to`' })
+      }
+    }).parse(req.query ?? {})
     const branchId = resolveBranch(req)
     const today = todayFor(deps)
-
-    // This week and the one before it — enough to answer «what happened lately» without scanning
-    // the whole ledger, and `listByWeek` is the index the entries are stored under.
     const thisWeek = weekStartFor(today)
     const previous = weekStartFor(addDays(thisWeek, -1))
-    const entries = [
-      ...(await deps.ledger.listByWeek(branchId, thisWeek)),
-      ...(await deps.ledger.listByWeek(branchId, previous)),
-    ]
-
-    const OFFICE = new Set(['office_cash', 'office_wallet'])
-    const touching = entries.filter((entry) => entry.lines.some((line) => OFFICE.has(line.fundCode)))
-    touching.sort((a, b) => b.id - a.id)
-    const page = touching.slice(0, q.limit)
+    // Omitted dates preserve the rolling two-week read used by the previous Treasury card.
+    const from = q.from ?? previous
+    const to = q.to ?? today
+    if (daysBetween(from, to) + 1 > LEDGER_RANGE_MAX_DAYS) {
+      throw new ServiceError(422, 'range_too_large', { maxDays: LEDGER_RANGE_MAX_DAYS })
+    }
+    const page = await deps.ledger.listTreasuryMovements(branchId, {
+      from,
+      to,
+      limit: q.limit,
+      ...(q.eventType === undefined ? {} : { eventType: q.eventType }),
+      ...(q.channel === undefined ? {} : { channel: q.channel }),
+      ...(q.flow === undefined ? {} : { flow: q.flow }),
+      ...(q.actorId === undefined ? {} : { actorId: q.actorId }),
+      ...(q.q === undefined ? {} : { query: q.q }),
+      ...(q.beforeId === undefined ? {} : { beforeId: q.beforeId }),
+    })
 
     const names = new Map(
       (await deps.users.list()).map((user) => [user.id, user.fullNameAr || user.username]),
     )
-    const effect = (entry: (typeof page)[number], fundCode: string): Minor =>
+    const effect = (entry: JournalEntryRecord, fundCode: string): Minor =>
       entry.lines
         .filter((line) => line.fundCode === fundCode)
         .reduce((sum, line) => (line.side === 'D' ? sum + line.amount : sum - line.amount), 0n) as Minor
 
     return {
-      rows: page.map((entry) => ({
-        id: entry.id,
-        businessDate: entry.businessDate,
-        eventType: entry.eventType,
-        reason: entry.reason,
-        shiftId: entry.shiftId,
-        actorName: names.get(entry.createdBy) ?? null,
-        cash: serializeMoney(effect(entry, 'office_cash')),
-        wallet: serializeMoney(effect(entry, 'office_wallet')),
-      })),
+      from,
+      to,
+      rows: page.entries.map((entry) => {
+        const cash = effect(entry, 'office_cash')
+        const wallet = effect(entry, 'office_wallet')
+        const net = cash + wallet
+        return {
+          id: entry.id,
+          businessDate: entry.businessDate,
+          createdAt: new Date(entry.createdAtMs).toISOString(),
+          eventType: entry.eventType,
+          reason: entry.reason,
+          shiftId: entry.shiftId,
+          actorId: entry.createdBy,
+          actorName: names.get(entry.createdBy) ?? null,
+          flow: net > 0n ? 'in' : net < 0n ? 'out' : 'internal',
+          cash: serializeMoney(cash),
+          wallet: serializeMoney(wallet),
+        }
+      }),
+      nextCursor: page.nextBeforeId,
+      facets: {
+        eventTypes: page.eventTypes,
+        actors: page.actorIds
+          .map((id) => ({ id, name: names.get(id) ?? id }))
+          .sort((left, right) => left.name.localeCompare(right.name)),
+      },
     }
   })
 
+  /**
+   * Move money between the branch's own two boxes.
+   *
+   * Everyday work: Yallago's cut comes out of the wallet while the drivers hand back notes, so the
+   * wallet empties as the cash box fills and the office tops one from the other. WORKING CAPITAL
+   * IS UNCHANGED by design — both legs are office funds — so the capital card, the restoration and
+   * the go-live gate all see exactly what they saw a second ago. Only the SHAPE of the money moves.
+   *
+   * `journal.manual.write`, like every other hand-entered movement, with a reason that has to say
+   * something: a transfer with no explanation is indistinguishable next month from a mistake.
+   */
   app.post('/treasury/transfer', { config: { permission: 'journal.manual.write', subject: targetBranch } }, async (req, reply) => {
     const body = officeTransferRequest.parse(req.body)
     const branchId = resolveBranch(req)
