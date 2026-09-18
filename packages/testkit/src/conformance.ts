@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type {
   BatteryReadingRecord,
+  BatterySwapRecord,
   CompanyCommandRecord,
   Deps,
   ExpenseRecord,
@@ -91,6 +92,7 @@ const OTHER_SHIFT = '55555555-5555-5555-5555-555555555556'
 const DRIVER = '77777777-7777-7777-7777-777777777777'
 const OTHER_DRIVER = '77777777-7777-7777-7777-777777777778'
 const OTHER_VEHICLE = '88888888-8888-8888-8888-888888888889'
+const VEHICLE = '88888888-8888-8888-8888-888888888888'
 const BATTERY = '99999999-aaaa-4aaa-8aaa-aaaaaaaaaaa1'
 const MEDIA_1 = '99999999-bbbb-4bbb-8bbb-bbbbbbbbbbb1'
 const MEDIA_2 = '99999999-bbbb-4bbb-8bbb-bbbbbbbbbbb2'
@@ -733,6 +735,35 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           expect((await deps.shifts.listTimingBetween(BRANCH, '2026-07-21', '2026-07-21')).map((row) => row.id)).toEqual([SHIFT])
           expect(await deps.shifts.listTimingBetween(BRANCH, '2026-07-22', '2026-08-30')).toEqual([])
           expect(await deps.shifts.listTimingBetween('11111111-1111-1111-1111-111111111112', '2026-07-01', '2026-07-31')).toEqual([])
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('lists a vehicle timeline in stable chronological order and enforces branch/range scope', async () => {
+        const deps = await freshSettlement()
+        try {
+          const original = await deps.shifts.findById(SHIFT)
+          if (!original) throw new Error('conformance shift missing')
+          // Release the vehicle through the real close unit of work before assigning it to the
+          // earlier fixture. PostgreSQL correctly forbids two live shifts on one vehicle.
+          await createAndApproveSettlement(deps, settlement())
+          await deps.shifts.create({
+            ...original,
+            id: OTHER_SHIFT,
+            driverId: OTHER_DRIVER,
+            vehicleId: VEHICLE,
+            businessDate: '2026-07-20',
+            state: 'draft',
+            submittedAt: null,
+          }, USER)
+          expect((await deps.shifts.listByVehicle(BRANCH, VEHICLE, '2026-07-19', '2026-07-22')).map((s) => s.id)).toEqual([
+            OTHER_SHIFT,
+            SHIFT,
+          ])
+          expect(await deps.shifts.listByVehicle(BRANCH, OTHER_VEHICLE, '2026-07-19', '2026-07-22')).toEqual([])
+          expect(await deps.shifts.listByVehicle(BRANCH, VEHICLE, '2026-07-22', '2026-07-23')).toEqual([])
+          expect(await deps.shifts.listByVehicle('11111111-1111-1111-1111-111111111112', VEHICLE, '2026-07-19', '2026-07-22')).toEqual([])
         } finally {
           await ctx.cleanup?.(deps)
         }
@@ -1848,6 +1879,43 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           await deps.batteryReadings.upsert(corrected)
 
           expect(await deps.batteryReadings.listByShift(SHIFT)).toEqual([corrected])
+          expect(await deps.batteryReadings.listByShiftIds([OTHER_SHIFT, SHIFT])).toEqual([corrected])
+          expect(await deps.batteryReadings.listByShiftIds([])).toEqual([])
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('batch-loads battery swaps for named shifts in shift/sequence order', async () => {
+        const deps = await fresh()
+        try {
+          const spare = '99999999-aaaa-4aaa-8aaa-aaaaaaaaaaa2'
+          await deps.directory.createBattery({
+            id: spare,
+            branchId: BRANCH,
+            serialNo: 'CONF-SPARE-2',
+            bmsMac: null,
+            capacityAh: 50,
+            vehicleId: null,
+            slotNo: null,
+            state: 'ready',
+            active: true,
+            bmsProfile: null,
+            groundNo: null,
+          })
+          const swap: BatterySwapRecord = {
+            id: '99999999-cccc-4ccc-8ccc-ccccccccccc1',
+            shiftId: SHIFT,
+            seqNo: 1,
+            slotNo: 1,
+            outBatteryId: BATTERY,
+            inBatteryId: spare,
+            occurredAtMs: 1_784_000_100_000,
+            createdBy: USER,
+          }
+          await deps.batterySwaps.create(swap)
+          expect(await deps.batterySwaps.listByShiftIds([OTHER_SHIFT, SHIFT])).toEqual([swap])
+          expect(await deps.batterySwaps.listByShiftIds([])).toEqual([])
         } finally {
           await ctx.cleanup?.(deps)
         }
@@ -1989,8 +2057,8 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
         id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
         branchId: BRANCH,
         categoryId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
-        costCenterKind: 'general',
-        vehicleId: null,
+        costCenterKind: 'vehicle',
+        vehicleId: VEHICLE,
         amount: syp(250),
         businessDate: '2026-07-21',
         description: 'Charging electricity',
@@ -2017,6 +2085,9 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           expect(await deps.expenses.get(row.id)).toEqual(row)
           await expect(deps.expenses.create(row)).rejects.toThrow()
           expect(await deps.expenses.listByBranchAndDate(BRANCH, '2026-07-21', '2026-07-21')).toEqual([row])
+          expect(await deps.expenses.listByVehicle(BRANCH, VEHICLE, '2026-07-20', '2026-07-22')).toEqual([row])
+          expect(await deps.expenses.listByVehicle(BRANCH, OTHER_VEHICLE, '2026-07-20', '2026-07-22')).toEqual([])
+          expect(await deps.expenses.listByVehicle(BRANCH, VEHICLE, '2026-07-22', '2026-07-23')).toEqual([])
         } finally {
           await ctx.cleanup?.(deps)
         }

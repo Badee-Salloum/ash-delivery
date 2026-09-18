@@ -38,6 +38,15 @@ export class MemoryExpenseRepo implements ExpenseRepo {
       .filter((e) => e.branchId === branchId && e.businessDate >= from && e.businessDate <= to)
       .sort((a, b) => (a.businessDate < b.businessDate ? -1 : 1))
   }
+  async listByVehicle(branchId: string, vehicleId: string, from: CalendarDate, to: CalendarDate): Promise<ExpenseRecord[]> {
+    return [...this.rows.values()]
+      .filter((e) => e.branchId === branchId && e.vehicleId === vehicleId && e.businessDate >= from && e.businessDate <= to)
+      .sort((a, b) =>
+        (a.businessDate < b.businessDate ? -1 : a.businessDate > b.businessDate ? 1 : 0) ||
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+      )
+      .map((e) => ({ ...e }))
+  }
 
   /** G-1's «تُغذي ربحية كل محور» — one row per axis, so vehicle profitability is a subtraction. */
   async totalsByCostCenter(

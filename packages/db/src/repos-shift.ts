@@ -288,6 +288,13 @@ export class PgShiftRepo implements ShiftRepo {
     return this.load('s.branch_id = $1 AND s.business_date BETWEEN $2 AND $3', [branchId, from, to])
   }
 
+  async listByVehicle(branchId: string, vehicleId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftRecord[]> {
+    return this.load(
+      's.branch_id = $1 AND s.vehicle_id = $2 AND s.business_date BETWEEN $3 AND $4',
+      [branchId, vehicleId, from, to],
+    )
+  }
+
   /** Only ever called for a shift that never opened; the route enforces that. */
   async delete(id: string, actorId: string | null): Promise<void> {
     await withTransaction(this.pool, { actorId }, async (client) => {
@@ -1794,6 +1801,16 @@ export class PgExpenseRepo implements ExpenseRepo {
     return rows.map(expenseRecord)
   }
 
+  async listByVehicle(branchId: string, vehicleId: string, from: CalendarDate, to: CalendarDate): Promise<ExpenseRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT *, amount_minor::text AS amount FROM expenses
+        WHERE branch_id = $1 AND vehicle_id = $2 AND business_date BETWEEN $3 AND $4
+        ORDER BY business_date, id`,
+      [branchId, vehicleId, from, to],
+    )
+    return rows.map(expenseRecord)
+  }
+
   /** Aggregated in the database: G-1's per-axis profitability over a year of rows is not a JS loop. */
   async totalsByCostCenter(
     branchId: string,
@@ -3038,6 +3055,19 @@ export class PgBatteryReadingRepo implements BatteryReadingRepo {
     }))
   }
 
+  async listByShiftIds(shiftIds: readonly string[]): Promise<BatteryReadingRecord[]> {
+    if (shiftIds.length === 0) return []
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT r.*, b.slot_no
+         FROM shift_battery_readings r
+         JOIN batteries b ON b.id = r.battery_id
+        WHERE r.shift_id = ANY($1::uuid[])
+        ORDER BY r.shift_id, r.package, b.slot_no`,
+      [shiftIds],
+    )
+    return rows.map(batteryReadingRecord)
+  }
+
   async existsForBattery(batteryId: string): Promise<boolean> {
     const { rows } = await this.pool.query('SELECT 1 FROM shift_battery_readings WHERE battery_id = $1 LIMIT 1', [
       batteryId,
@@ -3085,9 +3115,47 @@ export class PgBatterySwapRepo implements BatterySwapRepo {
       createdBy: (r.created_by as string | null) ?? null,
     }))
   }
+
+  async listByShiftIds(shiftIds: readonly string[]): Promise<BatterySwapRecord[]> {
+    if (shiftIds.length === 0) return []
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM battery_swaps WHERE shift_id = ANY($1::uuid[]) ORDER BY shift_id, seq_no',
+      [shiftIds],
+    )
+    return rows.map(batterySwapRecord)
+  }
 }
 
 const numOrNull = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v))
+const batteryReadingRecord = (r: Record<string, unknown>): BatteryReadingRecord => ({
+  shiftId: String(r.shift_id),
+  batteryId: String(r.battery_id),
+  package: r.package as BatteryReadingRecord['package'],
+  slotNo: Number(r.slot_no ?? 1),
+  percent: numOrNull(r.percent),
+  packMillivolts: numOrNull(r.pack_millivolts),
+  cycleCount: numOrNull(r.cycle_count),
+  remainCapacityDah: numOrNull(r.remain_capacity_dah),
+  fullCapacityDah: numOrNull(r.full_capacity_dah),
+  mosTempDc: numOrNull(r.mos_temp_dc),
+  t1Dc: numOrNull(r.t1_dc),
+  t2Dc: numOrNull(r.t2_dc),
+  mediaId: (r.media_id as string | null) ?? null,
+  source: r.source as BatteryReadingRecord['source'],
+  unavailable: Boolean(r.unavailable),
+  ocrRaw: r.ocr_raw ?? null,
+  batterySwapId: (r.battery_swap_id as string | null) ?? null,
+})
+const batterySwapRecord = (r: Record<string, unknown>): BatterySwapRecord => ({
+  id: String(r.id),
+  shiftId: String(r.shift_id),
+  seqNo: Number(r.seq_no),
+  slotNo: Number(r.slot_no),
+  outBatteryId: String(r.out_battery_id),
+  inBatteryId: String(r.in_battery_id),
+  occurredAtMs: new Date(r.occurred_at as string).getTime(),
+  createdBy: (r.created_by as string | null) ?? null,
+})
 
 // ── «التفقّد» — manager check-in rounds ────────────────────────────────────────────────────
 

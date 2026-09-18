@@ -5,6 +5,7 @@ import { Icon, type IconName } from './icons.tsx'
 import { type Notif, NotificationBell } from './NotificationBell.tsx'
 import { Login } from './screens/Login.tsx'
 import { Dashboard } from './screens/Dashboard.tsx'
+import { VehicleHistory } from './screens/VehicleHistory.tsx'
 import { AWAITING_STATES, Queue } from './screens/Queue.tsx'
 import { LiveShifts } from './screens/LiveShifts.tsx'
 import { CompletedShifts } from './screens/CompletedShifts.tsx'
@@ -386,7 +387,7 @@ export function AdminApp(): ReactNode {
         <main className="flex-1 overflow-y-auto p-3 lg:p-6">
         <HashParamsContext.Provider value={replaceParams}>
         <div className="mx-auto w-full max-w-[110rem]">
-        {!openShift ? (
+        {!openShift && section !== 'vehicle' ? (
           <h1 className="mb-4 text-page font-bold text-ink">
             {nav.find((n) => n.key === section)?.label ?? t.dashboard.title}
           </h1>
@@ -419,6 +420,8 @@ export function AdminApp(): ReactNode {
           <Fleet />
         ) : section === 'fleetConfig' ? (
           <FleetConfig />
+        ) : section === 'vehicle' ? (
+          <VehicleHistory key={mountKey} initial={liveParams.current} />
         ) : section === 'expenses' ? (
           <Expenses />
         ) : section === 'checkin' ? (

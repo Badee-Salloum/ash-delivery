@@ -1,7 +1,7 @@
 import cookie from '@fastify/cookie'
 import Fastify, { type FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import type { Deps, ShiftOrderRecord, ShiftSettlementRecord } from '@ash/contracts'
+import type { Deps, ShiftOrderRecord } from '@ash/contracts'
 import {
   addOrderRequest,
   addTrancheRequest,
@@ -49,7 +49,6 @@ import {
   dayOfWeek,
   minor,
   resolveFxDay,
-  splitFixedDriverShare,
   sum,
   weekClosedOn,
   weekStartFor,
@@ -130,6 +129,7 @@ import {
   prepareShiftReview,
   todayFor,
 } from './shifts.service.ts'
+import { completedShiftFinancial } from './shift-financial.ts'
 
 /**
  * A week-close blocker as it crosses the wire. A trial-balance difference is money, so it goes as a
@@ -153,51 +153,6 @@ export interface AppOptions {
  */
 export const SHIFT_LIST_MAX_DAYS = 31
 export const SHIFT_LIST_MAX_DAYS_NARROWED = 400
-
-/**
- * Historical financial detail derived from the immutable close snapshot plus the exact included
- * order split that produced it. Manual jobs carry their agreed split on the order; Yallago jobs
- * retain the fixed 40/40/20 calculation. Every amount stays in minor units until serialization.
- */
-function completedShiftFinancial(
-  settlement: ShiftSettlementRecord,
-  rows: readonly ShiftOrderRecord[],
-): Record<string, string> {
-  const counted = includedOrders(rows)
-  const yallago = splitFixedDriverShare(
-    counted.filter((row) => row.kind !== 'manual').map((row) => row.fee),
-  )
-  const manualCompanyShare = sum(
-    counted
-      .filter((row) => row.kind === 'manual')
-      .map((row) => row.companyShare ?? minor(0n)),
-  )
-
-  return {
-    policyCode: settlement.policyCode,
-    deliveryFees: serializeMoney(sum(counted.map((row) => row.fee))),
-    companyShare: serializeMoney(add(yallago.companyShare, manualCompanyShare)),
-    yalagoShare: serializeMoney(yallago.yalagoShare),
-    grossDriverShare: serializeMoney(settlement.grossDriverShare),
-    deductions: serializeMoney(settlement.cashDeductionTotal),
-    netDriverShare: serializeMoney(settlement.baseDriverShare),
-    expectedTotal: serializeMoney(settlement.expectedTotal),
-    actualCash: serializeMoney(settlement.actualCash),
-    actualWallet: serializeMoney(settlement.actualWallet),
-    actualTotal: serializeMoney(settlement.actualTotal),
-    variance: serializeMoney(settlement.variance),
-    varianceDirection: settlement.varianceDirection,
-    finalEmployeeCash: serializeMoney(settlement.finalEmployeeCash),
-    cashClaimToOffice: serializeMoney(settlement.cashClaimToOffice),
-    walletClaimToOffice: serializeMoney(settlement.walletClaimToOffice),
-    cashReceivableDeferred: serializeMoney(settlement.cashReceivableDeferred),
-    walletReceivableDeferred: serializeMoney(settlement.walletReceivableDeferred),
-    cashShortageReceivable: serializeMoney(settlement.cashShortageReceivable),
-    cashToOffice: serializeMoney(settlement.cashToOffice),
-    walletToOffice: serializeMoney(settlement.walletToOffice),
-    officeReturn: serializeMoney(add(settlement.cashToOffice, settlement.walletToOffice)),
-  }
-}
 
 /**
  * SQLSTATE 25006 is broader than the ledger's sealed-week guard.

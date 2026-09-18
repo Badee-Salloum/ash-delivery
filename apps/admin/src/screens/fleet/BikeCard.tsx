@@ -150,7 +150,7 @@ export function BikeCard({
           ))}
         </Select>
         <Button variant="ghost" onClick={onHistory}>
-          {t.fleet.history}
+          {t.fleet.fullHistory}
         </Button>
         {/* Only a shift that never opened can be released — `DELETE /shifts/:id` accepts `draft`
             and `awaiting_open_approval` and nothing else, so offering it on a running shift would

@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import type { Deps, DocumentRecord, DriverRecord, VehicleEventRecord } from '@ash/contracts'
+import type { Deps, DocumentRecord, DriverRecord, ShiftOrderRecord, VehicleEventRecord } from '@ash/contracts'
 import {
   createAssignmentRequest,
   createBatteryRequest,
@@ -33,13 +33,20 @@ import {
   MAX_BATTERY_SLOTS,
   addDays,
   alertBandFor,
+  can,
   canTransitionVehicle,
   documentStatusOn,
   formatVehicleNumber,
+  isCalendarDate,
   nextMachineNo,
+  odometerTimeline,
+  shiftDistance,
+  workedTime,
 } from '@ash/domain'
 import { ServiceError, recordVehicleEvent, todayFor } from './shifts.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
+import { completedShiftFinancial } from './shift-financial.ts'
+import { grantsFromRows } from './rbac.ts'
 
 /** The wire shape of a life-log event: cost serialised as a decimal string, time as ISO. */
 function presentVehicleEvent(e: VehicleEventRecord): Record<string, unknown> {
@@ -681,6 +688,101 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
     return { events: events.map(presentVehicleEvent) }
   })
 
+  /** P6: one bounded, batch-loaded history for a vehicle; no per-shift fan-out. */
+  app.get('/vehicles/:id/history', { config: { permission: 'branch_data.view', subject: vehicleSubject(deps) } }, async (req) => {
+    const { id } = z.object({ id: z.string() }).parse(req.params)
+    const q = z.object({
+      from: z.string().refine(isCalendarDate),
+      to: z.string().refine(isCalendarDate),
+    }).parse(req.query)
+    if (q.from > q.to) {
+      throw new z.ZodError([{ code: 'custom', path: ['from'], message: '`from` must be on or before `to`' }])
+    }
+    const vehicle = await deps.directory.vehicle(id)
+    if (!vehicle) throw new ServiceError(404, 'vehicle_not_found')
+
+    const shifts = await deps.shifts.listByVehicle(vehicle.branchId, id, q.from, q.to)
+    const shiftIds = shifts.map((shift) => shift.id)
+    const [orderRows, settlements, readings, swaps, expenses, categories, rawEvents, drivers] = await Promise.all([
+      deps.orders.listByShiftIds(shiftIds),
+      deps.settlements.listByShiftIds(shiftIds),
+      deps.batteryReadings.listByShiftIds(shiftIds),
+      deps.batterySwaps.listByShiftIds(shiftIds),
+      deps.expenses.listByVehicle(vehicle.branchId, id, q.from, q.to),
+      deps.expenses.listCategories(),
+      deps.vehicleEvents.listByVehicle(id),
+      deps.directory.listDrivers(vehicle.branchId),
+    ])
+    const ordersByShift = groupByShift(orderRows)
+    const settlementsByShift = new Map(settlements.map((settlement) => [settlement.shiftId, settlement]))
+    const readingsByShift = groupByShift(readings)
+    const swapsByShift = groupByShift(swaps)
+    const driverNames = new Map(drivers.map((driver) => [driver.id, driver.fullNameAr]))
+    const categoryNames = new Map(categories.map((category) => [category.id, category.nameAr]))
+    const distance = odometerTimeline(shifts.map((shift) => ({ start: shift.odoStart, end: shift.odoEnd })))
+    const events = rawEvents.filter((event) => event.businessDate >= q.from && event.businessDate <= q.to)
+    const canSeeAsset = req.actor
+      ? can(req.actor, 'company_fund.manage', {}, grantsFromRows(await deps.directory.grants())).allowed
+      : false
+
+    return {
+      from: q.from,
+      to: q.to,
+      vehicle,
+      distance,
+      shifts: shifts.map((shift) => {
+        const orders = ordersByShift.get(shift.id) ?? []
+        const settlement = settlementsByShift.get(shift.id)
+        const perShiftDistance = shiftDistance({ start: shift.odoStart, end: shift.odoEnd })
+        return {
+          id: shift.id,
+          businessDate: shift.businessDate,
+          shiftNo: shift.shiftNo,
+          state: shift.state,
+          driverId: shift.driverId,
+          driverName: driverNames.get(shift.driverId) ?? shift.driverId,
+          windowOpensAt: shift.windowOpensAt ?? shift.openApprovedAt,
+          submittedAt: shift.submittedAt,
+          worked: workedTime(
+            (shift.windowOpensAt ?? shift.openApprovedAt) === null
+              ? null
+              : Date.parse((shift.windowOpensAt ?? shift.openApprovedAt)!),
+            shift.submittedAt === null ? null : Date.parse(shift.submittedAt),
+            deps.clock.offsetMinutes(),
+            deps.clock.dayStartMinutes(),
+          ),
+          odometerStart: shift.odoStart,
+          odometerEnd: shift.odoEnd,
+          distance: perShiftDistance,
+          batteryStart: shift.batteryStart,
+          batteryEnd: shift.batteryEnd,
+          orderCount: orders.length,
+          orders: orders.map(presentHistoryOrder),
+          financial: settlement ? completedShiftFinancial(settlement, orders) : null,
+          batteryReadings: readingsByShift.get(shift.id) ?? [],
+          batterySwaps: (swapsByShift.get(shift.id) ?? []).map((swap) => ({
+            ...swap,
+            occurredAt: new Date(swap.occurredAtMs).toISOString(),
+          })),
+        }
+      }),
+      expenses: expenses.map((expense) => ({
+        id: expense.id,
+        businessDate: expense.businessDate,
+        categoryId: expense.categoryId,
+        categoryName: categoryNames.get(expense.categoryId) ?? expense.categoryId,
+        description: expense.description,
+        channel: expense.channel,
+        amount: serializeMoney(expense.amount),
+        receiptMediaId: expense.receiptMediaId,
+      })),
+      // A life-log event linked to an expense remains visible here, but its cost is not added to an
+      // expense total a second time. Consumers render events and expenses as separate evidence.
+      events: events.map(presentVehicleEvent),
+      ...(canSeeAsset ? { asset: null } : {}),
+    }
+  })
+
   // ── Driver ↔ vehicle assignments (B-3 / س34) ────────────────────────────────────────────
 
   /**
@@ -1013,6 +1115,27 @@ const vehicleSubject = (deps: Deps) => async (req: { params: unknown }) => {
   const vehicle = await deps.directory.vehicle(id)
   return vehicle ? { branchId: vehicle.branchId } : {}
 }
+
+function groupByShift<T extends { shiftId: string }>(rows: readonly T[]): Map<string, T[]> {
+  const grouped = new Map<string, T[]>()
+  for (const row of rows) {
+    const values = grouped.get(row.shiftId) ?? []
+    values.push(row)
+    grouped.set(row.shiftId, values)
+  }
+  return grouped
+}
+
+const presentHistoryOrder = (order: ShiftOrderRecord) => ({
+  id: order.id,
+  providerOrderNo: order.providerOrderNo,
+  payMode: order.payMode,
+  kind: order.kind,
+  fee: serializeMoney(order.fee),
+  included: order.included,
+  occurredDate: order.occurredDate,
+  occurredMinute: order.occurredMinute,
+})
 
 /** Every mutation is audited (A-5 / س79) — who, when, before and after. */
 async function audit(

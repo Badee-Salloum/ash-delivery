@@ -91,3 +91,40 @@ export function totalDistance(readings: Iterable<OdometerReading>): DistanceTota
   for (const reading of readings) total = addShiftDistance(total, shiftDistance(reading))
   return total
 }
+
+/** A vehicle's ordered odometer story, including kilometres between logged shifts. */
+export interface OdometerTimeline {
+  readonly distance: DistanceTotal
+  /** Positive movement between one shift's end and the next shift's start. */
+  readonly unloggedKm: number
+  /** Adjacent shift boundaries where the next start is below the previous end. */
+  readonly boundaryRollbacks: number
+  /** Adjacent boundaries that could not be compared because a reading was absent/invalid. */
+  readonly unknownBoundaries: number
+}
+
+/**
+ * Summarise an already chronological vehicle timeline.
+ *
+ * A gap is not assigned to either driver: it is movement the odometer proves happened between
+ * shifts. A backwards boundary is reported, never subtracted. For a fully recorded monotonic
+ * timeline, `distance.km + unloggedKm` telescopes exactly to `last.end - first.start`.
+ */
+export function odometerTimeline(readings: readonly OdometerReading[]): OdometerTimeline {
+  const distance = totalDistance(readings)
+  let unloggedKm = 0
+  let boundaryRollbacks = 0
+  let unknownBoundaries = 0
+  for (let index = 1; index < readings.length; index += 1) {
+    const previousEnd = readings[index - 1]?.end
+    const currentStart = readings[index]?.start
+    if (!isReading(previousEnd) || !isReading(currentStart)) {
+      unknownBoundaries += 1
+    } else if (currentStart < previousEnd) {
+      boundaryRollbacks += 1
+    } else {
+      unloggedKm += currentStart - previousEnd
+    }
+  }
+  return { distance, unloggedKm, boundaryRollbacks, unknownBoundaries }
+}

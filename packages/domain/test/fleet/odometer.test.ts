@@ -4,6 +4,7 @@ import {
   EMPTY_DISTANCE_TOTAL,
   type OdometerReading,
   addShiftDistance,
+  odometerTimeline,
   shiftDistance,
   totalDistance,
 } from '../../src/fleet/odometer.ts'
@@ -35,6 +36,45 @@ describe('shiftDistance', () => {
       expect(shiftDistance({ start: bad, end: 100 }), String(bad)).toEqual({ recorded: false, reason: 'missing' })
       expect(shiftDistance({ start: 0, end: bad }), String(bad)).toEqual({ recorded: false, reason: 'missing' })
     }
+  })
+})
+
+describe('odometerTimeline', () => {
+  it('separates driven shifts, unlogged gaps and rollbacks', () => {
+    expect(odometerTimeline([
+      { start: 100, end: 140 },
+      { start: 150, end: 180 },
+      { start: 170, end: 190 },
+      { start: null, end: 220 },
+    ])).toEqual({
+      distance: { km: 90, recordedShifts: 3, unrecordedShifts: 1, missing: 1, rollbacks: 0 },
+      unloggedKm: 10,
+      boundaryRollbacks: 1,
+      unknownBoundaries: 1,
+    })
+  })
+
+  it('telescopes for every monotonic complete timeline', () => {
+    fc.assert(fc.property(
+      fc.array(fc.integer({ min: 0, max: 1_000 }), { minLength: 1, maxLength: 40 }),
+      fc.integer({ min: 0, max: 10_000 }),
+      (steps, first) => {
+        let cursor = first
+        const shifts = steps.map((step, index) => {
+          const gap = index % 4
+          const start = cursor + gap
+          const end = start + step
+          cursor = end
+          return { start, end }
+        })
+        const timeline = odometerTimeline(shifts)
+        expect(timeline.boundaryRollbacks).toBe(0)
+        expect(timeline.unknownBoundaries).toBe(0)
+        expect(timeline.distance.km + timeline.unloggedKm).toBe(
+          shifts.at(-1)!.end - shifts[0]!.start,
+        )
+      },
+    ))
   })
 })
 

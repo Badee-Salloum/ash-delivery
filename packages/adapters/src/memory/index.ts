@@ -314,6 +314,16 @@ export class MemoryShiftRepo implements ShiftRepo {
   async listByBranchAndDateRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftRecord[]> {
     return [...this.rows.values()].filter((s) => s.branchId === branchId && s.businessDate >= from && s.businessDate <= to)
   }
+  async listByVehicle(branchId: string, vehicleId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftRecord[]> {
+    return [...this.rows.values()]
+      .filter((s) => s.branchId === branchId && s.vehicleId === vehicleId && s.businessDate >= from && s.businessDate <= to)
+      .sort((a, b) =>
+        (a.businessDate < b.businessDate ? -1 : a.businessDate > b.businessDate ? 1 : 0) ||
+        a.shiftNo - b.shiftNo ||
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+      )
+      .map((s) => structuredClone(s))
+  }
   async listApprovedForDriverOnDate(driverId: string, businessDate: CalendarDate): Promise<ShiftRecord[]> {
     return [...this.rows.values()].filter(
       (s) => s.driverId === driverId && s.businessDate === businessDate && (s.state === 'approved' || s.state === 'week_locked'),
@@ -376,6 +386,13 @@ export class MemoryBatteryReadingRepo implements BatteryReadingRepo {
       .sort((a, b) => a.package.localeCompare(b.package) || a.slotNo - b.slotNo)
       .map((r) => ({ ...r }))
   }
+  async listByShiftIds(shiftIds: readonly string[]): Promise<BatteryReadingRecord[]> {
+    const wanted = new Set(shiftIds)
+    return [...this.rows.values()]
+      .filter((r) => wanted.has(r.shiftId))
+      .sort((a, b) => a.shiftId.localeCompare(b.shiftId) || a.package.localeCompare(b.package) || a.slotNo - b.slotNo)
+      .map((r) => ({ ...r }))
+  }
   async existsForBattery(batteryId: string): Promise<boolean> {
     return [...this.rows.values()].some((r) => r.batteryId === batteryId)
   }
@@ -414,6 +431,13 @@ export class MemoryBatterySwapRepo implements BatterySwapRepo {
     return this.rows
       .filter((r) => r.shiftId === shiftId)
       .sort((a, b) => a.seqNo - b.seqNo)
+      .map((r) => ({ ...r }))
+  }
+  async listByShiftIds(shiftIds: readonly string[]): Promise<BatterySwapRecord[]> {
+    const wanted = new Set(shiftIds)
+    return this.rows
+      .filter((r) => wanted.has(r.shiftId))
+      .sort((a, b) => a.shiftId.localeCompare(b.shiftId) || a.seqNo - b.seqNo)
       .map((r) => ({ ...r }))
   }
 

@@ -883,6 +883,8 @@ export interface ShiftRepo {
    * be re-run, because `week_locks_no_reopen` refuses to re-stamp `closed_at`.
    */
   listByBranchAndDateRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftRecord[]>
+  /** Full vehicle timeline rows, branch-scoped and ordered oldest first (P6). */
+  listByVehicle(branchId: string, vehicleId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftRecord[]>
   listApprovedForDriverOnDate(driverId: string, businessDate: CalendarDate): Promise<ShiftRecord[]>
   /**
    * The next free shift number for this driver on this business date.
@@ -2065,6 +2067,8 @@ export interface ExpenseRepo {
   get(id: string): Promise<ExpenseRecord | null>
   create(expense: ExpenseRecord): Promise<void>
   listByBranchAndDate(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ExpenseRecord[]>
+  /** Company/branch expenses explicitly attributed to one vehicle in the inclusive period. */
+  listByVehicle(branchId: string, vehicleId: string, from: CalendarDate, to: CalendarDate): Promise<ExpenseRecord[]>
   /** Per-cost-centre totals — G-1's «تُغذي ربحية كل محور». */
   totalsByCostCenter(
     branchId: string,
@@ -2493,6 +2497,7 @@ export interface BatteryReadingRepo {
    */
   upsert(reading: BatteryReadingRecord): Promise<void>
   listByShift(shiftId: string): Promise<BatteryReadingRecord[]>
+  listByShiftIds(shiftIds: readonly string[]): Promise<BatteryReadingRecord[]>
   /** Has this pack ever been read? Asked before a delete — a pack with readings is evidence. */
   existsForBattery(batteryId: string): Promise<boolean>
 }
@@ -2502,6 +2507,7 @@ export interface BatterySwapRepo {
   create(swap: BatterySwapRecord): Promise<void>
   /** Every swap on a shift, in the order they happened. Length + max seqNo drive the next seqNo. */
   listByShift(shiftId: string): Promise<BatterySwapRecord[]>
+  listByShiftIds(shiftIds: readonly string[]): Promise<BatterySwapRecord[]>
   /** Has this pack been on either side of a swap? Asked before a delete. */
   existsForBattery(batteryId: string): Promise<boolean>
 }
