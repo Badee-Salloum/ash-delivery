@@ -13,6 +13,7 @@ import { PgLedgerRangeSource } from '../src/repos-range.ts'
 import { PgCompanyLedgerRepo, PgCompanyLedgerSource } from '../src/repos-company.ts'
 import { PgCompanyFinanceRepo } from '../src/repos-company-finance.ts'
 import { PgRecurringExpenseRepo } from '../src/repos-recurring.ts'
+import { PgDriverAccountProvisioningRepo } from '../src/repos-driver-account.ts'
 import { assertDisposableDatabaseConnection, assertDisposableDatabaseUrl } from './disposable-database.ts'
 import {
   PgAuditRepo,
@@ -215,6 +216,7 @@ if (!DATABASE_URL) {
         cipher: notYetImplemented('Cipher'),
         users: new PgUserRepo(pool),
         sessions: new PgSessionRepo(pool),
+        driverAccounts: new PgDriverAccountProvisioningRepo(pool),
         shifts: new PgShiftRepo(pool),
         preapprovedShiftRules: new PgPreapprovedShiftRuleRepo(pool),
         batteryReadings: new PgBatteryReadingRepo(pool),

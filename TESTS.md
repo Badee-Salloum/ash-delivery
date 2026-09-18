@@ -7,6 +7,19 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 
 **Legend:** ✅ implemented and green · ⚠ written but never executed · 🔜 planned, milestone named.
 
+## 2026-09-18 driver self-registration
+
+| Gate | Named test | Result |
+| --- | --- | --- |
+| The strict contract normalizes usernames, enforces password/username bounds and rejects privileged fields | `contracts/driver-registration.test.ts` | ✅ |
+| Public branch listing excludes HQ; signup creates an active fixed-role driver, session and immediate ordinary driver access | `api/driver-registration.test.ts` — *lists only operating branches* / *creates an active driver…* | ✅ |
+| Unknown/HQ branches, role/active/id injection, duplicate username/code, concurrent duplicate and authenticated callers fail by name | `api/driver-registration.test.ts` | ✅ |
+| A lost signup response recovers through login; three business outcomes consume the window, malformed input does not, and the fourth returns stable `Retry-After` | `api/driver-registration.test.ts` — *supports lost-response recovery* / *counts three schema-valid business outcomes…* | ✅ |
+| Separate addresses remain separate and IPv6 privacy addresses share a `/64`; proxy headers are trusted only on the Vercel/Caddy paths | `api/driver-registration.test.ts`, `api/registration-address.test.ts` | ✅ |
+| User, driver, session and audit commit together or all roll back; PostgreSQL serializes concurrent claims and duplicate provisioning across repository instances | `db/driver-registration-postgres.test.ts` (5 cases) | ✅ PostgreSQL 17.6 |
+| Login/register switching, required fields, normalized username, eight-character password and client-only matching confirmation stay wired | `driver/driver-registration.test.ts` | ✅ |
+| Full repository and production-build gates | `pnpm check`: 3,190 passed, 18 expected PostgreSQL-only skips; `pnpm --filter @ash/driver build` | ✅ |
+
 ## 2026-09-18 finance and fleet redesign — P3/P4/P6 and C1–C6
 
 | Gate | Named test | Result |

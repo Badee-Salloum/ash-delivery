@@ -81,6 +81,8 @@ const AUDIT_EXEMPT = {
   checkin_windows: 'a rota of expected times, not money; every change is a settings-shaped edit and the checkins it judges are audited',
   sessions: 'high churn; login/logout is covered by login_attempts',
   login_attempts: 'already an append-only audit record in its own right',
+  driver_registration_attempts:
+    'append-only, password-free rate-limit facts containing only a one-way address hash and timestamp; expired rows are retention-deleted',
   notifications: 'derived from audited events; auditing them would double the write volume',
   media: 'immutable and content-addressed; the shift_media link is what matters',
   shift_media_attachment_history:

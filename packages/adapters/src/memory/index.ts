@@ -21,6 +21,8 @@ import type {
   DirectoryRepo,
   DocumentRecord,
   DriverRecord,
+  DriverAccountProvisionInput,
+  DriverAccountProvisioningRepo,
   FxRepo,
   FinancialTransactionDeps,
   FinancialUnitOfWork,
@@ -228,7 +230,7 @@ export class MemoryUserRepo implements UserRepo {
 }
 
 export class MemorySessionRepo implements SessionRepo {
-  private readonly rows = new Map<string, SessionRecord>()
+  readonly rows = new Map<string, SessionRecord>()
   async create(session: SessionRecord): Promise<void> {
     this.rows.set(session.id, { ...session })
   }
@@ -244,6 +246,79 @@ export class MemorySessionRepo implements SessionRepo {
     for (const [id, s] of this.rows) {
       if (s.userId === userId) this.rows.set(id, { ...s, revokedAtMs: atMs })
     }
+  }
+}
+
+export class MemoryDriverAccountProvisioningRepo implements DriverAccountProvisioningRepo {
+  private readonly attempts = new Map<string, number[]>()
+  private readonly users: MemoryUserRepo
+  private readonly sessions: MemorySessionRepo
+  private readonly directory: MemoryDirectoryRepo
+  private readonly audit: MemoryAuditRepo
+
+  constructor(
+    users: MemoryUserRepo,
+    sessions: MemorySessionRepo,
+    directory: MemoryDirectoryRepo,
+    audit: MemoryAuditRepo,
+  ) {
+    this.users = users
+    this.sessions = sessions
+    this.directory = directory
+    this.audit = audit
+  }
+
+  async claimRegistrationAttempt(input: {
+    addressHash: string
+    attemptedAtMs: number
+    limit: number
+    windowMs: number
+  }) {
+    const retentionStart = input.attemptedAtMs - 24 * 60 * 60 * 1000
+    const retained = (this.attempts.get(input.addressHash) ?? []).filter((at) => at >= retentionStart)
+    const active = retained.filter((at) => at > input.attemptedAtMs - input.windowMs)
+    this.attempts.set(input.addressHash, retained)
+    if (active.length >= input.limit) {
+      return {
+        allowed: false as const,
+        retryAfterSeconds: Math.max(1, Math.ceil((active[0]! + input.windowMs - input.attemptedAtMs) / 1000)),
+      }
+    }
+    retained.push(input.attemptedAtMs)
+    return { allowed: true as const }
+  }
+
+  async provision(input: DriverAccountProvisionInput): Promise<void> {
+    // Validate every memory invariant before changing any collection; after this point all writes
+    // are infallible, which gives the fake the same all-or-nothing observable behavior as Postgres.
+    if (await this.users.findByUsername(input.user.username)) {
+      throw Object.assign(new Error(`duplicate username ${input.user.username}`), { code: 'DUPLICATE_USERNAME' })
+    }
+    if ([...this.directory.drivers.values()].some((driver) => driver.code === input.driver.code)) {
+      throw Object.assign(new Error(`duplicate driver code ${input.driver.code}`), { code: 'DUPLICATE_CODE' })
+    }
+    // PgUserRepo derives driverId through its LEFT JOIN; keep the memory read model identical.
+    this.users.rows.set(input.user.id, { ...input.user, driverId: input.driver.id })
+    this.directory.drivers.set(input.driver.id, { ...input.driver })
+    if (input.session) this.sessions.rows.set(input.session.id, { ...input.session })
+    await this.audit.append({
+      tableName: 'driver_registrations',
+      recordId: input.driver.id,
+      action: 'INSERT',
+      actorId: input.audit.actorId,
+      actorKind: input.audit.actorKind,
+      branchId: input.driver.branchId,
+      requestId: input.audit.requestId,
+      before: null,
+      after: {
+        userId: input.user.id,
+        driverId: input.driver.id,
+        branchId: input.driver.branchId,
+        roleKey: 'driver',
+        sessionCreated: input.session !== null,
+      },
+      occurredAtMs: input.audit.occurredAtMs,
+    })
   }
 }
 
@@ -2183,6 +2258,7 @@ export interface MemoryDeps extends Deps {
   notifications: MemoryNotificationRepo
   settings: MemorySettingsRepo
   users: MemoryUserRepo
+  driverAccounts: MemoryDriverAccountProvisioningRepo
   shifts: MemoryShiftRepo
   orders: MemoryOrderRepo
   cashDeductions: MemoryCashDeductionRepo
@@ -2422,6 +2498,10 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   const fx = new MemoryFxRepo()
   const weekLocks = new MemoryWeekLockRepo(ledger)
   const directory = new MemoryDirectoryRepo()
+  const users = new MemoryUserRepo()
+  const sessions = new MemorySessionRepo()
+  const audit = new MemoryAuditRepo()
+  const driverAccounts = new MemoryDriverAccountProvisioningRepo(users, sessions, directory, audit)
   const operationWindows = new MemoryOperationWindowRepo(
     shifts,
     orders,
@@ -2522,8 +2602,9 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     ids: new SeqIdGen(),
     hasher: new PlainHasher(),
     cipher: memoryCipher(),
-    users: new MemoryUserRepo(),
-    sessions: new MemorySessionRepo(),
+    users,
+    sessions,
+    driverAccounts,
     shifts,
     assignments,
     preapprovedShiftRules,
@@ -2566,7 +2647,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     ocrReads: new MemoryOcrReadRepo(),
     fx,
     weekLocks,
-    audit: new MemoryAuditRepo(),
+    audit,
     directory,
     vehicleEvents: new MemoryVehicleEventRepo(),
     attendance: new MemoryAttendanceRepo(),

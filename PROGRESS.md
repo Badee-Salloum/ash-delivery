@@ -1,5 +1,34 @@
 # PROGRESS
 
+## 2026-09-18 — driver self-registration complete locally
+
+**Done.** The logged-out driver app now switches between login and a bilingual account form for Arabic full
+name, operating branch, normalized username, password and client-only confirmation. It loads only public
+operating branches (never HQ), validates before sending, stays unavailable offline, and after a successful
+creation refreshes `/me` into the ordinary assignment/vehicle flow.
+
+`GET /auth/register/branches` and strict `POST /auth/register` create only an active `driver`. User, linked
+driver, eight-hour session and password-free anonymous audit facts commit atomically; the same provisioner now
+fixes the admin driver-account partial-write path. `DRIVER_SELF_REGISTRATION_ENABLED` defaults on and provides
+the emergency stop.
+
+Migration `0078_driver_self_registration.sql` adds the hashed-address attempt register and redacts credential
+columns from generic user audits. PostgreSQL serializes each address with an advisory transaction lock: exactly
+three schema-valid attempts fit in a rolling hour, denied attempts do not extend it, IPv6 is grouped to `/64`,
+and records older than 24 hours are removed opportunistically. Forwarded addresses are trusted only in Vercel
+or from a private Caddy connection.
+
+**Verified.** `pnpm check` passes every static gate and 3,190 default tests; the 18 database skips are the
+expected `DATABASE_URL`-gated suites. The focused disposable-PostgreSQL suite passes 5/5, proving all-or-nothing
+provisioning, password-free anonymous audit, rolling-window expiry and concurrent claims across repository
+instances. The driver production build also passes. Production deployment and applying migration 0078 remain
+separate and require explicit production approval.
+
+**Two-minute demo.** Open the driver app logged out, press “Create driver account”, choose an operating branch,
+submit the five visible fields, and watch the existing vehicle/assignment screen open without a second login.
+Use an existing username to see the localized conflict, or set `DRIVER_SELF_REGISTRATION_ENABLED=false` to
+exercise the kill switch.
+
 ## 2026-09-18 — finance and fleet redesign complete locally (P3/P4/P6, C2–C6)
 
 **Done.** The approved dashboard is now eight independently loaded sections with one shared business-date
@@ -20,7 +49,7 @@ and content-addressed. The company workspace exposes the complete flow, while th
 combined profit and keeps the branch/company split, both currency pockets, reserve, book value and due
 depreciation visible.
 
-**Correctness gates.** Migrations 0064–0077 are forward-only and still undeployed. PostgreSQL guards bind every
+**Correctness gates.** Migrations 0064–0078 are forward-only and still undeployed. PostgreSQL guards bind every
 HQ journal to exactly one typed command, enforce actor/RBAC and currency/rate identity, prevent overspending,
 protect linked vehicles, and make command facts immutable. The real-PostgreSQL finance and recurrence suites
 pass 33/33; focused API suites pass 104/104 and focused admin suites pass 27/27. Final `pnpm check` passes every
@@ -28,7 +57,7 @@ static gate and 3,168 default tests (domain 821, contracts 34, client 314, adapt
 database 161 and API 1,000); the 17 default database skips are the expected `DATABASE_URL`-gated cases.
 
 **Next (owner action, not an engineering gap).** Give separate written production approval, take the documented
-backup/pre-flight, deploy API and admin together, apply 0064–0077, then perform each branch cutover and physical
+backup/pre-flight, deploy API and admin together, apply 0064–0078, then perform each branch cutover and physical
 SYP/USD opening count through the UI/API. Until then, production correctly remains on the old schema and flows.
 
 **Risks kept visible.** The production cutover has not been rehearsed against real balances; an incorrect opening

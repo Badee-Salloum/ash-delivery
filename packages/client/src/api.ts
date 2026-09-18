@@ -1111,6 +1111,20 @@ export class ApiClient {
   me() {
     return this.get<{ userId: string; roleKey: string; branchId: string | null; driverId: string | null; businessDate: string }>('/me')
   }
+  registrationBranches() {
+    return this.get<{ branches: Array<{ id: string; code: string; nameAr: string; nameEn: string }> }>(
+      '/auth/register/branches',
+    )
+  }
+  registerDriver(body: { fullNameAr: string; branchId: string; username: string; password: string }) {
+    return this.post<{
+      userId: string
+      driverId: string
+      branchId: string
+      roleKey: 'driver'
+      businessDate: string
+    }>('/auth/register', body)
+  }
 
   // ── Accounts (SRS A-2) ──────────────────────────────────────────────────────────────────────
   users() {

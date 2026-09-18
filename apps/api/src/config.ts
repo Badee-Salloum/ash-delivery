@@ -18,12 +18,20 @@ import { z } from 'zod'
  */
 export const DEFAULT_MAX_OCR_READS_PER_SHIFT = 40
 
+const explicitBoolean = z
+  .union([z.boolean(), z.enum(['true', 'false'])])
+  .default(true)
+  .transform((value) => value === true || value === 'true')
+
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(3000),
   HOST: z.string().default('0.0.0.0'),
 
   DATABASE_URL: z.string().min(1).optional(),
+
+  /** Emergency kill switch for the one public account-creation path. */
+  DRIVER_SELF_REGISTRATION_ENABLED: explicitBoolean,
 
   /** bcrypt cost. SRS §7 mandates bcrypt; 12 is the current sane floor. */
   BCRYPT_ROUNDS: z.coerce.number().int().min(10).max(15).default(12),

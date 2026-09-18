@@ -76,6 +76,7 @@ import { registerIncomeRoutes } from './incomes.routes.ts'
 import { registerCheckInRoutes } from './checkin.routes.ts'
 import { registerFleetRoutes } from './fleet.routes.ts'
 import { registerUserRoutes } from './users.routes.ts'
+import { registerDriverRegistrationRoutes } from './driver-registration.routes.ts'
 import { registerDashboardRoutes } from './dashboard.routes.ts'
 import { registerNotificationRoutes } from './notification.routes.ts'
 import { registerTierRoutes } from './tier.routes.ts'
@@ -148,6 +149,8 @@ export interface AppOptions {
   splitGate?: 'advisory' | 'strict'
   /** Runaway guard on paid cloud OCR. Defaults here so a test never has to think about spend. */
   maxOcrReadsPerShift?: number
+  /** Emergency public-signup kill switch. Enabled by default. */
+  driverSelfRegistrationEnabled?: boolean
 }
 
 /**
@@ -328,6 +331,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         enrollmentRequired: mfaEnrollmentRequired(result.user),
       })
   })
+
+  registerDriverRegistrationRoutes(app, deps, opts.driverSelfRegistrationEnabled ?? true)
 
   // ── Second factor (SRS §7, A-1) ──────────────────────────────────────────────────────────
 

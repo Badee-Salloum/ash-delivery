@@ -98,6 +98,7 @@ export async function makeHarness(
     /** Swap in a reader that answers. The default one reports `available: false` and never calls out. */
     ocr?: OcrReader
     maxOcrReadsPerShift?: number
+    driverSelfRegistrationEnabled?: boolean
   } = {},
 ): Promise<Harness> {
   const deps = createMemoryDeps(NOW_MS)
@@ -182,6 +183,9 @@ export async function makeHarness(
     deps,
     ...(opts.splitGate ? { splitGate: opts.splitGate } : {}),
     ...(opts.maxOcrReadsPerShift !== undefined ? { maxOcrReadsPerShift: opts.maxOcrReadsPerShift } : {}),
+    ...(opts.driverSelfRegistrationEnabled !== undefined
+      ? { driverSelfRegistrationEnabled: opts.driverSelfRegistrationEnabled }
+      : {}),
   })
 
   const cookieFor = (token: string) => `${SESSION_COOKIE}=${token}`

@@ -160,6 +160,20 @@ export const loginResponse = z.object({
   expiresAt: z.number(),
 })
 
+/** Public signup is deliberately narrower than account administration. */
+export const registerDriverRequest = z
+  .object({
+    fullNameAr: z.string().trim().min(1).max(120),
+    branchId: uuidSchema,
+    username: z
+      .string()
+      .max(40)
+      .transform(normalizeUsername)
+      .refine((u) => u.length >= 3, { message: 'username must be at least 3 usable characters' }),
+    password: z.string().min(8).max(200),
+  })
+  .strict()
+
 // ── Shifts ────────────────────────────────────────────────────────────────────────────────
 
 export const createShiftRequest = z.object({
@@ -1548,6 +1562,7 @@ export const closeWeekRequest = z.object({
 })
 
 export type LoginRequest = z.infer<typeof loginRequest>
+export type RegisterDriverRequest = z.infer<typeof registerDriverRequest>
 export type CreateShiftRequest = z.infer<typeof createShiftRequest>
 export type StartPackageRequest = z.infer<typeof startPackageRequest>
 export type AddOrderRequest = z.infer<typeof addOrderRequest>

@@ -406,6 +406,23 @@ export interface SessionRecord {
   revokedAtMs: number | null
 }
 
+export interface DriverAccountProvisionInput {
+  user: UserRecord
+  driver: DriverRecord
+  /** Public registration creates a session; the admin account screen does not. */
+  session: SessionRecord | null
+  audit: {
+    actorId: string | null
+    actorKind: 'user' | 'anonymous'
+    requestId: string
+    occurredAtMs: number
+  }
+}
+
+export type RegistrationAttemptClaim =
+  | { allowed: true }
+  | { allowed: false; retryAfterSeconds: number }
+
 export interface DriverRecord {
   id: string
   branchId: string
@@ -830,6 +847,17 @@ export interface SessionRepo {
   findByTokenHash(tokenHash: string): Promise<SessionRecord | null>
   update(session: SessionRecord): Promise<void>
   revokeAllForUser(userId: string): Promise<void>
+}
+
+/** Atomic driver identity creation plus the database-backed public registration throttle. */
+export interface DriverAccountProvisioningRepo {
+  claimRegistrationAttempt(input: {
+    addressHash: string
+    attemptedAtMs: number
+    limit: number
+    windowMs: number
+  }): Promise<RegistrationAttemptClaim>
+  provision(input: DriverAccountProvisionInput): Promise<void>
 }
 
 export interface ShiftRepo {
@@ -2819,6 +2847,7 @@ export interface Deps {
   cipher: Cipher
   users: UserRepo
   sessions: SessionRepo
+  driverAccounts: DriverAccountProvisioningRepo
   shifts: ShiftRepo
   preapprovedShiftRules: PreapprovedShiftRuleRepo
   assignments: AssignmentRepo
