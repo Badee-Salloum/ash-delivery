@@ -12,14 +12,16 @@ Team `hadis-projects-3c86ccdb`, three projects, all public (no deployment protec
 
 | Surface | URL | Live deployment / notes |
 | --- | --- | --- |
-| Admin console | https://ash-admin-eta.vercel.app | `dpl_G522ThUwcRDjgiJN5pvR7sw2z3Dt`; React SPA, `/api/*` proxied to API |
-| Driver PWA | https://ash-driver.vercel.app | `dpl_Cxy7BpCU97nF6XpDSqFf5mEp5R6i`; installable PWA, `/api/*` proxied to API |
-| API | https://ash-api-xi.vercel.app | `dpl_FSwAqCsZvArvMK5SKjtsuEvj2pag`; Fastify serverless function |
+| Admin console | https://ash-admin-eta.vercel.app | `dpl_76xU4vYXJJTUHutTG1F8ecZ4uT8e`; React SPA, `/api/*` proxied to API |
+| Driver PWA | https://ash-driver.vercel.app | `dpl_AJ3VWMjckVtWwgw94RBMmum4ZQmX`; installable PWA, `/api/*` proxied to API |
+| API | https://ash-api-xi.vercel.app | `dpl_BEPgw85iwZzEaBapUa7KdzmyEwfa`; Fastify serverless function |
 | Database | Neon `ep-billowing-butterfly-…` (eu-central-1, **Postgres 18**) | live at `0078` (74 migrations) + bootstrapped |
 | Evidence | Vercel Blob store `ash-evidence` (private) | linked to `ash-api` |
 
-**Version boundary:** production is at `0078`, and all three public surfaces use the source tree merged by
-PR #3 at `814fe6bbad4a36f09f4f2a7a13b5e8b97baf2037`. Historical boundary evidence: the API build moved on the evening of 2026-08-24 —
+**Version boundary:** production is at `0078`, and all three public surfaces use runtime commit
+`bb39ffd79a4dcd5c47cbbff4ecee33ef79257004`, deployed on 2026-09-18. This release required no
+database migration; the ledger remains at 74 applied migrations. Historical boundary evidence: the
+API build moved on the evening of 2026-08-24 —
 `ocr_reads` carries `bms-prompt-v2` cache signatures from 2026-08-25 01:26, which ships in
 `c33e775`, so at least `c33e775` (and its ancestor `644306a`) were live by then. **The driver PWA
 is a separate bundle and reaches a phone only when its driver taps «تحديث» — see RUNBOOK §7d;

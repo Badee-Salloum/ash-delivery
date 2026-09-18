@@ -1,6 +1,19 @@
 # PROGRESS
 
-## 2026-09-18 — vehicle creation from fixed assets complete locally
+## 2026-09-18 — current finance and fleet changes deployed
+
+**Live.** Commit `bb39ffd79a4dcd5c47cbbff4ecee33ef79257004` is deployed to all three
+production surfaces. The release includes the standalone treasury-movement register, creation and
+immediate selection of a vehicle from Fixed Assets, and the complete current driver/API bundles.
+The stable Admin, Driver and API URLs all passed post-deployment smoke checks: health and both SPA
+API proxies return 200, the public registration branch list returns 200, unauthenticated `/me` and
+`/treasury/movements` return 401, and both stable SPAs reference their new hashed bundles.
+
+No migration was required or run for this release. Production remains at migration `0078` (74
+migrations). Deployment ids: Admin `dpl_76xU4vYXJJTUHutTG1F8ecZ4uT8e`, Driver
+`dpl_AJ3VWMjckVtWwgw94RBMmum4ZQmX`, API `dpl_BEPgw85iwZzEaBapUa7KdzmyEwfa`.
+
+## 2026-09-18 — vehicle creation from fixed assets complete and deployed
 
 **Done.** The fixed-assets tab now offers a compact, bilingual «إضافة آلية جديدة» flow when the
 asset kind is vehicle. It loads active vehicle types on demand, previews the server-assigned fleet
@@ -11,8 +24,8 @@ the purchase, financing and depreciation facts are still a separate explicit ass
 This path deliberately creates no batteries and says so in the form. A branch change clears the
 selected/new vehicle state and reloads the branch-scoped picker before it can be used again. The
 existing `fleet.manage` and `company_fund.manage` server checks remain the authority, and the
-vehicle mutation retains its audit fact. No API route, migration or production deployment was
-needed.
+vehicle mutation retains its audit fact. No API route or migration was needed; the Admin bundle was
+deployed with the release recorded above.
 
 **Proof.** `admin/company-assets-vehicle.test.ts` pins the conditional form, active-type load,
 number preview, no-battery boundary, immediate selection, separate asset command, branch reset and
@@ -22,7 +35,7 @@ manager cannot record the asset, the vehicle is audited, and no battery or asset
 first step. Full `pnpm check` passed: **3,205 tests**, with 19 expected PostgreSQL-only skips. The
 local Node 25.8 engine warning remains; the repository targets Node 24.
 
-## 2026-09-18 — standalone treasury movement register complete locally
+## 2026-09-18 — standalone treasury movement register complete and deployed
 
 **Done.** «حركات الخزينة» is now a separate, read-only Finance page for branch managers, general
 managers and system administrators. The Treasury page keeps a direct link but no longer loads or
@@ -43,9 +56,10 @@ No migration is needed: the timestamp already exists.
 **Verified.** `pnpm check` passes every static gate and 3,198 default tests; the 19 skips are the
 expected PostgreSQL-gated cases. The new disposable PostgreSQL test was also run separately on local
 PostgreSQL 17.6 and passed, proving direct SQL filtering, Arabic search, branch isolation, exact
-`created_at`, and cursor paging without duplicates. Production deployment remains separate.
+`created_at`, and cursor paging without duplicates. The API and Admin bundles were deployed with the
+release recorded above.
 
-## 2026-09-18 — driver self-registration complete locally
+## 2026-09-18 — driver self-registration complete and deployed
 
 **Done.** The logged-out driver app now switches between login and a bilingual account form for Arabic full
 name, operating branch, normalized username, password and client-only confirmation. It loads only public
@@ -66,15 +80,15 @@ or from a private Caddy connection.
 **Verified.** `pnpm check` passes every static gate and 3,190 default tests; the 18 database skips are the
 expected `DATABASE_URL`-gated suites. The focused disposable-PostgreSQL suite passes 5/5, proving all-or-nothing
 provisioning, password-free anonymous audit, rolling-window expiry and concurrent claims across repository
-instances. The driver production build also passes. Production deployment and applying migration 0078 remain
-separate and require explicit production approval.
+instances. The driver production build also passes. Migration `0078` is applied in production and
+the current Driver/API bundles were deployed with the release recorded above.
 
 **Two-minute demo.** Open the driver app logged out, press “Create driver account”, choose an operating branch,
 submit the five visible fields, and watch the existing vehicle/assignment screen open without a second login.
 Use an existing username to see the localized conflict, or set `DRIVER_SELF_REGISTRATION_ENABLED=false` to
 exercise the kill switch.
 
-## 2026-09-18 — finance and fleet redesign complete locally (P3/P4/P6, C2–C6)
+## 2026-09-18 — finance and fleet redesign complete and deployed (P3/P4/P6, C2–C6)
 
 **Done.** The approved dashboard is now eight independently loaded sections with one shared business-date
 range, filtered drill-down links, fleet performance and branch/company/combined profit. «صندوق الشركة» is
@@ -94,19 +108,19 @@ and content-addressed. The company workspace exposes the complete flow, while th
 combined profit and keeps the branch/company split, both currency pockets, reserve, book value and due
 depreciation visible.
 
-**Correctness gates.** Migrations 0064–0078 are forward-only and still undeployed. PostgreSQL guards bind every
+**Correctness gates.** Migrations 0064–0078 are forward-only and applied in production. PostgreSQL guards bind every
 HQ journal to exactly one typed command, enforce actor/RBAC and currency/rate identity, prevent overspending,
 protect linked vehicles, and make command facts immutable. The real-PostgreSQL finance and recurrence suites
 pass 33/33; focused API suites pass 104/104 and focused admin suites pass 27/27. Final `pnpm check` passes every
 static gate and 3,168 default tests (domain 821, contracts 34, client 314, adapters 169, admin 328, driver 341,
 database 161 and API 1,000); the 17 default database skips are the expected `DATABASE_URL`-gated cases.
 
-**Next (owner action, not an engineering gap).** Give separate written production approval, take the documented
-backup/pre-flight, deploy API and admin together, apply 0064–0078, then perform each branch cutover and physical
-SYP/USD opening count through the UI/API. Until then, production correctly remains on the old schema and flows.
+**Operational follow-up.** The production deployment and migrations are complete. Any outstanding
+per-branch company-fund cutover and physical SYP/USD opening count remains an explicit operator
+action through the UI/API; it must never be improvised with SQL.
 
-**Risks kept visible.** The production cutover has not been rehearsed against real balances; an incorrect opening
-amount must fail rather than be repaired with SQL. Existing vehicles need their real purchase/payment dates.
+**Risks kept visible.** An incorrect opening amount must fail rather than be repaired with SQL.
+Existing vehicles need their real purchase/payment dates.
 Early disposal remains deliberately out of scope. A restoration top-up may make company SYP negative by owner
 decision, so the warning and clearing invariant must be reviewed after every restoration and at Sunday HQ close.
 

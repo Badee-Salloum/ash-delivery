@@ -7,6 +7,16 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 
 **Legend:** ✅ implemented and green · ⚠ written but never executed · 🔜 planned, milestone named.
 
+## 2026-09-18 production deployment smoke checks
+
+| Gate | Production result | Result |
+| --- | --- | --- |
+| Stable API is ready and public driver-registration branches remain available | `GET /health` → 200; `GET /auth/register/branches` → 200 | ✅ |
+| Session and finance boundaries remain protected | unauthenticated `GET /me` and `GET /treasury/movements` → 401 | ✅ |
+| Both public SPAs reach the deployed API | Admin and Driver `/api/health` → 200 | ✅ |
+| Stable SPA aliases serve the exact new builds | Admin `index-DHxKfi-L.js`; Driver `index-t5R0aBir.js` | ✅ |
+| Production deployment state | Admin, Driver and API deployments are `READY`; no migration run | ✅ |
+
 ## 2026-09-18 vehicle creation from fixed assets
 
 | Gate | Named test | Result |
