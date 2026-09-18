@@ -2,7 +2,7 @@
 
 > Self-contained brief. Read it top to bottom before touching code. Then read `CLAUDE.md` (project rules —
 > they are binding) and open `docs/design/2026-09-redesign/index.html` in a browser (the approved mockups).
-> Branch: **`feat/finance-redesign`** (created from `fix/overlapping-dashboard-scans` @ `f953906`).
+> Merged to **`main`** by PR #3 at `814fe6b` (source head `f6219af`).
 > Last updated: 2026-09-18 by Codex (see §3 for the live status checklist).
 
 ---
@@ -18,7 +18,7 @@
    (One owner-ordered exception already happened — see memory note: shift `3ccda1d3…` has
    `open_approved_at = window_opens_at = 2026-09-11T16:00Z` on purpose. Do not "fix" it.)
 5. Migrations are **forward-only and checksum-locked** (`packages/db/src/migrate.ts`). Never edit a migration
-   that could already be applied in production (0001–0063 are applied; 0064 is NOT yet applied anywhere).
+   that could already be applied in production (0001–0078 are applied; intentional number gaps remain).
    A new Postgres **enum value needs its own enum-only migration** (precedent 0023/0046/0055).
 6. **Never mark work done with failing tests. Never fabricate test output.** Keep source-pinning tests
    (tests that read `.tsx` source text) — update what they pin, never delete the pin.
@@ -130,15 +130,19 @@ branch managers never see purchase prices/instalments/book values; company debts
 - [x] **C6** company recurring expenses + full company dashboard section — committed (`1383b50`), including
       branch/company/combined profit and company balance/reserve/depreciation digest.
 - [x] Docs: CLAUDE.md decisions 18–23 + money rules 9–12, ASSUMPTIONS, RUNBOOK «صندوق الشركة», PROGRESS, TESTS.md.
-- [ ] **Production** (owner go-ahead required): deploy api/admin/driver, run migrations 0064+, cutover.
+- [x] **Production release** (2026-09-18): API/admin/driver deployed; migrations 0064–0078 applied and
+      checksum-idempotence, financial integrity, backups, stable-route smokes, and an isolated full restore passed.
+- [ ] **Company-ledger cutover:** still requires the owner-supplied expected opening balance and audited reason.
+      Do not invent either and do not bypass `POST /company/cutover` with SQL.
 
-Migration numbers (none applied to production yet; `migrate.ts` applies files in sorted order, gaps are fine):
+Migration numbers (all applied to production; `migrate.ts` applies files in sorted order, gaps are fine):
 0064 P0 permission · 0065–0066 C1 · 0067 C2 (0068 spare) · 0069–0071 reserved C3–C5 · 0072–0074 reserved P6 ·
-0075(–0076) P4 · 0077+ C6.
+0075(–0076) P4 · 0077 C6 · 0078 driver self-registration.
 
-Final local verification (2026-09-18): `pnpm check` passed every static gate and 3,168 default tests; the focused
-real-PostgreSQL company-command and recurrence suites passed 33/33 on PostgreSQL 17.6. Node 25.8 emitted only
-the expected engine warning; production and its migrations were not touched.
+Final verification (2026-09-18): `pnpm check` passed every static gate and 3,190 default tests; CI run
+`35341306278` passed static, domain/property, and real-PostgreSQL guards, and Android run `35340928463` passed.
+Production is live at migration 0078; the post-migration restore reproduced 83,697 rows and all 84 table
+fingerprints exactly.
 
 ---
 

@@ -12,14 +12,14 @@ Team `hadis-projects-3c86ccdb`, three projects, all public (no deployment protec
 
 | Surface | URL | Live deployment / notes |
 | --- | --- | --- |
-| Admin console | https://ash-admin-eta.vercel.app | `dpl_AoziBU6U4ubjxugPRafwAVu8iUc6`; React SPA, `/api/*` proxied to API |
-| Driver PWA | https://ash-driver.vercel.app | `dpl_H8mXPQAUd5fjqNwSZzas6g9fACpj`; installable PWA, `/api/*` proxied to API |
-| API | https://ash-api-xi.vercel.app | `dpl_8s5w8kubRfYx4SLSjwuvL53JahMP`; Fastify serverless function |
-| Database | Neon `ep-billowing-butterfly-…` (eu-central-1, **Postgres 18**) | live at `0044` (44 migrations) + bootstrapped |
+| Admin console | https://ash-admin-eta.vercel.app | `dpl_G522ThUwcRDjgiJN5pvR7sw2z3Dt`; React SPA, `/api/*` proxied to API |
+| Driver PWA | https://ash-driver.vercel.app | `dpl_Cxy7BpCU97nF6XpDSqFf5mEp5R6i`; installable PWA, `/api/*` proxied to API |
+| API | https://ash-api-xi.vercel.app | `dpl_FSwAqCsZvArvMK5SKjtsuEvj2pag`; Fastify serverless function |
+| Database | Neon `ep-billowing-butterfly-…` (eu-central-1, **Postgres 18**) | live at `0078` (74 migrations) + bootstrapped |
 | Evidence | Vercel Blob store `ash-evidence` (private) | linked to `ash-api` |
 
-**Version boundary:** production is at `0044`, and all three public surfaces are on commit
-`5d76a539af517a914c59a455cdc8c2d3bafb4ce6`. Historical boundary evidence: the API build moved on the evening of 2026-08-24 —
+**Version boundary:** production is at `0078`, and all three public surfaces use the source tree merged by
+PR #3 at `814fe6bbad4a36f09f4f2a7a13b5e8b97baf2037`. Historical boundary evidence: the API build moved on the evening of 2026-08-24 —
 `ocr_reads` carries `bms-prompt-v2` cache signatures from 2026-08-25 01:26, which ships in
 `c33e775`, so at least `c33e775` (and its ancestor `644306a`) were live by then. **The driver PWA
 is a separate bundle and reaches a phone only when its driver taps «تحديث» — see RUNBOOK §7d;
@@ -225,6 +225,44 @@ redeploy a front-end: `pnpm build:apps`, copy `apps/<app>/dist/*` into a staging
 ---
 
 ## 7. Deploy checklist
+
+### Validated live `0078` checklist — 2026-09-18
+
+- [x] PR #3 merged at `814fe6bbad4a36f09f4f2a7a13b5e8b97baf2037`; CI run
+      [35341306278](https://github.com/Badee-Salloum/ash-delivery/actions/runs/35341306278) passed
+      static, domain/property, and real-PostgreSQL guards; Android run `35340928463` passed
+- [x] Production preflight found 85 historical settlement-hash mismatches; the release was held before
+      writes. All 85 fell exactly between the v4 rollout at 0052 and v5 rollout at 0062. Checker fix
+      `f6219af` preserved both immutable versions, and the full production audit then passed 17/17 groups
+- [x] API paused and database activity drained to zero active connections / zero transactions
+- [x] Validated pre-backup
+      `Desktop\ash-backups\release-0078-20260918\pre\2026-09-18T11-49-38-196Z`:
+      67 tables / 83,680 rows / 63 migrations
+- [x] Applied exactly 0064–0067, 0069–0072, 0075, 0077, and 0078; the immediate checksum rerun
+      applied 0 and found all 74 migrations present
+- [x] A final `main` checkout exposed legacy Windows-CRLF checksum records. The shared migration
+      runner now records canonical LF checksums and accepts only the line-ending-equivalent legacy
+      value; an LF production rerun again applied 0 and found all 74 migrations present
+- [x] Postflight proved all release checksums and 17 new tables, registration least privilege,
+      password/MFA audit redaction, zero registration attempts, zero trial balance, and zero violations
+      in every permanent shift-money integrity group
+- [x] Validated post-backup
+      `Desktop\ash-backups\release-0078-20260918\post\2026-09-18T11-54-38-892Z`:
+      84 tables / 83,697 rows / 74 migrations
+- [x] Promoted admin `dpl_G522ThUwcRDjgiJN5pvR7sw2z3Dt`, driver
+      `dpl_Cxy7BpCU97nF6XpDSqFf5mEp5R6i`, and corrected API `dpl_FSwAqCsZvArvMK5SKjtsuEvj2pag`.
+      The first API candidate exposed a stale prebuilt output during smoke (`/auth/register/branches` was
+      404); it was rebuilt from source, verified behind deployment protection, and replaced under a
+      second drained pause before completion
+- [x] Stable API and both proxies returned 200; driver/admin SPAs, driver manifest/service worker,
+      registration UI bundle, schema-invalid 400, and public operating-branch listing passed; HQ was absent
+- [x] Restored 83,697/83,697 rows into isolated database
+      `ash_release_gate_0040_restore_20260918_1505`; integrity and transactional rollback probes passed;
+      re-backup `Desktop\ash-backups\release-0078-20260918\restore-check\2026-09-18T12-11-01-411Z`
+      matched all 84 table fingerprints; the scratch database was disconnected and dropped
+- [ ] Execute the company-ledger cutover only after the owner supplies the expected opening balance and
+      audited reason; use `POST /company/cutover`, never direct SQL
+- [ ] Rotate the Vercel deployment token and Neon owner credential disclosed during this rollout
 
 ### Validated live `0044` checklist — 2026-08-26
 
