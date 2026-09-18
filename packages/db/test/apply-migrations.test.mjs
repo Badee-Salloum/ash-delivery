@@ -8,6 +8,9 @@ import {
   MIGRATION_RECHECK_SQL,
   bootstrapTransactionQueries,
   classifyRecordedMigration,
+  migrationChecksum,
+  migrationChecksumMatches,
+  migrationChecksums,
   migrationTransactionQueries,
 } from '../migration-http-plan.mjs'
 
@@ -75,5 +78,21 @@ describe('Neon HTTP migration single-runner protocol', () => {
       actualChecksum: 'cafebabe',
     })
     expect(classifyRecordedMigration([], 'deadbeef')).toEqual({ kind: 'missing' })
+  })
+
+  it('canonicalizes new checksums to LF while accepting legacy CRLF records', () => {
+    const lf = 'CREATE TABLE example (id integer);\n-- immutable\n'
+    const crlf = lf.replaceAll('\n', '\r\n')
+    const accepted = migrationChecksums(lf)
+
+    expect(migrationChecksum(lf)).toBe(migrationChecksum(crlf))
+    expect(accepted).toHaveLength(2)
+    expect(migrationChecksums(crlf)).toEqual(accepted)
+    expect(migrationChecksumMatches(lf, accepted[0])).toBe(true)
+    expect(migrationChecksumMatches(lf, accepted[1])).toBe(true)
+    expect(migrationChecksumMatches(lf, 'deadbeef')).toBe(false)
+    expect(classifyRecordedMigration([{ checksum: accepted[1] }], accepted)).toEqual({
+      kind: 'present',
+    })
   })
 })

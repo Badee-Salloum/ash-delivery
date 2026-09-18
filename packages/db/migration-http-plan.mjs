@@ -22,6 +22,34 @@ export const MIGRATION_RECHECK_SQL =
 export const MIGRATION_CLAIM_SQL =
   'INSERT INTO schema_migrations (filename, checksum) VALUES ($1, $2)'
 
+const fnv1a = (text) => {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, '0')
+}
+
+/**
+ * New migration records use the LF form committed to Git, independent of the runner's platform.
+ * Older production records were created from a Windows CRLF checkout, so verification accepts
+ * that byte-equivalent spelling too. No SQL character other than line endings is normalized.
+ */
+export function migrationChecksums(text) {
+  const lf = text.replace(/\r\n?/g, '\n')
+  const crlf = lf.replace(/\n/g, '\r\n')
+  return [...new Set([fnv1a(lf), fnv1a(crlf)])]
+}
+
+export function migrationChecksum(text) {
+  return migrationChecksums(text)[0]
+}
+
+export function migrationChecksumMatches(text, recordedChecksum) {
+  return migrationChecksums(text).includes(recordedChecksum)
+}
+
 /**
  * Neon HTTP transactions are non-interactive: the callback must synchronously return all query
  * promises. The migration ledger's primary key is therefore also the atomic claim. A stale runner
@@ -51,10 +79,11 @@ export function bootstrapTransactionQueries(tx) {
  * `missing` means the migration transaction really failed. `present` covers both an ordinary race
  * and a commit whose HTTP response was lost. A different checksum is immutable-history drift.
  */
-export function classifyRecordedMigration(rows, expectedChecksum) {
+export function classifyRecordedMigration(rows, expectedChecksums) {
   const row = rows[0]
   if (!row) return { kind: 'missing' }
-  if (row.checksum !== expectedChecksum) {
+  const accepted = Array.isArray(expectedChecksums) ? expectedChecksums : [expectedChecksums]
+  if (!accepted.includes(row.checksum)) {
     return { kind: 'drift', actualChecksum: row.checksum }
   }
   return { kind: 'present' }

@@ -2,6 +2,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Pool } from './pool.ts'
+import { migrationChecksum, migrationChecksumMatches } from '../migration-http-plan.mjs'
 
 /**
  * Migration runner.
@@ -48,11 +49,11 @@ export async function migrate(pool: Pool, dir = MIGRATIONS_DIR): Promise<Migrati
 
     for (const file of files) {
       const sql = readFileSync(join(dir, file), 'utf8')
-      const checksum = simpleChecksum(sql)
+      const checksum = migrationChecksum(sql)
       const previous = done.get(file)
 
       if (previous !== undefined) {
-        if (previous !== checksum) {
+        if (!migrationChecksumMatches(sql, previous)) {
           // An applied migration that has since been edited means the database and the repo
           // disagree about history. Refusing is the only safe answer — silently re-running it
           // or ignoring it both end with a schema nobody can reason about.
@@ -81,14 +82,4 @@ export async function migrate(pool: Pool, dir = MIGRATIONS_DIR): Promise<Migrati
     await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_ID.toString()]).catch(() => undefined)
     client.release()
   }
-}
-
-/** FNV-1a. Not cryptographic — this detects accidental edits, not tampering. */
-function simpleChecksum(text: string): string {
-  let hash = 0x811c9dc5
-  for (let i = 0; i < text.length; i++) {
-    hash ^= text.charCodeAt(i)
-    hash = Math.imul(hash, 0x01000193) >>> 0
-  }
-  return hash.toString(16).padStart(8, '0')
 }

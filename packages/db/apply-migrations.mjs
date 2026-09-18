@@ -9,14 +9,17 @@
 // dollar-quoted and full of semicolons. This splitter tracks dollar-quote tags, single-quoted
 // literals and comments, which is the minimum needed to be correct rather than lucky.
 //
-// The checksum is FNV-1a over the file text — byte-identical to `simpleChecksum` in migrate.ts, so
-// this runner and the app's own runner agree about what has been applied. Anything else reads as
-// history drift and refuses, which is the behaviour we want.
+// The checksum is FNV-1a over canonical LF text, shared with migrate.ts. Verification also accepts
+// the legacy CRLF spelling recorded by earlier Windows production runs; every non-line-ending edit
+// still reads as history drift and refuses.
 import { readFileSync, readdirSync } from 'node:fs'
 import { neon } from '@neondatabase/serverless'
 import {
   bootstrapTransactionQueries,
   classifyRecordedMigration,
+  migrationChecksum,
+  migrationChecksumMatches,
+  migrationChecksums,
   migrationTransactionQueries,
 } from './migration-http-plan.mjs'
 
@@ -28,15 +31,6 @@ const dir = new URL('./migrations/', import.meta.url)
 // Serialize even first-install ledger creation. CREATE TABLE IF NOT EXISTS alone does not make two
 // concurrent catalog writes a useful migration-runner lock.
 await sql.transaction((tx) => bootstrapTransactionQueries(tx))
-
-const simpleChecksum = (text) => {
-  let hash = 0x811c9dc5
-  for (let i = 0; i < text.length; i++) {
-    hash ^= text.charCodeAt(i)
-    hash = Math.imul(hash, 0x01000193) >>> 0
-  }
-  return hash.toString(16).padStart(8, '0')
-}
 
 /** Split SQL into statements, respecting dollar-quoting, single quotes and comments. */
 export function splitStatements(sql) {
@@ -106,10 +100,10 @@ let applied = 0
 let present = 0
 for (const file of files) {
   const body = readFileSync(new URL(file, dir), 'utf8')
-  const checksum = simpleChecksum(body)
+  const checksum = migrationChecksum(body)
 
   if (done.has(file)) {
-    if (done.get(file) !== checksum) {
+    if (!migrationChecksumMatches(body, done.get(file))) {
       console.error(`!! ${file} has changed since it was applied (db ${done.get(file)} → file ${checksum}).`)
       console.error('   Applied migrations are immutable. Add a new migration instead.')
       process.exit(1)
@@ -134,7 +128,7 @@ for (const file of files) {
     try {
       recorded = classifyRecordedMigration(
         await sql.query('SELECT checksum FROM schema_migrations WHERE filename = $1', [file]),
-        checksum,
+        migrationChecksums(body),
       )
     } catch (verificationError) {
       console.error(`!! ${file} failed atomically: ${e.message}`)
