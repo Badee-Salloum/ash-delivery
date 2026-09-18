@@ -26,6 +26,9 @@ importers:
       '@ash/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@ash/theme':
+        specifier: workspace:*
+        version: link:../../packages/theme
       leaflet:
         specifier: ^1.9.4
         version: 1.9.4
@@ -112,6 +115,9 @@ importers:
       '@ash/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@ash/theme':
+        specifier: workspace:*
+        version: link:../../packages/theme
       react:
         specifier: ^19.0.0
         version: 19.2.7
@@ -253,6 +259,12 @@ importers:
       vitest:
         specifier: ^3.2.4
         version: 3.2.7(@types/node@26.1.1)(jiti@2.7.0)(jsdom@25.0.1)(lightningcss@1.32.0)(terser@5.49.0)
+
+  packages/theme:
+    dependencies:
+      '@fontsource/ibm-plex-sans-arabic':
+        specifier: ^5.1.0
+        version: 5.3.0
 
 packages:
 
@@ -988,6 +1000,9 @@ packages:
 
   '@fastify/rate-limit@10.3.0':
     resolution: {integrity: sha512-eIGkG9XKQs0nyynatApA3EVrojHOuq4l6fhB4eeCk4PIOeadvOJz9/4w3vGI44Go17uaXOWEcPkaD8kuKm7g6Q==}
+
+  '@fontsource/ibm-plex-sans-arabic@5.3.0':
+    resolution: {integrity: sha512-ZZ4g+JDgQY0NqSh4o0MNWU1sHQmtcee1g++aKAwyJvZxnT5y51JXsN1cIXnaQaMd40dcbK6QFYa+Z1LbaiNuqA==}
 
   '@isaacs/cliui@9.0.0':
     resolution: {integrity: sha512-AokJm4tuBHillT+FpMtxQ60n8ObyXBatq7jD2/JA9dxbDDokKQm8KMht5ibGzLVU9IJDIKK4TPKgMHEYMn3lMg==}
@@ -3945,6 +3960,8 @@ snapshots:
       '@lukeed/ms': 2.0.2
       fastify-plugin: 5.1.0
       toad-cache: 3.7.4
+
+  '@fontsource/ibm-plex-sans-arabic@5.3.0': {}
 
   '@isaacs/cliui@9.0.0': {}
 

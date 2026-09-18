@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from 'vitest'
 import type { Deps, NewShiftSettlementRecord } from '@ash/contracts'
 import { minor } from '@ash/domain'
-import { runConformanceSuite } from '@ash/testkit/conformance'
+import { COMPANY_BRANCH, runConformanceSuite } from '@ash/testkit/conformance'
 import { assertBigIntParser, createPool } from '../src/pool.ts'
 import { migrate } from '../src/migrate.ts'
 import { PgShiftCloseUnitOfWork } from '../src/repos-close.ts'
@@ -9,6 +9,11 @@ import { PgShiftSettlementRepo } from '../src/repos-settlement.ts'
 import { PgCloseDraftRepo } from '../src/repos-close-draft.ts'
 import { PgFinancialUnitOfWork } from '../src/repos-financial.ts'
 import { PgReceivableEventRepo } from '../src/repos-receivable.ts'
+import { PgLedgerRangeSource } from '../src/repos-range.ts'
+import { PgCompanyLedgerRepo, PgCompanyLedgerSource } from '../src/repos-company.ts'
+import { PgCompanyFinanceRepo } from '../src/repos-company-finance.ts'
+import { PgRecurringExpenseRepo } from '../src/repos-recurring.ts'
+import { PgDriverAccountProvisioningRepo } from '../src/repos-driver-account.ts'
 import { assertDisposableDatabaseConnection, assertDisposableDatabaseUrl } from './disposable-database.ts'
 import {
   PgAuditRepo,
@@ -31,14 +36,18 @@ import {
   PgPreapprovedShiftRuleRepo,
   PgDirectoryRepo,
   PgExpenseRepo,
+  PgAdvanceRepo,
+  PgIncomeRepo,
   PgMediaRepo,
   PgOcrReadRepo,
   PgSettingsRepo,
   PgTierRepo,
   PgAssignmentRepo,
   PgAttendanceRepo,
+  PgCheckInRepo,
   PgBatteryReadingRepo,
   PgBatterySwapRepo,
+  PgOperationRemovalRepo,
   PgShiftDecisionRepo,
   PgGpsPingRepo,
   PgShiftRepo,
@@ -86,7 +95,7 @@ if (!DATABASE_URL) {
       // Truncate rather than re-migrate: orders of magnitude faster, and it exercises the real
       // constraints on every run instead of a freshly-empty database.
       await pool.query(`
-        TRUNCATE preapproved_shift_rules, receivable_events, shift_settlements, journal_lines, journal_entries, cash_deductions, shift_orders, shift_media_attachment_history, shift_media, media, float_tranches, expenses, expense_categories, settings, cash_counts, cash_count_lines, tier_rules, notifications,
+        TRUNCATE recurring_expense_occurrences, recurring_expense_templates, preapproved_shift_rules, receivable_events, shift_settlements, journal_lines, journal_entries, cash_deductions, shift_orders, shift_media_attachment_history, shift_media, media, float_tranches, expenses, expense_categories, settings, cash_counts, cash_count_lines, tier_rules, notifications,
                  shift_battery_readings, gps_pings, batteries,
                  shifts, funds, fx_days, week_locks, audit_log, sessions, drivers, vehicles,
                  vehicle_types, users, branches, governorates
@@ -102,6 +111,12 @@ if (!DATABASE_URL) {
          VALUES ($1, 'DAM', 'دمشق', 'Damascus', '99999999-9999-9999-9999-999999999999', 1)`,
         [BRANCH],
       )
+      // TRUNCATE branches took the company (HQ) row 0066 created with it; put it back as 0066 does.
+      await pool.query(
+        `INSERT INTO branches (id, code, name_ar, name_en, governorate_id, branch_no, kind)
+         VALUES ($1, 'HQ', 'صندوق الشركة', 'Company', '99999999-9999-9999-9999-999999999999', 0, 'company')`,
+        [COMPANY_BRANCH],
+      )
       await pool.query(
         `INSERT INTO roles (key, name_ar, name_en) VALUES ('system_admin','مدير النظام','System Admin')
          ON CONFLICT (key) DO NOTHING`,
@@ -110,14 +125,21 @@ if (!DATABASE_URL) {
         `INSERT INTO permissions (key, name_ar, name_en)
          VALUES
            ('journal.manual.write', 'القيد اليدوي', 'Manual journal'),
-           ('shift.approve', 'اعتماد النوبة', 'Approve shift')
+           ('shift.approve', 'اعتماد النوبة', 'Approve shift'),
+           ('company_fund.manage', 'إدارة صندوق الشركة', 'Manage company fund'),
+           ('settings.write', 'الإعدادات', 'Settings'),
+           ('expense.write', 'كتابة المصروفات', 'Write expenses')
          ON CONFLICT (key) DO NOTHING`,
       )
+      // The company ledger's command guards (0067) read these live grants.
       await pool.query(
         `INSERT INTO role_permissions (role_key, permission_key, scope)
          VALUES
            ('system_admin', 'journal.manual.write', 'all'),
-           ('system_admin', 'shift.approve', 'all')
+           ('system_admin', 'shift.approve', 'all'),
+           ('system_admin', 'company_fund.manage', 'all'),
+           ('system_admin', 'settings.write', 'all'),
+           ('system_admin', 'expense.write', 'all')
          ON CONFLICT (role_key, permission_key) DO UPDATE SET scope = EXCLUDED.scope`,
       )
       await pool.query(
@@ -187,13 +209,14 @@ if (!DATABASE_URL) {
         })
 
       return {
-        clock: { nowMs: () => Date.UTC(2026, 6, 21, 5, 0, 0), offsetMinutes: () => 180 },
+        clock: { nowMs: () => Date.UTC(2026, 6, 21, 5, 0, 0), offsetMinutes: () => 180, dayStartMinutes: () => 240 },
         ids: { uuid: () => crypto.randomUUID(), token: () => 'token' },
         hasher: { hash: async (p: string) => p, verify: async (p: string, h: string) => p === h },
         // The suite never encrypts (it writes/reads document bytes directly), so a stub suffices.
         cipher: notYetImplemented('Cipher'),
         users: new PgUserRepo(pool),
         sessions: new PgSessionRepo(pool),
+        driverAccounts: new PgDriverAccountProvisioningRepo(pool),
         shifts: new PgShiftRepo(pool),
         preapprovedShiftRules: new PgPreapprovedShiftRuleRepo(pool),
         batteryReadings: new PgBatteryReadingRepo(pool),
@@ -206,12 +229,19 @@ if (!DATABASE_URL) {
         movements: new PgWalletMovementRepo(pool),
         ledger: new PgLedgerRepo(pool),
         treasuryPosition: new PgTreasuryPositionSource(pool),
+        ledgerRange: new PgLedgerRangeSource(pool),
         expenses: new PgExpenseRepo(pool),
+        recurringExpenses: new PgRecurringExpenseRepo(pool),
+        incomes: new PgIncomeRepo(pool),
+        advances: new PgAdvanceRepo(pool),
         receivableEvents: new PgReceivableEventRepo(pool),
         financialUnitOfWork: new PgFinancialUnitOfWork(pool),
         cashCounts: new PgCashCountRepo(pool),
         capitalTargets: new PgOfficeCapitalTargetRepo(pool),
         restorations: new PgRestorationRepo(pool),
+        companyLedger: new PgCompanyLedgerRepo(pool),
+        companyLedgerSource: new PgCompanyLedgerSource(pool),
+        companyFinance: new PgCompanyFinanceRepo(pool),
         tiers: new PgTierRepo(pool),
         notifications: new PgNotificationRepo(pool),
         settings: new PgSettingsRepo(pool),
@@ -228,6 +258,8 @@ if (!DATABASE_URL) {
         directory: new PgDirectoryRepo(pool),
         vehicleEvents: new PgVehicleEventRepo(pool),
         attendance: new PgAttendanceRepo(pool),
+        checkIns: new PgCheckInRepo(pool),
+        operationRemovals: new PgOperationRemovalRepo(pool),
         decisions: new PgShiftDecisionRepo(pool),
         settlements: new PgShiftSettlementRepo(pool),
         closeDrafts: new PgCloseDraftRepo(pool),
@@ -239,6 +271,13 @@ if (!DATABASE_URL) {
   runConformanceSuite({
     label: 'postgres',
     makeDeps,
+    plantFund: async (_deps, branchId, fund) => {
+      await pool.query(
+        `INSERT INTO funds (branch_id, type, owner_kind, owner_id, code, name_ar, currency)
+         VALUES ($1, $2::fund_type, 'none', NULL, $3, $3, $4)`,
+        [branchId, fund.type, fund.code, fund.currency],
+      )
+    },
   })
 
   describe('PostgreSQL OCR cache ownership', () => {
@@ -348,6 +387,8 @@ if (!DATABASE_URL) {
         state: 'open',
         openApprovedAt: '2026-07-21T04:00:00.000Z',
         openApprovedBy: USER,
+        // Since 0054 an approved shift must carry its window bound (shifts_window_opens_at_ck).
+        windowOpensAt: '2026-07-21T04:00:00.000Z',
         submittedAt: null,
       }, USER)
 
@@ -365,6 +406,7 @@ if (!DATABASE_URL) {
         grossDriverShare: zero,
         cashDeductionTotal: zero,
         baseDriverShare: zero,
+        managerCharge: minor(0n),
         expectedTotal: zero,
         actualCash: zero,
         actualWallet: zero,
@@ -376,6 +418,8 @@ if (!DATABASE_URL) {
         walletClaimToOffice: zero,
         cashReceivableDeferred: zero,
         walletReceivableDeferred: zero,
+        maximumCashShortageReceivable: zero,
+        cashShortageReceivable: zero,
         walletToOffice: zero,
         cashToOffice: zero,
         walletAction: 'none',

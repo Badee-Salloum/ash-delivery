@@ -25,7 +25,18 @@ import type {
   WalletMovementRole,
 } from '@ash/contracts'
 import { normalizeUsername } from '@ash/contracts'
-import { type CalendarDate, type FxDay, type Minor, type Posting, minor } from '@ash/domain'
+import {
+  type CalendarDate,
+  type Currency,
+  type FundRef,
+  type FxDay,
+  type Minor,
+  type Posting,
+  currencyOf,
+  fundCode,
+  minor,
+  postingBalanceProblem,
+} from '@ash/domain'
 import { PG, type Pool, type PoolClient, isPgError, withTransaction } from './pool.ts'
 
 /**
@@ -38,38 +49,76 @@ import { PG, type Pool, type PoolClient, isPgError, withTransaction } from './po
  */
 
 /**
- * Stable fund identity. Matches `fundCodeOf` in the memory adapter exactly — the conformance
- * suite asserts balances by these strings, so they must not drift.
+ * Stable fund identity — the domain's `fundCode`, re-exported under its historical name.
+ *
+ * There used to be three copies of this switch (domain, here, memory adapter) held together only by
+ * the conformance suite comparing strings. Now there is one: a new fund kind cannot be coded one way
+ * in PostgreSQL and another in the fake.
  */
-export function fundCodeOf(fund: Posting['lines'][number]['fund']): string {
-  switch (fund.kind) {
-    case 'driver_cash':
-    case 'driver_wallet':
-    case 'driver_share_payable':
-    // A ذمة belongs to one named driver; without the suffix every driver's receivable merges into
-    // a single fund and the totals stay right while «who owes this» becomes unanswerable.
-    case 'driver_receivable_cash':
-    case 'driver_receivable_wallet':
-    case 'driver_shift_funding_cash':
-    case 'driver_shift_funding_wallet':
-      return `${fund.kind}:${fund.driverId}`
-    case 'cost_center':
-      return `cost_center:${fund.costCenterId}`
-    default:
-      return fund.kind
-  }
-}
+export const fundCodeOf: (fund: FundRef) => string = fundCode
 
-/** Which `fund_type` enum value a code maps to. */
-function fundTypeOf(fund: Posting['lines'][number]['fund']): string {
+/**
+ * Which `fund_type` enum value a fund maps to. EXHAUSTIVE: a new kind that is not decided here
+ * fails to compile rather than quietly landing under some default.
+ */
+export function fundTypeOf(fund: FundRef): string {
   switch (fund.kind) {
     case 'company_revenue':
     case 'yalago_income':
     case 'fee_earned':
+    // `other_income` joins them for the same reason, and WITHOUT this line the first direct income
+    // would try to insert 'other_income'::fund_type and fail at 22P02 — the enum has no such value
+    // and deliberately gains none, because this is a P&L account and not a box anyone counts.
+    case 'other_income':
+    case 'cost_center':
       // Not in the client's literal E-1 tree; they are the P&L accounts the tree implies.
       return 'cost_center'
-    default:
+    case 'office_cash':
+    case 'office_wallet':
+    case 'driver_cash':
+    case 'driver_wallet':
+    case 'yalago_share':
+    case 'driver_share_payable':
+    case 'company_box':
+    case 'driver_receivable_cash':
+    case 'driver_receivable_wallet':
+    case 'driver_shift_funding_cash':
+    case 'driver_shift_funding_wallet':
+    // A سلفة is a COUNTED asset like a ذمة, not a P&L account: its own enum value (0055).
+    case 'advance_receivable_cash':
+    case 'advance_receivable_wallet':
+    // The company ledger (0065). Each is its own enum value — none may hide under cost_center,
+    // because 0066's partition and pocket guards read the TYPE.
+    case 'company_cash':
+    case 'depreciation_reserve':
+    case 'company_fx_position':
+    case 'branch_clearing':
+    case 'company_payable':
+    case 'company_receivable':
+    case 'fixed_asset':
+    case 'company_expense':
+    case 'company_income':
+    case 'company_equity':
       return fund.kind
+    default: {
+      const unreachable: never = fund
+      throw new RangeError(`no fund_type for ${JSON.stringify(unreachable)}`)
+    }
+  }
+}
+
+/** Raised when a stored fund's currency disagrees with the currency its reference implies. */
+export class FundCurrencyMismatchError extends Error {
+  readonly code = 'fund_currency_mismatch'
+  readonly fundCode: string
+  readonly stored: string
+  readonly expected: Currency
+  constructor(fundCode: string, stored: string, expected: Currency) {
+    super(`fund_currency_mismatch: fund ${fundCode} is stored in ${stored}, the posting expects ${expected}`)
+    this.name = 'FundCurrencyMismatchError'
+    this.fundCode = fundCode
+    this.stored = stored
+    this.expected = expected
   }
 }
 
@@ -80,34 +129,119 @@ function fundTypeOf(fund: Posting['lines'][number]['fund']): string {
  * lazily is simpler and less error-prone than a trigger on `drivers` that has to be kept in
  * step with every future fund type.
  */
-async function ensureFund(client: PoolClient, branchId: string, fund: Posting['lines'][number]['fund']): Promise<string> {
-  const code = fundCodeOf(fund)
+async function ensureFund(client: PoolClient, branchId: string, fund: FundRef): Promise<string> {
+  const code = fundCode(fund)
+  const currency = currencyOf(fund)
   // A cost centre owned by a VEHICLE carries that vehicle's uuid; a NAMED contra account
   // ("opening_balance", "owner_funding", "adjustments") has no owner and is owner_kind='none'.
   // Getting this wrong trips funds_owner_ck: CHECK ((owner_kind='none') = (owner_id IS NULL)).
+  // Every company account is owner_kind='none' with its identity in the code, as an advance is.
   const costUuid = 'costCenterId' in fund ? toUuidOrNull(fund.costCenterId) : null
   const ownerId = 'driverId' in fund ? fund.driverId : costUuid
   const ownerKind = 'driverId' in fund ? 'driver' : costUuid !== null ? 'vehicle' : 'none'
 
-  const found = await client.query<{ id: string }>(
-    'SELECT id FROM funds WHERE branch_id = $1 AND code = $2',
+  const found = await client.query<{ id: string; currency: string }>(
+    'SELECT id, currency FROM funds WHERE branch_id = $1 AND code = $2',
     [branchId, code],
   )
-  if (found.rows[0]) return found.rows[0].id
+  const existing = found.rows[0]
+  if (existing) {
+    // The fund's currency is its lines' currency. A row that disagrees with the reference would
+    // silently post dollars into a lira account, or the reverse — refuse by name instead.
+    if (existing.currency !== currency) throw new FundCurrencyMismatchError(code, existing.currency, currency)
+    return existing.id
+  }
 
-  const inserted = await client.query<{ id: string }>(
-    `INSERT INTO funds (branch_id, type, owner_kind, owner_id, code, name_ar)
-     VALUES ($1, $2::fund_type, $3, $4, $5, $5)
+  const inserted = await client.query<{ id: string; currency: string }>(
+    `INSERT INTO funds (branch_id, type, owner_kind, owner_id, code, name_ar, currency)
+     VALUES ($1, $2::fund_type, $3, $4, $5, $5, $6)
      ON CONFLICT (branch_id, code) DO UPDATE SET code = EXCLUDED.code
-     RETURNING id`,
-    [branchId, fundTypeOf(fund), ownerKind, ownerId, code],
+     RETURNING id, currency`,
+    [branchId, fundTypeOf(fund), ownerKind, ownerId, code, currency],
   )
-  return inserted.rows[0]!.id
+  const row = inserted.rows[0]!
+  // A concurrent writer may have created the row first; the conflict path returns ITS currency.
+  if (row.currency !== currency) throw new FundCurrencyMismatchError(code, row.currency, currency)
+  return row.id
+}
+
+/**
+ * The application-side copy of 0066's COMMIT-time rules, so a bad posting fails with a clear error
+ * before any row is staged: balanced per currency, two currencies only for an exchange, and a USD
+ * line exactly when the entry freezes a rate. The memory adapter runs the same checks.
+ */
+function assertPostingBalances(posting: Posting, sypMinorPerUsd: bigint | null): void {
+  const problem = postingBalanceProblem(posting)
+  if (problem?.kind === 'unbalanced') {
+    throw new Error(
+      `unbalanced posting ${posting.eventType}: D ${problem.debits} <> C ${problem.credits}` +
+        (problem.currency === 'SYP_NEW' ? '' : ` in ${problem.currency}`),
+    )
+  }
+  if (problem?.kind === 'mixed_currency') {
+    throw new Error(
+      `posting ${posting.eventType} spans ${problem.currencies.join(' + ')}; only company_fx_exchange (or its company_correction reversal) may span two currencies`,
+    )
+  }
+  const hasUsd = posting.lines.some((line) => currencyOf(line.fund) === 'USD')
+  if (hasUsd && sypMinorPerUsd === null) {
+    throw new Error(`posting ${posting.eventType} has a USD line but no frozen syp_minor_per_usd`)
+  }
+  if (!hasUsd && sypMinorPerUsd !== null) {
+    throw new Error(`posting ${posting.eventType} freezes a USD rate but has no USD line`)
+  }
+  if (sypMinorPerUsd !== null && sypMinorPerUsd <= 0n) {
+    throw new Error(`posting ${posting.eventType} freezes a non-positive rate ${sypMinorPerUsd}`)
+  }
 }
 
 /** Driver ids in this system are uuids; a non-uuid (test fixture) becomes NULL rather than an error. */
 function toUuidOrNull(value: string): string | null {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ? value : null
+}
+
+/**
+ * The lines of a journal entry as one JSON array, for a query that joins `journal_lines jl` and
+ * `funds f` and groups by `je.id`. Amounts travel as TEXT and are parsed to BigInt — never through a
+ * JSON number.
+ */
+export const JOURNAL_LINES_JSON = `COALESCE(
+  json_agg(json_build_object('fundCode', f.code, 'side', jl.side,
+                             'amount', jl.amount_minor::text, 'role', jl.line_role,
+                             'currency', f.currency)
+           ORDER BY jl.id) FILTER (WHERE jl.id IS NOT NULL), '[]'
+)`
+
+/** One `journal_entries` row, with its `lines` from `JOURNAL_LINES_JSON`, as the port's record. */
+export function journalEntryFromRow(r: Record<string, unknown>): JournalEntryRecord {
+  return {
+    id: Number(r.id),
+    branchId: String(r.branch_id),
+    eventType: r.event_type as JournalEntryRecord['eventType'],
+    shiftId: (r.shift_id as string | null) ?? null,
+    occurrenceKey: String(r.occurrence_key),
+    businessDate: isoDate(r.business_date),
+    postingDate: isoDate(r.posting_date),
+    weekStartDate: isoDate(r.week_start_date),
+    fxDayId: Number(r.fx_day_id),
+    // int8 is parsed to bigint by the pool (pool.ts), so this is already exact.
+    sypMinorPerUsd: r.syp_minor_per_usd === null || r.syp_minor_per_usd === undefined
+      ? null
+      : BigInt(r.syp_minor_per_usd as bigint),
+    weekLockId: r.week_lock_id === null ? null : Number(r.week_lock_id),
+    reason: (r.reason as string | null) ?? null,
+    createdBy: String(r.created_by),
+    // amount comes back as ::text and is parsed to BigInt here — never through Number().
+    lines: (
+      r.lines as Array<{ fundCode: string; side: 'D' | 'C'; amount: string; role: string | null; currency: Currency }>
+    ).map((l) => ({
+      fundCode: l.fundCode,
+      side: l.side,
+      amount: minor(BigInt(l.amount)),
+      currency: l.currency,
+      ...(l.role === null ? {} : { role: l.role }),
+    })),
+  }
 }
 
 export class PgLedgerRepo implements LedgerRepo {
@@ -135,11 +269,9 @@ export class PgLedgerRepo implements LedgerRepo {
       for (const posting of postings) {
         // Balance is ALSO enforced by a deferred constraint trigger at COMMIT. Checking here
         // first turns it into a clear application error instead of a transaction that fails at
-        // the very end with every other posting already staged.
-        let d = 0n
-        let c = 0n
-        for (const l of posting.lines) (l.side === 'D' ? (d += l.amount) : (c += l.amount))
-        if (d !== c) throw new Error(`unbalanced posting ${posting.eventType}: D ${d} <> C ${c}`)
+        // the very end with every other posting already staged. Per currency, with the one
+        // two-currency exception, exactly as 0066's trigger — through the domain's single rule.
+        assertPostingBalances(posting, meta.sypMinorPerUsd)
 
         /*
          * ON CONFLICT DO NOTHING, not a caught unique violation.
@@ -166,8 +298,8 @@ export class PgLedgerRepo implements LedgerRepo {
         const res = await client.query<{ id: string }>(
           `INSERT INTO journal_entries
              (branch_id, event_type, shift_id, occurrence_key, business_date, posting_date,
-              week_start_date, fx_day_id, reason, created_by)
-           VALUES ($1, $2::ledger_event, $3, $4, $5, $6, $7, $8, $9, $10)
+              week_start_date, fx_day_id, reason, created_by, syp_minor_per_usd)
+           VALUES ($1, $2::ledger_event, $3, $4, $5, $6, $7, $8, $9, $10, $11)
            ON CONFLICT DO NOTHING
            RETURNING id`,
           [
@@ -181,6 +313,7 @@ export class PgLedgerRepo implements LedgerRepo {
             meta.fxDayId,
             meta.reason ?? null,
             meta.createdBy,
+            meta.sypMinorPerUsd === null ? null : meta.sypMinorPerUsd.toString(),
           ],
         )
         // Already posted. Writing nothing and carrying on is the whole point — a retried
@@ -206,13 +339,15 @@ export class PgLedgerRepo implements LedgerRepo {
           postingDate: meta.postingDate,
           weekStartDate: meta.weekStartDate,
           fxDayId: meta.fxDayId,
+          sypMinorPerUsd: meta.sypMinorPerUsd,
           weekLockId: null,
           reason: meta.reason ?? null,
           createdBy: meta.createdBy,
           lines: posting.lines.map((l) => ({
-            fundCode: fundCodeOf(l.fund),
+            fundCode: fundCode(l.fund),
             side: l.side,
             amount: l.amount,
+            currency: currencyOf(l.fund),
             ...(l.role === undefined ? {} : { role: l.role }),
           })),
         })
@@ -229,14 +364,23 @@ export class PgLedgerRepo implements LedgerRepo {
     return this.load('je.branch_id = $1 AND je.week_start_date = $2', [branchId, weekStartDate])
   }
 
+  async findStandaloneEntry(
+    branchId: string,
+    eventType: JournalEntryRecord['eventType'],
+    occurrenceKey: string,
+  ): Promise<JournalEntryRecord | null> {
+    // `shift_id IS NULL` is the COALESCE(shift_id::text, '') = '' half of je_idempotency_uq (0017),
+    // so this can match at most one row.
+    const rows = await this.load(
+      'je.branch_id = $1 AND je.event_type = $2::ledger_event AND je.shift_id IS NULL AND je.occurrence_key = $3',
+      [branchId, eventType, occurrenceKey],
+    )
+    return rows[0] ?? null
+  }
+
   private async load(where: string, params: unknown[]): Promise<JournalEntryRecord[]> {
     const { rows } = await this.pool.query<Record<string, unknown>>(
-      `SELECT je.*,
-              COALESCE(
-                json_agg(json_build_object('fundCode', f.code, 'side', jl.side,
-                                           'amount', jl.amount_minor::text, 'role', jl.line_role)
-                         ORDER BY jl.id) FILTER (WHERE jl.id IS NOT NULL), '[]'
-              ) AS lines
+      `SELECT je.*, ${JOURNAL_LINES_JSON} AS lines
          FROM journal_entries je
          LEFT JOIN journal_lines jl ON jl.entry_id = je.id
          LEFT JOIN funds f ON f.id = jl.fund_id
@@ -245,29 +389,7 @@ export class PgLedgerRepo implements LedgerRepo {
         ORDER BY je.id`,
       params,
     )
-    return rows.map((r) => ({
-      id: Number(r.id),
-      branchId: String(r.branch_id),
-      eventType: r.event_type as JournalEntryRecord['eventType'],
-      shiftId: (r.shift_id as string | null) ?? null,
-      occurrenceKey: String(r.occurrence_key),
-      businessDate: isoDate(r.business_date),
-      postingDate: isoDate(r.posting_date),
-      weekStartDate: isoDate(r.week_start_date),
-      fxDayId: Number(r.fx_day_id),
-      weekLockId: r.week_lock_id === null ? null : Number(r.week_lock_id),
-      reason: (r.reason as string | null) ?? null,
-      createdBy: String(r.created_by),
-      // amount comes back as ::text and is parsed to BigInt here — never through Number().
-      lines: (r.lines as Array<{ fundCode: string; side: 'D' | 'C'; amount: string; role: string | null }>).map(
-        (l) => ({
-          fundCode: l.fundCode,
-          side: l.side,
-          amount: minor(BigInt(l.amount)),
-          ...(l.role === null ? {} : { role: l.role }),
-        }),
-      ),
-    }))
+    return rows.map(journalEntryFromRow)
   }
 
   async fundBalance(branchId: string, fundCode: string): Promise<Minor> {
@@ -362,16 +484,18 @@ export class PgRestorationRepo {
   async create(row: {
     branchId: string
     businessDate: string
-    cashCountId: string
+    cashCountId: string | null
     plan: unknown
     netToCompany: Minor
     reason: string
     performedBy: string
-  }): Promise<void> {
+    runNo: number
+  }): Promise<number> {
     try {
-      await this.pool.query(
-        `INSERT INTO restorations (branch_id, business_date, cash_count_id, plan, net_to_company_minor, reason, performed_by)
-         VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7)`,
+      const { rows } = await this.pool.query<{ id: bigint | string | number }>(
+        `INSERT INTO restorations (branch_id, business_date, cash_count_id, plan, net_to_company_minor, reason, performed_by, run_no)
+         VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8)
+         RETURNING id`,
         [
           row.branchId,
           row.businessDate,
@@ -380,19 +504,37 @@ export class PgRestorationRepo {
           row.netToCompany.toString(),
           row.reason,
           row.performedBy,
+          row.runNo,
         ],
       )
+      // The company mirror of each journal of this run names the row (C2). A driver that does not
+      // echo RETURNING is not one this system runs on; say so rather than invent an id.
+      const id = rows[0]?.id
+      if (id === undefined || id === null) throw new Error('restorations insert returned no id')
+      return Number(id)
     } catch (err) {
       if (isPgError(err, PG.UNIQUE_VIOLATION)) {
-        throw Object.assign(new Error('already restored today'), { code: 'DUPLICATE_RESTORATION' })
+        // Two managers racing the same run number inside the branch-money lock. The loser is told,
+        // rather than quietly posting the same movement twice under a different key.
+        throw Object.assign(new Error('restoration run already recorded'), { code: 'DUPLICATE_RESTORATION' })
       }
       throw err
     }
   }
 
+  /** How many runs that business date already holds; the next run is this plus one. */
+  async runsOnDay(branchId: string, businessDate: string): Promise<number> {
+    const { rows } = await this.pool.query<{ n: string }>(
+      'SELECT count(*)::text AS n FROM restorations WHERE branch_id = $1 AND business_date = $2',
+      [branchId, businessDate],
+    )
+    return Number(rows[0]?.n ?? '0')
+  }
+
+  /** The LATEST run of that day. Since 0061 a day may hold several. */
   async find(branchId: string, businessDate: string) {
     const { rows } = await this.pool.query<Record<string, unknown>>(
-      'SELECT * FROM restorations WHERE branch_id = $1 AND business_date = $2',
+      'SELECT * FROM restorations WHERE branch_id = $1 AND business_date = $2 ORDER BY run_no DESC LIMIT 1',
       [branchId, businessDate],
     )
     const r = rows[0]
@@ -400,17 +542,18 @@ export class PgRestorationRepo {
     return {
       branchId: String(r.branch_id),
       businessDate: String(r.business_date).slice(0, 10),
-      cashCountId: String(r.cash_count_id),
+      cashCountId: r.cash_count_id === null ? null : String(r.cash_count_id),
       plan: r.plan,
       netToCompany: minor(BigInt(String(r.net_to_company_minor))),
       reason: String(r.reason),
       performedBy: String(r.performed_by),
+      runNo: Number(r.run_no ?? 1),
     }
   }
 }
 
 /** Postgres `date` comes back as a JS Date in local time; format it back without a timezone hop. */
-function isoDate(value: unknown): CalendarDate {
+export function isoDate(value: unknown): CalendarDate {
   if (typeof value === 'string') return value.slice(0, 10)
   const d = value as Date
   const pad = (n: number) => String(n).padStart(2, '0')
@@ -567,7 +710,8 @@ export class PgOrderRepo implements OrderRepo {
                 decided_by = $14, decided_at = $15::timestamptz,
                 window_basis = $16, position_evidence = $17::jsonb,
                 close_draft_observation_id = $18, close_draft_client_key = $19,
-                close_draft_review_reasons = $20::jsonb
+                close_draft_review_reasons = $20::jsonb,
+                removed_at = $21::timestamptz, removed_by = $22, removal_reason = $23
           WHERE id = $1`,
         [
           order.id,
@@ -592,6 +736,9 @@ export class PgOrderRepo implements OrderRepo {
           order.observationId ?? null,
           order.closeDraftClientKey ?? null,
           JSON.stringify(order.closeDraftReviewReasons ?? []),
+          order.removedAt ?? null,
+          order.removedBy ?? null,
+          order.removalReason ?? null,
         ],
       )
     })
@@ -658,6 +805,7 @@ const ORDER_COLUMNS = `
          o.window_status, o.decision_reason, o.decided_by, o.decided_at,
          o.window_basis, o.position_evidence, o.close_draft_observation_id,
          o.close_draft_client_key, o.close_draft_review_reasons,
+         o.removed_at, o.removed_by, o.removal_reason,
          COALESCE(
            (SELECT json_agg(json_build_object('role', p.role, 'label', p.label, 'lat', p.lat, 'lng', p.lng)
                             ORDER BY p.seq)
@@ -700,6 +848,9 @@ const toOrder = (r: Record<string, unknown>): ShiftOrderRecord => ({
   positionEvidence: (r.position_evidence as ShiftOrderRecord['positionEvidence'] | null) ?? null,
   observationId: (r.close_draft_observation_id as string | null) ?? null,
   closeDraftClientKey: (r.close_draft_client_key as string | null) ?? null,
+  removedAt: r.removed_at === null || r.removed_at === undefined ? null : new Date(r.removed_at as string).toISOString(),
+  removedBy: (r.removed_by as string | null) ?? null,
+  removalReason: (r.removal_reason as string | null) ?? null,
   closeDraftReviewReasons:
     (r.close_draft_review_reasons as ShiftOrderRecord['closeDraftReviewReasons'] | null) ?? [],
 })
@@ -776,7 +927,8 @@ export class PgCashDeductionRepo implements CashDeductionRepo {
                 window_status = $10, decision_reason = $11, decided_by = $12,
                 decided_at = $13::timestamptz, window_basis = $14,
                 position_evidence = $15::jsonb, close_draft_observation_id = $16,
-                close_draft_client_key = $17, close_draft_review_reasons = $18::jsonb
+                close_draft_client_key = $17, close_draft_review_reasons = $18::jsonb,
+                removed_at = $19::timestamptz, removed_by = $20, removal_reason = $21
           WHERE id = $1`,
         [
           deduction.id,
@@ -799,6 +951,9 @@ export class PgCashDeductionRepo implements CashDeductionRepo {
           deduction.observationId ?? null,
           deduction.closeDraftClientKey ?? null,
           JSON.stringify(deduction.closeDraftReviewReasons ?? []),
+          deduction.removedAt ?? null,
+          deduction.removedBy ?? null,
+          deduction.removalReason ?? null,
         ],
       )
     })
@@ -835,7 +990,7 @@ const CASH_DEDUCTION_COLUMNS = `
          amount_ocr_minor::text AS amount_ocr, point_a, point_b, included, window_status,
          decision_reason, decided_by, decided_at, created_by, window_basis,
          position_evidence, close_draft_observation_id, close_draft_client_key,
-         close_draft_review_reasons
+         close_draft_review_reasons, removed_at, removed_by, removal_reason
     FROM cash_deductions`
 
 const toCashDeduction = (r: Record<string, unknown>): CashDeductionRecord => ({
@@ -859,6 +1014,9 @@ const toCashDeduction = (r: Record<string, unknown>): CashDeductionRecord => ({
   positionEvidence: (r.position_evidence as CashDeductionRecord['positionEvidence'] | null) ?? null,
   observationId: (r.close_draft_observation_id as string | null) ?? null,
   closeDraftClientKey: (r.close_draft_client_key as string | null) ?? null,
+  removedAt: r.removed_at === null || r.removed_at === undefined ? null : new Date(r.removed_at as string).toISOString(),
+  removedBy: (r.removed_by as string | null) ?? null,
+  removalReason: (r.removal_reason as string | null) ?? null,
   closeDraftReviewReasons:
     (r.close_draft_review_reasons as CashDeductionRecord['closeDraftReviewReasons'] | null) ?? [],
 })
@@ -935,6 +1093,8 @@ export class PgTreasuryPositionSource implements TreasuryPositionSource {
       office_wallet: string
       receivables_cash: string
       receivables_wallet: string
+      advances_cash: string
+      advances_wallet: string
       active_custody_cash: string
       active_custody_wallet: string
       active_shift_count: number
@@ -967,6 +1127,8 @@ export class PgTreasuryPositionSource implements TreasuryPositionSource {
               'driver_receivable_wallet',
               'driver_shift_funding_cash',
               'driver_shift_funding_wallet',
+              'advance_receivable_cash',
+              'advance_receivable_wallet',
               'driver_cash',
               'driver_wallet'
             )
@@ -985,6 +1147,12 @@ export class PgTreasuryPositionSource implements TreasuryPositionSource {
                 WHERE fund_type IN ('driver_receivable_wallet', 'driver_shift_funding_wallet')
               ), 0)::text AS receivables_wallet,
               COALESCE(SUM(balance) FILTER (
+                WHERE fund_type = 'advance_receivable_cash'
+              ), 0)::text AS advances_cash,
+              COALESCE(SUM(balance) FILTER (
+                WHERE fund_type = 'advance_receivable_wallet'
+              ), 0)::text AS advances_wallet,
+              COALESCE(SUM(balance) FILTER (
                 WHERE fund_type = 'driver_cash'
                   AND EXISTS (SELECT 1 FROM active_drivers ad WHERE ad.driver_id = fund_balances.owner_id)
               ), 0)::text AS active_custody_cash,
@@ -1000,7 +1168,9 @@ export class PgTreasuryPositionSource implements TreasuryPositionSource {
                     'driver_receivable_cash',
                     'driver_receivable_wallet',
                     'driver_shift_funding_cash',
-                    'driver_shift_funding_wallet'
+                    'driver_shift_funding_wallet',
+                    'advance_receivable_cash',
+                    'advance_receivable_wallet'
                   )
                 ORDER BY code
                 LIMIT 1) AS negative_receivable_fund_code
@@ -1013,6 +1183,8 @@ export class PgTreasuryPositionSource implements TreasuryPositionSource {
       officeWallet: minor(BigInt(row?.office_wallet ?? '0')),
       receivablesCash: minor(BigInt(row?.receivables_cash ?? '0')),
       receivablesWallet: minor(BigInt(row?.receivables_wallet ?? '0')),
+      advancesCash: minor(BigInt(row?.advances_cash ?? '0')),
+      advancesWallet: minor(BigInt(row?.advances_wallet ?? '0')),
       activeCustodyCash: minor(BigInt(row?.active_custody_cash ?? '0')),
       activeCustodyWallet: minor(BigInt(row?.active_custody_wallet ?? '0')),
       activeShiftCount: Number(row?.active_shift_count ?? 0),

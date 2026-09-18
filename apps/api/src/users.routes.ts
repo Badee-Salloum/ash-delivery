@@ -98,16 +98,6 @@ export function registerUserRoutes(app: FastifyInstance, deps: Deps): void {
       lockedUntilMs: null,
       active: true,
     }
-    try {
-      await deps.users.create(user)
-    } catch (err) {
-      if ((err as { code?: string }).code === 'DUPLICATE_USERNAME') {
-        throw new ServiceError(409, 'duplicate_username', { username: body.username })
-      }
-      throw err
-    }
-    await audit(req, 'users', user.id, branchId, { username: user.username, roleKey: user.roleKey })
-
     // A driver account is only useful with a driver record to bind shifts to. The code defaults
     // to the username, which is already unique — the manager can rename it in Fleet later.
     let driverId: string | null = null
@@ -121,15 +111,38 @@ export function registerUserRoutes(app: FastifyInstance, deps: Deps): void {
         active: true,
       }
       try {
-        await deps.directory.createDriver(driver)
+        await deps.driverAccounts.provision({
+          user,
+          driver,
+          session: null,
+          audit: {
+            actorId: req.actor!.userId,
+            actorKind: 'user',
+            requestId: req.requestId,
+            occurredAtMs: deps.clock.nowMs(),
+          },
+        })
       } catch (err) {
-        if ((err as { code?: string }).code === 'DUPLICATE_CODE') {
+        const code = (err as { code?: string }).code
+        if (code === 'DUPLICATE_USERNAME') {
+          throw new ServiceError(409, 'duplicate_username', { username: body.username })
+        }
+        if (code === 'DUPLICATE_CODE') {
           throw new ServiceError(409, 'duplicate_driver_code', { code: body.username })
         }
         throw err
       }
       driverId = driver.id
-      await audit(req, 'drivers', driver.id, branchId, driver)
+    } else {
+      try {
+        await deps.users.create(user)
+      } catch (err) {
+        if ((err as { code?: string }).code === 'DUPLICATE_USERNAME') {
+          throw new ServiceError(409, 'duplicate_username', { username: body.username })
+        }
+        throw err
+      }
+      await audit(req, 'users', user.id, branchId, { username: user.username, roleKey: user.roleKey })
     }
 
     return reply.code(201).send({

@@ -12,19 +12,38 @@ import {
   ocrReadingDelta,
   slotLabel,
   splitSlot,
+  damascusParts,
   formatDateTime,
 } from '@ash/client'
-import { add, formatMinor, minor, parseMinor, sub } from '@ash/domain'
+import { abs, add, formatMinor, minor, parseMinor, sub, workedTime } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { evidenceReviewWarning } from '../evidence-warning.ts'
+import { br1SplitView, employeeShareChain } from '../money-story.ts'
+import {
+  type ResolvedDuplicateHint,
+  type ScanDuplicateHintWire,
+  type ScanOverlapPairCause,
+  duplicateHintsForDeduction,
+  duplicateHintsForOrder,
+} from '../duplicate-hints.ts'
+import {
+  duplicateChoiceRevision,
+  duplicateChoiceView,
+  type DuplicateChoiceRow,
+  type DuplicateChoiceTarget,
+  type DuplicateChoiceView,
+} from '../duplicate-choice.ts'
 import { useConfirm, useToast } from '../feedback.tsx'
 import { LatestRequestGuard } from '../latest-request.ts'
+import { shiftPatternLabel, shiftPatternTone } from '../shift-shape.ts'
 import { isValidOpeningFundInput, openingApprovalRequest } from '../opening-funds.ts'
 import {
   buildOrderDuplicateRevision,
   buildOrderTimingRevision,
   closeDraftReviewReasonLabel,
+  type ApprovalBlockerCode,
+  approvalBlockerCodes,
   closeWorkspaceApprovalReady,
   countAwaitingCloseBatteryReadings,
   deductionHasDashboardEvidenceOrigin,
@@ -32,6 +51,9 @@ import {
   orderHasDashboardEvidenceOrigin,
   orderNeedsAttention,
   positionEvidenceLabel,
+  rowEvidencePage,
+  defaultRereadSlot,
+  type RowEvidenceOriginInput,
   summarizeOrders,
   type CloseDraftReviewReason,
 } from '../approval-workspace.ts'
@@ -41,13 +63,28 @@ import {
 } from '../operation-window.ts'
 import {
   activeForcePreparation,
+  deferralMatchesSettlement as deferralMatchesSettlementInputs,
+  isNonnegativeSettlementMoney,
+  isPositiveMoneyInput,
   closeApprovalRequest,
   isKnownSettlementAction,
   settlementApprovalReady,
   settlementHasVariance,
   settlementVarianceMagnitude,
 } from '../settlement-review.ts'
-import { FOCUS_RING, Badge, Button, Card, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
+import {
+  FOCUS_RING,
+  Badge,
+  Button,
+  Card,
+  Figure,
+  Money,
+  MoneyInput,
+  Pending,
+  Select,
+  Table,
+  TextInput,
+} from '../ui.tsx'
 
 /** Where the map opens when no point has been pinned yet. */
 const DAMASCUS: readonly [number, number] = [33.5138, 36.2765]
@@ -67,6 +104,8 @@ interface BatteryReadingView {
 }
 
 interface Review {
+  /** Advisory overlap hints; absent on an API that predates them. */
+  duplicateHints?: ScanDuplicateHintWire[]
   id: string
   state: string
   driverId: string
@@ -79,6 +118,8 @@ interface Review {
   businessDate: string
   /** Actual operation-window edges. Optional during a staggered API/admin rollout. */
   openApprovedAt?: string | null
+  /** The operation window's start — the driver's own confirmation, not the manager's signature. */
+  windowOpensAt?: string | null
   submittedAt?: string | null
   /** Current branch+driver shift funding captured by the locked manager-review read. */
   shiftFunding: { cash: string; wallet: string }
@@ -130,7 +171,18 @@ interface Review {
       lowerInstant?: string | null
       upperInstant?: string | null
       anchorObservationIds?: string[]
+      /** Normalized 0..1 vertical bounds from deterministic image geometry — the band's position. */
+      yTop?: number | null
+      yBottom?: number | null
+      rowIndex?: number
+      rowCount?: number
     } | null
+    /** WHICH stored screenshot this row was read from. Null for a hand-typed row. */
+    evidenceSlot?: string | null
+    evidenceMediaId?: string | null
+    /** «هذا الصفّ ليس توصيلة» — stronger than `included: false`. See the wire schema. */
+    removedAt?: string | null
+    removalReason?: string | null
     closeDraftReviewReasons?: CloseDraftReviewReason[]
   }>
   /** A negative Recent-Orders row: positive magnitude, but a distinct cash deduction operation. */
@@ -153,7 +205,18 @@ interface Review {
       lowerInstant?: string | null
       upperInstant?: string | null
       anchorObservationIds?: string[]
+      /** Normalized 0..1 vertical bounds from deterministic image geometry — the band's position. */
+      yTop?: number | null
+      yBottom?: number | null
+      rowIndex?: number
+      rowCount?: number
     } | null
+    /** WHICH stored screenshot this row was read from. Null for a hand-typed row. */
+    evidenceSlot?: string | null
+    evidenceMediaId?: string | null
+    /** «هذا الصفّ ليس توصيلة» — stronger than `included: false`. See the wire schema. */
+    removedAt?: string | null
+    removalReason?: string | null
     closeDraftReviewReasons?: CloseDraftReviewReason[]
   }>
   /** «سجل المدفوعات» as read: archival evidence only, never a financial input. */
@@ -211,14 +274,6 @@ interface Review {
   }
 }
 
-function isNonnegativeSettlementMoney(value: string): boolean {
-  try {
-    return value.trim() !== '' && parseMinor(value.trim()) >= 0n
-  } catch {
-    return false
-  }
-}
-
 function positiveSettlementClaim(value: string): string {
   const amount = parseMinor(value)
   return formatMinor(amount > 0n ? amount : minor(0n))
@@ -271,6 +326,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   const [varianceReason, setVarianceReason] = useState('')
   const [cashReceivableDeferred, setCashReceivableDeferred] = useState('0')
   const [walletReceivableDeferred, setWalletReceivableDeferred] = useState('0')
+  const [cashShortageReceivable, setCashShortageReceivable] = useState('0')
   const [settlementRecalculating, setSettlementRecalculating] = useState(false)
   /** Suggestion-only reads of exact stored dashboard slots, keyed by the reviewed operation. */
   const [orderRereads, setOrderRereads] = useState<Record<string, ManagerOrderEvidenceRereadResponse>>({})
@@ -328,6 +384,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     setVarianceReason('')
     setCashReceivableDeferred('0')
     setWalletReceivableDeferred('0')
+    setCashShortageReceivable('0')
     setSettlementRecalculating(false)
     setOrderRereads({})
     void api
@@ -365,7 +422,8 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     if (!review || review.state !== 'pending_review') return
     if (
       !isNonnegativeSettlementMoney(cashReceivableDeferred) ||
-      !isNonnegativeSettlementMoney(walletReceivableDeferred)
+      !isNonnegativeSettlementMoney(walletReceivableDeferred) ||
+      !isNonnegativeSettlementMoney(cashShortageReceivable)
     ) {
       setSettlementLoadError('invalid_receivable_amount')
       setSettlementRecalculating(false)
@@ -379,6 +437,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         .shiftSettlement(review.id, undefined, {
           cashReceivableDeferred: cashReceivableDeferred.trim(),
           walletReceivableDeferred: walletReceivableDeferred.trim(),
+          cashShortageReceivable: cashShortageReceivable.trim(),
         })
         .then((next) => {
           if (cancelled) return
@@ -396,14 +455,43 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [api, cashReceivableDeferred, review, walletReceivableDeferred])
+  }, [api, cashReceivableDeferred, cashShortageReceivable, review, walletReceivableDeferred])
+
+  /*
+   * THE CLOSING STATEMENT OF A SHIFT THAT IS ALREADY CLOSED.
+   *
+   * The live effect above returns early for anything but `pending_review`, so a manager who pressed
+   * «عرض» on an approved shift left seven financial columns behind to reach a photo report and a
+   * meter reading. The frozen snapshot is right there — `/shifts/:id/settlement` returns the STORED
+   * row for a settled shift and recomputes nothing.
+   *
+   * `legacy_settlement_read_only` is not an error to show. Approvals from before the fixed-40%
+   * policy have no stored snapshot, and the route refuses to manufacture a 40% receipt for a
+   * journal posted under a former tier rule — correctly. The card simply does not appear.
+   */
+  useEffect(() => {
+    if (!review) return
+    if (review.state !== 'approved' && review.state !== 'week_locked') return
+    let cancelled = false
+    void api
+      .shiftSettlement(review.id)
+      .then((next) => {
+        if (!cancelled) setSettlement(next)
+      })
+      .catch(() => {
+        if (!cancelled) setSettlement(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [api, review])
 
   // A changed hash means changed money. Earlier ticks must never carry across to a new statement.
   useEffect(() => {
     setWalletTransferConfirmed(false)
     setCashSettlementConfirmed(false)
     setVarianceReason('')
-  }, [cashReceivableDeferred, review?.id, settlement?.settlementHash, walletReceivableDeferred])
+  }, [cashReceivableDeferred, cashShortageReceivable, review?.id, settlement?.settlementHash, walletReceivableDeferred])
 
   useEffect(() => {
     const prepared = activeForcePreparation(review?.submittedAt, review?.decisions ?? [])
@@ -447,6 +535,27 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
 
   const operationCopy = operationReviewCopy(lang)
   const openingFundsValid = isValidOpeningFundInput(floatText) && isValidOpeningFundInput(topupText)
+  /*
+   * The shift's own clock, in the BRANCH's timezone rather than the reader's.
+   *
+   * `windowOpensAt` is the driver's confirmation and `submittedAt` his close submission — the same
+   * operation window the close draft reasons about, and the same pair the history screen measures,
+   * so the two screens cannot disagree about how long a shift ran.
+   */
+  const shiftStart = review.windowOpensAt ?? review.openApprovedAt ?? null
+  const shiftEnd = review.submittedAt ?? null
+  const shiftClock = shiftStart
+    ? `${damascusParts(new Date(shiftStart)).time} → ${shiftEnd ? damascusParts(new Date(shiftEnd)).time : '…'}`
+    : null
+  const shiftWorked = workedTime(
+    shiftStart === null ? null : Date.parse(shiftStart),
+    shiftEnd === null ? null : Date.parse(shiftEnd),
+  )
+  // One shift judged alone, so it cannot see a second one that day — the dashboard, which holds
+  // the whole day per driver, is where a two-row double is caught. Only an open or suspended shift
+  // is RUNNING; an unclassified row in any other state has simply not started.
+  const shiftRunning = review.state === 'open' || review.state === 'suspended'
+
   const cashDeductions = review.cashDeductions ?? []
   const unresolvedWindowCount = countUnresolvedWindowRows(review.orders, cashDeductions)
   const operationReasonReady = operationReason.trim().length > 0
@@ -457,12 +566,10 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     cashSettlementConfirmed,
     varianceReason: forcePrepared ? notes : varianceReason,
   }
-  const deferralMatchesSettlement =
-    settlement !== null &&
-    isNonnegativeSettlementMoney(cashReceivableDeferred) &&
-    isNonnegativeSettlementMoney(walletReceivableDeferred) &&
-    parseMinor(cashReceivableDeferred.trim()) === parseMinor(settlement.cashReceivableDeferred) &&
-    parseMinor(walletReceivableDeferred.trim()) === parseMinor(settlement.walletReceivableDeferred)
+  const deferralMatchesSettlement = deferralMatchesSettlementInputs(
+    { cashReceivableDeferred, walletReceivableDeferred, cashShortageReceivable },
+    settlement,
+  )
   const closeSettlementReady =
     !settlementRecalculating &&
     deferralMatchesSettlement &&
@@ -651,6 +758,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         cashSettlementConfirmed: true,
         cashReceivableDeferred: settlement.cashReceivableDeferred,
         walletReceivableDeferred: settlement.walletReceivableDeferred,
+        cashShortageReceivable: settlement.cashShortageReceivable,
       })
       toast.success(`${t.approval.approved} — ${who.driver ?? ''}`)
       onDone()
@@ -689,6 +797,30 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       toast.error(explainError((err as { error?: string }).error ?? null, t))
     }
     refreshVisible()
+  }
+
+  /**
+   * «الحسم». Mirrors `reviseOps`: one audited write, then a visible refresh.
+   *
+   * The refresh is not cosmetic. The charge moves `finalEmployeeCash`, `cashToOffice` and the
+   * settlement hash, so the two ticks the manager has already given belong to a settlement that no
+   * longer exists — `setSettlement` landing a new hash is what clears them.
+   */
+  async function setCharge(amount: string, reason: string | null): Promise<boolean> {
+    if (!review) return false
+    setBusy(true)
+    setError(null)
+    try {
+      await api.setManagerCharge(review.id, { amount, reason })
+      toast.success(t.approval.recomputed)
+      refreshVisible()
+      return true
+    } catch (err) {
+      setError((err as { error?: string }).error ?? 'error')
+      return false
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function reviseOps(body: Record<string, unknown>): Promise<boolean> {
@@ -832,16 +964,19 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         varianceReason={varianceReason}
         cashReceivableDeferred={cashReceivableDeferred}
         walletReceivableDeferred={walletReceivableDeferred}
+        cashShortageReceivable={cashShortageReceivable}
         notes={notes}
         onWalletTransferConfirmed={setWalletTransferConfirmed}
         onCashSettlementConfirmed={setCashSettlementConfirmed}
         onVarianceReason={setVarianceReason}
         onCashReceivableDeferred={setCashReceivableDeferred}
         onWalletReceivableDeferred={setWalletReceivableDeferred}
+        onCashShortageReceivable={setCashShortageReceivable}
         onNotes={setNotes}
         onBack={onDone}
         onRefresh={refreshVisible}
         onRevise={reviseOps}
+        onSetManagerCharge={setCharge}
         onManagerRead={managerRead}
         onApprove={approve}
         onForceApprove={forceApprove}
@@ -872,11 +1007,45 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             {who.driver ?? t.approval.review}
             {who.vehicle ? <span className="num ms-2 text-base font-medium text-slate-500">{who.vehicle}</span> : null}
           </h1>
-          <p className="num text-sm text-slate-600">
-            {review.businessDate} · #{review.shiftNo}
+          {/*
+            * WHEN, not just which day. A business date and «#1» identified nothing on a day the
+            * fleet ran thirteen shifts, and it reads a day early for a night one, because the
+            * business day ends at 04:00. The branch-local clock is what separates them.
+            */}
+          <p className="text-sm text-ink-secondary">
+            <span className="num" dir="ltr">
+              {review.businessDate} #{review.shiftNo}
+            </span>
+            {shiftClock ? (
+              <span className="num ms-2" dir="ltr">
+                {shiftClock}
+              </span>
+            ) : null}
+            {shiftWorked.minutes !== null && !shiftWorked.abandoned ? (
+              <span className="num ms-2 font-semibold" dir="ltr">
+                {Math.floor(shiftWorked.minutes / 60)}:{String(shiftWorked.minutes % 60).padStart(2, '0')}
+              </span>
+            ) : null}
           </p>
         </div>
-        <Badge tone="slate">{t.shift.states[review.state as keyof typeof t.shift.states] ?? review.state}</Badge>
+        {/*
+          * SINGLE OR DOUBLE, on the page a manager actually opens.
+          *
+          * The pattern shipped on the history table and nowhere else, so the one screen you reach by
+          * pressing «عرض» — the screen where the money is signed for — could not tell you whether
+          * you were looking at one slot or two. That is the difference between a driver who is two
+          * hours short and one who covered a colleague's evening.
+          *
+          * It reads «صباحية · 8س», «مسائية · 8س» or «دبل · 12س»: the pattern and the target it is
+          * judged against. A RUNNING shift reads «جارية — صباحية» — its slot is certain, its pattern
+          * is not, because any shift that runs ten hours becomes a double.
+          */}
+        <span className="flex flex-col items-end gap-1">
+          <Badge tone="slate">{t.shift.states[review.state as keyof typeof t.shift.states] ?? review.state}</Badge>
+          <Badge tone={shiftPatternTone(shiftWorked)}>
+            {shiftPatternLabel(shiftWorked, t.completedShifts, shiftRunning)}
+          </Badge>
+        </span>
       </div>
 
       <OperationWindowAdvisory
@@ -889,6 +1058,30 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         lang={lang}
         copy={operationCopy}
       />
+
+      {/* A settled shift’s page IS its closing record; the gate panels below stay suppressed. */}
+      {!atGate && settlement ? <ClosingStatement settlement={settlement} /> : null}
+
+      {/*
+        * …and a RUNNING shift's page says where the manager can act on it, rather than looking
+        * broken. Force-close is not rebuilt here: it prefills from the close draft, handles the
+        * odometer anomaly and prepares in two stages, and a second copy of that would drift from
+        * the first. One instrument, one place, and a way to reach it from here.
+        */}
+      {review.state === 'open' || review.state === 'suspended' ? (
+        <Card title={t.shift.states[review.state as keyof typeof t.shift.states] ?? review.state}>
+          <p className="text-sm leading-6 text-ink-secondary">{t.approval.stillRunning}</p>
+          <Button
+            variant="ghost"
+            className="mt-2"
+            onClick={() => {
+              location.hash = 'liveShifts'
+            }}
+          >
+            {t.liveShifts.title}
+          </Button>
+        </Card>
+      ) : null}
 
       {/* ── The BR1 panel, pinned first — it is what the decision hinges on ───────────────
           Only once the shift is AT a gate. Mid-shift the driver has declared no closing cash or
@@ -973,151 +1166,11 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       </Card>
       ) : null}
 
-      {/* The physical handover comes immediately after BR1: first what to transfer, then why. */}
-      {settlement ? (
-        <Card title={t.settlement.title}>
-          <p className="text-xs text-slate-600">{t.settlement.hint}</p>
-
-          <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
-            <div
-              className={`rounded-xl border-2 p-4 ${
-                settlement.walletAction === 'collect'
-                  ? 'border-sky-300 bg-sky-50'
-                  : settlement.walletAction === 'fund'
-                    ? 'border-amber-300 bg-amber-50'
-                    : 'border-emerald-300 bg-emerald-50'
-              }`}
-            >
-              <p className="text-xs font-bold text-slate-600">{t.settlement.walletInstruction}</p>
-              <p className="mt-1 text-base font-bold text-slate-900">
-                {t.settlement.walletAction[settlement.walletAction]}
-              </p>
-              <Money value={settlement.walletAmount} className="mt-2 block text-3xl font-extrabold text-sky-800" />
-            </div>
-            <div
-              className={`rounded-xl border-2 p-4 ${
-                settlement.cashAction === 'collect'
-                  ? 'border-emerald-300 bg-emerald-50'
-                  : settlement.cashAction === 'pay'
-                    ? 'border-amber-300 bg-amber-50'
-                    : 'border-slate-300 bg-slate-50'
-              }`}
-            >
-              <p className="text-xs font-bold text-slate-600">{t.settlement.cashInstruction}</p>
-              <p className="mt-1 text-base font-bold text-slate-900">
-                {t.settlement.cashAction[settlement.cashAction]}
-              </p>
-              <Money
-                value={settlement.cashAmount}
-                className={`mt-2 block text-3xl font-extrabold ${
-                  settlement.cashAction === 'pay' ? 'text-amber-800' : 'text-emerald-800'
-                }`}
-              />
-            </div>
-          </div>
-
-          <div className="mt-4 rounded-lg border border-slate-200 bg-white p-3">
-            <p className="text-sm font-bold text-slate-800">{t.settlement.breakdown}</p>
-            <div className="mt-2 grid grid-cols-1 gap-x-6 gap-y-1 md:grid-cols-2">
-              {(
-                [
-                  ['deliveryFeeTotal', settlement.deliveryFeeTotal],
-                  ['fixedDriverShare', settlement.fixedDriverShare],
-                  ['manualDriverShare', settlement.manualDriverShare],
-                  ['grossDriverShare', settlement.grossDriverShare],
-                  ['cashDeductionTotal', settlement.cashDeductionTotal],
-                  ['baseDriverShare', settlement.baseDriverShare],
-                  ['expectedTotal', settlement.expectedTotal],
-                  ['actualTotal', settlement.actualTotal],
-                ] as const
-              ).map(([key, value]) => (
-                <div key={key} className="flex items-baseline gap-2 border-b border-slate-100 py-1 text-sm">
-                  <span className="text-slate-600">{t.settlement[key]}</span>
-                  <Money value={value} className="ms-auto font-semibold text-slate-900" />
-                </div>
-              ))}
-              <div
-                className={`flex items-baseline gap-2 border-b py-1 text-sm font-bold md:col-span-2 ${
-                  settlement.varianceDirection === 'surplus'
-                    ? 'border-emerald-200 text-emerald-800'
-                    : settlement.varianceDirection === 'shortage'
-                      ? 'border-red-200 text-red-800'
-                      : 'border-slate-100 text-slate-700'
-                }`}
-              >
-                <span>{t.settlement.varianceDirection[settlement.varianceDirection]}</span>
-                <Money value={settlementVarianceMagnitude(settlement)} className="ms-auto text-lg" />
-              </div>
-              <div className="flex items-baseline gap-2 pt-2 text-base font-extrabold md:col-span-2">
-                <span>{t.settlement.finalEmployeeCash}</span>
-                <Money
-                  value={settlement.finalEmployeeCash}
-                  className={`ms-auto text-2xl ${
-                    parseMinor(settlement.finalEmployeeCash) < 0n ? 'text-red-700' : 'text-brand'
-                  }`}
-                />
-              </div>
-            </div>
-          </div>
-
-          {settlementHasVariance(settlement) && !forcePrepared ? (
-            <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3">
-              <label className="text-sm font-bold text-amber-950" htmlFor="settlement-variance-reason">
-                {t.settlement.varianceReason}
-              </label>
-              <textarea
-                id="settlement-variance-reason"
-                value={varianceReason}
-                onChange={(event) => setVarianceReason(event.target.value)}
-                disabled={busy}
-                maxLength={500}
-                rows={2}
-                className="mt-2 w-full rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/15"
-                placeholder={t.settlement.varianceReasonPlaceholder}
-              />
-            </div>
-          ) : null}
-
-          <fieldset className="mt-4 flex flex-col gap-2" disabled={busy}>
-            <legend className="mb-1 text-sm font-bold text-slate-800">{t.settlement.confirmationsTitle}</legend>
-            <label className="flex min-h-12 cursor-pointer items-center gap-3 rounded-lg border border-slate-200 p-3 text-sm font-semibold text-slate-800">
-              <input
-                type="checkbox"
-                checked={walletTransferConfirmed}
-                onChange={(event) => setWalletTransferConfirmed(event.target.checked)}
-                className="size-5 shrink-0 accent-emerald-600"
-              />
-              <span>{t.settlement.walletConfirmed}</span>
-            </label>
-            <label className="flex min-h-12 cursor-pointer items-center gap-3 rounded-lg border border-slate-200 p-3 text-sm font-semibold text-slate-800">
-              <input
-                type="checkbox"
-                checked={cashSettlementConfirmed}
-                onChange={(event) => setCashSettlementConfirmed(event.target.checked)}
-                className="size-5 shrink-0 accent-emerald-600"
-              />
-              <span>{t.settlement.cashConfirmed}</span>
-            </label>
-          </fieldset>
-        </Card>
-      ) : isClose ? (
-        <Card title={t.settlement.title}>
-          <p className="text-sm font-medium text-red-700">
-            {settlementLoadError ? explainError(settlementLoadError, t) : t.settlement.loading}
-          </p>
-          {settlementLoadError ? (
-            <Button variant="ghost" className="mt-3" onClick={load} disabled={busy}>
-              {t.common.retry}
-            </Button>
-          ) : null}
-        </Card>
-      ) : null}
-
       {/* ── Start vs end, side by side — the odometer delta is the anti-fraud read ──────── */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <Card title={t.shift.startPackage}>
           <dl className="grid grid-cols-2 gap-2 text-sm">
-            <Field label={t.shift.odometer} value={String(review.startPackage.odometerKm ?? '—')} />
+            <Figure label={t.shift.odometer} value={String(review.startPackage.odometerKm ?? '—')} />
             {review.state === 'awaiting_open_approval' ? (
               <>
                 <div>
@@ -1144,11 +1197,11 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                     />
                   </dd>
                 </div>
-                <Field
+                <Figure
                   label={`${t.treasury.receivableKinds.shift_funding} / ${t.treasury.receivableChannels.cash}`}
                   value={review.shiftFunding.cash}
                 />
-                <Field
+                <Figure
                   label={`${t.treasury.receivableKinds.shift_funding} / ${t.treasury.receivableChannels.wallet}`}
                   value={review.shiftFunding.wallet}
                 />
@@ -1161,8 +1214,8 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
               </>
             ) : (
               <>
-                <Field label={t.shift.cashFloat} value={review.startPackage.floatTotal} />
-                <Field label={t.shift.walletTopup} value={review.startPackage.topupTotal} />
+                <Figure label={t.shift.cashFloat} value={review.startPackage.floatTotal} />
+                <Figure label={t.shift.walletTopup} value={review.startPackage.topupTotal} />
               </>
             )}
           </dl>
@@ -1179,17 +1232,17 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         </Card>
         <Card title={t.shift.endPackage}>
           <dl className="grid grid-cols-2 gap-2 text-sm">
-            <Field label={t.shift.odometer} value={String(review.endPackage.odometerKm ?? '—')} />
+            <Figure label={t.shift.odometer} value={String(review.endPackage.odometerKm ?? '—')} />
             {/* The sign was unconditional, so a tampered end-odometer rendered as «+-5 كم»; and the
                 unit was a literal in the TSX, unreachable by the English catalogue. A delta that is
                 zero or negative is the anti-fraud read failing, so it is coloured. */}
-            <Field
+            <Figure
               label={t.approval.startVsEnd}
               value={odoDelta === null ? '—' : `${odoDelta} ${t.shift.km}`}
               {...(odoDelta !== null && odoDelta <= 0 ? { tone: 'red' as const } : {})}
             />
-            <Field label={t.shift.cashHandover} value={review.endPackage.cashDeclared ?? '—'} />
-            <Field label={t.shift.walletBalance} value={review.endPackage.walletDeclared ?? '—'} />
+            <Figure label={t.shift.cashHandover} value={review.endPackage.cashDeclared ?? '—'} />
+            <Figure label={t.shift.walletBalance} value={review.endPackage.walletDeclared ?? '—'} />
           </dl>
           {review.endPackage.odometerAnomalyConfirmedAt ? (
             <p className="mt-2 text-xs font-medium text-red-700">
@@ -1197,9 +1250,6 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
               <span className="num">{formatDateTime(review.endPackage.odometerAnomalyConfirmedAt, lang)}</span>
               {' · '}{review.endPackage.odometerAnomalyConfirmedBy ?? '—'}
             </p>
-          ) : null}
-          {isClose && !forcePrepared ? (
-            <ReviseFigures shiftId={review.id} review={review} onRevised={refreshVisible} />
           ) : null}
           {/* Both close readers now preserve their baseline; a manual correction remains visible. */}
           <OcrDeltaLines
@@ -1521,49 +1571,26 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
              landing squarely on top of the approve button. And the safe-area padding, because
              `viewport-fit=cover` is now set — without it this bar sits under an Android gesture bar,
              where the tap that should approve a shift dismisses the app instead. */
-          className="sticky bottom-0 z-50 -mx-4 border-t border-slate-200 bg-white/95 px-4 py-3 backdrop-blur"
+          className="sticky bottom-0 z-50 -mx-4 border-t border-line bg-surface-card px-4 py-3"
           style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
         >
-          {/* WHY the button is dead. A 40%-opacity ghost with no explanation is how a manager
-              concludes the console is broken and goes looking for a way around the gate. */}
-          {isClose && !settlement ? (
-            <p className="mb-2 text-sm font-medium text-red-700">{t.settlement.unavailable}</p>
-          ) : null}
-          {isClose && settlement && (!walletTransferConfirmed || !cashSettlementConfirmed) ? (
-            <p className="mb-2 text-sm font-medium text-amber-800">{t.settlement.confirmBeforeApproval}</p>
-          ) : null}
-          {isClose && unresolvedWindowCount > 0 ? (
-            <p className="mb-2 text-sm font-medium text-amber-800">
-              {operationCopy.cannotApproveUnknown.replace('{n}', String(unresolvedWindowCount))}
+          {/* WHY the button is dead. `aria-invalid` on the two inputs tells a screen reader and
+              nobody else; a 40%-opacity ghost with no explanation is how a manager concludes the
+              console is broken and goes looking for a way around the gate. */}
+          {!openingFundsValid ? (
+            <p role="alert" className="mb-2 text-sm font-medium text-amber-800">
+              {t.approval.openingFundsInvalid}
             </p>
           ) : null}
-          {isClose && forcePrepared && settlementDraft.varianceReason.trim() === '' ? (
-            <p className="mb-2 text-sm font-medium text-red-700">{t.approval.forceReasonRequired}</p>
-          ) : null}
-          {isClose && forcePrepared ? (
-            <p className="mb-2 text-sm font-medium text-amber-800">{t.approval.forcePreparedHint}</p>
-          ) : null}
           <div className="flex flex-wrap gap-3">
-            {isClose && forcePrepared ? null : (
-              <Button
-                variant="success"
-                disabled={busy || (!isClose && !openingFundsValid) || (isClose && (unresolvedWindowCount > 0 || !closeSettlementReady))}
-                onClick={approve}
-                className="flex-1"
-              >
-                {isClose ? t.approval.approveClose : t.common.approve}
-              </Button>
-            )}
-            {isClose && forcePrepared ? (
-              <Button
-                variant="danger"
-                disabled={busy || unresolvedWindowCount > 0 || !closeSettlementReady || notes.trim() === ''}
-                onClick={forceApprove}
-                className="flex-1"
-              >
-                {t.approval.forceApprove}
-              </Button>
-            ) : null}
+            <Button
+              variant="success"
+              disabled={busy || !openingFundsValid}
+              onClick={approve}
+              className="flex-1"
+            >
+              {t.common.approve}
+            </Button>
             {/* Re-shoot is legal on both gates. */}
             <Button variant="ghost" disabled={busy} onClick={() => decide('request-rephoto')}>
               {t.approval.requestRetake}
@@ -1572,17 +1599,265 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                 للسائق» and neither is red. Red is now reserved for the one action that destroys
                 a shift — the manager used to learn «رفض» = send back at one gate and meet
                 «رفض نهائي» = void at the other, one word apart. */}
-            <Button variant="ghost" disabled={busy} onClick={() => decide(isClose ? 'reject-close' : 'reject-open')}>
+            <Button variant="ghost" disabled={busy} onClick={() => decide('reject-open')}>
               {t.approval.sendBack}
             </Button>
-            {isClose ? null : (
-              <Button variant="danger" disabled={busy} onClick={refuse}>
-                {t.approval.refuse}
-              </Button>
-            )}
+            <Button variant="danger" disabled={busy} onClick={refuse}>
+              {t.approval.refuse}
+            </Button>
           </div>
         </div>
       ) : null}
+    </div>
+  )
+}
+
+/**
+ * WHAT ACTUALLY HAPPENED AT CLOSE — read-only, for a shift that is already settled.
+ *
+ * The BR1 panel and the whole close workspace are suppressed once a shift leaves `pending_review`,
+ * because mid-shift they would read the driver's undeclared cash as zero and shout a difference the
+ * size of the float. The side effect was that an APPROVED shift lost them too: pressing «عرض» on a
+ * completed shift left seven financial columns behind to arrive at a photo report and an odometer
+ * reading. The one thing a manager opens a closed shift to see — what was handed over, and why —
+ * was the one thing the page did not show.
+ *
+ * Every figure here is the frozen snapshot, never a recomputation: `settlementFor` is not called at
+ * all for a settled shift, and a pre-policy approval (which has no stored snapshot) renders nothing
+ * rather than a freshly-computed 40% receipt for a journal posted under a former tier rule.
+ *
+ * Zero new financial strings: the labels are `t.settlement.*`, written for the gate and equally
+ * true in the past tense. Only the provenance line needed words of its own.
+ */
+function ClosingStatement({ settlement }: { settlement: SettlementView }): ReactNode {
+  const { t, lang } = useApp()
+  const variance = parseMinor(settlement.variance)
+  const employeeNegative = parseMinor(settlement.finalEmployeeCash) < 0n
+  const signedAt = settlement.confirmedAt ? formatDateTime(settlement.confirmedAt, lang) : null
+
+  return (
+    <Card title={t.approval.closingTitle}>
+      {signedAt ? (
+        <p className="text-label text-ink-muted">
+          {settlement.confirmedByName
+            ? t.approval.closingConfirmedBy
+                .replace('{name}', settlement.confirmedByName)
+                .replace('{at}', signedAt)
+            : t.approval.closingConfirmedAt.replace('{at}', signedAt)}
+        </p>
+      ) : null}
+
+      {/* Expected against actual, and the difference — the three numbers the close turned on. */}
+      <dl className="mt-3 flex flex-col gap-1 text-sm">
+        {[
+          { key: 'expected', label: t.settlement.expectedTotal, value: settlement.expectedTotal },
+          { key: 'actual', label: t.settlement.actualTotal, value: settlement.actualTotal },
+        ].map((line) => (
+          <div key={line.key} className="flex items-baseline justify-between gap-2">
+            <dt className="text-ink-secondary">{line.label}</dt>
+            <dd className="num font-semibold" dir="ltr">
+              <Money value={line.value} />
+            </dd>
+          </div>
+        ))}
+        <div className="mt-2 flex items-baseline justify-between gap-2 border-t border-line pt-2">
+          <dt
+            className={`font-semibold ${
+              settlement.varianceDirection === 'balanced'
+                ? 'text-ink-secondary'
+                : settlement.varianceDirection === 'surplus'
+                  ? 'text-success-ink'
+                  : 'text-danger-ink'
+            }`}
+          >
+            {t.settlement.varianceDirection[settlement.varianceDirection]}
+          </dt>
+          <dd className="num shrink-0 text-xl font-bold" dir="ltr">
+            <Money value={formatMinor(abs(variance))} />
+          </dd>
+        </div>
+      </dl>
+
+      {settlement.varianceReason ? (
+        <p className="mt-3 rounded-lg border border-line bg-surface-muted p-3 text-label">
+          <span className="font-semibold text-ink-secondary">{t.approval.closingVarianceReason}: </span>
+          {settlement.varianceReason}
+        </p>
+      ) : null}
+
+      {/* The same derivation the gate showed, reused verbatim — the employee's figure IS the chain. */}
+      <dl className="mt-3 rounded-lg border border-line p-3 text-sm">
+        {employeeShareChain(settlement).map((step) => {
+          const last = step.code === 'takes'
+          return (
+            <div
+              key={step.code}
+              className={`flex items-baseline justify-between gap-3 ${
+                last ? 'mt-2 border-t border-line-strong pt-2' : 'mt-1 first:mt-0'
+              }`}
+            >
+              <dt className={last ? 'font-bold text-ink-secondary' : 'text-label text-ink-muted'}>
+                {step.code === 'fees_to_share'
+                  ? t.settlement.share.fees_to_share.replace('{from}', groupThousands(step.from ?? '0'))
+                  : step.code === 'variance'
+                    ? t.settlement.share.variance[step.direction ?? 'balanced']
+                    : t.settlement.share[step.code]}
+              </dt>
+              <dd
+                dir="ltr"
+                className={`num shrink-0 ${
+                  last
+                    ? `text-xl font-extrabold ${employeeNegative ? 'text-danger-ink' : 'text-brand'}`
+                    : 'text-ink-secondary'
+                }`}
+              >
+                <Money value={step.amount} />
+              </dd>
+            </div>
+          )
+        })}
+        {/* Decision 15: the share came out of the money being returned, not out of company capital. */}
+        <p className="mt-1 text-label text-ink-faint">{t.settlement.share.fromReturnedMoney}</p>
+      </dl>
+
+      {/*
+        The two transactions, and the fact that a manager attested to each.
+        BR5 requires both ticks before a close can post, so a `false` here would be a stored snapshot
+        that could not have been approved — worth showing rather than assuming.
+      */}
+      <p className="mt-4 text-label font-semibold text-ink-secondary">{t.approval.closingHandover}</p>
+      <ul className="mt-1 flex flex-col gap-1 text-sm">
+        {[
+          {
+            key: 'wallet',
+            label: t.settlement.walletAction[settlement.walletAction],
+            amount: settlement.walletAmount,
+            done: settlement.walletTransferConfirmed === true,
+          },
+          {
+            key: 'cash',
+            label: t.settlement.cashAction[settlement.cashAction],
+            amount: settlement.cashAmount,
+            done: settlement.cashSettlementConfirmed === true,
+          },
+        ].map((row) => (
+          <li key={row.key} className="flex items-baseline justify-between gap-2">
+            <span className="text-ink-secondary">
+              {row.done ? <span className="text-success-ink">✓ </span> : null}
+              {row.label}
+            </span>
+            <span className="num shrink-0 font-semibold" dir="ltr">
+              <Money value={row.amount} />
+            </span>
+          </li>
+        ))}
+      </ul>
+    </Card>
+  )
+}
+
+/**
+ * «الحسم» — the amount a manager charges the employee at this close.
+ *
+ * PLACED INSIDE THE CLOSE WORKSPACE, and that is not incidental. Its withdrawn predecessor was
+ * rendered in the ordinary review JSX, which is only reached AFTER `if (isClose) return
+ * <CloseApprovalWorkspace/>` has already returned for `pending_review` — the exact state the form
+ * required. It was unreachable dead code: the feature shipped with no user interface at all, and
+ * nobody noticed because the money it moved was zero either way.
+ *
+ * It sits beside the settlement figures rather than with the operation rows, because it is not an
+ * operation. Nothing was scanned and nothing was counted; it is a decision about the settlement,
+ * and it belongs where the settlement is read.
+ */
+function ManagerChargeBox({
+  settlement,
+  disabled,
+  copy,
+  onSave,
+}: {
+  settlement: SettlementView
+  disabled: boolean
+  copy: ReturnType<typeof useApp>['t']['settlement']
+  onSave(amount: string, reason: string | null): Promise<boolean>
+}): ReactNode {
+  const applied = parseMinor(settlement.managerCharge ?? '0')
+  const [amount, setAmount] = useState(applied === 0n ? '' : (settlement.managerCharge ?? ''))
+  const [reason, setReason] = useState('')
+  const amountReady = isPositiveMoneyInput(amount)
+  const reasonReady = reason.trim() !== ''
+
+  return (
+    <div className="mt-3 rounded-xl border border-warning-line bg-warning-surface p-3">
+      <p className="text-sm font-extrabold text-warning-ink">{copy.chargeTitle}</p>
+      <p className="mt-1 text-label text-warning-ink">{copy.chargeHint}</p>
+
+      {applied > 0n ? (
+        <p className="mt-2 flex items-baseline justify-between gap-2 text-sm font-bold text-warning-ink">
+          <span>{copy.chargeApplied}</span>
+          <span dir="ltr" className="num">
+            <Money value={settlement.managerCharge ?? '0'} />
+          </span>
+        </p>
+      ) : null}
+
+      <label className="mt-3 flex flex-col gap-1 text-label font-bold text-warning-ink">
+        <span>{copy.chargeAmount}</span>
+        <MoneyInput
+          value={amount}
+          min="0"
+          disabled={disabled}
+          aria-invalid={amount.trim() !== '' && !amountReady}
+          onChange={(event) => setAmount(event.target.value)}
+          className="bg-surface-card"
+        />
+      </label>
+      <label className="mt-2 flex flex-col gap-1 text-label font-bold text-warning-ink">
+        <span>{copy.chargeReason}</span>
+        <TextInput
+          value={reason}
+          disabled={disabled}
+          placeholder={copy.chargeReasonPlaceholder}
+          onChange={(event) => setReason(event.target.value)}
+          className="bg-surface-card"
+        />
+      </label>
+      {/* Why the button is dead, in words. An `aria-invalid` outline tells a screen reader and
+          nobody else, and a 40%-opacity ghost is how a manager concludes the console is broken. */}
+      {amountReady && !reasonReady ? (
+        <p role="alert" className="mt-2 text-label font-semibold text-warning-ink">
+          {copy.chargeReasonRequired}
+        </p>
+      ) : null}
+      <div className="mt-2 flex flex-wrap gap-2">
+        <Button
+          variant="ghost"
+          disabled={disabled || !amountReady || !reasonReady}
+          onClick={() => {
+            void onSave(amount.trim(), reason.trim()).then((saved) => {
+              if (saved) setReason('')
+            })
+          }}
+        >
+          {copy.chargeSave}
+        </Button>
+        {applied > 0n ? (
+          <Button
+            variant="ghost"
+            disabled={disabled}
+            onClick={() => {
+              // Clearing needs no reason: removing a charge takes nothing from anyone.
+              void onSave('0.00', null).then((saved) => {
+                if (saved) {
+                  setAmount('')
+                  setReason('')
+                }
+              })
+            }}
+          >
+            {copy.chargeClear}
+          </Button>
+        ) : null}
+      </div>
     </div>
   )
 }
@@ -1600,16 +1875,19 @@ interface CloseApprovalWorkspaceProps {
   varianceReason: string
   cashReceivableDeferred: string
   walletReceivableDeferred: string
+  cashShortageReceivable: string
   notes: string
   onWalletTransferConfirmed(value: boolean): void
   onCashSettlementConfirmed(value: boolean): void
   onVarianceReason(value: string): void
   onCashReceivableDeferred(value: string): void
   onWalletReceivableDeferred(value: string): void
+  onCashShortageReceivable(value: string): void
   onNotes(value: string): void
   onBack(): void
   onRefresh(): void
   onRevise(body: Record<string, unknown>): Promise<boolean>
+  onSetManagerCharge(amount: string, reason: string | null): Promise<boolean>
   onManagerRead(pkg: 'start' | 'end', batteryId: string, percent: number): Promise<void>
   onApprove(): Promise<void>
   onForceApprove(): Promise<void>
@@ -1635,16 +1913,19 @@ function CloseApprovalWorkspace({
   varianceReason,
   cashReceivableDeferred,
   walletReceivableDeferred,
+  cashShortageReceivable,
   notes,
   onWalletTransferConfirmed,
   onCashSettlementConfirmed,
   onVarianceReason,
   onCashReceivableDeferred,
   onWalletReceivableDeferred,
+  onCashShortageReceivable,
   onNotes,
   onBack,
   onRefresh,
   onRevise,
+  onSetManagerCharge,
   onManagerRead,
   onApprove,
   onForceApprove,
@@ -1691,19 +1972,32 @@ function CloseApprovalWorkspace({
   }
   const deferralInputsValid =
     isNonnegativeSettlementMoney(cashReceivableDeferred) &&
-    isNonnegativeSettlementMoney(walletReceivableDeferred)
-  const deferralMatchesSettlement =
-    settlement !== null &&
-    deferralInputsValid &&
-    parseMinor(cashReceivableDeferred.trim()) === parseMinor(settlement.cashReceivableDeferred) &&
-    parseMinor(walletReceivableDeferred.trim()) === parseMinor(settlement.walletReceivableDeferred)
-  const approvalReady = closeWorkspaceApprovalReady({
+    isNonnegativeSettlementMoney(walletReceivableDeferred) &&
+    isNonnegativeSettlementMoney(cashShortageReceivable)
+  const deferralMatchesSettlement = deferralMatchesSettlementInputs(
+    { cashReceivableDeferred, walletReceivableDeferred, cashShortageReceivable },
+    settlement,
+  )
+  /*
+   * ONE description of the gate, used for both the button and its explanation.
+   *
+   * `closeWorkspaceApprovalReady` is now defined as "this list is empty", so a reason that disables
+   * the button and says nothing has become impossible to write. Two used to exist.
+   */
+  const blockerInput = {
     settlementReady: deferralMatchesSettlement && settlementApprovalReady(settlement, settlementDraft),
+    settlementLoaded: settlement !== null,
+    deferralMatches: deferralMatchesSettlement,
+    confirmationsComplete:
+      physicalConfirmationGuard.walletTransferConfirmed && physicalConfirmationGuard.cashSettlementConfirmed,
     unresolvedOperationCount: unresolvedCount,
     managerBatteryReadingCount,
     pendingTimingDraftCount: pendingTimingDraftKeys.size,
     refreshing,
-  })
+    forcePrepared,
+    forceReason: settlementDraft.varianceReason,
+  }
+  const approvalReady = closeWorkspaceApprovalReady(blockerInput)
 
   const day = review.businessDate.slice(0, 10)
   const occurrenceKey = (order: Review['orders'][number]): string =>
@@ -1712,6 +2006,17 @@ function CloseApprovalWorkspace({
     if (!a.occurredMinute !== !b.occurredMinute) return a.occurredMinute ? -1 : 1
     return occurrenceKey(a).localeCompare(occurrenceKey(b))
   })
+  const split = br1SplitView(review.br1)
+  // A duplicate hint names a row somewhere else in this same snapshot; the card that shows the
+  // hint has only its own row, so the list resolves the other one.
+  const lookupDuplicateRow = (target: DuplicateChoiceTarget): DuplicateChoiceRow | null => {
+    if (target.kind === 'order') {
+      const found = orders.find((item) => item.providerOrderNo === target.providerOrderNo)
+      return found ? duplicateRowFromOrder(found) : null
+    }
+    const found = cashDeductions.find((item) => item.id === target.id)
+    return found ? duplicateRowFromDeduction(found) : null
+  }
   const summary = summarizeOrders(orders)
   const attentionOrders = orders.filter(orderNeedsAttention)
   const ordinaryOrders = orders.filter((order) => !orderNeedsAttention(order))
@@ -1760,7 +2065,7 @@ function CloseApprovalWorkspace({
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
-      <header className="flex min-w-0 flex-wrap items-center gap-3 rounded-xl bg-white p-3 shadow-sm">
+      <header className="flex min-w-0 flex-wrap items-center gap-3 rounded-xl bg-surface-card p-3 shadow-sm">
         <Button variant="ghost" onClick={onBack} aria-label={t.common.back} className="shrink-0 px-3">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true" className="rtl:-scale-x-100">
             <path d="M15 6l-6 6 6 6" strokeLinecap="round" strokeLinejoin="round" />
@@ -1776,8 +2081,21 @@ function CloseApprovalWorkspace({
         <Badge tone={readyTone}>{readyLabel}</Badge>
       </header>
 
-      <div className="grid min-w-0 grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(22rem,28rem)]">
-        <main className="order-2 flex min-w-0 flex-col gap-4 xl:order-1">
+      {/*
+        TWO COLUMNS FROM 1536px, NOT 1280px. The nav rail is `w-60` and goes static at 1024px, so at
+        exactly `xl` the main pane is about 992px and `minmax(22rem,28rem)` claims up to 448 of it —
+        the first width at which two columns fire is also the width at which they are worst. And a
+        landscape tablet, 1024–1180px, is the manager's actual device: it never reaches `xl`, so
+        below is the layout he really uses, not a fallback.
+
+        In that one column the screen leads with WHATEVER IS HIS JOB RIGHT NOW. With rows still
+        open, that is the decisions; with nothing open, it is the two amounts he hands over and the
+        approve button. Today the money panel is `order-1` unconditionally, so on a shift with open
+        rows he scrolls past the figures, their inputs and the approve button to reach the work he
+        has to do before any of them mean anything.
+      */}
+      <div className="grid min-w-0 grid-cols-1 items-start gap-4 2xl:grid-cols-[minmax(0,1fr)_minmax(22rem,28rem)]">
+        <main className={`flex min-w-0 flex-col gap-4 2xl:order-1 ${unresolvedCount > 0 ? 'order-1' : 'order-2'}`}>
           <Card title={`${copy.attentionTitle} — ${attentionCount}`}>
             <p className="mb-3 text-xs text-slate-600">{copy.attentionHint}</p>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
@@ -1787,8 +2105,8 @@ function CloseApprovalWorkspace({
             </div>
 
             <div className="mt-3 grid grid-cols-1 gap-2 rounded-lg bg-sky-50 p-3 text-xs sm:grid-cols-2">
-              <Field label={operationCopy.opened} value={review.openApprovedAt ? formatDateTime(review.openApprovedAt, lang) : '—'} />
-              <Field label={operationCopy.submitted} value={review.submittedAt ? formatDateTime(review.submittedAt, lang) : operationCopy.notSubmitted} />
+              <Figure label={operationCopy.opened} value={review.openApprovedAt ? formatDateTime(review.openApprovedAt, lang) : '—'} />
+              <Figure label={operationCopy.submitted} value={review.submittedAt ? formatDateTime(review.submittedAt, lang) : operationCopy.notSubmitted} />
             </div>
 
             {attentionCount === 0 ? (
@@ -1800,6 +2118,7 @@ function CloseApprovalWorkspace({
                 {attentionOrders.map((order, index) => (
                   <OrderAttentionCard
                     key={order.providerOrderNo}
+                    lookupDuplicateRow={lookupDuplicateRow}
                     order={order}
                     index={orders.indexOf(order) + 1 || index + 1}
                     businessDate={day}
@@ -1808,6 +2127,7 @@ function CloseApprovalWorkspace({
                     operationCopy={operationCopy}
                     onRevise={onRevise}
                     dashboardEvidence={dashboardEvidence}
+                    duplicateHints={duplicateHintsForOrder(review.duplicateHints, order.providerOrderNo)}
                     {...(orderRereads[`order:${order.providerOrderNo}`]
                       ? { reread: orderRereads[`order:${order.providerOrderNo}`] }
                       : {})}
@@ -1819,12 +2139,14 @@ function CloseApprovalWorkspace({
                 {cashDeductions.map((deduction) => (
                   <DeductionAttentionCard
                     key={deduction.id}
+                    lookupDuplicateRow={lookupDuplicateRow}
                     deduction={deduction}
                     disabled={busy || refreshing}
                     copy={copy}
                     operationCopy={operationCopy}
                     onRevise={onRevise}
                     dashboardEvidence={dashboardEvidence}
+                    duplicateHints={duplicateHintsForDeduction(review.duplicateHints, deduction.id)}
                     {...(orderRereads[`cash_deduction:${deduction.id}`]
                       ? { reread: orderRereads[`cash_deduction:${deduction.id}`] }
                       : {})}
@@ -1841,9 +2163,43 @@ function CloseApprovalWorkspace({
                 {copy.ordinaryOrders.replace('{n}', String(ordinaryOrders.length))}
               </summary>
               <p className="mt-1 text-xs text-slate-600">{copy.ordinaryHint}</p>
+              {/*
+                EVERY row can be acted on, and only the ones that need attention are open.
+                Before this the ordinary list was display-only, so a scanned row that was clean by
+                all eight attention rules had no controls at all — and shift a3728815's phantom 230
+                was exactly such a row: in window, printed clock, no review reason, unedited fee.
+                Ten of its eleven rows were unreachable, including the one that had to be removed.
+                Opening a row costs one click and closes again; nothing about the default view moves.
+              */}
               <ul className="mt-3 flex min-w-0 flex-col gap-2">
                 {ordinaryOrders.map((order) => (
-                  <OrdinaryOrderRow key={order.providerOrderNo} order={order} businessDate={day} />
+                  <li key={order.providerOrderNo} className="min-w-0">
+                    <details className="min-w-0 rounded-lg border border-slate-200 bg-surface-card">
+                      <summary className={`cursor-pointer list-none p-2 ${FOCUS_RING}`}>
+                        <OrdinaryOrderRow order={order} businessDate={day} />
+                      </summary>
+                      <div className="border-t border-slate-200 p-2">
+                        <OrderAttentionCard
+                          order={order}
+                          index={orders.indexOf(order) + 1}
+                          businessDate={day}
+                          disabled={busy || refreshing}
+                          copy={copy}
+                          operationCopy={operationCopy}
+                          onRevise={onRevise}
+                          dashboardEvidence={dashboardEvidence}
+                          duplicateHints={duplicateHintsForOrder(review.duplicateHints, order.providerOrderNo)}
+                          lookupDuplicateRow={lookupDuplicateRow}
+                          {...(orderRereads[`order:${order.providerOrderNo}`]
+                            ? { reread: orderRereads[`order:${order.providerOrderNo}`] }
+                            : {})}
+                          onReread={onRereadOrder}
+                          timingDraftPending={pendingTimingDraftKeys.has(`order:${order.providerOrderNo}`)}
+                          onTimingDraftPending={(pending) => onTimingDraftPending(`order:${order.providerOrderNo}`, pending)}
+                        />
+                      </div>
+                    </details>
+                  </li>
                 ))}
               </ul>
             </details>
@@ -1856,7 +2212,7 @@ function CloseApprovalWorkspace({
 
           <details
             open={evidenceHasAnomaly ? true : undefined}
-            className={`rounded-xl bg-white p-4 shadow-sm ${evidenceHasAnomaly ? 'ring-2 ring-amber-300' : ''}`}
+            className={`rounded-xl bg-surface-card p-4 shadow-sm ${evidenceHasAnomaly ? 'ring-2 ring-amber-300' : ''}`}
           >
             <summary className={`cursor-pointer text-sm font-bold text-slate-700 ${FOCUS_RING}`}>
               {copy.evidenceTitle}
@@ -1866,9 +2222,9 @@ function CloseApprovalWorkspace({
               <section className="min-w-0 rounded-lg border border-slate-200 p-3">
                 <h3 className="text-sm font-bold text-slate-700">{t.shift.startPackage}</h3>
                 <dl className="mt-2 grid grid-cols-2 gap-2 text-sm">
-                  <Field label={t.shift.odometer} value={String(review.startPackage.odometerKm ?? '—')} />
-                  <Field label={t.shift.cashFloat} value={review.startPackage.floatTotal} />
-                  <Field label={t.shift.walletTopup} value={review.startPackage.topupTotal} />
+                  <Figure label={t.shift.odometer} value={String(review.startPackage.odometerKm ?? '—')} />
+                  <Figure label={t.shift.cashFloat} value={review.startPackage.floatTotal} />
+                  <Figure label={t.shift.walletTopup} value={review.startPackage.topupTotal} />
                 </dl>
                 <OcrDeltaLines deltas={scalarDelta(t.shift.odometer, review.startPackage.odometerKmOcr === null ? null : String(review.startPackage.odometerKmOcr), review.startPackage.odometerKm === null ? null : String(review.startPackage.odometerKm))} />
                 <PhotoRow pkg="start" media={review.media} />
@@ -1877,10 +2233,10 @@ function CloseApprovalWorkspace({
               <section className="min-w-0 rounded-lg border border-slate-200 p-3">
                 <h3 className="text-sm font-bold text-slate-700">{t.shift.endPackage}</h3>
                 <dl className="mt-2 grid grid-cols-2 gap-2 text-sm">
-                  <Field label={t.shift.odometer} value={String(review.endPackage.odometerKm ?? '—')} />
-                  <Field label={t.approval.startVsEnd} value={odoDelta === null ? '—' : `${odoDelta} ${t.shift.km}`} {...(odoDelta !== null && odoDelta <= 0 ? { tone: 'red' as const } : {})} />
-                  <Field label={t.shift.cashHandover} value={review.endPackage.cashDeclared ?? '—'} />
-                  <Field label={t.shift.walletBalance} value={review.endPackage.walletDeclared ?? '—'} />
+                  <Figure label={t.shift.odometer} value={String(review.endPackage.odometerKm ?? '—')} />
+                  <Figure label={t.approval.startVsEnd} value={odoDelta === null ? '—' : `${odoDelta} ${t.shift.km}`} {...(odoDelta !== null && odoDelta <= 0 ? { tone: 'red' as const } : {})} />
+                  <Figure label={t.shift.cashHandover} value={review.endPackage.cashDeclared ?? '—'} />
+                  <Figure label={t.shift.walletBalance} value={review.endPackage.walletDeclared ?? '—'} />
                 </dl>
                 <ReviseFigures shiftId={review.id} review={review} onRevised={onRefresh} />
                 <OcrDeltaLines deltas={[
@@ -1930,7 +2286,7 @@ function CloseApprovalWorkspace({
           </details>
         </main>
 
-        <aside className="order-1 min-w-0 xl:order-2 xl:sticky xl:top-2">
+        <aside className={`min-w-0 2xl:order-2 2xl:sticky 2xl:top-2 ${unresolvedCount > 0 ? 'order-2' : 'order-1'}`}>
           <Card className={`ring-2 ${br1State === 'balanced' ? 'ring-emerald-300' : 'ring-amber-300'}`}>
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -1943,23 +2299,107 @@ function CloseApprovalWorkspace({
             </div>
 
             <dl className="mt-3 grid grid-cols-2 gap-2 rounded-lg bg-slate-50 p-3 text-sm">
-              <Field label={t.br1.expected} value={formatMinor(add(parseMinor(review.br1.expectedCash), parseMinor(review.br1.expectedWallet)))} />
-              <Field label={t.br1.declared} value={formatMinor(add(parseMinor(review.endPackage.cashDeclared || '0'), parseMinor(review.endPackage.walletDeclared || '0')))} />
+              <Figure label={t.br1.expected} value={formatMinor(add(parseMinor(review.br1.expectedCash), parseMinor(review.br1.expectedWallet)))} />
+              <Figure label={t.br1.declared} value={formatMinor(add(parseMinor(review.endPackage.cashDeclared || '0'), parseMinor(review.endPackage.walletDeclared || '0')))} />
               <div className="col-span-2 flex items-baseline justify-between border-t border-slate-200 pt-2">
                 <dt className={`font-bold ${differenceColour}`}>{t.br1[difference.direction]}</dt>
                 <dd dir="ltr" className={`num text-2xl font-extrabold ${differenceColour}`}>{difference.amountText}</dd>
               </div>
+              {/*
+                WHERE the difference sits — money rule 4's other two terms, which this screen has
+                never rendered. Deliberately SLATE, never the difference's colour: since decision 8
+                retired pay mode, `expectedCash` assumes every order was cash, so an electronic one
+                moves these apart on a perfectly correct shift. `br1Verdict` suppresses its own
+                `split_off` verdict for that reason; colouring them would alarm on every honest close.
+              */}
+              {split.cash !== '' ? (
+                <div className="col-span-2 border-t border-slate-200 pt-2 text-xs text-slate-600">
+                  <p dir="ltr" className="num text-start">
+                    {t.br1.whereItSits
+                      .replace('{cash}', groupThousands(split.cash))
+                      .replace('{wallet}', groupThousands(split.wallet))}
+                  </p>
+                  {/*
+                    Two arithmetic facts, never a hypothesis: an amount that appears in one box and
+                    is missing from the other by exactly as much, and what is left over. The ranked
+                    `br1.causes` are deliberately NOT shown — under decision 8 their only branch that
+                    names candidate orders filters on `payMode !== 'cash'`, which is never true, so
+                    they resolve to a low-confidence restatement of figures already on this line.
+                  */}
+                  {split.offsetting ? (
+                    <p className="mt-1">
+                      {t.br1.offsetting.replace('{amount}', groupThousands(split.offsetting.amount))}{' '}
+                      {t.br1.realDifference
+                        .replace('{amount}', groupThousands(split.offsetting.remainder))
+                        .replace(
+                          '{direction}',
+                          split.offsetting.remainderDirection === 'balanced'
+                            ? t.br1.noDifference
+                            : t.br1[split.offsetting.remainderDirection],
+                        )}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
             </dl>
+
+            {/*
+              HOW THE EMPLOYEE'S FIGURE WAS REACHED, in the open. It used to live inside a collapsed
+              «تفاصيل حصة 40% والمحاسبة», so the one derivation of the number being signed for was
+              behind a disclosure nobody opens. Three lines on an ordinary shift; the manual-share
+              and deduction pairs appear only when they are non-zero, and `grossDriverShare` — shown
+              nowhere on this screen today — appears with them.
+            */}
+            {settlement ? (
+              <dl className="mt-3 rounded-lg border border-slate-200 p-3 text-sm">
+                {employeeShareChain(settlement).map((step) => {
+                  const last = step.code === 'takes'
+                  const negative = step.signed === true && parseMinor(step.amount) < 0n
+                  return (
+                    <div
+                      key={step.code}
+                      className={`flex items-baseline justify-between gap-3 ${
+                        last ? 'mt-2 border-t border-slate-300 pt-2' : 'mt-1 first:mt-0'
+                      }`}
+                    >
+                      <dt className={last ? 'font-bold text-slate-700' : 'text-xs text-slate-600'}>
+                        {step.code === 'fees_to_share'
+                          ? t.settlement.share.fees_to_share.replace('{from}', groupThousands(step.from ?? '0'))
+                          : step.code === 'variance'
+                            ? t.settlement.share.variance[step.direction ?? 'balanced']
+                            : t.settlement.share[step.code]}
+                      </dt>
+                      <dd
+                        dir="ltr"
+                        className={`num shrink-0 ${
+                          last ? `text-xl font-extrabold ${negative ? 'text-red-700' : 'text-brand'}` : 'text-slate-700'
+                        }`}
+                      >
+                        <Money value={step.amount} />
+                      </dd>
+                    </div>
+                  )
+                })}
+                {/* Decision 15, as a clause on the row it qualifies rather than a competing card. */}
+                <p className="mt-1 text-xs text-slate-500">{t.settlement.share.fromReturnedMoney}</p>
+              </dl>
+            ) : null}
+
+            {settlement ? (
+              <ManagerChargeBox
+                settlement={settlement}
+                disabled={busy || refreshing}
+                copy={t.settlement}
+                onSave={onSetManagerCharge}
+              />
+            ) : null}
 
             {settlement ? (
               <>
-                <p className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs font-semibold text-emerald-900">
-                  {t.settlement.shareFromReturnedMoney}
-                </p>
                 <div className="mt-3 rounded-xl border border-violet-200 bg-violet-50 p-3">
                   <p className="text-sm font-extrabold text-violet-950">{t.settlement.receivableDeferralTitle}</p>
                   <p className="mt-1 text-xs text-violet-900">{t.settlement.receivableDeferralHint}</p>
-                  <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+                  <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-1">
                     <label className="flex flex-col gap-1 text-xs font-bold text-violet-950">
                       <span>{t.settlement.cashReceivableDeferred}</span>
                       <MoneyInput
@@ -1968,7 +2408,7 @@ function CloseApprovalWorkspace({
                         aria-invalid={!isNonnegativeSettlementMoney(cashReceivableDeferred)}
                         disabled={busy}
                         onChange={(event) => onCashReceivableDeferred(event.target.value)}
-                        className="bg-white"
+                        className="bg-surface-card"
                       />
                       <span className="font-normal text-violet-800">
                         {t.settlement.receivableMaximum}: <Money value={positiveSettlementClaim(settlement.cashClaimToOffice)} />
@@ -1982,7 +2422,7 @@ function CloseApprovalWorkspace({
                         aria-invalid={!isNonnegativeSettlementMoney(walletReceivableDeferred)}
                         disabled={busy}
                         onChange={(event) => onWalletReceivableDeferred(event.target.value)}
-                        className="bg-white"
+                        className="bg-surface-card"
                       />
                       <span className="font-normal text-violet-800">
                         {t.settlement.receivableMaximum}: <Money value={positiveSettlementClaim(settlement.walletClaimToOffice)} />
@@ -1998,12 +2438,53 @@ function CloseApprovalWorkspace({
                   ) : null}
                 </div>
 
+                {parseMinor(settlement.maximumCashShortageReceivable) > 0n ? (
+                  <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3">
+                    <p className="text-sm font-extrabold text-red-950">{t.settlement.shortageReceivableTitle}</p>
+                    <p className="mt-1 text-xs text-red-900">{t.settlement.shortageReceivableHint}</p>
+                    <label className="mt-3 flex flex-col gap-1 text-xs font-bold text-red-950">
+                      <span>{t.settlement.cashShortageReceivable}</span>
+                      <MoneyInput
+                        value={cashShortageReceivable}
+                        min="0"
+                        aria-invalid={!isNonnegativeSettlementMoney(cashShortageReceivable)}
+                        disabled={busy}
+                        onChange={(event) => onCashShortageReceivable(event.target.value)}
+                        className="bg-surface-card"
+                      />
+                      <span className="font-normal text-red-800">
+                        {t.settlement.receivableMaximum}: <Money value={settlement.maximumCashShortageReceivable} />
+                      </span>
+                    </label>
+                    {/*
+                      One press for the whole amount. This block only appears when the employee ends
+                      the shift owing the office, which is rare — one of eight shifts on 2026-08-30 —
+                      so the manager meets it seldom and should not have to retype a figure the
+                      settlement already knows. Typing stays available for a part payment.
+                    */}
+                    {parseMinor(cashShortageReceivable.trim() || '0') !==
+                      parseMinor(settlement.maximumCashShortageReceivable) ? (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => onCashShortageReceivable(settlement.maximumCashShortageReceivable)}
+                        className="mt-2 inline-flex min-h-9 items-center rounded-lg border border-red-300 bg-surface-card px-3 text-xs font-bold text-red-900 disabled:opacity-40"
+                      >
+                        {t.settlement.shortageReceivableAll}
+                      </button>
+                    ) : null}
+                    <p className="mt-2 rounded-lg bg-surface-card/80 px-3 py-2 text-xs font-semibold text-red-900">
+                      {t.settlement.shortageReceivableOfficeUnchanged}
+                    </p>
+                  </div>
+                ) : null}
+
                 {physicalConfirmationsLocked ? (
                   <p role="alert" className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm font-bold text-amber-950">
                     {copy.resolveUnknownBeforeHandover.replace('{n}', String(unresolvedCount))}
                   </p>
                 ) : null}
-                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-1">
                   <SettlementConfirmationCard
                     label={t.settlement.walletInstruction}
                     action={t.settlement.walletAction[settlement.walletAction]}
@@ -2029,7 +2510,7 @@ function CloseApprovalWorkspace({
                 {settlementHasVariance(settlement) && !forcePrepared ? (
                   <label className="mt-3 flex flex-col gap-1 rounded-lg border border-amber-300 bg-amber-50 p-3">
                     <span className="text-sm font-bold text-amber-950">{t.settlement.varianceReason}</span>
-                    <textarea value={varianceReason} onChange={(event) => onVarianceReason(event.target.value)} disabled={busy || refreshing} maxLength={500} rows={2} className="w-full rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/15" placeholder={t.settlement.varianceReasonPlaceholder} />
+                    <textarea value={varianceReason} onChange={(event) => onVarianceReason(event.target.value)} disabled={busy || refreshing} maxLength={500} rows={2} className="w-full rounded-lg border border-amber-300 bg-surface-card px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/15" placeholder={t.settlement.varianceReasonPlaceholder} />
                   </label>
                 ) : null}
 
@@ -2071,20 +2552,14 @@ function CloseApprovalWorkspace({
             {forcePrepared ? (
               <label className="mt-3 flex flex-col gap-1 rounded-lg border border-red-200 bg-red-50 p-3">
                 <span className="text-sm font-bold text-red-900">{t.approval.forceReasonRequired}</span>
-                <textarea value={notes} onChange={(event) => onNotes(event.target.value)} disabled={busy || refreshing} maxLength={500} rows={2} className="rounded-lg border border-red-300 bg-white px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/15" />
+                <textarea value={notes} onChange={(event) => onNotes(event.target.value)} disabled={busy || refreshing} maxLength={500} rows={2} className="rounded-lg border border-red-300 bg-surface-card px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/15" />
               </label>
             ) : null}
 
             <ApprovalBlockers
-              refreshing={refreshing}
-              settlement={settlement}
-              walletConfirmed={physicalConfirmationGuard.walletTransferConfirmed}
-              cashConfirmed={physicalConfirmationGuard.cashSettlementConfirmed}
+              codes={approvalBlockerCodes(blockerInput)}
               unresolvedCount={unresolvedCount}
               managerBatteryReadingCount={managerBatteryReadingCount}
-              pendingTimingDraftCount={pendingTimingDraftKeys.size}
-              varianceReason={settlementDraft.varianceReason}
-              forcePrepared={forcePrepared}
               copy={copy}
               operationCopy={operationCopy}
             />
@@ -2105,7 +2580,7 @@ function CloseApprovalWorkspace({
               {!forcePrepared ? (
                 <textarea value={notes} onChange={(event) => onNotes(event.target.value)} placeholder={t.approval.notes} aria-label={t.approval.notes} rows={2} className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/15" />
               ) : null}
-              <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+              <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 2xl:grid-cols-1">
                 <Button variant="ghost" disabled={busy} onClick={() => void onRequestRephoto()}>{t.approval.requestRetake}</Button>
                 <Button variant="ghost" disabled={busy} onClick={onSendBack}>{t.approval.sendBack}</Button>
               </div>
@@ -2140,7 +2615,38 @@ interface CloseWorkspaceCopy {
   auditReasonPlaceholder: string
   includeException: string
   markDuplicate: string
+  duplicateHintBadge: string
+  duplicateHintMatches: string
+  duplicateHintAmountOnly: string
+  duplicateHintAdvisory: string
+  /* The side-by-side choice. A hint names a POSITION today — «يطابق الصف ٣ في صفحة ١» — and a
+     manager cannot judge two readings of one delivery without seeing both. */
+  duplicateChoiceTitle: string
+  duplicateChoiceMisread: string
+  duplicateChoiceQuestion: string
+  duplicateChoiceThisRow: string
+  duplicateChoiceOtherRow: string
+  duplicateChoiceSave: string
+  duplicateChoiceReversible: string
+  duplicateChoiceTimedNote: string
+  duplicateChoiceNoClock: string
+  duplicateChoiceIncludedNow: string
+  duplicateChoiceExcludedNow: string
+  duplicateChoiceAgree: string
+  duplicateChoiceDiffer: string
+  duplicateChoiceSettled: string
+  duplicateChoicePage: string
+  duplicateFactAmount: string
+  duplicateFactMinute: string
+  duplicateFactRoute: string
+  duplicateFactDate: string
+  duplicateFactInclusion: string
   excludeOrder: string
+  removeRow: string
+  removeRowConfirm: string
+  removeRowNote: string
+  removedBadge: string
+  restoreRow: string
   saveTimingPreserve: string
   correctAndInclude: string
   excludeDeduction: string
@@ -2178,7 +2684,36 @@ function closeWorkspaceCopy(lang: 'ar' | 'en'): CloseWorkspaceCopy {
       auditReasonPlaceholder: 'What did you verify in the image or record?',
       includeException: 'Include exceptionally',
       markDuplicate: 'Mark as duplicate',
+      duplicateHintBadge: 'Possible duplicate',
+      duplicateHintMatches: 'Matches row {row} on {page} — two scans of this list overlap.',
+      duplicateHintAmountOnly: 'Amounts match only; no clock or route to confirm it.',
+      duplicateHintAdvisory: 'A hint only — nothing is counted or excluded automatically. The decision, and the reason, are yours.',
+      duplicateChoiceTitle: 'These may be two rows for one delivery',
+      duplicateChoiceMisread: 'Same minute, same route, two different amounts — almost certainly ONE delivery read twice, with one reading wrong. Yallago deducts 20% per delivery, so its payments log will show one deduction here, not two.',
+      duplicateChoiceQuestion: 'Which row is the real delivery?',
+      duplicateChoiceThisRow: 'This row',
+      duplicateChoiceOtherRow: 'The other row',
+      duplicateChoiceSave: 'Save — the selected row stays, the other is excluded',
+      duplicateChoiceReversible: 'The excluded row keeps its reason and stays in the record. Nothing is deleted.',
+      duplicateChoiceTimedNote: 'carries a printed clock',
+      duplicateChoiceNoClock: 'no clock',
+      duplicateChoiceIncludedNow: 'counted now',
+      duplicateChoiceExcludedNow: 'excluded now',
+      duplicateChoiceAgree: 'Agree on: {list}',
+      duplicateChoiceDiffer: 'Differ on: {list}',
+      duplicateChoiceSettled: 'That answer already matches the record — nothing to save.',
+      duplicateChoicePage: '{page} · row {row}',
+      duplicateFactAmount: 'the amount',
+      duplicateFactMinute: 'the clock',
+      duplicateFactRoute: 'the route',
+      duplicateFactDate: 'the date',
+      duplicateFactInclusion: 'whether it is counted',
       excludeOrder: 'Exclude order',
+      removeRow: 'Remove — this is not a delivery',
+      removeRowConfirm: 'Remove this row? It stays in the record with your reason, it is taken out of the money, and the system admin is told. You can restore it.',
+      removeRowNote: 'Use this only when the row describes nothing that happened — a duplicate reading, a misread. To leave a REAL delivery uncounted, exclude it instead.',
+      removedBadge: 'Removed — not a delivery',
+      restoreRow: 'Restore the row',
       saveTimingPreserve: 'Save time and keep current decision',
       correctAndInclude: 'Correct time and include',
       excludeDeduction: 'Exclude deduction',
@@ -2215,7 +2750,36 @@ function closeWorkspaceCopy(lang: 'ar' | 'en'): CloseWorkspaceCopy {
     auditReasonPlaceholder: 'ما الذي تحققت منه في الصورة أو السجل؟',
     includeException: 'تضمين استثنائي',
     markDuplicate: 'تثبيت كتكرار',
+    duplicateHintBadge: 'يُحتمل أنه مكرّر',
+    duplicateHintMatches: 'يطابق الصف {row} في {page} — صورتان لهذه اللائحة متداخلتان.',
+    duplicateHintAmountOnly: 'التطابق على المبلغ فقط؛ لا وقت ولا مسار يؤكّده.',
+    duplicateHintAdvisory: 'إشارة فقط — لا شيء يُحتسب أو يُستبعد تلقائياً. القرار والسبب لك.',
+    duplicateChoiceTitle: 'يُحتمل أنّ هذين صفّان لتوصيلة واحدة',
+    duplicateChoiceMisread: 'نفس الدقيقة ونفس المسار، ومبلغان مختلفان — على الأرجح توصيلة واحدة قُرئت مرّتين وإحدى القراءتين خاطئة. يلاغو يحسم ٢٠٪ عن كل توصيلة، فسجلّ المدفوعات سيُظهر هنا حسماً واحداً لا حسمين.',
+    duplicateChoiceQuestion: 'أيّ الصفّين هو التوصيلة الحقيقية؟',
+    duplicateChoiceThisRow: 'هذا الصفّ',
+    duplicateChoiceOtherRow: 'الصفّ المقابل',
+    duplicateChoiceSave: 'احفظ — يبقى المحدَّد ويُستبعد الآخر',
+    duplicateChoiceReversible: 'الصفّ المستبعَد يبقى في السجلّ بسببه، ولا يُحذف.',
+    duplicateChoiceTimedNote: 'يحمل وقتاً مطبوعاً',
+    duplicateChoiceNoClock: 'بلا وقت',
+    duplicateChoiceIncludedNow: 'محتسَب الآن',
+    duplicateChoiceExcludedNow: 'مستبعَد الآن',
+    duplicateChoiceAgree: 'يتّفقان في: {list}',
+    duplicateChoiceDiffer: 'يختلفان في: {list}',
+    duplicateChoiceSettled: 'هذا الجواب مطابق لما هو مسجَّل — لا شيء ليُحفظ.',
+    duplicateChoicePage: '{page} · سطر {row}',
+    duplicateFactAmount: 'المبلغ',
+    duplicateFactMinute: 'الوقت',
+    duplicateFactRoute: 'المسار',
+    duplicateFactDate: 'التاريخ',
+    duplicateFactInclusion: 'الاحتساب',
     excludeOrder: 'استبعاد الطلب',
+    removeRow: 'احذف — ليست توصيلة',
+    removeRowConfirm: 'أتحذف هذا الصفّ؟ يبقى في السجلّ بسببك، ويخرج من الحساب، ويُبلَّغ مديرُ النظام. ويمكنك استرجاعه.',
+    removeRowNote: 'استعمله فقط حين لا يصف الصفّ شيئاً حدث — قراءة مكرّرة أو خاطئة. أمّا توصيلة حقيقية لا تُحتسب فاستبعِدها.',
+    removedBadge: 'محذوف — ليست توصيلة',
+    restoreRow: 'استرجع الصفّ',
     saveTimingPreserve: 'حفظ الوقت مع إبقاء القرار الحالي',
     correctAndInclude: 'تصحيح الوقت وتضمين الطلب',
     excludeDeduction: 'استبعاد الحسم',
@@ -2287,6 +2851,276 @@ function managerEvidenceRereadCopy(lang: 'ar' | 'en') {
   }
 }
 
+/**
+ * The advisory duplicate line.
+ *
+ * A badge plus one sentence naming the row this one appears to repeat. It deliberately offers no
+ * action of its own: the audited «تثبيت كتكرار» button below already does that, with the reason the
+ * 0033 trigger requires. A hint that could exclude a row by itself would stop being a hint.
+ */
+function DuplicateHintNote({ hints, copy }: {
+  hints: ResolvedDuplicateHint[]
+  copy: CloseWorkspaceCopy
+}): ReactNode {
+  const first = hints[0]
+  if (!first) return null
+  const line = copy.duplicateHintMatches
+    .replace('{row}', String(first.counterpartRowIndex + 1))
+    .replace('{page}', first.counterpartSlot)
+  return (
+    <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+      <p className="font-semibold">{line}</p>
+      {first.pageCauses.includes('scan_overlap_amount_only')
+        ? <p className="mt-1">{copy.duplicateHintAmountOnly}</p>
+        : null}
+      <p className="mt-1 text-amber-800">{copy.duplicateHintAdvisory}</p>
+    </div>
+  )
+}
+
+/**
+ * One side of the comparison: the figures, the page it was read from, and its own band.
+ *
+ * Both columns are rendered by the SAME component on purpose. «هذا الصفّ» and «المقابل» look
+ * different only in the words above them; if the two sides were built by different code, one of
+ * them would eventually stop matching the other and the manager would be comparing two things that
+ * are not comparable.
+ */
+/**
+ * The two money rows, reduced to what a comparison needs.
+ *
+ * Kept next to each other so the order and the deduction stay describable in the same terms — the
+ * whole point of the side-by-side is that both columns are comparable.
+ */
+function duplicateRowFromOrder(order: Review['orders'][number]): DuplicateChoiceRow {
+  return {
+    amount: order.fee,
+    occurredMinute: order.occurredMinute ?? null,
+    occurredDate: order.occurredDate ?? null,
+    included: order.included !== false,
+    evidenceSlot: order.evidenceSlot,
+    evidenceMediaId: order.evidenceMediaId,
+    positionEvidence: order.positionEvidence,
+    hasScanOrigin: orderHasDashboardEvidenceOrigin(order),
+  }
+}
+
+function duplicateRowFromDeduction(
+  deduction: NonNullable<Review['cashDeductions']>[number],
+): DuplicateChoiceRow {
+  return {
+    amount: deduction.amount,
+    occurredMinute: deduction.occurredMinute,
+    occurredDate: deduction.occurredDate,
+    included: deduction.included,
+    evidenceSlot: deduction.evidenceSlot,
+    evidenceMediaId: deduction.evidenceMediaId,
+    positionEvidence: deduction.positionEvidence,
+    hasScanOrigin: deductionHasDashboardEvidenceOrigin(deduction),
+  }
+}
+
+/**
+ * The first hint that resolves to a real second operation, if any.
+ *
+ * A row can carry several hints — two pages can both overlap it. The card asks ONE question, so it
+ * asks about the first pair it can actually show; the rest stay reachable through the other card.
+ * A hint whose counterpart is an `unmatched_row`, or names a row not in this snapshot, resolves to
+ * nothing and the card falls back to the plain position note.
+ */
+function duplicateChoiceFor(
+  target: DuplicateChoiceTarget,
+  row: DuplicateChoiceRow,
+  hints: ResolvedDuplicateHint[],
+  lookup: (target: DuplicateChoiceTarget) => DuplicateChoiceRow | null,
+): DuplicateChoiceView | null {
+  for (const hint of hints) {
+    const view = duplicateChoiceView({
+      self: { target, row, slot: hint.selfSlot, rowIndex: hint.selfRowIndex },
+      hint,
+      lookup,
+    })
+    if (view) return view
+  }
+  return null
+}
+
+function DuplicateChoiceColumn({
+  side,
+  heading,
+  pages,
+  copy,
+  timed,
+}: {
+  side: DuplicateChoiceView['self']
+  heading: string
+  pages: Review['media']
+  copy: CloseWorkspaceCopy
+  timed: boolean
+}): ReactNode {
+  const { t, lang } = useApp()
+  return (
+    <div className="min-w-0 flex-1 rounded-lg border border-amber-200 bg-surface-card p-2">
+      <p className="text-[11px] font-bold text-amber-900">{heading}</p>
+      <p dir="ltr" className="num mt-1 text-lg font-extrabold text-slate-800">
+        <Money value={side.row.amount} />
+      </p>
+      <p className="num text-xs text-slate-700">
+        {side.row.occurredMinute || copy.duplicateChoiceNoClock}
+        {timed ? <span className="text-slate-500"> · {copy.duplicateChoiceTimedNote}</span> : null}
+      </p>
+      <p className="num text-[11px] text-slate-500">
+        {copy.duplicateChoicePage
+          .replace('{page}', slotLabel(side.slot, t.shift.slotNames, lang))
+          .replace('{row}', String(side.rowIndex + 1))}
+      </p>
+      <RowEvidencePanel
+        pages={pages}
+        row={{
+          evidenceSlot: side.row.evidenceSlot,
+          evidenceMediaId: side.row.evidenceMediaId,
+          hasScanOrigin: side.row.hasScanOrigin,
+        }}
+        position={side.row.positionEvidence}
+      />
+      <p className={`mt-1 text-[11px] font-semibold ${side.row.included ? 'text-emerald-700' : 'text-slate-500'}`}>
+        {side.row.included ? copy.duplicateChoiceIncludedNow : copy.duplicateChoiceExcludedNow}
+      </p>
+    </div>
+  )
+}
+
+/**
+ * «أيّ الصفّين هو التوصيلة الحقيقية؟»
+ *
+ * The question is asked the way a manager actually thinks about it. Two buttons — «استبعد هذا» /
+ * «استبعد المقابل» — were tried and are not clear: «المقابل» is an abstract word he has to resolve
+ * by counting columns, and both buttons describe EXCLUSION while he is deciding which row is real.
+ * So: one question, two options each carrying the fact that tells them apart, and one button that
+ * states both outcomes before he presses it.
+ *
+ * NOTHING IS PRE-SELECTED. `timedKey` is rendered as a note on the option that carries a printed
+ * clock — a fact read off the table under decision 16, never a verdict — because a pre-checked
+ * radio beside a save button means one click excludes a real delivery.
+ *
+ * Both directions cost the same, and that is the point. «تثبيت كتكرار» acts only on the row being
+ * displayed, so a manager who finds the DISPLAYED row is the good one has to go hunt for the other
+ * card — which is how a shift ends up carrying 21 rows for 10 deliveries.
+ */
+function DuplicateChoicePanel({
+  view,
+  pages,
+  copy,
+  disabled,
+  reason,
+  onSave,
+}: {
+  view: DuplicateChoiceView
+  pages: Review['media']
+  copy: CloseWorkspaceCopy
+  disabled: boolean
+  reason: string
+  onSave(revision: ReturnType<typeof duplicateChoiceRevision>): Promise<void>
+}): ReactNode {
+  const { t, lang } = useApp()
+  const groupName = useId()
+  const [keepKey, setKeepKey] = useState('')
+  const factLabel = {
+    amount: copy.duplicateFactAmount,
+    minute: copy.duplicateFactMinute,
+    date: copy.duplicateFactDate,
+    inclusion: copy.duplicateFactInclusion,
+  }
+  /*
+    Exhaustive on purpose. `duplicateChoiceView` filters the two non-agreement causes out of
+    `agreements` before they reach here, but the annotation makes a future cause a compile error at
+    THIS line rather than an `undefined` rendered inside a `join(' · ')` — a dangling separator on
+    the one line a manager reads to decide whether two rows are one delivery.
+  */
+  const agreeLabel: Record<ScanOverlapPairCause, string> = {
+    scan_overlap_pair_amount_agrees: copy.duplicateFactAmount,
+    scan_overlap_pair_minute_agrees: copy.duplicateFactMinute,
+    scan_overlap_pair_route_agrees: copy.duplicateFactRoute,
+    scan_overlap_pair_amount_disagrees: copy.duplicateFactAmount,
+    scan_overlap_pair_unaccounted: copy.duplicateFactMinute,
+  }
+  const sides = [view.self, view.counterpart]
+  const revision = keepKey === '' ? null : duplicateChoiceRevision(view, keepKey, reason.trim())
+  // A chosen answer the books already hold posts nothing: re-asserting a value still rotates
+  // `orders_hash` and forces a full re-review. Say so rather than offering a button that lies.
+  const settled = keepKey !== '' && revision === null
+
+  return (
+    <section className="mt-2 rounded-lg border-2 border-amber-300 bg-amber-50 p-2 text-xs">
+      <p className="font-bold text-amber-900">{copy.duplicateChoiceTitle}</p>
+      {/* Only when the evidence has this exact shape. Said on every duplicate it would be noise;
+          said here it is the difference between «choose one» and «one of these never happened». */}
+      {view.likelyOneRowMisread ? (
+        <p className="mt-1 text-amber-800">{copy.duplicateChoiceMisread}</p>
+      ) : null}
+
+      <div className="mt-2 flex min-w-0 flex-col gap-2 sm:flex-row">
+        <DuplicateChoiceColumn side={view.self} heading={copy.duplicateChoiceThisRow} pages={pages} copy={copy} timed={view.timedKey === view.self.key} />
+        <DuplicateChoiceColumn side={view.counterpart} heading={copy.duplicateChoiceOtherRow} pages={pages} copy={copy} timed={view.timedKey === view.counterpart.key} />
+      </div>
+
+      {view.agreements.length > 0 ? (
+        <p className="mt-2 text-amber-900">
+          {copy.duplicateChoiceAgree.replace('{list}', view.agreements.map((cause) => agreeLabel[cause]).join(' · '))}
+        </p>
+      ) : null}
+      {view.differences.length > 0 ? (
+        <p className="text-amber-900">
+          {copy.duplicateChoiceDiffer.replace('{list}', view.differences.map((difference) => factLabel[difference]).join(' · '))}
+        </p>
+      ) : null}
+
+      <fieldset className="mt-2 border-t border-amber-200 pt-2">
+        <legend className="px-1 font-bold text-amber-900">{copy.duplicateChoiceQuestion}</legend>
+        {sides.map((side) => (
+          <label
+            key={side.key}
+            /* `FOCUS_RING` is `focus-visible:`, which never fires on the label when the RADIO takes
+               focus — so the keyboard ring is drawn from `focus-within` here. The chosen option
+               also carries a visible border: this is the one control on the card where reading the
+               wrong state costs a real delivery. */
+            className={`mt-1 flex min-w-0 cursor-pointer items-center gap-2 rounded-md border-2 bg-surface-card p-2 focus-within:ring-2 focus-within:ring-brand/40 ${
+              keepKey === side.key ? 'border-brand' : 'border-transparent'
+            }`}
+          >
+            <input
+              type="radio"
+              name={groupName}
+              value={side.key}
+              checked={keepKey === side.key}
+              disabled={disabled}
+              onChange={() => setKeepKey(side.key)}
+              className="size-4 shrink-0"
+            />
+            <span className="num min-w-0 flex-1 truncate">
+              {side.row.occurredMinute || copy.duplicateChoiceNoClock} · <Money value={side.row.amount} /> ·{' '}
+              {copy.duplicateChoicePage
+                .replace('{page}', slotLabel(side.slot, t.shift.slotNames, lang))
+                .replace('{row}', String(side.rowIndex + 1))}
+            </span>
+          </label>
+        ))}
+      </fieldset>
+
+      {settled ? <p className="mt-2 text-slate-600">{copy.duplicateChoiceSettled}</p> : null}
+      <Button
+        variant="primary"
+        className="mt-2"
+        disabled={disabled || revision === null || reason.trim() === ''}
+        onClick={() => void onSave(revision)}
+      >
+        {copy.duplicateChoiceSave}
+      </Button>
+      <p className="mt-1 text-amber-800">{copy.duplicateChoiceReversible}</p>
+    </section>
+  )
+}
+
 function OrderAttentionCard({
   order,
   index,
@@ -2296,6 +3130,8 @@ function OrderAttentionCard({
   operationCopy,
   onRevise,
   dashboardEvidence,
+  duplicateHints,
+  lookupDuplicateRow,
   reread,
   onReread,
   timingDraftPending,
@@ -2309,23 +3145,43 @@ function OrderAttentionCard({
   operationCopy: OperationReviewCopy
   onRevise(body: Record<string, unknown>): Promise<boolean>
   dashboardEvidence: Review['media']
+  duplicateHints: ResolvedDuplicateHint[]
+  lookupDuplicateRow(target: DuplicateChoiceTarget): DuplicateChoiceRow | null
   reread?: ManagerOrderEvidenceRereadResponse
   onReread(target: ManagerOrderEvidenceRereadTarget, slot: string, reason: string): Promise<void>
   timingDraftPending: boolean
   onTimingDraftPending(pending: boolean): void
 }): ReactNode {
   const { t, lang } = useApp()
+  // The hook, not the DOM global of the same name — `window.confirm` takes a string and this card
+  // would have typechecked against it while showing a browser dialog nobody styled.
+  const confirm = useConfirm()
   const rereadCopy = managerEvidenceRereadCopy(lang)
   const [reason, setReason] = useState('')
   const [timingDate, setTimingDate] = useState(order.occurredDate ?? businessDate)
   const [timingMinute, setTimingMinute] = useState(order.occurredMinute ?? '')
   const [timingEditorOpen, setTimingEditorOpen] = useState(false)
-  const [selectedEvidenceSlot, setSelectedEvidenceSlot] = useState(
-    dashboardEvidence.length === 1 ? dashboardEvidence[0]!.slot : '',
+  const [selectedEvidenceSlot, setSelectedEvidenceSlot] = useState(() =>
+    defaultRereadSlot(dashboardEvidence, {
+      evidenceSlot: order.evidenceSlot,
+      evidenceMediaId: order.evidenceMediaId,
+      hasScanOrigin: orderHasDashboardEvidenceOrigin(order),
+    }),
   )
   const reasonReady = reason.trim() !== ''
   const canRereadStoredDashboard = orderHasDashboardEvidenceOrigin(order)
+  const evidenceOrigin: RowEvidenceOriginInput = {
+    evidenceSlot: order.evidenceSlot,
+    evidenceMediaId: order.evidenceMediaId,
+    hasScanOrigin: canRereadStoredDashboard,
+  }
   const positionalBounds = positionEvidenceLabel(order.positionEvidence)
+  const duplicateChoice = duplicateChoiceFor(
+    { kind: 'order', providerOrderNo: order.providerOrderNo },
+    duplicateRowFromOrder(order),
+    duplicateHints,
+    lookupDuplicateRow,
+  )
   const reviewReasons = order.closeDraftReviewReasons ?? []
   const date = order.occurredDate ?? businessDate
   const route = [
@@ -2342,9 +3198,10 @@ function OrderAttentionCard({
   useEffect(() => {
     setSelectedEvidenceSlot((current) => {
       if (dashboardEvidence.some((item) => item.slot === current)) return current
-      return dashboardEvidence.length === 1 ? dashboardEvidence[0]!.slot : ''
+      return defaultRereadSlot(dashboardEvidence, evidenceOrigin)
     })
-  }, [dashboardEvidence])
+    // `evidenceOrigin` is rebuilt every render; the three values inside it are the real inputs.
+  }, [dashboardEvidence, order.evidenceSlot, order.evidenceMediaId, canRereadStoredDashboard])
   const timingChanged =
     timingDate !== (order.occurredDate ?? businessDate) || timingMinute !== (order.occurredMinute ?? '')
   const timingRevision = (decision: 'preserve' | 'include' | 'duplicate'): Record<string, unknown> =>
@@ -2414,7 +3271,7 @@ function OrderAttentionCard({
   )
 
   return (
-    <article className={`min-w-0 rounded-xl border p-3 ${reviewReasons.length > 0 || order.windowStatus === 'unknown' ? 'border-amber-300 bg-amber-50/40' : order.included === false ? 'border-slate-300 bg-slate-50' : 'border-sky-200 bg-white'}`}>
+    <article className={`min-w-0 rounded-xl border p-3 ${reviewReasons.length > 0 || order.windowStatus === 'unknown' ? 'border-amber-300 bg-amber-50/40' : order.included === false ? 'border-slate-300 bg-slate-50' : 'border-sky-200 bg-surface-card'}`}>
       <div className="flex min-w-0 flex-wrap items-start gap-2">
         <span className="num rounded bg-slate-100 px-2 py-1 text-xs font-bold">#{index}</span>
         <div className="min-w-0 flex-1">
@@ -2433,9 +3290,10 @@ function OrderAttentionCard({
       <div className="mt-2 flex flex-wrap gap-1.5">
         {order.windowStatus ? <WindowStatusBadge status={order.windowStatus} copy={operationCopy} /> : null}
         {order.windowBasis === 'screen_position' ? <Badge tone="sky">{operationCopy.positionBasis}</Badge> : null}
-        {order.included === false ? <Badge tone="slate">{operationCopy.excluded}</Badge> : null}
+        {order.removedAt ? <Badge tone="red">{copy.removedBadge}</Badge> : order.included === false ? <Badge tone="slate">{operationCopy.excluded}</Badge> : null}
         {order.kind === 'manual' ? <Badge tone="sky">{operationCopy.manual}</Badge> : null}
         {order.feeOcr != null && order.feeOcr !== order.fee ? <Badge tone="amber">{copy.changedByManager}</Badge> : null}
+        {duplicateHints.length > 0 ? <Badge tone="amber">{copy.duplicateHintBadge}</Badge> : null}
         {reviewReasons.map((reviewReason) => (
           <Badge
             key={reviewReason}
@@ -2445,6 +3303,7 @@ function OrderAttentionCard({
           </Badge>
         ))}
       </div>
+      {duplicateChoice ? null : <DuplicateHintNote hints={duplicateHints} copy={copy} />}
       {order.windowBasis === 'screen_position' ? (
         <p className="num mt-2 text-xs text-sky-800">
           {operationCopy.positionBasis}{positionalBounds ? ` · ${positionalBounds}` : ''}
@@ -2454,13 +3313,54 @@ function OrderAttentionCard({
       {order.kind === 'manual' ? (
         <p className="num mt-2 text-xs text-slate-600">{t.orders.driverShare}: {order.driverShare ?? '—'} · {t.orders.companyShare}: {order.companyShare ?? '—'}</p>
       ) : null}
+      {/* The page this row was read from, with its own line marked — the manager's first question
+          about a disputed row is «what did the screen say», and it used to take four steps. */}
+      <RowEvidencePanel pages={dashboardEvidence} row={evidenceOrigin} position={order.positionEvidence} />
       <label className="mt-3 flex min-w-0 flex-col gap-1">
         <span className="text-xs font-semibold text-slate-600">{copy.auditReason}</span>
         <TextInput value={reason} onChange={(event) => setReason(event.target.value)} disabled={disabled} maxLength={500} placeholder={copy.auditReasonPlaceholder} className="w-full" />
       </label>
+      {duplicateChoice ? (
+        <DuplicateChoicePanel
+          view={duplicateChoice}
+          pages={dashboardEvidence}
+          copy={copy}
+          disabled={disabled}
+          reason={reason}
+          onSave={async (revision) => { if (revision) await onRevise(revision as unknown as Record<string, unknown>) }}
+        />
+      ) : null}
       <div className="mt-2 flex flex-wrap gap-2">
         {order.included === false ? <Button variant="ghost" disabled={disabled || !reasonReady} onClick={() => void revise({ included: true })}>{copy.includeException}</Button> : null}
-        {order.kind === 'manual' && order.included !== false ? <Button variant="ghost" disabled={disabled || !reasonReady} onClick={() => void revise({ included: false })}>{copy.excludeOrder}</Button> : null}
+        {/*
+          EVERY included row, not just a manual one. A scanned row's only exclude control used to be
+          «تثبيت كتكرار» — so a manager who wanted to leave a real delivery uncounted had to press a
+          button that said it was a duplicate, and the audited reason went into the record under a
+          claim he had not made.
+        */}
+        {order.included !== false ? <Button variant="ghost" disabled={disabled || !reasonReady} onClick={() => void revise({ included: false })}>{copy.excludeOrder}</Button> : null}
+        {/*
+          «احذف» beside «استبعد», never instead of it. Exclusion is a decision about a delivery that
+          happened; removal says the row describes nothing that did. The confirm step is here
+          because the two are one click apart and only one of them is reported to the general
+          manager — and because the manager should read what does NOT happen before he presses it.
+        */}
+        {order.removedAt ? (
+          <Button variant="ghost" disabled={disabled || !reasonReady} onClick={() => void revise({ removed: false })}>
+            {copy.restoreRow}
+          </Button>
+        ) : (
+          <Button
+            variant="danger"
+            disabled={disabled || !reasonReady}
+            onClick={async () => {
+              const ok = await confirm({ title: copy.removeRow, body: copy.removeRowConfirm })
+              if (ok) await revise({ removed: true })
+            }}
+          >
+            {copy.removeRow}
+          </Button>
+        )}
         {order.kind !== 'manual' ? (
           <Button
             variant="ghost"
@@ -2539,7 +3439,7 @@ function OrderAttentionCard({
                   {reread.rows.map((row, rowIndex) => {
                     const rereadRoute = [row.pointA, row.pointB].filter(Boolean).join(' → ')
                     return (
-                      <li key={`${rowIndex}:${row.value ?? ''}:${row.time ?? ''}`} className="rounded-md bg-white p-2">
+                      <li key={`${rowIndex}:${row.value ?? ''}:${row.time ?? ''}`} className="rounded-md bg-surface-card p-2">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <span className="num font-bold">
                             #{rowIndex + 1} · {row.value ?? '—'} · {row.dateIso ?? '—'} {row.time ?? '—'}
@@ -2599,6 +3499,8 @@ function DeductionAttentionCard({
   operationCopy,
   onRevise,
   dashboardEvidence,
+  duplicateHints,
+  lookupDuplicateRow,
   reread,
   onReread,
   timingDraftPending,
@@ -2610,6 +3512,8 @@ function DeductionAttentionCard({
   operationCopy: OperationReviewCopy
   onRevise(body: Record<string, unknown>): Promise<boolean>
   dashboardEvidence: Review['media']
+  duplicateHints: ResolvedDuplicateHint[]
+  lookupDuplicateRow(target: DuplicateChoiceTarget): DuplicateChoiceRow | null
   reread?: ManagerOrderEvidenceRereadResponse
   onReread(target: ManagerOrderEvidenceRereadTarget, slot: string, reason: string): Promise<void>
   timingDraftPending: boolean
@@ -2618,8 +3522,12 @@ function DeductionAttentionCard({
   const { t, lang } = useApp()
   const rereadCopy = managerEvidenceRereadCopy(lang)
   const [reason, setReason] = useState('')
-  const [selectedEvidenceSlot, setSelectedEvidenceSlot] = useState(
-    dashboardEvidence.length === 1 ? dashboardEvidence[0]!.slot : '',
+  const [selectedEvidenceSlot, setSelectedEvidenceSlot] = useState(() =>
+    defaultRereadSlot(dashboardEvidence, {
+      evidenceSlot: deduction.evidenceSlot,
+      evidenceMediaId: deduction.evidenceMediaId,
+      hasScanOrigin: deductionHasDashboardEvidenceOrigin(deduction),
+    }),
   )
   const [timingSuggestion, setTimingSuggestion] = useState<{
     key: string
@@ -2628,16 +3536,28 @@ function DeductionAttentionCard({
   } | null>(null)
   const reasonReady = reason.trim() !== ''
   const canRereadStoredDashboard = deductionHasDashboardEvidenceOrigin(deduction)
+  const evidenceOrigin: RowEvidenceOriginInput = {
+    evidenceSlot: deduction.evidenceSlot,
+    evidenceMediaId: deduction.evidenceMediaId,
+    hasScanOrigin: canRereadStoredDashboard,
+  }
   const positionalBounds = positionEvidenceLabel(deduction.positionEvidence)
+  const duplicateChoice = duplicateChoiceFor(
+    { kind: 'cash_deduction', id: deduction.id },
+    duplicateRowFromDeduction(deduction),
+    duplicateHints,
+    lookupDuplicateRow,
+  )
   const reviewReasons = deduction.closeDraftReviewReasons ?? []
   const revise = (patch: Record<string, unknown>): Promise<boolean> =>
     onRevise({ cashDeductions: [{ id: deduction.id, ...patch, reason: reason.trim() }] })
   useEffect(() => {
     setSelectedEvidenceSlot((current) => {
       if (dashboardEvidence.some((item) => item.slot === current)) return current
-      return dashboardEvidence.length === 1 ? dashboardEvidence[0]!.slot : ''
+      return defaultRereadSlot(dashboardEvidence, evidenceOrigin)
     })
-  }, [dashboardEvidence])
+    // `evidenceOrigin` is rebuilt every render; the three values inside it are the real inputs.
+  }, [dashboardEvidence, deduction.evidenceSlot, deduction.evidenceMediaId, canRereadStoredDashboard])
 
   return (
     <article className="min-w-0 rounded-xl border border-red-200 bg-red-50/40 p-3">
@@ -2653,6 +3573,7 @@ function DeductionAttentionCard({
         <WindowStatusBadge status={deduction.windowStatus} copy={operationCopy} />
         {deduction.windowBasis === 'screen_position' ? <Badge tone="sky">{operationCopy.positionBasis}</Badge> : null}
         {!deduction.included ? <Badge tone="slate">{operationCopy.excluded}</Badge> : null}
+        {duplicateHints.length > 0 ? <Badge tone="amber">{copy.duplicateHintBadge}</Badge> : null}
         {reviewReasons.map((reviewReason) => (
           <Badge
             key={reviewReason}
@@ -2662,12 +3583,24 @@ function DeductionAttentionCard({
           </Badge>
         ))}
       </div>
+      {duplicateChoice ? null : <DuplicateHintNote hints={duplicateHints} copy={copy} />}
       {deduction.windowBasis === 'screen_position' ? (
         <p className="num mt-2 text-xs text-sky-800">
           {operationCopy.positionBasis}{positionalBounds ? ` · ${positionalBounds}` : ''}
         </p>
       ) : null}
       {deduction.decisionReason ? <p className="mt-2 text-xs text-slate-600">{operationCopy.decisionReason}: {deduction.decisionReason}</p> : null}
+      <RowEvidencePanel pages={dashboardEvidence} row={evidenceOrigin} position={deduction.positionEvidence} />
+      {duplicateChoice ? (
+        <DuplicateChoicePanel
+          view={duplicateChoice}
+          pages={dashboardEvidence}
+          copy={copy}
+          disabled={disabled}
+          reason={reason}
+          onSave={async (revision) => { if (revision) await onRevise(revision as unknown as Record<string, unknown>) }}
+        />
+      ) : null}
       <label className="mt-3 flex min-w-0 flex-col gap-1">
         <span className="text-xs font-semibold text-slate-600">{copy.auditReason}</span>
         <TextInput value={reason} onChange={(event) => setReason(event.target.value)} disabled={disabled} maxLength={500} placeholder={copy.auditReasonPlaceholder} className="w-full" />
@@ -2736,7 +3669,7 @@ function DeductionAttentionCard({
                   {reread.rows.map((row, rowIndex) => {
                     const suggestionKey = `${rowIndex}:${row.value ?? ''}:${row.dateIso ?? ''}:${row.time ?? ''}`
                     return (
-                      <li key={suggestionKey} className="rounded-md bg-white p-2">
+                      <li key={suggestionKey} className="rounded-md bg-surface-card p-2">
                         <p className="num font-bold">
                           #{rowIndex + 1} · {row.value ?? '—'} · {row.dateIso ?? '—'} {row.time ?? '—'}
                         </p>
@@ -2793,14 +3726,21 @@ function OrdinaryOrderRow({ order, businessDate }: { order: Review['orders'][num
     (order.points ?? []).find((point) => point.role === 'start')?.label,
     (order.points ?? []).find((point) => point.role === 'end')?.label,
   ].filter(Boolean).join(' ← ')
+  /*
+    A `<span>`, not a `<li>`. This is now the SUMMARY of a row that opens into its full card, and a
+    list item nested inside a `<summary>` is invalid markup — the browser reparents it and the row
+    silently loses its layout. The `<li>` moved out to the caller, which is where the list is.
+  */
   return (
-    <li className="flex min-w-0 items-start gap-3 rounded-lg border border-slate-200 bg-white p-3 text-sm">
-      <div className="min-w-0 flex-1">
-        <p className="num font-semibold">{order.occurredDate ?? businessDate} · {order.occurredMinute ?? '—'}</p>
-        {route ? <p className="truncate text-xs text-slate-500" title={route}>{route}</p> : null}
-      </div>
+    <span className="flex min-w-0 items-start gap-3 text-sm">
+      <span className="min-w-0 flex-1">
+        <span className="num block font-semibold">{order.occurredDate ?? businessDate} · {order.occurredMinute ?? '—'}</span>
+        {route ? <span className="block truncate text-xs text-slate-500" title={route}>{route}</span> : null}
+      </span>
       <Money value={order.fee} className="shrink-0 font-bold" />
-    </li>
+      {/* The affordance. A `<summary>` with `list-none` shows no marker of its own. */}
+      <span aria-hidden="true" className="shrink-0 text-xs text-slate-400">▾</span>
+    </span>
   )
 }
 
@@ -2841,42 +3781,42 @@ function SettlementConfirmationCard({
   )
 }
 
+/** Renders the codes `approvalBlockerCodes` produced. It decides nothing; it only resolves them. */
 function ApprovalBlockers({
-  refreshing,
-  settlement,
-  walletConfirmed,
-  cashConfirmed,
+  codes,
   unresolvedCount,
   managerBatteryReadingCount,
-  pendingTimingDraftCount,
-  varianceReason,
-  forcePrepared,
   copy,
   operationCopy,
 }: {
-  refreshing: boolean
-  settlement: SettlementView | null
-  walletConfirmed: boolean
-  cashConfirmed: boolean
+  codes: readonly ApprovalBlockerCode[]
   unresolvedCount: number
   managerBatteryReadingCount: number
-  pendingTimingDraftCount: number
-  varianceReason: string
-  forcePrepared: boolean
   copy: CloseWorkspaceCopy
   operationCopy: OperationReviewCopy
 }): ReactNode {
   const { t } = useApp()
-  const blockers: string[] = []
-  if (refreshing) blockers.push(copy.recalculating)
-  else if (!settlement) blockers.push(t.settlement.unavailable)
-  if (settlement && (!walletConfirmed || !cashConfirmed)) blockers.push(t.settlement.confirmBeforeApproval)
-  if (unresolvedCount > 0) blockers.push(operationCopy.cannotApproveUnknown.replace('{n}', String(unresolvedCount)))
-  if (pendingTimingDraftCount > 0) blockers.push(copy.unsavedTimingDraft)
-  if (managerBatteryReadingCount > 0) {
-    blockers.push(copy.managerBatteryRequired.replace('{n}', String(managerBatteryReadingCount)))
+  const label = (code: ApprovalBlockerCode): string => {
+    switch (code) {
+      case 'recalculating':
+        return copy.recalculating
+      case 'settlement_unavailable':
+        return t.settlement.unavailable
+      case 'settlement_amounts_pending':
+        return t.settlement.amountsPending
+      case 'confirm_before_approval':
+        return t.settlement.confirmBeforeApproval
+      case 'unresolved_operations':
+        return operationCopy.cannotApproveUnknown.replace('{n}', String(unresolvedCount))
+      case 'unsaved_timing_draft':
+        return copy.unsavedTimingDraft
+      case 'manager_battery_required':
+        return copy.managerBatteryRequired.replace('{n}', String(managerBatteryReadingCount))
+      case 'force_reason_required':
+        return t.approval.forceReasonRequired
+    }
   }
-  if (forcePrepared && varianceReason.trim() === '') blockers.push(t.approval.forceReasonRequired)
+  const blockers = [...new Set(codes)].map(label)
   if (blockers.length === 0) return null
   return (
     <ul className="mt-3 flex flex-col gap-1 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs font-medium text-amber-900">
@@ -3037,8 +3977,8 @@ function OperationWindowAdvisory({
       <aside role="note" className="rounded-lg border border-sky-200 bg-sky-50 p-3">
         <p className="text-sm text-sky-950">{copy.windowHint}</p>
         <dl className="mt-2 grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
-          <Field label={copy.opened} value={openApprovedAt ? formatDateTime(openApprovedAt, lang) : '—'} />
-          <Field
+          <Figure label={copy.opened} value={openApprovedAt ? formatDateTime(openApprovedAt, lang) : '—'} />
+          <Figure
             label={copy.submitted}
             value={submittedAt ? formatDateTime(submittedAt, lang) : copy.notSubmitted}
           />
@@ -3566,19 +4506,6 @@ function MapPin({
   )
 }
 
-function Field({ label, value, tone }: { label: string; value: string; tone?: 'green' | 'red' }): ReactNode {
-  return (
-    <div>
-      <dt className="text-xs text-slate-500">{label}</dt>
-      {/* dir=ltr: every value here is a figure (money, %, «+12 كم») — numbers read left-to-right in
-          both languages, so this keeps a sign/unit from landing on the wrong side in RTL. */}
-      <dd dir="ltr" className={`num text-lg font-semibold ${tone === 'green' ? 'text-emerald-700' : tone === 'red' ? 'text-red-700' : ''}`}>
-        {value}
-      </dd>
-    </div>
-  )
-}
-
 /**
  * The evidence photos for one end of the shift (C-7). Renders each uploaded slot as a thumbnail
  * from the same-origin, RBAC-checked `/api/media/:id`; a tap opens it full-screen so the manager
@@ -3700,6 +4627,102 @@ function PhotoRow({ pkg, media }: { pkg: 'start' | 'end'; media: Review['media']
  * image itself dismissed it. Comparing the start odometer against the end one — the whole point —
  * meant open, close, scroll, open, and holding five digits in your head.
  */
+/**
+ * The page this row was read from, with the disputed line marked — inside the card that asks about
+ * it.
+ *
+ * Before this, the photos lived in a collapsed «الأدلّة والتفاصيل» far below: the manager scrolled,
+ * opened it, picked the right page out of several, opened the viewer, and then matched it back to
+ * the row from memory. Four steps for one question, on the screen where he decides whether a
+ * delivery happened.
+ *
+ * The band is positioned as a PERCENTAGE of the image's own height, over an image left at its
+ * natural aspect ratio — so it lands on the right line whatever the screenshot's dimensions. A
+ * fixed-size `object-contain` thumbnail letterboxes, and the band would drift off the row.
+ */
+function RowEvidence({
+  page,
+  position,
+  label,
+  onZoom,
+}: {
+  page: Review['media'][number]
+  position?: { yTop?: number | null; yBottom?: number | null } | null | undefined
+  label: string
+  onZoom(mediaId: string): void
+}): ReactNode {
+  const top = position?.yTop
+  const bottom = position?.yBottom
+  // Only draw a band when the geometry is real. A guessed band pointing at the wrong line is worse
+  // than no band, because the manager believes it.
+  const band =
+    typeof top === 'number' && typeof bottom === 'number' && bottom > top
+      ? { top: `${Math.max(0, top) * 100}%`, height: `${Math.min(1, bottom - top) * 100}%` }
+      : null
+  return (
+    <button
+      type="button"
+      onClick={() => onZoom(page.mediaId)}
+      aria-label={label}
+      className={`mt-2 block w-40 overflow-hidden rounded-lg border border-slate-300 bg-slate-100 ${FOCUS_RING}`}
+    >
+      <span className="relative block">
+        <img src={`/api/media/${page.mediaId}`} alt={label} loading="lazy" className="block w-full" />
+        {band ? (
+          <span
+            aria-hidden="true"
+            className="absolute inset-x-0 border-y-2 border-amber-500 bg-amber-400/30"
+            style={band}
+          />
+        ) : null}
+      </span>
+      <span className="block px-1 py-0.5 text-[10px] text-slate-600">{label}</span>
+    </button>
+  )
+}
+
+/**
+ * The thumbnail plus the viewer it opens, as one unit an attention card drops in.
+ *
+ * The zoom state is local to the row deliberately: two cards open independently, and a manager
+ * comparing them is not fighting one shared «which photo is showing» flag.
+ */
+function RowEvidencePanel({
+  pages,
+  row,
+  position,
+}: {
+  pages: Review['media']
+  row: RowEvidenceOriginInput
+  position?: { yTop?: number | null; yBottom?: number | null; rowIndex?: number } | null | undefined
+}): ReactNode {
+  const { t, lang } = useApp()
+  const [zoom, setZoom] = useState<string | null>(null)
+  const page = rowEvidencePage(pages, row)
+  if (!page) return null
+  const rowNumber = typeof position?.rowIndex === 'number' ? ` · #${position.rowIndex + 1}` : ''
+  const zoomIndex = pages.findIndex((item) => item.mediaId === zoom)
+  return (
+    <>
+      <RowEvidence
+        page={page}
+        position={position}
+        label={`${slotLabel(page.slot, t.shift.slotNames, lang)}${rowNumber}`}
+        onZoom={setZoom}
+      />
+      {zoomIndex >= 0 ? (
+        <Lightbox
+          shots={pages}
+          index={zoomIndex}
+          label={(slot) => slotLabel(slot, t.shift.slotNames, lang)}
+          onIndex={(i) => setZoom(pages[i]?.mediaId ?? null)}
+          onClose={() => setZoom(null)}
+        />
+      ) : null}
+    </>
+  )
+}
+
 function Lightbox({
   shots,
   index,
@@ -3735,7 +4758,7 @@ function Lightbox({
   if (!shot) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-slate-900/90" role="dialog" aria-modal="true">
+    <div className="fixed inset-0 z-50 flex flex-col bg-scrim/90" role="dialog" aria-modal="true">
       <div className="flex items-center gap-3 p-3 text-white">
         <span className="font-semibold">{label(shot.slot)}</span>
         <span className="num text-sm text-white/70">

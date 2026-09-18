@@ -17,7 +17,12 @@ export interface ReceivableOperationPayload {
   driverId: string
   receivableKind: 'ordinary' | 'shift_funding'
   channel: 'cash' | 'wallet'
-  direction: 'create' | 'collect'
+  /**
+   * `writeoff` is deliberately part of the same durable outbox as create/collect: all three change
+   * the same receivable balance, so an uncertain response from one must block a differently keyed
+   * command from another tab until the exact operation is reconciled.
+   */
+  direction: 'create' | 'collect' | 'writeoff'
   amount: string
   reason: string
 }
@@ -144,7 +149,8 @@ function isReceivablePayload(value: unknown): value is ReceivableOperationPayloa
   return typeof row.driverId === 'string' && row.driverId !== '' &&
     (row.receivableKind === 'ordinary' || row.receivableKind === 'shift_funding') &&
     (row.channel === 'cash' || row.channel === 'wallet') &&
-    (row.direction === 'create' || row.direction === 'collect') &&
+    (row.direction === 'create' || row.direction === 'collect' || row.direction === 'writeoff') &&
+    (row.direction !== 'writeoff' || row.receivableKind === 'ordinary') &&
     typeof row.amount === 'string' &&
     typeof row.reason === 'string'
 }
@@ -246,7 +252,7 @@ export function receivableRejectionDefinitelyDidNotCommit(value: unknown): boole
   return typeof error.status === 'number' && error.status >= 400 && error.status < 500 && error.status !== 409
 }
 
-/** Active drivers may receive new advances; an inactive debtor remains visible for collection. */
+/** Active drivers may receive new advances; an inactive debtor remains visible for collection/write-off. */
 export function receivableDirectoryDrivers<T extends ReceivableDriverOption>(
   drivers: readonly T[],
   outstandingDriverIds: ReadonlySet<string>,
@@ -254,12 +260,12 @@ export function receivableDirectoryDrivers<T extends ReceivableDriverOption>(
   return drivers.filter((driver) => driver.active || outstandingDriverIds.has(driver.id))
 }
 
-/** The UI mirrors the API rule: collection survives deactivation, creation does not. */
+/** The UI mirrors the API rule: collection and write-off survive deactivation, creation does not. */
 export function receivableDriverMaySubmit(
   driver: Pick<ReceivableDriverOption, 'active'> | null | undefined,
   direction: ReceivableOperationPayload['direction'],
 ): boolean {
-  return driver !== null && driver !== undefined && (driver.active || direction === 'collect')
+  return driver !== null && driver !== undefined && (driver.active || direction !== 'create')
 }
 
 /** Once a command exists it is immutable until success or a definitive rejection releases it. */
@@ -277,10 +283,31 @@ export const pendingReceivableOperation = (
 /** The API is authoritative; this keeps an incomplete or non-positive command from being sent. */
 export function receivableOperationReady(payload: ReceivableOperationPayload): boolean {
   if (payload.driverId === '' || payload.reason.trim() === '' || payload.amount.trim() === '') return false
+  if (payload.direction === 'writeoff' && payload.receivableKind !== 'ordinary') return false
   try {
     return parseMinor(payload.amount) > 0n
   } catch {
     return false
+  }
+}
+
+/**
+ * A fresh write-off may not exceed the balance currently shown to the manager. An exact durable
+ * retry is different: the server may already have committed the write-off and reduced that balance
+ * before its response was lost, so only the immutable idempotency receipt can decide the retry.
+ */
+export function receivableWriteoffAmountWithinBalance(
+  payload: Pick<ReceivableOperationPayload, 'direction' | 'amount'>,
+  currentBalance: string,
+  exactPendingRetry: boolean,
+): boolean {
+  if (payload.direction !== 'writeoff' || exactPendingRetry || payload.amount.trim() === '') return true
+  try {
+    return parseMinor(payload.amount) <= parseMinor(currentBalance)
+  } catch {
+    // MoneyInput/receivableOperationReady own malformed and non-positive values. This helper is
+    // only the actionable "greater than the loaded debt" explanation.
+    return true
   }
 }
 

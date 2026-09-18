@@ -12,6 +12,7 @@
   "dependencies": {
     "@ash/client": "workspace:*",
     "@ash/domain": "workspace:*",
+    "@ash/theme": "workspace:*",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tesseract.js": "^7.0.0"

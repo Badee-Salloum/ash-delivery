@@ -1,12 +1,13 @@
 import cookie from '@fastify/cookie'
 import Fastify, { type FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import type { Deps, ShiftOrderRecord, ShiftSettlementRecord } from '@ash/contracts'
+import type { Deps, ShiftOrderRecord } from '@ash/contracts'
 import {
   addOrderRequest,
   addTrancheRequest,
+  adjustCashFloatRequest,
   adjustWalletTopupRequest,
-  gpsPingRequest,
+  gpsIngestRequest,
   approveCloseRequest,
   forceCloseRequest,
   approveOpenRequest,
@@ -20,6 +21,7 @@ import {
   uploadEvidenceParams,
   serializeMoney,
   setFxRequest,
+  serializeFxRateNumber,
   updateSettingsRequest,
   startPackageRequest,
   putBatteryReadingsRequest,
@@ -27,23 +29,30 @@ import {
   closeFiguresRequest,
   operationsRequest,
   reviseOperationsRequest,
+  setManagerChargeRequest,
   patchCloseDraftRequest,
   linkedCloseDraftReadRequest,
   restoreCloseDraftAttachmentRequest,
+  scanDuplicateHintSchema,
   shiftFundingPreviewSchema,
 } from '@ash/contracts'
+import type { CloseBlocker, Currency, Minor } from '@ash/domain'
+import { isTracked } from '@ash/domain'
 import {
+  CURRENCIES,
   add,
   addDays,
   bmsSlot,
+  daysBetween,
+  isCalendarDate,
   checkWeekClose,
   dayOfWeek,
   minor,
   resolveFxDay,
-  splitFixedDriverShare,
   sum,
   weekClosedOn,
   weekStartFor,
+  workedTime,
 } from '@ash/domain'
 import {
   SESSION_COOKIE,
@@ -58,14 +67,22 @@ import {
 } from './auth.ts'
 import { DEFAULT_MAX_OCR_READS_PER_SHIFT } from './config.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
+import { GO_LIVE_SETTING_KEY, goLiveDate } from './go-live.ts'
 import { assertEveryRouteDeclaresPermission, collectRoutes, makeAuthorize, resetRouteRegistry } from './rbac.ts'
 import { registerExpenseRoutes } from './expenses.routes.ts'
+import { registerRecurringExpenseRoutes } from './recurring-expenses.routes.ts'
+import { registerAdvanceRoutes } from './advances.routes.ts'
+import { registerIncomeRoutes } from './incomes.routes.ts'
+import { registerCheckInRoutes } from './checkin.routes.ts'
 import { registerFleetRoutes } from './fleet.routes.ts'
 import { registerUserRoutes } from './users.routes.ts'
+import { registerDriverRegistrationRoutes } from './driver-registration.routes.ts'
 import { registerDashboardRoutes } from './dashboard.routes.ts'
 import { registerNotificationRoutes } from './notification.routes.ts'
 import { registerTierRoutes } from './tier.routes.ts'
 import { registerTreasuryRoutes } from './treasury.routes.ts'
+import { registerCompanyRoutes } from './company.routes.ts'
+import { registerCompanyRecurringRoutes } from './company-recurring.routes.ts'
 import {
   MAX_UPLOAD_BYTES,
   acknowledgeStaleEvidence,
@@ -82,11 +99,13 @@ import {
   readCloseDraftAttachment,
   syncCloseDraftEvidence,
 } from './close-draft.service.ts'
+import { buildScanDuplicateHints, evidenceSourcesForShift } from './duplicate-hints.service.ts'
 import {
   ServiceError,
   addOrder,
   addManualOrder,
   addTranche,
+  adjustCashFloat,
   adjustWalletTopup,
   approveClose,
   approveOpen,
@@ -98,6 +117,7 @@ import {
   rejectClose,
   reviseCloseFigures,
   reviseOperations,
+  setManagerCharge,
   submitOperations,
   rejectOpen,
   reportIncident,
@@ -113,6 +133,15 @@ import {
   prepareShiftReview,
   todayFor,
 } from './shifts.service.ts'
+import { completedShiftFinancial } from './shift-financial.ts'
+
+/**
+ * A week-close blocker as it crosses the wire. A trial-balance difference is money, so it goes as a
+ * decimal string like every other amount — a bigint here would make the refusal itself a 500.
+ */
+function wireCloseBlocker(blocker: CloseBlocker) {
+  return blocker.kind === 'trial_balance_not_zero' ? { ...blocker, diff: serializeMoney(blocker.diff) } : blocker
+}
 
 export interface AppOptions {
   deps: Deps
@@ -120,51 +149,16 @@ export interface AppOptions {
   splitGate?: 'advisory' | 'strict'
   /** Runaway guard on paid cloud OCR. Defaults here so a test never has to think about spend. */
   maxOcrReadsPerShift?: number
+  /** Emergency public-signup kill switch. Enabled by default. */
+  driverSelfRegistrationEnabled?: boolean
 }
 
 /**
- * Historical financial detail derived from the immutable close snapshot plus the exact included
- * order split that produced it. Manual jobs carry their agreed split on the order; Yallago jobs
- * retain the fixed 40/40/20 calculation. Every amount stays in minor units until serialization.
+ * P2 — how many business dates one `GET /shifts?from&to` may span: a month for the whole branch,
+ * about thirteen months once a driver or a vehicle narrows the rows.
  */
-function completedShiftFinancial(
-  settlement: ShiftSettlementRecord,
-  rows: readonly ShiftOrderRecord[],
-): Record<string, string> {
-  const counted = includedOrders(rows)
-  const yallago = splitFixedDriverShare(
-    counted.filter((row) => row.kind !== 'manual').map((row) => row.fee),
-  )
-  const manualCompanyShare = sum(
-    counted
-      .filter((row) => row.kind === 'manual')
-      .map((row) => row.companyShare ?? minor(0n)),
-  )
-
-  return {
-    policyCode: settlement.policyCode,
-    deliveryFees: serializeMoney(sum(counted.map((row) => row.fee))),
-    companyShare: serializeMoney(add(yallago.companyShare, manualCompanyShare)),
-    yalagoShare: serializeMoney(yallago.yalagoShare),
-    grossDriverShare: serializeMoney(settlement.grossDriverShare),
-    deductions: serializeMoney(settlement.cashDeductionTotal),
-    netDriverShare: serializeMoney(settlement.baseDriverShare),
-    expectedTotal: serializeMoney(settlement.expectedTotal),
-    actualCash: serializeMoney(settlement.actualCash),
-    actualWallet: serializeMoney(settlement.actualWallet),
-    actualTotal: serializeMoney(settlement.actualTotal),
-    variance: serializeMoney(settlement.variance),
-    varianceDirection: settlement.varianceDirection,
-    finalEmployeeCash: serializeMoney(settlement.finalEmployeeCash),
-    cashClaimToOffice: serializeMoney(settlement.cashClaimToOffice),
-    walletClaimToOffice: serializeMoney(settlement.walletClaimToOffice),
-    cashReceivableDeferred: serializeMoney(settlement.cashReceivableDeferred),
-    walletReceivableDeferred: serializeMoney(settlement.walletReceivableDeferred),
-    cashToOffice: serializeMoney(settlement.cashToOffice),
-    walletToOffice: serializeMoney(settlement.walletToOffice),
-    officeReturn: serializeMoney(add(settlement.cashToOffice, settlement.walletToOffice)),
-  }
-}
+export const SHIFT_LIST_MAX_DAYS = 31
+export const SHIFT_LIST_MAX_DAYS_NARROWED = 400
 
 /**
  * SQLSTATE 25006 is broader than the ledger's sealed-week guard.
@@ -338,6 +332,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       })
   })
 
+  registerDriverRegistrationRoutes(app, deps, opts.driverSelfRegistrationEnabled ?? true)
+
   // ── Second factor (SRS §7, A-1) ──────────────────────────────────────────────────────────
 
   /** Present the TOTP code after a password login, flipping the session to fully authenticated. */
@@ -510,11 +506,44 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     '/shifts',
     { config: { permission: 'branch_data.view', subject: branchSubject } },
     async (req) => {
-      const { date, live, pending } = z
-        .object({ date: z.string().optional(), live: z.string().optional(), pending: z.string().optional() })
+      const { date, from, to, driverId, vehicleId, state, live, pending } = z
+        .object({
+          date: z.string().optional(),
+          // A RANGE, over the existing week-close repo read. The history screen was asking for one
+          // date at a time and fanning out seven at a time to cover a month — 33 requests where
+          // `listByBranchAndDateRange` answers in one, and it is the same call the Sunday close
+          // already trusts.
+          from: z.string().optional(),
+          to: z.string().optional(),
+          // Filtered HERE, not in the browser. The screen was fetching every state for every date
+          // and discarding what it did not want, so a month of drafts and cancelled shifts crossed
+          // the wire to be thrown away.
+          driverId: z.string().optional(),
+          // P2 — the bike's own history («سجل الآلية») and the drill-down from a fleet row.
+          vehicleId: z.string().optional(),
+          state: z.string().optional(),
+          live: z.string().optional(),
+          pending: z.string().optional(),
+        })
         .parse(req.query)
       const target = resolveBranchId(req)
       const businessDate = date ?? todayFor(deps)
+      /*
+       * P2 — a range read is BOUNDED. Every row costs an order and a settlement lookup, and the
+       * time filter now offers «الكل منذ البدء», so an unnamed range must not become a scan of the
+       * whole history: 31 days for the branch, 400 once a driver or a vehicle narrows it. Refused
+       * with a code the console explains («ضيّق الفترة»), never silently truncated.
+       */
+      if (pending !== '1' && live !== '1' && from !== undefined && to !== undefined) {
+        if (!isCalendarDate(from) || !isCalendarDate(to) || to < from) {
+          throw new z.ZodError([{ code: 'custom', path: ['from', 'to'], message: 'expected real dates with from <= to' }])
+        }
+        const maxDays = driverId !== undefined || vehicleId !== undefined
+          ? SHIFT_LIST_MAX_DAYS_NARROWED
+          : SHIFT_LIST_MAX_DAYS
+        const days = daysBetween(from, to) + 1
+        if (days > maxDays) throw new ServiceError(422, 'range_too_large', { from, to, days, maxDays })
+      }
       // `?live=1` asks "who is out RIGHT NOW", which is NOT a question about today's date: a shift
       // that opened before midnight and is still running belongs to yesterday's business date, and
       // the date-filtered list dropped it — the bike looked free and the shift unreachable from the
@@ -523,12 +552,21 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       // a question about today's date. The approval queue asked the date-filtered list and dropped
       // everything the manager did not get to before midnight: the shift stayed `pending_review`
       // with its money unposted, and the one screen whose job is to surface it stopped showing it.
-      const shifts =
+      const wanted = state === undefined ? null : new Set(state.split(',').filter((v) => v !== ''))
+      const all =
         pending === '1'
           ? await deps.shifts.listAwaitingDecisionForBranch(target)
           : live === '1'
             ? await deps.shifts.listLiveForBranch(target)
-            : await deps.shifts.listByBranchAndDate(target, businessDate)
+            : from !== undefined && to !== undefined
+              ? await deps.shifts.listByBranchAndDateRange(target, from, to)
+              : await deps.shifts.listByBranchAndDate(target, businessDate)
+      const shifts = all.filter(
+        (s) =>
+          (driverId === undefined || s.driverId === driverId) &&
+          (vehicleId === undefined || s.vehicleId === vehicleId) &&
+          (wanted === null || wanted.has(s.state)),
+      )
       // Reporting is a batch read: one order query and one settlement query for the whole page.
       // Apart from avoiding a per-shift round trip, reading both sets before shaping rows means the
       // order count and the financial split always come from the same in-memory order snapshot.
@@ -561,6 +599,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
             // shift so far. Money crosses as decimal strings, never JSON numbers.
             businessDate: s.businessDate,
             odometerStart: s.odoStart,
+            // P2 — with the start reading, the distance a shift covered on its bike.
+            odometerEnd: s.odoEnd,
             floatTotal: serializeMoney(add(sum(s.floatTranches), sum(s.carriedTranches))),
             topupTotal: serializeMoney(add(sum(s.topupTranches), sum(s.carriedWalletTranches ?? []))),
             // How much work COUNTS on the shift. An unchecked operation is stored and visible but
@@ -578,6 +618,36 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
             // one — and approving from the list is deliberately not offered. The difference is
             // already stored on the row by `evaluateShift`; serving it costs nothing.
             equationDiff: s.equationDiff === null ? null : serializeMoney(s.equationDiff),
+            /*
+             * WHEN it ran, and therefore WHICH of the fleet's three patterns it was.
+             *
+             * The history screen showed a business date and «#1» and nothing else, so thirteen
+             * shifts on one day were thirteen identical rows. These two instants are the operation
+             * window the system already reasons about — the driver's own confirmation through his
+             * close submission — and `workedTime` turns them into a pattern and a length.
+             *
+             * `worked` is `{ minutes, pattern, slot, abandoned }`. `slot` (additive; older consoles
+             * ignore it) is the half of the day the shift STARTED in, known even while it runs, so the
+             * live board can say «جارية — صباحية» without guessing a pattern.
+             *
+             * `submittedAt` is null for a live shift AND for one whose close was rejected, since
+             * that path clears it; either way there is no length yet, which is the honest answer.
+             * The branch offset and business-day start are the server's own, the same pair that
+             * decides `businessDate`, so a 02:00 start is the evening slot of the day it belongs to.
+             */
+            windowOpensAt: s.windowOpensAt ?? s.openApprovedAt,
+            submittedAt: s.submittedAt,
+            worked: workedTime(
+              // Same fallback the close draft's own window uses (`close-draft.service.ts`): a shift
+              // opened before `window_opens_at` existed still has the manager's approval instant,
+              // and without it the row would lose its pattern for no reason.
+              (s.windowOpensAt ?? s.openApprovedAt) === null
+                ? null
+                : Date.parse((s.windowOpensAt ?? s.openApprovedAt)!),
+              s.submittedAt === null ? null : Date.parse(s.submittedAt),
+              deps.clock.offsetMinutes(),
+              deps.clock.dayStartMinutes(),
+            ),
           }
         }),
       }
@@ -1417,6 +1487,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   const shiftSnapshot = async (shiftId: string, sourceDeps: Deps = deps) => {
     const shift = await sourceDeps.shifts.findById(shiftId)
     if (!shift) return null
+    // Which stored screenshot each money row was read from. Resolved once for the whole snapshot,
+    // through the same keys the duplicate hints use, so a row's thumbnail and the hint about it can
+    // never name different pages.
+    const evidenceSources = await evidenceSourcesForShift(sourceDeps, shiftId)
     // Per-pack readings, joined to the packs so a slot and a capacity are shown rather than a
     // uuid. A two-pack bike hands back two of these at each end of the shift.
     const [orders, movements, cashDeductions, readings, fitted, slots, swaps, allBatteries, driver, vehicle] = await Promise.all([
@@ -1484,6 +1558,15 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         shiftNo: shift.shiftNo,
         businessDate: shift.businessDate,
         openApprovedAt: shift.openApprovedAt,
+        /*
+         * The operation window's own start, so the shift page can state WHEN the shift ran.
+         *
+         * `openApprovedAt` is the manager's signature, not the driver's; for a pre-approved opening
+         * (decision 14) they are minutes or hours apart. The close draft already prefers this one
+         * (`windowOpensAt ?? openApprovedAt`), and the history screen measures from it — a page that
+         * used the other value would disagree with both about how long the same shift ran.
+         */
+        windowOpensAt: shift.windowOpensAt ?? shift.openApprovedAt,
         submittedAt: shift.submittedAt,
         startPackage: {
           odometerKm: shift.odoStart,
@@ -1538,6 +1621,14 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           windowBasis: o.windowBasis ?? null,
           positionEvidence: o.positionEvidence ?? null,
           observationId: o.observationId ?? null,
+          // WHICH stored screenshot this row was read from. `positionEvidence` already says WHERE
+          // on the page; together they let the review screen put the disputed line in front of the
+          // manager instead of handing him the whole end package to search.
+          evidenceSlot: evidenceSources.orders.get(o.providerOrderNo)?.slot ?? null,
+          evidenceMediaId: evidenceSources.orders.get(o.providerOrderNo)?.mediaId ?? null,
+          // «هذا الصفّ ليس توصيلة». Distinct from `included: false` — see the wire schema.
+          removedAt: o.removedAt ?? null,
+          removalReason: o.removalReason ?? null,
           closeDraftReviewReasons: o.closeDraftReviewReasons ?? [],
         })),
         cashDeductions: cashDeductions.map((d) => ({
@@ -1558,6 +1649,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           windowBasis: d.windowBasis ?? null,
           positionEvidence: d.positionEvidence ?? null,
           observationId: d.observationId ?? null,
+          evidenceSlot: evidenceSources.deductions.get(d.id)?.slot ?? null,
+          evidenceMediaId: evidenceSources.deductions.get(d.id)?.mediaId ?? null,
+          removedAt: d.removedAt ?? null,
+          removalReason: d.removalReason ?? null,
           closeDraftReviewReasons: d.closeDraftReviewReasons ?? [],
         })),
         // «سجل المدفوعات» as read: what the wallet actually did, beside what the orders imply.
@@ -1678,6 +1773,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         actualWallet: moneySchema.optional(),
         cashReceivableDeferred: nonnegativeMoneySchema.optional(),
         walletReceivableDeferred: nonnegativeMoneySchema.optional(),
+        cashShortageReceivable: nonnegativeMoneySchema.optional(),
       }).parse(req.query)
       const plan = await deps.closeUnitOfWork.run(
         { shiftId: id, actorId: req.actor!.userId },
@@ -1712,10 +1808,26 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
               ...(query.walletReceivableDeferred === undefined
                 ? {}
                 : { walletReceivableDeferred: query.walletReceivableDeferred }),
+              ...(query.cashShortageReceivable === undefined
+                ? {}
+                : { cashShortageReceivable: query.cashShortageReceivable }),
             },
           )
         },
       )
+      /*
+       * Resolve the signer to a NAME — outside the unit of work, because it is not a financial read.
+       *
+       * `confirmed_by` is a uuid, and a screen that prints one has told the reader nothing. "Who
+       * closed this" is the question, and the browser cannot answer it: only drivers are listable
+       * to it, and the manager who signs a close is not one.
+       */
+      const confirmedById = 'confirmedBy' in plan ? (plan as { confirmedBy?: string | null }).confirmedBy ?? null : null
+      // The snapshot stores an epoch (`confirmed_at_ms`); the wire carries instants as ISO strings.
+      const confirmedAtMs =
+        'confirmedAtMs' in plan ? (plan as { confirmedAtMs?: number | null }).confirmedAtMs ?? null : null
+      const signer = confirmedById === null ? null : await deps.users.findById(confirmedById)
+
       return {
         policyCode: plan.policyCode,
         driverRateBps: plan.driverRateBps,
@@ -1725,6 +1837,14 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         grossDriverShare: serializeMoney(plan.grossDriverShare),
         cashDeductionTotal: serializeMoney(plan.cashDeductionTotal),
         baseDriverShare: serializeMoney(plan.baseDriverShare),
+        // A freshly computed plan names it `managerChargeTotal`; a stored snapshot names it
+        // `managerCharge`. Both are the same frozen figure, exactly like the five provenance
+        // fields below, which read the same way.
+        managerCharge: serializeMoney(
+          'managerChargeTotal' in plan
+            ? plan.managerChargeTotal
+            : (plan as { managerCharge?: Minor }).managerCharge ?? minor(0n),
+        ),
         expectedTotal: serializeMoney(plan.expectedTotal),
         actualCash: serializeMoney(plan.actualCash),
         actualWallet: serializeMoney(plan.actualWallet),
@@ -1736,6 +1856,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         walletClaimToOffice: serializeMoney(plan.walletClaimToOffice),
         cashReceivableDeferred: serializeMoney(plan.cashReceivableDeferred),
         walletReceivableDeferred: serializeMoney(plan.walletReceivableDeferred),
+        maximumCashShortageReceivable: serializeMoney(plan.maximumCashShortageReceivable),
+        cashShortageReceivable: serializeMoney(plan.cashShortageReceivable),
         walletToOffice: serializeMoney(plan.walletToOffice),
         cashToOffice: serializeMoney(plan.cashToOffice),
         walletAction: plan.wallet.action,
@@ -1743,6 +1865,31 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         cashAction: plan.cash.action,
         cashAmount: serializeMoney(plan.cash.amount),
         settlementHash: plan.settlementHash,
+        /*
+         * WHO SIGNED IT, WHEN, AND WHY THE DIFFERENCE.
+         *
+         * These five live in the immutable snapshot and were serialized by nothing — the explicit
+         * whitelist above simply never listed them, so the provenance of a settled shift existed
+         * only in the audit trigger's raw JSON. A completed shift's page could show every figure of
+         * the handover and not the fact that a named manager confirmed it at a named minute, or the
+         * audited reason he gave for a non-zero variance, which BR5 required him to write.
+         *
+         * Undefined on a live preview: nothing has been confirmed yet, and a preview must not look
+         * like a signature.
+         */
+        confirmedAt: confirmedAtMs === null ? null : new Date(confirmedAtMs).toISOString(),
+        confirmedBy: 'confirmedBy' in plan ? (plan as { confirmedBy?: string | null }).confirmedBy ?? null : null,
+        confirmedByName: signer?.fullNameAr ?? null,
+        varianceReason:
+          'varianceReason' in plan ? (plan as { varianceReason?: string | null }).varianceReason ?? null : null,
+        walletTransferConfirmed:
+          'walletTransferConfirmed' in plan
+            ? (plan as { walletTransferConfirmed?: boolean }).walletTransferConfirmed ?? false
+            : false,
+        cashSettlementConfirmed:
+          'cashSettlementConfirmed' in plan
+            ? (plan as { cashSettlementConfirmed?: boolean }).cashSettlementConfirmed ?? false
+            : false,
       }
     },
   )
@@ -1777,8 +1924,15 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
               `driver_shift_funding_wallet:${snapshot.shift.driverId}`,
             ),
           ])
+          // Computed inside the close UOW so the hints and the operations they point at come from
+          // one locked snapshot. Read-only and deliberately absent from `shiftSnapshot`, which also
+          // serves the driver's own /state — this is manager review material.
+          const duplicateHints = z
+            .array(scanDuplicateHintSchema)
+            .parse(await buildScanDuplicateHints(transactionDeps, id))
           return {
             ...snapshot.body,
+            duplicateHints,
             shiftFunding: shiftFundingPreviewSchema.parse({
               cash: serializeMoney(shiftFundingCash),
               wallet: serializeMoney(shiftFundingWallet),
@@ -1813,6 +1967,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         ...(body.walletReceivableDeferred === undefined
           ? {}
           : { walletReceivableDeferred: body.walletReceivableDeferred }),
+        ...(body.cashShortageReceivable === undefined
+          ? {}
+          : { cashShortageReceivable: body.cashShortageReceivable }),
         ...(body.reviewedSettlementHash === undefined ? {} : { reviewedSettlementHash: body.reviewedSettlementHash }),
         walletTransferConfirmed: body.walletTransferConfirmed,
         cashSettlementConfirmed: body.cashSettlementConfirmed,
@@ -2002,6 +2159,47 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
    * its order. The shift stays `pending_review` and the close gate still has to pass afterwards.
    * Audited: every one of these moves BR1.
    */
+  /**
+   * «الحسم» — the amount a manager charges the employee at close.
+   *
+   * A PUT rather than a POST because it replaces the shift's whole charge: sending it twice leaves
+   * the same single figure, which is what its withdrawn predecessor got wrong by minting a new row
+   * per call. Clearing it is `amount: '0.00'`.
+   */
+  app.put(
+    '/shifts/:id/manager-charge',
+    { config: { permission: 'shift.approve', subject: shiftSubject } },
+    async (req) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const body = setManagerChargeRequest.parse(req.body)
+      const before = await deps.shifts.findById(id)
+      const shift = await setManagerCharge(deps, req.actor!, id, body)
+      await deps.audit.append({
+        tableName: 'shifts',
+        recordId: shift.id,
+        action: 'UPDATE',
+        actorId: req.actor!.userId,
+        actorKind: 'user',
+        branchId: shift.branchId,
+        requestId: req.requestId,
+        occurredAtMs: deps.clock.nowMs(),
+        before: before === null ? null : {
+          managerCharge: serializeMoney(before.managerCharge),
+          managerChargeReason: before.managerChargeReason,
+        },
+        after: {
+          managerCharge: serializeMoney(shift.managerCharge),
+          managerChargeReason: shift.managerChargeReason,
+        },
+      })
+      return {
+        id: shift.id,
+        managerCharge: serializeMoney(shift.managerCharge),
+        managerChargeReason: shift.managerChargeReason,
+      }
+    },
+  )
+
   app.post(
     '/shifts/:id/operations/revise',
     { config: { permission: 'shift.approve', subject: shiftSubject } },
@@ -2137,28 +2335,91 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     },
   )
 
+  /*
+   * Ceilings for the GPS stream, named rather than buried.
+   *
+   * A ten-hour shift at a fix every 15 s is ~2,400 rows, so 20,000 is a wide margin over any honest
+   * day and still bounds what one wedged handset can cost. The live window is what «now» means to
+   * the map: older than this and a fix is a memory, not a position.
+   */
+  const MAX_GPS_PINGS_PER_SHIFT = 20_000
+  const GPS_LIVE_WINDOW_MS = 60 * 60_000
+
   // ── Live GPS (SRS K) — the driver's phone streams its location while the shift is open ────────
-  // Ingest: the driver's own shift (shift.operate). The server stamps received_at, so a skewed
-  // phone clock can't rewrite when the office actually saw him.
+  /*
+   * Ingest: the driver's own shift (shift.operate). The server stamps received_at, so a skewed
+   * phone clock can't rewrite when the office actually saw him.
+   *
+   * Accepts a BATCH or a single fix. The batch is what a background uploader actually produces —
+   * a phone with no signal keeps working and keeps its fixes — and the single shape is kept
+   * forever rather than deprecated, because the driver PWA reaches a phone only when its driver
+   * taps «تحديث». Assuming otherwise is what let the 2026-08-24 close failures survive their fix.
+   *
+   * `bodyLimit` refuses a hostile body in Fastify before Zod ever runs, the same way the two
+   * evidence-upload routes do.
+   */
   app.post(
     '/shifts/:id/gps',
-    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    {
+      bodyLimit: 256 * 1024,
+      config: { permission: 'shift.operate', subject: shiftSubject },
+    },
     async (req, reply) => {
       const { id } = z.object({ id: z.string() }).parse(req.params)
-      const body = gpsPingRequest.parse(req.body)
+      const body = gpsIngestRequest.parse(req.body)
+      const parsed = 'fixes' in body ? body : { fixes: [body], source: 'phone_fg' as const }
       const shift = await deps.shifts.findById(id)
       if (!shift) return reply.code(404).send({ error: 'shift_not_found' })
-      await deps.gps.append({
-        shiftId: shift.id,
-        driverId: shift.driverId,
-        branchId: shift.branchId,
-        lat: body.lat,
-        lng: body.lng,
-        accuracyM: body.accuracyM,
-        capturedAtMs: body.capturedAtMs,
-        receivedAtMs: deps.clock.nowMs(),
+
+      /*
+       * THE STOP SIGNAL. A native uploader outlives the WebView, so JS may never get the chance to
+       * call stop(); this 409 is the only thing that reliably tells it to drop its buffer and shut
+       * down. The client contract is exact and belongs in the same breath: 409 → clear and stop;
+       * network error → keep and back off. Reverse those two and a phone hammers a closed shift
+       * every minute for weeks with nobody watching.
+       *
+       * Everything inside a live shift is accepted, including `pending_review` — a driver standing
+       * at the counter through his close package is precisely the presence evidence we want.
+       * Clipping to the operation window is the distance function's job, not ingest's.
+       */
+      if (!isTracked(shift.state)) {
+        return reply.code(409).send({ error: 'shift_not_live', detail: { state: shift.state } })
+      }
+
+      // One wedged handset must not be able to fill the table. A count against the natural-key
+      // index costs microseconds at batch cadence.
+      const stored = await deps.gps.countForShift(shift.id)
+      if (stored >= MAX_GPS_PINGS_PER_SHIFT) {
+        return reply.code(429).send({ error: 'gps_shift_quota_exhausted', detail: { stored } })
+      }
+
+      const nowMs = deps.clock.nowMs()
+      // A fix from tomorrow or from last week is a broken clock, not a position. Dropped rather
+      // than refused, so one bad reading never costs the whole batch.
+      const usable = parsed.fixes.filter(
+        (fix) => fix.capturedAtMs <= nowMs + 5 * 60_000 && fix.capturedAtMs >= nowMs - 24 * 60 * 60_000,
+      )
+      // Sorted so IDENTITY runs in capture order, which keeps `captured_at ASC, id ASC` stable.
+      const ordered = [...usable].sort((a, b) => a.capturedAtMs - b.capturedAtMs)
+      const { inserted } = await deps.gps.appendMany(
+        ordered.map((fix) => ({
+          shiftId: shift.id,
+          driverId: shift.driverId,
+          branchId: shift.branchId,
+          lat: fix.lat,
+          lng: fix.lng,
+          accuracyM: fix.accuracyM,
+          capturedAtMs: fix.capturedAtMs,
+          receivedAtMs: nowMs,
+          source: parsed.source,
+        })),
+      )
+      return reply.code(202).send({
+        ok: true,
+        accepted: inserted,
+        duplicates: ordered.length - inserted,
+        rejected: parsed.fixes.length - usable.length,
       })
-      return reply.code(202).send({ ok: true })
     },
   )
   // The manager's live map: the latest fix per driver in the branch (gps.view — BM/GM/sysadmin).
@@ -2169,11 +2430,20 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     // on the map at his last-known spot forever (gps_pings is append-only). Keyed on the shift id, not
     // just the driver, so a stale ping from an already-ended shift is dropped even when the driver has
     // since opened a fresh one that has not pinged yet.
-    const [pings, liveShifts] = await Promise.all([
-      deps.gps.latestPerDriverForBranch(branchId),
-      deps.shifts.listLiveForBranch(branchId),
-    ])
+    const liveShifts = await deps.shifts.listLiveForBranch(branchId)
     const liveShiftByDriver = new Map(liveShifts.map((s) => [s.driverId, s.id]))
+    /*
+     * Ask for the drivers who are actually out, rather than scanning the branch's whole history.
+     *
+     * The window is generous on purpose: a fix older than it is not a live position but a memory,
+     * and the screen decides what counts as fresh — it now shows the CAPTURE time, so a stale pin
+     * announces its own staleness instead of borrowing the arrival time's credibility.
+     */
+    const pings = await deps.gps.latestForDriversInBranch(
+      branchId,
+      [...liveShiftByDriver.keys()],
+      deps.clock.nowMs() - GPS_LIVE_WINDOW_MS,
+    )
     return {
       drivers: pings
         .filter((p) => liveShiftByDriver.get(p.driverId) === p.shiftId)
@@ -2182,6 +2452,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           lat: p.lat,
           lng: p.lng,
           accuracyM: p.accuracyM,
+          source: p.source,
           capturedAt: new Date(p.capturedAtMs).toISOString(),
           receivedAt: new Date(p.receivedAtMs).toISOString(),
         })),
@@ -2260,6 +2531,52 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     },
   )
 
+  /**
+   * «تصحيح سلفة الكاش» — return part of an office-funded cash float while the shift is still open.
+   *
+   * The wallet had this and the float did not, so a float tranche recorded but never handed over
+   * was unfixable: reversing the money alone leaves BR1 expecting the old total at close, and the
+   * whole difference falls on the driver's settlement. Same shape, same guarantees, same lock.
+   */
+  app.post(
+    '/shifts/:id/cash-float-adjustments',
+    { config: { permission: 'shift.approve', subject: shiftSubject } },
+    async (req, reply) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const body = adjustCashFloatRequest.parse(req.body)
+      const result = await adjustCashFloat(deps, req.actor!, id, body, req.requestId)
+      if (!result.replayed) {
+        await deps.audit.append({
+          tableName: 'shifts',
+          recordId: result.shift.id,
+          action: 'UPDATE',
+          actorId: req.actor!.userId,
+          actorKind: 'user',
+          branchId: result.shift.branchId,
+          requestId: req.requestId,
+          before: { cashFloatTotal: serializeMoney(result.from) },
+          after: {
+            cashFloatTotal: serializeMoney(result.to),
+            reduction: serializeMoney(result.reduction),
+            occurrenceKey: body.occurrenceKey,
+            reason: body.reason,
+            correctionEntryId: result.correctionEntryId,
+          },
+          occurredAtMs: deps.clock.nowMs(),
+        })
+      }
+      return reply.code(result.replayed ? 200 : 201).send({
+        id: result.shift.id,
+        from: serializeMoney(result.from),
+        to: serializeMoney(result.to),
+        reduction: serializeMoney(result.reduction),
+        currentTotal: serializeMoney(result.currentTotal),
+        correctionEntryId: result.correctionEntryId,
+        replayed: result.replayed,
+      })
+    },
+  )
+
   // ── Fleet: drivers, vehicles, documents (SRS B) ─────────────────────────────────
   registerFleetRoutes(app, deps)
 
@@ -2268,9 +2585,18 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   // ── Expenses (SRS G) ────────────────────────────────────────────────────────────
   registerExpenseRoutes(app, deps)
+  registerRecurringExpenseRoutes(app, deps)
+  // «المدخول المباشر» — the mirror of an expense, registered beside it on purpose.
+  registerIncomeRoutes(app, deps)
+  registerAdvanceRoutes(app, deps)
+
+  // ── «التفقّد» — manager check-in rounds ─────────────────────────────────────────
+  registerCheckInRoutes(app, deps)
 
   // ── Treasury: daily cash count + manual entries (SRS E-3, E-5) ──────────────────
   registerTreasuryRoutes(app, deps)
+  registerCompanyRoutes(app, deps)
+  registerCompanyRecurringRoutes(app, deps)
 
   // ── Tier admin (SRS F-3…F-6) ────────────────────────────────────────────────────
   registerTierRoutes(app, deps)
@@ -2292,9 +2618,12 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     try {
       const rate = resolveFxDay(days, today)
       // The FX rate is a bounded integer the wire carries as a number by design (setFxRequest),
-      // NOT a cash-minor amount — so a plain integer here is correct, not a precision hazard.
-      const perUsd = rate.sypMinorPerUsd
-      return { businessDate: today, sypMinorPerUsd: Number(perUsd), provisional: rate.provisional }
+      // NOT a cash-minor amount — converted at the sanctioned wire boundary, which bounds it.
+      return {
+        businessDate: today,
+        sypMinorPerUsd: serializeFxRateNumber(rate.sypMinorPerUsd),
+        provisional: rate.provisional,
+      }
     } catch {
       return { businessDate: today, sypMinorPerUsd: null, provisional: true }
     }
@@ -2329,10 +2658,15 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   /** The receipt ceiling and the kWh price, as decimal strings for the settings screen. */
   app.get('/settings', { config: { permission: 'settings.write' } }, async () => {
-    const [ceiling, kwh] = await Promise.all([deps.settings.receiptRequiredAbove(''), deps.settings.kwhPriceMinor()])
+    const [ceiling, kwh, goLive] = await Promise.all([
+      deps.settings.receiptRequiredAbove(''),
+      deps.settings.kwhPriceMinor(),
+      goLiveDate(deps),
+    ])
     return {
       receiptCeilingMinor: ceiling === null ? null : serializeMoney(ceiling),
       kwhPriceMinor: kwh === null ? null : serializeMoney(kwh),
+      goLiveBusinessDate: goLive,
     }
   })
 
@@ -2343,7 +2677,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
     // A fixed key map — never write an arbitrary key. Money is stored as a STRING of minor units,
     // matching how PgSettingsRepo.money() reads it back, so a large ceiling keeps its precision.
-    const fields: Array<[keyof typeof body, string]> = [
+    // Money keys only — spelled out rather than `keyof typeof body`, so adding a non-money setting
+    // below cannot silently fall into `serializeMoney` and be written as a number of minor units.
+    const fields: Array<['receiptCeilingMinor' | 'kwhPriceMinor', string]> = [
       ['receiptCeilingMinor', 'expense.receipt_required_above_minor'],
       ['kwhPriceMinor', 'vehicle.kwh_price_minor'],
     ]
@@ -2353,6 +2689,114 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       await deps.settings.set(key, value.toString(), actorId)
       written[key] = serializeMoney(value)
     }
+
+    /*
+     * «تاريخ بدء التطبيق». Not in the money loop above: it is a calendar date, and it is the only
+     * setting with a precondition.
+     *
+     * THE CEREMONY GATE. Declaring a go-live date only clamps FLOW reports. Balances stay
+     * cumulative — `fundBalance` sums every line for a fund, because a balance is a position and
+     * pre-epoch entries are what put the money in the box. What makes flows and balances agree from
+     * that date forward is a sealed cash count plus a restoration, which sets each office box to
+     * its capital target. Without it, "ignore everything before" would be a half-truth: the
+     * headline figures would restart while the boxes silently carried the trial period.
+     */
+    if (body.goLiveBusinessDate !== undefined) {
+      const date = body.goLiveBusinessDate
+      if (date === null) {
+        await deps.settings.set(GO_LIVE_SETTING_KEY, null, actorId)
+        written[GO_LIVE_SETTING_KEY] = 'null'
+      } else {
+        // The setting is global, but the ceremony is per-branch — and `settings.write` is
+        // system-admin-only, a role with no branch of its own. So the caller names the branch he
+        // opened, exactly as `/weeks/close` makes him name the one he is sealing.
+        const branchId = resolveBranchId(req)
+        const [count, restoration, position, targets, companyBox] = await Promise.all([
+          deps.cashCounts.find(branchId, date),
+          deps.restorations.find(branchId, date),
+          deps.treasuryPosition.readCurrent(branchId),
+          deps.capitalTargets.resolve(branchId, date),
+          deps.ledger.fundBalance(branchId, 'company_box'),
+        ])
+
+        /*
+         * TWO PROOFS, either will do — because they establish the same fact.
+         *
+         * (a) THE CEREMONY: a sealed count plus a restoration on that date. The ordinary path, and
+         *     the stronger one, because a count is a PHYSICAL attestation that somebody opened the
+         *     drawer and looked.
+         *
+         * (b) NOTHING IS MISSING: working capital is AT OR ABOVE the target and صندوق الشركة is
+         *     empty, so no shortfall from before is being carried in and buried.
+         *
+         * (b) exists because requiring (a) alone was a design error. The restoration settles the
+         * office boxes and deliberately excludes active custody, so it can only run when no shift
+         * is live — at the END of a day. Demanding it made declaring go-live ON the first day
+         * impossible, and a first day is exactly when an owner declares one.
+         *
+         * IT WAS `working === target`, AND THAT WAS STILL WRONG. Exact equality holds only at the
+         * instant a restoration finishes. The moment one shift collects one delivery fee, working
+         * capital rises above target — that is EARNINGS, and on the first day it is the very thing
+         * the owner wants attributed to the new epoch. So the epoch could only be declared at a
+         * frozen moment that a working day never has, and the owner asking for it mid-morning was
+         * refused for a state that is not a problem.
+         *
+         * The asymmetry is the whole argument. A SHORTFALL hidden by an epoch means real money
+         * vanished before it with no record and no way to see it afterwards — that is the failure
+         * this gate exists to prevent. A SURPLUS hidden means the office holds more than its
+         * declared capital, which is not a loss of control; it is today's work. Refusing a surplus
+         * protects nothing and blocks the ordinary case.
+         *
+         * The surplus is carried into the audit entry, so absorbing it is recorded rather than
+         * silent.
+         */
+        const target = (targets.office_cash ?? 0n) + (targets.office_wallet ?? 0n)
+        const working =
+          position.officeCash +
+          position.officeWallet +
+          position.receivablesCash +
+          position.receivablesWallet +
+          position.advancesCash +
+          position.advancesWallet +
+          position.activeCustodyCash +
+          position.activeCustodyWallet
+        const cutover = await deps.companyLedger.cutoverFor(branchId)
+        const companyPosition = cutover === null
+          ? companyBox
+          : minor(companyBox + await deps.ledger.fundBalance(
+              cutover.companyBranchId,
+              `branch_clearing:${branchId}`,
+            ))
+        const nothingMissing = target > 0n && working >= target && companyPosition === 0n
+
+        if (!nothingMissing) {
+          const missing: string[] = []
+          if (count === null || count.sealedAtMs === null) missing.push('sealed_cash_count')
+          if (restoration === null) missing.push('restoration')
+          if (missing.length > 0) {
+            throw new ServiceError(422, 'go_live_requires_opening_ceremony', {
+              businessDate: date,
+              missing,
+              // The numbers, so the screen can say HOW FAR SHORT the position is rather than only
+              // that a ceremony is owed. A reader who is whole never sees this.
+              workingCapital: serializeMoney(minor(working)),
+              capitalTarget: serializeMoney(minor(target)),
+              shortfall: serializeMoney(minor(target > working ? target - working : 0n)),
+              companyBox: serializeMoney(companyBox),
+              companyPosition: serializeMoney(companyPosition),
+            })
+          }
+        }
+        await deps.settings.set(GO_LIVE_SETTING_KEY, date, actorId)
+        written[GO_LIVE_SETTING_KEY] = date
+        // What the boxes held when the epoch was declared. Everything before this date drops out of
+        // the flow reports, so the position at the moment of the decision is the one number that
+        // makes the decision reviewable a year later.
+        written[`${GO_LIVE_SETTING_KEY}.working_capital`] = serializeMoney(minor(working))
+        written[`${GO_LIVE_SETTING_KEY}.capital_target`] = serializeMoney(minor(target))
+      }
+    }
+
     if (Object.keys(written).length > 0) {
       await deps.audit.append({
         tableName: 'settings',
@@ -2391,8 +2835,18 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         trialBalanceDiff: minor(0n),
         alreadyClosed: false,
       })
-      return reply.code(422).send({ error: 'week_not_closable', blockers: check.blockers })
+      return reply.code(422).send({ error: 'week_not_closable', blockers: check.blockers.map(wireCloseBlocker) })
     }
+
+    /*
+     * The company (HQ) row closes its week too (C1), but it is not a branch: nobody opens a drawer
+     * there, so it owes no daily cash count — the owner's own decision exempts صندوق الشركة from
+     * counts. And it holds two currencies, so its trial balance is judged per currency: a dollar
+     * surplus and a lira deficit of the same digits sum to zero and are still two broken books.
+     * (C2 adds the branch-clearing invariant to this same pre-flight.)
+     */
+    const company = await deps.directory.companyBranch()
+    const isCompany = company !== null && company.id === branchId
 
     const { start, end } = weekClosedOn(body.closeDate)
     // The WHOLE week, not the Sunday. A single-day query left Monday-to-Saturday invisible, so a
@@ -2404,14 +2858,31 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
     const entries = await deps.ledger.listByWeek(branchId, start)
     let diff = 0n
-    for (const e of entries) for (const l of e.lines) diff += l.side === 'D' ? l.amount : -l.amount
+    const diffByCurrency = new Map<Currency, bigint>()
+    for (const e of entries) {
+      for (const l of e.lines) {
+        const signed = l.side === 'D' ? l.amount : -l.amount
+        diff += signed
+        diffByCurrency.set(l.currency, (diffByCurrency.get(l.currency) ?? 0n) + signed)
+      }
+    }
 
     // Every day of the week must have been physically counted (E-5) before it can be sealed.
     // This was a placeholder until cash counts existed; leaving it empty would have let a week
     // close with drawers nobody ever opened.
     const counted = new Set(await deps.cashCounts.listDatesInRange(branchId, start, end))
+    /*
+     * A day BEFORE go-live was never operated, so no drawer was ever opened to count.
+     *
+     * Without this skip, a go-live falling mid-week makes that week permanently unsealable: the
+     * pre-epoch days can never acquire a cash count (there is no route to count a past date), the
+     * blocker never clears, and BR7's Sunday close is blocked forever from the very first week.
+     * Nothing is weakened for real days — an operated day still has to be counted.
+     */
+    const goLive = await goLiveDate(deps)
     const daysMissingCashCount: string[] = []
-    for (let d = start; d <= end; d = addDays(d, 1)) {
+    for (let d = start; d <= end && !isCompany; d = addDays(d, 1)) {
+      if (goLive !== null && d < goLive) continue
       if (!counted.has(d)) daysMissingCashCount.push(d)
     }
 
@@ -2424,10 +2895,20 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         .map((d) => d.businessDate),
       priorWeekClosed: closedStarts.length === 0 || closedStarts.some((s) => s < start),
       trialBalanceDiff: minor(diff),
+      ...(isCompany
+        ? {
+            trialBalanceByCurrency: CURRENCIES.map((currency) => ({
+              currency,
+              diff: minor(diffByCurrency.get(currency) ?? 0n),
+            })),
+          }
+        : {}),
       alreadyClosed: existing?.closedAtMs !== null && existing !== null,
     })
 
-    if (!check.canClose) return reply.code(422).send({ error: 'week_not_closable', blockers: check.blockers })
+    if (!check.canClose) {
+      return reply.code(422).send({ error: 'week_not_closable', blockers: check.blockers.map(wireCloseBlocker) })
+    }
 
     const lock = existing ?? (await deps.weekLocks.create({
       branchId,
@@ -2441,6 +2922,42 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   })
 
   // ── Audit viewer (A-5) ──────────────────────────────────────────────────────────────────
+  /**
+   * The register of rows a manager declared were never deliveries.
+   *
+   * `audit.view` — already granted to `system_admin` and `general_manager` at scope `all`, which is
+   * exactly the audience the owner named, so no new permission key. The existing `/audit` route
+   * cannot serve this: it needs a table name and a record UUID you must already know, which is a
+   * forensic tool rather than something a person checks.
+   */
+  app.get('/operation-removals', { config: { permission: 'audit.view' } }, async (req) => {
+    const q = z
+      .object({ branchId: z.string().uuid().optional(), limit: z.coerce.number().int().min(1).max(500).default(100) })
+      .parse(req.query ?? {})
+    const rows = await deps.operationRemovals.list({ branchId: q.branchId, limit: q.limit })
+    const drivers = new Map(
+      (await deps.users.list()).map((user) => [user.id, user.fullNameAr || user.username]),
+    )
+    return {
+      rows: rows.map((row) => ({
+        id: row.id,
+        kind: row.kind,
+        operationKind: row.operationKind,
+        operationRef: row.operationRef,
+        shiftId: row.shiftId,
+        branchId: row.branchId,
+        businessDate: row.businessDate,
+        driverName: row.driverId === null ? null : (drivers.get(row.driverId) ?? null),
+        amount: serializeMoney(row.amount),
+        reason: row.reason,
+        evidenceSlot: row.evidenceSlot,
+        evidenceMediaId: row.evidenceMediaId,
+        actedByName: drivers.get(row.actedBy) ?? null,
+        actedAt: new Date(row.actedAtMs).toISOString(),
+      })),
+    }
+  })
+
   app.get('/audit', { config: { permission: 'audit.view' } }, async (req) => {
     const q = z
       .object({ tableName: z.string().optional(), recordId: z.string().optional(), actorId: z.string().optional() })

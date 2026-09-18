@@ -111,8 +111,13 @@ async function seedHistoricalOcrDeductionOverlap(
 }
 
 describe('operation minute window', () => {
+  /*
+   * `windowOpensAt` was `openApprovedAt` until the owner amended decision 11 on 2026-08-31. Only
+   * the SOURCE of the lower bound moved — to the driver's confirmation — so this truth table is
+   * unchanged, deliberately, and is what proves the rule itself was not touched.
+   */
   const base = {
-    openApprovedAt: new Date(OPEN_MS).toISOString(),
+    windowOpensAt: new Date(OPEN_MS).toISOString(),
     submittedAt: new Date(CLOSE_MS).toISOString(),
     timeZone: 'Asia/Damascus',
     offsetMinutes: 180,
@@ -132,7 +137,7 @@ describe('operation minute window', () => {
   it('preserves uncertainty when either the operation or canonical open time is missing', () => {
     expect(classifyOperationWindow({ ...base, occurredDate: null, occurredMinute: '20:00' })).toBe('unknown')
     expect(classifyOperationWindow({ ...base, occurredDate: '2026-08-13', occurredMinute: null })).toBe('unknown')
-    expect(classifyOperationWindow({ ...base, occurredDate: '2026-08-13', occurredMinute: '20:00', openApprovedAt: null })).toBe('unknown')
+    expect(classifyOperationWindow({ ...base, occurredDate: '2026-08-13', occurredMinute: '20:00', windowOpensAt: null })).toBe('unknown')
   })
 })
 
@@ -196,7 +201,12 @@ describe('Thaer regression: six orders and the -50 recent-order row', () => {
     expect(review.json().submittedAt).toBe(new Date(CLOSE_MS).toISOString())
     expect(review.json().orders).toHaveLength(6)
     expect(review.json().orders.every((order: { included: boolean }) => order.included)).toBe(true)
-    expect(review.json().orders[0].windowStatus).toBe('open_minute_boundary')
+    // 19:49 was the boundary minute while the window opened at the MANAGER's approval. The fixture
+    // has always confirmed the driver ten minutes earlier (`OPEN_MS - 10 * 60_000`), and since the
+    // 2026-08-31 amendment that confirmation is the bound — so 19:49 now sits inside the window
+    // rather than on its edge. Both statuses are included, so the money below is unchanged; the
+    // boundary semantics themselves stay pinned by the truth table above.
+    expect(review.json().orders[0].windowStatus).toBe('in_window')
     expect(review.json().orders[4].windowStatus).toBe('in_window')
     expect(review.json().cashDeductions).toHaveLength(1)
     expect(review.json().cashDeductions[0]).toMatchObject({ amount: '50.00', included: true, windowStatus: 'in_window' })
@@ -774,7 +784,21 @@ describe('cash deduction compatibility and approval allocation', () => {
           payMode: 'cash',
           fee: '10.00',
           occurredDate: '2026-08-13',
-          occurredMinute: '19:48',
+          // 19:38 — one minute before the DRIVER confirmed. This read 19:48 while the window opened
+          // at the manager's approval; the 2026-08-31 amendment moved the bound back ten minutes to
+          // the confirmation, so 19:48 is now a real delivery inside the shift and the sample had to
+          // move with the rule it is testing. What is under test here is the HEALER, not this minute.
+          occurredMinute: '19:38',
+        },
+        {
+          // The row the amendment exists for: made after the driver confirmed at 19:39 and before
+          // the manager approved at 19:49. It used to heal to `pre_open` and be dropped from the
+          // money; it must now heal to `in_window` and count.
+          providerOrderNo: 'OLD-API-CONFIRM-GAP',
+          payMode: 'cash',
+          fee: '10.00',
+          occurredDate: '2026-08-13',
+          occurredMinute: '19:44',
         },
         { providerOrderNo: 'OLD-API-UNKNOWN', payMode: 'cash', fee: '10.00' },
       ],
@@ -816,6 +840,7 @@ describe('cash deduction compatibility and approval allocation', () => {
     expect(first.statusCode, first.body).toBe(200)
     expect(first.json().orders).toEqual(expect.arrayContaining([
       expect.objectContaining({ providerOrderNo: 'OLD-API-PRE-OPEN', windowStatus: 'pre_open', included: false }),
+      expect.objectContaining({ providerOrderNo: 'OLD-API-CONFIRM-GAP', windowStatus: 'in_window', included: true }),
       expect.objectContaining({ providerOrderNo: 'OLD-API-UNKNOWN', windowStatus: 'unknown', included: false }),
     ]))
     expect(first.json().cashDeductions[0]).toMatchObject({ windowStatus: 'post_close', included: false })
@@ -823,7 +848,7 @@ describe('cash deduction compatibility and approval allocation', () => {
     const second = await get(manager, `/shifts/${id}/review`)
     expect(second.statusCode, second.body).toBe(200)
     expect(counts).toEqual([
-      { orders: 2, cashDeductions: 1 },
+      { orders: 3, cashDeductions: 1 },
       { orders: 0, cashDeductions: 0 },
     ])
     const blocked = await approveFixedClose(h, manager, id, second.json().br1.ordersHash)
@@ -1097,6 +1122,123 @@ describe('cash deduction compatibility and approval allocation', () => {
       cashDeductionTotal: '30.00',
       expectedTotal: '70.00',
     })
+  })
+
+  it('«الحسم» takes money off the employee and gives it to the office, end to end', async () => {
+    /*
+     * The assertion its withdrawn predecessor never made.
+     *
+     * That one was a manager-created CASH DEDUCTION, and a cash deduction is subtracted from the
+     * expected total AND from the share — right for money that physically left the driver during
+     * the shift, wrong for a charge invented after the count. The variance rose by the charge and
+     * decision 13 handed it straight back to him. The old test asserted the variance moved and
+     * never asked whether the employee's figure had.
+     *
+     * So this one asks that first, and about the ledger second.
+     */
+    const { id, driver, manager } = await openShift({ float: 100, topup: 20 })
+    await uploadEnd(driver, id)
+    await put(driver, `/shifts/${id}/operations`, {
+      orders: [{
+        providerOrderNo: 'CHG-1', payMode: 'cash', fee: '100.00',
+        occurredDate: '2026-08-13', occurredMinute: '20:00',
+      }],
+      movements: [],
+    })
+    h.deps.clock.set(CLOSE_MS)
+    expect((await put(driver, `/shifts/${id}/end-package`, {
+      odometerKm: 6_050, batteryPercent: null, cashDeclared: '200.00', walletDeclared: '0.00',
+    })).statusCode).toBe(200)
+    expect((await post(manager, `/shifts/${id}/operations/revise`, {
+      orders: [{
+        providerOrderNo: 'CHG-1', included: true,
+        occurredDate: '2026-08-13', occurredMinute: '20:00',
+        reason: 'verified against the original Yallago screenshot',
+      }],
+    })).statusCode).toBe(200)
+
+    // 100 float + 20 top-up + the 80 residual after Yallago's per-order cut.
+    const before = (await get(manager, `/shifts/${id}/settlement`)).json()
+    expect(before).toMatchObject({
+      managerCharge: '0.00', expectedTotal: '200.00', variance: '0.00',
+      finalEmployeeCash: '40.00', cashToOffice: '160.00',
+    })
+
+    // A charge without an audited reason is an unexplained deduction from a person's pay.
+    const noReason = await put(manager, `/shifts/${id}/manager-charge`, { amount: '30.00' })
+    expect(noReason.statusCode, noReason.body).toBe(400)
+
+    const charged = await put(manager, `/shifts/${id}/manager-charge`, {
+      amount: '30.00', reason: 'broken phone mount charged to the driver',
+    })
+    expect(charged.statusCode, charged.body).toBe(200)
+
+    const after = (await get(manager, `/shifts/${id}/settlement`)).json()
+    expect(after).toMatchObject({
+      managerCharge: '30.00',
+      // THE ASSERTIONS THAT MATTER: he takes 30 less and the office collects 30 more.
+      finalEmployeeCash: '10.00',
+      cashToOffice: '190.00',
+      // …the count still agrees with itself, so no surplus is manufactured…
+      expectedTotal: '200.00',
+      variance: '0.00',
+      varianceDirection: 'balanced',
+      // …and he still EARNED his share; the charge is paid out of it, not hidden inside it.
+      baseDriverShare: '40.00',
+    })
+
+    const approved = await approveFixedClose(
+      h, manager, id, (await get(manager, `/shifts/${id}/review`)).json().br1.ordersHash,
+    )
+    expect(approved.statusCode, approved.body).toBe(200)
+
+    // The books name the 30 rather than letting the cash box quietly swell.
+    const entries = await h.deps.ledger.listByShift(id)
+    // Scoped to the CLOSE entry: `office_cash` also carries the 120 that left the box at open,
+    // and netting the whole shift would be asking a different question than this test's.
+    const closeLines = entries.filter((e) => e.eventType === 'float_return').flatMap((e) => e.lines)
+    // A driver-scoped fund's code carries his id (`driver_share_payable:<uuid>`), so match the head.
+    const net = (code: string) =>
+      closeLines.filter((l) => l.fundCode === code || l.fundCode.startsWith(`${code}:`))
+        .reduce((t, l) => t + (l.side === 'D' ? l.amount : -l.amount), 0n)
+    expect(net('other_income')).toBe(-3_000n) // credited 30.00, in minor units
+    expect(net('office_cash')).toBe(19_000n) // the office physically received 190.00
+    expect(net('driver_share_payable')).toBe(4_000n) // his full earned 40.00, undiminished
+
+    // …and the frozen snapshot carries the charge, so the close can be read back as it was signed.
+    const snapshot = await h.deps.settlements.findByShift(id)
+    expect(snapshot).toMatchObject({ managerCharge: 3_000n, finalEmployeeCash: 1_000n })
+
+    // After approval the door is shut: the snapshot is immutable and the journal has posted.
+    const late = await put(manager, `/shifts/${id}/manager-charge`, { amount: '10.00', reason: 'an afterthought' })
+    expect(late.statusCode, late.body).toBe(409)
+    expect(late.json().error).toBe('shift_not_under_review')
+  })
+
+  it('«الحسم» is a replacement, so a retried request cannot charge twice', async () => {
+    // Its predecessor minted a fresh uuid per call and booked a second money row on a replay.
+    const { id, driver, manager } = await openShift({ float: 100, topup: 20 })
+    await uploadEnd(driver, id)
+    await put(driver, `/shifts/${id}/operations`, {
+      orders: [{ providerOrderNo: 'CHG-2', payMode: 'cash', fee: '100.00' }],
+      movements: [],
+    })
+    h.deps.clock.set(CLOSE_MS)
+    await put(driver, `/shifts/${id}/end-package`, {
+      odometerKm: 6_050, batteryPercent: null, cashDeclared: '200.00', walletDeclared: '0.00',
+    })
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const sent = await put(manager, `/shifts/${id}/manager-charge`, {
+        amount: '25.00', reason: 'the same request, sent three times',
+      })
+      expect(sent.statusCode, sent.body).toBe(200)
+    }
+    expect((await get(manager, `/shifts/${id}/settlement`)).json().managerCharge).toBe('25.00')
+
+    // …and it clears, which is the only way to undo one before approval.
+    expect((await put(manager, `/shifts/${id}/manager-charge`, { amount: '0.00' })).statusCode).toBe(200)
+    expect((await get(manager, `/shifts/${id}/settlement`)).json().managerCharge).toBe('0.00')
   })
 
   it('blocks unresolved rows until a manager supplies an audited reason and decision', async () => {

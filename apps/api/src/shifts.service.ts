@@ -19,6 +19,7 @@ import type {
   ShiftCloseTransactionDeps,
   ShiftDecisionRecord,
   WalletMovementRecord,
+  OperationRemovalRecord,
   ShiftRecord,
   VehicleEventKind,
   VehicleEventRecord,
@@ -72,8 +73,11 @@ import {
   sum,
   transition,
   weekStartFor,
+  withoutSupersededScanRows,
 } from '@ash/domain'
+import { normalizePrintedOrderTime } from '@ash/adapters/ocr'
 import { fundCodeOf } from '@ash/adapters/memory'
+import { evidenceSourcesForShift } from './duplicate-hints.service.ts'
 import { grantsFromRows } from './rbac.ts'
 import {
   FIXED_SETTLEMENT_DRIVER_BPS,
@@ -277,15 +281,36 @@ export const classifyOperationWindow = classifyStoredOperationWindow
 
 const includedByWindow = includedByOperationWindow
 
+/**
+ * The one seam that supplies both window edges.
+ *
+ * Every `classifyOperationWindow` call site takes this by spread, so the lower bound moves here and
+ * nowhere else — which is the whole reason the 2026-08-31 amendment to decision 11 is a one-line
+ * change rather than five.
+ *
+ * `windowOpensAt ?? openApprovedAt` degrades a pre-0054 row to exactly today's behaviour instead of
+ * to `null`, which the classifier reads as `unknown` and which would exclude a whole shift's orders
+ * rather than one row.
+ */
+/**
+ * A wallet movement's minute, in the only shapes `shift_wallet_movements_minute_ck` accepts.
+ *
+ * `normalizePrintedOrderTime` is the adapter's tested clock parser — Arabic-Indic digits, ص/م and
+ * AM/PM. An already-canonical `HH:MM` passes through it unchanged; anything it cannot read becomes
+ * `''`, which the constraint permits and which costs a minute rather than a driver's whole shift.
+ */
+const storableMovementMinute = (value: string | null | undefined): string =>
+  normalizePrintedOrderTime(value ?? null) ?? ''
+
 async function operationWindowContext(deps: Deps, shift: ShiftRecord): Promise<{
-  openApprovedAt: string | null
+  windowOpensAt: string | null
   submittedAt: string | null
   timeZone?: string
   offsetMinutes: number
 }> {
   const branch = await deps.directory.branch(shift.branchId)
   return {
-    openApprovedAt: shift.openApprovedAt,
+    windowOpensAt: shift.windowOpensAt ?? shift.openApprovedAt,
     submittedAt: shift.submittedAt,
     ...(branch?.timezone ? { timeZone: branch.timezone } : {}),
     offsetMinutes: deps.clock.offsetMinutes(),
@@ -384,7 +409,7 @@ const manualShareTotals = (rows: readonly ShiftOrderRecord[]): { driverShare: Mi
 }
 
 export function todayFor(deps: Deps): CalendarDate {
-  return businessDateFor(deps.clock.nowMs(), deps.clock.offsetMinutes())
+  return businessDateFor(deps.clock.nowMs(), deps.clock.offsetMinutes(), deps.clock.dayStartMinutes())
 }
 
 /**
@@ -566,6 +591,7 @@ export async function createShift(
     endWalletDeclaredOcr: null,
     driverConfirmedAt: null,
     openApprovedAt: null,
+    windowOpensAt: null,
     openApprovedBy: null,
     submittedAt: null,
     equationDiff: null,
@@ -573,6 +599,9 @@ export async function createShift(
     walletDiff: null,
     ordersHash: null,
     approvedBy: null,
+    approvedAt: null,
+  managerCharge: minor(0n),
+  managerChargeReason: null,
   }
   try {
     await deps.shifts.create(shift, actor.userId)
@@ -837,6 +866,49 @@ async function submitStartPackageLocked(
  * counter. Best-effort: a notification failure must never roll back the shift transition that
  * triggered it — the bell is a convenience, the state change is the record.
  */
+/**
+ * Tell the system admin that a manager declared a row was never a delivery.
+ *
+ * Addressed to each `system_admin` USER ID, not to a branch. The bell's other producers use the
+ * pseudo-recipient `branch:<id>`, and a system admin has `branch_id = NULL` — so until now nothing
+ * in this system could reach him at all. That is why «report it to the system admin» needed more
+ * than one line.
+ *
+ * Best-effort by design, and the same swallow `notifyBranch` uses. The durable record is the
+ * `operation_removals` row written a moment earlier plus the audit trigger behind it; a bell that
+ * failed must never be able to roll back the removal it was announcing.
+ */
+async function notifySystemAdminsOfRemoval(
+  deps: Deps,
+  entry: { id: string; kind: 'removed' | 'restored'; shiftId: string; branchId: string; businessDate: string; operationRef: string; amount: Minor; reason: string; actedBy: string },
+): Promise<void> {
+  try {
+    const admins = (await deps.users.list()).filter((user) => user.roleKey === 'system_admin' && user.active)
+    for (const admin of admins) {
+      await deps.notifications.push({
+        recipientId: admin.id,
+        branchId: entry.branchId,
+        kind: entry.kind === 'removed' ? 'operation_removed' : 'operation_restored',
+        payload: {
+          removalId: entry.id,
+          shiftId: entry.shiftId,
+          businessDate: entry.businessDate,
+          operationRef: entry.operationRef,
+          amount: entry.amount.toString(),
+          reason: entry.reason,
+          actedBy: entry.actedBy,
+        },
+        // The register id: one bell per act, and a retry of the same act cannot ring twice.
+        dedupeKey: `operation_removal:${entry.id}`,
+        readAtMs: null,
+        createdAtMs: deps.clock.nowMs(),
+      })
+    }
+  } catch {
+    // swallow — the bell is a convenience; the register and the audit row are the record
+  }
+}
+
 async function notifyBranch(deps: Deps, shift: ShiftRecord, kind: string): Promise<void> {
   try {
     await deps.notifications.push({
@@ -983,6 +1055,7 @@ async function approveOpenLocked(
       postingDate: todayFor(deps),
       weekStartDate: withFunds.weekStartDate,
       fxDayId,
+      sypMinorPerUsd: null,
       createdBy: actor.userId,
     },
   )
@@ -992,6 +1065,18 @@ async function approveOpenLocked(
     ...withFunds,
     state: result.next,
     openApprovedAt,
+    /*
+     * The window opens when the DRIVER confirmed, not now (decision 11 as amended 2026-08-31).
+     *
+     * Stamped here rather than at confirmation because this is the transition that makes the shift
+     * operational — a shift that never gets approved has no window at all — and because freezing
+     * the bound at the same instant as `openApprovedAt` means the pair can never disagree about
+     * which shift they describe.
+     *
+     * The fallback keeps a shift whose confirmation instant is somehow missing on exactly today's
+     * behaviour; `null` here would classify its every row as `unknown`.
+     */
+    windowOpensAt: withFunds.driverConfirmedAt ?? openApprovedAt,
     openApprovedBy: actor.userId,
   }
   await deps.shifts.update(updated, actor.userId)
@@ -1402,6 +1487,7 @@ async function addTrancheLocked(
     postingDate: todayFor(deps),
     weekStartDate: shift.weekStartDate,
     fxDayId,
+    sypMinorPerUsd: null,
     createdBy: actor.userId,
   })
 
@@ -1455,12 +1541,37 @@ export async function adjustWalletTopup(
     reason: string
   },
   requestId: string | null = null,
+  kind: TrancheAdjustmentKind = 'wallet_topup',
 ): Promise<WalletTopupAdjustmentResult> {
   return deps.closeUnitOfWork.run(
     { shiftId, actorId: actor.userId, requestId },
     async (transaction) =>
-      adjustWalletTopupLocked(withCloseTransaction(deps, transaction), actor, shiftId, input),
+      adjustWalletTopupLocked(withCloseTransaction(deps, transaction), actor, shiftId, input, kind),
   )
+}
+
+/**
+ * «تصحيح سلفة الكاش» — return part of an office-funded cash float while the shift is still open.
+ *
+ * The float had no correction path until now, and the wallet's own doc comment says why a generic
+ * journal reversal will not do: reversing the money without changing the shift's tranche projection
+ * leaves BR1 expecting the old total at close, so the whole difference lands on the driver's
+ * settlement. On shift cd7b8fe9 a second float tranche of 1,500.00 that was recorded but not handed
+ * over turned a 228.10 wallet difference into a 1,728.10 shortfall against the driver.
+ */
+export async function adjustCashFloat(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: {
+    expectedCurrentTotal: Minor
+    targetTotal: Minor
+    occurrenceKey: string
+    reason: string
+  },
+  requestId: string | null = null,
+): Promise<WalletTopupAdjustmentResult> {
+  return adjustWalletTopup(deps, actor, shiftId, input, requestId, 'cash_float')
 }
 
 function reduceTranchesFromTail(tranches: readonly Minor[], targetTotal: Minor): Minor[] {
@@ -1480,6 +1591,55 @@ function reduceTranchesFromTail(tranches: readonly Minor[], targetTotal: Minor):
   return next
 }
 
+/**
+ * The two office-funded totals a shift carries, and everything that differs between them.
+ *
+ * A mis-entered CASH tranche was unfixable until this existed: the wallet had a correction path and
+ * the float had none, so an extra float tranche left BR1 expecting money the driver never received
+ * and the whole difference fell on his settlement. Both are the same act — return part of what the
+ * office handed out, while the shift is still financially open — so they are one implementation.
+ */
+const TRANCHE_KINDS = {
+  wallet_topup: {
+    recipe: walletTopup,
+    journalPrefix: 'wallet-topup-adjustment',
+    driverFund: (driverId: string) => `driver_wallet:${driverId}`,
+    tranchesOf: (shift: ShiftRecord) => shift.topupTranches,
+    withTranches: (shift: ShiftRecord, tranches: Minor[]) => ({ ...shift, topupTranches: tranches }),
+    label: 'topup' as const,
+    errors: {
+      keyRequired: 'wallet_topup_adjustment_key_required',
+      reasonRequired: 'wallet_topup_adjustment_reason_required',
+      increase: 'wallet_topup_increase_use_tranche',
+      noReduction: 'wallet_topup_reduction_required',
+      notOpen: 'shift_not_open_for_wallet_topup_adjustment',
+      totalChanged: 'wallet_topup_total_changed',
+      exceedsBalance: 'wallet_topup_reduction_exceeds_driver_balance',
+      conflictKind: 'wallet_topup_adjustment',
+    },
+  },
+  cash_float: {
+    recipe: floatOut,
+    journalPrefix: 'cash-float-adjustment',
+    driverFund: (driverId: string) => `driver_cash:${driverId}`,
+    tranchesOf: (shift: ShiftRecord) => shift.floatTranches,
+    withTranches: (shift: ShiftRecord, tranches: Minor[]) => ({ ...shift, floatTranches: tranches }),
+    label: 'float' as const,
+    errors: {
+      keyRequired: 'cash_float_adjustment_key_required',
+      reasonRequired: 'cash_float_adjustment_reason_required',
+      increase: 'cash_float_increase_use_tranche',
+      noReduction: 'cash_float_reduction_required',
+      notOpen: 'shift_not_open_for_cash_float_adjustment',
+      totalChanged: 'cash_float_total_changed',
+      exceedsBalance: 'cash_float_reduction_exceeds_driver_balance',
+      conflictKind: 'cash_float_adjustment',
+    },
+  },
+} as const
+
+export type TrancheAdjustmentKind = keyof typeof TRANCHE_KINDS
+
 async function adjustWalletTopupLocked(
   deps: Deps,
   actor: Actor,
@@ -1490,27 +1650,29 @@ async function adjustWalletTopupLocked(
     occurrenceKey: string
     reason: string
   },
+  kind: TrancheAdjustmentKind = 'wallet_topup',
 ): Promise<WalletTopupAdjustmentResult> {
+  const spec = TRANCHE_KINDS[kind]
   const shift = await mustFind(deps, shiftId)
   const key = input.occurrenceKey.trim()
   const reason = input.reason.trim()
-  if (!key) throw new ServiceError(422, 'wallet_topup_adjustment_key_required')
+  if (!key) throw new ServiceError(422, spec.errors.keyRequired)
   if (!/[^\p{White_Space}\p{Cf}]/u.test(reason)) {
-    throw new ServiceError(422, 'wallet_topup_adjustment_reason_required')
+    throw new ServiceError(422, spec.errors.reasonRequired)
   }
-  assertPersistableMinor('walletTopupAdjustment.expectedCurrentTotal', input.expectedCurrentTotal)
-  assertPersistableMinor('walletTopupAdjustment.targetTotal', input.targetTotal)
+  assertPersistableMinor(`${spec.journalPrefix}.expectedCurrentTotal`, input.expectedCurrentTotal)
+  assertPersistableMinor(`${spec.journalPrefix}.targetTotal`, input.targetTotal)
   if (input.targetTotal > input.expectedCurrentTotal) {
-    throw new ServiceError(422, 'wallet_topup_increase_use_tranche')
+    throw new ServiceError(422, spec.errors.increase)
   }
   if (input.targetTotal === input.expectedCurrentTotal) {
-    throw new ServiceError(422, 'wallet_topup_reduction_required')
+    throw new ServiceError(422, spec.errors.noReduction)
   }
 
   const reduction = minor(input.expectedCurrentTotal - input.targetTotal)
-  const journalOccurrenceKey = `wallet-topup-adjustment:${key}`
+  const journalOccurrenceKey = `${spec.journalPrefix}:${key}`
   const posting = reverse(
-    walletTopup(shift.driverId, reduction, journalOccurrenceKey),
+    spec.recipe(shift.driverId, reduction, journalOccurrenceKey),
     journalOccurrenceKey,
   )
   assertPersistablePostings([posting])
@@ -1518,14 +1680,14 @@ async function adjustWalletTopupLocked(
   // metadata column, and this canonical prefix lets an idempotency retry distinguish 600→500 from
   // 700→600 even though both reverse the same amount.
   const auditReason =
-    `wallet-topup-adjustment:${input.expectedCurrentTotal.toString()}:${input.targetTotal.toString()}\n${reason}`
+    `${spec.journalPrefix}:${input.expectedCurrentTotal.toString()}:${input.targetTotal.toString()}\n${reason}`
 
   const existingEntry = (await deps.ledger.listByShift(shift.id)).find(
     (entry) => entry.eventType === 'correction' && entry.occurrenceKey === journalOccurrenceKey,
   )
   if (existingEntry) {
     if (!journalMatchesPosting(existingEntry, posting) || existingEntry.reason !== auditReason) {
-      throw new ServiceError(409, 'idempotency_key_conflict', { occurrenceKey: key, kind: 'wallet_topup_adjustment' })
+      throw new ServiceError(409, 'idempotency_key_conflict', { occurrenceKey: key, kind: spec.errors.conflictKind })
     }
     return {
       shift,
@@ -1542,32 +1704,31 @@ async function adjustWalletTopupLocked(
     shift.openApprovedAt === null ||
     (shift.state !== 'open' && shift.state !== 'suspended' && shift.state !== 'pending_review')
   ) {
-    throw new ServiceError(409, 'shift_not_open_for_wallet_topup_adjustment')
+    throw new ServiceError(409, spec.errors.notOpen)
   }
 
-  assertPositiveTranches('topup', shift.topupTranches)
-  const currentTotal = sum(shift.topupTranches)
+  assertPositiveTranches(spec.label, spec.tranchesOf(shift))
+  const currentTotal = sum(spec.tranchesOf(shift))
   if (currentTotal !== input.expectedCurrentTotal) {
-    throw new ServiceError(409, 'wallet_topup_total_changed', {
+    throw new ServiceError(409, spec.errors.totalChanged, {
       currentTotal: serializeMoney(currentTotal),
     })
   }
 
-  const driverWalletBalance = await deps.ledger.fundBalance(
-    shift.branchId,
-    `driver_wallet:${shift.driverId}`,
-  )
-  if (driverWalletBalance < reduction) {
-    throw new ServiceError(409, 'wallet_topup_reduction_exceeds_driver_balance', {
-      available: serializeMoney(driverWalletBalance),
+  // You cannot take back money the driver no longer holds — he may already have spent the float on
+  // the goods he was collecting. Refusing here is cheaper than a negative driver fund.
+  const driverBalance = await deps.ledger.fundBalance(shift.branchId, spec.driverFund(shift.driverId))
+  if (driverBalance < reduction) {
+    throw new ServiceError(409, spec.errors.exceedsBalance, {
+      available: serializeMoney(driverBalance),
       requested: serializeMoney(reduction),
     })
   }
 
-  let updated: ShiftRecord = {
-    ...shift,
-    topupTranches: reduceTranchesFromTail(shift.topupTranches, input.targetTotal),
-  }
+  let updated: ShiftRecord = spec.withTranches(
+    shift,
+    reduceTranchesFromTail(spec.tranchesOf(shift), input.targetTotal),
+  )
   assertPersistableTrancheTotals(updated)
   if (updated.state === 'pending_review') {
     const br1 = await evaluateShift(deps, updated)
@@ -1587,6 +1748,7 @@ async function adjustWalletTopupLocked(
     postingDate: todayFor(deps),
     weekStartDate: shift.weekStartDate,
     fxDayId,
+    sypMinorPerUsd: null,
     createdBy: actor.userId,
     reason: auditReason,
   })
@@ -1601,12 +1763,12 @@ async function adjustWalletTopupLocked(
         from: input.expectedCurrentTotal,
         to: input.targetTotal,
         reduction,
-        currentTotal: sum(shift.topupTranches),
+        currentTotal: sum(spec.tranchesOf(shift)),
         correctionEntryId: racedEntry.id,
         replayed: true,
       }
     }
-    throw new ServiceError(409, 'idempotency_key_conflict', { occurrenceKey: key, kind: 'wallet_topup_adjustment' })
+    throw new ServiceError(409, 'idempotency_key_conflict', { occurrenceKey: key, kind: spec.errors.conflictKind })
   }
 
   await deps.shifts.update(updated, actor.userId)
@@ -1615,7 +1777,7 @@ async function adjustWalletTopupLocked(
     from: input.expectedCurrentTotal,
     to: input.targetTotal,
     reduction,
-    currentTotal: sum(updated.topupTranches),
+    currentTotal: sum(spec.tranchesOf(updated)),
     correctionEntryId: correction.id,
     replayed: false,
   }
@@ -2281,7 +2443,22 @@ function closeDraftOperationsInput(shiftId: string, closeDraft: CloseDraftRecord
     // in the immutable close draft and OCR observations, but it is not a financial operation and
     // cannot be parsed into one without inventing an amount. Included rows are checked below and
     // therefore can never disappear through this filter.
-    orders: closeDraft.data.operations.orders.filter((row) => row.fee !== null).map((row) => ({
+    // A copy a retake left behind carries a printed identity and nothing else — no evidence, no
+    // inclusion, and the SAME synthesised providerOrderNo lineage as the row that replaced it. Sent
+    // as-is it trips `duplicate_order_in_submission` and the driver cannot close at all: shift
+    // d0a5a7ec held ten such pairs and refused every submission. Dropping them here rather than in
+    // a client is deliberate — the same rule already drifted between server and driver three times.
+    orders: withoutSupersededScanRows(
+      closeDraft.data.operations.orders.map((row) => ({
+        ...row,
+        // The server's identity is the number it refuses to see twice. NOT the printed time and
+        // cost: twenty deliveries at one minute for one fare is an ordinary day, and grouping by
+        // that here would drop nineteen real orders from the submission.
+        identity: providerNo(row.clientKey, row.providerOrderNo),
+        included: row.included !== false,
+        sightingCount: (row.sightings ?? []).length,
+      })),
+    ).filter((row) => row.fee !== null).map((row) => ({
       providerOrderNo: providerNo(row.clientKey, row.providerOrderNo),
       payMode: row.payMode,
       fee: parseMinor(row.fee!),
@@ -3584,7 +3761,18 @@ export async function submitOperations(
         transitionTargets.get(m.providerOrderNo) === 'cash_deduction'
       return {
         amount: m.amount,
-        occurredMinute: m.occurredMinute,
+        /*
+         * Normalised HERE as well as where the draft is written, and that is the point.
+         *
+         * `shift_wallet_movements.occurred_minute` accepts `''` or `HH:MM`. Fixing only the read
+         * path leaves every draft already holding a raw printed clock — «٢:٣١ م» — permanently
+         * unsubmittable, so the driver's only way out would be to redo evidence he has already
+         * given. Normalising at the moment of persistence heals those drafts on the next press.
+         *
+         * It is also the honest place for it: this is the last line before a value the column has
+         * an opinion about, and a value the column will reject must never get past it.
+         */
+        occurredMinute: storableMovementMinute(m.occurredMinute),
         orderId: providerBecameDeduction ? null : orderId,
         // A wallet row formerly matched to a provider order is retained as evidence when that row
         // proves to be a cash deduction, but cannot silently become another BR1 adjustment.
@@ -3646,6 +3834,62 @@ export async function submitOperations(
  * put a row back — or take one out — without bouncing the shift or force-closing it. The state stays
  * `pending_review`, so the close gate still has to pass on its own afterwards.
  */
+/**
+ * Set or clear «الحسم» on a shift under review.
+ *
+ * Confined to `pending_review` by the same reasoning as every other close revision: before approval
+ * there is no immutable settlement snapshot to violate (decision 13) and no sealed week to reopen
+ * (BR7). After approval the charge is frozen with the rest of the close and a correction is a new,
+ * dated journal entry — never a rewrite.
+ *
+ * Deliberately NOT a cash deduction. See `packages/domain/src/settlement/statement.ts` and the test
+ * `deduction-cancels.test.ts`: a deduction is subtracted from the expected total AND the share, so
+ * for money still in the driver's hands at the count it inflates the variance by its own amount and
+ * decision 13 hands it straight back to him.
+ */
+export async function setManagerCharge(
+  deps: Deps,
+  actor: Actor,
+  shiftId: string,
+  input: { amount: Minor; reason: string | null },
+): Promise<ShiftRecord> {
+  return deps.closeUnitOfWork.run({ shiftId, actorId: actor.userId }, async (transaction) => {
+    const scoped = withCloseTransaction(deps, transaction)
+    const shift = await mustFind(scoped, shiftId)
+    if (shift.state !== 'pending_review') throw new ServiceError(409, 'shift_not_under_review')
+
+    const grants = grantsFromRows(await scoped.directory.grants())
+    const decision = can(
+      actor,
+      'shift.approve',
+      { driverId: shift.driverId, branchId: shift.branchId, ownerUserId: null },
+      grants,
+    )
+    if (!decision.allowed) throw new ServiceError(403, 'forbidden')
+
+    if (input.amount < 0n) throw new ServiceError(422, 'invalid_manager_charge_amount')
+    const reason = input.reason === null ? null : input.reason.trim()
+    if (input.amount > 0n && (reason === null || reason === '')) {
+      throw new ServiceError(422, 'manager_charge_reason_required')
+    }
+
+    /*
+     * A charge may exceed the driver's whole share — damage costs what it costs — and the close
+     * already knows how to handle a negative employee figure: it becomes a collectible shortfall,
+     * or an ordinary receivable the manager may choose to leave outstanding. So there is no upper
+     * bound here beyond what the money type itself can carry.
+     */
+    const updated: ShiftRecord = {
+      ...shift,
+      managerCharge: input.amount,
+      // Cleared together, so the CHECK constraint's pairing can never be violated from this path.
+      managerChargeReason: input.amount === 0n ? null : reason,
+    }
+    await scoped.shifts.update(updated, actor.userId)
+    return updated
+  })
+}
+
 export async function reviseOperations(
   deps: Deps,
   actor: Actor,
@@ -3678,6 +3922,7 @@ async function reviseOperationsLocked(
       fee?: Minor | undefined
       occurredMinute?: string | null | undefined
       occurredDate?: string | null | undefined
+      removed?: boolean | undefined
       reason?: string | undefined
     }[]
     cashDeductions?: readonly {
@@ -3685,6 +3930,7 @@ async function reviseOperationsLocked(
       included?: boolean | undefined
       occurredMinute?: string | null | undefined
       occurredDate?: string | null | undefined
+      removed?: boolean | undefined
       reason: string
     }[]
     movements?: readonly {
@@ -3709,13 +3955,34 @@ async function reviseOperationsLocked(
   if (!decision.allowed) throw new ServiceError(403, 'forbidden')
   const windowContext = await operationWindowContext(deps, shift)
 
+  /*
+    Removals and restores, collected as we go and appended to the register below.
+    They are written inside this same call so a row can never be marked removed without the general
+    manager's copy of the fact existing: the register is what makes «reported clearly» true, and a
+    second request that might not arrive would make it a promise instead.
+  */
+  const removalEntries: Array<Omit<OperationRemovalRecord, 'id' | 'actedAtMs'> & { actedAtMs: number }> = []
+  const evidenceSources = await evidenceSourcesForShift(deps, shiftId)
+
   const rows = await deps.orders.listByShift(shiftId)
   const byNo = new Map(rows.map((o) => [o.providerOrderNo, o]))
   for (const patch of input.orders ?? []) {
     const current = byNo.get(patch.providerOrderNo)
     if (!current) throw new ServiceError(404, 'order_not_found', { providerOrderNo: patch.providerOrderNo })
+    // A removal is a strictly stronger claim than an exclusion and carries the same mandatory
+    // reason. It is also the reason itself that lands in the register the general manager reads,
+    // so a blank one is refused here as well as by the CHECK constraint behind it.
+    if (patch.removed === true && !patch.reason?.trim()) {
+      throw new ServiceError(422, 'operation_decision_reason_required')
+    }
+    // A removal changes whether the row counts, and `guard_shift_order_window_decision_reason`
+    // (0054) refuses ANY inclusion change without a fresh, attributed, visibly-non-blank reason
+    // from an active manager of the right scope. Routing removal through the same decision
+    // machinery is therefore not tidiness — without it every removal is refused by the database,
+    // and no in-memory test can show that because the memory adapter has no triggers.
     const changesWindow =
-      patch.included !== undefined || patch.occurredMinute !== undefined || patch.occurredDate !== undefined
+      patch.included !== undefined || patch.occurredMinute !== undefined ||
+      patch.occurredDate !== undefined || patch.removed !== undefined
     const resolvesHumanMoney = patch.fee !== undefined &&
       (current.closeDraftReviewReasons ?? []).includes('human_money_edit')
     const authoritativeChange = changesWindow || patch.fee !== undefined || patch.walletAmount !== undefined
@@ -3731,11 +3998,70 @@ async function reviseOperationsLocked(
           ...windowContext,
         })
       : current.windowStatus
+    // The database refuses a removed row that is still counted, so removal decides inclusion
+    // outright. Restoring does NOT re-include: putting money back is its own decision, made
+    // deliberately, and inferring it here would let one click both clear a flag and change a total.
+    const removalNow =
+      patch.removed === true
+        ? { removedAt: new Date(deps.clock.nowMs()).toISOString(), removedBy: actor.userId, removalReason: patch.reason!.trim() }
+        : patch.removed === false
+          ? { removedAt: null, removedBy: null, removalReason: null }
+          : {}
+    if (patch.removed === true && !current.removedAt) {
+      const source = evidenceSources.orders.get(current.providerOrderNo)
+      removalEntries.push({
+        kind: 'removed',
+        operationKind: 'order',
+        operationId: current.id,
+        operationRef: current.providerOrderNo,
+        shiftId,
+        branchId: shift.branchId,
+        businessDate: shift.businessDate,
+        driverId: shift.driverId,
+        amount: current.fee,
+        reason: patch.reason!.trim(),
+        evidenceSlot: source?.slot ?? null,
+        evidenceMediaId: source?.mediaId ?? null,
+        actedBy: actor.userId,
+        actedAtMs: deps.clock.nowMs(),
+      })
+    }
+    if (patch.removed === false && current.removedAt) {
+      const source = evidenceSources.orders.get(current.providerOrderNo)
+      removalEntries.push({
+        kind: 'restored',
+        operationKind: 'order',
+        operationId: current.id,
+        operationRef: current.providerOrderNo,
+        shiftId,
+        branchId: shift.branchId,
+        businessDate: shift.businessDate,
+        driverId: shift.driverId,
+        amount: current.fee,
+        reason: patch.reason?.trim() || current.removalReason || '-',
+        evidenceSlot: source?.slot ?? null,
+        evidenceMediaId: source?.mediaId ?? null,
+        actedBy: actor.userId,
+        actedAtMs: deps.clock.nowMs(),
+      })
+    }
     await deps.orders.update({
       ...current,
-      included: patch.included ?? (changesWindow || resolvesHumanMoney
-        ? includedByWindow(windowStatus)
-        : current.included),
+      ...removalNow,
+      // Removal decides inclusion outright — the database refuses a removed row that still counts.
+      // RESTORING deliberately does not re-include: putting money back is its own decision, and
+      // letting `includedByWindow` make it here would have one click clear a flag AND change a
+      // total. An explicit `included` in the same patch still wins, because that IS the manager
+      // saying both things on purpose.
+      included: patch.included ?? (
+        patch.removed === true
+          ? false
+          : patch.removed === false
+            ? current.included
+            : changesWindow || resolvesHumanMoney
+              ? includedByWindow(windowStatus)
+              : current.included
+      ),
       // The manager's own correction. He verifies against the cash in his hand, so he is the one
       // placed to say what a fee actually was — and until now his only move against a wrong one was
       // to exclude the whole delivery. The audit trigger attributes the change, and it moves
@@ -3791,12 +4117,64 @@ async function reviseOperationsLocked(
       occurredMinute,
       ...windowContext,
     })
+    const removalNow =
+      patch.removed === true
+        ? { removedAt: new Date(deps.clock.nowMs()).toISOString(), removedBy: actor.userId, removalReason: patch.reason.trim() }
+        : patch.removed === false
+          ? { removedAt: null, removedBy: null, removalReason: null }
+          : {}
+    if (patch.removed === true && !current.removedAt) {
+      const source = evidenceSources.deductions.get(current.id)
+      removalEntries.push({
+        kind: 'removed',
+        operationKind: 'cash_deduction',
+        operationId: current.id,
+        operationRef: current.id,
+        shiftId,
+        branchId: shift.branchId,
+        businessDate: shift.businessDate,
+        driverId: shift.driverId,
+        amount: current.amount,
+        reason: patch.reason.trim(),
+        evidenceSlot: source?.slot ?? null,
+        evidenceMediaId: source?.mediaId ?? null,
+        actedBy: actor.userId,
+        actedAtMs: deps.clock.nowMs(),
+      })
+    }
+    if (patch.removed === false && current.removedAt) {
+      const source = evidenceSources.deductions.get(current.id)
+      removalEntries.push({
+        kind: 'restored',
+        operationKind: 'cash_deduction',
+        operationId: current.id,
+        operationRef: current.id,
+        shiftId,
+        branchId: shift.branchId,
+        businessDate: shift.businessDate,
+        driverId: shift.driverId,
+        amount: current.amount,
+        reason: patch.reason.trim(),
+        evidenceSlot: source?.slot ?? null,
+        evidenceMediaId: source?.mediaId ?? null,
+        actedBy: actor.userId,
+        actedAtMs: deps.clock.nowMs(),
+      })
+    }
     await deps.cashDeductions.update({
       ...current,
+      ...removalNow,
       occurredMinute,
       occurredDate,
       windowStatus,
-      included: patch.included ?? includedByWindow(windowStatus),
+      // Same rule as the order path: removal decides inclusion, a restore leaves the money alone.
+      included: patch.included ?? (
+        patch.removed === true
+          ? false
+          : patch.removed === false
+            ? current.included
+            : includedByWindow(windowStatus)
+      ),
       decisionReason: patch.reason.trim(),
       decidedBy: actor.userId,
       decidedAt: nextOperationDecisionAt(deps.clock.nowMs(), current.decidedAt),
@@ -3820,6 +4198,12 @@ async function reviseOperationsLocked(
         ? {}
         : { orderId: patch.providerOrderNo === null ? null : (orderIds.get(patch.providerOrderNo) ?? null) }),
     }, actor.userId)
+  }
+
+  // The register, in the same call as the rows it describes.
+  for (const entry of removalEntries) {
+    const appended = await deps.operationRemovals.append(entry)
+    await notifySystemAdminsOfRemoval(deps, { ...entry, id: appended.id })
   }
 
   const br1 = await evaluateShift(deps, shift)
@@ -3876,6 +4260,7 @@ export interface CloseSettlementConfirmation {
   payShareNow?: boolean
   cashReceivableDeferred?: Minor
   walletReceivableDeferred?: Minor
+  cashShortageReceivable?: Minor
 }
 
 /**
@@ -3885,6 +4270,8 @@ export interface CloseSettlementConfirmation {
  * field.
  */
 export const SYSTEM_VARIANCE_REASON_NOT_PROVIDED = 'system:manager_provided_no_variance_reason'
+export const SYSTEM_SHORTAGE_RECEIVABLE_REASON_NOT_PROVIDED =
+  'system:manager_provided_no_shortage_receivable_reason'
 
 interface FixedShiftShare {
   split: { driverShare: Minor; companyShare: Minor; yalagoShare: Minor }
@@ -3927,7 +4314,7 @@ export async function settlementFor(
   shift: ShiftRecord,
   deferred: Pick<
     CloseSettlementConfirmation,
-    'cashReceivableDeferred' | 'walletReceivableDeferred' | 'keepAsReceivable'
+    'cashReceivableDeferred' | 'walletReceivableDeferred' | 'cashShortageReceivable' | 'keepAsReceivable'
   > = {},
 ): Promise<SettlementView> {
   if (shift.endCashDeclared === null || shift.endWalletDeclared === null) {
@@ -3947,6 +4334,7 @@ export async function settlementFor(
   const cashReceivableDeferred =
     deferred.cashReceivableDeferred ?? deferred.keepAsReceivable ?? minor(0n)
   const walletReceivableDeferred = deferred.walletReceivableDeferred ?? minor(0n)
+  const cashShortageReceivable = deferred.cashShortageReceivable ?? minor(0n)
   const settlementInputs = {
     deliveryFeeTotal: share.deliveryFeeTotal,
     fixedDriverShare: share.fixedDriverShare,
@@ -3956,6 +4344,15 @@ export async function settlementFor(
     expectedWallet: br1.result.expectedWallet,
     actualCash: shift.endCashDeclared,
     actualWallet: shift.endWalletDeclared,
+    /*
+     * «الحسم» — read from the shift, not from the request.
+     *
+     * The preview, the ordinary approval and the exceptional close all reach this one function, so
+     * the charge is part of the calculation for all three by construction (decision 13: «Preview,
+     * ordinary approval, and exceptional close must use the same pure calculation»). Passing it in
+     * per-request instead would let a close post a charge the manager never previewed.
+     */
+    managerChargeTotal: shift.managerCharge,
   }
   const withoutDeferral = planFixedShareSettlement(settlementInputs)
   const maximumCashReceivable = withoutDeferral.cashClaimToOffice > 0n
@@ -3975,10 +4372,19 @@ export async function settlementFor(
       maximumWallet: serializeMoney(maximumWalletReceivable),
     })
   }
+  if (
+    cashShortageReceivable < 0n ||
+    cashShortageReceivable > withoutDeferral.maximumCashShortageReceivable
+  ) {
+    throw new ServiceError(422, 'invalid_shortage_receivable_amount', {
+      maximumCashShortageReceivable: serializeMoney(withoutDeferral.maximumCashShortageReceivable),
+    })
+  }
   const plan = planFixedShareSettlement({
     ...settlementInputs,
     cashReceivableDeferred,
     walletReceivableDeferred,
+    cashShortageReceivable,
   })
   assertPersistableMoney('settlement', {
     deliveryFeeTotal: plan.deliveryFeeTotal,
@@ -3987,6 +4393,7 @@ export async function settlementFor(
     grossDriverShare: plan.grossDriverShare,
     cashDeductionTotal: plan.cashDeductionTotal,
     baseDriverShare: plan.baseDriverShare,
+    managerCharge: plan.managerChargeTotal,
     expectedCash: plan.expectedCash,
     expectedWallet: plan.expectedWallet,
     expectedTotal: plan.expectedTotal,
@@ -4000,6 +4407,8 @@ export async function settlementFor(
     walletClaimToOffice: plan.walletClaimToOffice,
     cashReceivableDeferred: plan.cashReceivableDeferred,
     walletReceivableDeferred: plan.walletReceivableDeferred,
+    maximumCashShortageReceivable: plan.maximumCashShortageReceivable,
+    cashShortageReceivable: plan.cashShortageReceivable,
     cashToOffice: plan.cashToOffice,
     walletToOffice: plan.walletToOffice,
     walletAmount: plan.wallet.amount,
@@ -4050,9 +4459,11 @@ function requireSettlementConfirmation(
   }
   const requestedCash = input.cashReceivableDeferred ?? input.keepAsReceivable ?? minor(0n)
   const requestedWallet = input.walletReceivableDeferred ?? minor(0n)
+  const requestedShortage = input.cashShortageReceivable ?? minor(0n)
   if (
     requestedCash !== plan.cashReceivableDeferred ||
-    requestedWallet !== plan.walletReceivableDeferred
+    requestedWallet !== plan.walletReceivableDeferred ||
+    requestedShortage !== plan.cashShortageReceivable
   ) {
     throw new ServiceError(409, 'settlement_changed_since_review', { receivableChanged: true })
   }
@@ -4067,14 +4478,23 @@ function requireSettlementConfirmation(
       current: plan.settlementHash,
     })
   }
-  const reason = normalizedVarianceReason(plan.variance, input.varianceReason)
+  const reason = normalizedSettlementReason(
+    plan.variance,
+    plan.cashShortageReceivable,
+    input.varianceReason,
+  )
   return { varianceReason: reason }
 }
 
-function normalizedVarianceReason(variance: Minor, supplied: string | null | undefined): string | null {
+function normalizedSettlementReason(
+  variance: Minor,
+  cashShortageReceivable: Minor,
+  supplied: string | null | undefined,
+): string | null {
   const trimmed = supplied?.trim() ?? ''
   const humanReason = /[^\p{White_Space}\p{Cf}]/u.test(trimmed) ? trimmed : null
   if (humanReason !== null) return humanReason
+  if (cashShortageReceivable > 0n) return SYSTEM_SHORTAGE_RECEIVABLE_REASON_NOT_PROVIDED
   return variance === 0n ? null : SYSTEM_VARIANCE_REASON_NOT_PROVIDED
 }
 
@@ -4090,9 +4510,11 @@ function requireSettlementReplay(
   const requestedCash =
     confirmation.cashReceivableDeferred ?? confirmation.keepAsReceivable ?? minor(0n)
   const requestedWallet = confirmation.walletReceivableDeferred ?? minor(0n)
+  const requestedShortage = confirmation.cashShortageReceivable ?? minor(0n)
   if (
     requestedCash !== stored.cashReceivableDeferred ||
-    requestedWallet !== stored.walletReceivableDeferred
+    requestedWallet !== stored.walletReceivableDeferred ||
+    requestedShortage !== stored.cashShortageReceivable
   ) {
     throw new ServiceError(409, 'settlement_changed_since_review', { receivableChanged: true })
   }
@@ -4111,7 +4533,11 @@ function requireSettlementReplay(
   // Lost-response retries normalize an omitted/blank value exactly as the original request did.
   // Thus a system-marked settlement replays idempotently, while omitting a previously supplied
   // human explanation correctly remains a changed confirmation.
-  const reason = normalizedVarianceReason(stored.variance, confirmation.varianceReason)
+  const reason = normalizedSettlementReason(
+    stored.variance,
+    stored.cashShortageReceivable,
+    confirmation.varianceReason,
+  )
   if (reason !== stored.varianceReason) {
     throw new ServiceError(409, 'settlement_changed_since_review', {
       reasonChanged: true,
@@ -4139,6 +4565,7 @@ function settlementRecord(
     grossDriverShare: plan.grossDriverShare,
     cashDeductionTotal: plan.cashDeductionTotal,
     baseDriverShare: plan.baseDriverShare,
+    managerCharge: plan.managerChargeTotal,
     expectedTotal: plan.expectedTotal,
     actualCash: plan.actualCash,
     actualWallet: plan.actualWallet,
@@ -4150,6 +4577,8 @@ function settlementRecord(
     walletClaimToOffice: plan.walletClaimToOffice,
     cashReceivableDeferred: plan.cashReceivableDeferred,
     walletReceivableDeferred: plan.walletReceivableDeferred,
+    maximumCashShortageReceivable: plan.maximumCashShortageReceivable,
+    cashShortageReceivable: plan.cashShortageReceivable,
     walletToOffice: plan.walletToOffice,
     cashToOffice: plan.cashToOffice,
     walletAction: plan.wallet.action,
@@ -4267,6 +4696,7 @@ async function approveCloseLocked(
     postingDate: todayFor(deps),
     weekStartDate: shift.weekStartDate,
     fxDayId,
+    sypMinorPerUsd: null,
     createdBy: actor.userId,
     ...(varianceReason === null ? {} : { reason: varianceReason }),
   })
@@ -4278,6 +4708,10 @@ async function approveCloseLocked(
     ...shift,
     state: result.next,
     approvedBy: actor.userId,
+    // The column has been there since 0005 and nothing ever wrote it — 112 approved shifts carry
+    // an approver and no instant. This is the same moment the settlement snapshot is confirmed at,
+    // so the two can never disagree about when the close was signed.
+    approvedAt: new Date(confirmedAtMs).toISOString(),
     keptAsReceivable: settlement.cashReceivableDeferred,
     driverSharePaid: settlement.finalEmployeeCash > 0n ? settlement.finalEmployeeCash : minor(0n),
     equationDiff: br1.result.scalarDiff,
@@ -4361,6 +4795,7 @@ async function voidShiftLocked(
       postingDate: todayFor(deps),
       weekStartDate: shift.weekStartDate,
       fxDayId,
+      sypMinorPerUsd: null,
       createdBy: actor.userId,
       reason,
     })
@@ -4411,6 +4846,7 @@ async function forceCloseLocked(
     cashSettlementConfirmed?: boolean
     cashReceivableDeferred?: Minor | undefined
     walletReceivableDeferred?: Minor | undefined
+    cashShortageReceivable?: Minor | undefined
     reason: string
   },
 ): Promise<
@@ -4435,6 +4871,7 @@ async function forceCloseLocked(
       ...(input.cashSettlementConfirmed === undefined ? {} : { cashSettlementConfirmed: input.cashSettlementConfirmed }),
       ...(input.cashReceivableDeferred === undefined ? {} : { cashReceivableDeferred: input.cashReceivableDeferred }),
       ...(input.walletReceivableDeferred === undefined ? {} : { walletReceivableDeferred: input.walletReceivableDeferred }),
+      ...(input.cashShortageReceivable === undefined ? {} : { cashShortageReceivable: input.cashShortageReceivable }),
       varianceReason: input.reason,
     }, null)
     return { shift, postings: 0, prepared: false, replayed: true }
@@ -4570,6 +5007,7 @@ async function forceCloseLocked(
   const settlement = await settlementFor(deps, stagedShift, {
     ...(input.cashReceivableDeferred === undefined ? {} : { cashReceivableDeferred: input.cashReceivableDeferred }),
     ...(input.walletReceivableDeferred === undefined ? {} : { walletReceivableDeferred: input.walletReceivableDeferred }),
+    ...(input.cashShortageReceivable === undefined ? {} : { cashShortageReceivable: input.cashShortageReceivable }),
   })
   requireSettlementConfirmation(settlement, {
     ...(input.reviewedSettlementHash === undefined ? {} : { reviewedSettlementHash: input.reviewedSettlementHash }),
@@ -4577,6 +5015,7 @@ async function forceCloseLocked(
     ...(input.cashSettlementConfirmed === undefined ? {} : { cashSettlementConfirmed: input.cashSettlementConfirmed }),
     ...(input.cashReceivableDeferred === undefined ? {} : { cashReceivableDeferred: input.cashReceivableDeferred }),
     ...(input.walletReceivableDeferred === undefined ? {} : { walletReceivableDeferred: input.walletReceivableDeferred }),
+    ...(input.cashShortageReceivable === undefined ? {} : { cashShortageReceivable: input.cashShortageReceivable }),
     varianceReason: input.reason,
   })
   const shiftInput = {
@@ -4600,6 +5039,7 @@ async function forceCloseLocked(
     postingDate: todayFor(deps),
     weekStartDate: shift.weekStartDate,
     fxDayId,
+    sypMinorPerUsd: null,
     createdBy: actor.userId,
     reason: input.reason,
   })
@@ -4611,6 +5051,10 @@ async function forceCloseLocked(
     ...stagedShift,
     state: result.next,
     approvedBy: actor.userId,
+    // The column has been there since 0005 and nothing ever wrote it — 112 approved shifts carry
+    // an approver and no instant. This is the same moment the settlement snapshot is confirmed at,
+    // so the two can never disagree about when the close was signed.
+    approvedAt: new Date(confirmedAtMs).toISOString(),
     keptAsReceivable: settlement.cashReceivableDeferred,
     driverSharePaid: settlement.finalEmployeeCash > 0n ? settlement.finalEmployeeCash : minor(0n),
     odoEnd: finalOdometer,

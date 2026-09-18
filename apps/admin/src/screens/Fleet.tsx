@@ -4,6 +4,7 @@ import { useApp } from '../app-context.tsx'
 import { useConfirm, useToast } from '../feedback.tsx'
 import { explainError } from '../errors.ts'
 import { Badge, Button, Card, DateField, Money, Pending, Select, Table, TextInput } from '../ui.tsx'
+import { drill } from '../drill.ts'
 import { BikeBoard } from './fleet/BikeBoard.tsx'
 
 interface Driver {
@@ -108,7 +109,6 @@ export function Fleet(): ReactNode {
   const [loading, setLoading] = useState(true)
   const [view, setView] = useState<'board' | 'tables'>('board')
   /** Lifted out of `VehicleHistory` so «السجل» on a bike card can open that bike's log. */
-  const [historyVehicle, setHistoryVehicle] = useState('')
 
   const load = (): void => {
     setLoadError(null)
@@ -234,8 +234,7 @@ export function Fleet(): ReactNode {
           driverName={nameOfDriver}
           onChanged={load}
           onHistory={(id) => {
-            setView('tables')
-            setHistoryVehicle(id)
+            location.hash = drill.vehicle({ id })
           }}
           onState={async (id, state) => {
             try {
@@ -509,8 +508,6 @@ export function Fleet(): ReactNode {
           ))}
         </Table>
       </Card>
-
-      <VehicleHistory vehicles={vehicles} vehicleId={historyVehicle} setVehicleId={setHistoryVehicle} />
 
       <DocumentForm drivers={drivers} vehicles={vehicles} onAdded={load} />
 
@@ -848,7 +845,7 @@ function stateChangeLabel(notes: string, states: Record<string, string>, templat
  * charges and linked costs, newest first — and a small form to record one by hand. State changes
  * are logged automatically elsewhere, so they are read here but never offered as something to add.
  */
-function VehicleHistory({
+export function VehicleEventRecorder({
   vehicles,
   vehicleId,
   setVehicleId,

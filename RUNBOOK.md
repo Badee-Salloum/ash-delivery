@@ -67,7 +67,11 @@ applied to that entire day's transactions.
 - **Posting is never blocked on a missing rate.** If the admin has not entered today's rate, the
   posting path lazily inserts a `provisional` row carried forward from yesterday and flags it.
   A cron must never be a precondition for the ledger accepting a write.
-- Correcting a rate creates a new `fx_rate_versions` row; it never rewrites what was reported.
+- Correcting a rate updates `fx_days`; the `audit_fx_days` trigger records its before/after image in
+  `audit_log`. (`fx_rate_versions` exists in the original schema but the current repository does not
+  populate it.) **Branch historical USD display can therefore restate** because branch entries do
+  not freeze a rate. Company-ledger USD commands are different: each freezes
+  `journal_entries.syp_minor_per_usd`, and company historical profit uses that frozen value.
 
 ---
 
@@ -92,6 +96,88 @@ Then `fin_seal_week(week_lock_id, closed_by)` stamps every entry of the week and
 
 **To correct a locked week:** never edit. Post a dated reversal + repost pair; `occurrence_key`
 carries the correction sequence so repeated corrections remain possible.
+
+### 4a. «صندوق الشركة» cutover and monthly routine ⚠ NOT YET REHEARSED / NOT DEPLOYED
+
+Migrations `0064+` and the finance API must not be applied to production without the owner's
+separate written deployment approval. The commands below are read-only pre-flight queries; every
+money move itself goes through the API/UI, never through repair SQL.
+
+Before cutover:
+
+```sql
+-- Exactly one HQ row and no operating screen accidentally listing it.
+SELECT id, code, branch_no, kind FROM branches ORDER BY kind, code;
+SELECT count(*) AS company_rows FROM branches WHERE kind = 'company';              -- expect 1
+
+-- The branch balance that the cutover request must echo exactly as `expectedOpening`.
+SELECT f.branch_id, f.code,
+       sum(CASE jl.side WHEN 'D' THEN jl.amount_minor ELSE -jl.amount_minor END) AS balance_minor
+  FROM funds f
+  LEFT JOIN journal_lines jl ON jl.fund_id = f.id
+ WHERE f.code = 'company_box'
+ GROUP BY f.branch_id, f.code;
+
+-- No company event may be orphaned from its immutable command row; the migration's deferred
+-- trigger is the authority, and its PostgreSQL test must already be green before this runbook.
+SELECT event_type, count(*) FROM journal_entries
+ WHERE event_type::text LIKE 'company_%' OR event_type::text IN
+   ('asset_purchase','depreciation_transfer','depreciation_release')
+ GROUP BY event_type ORDER BY event_type;
+```
+
+Cut over one branch once:
+
+1. In «صندوق الشركة», call the cutover action with the branch, the exact `company_box` balance
+   just read, and a written reason. A changed balance returns a conflict; re-read and investigate,
+   do not edit a journal. The action posts the SYP opening transfer and records its journal
+   watermark atomically under the branch→HQ lock order.
+2. Enter the real USD opening cash as a company deposit with account `opening`. Do not convert it
+   from SYP and do not invent an exchange rate; use the rate evidenced for that opening entry.
+3. Count both physical pockets. Any difference is a visible company correction with its reason,
+   never a change to the cutover row or opening journal.
+4. From that commit onward, each branch `company_box` movement must have an HQ mirror. Restoration
+   sweeps («كييش») are mirrored before top-ups («شحن»). A top-up may make company SYP negative by
+   owner decision; the UI must show the resulting warning and the operator then deposits or
+   exchanges money to resolve it.
+
+Read-only invariant check after cutover and after every restoration:
+
+```sql
+SELECT c.branch_id,
+       ash_fund_balance(c.branch_id, 'company_box') AS branch_company_box,
+       ash_fund_balance(c.company_branch_id, 'branch_clearing:' || c.branch_id::text) AS hq_clearing,
+       ash_fund_balance(c.branch_id, 'company_box')
+         + ash_fund_balance(c.company_branch_id, 'branch_clearing:' || c.branch_id::text) AS delta
+  FROM company_ledger_cutovers c;
+-- Every delta must be 0. If not, stop money operations; do not repair with SQL.
+```
+
+Entering an existing vehicle (preferred historical reconstruction):
+
+1. Create the fixed asset with its real purchase date and currency, `paidNow = 0`, and the full
+   unpaid balance as its linked payable. Period 1 is the purchase month; the server writes all 36
+   deterministic schedule rows.
+2. Record each historical instalment as a payment on that payable with source `owner_outside` and
+   its real date. It is booked today while preserving that date on the event.
+3. Press «نقل الاستهلاك» once. It catches up the oldest due periods through the current month and
+   transfers only what the same-currency company pocket can cover; the remainder stays visibly due.
+
+Routine operations:
+
+- **Income/expense/debt payment:** choose the real currency and source. `owner_outside` records the
+  fact without pretending cash left a system pocket. Asset instalments are ordinary payable
+  payments; there is no second instalment subsystem.
+- **USD↔SYP exchange:** enter both actual amounts. The server derives and freezes the rate on the
+  entry; never type a rate in place of one of the amounts.
+- **Reversal:** use the command's «عكس» action with a written reason. It writes the exact inverse;
+  never edit/delete a command row and never use the generic branch journal endpoint for HQ.
+- **Monthly depreciation:** at the start of the month open «الترميم» or the depreciation tab,
+  review due/available/shortfall, and press the transfer button. A reserve release requires a
+  written reason and never reopens periods already funded.
+- **Sunday close for HQ:** close the HQ week after operating branches. HQ requires no cash count,
+  but its per-currency trial balance and every clearing invariant must pass. A branch whose mirror
+  is missing blocks HQ close; repair the originating workflow through its API, not with SQL.
 
 ---
 
@@ -139,6 +225,16 @@ docker compose -p ash-prod --env-file .env.prod -f infra/compose/docker-compose.
 **Migrations are forward-only and are NOT reverted by a rollback.** Before rolling back across a
 migration, confirm the new schema is still compatible with the older image — additive changes
 usually are, a dropped or renamed column is not.
+
+> **Do not roll the API back past the «السلفة» release (0055–0057) while any advance is
+> outstanding.** The older image emits a schema-v3 restoration plan, which has no `advances` term
+> and would read money out on a سلفة as a capital shortfall — «شحن»ing real money out of صندوق
+> الشركة to refill a box that is not short, and sweeping it back out when the advance is repaid.
+> 0057's dispatcher refuses such a plan by name (`restorations_plan_version_guard`, *"schema-v3
+> restoration cannot ignore an outstanding advance"*), so الترميم **stops** rather than lies. That
+> is the recoverable direction, but it does stop: roll forward, or settle the advances first.
+> Outstanding advances: `SELECT id, party_name, amount_minor FROM advances a WHERE EXISTS (…)` —
+> or read them from Treasury → «السلف».
 
 ### Backing up (Vercel + Neon — the live platform)
 
@@ -239,6 +335,17 @@ The isolated restore passed all 27 sequence checks and the audited rollback prob
 scratch database was dropped. Production's only current money-integrity warning is five excluded
 `unknown` orders on Thaer's submitted shift. Do not resolve those by editing timestamps or amounts:
 the manager must inspect the immutable images and record an attributed include/exclude decision.
+
+**Two of those five rows are the same deliveries twice.** The `dashboard` and `dashboard_2` photos
+are two scans of one list taken while scrolling, and they overlap: `130` and `125` on the undated
+page are the `22:47` and `22:21` rows already counted on the dated page. Only `130`, `280` and `270`
+are new. After release `0045` the review screen says so itself, on the affected rows.
+
+Resolving it: include `130`, `280`, `270`; exclude `130` and `125` as duplicates, each with a reason
+naming the row it repeats. Expect the variance to fall from **+58,120** to **+3,720** and the
+employee's settlement from **779.20** to **507.20**. Including all five instead would take it to
+**405.20** — over-collecting 102.00 from the driver. Use the audited `markDuplicate` action; never
+SQL.
 
 ### Pre-approved openings release (`0040` — deployed 2026-08-24)
 
@@ -648,6 +755,22 @@ SELECT field, result->>'reason' AS reason, count(*)
 SELECT shift_id, count(*) FROM ocr_reads WHERE shift_id IS NOT NULL
  GROUP BY 1 HAVING count(*) >= 15;
 ```
+
+**MEASURED, 2026-09-01** — 640 real reads across 72 shifts over 11 days, from `ocr_reads` tokens at
+the Vertex rate below. This supersedes the projection that follows it, which assumed 15 reads a
+shift; the fleet actually averages **8.7**, and the real bill is about a third lower.
+
+| | per shift | 10 shifts/day | 100 shifts/day |
+| --- | --- | --- | --- |
+| median | $0.0435 | **$13.06/month** | $130.61/month |
+| mean | $0.0442 | **$13.26/month** | $132.64/month |
+| p90 — plan on this | $0.0744 | **$22.32/month** | $223.20/month |
+
+A busy full day (2026-08-27, 2026-08-28) ran $0.060–0.063 a shift, so the honest planning range at
+ten shifts a day is **$13–19/month**, budgeted at **$22**. Spend follows READS, not drivers: the
+worst single shift used 18 reads, and every retake and every failed read costs a whole one.
+
+Older projection, kept because it names the price assumptions:
 
 Budget, measured per field off `ocr_reads` at 15 reads a shift and 26 shifts a month:
 

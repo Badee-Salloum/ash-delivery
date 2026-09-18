@@ -1,57 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import {
-  buildCountLines,
-  countDifference,
-  countDraftReady,
   differenceView,
   receivableDriverTotal,
-  restoreCountDraft,
   summarizeRestoration,
 } from './treasury-view.ts'
 
 describe('treasury presentation', () => {
-  it('separates count direction from the absolute amount', () => {
-    expect(countDifference('120.00', '100.00')).toEqual({ direction: 'increase', signed: '20.00', amount: '20.00' })
-    expect(countDifference('80.00', '100.00')).toEqual({ direction: 'shortage', signed: '-20.00', amount: '20.00' })
-    expect(countDifference('100.00', '100.00')).toEqual({ direction: 'none', signed: '0.00', amount: '0.00' })
-  })
-
-  it('does not infer a difference from an empty or invalid draft', () => {
-    expect(countDifference('', '100.00')).toBeNull()
-    expect(countDifference('not-money', '100.00')).toBeNull()
-  })
-
-  it('requires an audited reason only for a non-zero count difference', () => {
-    const funds = [
-      { fundCode: 'office_cash', computed: '100.00' },
-      { fundCode: 'office_wallet', computed: '50.00' },
-    ]
-    const counted = { office_cash: '120.00', office_wallet: '50.00' }
-    expect(countDraftReady(funds, counted, {})).toBe(false)
-    expect(countDraftReady(funds, counted, { office_cash: 'Verified against the physical box' })).toBe(true)
-    expect(buildCountLines(funds, counted, { office_cash: '  Verified against the physical box  ' })).toEqual([
-      { fundCode: 'office_cash', counted: '120.00', resolution: 'Verified against the physical box' },
-      { fundCode: 'office_wallet', counted: '50.00', resolution: null },
-    ])
-  })
-
-  it('restores a persisted count and its reasons after refresh', () => {
-    expect(
-      restoreCountDraft([
-        { fundCode: 'office_cash', counted: '120.00', computed: '100.00', variance: '20.00', resolution: 'Counted twice' },
-        { fundCode: 'office_wallet', counted: '50.00', computed: '50.00', variance: '0.00', resolution: null },
-      ]),
-    ).toEqual({
-      counted: { office_cash: '120.00', office_wallet: '50.00' },
-      resolutions: { office_cash: 'Counted twice', office_wallet: '' },
-    })
-  })
-
-  it('matches the spreadsheet capital example and keeps the direction explicit', () => {
+  it('summarizes ledger-backed office balances and keeps the direction explicit', () => {
     const summary = summarizeRestoration([
       {
         fundCode: 'office_cash',
-        counted: '4688592.00',
+        officeBalance: '4688592.00',
         receivables: '400000.00',
         position: '5088592.00',
         capitalTarget: '4000000.00',
@@ -61,7 +20,7 @@ describe('treasury presentation', () => {
       },
       {
         fundCode: 'office_wallet',
-        counted: '983560.00',
+        officeBalance: '983560.00',
         receivables: '30000.00',
         position: '1013560.00',
         capitalTarget: '1000000.00',
@@ -81,7 +40,7 @@ describe('treasury presentation', () => {
     const legs = [
       {
         fundCode: 'office_cash',
-        counted: '1050.00',
+        officeBalance: '1050.00',
         receivables: '50.00',
         position: '1100.00',
         capitalTarget: '1000.00',
@@ -91,7 +50,7 @@ describe('treasury presentation', () => {
       },
       {
         fundCode: 'office_wallet',
-        counted: '875.00',
+        officeBalance: '875.00',
         receivables: '25.00',
         position: '900.00',
         capitalTarget: '1000.00',

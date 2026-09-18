@@ -1,6 +1,7 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { type Harness, makeHarness, sypStr } from './harness.ts'
+import { COMPANY_BRANCH } from '../src/seed.ts'
+import { BRANCH, type Harness, TINY_JPEG, makeHarness, sypStr } from './harness.ts'
 
 /**
  * The system-settings surface (SRS A-4): the daily FX rate and the general operating constants —
@@ -114,15 +115,243 @@ describe('the ceiling set through /settings is actually enforced', () => {
     expect(over.statusCode).toBe(422)
     expect(over.json().error).toBe('receipt_required')
 
+    const receipt = await h.app.inject({
+      method: 'POST',
+      url: '/media/receipts',
+      headers: { cookie: h.cookie(manager), 'content-type': 'image/jpeg' },
+      payload: TINY_JPEG,
+    })
+    expect(receipt.statusCode, receipt.body).toBe(201)
+
     const withReceipt = await post(manager, '/expenses', {
       ...base,
       idempotencyKey: crypto.randomUUID(),
       amount: sypStr(25_000),
-      receiptMediaId: '00000000-0000-4000-8000-000000000abc',
+      receiptMediaId: receipt.json().mediaId,
     })
     expect(withReceipt.statusCode, withReceipt.body).toBe(201)
 
     const under = await post(manager, '/expenses', { ...base, idempotencyKey: crypto.randomUUID(), amount: sypStr(5_000) })
     expect(under.statusCode, under.body).toBe(201)
+  })
+})
+
+/**
+ * «تاريخ بدء التطبيق» — the go-live date (owner request, 2026-08-28).
+ *
+ * The owner ran the platform for five days as a trial before real operations began, and wanted the
+ * figures to start on a date he names rather than carry that trial forever.
+ *
+ * THE POINT OF THE CEREMONY GATE. Declaring the date only clamps FLOW reports. Balances stay
+ * cumulative on purpose — `fundBalance` is a CONTROL read (it feeds the insufficient-funds guards,
+ * the cash-count baseline, `cash_count_stale`, and the restoration plan), so date-filtering it
+ * would make the drawer look empty. What actually makes flows and balances agree from the epoch
+ * forward is a sealed count plus a restoration, which puts each box on its capital target. So the
+ * date cannot be set until that has happened — otherwise "ignore everything before" is a half
+ * truth: the headline figures restart while the boxes silently carry the trial period.
+ */
+describe('the go-live date (تاريخ بدء التطبيق)', () => {
+  const seedFund = async (token: string, fundCode: string, amount: string): Promise<void> => {
+    const res = await post(token, '/journal/manual', {
+      reason: 'رصيد افتتاحي',
+      lines: [
+        { fundCode, side: 'D', amount },
+        { fundCode: 'opening_balance', side: 'C', amount },
+      ],
+    })
+    expect(res.statusCode, res.body).toBe(201)
+  }
+
+  /** The opening ceremony, made of existing audited routes: count the boxes, then restore them. */
+  const performOpeningCeremony = async (): Promise<string> => {
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(4_000_000))
+    await seedFund(manager, 'office_wallet', sypStr(1_000_000))
+    const counted = await post(manager, '/cash-counts', {
+      lines: [
+        { fundCode: 'office_cash', counted: sypStr(4_000_000) },
+        { fundCode: 'office_wallet', counted: sypStr(1_000_000) },
+      ],
+    })
+    expect(counted.statusCode, counted.body).toBe(201)
+    const restored = await post(manager, '/treasury/restoration', { reason: 'ترميم الافتتاح' })
+    expect(restored.statusCode, restored.body).toBe(201)
+    return counted.json().businessDate as string
+  }
+
+  it('is unset until it is declared', async () => {
+    const admin = await h.loginAs('sysadmin')
+    expect((await get(admin, '/settings')).json().goLiveBusinessDate).toBeNull()
+  })
+
+  it('refuses a date whose boxes were never counted and restored', async () => {
+    const admin = await h.loginAs('sysadmin')
+    const res = await put(admin, '/settings', { goLiveBusinessDate: '2026-07-21', branchId: BRANCH })
+    expect(res.statusCode, res.body).toBe(422)
+    expect(res.json().error).toBe('go_live_requires_opening_ceremony')
+    // Names what is missing, so the screen can say it rather than just refusing.
+    expect(res.json().detail.missing).toEqual(['sealed_cash_count', 'restoration'])
+    expect((await get(admin, '/settings')).json().goLiveBusinessDate).toBeNull()
+  })
+
+  it('accepts the date once the boxes have been counted and restored, and reads it back', async () => {
+    const date = await performOpeningCeremony()
+    const admin = await h.loginAs('sysadmin')
+    const res = await put(admin, '/settings', { goLiveBusinessDate: date, branchId: BRANCH })
+    expect(res.statusCode, res.body).toBe(200)
+    expect((await get(admin, '/settings')).json().goLiveBusinessDate).toBe(date)
+  })
+
+  it('can be cleared, which returns every report to the whole history', async () => {
+    const date = await performOpeningCeremony()
+    const admin = await h.loginAs('sysadmin')
+    await put(admin, '/settings', { goLiveBusinessDate: date, branchId: BRANCH })
+    expect((await put(admin, '/settings', { goLiveBusinessDate: null })).statusCode).toBe(200)
+    expect((await get(admin, '/settings')).json().goLiveBusinessDate).toBeNull()
+  })
+
+  it('is system-admin only, like every other operating constant', async () => {
+    const manager = await h.loginAs('manager')
+    expect((await put(manager, '/settings', { goLiveBusinessDate: '2026-07-21' })).statusCode).toBe(403)
+  })
+
+  it('does not demand a cash count for days before it — a mid-week go-live must still seal', async () => {
+    // The worst failure this feature could introduce. The week close demands a sealed count for
+    // EVERY day of the week; a day before go-live was never operated and can never acquire one,
+    // so without the skip the first week would be permanently unsealable and BR7 blocked forever.
+    const date = await performOpeningCeremony()
+    const admin = await h.loginAs('sysadmin')
+    expect((await put(admin, '/settings', { goLiveBusinessDate: date, branchId: BRANCH })).statusCode).toBe(200)
+
+    const res = await post(admin, '/weeks/close', { closeDate: '2026-07-26', branchId: BRANCH })
+    const blockers: string[] = res.json().blockers ?? []
+    expect(blockers, res.body).not.toContain('cash_count_missing')
+  })
+})
+
+/**
+ * The second proof: NOTHING IS MISSING.
+ *
+ * Requiring the ceremony alone was a design error. The restoration settles the office boxes and
+ * deliberately excludes active custody, so it can only run when no shift is live — at the END of a
+ * day. That made declaring go-live ON the first day impossible, and a first day is exactly when an
+ * owner declares one.
+ *
+ * IT FIRST DEMANDED EXACT EQUALITY, AND THAT WAS STILL WRONG. Working capital equals the target
+ * only at the instant a restoration finishes. One shift collecting one delivery fee puts it above,
+ * and that is EARNINGS — on the first day, the very thing the owner wants attributed to the new
+ * epoch. The owner asked for the epoch mid-morning and was refused for a state that is not a
+ * problem.
+ *
+ * The asymmetry is the argument. A SHORTFALL hidden by an epoch means real money vanished before it
+ * with no record and no way to see it after — the failure this gate exists to prevent. A SURPLUS
+ * hidden means the office holds more than its declared capital: not a loss of control. So the rule
+ * is `working >= target`, and the position at the moment of the decision goes into the audit entry.
+ */
+describe('the go-live date accepts a position with nothing missing', () => {
+  const seedFund = async (token: string, fundCode: string, amount: string): Promise<void> => {
+    const res = await post(token, '/journal/manual', {
+      reason: 'رصيد افتتاحي',
+      lines: [
+        { fundCode, side: 'D', amount },
+        { fundCode: 'opening_balance', side: 'C', amount },
+      ],
+    })
+    expect(res.statusCode, res.body).toBe(201)
+  }
+
+  /** Put the boxes exactly on the configured capital, with no company fund and no receivables. */
+  const putOnCapital = async (): Promise<void> => {
+    const admin = await h.loginAs('sysadmin')
+    const targets = await put(admin, '/treasury/capital-targets', {
+      cashTarget: sypStr(4_000_000),
+      walletTarget: sypStr(1_000_000),
+      reason: 'رأس المال عند بدء التطبيق',
+      branchId: BRANCH,
+    })
+    expect(targets.statusCode, targets.body).toBe(200)
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(4_000_000))
+    await seedFund(manager, 'office_wallet', sypStr(1_000_000))
+  }
+
+  it('accepts the date with no count and no restoration when the position is exactly on capital', async () => {
+    await putOnCapital()
+    const admin = await h.loginAs('sysadmin')
+    const today = (await get(admin, '/fx')).json().businessDate
+
+    const res = await put(admin, '/settings', { goLiveBusinessDate: today, branchId: BRANCH })
+    expect(res.statusCode, res.body).toBe(200)
+    expect((await get(admin, '/settings')).json().goLiveBusinessDate).toBe(today)
+  })
+
+  it('accepts a position ABOVE capital, because a surplus is the day’s work, not a hidden loss', async () => {
+    /*
+     * THIS TEST WAS THE OPPOSITE, and the reversal is deliberate.
+     *
+     * It read «one lira more than capital is accumulation carried in from before. Refuse it.» But
+     * the gate cannot tell carried-in accumulation from money earned this morning, and on the first
+     * day it is nearly always the latter: the epoch is declared while shifts are running, and every
+     * fee collected puts working capital above target. Refusing that made the ordinary case
+     * impossible — it refused the owner at 12:39 on his own first day, for 6,502 of earnings.
+     *
+     * What the gate is FOR is the other direction, asserted in the next test.
+     */
+    await putOnCapital()
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(6_502))
+
+    const admin = await h.loginAs('sysadmin')
+    const today = (await get(admin, '/fx')).json().businessDate
+    const res = await put(admin, '/settings', { goLiveBusinessDate: today, branchId: BRANCH })
+    expect(res.statusCode, res.body).toBe(200)
+    expect((await get(admin, '/settings')).json().goLiveBusinessDate).toBe(today)
+  })
+
+  it('refuses a position BELOW capital, and says how far short — the case it exists for', async () => {
+    /*
+     * The failure worth blocking. Money went missing before the epoch; declaring the epoch would
+     * drop every pre-epoch flow out of the reports while the balances keep carrying the hole, so
+     * the shortfall becomes permanent and unattributable. Refuse, and name the number.
+     */
+    const admin = await h.loginAs('sysadmin')
+    const targets = await put(admin, '/treasury/capital-targets', {
+      cashTarget: sypStr(4_000_000),
+      walletTarget: sypStr(1_000_000),
+      reason: 'رأس المال عند بدء التطبيق',
+      branchId: BRANCH,
+    })
+    expect(targets.statusCode, targets.body).toBe(200)
+    const manager = await h.loginAs('manager')
+    await seedFund(manager, 'office_cash', sypStr(3_999_999))
+    await seedFund(manager, 'office_wallet', sypStr(1_000_000))
+
+    const today = (await get(admin, '/fx')).json().businessDate
+    const res = await put(admin, '/settings', { goLiveBusinessDate: today, branchId: BRANCH })
+    expect(res.statusCode, res.body).toBe(422)
+    expect(res.json().error).toBe('go_live_requires_opening_ceremony')
+    expect(res.json().detail.workingCapital).toBe(sypStr(4_999_999))
+    expect(res.json().detail.capitalTarget).toBe(sypStr(5_000_000))
+    expect(res.json().detail.shortfall).toBe(sypStr(1))
+  })
+
+  it('does not mix the separate HQ company pocket into a branch go-live position', async () => {
+    // Since C1, HQ company cash is a separate book. Only the branch's pre-cutover company_box (or
+    // its post-cutover clearing invariant) belongs to this branch opening ceremony.
+    await putOnCapital()
+    const gm = await h.loginAs('gm')
+    const funded = await post(gm, '/company-fund/deposit', {
+      idempotencyKey: crypto.randomUUID(),
+      amount: sypStr(100),
+      reason: 'ربح متراكم',
+      branchId: BRANCH,
+    })
+    expect(funded.statusCode, funded.body).toBe(201)
+    expect(funded.json().command.branchId).toBe(COMPANY_BRANCH)
+    const admin = await h.loginAs('sysadmin')
+    const today = (await get(admin, '/fx')).json().businessDate
+    const res = await put(admin, '/settings', { goLiveBusinessDate: today, branchId: BRANCH })
+    expect(res.statusCode, res.body).toBe(200)
+    expect((await get(admin, '/settings')).json().goLiveBusinessDate).toBe(today)
   })
 })

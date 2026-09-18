@@ -471,3 +471,116 @@ describe('a tranche sent twice', () => {
     expect(await cashOf(DRIVER_ID)).toBe(18_000_000n) // 100,000 + 50,000 + 30,000
   })
 })
+
+/**
+ * «تصحيح سلفة الكاش» — the cash counterpart of the wallet adjustment (2026-08-29).
+ *
+ * A float tranche RECORDED but never handed over was unfixable. Reversing the money alone leaves
+ * BR1 expecting the old total at close — the wallet path's own doc comment says exactly this — so
+ * the entire difference lands on the driver's settlement. On shift cd7b8fe9 a phantom 1,500.00
+ * second tranche turned a 228.10 wallet difference into a 1,728.10 shortfall against أنس.
+ */
+describe('correcting an overstated cash float', () => {
+  // The fixture map is module-scoped and keyed by client key; without this a second describe
+  // reusing `addTwentyOrders` collides with the first one's rows.
+  beforeEach(() => {
+    fixtureOrders.clear()
+  })
+
+  it('reduces the float, refreshes BR1, and posts one visible correction', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await openShift(driver, manager)
+
+    await addTwentyOrders(driver, id)
+    const submitted = await submitEnd(driver, id, 160_000, 70_000)
+    expect(submitted.statusCode, submitted.body).toBe(200)
+    const before = submitted.json().br1.cashDifference
+
+    const res = await post(manager, `/shifts/${id}/cash-float-adjustments`, {
+      expectedCurrentTotal: sypStr(100_000),
+      targetTotal: sypStr(85_000),
+      occurrenceKey: 'float-100k-to-85k',
+      reason: 'دفعة ثانية سُجّلت ولم تُسلَّم',
+    })
+    expect(res.statusCode, res.body).toBe(201)
+    expect(res.json()).toMatchObject({
+      id, from: sypStr(100_000), to: sypStr(85_000), reduction: sypStr(15_000),
+      currentTotal: sypStr(85_000), replayed: false,
+    })
+
+    // The shift's own projection moved — this is the whole point. A journal reversal alone would
+    // leave BR1 expecting the old float and charge the driver the difference.
+    const stored = await h.deps.shifts.findById(id)
+    expect(stored?.floatTranches.reduce((t, v) => t + v, 0n)).toBe(8_500_000n)
+
+    // BR1 recomputed: 15,000 less expected cash means the driver is 15,000 less short.
+    const review = await get(manager, `/shifts/${id}/review`)
+    expect(review.json().br1.cashDifference).not.toBe(before)
+
+    const correction = h.deps.ledger.entries.find(
+      (e) => e.eventType === 'correction' && e.occurrenceKey === 'cash-float-adjustment:float-100k-to-85k',
+    )
+    expect(correction, 'the correction is a visible dated entry, never an edit').toBeDefined()
+    const debits = correction!.lines.filter((l) => l.side === 'D').reduce((t, l) => t + l.amount, 0n)
+    const credits = correction!.lines.filter((l) => l.side === 'C').reduce((t, l) => t + l.amount, 0n)
+    expect(debits).toBe(credits)
+  })
+
+  it('replays the same key instead of returning the money twice', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await openShift(driver, manager)
+    const body = {
+      expectedCurrentTotal: sypStr(100_000),
+      targetTotal: sypStr(90_000),
+      occurrenceKey: 'float-once',
+      reason: 'تصحيح',
+    }
+    expect((await post(manager, `/shifts/${id}/cash-float-adjustments`, body)).statusCode).toBe(201)
+    const again = await post(manager, `/shifts/${id}/cash-float-adjustments`, body)
+    expect(again.statusCode, again.body).toBe(200)
+    expect(again.json().replayed).toBe(true)
+    expect(
+      h.deps.ledger.entries.filter((e) => e.occurrenceKey === 'cash-float-adjustment:float-once'),
+    ).toHaveLength(1)
+  })
+
+  it('refuses an increase, a no-op, and a blank reason', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await openShift(driver, manager)
+    const base = { expectedCurrentTotal: sypStr(100_000), occurrenceKey: 'k', reason: 'سبب' }
+
+    expect((await post(manager, `/shifts/${id}/cash-float-adjustments`, { ...base, targetTotal: sypStr(120_000) })).json().error)
+      .toBe('cash_float_increase_use_tranche')
+    expect((await post(manager, `/shifts/${id}/cash-float-adjustments`, { ...base, targetTotal: sypStr(100_000) })).json().error)
+      .toBe('cash_float_reduction_required')
+    expect((await post(manager, `/shifts/${id}/cash-float-adjustments`, { ...base, targetTotal: sypStr(90_000), reason: '   ' })).statusCode)
+      .toBe(400)
+  })
+
+  it('refuses a stale expected total, so two managers cannot both reduce it', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await openShift(driver, manager)
+    const res = await post(manager, `/shifts/${id}/cash-float-adjustments`, {
+      expectedCurrentTotal: sypStr(90_000), // the real total is 100,000
+      targetTotal: sypStr(80_000),
+      occurrenceKey: 'stale',
+      reason: 'تصحيح',
+    })
+    expect(res.statusCode, res.body).toBe(409)
+    expect(res.json().error).toBe('cash_float_total_changed')
+  })
+
+  it('is refused to the driver — only a manager returns office money', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await openShift(driver, manager)
+    const res = await post(driver, `/shifts/${id}/cash-float-adjustments`, {
+      expectedCurrentTotal: sypStr(100_000), targetTotal: sypStr(90_000), occurrenceKey: 'k', reason: 'سبب',
+    })
+    expect(res.statusCode).toBe(403)
+  })
+})

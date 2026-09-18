@@ -5,6 +5,9 @@ import type {
   AttachmentHistoryRecord,
   AttendanceRecord,
   AttendanceRepo,
+  CheckInRepo,
+  CheckInRecord,
+  CheckInWindowRecord,
   BatteryReadingRecord,
   BatteryReadingRepo,
   BatteryRecord,
@@ -29,6 +32,13 @@ import type {
   ExpenseCategoryRecord,
   ExpenseRecord,
   ExpenseRepo,
+  IncomeCategoryRecord,
+  IncomeRecord,
+  IncomeRepo,
+  AdvanceEventRecord,
+  AdvanceOutstandingRecord,
+  AdvanceRecord,
+  AdvanceRepo,
   NotificationRecord,
   NotificationRepo,
   PreapprovedShiftRuleRecord,
@@ -38,6 +48,8 @@ import type {
   TierRuleRecord,
   DriverRecord,
   RoleGrantRecord,
+  OperationRemovalRecord,
+  OperationRemovalRepo,
   ShiftDecisionRecord,
   ShiftDecisionRepo,
   GpsPingRecord,
@@ -49,6 +61,7 @@ import type {
   VehicleRecord,
   WeekLockRecord,
   WeekLockRepo,
+  ShiftTimingRecord,
 } from '@ash/contracts'
 import { AWAITING_DECISION_STATES, type CalendarDate, LIVE_STATES, type Minor, minor } from '@ash/domain'
 import type { Pool, PoolClient } from './pool.ts'
@@ -144,15 +157,26 @@ export class PgShiftRepo implements ShiftRepo {
            -- Fill either missing half, but preserve the database's exact value once present.
            open_approved_at = COALESCE(open_approved_at, $16::timestamptz),
            open_approved_by = COALESCE(open_approved_by, $17::uuid),
+           -- Write-once for the same reason: it is the bound this shift's rows were judged by, and
+           -- a settled shift must keep the exact instant it was judged by.
+           window_opens_at = COALESCE(window_opens_at, $28::timestamptz),
            submitted_at = $18::timestamptz,
            approved_by = $19,
+           -- Write-once, like the open pair above: the instant a close was signed is historical
+           -- identity, and re-saving a loaded record must not restamp it.
+           approved_at = COALESCE(approved_at, $29::timestamptz),
            odo_start_ocr = $20, odo_end_ocr = $21,
            odo_end_anomaly_confirmed_at = $22::timestamptz,
            odo_end_anomaly_confirmed_by = $23::uuid,
            battery_start_ocr = $24,
            end_wallet_declared_ocr_minor = $25,
            kept_as_receivable_minor = $26,
-           driver_share_paid_minor = $27
+           driver_share_paid_minor = $27,
+           -- «الحسم» is set and cleared freely while the shift is under review, so unlike the
+           -- write-once identity columns above it is an ordinary assignment. The CHECK constraint
+           -- refuses a non-zero amount without a reason, so the pair always moves together.
+           manager_charge_minor = $30,
+           manager_charge_reason = $31
          WHERE id = $1`,
         [
           shift.id,
@@ -182,6 +206,10 @@ export class PgShiftRepo implements ShiftRepo {
           shift.endWalletDeclaredOcr?.toString() ?? null,
           shift.keptAsReceivable.toString(),
           shift.driverSharePaid.toString(),
+          shift.windowOpensAt,
+          shift.approvedAt,
+          String(shift.managerCharge),
+          shift.managerChargeReason,
         ],
       )
 
@@ -260,6 +288,13 @@ export class PgShiftRepo implements ShiftRepo {
     return this.load('s.branch_id = $1 AND s.business_date BETWEEN $2 AND $3', [branchId, from, to])
   }
 
+  async listByVehicle(branchId: string, vehicleId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftRecord[]> {
+    return this.load(
+      's.branch_id = $1 AND s.vehicle_id = $2 AND s.business_date BETWEEN $3 AND $4',
+      [branchId, vehicleId, from, to],
+    )
+  }
+
   /** Only ever called for a shift that never opened; the route enforces that. */
   async delete(id: string, actorId: string | null): Promise<void> {
     await withTransaction(this.pool, { actorId }, async (client) => {
@@ -281,6 +316,51 @@ export class PgShiftRepo implements ShiftRepo {
       [driverId, businessDate],
     )
     return Number(rows[0]!.next)
+  }
+
+  /**
+   * P2 — the timing-only read behind `/dashboard/shifts-summary`.
+   *
+   * One scan of `shifts` with no tranche or media subqueries: a year of shifts judged for their
+   * pattern needs two instants and two odometer readings, not the whole aggregate. The window
+   * start falls back to the open approval exactly as `GET /shifts` does.
+   */
+  async listTimingBetween(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftTimingRecord[]> {
+    const { rows } = await this.pool.query<{
+      id: string
+      branch_id: string
+      driver_id: string
+      vehicle_id: string
+      shift_no: number
+      business_date: string
+      state: string
+      window_opens_at: Date | null
+      submitted_at: Date | null
+      odo_start: number | string | null
+      odo_end: number | string | null
+    }>(
+      `SELECT s.id, s.branch_id, s.driver_id, s.vehicle_id, s.shift_no,
+              s.business_date::text AS business_date, s.state::text AS state,
+              COALESCE(s.window_opens_at, s.open_approved_at) AS window_opens_at,
+              s.submitted_at, s.odo_start, s.odo_end
+         FROM shifts s
+        WHERE s.branch_id = $1 AND s.business_date BETWEEN $2 AND $3
+        ORDER BY s.business_date, s.shift_no, s.id`,
+      [branchId, from, to],
+    )
+    return rows.map((r) => ({
+      id: String(r.id),
+      branchId: String(r.branch_id),
+      driverId: String(r.driver_id),
+      vehicleId: String(r.vehicle_id),
+      shiftNo: Number(r.shift_no),
+      businessDate: isoDate(r.business_date),
+      state: r.state as ShiftTimingRecord['state'],
+      windowOpensAt: r.window_opens_at === null ? null : r.window_opens_at.toISOString(),
+      submittedAt: r.submitted_at === null ? null : r.submitted_at.toISOString(),
+      odoStart: r.odo_start === null ? null : Number(r.odo_start),
+      odoEnd: r.odo_end === null ? null : Number(r.odo_end),
+    }))
   }
 
   private async load(where: string, params: unknown[]): Promise<ShiftRecord[]> {
@@ -347,6 +427,7 @@ export class PgShiftRepo implements ShiftRepo {
       endWalletDeclaredOcr: bigintOrNull(r.end_wallet_declared_ocr_minor),
       driverConfirmedAt: r.driver_confirmed_at === null ? null : (r.driver_confirmed_at as Date).toISOString(),
       openApprovedAt: r.open_approved_at === null ? null : (r.open_approved_at as Date).toISOString(),
+      windowOpensAt: r.window_opens_at == null ? null : (r.window_opens_at as Date).toISOString(),
       openApprovedBy: (r.open_approved_by as string | null) ?? null,
       submittedAt: r.submitted_at === null ? null : (r.submitted_at as Date).toISOString(),
       equationDiff: bigintOrNull(r.equation_diff_minor),
@@ -354,6 +435,9 @@ export class PgShiftRepo implements ShiftRepo {
       walletDiff: bigintOrNull(r.wallet_diff_minor),
       ordersHash: (r.orders_hash as string | null) ?? null,
       approvedBy: (r.approved_by as string | null) ?? null,
+      approvedAt: r.approved_at == null ? null : (r.approved_at as Date).toISOString(),
+      managerCharge: minor(BigInt((r.manager_charge_minor as string | null) ?? '0')),
+      managerChargeReason: (r.manager_charge_reason as string | null) ?? null,
     }))
   }
 }
@@ -429,12 +513,38 @@ export class PgDirectoryRepo implements DirectoryRepo {
   }
 
   async listBranches(): Promise<BranchRecord[]> {
-    const { rows } = await this.pool.query<Record<string, unknown>>('SELECT * FROM branches ORDER BY code')
+    // Operating branches only. The company (HQ) row (0066) is not a branch anyone picks.
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      "SELECT * FROM branches WHERE kind = 'branch' ORDER BY code",
+    )
     return rows.map(toBranch)
+  }
+
+  async companyBranch(): Promise<BranchRecord | null> {
+    // `branches_single_company_uq` guarantees at most one.
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      "SELECT * FROM branches WHERE kind = 'company'",
+    )
+    const r = rows[0]
+    return r ? toBranch(r) : null
   }
 
   async branch(id: string): Promise<BranchRecord | null> {
     const { rows } = await this.pool.query<Record<string, unknown>>('SELECT * FROM branches WHERE id = $1', [id])
+    const r = rows[0]
+    return r ? toBranch(r) : null
+  }
+
+  /** The geofence for «التفقّد». `branches_geo_ck` refuses half a coordinate; pair them here. */
+  async setBranchLocation(
+    id: string,
+    location: { lat: number | null; lng: number | null; checkinRadiusM: number },
+  ): Promise<BranchRecord | null> {
+    const paired = location.lat === null || location.lng === null ? [null, null] : [location.lat, location.lng]
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'UPDATE branches SET lat = $2, lng = $3, checkin_radius_m = $4 WHERE id = $1 RETURNING *',
+      [id, paired[0], paired[1], location.checkinRadiusM],
+    )
     const r = rows[0]
     return r ? toBranch(r) : null
   }
@@ -646,9 +756,9 @@ export class PgDirectoryRepo implements DirectoryRepo {
     await this.uniqueOr(
       () =>
         this.pool.query(
-          `INSERT INTO branches (id, code, name_ar, name_en, timezone, governorate_id, branch_no)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-          [b.id, b.code, b.nameAr, b.nameEn, b.timezone, b.governorateId, b.branchNo],
+          `INSERT INTO branches (id, code, name_ar, name_en, timezone, governorate_id, branch_no, kind)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+          [b.id, b.code, b.nameAr, b.nameEn, b.timezone, b.governorateId, b.branchNo, b.kind],
         ),
       `branch ${b.code} or number ${b.branchNo} is taken`,
     )
@@ -879,6 +989,10 @@ const toBranch = (r: Record<string, unknown>): BranchRecord => ({
   timezone: String(r.timezone),
   governorateId: String(r.governorate_id),
   branchNo: Number(r.branch_no),
+  lat: r.lat === null || r.lat === undefined ? null : Number(r.lat),
+  lng: r.lng === null || r.lng === undefined ? null : Number(r.lng),
+  checkinRadiusM: r.checkin_radius_m === undefined ? 150 : Number(r.checkin_radius_m),
+  kind: r.kind === 'company' ? 'company' : 'branch',
 })
 
 const toGovernorate = (r: Record<string, unknown>): GovernorateRecord => ({
@@ -1656,8 +1770,9 @@ export class PgExpenseRepo implements ExpenseRepo {
   async create(expense: ExpenseRecord): Promise<void> {
     await this.pool.query(
       `INSERT INTO expenses (id, branch_id, category_id, cost_center_kind, vehicle_id, amount_minor,
-                             business_date, description, receipt_media_id, journal_entry_id, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+                             business_date, description, receipt_media_id, journal_entry_id,
+                             advance_id, channel, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [
         expense.id,
         expense.branchId,
@@ -1669,6 +1784,8 @@ export class PgExpenseRepo implements ExpenseRepo {
         expense.description,
         expense.receiptMediaId,
         expense.journalEntryId,
+        expense.advanceId,
+        expense.channel,
         expense.createdBy,
       ],
     )
@@ -1680,6 +1797,16 @@ export class PgExpenseRepo implements ExpenseRepo {
         WHERE branch_id = $1 AND business_date BETWEEN $2 AND $3
         ORDER BY business_date, id`,
       [branchId, from, to],
+    )
+    return rows.map(expenseRecord)
+  }
+
+  async listByVehicle(branchId: string, vehicleId: string, from: CalendarDate, to: CalendarDate): Promise<ExpenseRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT *, amount_minor::text AS amount FROM expenses
+        WHERE branch_id = $1 AND vehicle_id = $2 AND business_date BETWEEN $3 AND $4
+        ORDER BY business_date, id`,
+      [branchId, vehicleId, from, to],
     )
     return rows.map(expenseRecord)
   }
@@ -1712,11 +1839,278 @@ const expenseRecord = (row: Record<string, unknown>): ExpenseRecord => ({
   categoryId: String(row.category_id),
   costCenterKind: row.cost_center_kind as ExpenseRecord['costCenterKind'],
   vehicleId: (row.vehicle_id as string | null) ?? null,
+  channel: (row.channel as ExpenseRecord['channel'] | undefined) ?? 'office_cash',
   amount: minor(BigInt(String(row.amount))),
   businessDate: isoDate(row.business_date),
   description: String(row.description),
   receiptMediaId: (row.receipt_media_id as string | null) ?? null,
   journalEntryId: row.journal_entry_id === null ? null : Number(row.journal_entry_id),
+  advanceId: (row.advance_id as string | null) ?? null,
+  createdBy: String(row.created_by),
+})
+
+/**
+ * «المدخول المباشر» — direct income. Deliberately a near-copy of `PgExpenseRepo`: the two are the
+ * same shape of fact in opposite directions, and a reader who knows one should recognise the other.
+ */
+export class PgIncomeRepo implements IncomeRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async listCategories(): Promise<IncomeCategoryRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT id, code, name_ar, active FROM income_categories WHERE active ORDER BY code',
+    )
+    return rows.map((r) => ({
+      id: String(r.id),
+      code: String(r.code),
+      nameAr: String(r.name_ar),
+      active: Boolean(r.active),
+    }))
+  }
+
+  async createCategory(category: IncomeCategoryRecord): Promise<void> {
+    try {
+      await this.pool.query(
+        'INSERT INTO income_categories (id, code, name_ar, active) VALUES ($1,$2,$3,$4)',
+        [category.id, category.code, category.nameAr, category.active],
+      )
+    } catch (err) {
+      if (isPgError(err, PG.UNIQUE_VIOLATION)) {
+        throw Object.assign(new Error(`duplicate category ${category.code}`), { code: 'DUPLICATE_CODE' })
+      }
+      throw err
+    }
+  }
+
+  async get(id: string): Promise<IncomeRecord | null> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT *, amount_minor::text AS amount FROM incomes WHERE id = $1',
+      [id],
+    )
+    const row = rows[0]
+    return row ? incomeRecord(row) : null
+  }
+
+  async create(income: IncomeRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO incomes (id, branch_id, category_id, channel, amount_minor,
+                            business_date, description, evidence_media_id, journal_entry_id, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [
+        income.id,
+        income.branchId,
+        income.categoryId,
+        income.channel,
+        income.amount.toString(),
+        income.businessDate,
+        income.description,
+        income.evidenceMediaId,
+        income.journalEntryId,
+        income.createdBy,
+      ],
+    )
+  }
+
+  async listByBranchAndDate(branchId: string, from: CalendarDate, to: CalendarDate): Promise<IncomeRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT *, amount_minor::text AS amount FROM incomes
+        WHERE branch_id = $1 AND business_date BETWEEN $2 AND $3
+        ORDER BY business_date, id`,
+      [branchId, from, to],
+    )
+    return rows.map(incomeRecord)
+  }
+}
+
+const incomeRecord = (row: Record<string, unknown>): IncomeRecord => ({
+  id: String(row.id),
+  branchId: String(row.branch_id),
+  categoryId: String(row.category_id),
+  channel: row.channel as IncomeRecord['channel'],
+  amount: minor(BigInt(String(row.amount))),
+  businessDate: isoDate(row.business_date),
+  description: String(row.description),
+  evidenceMediaId: (row.evidence_media_id as string | null) ?? null,
+  // NOT NULL in the schema, unlike an expense's — an income without its journal cannot exist.
+  journalEntryId: Number(row.journal_entry_id),
+  createdBy: String(row.created_by),
+})
+
+/**
+ * «السلفة» — an expense that must come back (owner decision 17).
+ *
+ * `listOutstanding` reads what is still owed from the advance's OWN LEDGER FUND, never by
+ * subtracting the event rows. The fund IS the record — the same rule `listReceivables` states in
+ * its own header — and a second arithmetic would be one more thing to keep in step with it.
+ */
+export class PgAdvanceRepo implements AdvanceRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async get(id: string): Promise<AdvanceRecord | null> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT *, amount_minor::text AS amount FROM advances WHERE id = $1',
+      [id],
+    )
+    const row = rows[0]
+    return row ? advanceRecord(row) : null
+  }
+
+  async create(advance: AdvanceRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO advances (id, branch_id, party_name, party_key, category_id, cost_center_kind,
+                             vehicle_id, channel, amount_minor, business_date, description,
+                             receipt_media_id, journal_entry_id, source_driver_id, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+      [
+        advance.id,
+        advance.branchId,
+        advance.partyName,
+        advance.partyKey,
+        advance.categoryId,
+        advance.costCenterKind,
+        advance.vehicleId,
+        advance.channel,
+        advance.amount.toString(),
+        advance.businessDate,
+        advance.description,
+        advance.receiptMediaId,
+        advance.journalEntryId,
+        advance.sourceDriverId,
+        advance.createdBy,
+      ],
+    )
+  }
+
+  async listByBranchAndDate(branchId: string, from: CalendarDate, to: CalendarDate): Promise<AdvanceRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT *, amount_minor::text AS amount FROM advances
+        WHERE branch_id = $1 AND business_date BETWEEN $2 AND $3
+        ORDER BY business_date, id`,
+      [branchId, from, to],
+    )
+    return rows.map(advanceRecord)
+  }
+
+  async listOutstanding(branchId: string): Promise<AdvanceOutstandingRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT a.*, a.amount_minor::text AS amount,
+              COALESCE(bal.balance, 0)::text AS outstanding,
+              COALESCE(ev.repaid, 0)::text   AS repaid,
+              COALESCE(ev.converted, 0)::text AS converted
+         FROM advances a
+         LEFT JOIN LATERAL (
+           SELECT SUM(CASE jl.side WHEN 'D' THEN jl.amount_minor ELSE -jl.amount_minor END) AS balance
+             FROM journal_lines jl
+             JOIN funds f ON f.id = jl.fund_id
+            WHERE f.branch_id = a.branch_id
+              AND f.code = 'advance_receivable_'
+                          || CASE a.channel WHEN 'office_cash' THEN 'cash' ELSE 'wallet' END
+                          || ':' || a.id::text
+         ) bal ON true
+         LEFT JOIN LATERAL (
+           SELECT SUM(amount_minor) FILTER (WHERE kind = 'repayment')  AS repaid,
+                  SUM(amount_minor) FILTER (WHERE kind = 'conversion') AS converted
+             FROM advance_events ae WHERE ae.advance_id = a.id
+         ) ev ON true
+        WHERE a.branch_id = $1
+          AND COALESCE(bal.balance, 0) <> 0
+        ORDER BY a.business_date DESC, a.created_at DESC`,
+      [branchId],
+    )
+    return rows.map((row) => ({
+      advance: advanceRecord(row),
+      outstanding: minor(BigInt(String(row.outstanding))),
+      repaid: minor(BigInt(String(row.repaid))),
+      converted: minor(BigInt(String(row.converted))),
+    }))
+  }
+
+  async listParties(branchId: string): Promise<Array<{ partyName: string; partyKey: string }>> {
+    // DISTINCT ON keeps the FIRST spelling anyone used, so the suggestion list shows a real name
+    // rather than a normalised key nobody typed.
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT DISTINCT ON (party_key) party_key, party_name
+         FROM advances WHERE branch_id = $1
+        ORDER BY party_key, created_at`,
+      [branchId],
+    )
+    return rows.map((r) => ({ partyKey: String(r.party_key), partyName: String(r.party_name) }))
+  }
+
+  async getEvent(id: string): Promise<AdvanceEventRecord | null> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT *, amount_minor::text AS amount FROM advance_events WHERE id = $1',
+      [id],
+    )
+    const row = rows[0]
+    return row ? advanceEventRecord(row) : null
+  }
+
+  async createEvent(event: AdvanceEventRecord): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO advance_events (id, advance_id, branch_id, kind, amount_minor, business_date,
+                                   reason, expense_id, journal_entry_id, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [
+        event.id,
+        event.advanceId,
+        event.branchId,
+        event.kind,
+        event.amount.toString(),
+        event.businessDate,
+        event.reason,
+        event.expenseId,
+        event.journalEntryId,
+        event.createdBy,
+      ],
+    )
+  }
+
+  async listEvents(advanceId: string): Promise<AdvanceEventRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT *, amount_minor::text AS amount FROM advance_events
+        WHERE advance_id = $1 ORDER BY business_date, created_at`,
+      [advanceId],
+    )
+    return rows.map(advanceEventRecord)
+  }
+}
+
+const advanceRecord = (row: Record<string, unknown>): AdvanceRecord => ({
+  id: String(row.id),
+  branchId: String(row.branch_id),
+  partyName: String(row.party_name),
+  partyKey: String(row.party_key),
+  categoryId: String(row.category_id),
+  costCenterKind: row.cost_center_kind as AdvanceRecord['costCenterKind'],
+  vehicleId: (row.vehicle_id as string | null) ?? null,
+  channel: row.channel as AdvanceRecord['channel'],
+  amount: minor(BigInt(String(row.amount))),
+  businessDate: isoDate(row.business_date),
+  description: String(row.description),
+  receiptMediaId: (row.receipt_media_id as string | null) ?? null,
+  sourceDriverId: (row.source_driver_id as string | null) ?? null,
+  // NOT NULL in the schema, unlike an expense's: an advance without its journal cannot exist.
+  journalEntryId: Number(row.journal_entry_id),
+  createdBy: String(row.created_by),
+})
+
+const advanceEventRecord = (row: Record<string, unknown>): AdvanceEventRecord => ({
+  id: String(row.id),
+  advanceId: String(row.advance_id),
+  branchId: String(row.branch_id),
+  kind: row.kind as AdvanceEventRecord['kind'],
+  amount: minor(BigInt(String(row.amount))),
+  businessDate: isoDate(row.business_date),
+  reason: String(row.reason),
+  expenseId: (row.expense_id as string | null) ?? null,
+  journalEntryId: Number(row.journal_entry_id),
   createdBy: String(row.created_by),
 })
 
@@ -1748,9 +2142,11 @@ export class PgSettingsRepo implements SettingsRepo {
   }
 
   async set(key: string, value: unknown, actorId: string): Promise<void> {
-    // A money setting arrives as a string of minor units (see money() above); anything else is a
-    // plain scalar. Label it so the column's value_type stays honest rather than always 'json'.
-    const valueType = typeof value === 'string' && /^-?\d+$/.test(value) ? 'money_minor' : 'json'
+    // A money setting arrives as a string of minor units (see money() above); any other string is
+    // a plain scalar — a calendar date, for one. Label it so the column's value_type stays honest
+    // rather than filing every non-money string as 'json'.
+    const valueType =
+      typeof value === 'string' ? (/^-?\d+$/.test(value) ? 'money_minor' : 'string') : 'json'
     await this.pool.query(
       `INSERT INTO settings (key, value, value_type, updated_by, updated_at)
        VALUES ($1, $2::jsonb, $3, $4, now())
@@ -1771,51 +2167,8 @@ export class PgCashCountRepo implements CashCountRepo {
 
   async create(count: CashCountRecord): Promise<CashCountRecord> {
     try {
-      const persistedId = await withTransaction(this.pool, { actorId: count.countedBy }, async (client) => {
-        // `cash_counts.id` is BIGINT GENERATED ALWAYS. The API's id generator emits UUIDs, so
-        // inserting the placeholder would fail in PostgreSQL even though the memory adapter works.
-        // Let the database own the identity and return the exact string audit/restoration must use.
-        const inserted = await client.query<{ id: string }>(
-          `INSERT INTO cash_counts (branch_id, business_date, counted_by, counted_at, proof_sha256, sealed_at, notes)
-           VALUES ($1,$2,$3, to_timestamp($4::double precision/1000), $5,
-                   CASE WHEN $6::bigint IS NULL THEN NULL ELSE to_timestamp($6::double precision/1000) END, $7)
-           RETURNING id::text AS id`,
-          [
-            count.branchId,
-            count.businessDate,
-            count.countedBy,
-            count.countedAtMs,
-            count.proofSha256,
-            count.sealedAtMs,
-            count.notes,
-          ],
-        )
-        const storedId = inserted.rows[0]!.id
-        for (const line of count.lines) {
-          // Resolve the fund by code; a count line naming a fund that does not exist is a bug
-          // worth failing on rather than silently dropping.
-          const { rows } = await client.query<{ id: string }>(
-            'SELECT id FROM funds WHERE branch_id = $1 AND code = $2',
-            [count.branchId, line.fundCode],
-          )
-          const fundId = rows[0]?.id
-          if (!fundId) throw new Error(`cash count names an unknown fund: ${line.fundCode}`)
-
-          await client.query(
-            `INSERT INTO cash_count_lines (cash_count_id, fund_id, counted_minor, computed_minor, variance_minor, resolution)
-             VALUES ($1,$2,$3,$4,$5,$6)`,
-            [
-              storedId,
-              fundId,
-              line.counted.toString(),
-              line.computed.toString(),
-              line.variance.toString(),
-              line.resolution,
-            ],
-          )
-        }
-        return storedId
-      })
+      const persistedId = await withTransaction(this.pool, { actorId: count.countedBy }, async (client) =>
+        await insertCashCount(client, count))
       return { ...count, id: persistedId }
     } catch (err) {
       if (isPgError(err, PG.UNIQUE_VIOLATION)) {
@@ -1840,37 +2193,168 @@ export class PgCashCountRepo implements CashCountRepo {
          FROM cash_counts c
          LEFT JOIN cash_count_lines l ON l.cash_count_id = c.id
          LEFT JOIN funds f ON f.id = l.fund_id
-        WHERE c.branch_id = $1 AND c.business_date = $2
+        WHERE c.branch_id = $1 AND c.business_date = $2 AND c.status = 'active'
         GROUP BY c.id`,
       [branchId, businessDate],
     )
     const r = rows[0]
     if (!r) return null
-    return {
-      id: String(r.id),
-      branchId: String(r.branch_id),
-      businessDate: isoDate(r.business_date),
-      countedBy: String(r.counted_by),
-      countedAtMs: (r.counted_at as Date).getTime(),
-      proofSha256: (r.proof_sha256 as string | null) ?? null,
-      sealedAtMs: r.sealed_at === null ? null : (r.sealed_at as Date).getTime(),
-      notes: (r.notes as string | null) ?? null,
-      lines: (r.lines as Array<Record<string, string | null>>).map((l) => ({
-        fundCode: String(l.fundCode),
-        counted: minor(BigInt(String(l.counted))),
-        computed: minor(BigInt(String(l.computed))),
-        variance: minor(BigInt(String(l.variance))),
-        resolution: l.resolution ?? null,
-      })),
-    }
+    return rowToCashCount(r)
   }
 
   async listDatesInRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<CalendarDate[]> {
+    // `status = 'active'` is load-bearing, not tidiness: without it a financial week could seal on
+    // a count its own author withdrew, and BR7 makes that seal immutable.
     const { rows } = await this.pool.query<{ business_date: unknown }>(
-      'SELECT business_date FROM cash_counts WHERE branch_id = $1 AND business_date BETWEEN $2 AND $3 ORDER BY business_date',
+      `SELECT business_date FROM cash_counts
+        WHERE branch_id = $1 AND business_date BETWEEN $2 AND $3 AND status = 'active'
+        ORDER BY business_date`,
       [branchId, from, to],
     )
     return rows.map((r) => isoDate(r.business_date))
+  }
+
+  /**
+   * Close the active count and insert its replacement inside ONE transaction.
+   *
+   * Splitting them would leave the day with two active counts — which the partial unique index
+   * refuses, aborting halfway — or with none, stranding the restoration behind
+   * `cash_count_required` with no way back.
+   */
+  async supersede(input: {
+    priorId: string
+    replacement: CashCountRecord
+    closedBy: string
+    closedAtMs: number
+    reason: string
+  }): Promise<CashCountRecord> {
+    const id = await withTransaction(this.pool, { actorId: input.closedBy }, async (client) => {
+      const inserted = await insertCashCount(client, input.replacement)
+      const closed = await client.query(
+        `UPDATE cash_counts
+            SET status = 'superseded', superseded_by_id = $2,
+                closed_at = to_timestamp($3::double precision/1000), closed_by = $4, closed_reason = $5
+          WHERE id = $1 AND status = 'active'`,
+        [input.priorId, inserted, input.closedAtMs, input.closedBy, input.reason],
+      )
+      // The prior count moved under us — another recount, or a withdrawal. Roll the whole thing
+      // back rather than leave a replacement whose predecessor is still live somewhere else.
+      if (closed.rowCount !== 1) throw Object.assign(new Error('prior count not active'), { code: 'COUNT_NOT_ACTIVE' })
+      return inserted
+    })
+    return { ...input.replacement, id: String(id) }
+  }
+
+  async cancel(input: {
+    id: string
+    closedBy: string
+    closedAtMs: number
+    reason: string
+  }): Promise<CashCountRecord | null> {
+    const { rowCount } = await this.pool.query(
+      `UPDATE cash_counts
+          SET status = 'cancelled',
+              closed_at = to_timestamp($2::double precision/1000), closed_by = $3, closed_reason = $4
+        WHERE id = $1 AND status = 'active'`,
+      [input.id, input.closedAtMs, input.closedBy, input.reason],
+    )
+    if (rowCount !== 1) return null
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT c.*,
+              COALESCE(json_agg(json_build_object(
+                'fundCode', f.code,
+                'counted',  l.counted_minor::text,
+                'computed', l.computed_minor::text,
+                'variance', l.variance_minor::text,
+                'resolution', l.resolution
+              ) ORDER BY f.code) FILTER (WHERE l.id IS NOT NULL), '[]') AS lines
+         FROM cash_counts c
+         LEFT JOIN cash_count_lines l ON l.cash_count_id = c.id
+         LEFT JOIN funds f ON f.id = l.fund_id
+        WHERE c.id = $1
+        GROUP BY c.id`,
+      [input.id],
+    )
+    return rows[0] ? rowToCashCount(rows[0]) : null
+  }
+}
+
+/**
+ * Insert a count and its lines. Shared by `create` and `supersede` so a recount cannot drift from
+ * a first count — they must produce byte-identical rows or the proof stops being comparable.
+ *
+ * `cash_counts.id` is BIGINT GENERATED ALWAYS, and the API's id generator emits UUIDs, so the
+ * database owns the identity and returns the exact string audit and restoration must reference.
+ */
+async function insertCashCount(
+  client: { query: PoolClient['query'] },
+  count: CashCountRecord,
+): Promise<string> {
+  const inserted = await client.query<{ id: string }>(
+    `INSERT INTO cash_counts (branch_id, business_date, counted_by, counted_at, proof_sha256, sealed_at, notes)
+     VALUES ($1,$2,$3, to_timestamp($4::double precision/1000), $5,
+             CASE WHEN $6::bigint IS NULL THEN NULL ELSE to_timestamp($6::double precision/1000) END, $7)
+     RETURNING id::text AS id`,
+    [
+      count.branchId,
+      count.businessDate,
+      count.countedBy,
+      count.countedAtMs,
+      count.proofSha256,
+      count.sealedAtMs,
+      count.notes,
+    ],
+  )
+  const storedId = inserted.rows[0]!.id
+  for (const line of count.lines) {
+    // Resolve the fund by code; a count line naming a fund that does not exist is a bug worth
+    // failing on rather than silently dropping.
+    const { rows } = await client.query<{ id: string }>(
+      'SELECT id FROM funds WHERE branch_id = $1 AND code = $2',
+      [count.branchId, line.fundCode],
+    )
+    const fundId = rows[0]?.id
+    if (!fundId) throw new Error(`cash count names an unknown fund: ${line.fundCode}`)
+
+    await client.query(
+      `INSERT INTO cash_count_lines (cash_count_id, fund_id, counted_minor, computed_minor, variance_minor, resolution)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [
+        storedId,
+        fundId,
+        line.counted.toString(),
+        line.computed.toString(),
+        line.variance.toString(),
+        line.resolution,
+      ],
+    )
+  }
+  return storedId
+}
+
+/** One shape for every read, so a new column cannot be mapped in one place and forgotten in another. */
+function rowToCashCount(r: Record<string, unknown>): CashCountRecord {
+  return {
+    id: String(r.id),
+    branchId: String(r.branch_id),
+    businessDate: isoDate(r.business_date),
+    countedBy: String(r.counted_by),
+    countedAtMs: (r.counted_at as Date).getTime(),
+    proofSha256: (r.proof_sha256 as string | null) ?? null,
+    sealedAtMs: r.sealed_at === null ? null : (r.sealed_at as Date).getTime(),
+    notes: (r.notes as string | null) ?? null,
+    status: (r.status as CashCountRecord['status'] | undefined) ?? 'active',
+    supersededById: r.superseded_by_id === null || r.superseded_by_id === undefined ? null : String(r.superseded_by_id),
+    closedAtMs: r.closed_at === null || r.closed_at === undefined ? null : (r.closed_at as Date).getTime(),
+    closedBy: (r.closed_by as string | null) ?? null,
+    closedReason: (r.closed_reason as string | null) ?? null,
+    lines: (r.lines as Array<Record<string, string | null>>).map((l) => ({
+      fundCode: String(l.fundCode),
+      counted: minor(BigInt(String(l.counted))),
+      computed: minor(BigInt(String(l.computed))),
+      variance: minor(BigInt(String(l.variance))),
+      resolution: l.resolution ?? null,
+    })),
   }
 }
 
@@ -2016,6 +2500,83 @@ export class PgShiftDecisionRepo implements ShiftDecisionRepo {
   }
 }
 
+/**
+ * The register the system admin reads: every row a manager declared was never a delivery.
+ *
+ * Append-only in the database (`REVOKE UPDATE, DELETE` plus a trigger), so there is no `update` and
+ * no `delete` here to write. A restore is a second row, never an edit of the first — «removed, then
+ * put back» is two acts by two people for two reasons, and one row could only ever tell half of it.
+ */
+export class PgOperationRemovalRepo implements OperationRemovalRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async append(
+    entry: Omit<OperationRemovalRecord, 'id' | 'actedAtMs'> & { actedAtMs: number },
+  ): Promise<OperationRemovalRecord> {
+    const { rows } = await this.pool.query<{ id: string }>(
+      `INSERT INTO operation_removals
+         (kind, operation_kind, operation_id, operation_ref, shift_id, branch_id, business_date,
+          driver_id, amount_minor, reason, evidence_slot, evidence_media_id, acted_by, acted_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7::date,$8,$9,$10,$11,$12,$13,
+               to_timestamp($14::double precision / 1000))
+       RETURNING id`,
+      [
+        entry.kind,
+        entry.operationKind,
+        entry.operationId,
+        entry.operationRef,
+        entry.shiftId,
+        entry.branchId,
+        entry.businessDate,
+        entry.driverId,
+        entry.amount.toString(),
+        entry.reason,
+        entry.evidenceSlot,
+        entry.evidenceMediaId,
+        entry.actedBy,
+        entry.actedAtMs,
+      ],
+    )
+    return { ...entry, id: String(rows[0]!.id) }
+  }
+
+  async list(filter: { branchId?: string | undefined; limit: number }): Promise<OperationRemovalRecord[]> {
+    // Newest first, and bounded by the caller. An unbounded register is a screen that stops loading
+    // in the month the fleet reaches a hundred bikes.
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT id, kind, operation_kind, operation_id, operation_ref, shift_id, branch_id,
+              to_char(business_date, 'YYYY-MM-DD') AS business_date, driver_id,
+              amount_minor::text AS amount, reason, evidence_slot, evidence_media_id,
+              acted_by, acted_at
+         FROM operation_removals
+        WHERE ($1::uuid IS NULL OR branch_id = $1::uuid)
+        ORDER BY acted_at DESC, id DESC
+        LIMIT $2`,
+      [filter.branchId ?? null, filter.limit],
+    )
+    return rows.map((r) => ({
+      id: String(r.id),
+      kind: r.kind as OperationRemovalRecord['kind'],
+      operationKind: r.operation_kind as OperationRemovalRecord['operationKind'],
+      operationId: String(r.operation_id),
+      operationRef: String(r.operation_ref),
+      shiftId: String(r.shift_id),
+      branchId: String(r.branch_id),
+      businessDate: String(r.business_date),
+      driverId: (r.driver_id as string | null) ?? null,
+      amount: minor(BigInt(String(r.amount))),
+      reason: String(r.reason),
+      evidenceSlot: (r.evidence_slot as string | null) ?? null,
+      evidenceMediaId: (r.evidence_media_id as string | null) ?? null,
+      actedBy: String(r.acted_by),
+      actedAtMs: (r.acted_at as Date).getTime(),
+    }))
+  }
+}
+
 /** Live GPS pings (SRS K): append-only telemetry; the live map reads the latest fix per driver. */
 export class PgGpsPingRepo implements GpsPingRepo {
   private readonly pool: Pool
@@ -2024,32 +2585,91 @@ export class PgGpsPingRepo implements GpsPingRepo {
   }
 
   async append(ping: Omit<GpsPingRecord, 'id'>): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO gps_pings (shift_id, driver_id, branch_id, lat, lng, accuracy_m, captured_at, received_at)
-       VALUES ($1,$2,$3,$4,$5,$6, to_timestamp($7::double precision / 1000), to_timestamp($8::double precision / 1000))`,
-      [ping.shiftId, ping.driverId, ping.branchId, ping.lat, ping.lng, ping.accuracyM, ping.capturedAtMs, ping.receivedAtMs],
-    )
+    await this.appendMany([ping])
   }
 
-  async latestPerDriverForBranch(branchId: string): Promise<GpsPingRecord[]> {
+  /**
+   * One statement for a whole buffered run, and a replay costs nothing.
+   *
+   * `ON CONFLICT DO NOTHING` against the natural key `(shift_id, captured_at)` is what makes the
+   * client's retry safe: a batch that was stored but whose 202 never arrived can be sent again
+   * verbatim. `rowCount` then tells the caller how many were genuinely new.
+   */
+  async appendMany(pings: readonly Omit<GpsPingRecord, 'id'>[]): Promise<{ inserted: number }> {
+    if (pings.length === 0) return { inserted: 0 }
+    const params: unknown[] = []
+    const tuples = pings.map((ping, index) => {
+      const base = index * 9
+      params.push(
+        ping.shiftId, ping.driverId, ping.branchId, ping.lat, ping.lng,
+        ping.accuracyM, ping.capturedAtMs, ping.receivedAtMs, ping.source,
+      )
+      return (
+        `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},` +
+        `to_timestamp($${base + 7}::double precision / 1000),` +
+        `to_timestamp($${base + 8}::double precision / 1000),$${base + 9})`
+      )
+    })
+    const { rowCount } = await this.pool.query(
+      `INSERT INTO gps_pings
+         (shift_id, driver_id, branch_id, lat, lng, accuracy_m, captured_at, received_at, source)
+       VALUES ${tuples.join(',')}
+       ON CONFLICT (shift_id, captured_at) DO NOTHING`,
+      params,
+    )
+    return { inserted: rowCount ?? 0 }
+  }
+
+  /**
+   * One index seek per live driver — flat forever, whatever the history.
+   *
+   * Its predecessor was `SELECT DISTINCT ON (driver_id) ... WHERE branch_id = $1`, which reads
+   * EVERY tuple the branch has ever written: `DISTINCT ON` does not skip ahead, so the cost of
+   * drawing ten dots grew with every ping ever stored. The lateral turns it into one seek per
+   * driver against `(branch_id, driver_id, received_at DESC)`.
+   */
+  async latestForDriversInBranch(
+    branchId: string,
+    driverIds: readonly string[],
+    sinceMs: number,
+  ): Promise<GpsPingRecord[]> {
+    if (driverIds.length === 0) return []
     const { rows } = await this.pool.query<Record<string, unknown>>(
-      `SELECT DISTINCT ON (driver_id) * FROM gps_pings
-       WHERE branch_id = $1 ORDER BY driver_id, received_at DESC, id DESC`,
-      [branchId],
+      `SELECT p.* FROM unnest($2::uuid[]) AS d(driver_id)
+         CROSS JOIN LATERAL (
+           SELECT * FROM gps_pings g
+            WHERE g.branch_id = $1
+              AND g.driver_id = d.driver_id
+              AND g.received_at >= to_timestamp($3::double precision / 1000)
+            ORDER BY g.received_at DESC, g.id DESC
+            LIMIT 1
+         ) p`,
+      [branchId, [...driverIds], sinceMs],
     )
     return rows.map(toGpsPing)
   }
 
   async listForShift(shiftId: string): Promise<GpsPingRecord[]> {
+    // CAPTURE order. See the port's note: receive order corrupts a buffered trail.
     const { rows } = await this.pool.query<Record<string, unknown>>(
-      'SELECT * FROM gps_pings WHERE shift_id = $1 ORDER BY received_at ASC, id ASC',
+      'SELECT * FROM gps_pings WHERE shift_id = $1 ORDER BY captured_at ASC, id ASC',
       [shiftId],
     )
     return rows.map(toGpsPing)
   }
+
+  async countForShift(shiftId: string): Promise<number> {
+    const { rows } = await this.pool.query<{ n: string }>(
+      'SELECT count(*)::text AS n FROM gps_pings WHERE shift_id = $1',
+      [shiftId],
+    )
+    return Number(rows[0]?.n ?? 0)
+  }
 }
 
 const toGpsPing = (r: Record<string, unknown>): GpsPingRecord => ({
+  // Older rows predate the column and default to the foreground beacon, which is what they were.
+  source: (r.source as GpsPingRecord['source'] | null) ?? 'phone_fg',
   id: Number(r.id),
   shiftId: String(r.shift_id),
   driverId: String(r.driver_id),
@@ -2435,6 +3055,19 @@ export class PgBatteryReadingRepo implements BatteryReadingRepo {
     }))
   }
 
+  async listByShiftIds(shiftIds: readonly string[]): Promise<BatteryReadingRecord[]> {
+    if (shiftIds.length === 0) return []
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT r.*, b.slot_no
+         FROM shift_battery_readings r
+         JOIN batteries b ON b.id = r.battery_id
+        WHERE r.shift_id = ANY($1::uuid[])
+        ORDER BY r.shift_id, r.package, b.slot_no`,
+      [shiftIds],
+    )
+    return rows.map(batteryReadingRecord)
+  }
+
   async existsForBattery(batteryId: string): Promise<boolean> {
     const { rows } = await this.pool.query('SELECT 1 FROM shift_battery_readings WHERE battery_id = $1 LIMIT 1', [
       batteryId,
@@ -2482,6 +3115,139 @@ export class PgBatterySwapRepo implements BatterySwapRepo {
       createdBy: (r.created_by as string | null) ?? null,
     }))
   }
+
+  async listByShiftIds(shiftIds: readonly string[]): Promise<BatterySwapRecord[]> {
+    if (shiftIds.length === 0) return []
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM battery_swaps WHERE shift_id = ANY($1::uuid[]) ORDER BY shift_id, seq_no',
+      [shiftIds],
+    )
+    return rows.map(batterySwapRecord)
+  }
 }
 
 const numOrNull = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v))
+const batteryReadingRecord = (r: Record<string, unknown>): BatteryReadingRecord => ({
+  shiftId: String(r.shift_id),
+  batteryId: String(r.battery_id),
+  package: r.package as BatteryReadingRecord['package'],
+  slotNo: Number(r.slot_no ?? 1),
+  percent: numOrNull(r.percent),
+  packMillivolts: numOrNull(r.pack_millivolts),
+  cycleCount: numOrNull(r.cycle_count),
+  remainCapacityDah: numOrNull(r.remain_capacity_dah),
+  fullCapacityDah: numOrNull(r.full_capacity_dah),
+  mosTempDc: numOrNull(r.mos_temp_dc),
+  t1Dc: numOrNull(r.t1_dc),
+  t2Dc: numOrNull(r.t2_dc),
+  mediaId: (r.media_id as string | null) ?? null,
+  source: r.source as BatteryReadingRecord['source'],
+  unavailable: Boolean(r.unavailable),
+  ocrRaw: r.ocr_raw ?? null,
+  batterySwapId: (r.battery_swap_id as string | null) ?? null,
+})
+const batterySwapRecord = (r: Record<string, unknown>): BatterySwapRecord => ({
+  id: String(r.id),
+  shiftId: String(r.shift_id),
+  seqNo: Number(r.seq_no),
+  slotNo: Number(r.slot_no),
+  outBatteryId: String(r.out_battery_id),
+  inBatteryId: String(r.in_battery_id),
+  occurredAtMs: new Date(r.occurred_at as string).getTime(),
+  createdBy: (r.created_by as string | null) ?? null,
+})
+
+// ── «التفقّد» — manager check-in rounds ────────────────────────────────────────────────────
+
+export class PgCheckInRepo implements CheckInRepo {
+  private readonly pool: Pool
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
+
+  async listWindows(branchId: string, userId?: string): Promise<CheckInWindowRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM checkin_windows
+        WHERE branch_id = $1 AND active AND ($2::uuid IS NULL OR user_id = $2)
+        ORDER BY at_minute`,
+      [branchId, userId ?? null],
+    )
+    return rows.map(toCheckInWindow)
+  }
+
+  async createWindow(w: CheckInWindowRecord): Promise<CheckInWindowRecord> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `INSERT INTO checkin_windows (id, branch_id, user_id, at_minute, tolerance_minutes, active, label, created_by)
+       VALUES ($1,$2,$3,$4,$5,true,$6,$7) RETURNING *`,
+      [w.id, w.branchId, w.userId, w.atMinute, w.toleranceMinutes, w.label, w.createdBy],
+    )
+    return toCheckInWindow(rows[0]!)
+  }
+
+  /** Retiring a round keeps its history: the row stays, only `active` moves. */
+  async deactivateWindow(id: string): Promise<boolean> {
+    const { rowCount } = await this.pool.query(
+      'UPDATE checkin_windows SET active = false WHERE id = $1 AND active',
+      [id],
+    )
+    return rowCount === 1
+  }
+
+  async record(c: CheckInRecord): Promise<CheckInRecord> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `INSERT INTO checkins (id, branch_id, user_id, business_date, captured_at, lat, lng, accuracy_m,
+                             window_id, distance_m, inside_area, minutes_from_target, verdict, note)
+       VALUES ($1,$2,$3,$4, to_timestamp($5::double precision/1000), $6,$7,$8,$9,$10,$11,$12,$13,$14)
+       RETURNING *`,
+      [
+        c.id, c.branchId, c.userId, c.businessDate, c.capturedAtMs, c.lat, c.lng, c.accuracyM,
+        c.windowId, c.distanceM, c.insideArea, c.minutesFromTarget, c.verdict, c.note,
+      ],
+    )
+    return toCheckIn(rows[0]!)
+  }
+
+  async listByBranchAndDate(branchId: string, businessDate: CalendarDate): Promise<CheckInRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM checkins WHERE branch_id = $1 AND business_date = $2 ORDER BY captured_at',
+      [branchId, businessDate],
+    )
+    return rows.map(toCheckIn)
+  }
+
+  async listByUserAndDate(userId: string, businessDate: CalendarDate): Promise<CheckInRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM checkins WHERE user_id = $1 AND business_date = $2 ORDER BY captured_at',
+      [userId, businessDate],
+    )
+    return rows.map(toCheckIn)
+  }
+}
+
+const toCheckInWindow = (r: Record<string, unknown>): CheckInWindowRecord => ({
+  id: String(r.id),
+  branchId: String(r.branch_id),
+  userId: String(r.user_id),
+  atMinute: Number(r.at_minute),
+  toleranceMinutes: Number(r.tolerance_minutes),
+  active: Boolean(r.active),
+  label: (r.label as string | null) ?? null,
+  createdBy: String(r.created_by),
+})
+
+const toCheckIn = (r: Record<string, unknown>): CheckInRecord => ({
+  id: String(r.id),
+  branchId: String(r.branch_id),
+  userId: String(r.user_id),
+  businessDate: isoDate(r.business_date),
+  capturedAtMs: (r.captured_at as Date).getTime(),
+  lat: Number(r.lat),
+  lng: Number(r.lng),
+  accuracyM: r.accuracy_m === null || r.accuracy_m === undefined ? null : Number(r.accuracy_m),
+  windowId: (r.window_id as string | null) ?? null,
+  distanceM: Number(r.distance_m),
+  insideArea: Boolean(r.inside_area),
+  minutesFromTarget: r.minutes_from_target === null || r.minutes_from_target === undefined ? null : Number(r.minutes_from_target),
+  verdict: r.verdict as CheckInRecord['verdict'],
+  note: (r.note as string | null) ?? null,
+})

@@ -1,6 +1,7 @@
 import { type FormEvent, type ReactNode, useState } from 'react'
 import { useApp } from '../app-context.tsx'
 import { Button, Card, Field, Screen, TextInput } from '../ui.tsx'
+import { Register } from './Register.tsx'
 
 /**
  * Driver login. Drivers are a `driver` role, so there is no second factor — password only, on a
@@ -12,6 +13,9 @@ export function Login(): ReactNode {
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [registering, setRegistering] = useState(false)
+
+  if (registering) return <Register onBack={() => setRegistering(false)} />
 
   async function submit(e: FormEvent): Promise<void> {
     e.preventDefault()
@@ -57,6 +61,9 @@ export function Login(): ReactNode {
           {error ? <p className="text-sm font-medium text-red-600">{error}</p> : null}
           <Button type="submit" disabled={busy || !username || !password}>
             {busy ? t.common.loading : t.auth.signIn}
+          </Button>
+          <Button type="button" variant="ghost" onClick={() => setRegistering(true)} disabled={busy}>
+            {t.auth.createDriverAccount}
           </Button>
         </form>
       </Card>

@@ -7,6 +7,86 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 
 **Legend:** ✅ implemented and green · ⚠ written but never executed · 🔜 planned, milestone named.
 
+## 2026-09-18 driver self-registration
+
+| Gate | Named test | Result |
+| --- | --- | --- |
+| The strict contract normalizes usernames, enforces password/username bounds and rejects privileged fields | `contracts/driver-registration.test.ts` | ✅ |
+| Public branch listing excludes HQ; signup creates an active fixed-role driver, session and immediate ordinary driver access | `api/driver-registration.test.ts` — *lists only operating branches* / *creates an active driver…* | ✅ |
+| Unknown/HQ branches, role/active/id injection, duplicate username/code, concurrent duplicate and authenticated callers fail by name | `api/driver-registration.test.ts` | ✅ |
+| A lost signup response recovers through login; three business outcomes consume the window, malformed input does not, and the fourth returns stable `Retry-After` | `api/driver-registration.test.ts` — *supports lost-response recovery* / *counts three schema-valid business outcomes…* | ✅ |
+| Separate addresses remain separate and IPv6 privacy addresses share a `/64`; proxy headers are trusted only on the Vercel/Caddy paths | `api/driver-registration.test.ts`, `api/registration-address.test.ts` | ✅ |
+| User, driver, session and audit commit together or all roll back; PostgreSQL serializes concurrent claims and duplicate provisioning across repository instances | `db/driver-registration-postgres.test.ts` (5 cases) | ✅ PostgreSQL 17.6 |
+| Login/register switching, required fields, normalized username, eight-character password and client-only matching confirmation stay wired | `driver/driver-registration.test.ts` | ✅ |
+| Full repository and production-build gates | `pnpm check`: 3,190 passed, 18 expected PostgreSQL-only skips; `pnpm --filter @ash/driver build` | ✅ |
+
+## 2026-09-18 finance and fleet redesign — P3/P4/P6 and C1–C6
+
+| Gate | Named test | Result |
+| --- | --- | --- |
+| HQ is not a branch; its close needs no cash count and its trial balance is per currency | `api/company-branch.test.ts`, `db/migration-0065-0066.test.ts`, `db/company-ledger-postgres.test.ts` | ✅ |
+| Company commands are actor-bound, immutable, dual-currency, rate-frozen, idempotent and cannot overdraw a protected pocket | `db/company-commands-postgres.test.ts` — *company_moves*, *company_expenses and company_incomes*, *company_fx_exchanges*, *company_reversals* | ✅ PostgreSQL 17.6 |
+| Cutover moves the exact opening once; every later branch company-box movement has one exact HQ mirror and the invariant survives randomized activity | `db/company-commands-postgres.test.ts` — *cutover and the restoration mirror* | ✅ PostgreSQL 17.6 |
+| Public company routes preserve permission, identity, balances, exchange, reversal and lock ordering | `api/company-finance.test.ts`, `api/company-fund.test.ts` | ✅ |
+| Debt payments/write-offs, financed assets, 36 exact periods and FIFO depreciation are indivisible guarded commands | `domain/assets/depreciation.test.ts`, `api/company-finance.test.ts`, `db/company-commands-postgres.test.ts` | ✅ |
+| Linked asset finance appears only to company managers in bounded vehicle history | `api/fleet.test.ts` — `GET /vehicles/:id/history (P6)`; `admin/vehicle-history.test.ts` | ✅ |
+| Dashboard money stays bigint; all eight sections, filtered drills, fleet performance and branch/company/combined frozen-rate profit remain wired | `api/dashboard.test.ts`, `admin/dashboard-redesign.test.ts` | ✅ |
+| Company recurring dues are read-only until a human pays/skips; a payment creates one HQ expense command; PostgreSQL enforces HQ and permission | `api/company-recurring.test.ts`, `db/recurrence-parity-postgres.test.ts` — *keeps company schedules in HQ…* | ✅ |
+| Focused completion gate | API finance/dashboard/recurrence: 104/104; admin dashboard/company/recurrence/history: 27/27; PostgreSQL company commands + recurrence: 33/33 | ✅ |
+| Full repository gate | `pnpm check`: every static check plus 3,168 passed tests; 17 expected PostgreSQL-only skips rerun separately where relevant | ✅ |
+
+## 2026-09-17 P4 — recurring branch expenses and non-shift receipts
+
+| Gate | Named test | Result |
+| --- | --- | --- |
+| The three schedule predicates, boundaries, due buckets and payment-date rule agree with brute force | `domain/expenses/recurrence.test.ts` (21 tests, including four fast-check properties) | ✅ |
+| A due read creates no accounting row; pay and skip remain explicit, idempotent human decisions | `api/recurring-expenses.test.ts` (11 tests) | ✅ |
+| Pay reuses the ordinary expense journal recipe exactly once, including after its week later closes | `api/recurring-expenses.test.ts` — *pays through the ordinary expense recipe exactly once* / *replays a committed payment before a newly closed week is revalidated* | ✅ |
+| Receipt bytes are magic-byte checked, content-addressed and usable by manual and recurring expenses | `api/recurring-expenses.test.ts`, `api/expenses.test.ts`, `api/settings.test.ts` | ✅ |
+| Memory and PostgreSQL repositories round-trip the same records and roll back with the financial unit of work | shared `testkit/conformance.ts` — *recurring expenses* (2 cases) | ✅ memory + PostgreSQL |
+| The immutable SQL predicate agrees with TypeScript; invalid dates/deactivation/history edits and runtime mutation fail; audit rows exist | `db/recurrence-parity-postgres.test.ts` (3 cases on disposable PostgreSQL) | ✅ PostgreSQL 17.6 |
+| The approved log / due / fixed-template tabs and all four explicit actions stay wired | `admin/recurring-expenses-wiring.test.ts` (3 source pins) | ✅ |
+
+## 2026-08-26 closing-battery gate — the read the driver never saw
+
+Full `pnpm check` passes **2,207 tests**. The regression had been live since 2026-08-14 and no test
+caught it, because the only test over that path matched source text without executing it.
+
+| # | What it pins | Named test | Result |
+| --- | --- | --- | --- |
+| B1 | The shape the API really sends (`{draft, rows, fields}`) yields a COMPLETE read, and the old expression throws on it | `linked-bms-read-state.test.ts` › *accepts the response shape the API really sends* | ✅ |
+| B2 | The status is read for the requested slot, so one pack cannot suppress the other | `linked-bms-read-state.test.ts` › *reads the status of the requested slot, not of some other pack* | ✅ |
+| B3 | A terminal failure reports its own reason, not a blanket `unavailable` | `linked-bms-read-state.test.ts` › *reports the server-recorded failure reason…* | ✅ |
+| B4 | The decision never throws on any malformed payload — the defect was an exception, not a wrong answer | `linked-bms-read-state.test.ts` › *never throws, whatever the server sends* | ✅ |
+
+## 2026-08-26 overlapping-scan gate — the duplicate hint and the read guard (`0045`)
+
+Full `pnpm check` passes **2,201 tests** with the same 12 PostgreSQL-only skips. Each test below was
+proven to fail before its fix; the domain detector was additionally mutation-checked — inverting the
+maximal-overlap search, comparing magnitudes instead of signed amounts, letting an unread amount
+match, and dropping the clock refutation each fail a distinct named test.
+
+| # | What it pins | Named test | Result |
+| --- | --- | --- | --- |
+| D1 | The two rows ثائر photographed twice are found, and the match is labelled amount-only | `page-overlap.test.ts` › *finds the two rows photographed twice, and says the match is amount-only* | ✅ |
+| D2 | The answer does not depend on which page is passed first, or on slot names | `page-overlap.test.ts` › *does not care which page it is handed first* | ✅ |
+| D3 | A deduction never matches an order of the same magnitude | `page-overlap.test.ts` › *keeps a deduction distinct from an order of the same magnitude* | ✅ |
+| D4 | A disagreeing clock or route refutes; a missing one is neutral | `page-overlap.test.ts` › *is refuted by a printed clock that disagrees* | ✅ |
+| D5 | Pairs are a contiguous suffix/prefix run of equal amounts (fast-check) | `page-overlap.test.ts` › *pairs are a contiguous suffix/prefix run of equal amounts* | ✅ |
+| D6 | The manager's review names both duplicated orders and the page each came from | `scan-page-overlap.test.ts` › *names the two rows the second photo repeated…* | ✅ |
+| D7 | **The hint changes nothing** — br1, ordersHash, every `included`, every decision field | `scan-page-overlap.test.ts` › *changes no money, no inclusion and no hash by being there* | ✅ |
+| D8 | A page read twice is still one page, not ten rows | `scan-page-overlap.test.ts` › *reads a twice-read page as one page, not as ten rows* | ✅ |
+| D9 | The hint never reaches the driver's own shift state | `scan-page-overlap.test.ts` › *keeps the hint off the driver-facing shift state* | ✅ |
+| D10 | The hint component has no button, no `revise(`, no `included` | `approval-duplicate-hint-wiring.test.ts` › *never lets the hint itself change an operation* | ✅ |
+| D11 | The incident replayed: a second read writes no row and no sightings | `close-draft-repeat-read.test.ts` › *replays the incident: a second read of the same photo changes nothing* | ✅ |
+| D12 | Two in-flight reads of one photo coalesce | `close-draft-repeat-read.test.ts` › *coalesces two in-flight reads of the same photo* | ✅ |
+| D13 | A genuinely failed read is still retryable; a replaced photo is a new page | `close-draft-repeat-read.test.ts` › *still allows a retry after a failed read* | ✅ |
+| D14 | Where two reads do land, `clientKey` still collapses them to one order per row | `close-draft-repeat-read.test.ts` › *still collapses duplicate sightings to one order per row…* | ✅ |
+| D15 | `0045` is an index and a comment — never a UNIQUE index or a raising trigger | `migration-0045.test.ts` › *never turns the invariant into a constraint that could abort a deploy or a close* | ✅ |
+
+**CI-only:** the `PgCloseDraftRepo` half of `listObservationsByShift` and the SQL guard inside
+`saveRead` run only against real PostgreSQL. There is no local Postgres on the build machine.
+
 ## 2026-08-26 live release gate — attachment-bound OCR and funding (`0041`–`0044`)
 
 Release commit `5d76a539af517a914c59a455cdc8c2d3bafb4ce6` passed the full local Node 24

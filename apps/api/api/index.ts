@@ -42,6 +42,7 @@ async function getApp(): Promise<FastifyInstance> {
       logger: true,
       splitGate: config.BR1_SPLIT_GATE,
       maxOcrReadsPerShift: config.OCR_MAX_READS_PER_SHIFT,
+      driverSelfRegistrationEnabled: config.DRIVER_SELF_REGISTRATION_ENABLED,
     })
     await app.ready()
     return app

@@ -9,6 +9,8 @@ import {
   postingsForApproval,
   postingsForOpen,
   receivableAdjustment,
+  receivableWriteoff,
+  RECEIVABLE_WRITEOFF_LOSS_COST_CENTER,
   walletCarry,
 } from '../../src/ledger/recipes.ts'
 import { type Minor, minor } from '../../src/money/minor.ts'
@@ -166,5 +168,27 @@ describe('create shift funding, open with it, close flat', () => {
     const open = floatCarry(DRIVER, amount)
     expect(balance([ordinary, open], `driver_receivable_cash:${DRIVER}`)).toBe(amount)
     expect(balance([ordinary, open], `driver_shift_funding_cash:${DRIVER}`)).toBe(-amount)
+  })
+})
+
+describe('ordinary receivable write-off', () => {
+  it.each(['cash', 'wallet'] as const)('moves %s debt to the dedicated loss account without touching an office fund', (channel) => {
+    const amount = syp(12_500)
+    const posting = receivableWriteoff(DRIVER, channel, amount, `writeoff-${channel}`)
+
+    expect(posting.eventType).toBe('receivable_adjustment')
+    expect(posting.occurrenceKey).toBe(`writeoff-${channel}`)
+    expect(balance([posting], `driver_receivable_${channel}:${DRIVER}`)).toBe(-amount)
+    expect(balance([posting], `cost_center:${RECEIVABLE_WRITEOFF_LOSS_COST_CENTER}`)).toBe(amount)
+    expect(balance([posting], 'office_cash')).toBe(0n)
+    expect(balance([posting], 'office_wallet')).toBe(0n)
+    expect(posting.lines).toEqual(expect.arrayContaining([
+      expect.objectContaining({ side: 'D', amount, role: 'receivable_writeoff_loss' }),
+      expect.objectContaining({ side: 'C', amount, role: 'receivable_written_off' }),
+    ]))
+  })
+
+  it.each([minor(0n), minor(-1n)])('rejects a non-positive amount (%s)', (amount) => {
+    expect(() => receivableWriteoff(DRIVER, 'cash', amount, 'invalid')).toThrow(RangeError)
   })
 })

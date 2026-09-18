@@ -65,6 +65,16 @@ export type PermissionKey =
    * data, so one row changes it if the client disagrees.
    */
   | 'fleet.manage'
+  /**
+   * «إدارة صندوق الشركة» — see and move صندوق الشركة (`company_box`).
+   *
+   * The §3 matrix has no row for it. Until 2026-09-17 the company fund was READ under
+   * `profit.view_total` (GM + sysadmin) but WRITTEN under `journal.manual.write`, which the branch
+   * manager holds — so he could deposit into and withdraw from a fund he was not allowed to see.
+   * Owner decision (2026-09-17): «إدارة صندوق الشركة: المدير العام ومدير النظام فقط». One key now
+   * gates the read and both writes, so the two can never drift apart again.
+   */
+  | 'company_fund.manage'
 
 export type GrantTable = Readonly<Partial<Record<PermissionKey, Readonly<Partial<Record<RoleKey, Scope>>>>>>
 
@@ -105,10 +115,11 @@ export const DEFAULT_GRANTS: GrantTable = {
   'week.close': { system_admin: 'all' },
   'profit.view_total': { system_admin: 'all', general_manager: 'all' },
   'branch_data.view': { branch_manager: 'branch', system_admin: 'all', general_manager: 'all' },
-  // Live tracking is an UPPER-LEVEL view (owner's decision): the branch manager runs his branch from
-  // the shift screens, not by watching where each driver is standing. Removing the grant — rather
-  // than hiding the menu item — is what actually withholds it, since `GET /gps/live` checks this.
-  'gps.view': { system_admin: 'all', general_manager: 'all' },
+  // The branch manager is the one who actually dispatches, so he sees his own branch (owner,
+  // 2026-09-08). This RESTORES SRS §3, which granted him «التتبع الحي GPS ✓ (فرعه)» all along; the
+  // earlier «upper-level only» reading had been carried into the SRS transcription in
+  // `matrix.test.ts` as well, which is what quietly defeated that file's independent cross-check.
+  'gps.view': { branch_manager: 'branch', system_admin: 'all', general_manager: 'all' },
   'user.manage': { system_admin: 'all', general_manager: 'all' },
   'driver_earnings.view': {
     driver: 'own',
@@ -119,6 +130,9 @@ export const DEFAULT_GRANTS: GrantTable = {
   'audit.view': { system_admin: 'all', general_manager: 'all' },
   'settings.write': { system_admin: 'all' },
   'fleet.manage': { branch_manager: 'branch', system_admin: 'all', general_manager: 'all' },
+  // Deliberately NOT the branch manager — see the rationale on the PermissionKey union. Seeded into a
+  // live `role_permissions` by migration 0064, because this constant only seeds a fresh database.
+  'company_fund.manage': { system_admin: 'all', general_manager: 'all' },
   // `accountant` (س77) is seeded with no grants at all — enabling the role is a data change,
   // not a migration. See ASSUMPTIONS A-17.
 }
@@ -248,6 +262,7 @@ export const ALL_PERMISSIONS: readonly PermissionKey[] = [
   'audit.view',
   'settings.write',
   'fleet.manage',
+  'company_fund.manage',
 ]
 
 export const ALL_ROLES: readonly RoleKey[] = [

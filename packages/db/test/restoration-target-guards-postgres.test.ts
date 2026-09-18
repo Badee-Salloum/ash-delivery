@@ -121,6 +121,7 @@ const post = async (
     postingDate: DATE,
     weekStartDate: WEEK,
     fxDayId: Number(fx.rows[0]!.id),
+    sypMinorPerUsd: null,
     createdBy: fixture.managerId,
     reason,
   })
@@ -138,6 +139,29 @@ const makeLeg = (
   return {
     fundCode,
     counted: formatMinor(minor(counted)),
+    receivables: formatMinor(minor(receivables)),
+    position: formatMinor(minor(position)),
+    capitalTarget: formatMinor(minor(target)),
+    delta: formatMinor(minor(delta)),
+    direction: delta === 0n ? null : delta > 0n ? 'to_company' : 'from_company',
+    amount: formatMinor(minor(amount)),
+    feasible: true,
+    refusals: [],
+  }
+}
+
+const makeLedgerLeg = (
+  fundCode: 'office_cash' | 'office_wallet',
+  officeBalance: bigint,
+  receivables: bigint,
+  target: bigint,
+) => {
+  const position = officeBalance + receivables
+  const delta = position - target
+  const amount = delta < 0n ? -delta : delta
+  return {
+    fundCode,
+    officeBalance: formatMinor(minor(officeBalance)),
     receivables: formatMinor(minor(receivables)),
     position: formatMinor(minor(position)),
     capitalTarget: formatMinor(minor(target)),
@@ -675,6 +699,118 @@ if (!DATABASE_URL) {
       }
     })
 
+    it('accepts an exact v3 live-ledger snapshot, rejects a stale one, and stores no count identity', async () => {
+      await assertDisposableDatabaseConnection(pool, disposable)
+      await migrate(pool)
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const fixture = await createFixture(client, 'LEDGER-V3')
+
+        const insertMalformedVersion = (plan: unknown) => client.query(
+          `INSERT INTO restorations
+             (branch_id, business_date, cash_count_id, plan, net_to_company_minor, reason, performed_by)
+           VALUES ($1, $2, NULL, $3::jsonb, 0, 'malformed restoration version', $4)`,
+          [fixture.branchId, DATE, JSON.stringify(plan), fixture.managerId],
+        )
+        for (const [savepoint, plan] of [
+          ['missing_schema_version', {}],
+          ['null_schema_version', { schemaVersion: null }],
+        ] as const) {
+          await client.query(`SAVEPOINT ${savepoint}`)
+          await expect(insertMalformedVersion(plan)).rejects.toMatchObject({
+            code: '23514',
+            constraint: 'restorations_plan_version_guard',
+          })
+          await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`)
+        }
+
+        await putTargets(client, fixture)
+        const cashOpening = CASH_TARGET + 100n
+        await post(client, pool, fixture, [{
+          eventType: 'manual',
+          occurrenceKey: `restoration-v3-opening-${fixture.suffix}`,
+          lines: [
+            { fund: { kind: 'office_cash' }, side: 'D', amount: minor(cashOpening) },
+            { fund: { kind: 'office_wallet' }, side: 'D', amount: minor(WALLET_TARGET) },
+            { fund: { kind: 'company_box' }, side: 'C', amount: minor(cashOpening + WALLET_TARGET) },
+          ],
+        }], 'ledger v3 opening balances')
+
+        const planFor = (journalId: number | string) => ({
+          schemaVersion: 3,
+          source: 'live_ledger',
+          openingBalances: [
+            { fundCode: 'office_cash', balance: formatMinor(minor(cashOpening)) },
+            { fundCode: 'office_wallet', balance: formatMinor(minor(WALLET_TARGET)) },
+          ],
+          restorationJournalEntryIds: [journalId],
+          legs: [
+            makeLedgerLeg('office_cash', cashOpening, 0n, CASH_TARGET),
+            makeLedgerLeg('office_wallet', WALLET_TARGET, 0n, WALLET_TARGET),
+          ],
+        })
+        const insertV3 = (plan: ReturnType<typeof planFor>) => client.query(
+          `INSERT INTO restorations
+             (branch_id, business_date, cash_count_id, plan, net_to_company_minor, reason, performed_by)
+           VALUES ($1, $2, NULL, $3::jsonb, $4, $5, $6)`,
+          [fixture.branchId, DATE, JSON.stringify(plan), 100n, 'ledger v3 restoration', fixture.managerId],
+        )
+
+        // A branch-money write after the snapshot cannot be silently folded into the restoration.
+        await client.query('SAVEPOINT stale_v3_snapshot')
+        await post(client, pool, fixture, [{
+          eventType: 'manual',
+          occurrenceKey: `restoration-v3-drift-${fixture.suffix}`,
+          lines: [
+            { fund: { kind: 'office_cash' }, side: 'D', amount: minor(1n) },
+            { fund: { kind: 'company_box' }, side: 'C', amount: minor(1n) },
+          ],
+        }], 'post-snapshot drift')
+        const [staleJournal] = await post(
+          client,
+          pool,
+          fixture,
+          [sweepToCompany('office_cash', minor(100n), `${DATE}:office_cash`)],
+          'ledger v3 restoration',
+        )
+        await expect(insertV3(planFor(staleJournal!.id))).rejects.toMatchObject({
+          code: '23514',
+          constraint: 'restorations_opening_balance_guard',
+        })
+        await client.query('ROLLBACK TO SAVEPOINT stale_v3_snapshot')
+
+        const [journal] = await post(
+          client,
+          pool,
+          fixture,
+          [sweepToCompany('office_cash', minor(100n), `${DATE}:office_cash`)],
+          'ledger v3 restoration',
+        )
+        await insertV3(planFor(journal!.id))
+        await client.query('SET CONSTRAINTS restoration_journal_fact_from_entry IMMEDIATE')
+        const saved = await client.query<{ cash_count_id: bigint | null; plan: { schemaVersion: number } }>(
+          'SELECT cash_count_id, plan FROM restorations WHERE branch_id = $1 AND business_date = $2',
+          [fixture.branchId, DATE],
+        )
+        expect(saved.rows[0]).toMatchObject({ cash_count_id: null, plan: { schemaVersion: 3 } })
+
+        await client.query('SAVEPOINT mutate_v3_fact')
+        await expect(
+          client.query(
+            `UPDATE restorations SET reason = 'rewritten'
+              WHERE branch_id = $1 AND business_date = $2`,
+            [fixture.branchId, DATE],
+          ),
+        ).rejects.toMatchObject({ code: '55000', constraint: 'restorations_immutable_guard' })
+        await client.query('ROLLBACK TO SAVEPOINT mutate_v3_fact')
+        await client.query('ROLLBACK')
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+      }
+    })
+
     it('serializes target publication and cash-count mutations behind restoration publication', async () => {
       await assertDisposableDatabaseConnection(pool, disposable)
       await migrate(pool)
@@ -697,17 +833,19 @@ if (!DATABASE_URL) {
         await targetWaiter.query("SET LOCAL statement_timeout = '5s'")
         await setActor(targetWaiter, fixture.managerId)
         const targetPid = await targetWaiter.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
-        const targetUpdate = targetWaiter.query(
-          `UPDATE office_capital_targets SET note = 'concurrent rewrite'
-            WHERE branch_id = $1 AND fund_code = 'office_cash' AND effective_from = $2`,
-          [fixture.branchId, DATE],
-        )
-        await waitForLock(pool, targetPid.rows[0]!.pid)
-        await setup.query('COMMIT')
-        await expect(targetUpdate).rejects.toMatchObject({
+        const targetUpdateRejection = expect(
+          targetWaiter.query(
+            `UPDATE office_capital_targets SET note = 'concurrent rewrite'
+              WHERE branch_id = $1 AND fund_code = 'office_cash' AND effective_from = $2`,
+            [fixture.branchId, DATE],
+          ),
+        ).rejects.toMatchObject({
           code: '55000',
           constraint: 'office_capital_targets_history_guard',
         })
+        await waitForLock(pool, targetPid.rows[0]!.pid)
+        await setup.query('COMMIT')
+        await targetUpdateRejection
         await targetWaiter.query('ROLLBACK')
       } finally {
         await setup.query('ROLLBACK').catch(() => undefined)
@@ -734,19 +872,21 @@ if (!DATABASE_URL) {
         await lineWaiter.query("SET LOCAL statement_timeout = '5s'")
         await setActor(lineWaiter, fixture.managerId)
         const linePid = await lineWaiter.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
-        const lineUpdate = lineWaiter.query(
-          `UPDATE cash_count_lines SET counted_minor = counted_minor + 1
-            WHERE cash_count_id = $1 AND fund_id = (
-              SELECT id FROM funds WHERE branch_id = $2 AND code = 'office_cash'
-            )`,
-          [evidence.countId, fixture.branchId],
-        )
-        await waitForLock(pool, linePid.rows[0]!.pid)
-        await publisher.query('COMMIT')
-        await expect(lineUpdate).rejects.toMatchObject({
+        const lineUpdateRejection = expect(
+          lineWaiter.query(
+            `UPDATE cash_count_lines SET counted_minor = counted_minor + 1
+              WHERE cash_count_id = $1 AND fund_id = (
+                SELECT id FROM funds WHERE branch_id = $2 AND code = 'office_cash'
+              )`,
+            [evidence.countId, fixture.branchId],
+          ),
+        ).rejects.toMatchObject({
           code: '55000',
           constraint: 'restorations_cash_count_immutable_guard',
         })
+        await waitForLock(pool, linePid.rows[0]!.pid)
+        await publisher.query('COMMIT')
+        await lineUpdateRejection
         await lineWaiter.query('ROLLBACK')
       } finally {
         await publisher.query('ROLLBACK').catch(() => undefined)

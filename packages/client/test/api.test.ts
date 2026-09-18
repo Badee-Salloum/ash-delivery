@@ -79,6 +79,7 @@ it('adds the selected branch exactly once to the restoration preview read', asyn
     new Response(
       JSON.stringify({
         businessDate: '2026-08-15',
+        source: 'live_ledger',
         counted: true,
         alreadyRestored: false,
         legs: [],
@@ -93,13 +94,52 @@ it('adds the selected branch exactly once to the restoration preview read', asyn
   const api = new ApiClient('/api')
   api.setBranch('branch-1')
 
-  await api.restorationPreview()
+  const preview = await api.restorationPreview()
+
+  expect(preview.source).toBe('live_ledger')
 
   expect(fetchMock).toHaveBeenCalledWith('/api/treasury/restoration/preview?branchId=branch-1', {
     method: 'GET',
     credentials: 'include',
     headers: { 'content-type': 'application/json' },
   })
+})
+
+it('normalizes the legacy restoration balance field without exposing the old count gate', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        businessDate: '2026-08-31',
+        counted: false,
+        alreadyRestored: false,
+        legs: [
+          {
+            fundCode: 'office_cash',
+            counted: '52030.00',
+            receivables: '7970.00',
+            position: '60000.00',
+            capitalTarget: '60000.00',
+            delta: '0.00',
+            direction: null,
+            amount: '0.00',
+            feasible: true,
+            refusals: [],
+          },
+        ],
+        netToCompany: '0.00',
+        feasible: true,
+        refusals: [],
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+
+  const preview = await new ApiClient('/api').restorationPreview()
+
+  expect(preview).not.toHaveProperty('counted')
+  expect(preview.source).toBeUndefined()
+  expect(preview.legs[0]).toMatchObject({ officeBalance: '52030.00' })
 })
 
 it('publishes both restoration targets and their audited reason in one branch-scoped PUT', async () => {
@@ -127,6 +167,47 @@ it('publishes both restoration targets and their audited reason in one branch-sc
       branchId: 'branch-1',
     }),
   })
+})
+
+it('sends the client-owned key on company-fund moves, treasury deposits and withdrawals, with the selected branch', async () => {
+  const fetchMock = vi.fn().mockImplementation(async () =>
+    new Response(JSON.stringify({ balance: '10.00', replayed: false }), {
+      status: 201,
+      headers: { 'content-type': 'application/json' },
+    }),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+  api.setBranch('branch-1')
+  const key = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+  const posted = (url: string, body: Record<string, unknown>) => [
+    url,
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  ]
+
+  await api.companyFundDeposit('10.00', 'رأس مال', key)
+  await api.companyFundWithdraw('10.00', 'مسحوبات', key)
+  await api.treasuryDeposit('cash', '10.00', key)
+  await api.treasuryWithdraw('wallet', '10.00', 'كييش', 'company_box', key)
+
+  expect(fetchMock.mock.calls).toEqual([
+    posted('/api/company-fund/deposit', { idempotencyKey: key, amount: '10.00', reason: 'رأس مال', branchId: 'branch-1' }),
+    posted('/api/company-fund/withdraw', { idempotencyKey: key, amount: '10.00', reason: 'مسحوبات', branchId: 'branch-1' }),
+    posted('/api/treasury/deposit', { idempotencyKey: key, target: 'cash', amount: '10.00', branchId: 'branch-1' }),
+    posted('/api/treasury/withdraw', {
+      idempotencyKey: key,
+      target: 'wallet',
+      amount: '10.00',
+      to: 'company_box',
+      reason: 'كييش',
+      branchId: 'branch-1',
+    }),
+  ])
 })
 
 it('sends the client-owned expense idempotency key with the selected branch', async () => {
@@ -215,6 +296,34 @@ it('posts a direct receivable event with its client key and selected branch', as
   await api.createReceivableEvent(body)
 
   expect(fetchMock).toHaveBeenCalledWith('/api/treasury/receivables/events', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ...body, branchId: 'branch-1' }),
+  })
+})
+
+it('posts a receivable write-off without disguising it as a collection', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ id: 'writeoff-1', replayed: false }), {
+      status: 201,
+      headers: { 'content-type': 'application/json' },
+    }),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+  api.setBranch('branch-1')
+  const body = {
+    driverId: 'driver-1',
+    channel: 'wallet' as const,
+    amount: '125.00',
+    reason: 'Approved uncollectible debt',
+    idempotencyKey: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+  }
+
+  await api.writeoffReceivable(body)
+
+  expect(fetchMock).toHaveBeenCalledWith('/api/treasury/receivables/writeoffs', {
     method: 'POST',
     credentials: 'include',
     headers: { 'content-type': 'application/json' },
@@ -413,7 +522,7 @@ it('previews force-close settlement against the entered actual cash and wallet f
   )
 })
 
-it('previews a close settlement with separate cash and wallet receivable deferrals', async () => {
+it('previews next-shift funding separately from an ordinary close shortage receivable', async () => {
   const fetchMock = vi.fn().mockResolvedValue(
     new Response(JSON.stringify({ settlementHash: 'd'.repeat(64) }), {
       status: 200,
@@ -426,11 +535,68 @@ it('previews a close settlement with separate cash and wallet receivable deferra
   await api.shiftSettlement(
     'shift-4',
     undefined,
-    { cashReceivableDeferred: '6000.00', walletReceivableDeferred: '1000.00' },
+    {
+      cashReceivableDeferred: '6000.00',
+      walletReceivableDeferred: '1000.00',
+      cashShortageReceivable: '400.00',
+    },
   )
 
   expect(fetchMock).toHaveBeenCalledWith(
-    '/api/shifts/shift-4/settlement?cashReceivableDeferred=6000.00&walletReceivableDeferred=1000.00',
+    '/api/shifts/shift-4/settlement?cashReceivableDeferred=6000.00&walletReceivableDeferred=1000.00&cashShortageReceivable=400.00',
+    expect.objectContaining({ method: 'GET', credentials: 'include' }),
+  )
+})
+
+it('normalizes an older settlement response without close-shortage fields instead of crashing review', async () => {
+  const legacy = {
+    policyCode: 'fixed_40_cash_close_v2_receivable',
+    driverRateBps: 4000,
+    deliveryFeeTotal: '1000.00',
+    fixedDriverShare: '400.00',
+    manualDriverShare: '0.00',
+    grossDriverShare: '400.00',
+    cashDeductionTotal: '0.00',
+    baseDriverShare: '400.00',
+    expectedTotal: '1800.00',
+    actualCash: '1300.00',
+    actualWallet: '500.00',
+    actualTotal: '1800.00',
+    variance: '0.00',
+    varianceDirection: 'balanced',
+    finalEmployeeCash: '400.00',
+    cashClaimToOffice: '900.00',
+    walletClaimToOffice: '500.00',
+    cashReceivableDeferred: '0.00',
+    walletReceivableDeferred: '0.00',
+    walletToOffice: '500.00',
+    cashToOffice: '900.00',
+    walletAction: 'collect',
+    walletAmount: '500.00',
+    cashAction: 'collect',
+    cashAmount: '900.00',
+    settlementHash: 'e'.repeat(64),
+  }
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(JSON.stringify(legacy), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+
+  await expect(api.shiftSettlement('shift-legacy', undefined, {
+    cashReceivableDeferred: '0',
+    walletReceivableDeferred: '0',
+    cashShortageReceivable: '0',
+  })).resolves.toMatchObject({
+    maximumCashShortageReceivable: '0.00',
+    cashShortageReceivable: '0.00',
+    settlementHash: legacy.settlementHash,
+  })
+  expect(fetchMock).toHaveBeenCalledWith(
+    '/api/shifts/shift-legacy/settlement?cashReceivableDeferred=0&walletReceivableDeferred=0&cashShortageReceivable=0',
     expect.objectContaining({ method: 'GET', credentials: 'include' }),
   )
 })

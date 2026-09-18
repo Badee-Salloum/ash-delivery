@@ -1,0 +1,31 @@
+/*
+ * The Arabic typeface, self-hosted.
+ *
+ * WHY THIS FILE EXISTS AT ALL. Both front-ends have declared `font-family: 'IBM Plex Sans Arabic'`
+ * since the project started, and neither has ever loaded it: there is no <link>, no @font-face and
+ * no font file anywhere in the repo. Every screen has silently been rendering in `system-ui` — on
+ * Android and most Linux that resolves to a face with poor Arabic. This is the cheapest visual
+ * improvement available to this product.
+ *
+ * WHY NOT GOOGLE FONTS, which is how the sibling product does it. `infra/caddy/Caddyfile` sets
+ * `font-src 'self'` and says why: "no CDN, no Google Fonts, no third-party analytics. Sanctions and
+ * geo-blocking from Damascus cannot break what is not fetched from elsewhere." Copying their
+ * `@import url(https://fonts.googleapis.com/...)` would be blocked by our own CSP in production and
+ * reproduce exactly the bug this file fixes — a declared font that never arrives.
+ *
+ * WHY THE COMBINED WEIGHT FILES and not the per-subset ones. Fontsource ships both. Only the
+ * combined `<weight>.css` carries `unicode-range`; the per-subset files (`arabic-400.css`,
+ * `latin-400.css`) do not. Importing those two would declare two faces with IDENTICAL descriptors —
+ * same family, same weight, same style — and the last one parsed would win outright, so either the
+ * Arabic or the Latin half of every screen would silently fall back. The combined files declare all
+ * four subsets with ranges, and the browser fetches only the two this product actually uses: Arabic
+ * for the interface, Latin for the money.
+ *
+ * Fontsource already sets `font-display: swap`. That is the right call here and is left alone: a
+ * manager staring at invisible figures while a font loads is worse than one brief reflow.
+ */
+
+@import '@fontsource/ibm-plex-sans-arabic/400.css';
+@import '@fontsource/ibm-plex-sans-arabic/500.css';
+@import '@fontsource/ibm-plex-sans-arabic/600.css';
+@import '@fontsource/ibm-plex-sans-arabic/700.css';

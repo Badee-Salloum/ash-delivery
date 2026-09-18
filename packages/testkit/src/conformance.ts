@@ -1,21 +1,54 @@
 import { describe, expect, it } from 'vitest'
 import type {
   BatteryReadingRecord,
+  BatterySwapRecord,
+  CompanyCommandRecord,
   Deps,
   ExpenseRecord,
+  RecurringExpenseOccurrenceRecord,
+  RecurringExpenseTemplateRecord,
+  GpsPingRecord,
   NewShiftSettlementRecord,
   OcrReadClaimInput,
   OcrReadCompletion,
   OcrResult,
   ShiftRecord,
 } from '@ash/contracts'
+// P2 — the range read model conformance.
+import type { JournalEntryRecord, LedgerRangeRecord } from '@ash/contracts'
+import { serializeMoney } from '@ash/contracts'
+import { lockBranchThenCompany } from '@ash/contracts'
 import {
+  type Currency,
+  type FundRef,
   type Posting,
   cashSettledReturnPostings,
+  companyDeposit,
+  companyExpense,
+  companyFxExchange,
+  companyIncome,
+  companyOpeningTransfer,
+  companyReversal,
+  companyWithdrawal,
+  currencyOf,
+  fundCode,
+  manualKaish,
   minor,
+  money,
   planFixedShareSettlement,
   receivableAdjustment,
+  restorationMirror,
 } from '@ash/domain'
+import {
+  expense as expensePosting,
+  planRestoration,
+  postingsForRestoration,
+  reverse,
+  weekStartFor,
+} from '@ash/domain'
+
+/** `Omit` that keeps a union a union. */
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never
 
 /**
  * The conformance suite.
@@ -29,12 +62,28 @@ import {
  */
 
 export interface ConformanceContext {
-  /** A fresh, empty set of dependencies. Called before every test. */
+  /**
+   * A fresh, empty set of dependencies. Called before every test.
+   *
+   * The directory must hold exactly two rows: the operating branch `BRANCH` (DAM, kind `branch`) and
+   * the company row `COMPANY_BRANCH` (HQ, kind `company`, branch number 0) — what migration 0066 and
+   * `seedReferenceData` leave in a real database.
+   */
   makeDeps(): Promise<Deps> | Deps
   /** Optional teardown (close a pool, drop a schema). */
   cleanup?(deps: Deps): Promise<void> | void
+  /**
+   * Plant a fund row whose stored currency is `currency`, as a hand-written SQL insert could have
+   * left it — so the suite can prove both adapters refuse to post through a mismatched fund.
+   */
+  plantFund(deps: Deps, branchId: string, fund: { code: string; type: string; currency: Currency }): Promise<void>
   label: string
 }
+
+/** The company (HQ) row — the fixed id migration 0066 and `seedReferenceData` both write. */
+export const COMPANY_BRANCH = '10000000-0000-4000-8000-000000000100'
+/** The operating branch every conformance fixture uses. */
+export const CONFORMANCE_BRANCH = '11111111-1111-1111-1111-111111111111'
 
 const syp = (n: number) => minor(BigInt(n) * 100n)
 
@@ -45,6 +94,7 @@ const OTHER_SHIFT = '55555555-5555-5555-5555-555555555556'
 const DRIVER = '77777777-7777-7777-7777-777777777777'
 const OTHER_DRIVER = '77777777-7777-7777-7777-777777777778'
 const OTHER_VEHICLE = '88888888-8888-8888-8888-888888888889'
+const VEHICLE = '88888888-8888-8888-8888-888888888888'
 const BATTERY = '99999999-aaaa-4aaa-8aaa-aaaaaaaaaaa1'
 const MEDIA_1 = '99999999-bbbb-4bbb-8bbb-bbbbbbbbbbb1'
 const MEDIA_2 = '99999999-bbbb-4bbb-8bbb-bbbbbbbbbbb2'
@@ -64,6 +114,7 @@ const settlement = (overrides: Partial<NewShiftSettlementRecord> = {}): NewShift
   grossDriverShare: syp(40_000),
   cashDeductionTotal: syp(0),
   baseDriverShare: syp(40_000),
+  managerCharge: syp(0),
   expectedTotal: syp(230_000),
   actualCash: syp(240_000),
   actualWallet: syp(-10_000),
@@ -75,6 +126,8 @@ const settlement = (overrides: Partial<NewShiftSettlementRecord> = {}): NewShift
   walletClaimToOffice: syp(-10_000),
   cashReceivableDeferred: syp(0),
   walletReceivableDeferred: syp(0),
+  maximumCashShortageReceivable: syp(0),
+  cashShortageReceivable: syp(0),
   walletToOffice: syp(-10_000),
   cashToOffice: syp(200_000),
   walletAction: 'fund',
@@ -127,6 +180,7 @@ const META = {
   postingDate: '2026-07-21',
   weekStartDate: '2026-07-19',
   fxDayId: 1,
+  sypMinorPerUsd: null,
   createdBy: USER,
 }
 
@@ -178,6 +232,7 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
             postingDate: record.businessDate,
             weekStartDate: '2026-07-19',
             fxDayId: 1,
+            sypMinorPerUsd: null,
             createdBy: USER,
             ...(record.varianceReason === null ? {} : { reason: record.varianceReason }),
           },
@@ -226,6 +281,578 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
 
         await deps.shifts.update({ ...original, state: 'pending_review' }, USER)
         expect(await deps.shifts.countOpenActorsForBranch(BRANCH)).toEqual({ drivers: 0, vehicles: 0 })
+      })
+    })
+
+    // ── P2: the range read model and the timing-only shift read ──────────────────────────────
+    describe('P2 range read model (LedgerRangeSource) and shift timing', () => {
+      const WEEK_ONE = '2026-07-19'
+      const WEEK_TWO = '2026-07-26'
+      const RANGE_REASON = 'range read model conformance'
+
+      interface RangeFixture {
+        kaishAmount: bigint
+        shahnAmount: bigint
+      }
+
+      /**
+       * Everything the dashboard's range read has to get right, posted through the real ports:
+       * a settled shift approval (its share_split must NOT count as legacy share), a legacy shift
+       * with a deduction overflow, a shift-less legacy share line, a vehicle expense on a bare-uuid
+       * cost centre, owner funding into the office boxes and the company fund, a ledger-backed
+       * restoration (one كييش leg, one شحن leg), corrections of both, and a reversal of the شحن
+       * correction in the NEXT financial week — whose original lives outside a second-week range.
+       */
+      async function seedRangeFixture(deps: Deps): Promise<RangeFixture> {
+        const fxDayId = (await deps.fx.idFor('2026-07-21')) ?? await deps.fx.upsert({
+          businessDate: '2026-07-21',
+          sypMinorPerUsd: 13_000n,
+          provisional: false,
+        })
+        const on = (businessDate: string, shiftId: string | null, reason?: string) => ({
+          shiftId,
+          businessDate,
+          postingDate: businessDate,
+          weekStartDate: weekStartFor(businessDate),
+          fxDayId,
+          // Branch postings carry no USD line, so they freeze no rate (C1: the field is required).
+          sypMinorPerUsd: null,
+          createdBy: USER,
+          ...(reason === undefined ? {} : { reason }),
+        })
+
+        // A settled shift: its gross share_split is on the ledger, but its settlement decides.
+        await deps.ledger.post(BRANCH, [{
+          eventType: 'share_split',
+          occurrenceKey: 'range-split',
+          lines: [
+            { fund: { kind: 'fee_earned' }, side: 'D', amount: syp(100_000) },
+            { fund: { kind: 'driver_share_payable', driverId: DRIVER }, side: 'C', amount: syp(40_000), role: 'driver_share' },
+            { fund: { kind: 'company_revenue' }, side: 'C', amount: syp(40_000) },
+            { fund: { kind: 'yalago_income' }, side: 'C', amount: syp(20_000) },
+          ],
+        }], on('2026-07-21', SHIFT))
+        await createAndApproveSettlement(deps, settlement())
+
+        // A legacy shift with no settlement, one day earlier, on the other seeded driver and bike.
+        const original = await deps.shifts.findById(SHIFT)
+        if (!original) throw new Error('conformance shift missing')
+        await deps.shifts.create({
+          ...original,
+          id: OTHER_SHIFT,
+          driverId: OTHER_DRIVER,
+          vehicleId: OTHER_VEHICLE,
+          state: 'draft',
+          businessDate: '2026-07-20',
+          shiftNo: 1,
+          submittedAt: null,
+          approvedBy: null,
+          keptAsReceivable: minor(0n),
+          walletDiff: null,
+        }, USER)
+        await deps.ledger.post(BRANCH, [
+          {
+            eventType: 'share_split',
+            occurrenceKey: 'legacy-split',
+            lines: [
+              { fund: { kind: 'fee_earned' }, side: 'D', amount: syp(5_000) },
+              { fund: { kind: 'driver_share_payable', driverId: OTHER_DRIVER }, side: 'C', amount: syp(2_000), role: 'driver_share' },
+              { fund: { kind: 'company_revenue' }, side: 'C', amount: syp(2_000) },
+              { fund: { kind: 'yalago_income' }, side: 'C', amount: syp(1_000) },
+            ],
+          },
+          {
+            eventType: 'driver_cash_deduction',
+            occurrenceKey: 'legacy-deduction',
+            lines: [
+              { fund: { kind: 'driver_share_payable', driverId: OTHER_DRIVER }, side: 'D', amount: syp(300), role: 'cash_deduction_share' },
+              { fund: { kind: 'driver_receivable_cash', driverId: OTHER_DRIVER }, side: 'D', amount: syp(100), role: 'cash_deduction_overflow' },
+              { fund: { kind: 'driver_cash', driverId: OTHER_DRIVER }, side: 'C', amount: syp(400), role: 'cash_deduction' },
+            ],
+          },
+        ], on('2026-07-20', OTHER_SHIFT))
+
+        // Shift-less: a legacy share line, the owner's capital, and a vehicle expense.
+        await deps.ledger.post(BRANCH, [{
+          eventType: 'manual',
+          occurrenceKey: 'legacy-shiftless-share',
+          lines: [
+            { fund: { kind: 'office_cash' }, side: 'D', amount: syp(50) },
+            { fund: { kind: 'driver_share_payable', driverId: DRIVER }, side: 'C', amount: syp(50), role: 'driver_share' },
+          ],
+        }], on('2026-07-22', null, RANGE_REASON))
+        await deps.ledger.post(BRANCH, [{
+          eventType: 'manual',
+          occurrenceKey: 'range-owner-funding',
+          lines: [
+            { fund: { kind: 'office_cash' }, side: 'D', amount: syp(90_000) },
+            { fund: { kind: 'office_wallet' }, side: 'D', amount: syp(20_000) },
+            { fund: { kind: 'company_box' }, side: 'D', amount: syp(5_000) },
+            { fund: { kind: 'cost_center', costCenterId: 'owner_funding' }, side: 'C', amount: syp(115_000) },
+          ],
+        }], on('2026-07-21', null, RANGE_REASON))
+        await deps.ledger.post(
+          BRANCH,
+          [expensePosting('office_cash', OTHER_VEHICLE, syp(700), 'range-vehicle-expense')],
+          on('2026-07-22', null, 'charging D2'),
+        )
+
+        // A ledger-backed restoration exactly as the API performs it: sweep 50 of cash, fund 30 of wallet.
+        const kaishAmount = syp(50)
+        const shahnAmount = syp(30)
+        const restoration = await deps.financialUnitOfWork.run(
+          { lockKey: `receivables:${BRANCH}`, actorId: USER, requestId: 'range-restoration' },
+          async (tx) => {
+            const [ordinary, funding, advances] = await Promise.all([
+              tx.ledger.balancesByPrefix(BRANCH, 'driver_receivable_'),
+              tx.ledger.balancesByPrefix(BRANCH, 'driver_shift_funding_'),
+              tx.ledger.balancesByPrefix(BRANCH, 'advance_receivable_'),
+            ])
+            const prefixed = (balances: Record<string, bigint>, prefix: string): bigint =>
+              Object.entries(balances)
+                .filter(([code]) => code.startsWith(prefix))
+                .reduce((total, [, balance]) => total + balance, 0n)
+            const positionOf = async (fundCode: 'office_cash' | 'office_wallet') => {
+              const channel = fundCode === 'office_cash' ? 'cash' : 'wallet'
+              return {
+                fundCode,
+                officeBalance: await tx.ledger.fundBalance(BRANCH, fundCode),
+                receivables: minor(
+                  prefixed(ordinary, `driver_receivable_${channel}:`) + prefixed(funding, `driver_shift_funding_${channel}:`),
+                ),
+                advances: minor(prefixed(advances, `advance_receivable_${channel}:`)),
+              }
+            }
+            const cash = await positionOf('office_cash')
+            const wallet = await positionOf('office_wallet')
+            const cashTarget = minor(cash.officeBalance + cash.receivables + cash.advances - kaishAmount)
+            const walletTarget = minor(wallet.officeBalance + wallet.receivables + wallet.advances + shahnAmount)
+            for (const [fundCode, target] of [['office_cash', cashTarget], ['office_wallet', walletTarget]] as const) {
+              await tx.capitalTargets.upsert({
+                branchId: BRANCH,
+                fundCode,
+                target,
+                effectiveFrom: '2026-07-21',
+                createdBy: USER,
+                note: RANGE_REASON,
+              })
+            }
+            const plan = planRestoration([
+              { ...cash, capitalTarget: cashTarget },
+              { ...wallet, capitalTarget: walletTarget },
+            ])
+            if (!plan.feasible) throw new Error(`range restoration infeasible: ${plan.refusals.join(',')}`)
+            const postings = postingsForRestoration(plan, '2026-07-21#1')
+            const entries = await tx.ledger.post(BRANCH, postings, on('2026-07-21', null, RANGE_REASON))
+            if (entries.length !== 2) throw new Error('range restoration did not post both legs')
+            await tx.restorations.create({
+              branchId: BRANCH,
+              businessDate: '2026-07-21',
+              runNo: 1,
+              cashCountId: null,
+              plan: {
+                schemaVersion: 4,
+                source: 'live_ledger',
+                openingBalances: plan.legs.map((leg) => ({
+                  fundCode: leg.fundCode,
+                  balance: serializeMoney(leg.officeBalance),
+                })),
+                restorationJournalEntryIds: entries.map((entry) => entry.id),
+                legs: plan.legs.map((leg) => ({
+                  fundCode: leg.fundCode,
+                  officeBalance: serializeMoney(leg.officeBalance),
+                  receivables: serializeMoney(leg.receivables),
+                  advances: serializeMoney(leg.advances),
+                  position: serializeMoney(leg.position),
+                  capitalTarget: serializeMoney(leg.capitalTarget),
+                  delta: serializeMoney(leg.delta),
+                  direction: leg.direction,
+                  amount: serializeMoney(leg.amount),
+                  feasible: leg.feasible,
+                  refusals: leg.refusals,
+                })),
+              },
+              netToCompany: plan.netToCompany,
+              reason: RANGE_REASON,
+              performedBy: USER,
+            })
+            return { postings, entries }
+          },
+        )
+        const kaishIndex = restoration.postings.findIndex((posting) => posting.lines.some((line) => line.role === 'kaish'))
+        const shahnIndex = kaishIndex === 0 ? 1 : 0
+        const kaishPosting = restoration.postings[kaishIndex]!
+        const shahnPosting = restoration.postings[shahnIndex]!
+        const kaishEntry = restoration.entries.find((entry) => entry.occurrenceKey === kaishPosting.occurrenceKey)!
+        const shahnEntry = restoration.entries.find((entry) => entry.occurrenceKey === shahnPosting.occurrenceKey)!
+
+        // Corrections of both legs two days later. The شحن leg's company_box line carries no role,
+        // so its correction can only be classified by following the reversal link.
+        const shahnCorrection = reverse(shahnPosting, `reversal-of-${shahnEntry.id}`)
+        const [, shahnCorrectionEntry] = await deps.ledger.post(
+          BRANCH,
+          [reverse(kaishPosting, `reversal-of-${kaishEntry.id}`), shahnCorrection],
+          on('2026-07-23', null, RANGE_REASON),
+        )
+        if (!shahnCorrectionEntry) throw new Error('range correction did not post')
+        // The double reversal, in the next financial week.
+        await deps.ledger.post(
+          BRANCH,
+          [reverse(shahnCorrection, `reversal-of-${shahnCorrectionEntry.id}`)],
+          on('2026-07-27', null, RANGE_REASON),
+        )
+        return { kaishAmount, shahnAmount }
+      }
+
+      /**
+       * The REFERENCE: the week-walking algorithm `/dashboard/profit` and `/dashboard/treasury` ran
+       * before the range source existed, restated here on purpose rather than imported.
+       */
+      async function referenceRange(deps: Deps, from: string, to: string): Promise<LedgerRangeRecord> {
+        const all: JournalEntryRecord[] = []
+        for (const week of [WEEK_ONE, WEEK_TWO]) all.push(...(await deps.ledger.listByWeek(BRANCH, week)))
+        const byId = new Map(all.map((entry) => [entry.id, entry]))
+        const entries = all.filter((entry) => entry.businessDate >= from && entry.businessDate <= to)
+
+        const keep = (fundCode: string, role: string | undefined): boolean =>
+          ['company_revenue', 'other_income', 'yalago_income', 'company_box'].includes(fundCode) ||
+          fundCode.startsWith('cost_center:') ||
+          legacyShare(fundCode, role)
+        const legacyShare = (fundCode: string, role: string | undefined): boolean =>
+          (fundCode.startsWith('driver_share_payable:') && (role === 'driver_share' || role === 'cash_deduction_share')) ||
+          (fundCode.startsWith('driver_receivable_cash:') && role === 'cash_deduction_overflow')
+
+        const groups = new Map<string, LedgerRangeRecord['lines'][number]>()
+        const legacyByShift = new Map<string | null, bigint>()
+        const shiftIds = new Set<string>()
+        const perDay = new Map<string, { kaish: bigint; shahn: bigint }>()
+
+        const roleOf = (entry: JournalEntryRecord, line: JournalEntryRecord['lines'][number], visited = new Set<number>()): 'kaish' | 'shahn' | null => {
+          if (line.role === 'kaish' || line.role === 'shahn') return line.role
+          if (entry.eventType === 'restoration') return line.side === 'D' ? 'kaish' : 'shahn'
+          if (entry.eventType !== 'correction' || visited.has(entry.id)) return null
+          const match = /^reversal-of-(\d+)$/.exec(entry.occurrenceKey)
+          if (!match) return null
+          visited.add(entry.id)
+          const found = byId.get(Number(match[1]))
+          const foundLine = found?.lines.find((candidate) => candidate.fundCode === 'company_box')
+          return found && foundLine ? roleOf(found, foundLine, visited) : null
+        }
+
+        for (const entry of entries) {
+          if (entry.shiftId !== null) shiftIds.add(entry.shiftId)
+          for (const line of entry.lines) {
+            const signed = line.side === 'C' ? line.amount : -line.amount
+            if (legacyShare(line.fundCode, line.role)) {
+              legacyByShift.set(entry.shiftId, (legacyByShift.get(entry.shiftId) ?? 0n) + signed)
+            }
+            if (keep(line.fundCode, line.role)) {
+              const key = JSON.stringify([entry.businessDate, entry.eventType, line.fundCode, line.role ?? null, line.side])
+              const group = groups.get(key)
+              if (group) {
+                group.amount = minor(group.amount + line.amount)
+                group.lineCount += 1
+              } else {
+                groups.set(key, {
+                  businessDate: entry.businessDate,
+                  eventType: entry.eventType,
+                  fundCode: line.fundCode,
+                  role: line.role ?? null,
+                  side: line.side,
+                  currency: 'SYP_NEW',
+                  amount: minor(line.amount),
+                  lineCount: 1,
+                })
+              }
+            }
+            const carriesRole = line.role === 'kaish' || line.role === 'shahn'
+            if (line.fundCode !== 'company_box') continue
+            if (!carriesRole && entry.eventType !== 'restoration' && entry.eventType !== 'correction') continue
+            const role = roleOf(entry, line)
+            if (role === null) continue
+            const day = perDay.get(entry.businessDate) ?? { kaish: 0n, shahn: 0n }
+            if (role === 'kaish') day.kaish += line.side === 'D' ? line.amount : -line.amount
+            else day.shahn += line.side === 'C' ? line.amount : -line.amount
+            perDay.set(entry.businessDate, day)
+          }
+        }
+
+        const settlements = await deps.settlements.listByShiftIds([...shiftIds])
+        const bySettledShift = new Map(settlements.map((row) => [row.shiftId, row]))
+        let settled = 0n
+        let legacy = legacyByShift.get(null) ?? 0n
+        for (const shiftId of shiftIds) {
+          const row = bySettledShift.get(shiftId)
+          if (row) settled += row.baseDriverShare
+          else legacy += legacyByShift.get(shiftId) ?? 0n
+        }
+
+        const order = (a: string | null, b: string | null): number =>
+          a === b ? 0 : a === null ? -1 : b === null ? 1 : a < b ? -1 : 1
+        return {
+          from,
+          to,
+          lines: [...groups.values()].sort((a, b) =>
+            order(a.businessDate, b.businessDate) ||
+            order(a.eventType, b.eventType) ||
+            order(a.fundCode, b.fundCode) ||
+            order(a.role, b.role) ||
+            order(a.side, b.side),
+          ),
+          settledDriverShare: minor(settled),
+          legacyDriverShare: minor(legacy),
+          treasuryDays: [...perDay.entries()]
+            .sort(([a], [b]) => order(a, b))
+            .map(([businessDate, day]) => ({ businessDate, kaish: minor(day.kaish), shahn: minor(day.shahn) })),
+        }
+      }
+
+      it('equals the week-by-week reference for every range, including chains that leave the range', async () => {
+        const deps = await freshSettlement()
+        try {
+          const { kaishAmount, shahnAmount } = await seedRangeFixture(deps)
+          for (const [from, to] of [
+            ['2026-07-19', '2026-07-31'],
+            ['2026-07-20', '2026-07-20'],
+            ['2026-07-21', '2026-07-21'],
+            ['2026-07-22', '2026-07-23'],
+            ['2026-07-26', '2026-07-27'],
+            ['2026-07-28', '2026-08-30'],
+          ] as const) {
+            const actual = await deps.ledgerRange.readRange(BRANCH, from, to)
+            expect(actual, `${from}..${to}`).toEqual(await referenceRange(deps, from, to))
+          }
+
+          // And the reference itself says what the fixture means.
+          const whole = await deps.ledgerRange.readRange(BRANCH, '2026-07-19', '2026-07-31')
+          expect(whole.settledDriverShare).toBe(syp(40_000))
+          // 2,000 − 300 − 100 on the legacy shift, + 50 shift-less. The settled shift's 40,000 split is NOT here.
+          expect(whole.legacyDriverShare).toBe(syp(1_650))
+          expect(whole.treasuryDays).toEqual([
+            { businessDate: '2026-07-21', kaish: kaishAmount, shahn: shahnAmount },
+            { businessDate: '2026-07-23', kaish: minor(-kaishAmount), shahn: minor(-shahnAmount) },
+            { businessDate: '2026-07-27', kaish: minor(0n), shahn: shahnAmount },
+          ])
+          // The owner's company-fund deposit is on the ledger but is not a restoration flow.
+          expect(whole.lines.some((line) => line.fundCode === 'company_box' && line.eventType === 'manual')).toBe(true)
+          expect(whole.lines.find((line) => line.fundCode === `cost_center:${OTHER_VEHICLE}`)).toMatchObject({
+            businessDate: '2026-07-22',
+            eventType: 'expense',
+            side: 'D',
+            amount: syp(700),
+            lineCount: 1,
+            currency: 'SYP_NEW',
+          })
+          // Positions never enter the aggregate.
+          expect(whole.lines.some((line) => line.fundCode.startsWith('office_') || line.fundCode.startsWith('driver_cash:'))).toBe(false)
+
+          // A second-week range still classifies the double reversal through first-week originals.
+          const second = await deps.ledgerRange.readRange(BRANCH, '2026-07-26', '2026-07-27')
+          expect(second.treasuryDays).toEqual([{ businessDate: '2026-07-27', kaish: minor(0n), shahn: shahnAmount }])
+          expect(second.settledDriverShare).toBe(minor(0n))
+          expect(second.legacyDriverShare).toBe(minor(0n))
+
+          // Another branch sees nothing.
+          const elsewhere = await deps.ledgerRange.readRange('11111111-1111-1111-1111-111111111112', '2026-07-19', '2026-07-31')
+          expect(elsewhere).toEqual({
+            from: '2026-07-19',
+            to: '2026-07-31',
+            lines: [],
+            settledDriverShare: minor(0n),
+            legacyDriverShare: minor(0n),
+            treasuryDays: [],
+          })
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('knows the first day the branch ledger moved', async () => {
+        const deps = await fresh()
+        try {
+          expect(await deps.ledgerRange.firstActivityDate(BRANCH)).toBeNull()
+          await deps.ledger.post(BRANCH, [transfer('first-activity')], { ...META, businessDate: '2026-07-22' })
+          await deps.ledger.post(BRANCH, [transfer('earlier-activity')], { ...META, businessDate: '2026-07-20' })
+          expect(await deps.ledgerRange.firstActivityDate(BRANCH)).toBe('2026-07-20')
+          expect(await deps.ledgerRange.firstActivityDate('11111111-1111-1111-1111-111111111112')).toBeNull()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('lists shift timing for a date range, every state, with the window fallback', async () => {
+        const deps = await fresh()
+        try {
+          const original = await deps.shifts.findById(SHIFT)
+          if (!original) throw new Error('conformance shift missing')
+          await deps.shifts.update({
+            ...original,
+            state: 'pending_review',
+            openApprovedAt: '2026-07-21T05:00:00.000Z',
+            openApprovedBy: USER,
+            // The driver confirmed after the approval: the window opens at his confirmation.
+            windowOpensAt: '2026-07-21T05:30:00.000Z',
+            submittedAt: '2026-07-21T13:45:00.000Z',
+            odoStart: 1_200,
+            odoEnd: 1_275,
+          }, USER)
+          await deps.shifts.create({
+            ...original,
+            id: OTHER_SHIFT,
+            driverId: OTHER_DRIVER,
+            vehicleId: OTHER_VEHICLE,
+            state: 'draft',
+            businessDate: '2026-07-20',
+            shiftNo: 1,
+          }, USER)
+
+          expect(await deps.shifts.listTimingBetween(BRANCH, '2026-07-20', '2026-07-21')).toEqual([
+            {
+              id: OTHER_SHIFT,
+              branchId: BRANCH,
+              driverId: OTHER_DRIVER,
+              vehicleId: OTHER_VEHICLE,
+              shiftNo: 1,
+              businessDate: '2026-07-20',
+              state: 'draft',
+              windowOpensAt: null,
+              submittedAt: null,
+              odoStart: null,
+              odoEnd: null,
+            },
+            {
+              id: SHIFT,
+              branchId: BRANCH,
+              driverId: DRIVER,
+              vehicleId: '88888888-8888-8888-8888-888888888888',
+              shiftNo: 1,
+              businessDate: '2026-07-21',
+              state: 'pending_review',
+              windowOpensAt: '2026-07-21T05:30:00.000Z',
+              submittedAt: '2026-07-21T13:45:00.000Z',
+              odoStart: 1_200,
+              odoEnd: 1_275,
+            },
+          ])
+          expect((await deps.shifts.listTimingBetween(BRANCH, '2026-07-21', '2026-07-21')).map((row) => row.id)).toEqual([SHIFT])
+          expect(await deps.shifts.listTimingBetween(BRANCH, '2026-07-22', '2026-08-30')).toEqual([])
+          expect(await deps.shifts.listTimingBetween('11111111-1111-1111-1111-111111111112', '2026-07-01', '2026-07-31')).toEqual([])
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('lists a vehicle timeline in stable chronological order and enforces branch/range scope', async () => {
+        const deps = await freshSettlement()
+        try {
+          const original = await deps.shifts.findById(SHIFT)
+          if (!original) throw new Error('conformance shift missing')
+          // Release the vehicle through the real close unit of work before assigning it to the
+          // earlier fixture. PostgreSQL correctly forbids two live shifts on one vehicle.
+          await createAndApproveSettlement(deps, settlement())
+          await deps.shifts.create({
+            ...original,
+            id: OTHER_SHIFT,
+            driverId: OTHER_DRIVER,
+            vehicleId: VEHICLE,
+            businessDate: '2026-07-20',
+            state: 'draft',
+            submittedAt: null,
+          }, USER)
+          expect((await deps.shifts.listByVehicle(BRANCH, VEHICLE, '2026-07-19', '2026-07-22')).map((s) => s.id)).toEqual([
+            OTHER_SHIFT,
+            SHIFT,
+          ])
+          expect(await deps.shifts.listByVehicle(BRANCH, OTHER_VEHICLE, '2026-07-19', '2026-07-22')).toEqual([])
+          expect(await deps.shifts.listByVehicle(BRANCH, VEHICLE, '2026-07-22', '2026-07-23')).toEqual([])
+          expect(await deps.shifts.listByVehicle('11111111-1111-1111-1111-111111111112', VEHICLE, '2026-07-19', '2026-07-22')).toEqual([])
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+    })
+
+    describe('GPS pings (SRS K)', () => {
+      /*
+       * These two implementations had NEVER been compared. `gps_pings` carried no conformance case
+       * at all, which mattered little while the repo only appended one row and read the latest —
+       * and matters a great deal now that it dedupes on a natural key and orders a trail.
+       *
+       * Every API test in the system runs against the memory adapter. A rule that holds there and
+       * not in PostgreSQL is a rule CI proves and production does not have.
+       */
+      const fix = (capturedAtMs: number, over: Partial<Omit<GpsPingRecord, 'id'>> = {}) => ({
+        shiftId: SHIFT,
+        driverId: DRIVER,
+        branchId: BRANCH,
+        lat: 33.5138,
+        lng: 36.2765,
+        accuracyM: 10,
+        capturedAtMs,
+        receivedAtMs: capturedAtMs + 1_000,
+        source: 'phone_fg' as const,
+        ...over,
+      })
+
+      it('ignores a fix it already holds — the retried batch must be free', async () => {
+        const deps = await fresh()
+        expect(await deps.gps.appendMany([fix(1_000), fix(2_000)])).toEqual({ inserted: 2 })
+        // The same bytes again: a 202 that never reached the phone.
+        expect(await deps.gps.appendMany([fix(1_000), fix(2_000)])).toEqual({ inserted: 0 })
+        // …and a batch straddling the boundary inserts only what is new.
+        expect(await deps.gps.appendMany([fix(2_000), fix(3_000)])).toEqual({ inserted: 1 })
+        expect(await deps.gps.countForShift(SHIFT)).toBe(3)
+      })
+
+      it('dedupes WITHIN one batch, the way a single INSERT does', async () => {
+        // Where parity is most easily lost: PostgreSQL resolves the conflict inside the statement,
+        // so a naive in-memory loop that only checks already-stored rows would insert both.
+        const deps = await fresh()
+        expect(await deps.gps.appendMany([fix(5_000), fix(5_000)])).toEqual({ inserted: 1 })
+        expect(await deps.gps.countForShift(SHIFT)).toBe(1)
+      })
+
+      it('reads a trail in CAPTURE order, whatever order it arrived in', async () => {
+        const deps = await fresh()
+        // A buffered run flushed late, interleaved with fixes that arrived live.
+        await deps.gps.appendMany([fix(30_000, { receivedAtMs: 90_000 })])
+        await deps.gps.appendMany([fix(10_000, { receivedAtMs: 95_000 })])
+        await deps.gps.appendMany([fix(20_000, { receivedAtMs: 20_500 })])
+        const trail = await deps.gps.listForShift(SHIFT)
+        expect(trail.map((p) => p.capturedAtMs)).toEqual([10_000, 20_000, 30_000])
+      })
+
+      it('returns the latest fix per named driver, and nothing older than the window', async () => {
+        const deps = await fresh()
+        await deps.gps.appendMany([
+          fix(1_000, { receivedAtMs: 1_000, lat: 33.1 }),
+          fix(2_000, { receivedAtMs: 2_000, lat: 33.2 }),
+        ])
+        const latest = await deps.gps.latestForDriversInBranch(BRANCH, [DRIVER], 0)
+        expect(latest).toHaveLength(1)
+        expect(latest[0]!.lat).toBeCloseTo(33.2)
+
+        // A driver nobody asked about is not returned, even though his fix exists.
+        expect(await deps.gps.latestForDriversInBranch(BRANCH, [OTHER_DRIVER], 0)).toEqual([])
+        // And a fix older than the window is a memory, not a position.
+        expect(await deps.gps.latestForDriversInBranch(BRANCH, [DRIVER], 3_000)).toEqual([])
+      })
+
+      it('round-trips every field, including the capture layer', async () => {
+        const deps = await fresh()
+        await deps.gps.appendMany([fix(7_000, { accuracyM: null, source: 'phone_bg' })])
+        const [stored] = await deps.gps.listForShift(SHIFT)
+        expect(stored).toMatchObject({
+          shiftId: SHIFT,
+          driverId: DRIVER,
+          branchId: BRANCH,
+          accuracyM: null,
+          capturedAtMs: 7_000,
+          receivedAtMs: 8_000,
+          source: 'phone_bg',
+        })
+        expect(stored!.lat).toBeCloseTo(33.5138)
+        expect(stored!.lng).toBeCloseTo(36.2765)
       })
     })
 
@@ -546,6 +1173,55 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
         }
       })
 
+      /*
+       * A command whose only record is its journal entry (صندوق الشركة, a treasury deposit) reads its
+       * receipt back through this to tell a lost-response retry from a reused key. It must find the
+       * shift-less row under exactly the idempotency index's key — and never a shift's row, another
+       * event type's, or another branch's.
+       */
+      it('finds a shift-less posting by (branch, event, occurrence) and nothing else', async () => {
+        const deps = await fresh()
+        try {
+          const standalone: Posting = {
+            eventType: 'manual',
+            occurrenceKey: 'company-fund-receipt',
+            lines: [
+              { fund: { kind: 'company_box' }, side: 'D', amount: syp(2_500) },
+              { fund: { kind: 'cost_center', costCenterId: 'owner_funding' }, side: 'C', amount: syp(2_500) },
+            ],
+          }
+          const standaloneMeta = { ...META, shiftId: null, reason: 'conformance receipt' }
+          const [written] = await deps.ledger.post(BRANCH, [standalone], standaloneMeta)
+          expect(written).toBeDefined()
+          // A shift posting under the same event and key is a different row the lookup must ignore.
+          await deps.ledger.post(BRANCH, [{ ...standalone }], { ...META, reason: 'shift twin' })
+
+          const found = await deps.ledger.findStandaloneEntry(BRANCH, 'manual', 'company-fund-receipt')
+          expect(found).not.toBeNull()
+          expect(found!.id).toBe(written!.id)
+          expect(found!.shiftId).toBeNull()
+          expect(found!.reason).toBe('conformance receipt')
+          // Every line reports its fund's currency (0066); every branch fund is new lira.
+          expect(found!.lines).toEqual([
+            { fundCode: 'company_box', side: 'D', amount: syp(2_500), currency: 'SYP_NEW' },
+            { fundCode: 'cost_center:owner_funding', side: 'C', amount: syp(2_500), currency: 'SYP_NEW' },
+          ])
+          expect(found!.sypMinorPerUsd).toBeNull()
+
+          expect(await deps.ledger.findStandaloneEntry(BRANCH, 'manual', 'no-such-key')).toBeNull()
+          expect(await deps.ledger.findStandaloneEntry(BRANCH, 'income', 'company-fund-receipt')).toBeNull()
+          expect(
+            await deps.ledger.findStandaloneEntry(
+              '11111111-1111-1111-1111-111111111112',
+              'manual',
+              'company-fund-receipt',
+            ),
+          ).toBeNull()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
       it('what post() RETURNS is what was actually committed', async () => {
         // The silent half of the same defect: rows reported as written that a rolled-back
         // transaction never kept. Whatever comes back must be readable afterwards.
@@ -643,6 +1319,505 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
       })
     })
 
+    /**
+     * «صندوق الشركة» as its own ledger (C1). Both adapters must store every fund under the DOMAIN's
+     * code — there is one `fundCode` now, not three — report each line's currency from its fund,
+     * freeze the USD rate on the entry, and refuse the same malformed postings.
+     */
+    describe('company ledger foundation (C1)', () => {
+      const HQ_META = { ...META, shiftId: null, reason: 'company ledger conformance' }
+      const RATE = 13_050n
+      const cash = (currency: Currency) => ({ kind: 'company_cash', currency }) as const
+      const line = (fund: FundRef, side: 'D' | 'C', amount: bigint) => ({ fund, side, amount: minor(amount) })
+
+      const branchFunds: FundRef[] = [
+        { kind: 'office_cash' },
+        { kind: 'office_wallet' },
+        { kind: 'yalago_share' },
+        { kind: 'company_revenue' },
+        { kind: 'yalago_income' },
+        { kind: 'fee_earned' },
+        { kind: 'other_income' },
+        { kind: 'company_box' },
+        { kind: 'driver_cash', driverId: DRIVER },
+        { kind: 'driver_wallet', driverId: DRIVER },
+        { kind: 'driver_share_payable', driverId: DRIVER },
+        { kind: 'cost_center', costCenterId: 'owner_funding' },
+      ]
+      /** Every company kind but the clearing account, which moves only under its two events. */
+      const companyFunds = (currency: Currency): FundRef[] => [
+        { kind: 'company_cash', currency },
+        { kind: 'depreciation_reserve', currency },
+        { kind: 'company_fx_position', currency },
+        { kind: 'company_equity', currency, account: 'owner_funding' },
+        { kind: 'company_equity', currency, account: 'opening' },
+        { kind: 'company_expense', currency, centre: 'general' },
+        { kind: 'company_expense', currency, centre: `vehicle:${OTHER_VEHICLE}` },
+        { kind: 'company_expense', currency, centre: 'receivable_writeoff' },
+        { kind: 'company_income', currency, account: 'general' },
+        { kind: 'company_income', currency, account: 'payable_forgiven' },
+        { kind: 'company_payable', currency, debtId: ORDER_1 },
+        { kind: 'company_receivable', currency, debtId: ORDER_2 },
+        { kind: 'fixed_asset', currency, assetId: BATTERY },
+      ]
+      /** All debits but the last, one credit that balances them: no company pocket is ever lowered. */
+      const spread = (funds: FundRef[], unit: bigint): Posting['lines'] => {
+        const [first, ...rest] = funds
+        return [
+          ...rest.map((fund) => line(fund, 'D', unit)),
+          line(first!, 'C', unit * BigInt(rest.length)),
+        ]
+      }
+      const expectStored = (
+        stored: { lines: Array<{ fundCode: string; currency: Currency; side: 'D' | 'C'; amount: bigint }> },
+        posting: Posting,
+      ) => {
+        expect(stored.lines.map((l) => [l.fundCode, l.currency, l.side, l.amount])).toEqual(
+          posting.lines.map((l) => [fundCode(l.fund), currencyOf(l.fund), l.side, l.amount]),
+        )
+      }
+
+      it('lists only operating branches, and names the company row apart', async () => {
+        const deps = await fresh()
+        try {
+          const listed = await deps.directory.listBranches()
+          expect(listed.map((b) => [b.id, b.kind])).toEqual([[BRANCH, 'branch']])
+          const company = await deps.directory.companyBranch()
+          expect(company).toMatchObject({ id: COMPANY_BRANCH, kind: 'company', branchNo: 0, code: 'HQ' })
+          expect(await deps.directory.branch(COMPANY_BRANCH)).toMatchObject({ kind: 'company' })
+          expect(await deps.directory.branch(BRANCH)).toMatchObject({ kind: 'branch' })
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('stores every fund kind under the domain code, with its fund currency and the frozen rate', async () => {
+        const deps = await fresh()
+        try {
+          // A branch entry: every line new lira, no rate.
+          const branchEntry: Posting = { eventType: 'manual', occurrenceKey: 'c1-branch-kinds', lines: spread(branchFunds, 100n) }
+          const [branchWritten] = await deps.ledger.post(BRANCH, [branchEntry], HQ_META)
+          expectStored(branchWritten!, branchEntry)
+          expect(branchWritten!.sypMinorPerUsd).toBeNull()
+          expect(branchWritten!.lines.every((l) => l.currency === 'SYP_NEW')).toBe(true)
+
+          // The company ledger, in the order a real day would need: cutover, a dollar deposit, then
+          // an exchange that spends some of those dollars.
+          const cutover: Posting = {
+            eventType: 'company_opening_transfer',
+            occurrenceKey: 'c1-cutover',
+            lines: [
+              line(cash('SYP_NEW'), 'D', 7_905_726n),
+              line({ kind: 'branch_clearing', branchId: BRANCH }, 'C', 7_905_726n),
+            ],
+          }
+          const sypKinds: Posting = {
+            eventType: 'company_correction',
+            occurrenceKey: 'c1-syp-kinds',
+            lines: spread([{ kind: 'company_equity', currency: 'SYP_NEW', account: 'owner_drawings' }, ...companyFunds('SYP_NEW')], 100n),
+          }
+          const usdKinds: Posting = {
+            eventType: 'company_correction',
+            occurrenceKey: 'c1-usd-kinds',
+            lines: spread([{ kind: 'company_equity', currency: 'USD', account: 'owner_drawings' }, ...companyFunds('USD')], 10_000n),
+          }
+          const exchange: Posting = {
+            eventType: 'company_fx_exchange',
+            occurrenceKey: 'c1-exchange',
+            lines: [
+              line({ kind: 'company_fx_position', currency: 'USD' }, 'D', 5_000n),
+              line(cash('USD'), 'C', 5_000n),
+              line(cash('SYP_NEW'), 'D', 652_500n),
+              line({ kind: 'company_fx_position', currency: 'SYP_NEW' }, 'C', 652_500n),
+            ],
+          }
+
+          /*
+           * Since C2 (0067) a company entry commits only beside its command row, and these probes —
+           * every account kind under one correction — are no command anyone may issue. So they are
+           * stored, read back and checked INSIDE one unit of work that is then rolled back: the
+           * storage round-trip is what this test is about, and nothing fact-less ever commits.
+           */
+          const rolledBack = new Error('conformance probe rolled back')
+          await expect(
+            deps.financialUnitOfWork.run({ lockKey: `receivables:${COMPANY_BRANCH}`, actorId: USER }, async (tx) => {
+              const [cutoverWritten] = await tx.ledger.post(COMPANY_BRANCH, [cutover], HQ_META)
+              const [sypWritten] = await tx.ledger.post(COMPANY_BRANCH, [sypKinds], HQ_META)
+              const [usdWritten] = await tx.ledger.post(COMPANY_BRANCH, [usdKinds], { ...HQ_META, sypMinorPerUsd: RATE })
+              const [exchangeWritten] = await tx.ledger.post(COMPANY_BRANCH, [exchange], {
+                ...HQ_META,
+                sypMinorPerUsd: 13_050n,
+              })
+              for (const [written, posting] of [
+                [cutoverWritten, cutover],
+                [sypWritten, sypKinds],
+                [usdWritten, usdKinds],
+                [exchangeWritten, exchange],
+              ] as const) {
+                expectStored(written!, posting)
+                // What was returned is what a reader gets back.
+                const found = await tx.ledger.findStandaloneEntry(COMPANY_BRANCH, posting.eventType, posting.occurrenceKey)
+                expectStored(found!, posting)
+                expect(found!.sypMinorPerUsd).toBe(written!.sypMinorPerUsd)
+              }
+              expect(cutoverWritten!.sypMinorPerUsd).toBeNull()
+              expect(sypWritten!.sypMinorPerUsd).toBeNull()
+              expect(usdWritten!.sypMinorPerUsd).toBe(RATE)
+              expect(exchangeWritten!.lines.map((l) => l.currency)).toEqual(['USD', 'USD', 'SYP_NEW', 'SYP_NEW'])
+
+              // Balances are per code, and the two pockets never mix.
+              expect(await tx.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:USD')).toBe(10_000n - 5_000n)
+              expect(await tx.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:SYP_NEW')).toBe(7_905_726n + 100n + 652_500n)
+              expect(await tx.ledger.fundBalance(COMPANY_BRANCH, `branch_clearing:${BRANCH}`)).toBe(-7_905_726n)
+              // The company ledger is not the branch's: nothing of it shows under DAM.
+              expect(await tx.ledger.fundBalance(BRANCH, 'company_cash:SYP_NEW')).toBe(0n)
+              throw rolledBack
+            }),
+          ).rejects.toBe(rolledBack)
+          // …and nothing of it survived the rollback.
+          expect(await deps.ledger.findStandaloneEntry(COMPANY_BRANCH, 'company_opening_transfer', 'c1-cutover')).toBeNull()
+          expect(await deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:USD')).toBe(0n)
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('refuses a USD line without a rate, a rate without a USD line, and currencies that do not balance', async () => {
+        const deps = await fresh()
+        try {
+          const deposit: Posting = {
+            eventType: 'company_deposit',
+            occurrenceKey: 'c1-refused',
+            lines: [
+              line(cash('USD'), 'D', 100n),
+              line({ kind: 'company_equity', currency: 'USD', account: 'owner_funding' }, 'C', 100n),
+            ],
+          }
+          await expect(deps.ledger.post(COMPANY_BRANCH, [deposit], HQ_META)).rejects.toThrow(/syp_minor_per_usd/)
+          const sypDeposit: Posting = {
+            ...deposit,
+            lines: [
+              line(cash('SYP_NEW'), 'D', 100n),
+              line({ kind: 'company_equity', currency: 'SYP_NEW', account: 'owner_funding' }, 'C', 100n),
+            ],
+          }
+          await expect(
+            deps.ledger.post(COMPANY_BRANCH, [sypDeposit], { ...HQ_META, sypMinorPerUsd: RATE }),
+          ).rejects.toThrow(/no USD line/)
+          const crossed: Posting = {
+            eventType: 'company_correction',
+            occurrenceKey: 'c1-crossed',
+            lines: [line(cash('USD'), 'D', 100n), line(cash('SYP_NEW'), 'C', 100n)],
+          }
+          await expect(
+            deps.ledger.post(COMPANY_BRANCH, [crossed], { ...HQ_META, sypMinorPerUsd: RATE }),
+          ).rejects.toThrow(/unbalanced/)
+          // A deposit, not a correction: since C2 a two-currency company_correction is how an
+          // exchange is taken back (and 0067 requires it to be the exact inverse of one).
+          const balancedButMixed: Posting = {
+            eventType: 'company_deposit',
+            occurrenceKey: 'c1-mixed',
+            lines: [
+              line(cash('USD'), 'D', 100n),
+              line({ kind: 'company_fx_position', currency: 'USD' }, 'C', 100n),
+              line(cash('SYP_NEW'), 'D', 13_050n),
+              line({ kind: 'company_fx_position', currency: 'SYP_NEW' }, 'C', 13_050n),
+            ],
+          }
+          await expect(
+            deps.ledger.post(COMPANY_BRANCH, [balancedButMixed], { ...HQ_META, sypMinorPerUsd: RATE }),
+          ).rejects.toThrow(/company_fx_exchange/)
+          expect(await deps.ledger.findStandaloneEntry(COMPANY_BRANCH, 'company_deposit', 'c1-refused')).toBeNull()
+          expect(await deps.ledger.findStandaloneEntry(COMPANY_BRANCH, 'company_deposit', 'c1-mixed')).toBeNull()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('refuses to post through a fund whose stored currency disagrees with its reference', async () => {
+        const deps = await fresh()
+        try {
+          await ctx.plantFund(deps, COMPANY_BRANCH, { code: 'company_cash:USD', type: 'company_cash', currency: 'SYP_NEW' })
+          const deposit: Posting = {
+            eventType: 'company_deposit',
+            occurrenceKey: 'c1-mismatch',
+            lines: [
+              line(cash('USD'), 'D', 100n),
+              line({ kind: 'company_equity', currency: 'USD', account: 'owner_funding' }, 'C', 100n),
+            ],
+          }
+          await expect(
+            deps.ledger.post(COMPANY_BRANCH, [deposit], { ...HQ_META, sypMinorPerUsd: RATE }),
+          ).rejects.toMatchObject({ code: 'fund_currency_mismatch' })
+          expect(await deps.ledger.findStandaloneEntry(COMPANY_BRANCH, 'company_deposit', 'c1-mismatch')).toBeNull()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+    })
+
+    describe('company ledger commands, cutover and mirror (C2)', () => {
+      const TODAY = '2026-07-21'
+      const RATE = 13_050n
+      const CMD = {
+        shiftId: null,
+        businessDate: TODAY,
+        postingDate: TODAY,
+        weekStartDate: '2026-07-19',
+        fxDayId: 1,
+        createdBy: USER,
+      }
+      const KEY = (n: number) => `c2000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+      const EXPENSE_CATEGORY = 'c2000000-0000-4000-8000-00000000ca01'
+      const INCOME_CATEGORY = 'c2000000-0000-4000-8000-00000000ca02'
+      const base = { branchId: COMPANY_BRANCH, occurredOn: TODAY, businessDate: TODAY, createdBy: USER, createdAtMs: 0 }
+      const hq = (deps: Deps) => ({ lockKey: `receivables:${COMPANY_BRANCH}`, actorId: USER, deps })
+      const withoutTime = <T extends { createdAtMs: number }>(row: T | null): T | null =>
+        row === null ? null : { ...row, createdAtMs: 0 }
+
+      async function categories(deps: Deps): Promise<void> {
+        if (!(await deps.expenses.listCategories()).some((c) => c.id === EXPENSE_CATEGORY)) {
+          await deps.expenses.createCategory({ id: EXPENSE_CATEGORY, code: 'c2-company-expense', nameAr: 'صرفية شركة', active: true })
+        }
+        if (!(await deps.incomes.listCategories()).some((c) => c.id === INCOME_CATEGORY)) {
+          await deps.incomes.createCategory({ id: INCOME_CATEGORY, code: 'c2-company-income', nameAr: 'مدخول شركة', active: true })
+        }
+      }
+
+      /** Post a company command the way the API does: journal first, its row second, one unit of work. */
+      async function issue(
+        deps: Deps,
+        posting: Posting,
+        rate: bigint | null,
+        reason: string,
+        row: DistributiveOmit<CompanyCommandRecord, 'journalEntryId'>,
+      ): Promise<CompanyCommandRecord> {
+        const { lockKey, actorId } = hq(deps)
+        return deps.financialUnitOfWork.run({ lockKey, actorId }, async (tx) => {
+          const [entry] = await tx.ledger.post(COMPANY_BRANCH, [posting], { ...CMD, sypMinorPerUsd: rate, reason })
+          const command = { ...row, journalEntryId: entry!.id } as CompanyCommandRecord
+          await tx.companyLedger.createCommand(command)
+          return command
+        })
+      }
+
+      it('stores every command kind, reads it back by key and by entry, and sums the pockets', async () => {
+        const deps = await fresh()
+        try {
+          await categories(deps)
+          const deposit = await issue(deps, companyDeposit('SYP_NEW', minor(500_000n), 'owner_funding', KEY(1)), null, 'إيداع المالك', {
+            ...base, id: KEY(1), kind: 'deposit', equityAccount: 'owner_funding', currency: 'SYP_NEW',
+            amount: minor(500_000n), sypMinorPerUsd: null, reason: 'إيداع المالك',
+          })
+          const opening = await issue(deps, companyDeposit('USD', minor(20_000n), 'opening', KEY(2)), RATE, 'رصيد افتتاحي بالدولار', {
+            ...base, id: KEY(2), kind: 'deposit', equityAccount: 'opening', currency: 'USD',
+            amount: minor(20_000n), sypMinorPerUsd: RATE, reason: 'رصيد افتتاحي بالدولار',
+          })
+          const withdrawal = await issue(deps, companyWithdrawal('SYP_NEW', minor(100_000n), KEY(3)), null, 'سحب المالك', {
+            ...base, id: KEY(3), kind: 'withdrawal', equityAccount: 'owner_drawings', currency: 'SYP_NEW',
+            amount: minor(100_000n), sypMinorPerUsd: null, reason: 'سحب المالك',
+          })
+          const expense = await issue(
+            deps,
+            companyExpense('USD', minor(5_000n), `vehicle:${OTHER_VEHICLE}`, 'pocket', KEY(4)),
+            RATE,
+            'إطارات',
+            {
+              ...base, id: KEY(4), kind: 'expense', currency: 'USD', amount: minor(5_000n), sypMinorPerUsd: RATE,
+              categoryId: EXPENSE_CATEGORY, costCenterKind: 'vehicle', vehicleId: OTHER_VEHICLE, assetId: null,
+              paidFrom: 'pocket', receiptMediaId: null, description: 'إطارات', occurredOn: '2026-07-01',
+            },
+          )
+          const income = await issue(deps, companyIncome('SYP_NEW', minor(30_000n), KEY(5)), null, 'بيع خردة', {
+            ...base, id: KEY(5), kind: 'income', currency: 'SYP_NEW', amount: minor(30_000n), sypMinorPerUsd: null,
+            categoryId: INCOME_CATEGORY, description: 'بيع خردة',
+          })
+          const exchangePosting = companyFxExchange(money('USD', minor(10_000n)), money('SYP_NEW', minor(1_305_000n)), KEY(6))
+          const exchange = await issue(deps, exchangePosting, RATE, 'تصريف', {
+            ...base, id: KEY(6), kind: 'exchange', fromCurrency: 'USD', fromAmount: minor(10_000n),
+            toCurrency: 'SYP_NEW', toAmount: minor(1_305_000n), sypMinorPerUsd: RATE, reason: 'تصريف',
+          })
+          const reversal = await issue(
+            deps,
+            companyReversal(companyIncome('SYP_NEW', minor(30_000n), KEY(5)), KEY(7)),
+            null,
+            'مدخول مكرر',
+            {
+              ...base, id: KEY(7), kind: 'reversal', targetKind: 'income', targetId: KEY(5),
+              targetEntryId: income.journalEntryId, sypMinorPerUsd: null, reason: 'مدخول مكرر',
+            },
+          )
+
+          const all = [deposit, opening, withdrawal, expense, income, exchange, reversal]
+          for (const command of all) {
+            expect(withoutTime(await deps.companyLedger.findCommand(command.id))).toEqual(withoutTime(command))
+            expect(withoutTime(await deps.companyLedger.findCommand(command.id.toUpperCase()))).toEqual(withoutTime(command))
+            expect(withoutTime(await deps.companyLedger.findCommandByEntry(command.journalEntryId))).toEqual(withoutTime(command))
+          }
+          expect(await deps.companyLedger.findCommand(KEY(99))).toBeNull()
+          expect(await deps.companyLedger.findCommand('not-a-uuid')).toBeNull()
+          expect((await deps.companyLedger.listCommands(COMPANY_BRANCH)).map((c) => c.id)).toEqual(all.map((c) => c.id))
+          expect(await deps.companyLedger.listCommands(COMPANY_BRANCH, { from: '2026-07-22', to: '2026-07-30' })).toEqual([])
+          expect(await deps.companyLedger.listCommands(BRANCH)).toEqual([])
+          expect(withoutTime(await deps.companyLedger.findReversalOf(income.journalEntryId))).toEqual(withoutTime(reversal))
+          expect(await deps.companyLedger.findReversalOf(deposit.journalEntryId)).toBeNull()
+
+          // 500,000 − 100,000 + 30,000 − 30,000 + 1,305,000 lira; 20,000 − 5,000 − 10,000 cents.
+          const overview = await deps.companyLedgerSource.readOverview(COMPANY_BRANCH, { from: TODAY, to: TODAY })
+          expect(overview.pockets).toEqual({ SYP_NEW: 1_705_000n, USD: 5_000n })
+          expect(overview.reserves).toEqual({ SYP_NEW: 0n, USD: 0n })
+          expect(overview.branches).toEqual([{ branchId: BRANCH, companyBox: 0n, clearing: 0n, cutOver: false }])
+          expect(overview.period.SYP_NEW).toEqual({ income: 0n, expense: 0n, deposits: 500_000n, withdrawals: 100_000n, net: 0n })
+          expect(overview.period.USD).toEqual({ income: 0n, expense: 5_000n, deposits: 20_000n, withdrawals: 0n, net: -5_000n })
+          const outside = await deps.companyLedgerSource.readOverview(COMPANY_BRANCH, { from: '2026-07-22', to: '2026-07-22' })
+          expect(outside.pockets).toEqual(overview.pockets)
+          expect(outside.period.USD).toEqual({ income: 0n, expense: 0n, deposits: 0n, withdrawals: 0n, net: 0n })
+
+          // The running pocket balance follows posting order, per currency.
+          const movements = await deps.companyLedgerSource.listMovements(COMPANY_BRANCH, { from: TODAY, to: TODAY })
+          expect(movements.map((m) => m.entry.id)).toEqual(all.map((c) => c.journalEntryId))
+          expect(movements.map((m) => m.pocketAfter)).toEqual([
+            { SYP_NEW: 500_000n },
+            { USD: 20_000n },
+            { SYP_NEW: 400_000n },
+            { USD: 15_000n },
+            { SYP_NEW: 430_000n },
+            { USD: 5_000n, SYP_NEW: 1_735_000n },
+            { SYP_NEW: 1_705_000n },
+          ])
+          expect(movements[5]!.entry.sypMinorPerUsd).toBe(RATE)
+          expect(await deps.companyLedgerSource.listMovements(COMPANY_BRANCH, { from: '2026-07-22', to: '2026-07-22' })).toEqual([])
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('refuses a key already spent on another command, and a second reversal of one entry', async () => {
+        const deps = await fresh()
+        try {
+          await categories(deps)
+          const deposit = await issue(deps, companyDeposit('SYP_NEW', minor(9_000n), 'owner_funding', KEY(11)), null, 'إيداع', {
+            ...base, id: KEY(11), kind: 'deposit', equityAccount: 'owner_funding', currency: 'SYP_NEW',
+            amount: minor(9_000n), sypMinorPerUsd: null, reason: 'إيداع',
+          })
+          // The same key sent to an expense: refused, and nothing it posted survives.
+          await expect(
+            issue(deps, companyExpense('SYP_NEW', minor(1n), 'general', 'pocket', KEY(11)), null, 'صرفية', {
+              ...base, id: KEY(11), kind: 'expense', currency: 'SYP_NEW', amount: minor(1n), sypMinorPerUsd: null,
+              categoryId: EXPENSE_CATEGORY, costCenterKind: 'general', vehicleId: null, assetId: null,
+              paidFrom: 'pocket', receiptMediaId: null, description: 'صرفية',
+            }),
+          ).rejects.toMatchObject({ code: 'DUPLICATE_COMPANY_COMMAND' })
+          expect(await deps.ledger.findStandaloneEntry(COMPANY_BRANCH, 'company_expense', KEY(11))).toBeNull()
+
+          const reverse = (id: string) =>
+            issue(deps, companyReversal(companyDeposit('SYP_NEW', minor(9_000n), 'owner_funding', KEY(11)), id), null, 'خطأ', {
+              ...base, id, kind: 'reversal', targetKind: 'move', targetId: KEY(11),
+              targetEntryId: deposit.journalEntryId, sypMinorPerUsd: null, reason: 'خطأ',
+            })
+          await reverse(KEY(12))
+          await expect(reverse(KEY(13))).rejects.toMatchObject({ code: 'DUPLICATE_REVERSAL' })
+          expect(await deps.ledger.findStandaloneEntry(COMPANY_BRANCH, 'company_correction', KEY(13))).toBeNull()
+          expect(await deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:SYP_NEW')).toBe(0n)
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('cuts a branch over once, then mirrors every company_box movement into the company pocket', async () => {
+        const deps = await fresh()
+        try {
+          const branchMeta = { ...CMD, sypMinorPerUsd: null }
+          // History before the cutover: the branch's company_box is the branch's own business.
+          const [history] = await deps.financialUnitOfWork.run({ lockKey: `receivables:${BRANCH}`, actorId: USER }, (tx) =>
+            tx.ledger.post(BRANCH, [manualKaish('office_cash', minor(700n), 'c2-history')], { ...branchMeta, reason: 'كييش قديم' }),
+          )
+          expect(await deps.companyLedger.cutoverFor(BRANCH)).toBeNull()
+
+          const cutover = await deps.financialUnitOfWork.run({ lockKey: `receivables:${BRANCH}`, actorId: USER }, async (tx) => {
+            await lockBranchThenCompany(tx, BRANCH, COMPANY_BRANCH)
+            const opening = await tx.ledger.fundBalance(BRANCH, 'company_box')
+            const watermark = await tx.companyLedger.latestEntryId()
+            const [entry] = await tx.ledger.post(COMPANY_BRANCH, [companyOpeningTransfer(BRANCH, opening)], {
+              ...branchMeta,
+              reason: 'الانتقال إلى الصندوق المستقل',
+            })
+            const row = {
+              branchId: BRANCH,
+              companyBranchId: COMPANY_BRANCH,
+              openingAmount: opening,
+              openingEntryId: entry!.id,
+              watermarkEntryId: watermark,
+              businessDate: TODAY,
+              reason: 'الانتقال إلى الصندوق المستقل',
+              performedBy: USER,
+              performedAtMs: 0,
+            }
+            await tx.companyLedger.createCutover(row)
+            return row
+          })
+          expect(cutover.openingAmount).toBe(700n)
+          expect(cutover.watermarkEntryId).toBeGreaterThanOrEqual(history!.id)
+          expect({ ...(await deps.companyLedger.cutoverFor(BRANCH))!, performedAtMs: 0 }).toEqual(cutover)
+          expect((await deps.companyLedger.listCutovers()).map((c) => c.branchId)).toEqual([BRANCH])
+          await expect(
+            deps.financialUnitOfWork.run({ lockKey: `receivables:${BRANCH}`, actorId: USER }, (tx) =>
+              tx.companyLedger.createCutover(cutover),
+            ),
+          ).rejects.toMatchObject({ code: 'DUPLICATE_CUTOVER' })
+
+          // A hand «كييش» after the cutover, with its HQ half in the same unit of work.
+          const mirror = await deps.financialUnitOfWork.run({ lockKey: `receivables:${BRANCH}`, actorId: USER }, async (tx) => {
+            await lockBranchThenCompany(tx, BRANCH, COMPANY_BRANCH)
+            const [source] = await tx.ledger.post(BRANCH, [manualKaish('office_wallet', minor(300n), 'c2-after')], {
+              ...branchMeta,
+              reason: 'كييش بعد الانتقال',
+            })
+            const [half] = await tx.ledger.post(
+              COMPANY_BRANCH,
+              [restorationMirror('to_company', minor(300n), BRANCH, source!.id)],
+              {
+                ...branchMeta,
+                businessDate: source!.businessDate,
+                postingDate: source!.postingDate,
+                weekStartDate: source!.weekStartDate,
+                reason: 'كييش بعد الانتقال',
+              },
+            )
+            const row = {
+              id: KEY(21),
+              sourceBranchId: BRANCH,
+              sourceEntryId: source!.id,
+              mirrorEntryId: half!.id,
+              direction: 'to_company' as const,
+              amount: minor(300n),
+              restorationId: null,
+              createdBy: USER,
+              createdAtMs: 0,
+            }
+            await tx.companyLedger.createMirror(row)
+            return row
+          })
+          expect(mirror.sourceEntryId).toBeGreaterThan(cutover.watermarkEntryId)
+          expect(withoutTime(await deps.companyLedger.findMirrorBySource(mirror.sourceEntryId))).toEqual(mirror)
+          expect((await deps.companyLedger.listMirrors(BRANCH)).map((m) => m.sourceEntryId)).toEqual([mirror.sourceEntryId])
+          expect(await deps.companyLedger.findMirrorBySource(history!.id)).toBeNull()
+          expect(await deps.companyLedger.latestEntryId()).toBe(mirror.mirrorEntryId)
+
+          const overview = await deps.companyLedgerSource.readOverview(COMPANY_BRANCH, { from: TODAY, to: TODAY })
+          expect(overview.branches).toEqual([{ branchId: BRANCH, companyBox: 1_000n, clearing: -1_000n, cutOver: true }])
+          expect(overview.pockets.SYP_NEW).toBe(1_000n)
+          const movements = await deps.companyLedgerSource.listMovements(COMPANY_BRANCH, { from: TODAY, to: TODAY })
+          expect(movements.map((m) => [m.entry.eventType, m.pocketAfter])).toEqual([
+            ['company_opening_transfer', { SYP_NEW: 700n }],
+            ['company_restoration_mirror', { SYP_NEW: 1_000n }],
+          ])
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+    })
+
     describe('orders', () => {
       it('refuses a duplicate provider order number', async () => {
         const deps = await fresh()
@@ -706,6 +1881,43 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           await deps.batteryReadings.upsert(corrected)
 
           expect(await deps.batteryReadings.listByShift(SHIFT)).toEqual([corrected])
+          expect(await deps.batteryReadings.listByShiftIds([OTHER_SHIFT, SHIFT])).toEqual([corrected])
+          expect(await deps.batteryReadings.listByShiftIds([])).toEqual([])
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('batch-loads battery swaps for named shifts in shift/sequence order', async () => {
+        const deps = await fresh()
+        try {
+          const spare = '99999999-aaaa-4aaa-8aaa-aaaaaaaaaaa2'
+          await deps.directory.createBattery({
+            id: spare,
+            branchId: BRANCH,
+            serialNo: 'CONF-SPARE-2',
+            bmsMac: null,
+            capacityAh: 50,
+            vehicleId: null,
+            slotNo: null,
+            state: 'ready',
+            active: true,
+            bmsProfile: null,
+            groundNo: null,
+          })
+          const swap: BatterySwapRecord = {
+            id: '99999999-cccc-4ccc-8ccc-ccccccccccc1',
+            shiftId: SHIFT,
+            seqNo: 1,
+            slotNo: 1,
+            outBatteryId: BATTERY,
+            inBatteryId: spare,
+            occurredAtMs: 1_784_000_100_000,
+            createdBy: USER,
+          }
+          await deps.batterySwaps.create(swap)
+          expect(await deps.batterySwaps.listByShiftIds([OTHER_SHIFT, SHIFT])).toEqual([swap])
+          expect(await deps.batterySwaps.listByShiftIds([])).toEqual([])
         } finally {
           await ctx.cleanup?.(deps)
         }
@@ -847,13 +2059,15 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
         id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
         branchId: BRANCH,
         categoryId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
-        costCenterKind: 'general',
-        vehicleId: null,
+        costCenterKind: 'vehicle',
+        vehicleId: VEHICLE,
         amount: syp(250),
         businessDate: '2026-07-21',
         description: 'Charging electricity',
         receiptMediaId: null,
-        journalEntryId: null,
+        channel: 'office_cash',
+    journalEntryId: null,
+  advanceId: null,
         createdBy: USER,
       })
 
@@ -873,6 +2087,114 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           expect(await deps.expenses.get(row.id)).toEqual(row)
           await expect(deps.expenses.create(row)).rejects.toThrow()
           expect(await deps.expenses.listByBranchAndDate(BRANCH, '2026-07-21', '2026-07-21')).toEqual([row])
+          expect(await deps.expenses.listByVehicle(BRANCH, VEHICLE, '2026-07-20', '2026-07-22')).toEqual([row])
+          expect(await deps.expenses.listByVehicle(BRANCH, OTHER_VEHICLE, '2026-07-20', '2026-07-22')).toEqual([])
+          expect(await deps.expenses.listByVehicle(BRANCH, VEHICLE, '2026-07-22', '2026-07-23')).toEqual([])
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+    })
+
+    describe('recurring expenses', () => {
+      const template = (): RecurringExpenseTemplateRecord => ({
+        id: 'dddddddd-dddd-4ddd-8ddd-dddddddddd01',
+        branchId: BRANCH,
+        templateKind: 'branch',
+        currency: 'SYP_NEW',
+        title: 'Office rent',
+        categoryId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        costCenterKind: 'general',
+        vehicleId: null,
+        assetId: null,
+        channel: 'office_cash',
+        paidFrom: null,
+        amount: syp(300),
+        scheduleKind: 'monthly_first',
+        weekday: null,
+        intervalDays: null,
+        startsOn: '2026-07-01',
+        endsOn: null,
+        active: true,
+        deactivatedOn: null,
+        deactivatedAtMs: null,
+        deactivatedBy: null,
+        deactivationReason: null,
+        createdBy: USER,
+        createdAtMs: 1_784_000_000_000,
+        updatedBy: USER,
+        updatedAtMs: 1_784_000_000_000,
+      })
+
+      it('round-trips templates and immutable occurrence decisions', async () => {
+        const deps = await fresh()
+        try {
+          await deps.expenses.createCategory({
+            id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+            code: 'RENT',
+            nameAr: 'إيجار',
+            active: true,
+          })
+          const row = template()
+          await deps.financialUnitOfWork.run(
+            { lockKey: `recurring-template:${row.id}`, actorId: USER },
+            (tx) => tx.recurringExpenses.createTemplate(row),
+          )
+          expect(await deps.recurringExpenses.getTemplate(row.id)).toEqual(row)
+          expect(await deps.recurringExpenses.listTemplates(BRANCH)).toEqual([row])
+
+          const occurrence: RecurringExpenseOccurrenceRecord = {
+            id: 'dddddddd-dddd-4ddd-8ddd-dddddddddd02',
+            templateId: row.id,
+            branchId: BRANCH,
+            dueDate: '2026-08-01',
+            status: 'skipped',
+            expenseId: null,
+            companyExpenseId: null,
+            reason: 'Landlord waived this month',
+            actedBy: USER,
+            actedAtMs: 1_785_600_000_000,
+          }
+          await deps.financialUnitOfWork.run(
+            { lockKey: `recurring:${row.id}:${occurrence.dueDate}`, actorId: USER },
+            (tx) => tx.recurringExpenses.createOccurrence(occurrence),
+          )
+          expect(await deps.recurringExpenses.getOccurrence(row.id, occurrence.dueDate)).toEqual(occurrence)
+          expect(await deps.recurringExpenses.listOccurrences(BRANCH, '2026-08-01', '2026-08-01')).toEqual([
+            occurrence,
+          ])
+          expect(await deps.recurringExpenses.countOccurrencesBefore(row.id, '2026-08-02')).toBe(1)
+          await expect(
+            deps.financialUnitOfWork.run(
+              { lockKey: `recurring:${row.id}:${occurrence.dueDate}`, actorId: USER },
+              (tx) => tx.recurringExpenses.createOccurrence(occurrence),
+            ),
+          ).rejects.toThrow()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('rolls template writes back with the rest of a failed financial transaction', async () => {
+        const deps = await fresh()
+        try {
+          await deps.expenses.createCategory({
+            id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+            code: 'RENT',
+            nameAr: 'إيجار',
+            active: true,
+          })
+          const row = template()
+          await expect(
+            deps.financialUnitOfWork.run(
+              { lockKey: `recurring-template:${row.id}`, actorId: USER },
+              async (tx) => {
+                await tx.recurringExpenses.createTemplate(row)
+                throw new Error('rollback recurring template')
+              },
+            ),
+          ).rejects.toThrow('rollback recurring template')
+          expect(await deps.recurringExpenses.getTemplate(row.id)).toBeNull()
         } finally {
           await ctx.cleanup?.(deps)
         }
@@ -914,6 +2236,9 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
                 amount: syp(250),
                 businessDate: '2026-07-21' as const,
                 reason: 'direct driver debt',
+                intent: 'command' as const,
+                priorBalance: null,
+                targetBalance: null,
                 idempotencyKey: key,
                 journalEntryId: entry!.id,
                 createdBy: USER,
@@ -968,6 +2293,9 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
                   amount: syp(75),
                   businessDate: '2026-07-21',
                   reason: 'rollback proof',
+                  intent: 'command',
+                  priorBalance: null,
+                  targetBalance: null,
                   idempotencyKey: rollbackKey,
                   journalEntryId: entry!.id,
                   createdBy: USER,
@@ -1038,6 +2366,11 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
             ],
             proofSha256: 'c'.repeat(64),
             sealedAtMs: 1_784_000_000_000,
+            status: 'active',
+            supersededById: null,
+            closedAtMs: null,
+            closedBy: null,
+            closedReason: null,
             notes: null,
           })
         })()
@@ -1074,9 +2407,12 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
                 reason: 'signed daily count variance',
               })
               expect(entries).toHaveLength(1)
-              await tx.restorations.create({
+              // The row id comes back: a company mirror of the run's journals names it (C2).
+              const restorationId = await tx.restorations.create({
                 branchId: BRANCH,
                 businessDate: '2026-07-21',
+                runNo: 1,
+
                 cashCountId: count.id,
                 plan: {
                   schemaVersion: 2,
@@ -1105,6 +2441,7 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
                 reason: 'signed daily count variance',
                 performedBy: USER,
               })
+              expect(Number.isSafeInteger(restorationId) && restorationId > 0).toBe(true)
             },
           )
 
@@ -1140,7 +2477,9 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
                 await tx.restorations.create({
                   branchId: BRANCH,
                   businessDate: '2026-07-22',
-                  cashCountId: count.id,
+                  runNo: 1,
+
+                cashCountId: count.id,
                   plan: {
                     schemaVersion: 2,
                     cashCountProofSha256: count.proofSha256,
@@ -1218,6 +2557,7 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
               variance: syp(-50_000),
               varianceDirection: 'shortage',
               finalEmployeeCash: syp(-10_000),
+              maximumCashShortageReceivable: syp(10_000),
               cashClaimToOffice: syp(120_000),
               walletClaimToOffice: syp(70_000),
               walletToOffice: syp(70_000),

@@ -127,3 +127,25 @@ describe('end-shift failure and optional-log source guards', () => {
     expect(shiftSource).toContain('toast.error(`${notice.title}:')
   })
 })
+
+/**
+ * Shift d0a5a7ec: the close draft had been corrected through the manager API, so the phone still
+ * held revision 29 while the server was on 30. The server refused with `close_draft_changed` —
+ * correct optimistic concurrency — and the driver was shown «حدث غير متوقع … تحقّق من الاتصال»,
+ * advice that cannot possibly help. His connection was fine; his copy of the draft was old.
+ */
+describe('a draft that moved on is a recoverable state, not an unexpected failure', () => {
+  it('names the cause and tells the driver what actually works', () => {
+    const notice = inArabic({
+      error: 'close_draft_changed',
+      detail: { currentRevision: 30, currentDraftHash: 'abc' },
+    })
+    expect(notice.code).toBe('close_draft_changed')
+    expect(notice.lines).toEqual([ar.shift.closeFailure.draftChanged])
+    // The catch-all would have told him to check his connection. It must not be reached, and the
+    // raw error code must never be the thing a driver is shown.
+    expect(notice.lines.join(' ')).not.toContain('close_draft_changed')
+    expect(inEnglish({ error: 'close_draft_changed' }).lines)
+      .toEqual([en.shift.closeFailure.draftChanged])
+  })
+})

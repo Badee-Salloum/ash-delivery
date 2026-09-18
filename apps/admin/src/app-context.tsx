@@ -1,6 +1,7 @@
 import { type ReactNode, createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import { ApiClient } from '@ash/client'
 import { type Catalog, type Lang, catalogs, dir } from '@ash/client/i18n'
+import { type Theme, applyTheme, readTheme, watchSystemTheme } from './theme.ts'
 
 /**
  * The app-wide context: the API client, the current language (ar default, RTL-first), and the
@@ -28,6 +29,9 @@ interface AppContextValue {
   lang: Lang
   t: Catalog
   setLang(lang: Lang): void
+  /** The theme the manager CHOSE — may be 'system'; the painted theme is derived from it. */
+  theme: Theme
+  setTheme(theme: Theme): void
   session: Session | null
   setSession(session: Session | null): void
   refreshSession(): Promise<void>
@@ -58,8 +62,16 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     }
   })
   const [session, setSession] = useState<Session | null>(null)
+  // Seeded from storage, not from the DOM: `theme-boot.js` already painted a CONCRETE theme before
+  // React mounted, so reading the attribute back would lose the fact that the choice was «system».
+  const [theme, setThemeState] = useState<Theme>(() => readTheme())
   const [branches, setBranches] = useState<Branch[]>([])
   const [branchId, setBranchIdState] = useState<string | null>(null)
+
+  const setTheme = useCallback((next: Theme) => {
+    setThemeState(next)
+    applyTheme(next)
+  }, [])
 
   const setLang = useCallback((next: Lang) => {
     setLangState(next)
@@ -96,6 +108,13 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
       api.onUnauthorized = null
     }
   }, [api])
+
+  // While the choice is «system», follow the OS live. A manager whose laptop turns dark at sunset
+  // should not have to reload to see it.
+  useEffect(() => {
+    if (theme !== 'system') return
+    return watchSystemTheme(() => applyTheme('system'))
+  }, [theme])
 
   // Keep <html dir/lang> in step with the chosen language — the whole layout is RTL by default.
   useEffect(() => {
@@ -166,6 +185,8 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     lang,
     t: catalogs[lang],
     setLang,
+    theme,
+    setTheme,
     session,
     setSession,
     refreshSession,

@@ -17,8 +17,15 @@ import { fileURLToPath } from 'node:url'
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const ROOTS = ['packages/contracts/src', 'packages/adapters/src', 'apps'].map((p) => join(ROOT, p))
 
-/** Field names that mean money. Kept deliberately broad — a false positive costs one rename. */
-const MONEY_NAME = /(amount|fee|balance|cash|wallet|float|topup|total|share|minor|price|cost|salary|ceiling)/i
+/**
+ * Field names that mean money. Kept deliberately broad — a false positive costs one rename.
+ *
+ * The company ledger (C1) adds dollars, frozen exchange rates, debts, instalments, depreciation and
+ * book values: every one of them is money or multiplies money, and a float on any of them is the
+ * same silent rounding as on an amount.
+ */
+const MONEY_NAME =
+  /(amount|fee|balance|cash|wallet|float|topup|total|share|minor|price|cost|salary|ceiling|usd|syp|rate|principal|outstanding|instal|depreci|reserve|book)/i
 
 /** Where turning money into a Number is legitimate and reviewed. */
 const ALLOWED = new Set([

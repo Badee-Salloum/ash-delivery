@@ -92,3 +92,42 @@ describe('the permission matrix as data (SRS A-2)', () => {
     expect((await get(mgr, '/permissions')).statusCode).toBe(403)
   })
 })
+
+
+/**
+ * Found in production while probing the new routes: `GET /nonsense-route` answered
+ * `500 route_misconfigured`.
+ *
+ * `authorize` is a GLOBAL preHandler, and Fastify runs preHandler hooks on its not-found route too
+ * — which declares no permission, because nobody wrote it. So every typo, every stale client URL
+ * and every scanner probe was the server reporting its own fault for a thing that does not exist.
+ * Real 500s are how breakage gets found; burying them under 404s costs exactly that.
+ */
+describe('a route that does not exist', () => {
+  it('is 404, not the server confessing to a misconfiguration', async () => {
+    const h = await makeHarness()
+    try {
+      const anonymous = await h.app.inject({ method: 'GET', url: '/no-such-route' })
+      expect(anonymous.statusCode).toBe(404)
+      expect(anonymous.json().error).toBe('not_found')
+
+      // Also for a signed-in caller: the old behaviour hit both, since the hook never got as far
+      // as looking at who was asking.
+      const admin = await h.loginAs('sysadmin')
+      const authenticated = await h.app.inject({
+        method: 'GET',
+        url: '/treasury/restoration',
+        headers: { cookie: h.cookie(admin) },
+      })
+      // `/treasury/restoration` exists as a POST only, so a GET matches no route.
+      expect(authenticated.statusCode).toBe(404)
+
+      // The other branch — a REGISTERED route declaring no permission — still fails closed with
+      // 500, and is not exercised here because it cannot be reached: `assertEveryRouteDeclaresPermission`
+      // refuses to boot in that state, and Fastify will not accept a new route afterwards.
+    } finally {
+      await h.app.close()
+    }
+  })
+
+})

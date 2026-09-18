@@ -2,7 +2,6 @@ import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import {
   groupThousands,
   type ReceivableChannel,
-  type ReceivableDirection,
   type ReceivableEventView,
   type ReceivableKind,
   type ReceivablesView,
@@ -13,14 +12,7 @@ import { useApp } from '../app-context.tsx'
 import { useConfirm, useToast } from '../feedback.tsx'
 import { explainError } from '../errors.ts'
 import { Button, Card, Field, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
-import {
-  buildCountLines,
-  countDifference,
-  countDraftReady,
-  differenceView,
-  restoreCountDraft,
-  summarizeRestoration,
-} from '../treasury-view.ts'
+import { differenceView, summarizeRestoration } from '../treasury-view.ts'
 import {
   browserReceivableOperationMutex,
   browserReceivableOperationStorage,
@@ -30,40 +22,24 @@ import {
   receivableDirectoryDrivers,
   receivableDriverMaySubmit,
   receivableOperationReady,
+  receivableWriteoffAmountWithinBalance,
   type PendingReceivableOperation,
   type PendingReceivableRecovery,
   type ReceivableOperationPayload,
 } from '../receivable-idempotency.ts'
+import { pendingAfterAttempt, pendingMoneyMove, type PendingMoneyMove } from '../money-move-idempotency.ts'
 
-/** The branch-level funds a manual entry can move (the driver/cost-centre ones need an id suffix). */
-const MANUAL_FUNDS = ['office_cash', 'office_wallet', 'yalago_share', 'company_revenue', 'yalago_income', 'fee_earned', 'company_box'] as const
+/**
+ * The branch-level funds a manual entry can move (the driver/cost-centre ones need an id suffix).
+ *
+ * NOT `company_box`: صندوق الشركة moves only through its own commands (`company_fund.manage`), and
+ * the server refuses it in a manual entry with `company_fund_not_manual` for every role.
+ */
+const MANUAL_FUNDS = ['office_cash', 'office_wallet', 'yalago_share', 'company_revenue', 'yalago_income', 'fee_earned'] as const
 interface EntryLine {
   fundCode: string
   side: 'D' | 'C'
   amount: string
-}
-
-interface CashCountSheet {
-  businessDate: string
-  alreadyCounted: boolean
-  funds: Array<{ fundCode: string; computed: string }>
-}
-
-interface CashCountView {
-  id: string
-  businessDate: string
-  countedBy: string
-  countedAt: string
-  proofSha256: string | null
-  notes: string | null
-  balanced: boolean
-  lines: Array<{
-    fundCode: string
-    counted: string
-    computed: string
-    variance: string
-    resolution: string | null
-  }>
 }
 
 interface TreasuryDriver {
@@ -75,33 +51,49 @@ interface TreasuryDriver {
 }
 
 /**
- * Treasury (SRS E-5, E-6): the daily cash count and the Sunday close. Both are branch-manager +
- * GM; the close itself is system-admin-only and its pre-flight blockers are shown before sealing.
+ * Branch treasury management and the Sunday close. The close itself is system-admin-only and its
+ * pre-flight blockers are shown before sealing.
  */
 export function Treasury(): ReactNode {
   const { api, t, session, branchId } = useApp()
   const toast = useToast()
   const confirm = useConfirm()
-  const [sheet, setSheet] = useState<CashCountSheet | null>(null)
-  const [counted, setCounted] = useState<Record<string, string>>({})
-  const [countResolutions, setCountResolutions] = useState<Record<string, string>>({})
-  const [result, setResult] = useState<CashCountView | null>(null)
   const [closeResult, setCloseResult] = useState<{ error?: string; blockers?: Array<{ kind: string }>; weekStart?: string } | null>(null)
   const [balances, setBalances] = useState<{ cash: string; wallet: string } | null>(null)
   const [depositAmt, setDepositAmt] = useState<{ cash: string; wallet: string }>({ cash: '', wallet: '' })
   const [depositMsg, setDepositMsg] = useState<string | null>(null)
+  // One key per unresolved submission, per box — reused when the same deposit is pressed again after
+  // a lost response, so the server answers with the original entry instead of depositing twice.
+  const pendingDeposit = useRef<Record<'cash' | 'wallet', PendingMoneyMove | null>>({ cash: null, wallet: null })
   const [withdrawAmt, setWithdrawAmt] = useState<{ cash: string; wallet: string }>({ cash: '', wallet: '' })
+  // The same held-key rule for «كييش» by hand: a second press after a lost response sweeps once.
+  const pendingKaish = useRef<Record<'cash' | 'wallet', PendingMoneyMove | null>>({ cash: null, wallet: null })
+  const [advances, setAdvances] = useState<Awaited<ReturnType<typeof api.advances>> | null>(null)
+  const [advancesError, setAdvancesError] = useState<string | null>(null)
+  const [advanceRepayAmt, setAdvanceRepayAmt] = useState<Record<string, string>>({})
+  const [convertParty, setConvertParty] = useState<Record<string, string>>({})
+  const [advanceReason, setAdvanceReason] = useState<Record<string, string>>({})
+  const [advanceBusy, setAdvanceBusy] = useState<string | null>(null)
+  const [moveDirection, setMoveDirection] = useState<'cash_to_wallet' | 'wallet_to_cash'>('cash_to_wallet')
+  const [moveAmt, setMoveAmt] = useState('')
+  const [moveReason, setMoveReason] = useState('')
 
   // ── «صندوق الشركة» ────────────────────────────────────────────────────────────────────────
   const [company, setCompany] = useState<{ total: string; branches: Array<{ branchId: string; nameAr: string; balance: string }> } | null>(null)
   const [companyError, setCompanyError] = useState<string | null>(null)
   const [companyAmt, setCompanyAmt] = useState('')
   const [companyReason, setCompanyReason] = useState('')
+  const [companyBusy, setCompanyBusy] = useState(false)
+  const pendingCompanyMove = useRef<Record<'deposit' | 'withdraw', PendingMoneyMove | null>>({
+    deposit: null,
+    withdraw: null,
+  })
 
   // ── «الترميم» ─────────────────────────────────────────────────────────────────────────────
   const [restoration, setRestoration] = useState<RestorationView | null>(null)
+  const [movements, setMovements] = useState<Awaited<ReturnType<typeof api.treasuryMovements>>['rows'] | null>(null)
+  const [movementsError, setMovementsError] = useState<string | null>(null)
   const [restorationError, setRestorationError] = useState<string | null>(null)
-  const [restoreDone, setRestoreDone] = useState(false)
   const [capitalTargetsDraft, setCapitalTargetsDraft] = useState({ cash: '', wallet: '' })
   const [capitalTargetReason, setCapitalTargetReason] = useState('')
   const [capitalTargetsBusy, setCapitalTargetsBusy] = useState(false)
@@ -119,6 +111,22 @@ export function Treasury(): ReactNode {
     amount: '',
     reason: '',
   })
+  /*
+   * «تعديل الذمم المسجلة» — a restatement, kept beside the command form but deliberately separate.
+   *
+   * It shares nothing with the command draft on purpose: a command says "move this much", a
+   * correction says "the balance should read this". Folding one into the other would produce a form
+   * whose «المبلغ» means two different things depending on a dropdown, which is how an operator
+   * ends up moving 4,000 when he meant to set the balance TO 4,000.
+   */
+  const [correctionDriverId, setCorrectionDriverId] = useState('')
+  const [correctionKind, setCorrectionKind] = useState<ReceivableKind>('ordinary')
+  const [correctionChannel, setCorrectionChannel] = useState<ReceivableChannel>('cash')
+  const [correctionTarget, setCorrectionTarget] = useState('')
+  const [correctionReason, setCorrectionReason] = useState('')
+  const correctionFormRef = useRef<HTMLDivElement | null>(null)
+  const [correctionBusy, setCorrectionBusy] = useState(false)
+  const [correctionError, setCorrectionError] = useState<string | null>(null)
   const [receivableEventBusy, setReceivableEventBusy] = useState(false)
   const [receivableEventError, setReceivableEventError] = useState<string | null>(null)
   const [receivableHistory, setReceivableHistory] = useState<ReceivableEventView[] | null>(null)
@@ -128,7 +136,6 @@ export function Treasury(): ReactNode {
     status: 'unavailable',
   })
 
-  const [sheetError, setSheetError] = useState<string | null>(null)
   const [balanceError, setBalanceError] = useState<string | null>(null)
   const loadVersion = useRef(0)
   const restorationLoadVersion = useRef(0)
@@ -164,50 +171,19 @@ export function Treasury(): ReactNode {
       branchId: branchId ?? session.branchId,
     }).allowed
 
-  const canViewCompanyFund =
+  // صندوق الشركة is `company_fund.manage` for the read AND both writes (2026-09-17) — the same key the
+  // server checks, so the card is shown to exactly the people who may use it.
+  const canManageCompanyFund =
     session != null &&
-    can({ userId: session.userId, roleKey: session.roleKey as RoleKey, branchId: session.branchId }, 'profit.view_total', {}).allowed
+    can({ userId: session.userId, roleKey: session.roleKey as RoleKey, branchId: session.branchId }, 'company_fund.manage', {}).allowed
 
   const receivableOutboxActorId = session?.userId ?? null
   const receivableOutboxBranchId = branchId ?? session?.branchId ?? null
 
   const load = useCallback(() => {
     const version = ++loadVersion.current
-    setSheetError(null)
     setBalanceError(null)
-    setSheet(null)
-    setResult(null)
-    setCounted({})
-    setCountResolutions({})
     setBalances(null)
-    void api
-      .get<CashCountSheet>('/cash-counts/sheet')
-      .then(async (d) => {
-        if (version !== loadVersion.current) return
-        setSheet(d)
-        if (!d.alreadyCounted) {
-          setResult(null)
-          setCounted({})
-          setCountResolutions({})
-          return
-        }
-
-        // The sheet only says that today's count exists. Load the sealed record as well so a
-        // refresh restores the frozen system balance, the physical count, every variance and its
-        // audited explanation instead of replacing the whole card with a bare check mark.
-        const saved = await api.get<CashCountView>(`/cash-counts/${d.businessDate}`)
-        if (version !== loadVersion.current) return
-        const draft = restoreCountDraft(saved.lines)
-        setResult(saved)
-        setCounted(draft.counted)
-        setCountResolutions(draft.resolutions)
-      })
-      .catch((e: { error?: string }) => {
-        if (version !== loadVersion.current) return
-        setSheet(null)
-        setResult(null)
-        setSheetError(e.error ?? 'error')
-      })
     void api
       .treasuryBalances()
       .then((next) => {
@@ -220,6 +196,28 @@ export function Treasury(): ReactNode {
       })
   }, [api, branchId])
 
+  /**
+   * What the two office boxes did lately. Read-only; the decisions live where the money moves.
+   *
+   * `branchId` is in the dependency list, not just `api`. An organisation-wide role has no branch
+   * of its own and the picker supplies one a moment after mount — so a loader that runs once on
+   * `[api]` fires before the branch exists, gets `422 branch_required`, and never tries again.
+   *
+   * And the error is SHOWN, never swallowed. The first draft of this card caught everything into an
+   * empty array, so a refused request and a genuinely quiet day looked identical: it said
+   * «لا حركات» while four duplicate transfers sat behind it. That is the same fault as an audit
+   * screen nobody can search — a failure that reports itself as an absence.
+   */
+  const loadMovements = useCallback(async (): Promise<void> => {
+    setMovementsError(null)
+    try {
+      setMovements((await api.treasuryMovements(50)).rows)
+    } catch (err) {
+      setMovements(null)
+      setMovementsError((err as { error?: string }).error ?? 'error')
+    }
+  }, [api, branchId])
+
   const loadRestoration = useCallback(async (): Promise<void> => {
     const version = ++restorationLoadVersion.current
     setRestoration(null)
@@ -227,7 +225,6 @@ export function Treasury(): ReactNode {
       const preview = await api.restorationPreview()
       if (version !== restorationLoadVersion.current) return
       setRestoration(preview)
-      setRestoreDone(preview.alreadyRestored === true)
       setCapitalTargetsDraft({
         cash: preview.legs.find((leg) => leg.fundCode === 'office_cash')?.capitalTarget ?? '',
         wallet: preview.legs.find((leg) => leg.fundCode === 'office_wallet')?.capitalTarget ?? '',
@@ -296,9 +293,11 @@ export function Treasury(): ReactNode {
   // showing branch A's cash box under branch B's name is the worst kind of wrong.
   useEffect(load, [load, branchId])
   useEffect(() => {
-    setRestoreDone(false)
     void loadRestoration()
   }, [loadRestoration])
+  useEffect(() => {
+    void loadMovements()
+  }, [loadMovements, branchId])
   useEffect(() => {
     void loadReceivables()
   }, [loadReceivables])
@@ -331,25 +330,157 @@ export function Treasury(): ReactNode {
     void loadReceivableHistory()
   }, [loadReceivableHistory])
 
-  /** «كييش» — take the day's profit out of the branch box and into صندوق الشركة. */
+  /**
+   * «كييش» — take the day's profit out of the branch box and into صندوق الشركة.
+   *
+   * Moving the company fund is `company_fund.manage` (GM + system admin, 2026-09-17): the server
+   * answers anyone else with 403 `company_fund_forbidden`, and the row is only rendered for holders.
+   */
   async function withdraw(target: 'cash' | 'wallet'): Promise<void> {
     const amount = withdrawAmt[target]
     if (!amount) return
     setDepositMsg(null)
+    const operation = pendingMoneyMove(pendingKaish.current[target], {
+      command: `treasury_kaish:${target}`,
+      branchId: branchId ?? session?.branchId ?? null,
+      amount,
+      reason: t.treasury.kaish,
+    })
+    pendingKaish.current[target] = operation
     try {
-      const res = await api.treasuryWithdraw(target, amount, t.treasury.kaish)
+      const res = await api.treasuryWithdraw(target, amount, t.treasury.kaish, 'company_box', operation.idempotencyKey)
+      pendingKaish.current[target] = pendingAfterAttempt(operation, { ok: true })
       setBalances((b) => (b ? { ...b, [target]: res.balance } : b))
       setWithdrawAmt({ ...withdrawAmt, [target]: '' })
       setDepositMsg(t.treasury.withdrawn)
       void refreshCompany()
     } catch (err) {
+      const code = (err as { error?: string }).error
+      pendingKaish.current[target] = pendingAfterAttempt(operation, { ok: false, error: code })
       setDepositMsg(null)
+      toast.error(explainError(code ?? 'error', t))
+    }
+  }
+
+  const loadAdvances = useCallback(async (): Promise<void> => {
+    try {
+      setAdvances(await api.advances())
+      setAdvancesError(null)
+    } catch (err) {
+      setAdvances(null)
+      setAdvancesError((err as { error?: string }).error ?? 'error')
+    }
+  }, [api])
+
+  useEffect(() => {
+    void loadAdvances()
+  }, [loadAdvances])
+
+  /**
+   * «تسجيل إعادة» — money coming back on one advance.
+   *
+   * Targets the ADVANCE, never the party: the party is free text, and two spellings of one name
+   * must never be able to merge or split what is owed.
+   */
+  async function repayAdvance(advanceId: string): Promise<void> {
+    const amount = advanceRepayAmt[advanceId]
+    const reason = (advanceReason[advanceId] ?? '').trim()
+    if (!amount || !reason) return
+    setAdvanceBusy(advanceId)
+    try {
+      await api.repayAdvance(advanceId, { idempotencyKey: crypto.randomUUID(), amount, reason })
+      setAdvanceRepayAmt({ ...advanceRepayAmt, [advanceId]: '' })
+      setAdvanceReason({ ...advanceReason, [advanceId]: '' })
+      toast.success(t.treasury.advanceRepaidOk)
+      await Promise.all([loadAdvances(), load()])
+    } catch (err) {
+      toast.error(explainError((err as { error?: string }).error ?? 'error', t))
+    } finally {
+      setAdvanceBusy(null)
+    }
+  }
+
+  /** «تحويل إلى صرفية» — the only act in this instrument's life that reduces office capital. */
+  async function convertAdvance(advanceId: string): Promise<void> {
+    const reason = (advanceReason[advanceId] ?? '').trim()
+    if (!reason) return
+    if (
+      !(await confirm({
+        title: t.treasury.advanceConvert,
+        body: t.treasury.advanceConvertConfirm,
+        confirmLabel: t.treasury.advanceConvert,
+        danger: true,
+      }))
+    ) {
+      return
+    }
+    setAdvanceBusy(advanceId)
+    try {
+      await api.convertAdvance(advanceId, { idempotencyKey: crypto.randomUUID(), reason })
+      setAdvanceReason({ ...advanceReason, [advanceId]: '' })
+      toast.success(t.treasury.advanceConvertedOk)
+      await Promise.all([loadAdvances(), load()])
+    } catch (err) {
+      toast.error(explainError((err as { error?: string }).error ?? 'error', t))
+    } finally {
+      setAdvanceBusy(null)
+    }
+  }
+
+  /**
+   * «تحويل الذمة إلى سلفة» — the same debt, filed differently (owner request, 2026-09-01).
+   *
+   * NO MONEY MOVES. One counted asset falls and another rises; no box is touched and office capital
+   * is unchanged. It goes through its own route rather than composing collect-then-pay, because
+   * that would write a collection into the driver's history for money that never came back.
+   */
+  async function convertReceivableToAdvance(
+    driverId: string,
+    driverName: string,
+    channel: 'cash' | 'wallet',
+    amount: string,
+  ): Promise<void> {
+    // Whose debt it REALLY is. A ذمة can only name a registered driver, so a debt somebody else
+    // owes has always had to sit under whichever driver's row the manager picked; this is the
+    // first point at which it can be filed under the right name.
+    const partyName = (convertParty[driverId] ?? '').trim() || driverName
+    const categories = await api.expenseCategories().catch(() => null)
+    const categoryId = categories?.categories[0]?.id
+    if (!categoryId) {
+      toast.error(explainError('unknown_expense_category', t))
+      return
+    }
+    const confirmed = await confirm({
+      title: t.treasury.advanceFromReceivable,
+      body: t.treasury.advanceFromReceivableConfirm
+        .replace('{driver}', partyName === driverName ? driverName : `${driverName} → ${partyName}`)
+        .replace('{amount}', groupThousands(amount)),
+      confirmLabel: t.treasury.advanceFromReceivable,
+    })
+    if (!confirmed) return
+    try {
+      await api.createAdvance({
+        idempotencyKey: crypto.randomUUID(),
+        partyName,
+        categoryId,
+        costCenterKind: 'general',
+        vehicleId: null,
+        sourceDriverId: driverId,
+        // Inherited from the debt, never chosen: a debt owed in cash stays owed in cash.
+        channel: channel === 'cash' ? 'office_cash' : 'office_wallet',
+        amount,
+        description: `${t.treasury.advanceFromReceivable} — ${driverName}`,
+      })
+      setConvertParty({ ...convertParty, [driverId]: '' })
+      toast.success(t.treasury.advanceFromReceivableOk)
+      await Promise.all([loadAdvances(), loadReceivables(), load()])
+    } catch (err) {
       toast.error(explainError((err as { error?: string }).error ?? 'error', t))
     }
   }
 
   const refreshCompany = useCallback(async (): Promise<void> => {
-    if (!canViewCompanyFund) {
+    if (!canManageCompanyFund) {
       setCompany(null)
       setCompanyError(null)
       return
@@ -358,12 +489,12 @@ export function Treasury(): ReactNode {
       setCompany(await api.companyFund())
       setCompanyError(null)
     } catch (err) {
-      // `profit.view_total` — the GM and, since decision 9, the system admin. A branch manager
-      // gets 403 here, and saying so beats an empty card he reads as broken.
+      // `company_fund.manage` — the GM and the system admin. If the live matrix was narrowed the
+      // server answers 403, and saying so beats an empty card read as broken.
       setCompany(null)
       setCompanyError((err as { error?: string }).error ?? 'error')
     }
-  }, [api, canViewCompanyFund])
+  }, [api, canManageCompanyFund])
 
   // صندوق الشركة is company-wide, so it does NOT depend on the selected branch. Declared after
   // `refreshCompany` because a `const` callback is not hoisted — the effect would read it before
@@ -373,16 +504,32 @@ export function Treasury(): ReactNode {
   }, [refreshCompany])
 
   async function moveCompany(direction: 'deposit' | 'withdraw'): Promise<void> {
-    if (!companyAmt || !companyReason.trim()) return
+    const reasonText = companyReason.trim()
+    if (!companyAmt || !reasonText || companyBusy) return
+    // Held until the server has answered: pressing again after a lost response re-sends the SAME
+    // key, and the server returns the original entry instead of moving the money twice.
+    const operation = pendingMoneyMove(pendingCompanyMove.current[direction], {
+      command: `company_${direction}`,
+      branchId: branchId ?? session?.branchId ?? null,
+      amount: companyAmt,
+      reason: reasonText,
+    })
+    pendingCompanyMove.current[direction] = operation
+    setCompanyBusy(true)
     try {
-      if (direction === 'deposit') await api.companyFundDeposit(companyAmt, companyReason.trim())
-      else await api.companyFundWithdraw(companyAmt, companyReason.trim())
+      if (direction === 'deposit') await api.companyFundDeposit(companyAmt, reasonText, operation.idempotencyKey)
+      else await api.companyFundWithdraw(companyAmt, reasonText, operation.idempotencyKey)
+      pendingCompanyMove.current[direction] = pendingAfterAttempt(operation, { ok: true })
       setCompanyAmt('')
       setCompanyReason('')
       await refreshCompany()
       void load()
     } catch (err) {
-      toast.error(explainError((err as { error?: string }).error ?? 'error', t))
+      const code = (err as { error?: string }).error
+      pendingCompanyMove.current[direction] = pendingAfterAttempt(operation, { ok: false, error: code })
+      toast.error(explainError(code ?? 'error', t))
+    } finally {
+      setCompanyBusy(false)
     }
   }
 
@@ -390,8 +537,16 @@ export function Treasury(): ReactNode {
     const amount = depositAmt[target]
     if (!amount) return
     setDepositMsg(null)
+    const operation = pendingMoneyMove(pendingDeposit.current[target], {
+      command: `treasury_deposit:${target}`,
+      branchId: branchId ?? session?.branchId ?? null,
+      amount,
+      reason: '',
+    })
+    pendingDeposit.current[target] = operation
     try {
-      const res = await api.treasuryDeposit(target, amount)
+      const res = await api.treasuryDeposit(target, amount, operation.idempotencyKey)
+      pendingDeposit.current[target] = pendingAfterAttempt(operation, { ok: true })
       setBalances((b) => (b ? { ...b, [target]: res.balance } : b))
       setDepositAmt({ ...depositAmt, [target]: '' })
       setDepositMsg(t.treasury.deposited)
@@ -399,6 +554,29 @@ export function Treasury(): ReactNode {
       // It used to set the SAME state as success, which renders in emerald — so a rejected
       // deposit printed «forbidden» in green under the cash box and the manager believed the
       // money had gone in.
+      const code = (err as { error?: string }).error
+      pendingDeposit.current[target] = pendingAfterAttempt(operation, { ok: false, error: code })
+      setDepositMsg(null)
+      toast.error(explainError(code ?? 'error', t))
+    }
+  }
+
+  /**
+   * «نقل بين الصندوق والمحفظة» — reshape the branch's own money, both directions.
+   *
+   * Not «كييش»: nothing leaves for صندوق الشركة, so the treasury total, the capital target and
+   * الترميم all see exactly what they saw a second ago. Only the two boxes change.
+   */
+  async function moveBetweenBoxes(): Promise<void> {
+    if (!moveAmt || !moveReason.trim()) return
+    setDepositMsg(null)
+    try {
+      const res = await api.treasuryTransfer(moveDirection, moveAmt, moveReason.trim())
+      setBalances((b) => (b ? { ...b, cash: res.cash, wallet: res.wallet } : b))
+      setMoveAmt('')
+      setMoveReason('')
+      setDepositMsg(t.treasury.moved)
+    } catch (err) {
       setDepositMsg(null)
       toast.error(explainError((err as { error?: string }).error ?? 'error', t))
     }
@@ -448,58 +626,6 @@ export function Treasury(): ReactNode {
       load()
     } catch (err) {
       setRevMsg(explainError((err as { error?: string }).error ?? 'error', t))
-    }
-  }
-
-  async function reloadCountSheetPreservingDraft(): Promise<void> {
-    try {
-      const latest = await api.get<CashCountSheet>('/cash-counts/sheet')
-      setSheet(latest)
-      if (!latest.alreadyCounted) return
-      const saved = await api.get<CashCountView>(`/cash-counts/${latest.businessDate}`)
-      const draft = restoreCountDraft(saved.lines)
-      setResult(saved)
-      setCounted(draft.counted)
-      setCountResolutions(draft.resolutions)
-    } catch {
-      // Keep the manager's draft intact. The actionable refusal remains visible in the toast and a
-      // later manual retry can refresh without forcing the physical count to be typed again.
-    }
-  }
-
-  async function submitCount(): Promise<void> {
-    if (!sheet) return
-    const lines = buildCountLines(sheet.funds, counted, countResolutions)
-    // Swallowed before: the manager typed the day's counted cash, pressed «تأكيد», and nothing
-    // whatsoever happened — no error, no result — on the seal of the cash box.
-    try {
-      const saved = await api.post<CashCountView>('/cash-counts', {
-        ...(branchId ? { branchId } : {}),
-        businessDate: sheet.businessDate,
-        lines,
-      })
-      const draft = restoreCountDraft(saved.lines)
-      setResult(saved)
-      setCounted(draft.counted)
-      setCountResolutions(draft.resolutions)
-      setSheet((current) => (current ? { ...current, alreadyCounted: true } : current))
-      // الترميم is computed FROM the count (decision j), so sealing one changes the other.
-      void loadRestoration()
-    } catch (err) {
-      const failure = err as { error?: string; detail?: unknown }
-      if (failure.error === 'cash_count_resolution_required') {
-        if (isCountResolutionDetail(failure.detail)) {
-          const fund = t.treasury.fundCodes[failure.detail.fundCode as keyof typeof t.treasury.fundCodes] ?? failure.detail.fundCode
-          const variance = differenceView(failure.detail.variance)
-          const direction = variance.direction === 'increase' ? t.treasury.increase : t.treasury.shortage
-          toast.error(`${t.errors.cash_count_resolution_required}: ${fund} — ${direction} ${groupThousands(variance.amount)}`)
-        } else {
-          toast.error(t.errors.cash_count_resolution_required)
-        }
-        void reloadCountSheetPreservingDraft()
-      } else {
-        toast.error(explainError(failure.error ?? 'error', t))
-      }
     }
   }
 
@@ -558,8 +684,9 @@ export function Treasury(): ReactNode {
     const confirmedAgainstVersion = receivableSubmitVersion.current
     const confirmed = await confirm({
       title: t.treasury.receivableEventConfirmTitle,
-      body: `${actionLabel} — ${driver.fullNameAr} (${driver.code}) — ${t.treasury.receivableKinds[payload.receivableKind]} — ${t.treasury.receivableChannels[payload.channel]} — ${groupThousands(payload.amount)} — ${payload.reason}`,
+      body: `${actionLabel} — ${driver.fullNameAr} (${driver.code}) — ${t.treasury.receivableKinds[payload.receivableKind]} — ${t.treasury.receivableChannels[payload.channel]} — ${groupThousands(payload.amount)} — ${payload.reason}${payload.direction === 'writeoff' ? ` — ${t.treasury.receivableWriteoffHint}` : ''}`,
       confirmLabel: actionLabel,
+      danger: payload.direction === 'writeoff',
     })
     // A branch/session switch while the modal was open invalidates its captured actor + branch.
     if (!confirmed || confirmedAgainstVersion !== receivableSubmitVersion.current) return
@@ -590,7 +717,20 @@ export function Treasury(): ReactNode {
         setReceivableOutboxRecovery({ status: 'pending', operation })
         setReceivableDraft(operation.payload)
         submitVersion = ++receivableSubmitVersion.current
-        return api.createReceivableEvent({ ...operation.payload, idempotencyKey: operation.idempotencyKey })
+        if (operation.payload.direction === 'writeoff') {
+          return api.writeoffReceivable({
+            driverId: operation.payload.driverId,
+            channel: operation.payload.channel,
+            amount: operation.payload.amount,
+            reason: operation.payload.reason,
+            idempotencyKey: operation.idempotencyKey,
+          })
+        }
+        return api.createReceivableEvent({
+          ...operation.payload,
+          direction: operation.payload.direction === 'create' ? 'create' : 'collect',
+          idempotencyKey: operation.idempotencyKey,
+        })
       },
     })
 
@@ -698,7 +838,7 @@ export function Treasury(): ReactNode {
   }
 
   async function doRestore(): Promise<void> {
-    if (!restoration) return
+    if (!restoration || restoration.source !== 'live_ledger') return
     const legText = restoration.legs.map((leg) => {
       const fund = leg.fundCode === 'office_cash' ? t.treasury.cashBox : t.treasury.wallet
       const action =
@@ -737,7 +877,7 @@ export function Treasury(): ReactNode {
 
   async function closeWeek(): Promise<void> {
     // The API expects the FOLLOWING Sunday; the server validates it, so send today's next Sunday.
-    const closeDate = nextSunday(sheet?.businessDate ?? new Date().toISOString().slice(0, 10))
+    const closeDate = nextSunday(session?.businessDate ?? new Date().toISOString().slice(0, 10))
     // BR7 seals the week: every entry inside it becomes immutable and corrections after this are
     // dated correction entries only. It was a bare red button with no question asked.
     const ok = await confirm({
@@ -755,8 +895,6 @@ export function Treasury(): ReactNode {
     }
   }
 
-  const countIsSealed = sheet?.alreadyCounted === true || result !== null
-  const countReady = sheet ? countDraftReady(sheet.funds, counted, countResolutions) : false
   const restorationSummary = restoration ? summarizeRestoration(restoration.legs) : null
   const restorationNet = restoration ? differenceView(restoration.netToCompany) : null
   const capitalTargetsReady = (() => {
@@ -773,6 +911,86 @@ export function Treasury(): ReactNode {
   // A branch switch invalidates the painted data immediately, before the effect starts its fetch.
   const selectedReceivables = receivablesBranchId === branchId ? receivables : null
   const selectedReceivablesError = receivablesBranchId === branchId ? receivablesError : null
+  /**
+   * The balance the correction is about, straight off the loaded view.
+   *
+   * Shown read-only rather than typed. The whole point of `expectedCurrentBalance` is that it is
+   * what the operator was LOOKING AT — letting him type it would turn an optimistic-concurrency
+   * check into a second chance to get a number wrong.
+   */
+  const correctionRow = (receivablesBranchId === branchId ? receivables : null)?.drivers.find(
+    (d) => d.driverId === correctionDriverId,
+  )
+  const correctionCurrent = correctionRow
+    ? correctionKind === 'ordinary'
+      ? correctionChannel === 'cash'
+        ? correctionRow.ordinaryCash
+        : correctionRow.ordinaryWallet
+      : correctionChannel === 'cash'
+        ? correctionRow.shiftFundingCash
+        : correctionRow.shiftFundingWallet
+    : null
+
+  /**
+   * Point the correction form at one specific balance.
+   *
+   * A driver row carries FOUR balances — ordinary and shift-funding, each in cash and wallet — so a
+   * button that only knew the driver would leave the operator to re-pick the pair he had just
+   * clicked on, which is how the wrong one gets corrected. Each button therefore carries its own
+   * kind and channel.
+   *
+   * `clear` is the same act with the target already at zero. Nothing is deleted, because nothing in
+   * this ledger can be: the balance is restated to zero and both the original and the restatement
+   * stay in the history. The reason is still required — it is the only record of WHY the debt
+   * should not have been there, and the server refuses without it.
+   */
+  const aimCorrection = (
+    driverId: string,
+    kind: ReceivableKind,
+    channel: ReceivableChannel,
+    clear: boolean,
+  ): void => {
+    setCorrectionDriverId(driverId)
+    setCorrectionKind(kind)
+    setCorrectionChannel(channel)
+    setCorrectionTarget(clear ? '0.00' : '')
+    setCorrectionReason('')
+    setCorrectionError(null)
+    correctionFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+
+  const submitCorrection = async (): Promise<void> => {
+    if (!correctionRow || correctionCurrent === null) return
+    setCorrectionError(null)
+    const confirmed = await confirm({
+      title: t.treasury.correctionConfirmTitle,
+      body: `${correctionRow.nameAr} (${correctionRow.code}) — ${t.treasury.receivableKinds[correctionKind]} — ${t.treasury.receivableChannels[correctionChannel]} — ${groupThousands(correctionCurrent)} → ${groupThousands(correctionTarget)} — ${correctionReason}`,
+    })
+    if (!confirmed) return
+    setCorrectionBusy(true)
+    try {
+      await api.correctReceivable({
+        driverId: correctionDriverId,
+        receivableKind: correctionKind,
+        channel: correctionChannel,
+        expectedCurrentBalance: correctionCurrent,
+        targetBalance: correctionTarget,
+        reason: correctionReason.trim(),
+        // A fresh key per attempt: the server treats a repeat of the SAME key as a replay, which is
+        // what protects a lost response from restating the balance twice.
+        idempotencyKey: crypto.randomUUID(),
+      })
+      setCorrectionTarget('')
+      setCorrectionReason('')
+      await Promise.all([loadReceivables(), loadReceivableHistory()])
+      toast.success(t.treasury.correctionSaved)
+    } catch (error) {
+      setCorrectionError((error as { error?: string }).error ?? 'error')
+    } finally {
+      setCorrectionBusy(false)
+    }
+  }
+
   const selectedReceivableHistory = receivableHistoryBranchId === branchId ? receivableHistory : null
   const selectedReceivableHistoryError = receivableHistoryBranchId === branchId ? receivableHistoryError : null
   const selectedReceivableRow = selectedReceivables?.drivers.find(
@@ -782,7 +1000,7 @@ export function Treasury(): ReactNode {
     (driver) => driver.id === receivableDraft.driverId,
   )
   const selectedReceivableBalance = selectedReceivableRow
-    ? receivableDraft.receivableKind === 'ordinary'
+    ? receivableDraft.direction === 'writeoff' || receivableDraft.receivableKind === 'ordinary'
       ? receivableDraft.channel === 'cash'
         ? selectedReceivableRow.ordinaryCash
         : selectedReceivableRow.ordinaryWallet
@@ -803,13 +1021,15 @@ export function Treasury(): ReactNode {
     receivableOutboxRecovery.status === 'unavailable' || receivableOutboxRecovery.status === 'corrupt'
   const receivableFingerprintLocked =
     receivableEventBusy || receivableOutboxBlocked || receivableOutboxRecovery.status === 'pending'
+  const writeoffAmountWithinBalance = receivableWriteoffAmountWithinBalance(
+    normalizedReceivableDraft,
+    selectedReceivableBalance,
+    exactPendingReceivableRetry,
+  )
   const receivableEventReady = !receivableOutboxBlocked && (
     receivableDriverMaySubmit(selectedReceivableDriver, receivableDraft.direction) ||
     exactPendingReceivableRetry
-  ) && receivableOperationReady(normalizedReceivableDraft)
-
-  const fundLabel = (fundCode: string): string =>
-    t.treasury.fundCodes[fundCode as keyof typeof t.treasury.fundCodes] ?? fundCode
+  ) && receivableOperationReady(normalizedReceivableDraft) && writeoffAmountWithinBalance
 
   const directionLabel = (direction: 'increase' | 'shortage' | 'none', capital = false): string => {
     if (direction === 'increase') return capital ? t.treasury.capitalSurplus : t.treasury.increase
@@ -830,7 +1050,7 @@ export function Treasury(): ReactNode {
           {(['cash', 'wallet'] as const).map((target) => (
             <div key={target} className="rounded-lg border border-slate-200 p-3">
               <div className="text-xs font-semibold text-slate-500">
-                {target === 'cash' ? t.treasury.cashBox : t.treasury.wallet}
+                {target === 'cash' ? t.treasury.expectedCashBox : t.treasury.expectedWallet}
               </div>
               <div className="mt-1 text-2xl font-bold">
                 {balances ? (
@@ -854,24 +1074,27 @@ export function Treasury(): ReactNode {
                       {t.treasury.ownerFunding}
                     </Button>
                   </div>
-                  {/* «كييش» by hand. The owner's book moves money out of the box every day; until
-                      now the screen could only put money in. الترميم automates the decision later
-                      and posts through the very same recipe, so the two are one thing in the ledger. */}
-                  <div className="flex flex-col gap-2 sm:flex-row">
-                    <MoneyInput
-                      value={withdrawAmt[target]}
-                      onChange={(e) => setWithdrawAmt({ ...withdrawAmt, [target]: e.target.value })}
-                      className="min-w-0 flex-1"
-                      placeholder={t.treasury.kaish}
-                    />
-                    <Button
-                      variant="ghost"
-                      onClick={() => withdraw(target)}
-                      disabled={!withdrawAmt[target]}
-                    >
-                      {t.treasury.transferToCompanyKaish}
-                    </Button>
-                  </div>
+                  {/* «كييش» by hand. The owner's book moves money out of the box every day; الترميم
+                      posts through the very same recipe, so the two are one thing in the ledger.
+                      Only for `company_fund.manage` — it moves صندوق الشركة, which the branch
+                      manager may not (2026-09-17). */}
+                  {canManageCompanyFund ? (
+                    <div className="flex flex-col gap-2 sm:flex-row">
+                      <MoneyInput
+                        value={withdrawAmt[target]}
+                        onChange={(e) => setWithdrawAmt({ ...withdrawAmt, [target]: e.target.value })}
+                        className="min-w-0 flex-1"
+                        placeholder={t.treasury.kaish}
+                      />
+                      <Button
+                        variant="ghost"
+                        onClick={() => withdraw(target)}
+                        disabled={!withdrawAmt[target]}
+                      >
+                        {t.treasury.transferToCompanyKaish}
+                      </Button>
+                    </div>
+                  ) : null}
                 </div>
               ) : (
                 // Saying why beats an empty card somebody reads as a broken screen.
@@ -880,11 +1103,42 @@ export function Treasury(): ReactNode {
             </div>
           ))}
         </div>
+        {canDeposit ? (
+          <div className="mt-4 rounded-lg border border-slate-200 p-3">
+            <div className="text-xs font-semibold text-slate-500">{t.treasury.moveBetweenBoxes}</div>
+            <p className="mt-1 text-xs text-slate-600">{t.treasury.moveBetweenBoxesHint}</p>
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">
+              <Select
+                value={moveDirection}
+                onChange={(e) => setMoveDirection(e.target.value as 'cash_to_wallet' | 'wallet_to_cash')}
+                className="min-w-0 flex-1"
+              >
+                <option value="cash_to_wallet">{t.treasury.cashToWallet}</option>
+                <option value="wallet_to_cash">{t.treasury.walletToCash}</option>
+              </Select>
+              <MoneyInput
+                value={moveAmt}
+                onChange={(e) => setMoveAmt(e.target.value)}
+                className="min-w-0 flex-1"
+                placeholder={t.treasury.depositAmount}
+              />
+              <TextInput
+                value={moveReason}
+                onChange={(e) => setMoveReason(e.target.value)}
+                className="min-w-0 flex-1"
+                placeholder={t.treasury.moveBetweenBoxesReason}
+              />
+              <Button variant="ghost" onClick={() => void moveBetweenBoxes()} disabled={!moveAmt || !moveReason.trim()}>
+                {t.treasury.moveBetweenBoxes}
+              </Button>
+            </div>
+          </div>
+        ) : null}
         {depositMsg ? <p className="mt-3 text-sm font-medium text-emerald-700">{depositMsg}</p> : null}
 
         {/* «صندوق الشركة» — where «كييش» lands and where «شحن من الصندوق» comes from. Sits inside
             the treasury card because the two are one flow: money leaves the box and arrives here. */}
-        {canViewCompanyFund ? <div className="mt-4 rounded-lg border border-slate-300 bg-slate-50 p-3">
+        {canManageCompanyFund ? <div className="mt-4 rounded-lg border border-slate-300 bg-slate-50 p-3">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <span className="text-xs font-semibold text-slate-500">{t.treasury.companyFund}</span>
             <span className="text-2xl font-bold">
@@ -926,13 +1180,16 @@ export function Treasury(): ReactNode {
               <div className="flex gap-2">
                 {/* A reason is mandatory on both: the database enforces it for these events, so a
                     button that submits without one only ever produces a 400 the operator must decode. */}
-                <Button onClick={() => moveCompany('deposit')} disabled={!companyAmt || !companyReason.trim()}>
+                <Button
+                  onClick={() => moveCompany('deposit')}
+                  disabled={companyBusy || !companyAmt || !companyReason.trim()}
+                >
                   {t.treasury.deposit}
                 </Button>
                 <Button
                   variant="ghost"
                   onClick={() => moveCompany('withdraw')}
-                  disabled={!companyAmt || !companyReason.trim()}
+                  disabled={companyBusy || !companyAmt || !companyReason.trim()}
                 >
                   {t.treasury.withdraw}
                 </Button>
@@ -940,6 +1197,87 @@ export function Treasury(): ReactNode {
             </div>
           ) : null}
         </div> : null}
+      </Card>
+
+      <Card title={t.treasury.advances} className="lg:col-span-2">
+        <p className="text-xs text-slate-600">{t.treasury.advancesHint}</p>
+        {advancesError ? (
+          <p className="mt-3 text-sm text-red-600">{explainError(advancesError, t)}</p>
+        ) : (
+          <>
+            <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 text-sm sm:grid-cols-4">
+              <dt className="text-slate-600">{t.treasury.advanceOutstandingCash}</dt>
+              <dd className="text-end font-semibold">
+                <Money value={advances?.outstandingCash ?? '0.00'} />
+              </dd>
+              <dt className="text-slate-600">{t.treasury.advanceOutstandingWallet}</dt>
+              <dd className="text-end font-semibold">
+                <Money value={advances?.outstandingWallet ?? '0.00'} />
+              </dd>
+            </dl>
+            <div className="mt-3">
+              <Table
+                head={[
+                  t.treasury.advanceParty,
+                  t.expenses.description,
+                  t.treasury.withdrawTo,
+                  t.treasury.advanceOutstanding,
+                  t.treasury.advanceRepaid,
+                  t.accounts.actions,
+                ]}
+                isEmpty={(advances?.outstanding.length ?? 0) === 0}
+                empty={t.treasury.advanceNone}
+              >
+                {(advances?.outstanding ?? []).map((row) => (
+                  <tr key={row.id}>
+                    <td className="px-3 py-2 font-medium text-slate-800">{row.partyName}</td>
+                    <td className="px-3 py-2 text-slate-600">{row.description}</td>
+                    <td className="px-3 py-2 text-slate-600">
+                      {row.channel === 'office_cash' ? t.treasury.cashBox : t.treasury.wallet}
+                    </td>
+                    <td className="px-3 py-2 font-semibold"><Money value={row.outstanding} /></td>
+                    <td className="px-3 py-2 text-slate-600"><Money value={row.repaid} /></td>
+                    <td className="px-3 py-2">
+                      {canDeposit ? (
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                          <MoneyInput
+                            value={advanceRepayAmt[row.id] ?? ''}
+                            onChange={(e) => setAdvanceRepayAmt({ ...advanceRepayAmt, [row.id]: e.target.value })}
+                            className="w-32"
+                            placeholder={t.treasury.advanceOutstanding}
+                          />
+                          <TextInput
+                            value={advanceReason[row.id] ?? ''}
+                            onChange={(e) => setAdvanceReason({ ...advanceReason, [row.id]: e.target.value })}
+                            className="w-40"
+                            placeholder={t.treasury.advanceReason}
+                          />
+                          <Button
+                            onClick={() => void repayAdvance(row.id)}
+                            disabled={advanceBusy === row.id || !advanceRepayAmt[row.id] || !(advanceReason[row.id] ?? '').trim()}
+                          >
+                            {t.treasury.advanceRepay}
+                          </Button>
+                          {/* Capital drops here and nowhere else, so it asks first and needs a reason. */}
+                          <Button
+                            variant="ghost"
+                            onClick={() => void convertAdvance(row.id)}
+                            disabled={advanceBusy === row.id || !(advanceReason[row.id] ?? '').trim()}
+                          >
+                            {t.treasury.advanceConvert}
+                          </Button>
+                        </div>
+                      ) : (
+                        <span className="text-slate-400">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </Table>
+            </div>
+            {canDeposit ? <p className="mt-2 text-xs text-slate-600">{t.treasury.advanceRepayHint}</p> : null}
+          </>
+        )}
       </Card>
 
       <Card title={t.treasury.receivables} className="lg:col-span-2">
@@ -976,7 +1314,7 @@ export function Treasury(): ReactNode {
                           }
                         >
                           {driver.fullNameAr} ({driver.code})
-                          {driver.active ? '' : ` — ${t.accounts.inactive}; ${t.treasury.receivableDirections.collect}`}
+                          {driver.active ? '' : ` — ${t.accounts.inactive}; ${t.treasury.receivableDirections[receivableDraft.direction === 'create' ? 'collect' : receivableDraft.direction]}`}
                         </option>
                       ))}
                     </Select>
@@ -984,7 +1322,7 @@ export function Treasury(): ReactNode {
                   <Field label={t.treasury.receivableKind}>
                     <Select
                       value={receivableDraft.receivableKind}
-                      disabled={receivableFingerprintLocked}
+                      disabled={receivableFingerprintLocked || receivableDraft.direction === 'writeoff'}
                       onChange={(event) => setReceivableDraft((current) => ({
                         ...current,
                         receivableKind: event.target.value as ReceivableKind,
@@ -1012,10 +1350,14 @@ export function Treasury(): ReactNode {
                       value={receivableDraft.direction}
                       disabled={receivableFingerprintLocked}
                       onChange={(event) => {
-                        const direction = event.target.value as ReceivableDirection
+                        const direction = event.target.value as ReceivableOperationPayload['direction']
                         setReceivableDraft((current) => {
                           const selected = receivableDrivers.find((driver) => driver.id === current.driverId)
-                          const changed = { ...current, direction }
+                          const changed = {
+                            ...current,
+                            direction,
+                            ...(direction === 'writeoff' ? { receivableKind: 'ordinary' as const } : {}),
+                          }
                           const exactRetry = pendingReceivableOperationMatches(
                             pendingReceivableEvent.current,
                             changed,
@@ -1031,6 +1373,7 @@ export function Treasury(): ReactNode {
                     >
                       <option value="create">{t.treasury.receivableDirections.create}</option>
                       <option value="collect">{t.treasury.receivableDirections.collect}</option>
+                      <option value="writeoff">{t.treasury.receivableDirections.writeoff}</option>
                     </Select>
                   </Field>
                   <Field label={t.treasury.amount}>
@@ -1051,7 +1394,11 @@ export function Treasury(): ReactNode {
                     />
                   </Field>
                   <Button
-                    variant={receivableDraft.direction === 'create' ? 'primary' : 'success'}
+                    variant={receivableDraft.direction === 'writeoff'
+                      ? 'danger'
+                      : receivableDraft.direction === 'create'
+                        ? 'primary'
+                        : 'success'}
                     disabled={receivableEventBusy || !receivableEventReady}
                     onClick={() => void submitReceivableEvent()}
                   >
@@ -1059,12 +1406,24 @@ export function Treasury(): ReactNode {
                       ? t.common.retry
                       : receivableDraft.direction === 'create'
                       ? t.treasury.receivableDirections.create
-                      : t.treasury.receivableDirections.collect}
+                      : receivableDraft.direction === 'collect'
+                        ? t.treasury.receivableDirections.collect
+                        : t.treasury.receivableDirections.writeoff}
                   </Button>
                 </div>
+                {receivableDraft.direction === 'writeoff' ? (
+                  <p className="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-800">
+                    {t.treasury.receivableWriteoffHint}
+                  </p>
+                ) : null}
                 {receivableDraft.driverId ? (
                   <p className="mt-2 text-xs text-slate-600">
                     {t.treasury.currentReceivableBalance}: <Money value={selectedReceivableBalance} className="font-semibold" />
+                  </p>
+                ) : null}
+                {receivableDraft.direction === 'writeoff' && !writeoffAmountWithinBalance ? (
+                  <p className="mt-2 text-xs font-medium text-red-700">
+                    {t.treasury.receivableWriteoffBalanceHint} <Money value={selectedReceivableBalance} />
                   </p>
                 ) : null}
                 {receivableEventError ? (
@@ -1131,6 +1490,7 @@ export function Treasury(): ReactNode {
                   `${t.treasury.receivableKinds.shift_funding} / ${t.treasury.receivableChannels.cash}`,
                   `${t.treasury.receivableKinds.shift_funding} / ${t.treasury.receivableChannels.wallet}`,
                   t.treasury.total,
+                  t.accounts.actions,
                 ]}
                 isEmpty={selectedReceivables.drivers.length === 0}
                 empty={t.treasury.noReceivables}
@@ -1144,10 +1504,148 @@ export function Treasury(): ReactNode {
                     <td className="px-3 py-2"><Money value={driver.shiftFundingCash} /></td>
                     <td className="px-3 py-2"><Money value={driver.shiftFundingWallet} /></td>
                     <td className="px-3 py-2 font-semibold"><Money value={driver.total} /></td>
+                    <td className="px-3 py-2">
+                      {/*
+                        One pair of buttons per balance the driver ACTUALLY has. A driver with a
+                        single 5,000 carry gets one pair, not four; a driver with none gets «—»
+                        rather than buttons that would correct a zero to a zero.
+                      */}
+                      <div className="flex flex-col gap-1">
+                        {([
+                          ['ordinary', 'cash', driver.ordinaryCash],
+                          ['ordinary', 'wallet', driver.ordinaryWallet],
+                          ['shift_funding', 'cash', driver.shiftFundingCash],
+                          ['shift_funding', 'wallet', driver.shiftFundingWallet],
+                        ] as const)
+                          .filter(([, , value]) => Number(value) !== 0)
+                          .map(([kind, channel]) => (
+                            <div key={`${kind}-${channel}`} className="flex items-center gap-1">
+                              <span className="text-xs text-slate-500">
+                                {t.treasury.receivableKinds[kind]} / {t.treasury.receivableChannels[channel]}
+                              </span>
+                              <Button
+                                variant="ghost"
+                                className="min-h-8 px-2 text-xs"
+                                onClick={() => aimCorrection(driver.driverId, kind, channel, false)}
+                              >
+                                {t.treasury.correctionEdit}
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                className="min-h-8 px-2 text-xs"
+                                onClick={() => aimCorrection(driver.driverId, kind, channel, true)}
+                              >
+                                {t.treasury.correctionClear}
+                              </Button>
+                              {/*
+                                Ordinary debts only. Shift funding is money the driver physically
+                                holds for his next shift, not a debt to be re-filed — the same
+                                reason the write-off path refuses it.
+                              */}
+                              {kind === 'ordinary' ? (
+                                <>
+                                <TextInput
+                                  value={convertParty[driver.driverId] ?? ''}
+                                  onChange={(e) =>
+                                    setConvertParty({ ...convertParty, [driver.driverId]: e.target.value })
+                                  }
+                                  className="w-32"
+                                  placeholder={`${t.treasury.advanceFromReceivableParty} ${driver.nameAr}`}
+                                />
+                                <Button
+                                  variant="ghost"
+                                  className="min-h-8 px-2 text-xs"
+                                  onClick={() =>
+                                    void convertReceivableToAdvance(
+                                      driver.driverId,
+                                      driver.nameAr,
+                                      channel,
+                                      channel === 'cash' ? driver.ordinaryCash : driver.ordinaryWallet,
+                                    )
+                                  }
+                                >
+                                  {t.treasury.advanceFromReceivable}
+                                </Button>
+                                </>
+                              ) : null}
+                            </div>
+                          ))}
+                        {Number(driver.total) === 0 ? <span className="text-xs text-slate-400">—</span> : null}
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </Table>
             </div>
+            <div ref={correctionFormRef} className="mt-5 border-t border-slate-200 pt-3">
+              <h3 className="text-sm font-bold text-slate-700">{t.treasury.correctionTitle}</h3>
+              <p className="mt-1 text-xs text-slate-600">{t.treasury.correctionHint}</p>
+              {correctionTarget.trim() === '0.00' && correctionCurrent !== null ? (
+                <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  {t.treasury.correctionClearing}
+                </p>
+              ) : null}
+              <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <Field label={t.treasury.driver}>
+                  <Select value={correctionDriverId} onChange={(e) => setCorrectionDriverId(e.target.value)}>
+                    <option value="">—</option>
+                    {(receivablesBranchId === branchId ? receivables?.drivers ?? [] : []).map((d) => (
+                      <option key={d.driverId} value={d.driverId}>
+                        {d.nameAr} ({d.code})
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label={t.treasury.receivableKind}>
+                  <Select value={correctionKind} onChange={(e) => setCorrectionKind(e.target.value as ReceivableKind)}>
+                    <option value="ordinary">{t.treasury.receivableKinds.ordinary}</option>
+                    <option value="shift_funding">{t.treasury.receivableKinds.shift_funding}</option>
+                  </Select>
+                </Field>
+                <Field label={t.treasury.receivableChannel}>
+                  <Select
+                    value={correctionChannel}
+                    onChange={(e) => setCorrectionChannel(e.target.value as ReceivableChannel)}
+                  >
+                    <option value="cash">{t.treasury.receivableChannels.cash}</option>
+                    <option value="wallet">{t.treasury.receivableChannels.wallet}</option>
+                  </Select>
+                </Field>
+                <Field label={t.treasury.correctionCurrent}>
+                  {/* Read-only by design — see `correctionCurrent`. */}
+                  <div className="num flex min-h-10 items-center rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm text-slate-700">
+                    {correctionCurrent === null ? '—' : <Money value={correctionCurrent} />}
+                  </div>
+                </Field>
+                <Field label={t.treasury.correctionTarget}>
+                  <MoneyInput value={correctionTarget} onChange={(e) => setCorrectionTarget(e.target.value)} />
+                </Field>
+                <Field label={t.treasury.receivableReason} hint={t.treasury.receivableReasonHint}>
+                  <TextInput value={correctionReason} onChange={(e) => setCorrectionReason(e.target.value)} />
+                </Field>
+              </div>
+              {correctionError ? (
+                <p className="mt-2 text-sm text-red-600">{explainError(correctionError, t)}</p>
+              ) : null}
+              {correctionCurrent !== null && correctionTarget.trim() === correctionCurrent ? (
+                <p className="mt-2 text-sm text-amber-700">{t.treasury.correctionNoChange}</p>
+              ) : null}
+              <div className="mt-3">
+                <Button
+                  onClick={() => void submitCorrection()}
+                  disabled={
+                    correctionBusy ||
+                    correctionCurrent === null ||
+                    correctionTarget.trim() === '' ||
+                    correctionTarget.trim() === correctionCurrent ||
+                    correctionReason.trim() === ''
+                  }
+                >
+                  {t.treasury.correctionSave}
+                </Button>
+              </div>
+            </div>
+
             <div className="mt-5 border-t border-slate-200 pt-3">
               <h3 className="text-sm font-bold text-slate-700">{t.treasury.receivableHistory}</h3>
               {!selectedReceivableHistory ? (
@@ -1178,7 +1676,23 @@ export function Treasury(): ReactNode {
                       <td className="px-3 py-2">{event.driverNameAr} ({event.driverCode})</td>
                       <td className="px-3 py-2">{t.treasury.receivableKinds[event.receivableKind]}</td>
                       <td className="px-3 py-2">{t.treasury.receivableChannels[event.channel]}</td>
-                      <td className="px-3 py-2">{t.treasury.receivableDirections[event.direction]}</td>
+                      <td className="px-3 py-2">
+                        {/*
+                          A correction posts as a collection, and rendering it as one would tell the
+                          driver his debt was paid when nothing was paid. Name it, and show the
+                          restatement it actually was.
+                        */}
+                        {event.intent === 'writeoff' ? (
+                          <span className="text-red-700">{t.treasury.writeoffIntent}</span>
+                        ) : event.intent === 'correction' ? (
+                          <span className="num text-slate-700">
+                            {t.treasury.correctionIntent}: <Money value={event.priorBalance ?? '0.00'} /> →{' '}
+                            <Money value={event.targetBalance ?? '0.00'} />
+                          </span>
+                        ) : (
+                          t.treasury.receivableDirections[event.direction]
+                        )}
+                      </td>
                       <td className="px-3 py-2"><Money value={event.amount} /></td>
                       <td className="px-3 py-2 text-slate-600">{event.reason}</td>
                     </tr>
@@ -1193,9 +1707,8 @@ export function Treasury(): ReactNode {
       {/*
         «الترميم» — the owner's own end-of-day process, in his own words.
 
-        It reads the SEALED COUNT and shows the two boxes side by side: what is physically there,
-        what is out on ذمم, and how far that stands from رأس مال المكتب. The button is deliberately
-        dead until the count exists — decision (j), and the whole reason the figure is trustworthy.
+        It reads the ledger-backed office balance and shows the two boxes side by side: what the
+        system says is in each box, what is out on ذمم, and how far that stands from رأس مال المكتب.
       */}
       <Card title={t.treasury.restoration} className="lg:col-span-2">
         <p className="text-xs text-slate-600">{t.treasury.restorationHint}</p>
@@ -1207,6 +1720,10 @@ export function Treasury(): ReactNode {
             onRetry={() => void loadRestoration()}
             retryLabel={t.common.retry}
           />
+        ) : restoration.source !== 'live_ledger' ? (
+          <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-800">
+            {t.treasury.restorationServerUpdateRequired}
+          </div>
         ) : (
           <>
             {canDeposit ? (
@@ -1295,7 +1812,7 @@ export function Treasury(): ReactNode {
                       <div className="col-span-2 rounded-lg bg-slate-50 px-2 py-1.5">
                         <dt className="text-xs text-slate-500">{t.treasury.positionFormula}</dt>
                         <dd className="mt-1 flex flex-wrap items-center justify-end gap-1 font-semibold" dir="ltr">
-                          <Money value={leg.counted} />
+                          <Money value={leg.officeBalance} />
                           <span>+</span>
                           <Money value={leg.receivables} />
                           <span>=</span>
@@ -1354,114 +1871,72 @@ export function Treasury(): ReactNode {
                   {restorationNet.direction === 'none' ? null : <> — <Money value={restorationNet.amount} /></>}
                 </span>
               ) : null}
-              {restoreDone || restoration.alreadyRestored === true ? (
-                <span className="text-sm font-semibold text-emerald-700">{t.treasury.restored} ✓</span>
-              ) : (
-                <Button onClick={doRestore} disabled={restoration.counted === false || !restoration.feasible}>
-                  {t.treasury.doRestore}
+              {/*
+                THE BUTTON IS ALWAYS HERE. It used to be replaced by «تم الترميم ✓» once the business
+                date held a restoration — and with the day starting at 04:00, the owner found it gone
+                at 02:27 while a full day's takings sat in the boxes: he was still inside a day
+                restored at 09:10 that morning. Since 0061 a date may hold several runs, so the
+                screen states what has happened and leaves the decision to him.
+              */}
+              <div className="flex flex-wrap items-center gap-3">
+                {restoration.alreadyRestored === true ? (
+                  <span className="text-sm font-semibold text-emerald-700">
+                    {t.treasury.restored} ✓
+                    {restoration.runsToday === undefined
+                      ? ''
+                      : ` · ${t.treasury.restoredRunsToday.replace('{n}', String(restoration.runsToday))}`}
+                  </span>
+                ) : null}
+                <Button onClick={doRestore} disabled={!restoration.feasible}>
+                  {restoration.alreadyRestored === true ? t.treasury.doRestoreAgain : t.treasury.doRestore}
                 </Button>
-              )}
+                {canManageCompanyFund ? (
+                  <a className="inline-flex min-h-10 items-center rounded-lg border border-line-strong bg-surface-card px-4 text-body font-semibold text-brand hover:bg-surface-muted" href="#companyFund?tab=depreciation">
+                    {t.companyFinance.transfer}
+                  </a>
+                ) : null}
+              </div>
             </div>
-            {restoration.counted === false ? (
-              // Not an error — an order of operations. The count comes first, always.
-              <p className="mt-2 text-xs text-amber-700">{t.treasury.countFirst}</p>
-            ) : null}
           </>
         )}
       </Card>
 
-      <Card title={t.treasury.cashCount}>
-        {!sheet ? (
+      {/*
+        «حركات الخزينة» — what the two boxes actually did.
+        Asked «أين أرى عمليات عمران», the answer was nowhere: this screen could post a transfer and
+        never show one, and `/audit` needs a table name and a record id and returns everything ever,
+        oldest first. Four identical transfers in two seconds sat here unseen until a hand count
+        disagreed with the ledger.
+      */}
+      <Card title={t.treasury.movements} className="lg:col-span-2">
+        <p className="text-xs text-slate-600">{t.treasury.movementsHint}</p>
+        {movementsError !== null ? (
           <Pending
-            error={sheetError}
+            error={movementsError}
             loadingLabel={t.common.loading}
-            errorLabel={explainError(sheetError, t)}
-            onRetry={load}
+            errorLabel={explainError(movementsError, t)}
+            onRetry={() => void loadMovements()}
             retryLabel={t.common.retry}
           />
+        ) : movements === null ? (
+          <p className="mt-3 text-sm text-slate-500">{t.common.loading}</p>
+        ) : movements.length === 0 ? (
+          <p className="mt-3 text-sm text-slate-500">{t.treasury.movementsEmpty}</p>
         ) : (
-          <>
-            {countIsSealed ? (
-              <p className="mb-3 text-sm font-semibold text-emerald-700">
-                {t.treasury.savedCountDetails} — {t.treasury.sealProof} ✓
-              </p>
-            ) : null}
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              {sheet.funds.map((fund) => {
-                const saved = result?.lines.find((line) => line.fundCode === fund.fundCode)
-                const computed = saved?.computed ?? fund.computed
-                const countedValue = saved?.counted ?? counted[fund.fundCode] ?? ''
-                const variance = saved ? differenceView(saved.variance) : countDifference(countedValue, computed)
-                const resolution = saved?.resolution ?? countResolutions[fund.fundCode] ?? ''
-                const needsReason = variance != null && variance.direction !== 'none'
-                return (
-                  <div key={fund.fundCode} className="rounded-lg border border-slate-200 p-3">
-                    <h3 className="text-sm font-bold text-slate-700">{fundLabel(fund.fundCode)}</h3>
-                    <dl className="mt-2 grid grid-cols-2 gap-y-1 text-sm">
-                      <dt className="text-slate-600">{t.treasury.systemBalance}</dt>
-                      <dd className="text-end font-semibold"><Money value={computed} /></dd>
-                    </dl>
-                    <Field label={t.treasury.counted} className="mt-2">
-                      <MoneyInput
-                        value={countedValue}
-                        disabled={countIsSealed}
-                        aria-label={`${t.treasury.counted} — ${fundLabel(fund.fundCode)}`}
-                        onChange={(e) => setCounted((current) => ({ ...current, [fund.fundCode]: e.target.value }))}
-                        className="w-full"
-                      />
-                    </Field>
-                    {variance ? (
-                      <div
-                        className={`mt-2 rounded-md px-3 py-2 text-sm font-semibold ${
-                          variance.direction === 'increase'
-                            ? 'bg-emerald-50 text-emerald-800'
-                            : variance.direction === 'shortage'
-                              ? 'bg-amber-50 text-amber-800'
-                              : 'bg-slate-50 text-slate-700'
-                        }`}
-                      >
-                        {directionLabel(variance.direction)}
-                        {variance.direction === 'none' ? null : <>: <Money value={variance.amount} /></>}
-                      </div>
-                    ) : null}
-                    {needsReason ? (
-                      countIsSealed ? (
-                        <dl className="mt-2 text-sm">
-                          <dt className="text-xs text-slate-500">{t.treasury.varianceReason}</dt>
-                          <dd className="mt-1 text-slate-700">{resolution}</dd>
-                        </dl>
-                      ) : (
-                        <Field
-                          label={t.treasury.varianceReason}
-                          hint={t.treasury.varianceReasonHint}
-                          error={resolution.trim() ? null : t.errors.cash_count_resolution_required}
-                          className="mt-2"
-                        >
-                          <TextInput
-                            value={resolution}
-                            aria-label={`${t.treasury.varianceReason} — ${fundLabel(fund.fundCode)}`}
-                            onChange={(e) =>
-                              setCountResolutions((current) => ({ ...current, [fund.fundCode]: e.target.value }))
-                            }
-                          />
-                        </Field>
-                      )
-                    ) : null}
-                  </div>
-                )
-              })}
-            </div>
-            {!countIsSealed ? (
-              <Button className="mt-3" onClick={submitCount} disabled={!countReady}>
-                {t.common.confirm}
-              </Button>
-            ) : null}
-            {result ? (
-              <p className={`mt-2 text-sm font-medium ${result.balanced ? 'text-emerald-700' : 'text-amber-700'}`}>
-                {result.balanced ? t.treasury.noDifference : t.treasury.variance}
-              </p>
-            ) : null}
-          </>
+          <div className="mt-3">
+            <Table head={[t.treasury.movementDate, t.treasury.movementKind, t.treasury.cashBox, t.treasury.wallet, t.treasury.movementReason, t.treasury.movementBy]}>
+              {movements.map((row) => (
+                <tr key={row.id}>
+                  <td className="num px-3 py-2 text-xs">{row.businessDate}</td>
+                  <td className="px-3 py-2 text-xs">{row.eventType}</td>
+                  <td dir="ltr" className="num px-3 py-2 text-xs"><Money value={row.cash} /></td>
+                  <td dir="ltr" className="num px-3 py-2 text-xs"><Money value={row.wallet} /></td>
+                  <td className="px-3 py-2 text-xs text-slate-700">{row.reason ?? '—'}</td>
+                  <td className="px-3 py-2 text-xs">{row.actorName ?? '—'}</td>
+                </tr>
+              ))}
+            </Table>
+          </div>
         )}
       </Card>
 
@@ -1575,16 +2050,4 @@ function nextSunday(date: string): string {
   const next = new Date(ms + add * 86_400_000)
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${next.getUTCFullYear()}-${pad(next.getUTCMonth() + 1)}-${pad(next.getUTCDate())}`
-}
-
-function isCountResolutionDetail(value: unknown): value is { fundCode: string; variance: string } {
-  if (typeof value !== 'object' || value === null) return false
-  const detail = value as Record<string, unknown>
-  if (typeof detail.fundCode !== 'string' || typeof detail.variance !== 'string') return false
-  try {
-    parseMinor(detail.variance)
-    return true
-  } catch {
-    return false
-  }
 }

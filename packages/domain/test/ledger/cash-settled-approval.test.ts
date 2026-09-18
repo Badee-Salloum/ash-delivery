@@ -187,6 +187,91 @@ describe('cash-settled approval assembly', () => {
     expect(fundBalance(all, 'driver_receivable_cash')).toBe(ZERO)
   })
 
+  it('clears custody once and preserves an unpaid shortage in the ordinary cash receivable', () => {
+    const fee = syp(100)
+    const orders: ShiftOrder[] = [{ orderNo: 'SR-1', payMode: 'cash', fee }]
+    const split = splitFixedDriverShare([fee])
+    const input = {
+      driverId: DRIVER,
+      branchId: BRANCH,
+      floatTranches: [syp(100)],
+      topupTranches: [syp(20)],
+      orders,
+    }
+    const expected = closingBalances(input)
+    const settlement = planFixedShareSettlement({
+      deliveryFeeTotal: fee,
+      fixedDriverShare: split.driverShare,
+      manualDriverShare: ZERO,
+      cashDeductionTotal: ZERO,
+      expectedCash: expected.endCash,
+      expectedWallet: expected.endWallet,
+      actualCash: syp(140),
+      actualWallet: ZERO,
+      cashShortageReceivable: syp(20),
+    })
+    const all = [
+      ...postingsForOpen(input),
+      ...postingsForCashSettledApproval(input, split, settlement),
+    ]
+
+    expect(settlement.finalEmployeeCash).toBe(-syp(20))
+    expect(settlement.cashToOffice).toBe(settlement.actualCash)
+    expect(fundBalance(all, 'office_cash')).toBe(syp(40))
+    expect(fundBalance(all, 'driver_receivable_cash')).toBe(syp(20))
+    expect(fundBalance(all, 'driver_shift_funding_cash')).toBe(ZERO)
+    expect(fundBalance(all, 'driver_cash')).toBe(ZERO)
+    expect(fundBalance(all, 'driver_wallet')).toBe(ZERO)
+    const shortageLine = all
+      .flatMap((posting) => posting.lines)
+      .find((line) => line.role === 'cash_shortage_receivable')
+    expect(shortageLine).toMatchObject({
+      fund: { kind: 'driver_receivable_cash', driverId: DRIVER },
+      side: 'D',
+      amount: syp(20),
+    })
+  })
+
+  it('settles a negative base receivable before adding exactly the reviewed shortage debt', () => {
+    const input = {
+      driverId: DRIVER,
+      branchId: BRANCH,
+      floatTranches: [syp(100)],
+      topupTranches: [],
+      orders: [],
+      cashDeductions: [{ amount: syp(10), sharePortion: ZERO, occurrenceKey: 'negative-base' }],
+    }
+    const expected = closingBalances(input)
+    expect(expected).toEqual({ endCash: syp(90), endWallet: ZERO })
+    const settlement = planFixedShareSettlement({
+      deliveryFeeTotal: ZERO,
+      fixedDriverShare: ZERO,
+      manualDriverShare: ZERO,
+      cashDeductionTotal: syp(10),
+      expectedCash: expected.endCash,
+      expectedWallet: ZERO,
+      actualCash: syp(80),
+      actualWallet: ZERO,
+      cashShortageReceivable: syp(20),
+    })
+    const all = [
+      ...postingsForOpen(input),
+      ...postingsForCashSettledApproval(
+        input,
+        { driverShare: ZERO, companyShare: ZERO, yalagoShare: ZERO },
+        settlement,
+      ),
+    ]
+
+    expect(settlement.baseDriverShare).toBe(-syp(10))
+    expect(settlement.finalEmployeeCash).toBe(-syp(20))
+    // The deduction creates 10 temporarily, the return clears that 10, then creates the reviewed
+    // final 20. The resulting balance is exactly 20, never 30; operational custody is flat.
+    expect(fundBalance(all, 'driver_receivable_cash')).toBe(syp(20))
+    expect(fundBalance(all, 'driver_cash')).toBe(ZERO)
+    expect(fundBalance(all, 'driver_wallet')).toBe(ZERO)
+  })
+
   it('refuses stale expected balances, shares, deduction totals and incomplete allocation', () => {
     const fee = syp(100)
     const split = splitFixedDriverShare([fee])

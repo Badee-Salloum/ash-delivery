@@ -6,34 +6,49 @@ import type {
   CashCountRecord,
   Deps,
   FinancialTransactionDeps,
+  JournalEntryRecord,
   ReceivableEventRecord,
 } from '@ash/contracts'
 import {
+  cancelCashCountRequest,
   createCashCountRequest,
+  correctReceivableRequest,
+  officeTransferRequest,
   createReceivableEventRequest,
   manualEntryRequest,
   moneySchema,
   serializeMoney,
+  writeoffReceivableRequest,
 } from '@ash/contracts'
 import {
+  COMPANY_FUND_KINDS,
+  type FundRef,
   type Minor,
   type Posting,
   type RestorationPlan,
   assertBalanced,
+  can,
+  fundCode,
   fundRefFromCode,
   isDateLocked,
   minor,
   parseMinor,
   planRestoration,
-  postingsForCashCountReconciliation,
   postingsForRestoration,
   receivableAdjustment,
+  receivableWriteoff,
   reverse,
-  sweepToCompany,
+  manualKaish,
+  officeTransfer,
+  addDays,
+  companyBoxMovement,
+  mirrorOrder,
+  restorationMirror,
   weekStartFor,
 } from '@ash/domain'
 import { ServiceError, assertWeekOpen, ensureFxDay, todayFor } from './shifts.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
+import { grantsFromRows } from './rbac.ts'
 
 /** Exact storage range of PostgreSQL bigint-backed money columns and journal lines. */
 const PG_MINOR_MAX = 9_223_372_036_854_775_807n
@@ -53,8 +68,9 @@ function assertPersistableTreasuryMinor(field: string, value: bigint): void {
 function assertPersistableRestorationPlan(plan: RestorationPlan): void {
   for (const leg of plan.legs) {
     const scope = `restoration.legs.${leg.fundCode}`
-    assertPersistableTreasuryMinor(`${scope}.counted`, leg.counted)
+    assertPersistableTreasuryMinor(`${scope}.officeBalance`, leg.officeBalance)
     assertPersistableTreasuryMinor(`${scope}.receivables`, leg.receivables)
+    assertPersistableTreasuryMinor(`${scope}.advances`, leg.advances)
     assertPersistableTreasuryMinor(`${scope}.position`, leg.position)
     assertPersistableTreasuryMinor(`${scope}.capitalTarget`, leg.capitalTarget)
     assertPersistableTreasuryMinor(`${scope}.delta`, leg.delta)
@@ -75,6 +91,70 @@ function assertPersistableTreasuryPostings(postings: readonly Posting[]): void {
   }
 }
 
+/** Every code head that names company money: صندوق الشركة in a branch, and the whole HQ ledger. */
+const COMPANY_CODE_HEADS: ReadonlySet<string> = new Set(['company_box', ...COMPANY_FUND_KINDS])
+
+/**
+ * Whether a client-named fund code names صندوق الشركة — or any account of the company ledger.
+ *
+ * By its FIRST SEGMENT, deliberately. This used to ask the posting's own parser, so that
+ * `company_box:anything` could not slip past a string comparison. Since C1 that parser is strict and
+ * REFUSES `company_box:anything`, so asking it would call the alias «not the company fund» and turn
+ * the named 422 below into an anonymous 500. The head is what the parser keys on, so the two can
+ * never disagree about which codes are company money. `company_cash:USD` and every other company
+ * ledger account are refused the same way: they live only in the HQ ledger, which a branch entry
+ * can never reach.
+ */
+function namesCompanyBox(code: string): boolean {
+  return COMPANY_CODE_HEADS.has(code.split(':')[0] ?? '')
+}
+
+/**
+ * The fund a client named, or a 422 naming the line. `fundRefFromCode` throws a RangeError for a
+ * known account written wrong (`driver_cash` with no driver, `office_cash:x`); that is the caller's
+ * mistake, not a server fault.
+ */
+function clientFundRef(code: string, line: number): FundRef {
+  try {
+    return fundRefFromCode(code)
+  } catch (error) {
+    if (error instanceof RangeError) throw new ServiceError(422, 'invalid_fund_code', { line, fundCode: code })
+    throw error
+  }
+}
+
+/**
+ * One occurrence-key namespace for every client-keyed treasury command.
+ *
+ * Shared on purpose: a key sent to a deposit and then to a withdrawal must find the first entry and
+ * be refused as a conflict, not post twice under two different keys. Lower-cased because a UUID's
+ * letter case carries no meaning. The `client:` prefix keeps these apart from the hashed keys of
+ * `/journal/manual` and `/treasury/transfer`, and from the server-random UUIDs older entries carry.
+ */
+const clientOccurrenceKey = (idempotencyKey: string): string => `client:${idempotencyKey.toLowerCase()}`
+
+/** A stored entry IS this command only if every money-relevant fact matches, line for line. */
+function sameCommandEntry(entry: JournalEntryRecord, posting: Posting, reason: string, createdBy: string): boolean {
+  return (
+    entry.shiftId === null &&
+    entry.eventType === posting.eventType &&
+    entry.occurrenceKey === posting.occurrenceKey &&
+    entry.reason === reason &&
+    entry.createdBy === createdBy &&
+    entry.lines.length === posting.lines.length &&
+    posting.lines.every((line, index) => {
+      const stored = entry.lines[index]
+      return (
+        stored !== undefined &&
+        stored.fundCode === fundCode(line.fund) &&
+        stored.side === line.side &&
+        stored.amount === line.amount &&
+        (stored.role ?? null) === (line.role ?? null)
+      )
+    })
+  )
+}
+
 /**
  * Treasury: the daily cash count (E-5 / س51) and disciplined manual entries (E-3 / س50).
  *
@@ -91,6 +171,95 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
 
   /** The funds a physical count covers. Driver funds are counted through the shift close. */
   const COUNTABLE_FUNDS = ['office_cash', 'office_wallet'] as const
+
+  /**
+   * The SECOND gate for a route whose own permission is broader than صندوق الشركة.
+   *
+   * `/treasury/withdraw` and `/journal/:id/reverse` are `journal.manual.write`, which the branch
+   * manager holds; only some of what they do touches `company_box`. When it does, the actor must ALSO
+   * hold `company_fund.manage` — read from the live matrix, exactly as the route preHandler reads it,
+   * so a system admin's edit to `role_permissions` governs this as well.
+   */
+  async function assertManagesCompanyFund(req: FastifyRequest, branchId: string): Promise<void> {
+    const grants = grantsFromRows(await deps.directory.grants())
+    const decision = can(req.actor!, 'company_fund.manage', { branchId }, grants)
+    if (decision.allowed) return
+    req.log.warn(
+      { actor: req.actor!.userId, role: req.actor!.roleKey, permission: 'company_fund.manage', reason: decision.reason },
+      'company fund movement refused',
+    )
+    throw new ServiceError(403, 'company_fund_forbidden', {
+      permission: 'company_fund.manage',
+      reason: decision.reason,
+    })
+  }
+
+  type PreparedMirror = { companyBranchId: string; watermarkEntryId: number }
+
+  /** Take the HQ lock before a cut-over branch writes any posting that touches `company_box`. */
+  async function prepareCompanyMirror(
+    tx: FinancialTransactionDeps,
+    branchId: string,
+    postings: readonly Posting[],
+  ): Promise<PreparedMirror | null> {
+    const touchesCompany = postings.some((posting) => companyBoxMovement(posting.lines.map((line) => ({
+      fundCode: fundCode(line.fund),
+      side: line.side,
+      amount: line.amount,
+    }))) !== null)
+    if (!touchesCompany) return null
+    const cutover = await tx.companyLedger.cutoverFor(branchId)
+    if (!cutover) return null
+    const company = await deps.directory.companyBranch()
+    if (!company || company.id !== cutover.companyBranchId) {
+      throw new ServiceError(500, 'company_cutover_integrity_error')
+    }
+    // The UOW already owns the branch lock. Acquiring it again is idempotent, then HQ is last.
+    await tx.locks.acquire(`receivables:${branchId}`)
+    await tx.locks.acquire(`receivables:${company.id}`)
+    return { companyBranchId: company.id, watermarkEntryId: cutover.watermarkEntryId }
+  }
+
+  /** Write every HQ half after its branch source and immutable restoration row exist. */
+  async function mirrorCompanyBoxEntries(
+    tx: FinancialTransactionDeps,
+    prepared: PreparedMirror | null,
+    entries: readonly JournalEntryRecord[],
+    restorationId: number | null,
+  ): Promise<void> {
+    if (!prepared) return
+    const moving = entries.flatMap((entry) => {
+      const movement = companyBoxMovement(entry.lines)
+      return movement === null || entry.id <= prepared.watermarkEntryId ? [] : [{ entry, ...movement }]
+    })
+    for (const source of mirrorOrder(moving)) {
+      const existing = await tx.companyLedger.findMirrorBySource(source.entry.id)
+      if (existing) continue
+      const posting = restorationMirror(source.direction, source.amount, source.entry.branchId, source.entry.id)
+      const [mirror] = await tx.ledger.post(prepared.companyBranchId, [posting], {
+        shiftId: null,
+        businessDate: source.entry.businessDate,
+        postingDate: source.entry.postingDate,
+        weekStartDate: source.entry.weekStartDate,
+        fxDayId: source.entry.fxDayId,
+        sypMinorPerUsd: null,
+        createdBy: source.entry.createdBy,
+        ...(source.entry.reason === null ? {} : { reason: source.entry.reason }),
+      })
+      if (!mirror) throw new ServiceError(409, 'company_mirror_conflict', { sourceEntryId: source.entry.id })
+      await tx.companyLedger.createMirror({
+        id: deps.ids.uuid(),
+        sourceBranchId: source.entry.branchId,
+        sourceEntryId: source.entry.id,
+        mirrorEntryId: mirror.id,
+        direction: source.direction,
+        amount: source.amount,
+        restorationId,
+        createdBy: source.entry.createdBy,
+        createdAtMs: deps.clock.nowMs(),
+      })
+    }
+  }
 
   // ── The daily count (E-5) ───────────────────────────────────────────────────────────────
 
@@ -161,20 +330,55 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       lines,
       proofSha256: null,
       sealedAtMs: null,
+      status: 'active',
+      supersededById: null,
+      closedAtMs: null,
+      closedBy: null,
+      closedReason: null,
       notes: body.notes,
     }
     // «إثبات الجرد» — a sha256 over the frozen lines, so the count cannot be quietly restated.
     record.proofSha256 = sealProof(record)
     record.sealedAtMs = record.countedAtMs
 
+    /*
+     * A RECOUNT supersedes the day's active count instead of colliding with it.
+     *
+     * Recounting is deliberate and audited: `recountReason` is required, so nobody replaces a
+     * signed count by accident. Restoration v3 is live-ledger based, but the count remains weekly
+     * operational evidence and keeps its own append-only history.
+     */
     let stored: CashCountRecord
-    try {
-      stored = await deps.cashCounts.create(record)
-    } catch (err) {
-      if ((err as { code?: string }).code === 'DUPLICATE_COUNT') {
-        throw new ServiceError(409, 'already_counted_today', { businessDate })
+    const prior = await deps.cashCounts.find(branchId, businessDate)
+    if (prior !== null && body.recountReason !== undefined) {
+      try {
+        stored = await deps.cashCounts.supersede({
+          priorId: prior.id,
+          replacement: record,
+          closedBy: req.actor!.userId,
+          closedAtMs: deps.clock.nowMs(),
+          reason: body.recountReason,
+        })
+      } catch (err) {
+        // Somebody else recounted or withdrew it between our read and our write.
+        if ((err as { code?: string }).code === 'COUNT_NOT_ACTIVE') {
+          throw new ServiceError(409, 'cash_count_changed', { businessDate })
+        }
+        throw err
       }
-      throw err
+    } else {
+      try {
+        stored = await deps.cashCounts.create(record)
+      } catch (err) {
+        if ((err as { code?: string }).code === 'DUPLICATE_COUNT') {
+          // Names the way out, which the old error did not: send `recountReason` to replace it.
+          throw new ServiceError(409, 'already_counted_today', {
+            businessDate,
+            hint: 'send recountReason to supersede the existing count',
+          })
+        }
+        throw err
+      }
     }
 
     await deps.audit.append({
@@ -201,6 +405,58 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     return serializeCount(found)
   })
 
+  /**
+   * «إلغاء الجرد» — withdraw the day's count until the underlying error is fixed.
+   *
+   * The third answer a variance deserves, beside proceeding and recounting: sometimes the right
+   * move is to stop, fix what is wrong, and count again later. The withdrawn count keeps its rows,
+   * its resolutions and its proof — only its standing changes — and the weekly count workflow
+   * treats the day as uncounted. Live-ledger restoration remains independent of that evidence.
+   */
+  app.post(
+    '/cash-counts/:date/cancel',
+    { config: { permission: 'cash_count.perform', subject: targetBranch } },
+    async (req) => {
+      const { date } = z.object({ date: z.string() }).parse(req.params)
+      const body = cancelCashCountRequest.parse(req.body)
+      const branchId = resolveBranch(req)
+      await assertWeekOpen(deps, branchId, date)
+
+      const active = await deps.cashCounts.find(branchId, date)
+      if (!active) throw new ServiceError(404, 'cash_count_not_found')
+
+      // Legacy v2 restorations still point at their sealed count and keep that evidence immutable.
+      // A v3 live-ledger restoration has `cashCountId = null`, so an unrelated operational count
+      // remains withdrawable and continues to serve the weekly count workflow independently.
+      const restored = await deps.restorations.find(branchId, date)
+      if (restored?.cashCountId === active.id) {
+        throw new ServiceError(409, 'already_restored_today', { businessDate: date })
+      }
+
+      const cancelled = await deps.cashCounts.cancel({
+        id: active.id,
+        closedBy: req.actor!.userId,
+        closedAtMs: deps.clock.nowMs(),
+        reason: body.reason,
+      })
+      if (!cancelled) throw new ServiceError(409, 'cash_count_changed', { businessDate: date })
+
+      await deps.audit.append({
+        tableName: 'cash_counts',
+        recordId: cancelled.id,
+        action: 'UPDATE',
+        actorId: req.actor!.userId,
+        actorKind: 'user',
+        branchId,
+        requestId: req.requestId,
+        before: serializeCount(active),
+        after: serializeCount(cancelled),
+        occurredAtMs: deps.clock.nowMs(),
+      })
+      return serializeCount(cancelled)
+    },
+  )
+
   // ── Manual entries and corrections (E-3 / س50) ──────────────────────────────────────────
 
   app.post('/journal/manual', { config: { permission: 'journal.manual.write', subject: targetBranch } }, async (req, reply) => {
@@ -210,6 +466,22 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     // A manual entry without a stated reason is not auditable. The schema requires it and the
     // database CHECK requires it too — this is the third layer, and the one with a clear error.
     if (body.reason.trim().length === 0) throw new ServiceError(422, 'reason_required')
+
+    /*
+     * صندوق الشركة moves only through its own commands, under `company_fund.manage`.
+     *
+     * This route is `journal.manual.write`, which the branch manager holds, and its lines are free
+     * text — so naming `company_box` here was a back door to a fund he may not even see. Refused for
+     * EVERY role, the general manager included: his deposit and withdrawal have dedicated routes
+     * with a replay key and a balance check, and a hand-built entry has neither.
+     */
+    const companyLine = body.lines.findIndex((l) => namesCompanyBox(l.fundCode))
+    if (companyLine !== -1) {
+      throw new ServiceError(422, 'company_fund_not_manual', {
+        line: companyLine,
+        fundCode: body.lines[companyLine]!.fundCode,
+      })
+    }
 
     const ceiling = await deps.settings.receiptRequiredAbove(branchId)
     const total = body.lines
@@ -222,13 +494,35 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       })
     }
 
+    /*
+     * Derived from the entry itself, for the reason the office-transfer route beside it now is: a
+     * fresh UUID per call means the ledger's idempotency key `(shift_id, event_type,
+     * occurrence_key)` cannot see a double submit as a repeat. That is not hypothetical here — on
+     * 2026-09-02 one Treasury button pressed four times in two seconds posted the same 461.15 four
+     * times and put the books 1,383.45 away from the counted drawer.
+     *
+     * A manual entry is the most dangerous place for it: the lines are arbitrary, so a repeat can
+     * move any amount between any two funds. Branch, business date, reason and the exact lines —
+     * the same transfer on the same day is expressed by saying why it differs, which a manual
+     * entry's mandatory reason already exists for.
+     */
+    const occurrenceKey = createHash('sha256')
+      .update([
+        branchId,
+        body.businessDate ?? todayFor(deps),
+        body.reason.trim(),
+        ...body.lines.map((l) => `${l.fundCode}|${l.side}|${l.amount.toString()}`),
+      ].join(' '))
+      .digest('hex')
+      .slice(0, 32)
+
     const posting: Posting = assertBalanced({
       eventType: 'manual',
-      occurrenceKey: deps.ids.uuid(),
+      occurrenceKey,
       // fundRefFromCode, NOT a blanket cost-centre wrap: naming `office_cash` must move the
       // office cash fund, not a look-alike called `cost_center:office_cash`.
-      lines: body.lines.map((l) => ({
-        fund: fundRefFromCode(l.fundCode),
+      lines: body.lines.map((l, index) => ({
+        fund: clientFundRef(l.fundCode, index),
         side: l.side,
         amount: l.amount,
       })),
@@ -245,6 +539,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       postingDate: todayFor(deps),
       weekStartDate: weekStartFor(businessDate),
       fxDayId,
+      sypMinorPerUsd: null,
       createdBy: req.actor!.userId,
       reason: body.reason,
     })
@@ -269,6 +564,13 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
 
       const original = await findEntry(deps, branchId, entryId)
       if (!original) throw new ServiceError(404, 'entry_not_found')
+
+      // Reversing an entry that moved صندوق الشركة moves it again, the other way — a GM's deposit, a
+      // hand «كييش», a الترميم run. That is company-fund management, so it needs the fund's own
+      // permission on top of this route's. Entries that never touched the fund keep today's rule.
+      if (original.lines.some((line) => namesCompanyBox(line.fundCode))) {
+        await assertManagesCompanyFund(req, branchId)
+      }
 
       const posting = reverse(
         {
@@ -310,15 +612,30 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       const businessDate = sealed ? postingDate : original.businessDate
       const weekStartDate = sealed ? weekStartFor(postingDate) : original.weekStartDate
       const fxDayId = await ensureFxDay(deps, businessDate)
-      const [entry] = await deps.ledger.post(branchId, [posting], {
+      const meta = {
         shiftId: null,
         businessDate,
         postingDate,
         weekStartDate,
         fxDayId,
+        sypMinorPerUsd: null,
         createdBy: req.actor!.userId,
         reason,
-      })
+      } as const
+      const movement = companyBoxMovement(posting.lines.map((line) => ({
+        fundCode: fundCode(line.fund), side: line.side, amount: line.amount,
+      })))
+      const entry = movement === null
+        ? (await deps.ledger.post(branchId, [posting], meta))[0]
+        : await deps.financialUnitOfWork.run(
+            { lockKey: `receivables:${branchId}`, actorId: req.actor!.userId, requestId: req.requestId },
+            async (tx) => {
+              const mirror = await prepareCompanyMirror(tx, branchId, [posting])
+              const [written] = await tx.ledger.post(branchId, [posting], meta)
+              if (written) await mirrorCompanyBoxEntries(tx, mirror, [written], null)
+              return written
+            },
+          )
 
       return reply
         .code(201)
@@ -341,7 +658,72 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     }
   })
 
+  /**
+   * Post ONE shift-less command entry under the client's idempotency key — exactly once.
+   *
+   * The routes that use this have no business table: the journal entry IS the record. They used to
+   * post under `deps.ids.uuid()`, a fresh key per call, so the ledger's idempotency index could not
+   * see a double click as a repeat and the same money moved twice. Now the key comes from the client
+   * and survives a retry:
+   *
+   *  • same key, same command  → the original entry, `replayed: true`, nothing posted;
+   *  • same key, anything else → 409 `idempotency_key_conflict`, nothing posted.
+   *
+   * The committed receipt is read BEFORE the week gate, so a retry after Sunday's close still gets
+   * its original answer. Everything that decides whether new money may move — the receipt re-read,
+   * the caller's `guard` (a balance check) and the posting — runs inside the branch-money lock every
+   * `PgLedgerRepo.post` takes, so two concurrent requests cannot both pass the same balance.
+   */
+  async function postClientKeyedCommand(
+    req: FastifyRequest,
+    branchId: string,
+    posting: Posting,
+    reason: string,
+    guard?: (tx: FinancialTransactionDeps) => Promise<void>,
+  ): Promise<{ entry: JournalEntryRecord; replayed: boolean }> {
+    const actorId = req.actor!.userId
+    const receipt = (entry: JournalEntryRecord) => {
+      if (!sameCommandEntry(entry, posting, reason, actorId)) {
+        throw new ServiceError(409, 'idempotency_key_conflict')
+      }
+      return { entry, replayed: true }
+    }
+
+    const committed = await deps.ledger.findStandaloneEntry(branchId, posting.eventType, posting.occurrenceKey)
+    if (committed) return receipt(committed)
+
+    const businessDate = todayFor(deps)
+    await assertWeekOpen(deps, branchId, businessDate)
+    const fxDayId = await ensureFxDay(deps, businessDate)
+    return deps.financialUnitOfWork.run(
+      { lockKey: `receivables:${branchId}`, actorId, requestId: req.requestId },
+      async (tx) => {
+        const prior = await tx.ledger.findStandaloneEntry(branchId, posting.eventType, posting.occurrenceKey)
+        if (prior) return receipt(prior)
+        const mirror = await prepareCompanyMirror(tx, branchId, [posting])
+        if (guard) await guard(tx)
+        const [entry] = await tx.ledger.post(branchId, [posting], {
+          shiftId: null,
+          businessDate,
+          postingDate: businessDate,
+          weekStartDate: weekStartFor(businessDate),
+          fxDayId,
+          sypMinorPerUsd: null,
+          createdBy: actorId,
+          reason,
+        })
+        // Unreachable under the lock unless the key is held by a row this lookup cannot see. Never
+        // report money as moved when it was not.
+        if (!entry) throw new ServiceError(409, 'idempotency_key_conflict')
+        await mirrorCompanyBoxEntries(tx, mirror, [entry], null)
+        return { entry, replayed: false }
+      },
+    )
+  }
+
   const depositRequest = z.object({
+    /** One per logical submission, reused on retry — see `postClientKeyedCommand`. */
+    idempotencyKey: z.string().uuid(),
     target: z.enum(['cash', 'wallet']),
     amount: moneySchema,
     note: z.string().max(200).optional(),
@@ -352,40 +734,28 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     const branchId = resolveBranch(req)
     if (body.amount <= 0n) throw new ServiceError(422, 'amount_must_be_positive')
     const officeCode = body.target === 'cash' ? 'office_cash' : 'office_wallet'
-    // BR7, and it was MISSING here while every other posting route had it. The date is always
-    // today so it rarely bit — but on the Sunday a week is sealed, a deposit would have gone
-    // straight through the application and been refused by the database trigger instead, surfacing
-    // as a raw 25006 rather than «الأسبوع مقفل».
-    await assertWeekOpen(deps, branchId, todayFor(deps))
 
     // A deposit increases the office box/wallet (DEBIT) against an owner-funding contra account
     // (CREDIT), so the ledger stays balanced and the source of the money is recorded. `owner_funding`
     // is an unrecognised code, which fundRefFromCode maps to a contra cost centre by design.
     const posting = assertBalanced({
       eventType: 'manual',
-      occurrenceKey: deps.ids.uuid(),
+      occurrenceKey: clientOccurrenceKey(body.idempotencyKey),
       lines: [
         { fund: fundRefFromCode(officeCode), side: 'D', amount: body.amount },
         { fund: fundRefFromCode('owner_funding'), side: 'C', amount: body.amount },
       ],
     })
-
-    const businessDate = todayFor(deps)
-    const fxDayId = await ensureFxDay(deps, businessDate)
     const reason = body.note?.trim() || (body.target === 'cash' ? 'deposit to cash box' : 'top up branch wallet')
-    await deps.ledger.post(branchId, [posting], {
-      shiftId: null,
-      businessDate,
-      postingDate: businessDate,
-      weekStartDate: weekStartFor(businessDate),
-      fxDayId,
-      createdBy: req.actor!.userId,
-      reason,
-    })
 
-    return reply.code(201).send({
+    // BR7 is checked inside: it was once MISSING here while every other posting route had it, and on
+    // the Sunday a week is sealed a deposit surfaced as a raw 25006 rather than «الأسبوع مقفل».
+    const { replayed } = await postClientKeyedCommand(req, branchId, posting, reason)
+
+    return reply.code(replayed ? 200 : 201).send({
       target: body.target,
       balance: serializeMoney(await deps.ledger.fundBalance(branchId, officeCode)),
+      replayed,
     })
   })
 
@@ -398,19 +768,11 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
 
   /** Aggregated across branches: with one branch this simply IS صندوق الشركة. */
   // No `subject`: صندوق الشركة is company-wide by definition, so there is no branch to scope it to.
-  // `profit.view_total` is the gate — GM and, since decision 9, the system admin.
-  app.get('/company-fund', { config: { permission: 'profit.view_total' } }, async () => {
-    const branches = await deps.directory.listBranches()
-    const perBranch = await Promise.all(
-      branches.map(async (b) => ({
-        branchId: b.id,
-        code: b.code,
-        nameAr: b.nameAr,
-        balance: serializeMoney(await deps.ledger.fundBalance(b.id, 'company_box')),
-      })),
-    )
-    const total = perBranch.reduce((sum, b) => sum + BigInt(b.balance.replace('.', '')), 0n)
-    return { total: serializeMoney(minor(total)), branches: perBranch }
+  // `company_fund.manage` is the gate — GM and system admin (2026-09-17) — the SAME key as the two
+  // writes below. It used to be `profit.view_total` here and `journal.manual.write` there, which let
+  // a branch manager move money in and out of a fund he could not see.
+  app.get('/company-fund/legacy-branch-boxes', { config: { permission: 'company_fund.manage' } }, async () => {
+    throw new ServiceError(410, 'company_fund_route_moved')
   })
 
   /**
@@ -485,7 +847,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
   app.get('/receivables', receivableReadOptions, listReceivables)
   app.get('/treasury/receivables', receivableReadOptions, listReceivables)
 
-  /** Immutable command history, newest first, for explaining every direct debt and collection. */
+  /** Immutable history, newest first, for explaining debts, collections, corrections, and losses. */
   const listReceivableEvents = async (req: FastifyRequest) => {
     const query = z.object({ driverId: z.string().min(1).optional() }).parse(req.query)
     const branchId = resolveBranch(req)
@@ -508,6 +870,11 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
           amount: serializeMoney(event.amount),
           businessDate: event.businessDate,
           reason: event.reason,
+          // The history has to say which this was. A correction rendered as a collection tells the
+          // driver his debt was paid when nothing was paid.
+          intent: event.intent,
+          priorBalance: event.priorBalance === null ? null : serializeMoney(event.priorBalance),
+          targetBalance: event.targetBalance === null ? null : serializeMoney(event.targetBalance),
           journalEntryId: event.journalEntryId,
           createdBy: event.createdBy,
           createdAtMs: event.createdAtMs,
@@ -529,6 +896,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       reason: string
     },
   ): boolean =>
+    prior.intent === 'command' &&
     prior.driverId === input.driverId &&
     prior.receivableKind === input.receivableKind &&
     prior.channel === input.channel &&
@@ -549,6 +917,9 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     amount: serializeMoney(event.amount),
     businessDate: event.businessDate,
     reason: event.reason,
+    intent: event.intent,
+    priorBalance: event.priorBalance === null ? null : serializeMoney(event.priorBalance),
+    targetBalance: event.targetBalance === null ? null : serializeMoney(event.targetBalance),
     journalEntryId: event.journalEntryId,
     replayed,
   })
@@ -635,6 +1006,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
             postingDate: businessDate,
             weekStartDate: weekStartFor(businessDate),
             fxDayId,
+            sypMinorPerUsd: null,
             createdBy: req.actor!.userId,
             reason: body.reason,
           })
@@ -650,6 +1022,11 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
             amount: body.amount,
             businessDate,
             reason: body.reason,
+            // A direct command, not a restatement: money genuinely moves between the office box and
+            // the driver's account, so the balances a correction records do not apply.
+            intent: 'command',
+            priorBalance: null,
+            targetBalance: null,
             idempotencyKey: body.idempotencyKey,
             journalEntryId: journal.id,
             createdBy: req.actor!.userId,
@@ -666,105 +1043,523 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
   app.post('/receivables/events', receivableWriteOptions, writeReceivableEvent)
   app.post('/treasury/receivables/events', receivableWriteOptions, writeReceivableEvent)
 
+  /**
+   * «تعديل الذمم المسجلة» — restate a receivable balance that was recorded wrongly.
+   *
+   * The operator names the BALANCE, not a movement. That is the only form that can work: a driver's
+   * receivable balance is a LEDGER FUND BALANCE fed from seven places — this route, the shift
+   * close's deferral, the shift-funding carry consumed at the next open, the cash-deduction
+   * overflow, and more — and only ONE of them writes a `receivable_events` row. A correction that
+   * pointed at an event could not touch the commonest wrong number of all, a `shift_funding` carry,
+   * because there is no event to point at.
+   *
+   * So: read the balance, refuse if it is not what the operator was looking at, and post the
+   * difference through the UNCHANGED `receivableAdjustment` recipe. One way of moving a receivable,
+   * no second arithmetic to keep in step, and every guard 0037 installed applies untouched — the
+   * actor check against the live RBAC matrix, the journal-identity check, the two-line recipe
+   * check, the over-collection row lock. A correction IS one of those postings; it is only
+   * LABELLED differently, so the driver's history does not claim money came back when none did.
+   */
+  const correctReceivable = async (req: FastifyRequest, reply: FastifyReply) => {
+    const body = correctReceivableRequest.parse(req.body)
+    const branchId = resolveBranch(req)
+
+    const replayMatches = (prior: ReceivableEventRecord): boolean =>
+      prior.intent === 'correction' &&
+      prior.driverId === body.driverId &&
+      prior.receivableKind === body.receivableKind &&
+      prior.channel === body.channel &&
+      prior.priorBalance === body.expectedCurrentBalance &&
+      prior.targetBalance === body.targetBalance &&
+      prior.reason === body.reason
+
+    // A lost-response retry reads the immutable receipt rather than restating the balance a second
+    // time — which, on a correction, would move it twice as far.
+    const committed = await deps.receivableEvents.findByIdempotencyKey(branchId, body.idempotencyKey)
+    if (committed) {
+      if (!replayMatches(committed)) throw new ServiceError(409, 'idempotency_key_conflict')
+      return sendReceivableEvent(reply, committed, true)
+    }
+
+    const driver = await deps.directory.driver(body.driverId)
+    if (!driver) throw new ServiceError(404, 'driver_not_found')
+    if (driver.branchId !== branchId) throw new ServiceError(422, 'driver_in_another_branch')
+
+    const raising = body.targetBalance > body.expectedCurrentBalance
+    if (raising && !driver.active) {
+      // 0037's database guard refuses `create` for an inactive driver and is not relaxed here — see
+      // the note in migration 0050. Name it, so the operator reads "reactivate him first" instead
+      // of a constraint violation.
+      throw new ServiceError(422, 'receivable_correction_needs_active_driver', { driverId: body.driverId })
+    }
+
+    const businessDate = todayFor(deps)
+    await assertWeekOpen(deps, branchId, businessDate)
+    const fxDayId = await ensureFxDay(deps, businessDate)
+
+    const result = await deps.financialUnitOfWork.run(
+      { lockKey: `receivables:${branchId}`, actorId: req.actor!.userId, requestId: req.requestId },
+      async (transaction) => {
+        const prior = await transaction.receivableEvents.findByIdempotencyKey(branchId, body.idempotencyKey)
+        if (prior) {
+          if (!replayMatches(prior)) throw new ServiceError(409, 'idempotency_key_conflict')
+          return { event: prior, replayed: true }
+        }
+
+        const receivablePrefix = body.receivableKind === 'shift_funding' ? 'driver_shift_funding' : 'driver_receivable'
+        const receivableCode = receivablePrefix + '_' + body.channel + ':' + body.driverId
+        const officeCode = body.channel === 'cash' ? 'office_cash' : 'office_wallet'
+
+        /*
+         * Read INSIDE the lock and compare with what the operator saw.
+         *
+         * "Set it to 500" is a statement about a number he was looking at. If a shift closed or a
+         * collection landed between his reading and his pressing, applying it anyway would silently
+         * discard that movement — and a correction that erases a real event is worse than the wrong
+         * balance it was meant to fix. So: refuse, and hand back what it actually reads.
+         */
+        const current = await transaction.ledger.fundBalance(branchId, receivableCode)
+        if (current !== body.expectedCurrentBalance) {
+          throw new ServiceError(409, 'receivable_balance_changed', {
+            expected: serializeMoney(body.expectedCurrentBalance),
+            actual: serializeMoney(current),
+          })
+        }
+
+        const delta = body.targetBalance - current
+        if (delta === 0n) {
+          // Nothing to restate. The recipe refuses a zero amount anyway; saying so plainly beats a
+          // RangeError, and a correction that changes nothing is a mistake worth naming.
+          throw new ServiceError(422, 'receivable_already_at_target', { balance: serializeMoney(current) })
+        }
+
+        const direction = delta > 0n ? ('create' as const) : ('collect' as const)
+        const amount = minor(delta > 0n ? delta : -delta)
+
+        // Raising a receivable takes value out of the office box, exactly as an ordinary advance
+        // does; the office must actually hold it. Lowering one is bounded by the balance itself,
+        // which `targetBalance >= 0` already guarantees.
+        if (direction === 'create') {
+          const available = await transaction.ledger.fundBalance(branchId, officeCode)
+          if (available < amount) {
+            throw new ServiceError(422, 'insufficient_funds', { available: serializeMoney(available) })
+          }
+        }
+
+        const posting = receivableAdjustment(
+          body.driverId,
+          body.receivableKind,
+          body.channel,
+          direction,
+          amount,
+          body.idempotencyKey,
+        )
+        const [journal] = await transaction.ledger.post(branchId, [posting], {
+          shiftId: null,
+          businessDate,
+          postingDate: businessDate,
+          weekStartDate: weekStartFor(businessDate),
+          fxDayId,
+          sypMinorPerUsd: null,
+          createdBy: req.actor!.userId,
+          reason: body.reason,
+        })
+        if (!journal) throw new ServiceError(409, 'idempotency_key_conflict')
+
+        const event: ReceivableEventRecord = {
+          id: deps.ids.uuid(),
+          branchId,
+          driverId: body.driverId,
+          receivableKind: body.receivableKind,
+          channel: body.channel,
+          direction,
+          amount,
+          businessDate,
+          reason: body.reason,
+          intent: 'correction',
+          priorBalance: current,
+          targetBalance: body.targetBalance,
+          idempotencyKey: body.idempotencyKey,
+          journalEntryId: journal.id,
+          createdBy: req.actor!.userId,
+          createdAtMs: deps.clock.nowMs(),
+        }
+        await transaction.receivableEvents.create(event)
+        return { event, replayed: false }
+      },
+    )
+
+    return sendReceivableEvent(reply, result.event, result.replayed)
+  }
+  app.post('/receivables/adjustments', receivableWriteOptions, correctReceivable)
+  app.post('/treasury/receivables/adjustments', receivableWriteOptions, correctReceivable)
+
+  /**
+   * Recognise an ordinary receivable as a loss without recording a fictitious collection.
+   *
+   * The receivable is credited and the dedicated loss cost centre is debited. Neither office box
+   * participates: the office gave up the money when the debt was first created, and a write-off
+   * must not remove it a second time (nor pretend that it came back).
+   */
+  const writeoffReceivable = async (req: FastifyRequest, reply: FastifyReply) => {
+    const body = writeoffReceivableRequest.parse(req.body)
+    const branchId = resolveBranch(req)
+
+    const replayMatches = (prior: ReceivableEventRecord): boolean =>
+      prior.intent === 'writeoff' &&
+      prior.driverId === body.driverId &&
+      prior.receivableKind === 'ordinary' &&
+      prior.channel === body.channel &&
+      prior.direction === 'collect' &&
+      prior.amount === body.amount &&
+      prior.reason === body.reason
+
+    // Replay the immutable receipt before mutable week/driver checks. A successful write-off does
+    // not become un-retryable because the debtor was later disabled or the week was locked.
+    const committed = await deps.receivableEvents.findByIdempotencyKey(branchId, body.idempotencyKey)
+    if (committed) {
+      if (!replayMatches(committed)) throw new ServiceError(409, 'idempotency_key_conflict')
+      return sendReceivableEvent(reply, committed, true)
+    }
+
+    const driver = await deps.directory.driver(body.driverId)
+    if (!driver) throw new ServiceError(404, 'driver_not_found')
+    if (driver.branchId !== branchId) throw new ServiceError(422, 'driver_in_another_branch')
+    // Inactive drivers can still have bad debt. Unlike creating a receivable, recognising its loss
+    // does not hand them any new value, so activity is deliberately not required.
+
+    const businessDate = todayFor(deps)
+    await assertWeekOpen(deps, branchId, businessDate)
+    const fxDayId = await ensureFxDay(deps, businessDate)
+
+    const result = await deps.financialUnitOfWork.run(
+      { lockKey: `receivables:${branchId}`, actorId: req.actor!.userId, requestId: req.requestId },
+      async (transaction) => {
+        const prior = await transaction.receivableEvents.findByIdempotencyKey(
+          branchId,
+          body.idempotencyKey,
+        )
+        if (prior) {
+          if (!replayMatches(prior)) throw new ServiceError(409, 'idempotency_key_conflict')
+          return { event: prior, replayed: true }
+        }
+
+        const receivableCode = `driver_receivable_${body.channel}:${body.driverId}`
+        const current = await transaction.ledger.fundBalance(branchId, receivableCode)
+        if (current < body.amount) {
+          throw new ServiceError(422, 'receivable_writeoff_exceeds_balance', {
+            available: serializeMoney(current),
+          })
+        }
+
+        const posting = receivableWriteoff(
+          body.driverId,
+          body.channel,
+          body.amount,
+          body.idempotencyKey,
+        )
+        const [journal] = await transaction.ledger.post(branchId, [posting], {
+          shiftId: null,
+          businessDate,
+          postingDate: businessDate,
+          weekStartDate: weekStartFor(businessDate),
+          fxDayId,
+          sypMinorPerUsd: null,
+          createdBy: req.actor!.userId,
+          reason: body.reason,
+        })
+        if (!journal) throw new ServiceError(409, 'idempotency_key_conflict')
+
+        const event: ReceivableEventRecord = {
+          id: deps.ids.uuid(),
+          branchId,
+          driverId: body.driverId,
+          receivableKind: 'ordinary',
+          channel: body.channel,
+          direction: 'collect',
+          amount: body.amount,
+          businessDate,
+          reason: body.reason,
+          intent: 'writeoff',
+          priorBalance: current,
+          targetBalance: minor(current - body.amount),
+          idempotencyKey: body.idempotencyKey,
+          journalEntryId: journal.id,
+          createdBy: req.actor!.userId,
+          createdAtMs: deps.clock.nowMs(),
+        }
+        await transaction.receivableEvents.create(event)
+        return { event, replayed: false }
+      },
+    )
+
+    return sendReceivableEvent(reply, result.event, result.replayed)
+  }
+  app.post('/receivables/writeoffs', receivableWriteOptions, writeoffReceivable)
+  app.post('/treasury/receivables/writeoffs', receivableWriteOptions, writeoffReceivable)
+
   const companyMoveRequest = z.object({
+    /** One per logical submission, reused on retry — see `postClientKeyedCommand`. */
+    idempotencyKey: z.string().uuid(),
     amount: moneySchema,
     reason: z.string().min(1).max(500),
   })
+
+  // `company_fund.manage` (GM + system admin), NOT `journal.manual.write`: the branch manager holds
+  // the latter, and this is the gap it opened. The subject stays the named branch — an 'all' grant
+  // ignores it, and a narrower grant the system admin might one day write is still confined to it.
+  const companyFundWrite = { config: { permission: 'company_fund.manage' as const, subject: targetBranch } }
+
+  /**
+   * These two routes move `company_box`, a BRANCH account («حساب الشركة لدى الفرع»). The company (HQ)
+   * row may be named under `company_fund.manage`, but it holds no `company_box` and the database
+   * refuses one there (0066) — so say so here instead of failing at COMMIT. C2 replaces both routes.
+   */
+  const assertOperatingBranch = async (branchId: string): Promise<void> => {
+    if ((await deps.directory.branch(branchId))?.kind === 'company') {
+      throw new ServiceError(403, 'company_branch_not_addressable')
+    }
+  }
 
   /**
    * Put the owner's own money into صندوق الشركة. Its counterpart is `owner_funding`, the same
    * contra account a branch deposit uses — so «where did this come from» has one answer, not two.
    */
-  app.post('/company-fund/deposit', { config: { permission: 'journal.manual.write', subject: targetBranch } }, async (req, reply) => {
+  app.post('/company-fund/legacy-deposit', companyFundWrite, async (req, reply) => {
     const body = companyMoveRequest.parse(req.body)
     const branchId = resolveBranch(req)
+    await assertOperatingBranch(branchId)
     if (body.amount <= 0n) throw new ServiceError(422, 'amount_must_be_positive')
-    const businessDate = todayFor(deps)
-    await assertWeekOpen(deps, branchId, businessDate)
 
     const posting = assertBalanced({
       eventType: 'manual',
-      occurrenceKey: deps.ids.uuid(),
+      occurrenceKey: clientOccurrenceKey(body.idempotencyKey),
       lines: [
         { fund: { kind: 'company_box' }, side: 'D', amount: body.amount },
         { fund: fundRefFromCode('owner_funding'), side: 'C', amount: body.amount },
       ],
     })
-    await postOne(branchId, businessDate, posting, req.actor!.userId, body.reason)
-    return reply.code(201).send({ balance: serializeMoney(await deps.ledger.fundBalance(branchId, 'company_box')) })
+    const { replayed } = await postClientKeyedCommand(req, branchId, posting, body.reason)
+    return reply.code(replayed ? 200 : 201).send({
+      balance: serializeMoney(await deps.ledger.fundBalance(branchId, 'company_box')),
+      replayed,
+    })
   })
 
   /** Take money out of صندوق الشركة — the owner's drawings. Refused below zero. */
-  app.post('/company-fund/withdraw', { config: { permission: 'journal.manual.write', subject: targetBranch } }, async (req, reply) => {
+  app.post('/company-fund/legacy-withdraw', companyFundWrite, async (req, reply) => {
     const body = companyMoveRequest.parse(req.body)
     const branchId = resolveBranch(req)
+    await assertOperatingBranch(branchId)
     if (body.amount <= 0n) throw new ServiceError(422, 'amount_must_be_positive')
-    const businessDate = todayFor(deps)
-    await assertWeekOpen(deps, branchId, businessDate)
-
-    // You cannot hand over money the fund does not hold. The ledger would happily carry a negative
-    // balance — arithmetic has no opinion about it — but a company fund that owes itself money is
-    // a data-entry mistake every time, and it is cheapest to refuse at the moment it is made.
-    const held = await deps.ledger.fundBalance(branchId, 'company_box')
-    if (body.amount > held) {
-      throw new ServiceError(422, 'insufficient_funds', { held: serializeMoney(held) })
-    }
 
     const posting = assertBalanced({
       eventType: 'manual',
-      occurrenceKey: deps.ids.uuid(),
+      occurrenceKey: clientOccurrenceKey(body.idempotencyKey),
       lines: [
         { fund: fundRefFromCode('owner_drawings'), side: 'D', amount: body.amount },
         { fund: { kind: 'company_box' }, side: 'C', amount: body.amount },
       ],
     })
-    await postOne(branchId, businessDate, posting, req.actor!.userId, body.reason)
-    return reply.code(201).send({ balance: serializeMoney(await deps.ledger.fundBalance(branchId, 'company_box')) })
+    const { replayed } = await postClientKeyedCommand(req, branchId, posting, body.reason, async (tx) => {
+      // You cannot hand over money the fund does not hold. The ledger would happily carry a negative
+      // balance — arithmetic has no opinion about it — but a company fund that owes itself money is
+      // a data-entry mistake every time. Read INSIDE the branch lock: checked outside it, two
+      // withdrawals of the whole balance could both pass and the fund would go negative.
+      const held = await tx.ledger.fundBalance(branchId, 'company_box')
+      if (body.amount > held) {
+        throw new ServiceError(422, 'insufficient_funds', { held: serializeMoney(held) })
+      }
+    })
+    return reply.code(replayed ? 200 : 201).send({
+      balance: serializeMoney(await deps.ledger.fundBalance(branchId, 'company_box')),
+      replayed,
+    })
   })
 
+  /**
+   * Move money between the branch's own two boxes.
+   *
+   * Everyday work: Yallago's cut comes out of the wallet while the drivers hand back notes, so the
+   * wallet empties as the cash box fills and the office tops one from the other. WORKING CAPITAL
+   * IS UNCHANGED by design — both legs are office funds — so the capital card, the restoration and
+   * the go-live gate all see exactly what they saw a second ago. Only the SHAPE of the money moves.
+   *
+   * `journal.manual.write`, like every other hand-entered movement, with a reason that has to say
+   * something: a transfer with no explanation is indistinguishable next month from a mistake.
+   */
+  /**
+   * What the two office boxes actually did, most recent first.
+   *
+   * The screen could post a transfer and never show one. Asked «أين أرى عمليات عمران», the honest
+   * answer was nowhere: the Treasury card shows balances only, and `/audit` needs a table name and
+   * a record id and returns 1,405 rows oldest-first with no paging. So four duplicate transfers sat
+   * in the ledger, correct and invisible, until the boxes disagreed with a hand count.
+   *
+   * Read-only, and deliberately about the OFFICE boxes rather than the whole ledger: this answers
+   * «ماذا جرى لصندوقي», which is the question someone standing at the drawer actually has.
+   */
+  app.get('/treasury/movements', { config: { permission: 'branch_data.view', subject: ownBranch } }, async (req) => {
+    const q = z.object({ limit: z.coerce.number().int().min(1).max(200).default(50) }).parse(req.query ?? {})
+    const branchId = resolveBranch(req)
+    const today = todayFor(deps)
+
+    // This week and the one before it — enough to answer «what happened lately» without scanning
+    // the whole ledger, and `listByWeek` is the index the entries are stored under.
+    const thisWeek = weekStartFor(today)
+    const previous = weekStartFor(addDays(thisWeek, -1))
+    const entries = [
+      ...(await deps.ledger.listByWeek(branchId, thisWeek)),
+      ...(await deps.ledger.listByWeek(branchId, previous)),
+    ]
+
+    const OFFICE = new Set(['office_cash', 'office_wallet'])
+    const touching = entries.filter((entry) => entry.lines.some((line) => OFFICE.has(line.fundCode)))
+    touching.sort((a, b) => b.id - a.id)
+    const page = touching.slice(0, q.limit)
+
+    const names = new Map(
+      (await deps.users.list()).map((user) => [user.id, user.fullNameAr || user.username]),
+    )
+    const effect = (entry: (typeof page)[number], fundCode: string): Minor =>
+      entry.lines
+        .filter((line) => line.fundCode === fundCode)
+        .reduce((sum, line) => (line.side === 'D' ? sum + line.amount : sum - line.amount), 0n) as Minor
+
+    return {
+      rows: page.map((entry) => ({
+        id: entry.id,
+        businessDate: entry.businessDate,
+        eventType: entry.eventType,
+        reason: entry.reason,
+        shiftId: entry.shiftId,
+        actorName: names.get(entry.createdBy) ?? null,
+        cash: serializeMoney(effect(entry, 'office_cash')),
+        wallet: serializeMoney(effect(entry, 'office_wallet')),
+      })),
+    }
+  })
+
+  app.post('/treasury/transfer', { config: { permission: 'journal.manual.write', subject: targetBranch } }, async (req, reply) => {
+    const body = officeTransferRequest.parse(req.body)
+    const branchId = resolveBranch(req)
+    const from = body.direction === 'cash_to_wallet' ? 'office_cash' : 'office_wallet'
+    const to = body.direction === 'cash_to_wallet' ? 'office_wallet' : 'office_cash'
+    const businessDate = todayFor(deps)
+    await assertWeekOpen(deps, branchId, businessDate)
+
+    // You cannot move money the box is not holding. The ledger would carry a negative balance
+    // without complaint — arithmetic has no opinion — and a box that owes itself money is a
+    // data-entry mistake every time, cheapest to refuse at the moment it is made.
+    const held = await deps.ledger.fundBalance(branchId, from)
+    if (body.amount > held) {
+      throw new ServiceError(422, 'insufficient_funds', { held: serializeMoney(held), from })
+    }
+
+    /*
+     * THE KEY IS DERIVED FROM WHAT THE TRANSFER IS, not freshly invented.
+     *
+     * On 2026-09-02 at 02:42:37, :37, :38 and :39 this route recorded «تسكير نوبة عمران» — the same
+     * 461.15 from the wallet to the cash box — FOUR times. It was one button pressed four times in
+     * two seconds. Every other posting in this system is protected by the ledger's idempotency key
+     * `(shift_id, event_type, occurrence_key)`; this one handed it a fresh UUID each call, so the
+     * guard could not see a repeat as a repeat. Three phantom entries moved 1,383.45 between the
+     * boxes and put the system 1,383.45 of cash away from the counted drawer.
+     *
+     * Branch, direction, amount, reason and the BUSINESS DATE. The date is in it so the same
+     * routine transfer may recur tomorrow; a genuine second transfer of the same amount on the same
+     * day is expressed by saying why it is different, which the reason field exists for and which
+     * good bookkeeping wants anyway.
+     *
+     * A minute-bucketed clock was the other candidate and is worse: two clicks either side of
+     * :59/:00 straddle the bucket and both post, which is exactly the case this has to stop.
+     */
+    const occurrenceKey = createHash('sha256')
+      .update([branchId, businessDate, from, to, body.amount.toString(), body.reason.trim()].join(' '))
+      .digest('hex')
+      .slice(0, 32)
+
+    const before = await deps.ledger.fundBalance(branchId, to)
+    await postOne(branchId, businessDate, officeTransfer(from, to, body.amount, occurrenceKey), req.actor!.userId, body.reason)
+    const cash = await deps.ledger.fundBalance(branchId, 'office_cash')
+    const wallet = await deps.ledger.fundBalance(branchId, 'office_wallet')
+
+    // The ledger swallows a replayed key silently, which is right for a retry and wrong for a
+    // person: the balances would come back unchanged and the screen would say «تمّ» twice. Say so.
+    const applied = (to === 'office_cash' ? cash : wallet) !== before
+    return reply.code(applied ? 201 : 200).send({
+      direction: body.direction,
+      amount: serializeMoney(body.amount),
+      applied,
+      cash: serializeMoney(cash),
+      wallet: serializeMoney(wallet),
+    })
+  })
+
+  /**
+   * Where money taken out of خزينة الفرع may go — a CLOSED list.
+   *
+   * `to` used to be free text, and an unrecognised code silently became `cost_center:<code>`, an
+   * account no report sums. Two destinations exist:
+   *
+   *  • `company_box` — «كييش» by hand, into صندوق الشركة. The route is `journal.manual.write`, which
+   *    the branch manager holds, and that was the gap: he could move money into a fund only the GM
+   *    and the system admin manage (2026-09-17). This destination now ALSO needs
+   *    `company_fund.manage`; without it the answer is 403 `company_fund_forbidden`.
+   *  • `owner_drawings` — the owner taking cash straight out of the branch box: the inverse of
+   *    `/treasury/deposit`'s `owner_funding`, and the contra `/company-fund/withdraw` already uses.
+   */
+  const WITHDRAW_DESTINATIONS = ['company_box', 'owner_drawings'] as const
+
   const withdrawRequest = z.object({
+    /** One per logical submission, reused on retry — see `postClientKeyedCommand`. */
+    idempotencyKey: z.string().uuid(),
     target: z.enum(['cash', 'wallet']),
     amount: moneySchema,
-    /** Where it goes. `company_box` is «كييش»; anything else is a named contra account. */
-    to: z.string().min(1).max(64).default('company_box'),
+    /** Required: there is no longer a default a caller could land in without saying so. */
+    to: z.enum(WITHDRAW_DESTINATIONS),
     reason: z.string().min(1).max(500),
   })
 
   /**
-   * Take money OUT of خزينة الفرع — the manual half of «كييش».
+   * Take money OUT of خزينة الفرع to one of the closed destinations above.
    *
-   * Uses the same `sweepToCompany` recipe الترميم will use, so a hand-made sweep and an automatic
-   * one are the same event type and the same shape in the ledger. A dashboard that sums «كييش» must
-   * not have to know which of the two produced a row.
+   * A hand sweep uses the same LINES and the same `kaish` line role الترميم uses, so a dashboard that
+   * sums «كييش» need not know which of the two produced a row. Client-keyed like the company-fund
+   * commands: it used to post under a fresh server UUID, so a double click swept twice.
    */
   app.post('/treasury/withdraw', { config: { permission: 'journal.manual.write', subject: targetBranch } }, async (req, reply) => {
     const body = withdrawRequest.parse(req.body)
     const branchId = resolveBranch(req)
+    // Authority first: a branch manager naming the company fund is refused before anything is read.
+    if (body.to === 'company_box') await assertManagesCompanyFund(req, branchId)
     if (body.amount <= 0n) throw new ServiceError(422, 'amount_must_be_positive')
     const office = body.target === 'cash' ? 'office_cash' : 'office_wallet'
-    const businessDate = todayFor(deps)
-    await assertWeekOpen(deps, branchId, businessDate)
-
-    const held = await deps.ledger.fundBalance(branchId, office)
-    if (body.amount > held) {
-      throw new ServiceError(422, 'insufficient_funds', { held: serializeMoney(held) })
-    }
+    const occurrenceKey = clientOccurrenceKey(body.idempotencyKey)
 
     const posting =
       body.to === 'company_box'
-        ? sweepToCompany(office, body.amount, deps.ids.uuid())
+        ? manualKaish(office, body.amount, occurrenceKey)
         : assertBalanced({
             eventType: 'manual',
-            occurrenceKey: deps.ids.uuid(),
+            occurrenceKey,
             lines: [
               { fund: fundRefFromCode(body.to), side: 'D', amount: body.amount },
               { fund: fundRefFromCode(office), side: 'C', amount: body.amount },
             ],
           })
-    await postOne(branchId, businessDate, posting, req.actor!.userId, body.reason)
-    return reply.code(201).send({
+    const { replayed } = await postClientKeyedCommand(req, branchId, posting, body.reason, async (tx) => {
+      // You cannot move money the box is not holding. Read INSIDE the branch lock, so two
+      // concurrent sweeps of the whole box cannot both pass.
+      const held = await tx.ledger.fundBalance(branchId, office)
+      if (body.amount > held) {
+        throw new ServiceError(422, 'insufficient_funds', { held: serializeMoney(held) })
+      }
+    })
+    return reply.code(replayed ? 200 : 201).send({
       target: body.target,
       balance: serializeMoney(await deps.ledger.fundBalance(branchId, office)),
+      replayed,
     })
   })
 
@@ -836,24 +1631,31 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
   )
 
   /**
-   * Build the positions from the SEALED COUNT before posting, never from the request body.
+   * Build the restoration position from the live double-entry ledger.
    *
-   * Owner decision (j): «count first, then ترميم». The whole point is that it settles against money
-   * somebody physically counted — computing the actionable plan from the ledger would make it a
-   * tautology that can never find anything. The live-ledger mode is read-only and used only after
-   * the immutable restoration exists, so a reloaded card describes the post-action position.
+   * The caller supplies transaction-bound repositories for execution and preview, so the office
+   * balances, receivables and effective targets are all read while holding the same branch-money
+   * lock used by every financial writer. Nothing monetary comes from the request body.
    */
   async function positionsFor(
     branchId: string,
     businessDate: string,
-    source: 'sealed_count' | 'live_ledger' = 'sealed_count',
-    readDeps: Pick<Deps, 'cashCounts' | 'capitalTargets' | 'ledger'> = deps,
+    readDeps: Pick<Deps, 'capitalTargets' | 'ledger'> = deps,
   ) {
-    const [count, targets, ordinaryReceivables, shiftFundingReceivables] = await Promise.all([
-      readDeps.cashCounts.find(branchId, businessDate),
+    const officeFunds = ['office_cash', 'office_wallet'] as const
+    const [targets, ordinaryReceivables, shiftFundingReceivables, advanceBalances, openingBalances] =
+      await Promise.all([
       readDeps.capitalTargets.resolve(branchId, businessDate),
       readDeps.ledger.balancesByPrefix(branchId, 'driver_receivable_'),
       readDeps.ledger.balancesByPrefix(branchId, 'driver_shift_funding_'),
+      // «السلف» count toward رأس مال المكتب exactly as الذمم do (owner decision 17). Leave them out
+      // and every night reads the emptier box as a shortfall and «شحن» real money out of
+      // صندوق الشركة to refill it — then sweeps it back the day the advance is repaid.
+      readDeps.ledger.balancesByPrefix(branchId, 'advance_receivable_'),
+      Promise.all(officeFunds.map(async (fundCode) => ({
+        fundCode,
+        balance: await readDeps.ledger.fundBalance(branchId, fundCode),
+      }))),
     ])
     const sumFor = (suffix: string): Minor => {
       const total = [...Object.entries(ordinaryReceivables), ...Object.entries(shiftFundingReceivables)]
@@ -866,36 +1668,42 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       return minor(total)
     }
 
+    const advancesFor = (suffix: string): Minor => {
+      const total = Object.entries(advanceBalances)
+        .filter(([code]) => code.startsWith(`advance_receivable_${suffix}:`))
+        .reduce((acc, [, value]) => acc + value, 0n)
+      assertPersistableTreasuryMinor(`restoration.advances.${suffix}`, total)
+      return minor(total)
+    }
+
+    // A counted asset that has gone negative is corruption whichever kind it is, and the fund code
+    // is what makes it actionable. An advance repaid twice would land here.
     for (const [fundCode, balance] of [
       ...Object.entries(ordinaryReceivables),
       ...Object.entries(shiftFundingReceivables),
+      ...Object.entries(advanceBalances),
     ]) {
       if (balance < 0n) throw new ServiceError(500, 'receivable_balance_integrity_error', { fundCode })
     }
 
-    return {
-      count,
-      positions: await Promise.all(
-        (['office_cash', 'office_wallet'] as const).map(async (fundCode) => {
-          const counted = source === 'live_ledger'
-            ? await readDeps.ledger.fundBalance(branchId, fundCode)
-            : count?.lines.find((line) => line.fundCode === fundCode)?.counted ?? minor(0n)
-          const receivables = sumFor(fundCode === 'office_cash' ? 'cash' : 'wallet')
-          const capitalTarget = targets[fundCode] ?? null
-          assertPersistableTreasuryMinor(`restoration.counted.${fundCode}`, counted)
-          if (capitalTarget !== null) {
-            assertPersistableTreasuryMinor(`restoration.capitalTarget.${fundCode}`, capitalTarget)
-          }
-          return { fundCode, counted, receivables, capitalTarget }
-        }),
-      ),
-    }
+    return openingBalances.map(({ fundCode, balance: officeBalance }) => {
+      const channel = fundCode === 'office_cash' ? 'cash' : 'wallet'
+      const receivables = sumFor(channel)
+      const advances = advancesFor(channel)
+      const capitalTarget = targets[fundCode] ?? null
+      assertPersistableTreasuryMinor(`restoration.officeBalance.${fundCode}`, officeBalance)
+      if (capitalTarget !== null) {
+        assertPersistableTreasuryMinor(`restoration.capitalTarget.${fundCode}`, capitalTarget)
+      }
+      return { fundCode, officeBalance, receivables, advances, capitalTarget }
+    })
   }
 
-  const serializeLeg = (l: RestorationPlan['legs'][number]) => ({
+  const serializeSnapshotLeg = (l: RestorationPlan['legs'][number]) => ({
     fundCode: l.fundCode,
-    counted: serializeMoney(l.counted),
+    officeBalance: serializeMoney(l.officeBalance),
     receivables: serializeMoney(l.receivables),
+    advances: serializeMoney(l.advances),
     position: serializeMoney(l.position),
     capitalTarget: serializeMoney(l.capitalTarget),
     delta: serializeMoney(l.delta),
@@ -905,29 +1713,57 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
     refusals: l.refusals,
   })
 
-  /** What tonight's ترميم WOULD do. Reads the sealed count; posts nothing. */
+  /** Keep the old Admin readable while naming the live-ledger source explicitly on the new wire. */
+  const serializeResponseLeg = (l: RestorationPlan['legs'][number]) => ({
+    ...serializeSnapshotLeg(l),
+    openingOfficeBalance: serializeMoney(l.officeBalance),
+    /** Transitional alias: old clients render this field as the available office amount. */
+    counted: serializeMoney(l.officeBalance),
+  })
+
+  const openingBalancesFor = (plan: RestorationPlan) => plan.legs.map((leg) => ({
+    fundCode: leg.fundCode,
+    balance: serializeMoney(leg.officeBalance),
+  }))
+
+  /** What tonight's ترميم WOULD do. Reads a branch-locked live-ledger snapshot; posts nothing. */
   app.get('/treasury/restoration/preview', { config: { permission: 'cash_count.perform', subject: ownBranch } }, async (req) => {
     const branchId = resolveBranch(req)
     const businessDate = todayFor(deps)
-    const completed = await deps.restorations.find(branchId, businessDate)
-    // Before execution, only the sealed physical count is authoritative. Afterwards the posting
-    // has moved the funds, so a card labelled "current position" must use live ledger balances;
-    // `alreadyRestored` still disables a second execution and the stored record remains immutable.
-    const { count, positions } = await positionsFor(
-      branchId,
-      businessDate,
-      completed === null ? 'sealed_count' : 'live_ledger',
+    const preview = await deps.financialUnitOfWork.run(
+      {
+        lockKey: `receivables:${branchId}`,
+        actorId: req.actor!.userId,
+        requestId: req.requestId,
+      },
+      async (tx: FinancialTransactionDeps) => {
+        const [completed, runsToday, positions] = await Promise.all([
+          tx.restorations.find(branchId, businessDate),
+          tx.restorations.runsOnDay(branchId, businessDate),
+          positionsFor(branchId, businessDate, tx),
+        ])
+        const plan = planRestoration(positions)
+        assertPersistableRestorationPlan(plan)
+        return { completed, runsToday, plan }
+      },
     )
-    const plan = planRestoration(positions)
-    assertPersistableRestorationPlan(plan)
     return {
       businessDate,
-      counted: count !== null,
-      alreadyRestored: completed !== null,
-      legs: plan.legs.map(serializeLeg),
-      netToCompany: serializeMoney(plan.netToCompany),
-      feasible: plan.feasible,
-      refusals: plan.refusals,
+      source: 'live_ledger',
+      /** Transitional truthy alias so the old Admin does not wait for a cash count. */
+      counted: true,
+      /**
+        * Retained, but it no longer means «you may not». Since 0061 a business date may hold several
+        * runs, and the screen shows how many rather than hiding the button — the owner asked for
+        * الترميم «متاح دوما» after finding it gone at 02:27 inside a day restored that morning.
+        */
+      alreadyRestored: preview.completed !== null,
+      runsToday: preview.runsToday,
+      openingBalances: openingBalancesFor(preview.plan),
+      legs: preview.plan.legs.map(serializeResponseLeg),
+      netToCompany: serializeMoney(preview.plan.netToCompany),
+      feasible: preview.plan.feasible,
+      refusals: preview.plan.refusals,
     }
   })
 
@@ -941,148 +1777,117 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
 
     const outcome = await deps.financialUnitOfWork.run(
       {
-        // This exact branch lock is shared by shift open/close, direct receivables, and every Pg
-        // ledger posting. The sealed-balance check and both journal phases therefore see one
+        // This exact branch lock is shared by shift open/close, direct receivables, target edits and
+        // every Pg ledger posting. The opening live balances and journals therefore belong to one
         // serial branch-money history.
         lockKey: `receivables:${branchId}`,
         actorId,
         requestId: req.requestId,
       },
       async (tx: FinancialTransactionDeps) => {
-        // This check belongs inside the serialized transaction. Two concurrent managers both pass
-        // an outside check; here the waiter observes the winner's immutable record and returns 409.
-        if ((await tx.restorations.find(branchId, businessDate)) !== null) {
-          throw new ServiceError(409, 'already_restored_today')
-        }
+        /*
+          WHICH RUN OF THE DAY THIS IS. Owner, 2026-09-02: «اجعل خيار الترميم متاح دوما». الترميم
+          was once per business date, and with the day starting at 04:00 he found the button gone at
+          02:27 — still inside a day restored that morning, with a full day's takings sitting in the
+          boxes waiting on a clock.
 
-        const { count, positions } = await positionsFor(branchId, businessDate, 'sealed_count', tx)
-        if (count === null) throw new ServiceError(422, 'cash_count_required')
-        if (count.sealedAtMs === null || count.proofSha256 === null || sealProof(count) !== count.proofSha256) {
-          throw new ServiceError(422, 'cash_count_proof_invalid')
-        }
+          Read inside the serialized transaction, like the refusal it replaces. Two managers racing
+          both compute the same number, and the loser hits `restorations_run_per_day` — a clean
+          unique violation instead of a second posting. And the run number is what makes each run's
+          ledger occurrence key distinct, so repetition can never become double posting.
+        */
+        const runNo = (await tx.restorations.runsOnDay(branchId, businessDate)) + 1
 
-        const requiredFunds = ['office_cash', 'office_wallet'] as const
-        const countLines = new Map(count.lines.map((line) => [line.fundCode, line]))
-        const reconciliationLines: Array<{
-          fundCode: typeof requiredFunds[number]
-          variance: Minor
-          resolution: string | null
-        }> = []
-
-        for (const fundCode of requiredFunds) {
-          const line = countLines.get(fundCode)
-          if (!line) throw new ServiceError(422, 'cash_count_incomplete', { fundCode })
-          const calculatedVariance = minor(line.counted - line.computed)
-          if (calculatedVariance !== line.variance) {
-            throw new ServiceError(422, 'cash_count_formula_invalid', { fundCode })
-          }
-          if (line.variance !== 0n && (!line.resolution || line.resolution.trim() === '')) {
-            throw new ServiceError(422, 'cash_count_resolution_required', {
-              fundCode,
-              variance: serializeMoney(line.variance),
-            })
-          }
-
-          // Never fold a posting made after the count into the signed variance: that would repair
-          // a different number than the manager explained. The manager must recount instead.
-          const current = await tx.ledger.fundBalance(branchId, fundCode)
-          if (current !== line.computed) {
-            throw new ServiceError(409, 'cash_count_stale', {
-              fundCode,
-              counted: serializeMoney(line.counted),
-              computedAtCount: serializeMoney(line.computed),
-              current: serializeMoney(current),
-            })
-          }
-          reconciliationLines.push({ fundCode, variance: line.variance, resolution: line.resolution })
-        }
-
+        const positions = await positionsFor(branchId, businessDate, tx)
         const plan = planRestoration(positions)
         assertPersistableRestorationPlan(plan)
         if (!plan.feasible) {
           throw new ServiceError(422, 'restoration_infeasible', { refusals: plan.refusals })
         }
 
-        const reconciliationPostings = postingsForCashCountReconciliation({
-          branchId,
-          cashCountId: count.id,
-          proofSha256: count.proofSha256,
-          lines: reconciliationLines,
-        })
-        const restorationPostings = postingsForRestoration(plan, businessDate)
-        const postings = [...reconciliationPostings, ...restorationPostings]
-        assertPersistableTreasuryPostings(postings)
-        const entries = postings.length === 0 ? [] : await tx.ledger.post(branchId, postings, {
+        // `<date>#<run>` — the guard in 0061 demands exactly this shape, so an API rolled back past
+        // it makes الترميم refuse loudly rather than post under a key the guard cannot check.
+        const restorationPostings = postingsForRestoration(plan, `${businessDate}#${runNo}`)
+        assertPersistableTreasuryPostings(restorationPostings)
+        const mirror = await prepareCompanyMirror(tx, branchId, restorationPostings)
+        const entries = restorationPostings.length === 0 ? [] : await tx.ledger.post(branchId, restorationPostings, {
           shiftId: null,
           businessDate,
           postingDate: businessDate,
           weekStartDate: weekStartFor(businessDate),
           fxDayId,
+          sypMinorPerUsd: null,
           createdBy: actorId,
           reason: body.reason,
         })
 
         // A missing result means an occurrence key already existed without the restoration fact.
         // Never bless an orphan/mismatched journal as this run's evidence.
-        if (entries.length !== postings.length) {
+        if (entries.length !== restorationPostings.length) {
           throw new ServiceError(409, 'restoration_journal_conflict')
         }
 
-        const reconciliationKeys = new Set(reconciliationPostings.map((posting) => posting.occurrenceKey))
         const restorationKeys = new Set(restorationPostings.map((posting) => posting.occurrenceKey))
-        const serializedLegs = plan.legs.map(serializeLeg)
+        const snapshotLegs = plan.legs.map(serializeSnapshotLeg)
+        const responseLegs = plan.legs.map(serializeResponseLeg)
+        const openingBalances = openingBalancesFor(plan)
+        let restorationId: number
         try {
-          await tx.restorations.create({
+          restorationId = await tx.restorations.create({
             branchId,
             businessDate,
-            cashCountId: count.id,
+            cashCountId: null,
             plan: {
-              schemaVersion: 2,
-              cashCountProofSha256: count.proofSha256,
-              cashCountSealedAt: new Date(count.sealedAtMs).toISOString(),
-              countReconciliation: reconciliationLines.map((line) => ({
-                fundCode: line.fundCode,
-                variance: serializeMoney(line.variance),
-                resolution: line.resolution,
-              })),
-              reconciliationJournalEntryIds: entries
-                .filter((entry) => reconciliationKeys.has(entry.occurrenceKey))
-                .map((entry) => entry.id),
+              schemaVersion: 4,
+              source: 'live_ledger',
+              openingBalances,
               restorationJournalEntryIds: entries
                 .filter((entry) => restorationKeys.has(entry.occurrenceKey))
                 .map((entry) => entry.id),
-              legs: serializedLegs,
+              legs: snapshotLegs,
             },
             netToCompany: plan.netToCompany,
             reason: body.reason,
             performedBy: actorId,
+            runNo,
           })
         } catch (err) {
           if ((err as { code?: string }).code === 'DUPLICATE_RESTORATION') {
-            throw new ServiceError(409, 'already_restored_today')
+            // Only reachable when another manager took this run number between the count above and
+            // the insert — inside the same branch lock, so a genuine race and not a repeat request.
+            throw new ServiceError(409, 'restoration_run_conflict')
           }
           throw err
         }
+        await mirrorCompanyBoxEntries(tx, mirror, entries, restorationId)
 
         return {
-          legs: serializedLegs,
+          legs: responseLegs,
+          openingBalances,
           netToCompany: plan.netToCompany,
           restorationPostings: restorationPostings.length,
-          reconciliationPostings: reconciliationPostings.length,
         }
       },
     )
 
     return reply.code(201).send({
       businessDate,
+      source: 'live_ledger',
+      /** Transitional truthy alias matching preview for the old Admin. */
+      counted: true,
+      openingBalances: outcome.openingBalances,
       legs: outcome.legs,
       netToCompany: serializeMoney(outcome.netToCompany),
       postings: outcome.restorationPostings,
-      reconciliationPostings: outcome.reconciliationPostings,
+      /** Transitional zero: v3 never creates cash-count reconciliation journals. */
+      reconciliationPostings: 0,
     })
   })
 
-  /** The four routes above post one balanced entry on today's date; only the lines differ. */
+  /**
+   * `/treasury/transfer` posts one balanced entry on today's date. The client-keyed commands (the
+   * deposits and withdrawals) use `postClientKeyedCommand` instead.
+   */
   async function postOne(
     branchId: string,
     businessDate: string,
@@ -1097,6 +1902,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       postingDate: businessDate,
       weekStartDate: weekStartFor(businessDate),
       fxDayId,
+      sypMinorPerUsd: null,
       createdBy,
       reason,
     })
@@ -1145,6 +1951,11 @@ function serializeCount(record: CashCountRecord) {
     countedBy: record.countedBy,
     countedAt: new Date(record.countedAtMs).toISOString(),
     proofSha256: record.proofSha256,
+    status: record.status,
+    supersededById: record.supersededById,
+    closedAt: record.closedAtMs === null ? null : new Date(record.closedAtMs).toISOString(),
+    closedBy: record.closedBy,
+    closedReason: record.closedReason,
     notes: record.notes,
     lines: record.lines.map((l) => ({
       fundCode: l.fundCode,

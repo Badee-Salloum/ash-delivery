@@ -41,7 +41,13 @@ export function fixedSettlementHash(
   plan: FixedShareSettlementPlan,
 ): string {
   const canonical = {
-    version: 3,
+    /*
+     * 5: «الحسم». Adding a field changes the fingerprint of every shift, including those carrying
+     * no charge — which is correct and is what the version is for. An approved shift keeps the hash
+     * stored beside its snapshot and is never re-fingerprinted; a shift still under review simply
+     * has to be re-read before it can be approved, which is the staleness guard doing its job.
+     */
+    version: 5,
     policyCode: FIXED_SETTLEMENT_POLICY,
     driverRateBps: FIXED_SETTLEMENT_DRIVER_BPS,
     ...context,
@@ -51,6 +57,7 @@ export function fixedSettlementHash(
     grossDriverShare: String(plan.grossDriverShare),
     cashDeductionTotal: String(plan.cashDeductionTotal),
     baseDriverShare: String(plan.baseDriverShare),
+    managerChargeTotal: String(plan.managerChargeTotal),
     expectedCash: String(plan.expectedCash),
     expectedWallet: String(plan.expectedWallet),
     expectedTotal: String(plan.expectedTotal),
@@ -64,6 +71,8 @@ export function fixedSettlementHash(
     walletClaimToOffice: String(plan.walletClaimToOffice),
     cashReceivableDeferred: String(plan.cashReceivableDeferred),
     walletReceivableDeferred: String(plan.walletReceivableDeferred),
+    maximumCashShortageReceivable: String(plan.maximumCashShortageReceivable),
+    cashShortageReceivable: String(plan.cashShortageReceivable),
     walletToOffice: String(plan.walletToOffice),
     cashToOffice: String(plan.cashToOffice),
     walletAction: plan.wallet.action,

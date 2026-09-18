@@ -17,7 +17,9 @@ const record = (): ExpenseRecord => ({
   businessDate: '2026-08-23',
   description: 'Charging electricity',
   receiptMediaId: null,
-  journalEntryId: null,
+  channel: 'office_cash',
+    journalEntryId: null,
+  advanceId: null,
   createdBy: USER,
 })
 
@@ -27,10 +29,38 @@ const meta = {
   postingDate: '2026-08-23' as const,
   weekStartDate: '2026-08-23' as const,
   fxDayId: 1,
+  sypMinorPerUsd: null,
   createdBy: USER,
 }
 
 describe('in-memory financial unit of work', () => {
+  it('preserves the nullable evidence discriminator and returns an immutable v3 snapshot copy', async () => {
+    const deps = createMemoryDeps(Date.UTC(2026, 7, 31))
+    const plan = {
+      schemaVersion: 3,
+      source: 'live_ledger',
+      openingBalances: [
+        { fundCode: 'office_cash', balance: '50000.00' },
+        { fundCode: 'office_wallet', balance: '10000.00' },
+      ],
+    }
+    await deps.restorations.create({
+      branchId: BRANCH,
+      businessDate: '2026-08-31',
+      cashCountId: null,
+      plan,
+      netToCompany: minor(0n),
+      reason: 'ledger-backed restoration',
+      performedBy: USER,
+        runNo: 1,
+      })
+
+    const first = await deps.restorations.find(BRANCH, '2026-08-31')
+    expect(first).toMatchObject({ cashCountId: null, plan })
+    ;(first!.plan as { source: string }).source = 'mutated-copy'
+    await expect(deps.restorations.find(BRANCH, '2026-08-31')).resolves.toMatchObject({ plan })
+  })
+
   it('rolls back a journal when the expense row does not complete', async () => {
     const deps = createMemoryDeps(Date.UTC(2026, 7, 23))
     const failure = new Error('expense insert failed')
@@ -39,7 +69,7 @@ describe('in-memory financial unit of work', () => {
       deps.financialUnitOfWork.run({ lockKey: `expense:${EXPENSE}`, actorId: USER }, async (tx) => {
         const [entry] = await tx.ledger.post(
           BRANCH,
-          [expensePosting(`general:${BRANCH}`, minor(25_000n), EXPENSE)],
+          [expensePosting('office_cash', `general:${BRANCH}`, minor(25_000n), EXPENSE)],
           meta,
         )
         await tx.expenses.create({ ...record(), journalEntryId: entry!.id })
@@ -57,7 +87,7 @@ describe('in-memory financial unit of work', () => {
     await deps.financialUnitOfWork.run({ lockKey: `expense:${EXPENSE}`, actorId: USER }, async (tx) => {
       const [entry] = await tx.ledger.post(
         BRANCH,
-        [expensePosting(`general:${BRANCH}`, minor(25_000n), EXPENSE)],
+        [expensePosting('office_cash', `general:${BRANCH}`, minor(25_000n), EXPENSE)],
         meta,
       )
       await tx.expenses.create({ ...record(), journalEntryId: entry!.id })
@@ -92,6 +122,7 @@ describe('in-memory financial unit of work', () => {
           netToCompany: minor(0n),
           reason: 'daily restoration',
           performedBy: USER,
+          runNo: 1,
         })
         throw failure
       }),

@@ -72,13 +72,70 @@ export function guardPhysicalSettlementConfirmations(
 
 /** One local timing draft is enough to keep the financial close button unavailable. */
 export function closeWorkspaceApprovalReady(input: CloseWorkspaceApprovalGateInput): boolean {
-  return (
-    input.settlementReady &&
-    input.unresolvedOperationCount === 0 &&
-    input.managerBatteryReadingCount === 0 &&
-    input.pendingTimingDraftCount === 0 &&
-    !input.refreshing
-  )
+  return approvalBlockerCodes(input).length === 0
+}
+
+export type ApprovalBlockerCode =
+  | 'recalculating'
+  | 'settlement_unavailable'
+  | 'settlement_amounts_pending'
+  | 'confirm_before_approval'
+  | 'unresolved_operations'
+  | 'unsaved_timing_draft'
+  | 'manager_battery_required'
+  | 'force_reason_required'
+
+export interface ApprovalBlockerInput extends CloseWorkspaceApprovalGateInput {
+  /** Split out of `settlementReady` so each half can name itself. */
+  settlementLoaded?: boolean
+  deferralMatches?: boolean
+  confirmationsComplete?: boolean
+  forcePrepared?: boolean
+  forceReason?: string
+}
+
+/**
+ * WHY the close button is dead — every reason, by code, in reading order.
+ *
+ * `closeWorkspaceApprovalReady` is defined AS "this list is empty", so the button and its
+ * explanation cannot disagree. That is not tidiness: two of the five gate terms —
+ * `deferralMatchesSettlement` and the settlement-hash shape — used to disable the button while
+ * contributing nothing to the displayed list, and a manager reading a dead button with no reason
+ * concludes the console is broken and goes looking for a way around the gate.
+ *
+ * The caller resolves each code through `t.close.blocker.*`; the domain emits codes, the UI
+ * resolves them.
+ */
+export function approvalBlockerCodes(input: ApprovalBlockerInput): ApprovalBlockerCode[] {
+  const codes: ApprovalBlockerCode[] = []
+  if (input.refreshing) codes.push('recalculating')
+  else if (input.settlementLoaded === false) codes.push('settlement_unavailable')
+
+  if (!input.settlementReady && input.settlementLoaded !== false && !input.refreshing) {
+    // The statement loaded, so say which half of "ready" is missing rather than one vague line.
+    if (input.deferralMatches === false) codes.push('settlement_amounts_pending')
+    if (input.confirmationsComplete === false) codes.push('confirm_before_approval')
+    if (input.deferralMatches !== false && input.confirmationsComplete !== false) {
+      // Neither half explains it: the hash is malformed, which is a server or transport fault the
+      // manager cannot fix by typing. Name it as an unavailable statement rather than stay silent.
+      codes.push('settlement_unavailable')
+    }
+  }
+
+  if (input.unresolvedOperationCount > 0) codes.push('unresolved_operations')
+  if (input.pendingTimingDraftCount > 0) codes.push('unsaved_timing_draft')
+  if (input.managerBatteryReadingCount > 0) codes.push('manager_battery_required')
+  /*
+   * `hasVisibleText`, not `.trim()`. An exceptional close is the one path where the reason is
+   * MANDATORY, and `'‏'.trim()` is truthy — an RTL mark pasted along with Arabic used to pass
+   * as an audit trail. The server already refuses it (`normalizedSettlementReason` tests
+   * `\p{White_Space}|\p{Cf}`); this makes the button agree with the server instead of letting the
+   * manager write something the ledger will not keep.
+   */
+  if (input.forcePrepared === true && !hasVisibleText(input.forceReason ?? '')) {
+    codes.push('force_reason_required')
+  }
+  return codes
 }
 
 export type TimingRevisionDecision = 'preserve' | 'include' | 'duplicate'
@@ -216,4 +273,66 @@ export function countAwaitingCloseBatteryReadings(
   endReadings: readonly CloseBatteryReadingInput[],
 ): number {
   return endReadings.filter((reading) => reading.unavailable === true && reading.percent === null).length
+}
+
+/** One stored screenshot of the end package, as the review screen receives it. */
+export interface EvidencePageInput {
+  slot: string
+  mediaId: string
+}
+
+export interface RowEvidenceOriginInput {
+  /** The page the reader actually read this row from, when the snapshot could resolve one. */
+  evidenceSlot?: string | null | undefined
+  evidenceMediaId?: string | null | undefined
+  /** Whether the row came from a screenshot at all — a hand-typed row must never borrow a page. */
+  hasScanOrigin: boolean
+}
+
+/**
+ * Which stored page to put in front of the manager for one money row.
+ *
+ * Preference order, and each step is a different fact:
+ *
+ * 1. `evidenceMediaId` — the exact bytes the reader read. Authoritative.
+ * 2. `evidenceSlot` — the page currently in that slot. A RETAKE rotates the attachment token and
+ *    stores new bytes, so the id from the read no longer names anything on the screen; the slot
+ *    still names the right page, and the retaken photo is the one the manager wants to look at.
+ * 3. The only page there is, but ONLY for a row that came from a screenshot. This covers rows read
+ *    before the snapshot carried the link, and it is unambiguous exactly because there is nothing
+ *    else it could have been.
+ *
+ * A hand-typed row falls through to `null`, and so does a row on a multi-page shift with no link:
+ * showing a manager the wrong screenshot is worse than showing him none, because he believes it.
+ */
+export function rowEvidencePage<Page extends EvidencePageInput>(
+  pages: readonly Page[],
+  row: RowEvidenceOriginInput,
+): Page | null {
+  if (row.evidenceMediaId) {
+    const exact = pages.find((page) => page.mediaId === row.evidenceMediaId)
+    if (exact) return exact
+  }
+  if (row.evidenceSlot) {
+    const retaken = pages.find((page) => page.slot === row.evidenceSlot)
+    if (retaken) return retaken
+  }
+  if (row.hasScanOrigin && pages.length === 1) return pages[0]!
+  return null
+}
+
+/**
+ * The page a re-read should target, chosen rather than asked for.
+ *
+ * Nothing today stops a manager on a two-page shift from re-reading the page the row did not come
+ * from — the `<Select>` starts empty and both options look alike. When the row names its own page,
+ * select it. Otherwise keep the old behaviour exactly: one page selects itself, several ask.
+ */
+export function defaultRereadSlot(
+  pages: readonly EvidencePageInput[],
+  row: RowEvidenceOriginInput,
+): string {
+  const resolved = rowEvidencePage(pages, row)
+  if (resolved) return resolved.slot
+  return pages.length === 1 ? pages[0]!.slot : ''
 }

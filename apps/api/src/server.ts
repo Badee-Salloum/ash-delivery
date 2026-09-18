@@ -22,6 +22,7 @@ async function main(): Promise<void> {
     logger: true,
     splitGate: config.BR1_SPLIT_GATE,
     maxOcrReadsPerShift: config.OCR_MAX_READS_PER_SHIFT,
+    driverSelfRegistrationEnabled: config.DRIVER_SELF_REGISTRATION_ENABLED,
   })
 
   const shutdown = async (signal: string): Promise<void> => {

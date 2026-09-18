@@ -55,6 +55,7 @@ jobs:
       - name: RTL & i18n checks
         run: |
           pnpm check:css
+          pnpm check:tokens
           pnpm check:i18n
 
       # Both front-ends must build. Catches a broken JSX/Tailwind/PWA config at PR time rather

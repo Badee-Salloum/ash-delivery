@@ -21,6 +21,8 @@ import type {
   DirectoryRepo,
   DocumentRecord,
   DriverRecord,
+  DriverAccountProvisionInput,
+  DriverAccountProvisioningRepo,
   FxRepo,
   FinancialTransactionDeps,
   FinancialUnitOfWork,
@@ -35,6 +37,8 @@ import type {
   RoleGrantRecord,
   SessionRecord,
   SessionRepo,
+  OperationRemovalRecord,
+  OperationRemovalRepo,
   ShiftDecisionRecord,
   ShiftDecisionRepo,
   ShiftCloseTransactionDeps,
@@ -66,6 +70,8 @@ import type {
   WeekLockRecord,
   WeekLockRepo,
 } from '@ash/contracts'
+// P2 — the timing-only shift read.
+import type { ShiftTimingRecord } from '@ash/contracts'
 import {
   FIXED_CASH_SETTLEMENT_POLICY,
   FIXED_CASH_SETTLEMENT_POLICY_V1,
@@ -74,25 +80,52 @@ import {
   includedByOperationWindow,
   normalizeUsername,
 } from '@ash/contracts'
-import { type CalendarDate, type FxDay, type Minor, type Posting, hasVisibleText, isAwaitingDecision, isLive, minor } from '@ash/domain'
+import {
+  type CalendarDate,
+  type Currency,
+  type FundRef,
+  type FxDay,
+  type Minor,
+  type Posting,
+  currencyOf,
+  fundCode,
+  hasVisibleText,
+  isAwaitingDecision,
+  isLive,
+  minor,
+  postingBalanceProblem,
+} from '@ash/domain'
 import { memoryCipher } from '../crypto.ts'
 import { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 import { MemoryOcrReadRepo, MemoryOcrReader } from '../ocr/memory.ts'
-import { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
+import { MemoryExpenseRepo, MemoryRecurringExpenseRepo, MemorySettingsRepo } from './expenses.ts'
+import { MemoryAdvanceRepo, fundCodeForAdvance } from './advances.ts'
+import { MemoryIncomeRepo } from './incomes.ts'
 import { MemoryCashCountRepo } from './cashcount.ts'
+import { MemoryCheckInRepo } from './checkin.ts'
 import { MemoryOfficeCapitalTargetRepo, MemoryRestorationRepo } from './restoration.ts'
 import { MemoryNotificationRepo, MemoryTierRepo } from './tiers.ts'
 import { MemoryCloseDraftRepo } from './close-draft.ts'
 import { MemoryReceivableEventRepo } from './receivables.ts'
+// P2 — the range read model behind the time filter.
+import { MemoryLedgerRangeSource } from './ledger-range.ts'
+import { MemoryCompanyLedgerRepo, MemoryCompanyLedgerSource, MemoryFinancialLocks } from './company.ts'
+import { MemoryCompanyFinanceRepo } from './company-finance.ts'
 
 export { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 export { MemoryOcrReadRepo, MemoryOcrReader, ScriptedOcrReader } from '../ocr/memory.ts'
-export { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
+export { MemoryExpenseRepo, MemoryRecurringExpenseRepo, MemorySettingsRepo } from './expenses.ts'
+export { MemoryAdvanceRepo, fundCodeForAdvance } from './advances.ts'
+export { MemoryIncomeRepo } from './incomes.ts'
 export { MemoryCashCountRepo } from './cashcount.ts'
 export { MemoryOfficeCapitalTargetRepo, MemoryRestorationRepo } from './restoration.ts'
 export { MemoryNotificationRepo, MemoryTierRepo } from './tiers.ts'
 export { MemoryCloseDraftRepo } from './close-draft.ts'
 export { MemoryReceivableEventRepo } from './receivables.ts'
+// P2 — the range read model behind the time filter.
+export { MemoryLedgerRangeSource } from './ledger-range.ts'
+export { MemoryCompanyLedgerRepo, MemoryCompanyLedgerSource, MemoryFinancialLocks } from './company.ts'
+export { MemoryCompanyFinanceRepo } from './company-finance.ts'
 
 /**
  * In-memory implementations of every port.
@@ -110,16 +143,21 @@ export class FixedClock implements Clock {
   // cannot erase those, and this code is executed as source in development.
   private ms: number
   private readonly offset: number
-  constructor(ms: number, offset = 180) {
-    // Asia/Damascus, UTC+3 year-round since Oct 2022
+  private readonly dayStart: number
+  constructor(ms: number, offset = 180, dayStart = 240) {
+    // Asia/Damascus, UTC+3 year-round since Oct 2022; the business day rolls at 04:00.
     this.ms = ms
     this.offset = offset
+    this.dayStart = dayStart
   }
   nowMs(): number {
     return this.ms
   }
   offsetMinutes(): number {
     return this.offset
+  }
+  dayStartMinutes(): number {
+    return this.dayStart
   }
   advance(ms: number): void {
     this.ms += ms
@@ -192,7 +230,7 @@ export class MemoryUserRepo implements UserRepo {
 }
 
 export class MemorySessionRepo implements SessionRepo {
-  private readonly rows = new Map<string, SessionRecord>()
+  readonly rows = new Map<string, SessionRecord>()
   async create(session: SessionRecord): Promise<void> {
     this.rows.set(session.id, { ...session })
   }
@@ -208,6 +246,79 @@ export class MemorySessionRepo implements SessionRepo {
     for (const [id, s] of this.rows) {
       if (s.userId === userId) this.rows.set(id, { ...s, revokedAtMs: atMs })
     }
+  }
+}
+
+export class MemoryDriverAccountProvisioningRepo implements DriverAccountProvisioningRepo {
+  private readonly attempts = new Map<string, number[]>()
+  private readonly users: MemoryUserRepo
+  private readonly sessions: MemorySessionRepo
+  private readonly directory: MemoryDirectoryRepo
+  private readonly audit: MemoryAuditRepo
+
+  constructor(
+    users: MemoryUserRepo,
+    sessions: MemorySessionRepo,
+    directory: MemoryDirectoryRepo,
+    audit: MemoryAuditRepo,
+  ) {
+    this.users = users
+    this.sessions = sessions
+    this.directory = directory
+    this.audit = audit
+  }
+
+  async claimRegistrationAttempt(input: {
+    addressHash: string
+    attemptedAtMs: number
+    limit: number
+    windowMs: number
+  }) {
+    const retentionStart = input.attemptedAtMs - 24 * 60 * 60 * 1000
+    const retained = (this.attempts.get(input.addressHash) ?? []).filter((at) => at >= retentionStart)
+    const active = retained.filter((at) => at > input.attemptedAtMs - input.windowMs)
+    this.attempts.set(input.addressHash, retained)
+    if (active.length >= input.limit) {
+      return {
+        allowed: false as const,
+        retryAfterSeconds: Math.max(1, Math.ceil((active[0]! + input.windowMs - input.attemptedAtMs) / 1000)),
+      }
+    }
+    retained.push(input.attemptedAtMs)
+    return { allowed: true as const }
+  }
+
+  async provision(input: DriverAccountProvisionInput): Promise<void> {
+    // Validate every memory invariant before changing any collection; after this point all writes
+    // are infallible, which gives the fake the same all-or-nothing observable behavior as Postgres.
+    if (await this.users.findByUsername(input.user.username)) {
+      throw Object.assign(new Error(`duplicate username ${input.user.username}`), { code: 'DUPLICATE_USERNAME' })
+    }
+    if ([...this.directory.drivers.values()].some((driver) => driver.code === input.driver.code)) {
+      throw Object.assign(new Error(`duplicate driver code ${input.driver.code}`), { code: 'DUPLICATE_CODE' })
+    }
+    // PgUserRepo derives driverId through its LEFT JOIN; keep the memory read model identical.
+    this.users.rows.set(input.user.id, { ...input.user, driverId: input.driver.id })
+    this.directory.drivers.set(input.driver.id, { ...input.driver })
+    if (input.session) this.sessions.rows.set(input.session.id, { ...input.session })
+    await this.audit.append({
+      tableName: 'driver_registrations',
+      recordId: input.driver.id,
+      action: 'INSERT',
+      actorId: input.audit.actorId,
+      actorKind: input.audit.actorKind,
+      branchId: input.driver.branchId,
+      requestId: input.audit.requestId,
+      before: null,
+      after: {
+        userId: input.user.id,
+        driverId: input.driver.id,
+        branchId: input.driver.branchId,
+        roleKey: 'driver',
+        sessionCreated: input.session !== null,
+      },
+      occurredAtMs: input.audit.occurredAtMs,
+    })
   }
 }
 
@@ -280,6 +391,16 @@ export class MemoryShiftRepo implements ShiftRepo {
   async listByBranchAndDateRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftRecord[]> {
     return [...this.rows.values()].filter((s) => s.branchId === branchId && s.businessDate >= from && s.businessDate <= to)
   }
+  async listByVehicle(branchId: string, vehicleId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftRecord[]> {
+    return [...this.rows.values()]
+      .filter((s) => s.branchId === branchId && s.vehicleId === vehicleId && s.businessDate >= from && s.businessDate <= to)
+      .sort((a, b) =>
+        (a.businessDate < b.businessDate ? -1 : a.businessDate > b.businessDate ? 1 : 0) ||
+        a.shiftNo - b.shiftNo ||
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+      )
+      .map((s) => structuredClone(s))
+  }
   async listApprovedForDriverOnDate(driverId: string, businessDate: CalendarDate): Promise<ShiftRecord[]> {
     return [...this.rows.values()].filter(
       (s) => s.driverId === driverId && s.businessDate === businessDate && (s.state === 'approved' || s.state === 'week_locked'),
@@ -294,6 +415,30 @@ export class MemoryShiftRepo implements ShiftRepo {
   }
   async delete(id: string, _actorId: string | null): Promise<void> {
     this.rows.delete(id)
+  }
+
+  // P2 — timing-only read for the shifts summary; same ordering as the PostgreSQL query.
+  async listTimingBetween(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftTimingRecord[]> {
+    return [...this.rows.values()]
+      .filter((s) => s.branchId === branchId && s.businessDate >= from && s.businessDate <= to)
+      .sort((a, b) =>
+        (a.businessDate < b.businessDate ? -1 : a.businessDate > b.businessDate ? 1 : 0) ||
+        a.shiftNo - b.shiftNo ||
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+      )
+      .map((s) => ({
+        id: s.id,
+        branchId: s.branchId,
+        driverId: s.driverId,
+        vehicleId: s.vehicleId,
+        shiftNo: s.shiftNo,
+        businessDate: s.businessDate,
+        state: s.state,
+        windowOpensAt: s.windowOpensAt ?? s.openApprovedAt,
+        submittedAt: s.submittedAt,
+        odoStart: s.odoStart,
+        odoEnd: s.odoEnd,
+      }))
   }
 }
 
@@ -316,6 +461,13 @@ export class MemoryBatteryReadingRepo implements BatteryReadingRepo {
     return [...this.rows.values()]
       .filter((r) => r.shiftId === shiftId)
       .sort((a, b) => a.package.localeCompare(b.package) || a.slotNo - b.slotNo)
+      .map((r) => ({ ...r }))
+  }
+  async listByShiftIds(shiftIds: readonly string[]): Promise<BatteryReadingRecord[]> {
+    const wanted = new Set(shiftIds)
+    return [...this.rows.values()]
+      .filter((r) => wanted.has(r.shiftId))
+      .sort((a, b) => a.shiftId.localeCompare(b.shiftId) || a.package.localeCompare(b.package) || a.slotNo - b.slotNo)
       .map((r) => ({ ...r }))
   }
   async existsForBattery(batteryId: string): Promise<boolean> {
@@ -356,6 +508,13 @@ export class MemoryBatterySwapRepo implements BatterySwapRepo {
     return this.rows
       .filter((r) => r.shiftId === shiftId)
       .sort((a, b) => a.seqNo - b.seqNo)
+      .map((r) => ({ ...r }))
+  }
+  async listByShiftIds(shiftIds: readonly string[]): Promise<BatterySwapRecord[]> {
+    const wanted = new Set(shiftIds)
+    return this.rows
+      .filter((r) => wanted.has(r.shiftId))
+      .sort((a, b) => a.shiftId.localeCompare(b.shiftId) || a.seqNo - b.seqNo)
       .map((r) => ({ ...r }))
   }
 
@@ -479,7 +638,15 @@ export class MemoryOrderRepo implements OrderRepo {
         })
       }
     }
-    this.rows.set(order.id, { ...order })
+    // Normalised the way a Postgres SELECT normalises: the columns exist, so the record has the
+    // keys. Without this a row read straight after `create` is a different SHAPE from the same row
+    // read after any `update`, and `toEqual` in a test starts depending on which happened.
+    this.rows.set(order.id, {
+      removedAt: null,
+      removedBy: null,
+      removalReason: null,
+      ...order,
+    })
   }
   /** Identity is never changed — only what a human may correct. Mirrors `PgOrderRepo.update`. */
   async update(order: ShiftOrderRecord, _actorId: string | null): Promise<void> {
@@ -506,6 +673,9 @@ export class MemoryOrderRepo implements OrderRepo {
       observationId: order.observationId ?? null,
       closeDraftClientKey: order.closeDraftClientKey ?? null,
       closeDraftReviewReasons: [...(order.closeDraftReviewReasons ?? [])],
+      removedAt: order.removedAt ?? null,
+      removedBy: order.removedBy ?? null,
+      removalReason: order.removalReason ?? null,
     })
   }
   async replacePoints(orderId: string, points: readonly OrderPointRecord[], _actorId: string | null): Promise<void> {
@@ -541,7 +711,7 @@ export class MemoryCashDeductionRepo implements CashDeductionRepo {
         })
       }
     }
-    this.rows.set(deduction.id, { ...deduction })
+    this.rows.set(deduction.id, { removedAt: null, removedBy: null, removalReason: null, ...deduction })
   }
 
   async update(deduction: CashDeductionRecord, _actorId: string | null): Promise<void> {
@@ -702,7 +872,9 @@ export class MemoryOperationWindowRepo implements OperationWindowRepo {
       classifyOperationWindow({
         occurredDate,
         occurredMinute,
-        openApprovedAt: shift.openApprovedAt,
+        // Same fallback as `operationWindowContext`: a pre-0054 shift keeps today's behaviour
+        // rather than classifying every row `unknown`.
+        windowOpensAt: shift.windowOpensAt ?? shift.openApprovedAt,
         submittedAt: shift.submittedAt,
         ...(branch?.timezone ? { timeZone: branch.timezone } : {}),
         offsetMinutes: this.clock.offsetMinutes(),
@@ -1100,20 +1272,58 @@ export class MemoryLedgerRepo implements LedgerRepo {
    * never be wrong in.
    */
   private readonly seen = new Set<string>()
+  /**
+   * `funds.currency`, keyed `<branchId>|<code>` — the fake's copy of the fund rows `ensureFund`
+   * creates, so a code seen under two currencies is refused here exactly as PostgreSQL refuses it.
+   */
+  private readonly fundCurrencies = new Map<string, Currency>()
 
-  snapshotState(): { entries: JournalEntryRecord[]; seen: Set<string>; nextId: number } {
+  snapshotState(): {
+    entries: JournalEntryRecord[]
+    seen: Set<string>
+    nextId: number
+    fundCurrencies: Map<string, Currency>
+  } {
     return {
       entries: structuredClone(this.entries),
       seen: new Set(this.seen),
       nextId: this.nextId,
+      fundCurrencies: new Map(this.fundCurrencies),
     }
   }
 
-  restoreState(state: { entries: JournalEntryRecord[]; seen: Set<string>; nextId: number }): void {
+  restoreState(state: {
+    entries: JournalEntryRecord[]
+    seen: Set<string>
+    nextId: number
+    fundCurrencies: Map<string, Currency>
+  }): void {
     this.entries.splice(0, this.entries.length, ...structuredClone(state.entries))
     this.seen.clear()
     for (const key of state.seen) this.seen.add(key)
     this.nextId = state.nextId
+    this.fundCurrencies.clear()
+    for (const [key, currency] of state.fundCurrencies) this.fundCurrencies.set(key, currency)
+  }
+
+  /** The memory twin of `ensureFund`'s currency rule: refuse before anything is written. */
+  private assertFundCurrencies(branchId: string, posting: Posting): void {
+    for (const line of posting.lines) {
+      const code = fundCode(line.fund)
+      const currency = currencyOf(line.fund)
+      const stored = this.fundCurrencies.get(`${branchId}|${code}`)
+      if (stored !== undefined && stored !== currency) {
+        throw Object.assign(
+          new Error(`fund_currency_mismatch: fund ${code} is stored in ${stored}, the posting expects ${currency}`),
+          { code: 'fund_currency_mismatch' },
+        )
+      }
+    }
+  }
+
+  /** Test seam: a fund row as a hand-written SQL insert could have left it. */
+  setFundCurrency(branchId: string, code: string, currency: Currency): void {
+    this.fundCurrencies.set(`${branchId}|${code}`, currency)
   }
 
   async post(
@@ -1123,18 +1333,17 @@ export class MemoryLedgerRepo implements LedgerRepo {
   ): Promise<JournalEntryRecord[]> {
     const written: JournalEntryRecord[] = []
     for (const posting of postings) {
-      // Balance, exactly as the deferred constraint trigger does at COMMIT.
-      let d = 0n
-      let c = 0n
-      for (const l of posting.lines) {
-        if (l.side === 'D') d += l.amount
-        else c += l.amount
-      }
-      if (d !== c) throw new Error(`unbalanced posting ${posting.eventType}: D ${d} <> C ${c}`)
+      // Balance, exactly as the deferred constraint trigger does at COMMIT: per currency, two
+      // currencies only for an exchange, and a USD line exactly when a rate is frozen (0066).
+      assertMemoryPostingBalances(posting, meta.sypMinorPerUsd)
 
       const key = `${branchId}|${posting.eventType}|${meta.shiftId ?? ''}|${posting.occurrenceKey}`
       if (this.seen.has(key)) continue // idempotent replay: write nothing
+      this.assertFundCurrencies(branchId, posting)
       this.seen.add(key)
+      for (const line of posting.lines) {
+        this.fundCurrencies.set(`${branchId}|${fundCode(line.fund)}`, currencyOf(line.fund))
+      }
 
       const entry: JournalEntryRecord = {
         id: this.nextId++,
@@ -1146,13 +1355,15 @@ export class MemoryLedgerRepo implements LedgerRepo {
         postingDate: meta.postingDate,
         weekStartDate: meta.weekStartDate,
         fxDayId: meta.fxDayId,
+        sypMinorPerUsd: meta.sypMinorPerUsd,
         weekLockId: null,
         reason: meta.reason ?? null,
         createdBy: meta.createdBy,
         lines: posting.lines.map((l) => ({
-          fundCode: fundCodeOf(l.fund),
+          fundCode: fundCode(l.fund),
           side: l.side,
           amount: l.amount,
+          currency: currencyOf(l.fund),
           ...(l.role === undefined ? {} : { role: l.role }),
         })),
       }
@@ -1167,6 +1378,21 @@ export class MemoryLedgerRepo implements LedgerRepo {
   }
   async listByWeek(branchId: string, weekStartDate: CalendarDate): Promise<JournalEntryRecord[]> {
     return this.entries.filter((e) => e.branchId === branchId && e.weekStartDate === weekStartDate)
+  }
+  async findStandaloneEntry(
+    branchId: string,
+    eventType: JournalEntryRecord['eventType'],
+    occurrenceKey: string,
+  ): Promise<JournalEntryRecord | null> {
+    return (
+      this.entries.find(
+        (e) =>
+          e.branchId === branchId &&
+          e.eventType === eventType &&
+          e.shiftId === null &&
+          e.occurrenceKey === occurrenceKey,
+      ) ?? null
+    )
   }
   async fundBalance(branchId: string, fundCode: string): Promise<Minor> {
     let total = 0n
@@ -1240,13 +1466,17 @@ export class MemoryTreasuryPositionSource implements TreasuryPositionSource {
       }
     }
 
+    // Advance funds join the integrity probe: a negative counted asset is corruption whichever
+    // kind it is, and naming the exact fund is what makes it actionable.
     const receivableCodes = [...balances.keys()]
       .filter(
         (code) =>
           code.startsWith('driver_receivable_cash:') ||
           code.startsWith('driver_receivable_wallet:') ||
           code.startsWith('driver_shift_funding_cash:') ||
-          code.startsWith('driver_shift_funding_wallet:'),
+          code.startsWith('driver_shift_funding_wallet:') ||
+          code.startsWith('advance_receivable_cash:') ||
+          code.startsWith('advance_receivable_wallet:'),
       )
       .sort()
     const totalForPrefixes = (prefixes: readonly string[]): bigint =>
@@ -1264,6 +1494,8 @@ export class MemoryTreasuryPositionSource implements TreasuryPositionSource {
       officeWallet: minor(balances.get('office_wallet') ?? 0n),
       receivablesCash: minor(totalForPrefixes(['driver_receivable_cash:', 'driver_shift_funding_cash:'])),
       receivablesWallet: minor(totalForPrefixes(['driver_receivable_wallet:', 'driver_shift_funding_wallet:'])),
+      advancesCash: minor(totalForPrefixes(['advance_receivable_cash:'])),
+      advancesWallet: minor(totalForPrefixes(['advance_receivable_wallet:'])),
       activeCustodyCash: minor(totalActiveCustody('cash')),
       activeCustodyWallet: minor(totalActiveCustody('wallet')),
       activeShiftCount: activeShifts.length,
@@ -1273,22 +1505,35 @@ export class MemoryTreasuryPositionSource implements TreasuryPositionSource {
   }
 }
 
-/** Stable fund identity, mirroring `funds.code` in the schema. */
-export function fundCodeOf(fund: Posting['lines'][number]['fund']): string {
-  switch (fund.kind) {
-    case 'driver_cash':
-    case 'driver_wallet':
-    case 'driver_share_payable':
-    // Same rule as the Pg repo and the domain: a ذمة is per driver, so it carries his id.
-    case 'driver_receivable_cash':
-    case 'driver_receivable_wallet':
-    case 'driver_shift_funding_cash':
-    case 'driver_shift_funding_wallet':
-      return `${fund.kind}:${fund.driverId}`
-    case 'cost_center':
-      return `cost_center:${fund.costCenterId}`
-    default:
-      return fund.kind
+/**
+ * Stable fund identity, mirroring `funds.code` in the schema — the domain's `fundCode` under its
+ * historical name. This used to be the third copy of the switch; now there is one.
+ */
+export const fundCodeOf: (fund: FundRef) => string = fundCode
+
+/** The memory copy of `packages/db`'s `assertPostingBalances` — same rules, same messages. */
+function assertMemoryPostingBalances(posting: Posting, sypMinorPerUsd: bigint | null): void {
+  const problem = postingBalanceProblem(posting)
+  if (problem?.kind === 'unbalanced') {
+    throw new Error(
+      `unbalanced posting ${posting.eventType}: D ${problem.debits} <> C ${problem.credits}` +
+        (problem.currency === 'SYP_NEW' ? '' : ` in ${problem.currency}`),
+    )
+  }
+  if (problem?.kind === 'mixed_currency') {
+    throw new Error(
+      `posting ${posting.eventType} spans ${problem.currencies.join(' + ')}; only company_fx_exchange (or its company_correction reversal) may span two currencies`,
+    )
+  }
+  const hasUsd = posting.lines.some((line) => currencyOf(line.fund) === 'USD')
+  if (hasUsd && sypMinorPerUsd === null) {
+    throw new Error(`posting ${posting.eventType} has a USD line but no frozen syp_minor_per_usd`)
+  }
+  if (!hasUsd && sypMinorPerUsd !== null) {
+    throw new Error(`posting ${posting.eventType} freezes a USD rate but has no USD line`)
+  }
+  if (sypMinorPerUsd !== null && sypMinorPerUsd <= 0n) {
+    throw new Error(`posting ${posting.eventType} freezes a non-positive rate ${sypMinorPerUsd}`)
   }
 }
 
@@ -1377,7 +1622,27 @@ export class MemoryDirectoryRepo implements DirectoryRepo {
     return this.branches.get(id) ?? null
   }
   async listBranches(): Promise<BranchRecord[]> {
-    return [...this.branches.values()].map((b) => ({ ...b }))
+    // Operating branches only — the company (HQ) row is not a branch anyone picks (C1).
+    return [...this.branches.values()].filter((b) => b.kind === 'branch').map((b) => ({ ...b }))
+  }
+  async companyBranch(): Promise<BranchRecord | null> {
+    const company = [...this.branches.values()].find((b) => b.kind === 'company')
+    return company ? { ...company } : null
+  }
+  async setBranchLocation(
+    id: string,
+    location: { lat: number | null; lng: number | null; checkinRadiusM: number },
+  ): Promise<BranchRecord | null> {
+    const found = this.branches.get(id)
+    if (!found) return null
+    // Both or neither, mirroring branches_geo_ck: half a coordinate is a fence centred on the
+    // equator, which would fail every round with no way to see why.
+    const paired = location.lat === null || location.lng === null
+      ? { lat: null, lng: null }
+      : { lat: location.lat, lng: location.lng }
+    const updated: BranchRecord = { ...found, ...paired, checkinRadiusM: location.checkinRadiusM }
+    this.branches.set(id, updated)
+    return { ...updated }
   }
   async driver(id: string): Promise<DriverRecord | null> {
     return this.drivers.get(id) ?? null
@@ -1451,9 +1716,18 @@ export class MemoryDirectoryRepo implements DirectoryRepo {
   }
   async createBranch(branch: BranchRecord): Promise<void> {
     this.assertBranchNumberFree(branch)
+    // Mirrors branches_single_company_uq: one company row.
+    if (branch.kind === 'company' && [...this.branches.values()].some((b) => b.kind === 'company')) {
+      throw Object.assign(new Error('a company branch already exists'), { code: 'DUPLICATE_NUMBER' })
+    }
     this.branches.set(branch.id, { ...branch })
   }
   async updateBranch(branch: BranchRecord): Promise<void> {
+    // Mirrors branches_kind_immutable: the Pg UPDATE never writes `kind`, and the trigger refuses it.
+    const existing = this.branches.get(branch.id)
+    if (existing && existing.kind !== branch.kind) {
+      throw Object.assign(new Error(`branch ${branch.id} cannot change kind`), { code: 'BRANCH_KIND_IMMUTABLE' })
+    }
     this.assertBranchNumberFree(branch)
     this.branches.set(branch.id, { ...branch })
   }
@@ -1643,6 +1917,41 @@ export class MemoryVehicleEventRepo implements VehicleEventRepo {
 }
 
 /** The manager's decision log on a shift (SRS C-7): append-only, read newest-first. */
+/**
+ * The register a manager's removal is written into. Append-only in the database, and here too:
+ * there is deliberately no update or delete to mirror.
+ */
+export class MemoryOperationRemovalRepo implements OperationRemovalRepo {
+  readonly rows: OperationRemovalRecord[] = []
+  private nextId = 1
+
+  snapshotState(): { rows: OperationRemovalRecord[]; nextId: number } {
+    return { rows: structuredClone(this.rows), nextId: this.nextId }
+  }
+
+  restoreState(state: { rows: OperationRemovalRecord[]; nextId: number }): void {
+    this.rows.splice(0, this.rows.length, ...structuredClone(state.rows))
+    this.nextId = state.nextId
+  }
+
+  async append(
+    entry: Omit<OperationRemovalRecord, 'id' | 'actedAtMs'> & { actedAtMs: number },
+  ): Promise<OperationRemovalRecord> {
+    const row: OperationRemovalRecord = { ...entry, id: String(this.nextId++) }
+    this.rows.push(row)
+    return structuredClone(row)
+  }
+
+  async list(filter: { branchId?: string | undefined; limit: number }): Promise<OperationRemovalRecord[]> {
+    return structuredClone(
+      this.rows
+        .filter((row) => filter.branchId === undefined || row.branchId === filter.branchId)
+        .sort((a, b) => b.actedAtMs - a.actedAtMs || Number(b.id) - Number(a.id))
+        .slice(0, filter.limit),
+    )
+  }
+}
+
 export class MemoryShiftDecisionRepo implements ShiftDecisionRepo {
   readonly rows: ShiftDecisionRecord[] = []
   private nextId = 1
@@ -1696,6 +2005,9 @@ function assertSettlement(record: NewShiftSettlementRecord): void {
     record.cashAmount,
     record.cashReceivableDeferred,
     record.walletReceivableDeferred,
+    record.maximumCashShortageReceivable,
+    record.cashShortageReceivable,
+    record.managerCharge,
   ]
   if (nonnegative.some((amount) => amount < 0n)) throw invalidSettlement('settlement magnitudes must be non-negative')
   if (record.fixedDriverShare !== (record.deliveryFeeTotal * 4_000n) / 10_000n) {
@@ -1715,8 +2027,17 @@ function assertSettlement(record: NewShiftSettlementRecord): void {
   }
   const direction = record.variance > 0n ? 'surplus' : record.variance < 0n ? 'shortage' : 'balanced'
   if (record.varianceDirection !== direction) throw invalidSettlement('variance direction disagrees with its sign')
-  if (record.finalEmployeeCash !== record.baseDriverShare + record.variance) {
-    throw invalidSettlement('final employee cash does not include the closing variance')
+  /*
+   * «الحسم» touches the employee's figure and the office's claim, and nothing else.
+   *
+   * `baseDriverShare` deliberately excludes it — he EARNED his share and paid the charge out of
+   * it, which is why the journal credits `other_income` instead of quietly swelling office_cash.
+   * These two identities are the in-memory twin of 0062's
+   * `shift_settlements_manager_charge_claim_ck`; if they ever drift apart, the fake passes a close
+   * that PostgreSQL would refuse.
+   */
+  if (record.finalEmployeeCash !== record.baseDriverShare + record.variance - record.managerCharge) {
+    throw invalidSettlement('final employee cash does not include the closing variance and the manager charge')
   }
   if (record.cashClaimToOffice !== record.actualCash - record.finalEmployeeCash) {
     throw invalidSettlement('cash claim does not equal actual cash less final employee cash')
@@ -1726,7 +2047,11 @@ function assertSettlement(record: NewShiftSettlementRecord): void {
   }
   if (
     record.policyCode === FIXED_CASH_SETTLEMENT_POLICY_V1 &&
-    (record.cashReceivableDeferred !== 0n || record.walletReceivableDeferred !== 0n)
+    (
+      record.cashReceivableDeferred !== 0n ||
+      record.walletReceivableDeferred !== 0n ||
+      record.cashShortageReceivable !== 0n
+    )
   ) {
     throw invalidSettlement('the legacy settlement policy cannot defer a receivable')
   }
@@ -1738,6 +2063,13 @@ function assertSettlement(record: NewShiftSettlementRecord): void {
   ) {
     throw invalidSettlement('settlement deferral exceeds the positive office claim')
   }
+  const maximumCashShortageReceivable = record.finalEmployeeCash < 0n ? -record.finalEmployeeCash : 0n
+  if (record.maximumCashShortageReceivable !== maximumCashShortageReceivable) {
+    throw invalidSettlement('maximum cash shortage receivable does not match final employee cash')
+  }
+  if (record.cashShortageReceivable > maximumCashShortageReceivable) {
+    throw invalidSettlement('cash shortage receivable exceeds the unpaid employee cash')
+  }
   if (record.walletToOffice !== record.walletClaimToOffice - record.walletReceivableDeferred) {
     throw invalidSettlement('wallet movement does not subtract its deferred receivable')
   }
@@ -1746,8 +2078,11 @@ function assertSettlement(record: NewShiftSettlementRecord): void {
   if (record.walletAction !== walletAction || record.walletAmount !== walletAmount) {
     throw invalidSettlement('wallet action does not match the signed wallet transfer')
   }
-  if (record.cashToOffice !== record.cashClaimToOffice - record.cashReceivableDeferred) {
-    throw invalidSettlement('cash movement does not subtract its deferred receivable')
+  if (
+    record.cashToOffice !==
+    record.cashClaimToOffice - record.cashReceivableDeferred - record.cashShortageReceivable
+  ) {
+    throw invalidSettlement('cash movement does not subtract funding and the unpaid shortage receivable')
   }
   const cashAction = record.cashToOffice > 0n ? 'collect' : record.cashToOffice < 0n ? 'pay' : 'none'
   const cashAmount = record.cashToOffice < 0n ? -record.cashToOffice : record.cashToOffice
@@ -1826,13 +2161,38 @@ export class MemoryGpsPingRepo implements GpsPingRepo {
   private nextId = 1
 
   async append(ping: Omit<GpsPingRecord, 'id'>): Promise<void> {
-    this.rows.push({ ...ping, id: this.nextId++ })
+    await this.appendMany([ping])
   }
 
-  async latestPerDriverForBranch(branchId: string): Promise<GpsPingRecord[]> {
+  /**
+   * Mirrors `ON CONFLICT (shift_id, captured_at) DO NOTHING`, deliberately and exactly.
+   *
+   * Every API test runs against this class, so a divergence here is a rule CI proves and production
+   * does not have. The natural key is checked against rows already stored AND against earlier fixes
+   * in the same batch, because one INSERT statement in PostgreSQL behaves that way too.
+   */
+  async appendMany(pings: readonly Omit<GpsPingRecord, 'id'>[]): Promise<{ inserted: number }> {
+    const seen = new Set(this.rows.map((r) => `${r.shiftId}:${r.capturedAtMs}`))
+    let inserted = 0
+    for (const ping of pings) {
+      const key = `${ping.shiftId}:${ping.capturedAtMs}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      this.rows.push({ ...ping, id: this.nextId++ })
+      inserted += 1
+    }
+    return { inserted }
+  }
+
+  async latestForDriversInBranch(
+    branchId: string,
+    driverIds: readonly string[],
+    sinceMs: number,
+  ): Promise<GpsPingRecord[]> {
+    const wanted = new Set(driverIds)
     const latest = new Map<string, GpsPingRecord>()
     for (const r of this.rows) {
-      if (r.branchId !== branchId) continue
+      if (r.branchId !== branchId || !wanted.has(r.driverId) || r.receivedAtMs < sinceMs) continue
       const seen = latest.get(r.driverId)
       // Tie-break on id (insertion order) so a fixed clock still resolves the newest — the Pg repo
       // does the same with `ORDER BY received_at DESC, id DESC`.
@@ -1844,10 +2204,16 @@ export class MemoryGpsPingRepo implements GpsPingRepo {
   }
 
   async listForShift(shiftId: string): Promise<GpsPingRecord[]> {
+    // CAPTURE order, matching `ORDER BY captured_at ASC, id ASC`. Receive order corrupts a
+    // buffered trail: a late batch would sort after fixes it happened before.
     return this.rows
       .filter((r) => r.shiftId === shiftId)
-      .sort((a, b) => a.receivedAtMs - b.receivedAtMs || a.id - b.id)
+      .sort((a, b) => a.capturedAtMs - b.capturedAtMs || a.id - b.id)
       .map((r) => structuredClone(r))
+  }
+
+  async countForShift(shiftId: string): Promise<number> {
+    return this.rows.filter((r) => r.shiftId === shiftId).length
   }
 }
 
@@ -1878,15 +2244,21 @@ export interface MemoryDeps extends Deps {
   blobs: MemoryBlobStore
   ocrReads: MemoryOcrReadRepo
   expenses: MemoryExpenseRepo
+  recurringExpenses: MemoryRecurringExpenseRepo
+  incomes: MemoryIncomeRepo
+  advances: MemoryAdvanceRepo
   receivableEvents: MemoryReceivableEventRepo
   financialUnitOfWork: MemoryFinancialUnitOfWork
   cashCounts: MemoryCashCountRepo
   capitalTargets: MemoryOfficeCapitalTargetRepo
   restorations: MemoryRestorationRepo
+  companyLedger: MemoryCompanyLedgerRepo
+  companyLedgerSource: MemoryCompanyLedgerSource
   tiers: MemoryTierRepo
   notifications: MemoryNotificationRepo
   settings: MemorySettingsRepo
   users: MemoryUserRepo
+  driverAccounts: MemoryDriverAccountProvisioningRepo
   shifts: MemoryShiftRepo
   orders: MemoryOrderRepo
   cashDeductions: MemoryCashDeductionRepo
@@ -1895,6 +2267,8 @@ export interface MemoryDeps extends Deps {
   closeUnitOfWork: MemoryShiftCloseUnitOfWork
   ledger: MemoryLedgerRepo
   treasuryPosition: MemoryTreasuryPositionSource
+  /** P2 — one aggregate over a business-date range. */
+  ledgerRange: MemoryLedgerRangeSource
   fx: MemoryFxRepo
   weekLocks: MemoryWeekLockRepo
   audit: MemoryAuditRepo
@@ -1905,7 +2279,9 @@ export interface MemoryDeps extends Deps {
   batterySwaps: MemoryBatterySwapRepo
   vehicleEvents: MemoryVehicleEventRepo
   attendance: MemoryAttendanceRepo
+  checkIns: MemoryCheckInRepo
   decisions: MemoryShiftDecisionRepo
+  operationRemovals: MemoryOperationRemovalRepo
   settlements: MemoryShiftSettlementRepo
   closeDrafts: MemoryCloseDraftRepo
   gps: MemoryGpsPingRepo
@@ -1915,36 +2291,65 @@ export interface MemoryDeps extends Deps {
 export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
   private readonly deps: FinancialTransactionDeps
   private readonly expenses: MemoryExpenseRepo
+  private readonly recurringExpenses: MemoryRecurringExpenseRepo
+  private readonly incomes: MemoryIncomeRepo
+  private readonly advances: MemoryAdvanceRepo
   private readonly ledger: MemoryLedgerRepo
   private readonly receivableEvents: MemoryReceivableEventRepo
   private readonly capitalTargets: MemoryOfficeCapitalTargetRepo
   private readonly restorations: MemoryRestorationRepo
+  private readonly companyLedger: MemoryCompanyLedgerRepo
+  private readonly companyFinance: MemoryCompanyFinanceRepo
+  /** The locks the LAST unit of work asked for, in order — a test reads the lock order here. */
+  readonly locks = new MemoryFinancialLocks()
   private readonly gate: MemoryTransactionGate
 
   constructor(
     expenses: MemoryExpenseRepo,
+    recurringExpenses: MemoryRecurringExpenseRepo,
+    incomes: MemoryIncomeRepo,
+    advances: MemoryAdvanceRepo,
     ledger: MemoryLedgerRepo,
     receivableEvents: MemoryReceivableEventRepo,
     cashCounts: MemoryCashCountRepo,
     capitalTargets: MemoryOfficeCapitalTargetRepo,
     restorations: MemoryRestorationRepo,
     gate: MemoryTransactionGate,
+    companyLedger: MemoryCompanyLedgerRepo,
+    companyFinance: MemoryCompanyFinanceRepo,
   ) {
     this.expenses = expenses
+    this.recurringExpenses = recurringExpenses
+    this.incomes = incomes
+    this.advances = advances
     this.ledger = ledger
     this.receivableEvents = receivableEvents
     this.capitalTargets = capitalTargets
     this.restorations = restorations
+    this.companyLedger = companyLedger
+    this.companyFinance = companyFinance
     this.gate = gate
-    this.deps = { expenses, ledger, receivableEvents, cashCounts, capitalTargets, restorations }
+    this.deps = {
+      expenses, recurringExpenses, incomes, advances, ledger, receivableEvents, cashCounts, capitalTargets, restorations,
+      companyLedger, locks: this.locks,
+      companyFinance,
+    }
   }
 
   async run<T>(
-    _input: FinancialUnitOfWorkInput,
+    input: FinancialUnitOfWorkInput,
     work: (deps: FinancialTransactionDeps) => Promise<T>,
   ): Promise<T> {
     return this.gate.run(async () => {
+      // The unit of work's own lock comes first, exactly as PgFinancialUnitOfWork takes it.
+      this.locks.taken.length = 0
+      await this.locks.acquire(input.lockKey)
+      const companySnapshot = this.companyLedger.snapshot()
+      const companyFinanceSnapshot = this.companyFinance.snapshot()
       const expenseSnapshot = this.expenses.snapshotRows()
+      const recurringExpenseSnapshot = this.recurringExpenses.snapshotState()
+      const incomeSnapshot = this.incomes.snapshotRows()
+      const advanceSnapshot = this.advances.snapshotRows()
       const ledgerSnapshot = this.ledger.snapshotState()
       const receivableSnapshot = this.receivableEvents.snapshot()
       const capitalTargetSnapshot = this.capitalTargets.snapshotRows()
@@ -1953,10 +2358,15 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
         return await work(this.deps)
       } catch (error) {
         this.expenses.restoreRows(expenseSnapshot)
+        this.recurringExpenses.restoreState(recurringExpenseSnapshot)
+        this.incomes.restoreRows(incomeSnapshot)
+        this.advances.restoreRows(advanceSnapshot)
         this.ledger.restoreState(ledgerSnapshot)
         this.receivableEvents.restore(receivableSnapshot)
         this.capitalTargets.restoreRows(capitalTargetSnapshot)
         this.restorations.restoreRows(restorationSnapshot)
+        this.companyLedger.restore(companySnapshot)
+        this.companyFinance.restore(companyFinanceSnapshot)
         throw error
       }
     })
@@ -2088,6 +2498,10 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   const fx = new MemoryFxRepo()
   const weekLocks = new MemoryWeekLockRepo(ledger)
   const directory = new MemoryDirectoryRepo()
+  const users = new MemoryUserRepo()
+  const sessions = new MemorySessionRepo()
+  const audit = new MemoryAuditRepo()
+  const driverAccounts = new MemoryDriverAccountProvisioningRepo(users, sessions, directory, audit)
   const operationWindows = new MemoryOperationWindowRepo(
     shifts,
     orders,
@@ -2101,26 +2515,55 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   const gate = new MemoryTransactionGate()
   const treasuryPosition = new MemoryTreasuryPositionSource(ledger, shifts, gate)
   const expenses = new MemoryExpenseRepo()
+  const recurringExpenses = new MemoryRecurringExpenseRepo()
+  const incomes = new MemoryIncomeRepo()
+  const advances = new MemoryAdvanceRepo()
+  // What an advance still owes is a LEDGER fact, exactly as it is in Postgres. Reading it from
+  // the fund rather than from the event rows keeps one source of truth, so a divergence between
+  // the two adapters cannot hide behind a second arithmetic that happens to agree.
+  advances.bindLedger((branchId, fundCode) => {
+    let balance = 0n
+    for (const entry of ledger.entries) {
+      if (entry.branchId !== branchId) continue
+      for (const line of entry.lines) {
+        if (line.fundCode !== fundCode) continue
+        balance += line.side === 'D' ? line.amount : -line.amount
+      }
+    }
+    return balance
+  })
   const receivableEvents = new MemoryReceivableEventRepo()
   const cashCounts = new MemoryCashCountRepo()
   const capitalTargets = new MemoryOfficeCapitalTargetRepo()
   const restorations = new MemoryRestorationRepo()
+  // The cutover watermark is max(journal_entries.id), read from the same ledger every repo writes.
+  const companyLedger = new MemoryCompanyLedgerRepo(() =>
+    ledger.entries.reduce((max, entry) => (entry.id > max ? entry.id : max), 0),
+  )
+  const companyFinance = new MemoryCompanyFinanceRepo()
   const assignments = new MemoryAssignmentRepo()
   const preapprovedShiftRules = new MemoryPreapprovedShiftRuleRepo()
   const financialUnitOfWork = new MemoryFinancialUnitOfWork(
     expenses,
+    recurringExpenses,
+    incomes,
+    advances,
     ledger,
     receivableEvents,
     cashCounts,
     capitalTargets,
     restorations,
     gate,
+    companyLedger,
+    companyFinance,
   )
+  const operationRemovals = new MemoryOperationRemovalRepo()
   const transactionDeps: ShiftCloseTransactionDeps = {
     shifts,
     preapprovedShiftRules,
     orders,
     cashDeductions,
+    operationRemovals,
     operationWindows,
     movements,
     ledger,
@@ -2159,8 +2602,9 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     ids: new SeqIdGen(),
     hasher: new PlainHasher(),
     cipher: memoryCipher(),
-    users: new MemoryUserRepo(),
-    sessions: new MemorySessionRepo(),
+    users,
+    sessions,
+    driverAccounts,
     shifts,
     assignments,
     preapprovedShiftRules,
@@ -2174,12 +2618,24 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     movements,
     ledger,
     treasuryPosition,
+    // P2 — reads the live ledger and resolves settlements in one batch.
+    ledgerRange: new MemoryLedgerRangeSource(ledger, settlements),
     expenses,
+    recurringExpenses,
+    incomes,
+    advances,
     receivableEvents,
     financialUnitOfWork,
     cashCounts,
     capitalTargets,
     restorations,
+    companyLedger,
+    companyFinance,
+    companyLedgerSource: new MemoryCompanyLedgerSource(
+      () => ledger.entries,
+      () => directory.listBranches(),
+      companyLedger,
+    ),
     tiers,
     notifications: new MemoryNotificationRepo(),
     settings: new MemorySettingsRepo(),
@@ -2191,11 +2647,13 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     ocrReads: new MemoryOcrReadRepo(),
     fx,
     weekLocks,
-    audit: new MemoryAuditRepo(),
+    audit,
     directory,
     vehicleEvents: new MemoryVehicleEventRepo(),
     attendance: new MemoryAttendanceRepo(),
+    checkIns: new MemoryCheckInRepo(),
     decisions,
+    operationRemovals,
     settlements,
     closeDrafts,
     gps: new MemoryGpsPingRepo(),

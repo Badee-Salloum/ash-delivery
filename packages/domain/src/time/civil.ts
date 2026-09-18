@@ -13,6 +13,21 @@ export type CalendarDate = string
 
 export const DAMASCUS_OFFSET_MINUTES = 180
 
+/**
+ * When one business day gives way to the next, in minutes past branch-local midnight.
+ *
+ * A delivery fleet does not stop at midnight. The owner's day runs 04:00 → 04:00, so a shift
+ * closed at 01:30 belongs to the day it was WORKED, not to the calendar date the clock had just
+ * rolled onto. Booking that close under the next day would split one night's takings across two
+ * business dates — and, on a Saturday night, across two FINANCIAL WEEKS, which is the one place
+ * BR7 makes entries immutable.
+ *
+ * INJECTED AS A VALUE for the same reason as the UTC offset: rows already written under a
+ * different boundary must stay reproducible. `business_date` is a written column, so changing
+ * this never re-buckets stored money — it only decides where NEW entries land.
+ */
+export const DAY_START_MINUTES = 240
+
 const isLeap = (y: number): boolean => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0
 
 /** Days since 1970-01-01. Howard Hinnant's `days_from_civil`, valid for the full proleptic range. */
@@ -69,8 +84,14 @@ export function parseCalendarDate(date: CalendarDate): { y: number; m: number; d
  * is STABLE, not IMMUTABLE, and Postgres refuses it in a generated column. Computing it here
  * and storing it also means a tz-database update can never silently re-bucket historical money.
  */
-export function businessDateFor(epochMs: number, offsetMinutes = DAMASCUS_OFFSET_MINUTES): CalendarDate {
-  const localMs = epochMs + offsetMinutes * 60_000
+export function businessDateFor(
+  epochMs: number,
+  offsetMinutes = DAMASCUS_OFFSET_MINUTES,
+  dayStartMinutes = DAY_START_MINUTES,
+): CalendarDate {
+  // Rolling the clock BACK by the day-start pushes the small hours onto the previous date, which
+  // is the whole rule: 01:30 on the 28th is hour 21.5 of the 27th's working day.
+  const localMs = epochMs + (offsetMinutes - dayStartMinutes) * 60_000
   const { y, m, d } = civilFromDays(Math.floor(localMs / 86_400_000))
   return toCalendarDate(y, m, d)
 }
@@ -110,4 +131,79 @@ export function weekClosedOn(closeDate: CalendarDate): { start: CalendarDate; en
   }
   const start = addDays(closeDate, -7)
   return { start, end: addDays(start, 6) }
+}
+
+// ── Months, spans and validation (P2: the shared time filter) ───────────────────────────────
+//
+// Everything below is calendar arithmetic on business DATES, exactly like `addDays` above: no
+// `Date`, no `Intl`, no zone. A «month» is the calendar month the business date falls in, and the
+// business date already carries the 04:00 day start, so «هذا الشهر» needs no second time rule.
+
+/** `true` when `value` is a real `YYYY-MM-DD` date — the same parser every other helper uses. */
+export function isCalendarDate(value: unknown): value is CalendarDate {
+  if (typeof value !== 'string') return false
+  try {
+    parseCalendarDate(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** How many days month `m` (1–12) of year `y` has. */
+export function daysInMonth(y: number, m: number): number {
+  if (!Number.isInteger(y) || !Number.isInteger(m) || m < 1 || m > 12) {
+    throw new RangeError(`not a month: ${y}-${m}`)
+  }
+  return [31, isLeap(y) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1] ?? 0
+}
+
+/** The first day of the calendar month `date` falls in. */
+export function monthStartFor(date: CalendarDate): CalendarDate {
+  const { y, m } = parseCalendarDate(date)
+  return toCalendarDate(y, m, 1)
+}
+
+/** The last day of the calendar month `date` falls in. */
+export function monthEndFor(date: CalendarDate): CalendarDate {
+  const { y, m } = parseCalendarDate(date)
+  return toCalendarDate(y, m, daysInMonth(y, m))
+}
+
+/**
+ * The same day `n` months later (or earlier, for a negative `n`), CLAMPED to the target month's
+ * last day: 2026-01-31 plus one month is 2026-02-28, never an overflow into March. Clamping is
+ * the only reading under which «the previous month» of the 31st is still the previous month.
+ */
+export function addMonths(date: CalendarDate, n: number): CalendarDate {
+  if (!Number.isInteger(n)) throw new RangeError(`non-integer month delta: ${n}`)
+  const { y, m, d } = parseCalendarDate(date)
+  const index = y * 12 + (m - 1) + n
+  const ty = Math.floor(index / 12)
+  const tm = index - ty * 12 + 1
+  return toCalendarDate(ty, tm, Math.min(d, daysInMonth(ty, tm)))
+}
+
+/** `YYYY-MM` — the month a date belongs to, as a sortable key. */
+export function monthKey(date: CalendarDate): string {
+  // Through the parser, so an impossible date is refused rather than keyed by its first 7 chars.
+  return monthStartFor(date).slice(0, 7)
+}
+
+/**
+ * Signed count of calendar-month boundaries from `a`'s month to `b`'s month: 2026-01-31 → 2026-02-01
+ * is 1, and any two dates in the same month are 0. Days inside the months are ignored on purpose;
+ * a caller that wants «the Nth month, counting the first as 1» adds one.
+ */
+export function monthsBetween(a: CalendarDate, b: CalendarDate): number {
+  const pa = parseCalendarDate(a)
+  const pb = parseCalendarDate(b)
+  return (pb.y * 12 + pb.m) - (pa.y * 12 + pa.m)
+}
+
+/** Signed whole days from `a` to `b`: `addDays(a, daysBetween(a, b)) === b`. */
+export function daysBetween(a: CalendarDate, b: CalendarDate): number {
+  const pa = parseCalendarDate(a)
+  const pb = parseCalendarDate(b)
+  return daysFromCivil(pb.y, pb.m, pb.d) - daysFromCivil(pa.y, pa.m, pa.d)
 }

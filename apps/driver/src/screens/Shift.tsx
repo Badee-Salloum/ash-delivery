@@ -19,6 +19,7 @@ import type {
 } from '@ash/client'
 import {
   allProblems,
+  withoutSupersededRemnants,
   br1DifferencePresentation,
   cashDeductionsAreValid,
   checkOdometer,
@@ -32,12 +33,14 @@ import {
   previewBr1,
   readInCloud,
   reconcileLocalCashDeductions,
+  sanitizeCloseDraftOperationsOverlay,
   resumedOrderWindowState,
   syncRecordedCashDeductions,
   isUsableMoneyText,
   normalizeDecimalDigits,
   odometerFromCloudFields,
   parseNonNegativeInteger,
+  mergeCanonicalManualOperations,
   slotLabel,
   splitSlot,
   uploadEvidencePath,
@@ -51,6 +54,7 @@ import {
 } from '../close-draft-revision.ts'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
+import { syncNativeTracking } from '../native-tracker.ts'
 import { useGpsBeacon } from '../use-gps-beacon.ts'
 import { Button, Card, Field, Money, MoneyInput, Screen, TextInput } from '../ui.tsx'
 import { OperationsList } from './OrderEntry.tsx'
@@ -145,6 +149,10 @@ interface EndDraft {
   /** Revision/hash of the only server draft allowed to materialise at submit. */
   closeDraftRevision: number | null
   closeDraftHash: string | null
+  /** Stale local money disagreed with a newer canonical row; never autosave/submit silently. */
+  closeDraftMergeConflict: boolean
+  /** Latest server snapshot retained until the driver explicitly chooses which values to keep. */
+  closeDraftConflictCanonical: CloseDraftView | null
   closeDraftAttachments: Readonly<Record<string, CloseDraftAttachment>>
   closeDraftRestored: boolean
   /** Last canonical editable payload; debounced persistence compares against this. */
@@ -212,6 +220,8 @@ interface EndDraft {
 const EMPTY_END_DRAFT: EndDraft = {
   closeDraftRevision: null,
   closeDraftHash: null,
+  closeDraftMergeConflict: false,
+  closeDraftConflictCanonical: null,
   closeDraftAttachments: {},
   closeDraftRestored: false,
   persistedCloseDraftFingerprint: null,
@@ -277,7 +287,18 @@ function restoredPageReadState(
 
 /** Apply one canonical close-draft snapshot; no local-only OCR row can enter through this path. */
 function restoreCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
-  const operations = closeDraftOperations(view)
+  const rawOperations = closeDraftOperations(view)
+  const operations = applyCloseDraftOperationsOverlay(
+    rawOperations,
+    sanitizeCloseDraftOperationsOverlay(
+      rawOperations,
+      closeDraftOperationsPatch(
+        rawOperations.orders,
+        rawOperations.cashDeductions,
+        rawOperations.movements,
+      ),
+    ),
+  )
   const canonicalAttachments = Object.fromEntries(
     view.attachments.map((attachment) => [attachment.slot, attachment]),
   )
@@ -299,7 +320,7 @@ function restoreCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
       odometerKm: view.figures.odometerKm,
       odometerAnomalyConfirmed: view.figures.odometerAnomalyConfirmed,
     },
-    ...operations,
+    ...rawOperations,
   })
   const walletOcr = view.figures.walletDeclaredOcr
   const walletHumanEdited =
@@ -403,27 +424,83 @@ export function applyLinkedScalarRead(
 }
 
 /** Rebase local human input over a newer canonical revision without retaining withdrawn OCR rows. */
-export function rebaseCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
+export function rebaseCloseDraft(
+  current: EndDraft,
+  view: CloseDraftView,
+  conservativeHigherRevision = true,
+): EndDraft {
   // Upload, autosave and linked-read requests can finish out of order. A late older response is
   // not a new base: applying it would rewind attachment generations, canonical rows and the CAS
   // revision, after which the next legitimate save conflicts or publishes withdrawn OCR rows.
   if (isStaleCloseDraftView(current.closeDraftRevision, view.revision)) return current
-  const cashDirty = (current.cash.trim() === '' ? null : current.cash) !== current.persistedCashDeclared
-  const walletDirty =
-    (current.wallet.trim() === '' ? null : current.wallet) !== current.persistedWalletDeclared
+  const moneyEqual = (left: string | null, right: string | null): boolean => {
+    if (left === right) return true
+    if (left === null || right === null) return false
+    return isUsableMoneyText(left) && isUsableMoneyText(right) &&
+      closeDraftEditableFingerprint({
+        figures: { cashDeclared: left, walletDeclared: null, odometerKm: null, odometerAnomalyConfirmed: false },
+        orders: [], cashDeductions: [], movements: [],
+      }) === closeDraftEditableFingerprint({
+        figures: { cashDeclared: right, walletDeclared: null, odometerKm: null, odometerAnomalyConfirmed: false },
+        orders: [], cashDeductions: [], movements: [],
+      })
+  }
+  const desiredCash = current.cash.trim() === '' ? null : current.cash
+  const desiredWallet = current.wallet.trim() === '' ? null : current.wallet
+  const cashDirty = !moneyEqual(desiredCash, current.persistedCashDeclared)
+  const walletDirty = !moneyEqual(desiredWallet, current.persistedWalletDeclared)
   const currentOdometer = parseNonNegativeInteger(current.odo)
   const odometerDirty = currentOdometer !== current.persistedOdometerKm
   const odometerConfirmationDirty =
     current.odoConfirmed !== current.persistedOdometerAnomalyConfirmed
+  const scalarConflict =
+    (cashDirty && !moneyEqual(view.figures.cashDeclared, current.persistedCashDeclared) &&
+      !moneyEqual(view.figures.cashDeclared, desiredCash)) ||
+    (walletDirty && !moneyEqual(view.figures.walletDeclared, current.persistedWalletDeclared) &&
+      !moneyEqual(view.figures.walletDeclared, desiredWallet)) ||
+    (odometerDirty && view.figures.odometerKm !== current.persistedOdometerKm &&
+      view.figures.odometerKm !== currentOdometer) ||
+    (odometerConfirmationDirty &&
+      view.figures.odometerAnomalyConfirmed !== current.persistedOdometerAnomalyConfirmed &&
+      view.figures.odometerAnomalyConfirmed !== current.odoConfirmed)
   const restored = restoreCloseDraft(current, view)
-  const operations = applyCloseDraftOperationsOverlay(
-    {
-      orders: restored.orders,
-      cashDeductions: restored.cashDeductions,
-      movements: restored.movements,
-    },
-    closeDraftOperationsPatch(current.orders, current.cashDeductions, current.movements),
+  const canonicalOperations = {
+    orders: restored.orders,
+    cashDeductions: restored.cashDeductions,
+    movements: restored.movements,
+  }
+  const localBaseOperations = {
+    orders: current.orders,
+    cashDeductions: current.cashDeductions,
+    movements: current.movements,
+  }
+  // Before the first close-draft response, `/state` may temporarily show COMMITTED rows using
+  // `already-*` local ids. They are a readable fallback, not a human-authored overlay. Reapplying
+  // them here used to save one evidence-less manual copy beside every canonical OCR row. A real
+  // offline overlay is applied separately by `rebaseStoredCloseDraft` immediately afterwards.
+  const localOverlay = closeDraftOperationsPatch(
+    current.orders,
+    current.cashDeductions,
+    current.movements,
   )
+  const staleMerge = conservativeHigherRevision &&
+    current.closeDraftRevision !== null && view.revision > current.closeDraftRevision
+    ? mergeCanonicalManualOperations(canonicalOperations, localOverlay, localBaseOperations, 'local')
+    : null
+  const acceptsSuccessfulWrite = !conservativeHigherRevision &&
+    current.closeDraftRevision !== null && view.revision > current.closeDraftRevision
+  const operations = current.closeDraftRevision === null || acceptsSuccessfulWrite
+    ? canonicalOperations
+    : applyCloseDraftOperationsOverlay(
+        canonicalOperations,
+        staleMerge !== null
+          ? staleMerge.overlay
+          : localOverlay,
+      )
+  const newConflict = scalarConflict || (staleMerge?.conflicts.length ?? 0) > 0
+  const mergeConflict = acceptsSuccessfulWrite
+    ? false
+    : current.closeDraftMergeConflict || newConflict
   return {
     ...restored,
     cash: cashDirty ? current.cash : restored.cash,
@@ -432,33 +509,111 @@ export function rebaseCloseDraft(current: EndDraft, view: CloseDraftView): EndDr
     odo: odometerDirty ? current.odo : restored.odo,
     odoHumanEdited: odometerDirty ? current.odoHumanEdited : restored.odoHumanEdited,
     odoConfirmed: odometerConfirmationDirty ? current.odoConfirmed : restored.odoConfirmed,
+    closeDraftMergeConflict: mergeConflict,
+    closeDraftConflictCanonical: acceptsSuccessfulWrite
+      ? null
+      : mergeConflict ? view : null,
     ...operations,
   }
 }
 
 /** Overlay locally crash-saved human work only after the canonical rows have been restored. */
-function rebaseStoredCloseDraft(
+export function rebaseStoredCloseDraft(
   current: EndDraft,
   view: CloseDraftView,
   saved: PersistedEndDraft | null,
 ): EndDraft {
   const canonical = rebaseCloseDraft(current, view)
   if (saved === null) return canonical
-  const operations = applyCloseDraftOperationsOverlay(
-    {
-      orders: canonical.orders,
-      cashDeductions: canonical.cashDeductions,
-      movements: canonical.movements,
-    },
-    saved.operations,
-  )
-  const overlaid = restoreEndDraftScalars({ ...canonical, ...operations }, saved)
+  const canonicalOperations = {
+    orders: canonical.orders,
+    cashDeductions: canonical.cashDeductions,
+    movements: canonical.movements,
+  }
+  const sanitized = sanitizeCloseDraftOperationsOverlay(canonicalOperations, saved.operations)
+  const sameBase = saved.baseRevision === view.revision && saved.baseDraftHash === view.draftHash
+  // The three manual arrays are full replacement snapshots. On a newer/unknown base (including
+  // legacy v2), convert them to a server-wins union: preserve canonical keys and append phone-only
+  // keys. Absence is never inferred as deletion; that would require an explicit tombstone.
+  const staleMerge = sameBase
+    ? null
+    : mergeCanonicalManualOperations(canonicalOperations, sanitized, undefined, 'local')
+  const safeOperations = staleMerge?.overlay ?? sanitized
+  const operations = applyCloseDraftOperationsOverlay(canonicalOperations, safeOperations)
+  const overlaid = sameBase
+    ? restoreEndDraftScalars({ ...canonical, ...operations }, saved)
+    : { ...canonical, ...operations }
   return {
     ...overlaid,
+    closeDraftMergeConflict:
+      canonical.closeDraftMergeConflict || (staleMerge?.conflicts.length ?? 0) > 0,
+    closeDraftConflictCanonical:
+      canonical.closeDraftConflictCanonical ??
+      ((staleMerge?.conflicts.length ?? 0) > 0 ? view : null),
     persistedCashDeclared: canonical.persistedCashDeclared,
     persistedWalletDeclared: canonical.persistedWalletDeclared,
     persistedOdometerKm: canonical.persistedOdometerKm,
     persistedOdometerAnomalyConfirmed: canonical.persistedOdometerAnomalyConfirmed,
+  }
+}
+
+export type CloseDraftConflictResolution = 'phone' | 'server'
+
+export type CloseDraftSaveNotice = 'saved' | 'saving' | 'failed' | 'conflict'
+
+/** Keep a restored/concurrent conflict actionable even when no network save failed first. */
+export function closeDraftSaveNotice(
+  draftSaved: boolean,
+  saveFailed: boolean,
+  mergeConflict: boolean,
+): CloseDraftSaveNotice {
+  if (mergeConflict) return 'conflict'
+  if (draftSaved) return 'saved'
+  return saveFailed ? 'failed' : 'saving'
+}
+
+/** A late conflict-refresh response must never cross from one shift into the next. */
+export function ownsCloseDraftRefresh(
+  activeShiftId: string | null,
+  requestedShiftId: string,
+  responseShiftId: string,
+): boolean {
+  return activeShiftId === requestedShiftId && responseShiftId === requestedShiftId
+}
+
+/** Resolve a real concurrent edit only after the driver chooses which values should win. */
+export function resolveCloseDraftMergeConflict(
+  current: EndDraft,
+  resolution: CloseDraftConflictResolution,
+): EndDraft {
+  if (!current.closeDraftMergeConflict) return current
+  if (resolution === 'phone') {
+    return {
+      ...current,
+      closeDraftMergeConflict: false,
+      closeDraftConflictCanonical: null,
+    }
+  }
+  const view = current.closeDraftConflictCanonical
+  if (view === null) return current
+  const canonical = restoreCloseDraft(current, view)
+  const canonicalOperations = {
+    orders: canonical.orders,
+    cashDeductions: canonical.cashDeductions,
+    movements: canonical.movements,
+  }
+  // Keep additions that exist only on this phone, but never replay a same-key value or row edit
+  // after the driver chose the server. The close UI has no delete action, so omission is not one.
+  const safeLocalOnly = mergeCanonicalManualOperations(
+    canonicalOperations,
+    closeDraftOperationsPatch(current.orders, current.cashDeductions, current.movements),
+  ).overlay
+  const operations = applyCloseDraftOperationsOverlay(canonicalOperations, safeLocalOnly)
+  return {
+    ...canonical,
+    ...operations,
+    closeDraftMergeConflict: false,
+    closeDraftConflictCanonical: null,
   }
 }
 
@@ -491,6 +646,15 @@ const withWalletAuthority = (
 })
 
 /** Where a shift already in flight puts the driver back. */
+/**
+ * Server states in which location may be recorded — the client half of the domain's
+ * `TRACKED_STATES`, which the ingest route enforces with a 409.
+ *
+ * `pending_review` IS here: the driver is at the counter handing over the close package, and that
+ * is exactly the presence evidence the close wants.
+ */
+const TRACKED_SHIFT_STATES = new Set(['open', 'suspended', 'pending_review'])
+
 const PHASE_FOR: Record<string, Phase> = {
   draft: 'start',
   awaiting_open_approval: 'awaiting',
@@ -531,6 +695,7 @@ export function ShiftFlow({
   const { api, t } = useApp()
   const toast = useToast()
   const [phase, setPhase] = useState<Phase>(resume ? (PHASE_FOR[resume.state] ?? 'start') : 'start')
+  const [serverState, setServerState] = useState<string | null>(resume?.state ?? null)
   // The fitted set can change mid-shift when the driver swaps a pack, so it lives in state: the
   // swap panel hands back the new fitment and the close screen then reads THAT, not the old pack.
   const [fitted, setFitted] = useState<readonly FittedBattery[]>(batteries)
@@ -603,7 +768,8 @@ export function ShiftFlow({
       shiftId === null ||
       phase === 'done' ||
       hydratedDraftShiftId !== shiftId ||
-      endDraft.closeDraftRevision === null
+      endDraft.closeDraftRevision === null ||
+      endDraft.closeDraftMergeConflict
     ) return
     const storage = localDraftStorage()
     if (!storage) return
@@ -643,6 +809,7 @@ export function ShiftFlow({
       },
       closeDraftOperationsPatch(endDraft.orders, endDraft.cashDeductions, endDraft.movements),
       fingerprint,
+      { revision: endDraft.closeDraftRevision, draftHash: endDraft.closeDraftHash ?? '' },
     )
     if (!stored) setCloseDraftSaveFailed(true)
   }, [
@@ -651,6 +818,7 @@ export function ShiftFlow({
     hydratedDraftShiftId,
     phase,
     endDraft.closeDraftRevision,
+    endDraft.closeDraftMergeConflict,
     endDraft.persistedCloseDraftFingerprint,
     endDraft.persistedCashDeclared,
     endDraft.persistedWalletDeclared,
@@ -673,7 +841,10 @@ export function ShiftFlow({
   const closeDraftSaveCycle = useRef(0)
   /** Persist human edits with bounded retry; conflicts rebase without discarding the local overlay. */
   useEffect(() => {
-    if (phase !== 'end' || shift === null || endDraft.closeDraftRevision === null) return
+    if (
+      phase !== 'end' || shift === null || endDraft.closeDraftRevision === null ||
+      endDraft.closeDraftMergeConflict
+    ) return
     const odometerKm = parseNonNegativeInteger(endDraft.odo)
     const fingerprint = closeDraftEditableFingerprint({
       figures: {
@@ -722,8 +893,20 @@ export function ShiftFlow({
       },
     }).then((result) => {
       if (!active || closeDraftSaveCycle.current !== cycle) return
-      if (result.kind === 'saved' || result.kind === 'conflict') {
+      if (result.kind === 'conflict') {
+        setCloseDraftSaveFailed(true)
+        // A safe disjoint union adopts the latest revision and autosaves normally. A true
+        // same-field conflict remains blocked; a generic transport retry is not permission to
+        // overwrite the other editor's monetary value.
         setEndDraft((current) => rebaseCloseDraft(current, result.value))
+        return
+      }
+      if (result.kind === 'saved') {
+        setEndDraft((current) => ({
+          ...rebaseCloseDraft(current, result.value, false),
+          closeDraftMergeConflict: false,
+          closeDraftConflictCanonical: null,
+        }))
         setCloseDraftSaveFailed(false)
       }
     })
@@ -737,6 +920,7 @@ export function ShiftFlow({
     shift?.id,
     closeDraftSaveRetryKey,
     endDraft.closeDraftRevision,
+    endDraft.closeDraftMergeConflict,
     endDraft.persistedCloseDraftFingerprint,
     endDraft.cash,
     endDraft.wallet,
@@ -763,8 +947,46 @@ export function ShiftFlow({
   const phaseRef = useRef(phase)
   phaseRef.current = phase
 
+  /*
+   * SRS K — the beacon follows the SHIFT, not the screen.
+   *
+   * It used to be a component rendered inside `if (phase === 'orders')`, so it stopped the moment
+   * the driver tapped «إنهاء النوبة», the moment a shift was suspended, and on any navigation —
+   * while the server still called the shift open. The state poll two hundred lines below already
+   * used a wider condition, so the two disagreed about the same shift.
+   *
+   * That mismatch also made proof-of-presence at close structurally impossible: the driver stands
+   * at the branch for the whole close package with the beacon unmounted.
+   *
+   * Called unconditionally, as a hook must be, and given `null` when the shift is not in a tracked
+   * state. `draft` and `awaiting_open_approval` are deliberately NOT tracked: the shift holds the
+   * driver, but he has not been approved to start working and where he is then is not ours to know.
+   */
+  // Renders nothing. The driver was once shown a live «التتبع يعمل / متوقف» line and the owner
+  // did not want the tracking state on his screen; the browser's own location prompt is his notice,
+  // and consent was given. That decision is unchanged — only where the hook is called has moved.
+  const trackedShiftId = shift && serverState && TRACKED_SHIFT_STATES.has(serverState) ? shift.id : null
+  useGpsBeacon(trackedShiftId)
+
+  /*
+   * …and the Android shell's foreground service, driven by exactly the same condition.
+   *
+   * One source of truth for «is this shift being tracked», so the web beacon and the native service
+   * can never disagree about it. Stating the desired state on every change is safe: starting an
+   * already-running service just re-delivers the intent. In a browser or an installed PWA there is
+   * no plugin and this does nothing at all.
+   */
+  useEffect(() => {
+    void syncNativeTracking(trackedShiftId)
+  }, [trackedShiftId])
+
   const applyServerState = useCallback(
     (state: string): boolean => {
+      // What the SERVER says the shift is. The local `phase` is a rendering decision derived from
+      // it and is deliberately not the same thing — `end` is a phase the driver enters while the
+      // server still says `open`, and `done` covers both `pending_review` and an approved shift.
+      // Anything that must follow the shift's real life, like the GPS beacon, reads this.
+      setServerState(state)
       // The decision itself is pure and tested (`driverPhaseFor`), so the screen and the rule
       // cannot drift; this only carries out what it decides.
       const { gone, phase: next } = driverPhaseFor(state, phaseRef.current)
@@ -935,32 +1157,59 @@ export function ShiftFlow({
           batteryMediaIds: Object.fromEntries(
             st.endPackage.batteries.map((reading) => [reading.batteryId, reading.mediaId]),
           ),
-          orders: st.orders.map((o) => ({
-            // `already-<no>` rather than a random id: the list is rebuilt from the server on every
-            // resume, and a stable key keeps React from remounting rows the driver is editing.
-            localId: `already-${o.providerOrderNo}`,
-            providerOrderNo: o.providerOrderNo,
-            payMode: o.payMode,
-            feeText: o.fee,
-            recorded: true,
-            ...resumedOrderWindowState(o),
-            walletAmountText: o.walletAmount ?? '',
-            timeText: o.occurredMinute ?? '',
-            dateText: o.occurredDate ?? '',
-            // «A» و«B» come back from the stored route, so a resumed shift still shows where each
-            // order went — the only thing on the row a person can recognise.
-            pointA: o.points?.find((p) => p.role === 'start')?.label ?? null,
-            pointB: o.points?.find((p) => p.role === 'end')?.label ?? null,
-          })),
-          movements: (st.movements ?? []).map((m) => ({
-            localId: `already-${m.id}`,
-            amountText: m.amount,
-            timeText: m.occurredMinute,
-            included: m.included,
-            role: m.role,
-            ambiguous: m.ambiguous,
-          })),
-          cashDeductions: syncRecordedCashDeductions([], st.cashDeductions ?? []),
+          /*
+           * THE THREE ROW LISTS BELONG TO THE CLOSE DRAFT, NOT TO THIS ENDPOINT.
+           *
+           * `st.orders` is the COMMITTED orders table (`orders.listByShift`, app.ts), and draft
+           * rows only reach that table at close submit. For a shift that is still open it is
+           * therefore ALWAYS EMPTY — so writing it unconditionally replaced the driver's real list
+           * with nothing, every time this effect re-ran.
+           *
+           * That is what emptied محمد المسلماني's «الطلبات» on 2026-08-25: both dashboard reads
+           * completed at 18:24, the server draft held 7 orders at 18:28, and his screen showed
+           * «0 طلبات» at 18:31. The photo badges still said «القراءة: تمت» because
+           * `closeDraftAttachments` is not one of the fields this block writes — so the read record
+           * survived while the rows it produced did not.
+           *
+           * Nothing repaired it either: the close-draft fetch below is skipped once
+           * `closeDraftRevision` is set, and the autosave fingerprint only covers MANUAL rows, so
+           * deleting canonical OCR rows produced an identical fingerprint and sent nothing.
+           *
+           * The typed figures above were already protected — «a resume can never clobber something
+           * he is in the middle of correcting». The row lists were simply left out of that promise.
+           * Once a draft is loaded it is the owner; before that, restoring the committed rows is
+           * still exactly right, which is what this endpoint is for.
+           */
+          ...(d.closeDraftRevision === null
+            ? {
+                orders: st.orders.map((o) => ({
+                  // `already-<no>` rather than a random id: the list is rebuilt from the server on
+                  // every resume, and a stable key keeps React from remounting rows he is editing.
+                  localId: `already-${o.providerOrderNo}`,
+                  providerOrderNo: o.providerOrderNo,
+                  payMode: o.payMode,
+                  feeText: o.fee,
+                  recorded: true,
+                  ...resumedOrderWindowState(o),
+                  walletAmountText: o.walletAmount ?? '',
+                  timeText: o.occurredMinute ?? '',
+                  dateText: o.occurredDate ?? '',
+                  // «A» و«B» come back from the stored route, so a resumed shift still shows where
+                  // each order went — the only thing on the row a person can recognise.
+                  pointA: o.points?.find((p) => p.role === 'start')?.label ?? null,
+                  pointB: o.points?.find((p) => p.role === 'end')?.label ?? null,
+                })),
+                movements: (st.movements ?? []).map((m) => ({
+                  localId: `already-${m.id}`,
+                  amountText: m.amount,
+                  timeText: m.occurredMinute,
+                  included: m.included,
+                  role: m.role,
+                  ambiguous: m.ambiguous,
+                })),
+                cashDeductions: syncRecordedCashDeductions([], st.cashDeductions ?? []),
+              }
+            : {}),
         }))
         // Trust the server's state over the one the assignment reported: the manager may have
         // approved between the two calls. A shift that is no longer LIVE goes through the same
@@ -1089,8 +1338,6 @@ export function ShiftFlow({
         {/* «بلاغ حادثة» (C-1): the driver can't suspend himself — he flags the incident to the
             branch, which rings the bell so a manager can put the shift on hold. */}
         <ReportIncident shiftId={shift.id} />
-        {/* SRS K: stream location while the shift is open (foreground-only). */}
-        <GpsBeacon shiftId={shift.id} />
       </Screen>
     )
   }
@@ -1121,6 +1368,41 @@ export function ShiftFlow({
         saveFailed={closeDraftSaveFailed}
         onRetrySave={() => {
           setCloseDraftSaveFailed(false)
+          setCloseDraftSaveRetryKey((value) => value + 1)
+        }}
+        onResolveSaveConflict={(resolution) => {
+          setCloseDraftSaveFailed(false)
+          if (resolution === 'server') {
+            // Resolve against a fresh canonical snapshot. The other device may have saved again
+            // while this choice was on screen; restoring the first 409 body would rewind the CAS
+            // revision and leave the close blocked a second time.
+            const requestedShiftId = shift.id
+            void api.closeDraft(requestedShiftId).then((latest) => {
+              if (!ownsCloseDraftRefresh(
+                activeDraftShiftIdRef.current,
+                requestedShiftId,
+                latest.shiftId,
+              )) return
+              setEndDraft((current) => {
+                if (!ownsCloseDraftRefresh(
+                  activeDraftShiftIdRef.current,
+                  requestedShiftId,
+                  latest.shiftId,
+                )) return current
+                return resolveCloseDraftMergeConflict(
+                  rebaseCloseDraft(current, latest),
+                  'server',
+                )
+              })
+              setCloseDraftSaveRetryKey((value) => value + 1)
+            }).catch(() => {
+              if (activeDraftShiftIdRef.current === requestedShiftId) {
+                setCloseDraftSaveFailed(true)
+              }
+            })
+            return
+          }
+          setEndDraft((current) => resolveCloseDraftMergeConflict(current, 'phone'))
           setCloseDraftSaveRetryKey((value) => value + 1)
         }}
         // Back to the running shift. The operations list now lives ON this screen, so there is no
@@ -1642,6 +1924,7 @@ function EndPackage({
   onDraft,
   saveFailed,
   onRetrySave,
+  onResolveSaveConflict,
   onBack,
   onSubmitted,
 }: {
@@ -1652,6 +1935,7 @@ function EndPackage({
   onDraft: Dispatch<SetStateAction<EndDraft>>
   saveFailed: boolean
   onRetrySave(): void
+  onResolveSaveConflict(resolution: CloseDraftConflictResolution): void
   onBack?(): void
   onSubmitted(): void
 }): ReactNode {
@@ -1870,7 +2154,14 @@ function EndPackage({
     cashDeductions: draft.cashDeductions,
     movements: draft.movements,
   })
-  const draftSaved = currentDraftFingerprint === draft.persistedCloseDraftFingerprint
+  const draftSaved =
+    !draft.closeDraftMergeConflict &&
+    currentDraftFingerprint === draft.persistedCloseDraftFingerprint
+  const draftSaveNotice = closeDraftSaveNotice(
+    draftSaved,
+    saveFailed,
+    draft.closeDraftMergeConflict,
+  )
   const readingAttachment = Object.values(draft.closeDraftAttachments).some(
     (attachment) =>
       attachment.read?.status === 'running' && attachment.read.field !== 'payments_log',
@@ -1908,8 +2199,12 @@ function EndPackage({
     moneyIsUsable: isUsableMoneyText,
     odometerKm,
     namedOrderCount: named,
-    hasBadOrderRows: allProblems(draft.orders).size > 0,
-    hasBadDeductionRows: !cashDeductionsAreValid(draft.cashDeductions),
+    // The gate must judge exactly the rows on his screen. A copy superseded by a retake raises
+    // `duplicate_order_no` against the row that replaced it — on shift d0a5a7ec that was ten such
+    // collisions, none of them visible to the driver, refusing a close he could not repair. That is
+    // the shape that stranded امجد: a refusal naming something he cannot find.
+    hasBadOrderRows: allProblems(withoutSupersededRemnants(draft.orders)).size > 0,
+    hasBadDeductionRows: !cashDeductionsAreValid(withoutSupersededRemnants(draft.cashDeductions)),
     readingInFlight: readingAttachment,
     odometerNeedsConfirmation,
     draftSaved,
@@ -2247,24 +2542,47 @@ function EndPackage({
               <p className="pt-1">{missing.join(' · ')}</p>
             </details>
           ) : null}
-          {!draftSaved ? (
-            saveFailed ? (
+          {draftSaveNotice === 'conflict' || draftSaveNotice === 'failed' ? (
               <div
                 className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded-xl bg-red-50 px-3 py-2 text-red-800"
                 role="alert"
               >
-                <p className="min-w-0 flex-1 break-words text-xs font-medium">{t.shift.draftSaveFailed}</p>
-                <button
-                  type="button"
-                  onClick={onRetrySave}
-                  className="min-h-9 shrink-0 rounded-lg bg-red-100 px-3 text-xs font-semibold"
-                >
-                  {t.shift.retryDraftSave}
-                </button>
+                {draftSaveNotice === 'conflict' ? (
+                  <div className="min-w-0 flex-1 basis-full space-y-2">
+                    <p className="text-sm font-semibold">{t.shift.draftMergeConflictTitle}</p>
+                    <p className="break-words text-xs">{t.shift.draftMergeConflictBody}</p>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => onResolveSaveConflict('phone')}
+                        className="min-h-10 rounded-lg bg-danger-solid px-3 text-xs font-semibold text-white"
+                      >
+                        {t.shift.usePhoneDraft}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onResolveSaveConflict('server')}
+                        className="min-h-10 rounded-lg bg-surface-card px-3 text-xs font-semibold text-red-800 ring-1 ring-red-200"
+                      >
+                        {t.shift.useServerDraft}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                  <p className="min-w-0 flex-1 break-words text-xs font-medium">{t.shift.draftSaveFailed}</p>
+                  <button
+                    type="button"
+                    onClick={onRetrySave}
+                    className="min-h-9 shrink-0 rounded-lg bg-red-100 px-3 text-xs font-semibold"
+                  >
+                    {t.shift.retryDraftSave}
+                  </button>
+                  </>
+                )}
               </div>
-            ) : (
-              <p className="truncate text-xs text-slate-500" role="status">{t.shift.savingDraft}</p>
-            )
+          ) : draftSaveNotice === 'saving' ? (
+            <p className="truncate text-xs text-slate-500" role="status">{t.shift.savingDraft}</p>
           ) : null}
           {closeFailure ? (
             <details
@@ -2639,15 +2957,6 @@ function ReportIncident({ shiftId }: { shiftId: string }): ReactNode {
  * The live-GPS indicator. Mounting it starts the beacon (SRS K); unmounting — when the shift leaves
  * the open/orders phase — stops it. Foreground-only, per the PWA limitation.
  */
-function GpsBeacon({ shiftId }: { shiftId: string }): ReactNode {
-  // Runs the beacon and renders NOTHING. The driver used to be shown a live «التتبع يعمل / متوقف»
-  // line; the owner does not want the tracking state on his screen. Mounting still starts it and
-  // unmounting still stops it, so behaviour is unchanged — only the readout is gone. The location
-  // permission the browser itself asks for is the driver's real notice, and consent was given.
-  useGpsBeacon(shiftId)
-  return null
-}
-
 /**
  * Abandon a shift that never opened.
  *

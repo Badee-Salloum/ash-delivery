@@ -71,27 +71,57 @@ export class MemoryOfficeCapitalTargetRepo implements OfficeCapitalTargetRepo {
   }
 }
 
-/** One ترميم per branch per working day — the same rule the unique index enforces in Postgres. */
-export class MemoryRestorationRepo implements RestorationRepo {
-  private readonly rows: RestorationRecord[] = []
+/**
+ * One ترميم per branch per working day — the same rule the unique index enforces in Postgres.
+ * `RestorationRecord` preserves both evidence generations: v2 has a cash-count id, while v3 keeps
+ * it null and freezes the opening live-ledger balances inside its cloned plan.
+ */
+type StoredRestoration = RestorationRecord & { id: number }
 
-  snapshotRows(): RestorationRecord[] {
+export class MemoryRestorationRepo implements RestorationRepo {
+  private readonly rows: StoredRestoration[] = []
+  /** A sequence, like the identity column: a rolled-back run does not give its id back. */
+  private nextId = 1
+
+  snapshotRows(): StoredRestoration[] {
     return structuredClone(this.rows)
   }
 
-  restoreRows(snapshot: readonly RestorationRecord[]): void {
+  restoreRows(snapshot: readonly StoredRestoration[]): void {
     this.rows.splice(0, this.rows.length, ...structuredClone(snapshot))
   }
 
-  async create(row: RestorationRecord): Promise<void> {
-    if (this.rows.some((r) => r.branchId === row.branchId && r.businessDate === row.businessDate)) {
-      throw Object.assign(new Error('already restored today'), { code: 'DUPLICATE_RESTORATION' })
-    }
-    this.rows.push(structuredClone(row))
+  /** The stored id of a run — what a company mirror names. */
+  idOf(branchId: string, businessDate: CalendarDate, runNo: number): number | null {
+    return this.rows.find((r) => r.branchId === branchId && r.businessDate === businessDate && r.runNo === runNo)?.id ?? null
   }
 
+  async create(row: RestorationRecord): Promise<number> {
+    // Since 0061 a business date may hold several runs; what stays unique is the RUN, mirroring
+    // `restorations_run_per_day`. Uniqueness never was the thing that prevented a double posting —
+    // the ledger's `(shift_id, event_type, occurrence_key)` key is, and each run has its own.
+    const taken = this.rows.some(
+      (r) => r.branchId === row.branchId && r.businessDate === row.businessDate && r.runNo === row.runNo,
+    )
+    if (taken) {
+      throw Object.assign(new Error('restoration run already recorded'), { code: 'DUPLICATE_RESTORATION' })
+    }
+    const id = this.nextId++
+    this.rows.push({ ...structuredClone(row), id })
+    return id
+  }
+
+  async runsOnDay(branchId: string, businessDate: CalendarDate): Promise<number> {
+    return this.rows.filter((r) => r.branchId === branchId && r.businessDate === businessDate).length
+  }
+
+  /** The LATEST run of that day, which is what «هل رُمِّم؟» actually asks. */
   async find(branchId: string, businessDate: CalendarDate): Promise<RestorationRecord | null> {
-    const found = this.rows.find((r) => r.branchId === branchId && r.businessDate === businessDate)
-    return found ? structuredClone(found) : null
+    const found = this.rows
+      .filter((r) => r.branchId === branchId && r.businessDate === businessDate)
+      .sort((a, b) => b.runNo - a.runNo)[0]
+    if (!found) return null
+    const { id: _id, ...record } = structuredClone(found)
+    return record
   }
 }

@@ -37,24 +37,46 @@ describe('civil date arithmetic', () => {
   })
 })
 
-describe('business date — Asia/Damascus midnight boundary', () => {
-  it('23:50 and 00:30 fall on DIFFERENT business dates', () => {
+describe('business date — Asia/Damascus 04:00 boundary', () => {
+  it('23:50 and 00:30 are the SAME business day — the fleet does not stop at midnight', () => {
+    // The owner's own rule: «اليوم لا ينتهي على الساعة 12 بل على الساعة 4 صباحا».
     expect(businessDateFor(damascus(2026, 7, 21, 23, 50))).toBe('2026-07-21')
-    expect(businessDateFor(damascus(2026, 7, 22, 0, 30))).toBe('2026-07-22')
+    expect(businessDateFor(damascus(2026, 7, 22, 0, 30))).toBe('2026-07-21')
   })
 
-  it('the boundary is local midnight, not UTC midnight', () => {
-    // 22:30 UTC on the 21st is already 01:30 on the 22nd in Damascus (UTC+3).
+  it('rolls over at 04:00 exactly, not a minute before', () => {
+    expect(businessDateFor(damascus(2026, 7, 22, 3, 59))).toBe('2026-07-21')
+    expect(businessDateFor(damascus(2026, 7, 22, 4, 0))).toBe('2026-07-22')
+  })
+
+  it('the boundary is local, not UTC', () => {
+    // 22:30 UTC on the 21st is 01:30 on the 22nd in Damascus (UTC+3) — still the 21st's workday.
     const utcLate = (daysFromCivil(2026, 7, 21) * 1440 + 22 * 60 + 30) * 60_000
-    expect(businessDateFor(utcLate)).toBe('2026-07-22')
+    expect(businessDateFor(utcLate)).toBe('2026-07-21')
   })
 
-  it('a shift opened 23:50 and closed 00:30 spans two business dates', () => {
+  it('a shift opened 23:50 and closed 01:30 stays on ONE business date', () => {
     const open = businessDateFor(damascus(2026, 7, 21, 23, 50))
-    const close = businessDateFor(damascus(2026, 7, 22, 0, 30))
-    expect(open).not.toBe(close)
-    // The shift's business_date is the OPENING date — a night shift belongs to the day it began.
+    const close = businessDateFor(damascus(2026, 7, 22, 1, 30))
+    expect(open).toBe(close)
     expect(open).toBe('2026-07-21')
+  })
+
+  it('keeps a Saturday night out of the next FINANCIAL WEEK', () => {
+    // The worst available failure. 2026-08-29 is a Saturday; under a midnight boundary a close at
+    // 01:30 on Sunday the 30th would book into the week starting the 30th — a different week, and
+    // BR7 makes a closed week immutable. The 04:00 rule keeps the night with the day it was worked.
+    const saturdayNight = businessDateFor(damascus(2026, 8, 30, 1, 30))
+    expect(saturdayNight).toBe('2026-08-29')
+    expect(weekStartFor(saturdayNight)).toBe('2026-08-23')
+    expect(weekStartFor(businessDateFor(damascus(2026, 8, 30, 4, 0)))).toBe('2026-08-30')
+  })
+
+  it('reproduces the old midnight rule when the boundary is injected as 0', () => {
+    // `business_date` is a WRITTEN column. Rows stored under the previous boundary must stay
+    // reproducible, which is why this is a value and not a constant.
+    expect(businessDateFor(damascus(2026, 7, 22, 0, 30), DAMASCUS_OFFSET_MINUTES, 0)).toBe('2026-07-22')
+    expect(businessDateFor(damascus(2026, 7, 21, 23, 50), DAMASCUS_OFFSET_MINUTES, 0)).toBe('2026-07-21')
   })
 
   it('honours an injected non-Damascus offset (pre-2022 Syrian DST, backfilled data)', () => {

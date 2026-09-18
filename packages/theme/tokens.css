@@ -1,0 +1,368 @@
+/*
+ * ASH design tokens — the one place a colour is decided.
+ *
+ * WHY ROLES AND NOT COLOURS. Before this file, `apps/admin/src` carried ~700 raw colour utilities
+ * across 67 distinct values: `red-600`, `red-700`, `red-800` and `red-900` all meant "bad", and
+ * `amber-700/800/900` all meant "warning". Nothing said which was correct, so every new screen
+ * picked again. A role — `--color-danger-ink` — has exactly one answer.
+ *
+ * WHY THE INDIRECTION. Tailwind 4 resolves `@theme` values at build time, so a token cannot change
+ * per theme on its own. Every colour below therefore points at an `--ash-*` custom property that is
+ * redefined under `[data-theme='dark']`, and the cascade does the rest: a component written once
+ * against `bg-surface-card` follows the theme with no `dark:` variant anywhere.
+ *
+ * That indirection is the whole dark-mode strategy, and it is a direct lesson from the sibling
+ * product. Its stylesheet ends in unlayered rescue hacks —
+ *
+ *     .dark .card .text-gray-900 { color: #e5e7eb; }
+ *
+ * — with the comment "many headings use text-gray-900 with no dark: variant; on the dark surface
+ * they render near-invisible". They hardcoded first and bolted dark mode on afterwards. We would
+ * land in the same place, so the tokens come first and the LEGACY BRIDGE at the end of this file
+ * carries the existing utilities across in one move instead of a specificity war.
+ */
+
+/*
+ * Explicit toggle, not just `prefers-color-scheme`. A branch manager works under office light that
+ * has nothing to do with what his OS was configured for a year ago, so the choice has to be his.
+ * `:where()` keeps specificity at 0 so an ordinary utility can still win.
+ */
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+/*
+ * `inline` is mandatory, not stylistic.
+ *
+ * With a plain `@theme`, Tailwind emits `--color-surface-card: var(--ash-surface-card)` as a
+ * declaration ON `:root`, and CSS substitutes a var() at the element where it is DECLARED. The
+ * binding would then freeze to whatever `:root` resolved, so a theme attribute set anywhere other
+ * than the document element would be silently ignored. `inline` splices the reference into the
+ * utility itself — `bg-surface-card` compiles to `background-color: var(--ash-surface-card)` — so it
+ * resolves at the consuming element and the cascade behaves the way anyone would expect.
+ */
+@theme inline {
+  /* Brand — the navy hexagon and its blue bar-chart accent. These four keep their existing names
+     because `bg-brand` / `text-brand` / `ring-brand/40` / `hover:bg-brand-700` are already used
+     across both apps; they gain a dark value rather than a new spelling. */
+  --color-brand: var(--ash-brand);
+  --color-brand-700: var(--ash-brand-strong);
+  --color-brand-300: var(--ash-brand-soft);
+  --color-accent: var(--ash-accent);
+  --color-accent-600: var(--ash-accent-strong);
+
+  /* Surfaces — five levels, because today ONE card style (`rounded-xl bg-white p-4 shadow-sm`) is
+     used 71 times at every level of the hierarchy, including nested inside itself, which renders as
+     white-on-white with doubled padding. */
+  --color-surface-page: var(--ash-surface-page);
+  --color-surface-card: var(--ash-surface-card);
+  --color-surface-raised: var(--ash-surface-raised);
+  --color-surface-muted: var(--ash-surface-muted);
+  --color-surface-sunken: var(--ash-surface-sunken);
+
+  /* Ink — `ink` is the reading colour and the rest step down. `ink-faint` is for glyphs and rules
+     only; it does not meet AA on body text and must never carry any. */
+  --color-ink: var(--ash-ink);
+  --color-ink-secondary: var(--ash-ink-secondary);
+  --color-ink-muted: var(--ash-ink-muted);
+  --color-ink-faint: var(--ash-ink-faint);
+  --color-ink-inverse: var(--ash-ink-inverse);
+
+  /* Borders. */
+  --color-line-subtle: var(--ash-line-subtle);
+  --color-line: var(--ash-line);
+  --color-line-strong: var(--ash-line-strong);
+
+  /* Semantic — each state is a triple: a tinted surface, a readable ink, and a border. Named for
+     what they MEAN, so a status is never again "amber-800". */
+  --color-success-surface: var(--ash-success-surface);
+  --color-success-ink: var(--ash-success-ink);
+  --color-success-line: var(--ash-success-line);
+
+  --color-warning-surface: var(--ash-warning-surface);
+  --color-warning-ink: var(--ash-warning-ink);
+  --color-warning-line: var(--ash-warning-line);
+
+  --color-danger-surface: var(--ash-danger-surface);
+  --color-danger-ink: var(--ash-danger-ink);
+  --color-danger-line: var(--ash-danger-line);
+
+  --color-info-surface: var(--ash-info-surface);
+  --color-info-ink: var(--ash-info-ink);
+  --color-info-line: var(--ash-info-line);
+
+  /* SOLID fills, which are a different job from the inks above and must not be confused with them.
+     A `-ink` is text ON a tinted surface, so in dark it LIGHTENS. A `-solid` is a saturated block
+     carrying white text — a danger button, a toast, a count badge — so it must stay saturated in
+     both themes or the white label on it disappears. This is exactly why `red-600` could not simply
+     be bridged: 31 of its uses are error text and 3 are solid buttons. */
+  --color-danger-solid: var(--ash-danger-solid);
+  --color-danger-solid-hover: var(--ash-danger-solid-hover);
+  --color-success-solid: var(--ash-success-solid);
+  --color-success-solid-hover: var(--ash-success-solid-hover);
+
+  /* A scrim is dark in BOTH themes. It has its own token precisely so it can never be swept up by
+     the neutral bridge below — see the warning there. Kept OPAQUE so the existing call sites keep
+     expressing their own intensity through Tailwind (bg-scrim/40 dims the nav drawer, bg-scrim/90
+     covers the screen for a dialog); baking alpha in here would flatten that distinction. */
+  --color-scrim: var(--ash-scrim);
+  --color-focus: var(--ash-focus);
+
+  /*
+   * Type scale, named for the JOB.
+   *
+   * The measured problem is not that the sizes are wrong — it is that there are only two of them.
+   * Across the three densest admin screens: 128x text-xs, 90x text-sm, 8x text-2xl, and eleven uses
+   * of lg/xl/3xl combined in 7,100 lines. Two steps cannot express a hierarchy, so thirteen
+   * dashboard tiles all shout at one volume and none of them leads.
+   *
+   * `figure` and `figure-lg` exist so a MONEY number is never sized by eye again.
+   */
+  --text-label: 0.75rem;
+  --text-label--line-height: 1.25rem;
+  --text-body: 0.875rem;
+  --text-body--line-height: 1.5rem;
+  --text-title: 1rem;
+  --text-title--line-height: 1.5rem;
+  --text-figure: 1.375rem;
+  --text-figure--line-height: 1.75rem;
+  --text-page: 1.5rem;
+  --text-page--line-height: 2rem;
+  --text-figure-lg: 2rem;
+  --text-figure-lg--line-height: 2.25rem;
+
+  /*
+   * Arabic-capable fallbacks come FIRST among the fallbacks. Today's stack puts `system-ui` there,
+   * which on Android and most Linux resolves to a face with poor Arabic — so every reader who does
+   * not yet have the webfont sees the worst available rendering rather than the second best.
+   */
+  --font-sans: 'IBM Plex Sans Arabic', 'Segoe UI', Tahoma, 'Noto Sans Arabic', system-ui, sans-serif;
+}
+
+/*
+ * LIGHT — the default, and the only theme most of this fleet will ever use.
+ *
+ * The neutral values are deliberately Tailwind's own slate ramp, and the semantic values its
+ * emerald/amber/red/sky. That is what makes the bridge at the foot of this file provable: light mode
+ * comes out pixel-identical to what shipped yesterday, so any visual difference in review is a real
+ * regression rather than a re-tint nobody asked for.
+ */
+:root {
+  color-scheme: light;
+
+  --ash-brand: #1b2a5c;
+  --ash-brand-strong: #22347a;
+  --ash-brand-soft: #6b7bb0;
+  --ash-accent: #2d6cb0;
+  --ash-accent-strong: #245a97;
+
+  --ash-surface-page: #eef1f8;
+  --ash-surface-card: #ffffff;
+  --ash-surface-raised: #f1f5f9;
+  --ash-surface-muted: #f8fafc;
+  --ash-surface-sunken: #e2e8f0;
+
+  --ash-ink: #0f172a;
+  --ash-ink-secondary: #475569;
+  --ash-ink-muted: #64748b;
+  --ash-ink-faint: #94a3b8;
+  --ash-ink-inverse: #ffffff;
+
+  --ash-line-subtle: #f1f5f9;
+  --ash-line: #e2e8f0;
+  --ash-line-strong: #cbd5e1;
+
+  --ash-success-surface: #ecfdf5;
+  --ash-success-ink: #047857;
+  --ash-success-line: #a7f3d0;
+
+  --ash-warning-surface: #fffbeb;
+  --ash-warning-ink: #92400e;
+  --ash-warning-line: #fde68a;
+
+  --ash-danger-surface: #fef2f2;
+  --ash-danger-ink: #b91c1c;
+  --ash-danger-line: #fecaca;
+
+  --ash-info-surface: #f0f9ff;
+  --ash-info-ink: #0369a1;
+  --ash-info-line: #bae6fd;
+
+  --ash-danger-solid: #dc2626;
+  --ash-danger-solid-hover: #b91c1c;
+  --ash-success-solid: #059669;
+  --ash-success-solid-hover: #047857;
+
+  --ash-scrim: #0f172a;
+  --ash-focus: #2d6cb0;
+}
+
+/*
+ * DARK.
+ *
+ * Not an inversion. Three things are deliberately NOT mirrored:
+ *
+ *   1. SURFACES STAY NAVY-DERIVED, not neutral black, so the ASH identity survives the flip and a
+ *      long money table does not read as a terminal.
+ *   2. BRAND LIFTS. #1b2a5c is the dark page background's near-neighbour, so a primary button in it
+ *      would read as a hole rather than a control. Hue is preserved, so the wordmark still reads as
+ *      itself.
+ *   3. SEMANTIC INKS LIGHTEN AND THEIR SURFACES DEEPEN. The light pairing (pale tint, dark text)
+ *      reversed naively gives a muddy mid-grey that fails contrast in both directions.
+ */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --ash-brand: #3a5aa6;
+  --ash-brand-strong: #4a6bb8;
+  --ash-brand-soft: #8fa2cf;
+  --ash-accent: #6fa8e8;
+  --ash-accent-strong: #5b93d4;
+
+  --ash-surface-page: #0b1220;
+  --ash-surface-card: #131c30;
+  --ash-surface-raised: #22304a;
+  --ash-surface-muted: #1a2437;
+  --ash-surface-sunken: #060a15;
+
+  --ash-ink: #e8edf7;
+  --ash-ink-secondary: #b3c0d6;
+  --ash-ink-muted: #8b9ab5;
+  --ash-ink-faint: #6b7a95;
+  --ash-ink-inverse: #0b1220;
+
+  --ash-line-subtle: #1c2740;
+  --ash-line: #26334d;
+  --ash-line-strong: #3a4a6b;
+
+  --ash-success-surface: #0d2a1f;
+  --ash-success-ink: #6ee7b7;
+  --ash-success-line: #1c5a41;
+
+  --ash-warning-surface: #2e2208;
+  --ash-warning-ink: #fcd34d;
+  --ash-warning-line: #6b4c12;
+
+  --ash-danger-surface: #2d1214;
+  --ash-danger-ink: #fca5a5;
+  --ash-danger-line: #6b2226;
+
+  --ash-info-surface: #0b2436;
+  --ash-info-ink: #7dd3fc;
+  --ash-info-line: #175071;
+
+  /* Unchanged from light on purpose: white text sits on these, and #dc2626 / #059669 clear AA
+     against white. Lightening them for the dark theme would cost that and gain nothing. */
+  --ash-danger-solid: #dc2626;
+  --ash-danger-solid-hover: #b91c1c;
+  --ash-success-solid: #059669;
+  --ash-success-solid-hover: #047857;
+
+  --ash-scrim: #000000;
+  --ash-focus: #6ba4e2;
+}
+
+/*
+ * ── LEGACY BRIDGE ────────────────────────────────────────────────────────────────────────────────
+ *
+ * The migration lever, and the reason dark mode is shippable at all.
+ *
+ * `text-slate-600` compiles to `color: var(--color-slate-600)`, and that variable belongs to
+ * Tailwind's own theme. Rebinding it here re-points EVERY existing occurrence at a role token —
+ * roughly seven hundred of them — without editing one line of TSX. The light values above were
+ * chosen to equal the ramp being replaced, so light mode does not move; dark mode starts working
+ * everywhere at once instead of screen by screen.
+ *
+ * This is a bridge, not a destination. New code uses the semantic names; these bindings are deleted
+ * once the screens are migrated.
+ *
+ * TWO THINGS ARE DELIBERATELY NOT BRIDGED:
+ *
+ *   `--color-white` — `text-white` sits on solid brand/danger/success fills. It must stay white in
+ *   both themes or every primary button loses its label.
+ *
+ *   The 900 step is bridged to `ink`, which is near-WHITE in dark. Four call sites use
+ *   `bg-slate-900/40` as a modal scrim; under this bridge they would become a white flashbang. They
+ *   are migrated to `bg-scrim` by hand in the same change that adds this file — that is the single
+ *   highest-severity item in the whole migration, and it is why `--color-scrim` exists above.
+ */
+@theme inline {
+  --color-slate-50: var(--ash-surface-muted);
+  --color-slate-100: var(--ash-surface-raised);
+  --color-slate-200: var(--ash-line);
+  --color-slate-300: var(--ash-line-strong);
+  --color-slate-400: var(--ash-ink-faint);
+  --color-slate-500: var(--ash-ink-muted);
+  --color-slate-600: var(--ash-ink-secondary);
+  --color-slate-700: var(--ash-ink-secondary);
+  --color-slate-800: var(--ash-ink);
+  --color-slate-900: var(--ash-ink);
+  --color-slate-950: var(--ash-ink);
+
+  --color-emerald-50: var(--ash-success-surface);
+  --color-emerald-100: var(--ash-success-surface);
+  --color-emerald-200: var(--ash-success-line);
+  --color-emerald-300: var(--ash-success-line);
+  --color-emerald-400: var(--ash-success-line);
+  --color-emerald-600: var(--ash-success-ink);
+  --color-emerald-700: var(--ash-success-ink);
+  --color-emerald-800: var(--ash-success-ink);
+  --color-emerald-900: var(--ash-success-ink);
+
+  --color-amber-50: var(--ash-warning-surface);
+  --color-amber-100: var(--ash-warning-surface);
+  --color-amber-200: var(--ash-warning-line);
+  --color-amber-300: var(--ash-warning-line);
+  --color-amber-400: var(--ash-warning-line);
+  --color-amber-600: var(--ash-warning-ink);
+  --color-amber-700: var(--ash-warning-ink);
+  --color-amber-800: var(--ash-warning-ink);
+  --color-amber-900: var(--ash-warning-ink);
+  --color-amber-950: var(--ash-warning-ink);
+
+  --color-red-50: var(--ash-danger-surface);
+  --color-red-100: var(--ash-danger-surface);
+  --color-red-200: var(--ash-danger-line);
+  --color-red-300: var(--ash-danger-line);
+  --color-red-400: var(--ash-danger-ink);
+  --color-red-600: var(--ash-danger-ink);
+  --color-red-700: var(--ash-danger-ink);
+  --color-red-800: var(--ash-danger-ink);
+  --color-red-900: var(--ash-danger-ink);
+  --color-red-950: var(--ash-danger-ink);
+
+  --color-rose-50: var(--ash-danger-surface);
+  --color-rose-100: var(--ash-danger-surface);
+  --color-rose-300: var(--ash-danger-line);
+  --color-rose-200: var(--ash-danger-line);
+  --color-rose-600: var(--ash-danger-ink);
+  --color-rose-700: var(--ash-danger-ink);
+
+  --color-sky-50: var(--ash-info-surface);
+  --color-sky-100: var(--ash-info-surface);
+  --color-sky-200: var(--ash-info-line);
+  --color-sky-300: var(--ash-info-line);
+  --color-sky-600: var(--ash-info-ink);
+  --color-sky-700: var(--ash-info-ink);
+  --color-sky-800: var(--ash-info-ink);
+  --color-sky-900: var(--ash-info-ink);
+  --color-sky-950: var(--ash-info-ink);
+
+  --color-violet-50: var(--ash-info-surface);
+  --color-violet-200: var(--ash-info-line);
+  --color-violet-700: var(--ash-info-ink);
+  --color-violet-800: var(--ash-info-ink);
+  --color-violet-900: var(--ash-info-ink);
+  --color-violet-950: var(--ash-info-ink);
+}
+
+/*
+ * Money and order numbers isolate as bidi runs so an Arabic label never reorders a figure, and
+ * `tabular-nums` keeps columns aligned WITHOUT switching typeface.
+ *
+ * The sibling product reaches for `font-mono` here instead. That yanks every numeric run out of the
+ * Arabic face into a Latin monospace stack, leaving a visible typographic seam mid-row and a
+ * different x-height on every number in the table. Tabular figures give the alignment for free.
+ */
+.num {
+  unicode-bidi: isolate;
+  font-variant-numeric: tabular-nums;
+}

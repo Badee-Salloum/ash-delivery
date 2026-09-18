@@ -9,6 +9,13 @@ describe('configuration is validated at boot, not discovered at 2am', () => {
     expect(c.BCRYPT_ROUNDS).toBe(12) // SRS §7 mandates bcrypt; 12 is the current floor
     expect(c.BR1_SPLIT_GATE).toBe('advisory') // pilot default until BR1 is calibrated
     expect(c.TZ_OFFSET_MINUTES).toBe(180) // Asia/Damascus, UTC+3 year-round since Oct 2022
+    expect(c.DRIVER_SELF_REGISTRATION_ENABLED).toBe(true)
+  })
+
+  it('parses the driver registration kill switch without treating "false" as truthy', () => {
+    expect(loadConfig({ DRIVER_SELF_REGISTRATION_ENABLED: 'false' } as NodeJS.ProcessEnv).DRIVER_SELF_REGISTRATION_ENABLED).toBe(false)
+    expect(loadConfig({ DRIVER_SELF_REGISTRATION_ENABLED: 'true' } as NodeJS.ProcessEnv).DRIVER_SELF_REGISTRATION_ENABLED).toBe(true)
+    expect(() => loadConfig({ DRIVER_SELF_REGISTRATION_ENABLED: '0' } as NodeJS.ProcessEnv)).toThrow(/DRIVER_SELF_REGISTRATION_ENABLED/)
   })
 
   it('REFUSES to start in production without a database', () => {

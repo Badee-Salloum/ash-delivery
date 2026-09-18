@@ -366,3 +366,86 @@ describe('every fleet mutation is audited (A-5)', () => {
     expect((rows[0]?.after as { code: string }).code).toBe('DRV-AUD')
   })
 })
+
+describe('GET /vehicles/:id/history (P6)', () => {
+  async function seedHistory(): Promise<void> {
+    const driver = await h.loginAs('driver1')
+    const created = await post(driver, '/shifts', { driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1 })
+    const first = await h.deps.shifts.findById(created.json().id)
+    if (!first) throw new Error('history fixture shift missing')
+    await h.deps.shifts.update({
+      ...first,
+      state: 'approved',
+      odoStart: 100,
+      odoEnd: 140,
+      openApprovedAt: '2026-07-21T05:00:00.000Z',
+      windowOpensAt: '2026-07-21T05:00:00.000Z',
+      submittedAt: '2026-07-21T13:00:00.000Z',
+    }, 'u-bm')
+    await h.deps.shifts.create({
+      ...first,
+      id: 'history-shift-2',
+      shiftNo: 2,
+      state: 'approved',
+      odoStart: 150,
+      odoEnd: 175,
+      openApprovedAt: '2026-07-21T14:00:00.000Z',
+      windowOpensAt: '2026-07-21T14:00:00.000Z',
+      submittedAt: '2026-07-21T22:00:00.000Z',
+    }, 'u-bm')
+
+    const admin = await h.loginAs('sysadmin')
+    const category = await post(admin, '/expense-categories', { code: 'history-maint', nameAr: 'صيانة' })
+    const manager = await h.loginAs('manager')
+    const expense = await post(manager, '/expenses', {
+      idempotencyKey: crypto.randomUUID(),
+      categoryId: category.json().id,
+      costCenterKind: 'vehicle',
+      vehicleId: VEHICLE_ID,
+      channel: 'office_cash',
+      amount: '250.00',
+      description: 'سلسلة',
+      receiptMediaId: null,
+    })
+    expect(expense.statusCode, expense.body).toBe(201)
+  }
+
+  it('returns one batch-loaded timeline with odometer gaps and linked expenses', async () => {
+    await seedHistory()
+    const manager = await h.loginAs('manager')
+    const res = await get(manager, `/vehicles/${VEHICLE_ID}/history?from=2026-07-21&to=2026-07-21`)
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json()).toMatchObject({
+      from: '2026-07-21',
+      to: '2026-07-21',
+      vehicle: { id: VEHICLE_ID, branchId: BRANCH },
+      distance: {
+        distance: { km: 65, recordedShifts: 2, unrecordedShifts: 0 },
+        unloggedKm: 10,
+        boundaryRollbacks: 0,
+        unknownBoundaries: 0,
+      },
+    })
+    expect(res.json().shifts).toHaveLength(2)
+    expect(res.json().shifts[0]).toMatchObject({ odometerStart: 100, odometerEnd: 140, orderCount: 0 })
+    expect(res.json().expenses).toEqual([
+      expect.objectContaining({ amount: '250.00', description: 'سلسلة' }),
+    ])
+    expect(res.json().events).toEqual([
+      expect.objectContaining({ expenseId: res.json().expenses[0].id, cost: '250.00' }),
+    ])
+    expect(res.json()).not.toHaveProperty('asset')
+  })
+
+  it('gates asset data and enforces range and vehicle branch RBAC', async () => {
+    const gm = await h.loginAs('gm')
+    const allowed = await get(gm, `/vehicles/${VEHICLE_ID}/history?from=2026-07-21&to=2026-07-21`)
+    expect(allowed.statusCode, allowed.body).toBe(200)
+    expect(allowed.json()).toHaveProperty('asset', null)
+
+    const manager = await h.loginAs('manager')
+    expect((await get(manager, `/vehicles/${VEHICLE_ID}/history?from=2026-07-22&to=2026-07-21`)).statusCode).toBe(400)
+    expect((await get(await h.loginAs('driver1'), `/vehicles/${VEHICLE_ID}/history?from=2026-07-21&to=2026-07-21`)).statusCode).toBe(403)
+    expect((await get(await h.loginAs('manager2'), `/vehicles/${VEHICLE_ID}/history?from=2026-07-21&to=2026-07-21`)).statusCode).toBe(403)
+  })
+})

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="tracking_channel_name">Shift tracking</string>
+  <string name="tracking_title">Shift open</string>
+  <string name="tracking_text">Your location is recorded during the shift, and stops when it closes.</string>
+</resources>

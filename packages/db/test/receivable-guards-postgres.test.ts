@@ -7,6 +7,7 @@ import {
   floatReturn,
   minor,
   receivableAdjustment,
+  receivableWriteoff,
   reverse,
   walletCarry,
   walletReturn,
@@ -299,6 +300,7 @@ if (!DATABASE_URL) {
               postingDate: '2026-08-23',
               weekStartDate: '2026-08-23',
               fxDayId,
+              sypMinorPerUsd: null,
               createdBy: actorId,
               reason: `RBAC probe ${key}`,
             },
@@ -313,6 +315,9 @@ if (!DATABASE_URL) {
             amount: minor(1n),
             businessDate: '2026-08-23',
             reason: `RBAC probe ${key}`,
+            intent: 'command',
+            priorBalance: null,
+            targetBalance: null,
             idempotencyKey: key,
             journalEntryId: journal!.id,
             createdBy: actorId,
@@ -422,6 +427,7 @@ if (!DATABASE_URL) {
           grossDriverShare: minor(400n),
           cashDeductionTotal: zero,
           baseDriverShare: minor(400n),
+          managerCharge: minor(0n),
           expectedTotal: minor(10_000n),
           actualCash: minor(8_000n),
           actualWallet: minor(2_000n),
@@ -433,6 +439,8 @@ if (!DATABASE_URL) {
           walletClaimToOffice: minor(2_000n),
           cashReceivableDeferred: minor(600n),
           walletReceivableDeferred: minor(500n),
+          maximumCashShortageReceivable: zero,
+          cashShortageReceivable: zero,
           cashToOffice: minor(7_000n),
           walletToOffice: minor(1_500n),
           cashAction: 'collect',
@@ -532,6 +540,7 @@ if (!DATABASE_URL) {
             fixedDriverShare: zero,
             grossDriverShare: zero,
             baseDriverShare: zero,
+            managerCharge: minor(0n),
             expectedTotal: max,
             actualCash: max,
             actualWallet: minor(1n),
@@ -579,6 +588,7 @@ if (!DATABASE_URL) {
             postingDate: '2026-08-23',
             weekStartDate: '2026-08-23',
             fxDayId,
+            sypMinorPerUsd: null,
             createdBy: managerId,
             reason: 'preposted close poison',
           },
@@ -673,6 +683,7 @@ if (!DATABASE_URL) {
             postingDate: '2026-08-23',
             weekStartDate: '2026-08-23',
             fxDayId,
+            sypMinorPerUsd: null,
             createdBy: managerId,
           },
         )
@@ -738,6 +749,7 @@ if (!DATABASE_URL) {
             postingDate: '2026-08-23',
             weekStartDate: '2026-08-23',
             fxDayId,
+            sypMinorPerUsd: null,
             createdBy: managerId,
           },
         )
@@ -774,6 +786,7 @@ if (!DATABASE_URL) {
             postingDate: '2026-08-23',
             weekStartDate: '2026-08-23',
             fxDayId,
+            sypMinorPerUsd: null,
             createdBy: managerId,
           },
         )
@@ -866,6 +879,7 @@ if (!DATABASE_URL) {
             postingDate: '2026-08-23',
             weekStartDate: '2026-08-23',
             fxDayId,
+            sypMinorPerUsd: null,
             createdBy: managerId,
           },
         )
@@ -883,6 +897,7 @@ if (!DATABASE_URL) {
             postingDate: '2026-08-23',
             weekStartDate: '2026-08-23',
             fxDayId,
+            sypMinorPerUsd: null,
             createdBy: managerId,
             reason: cancelReason,
           },
@@ -923,6 +938,7 @@ if (!DATABASE_URL) {
             postingDate: '2026-08-23',
             weekStartDate: '2026-08-23',
             fxDayId,
+            sypMinorPerUsd: null,
             createdBy: managerId,
             reason: 'attacker-selected reason',
           },
@@ -958,6 +974,7 @@ if (!DATABASE_URL) {
                 postingDate: '2026-08-23',
                 weekStartDate: '2026-08-23',
                 fxDayId,
+                sypMinorPerUsd: null,
                 createdBy: managerId,
                 reason: 'driver cash debt',
               },
@@ -972,6 +989,9 @@ if (!DATABASE_URL) {
               amount: minor(250n),
               businessDate: '2026-08-23',
               reason: 'driver cash debt',
+              intent: 'command',
+              priorBalance: null,
+              targetBalance: null,
               idempotencyKey: createKey,
               journalEntryId: entry!.id,
               createdBy: managerId,
@@ -989,6 +1009,123 @@ if (!DATABASE_URL) {
             [createdEvent.id],
           ),
         ).toMatchObject({ rows: [{ count: 1 }] })
+
+        await client.query('SAVEPOINT valid_receivable_writeoff')
+        const writeoffKey = 'receivable-writeoff-1'
+        const receivableBeforeWriteoff = await ledger.fundBalance(
+          branchId,
+          `driver_receivable_cash:${driverId}`,
+        )
+        const officeCashBeforeWriteoff = await ledger.fundBalance(branchId, 'office_cash')
+        const officeWalletBeforeWriteoff = await ledger.fundBalance(branchId, 'office_wallet')
+        const writtenOffEvent = await financial.run(
+          {
+            lockKey: `receivables:${branchId}`,
+            actorId: managerId,
+            requestId: 'receivable-guard-test',
+          },
+          async (tx) => {
+            const amount = minor(50n)
+            const [entry] = await tx.ledger.post(
+              branchId,
+              [receivableWriteoff(driverId, 'cash', amount, writeoffKey)],
+              {
+                shiftId: null,
+                businessDate: '2026-08-23',
+                postingDate: '2026-08-23',
+                weekStartDate: '2026-08-23',
+                fxDayId,
+                sypMinorPerUsd: null,
+                createdBy: managerId,
+                reason: 'approved bad-debt loss',
+              },
+            )
+            const event: ReceivableEventRecord = {
+              id: randomUUID(),
+              branchId,
+              driverId,
+              receivableKind: 'ordinary',
+              channel: 'cash',
+              direction: 'collect',
+              amount,
+              businessDate: '2026-08-23',
+              reason: 'approved bad-debt loss',
+              intent: 'writeoff',
+              priorBalance: receivableBeforeWriteoff,
+              targetBalance: minor(receivableBeforeWriteoff - amount),
+              idempotencyKey: writeoffKey,
+              journalEntryId: entry!.id,
+              createdBy: managerId,
+              createdAtMs: Date.UTC(2026, 7, 23, 9, 2),
+            }
+            await tx.receivableEvents.create(event)
+            return event
+          },
+        )
+        await client.query(
+          'SET CONSTRAINTS receivable_journal_event_from_entry, receivable_journal_lines_from_line IMMEDIATE',
+        )
+        // The assertion above deliberately flushes the valid journal-first transaction. Restore
+        // the production mode before the forged pair below: its journal must be allowed to exist
+        // until the event insert can reject the falsely labelled write-off recipe.
+        await client.query(
+          'SET CONSTRAINTS receivable_journal_event_from_entry, receivable_journal_lines_from_line DEFERRED',
+        )
+        expect(await receivableRepo.findByIdempotencyKey(branchId, writeoffKey)).toEqual(writtenOffEvent)
+        expect(await ledger.fundBalance(branchId, `driver_receivable_cash:${driverId}`)).toBe(
+          receivableBeforeWriteoff - 50n,
+        )
+        expect(await ledger.fundBalance(branchId, 'cost_center:receivable_writeoff_loss')).toBe(50n)
+        expect(await ledger.fundBalance(branchId, 'office_cash')).toBe(officeCashBeforeWriteoff)
+        expect(await ledger.fundBalance(branchId, 'office_wallet')).toBe(officeWalletBeforeWriteoff)
+        expect(
+          await client.query(
+            "SELECT count(*)::int AS count FROM audit_log WHERE table_name = 'receivable_events' AND record_id = $1",
+            [writtenOffEvent.id],
+          ),
+        ).toMatchObject({ rows: [{ count: 1 }] })
+
+        // Merely labelling an office collection as a write-off cannot pass the canonical matcher.
+        await client.query('SAVEPOINT forged_writeoff_collection')
+        const forgedWriteoffKey = 'receivable-forged-writeoff-1'
+        const [forgedWriteoffJournal] = await ledger.post(
+          branchId,
+          [
+            receivableAdjustment(
+              driverId,
+              'ordinary',
+              'cash',
+              'collect',
+              minor(1n),
+              forgedWriteoffKey,
+            ),
+          ],
+          {
+            shiftId: null,
+            businessDate: '2026-08-23',
+            postingDate: '2026-08-23',
+            weekStartDate: '2026-08-23',
+            fxDayId,
+            sypMinorPerUsd: null,
+            createdBy: managerId,
+            reason: 'forged write-off collection',
+          },
+        )
+        await expect(
+          receivableRepo.create({
+            ...writtenOffEvent,
+            id: randomUUID(),
+            amount: minor(1n),
+            reason: 'forged write-off collection',
+            priorBalance: minor(receivableBeforeWriteoff - 50n),
+            targetBalance: minor(receivableBeforeWriteoff - 51n),
+            idempotencyKey: forgedWriteoffKey,
+            journalEntryId: forgedWriteoffJournal!.id,
+          }),
+        ).rejects.toMatchObject({ code: '23514', constraint: 'receivable_events_lines_guard' })
+        await client.query('ROLLBACK TO SAVEPOINT forged_writeoff_collection')
+        await client.query('ROLLBACK TO SAVEPOINT valid_receivable_writeoff')
+        await client.query('SET CONSTRAINTS ALL DEFERRED')
 
         await client.query('SAVEPOINT post_commit_extra_receivable_lines')
         await client.query(
@@ -1019,6 +1156,7 @@ if (!DATABASE_URL) {
             postingDate: '2026-08-24',
             weekStartDate: '2026-08-23',
             fxDayId,
+            sypMinorPerUsd: null,
             createdBy: managerId,
             reason: 'wrong receivable posting date',
           },
@@ -1029,6 +1167,9 @@ if (!DATABASE_URL) {
             id: randomUUID(),
             amount: minor(1n),
             reason: 'wrong receivable posting date',
+            intent: 'command',
+            priorBalance: null,
+            targetBalance: null,
             idempotencyKey: wrongDateKey,
             journalEntryId: wrongDateJournal!.id,
           }),
@@ -1049,6 +1190,7 @@ if (!DATABASE_URL) {
             postingDate: '2026-08-23',
             weekStartDate: '2026-08-23',
             fxDayId,
+            sypMinorPerUsd: null,
             createdBy: managerId,
             reason: 'orphan receivable journal',
           },
@@ -1074,6 +1216,7 @@ if (!DATABASE_URL) {
             postingDate: '2026-08-23',
             weekStartDate: '2026-08-23',
             fxDayId,
+            sypMinorPerUsd: null,
             createdBy: managerId,
             reason: 'inactive driver cannot receive a new advance',
           },
@@ -1084,6 +1227,9 @@ if (!DATABASE_URL) {
             id: randomUUID(),
             amount: minor(1n),
             reason: 'inactive driver cannot receive a new advance',
+            intent: 'command',
+            priorBalance: null,
+            targetBalance: null,
             idempotencyKey: inactiveCreateKey,
             journalEntryId: inactiveCreateJournal!.id,
           }),
@@ -1103,6 +1249,7 @@ if (!DATABASE_URL) {
             postingDate: '2026-08-23',
             weekStartDate: '2026-08-23',
             fxDayId,
+            sypMinorPerUsd: null,
             createdBy: managerId,
             reason: 'inactive driver debt collection',
           },
@@ -1114,6 +1261,9 @@ if (!DATABASE_URL) {
             direction: 'collect',
             amount: minor(1n),
             reason: 'inactive driver debt collection',
+            intent: 'command',
+            priorBalance: null,
+            targetBalance: null,
             idempotencyKey: inactiveCollectKey,
             journalEntryId: inactiveCollectJournal!.id,
           }),
@@ -1150,6 +1300,7 @@ if (!DATABASE_URL) {
             postingDate: '2026-08-23',
             weekStartDate: '2026-08-23',
             fxDayId,
+            sypMinorPerUsd: null,
             createdBy: managerId,
             reason: invisibleReason,
           },
@@ -1201,6 +1352,7 @@ if (!DATABASE_URL) {
             postingDate: '2026-08-23',
             weekStartDate: '2026-08-23',
             fxDayId,
+            sypMinorPerUsd: null,
             createdBy: managerId,
             reason: 'forged fund identity',
           },
@@ -1214,6 +1366,9 @@ if (!DATABASE_URL) {
             channel: 'wallet',
             amount: minor(1n),
             reason: 'forged fund identity',
+            intent: 'command',
+            priorBalance: null,
+            targetBalance: null,
             idempotencyKey: forgedFundKey,
             journalEntryId: forgedFundJournal!.id,
           }),
@@ -1234,6 +1389,7 @@ if (!DATABASE_URL) {
             postingDate: '2026-08-23',
             weekStartDate: '2026-08-23',
             fxDayId,
+            sypMinorPerUsd: null,
             createdBy: managerId,
             reason: 'mismatched line recipe',
           },
@@ -1245,6 +1401,9 @@ if (!DATABASE_URL) {
             channel: 'wallet',
             amount: minor(1n),
             reason: 'mismatched line recipe',
+            intent: 'command',
+            priorBalance: null,
+            targetBalance: null,
             idempotencyKey: mismatchedLinesKey,
             journalEntryId: mismatchedLinesJournal!.id,
           }),
@@ -1294,6 +1453,7 @@ if (!DATABASE_URL) {
             postingDate: '2026-08-23',
             weekStartDate: '2026-08-23',
             fxDayId,
+            sypMinorPerUsd: null,
             createdBy: managerId,
             reason: 'too much collection',
           },
@@ -1309,6 +1469,9 @@ if (!DATABASE_URL) {
             amount: minor(851n),
             businessDate: '2026-08-23',
             reason: 'too much collection',
+            intent: 'command',
+            priorBalance: null,
+            targetBalance: null,
             idempotencyKey: overKey,
             journalEntryId: overJournal!.id,
             createdBy: managerId,
@@ -1406,6 +1569,7 @@ if (!DATABASE_URL) {
             postingDate: businessDate,
             weekStartDate: businessDate,
             fxDayId,
+            sypMinorPerUsd: null,
             createdBy: managerId,
             reason: 'concurrency baseline',
           },
@@ -1420,6 +1584,9 @@ if (!DATABASE_URL) {
           amount: minor(100n),
           businessDate,
           reason: 'concurrency baseline',
+          intent: 'command',
+          priorBalance: null,
+          targetBalance: null,
           idempotencyKey: baselineKey,
           journalEntryId: baselineJournal!.id,
           createdBy: managerId,
@@ -1458,6 +1625,7 @@ if (!DATABASE_URL) {
               postingDate: businessDate,
               weekStartDate: businessDate,
               fxDayId,
+              sypMinorPerUsd: null,
               createdBy: managerId,
               reason: 'first concurrent collection',
             },
@@ -1474,6 +1642,9 @@ if (!DATABASE_URL) {
             amount: minor(60n),
             businessDate,
             reason: 'first concurrent collection',
+            intent: 'command',
+            priorBalance: null,
+            targetBalance: null,
             idempotencyKey: firstKey,
             journalEntryId: firstJournal!.id,
             createdBy: managerId,
@@ -1493,6 +1664,7 @@ if (!DATABASE_URL) {
               postingDate: businessDate,
               weekStartDate: businessDate,
               fxDayId,
+              sypMinorPerUsd: null,
               createdBy: managerId,
               reason: 'second concurrent collection',
             },
@@ -1510,6 +1682,9 @@ if (!DATABASE_URL) {
             amount: minor(60n),
             businessDate,
             reason: 'second concurrent collection',
+            intent: 'command',
+            priorBalance: null,
+            targetBalance: null,
             idempotencyKey: secondKey,
             journalEntryId: secondJournal!.id,
             createdBy: managerId,
@@ -1723,6 +1898,7 @@ if (!DATABASE_URL) {
               postingDate: businessDate,
               weekStartDate: businessDate,
               fxDayId,
+              sypMinorPerUsd: null,
               createdBy: managerId,
             },
           )
@@ -1739,6 +1915,7 @@ if (!DATABASE_URL) {
             grossDriverShare: minor(400n),
             cashDeductionTotal: minor(0n),
             baseDriverShare: minor(400n),
+            managerCharge: minor(0n),
             expectedTotal: minor(10_000n),
             actualCash: minor(8_000n),
             actualWallet: minor(2_000n),
@@ -1750,6 +1927,8 @@ if (!DATABASE_URL) {
             walletClaimToOffice: minor(2_000n),
             cashReceivableDeferred: minor(600n),
             walletReceivableDeferred: minor(500n),
+            maximumCashShortageReceivable: minor(0n),
+            cashShortageReceivable: minor(0n),
             cashToOffice: minor(7_000n),
             walletToOffice: minor(1_500n),
             cashAction: 'collect',

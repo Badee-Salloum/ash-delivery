@@ -795,7 +795,7 @@ export function PhotoSlot({
                     value={restoreReason}
                     onChange={(event) => setRestoreReason(event.target.value)}
                     maxLength={240}
-                    className="mt-1 min-h-9 w-full min-w-0 rounded-lg border border-slate-200 bg-white px-2 text-xs"
+                    className="mt-1 min-h-9 w-full min-w-0 rounded-lg border border-slate-200 bg-surface-card px-2 text-xs"
                   />
                 </label>
               ) : null}
@@ -804,7 +804,7 @@ export function PhotoSlot({
                 return (
                   <div
                     key={item.historyId}
-                    className="grid min-w-0 grid-cols-[2.5rem_minmax(0,1fr)] items-center gap-2 rounded-lg bg-white p-1.5"
+                    className="grid min-w-0 grid-cols-[2.5rem_minmax(0,1fr)] items-center gap-2 rounded-lg bg-surface-card p-1.5"
                   >
                     <img
                       src={closeDraftThumbnailPath(shiftId, item.mediaId)}
@@ -819,7 +819,7 @@ export function PhotoSlot({
                         type="button"
                         disabled={restoreReason.trim().length === 0 || restoringHistoryId !== null}
                         onClick={() => void restoreHistory(item)}
-                        className="mt-1 min-h-8 w-full rounded-lg bg-slate-900 px-2 text-[10px] font-medium text-white disabled:opacity-40"
+                        className="mt-1 min-h-8 w-full rounded-lg bg-ink px-2 text-[10px] font-medium text-ink-inverse disabled:opacity-40"
                       >
                         {restoringHistoryId === item.historyId ? t.common.loading : t.shift.restoreAttachment}
                       </button>
@@ -848,7 +848,7 @@ export function PhotoSlot({
               ? 'border-red-400 bg-red-50'
               : attached
                 ? 'border-emerald-400 bg-emerald-50'
-                : 'border-dashed border-slate-300 bg-white'
+                : 'border-dashed border-slate-300 bg-surface-card'
           }`}
         >
           <span className="absolute end-1 top-1 z-10 text-xs" aria-hidden>
@@ -874,7 +874,7 @@ export function PhotoSlot({
             onClick={() => (confirming ? void remove() : setConfirming(true))}
             onBlur={() => setConfirming(false)}
             className={`mt-1 min-h-8 w-full rounded-lg px-1 text-[10px] font-medium ${
-              confirming ? 'bg-red-600 text-white' : 'text-slate-500'
+              confirming ? 'bg-danger-solid text-white' : 'text-slate-500'
             }`}
           >
             {confirming ? t.shift.removePhotoConfirm : t.shift.removePhoto}
@@ -895,7 +895,7 @@ export function PhotoSlot({
             ? 'border-red-400 bg-red-50'
             : attached
               ? 'border-emerald-400 bg-emerald-50'
-              : 'border-slate-300 bg-white'
+              : 'border-slate-300 bg-surface-card'
         }`}
       >
         <span className="min-w-0 truncate text-sm font-medium">{label}</span>

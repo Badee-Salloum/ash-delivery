@@ -1,48 +1,39 @@
-import { type ReactNode, useCallback, useEffect, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { useApp } from './app-context.tsx'
-import { Badge, Wordmark } from './ui.tsx'
+import { Badge, FOCUS_RING, Wordmark } from './ui.tsx'
+import { Icon, type IconName } from './icons.tsx'
 import { type Notif, NotificationBell } from './NotificationBell.tsx'
 import { Login } from './screens/Login.tsx'
 import { Dashboard } from './screens/Dashboard.tsx'
+import { VehicleHistory } from './screens/VehicleHistory.tsx'
 import { AWAITING_STATES, Queue } from './screens/Queue.tsx'
 import { LiveShifts } from './screens/LiveShifts.tsx'
 import { CompletedShifts } from './screens/CompletedShifts.tsx'
 import { PreapprovedShifts } from './screens/PreapprovedShifts.tsx'
 import { GpsLive } from './screens/GpsLive.tsx'
 import { Approval } from './screens/Approval.tsx'
+import { ErrorBoundary } from './ErrorBoundary.tsx'
 import { Fleet } from './screens/Fleet.tsx'
 import { FleetConfig } from './screens/FleetConfig.tsx'
 import { Treasury } from './screens/Treasury.tsx'
+import { CompanyFund } from './screens/CompanyFund.tsx'
 import { Expenses } from './screens/Expenses.tsx'
+import { CheckIn } from './screens/CheckIn.tsx'
 import { Accounts } from './screens/Accounts.tsx'
 import { Audit } from './screens/Audit.tsx'
+import { Removals } from './screens/Removals.tsx'
 import { Permissions } from './screens/Permissions.tsx'
 import { Settings } from './screens/Settings.tsx'
 import { canManagePreapprovedShifts } from './preapproved-shifts.ts'
+import { type RouteParams, type RouteView, type Section, formatHash, paramsKey, parseHash } from './route.ts'
+import { HashParamsContext, replaceHashParams } from './use-hash-params.ts'
 
-const SECTIONS = [
-  'dashboard',
-  'queue',
-  'liveShifts',
-  'completedShifts',
-  'preapprovedShifts',
-  'gpsLive',
-  'fleet',
-  'fleetConfig',
-  'treasury',
-  'expenses',
-  'accounts',
-  'audit',
-  'permissions',
-  'settings',
-] as const
-type Section = (typeof SECTIONS)[number]
-
-/** The view encoded in the URL hash: a section, or `shift:<id>` for the review overlay. */
-function viewFromHash(): { section: Section; openShift: string | null } {
-  const raw = decodeURIComponent(location.hash.slice(1))
-  if (raw.startsWith('shift:')) return { section: 'dashboard', openShift: raw.slice('shift:'.length) }
-  return { section: (SECTIONS as readonly string[]).includes(raw) ? (raw as Section) : 'dashboard', openShift: null }
+/**
+ * The view encoded in the URL hash: a section with its filter params, or `shift:<id>` for the
+ * review overlay. Parsing and validation live in `route.ts` (pure, unit-tested).
+ */
+function viewFromHash(): RouteView {
+  return parseHash(location.hash)
 }
 
 /**
@@ -50,11 +41,42 @@ function viewFromHash(): { section: Section; openShift: string | null } {
  * the main pane when a queue item is opened, then returns.
  */
 export function AdminApp(): ReactNode {
-  const { session, t, lang, setLang, api, setSession, branches, branchId, setBranchId } = useApp()
+  const { session, t, lang, setLang, theme, setTheme, api, setSession, branches, branchId, setBranchId } =
+    useApp()
   // Initialise from the URL hash so a refresh or a shared link restores the view immediately —
   // before the reflect effect runs, so a deep link is never overwritten by the default.
-  const [section, setSection] = useState<Section>(() => viewFromHash().section)
+  const [section, setSectionState] = useState<Section>(() => viewFromHash().section)
   const [openShift, setOpenShift] = useState<string | null>(() => viewFromHash().openShift)
+  /*
+   * P2 — the filters a screen was MOUNTED with (its `key` and `initial`), and the filters it holds
+   * NOW. A screen narrowing its list replaces the URL without a history step and reports here, so
+   * closing a shift overlay returns to the filtered view rather than the one first opened, while
+   * the screen itself is not remounted by its own typing.
+   */
+  const [mountedParams, setMountedParams] = useState<RouteParams>(() => viewFromHash().params)
+  // Every navigation mounts afresh — even the rail item already on screen, which must drop the
+  // filters it holds rather than keep them under a bare URL.
+  const [mountNonce, setMountNonce] = useState(0)
+  const mountKey = `${mountNonce}:${paramsKey(mountedParams)}`
+  const liveParams = useRef<RouteParams>(mountedParams)
+  // The section as the hashchange handler must see it: synchronously, not from a stale closure.
+  const sectionRef = useRef<Section>(section)
+  sectionRef.current = section
+  /** Navigate to a section, with the params a link carries (none from the rail). */
+  const setSection = useCallback((next: Section, params: RouteParams = {}) => {
+    sectionRef.current = next
+    setSectionState(next)
+    setMountedParams(params)
+    setMountNonce((n) => n + 1)
+    liveParams.current = params
+  }, [])
+  const replaceParams = useCallback(
+    (params: RouteParams) => {
+      liveParams.current = params
+      replaceHashParams(section, params, window)
+    },
+    [section],
+  )
   const [notifs, setNotifs] = useState<Notif[]>([])
   const [queueCount, setQueueCount] = useState(0)
   const [navOpen, setNavOpen] = useState(false) // the rail is a drawer below lg
@@ -65,28 +87,34 @@ export function AdminApp(): ReactNode {
    * restores the view — not always the dashboard — and Back/forward still walk the console instead
    * of leaving the app. No router dependency: the SPA's catch-all `index.html` fallback is enough.
    */
-  const view = openShift ? `shift:${openShift}` : section
+  // `formatHash`, not the bare section: the filters survive the reflect, which used to strip them.
+  const view = formatHash({ section, openShift, params: liveParams.current })
   useEffect(() => {
     if (!session) return
-    if (decodeURIComponent(location.hash.slice(1)) !== view) location.hash = view
+    // Compared NORMALISED, so an equivalent spelling (or one carrying dropped junk) is rewritten
+    // once and never fought over.
+    if (formatHash(viewFromHash()) !== view) location.hash = view
   }, [session, view])
   useEffect(() => {
     if (!session) return
     // Back/forward and manual hash edits fire `hashchange`; apply it to state. A `shift:` hash only
     // toggles the overlay — the section behind it is left as-is, so closing the review returns to
-    // wherever it was opened from (the queue), not the dashboard.
+    // wherever it was opened from (the queue, or a filtered list), not the dashboard.
     const apply = (): void => {
-      const raw = decodeURIComponent(location.hash.slice(1))
-      if (raw.startsWith('shift:')) {
-        setOpenShift(raw.slice('shift:'.length))
-      } else {
-        setOpenShift(null)
-        setSection((SECTIONS as readonly string[]).includes(raw) ? (raw as Section) : 'dashboard')
+      const next = viewFromHash()
+      if (next.openShift !== null) {
+        setOpenShift(next.openShift)
+        return
       }
+      setOpenShift(null)
+      // Arriving back at the view the screen already shows (closing the overlay with Back) keeps
+      // the mounted screen; any other section or filter set mounts it afresh.
+      if (sectionRef.current === next.section && paramsKey(next.params) === paramsKey(liveParams.current)) return
+      setSection(next.section, next.params)
     }
     window.addEventListener('hashchange', apply)
     return () => window.removeEventListener('hashchange', apply)
-  }, [session])
+  }, [session, setSection])
 
   const refreshNotifs = useCallback(() => {
     void api.notifications().then((n) => setNotifs(n.notifications)).catch(() => undefined)
@@ -144,31 +172,55 @@ export function AdminApp(): ReactNode {
   // Account management is a sysadmin/GM permission (user.manage), so the tab only shows for them.
   const canManageUsers = session.roleKey === 'system_admin' || session.roleKey === 'general_manager'
   const canManagePreapproved = canManagePreapprovedShifts(session.roleKey)
+  const canManageCompanyFund = session.roleKey === 'system_admin' || session.roleKey === 'general_manager'
   // gps.view — the same two roles; the branch manager no longer has it.
   const canSeeMap = canManageUsers
-  const nav: Array<{ key: Section; label: string; badge?: number | undefined }> = [
-    { key: 'dashboard', label: t.dashboard.title },
-    { key: 'queue', label: t.approval.queue, badge: queueCount || undefined },
-    { key: 'liveShifts', label: t.liveShifts.title },
-    { key: 'completedShifts', label: t.completedShifts.title },
+  /*
+   * Grouped by FUNCTION, and every item carries a glyph.
+   *
+   * It was a flat list of sixteen text lines in which «الإعدادات» and «مصفوفة الصلاحيات» — touched
+   * a few times a year — sat in the same undifferentiated run as «قائمة الاعتماد», which is opened
+   * every shift. Daily work keeps the unlabelled first group because it is the default; the rest
+   * are named, and an empty group disappears with the role that could not see it.
+   */
+  const nav: Array<{
+    key: Section
+    label: string
+    icon: IconName
+    group?: 'money' | 'fleet' | 'system'
+    badge?: number | undefined
+  }> = [
+    { key: 'dashboard', label: t.dashboard.title, icon: 'dashboard' },
+    { key: 'queue', label: t.approval.queue, icon: 'queue', badge: queueCount || undefined },
+    { key: 'liveShifts', label: t.liveShifts.title, icon: 'live' },
+    { key: 'completedShifts', label: t.completedShifts.title, icon: 'completed' },
     ...(canManagePreapproved
-      ? [{ key: 'preapprovedShifts' as const, label: t.preapprovedShifts.title }]
+      ? [{ key: 'preapprovedShifts' as const, label: t.preapprovedShifts.title, icon: 'calendar' as const }]
       : []),
     // The live map is gps.view — the GM and the system admin only. The branch manager runs his
     // branch from the shift screens. (The API enforces it too; this only stops offering a 403.)
-    ...(canSeeMap ? [{ key: 'gpsLive' as const, label: t.gpsLive.title }] : []),
-    { key: 'fleet', label: `${t.fleet.drivers} / ${t.fleet.vehicles}` },
-    { key: 'treasury', label: t.treasury.branchTreasury },
-    { key: 'expenses', label: t.expenses.title },
-    ...(canManageUsers ? [{ key: 'accounts' as const, label: t.accounts.title }] : []),
+    ...(canSeeMap ? [{ key: 'gpsLive' as const, label: t.gpsLive.title, icon: 'map' as const }] : []),
+    { key: 'fleet', label: `${t.fleet.drivers} / ${t.fleet.vehicles}`, icon: 'bike', group: 'fleet' },
+    { key: 'treasury', label: t.treasury.branchTreasury, icon: 'treasury', group: 'money' },
+    ...(canManageCompanyFund
+      ? [{ key: 'companyFund' as const, label: t.companyFinance.title, icon: 'treasury' as const, group: 'money' as const }]
+      : []),
+    { key: 'expenses', label: t.expenses.title, icon: 'expenses', group: 'money' },
+    // «التفقّد» — the branch manager's own rounds. Drivers never see it; they are out on the road
+    // and their whereabouts already ride on their shift.
+    ...(session.roleKey !== 'driver' ? [{ key: 'checkin' as const, label: t.checkin.title, icon: 'checkin' as const }] : []),
+    ...(canManageUsers ? [{ key: 'accounts' as const, label: t.accounts.title, icon: 'accounts' as const, group: 'system' as const }] : []),
     // audit.view is granted to the sysadmin and the GM — the same two roles.
-    ...(canManageUsers ? [{ key: 'audit' as const, label: t.audit.title }] : []),
-    ...(canManageUsers ? [{ key: 'permissions' as const, label: t.permissions.title }] : []),
+    ...(canManageUsers ? [{ key: 'audit' as const, label: t.audit.title, icon: 'audit' as const, group: 'system' as const }] : []),
+    // «سجلّ الحذف» — same permission, and beside the audit trail because it is the readable
+    // half of it: the audit log needs a table name and a UUID before it answers anything.
+    ...(canManageUsers ? [{ key: 'removals' as const, label: t.removals.title, icon: 'removals' as const, group: 'system' as const }] : []),
+    ...(canManageUsers ? [{ key: 'permissions' as const, label: t.permissions.title, icon: 'permissions' as const, group: 'system' as const }] : []),
     // The numbering scheme is settings.write — the system admin alone. Renumbering a type or a
     // branch restates printed vehicle numbers, so it does not belong beside day-to-day fleet work.
-    ...(session.roleKey === 'system_admin' ? [{ key: 'fleetConfig' as const, label: t.fleet.numberingTitle }] : []),
+    ...(session.roleKey === 'system_admin' ? [{ key: 'fleetConfig' as const, label: t.fleet.numberingTitle, icon: 'hash' as const, group: 'fleet' as const }] : []),
     // FX rate + general settings are settings.write / fx_rate.write — system admin only.
-    ...(session.roleKey === 'system_admin' ? [{ key: 'settings' as const, label: t.settings.title }] : []),
+    ...(session.roleKey === 'system_admin' ? [{ key: 'settings' as const, label: t.settings.title, icon: 'settings' as const, group: 'system' as const }] : []),
   ]
 
   return (
@@ -176,10 +228,10 @@ export function AdminApp(): ReactNode {
       {/* On a phone/tablet the rail is an off-canvas drawer; a dim overlay closes it. On lg+ it is
           a normal static column and the overlay/hamburger never show. */}
       {navOpen ? (
-        <div className="fixed inset-0 z-30 bg-slate-900/40 lg:hidden" onClick={() => setNavOpen(false)} aria-hidden="true" />
+        <div className="fixed inset-0 z-30 bg-scrim/40 lg:hidden" onClick={() => setNavOpen(false)} aria-hidden="true" />
       ) : null}
       <aside
-        className={`fixed inset-y-0 start-0 z-40 flex w-60 flex-col gap-1 overflow-y-auto border-e border-slate-200 bg-white p-3 transition-transform lg:static lg:z-auto lg:translate-x-0 ${
+        className={`fixed inset-y-0 start-0 z-40 flex w-60 flex-col gap-1 overflow-y-auto border-e border-slate-200 bg-surface-card p-3 transition-transform lg:static lg:z-auto lg:translate-x-0 ${
           navOpen ? 'translate-x-0' : 'ltr:-translate-x-full rtl:translate-x-full lg:ltr:translate-x-0 lg:rtl:translate-x-0'
         }`}
       >
@@ -212,23 +264,78 @@ export function AdminApp(): ReactNode {
             </select>
           ) : null}
         </div>
-        {nav.map((n) => (
-          <button
-            key={n.key}
-            onClick={() => {
-              setSection(n.key)
-              setOpenShift(null)
-              setNavOpen(false)
-            }}
-            className={`flex items-center justify-between rounded-lg px-3 py-2 text-start text-sm font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-brand/40 ${
-              section === n.key && !openShift ? 'bg-brand text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100'
-            }`}
-          >
-            <span>{n.label}</span>
-            {n.badge ? <Badge tone="red">{n.badge}</Badge> : null}
-          </button>
-        ))}
-        <div className="mt-auto flex flex-col gap-1 border-t border-slate-100 pt-2">
+        {([undefined, 'money', 'fleet', 'system'] as const).map((group) => {
+          const items = nav.filter((n) => n.group === group)
+          // A group whose every item was filtered out by role disappears with them, rather than
+          // leaving a heading over nothing.
+          if (items.length === 0) return null
+          const heading =
+            group === 'money'
+              ? t.common.navMoney
+              : group === 'fleet'
+                ? t.common.navFleet
+                : group === 'system'
+                  ? t.common.navSystem
+                  : null
+          return (
+            <div key={group ?? 'daily'} className="flex flex-col gap-1">
+              {heading ? (
+                // No `uppercase`, no `tracking-wider`: Arabic has no letter case, and extra tracking
+                // pulls apart the joins that make the script legible. Weight and colour do the work.
+                <div className="mt-3 px-3 pb-0.5 text-label font-semibold text-ink-faint">{heading}</div>
+              ) : null}
+              {items.map((n) => (
+                <button
+                  key={n.key}
+                  onClick={() => {
+                    setSection(n.key)
+                    setOpenShift(null)
+                    setNavOpen(false)
+                  }}
+                  aria-current={section === n.key && !openShift ? 'page' : undefined}
+                  className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-start text-body font-medium outline-none transition-colors ${FOCUS_RING} ${
+                    section === n.key && !openShift
+                      ? 'bg-brand text-ink-inverse shadow-sm'
+                      : 'text-ink-secondary hover:bg-surface-raised'
+                  }`}
+                >
+                  <Icon name={n.icon} />
+                  <span className="min-w-0 flex-1 truncate">{n.label}</span>
+                  {n.badge ? <Badge tone="danger">{n.badge}</Badge> : null}
+                </button>
+              ))}
+            </div>
+          )
+        })}
+        <div className="mt-auto flex flex-col gap-1 border-t border-line-subtle pt-2">
+          {/*
+            Three states, not a switch. «Auto» is the default and follows the device, so a manager
+            who never thinks about this still gets the right thing at night; the other two are a
+            deliberate override that survives reloads. A two-way toggle would have forced everyone
+            to make a choice they mostly do not have.
+          */}
+          <div className="px-3 pb-1 pt-1 text-label font-medium text-ink-muted">{t.common.theme}</div>
+          <div role="group" aria-label={t.common.theme} className="flex gap-1 px-2 pb-1">
+            {([
+              ['system', t.common.themeSystem],
+              ['light', t.common.themeLight],
+              ['dark', t.common.themeDark],
+            ] as const).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setTheme(value)}
+                aria-pressed={theme === value}
+                className={`flex-1 rounded-lg px-2 py-1.5 text-label font-medium outline-none transition-colors ${FOCUS_RING} ${
+                  theme === value
+                    ? 'bg-brand text-ink-inverse'
+                    : 'text-ink-secondary hover:bg-surface-raised'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <button
             onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}
             className="rounded-lg px-3 py-2 text-start text-sm text-slate-600 outline-none hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-brand/40"
@@ -256,7 +363,7 @@ export function AdminApp(): ReactNode {
 
       <div className="flex min-w-0 flex-1 flex-col">
         {/* Mobile top bar: a hamburger to open the rail. Hidden on lg where the rail is static. */}
-        <div className="flex items-center gap-3 border-b border-slate-200 bg-white p-3 lg:hidden">
+        <div className="flex items-center gap-3 border-b border-slate-200 bg-surface-card p-3 lg:hidden">
           <button
             aria-label={t.common.menu}
             onClick={() => setNavOpen(true)}
@@ -271,20 +378,45 @@ export function AdminApp(): ReactNode {
             <NotificationBell notifications={notifs} onMarkRead={markRead} onNavigate={openNotif} />
           </div>
         </div>
+        {/*
+          * `max-w-[110rem]` and a page title, neither of which existed.
+          *
+          * The frame was `p-3 lg:p-6` with no width bound, so on a 27-inch monitor the treasury
+          * tables ran to two thousand pixels and a seven-column row became a horizon. And the name
+          * of the screen you were on appeared nowhere except the highlighted pill in the rail — on
+          * a phone, where the rail is a closed drawer, it appeared nowhere at all.
+          *
+          * The shift review is exempt: it carries its own header, and a second one above it would
+          * be two titles for one screen.
+          */}
         <main className="flex-1 overflow-y-auto p-3 lg:p-6">
+        <HashParamsContext.Provider value={replaceParams}>
+        <div className="mx-auto w-full max-w-[110rem]">
+        {!openShift && section !== 'vehicle' ? (
+          <h1 className="mb-4 text-page font-bold text-ink">
+            {nav.find((n) => n.key === section)?.label ?? t.dashboard.title}
+          </h1>
+        ) : null}
         {openShift ? (
           /* A notification can replace `openShift` while a review is already mounted. Keying the
              workspace prevents typed cash/top-up or confirmations from one driver surviving into
-             another driver's shift. */
-          <Approval key={openShift} shiftId={openShift} onDone={() => setOpenShift(null)} />
+             another driver's shift.
+
+             ITS OWN BOUNDARY. The root one in `main.tsx` catches everything, but a throw here takes
+             the whole console down with it — the rail, the queue, the treasury. This screen is the
+             one under active rebuild and the one a manager is standing at a counter using, so a
+             throw should cost him this shift's review and nothing else. */
+          <ErrorBoundary key={`boundary:${openShift}`}>
+            <Approval key={openShift} shiftId={openShift} onDone={() => setOpenShift(null)} />
+          </ErrorBoundary>
         ) : section === 'dashboard' ? (
-          <Dashboard />
+          <Dashboard key={mountKey} initial={liveParams.current} />
         ) : section === 'queue' ? (
           <Queue onOpen={setOpenShift} />
         ) : section === 'liveShifts' ? (
-          <LiveShifts onOpen={setOpenShift} />
+          <LiveShifts key={mountKey} initial={liveParams.current} onOpen={setOpenShift} />
         ) : section === 'completedShifts' ? (
-          <CompletedShifts onOpen={setOpenShift} />
+          <CompletedShifts key={mountKey} initial={liveParams.current} onOpen={setOpenShift} />
         ) : section === 'preapprovedShifts' && canManagePreapproved ? (
           <PreapprovedShifts />
         ) : section === 'gpsLive' ? (
@@ -293,12 +425,20 @@ export function AdminApp(): ReactNode {
           <Fleet />
         ) : section === 'fleetConfig' ? (
           <FleetConfig />
+        ) : section === 'vehicle' ? (
+          <VehicleHistory key={mountKey} initial={liveParams.current} />
         ) : section === 'expenses' ? (
           <Expenses />
+        ) : section === 'companyFund' && canManageCompanyFund ? (
+          <CompanyFund key={mountKey} initial={liveParams.current} />
+        ) : section === 'checkin' ? (
+          <CheckIn />
         ) : section === 'accounts' ? (
           <Accounts />
         ) : section === 'audit' ? (
           <Audit />
+        ) : section === 'removals' ? (
+          <Removals />
         ) : section === 'permissions' ? (
           <Permissions />
         ) : section === 'settings' ? (
@@ -306,6 +446,8 @@ export function AdminApp(): ReactNode {
         ) : (
           <Treasury />
         )}
+        </div>
+        </HashParamsContext.Provider>
         </main>
       </div>
     </div>

@@ -1,7 +1,7 @@
-import { runConformanceSuite } from '@ash/testkit/conformance'
-import type { ShiftRecord } from '@ash/contracts'
+import { COMPANY_BRANCH, CONFORMANCE_BRANCH, runConformanceSuite } from '@ash/testkit/conformance'
+import type { BranchRecord, ShiftRecord } from '@ash/contracts'
 import { minor } from '@ash/domain'
-import { createMemoryDeps } from '../src/memory/index.ts'
+import { type MemoryLedgerRepo, createMemoryDeps } from '../src/memory/index.ts'
 
 const NOW_MS = Date.UTC(2026, 6, 21, 5, 0, 0)
 const USER = '22222222-2222-2222-2222-222222222222'
@@ -36,6 +36,7 @@ const conformanceShift = (): ShiftRecord => ({
   endWalletDeclaredOcr: null,
   driverConfirmedAt: null,
   openApprovedAt: null,
+  windowOpensAt: null,
   openApprovedBy: null,
   submittedAt: null,
   equationDiff: null,
@@ -43,6 +44,25 @@ const conformanceShift = (): ShiftRecord => ({
   walletDiff: null,
   ordersHash: null,
   approvedBy: null,
+  approvedAt: null,
+  managerCharge: minor(0n),
+  managerChargeReason: null,
+})
+
+const GOVERNORATE = '99999999-9999-9999-9999-999999999999'
+
+const branchRow = (id: string, code: string, branchNo: number, kind: BranchRecord['kind']): BranchRecord => ({
+  id,
+  code,
+  nameAr: code,
+  nameEn: code,
+  timezone: 'Asia/Damascus',
+  governorateId: GOVERNORATE,
+  branchNo,
+  lat: null,
+  lng: null,
+  checkinRadiusM: 150,
+  kind,
 })
 
 // The same suite the PostgreSQL adapters must pass. If these two ever disagree, one is wrong.
@@ -50,7 +70,13 @@ runConformanceSuite({
   label: 'in-memory',
   makeDeps: async () => {
     const deps = createMemoryDeps(NOW_MS)
+    // What a migrated, seeded database holds: the branch, and the company row 0066 adds.
+    deps.directory.branches.set(CONFORMANCE_BRANCH, branchRow(CONFORMANCE_BRANCH, 'DAM', 1, 'branch'))
+    deps.directory.branches.set(COMPANY_BRANCH, branchRow(COMPANY_BRANCH, 'HQ', 0, 'company'))
     await deps.shifts.create(conformanceShift(), USER)
     return deps
+  },
+  plantFund: async (deps, branchId, fund) => {
+    ;(deps.ledger as MemoryLedgerRepo).setFundCurrency(branchId, fund.code, fund.currency)
   },
 })

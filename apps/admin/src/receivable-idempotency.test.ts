@@ -12,6 +12,7 @@ import {
   receivableOutboxKey,
   receivableOperationReady,
   receivableRejectionDefinitelyDidNotCommit,
+  receivableWriteoffAmountWithinBalance,
   savePendingReceivableOperation,
   type ReceivableOperationMutex,
   type ReceivableOperationStorage,
@@ -92,6 +93,7 @@ describe('direct receivable submit idempotency', () => {
     ['kind', { receivableKind: 'shift_funding' as const }],
     ['channel', { channel: 'wallet' as const }],
     ['direction', { direction: 'collect' as const }],
+    ['write-off direction', { direction: 'writeoff' as const }],
     ['amount', { amount: '251.00' }],
     ['reason', { reason: 'Different reason' }],
   ])('keeps the pending command immutable when the %s changes', (_label, change) => {
@@ -114,7 +116,7 @@ describe('direct receivable submit idempotency', () => {
     expect(receivableOperationReady({ ...payload, reason: '   ' })).toBe(false)
   })
 
-  it('keeps inactive debtors available only for collection', () => {
+  it('keeps inactive debtors available for collection and write-off, but never new advances', () => {
     const active = { id: 'active', active: true }
     const inactiveDebtor = { id: 'inactive-debtor', active: false }
     const inactiveClear = { id: 'inactive-clear', active: false }
@@ -127,7 +129,41 @@ describe('direct receivable submit idempotency', () => {
     expect(receivableDriverMaySubmit(active, 'create')).toBe(true)
     expect(receivableDriverMaySubmit(inactiveDebtor, 'create')).toBe(false)
     expect(receivableDriverMaySubmit(inactiveDebtor, 'collect')).toBe(true)
+    expect(receivableDriverMaySubmit(inactiveDebtor, 'writeoff')).toBe(true)
     expect(receivableDriverMaySubmit(undefined, 'collect')).toBe(false)
+  })
+
+  it('accepts a write-off only for an ordinary receivable', () => {
+    expect(receivableOperationReady({ ...payload, direction: 'writeoff' })).toBe(true)
+    expect(receivableOperationReady({
+      ...payload,
+      direction: 'writeoff',
+      receivableKind: 'shift_funding',
+    })).toBe(false)
+  })
+
+  it('persists and restores the exact write-off command for a lost response retry', () => {
+    const storage = new MemoryStorage()
+    const writeoffPayload = { ...payload, direction: 'writeoff' as const, reason: 'approved loss' }
+    const operation = pendingReceivableOperation(null, writeoffPayload, () => KEY_1)
+    expect(savePendingReceivableOperation(storage, 'actor-1', 'branch-1', operation)).toBe(true)
+    expect(loadPendingReceivableOperation(storage, 'actor-1', 'branch-1')).toEqual({
+      status: 'pending',
+      operation,
+    })
+  })
+
+  it('allows an exact write-off replay after the committed write-off reduced the loaded balance', () => {
+    const writeoffPayload = {
+      ...payload,
+      direction: 'writeoff' as const,
+      amount: '500.00',
+      reason: 'approved loss',
+    }
+
+    expect(receivableWriteoffAmountWithinBalance(writeoffPayload, '0.00', false)).toBe(false)
+    expect(receivableWriteoffAmountWithinBalance(writeoffPayload, '0.00', true)).toBe(true)
+    expect(receivableWriteoffAmountWithinBalance(writeoffPayload, '500.00', false)).toBe(true)
   })
 
   it('restores a complete outbox only for the same actor and branch', () => {

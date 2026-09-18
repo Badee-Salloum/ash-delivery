@@ -64,14 +64,14 @@ export function NotificationBell({
           <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
         {unread > 0 ? (
-          <span className="absolute -top-0.5 end-0 min-w-4 rounded-full bg-red-600 px-1 text-center text-[10px] font-bold leading-4 text-white">
+          <span className="absolute -top-0.5 end-0 min-w-4 rounded-full bg-danger-solid px-1 text-center text-[10px] font-bold leading-4 text-white">
             {unread}
           </span>
         ) : null}
       </button>
 
       {open ? (
-        <div className="absolute end-0 top-full z-50 mt-2 max-h-96 w-72 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl">
+        <div className="absolute end-0 top-full z-50 mt-2 max-h-96 w-72 overflow-y-auto rounded-xl border border-slate-200 bg-surface-card p-1 shadow-xl">
           <div className="px-3 py-2 text-xs font-bold text-slate-500">{t.notifications.title}</div>
           {notifications.length === 0 ? (
             <p className="px-3 py-4 text-center text-sm text-slate-600">{t.notifications.empty}</p>

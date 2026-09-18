@@ -187,6 +187,27 @@ describe('releasing a shift that never opened', () => {
     expect(row).toMatchObject({ id: shiftId, odometerStart: 1_234, orderCount: 0, floatTotal: '0.00', topupTotal: '0.00' })
   })
 
+  it('serves a running shift its slot, and a closed one its pattern (owner schedule, 2026-09-17)', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = (await startShift(driver, DRIVER_ID, VEHICLE_ID)).json().id as string
+    const shift = (await h.deps.shifts.findById(shiftId))!
+    // Confirmed at 09:00 Damascus (06:00Z): the morning slot is certain, the pattern is not yet.
+    await h.deps.shifts.update({ ...shift, state: 'open', windowOpensAt: '2026-07-21T06:00:00.000Z' }, 'u-bm')
+    const live = (await get(manager, '/shifts?live=1')).json().shifts[0] as Record<string, unknown>
+    expect(live.worked).toEqual({ minutes: null, pattern: 'unknown', slot: 'day', abandoned: false })
+
+    // Close sent at 21:00 Damascus: twelve hours is a double, although it started in the morning.
+    // The old boundaries read this exact shift as a long `day`.
+    const running = (await h.deps.shifts.findById(shiftId))!
+    await h.deps.shifts.update(
+      { ...running, state: 'pending_review', submittedAt: '2026-07-21T18:00:00.000Z' },
+      'u-bm',
+    )
+    const closed = (await get(manager, '/shifts?pending=1')).json().shifts[0] as Record<string, unknown>
+    expect(closed.worked).toEqual({ minutes: 720, pattern: 'full', slot: 'day', abandoned: false })
+  })
+
   it('the cancellation is audited', async () => {
     const driver1 = await h.loginAs('driver1')
     const shiftId = (await startShift(driver1, DRIVER_ID, VEHICLE_ID)).json().id

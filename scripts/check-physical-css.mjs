@@ -13,7 +13,10 @@ import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
-const APPS = ['apps/driver/src', 'apps/admin/src'].map((p) => join(ROOT, p))
+//  is in the list because the shared tokens are CSS the two front-ends inherit:
+// a physical property introduced there would break RTL in BOTH apps at once, and the guard would
+// not have been looking at it.
+const APPS = ['apps/driver/src', 'apps/admin/src', 'packages/theme'].map((p) => join(ROOT, p))
 
 // Match physical utilities as whole class tokens, incl. responsive/state prefixes (md:ml-2).
 const BANNED =
@@ -28,6 +31,9 @@ function* walk(dir) {
     return
   }
   for (const entry of entries) {
+    // A workspace package carries its own node_modules symlinks; vendored CSS is not ours to police
+    // and walking it would scan hundreds of irrelevant files for every run.
+    if (entry === 'node_modules') continue
     const full = join(dir, entry)
     if (statSync(full).isDirectory()) yield* walk(full)
     else if (/\.(tsx?|css)$/.test(entry)) yield full

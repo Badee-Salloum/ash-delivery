@@ -140,7 +140,7 @@ export function Accounts(): ReactNode {
             <select
               value={form.roleKey}
               onChange={(e) => setForm({ ...form, roleKey: e.target.value })}
-              className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm outline-none focus:border-brand"
+              className="min-h-10 rounded-lg border border-slate-300 bg-surface-card px-3 text-sm outline-none focus:border-brand"
             >
               {ROLE_KEYS.map((r) => (
                 <option key={r} value={r}>
@@ -168,7 +168,7 @@ export function Accounts(): ReactNode {
               <select
                 value={form.branchId}
                 onChange={(e) => setForm({ ...form, branchId: e.target.value })}
-                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm outline-none focus:border-brand"
+                className="min-h-10 rounded-lg border border-slate-300 bg-surface-card px-3 text-sm outline-none focus:border-brand"
               >
                 <option value="">—</option>
                 {branches.map((b) => (
@@ -210,7 +210,7 @@ export function Accounts(): ReactNode {
                     aria-label={t.accounts.role}
                     value={editForm.roleKey}
                     onChange={(e) => setEditForm({ ...editForm, roleKey: e.target.value })}
-                    className="min-h-10 rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none focus:border-brand focus-visible:ring-2 focus-visible:ring-brand/40"
+                    className="min-h-10 rounded-lg border border-slate-300 bg-surface-card px-2 text-sm outline-none focus:border-brand focus-visible:ring-2 focus-visible:ring-brand/40"
                   >
                     {ROLE_KEYS.map((r) => (
                       <option key={r} value={r}>
@@ -225,7 +225,7 @@ export function Accounts(): ReactNode {
                       aria-label={t.accounts.branch}
                       value={editForm.branchId}
                       onChange={(e) => setEditForm({ ...editForm, branchId: e.target.value })}
-                      className="min-h-10 rounded-lg border border-slate-300 bg-white px-2 text-sm outline-none focus:border-brand focus-visible:ring-2 focus-visible:ring-brand/40"
+                      className="min-h-10 rounded-lg border border-slate-300 bg-surface-card px-2 text-sm outline-none focus:border-brand focus-visible:ring-2 focus-visible:ring-brand/40"
                     >
                       <option value="">—</option>
                       {branches.map((b) => (

@@ -48,17 +48,30 @@ function operationMinuteKey(date: string | null, minute: string | null): string 
   return `${date} ${minute}`
 }
 
-/** Classify a printed operation minute against the inclusive approved-open/submitted-close window. */
+/**
+ * Classify a printed operation minute against the inclusive open/submitted-close window.
+ *
+ * `windowOpensAt` was `openApprovedAt` until 2026-08-31. The owner amended decision 11's lower
+ * bound to the DRIVER's confirmation, because the manager's approval is an administrative act that
+ * arrived up to 426 minutes after the driver had already started working — and every delivery in
+ * that gap was excluded as `pre_open` and then re-included by hand, every single shift.
+ *
+ * Only the NAME of the instant changed. The truth table below — strict `<` before the open,
+ * inclusive on both boundary minutes, `unknown` whenever either side is unreadable — is untouched,
+ * and its SQL mirror in `0030_operation_window_integrity.sql` is untouched with it. Which instant
+ * to hand in is `shifts.window_opens_at`'s job, and a settled shift still carries the exact bound
+ * it was judged by.
+ */
 export function classifyOperationWindow(input: {
   occurredDate: string | null
   occurredMinute: string | null
-  openApprovedAt: string | null
+  windowOpensAt: string | null
   submittedAt: string | null
   timeZone?: string
   offsetMinutes?: number
 }): OperationWindowStatus {
   const operation = operationMinuteKey(input.occurredDate, input.occurredMinute)
-  const opened = localMinuteKey(input.openApprovedAt, input.timeZone, input.offsetMinutes ?? 0)
+  const opened = localMinuteKey(input.windowOpensAt, input.timeZone, input.offsetMinutes ?? 0)
   if (operation === null || opened === null) return 'unknown'
   if (operation < opened) return 'pre_open'
   if (operation === opened) return 'open_minute_boundary'

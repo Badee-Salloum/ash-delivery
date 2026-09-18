@@ -1,4 +1,5 @@
 import { type Minor, ZERO, abs, add, minor, neg, sub, sum } from '../money/minor.ts'
+import { type Currency, isCurrency } from '../money/currency.ts'
 import { type FeeTotals, type Rounding } from '../money/allocate.ts'
 import type { BlockSplit } from '../money/allocate.ts'
 import { type PayMode, type ShiftOrder, orderWalletAmount, orderYalagoCut, totalFeesOfOrders } from '../br1/equation.ts'
@@ -45,6 +46,8 @@ export type LedgerEvent =
   | 'float_return'
   | 'wallet_return'
   | 'expense'
+  /** «مدخول مباشر» — money reaching the branch that is not a delivery fee. The mirror of `expense`. */
+  | 'income'
   | 'manual'
   | 'correction'
   /** «الترميم» — the daily sweep of profit to صندوق الشركة, or the replenishment of office capital. */
@@ -53,6 +56,70 @@ export type LedgerEvent =
   | 'driver_payout'
   /** Direct driver receivable creation or later collection, outside a shift. */
   | 'receivable_adjustment'
+  /**
+   * «السلفة» — money paid out like a صرفية that must come back in full (owner decision 17).
+   *
+   * Three events rather than one because they are three different facts about the same money and a
+   * reader must be able to tell them apart without reconstructing the lines: it went out, some of
+   * it came back, or the company gave up on the rest and finally spent it.
+   */
+  | 'advance'
+  | 'advance_repayment'
+  | 'advance_conversion'
+  | CompanyLedgerEvent
+
+/**
+ * «صندوق الشركة» as its own ledger (finance redesign C1, migration 0065).
+ *
+ * Every one of these belongs to the company (HQ) ledger and to no branch: migration 0066 refuses
+ * them in a branch and refuses every other event in the company ledger. They are listed apart so
+ * the API, the recipes and the database guard can all name the same set.
+ */
+export type CompanyLedgerEvent =
+  /** The branch `company_box` balance moved as-is into the company SYP pocket at cutover. */
+  | 'company_opening_transfer'
+  /** The HQ half of a branch entry that moved `company_box` («كييش» / «شحن») after cutover. */
+  | 'company_restoration_mirror'
+  | 'company_deposit'
+  | 'company_withdrawal'
+  | 'company_expense'
+  | 'company_income'
+  /** USD⇄SYP: both actual amounts, the resulting rate frozen on the entry. The only two-currency event. */
+  | 'company_fx_exchange'
+  | 'company_debt_open'
+  | 'company_debt_payment'
+  | 'company_debt_writeoff'
+  | 'asset_purchase'
+  /** «نقل الاهتلاك» — the month's depreciation from the company pocket into «الاهتلاك». */
+  | 'depreciation_transfer'
+  /** Money released back from «الاهتلاك» to the company pocket, with a written reason. */
+  | 'depreciation_release'
+  | 'company_correction'
+
+export const COMPANY_LEDGER_EVENTS = [
+  'company_opening_transfer',
+  'company_restoration_mirror',
+  'company_deposit',
+  'company_withdrawal',
+  'company_expense',
+  'company_income',
+  'company_fx_exchange',
+  'company_debt_open',
+  'company_debt_payment',
+  'company_debt_writeoff',
+  'asset_purchase',
+  'depreciation_transfer',
+  'depreciation_release',
+  'company_correction',
+] as const satisfies readonly CompanyLedgerEvent[]
+
+type MissingCompanyEvents = Exclude<CompanyLedgerEvent, (typeof COMPANY_LEDGER_EVENTS)[number]>
+/** Compile-time proof that the list above names every company event. */
+const COMPANY_EVENTS_EXHAUSTIVE: [MissingCompanyEvents] extends [never] ? true : false = true
+void COMPANY_EVENTS_EXHAUSTIVE
+
+export const isCompanyLedgerEvent = (event: LedgerEvent): event is CompanyLedgerEvent =>
+  (COMPANY_LEDGER_EVENTS as readonly LedgerEvent[]).includes(event)
 
 export type FundRef =
   | { readonly kind: 'office_cash' }
@@ -64,6 +131,14 @@ export type FundRef =
   | { readonly kind: 'company_revenue' }
   | { readonly kind: 'yalago_income' }
   | { readonly kind: 'fee_earned' }
+  /**
+   * «مدخول مباشر» — income that is NOT a delivery fee: a scrap sale, a damage recovery, a sponsor.
+   *
+   * Deliberately its own account rather than `company_revenue`. BR4 defines `company_revenue` as
+   * the company's residual share of delivery fees, and `/dashboard/profit` reports it under that
+   * name; folding a battery sale into it would silently overstate the delivery business.
+   */
+  | { readonly kind: 'other_income' }
   /**
    * «صندوق الشركة» — where profit goes, and where an office capital shortfall is funded from.
    *
@@ -90,7 +165,187 @@ export type FundRef =
   /** Money already advanced specifically for automatic use at the driver's next shift open. */
   | { readonly kind: 'driver_shift_funding_cash'; readonly driverId: string }
   | { readonly kind: 'driver_shift_funding_wallet'; readonly driverId: string }
+  /**
+   * «السلفة» — one named advance, still outstanding (owner decision 17).
+   *
+   * NOT a ذمة and not `driver_shift_funding_*`. A ذمة belongs to a driver by uuid and is forgivable
+   * by write-off; shift funding is money already handed over for a specific next shift open. An
+   * advance belongs to whoever the manager wrote on the line — a driver, a workshop, a landlord —
+   * and its only endings are repayment or an audited conversion into an ordinary صرفية.
+   *
+   * SUFFIXED BY THE ADVANCE, not by the party. The party is free text, so it has no id and two
+   * spellings of one name would otherwise be two funds. Suffixing by the advance also buys back the
+   * proven guard: `0037`'s over-collection trigger refuses to drive a NAMED asset below zero, and a
+   * single pooled fund would hide over-repaying one advance behind another still outstanding.
+   *
+   * Two kinds, like the ذمم, because الترميم restores each box against its own capital target and
+   * must know which one an outstanding advance counts toward.
+   *
+   * In the database these carry `owner_kind='none'` with the identity in the code — the shape
+   * `cost_center:cash_count_variance:<branchId>:<fundCode>` already uses.
+   */
+  | { readonly kind: 'advance_receivable_cash'; readonly advanceId: string }
+  | { readonly kind: 'advance_receivable_wallet'; readonly advanceId: string }
   | { readonly kind: 'cost_center'; readonly costCenterId: string }
+  | CompanyFundRef
+
+/**
+ * «صندوق الشركة» — the company (HQ) ledger's accounts (finance redesign C1, migrations 0065/0066).
+ *
+ * They live ONLY in the company branch row and never in a branch; the database refuses both
+ * directions. Each carries its currency where it has one — the currency is part of the fund's
+ * identity and of its code, so `company_cash:SYP_NEW` and `company_cash:USD` are two pockets and a
+ * code read back from the ledger always says which.
+ *
+ * Codes (the enum literal is the `<CUR>` segment):
+ *   company_cash:<CUR>                       the company's own cash, per currency
+ *   depreciation_reserve:<CUR>               «الاهتلاك»
+ *   company_fx_position:<CUR>                the transit account an exchange passes through
+ *   company_equity:<CUR>:<account>           owner_funding | owner_drawings | opening
+ *   company_expense:<CUR>:<centre>           general | receivable_writeoff | vehicle:<id> | asset:<id>
+ *   company_income:<CUR>:<account>           general | payable_forgiven
+ *   branch_clearing:<branchId>               «حساب الشركة لدى الفرع», SYP only
+ *   company_payable:<CUR>:<debtId>           one debt the company owes
+ *   company_receivable:<CUR>:<debtId>        one debt owed to the company
+ *   fixed_asset:<CUR>:<assetId>              one purchased asset
+ */
+export type CompanyFundRef =
+  | { readonly kind: 'company_cash'; readonly currency: Currency }
+  | { readonly kind: 'depreciation_reserve'; readonly currency: Currency }
+  | { readonly kind: 'company_fx_position'; readonly currency: Currency }
+  | { readonly kind: 'company_equity'; readonly currency: Currency; readonly account: CompanyEquityAccount }
+  | { readonly kind: 'company_expense'; readonly currency: Currency; readonly centre: CompanyExpenseCentre }
+  | { readonly kind: 'company_income'; readonly currency: Currency; readonly account: CompanyIncomeAccount }
+  | { readonly kind: 'branch_clearing'; readonly branchId: string }
+  | { readonly kind: 'company_payable'; readonly debtId: string; readonly currency: Currency }
+  | { readonly kind: 'company_receivable'; readonly debtId: string; readonly currency: Currency }
+  | { readonly kind: 'fixed_asset'; readonly assetId: string; readonly currency: Currency }
+
+export type CompanyEquityAccount = 'owner_funding' | 'owner_drawings' | 'opening'
+export const COMPANY_EQUITY_ACCOUNTS = ['owner_funding', 'owner_drawings', 'opening'] as const satisfies readonly CompanyEquityAccount[]
+
+export type CompanyIncomeAccount = 'general' | 'payable_forgiven'
+export const COMPANY_INCOME_ACCOUNTS = ['general', 'payable_forgiven'] as const satisfies readonly CompanyIncomeAccount[]
+
+/** Where a company expense is filed. A vehicle or asset centre names its id. */
+export type CompanyExpenseCentre = 'general' | 'receivable_writeoff' | `vehicle:${string}` | `asset:${string}`
+
+export type CompanyFundKind = CompanyFundRef['kind']
+
+/** Every company account kind — the same ten `fund_type` values 0065 added. */
+export const COMPANY_FUND_KINDS = [
+  'company_cash',
+  'depreciation_reserve',
+  'company_fx_position',
+  'branch_clearing',
+  'company_payable',
+  'company_receivable',
+  'fixed_asset',
+  'company_expense',
+  'company_income',
+  'company_equity',
+] as const satisfies readonly CompanyFundKind[]
+
+/**
+ * Which company events may move which company account — the domain copy of 0066's
+ * `ash_company_fund_event_allowed`. A PostgreSQL test compares every pair between the two.
+ */
+export const COMPANY_FUND_ALLOWED_EVENTS: Readonly<Record<CompanyFundKind, readonly CompanyLedgerEvent[]>> = {
+  company_cash: [
+    'company_deposit',
+    'company_withdrawal',
+    'company_expense',
+    'company_income',
+    'company_fx_exchange',
+    'company_opening_transfer',
+    'company_restoration_mirror',
+    'company_debt_open',
+    'company_debt_payment',
+    'asset_purchase',
+    'depreciation_transfer',
+    'depreciation_release',
+    'company_correction',
+  ],
+  depreciation_reserve: [
+    'depreciation_transfer',
+    'depreciation_release',
+    'company_expense',
+    'company_debt_payment',
+    'asset_purchase',
+    'company_correction',
+  ],
+  company_fx_position: ['company_fx_exchange', 'company_correction'],
+  branch_clearing: ['company_opening_transfer', 'company_restoration_mirror'],
+  company_payable: [
+    'company_debt_open',
+    'company_debt_payment',
+    'company_debt_writeoff',
+    'asset_purchase',
+    'company_correction',
+  ],
+  company_receivable: [
+    'company_debt_open',
+    'company_debt_payment',
+    'company_debt_writeoff',
+    'asset_purchase',
+    'company_correction',
+  ],
+  fixed_asset: ['asset_purchase', 'company_correction'],
+  company_expense: ['company_expense', 'company_debt_open', 'company_debt_writeoff', 'company_correction'],
+  company_income: ['company_income', 'company_debt_open', 'company_debt_writeoff', 'company_correction'],
+  company_equity: [
+    'company_deposit',
+    'company_withdrawal',
+    'company_expense',
+    'company_debt_open',
+    'company_debt_payment',
+    'asset_purchase',
+    'company_correction',
+  ],
+}
+
+export const isCompanyFund = (fund: FundRef): fund is CompanyFundRef =>
+  (COMPANY_FUND_KINDS as readonly string[]).includes(fund.kind)
+
+/**
+ * Every fund kind, branch and company. Exhaustive by construction — the check below fails to
+ * compile the day a `FundRef` kind is added without being listed — so a test iterating it covers
+ * every code `fundCode` can produce.
+ */
+export const FUND_KINDS = [
+  'office_cash',
+  'office_wallet',
+  'driver_cash',
+  'driver_wallet',
+  'yalago_share',
+  'driver_share_payable',
+  'company_revenue',
+  'yalago_income',
+  'fee_earned',
+  'other_income',
+  'company_box',
+  'driver_receivable_cash',
+  'driver_receivable_wallet',
+  'driver_shift_funding_cash',
+  'driver_shift_funding_wallet',
+  'advance_receivable_cash',
+  'advance_receivable_wallet',
+  'cost_center',
+  ...COMPANY_FUND_KINDS,
+] as const satisfies readonly FundRef['kind'][]
+
+type MissingFundKinds = Exclude<FundRef['kind'], (typeof FUND_KINDS)[number]>
+/** Compile-time proof that `FUND_KINDS` names every `FundRef` kind. */
+const FUND_KINDS_EXHAUSTIVE: [MissingFundKinds] extends [never] ? true : false = true
+void FUND_KINDS_EXHAUSTIVE
+
+/**
+ * The currency a fund holds. Every branch fund is new lira; a company fund says so itself, and the
+ * branch clearing account mirrors a branch's SYP `company_box`.
+ */
+export function currencyOf(fund: FundRef): Currency {
+  return 'currency' in fund ? fund.currency : 'SYP_NEW'
+}
 
 /** The two branch funds that hold real value and are counted, restored and swept. */
 export type OfficeFund = 'office_cash' | 'office_wallet'
@@ -121,32 +376,120 @@ export class UnbalancedPostingError extends Error {
   readonly posting: Posting
   readonly debits: Minor
   readonly credits: Minor
-  constructor(posting: Posting, debits: Minor, credits: Minor) {
-    super(`posting ${posting.eventType}/${posting.occurrenceKey} is unbalanced: D ${debits} <> C ${credits}`)
+  /** The currency whose debits and credits disagree. */
+  readonly currency: Currency
+  constructor(posting: Posting, debits: Minor, credits: Minor, currency: Currency = 'SYP_NEW') {
+    super(
+      `posting ${posting.eventType}/${posting.occurrenceKey} is unbalanced: D ${debits} <> C ${credits}` +
+        (currency === 'SYP_NEW' ? '' : ` (${currency})`),
+    )
     this.name = 'UnbalancedPostingError'
     this.posting = posting
     this.debits = debits
     this.credits = credits
+    this.currency = currency
   }
 }
 
+/** A posting that spans currencies without being a two-currency exchange. */
+export class MixedCurrencyPostingError extends Error {
+  readonly posting: Posting
+  readonly currencies: readonly Currency[]
+  constructor(posting: Posting, currencies: readonly Currency[]) {
+    super(
+      `posting ${posting.eventType}/${posting.occurrenceKey} spans ${currencies.join(' + ')}; ` +
+        'only company_fx_exchange (or its company_correction reversal) may span exactly two currencies',
+    )
+    this.name = 'MixedCurrencyPostingError'
+    this.posting = posting
+    this.currencies = currencies
+  }
+}
+
+/** Σ debits over every line, currency-blind. Meaningful for a single-currency posting. */
 export function debitsOf(posting: Posting): Minor {
   return sum(posting.lines.filter((l) => l.side === 'D').map((l) => l.amount))
 }
 
+/** Σ credits over every line, currency-blind. Meaningful for a single-currency posting. */
 export function creditsOf(posting: Posting): Minor {
   return sum(posting.lines.filter((l) => l.side === 'C').map((l) => l.amount))
+}
+
+export interface CurrencyBalance {
+  readonly currency: Currency
+  readonly debits: Minor
+  readonly credits: Minor
+}
+
+/** Debits and credits per currency, in `CURRENCIES` order, for the currencies the posting uses. */
+export function currencyBalances(posting: Posting): CurrencyBalance[] {
+  const totals = new Map<Currency, { debits: bigint; credits: bigint }>()
+  for (const line of posting.lines) {
+    const currency = currencyOf(line.fund)
+    const total = totals.get(currency) ?? { debits: 0n, credits: 0n }
+    if (line.side === 'D') total.debits += line.amount
+    else total.credits += line.amount
+    totals.set(currency, total)
+  }
+  return (['SYP_NEW', 'USD'] as const)
+    .filter((currency) => totals.has(currency))
+    .map((currency) => {
+      const total = totals.get(currency)!
+      return { currency, debits: minor(total.debits), credits: minor(total.credits) }
+    })
+}
+
+/**
+ * The only events that may move two currencies at once — and never more than two.
+ *
+ * An exchange, and its reversal (C2). `company_correction` undoes a company command line for line,
+ * and the undo of a four-line exchange is itself a four-line, two-currency entry. Each currency still
+ * balances on its own — that part of the rule has no exception — and the database requires every
+ * `company_correction` to be the exact inverse of a reversible command (migration 0067), so a
+ * two-currency correction can only ever be an exchange taken back.
+ */
+export const TWO_CURRENCY_EVENTS = ['company_fx_exchange', 'company_correction'] as const satisfies readonly LedgerEvent[]
+
+const mayCrossCurrencies = (posting: Posting, currencies: number): boolean =>
+  currencies <= 1 ||
+  (currencies === 2 && (TWO_CURRENCY_EVENTS as readonly LedgerEvent[]).includes(posting.eventType))
+
+/**
+ * The balance rule the database enforces at COMMIT (0066's `assert_entry_balanced`, widened by 0067),
+ * without the throw: per currency, debits equal credits; and a posting spans two currencies only as
+ * an exchange or its reversal. `null` when the posting is sound. Shared by `assertBalanced` and both ledger adapters so
+ * the three can never disagree about what «balanced» means.
+ */
+export function postingBalanceProblem(
+  posting: Posting,
+):
+  | { readonly kind: 'unbalanced'; readonly currency: Currency; readonly debits: Minor; readonly credits: Minor }
+  | { readonly kind: 'mixed_currency'; readonly currencies: readonly Currency[] }
+  | null {
+  const balances = currencyBalances(posting)
+  const unbalanced = balances.find((b) => b.debits !== b.credits)
+  if (unbalanced) return { kind: 'unbalanced', ...unbalanced }
+  if (!mayCrossCurrencies(posting, balances.length)) {
+    return { kind: 'mixed_currency', currencies: balances.map((b) => b.currency) }
+  }
+  return null
 }
 
 /**
  * The invariant the database also enforces with a deferred constraint trigger. Checked here so
  * a recipe bug fails in a unit test rather than at COMMIT in production.
+ *
+ * Balanced PER CURRENCY (0066): $100 against 100 lira is not a balanced entry, it is two unbalanced
+ * ones. For a single-currency posting this is exactly the old Σ D = Σ C.
  */
 export function assertBalanced(posting: Posting): Posting {
-  const d = debitsOf(posting)
-  const c = creditsOf(posting)
-  if (d !== c) throw new UnbalancedPostingError(posting, d, c)
-  if (posting.lines.length === 0) throw new UnbalancedPostingError(posting, d, c)
+  const problem = postingBalanceProblem(posting)
+  if (problem?.kind === 'unbalanced') {
+    throw new UnbalancedPostingError(posting, problem.debits, problem.credits, problem.currency)
+  }
+  if (posting.lines.length === 0) throw new UnbalancedPostingError(posting, ZERO, ZERO)
+  if (problem?.kind === 'mixed_currency') throw new MixedCurrencyPostingError(posting, problem.currencies)
   for (const line of posting.lines) {
     if (line.amount <= 0n) {
       throw new RangeError(
@@ -341,6 +684,47 @@ export function receivableAdjustment(
   return assertBalanced({ eventType: 'receivable_adjustment', occurrenceKey, lines })
 }
 
+/**
+ * Dedicated loss account for an ordinary receivable the company deliberately writes off.
+ *
+ * It is a cost centre rather than either office fund because no cash or wallet moved. Keeping one
+ * stable code also prevents callers from choosing an arbitrary counterpart and disguising a
+ * collection, withdrawal, or owner movement as a write-off.
+ */
+export const RECEIVABLE_WRITEOFF_LOSS_COST_CENTER = 'receivable_writeoff_loss' as const
+
+/**
+ * Write off part of a named driver's ordinary receivable without pretending it was collected.
+ *
+ * The receivable asset falls (credit) and the dedicated loss rises (debit). `office_cash` and
+ * `office_wallet` are deliberately absent: a write-off is an accounting loss, not money returning
+ * to either box. Shift-funding is intentionally unsupported because it represents money the driver
+ * still physically holds for the next shift, not an ordinary debt eligible for this workflow.
+ */
+export function receivableWriteoff(
+  driverId: string,
+  channel: 'cash' | 'wallet',
+  amount: Minor,
+  occurrenceKey: string,
+): Posting {
+  if (amount <= ZERO) throw new RangeError(`receivable write-off must be positive, got ${amount}`)
+  const receivable: FundRef = channel === 'cash'
+    ? { kind: 'driver_receivable_cash', driverId }
+    : { kind: 'driver_receivable_wallet', driverId }
+  return assertBalanced({
+    eventType: 'receivable_adjustment',
+    occurrenceKey,
+    lines: [
+      D(
+        { kind: 'cost_center', costCenterId: RECEIVABLE_WRITEOFF_LOSS_COST_CENTER },
+        amount,
+        'receivable_writeoff_loss',
+      ),
+      C(receivable, amount, 'receivable_written_off'),
+    ],
+  })
+}
+
 export interface CashSettledReturnInput {
   readonly driverId: string
   /** The exact immutable plan the manager reviewed and confirmed. */
@@ -365,10 +749,13 @@ function assertCanonicalFixedShareSettlement(settlement: FixedShareSettlementPla
     actualWallet: settlement.actualWallet,
     cashReceivableDeferred: settlement.cashReceivableDeferred,
     walletReceivableDeferred: settlement.walletReceivableDeferred,
+    cashShortageReceivable: settlement.cashShortageReceivable,
+    managerChargeTotal: settlement.managerChargeTotal,
   })
   const scalarFields = [
     'grossDriverShare',
     'baseDriverShare',
+    'managerChargeTotal',
     'expectedTotal',
     'actualTotal',
     'variance',
@@ -378,6 +765,8 @@ function assertCanonicalFixedShareSettlement(settlement: FixedShareSettlementPla
     'walletClaimToOffice',
     'cashReceivableDeferred',
     'walletReceivableDeferred',
+    'maximumCashShortageReceivable',
+    'cashShortageReceivable',
     'cashToOffice',
     'walletToOffice',
   ] as const
@@ -453,13 +842,25 @@ export function cashSettledReturnPostings(input: CashSettledReturnInput): Postin
   const cashAfterWallet = sub(settlement.expectedTotal, settlement.actualWallet)
   const payable = settlement.baseDriverShare > ZERO ? settlement.baseDriverShare : ZERO
   const receivable = settlement.baseDriverShare < ZERO ? abs(settlement.baseDriverShare) : ZERO
-  const cashClaimToOffice = sub(cashAfterWallet, settlement.baseDriverShare)
+  /*
+   * «الحسم» raises what the office collects without touching what the employee EARNED.
+   *
+   * `baseDriverShare` stays his earned share — he earned it — and the charge is money he pays out
+   * of it. Folding the charge into `baseDriverShare` instead would post a smaller
+   * `driver_share_payable` and let the extra cash land in `office_cash` unnamed, so the books would
+   * show the company holding more money for no stated reason. The credit below is that reason.
+   */
+  const managerCharge = settlement.managerChargeTotal
+  const cashClaimToOffice = add(sub(cashAfterWallet, settlement.baseDriverShare), managerCharge)
   if (cashClaimToOffice !== settlement.cashClaimToOffice) {
     throw new RangeError(
       `cash-settled claim disagrees with reviewed plan: ${cashClaimToOffice} vs ${settlement.cashClaimToOffice}`,
     )
   }
-  const cashToOffice = sub(cashClaimToOffice, settlement.cashReceivableDeferred)
+  const cashToOffice = sub(
+    sub(cashClaimToOffice, settlement.cashReceivableDeferred),
+    settlement.cashShortageReceivable,
+  )
   if (cashToOffice !== settlement.cashToOffice) {
     throw new RangeError(
       `cash-settled movement disagrees with reviewed plan: ${cashToOffice} vs ${settlement.cashToOffice}`,
@@ -482,6 +883,34 @@ export function cashSettledReturnPostings(input: CashSettledReturnInput): Postin
         'cash_settlement_deferred',
       ),
     )
+  }
+  if (settlement.cashShortageReceivable > ZERO) {
+    // The operational custody is cleared exactly once below. This debit preserves the unpaid part
+    // as an ordinary receivable while office_cash records only what was physically received. It is
+    // deliberately not a direct receivable adjustment (which would credit office_cash again) and
+    // not shift funding (which would be consumed automatically at the next open).
+    cashLines.push(
+      D(
+        { kind: 'driver_receivable_cash', driverId },
+        settlement.cashShortageReceivable,
+        'cash_shortage_receivable',
+      ),
+    )
+  }
+  if (managerCharge > ZERO) {
+    /*
+     * The charge, as INCOME — not as a quietly larger cash box.
+     *
+     * `other_income` and deliberately not `company_revenue`: BR4 defines that account as the
+     * company's residual share of DELIVERY fees and `/dashboard/profit` reports it under that name,
+     * so booking damage recovered from a driver there would overstate the delivery business by
+     * exactly the charge. It is the same account a battery sale uses, for the same reason.
+     *
+     * This is also the line that makes the posting balance. The driver's full earned share still
+     * debits `driver_share_payable` while `office_cash` receives the charge on top, so without a
+     * credit of the same size the entry would be out by exactly `managerCharge`.
+     */
+    cashLines.push(C({ kind: 'other_income' }, managerCharge, 'manager_charge'))
   }
   signedLine(cashLines, { kind: 'office_cash' }, cashToOffice, 'cash_settlement')
   if (cashLines.length > 0) {
@@ -671,11 +1100,188 @@ export function shareSplit(driverId: string, totals: FeeTotals, split: BlockSpli
 
 // ── Expenses (G) ──────────────────────────────────────────────────────────────────────────
 
-export function expense(costCenterId: string, amount: Minor, occurrenceKey = '1'): Posting {
+/**
+ * «كل ليرة تخرج» (SRS G) — and it does not always leave the cash box.
+ *
+ * THE CALLER NAMES A CHANNEL, NEVER A FUND, for the reason `income` states below: an operator who
+ * types a fund code instead reaches `fundRefFromCode`'s default clause, which turns anything it
+ * does not recognise into `cost_center:<code>` — a look-alike account no cost report sums and no
+ * error is ever raised about.
+ *
+ * The wallet channel is not decoration. Yallago's cut leaves the wallet, so a cost that falls on
+ * the wallet is ordinary here; before it existed the only honest record of one was a raw manual
+ * entry, which never appears in «الصرفيات» and so silently understates every cost report.
+ */
+export function expense(
+  channel: OfficeFund,
+  costCenterId: string,
+  amount: Minor,
+  occurrenceKey = '1',
+): Posting {
+  if (amount <= ZERO) throw new RangeError(`expense must be positive, got ${amount}`)
   return assertBalanced({
     eventType: 'expense',
     occurrenceKey,
-    lines: [D({ kind: 'cost_center', costCenterId }, amount), C({ kind: 'office_cash' }, amount)],
+    lines: [D({ kind: 'cost_center', costCenterId }, amount), C({ kind: channel }, amount)],
+  })
+}
+
+/**
+ * «مدخول مباشر» — the mirror of `expense`: money arriving that is not a delivery fee.
+ *
+ * THE CALLER NAMES A CHANNEL, NEVER A FUND. `channel` is a physical fact the person recording it
+ * knows — the notes went into the drawer, or the transfer landed in the branch wallet. Letting an
+ * operator type a fund code instead is the trap `fundRefFromCode`'s own header describes: its
+ * default clause turns any unrecognised string into `cost_center:<code>`, a look-alike account no
+ * profit reader sums and no error is ever raised about.
+ *
+ * The wallet channel is not decoration. An office wallet can also be the side that FALLS on a
+ * correction — which is precisely why a cash-only income recipe could not express Haidar's shift.
+ */
+export function income(channel: OfficeFund, amount: Minor, occurrenceKey = '1'): Posting {
+  if (amount <= ZERO) throw new RangeError(`income must be positive, got ${amount}`)
+  return assertBalanced({
+    eventType: 'income',
+    occurrenceKey,
+    lines: [D({ kind: channel }, amount), C({ kind: 'other_income' }, amount)],
+  })
+}
+
+// ── «السلفة» — an expense that must come back (owner decision 17) ─────────────────────────
+//
+// The owner's own framing: «هوي صرفية دفعت لكنها يجب ان ترد كاملة». Money leaves the box the way a
+// صرفية does — a named person, a category, a receipt — but unlike a صرفية it is NOT consumed. It is
+// still company property until it is handed back, so it stays counted as office capital and الترميم
+// must not read the emptier box as a shortfall.
+//
+// The arithmetic carries the whole rule, so nobody has to enforce it:
+//
+//   pay 100,000    box 3,900,000 + ذمم 400,000 + سلف 100,000 = target → nothing moves
+//   repay it       box 4,000,000 + ذمم 400,000 + سلف       0 = target → nothing moves
+//   convert it     box 3,900,000 + ذمم 400,000 + سلف       0 < target → one «شحن» of 100,000
+//
+// Capital falls at the conversion and not one moment earlier — which is exactly what «يجب أن ترد»
+// means in double entry.
+//
+// None of the three touches `company_box`, and none borrows the `kaish`/`shahn` line roles: the
+// treasury dashboard classifies a flow by those roles, and an advance wearing one would be read as
+// money that left for صندوق الشركة when it never left the branch.
+
+/** The advance asset for one advance, on the side of the box the money left from. */
+function advanceFund(channel: OfficeFund, advanceId: string): FundRef {
+  return channel === 'office_cash'
+    ? { kind: 'advance_receivable_cash', advanceId }
+    : { kind: 'advance_receivable_wallet', advanceId }
+}
+
+/**
+ * Pay an advance out of a named box. The box falls; a named advance asset rises by the same amount.
+ *
+ * Working capital is unchanged by construction — that is the whole point, and a test pins it.
+ */
+export function advance(
+  channel: OfficeFund,
+  advanceId: string,
+  amount: Minor,
+  occurrenceKey = '1',
+): Posting {
+  if (amount <= ZERO) throw new RangeError(`advance must be positive, got ${amount}`)
+  return assertBalanced({
+    eventType: 'advance',
+    occurrenceKey,
+    lines: [
+      D(advanceFund(channel, advanceId), amount, 'advance_created'),
+      C({ kind: channel }, amount, 'office_value_advanced'),
+    ],
+  })
+}
+
+/**
+ * Reclassify a driver's «ذمة» as a «سلفة» — the debt is the same money, filed differently.
+ *
+ * NOTHING PHYSICAL HAPPENS HERE, and the posting says so: one counted asset falls and another
+ * rises, no box is touched, and office capital is unchanged. That is the whole reason this recipe
+ * exists rather than composing the two routes that already exist. Collecting the receivable and
+ * then paying an advance reaches the same end state, but it writes a COLLECTION into the driver's
+ * history — «تحصيل» for money that never came back — and shows cash entering and leaving the box
+ * on a day neither happened. `ReceivableEventRecord.intent` carries a comment naming that exact lie
+ * as the thing the ledger exists to prevent.
+ *
+ * The channel is inherited from the receivable, never chosen: a debt owed in cash stays owed in
+ * cash, so a later repayment lands in the box it was always owed to.
+ */
+export function advanceFromReceivable(
+  channel: OfficeFund,
+  advanceId: string,
+  driverId: string,
+  amount: Minor,
+  occurrenceKey = '1',
+): Posting {
+  if (amount <= ZERO) throw new RangeError(`advance from receivable must be positive, got ${amount}`)
+  const receivable: FundRef =
+    channel === 'office_cash'
+      ? { kind: 'driver_receivable_cash', driverId }
+      : { kind: 'driver_receivable_wallet', driverId }
+  return assertBalanced({
+    eventType: 'advance',
+    occurrenceKey,
+    lines: [
+      D(advanceFund(channel, advanceId), amount, 'advance_created'),
+      C(receivable, amount, 'receivable_converted_to_advance'),
+    ],
+  })
+}
+
+/**
+ * Money coming back — the exact reverse of the payment, whole or in part.
+ *
+ * IT RETURNS TO THE BOX IT LEFT. Not tidiness: الترميم plans each box against its own target, so an
+ * advance repaid into the other box would push one leg up and the other down at different moments,
+ * letting a single advance's own balance go negative in between — which every reader in the system
+ * treats as corruption. If the notes are physically handed over for a wallet advance, record the
+ * repayment to the wallet and move it with `officeTransfer`, which is proven to leave capital alone.
+ */
+export function advanceRepayment(
+  channel: OfficeFund,
+  advanceId: string,
+  amount: Minor,
+  occurrenceKey = '1',
+): Posting {
+  if (amount <= ZERO) throw new RangeError(`advance repayment must be positive, got ${amount}`)
+  return assertBalanced({
+    eventType: 'advance_repayment',
+    occurrenceKey,
+    lines: [
+      D({ kind: channel }, amount, 'advance_repaid'),
+      C(advanceFund(channel, advanceId), amount, 'advance_cleared'),
+    ],
+  })
+}
+
+/**
+ * The advance is never coming back: recognise it as the صرفية it turned out to be.
+ *
+ * No box moves — the cash left weeks ago. The advance asset falls and the cost centre rises, which
+ * is the moment office capital finally drops. `costCenterId` is derived the way an ordinary expense
+ * derives it (`vehicleId ?? '<costCenterKind>:<branchId>'`), never from the category: the category
+ * is a column on `expenses` and has never been an account, so debiting it would mint a look-alike
+ * cost centre that no profitability reader sums.
+ */
+export function advanceConversion(
+  channel: OfficeFund,
+  advanceId: string,
+  costCenterId: string,
+  amount: Minor,
+  occurrenceKey = '1',
+): Posting {
+  if (amount <= ZERO) throw new RangeError(`advance conversion must be positive, got ${amount}`)
+  return assertBalanced({
+    eventType: 'advance_conversion',
+    occurrenceKey,
+    lines: [
+      D({ kind: 'cost_center', costCenterId }, amount, 'advance_converted_cost'),
+      C(advanceFund(channel, advanceId), amount, 'advance_converted'),
+    ],
   })
 }
 
@@ -699,6 +1305,58 @@ export function expense(costCenterId: string, amount: Minor, occurrenceKey = '1'
 export function sweepToCompany(office: OfficeFund, amount: Minor, occurrenceKey = '1'): Posting {
   return assertBalanced({
     eventType: 'restoration',
+    occurrenceKey,
+    lines: [D({ kind: 'company_box' }, amount, 'kaish'), C({ kind: office }, amount)],
+  })
+}
+
+/**
+ * Move money between the branch's two office boxes — cash to wallet, or wallet to cash.
+ *
+ * Owner request, 2026-08-31. It is an everyday act: the wallet runs dry while cash piles up because
+ * Yallago takes its cut from the wallet and the drivers hand back notes, so the office tops one from
+ * the other. Until now the only route that could do it took a free-form fund code, and
+ * `fundRefFromCode` turns any string it does not recognise into `cost_center:<code>` — a look-alike
+ * account no reader sums and no error is raised about. Naming the two ends closes that door.
+ *
+ * WORKING CAPITAL DOES NOT MOVE, and that is the whole character of this posting: both legs are
+ * office funds, so the branch holds exactly what it held a second ago. It is a reshaping, not an
+ * income, an expense, or a sweep — which is why it carries its own line roles rather than borrowing
+ * `kaish`/`shahn`. Those two mean «money left for صندوق الشركة» and the treasury reader classifies
+ * by them; a transfer wearing one would be counted as company money that never moved.
+ */
+export function officeTransfer(
+  from: OfficeFund,
+  to: OfficeFund,
+  amount: Minor,
+  occurrenceKey = '1',
+): Posting {
+  if (amount <= ZERO) throw new RangeError(`office transfer must be positive, got ${amount}`)
+  if (from === to) throw new RangeError(`office transfer needs two different boxes, got ${from} twice`)
+  return assertBalanced({
+    eventType: 'manual',
+    occurrenceKey,
+    lines: [D({ kind: to }, amount, 'office_transfer_in'), C({ kind: from }, amount, 'office_transfer_out')],
+  })
+}
+
+/**
+ * «كييش» BY HAND — the manager moving money out of a box without running الترميم.
+ *
+ * Identical lines and identical roles to `sweepToCompany`, and deliberately a DIFFERENT event type.
+ * `restoration` is not a label, it is a promise: `restoration_journal_fact_from_entry` refuses any
+ * `restoration` entry that does not have an immutable `restorations` row in the same transaction —
+ * a sealed count, a feasible plan, the whole atomic ceremony. A hand sweep has none of that, so
+ * calling it one made the route answer 500 in production every time it was pressed, while the
+ * memory-backed tests passed because no trigger exists there.
+ *
+ * The shared MEANING lives where the reader actually looks: the `kaish` line role. The dashboard
+ * classifies by role first and falls back to event type, so «كييش» still sums as «كييش» whichever
+ * of the two produced the row — which was the point of sharing a recipe in the first place.
+ */
+export function manualKaish(office: OfficeFund, amount: Minor, occurrenceKey = '1'): Posting {
+  return assertBalanced({
+    eventType: 'manual',
     occurrenceKey,
     lines: [D({ kind: 'company_box' }, amount, 'kaish'), C({ kind: office }, amount)],
   })
@@ -987,11 +1645,57 @@ export const isFund =
   (fund: FundRef): boolean =>
     fund.kind === kind
 
+/** A company fund's id segment: present, and free of the `:` that separates code segments. */
+function codeId(kind: string, what: string, id: string): string {
+  if (id === '' || id.includes(':')) {
+    throw new RangeError(`${kind} requires a ${what} without ':', got ${JSON.stringify(id)}`)
+  }
+  return id
+}
+
+function codeCurrency(kind: string, currency: string | undefined): Currency {
+  if (!isCurrency(currency)) {
+    throw new RangeError(`${kind} requires a currency (SYP_NEW or USD), got ${JSON.stringify(currency)}`)
+  }
+  return currency
+}
+
+function expenseCentre(centre: string): CompanyExpenseCentre {
+  if (centre === 'general' || centre === 'receivable_writeoff') return centre
+  const [scope, id, ...extra] = centre.split(':')
+  if ((scope === 'vehicle' || scope === 'asset') && id !== undefined && extra.length === 0) {
+    return `${scope}:${codeId('company_expense', `${scope} id`, id)}`
+  }
+  throw new RangeError(
+    `company_expense requires a centre (general | receivable_writeoff | vehicle:<id> | asset:<id>), got ${JSON.stringify(centre)}`,
+  )
+}
+
+function oneOf<T extends string>(kind: string, what: string, allowed: readonly T[], value: string | undefined): T {
+  if (value === undefined || !(allowed as readonly string[]).includes(value)) {
+    throw new RangeError(`${kind} requires ${what} (${allowed.join(' | ')}), got ${JSON.stringify(value)}`)
+  }
+  return value as T
+}
+
 /**
  * Stable string identity for a fund. The database stores this in `funds.code`.
+ *
+ * THE ONE COPY. `packages/db` and the memory adapter both import this; the conformance suite
+ * compares what each stores against it. A company code is validated on the way out as well as on
+ * the way in, so a malformed id can never become a fund that `fundRefFromCode` cannot read back.
  */
 export function fundCode(fund: FundRef): string {
   switch (fund.kind) {
+    case 'office_cash':
+    case 'office_wallet':
+    case 'yalago_share':
+    case 'company_revenue':
+    case 'yalago_income':
+    case 'fee_earned':
+    case 'other_income':
+    case 'company_box':
+      return fund.kind
     case 'driver_cash':
     case 'driver_wallet':
     case 'driver_share_payable':
@@ -1003,10 +1707,34 @@ export function fundCode(fund: FundRef): string {
     case 'driver_shift_funding_cash':
     case 'driver_shift_funding_wallet':
       return `${fund.kind}:${fund.driverId}`
+    // An advance is suffixed by the ADVANCE, not the party — the party is free text and has no id.
+    case 'advance_receivable_cash':
+    case 'advance_receivable_wallet':
+      return `${fund.kind}:${fund.advanceId}`
     case 'cost_center':
       return `cost_center:${fund.costCenterId}`
-    default:
-      return fund.kind
+    // ── The company ledger. The enum literal is the currency segment. ──────────────────────
+    case 'company_cash':
+    case 'depreciation_reserve':
+    case 'company_fx_position':
+      return `${fund.kind}:${codeCurrency(fund.kind, fund.currency)}`
+    case 'company_equity':
+      return `${fund.kind}:${codeCurrency(fund.kind, fund.currency)}:${oneOf(fund.kind, 'an account', COMPANY_EQUITY_ACCOUNTS, fund.account)}`
+    case 'company_income':
+      return `${fund.kind}:${codeCurrency(fund.kind, fund.currency)}:${oneOf(fund.kind, 'an account', COMPANY_INCOME_ACCOUNTS, fund.account)}`
+    case 'company_expense':
+      return `${fund.kind}:${codeCurrency(fund.kind, fund.currency)}:${expenseCentre(fund.centre)}`
+    case 'branch_clearing':
+      return `${fund.kind}:${codeId(fund.kind, 'branch id', fund.branchId)}`
+    case 'company_payable':
+    case 'company_receivable':
+      return `${fund.kind}:${codeCurrency(fund.kind, fund.currency)}:${codeId(fund.kind, 'debt id', fund.debtId)}`
+    case 'fixed_asset':
+      return `${fund.kind}:${codeCurrency(fund.kind, fund.currency)}:${codeId(fund.kind, 'asset id', fund.assetId)}`
+    default: {
+      const unreachable: never = fund
+      throw new RangeError(`unknown fund kind ${JSON.stringify(unreachable)}`)
+    }
   }
 }
 
@@ -1022,10 +1750,21 @@ export function fundCode(fund: FundRef): string {
  * ("opening_balance", "adjustments") that are not part of the client's fixed tree, and refusing
  * them would make E-3 unusable. What must never happen is a *known* fund name being silently
  * re-pointed.
+ *
+ * STRICT for every known name (C1). A known name with a segment it does not take — `company_box:x`,
+ * `office_cash:x` — used to be read as the bare fund with the suffix silently dropped; it now
+ * throws, exactly as a missing driver id always has. A company code must carry a valid currency,
+ * id and account, or it throws: a company account read back wrong is a different pocket.
  */
 export function fundRefFromCode(code: string): FundRef {
-  const [head, ...rest] = code.split(':')
+  const [head = '', ...rest] = code.split(':')
   const tail = rest.join(':')
+  const noSuffix = (): void => {
+    if (rest.length > 0) throw new RangeError(`${head} takes no suffix, got ${JSON.stringify(code)}`)
+  }
+  const segments = (count: number, shape: string): void => {
+    if (rest.length !== count) throw new RangeError(`${head} is ${shape}, got ${JSON.stringify(code)}`)
+  }
 
   switch (head) {
     case 'office_cash':
@@ -1034,10 +1773,12 @@ export function fundRefFromCode(code: string): FundRef {
     case 'company_revenue':
     case 'yalago_income':
     case 'fee_earned':
+    case 'other_income':
     // WITHOUT THIS LINE a manual entry naming «company_box» silently becomes
     // `cost_center:company_box` — a different account that looks right in the UI and never moves
     // the fund the operator meant. Exactly the failure this function's own header describes.
     case 'company_box':
+      noSuffix()
       return { kind: head }
     case 'driver_cash':
     case 'driver_wallet':
@@ -1048,9 +1789,50 @@ export function fundRefFromCode(code: string): FundRef {
     case 'driver_shift_funding_wallet':
       if (tail === '') throw new RangeError(`${head} requires a driver id, got ${JSON.stringify(code)}`)
       return { kind: head, driverId: tail }
+    // WITHOUT THESE TWO LINES an advance fund read back from the ledger becomes
+    // `cost_center:advance_receivable_cash:<uuid>` — a look-alike account that الترميم does not
+    // count toward office capital, so every night would read a phantom shortfall and «شحن» real
+    // money out of صندوق الشركة. Nothing would raise; the totals would simply be wrong.
+    case 'advance_receivable_cash':
+    case 'advance_receivable_wallet':
+      if (tail === '') throw new RangeError(`${head} requires an advance id, got ${JSON.stringify(code)}`)
+      return { kind: head, advanceId: tail }
     case 'cost_center':
       if (tail === '') throw new RangeError(`cost_center requires an id, got ${JSON.stringify(code)}`)
       return { kind: 'cost_center', costCenterId: tail }
+    // ── The company ledger ──────────────────────────────────────────────────────────────────
+    case 'company_cash':
+    case 'depreciation_reserve':
+    case 'company_fx_position':
+      segments(1, `${head}:<CUR>`)
+      return { kind: head, currency: codeCurrency(head, rest[0]) }
+    case 'company_equity':
+      segments(2, `${head}:<CUR>:<account>`)
+      return {
+        kind: head,
+        currency: codeCurrency(head, rest[0]),
+        account: oneOf(head, 'an account', COMPANY_EQUITY_ACCOUNTS, rest[1]),
+      }
+    case 'company_income':
+      segments(2, `${head}:<CUR>:<account>`)
+      return {
+        kind: head,
+        currency: codeCurrency(head, rest[0]),
+        account: oneOf(head, 'an account', COMPANY_INCOME_ACCOUNTS, rest[1]),
+      }
+    case 'company_expense':
+      if (rest.length < 2) throw new RangeError(`${head} is ${head}:<CUR>:<centre>, got ${JSON.stringify(code)}`)
+      return { kind: head, currency: codeCurrency(head, rest[0]), centre: expenseCentre(rest.slice(1).join(':')) }
+    case 'branch_clearing':
+      segments(1, `${head}:<branchId>`)
+      return { kind: head, branchId: codeId(head, 'branch id', rest[0] ?? '') }
+    case 'company_payable':
+    case 'company_receivable':
+      segments(2, `${head}:<CUR>:<debtId>`)
+      return { kind: head, currency: codeCurrency(head, rest[0]), debtId: codeId(head, 'debt id', rest[1] ?? '') }
+    case 'fixed_asset':
+      segments(2, `${head}:<CUR>:<assetId>`)
+      return { kind: head, currency: codeCurrency(head, rest[0]), assetId: codeId(head, 'asset id', rest[1] ?? '') }
     default:
       return { kind: 'cost_center', costCenterId: code }
   }

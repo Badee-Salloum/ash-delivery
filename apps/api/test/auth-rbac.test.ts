@@ -129,6 +129,7 @@ describe('the boot assertion — no route can escape RBAC', () => {
       [
         'GET /me', 'GET /health', 'POST /auth/login', 'POST /auth/logout',
         'POST /auth/2fa/verify', 'POST /auth/2fa/enroll', 'POST /auth/2fa/confirm',
+        'GET /auth/register/branches', 'POST /auth/register',
         'GET /notifications', 'POST /notifications/:id/read',
       ].sort(),
     )

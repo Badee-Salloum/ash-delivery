@@ -297,6 +297,9 @@ async function clonePendingShift(harness: Harness, firstId: string, prefix: stri
     vehicleId: 'vehicle-2',
     shiftNo: 2,
     approvedBy: null,
+    approvedAt: null,
+  managerCharge: 0n as never,
+  managerChargeReason: null,
   }, 'u-d1')
 
   const sourceOrders = await harness.deps.orders.listByShift(firstId)
@@ -342,6 +345,7 @@ async function clonePendingShift(harness: Harness, firstId: string, prefix: stri
     postingDate: first.businessDate,
     weekStartDate: first.weekStartDate,
     fxDayId,
+    sypMinorPerUsd: null,
     createdBy: 'u-bm',
   })
   return secondId

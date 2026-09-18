@@ -5,7 +5,13 @@ import {
   ownsPendingCloseDraftRead,
   preservePendingCloseDraftReads,
 } from '../src/close-draft-revision.ts'
-import { rebaseCloseDraft } from '../src/screens/Shift.tsx'
+import {
+  closeDraftSaveNotice,
+  ownsCloseDraftRefresh,
+  rebaseCloseDraft,
+  rebaseStoredCloseDraft,
+  resolveCloseDraftMergeConflict,
+} from '../src/screens/Shift.tsx'
 
 const read = (readId: string, status: 'running' | 'complete' | 'failed', attempts = 1) => ({
   readId,
@@ -69,10 +75,63 @@ const draftWith = (revision: number, currentAttachment: CloseDraftAttachment) =>
   movements: [],
 })
 
+const manualOrder = (clientKey: string, providerOrderNo: string, fee = '100.00') => ({
+  clientKey,
+  providerOrderNo,
+  payMode: 'cash' as const,
+  fee,
+  feeOcr: null,
+  feeRefused: false,
+  reviewRequired: true,
+  reviewReasons: ['manual'] as never,
+  included: false,
+  occurredMinute: null,
+  occurredDate: '2026-08-30',
+  pointA: null,
+  pointB: null,
+  source: 'manual' as const,
+  readId: null,
+  observationId: null,
+  rowIndex: null,
+  dateSection: null,
+  evidence: null,
+  sightings: [],
+  windowBasis: null,
+  position: null,
+})
+
+const savedDraft = (operations: unknown, base?: { revision: number; draftHash: string }) => ({
+  version: 2,
+  ownerDriverId: 'driver-1', shiftId: 'shift-1', savedAt: 1, expiresAt: 9999999999999,
+  fingerprint: 'saved', ...base && { baseRevision: base.revision, baseDraftHash: base.draftHash },
+  persistedCashDeclared: null, persistedWalletDeclared: null, persistedOdometerKm: null,
+  persistedOdometerAnomalyConfirmed: false,
+  cash: '', wallet: '', walletOcr: null, walletHumanEdited: false,
+  odo: '', odoOcr: null, odoAiAuthoritative: false, odoHumanEdited: false, odoConfirmed: false,
+  operations,
+})
+
 describe('close-draft response ordering', () => {
+  it('shows conflict choices even when no transport save failed', () => {
+    expect(closeDraftSaveNotice(false, false, true)).toBe('conflict')
+    expect(closeDraftSaveNotice(false, false, false)).toBe('saving')
+    expect(closeDraftSaveNotice(false, true, false)).toBe('failed')
+    expect(closeDraftSaveNotice(true, false, false)).toBe('saved')
+  })
+
+  it('rejects a conflict refresh after the active shift changes', () => {
+    expect(ownsCloseDraftRefresh('shift-1', 'shift-1', 'shift-1')).toBe(true)
+    expect(ownsCloseDraftRefresh('shift-2', 'shift-1', 'shift-1')).toBe(false)
+    expect(ownsCloseDraftRefresh('shift-1', 'shift-1', 'shift-2')).toBe(false)
+    expect(ownsCloseDraftRefresh(null, 'shift-1', 'shift-1')).toBe(false)
+  })
+
   it('keeps the exact newer state object when an older response finishes late', () => {
+    const latestSnapshot = { revision: 12 }
     const current = {
       closeDraftRevision: 12,
+      closeDraftMergeConflict: true,
+      closeDraftConflictCanonical: latestSnapshot,
       marker: 'new attachment and rows',
     }
     const lateResponse = { revision: 11 }
@@ -80,6 +139,7 @@ describe('close-draft response ordering', () => {
     // The stale guard runs before rebase reads any other draft/view property. This deliberately
     // minimal fixture proves a late response is a no-op, not merely an overlay of some local fields.
     expect(rebaseCloseDraft(current as never, lateResponse as never)).toBe(current)
+    expect(current.closeDraftConflictCanonical).toBe(latestSnapshot)
   })
 
   it('accepts an initial, equal or newer revision and rejects only a rewind', () => {
@@ -87,6 +147,257 @@ describe('close-draft response ordering', () => {
     expect(isStaleCloseDraftView(7, 7)).toBe(false)
     expect(isStaleCloseDraftView(7, 8)).toBe(false)
     expect(isStaleCloseDraftView(7, 6)).toBe(true)
+  })
+
+  it('does not invent a scalar conflict for equivalent money formatting', () => {
+    const canonical = view(8, attachment('token-1', null))
+    canonical.figures.cashDeclared = '600.00'
+    canonical.figures.walletDeclared = '700.00'
+    const current = {
+      ...draftWith(7, attachment('token-1', null)),
+      persistedCashDeclared: '500.00',
+      persistedWalletDeclared: '650.00',
+      cash: '500',
+      wallet: '650.0',
+    }
+
+    const rebased = rebaseCloseDraft(current as never, canonical)
+    expect(rebased.cash).toBe('600.00')
+    expect(rebased.wallet).toBe('700.00')
+    expect(rebased.closeDraftMergeConflict).toBe(false)
+  })
+
+  it('takes the first canonical row set without overlaying transient already-YAL state rows', () => {
+    const providerOrderNo = 'YAL-903d7b56dcf5122968608a5154db16ce'
+    const canonical = view(20, attachment('token-1', read('server-read', 'complete')))
+    canonical.operations.orders.push({
+      clientKey: 'orders:c1270421415835b2b13473b43ccf967e',
+      providerOrderNo,
+      payMode: 'cash',
+      fee: '415.00',
+      feeOcr: '415.00',
+      feeRefused: false,
+      reviewRequired: true,
+      reviewReasons: ['missing_time'],
+      included: false,
+      occurredMinute: null,
+      occurredDate: '2026-08-30',
+      pointA: null,
+      pointB: null,
+      source: 'cloud_ocr',
+      readId: 'server-read',
+      observationId: 'observation-1',
+      rowIndex: 6,
+      dateSection: '2026-08-30',
+      evidence: { mediaId: 'media-token-1', attachmentToken: 'token-1', slot: 'dashboard' },
+      sightings: [{
+        readId: 'server-read',
+        observationId: 'observation-1',
+        rowIndex: 6,
+        dateSection: '2026-08-30',
+        evidence: { mediaId: 'media-token-1', attachmentToken: 'token-1', slot: 'dashboard' },
+      }],
+      windowBasis: null,
+      position: null,
+    })
+    const current = {
+      ...draftWith(0, attachment('token-1', null)),
+      closeDraftRevision: null,
+      orders: [{
+        localId: `already-${providerOrderNo}`,
+        providerOrderNo,
+        payMode: 'cash',
+        feeText: '415.00',
+        timeText: '',
+        dateText: '2026-08-30',
+        included: true,
+        recorded: true,
+      }],
+    }
+
+    const rebased = rebaseCloseDraft(current as never, canonical)
+    expect(rebased.orders).toHaveLength(1)
+    expect(rebased.orders[0]).toMatchObject({
+      localId: 'orders:c1270421415835b2b13473b43ccf967e',
+      providerOrderNo,
+      draftSource: 'cloud_ocr',
+    })
+    expect(rebased.orders.some((row) => row.localId.startsWith('already-'))).toBe(false)
+  })
+
+  it('unions A+B without letting a stale full-replacement snapshot delete newer canonical work', () => {
+    const canonical = view(8, attachment('token-1', null))
+    canonical.operations.orders.push(manualOrder('server-new', 'YAL-new'))
+    const saved = savedDraft({
+      manualOrders: [manualOrder('phone-old', 'YAL-old')],
+      manualCashDeductions: [], manualMovements: [], rowEdits: [],
+    }, { revision: 7, draftHash: 'hash-7' })
+
+    const rebased = rebaseStoredCloseDraft(
+      draftWith(7, attachment('token-1', null)) as never,
+      canonical,
+      saved as never,
+    )
+    expect(rebased.orders.map((row) => row.clientKey)).toEqual(['server-new', 'phone-old'])
+  })
+
+  it('uses server-wins union for an autosave conflict and preserves both devices additions', () => {
+    const canonical = view(8, attachment('token-1', null))
+    canonical.operations.orders.push(manualOrder('device-b', 'YAL-b', '200.00'))
+    const current = {
+      ...draftWith(7, attachment('token-1', null)),
+      orders: [{
+        localId: 'device-a', clientKey: 'device-a', draftSource: 'manual',
+        providerOrderNo: 'YAL-a', payMode: 'cash', feeText: '100.00', timeText: '',
+        dateText: '2026-08-30', included: false,
+      }],
+    }
+    const rebased = rebaseCloseDraft(current as never, canonical)
+    expect(rebased.orders.map((row) => row.clientKey)).toEqual(['device-b', 'device-a'])
+  })
+
+  it('retains the visible phone value while adopting the newer conflict revision', () => {
+    const canonical = view(8, attachment('token-1', null))
+    canonical.operations.orders.push(manualOrder('shared', 'YAL-shared', '250.00'))
+    const current = {
+      ...draftWith(7, attachment('token-1', null)),
+      orders: [{
+        localId: 'shared', clientKey: 'shared', draftSource: 'manual',
+        providerOrderNo: 'YAL-shared', payMode: 'cash', feeText: '100.00', timeText: '',
+        dateText: '2026-08-30', included: false,
+      }],
+    }
+    const rebased = rebaseCloseDraft(current as never, canonical)
+    expect(rebased.orders).toHaveLength(1)
+    expect(rebased.orders[0]?.feeText).toBe('100.00')
+    expect(rebased.closeDraftRevision).toBe(8)
+    expect(rebased.closeDraftMergeConflict).toBe(true)
+    expect(rebased.closeDraftConflictCanonical).toBe(canonical)
+  })
+
+  it('requires an explicit choice and preserves disjoint additions whichever side wins', () => {
+    const canonical = view(8, attachment('token-1', null))
+    canonical.figures.cashDeclared = '80.00'
+    canonical.operations.orders.push(
+      manualOrder('shared', 'YAL-shared', '250.00'),
+      manualOrder('server-only', 'YAL-server', '300.00'),
+    )
+    const current = {
+      ...draftWith(7, attachment('token-1', null)),
+      closeDraftMergeConflict: false,
+      closeDraftConflictCanonical: null,
+      persistedCashDeclared: '50.00',
+      cash: '100.00',
+      orders: [
+        {
+          localId: 'shared', clientKey: 'shared', draftSource: 'manual',
+          providerOrderNo: 'YAL-shared', payMode: 'cash', feeText: '100.00',
+          persistedFeeText: '50.00', timeText: '', persistedTimeText: '',
+          dateText: '2026-08-30', persistedDateText: '2026-08-30', included: false,
+        },
+        {
+          localId: 'phone-only', clientKey: 'phone-only', draftSource: 'manual',
+          providerOrderNo: 'YAL-phone', payMode: 'cash', feeText: '75.00', timeText: '',
+          dateText: '2026-08-30', included: false,
+        },
+      ],
+    }
+    const conflicted = rebaseCloseDraft(current as never, canonical)
+    expect(conflicted.closeDraftMergeConflict).toBe(true)
+    expect(conflicted.cash).toBe('100.00')
+    expect(conflicted.orders.map((row) => row.clientKey)).toEqual([
+      'shared', 'server-only', 'phone-only',
+    ])
+
+    const phone = resolveCloseDraftMergeConflict(conflicted, 'phone')
+    expect(phone.closeDraftMergeConflict).toBe(false)
+    expect(phone.closeDraftConflictCanonical).toBeNull()
+    expect(phone.cash).toBe('100.00')
+    expect(phone.orders.find((row) => row.clientKey === 'shared')?.feeText).toBe('100.00')
+
+    const server = resolveCloseDraftMergeConflict(conflicted, 'server')
+    expect(server.closeDraftMergeConflict).toBe(false)
+    expect(server.closeDraftConflictCanonical).toBeNull()
+    expect(server.cash).toBe('80.00')
+    expect(server.orders.find((row) => row.clientKey === 'shared')?.feeText).toBe('250.00')
+    expect(server.orders.map((row) => row.clientKey)).toEqual([
+      'shared', 'server-only', 'phone-only',
+    ])
+  })
+
+  it('advances the retained server choice when a newer canonical snapshot arrives', () => {
+    const first = view(8, attachment('token-1', null))
+    first.operations.orders.push(manualOrder('shared', 'YAL-shared', '250.00'))
+    const current = {
+      ...draftWith(7, attachment('token-1', null)),
+      closeDraftMergeConflict: false,
+      closeDraftConflictCanonical: null,
+      orders: [{
+        localId: 'shared', clientKey: 'shared', draftSource: 'manual',
+        providerOrderNo: 'YAL-shared', payMode: 'cash', feeText: '100.00',
+        persistedFeeText: '50.00', timeText: '', persistedTimeText: '',
+        dateText: '2026-08-30', persistedDateText: '2026-08-30', included: false,
+      }],
+    }
+    const conflicted = rebaseCloseDraft(current as never, first)
+
+    const latest = view(9, attachment('token-1', null))
+    latest.operations.orders.push(manualOrder('shared', 'YAL-shared', '300.00'))
+    const advanced = rebaseCloseDraft(conflicted, latest)
+    expect(advanced.closeDraftRevision).toBe(9)
+    expect(advanced.closeDraftConflictCanonical).toBe(latest)
+    expect(advanced.orders[0]?.feeText).toBe('100.00')
+
+    const server = resolveCloseDraftMergeConflict(advanced, 'server')
+    expect(server.closeDraftRevision).toBe(9)
+    expect(server.orders[0]?.feeText).toBe('300.00')
+  })
+
+  it('accepts a successful PATCH response without misclassifying its higher revision as conflict', () => {
+    const canonical = view(8, attachment('token-1', null))
+    canonical.operations.orders.push(manualOrder('shared', 'YAL-shared', '500.00'))
+    const current = {
+      ...draftWith(7, attachment('token-1', null)),
+      closeDraftMergeConflict: false,
+      orders: [{
+        localId: 'shared', clientKey: 'shared', draftSource: 'manual',
+        providerOrderNo: 'YAL-shared', payMode: 'cash', feeText: '500', timeText: '',
+        dateText: '2026-08-30', included: false,
+      }],
+    }
+    const rebased = rebaseCloseDraft(current as never, canonical, false)
+    expect(rebased.closeDraftRevision).toBe(8)
+    expect(rebased.closeDraftMergeConflict).toBe(false)
+    expect(rebased.orders[0]?.feeText).toBe('500.00')
+  })
+
+  it('treats legacy v2 as an unknown base and never re-seeds an already recovery artifact', () => {
+    const providerOrderNo = 'YAL-legacy'
+    const canonical = view(8, attachment('token-1', null))
+    canonical.operations.orders.push({
+      ...manualOrder('canonical-ocr', providerOrderNo, '415.00'),
+      source: 'cloud_ocr', readId: 'read-1', observationId: 'observation-1', rowIndex: 0,
+      evidence: { mediaId: 'm1', attachmentToken: 'token-1', slot: 'dashboard' },
+      sightings: [{
+        readId: 'read-1', observationId: 'observation-1', rowIndex: 0, dateSection: null,
+        evidence: { mediaId: 'm1', attachmentToken: 'token-1', slot: 'dashboard' },
+      }],
+    })
+    const saved = savedDraft({
+      manualOrders: [{
+        clientKey: `already-${providerOrderNo}`, providerOrderNo, payMode: 'cash', fee: '415',
+        occurredMinute: null, occurredDate: '2026-08-30', pointA: null, pointB: null,
+        source: 'manual',
+      }],
+      manualCashDeductions: [], manualMovements: [], rowEdits: [],
+    })
+    const rebased = rebaseStoredCloseDraft(
+      draftWith(7, attachment('token-1', null)) as never,
+      canonical,
+      saved as never,
+    )
+    expect(rebased.orders).toHaveLength(1)
+    expect(rebased.orders.some((row) => row.localId.startsWith('already-'))).toBe(false)
   })
 
   it('does not let read A erase read B ownership, then lets B apply', () => {

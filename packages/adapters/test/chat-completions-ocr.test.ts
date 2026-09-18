@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ChatCompletionsOcrReader,
+  ORDERS_MONEY_TIMEOUT_MS,
+  ORDERS_SCREEN_KIND_RETRY_TIMEOUT_MS,
+  ORDERS_SCREEN_KIND_TIMEOUT_MS,
   normalizePrintedOrderTime,
   parsedResult,
   resolveSamePageOrderTimes,
@@ -279,6 +282,70 @@ describe('printed order time normalization', () => {
     })
   })
 
+  /**
+   * The shift's own lower edge, added 2026-08-31.
+   *
+   * Eleven production rows worth 2,715.00 stayed unresolved because a marker-less clock has two
+   * readings and the resolver will not guess — and a row with no time has no merge identity, so
+   * 45% of them duplicated on the next retake against 0.6% of timed rows. A delivery cannot predate
+   * its own shift, which settles the choice without anyone guessing a marker.
+   */
+  it('settles a marker-less clock against the minute the shift opened', () => {
+    expect(resolveSamePageOrderTimes(
+      [{ printedTime: '1:18', dateIso: '2026-08-16' }],
+      { dateIso: '2026-08-16', time: '22:00' },
+      { dateIso: '2026-08-16', time: '12:00' },
+    )[0]).toEqual({
+      time: '13:18',
+      candidates: ['13:18'],
+      basis: 'screen_position',
+      conflict: false,
+    })
+  })
+
+  it('keeps the delivery printed at the exact opening minute', () => {
+    // INCLUSIVE, like the operation window itself. A strict comparison here would throw away the
+    // first delivery of every shift — and every default close-draft fixture is an 08:00 row on a
+    // shift that opens at 08:00.
+    expect(resolveSamePageOrderTimes(
+      [{ printedTime: '8:00 AM', dateIso: '2026-08-16' }],
+      { dateIso: '2026-08-16', time: '22:00' },
+      { dateIso: '2026-08-16', time: '08:00' },
+    )[0]).toMatchObject({ time: '08:00', basis: 'printed_time', conflict: false })
+  })
+
+  it('never lets the shift bound delete the only reading a row has', () => {
+    /*
+     * The bound exists to CHOOSE between two candidates, not to erase one.
+     *
+     * A `1:00 PM` printed under the previous day's header is a perfectly legible time that simply
+     * falls outside this shift — deciding what to do about that belongs to the window classifier,
+     * which has `pre_open` for exactly it. Taking the minute away instead would cost the row its
+     * merge identity and duplicate it on the next retake: the failure this bound was added to stop.
+     *
+     * Caught by a real test in `close-draft-adversarial` before this rule was written down.
+     */
+    expect(resolveSamePageOrderTimes(
+      [{ printedTime: '1:00 PM', dateIso: '2026-07-20' }],
+      { dateIso: '2026-07-21', time: '14:00' },
+      { dateIso: '2026-07-21', time: '08:00' },
+    )[0]).toMatchObject({ time: '13:00', conflict: false })
+  })
+
+  it('is unchanged when no shift bound is supplied, which is how the cached adapter pass calls it', () => {
+    // The adapter's own pass stays context-free so its result remains cacheable — the reason
+    // `cache_signature` does not move for this change and no page is re-read.
+    expect(resolveSamePageOrderTimes([
+      { printedTime: '01:18', dateIso: '2026-08-16' },
+      { printedTime: '00:57', dateIso: '2026-08-16' },
+    ])[0]).toEqual({
+      time: null,
+      candidates: ['01:18', '13:18'],
+      basis: 'unknown',
+      conflict: false,
+    })
+  })
+
   it('rejects trusted times that invert the newest-first screen order', () => {
     expect(resolveSamePageOrderTimes([
       { printedTime: '00:57', dateIso: '2026-08-16' },
@@ -293,7 +360,7 @@ describe('printed order time normalization', () => {
 describe('orders fast financial pass', () => {
   it('versions the cache by model configuration and all orders pass versions and budgets', () => {
     expect(reader().cacheSignature('orders')).toBe(
-      'openai@ocr.test:gpt-test:medium:medium:orders-screen-kind-v1:orders-money-v4:orders-time-v3:orders-route-v3:money-authority-v1:money-validation-v2:time-validation-v3:position-evidence-v1:cancellation-consensus-v1:kind-timeout-1000:money-timeout-1000:time-timeout-1000:route-timeout-1000:route-grace-12000:kind-max-512:money-max-8192:time-max-4096:route-max-8192',
+      'openai@ocr.test:gpt-test:medium:medium:orders-screen-kind-v1:orders-money-v5:orders-money-2-v1:orders-time-v3:orders-route-v4:money-consensus-v1:money-validation-v2:time-validation-v3:position-evidence-v1:cancellation-consensus-v1:kind-timeout-1000:kind-retry-1000:money-timeout-1000:time-timeout-1000:route-timeout-1000:route-grace-12000:kind-max-512:money-max-8192:time-max-4096:route-max-8192',
     )
     expect(reader(2_000).cacheSignature('orders')).not.toBe(reader().cacheSignature('orders'))
     expect(reader(2_000).cacheSignature('wallet')).not.toBe(reader().cacheSignature('wallet'))
@@ -389,7 +456,10 @@ describe('orders fast financial pass', () => {
 
     const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
 
-    expect(fetch).toHaveBeenCalledTimes(4)
+    // FIVE: screen-kind, two independent money readings, the printed-time verifier, and routes.
+    // The second money pass was added after a single unchecked reading published 230 for a fee of
+    // 330 on 2026-09-01 — the wallet and the clock had needed two agreeing readers for weeks.
+    expect(fetch).toHaveBeenCalledTimes(5)
     const fastCall = vi.mocked(fetch).mock.calls.find(([, init]) =>
       requestedPrompt(init).includes('ORDERS MONEY/TIME/DATE FAST PASS'),
     )
@@ -411,12 +481,16 @@ describe('orders fast financial pass', () => {
     ])
     expect(reading.result.rows.reduce((sum, row) => sum + Number(row.value), 0)).toBe(1_415)
     expect(reading.result.raw).toMatchObject({
-      reader: 'orders-ai-time-consensus-v4',
+      reader: 'orders-ai-money-and-time-consensus-v5',
       routesAligned: false,
       route: { ok: false, reason: 'timeout' },
       timeAgreementCounts: [2, 2, 2, 2, 2],
     })
-    expect(reading.usage).toMatchObject({ tokensIn: 16, tokensOut: 8 })
+    // The price of the second opinion, summed across every pass exactly as `ocr_reads` records it:
+    // 16/8 before, 24/12 after — the new pass costs what the first money pass costs. Measured
+    // against production the same ratio came to +$1.63/month at ten shifts a day, against a single
+    // misread fee that moved one employee settlement by 92.00.
+    expect(reading.usage).toMatchObject({ tokensIn: 24, tokensOut: 12 })
   })
 
   it('normalizes the exact midnight incident only after money and time passes agree', async () => {
@@ -894,6 +968,149 @@ describe('orders fast financial pass', () => {
 
     expect(reading.result).toMatchObject({ ok: false, reason: 'unavailable' })
   })
+
+  /*
+   * The fee, voted on — added 2026-09-01 after a single unchecked reading put a phantom delivery
+   * into a settlement.
+   *
+   * Shift a3728815 photographed one Recent Orders list twice. On the second page the 14:50 row was
+   * scrolled under the sticky header and rendered faded, the top of a ٣ was lost, and the money
+   * pass returned 230 where the screen said 330 — while transcribing the clock and both address
+   * lines perfectly. Nothing checked it, so both rows became orders: ten orders for nine
+   * deliveries. The phantom raised `expectedTotal` by 0.8 × 230, which pulled a real 218.25 surplus
+   * down to 34.25 and made the shift look almost exact.
+   *
+   * Yallago's own payments log settles the fee beyond argument: exactly one 20% deduction at that
+   * minute, −66.00 = 20% of 330, and no −46.00 anywhere in it.
+   *
+   * The wallet has needed two agreeing readers since `٢٧٩٫٥٠` came back as `٣٧٩٫٥٠` — the same ٢/٣
+   * confusion — and the printed clock since 0033. The fee, which the whole settlement is built
+   * from, was the one field with no vote.
+   */
+  describe('the fee is voted on, not taken from one reader', () => {
+    const twoPages = (first: string, second: string): ParsedScreen => ({
+      rows: [
+        orderRow(first, { time: '02:50 م', dateIso: '2026-09-01' }),
+        orderRow(second, { time: '02:00 م', dateIso: '2026-09-01' }),
+      ],
+      fields: [],
+      notes: null,
+    })
+
+    /** Stage the two money readings independently; everything else agrees. */
+    const stage = (primary: ParsedScreen, second: ParsedScreen, route?: ParsedScreen): void => {
+      vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        const prompt = requestedPrompt(init)
+        if (isScreenKindPrompt(prompt)) return completion(screenKind())
+        // The second prompt embeds the first, so the specific marker must be tested FIRST.
+        if (prompt.includes('SECOND FINANCIAL READING')) return completion(second)
+        if (prompt.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return completion(primary)
+        if (prompt.includes('ORDERS PRINTED-TIME VERIFIER')) return completion(primary)
+        if (route !== undefined) return completion(route)
+        return new Response('', { status: 504 })
+      }))
+    }
+
+    it('refuses a fee the two readers disagree about, and says why', async () => {
+      // The incident, reproduced: 330 on one reading, 230 on the other, everything else identical.
+      stage(twoPages('330', '120'), twoPages('230', '120'))
+      const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+
+      expect(reading.result.ok).toBe(true)
+      if (!reading.result.ok) throw new Error('expected an orders result')
+
+      // NOT 330, and emphatically not 230. Neither reader is trusted over the other, so the row
+      // goes to a human — `reviewRequired` reaches the manager as `reader_conflict` and the driver
+      // as a fee to type. Before this, 230 was published with nothing to show anyone disagreed.
+      expect(reading.result.rows[0]).toMatchObject({ value: null, reviewRequired: true })
+      // The row the readers agreed on is untouched. A conflict is per row, never per screen.
+      expect(reading.result.rows[1]).toMatchObject({ value: '120' })
+      expect(reading.result.raw).toMatchObject({ moneyDisagreementIndexes: [0] })
+      // And the whole image stays retryable, because a refused fee is an unread one.
+      expect(reading.result.retryable).toBe(true)
+    })
+
+    it('publishes a fee both readers saw', async () => {
+      stage(twoPages('330', '120'), twoPages('330', '120'))
+      const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+      expect(reading.result.ok && reading.result.rows.map((row) => row.value)).toEqual(['330', '120'])
+      expect(reading.result.ok && reading.result.raw).toMatchObject({ moneyDisagreementIndexes: [] })
+    })
+
+    it('counts 330 and 330.00 as one reading, not two disagreeing ones', async () => {
+      // The vote is over the parsed money key. Two readers who wrote the same amount differently
+      // agree, and treating that as a conflict would send honest rows to a human every night.
+      stage(twoPages('330', '120'), twoPages('330.00', '120.00'))
+      const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+      expect(reading.result.ok && reading.result.rows.map((row) => row.value)).toEqual(['330', '120'])
+      expect(reading.result.ok && reading.result.raw).toMatchObject({ moneyDisagreementIndexes: [] })
+    })
+
+    it('still publishes when only ONE reader could read the fee', async () => {
+      /*
+       * Availability, stated as a deliberate limit rather than left implicit. If the second reading
+       * fails — a timeout, a refusal, a truncated completion — the first is published as before.
+       * Refusing here would turn every flaky-network shift into a page of hand-typed fees, and a
+       * lone reading is not the failure this exists to catch. A CONTRADICTED one is.
+       */
+      vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        const prompt = requestedPrompt(init)
+        if (isScreenKindPrompt(prompt)) return completion(screenKind())
+        if (prompt.includes('SECOND FINANCIAL READING')) return new Response('', { status: 504 })
+        if (prompt.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return completion(twoPages('330', '120'))
+        if (prompt.includes('ORDERS PRINTED-TIME VERIFIER')) return completion(twoPages('330', '120'))
+        return new Response('', { status: 504 })
+      }))
+      const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+      expect(reading.result.ok && reading.result.rows.map((row) => row.value)).toEqual(['330', '120'])
+    })
+
+    it('lets two agreeing readers outvote a third that disagrees', async () => {
+      // The wallet's rule exactly: two independent readers who saw the same amount outweigh one who
+      // did not. Without this, any single bad pass could veto a whole screen.
+      stage(twoPages('330', '120'), twoPages('330', '120'), twoPages('230', '120'))
+      const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+      expect(reading.result.ok && reading.result.rows[0]).toMatchObject({ value: '330' })
+    })
+
+    it('keeps the second reading out of the printed-time vote', async () => {
+      /*
+       * The second money prompt is the first one plus a financial appendix, so its time
+       * instructions are the first's verbatim. It is a genuinely independent reader of the FEE and
+       * not of the clock — counting it would turn one reader's time into two votes and retire the
+       * rule 0033 exists for.
+       *
+       * Here the two money passes agree on a clock the verifier contradicts. That is one reader
+       * against one, so no time may be published.
+       */
+      const money = twoPages('330', '120')
+      const verifier: ParsedScreen = {
+        rows: [
+          orderRow('330', { time: '03:50 م', dateIso: '2026-09-01' }),
+          orderRow('120', { time: '02:00 م', dateIso: '2026-09-01' }),
+        ],
+        fields: [],
+        notes: null,
+      }
+      vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        const prompt = requestedPrompt(init)
+        if (isScreenKindPrompt(prompt)) return completion(screenKind())
+        if (prompt.includes('SECOND FINANCIAL READING')) return completion(money)
+        if (prompt.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return completion(money)
+        if (prompt.includes('ORDERS PRINTED-TIME VERIFIER')) return completion(verifier)
+        return new Response('', { status: 504 })
+      }))
+      const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+      expect(reading.result.ok).toBe(true)
+      if (!reading.result.ok) throw new Error('expected an orders result')
+      // The contested clock is refused; the money the two readers agreed on is published.
+      expect(reading.result.rows[0]).toMatchObject({ value: '330', time: null })
+      // Zero, not two. `consensusValue` reports the WINNER's votes, and a contested clock has no
+      // winner — so this is the direct statement that the second money pass did not get to second
+      // its own copy of the time. Row 1, which the verifier really did corroborate, still shows 2.
+      expect(reading.result.raw).toMatchObject({ timeAgreementCounts: [0, 2] })
+    })
+  })
 })
 
 describe('provider identity and request shape', () => {
@@ -1159,4 +1376,121 @@ describe('a deliberate cancellation is not an alarm', () => {
     expect(isDeliberateAbort('TypeError', caller.signal)).toBe(false)
     expect(isDeliberateAbort(undefined, caller.signal)).toBe(false)
   })
+
+  /*
+   * Shift 7813ec86, مجد الرفاعي, 2026-09-02 17:56 — the read that was thrown away.
+   *
+   * Stored result: {"reason":"timeout","detail":"timeout 12000ms orders_screen_kind"}. Latency
+   * 41,586ms, output 15,546 tokens — money, time and route had all answered. The whole read died
+   * because a 512-token classifier missed a 12-second budget, and it was the FIRST orders timeout
+   * in 160 reads. The repo's own pre-flight had measured screen-kind at 7,646ms against that
+   * 12,000ms budget — 1.57x headroom where every other pass had 4.5x to 7x — so a provider running
+   * 30% slower that day (measured on four fields whose prompts never changed) made it arithmetic.
+   */
+  describe('the screen-kind gate is asked twice before its silence sinks the read', () => {
+    const rows: ParsedScreen = {
+      rows: [
+        orderRow('330', { time: '02:50 م', dateIso: '2026-09-01' }),
+        orderRow('120', { time: '02:00 م', dateIso: '2026-09-01' }),
+      ],
+      fields: [],
+      notes: null,
+    }
+
+    /** Screen-kind answers per call from `kinds`; every other pass always answers. */
+    const stage = (kinds: Array<ParsedScreen | 'silent'>): void => {
+      let asked = 0
+      vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        const prompt = requestedPrompt(init)
+        if (isScreenKindPrompt(prompt)) {
+          const answer = kinds[asked] ?? 'silent'
+          asked += 1
+          return answer === 'silent' ? new Response('', { status: 504 }) : completion(answer, 2, 1)
+        }
+        if (prompt.includes('SECOND FINANCIAL READING')) return completion(rows)
+        if (prompt.includes('ORDERS MONEY/TIME/DATE FAST PASS')) return completion(rows)
+        if (prompt.includes('ORDERS PRINTED-TIME VERIFIER')) return completion(rows)
+        return completion(rows)
+      }))
+    }
+
+    it('publishes the read when the gate answers on the second ask', async () => {
+      // The incident, and the test that would have saved that shift: everything else succeeded and
+      // was discarded over one unanswered 512-token call.
+      stage(['silent', screenKind()])
+      const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+
+      expect(reading.result.ok, 'the four successful passes must not be thrown away').toBe(true)
+      if (!reading.result.ok) throw new Error('expected an orders result')
+      expect(reading.result.rows.map((row) => row.value)).toEqual(['330', '120'])
+      // Six calls: the gate twice, plus money, money-2, time and route.
+      expect(fetch).toHaveBeenCalledTimes(6)
+      // And the discarded attempt is still billed — a paid call missing from `usage` is a call the
+      // cost meter cannot see.
+      expect(reading.usage.tokensIn).toBeGreaterThan(0)
+    })
+
+    it('NEVER re-asks a gate that answered — this one must not be deleted', async () => {
+      /*
+       * The safety property the whole gate exists for. A payments-log screenshot carries plausible
+       * signed money and times, so a refusal must be final. Re-asking an answered gate would turn
+       * «no» into «ask until yes», which is the one thing this fix must not become.
+       *
+       * The second staged answer is `orders` precisely so that a wrong implementation would pass
+       * the read and fail this assertion loudly.
+       */
+      stage([screenKind('payments_log'), screenKind()])
+      const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+
+      expect(reading.result.ok).toBe(false)
+      if (reading.result.ok) throw new Error('a payments-log screen must never publish money')
+      expect(reading.result.reason).toBe('wrong_screen')
+      // FIVE, not six: the gate spoke, so it was not asked again.
+      expect(fetch).toHaveBeenCalledTimes(5)
+    })
+
+    it('still fails closed when the gate is silent twice, and says whose silence it was', async () => {
+      // The refusal is unchanged — `ordersPassResult` still returns the gate's failure. What changed
+      // is that the driver is told the image was not JUDGED, so he does not retake a correct screen.
+      stage(['silent', 'silent'])
+      const reading = await reader().read({ field: 'orders', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+
+      expect(reading.result.ok).toBe(false)
+      if (reading.result.ok) throw new Error('expected a refusal')
+      expect(reading.result.reason).toBe('timeout')
+      expect(reading.result.detail).toContain('screen-kind gate did not answer')
+      expect(fetch).toHaveBeenCalledTimes(6)
+    })
+
+    it('does not spend a second call once the caller has given up', async () => {
+      // An aborted request means the API's deadline already fired; a retry could not be observed by
+      // anyone and would be pure spend against the driver's per-shift read budget.
+      stage(['silent', screenKind()])
+      const controller = new AbortController()
+      controller.abort()
+      const reading = await reader().read({
+        field: 'orders',
+        bytes: new Uint8Array([1]),
+        mimeType: 'image/jpeg',
+        signal: controller.signal,
+      })
+      expect(reading.result.ok).toBe(false)
+      const asks = vi.mocked(fetch).mock.calls.filter(([, init]) => isScreenKindPrompt(requestedPrompt(init)))
+      expect(asks).toHaveLength(1)
+    })
+
+    it('keeps both asks inside the budget the money pass already bounds', () => {
+      /*
+       * The invariant the whole design rests on, asserted so a future tuner cannot break it by
+       * editing one constant. `readOrders` settles `Promise.all([screenKind, money, moneySecond,
+       * time])`, which money bounds at 30s. While the two gate asks sum to no more than that, the
+       * settle bound, the route grace and the whole-read worst case are all exactly what they were
+       * before this fix. Raise either number past it and every read creeps toward the platform's
+       * 60s function ceiling — the failure this fix exists to prevent, not to cause.
+       */
+      expect(ORDERS_SCREEN_KIND_TIMEOUT_MS + ORDERS_SCREEN_KIND_RETRY_TIMEOUT_MS)
+        .toBeLessThanOrEqual(ORDERS_MONEY_TIMEOUT_MS)
+    })
+  })
+
 })

@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import type { Deps, ExpenseCategoryRecord, ExpenseRecord } from '@ash/contracts'
+import type { Deps, ExpenseCategoryRecord, ExpenseRecord, FinancialTransactionDeps } from '@ash/contracts'
 import { createExpenseCategoryRequest, createExpenseRequest, serializeMoney } from '@ash/contracts'
 import { type Posting, expense as expensePosting, minor, weekStartFor } from '@ash/domain'
 import { ServiceError, assertWeekOpen, ensureFxDay, recordVehicleEvent, todayFor } from './shifts.service.ts'
@@ -16,16 +16,66 @@ const sameExpenseRequest = (
   existing.categoryId === requested.categoryId &&
   existing.costCenterKind === requested.costCenterKind &&
   existing.vehicleId === requested.vehicleId &&
+  // Compared, and it matters for the reason the income route records: without it a replay that
+  // flipped cash to wallet would return 200 and leave the ORIGINAL row against the wrong box.
+  existing.channel === requested.channel &&
   existing.amount === requested.amount &&
   (!businessDateWasExplicit || existing.businessDate === requested.businessDate) &&
   existing.description === requested.description &&
   existing.receiptMediaId === requested.receiptMediaId &&
+  existing.advanceId === requested.advanceId &&
   existing.createdBy === requested.createdBy
 
 const assertCompleteExpense = (record: ExpenseRecord): void => {
   if (record.journalEntryId === null) {
     throw new ServiceError(500, 'expense_integrity_error', { expenseId: record.id })
   }
+}
+
+/**
+ * Write one ordinary expense and its journal while the caller owns the financial transaction.
+ *
+ * Recurring-expense payment deliberately reuses this exact path: a fixed expense is not a second
+ * kind of accounting fact. It is this ordinary expense plus the occurrence decision that points
+ * to it, committed in the same unit of work.
+ */
+export async function recordExpenseInTx(
+  tx: FinancialTransactionDeps,
+  input: {
+    record: ExpenseRecord
+    businessDateWasExplicit: boolean
+    fxDayId: number
+    postingDate: ExpenseRecord['businessDate']
+  },
+): Promise<{ record: ExpenseRecord; created: boolean }> {
+  const { record } = input
+  const concurrent = await tx.expenses.get(record.id)
+  if (concurrent) {
+    if (!sameExpenseRequest(concurrent, record, input.businessDateWasExplicit)) {
+      throw new ServiceError(409, 'idempotency_key_conflict', { idempotencyKey: record.id })
+    }
+    assertCompleteExpense(concurrent)
+    return { record: concurrent, created: false }
+  }
+
+  const costCenterId = record.vehicleId ?? `${record.costCenterKind}:${record.branchId}`
+  const posting: Posting = expensePosting(record.channel, costCenterId, record.amount, record.id)
+  const [entry] = await tx.ledger.post(record.branchId, [posting], {
+    shiftId: null,
+    businessDate: record.businessDate,
+    postingDate: input.postingDate,
+    weekStartDate: weekStartFor(record.businessDate),
+    fxDayId: input.fxDayId,
+    sypMinorPerUsd: null,
+    createdBy: record.createdBy,
+    reason: record.description,
+  })
+  if (!entry) {
+    throw new ServiceError(409, 'idempotency_key_conflict', { idempotencyKey: record.id })
+  }
+  const created = { ...record, journalEntryId: entry.id }
+  await tx.expenses.create(created)
+  return { record: created, created: true }
 }
 
 /**
@@ -84,11 +134,15 @@ export function registerExpenseRoutes(app: FastifyInstance, deps: Deps): void {
       categoryId: body.categoryId,
       costCenterKind: body.costCenterKind,
       vehicleId: body.vehicleId,
+      channel: body.channel,
       amount: body.amount,
       businessDate,
       description: body.description,
       receiptMediaId: body.receiptMediaId,
       journalEntryId: null,
+      // Always null here. A conversion expense — a «سلفة» finally recognised as spent — is written
+      // by the advances route, which is the only place that may set it.
+      advanceId: null,
       createdBy: req.actor!.userId,
     }
 
@@ -129,14 +183,16 @@ export function registerExpenseRoutes(app: FastifyInstance, deps: Deps): void {
         ceiling: serializeMoney(ceiling),
       })
     }
+    if (body.receiptMediaId !== null) {
+      const receipt = await deps.media.findById(body.receiptMediaId)
+      if (!receipt || receipt.branchId !== branchId) throw new ServiceError(422, 'receipt_media_invalid')
+    }
 
     // BR7. The likeliest real path into a sealed week in the whole system: a manager remembering
     // Thursday's charging bill on Monday, and back-dating it because the form lets him.
     await assertWeekOpen(deps, branchId, businessDate)
     // The ledger posting and the expense row belong together: an expense that is not in the
     // ledger is a number nobody's balance sheet knows about.
-    const costCenterId = record.vehicleId ?? `${record.costCenterKind}:${branchId}`
-    const posting: Posting = expensePosting(costCenterId, record.amount, record.id)
     const fxDayId = await ensureFxDay(deps, businessDate)
 
     const outcome = await deps.financialUnitOfWork.run(
@@ -145,34 +201,12 @@ export function registerExpenseRoutes(app: FastifyInstance, deps: Deps): void {
         actorId: req.actor!.userId,
         requestId: req.requestId,
       },
-      async (tx) => {
-        const concurrent = await tx.expenses.get(record.id)
-        if (concurrent) {
-          if (!sameExpenseRequest(concurrent, record, body.businessDate !== undefined)) {
-            throw new ServiceError(409, 'idempotency_key_conflict', { idempotencyKey: record.id })
-          }
-          assertCompleteExpense(concurrent)
-          return { record: concurrent, created: false }
-        }
-
-        const [entry] = await tx.ledger.post(branchId, [posting], {
-          shiftId: null,
-          businessDate,
-          postingDate: todayFor(deps),
-          weekStartDate: weekStartFor(businessDate),
-          fxDayId,
-          createdBy: req.actor!.userId,
-          reason: record.description,
-        })
-        // A journal with this client UUID but no matching expense can only be an incompatible use
-        // of the key (or historical corruption). Never attach the new row to somebody else's entry.
-        if (!entry) {
-          throw new ServiceError(409, 'idempotency_key_conflict', { idempotencyKey: record.id })
-        }
-        const created = { ...record, journalEntryId: entry.id }
-        await tx.expenses.create(created)
-        return { record: created, created: true }
-      },
+      (tx) => recordExpenseInTx(tx, {
+        record,
+        businessDateWasExplicit: body.businessDate !== undefined,
+        fxDayId,
+        postingDate: todayFor(deps),
+      }),
     )
     const saved = outcome.record
 
@@ -240,4 +274,3 @@ export function registerExpenseRoutes(app: FastifyInstance, deps: Deps): void {
     return { totals: totals.map((t) => ({ ...t, total: serializeMoney(t.total) })) }
   })
 }
-

@@ -43,6 +43,7 @@ const shift = (): ShiftRecord => ({
   endWalletDeclaredOcr: null,
   driverConfirmedAt: null,
   openApprovedAt: null,
+  windowOpensAt: null,
   openApprovedBy: null,
   submittedAt: null,
   equationDiff: null,
@@ -50,6 +51,9 @@ const shift = (): ShiftRecord => ({
   walletDiff: null,
   ordersHash: null,
   approvedBy: null,
+  approvedAt: null,
+  managerCharge: minor(0n),
+  managerChargeReason: null,
 })
 
 const order = (

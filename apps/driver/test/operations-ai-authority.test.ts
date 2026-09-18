@@ -12,7 +12,7 @@ describe('durable operations OCR authority guards', () => {
     expect(shift).toContain('attachmentToken: attachment.attachmentToken')
     expect(shift).toContain('expectedRevision: revision')
     expect(shift).toContain('applyLinkedScalarRead(state, response, field, attachment.attachmentToken)')
-    expect(shift).toContain('const operations = closeDraftOperations(view)')
+    expect(shift).toContain('const rawOperations = closeDraftOperations(view)')
   })
 
   it('wires every paged tile to its canonical attachment and revision', () => {
@@ -52,7 +52,20 @@ describe('durable operations OCR authority guards', () => {
   it('autosaves only the strict human allowlist and restores the local overlay after canonical GET', () => {
     expect(shift).toContain('runCloseDraftSaveWithRetry({')
     expect(shift).toContain('rebaseStoredCloseDraft(current, view, saved)')
-    expect(shift).toContain('setEndDraft((current) => rebaseCloseDraft(current, result.value))')
+    expect(shift).toContain('rebaseCloseDraft(current, result.value, false)')
+    expect(shift).toContain(
+      'setEndDraft((current) => rebaseCloseDraft(current, result.value))',
+    )
+    expect(shift).not.toContain('closeDraftConflictCanonical: result.value')
+    expect(shift).toContain('api.closeDraft(requestedShiftId).then((latest) =>')
+    expect(shift).toContain('activeDraftShiftIdRef.current')
+    expect(shift).toContain('latest.shiftId')
+    expect(shift).toContain('draft.closeDraftMergeConflict')
+    expect(shift).toContain("onResolveSaveConflict('phone')")
+    expect(shift).toContain("onResolveSaveConflict('server')")
+    expect(shift).toContain("resolveCloseDraftMergeConflict(current, 'phone')")
+    expect(shift).toContain('return resolveCloseDraftMergeConflict(')
+    expect(shift).toContain('rebaseCloseDraft(current, latest),')
     expect(shift).not.toContain('walletDeclaredOcr: endDraft.walletOcr')
     expect(shift).not.toContain('odometerKmOcr: endDraft.odoOcr')
     expect(shift).not.toContain('batteryPercent: endDraft')

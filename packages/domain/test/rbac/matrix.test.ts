@@ -49,8 +49,7 @@ const SRS_MATRIX: Record<PermissionKey, Partial<Record<RoleKey, Scope>>> = {
   // «رؤية بيانات الفرع كاملة»: BM ✓ (فرعه), sysadmin ✓, GM ✓
   'branch_data.view': { branch_manager: 'branch', system_admin: 'all', general_manager: 'all' },
   // «التتبع الحي GPS»: BM ✓ (فرعه), sysadmin ✓, GM ✓
-  // Live tracking is upper-level only (owner's decision) — the branch manager has no gps.view.
-  'gps.view': { system_admin: 'all', general_manager: 'all' },
+  'gps.view': { branch_manager: 'branch', system_admin: 'all', general_manager: 'all' },
   // «إدارة المستخدمين والصلاحيات»: sysadmin ✓, GM ✓
   'user.manage': { system_admin: 'all', general_manager: 'all' },
   // BR8: the driver sees his own shifts and dues
@@ -64,6 +63,9 @@ const SRS_MATRIX: Record<PermissionKey, Partial<Record<RoleKey, Scope>>> = {
   'settings.write': { system_admin: 'all' },
   // Not in the §3 matrix — ASSUMPTION A-27. See the rationale on the PermissionKey union.
   'fleet.manage': { branch_manager: 'branch', system_admin: 'all', general_manager: 'all' },
+  // Not in the §3 matrix — owner decision 2026-09-17: «إدارة صندوق الشركة: المدير العام ومدير النظام
+  // فقط». Deliberately NOT the branch manager, although he holds `journal.manual.write`.
+  'company_fund.manage': { system_admin: 'all', general_manager: 'all' },
 }
 
 /**
@@ -134,7 +136,7 @@ describe('the grant table IS the SRS §3 matrix, plus exactly one recorded overr
     expect(Object.keys(SRS_MATRIX).sort()).toEqual([...ALL_PERMISSIONS].sort())
   })
 
-  // The exhaustive sweep: 16 permissions × 5 roles, generated, against SRS §3 ⊕ decision 9.
+  // The exhaustive sweep: every permission × 5 roles, generated, against SRS §3 ⊕ decision 9.
   for (const permission of ALL_PERMISSIONS) {
     for (const roleKey of ALL_ROLES) {
       const expected = EFFECTIVE_MATRIX[permission][roleKey]
@@ -171,6 +173,22 @@ describe('the rows worth a second look', () => {
         roleKey === 'general_manager' || roleKey === 'system_admin',
       )
     }
+  })
+
+  /**
+   * صندوق الشركة (2026-09-17). The branch manager used to reach it through `journal.manual.write`
+   * while `profit.view_total` kept him from seeing it. The new key must never quietly follow the
+   * manual-entry grant back to him.
+   */
+  it('only the General Manager and the system admin manage the company fund', () => {
+    for (const roleKey of ALL_ROLES) {
+      expect(can(actor(roleKey), 'company_fund.manage', { branchId: BRANCH_A }).allowed, roleKey).toBe(
+        roleKey === 'general_manager' || roleKey === 'system_admin',
+      )
+    }
+    // The gap it closes: the branch manager keeps manual entries, and that is no longer enough.
+    expect(can(actor('branch_manager'), 'journal.manual.write', { branchId: BRANCH_A }).allowed).toBe(true)
+    expect(DEFAULT_GRANTS['company_fund.manage']?.branch_manager).toBeUndefined()
   })
 
   /** The floor decision 9 does NOT touch: a driver is still confined to his own. */

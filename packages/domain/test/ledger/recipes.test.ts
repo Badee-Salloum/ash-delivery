@@ -17,6 +17,8 @@ import {
   orderFee,
   postingsForApproval,
   postingsForOpen,
+  expense,
+  income,
   reverse,
 } from '../../src/ledger/recipes.ts'
 
@@ -452,6 +454,92 @@ describe('property: every posting balances under random event streams (brief §5
         },
       ),
       { numRuns: 400 },
+    )
+  })
+})
+
+/**
+ * «مدخول مباشر» — direct income, the mirror of `expense` (owner request, 2026-08-28).
+ *
+ * Money reaching the branch that is not a delivery fee: a scrap sale, a damage recovery, a sponsor.
+ */
+describe('expense — and which box paid for it', () => {
+  it('credits the box the recorder named', () => {
+    // Cash was the only possibility until 0059, and it is still the common one; the wallet is not
+    // exotic here, because Yallago's cut leaves the wallet and costs fall on it.
+    for (const channel of ['office_cash', 'office_wallet'] as const) {
+      const posting = expense(channel, 'branch:b1', syp(1_000))
+      expect(posting.eventType).toBe('expense')
+      expect(debitsOf(posting)).toBe(creditsOf(posting))
+      expect(posting.lines.filter((l) => l.side === 'C').map((l) => l.fund.kind)).toEqual([channel])
+    }
+  })
+
+  it('debits the cost centre it was told, never anything else', () => {
+    const posting = expense('office_wallet', 'branch:b1', minor(6_381n))
+    expect(posting.lines.filter((l) => l.side === 'D').map((l) => l.fund)).toEqual([
+      { kind: 'cost_center', costCenterId: 'branch:b1' },
+    ])
+  })
+
+  it('refuses a zero or negative amount', () => {
+    expect(() => expense('office_cash', 'branch:b1', minor(0n))).toThrow(RangeError)
+    expect(() => expense('office_cash', 'branch:b1', minor(-1n))).toThrow(RangeError)
+  })
+})
+
+describe('income — the mirror of expense', () => {
+  const fundsOn = (posting: Posting, side: 'D' | 'C'): string[] =>
+    posting.lines.filter((l) => l.side === side).map((l) => l.fund.kind)
+
+  it('debits the box that received the money and credits other_income', () => {
+    const posting = income('office_cash', syp(1_000))
+    expect(posting.eventType).toBe('income')
+    expect(debitsOf(posting)).toBe(creditsOf(posting))
+    expect(fundsOn(posting, 'D')).toEqual(['office_cash'])
+    expect(fundsOn(posting, 'C')).toEqual(['other_income'])
+  })
+
+  it('posts to the WALLET as readily as to cash', () => {
+    // Not decoration. An office wallet is a real destination for a transfer, and it is also the
+    // side that FALLS on a correction — which is why a cash-only recipe could not express the
+    // Haidar shift that motivated this feature.
+    const posting = income('office_wallet', syp(388))
+    expect(debitsOf(posting)).toBe(creditsOf(posting))
+    expect(fundsOn(posting, 'D')).toEqual(['office_wallet'])
+  })
+
+  it('never credits company_revenue, which BR4 reserves for the delivery share', () => {
+    // Folding a battery sale into the company's share of delivery fees would overstate the
+    // delivery business in `/dashboard/profit` for ever, with nothing to reveal it.
+    for (const channel of ['office_cash', 'office_wallet'] as const) {
+      expect(fundsOn(income(channel, syp(500)), 'C')).not.toContain('company_revenue')
+    }
+  })
+
+  it('refuses a zero or negative amount rather than posting a backwards entry', () => {
+    // `allocate()` refuses negative totals for the same reason: a signed delta must come from
+    // subtracting two allocations, never from a negative one.
+    expect(() => income('office_cash', minor(0n))).toThrow(RangeError)
+    expect(() => income('office_cash', minor(-1n))).toThrow(RangeError)
+  })
+
+  it('carries its occurrence key, so a replayed request cannot post twice', () => {
+    expect(income('office_cash', syp(10), 'income-abc').occurrenceKey).toBe('income-abc')
+  })
+
+  it('balances for any positive amount and either channel', () => {
+    fc.assert(
+      fc.property(
+        fc.bigInt({ min: 1n, max: 9_000_000_000n }),
+        fc.constantFrom('office_cash' as const, 'office_wallet' as const),
+        (amount, channel) => {
+          const posting = income(channel, minor(amount))
+          expect(debitsOf(posting)).toBe(creditsOf(posting))
+          expect(debitsOf(posting)).toBe(amount)
+        },
+      ),
+      { numRuns: 300 },
     )
   })
 })

@@ -2,6 +2,8 @@ import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BRANCH, type Harness, makeHarness, sypStr } from './harness.ts'
 
+const key = (): string => crypto.randomUUID()
+
 /**
  * Treasury: the daily cash count (E-5 / س51) and disciplined manual entries (E-3 / س50).
  */
@@ -41,16 +43,62 @@ describe('branch treasury: cash box + wallet deposits (E-1, D-5 as superseded by
 
   it('a deposit raises the cash box balance', async () => {
     const manager = await h.loginAs('manager')
-    const res = await post(manager, '/treasury/deposit', { target: 'cash', amount: sypStr(200_000) })
+    const res = await post(manager, '/treasury/deposit', { idempotencyKey: key(), target: 'cash', amount: sypStr(200_000) })
     expect(res.statusCode, res.body).toBe(201)
     expect(res.json().balance).toBe(sypStr(200_000))
+    expect(res.json().replayed).toBe(false)
     expect((await get(manager, '/treasury/balances')).json().cash).toBe(sypStr(200_000))
   })
 
   it('a wallet top-up raises the wallet balance', async () => {
     const manager = await h.loginAs('manager')
-    await post(manager, '/treasury/deposit', { target: 'wallet', amount: sypStr(50_000) })
+    const res = await post(manager, '/treasury/deposit', { idempotencyKey: key(), target: 'wallet', amount: sypStr(50_000) })
+    expect(res.statusCode, res.body).toBe(201)
     expect((await get(manager, '/treasury/balances')).json().wallet).toBe(sypStr(50_000))
+  })
+
+  /*
+   * A fresh server-side key per call let one double click deposit twice. The key now comes from the
+   * client and is reused when the operator presses again after a lost response.
+   */
+  it('a replayed deposit (same key, same body) answers 200 with the original and deposits once', async () => {
+    const manager = await h.loginAs('manager')
+    const body = { idempotencyKey: key(), target: 'cash', amount: sypStr(200_000), note: 'تمويل' }
+    expect((await post(manager, '/treasury/deposit', body)).statusCode).toBe(201)
+    const replay = await post(manager, '/treasury/deposit', body)
+    expect(replay.statusCode, replay.body).toBe(200)
+    expect(replay.json()).toMatchObject({ replayed: true, balance: sypStr(200_000) })
+    // The key is not case-sensitive: a UUID's letter case carries no meaning.
+    const shouted = await post(manager, '/treasury/deposit', { ...body, idempotencyKey: body.idempotencyKey.toUpperCase() })
+    expect(shouted.statusCode, shouted.body).toBe(200)
+    expect(await h.deps.ledger.fundBalance(BRANCH, 'office_cash')).toBe(20_000_000n)
+    expect(h.deps.ledger.entries.filter((e) => e.reason === 'تمويل')).toHaveLength(1)
+  })
+
+  it('the same deposit key with a different amount, box or note is 409 and deposits nothing more', async () => {
+    const manager = await h.loginAs('manager')
+    const body = { idempotencyKey: key(), target: 'cash', amount: sypStr(200_000) }
+    expect((await post(manager, '/treasury/deposit', body)).statusCode).toBe(201)
+    for (const changed of [
+      { ...body, amount: sypStr(200_001) },
+      { ...body, target: 'wallet' },
+      { ...body, note: 'سبب آخر' },
+    ]) {
+      const res = await post(manager, '/treasury/deposit', changed)
+      expect(res.statusCode, res.body).toBe(409)
+      expect(res.json().error).toBe('idempotency_key_conflict')
+    }
+    expect(await h.deps.ledger.fundBalance(BRANCH, 'office_cash')).toBe(20_000_000n)
+    expect(await h.deps.ledger.fundBalance(BRANCH, 'office_wallet')).toBe(0n)
+  })
+
+  it('a deposit without a client key is refused before anything moves', async () => {
+    const manager = await h.loginAs('manager')
+    for (const idempotencyKey of [undefined, 'not-a-uuid']) {
+      const res = await post(manager, '/treasury/deposit', { idempotencyKey, target: 'cash', amount: sypStr(1_000) })
+      expect(res.statusCode).toBe(400)
+    }
+    expect(h.deps.ledger.entries).toHaveLength(0)
   })
 
   /**
@@ -60,11 +108,12 @@ describe('branch treasury: cash box + wallet deposits (E-1, D-5 as superseded by
    */
   it('the system admin may deposit, once he names a branch (decision 9, was D-5)', async () => {
     const sysadmin = await h.loginAs('sysadmin')
-    const unnamed = await post(sysadmin, '/treasury/deposit', { target: 'cash', amount: sypStr(1_000) })
+    const unnamed = await post(sysadmin, '/treasury/deposit', { idempotencyKey: key(), target: 'cash', amount: sypStr(1_000) })
     expect(unnamed.statusCode).toBe(422)
     expect(unnamed.json().error).toBe('branch_required')
 
     const named = await post(sysadmin, '/treasury/deposit', {
+      idempotencyKey: key(),
       target: 'cash',
       amount: sypStr(1_000),
       branchId: BRANCH,
@@ -74,8 +123,9 @@ describe('branch treasury: cash box + wallet deposits (E-1, D-5 as superseded by
 
   it('rejects a non-positive amount', async () => {
     const manager = await h.loginAs('manager')
-    const res = await post(manager, '/treasury/deposit', { target: 'wallet', amount: sypStr(0) })
+    const res = await post(manager, '/treasury/deposit', { idempotencyKey: key(), target: 'wallet', amount: sypStr(0) })
     expect(res.statusCode).toBe(422)
+    expect(res.json().error).toBe('amount_must_be_positive')
   })
 })
 
@@ -384,21 +434,29 @@ describe('corrections are visible reversals, never edits (BR7)', () => {
     expect(h.deps.ledger.entries.filter((e) => e.eventType === 'correction')).toHaveLength(1)
   })
 
-  it('preserves a treasury line role when reversing a restoration entry', async () => {
+  // Since 2026-09-17 a hand sweep and its reversal both move صندوق الشركة, so they are the GM's
+  // (`company_fund.manage`) — the branch manager did both here before.
+  it('preserves a treasury line role when the GM reverses a hand sweep', async () => {
     await seedOfficeCash(sypStr(10_000))
-    const manager = await h.loginAs('manager')
-    const moved = await post(manager, '/treasury/withdraw', {
+    const gm = await h.loginAs('gm')
+    const moved = await post(gm, '/treasury/withdraw', {
+      idempotencyKey: key(),
       target: 'cash',
       amount: sypStr(10_000),
       to: 'company_box',
       reason: 'sweep',
+      branchId: BRANCH,
     })
     expect(moved.statusCode, moved.body).toBe(201)
 
-    const original = h.deps.ledger.entries.find((entry) => entry.eventType === 'restoration')!
+    // Selected by the role it carries, not by its event type: a hand sweep is a `manual` entry —
+    // `restoration` is reserved for the atomic ceremony the database enforces a fact row for.
+    const original = h.deps.ledger.entries.find((entry) =>
+      entry.lines.some((line) => line.fundCode === 'company_box' && line.role === 'kaish'),
+    )!
     expect(original.lines.find((line) => line.fundCode === 'company_box')?.role).toBe('kaish')
 
-    const res = await post(manager, `/journal/${original.id}/reverse`, { reason: 'reverse sweep' })
+    const res = await post(gm, `/journal/${original.id}/reverse`, { reason: 'reverse sweep', branchId: BRANCH })
     expect(res.statusCode, res.body).toBe(201)
     const correction = h.deps.ledger.entries.find((entry) => entry.id === res.json().reversalEntryId)!
     expect(correction.lines.find((line) => line.fundCode === 'company_box')).toMatchObject({

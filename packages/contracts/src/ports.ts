@@ -1,5 +1,6 @@
 import type {
   CalendarDate,
+  Currency,
   FxDay,
   Minor,
   OrderKind,
@@ -9,7 +10,10 @@ import type {
   ShiftState,
   Scope,
   PermissionKey,
+  RecurrenceKind,
 } from '@ash/domain'
+import type { CompanyLedgerRepo, CompanyLedgerSource, FinancialLocks } from './company-ledger.ts'
+import type { CompanyFinanceRepo } from './company-finance.ts'
 
 /**
  * The ports. Everything the application needs from the outside world, expressed as interfaces
@@ -28,6 +32,11 @@ export interface Clock {
   nowMs(): number
   /** Asia/Damascus offset for `businessDateFor`. A value, so history stays reproducible. */
   offsetMinutes(): number
+  /**
+   * Minutes past branch-local midnight at which the business day rolls over — 240, i.e. 04:00.
+   * A value for the same reason as the offset: entries already written must stay reproducible.
+   */
+  dayStartMinutes(): number
 }
 
 export interface IdGen {
@@ -234,7 +243,22 @@ export interface BranchRecord {
   /** The second segment of the vehicle number. Unique within the governorate. */
   governorateId: string
   branchNo: number
+  /**
+   * Where the branch is, for «التفقّد». Null until someone sets it — a branch with no fence has no
+   * check-in to fail, rather than every round failing against a default point in the ocean.
+   */
+  lat: number | null
+  lng: number | null
+  checkinRadiusM: number
+  /**
+   * `branch` for an operating branch. `company` for the ONE HQ row that holds the company ledger
+   * («صندوق الشركة», USD and SYP — migration 0066). Immutable. The HQ row is never listed as a branch,
+   * never created or edited through the branch screens, and never addressable by a branch permission.
+   */
+  kind: BranchKind
 }
+
+export type BranchKind = 'branch' | 'company'
 
 export interface VehicleTypeRecord {
   id: string
@@ -382,6 +406,23 @@ export interface SessionRecord {
   revokedAtMs: number | null
 }
 
+export interface DriverAccountProvisionInput {
+  user: UserRecord
+  driver: DriverRecord
+  /** Public registration creates a session; the admin account screen does not. */
+  session: SessionRecord | null
+  audit: {
+    actorId: string | null
+    actorKind: 'user' | 'anonymous'
+    requestId: string
+    occurredAtMs: number
+  }
+}
+
+export type RegistrationAttemptClaim =
+  | { allowed: true }
+  | { allowed: false; retryAfterSeconds: number }
+
 export interface DriverRecord {
   id: string
   branchId: string
@@ -450,6 +491,15 @@ export interface ShiftRecord {
   /** Wallet shift-funding consumed automatically at open without charging office_wallet twice. */
   carriedWalletTranches?: Minor[]
   /** Legacy projection: cash retained as funding auto-consumed when this driver opens his next shift. */
+  /**
+   * «الحسم» pending on this shift: a positive charge against the employee's close settlement.
+   *
+   * Lives here rather than in `shift_settlements` because it is set DURING review, before any
+   * snapshot exists. It is frozen into the settlement at approval like every other close figure.
+   */
+  managerCharge: Minor
+  /** Audited reason for the pending charge. Required by the database whenever the amount is non-zero. */
+  managerChargeReason: string | null
   keptAsReceivable: Minor
   /** «يُعاد للسائق» — the share he kept out of the cash in his hands (owner decision f). */
   driverSharePaid: Minor
@@ -485,6 +535,17 @@ export interface ShiftRecord {
   driverConfirmedAt: string | null
   /** The one manager-approved instant at which this shift first became operational. */
   openApprovedAt: string | null
+  /**
+   * Lower bound of the operation window — the driver's confirmation, not the manager's approval.
+   *
+   * Separate from `openApprovedAt` because the two answer different questions. `openApprovedAt` is
+   * an audit fact about WHO authorised the shift and WHEN, and it must never move. This is the
+   * instant from which the driver's deliveries count, and the owner moved it on 2026-08-31 because
+   * the approval routinely arrived hours after the driver had started working.
+   *
+   * A settled shift keeps the bound it was judged by, so the amendment cannot reach backwards.
+   */
+  windowOpensAt: string | null
   /** Manager who approved the initial open. Never replaced by resume/review decisions. */
   openApprovedBy: string | null
   /** Driver's most recent close-package submission instant. */
@@ -494,6 +555,19 @@ export interface ShiftRecord {
   walletDiff: Minor | null
   ordersHash: string | null
   approvedBy: string | null
+  /**
+   * When the close was approved.
+   *
+   * The column has existed since migration 0005 and no code path ever wrote it — `approved_by` was
+   * set on all 112 approved production shifts and `approved_at` on none of them, because the field
+   * was missing from this record and so the UPDATE below could not carry it. Anything that needed
+   * the instant had to reach for `shift_settlements.confirmed_at` instead.
+   *
+   * Rows approved before this fix stay null; they are not backfilled, because the settlement
+   * snapshot already holds their true confirmation instant and inventing one here would be worse
+   * than an honest gap.
+   */
+  approvedAt: string | null
 }
 
 export interface ShiftOrderRecord {
@@ -556,6 +630,18 @@ export interface ShiftOrderRecord {
   closeDraftReviewReasons?: CloseDraftReviewReason[]
   /** Stable server draft identity; null on operations predating durable close drafts. */
   closeDraftClientKey?: string | null
+  /**
+   * A manager declared that this row is not a delivery at all — a reading of something that never
+   * happened, not a real job left uncounted.
+   *
+   * DISTINCT from `included: false`, which is an accounting decision about a delivery that did
+   * happen. The database forces a removed row to also be excluded, so no money path had to learn a
+   * second rule; what removal adds is the MEANING and the report to the general manager. Set and
+   * cleared together with `removedBy` and `removalReason`, all three or none.
+   */
+  removedAt?: string | null
+  removedBy?: string | null
+  removalReason?: string | null
 }
 
 /**
@@ -605,6 +691,42 @@ export interface CashDeductionRecord {
   observationId?: string | null
   closeDraftReviewReasons?: CloseDraftReviewReason[]
   closeDraftClientKey?: string | null
+  /** Same meaning as on an order: read as something that never happened. See `ShiftOrderRecord`. */
+  removedAt?: string | null
+  removedBy?: string | null
+  removalReason?: string | null
+}
+
+/**
+ * One append-only entry in the register the system admin reads.
+ *
+ * Denormalised on purpose. The screen answers «what was removed, from whose shift, for how much»
+ * without joining four tables, and it must keep answering after a shift is voided and its rows are
+ * gone — a register that dies with the thing it records is not a register.
+ */
+export interface OperationRemovalRecord {
+  id: string
+  kind: 'removed' | 'restored'
+  operationKind: 'order' | 'cash_deduction'
+  operationId: string
+  /** The provider order number, or the deduction id — whichever a human would recognise. */
+  operationRef: string
+  shiftId: string
+  branchId: string
+  businessDate: string
+  driverId: string | null
+  amount: Minor
+  reason: string
+  evidenceSlot: string | null
+  evidenceMediaId: string | null
+  actedBy: string
+  actedAtMs: number
+}
+
+export interface OperationRemovalRepo {
+  append(entry: Omit<OperationRemovalRecord, 'id' | 'actedAtMs'> & { actedAtMs: number }): Promise<OperationRemovalRecord>
+  /** Newest first. `branchId` narrows to one branch; omitted means every branch. */
+  list(filter: { branchId?: string | undefined; limit: number }): Promise<OperationRemovalRecord[]>
 }
 
 /** What a captured payment-log movement appears to be; retained for archival review/matching. */
@@ -667,10 +789,16 @@ export interface JournalEntryRecord {
   postingDate: CalendarDate
   weekStartDate: CalendarDate
   fxDayId: number
+  /**
+   * The SYP-minor-per-USD rate frozen on an entry with a USD line (0066), and `null` on every other
+   * entry — every branch entry among them. Never re-read from `fx_days`, which is corrected in place.
+   */
+  sypMinorPerUsd: bigint | null
   weekLockId: number | null
   reason: string | null
   createdBy: string
-  lines: Array<{ fundCode: string; side: 'D' | 'C'; amount: Minor; role?: string }>
+  /** `currency` is the FUND's — a line has no currency of its own (0066). */
+  lines: Array<{ fundCode: string; side: 'D' | 'C'; amount: Minor; currency: Currency; role?: string }>
 }
 
 export interface WeekLockRecord {
@@ -719,6 +847,17 @@ export interface SessionRepo {
   findByTokenHash(tokenHash: string): Promise<SessionRecord | null>
   update(session: SessionRecord): Promise<void>
   revokeAllForUser(userId: string): Promise<void>
+}
+
+/** Atomic driver identity creation plus the database-backed public registration throttle. */
+export interface DriverAccountProvisioningRepo {
+  claimRegistrationAttempt(input: {
+    addressHash: string
+    attemptedAtMs: number
+    limit: number
+    windowMs: number
+  }): Promise<RegistrationAttemptClaim>
+  provision(input: DriverAccountProvisionInput): Promise<void>
 }
 
 export interface ShiftRepo {
@@ -774,6 +913,8 @@ export interface ShiftRepo {
    * be re-run, because `week_locks_no_reopen` refuses to re-stamp `closed_at`.
    */
   listByBranchAndDateRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftRecord[]>
+  /** Full vehicle timeline rows, branch-scoped and ordered oldest first (P6). */
+  listByVehicle(branchId: string, vehicleId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftRecord[]>
   listApprovedForDriverOnDate(driverId: string, businessDate: CalendarDate): Promise<ShiftRecord[]>
   /**
    * The next free shift number for this driver on this business date.
@@ -790,6 +931,13 @@ export interface ShiftRepo {
    * the unique constraint means, and reusing it would collide all over again.
    */
   nextShiftNo(driverId: string, businessDate: CalendarDate): Promise<number>
+  /**
+   * P2 — every shift of the branch with `business_date` in the inclusive range, EVERY state,
+   * reduced to its timing and odometer. What the shifts summary judges patterns from: loading
+   * whole `ShiftRecord`s (tranches, media) for a year of shifts would be most of the cost.
+   * Ordered by business date, then shift number, then id.
+   */
+  listTimingBetween(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ShiftTimingRecord[]>
 }
 
 /**
@@ -1065,12 +1213,32 @@ export interface LedgerRepo {
       postingDate: CalendarDate
       weekStartDate: CalendarDate
       fxDayId: number
+      /**
+       * The rate frozen on the entry. REQUIRED, and `null` for everything that is not a USD company
+       * entry, so no caller can forget to decide. The database refuses a USD line without it and a
+       * rate without a USD line (0066); the memory adapter mirrors both.
+       */
+      sypMinorPerUsd: bigint | null
       createdBy: string
       reason?: string
     },
   ): Promise<JournalEntryRecord[]>
   listByShift(shiftId: string): Promise<JournalEntryRecord[]>
   listByWeek(branchId: string, weekStartDate: CalendarDate): Promise<JournalEntryRecord[]>
+  /**
+   * The one shift-less entry stored under `(branchId, eventType, occurrenceKey)`, or null.
+   *
+   * `post()` answers a replay with an empty array and nothing else, which is right for a retry and
+   * useless to a command that must tell «the same request again» (200, the original receipt) from
+   * «this key with different money» (409). A command whose only record IS its journal entry —
+   * صندوق الشركة, a treasury deposit — reads the receipt through this. Same key the idempotency
+   * index uses (0017), so there is at most one row to find.
+   */
+  findStandaloneEntry(
+    branchId: string,
+    eventType: JournalEntryRecord['eventType'],
+    occurrenceKey: string,
+  ): Promise<JournalEntryRecord | null>
   fundBalance(branchId: string, fundCode: string): Promise<Minor>
   /**
    * Every fund whose code starts with `prefix`, and its balance.
@@ -1095,6 +1263,16 @@ export interface TreasuryPositionRecord {
   officeWallet: Minor
   receivablesCash: Minor
   receivablesWallet: Minor
+  /**
+   * Σ السلف outstanding against each box (owner decision 17).
+   *
+   * Its own pair rather than folded into `receivables*`, because the Treasury screen labels
+   * `receivables` «الذمم» and a manager reading an advance as driver debt is a lie the numbers
+   * would never reveal. Counted as capital for the same reason a ذمة is: the money is still the
+   * company's, it is simply not in the drawer tonight.
+   */
+  advancesCash: Minor
+  advancesWallet: Minor
   activeCustodyCash: Minor
   activeCustodyWallet: Minor
   activeShiftCount: number
@@ -1105,6 +1283,92 @@ export interface TreasuryPositionRecord {
 /** Cross-table read model: funds/journal lines and financially-open shifts in one snapshot. */
 export interface TreasuryPositionSource {
   readCurrent(branchId: string): Promise<TreasuryPositionRecord>
+}
+
+// ── P2: the range read model behind the time filter ───────────────────────────────────────
+//
+// `/dashboard/profit` and `/dashboard/treasury` used to walk the ledger one financial week at a
+// time (up to 520 reads for a ten-year window) and total the lines in the route. This port
+// answers the same question with ONE aggregate between two business dates. The route still owns
+// the go-live clamp and the profit classification (`classifyProfitLine`); the source owns only
+// what needs the database: the grouped lines, the driver share, and the company-fund flows.
+
+/** The widest range the source is ever asked for — ten years and change. A route answers 400 above it. */
+export const LEDGER_RANGE_MAX_DAYS = 3653
+
+/**
+ * One aggregated group of journal lines. Only the funds `isRangeReportLine` keeps are present,
+ * in `compareLedgerRangeLines` order, so both adapters return identical arrays.
+ */
+export interface LedgerRangeLine {
+  businessDate: CalendarDate
+  eventType: Posting['eventType']
+  fundCode: string
+  role: string | null
+  side: 'D' | 'C'
+  /**
+   * `funds.currency` — every branch fund is `SYP_NEW` today. Carried as a grouping dimension so a
+   * multi-currency ledger (the HQ company fund, C1/C6) can reuse this shape without a second
+   * aggregate; frozen FX rates belong to that ledger's own entries, not to this read.
+   */
+  currency: string
+  /** Σ amount of the group, positive, minor units. */
+  amount: Minor
+  /** How many journal lines the group summarises. */
+  lineCount: number
+}
+
+/** «كييش» (`kaish`) and «شحن من الصندوق» (`shahn`) per business date, signed as the treasury sheet shows them. */
+export interface LedgerRangeTreasuryDay {
+  businessDate: CalendarDate
+  kaish: Minor
+  shahn: Minor
+}
+
+export interface LedgerRangeRecord {
+  from: CalendarDate
+  to: CalendarDate
+  lines: LedgerRangeLine[]
+  /**
+   * Σ `shift_settlements.base_driver_share` over every shift with ANY journal entry in the range —
+   * the net earned share after cash deductions, before the closing variance. Exactly the set the
+   * week-walking profit route summed.
+   */
+  settledDriverShare: Minor
+  /**
+   * The legacy fallback, as `/dashboard/profit` always read it: shift-less legacy share lines plus,
+   * for each touched shift WITHOUT a settlement, its in-range `share_split`/deduction lines.
+   */
+  legacyDriverShare: Minor
+  /** Company-fund flows classified by `treasuryRoleOf`, oldest first; a day appears once it has one. */
+  treasuryDays: LedgerRangeTreasuryDay[]
+}
+
+export interface LedgerRangeSource {
+  /** Inclusive business-date range, `from <= to`, at most `LEDGER_RANGE_MAX_DAYS` days. */
+  readRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<LedgerRangeRecord>
+  /** The earliest `business_date` any journal entry of the branch carries, or null for an empty ledger. */
+  firstActivityDate(branchId: string): Promise<CalendarDate | null>
+}
+
+/**
+ * Just enough of a shift to judge WHEN it ran and on what — no tranches, no media, no money.
+ *
+ * `windowOpensAt` already applies the fallback the rest of the system uses (the manager's open
+ * approval for a shift opened before `window_opens_at` existed).
+ */
+export interface ShiftTimingRecord {
+  id: string
+  branchId: string
+  driverId: string
+  vehicleId: string
+  shiftNo: number
+  businessDate: CalendarDate
+  state: ShiftState
+  windowOpensAt: string | null
+  submittedAt: string | null
+  odoStart: number | null
+  odoEnd: number | null
 }
 
 // ── «رأس مال المكتب» and «الترميم» (owner decision 10) ────────────────────────────────────
@@ -1131,18 +1395,39 @@ export interface OfficeCapitalTargetRepo {
 export interface RestorationRecord {
   branchId: string
   businessDate: CalendarDate
-  cashCountId: string
+  /**
+   * Historical schema-v2 restorations are backed by an immutable sealed cash count. Schema v3
+   * snapshots the live office ledger instead, so it deliberately has no cash-count identity.
+   * The plan's schemaVersion is the durable discriminator; keeping this nullable lets old facts
+   * remain readable without inventing evidence for new ledger-backed restorations.
+   */
+  cashCountId: string | null
   plan: unknown
   /** SIGNED: positive is «كييش», negative is «شحن من الصندوق». */
   netToCompany: Minor
   reason: string
   performedBy: string
+  /**
+   * Which run of that business day this was, from 1.
+   *
+   * الترميم used to be once a day, and the owner asked for it «متاح دوما» after finding the button
+   * gone at 02:27 — the business day starts at 04:00, so he was still inside a day already restored
+   * that morning while a full day's takings sat in the boxes. The run number is what keeps each
+   * run's ledger occurrence key distinct, so repetition can never become double posting.
+   */
+  runNo: number
 }
 
 export interface RestorationRepo {
-  /** Throws `{ code: 'DUPLICATE_RESTORATION' }` on a second run for the same branch and day. */
-  create(row: RestorationRecord): Promise<void>
+  /**
+   * Throws `{ code: 'DUPLICATE_RESTORATION' }` when that run number is already taken. Returns the
+   * row's id — the company mirror of each of the run's journals names it (C2).
+   */
+  create(row: RestorationRecord): Promise<number>
+  /** The LATEST run of that day, or null. Callers wanting the count use `runsOnDay`. */
   find(branchId: string, businessDate: CalendarDate): Promise<RestorationRecord | null>
+  /** How many runs that business date already holds. The next run is this plus one. */
+  runsOnDay(branchId: string, businessDate: CalendarDate): Promise<number>
 }
 
 export interface FxRepo {
@@ -1344,6 +1629,12 @@ export interface CloseDraftOrder {
   clientKey: string
   /** Server-only overlap key; null for human-created rows. */
   matchKey: string | null
+  /**
+   * The same identity in the shape it had before it was canonicalised, carried on freshly scanned
+   * rows only. It exists so a retake of a draft saved before that change still merges rather than
+   * duplicating; nothing stored needs migrating, and it can be dropped once no such draft is open.
+   */
+  legacyMatchKey?: string | null
   providerOrderNo: string
   payMode: PayMode
   fee: string | null
@@ -1371,6 +1662,8 @@ export interface CloseDraftOrder {
 export interface CloseDraftCashDeduction {
   clientKey: string
   matchKey: string | null
+  /** The pre-canonicalisation shape of the same identity; see `CloseDraftOrder`. */
+  legacyMatchKey?: string | null
   operationKey: string
   amount: string | null
   amountOcr: string | null
@@ -1395,6 +1688,8 @@ export interface CloseDraftCashDeduction {
 export interface CloseDraftMovement {
   clientKey: string
   matchKey: string | null
+  /** The pre-canonicalisation shape of the same identity; see `CloseDraftOrder`. */
+  legacyMatchKey?: string | null
   amount: string
   occurredMinute: string | null
   role: WalletMovementRole
@@ -1491,6 +1786,12 @@ export interface CloseDraftRepo {
     attachmentToken: string
     slot: string
     read: CloseDraftReadRecord
+    /**
+     * The caller explicitly asked to re-read an attachment that already read to completion — a
+     * reader/prompt upgrade, not the accidental repeat the idempotency rule exists to absorb.
+     * Without it, a second complete read for the same page is refused.
+     */
+    replacesCompletedRead?: boolean
     observations: Array<{
       id: string
       rowIndex: number
@@ -1505,6 +1806,32 @@ export interface CloseDraftRepo {
     updatedAtMs: number
     updatedBy: string
   }): Promise<CloseDraftRecord | null>
+  /**
+   * Every immutable row sighting for one shift, ordered by `(attachmentToken, rowIndex)`.
+   *
+   * Read-only: this is the provenance the manager review reads to spot two scans of one list that
+   * overlap. It never feeds money — orders and deductions keep their own canonical rows.
+   */
+  listObservationsByShift(shiftId: string): Promise<CloseDraftObservationRecord[]>
+}
+
+/** One scanned row exactly as a reader saw it, bound to the page generation it came from. */
+export interface CloseDraftObservationRecord {
+  id: string
+  readId: string
+  shiftId: string
+  mediaId: string
+  /** The evidence generation. A retaken photo rotates it, so rows never merge across retakes. */
+  attachmentToken: string
+  slot: string
+  field: OcrField
+  rowIndex: number
+  rowCount: number
+  dateSection: string | null
+  yTop: number | null
+  yBottom: number | null
+  row: OcrRow
+  createdAtMs: number
 }
 
 export interface OcrReadRecord {
@@ -1607,13 +1934,160 @@ export interface ExpenseRecord {
   /** G-1 cost centres: vehicle / branch / general — these feed per-axis profitability. */
   costCenterKind: 'vehicle' | 'branch' | 'general'
   vehicleId: string | null
+  /**
+   * WHICH BOX paid — a physical fact, never a ledger fund.
+   *
+   * Every row predating migration 0059 is `office_cash` by construction: the recipe could credit
+   * nothing else.
+   */
+  channel: 'office_cash' | 'office_wallet'
   amount: Minor
   businessDate: CalendarDate
   description: string
   /** Required above the configured ceiling (G-3 / س52). */
   receiptMediaId: string | null
   journalEntryId: number | null
+  /**
+   * Set only when this expense is a «سلفة» finally recognised as spent (owner decision 17).
+   *
+   * Such a row is an expense with NO same-day cash outflow — the money left the box weeks ago — so
+   * it has to be able to say so to anyone reconciling today's expenses against today's office
+   * credits. A partial unique index also makes a SECOND conversion of one advance impossible in
+   * the schema rather than only in a route check.
+   */
+  advanceId: string | null
   createdBy: string
+}
+
+// ── «المدخول المباشر» — direct income (owner request, 2026-08-28) ────────────────────────────
+//
+// The mirror of an expense: money arriving at the branch that is not a delivery fee. Kept as its
+// own entity rather than a signed expense, because SRS G defines an expense as «كل ليرة تخرج» and
+// generalising that would make «الصرفيات» correct only while every reader remembers to filter.
+
+export interface IncomeCategoryRecord {
+  id: string
+  code: string
+  nameAr: string
+  active: boolean
+}
+
+export interface IncomeRecord {
+  id: string
+  branchId: string
+  categoryId: string
+  /**
+   * WHICH BOX received the money — a physical fact, not a ledger fund.
+   *
+   * The operator never names a fund: `fundRefFromCode`'s default clause turns any unrecognised
+   * string into `cost_center:<code>`, a look-alike account no profit reader sums and no error is
+   * raised about.
+   */
+  channel: 'office_cash' | 'office_wallet'
+  amount: Minor
+  businessDate: CalendarDate
+  description: string
+  evidenceMediaId: string | null
+  /** NOT NULL in the schema, unlike an expense's: an income without its journal cannot exist. */
+  journalEntryId: number
+  createdBy: string
+}
+
+export interface IncomeRepo {
+  listCategories(): Promise<IncomeCategoryRecord[]>
+  createCategory(category: IncomeCategoryRecord): Promise<void>
+  /** Lookup by the client-owned income UUID, which is also its idempotency key. */
+  get(id: string): Promise<IncomeRecord | null>
+  create(income: IncomeRecord): Promise<void>
+  listByBranchAndDate(branchId: string, from: CalendarDate, to: CalendarDate): Promise<IncomeRecord[]>
+}
+
+// ── «السلفة» — an expense that must come back (owner decision 17) ────────────────────────────
+//
+// «هوي صرفية دفعت لكنها يجب ان ترد كاملة». Recorded from the Expenses screen with a category, a
+// description and a receipt, because it becomes an ordinary صرفية if it is never repaid. Read from
+// the Treasury screen, because while it is outstanding it is still office capital.
+//
+// THE ADVANCE IS THE UNIT, NOT THE PARTY. The party is free text by the owner's own choice — a
+// driver, a workshop, a landlord — so it has no id, and every balance is per advance. Nothing
+// financial keys on a name, which is why two spellings of one name can neither merge two people's
+// debts nor split one person's.
+
+export interface AdvanceRecord {
+  /** The client-owned UUID: identity, idempotency key, and the journal's occurrence key. */
+  id: string
+  branchId: string
+  /** Whoever the manager wrote on the line. */
+  partyName: string
+  /** Normalised `partyName`, for search and grouping in the UI ONLY. No money depends on it. */
+  partyKey: string
+  /** The classification a conversion will file it under if it is never repaid. */
+  categoryId: string
+  costCenterKind: 'vehicle' | 'branch' | 'general'
+  vehicleId: string | null
+  /**
+   * Set when this advance was reclassified from that driver's «ذمة» instead of paid out of a box.
+   *
+   * The credit leg is then his receivable fund, no money moved, and office capital is unchanged —
+   * the same debt, filed differently.
+   */
+  sourceDriverId: string | null
+  /**
+   * WHICH BOX paid — a physical fact. The operator never names a ledger fund.
+   *
+   * For a reclassified receivable this is INHERITED from the debt, never chosen: a debt owed in
+   * cash stays owed in cash, so a later repayment lands in the box it was always owed to.
+   */
+  channel: 'office_cash' | 'office_wallet'
+  amount: Minor
+  businessDate: CalendarDate
+  description: string
+  receiptMediaId: string | null
+  /** NOT NULL in the schema, unlike an expense's: an advance without its journal cannot exist. */
+  journalEntryId: number
+  createdBy: string
+}
+
+export interface AdvanceEventRecord {
+  id: string
+  advanceId: string
+  branchId: string
+  /** Money coming back, or the company declaring that it never will. */
+  kind: 'repayment' | 'conversion'
+  amount: Minor
+  businessDate: CalendarDate
+  reason: string
+  /** The ordinary `expenses` row a conversion writes; null for a repayment. */
+  expenseId: string | null
+  journalEntryId: number
+  createdBy: string
+}
+
+/**
+ * One advance and what it still owes.
+ *
+ * `outstanding` is read from the advance's OWN ledger fund, not computed from the event rows: the
+ * fund is the record, and a second arithmetic would be one more thing to keep in step with it.
+ */
+export interface AdvanceOutstandingRecord {
+  advance: AdvanceRecord
+  outstanding: Minor
+  repaid: Minor
+  converted: Minor
+}
+
+export interface AdvanceRepo {
+  /** Lookup by the client-owned advance UUID, which is also its idempotency key. */
+  get(id: string): Promise<AdvanceRecord | null>
+  create(advance: AdvanceRecord): Promise<void>
+  listByBranchAndDate(branchId: string, from: CalendarDate, to: CalendarDate): Promise<AdvanceRecord[]>
+  /** Everything still owed to the branch — what the Treasury card renders. */
+  listOutstanding(branchId: string): Promise<AdvanceOutstandingRecord[]>
+  /** Distinct party names already used at this branch, for the UI's autocomplete. */
+  listParties(branchId: string): Promise<Array<{ partyName: string; partyKey: string }>>
+  getEvent(id: string): Promise<AdvanceEventRecord | null>
+  createEvent(event: AdvanceEventRecord): Promise<void>
+  listEvents(advanceId: string): Promise<AdvanceEventRecord[]>
 }
 
 export interface ExpenseRepo {
@@ -1623,12 +2097,81 @@ export interface ExpenseRepo {
   get(id: string): Promise<ExpenseRecord | null>
   create(expense: ExpenseRecord): Promise<void>
   listByBranchAndDate(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ExpenseRecord[]>
+  /** Company/branch expenses explicitly attributed to one vehicle in the inclusive period. */
+  listByVehicle(branchId: string, vehicleId: string, from: CalendarDate, to: CalendarDate): Promise<ExpenseRecord[]>
   /** Per-cost-centre totals — G-1's «تُغذي ربحية كل محور». */
   totalsByCostCenter(
     branchId: string,
     from: CalendarDate,
     to: CalendarDate,
   ): Promise<Array<{ costCenterKind: string; vehicleId: string | null; total: Minor }>>
+}
+
+// ── Branch recurring expenses (finance redesign P4) ──────────────────────────────────────
+
+export interface RecurringExpenseTemplateRecord {
+  /** Client-owned UUID: identity and create-retry key. */
+  id: string
+  branchId: string
+  /** C6: omitted by pre-C6 callers means an operating-branch template. */
+  templateKind?: 'branch' | 'company'
+  /** Branch templates are always SYP; company templates preserve their purchase currency. */
+  currency?: Currency
+  title: string
+  categoryId: string
+  costCenterKind: 'vehicle' | 'branch' | 'general' | 'asset'
+  vehicleId: string | null
+  assetId?: string | null
+  channel: 'office_cash' | 'office_wallet' | null
+  paidFrom?: 'pocket' | 'reserve' | 'owner_outside' | null
+  amount: Minor
+  scheduleKind: RecurrenceKind
+  weekday: number | null
+  intervalDays: number | null
+  startsOn: CalendarDate
+  endsOn: CalendarDate | null
+  active: boolean
+  /** The first business date no longer generated after a reasoned deactivation. */
+  deactivatedOn: CalendarDate | null
+  deactivatedAtMs: number | null
+  deactivatedBy: string | null
+  deactivationReason: string | null
+  createdBy: string
+  createdAtMs: number
+  updatedBy: string
+  updatedAtMs: number
+}
+
+export interface RecurringExpenseOccurrenceRecord {
+  id: string
+  templateId: string
+  branchId: string
+  dueDate: CalendarDate
+  status: 'paid' | 'skipped'
+  /** An ordinary ledger-backed expense when paid; null only for a skip. */
+  expenseId: string | null
+  /** C6 company payment; exactly one expense reference is set for a paid occurrence. */
+  companyExpenseId?: string | null
+  /** Required for a skip and whenever the paid amount differs from the template. */
+  reason: string | null
+  actedBy: string
+  actedAtMs: number
+}
+
+export interface RecurringExpenseRepo {
+  getTemplate(id: string): Promise<RecurringExpenseTemplateRecord | null>
+  listTemplates(branchId: string, includeInactive?: boolean): Promise<RecurringExpenseTemplateRecord[]>
+  createTemplate(template: RecurringExpenseTemplateRecord): Promise<void>
+  updateTemplate(template: RecurringExpenseTemplateRecord): Promise<void>
+  getOccurrence(templateId: string, dueDate: CalendarDate): Promise<RecurringExpenseOccurrenceRecord | null>
+  listOccurrences(
+    branchId: string,
+    from: CalendarDate,
+    to: CalendarDate,
+  ): Promise<RecurringExpenseOccurrenceRecord[]>
+  /** Number of already-resolved dates before `before`; due reads subtract it from generated dates. */
+  countOccurrencesBefore(templateId: string, before: CalendarDate): Promise<number>
+  createOccurrence(occurrence: RecurringExpenseOccurrenceRecord): Promise<void>
 }
 
 // â”€â”€ Direct receivable commands â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1643,6 +2186,19 @@ export interface ReceivableEventRecord {
   amount: Minor
   businessDate: CalendarDate
   reason: string
+  /**
+   * What this row IS, as opposed to what it does to the ledger.
+   *
+   * A `correction` restates a balance that was recorded wrongly; nothing physically moved. Without
+   * this distinction the driver's history reads «تحصيل ٥٠٠» — money came back — for an event where
+   * no money came back, which is the exact lie the ledger exists to prevent. A `writeoff` also
+   * moves no money, but recognises a real debt as a loss through its dedicated cost centre. A
+   * `command` is the only intent here that reports a physical advance or collection.
+   */
+  intent: 'command' | 'correction' | 'writeoff'
+  /** Corrections and write-offs: what the balance read, and its resulting balance. */
+  priorBalance: Minor | null
+  targetBalance: Minor | null
   idempotencyKey: string
   journalEntryId: number
   createdBy: string
@@ -1668,12 +2224,21 @@ export interface ReceivableEventRepo {
 export interface FinancialTransactionDeps {
   ledger: LedgerRepo
   expenses: ExpenseRepo
+  recurringExpenses: RecurringExpenseRepo
+  incomes: IncomeRepo
+  advances: AdvanceRepo
   receivableEvents: ReceivableEventRepo
   /** Restoration reads its sealed evidence and capital targets inside the same branch lock. */
   cashCounts: CashCountRepo
   capitalTargets: OfficeCapitalTargetRepo
   /** The immutable fact and its journal entries must commit or roll back together. */
   restorations: RestorationRepo
+  /** «صندوق الشركة» commands, cutovers and mirrors (C2) — written beside their journal entries. */
+  companyLedger: CompanyLedgerRepo
+  /** Company debts, fixed assets and depreciation facts (C3–C5). */
+  companyFinance: CompanyFinanceRepo
+  /** Further financial locks in the same namespace; see `lockBranchThenCompany`. */
+  locks: FinancialLocks
 }
 
 export interface FinancialUnitOfWorkInput {
@@ -1713,7 +2278,19 @@ export interface CashCountRecord {
   proofSha256: string | null
   sealedAtMs: number | null
   notes: string | null
+  /**
+   * `active` until a recount supersedes it or someone withdraws it. Exactly one active count per
+   * branch per business date; the others stay readable with their proof intact.
+   */
+  status: CashCountStatus
+  /** The count that replaced this one. Set only on `superseded`. */
+  supersededById: string | null
+  closedAtMs: number | null
+  closedBy: string | null
+  closedReason: string | null
 }
+
+export type CashCountStatus = 'active' | 'superseded' | 'cancelled'
 
 export interface CashCountRepo {
   /**
@@ -1721,8 +2298,36 @@ export interface CashCountRepo {
    * client-generated placeholder survived, and audit/restoration must reference this returned id.
    */
   create(count: CashCountRecord): Promise<CashCountRecord>
+  /**
+   * The ACTIVE count for that day, or null.
+   *
+   * Never a superseded or cancelled one. The restoration reconciles against whatever this returns,
+   * and the go-live gate treats it as proof the boxes were counted — a dead count in either place
+   * is money moved on figures nobody stands behind.
+   */
   find(branchId: string, businessDate: CalendarDate): Promise<CashCountRecord | null>
+  /** Days with an ACTIVE count. A withdrawn count must not let a financial week seal. */
   listDatesInRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<CalendarDate[]>
+  /**
+   * Replace the active count for a day with a fresh one, in a single transaction.
+   *
+   * Two steps that must not separate: a crash between them would leave the day with two active
+   * counts (which the partial unique index refuses) or none (which strands the restoration).
+   */
+  supersede(input: {
+    priorId: string
+    replacement: CashCountRecord
+    closedBy: string
+    closedAtMs: number
+    reason: string
+  }): Promise<CashCountRecord>
+  /** Withdraw the active count, leaving the day uncounted until the underlying error is fixed. */
+  cancel(input: {
+    id: string
+    closedBy: string
+    closedAtMs: number
+    reason: string
+  }): Promise<CashCountRecord | null>
 }
 
 // ── Tier rules (SRS F) ────────────────────────────────────────────────────────────────────
@@ -1853,9 +2458,62 @@ export interface AttendanceRepo {
   listByBranchAndDate(branchId: string, businessDate: CalendarDate): Promise<AttendanceRecord[]>
 }
 
+// ── «التفقّد» — manager check-in rounds ────────────────────────────────────────────────────
+
+/** One round a named user is expected to answer, in minutes past branch-local midnight. */
+export interface CheckInWindowRecord {
+  id: string
+  branchId: string
+  userId: string
+  atMinute: number
+  toleranceMinutes: number
+  active: boolean
+  label: string | null
+  createdBy: string
+}
+
+/** Where somebody was, and what that meant for the round it answered. Append-only. */
+export interface CheckInRecord {
+  id: string
+  branchId: string
+  userId: string
+  businessDate: CalendarDate
+  capturedAtMs: number
+  lat: number
+  lng: number
+  accuracyM: number | null
+  windowId: string | null
+  distanceM: number
+  insideArea: boolean
+  minutesFromTarget: number | null
+  verdict: 'on_time' | 'outside_window' | 'outside_area' | 'outside_both'
+  note: string | null
+}
+
+export interface CheckInRepo {
+  listWindows(branchId: string, userId?: string): Promise<CheckInWindowRecord[]>
+  createWindow(window: CheckInWindowRecord): Promise<CheckInWindowRecord>
+  /** Retiring a round keeps its history: `active` goes false, the row stays. */
+  deactivateWindow(id: string): Promise<boolean>
+  record(checkIn: CheckInRecord): Promise<CheckInRecord>
+  listByBranchAndDate(branchId: string, businessDate: CalendarDate): Promise<CheckInRecord[]>
+  listByUserAndDate(userId: string, businessDate: CalendarDate): Promise<CheckInRecord[]>
+}
+
 export interface DirectoryRepo {
   branch(id: string): Promise<BranchRecord | null>
+  /** Operating branches only (`kind = 'branch'`). The company (HQ) row is never a branch to pick. */
   listBranches(): Promise<BranchRecord[]>
+  /** The single company (HQ) row that holds «صندوق الشركة», or null before it exists. */
+  companyBranch(): Promise<BranchRecord | null>
+  /**
+   * Where the branch is, for «التفقّد». A null point means no fence — and therefore no round any
+   * manager can fail, which is the right behaviour for a branch nobody has placed on the map yet.
+   */
+  setBranchLocation(
+    id: string,
+    location: { lat: number | null; lng: number | null; checkinRadiusM: number },
+  ): Promise<BranchRecord | null>
   driver(id: string): Promise<DriverRecord | null>
   vehicle(id: string): Promise<VehicleRecord | null>
   grants(): Promise<RoleGrantRecord[]>
@@ -1939,6 +2597,7 @@ export interface BatteryReadingRepo {
    */
   upsert(reading: BatteryReadingRecord): Promise<void>
   listByShift(shiftId: string): Promise<BatteryReadingRecord[]>
+  listByShiftIds(shiftIds: readonly string[]): Promise<BatteryReadingRecord[]>
   /** Has this pack ever been read? Asked before a delete — a pack with readings is evidence. */
   existsForBattery(batteryId: string): Promise<boolean>
 }
@@ -1948,6 +2607,7 @@ export interface BatterySwapRepo {
   create(swap: BatterySwapRecord): Promise<void>
   /** Every swap on a shift, in the order they happened. Length + max seqNo drive the next seqNo. */
   listByShift(shiftId: string): Promise<BatterySwapRecord[]>
+  listByShiftIds(shiftIds: readonly string[]): Promise<BatterySwapRecord[]>
   /** Has this pack been on either side of a swap? Asked before a delete. */
   existsForBattery(batteryId: string): Promise<boolean>
 }
@@ -2022,8 +2682,7 @@ export interface ShiftSettlementRecord {
   variance: Minor
   varianceDirection: SettlementVarianceDirection
   /**
-   * Signed final cash: positive is kept/paid to the employee; negative is collected from him now.
-   * Current-shift shortages never become a carried receivable.
+   * Signed final cash: positive is kept/paid to the employee; negative is due from him at close.
    */
   finalEmployeeCash: Minor
   /** Signed cash claim before any manager-confirmed deferral. */
@@ -2034,6 +2693,10 @@ export interface ShiftSettlementRecord {
   cashReceivableDeferred: Minor
   /** Legacy-named positive wallet amount retained as automatically consumed next-shift funding. */
   walletReceivableDeferred: Minor
+  /** Frozen upper bound reviewed by the manager for the current-shift ordinary receivable. */
+  maximumCashShortageReceivable: Minor
+  /** Unpaid current-shift shortage retained as an ordinary cash receivable. */
+  cashShortageReceivable: Minor
   /** Physical signed wallet movement after deferral. */
   walletToOffice: Minor
   /** Physical signed cash movement after deferral. */
@@ -2042,6 +2705,14 @@ export interface ShiftSettlementRecord {
   walletAmount: Minor
   cashAction: SettlementCashAction
   cashAmount: Minor
+  /**
+   * «الحسم» as frozen at approval: charged to the employee, credited to `other_income`.
+   *
+   * Reduces `finalEmployeeCash` and raises `cashClaimToOffice`. Deliberately does NOT reduce
+   * `baseDriverShare` — the driver earned his share and paid the charge out of it, so the journal
+   * names the money as income instead of quietly swelling the office cash box.
+   */
+  managerCharge: Minor
   reviewedOrdersHash: string
   /** sha256 over the complete canonical snapshot, including shift identity and policy. */
   settlementHash: string
@@ -2081,14 +2752,46 @@ export interface GpsPingRecord {
   capturedAtMs: number
   /** Server receive time (ms), stamped by the clock — a skewed phone can't rewrite it. */
   receivedAtMs: number
+  /** Which capture layer produced it. See the 0063 column comment. */
+  source: GpsPingSource
 }
+
+export type GpsPingSource = 'phone_fg' | 'phone_bg' | 'tracker'
 
 export interface GpsPingRepo {
   append(ping: Omit<GpsPingRecord, 'id'>): Promise<void>
-  /** The most recent fix per driver in the branch — what the live map draws. */
-  latestPerDriverForBranch(branchId: string): Promise<GpsPingRecord[]>
-  /** A shift's whole trail, oldest first (for the route view). */
+  /**
+   * Insert a buffered run in one statement, ignoring fixes already stored.
+   *
+   * `(shift_id, captured_at)` is a natural key — two fixes at the same millisecond on one shift are
+   * physically meaningless — so a retried batch costs nothing and cannot duplicate a trail. Returns
+   * how many were actually new, which is what the route reports back so a client can log rather
+   * than guess.
+   */
+  appendMany(pings: readonly Omit<GpsPingRecord, 'id'>[]): Promise<{ inserted: number }>
+  /**
+   * The latest fix for each of the named drivers — what the live map draws.
+   *
+   * Takes the driver ids because the caller already knows who is live, and a seek per driver is
+   * O(drivers) forever. Its predecessor was `DISTINCT ON (driver_id)` over the whole branch, which
+   * does not skip: it reads every tuple the branch has ever written, so it degraded with history.
+   * `sinceMs` bounds it further — a fix older than that is not a live position, it is a memory.
+   */
+  latestForDriversInBranch(
+    branchId: string,
+    driverIds: readonly string[],
+    sinceMs: number,
+  ): Promise<GpsPingRecord[]>
+  /**
+   * A shift's whole trail, in CAPTURE order.
+   *
+   * Deliberately not receive order. Once anything buffers, a batch received at 14:00 holding fixes
+   * captured 12:00–13:00 sorts after fixes captured at 13:30 that arrived live — the trail zigzags
+   * and the summed distance inflates without bound. That number is one a manager acts on.
+   */
   listForShift(shiftId: string): Promise<GpsPingRecord[]>
+  /** How many fixes a shift has stored. Guards one wedged handset from filling the table. */
+  countForShift(shiftId: string): Promise<number>
 }
 
 /**
@@ -2103,6 +2806,8 @@ export interface ShiftCloseTransactionDeps {
   preapprovedShiftRules: PreapprovedShiftRuleRepo
   orders: OrderRepo
   cashDeductions: CashDeductionRepo
+  /** The register a manager's removal is written into, in the same transaction as the removal. */
+  operationRemovals: OperationRemovalRepo
   operationWindows: OperationWindowRepo
   movements: WalletMovementRepo
   ledger: LedgerRepo
@@ -2142,6 +2847,7 @@ export interface Deps {
   cipher: Cipher
   users: UserRepo
   sessions: SessionRepo
+  driverAccounts: DriverAccountProvisioningRepo
   shifts: ShiftRepo
   preapprovedShiftRules: PreapprovedShiftRuleRepo
   assignments: AssignmentRepo
@@ -2150,6 +2856,8 @@ export interface Deps {
   orders: OrderRepo
   /** Positive cash deductions read from the provider's operation history. */
   cashDeductions: CashDeductionRepo
+  /** Append-only record of rows a manager declared were never deliveries. */
+  operationRemovals: OperationRemovalRepo
   /** Deterministic, audited refresh of stored operation-window classifications. */
   operationWindows: OperationWindowRepo
   /** Atomic writer for one complete driver operations submission. */
@@ -2159,7 +2867,12 @@ export interface Deps {
   ledger: LedgerRepo
   /** Atomic statement-snapshot behind the working-capital dashboard. */
   treasuryPosition: TreasuryPositionSource
+  /** P2 — one aggregate over a business-date range, behind the time filter. */
+  ledgerRange: LedgerRangeSource
   expenses: ExpenseRepo
+  recurringExpenses: RecurringExpenseRepo
+  incomes: IncomeRepo
+  advances: AdvanceRepo
   receivableEvents: ReceivableEventRepo
   /** Atomic boundary for ledger-backed expenses and future treasury/receivable commands. */
   financialUnitOfWork: FinancialUnitOfWork
@@ -2168,6 +2881,12 @@ export interface Deps {
   capitalTargets: OfficeCapitalTargetRepo
   /** «الترميم» — one record per branch per working day. */
   restorations: RestorationRepo
+  /** «صندوق الشركة» — the company ledger's command rows, cutovers and mirrors (C2). */
+  companyLedger: CompanyLedgerRepo
+  /** «صندوق الشركة» — pockets, clearing and movements, each read in one statement (C2). */
+  companyLedgerSource: CompanyLedgerSource
+  /** Company debts, fixed assets and depreciation (C3–C5). */
+  companyFinance: CompanyFinanceRepo
   tiers: TierRepo
   notifications: NotificationRepo
   settings: SettingsRepo
@@ -2183,6 +2902,7 @@ export interface Deps {
   directory: DirectoryRepo
   vehicleEvents: VehicleEventRepo
   attendance: AttendanceRepo
+  checkIns: CheckInRepo
   decisions: ShiftDecisionRepo
   /** Immutable cash/wallet action the manager confirmed when approving the close. */
   settlements: ShiftSettlementRepo

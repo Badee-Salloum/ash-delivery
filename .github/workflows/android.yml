@@ -1,0 +1,75 @@
+# Build the driver's Android shell.
+#
+# Manual only. This is not part of the PR gate: the shell changes rarely — a UI fix still ships by
+# web deploy and a driver tapping «تحديث», because the APK loads the deployed site rather than
+# bundling it — and an Android toolchain on every pull request would cost minutes to prove nothing.
+#
+# It also exists because nobody on this project has the Android SDK installed. The APK is produced
+# here, downloaded from the run, and sideloaded onto the handsets.
+name: android
+
+on:
+  # `workflow_dispatch` alone is not enough: GitHub only offers it once the workflow file is on the
+  # DEFAULT branch, and this lives on a feature branch. The push trigger is what makes the APK
+  # buildable today, and it is scoped so ordinary work never pays for an Android toolchain.
+  push:
+    paths:
+      - 'android/**'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+    inputs:
+      driverUrl:
+        description: 'Which deployment the shell loads'
+        required: true
+        default: 'https://ash-driver.vercel.app'
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: android-actions/setup-android@v3
+        with:
+          # The action's old default also requested the retired SDK package named `tools`.
+          # Platform tools are all Capacitor/Gradle needs; Gradle installs its pinned SDK itself.
+          packages: platform-tools
+
+      - name: install capacitor
+        working-directory: android
+        run: npm install
+
+      # The platform is generated, never committed: `cap add android` writes a few thousand files
+      # that nobody would review. What the repository holds is only what we wrote — three Java
+      # files, two string resources, an offline page and the script that places them.
+      - name: generate the android platform
+        working-directory: android
+        env:
+          ASH_DRIVER_URL: ${{ inputs.driverUrl || 'https://ash-driver.vercel.app' }}
+        run: npx cap add android
+
+      - name: apply our native sources
+        working-directory: android
+        run: node apply-native.mjs
+
+      - name: assemble
+        working-directory: android/android
+        run: ./gradlew --no-daemon assembleDebug
+
+      # Debug-signed on purpose. These handsets are company property and the APK is sideloaded, so
+      # a release keystore would add a secret to manage and a signing identity to lose for no gain
+      # that anyone here would notice. Revisit if it ever goes near Play.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ash-driver-apk
+          path: android/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

@@ -23,6 +23,7 @@ export interface EndSubmitFailureCopy {
   operationWindow: string
   odometerAnomaly: string
   operationsChanged: string
+  draftChanged: string
   shiftChanged: string
   shiftMissing: string
   otherShiftOrder: string
@@ -164,6 +165,11 @@ export function describeEndSubmitFailure(
     ]
   } else if (code === 'operations_changed_concurrently') {
     lines = [copy.operationsChanged]
+  } else if (code === 'close_draft_changed') {
+    // The draft moved on somewhere else — another device, or a manager correcting a figure. This is
+    // ordinary optimistic concurrency and it is recoverable, but it used to fall to the catch-all
+    // and tell the driver to check his connection. His connection was fine; his copy was old.
+    lines = [copy.draftChanged]
   } else if (code === 'shift_not_open' || code === 'illegal_transition') {
     lines = [copy.shiftChanged]
   } else if (code === 'shift_not_found') {

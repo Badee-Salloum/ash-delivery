@@ -1,0 +1,896 @@
+<title>نماذج شاشات آش</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap">
+<style>
+/* Tokens mirror packages/theme/tokens.css — the product's own roles, so these mockups are the product. */
+:root{
+  --ash-brand:#1b2a5c; --ash-brand-strong:#22347a; --ash-brand-soft:#6b7bb0;
+  --ash-accent:#2d6cb0; --ash-accent-strong:#245a97;
+  --ash-surface-page:#eef1f8; --ash-surface-card:#ffffff; --ash-surface-raised:#f1f5f9;
+  --ash-surface-muted:#f8fafc; --ash-surface-sunken:#e2e8f0;
+  --ash-ink:#0f172a; --ash-ink-secondary:#475569; --ash-ink-muted:#64748b; --ash-ink-faint:#94a3b8; --ash-ink-inverse:#ffffff;
+  --ash-line-subtle:#f1f5f9; --ash-line:#e2e8f0; --ash-line-strong:#cbd5e1;
+  --ash-success-surface:#ecfdf5; --ash-success-ink:#047857; --ash-success-line:#a7f3d0;
+  --ash-warning-surface:#fffbeb; --ash-warning-ink:#92400e; --ash-warning-line:#fde68a;
+  --ash-danger-surface:#fef2f2; --ash-danger-ink:#b91c1c; --ash-danger-line:#fecaca;
+  --ash-info-surface:#f0f9ff; --ash-info-ink:#0369a1; --ash-info-line:#bae6fd;
+  --ash-danger-solid:#dc2626; --ash-success-solid:#059669;
+  --ash-focus:#2d6cb0;
+  --deck-bg:#dfe4ef;
+  --font:'IBM Plex Sans Arabic','Segoe UI',Tahoma,'Noto Sans Arabic',system-ui,sans-serif;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ash-brand:#3a5aa6; --ash-brand-strong:#4a6bb8; --ash-brand-soft:#8fa2cf;
+    --ash-accent:#6fa8e8; --ash-accent-strong:#5b93d4;
+    --ash-surface-page:#0b1220; --ash-surface-card:#131c30; --ash-surface-raised:#22304a;
+    --ash-surface-muted:#1a2437; --ash-surface-sunken:#060a15;
+    --ash-ink:#e8edf7; --ash-ink-secondary:#b3c0d6; --ash-ink-muted:#8b9ab5; --ash-ink-faint:#6b7a95; --ash-ink-inverse:#0b1220;
+    --ash-line-subtle:#1c2740; --ash-line:#26334d; --ash-line-strong:#3a4a6b;
+    --ash-success-surface:#0d2a1f; --ash-success-ink:#6ee7b7; --ash-success-line:#1c5a41;
+    --ash-warning-surface:#2e2208; --ash-warning-ink:#fcd34d; --ash-warning-line:#6b4c12;
+    --ash-danger-surface:#2d1214; --ash-danger-ink:#fca5a5; --ash-danger-line:#6b2226;
+    --ash-info-surface:#0b2436; --ash-info-ink:#7dd3fc; --ash-info-line:#175071;
+    --ash-focus:#6ba4e2; --deck-bg:#070c17; color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --ash-brand:#3a5aa6; --ash-brand-strong:#4a6bb8; --ash-brand-soft:#8fa2cf;
+  --ash-accent:#6fa8e8; --ash-accent-strong:#5b93d4;
+  --ash-surface-page:#0b1220; --ash-surface-card:#131c30; --ash-surface-raised:#22304a;
+  --ash-surface-muted:#1a2437; --ash-surface-sunken:#060a15;
+  --ash-ink:#e8edf7; --ash-ink-secondary:#b3c0d6; --ash-ink-muted:#8b9ab5; --ash-ink-faint:#6b7a95; --ash-ink-inverse:#0b1220;
+  --ash-line-subtle:#1c2740; --ash-line:#26334d; --ash-line-strong:#3a4a6b;
+  --ash-success-surface:#0d2a1f; --ash-success-ink:#6ee7b7; --ash-success-line:#1c5a41;
+  --ash-warning-surface:#2e2208; --ash-warning-ink:#fcd34d; --ash-warning-line:#6b4c12;
+  --ash-danger-surface:#2d1214; --ash-danger-ink:#fca5a5; --ash-danger-line:#6b2226;
+  --ash-info-surface:#0b2436; --ash-info-ink:#7dd3fc; --ash-info-line:#175071;
+  --ash-focus:#6ba4e2; --deck-bg:#070c17; color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{background:var(--deck-bg);color:var(--ash-ink);font-family:var(--font);font-size:14px;line-height:1.5;padding-inline:16px;padding-block:0 32px}
+.num{font-variant-numeric:tabular-nums;direction:ltr;unicode-bidi:isolate;display:inline-block}
+button,select,input{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--ash-focus);outline-offset:2px}
+
+/* ── deck bar ─────────────────────────────────────────── */
+.deckbar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--deck-bg);padding-block:14px 12px;display:grid;gap:10px}
+.deckbar h1{margin:0;font-size:1.25rem;font-weight:700;text-wrap:balance}
+.deckbar p{margin:0;color:var(--ash-ink-secondary);max-width:70ch}
+.controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.seg{display:inline-flex;background:var(--ash-surface-card);border:1px solid var(--ash-line);border-radius:10px;padding:2px;gap:2px;flex-wrap:wrap}
+.seg button{border:0;background:transparent;padding:5px 10px;border-radius:8px;cursor:pointer;color:var(--ash-ink-secondary);font-size:.8125rem;white-space:nowrap}
+.seg button[aria-pressed="true"]{background:var(--ash-brand);color:#fff;font-weight:600}
+.pagesel{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;scrollbar-width:thin}
+.pagesel button{flex:none;border:1px solid var(--ash-line);background:var(--ash-surface-card);border-radius:999px;padding:5px 12px;cursor:pointer;font-size:.8125rem;color:var(--ash-ink-secondary)}
+.pagesel button[aria-pressed="true"]{border-color:var(--ash-accent);color:var(--ash-accent);font-weight:600;background:var(--ash-info-surface)}
+.lbl{font-size:.75rem;color:var(--ash-ink-muted);letter-spacing:.02em}
+
+/* ── frame + admin shell ──────────────────────────────── */
+.stage{display:grid;gap:16px;justify-items:center}
+.frame{width:100%;max-width:1280px;container-type:inline-size;border-radius:14px;overflow:hidden;border:1px solid var(--ash-line-strong);background:var(--ash-surface-page);box-shadow:0 10px 30px rgb(15 23 42 / .12);transition:max-width .25s ease}
+.frame[data-w="400"]{max-width:400px}
+@media (prefers-reduced-motion:reduce){.frame{transition:none}}
+.shell{display:grid;grid-template-columns:200px 1fr;min-height:640px}
+.rail{background:var(--ash-brand);color:#dbe3f6;padding:14px 10px;display:grid;align-content:start;gap:2px}
+.rail .logo{display:flex;align-items:center;gap:8px;font-weight:700;color:#fff;padding:4px 8px 14px}
+.hex{width:22px;height:22px;background:#fff;clip-path:polygon(25% 5%,75% 5%,100% 50%,75% 95%,25% 95%,0 50%);display:grid;place-items:center}
+.hex i{width:10px;height:10px;background:var(--ash-accent);display:block}
+.rail a{display:block;padding:7px 10px;border-radius:8px;color:inherit;text-decoration:none;font-size:.8125rem}
+.rail a.on{background:rgb(255 255 255 / .14);color:#fff;font-weight:600}
+.rail .grp{font-size:.6875rem;opacity:.6;padding:10px 10px 2px;letter-spacing:.04em}
+.app{min-width:0;display:grid;align-content:start}
+.apphead{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 18px;background:var(--ash-surface-card);border-bottom:1px solid var(--ash-line)}
+.apphead h2{margin:0;font-size:1.125rem;font-weight:700}
+.crumb{color:var(--ash-ink-muted);font-size:.8125rem;text-decoration:none}
+.page{padding:16px 18px 22px;display:grid;gap:14px;align-content:start}
+@container (max-width:640px){
+  .shell{grid-template-columns:1fr}
+  .rail{display:flex;gap:6px;overflow-x:auto;padding:8px 10px}
+  .rail .grp{display:none}
+  .rail a{flex:none}
+  .rail .logo{padding:2px 6px}
+  .page{padding:12px}
+  .apphead{padding:10px 12px}
+}
+
+/* ── components ───────────────────────────────────────── */
+.card{background:var(--ash-surface-card);border:1px solid var(--ash-line);border-radius:12px;padding:14px;position:relative;min-width:0}
+.card>header{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.card h3{margin:0;font-size:.9375rem;font-weight:600}
+.sub{color:var(--ash-ink-muted);font-size:.75rem}
+.section-title{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:4px 0 -4px}
+.section-title h3{margin:0;font-size:.8125rem;font-weight:600;color:var(--ash-ink-secondary);letter-spacing:.02em}
+.grid{display:grid;gap:10px}
+.g6{grid-template-columns:repeat(6,minmax(0,1fr))}
+.g5{grid-template-columns:repeat(5,minmax(0,1fr))}
+.g4{grid-template-columns:repeat(4,minmax(0,1fr))}
+.g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.g-profit{grid-template-columns:1.25fr 1fr 1fr}
+@container (max-width:1000px){.g6{grid-template-columns:repeat(3,minmax(0,1fr))}.g5{grid-template-columns:repeat(3,minmax(0,1fr))}.g-profit{grid-template-columns:1fr 1fr}.g-profit>.lead{grid-column:1 / -1}}
+@container (max-width:640px){.g6,.g5,.g4{grid-template-columns:repeat(2,minmax(0,1fr))}.g3,.g2,.g-profit{grid-template-columns:1fr}}
+
+.stat{background:var(--ash-surface-card);border:1px solid var(--ash-line);border-radius:12px;padding:10px 12px;display:grid;gap:2px;text-decoration:none;color:inherit;min-width:0}
+a.stat:hover{border-color:var(--ash-accent)}
+.stat .k{font-size:.75rem;color:var(--ash-ink-muted);display:flex;justify-content:space-between;gap:6px}
+.stat .k .go{color:var(--ash-accent);font-weight:600}
+.stat .v{font-size:1.375rem;font-weight:700;line-height:1.75rem}
+.stat .s{font-size:.75rem;color:var(--ash-ink-secondary)}
+.stat.warn{background:var(--ash-warning-surface);border-color:var(--ash-warning-line)}
+.stat.warn .v{color:var(--ash-warning-ink)}
+.stat.bad{background:var(--ash-danger-surface);border-color:var(--ash-danger-line)}
+.stat.bad .v{color:var(--ash-danger-ink)}
+.stat.good .v{color:var(--ash-success-ink)}
+.lead-fig{font-size:2rem;font-weight:700;line-height:2.25rem}
+
+.badge{display:inline-flex;align-items:center;gap:4px;border-radius:999px;padding:1px 8px;font-size:.6875rem;font-weight:600;border:1px solid transparent;white-space:nowrap}
+.b-ok{background:var(--ash-success-surface);color:var(--ash-success-ink);border-color:var(--ash-success-line)}
+.b-warn{background:var(--ash-warning-surface);color:var(--ash-warning-ink);border-color:var(--ash-warning-line)}
+.b-bad{background:var(--ash-danger-surface);color:var(--ash-danger-ink);border-color:var(--ash-danger-line)}
+.b-info{background:var(--ash-info-surface);color:var(--ash-info-ink);border-color:var(--ash-info-line)}
+.b-neu{background:var(--ash-surface-raised);color:var(--ash-ink-secondary);border-color:var(--ash-line)}
+.b-dbl{background:var(--ash-brand);color:#fff}
+.cur{font-size:.6875rem;color:var(--ash-ink-muted);margin-inline-start:3px}
+
+.btn{border:1px solid var(--ash-line-strong);background:var(--ash-surface-card);border-radius:8px;padding:5px 11px;cursor:pointer;font-size:.8125rem;white-space:nowrap}
+.btn.pri{background:var(--ash-brand);border-color:var(--ash-brand);color:#fff;font-weight:600}
+.btn.ok{background:var(--ash-success-solid);border-color:var(--ash-success-solid);color:#fff}
+.btn.ghost{border-color:transparent;background:transparent;color:var(--ash-accent)}
+.btn.sm{padding:2px 8px;font-size:.75rem}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.row.between{justify-content:space-between}
+.field{display:grid;gap:3px;font-size:.75rem;color:var(--ash-ink-muted)}
+.input,.select{border:1px solid var(--ash-line-strong);background:var(--ash-surface-card);border-radius:8px;padding:5px 9px;font-size:.8125rem;color:var(--ash-ink);min-width:0}
+.check{display:inline-flex;align-items:center;gap:5px;font-size:.8125rem;color:var(--ash-ink-secondary)}
+
+.tbl-wrap{overflow-x:auto;border:1px solid var(--ash-line);border-radius:10px}
+table{border-collapse:collapse;width:100%;font-size:.8125rem;min-width:640px}
+th{background:var(--ash-surface-muted);color:var(--ash-ink-muted);font-weight:600;font-size:.75rem;text-align:start;padding:7px 10px;white-space:nowrap;border-bottom:1px solid var(--ash-line)}
+td{padding:7px 10px;border-bottom:1px solid var(--ash-line-subtle);white-space:nowrap}
+tr:last-child td{border-bottom:0}
+td.n,th.n{text-align:end}
+td a,.link{color:var(--ash-accent);text-decoration:none;font-weight:500}
+tr.hl td{background:var(--ash-warning-surface)}
+.neg{color:var(--ash-danger-ink)}
+.pos{color:var(--ash-success-ink)}
+.muted{color:var(--ash-ink-muted)}
+
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--ash-line);overflow-x:auto}
+.tabs button{border:0;background:transparent;padding:7px 12px;cursor:pointer;color:var(--ash-ink-muted);border-bottom:2px solid transparent;margin-bottom:-1px;white-space:nowrap;font-size:.8125rem}
+.tabs button[aria-selected="true"]{color:var(--ash-accent);border-bottom-color:var(--ash-accent);font-weight:600}
+.tabs .count{background:var(--ash-danger-solid);color:#fff;border-radius:999px;padding:0 6px;font-size:.6875rem;margin-inline-start:4px}
+
+.pills{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px}
+.pill{flex:none;border:1px solid var(--ash-line);background:var(--ash-surface-muted);color:var(--ash-ink-secondary);border-radius:999px;padding:4px 12px;font-size:.8125rem;cursor:pointer}
+.pill.on{background:var(--ash-brand);border-color:var(--ash-brand);color:#fff;font-weight:600}
+.weeknav{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.chip{background:var(--ash-info-surface);color:var(--ash-info-ink);border-radius:10px;padding:4px 10px;font-size:.8125rem;font-weight:500}
+.caption{font-size:.75rem;color:var(--ash-ink-muted)}
+
+.bridge{display:grid;gap:4px;font-size:.8125rem}
+.bridge div{display:flex;justify-content:space-between;gap:10px;padding-block:3px;border-bottom:1px dashed var(--ash-line)}
+.bridge div:last-child{border-bottom:0;font-weight:700;padding-top:6px}
+.dual{display:grid;grid-template-columns:auto 1fr 1fr;gap:4px 10px;font-size:.8125rem}
+.dual .h{color:var(--ash-ink-muted);font-size:.6875rem}
+.dual .t{font-weight:700;border-top:1px solid var(--ash-line);padding-top:4px}
+.progress{height:6px;border-radius:999px;background:var(--ash-surface-sunken);overflow:hidden;min-width:90px}
+.progress i{display:block;height:100%;background:var(--ash-accent)}
+.progress.over i{background:var(--ash-danger-solid)}
+.callout{border:1px solid var(--ash-warning-line);background:var(--ash-warning-surface);color:var(--ash-warning-ink);border-radius:10px;padding:8px 12px;font-size:.8125rem}
+.callout.info{border-color:var(--ash-info-line);background:var(--ash-info-surface);color:var(--ash-info-ink)}
+.callout.bad{border-color:var(--ash-danger-line);background:var(--ash-danger-surface);color:var(--ash-danger-ink)}
+.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px}
+.kv div{background:var(--ash-surface-muted);border-radius:8px;padding:6px 10px}
+.kv b{display:block;font-size:.9375rem}
+.kv span{font-size:.6875rem;color:var(--ash-ink-muted)}
+.form{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;align-items:end}
+.steps{display:flex;gap:6px;flex-wrap:wrap;font-size:.75rem}
+.steps span{padding:3px 10px;border-radius:999px;background:var(--ash-surface-raised);color:var(--ash-ink-muted)}
+.steps span.on{background:var(--ash-brand);color:#fff}
+.sched{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:3px}
+.sched i{height:18px;border-radius:3px;background:var(--ash-surface-sunken)}
+.sched i.done{background:var(--ash-success-solid)}
+.sched i.part{background:linear-gradient(90deg,var(--ash-success-solid) 50%,var(--ash-surface-sunken) 50%)}
+.sched i.due{background:var(--ash-warning-line);outline:1px solid var(--ash-warning-ink)}
+@container (max-width:640px){.sched{grid-template-columns:repeat(6,minmax(0,1fr))}}
+.legend{display:flex;gap:10px;flex-wrap:wrap;font-size:.6875rem;color:var(--ash-ink-muted)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-inline-end:4px;vertical-align:-1px}
+
+.bike{display:grid;gap:6px}
+.bike .gno{font-size:1.5rem;font-weight:700;line-height:1}
+.bike .batt{display:flex;gap:6px;flex-wrap:wrap}
+.bike .fin{background:var(--ash-surface-muted);border-radius:8px;padding:5px 8px;font-size:.75rem;display:flex;justify-content:space-between;gap:6px}
+
+svg text{fill:var(--ash-ink-muted);font-family:var(--font)}
+
+/* ── role + states (generic) ──────────────────────────── */
+.frame[data-role="bm"] .gm-only{display:none!important}
+.frame:not([data-role="bm"]) .bm-only{display:none!important}
+.state-note{display:none}
+.frame[data-state="loading"] .card>:not(header),
+.frame[data-state="loading"] .stat>*{visibility:hidden}
+.frame[data-state="loading"] .card,.frame[data-state="loading"] .stat{background-image:linear-gradient(90deg,transparent,rgb(148 163 184 / .18),transparent);background-size:200% 100%;animation:sh 1.2s linear infinite}
+@keyframes sh{to{background-position:-200% 0}}
+@media (prefers-reduced-motion:reduce){.frame[data-state="loading"] .card,.frame[data-state="loading"] .stat{animation:none}}
+.frame[data-state="empty"] .card>:not(header):not(.state-note){display:none}
+.frame[data-state="empty"] .card .state-note.empty{display:block}
+.frame[data-state="empty"] .stat .v{color:var(--ash-ink-faint)}
+.frame[data-state="error"] .card>:not(header):not(.state-note){display:none}
+.frame[data-state="error"] .card .state-note.error{display:flex}
+.state-note.empty{color:var(--ash-ink-muted);font-size:.8125rem;padding:12px 4px}
+.state-note.error{align-items:center;justify-content:space-between;gap:8px;background:var(--ash-danger-surface);color:var(--ash-danger-ink);border:1px solid var(--ash-danger-line);border-radius:8px;padding:8px 10px;font-size:.8125rem}
+
+.notes{width:100%;max-width:1280px;background:var(--ash-surface-card);border:1px solid var(--ash-line);border-radius:12px;padding:14px 16px}
+.notes h4{margin:0 0 6px;font-size:.9375rem}
+.notes ul{margin:0;padding-inline-start:18px;display:grid;gap:4px;color:var(--ash-ink-secondary);max-width:90ch}
+.example{font-size:.6875rem;color:var(--ash-ink-muted)}
+</style>
+
+<div dir="rtl" lang="ar">
+<header class="deckbar">
+  <h1>نماذج شاشات آش — إعادة التصميم</h1>
+  <p>كل صفحة من الخطة المعتمدة، بألوان النظام نفسه. الأرقام أمثلة للتوضيح وليست بيانات فعلية. غيّر العرض والحالة والدور من الأزرار.</p>
+  <div class="pagesel" id="pages" role="toolbar" aria-label="الصفحة">
+    <button data-p="filter">فلتر الوقت</button>
+    <button data-p="dash" aria-pressed="true">الداشبورد</button>
+    <button data-p="done">النوبات المنتهية</button>
+    <button data-p="live">النوبات الجارية</button>
+    <button data-p="exp">الصرفيات</button>
+    <button data-p="cf">صندوق الشركة</button>
+    <button data-p="rest">الترميم</button>
+    <button data-p="bikes">بطاقات الآليات</button>
+    <button data-p="veh">سجل الآلية</button>
+    <button data-p="appr">شاشة الاعتماد</button>
+  </div>
+  <div class="controls">
+    <span class="lbl">العرض</span>
+    <div class="seg" id="w"><button data-v="1280" aria-pressed="true">1280</button><button data-v="400">400</button></div>
+    <span class="lbl">الحالة</span>
+    <div class="seg" id="st"><button data-v="data" aria-pressed="true">بيانات</button><button data-v="loading">تحميل</button><button data-v="empty">فارغ</button><button data-v="error">خطأ</button></div>
+    <span class="lbl">الدور</span>
+    <div class="seg" id="role"><button data-v="gm" aria-pressed="true">مدير عام</button><button data-v="bm">مدير فرع</button></div>
+  </div>
+</header>
+
+<main class="stage">
+<div class="frame" id="frame" data-w="1280" data-state="data" data-role="gm">
+ <div class="shell">
+  <nav class="rail" aria-label="التنقل">
+    <div class="logo"><span class="hex"><i></i></span>ASH</div>
+    <span class="grp">التشغيل</span>
+    <a href="#" data-nav="dash">لوحة التحكم</a>
+    <a href="#" data-nav="live">النوبات الجارية</a>
+    <a href="#" data-nav="done">النوبات المنتهية</a>
+    <a href="#" data-nav="bikes">الأسطول</a>
+    <span class="grp">المال</span>
+    <a href="#" data-nav="rest">الخزينة</a>
+    <a href="#" data-nav="exp">الصرفيات</a>
+    <a href="#" data-nav="cf" class="gm-only">صندوق الشركة</a>
+  </nav>
+  <div class="app">
+
+<!-- ═══════════════ FILTER ═══════════════ -->
+<section data-page="filter" hidden>
+  <div class="apphead"><h2>فلتر الوقت — مكوّن مشترك</h2><span class="sub">يُستخدم في الداشبورد والنوبات والصرفيات وصندوق الشركة وسجل الآلية</span></div>
+  <div class="page">
+    <div class="card"><header><h3>الوضع الافتراضي: الكل منذ البدء</h3><span class="sub">يُحفظ في الرابط ولكل مستخدم</span></header>
+      <div class="grid" style="gap:8px">
+        <div class="pills"><button class="pill on">الكل منذ البدء</button><button class="pill">اليوم</button><button class="pill">أمس</button><button class="pill">هذا الأسبوع</button><button class="pill">الأسبوع الماضي</button><button class="pill">هذا الشهر</button><button class="pill">الشهر الماضي</button><button class="pill">مخصّص ▾</button></div>
+        <div class="caption">من <span class="num">2026-08-11</span> إلى <span class="num">2026-09-17</span> · اليوم يبدأ 04:00 بتوقيت دمشق · ما قبل بدء التطبيق مستبعد</div>
+      </div>
+      <div class="state-note empty">لا حركة في هذه الفترة.</div>
+      <div class="state-note error">تعذّر تحميل التواريخ من الخادم. <button class="btn sm">إعادة المحاولة</button></div>
+    </div>
+    <div class="card"><header><h3>التنقّل بالأسابيع (الأسبوع يبدأ الأحد)</h3></header>
+      <div class="weeknav">
+        <button class="btn">› السابق</button>
+        <span class="chip">الأسبوع <b class="num">13–19</b> أيلول</span>
+        <button class="btn" disabled style="opacity:.45">التالي ‹</button>
+        <button class="btn ghost">⌂ الحالي</button>
+      </div>
+      <p class="caption" style="margin:8px 0 0">«التالي» معطّل عند الأسبوع الجاري. التواريخ تأتي من الخادم (<code>/dashboard/meta</code>) لا من ساعة المتصفح.</p>
+    </div>
+    <div class="card"><header><h3>فترة مخصّصة</h3></header>
+      <div class="form" style="max-width:560px">
+        <label class="field">من<input class="input" type="date" id="f-from" value="2026-09-01"></label>
+        <label class="field">إلى<input class="input" type="date" id="f-to" value="2026-09-17"></label>
+        <button class="btn pri">عرض</button>
+      </div>
+      <p class="caption" style="margin:8px 0 0">تاريخ «إلى» قبل «من» يُرفض برسالة: «تاريخ النهاية قبل تاريخ البداية — عدّل أحدهما».</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ DASHBOARD ═══════════════ -->
+<section data-page="dash">
+  <div class="apphead"><h2>لوحة التحكم</h2>
+    <label class="row sub">الفرع <select class="select" id="d-branch"><option>دمشق</option></select></label></div>
+  <div class="page">
+    <div class="card" style="padding:10px 12px">
+      <div class="pills"><button class="pill on">الكل منذ البدء</button><button class="pill">اليوم</button><button class="pill">أمس</button><button class="pill">هذا الأسبوع</button><button class="pill">الأسبوع الماضي</button><button class="pill">هذا الشهر</button><button class="pill">الشهر الماضي</button><button class="pill">مخصّص ▾</button></div>
+      <div class="caption" style="margin-top:6px">من <span class="num">2026-08-11</span> إلى <span class="num">2026-09-17</span> · اليوم يبدأ 04:00</div>
+    </div>
+
+    <div class="section-title"><h3>الآن — مباشر، لا يتأثر بالفلتر</h3><span class="sub">يتحدّث كل 30 ثانية</span></div>
+    <div class="grid g5">
+      <a class="stat" href="#"><span class="k">يعملون الآن <span class="go">›</span></span><span class="v num">7</span><span class="s">7 آليات خارج المكتب</span></a>
+      <a class="stat warn" href="#"><span class="k">بانتظار الاعتماد <span class="go">›</span></span><span class="v num">2</span><span class="s">فتح 1 · إغلاق 1</span></a>
+      <a class="stat" href="#"><span class="k">معلّقة <span class="go">›</span></span><span class="v num">0</span><span class="s">لا شيء</span></a>
+      <a class="stat bad" href="#"><span class="k">تجاوزت الهدف الآن <span class="go">›</span></span><span class="v num">1</span><span class="s">مسائية منذ 9س 10د</span></a>
+      <div class="stat"><span class="k">جاهزية الأسطول</span><span class="v num">9/10</span><span class="s">1 في الصيانة</span></div>
+    </div>
+
+    <div class="gm-only section-title"><h3>صافي الربح</h3><span class="sub">الاهتلاك لا يُطرح منه</span></div>
+    <div class="gm-only grid g-profit">
+      <div class="card lead"><header><h3>الصافي المجمّع</h3><span class="sub">منذ البدء · الدولار بسعره المجمَّد</span></header>
+        <div class="lead-fig"><span class="num">1,234,560</span><span class="cur">ل.س</span></div>
+        <div class="sub">≈ <span class="num">$ 949</span> · هامش <span class="num">38%</span> من رسوم التوصيل</div>
+        <svg viewBox="0 0 320 110" width="100%" role="img" aria-label="اتجاه الصافي الأسبوعي" style="margin-top:8px;max-width:100%">
+          <g stroke="var(--ash-line)" stroke-width="1"><line x1="30" y1="10" x2="315" y2="10"/><line x1="30" y1="45" x2="315" y2="45"/><line x1="30" y1="80" x2="315" y2="80"/></g>
+          <text x="26" y="13" font-size="9" text-anchor="end">300k</text><text x="26" y="48" font-size="9" text-anchor="end">150k</text><text x="26" y="83" font-size="9" text-anchor="end">0</text>
+          <g fill="var(--ash-accent)">
+            <rect x="42" y="66" width="30" height="14" rx="2"/><rect x="92" y="52" width="30" height="28" rx="2"/><rect x="142" y="38" width="30" height="42" rx="2"/><rect x="192" y="31" width="30" height="49" rx="2"/><rect x="242" y="24" width="30" height="56" rx="2"/>
+            <rect x="292" y="45" width="20" height="35" rx="2" fill="var(--ash-brand-soft)"/>
+          </g>
+          <g font-size="9" text-anchor="middle"><text x="57" y="96">11 آب</text><text x="107" y="96">18 آب</text><text x="157" y="96">25 آب</text><text x="207" y="96">1 أيلول</text><text x="257" y="96">8 أيلول</text><text x="302" y="96">15 أيلول</text></g>
+          <text x="302" y="106" font-size="8" text-anchor="middle">جارٍ</text>
+        </svg>
+        <div class="state-note empty">لا حركة في هذه الفترة.</div>
+        <div class="state-note error">تعذّر تحميل الربح. <button class="btn sm">إعادة المحاولة</button></div>
+      </div>
+      <div class="card"><header><h3>الفرع — دمشق</h3><a class="link" href="#">الصرفيات ›</a></header>
+        <div class="bridge">
+          <div><span>حصة الشركة</span><span class="num">2,610,400</span></div>
+          <div><span>+ إيرادات أخرى (حسم، مداخيل)</span><span class="num pos">+48,000</span></div>
+          <div><span>− صرفيات عامة</span><span class="num neg">−610,000</span></div>
+          <div><span>− كلف الآليات <span class="badge b-info">مصحّحة</span></span><span class="num neg">−392,000</span></div>
+          <div><span>= صافي الفرع</span><span class="num">1,656,400</span></div>
+        </div>
+        <div class="state-note empty">لا حركة في هذه الفترة.</div>
+        <div class="state-note error">تعذّر التحميل. <button class="btn sm">إعادة المحاولة</button></div>
+      </div>
+      <div class="card"><header><h3>الشركة</h3><a class="link" href="#">صندوق الشركة ›</a></header>
+        <div class="dual">
+          <span></span><span class="h">ل.س</span><span class="h">$</span>
+          <span>مداخيل</span><span class="num">0</span><span class="num">120</span>
+          <span>− صرفيات</span><span class="num neg">−100,000</span><span class="num neg">−350</span>
+          <span class="t">= صافي الشركة</span><span class="t num">−100,000</span><span class="t num">−230</span>
+        </div>
+        <div class="sub" style="margin-top:6px">المكافئ بالليرة: <span class="num">−421,840</span> (بسعر كل قيد)</div>
+        <div class="state-note empty">لا حركة في هذه الفترة.</div>
+        <div class="state-note error">تعذّر التحميل. <button class="btn sm">إعادة المحاولة</button></div>
+      </div>
+    </div>
+    <div class="gm-only callout info">الاهتلاك (لا يُطرح من الربح): مستحق هذا الشهر <b class="num">$ 120</b> · منقول منذ البدء <b class="num">$ 480</b> · <a class="link" href="#">نقل الاهتلاك ›</a></div>
+
+    <div class="section-title"><h3>التشغيل</h3><span class="sub">ضمن الفترة المختارة</span></div>
+    <div class="grid g6">
+      <div class="stat"><span class="k">رسوم التوصيل</span><span class="v num">6,526,000</span><span class="s">≈ $ 5,020</span></div>
+      <div class="stat"><span class="k">الطلبات</span><span class="v num">4,812</span><span class="s">مقبولة برسم</span></div>
+      <a class="stat" href="#"><span class="k">نوبات منتهية <span class="go">›</span></span><span class="v num">312</span><span class="s">صباحية 171 · مسائية 88</span></a>
+      <a class="stat" href="#"><span class="k">دبل <span class="go">›</span></span><span class="v num">53</span><span class="s">هدفها 12 ساعة</span></a>
+      <a class="stat warn" href="#"><span class="k">دون الهدف <span class="go">›</span></span><span class="v num">24</span><span class="s">مجموع النقص 31س 40د</span></a>
+      <a class="stat bad" href="#"><span class="k">لم تُغلق في وقتها <span class="go">›</span></span><span class="v num">3</span><span class="s">أكثر من 16 ساعة</span></a>
+    </div>
+    <div class="card"><header><h3>حسب السائق</h3><span class="sub">الصف يفتح نوباته المنتهية</span></header>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>السائق</th><th class="n">نوبات</th><th class="n">دبل</th><th class="n">دون الهدف</th><th class="n">طلبات</th><th class="n">رسوم</th><th class="n gm-only">حصة الشركة</th><th>الآن</th></tr></thead>
+        <tbody>
+          <tr><td><a href="#">ثائر قدورة</a></td><td class="n num">29</td><td class="n num">3</td><td class="n num">2</td><td class="n num">471</td><td class="n num">612,500</td><td class="n num gm-only">244,900</td><td><a class="badge b-ok" href="#">● جارية ›</a></td></tr>
+          <tr><td><a href="#">نذير العلي</a></td><td class="n num">31</td><td class="n num">7</td><td class="n num">1</td><td class="n num">560</td><td class="n num">733,000</td><td class="n num gm-only">293,200</td><td><span class="muted">—</span></td></tr>
+          <tr><td><a href="#">مجد حداد</a></td><td class="n num">24</td><td class="n num">0</td><td class="n num">6</td><td class="n num">344</td><td class="n num">455,500</td><td class="n num gm-only">182,200</td><td><a class="badge b-ok" href="#">● جارية ›</a></td></tr>
+        </tbody></table></div>
+      <div class="state-note empty">لا نوبات في هذه الفترة.</div>
+      <div class="state-note error">تعذّر تحميل النوبات. <button class="btn sm">إعادة المحاولة</button></div>
+    </div>
+
+    <div class="section-title"><h3>الأسطول</h3></div>
+    <div class="card"><header><h3>أداء الآليات</h3><span class="sub">الصف يفتح سجل الآلية</span></header>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>الآلية</th><th class="n">نوبات</th><th class="n">كم</th><th class="n">طلبات</th><th class="n gm-only">حصة الشركة</th><th class="n">كلف</th><th class="n gm-only">مساهمة</th><th class="n gm-only">دفترية</th><th class="n gm-only">غير مسدّد</th></tr></thead>
+        <tbody>
+          <tr><td><a href="#">D19 · 1-1-1-7</a></td><td class="n"><a class="num" href="#">42</a></td><td class="n num">5,120</td><td class="n num">812</td><td class="n num gm-only">431,000</td><td class="n num">96,000</td><td class="n num gm-only pos">335,000</td><td class="n gm-only"><span class="num">$1,150</span></td><td class="n gm-only"><span class="num">$600</span></td></tr>
+          <tr><td><a href="#">D07 · 1-1-1-3</a></td><td class="n"><a class="num" href="#">38</a></td><td class="n num">4,410</td><td class="n num">701</td><td class="n num gm-only">372,600</td><td class="n num">154,000</td><td class="n num gm-only pos">218,600</td><td class="n gm-only"><span class="num">$1,300</span></td><td class="n gm-only"><span class="num">$0</span></td></tr>
+          <tr class="hl"><td><a href="#">D02 · 1-1-1-1</a></td><td class="n"><a class="num" href="#">11</a></td><td class="n num">1,020</td><td class="n num">166</td><td class="n num gm-only">80,400</td><td class="n num">210,000</td><td class="n num gm-only neg">−129,600</td><td class="n gm-only"><span class="num">$900</span></td><td class="n gm-only"><span class="num">$250</span></td></tr>
+        </tbody></table></div>
+      <div class="state-note empty">لا آليات عملت في هذه الفترة.</div>
+      <div class="state-note error">تعذّر تحميل الأسطول. <button class="btn sm">إعادة المحاولة</button></div>
+    </div>
+
+    <div class="gm-only section-title"><h3>صندوق الشركة</h3><a class="link" href="#">فتح صندوق الشركة ›</a></div>
+    <div class="gm-only grid g6">
+      <a class="stat" href="#"><span class="k">جيب السوري</span><span class="v num">79,057</span><span class="s">ل.س</span></a>
+      <a class="stat" href="#"><span class="k">جيب الدولار</span><span class="v num">$1,450</span><span class="s">≈ 18.9 مليون ل.س بسعر اليوم</span></a>
+      <a class="stat" href="#"><span class="k">احتياطي الاهتلاك</span><span class="v num">$480</span><span class="s">ل.س 0</span></a>
+      <a class="stat warn" href="#"><span class="k">ديون علينا <span class="go">›</span></span><span class="v num">$600</span><span class="s">1 مستحق خلال 7 أيام</span></a>
+      <a class="stat" href="#"><span class="k">ديون لنا <span class="go">›</span></span><span class="v num">150,000</span><span class="s">ل.س · 2 طرف</span></a>
+      <div class="stat good"><span class="k">تطابق حساب الفرع</span><span class="v">✓ متطابق</span><span class="s">دمشق</span></div>
+    </div>
+
+    <div class="section-title"><h3>رأس المال المدوّر — الفرع</h3><span class="sub">كما هو اليوم</span></div>
+    <div class="card"><header><h3>الصناديق مقابل الهدف</h3><a class="link" href="#">الترميم ›</a></header>
+      <div class="grid g3">
+        <div class="kv"><div><b class="num">48,200</b><span>كاش المكتب / الهدف 50,000</span></div></div>
+        <div class="kv"><div><b class="num">11,000</b><span>محفظة المكتب / الهدف 10,000</span></div></div>
+        <div class="kv"><div><b class="num">4,000</b><span>عهدة النوبات المفتوحة</span></div></div>
+      </div>
+      <div class="state-note empty">لا أرصدة.</div>
+      <div class="state-note error">تعذّر التحميل. <button class="btn sm">إعادة المحاولة</button></div>
+    </div>
+
+    <div class="section-title"><h3>مستحقات وتنبيهات</h3></div>
+    <div class="grid g3">
+      <a class="stat warn" href="#"><span class="k">صرفيات ثابتة مستحقة <span class="go">›</span></span><span class="v num">3</span><span class="s">متأخرة 1 · اليوم 1 · قريباً 1</span></a>
+      <a class="stat" href="#"><span class="k">وثائق تنتهي قريباً <span class="go">›</span></span><span class="v num">2</span><span class="s">تأمين D07 خلال 12 يوماً</span></a>
+      <div class="stat"><span class="k">حضور اليوم</span><span class="v num">8/9</span><span class="s">غائب: 1</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ COMPLETED SHIFTS ═══════════════ -->
+<section data-page="done" hidden>
+  <div class="apphead"><h2>النوبات المنتهية</h2><a class="crumb" href="#">‹ من لوحة التحكم: دون الهدف</a></div>
+  <div class="page">
+    <div class="card" style="padding:10px 12px">
+      <div class="pills"><button class="pill">الكل منذ البدء</button><button class="pill">اليوم</button><button class="pill">أمس</button><button class="pill on">هذا الأسبوع</button><button class="pill">الأسبوع الماضي</button><button class="pill">هذا الشهر</button><button class="pill">مخصّص ▾</button></div>
+      <div class="row" style="margin-top:8px">
+        <label class="field">السائق<select class="select" id="c-drv"><option>الكل</option><option>ثائر قدورة</option></select></label>
+        <label class="field">الآلية<select class="select" id="c-veh"><option>الكل</option><option>D19</option></select></label>
+        <label class="field">النمط<select class="select" id="c-pat"><option>الكل</option><option>صباحية</option><option>مسائية</option><option>دبل</option></select></label>
+        <label class="check"><input type="checkbox" id="c-short" checked> دون الهدف فقط</label>
+        <label class="check"><input type="checkbox" id="c-ab"> لم تُغلق في وقتها</label>
+      </div>
+    </div>
+    <div class="grid g5">
+      <div class="stat"><span class="k">العدد</span><span class="v num">58</span></div>
+      <div class="stat"><span class="k">دبل</span><span class="v num">9</span></div>
+      <div class="stat warn"><span class="k">دون الهدف</span><span class="v num">4</span><span class="s">مجموع 3س 20د</span></div>
+      <div class="stat good"><span class="k">حقّقت الهدف</span><span class="v num">45</span></div>
+      <div class="stat"><span class="k">غير مقيّمة</span><span class="v num">0</span></div>
+    </div>
+    <div class="card"><header><h3>النوبات — دون الهدف</h3><span class="sub">الهدف: صباحية 8س · مسائية 8س · دبل 12س (دبل = 10 ساعات فأكثر)</span></header>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>البداية ← النهاية</th><th>السائق</th><th>الآلية</th><th>النمط</th><th class="n">المدة</th><th class="n">النقص</th><th class="n">طلبات</th><th class="n">رسوم</th><th></th></tr></thead>
+        <tbody>
+          <tr><td class="num">15/09 09:04 ← 16:02</td><td>ثائر قدورة</td><td><a href="#">D19 ›</a></td><td><span class="badge b-info">صباحية · 8س</span></td><td class="n num">6س 58د</td><td class="n num neg">1س 02د</td><td class="n num">17</td><td class="n num">21,500</td><td><a href="#">عرض</a></td></tr>
+          <tr><td class="num">14/09 18:10 ← 01:40</td><td>مجد حداد</td><td><a href="#">D07 ›</a></td><td><span class="badge b-neu">مسائية · 8س</span></td><td class="n num">7س 30د</td><td class="n num neg">0س 30د</td><td class="n num">14</td><td class="n num">18,000</td><td><a href="#">عرض</a></td></tr>
+          <tr><td class="num">13/09 09:00 ← 19:30</td><td>نذير العلي</td><td><a href="#">D02 ›</a></td><td><span class="badge b-dbl">دبل · 12س</span></td><td class="n num">10س 30د</td><td class="n num neg">1س 30د</td><td class="n num">28</td><td class="n num">36,500</td><td><a href="#">عرض</a></td></tr>
+          <tr><td class="num">12/09 11:00 ← 20:48</td><td>مجد حداد</td><td><a href="#">D07 ›</a></td><td><span class="badge b-info">صباحية · 8س</span></td><td class="n num">9س 48د</td><td class="n muted">—</td><td class="n num">24</td><td class="n num">30,000</td><td><a href="#">عرض</a></td></tr>
+        </tbody></table></div>
+      <p class="example">الصف الأخير (9س 48د) يبقى صباحياً لأنه أقل من 10 ساعات؛ لو بلغ 10 ساعات لصار دبل بهدف 12.</p>
+      <div class="state-note empty">لا نوبات مطابقة. جرّب إزالة «دون الهدف فقط» أو توسيع الفترة.</div>
+      <div class="state-note error">تعذّر تحميل النوبات. <button class="btn sm">إعادة المحاولة</button></div>
+    </div>
+    <div class="callout">الفترة أطول من 31 يوماً. اختر سائقاً أو آلية لعرض حتى 400 يوم، أو <a class="link" href="#">ضيّق الفترة</a>.</div>
+  </div>
+</section>
+
+<!-- ═══════════════ LIVE SHIFTS ═══════════════ -->
+<section data-page="live" hidden>
+  <div class="apphead"><h2>النوبات الجارية</h2><span class="sub">تتحدّث كل 8 ثوانٍ</span></div>
+  <div class="page">
+    <div class="row">
+      <label class="field">السائق<select class="select" id="l-drv"><option>الكل</option></select></label>
+      <label class="field">الآلية<select class="select" id="l-veh"><option>الكل</option></select></label>
+      <label class="field">الحالة<select class="select" id="l-st"><option>الكل</option><option>مفتوحة</option><option>معلّقة</option></select></label>
+      <label class="field">الفترة<select class="select" id="l-slot"><option>الكل</option><option>صباحية</option><option>مسائية</option></select></label>
+    </div>
+    <div class="grid g3">
+      <div class="stat"><span class="k">مفتوحة</span><span class="v num">6</span></div>
+      <div class="stat"><span class="k">معلّقة</span><span class="v num">1</span></div>
+      <div class="stat bad"><span class="k">تجاوزت الهدف الآن</span><span class="v num">1</span></div>
+    </div>
+    <div class="card"><header><h3>الجارية الآن</h3></header>
+      <div class="grid" style="gap:8px">
+        <div class="row between" style="border-bottom:1px solid var(--ash-line-subtle);padding-bottom:8px">
+          <div class="grid" style="gap:2px"><b>ثائر قدورة · <a class="link" href="#">D19</a></b><span class="sub">بدأت <span class="num">09:04</span> · جارية — صباحية</span></div>
+          <div class="row"><div class="progress" style="width:140px"><i style="width:75%"></i></div><span class="num sub">6س / 8س</span></div>
+          <div class="row"><button class="btn sm">فتح</button><button class="btn sm">دفعة</button><button class="btn sm">تعليق</button><button class="btn sm">إغلاق قسري</button></div>
+        </div>
+        <div class="row between" style="border-bottom:1px solid var(--ash-line-subtle);padding-bottom:8px">
+          <div class="grid" style="gap:2px"><b>مجد حداد · <a class="link" href="#">D07</a></b><span class="sub">بدأت <span class="num">08:50</span> · جارية — صباحية · <span class="badge b-bad">تجاوزت 9س 10د</span></span></div>
+          <div class="row"><div class="progress over" style="width:140px"><i style="width:100%"></i></div><span class="num sub">9س 10د / 8س</span></div>
+          <div class="row"><button class="btn sm">فتح</button><button class="btn sm">دفعة</button><button class="btn sm">تعليق</button><button class="btn sm">إغلاق قسري</button></div>
+        </div>
+        <div class="row between">
+          <div class="grid" style="gap:2px"><b>نذير العلي · <a class="link" href="#">D02</a></b><span class="sub">بدأت <span class="num">18:05</span> · <span class="badge b-warn">معلّقة</span> — مسائية</span></div>
+          <div class="row"><div class="progress" style="width:140px"><i style="width:20%"></i></div><span class="num sub">1س 36د / 8س</span></div>
+          <div class="row"><button class="btn sm">فتح</button><button class="btn sm">استئناف</button></div>
+        </div>
+      </div>
+      <p class="example">النوبة الجارية تُعرض «جارية» مع فترتها؛ تُصنَّف دبل فقط بعد إغلاقها إن بلغت 10 ساعات.</p>
+      <div class="state-note empty">لا نوبات جارية الآن.</div>
+      <div class="state-note error">تعذّر تحميل النوبات الجارية. <button class="btn sm">إعادة المحاولة</button></div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ EXPENSES ═══════════════ -->
+<section data-page="exp" hidden>
+  <div class="apphead"><h2>الصرفيات</h2><div class="seg"><button aria-pressed="true">صرفية</button><button>مدخول</button><button>سلفة</button></div></div>
+  <div class="page">
+    <div class="tabs" data-tabs="exp" role="tablist">
+      <button role="tab" data-t="log">السجل</button>
+      <button role="tab" data-t="due" aria-selected="true">المستحقة <span class="count">3</span></button>
+      <button role="tab" data-t="tpl">الثابتة</button>
+    </div>
+    <div data-panel="exp:due" class="grid" style="gap:12px">
+      <div class="card"><header><h3>متأخرة</h3><span class="badge b-bad">1</span></header>
+        <div class="row between"><div class="grid" style="gap:2px"><b>إيجار المكتب</b><span class="sub">شهري · استُحق <span class="num">1 أيلول</span> · كاش المكتب</span></div><b class="num">300,000 <span class="cur">ل.س</span></b><div class="row"><button class="btn ok">دفع</button><button class="btn">تخطٍّ</button></div></div>
+        <div class="state-note empty">لا شيء متأخر.</div><div class="state-note error">تعذّر التحميل. <button class="btn sm">إعادة المحاولة</button></div>
+      </div>
+      <div class="card"><header><h3>اليوم</h3><span class="badge b-warn">1</span></header>
+        <div class="row between"><div class="grid" style="gap:2px"><b>راتب عامل الشحن</b><span class="sub">أسبوعي (الأربعاء) · <span class="num">17 أيلول</span> · كاش المكتب</span></div><b class="num">75,000 <span class="cur">ل.س</span></b><div class="row"><button class="btn ok">دفع</button><button class="btn">تخطٍّ</button></div></div>
+        <div class="state-note empty">لا شيء اليوم.</div><div class="state-note error">تعذّر التحميل. <button class="btn sm">إعادة المحاولة</button></div>
+      </div>
+      <div class="card"><header><h3>خلال 7 أيام</h3><span class="badge b-neu">1</span></header>
+        <div class="row between"><div class="grid" style="gap:2px"><b>باقة إنترنت</b><span class="sub">كل 30 يوماً · <span class="num">21 أيلول</span> · محفظة المكتب</span></div><b class="num">45,000 <span class="cur">ل.س</span></b><span class="sub">يُدفع عند موعده</span></div>
+        <div class="state-note empty">لا شيء قريب.</div><div class="state-note error">تعذّر التحميل. <button class="btn sm">إعادة المحاولة</button></div>
+      </div>
+      <div class="card" style="border-color:var(--ash-accent)"><header><h3>دفع: إيجار المكتب — 1 أيلول</h3></header>
+        <div class="form">
+          <label class="field">المبلغ<input class="input num" id="pay-amt" value="300,000"></label>
+          <label class="field">سبب تعديل المبلغ (إن عُدّل)<input class="input" id="pay-why" placeholder="مثلاً: خصم من المالك"></label>
+          <label class="field">تاريخ الدفع<input class="input" type="date" id="pay-date" value="2026-09-17"></label>
+          <label class="field">الإيصال (إلزامي فوق السقف)<button class="btn">اختيار صورة…</button></label>
+          <button class="btn pri">تأكيد الدفع</button>
+        </div>
+        <p class="caption" style="margin:6px 0 0">تُسجَّل صرفية عادية من كاش المكتب مرتبطة بهذا الاستحقاق، ولا يمكن دفعه مرتين. «تخطٍّ» يطلب سبباً ويُسجَّل.</p>
+      </div>
+    </div>
+    <div data-panel="exp:tpl" hidden>
+      <div class="card"><header><h3>الصرفيات الثابتة</h3><button class="btn pri">+ صرفية ثابتة</button></header>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>البيان</th><th>الفئة</th><th>مركز الكلفة</th><th>الصندوق</th><th class="n">المبلغ</th><th>التكرار</th><th>القادمة</th><th></th></tr></thead>
+          <tbody>
+            <tr><td>إيجار المكتب</td><td>إيجارات</td><td>الفرع</td><td>كاش المكتب</td><td class="n num">300,000</td><td>أول كل شهر</td><td class="num">1 تشرين الأول</td><td><button class="btn sm">إيقاف بسبب</button></td></tr>
+            <tr><td>راتب عامل الشحن</td><td>رواتب</td><td>عام</td><td>كاش المكتب</td><td class="n num">75,000</td><td>أسبوعي · الأربعاء</td><td class="num">17 أيلول</td><td><button class="btn sm">إيقاف بسبب</button></td></tr>
+            <tr><td>صيانة دورية D07</td><td>صيانة</td><td>آلية D07</td><td>كاش المكتب</td><td class="n num">20,000</td><td>كل 14 يوماً</td><td class="num">24 أيلول</td><td><button class="btn sm">إيقاف بسبب</button></td></tr>
+          </tbody></table></div>
+        <div class="form" style="margin-top:12px">
+          <label class="field">البيان<input class="input" id="tp-t" value="باقة إنترنت"></label>
+          <label class="field">التكرار<select class="select" id="tp-k"><option>أسبوعي</option><option>أول كل شهر</option><option selected>كل N يوم</option></select></label>
+          <label class="field">كل (أيام)<input class="input num" id="tp-n" value="30"></label>
+          <label class="field">يبدأ من<input class="input" type="date" id="tp-s" value="2026-08-22"></label>
+          <label class="field">المبلغ<input class="input num" id="tp-a" value="45,000"></label>
+          <button class="btn pri">حفظ</button>
+        </div>
+        <div class="state-note empty">لا صرفيات ثابتة بعد. أضف الإيجار أو الرواتب لتظهر مستحقة في موعدها.</div>
+        <div class="state-note error">تعذّر التحميل. <button class="btn sm">إعادة المحاولة</button></div>
+      </div>
+    </div>
+    <div data-panel="exp:log" hidden>
+      <div class="card"><header><h3>السجل</h3><span class="sub">النموذج الحالي + منتقي الإيصال</span></header>
+        <div class="form">
+          <label class="field">الفئة<select class="select" id="lg-c"><option>وقود/شحن</option></select></label>
+          <label class="field">مركز الكلفة<select class="select" id="lg-cc"><option>آلية D19</option></select></label>
+          <label class="field">المبلغ<input class="input num" id="lg-a" value="12,000"></label>
+          <label class="field">الإيصال<button class="btn">اختيار صورة…</button></label>
+          <button class="btn pri">تسجيل</button>
+        </div>
+        <div class="state-note empty">لا صرفيات في هذه الفترة.</div>
+        <div class="state-note error">تعذّر التحميل. <button class="btn sm">إعادة المحاولة</button></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ COMPANY FUND ═══════════════ -->
+<section data-page="cf" hidden>
+  <div class="apphead"><h2>صندوق الشركة</h2><span class="sub">المدير العام ومدير النظام فقط</span></div>
+  <div class="page">
+    <div class="bm-only callout bad">هذه الصفحة غير متاحة لمدير الفرع.</div>
+    <div class="gm-only grid" style="gap:14px">
+    <div class="grid g4">
+      <div class="stat"><span class="k">جيب السوري</span><span class="v num">79,057.26</span><span class="s">ل.س</span></div>
+      <div class="stat"><span class="k">جيب الدولار</span><span class="v num">$1,450.00</span><span class="s">≈ 18,850,000 ل.س بسعر اليوم</span></div>
+      <div class="stat"><span class="k">احتياطي الاهتلاك</span><span class="v num">$480</span><span class="s">ل.س 0</span></div>
+      <div class="stat"><span class="k">الأصول</span><span class="v num">$5,400</span><span class="s">دفترية $4,210 · غير مسدّد $600</span></div>
+    </div>
+    <div class="row">
+      <a class="badge b-warn" href="#">ديون علينا: $600 ›</a>
+      <a class="badge b-info" href="#">ديون لنا: 150,000 ل.س ›</a>
+      <span class="badge b-ok">حساب فرع دمشق ✓ متطابق</span>
+    </div>
+    <div class="tabs" data-tabs="cf" role="tablist">
+      <button role="tab" data-t="ov">نظرة عامة</button>
+      <button role="tab" data-t="mv" aria-selected="true">الحركات</button>
+      <button role="tab" data-t="debt">الديون</button>
+      <button role="tab" data-t="asset">الأصول</button>
+      <button role="tab" data-t="dep">الاهتلاك <span class="count">1</span></button>
+      <button role="tab" data-t="rec">الثابتة</button>
+    </div>
+
+    <div data-panel="cf:ov" hidden class="grid g2">
+      <div class="card"><header><h3>بالليرة السورية</h3></header>
+        <div class="bridge"><div><span>الجيب</span><span class="num">79,057.26</span></div><div><span>احتياطي الاهتلاك</span><span class="num">0</span></div><div><span>ديون علينا</span><span class="num">0</span></div><div><span>ديون لنا</span><span class="num">150,000</span></div><div><span>صافي الفترة</span><span class="num">−100,000</span></div></div>
+        <div class="state-note empty">لا حركة.</div><div class="state-note error">تعذّر التحميل. <button class="btn sm">إعادة المحاولة</button></div>
+      </div>
+      <div class="card"><header><h3>بالدولار</h3></header>
+        <div class="bridge"><div><span>الجيب</span><span class="num">1,450.00</span></div><div><span>احتياطي الاهتلاك</span><span class="num">480.00</span></div><div><span>ديون علينا</span><span class="num">600.00</span></div><div><span>الأصول (كلفة / دفترية)</span><span class="num">5,400 / 4,210</span></div><div><span>صافي الفترة</span><span class="num">−230.00</span></div></div>
+        <div class="state-note empty">لا حركة.</div><div class="state-note error">تعذّر التحميل. <button class="btn sm">إعادة المحاولة</button></div>
+      </div>
+      <div class="card" style="grid-column:1/-1"><header><h3>الانتقال إلى الصندوق المستقل</h3><span class="badge b-ok">تم</span></header>
+        <p class="sub" style="margin:0">الرصيد الافتتاحي بالسوري نُقل من دفتر دمشق: <b class="num">79,057.26</b> ل.س، ثم طوبق بالجرد. الدولار الافتتاحي أُدخل يدوياً. أي فرق يظهر كقيد تصحيح بسبب مكتوب.</p>
+      </div>
+    </div>
+
+    <div data-panel="cf:mv" class="grid" style="gap:12px">
+      <div class="row between">
+        <div class="row"><button class="btn pri">+ صرفية</button><button class="btn">+ مدخول</button><button class="btn">⇄ تصريف</button><button class="btn">إيداع المالك</button><button class="btn">سحب المالك</button></div>
+        <div class="seg"><button aria-pressed="true">الكل</button><button>ل.س</button><button>$</button></div>
+      </div>
+      <div class="card" style="border-color:var(--ash-accent)"><header><h3>تصريف عملة</h3><span class="sub">المبلغان الفعليان — السعر يُحسب ويُجمَّد</span></header>
+        <div class="form">
+          <label class="field">تدفع<div class="row"><input class="input num" id="fx-from" value="100" style="width:90px"><select class="select" id="fx-fc"><option>$</option><option>ل.س</option></select></div></label>
+          <label class="field">تستلم<div class="row"><input class="input num" id="fx-to" value="1,300,000" style="width:120px"><span class="sub">ل.س</span></div></label>
+          <div class="field">السعر الناتج<b class="num" style="color:var(--ash-ink)">13,000 ل.س / $</b></div>
+          <label class="field">السبب<input class="input" id="fx-why" value="تصريف لشحن الصناديق"></label>
+          <button class="btn pri">تسجيل التصريف</button>
+        </div>
+      </div>
+      <div class="card"><header><h3>الحركات</h3><span class="sub">منذ البدء</span></header>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>التاريخ الفعلي</th><th>تاريخ القيد</th><th>النوع</th><th>البيان / الطرف</th><th>العملة</th><th class="n">داخل</th><th class="n">خارج</th><th class="n">رصيد الجيب</th><th class="n">السعر المجمَّد</th><th>بواسطة</th><th></th></tr></thead>
+          <tbody>
+            <tr><td class="num">17/09</td><td class="num">17/09</td><td><span class="badge b-info">تصريف</span></td><td>تصريف لشحن الصناديق</td><td>$</td><td class="n muted">—</td><td class="n num neg">100.00</td><td class="n num">1,450.00</td><td class="n num">13,000</td><td>المدير العام</td><td><button class="btn sm">عكس</button></td></tr>
+            <tr><td class="num">17/09</td><td class="num">17/09</td><td><span class="badge b-info">تصريف</span></td><td>تصريف لشحن الصناديق</td><td>ل.س</td><td class="n num pos">1,300,000</td><td class="n muted">—</td><td class="n num">1,379,057</td><td class="n num">13,000</td><td>المدير العام</td><td></td></tr>
+            <tr><td class="num">16/09</td><td class="num">16/09</td><td><span class="badge b-neu">كييش من دمشق</span></td><td>الترميم #1 — مرآة تلقائية</td><td>ل.س</td><td class="n num pos">6,300</td><td class="n muted">—</td><td class="n num">79,057</td><td class="n muted">—</td><td>مدير الفرع</td><td></td></tr>
+            <tr><td class="num">02/03</td><td class="num">15/09</td><td><span class="badge b-warn">صرفية</span></td><td>تسجيل شركة — تاريخية</td><td>$</td><td class="n muted">—</td><td class="n num neg">350.00</td><td class="n num">1,550.00</td><td class="n num">12,900</td><td>مدير النظام</td><td><button class="btn sm">عكس</button></td></tr>
+          </tbody></table></div>
+        <div class="state-note empty">لا حركات في هذه الفترة.</div><div class="state-note error">تعذّر تحميل الحركات. <button class="btn sm">إعادة المحاولة</button></div>
+      </div>
+    </div>
+
+    <div data-panel="cf:debt" hidden class="grid" style="gap:12px">
+      <div class="row between"><div class="seg"><button aria-pressed="true">علينا</button><button>لنا</button></div><div class="row"><label class="check"><input type="checkbox" id="db-open" checked> غير مسدّد فقط</label><button class="btn pri">+ دين جديد</button></div></div>
+      <div class="card"><header><h3>ديون علينا</h3></header>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>الطرف</th><th>العملة</th><th class="n">الأصل</th><th class="n">المسدّد</th><th class="n">المتبقّي</th><th>الاستحقاق</th><th>مرتبط بـ</th><th>الحالة</th><th></th></tr></thead>
+          <tbody>
+            <tr><td>معرض الأمين للدراجات</td><td>$</td><td class="n num">1,800</td><td class="n num">1,200</td><td class="n num">600</td><td class="num">01/10</td><td><a href="#">أصل: D19</a></td><td><span class="badge b-warn">قسط قريب</span></td><td><button class="btn sm ok">دفعة</button></td></tr>
+            <tr><td>أبو خالد (قرض)</td><td>ل.س</td><td class="n num">500,000</td><td class="n num">500,000</td><td class="n num">0</td><td class="muted">—</td><td class="muted">—</td><td><span class="badge b-ok">مسدّد</span></td><td></td></tr>
+          </tbody></table></div>
+        <div class="state-note empty">لا ديون مفتوحة.</div><div class="state-note error">تعذّر تحميل الديون. <button class="btn sm">إعادة المحاولة</button></div>
+      </div>
+      <div class="card" style="border-color:var(--ash-accent)"><header><h3>معرض الأمين للدراجات — شراء D19</h3><span class="sub">$ · المتبقّي 600</span></header>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>التاريخ الفعلي</th><th>النوع</th><th class="n">المبلغ</th><th>المصدر</th><th class="n">المتبقّي بعدها</th><th>ملاحظة</th></tr></thead>
+          <tbody>
+            <tr><td class="num">10/08/2025</td><td>فتح (شراء أصل)</td><td class="n num">1,800</td><td class="muted">—</td><td class="n num">1,800</td><td>سعر الشراء</td></tr>
+            <tr><td class="num">10/08/2025</td><td>دفعة</td><td class="n num">600</td><td>خارج النظام</td><td class="n num">1,200</td><td>دفعة أولى من المالك</td></tr>
+            <tr><td class="num">10/05/2026</td><td>دفعة</td><td class="n num">600</td><td>خارج النظام</td><td class="n num">600</td><td>قسط تاريخي</td></tr>
+          </tbody></table></div>
+        <div class="form" style="margin-top:10px">
+          <label class="field">مبلغ الدفعة<input class="input num" id="dp-a" value="600"></label>
+          <label class="field">من<select class="select" id="dp-s"><option>جيب الدولار</option><option>احتياطي الاهتلاك</option><option>خارج النظام (المالك)</option></select></label>
+          <label class="field">التاريخ الفعلي<input class="input" type="date" id="dp-d" value="2026-09-17"></label>
+          <button class="btn ok">تسجيل الدفعة</button><button class="btn">شطب بسبب</button>
+        </div>
+      </div>
+    </div>
+
+    <div data-panel="cf:asset" hidden class="grid" style="gap:12px">
+      <div class="row between"><div class="row"><label class="field">النوع<select class="select" id="as-k"><option>الكل</option><option>آلية</option><option>معدّات</option></select></label><label class="check"><input type="checkbox" id="as-u"> غير مسدّد فقط</label></div><button class="btn pri">+ تسجيل شراء</button></div>
+      <div class="card"><header><h3>سجل الأصول</h3></header>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>الأصل</th><th>المورد</th><th>الشراء</th><th>العملة</th><th class="n">السعر</th><th class="n">المسدّد</th><th class="n">المتبقّي</th><th>الاهتلاك</th><th class="n">الدفترية</th><th class="n">ممول من الاحتياطي</th></tr></thead>
+          <tbody>
+            <tr><td><a href="#">دراجة D19 · 1-1-1-7</a></td><td>معرض الأمين</td><td class="num">10/08/2025</td><td>$</td><td class="n num">1,800</td><td class="n num">1,200</td><td class="n num">600</td><td class="num">14/36</td><td class="n num">1,100</td><td class="n num">200</td></tr>
+            <tr><td><a href="#">دراجة D07 · 1-1-1-3</a></td><td>معرض الأمين</td><td class="num">01/03/2026</td><td>$</td><td class="n num">1,800</td><td class="n num">1,800</td><td class="n num">0</td><td class="num">7/36</td><td class="n num">1,450</td><td class="n num">280</td></tr>
+            <tr><td><a href="#">شاحن سريع</a></td><td>كهربائيات النور</td><td class="num">20/07/2026</td><td>ل.س</td><td class="n num">1,440,000</td><td class="n num">1,440,000</td><td class="n num">0</td><td class="num">3/36</td><td class="n num">1,320,000</td><td class="n num">0</td></tr>
+          </tbody></table></div>
+        <div class="state-note empty">لا أصول مسجّلة. ابدأ بالآليات الحالية بتاريخ شرائها الحقيقي.</div><div class="state-note error">تعذّر تحميل الأصول. <button class="btn sm">إعادة المحاولة</button></div>
+      </div>
+      <div class="card" style="border-color:var(--ash-accent)"><header><h3>تسجيل شراء</h3><div class="steps"><span>التفاصيل</span><span>المدفوع الآن</span><span class="on">التمويل</span><span>تأكيد</span></div></header>
+        <div class="form">
+          <label class="field">الدائن<input class="input" id="aw-p" value="معرض الأمين للدراجات"></label>
+          <label class="field">المبلغ الممول<input class="input num" id="aw-f" value="1,200" disabled></label>
+          <label class="field">موعد القسط القادم<input class="input" type="date" id="aw-d" value="2026-10-01"></label>
+          <label class="field">ملاحظة<input class="input" id="aw-n" value="أقساط شهرية 600$"></label>
+        </div>
+        <p class="caption" style="margin:8px 0 0">التأكيد يعرض 36 شهراً: <b class="num">$50</b> شهرياً (الأخير يأخذ الباقي)، والأول هو شهر الشراء. تعويض الأشهر الفائتة: <b class="num">14</b> شهراً = <b class="num">$700</b> مستحقة للنقل.</p>
+      </div>
+      <div class="card"><header><h3>تفصيل: دراجة D19</h3><a class="link" href="#">سجل الآلية ›</a></header>
+        <div class="kv"><div><b class="num">$1,800</b><span>سعر الشراء · 10/08/2025</span></div><div><b class="num">$600</b><span>المتبقّي (من سجل الديون)</span></div><div><b class="num">$50</b><span>الاهتلاك الشهري</span></div><div><b class="num">$1,100</b><span>القيمة الدفترية (14/36)</span></div></div>
+        <div style="margin-top:10px" class="sched" aria-label="جدول 36 شهراً">
+          <i class="done"></i><i class="done"></i><i class="done"></i><i class="done"></i><i class="part"></i><i class="due"></i><i class="due"></i><i class="due"></i><i class="due"></i><i class="due"></i><i class="due"></i><i class="due"></i>
+          <i class="due"></i><i class="due"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+        </div>
+        <div class="legend" style="margin-top:6px"><span><i style="background:var(--ash-success-solid)"></i>منقول للاحتياطي</span><span><i style="background:linear-gradient(90deg,var(--ash-success-solid) 50%,var(--ash-surface-sunken) 50%)"></i>جزئي</span><span><i style="background:var(--ash-warning-line)"></i>مستحق</span><span><i style="background:var(--ash-surface-sunken)"></i>قادم</span></div>
+      </div>
+    </div>
+
+    <div data-panel="cf:dep" hidden class="grid" style="gap:12px">
+      <div class="card" style="border-color:var(--ash-warning-line)"><header><h3>الاهتلاك المستحق حتى أيلول 2026</h3><span class="badge b-warn">مستحق</span></header>
+        <div class="grid g2">
+          <div class="kv"><div><b class="num">$ 360</b><span>مستحق (منها تعويض 7 أشهر)</span></div><div><b class="num">$ 1,450</b><span>رصيد جيب الدولار</span></div></div>
+          <div class="kv"><div><b class="num">0 ل.س</b><span>مستحق بالسوري</span></div><div><b class="num">79,057 ل.س</b><span>رصيد جيب السوري</span></div></div>
+        </div>
+        <div class="row" style="margin-top:10px"><button class="btn pri">نقل الاهتلاك: $ 360</button><span class="sub">المبلغ يحسبه النظام = الأقل من المستحق والمتاح. بعد النقل يبقى <b class="num">$ 0</b> مستحقاً.</span></div>
+        <div class="callout" style="margin-top:8px">لو كان رصيد الجيب $200 فقط: يُنقل $200 ويبقى $160 مستحقاً ظاهراً هنا وفي الداشبورد.</div>
+        <div class="state-note empty">لا اهتلاك مستحق — كل الأشهر منقولة.</div><div class="state-note error">تعذّر حساب المستحق. <button class="btn sm">إعادة المحاولة</button></div>
+      </div>
+      <div class="card"><header><h3>السجل</h3><button class="btn">إعادة إلى صندوق الشركة…</button></header>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>التاريخ</th><th>النوع</th><th>العملة</th><th class="n">المبلغ</th><th>التوزيع</th><th>السبب</th></tr></thead>
+          <tbody>
+            <tr><td class="num">01/09</td><td>نقل</td><td>$</td><td class="n num">100</td><td>D19 أيلول $50 · D07 أيلول $50</td><td class="muted">—</td></tr>
+            <tr><td class="num">15/08</td><td>نقل</td><td>$</td><td class="n num">380</td><td>أقدم الأشهر أولاً (8 أشهر)</td><td class="muted">—</td></tr>
+          </tbody></table></div>
+        <div class="state-note empty">لا نقل بعد.</div><div class="state-note error">تعذّر التحميل. <button class="btn sm">إعادة المحاولة</button></div>
+      </div>
+    </div>
+
+    <div data-panel="cf:rec" hidden>
+      <div class="card"><header><h3>صرفيات الشركة الثابتة</h3><button class="btn pri">+ صرفية ثابتة</button></header>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>البيان</th><th>العملة</th><th class="n">المبلغ</th><th>التكرار</th><th>المصدر</th><th>القادمة</th><th></th></tr></thead>
+          <tbody><tr><td>اشتراك برنامج المحاسبة</td><td>$</td><td class="n num">15.00</td><td>أول كل شهر</td><td>جيب الدولار</td><td class="num">1 تشرين الأول</td><td><button class="btn sm">إيقاف بسبب</button></td></tr></tbody></table></div>
+        <div class="state-note empty">لا صرفيات ثابتة للشركة.</div><div class="state-note error">تعذّر التحميل. <button class="btn sm">إعادة المحاولة</button></div>
+      </div>
+    </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ RESTORATION ═══════════════ -->
+<section data-page="rest" hidden>
+  <div class="apphead"><h2>الخزينة — الترميم</h2><span class="sub">اليوم <span class="num">17/09</span></span></div>
+  <div class="page">
+    <div class="card"><header><h3>الترميم — كما هو اليوم</h3><span class="sub">الأهداف: كاش 50,000 · محفظة 10,000</span></header>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>الصندوق</th><th class="n">الوضع</th><th class="n">الهدف</th><th class="n">الفرق</th><th>الحركة</th></tr></thead>
+        <tbody>
+          <tr><td>كاش المكتب</td><td class="n num">43,700</td><td class="n num">50,000</td><td class="n num neg">−6,300</td><td><span class="badge b-info">شحن 6,300 من صندوق الشركة</span></td></tr>
+          <tr><td>محفظة المكتب</td><td class="n num">16,300</td><td class="n num">10,000</td><td class="n num pos">+6,300</td><td><span class="badge b-neu">كييش 6,300 إلى صندوق الشركة</span></td></tr>
+        </tbody></table></div>
+      <div class="row" style="margin-top:10px"><button class="btn pri">تنفيذ الترميم</button></div>
+      <div class="state-note empty">لا فرق — الصناديق على الهدف.</div><div class="state-note error">تعذّر حساب الترميم. <button class="btn sm">إعادة المحاولة</button></div>
+    </div>
+    <div class="gm-only grid g2">
+      <div class="card"><header><h3>صندوق الشركة المتاح للشحن</h3><span class="badge b-ok">كافٍ</span></header>
+        <div class="lead-fig"><span class="num">79,057</span><span class="cur">ل.س</span></div>
+        <p class="sub" style="margin:4px 0 0">كل كييش وشحن هنا يُسجَّل تلقائياً في دفتر الشركة في العملية نفسها.</p>
+        <div class="callout bad" style="margin-top:8px">مثال عند النقص: «الشحن سيجعل جيب السوري في صندوق الشركة <b class="num">−12,400</b> ل.س. مسموح بقرار المالك — أودِع أو صرّف دولاراً لتسويته.»</div>
+      </div>
+      <div class="card"><header><h3>اهتلاك هذا الشهر</h3><span class="badge b-warn">مستحق</span></header>
+        <div class="kv"><div><b class="num">$ 360</b><span>مستحق (منها تعويض)</span></div><div><b class="num">$ 1,450</b><span>متاح في جيب الدولار</span></div></div>
+        <div class="row" style="margin-top:10px"><button class="btn pri">نقل الاهتلاك: $ 360</button><a class="link" href="#">التفاصيل ›</a></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ BIKE CARDS ═══════════════ -->
+<section data-page="bikes" hidden>
+  <div class="apphead"><h2>الأسطول</h2><div class="seg"><button aria-pressed="true">الكل</button><button>في نوبة</button><button>متاحة</button></div></div>
+  <div class="page">
+    <div class="grid g4">
+      <div class="card bike"><div class="row between"><span class="gno">D19</span><span class="badge b-ok">في نوبة · ثائر</span></div><span class="sub">1-1-1-7 · كهربائية</span><div class="batt"><span class="badge b-neu">بطارية 17: 100%</span><span class="badge b-neu">بطارية 7: 95%</span></div><div class="fin gm-only"><span>دفترية <b class="num">$1,100</b></span><span>متبقٍّ <b class="num">$600</b></span></div><div class="row between"><select class="select" id="bk1"><option>جاهزة</option></select><a class="link" href="#">السجل الكامل ›</a></div></div>
+      <div class="card bike"><div class="row between"><span class="gno">D07</span><span class="badge b-neu">متاحة</span></div><span class="sub">1-1-1-3 · كهربائية</span><div class="batt"><span class="badge b-neu">بطارية 3: 64%</span><span class="badge b-neu">بطارية 4: 70%</span></div><div class="fin gm-only"><span>دفترية <b class="num">$1,450</b></span><span class="pos">مسدّدة</span></div><div class="row between"><select class="select" id="bk2"><option>جاهزة</option></select><a class="link" href="#">السجل الكامل ›</a></div></div>
+      <div class="card bike"><div class="row between"><span class="gno">D02</span><span class="badge b-warn">صيانة</span></div><span class="sub">1-1-1-1 · كهربائية</span><div class="batt"><span class="badge b-neu">بطارية 1: —</span></div><div class="fin gm-only"><span>دفترية <b class="num">$900</b></span><span>متبقٍّ <b class="num">$250</b></span></div><div class="row between"><select class="select" id="bk3"><option>صيانة</option></select><a class="link" href="#">السجل الكامل ›</a></div></div>
+      <div class="card bike"><div class="row between"><span class="gno">D11</span><span class="badge b-neu">متاحة</span></div><span class="sub">1-1-1-9 · كهربائية</span><div class="batt"><span class="badge b-neu">بطارية 9: 88%</span></div><div class="fin gm-only"><span class="muted">لا أصل مسجّل</span><a class="link" href="#">تسجيل الشراء ›</a></div><div class="row between"><select class="select" id="bk4"><option>جاهزة</option></select><a class="link" href="#">السجل الكامل ›</a></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ VEHICLE HISTORY ═══════════════ -->
+<section data-page="veh" hidden>
+  <div class="apphead"><div class="grid" style="gap:0"><a class="crumb" href="#">‹ الأسطول</a><h2>آلية 1-1-1-7 · أرضي D19</h2></div><div class="row"><span class="badge b-ok">جاهزة</span><span class="badge b-neu">مملوكة</span></div></div>
+  <div class="page">
+    <div class="pills"><button class="pill on">الكل منذ البدء</button><button class="pill">هذا الشهر</button><button class="pill">الشهر الماضي</button><button class="pill">مخصّص ▾</button></div>
+    <div class="grid g6">
+      <a class="stat" href="#"><span class="k">نوبات <span class="go">›</span></span><span class="v num">42</span></a>
+      <div class="stat"><span class="k">كم</span><span class="v num">5,120</span><span class="s">غير مسجّل: 30</span></div>
+      <div class="stat"><span class="k">طلبات</span><span class="v num">812</span></div>
+      <div class="stat"><span class="k">رسوم</span><span class="v num">1,077,500</span></div>
+      <div class="stat gm-only"><span class="k">حصة الشركة</span><span class="v num">431,000</span></div>
+      <div class="stat gm-only good"><span class="k">مساهمة بعد الكلف</span><span class="v num">335,000</span></div>
+    </div>
+    <div class="gm-only card"><header><h3>الشراء والاهتلاك</h3><a class="link" href="#">تفصيل الأصل ›</a></header>
+      <div class="kv"><div><b class="num">$1,800</b><span>السعر · 10/08/2025</span></div><div><b class="num">$1,200</b><span>مسدّد</span></div><div><b class="num">$600</b><span>متبقٍّ</span></div><div><b class="num">$50</b><span>شهرياً</span></div><div><b class="num">14/36</b><span>أشهر مستحقة</span></div><div><b class="num">$1,100</b><span>القيمة الدفترية</span></div></div>
+    </div>
+    <div class="tabs" data-tabs="veh" role="tablist"><button role="tab" data-t="sh" aria-selected="true">النوبات</button><button role="tab" data-t="drv">السائقون</button><button role="tab" data-t="cost">الكلف</button><button role="tab" data-t="life">سجل الحياة</button><button role="tab" data-t="bat">البطاريات</button><button role="tab" data-t="doc">الوثائق</button></div>
+    <div data-panel="veh:sh">
+      <div class="card"><div class="tbl-wrap"><table>
+        <thead><tr><th>التاريخ</th><th>السائق</th><th>النمط</th><th class="n">المدة</th><th class="n">العداد</th><th class="n">كم</th><th class="n">فجوة قبلها</th><th class="n">طلبات</th><th class="n">رسوم</th><th class="n gm-only">حصة</th><th>بطارية</th><th></th></tr></thead>
+        <tbody>
+          <tr><td class="num">17/09</td><td>ثائر</td><td><span class="badge b-neu">جارية</span></td><td class="n muted">—</td><td class="n num">9,524 ←</td><td class="n muted">—</td><td class="n num">0</td><td class="n muted">—</td><td class="n muted">—</td><td class="n gm-only muted">—</td><td class="num">95% ←</td><td><a href="#">عرض</a></td></tr>
+          <tr><td class="num">17/09</td><td>مجد</td><td><span class="badge b-info">صباحية</span></td><td class="n num">7س 50د</td><td class="n num">9,396 ← 9,524</td><td class="n num">128</td><td class="n num">0</td><td class="n num">31</td><td class="n num">41,000</td><td class="n num gm-only">16,400</td><td class="num">100% ← 38%</td><td><a href="#">عرض</a></td></tr>
+          <tr class="hl"><td class="num">16/09</td><td>ثائر</td><td><span class="badge b-dbl">دبل</span></td><td class="n num">11س 20د</td><td class="n num">9,297 ← 9,366</td><td class="n num">69</td><td class="n num">30 <span class="badge b-warn">غير مسجّل</span></td><td class="n num">44</td><td class="n num">58,500</td><td class="n num gm-only">23,400</td><td class="num">100% ← 22%</td><td><a href="#">عرض</a></td></tr>
+        </tbody></table></div>
+        <div class="state-note empty">لم تعمل هذه الآلية في الفترة المختارة.</div><div class="state-note error">تعذّر تحميل النوبات. <button class="btn sm">إعادة المحاولة</button></div>
+      </div>
+    </div>
+    <div data-panel="veh:cost" hidden>
+      <div class="card"><header><h3>الكلف</h3><span class="sub">المرحّلة فقط تُجمع</span></header>
+        <div class="tbl-wrap"><table><thead><tr><th>التاريخ</th><th>المصدر</th><th>البيان</th><th class="n">المبلغ</th><th>يُجمع؟</th></tr></thead>
+        <tbody>
+          <tr><td class="num">12/09</td><td>صرفية الفرع</td><td>تبديل إطار</td><td class="n num">35,000 ل.س</td><td><span class="badge b-ok">نعم</span></td></tr>
+          <tr><td class="num">01/09</td><td>صرفية الشركة</td><td>تأمين سنوي</td><td class="n num">$40</td><td><span class="badge b-ok">نعم</span></td></tr>
+          <tr><td class="num">28/08</td><td>سجل الحياة</td><td>تنظيف — كلفة مذكورة فقط</td><td class="n num">5,000 ل.س</td><td><span class="badge b-neu">لا (غير مرحّلة)</span></td></tr>
+        </tbody></table></div>
+      </div>
+    </div>
+    <div data-panel="veh:drv" hidden><div class="card"><p class="sub" style="margin:0">ثائر قدورة: 18 نوبة · مجد حداد: 14 · نذير العلي: 10 — مع آخر نوبة لكل منهم.</p></div></div>
+    <div data-panel="veh:life" hidden><div class="card"><p class="sub" style="margin:0">خط زمني لأحداث الحالة والصيانة، مع نموذج «إضافة حدث» المنقول من شاشة الأسطول.</p></div></div>
+    <div data-panel="veh:bat" hidden><div class="card"><p class="sub" style="margin:0">قراءات البداية والنهاية لكل بطارية، والتبديلات أثناء النوبات.</p></div></div>
+    <div data-panel="veh:doc" hidden><div class="card"><p class="sub" style="margin:0">الترخيص والتأمين مع تواريخ الانتهاء.</p></div></div>
+  </div>
+</section>
+
+<!-- ═══════════════ APPROVAL ═══════════════ -->
+<section data-page="appr" hidden>
+  <div class="apphead"><h2>اعتماد الإغلاق</h2><span class="sub">التغيير الوحيد: شارة النمط مع هدفه</span></div>
+  <div class="page">
+    <div class="card"><header><h3>ثائر قدورة · D19 · النوبة 1</h3><span class="badge b-dbl">دبل · الهدف 12س</span></header>
+      <div class="kv"><div><b class="num">09:02 ← 20:22</b><span>الفتح ← الإرسال</span></div><div><b class="num">11س 20د</b><span>المدة · نقص 0س 40د</span></div><div><b class="num">44</b><span>طلبات</span></div></div>
+    </div>
+    <div class="grid g3">
+      <div class="card"><span class="badge b-info">صباحية · 8س</span><p class="sub" style="margin:6px 0 0">بدأت قبل 15:00 وأقل من 10 ساعات.</p></div>
+      <div class="card"><span class="badge b-neu">مسائية · 8س</span><p class="sub" style="margin:6px 0 0">بدأت من 15:00 (أو بين منتصف الليل و04:00) وأقل من 10 ساعات.</p></div>
+      <div class="card"><span class="badge b-dbl">دبل · 12س</span><p class="sub" style="margin:6px 0 0">كل نوبة مغلقة مدتها 10 ساعات فأكثر.</p></div>
+    </div>
+  </div>
+</section>
+
+  </div>
+ </div>
+</div>
+
+<section class="notes" id="notes" aria-live="polite"></section>
+</main>
+</div>
+
+<script>
+(function(){
+  var frame=document.getElementById('frame');
+  var NOTES={
+    filter:['مكوّن واحد لكل الشاشات. الافتراضي «الكل منذ البدء» (من تاريخ الإطلاق).','الأسبوع يبدأ الأحد، و«اليوم» يبدأ 04:00 بتوقيت دمشق ويأتي من الخادم.','الاختيار يُحفظ في الرابط (يمكن مشاركته) وفي المتصفح لكل مستخدم.'],
+    dash:['«الآن» لا يتأثر بالفلتر ويتحدّث كل 30 ثانية؛ كل بطاقة عليها › تفتح الشاشة الهدف مفلترة.','صافي الربح: الفرع والشركة منفصلان مع إجمالي؛ كلف الآليات صارت تُحسب؛ الاهتلاك يُعرض ولا يُطرح.','جرّب «مدير فرع» في الأعلى: تختفي أرقام الربح وصندوق الشركة والأعمدة المالية للشركة.','كل قسم يُحمَّل ويفشل وحده (جرّب حالات تحميل/فارغ/خطأ).'],
+    done:['تُفتح من الداشبورد مفلترة (الفترة، السائق، الآلية، النمط، دون الهدف، لم تُغلق).','النمط: دبل = 10 ساعات فأكثر (هدف 12)؛ غير ذلك صباحية أو مسائية (هدف 8).','الفترة حتى 31 يوماً، أو 400 يوم مع سائق أو آلية.'],
+    live:['فلاتر جديدة: السائق، الآلية، الحالة، الفترة.','شريط تقدّم مقابل هدف الفترة؛ الأحمر عند التجاوز.','الجارية لا تُسمّى دبل قبل إغلاقها.'],
+    exp:['ثلاثة تبويبات: السجل، المستحقة، الثابتة.','المستحقة تُحسب عند فتح الشاشة (لا جدولة)، وكل دفع قرار بشري بزر.','المبلغ قابل للتعديل عند الدفع بسبب مكتوب؛ التخطي يحتاج سبباً.'],
+    cf:['قسم جديد للمدير العام ومدير النظام فقط، بجيبين: سوري ودولار.','التصريف بالمبلغين الفعليين، والسعر يُحفظ مع العملية ولا يتغيّر.','الديون بالاتجاهين؛ أقساط الأصول تعيش في سجل الديون.','الاهتلاك: الزر ينقل الأقل من المستحق والمتاح، والباقي يبقى ظاهراً. الشهر الأول هو شهر الشراء.','جرّب التبويبات: نظرة عامة، الحركات، الديون، الأصول، الاهتلاك، الثابتة.'],
+    rest:['بطاقة الترميم كما هي لمدير الفرع.','للمدير العام: رصيد صندوق الشركة المتاح للشحن، مع تحذير إن صار سالباً (مسموح بقرار المالك).','زر نقل الاهتلاك يظهر هنا أيضاً.'],
+    bikes:['سطر مالي على البطاقة للمدير العام فقط: القيمة الدفترية والمتبقّي.','«السجل الكامل» يفتح صفحة الآلية؛ آلية بلا أصل تعرض «تسجيل الشراء».'],
+    veh:['صفحة جديدة لكل آلية مع فلتر الوقت.','الكيلومترات لكل نوبة، والفجوات غير المسجّلة بين نوبتين مظلّلة.','الكلف: المرحّلة (فرع + شركة) تُجمع؛ ملاحظات سجل الحياة تُعرض ولا تُجمع.','كتلة الشراء والاهتلاك للمدير العام فقط.'],
+    appr:['التغيير الوحيد: شارة النمط مع هدفه.','القاعدة مكتوبة بجانب كل شارة.']
+  };
+  function pressGroup(id,val,attr){
+    var g=document.getElementById(id);
+    g.querySelectorAll('button').forEach(function(b){b.setAttribute('aria-pressed',String(b.dataset.v===val))});
+    frame.dataset[attr]=val;
+  }
+  function showPage(p){
+    document.querySelectorAll('#pages button').forEach(function(b){b.setAttribute('aria-pressed',String(b.dataset.p===p))});
+    document.querySelectorAll('section[data-page]').forEach(function(s){s.hidden=s.dataset.page!==p});
+    document.querySelectorAll('.rail a').forEach(function(a){a.classList.toggle('on',a.dataset.nav===p||(p==='veh'&&a.dataset.nav==='bikes')||(p==='appr'&&a.dataset.nav==='done')||(p==='filter'&&a.dataset.nav==='dash'))});
+    var n=document.getElementById('notes');
+    n.innerHTML='<h4>ملاحظات التصميم</h4><ul>'+(NOTES[p]||[]).map(function(t){return '<li>'+t+'</li>'}).join('')+'</ul>';
+    try{localStorage.setItem('ash-mock-page',p)}catch(e){}
+  }
+  document.getElementById('pages').addEventListener('click',function(e){var b=e.target.closest('button');if(b)showPage(b.dataset.p)});
+  document.querySelectorAll('.rail a').forEach(function(a){a.addEventListener('click',function(e){e.preventDefault();showPage(a.dataset.nav)})});
+  document.getElementById('w').addEventListener('click',function(e){var b=e.target.closest('button');if(b)pressGroup('w',b.dataset.v,'w')});
+  document.getElementById('st').addEventListener('click',function(e){var b=e.target.closest('button');if(b)pressGroup('st',b.dataset.v,'state')});
+  document.getElementById('role').addEventListener('click',function(e){var b=e.target.closest('button');if(b)pressGroup('role',b.dataset.v,'role')});
+  document.querySelectorAll('[data-tabs]').forEach(function(tl){
+    var name=tl.dataset.tabs;
+    tl.addEventListener('click',function(e){
+      var b=e.target.closest('button[data-t]');if(!b)return;
+      tl.querySelectorAll('button[data-t]').forEach(function(x){x.setAttribute('aria-selected',String(x===b))});
+      document.querySelectorAll('[data-panel^="'+name+':"]').forEach(function(p){p.hidden=p.dataset.panel!==name+':'+b.dataset.t});
+    });
+  });
+  var start='dash';
+  try{start=localStorage.getItem('ash-mock-page')||'dash'}catch(e){}
+  showPage(start);
+})();
+</script>

@@ -88,6 +88,49 @@ export const sha256Of = (bytes: Uint8Array): string => createHash('sha256').upda
 /** `ab/cd/abcdef…` — fans out across directories so one folder never holds a million files. */
 export const storageKeyFor = (sha256: string): string => `${sha256.slice(0, 2)}/${sha256.slice(2, 4)}/${sha256}`
 
+/**
+ * Store an expense receipt without attaching it to a shift slot.
+ *
+ * Receipts share the immutable, content-addressed `media` table and blob store with evidence, but
+ * they are deliberately not shift evidence: no fake shift/slot is created merely to obtain an id.
+ */
+export async function uploadReceipt(
+  deps: Deps,
+  input: {
+    branchId: string
+    bytes: Uint8Array
+    clientTakenAtMs: number | null
+    uploadedBy: string
+  },
+): Promise<{ media: MediaRecord; deduped: boolean }> {
+  if (input.bytes.length === 0) throw new ServiceError(422, 'empty_upload')
+  if (input.bytes.length > MAX_UPLOAD_BYTES) {
+    throw new ServiceError(413, 'upload_too_large', { bytes: input.bytes.length, max: MAX_UPLOAD_BYTES })
+  }
+  const mimeType = sniffImageType(input.bytes)
+  if (!mimeType) throw new ServiceError(415, 'not_an_image')
+
+  const sha256 = sha256Of(input.bytes)
+  const storageKey = storageKeyFor(sha256)
+  if (!(await deps.blobs.exists(storageKey))) await deps.blobs.put(storageKey, input.bytes, mimeType)
+
+  const existing = await deps.media.findBySha(input.branchId, sha256)
+  const media = await deps.media.put(
+    existing ?? {
+      id: deps.ids.uuid(),
+      branchId: input.branchId,
+      sha256,
+      byteSize: input.bytes.length,
+      mimeType,
+      storageKey,
+      clientTakenAtMs: input.clientTakenAtMs,
+      receivedAtMs: deps.clock.nowMs(),
+      uploadedBy: input.uploadedBy,
+    },
+  )
+  return { media, deduped: existing !== null }
+}
+
 export interface UploadInput {
   shiftId: string
   package: EvidencePackage

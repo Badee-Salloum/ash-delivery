@@ -19,8 +19,11 @@ const syp = (whole: number): Minor => minor(BigInt(whole) * 100n)
 
 const box = (over: Partial<FundPosition> = {}): FundPosition => ({
   fundCode: 'office_cash',
-  counted: syp(3_600_000),
+  officeBalance: syp(3_600_000),
   receivables: syp(400_000),
+  // His book predates السلف, so his rows carry none. Every existing assertion below therefore
+  // still measures exactly what it measured before decision 17.
+  advances: ZERO,
   capitalTarget: syp(4_000_000),
   ...over,
 })
@@ -29,7 +32,7 @@ describe('the owner`s own book, encoded', () => {
   /** كاش المكتب 3,600,000 + ذمم 400,000 = 4,000,000 — his `=SUM(I38:J48)-4000000` is zero. */
   it('a day already restored: cash lands exactly on capital', () => {
     const plan = planRestoration([box()])
-    expect(plan.legs[0]!.counted).toBe(syp(3_600_000))
+    expect(plan.legs[0]!.officeBalance).toBe(syp(3_600_000))
     expect(plan.legs[0]!.receivables).toBe(syp(400_000))
     expect(plan.legs[0]!.position).toBe(syp(4_000_000))
     expect(plan.legs[0]!.delta).toBe(ZERO)
@@ -42,7 +45,7 @@ describe('the owner`s own book, encoded', () => {
   /** محفظة المكتب 970,000 + ذمم 30,000 = 1,000,000 — his `=SUM(G38:H49)-1000000` is zero. */
   it('and so does the wallet', () => {
     const plan = planRestoration([
-      box({ fundCode: 'office_wallet', counted: syp(970_000), receivables: syp(30_000), capitalTarget: syp(1_000_000) }),
+      box({ fundCode: 'office_wallet', officeBalance: syp(970_000), receivables: syp(30_000), capitalTarget: syp(1_000_000) }),
     ])
     expect(plan.legs[0]!.delta).toBe(ZERO)
     expect(plan.feasible).toBe(true)
@@ -52,7 +55,7 @@ describe('the owner`s own book, encoded', () => {
   it('nets to nothing across both boxes on a restored day', () => {
     const plan = planRestoration([
       box(),
-      box({ fundCode: 'office_wallet', counted: syp(970_000), receivables: syp(30_000), capitalTarget: syp(1_000_000) }),
+      box({ fundCode: 'office_wallet', officeBalance: syp(970_000), receivables: syp(30_000), capitalTarget: syp(1_000_000) }),
     ])
     expect(plan.netToCompany).toBe(ZERO)
     expect(plan.feasible).toBe(true)
@@ -61,7 +64,7 @@ describe('the owner`s own book, encoded', () => {
 
 describe('«كييش» — the day made a profit', () => {
   it('sweeps the surplus to صندوق الشركة', () => {
-    const plan = planRestoration([box({ counted: syp(4_300_000) })]) // +400,000 ذمم = 4,700,000
+    const plan = planRestoration([box({ officeBalance: syp(4_300_000) })]) // +400,000 ذمم = 4,700,000
     const leg = plan.legs[0]!
     expect(leg.direction).toBe('to_company')
     expect(leg.amount).toBe(syp(700_000))
@@ -79,19 +82,19 @@ describe('«كييش» — the day made a profit', () => {
    * opens on it. That is exactly why the owner's formula adds الذمم in the first place.
    */
   it('leaves the box below target when the surplus is partly out on ذمم', () => {
-    const plan = planRestoration([box({ counted: syp(4_600_000), receivables: syp(400_000) })])
+    const plan = planRestoration([box({ officeBalance: syp(4_600_000), receivables: syp(400_000) })])
     const leg = plan.legs[0]!
-    expect(leg.position).toBe(syp(5_000_000)) // 4,600,000 counted + 400,000 owed
+    expect(leg.position).toBe(syp(5_000_000)) // 4,600,000 in office + 400,000 owed
     expect(leg.amount).toBe(syp(1_000_000))
-    // 4,600,000 counted − 1,000,000 swept leaves 3,600,000 in the drawer against a 4,000,000
+    // 4,600,000 office balance − 1,000,000 swept leaves 3,600,000 against a 4,000,000
     // target. Correct: the missing 400,000 is in a driver's pocket and returns tomorrow.
     expect(sub(syp(4_600_000), leg.amount)).toBe(syp(3_600_000))
   })
 
   /** You cannot hand over cash you are not holding. */
-  it('refuses a sweep larger than what was physically counted', () => {
-    // The whole surplus is ذمم: 3,900,000 in the drawer, 500,000 owed, target 4,000,000.
-    const plan = planRestoration([box({ counted: syp(100_000), receivables: syp(4_500_000) })])
+  it('refuses a sweep larger than the live office balance', () => {
+    // The whole surplus is ذمم: 100,000 in the office fund, 4,500,000 owed, target 4,000,000.
+    const plan = planRestoration([box({ officeBalance: syp(100_000), receivables: syp(4_500_000) })])
     expect(plan.legs[0]!.refusals).toContain('sweep_exceeds_counted')
     expect(plan.feasible).toBe(false)
     expect(postingsForRestoration(plan, '2026-08-12')).toHaveLength(0)
@@ -100,7 +103,7 @@ describe('«كييش» — the day made a profit', () => {
 
 describe('«شحن من الصندوق» — the day came up short', () => {
   it('restores the capital from صندوق الشركة', () => {
-    const plan = planRestoration([box({ counted: syp(3_000_000), receivables: ZERO })])
+    const plan = planRestoration([box({ officeBalance: syp(3_000_000), receivables: ZERO })])
     const leg = plan.legs[0]!
     expect(leg.direction).toBe('from_company')
     expect(leg.amount).toBe(syp(1_000_000))
@@ -113,7 +116,7 @@ describe('«شحن من الصندوق» — the day came up short', () => {
 
   /** A shortfall is never refused for lack of cash — the company fund is the one paying. */
   it('does not check the drawer when money is coming IN', () => {
-    const plan = planRestoration([box({ counted: ZERO, receivables: ZERO })])
+    const plan = planRestoration([box({ officeBalance: ZERO, receivables: ZERO })])
     expect(plan.legs[0]!.feasible).toBe(true)
     expect(plan.legs[0]!.amount).toBe(syp(4_000_000))
   })
@@ -126,7 +129,7 @@ describe('the guards', () => {
    */
   it('refuses a box with no رأس مال configured rather than sweeping everything', () => {
     const plan = planRestoration([box({ capitalTarget: null })])
-    expect(plan.legs[0]!.counted).toBe(syp(3_600_000))
+    expect(plan.legs[0]!.officeBalance).toBe(syp(3_600_000))
     expect(plan.legs[0]!.receivables).toBe(syp(400_000))
     expect(plan.legs[0]!.refusals).toContain('no_capital_target')
     expect(plan.feasible).toBe(false)
@@ -135,8 +138,8 @@ describe('the guards', () => {
 
   it('keys each leg by date AND box, so one day cannot restore the same box twice', () => {
     const plan = planRestoration([
-      box({ counted: syp(4_300_000) }),
-      box({ fundCode: 'office_wallet', counted: syp(1_200_000), receivables: ZERO, capitalTarget: syp(1_000_000) }),
+      box({ officeBalance: syp(4_300_000) }),
+      box({ fundCode: 'office_wallet', officeBalance: syp(1_200_000), receivables: ZERO, capitalTarget: syp(1_000_000) }),
     ])
     const keys = postingsForRestoration(plan, '2026-08-12').map((p) => p.occurrenceKey)
     expect(keys).toEqual(['2026-08-12:office_cash', '2026-08-12:office_wallet'])
@@ -144,8 +147,8 @@ describe('the guards', () => {
 
   it('every posting balances', () => {
     const plan = planRestoration([
-      box({ counted: syp(4_300_000) }),
-      box({ fundCode: 'office_wallet', counted: syp(500_000), receivables: ZERO, capitalTarget: syp(1_000_000) }),
+      box({ officeBalance: syp(4_300_000) }),
+      box({ fundCode: 'office_wallet', officeBalance: syp(500_000), receivables: ZERO, capitalTarget: syp(1_000_000) }),
     ])
     for (const p of postingsForRestoration(plan, '2026-08-12')) expect(debitsOf(p)).toBe(creditsOf(p))
   })
@@ -154,7 +157,7 @@ describe('the guards', () => {
   it('keeps a good leg usable when the other is refused', () => {
     const plan = planRestoration([
       box({ capitalTarget: null }),
-      box({ fundCode: 'office_wallet', counted: syp(1_200_000), receivables: ZERO, capitalTarget: syp(1_000_000) }),
+      box({ fundCode: 'office_wallet', officeBalance: syp(1_200_000), receivables: ZERO, capitalTarget: syp(1_000_000) }),
     ])
     expect(plan.feasible).toBe(false)
     expect(plan.netToCompany).toBe(syp(200_000)) // only the wallet leg counts

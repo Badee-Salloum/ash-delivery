@@ -1,5 +1,1491 @@
 # PROGRESS
 
+## 2026-09-18 — driver self-registration complete locally
+
+**Done.** The logged-out driver app now switches between login and a bilingual account form for Arabic full
+name, operating branch, normalized username, password and client-only confirmation. It loads only public
+operating branches (never HQ), validates before sending, stays unavailable offline, and after a successful
+creation refreshes `/me` into the ordinary assignment/vehicle flow.
+
+`GET /auth/register/branches` and strict `POST /auth/register` create only an active `driver`. User, linked
+driver, eight-hour session and password-free anonymous audit facts commit atomically; the same provisioner now
+fixes the admin driver-account partial-write path. `DRIVER_SELF_REGISTRATION_ENABLED` defaults on and provides
+the emergency stop.
+
+Migration `0078_driver_self_registration.sql` adds the hashed-address attempt register and redacts credential
+columns from generic user audits. PostgreSQL serializes each address with an advisory transaction lock: exactly
+three schema-valid attempts fit in a rolling hour, denied attempts do not extend it, IPv6 is grouped to `/64`,
+and records older than 24 hours are removed opportunistically. Forwarded addresses are trusted only in Vercel
+or from a private Caddy connection.
+
+**Verified.** `pnpm check` passes every static gate and 3,190 default tests; the 18 database skips are the
+expected `DATABASE_URL`-gated suites. The focused disposable-PostgreSQL suite passes 5/5, proving all-or-nothing
+provisioning, password-free anonymous audit, rolling-window expiry and concurrent claims across repository
+instances. The driver production build also passes. Production deployment and applying migration 0078 remain
+separate and require explicit production approval.
+
+**Two-minute demo.** Open the driver app logged out, press “Create driver account”, choose an operating branch,
+submit the five visible fields, and watch the existing vehicle/assignment screen open without a second login.
+Use an existing username to see the localized conflict, or set `DRIVER_SELF_REGISTRATION_ENABLED=false` to
+exercise the kill switch.
+
+## 2026-09-18 — finance and fleet redesign complete locally (P3/P4/P6, C2–C6)
+
+**Done.** The approved dashboard is now eight independently loaded sections with one shared business-date
+range, filtered drill-down links, fleet performance and branch/company/combined profit. «صندوق الشركة» is
+an HQ-owned USD/SYP ledger with guarded deposits, withdrawals, income, expenses, exchanges, reversals and
+per-branch cutover. Every post-cutover `company_box` move receives its separate HQ clearing mirror under the
+branch→HQ lock order. The branch and company books never share a journal.
+
+Company debts now run both directions with immutable payments and write-offs. Fixed assets create an exact
+36-period straight-line schedule, may link one-to-one with vehicles and may create one payable for an unpaid
+purchase balance. Depreciation funding is same-currency, FIFO and limited to available cash; reserve use and
+written releases do not reopen funded periods. Vehicle history combines shifts, orders, kilometres, life-log
+events, expenses, and — only for a company-fund manager — asset, debt, book-value and depreciation detail.
+
+Both branch and company recurring expenses are reminders computed on read. Pay, skip, edit-at-payment and
+deactivation remain explicit human decisions; no cron or read posts money. Non-shift receipt media is immutable
+and content-addressed. The company workspace exposes the complete flow, while the dashboard digest leads with
+combined profit and keeps the branch/company split, both currency pockets, reserve, book value and due
+depreciation visible.
+
+**Correctness gates.** Migrations 0064–0078 are forward-only and still undeployed. PostgreSQL guards bind every
+HQ journal to exactly one typed command, enforce actor/RBAC and currency/rate identity, prevent overspending,
+protect linked vehicles, and make command facts immutable. The real-PostgreSQL finance and recurrence suites
+pass 33/33; focused API suites pass 104/104 and focused admin suites pass 27/27. Final `pnpm check` passes every
+static gate and 3,168 default tests (domain 821, contracts 34, client 314, adapters 169, admin 328, driver 341,
+database 161 and API 1,000); the 17 default database skips are the expected `DATABASE_URL`-gated cases.
+
+**Next (owner action, not an engineering gap).** Give separate written production approval, take the documented
+backup/pre-flight, deploy API and admin together, apply 0064–0078, then perform each branch cutover and physical
+SYP/USD opening count through the UI/API. Until then, production correctly remains on the old schema and flows.
+
+**Risks kept visible.** The production cutover has not been rehearsed against real balances; an incorrect opening
+amount must fail rather than be repaired with SQL. Existing vehicles need their real purchase/payment dates.
+Early disposal remains deliberately out of scope. A restoration top-up may make company SYP negative by owner
+decision, so the warning and clearing invariant must be reviewed after every restoration and at Sunday HQ close.
+
+**Two-minute demo.** (1) Open the cumulative dashboard and switch month/all-time to show combined profit and its
+branch/company split. (2) Open «صندوق الشركة», deposit SYP and USD, exchange using two actual amounts, and show
+the frozen rate in movements. (3) Create a payable asset linked to a vehicle, record an instalment, then fund due
+depreciation and show reserve/book value. (4) Create a due company recurring expense and press Pay to prove that
+reading it moved nothing. (5) open that vehicle's history to show shifts, kilometres, expenses and finance cards.
+
+## 2026-09-17 — C1: the company ledger and the second currency (foundation only — no new money moves)
+
+**A separate book.** The company is now its own ledger: one `branches` row of `kind='company'` (HQ,
+`branch_no` 0, fixed id `10000000-0000-4000-8000-000000000100`) that no branch route can address
+(`company_branch_not_addressable`) and that `listBranches` never returns. Triggers keep branch tables
+branch-only and company fund types / events HQ-only (`assert_ledger_partition`).
+
+**Two currencies.** `funds.currency` accepts `USD` for company fund types only; a fund's identity is
+immutable. The balance trigger now balances **per currency**; only `company_fx_exchange` may span two, and
+any entry with a USD line must freeze its rate in `journal_entries.syp_minor_per_usd`. A company cash or
+reserve pocket may not go negative, except through the restoration mirror (owner decision). The migration
+proves every existing entry still balances before it commits.
+
+**Code.** `money/currency.ts` (typed `Money<C>`, `usdToSypMinor`), strict `fundRefFromCode`, per-currency
+`assertBalanced`; `LedgerRepo.post` requires `sypMinorPerUsd` (branch postings pass `null`); HQ week close
+has no cash count and a per-currency trial balance; the admin `Money` component shows its currency when
+told. No route moves money in HQ yet — that is C2.
+
+**Verified.** Merged with P1+P2 (`2e6dedc`); the range fixtures now carry the frozen rate and line currency.
+Full suite with local PostgreSQL green (domain 743, client 314, adapters 162, admin 318, driver 341,
+db 244, api 977), typecheck and every `check:*`. Not deployed: migrations 0064–0066 wait for the owner's
+go-ahead.
+
+**Next.** P3 (dashboard redesign) on the merged tree; C2 (company transactions, FX exchange, restoration
+mirror, cutover) in its worktree.
+
+## 2026-09-17 — P2: any period, one read — links that carry their filters, and vehicle costs in the profit
+
+**Links carry filters.** The console router understood only `#section` and `#shift:<id>` and rewrote
+everything else back to the bare section, so no button could open a screen already filtered.
+`apps/admin/src/route.ts` now parses and formats validated parameters (dates, preset, driver, vehicle,
+pattern, short, abandoned, state, over, tab, id); filters live in the URL (`history.replaceState`), a
+closed shift overlay returns to the filtered list, and `drill.ts` builds the hrefs the dashboard will use.
+
+**One time filter for every screen.** `TimeRangeBar` offers «الكل منذ البدء» (default) · اليوم · أمس ·
+هذا الأسبوع · الأسبوع الماضي · هذا الشهر · الشهر الماضي · مخصّص, a Sunday-start week navigator and a
+custom range. "Today" comes from the server (`GET /dashboard/meta`), never from the browser clock or the
+session stamp that goes stale after 04:00. Month helpers and `resolveRange` live in the pure domain.
+
+**One read for any period.** `/dashboard/profit` walked the range a week at a time (capped at 520 weeks).
+`LedgerRangeSource` answers any range with one aggregate — conformance-tested against the old week walk
+on a fixture with restorations, corrections, a double reversal, legacy shares and a vehicle expense.
+
+**Vehicle costs count** (decision 19): `classifyProfitLine` recognises `cost_center:<vehicleId>`.
+Measured read-only: production has no vehicle cost-centre expense yet — 42 branch and 3 general
+expenses — so no past figure moves; the fix protects the first one.
+
+**Shift screens.** `GET /dashboard/shifts-summary`; `GET /shifts` gains a vehicle filter, the odometer
+end and a server cap (31 days; 400 with a driver or vehicle → otherwise 422 `range_too_large`).
+Completed shifts use the shared filter and a vehicle filter; a period longer than the cap shows its most
+recent days with a note that says which days (not an empty page). Live shifts gain driver / vehicle /
+state / slot filters, an over-target counter and elapsed-versus-target per row.
+
+**Verified.** Full suite with local PostgreSQL green (domain 647, admin 314, api 965, db 222),
+typecheck and every `check:*`.
+
+**Next.** Merge C1 (company ledger foundation, verified separately and together with P1), then P3.
+
+## 2026-09-17 — P1: the owner's schedule — 09–17, 18–02, and a double is twelve hours
+
+**Rule (owner decision, automatic from the times).** A closed shift lasting **≥ 600 minutes is a double**
+(`full`, target 720). Anything shorter is its **slot**: morning (`day`) when it started before 15:00,
+evening when it started at/after 15:00 or between 00:00 and 03:59 — both target 480. A running shift is
+`unknown` with its slot and reads «جارية — صباحية/مسائية». A close forgotten for more than 16 hours keeps
+its slot and is not judged.
+
+**Why the old classifier had to go.** It called a shift `day` whenever the driver came back the same day
+before 22:00, so a 09:00→21:00 double read «عادية» and was judged against eight hours; and the double's
+target was sixteen hours, duplicated in two screens.
+
+**Now.** `packages/domain/src/shift/worked-time.ts` exposes `SLOT_SPLIT_MINUTES`,
+`DOUBLE_SHIFT_MIN_MINUTES`, `SHIFT_TARGET_MINUTES` (one table for every screen), `slotOfStart`,
+`workedTime → {minutes, pattern, slot, abandoned}`, `shiftTargetMinutes`, `shortfallMinutes`. The shift
+shape helpers moved into the domain (`shift/shape.ts`). `GET /shifts` serialises `worked.slot` using the
+injected clock offset and day start. Completed shifts, the approval screen and live shifts show the
+pattern with its target («صباحية · 8س», «مسائية · 8س», «دبل · 12س»).
+
+**Measured on production (read-only), 212 finished shifts:** 7 change pattern — 4 evening → double
+(they ran ≥ 10 h), 3 double → morning (under 10 h). Shifts shown under target drop from 192 to 129,
+because a double is now judged against 12 h instead of 16; the displayed shortfall changes on 69 rows.
+No money figure is affected — the classifier only labels and judges hours.
+
+**Verified.** Full suite with local PostgreSQL green (domain 595 incl. three fast-check properties,
+api 949), typecheck and every `check:*`.
+
+## 2026-09-17 — P0: only company-fund managers move company money
+
+First phase of the owner-approved finance & fleet redesign (brief: `docs/handoff/finance-redesign-codex.md`,
+mockups: `docs/design/2026-09-redesign/index.html`).
+
+**The gap.** صندوق الشركة was readable only by the general manager and the system admin, but a branch
+manager could deposit into it, withdraw from it, name it in a manual journal line, sweep an office box
+into it by hand, and reverse any entry that touched it — all through `journal.manual.write`. Deposits and
+withdrawals posted under a fresh server UUID, so a double click moved the money twice, and the withdraw
+balance check ran outside the lock.
+
+**Now.**
+- New permission `company_fund.manage` (GM + sysadmin, scope `all`); migration `0064` seeds it only when
+  `role_permissions` is already populated, so a fresh database keeps its default matrix.
+- `/company-fund` read, deposit and withdraw require it. The hand «كييش» (`/treasury/withdraw` with
+  `to=company_box`) and any reversal of an entry with a `company_box` line require it as a second gate
+  (403 `company_fund_forbidden`). `/journal/manual` refuses `company_box` for every role
+  (422 `company_fund_not_manual`). The `to` field of `/treasury/withdraw` is a closed list.
+- The four money-move routes take a client idempotency key: a replay answers 200 without posting, a
+  changed request 409; the balance check runs inside the `receivables:<branch>` lock.
+- Admin: held keys per submission (`money-move-idempotency.ts`); company-fund controls and the hand
+  sweep show only for `company_fund.manage`.
+
+**Verified.** Full suite against a local disposable PostgreSQL 17.6 (db 219 passed, 0 skipped — including
+0064 on a real database), api 948, typecheck and every `check:*`. Mutation checks: removing the reversal
+gate breaks 4 tests, the sweep gate 1, moving the balance check out of the lock 3. Also fixed four stale
+PostgreSQL fixtures that lacked `window_opens_at` (`b0c469f`).
+
+**Next.** P1 (schedule 09–17 / 18–02, double ≥ 10 h → target 12 h) and, in parallel, C1 (HQ ledger and
+USD/SYP foundation).
+
+**Risk.** Not deployed. Production must apply migration 0064 before the new API ships, or the GM and the
+system admin lose the company-fund card (the key would be missing from their live grants).
+
+## 2026-09-08 — للنوبة ساعةٌ، ونمطٌ، وكشفُ إغلاق
+
+Commits `b452840`, `b74e2ea`, `274996d`, `9fd1918`, plus the dashboard tile. `pnpm check` green —
+229 test files across eight packages: two new API cases، اثنتان في الكونسول، ومجموعتا
+`worked-time` (١٢ حالة) و`damascus-time` (٦) من `b452840`.
+
+طلب المالك خمسة أشياء عن صفحة النوبات المنتهية: تواريخ صحيحة، وفلاتر، وفصلاً بين نظامَي النوبتين
+والنوبة الواحدة، وبيانات الإغلاق في صفحة النوبة، وخيار إغلاق وخيار حسم، وإبراز من لم يُكمل ثماني
+ساعات. قِستُ ١١٣ نوبة منتهية من الإنتاج قبل التصميم، وما وجدتُه غيّر شكل الحلّ.
+
+### النوبة لم تكن لها هويّة
+
+في ٠٦-٠٩ عملت **١٣ نوبة**، والجدول يعرض ثلاثة عشر صفّاً كلّها «2026-09-06» و«#1». التاريخ ليس خاطئاً
+حسابياً — `business_date` عمود مكتوب — بل **غير كافٍ للتعريف**، وثلاثة عيوب تُضاف إليه: يوم العمل
+ينتهي ٤:٠٠ ولا شيء يقول ذلك فتبدو نوبة الليل متقدّمةً يوماً؛ والخليّة بلا `dir="ltr"` بخلاف كلّ رقم
+آخر؛ و`formatDateTime` كان يعرض **منطقة المتصفّح** لا منطقة الفرع، فإغلاق ٠١:٣٠ بدمشق يظهر على حاسوب
+بتوقيت UTC بأنّه اليوم السابق ٢٢:٣٠ — بجانب عمود تاريخٍ يقول غير ذلك.
+
+الآن: اسم اليوم + التاريخ + المدى الفعليّ بتوقيت دمشق، وترويسة تقول إنّ اليوم ينتهي ٤:٠٠.
+
+### وثلاثة أنماط عملٍ حقيقيّة لم يعرف النظام عنها شيئاً
+
+| النمط | العدد | المتوسط | المدى |
+| --- | ---: | ---: | --- |
+| **نهارية** — تبدأ قبل ١٥:٠٠ وتنتهي ١٥–٢٢ | ٣٩ | ٧٫٤٠س | ٦٫١٨–٨٫٦٩ |
+| **مسائية** — تبدأ ١٥:٠٠ فصاعداً | ٤٣ | ٧٫٢٥س | — |
+| **كاملة** — من الظهر إلى ما بعد منتصف الليل | ٢٩ | ١٣٫٠٣س | ١١٫٤٩–١٤٫٤٦ |
+
+الحدود **مقيسة لا مختارة**: توزيع ساعة البدء ثنائيّ المنوال بفجوة شبه فارغة بين ١٥:٠٠ و١٧:٠٠ — خمس
+نوبات من ١٥٥. والدالّة في `packages/domain` نقيّة، الإزاحة تُحقن قيمةً كما في `civil.ts`.
+
+**وكلّ نمط يُحاسَب على معياره.** النوبة الكاملة تغطّي فترتين؛ فبقياسها على ثماني ساعات تبدو ثلاثَ عشرة
+ساعةً **خمسَ ساعات عمل إضافيّ** بينما هي ثلاثُ ساعات **نقصاً** عن الفترتين اللتين حلّت محلّهما.
+
+**و٧٠ نوبة من ١١٣ تحت الثماني ساعات** — نمطٌ لا حادثة، فبلاطةٌ بعدد لا شارةٌ يعدّها القارئ بنفسه.
+والنوبة فوق ١٦ ساعة (ستّ منها، أطولها ٢٤٫٦٤) إغلاقٌ نُسي لا يومٌ طويل: تُوسم ولا تُحتسب.
+
+### وصفحة النوبة المعتمدة لم تعرض التسوية إطلاقاً
+
+من يضغط «عرض» على نوبة معتمدة كان يترك **سبعة أعمدة ماليّة** ليصل إلى تقرير صور وعدّاد مسافة.
+لوحة BR1 مكبوتة بـ`atGate` — وهو صحيح، فمنتصف النوبة لا نقد مُعلَناً فيه وستُظهر فرقاً بحجم السلفة
+كلّها — لكنّ الأثر الجانبيّ أنّ النوبة **المنتهية** خسرتها أيضاً.
+
+اللقطة المجمّدة كانت هناك طوال الوقت. وعطلان حقيقيّان في الطريق:
+
+**`confirmedAt` كان يُسلسَل من حقل لا وجود له.** اللقطة تخزّن `confirmedAtMs` — رقم حقبة — والاستجابة
+تقرأ `plan.confirmedAt`، فلحظة توقيع الإغلاق كانت ستبقى `null` على السلك **إلى الأبد**. الاختبار
+أمسكه.
+
+**و`confirmedBy` صار اسماً.** هو `uuid`، والكونسول لا يستطيع ترجمته: السائقون وحدهم قابلون للسرد
+فيه، والمدير الذي يوقّع الإغلاق ليس سائقاً.
+
+### والمدير لم يكن يستطيع أن يحسم شيئاً
+
+كلّ مدخل في `/operations/revise` **تعديلٌ بمعرّف** يُرجع ٤٠٤ لمجهول، وإنشاء الحسم محصور بـ
+`shift.operate` وبحالتَي `open`/`suspended` — أي بشاشة السائق نفسه. فمن وجد عند المراجعة أنّ شيئاً
+يجب أن يُخصم كان أمامه أداتان: استبعاد توصيلة حقيقيّة، أو رفض الإغلاق كلّه. ولا واحدة منهما تقول ما
+حدث.
+
+`cashDeductionsAdded` محصور بـ`pending_review` بحارس المسار نفسه — وهذا هو كامل حجّة السلامة: قبل
+الاعتماد لا لقطة تسوية تُنتهك (قرار ١٣) ولا أسبوع مقفل يُفتح (BR7)، و`orders_hash` يتحرّك معه فتُعاد
+المراجعة قبل أن يُقيَّد الدفتر. والصفّ يولد بقرارٍ مدقَّق كامل: لا ساعة مطبوعة لحسم المدير، فيصنَّف
+`unknown` — والسبب المنسوب هو ما يجعله يُحتسب، بالآليّة نفسها التي تحسم صفّاً ممسوحاً غير مقروء.
+
+### ٣٣ طلباً صارت واحداً
+
+الشاشة كانت تروّس على التواريخ سبعةً سبعة — ٣٣ طلباً لتغطية شهر، كلّها `no-store` وكلّها تُرجع كلّ
+الحالات ليرمي المتصفّح أكثرها. و`listByBranchAndDateRange` **موجود ومُختبَر** وغير موصول بالمسار.
+وسقف الواحد والثلاثين يوماً باقٍ: صار يحدّ **مسح الخادم** لا التوزّع.
+
+### شاهده في دقيقتين
+
+1. **النوبات المنتهية** لـ٠٦-٠٩: تسع نهارية وأربع مسائية **يمكن تمييزها** بالساعة والنمط.
+2. نوبة `12:00 → 01:00` توسم **«كاملة»** لا «متأخّرة»، وتُقاس على ١٦ ساعة.
+3. نوبة ٢٢ ساعة توسم **«لم تُغلق في حينها»** ولا تدخل أيّ متوسّط.
+4. **فلترة** بالسائق أو النمط أو «المقصّرون فقط» — بلا طلب جديد.
+5. افتح نوبة معتمدة: **كشف الإغلاق** — من أكّد ومتى، والمتوقَّع مقابل الفعليّ، وسلسلة حصّة الموظف،
+   والتسليمان بعلامتَي إقرارهما.
+6. افتح نوبة `pending_review`: **«إضافة حسم»** داخل بطاقة الحسومات؛ ينقص المتوقَّع وحصة الموظف
+   مرّةً واحدةً لكلٍّ منهما.
+7. **اللوحة**: بلاطة «نوبات لم تُكمل الوقت» لليوم المعروض، تصل إلى الصفحة.
+
+### مراجعة خصميّة بعد النشر — وما وجدَته
+
+ستّ عدسات مستقلّة على التغيير، وكلّ نتيجة أمام ثلاثة مشكّكين. **١٠ مؤكَّدة، ١٢ مدحوضة.**
+
+**والحرجة كانت لي.** زرّ «إضافة حسم» الذي شحنتُه لم يحسم من أحد شيئاً. قِستُه على الإنتاج:
+
+```
+قبل   الأساس 40.00  الفرق  0.00  الموظف 40.00  المكتب 160.00
+بعد   الأساس 10.00  الفرق 30.00  الموظف 40.00  المكتب 160.00
+```
+
+المدير يحسم ٣٠، ويرى الحصّة تنزل إلى ١٠، والسائق يقبض ٤٠، والمكتب يقبض ١٦٠. المعادلة ليست مخطئة —
+قاعدة المال ٦ تُظهر الحسم **مرّة في المتوقَّع ومرّة في الأساس**، فـ`الموظف = (إجمالي − ح) + (ف٠ + ح)`
+و**ح تُلغي نفسها**. الصفّ الممسوح يعمل لأنّ النقد **خرج فعلاً** من يد السائق فـ`ف٠ = −ح`؛ أمّا حسمٌ
+يُخترع بعد العدّ فلا خروج خلفه، فيُعاد المال إليه فائضاً بموجب القرار ١٣. والأثر الباقي الوحيد فائضٌ
+مُختلَق يُجمَّد في لقطة الإغلاق. **أنا كتبتُ التعليق الذي سمّى ذلك الفائض صحيحاً**، واختباري أكّد
+الفرق ولم يسأل قطّ إن كان مبلغ الموظف قد تحرّك. سُحبت الأداة؛ وتحقّقتُ أنّها **لم تُستعمل ولا مرّة**.
+
+**وعطلٌ كامنٌ في المصنِّف.** `endedInTheEvening` كان يشترط نهايةً بعد ١٥:٠٠، فنوبة ٠٨:٠٠ ← ١٤:٠٠
+تسقط إلى `full` وتُقاس على ١٦ ساعة: **ستّ ساعات عملٍ تُعرَض بوصفها عشر ساعات نقص** تحت اسم سائق.
+والحارس بجانبه يقارن `minutes` (مدّة) بـ`DAY_END_LIMIT_MINUTES` (دقيقة من اليوم). صُحّح بسؤالين
+كلٌّ بوحدته. توزيع الأنماط على الإنتاج **لم يتغيّر** بعد الإصلاح — أي أنّ العطل لم يُصب صفّاً قائماً.
+
+وثلاثة أخرى: «مكتملة» كانت طرحاً من المجموع فتحسب كلّ نوبة **رفض المصنِّف الحكم عليها** ناجحةً؛
+ومجموع النقص كان يُحسب ثمّ يُرمى (`{t}` غير موجود في أيّ من النصّين)؛ وقراءة اليوم كانت تبقى بعد
+تبديل الفرع بينما تُمسح كلّ لوحة أخرى.
+
+### «الحسم» — أُعيد بناؤه ليحسم فعلاً
+
+اختار المالك: **«يُنقص من حصّته فوراً»**. فالموظف يأخذ أقلّ في هذا الإغلاق، والمكتب يقبض الفرق في
+اللحظة نفسها. مقيس من طرف إلى طرف: **الموظف ٤٠٫٠٠ ← ١٠٫٠٠ · المكتب ١٦٠٫٠٠ ← ١٩٠٫٠٠ · الفرق يبقى صفراً.**
+
+الحدّ الفاصل عن سلفه المسحوب: **يمسّ طرفاً واحداً**. `expectedTotal` لا يُمسّ، فيبقى الفرق قياساً
+لِما اختلف عليه العدّ وحده. و`baseDriverShare` **لا يُنقَص عمداً**: الموظف كسب حصّته ودفع الحسم منها،
+فالقيد يُدائن `other_income` بالمبلغ بدل أن يُثقل صندوق الكاش بمالٍ لا تفسّره الدفاتر. و`other_income`
+لا `company_revenue`: الثاني حصّة الشركة من **أجور التوصيل** بتعريف BR4، وعطلٌ يُحصَّل من سائق ليس
+عمل توصيل.
+
+**والحراسة في المواضع التي توقف الأشياء فعلاً:**
+
+- الترحيل **0062** يعكس الحساب قيدَين `CHECK`، ويُعلّم `shift_close_journals_match` سطر الدخل
+  الجديد — تلك الدالّة تُعيد بناء **مجموعة القيود المتوقَّعة كاملةً داخل PostgreSQL**، ولولا ذلك
+  لرفضت كلّ إغلاق يحمل حسماً.
+- والمحوِّل الذاكريّ نال الهُويّة نفسها، وإلّا لأجاز الزائفُ إغلاقاً ترفضه قاعدة البيانات.
+- والبصمة نالت الحقل وارتفعت إلى الإصدار ٥. وبُناة البصمة **الثلاثة التاريخيّون لم يُمسّوا**: مهمّتهم
+  إعادة إنتاج بصمات تسويات وُقّعت قبل وجود هذه الأداة.
+- و**PUT لا POST**: الطلب يحمل حسم النوبة كلَّه، فإعادة الإرسال لا تحسم مرّتين. سلفُه كان يولّد
+  معرّفاً جديداً في كلّ نداء ويقيّد صفّاً ثانياً.
+- والنموذج **داخل `CloseApprovalWorkspace`**. سلفُه كان في فرع لا يُبلَغ أصلاً — بعد
+  `if (isClose) return` — أي ميزةٌ شُحنت بلا واجهة، ولم ينتبه أحد لأنّ المال الذي حرّكته كان صفراً
+  في الحالتين. واختبارٌ الآن يثبّت **موضعه** لا وجوده.
+
+طُبِّق الترحيل على الإنتاج نظيفاً (٦٢ ترحيلاً)، ولا صفَّ قائمٌ خالف القيدَين الجديدين.
+
+### ما يبقى
+
+- **المعايير ثابتة في الكود** (`TARGET_MINUTES`)، ومكانها `settings` بجانب سعر الصرف. مكرَّرة اليوم
+  في موضعين — عمداً وبإيجاز، لأنّ ثابتاً مشتركاً في وحدة ثالثة بيتٌ لقاعدة لا بيت لها بعد.
+- **`suspended_at` عمود ميت** لا يُكتب، فوقت التعليق غير مرئيّ ولا يُطرح من المدّة. المدّة معروضة
+  بصدق: من تأكيد السائق إلى إرسال الإغلاق، لا وقت قيادة.
+- **الإغلاق القسريّ لم يُعَد بناؤه** في صفحة النوبة — يملأ من مسوّدة الإغلاق ويعالج شذوذ العدّاد
+  ويُحضّر على مرحلتين، ونسخةٌ ثانية منه ستنحرف عن الأولى. الصفحة تقول ذلك وتوصل إلى شاشته.
+- **لا تحقّق بصريّ آليّ** (لا Playwright في المستودع).
+- الدين اللونيّ: `CompletedShifts.tsx` صار **صفراً** و`Approval.tsx` نزل إلى ٢٧٢.
+
+## 2026-09-07 — «هل نربح؟» سؤالٌ لم تكن اللوحة تجيبه
+
+Deployed: API `ash-api-xi`, admin `ash-admin-eta` (bundle `index-CB-PL9t6.js`، verified live).
+Commit `b2f38be`. `pnpm check` green — 216 test files، two new API cases.
+
+اللوحة لم تعرض ربحاً صافياً قطّ. بطاقتها الوحيدة تعرض حصص السائق والشركة ويلاغو، وكلّها **إجمالية**
+— وتسمية المنتج نفسه لها «حصة الشركة قبل المصروفات». كانت تجيب «كم دخل؟» ولا تجيب «كم بقي؟».
+
+**قِستُ من الدفتر:** حصة الشركة 81,108.50 · دخل آخر 5,692.37 · مصروفات 36,988.81 · **صافي 49,812.06
+بهامش ٥٧٫٤٪**. والمصروفات ٤٦٪ من حصّة الشركة ولم يكن منها شيء على الشاشة.
+
+### عطلان أُصلحا في الطريق
+
+**المدّة كانت خاطئة.** بلا مدىً مُرسَل، يرجع الخادم إلى `weekStartFor(today)`، فبطاقة «الأرباح
+الإجمالية» تعرض **الأسبوع المالي كلّه** بينما حقل التاريخ بجانبها يعرض اليوم. والخادم يُرجع
+`from`/`to` منذ البداية، ونوع العميل يُعلن ثلاثة حقول مال ويرمي الباقي.
+
+**و`/dashboard/treasury` كان يُنادى عارياً دائماً**، فكشف الصندوق لم يتبع منتقي التاريخ إطلاقاً.
+واختبار `latest-request.test.ts` كان يثبّت ذلك في مجموعة «القراءات التي لا تحمل يوماً» — أي أنّ العطل
+كان مُرمَّزاً في اختبار. نُقل إلى المجموعة المحروسة.
+
+### وثلاثة أشياء فرضها الحساب
+
+**المصروف قائمة سماح، لا بادئة `cost_center:`.** `fundRefFromCode` يحوّل كلّ رمز لا يعرفه إلى
+`cost_center:<code>`، فالبادئة تحمل أيضاً `owner_funding` (−63,980) و`owner_drawings` (+9,904)
+و`opening_balance` (+9,464). النسخة العمياء تُرجع **7,778.39** حيث الحقيقة **36,988.81** — نقصٌ في
+الكلفة ٧٩٪ وتضخيمٌ في الربح بالقدر نفسه، على الرقم الوحيد الذي وُجدت الشاشة لأجله. واختبار يُثبّت
+خروج صناديق رأس المال.
+
+**الدخل الآخر يُضاف ويُعرَض منفصلاً.** `income` يُقيَّد على `other_income` بتصميم مقصود كي لا تُضخّم
+بيعةُ بطارية عملَ التوصيل — لكنّه مال الشركة، و5,692.37 منه كانت خفيّة عن كلّ رقم ربح في النظام.
+
+**والجسر يستعمل الحصّة الإجمالية لا `driverShareSyp`.** ذلك الحقل هو أساس التسوية بعد الحسميات —
+83,195.50 مقابل إجماليّ 82,698.00 — فجسرٌ مبنيّ عليه ينقص بمقدار كلّ حسم أُخذ. و`feeTotal` يُشتقّ من
+الحصص الثلاث لا يُقرأ من `fee_earned`، الذي رصيده على أيّ مدّة **صفر** لأنّ `orderFee` يدائنه
+و`shareSplit` يُمادنه.
+
+### وتقول متى لا تعرف
+
+خمسة عشر يوماً من أربعة وعشرين بلا سطر مصروف، فصافٍ صامت سيكون الإجماليَّ في أغلب الأيام — والبلاطة
+تقول ذلك. وقيود الاعتماد تُختم بتاريخ **النوبة**، فربح يومٍ ماضٍ يتحرّك حين تُعتمد نوبته — والبلاطة
+تقول ذلك أيضاً.
+
+### شاهده في دقيقتين
+
+بحساب `gm` على https://ash-admin-eta.vercel.app:
+
+1. الشاشة تفتح على **صافي ربح الفترة** بحجم `text-figure-lg` — أوّل استعمال لـ`Stat lead`، وتوثيقه
+   يقول «إن تصدّر بلاطان لم يتصدّر أيّهما». وبجانبه صافي اليوم بحالته.
+2. البطاقة **تقول مدّتها**: «من {from} إلى {to}». وهي تبدأ من تاريخ بدء التطبيق لا قبله.
+3. الجسر يُطابق على الشاشة: حصة الشركة + دخل آخر − مصروفات = الصافي. تحقّقتُ حيّاً:
+   `company + other − expense == net` ✔ و`driverBlock + company + yalago == feeTotal` ✔.
+4. اختر ٠٣-٠٩: الصافي **−13,542.50** بلون `danger`، والمنحنى يُظهره عموداً واحداً نازلاً — رواتب،
+   لا انهيار.
+5. مدير الفرع لا يرى شيئاً من ذلك؛ الحارس `profit.view_total` نفسه القائم.
+
+### ما يبقى
+
+- **لا تحقّق بصريّ آليّ** (لا Playwright في المستودع). ما سبق فُحص عبر HTTP والبناء، لا بالعين.
+- المصروفات المُرحَّلة من ما قبل بدء التطبيق مستبعَدة عمداً بـ`clampToGoLive`، فأرقام الشاشة أصغر
+  من قياس الدفتر الكامل. هذا صحيح ومقصود.
+- الدين اللونيّ في `Dashboard.tsx` ما زال عند ٤٠ في `check:tokens`؛ لم يُخفَّض في هذه الجولة.
+
+## 2026-09-03 — الخطّ الذي لم يُحمَّل قطّ، واللون الذي صار دوراً
+
+Deployed: admin `ash-admin-eta`, driver `ash-driver` (both prebuilt, verified live). API untouched
+and healthy. Commits `cdf573a`, `78d654b`. `pnpm check` green — 216 test files across eight
+packages, including the new `check:tokens`.
+
+طلب المالك نقل ممارسات التصميم من `Ash group v2` إلى اللوحة، «واجعله أوضح، بصفتك خبير UI/UX».
+
+### ما وجدناه أوّلاً — والخطّ كان أوّل الأدلّة
+
+**التطبيقان يعلنان `IBM Plex Sans Arabic` منذ بداية المشروع، ولم يُحمَّل قطّ.** لا `<link>` ولا
+`@font-face` ولا ملفّ خطّ في المستودع كلّه. كلّ شاشة كانت تُعرض بـ`system-ui` — وهو على أندرويد
+وأغلب لينكس خطّ عربيّ رديء. أرخص تحسين بصريّ في المنتج، وقد مرّ عليه شهور.
+
+والنقل الحرفيّ عن المرجع كان سيُعيد إنتاج العطل نفسه: المرجع يجلب الخطّ من Google Fonts، و
+`infra/caddy/Caddyfile:28` يضبط `font-src 'self'` ويشرح السبب — «لا CDN ولا Google Fonts؛ العقوبات
+والحجب الجغرافي من دمشق لا يكسران ما لا يُجلب من الخارج». فالاستضافة الذاتية ليست تفضيلاً بل الشيء
+الوحيد الذي يصل.
+
+### القياس الذي حدّد العمل
+
+| | |
+| --- | --- |
+| أدوات لون خام | **٩٠٧** ظهوراً عبر التطبيقين، المعنى محمول بلون منتقى يدوياً |
+| سلّم الطباعة | **١٢٨×** `text-xs` · **٩٠×** `text-sm` · **٨×** `text-2xl` — وإحدى عشرة مرّة لكلّ `lg/xl/3xl` مجتمعةً في ٧٬١٠٠ سطر |
+| `dark:` | صفر |
+| مكتبة أيقونات | لا شيء — ٦ `<svg>` في اللوحة كلّها |
+
+درجتان اثنتان لا تصنعان تراتباً: ثلاثة عشر بلاطاً في اللوحة تصرخ بالمستوى نفسه فلا يتقدّم أيّ منها.
+وعنوان البطاقة — `text-sm font-bold text-slate-500` — كان **أخفت وأصغر من النصّ الذي تحته**، فحدود
+الأقسام غير مرئية أصلاً.
+
+### الدرس المأخوذ عن المرجع هو ما لا يُنقل
+
+`globals.css` عنده ينتهي بترقيعات غير مُطبَّقة الطبقة — `.dark .card .text-gray-900 { color:#e5e7eb }`
+— تحت تعليق يعترف بأنّ كثيراً من العناوين بلا نظير `dark:` فتُعرض شبه خفيّة. بنَوا الوضع الليليّ
+**بعد** ترميز الألوان يدوياً. ولدينا ٩٠٧ لوناً مُرمَّزاً: الطريق نفسه، المصيدة نفسها.
+
+فالجسر يُعيد ربط متغيّرات لوحة Tailwind نفسها بالأدوار، لا يُرقّع فوقها. النتيجة: **٩٠٧ من ٩٠٧
+تتبع السمة، بصفر تعديل في المصدر**، والوضع الفاتح لم يتحرّك لأنّ قيمة كلّ رمز الفاتحة تساوي درجة
+اللوحة التي حلّت محلّها.
+
+وأربعة أشياء لم يحملها الجسر، أُصلحت يدوياً: خمس ستائر حوارية كانت ستصير **بيضاء ساطعة** في الوضع
+الداكن (`slate-900` يقابل `ink`)، وفصل التعبئة الصلبة عن الحبر (`red-600` واحد يخدم ٣١ نصّ خطأ
+وثلاثة أزرار خطر)، و`bg-white` في خمسين موضعاً، والزجاجية فوق شريط الاعتماد — الشريط الذي يعلو أرقام
+التسوية نفسها.
+
+### وما رُفض صراحةً
+
+`.btn` في المرجع يضبط `focus:outline-none` **بلا بديل**: كلّ زرّ هناك خفيّ للوحة المفاتيح، إخفاق
+WCAG 2.4.7 على كامل السطح. وحركة الدخول تبلغ نحو ثانية قبل أن تُقرأ البيانات، ولا حارس
+`prefers-reduced-motion` في المستودع كلّه. ونحن متقدّمون في موضعين: خصائصنا منطقية ١٠٠٪ ومحروسة
+بـCI (عندهم ٢٠٢ فيزيائية مقابل ٦٨)، و`.num` + `tabular-nums` بدل `font-mono` الذي يقتلع الأرقام من
+الخطّ العربيّ.
+
+### الحارس
+
+`check:tokens` **سقّاطة لا جدار**: لكلّ ملفّ ميزانية لا ترتفع، فالدين المتبقّي مرئيّ ولا ينمو. والمرجع
+نفسه هو الحجّة: بنى `PageHeader` مشتركاً ثمّ طبّقه على ست صفحات من ثلاثين، وشحن مكوّنَي «حالة فارغة»
+موحَّدَين لم يُدمجا قطّ. لا شيء منها كان خطأً لحظة كتابته، ولم يكن ثمّة حارس.
+
+### شاهده في دقيقتين
+
+1. افتح https://ash-admin-eta.vercel.app — **الحروف نفسها تغيّرت**. أدوات المطوّر ← Fonts تقول
+   `IBM Plex Sans Arabic` لا `system-ui`.
+2. أسفل الشريط الجانبيّ: **السمة** — تلقائي · فاتحة · داكنة. اضغط «داكنة» وتنقّل بين الخزينة
+   والاعتماد واللوحة: لا نصّ يختفي، ولا ستارة بيضاء.
+3. الشريط الجانبيّ صار مجموعات بأيقونات — «المال»، «الأسطول»، «النظام» — بدل ستة عشر سطراً مسطّحاً.
+4. صغّر النافذة تحت ٦٤٠ بكسل: الجداول تصير بطاقات وكلّ خليّة تحمل اسم عمودها.
+
+### ما يبقى
+
+- **هجرة الدين المتبقّي** شاشةً شاشةً، وإنزال ميزانيات `check:tokens` معها حتى يُحذف الجسر.
+  `Approval` (٢٧٣) و`Treasury` (١١٩) هما ٥٦٪ منه.
+- **لا تحقّق بصريّ آليّ.** `CLAUDE.md:181` يذكر Playwright ضمن المكدّس، ولا حزمة في المستودع تعتمده.
+  الفحص أعلاه يدويّ.
+- **`default-src 'self'` بلا `script-src` يمنع النصوص المضمَّنة**، فحارس الإقلاع المضمَّن في
+  `apps/driver/index.html` شبه مؤكَّد أنّه ميت في الإنتاج. خارج نطاق هذه الجولة، ويستحقّ فحصاً.
+- شريطا الحالة في تطبيق السائق (`bg-amber-500` بنصّ أبيض) عند تباين ~٢٫١:١ — عطل سابق لهذه الجولة.
+
+## 2026-09-01 (evening) — الصفّ الذي قُرئ مرّتين، والحذف الذي يراه مدير النظام
+
+Deployed: migration `0060`, API `ash-api-xi`, admin `ash-admin-eta` (bundle `index-B4hkoUQn.js`,
+verified live). Commits `bb16d05`, `85ff35d`. `pnpm check` green — 902 API tests, 546 domain,
+240 admin. Production trial balance 0.
+
+المالك، وهو ينظر إلى الشاشة: «هذه القراءة مكررة». كان محقّاً، والتحقّق أثبت أنّ التداخل **صفّان**.
+
+### ما ثبت — ثلاثة أدلّة مستقلّة
+
+نوبة `a3728815` تحمل **١٠ طلبيات لتسع توصيلات**.
+
+1. **سجلّ مدفوعات يلاغو** يسجّل حسم الـ٢٠٪ لكل طلبية. عند `٢:٥٠ م` **حسم واحد فقط: `−٦٦`** =
+   ٢٠٪ × ٣٣٠. لو كانتا توصيلتين لظهر `−٦٦` و`−٤٦`؛ لا `−٤٦` في السجلّ كلّه. وكل حسم آخر يطابق
+   طلبيته، والسجلّ كلّه يُجمع إلى `+١٨٠٫٢٥` — رصيد المحفظة المصرَّح بالضبط.
+2. **تسلسل الصفحتين:** أسفل الصفحة ١ يُظهر `١٢٠ · ٢:٠٠ م`، وهو الصفّ الثاني في الصفحة ٢.
+3. **قياس البكسل:** حرفا `٣٣` الأوّلان في الصفّ المقصوص **متطابقان ببعضهما** — وهو ما يستحيل في
+   `٢٣٠`. والحرف الأوسط `٣` في كلتا الفرضيتين، فالأوّل `٣` حتماً.
+
+### لماذا حدث — ثغرتان في مكان واحد
+
+الصفّ الأوّل في الصفحة ٢ ممرَّر **تحت الترويسة اللاصقة**، فبهتت أعلى حروفه. القارئ قرأ **المسار
+والوقت بشكل مثالي** وأخطأ في المبلغ وحده، وسجّل `reviewRequired: false`.
+
+- **المبلغ مرساة مطلقة** ([page-overlap.ts:100](packages/domain/src/shift/page-overlap.ts#L100)):
+  `if (earlier.amount !== later.amount) return REFUTED`. القصّ أفسد المرساة بالذات. ولأنّ
+  `suffixPrefixRun` يُلغي المقطع كلّه عند أوّل زوج فاشل، سقط معه الزوج السليم `١٢٠⟷١٢٠`.
+- **`timedMatches` يقصر الدائرة:** يعود فور أوّل زوج ولا يبلغ `suffixPrefixRun` أبداً. ثلاثة صفوف
+  حدّية نظيفة ورابع فاسد ⇒ `length: 3` ويُحتسب الرابع مرّتين **بتلميح يبدو سليماً** — أخطر.
+
+**والخطأ موّه نفسه:** الصفّ الوهمي أضاف ٠٫٨×٢٣٠ = ١٨٤٫٠٠ إلى المتوقّع، فحوّل فائضاً حقيقياً
+٢١٨٫٢٥ إلى ٣٤٫٢٥. النوبات الأدقّ مظهراً هي حيث يختبئ التكرار.
+
+**نطاق الضرر محصور:** ٥٩ نوبة فُحصت، هذه هي الوحيدة، ولا نوبة معتمدة متأثّرة.
+
+### الإصلاح — فكرة واحدة
+
+متى عُرفت محاذاة الصفحتين، يُحاسَب كلُّ صفّ داخل نافذة التداخل. `sharedOffset` يشتقّ المحاذاة
+حين تتّفق عليها كل الأزواج المؤكَّدة؛ `accountForWindow` يبلّغ عن كل صفّ في المدى؛ و`misreadAnchors`
+يوفّر محاذاة حيث لا توجد — **يُجرَّب أخيراً وحين تعود الطريقتان فارغتين**، فيضيف تلميحات ولا يغيّر
+قائماً. `rowsMayBeTheSameOperation` لم تتغيّر بحرف، والقرار ١٦ سليم.
+
+`length` يبقى عدد الأزواج المؤكَّدة، والمسح يتخطّى صفّاً بلا مبلغ مقروء على أحد الجانبين: هذا موجود
+لالتقاط صفّ حُسب مرّتين، وصفّ لا يقرؤه أحد لا يُحسب مرّة.
+
+**وأُغلقت النسخة غير المحميّة** من مفردات الأسباب: أربع نسخ، واحدة فقط كانت مختبَرة.
+
+### القارئ يعترف بالقصّ
+
+كان يغطّي «بطاقة لا يظهر أجرها»، لا «أجراً ظاهراً حروفه مقصوصة» — وهي الحالة التي تُنتج رقماً خاطئاً
+واثقاً. `orders-money-v5` و`orders-route-v4`: إجابة مخزّنة من قارئ كان سيقبل ٢٣٠ يجب ألّا تُرضي
+لقطة جديدة.
+
+### الحذف — بطلب المالك
+
+«بجانب الاستبعاد لا بدلاً منه · لا يُمحى بل يُعلَّم · شاشة مستقلّة + سجلّ التدقيق + إشعار».
+خاصية الأمان: قيدٌ يفرض أنّ الصفّ المحذوف **مستبعَد أيضاً**، فيخرج من الحساب عبر الباب المختبَر
+وحده — ولا سطر واحد من حساب التسوية تغيّر، واختبار يثبت أنّ الفروق الثلاثة بعد الحذف تطابق تماماً
+ما يعطيه استبعاد الصفّ نفسه.
+
+**والإشعار احتاج عملاً حقيقياً:** مدير النظام `branch_id = NULL` وكل المنتِجين يخاطبون
+`branch:<id>` — فلم يكن يستقبل شيئاً إطلاقاً.
+
+### البروفة استحقّت نفسها
+
+المسودّة الأولى نجحت في **٩٠٢ اختبار** ورفضتها PostgreSQL الإنتاجية في أوّل بروفة مُتراجَع عنها:
+`guard_shift_order_window_decision_reason` يرفض أيّ تغيير للاحتساب بلا سبب مدقَّق منسوب من مدير
+فعّال. المحوّل الذاكري بلا مُشغِّلات، فلا شيء في المجموعة كان ليمسك هذا. الحذف صار يمرّ عبر آليّة
+القرار نفسها، واختبار يثبّتها.
+
+### تكلفة القارئ — مقيسة لا مقدَّرة
+
+٦٤٠ قراءة حقيقية عبر ٧٢ نوبة: **‎$0.0442 للنوبة، ‎$13.26 شهرياً عند عشر نوبات يومياً**، والمئين
+٩٠ ‎$22.32. الـRUNBOOK كان يقدّر ‎$20؛ صُحِّح. المحرّك هو عدد القراءات (٨٫٧ وسطياً، ١٨ في الأسوأ)
+لا عدد السائقين.
+
+**Next**
+
+1. **حسم نوبة `a3728815`:** الصحيح ٣٣٠، ويُحذف ٢٣٠، والصفّ بلا وقت (١٢٠) ينقصه سبب مدقَّق.
+   بعدها: ٩ توصيلات · Σ ١٬٩٦٥٫٠٠ · يأخذ الموظف ١٬٠٠٤٫٢٥ · يقبض المكتب ٦٬١٠٥٫٧٥.
+2. ~~أجر الطلبيات يُقرأ بتمريرة واحدة بلا تصويت.~~ **أُنجز في `e004ef9`** — تمريرة مالية ثانية
+   بصياغة مختلفة تقرأ الأرقام خصومياً وتسمّي ٢/٣ و٦/٧ و٤/٥. ثلاث نتائج: اتّفاق ⇒ يُنشر؛ **تناقض
+   ⇒ يُرفض** ويصل المدير كـ`reader_conflict` والسائق كرقم يكتبه؛ قراءة وحيدة ⇒ يُنشر كما كان
+   (رفضها كان سيحوّل كل نوبة بشبكة متعثّرة إلى صفحة أرقام تُكتب يدوياً). **وناخبان منفصلان:**
+   التمريرة الثانية تصوّت على **المبلغ فقط** — تعليماتها الزمنية منسوخة من الأولى، وعدُّها على
+   الساعة كان سيحوّل قارئاً واحداً إلى صوتين ويُلغي قاعدة 0033. الكلفة المقيسة **+‎$1.63 شهرياً**
+   (‎$13.26 ← ‎$14.89) مقابل خطأ واحد حرّك تسوية موظف بـ٩٢٫٠٠.
+3. إحداثيات الفرع ما زالت مقلوبة في الإنتاج (`lat 36.29297 / lng 33.52239`).
+
+**Risks**
+
+- 🟠 **بيانات اعتماد مكشوفة في النصوص وتستحق التدوير** — وصلة `neondb_owner`، ورمز Vercel، وكلمة
+  مرور الإدارة. المالك وحده يستطيع تدويرها.
+- 🟡 حزمة الإدارة ٨٩٠ ك.ب بلا `manualChunks`.
+
+
+## 2026-09-01 (later) — the close approval screen: the picture, the pair, and the tablet
+
+Deployed: API `ash-api-xi` and admin `ash-admin-eta` (bundle `index-BhqiR3_5.js`, verified live).
+Commits `d1b1602`, `613b6f2`, `d484f7b`. `pnpm check` green — 895 API tests, 232 admin, 537 domain.
+
+Owner: «اعد تصميم واجهة انهاء النوبة بالنسبة للادارة لتصبح بشكل اوضح و ابسط / راجع الموضوع كخبير
+UI/UX software and finance».
+
+Three shipped changes, each fixing something a manager pays for on a real shift. **No financial
+rule moved.** Every money figure comes from the same tested pure modules it came from yesterday.
+
+### 1. The disputed row now carries its own page
+
+The manager's first question about a row is «what did the screen say». That took four steps: scroll
+past the cards, open «الأدلّة والتفاصيل», pick the right page out of several, open the viewer, then
+match it back to the row from memory. On a two-page shift, step three is also how he looks at the
+wrong page and decides confidently.
+
+The link already existed — an observation records `{mediaId, attachmentToken, slot}` and every
+scanned row carries `observationId` — it simply never reached the client. `evidenceSourcesForShift`
+resolves it through the **same two keys** `buildScanDuplicateHints` uses, in the same order, so a
+row's thumbnail and a hint about that row can never name different pages.
+
+`rowEvidencePage` decides what to show, and each fallback is a different fact: the exact bytes read;
+failing that the page now in that slot, because a **retake** rotates the attachment token and stores
+a new image while the slot still names the right page; failing that the only page there is, but only
+for a row that came from a screenshot at all. A hand-typed row, and a linkless row on a multi-page
+shift, get **nothing** — showing a manager the wrong screenshot is worse than showing him none,
+because he believes it.
+
+The band is a percentage of the image's own height over an image left at its natural aspect, so it
+lands on the disputed line whatever the screenshot's dimensions, and it is drawn only when
+`yTop`/`yBottom` are real. `defaultRereadSlot` targets that same page instead of asking — nothing
+previously stopped a re-read of the page the row did not come from.
+
+### 2. «أيّ الصفّين هو التوصيلة الحقيقية؟»
+
+A hint named a **position**: «يطابق الصف ٣ في صفحة ١». And «تثبيت كتكرار» acted only on the row
+being displayed — so when the displayed row was the good one, the manager had to go find the other
+card. He did not. That is how shift `d0a5a7ec` came to carry **21 rows for 10 deliveries** and
+Haidar's 205.00 was counted twice.
+
+Both operations are now shown side by side, each with its own figures, its own page and a band over
+its own line, under one question and one button that states both outcomes before it is pressed:
+«احفظ — يبقى المحدَّد ويُستبعد الآخر», with a line saying what does **not** happen — the excluded
+row keeps its reason and stays in the record. Two buttons («استبعد هذا» / «استبعد المقابل») were
+tried and rejected: «المقابل» is a word a manager resolves by counting columns, and both buttons
+named exclusion while he was deciding which row is *real*.
+
+**Nothing is pre-selected.** The side carrying a printed clock — the identity under decision 16 — is
+marked as a note on the option, never as the answer: a radio checked on arrival beside a save button
+means one click excludes a real delivery the system merely suspected.
+
+`duplicateChoiceRevision` posts only rows that actually change (re-asserting a held value still
+rotates `orders_hash` and forces a full re-review), and it can bring the chosen row back when the
+chosen one was the excluded one — a case a single-row control cannot express at all.
+
+### 3. The layout a landscape tablet actually gets
+
+Two columns fired at `xl` = 1280px. The nav rail is `w-60` and static from 1024px, so at exactly
+1280 the main pane is ~992px and `minmax(22rem,28rem)` claims up to 448 of it: the first width at
+which two columns appear is also the width at which they are worst. Moved to `2xl` = 1536px, which
+makes the single column the layout the manager's real device (1024–1180px) always gets.
+
+There the money panel was `order-1` unconditionally, so on a shift with open rows he scrolled past
+the figures, their inputs and the approve button to reach the work that has to happen before any of
+those numbers mean anything. The column now leads with whatever is his job at that moment.
+
+### One test was weaker than it looked
+
+`bodyOf` in the duplicate-hint wiring test brace-matched from the first `{` after the function name
+— the **destructured parameter list**. Its `not.toContain` assertions, which guard «an advisory hint
+may never post a revision», were running against the props, where they could not have failed. Fixed
+in both wiring tests; both still pass.
+
+**Next**
+
+1. Ship 3b of the approval plan — extract `screens/close/*` and move the 67 inline copy keys into
+   `packages/client/src/i18n`. Pure mechanics, no user-visible change, so it waits for a quiet day
+   rather than moving 3,900 lines of a screen managers use tonight.
+2. Branch coordinates are still swapped in production (`lat 36.29297 / lng 33.52239`).
+3. Yaman's 226,000 and Ibrahim's 50,000 / 43,500 remain unrecorded, pending the owner's answers.
+
+**Risks**
+
+- 🟠 **Credentials exposed in session transcripts and warranting rotation** — the `neondb_owner`
+  connection string, the Vercel token, and the admin password. Only the owner can rotate them.
+- 🟡 The admin bundle is 884 kB (249 kB gzipped) and has no `manualChunks`. Not urgent on a branch
+  laptop, but the driver PWA's size budget does not protect this one.
+
+
+## 2026-09-01 — «السلفة»: an expense that must come back
+
+Deployed: migrations `0055`–`0057`, API, admin. Commit `e04dca4`. `pnpm check` green — 885 API
+tests, 560 domain, plus the new static migration suite.
+
+Owner: «اضف شي خليط بين الصرفية و الذمة — هوي صرفية دفعت لكنها يجب ان ترد كاملة».
+
+A third money instrument beside the صرفية and the ذمة. It leaves the box the way a صرفية does — a
+named person, a category, a receipt — but it is **not consumed**: it stays company property, and
+therefore office capital, until it is handed back.
+
+### A scope amendment, not a feature
+
+`SRSv1.0.md:62` and `:176` place «السلف» out of scope, and `ASSUMPTIONS.md` A-16 recorded the
+omission as deliberate, *"so a future session does not helpfully add them"*. That conflict was put
+to the owner before any code was written, with four scoping questions. His answers, now
+**decision 17**: any party named as free text; recorded from Expenses and read from Treasury;
+repaid only by cash back into the box; converted to an ordinary صرفية if it never returns. A-16 is
+superseded in place for advances only — salaries and penalties remain out of scope.
+
+### The property the whole thing rests on
+
+```
+pay 100,000   box 3,900,000 + ذمم 400,000 + سلف 100,000 = target -> nothing moves
+repay it      box 4,000,000 + ذمم 400,000 + سلف       0 = target -> nothing moves
+convert it    box 3,900,000 + ذمم 400,000 + سلف       0 < target -> one «شحن» of 100,000
+```
+
+Get this wrong and صندوق الشركة finances every advance invisibly: «شحن» in each night to refill a
+box that is not short, swept back out the day the money returns. So capital gains the term in all
+**four** places that compute it — the dashboard read model, the restoration's own `positionsFor`,
+the go-live gate, and the guard inside PostgreSQL. An end-to-end test runs three nights around one
+advance and asserts the company fund never moves; a second asserts conversion moves it exactly once.
+
+### Three design decisions worth keeping
+
+**The fund is keyed by the ADVANCE, not the party.** The party is free text and has no id. Keying by
+the advance also inherits `0037`'s production-tested over-collection guard, which refuses to drive a
+*named* asset below zero — a single pooled fund would hide over-repaying one advance behind another
+still outstanding, because the pool never goes negative. `party_key` (a pure Arabic normaliser:
+hamza, harakat, tatweel, ة/ه, ى/ي, Arabic-Indic digits) exists only for autocomplete, is derived
+server-side, and no figure depends on it.
+
+**A repayment returns to the box the money left from.** الترميم plans each box against its own
+target, so crossing boxes would raise one leg and lower the other at different moments and let one
+advance's own balance go negative in between — which every reader treats as corruption. The physical
+case is served by composing with `POST /treasury/transfer` from the previous commit.
+
+**Conversion writes a real `expenses` row**, carrying the advance's own category, cost centre and
+receipt, so SRS G's «كل ليرة تخرج: مصنَّفة وموثَّقة ومنسوبة لمركز كلفتها» is honoured at the moment
+the lira is finally recognised as spent. Its cost centre is derived as an ordinary expense derives
+it (`vehicleId ?? '<kind>:<branchId>'`) — never from the category, which has never been an account.
+
+### Re-emitting a SECURITY DEFINER guard without retyping it
+
+`0053` cannot be edited: `migrate.ts` checksums applied migrations. So its v3 restoration guard is
+re-emitted as v4 — **extracted verbatim with `sed`, changed by seven named hunks, proved by
+`diff -u`: 40 lines of 332.** The driver-receivable derivation inside it is byte-identical, and a
+test slices that fragment out of both files and demands equality, so the proof outlives the session
+that made it. Four whole blocks — the actor check, the advisory lock, the opening-snapshot reversal,
+the net computation — are untouched, and being able to say that precisely is the evidence.
+
+The dispatcher gained one genuinely new rule, which is the whole safety story: **a v3 plan is refused
+while any advance is outstanding.** An API rolled back past this release can only emit v3, which has
+no advances term; refusing it by name stops الترميم loudly instead of paying for the same advance
+twice. RUNBOOK carries the operator note.
+
+### Verified on production, then rolled back
+
+No Docker on this machine, so the guards had never met a real PostgreSQL. Two passes, both against
+production inside transactions that were rolled back — the technique that caught two faults in 0054:
+
+1. **Rehearsal** — 0056 and 0057 parsed and ran together, all six functions present with the right
+   `SECURITY DEFINER`/`search_path`, ten triggers, `expenses.advance_id` and its partial unique
+   index, and all 11 existing expenses still ordinary.
+2. **Guard exercise** — paid a 1.00 advance through the real triggers, then proved each refusal
+   fires by name: `advances_actor_guard` (attributed to somebody else), `advances_lines_guard`
+   (journal disagrees with the row), `advance_events_overrepayment_guard` (repaying more than is
+   owed). Repaid it; `office_cash` returned exactly to `51,520.65`. **11/11, then rolled back.**
+
+### See it in 2 minutes
+
+**الصرفيات** → a third button «السلف» beside «صرفية» and «مدخول»: recipient, box, category, amount.
+**الخزينة** → the «السلف» card above «الذمم»: what each still owes, with «تسجيل إعادة» and
+«تحويل إلى صرفية» (which asks first — capital drops only there).
+
+### Deliberately not done
+
+No deduction from a driver's shift settlement: that would reach into the settlement snapshot
+decision 13 froze, and the owner chose cash repayment only. No write-off path — an advance that will
+not return becomes an *expense*, with its cost centre, rather than a loss beside the receivable
+write-offs it has nothing to do with.
+
+---
+
+## 2026-08-31 — the order-time pipeline: the window, the clock, the duplicate
+
+Deployed: migration `0054`, API, admin. Commits `3409622`, `2ea8f8f`. `pnpm check` green — 838 API
+tests, 138 adapters, 118 db, 330 driver, 173 admin, 307 client, 505 domain.
+
+Owner: «صمم حل مناسب … تأكد من اصلاح كلشيء و عدم حدوث اخطاء جديدة **لان النسخة مستخدمة الان**».
+
+Measured first, on 330 production order rows — all from OCR, zero manual — of which 35 (10.6%) were
+excluded. Three defects behind one complaint, and the third caused by the second.
+
+### 1. The window, not the reader — 29 rows, 6,795.00
+
+The clock was read correctly; the delivery simply fell before the manager pressed approve.
+Driver-confirm→approve gaps reached **426 minutes**. Six of Nazeer's rows on 2026-08-28 were
+re-included by hand as «توصيل بين تأكيد السائق 12:46 واعتماد المدير …». **A rule a human overrides
+every shift is the wrong rule**, so the owner moved the bound to the driver's confirmation
+(decision 11, amended).
+
+The bound lived in **four** places — the TS classifier, a full SQL mirror of it, and two comparisons
+in the close-draft service. `shifts.window_opens_at` is now the one instant they all read; the
+six-value truth table is untouched in both implementations. The four SQL callers were extracted
+**verbatim** and re-emitted with exactly five tokens substituted, proved by diff — after I caught
+myself, twice this session, rewriting a security function from memory.
+
+### 2. The clock — 11 rows, 2,715.00
+
+The resolver had the upper bound (the screenshot's own time) and never the shift's lower edge, which
+`linkedRows` has held as `shiftOpenMinute` all along. A delivery cannot predate its shift, so `1:18`
+on a shift opened at 12:00 settles as 13:18 without guessing a marker. Only the linked-read caller
+passes it; the adapter's cached pass stays context-free, so `cache_signature` does not move — no
+re-read, no OCR re-billing.
+
+**The bound disambiguates; it never deletes.** A first draft filtered unconditionally and stripped
+the minute from a legible `1:00 PM` printed under the previous day's header — costing the row its
+merge identity and duplicating it on the next retake, the exact failure being fixed. An existing
+test caught it.
+
+### 3. The duplicate follows from 2 — and a second cause nobody knew
+
+5 of 11 no-time rows were marked duplicate against 2 of 319 timed rows — **72×**. Found while
+fixing it: `matchKey` was built by two recipes that could not agree. The scan path used an unpadded
+printed hour and raw OCR money (`8:00`/`155`); rehydration used the stored padded minute and
+`serializeMoney` (`08:00`/`155.00`). **A rehydrated row could never match a scanned one for any hour
+0–9 — every morning shift** — and nothing asserted either key's value. One builder now serves both,
+marker-blind so a retake that makes ص/م legible still merges, and fresh rows also carry the old
+shape so a draft saved before this lands is not stranded.
+
+### The rehearsal earned its keep
+
+No Docker on this machine, so the PostgreSQL guard suite is skipped and 427 lines of replaced
+PL/pgSQL had never been parsed. Running the whole migration against production **inside a
+transaction that was rolled back** found two faults that would have hit at deploy time:
+
+- `55006 pending trigger events` — two deferred constraint triggers re-validate a shift's close
+  journals on ANY update. Flushing them made it worse: the guard then raised on an existing
+  cancelled shift, so a derivation would have surfaced unrelated history. Both are suspended across
+  the backfill and restored in the same transaction, as 0037 does.
+- **`cancelled` is a real state holding 33 of production's 70 shifts.** The enum in 0005 does not
+  list it; a later migration added it. The backfill treated it as work in progress and moved every
+  one of those bounds.
+
+After the real run: **70 shifts, all bounded, `moved 0`** — every settled shift keeps the exact
+instant it was judged by. 4/4 functions read the new column, none the old. Trial balance 0.
+
+### Also
+
+A one-press action to book the whole close shortage as an ordinary receivable. The control existed
+and worked; it only appears when the employee ends owing the office — one of eight shifts on
+2026-08-30 — which is why the owner had never met it.
+
+### New tests
+
+TS/SQL parity over the whole truth table (**there was none** — 0030's test only asserted the SQL
+text *contains* the call); the merge identity in both shapes and its null guards; the resolver bound
+settling, respecting the inclusive open minute, and never deleting a lone candidate; a delivery in
+the confirm→approve gap healing to `in_window`.
+
+### Correction to an earlier claim
+
+I told the owner that `close_draft_review_reasons` being empty in production was worth investigating.
+It is not. The approval gate refuses while any row carries a reason, and the only way past it clears
+the column — so every approved row necessarily ends `[]`.
+
+## 2026-08-29 (later) — «تعديل الذمم المسجلة», the map picker, and two bugs found by looking
+
+Deployed: migration `0050` applied (`1 applied, 49 already present`), then API and admin. Commits
+`ead5558`, `1c884a6`. `pnpm check` green — 820 API tests, 498 domain.
+
+### رأس المال المدوّر = 60,000.00, and the button that could never have worked
+
+Owner: «يجب ان يكون 60000». The 6,502.00 above capital was pre-epoch accumulation sitting inside
+working capital, so it had to LEAVE — not be subtracted in a reader, which is the mistake the
+position-vs-flow rule exists to prevent. It went out through «كييش» to صندوق الشركة: audited, dated,
+reversible, and the same leg tonight's restoration would perform.
+
+**Except the route answered 500.** `sweepToCompany` stamps `event_type = 'restoration'`, and
+`restoration_journal_fact_from_entry` refuses any restoration entry without an immutable
+`restorations` row in the same transaction. `restoration` is not a label, it is a promise: a sealed
+count, a feasible plan, the whole atomic ceremony. A hand sweep has none of it, so the «تحويل إلى
+صندوق الشركة» button had never worked in production — while five green tests exercised it, because
+the memory ledger has no triggers and the Postgres guard suite is skipped without Docker.
+
+Fixed as `manualKaish`: identical lines, identical `kaish` line role, `event_type = 'manual'`.
+
+**And that fix nearly shipped a worse bug.** The dashboard's treasury reader gated on event type
+BEFORE looking at the line role, so moving hand sweeps to `manual` would have made every one vanish
+from «دخل الصندوق (كييش)». Two existing tests failed, which is how it surfaced. The reader now
+identifies a treasury flow by its LINE ROLE first — the same order `treasuryRoleOf` already used one
+line below — with event type as the fallback for legacy rows.
+
+Live:
+
+```
+working capital  60,000.00 / 60,000.00   0.00
+cash    26,716.37 / 50,000.00   −23,283.63
+wallet   5,783.63 / 10,000.00    −4,216.37
+custody (5 shifts)  25,000.00 + 2,500.00
+company fund  6,502.00     fund in (كييش)  6,502.00
+```
+
+### No surplus is claimed while today's shifts are open
+
+Owner: «لا يجب ان يظهر اي زيادة بالصندوق طالما لم تنتهي النوبات اليوم». He was right and my earlier
+explanation to him was wrong — I had told him the surplus above capital was the day's earnings. An
+open shift posts NOTHING after its float leaves the box: orders, share and variance all land at
+approval.
+
+The ledger settled it. Walking working capital day by day, **2026-08-29 moved it by exactly 0.00**,
+not one entry. Every lira of the 6,502.00 the card called «زيادة عن رأس المال» accumulated between
+22 and 28 August, before the epoch. True about the balance, false about the day — and the day is
+what a reader takes from a dashboard.
+
+While any shift is open the headline now reads «تُحتسب الزيادة بعد إقفال نوبات اليوم (N مفتوحة)».
+A SHORTFALL still shows: holding back premature good news protects the reader, holding back bad news
+hides the one direction that means money is missing. `deltaProvisional` comes from the API rather
+than being re-derived in the screen, so the two cannot drift.
+
+**Still owed tonight:** that 6,502.00 is pre-epoch accumulation sitting in working capital. It is
+not sweepable right now — the office boxes are short by 20,998.00 because 27,500.00 is out on the
+road — so the restoration after the shifts close is where it lands.
+
+### A box with its money in drivers' pockets is not in surplus
+
+Reported off the screen. The cash line read «58,218.37 / 50,000.00  +8,218.37» in green while the
+box held 33,218.37 against that same target — SHORT by 16,781.63. The difference was 25,000 of
+active custody, folded into the box's position.
+
+`planRestoration` takes a box's position as `counted + receivables`, because custody is out in a
+driver's pocket and cannot be swept while his shift is live. The per-box lines added custody on top,
+so the one figure a manager reads before deciding whether to sweep said the opposite of what the
+restoration would do. Green means "you may take money out"; the drawer was short.
+
+Fixed, relabelled «ما في الصندوق والذمم / الهدف», and negative-tested: on the old arithmetic the new
+test reports 60,000.00 where the box holds 35,000.00. Live now:
+
+```
+cash    33,218.37 / 50,000.00   −16,781.63
+wallet   5,783.63 / 10,000.00    −4,216.37
+custody (5 shifts)  25,000.00 + 2,500.00      ← not actionable tonight
+working capital  66,502.00 / 60,000.00  +6,502.00
+restoration delta (actionable)          −20,998.00
+```
+
+Checked and NOT a bug: receivables reading 0.00 on the same card is correct — API and ledger agree
+to the lira, and the 16,290.00 seen earlier in the day was collected in between.
+
+### Correcting a receivable: restate the balance, never edit an event
+
+A driver's receivable balance is a LEDGER FUND BALANCE, not the sum of `receivable_events`. Seven
+places emit receivable fund lines and only ONE writes an event row — so "edit the event" is
+arithmetically incapable of touching the commonest wrong number of all, a `shift_funding` carry,
+which has no event to point at. There is a test for precisely that: a carry created entirely by a
+shift close, corrected, asserting no command row existed beforehand and that the next shift opens on
+the corrected figure.
+
+So the correction names the balance and posts the difference through the UNCHANGED
+`receivableAdjustment` recipe — one way to move a receivable, and every 0037 guard applies
+untouched. `expectedCurrentBalance` is re-read inside the lock: if a shift closed in between, the
+correction is refused with both numbers, because a correction that silently erases a real event is
+worse than the balance it was meant to fix. `intent` exists so the driver's history does not read
+«تحصيل ٦٬٠٠٠» for an event where no money came back.
+
+Migration 0050 deliberately does NOT relax 0037's inactive-driver guard: that meant rewriting a
+200-line security trigger to change one clause. A hand-copied guard that drifts from the original is
+a worse risk than the workflow it saves — a first draft of this migration did drift, inventing
+`jl.role` where the original checks `jl.line_role`, and would have weakened production.
+
+### A 300 km fence, and a map so it cannot happen again
+
+The branch was placed at lat 36.29297 / lng 33.52239 — the fields filled the wrong way round.
+Damascus is 33.5 N, 36.3 E, so the fence landed in southern Turkey and every round would have read
+«خارج الفرع». No schema could catch it: both numbers are legal in both fields. The guard is now a
+bounding box for the ground this business operates on, and when reversing the pair would land inside
+the refusal hands back the swap for one press. And the fence can now be picked off a Leaflet map —
+already a dependency, so no new weight — with the radius drawn at true scale.
+
+### An unknown route was a 500
+
+`authorize` is a global preHandler and Fastify runs preHandler hooks on its not-found route, which
+declares no permission. So every typo, stale client URL and scanner probe answered
+`500 route_misconfigured` — the server confessing to its own fault for a thing that does not exist.
+Real 500s are how breakage gets found.
+
+### Go-live: refused for the wrong reason, then set
+
+The owner asked to move the epoch to 2026-08-29 and the gate refused —
+`go_live_requires_opening_ceremony`, with working capital **66,502.00** against a target of
+**60,000.00**, i.e. 6,502.00 ABOVE it. The refusal was my design error, not his mistake. The second
+proof demanded working capital EQUAL the target, and that holds only at the instant a restoration
+finishes: one shift collecting one delivery fee puts it above, which on the first day is exactly the
+earnings being attributed to the new epoch. The epoch could only be declared at a frozen moment a
+working day never has.
+
+The asymmetry decides it. A shortfall hidden by an epoch means money vanished with no record and no
+way to see it afterwards — what the gate is for. A surplus hidden means the office holds more than
+its declared capital, which is not a loss of control. The rule is now `working >= target`, the
+refusal names the shortfall, and the position at the decision is written into the audit entry. The
+test that asserted the opposite is reversed in place, and a new one pins the case that still fails:
+one lira BELOW capital.
+
+Set to **2026-08-29**. `/dashboard/profit` asked for 2026-08-01 answers `from: 2026-08-29`, so the
+flows start at the epoch while the box balances still reconcile to capital. Shares read 0.00 because
+all five of today's shifts are still open — they post at approval.
+
+## 2026-08-29 — «التفقّد», the branch manager's rounds
+
+Deployed: migration `0049` applied to production on the direct Neon endpoint (`1 applied, 48
+already present`), then API and admin. `/health` `{"ok":true}`; `/checkin-windows`, `/checkins` and
+`/branch-location` all answer `401` (registered, authenticating) where an unknown route answers
+`500`; `ash-admin-eta` serves `index-_MPebcql.js`. **Trial balance after migration: 0.** Commits
+`51446af`, `708f17f`.
+
+`checkins` came up with `INSERT, SELECT` and nothing else for `app_user` — the append-only grant
+took. The Postgres conformance suite is skipped without Docker, so the row mappers were the one part
+no test had exercised against a real database; every column they dereference was checked to exist
+(`8/8`, `14/14`, `3/3`) and `captured_at` confirmed to be `timestamp with time zone`, since a mapper
+reading a missing column does not throw — `String(undefined)` is `"undefined"`, and the failure
+would have been a check-in attributed to a user of that name.
+
+The owner's rule: several rounds a day — «تسجيل الدخول عالساعة 1 و 5 و 10» — each within a
+tolerance and each from inside the branch's own patch of ground, «على حساب مدير الفرع و ليس
+السائقين». Three choices he made: a «تفقّد» button the manager presses, a branch point plus a
+radius, and record-and-report rather than block.
+
+### It never blocks, and that is the design, not a softness
+
+A refused GPS permission, a manager genuinely away, a round nobody answered — each produces a
+recorded row saying exactly that. A check-in that could stop a manager working would be one GPS
+outage away from stopping the branch. The single refusal is a branch with **no** coordinates:
+measuring against `(0,0)` puts the fence in the Gulf of Guinea and fails every round with a distance
+of several thousand kilometres and no explanation, so `branch_location_not_set` says so instead.
+
+### Drivers are excluded by name, not by omission
+
+They are on the road all day and their whereabouts already ride on their shift's GPS pings. A rota
+of office rounds for a driver would be a queue of guaranteed misses, so `POST /checkin-windows`
+refuses one with `checkin_not_for_drivers` and the admin never offers a driver in the picker.
+
+### The two decisions in the pure code
+
+**Haversine, not a flat-earth fit.** A geofence is decided at its edge — precisely where an
+approximation is least trustworthy — and the error of treating degrees as a plane grows with
+latitude.
+
+**Closest open window, not the first.** Tolerances overlap: 01:00 ± 45 and 02:00 ± 45 both accept
+01:30. A manager checking in at 01:55 means the two o'clock round, not the one o'clock round he is
+nearly an hour late for. Ties break on the earlier target, then on the ref, so the same inputs
+always give the same answer.
+
+### The roll-call is built from the windows
+
+The interesting row is the one with **no** check-in against it, and a report driven by what happened
+can never show what didn't. Where a round has two answers the best one stands — a manager who checked
+in from the road and again from the office was, in the end, at the office for that round — and both
+rows survive in the log. `checkins` is append-only at the database (`REVOKE UPDATE, DELETE,
+TRUNCATE`), like every other piece of evidence.
+
+Rota and fence are `settings.write`, so a branch manager cannot move his own goalposts. Retiring a
+round moves `active` and keeps the row, so yesterday still explains itself.
+
+**Verification:** 17 domain tests, 15 API tests, `pnpm check` green (791 API tests, 494 domain).
+
+### The person being checked on does not own the check
+
+Owner amendment, same day: «لا يجب ان يستطيع مدير الفرع تغير اعدادت التفقد فقط مدير النظام / مدير
+الفرع فقط يسجل الدخول».
+
+The server already behaved this way — every write that DEFINES the check (add a round, retire a
+round, move the fence) is `settings.write`, and production's `role_permissions` holds exactly one
+row for it: `system_admin / all`. But only one of the three writes had a test, so the rule was true
+by accident of a shared gate rather than pinned. All three are now asserted, and the **general
+manager** is tested separately on purpose: he holds `branch_data.view` at scope 'all', so a leak of
+configuration to "whoever can see the branch" would have passed every branch-manager assertion and
+still handed him the rota. The success half is asserted too, so a future tightening cannot quietly
+take away the one thing the branch manager is here to do.
+
+On the screen, a manager looking at an unplaced branch was shown «لم يُحدَّد موقع الفرع» with no way
+to act and no hint of who could — which reads as a broken system rather than as a step somebody owes
+him. He is now told it is the system admin's to set.
+
+### The truthy-object bug, and the half that hiding could not fix
+
+The owner opened the screen as a branch manager and found the rota editor there: an add form and an
+«إيقاف» button on every round.
+
+`can()` returns a Decision **object**, and every object is truthy. `canConfigure` read
+`session != null && can(...)` — permanently true. `Treasury.tsx` and `Expenses.tsx` end the same
+call in `.allowed`; this one did not, and nothing catches it: the expression typechecks, and the
+server refused every button anyway. He could change nothing; he was offered controls that could only
+fail. A sweep of every `can()` call site in both apps found no other instance.
+
+Hiding the cards would not have been enough. Both reads answered with **every** person on the
+branch's rota, so a colleague's rounds and check-ins were one request away however the screen was
+drawn — and UI hiding is not security. Both are now narrowed on the server, keyed on the SCOPE the
+authorisation granted rather than a role name: branch-wide sight makes an auditor, anything narrower
+makes a subject who sees himself only. `req.grantedScope` carries `decision.scope` out of the RBAC
+preHandler, which was the only place that fact existed. A `?userId=` naming a colleague is ignored,
+not obeyed — and if the §3 matrix is ever edited to widen someone, he becomes an auditor by that same
+act rather than by a second edit here that somebody would have to remember.
+
+The per-ping log is an auditor's view, so the response states the caller's scope and the screen
+renders from it instead of re-deriving the rule. Three new tests, including the one a client-side
+filter would have passed: a colleague's real check-in, written through his own session, must not
+appear in the manager's log.
+
+### Next
+
+- **The branch has no point yet** (`DAM`: `lat` null, radius 150), so «التفقّد» is inert by
+  construction — no round can be failed. The owner sets it from the branch itself with «استخدم
+  موقعي الحالي»; a coordinate guessed from here would fence the wrong ground.
+- «تعديل الذمم المسجلة» — designed, not built. The finding that shapes it: a driver's receivable
+  balance is **not** the sum of `receivable_events` (seven sites emit receivable fund lines, one
+  writes an event row), so an event-pointer correction cannot touch the commonest case — a
+  `shift_funding` carry. The design is a balance **restatement**: `POST /receivables/adjustments`
+  from an expected current balance to a target, reusing the unchanged `receivableAdjustment()`
+  recipe, with `intent='correction'` so a driver's history never reads "collected".
+
+## 2026-08-28 — the go-live date, and direct income
+
+Deployed: migrations `0045`–`0047` applied to production (`3 applied, 44 already present`), then
+API, admin and driver — all `● Ready`, `/health` `{"ok":true}`, `ash-admin-eta` verified serving
+`index-CcX-kASL.js`. Trial balance after migration: **0.00**. Commits `831fbdf`, `e273fd3`.
+
+### «تاريخ بدء التطبيق» — and why a date alone is a half-truth
+
+The first five days of production were a trial. The owner asked for a setting naming the real
+go-live date, with everything before it ignored.
+
+A date alone cannot do that, and the proof was already on his screen. `PgLedgerRepo.fundBalance`
+(`repos.ts:273`) and `PgTreasuryPositionSource.readCurrent` (`:932`) sum **every** journal line for a
+fund with no date predicate — and `fundBalance` is a **control** read, not a report: it feeds the
+insufficient-funds guards, the cash-count baseline, `cash_count_stale` and the restoration plan.
+Date-filtering it would make the drawer look empty and break all four. So flows clamp; positions
+never do. What makes the two agree from the epoch forward is a sealed cash count plus a restoration,
+which puts each box on its capital target — so **the date is refused until that has happened**,
+naming what is missing.
+
+It is a business DATE, not a time: every money column is keyed on `business_date`, which now rolls
+at 04:00, and a second go-live instant would be a competing time rule.
+
+**The worst failure it could have introduced, now a named test.** The week close demands a sealed
+cash count for every day of the week. A day before go-live was never operated and can never acquire
+one, so a mid-week go-live would have made that week permanently unsealable and blocked BR7 from the
+first week onward.
+
+### «المدخول المباشر» — direct income
+
+Money arriving that is not a delivery fee. Until now it was recorded as an uncategorised manual
+journal entry, which is how a scrap sale becomes indistinguishable from a correction.
+
+**The operator names a CHANNEL, never a fund.** Which box received it is a physical fact he knows;
+the recipe picks the account. Letting him type a fund code is the trap `fundRefFromCode`'s own header
+describes — its default clause turns any unrecognised string into `cost_center:<code>`, a look-alike
+account no profit reader sums and no error is raised about.
+
+It credits **`other_income`, not `company_revenue`**: BR4 reserves that for the company's residual
+share of *delivery fees*, and folding a battery sale into it would silently overstate the delivery
+business. `fundTypeOf` files the new account under `cost_center` beside `company_revenue`, so no
+`fund_type` enum value is needed — but the `case` **is**, or the first income raises 22P02.
+
+Modelled on `receivable_events`, not on `expenses`: `journal_entry_id` is NOT NULL UNIQUE, so an
+income without its journal cannot exist and the expense route's runtime `assertCompleteExpense`
+guard has no counterpart to need. The replay comparison includes the channel — without it, a retry
+that flipped cash to wallet returns 200 while the original row stands against the wrong box.
+
+No new permission and no RBAC migration: `branch_manager` already holds `expense.write` at branch
+scope, and recording income is the same act.
+
+### A real bug the work uncovered
+
+`Expenses.tsx:45` gated writing on `roleKey === 'branch_manager' || 'general_manager'`, but decision
+9 grants `expense.write` to `system_admin` at scope `all` — so the system admin was shown a
+read-only screen. The identical bug was already found and fixed once in `Dashboard.tsx:131`. It now
+asks the rule via `can()` instead of restating it.
+
+### Deliberately not done
+
+Receivables keep their card on the treasury screen, linked from the money hub. Their client-side
+outbox (mutex + durable storage, `receivable-idempotency.ts`) is what stops a lost response charging
+a driver twice; a second copy of that machinery was not worth the risk. The hub instead warns that
+entries must precede the cash count — which the server enforces with `cash_count_stale`, and which
+the treasury screen's card order currently contradicts.
+
+**2,281 tests pass**; typecheck, domain purity, CSS logical-properties, i18n, wire, sql and glyph
+gates all clean.
+
+
+## 2026-08-28 — the business day ends at 04:00, and the dashboard picks its day
+
+Deployed to production (API `ash-api`, admin, driver — all `● Ready`, `/health` `{"ok":true}`,
+`ash-admin-eta` verified serving `index-BFoVL-v0.js`). Commit `75c32ab`.
+
+### The day boundary
+
+The owner: «اليوم لا ينتهي على الساعة 12 بل على الساعة 4 صباحا». A delivery fleet does not stop at
+midnight, so a shift closed at 01:30 belongs to the day it was **worked**.
+
+`businessDateFor` now rolls the clock back by the day-start before taking the calendar date:
+
+```ts
+const localMs = epochMs + (offsetMinutes - dayStartMinutes) * 60_000
+```
+
+**Injected as a value**, exactly like the UTC offset and for the same reason: `business_date` is a
+WRITTEN column, so rows already stored under the midnight boundary must stay reproducible — a named
+test pins that `dayStartMinutes: 0` reproduces the old rule exactly. `DAY_START_MINUTES` is config,
+so a branch changing its hours needs no deploy.
+
+The change went on the `Clock` port rather than into a constant, which made the compiler enumerate
+every implementation — and it found one (`packages/db/test/conformance.test.ts`) that would
+otherwise have been missed.
+
+**The case that mattered most.** 2026-08-29 is a Saturday. Under the midnight rule a close at 01:30
+on Sunday the 30th booked into the week starting the 30th — a *different financial week*, and BR7
+makes a closed week immutable. Now it books to Saturday the 29th, week starting the 23rd. That is a
+named test, because an off-by-one where entries become immutable is the worst failure available.
+
+Existing data is untouched: 84 journal entries, 14 orders and 1 shift sit in the 00:00–03:59 window
+and keep the dates they were written with. The rule is forward-only; no migration.
+
+### Day selection on the dashboard
+
+`/dashboard` accepted no date at all — it pinned `todayFor(deps)`. It now takes `?day=`, defaulting
+to today. The financial panels follow the selection; **fleet readiness deliberately does not**,
+because `vehicles.state` is a current fact with no history and rendering it as yesterday's would be
+inventing data.
+
+The picker takes "today" from the server's own `businessDate` rather than recomputing it in the
+browser. A second copy of the 04:00 rule is free to drift, and the four hours either side of the
+boundary are exactly when a manager is closing shifts.
+
+**2,253 tests pass** · typecheck · domain purity · CSS logical-properties · i18n · wire · sql · glyphs.
+
+### Not done, and why
+
+The recoveries for محمد المسلماني (744.00) and حيدر محمد (666.00) are **not** posted. They are also
+not "special income": from `recipes.ts`,
+
+```
+Δoffice_cash + Δoffice_wallet = blockTotal − grossDriverShare = companyShare
+```
+
+so حيدر needs a **credit** to `office_wallet` (−811.80). An income recipe (`D office / C revenue`)
+cannot express that leg; forcing it would book the driver's share and Yallago's cut as a company
+**cost**, misstating the very profit the work exists to protect. The right instrument is the
+existing `POST /journal/manual`, which takes balanced multi-line entries and needs no new code.
+
+Related trap, found and avoided: `/treasury/deposit`'s `owner_funding` contra would have understated
+reported profit permanently — all three profit readers enumerate **fund codes**, not event types, so
+there would have been no error and no failing test, just a wrong number.
+
+
+## 2026-08-27 — Taha's shift: two corrected figures, and a display that lied twice
+
+**The shift.** `d0a5a7ec` (طه قبلان). The owner's calculator and the system disagreed on two inputs
+and agreed on everything else — orders `172,000` and Yallago's cut `34,400` matched to the unit.
+
+| | system | bot | resolution |
+| --- | ---: | ---: | --- |
+| كاش السائق | 68,100 | **681,000** | driver typed `681.00` for `6,810.00` — a dropped digit |
+| الكاش المشحون | 300,000 | **500,000** | every other driver that day got 500,000; Taha alone 300,000 |
+
+Corrected through the audited API as `admin` (system_admin holds `shift.operate` at scope `all` per
+decision 9 — the only role that can do both):
+
+- `PATCH /shifts/:id/close-draft` → `cashDeclared: "6810.00"`, draft revision 28 → 29.
+- `POST /shifts/:id/tranche` → a **second** float tranche of `2,000.00`, never an edit of the first.
+  Journal entry `#329` posted `driver_cash D 200000 / office_cash C 200000`; the whole ledger's
+  trial balance is **0**. A raw `UPDATE` would have left `#309` saying 300,000 with no `#329` at
+  all — 2,000.00 out of the office in the projection and not in the books, and the trial balance
+  would still have read zero, which is what makes that failure mode dangerous.
+
+`end_cash_declared_minor` and the variance recompute only at close **submission**, so the admin
+screen still shows −3,985.20 until Taha submits. After submission: **+143.80**.
+
+### The display: wrong twice before it was right
+
+His screen read «محسوبة 10 من 21» — ten deliveries drawn twice, one «محسوبة» beside one
+«بانتظار المدير». The stale copies had lost every sighting to a photo retake and kept only
+`human_time_edit`, which `operationDecisionState` reports as pending: a manager decision with no
+photo behind it to decide on.
+
+1. **First attempt keyed on date/clock/cost but exempted `source: 'manual'`.** In this codebase
+   `manual` marks a scanned row whose TIME a human corrected — which is exactly what every stale
+   copy was. The filter was a **no-op on the only shift it existed for**, and it shipped.
+2. **Second attempt keyed on `providerOrderNo`,** on the belief that it was the provider's own
+   unique number. It is synthesised as `YAL-${stableKey([shiftId, clientKey])}`
+   (`close-draft.service.ts:814`) and `clientKey` is page-scoped, so one delivery photographed on
+   two generations carries two numbers. `125.00 @15:19` stayed on the screen twice.
+3. **Third is correct:** the printed date, clock and cost — decision 16, which the owner had stated
+   twice — with no `manual` exemption, and the survivor chosen by evidence rather than by position
+   in the array. Verified against the stored rows **before** deploying: 21 → 10, all counted, all
+   evidenced. A delivery that lost every photo still appears once; swallowing it would hide real
+   work from the driver.
+
+**Both wrong attempts had green tests**, because the tests encoded the same false premise. What
+caught them was running the code against production data. Mutation checking then found two
+unprotected guards in the third attempt — the survivor preference and the evidenced-row exemption —
+and both now have failing tests behind them.
+
+**And hiding them broke the gate.** His summary then read «متبقي 1 — صفوف فيها خطأ» over ten clean
+rows: `hasBadOrderRows` still ran over all 21, and every stale copy raised `duplicate_order_no`
+against the row that superseded it — ten collisions, none on his screen, refusing a close he had no
+way to repair. That is the shape that stranded امجد on 2026-08-24, and this time it was introduced
+by filtering the display without filtering the gate. Both gate inputs now take the same list the
+grid renders; a problem on a visible row still blocks.
+
+**Risk:** the filter is presentational. The remnants remain in the draft and the manager's review
+still shows them; only the driver's grid and counter are filtered. `shift_orders` holds 10 committed
+rows and no money moved at any point.
+
+**Next:** Taha taps «تحديث» and submits. Then retire one of his two driver records — `Taha`
+(`6aaf6199`) and `Taha2` (`35ccd38c`) are the same man, and the ledger posted against `Taha2`.
+
+## 2026-08-26 — the duplicate detector was blind on the first real shift it met
+
+Shift `7be4dbb5` (أنس رميح, still open) has two dashboard scans that genuinely share a row:
+`130 @22:26` is printed on both — the last row of `dashboard_2` and the second row of `dashboard`.
+**The detector shipped this morning found nothing.** Run against the real stored rows, it returned
+zero overlaps.
+
+The cause was my own design. I required a CONTIGUOUS suffix-to-prefix run, and `dashboard` opens on
+a row the screenshot cut in half — no amount, so no anchor. One unreadable row at the edge of a
+photo, which is the ordinary shape of a scrolling list, ended the search at its first comparison.
+
+No money was hidden by it: the canonical merge keys on date, printed clock and value, so
+`130 @22:26` was correctly counted once and the six committed orders are right.
+
+**Owner instruction, taken:** match on the printed date and minute. That is now the primary rule,
+and it is the same identity the merge already trusts. The contiguous run stays as the fallback and
+is exercised by its own test, because the shift that motivated the feature — `4f40640e` — had NO
+clock on any row of its second page; date matching is impossible there by construction.
+
+Direction is decided by where the shared rows sit: the list is newest-first, so the page still
+showing newer orders above them was captured first. Slot names and read timestamps both point the
+wrong way and are still ignored.
+
+`SCAN_OVERLAP_CAUSES` / `SCAN_OVERLAP_PAIR_CAUSES` are now runtime lists, and an API test asserts
+the wire enum equals them. A cause the schema does not know throws inside
+`scanDuplicateHintSchema.parse` — a 500 on the exact review screen this feature serves. That is now
+a failing test rather than an incident.
+
+**Deployed 2026-08-27** — API `dpl_GCPZ8oiBztyyoE1c1CVytzxdfjS5`, admin
+`dpl_2tB87PiQhk4WPkxzzCQaTez68Txk`. Verified against the CDN: the served admin bundle
+`index-V491UlzR.js` carries `scan_overlap_timed_match` and is SHA-256 identical to the local build.
+The driver PWA was not rebuilt — it has no part in this change.
+
+### Also found on that shift, and NOT fixed here
+
+- The draft carries **16 order rows for 6 orders**. Both dashboards were retaken, so there are four
+  attachment generations; the stale generation's rows survive excluded, tagged `human_time_edit`.
+  The cash deduction is duplicated the same way (two 50.00 at 19:24, one included). Money is
+  currently correct, but a manager who "helpfully" includes the six excluded rows would double the
+  order total and move the driver share by 304.00 SYP.
+- BR1 on the shift as it stands: expected **6,150.00**, held **6,956.65**, **surplus 806.65** — about
+  1,008 SYP of orders unaccounted for, alongside three rows the reader could not price (two cut off
+  at the edges of `dashboard`, one cancelled). The shift should not be approved until أنس supplies
+  the missing page.
+
+## 2026-08-26 — the closing battery reading had been dead for twelve days
+
+An operator reported that "many battery readings failed today". They had not. **The reader
+succeeded every time; the driver's phone threw before it could use the answer.**
+
+| production, 2026-08-26 | |
+| --- | ---: |
+| BMS reads billed | 18 — **17 succeeded** (one real `no choice in response`) |
+| `shift_close_draft_reads` for `bms` | 12 rows, **every one `complete`, zero failed** |
+| model returned the `percent` key | **17 of 17** |
+| battery readings from OCR — **start** | **9** |
+| battery readings from OCR — **end** | **0** (7 typed by hand, 3 by a manager) |
+
+End-package readings sourced from OCR, by day: `08-14: 2` · `08-21: 0` · `08-22: 0` · `08-23: 0` ·
+`08-24: 0` · `08-25: 0` · `08-26: 0`. Start-package over the same days: `3, 3, 8, 9, 9, 9`.
+**The closing reading auto-filled exactly zero times between 2026-08-14 and 2026-08-26.**
+
+Shift `f61f4d73` shows the whole shape on one driver. Start: `88` and `65`, both `source: ocr`,
+cycle counts 25 and 30 stored. Close: the reader returned `17` and `9`, both `ok`, both stored
+`complete` — and what landed was `9, source: manual, cycles: null` plus a second pack marked
+`unavailable`. **The answer `17` was in the database and was never put in front of him.**
+
+**Root cause.** `BatteryPanel.tsx` asked `response.read.status`. The API has never returned a
+top-level `read` — both return sites give `{draft, rows, fields}`. `undefined.status` threw,
+`createLinkedReadTask` converted the throw into a failed read, and `applyCloudBmsFields` was never
+reached. The retry button took the identical path and failed identically.
+
+It hid for twelve days because **`packages/client/src/api.ts` declared `read` on
+`CloseDraftReadResponse`** — a field the server never sends — so the compiler had no reason to
+object, and the only test over this path (`linked-bms-escape-wiring.test.ts`) matches source text
+without executing it. The start package was unaffected because it uses a different response type
+that really does carry `status`, which is exactly the asymmetry the production numbers show.
+
+**Fix.** The client type now describes what the API actually sends (and gains the `alreadyRead` flag
+it really returns). The read is taken from where it genuinely lives — `draft.attachments[].read`,
+per slot — through a new total function `apps/driver/src/bms-linked-read.ts`, so the decision is
+executable in a unit test and cannot throw. Making the type honest immediately produced two
+compile errors, which were the two call sites.
+
+`apps/driver/test/linked-bms-read-state.test.ts` drives the decision on the shape the server really
+returns and asserts the old expression throws on it.
+
+**Deployed 2026-08-26** — driver `dpl_GXC2VrJCjT9WSmuRJGFcPH4tmegi`. Verified against the CDN, not
+just the local build: the served battery chunk `index-Dayo5gPb.js` contains zero occurrences of
+`.read.status` and two of the per-slot `attachments…find` lookup. API and admin untouched, both 200.
+
+**The fleet does not have this yet.** The driver app is `registerType: 'prompt'` — every phone keeps
+its old bundle until the driver taps «تحديث». Until he does, his closing battery reading still
+fails. Tell the drivers.
+
+**Not changed, deliberately:** the `fieldsFound === 0` path leaves `persistedMediaId` null without a
+push, so the pack stays un-ready until the driver types. That is correct — a reading must be bound
+to the media generation it describes — and the close gate names the pack if he does not.
+
+**No money was at risk.** The battery never touches BR1, the settlement or the ledger. What was lost
+is fleet-health data: twelve days of closing cycle counts, and packs recorded `unavailable` whose
+charge the reader had already read. History is not reprocessed; the typed values are the drivers'
+own attested readings.
+
+## 2026-08-26 — two overlapping scans of one order list, and the 374 SYP that hung on them
+
+**API deployed 2026-08-26.** `dpl_AtfHamDXtAdqeckFB12uoJuJsxia` is READY and aliased to
+`https://ash-api-xi.vercel.app`; health `200`, unauthenticated `/review` `401`, both front-end
+proxies still `200`. Local `pnpm check` is green: 2,201 tests, 45 migrations, every static gate.
+
+**Admin console deployed 2026-08-26.** `dpl_J6upM6qRvi4ABa8DPVVdxHWZQrKM`, bundle
+`index-ymlf6--n.js`, byte-identical by SHA-256 to the local build and carrying all four new copy
+strings. SPA `200`, `/api/health` through the proxy `200`, `/api/.../review` unauthenticated `401`.
+The driver PWA was deliberately left on `index-CZx3XxdF.js`: it has no functional change in this
+release, and a needless «تحديث» prompt trains drivers to dismiss the one that matters.
+
+**A stale-bundle trap was caught before it shipped.** `.release/admin` — the directory the prebuilt
+deploy reads — still held `index-DBAG-clh.js` from 24 August 17:04, two releases old. `vite build`
+writes to `apps/admin/dist`, not into `.vercel/output/static`, so deploying `--prebuilt` from the
+staging directory without re-staging would have rolled the admin console back two days and silently
+undone the `0044` admin release. Releases are now staged into a dated directory and the SHA-256 of
+the staged bundle is checked against the build before deploying.
+
+**Migration `0045` is NOT deployed** — see "What is still outstanding" below.
+Neither is required for the API release to be correct: migrations run only from an explicit CLI,
+never at boot, and the new code reads only `shift_close_draft_observations` and
+`shift_close_draft_reads`, which exist since `0034` with `app_user` already holding `SELECT`. The
+read guard is therefore live now; `0045`'s index is a performance aid for a check that already
+works without it. The old admin bundle simply ignores the new `duplicateHints` field.
+
+ثائر's shift `4f40640e-e8dd-4966-b547-d20656136fde` is production's only open money-integrity
+warning. He photographed the Recent Orders list **twice while scrolling**, and the second shot lost
+its date header, so none of its five rows carried a clock. All five became `unknown` and excluded —
+decision 11 working exactly as intended. But its first two rows were the first shot's last two, and
+nothing on the manager's screen said so:
+
+| his choice | orders | expected | variance | employee keeps | office cash |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| approve as-is (4 orders) | 62,000 | 594,600 | +58,120 | **779.20** | 5,245.80 |
+| include the 3 genuinely new | 130,000 | 649,000 | +3,720 | **507.20** | 5,517.80 |
+| include all 5 | 155,500 | 669,400 | −16,680 | 405.20 | 5,619.80 |
+
+Under decision 13 the variance is paid straight to the employee, so **37,400 minor units swing on
+one manager's reading of five undated rows.** The stored `equation_diff=58,120`, `cash_diff=45,500`
+and `wallet_diff=12,620` all reproduce BR1 exactly — the engine is right, the inputs are incomplete.
+
+**What shipped**
+
+- **`packages/domain/src/shift/page-overlap.ts`** — a pure detector for the one shape a re-scroll
+  always makes: a maximal *suffix* of one page equal to the *prefix* of another. Every existing
+  matcher in this codebase is time-keyed (`matchKey`, `isTimedCashDeductionDuplicate`,
+  `reconcileLocalCashDeductions`), and every row on the second page had a null clock, which is
+  precisely why none of them could see it. Amount equality including sign anchors a pair; a clock or
+  route present on both sides and disagreeing refutes it; a field missing on one side is neutral.
+  Emits cause codes only.
+- **`apps/api/src/duplicate-hints.service.ts`** — resolves rows to operations through the *same*
+  `closeDraftClientKeyFor` the linked reader writes, so the two cannot drift. Read-only: no order,
+  no deduction, no audit row. Served on `/shifts/:id/review` inside the close UOW, and deliberately
+  not on the driver's `/state`.
+- **Admin review** — an amber «يُحتمل أنه مكرّر» badge and one line naming the counterpart row and
+  page, on both the order and deduction attention cards. The action stays the existing audited
+  «تثبيت كتكرار» with its required reason. A test asserts the hint component contains no button, no
+  `revise(`, and no `included`.
+- **Migration `0045` + `PgCloseDraftRepo.saveRead`** — at most one *complete* read per
+  `(shift, media, attachment generation, field)`, enforced inside the `FOR UPDATE` the transaction
+  already takes. Index and comment only: a UNIQUE index would abort the deploy on ثائر's existing
+  violating pair, and a raising trigger would abort a driver's close.
+
+**Corrected during the work:** the double read did *not* cost OCR budget. `ocr_reads` holds nine
+billed rows for that shift and none at 22:33 — the second call hit the `sha256` cache. The damage
+was confined to the draft ledger: a second read row and ten observations for five rows. The hint
+service therefore keeps only the newest read per attachment, which is what makes it correct against
+the duplicate rows already in production.
+
+**What is still outstanding**
+
+| Item | Why it did not ship |
+| --- | --- |
+| `git push` of `fix/overlapping-dashboard-scans` (5 commits, incl. `407a3b6` from 24 Aug) | blocked by the agent permission classifier |
+| Migration `0045` | no working production DB credentials — the pulled `.env.prod` has `DATABASE_URL="[SENSITIVE]"`. Not required by the deployed code: the index is a performance aid for a check that already works, and migrations never run at boot |
+
+**The manager can now resolve shift `4f40640e`.** The review screen names the repeats: include
+`130`, `280`, `270`; exclude `130` and `125` as repeats of the 22:47 and 22:21 rows, each with a
+reason naming the row it repeats. Expect the variance to fall from +58,120 to +3,720 and the
+employee's settlement from 779.20 to 507.20.
+
+**Risk:** the overlap on that shift is corroborated by amount alone, because the second photo
+carried no clock and no route. The UI says so in as many words. It is a prompt to look at the
+images, not a verdict, and no code path can act on it.
+
 ## 2026-08-26 — release `0044` is live: durable evidence reads and correct next-shift funding
 
 **Outcome:** commit `5d76a539af517a914c59a455cdc8c2d3bafb4ce6` is live on the API, driver

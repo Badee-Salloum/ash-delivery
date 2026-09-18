@@ -1,0 +1,549 @@
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
+import type { CheckInReportView, CheckInWindowView } from '@ash/client'
+import { type RoleKey, can } from '@ash/domain'
+import { useApp } from '../app-context.tsx'
+import { useToast } from '../feedback.tsx'
+import { explainError } from '../errors.ts'
+import { Badge, Button, Card, Field, Pending, Select, Table, TextInput } from '../ui.tsx'
+
+/**
+ * «التفقّد» — the branch manager proving he was at the branch when he is expected there.
+ *
+ * The owner's rule (2026-08-29): several rounds a day — «تسجيل الدخول عالساعة 1 و 5 و 10» — each
+ * within a tolerance and each from inside the branch's own patch of ground, «على حساب مدير الفرع
+ * و ليس السائقين».
+ *
+ * NOTHING HERE BLOCKS. A refused GPS permission, a manager genuinely away, a round nobody answered
+ * — each produces a row that says exactly that, and the report is for a human to read. A check-in
+ * that could stop a manager working would be one GPS outage away from stopping the branch, which
+ * is why the button reports its failures instead of gating anything.
+ */
+
+/** How the browser reports a fix. Deliberately narrow — nothing else here needs `navigator`. */
+interface Fix {
+  lat: number
+  lng: number
+  accuracyM: number | null
+}
+
+const HOURS = Array.from({ length: 24 }, (_, h) => h)
+const MINUTES = [0, 15, 30, 45]
+
+/** Minutes past branch-local midnight, as the clock face a person reads. */
+const clock = (minute: number): string =>
+  `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`
+
+const toneFor = (status: string): 'green' | 'amber' | 'red' | 'slate' =>
+  status === 'on_time' ? 'green' : status === 'missed' ? 'slate' : 'amber'
+
+/** The server's error code, or null — the shape `explainError` reads. */
+const codeOf = (e: unknown): string | null => (e as { error?: string }).error ?? null
+
+
+/** Damascus, for a map that has to open somewhere before a branch has been placed. */
+const DAMASCUS: [number, number] = [33.5138, 36.2765]
+
+/**
+ * Pick the branch off the map.
+ *
+ * This exists because of a real 300 km error: the two coordinate fields were filled the wrong way
+ * round, and no schema could see it — both numbers are legal in both fields. A map cannot be filled
+ * in the wrong order. The typed fields stay for anyone who has an exact pair, and the region guard
+ * still covers them.
+ *
+ * The circle is the check-in radius at its true scale, so the person setting the fence sees the
+ * ground it actually covers instead of guessing what 150 m means. Leaflet with `circleMarker` and
+ * no image asset, exactly as the live map does it — no marker-icon bundling problem, no new
+ * dependency.
+ */
+function FencePicker({
+  lat,
+  lng,
+  radiusM,
+  hint,
+  onPick,
+}: {
+  lat: number | null
+  lng: number | null
+  radiusM: number
+  hint: string
+  onPick: (lat: number, lng: number) => void
+}): ReactNode {
+  const div = useRef<HTMLDivElement | null>(null)
+  const map = useRef<L.Map | null>(null)
+  const layer = useRef<L.LayerGroup | null>(null)
+  // Read through a ref so the click handler is installed once and still sees the current callback;
+  // re-registering it on every keystroke would leak handlers and fire a pick several times.
+  const pick = useRef(onPick)
+  pick.current = onPick
+
+  useEffect(() => {
+    if (!div.current || map.current) return
+    const created = L.map(div.current).setView(lat !== null && lng !== null ? [lat, lng] : DAMASCUS, 15)
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap',
+      maxZoom: 19,
+    }).addTo(created)
+    layer.current = L.layerGroup().addTo(created)
+    created.on('click', (e: L.LeafletMouseEvent) => pick.current(e.latlng.lat, e.latlng.lng))
+    map.current = created
+    return () => {
+      created.remove()
+      map.current = null
+      layer.current = null
+    }
+    // Mount once. The point and radius are drawn by the effect below, which is what has to react.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    const group = layer.current
+    if (!group) return
+    group.clearLayers()
+    if (lat === null || lng === null) return
+    L.circle([lat, lng], { radius: radiusM, color: '#1d4ed8', weight: 1, fillOpacity: 0.12 }).addTo(group)
+    L.circleMarker([lat, lng], { radius: 6, color: '#1d4ed8', fillColor: '#1d4ed8', fillOpacity: 1 }).addTo(group)
+  }, [lat, lng, radiusM])
+
+  // Follow the point when it is set from outside the map — the device fix, or the swap correction.
+  useEffect(() => {
+    if (map.current && lat !== null && lng !== null) map.current.setView([lat, lng], map.current.getZoom())
+  }, [lat, lng])
+
+  return (
+    <div>
+      <p className="mb-2 text-sm text-slate-500">{hint}</p>
+      <div ref={div} className="h-72 w-full rounded-lg border border-slate-200" />
+    </div>
+  )
+}
+
+export function CheckIn(): ReactNode {
+  const { api, t, session, branchId } = useApp()
+  const toast = useToast()
+  const [report, setReport] = useState<CheckInReportView | null>(null)
+  const [windows, setWindows] = useState<CheckInWindowView[]>([])
+  const [people, setPeople] = useState<Array<{ id: string; name: string }>>([])
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  // The rota and the fence are settings.write — the same gate as the rest of the system's shape,
+  // so a branch manager cannot move his own goalposts.
+  //
+  // `.allowed` is not optional politeness: `can()` returns a Decision OBJECT, and every object is
+  // truthy. Without it this read `session != null && {allowed: false, reason: 'no_grant_for_role'}`
+  // — permanently true — and the branch manager was shown the rota editor and the fence for a rule
+  // he does not hold. The server refused every button, so nothing could be changed; he was simply
+  // offered controls that could only fail.
+  const canConfigure =
+    session != null &&
+    can({ userId: session.userId, roleKey: session.roleKey as RoleKey, branchId: session.branchId }, 'settings.write', {
+      branchId: branchId ?? session.branchId,
+    }).allowed
+
+  const [userId, setUserId] = useState('')
+  const [hour, setHour] = useState(9)
+  const [minute, setMinute] = useState(0)
+  const [tolerance, setTolerance] = useState(30)
+  const [label, setLabel] = useState('')
+
+  const [lat, setLat] = useState('')
+  const [lng, setLng] = useState('')
+  const [radius, setRadius] = useState('150')
+  /** Set when the server refused the point as out of region, carrying the reversal it suggests. */
+  const [swap, setSwap] = useState<{ lat: number; lng: number; suggested: boolean } | null>(null)
+
+  const load = useCallback(async () => {
+    setError(null)
+    try {
+      const [r, w] = await Promise.all([api.checkinReport(), api.checkinWindows()])
+      setReport(r)
+      setWindows(w.windows)
+      if (r.radiusM !== null) setRadius(String(r.radiusM))
+    } catch (e) {
+      setError(codeOf(e) ?? 'error')
+    }
+  }, [api])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const scope = branchId ?? session?.branchId ?? null
+  useEffect(() => {
+    if (!canConfigure) return
+    void api
+      .users()
+      .then((res) => {
+        // Drivers are excluded by design, not by omission — offering one here would only produce
+        // a 422 the operator cannot act on.
+        const eligible = res.users.filter((u) => u.roleKey !== 'driver' && u.active && u.branchId === scope)
+        setPeople(eligible.map((u) => ({ id: u.id, name: u.fullNameAr })))
+        setUserId((current) => current || (eligible[0]?.id ?? ''))
+      })
+      .catch(() => setPeople([]))
+  }, [api, canConfigure, scope])
+
+  /** One place that asks the browser where it is, so every caller reports failure the same way. */
+  const locate = (): Promise<Fix> =>
+    new Promise((resolve, reject) => {
+      if (!('geolocation' in navigator)) {
+        reject(new Error('unsupported'))
+        return
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) =>
+          resolve({
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+            // Evidence, never a gate: refusing a low-confidence fix would punish a manager for
+            // standing under a roof.
+            accuracyM: Number.isFinite(pos.coords.accuracy) ? Math.round(pos.coords.accuracy) : null,
+          }),
+        () => reject(new Error('denied')),
+        { enableHighAccuracy: true, timeout: 20_000, maximumAge: 0 },
+      )
+    })
+
+  /** A refused permission is a browser fact, not a server error code — say so in the user's words. */
+  const reportFailure = (e: unknown): void => {
+    if (e instanceof Error && (e.message === 'denied' || e.message === 'unsupported')) {
+      toast.error(t.checkin[e.message])
+      return
+    }
+    toast.error(explainError(codeOf(e), t))
+  }
+
+  const checkInNow = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      const fix = await locate()
+      const saved = await api.checkin({ ...fix, note: null })
+      if (saved.insideArea) toast.success(t.checkin.recorded)
+      // Recorded either way. The toast names the verdict rather than pretending nothing happened.
+      else toast.error(`${t.checkin.recorded} — ${t.checkin.status[saved.verdict]}`)
+      await load()
+    } catch (e) {
+      reportFailure(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const addRound = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      await api.createCheckinWindow({
+        userId,
+        atMinute: hour * 60 + minute,
+        toleranceMinutes: tolerance,
+        label: label.trim() || null,
+      })
+      setLabel('')
+      await load()
+    } catch (e) {
+      reportFailure(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const retire = async (id: string): Promise<void> => {
+    setBusy(true)
+    try {
+      await api.deleteCheckinWindow(id)
+      await load()
+    } catch (e) {
+      reportFailure(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const saveLocation = async (clear: boolean, confirmOutsideRegion = false): Promise<void> => {
+    setBusy(true)
+    try {
+      await api.setBranchLocation({
+        lat: clear ? null : Number(lat),
+        lng: clear ? null : Number(lng),
+        checkinRadiusM: Number(radius) || 150,
+        confirmOutsideRegion,
+      })
+      if (clear) {
+        setLat('')
+        setLng('')
+      }
+      setSwap(null)
+      await load()
+      toast.success(t.common.saved)
+    } catch (e) {
+      const detail = (e as { detail?: { suggestedLat?: number; suggestedLng?: number; swapSuggested?: boolean } }).detail
+      if (codeOf(e) === 'location_outside_operating_region' && detail) {
+        // Keep the refusal beside the fields it is about, with the correction already computed.
+        // A toast that vanishes would leave the operator with a wrong point and no idea why.
+        setSwap({ lat: detail.suggestedLat!, lng: detail.suggestedLng!, suggested: detail.swapSuggested === true })
+        return
+      }
+      reportFailure(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const fillFromDevice = async (): Promise<void> => {
+    try {
+      const fix = await locate()
+      setLat(fix.lat.toFixed(6))
+      setLng(fix.lng.toFixed(6))
+    } catch (e) {
+      reportFailure(e)
+    }
+  }
+
+  if (report === null) {
+    return (
+      <Pending
+        error={error}
+        loadingLabel={t.common.loading}
+        errorLabel={explainError(error, t)}
+        onRetry={load}
+        retryLabel={t.common.retry}
+      />
+    )
+  }
+
+  const named = new Map(windows.map((w) => [w.id, w]))
+  const offset = (minutes: number): string =>
+    minutes === 0
+      ? t.checkin.onTime
+      : (minutes < 0 ? t.checkin.early : t.checkin.late).replace('{{n}}', String(Math.abs(minutes)))
+
+  return (
+    <div className="flex flex-col gap-4">
+      <Card title={t.checkin.title}>
+        <p className="mb-3 text-sm text-slate-500">{t.checkin.neverBlocks}</p>
+        {report.radiusM === null ? (
+          // Name whose job it is. A manager who cannot act on a warning, and is not told who can,
+          // reads it as the system being broken rather than as a step somebody still owes him.
+          <p className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            {canConfigure ? t.checkin.notSet : t.checkin.notSetAdmin}
+          </p>
+        ) : null}
+        <Button onClick={() => void checkInNow()} disabled={busy}>
+          {busy ? t.checkin.locating : t.checkin.now}
+        </Button>
+      </Card>
+
+      <Card title={`${t.checkin.rounds} — ${report.businessDate}`}>
+        {report.people.length === 0 ? (
+          <p className="text-sm text-slate-500">{t.checkin.noPeople}</p>
+        ) : (
+          <div className="flex flex-col gap-5">
+            {report.people.map((person) => (
+              <div key={person.userId}>
+                <div className="mb-2 text-sm font-semibold text-slate-700">{person.name}</div>
+                <Table
+                  head={[t.checkin.at, t.checkin.label, t.checkin.result, t.checkin.distance]}
+                  isEmpty={person.rounds.length === 0}
+                  empty={t.checkin.noRounds}
+                >
+                  {person.rounds.map((round) => (
+                    <tr key={round.windowRef}>
+                      <td className="px-3 py-2 tabular-nums">{clock(round.atMinute)}</td>
+                      <td className="px-3 py-2">{named.get(round.windowRef)?.label ?? '—'}</td>
+                      <td className="px-3 py-2">
+                        <Badge tone={toneFor(round.status)}>{t.checkin.status[round.status]}</Badge>
+                      </td>
+                      <td className="px-3 py-2 tabular-nums">
+                        {round.distanceMetres === null
+                          ? '—'
+                          : `${round.distanceMetres} ${t.checkin.metres}`}
+                        {round.minutesFromTarget !== null ? ` · ${offset(round.minutesFromTarget)}` : ''}
+                      </td>
+                    </tr>
+                  ))}
+                </Table>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {/*
+        The per-ping log is an AUDITOR's view — exact times, accuracy, every attempt including the
+        one from the road. The person being checked gets «زر التفقد و مواعيد تفقده»: the button and
+        his own rounds, which already carry the verdict, the distance and how early or late he was.
+      */}
+      {report.scope === 'all' ? (
+      <Card title={t.checkin.log}>
+        <Table
+          head={[t.checkin.time, t.checkin.result, t.checkin.distance, t.checkin.accuracy]}
+          isEmpty={report.checkIns.length === 0}
+          empty="—"
+        >
+          {report.checkIns.map((c) => (
+            <tr key={c.id}>
+              <td className="px-3 py-2 tabular-nums">
+                {new Date(c.capturedAt).toLocaleTimeString('en-GB', { hour12: false })}
+              </td>
+              <td className="px-3 py-2">
+                <Badge tone={toneFor(c.verdict)}>{t.checkin.status[c.verdict]}</Badge>
+              </td>
+              <td className="px-3 py-2 tabular-nums">
+                {c.distanceM} {t.checkin.metres}
+              </td>
+              <td className="px-3 py-2 tabular-nums">
+                {c.accuracyM === null ? '—' : `±${c.accuracyM} ${t.checkin.metres}`}
+              </td>
+            </tr>
+          ))}
+        </Table>
+      </Card>
+      ) : null}
+
+      {canConfigure ? (
+        <>
+          <Card title={t.checkin.rota}>
+            <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+              <Field label={t.checkin.person}>
+                <Select value={userId} onChange={(e) => setUserId(e.target.value)}>
+                  {people.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label={t.checkin.at}>
+                <div className="flex gap-2">
+                  <Select value={String(hour)} onChange={(e) => setHour(Number(e.target.value))}>
+                    {HOURS.map((x) => (
+                      <option key={x} value={x}>
+                        {String(x).padStart(2, '0')}
+                      </option>
+                    ))}
+                  </Select>
+                  <Select value={String(minute)} onChange={(e) => setMinute(Number(e.target.value))}>
+                    {MINUTES.map((x) => (
+                      <option key={x} value={x}>
+                        {String(x).padStart(2, '0')}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              </Field>
+              <Field label={t.checkin.tolerance}>
+                <TextInput
+                  inputMode="numeric"
+                  value={String(tolerance)}
+                  onChange={(e) => setTolerance(Number(e.target.value) || 0)}
+                />
+              </Field>
+              <Field label={t.checkin.label}>
+                <TextInput value={label} onChange={(e) => setLabel(e.target.value)} />
+              </Field>
+              <div className="flex items-end">
+                <Button onClick={() => void addRound()} disabled={busy || !userId}>
+                  {t.checkin.addRound}
+                </Button>
+              </div>
+            </div>
+            <Table
+              head={[t.checkin.at, t.checkin.tolerance, t.checkin.label, '']}
+              isEmpty={windows.length === 0}
+              empty={t.checkin.noRounds}
+            >
+              {windows.map((w) => (
+                <tr key={w.id}>
+                  <td className="px-3 py-2 tabular-nums">{clock(w.atMinute)}</td>
+                  <td className="px-3 py-2 tabular-nums">±{w.toleranceMinutes}</td>
+                  <td className="px-3 py-2">{w.label ?? '—'}</td>
+                  <td className="px-3 py-2">
+                    <Button variant="ghost" onClick={() => void retire(w.id)} disabled={busy}>
+                      {t.checkin.retire}
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </Table>
+          </Card>
+
+          <Card title={t.checkin.location}>
+            <FencePicker
+              lat={Number.isFinite(Number(lat)) && lat !== '' ? Number(lat) : null}
+              lng={Number.isFinite(Number(lng)) && lng !== '' ? Number(lng) : null}
+              radiusM={Number(radius) || 150}
+              hint={t.checkin.pickOnMap}
+              onPick={(pickedLat, pickedLng) => {
+                setLat(pickedLat.toFixed(6))
+                setLng(pickedLng.toFixed(6))
+                // A point taken off the map cannot be reversed, so any standing warning about the
+                // pair is stale the moment one is picked.
+                setSwap(null)
+              }}
+            />
+            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <Field label={t.checkin.lat}>
+                <TextInput inputMode="decimal" value={lat} onChange={(e) => setLat(e.target.value)} />
+              </Field>
+              <Field label={t.checkin.lng}>
+                <TextInput inputMode="decimal" value={lng} onChange={(e) => setLng(e.target.value)} />
+              </Field>
+              <Field label={t.checkin.radius}>
+                <TextInput inputMode="numeric" value={radius} onChange={(e) => setRadius(e.target.value)} />
+              </Field>
+              <div className="flex items-end">
+                <Button variant="ghost" onClick={() => void fillFromDevice()} disabled={busy}>
+                  {t.checkin.useMyLocation}
+                </Button>
+              </div>
+            </div>
+            {swap ? (
+              <div className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                <p>{t.checkin.outsideRegion}</p>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {swap.suggested ? (
+                    <>
+                      <span>
+                        {t.checkin.swapSuggest
+                          .replace('{{lat}}', swap.lat.toFixed(5))
+                          .replace('{{lng}}', swap.lng.toFixed(5))}
+                      </span>
+                      <Button
+                        onClick={() => {
+                          setLat(String(swap.lat))
+                          setLng(String(swap.lng))
+                          setSwap(null)
+                        }}
+                        disabled={busy}
+                      >
+                        {t.checkin.applySwap}
+                      </Button>
+                    </>
+                  ) : null}
+                  {/* A branch genuinely outside the region must still be recordable — the guard is
+                      for reversed fields, not for deciding where a branch may be. */}
+                  <Button variant="ghost" onClick={() => void saveLocation(false, true)} disabled={busy}>
+                    {t.checkin.saveAnyway}
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+            <div className="mt-3 flex gap-2">
+              <Button onClick={() => void saveLocation(false)} disabled={busy || !lat || !lng}>
+                {t.checkin.saveLocation}
+              </Button>
+              {/* Clearing is a legitimate act: it switches the rounds off rather than leaving a
+                  fence nobody can satisfy. */}
+              <Button variant="ghost" onClick={() => void saveLocation(true)} disabled={busy}>
+                {t.checkin.clearLocation}
+              </Button>
+            </div>
+          </Card>
+        </>
+      ) : null}
+    </div>
+  )
+}

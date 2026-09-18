@@ -1,5 +1,16 @@
 import { z } from 'zod'
-import { MAX_BATTERY_SLOTS, type Minor, formatMinor, hasVisibleText, parseMinor } from '@ash/domain'
+import {
+  CURRENCIES,
+  type Currency,
+  MAX_BATTERY_SLOTS,
+  MAX_RECURRENCE_INTERVAL_DAYS,
+  type Minor,
+  type Money,
+  formatMinor,
+  hasVisibleText,
+  money,
+  parseMinor,
+} from '@ash/domain'
 
 /**
  * Wire schemas.
@@ -77,6 +88,27 @@ const optionalVarianceReasonSchema = z.string().trim().max(500).nullable().defau
 
 export const serializeMoney = (m: Minor): string => formatMinor(m)
 
+/**
+ * The two currencies «صندوق الشركة» holds (finance redesign C1). The literal strings are the ones
+ * `funds.currency` stores, so what crosses the wire is what the ledger means.
+ */
+export const currencySchema = z.enum(CURRENCIES)
+
+/**
+ * An amount that carries its currency: `{ "currency": "USD", "amount": "12.50" }`. The amount is
+ * the same decimal string as every other money field — two places, cents for USD — and is parsed
+ * into `Minor` here, once. Nothing may add two of these without comparing `currency` first; the
+ * domain's `addMoney` refuses.
+ */
+export const currencyMoneySchema = z
+  .object({ currency: currencySchema, amount: moneySchema })
+  .transform(({ currency, amount }): Money => money(currency, amount))
+
+export const serializeCurrencyMoney = (value: Money): { currency: Currency; amount: string } => ({
+  currency: value.currency,
+  amount: serializeMoney(value.amount),
+})
+
 export const calendarDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'expected YYYY-MM-DD')
 export const realCalendarDateSchema = calendarDateSchema.refine((value) => {
   const [year, month, day] = value.split('-').map(Number) as [number, number, number]
@@ -127,6 +159,20 @@ export const loginResponse = z.object({
   fullNameAr: z.string(),
   expiresAt: z.number(),
 })
+
+/** Public signup is deliberately narrower than account administration. */
+export const registerDriverRequest = z
+  .object({
+    fullNameAr: z.string().trim().min(1).max(120),
+    branchId: uuidSchema,
+    username: z
+      .string()
+      .max(40)
+      .transform(normalizeUsername)
+      .refine((u) => u.length >= 3, { message: 'username must be at least 3 usable characters' }),
+    password: z.string().min(8).max(200),
+  })
+  .strict()
 
 // ── Shifts ────────────────────────────────────────────────────────────────────────────────
 
@@ -258,6 +304,65 @@ export const operationWindowStatusSchema = z.enum([
   'unknown',
 ])
 
+/**
+ * Advisory hint that two scans of one list share rows. Read-only: it changes no money, no
+ * inclusion, and no order. Cause codes come straight from the domain; the UI resolves the strings.
+ */
+export const scanOverlapCauseSchema = z.enum([
+  'scan_overlap_timed_match',
+  'scan_overlap_suffix_prefix',
+  'scan_overlap_amount_only',
+  'scan_overlap_direction_ambiguous',
+  'scan_overlap_amount_disagrees',
+])
+
+export const scanOverlapPairCauseSchema = z.enum([
+  'scan_overlap_pair_amount_agrees',
+  'scan_overlap_pair_minute_agrees',
+  'scan_overlap_pair_route_agrees',
+  'scan_overlap_pair_amount_disagrees',
+  'scan_overlap_pair_unaccounted',
+])
+
+const scanDuplicateHintPageSchema = z.object({
+  slot: z.string().min(1).max(64),
+  mediaId: z.string().min(1).max(64),
+})
+
+export const scanDuplicateHintOperationRefSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('order'),
+    providerOrderNo: z.string().min(1).max(160),
+    observationId: z.string().min(1).max(64),
+    rowIndex: z.number().int(),
+  }),
+  z.object({
+    kind: z.literal('cash_deduction'),
+    id: z.string().min(1).max(64),
+    observationId: z.string().min(1).max(64),
+    rowIndex: z.number().int(),
+  }),
+  z.object({
+    kind: z.literal('unmatched_row'),
+    observationId: z.string().min(1).max(64),
+    rowIndex: z.number().int(),
+  }),
+])
+
+export const scanDuplicateHintSchema = z.object({
+  earlier: scanDuplicateHintPageSchema,
+  later: scanDuplicateHintPageSchema,
+  length: z.number().int().positive(),
+  causes: z.array(scanOverlapCauseSchema),
+  pairs: z.array(z.object({
+    earlier: scanDuplicateHintOperationRefSchema,
+    later: scanDuplicateHintOperationRefSchema,
+    causes: z.array(scanOverlapPairCauseSchema),
+  })),
+})
+
+export type ScanDuplicateHintWire = z.infer<typeof scanDuplicateHintSchema>
+
 const cashDeductionRequest = z.object({
   /** Stable across overlapping OCR pages and retries. */
   operationKey: z.string().min(1).max(160),
@@ -359,6 +464,19 @@ export const reviseOperationsRequest = z.object({
         occurredMinute: minuteSchema.nullable().optional(),
         occurredDate: isoDateSchema.nullable().optional(),
         /**
+         * «هذا الصفّ ليس توصيلة» — a stronger statement than `included: false`.
+         *
+         * Exclusion says a real delivery is not being counted on this shift. Removal says the row
+         * describes nothing that happened: a reading of a page seam, a duplicate the OCR invented.
+         * The service forces a removed row to be excluded too, so the money side is the one that is
+         * already tested; what removal adds is the meaning, and a report the general manager reads.
+         *
+         * `false` restores the row to an ordinary excluded one. It does NOT re-include it — putting
+         * money back is a separate decision the manager makes deliberately.
+         */
+        removed: z.boolean().optional(),
+
+        /**
          * Required by the service whenever inclusion or timing is changed, and the ONLY record of
          * why a delivery fee entered or left BR1. `nonblankReasonSchema` rather than a bare trim:
          * an Arabic-first UI routinely carries invisible bidi marks through copy-paste, and
@@ -376,6 +494,8 @@ export const reviseOperationsRequest = z.object({
         included: z.boolean().optional(),
         occurredMinute: minuteSchema.nullable().optional(),
         occurredDate: isoDateSchema.nullable().optional(),
+        /** See the order patch above — the same instrument on a negative row. */
+        removed: z.boolean().optional(),
         /** Same reasoning as the order decision reason above. */
         reason: nonblankReasonSchema,
       }),
@@ -396,6 +516,28 @@ export const reviseOperationsRequest = z.object({
     .max(400)
     .default([]),
 })
+
+/**
+ * «الحسم» — set or clear the charge a manager makes against the employee at close.
+ *
+ * A REPLACEMENT, not an increment: the request carries the shift's whole charge, so a retried POST
+ * is idempotent by construction. Its predecessor minted a fresh uuid per call and booked a second
+ * money row on a replay.
+ *
+ * `amount: '0.00'` clears it, and only then may the reason be absent — a non-zero charge without an
+ * audited reason is an unexplained deduction from a person's pay, and the reason is the only
+ * evidence this instrument has: nothing was scanned and nothing was counted.
+ */
+export const setManagerChargeRequest = z
+  .object({
+    /** A magnitude. The direction is the instrument, never the sign. */
+    amount: nonnegativeMoneySchema,
+    reason: nonblankReasonSchema.nullable().default(null),
+  })
+  .refine((value) => value.amount === 0n || value.reason !== null, {
+    message: 'a charge requires an audited reason',
+    path: ['reason'],
+  })
 
 export const endPackageRequest = z.object({
   /** Optimistic close-draft identity. Required by the service once a durable draft exists. */
@@ -612,6 +754,8 @@ export const shiftSettlementViewSchema = z.object({
   walletClaimToOffice: settlementMoneyStringSchema,
   cashReceivableDeferred: settlementMoneyStringSchema,
   walletReceivableDeferred: settlementMoneyStringSchema,
+  maximumCashShortageReceivable: settlementMoneyStringSchema,
+  cashShortageReceivable: settlementMoneyStringSchema,
   walletToOffice: settlementMoneyStringSchema,
   cashToOffice: settlementMoneyStringSchema,
   walletAction: settlementWalletActionSchema,
@@ -649,6 +793,8 @@ export const approveCloseRequest = z.object({
   /** Legacy-named positive collections retained as funding auto-consumed by the next shift. */
   cashReceivableDeferred: nonnegativeMoneySchema.optional(),
   walletReceivableDeferred: nonnegativeMoneySchema.optional(),
+  /** Unpaid current-shift shortage converted to an ordinary cash receivable at close. */
+  cashShortageReceivable: nonnegativeMoneySchema.optional(),
   /** Fixed-policy preview hash. Optional on the wire solely for a controlled old-client refusal. */
   reviewedSettlementHash: z.string().regex(/^[0-9a-f]{64}$/, 'expected a sha256 hex digest').optional(),
   /** Both physical actions must be explicitly confirmed before the service persists a settlement. */
@@ -683,6 +829,7 @@ export const commitForceCloseRequest = forceCloseBaseRequest.extend({
   cashSettlementConfirmed: z.literal(true),
   cashReceivableDeferred: nonnegativeMoneySchema.optional(),
   walletReceivableDeferred: nonnegativeMoneySchema.optional(),
+  cashShortageReceivable: nonnegativeMoneySchema.optional(),
 })
 
 /** Upper-level force-close is an explicit prepare-then-settle protocol. */
@@ -725,6 +872,9 @@ export const adjustWalletTopupRequest = z.object({
   reason: nonblankReasonSchema,
 })
 
+/** «تصحيح سلفة الكاش» — the cash counterpart, identical in shape and in guarantees. */
+export const adjustCashFloatRequest = adjustWalletTopupRequest
+
 /**
  * One live GPS fix from the driver's phone while a shift is open (SRS K). lat/lng/accuracy are plain
  * numbers — coordinates, not money — so `z.number()` is correct here.
@@ -736,6 +886,31 @@ export const gpsPingRequest = z.object({
   /** The phone's own clock in ms; the server stamps its own receive time. */
   capturedAtMs: z.number().int(),
 })
+
+/** Where a fix came from. `phone_fg` is the foreground beacon — see the 0063 column comment. */
+export const gpsSourceSchema = z.enum(['phone_fg', 'phone_bg', 'tracker']).default('phone_fg')
+
+/**
+ * A buffered run of fixes, which is what a background uploader actually produces.
+ *
+ * A phone with no signal keeps working and keeps its fixes; the batch is how they arrive when it
+ * comes back. 500 is roughly two hours at a fix every 15 s — long enough to ride out a dead zone,
+ * and about 45 KB, so the route's own `bodyLimit` refuses anything hostile before Zod ever runs.
+ */
+export const gpsBatchRequest = z.object({
+  fixes: z.array(gpsPingRequest).min(1).max(500),
+  source: gpsSourceSchema,
+})
+
+/**
+ * What the ingest route accepts.
+ *
+ * The batch shape is tried FIRST, and the single ping is kept forever rather than deprecated: the
+ * driver PWA is a separate bundle that reaches a phone only when its driver taps «تحديث», and
+ * assuming otherwise is what made the 2026-08-24 close failures survive their own fix. Phones in
+ * the field will post singles for weeks after this ships, and they must keep working.
+ */
+export const gpsIngestRequest = z.union([gpsBatchRequest, gpsPingRequest])
 
 // ── Fleet (SRS B) ─────────────────────────────────────────────────────────────────────────
 
@@ -1046,11 +1221,152 @@ export const createExpenseRequest = z.object({
   /** G-1: vehicle / branch / general — these feed per-axis profitability. */
   costCenterKind: z.enum(['vehicle', 'branch', 'general']),
   vehicleId: z.string().nullable().default(null),
+  /**
+   * WHICH BOX paid. Defaults to cash, which is what every expense meant before 0059 — so an older
+   * client deployed against a newer API keeps recording exactly what it always recorded.
+   */
+  channel: z.enum(['office_cash', 'office_wallet']).default('office_cash'),
   amount: positiveExpenseMoneySchema,
   businessDate: calendarDateSchema.optional(),
   description: z.string().min(1).max(500),
   /** Mandatory above the configured ceiling (G-3 / س52). */
   receiptMediaId: z.string().nullable().default(null),
+})
+
+const recurringExpenseTerms = z
+  .object({
+    title: z.string().trim().min(1).max(200),
+    categoryId: z.string().min(1),
+    costCenterKind: z.enum(['vehicle', 'branch', 'general']),
+    vehicleId: z.string().nullable().default(null),
+    channel: z.enum(['office_cash', 'office_wallet']),
+    amount: positiveExpenseMoneySchema,
+    scheduleKind: z.enum(['weekly', 'monthly_first', 'every_n_days']),
+    weekday: z.number().int().min(0).max(6).nullable().default(null),
+    intervalDays: z.number().int().min(1).max(MAX_RECURRENCE_INTERVAL_DAYS).nullable().default(null),
+    startsOn: calendarDateSchema,
+    endsOn: calendarDateSchema.nullable().default(null),
+  })
+  .superRefine((body, ctx) => {
+    if ((body.costCenterKind === 'vehicle') !== (body.vehicleId !== null)) {
+      ctx.addIssue({ code: 'custom', path: ['vehicleId'], message: 'vehicle cost centre mismatch' })
+    }
+    if (body.endsOn !== null && body.endsOn < body.startsOn) {
+      ctx.addIssue({ code: 'custom', path: ['endsOn'], message: 'end date precedes start date' })
+    }
+    const validSchedule =
+      (body.scheduleKind === 'weekly' && body.weekday !== null && body.intervalDays === null) ||
+      (body.scheduleKind === 'monthly_first' && body.weekday === null && body.intervalDays === null) ||
+      (body.scheduleKind === 'every_n_days' && body.weekday === null && body.intervalDays !== null)
+    if (!validSchedule) {
+      ctx.addIssue({ code: 'custom', path: ['scheduleKind'], message: 'schedule fields do not match kind' })
+    }
+  })
+
+export const createRecurringExpenseRequest = z
+  .object({ branchId: z.string().optional(), idempotencyKey: z.string().uuid() })
+  .and(recurringExpenseTerms)
+
+export const updateRecurringExpenseRequest = z.object({ branchId: z.string().optional() }).and(recurringExpenseTerms)
+
+export const deactivateRecurringExpenseRequest = z.object({
+  branchId: z.string().optional(),
+  reason: nonblankReasonSchema,
+})
+
+export const payRecurringExpenseRequest = z.object({
+  branchId: z.string().optional(),
+  /** Identity of the ordinary expense written by this payment. Held across lost-response retries. */
+  idempotencyKey: z.string().uuid(),
+  amount: positiveExpenseMoneySchema,
+  businessDate: calendarDateSchema.optional(),
+  reason: z.string().trim().min(1).max(500).nullable().default(null),
+  receiptMediaId: z.string().nullable().default(null),
+})
+
+export const skipRecurringExpenseRequest = z.object({
+  branchId: z.string().optional(),
+  reason: nonblankReasonSchema,
+})
+
+// ── «المدخول المباشر» — direct income, the mirror of an expense ───────────────────────────────
+
+export const createIncomeCategoryRequest = z.object({
+  code: z.string().min(1).max(32),
+  nameAr: z.string().min(1).max(120),
+})
+
+export const createIncomeRequest = z.object({
+  branchId: z.string().optional(),
+  /** Client-owned UUID: exact retries reuse it; a new income must generate a new one. */
+  idempotencyKey: z.string().uuid(),
+  categoryId: z.string().min(1),
+  /**
+   * WHICH BOX received the money. A channel, not a fund code — the operator states a physical fact
+   * and the recipe picks the account, so an unrecognised string can never mint a look-alike.
+   */
+  channel: z.enum(['office_cash', 'office_wallet']),
+  amount: moneySchema.refine((amount) => amount > 0n, 'income amount must be strictly positive'),
+  businessDate: calendarDateSchema.optional(),
+  description: z.string().min(1).max(500),
+  evidenceMediaId: z.string().nullable().default(null),
+})
+
+// ── «السلفة» — an expense that must come back (owner decision 17) ─────────────────────────────
+//
+// The shape mirrors an expense, because that is what it becomes if it is never repaid: a category,
+// a cost centre, a description, a receipt. What it adds is a party and a channel.
+//
+// NO FUND CODE AND NO PARTY KEY CROSS THE WIRE. The channel is an enum, so `fundRefFromCode` can
+// never be handed a string it does not know and silently mint `cost_center:<code>`. And `partyKey`
+// is DERIVED from `partyName` on the server: accepting one would let a client send a key that
+// disagrees with the name it is supposed to normalise, and the grouped view and the list would
+// then disagree with each other for ever.
+
+export const createAdvanceRequest = z.object({
+  branchId: z.string().optional(),
+  /** Client-owned UUID: exact retries reuse it; a new advance must generate a new one. */
+  idempotencyKey: z.string().uuid(),
+  /** Whoever must pay it back — free text by the owner's own choice. */
+  partyName: z.string().trim().min(1).max(120).refine(hasVisibleText, 'party name must be visible'),
+  categoryId: z.string().min(1),
+  /** G-1: vehicle / branch / general — where the cost lands if it is ever converted. */
+  costCenterKind: z.enum(['vehicle', 'branch', 'general']),
+  vehicleId: z.string().nullable().default(null),
+  /**
+   * Reclassify this driver's «ذمة» instead of paying out of a box.
+   *
+   * When present, no money moves: the debt is simply filed as an advance. The channel then names
+   * WHICH receivable — his cash one or his wallet one — rather than which box pays.
+   */
+  sourceDriverId: z.string().min(1).nullable().default(null),
+  /** WHICH BOX paid. A repayment must return to this same box. */
+  channel: z.enum(['office_cash', 'office_wallet']),
+  amount: positiveExpenseMoneySchema,
+  businessDate: calendarDateSchema.optional(),
+  description: z.string().min(1).max(500),
+  receiptMediaId: z.string().nullable().default(null),
+})
+
+/** Money coming back. Partial is normal; the channel is the advance's own, never the caller's. */
+export const repayAdvanceRequest = z.object({
+  branchId: z.string().optional(),
+  idempotencyKey: z.string().uuid(),
+  amount: positiveMoneySchema,
+  reason: nonblankReasonSchema,
+  businessDate: calendarDateSchema.optional(),
+})
+
+/**
+ * «تحويل السلفة إلى صرفية» — it is never coming back, so recognise it as the expense it turned out
+ * to be. No amount: the whole outstanding remainder converts, read inside the lock. Letting the
+ * caller name an amount would invite converting more than is left, or leaving a stub nobody chases.
+ */
+export const convertAdvanceRequest = z.object({
+  branchId: z.string().optional(),
+  idempotencyKey: z.string().uuid(),
+  reason: nonblankReasonSchema,
+  businessDate: calendarDateSchema.optional(),
 })
 
 /** Direct debt creation/collection, explicitly outside any shift. */
@@ -1065,7 +1381,60 @@ export const createReceivableEventRequest = z.object({
   idempotencyKey: z.string().uuid(),
 })
 
+/**
+ * «تعديل الذمم المسجلة» — restate a receivable balance that was recorded wrongly.
+ *
+ * The operator names the BALANCE, not a movement: "it reads X, it should be Y". That is the only
+ * form that works, because a driver's receivable balance is a ledger fund balance fed from seven
+ * places and only one of them writes an event to point at — the commonest wrong number of all, a
+ * `shift_funding` carry, has no event at all.
+ *
+ * `expectedCurrentBalance` is what the screen showed him. If the real balance has moved since — a
+ * shift closed, a collection landed — the correction is refused rather than applied to a number he
+ * never saw. Without it, "set the balance to 500" silently discards whatever happened in between.
+ */
+export const correctReceivableRequest = z.object({
+  branchId: z.string().optional(),
+  driverId: z.string().min(1),
+  receivableKind: z.enum(['ordinary', 'shift_funding']),
+  channel: z.enum(['cash', 'wallet']),
+  /** Both are balances, so both may be zero; neither may be negative. */
+  expectedCurrentBalance: nonnegativeMoneySchema,
+  targetBalance: nonnegativeMoneySchema,
+  reason: nonblankReasonSchema,
+  idempotencyKey: z.string().uuid(),
+})
+
+/**
+ * «نقل بين الصندوق والمحفظة» — reshape the branch's own money without changing how much it has.
+ *
+ * `direction` names both ends, so no fund code crosses the wire. The route this would otherwise
+ * ride on takes a free-form `to`, and `fundRefFromCode` silently turns anything it does not know
+ * into `cost_center:<code>` — money moved into an account nothing sums and nothing complains about.
+ */
+export const officeTransferRequest = z.object({
+  branchId: z.string().optional(),
+  direction: z.enum(['cash_to_wallet', 'wallet_to_cash']),
+  amount: positiveMoneySchema,
+  reason: nonblankReasonSchema,
+})
+
 // ── Treasury: daily count and manual entries (SRS E-3, E-5) ───────────────────────────────
+
+/**
+ * Forgive an ordinary driver receivable without pretending that cash was collected.
+ *
+ * The kind is intentionally not caller-selectable: next-shift funding is operational custody,
+ * while this command is an audited loss decision that applies only to ordinary debt.
+ */
+export const writeoffReceivableRequest = z.object({
+  branchId: z.string().optional(),
+  driverId: z.string().min(1),
+  channel: z.enum(['cash', 'wallet']),
+  amount: positiveMoneySchema,
+  reason: nonblankReasonSchema,
+  idempotencyKey: z.string().uuid(),
+})
 
 export const createCashCountRequest = z.object({
   branchId: z.string().optional(),
@@ -1081,6 +1450,20 @@ export const createCashCountRequest = z.object({
     )
     .min(1),
   notes: z.string().max(1000).nullable().default(null),
+  /**
+   * «إعادة الجرد» — supersede the day's existing count with this one.
+   *
+   * Required to replace a sealed count, and required to be a REASON rather than a flag: replacing
+   * a signed count is an audited act, and «true» explains nothing to whoever reads it later.
+   * Omitted, a second count for the day is refused as before.
+   */
+  recountReason: z.string().trim().min(1).max(500).optional(),
+})
+
+/** «إلغاء الجرد» — withdraw the day's count until the underlying error is fixed. */
+export const cancelCashCountRequest = z.object({
+  branchId: z.string().optional(),
+  reason: z.string().trim().min(1).max(500),
 })
 
 export const manualEntryRequest = z.object({
@@ -1130,6 +1513,20 @@ export const setFxRequest = z.object({
 })
 
 /**
+ * The daily rate as `GET /fx` has always sent it: a JSON integer, the shape `setFxRequest` reads back.
+ *
+ * A rate is not an amount and a real one has five or six digits, but turning a bigint into a number is
+ * exactly what `check-wire-money` forbids outside this file — so the one conversion lives here, at the
+ * sanctioned boundary, and refuses anything a JSON number could not carry exactly.
+ */
+export function serializeFxRateNumber(sypMinorPerUsd: bigint): number {
+  if (sypMinorPerUsd <= 0n || sypMinorPerUsd > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new RangeError(`FX rate ${sypMinorPerUsd} cannot cross the wire as an exact integer`)
+  }
+  return Number(sypMinorPerUsd)
+}
+
+/**
  * General operating constants (SRS A-4). A FIXED set of known keys — never an arbitrary
  * key/value write, which would let a typo create a setting nothing reads. Money crosses as a
  * decimal string (moneySchema) and is stored as minor units, so a large ceiling keeps its
@@ -1140,6 +1537,15 @@ export const updateSettingsRequest = z.object({
   receiptCeilingMinor: moneySchema.optional(),
   /** «سعر الكيلوواط-ساعة» — fixed kWh price for charging cost (G-2 / س64). */
   kwhPriceMinor: moneySchema.optional(),
+  /**
+   * «تاريخ بدء التطبيق» — the business date the system really went live on. Reports start here;
+   * everything before it is trial data, kept and readable but excluded from the figures.
+   *
+   * A DATE, deliberately not a timestamp. Every money column in this system is keyed on
+   * `business_date`, which rolls at 04:00 — a separate go-live instant would be a second, competing
+   * time rule, which is the failure BR7's Sunday boundary exists to warn about.
+   */
+  goLiveBusinessDate: realCalendarDateSchema.nullable().optional(),
 })
 
 export const closeWeekRequest = z.object({
@@ -1156,6 +1562,7 @@ export const closeWeekRequest = z.object({
 })
 
 export type LoginRequest = z.infer<typeof loginRequest>
+export type RegisterDriverRequest = z.infer<typeof registerDriverRequest>
 export type CreateShiftRequest = z.infer<typeof createShiftRequest>
 export type StartPackageRequest = z.infer<typeof startPackageRequest>
 export type AddOrderRequest = z.infer<typeof addOrderRequest>
@@ -1166,3 +1573,45 @@ export type RestoreCloseDraftAttachmentRequest = z.infer<typeof restoreCloseDraf
 export type ApproveOpenRequest = z.infer<typeof approveOpenRequest>
 export type CreatePreapprovedShiftRulesRequest = z.infer<typeof createPreapprovedShiftRulesRequest>
 export type ShiftFundingPreview = z.infer<typeof shiftFundingPreviewSchema>
+
+// ── «التفقّد» — manager check-in rounds ────────────────────────────────────────────────────
+
+/** One expected round, in minutes past branch-local midnight. 60 = 01:00, 600 = 10:00. */
+export const createCheckInWindowRequest = z.object({
+  branchId: z.string().optional(),
+  userId: z.string().min(1),
+  atMinute: z.number().int().min(0).max(1439),
+  /** Symmetric: "be there at one" means around one, not "any time after one". */
+  toleranceMinutes: z.number().int().min(1).max(720).default(30),
+  label: z.string().trim().min(1).max(60).nullable().default(null),
+})
+
+/**
+ * A check-in. lat/lng/accuracy are coordinates and metres, not money, so plain numbers are right.
+ *
+ * `accuracyM` is evidence, never a gate: refusing a low-confidence fix would punish a manager for
+ * standing under a roof.
+ */
+export const createCheckInRequest = z.object({
+  branchId: z.string().optional(),
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+  accuracyM: z.number().min(0).max(100_000).nullable().default(null),
+  note: z.string().trim().max(500).nullable().default(null),
+})
+
+/** Where the branch is, for «التفقّد». Null coordinates mean no fence, so no round can fail. */
+export const setBranchLocationRequest = z.object({
+  branchId: z.string().optional(),
+  lat: z.number().min(-90).max(90).nullable(),
+  lng: z.number().min(-180).max(180).nullable(),
+  checkinRadiusM: z.number().int().min(10).max(20_000).default(150),
+  /**
+   * Save a point outside the region this business operates in, having been told.
+   *
+   * The guard exists for swapped fields, not to decide where a branch may be; a future branch
+   * genuinely outside the box must still be possible to record. So it refuses once, names what it
+   * saw, and takes yes for an answer.
+   */
+  confirmOutsideRegion: z.boolean().default(false),
+})

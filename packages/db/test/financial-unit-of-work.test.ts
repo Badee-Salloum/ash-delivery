@@ -46,6 +46,7 @@ describe('PgFinancialUnitOfWork', () => {
             postingDate: '2026-08-23',
             weekStartDate: '2026-08-23',
             fxDayId: 1,
+            sypMinorPerUsd: null,
             createdBy: 'actor-1',
           }),
         ).toEqual([])

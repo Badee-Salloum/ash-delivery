@@ -1,0 +1,19 @@
+{
+  "name": "ash-driver-android",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Android shell for the ASH driver PWA. Its only job is the location foreground service.",
+  "scripts": {
+    "platform": "cap add android",
+    "apply-native": "node apply-native.mjs",
+    "sync": "cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.1",
+    "@capacitor/core": "^8.5.1"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.5.1",
+    "typescript": "^5.9.2"
+  }
+}

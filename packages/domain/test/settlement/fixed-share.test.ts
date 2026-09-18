@@ -110,6 +110,30 @@ describe('fixed 40% settlement', () => {
     expect(plan.cashToOffice).toBeGreaterThan(plan.actualCash)
   })
 
+  it('can leave all or part of the unpaid close contribution as an ordinary receivable', () => {
+    const common = {
+      deliveryFeeTotal: syp(100),
+      fixedDriverShare: syp(40),
+      manualDriverShare: syp(0),
+      cashDeductionTotal: syp(0),
+      expectedCash: syp(80),
+      expectedWallet: syp(20),
+      actualCash: syp(20),
+      actualWallet: syp(20),
+    }
+    const partial = planFixedShareSettlement({ ...common, cashShortageReceivable: syp(5) })
+    const full = planFixedShareSettlement({ ...common, cashShortageReceivable: syp(20) })
+
+    expect(full.maximumCashShortageReceivable).toBe(syp(20))
+    expect(partial.cashToOffice).toBe(syp(35)) // 20 in custody + 15 contributed now
+    expect(full.cashToOffice).toBe(full.actualCash) // only the cash physically in custody arrives
+    expect(full.cashShortageReceivable).toBe(syp(20))
+    expect(() => planFixedShareSettlement({
+      ...common,
+      cashShortageReceivable: minor(syp(20) + 1n),
+    })).toThrow(/exceeds unpaid employee cash/)
+  })
+
   it('expresses office funding and payment as directions with absolute amounts', () => {
     const walletFunding = planFixedShareSettlement({
       deliveryFeeTotal: syp(0),

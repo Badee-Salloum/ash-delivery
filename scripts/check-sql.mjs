@@ -24,7 +24,7 @@ const MUST_AUDIT = [
   'users', 'role_permissions', 'settings', 'approval_ceilings',
   'drivers', 'vehicles', 'documents',
   'funds', 'fx_days', 'week_locks', 'journal_entries', 'journal_lines',
-  'cash_counts', 'expenses', 'receivable_events',
+  'cash_counts', 'expenses', 'incomes', 'receivable_events', 'checkins',
   'shifts', 'shift_orders', 'cash_deductions', 'shift_media', 'float_tranches', 'tier_rules',
   // Decision-complete cash/wallet close snapshots. Append-only, but creation is a money decision.
   'shift_settlements',
@@ -41,6 +41,30 @@ const MUST_AUDIT = [
   // «رأس مال المكتب» decides how much «كييش» is swept out of the branch every single day, and
   // «الترميم» is the record of it having happened. Editing a target silently restates the profit.
   'office_capital_targets', 'restorations',
+  // «السلفة» — office money paid out that must come back. It is counted as capital while it is
+  // outstanding, so who created one, for how much, and who later declared it spent are all money
+  // decisions of exactly the kind this list exists for.
+  'advances', 'advance_events',
+  // Company debts are isolated per debt UUID; both their opening facts and every settlement are
+  // immutable money decisions guarded against overpayment in PostgreSQL.
+  'company_debts', 'company_debt_events',
+  // Purchase price, financing link and schedule are financial facts; the deterministic schedule
+  // rows themselves are immutable derived data and are exempted below.
+  'fixed_assets',
+  'depreciation_transfers', 'depreciation_releases',
+  // Fixed expenses are promises plus explicit human paid/skipped decisions. Both influence what
+  // managers expect to leave the box, and a paid occurrence links to an ordinary audited expense.
+  'recurring_expense_templates', 'recurring_expense_occurrences',
+  // A manager declaring that a row is not a delivery at all removes a fee from the shift's money.
+  // The register is append-only and can only be added to, but «who removed what, and when did the
+  // general manager get told» is precisely a money decision — and the audit row is the second,
+  // independent copy that does not depend on the register's own insert having happened.
+  'operation_removals',
+  // «صندوق الشركة» (C2): every company money move is a command row, and so are the cutover that
+  // moved a branch's company_box into the company pocket and each mirror of a branch company_box
+  // movement after it. Who moved which dollars, at which frozen rate, is exactly an audit question.
+  'company_moves', 'company_expenses', 'company_incomes', 'company_fx_exchanges', 'company_reversals',
+  'company_ledger_cutovers', 'company_restoration_mirrors',
 ]
 
 /**
@@ -53,8 +77,12 @@ const AUDIT_EXEMPT = {
   roles: 'reference data; the grants in role_permissions are what carry authority',
   permissions: 'reference data, defined in code',
   expense_categories: 'reference data',
+  income_categories: 'reference data',
+  checkin_windows: 'a rota of expected times, not money; every change is a settings-shaped edit and the checkins it judges are audited',
   sessions: 'high churn; login/logout is covered by login_attempts',
   login_attempts: 'already an append-only audit record in its own right',
+  driver_registration_attempts:
+    'append-only, password-free rate-limit facts containing only a one-way address hash and timestamp; expired rows are retention-deleted',
   notifications: 'derived from audited events; auditing them would double the write volume',
   media: 'immutable and content-addressed; the shift_media link is what matters',
   shift_media_attachment_history:
@@ -73,6 +101,10 @@ const AUDIT_EXEMPT = {
     'transaction-scoped exact-draft capability; guarded writes are matched to the locked revision and the marker is removed before commit',
   attendance_days: 'derived from session activity',
   vehicle_events: 'append-only life log; is itself the audit trail (B-2)',
+  asset_depreciation_schedule:
+    'deterministic immutable rows derived from an audited fixed asset; a deferred trigger proves all 36 sum to price',
+  depreciation_allocations:
+    'deterministic immutable FIFO detail of an audited reserve transfer; deferred guards prove it totals the parent',
   assignments: 'covered by the audited shift it produces',
   shift_decisions: 'append-only decision log; is itself the audit trail (C-7)',
   cash_count_lines: 'sealed with a sha256 proof on the parent cash_count',

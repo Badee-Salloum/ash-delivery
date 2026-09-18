@@ -485,6 +485,12 @@ describe('manager-attributed operation kinds survive rephoto retries', () => {
       decidedBy: 'u-bm',
       decidedAt,
       createdBy: 'u-d1',
+      // The columns exist, so a stored row has the keys — the memory repo normalises them the way a
+      // Postgres SELECT does. Spelled out here because this test compares a hand-built literal
+      // against what came back, and that comparison is only meaningful if both are whole rows.
+      removedAt: null,
+      removedBy: null,
+      removalReason: null,
     }
     await h.deps.cashDeductions.create(decidedDeduction, 'u-bm')
 

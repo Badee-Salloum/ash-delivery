@@ -225,11 +225,19 @@ export interface CloseDraftPatch {
   }
 }
 
+/**
+ * The linked-read reply, exactly as the API sends it.
+ *
+ * There is NO top-level `read`. It was declared here once and never sent, so `response.read.status`
+ * compiled cleanly and threw at runtime on every end-package battery read for twelve days. The read
+ * belongs to a slot, and lives on `draft.attachments[].read`.
+ */
 export interface CloseDraftReadResponse {
   draft: CloseDraftView
-  read: CloseDraftAttachmentRead
   rows: CloudOcrResponse['rows']
   fields: Record<string, string | null>
+  /** The server already had a complete read for this attachment and did no work. */
+  alreadyRead?: boolean
 }
 
 export interface CloseDraftAttachmentHistoryItem {
@@ -474,12 +482,88 @@ export interface ExpenseCategoryView {
   nameAr: string
   active: boolean
 }
+/** «مدخول مباشر» — money arriving that is not a delivery fee. The mirror of an expense. */
+/**
+ * «السلفة» — an expense that was paid but must come back in full (owner decision 17).
+ *
+ * Recorded like a صرفية and read like a ذمة. `outstanding` is a LEDGER fact from the advance's own
+ * fund, so it is authoritative even if the event rows are ever incomplete.
+ */
+export interface AdvanceView {
+  id: string
+  branchId: string
+  /** Whoever must pay it back — free text. */
+  partyName: string
+  /** Normalised `partyName`. For grouping and search only; no money depends on it. */
+  partyKey: string
+  categoryId: string
+  costCenterKind: 'vehicle' | 'branch' | 'general'
+  vehicleId: string | null
+  /** Set when this advance was reclassified from that driver's «ذمة»; no money moved. */
+  sourceDriverId: string | null
+  /** WHICH BOX paid — or, for a reclassified receivable, which of his debts it was. */
+  channel: 'office_cash' | 'office_wallet'
+  /** Decimal string — what was originally handed over. */
+  amount: string
+  businessDate: string
+  description: string
+  receiptMediaId: string | null
+  journalEntryId: number
+  createdBy: string
+}
+
+/** One outstanding advance, with what the ledger says is still owed on it. */
+export interface AdvanceOutstandingView extends AdvanceView {
+  outstanding: string
+  repaid: string
+  converted: string
+}
+
+export interface AdvanceEventView {
+  id: string
+  advanceId: string
+  branchId: string
+  kind: 'repayment' | 'conversion'
+  amount: string
+  businessDate: string
+  reason: string
+  /** The ordinary expense row a conversion writes; null for a repayment. */
+  expenseId: string | null
+  journalEntryId: number
+  createdBy: string
+}
+
+export interface IncomeView {
+  id: string
+  branchId: string
+  categoryId: string
+  /** WHICH BOX received it. A physical fact the operator knows, never a ledger fund code. */
+  channel: 'office_cash' | 'office_wallet'
+  /** Decimal string. */
+  amount: string
+  businessDate: string
+  description: string
+  evidenceMediaId: string | null
+  /** Never null, unlike an expense's — the column is NOT NULL. */
+  journalEntryId: number
+  createdBy: string
+}
+
+export interface IncomeCategoryView {
+  id: string
+  code: string
+  nameAr: string
+  active: boolean
+}
+
 export interface ExpenseView {
   id: string
   branchId: string
   categoryId: string
   costCenterKind: 'vehicle' | 'branch' | 'general'
   vehicleId: string | null
+  /** WHICH BOX paid. Absent on rows recorded before the wallet channel existed (0059). */
+  channel?: 'office_cash' | 'office_wallet'
   /** Decimal string. */
   amount: string
   businessDate: string
@@ -487,6 +571,49 @@ export interface ExpenseView {
   receiptMediaId: string | null
   journalEntryId: number | null
   createdBy: string
+}
+
+export interface RecurringExpenseTemplateView {
+  id: string
+  branchId: string
+  title: string
+  categoryId: string
+  costCenterKind: 'vehicle' | 'branch' | 'general'
+  vehicleId: string | null
+  channel: 'office_cash' | 'office_wallet'
+  amount: string
+  scheduleKind: 'weekly' | 'monthly_first' | 'every_n_days'
+  weekday: number | null
+  intervalDays: number | null
+  startsOn: string
+  endsOn: string | null
+  active: boolean
+  deactivatedOn: string | null
+  deactivatedAtMs: number | null
+  deactivatedBy: string | null
+  deactivationReason: string | null
+  createdBy: string
+  createdAtMs: number
+  updatedBy: string
+  updatedAtMs: number
+}
+
+export interface RecurringExpenseDueView extends RecurringExpenseTemplateView {
+  dueDate: string
+  status: 'overdue' | 'today' | 'upcoming' | 'later'
+}
+
+export interface RecurringExpenseOccurrenceView {
+  id: string
+  templateId: string
+  branchId: string
+  dueDate: string
+  status: 'paid' | 'skipped'
+  expenseId: string | null
+  reason: string | null
+  actedBy: string
+  actedAtMs: number
+  replayed?: boolean
 }
 
 /**
@@ -517,13 +644,61 @@ export interface ShiftSettlementView {
   walletClaimToOffice: string
   cashReceivableDeferred: string
   walletReceivableDeferred: string
+  maximumCashShortageReceivable: string
+  cashShortageReceivable: string
   walletToOffice: string
   cashToOffice: string
   walletAction: 'collect' | 'fund' | 'none'
   walletAmount: string
   cashAction: 'collect' | 'pay' | 'none'
   cashAmount: string
+  /**
+   * «الحسم» — a charge the manager made against the employee at close.
+   *
+   * Reduces `finalEmployeeCash` and raises `cashClaimToOffice`; deliberately NOT reflected in
+   * `baseDriverShare`, because he earned his share and paid the charge out of it. Optional so a
+   * page served during a rolling deploy against the previous API still renders.
+   */
+  managerCharge?: string
   settlementHash: string
+  /*
+   * WHO SIGNED IT, WHEN, AND WHY THE DIFFERENCE — present only on a settled shift.
+   *
+   * These live in the immutable close snapshot. On a live preview they are absent by design: a
+   * preview must not carry a signature. Optional so a page served during a rolling deploy against
+   * the previous API, which did not serialize them at all, still renders.
+   */
+  confirmedAt?: string | null
+  confirmedBy?: string | null
+  /** Resolved server-side: the browser cannot look a manager's id up, and a uuid tells nobody anything. */
+  confirmedByName?: string | null
+  varianceReason?: string | null
+  walletTransferConfirmed?: boolean
+  cashSettlementConfirmed?: boolean
+}
+
+/**
+ * Rolling-deploy shape from the API before close-shortage receivables were introduced.
+ *
+ * Those two fields were added together. Treating their absence as zero is the only truthful
+ * compatibility value: the older server could neither preview nor publish that kind of debt.
+ * A positive value typed by a new client still cannot match this normalized preview, so approval
+ * remains blocked until a server that actually supports the feature answers with the same value.
+ */
+type ShiftSettlementWireView = Omit<
+  ShiftSettlementView,
+  'maximumCashShortageReceivable' | 'cashShortageReceivable'
+> & {
+  maximumCashShortageReceivable?: string
+  cashShortageReceivable?: string
+}
+
+function normalizeShiftSettlementView(view: ShiftSettlementWireView): ShiftSettlementView {
+  return {
+    ...view,
+    maximumCashShortageReceivable: view.maximumCashShortageReceivable ?? '0.00',
+    cashShortageReceivable: view.cashShortageReceivable ?? '0.00',
+  }
 }
 
 /** The two physical handovers the manager must attest before close approval can post. */
@@ -534,6 +709,7 @@ export interface ApproveCloseRequest {
   cashSettlementConfirmed: boolean
   cashReceivableDeferred?: string
   walletReceivableDeferred?: string
+  cashShortageReceivable?: string
   varianceReason?: string | null
 }
 
@@ -543,11 +719,21 @@ export interface ApproveCloseRequest {
  */
 export interface RestorationLegView {
   fundCode: 'office_cash' | 'office_wallet'
-  /** Physical amount from the sealed count (or the live box after a completed restoration). */
-  counted: string
+  /** Current office-fund balance from the system ledger. */
+  officeBalance: string
+  /** Transitional compatibility for older API deployments; UI code must use `officeBalance`. */
+  counted?: string
   /** Outstanding driver debt assigned to this box. */
   receivables: string
-  /** counted + الذمم — «الوضع الحالي». */
+  /**
+   * Outstanding السلف assigned to this box (owner decision 17).
+   *
+   * Its own field, never folded into `receivables`: the screen labels that «الذمم», and a سلفة
+   * shown there would read as a driver's debt. Optional so a page served during a rolling deploy
+   * against the previous API still renders.
+   */
+  advances?: string
+  /** officeBalance + الذمم + السلف — «الوضع الحالي». */
   position: string
   capitalTarget: string
   /** Signed: positive is «كييش», negative «شحن من الصندوق». */
@@ -560,14 +746,56 @@ export interface RestorationLegView {
 }
 export interface RestorationView {
   businessDate: string
-  /** Preview only: whether tonight's count has been sealed yet (decision j gates on this). */
-  counted?: boolean
-  /** True after today's immutable restoration posting exists; prevents a fresh-looking replay after reload. */
+  /** Present only on the ledger-backed restoration API. Missing means the server is still legacy. */
+  source?: 'live_ledger'
+  /**
+   * Whether this business date already holds a restoration.
+   *
+   * It no longer means «you may not run another». Since 0061 a date may hold several runs, and the
+   * screen says how many instead of hiding the button — the owner asked for الترميم «متاح دوما»
+   * after finding it gone at 02:27, still inside a day restored that morning while a full day's
+   * takings sat in the boxes.
+   */
   alreadyRestored?: boolean
+  /** How many runs this business date already holds. Absent from a server older than 0061. */
+  runsToday?: number
   legs: RestorationLegView[]
   netToCompany: string
   feasible: boolean
   refusals: Array<'sweep_exceeds_counted' | 'no_capital_target'>
+}
+
+/** Rolling-deploy shape accepted from both the old count-based API and the ledger-based API. */
+interface RestorationWireView extends Omit<RestorationView, 'legs' | 'feasible' | 'refusals'> {
+  /** Old previews exposed this gate; it is intentionally absent from the normalized view. */
+  counted?: boolean
+  feasible?: boolean
+  refusals?: RestorationView['refusals']
+  legs: Array<Omit<RestorationLegView, 'officeBalance'> & { officeBalance?: string }>
+}
+
+function normalizeRestorationView(view: RestorationWireView): RestorationView {
+  const legs = view.legs.map((leg) => {
+    const officeBalance = leg.officeBalance ?? leg.counted
+    if (officeBalance === undefined) {
+      throw {
+        status: 502,
+        error: 'malformed_response',
+        detail: 'restoration leg is missing officeBalance',
+      } satisfies ApiError
+    }
+    return { ...leg, officeBalance }
+  })
+  return {
+    businessDate: view.businessDate,
+    ...(view.source === undefined ? {} : { source: view.source }),
+    ...(view.alreadyRestored === undefined ? {} : { alreadyRestored: view.alreadyRestored }),
+    ...(view.runsToday === undefined ? {} : { runsToday: view.runsToday }),
+    legs,
+    netToCompany: view.netToCompany,
+    feasible: view.feasible ?? legs.every((leg) => leg.feasible),
+    refusals: view.refusals ?? [...new Set(legs.flatMap((leg) => leg.refusals))],
+  }
 }
 
 export interface CapitalTargetsView {
@@ -617,6 +845,15 @@ export interface ReceivableEventView {
   amount: string
   businessDate: string
   reason: string
+  /**
+   * `correction` restates a balance that was recorded wrongly — no money moved. Rendering it as a
+   * collection would tell the driver his debt was paid when it was not. `writeoff` clears a real
+   * debt against loss and, unlike collection, never moves an office box.
+   */
+  intent: 'command' | 'correction' | 'writeoff'
+  /** Corrections/write-offs: what the balance read, and what it became. */
+  priorBalance: string | null
+  targetBalance: string | null
   journalEntryId: number
   createdBy: string
   createdAtMs: number
@@ -633,6 +870,14 @@ export interface CreateReceivableEventRequest {
   idempotencyKey: string
 }
 
+export interface WriteoffReceivableRequest {
+  driverId: string
+  channel: ReceivableChannel
+  amount: string
+  reason: string
+  idempotencyKey: string
+}
+
 export interface CreateReceivableEventResult {
   id: string
   driverId: string
@@ -642,8 +887,30 @@ export interface CreateReceivableEventResult {
   amount: string
   businessDate: string
   reason: string
+  intent: 'command' | 'correction' | 'writeoff'
+  priorBalance: string | null
+  targetBalance: string | null
   journalEntryId: number
   replayed: boolean
+}
+
+/**
+ * «تعديل الذمم المسجلة» — restate a balance, rather than record a movement.
+ *
+ * A driver's receivable balance is a ledger fund balance fed from seven places, only one of which
+ * writes an event; the commonest wrong number of all — a `shift_funding` carry — has no event to
+ * point at. So the correction names the balance, and `expectedCurrentBalance` is what the operator
+ * had on screen: if it has moved since, the server refuses rather than applying his instruction to
+ * a number he never saw.
+ */
+export interface CorrectReceivableRequest {
+  driverId: string
+  receivableKind: ReceivableKind
+  channel: ReceivableChannel
+  expectedCurrentBalance: string
+  targetBalance: string
+  reason: string
+  idempotencyKey: string
 }
 
 /**
@@ -844,6 +1111,20 @@ export class ApiClient {
   me() {
     return this.get<{ userId: string; roleKey: string; branchId: string | null; driverId: string | null; businessDate: string }>('/me')
   }
+  registrationBranches() {
+    return this.get<{ branches: Array<{ id: string; code: string; nameAr: string; nameEn: string }> }>(
+      '/auth/register/branches',
+    )
+  }
+  registerDriver(body: { fullNameAr: string; branchId: string; username: string; password: string }) {
+    return this.post<{
+      userId: string
+      driverId: string
+      branchId: string
+      roleKey: 'driver'
+      businessDate: string
+    }>('/auth/register', body)
+  }
 
   // ── Accounts (SRS A-2) ──────────────────────────────────────────────────────────────────────
   users() {
@@ -919,6 +1200,60 @@ export class ApiClient {
         occurredAt: string
       }>
     }>(`/audit${qs ? `?${qs}` : ''}`)
+  }
+
+  /**
+   * What the two office boxes actually did, most recent first.
+   *
+   * The Treasury screen could post a transfer and never show one. That is how four identical
+   * «تسكير نوبة عمران» transfers — one button pressed four times in two seconds — sat in the ledger
+   * unseen until the boxes disagreed with a hand count.
+   */
+  treasuryMovements(limit = 50) {
+    return this.get<{
+      rows: Array<{
+        id: number
+        businessDate: string
+        eventType: string
+        reason: string | null
+        shiftId: string | null
+        actorName: string | null
+        cash: string
+        wallet: string
+      }>
+    }>(`/treasury/movements?limit=${limit}`)
+  }
+
+  /**
+   * The register of rows a manager declared were never deliveries.
+   *
+   * Separate from `audit()` on purpose. The audit trail answers «what happened to THIS record», and
+   * you must already know the table and the UUID to ask it. This answers «what has been removed
+   * lately», which is the question a general manager actually has.
+   */
+  operationRemovals(filter: { branchId?: string; limit?: number } = {}) {
+    const q = new URLSearchParams()
+    if (filter.branchId) q.set('branchId', filter.branchId)
+    if (filter.limit) q.set('limit', String(filter.limit))
+    const qs = q.toString()
+    return this.get<{
+      rows: Array<{
+        id: string
+        kind: 'removed' | 'restored'
+        operationKind: 'order' | 'cash_deduction'
+        operationRef: string
+        shiftId: string
+        branchId: string
+        businessDate: string
+        driverName: string | null
+        amount: string
+        reason: string
+        evidenceSlot: string | null
+        evidenceMediaId: string | null
+        actedByName: string | null
+        actedAt: string
+      }>
+    }>(`/operation-removals${qs ? `?${qs}` : ''}`)
   }
 
   // -- The fleet: numbering, types, batteries (SRS B-2 / L) ------------------------------------
@@ -1222,10 +1557,25 @@ export class ApiClient {
   }
 
   settings() {
-    return this.get<{ receiptCeilingMinor: string | null; kwhPriceMinor: string | null }>('/settings')
+    return this.get<{
+      receiptCeilingMinor: string | null
+      kwhPriceMinor: string | null
+      goLiveBusinessDate: string | null
+    }>('/settings')
   }
-  /** Money fields are decimal strings ("50000.00"); only what is sent changes. */
-  updateSettings(body: { receiptCeilingMinor?: string; kwhPriceMinor?: string }) {
+  /**
+   * Money fields are decimal strings ("50000.00"); only what is sent changes.
+   *
+   * `goLiveBusinessDate` needs `branchId`: the setting is global but its opening ceremony (a sealed
+   * cash count plus a restoration) is per-branch, and `settings.write` belongs to the system admin,
+   * who has no branch of his own. `null` clears the date.
+   */
+  updateSettings(body: {
+    receiptCeilingMinor?: string
+    kwhPriceMinor?: string
+    goLiveBusinessDate?: string | null
+    branchId?: string
+  }) {
     return this.put<{ updated: string[] }>('/settings', body)
   }
 
@@ -1245,6 +1595,94 @@ export class ApiClient {
   }
 
   // ── Expenses (SRS G) — create is expense.write (BM+GM); categories are settings.write (sysadmin) ──
+  // ── «المدخول المباشر» — the mirror of an expense ──────────────────────────────────────────
+  incomeCategories() {
+    return this.get<{ categories: IncomeCategoryView[] }>('/income-categories')
+  }
+  createIncomeCategory(body: { code: string; nameAr: string }) {
+    return this.post<IncomeCategoryView>('/income-categories', body)
+  }
+  incomes(from?: string, to?: string) {
+    const q = [from && `from=${from}`, to && `to=${to}`].filter(Boolean).join('&')
+    return this.get<{ from: string; to: string; incomes: IncomeView[]; total: string }>(`/incomes${q ? `?${q}` : ''}`)
+  }
+  /** `channel` is the box that received the money; the recipe picks the ledger account. */
+  createIncome(body: {
+    idempotencyKey: string
+    categoryId: string
+    channel: 'office_cash' | 'office_wallet'
+    amount: string
+    description: string
+    businessDate?: string
+    evidenceMediaId?: string | null
+    branchId?: string
+  }) {
+    return this.post<IncomeView>('/incomes', body)
+  }
+
+  // ── «السلفة» ──────────────────────────────────────────────────────────────────────────
+  advances(from?: string, to?: string) {
+    const q = [from && `from=${from}`, to && `to=${to}`].filter(Boolean).join('&')
+    return this.get<{
+      from: string
+      to: string
+      advances: AdvanceView[]
+      total: string
+      outstanding: AdvanceOutstandingView[]
+      outstandingCash: string
+      outstandingWallet: string
+      parties: Array<{ partyName: string; partyKey: string }>
+    }>(`/advances${q ? `?${q}` : ''}`)
+  }
+  /**
+   * `channel` is the box the money comes OUT of; the recipe picks the ledger account, and a
+   * repayment must later return to that same box.
+   *
+   * `partyKey` is deliberately absent: the server derives it from `partyName`, so a client can
+   * never send a key that disagrees with the name it is supposed to normalise.
+   */
+  createAdvance(body: {
+    idempotencyKey: string
+    partyName: string
+    categoryId: string
+    costCenterKind: 'vehicle' | 'branch' | 'general'
+    vehicleId?: string | null
+    /** Reclassify this driver's «ذمة» instead of paying out of a box. No money moves. */
+    sourceDriverId?: string | null
+    channel: 'office_cash' | 'office_wallet'
+    amount: string
+    description: string
+    businessDate?: string
+    receiptMediaId?: string | null
+    branchId?: string
+  }) {
+    return this.post<AdvanceView>('/advances', body)
+  }
+  /** Partial is normal. The amount may not exceed what the ledger still says is outstanding. */
+  repayAdvance(advanceId: string, body: { idempotencyKey: string; amount: string; reason: string }) {
+    return this.post<AdvanceEventView>(`/advances/${advanceId}/repayments`, {
+      ...body,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+  /**
+   * It is never coming back: recognise the remainder as the صرفية it turned out to be.
+   *
+   * No amount — the whole outstanding balance converts, read server-side inside the lock. Office
+   * capital drops here and nowhere else in this instrument's life.
+   */
+  convertAdvance(advanceId: string, body: { idempotencyKey: string; reason: string }) {
+    return this.post<AdvanceEventView>(`/advances/${advanceId}/conversion`, {
+      ...body,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+  advanceEvents(advanceId: string) {
+    return this.get<{ advance: AdvanceView; outstanding: string; events: AdvanceEventView[] }>(
+      `/advances/${advanceId}/events`,
+    )
+  }
+
   expenseCategories() {
     return this.get<{ categories: ExpenseCategoryView[] }>('/expense-categories')
   }
@@ -1264,6 +1702,8 @@ export class ApiClient {
     categoryId: string
     costCenterKind: 'vehicle' | 'branch' | 'general'
     vehicleId?: string | null
+    /** WHICH BOX pays. Omitted means cash — what every expense meant before 0059. */
+    channel?: 'office_cash' | 'office_wallet'
     amount: string
     description: string
     businessDate?: string
@@ -1272,12 +1712,131 @@ export class ApiClient {
     return this.post<ExpenseView>('/expenses', { ...body, ...(this.branchId ? { branchId: this.branchId } : {}) })
   }
 
+  recurringExpenses(includeInactive = true) {
+    return this.get<{ templates: RecurringExpenseTemplateView[] }>(
+      `/recurring-expenses?includeInactive=${includeInactive ? 'true' : 'false'}`,
+    )
+  }
+  recurringExpensesDue(from?: string, to?: string) {
+    const q = [from && `from=${encodeURIComponent(from)}`, to && `to=${encodeURIComponent(to)}`]
+      .filter(Boolean)
+      .join('&')
+    return this.get<{
+      today: string
+      from: string
+      to: string
+      olderUnresolved: number
+      due: RecurringExpenseDueView[]
+    }>(`/recurring-expenses/due${q ? `?${q}` : ''}`)
+  }
+  createRecurringExpense(body: {
+    idempotencyKey: string
+    title: string
+    categoryId: string
+    costCenterKind: 'vehicle' | 'branch' | 'general'
+    vehicleId: string | null
+    channel: 'office_cash' | 'office_wallet'
+    amount: string
+    scheduleKind: 'weekly' | 'monthly_first' | 'every_n_days'
+    weekday: number | null
+    intervalDays: number | null
+    startsOn: string
+    endsOn: string | null
+  }) {
+    return this.post<RecurringExpenseTemplateView>('/recurring-expenses', {
+      ...body,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+  updateRecurringExpense(id: string, body: Omit<Parameters<ApiClient['createRecurringExpense']>[0], 'idempotencyKey'>) {
+    return this.put<RecurringExpenseTemplateView>(`/recurring-expenses/${id}`, {
+      ...body,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+  deactivateRecurringExpense(id: string, reason: string) {
+    return this.post<RecurringExpenseTemplateView>(`/recurring-expenses/${id}/deactivate`, {
+      reason,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+  payRecurringExpense(templateId: string, dueDate: string, body: {
+    idempotencyKey: string
+    amount: string
+    businessDate?: string
+    reason: string | null
+    receiptMediaId: string | null
+  }) {
+    return this.post<{
+      occurrence: RecurringExpenseOccurrenceView
+      expense: ExpenseView
+      replayed: boolean
+    }>(`/recurring-expenses/${templateId}/occurrences/${dueDate}/pay`, {
+      ...body,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+  skipRecurringExpense(templateId: string, dueDate: string, reason: string) {
+    return this.post<RecurringExpenseOccurrenceView>(
+      `/recurring-expenses/${templateId}/occurrences/${dueDate}/skip`,
+      { reason, ...(this.branchId ? { branchId: this.branchId } : {}) },
+    )
+  }
+  uploadReceipt(bytes: Uint8Array, contentType: string, clientTakenAtMs?: number) {
+    const q = this.branchId ? `?branchId=${encodeURIComponent(this.branchId)}` : ''
+    return this.putBytes<{ mediaId: string; sha256: string; byteSize: number; deduped: boolean }>(
+      `/media/receipts${q}`,
+      bytes,
+      contentType,
+      clientTakenAtMs === undefined ? {} : { 'x-client-taken-at': String(clientTakenAtMs) },
+      'POST',
+    )
+  }
+
+  // ── «التفقّد» — manager check-in rounds ───────────────────────────────────────────────
+
+  checkinWindows(userId?: string) {
+    return this.get<{ windows: CheckInWindowView[] }>(`/checkin-windows${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`)
+  }
+  createCheckinWindow(body: { userId: string; atMinute: number; toleranceMinutes: number; label: string | null }) {
+    return this.post<CheckInWindowView>('/checkin-windows', { ...body, ...(this.branchId ? { branchId: this.branchId } : {}) })
+  }
+  deleteCheckinWindow(id: string) {
+    // A DELETE carries no body, so an organisation-wide role names the branch on the query string
+    // — the one channel `namedBranch` reads that a bodiless method still has.
+    const q = this.branchId ? `?branchId=${encodeURIComponent(this.branchId)}` : ''
+    return this.del<{ id: string; active: boolean }>(`/checkin-windows/${id}${q}`)
+  }
+  /** The manager presses «تفقّد»; the browser supplies the fix. Never blocks — it records. */
+  checkin(body: { lat: number; lng: number; accuracyM: number | null; note: string | null }) {
+    return this.post<CheckInView>('/checkins', { ...body, ...(this.branchId ? { branchId: this.branchId } : {}) })
+  }
+  checkinReport(date?: string, userId?: string) {
+    const q = [date && `date=${date}`, userId && `userId=${encodeURIComponent(userId)}`].filter(Boolean).join('&')
+    return this.get<CheckInReportView>(`/checkins${q ? `?${q}` : ''}`)
+  }
+  setBranchLocation(body: {
+    lat: number | null
+    lng: number | null
+    checkinRadiusM: number
+    confirmOutsideRegion?: boolean
+  }) {
+    return this.put<{ id: string; lat: number | null; lng: number | null; checkinRadiusM: number }>('/branch-location', {
+      ...body,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+
   /** «كشف التسوية» — read-only and server-owned. Posts nothing until both handovers are confirmed. */
-  shiftSettlement(
+  async shiftSettlement(
     shiftId: string,
     actual?: { actualCash: string; actualWallet: string },
-    deferred?: { cashReceivableDeferred: string; walletReceivableDeferred: string },
-  ) {
+    deferred?: {
+      cashReceivableDeferred: string
+      walletReceivableDeferred: string
+      cashShortageReceivable?: string
+    },
+  ): Promise<ShiftSettlementView> {
     const params = new URLSearchParams()
     if (actual) {
       params.set('actualCash', actual.actualCash)
@@ -1286,10 +1845,14 @@ export class ApiClient {
     if (deferred) {
       params.set('cashReceivableDeferred', deferred.cashReceivableDeferred)
       params.set('walletReceivableDeferred', deferred.walletReceivableDeferred)
+      if (deferred.cashShortageReceivable !== undefined) {
+        params.set('cashShortageReceivable', deferred.cashShortageReceivable)
+      }
     }
     const encoded = params.toString()
     const query = encoded === '' ? '' : `?${encoded}`
-    return this.get<ShiftSettlementView>(`/shifts/${shiftId}/settlement${query}`)
+    const view = await this.get<ShiftSettlementWireView>(`/shifts/${shiftId}/settlement${query}`)
+    return normalizeShiftSettlementView(view)
   }
 
   /**
@@ -1310,6 +1873,18 @@ export class ApiClient {
       `/shifts/${shiftId}/ocr/orders/evidence-reread`,
       body,
       { 'x-ash-orders-time-consensus': 'close-draft-v1' },
+    )
+  }
+
+  /**
+   * «الحسم» — set or clear the charge against the employee. `'0.00'` clears it.
+   *
+   * A REPLACEMENT: the request carries the shift's whole charge, so a retry is idempotent.
+   */
+  setManagerCharge(shiftId: string, body: { amount: string; reason: string | null }) {
+    return this.put<{ id: string; managerCharge: string; managerChargeReason: string | null }>(
+      `/shifts/${shiftId}/manager-charge`,
+      body,
     )
   }
 
@@ -1335,19 +1910,66 @@ export class ApiClient {
       ...(this.branchId ? { branchId: this.branchId } : {}),
     })
   }
-  treasuryDeposit(target: 'cash' | 'wallet', amount: string, note?: string) {
+  writeoffReceivable(body: WriteoffReceivableRequest) {
+    return this.post<CreateReceivableEventResult>('/treasury/receivables/writeoffs', {
+      ...body,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+  correctReceivable(body: CorrectReceivableRequest) {
+    return this.post<CreateReceivableEventResult>('/treasury/receivables/adjustments', {
+      ...body,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+  /**
+   * «نقل بين الصندوق والمحفظة» — reshape the branch's money without changing how much it holds.
+   *
+   * The direction names both ends so no fund code crosses the wire: the generic withdraw route
+   * takes a free-form `to`, and an unrecognised code lands in a look-alike account nothing sums.
+   */
+  treasuryTransfer(direction: 'cash_to_wallet' | 'wallet_to_cash', amount: string, reason: string) {
+    return this.post<{ direction: string; amount: string; cash: string; wallet: string }>(
+      '/treasury/transfer',
+      { direction, amount, reason, ...(this.branchId ? { branchId: this.branchId } : {}) },
+    )
+  }
+  /**
+   * Owner funding into the branch box.
+   *
+   * `idempotencyKey` is one UUID per logical submission, REUSED when the same submission is retried
+   * after a lost response — the server then answers with the original entry instead of depositing
+   * twice. A new submission (any changed field) needs a new key; see the admin's
+   * `pendingMoneyMove`.
+   */
+  treasuryDeposit(target: 'cash' | 'wallet', amount: string, idempotencyKey: string, note?: string) {
     // branchId is explicit here: the GM has scope 'all' and no session branch, so without it the
     // deposit 422s — the money would have nowhere to land.
-    return this.post<{ target: string; balance: string }>('/treasury/deposit', {
+    return this.post<{ target: string; balance: string; replayed: boolean }>('/treasury/deposit', {
+      idempotencyKey,
       target,
       amount,
       note,
       ...(this.branchId ? { branchId: this.branchId } : {}),
     })
   }
-  /** «كييش» when `to` is the company fund — the same recipe الترميم uses automatically. */
-  treasuryWithdraw(target: 'cash' | 'wallet', amount: string, reason: string, to = 'company_box') {
-    return this.post<{ target: string; balance: string }>('/treasury/withdraw', {
+  /**
+   * Take money out of the branch box to a closed destination.
+   *
+   * `company_box` is «كييش» by hand — the same recipe الترميم uses — and the server accepts it only
+   * from a holder of `company_fund.manage` (GM + system admin); anyone else gets 403
+   * `company_fund_forbidden`. No default: the caller always says where the money goes. Same key
+   * contract as `treasuryDeposit`: one per submission, reused on retry.
+   */
+  treasuryWithdraw(
+    target: 'cash' | 'wallet',
+    amount: string,
+    reason: string,
+    to: 'company_box' | 'owner_drawings',
+    idempotencyKey: string,
+  ) {
+    return this.post<{ target: string; balance: string; replayed: boolean }>('/treasury/withdraw', {
+      idempotencyKey,
       target,
       amount,
       to,
@@ -1357,21 +1979,31 @@ export class ApiClient {
   }
 
   // ── «صندوق الشركة» — company-wide, so it is NOT scoped to the session branch on read ────────
+  // Every call here needs `company_fund.manage` (GM + system admin).
   companyFund() {
     return this.get<{
       total: string
-      branches: Array<{ branchId: string; code: string; nameAr: string; balance: string }>
+      usd: string
+      reserve: { SYP_NEW: string; USD: string }
+      depreciationDue: { SYP_NEW: string; USD: string }
+      assets: { SYP_NEW: string; USD: string }
+      debts: Record<'SYP_NEW' | 'USD', { payable: string; receivable: string }>
+      branches: Array<{ branchId: string; code: string; nameAr: string; balance: string; clearing: string; cutOver: boolean }>
     }>('/company-fund')
   }
-  companyFundDeposit(amount: string, reason: string) {
-    return this.post<{ balance: string }>('/company-fund/deposit', {
+  /** Same key contract as `treasuryDeposit`: one per submission, reused on retry. */
+  companyFundDeposit(amount: string, reason: string, idempotencyKey: string) {
+    return this.post<{ balance: string; replayed: boolean }>('/company-fund/deposit', {
+      idempotencyKey,
       amount,
       reason,
       ...(this.branchId ? { branchId: this.branchId } : {}),
     })
   }
-  companyFundWithdraw(amount: string, reason: string) {
-    return this.post<{ balance: string }>('/company-fund/withdraw', {
+  /** Same key contract as `treasuryDeposit`: one per submission, reused on retry. */
+  companyFundWithdraw(amount: string, reason: string, idempotencyKey: string) {
+    return this.post<{ balance: string; replayed: boolean }>('/company-fund/withdraw', {
+      idempotencyKey,
       amount,
       reason,
       ...(this.branchId ? { branchId: this.branchId } : {}),
@@ -1380,12 +2012,13 @@ export class ApiClient {
 
   // ── «الترميم» — the daily restoration (owner decision 10) ───────────────────────────────────
 
-  /** What tonight's ترميم WOULD do, read from the sealed count. Posts nothing. */
-  restorationPreview() {
+  /** What tonight's ترميم would do from the ledger-backed office position. Posts nothing. */
+  async restorationPreview(): Promise<RestorationView> {
     // `get()` already scopes branch reads. Building the query here as well produced duplicate
     // `branchId` parameters for organisation-wide actors, which some query parsers expose as an
     // array and the server correctly refuses as an invalid branch selector.
-    return this.get<RestorationView>('/treasury/restoration/preview')
+    const view = await this.get<RestorationWireView>('/treasury/restoration/preview')
+    return normalizeRestorationView(view)
   }
   /** Publishes today's effective targets atomically; prior restored dates remain immutable. */
   updateCapitalTargets(cashTarget: string, walletTarget: string, reason: string) {
@@ -1396,12 +2029,20 @@ export class ApiClient {
       ...(this.branchId ? { branchId: this.branchId } : {}),
     })
   }
-  /** Performs it. The plan is re-derived server-side from the count — nothing here is trusted. */
-  restore(reason: string) {
-    return this.post<RestorationView & { postings: number }>('/treasury/restoration', {
-      reason,
-      ...(this.branchId ? { branchId: this.branchId } : {}),
-    })
+  /** Performs it. The plan is re-derived server-side from the ledger — nothing here is trusted. */
+  async restore(reason: string): Promise<RestorationView & { postings: number; reconciliationPostings?: number }> {
+    const result = await this.post<RestorationWireView & { postings: number; reconciliationPostings?: number }>(
+      '/treasury/restoration',
+      {
+        reason,
+        ...(this.branchId ? { branchId: this.branchId } : {}),
+      },
+    )
+    return {
+      ...normalizeRestorationView(result),
+      postings: result.postings,
+      ...(result.reconciliationPostings === undefined ? {} : { reconciliationPostings: result.reconciliationPostings }),
+    }
   }
 
   // ── Manual journal entry + BR7 correction (SRS E-3) — branch manager + GM ───────────────────
@@ -1510,6 +2151,7 @@ export class ApiClient {
         cashSettlementConfirmed: true
         cashReceivableDeferred?: string
         walletReceivableDeferred?: string
+        cashShortageReceivable?: string
       }
   )) {
     return this.post<{ id: string; state: string; postings: number; prepared: boolean }>(
@@ -1520,6 +2162,28 @@ export class ApiClient {
 
   // ── Live GPS (SRS K) ────────────────────────────────────────────────────────────────────────
   /** The driver's phone posts a location fix while his shift is open (foreground-only). */
+  /**
+   * Send a buffered run of fixes in one request.
+   *
+   * A background uploader produces runs, not singles: a phone with no signal keeps working and
+   * keeps its fixes. One request carrying four costs the API a fraction of four carrying one, and
+   * the server dedupes on `(shift_id, captured_at)` so a retry after a lost response is free.
+   *
+   * 409 means the shift is over and these fixes will never be accepted — the caller must drop them
+   * and stop, never retry.
+   */
+  sendGpsBatch(
+    shiftId: string,
+    body: {
+      source: 'phone_fg' | 'phone_bg' | 'tracker'
+      fixes: Array<{ lat: number; lng: number; accuracyM: number | null; capturedAtMs: number }>
+    },
+  ) {
+    return this.post<{ ok: true; accepted: number; duplicates: number; rejected: number }>(
+      `/shifts/${shiftId}/gps`,
+      body,
+    )
+  }
   sendGps(shiftId: string, body: { lat: number; lng: number; accuracyM: number | null; capturedAtMs: number }) {
     return this.post(`/shifts/${shiftId}/gps`, body)
   }
@@ -1722,4 +2386,54 @@ export async function readInCloud(
   } catch {
     return null
   }
+}
+
+// ── «التفقّد» ───────────────────────────────────────────────────────────────────────────
+
+export interface CheckInWindowView {
+  id: string
+  userId: string
+  /** Minutes past branch-local midnight. 600 = 10:00. */
+  atMinute: number
+  toleranceMinutes: number
+  label: string | null
+}
+
+export interface CheckInView {
+  id: string
+  userId: string
+  businessDate: string
+  capturedAt: string
+  lat: number
+  lng: number
+  accuracyM: number | null
+  windowId: string | null
+  distanceM: number
+  insideArea: boolean
+  minutesFromTarget: number | null
+  verdict: 'on_time' | 'outside_window' | 'outside_area' | 'outside_both'
+  note: string | null
+}
+
+export interface CheckInReportView {
+  businessDate: string
+  /**
+   * What the server let this caller see: `all` for an auditor, `own` for the person being checked.
+   * The screen renders from this rather than re-deriving it, so the two can never disagree.
+   */
+  scope: 'all' | 'own'
+  radiusM: number | null
+  people: Array<{
+    userId: string
+    name: string
+    rounds: Array<{
+      windowRef: string
+      atMinute: number
+      /** `missed` is the absence of a check-in, not a failure — the row with no answer. */
+      status: 'on_time' | 'outside_area' | 'missed'
+      distanceMetres: number | null
+      minutesFromTarget: number | null
+    }>
+  }>
+  checkIns: CheckInView[]
 }
