@@ -9,3 +9,4 @@ export * from './repos-financial.ts'
 export * from './repos-receivable.ts'
 // P2 — the range read model behind the time filter.
 export * from './repos-range.ts'
+export * from './repos-company.ts'

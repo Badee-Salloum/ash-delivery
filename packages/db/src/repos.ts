@@ -200,6 +200,50 @@ function toUuidOrNull(value: string): string | null {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ? value : null
 }
 
+/**
+ * The lines of a journal entry as one JSON array, for a query that joins `journal_lines jl` and
+ * `funds f` and groups by `je.id`. Amounts travel as TEXT and are parsed to BigInt — never through a
+ * JSON number.
+ */
+export const JOURNAL_LINES_JSON = `COALESCE(
+  json_agg(json_build_object('fundCode', f.code, 'side', jl.side,
+                             'amount', jl.amount_minor::text, 'role', jl.line_role,
+                             'currency', f.currency)
+           ORDER BY jl.id) FILTER (WHERE jl.id IS NOT NULL), '[]'
+)`
+
+/** One `journal_entries` row, with its `lines` from `JOURNAL_LINES_JSON`, as the port's record. */
+export function journalEntryFromRow(r: Record<string, unknown>): JournalEntryRecord {
+  return {
+    id: Number(r.id),
+    branchId: String(r.branch_id),
+    eventType: r.event_type as JournalEntryRecord['eventType'],
+    shiftId: (r.shift_id as string | null) ?? null,
+    occurrenceKey: String(r.occurrence_key),
+    businessDate: isoDate(r.business_date),
+    postingDate: isoDate(r.posting_date),
+    weekStartDate: isoDate(r.week_start_date),
+    fxDayId: Number(r.fx_day_id),
+    // int8 is parsed to bigint by the pool (pool.ts), so this is already exact.
+    sypMinorPerUsd: r.syp_minor_per_usd === null || r.syp_minor_per_usd === undefined
+      ? null
+      : BigInt(r.syp_minor_per_usd as bigint),
+    weekLockId: r.week_lock_id === null ? null : Number(r.week_lock_id),
+    reason: (r.reason as string | null) ?? null,
+    createdBy: String(r.created_by),
+    // amount comes back as ::text and is parsed to BigInt here — never through Number().
+    lines: (
+      r.lines as Array<{ fundCode: string; side: 'D' | 'C'; amount: string; role: string | null; currency: Currency }>
+    ).map((l) => ({
+      fundCode: l.fundCode,
+      side: l.side,
+      amount: minor(BigInt(l.amount)),
+      currency: l.currency,
+      ...(l.role === null ? {} : { role: l.role }),
+    })),
+  }
+}
+
 export class PgLedgerRepo implements LedgerRepo {
   private readonly pool: Pool
   constructor(pool: Pool) {
@@ -336,13 +380,7 @@ export class PgLedgerRepo implements LedgerRepo {
 
   private async load(where: string, params: unknown[]): Promise<JournalEntryRecord[]> {
     const { rows } = await this.pool.query<Record<string, unknown>>(
-      `SELECT je.*,
-              COALESCE(
-                json_agg(json_build_object('fundCode', f.code, 'side', jl.side,
-                                           'amount', jl.amount_minor::text, 'role', jl.line_role,
-                                           'currency', f.currency)
-                         ORDER BY jl.id) FILTER (WHERE jl.id IS NOT NULL), '[]'
-              ) AS lines
+      `SELECT je.*, ${JOURNAL_LINES_JSON} AS lines
          FROM journal_entries je
          LEFT JOIN journal_lines jl ON jl.entry_id = je.id
          LEFT JOIN funds f ON f.id = jl.fund_id
@@ -351,34 +389,7 @@ export class PgLedgerRepo implements LedgerRepo {
         ORDER BY je.id`,
       params,
     )
-    return rows.map((r) => ({
-      id: Number(r.id),
-      branchId: String(r.branch_id),
-      eventType: r.event_type as JournalEntryRecord['eventType'],
-      shiftId: (r.shift_id as string | null) ?? null,
-      occurrenceKey: String(r.occurrence_key),
-      businessDate: isoDate(r.business_date),
-      postingDate: isoDate(r.posting_date),
-      weekStartDate: isoDate(r.week_start_date),
-      fxDayId: Number(r.fx_day_id),
-      // int8 is parsed to bigint by the pool (pool.ts), so this is already exact.
-      sypMinorPerUsd: r.syp_minor_per_usd === null || r.syp_minor_per_usd === undefined
-        ? null
-        : BigInt(r.syp_minor_per_usd as bigint),
-      weekLockId: r.week_lock_id === null ? null : Number(r.week_lock_id),
-      reason: (r.reason as string | null) ?? null,
-      createdBy: String(r.created_by),
-      // amount comes back as ::text and is parsed to BigInt here — never through Number().
-      lines: (
-        r.lines as Array<{ fundCode: string; side: 'D' | 'C'; amount: string; role: string | null; currency: Currency }>
-      ).map((l) => ({
-        fundCode: l.fundCode,
-        side: l.side,
-        amount: minor(BigInt(l.amount)),
-        currency: l.currency,
-        ...(l.role === null ? {} : { role: l.role }),
-      })),
-    }))
+    return rows.map(journalEntryFromRow)
   }
 
   async fundBalance(branchId: string, fundCode: string): Promise<Minor> {
@@ -479,11 +490,12 @@ export class PgRestorationRepo {
     reason: string
     performedBy: string
     runNo: number
-  }): Promise<void> {
+  }): Promise<number> {
     try {
-      await this.pool.query(
+      const { rows } = await this.pool.query<{ id: bigint | string | number }>(
         `INSERT INTO restorations (branch_id, business_date, cash_count_id, plan, net_to_company_minor, reason, performed_by, run_no)
-         VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8)`,
+         VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8)
+         RETURNING id`,
         [
           row.branchId,
           row.businessDate,
@@ -495,6 +507,11 @@ export class PgRestorationRepo {
           row.runNo,
         ],
       )
+      // The company mirror of each journal of this run names the row (C2). A driver that does not
+      // echo RETURNING is not one this system runs on; say so rather than invent an id.
+      const id = rows[0]?.id
+      if (id === undefined || id === null) throw new Error('restorations insert returned no id')
+      return Number(id)
     } catch (err) {
       if (isPgError(err, PG.UNIQUE_VIOLATION)) {
         // Two managers racing the same run number inside the branch-money lock. The loser is told,
@@ -536,7 +553,7 @@ export class PgRestorationRepo {
 }
 
 /** Postgres `date` comes back as a JS Date in local time; format it back without a timezone hop. */
-function isoDate(value: unknown): CalendarDate {
+export function isoDate(value: unknown): CalendarDate {
   if (typeof value === 'string') return value.slice(0, 10)
   const d = value as Date
   const pad = (n: number) => String(n).padStart(2, '0')

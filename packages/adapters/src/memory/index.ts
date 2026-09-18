@@ -107,6 +107,7 @@ import { MemoryCloseDraftRepo } from './close-draft.ts'
 import { MemoryReceivableEventRepo } from './receivables.ts'
 // P2 — the range read model behind the time filter.
 import { MemoryLedgerRangeSource } from './ledger-range.ts'
+import { MemoryCompanyLedgerRepo, MemoryCompanyLedgerSource, MemoryFinancialLocks } from './company.ts'
 
 export { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 export { MemoryOcrReadRepo, MemoryOcrReader, ScriptedOcrReader } from '../ocr/memory.ts'
@@ -120,6 +121,7 @@ export { MemoryCloseDraftRepo } from './close-draft.ts'
 export { MemoryReceivableEventRepo } from './receivables.ts'
 // P2 — the range read model behind the time filter.
 export { MemoryLedgerRangeSource } from './ledger-range.ts'
+export { MemoryCompanyLedgerRepo, MemoryCompanyLedgerSource, MemoryFinancialLocks } from './company.ts'
 
 /**
  * In-memory implementations of every port.
@@ -2148,6 +2150,8 @@ export interface MemoryDeps extends Deps {
   cashCounts: MemoryCashCountRepo
   capitalTargets: MemoryOfficeCapitalTargetRepo
   restorations: MemoryRestorationRepo
+  companyLedger: MemoryCompanyLedgerRepo
+  companyLedgerSource: MemoryCompanyLedgerSource
   tiers: MemoryTierRepo
   notifications: MemoryNotificationRepo
   settings: MemorySettingsRepo
@@ -2190,6 +2194,9 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
   private readonly receivableEvents: MemoryReceivableEventRepo
   private readonly capitalTargets: MemoryOfficeCapitalTargetRepo
   private readonly restorations: MemoryRestorationRepo
+  private readonly companyLedger: MemoryCompanyLedgerRepo
+  /** The locks the LAST unit of work asked for, in order — a test reads the lock order here. */
+  readonly locks = new MemoryFinancialLocks()
   private readonly gate: MemoryTransactionGate
 
   constructor(
@@ -2202,6 +2209,7 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
     capitalTargets: MemoryOfficeCapitalTargetRepo,
     restorations: MemoryRestorationRepo,
     gate: MemoryTransactionGate,
+    companyLedger: MemoryCompanyLedgerRepo,
   ) {
     this.expenses = expenses
     this.incomes = incomes
@@ -2210,17 +2218,23 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
     this.receivableEvents = receivableEvents
     this.capitalTargets = capitalTargets
     this.restorations = restorations
+    this.companyLedger = companyLedger
     this.gate = gate
     this.deps = {
       expenses, incomes, advances, ledger, receivableEvents, cashCounts, capitalTargets, restorations,
+      companyLedger, locks: this.locks,
     }
   }
 
   async run<T>(
-    _input: FinancialUnitOfWorkInput,
+    input: FinancialUnitOfWorkInput,
     work: (deps: FinancialTransactionDeps) => Promise<T>,
   ): Promise<T> {
     return this.gate.run(async () => {
+      // The unit of work's own lock comes first, exactly as PgFinancialUnitOfWork takes it.
+      this.locks.taken.length = 0
+      await this.locks.acquire(input.lockKey)
+      const companySnapshot = this.companyLedger.snapshot()
       const expenseSnapshot = this.expenses.snapshotRows()
       const incomeSnapshot = this.incomes.snapshotRows()
       const advanceSnapshot = this.advances.snapshotRows()
@@ -2238,6 +2252,7 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
         this.receivableEvents.restore(receivableSnapshot)
         this.capitalTargets.restoreRows(capitalTargetSnapshot)
         this.restorations.restoreRows(restorationSnapshot)
+        this.companyLedger.restore(companySnapshot)
         throw error
       }
     })
@@ -2402,6 +2417,10 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   const cashCounts = new MemoryCashCountRepo()
   const capitalTargets = new MemoryOfficeCapitalTargetRepo()
   const restorations = new MemoryRestorationRepo()
+  // The cutover watermark is max(journal_entries.id), read from the same ledger every repo writes.
+  const companyLedger = new MemoryCompanyLedgerRepo(() =>
+    ledger.entries.reduce((max, entry) => (entry.id > max ? entry.id : max), 0),
+  )
   const assignments = new MemoryAssignmentRepo()
   const preapprovedShiftRules = new MemoryPreapprovedShiftRuleRepo()
   const financialUnitOfWork = new MemoryFinancialUnitOfWork(
@@ -2414,6 +2433,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     capitalTargets,
     restorations,
     gate,
+    companyLedger,
   )
   const operationRemovals = new MemoryOperationRemovalRepo()
   const transactionDeps: ShiftCloseTransactionDeps = {
@@ -2485,6 +2505,12 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     cashCounts,
     capitalTargets,
     restorations,
+    companyLedger,
+    companyLedgerSource: new MemoryCompanyLedgerSource(
+      () => ledger.entries,
+      () => directory.listBranches(),
+      companyLedger,
+    ),
     tiers,
     notifications: new MemoryNotificationRepo(),
     settings: new MemorySettingsRepo(),

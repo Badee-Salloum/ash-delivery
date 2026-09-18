@@ -10,6 +10,7 @@ import { PgCloseDraftRepo } from '../src/repos-close-draft.ts'
 import { PgFinancialUnitOfWork } from '../src/repos-financial.ts'
 import { PgReceivableEventRepo } from '../src/repos-receivable.ts'
 import { PgLedgerRangeSource } from '../src/repos-range.ts'
+import { PgCompanyLedgerRepo, PgCompanyLedgerSource } from '../src/repos-company.ts'
 import { assertDisposableDatabaseConnection, assertDisposableDatabaseUrl } from './disposable-database.ts'
 import {
   PgAuditRepo,
@@ -121,14 +122,19 @@ if (!DATABASE_URL) {
         `INSERT INTO permissions (key, name_ar, name_en)
          VALUES
            ('journal.manual.write', 'القيد اليدوي', 'Manual journal'),
-           ('shift.approve', 'اعتماد النوبة', 'Approve shift')
+           ('shift.approve', 'اعتماد النوبة', 'Approve shift'),
+           ('company_fund.manage', 'إدارة صندوق الشركة', 'Manage company fund'),
+           ('settings.write', 'الإعدادات', 'Settings')
          ON CONFLICT (key) DO NOTHING`,
       )
+      // The company ledger's command guards (0067) read these live grants.
       await pool.query(
         `INSERT INTO role_permissions (role_key, permission_key, scope)
          VALUES
            ('system_admin', 'journal.manual.write', 'all'),
-           ('system_admin', 'shift.approve', 'all')
+           ('system_admin', 'shift.approve', 'all'),
+           ('system_admin', 'company_fund.manage', 'all'),
+           ('system_admin', 'settings.write', 'all')
          ON CONFLICT (role_key, permission_key) DO UPDATE SET scope = EXCLUDED.scope`,
       )
       await pool.query(
@@ -226,6 +232,8 @@ if (!DATABASE_URL) {
         cashCounts: new PgCashCountRepo(pool),
         capitalTargets: new PgOfficeCapitalTargetRepo(pool),
         restorations: new PgRestorationRepo(pool),
+        companyLedger: new PgCompanyLedgerRepo(pool),
+        companyLedgerSource: new PgCompanyLedgerSource(pool),
         tiers: new PgTierRepo(pool),
         notifications: new PgNotificationRepo(pool),
         settings: new PgSettingsRepo(pool),

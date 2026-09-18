@@ -7,6 +7,7 @@ import { bindPoolToTransaction, type Pool, withTransaction } from './pool.ts'
 import { PgLedgerRepo, PgOfficeCapitalTargetRepo, PgRestorationRepo } from './repos.ts'
 import { PgAdvanceRepo, PgCashCountRepo, PgExpenseRepo, PgIncomeRepo } from './repos-shift.ts'
 import { PgReceivableEventRepo } from './repos-receivable.ts'
+import { PgCompanyLedgerRepo, PgFinancialLocks } from './repos-company.ts'
 
 const transactionDeps = (pool: Pool): FinancialTransactionDeps => ({
   ledger: new PgLedgerRepo(pool),
@@ -17,6 +18,8 @@ const transactionDeps = (pool: Pool): FinancialTransactionDeps => ({
   cashCounts: new PgCashCountRepo(pool),
   capitalTargets: new PgOfficeCapitalTargetRepo(pool),
   restorations: new PgRestorationRepo(pool),
+  companyLedger: new PgCompanyLedgerRepo(pool),
+  locks: new PgFinancialLocks(pool),
 })
 
 /**

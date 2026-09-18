@@ -57,6 +57,11 @@ const MUST_AUDIT = [
   // general manager get told» is precisely a money decision — and the audit row is the second,
   // independent copy that does not depend on the register's own insert having happened.
   'operation_removals',
+  // «صندوق الشركة» (C2): every company money move is a command row, and so are the cutover that
+  // moved a branch's company_box into the company pocket and each mirror of a branch company_box
+  // movement after it. Who moved which dollars, at which frozen rate, is exactly an audit question.
+  'company_moves', 'company_expenses', 'company_incomes', 'company_fx_exchanges', 'company_reversals',
+  'company_ledger_cutovers', 'company_restoration_mirrors',
 ]
 
 /**

@@ -11,6 +11,7 @@ import type {
   Scope,
   PermissionKey,
 } from '@ash/domain'
+import type { CompanyLedgerRepo, CompanyLedgerSource, FinancialLocks } from './company-ledger.ts'
 
 /**
  * The ports. Everything the application needs from the outside world, expressed as interfaces
@@ -1386,8 +1387,11 @@ export interface RestorationRecord {
 }
 
 export interface RestorationRepo {
-  /** Throws `{ code: 'DUPLICATE_RESTORATION' }` when that run number is already taken. */
-  create(row: RestorationRecord): Promise<void>
+  /**
+   * Throws `{ code: 'DUPLICATE_RESTORATION' }` when that run number is already taken. Returns the
+   * row's id — the company mirror of each of the run's journals names it (C2).
+   */
+  create(row: RestorationRecord): Promise<number>
   /** The LATEST run of that day, or null. Callers wanting the count use `runsOnDay`. */
   find(branchId: string, businessDate: CalendarDate): Promise<RestorationRecord | null>
   /** How many runs that business date already holds. The next run is this plus one. */
@@ -2127,6 +2131,10 @@ export interface FinancialTransactionDeps {
   capitalTargets: OfficeCapitalTargetRepo
   /** The immutable fact and its journal entries must commit or roll back together. */
   restorations: RestorationRepo
+  /** «صندوق الشركة» commands, cutovers and mirrors (C2) — written beside their journal entries. */
+  companyLedger: CompanyLedgerRepo
+  /** Further financial locks in the same namespace; see `lockBranchThenCompany`. */
+  locks: FinancialLocks
 }
 
 export interface FinancialUnitOfWorkInput {
@@ -2765,6 +2773,10 @@ export interface Deps {
   capitalTargets: OfficeCapitalTargetRepo
   /** «الترميم» — one record per branch per working day. */
   restorations: RestorationRepo
+  /** «صندوق الشركة» — the company ledger's command rows, cutovers and mirrors (C2). */
+  companyLedger: CompanyLedgerRepo
+  /** «صندوق الشركة» — pockets, clearing and movements, each read in one statement (C2). */
+  companyLedgerSource: CompanyLedgerSource
   tiers: TierRepo
   notifications: NotificationRepo
   settings: SettingsRepo

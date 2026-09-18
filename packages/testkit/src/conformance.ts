@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type {
   BatteryReadingRecord,
+  CompanyCommandRecord,
   Deps,
   ExpenseRecord,
   GpsPingRecord,
@@ -13,16 +14,27 @@ import type {
 // P2 — the range read model conformance.
 import type { JournalEntryRecord, LedgerRangeRecord } from '@ash/contracts'
 import { serializeMoney } from '@ash/contracts'
+import { lockBranchThenCompany } from '@ash/contracts'
 import {
   type Currency,
   type FundRef,
   type Posting,
   cashSettledReturnPostings,
+  companyDeposit,
+  companyExpense,
+  companyFxExchange,
+  companyIncome,
+  companyOpeningTransfer,
+  companyReversal,
+  companyWithdrawal,
   currencyOf,
   fundCode,
+  manualKaish,
   minor,
+  money,
   planFixedShareSettlement,
   receivableAdjustment,
+  restorationMirror,
 } from '@ash/domain'
 import {
   expense as expensePosting,
@@ -31,6 +43,9 @@ import {
   reverse,
   weekStartFor,
 } from '@ash/domain'
+
+/** `Omit` that keeps a union a union. */
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never
 
 /**
  * The conformance suite.
@@ -1384,36 +1399,51 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
             ],
           }
 
-          const [cutoverWritten] = await deps.ledger.post(COMPANY_BRANCH, [cutover], HQ_META)
-          const [sypWritten] = await deps.ledger.post(COMPANY_BRANCH, [sypKinds], HQ_META)
-          const [usdWritten] = await deps.ledger.post(COMPANY_BRANCH, [usdKinds], { ...HQ_META, sypMinorPerUsd: RATE })
-          const [exchangeWritten] = await deps.ledger.post(COMPANY_BRANCH, [exchange], {
-            ...HQ_META,
-            sypMinorPerUsd: 13_050n,
-          })
-          for (const [written, posting] of [
-            [cutoverWritten, cutover],
-            [sypWritten, sypKinds],
-            [usdWritten, usdKinds],
-            [exchangeWritten, exchange],
-          ] as const) {
-            expectStored(written!, posting)
-            // What was returned is what a reader gets back.
-            const found = await deps.ledger.findStandaloneEntry(COMPANY_BRANCH, posting.eventType, posting.occurrenceKey)
-            expectStored(found!, posting)
-            expect(found!.sypMinorPerUsd).toBe(written!.sypMinorPerUsd)
-          }
-          expect(cutoverWritten!.sypMinorPerUsd).toBeNull()
-          expect(sypWritten!.sypMinorPerUsd).toBeNull()
-          expect(usdWritten!.sypMinorPerUsd).toBe(RATE)
-          expect(exchangeWritten!.lines.map((l) => l.currency)).toEqual(['USD', 'USD', 'SYP_NEW', 'SYP_NEW'])
+          /*
+           * Since C2 (0067) a company entry commits only beside its command row, and these probes —
+           * every account kind under one correction — are no command anyone may issue. So they are
+           * stored, read back and checked INSIDE one unit of work that is then rolled back: the
+           * storage round-trip is what this test is about, and nothing fact-less ever commits.
+           */
+          const rolledBack = new Error('conformance probe rolled back')
+          await expect(
+            deps.financialUnitOfWork.run({ lockKey: `receivables:${COMPANY_BRANCH}`, actorId: USER }, async (tx) => {
+              const [cutoverWritten] = await tx.ledger.post(COMPANY_BRANCH, [cutover], HQ_META)
+              const [sypWritten] = await tx.ledger.post(COMPANY_BRANCH, [sypKinds], HQ_META)
+              const [usdWritten] = await tx.ledger.post(COMPANY_BRANCH, [usdKinds], { ...HQ_META, sypMinorPerUsd: RATE })
+              const [exchangeWritten] = await tx.ledger.post(COMPANY_BRANCH, [exchange], {
+                ...HQ_META,
+                sypMinorPerUsd: 13_050n,
+              })
+              for (const [written, posting] of [
+                [cutoverWritten, cutover],
+                [sypWritten, sypKinds],
+                [usdWritten, usdKinds],
+                [exchangeWritten, exchange],
+              ] as const) {
+                expectStored(written!, posting)
+                // What was returned is what a reader gets back.
+                const found = await tx.ledger.findStandaloneEntry(COMPANY_BRANCH, posting.eventType, posting.occurrenceKey)
+                expectStored(found!, posting)
+                expect(found!.sypMinorPerUsd).toBe(written!.sypMinorPerUsd)
+              }
+              expect(cutoverWritten!.sypMinorPerUsd).toBeNull()
+              expect(sypWritten!.sypMinorPerUsd).toBeNull()
+              expect(usdWritten!.sypMinorPerUsd).toBe(RATE)
+              expect(exchangeWritten!.lines.map((l) => l.currency)).toEqual(['USD', 'USD', 'SYP_NEW', 'SYP_NEW'])
 
-          // Balances are per code, and the two pockets never mix.
-          expect(await deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:USD')).toBe(10_000n - 5_000n)
-          expect(await deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:SYP_NEW')).toBe(7_905_726n + 100n + 652_500n)
-          expect(await deps.ledger.fundBalance(COMPANY_BRANCH, `branch_clearing:${BRANCH}`)).toBe(-7_905_726n)
-          // The company ledger is not the branch's: nothing of it shows under DAM.
-          expect(await deps.ledger.fundBalance(BRANCH, 'company_cash:SYP_NEW')).toBe(0n)
+              // Balances are per code, and the two pockets never mix.
+              expect(await tx.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:USD')).toBe(10_000n - 5_000n)
+              expect(await tx.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:SYP_NEW')).toBe(7_905_726n + 100n + 652_500n)
+              expect(await tx.ledger.fundBalance(COMPANY_BRANCH, `branch_clearing:${BRANCH}`)).toBe(-7_905_726n)
+              // The company ledger is not the branch's: nothing of it shows under DAM.
+              expect(await tx.ledger.fundBalance(BRANCH, 'company_cash:SYP_NEW')).toBe(0n)
+              throw rolledBack
+            }),
+          ).rejects.toBe(rolledBack)
+          // …and nothing of it survived the rollback.
+          expect(await deps.ledger.findStandaloneEntry(COMPANY_BRANCH, 'company_opening_transfer', 'c1-cutover')).toBeNull()
+          expect(await deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:USD')).toBe(0n)
         } finally {
           await ctx.cleanup?.(deps)
         }
@@ -1449,8 +1479,10 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           await expect(
             deps.ledger.post(COMPANY_BRANCH, [crossed], { ...HQ_META, sypMinorPerUsd: RATE }),
           ).rejects.toThrow(/unbalanced/)
+          // A deposit, not a correction: since C2 a two-currency company_correction is how an
+          // exchange is taken back (and 0067 requires it to be the exact inverse of one).
           const balancedButMixed: Posting = {
-            eventType: 'company_correction',
+            eventType: 'company_deposit',
             occurrenceKey: 'c1-mixed',
             lines: [
               line(cash('USD'), 'D', 100n),
@@ -1463,7 +1495,7 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
             deps.ledger.post(COMPANY_BRANCH, [balancedButMixed], { ...HQ_META, sypMinorPerUsd: RATE }),
           ).rejects.toThrow(/company_fx_exchange/)
           expect(await deps.ledger.findStandaloneEntry(COMPANY_BRANCH, 'company_deposit', 'c1-refused')).toBeNull()
-          expect(await deps.ledger.findStandaloneEntry(COMPANY_BRANCH, 'company_correction', 'c1-mixed')).toBeNull()
+          expect(await deps.ledger.findStandaloneEntry(COMPANY_BRANCH, 'company_deposit', 'c1-mixed')).toBeNull()
         } finally {
           await ctx.cleanup?.(deps)
         }
@@ -1485,6 +1517,268 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
             deps.ledger.post(COMPANY_BRANCH, [deposit], { ...HQ_META, sypMinorPerUsd: RATE }),
           ).rejects.toMatchObject({ code: 'fund_currency_mismatch' })
           expect(await deps.ledger.findStandaloneEntry(COMPANY_BRANCH, 'company_deposit', 'c1-mismatch')).toBeNull()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+    })
+
+    describe('company ledger commands, cutover and mirror (C2)', () => {
+      const TODAY = '2026-07-21'
+      const RATE = 13_050n
+      const CMD = {
+        shiftId: null,
+        businessDate: TODAY,
+        postingDate: TODAY,
+        weekStartDate: '2026-07-19',
+        fxDayId: 1,
+        createdBy: USER,
+      }
+      const KEY = (n: number) => `c2000000-0000-4000-8000-${String(n).padStart(12, '0')}`
+      const EXPENSE_CATEGORY = 'c2000000-0000-4000-8000-00000000ca01'
+      const INCOME_CATEGORY = 'c2000000-0000-4000-8000-00000000ca02'
+      const base = { branchId: COMPANY_BRANCH, occurredOn: TODAY, businessDate: TODAY, createdBy: USER, createdAtMs: 0 }
+      const hq = (deps: Deps) => ({ lockKey: `receivables:${COMPANY_BRANCH}`, actorId: USER, deps })
+      const withoutTime = <T extends { createdAtMs: number }>(row: T | null): T | null =>
+        row === null ? null : { ...row, createdAtMs: 0 }
+
+      async function categories(deps: Deps): Promise<void> {
+        if (!(await deps.expenses.listCategories()).some((c) => c.id === EXPENSE_CATEGORY)) {
+          await deps.expenses.createCategory({ id: EXPENSE_CATEGORY, code: 'c2-company-expense', nameAr: 'صرفية شركة', active: true })
+        }
+        if (!(await deps.incomes.listCategories()).some((c) => c.id === INCOME_CATEGORY)) {
+          await deps.incomes.createCategory({ id: INCOME_CATEGORY, code: 'c2-company-income', nameAr: 'مدخول شركة', active: true })
+        }
+      }
+
+      /** Post a company command the way the API does: journal first, its row second, one unit of work. */
+      async function issue(
+        deps: Deps,
+        posting: Posting,
+        rate: bigint | null,
+        reason: string,
+        row: DistributiveOmit<CompanyCommandRecord, 'journalEntryId'>,
+      ): Promise<CompanyCommandRecord> {
+        const { lockKey, actorId } = hq(deps)
+        return deps.financialUnitOfWork.run({ lockKey, actorId }, async (tx) => {
+          const [entry] = await tx.ledger.post(COMPANY_BRANCH, [posting], { ...CMD, sypMinorPerUsd: rate, reason })
+          const command = { ...row, journalEntryId: entry!.id } as CompanyCommandRecord
+          await tx.companyLedger.createCommand(command)
+          return command
+        })
+      }
+
+      it('stores every command kind, reads it back by key and by entry, and sums the pockets', async () => {
+        const deps = await fresh()
+        try {
+          await categories(deps)
+          const deposit = await issue(deps, companyDeposit('SYP_NEW', minor(500_000n), 'owner_funding', KEY(1)), null, 'إيداع المالك', {
+            ...base, id: KEY(1), kind: 'deposit', equityAccount: 'owner_funding', currency: 'SYP_NEW',
+            amount: minor(500_000n), sypMinorPerUsd: null, reason: 'إيداع المالك',
+          })
+          const opening = await issue(deps, companyDeposit('USD', minor(20_000n), 'opening', KEY(2)), RATE, 'رصيد افتتاحي بالدولار', {
+            ...base, id: KEY(2), kind: 'deposit', equityAccount: 'opening', currency: 'USD',
+            amount: minor(20_000n), sypMinorPerUsd: RATE, reason: 'رصيد افتتاحي بالدولار',
+          })
+          const withdrawal = await issue(deps, companyWithdrawal('SYP_NEW', minor(100_000n), KEY(3)), null, 'سحب المالك', {
+            ...base, id: KEY(3), kind: 'withdrawal', equityAccount: 'owner_drawings', currency: 'SYP_NEW',
+            amount: minor(100_000n), sypMinorPerUsd: null, reason: 'سحب المالك',
+          })
+          const expense = await issue(
+            deps,
+            companyExpense('USD', minor(5_000n), `vehicle:${OTHER_VEHICLE}`, 'pocket', KEY(4)),
+            RATE,
+            'إطارات',
+            {
+              ...base, id: KEY(4), kind: 'expense', currency: 'USD', amount: minor(5_000n), sypMinorPerUsd: RATE,
+              categoryId: EXPENSE_CATEGORY, costCenterKind: 'vehicle', vehicleId: OTHER_VEHICLE, assetId: null,
+              paidFrom: 'pocket', receiptMediaId: null, description: 'إطارات', occurredOn: '2026-07-01',
+            },
+          )
+          const income = await issue(deps, companyIncome('SYP_NEW', minor(30_000n), KEY(5)), null, 'بيع خردة', {
+            ...base, id: KEY(5), kind: 'income', currency: 'SYP_NEW', amount: minor(30_000n), sypMinorPerUsd: null,
+            categoryId: INCOME_CATEGORY, description: 'بيع خردة',
+          })
+          const exchangePosting = companyFxExchange(money('USD', minor(10_000n)), money('SYP_NEW', minor(1_305_000n)), KEY(6))
+          const exchange = await issue(deps, exchangePosting, RATE, 'تصريف', {
+            ...base, id: KEY(6), kind: 'exchange', fromCurrency: 'USD', fromAmount: minor(10_000n),
+            toCurrency: 'SYP_NEW', toAmount: minor(1_305_000n), sypMinorPerUsd: RATE, reason: 'تصريف',
+          })
+          const reversal = await issue(
+            deps,
+            companyReversal(companyIncome('SYP_NEW', minor(30_000n), KEY(5)), KEY(7)),
+            null,
+            'مدخول مكرر',
+            {
+              ...base, id: KEY(7), kind: 'reversal', targetKind: 'income', targetId: KEY(5),
+              targetEntryId: income.journalEntryId, sypMinorPerUsd: null, reason: 'مدخول مكرر',
+            },
+          )
+
+          const all = [deposit, opening, withdrawal, expense, income, exchange, reversal]
+          for (const command of all) {
+            expect(withoutTime(await deps.companyLedger.findCommand(command.id))).toEqual(withoutTime(command))
+            expect(withoutTime(await deps.companyLedger.findCommand(command.id.toUpperCase()))).toEqual(withoutTime(command))
+            expect(withoutTime(await deps.companyLedger.findCommandByEntry(command.journalEntryId))).toEqual(withoutTime(command))
+          }
+          expect(await deps.companyLedger.findCommand(KEY(99))).toBeNull()
+          expect(await deps.companyLedger.findCommand('not-a-uuid')).toBeNull()
+          expect((await deps.companyLedger.listCommands(COMPANY_BRANCH)).map((c) => c.id)).toEqual(all.map((c) => c.id))
+          expect(await deps.companyLedger.listCommands(COMPANY_BRANCH, { from: '2026-07-22', to: '2026-07-30' })).toEqual([])
+          expect(await deps.companyLedger.listCommands(BRANCH)).toEqual([])
+          expect(withoutTime(await deps.companyLedger.findReversalOf(income.journalEntryId))).toEqual(withoutTime(reversal))
+          expect(await deps.companyLedger.findReversalOf(deposit.journalEntryId)).toBeNull()
+
+          // 500,000 − 100,000 + 30,000 − 30,000 + 1,305,000 lira; 20,000 − 5,000 − 10,000 cents.
+          const overview = await deps.companyLedgerSource.readOverview(COMPANY_BRANCH, { from: TODAY, to: TODAY })
+          expect(overview.pockets).toEqual({ SYP_NEW: 1_705_000n, USD: 5_000n })
+          expect(overview.reserves).toEqual({ SYP_NEW: 0n, USD: 0n })
+          expect(overview.branches).toEqual([{ branchId: BRANCH, companyBox: 0n, clearing: 0n, cutOver: false }])
+          expect(overview.period.SYP_NEW).toEqual({ income: 0n, expense: 0n, deposits: 500_000n, withdrawals: 100_000n, net: 0n })
+          expect(overview.period.USD).toEqual({ income: 0n, expense: 5_000n, deposits: 20_000n, withdrawals: 0n, net: -5_000n })
+          const outside = await deps.companyLedgerSource.readOverview(COMPANY_BRANCH, { from: '2026-07-22', to: '2026-07-22' })
+          expect(outside.pockets).toEqual(overview.pockets)
+          expect(outside.period.USD).toEqual({ income: 0n, expense: 0n, deposits: 0n, withdrawals: 0n, net: 0n })
+
+          // The running pocket balance follows posting order, per currency.
+          const movements = await deps.companyLedgerSource.listMovements(COMPANY_BRANCH, { from: TODAY, to: TODAY })
+          expect(movements.map((m) => m.entry.id)).toEqual(all.map((c) => c.journalEntryId))
+          expect(movements.map((m) => m.pocketAfter)).toEqual([
+            { SYP_NEW: 500_000n },
+            { USD: 20_000n },
+            { SYP_NEW: 400_000n },
+            { USD: 15_000n },
+            { SYP_NEW: 430_000n },
+            { USD: 5_000n, SYP_NEW: 1_735_000n },
+            { SYP_NEW: 1_705_000n },
+          ])
+          expect(movements[5]!.entry.sypMinorPerUsd).toBe(RATE)
+          expect(await deps.companyLedgerSource.listMovements(COMPANY_BRANCH, { from: '2026-07-22', to: '2026-07-22' })).toEqual([])
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('refuses a key already spent on another command, and a second reversal of one entry', async () => {
+        const deps = await fresh()
+        try {
+          await categories(deps)
+          const deposit = await issue(deps, companyDeposit('SYP_NEW', minor(9_000n), 'owner_funding', KEY(11)), null, 'إيداع', {
+            ...base, id: KEY(11), kind: 'deposit', equityAccount: 'owner_funding', currency: 'SYP_NEW',
+            amount: minor(9_000n), sypMinorPerUsd: null, reason: 'إيداع',
+          })
+          // The same key sent to an expense: refused, and nothing it posted survives.
+          await expect(
+            issue(deps, companyExpense('SYP_NEW', minor(1n), 'general', 'pocket', KEY(11)), null, 'صرفية', {
+              ...base, id: KEY(11), kind: 'expense', currency: 'SYP_NEW', amount: minor(1n), sypMinorPerUsd: null,
+              categoryId: EXPENSE_CATEGORY, costCenterKind: 'general', vehicleId: null, assetId: null,
+              paidFrom: 'pocket', receiptMediaId: null, description: 'صرفية',
+            }),
+          ).rejects.toMatchObject({ code: 'DUPLICATE_COMPANY_COMMAND' })
+          expect(await deps.ledger.findStandaloneEntry(COMPANY_BRANCH, 'company_expense', KEY(11))).toBeNull()
+
+          const reverse = (id: string) =>
+            issue(deps, companyReversal(companyDeposit('SYP_NEW', minor(9_000n), 'owner_funding', KEY(11)), id), null, 'خطأ', {
+              ...base, id, kind: 'reversal', targetKind: 'move', targetId: KEY(11),
+              targetEntryId: deposit.journalEntryId, sypMinorPerUsd: null, reason: 'خطأ',
+            })
+          await reverse(KEY(12))
+          await expect(reverse(KEY(13))).rejects.toMatchObject({ code: 'DUPLICATE_REVERSAL' })
+          expect(await deps.ledger.findStandaloneEntry(COMPANY_BRANCH, 'company_correction', KEY(13))).toBeNull()
+          expect(await deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:SYP_NEW')).toBe(0n)
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('cuts a branch over once, then mirrors every company_box movement into the company pocket', async () => {
+        const deps = await fresh()
+        try {
+          const branchMeta = { ...CMD, sypMinorPerUsd: null }
+          // History before the cutover: the branch's company_box is the branch's own business.
+          const [history] = await deps.financialUnitOfWork.run({ lockKey: `receivables:${BRANCH}`, actorId: USER }, (tx) =>
+            tx.ledger.post(BRANCH, [manualKaish('office_cash', minor(700n), 'c2-history')], { ...branchMeta, reason: 'كييش قديم' }),
+          )
+          expect(await deps.companyLedger.cutoverFor(BRANCH)).toBeNull()
+
+          const cutover = await deps.financialUnitOfWork.run({ lockKey: `receivables:${BRANCH}`, actorId: USER }, async (tx) => {
+            await lockBranchThenCompany(tx, BRANCH, COMPANY_BRANCH)
+            const opening = await tx.ledger.fundBalance(BRANCH, 'company_box')
+            const watermark = await tx.companyLedger.latestEntryId()
+            const [entry] = await tx.ledger.post(COMPANY_BRANCH, [companyOpeningTransfer(BRANCH, opening)], {
+              ...branchMeta,
+              reason: 'الانتقال إلى الصندوق المستقل',
+            })
+            const row = {
+              branchId: BRANCH,
+              companyBranchId: COMPANY_BRANCH,
+              openingAmount: opening,
+              openingEntryId: entry!.id,
+              watermarkEntryId: watermark,
+              businessDate: TODAY,
+              reason: 'الانتقال إلى الصندوق المستقل',
+              performedBy: USER,
+              performedAtMs: 0,
+            }
+            await tx.companyLedger.createCutover(row)
+            return row
+          })
+          expect(cutover.openingAmount).toBe(700n)
+          expect(cutover.watermarkEntryId).toBeGreaterThanOrEqual(history!.id)
+          expect({ ...(await deps.companyLedger.cutoverFor(BRANCH))!, performedAtMs: 0 }).toEqual(cutover)
+          expect((await deps.companyLedger.listCutovers()).map((c) => c.branchId)).toEqual([BRANCH])
+          await expect(
+            deps.financialUnitOfWork.run({ lockKey: `receivables:${BRANCH}`, actorId: USER }, (tx) =>
+              tx.companyLedger.createCutover(cutover),
+            ),
+          ).rejects.toMatchObject({ code: 'DUPLICATE_CUTOVER' })
+
+          // A hand «كييش» after the cutover, with its HQ half in the same unit of work.
+          const mirror = await deps.financialUnitOfWork.run({ lockKey: `receivables:${BRANCH}`, actorId: USER }, async (tx) => {
+            await lockBranchThenCompany(tx, BRANCH, COMPANY_BRANCH)
+            const [source] = await tx.ledger.post(BRANCH, [manualKaish('office_wallet', minor(300n), 'c2-after')], {
+              ...branchMeta,
+              reason: 'كييش بعد الانتقال',
+            })
+            const [half] = await tx.ledger.post(
+              COMPANY_BRANCH,
+              [restorationMirror('to_company', minor(300n), BRANCH, source!.id)],
+              {
+                ...branchMeta,
+                businessDate: source!.businessDate,
+                postingDate: source!.postingDate,
+                weekStartDate: source!.weekStartDate,
+                reason: 'كييش بعد الانتقال',
+              },
+            )
+            const row = {
+              id: KEY(21),
+              sourceBranchId: BRANCH,
+              sourceEntryId: source!.id,
+              mirrorEntryId: half!.id,
+              direction: 'to_company' as const,
+              amount: minor(300n),
+              restorationId: null,
+              createdBy: USER,
+              createdAtMs: 0,
+            }
+            await tx.companyLedger.createMirror(row)
+            return row
+          })
+          expect(mirror.sourceEntryId).toBeGreaterThan(cutover.watermarkEntryId)
+          expect(withoutTime(await deps.companyLedger.findMirrorBySource(mirror.sourceEntryId))).toEqual(mirror)
+          expect((await deps.companyLedger.listMirrors(BRANCH)).map((m) => m.sourceEntryId)).toEqual([mirror.sourceEntryId])
+          expect(await deps.companyLedger.findMirrorBySource(history!.id)).toBeNull()
+          expect(await deps.companyLedger.latestEntryId()).toBe(mirror.mirrorEntryId)
+
+          const overview = await deps.companyLedgerSource.readOverview(COMPANY_BRANCH, { from: TODAY, to: TODAY })
+          expect(overview.branches).toEqual([{ branchId: BRANCH, companyBox: 1_000n, clearing: -1_000n, cutOver: true }])
+          expect(overview.pockets.SYP_NEW).toBe(1_000n)
+          const movements = await deps.companyLedgerSource.listMovements(COMPANY_BRANCH, { from: TODAY, to: TODAY })
+          expect(movements.map((m) => [m.entry.eventType, m.pocketAfter])).toEqual([
+            ['company_opening_transfer', { SYP_NEW: 700n }],
+            ['company_restoration_mirror', { SYP_NEW: 1_000n }],
+          ])
         } finally {
           await ctx.cleanup?.(deps)
         }
@@ -1935,7 +2229,8 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
                 reason: 'signed daily count variance',
               })
               expect(entries).toHaveLength(1)
-              await tx.restorations.create({
+              // The row id comes back: a company mirror of the run's journals names it (C2).
+              const restorationId = await tx.restorations.create({
                 branchId: BRANCH,
                 businessDate: '2026-07-21',
                 runNo: 1,
@@ -1968,6 +2263,7 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
                 reason: 'signed daily count variance',
                 performedBy: USER,
               })
+              expect(Number.isSafeInteger(restorationId) && restorationId > 0).toBe(true)
             },
           )
 
