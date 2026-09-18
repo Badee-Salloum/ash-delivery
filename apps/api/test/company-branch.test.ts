@@ -108,20 +108,19 @@ describe('the company row is not addressable by a branch permission', () => {
     expect(h.deps.ledger.entries).toHaveLength(0)
   })
 
-  it('refuses the legacy company-fund moves on it, which move a BRANCH account', async () => {
+  it('routes legacy company-fund moves to HQ even when a stale client sends the HQ branch id', async () => {
     const gm = await h.loginAs('gm')
     for (const url of ['/company-fund/deposit', '/company-fund/withdraw']) {
-      expectNotAddressable(
-        await request(gm, 'POST', url, {
-          branchId: COMPANY_BRANCH,
-          idempotencyKey: randomUUID(),
-          amount: sypStr(10),
-          reason: 'إيداع',
-        }),
-        url,
-      )
+      const res = await request(gm, 'POST', url, {
+        branchId: COMPANY_BRANCH,
+        idempotencyKey: randomUUID(),
+        amount: sypStr(10),
+        reason: 'حركة عبر المسار القديم',
+      })
+      expect(res.statusCode, `${url}: ${res.body}`).toBe(201)
+      expect(res.json().command.branchId).toBe(COMPANY_BRANCH)
     }
-    expect(h.deps.ledger.entries).toHaveLength(0)
+    expect(h.deps.ledger.entries).toHaveLength(2)
   })
 
   it('still lets the company permissions reach it: audit', async () => {

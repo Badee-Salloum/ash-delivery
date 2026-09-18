@@ -6,7 +6,7 @@ import { PgRestorationRepo } from '../src/repos.ts'
 describe('PgRestorationRepo evidence versions', () => {
   it('writes and reads a schema-v3 restoration with no invented cash-count id', async () => {
     const query = vi.fn()
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ id: 1 }], rowCount: 1 })
       .mockResolvedValueOnce({
         rows: [{
           branch_id: 'branch-1',

@@ -67,7 +67,11 @@ const release = (r: Record<string, unknown>): DepreciationReleaseRecord => ({
 })
 
 export class PgCompanyFinanceRepo implements CompanyFinanceRepo {
-  constructor(private readonly pool: Pool) {}
+  private readonly pool: Pool
+
+  constructor(pool: Pool) {
+    this.pool = pool
+  }
 
   async getDebt(id: string): Promise<CompanyDebtRecord | null> {
     const { rows } = await this.pool.query<Record<string, unknown>>('SELECT * FROM company_debts WHERE id = $1', [id])

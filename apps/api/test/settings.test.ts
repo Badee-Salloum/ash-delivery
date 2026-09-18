@@ -1,5 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { COMPANY_BRANCH } from '../src/seed.ts'
 import { BRANCH, type Harness, TINY_JPEG, makeHarness, sypStr } from './harness.ts'
 
 /**
@@ -334,12 +335,10 @@ describe('the go-live date accepts a position with nothing missing', () => {
     expect(res.json().detail.shortfall).toBe(sypStr(1))
   })
 
-  it('refuses while صندوق الشركة still holds anything', async () => {
-    // A non-empty company fund is exactly the shape of carried-over profit this rule exists to
-    // keep out of a fresh start.
+  it('does not mix the separate HQ company pocket into a branch go-live position', async () => {
+    // Since C1, HQ company cash is a separate book. Only the branch's pre-cutover company_box (or
+    // its post-cutover clearing invariant) belongs to this branch opening ceremony.
     await putOnCapital()
-    // Through the company fund's own command: since 2026-09-17 a manual entry may not name
-    // `company_box` at all, and a branch manager may not move it.
     const gm = await h.loginAs('gm')
     const funded = await post(gm, '/company-fund/deposit', {
       idempotencyKey: crypto.randomUUID(),
@@ -348,10 +347,11 @@ describe('the go-live date accepts a position with nothing missing', () => {
       branchId: BRANCH,
     })
     expect(funded.statusCode, funded.body).toBe(201)
+    expect(funded.json().command.branchId).toBe(COMPANY_BRANCH)
     const admin = await h.loginAs('sysadmin')
     const today = (await get(admin, '/fx')).json().businessDate
     const res = await put(admin, '/settings', { goLiveBusinessDate: today, branchId: BRANCH })
-    expect(res.statusCode, res.body).toBe(422)
-    expect(res.json().detail.companyBox).toBe(sypStr(100))
+    expect(res.statusCode, res.body).toBe(200)
+    expect((await get(admin, '/settings')).json().goLiveBusinessDate).toBe(today)
   })
 })
