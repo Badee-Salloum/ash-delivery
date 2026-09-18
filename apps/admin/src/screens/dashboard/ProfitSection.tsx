@@ -10,12 +10,6 @@ import { SectionHeading } from './SectionHeading.tsx'
 import type { ProfitDigest } from './types.ts'
 import { useDashboardRead } from './use-dashboard-read.ts'
 
-function percent(numerator: bigint, denominator: bigint): string | null {
-  if (denominator <= 0n) return null
-  const tenths = (numerator * 1_000n) / denominator
-  return `${tenths / 10n}.${(tenths < 0n ? -tenths : tenths) % 10n}`
-}
-
 export function ProfitSection({ range }: { range: DateRange }): ReactNode {
   const { t } = useApp()
   const query = `?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`
@@ -44,23 +38,15 @@ export function ProfitSection({ range }: { range: DateRange }): ReactNode {
         <div id="dashboard-profit" className="grid grid-cols-1 gap-3 xl:grid-cols-3">
           <Card className="xl:col-span-2" title={t.dashboard.netProfit} subtitle={t.dashboard.periodRange.replace('{from}', data.from).replace('{to}', data.to)}>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-[minmax(0,1fr)_2fr]">
-              <Stat
-                lead
-                label={t.dashboard.netProfit}
-                value={<Money value={data.netProfitSyp} />}
-                tone={parseMinor(data.netProfitSyp) < minor(0n) ? 'danger' : 'success'}
-                sub={(() => {
-                  const margin = percent(
-                    parseMinor(data.netProfitSyp),
-                    parseMinor(data.companyShareSyp) + parseMinor(data.otherIncomeSyp),
-                  )
-                  return margin === null ? undefined : `${t.dashboard.margin} ${margin}%`
-                })()}
-              />
+              <div className="grid grid-cols-1 gap-3">
+                <Stat lead label={t.dashboard.combinedNetProfit} value={<Money value={data.combinedNetProfitSyp} />} tone={parseMinor(data.combinedNetProfitSyp) < minor(0n) ? 'danger' : 'success'} />
+                <Stat label={t.dashboard.branchNetProfit} value={<Money value={data.branchNetProfitSyp} />} tone={parseMinor(data.branchNetProfitSyp) < minor(0n) ? 'danger' : 'success'} />
+                <Stat label={t.dashboard.companyNetProfit} value={<Money value={data.companyNetProfitSyp} />} tone={parseMinor(data.companyNetProfitSyp) < minor(0n) ? 'danger' : 'success'} />
+              </div>
               <TrendBars
                 from={range.from}
                 to={range.to}
-                points={data.days.map((day) => ({ date: day.businessDate, value: day.netProfitSyp }))}
+                points={data.days.map((day) => ({ date: day.businessDate, value: day.combinedNetProfitSyp }))}
                 label={t.dashboard.profitTrend}
               />
             </div>

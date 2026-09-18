@@ -5,7 +5,7 @@ import { explainError } from '../errors.ts'
 import type { RouteParams } from '../route.ts'
 import { Button, Card, DateField, Field, Money, MoneyInput, Pending, Select, Stat, Table, TextInput } from '../ui.tsx'
 
-type Tab = 'overview' | 'movements' | 'debts' | 'assets' | 'depreciation'
+type Tab = 'overview' | 'movements' | 'debts' | 'assets' | 'depreciation' | 'recurring'
 
 interface Overview {
   pockets: Record<Currency, string>
@@ -52,6 +52,26 @@ interface DepreciationPlan {
   }>
 }
 
+interface RecurringTemplate {
+  id: string
+  title: string
+  categoryId: string
+  currency: Currency
+  paidFrom: 'pocket' | 'reserve' | 'owner_outside'
+  amount: string
+  scheduleKind: 'weekly' | 'monthly_first' | 'every_n_days'
+  weekday: number | null
+  intervalDays: number | null
+  startsOn: string
+  endsOn: string | null
+  active: boolean
+}
+
+interface RecurringDue extends RecurringTemplate {
+  dueDate: string
+  status: 'overdue' | 'today' | 'upcoming' | 'later'
+}
+
 interface CompanyData {
   overview: Overview
   movements: Movement[]
@@ -59,9 +79,12 @@ interface CompanyData {
   assets: Asset[]
   depreciation: DepreciationPlan
   vehicles: Array<{ id: string; code: string; groundNo?: string | null }>
+  recurring: RecurringTemplate[]
+  recurringDue: RecurringDue[]
+  categories: Array<{ id: string; nameAr: string; code: string }>
 }
 
-const tabs: readonly Tab[] = ['overview', 'movements', 'debts', 'assets', 'depreciation']
+const tabs: readonly Tab[] = ['overview', 'movements', 'debts', 'assets', 'depreciation', 'recurring']
 
 export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactNode {
   const { api, session, t } = useApp()
@@ -83,8 +106,15 @@ export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactN
       api.get<{ assets: Asset[] }>('/company/assets'),
       api.get<DepreciationPlan>(`/company/depreciation?asOfMonth=${encodeURIComponent(month)}`),
       api.get<{ vehicles: Array<{ id: string; code: string; groundNo?: string | null }> }>('/vehicles'),
-    ]).then(([overview, movements, debts, assets, depreciation, vehicles]) => {
-      setData({ overview, movements: movements.movements, debts: debts.debts, assets: assets.assets, depreciation, vehicles: vehicles.vehicles })
+      api.get<{ templates: RecurringTemplate[] }>('/company/recurring-expenses?includeInactive=true'),
+      api.get<{ due: RecurringDue[] }>('/company/recurring-expenses/due'),
+      api.get<{ categories: Array<{ id: string; nameAr: string; code: string }> }>('/expense-categories'),
+    ]).then(([overview, movements, debts, assets, depreciation, vehicles, recurring, recurringDue, categories]) => {
+      setData({
+        overview, movements: movements.movements, debts: debts.debts, assets: assets.assets,
+        depreciation, vehicles: vehicles.vehicles, recurring: recurring.templates,
+        recurringDue: recurringDue.due, categories: categories.categories,
+      })
     }).catch((cause: { error?: string }) => {
       setData(null)
       setError(cause.error ?? 'error')
@@ -138,6 +168,7 @@ export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactN
       {tab === 'debts' ? <DebtsTab rows={data.debts} today={today} busy={busy} mutate={mutate} /> : null}
       {tab === 'assets' ? <AssetsTab rows={data.assets} vehicles={data.vehicles} today={today} busy={busy} mutate={mutate} /> : null}
       {tab === 'depreciation' ? <DepreciationTab plan={data.depreciation} busy={busy} mutate={mutate} /> : null}
+      {tab === 'recurring' ? <RecurringTab rows={data.recurring} due={data.recurringDue} categories={data.categories} today={today} busy={busy} mutate={mutate} /> : null}
     </div>
   )
 }
@@ -356,6 +387,108 @@ function DepreciationTab({ plan, busy, mutate }: { plan: DepreciationPlan; busy:
           </Card>
         )
       })}
+    </div>
+  )
+}
+
+function RecurringTab({
+  rows,
+  due,
+  categories,
+  today,
+  busy,
+  mutate,
+}: {
+  rows: RecurringTemplate[]
+  due: RecurringDue[]
+  categories: CompanyData['categories']
+  today: string
+  busy: boolean
+  mutate: Mutate
+}): ReactNode {
+  const { api, t } = useApp()
+  const [title, setTitle] = useState('')
+  const [categoryId, setCategoryId] = useState(categories[0]?.id ?? '')
+  const [currency, setCurrency] = useState<Currency>('SYP_NEW')
+  const [paidFrom, setPaidFrom] = useState<'pocket' | 'reserve' | 'owner_outside'>('pocket')
+  const [amount, setAmount] = useState('')
+  const [scheduleKind, setScheduleKind] = useState<'weekly' | 'monthly_first' | 'every_n_days'>('monthly_first')
+  const [weekday, setWeekday] = useState(0)
+  const [intervalDays, setIntervalDays] = useState('30')
+  const [startsOn, setStartsOn] = useState(today)
+  const [endsOn, setEndsOn] = useState('')
+
+  const submit = (event: FormEvent): void => {
+    event.preventDefault()
+    void mutate(() => api.post('/company/recurring-expenses', {
+      idempotencyKey: crypto.randomUUID(), title, categoryId, costCenterKind: 'general',
+      vehicleId: null, assetId: null, currency, paidFrom, amount, scheduleKind,
+      weekday: scheduleKind === 'weekly' ? weekday : null,
+      intervalDays: scheduleKind === 'every_n_days' ? Number(intervalDays) : null,
+      startsOn, endsOn: endsOn === '' ? null : endsOn,
+    }), t.expenses.fixedSaved).then(() => { setTitle(''); setAmount('') })
+  }
+  const pay = (row: RecurringDue): void => {
+    void mutate(() => api.post(`/company/recurring-expenses/${row.id}/occurrences/${row.dueDate}/pay`, {
+      idempotencyKey: crypto.randomUUID(), amount: row.amount, receiptMediaId: null, reason: null,
+    }), t.expenses.paid)
+  }
+  const skip = (row: RecurringDue): void => {
+    const reason = window.prompt(t.expenses.skipReason)?.trim() ?? ''
+    if (reason === '') return
+    void mutate(() => api.post(`/company/recurring-expenses/${row.id}/occurrences/${row.dueDate}/skip`, { reason }), t.expenses.skipped)
+  }
+  const deactivate = (row: RecurringTemplate): void => {
+    const reason = window.prompt(t.expenses.deactivationReason)?.trim() ?? ''
+    if (reason === '') return
+    void mutate(() => api.post(`/company/recurring-expenses/${row.id}/deactivate`, { reason }), t.expenses.deactivated)
+  }
+
+  return (
+    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(20rem,1fr)_2fr]">
+      <Card title={t.expenses.newFixed}>
+        <form className="flex flex-col gap-3" onSubmit={submit}>
+          <Field label={t.expenses.name}><TextInput required value={title} onChange={(event) => setTitle(event.target.value)} aria-label={t.expenses.name} /></Field>
+          <Field label={t.expenses.category}><Select required value={categoryId} onChange={(event) => setCategoryId(event.target.value)} aria-label={t.expenses.category}>{categories.map((category) => <option key={category.id} value={category.id}>{category.nameAr} · {category.code}</option>)}</Select></Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label={t.companyFinance.currency}><Select value={currency} onChange={(event) => setCurrency(event.target.value as Currency)} aria-label={t.companyFinance.currency}><option value="SYP_NEW">{t.currency.SYP_NEW}</option><option value="USD">{t.currency.USD}</option></Select></Field>
+            <Field label={t.companyFinance.paidFrom}><Select value={paidFrom} onChange={(event) => setPaidFrom(event.target.value as typeof paidFrom)} aria-label={t.companyFinance.paidFrom}><option value="pocket">{t.companyFinance.pocket}</option><option value="reserve">{t.companyFinance.reserve}</option><option value="owner_outside">{t.companyFinance.ownerOutside}</option></Select></Field>
+          </div>
+          <Field label={t.companyFinance.amount}><MoneyInput required value={amount} onChange={(event) => setAmount(event.target.value)} aria-label={t.companyFinance.amount} /></Field>
+          <Field label={t.expenses.recurrence}><Select value={scheduleKind} onChange={(event) => setScheduleKind(event.target.value as typeof scheduleKind)} aria-label={t.expenses.recurrence}><option value="monthly_first">{t.expenses.monthlyFirst}</option><option value="weekly">{t.expenses.weekly}</option><option value="every_n_days">{t.expenses.everyNDays}</option></Select></Field>
+          {scheduleKind === 'weekly' ? <Field label={t.expenses.weekday}><Select value={weekday} onChange={(event) => setWeekday(Number(event.target.value))} aria-label={t.expenses.weekday}>{t.expenses.weekdays.map((day, index) => <option key={day} value={index}>{day}</option>)}</Select></Field> : null}
+          {scheduleKind === 'every_n_days' ? <Field label={t.expenses.intervalDays}><TextInput type="number" min="1" max="366" value={intervalDays} onChange={(event) => setIntervalDays(event.target.value)} aria-label={t.expenses.intervalDays} /></Field> : null}
+          <DateField label={t.expenses.startsOn} value={startsOn} onChange={setStartsOn} />
+          <DateField label={t.expenses.endsOn} value={endsOn} onChange={setEndsOn} />
+          <Button type="submit" disabled={busy || categoryId === ''}>{t.expenses.saveFixed}</Button>
+        </form>
+      </Card>
+      <div className="flex flex-col gap-4">
+        <Card title={t.expenses.tabDue}>
+          <Table head={[t.expenses.name, t.companyFinance.date, t.companyFinance.amount, t.expenses.actionLabel]} isEmpty={due.length === 0} empty={t.expenses.nothingDue}>
+            {due.map((row) => (
+              <tr key={`${row.id}:${row.dueDate}`}>
+                <td className="px-3 py-2">{row.title}</td>
+                <td className="num px-3 py-2">{row.dueDate}</td>
+                <td className="px-3 py-2 text-end"><Money value={row.amount} currency={row.currency} /></td>
+                <td className="px-3 py-2"><div className="flex flex-wrap gap-2"><Button size="sm" disabled={busy || row.dueDate > today} onClick={() => pay(row)}>{t.expenses.pay}</Button><Button size="sm" variant="ghost" disabled={busy || row.dueDate > today} onClick={() => skip(row)}>{t.expenses.skip}</Button></div></td>
+              </tr>
+            ))}
+          </Table>
+        </Card>
+        <Card title={t.expenses.fixedTitle}>
+          <Table head={[t.expenses.name, t.expenses.recurrence, t.companyFinance.amount, t.expenses.statusLabel]} isEmpty={rows.length === 0} empty={t.expenses.noneFixed}>
+            {rows.map((row) => (
+              <tr key={row.id}>
+                <td className="px-3 py-2">{row.title}</td>
+                <td className="px-3 py-2">{row.scheduleKind === 'monthly_first' ? t.expenses.monthlyFirst : row.scheduleKind === 'weekly' ? t.expenses.weekly : t.expenses.everyNDays}</td>
+                <td className="px-3 py-2 text-end"><Money value={row.amount} currency={row.currency} /></td>
+                <td className="px-3 py-2">{row.active ? <Button size="sm" variant="ghost" disabled={busy} onClick={() => deactivate(row)}>{t.expenses.deactivate}</Button> : t.expenses.inactive}</td>
+              </tr>
+            ))}
+          </Table>
+        </Card>
+      </div>
     </div>
   )
 }

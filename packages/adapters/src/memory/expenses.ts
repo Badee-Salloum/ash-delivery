@@ -145,6 +145,14 @@ export class MemoryRecurringExpenseRepo implements RecurringExpenseRepo {
         code: 'DUPLICATE_OCCURRENCE_EXPENSE',
       })
     }
+    if (
+      occurrence.companyExpenseId != null &&
+      [...this.occurrences.values()].some((row) => row.companyExpenseId === occurrence.companyExpenseId)
+    ) {
+      throw Object.assign(new Error(`duplicate recurring company expense ${occurrence.companyExpenseId}`), {
+        code: 'DUPLICATE_OCCURRENCE_EXPENSE',
+      })
+    }
     this.occurrences.set(key, structuredClone(occurrence))
   }
 

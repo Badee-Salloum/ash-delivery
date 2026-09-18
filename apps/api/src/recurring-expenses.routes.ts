@@ -37,6 +37,14 @@ import { ServiceError, assertWeekOpen, ensureFxDay, recordVehicleEvent, todayFor
 const paramsSchema = z.object({ id: z.string().uuid() })
 const occurrenceParamsSchema = z.object({ id: z.string().uuid(), dueDate: z.string() })
 
+type BranchRecurringTemplate = RecurringExpenseTemplateRecord & {
+  templateKind?: 'branch'
+  currency?: 'SYP_NEW'
+  costCenterKind: 'vehicle' | 'branch' | 'general'
+  channel: 'office_cash' | 'office_wallet'
+  paidFrom?: null
+}
+
 const templateTermsEqual = (
   a: RecurringExpenseTemplateRecord,
   b: Pick<
@@ -78,10 +86,16 @@ const scheduleOf = (row: RecurringExpenseTemplateRecord) => ({
   intervalDays: row.intervalDays,
 })
 
-const assertTemplateScope = (row: RecurringExpenseTemplateRecord | null, branchId: string) => {
+const assertTemplateScope = (
+  row: RecurringExpenseTemplateRecord | null,
+  branchId: string,
+): BranchRecurringTemplate => {
   if (!row) throw new ServiceError(404, 'recurring_expense_not_found')
-  if (row.branchId !== branchId) throw new ServiceError(404, 'recurring_expense_not_found')
-  return row
+  if (
+    row.branchId !== branchId || (row.templateKind ?? 'branch') !== 'branch' || row.channel === null ||
+    row.costCenterKind === 'asset'
+  ) throw new ServiceError(404, 'recurring_expense_not_found')
+  return row as BranchRecurringTemplate
 }
 
 async function validateTemplateReferences(

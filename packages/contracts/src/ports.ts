@@ -2085,11 +2085,17 @@ export interface RecurringExpenseTemplateRecord {
   /** Client-owned UUID: identity and create-retry key. */
   id: string
   branchId: string
+  /** C6: omitted by pre-C6 callers means an operating-branch template. */
+  templateKind?: 'branch' | 'company'
+  /** Branch templates are always SYP; company templates preserve their purchase currency. */
+  currency?: Currency
   title: string
   categoryId: string
-  costCenterKind: 'vehicle' | 'branch' | 'general'
+  costCenterKind: 'vehicle' | 'branch' | 'general' | 'asset'
   vehicleId: string | null
-  channel: 'office_cash' | 'office_wallet'
+  assetId?: string | null
+  channel: 'office_cash' | 'office_wallet' | null
+  paidFrom?: 'pocket' | 'reserve' | 'owner_outside' | null
   amount: Minor
   scheduleKind: RecurrenceKind
   weekday: number | null
@@ -2116,6 +2122,8 @@ export interface RecurringExpenseOccurrenceRecord {
   status: 'paid' | 'skipped'
   /** An ordinary ledger-backed expense when paid; null only for a skip. */
   expenseId: string | null
+  /** C6 company payment; exactly one expense reference is set for a paid occurrence. */
+  companyExpenseId?: string | null
   /** Required for a skip and whenever the paid amount differs from the template. */
   reason: string | null
   actedBy: string

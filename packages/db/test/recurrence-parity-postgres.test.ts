@@ -19,6 +19,7 @@ describe('migration 0075 recurring expenses', () => {
     const files = readdirSync(migrationsDir).filter((file) => file.endsWith('.sql')).sort()
     expect(files).toContain('0075_recurring_expenses.sql')
     expect(files.indexOf('0075_recurring_expenses.sql')).toBeGreaterThan(files.indexOf('0066_company_ledger_foundation.sql'))
+    expect(files.indexOf('0077_company_recurring_expenses.sql')).toBeGreaterThan(files.indexOf('0075_recurring_expenses.sql'))
   })
 })
 
@@ -83,6 +84,12 @@ if (!DATABASE_URL) {
         )
         await client.query(
           `INSERT INTO roles (key, name_ar, name_en) VALUES ('system_admin', 'مدير النظام', 'System Admin')
+           ON CONFLICT (key) DO NOTHING`,
+        )
+        await client.query(
+          `INSERT INTO permissions (key, name_ar, name_en) VALUES
+             ('expense.write', 'كتابة الصرفيات', 'Write expenses'),
+             ('company_fund.manage', 'إدارة صندوق الشركة', 'Manage company fund')
            ON CONFLICT (key) DO NOTHING`,
         )
         await client.query(
@@ -168,6 +175,96 @@ if (!DATABASE_URL) {
           client.query(`UPDATE recurring_expense_occurrences SET reason = 'rewritten' WHERE id = $1`, [occurrenceId]),
         ).rejects.toMatchObject({ code: '42501' })
         await client.query('ROLLBACK TO SAVEPOINT immutable_occurrence')
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined)
+        client.release()
+      }
+    })
+
+    it('keeps company schedules in HQ and requires company-fund management', async () => {
+      await migrate(pool)
+      const client = await pool.connect()
+      const companyId = '10000000-0000-4000-8000-000000000100'
+      const governorateId = randomUUID()
+      const branchId = randomUUID()
+      const actorId = randomUUID()
+      const categoryId = randomUUID()
+      const templateId = randomUUID()
+      const suffix = randomUUID().replaceAll('-', '').slice(0, 12)
+      try {
+        await client.query('BEGIN')
+        await client.query(
+          `INSERT INTO governorates (id, no, name_ar, name_en) VALUES ($1, 97, 'اختبار', 'Test')`,
+          [governorateId],
+        )
+        await client.query(
+          `INSERT INTO branches (id, code, name_ar, name_en, governorate_id, branch_no, kind)
+           VALUES ($1, $2, 'فرع اختبار', 'Test branch', $3, 97, 'branch')`,
+          [branchId, `C${suffix}`, governorateId],
+        )
+        await client.query(
+          `INSERT INTO permissions (key, name_ar, name_en) VALUES
+             ('expense.write', 'كتابة الصرفيات', 'Write expenses'),
+             ('company_fund.manage', 'إدارة صندوق الشركة', 'Manage company fund')
+           ON CONFLICT (key) DO NOTHING`,
+        )
+        await client.query(
+          `INSERT INTO roles (key, name_ar, name_en) VALUES ('system_admin', 'مدير النظام', 'System Admin')
+           ON CONFLICT (key) DO NOTHING`,
+        )
+        await client.query(
+          `INSERT INTO role_permissions (role_key, permission_key, scope)
+           VALUES ('system_admin', 'expense.write', 'all')
+           ON CONFLICT (role_key, permission_key) DO UPDATE SET scope = EXCLUDED.scope`,
+        )
+        await client.query(
+          `INSERT INTO users (id, branch_id, role_key, username, full_name_ar, password_hash)
+           VALUES ($1, $2, 'system_admin', $3, 'مدير اختبار', 'x')`,
+          [actorId, branchId, `company-recurrence-${suffix}`],
+        )
+        await client.query(
+          `INSERT INTO expense_categories (id, code, name_ar, active)
+           VALUES ($1, $2, 'إيجار المركز', true)`,
+          [categoryId, `hq-rent-${suffix}`],
+        )
+        await client.query(`SELECT set_config('app.actor_id', $1, true)`, [actorId])
+        await client.query(`SELECT set_config('app.request_id', $1, true)`, [`company-recurrence-${suffix}`])
+
+        await client.query('SAVEPOINT missing_company_permission')
+        await expect(client.query(
+          `INSERT INTO recurring_expense_templates
+             (id, branch_id, template_kind, currency, title, category_id, cost_center_kind,
+              channel, paid_from, amount_minor, schedule_kind, starts_on, active, created_by, updated_by)
+           VALUES ($1, $2, 'company', 'USD', 'HQ rent', $3, 'general',
+                   NULL, 'pocket', 10000, 'monthly_first', DATE '2026-07-01', true, $4, $4)`,
+          [templateId, companyId, categoryId, actorId],
+        )).rejects.toMatchObject({ code: '23514', constraint: 'company_recurring_expense_actor_guard' })
+        await client.query('ROLLBACK TO SAVEPOINT missing_company_permission')
+
+        await client.query(
+          `INSERT INTO role_permissions (role_key, permission_key, scope)
+           VALUES ('system_admin', 'company_fund.manage', 'all')
+           ON CONFLICT (role_key, permission_key) DO UPDATE SET scope = EXCLUDED.scope`,
+        )
+        await client.query(
+          `INSERT INTO recurring_expense_templates
+             (id, branch_id, template_kind, currency, title, category_id, cost_center_kind,
+              channel, paid_from, amount_minor, schedule_kind, starts_on, active, created_by, updated_by)
+           VALUES ($1, $2, 'company', 'USD', 'HQ rent', $3, 'general',
+                   NULL, 'pocket', 10000, 'monthly_first', DATE '2026-07-01', true, $4, $4)`,
+          [templateId, companyId, categoryId, actorId],
+        )
+        await client.query(
+          `INSERT INTO recurring_expense_occurrences
+             (id, template_id, branch_id, due_date, status, reason, acted_by, acted_at)
+           VALUES ($1, $2, $3, DATE '2026-08-01', 'skipped', 'Owner deferred it', $4, now())`,
+          [randomUUID(), templateId, companyId, actorId],
+        )
+        const saved = await client.query<{ template_kind: string; currency: string; paid_from: string }>(
+          `SELECT template_kind, currency, paid_from FROM recurring_expense_templates WHERE id = $1`,
+          [templateId],
+        )
+        expect(saved.rows).toEqual([{ template_kind: 'company', currency: 'USD', paid_from: 'pocket' }])
       } finally {
         await client.query('ROLLBACK').catch(() => undefined)
         client.release()

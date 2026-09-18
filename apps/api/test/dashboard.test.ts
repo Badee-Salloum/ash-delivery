@@ -483,6 +483,9 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
       expenseSyp: '165.00',
       vehicleCostSyp: '20.00',
       netProfitSyp: '835.00',
+      branchNetProfitSyp: '835.00',
+      companyNetProfitSyp: '0.00',
+      combinedNetProfitSyp: '835.00',
     }])
   })
 
@@ -508,6 +511,51 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
     // Its own line, and inside the net.
     expect(res.json().netProfitSyp).toBe('250.00')
     expect(res.json().companyShareSyp).toBe('0.00')
+  })
+
+  it('reports branch, company, and combined profit with frozen USD conversion', async () => {
+    const admin = await h.loginAs('sysadmin')
+    const expenseCategory = await h.app.inject({
+      method: 'POST', url: '/expense-categories', headers: { cookie: h.cookie(admin) },
+      payload: { code: 'HQ-OPS', nameAr: 'تشغيل المركز' },
+    })
+    const incomeCategory = await h.app.inject({
+      method: 'POST', url: '/income-categories', headers: { cookie: h.cookie(admin) },
+      payload: { code: 'HQ-OTHER', nameAr: 'دخل المركز' },
+    })
+    expect(expenseCategory.statusCode, expenseCategory.body).toBe(201)
+    expect(incomeCategory.statusCode, incomeCategory.body).toBe(201)
+    const gm = await h.loginAs('gm')
+    const companyPost = (url: string, payload: Record<string, unknown>) => h.app.inject({
+      method: 'POST', url, headers: { cookie: h.cookie(gm) }, payload,
+    })
+    expect((await companyPost('/company/incomes', {
+      idempotencyKey: crypto.randomUUID(), currency: 'SYP_NEW', amount: sypStr(300),
+      categoryId: incomeCategory.json().id, description: 'SYP income',
+    })).statusCode).toBe(201)
+    expect((await companyPost('/company/incomes', {
+      idempotencyKey: crypto.randomUUID(), currency: 'USD', amount: '2.00',
+      categoryId: incomeCategory.json().id, description: 'USD income',
+    })).statusCode).toBe(201)
+    expect((await companyPost('/company/expenses', {
+      idempotencyKey: crypto.randomUUID(), currency: 'SYP_NEW', amount: sypStr(100),
+      categoryId: expenseCategory.json().id, paidFrom: 'owner_outside', description: 'HQ cost',
+    })).statusCode).toBe(201)
+
+    const res = await get(gm, `/dashboard/profit?from=${today}&to=${today}&branchId=${BRANCH}`)
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json()).toMatchObject({
+      branchNetProfitSyp: sypStr(0),
+      companyIncomeSyp: sypStr(560),
+      companyExpenseSyp: sypStr(100),
+      companyNetProfitSyp: sypStr(460),
+      combinedNetProfitSyp: sypStr(460),
+    })
+    expect(res.json().days).toContainEqual(expect.objectContaining({
+      businessDate: today,
+      companyNetProfitSyp: sypStr(460),
+      combinedNetProfitSyp: sypStr(460),
+    }))
   })
 
   it('a driver sees none of the dashboard endpoints', async () => {

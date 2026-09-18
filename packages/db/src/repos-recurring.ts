@@ -18,11 +18,15 @@ const atMs = (value: unknown): number => (value instanceof Date ? value.getTime(
 const templateRecord = (row: Record<string, unknown>): RecurringExpenseTemplateRecord => ({
   id: String(row.id),
   branchId: String(row.branch_id),
+  templateKind: (row.template_kind as 'branch' | 'company' | undefined) ?? 'branch',
+  currency: (row.currency as 'SYP_NEW' | 'USD' | undefined) ?? 'SYP_NEW',
   title: String(row.title),
   categoryId: String(row.category_id),
   costCenterKind: row.cost_center_kind as RecurringExpenseTemplateRecord['costCenterKind'],
   vehicleId: (row.vehicle_id as string | null) ?? null,
-  channel: row.channel as RecurringExpenseTemplateRecord['channel'],
+  assetId: (row.asset_id as string | null) ?? null,
+  channel: (row.channel as RecurringExpenseTemplateRecord['channel']) ?? null,
+  paidFrom: (row.paid_from as RecurringExpenseTemplateRecord['paidFrom']) ?? null,
   amount: minor(BigInt(String(row.amount_minor))),
   scheduleKind: row.schedule_kind as RecurringExpenseTemplateRecord['scheduleKind'],
   weekday: row.weekday === null ? null : Number(row.weekday),
@@ -47,6 +51,7 @@ const occurrenceRecord = (row: Record<string, unknown>): RecurringExpenseOccurre
   dueDate: isoDate(row.due_date),
   status: row.status as RecurringExpenseOccurrenceRecord['status'],
   expenseId: (row.expense_id as string | null) ?? null,
+  companyExpenseId: (row.company_expense_id as string | null) ?? null,
   reason: (row.reason as string | null) ?? null,
   actedBy: String(row.acted_by),
   actedAtMs: atMs(row.acted_at),
@@ -80,17 +85,19 @@ export class PgRecurringExpenseRepo implements RecurringExpenseRepo {
     try {
       await this.pool.query(
         `INSERT INTO recurring_expense_templates
-           (id, branch_id, title, category_id, cost_center_kind, vehicle_id, channel, amount_minor,
+           (id, branch_id, template_kind, currency, title, category_id, cost_center_kind, vehicle_id,
+            asset_id, channel, paid_from, amount_minor,
             schedule_kind, weekday, interval_days, starts_on, ends_on, active,
             deactivated_on, deactivated_at, deactivated_by, deactivation_reason,
             created_by, created_at, updated_by, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-                 CASE WHEN $16::bigint IS NULL THEN NULL ELSE to_timestamp($16::double precision / 1000) END,
-                 $17,$18,$19,to_timestamp($20::double precision / 1000),$21,
-                 to_timestamp($22::double precision / 1000))`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
+                 CASE WHEN $20::bigint IS NULL THEN NULL ELSE to_timestamp($20::double precision / 1000) END,
+                 $21,$22,$23,to_timestamp($24::double precision / 1000),$25,
+                 to_timestamp($26::double precision / 1000))`,
         [
-          template.id, template.branchId, template.title, template.categoryId,
-          template.costCenterKind, template.vehicleId, template.channel, template.amount.toString(),
+          template.id, template.branchId, template.templateKind ?? 'branch', template.currency ?? 'SYP_NEW',
+          template.title, template.categoryId, template.costCenterKind, template.vehicleId,
+          template.assetId ?? null, template.channel, template.paidFrom ?? null, template.amount.toString(),
           template.scheduleKind, template.weekday, template.intervalDays, template.startsOn, template.endsOn,
           template.active, template.deactivatedOn, template.deactivatedAtMs, template.deactivatedBy,
           template.deactivationReason, template.createdBy, template.createdAtMs, template.updatedBy,
@@ -109,16 +116,18 @@ export class PgRecurringExpenseRepo implements RecurringExpenseRepo {
     const result = await this.pool.query(
       `UPDATE recurring_expense_templates
           SET title = $2, category_id = $3, cost_center_kind = $4, vehicle_id = $5,
-              channel = $6, amount_minor = $7, schedule_kind = $8, weekday = $9,
-              interval_days = $10, starts_on = $11, ends_on = $12, active = $13,
-              deactivated_on = $14,
-              deactivated_at = CASE WHEN $15::bigint IS NULL THEN NULL ELSE to_timestamp($15::double precision / 1000) END,
-              deactivated_by = $16, deactivation_reason = $17,
-              updated_by = $18, updated_at = to_timestamp($19::double precision / 1000)
+              asset_id = $6, channel = $7, paid_from = $8, currency = $9,
+              amount_minor = $10, schedule_kind = $11, weekday = $12,
+              interval_days = $13, starts_on = $14, ends_on = $15, active = $16,
+              deactivated_on = $17,
+              deactivated_at = CASE WHEN $18::bigint IS NULL THEN NULL ELSE to_timestamp($18::double precision / 1000) END,
+              deactivated_by = $19, deactivation_reason = $20,
+              updated_by = $21, updated_at = to_timestamp($22::double precision / 1000)
         WHERE id = $1`,
       [
         template.id, template.title, template.categoryId, template.costCenterKind, template.vehicleId,
-        template.channel, template.amount.toString(), template.scheduleKind, template.weekday,
+        template.assetId ?? null, template.channel, template.paidFrom ?? null, template.currency ?? 'SYP_NEW',
+        template.amount.toString(), template.scheduleKind, template.weekday,
         template.intervalDays, template.startsOn, template.endsOn, template.active,
         template.deactivatedOn, template.deactivatedAtMs, template.deactivatedBy,
         template.deactivationReason, template.updatedBy, template.updatedAtMs,
@@ -166,11 +175,12 @@ export class PgRecurringExpenseRepo implements RecurringExpenseRepo {
     try {
       await this.pool.query(
         `INSERT INTO recurring_expense_occurrences
-           (id, template_id, branch_id, due_date, status, expense_id, reason, acted_by, acted_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,to_timestamp($9::double precision / 1000))`,
+           (id, template_id, branch_id, due_date, status, expense_id, company_expense_id, reason, acted_by, acted_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10::double precision / 1000))`,
         [
           occurrence.id, occurrence.templateId, occurrence.branchId, occurrence.dueDate,
-          occurrence.status, occurrence.expenseId, occurrence.reason, occurrence.actedBy,
+          occurrence.status, occurrence.expenseId, occurrence.companyExpenseId ?? null,
+          occurrence.reason, occurrence.actedBy,
           occurrence.actedAtMs,
         ],
       )

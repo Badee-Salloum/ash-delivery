@@ -37,6 +37,7 @@ import {
   splitFixedDriverShare,
   toUsdMinor,
   totalCost,
+  usdToSypMinor,
   vehicleIdOfCostLine,
   weekStartFor,
   workedTime,
@@ -625,10 +626,13 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
      * and resolves the driver share exactly as this route used to: the immutable settlement's
      * `baseDriverShare` for every shift the range touches, and the legacy share lines otherwise.
      */
-    const [range, vehicles] = await Promise.all([
+    const companyBranch = await deps.directory.companyBranch()
+    const [range, vehicles, companyCommands, companyDebts] = await Promise.all([
       deps.ledgerRange.readRange(branchId, from, to),
       // Every vehicle of the branch, retired ones included: a stopped bike's old costs are costs.
       deps.directory.listVehicles(branchId),
+      companyBranch ? deps.companyLedger.listCommands(companyBranch.id, { from, to }) : Promise.resolve([]),
+      companyBranch ? deps.companyFinance.listDebts(companyBranch.id) : Promise.resolve([]),
     ])
     const classification = { vehicleIds: new Set(vehicles.map((vehicle) => vehicle.id)) }
 
@@ -672,6 +676,68 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     // Legacy approvals have no snapshot and retain their historical share_split less
     // cash-deduction calculation. Payout/return debits are settlement, not reduced earnings.
     const driverShare = range.settledDriverShare + range.legacyDriverShare
+    let companyIncome = 0n
+    let companyExpenseTotal = 0n
+    const companyPerDay = new Map<string, { income: bigint; expense: bigint }>()
+    const asSyp = (amount: bigint, currency: 'SYP_NEW' | 'USD', rate: bigint | null): bigint => {
+      if (currency === 'SYP_NEW') return amount
+      if (rate === null) throw new ServiceError(500, 'company_command_integrity_error')
+      return usdToSypMinor(minor(amount), rate)
+    }
+    const addCompanyProfit = (
+      businessDate: string,
+      kind: 'income' | 'expense',
+      amount: bigint,
+    ): void => {
+      const day = companyPerDay.get(businessDate) ?? { income: 0n, expense: 0n }
+      if (kind === 'income') {
+        companyIncome += amount
+        day.income += amount
+      } else {
+        companyExpenseTotal += amount
+        day.expense += amount
+      }
+      companyPerDay.set(businessDate, day)
+    }
+    for (const command of companyCommands) {
+      if (command.kind === 'income' || command.kind === 'expense') {
+        addCompanyProfit(
+          command.businessDate,
+          command.kind,
+          asSyp(command.amount, command.currency, command.sypMinorPerUsd),
+        )
+      } else if (command.kind === 'reversal' && (command.targetKind === 'income' || command.targetKind === 'expense')) {
+        const target = await deps.companyLedger.findCommand(command.targetId)
+        if (!target || (target.kind !== 'income' && target.kind !== 'expense')) {
+          throw new ServiceError(500, 'company_command_integrity_error')
+        }
+        addCompanyProfit(
+          command.businessDate,
+          target.kind === 'income' ? 'expense' : 'income',
+          asSyp(target.amount, target.currency, target.sypMinorPerUsd),
+        )
+      }
+    }
+    for (const debt of companyDebts) {
+      if (debt.businessDate >= from && debt.businessDate <= to && (debt.origin === 'expense' || debt.origin === 'income')) {
+        addCompanyProfit(
+          debt.businessDate,
+          debt.origin,
+          asSyp(debt.principal, debt.currency, debt.sypMinorPerUsd),
+        )
+      }
+      for (const event of await deps.companyFinance.listDebtEvents(debt.id)) {
+        if (event.kind !== 'writeoff' || event.businessDate < from || event.businessDate > to) continue
+        addCompanyProfit(
+          event.businessDate,
+          debt.direction === 'payable' ? 'income' : 'expense',
+          asSyp(event.amount, debt.currency, event.sypMinorPerUsd),
+        )
+      }
+    }
+    const branchNet = netProfit(totals)
+    const companyNet = companyIncome - companyExpenseTotal
+    const allProfitDays = new Set([...perDay.keys(), ...companyPerDay.keys()])
     return {
       from,
       to,
@@ -697,19 +763,33 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
       // Company share is GROSS — expenses never touch `company_revenue` — so it is not profit and
       // was never presented as any. This is: company + other income − (operating + vehicle + loss).
       // Depreciation is not subtracted (owner decision 2026-09-17); it is shown beside profit.
-      netProfitSyp: serializeMoney(minor(netProfit(totals))),
+      netProfitSyp: serializeMoney(minor(branchNet)),
+      branchNetProfitSyp: serializeMoney(minor(branchNet)),
+      companyIncomeSyp: serializeMoney(minor(companyIncome)),
+      companyExpenseSyp: serializeMoney(minor(companyExpenseTotal)),
+      companyNetProfitSyp: serializeMoney(minor(companyNet)),
+      combinedNetProfitSyp: serializeMoney(minor(branchNet + companyNet)),
       // One row per business date that moved, so a day can be read against its neighbours. It is
       // what turns «we lost 13,543 on the 3rd» into «salaries were paid on the 3rd».
-      days: [...perDay.entries()]
-        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-        .map(([businessDate, d]) => ({
+      days: [...allProfitDays]
+        .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+        .map((businessDate) => {
+          const d = perDay.get(businessDate) ?? emptyProfitTotals()
+          const companyDay = companyPerDay.get(businessDate) ?? { income: 0n, expense: 0n }
+          const branchDayNet = netProfit(d)
+          const companyDayNet = companyDay.income - companyDay.expense
+          return {
           businessDate,
           companyShareSyp: serializeMoney(minor(d.company)),
           otherIncomeSyp: serializeMoney(minor(d.otherIncome)),
           expenseSyp: serializeMoney(minor(totalCost(d))),
           vehicleCostSyp: serializeMoney(minor(d.vehicleCost)),
-          netProfitSyp: serializeMoney(minor(netProfit(d))),
-        })),
+          netProfitSyp: serializeMoney(minor(branchDayNet)),
+          branchNetProfitSyp: serializeMoney(minor(branchDayNet)),
+          companyNetProfitSyp: serializeMoney(minor(companyDayNet)),
+          combinedNetProfitSyp: serializeMoney(minor(branchDayNet + companyDayNet)),
+          }
+        }),
     }
   })
 

@@ -67,6 +67,9 @@ export interface ProfitDay {
   expenseSyp: string
   vehicleCostSyp: string
   netProfitSyp: string
+  branchNetProfitSyp: string
+  companyNetProfitSyp: string
+  combinedNetProfitSyp: string
 }
 
 export interface ProfitDigest {
@@ -82,6 +85,11 @@ export interface ProfitDigest {
   lossSyp: string
   feeTotalSyp: string
   netProfitSyp: string
+  branchNetProfitSyp: string
+  companyIncomeSyp: string
+  companyExpenseSyp: string
+  companyNetProfitSyp: string
+  combinedNetProfitSyp: string
   days: ProfitDay[]
 }
 
@@ -155,6 +163,9 @@ export interface CompanyFundLegacyDigest {
   total: string
   usd: string
   reserve: { SYP_NEW: string; USD: string }
+  depreciationDue: { SYP_NEW: string; USD: string }
+  assets: { SYP_NEW: string; USD: string }
+  debts: Record<'SYP_NEW' | 'USD', { payable: string; receivable: string }>
   branches: Array<{ branchId: string; code: string; nameAr: string; balance: string; clearing: string; cutOver: boolean }>
 }
 

@@ -33,6 +33,10 @@ export function CompanyFundSection(): ReactNode {
             <Stat label={t.companyFinance.usdPocket} value={<Money value={data.usd} currency="USD" />} />
             <Stat label={t.companyFinance.sypReserve} value={<Money value={data.reserve.SYP_NEW} currency="SYP_NEW" />} />
             <Stat label={t.companyFinance.usdReserve} value={<Money value={data.reserve.USD} currency="USD" />} />
+            <Stat label={t.companyFinance.depreciationDue} value={<Money value={data.depreciationDue.SYP_NEW} currency="SYP_NEW" />} />
+            <Stat label={t.companyFinance.depreciationDue} value={<Money value={data.depreciationDue.USD} currency="USD" />} />
+            <Stat label={t.companyFinance.bookValue} value={<Money value={data.assets.SYP_NEW} currency="SYP_NEW" />} />
+            <Stat label={t.companyFinance.bookValue} value={<Money value={data.assets.USD} currency="USD" />} />
           </div>
           <Card title={t.dashboard.branchCompanyAccounts}>
             <Table

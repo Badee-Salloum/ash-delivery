@@ -81,6 +81,7 @@ import { registerNotificationRoutes } from './notification.routes.ts'
 import { registerTierRoutes } from './tier.routes.ts'
 import { registerTreasuryRoutes } from './treasury.routes.ts'
 import { registerCompanyRoutes } from './company.routes.ts'
+import { registerCompanyRecurringRoutes } from './company-recurring.routes.ts'
 import {
   MAX_UPLOAD_BYTES,
   acknowledgeStaleEvidence,
@@ -2590,6 +2591,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   // ── Treasury: daily cash count + manual entries (SRS E-3, E-5) ──────────────────
   registerTreasuryRoutes(app, deps)
   registerCompanyRoutes(app, deps)
+  registerCompanyRecurringRoutes(app, deps)
 
   // ── Tier admin (SRS F-3…F-6) ────────────────────────────────────────────────────
   registerTierRoutes(app, deps)

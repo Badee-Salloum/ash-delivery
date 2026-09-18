@@ -314,15 +314,53 @@ export function registerCompanyRoutes(app: FastifyInstance, deps: Deps): void {
   app.get('/company-fund', permission, async () => {
     const branch = await companyBranch()
     const today = todayFor(deps)
-    const overview = await deps.companyLedgerSource.readOverview(branch.id, { from: today, to: today })
+    const currentMonth = monthStartFor(today)
+    const [overview, assets, debts, schedule, sypAllocations, usdAllocations] = await Promise.all([
+      deps.companyLedgerSource.readOverview(branch.id, { from: today, to: today }),
+      deps.companyFinance.listAssets(branch.id),
+      deps.companyFinance.listDebts(branch.id),
+      deps.companyFinance.listAssetSchedule(),
+      deps.companyFinance.listDepreciationAllocations(branch.id, 'SYP_NEW'),
+      deps.companyFinance.listDepreciationAllocations(branch.id, 'USD'),
+    ])
     const operating = await deps.directory.listBranches()
     const names = new Map(operating.map((row) => [row.id, row]))
+    const debtTotals = async (currency: Currency) => {
+      let payable = 0n
+      let receivable = 0n
+      for (const debt of debts.filter((row) => row.currency === currency)) {
+        const outstanding = companyDebtOutstanding(
+          debt.direction,
+          await deps.ledger.fundBalance(branch.id, debtFundCode(debt)),
+        )
+        if (debt.direction === 'payable') payable += outstanding
+        else receivable += outstanding
+      }
+      return { payable: serializeMoney(minor(payable)), receivable: serializeMoney(minor(receivable)) }
+    }
+    const depreciationDue = (currency: Currency): string => {
+      const assetIds = new Set(assets.filter((asset) => asset.currency === currency).map((asset) => asset.id))
+      const scheduled = schedule.filter((row) => assetIds.has(row.assetId) && row.periodMonth <= currentMonth)
+        .reduce((sum, row) => sum + row.amount, 0n)
+      const allocations = (currency === 'SYP_NEW' ? sypAllocations : usdAllocations)
+        .reduce((sum, row) => sum + row.amount, 0n)
+      return serializeMoney(minor(scheduled - allocations))
+    }
+    const [sypDebts, usdDebts] = await Promise.all([debtTotals('SYP_NEW'), debtTotals('USD')])
     return {
       total: serializeMoney(overview.pockets.SYP_NEW),
       usd: serializeMoney(overview.pockets.USD),
       reserve: {
         SYP_NEW: serializeMoney(overview.reserves.SYP_NEW),
         USD: serializeMoney(overview.reserves.USD),
+      },
+      depreciationDue: { SYP_NEW: depreciationDue('SYP_NEW'), USD: depreciationDue('USD') },
+      debts: { SYP_NEW: sypDebts, USD: usdDebts },
+      assets: {
+        SYP_NEW: serializeMoney(minor(assets.filter((asset) => asset.currency === 'SYP_NEW')
+          .reduce((sum, asset) => sum + assetBookValue(asset.price, asset.purchasedOn, today), 0n))),
+        USD: serializeMoney(minor(assets.filter((asset) => asset.currency === 'USD')
+          .reduce((sum, asset) => sum + assetBookValue(asset.price, asset.purchasedOn, today), 0n))),
       },
       branches: overview.branches.map((row) => ({
         branchId: row.branchId,
