@@ -54,7 +54,7 @@ jobs:
       - name: generate the android platform
         working-directory: android
         env:
-          ASH_DRIVER_URL: ${{ inputs.driverUrl }}
+          ASH_DRIVER_URL: ${{ inputs.driverUrl || 'https://ash-driver.vercel.app' }}
         run: npx cap add android
 
       - name: apply our native sources
