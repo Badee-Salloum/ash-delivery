@@ -13,6 +13,7 @@ import type {
   RecurrenceKind,
 } from '@ash/domain'
 import type { CompanyLedgerRepo, CompanyLedgerSource, FinancialLocks } from './company-ledger.ts'
+import type { CompanyFinanceRepo } from './company-finance.ts'
 
 /**
  * The ports. Everything the application needs from the outside world, expressed as interfaces
@@ -2198,6 +2199,8 @@ export interface FinancialTransactionDeps {
   restorations: RestorationRepo
   /** «صندوق الشركة» commands, cutovers and mirrors (C2) — written beside their journal entries. */
   companyLedger: CompanyLedgerRepo
+  /** Company debts, fixed assets and depreciation facts (C3–C5). */
+  companyFinance: CompanyFinanceRepo
   /** Further financial locks in the same namespace; see `lockBranchThenCompany`. */
   locks: FinancialLocks
 }
@@ -2845,6 +2848,8 @@ export interface Deps {
   companyLedger: CompanyLedgerRepo
   /** «صندوق الشركة» — pockets, clearing and movements, each read in one statement (C2). */
   companyLedgerSource: CompanyLedgerSource
+  /** Company debts, fixed assets and depreciation (C3–C5). */
+  companyFinance: CompanyFinanceRepo
   tiers: TierRepo
   notifications: NotificationRepo
   settings: SettingsRepo

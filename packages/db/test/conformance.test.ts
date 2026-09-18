@@ -11,6 +11,7 @@ import { PgFinancialUnitOfWork } from '../src/repos-financial.ts'
 import { PgReceivableEventRepo } from '../src/repos-receivable.ts'
 import { PgLedgerRangeSource } from '../src/repos-range.ts'
 import { PgCompanyLedgerRepo, PgCompanyLedgerSource } from '../src/repos-company.ts'
+import { PgCompanyFinanceRepo } from '../src/repos-company-finance.ts'
 import { PgRecurringExpenseRepo } from '../src/repos-recurring.ts'
 import { assertDisposableDatabaseConnection, assertDisposableDatabaseUrl } from './disposable-database.ts'
 import {
@@ -230,7 +231,7 @@ if (!DATABASE_URL) {
         expenses: new PgExpenseRepo(pool),
         recurringExpenses: new PgRecurringExpenseRepo(pool),
         incomes: new PgIncomeRepo(pool),
-    advances: new PgAdvanceRepo(pool),
+        advances: new PgAdvanceRepo(pool),
         receivableEvents: new PgReceivableEventRepo(pool),
         financialUnitOfWork: new PgFinancialUnitOfWork(pool),
         cashCounts: new PgCashCountRepo(pool),
@@ -238,6 +239,7 @@ if (!DATABASE_URL) {
         restorations: new PgRestorationRepo(pool),
         companyLedger: new PgCompanyLedgerRepo(pool),
         companyLedgerSource: new PgCompanyLedgerSource(pool),
+        companyFinance: new PgCompanyFinanceRepo(pool),
         tiers: new PgTierRepo(pool),
         notifications: new PgNotificationRepo(pool),
         settings: new PgSettingsRepo(pool),

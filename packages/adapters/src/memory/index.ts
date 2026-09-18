@@ -108,6 +108,7 @@ import { MemoryReceivableEventRepo } from './receivables.ts'
 // P2 — the range read model behind the time filter.
 import { MemoryLedgerRangeSource } from './ledger-range.ts'
 import { MemoryCompanyLedgerRepo, MemoryCompanyLedgerSource, MemoryFinancialLocks } from './company.ts'
+import { MemoryCompanyFinanceRepo } from './company-finance.ts'
 
 export { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 export { MemoryOcrReadRepo, MemoryOcrReader, ScriptedOcrReader } from '../ocr/memory.ts'
@@ -122,6 +123,7 @@ export { MemoryReceivableEventRepo } from './receivables.ts'
 // P2 — the range read model behind the time filter.
 export { MemoryLedgerRangeSource } from './ledger-range.ts'
 export { MemoryCompanyLedgerRepo, MemoryCompanyLedgerSource, MemoryFinancialLocks } from './company.ts'
+export { MemoryCompanyFinanceRepo } from './company-finance.ts'
 
 /**
  * In-memory implementations of every port.
@@ -2221,6 +2223,7 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
   private readonly capitalTargets: MemoryOfficeCapitalTargetRepo
   private readonly restorations: MemoryRestorationRepo
   private readonly companyLedger: MemoryCompanyLedgerRepo
+  private readonly companyFinance: MemoryCompanyFinanceRepo
   /** The locks the LAST unit of work asked for, in order — a test reads the lock order here. */
   readonly locks = new MemoryFinancialLocks()
   private readonly gate: MemoryTransactionGate
@@ -2237,6 +2240,7 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
     restorations: MemoryRestorationRepo,
     gate: MemoryTransactionGate,
     companyLedger: MemoryCompanyLedgerRepo,
+    companyFinance: MemoryCompanyFinanceRepo,
   ) {
     this.expenses = expenses
     this.recurringExpenses = recurringExpenses
@@ -2247,10 +2251,12 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
     this.capitalTargets = capitalTargets
     this.restorations = restorations
     this.companyLedger = companyLedger
+    this.companyFinance = companyFinance
     this.gate = gate
     this.deps = {
       expenses, recurringExpenses, incomes, advances, ledger, receivableEvents, cashCounts, capitalTargets, restorations,
       companyLedger, locks: this.locks,
+      companyFinance,
     }
   }
 
@@ -2263,6 +2269,7 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
       this.locks.taken.length = 0
       await this.locks.acquire(input.lockKey)
       const companySnapshot = this.companyLedger.snapshot()
+      const companyFinanceSnapshot = this.companyFinance.snapshot()
       const expenseSnapshot = this.expenses.snapshotRows()
       const recurringExpenseSnapshot = this.recurringExpenses.snapshotState()
       const incomeSnapshot = this.incomes.snapshotRows()
@@ -2283,6 +2290,7 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
         this.capitalTargets.restoreRows(capitalTargetSnapshot)
         this.restorations.restoreRows(restorationSnapshot)
         this.companyLedger.restore(companySnapshot)
+        this.companyFinance.restore(companyFinanceSnapshot)
         throw error
       }
     })
@@ -2452,6 +2460,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   const companyLedger = new MemoryCompanyLedgerRepo(() =>
     ledger.entries.reduce((max, entry) => (entry.id > max ? entry.id : max), 0),
   )
+  const companyFinance = new MemoryCompanyFinanceRepo()
   const assignments = new MemoryAssignmentRepo()
   const preapprovedShiftRules = new MemoryPreapprovedShiftRuleRepo()
   const financialUnitOfWork = new MemoryFinancialUnitOfWork(
@@ -2466,6 +2475,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     restorations,
     gate,
     companyLedger,
+    companyFinance,
   )
   const operationRemovals = new MemoryOperationRemovalRepo()
   const transactionDeps: ShiftCloseTransactionDeps = {
@@ -2539,6 +2549,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     capitalTargets,
     restorations,
     companyLedger,
+    companyFinance,
     companyLedgerSource: new MemoryCompanyLedgerSource(
       () => ledger.entries,
       () => directory.listBranches(),
