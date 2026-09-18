@@ -7,6 +7,18 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 
 **Legend:** ✅ implemented and green · ⚠ written but never executed · 🔜 planned, milestone named.
 
+## 2026-09-17 P4 — recurring branch expenses and non-shift receipts
+
+| Gate | Named test | Result |
+| --- | --- | --- |
+| The three schedule predicates, boundaries, due buckets and payment-date rule agree with brute force | `domain/expenses/recurrence.test.ts` (21 tests, including four fast-check properties) | ✅ |
+| A due read creates no accounting row; pay and skip remain explicit, idempotent human decisions | `api/recurring-expenses.test.ts` (11 tests) | ✅ |
+| Pay reuses the ordinary expense journal recipe exactly once, including after its week later closes | `api/recurring-expenses.test.ts` — *pays through the ordinary expense recipe exactly once* / *replays a committed payment before a newly closed week is revalidated* | ✅ |
+| Receipt bytes are magic-byte checked, content-addressed and usable by manual and recurring expenses | `api/recurring-expenses.test.ts`, `api/expenses.test.ts`, `api/settings.test.ts` | ✅ |
+| Memory and PostgreSQL repositories round-trip the same records and roll back with the financial unit of work | shared `testkit/conformance.ts` — *recurring expenses* (2 cases) | ✅ memory + PostgreSQL |
+| The immutable SQL predicate agrees with TypeScript; invalid dates/deactivation/history edits and runtime mutation fail; audit rows exist | `db/recurrence-parity-postgres.test.ts` (3 cases on disposable PostgreSQL) | ✅ PostgreSQL 17.6 |
+| The approved log / due / fixed-template tabs and all four explicit actions stay wired | `admin/recurring-expenses-wiring.test.ts` (3 source pins) | ✅ |
+
 ## 2026-08-26 closing-battery gate — the read the driver never saw
 
 Full `pnpm check` passes **2,207 tests**. The regression had been live since 2026-08-14 and no test
