@@ -804,6 +804,10 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     const walletPosition = position.officeWallet + position.receivablesWallet + position.advancesWallet
     const cashTarget = targets.office_cash ?? 0n
     const walletTarget = targets.office_wallet ?? 0n
+    const cutover = await deps.companyLedger.cutoverFor(branchId)
+    const companyFund = cutover === null
+      ? await deps.ledger.fundBalance(branchId, 'company_box')
+      : await deps.ledger.fundBalance(cutover.companyBranchId, 'company_cash:SYP_NEW')
 
     return {
       from,
@@ -855,7 +859,7 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
         walletDelta: serializeMoney(minor(walletPosition - walletTarget)),
       },
       companyProfit: serializeMoney(minor(profit)),
-      companyFund: serializeMoney(await deps.ledger.fundBalance(branchId, 'company_box')),
+      companyFund: serializeMoney(companyFund),
       fundIn: serializeMoney(minor(fundIn)),
       fundOut: serializeMoney(minor(fundOut)),
       fundNet: serializeMoney(minor(fundIn - fundOut)),

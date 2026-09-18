@@ -117,6 +117,7 @@ export interface CompanyFinanceRepo {
   getDebt(id: string): Promise<CompanyDebtRecord | null>
   listDebts(companyBranchId: string): Promise<CompanyDebtRecord[]>
   createDebt(row: CompanyDebtRecord): Promise<void>
+  getDebtEvent(id: string): Promise<CompanyDebtEventRecord | null>
   listDebtEvents(debtId: string): Promise<CompanyDebtEventRecord[]>
   createDebtEvent(row: CompanyDebtEventRecord): Promise<void>
 

@@ -127,7 +127,11 @@ LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
-  v_asset_id uuid := CASE WHEN TG_TABLE_NAME = 'fixed_assets' THEN NEW.id ELSE NEW.asset_id END;
+  -- This function is attached to two row types. Direct `NEW.id` / `NEW.asset_id` references in a
+  -- CASE are still resolved against both composite types by PL/pgSQL and fail before the chosen
+  -- branch runs. JSON extraction keeps the shared trigger polymorphic.
+  v_asset_id uuid := CASE WHEN TG_TABLE_NAME = 'fixed_assets'
+    THEN (to_jsonb(NEW)->>'id')::uuid ELSE (to_jsonb(NEW)->>'asset_id')::uuid END;
   v_asset public.fixed_assets%ROWTYPE;
   v_count bigint;
   v_total bigint;
@@ -222,7 +226,8 @@ LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
-  v_asset_id uuid := CASE WHEN TG_TABLE_NAME = 'fixed_assets' THEN NEW.id ELSE NEW.asset_id END;
+  v_asset_id uuid := CASE WHEN TG_TABLE_NAME = 'fixed_assets'
+    THEN (to_jsonb(NEW)->>'id')::uuid ELSE (to_jsonb(NEW)->>'asset_id')::uuid END;
   v_asset public.fixed_assets%ROWTYPE;
   v_debt public.company_debts%ROWTYPE;
   v_financed bigint;

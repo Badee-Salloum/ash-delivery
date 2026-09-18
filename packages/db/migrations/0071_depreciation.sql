@@ -194,7 +194,10 @@ LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
-  v_transfer_id uuid := CASE WHEN TG_TABLE_NAME = 'depreciation_transfers' THEN NEW.id ELSE NEW.transfer_id END;
+  -- Shared by transfer and allocation rows; use JSON so PL/pgSQL does not resolve a field that
+  -- only exists on the other trigger table.
+  v_transfer_id uuid := CASE WHEN TG_TABLE_NAME = 'depreciation_transfers'
+    THEN (to_jsonb(NEW)->>'id')::uuid ELSE (to_jsonb(NEW)->>'transfer_id')::uuid END;
   v_transfer public.depreciation_transfers%ROWTYPE;
   v_allocated numeric;
   v_scheduled numeric;

@@ -10,9 +10,11 @@ import type {
 } from '@ash/contracts'
 import { minor, type CalendarDate, type Currency } from '@ash/domain'
 import type { Pool } from './pool.ts'
+import { isoDate } from './repos.ts'
 
-const date = (value: unknown): CalendarDate =>
-  (value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10)) as CalendarDate
+// PostgreSQL `date` is a civil date. Converting its Date object through UTC can move Damascus
+// midnight to the preceding day, which would fund an extra depreciation month.
+const date = (value: unknown): CalendarDate => isoDate(value)
 const ms = (value: unknown): number => value instanceof Date ? value.getTime() : new Date(String(value)).getTime()
 const amount = (value: unknown) => minor(BigInt(String(value)))
 const rate = (value: unknown): bigint | null => value === null || value === undefined ? null : BigInt(String(value))
@@ -88,6 +90,12 @@ export class PgCompanyFinanceRepo implements CompanyFinanceRepo {
        row.sypMinorPerUsd?.toString() ?? null,row.openedOn,row.businessDate,row.dueOn,row.note,row.origin,
        row.expenseCategoryId,row.incomeCategoryId,row.costCenterKind,row.vehicleId,row.assetId,row.journalEntryId,row.createdBy],
     )
+  }
+  async getDebtEvent(id: string): Promise<CompanyDebtEventRecord | null> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM company_debt_events WHERE id = $1', [id],
+    )
+    return rows[0] ? debtEvent(rows[0]) : null
   }
   async listDebtEvents(debtId: string): Promise<CompanyDebtEventRecord[]> {
     const { rows } = await this.pool.query<Record<string, unknown>>(

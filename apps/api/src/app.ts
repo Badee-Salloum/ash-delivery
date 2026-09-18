@@ -80,6 +80,7 @@ import { registerDashboardRoutes } from './dashboard.routes.ts'
 import { registerNotificationRoutes } from './notification.routes.ts'
 import { registerTierRoutes } from './tier.routes.ts'
 import { registerTreasuryRoutes } from './treasury.routes.ts'
+import { registerCompanyRoutes } from './company.routes.ts'
 import {
   MAX_UPLOAD_BYTES,
   acknowledgeStaleEvidence,
@@ -2588,6 +2589,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   // ── Treasury: daily cash count + manual entries (SRS E-3, E-5) ──────────────────
   registerTreasuryRoutes(app, deps)
+  registerCompanyRoutes(app, deps)
 
   // ── Tier admin (SRS F-3…F-6) ────────────────────────────────────────────────────
   registerTierRoutes(app, deps)
@@ -2751,7 +2753,14 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           position.advancesWallet +
           position.activeCustodyCash +
           position.activeCustodyWallet
-        const nothingMissing = target > 0n && working >= target && companyBox === 0n
+        const cutover = await deps.companyLedger.cutoverFor(branchId)
+        const companyPosition = cutover === null
+          ? companyBox
+          : minor(companyBox + await deps.ledger.fundBalance(
+              cutover.companyBranchId,
+              `branch_clearing:${branchId}`,
+            ))
+        const nothingMissing = target > 0n && working >= target && companyPosition === 0n
 
         if (!nothingMissing) {
           const missing: string[] = []
@@ -2767,6 +2776,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
               capitalTarget: serializeMoney(minor(target)),
               shortfall: serializeMoney(minor(target > working ? target - working : 0n)),
               companyBox: serializeMoney(companyBox),
+              companyPosition: serializeMoney(companyPosition),
             })
           }
         }

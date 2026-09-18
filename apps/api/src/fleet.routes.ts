@@ -33,12 +33,15 @@ import {
   MAX_BATTERY_SLOTS,
   addDays,
   alertBandFor,
+  assetBookValue,
   can,
   canTransitionVehicle,
+  companyDebtOutstanding,
   documentStatusOn,
   formatVehicleNumber,
   isCalendarDate,
   nextMachineNo,
+  minor,
   odometerTimeline,
   shiftDistance,
   workedTime,
@@ -543,6 +546,9 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
     const before = await deps.directory.vehicle(id)
     if (!before) throw new ServiceError(404, 'vehicle_not_found')
 
+    if (await deps.companyFinance.getAssetByVehicle(id)) {
+      throw new ServiceError(409, 'vehicle_is_fixed_asset')
+    }
     if (await deps.shifts.existsForVehicle(id)) throw new ServiceError(409, 'vehicle_has_history')
     // Packs still fitted would be orphaned by the delete — `batteries.vehicle_id` has no cascade,
     // and silently unfitting them would move assets the manager did not ask to move.
@@ -724,6 +730,58 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
     const canSeeAsset = req.actor
       ? can(req.actor, 'company_fund.manage', {}, grantsFromRows(await deps.directory.grants())).allowed
       : false
+    let assetFinance: Record<string, unknown> | null = null
+    let companyExpenses: Array<Record<string, unknown>> = []
+    if (canSeeAsset) {
+      const asset = await deps.companyFinance.getAssetByVehicle(id)
+      if (asset) {
+        const [schedule, allocations, debt] = await Promise.all([
+          deps.companyFinance.listAssetSchedule(asset.id),
+          deps.companyFinance.listDepreciationAllocations(asset.branchId, asset.currency),
+          asset.debtId === null ? Promise.resolve(null) : deps.companyFinance.getDebt(asset.debtId),
+        ])
+        const funded = minor(allocations
+          .filter((row) => row.assetId === asset.id)
+          .reduce((sum, row) => sum + row.amount, 0n))
+        const scheduledDue = minor(schedule
+          .filter((row) => row.periodMonth <= q.to)
+          .reduce((sum, row) => sum + row.amount, 0n))
+        const outstanding = debt === null
+          ? minor(0n)
+          : companyDebtOutstanding(
+              debt.direction,
+              await deps.ledger.fundBalance(asset.branchId, `${debt.direction === 'payable' ? 'company_payable' : 'company_receivable'}:${debt.currency}:${debt.id}`),
+            )
+        assetFinance = {
+          id: asset.id,
+          kind: asset.kind,
+          name: asset.name,
+          currency: asset.currency,
+          price: serializeMoney(asset.price),
+          purchasedOn: asset.purchasedOn,
+          paidNow: serializeMoney(asset.paidNow),
+          outstanding: serializeMoney(outstanding),
+          bookValue: serializeMoney(assetBookValue(asset.price, asset.purchasedOn, q.to)),
+          depreciationDue: serializeMoney(minor(scheduledDue - funded)),
+          depreciationFunded: serializeMoney(funded),
+        }
+      }
+      const company = await deps.directory.companyBranch()
+      if (company) {
+        companyExpenses = (await deps.companyLedger.listCommands(company.id, { from: q.from, to: q.to }))
+          .filter((command) => command.kind === 'expense' && command.vehicleId === id)
+          .map((command) => command.kind === 'expense' ? {
+            id: command.id,
+            businessDate: command.businessDate,
+            occurredOn: command.occurredOn,
+            currency: command.currency,
+            amount: serializeMoney(command.amount),
+            description: command.description,
+            categoryId: command.categoryId,
+            paidFrom: command.paidFrom,
+          } : {})
+      }
+    }
 
     return {
       from: q.from,
@@ -779,7 +837,7 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
       // A life-log event linked to an expense remains visible here, but its cost is not added to an
       // expense total a second time. Consumers render events and expenses as separate evidence.
       events: events.map(presentVehicleEvent),
-      ...(canSeeAsset ? { asset: null } : {}),
+      ...(canSeeAsset ? { asset: assetFinance, companyExpenses } : {}),
     }
   })
 

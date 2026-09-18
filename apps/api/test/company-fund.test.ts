@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BRANCH, type Harness, makeHarness, sypStr } from './harness.ts'
+import { BRANCH, COMPANY_BRANCH, type Harness, makeHarness, sypStr } from './harness.ts'
 
 /**
  * «صندوق الشركة» — who may see it, who may move it, and how it moves.
@@ -31,9 +31,12 @@ const post = async (t: string, url: string, payload: Payload = {}): Promise<Ligh
 
 const key = (): string => crypto.randomUUID()
 const companyBox = async (): Promise<bigint> => await h.deps.ledger.fundBalance(BRANCH, 'company_box')
+const companyCash = async (): Promise<bigint> => await h.deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:SYP_NEW')
 /** Every ledger line that touches صندوق الشركة — the thing a refusal must leave untouched. */
 const companyLines = () =>
   h.deps.ledger.entries.flatMap((e) => e.lines.filter((l) => l.fundCode === 'company_box'))
+const companyCashLines = () =>
+  h.deps.ledger.entries.flatMap((e) => e.lines.filter((l) => l.fundCode === 'company_cash:SYP_NEW'))
 
 const move = (amount: number, reason: string, idempotencyKey = key()): Payload => ({
   idempotencyKey,
@@ -101,24 +104,24 @@ describe('صندوق الشركة — company_fund.manage', () => {
     expect(take.json()).toMatchObject({ balance: sypStr(300_000), replayed: false })
     expect((await get(gm, '/company-fund')).json().total).toBe(sypStr(300_000))
 
-    // Same contra accounts as before: the owner's funding in, the owner's drawings out.
-    expect(await h.deps.ledger.fundBalance(BRANCH, 'cost_center:owner_funding')).toBe(-50_000_000n)
-    expect(await h.deps.ledger.fundBalance(BRANCH, 'cost_center:owner_drawings')).toBe(20_000_000n)
+    expect(await h.deps.ledger.fundBalance(COMPANY_BRANCH, 'company_equity:SYP_NEW:owner_funding')).toBe(-50_000_000n)
+    expect(await h.deps.ledger.fundBalance(COMPANY_BRANCH, 'company_equity:SYP_NEW:owner_drawings')).toBe(20_000_000n)
   })
 
   it('lets the system admin deposit and withdraw too', async () => {
     const sysadmin = await h.loginAs('sysadmin')
     expect((await post(sysadmin, '/company-fund/deposit', move(1_000, 'x'))).statusCode).toBe(201)
     expect((await post(sysadmin, '/company-fund/withdraw', move(400, 'y'))).statusCode).toBe(201)
-    expect(await companyBox()).toBe(60_000n)
+    expect(await companyCash()).toBe(60_000n)
   })
 
-  it('still needs a named branch from an organisation-wide role', async () => {
+  it('always targets HQ and no longer needs a named operating branch', async () => {
     const gm = await h.loginAs('gm')
     const { branchId: _omitted, ...unnamed } = move(1_000, 'x')
     const res = await post(gm, '/company-fund/deposit', unnamed)
-    expect(res.statusCode).toBe(422)
-    expect(res.json().error).toBe('branch_required')
+    expect(res.statusCode, res.body).toBe(201)
+    expect(await companyCash()).toBe(100_000n)
+    expect(await companyBox()).toBe(0n)
   })
 
   it('refuses to withdraw more than it holds', async () => {
@@ -127,7 +130,7 @@ describe('صندوق الشركة — company_fund.manage', () => {
     const res = await post(gm, '/company-fund/withdraw', move(5_000, 'too much'))
     expect(res.statusCode).toBe(422)
     expect(res.json()).toMatchObject({ error: 'insufficient_funds', detail: { held: sypStr(1_000) } })
-    expect(await companyBox()).toBe(100_000n)
+    expect(await companyCash()).toBe(100_000n)
   })
 
   /**
@@ -144,7 +147,7 @@ describe('صندوق الشركة — company_fund.manage', () => {
     ])
     expect(results.map((r) => r.statusCode).sort()).toEqual([201, 422])
     expect(results.find((r) => r.statusCode === 422)!.json().error).toBe('insufficient_funds')
-    expect(await companyBox()).toBe(0n)
+    expect(await companyCash()).toBe(0n)
   })
 
   it('requires a reason — money moved by decision must be answerable later', async () => {
@@ -176,8 +179,8 @@ describe('صندوق الشركة — a client idempotency key on every move', (
     const replay = await post(gm, '/company-fund/deposit', body)
     expect(replay.statusCode, replay.body).toBe(200)
     expect(replay.json()).toMatchObject({ balance: sypStr(500_000), replayed: true })
-    expect(await companyBox()).toBe(50_000_000n)
-    expect(companyLines()).toHaveLength(1)
+    expect(await companyCash()).toBe(50_000_000n)
+    expect(companyCashLines()).toHaveLength(1)
   })
 
   it('answers a concurrent double click with one deposit', async () => {
@@ -185,8 +188,8 @@ describe('صندوق الشركة — a client idempotency key on every move', (
     const body = move(700, 'نقرتان')
     const results = await Promise.all([post(gm, '/company-fund/deposit', body), post(gm, '/company-fund/deposit', body)])
     expect(results.map((r) => r.statusCode).sort()).toEqual([200, 201])
-    expect(await companyBox()).toBe(70_000n)
-    expect(companyLines()).toHaveLength(1)
+    expect(await companyCash()).toBe(70_000n)
+    expect(companyCashLines()).toHaveLength(1)
   })
 
   /**
@@ -202,8 +205,8 @@ describe('صندوق الشركة — a client idempotency key on every move', (
     const replay = await post(gm, '/company-fund/withdraw', body)
     expect(replay.statusCode, replay.body).toBe(200)
     expect(replay.json()).toMatchObject({ balance: sypStr(0), replayed: true })
-    expect(await companyBox()).toBe(0n)
-    expect(companyLines()).toHaveLength(2)
+    expect(await companyCash()).toBe(0n)
+    expect(companyCashLines()).toHaveLength(2)
   })
 
   it('refuses the same key with a different amount or reason as 409 and posts nothing', async () => {
@@ -218,8 +221,8 @@ describe('صندوق الشركة — a client idempotency key on every move', (
       expect(res.statusCode, res.body).toBe(409)
       expect(res.json().error).toBe('idempotency_key_conflict')
     }
-    expect(await companyBox()).toBe(50_000n)
-    expect(companyLines()).toHaveLength(1)
+    expect(await companyCash()).toBe(50_000n)
+    expect(companyCashLines()).toHaveLength(1)
   })
 
   /** One key, one decision: a deposit's key cannot later become a withdrawal. */
@@ -234,16 +237,16 @@ describe('صندوق الشركة — a client idempotency key on every move', (
     const withdrawal = move(100, 'سحب')
     expect((await post(gm, '/company-fund/withdraw', withdrawal)).statusCode).toBe(201)
     expect((await post(gm, '/company-fund/deposit', withdrawal)).statusCode).toBe(409)
-    // And a company-fund key is not a branch deposit key either: one namespace for all three.
+    // HQ commands and branch treasury commands are separate immutable ledgers.
     const asBranchDeposit = await post(gm, '/treasury/deposit', {
       idempotencyKey: deposit.idempotencyKey,
       target: 'cash',
       amount: sypStr(500),
       branchId: BRANCH,
     })
-    expect(asBranchDeposit.statusCode, asBranchDeposit.body).toBe(409)
-    expect(await companyBox()).toBe(40_000n)
-    expect(await h.deps.ledger.fundBalance(BRANCH, 'office_cash')).toBe(0n)
+    expect(asBranchDeposit.statusCode, asBranchDeposit.body).toBe(201)
+    expect(await companyCash()).toBe(40_000n)
+    expect(await h.deps.ledger.fundBalance(BRANCH, 'office_cash')).toBe(50_000n)
   })
 
   it('treats the same key from another person as a conflict, not as his receipt', async () => {
@@ -251,7 +254,7 @@ describe('صندوق الشركة — a client idempotency key on every move', (
     expect((await post(await h.loginAs('gm'), '/company-fund/deposit', body)).statusCode).toBe(201)
     const other = await post(await h.loginAs('sysadmin'), '/company-fund/deposit', body)
     expect(other.statusCode, other.body).toBe(409)
-    expect(companyLines()).toHaveLength(1)
+    expect(companyCashLines()).toHaveLength(1)
   })
 })
 
@@ -336,7 +339,8 @@ describe('/treasury/withdraw — «كييش» by hand is company_fund.manage', (
     const bySysadmin = await post(await h.loginAs('sysadmin'), '/treasury/withdraw', kaish(100_000))
     expect(bySysadmin.statusCode, bySysadmin.body).toBe(201)
     expect(bySysadmin.json().balance).toBe(sypStr(600_000))
-    expect((await get(gm, '/company-fund')).json().total).toBe(sypStr(400_000))
+    expect(await companyBox()).toBe(40_000_000n)
+    expect((await get(gm, '/company-fund')).json().total).toBe(sypStr(0))
   })
 
   /** The gap this closes: the branch manager's hand «كييش» used to answer 201. */
@@ -385,7 +389,8 @@ describe('/treasury/withdraw — «كييش» by hand is company_fund.manage', (
     const res = await post(gm, '/treasury/withdraw', kaish(40_000, { target: 'wallet', reason: 'كييش من المحفظة' }))
     expect(res.statusCode, res.body).toBe(201)
     expect((await get(gm, '/treasury/balances?branchId=' + BRANCH)).json().wallet).toBe(sypStr(60_000))
-    expect((await get(gm, '/company-fund')).json().total).toBe(sypStr(40_000))
+    expect(await companyBox()).toBe(4_000_000n)
+    expect((await get(gm, '/company-fund')).json().total).toBe(sypStr(0))
   })
 
   it('requires the client key, and requires it to be a UUID', async () => {
@@ -438,14 +443,15 @@ describe('/treasury/withdraw — «كييش» by hand is company_fund.manage', (
       expect(res.statusCode, res.body).toBe(409)
       expect(res.json().error).toBe('idempotency_key_conflict')
     }
-    // A key already spent on a company-fund deposit is not a sweep key either.
+    // An HQ command key may also identify a branch command: their partitions are independent.
     const deposit = move(50, 'إيداع')
     expect((await post(gm, '/company-fund/deposit', deposit)).statusCode).toBe(201)
     const reused = await post(gm, '/treasury/withdraw', kaish(50, { idempotencyKey: deposit.idempotencyKey }))
-    expect(reused.statusCode, reused.body).toBe(409)
+    expect(reused.statusCode, reused.body).toBe(201)
 
     expect(await companyBox()).toBe(105_000n)
-    expect(await h.deps.ledger.fundBalance(BRANCH, 'office_cash')).toBe(900_000n)
+    expect(await companyCash()).toBe(5_000n)
+    expect(await h.deps.ledger.fundBalance(BRANCH, 'office_cash')).toBe(895_000n)
     expect(await h.deps.ledger.fundBalance(BRANCH, 'office_wallet')).toBe(1_000_000n)
     expect(await h.deps.ledger.fundBalance(BRANCH, 'cost_center:owner_drawings')).toBe(0n)
   })
@@ -507,7 +513,7 @@ describe('/treasury/withdraw — «كييش» by hand is company_fund.manage', (
    * THE ROUND TRIP. A sweep followed by a replenishment of the same amount must leave both funds
    * exactly where they started — that is what makes الترميم safe to run every day for a year.
    */
-  it('nets to nothing when the money is swept out and put back', async () => {
+  it('keeps pre-cutover HQ cash separate from the branch company box', async () => {
     const gm = await h.loginAs('gm')
     await fundBox(gm, 'cash', sypStr(500_000))
     expect((await post(gm, '/company-fund/deposit', move(200_000, 'seed'))).statusCode).toBe(201)
@@ -518,7 +524,8 @@ describe('/treasury/withdraw — «كييش» by hand is company_fund.manage', (
     await fundBox(gm, 'cash', sypStr(120_000))
 
     expect((await get(gm, '/treasury/balances?branchId=' + BRANCH)).json().cash).toBe(sypStr(500_000))
-    expect((await get(gm, '/company-fund')).json().total).toBe(sypStr(200_000))
+    expect((await get(gm, '/company-fund')).json().total).toBe(sypStr(80_000))
+    expect(await companyBox()).toBe(12_000_000n)
   })
 })
 
@@ -527,31 +534,29 @@ describe('/journal/:entryId/reverse — undoing a company-fund movement is compa
     await post(token, `/journal/${entryId}/reverse`, { reason: 'تصحيح ظاهر مؤرَّخ', branchId: BRANCH })
   const corrections = () => h.deps.ledger.entries.filter((e) => e.eventType === 'correction')
   const lastCompanyEntry = () =>
-    [...h.deps.ledger.entries].reverse().find((e) => e.lines.some((l) => l.fundCode === 'company_box'))!
+    [...h.deps.ledger.entries].reverse().find((e) => e.lines.some((l) =>
+      l.fundCode === 'company_box' || l.fundCode === 'company_cash:SYP_NEW'))!
 
-  it('refuses the branch manager a GM company-fund deposit; the GM and the system admin may reverse one', async () => {
+  it('does not expose HQ company commands through the branch journal reversal endpoint', async () => {
     const gm = await h.loginAs('gm')
     const manager = await h.loginAs('manager')
     expect((await post(gm, '/company-fund/deposit', move(5_000, 'رأس مال'))).statusCode).toBe(201)
     const deposit = lastCompanyEntry()
 
     const refused = await reverseAs(manager, deposit.id)
-    expect(refused.statusCode, refused.body).toBe(403)
-    expect(refused.json()).toMatchObject({
-      error: 'company_fund_forbidden',
-      detail: { permission: 'company_fund.manage' },
-    })
+    expect(refused.statusCode, refused.body).toBe(404)
+    expect(refused.json()).toMatchObject({ error: 'entry_not_found' })
     expect(corrections()).toEqual([])
-    expect(await companyBox()).toBe(500_000n)
+    expect(await companyCash()).toBe(500_000n)
 
     const byGm = await reverseAs(gm, deposit.id)
-    expect(byGm.statusCode, byGm.body).toBe(201)
-    expect(await companyBox()).toBe(0n)
+    expect(byGm.statusCode, byGm.body).toBe(404)
+    expect(await companyCash()).toBe(500_000n)
 
     expect((await post(gm, '/company-fund/deposit', move(700, 'ثان'))).statusCode).toBe(201)
     const bySysadmin = await reverseAs(await h.loginAs('sysadmin'), lastCompanyEntry().id)
-    expect(bySysadmin.statusCode, bySysadmin.body).toBe(201)
-    expect(await companyBox()).toBe(0n)
+    expect(bySysadmin.statusCode, bySysadmin.body).toBe(404)
+    expect(await companyCash()).toBe(570_000n)
   })
 
   it('refuses the branch manager a hand «كييش» reversal; the GM may', async () => {

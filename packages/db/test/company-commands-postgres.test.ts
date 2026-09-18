@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import type { CompanyCommandRecord } from '@ash/contracts'
+import type { CompanyCommandRecord, CompanyDebtRecord, FixedAssetRecord } from '@ash/contracts'
 import {
   type FundRef,
   type Minor,
@@ -13,6 +13,13 @@ import {
   companyOpeningTransfer,
   companyReversal,
   companyWithdrawal,
+  assetPurchase,
+  companyDebtOpen,
+  companyDebtOutstanding,
+  companyDebtPayment,
+  depreciationSchedule,
+  depreciationTransfer,
+  planDepreciationTransfer,
   exchangeRate,
   formatMinor,
   fundCode,
@@ -26,6 +33,7 @@ import {
 import { migrate } from '../src/migrate.ts'
 import { bindPoolToTransaction, createPool, type Pool, type PoolClient } from '../src/pool.ts'
 import { PgCompanyLedgerRepo } from '../src/repos-company.ts'
+import { PgCompanyFinanceRepo } from '../src/repos-company-finance.ts'
 import { PgLedgerRepo, fundTypeOf } from '../src/repos.ts'
 import { assertDisposableDatabaseConnection, assertDisposableDatabaseUrl } from './disposable-database.ts'
 
@@ -188,6 +196,7 @@ if (!DATABASE_URL) {
   const bound = (actorId: string) => bindPoolToTransaction(pool!, client, { actorId, requestId: 'c2-guard' })
   const ledger = (actorId: string) => new PgLedgerRepo(bound(actorId))
   const company = (actorId: string) => new PgCompanyLedgerRepo(bound(actorId))
+  const finance = (actorId: string) => new PgCompanyFinanceRepo(bound(actorId))
 
   /** Run `work` as `actorId` in its own transaction and COMMIT: the error it or the COMMIT raised, or null. */
   async function outcome(actorId: string, work: () => Promise<unknown>): Promise<PgError | null> {
@@ -1264,6 +1273,170 @@ if (!DATABASE_URL) {
       )
       expect(unmirrored.rows).toEqual([{ n: 0 }])
       expect(mirrors.length).toBeGreaterThanOrEqual(36)
+    })
+  })
+
+  describe('company debts, assets and depreciation repository path (0069-0071)', () => {
+    it('commits a guarded debt opening and payment through the typed repository', async () => {
+      const debtId = randomUUID()
+      const paymentId = randomUUID()
+      const principal = m(90_000n)
+      const paid = m(30_000n)
+      const opened = companyDebtOpen({
+        debtId,
+        direction: 'payable',
+        currency: 'SYP_NEW',
+        principal,
+        origin: 'opening',
+        occurrenceKey: debtId,
+      })
+      expect(await outcome(ids.gm, async () => {
+        const entry = await post(HQ, opened, ids.gm, 'supplier opening')
+        const row: CompanyDebtRecord = {
+          id: debtId,
+          branchId: HQ,
+          direction: 'payable',
+          partyName: 'Supplier',
+          partyKey: 'supplier',
+          currency: 'SYP_NEW',
+          principal,
+          sypMinorPerUsd: null,
+          openedOn: DATE,
+          businessDate: DATE,
+          dueOn: null,
+          note: 'supplier opening',
+          origin: 'opening',
+          expenseCategoryId: null,
+          incomeCategoryId: null,
+          costCenterKind: null,
+          vehicleId: null,
+          assetId: null,
+          journalEntryId: entry.id,
+          createdBy: ids.gm,
+          createdAtMs: 0,
+        }
+        await finance(ids.gm).createDebt(row)
+        const outstanding = companyDebtOutstanding(
+          row.direction,
+          await ledger(ids.gm).fundBalance(HQ, `company_payable:SYP_NEW:${debtId}`),
+        )
+        const payment = companyDebtPayment({
+          debtId,
+          direction: 'payable',
+          currency: 'SYP_NEW',
+          amount: paid,
+          outstanding,
+          paidFrom: 'owner_outside',
+          occurrenceKey: paymentId,
+        })
+        const paymentEntry = await post(HQ, payment, ids.gm, 'first instalment')
+        await finance(ids.gm).createDebtEvent({
+          id: paymentId,
+          debtId,
+          branchId: HQ,
+          kind: 'payment',
+          amount: paid,
+          source: 'owner_outside',
+          sypMinorPerUsd: null,
+          occurredOn: DATE,
+          businessDate: DATE,
+          reason: 'first instalment',
+          journalEntryId: paymentEntry.id,
+          createdBy: ids.gm,
+          createdAtMs: 0,
+        })
+      })).toBeNull()
+      expect((await finance(ids.gm).getDebt(debtId))?.principal).toBe(principal)
+      expect((await finance(ids.gm).getDebtEvent(paymentId))?.amount).toBe(paid)
+      expect(companyDebtOutstanding(
+        'payable',
+        await ledger(ids.gm).fundBalance(HQ, `company_payable:SYP_NEW:${debtId}`),
+      )).toBe(m(60_000n))
+    })
+
+    it('commits an exact 36-row asset schedule and FIFO depreciation transfer', async () => {
+      const assetId = randomUUID()
+      const transferId = randomUUID()
+      const price = m(360_000n)
+      const purchase = assetPurchase({
+        assetId,
+        currency: 'SYP_NEW',
+        price,
+        paidNow: price,
+        paidFrom: 'owner_outside',
+        occurrenceKey: assetId,
+      })
+      await deposit(ids.gm, 'SYP_NEW', 100_000n, 'depreciation cash')
+      expect(await outcome(ids.gm, async () => {
+        const entry = await post(HQ, purchase.posting, ids.gm, 'asset purchase')
+        const row: FixedAssetRecord = {
+          id: assetId,
+          branchId: HQ,
+          kind: 'equipment',
+          vehicleId: null,
+          name: 'Guarded asset',
+          currency: 'SYP_NEW',
+          price,
+          sypMinorPerUsd: null,
+          purchasedOn: DATE,
+          businessDate: DATE,
+          usefulMonths: 36,
+          paidNow: price,
+          paidFrom: 'owner_outside',
+          debtId: null,
+          description: 'asset purchase',
+          journalEntryId: entry.id,
+          createdBy: ids.gm,
+          createdAtMs: 0,
+        }
+        await finance(ids.gm).createAsset(row)
+        await finance(ids.gm).createAssetSchedule(depreciationSchedule(assetId, price, DATE))
+      })).toBeNull()
+      expect(await finance(ids.gm).listAssetSchedule(assetId)).toHaveLength(36)
+
+      expect(await outcome(ids.gm, async () => {
+        const assetIds = new Set((await finance(ids.gm).listAssets(HQ))
+          .filter((asset) => asset.currency === 'SYP_NEW')
+          .map((asset) => asset.id))
+        const schedule = (await finance(ids.gm).listAssetSchedule()).filter((row) => assetIds.has(row.assetId))
+        const funded = await finance(ids.gm).listDepreciationAllocations(HQ, 'SYP_NEW')
+        const available = await ledger(ids.gm).fundBalance(HQ, 'company_cash:SYP_NEW')
+        const plan = planDepreciationTransfer({ schedule, funded, asOfMonth: '2026-09-01', available })
+        expect(plan.transferAmount).toBeGreaterThan(0n)
+        expect(plan.allocations.map((allocation) => ({
+          assetId: allocation.assetId,
+          period: allocation.period,
+          periodMonth: allocation.periodMonth,
+        }))).toEqual([{ assetId, period: 1, periodMonth: '2026-09-01' }])
+        const entry = await post(
+          HQ,
+          depreciationTransfer('SYP_NEW', plan.transferAmount, transferId),
+          ids.gm,
+          'monthly depreciation',
+        )
+        await finance(ids.gm).createDepreciationTransfer({
+          id: transferId,
+          branchId: HQ,
+          currency: 'SYP_NEW',
+          amount: plan.transferAmount,
+          expectedAmount: plan.transferAmount,
+          sypMinorPerUsd: null,
+          asOfMonth: '2026-09-01',
+          businessDate: DATE,
+          reason: 'monthly depreciation',
+          journalEntryId: entry.id,
+          createdBy: ids.gm,
+          createdAtMs: 0,
+        }, plan.allocations.map((allocation) => ({
+          transferId,
+          assetId: allocation.assetId,
+          period: allocation.period,
+          amount: allocation.amount,
+        })))
+      })).toBeNull()
+      expect((await finance(ids.gm).listDepreciationTransfers(HQ)).some((row) => row.id === transferId)).toBe(true)
+      expect((await finance(ids.gm).listDepreciationAllocations(HQ, 'SYP_NEW'))
+        .filter((row) => row.transferId === transferId).length).toBeGreaterThan(0)
     })
   })
 }

@@ -7,6 +7,7 @@ import { SESSION_COOKIE } from '../src/auth.ts'
 
 export const BRANCH = 'branch-damascus'
 export const OTHER_BRANCH = 'branch-aleppo'
+export const COMPANY_BRANCH = '10000000-0000-4000-8000-000000000100'
 export const DRIVER_ID = 'driver-1'
 export const DRIVER2_ID = 'driver-2'
 export const VEHICLE_ID = 'vehicle-1'
@@ -117,6 +118,19 @@ export async function makeHarness(
   deps.directory.branches.set(OTHER_BRANCH, { id: OTHER_BRANCH, code: 'ALP', nameAr: 'حلب', nameEn: 'Aleppo', governorateId: GOV_ALEPPO, branchNo: 1, timezone: 'Asia/Damascus', lat: null, lng: null, checkinRadiusM: 150, kind: 'branch' })
   // «رأس مال المكتب» — the owner's own figures, seeded exactly as migration 0026 seeds production.
   // A test that had to configure capital before it could exercise الترميم would be testing its setup.
+  deps.directory.branches.set(COMPANY_BRANCH, {
+    id: COMPANY_BRANCH,
+    code: 'HQ',
+    nameAr: 'صندوق الشركة',
+    nameEn: 'Company',
+    governorateId: GOV_DAMASCUS,
+    branchNo: 0,
+    timezone: 'Asia/Damascus',
+    lat: null,
+    lng: null,
+    checkinRadiusM: 150,
+    kind: 'company',
+  })
   deps.capitalTargets.seed(BRANCH)
   deps.capitalTargets.seed(OTHER_BRANCH)
   deps.directory.drivers.set(DRIVER_ID, { id: DRIVER_ID, branchId: BRANCH, code: 'DRV-1', fullNameAr: 'سائق ١', active: true, userId: 'u-d1' })

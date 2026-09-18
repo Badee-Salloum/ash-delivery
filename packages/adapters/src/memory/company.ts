@@ -259,6 +259,6 @@ export class MemoryCompanyLedgerSource implements CompanyLedgerSource {
 export class MemoryFinancialLocks implements FinancialLocks {
   readonly taken: string[] = []
   async acquire(lockKey: string): Promise<void> {
-    this.taken.push(lockKey)
+    if (!this.taken.includes(lockKey)) this.taken.push(lockKey)
   }
 }

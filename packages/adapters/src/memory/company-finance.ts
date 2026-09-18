@@ -41,6 +41,9 @@ export class MemoryCompanyFinanceRepo implements CompanyFinanceRepo {
     if (this.state.debts.some((stored) => stored.id === row.id)) throw duplicate('DUPLICATE_COMPANY_DEBT')
     this.state.debts.push(clone(row))
   }
+  async getDebtEvent(id: string): Promise<CompanyDebtEventRecord | null> {
+    return clone(this.state.debtEvents.find((row) => row.id === id) ?? null)
+  }
   async listDebtEvents(debtId: string): Promise<CompanyDebtEventRecord[]> {
     return clone(this.state.debtEvents.filter((row) => row.debtId === debtId))
   }

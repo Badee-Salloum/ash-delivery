@@ -41,6 +41,9 @@ import {
   manualKaish,
   officeTransfer,
   addDays,
+  companyBoxMovement,
+  mirrorOrder,
+  restorationMirror,
   weekStartFor,
 } from '@ash/domain'
 import { ServiceError, assertWeekOpen, ensureFxDay, todayFor } from './shifts.service.ts'
@@ -189,6 +192,73 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       permission: 'company_fund.manage',
       reason: decision.reason,
     })
+  }
+
+  type PreparedMirror = { companyBranchId: string; watermarkEntryId: number }
+
+  /** Take the HQ lock before a cut-over branch writes any posting that touches `company_box`. */
+  async function prepareCompanyMirror(
+    tx: FinancialTransactionDeps,
+    branchId: string,
+    postings: readonly Posting[],
+  ): Promise<PreparedMirror | null> {
+    const touchesCompany = postings.some((posting) => companyBoxMovement(posting.lines.map((line) => ({
+      fundCode: fundCode(line.fund),
+      side: line.side,
+      amount: line.amount,
+    }))) !== null)
+    if (!touchesCompany) return null
+    const cutover = await tx.companyLedger.cutoverFor(branchId)
+    if (!cutover) return null
+    const company = await deps.directory.companyBranch()
+    if (!company || company.id !== cutover.companyBranchId) {
+      throw new ServiceError(500, 'company_cutover_integrity_error')
+    }
+    // The UOW already owns the branch lock. Acquiring it again is idempotent, then HQ is last.
+    await tx.locks.acquire(`receivables:${branchId}`)
+    await tx.locks.acquire(`receivables:${company.id}`)
+    return { companyBranchId: company.id, watermarkEntryId: cutover.watermarkEntryId }
+  }
+
+  /** Write every HQ half after its branch source and immutable restoration row exist. */
+  async function mirrorCompanyBoxEntries(
+    tx: FinancialTransactionDeps,
+    prepared: PreparedMirror | null,
+    entries: readonly JournalEntryRecord[],
+    restorationId: number | null,
+  ): Promise<void> {
+    if (!prepared) return
+    const moving = entries.flatMap((entry) => {
+      const movement = companyBoxMovement(entry.lines)
+      return movement === null || entry.id <= prepared.watermarkEntryId ? [] : [{ entry, ...movement }]
+    })
+    for (const source of mirrorOrder(moving)) {
+      const existing = await tx.companyLedger.findMirrorBySource(source.entry.id)
+      if (existing) continue
+      const posting = restorationMirror(source.direction, source.amount, source.entry.branchId, source.entry.id)
+      const [mirror] = await tx.ledger.post(prepared.companyBranchId, [posting], {
+        shiftId: null,
+        businessDate: source.entry.businessDate,
+        postingDate: source.entry.postingDate,
+        weekStartDate: source.entry.weekStartDate,
+        fxDayId: source.entry.fxDayId,
+        sypMinorPerUsd: null,
+        createdBy: source.entry.createdBy,
+        ...(source.entry.reason === null ? {} : { reason: source.entry.reason }),
+      })
+      if (!mirror) throw new ServiceError(409, 'company_mirror_conflict', { sourceEntryId: source.entry.id })
+      await tx.companyLedger.createMirror({
+        id: deps.ids.uuid(),
+        sourceBranchId: source.entry.branchId,
+        sourceEntryId: source.entry.id,
+        mirrorEntryId: mirror.id,
+        direction: source.direction,
+        amount: source.amount,
+        restorationId,
+        createdBy: source.entry.createdBy,
+        createdAtMs: deps.clock.nowMs(),
+      })
+    }
   }
 
   // ── The daily count (E-5) ───────────────────────────────────────────────────────────────
@@ -542,7 +612,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       const businessDate = sealed ? postingDate : original.businessDate
       const weekStartDate = sealed ? weekStartFor(postingDate) : original.weekStartDate
       const fxDayId = await ensureFxDay(deps, businessDate)
-      const [entry] = await deps.ledger.post(branchId, [posting], {
+      const meta = {
         shiftId: null,
         businessDate,
         postingDate,
@@ -551,7 +621,21 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
         sypMinorPerUsd: null,
         createdBy: req.actor!.userId,
         reason,
-      })
+      } as const
+      const movement = companyBoxMovement(posting.lines.map((line) => ({
+        fundCode: fundCode(line.fund), side: line.side, amount: line.amount,
+      })))
+      const entry = movement === null
+        ? (await deps.ledger.post(branchId, [posting], meta))[0]
+        : await deps.financialUnitOfWork.run(
+            { lockKey: `receivables:${branchId}`, actorId: req.actor!.userId, requestId: req.requestId },
+            async (tx) => {
+              const mirror = await prepareCompanyMirror(tx, branchId, [posting])
+              const [written] = await tx.ledger.post(branchId, [posting], meta)
+              if (written) await mirrorCompanyBoxEntries(tx, mirror, [written], null)
+              return written
+            },
+          )
 
       return reply
         .code(201)
@@ -616,6 +700,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
       async (tx) => {
         const prior = await tx.ledger.findStandaloneEntry(branchId, posting.eventType, posting.occurrenceKey)
         if (prior) return receipt(prior)
+        const mirror = await prepareCompanyMirror(tx, branchId, [posting])
         if (guard) await guard(tx)
         const [entry] = await tx.ledger.post(branchId, [posting], {
           shiftId: null,
@@ -630,6 +715,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
         // Unreachable under the lock unless the key is held by a row this lookup cannot see. Never
         // report money as moved when it was not.
         if (!entry) throw new ServiceError(409, 'idempotency_key_conflict')
+        await mirrorCompanyBoxEntries(tx, mirror, [entry], null)
         return { entry, replayed: false }
       },
     )
@@ -685,18 +771,8 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
   // `company_fund.manage` is the gate — GM and system admin (2026-09-17) — the SAME key as the two
   // writes below. It used to be `profit.view_total` here and `journal.manual.write` there, which let
   // a branch manager move money in and out of a fund he could not see.
-  app.get('/company-fund', { config: { permission: 'company_fund.manage' } }, async () => {
-    const branches = await deps.directory.listBranches()
-    const perBranch = await Promise.all(
-      branches.map(async (b) => ({
-        branchId: b.id,
-        code: b.code,
-        nameAr: b.nameAr,
-        balance: serializeMoney(await deps.ledger.fundBalance(b.id, 'company_box')),
-      })),
-    )
-    const total = perBranch.reduce((sum, b) => sum + BigInt(b.balance.replace('.', '')), 0n)
-    return { total: serializeMoney(minor(total)), branches: perBranch }
+  app.get('/company-fund/legacy-branch-boxes', { config: { permission: 'company_fund.manage' } }, async () => {
+    throw new ServiceError(410, 'company_fund_route_moved')
   })
 
   /**
@@ -1249,7 +1325,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
    * Put the owner's own money into صندوق الشركة. Its counterpart is `owner_funding`, the same
    * contra account a branch deposit uses — so «where did this come from» has one answer, not two.
    */
-  app.post('/company-fund/deposit', companyFundWrite, async (req, reply) => {
+  app.post('/company-fund/legacy-deposit', companyFundWrite, async (req, reply) => {
     const body = companyMoveRequest.parse(req.body)
     const branchId = resolveBranch(req)
     await assertOperatingBranch(branchId)
@@ -1271,7 +1347,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
   })
 
   /** Take money out of صندوق الشركة — the owner's drawings. Refused below zero. */
-  app.post('/company-fund/withdraw', companyFundWrite, async (req, reply) => {
+  app.post('/company-fund/legacy-withdraw', companyFundWrite, async (req, reply) => {
     const body = companyMoveRequest.parse(req.body)
     const branchId = resolveBranch(req)
     await assertOperatingBranch(branchId)
@@ -1733,6 +1809,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
         // it makes الترميم refuse loudly rather than post under a key the guard cannot check.
         const restorationPostings = postingsForRestoration(plan, `${businessDate}#${runNo}`)
         assertPersistableTreasuryPostings(restorationPostings)
+        const mirror = await prepareCompanyMirror(tx, branchId, restorationPostings)
         const entries = restorationPostings.length === 0 ? [] : await tx.ledger.post(branchId, restorationPostings, {
           shiftId: null,
           businessDate,
@@ -1754,8 +1831,9 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
         const snapshotLegs = plan.legs.map(serializeSnapshotLeg)
         const responseLegs = plan.legs.map(serializeResponseLeg)
         const openingBalances = openingBalancesFor(plan)
+        let restorationId: number
         try {
-          await tx.restorations.create({
+          restorationId = await tx.restorations.create({
             branchId,
             businessDate,
             cashCountId: null,
@@ -1781,6 +1859,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
           }
           throw err
         }
+        await mirrorCompanyBoxEntries(tx, mirror, entries, restorationId)
 
         return {
           legs: responseLegs,
