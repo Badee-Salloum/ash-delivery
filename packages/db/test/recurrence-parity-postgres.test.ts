@@ -230,6 +230,13 @@ if (!DATABASE_URL) {
         await client.query(`SELECT set_config('app.actor_id', $1, true)`, [actorId])
         await client.query(`SELECT set_config('app.request_id', $1, true)`, [`company-recurrence-${suffix}`])
 
+        // Migration 0064 grants this owner-approved permission to existing system admins. Remove
+        // it inside this rolled-back fixture so the negative half proves the 0077 trigger itself.
+        await client.query(
+          `DELETE FROM role_permissions
+            WHERE role_key = 'system_admin' AND permission_key = 'company_fund.manage'`,
+        )
+
         await client.query('SAVEPOINT missing_company_permission')
         await expect(client.query(
           `INSERT INTO recurring_expense_templates

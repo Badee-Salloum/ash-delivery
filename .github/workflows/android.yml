@@ -39,6 +39,10 @@ jobs:
           java-version: '21'
 
       - uses: android-actions/setup-android@v3
+        with:
+          # The action's old default also requested the retired SDK package named `tools`.
+          # Platform tools are all Capacitor/Gradle needs; Gradle installs its pinned SDK itself.
+          packages: platform-tools
 
       - name: install capacitor
         working-directory: android
