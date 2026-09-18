@@ -67,7 +67,10 @@ applied to that entire day's transactions.
 - **Posting is never blocked on a missing rate.** If the admin has not entered today's rate, the
   posting path lazily inserts a `provisional` row carried forward from yesterday and flags it.
   A cron must never be a precondition for the ledger accepting a write.
-- Correcting a rate creates a new `fx_rate_versions` row; it never rewrites what was reported.
+- Correcting a rate updates `fx_days` and appends the old/new values to `fx_rate_versions` for
+  audit. **Branch historical USD display can therefore restate** because branch entries do not
+  freeze a rate. Company-ledger USD commands are different: each freezes
+  `journal_entries.syp_minor_per_usd`, and company historical profit uses that frozen value.
 
 ---
 
@@ -92,6 +95,88 @@ Then `fin_seal_week(week_lock_id, closed_by)` stamps every entry of the week and
 
 **To correct a locked week:** never edit. Post a dated reversal + repost pair; `occurrence_key`
 carries the correction sequence so repeated corrections remain possible.
+
+### 4a. «صندوق الشركة» cutover and monthly routine ⚠ NOT YET REHEARSED / NOT DEPLOYED
+
+Migrations `0064+` and the finance API must not be applied to production without the owner's
+separate written deployment approval. The commands below are read-only pre-flight queries; every
+money move itself goes through the API/UI, never through repair SQL.
+
+Before cutover:
+
+```sql
+-- Exactly one HQ row and no operating screen accidentally listing it.
+SELECT id, code, branch_no, kind FROM branches ORDER BY kind, code;
+SELECT count(*) AS company_rows FROM branches WHERE kind = 'company';              -- expect 1
+
+-- The branch balance that the cutover request must echo exactly as `expectedOpening`.
+SELECT f.branch_id, f.code,
+       sum(CASE jl.side WHEN 'D' THEN jl.amount_minor ELSE -jl.amount_minor END) AS balance_minor
+  FROM funds f
+  LEFT JOIN journal_lines jl ON jl.fund_id = f.id
+ WHERE f.code = 'company_box'
+ GROUP BY f.branch_id, f.code;
+
+-- No company event may be orphaned from its immutable command row; the migration's deferred
+-- trigger is the authority, and its PostgreSQL test must already be green before this runbook.
+SELECT event_type, count(*) FROM journal_entries
+ WHERE event_type::text LIKE 'company_%' OR event_type::text IN
+   ('asset_purchase','depreciation_transfer','depreciation_release')
+ GROUP BY event_type ORDER BY event_type;
+```
+
+Cut over one branch once:
+
+1. In «صندوق الشركة», call the cutover action with the branch, the exact `company_box` balance
+   just read, and a written reason. A changed balance returns a conflict; re-read and investigate,
+   do not edit a journal. The action posts the SYP opening transfer and records its journal
+   watermark atomically under the branch→HQ lock order.
+2. Enter the real USD opening cash as a company deposit with account `opening`. Do not convert it
+   from SYP and do not invent an exchange rate; use the rate evidenced for that opening entry.
+3. Count both physical pockets. Any difference is a visible company correction with its reason,
+   never a change to the cutover row or opening journal.
+4. From that commit onward, each branch `company_box` movement must have an HQ mirror. Restoration
+   sweeps («كييش») are mirrored before top-ups («شحن»). A top-up may make company SYP negative by
+   owner decision; the UI must show the resulting warning and the operator then deposits or
+   exchanges money to resolve it.
+
+Read-only invariant check after cutover and after every restoration:
+
+```sql
+SELECT c.branch_id,
+       ash_fund_balance(c.branch_id, 'company_box') AS branch_company_box,
+       ash_fund_balance(c.company_branch_id, 'branch_clearing:' || c.branch_id::text) AS hq_clearing,
+       ash_fund_balance(c.branch_id, 'company_box')
+         + ash_fund_balance(c.company_branch_id, 'branch_clearing:' || c.branch_id::text) AS delta
+  FROM company_ledger_cutovers c;
+-- Every delta must be 0. If not, stop money operations; do not repair with SQL.
+```
+
+Entering an existing vehicle (preferred historical reconstruction):
+
+1. Create the fixed asset with its real purchase date and currency, `paidNow = 0`, and the full
+   unpaid balance as its linked payable. Period 1 is the purchase month; the server writes all 36
+   deterministic schedule rows.
+2. Record each historical instalment as a payment on that payable with source `owner_outside` and
+   its real date. It is booked today while preserving that date on the event.
+3. Press «نقل الاستهلاك» once. It catches up the oldest due periods through the current month and
+   transfers only what the same-currency company pocket can cover; the remainder stays visibly due.
+
+Routine operations:
+
+- **Income/expense/debt payment:** choose the real currency and source. `owner_outside` records the
+  fact without pretending cash left a system pocket. Asset instalments are ordinary payable
+  payments; there is no second instalment subsystem.
+- **USD↔SYP exchange:** enter both actual amounts. The server derives and freezes the rate on the
+  entry; never type a rate in place of one of the amounts.
+- **Reversal:** use the command's «عكس» action with a written reason. It writes the exact inverse;
+  never edit/delete a command row and never use the generic branch journal endpoint for HQ.
+- **Monthly depreciation:** at the start of the month open «الترميم» or the depreciation tab,
+  review due/available/shortfall, and press the transfer button. A reserve release requires a
+  written reason and never reopens periods already funded.
+- **Sunday close for HQ:** close the HQ week after operating branches. HQ requires no cash count,
+  but its per-currency trial balance and every clearing invariant must pass. A branch whose mirror
+  is missing blocks HQ close; repair the originating workflow through its API, not with SQL.
 
 ---
 

@@ -101,6 +101,10 @@ independently to every shift that was not approved when the policy launched.
 | 15 | **Driver share comes from returned shift money, never company capital** (2026-08-24): at close the employee keeps or receives his settlement from the actual cash being returned. The office receives only the residual `actualCash - employeeSettlement`; the close does not post a company-capital withdrawal and daily restoration must not reinterpret the share as a capital shortfall. This clarifies, rather than replaces, decision 13. |
 | 18 | **The owner's work schedule** (2026-09-17): morning 09:00–17:00, evening 18:00–02:00, and a double is **twelve hours**. Classification is automatic from the times, in `packages/domain/src/shift/worked-time.ts`: a **closed shift of at least 600 minutes is a double (`full`, target 720)**; anything shorter is its slot — morning (`day`) when it started before 15:00, evening when it started at/after 15:00 or between 00:00 and 03:59 — each with target 480. A running shift is `unknown` with its slot («جارية»); a close forgotten for more than 960 minutes keeps its slot and is not judged. `SHIFT_TARGET_MINUTES` is the only target table; no screen may keep its own. Supersedes the measured 15:00/22:00 classifier and the sixteen-hour double. |
 | 19 | **Net profit** (2026-09-17): «صافي الربح هوي حصة الشركة ناقص الصرفيات». Net = company share + other income − (operating costs + **vehicle costs** + losses), computed by `classifyProfitLine` in `packages/domain/src/reporting/profit.ts`. A vehicle expense posts to `cost_center:<vehicleId>`; the old allowlist only matched a `vehicle:` prefix nothing writes, so vehicle costs were silently missing — measured on production 2026-09-17: none had been booked yet, so no historical figure changed. **Depreciation is never subtracted** — it is reported beside the profit. Owner capital accounts (`owner_funding`, `owner_drawings`, `opening_balance`) stay out. The dashboard reads any range through `LedgerRangeSource` (one aggregate, no week walk) and defaults to «الكل منذ البدء» (from the go-live date). Branch and company figures are reported separately once the company ledger lands (decision 21). |
+| 20 | **Recurring expenses are due reminders, never automatic money moves** (2026-09-17). A template may recur weekly on a weekday, on the first of each month, or every N days from its start. Due occurrences are computed when read; no cron posts them. A human explicitly pays or skips each occurrence, and changing the amount at payment or skipping it requires a visible reason. The resulting expense uses the ordinary guarded expense path and may carry a receipt. |
+| 21 | **«صندوق الشركة» is a separate dual-currency company ledger** (2026-09-17), available only through `company_fund.manage` to the general manager and system admin. A dedicated HQ branch row owns independent SYP and USD pockets; currency lives on each fund and every journal balances per currency. Exchanges record both actual amounts and freeze their implied rate. The old branch `company_box` becomes the company's clearing account at that branch: after an explicit cutover every movement is mirrored atomically under the branch→HQ lock order, and `branch company_box + HQ branch_clearing = 0`. Restoration may make company SYP negative, visibly, by owner decision. This amends BR6 and decisions 3 and 10; it does not merge branch and company books. |
+| 22 | **Company debts and fixed assets** (2026-09-17). Debts run in both directions, carry no interest or planned instalment schedule, and every payment/write-off is an immutable event against one debt-specific fund. An asset keeps its purchase currency and may be paid from the company pocket, depreciation reserve, or outside by the owner; any unpaid purchase balance is one linked payable, so instalments live in the debt register. One asset may link to one vehicle; branch managers never see purchase price, instalments, outstanding balances, or book value. |
+| 23 | **Straight-line depreciation and cumulative finance view** (2026-09-17). Every fixed asset has 36 monthly periods and period 1 is its purchase month. Book value is time-based (`price − scheduled depreciation due through the selected month`), including catch-up for existing vehicles. A manager button moves `min(due, available)` from the same-currency company pocket to «الاستهلاك», FIFO oldest period first; any shortfall remains due. This reserve may buy assets/pay instalments and may be released back with a written reason; releases and spending never reopen funded months. Depreciation is displayed beside net profit and never subtracted from it. The dashboard defaults to the cumulative go-live range and keeps branch, company, and combined results explicit. |
 
 ---
 
@@ -132,6 +136,24 @@ independently to every shift that was not approved when the policy launched.
    `office_cash + office_wallet + الذمم + السلف` in all four places that compute it: the dashboard
    read model, the restoration's own `positionsFor`, the go-live gate, and the guard inside
    PostgreSQL. Paying one moves that sum by exactly `0`. Only `advance_conversion` reduces it.
+9. **Currency belongs to the fund, never to an untyped amount.** Company SYP and USD pockets are
+   distinct accounts; every entry balances separately in each currency. The only cross-currency
+   command is an exchange with two balanced pairs and one frozen `syp_minor_per_usd` derived from
+   the two actual amounts. A USD posting without its frozen rate, or a SYP-only posting with one,
+   is invalid.
+10. **Branch and company ledgers never cross in one journal.** A branch money move that affects
+    `company_box` is followed inside the same financial transaction by a separate HQ mirror, after
+    locks are taken branch first and HQ second. Every committed cut-over branch must satisfy
+    `balance(company_box) + balance(branch_clearing) = 0`.
+11. **Every company journal has exactly one immutable command fact** (an asset purchase may also
+    create its one linked payable). Historical facts are posted on today's open business date while
+    retaining their real `occurred_on`/`purchased_on`; profit therefore follows posting date, and
+    screens show both dates. No generic manual journal or generic reversal may manufacture an HQ
+    movement.
+12. **Depreciation is integer, exact and FIFO.** For price `P` over 36 periods, periods 1–35 are
+    `floor(P / 36)` and period 36 receives the remainder, so the schedule sums exactly to `P`.
+    Funding allocates oldest due periods first and moves only `min(due, available)`; it is a reserve
+    transfer, never a P&L expense, and funded periods remain funded after reserve use or release.
 
 ## Time rules
 
