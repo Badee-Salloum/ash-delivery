@@ -3,7 +3,7 @@
 > Self-contained brief. Read it top to bottom before touching code. Then read `CLAUDE.md` (project rules —
 > they are binding) and open `docs/design/2026-09-redesign/index.html` in a browser (the approved mockups).
 > Branch: **`feat/finance-redesign`** (created from `fix/overlapping-dashboard-scans` @ `f953906`).
-> Last updated: 2026-09-17 by Claude (see §3 for the live status checklist — update it as you go).
+> Last updated: 2026-09-18 by Codex (see §3 for the live status checklist).
 
 ---
 
@@ -109,10 +109,8 @@ branch managers never see purchase prices/instalments/book values; company debts
 - [x] **P2** router params + time filter + range read model + profit fix — committed
       (`feat(dashboard): any period, one read …`). Production has NO vehicle cost-centre expenses yet, so the
       profit fix restates nothing.
-- [ ] **P3** dashboard redesign + drill-down — IN PROGRESS in an agent worktree based on `a1ba9e4`
-      (sections under `screens/dashboard/`, `TrendBars`, `GET /dashboard/fleet-performance`, domain `fleet/odometer.ts`;
-      tests on local DB `ash_test_ui`). If this line is still unchecked when you pick this up, check
-      `git branch --list "worktree-agent-*"` for its commits before starting over.
+- [x] **P3** dashboard redesign + drill-down — committed (`1d22365`, `a44c5e7`, `991fdb9`): eight independent
+      sections, trend/range views, filtered links and fleet performance.
 - [x] **C1** HQ ledger + currency foundation — DONE on branch `worktree-agent-ae074aa887cf11d96`
       (worktree `.claude/worktrees/agent-ae074aa887cf11d96`), 8 commits ending `4d47ffc`: 0065 enum-only, 0066
       foundation (HQ row `10000000-0000-4000-8000-000000000100`, `branches.kind`, per-currency balance trigger,
@@ -122,21 +120,25 @@ branch managers never see purchase prices/instalments/book values; company debts
       `LedgerRepo.post` meta `sypMinorPerUsd` REQUIRED — every new caller must pass `null` for branch postings.
       Merged state verified: domain 743, client 314, adapters 162, admin 318, driver 341, db 244, api 977,
       typecheck + all checks green.
-- [ ] **C2** company transactions + FX exchange + restoration mirror + cutover — IN PROGRESS on the same worktree
-      branch, on top of `4d47ffc`.
-- [ ] **C3** debts register
-- [ ] **C4** fixed assets
-- [ ] **C5** depreciation
-- [ ] **P6** vehicle history
-- [ ] **P4** branch recurring expenses + receipt upload — IN PROGRESS in an agent worktree based on `4a3cec8`
-      (migration `0075`, local DB `ash_test_p4`; the dashboard "due" card is a follow-up after P3 merges).
-- [ ] **C6** company recurring expenses + full company dashboard section
-- [ ] Docs: CLAUDE.md decisions 18–23 + money rules 9–12, ASSUMPTIONS, RUNBOOK «صندوق الشركة», PROGRESS, TESTS.md
+- [x] **C2** company transactions + FX exchange + restoration mirror + cutover — migration 0067 and guarded
+      command ledger committed (`4467a78`); real-PostgreSQL mirror/invariant suite green.
+- [x] **C3** debts register — migration 0069, repository and HTTP workflows complete (`98bf74e`, `853fb9a`).
+- [x] **C4** fixed assets — migration 0070, financed purchase and vehicle linking complete.
+- [x] **C5** depreciation — migration 0071, 36-period schedule, FIFO funding, reserve spending/release complete.
+- [x] **P6** vehicle history — committed (`e09988d`), including company-finance cards behind server RBAC.
+- [x] **P4** branch recurring expenses + receipt upload — committed (`08cb030`, `656c1e1`), human-triggered only.
+- [x] **C6** company recurring expenses + full company dashboard section — committed (`1383b50`), including
+      branch/company/combined profit and company balance/reserve/depreciation digest.
+- [x] Docs: CLAUDE.md decisions 18–23 + money rules 9–12, ASSUMPTIONS, RUNBOOK «صندوق الشركة», PROGRESS, TESTS.md.
 - [ ] **Production** (owner go-ahead required): deploy api/admin/driver, run migrations 0064+, cutover.
 
 Migration numbers (none applied to production yet; `migrate.ts` applies files in sorted order, gaps are fine):
 0064 P0 permission · 0065–0066 C1 · 0067 C2 (0068 spare) · 0069–0071 reserved C3–C5 · 0072–0074 reserved P6 ·
 0075(–0076) P4 · 0077+ C6.
+
+Final local verification (2026-09-18): `pnpm check` passed every static gate and 3,168 default tests; the focused
+real-PostgreSQL company-command and recurrence suites passed 33/33 on PostgreSQL 17.6. Node 25.8 emitted only
+the expected engine warning; production and its migrations were not touched.
 
 ---
 

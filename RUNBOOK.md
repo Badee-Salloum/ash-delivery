@@ -67,9 +67,10 @@ applied to that entire day's transactions.
 - **Posting is never blocked on a missing rate.** If the admin has not entered today's rate, the
   posting path lazily inserts a `provisional` row carried forward from yesterday and flags it.
   A cron must never be a precondition for the ledger accepting a write.
-- Correcting a rate updates `fx_days` and appends the old/new values to `fx_rate_versions` for
-  audit. **Branch historical USD display can therefore restate** because branch entries do not
-  freeze a rate. Company-ledger USD commands are different: each freezes
+- Correcting a rate updates `fx_days`; the `audit_fx_days` trigger records its before/after image in
+  `audit_log`. (`fx_rate_versions` exists in the original schema but the current repository does not
+  populate it.) **Branch historical USD display can therefore restate** because branch entries do
+  not freeze a rate. Company-ledger USD commands are different: each freezes
   `journal_entries.syp_minor_per_usd`, and company historical profit uses that frozen value.
 
 ---

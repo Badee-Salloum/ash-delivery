@@ -7,6 +7,21 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 
 **Legend:** ✅ implemented and green · ⚠ written but never executed · 🔜 planned, milestone named.
 
+## 2026-09-18 finance and fleet redesign — P3/P4/P6 and C1–C6
+
+| Gate | Named test | Result |
+| --- | --- | --- |
+| HQ is not a branch; its close needs no cash count and its trial balance is per currency | `api/company-branch.test.ts`, `db/migration-0065-0066.test.ts`, `db/company-ledger-postgres.test.ts` | ✅ |
+| Company commands are actor-bound, immutable, dual-currency, rate-frozen, idempotent and cannot overdraw a protected pocket | `db/company-commands-postgres.test.ts` — *company_moves*, *company_expenses and company_incomes*, *company_fx_exchanges*, *company_reversals* | ✅ PostgreSQL 17.6 |
+| Cutover moves the exact opening once; every later branch company-box movement has one exact HQ mirror and the invariant survives randomized activity | `db/company-commands-postgres.test.ts` — *cutover and the restoration mirror* | ✅ PostgreSQL 17.6 |
+| Public company routes preserve permission, identity, balances, exchange, reversal and lock ordering | `api/company-finance.test.ts`, `api/company-fund.test.ts` | ✅ |
+| Debt payments/write-offs, financed assets, 36 exact periods and FIFO depreciation are indivisible guarded commands | `domain/assets/depreciation.test.ts`, `api/company-finance.test.ts`, `db/company-commands-postgres.test.ts` | ✅ |
+| Linked asset finance appears only to company managers in bounded vehicle history | `api/fleet.test.ts` — `GET /vehicles/:id/history (P6)`; `admin/vehicle-history.test.ts` | ✅ |
+| Dashboard money stays bigint; all eight sections, filtered drills, fleet performance and branch/company/combined frozen-rate profit remain wired | `api/dashboard.test.ts`, `admin/dashboard-redesign.test.ts` | ✅ |
+| Company recurring dues are read-only until a human pays/skips; a payment creates one HQ expense command; PostgreSQL enforces HQ and permission | `api/company-recurring.test.ts`, `db/recurrence-parity-postgres.test.ts` — *keeps company schedules in HQ…* | ✅ |
+| Focused completion gate | API finance/dashboard/recurrence: 104/104; admin dashboard/company/recurrence/history: 27/27; PostgreSQL company commands + recurrence: 33/33 | ✅ |
+| Full repository gate | `pnpm check`: every static check plus 3,168 passed tests; 17 expected PostgreSQL-only skips rerun separately where relevant | ✅ |
+
 ## 2026-09-17 P4 — recurring branch expenses and non-shift receipts
 
 | Gate | Named test | Result |

@@ -1,5 +1,47 @@
 # PROGRESS
 
+## 2026-09-18 — finance and fleet redesign complete locally (P3/P4/P6, C2–C6)
+
+**Done.** The approved dashboard is now eight independently loaded sections with one shared business-date
+range, filtered drill-down links, fleet performance and branch/company/combined profit. «صندوق الشركة» is
+an HQ-owned USD/SYP ledger with guarded deposits, withdrawals, income, expenses, exchanges, reversals and
+per-branch cutover. Every post-cutover `company_box` move receives its separate HQ clearing mirror under the
+branch→HQ lock order. The branch and company books never share a journal.
+
+Company debts now run both directions with immutable payments and write-offs. Fixed assets create an exact
+36-period straight-line schedule, may link one-to-one with vehicles and may create one payable for an unpaid
+purchase balance. Depreciation funding is same-currency, FIFO and limited to available cash; reserve use and
+written releases do not reopen funded periods. Vehicle history combines shifts, orders, kilometres, life-log
+events, expenses, and — only for a company-fund manager — asset, debt, book-value and depreciation detail.
+
+Both branch and company recurring expenses are reminders computed on read. Pay, skip, edit-at-payment and
+deactivation remain explicit human decisions; no cron or read posts money. Non-shift receipt media is immutable
+and content-addressed. The company workspace exposes the complete flow, while the dashboard digest leads with
+combined profit and keeps the branch/company split, both currency pockets, reserve, book value and due
+depreciation visible.
+
+**Correctness gates.** Migrations 0064–0077 are forward-only and still undeployed. PostgreSQL guards bind every
+HQ journal to exactly one typed command, enforce actor/RBAC and currency/rate identity, prevent overspending,
+protect linked vehicles, and make command facts immutable. The real-PostgreSQL finance and recurrence suites
+pass 33/33; focused API suites pass 104/104 and focused admin suites pass 27/27. Final `pnpm check` passes every
+static gate and 3,168 default tests (domain 821, contracts 34, client 314, adapters 169, admin 328, driver 341,
+database 161 and API 1,000); the 17 default database skips are the expected `DATABASE_URL`-gated cases.
+
+**Next (owner action, not an engineering gap).** Give separate written production approval, take the documented
+backup/pre-flight, deploy API and admin together, apply 0064–0077, then perform each branch cutover and physical
+SYP/USD opening count through the UI/API. Until then, production correctly remains on the old schema and flows.
+
+**Risks kept visible.** The production cutover has not been rehearsed against real balances; an incorrect opening
+amount must fail rather than be repaired with SQL. Existing vehicles need their real purchase/payment dates.
+Early disposal remains deliberately out of scope. A restoration top-up may make company SYP negative by owner
+decision, so the warning and clearing invariant must be reviewed after every restoration and at Sunday HQ close.
+
+**Two-minute demo.** (1) Open the cumulative dashboard and switch month/all-time to show combined profit and its
+branch/company split. (2) Open «صندوق الشركة», deposit SYP and USD, exchange using two actual amounts, and show
+the frozen rate in movements. (3) Create a payable asset linked to a vehicle, record an instalment, then fund due
+depreciation and show reserve/book value. (4) Create a due company recurring expense and press Pay to prove that
+reading it moved nothing. (5) open that vehicle's history to show shifts, kilometres, expenses and finance cards.
+
 ## 2026-09-17 — C1: the company ledger and the second currency (foundation only — no new money moves)
 
 **A separate book.** The company is now its own ledger: one `branches` row of `kind='company'` (HQ,
