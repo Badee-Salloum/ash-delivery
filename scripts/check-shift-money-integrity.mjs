@@ -2228,8 +2228,8 @@ function fixedSettlementHashV3(context, plan) {
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex')
 }
 
-/** Hash used by settlements confirmed after close-time ordinary shortage receivables launched. */
-function fixedSettlementHashV4(context, plan) {
+/** Hash used by settlements confirmed after manager charges launched in migration 0062. */
+function fixedSettlementHashV5(context, plan) {
   const canonical = {
     // 5: «الحسم». See `apps/api/src/fixed-settlement.ts` — this reconstruction is deliberately an
     // INDEPENDENT implementation, and the parity test is what keeps the two honest.
@@ -2244,6 +2244,44 @@ function fixedSettlementHashV4(context, plan) {
     cashDeductionTotal: String(plan.cashDeductionTotal),
     baseDriverShare: String(plan.baseDriverShare),
     managerChargeTotal: String(plan.managerChargeTotal),
+    expectedCash: String(plan.expectedCash),
+    expectedWallet: String(plan.expectedWallet),
+    expectedTotal: String(plan.expectedTotal),
+    actualCash: String(plan.actualCash),
+    actualWallet: String(plan.actualWallet),
+    actualTotal: String(plan.actualTotal),
+    variance: String(plan.variance),
+    finalEmployeeCash: String(plan.finalEmployeeCash),
+    officeEntitlement: String(plan.officeEntitlement),
+    cashClaimToOffice: String(plan.cashClaimToOffice),
+    walletClaimToOffice: String(plan.walletClaimToOffice),
+    cashReceivableDeferred: String(plan.cashReceivableDeferred),
+    walletReceivableDeferred: String(plan.walletReceivableDeferred),
+    maximumCashShortageReceivable: String(plan.maximumCashShortageReceivable),
+    cashShortageReceivable: String(plan.cashShortageReceivable),
+    walletToOffice: String(plan.walletToOffice),
+    cashToOffice: String(plan.cashToOffice),
+    walletAction: plan.wallet.action,
+    walletAmount: String(plan.wallet.amount),
+    cashAction: plan.cash.action,
+    cashAmount: String(plan.cash.amount),
+  }
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex')
+}
+
+/** Hash used after ordinary shortage receivables launched and before manager charges existed. */
+function fixedSettlementHashV4(context, plan) {
+  const canonical = {
+    version: 4,
+    policyCode: 'fixed_40_cash_close_v2_receivable',
+    driverRateBps: 4_000,
+    ...context,
+    deliveryFeeTotal: String(plan.deliveryFeeTotal),
+    fixedDriverShare: String(plan.fixedDriverShare),
+    manualDriverShare: String(plan.manualDriverShare),
+    grossDriverShare: String(plan.grossDriverShare),
+    cashDeductionTotal: String(plan.cashDeductionTotal),
+    baseDriverShare: String(plan.baseDriverShare),
     expectedCash: String(plan.expectedCash),
     expectedWallet: String(plan.expectedWallet),
     expectedTotal: String(plan.expectedTotal),
@@ -2354,7 +2392,15 @@ export function canonicalSettlementHash(row) {
   const shortageRolloutMs = row.shortage_receivable_rollout_at == null
     ? Number.POSITIVE_INFINITY
     : new Date(row.shortage_receivable_rollout_at).getTime()
-  if (!Number.isFinite(confirmedMs) || Number.isNaN(rolloutMs) || Number.isNaN(shortageRolloutMs)) {
+  const managerChargeRolloutMs = row.manager_charge_rollout_at == null
+    ? Number.POSITIVE_INFINITY
+    : new Date(row.manager_charge_rollout_at).getTime()
+  if (
+    !Number.isFinite(confirmedMs)
+    || Number.isNaN(rolloutMs)
+    || Number.isNaN(shortageRolloutMs)
+    || Number.isNaN(managerChargeRolloutMs)
+  ) {
     throw new RangeError('invalid settlement hash-version timestamp')
   }
   if (policyCode === 'fixed_40_cash_close_v1') {
@@ -2370,6 +2416,17 @@ export function canonicalSettlementHash(row) {
     )
   }
   if (policyCode === 'fixed_40_cash_close_v2_receivable') {
+    if (confirmedMs >= managerChargeRolloutMs) {
+      return fixedSettlementHashV5(
+        {
+          ...context,
+          closeDraftRevision: submittedDraft?.revision ?? null,
+          closeDraftHash: submittedDraft?.hash ?? null,
+          closeDraftSubmittedAt: submittedDraft?.submittedAt ?? null,
+        },
+        plan,
+      )
+    }
     if (confirmedMs >= shortageRolloutMs) {
       return fixedSettlementHashV4(
         {
@@ -2489,6 +2546,7 @@ async function runSettlementHashCheck(client, sampleLimit, receivableV2, shortag
            d.submitted_at AS close_draft_submitted_at,
            rollout.close_draft_rollout_at
            , shortage_rollout.shortage_receivable_rollout_at
+           , manager_charge_rollout.manager_charge_rollout_at
       FROM shift_settlements ss
       JOIN shifts s ON s.id = ss.shift_id
       LEFT JOIN shift_close_drafts d ON d.shift_id = ss.shift_id AND d.submitted_at IS NOT NULL
@@ -2502,12 +2560,17 @@ async function runSettlementHashCheck(client, sampleLimit, receivableV2, shortag
           FROM schema_migrations
          WHERE filename = '0052_shift_shortage_ordinary_receivable.sql'
       ) shortage_rollout ON true
+      LEFT JOIN (
+        SELECT applied_at AS manager_charge_rollout_at
+          FROM schema_migrations
+         WHERE filename = '0062_manager_charge.sql'
+      ) manager_charge_rollout ON true
      ORDER BY ss.shift_id
   `)
   const failures = settlementHashFailures(rows)
   return {
     id: 'settlement_hashes',
-    description: 'stored settlement hashes equal their canonical rollout-aware v1/v2/v3/v4 SHA-256 values',
+    description: 'stored settlement hashes equal their canonical rollout-aware v1/v2/v3/v4/v5 SHA-256 values',
     violations: failures.length,
     samples: failures.slice(0, sampleLimit),
   }

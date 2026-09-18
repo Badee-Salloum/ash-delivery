@@ -600,6 +600,7 @@ describe('read-only shift-money integrity checker', () => {
       confirmed_at: '2026-08-23T12:01:00.000Z',
       close_draft_rollout_at: '2026-08-22T11:00:00.000Z',
       shortage_receivable_rollout_at: '2026-08-23T11:00:00.000Z',
+      manager_charge_rollout_at: '2026-08-23T11:30:00.000Z',
       maximum_cash_shortage_receivable_minor: '0',
       cash_shortage_receivable_minor: '0',
       settlement_hash: 'f'.repeat(64),
@@ -670,6 +671,18 @@ describe('read-only shift-money integrity checker', () => {
       cash_shortage_receivable_minor: '1',
     })).not.toBe(canonical)
     expect(settlementHashFailures([{ ...row, settlement_hash: canonical }])).toEqual([])
+
+    const historicalV4 = canonicalSettlementHash({
+      ...row,
+      manager_charge_rollout_at: '2026-08-24T11:00:00.000Z',
+    })
+    expect(historicalV4).toMatch(/^[0-9a-f]{64}$/)
+    expect(historicalV4).not.toBe(canonical)
+    expect(settlementHashFailures([{
+      ...row,
+      manager_charge_rollout_at: '2026-08-24T11:00:00.000Z',
+      settlement_hash: historicalV4,
+    }])).toEqual([])
   })
 })
 
