@@ -1890,6 +1890,11 @@ export function Treasury(): ReactNode {
                 <Button onClick={doRestore} disabled={!restoration.feasible}>
                   {restoration.alreadyRestored === true ? t.treasury.doRestoreAgain : t.treasury.doRestore}
                 </Button>
+                {canManageCompanyFund ? (
+                  <a className="inline-flex min-h-10 items-center rounded-lg border border-line-strong bg-surface-card px-4 text-body font-semibold text-brand hover:bg-surface-muted" href="#companyFund?tab=depreciation">
+                    {t.companyFinance.transfer}
+                  </a>
+                ) : null}
               </div>
             </div>
           </>

@@ -30,6 +30,7 @@ export const SECTIONS = [
   'vehicle',
   'fleetConfig',
   'treasury',
+  'companyFund',
   'expenses',
   'checkin',
   'accounts',

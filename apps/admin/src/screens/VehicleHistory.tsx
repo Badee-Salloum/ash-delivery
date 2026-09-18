@@ -62,7 +62,25 @@ interface VehicleHistoryResponse {
     expenseId: string | null
     notes: string | null
   }>
-  asset?: null
+  asset?: null | {
+    id: string
+    currency: 'SYP_NEW' | 'USD'
+    price: string
+    purchasedOn: string
+    paidNow: string
+    outstanding: string
+    bookValue: string
+    depreciationDue: string
+    depreciationFunded: string
+  }
+  companyExpenses?: Array<{
+    id: string
+    businessDate: string
+    occurredOn: string
+    currency: 'SYP_NEW' | 'USD'
+    amount: string
+    description: string
+  }>
 }
 
 function paramsFor(id: string, selection: RangeSelection): RouteParams {
@@ -194,7 +212,33 @@ function VehicleHistoryData({ vehicleId, range }: { vehicleId: string; range: Da
         </Card>
       </div>
 
-      {'asset' in data ? <Card title={t.vehicleHistory.asset}><p className="text-body text-ink-muted">{t.vehicleHistory.assetUnavailable}</p></Card> : null}
+      {'asset' in data ? (
+        data.asset === null ? (
+          <Card title={t.vehicleHistory.asset}><p className="text-body text-ink-muted">{t.vehicleHistory.assetUnavailable}</p></Card>
+        ) : (
+          <Card title={t.vehicleHistory.asset}>
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+              <Stat label={t.companyFinance.price} value={<Money value={data.asset.price} currency={data.asset.currency} />} />
+              <Stat lead label={t.companyFinance.bookValue} value={<Money value={data.asset.bookValue} currency={data.asset.currency} />} />
+              <Stat label={t.companyFinance.outstanding} value={<Money value={data.asset.outstanding} currency={data.asset.currency} />} />
+              <Stat label={t.companyFinance.depreciationDue} value={<Money value={data.asset.depreciationDue} currency={data.asset.currency} />} />
+            </div>
+          </Card>
+        )
+      ) : null}
+      {data.companyExpenses && data.companyExpenses.length > 0 ? (
+        <Card title={t.companyFinance.periodExpense}>
+          <Table head={[t.companyFinance.date, t.companyFinance.description, { label: t.companyFinance.amount, numeric: true }]}>
+            {data.companyExpenses.map((expense) => (
+              <tr key={expense.id}>
+                <td className="num px-3 py-2">{expense.occurredOn}</td>
+                <td className="px-3 py-2">{expense.description}</td>
+                <td className="px-3 py-2 text-end"><Money value={expense.amount} currency={expense.currency} /></td>
+              </tr>
+            ))}
+          </Table>
+        </Card>
+      ) : null}
     </div>
   )
 }

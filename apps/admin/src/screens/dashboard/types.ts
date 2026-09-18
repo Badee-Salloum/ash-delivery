@@ -153,7 +153,9 @@ export interface TreasuryDigest {
 
 export interface CompanyFundLegacyDigest {
   total: string
-  branches: Array<{ branchId: string; code: string; nameAr: string; balance: string }>
+  usd: string
+  reserve: { SYP_NEW: string; USD: string }
+  branches: Array<{ branchId: string; code: string; nameAr: string; balance: string; clearing: string; cutOver: boolean }>
 }
 
 export interface ExpiringDocument {
