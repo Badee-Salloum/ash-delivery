@@ -8,10 +8,12 @@ import { PgLedgerRepo, PgOfficeCapitalTargetRepo, PgRestorationRepo } from './re
 import { PgAdvanceRepo, PgCashCountRepo, PgExpenseRepo, PgIncomeRepo } from './repos-shift.ts'
 import { PgReceivableEventRepo } from './repos-receivable.ts'
 import { PgCompanyLedgerRepo, PgFinancialLocks } from './repos-company.ts'
+import { PgRecurringExpenseRepo } from './repos-recurring.ts'
 
 const transactionDeps = (pool: Pool): FinancialTransactionDeps => ({
   ledger: new PgLedgerRepo(pool),
   expenses: new PgExpenseRepo(pool),
+  recurringExpenses: new PgRecurringExpenseRepo(pool),
   incomes: new PgIncomeRepo(pool),
   advances: new PgAdvanceRepo(pool),
   receivableEvents: new PgReceivableEventRepo(pool),

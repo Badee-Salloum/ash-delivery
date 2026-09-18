@@ -52,6 +52,9 @@ const MUST_AUDIT = [
   // rows themselves are immutable derived data and are exempted below.
   'fixed_assets',
   'depreciation_transfers', 'depreciation_releases',
+  // Fixed expenses are promises plus explicit human paid/skipped decisions. Both influence what
+  // managers expect to leave the box, and a paid occurrence links to an ordinary audited expense.
+  'recurring_expense_templates', 'recurring_expense_occurrences',
   // A manager declaring that a row is not a delivery at all removes a fee from the shift's money.
   // The register is append-only and can only be added to, but «who removed what, and when did the
   // general manager get told» is precisely a money decision — and the audit row is the second,

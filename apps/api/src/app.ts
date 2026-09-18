@@ -70,6 +70,7 @@ import { branchSubject, resolveBranchId } from './branch-scope.ts'
 import { GO_LIVE_SETTING_KEY, goLiveDate } from './go-live.ts'
 import { assertEveryRouteDeclaresPermission, collectRoutes, makeAuthorize, resetRouteRegistry } from './rbac.ts'
 import { registerExpenseRoutes } from './expenses.routes.ts'
+import { registerRecurringExpenseRoutes } from './recurring-expenses.routes.ts'
 import { registerAdvanceRoutes } from './advances.routes.ts'
 import { registerIncomeRoutes } from './incomes.routes.ts'
 import { registerCheckInRoutes } from './checkin.routes.ts'
@@ -2577,6 +2578,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   // ── Expenses (SRS G) ────────────────────────────────────────────────────────────
   registerExpenseRoutes(app, deps)
+  registerRecurringExpenseRoutes(app, deps)
   // «المدخول المباشر» — the mirror of an expense, registered beside it on purpose.
   registerIncomeRoutes(app, deps)
   registerAdvanceRoutes(app, deps)

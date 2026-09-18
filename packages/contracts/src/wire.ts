@@ -3,6 +3,7 @@ import {
   CURRENCIES,
   type Currency,
   MAX_BATTERY_SLOTS,
+  MAX_RECURRENCE_INTERVAL_DAYS,
   type Minor,
   type Money,
   formatMinor,
@@ -1216,6 +1217,62 @@ export const createExpenseRequest = z.object({
   description: z.string().min(1).max(500),
   /** Mandatory above the configured ceiling (G-3 / س52). */
   receiptMediaId: z.string().nullable().default(null),
+})
+
+const recurringExpenseTerms = z
+  .object({
+    title: z.string().trim().min(1).max(200),
+    categoryId: z.string().min(1),
+    costCenterKind: z.enum(['vehicle', 'branch', 'general']),
+    vehicleId: z.string().nullable().default(null),
+    channel: z.enum(['office_cash', 'office_wallet']),
+    amount: positiveExpenseMoneySchema,
+    scheduleKind: z.enum(['weekly', 'monthly_first', 'every_n_days']),
+    weekday: z.number().int().min(0).max(6).nullable().default(null),
+    intervalDays: z.number().int().min(1).max(MAX_RECURRENCE_INTERVAL_DAYS).nullable().default(null),
+    startsOn: calendarDateSchema,
+    endsOn: calendarDateSchema.nullable().default(null),
+  })
+  .superRefine((body, ctx) => {
+    if ((body.costCenterKind === 'vehicle') !== (body.vehicleId !== null)) {
+      ctx.addIssue({ code: 'custom', path: ['vehicleId'], message: 'vehicle cost centre mismatch' })
+    }
+    if (body.endsOn !== null && body.endsOn < body.startsOn) {
+      ctx.addIssue({ code: 'custom', path: ['endsOn'], message: 'end date precedes start date' })
+    }
+    const validSchedule =
+      (body.scheduleKind === 'weekly' && body.weekday !== null && body.intervalDays === null) ||
+      (body.scheduleKind === 'monthly_first' && body.weekday === null && body.intervalDays === null) ||
+      (body.scheduleKind === 'every_n_days' && body.weekday === null && body.intervalDays !== null)
+    if (!validSchedule) {
+      ctx.addIssue({ code: 'custom', path: ['scheduleKind'], message: 'schedule fields do not match kind' })
+    }
+  })
+
+export const createRecurringExpenseRequest = z
+  .object({ branchId: z.string().optional(), idempotencyKey: z.string().uuid() })
+  .and(recurringExpenseTerms)
+
+export const updateRecurringExpenseRequest = z.object({ branchId: z.string().optional() }).and(recurringExpenseTerms)
+
+export const deactivateRecurringExpenseRequest = z.object({
+  branchId: z.string().optional(),
+  reason: nonblankReasonSchema,
+})
+
+export const payRecurringExpenseRequest = z.object({
+  branchId: z.string().optional(),
+  /** Identity of the ordinary expense written by this payment. Held across lost-response retries. */
+  idempotencyKey: z.string().uuid(),
+  amount: positiveExpenseMoneySchema,
+  businessDate: calendarDateSchema.optional(),
+  reason: z.string().trim().min(1).max(500).nullable().default(null),
+  receiptMediaId: z.string().nullable().default(null),
+})
+
+export const skipRecurringExpenseRequest = z.object({
+  branchId: z.string().optional(),
+  reason: nonblankReasonSchema,
 })
 
 // ── «المدخول المباشر» — direct income, the mirror of an expense ───────────────────────────────

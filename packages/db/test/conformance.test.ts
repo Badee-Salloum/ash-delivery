@@ -11,6 +11,7 @@ import { PgFinancialUnitOfWork } from '../src/repos-financial.ts'
 import { PgReceivableEventRepo } from '../src/repos-receivable.ts'
 import { PgLedgerRangeSource } from '../src/repos-range.ts'
 import { PgCompanyLedgerRepo, PgCompanyLedgerSource } from '../src/repos-company.ts'
+import { PgRecurringExpenseRepo } from '../src/repos-recurring.ts'
 import { assertDisposableDatabaseConnection, assertDisposableDatabaseUrl } from './disposable-database.ts'
 import {
   PgAuditRepo,
@@ -92,7 +93,7 @@ if (!DATABASE_URL) {
       // Truncate rather than re-migrate: orders of magnitude faster, and it exercises the real
       // constraints on every run instead of a freshly-empty database.
       await pool.query(`
-        TRUNCATE preapproved_shift_rules, receivable_events, shift_settlements, journal_lines, journal_entries, cash_deductions, shift_orders, shift_media_attachment_history, shift_media, media, float_tranches, expenses, expense_categories, settings, cash_counts, cash_count_lines, tier_rules, notifications,
+        TRUNCATE recurring_expense_occurrences, recurring_expense_templates, preapproved_shift_rules, receivable_events, shift_settlements, journal_lines, journal_entries, cash_deductions, shift_orders, shift_media_attachment_history, shift_media, media, float_tranches, expenses, expense_categories, settings, cash_counts, cash_count_lines, tier_rules, notifications,
                  shift_battery_readings, gps_pings, batteries,
                  shifts, funds, fx_days, week_locks, audit_log, sessions, drivers, vehicles,
                  vehicle_types, users, branches, governorates
@@ -124,7 +125,8 @@ if (!DATABASE_URL) {
            ('journal.manual.write', 'القيد اليدوي', 'Manual journal'),
            ('shift.approve', 'اعتماد النوبة', 'Approve shift'),
            ('company_fund.manage', 'إدارة صندوق الشركة', 'Manage company fund'),
-           ('settings.write', 'الإعدادات', 'Settings')
+           ('settings.write', 'الإعدادات', 'Settings'),
+           ('expense.write', 'كتابة المصروفات', 'Write expenses')
          ON CONFLICT (key) DO NOTHING`,
       )
       // The company ledger's command guards (0067) read these live grants.
@@ -134,7 +136,8 @@ if (!DATABASE_URL) {
            ('system_admin', 'journal.manual.write', 'all'),
            ('system_admin', 'shift.approve', 'all'),
            ('system_admin', 'company_fund.manage', 'all'),
-           ('system_admin', 'settings.write', 'all')
+           ('system_admin', 'settings.write', 'all'),
+           ('system_admin', 'expense.write', 'all')
          ON CONFLICT (role_key, permission_key) DO UPDATE SET scope = EXCLUDED.scope`,
       )
       await pool.query(
@@ -225,6 +228,7 @@ if (!DATABASE_URL) {
         treasuryPosition: new PgTreasuryPositionSource(pool),
         ledgerRange: new PgLedgerRangeSource(pool),
         expenses: new PgExpenseRepo(pool),
+        recurringExpenses: new PgRecurringExpenseRepo(pool),
         incomes: new PgIncomeRepo(pool),
     advances: new PgAdvanceRepo(pool),
         receivableEvents: new PgReceivableEventRepo(pool),

@@ -5,6 +5,8 @@ import type {
   CompanyCommandRecord,
   Deps,
   ExpenseRecord,
+  RecurringExpenseOccurrenceRecord,
+  RecurringExpenseTemplateRecord,
   GpsPingRecord,
   NewShiftSettlementRecord,
   OcrReadClaimInput,
@@ -2088,6 +2090,106 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           expect(await deps.expenses.listByVehicle(BRANCH, VEHICLE, '2026-07-20', '2026-07-22')).toEqual([row])
           expect(await deps.expenses.listByVehicle(BRANCH, OTHER_VEHICLE, '2026-07-20', '2026-07-22')).toEqual([])
           expect(await deps.expenses.listByVehicle(BRANCH, VEHICLE, '2026-07-22', '2026-07-23')).toEqual([])
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+    })
+
+    describe('recurring expenses', () => {
+      const template = (): RecurringExpenseTemplateRecord => ({
+        id: 'dddddddd-dddd-4ddd-8ddd-dddddddddd01',
+        branchId: BRANCH,
+        title: 'Office rent',
+        categoryId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        costCenterKind: 'general',
+        vehicleId: null,
+        channel: 'office_cash',
+        amount: syp(300),
+        scheduleKind: 'monthly_first',
+        weekday: null,
+        intervalDays: null,
+        startsOn: '2026-07-01',
+        endsOn: null,
+        active: true,
+        deactivatedOn: null,
+        deactivatedAtMs: null,
+        deactivatedBy: null,
+        deactivationReason: null,
+        createdBy: USER,
+        createdAtMs: 1_784_000_000_000,
+        updatedBy: USER,
+        updatedAtMs: 1_784_000_000_000,
+      })
+
+      it('round-trips templates and immutable occurrence decisions', async () => {
+        const deps = await fresh()
+        try {
+          await deps.expenses.createCategory({
+            id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+            code: 'RENT',
+            nameAr: 'إيجار',
+            active: true,
+          })
+          const row = template()
+          await deps.financialUnitOfWork.run(
+            { lockKey: `recurring-template:${row.id}`, actorId: USER },
+            (tx) => tx.recurringExpenses.createTemplate(row),
+          )
+          expect(await deps.recurringExpenses.getTemplate(row.id)).toEqual(row)
+          expect(await deps.recurringExpenses.listTemplates(BRANCH)).toEqual([row])
+
+          const occurrence: RecurringExpenseOccurrenceRecord = {
+            id: 'dddddddd-dddd-4ddd-8ddd-dddddddddd02',
+            templateId: row.id,
+            branchId: BRANCH,
+            dueDate: '2026-08-01',
+            status: 'skipped',
+            expenseId: null,
+            reason: 'Landlord waived this month',
+            actedBy: USER,
+            actedAtMs: 1_785_600_000_000,
+          }
+          await deps.financialUnitOfWork.run(
+            { lockKey: `recurring:${row.id}:${occurrence.dueDate}`, actorId: USER },
+            (tx) => tx.recurringExpenses.createOccurrence(occurrence),
+          )
+          expect(await deps.recurringExpenses.getOccurrence(row.id, occurrence.dueDate)).toEqual(occurrence)
+          expect(await deps.recurringExpenses.listOccurrences(BRANCH, '2026-08-01', '2026-08-01')).toEqual([
+            occurrence,
+          ])
+          expect(await deps.recurringExpenses.countOccurrencesBefore(row.id, '2026-08-02')).toBe(1)
+          await expect(
+            deps.financialUnitOfWork.run(
+              { lockKey: `recurring:${row.id}:${occurrence.dueDate}`, actorId: USER },
+              (tx) => tx.recurringExpenses.createOccurrence(occurrence),
+            ),
+          ).rejects.toThrow()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('rolls template writes back with the rest of a failed financial transaction', async () => {
+        const deps = await fresh()
+        try {
+          await deps.expenses.createCategory({
+            id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+            code: 'RENT',
+            nameAr: 'إيجار',
+            active: true,
+          })
+          const row = template()
+          await expect(
+            deps.financialUnitOfWork.run(
+              { lockKey: `recurring-template:${row.id}`, actorId: USER },
+              async (tx) => {
+                await tx.recurringExpenses.createTemplate(row)
+                throw new Error('rollback recurring template')
+              },
+            ),
+          ).rejects.toThrow('rollback recurring template')
+          expect(await deps.recurringExpenses.getTemplate(row.id)).toBeNull()
         } finally {
           await ctx.cleanup?.(deps)
         }

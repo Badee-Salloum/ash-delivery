@@ -573,6 +573,49 @@ export interface ExpenseView {
   createdBy: string
 }
 
+export interface RecurringExpenseTemplateView {
+  id: string
+  branchId: string
+  title: string
+  categoryId: string
+  costCenterKind: 'vehicle' | 'branch' | 'general'
+  vehicleId: string | null
+  channel: 'office_cash' | 'office_wallet'
+  amount: string
+  scheduleKind: 'weekly' | 'monthly_first' | 'every_n_days'
+  weekday: number | null
+  intervalDays: number | null
+  startsOn: string
+  endsOn: string | null
+  active: boolean
+  deactivatedOn: string | null
+  deactivatedAtMs: number | null
+  deactivatedBy: string | null
+  deactivationReason: string | null
+  createdBy: string
+  createdAtMs: number
+  updatedBy: string
+  updatedAtMs: number
+}
+
+export interface RecurringExpenseDueView extends RecurringExpenseTemplateView {
+  dueDate: string
+  status: 'overdue' | 'today' | 'upcoming' | 'later'
+}
+
+export interface RecurringExpenseOccurrenceView {
+  id: string
+  templateId: string
+  branchId: string
+  dueDate: string
+  status: 'paid' | 'skipped'
+  expenseId: string | null
+  reason: string | null
+  actedBy: string
+  actedAtMs: number
+  replayed?: boolean
+}
+
 /**
  * The branch manager's immutable close-settlement preview.
  *
@@ -1653,6 +1696,87 @@ export class ApiClient {
     receiptMediaId?: string | null
   }) {
     return this.post<ExpenseView>('/expenses', { ...body, ...(this.branchId ? { branchId: this.branchId } : {}) })
+  }
+
+  recurringExpenses(includeInactive = true) {
+    return this.get<{ templates: RecurringExpenseTemplateView[] }>(
+      `/recurring-expenses?includeInactive=${includeInactive ? 'true' : 'false'}`,
+    )
+  }
+  recurringExpensesDue(from?: string, to?: string) {
+    const q = [from && `from=${encodeURIComponent(from)}`, to && `to=${encodeURIComponent(to)}`]
+      .filter(Boolean)
+      .join('&')
+    return this.get<{
+      today: string
+      from: string
+      to: string
+      olderUnresolved: number
+      due: RecurringExpenseDueView[]
+    }>(`/recurring-expenses/due${q ? `?${q}` : ''}`)
+  }
+  createRecurringExpense(body: {
+    idempotencyKey: string
+    title: string
+    categoryId: string
+    costCenterKind: 'vehicle' | 'branch' | 'general'
+    vehicleId: string | null
+    channel: 'office_cash' | 'office_wallet'
+    amount: string
+    scheduleKind: 'weekly' | 'monthly_first' | 'every_n_days'
+    weekday: number | null
+    intervalDays: number | null
+    startsOn: string
+    endsOn: string | null
+  }) {
+    return this.post<RecurringExpenseTemplateView>('/recurring-expenses', {
+      ...body,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+  updateRecurringExpense(id: string, body: Omit<Parameters<ApiClient['createRecurringExpense']>[0], 'idempotencyKey'>) {
+    return this.put<RecurringExpenseTemplateView>(`/recurring-expenses/${id}`, {
+      ...body,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+  deactivateRecurringExpense(id: string, reason: string) {
+    return this.post<RecurringExpenseTemplateView>(`/recurring-expenses/${id}/deactivate`, {
+      reason,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+  payRecurringExpense(templateId: string, dueDate: string, body: {
+    idempotencyKey: string
+    amount: string
+    businessDate?: string
+    reason: string | null
+    receiptMediaId: string | null
+  }) {
+    return this.post<{
+      occurrence: RecurringExpenseOccurrenceView
+      expense: ExpenseView
+      replayed: boolean
+    }>(`/recurring-expenses/${templateId}/occurrences/${dueDate}/pay`, {
+      ...body,
+      ...(this.branchId ? { branchId: this.branchId } : {}),
+    })
+  }
+  skipRecurringExpense(templateId: string, dueDate: string, reason: string) {
+    return this.post<RecurringExpenseOccurrenceView>(
+      `/recurring-expenses/${templateId}/occurrences/${dueDate}/skip`,
+      { reason, ...(this.branchId ? { branchId: this.branchId } : {}) },
+    )
+  }
+  uploadReceipt(bytes: Uint8Array, contentType: string, clientTakenAtMs?: number) {
+    const q = this.branchId ? `?branchId=${encodeURIComponent(this.branchId)}` : ''
+    return this.putBytes<{ mediaId: string; sha256: string; byteSize: number; deduped: boolean }>(
+      `/media/receipts${q}`,
+      bytes,
+      contentType,
+      clientTakenAtMs === undefined ? {} : { 'x-client-taken-at': String(clientTakenAtMs) },
+      'POST',
+    )
   }
 
   // ── «التفقّد» — manager check-in rounds ───────────────────────────────────────────────

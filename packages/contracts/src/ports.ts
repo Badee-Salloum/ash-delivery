@@ -10,6 +10,7 @@ import type {
   ShiftState,
   Scope,
   PermissionKey,
+  RecurrenceKind,
 } from '@ash/domain'
 import type { CompanyLedgerRepo, CompanyLedgerSource, FinancialLocks } from './company-ledger.ts'
 
@@ -2077,6 +2078,65 @@ export interface ExpenseRepo {
   ): Promise<Array<{ costCenterKind: string; vehicleId: string | null; total: Minor }>>
 }
 
+// ── Branch recurring expenses (finance redesign P4) ──────────────────────────────────────
+
+export interface RecurringExpenseTemplateRecord {
+  /** Client-owned UUID: identity and create-retry key. */
+  id: string
+  branchId: string
+  title: string
+  categoryId: string
+  costCenterKind: 'vehicle' | 'branch' | 'general'
+  vehicleId: string | null
+  channel: 'office_cash' | 'office_wallet'
+  amount: Minor
+  scheduleKind: RecurrenceKind
+  weekday: number | null
+  intervalDays: number | null
+  startsOn: CalendarDate
+  endsOn: CalendarDate | null
+  active: boolean
+  /** The first business date no longer generated after a reasoned deactivation. */
+  deactivatedOn: CalendarDate | null
+  deactivatedAtMs: number | null
+  deactivatedBy: string | null
+  deactivationReason: string | null
+  createdBy: string
+  createdAtMs: number
+  updatedBy: string
+  updatedAtMs: number
+}
+
+export interface RecurringExpenseOccurrenceRecord {
+  id: string
+  templateId: string
+  branchId: string
+  dueDate: CalendarDate
+  status: 'paid' | 'skipped'
+  /** An ordinary ledger-backed expense when paid; null only for a skip. */
+  expenseId: string | null
+  /** Required for a skip and whenever the paid amount differs from the template. */
+  reason: string | null
+  actedBy: string
+  actedAtMs: number
+}
+
+export interface RecurringExpenseRepo {
+  getTemplate(id: string): Promise<RecurringExpenseTemplateRecord | null>
+  listTemplates(branchId: string, includeInactive?: boolean): Promise<RecurringExpenseTemplateRecord[]>
+  createTemplate(template: RecurringExpenseTemplateRecord): Promise<void>
+  updateTemplate(template: RecurringExpenseTemplateRecord): Promise<void>
+  getOccurrence(templateId: string, dueDate: CalendarDate): Promise<RecurringExpenseOccurrenceRecord | null>
+  listOccurrences(
+    branchId: string,
+    from: CalendarDate,
+    to: CalendarDate,
+  ): Promise<RecurringExpenseOccurrenceRecord[]>
+  /** Number of already-resolved dates before `before`; due reads subtract it from generated dates. */
+  countOccurrencesBefore(templateId: string, before: CalendarDate): Promise<number>
+  createOccurrence(occurrence: RecurringExpenseOccurrenceRecord): Promise<void>
+}
+
 // â”€â”€ Direct receivable commands â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface ReceivableEventRecord {
@@ -2127,6 +2187,7 @@ export interface ReceivableEventRepo {
 export interface FinancialTransactionDeps {
   ledger: LedgerRepo
   expenses: ExpenseRepo
+  recurringExpenses: RecurringExpenseRepo
   incomes: IncomeRepo
   advances: AdvanceRepo
   receivableEvents: ReceivableEventRepo
@@ -2769,6 +2830,7 @@ export interface Deps {
   /** P2 — one aggregate over a business-date range, behind the time filter. */
   ledgerRange: LedgerRangeSource
   expenses: ExpenseRepo
+  recurringExpenses: RecurringExpenseRepo
   incomes: IncomeRepo
   advances: AdvanceRepo
   receivableEvents: ReceivableEventRepo

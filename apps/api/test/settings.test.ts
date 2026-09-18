@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BRANCH, type Harness, makeHarness, sypStr } from './harness.ts'
+import { BRANCH, type Harness, TINY_JPEG, makeHarness, sypStr } from './harness.ts'
 
 /**
  * The system-settings surface (SRS A-4): the daily FX rate and the general operating constants —
@@ -114,11 +114,19 @@ describe('the ceiling set through /settings is actually enforced', () => {
     expect(over.statusCode).toBe(422)
     expect(over.json().error).toBe('receipt_required')
 
+    const receipt = await h.app.inject({
+      method: 'POST',
+      url: '/media/receipts',
+      headers: { cookie: h.cookie(manager), 'content-type': 'image/jpeg' },
+      payload: TINY_JPEG,
+    })
+    expect(receipt.statusCode, receipt.body).toBe(201)
+
     const withReceipt = await post(manager, '/expenses', {
       ...base,
       idempotencyKey: crypto.randomUUID(),
       amount: sypStr(25_000),
-      receiptMediaId: '00000000-0000-4000-8000-000000000abc',
+      receiptMediaId: receipt.json().mediaId,
     })
     expect(withReceipt.statusCode, withReceipt.body).toBe(201)
 

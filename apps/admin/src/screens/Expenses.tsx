@@ -1,4 +1,4 @@
-import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import { type ChangeEvent, type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import type { ExpenseCategoryView, ExpenseView, IncomeCategoryView, IncomeView } from '@ash/client'
 import { type RoleKey, can } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
@@ -6,6 +6,8 @@ import { useToast } from '../feedback.tsx'
 import { explainError } from '../errors.ts'
 import { Button, Card, DateField, Field, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
 import { pendingExpenseOperation, type PendingExpenseOperation } from '../expense-idempotency.ts'
+import { uploadExpenseReceipt } from '../receipt-upload.ts'
+import { RecurringExpenses } from './RecurringExpenses.tsx'
 
 /**
  * Expenses (SRS G) — «كل ليرة تخرج: مصنَّفة وموثَّقة ومنسوبة لمركز كلفتها». Recording is branch
@@ -27,6 +29,7 @@ export function Expenses(): ReactNode {
   const [cats, setCats] = useState<ExpenseCategoryView[]>([])
   const [vehicles, setVehicles] = useState<VehicleLite[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [screenTab, setScreenTab] = useState<'log' | 'due' | 'templates'>('log')
 
   const [from, setFrom] = useState('')
   const [to, setTo] = useState('')
@@ -38,6 +41,8 @@ export function Expenses(): ReactNode {
   const [description, setDescription] = useState('')
   const [busy, setBusy] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
+  const [receiptMediaId, setReceiptMediaId] = useState<string | null>(null)
+  const [receiptBusy, setReceiptBusy] = useState(false)
   const pendingExpense = useRef<PendingExpenseOperation | null>(null)
 
   const [catCode, setCatCode] = useState('')
@@ -129,6 +134,7 @@ export function Expenses(): ReactNode {
       channel,
       amount,
       description,
+      receiptMediaId,
     }
     const operation = pendingExpenseOperation(pendingExpense.current, payload)
     pendingExpense.current = operation
@@ -141,6 +147,7 @@ export function Expenses(): ReactNode {
       toast.success(t.expenses.added)
       setAmount('')
       setDescription('')
+      setReceiptMediaId(null)
       load()
     } catch (e) {
       const code = (e as { error?: string }).error ?? 'error'
@@ -199,12 +206,14 @@ export function Expenses(): ReactNode {
         channel,
         amount,
         description,
+        receiptMediaId,
       })
       pendingAdvanceKey.current = null
       toast.success(t.treasury.advanceAdded)
       setAmount('')
       setDescription('')
       setPartyName('')
+      setReceiptMediaId(null)
       load()
     } catch (e) {
       const code = (e as { error?: string }).error ?? 'error'
@@ -226,8 +235,53 @@ export function Expenses(): ReactNode {
     }
   }
 
+  const uploadReceipt = async (event: ChangeEvent<HTMLInputElement>): Promise<void> => {
+    const file = event.target.files?.[0]
+    if (!file) return
+    setReceiptBusy(true)
+    setFormError(null)
+    try {
+      setReceiptMediaId(await uploadExpenseReceipt(api, file))
+    } catch (cause) {
+      setFormError((cause as { error?: string }).error ?? 'error')
+    } finally {
+      setReceiptBusy(false)
+      event.target.value = ''
+    }
+  }
+
+  const tabs = (
+    <div className="flex gap-2" role="tablist" aria-label={t.expenses.title}>
+      {(['log', 'due', 'templates'] as const).map((tab) => (
+        <Button
+          key={tab}
+          role="tab"
+          aria-selected={screenTab === tab}
+          variant={screenTab === tab ? 'primary' : 'ghost'}
+          onClick={() => setScreenTab(tab)}
+        >
+          {tab === 'log' ? t.expenses.tabLog : tab === 'due' ? t.expenses.tabDue : t.expenses.tabFixed}
+        </Button>
+      ))}
+    </div>
+  )
+
+  if (screenTab !== 'log') {
+    return (
+      <div className="flex flex-col gap-4">
+        {tabs}
+        <RecurringExpenses
+          view={screenTab === 'due' ? 'due' : 'templates'}
+          categories={cats}
+          vehicles={vehicles}
+          canWrite={canWrite}
+        />
+      </div>
+    )
+  }
+
   if (!rows) {
-    return <Pending error={error} loadingLabel={t.common.loading} errorLabel={explainError(error, t)} onRetry={load} retryLabel={t.common.retry} />
+    return <div className="flex flex-col gap-4">{tabs}<Pending error={error} loadingLabel={t.common.loading} errorLabel={explainError(error, t)} onRetry={load} retryLabel={t.common.retry} /></div>
   }
 
   const ready =
@@ -241,6 +295,7 @@ export function Expenses(): ReactNode {
 
   return (
     <div className="flex flex-col gap-4">
+      {tabs}
       {canWrite ? (
         <Card title={t.movements.add}>
           <div className="flex flex-col gap-3">
@@ -253,6 +308,7 @@ export function Expenses(): ReactNode {
                   onClick={() => {
                     setMode(m)
                     setFormError(null)
+                    setReceiptMediaId(null)
                   }}
                 >
                   {m === 'expense'
@@ -375,11 +431,28 @@ export function Expenses(): ReactNode {
             <Field label={t.expenses.description}>
               <TextInput value={description} onChange={(e) => setDescription(e.target.value)} />
             </Field>
+            {mode !== 'income' ? (
+              <Field label={t.expenses.receipt}>
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  onChange={(event) => void uploadReceipt(event)}
+                  className="max-w-72 text-sm"
+                />
+                <span className="text-xs text-ink-muted">
+                  {receiptBusy
+                    ? t.expenses.receiptUploading
+                    : receiptMediaId
+                      ? t.expenses.receiptUploaded
+                      : t.expenses.chooseReceipt}
+                </span>
+              </Field>
+            ) : null}
             {formError ? <p className="text-sm text-red-600">{explainError(formError, t)}</p> : null}
             <Button
               variant="primary"
               className="self-start"
-              disabled={busy || !ready}
+              disabled={busy || receiptBusy || !ready}
               onClick={mode === 'expense' ? add : mode === 'income' ? addIncome : addAdvance}
             >
               {mode === 'expense' ? t.expenses.add : mode === 'income' ? t.incomes.add : t.treasury.advanceAdd}

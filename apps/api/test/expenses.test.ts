@@ -1,7 +1,7 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { fundCodeOf } from '@ash/adapters/memory'
-import { BRANCH, type Harness, OTHER_BRANCH, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
+import { BRANCH, type Harness, OTHER_BRANCH, TINY_JPEG, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
 
 /**
  * Expenses (SRS §G) — «كل ليرة تخرج: مصنَّفة وموثَّقة ومنسوبة لمركز كلفتها».
@@ -196,7 +196,18 @@ describe('the approval ceiling (A-4 / س52, G-3)', () => {
     const manager = await h.loginAs('manager')
     await h.deps.settings.set('expense.receipt_required_above_minor', '1000000', 'u-sa')
 
-    const res = await post(manager, '/expenses', expense({ amount: sypStr(25_000), receiptMediaId: 'media-1' }))
+    const upload = await h.app.inject({
+      method: 'POST',
+      url: '/media/receipts',
+      headers: { cookie: h.cookie(manager), 'content-type': 'image/jpeg' },
+      payload: TINY_JPEG,
+    })
+    expect(upload.statusCode, upload.body).toBe(201)
+
+    const res = await post(manager, '/expenses', expense({
+      amount: sypStr(25_000),
+      receiptMediaId: upload.json().mediaId,
+    }))
     expect(res.statusCode, res.body).toBe(201)
   })
 

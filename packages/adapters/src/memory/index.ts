@@ -96,7 +96,7 @@ import {
 import { memoryCipher } from '../crypto.ts'
 import { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 import { MemoryOcrReadRepo, MemoryOcrReader } from '../ocr/memory.ts'
-import { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
+import { MemoryExpenseRepo, MemoryRecurringExpenseRepo, MemorySettingsRepo } from './expenses.ts'
 import { MemoryAdvanceRepo, fundCodeForAdvance } from './advances.ts'
 import { MemoryIncomeRepo } from './incomes.ts'
 import { MemoryCashCountRepo } from './cashcount.ts'
@@ -111,7 +111,7 @@ import { MemoryCompanyLedgerRepo, MemoryCompanyLedgerSource, MemoryFinancialLock
 
 export { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 export { MemoryOcrReadRepo, MemoryOcrReader, ScriptedOcrReader } from '../ocr/memory.ts'
-export { MemoryExpenseRepo, MemorySettingsRepo } from './expenses.ts'
+export { MemoryExpenseRepo, MemoryRecurringExpenseRepo, MemorySettingsRepo } from './expenses.ts'
 export { MemoryAdvanceRepo, fundCodeForAdvance } from './advances.ts'
 export { MemoryIncomeRepo } from './incomes.ts'
 export { MemoryCashCountRepo } from './cashcount.ts'
@@ -2167,6 +2167,7 @@ export interface MemoryDeps extends Deps {
   blobs: MemoryBlobStore
   ocrReads: MemoryOcrReadRepo
   expenses: MemoryExpenseRepo
+  recurringExpenses: MemoryRecurringExpenseRepo
   incomes: MemoryIncomeRepo
   advances: MemoryAdvanceRepo
   receivableEvents: MemoryReceivableEventRepo
@@ -2212,6 +2213,7 @@ export interface MemoryDeps extends Deps {
 export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
   private readonly deps: FinancialTransactionDeps
   private readonly expenses: MemoryExpenseRepo
+  private readonly recurringExpenses: MemoryRecurringExpenseRepo
   private readonly incomes: MemoryIncomeRepo
   private readonly advances: MemoryAdvanceRepo
   private readonly ledger: MemoryLedgerRepo
@@ -2225,6 +2227,7 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
 
   constructor(
     expenses: MemoryExpenseRepo,
+    recurringExpenses: MemoryRecurringExpenseRepo,
     incomes: MemoryIncomeRepo,
     advances: MemoryAdvanceRepo,
     ledger: MemoryLedgerRepo,
@@ -2236,6 +2239,7 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
     companyLedger: MemoryCompanyLedgerRepo,
   ) {
     this.expenses = expenses
+    this.recurringExpenses = recurringExpenses
     this.incomes = incomes
     this.advances = advances
     this.ledger = ledger
@@ -2245,7 +2249,7 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
     this.companyLedger = companyLedger
     this.gate = gate
     this.deps = {
-      expenses, incomes, advances, ledger, receivableEvents, cashCounts, capitalTargets, restorations,
+      expenses, recurringExpenses, incomes, advances, ledger, receivableEvents, cashCounts, capitalTargets, restorations,
       companyLedger, locks: this.locks,
     }
   }
@@ -2260,6 +2264,7 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
       await this.locks.acquire(input.lockKey)
       const companySnapshot = this.companyLedger.snapshot()
       const expenseSnapshot = this.expenses.snapshotRows()
+      const recurringExpenseSnapshot = this.recurringExpenses.snapshotState()
       const incomeSnapshot = this.incomes.snapshotRows()
       const advanceSnapshot = this.advances.snapshotRows()
       const ledgerSnapshot = this.ledger.snapshotState()
@@ -2270,6 +2275,7 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
         return await work(this.deps)
       } catch (error) {
         this.expenses.restoreRows(expenseSnapshot)
+        this.recurringExpenses.restoreState(recurringExpenseSnapshot)
         this.incomes.restoreRows(incomeSnapshot)
         this.advances.restoreRows(advanceSnapshot)
         this.ledger.restoreState(ledgerSnapshot)
@@ -2421,6 +2427,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   const gate = new MemoryTransactionGate()
   const treasuryPosition = new MemoryTreasuryPositionSource(ledger, shifts, gate)
   const expenses = new MemoryExpenseRepo()
+  const recurringExpenses = new MemoryRecurringExpenseRepo()
   const incomes = new MemoryIncomeRepo()
   const advances = new MemoryAdvanceRepo()
   // What an advance still owes is a LEDGER fact, exactly as it is in Postgres. Reading it from
@@ -2449,6 +2456,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   const preapprovedShiftRules = new MemoryPreapprovedShiftRuleRepo()
   const financialUnitOfWork = new MemoryFinancialUnitOfWork(
     expenses,
+    recurringExpenses,
     incomes,
     advances,
     ledger,
@@ -2522,6 +2530,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     // P2 — reads the live ledger and resolves settlements in one batch.
     ledgerRange: new MemoryLedgerRangeSource(ledger, settlements),
     expenses,
+    recurringExpenses,
     incomes,
     advances,
     receivableEvents,
