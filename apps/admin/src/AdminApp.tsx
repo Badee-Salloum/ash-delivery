@@ -1,6 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { useApp } from './app-context.tsx'
-import { Badge, FOCUS_RING, Wordmark } from './ui.tsx'
+import { Badge, FOCUS_RING, PageHeader, Wordmark } from './ui.tsx'
 import { Icon, type IconName } from './icons.tsx'
 import { type Notif, NotificationBell } from './NotificationBell.tsx'
 import { Login } from './screens/Login.tsx'
@@ -81,6 +81,23 @@ export function AdminApp(): ReactNode {
   const [notifs, setNotifs] = useState<Notif[]>([])
   const [queueCount, setQueueCount] = useState(0)
   const [navOpen, setNavOpen] = useState(false) // the rail is a drawer below lg
+  const navCloseRef = useRef<HTMLButtonElement | null>(null)
+
+  useEffect(() => {
+    if (!navOpen) return
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setNavOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    const frame = requestAnimationFrame(() => navCloseRef.current?.focus())
+    return () => {
+      cancelAnimationFrame(frame)
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [navOpen])
 
   /**
    * Client routing via the URL hash. `view` is the single source of truth (`section`, or
@@ -237,10 +254,21 @@ export function AdminApp(): ReactNode {
         <div className="fixed inset-0 z-30 bg-scrim/40 lg:hidden" onClick={() => setNavOpen(false)} aria-hidden="true" />
       ) : null}
       <aside
+        aria-label={t.common.menu}
         className={`fixed inset-y-0 start-0 z-40 flex w-60 flex-col gap-1 overflow-y-auto border-e border-slate-200 bg-surface-card p-3 transition-transform lg:static lg:z-auto lg:translate-x-0 ${
           navOpen ? 'translate-x-0' : 'ltr:-translate-x-full rtl:translate-x-full lg:ltr:translate-x-0 lg:rtl:translate-x-0'
         }`}
       >
+        <div className="flex justify-end lg:hidden">
+          <button
+            ref={navCloseRef}
+            type="button"
+            onClick={() => setNavOpen(false)}
+            className={`min-h-10 rounded-lg px-3 text-label font-semibold text-ink-secondary hover:bg-surface-raised ${FOCUS_RING}`}
+          >
+            {t.common.close}
+          </button>
+        </div>
         <div className="mb-5 border-b border-slate-100 px-2 pb-4 pt-1">
           <div className="flex items-start justify-between">
             <Wordmark size={32} />
@@ -301,7 +329,7 @@ export function AdminApp(): ReactNode {
                   aria-current={section === n.key && !openShift ? 'page' : undefined}
                   className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-start text-body font-medium outline-none transition-colors ${FOCUS_RING} ${
                     section === n.key && !openShift
-                      ? 'bg-brand text-ink-inverse shadow-sm'
+                      ? 'bg-brand text-on-brand shadow-sm'
                       : 'text-ink-secondary hover:bg-surface-raised'
                   }`}
                 >
@@ -334,7 +362,7 @@ export function AdminApp(): ReactNode {
                 aria-pressed={theme === value}
                 className={`flex-1 rounded-lg px-2 py-1.5 text-label font-medium outline-none transition-colors ${FOCUS_RING} ${
                   theme === value
-                    ? 'bg-brand text-ink-inverse'
+                    ? 'bg-brand text-on-brand'
                     : 'text-ink-secondary hover:bg-surface-raised'
                 }`}
               >
@@ -399,9 +427,7 @@ export function AdminApp(): ReactNode {
         <HashParamsContext.Provider value={replaceParams}>
         <div className="mx-auto w-full max-w-[110rem]">
         {!openShift && section !== 'vehicle' ? (
-          <h1 className="mb-4 text-page font-bold text-ink">
-            {nav.find((n) => n.key === section)?.label ?? t.dashboard.title}
-          </h1>
+          <PageHeader title={nav.find((n) => n.key === section)?.label ?? t.dashboard.title} />
         ) : null}
         {openShift ? (
           /* A notification can replace `openShift` while a review is already mounted. Keying the

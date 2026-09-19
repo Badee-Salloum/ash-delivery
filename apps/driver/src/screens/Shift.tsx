@@ -2555,7 +2555,7 @@ function EndPackage({
                       <button
                         type="button"
                         onClick={() => onResolveSaveConflict('phone')}
-                        className="min-h-10 rounded-lg bg-danger-solid px-3 text-xs font-semibold text-white"
+                        className="min-h-10 rounded-lg bg-danger-solid px-3 text-xs font-semibold text-on-danger"
                       >
                         {t.shift.usePhoneDraft}
                       </button>

@@ -49,7 +49,7 @@ describe('the screen reads the capture time everywhere it draws one', () => {
      * test would pass with both present.
      */
     expect(screenSource).toContain('Date.parse(d.capturedAt)')
-    expect(screenSource).toContain('new Date(d.capturedAt).toLocaleTimeString()')
+    expect(screenSource).toContain('formatDateTimeSeconds(d.capturedAt, lang)')
     expect(screenSource).not.toContain('d.receivedAt')
   })
 

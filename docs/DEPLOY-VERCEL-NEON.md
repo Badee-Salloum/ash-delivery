@@ -12,14 +12,19 @@ Team `hadis-projects-3c86ccdb`, three projects, all public (no deployment protec
 
 | Surface | URL | Live deployment / notes |
 | --- | --- | --- |
-| Admin console | https://ash-admin-eta.vercel.app | `dpl_76xU4vYXJJTUHutTG1F8ecZ4uT8e`; React SPA, `/api/*` proxied to API |
-| Driver PWA | https://ash-driver.vercel.app | `dpl_AJ3VWMjckVtWwgw94RBMmum4ZQmX`; installable PWA, `/api/*` proxied to API |
+| Admin console | https://ash-admin-eta.vercel.app | `dpl_75oexHWPgAVMa4axYC3Qyna4662M`; 2026-09-19 UI-only release; React SPA, `/api/*` proxied to API |
+| Driver PWA | https://ash-driver.vercel.app | `dpl_6QkYMwTAfojD5HzvNsz5RAt6bwQq`; 2026-09-19 UI-only release; installable PWA, `/api/*` proxied to API |
 | API | https://ash-api-xi.vercel.app | `dpl_BEPgw85iwZzEaBapUa7KdzmyEwfa`; Fastify serverless function |
 | Database | Neon `ep-billowing-butterfly-…` (eu-central-1, **Postgres 18**) | live at `0078` (74 migrations) + bootstrapped |
 | Evidence | Vercel Blob store `ash-evidence` (private) | linked to `ash-api` |
 
-**Version boundary:** production is at `0078`, and all three public surfaces use runtime commit
-`bb39ffd79a4dcd5c47cbbff4ecee33ef79257004`, deployed on 2026-09-18. This release required no
+**UI release boundary (2026-09-19):** only the static Admin and Driver outputs were promoted, after
+Node 24 `pnpm check` and `pnpm build:apps` passed, the visual suite recorded 9 passing / 18 skipped,
+and the stable front-end URLs plus their API proxies passed smoke. No API function was promoted and
+no Neon action or migration ran. The ledger remains at `0078` with 74 applied migrations.
+
+**Previous coordinated runtime boundary:** all three public surfaces used runtime commit
+`bb39ffd79a4dcd5c47cbbff4ecee33ef79257004`, deployed on 2026-09-18. That release required no
 database migration; the ledger remains at 74 applied migrations. Historical boundary evidence: the
 API build moved on the evening of 2026-08-24 —
 `ocr_reads` carries `bms-prompt-v2` cache signatures from 2026-08-25 01:26, which ships in

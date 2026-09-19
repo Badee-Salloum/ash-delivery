@@ -55,7 +55,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error: E
           <button
             type="button"
             onClick={() => window.location.reload()}
-            className="mt-4 inline-flex min-h-11 w-full items-center justify-center rounded-lg bg-brand px-4 text-sm font-semibold text-white"
+            className="mt-4 inline-flex min-h-11 w-full items-center justify-center rounded-lg bg-brand px-4 text-sm font-semibold text-on-brand"
           >
             إعادة التحميل · Reload
           </button>

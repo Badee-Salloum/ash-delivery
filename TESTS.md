@@ -7,6 +7,22 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 
 **Legend:** ✅ implemented and green · ⚠ written but never executed · 🔜 planned, milestone named.
 
+## 2026-09-19 design-system unification — verification and frontend production deployment complete
+
+This UI-only slice was verified independently of the earlier production releases below, then deployed
+to the static Admin and Driver surfaces only. No API function, Neon database action, or migration ran.
+
+| Contract | Command / evidence | Release status |
+| --- | --- | --- |
+| Arabic/English catalogues retain the same nested key set | `pnpm check:i18n` (`scripts/check-i18n-parity.mjs`) | ✅ 2026-09-19 |
+| New user-facing feedback does not bypass the translation boundary with literals | `pnpm check:i18n-boundaries` (`scripts/check-i18n-boundaries.mjs`) | ✅ 2026-09-19 |
+| Changed front-end code does not introduce raw palette colors or non-semantic paint values | `pnpm check:tokens` (`scripts/check-design-tokens.mjs`) | ✅ 2026-09-19 |
+| Operational/financial time display remains centralized on Damascus rather than browser `toLocale*` calls | `pnpm check:time` (`scripts/check-client-time-format.mjs`) | ✅ 2026-09-19 |
+| The combined static, type, and automated suite remains sound | Node 24 `pnpm check` | ✅ 2026-09-19 |
+| Admin and Driver bundles build after the shared UI migration | Node 24 `pnpm check`; `pnpm build:apps` | ✅ 2026-09-19 |
+| Keyboard/focus/escape behavior, labelled errors, RTL, Latin numerals, Arabic/English and light/dark states remain usable | `pnpm test:visual`: Admin desktop and Driver 320px/390px states | ✅ 9 passed / 18 skipped, 2026-09-19 |
+| Front-end production smoke preserves the static SPA and same-origin proxy paths | Admin `dpl_75oexHWPgAVMa4axYC3Qyna4662M`; Driver `dpl_6QkYMwTAfojD5HzvNsz5RAt6bwQq`; stable URLs and API proxies | ✅ 2026-09-19 |
+
 ## 2026-09-18 production deployment smoke checks
 
 | Gate | Production result | Result |

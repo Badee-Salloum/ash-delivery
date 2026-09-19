@@ -1,6 +1,7 @@
 import { type ReactNode, createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import { ApiClient } from '@ash/client'
 import { type Catalog, type Lang, catalogs, dir } from '@ash/client/i18n'
+import { type Theme, applyTheme, readTheme, watchSystemTheme } from './theme.ts'
 
 /**
  * The app-wide context: the API client, the current language (ar default, RTL-first), and the
@@ -21,6 +22,9 @@ interface AppContextValue {
   lang: Lang
   t: Catalog
   setLang(lang: Lang): void
+  /** The saved preference; `system` follows the device's current appearance. */
+  theme: Theme
+  setTheme(theme: Theme): void
   session: Session | null
   setSession(session: Session | null): void
   refreshSession(): Promise<void>
@@ -46,6 +50,14 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     }
   })
   const [session, setSession] = useState<Session | null>(null)
+  // `theme-boot.js` has already painted the concrete value before React mounts. Keep the saved
+  // preference here so “automatic” remains distinguishable from an explicit light/dark choice.
+  const [theme, setThemeState] = useState<Theme>(() => readTheme())
+
+  const setTheme = useCallback((next: Theme) => {
+    setThemeState(next)
+    applyTheme(next)
+  }, [])
 
   const setLang = useCallback((next: Lang) => {
     setLangState(next)
@@ -83,6 +95,14 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     }
   }, [api])
 
+  useEffect(() => {
+    if (theme !== 'system') return
+    // `theme-boot.js` normally handles first paint. Apply here too when storage was unavailable
+    // before React mounted, so Auto still follows a dark operating system for this visit.
+    applyTheme('system')
+    return watchSystemTheme(() => applyTheme('system'))
+  }, [theme])
+
   // Keep <html dir/lang> in step with the chosen language — the whole layout is RTL by default.
   useEffect(() => {
     document.documentElement.lang = lang
@@ -109,6 +129,8 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
     lang,
     t: catalogs[lang],
     setLang,
+    theme,
+    setTheme,
     session,
     setSession,
     refreshSession,

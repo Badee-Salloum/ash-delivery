@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <!-- Paints the Android status bar in the app's own navy instead of leaving it white. -->
     <meta name="theme-color" content="#1b2a5c" />
+    <!-- Keeps a saved appearance from flashing to light while the PWA bundle starts. -->
+    <script src="/theme-boot.js"></script>
     <link rel="apple-touch-icon" href="/icon-192.png" />
     <title>ASH Delivery — السائق</title>
     <style>
@@ -12,7 +14,7 @@
          It used to be a blank white screen for several seconds with nothing at all on it. Inline
          because anything else is another request before the first paint. */
       #root:empty::after {
-        content: 'ASH';
+        content: 'ASH Delivery';
         position: fixed;
         inset: 0;
         display: flex;
@@ -22,6 +24,10 @@
         color: #1b2a5c;
         font: bold 2rem/1 system-ui, sans-serif;
         letter-spacing: 0.1em;
+      }
+      html[data-theme='dark'] #root:empty::after {
+        background: #0b1220;
+        color: #e8edf7;
       }
       #ash-stuck {
         position: fixed;
@@ -48,6 +54,12 @@
         color: #fff;
         font: 600 1rem system-ui, sans-serif;
       }
+      html[data-theme='dark'] #ash-stuck {
+        background: #0b1220;
+        color: #e8edf7;
+      }
+      html[data-theme='dark'] #ash-stuck p { color: #b3c0d6; }
+      html[data-theme='dark'] #ash-stuck strong { color: #e8edf7; }
     </style>
   </head>
   <body>

@@ -4,7 +4,7 @@ import { type RoleKey, can } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
 import { explainError } from '../errors.ts'
-import { Button, Card, DateField, Field, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
+import { Button, Card, DateField, Field, FOCUS_RING, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
 import { pendingExpenseOperation, type PendingExpenseOperation } from '../expense-idempotency.ts'
 import { uploadExpenseReceipt } from '../receipt-upload.ts'
 import { RecurringExpenses } from './RecurringExpenses.tsx'
@@ -91,6 +91,8 @@ export function Expenses(): ReactNode {
       { branchId: branchId ?? session.branchId },
     ).allowed
   const isSysadmin = session?.roleKey === 'system_admin'
+  const channelLabel = (value: 'office_cash' | 'office_wallet'): string =>
+    value === 'office_cash' ? t.glossary.finance.officeCash : t.glossary.finance.officeWallet
 
   const load = useCallback(() => {
     setError(null)
@@ -256,6 +258,8 @@ export function Expenses(): ReactNode {
         <Button
           key={tab}
           role="tab"
+          id={`expenses-tab-${tab}`}
+          aria-controls={`expenses-panel-${tab}`}
           aria-selected={screenTab === tab}
           variant={screenTab === tab ? 'primary' : 'ghost'}
           onClick={() => setScreenTab(tab)}
@@ -270,18 +274,27 @@ export function Expenses(): ReactNode {
     return (
       <div className="flex flex-col gap-4">
         {tabs}
-        <RecurringExpenses
-          view={screenTab === 'due' ? 'due' : 'templates'}
-          categories={cats}
-          vehicles={vehicles}
-          canWrite={canWrite}
-        />
+        <div id={`expenses-panel-${screenTab}`} role="tabpanel" aria-labelledby={`expenses-tab-${screenTab}`}>
+          <RecurringExpenses
+            view={screenTab === 'due' ? 'due' : 'templates'}
+            categories={cats}
+            vehicles={vehicles}
+            canWrite={canWrite}
+          />
+        </div>
       </div>
     )
   }
 
   if (!rows) {
-    return <div className="flex flex-col gap-4">{tabs}<Pending error={error} loadingLabel={t.common.loading} errorLabel={explainError(error, t)} onRetry={load} retryLabel={t.common.retry} /></div>
+    return (
+      <div className="flex flex-col gap-4">
+        {tabs}
+        <div id="expenses-panel-log" role="tabpanel" aria-labelledby="expenses-tab-log">
+          <Pending error={error} loadingLabel={t.common.loading} errorLabel={explainError(error, t)} onRetry={load} retryLabel={t.common.retry} />
+        </div>
+      </div>
+    )
   }
 
   const ready =
@@ -296,6 +309,7 @@ export function Expenses(): ReactNode {
   return (
     <div className="flex flex-col gap-4">
       {tabs}
+      <div id="expenses-panel-log" role="tabpanel" aria-labelledby="expenses-tab-log" className="flex flex-col gap-4">
       {canWrite ? (
         <Card title={t.movements.add}>
           <div className="flex flex-col gap-3">
@@ -314,11 +328,11 @@ export function Expenses(): ReactNode {
                   {m === 'expense'
                     ? t.movements.modeExpense
                     : m === 'income'
-                      ? t.movements.modeIncome
+                      ? t.glossary.finance.revenue
                       : t.treasury.advances}
                 </Button>
               ))}
-              <a className="ms-auto self-center text-sm text-sky-700 underline" href="#treasury">
+              <a className={`ms-auto self-center text-body font-medium text-brand underline ${FOCUS_RING}`} href="#treasury">
                 {t.movements.receivablesElsewhere}
               </a>
             </div>
@@ -341,8 +355,8 @@ export function Expenses(): ReactNode {
                     value={channel}
                     onChange={(e) => setChannel(e.target.value as 'office_cash' | 'office_wallet')}
                   >
-                    <option value="office_cash">{t.movements.channelCash}</option>
-                    <option value="office_wallet">{t.movements.channelWallet}</option>
+                    <option value="office_cash">{channelLabel('office_cash')}</option>
+                    <option value="office_wallet">{channelLabel('office_wallet')}</option>
                   </Select>
                 </Field>
                 <Field label={t.expenses.amount}>
@@ -377,8 +391,8 @@ export function Expenses(): ReactNode {
                       value={channel}
                       onChange={(e) => setChannel(e.target.value as 'office_cash' | 'office_wallet')}
                     >
-                      <option value="office_cash">{t.movements.channelCash}</option>
-                      <option value="office_wallet">{t.movements.channelWallet}</option>
+                      <option value="office_cash">{channelLabel('office_cash')}</option>
+                      <option value="office_wallet">{channelLabel('office_wallet')}</option>
                     </Select>
                   </Field>
                 </>
@@ -399,8 +413,8 @@ export function Expenses(): ReactNode {
                     value={channel}
                     onChange={(e) => setChannel(e.target.value as 'office_cash' | 'office_wallet')}
                   >
-                    <option value="office_cash">{t.movements.channelCash}</option>
-                    <option value="office_wallet">{t.movements.channelWallet}</option>
+                    <option value="office_cash">{channelLabel('office_cash')}</option>
+                    <option value="office_wallet">{channelLabel('office_wallet')}</option>
                   </Select>
                 </Field>
               ) : null}
@@ -448,7 +462,7 @@ export function Expenses(): ReactNode {
                 </span>
               </Field>
             ) : null}
-            {formError ? <p className="text-sm text-red-600">{explainError(formError, t)}</p> : null}
+            {formError ? <p role="alert" className="text-body text-danger-ink">{explainError(formError, t)}</p> : null}
             <Button
               variant="primary"
               className="self-start"
@@ -458,7 +472,7 @@ export function Expenses(): ReactNode {
               {mode === 'expense' ? t.expenses.add : mode === 'income' ? t.incomes.add : t.treasury.advanceAdd}
             </Button>
             {mode === 'advance' ? (
-              <p className="text-xs text-slate-600">{t.treasury.advancesHint}</p>
+              <p className="text-label text-ink-secondary">{t.treasury.advancesHint}</p>
             ) : null}
             {/*
               Entries must be recorded BEFORE the box is counted: the server refuses a restoration
@@ -466,7 +480,7 @@ export function Expenses(): ReactNode {
               to count a day twice. Saying so here is cheaper than discovering it at the restoration
               button — the count and restoration live on the treasury screen.
             */}
-            <p className="text-xs text-slate-500">{t.movements.beforeCountHint}</p>
+            <p className="text-label text-ink-muted">{t.movements.beforeCountHint}</p>
           </div>
         </Card>
       ) : null}
@@ -475,45 +489,45 @@ export function Expenses(): ReactNode {
         <div className="mb-3 flex flex-wrap items-end gap-3">
           <DateField label={t.expenses.from} value={from} onChange={setFrom} />
           <DateField label={t.expenses.to} value={to} onChange={setTo} />
-          <span className="ms-auto text-sm text-slate-600">
+          <span className="ms-auto text-body text-ink-secondary">
             {t.expenses.total}: <Money value={total} className="font-semibold" />
           </span>
         </div>
-        <Table head={[t.expenses.date, t.expenses.category, t.expenses.costCenter, t.expenses.description, t.expenses.amount]} isEmpty={rows.length === 0} empty={t.expenses.none}>
+        <Table head={[t.glossary.time.businessDay, t.expenses.category, t.expenses.costCenter, t.expenses.description, t.expenses.amount]} isEmpty={rows.length === 0} empty={t.expenses.none}>
           {rows.map((e) => (
             <tr key={e.id}>
-              <td className="num px-3 py-1 text-slate-500">{e.businessDate}</td>
+              <td className="num px-3 py-1 text-ink-muted">{e.businessDate}</td>
               <td className="px-3 py-1">{catName_(e.categoryId)}</td>
               <td className="px-3 py-1">
                 {kindLabel(e.costCenterKind)}
                 {e.costCenterKind === 'vehicle' ? ` · ${vehicleCode(e.vehicleId)}` : ''}
               </td>
-              <td className="px-3 py-1 text-slate-600">{e.description}</td>
+              <td className="px-3 py-1 text-ink-secondary">{e.description}</td>
               <td className="px-3 py-1"><Money value={e.amount} /></td>
             </tr>
           ))}
         </Table>
       </Card>
 
-      <Card title={t.incomes.title}>
+      <Card title={t.glossary.finance.revenue}>
         <div className="mb-3 flex flex-wrap items-end gap-3">
-          <span className="ms-auto text-sm text-slate-600">
+          <span className="ms-auto text-body text-ink-secondary">
             {t.expenses.total}: <Money value={incomeTotal} className="font-semibold" />
           </span>
         </div>
         <Table
-          head={[t.expenses.date, t.expenses.category, t.movements.channel, t.expenses.description, t.expenses.amount]}
+          head={[t.glossary.time.businessDay, t.expenses.category, t.treasuryMovements.channel, t.expenses.description, t.expenses.amount]}
           isEmpty={incomeRows.length === 0}
           empty={t.incomes.none}
         >
           {incomeRows.map((e) => (
             <tr key={e.id}>
-              <td className="num px-3 py-1 text-slate-500">{e.businessDate}</td>
+              <td className="num px-3 py-1 text-ink-muted">{e.businessDate}</td>
               <td className="px-3 py-1">{incomeCats.find((c) => c.id === e.categoryId)?.nameAr ?? e.categoryId.slice(0, 8)}</td>
               <td className="px-3 py-1">
-                {e.channel === 'office_cash' ? t.movements.channelCash : t.movements.channelWallet}
+                {channelLabel(e.channel)}
               </td>
-              <td className="px-3 py-1 text-slate-600">{e.description}</td>
+              <td className="px-3 py-1 text-ink-secondary">{e.description}</td>
               <td className="px-3 py-1"><Money value={e.amount} /></td>
             </tr>
           ))}
@@ -535,6 +549,7 @@ export function Expenses(): ReactNode {
           </div>
         </Card>
       ) : null}
+      </div>
     </div>
   )
 }

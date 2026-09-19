@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ar } from '../src/i18n/ar.ts'
 import { en } from '../src/i18n/en.ts'
+import { glossary, interpolate } from '../src/i18n/index.ts'
 
 /** ar is the source of truth; en must mirror it key-for-key, including nested objects. */
 function keyPaths(obj: Record<string, unknown>, prefix = ''): string[] {
@@ -14,6 +15,39 @@ function keyPaths(obj: Record<string, unknown>, prefix = ''): string[] {
 describe('i18n parity', () => {
   it('en has exactly the same keys as ar', () => {
     expect(keyPaths(en).sort()).toEqual(keyPaths(ar).sort())
+  })
+
+  it('keeps the canonical finance, shift, time, and brand terms available to both apps', () => {
+    expect(ar.app.title).toBe(ar.glossary.brand.product)
+    expect(en.app.title).toBe(en.glossary.brand.product)
+    expect(ar.common.navMoney).toBe(ar.glossary.navigation.finance)
+    expect(en.common.navMoney).toBe(en.glossary.navigation.finance)
+    expect(ar.dashboard.title).toBe(ar.glossary.navigation.dashboard)
+    expect(en.dashboard.title).toBe(en.glossary.navigation.dashboard)
+    expect(ar.shift.cashFloat).toBe(ar.glossary.finance.cashFloat)
+    expect(en.shift.cashFloat).toBe(en.glossary.finance.cashFloat)
+    expect(ar.treasury.cashBox).toBe(ar.glossary.finance.officeCash)
+    expect(en.treasury.cashBox).toBe(en.glossary.finance.officeCash)
+    expect(ar.treasury.wallet).toBe(ar.glossary.finance.officeWallet)
+    expect(en.treasury.wallet).toBe(en.glossary.finance.officeWallet)
+    expect(ar.treasury.restoration).toBe(ar.glossary.finance.dailyRestoration)
+    expect(en.treasury.restoration).toBe(en.glossary.finance.dailyRestoration)
+    expect(ar.treasury.kaish).toBe(ar.glossary.finance.surplusToCompany)
+    expect(en.treasury.kaish).toBe(en.glossary.finance.surplusToCompany)
+    expect(ar.treasury.shahn).toBe(ar.glossary.finance.shortfallFundingFromCompany)
+    expect(en.treasury.shahn).toBe(en.glossary.finance.shortfallFundingFromCompany)
+    expect(ar.treasuryMovements.businessDay).toBe(ar.glossary.time.businessDay)
+    expect(en.treasuryMovements.businessDay).toBe(en.glossary.time.businessDay)
+    expect(glossary('ar')).toBe(ar.glossary)
+    expect(glossary('en')).toBe(en.glossary)
+  })
+
+  it('interpolates both catalog placeholder spellings and leaves unknown placeholders visible', () => {
+    expect(interpolate('From {from} to {to}', { from: '2026-09-01', to: '2026-09-19' })).toBe(
+      'From 2026-09-01 to 2026-09-19',
+    )
+    expect(interpolate('Location {{lat}}, {{lng}}', { lat: 33.5, lng: 36.3 })).toBe('Location 33.5, 36.3')
+    expect(interpolate('Still {missing}', {})).toBe('Still {missing}')
   })
 
   it('every BR1 cause code from the domain has a translation', () => {

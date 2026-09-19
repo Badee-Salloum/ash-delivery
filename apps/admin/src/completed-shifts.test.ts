@@ -203,7 +203,8 @@ describe('completed shift history screen wiring', () => {
     // A night shift carries the PREVIOUS date by design (the business day ends at 04:00), which looks
     // like an off-by-one until the screen says so.
     expect(screenSource).toContain('t.completedShifts.businessDayNote')
-    expect(ar.completedShifts.businessDayNote).toContain('٤:٠٠')
+    // Operational times use stable Latin digits in both language modes.
+    expect(ar.completedShifts.businessDayNote).toContain('04:00')
   })
 
   it('judges each pattern against its own target, so a full shift is not read as overtime', () => {

@@ -13,7 +13,7 @@ describe('driver registration screen wiring', () => {
 
   it('loads public branches and submits no password confirmation field', () => {
     expect(registration).toContain('api.registrationBranches()')
-    expect(registration).toContain('<select')
+    expect(registration).toContain('<Select')
     expect(registration).toContain('api.registerDriver({ fullNameAr: fullNameAr.trim(), branchId, username, password })')
     expect(registration).not.toContain('api.registerDriver({ fullNameAr: fullNameAr.trim(), branchId, username, password, confirmation')
   })

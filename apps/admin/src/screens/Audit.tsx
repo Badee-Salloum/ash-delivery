@@ -1,7 +1,8 @@
 import { Fragment, type ReactNode, useCallback, useEffect, useState } from 'react'
 import { formatDateTime } from '@ash/client'
 import { useApp } from '../app-context.tsx'
-import { Badge, Button, Card, Table, TextInput } from '../ui.tsx'
+import { explainError } from '../errors.ts'
+import { Badge, Button, Card, Field, Pending, Table, TextInput } from '../ui.tsx'
 
 /**
  * The audit trail (SRS A-5 / س79): who changed what, when, and from what to what.
@@ -26,6 +27,8 @@ interface AuditRow {
 export function Audit(): ReactNode {
   const { api, t, lang } = useApp()
   const [rows, setRows] = useState<AuditRow[]>([])
+  const [loaded, setLoaded] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [tableName, setTableName] = useState('')
   const [recordId, setRecordId] = useState('')
   const [busy, setBusy] = useState(false)
@@ -34,12 +37,14 @@ export function Audit(): ReactNode {
   const load = useCallback(
     async (f: { tableName?: string; recordId?: string }) => {
       setBusy(true)
+      setLoadError(null)
       try {
         setRows((await api.audit(f)).rows)
-      } catch {
-        setRows([])
+      } catch (error) {
+        setLoadError((error as { error?: string }).error ?? 'error')
       } finally {
         setBusy(false)
+        setLoaded(true)
       }
     },
     [api],
@@ -51,29 +56,39 @@ export function Audit(): ReactNode {
   const tone = (action: string): 'green' | 'amber' | 'red' =>
     action === 'INSERT' ? 'green' : action === 'DELETE' ? 'red' : 'amber'
 
+  const currentFilter = (): { tableName?: string; recordId?: string } => {
+    const filter: { tableName?: string; recordId?: string } = {}
+    if (tableName) filter.tableName = tableName
+    if (recordId) filter.recordId = recordId
+    return filter
+  }
+
+  if (!loaded) {
+    return (
+      <Pending
+        error={loadError}
+        loadingLabel={t.common.loading}
+        errorLabel={explainError(loadError, t)}
+        onRetry={() => void load(currentFilter())}
+        retryLabel={t.common.retry}
+      />
+    )
+  }
+
   return (
     <div className="flex flex-col gap-4">
-      <h1 className="text-xl font-bold text-slate-800">{t.audit.title}</h1>
-
       <Card>
         <div className="flex flex-wrap items-end gap-3">
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-semibold text-slate-500">{t.audit.table}</span>
+          <Field label={t.audit.table}>
             <TextInput value={tableName} onChange={(e) => setTableName(e.target.value)} placeholder="users" />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-semibold text-slate-500">{t.audit.record}</span>
+          </Field>
+          <Field label={t.audit.record}>
             <TextInput value={recordId} onChange={(e) => setRecordId(e.target.value)} className="w-72" />
-          </label>
+          </Field>
           <Button
             disabled={busy}
             onClick={() => {
-              // Built key-by-key: with exactOptionalPropertyTypes an explicit `undefined` is not
-              // the same as an absent key.
-              const f: { tableName?: string; recordId?: string } = {}
-              if (tableName) f.tableName = tableName
-              if (recordId) f.recordId = recordId
-              void load(f)
+              void load(currentFilter())
             }}
           >
             {busy ? t.common.loading : t.audit.search}
@@ -82,7 +97,17 @@ export function Audit(): ReactNode {
       </Card>
 
       <Card title={`${t.audit.title} — ${rows.length}`}>
-        <Table head={[t.audit.when, t.audit.table, t.audit.record, t.audit.action, t.audit.actor, '']}>
+        {loadError ? (
+          <div role="alert" className="mb-3 flex flex-wrap items-center gap-3 rounded-lg border border-danger-line bg-danger-surface p-3 text-body text-danger-ink">
+            <span>{explainError(loadError, t)}</span>
+            <Button variant="ghost" size="sm" onClick={() => void load(currentFilter())}>{t.common.retry}</Button>
+          </div>
+        ) : null}
+        <Table
+          head={[t.audit.when, t.audit.table, t.audit.record, t.audit.action, t.audit.actor, '']}
+          isEmpty={rows.length === 0}
+          empty={t.common.empty}
+        >
           {rows.map((r) => (
             <Fragment key={r.id}>
               <tr>

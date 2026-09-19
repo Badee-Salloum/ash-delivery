@@ -75,7 +75,6 @@ export function Permissions(): ReactNode {
 
   return (
     <div className="flex flex-col gap-4">
-      <h1 className="text-xl font-bold text-slate-800">{t.permissions.title}</h1>
       <p className="text-sm text-slate-500">{t.permissions.hint}</p>
       {msg ? <p className="text-sm font-medium text-emerald-700">{msg}</p> : null}
       {err ? <p className="text-sm font-medium text-red-600">{explainError(err, t)}</p> : null}

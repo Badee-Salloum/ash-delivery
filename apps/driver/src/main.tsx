@@ -1,7 +1,7 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { AppProvider } from './app-context.tsx'
-import { ToastProvider } from './feedback.tsx'
+import { FeedbackProvider } from './feedback.tsx'
 import { DriverApp } from './DriverApp.tsx'
 import { ErrorBoundary } from './ErrorBoundary.tsx'
 import { BOOTED_FLAG } from './boot.ts'
@@ -22,9 +22,9 @@ createRoot(document.getElementById('root')!).render(
     {/* Outside the providers: `AppProvider` may be the very thing that throws. */}
     <ErrorBoundary>
       <AppProvider>
-        <ToastProvider>
+        <FeedbackProvider>
           <DriverApp />
-        </ToastProvider>
+        </FeedbackProvider>
       </AppProvider>
     </ErrorBoundary>
   </StrictMode>,

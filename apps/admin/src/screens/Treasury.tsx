@@ -11,7 +11,7 @@ import { type RoleKey, can, formatMinor, minor, parseMinor } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { useConfirm, useToast } from '../feedback.tsx'
 import { explainError } from '../errors.ts'
-import { Button, Card, Field, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
+import { Button, Card, Field, FOCUS_RING, Money, MoneyInput, Pending, Select, Table, TextInput } from '../ui.tsx'
 import { differenceView, summarizeRestoration } from '../treasury-view.ts'
 import {
   browserReceivableOperationMutex,
@@ -58,6 +58,8 @@ export function Treasury(): ReactNode {
   const { api, t, session, branchId } = useApp()
   const toast = useToast()
   const confirm = useConfirm()
+  const receivableChannelLabel = (channel: ReceivableChannel): string =>
+    channel === 'cash' ? t.glossary.finance.officeCash : t.glossary.finance.officeWallet
   const [closeResult, setCloseResult] = useState<{ error?: string; blockers?: Array<{ kind: string }>; weekStart?: string } | null>(null)
   const [balances, setBalances] = useState<{ cash: string; wallet: string } | null>(null)
   const [depositAmt, setDepositAmt] = useState<{ cash: string; wallet: string }>({ cash: '', wallet: '' })
@@ -657,7 +659,7 @@ export function Treasury(): ReactNode {
     const confirmedAgainstVersion = receivableSubmitVersion.current
     const confirmed = await confirm({
       title: t.treasury.receivableEventConfirmTitle,
-      body: `${actionLabel} — ${driver.fullNameAr} (${driver.code}) — ${t.treasury.receivableKinds[payload.receivableKind]} — ${t.treasury.receivableChannels[payload.channel]} — ${groupThousands(payload.amount)} — ${payload.reason}${payload.direction === 'writeoff' ? ` — ${t.treasury.receivableWriteoffHint}` : ''}`,
+      body: `${actionLabel} — ${driver.fullNameAr} (${driver.code}) — ${t.treasury.receivableKinds[payload.receivableKind]} — ${receivableChannelLabel(payload.channel)} — ${groupThousands(payload.amount)} — ${payload.reason}${payload.direction === 'writeoff' ? ` — ${t.treasury.receivableWriteoffHint}` : ''}`,
       confirmLabel: actionLabel,
       danger: payload.direction === 'writeoff',
     })
@@ -937,7 +939,7 @@ export function Treasury(): ReactNode {
     setCorrectionError(null)
     const confirmed = await confirm({
       title: t.treasury.correctionConfirmTitle,
-      body: `${correctionRow.nameAr} (${correctionRow.code}) — ${t.treasury.receivableKinds[correctionKind]} — ${t.treasury.receivableChannels[correctionChannel]} — ${groupThousands(correctionCurrent)} → ${groupThousands(correctionTarget)} — ${correctionReason}`,
+      body: `${correctionRow.nameAr} (${correctionRow.code}) — ${t.treasury.receivableKinds[correctionKind]} — ${receivableChannelLabel(correctionChannel)} — ${groupThousands(correctionCurrent)} → ${groupThousands(correctionTarget)} — ${correctionReason}`,
     })
     if (!confirmed) return
     setCorrectionBusy(true)
@@ -1019,11 +1021,11 @@ export function Treasury(): ReactNode {
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
       <Card
-        title={t.treasury.branchTreasury}
+        title={t.glossary.finance.branchTreasury}
         className="lg:col-span-2"
         actions={
           <a
-            className="inline-flex min-h-10 items-center rounded-lg border border-line-strong bg-surface-card px-4 text-body font-semibold text-brand hover:bg-surface-muted"
+            className={`inline-flex min-h-10 items-center rounded-lg border border-line-strong bg-surface-card px-4 text-body font-semibold text-brand hover:bg-surface-muted ${FOCUS_RING}`}
             href="#treasuryMovements"
           >
             {t.treasuryMovements.open}
@@ -1032,15 +1034,15 @@ export function Treasury(): ReactNode {
       >
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           {(['cash', 'wallet'] as const).map((target) => (
-            <div key={target} className="rounded-lg border border-slate-200 p-3">
-              <div className="text-xs font-semibold text-slate-500">
+            <div key={target} className="rounded-lg border border-line p-3">
+              <div className="text-label font-semibold text-ink-muted">
                 {target === 'cash' ? t.treasury.expectedCashBox : t.treasury.expectedWallet}
               </div>
-              <div className="mt-1 text-2xl font-bold">
+              <div className="mt-1 text-figure font-bold text-ink">
                 {balances ? (
                   <Money value={balances[target]} />
                 ) : (
-                  <span className="text-base font-medium text-red-600">
+                  <span className="text-body font-medium text-danger-ink">
                     {balanceError ? explainError(balanceError, t) : '—'}
                   </span>
                 )}
@@ -1053,6 +1055,7 @@ export function Treasury(): ReactNode {
                       onChange={(e) => setDepositAmt({ ...depositAmt, [target]: e.target.value })}
                       className="min-w-0 flex-1"
                       placeholder={t.treasury.depositAmount}
+                      aria-label={`${t.treasury.depositAmount}: ${target === 'cash' ? t.glossary.finance.officeCash : t.glossary.finance.officeWallet}`}
                     />
                     <Button onClick={() => deposit(target)} disabled={!depositAmt[target]}>
                       {t.treasury.ownerFunding}
@@ -1069,6 +1072,7 @@ export function Treasury(): ReactNode {
                         onChange={(e) => setWithdrawAmt({ ...withdrawAmt, [target]: e.target.value })}
                         className="min-w-0 flex-1"
                         placeholder={t.treasury.kaish}
+                        aria-label={`${t.glossary.finance.surplusToCompany}: ${target === 'cash' ? t.glossary.finance.officeCash : t.glossary.finance.officeWallet}`}
                       />
                       <Button
                         variant="ghost"
@@ -1082,62 +1086,58 @@ export function Treasury(): ReactNode {
                 </div>
               ) : (
                 // Saying why beats an empty card somebody reads as a broken screen.
-                <p className="mt-3 text-xs text-slate-600">{t.treasury.depositRoleHint}</p>
+                <p className="mt-3 text-label text-ink-secondary">{t.treasury.depositRoleHint}</p>
               )}
             </div>
           ))}
         </div>
         {canDeposit ? (
-          <div className="mt-4 rounded-lg border border-slate-200 p-3">
-            <div className="text-xs font-semibold text-slate-500">{t.treasury.moveBetweenBoxes}</div>
-            <p className="mt-1 text-xs text-slate-600">{t.treasury.moveBetweenBoxesHint}</p>
+          <div className="mt-4 rounded-lg border border-line bg-surface-muted p-3">
+            <div className="text-label font-semibold text-ink-muted">{t.treasury.moveBetweenBoxes}</div>
+            <p className="mt-1 text-label text-ink-secondary">{t.treasury.moveBetweenBoxesHint}</p>
             <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">
-              <Select
-                value={moveDirection}
-                onChange={(e) => setMoveDirection(e.target.value as 'cash_to_wallet' | 'wallet_to_cash')}
-                className="min-w-0 flex-1"
-              >
-                <option value="cash_to_wallet">{t.treasury.cashToWallet}</option>
-                <option value="wallet_to_cash">{t.treasury.walletToCash}</option>
-              </Select>
-              <MoneyInput
-                value={moveAmt}
-                onChange={(e) => setMoveAmt(e.target.value)}
-                className="min-w-0 flex-1"
-                placeholder={t.treasury.depositAmount}
-              />
-              <TextInput
-                value={moveReason}
-                onChange={(e) => setMoveReason(e.target.value)}
-                className="min-w-0 flex-1"
-                placeholder={t.treasury.moveBetweenBoxesReason}
-              />
+              <Field label={t.treasury.moveBetweenBoxes} className="min-w-0 flex-1">
+                <Select
+                  value={moveDirection}
+                  onChange={(e) => setMoveDirection(e.target.value as 'cash_to_wallet' | 'wallet_to_cash')}
+                  className="w-full"
+                >
+                  <option value="cash_to_wallet">{t.treasury.cashToWallet}</option>
+                  <option value="wallet_to_cash">{t.treasury.walletToCash}</option>
+                </Select>
+              </Field>
+              <Field label={t.treasury.depositAmount} className="min-w-0 flex-1">
+                <MoneyInput value={moveAmt} onChange={(e) => setMoveAmt(e.target.value)} className="w-full" />
+              </Field>
+              <Field label={t.treasury.moveBetweenBoxesReason} className="min-w-0 flex-1">
+                <TextInput value={moveReason} onChange={(e) => setMoveReason(e.target.value)} className="w-full" />
+              </Field>
               <Button variant="ghost" onClick={() => void moveBetweenBoxes()} disabled={!moveAmt || !moveReason.trim()}>
                 {t.treasury.moveBetweenBoxes}
               </Button>
             </div>
           </div>
         ) : null}
-        {depositMsg ? <p className="mt-3 text-sm font-medium text-emerald-700">{depositMsg}</p> : null}
+        {depositMsg ? <p role="status" className="mt-3 text-body font-medium text-success-ink">{depositMsg}</p> : null}
 
         {/* «صندوق الشركة» — where «كييش» lands and where «شحن من الصندوق» comes from. Sits inside
             the treasury card because the two are one flow: money leaves the box and arrives here. */}
-        {canManageCompanyFund ? <div className="mt-4 rounded-lg border border-slate-300 bg-slate-50 p-3">
+        {canManageCompanyFund ? <div className="mt-4 rounded-lg border border-line bg-surface-muted p-3">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <span className="text-xs font-semibold text-slate-500">{t.treasury.companyFund}</span>
-            <span className="text-2xl font-bold">
+            <span className="text-label font-semibold text-ink-muted">{t.glossary.finance.companyFund}</span>
+            <span className="text-figure font-bold text-ink">
               {company ? (
                 <Money value={company.total} />
               ) : (
-                <span className="text-base font-medium text-red-600">
+                <span className="text-body font-medium text-danger-ink">
                   {companyError ? explainError(companyError, t) : '—'}
                 </span>
               )}
             </span>
           </div>
-          <p className="mt-1 text-xs text-slate-600">{t.treasury.companyFundHint}</p>
+          <p className="mt-1 text-label text-ink-secondary">{t.treasury.companyFundHint}</p>
           {company && company.branches.length > 1 ? (
-            <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-600">
+            <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-label text-ink-secondary">
               {company.branches.map((b) => (
                 <li key={b.branchId}>
                   {b.nameAr} <Money value={b.balance} />
@@ -1147,19 +1147,13 @@ export function Treasury(): ReactNode {
           ) : null}
           {company ? (
             <div className="mt-3 flex flex-col gap-2">
-              <div className="flex gap-2">
-                <MoneyInput
-                  value={companyAmt}
-                  onChange={(e) => setCompanyAmt(e.target.value)}
-                  className="w-full"
-                  placeholder={t.treasury.depositAmount}
-                />
-                <TextInput
-                  value={companyReason}
-                  onChange={(e) => setCompanyReason(e.target.value)}
-                  className="w-full"
-                  placeholder={t.treasury.reason}
-                />
+              <div className="grid gap-2 sm:grid-cols-2">
+                <Field label={t.treasury.depositAmount}>
+                  <MoneyInput value={companyAmt} onChange={(e) => setCompanyAmt(e.target.value)} className="w-full" />
+                </Field>
+                <Field label={t.treasury.reason}>
+                  <TextInput value={companyReason} onChange={(e) => setCompanyReason(e.target.value)} className="w-full" />
+                </Field>
               </div>
               <div className="flex gap-2">
                 {/* A reason is mandatory on both: the database enforces it for these events, so a
@@ -1184,17 +1178,17 @@ export function Treasury(): ReactNode {
       </Card>
 
       <Card title={t.treasury.advances} className="lg:col-span-2">
-        <p className="text-xs text-slate-600">{t.treasury.advancesHint}</p>
+        <p className="text-label text-ink-secondary">{t.treasury.advancesHint}</p>
         {advancesError ? (
-          <p className="mt-3 text-sm text-red-600">{explainError(advancesError, t)}</p>
+          <p role="alert" className="mt-3 text-body text-danger-ink">{explainError(advancesError, t)}</p>
         ) : (
           <>
-            <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 text-sm sm:grid-cols-4">
-              <dt className="text-slate-600">{t.treasury.advanceOutstandingCash}</dt>
+            <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 text-body sm:grid-cols-4">
+              <dt className="text-ink-secondary">{t.treasury.advanceOutstandingCash}</dt>
               <dd className="text-end font-semibold">
                 <Money value={advances?.outstandingCash ?? '0.00'} />
               </dd>
-              <dt className="text-slate-600">{t.treasury.advanceOutstandingWallet}</dt>
+              <dt className="text-ink-secondary">{t.treasury.advanceOutstandingWallet}</dt>
               <dd className="text-end font-semibold">
                 <Money value={advances?.outstandingWallet ?? '0.00'} />
               </dd>
@@ -1214,13 +1208,13 @@ export function Treasury(): ReactNode {
               >
                 {(advances?.outstanding ?? []).map((row) => (
                   <tr key={row.id}>
-                    <td className="px-3 py-2 font-medium text-slate-800">{row.partyName}</td>
-                    <td className="px-3 py-2 text-slate-600">{row.description}</td>
-                    <td className="px-3 py-2 text-slate-600">
+                    <td className="px-3 py-2 font-medium text-ink">{row.partyName}</td>
+                    <td className="px-3 py-2 text-ink-secondary">{row.description}</td>
+                    <td className="px-3 py-2 text-ink-secondary">
                       {row.channel === 'office_cash' ? t.treasury.cashBox : t.treasury.wallet}
                     </td>
                     <td className="px-3 py-2 font-semibold"><Money value={row.outstanding} /></td>
-                    <td className="px-3 py-2 text-slate-600"><Money value={row.repaid} /></td>
+                    <td className="px-3 py-2 text-ink-secondary"><Money value={row.repaid} /></td>
                     <td className="px-3 py-2">
                       {canDeposit ? (
                         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -1252,20 +1246,20 @@ export function Treasury(): ReactNode {
                           </Button>
                         </div>
                       ) : (
-                        <span className="text-slate-400">—</span>
+                        <span className="text-ink-faint">—</span>
                       )}
                     </td>
                   </tr>
                 ))}
               </Table>
             </div>
-            {canDeposit ? <p className="mt-2 text-xs text-slate-600">{t.treasury.advanceRepayHint}</p> : null}
+            {canDeposit ? <p className="mt-2 text-label text-ink-secondary">{t.treasury.advanceRepayHint}</p> : null}
           </>
         )}
       </Card>
 
       <Card title={t.treasury.receivables} className="lg:col-span-2">
-        <p className="text-xs text-slate-600">{t.treasury.receivablesHint}</p>
+        <p className="text-label text-ink-secondary">{t.treasury.receivablesHint}</p>
         {!selectedReceivables ? (
           <Pending
             error={selectedReceivablesError}
@@ -1277,9 +1271,9 @@ export function Treasury(): ReactNode {
         ) : (
           <>
             {canDeposit ? (
-              <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
-                <h3 className="text-sm font-bold text-slate-700">{t.treasury.receivableEventTitle}</h3>
-                <p className="mt-1 text-xs text-slate-600">{t.treasury.receivableEventHint}</p>
+              <div className="mt-3 rounded-xl border border-line bg-surface-muted p-3">
+                <h3 className="text-title font-bold text-ink">{t.treasury.receivableEventTitle}</h3>
+                <p className="mt-1 text-label text-ink-secondary">{t.treasury.receivableEventHint}</p>
                 <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
                   <Field label={t.treasury.driver}>
                     <Select
@@ -1325,8 +1319,8 @@ export function Treasury(): ReactNode {
                         channel: event.target.value as ReceivableChannel,
                       }))}
                     >
-                      <option value="cash">{t.treasury.receivableChannels.cash}</option>
-                      <option value="wallet">{t.treasury.receivableChannels.wallet}</option>
+                      <option value="cash">{receivableChannelLabel('cash')}</option>
+                      <option value="wallet">{receivableChannelLabel('wallet')}</option>
                     </Select>
                   </Field>
                   <Field label={t.treasury.receivableDirection}>
@@ -1396,22 +1390,22 @@ export function Treasury(): ReactNode {
                   </Button>
                 </div>
                 {receivableDraft.direction === 'writeoff' ? (
-                  <p className="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-800">
+                  <p className="mt-2 rounded-lg border border-danger-line bg-danger-surface px-3 py-2 text-label font-medium text-danger-ink">
                     {t.treasury.receivableWriteoffHint}
                   </p>
                 ) : null}
                 {receivableDraft.driverId ? (
-                  <p className="mt-2 text-xs text-slate-600">
+                  <p className="mt-2 text-label text-ink-secondary">
                     {t.treasury.currentReceivableBalance}: <Money value={selectedReceivableBalance} className="font-semibold" />
                   </p>
                 ) : null}
                 {receivableDraft.direction === 'writeoff' && !writeoffAmountWithinBalance ? (
-                  <p className="mt-2 text-xs font-medium text-red-700">
+                  <p role="alert" className="mt-2 text-label font-medium text-danger-ink">
                     {t.treasury.receivableWriteoffBalanceHint} <Money value={selectedReceivableBalance} />
                   </p>
                 ) : null}
                 {receivableEventError ? (
-                  <p className="mt-2 text-sm font-medium text-red-600">
+                  <p role="alert" className="mt-2 text-body font-medium text-danger-ink">
                     {receivableEventError === 'receivable_outbox_unavailable'
                       ? t.treasury.receivableOutboxUnavailable
                       : receivableEventError === 'receivable_outbox_corrupt'
@@ -1427,39 +1421,39 @@ export function Treasury(): ReactNode {
                 ) : null}
               </div>
             ) : (
-              <p className="mt-3 text-xs text-slate-600">{t.treasury.receivableWriteRoleHint}</p>
+              <p className="mt-3 text-label text-ink-secondary">{t.treasury.receivableWriteRoleHint}</p>
             )}
             <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
-              <div className="rounded-lg bg-slate-50 p-3">
-                <div className="text-xs font-medium text-slate-500">{t.treasury.receivablesCashTotal}</div>
-                <div className="mt-1 text-lg font-bold"><Money value={selectedReceivables.cashTotal} /></div>
+              <div className="rounded-lg bg-surface-muted p-3">
+                <div className="text-label font-medium text-ink-muted">{t.treasury.receivablesCashTotal}</div>
+                <div className="mt-1 text-figure font-bold text-ink"><Money value={selectedReceivables.cashTotal} /></div>
               </div>
-              <div className="rounded-lg bg-slate-50 p-3">
-                <div className="text-xs font-medium text-slate-500">{t.treasury.receivablesWalletTotal}</div>
-                <div className="mt-1 text-lg font-bold"><Money value={selectedReceivables.walletTotal} /></div>
+              <div className="rounded-lg bg-surface-muted p-3">
+                <div className="text-label font-medium text-ink-muted">{t.treasury.receivablesWalletTotal}</div>
+                <div className="mt-1 text-figure font-bold text-ink"><Money value={selectedReceivables.walletTotal} /></div>
               </div>
-              <div className="rounded-lg bg-brand/5 p-3 text-brand">
-                <div className="text-xs font-medium">{t.treasury.receivablesGrandTotal}</div>
-                <div className="mt-1 text-lg font-bold"><Money value={selectedReceivables.grandTotal} /></div>
+              <div className="rounded-lg border border-brand/30 bg-surface-card p-3 text-brand">
+                <div className="text-label font-medium">{t.treasury.receivablesGrandTotal}</div>
+                <div className="mt-1 text-figure font-bold"><Money value={selectedReceivables.grandTotal} /></div>
               </div>
             </div>
             <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div className="rounded-lg border border-slate-200 p-3">
-                <h3 className="text-sm font-semibold text-slate-700">{t.treasury.receivableKinds.ordinary}</h3>
-                <dl className="mt-2 grid grid-cols-2 gap-y-1 text-sm">
-                  <dt className="text-slate-600">{t.treasury.receivableChannels.cash}</dt>
+              <div className="rounded-lg border border-line p-3">
+                <h3 className="text-body font-semibold text-ink">{t.treasury.receivableKinds.ordinary}</h3>
+                <dl className="mt-2 grid grid-cols-2 gap-y-1 text-body">
+                  <dt className="text-ink-secondary">{receivableChannelLabel('cash')}</dt>
                   <dd className="text-end font-semibold"><Money value={selectedReceivables.ordinaryCashTotal} /></dd>
-                  <dt className="text-slate-600">{t.treasury.receivableChannels.wallet}</dt>
+                  <dt className="text-ink-secondary">{receivableChannelLabel('wallet')}</dt>
                   <dd className="text-end font-semibold"><Money value={selectedReceivables.ordinaryWalletTotal} /></dd>
                 </dl>
               </div>
-              <div className="rounded-lg border border-sky-200 bg-sky-50/50 p-3">
-                <h3 className="text-sm font-semibold text-sky-800">{t.treasury.receivableKinds.shift_funding}</h3>
-                <p className="mt-1 text-xs text-sky-700">{t.treasury.shiftFundingHint}</p>
-                <dl className="mt-2 grid grid-cols-2 gap-y-1 text-sm">
-                  <dt className="text-slate-600">{t.treasury.receivableChannels.cash}</dt>
+              <div className="rounded-lg border border-info-line bg-info-surface p-3">
+                <h3 className="text-body font-semibold text-info-ink">{t.treasury.receivableKinds.shift_funding}</h3>
+                <p className="mt-1 text-label text-info-ink">{t.treasury.shiftFundingHint}</p>
+                <dl className="mt-2 grid grid-cols-2 gap-y-1 text-body">
+                  <dt className="text-ink-secondary">{receivableChannelLabel('cash')}</dt>
                   <dd className="text-end font-semibold"><Money value={selectedReceivables.shiftFundingCashTotal} /></dd>
-                  <dt className="text-slate-600">{t.treasury.receivableChannels.wallet}</dt>
+                  <dt className="text-ink-secondary">{receivableChannelLabel('wallet')}</dt>
                   <dd className="text-end font-semibold"><Money value={selectedReceivables.shiftFundingWalletTotal} /></dd>
                 </dl>
               </div>
@@ -1469,10 +1463,10 @@ export function Treasury(): ReactNode {
                 head={[
                   t.treasury.driver,
                   t.treasury.driverCode,
-                  `${t.treasury.receivableKinds.ordinary} / ${t.treasury.receivableChannels.cash}`,
-                  `${t.treasury.receivableKinds.ordinary} / ${t.treasury.receivableChannels.wallet}`,
-                  `${t.treasury.receivableKinds.shift_funding} / ${t.treasury.receivableChannels.cash}`,
-                  `${t.treasury.receivableKinds.shift_funding} / ${t.treasury.receivableChannels.wallet}`,
+                  `${t.treasury.receivableKinds.ordinary} / ${receivableChannelLabel('cash')}`,
+                  `${t.treasury.receivableKinds.ordinary} / ${receivableChannelLabel('wallet')}`,
+                  `${t.treasury.receivableKinds.shift_funding} / ${receivableChannelLabel('cash')}`,
+                  `${t.treasury.receivableKinds.shift_funding} / ${receivableChannelLabel('wallet')}`,
                   t.treasury.total,
                   t.accounts.actions,
                 ]}
@@ -1481,8 +1475,8 @@ export function Treasury(): ReactNode {
               >
                 {selectedReceivables.drivers.map((driver) => (
                   <tr key={driver.driverId}>
-                    <td className="px-3 py-2 font-medium text-slate-800">{driver.nameAr}</td>
-                    <td className="px-3 py-2 text-slate-600" dir="ltr">{driver.code}</td>
+                    <td className="px-3 py-2 font-medium text-ink">{driver.nameAr}</td>
+                    <td className="px-3 py-2 text-ink-secondary" dir="ltr">{driver.code}</td>
                     <td className="px-3 py-2"><Money value={driver.ordinaryCash} /></td>
                     <td className="px-3 py-2"><Money value={driver.ordinaryWallet} /></td>
                     <td className="px-3 py-2"><Money value={driver.shiftFundingCash} /></td>
@@ -1504,8 +1498,8 @@ export function Treasury(): ReactNode {
                           .filter(([, , value]) => Number(value) !== 0)
                           .map(([kind, channel]) => (
                             <div key={`${kind}-${channel}`} className="flex items-center gap-1">
-                              <span className="text-xs text-slate-500">
-                                {t.treasury.receivableKinds[kind]} / {t.treasury.receivableChannels[channel]}
+                              <span className="text-label text-ink-muted">
+                                {t.treasury.receivableKinds[kind]} / {receivableChannelLabel(channel)}
                               </span>
                               <Button
                                 variant="ghost"
@@ -1554,18 +1548,18 @@ export function Treasury(): ReactNode {
                               ) : null}
                             </div>
                           ))}
-                        {Number(driver.total) === 0 ? <span className="text-xs text-slate-400">—</span> : null}
+                        {Number(driver.total) === 0 ? <span className="text-label text-ink-faint">—</span> : null}
                       </div>
                     </td>
                   </tr>
                 ))}
               </Table>
             </div>
-            <div ref={correctionFormRef} className="mt-5 border-t border-slate-200 pt-3">
-              <h3 className="text-sm font-bold text-slate-700">{t.treasury.correctionTitle}</h3>
-              <p className="mt-1 text-xs text-slate-600">{t.treasury.correctionHint}</p>
+            <div ref={correctionFormRef} className="mt-5 border-t border-line pt-3">
+              <h3 className="text-title font-bold text-ink">{t.treasury.correctionTitle}</h3>
+              <p className="mt-1 text-label text-ink-secondary">{t.treasury.correctionHint}</p>
               {correctionTarget.trim() === '0.00' && correctionCurrent !== null ? (
-                <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                <p className="mt-2 rounded-lg bg-warning-surface px-3 py-2 text-label text-warning-ink">
                   {t.treasury.correctionClearing}
                 </p>
               ) : null}
@@ -1591,13 +1585,13 @@ export function Treasury(): ReactNode {
                     value={correctionChannel}
                     onChange={(e) => setCorrectionChannel(e.target.value as ReceivableChannel)}
                   >
-                    <option value="cash">{t.treasury.receivableChannels.cash}</option>
-                    <option value="wallet">{t.treasury.receivableChannels.wallet}</option>
+                    <option value="cash">{receivableChannelLabel('cash')}</option>
+                    <option value="wallet">{receivableChannelLabel('wallet')}</option>
                   </Select>
                 </Field>
                 <Field label={t.treasury.correctionCurrent}>
                   {/* Read-only by design — see `correctionCurrent`. */}
-                  <div className="num flex min-h-10 items-center rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm text-slate-700">
+                  <div className="num flex min-h-10 items-center rounded-lg border border-line bg-surface-muted px-3 text-body text-ink-secondary">
                     {correctionCurrent === null ? '—' : <Money value={correctionCurrent} />}
                   </div>
                 </Field>
@@ -1609,10 +1603,10 @@ export function Treasury(): ReactNode {
                 </Field>
               </div>
               {correctionError ? (
-                <p className="mt-2 text-sm text-red-600">{explainError(correctionError, t)}</p>
+                <p role="alert" className="mt-2 text-body text-danger-ink">{explainError(correctionError, t)}</p>
               ) : null}
               {correctionCurrent !== null && correctionTarget.trim() === correctionCurrent ? (
-                <p className="mt-2 text-sm text-amber-700">{t.treasury.correctionNoChange}</p>
+                <p className="mt-2 text-body text-warning-ink">{t.treasury.correctionNoChange}</p>
               ) : null}
               <div className="mt-3">
                 <Button
@@ -1630,8 +1624,8 @@ export function Treasury(): ReactNode {
               </div>
             </div>
 
-            <div className="mt-5 border-t border-slate-200 pt-3">
-              <h3 className="text-sm font-bold text-slate-700">{t.treasury.receivableHistory}</h3>
+            <div className="mt-5 border-t border-line pt-3">
+              <h3 className="text-title font-bold text-ink">{t.treasury.receivableHistory}</h3>
               {!selectedReceivableHistory ? (
                 <Pending
                   error={selectedReceivableHistoryError}
@@ -1656,10 +1650,10 @@ export function Treasury(): ReactNode {
                 >
                   {selectedReceivableHistory.slice(0, 10).map((event) => (
                     <tr key={event.id}>
-                      <td className="num px-3 py-2 text-slate-500">{event.businessDate}</td>
+                      <td className="num px-3 py-2 text-ink-muted">{event.businessDate}</td>
                       <td className="px-3 py-2">{event.driverNameAr} ({event.driverCode})</td>
                       <td className="px-3 py-2">{t.treasury.receivableKinds[event.receivableKind]}</td>
-                      <td className="px-3 py-2">{t.treasury.receivableChannels[event.channel]}</td>
+                      <td className="px-3 py-2">{receivableChannelLabel(event.channel)}</td>
                       <td className="px-3 py-2">
                         {/*
                           A correction posts as a collection, and rendering it as one would tell the
@@ -1667,9 +1661,9 @@ export function Treasury(): ReactNode {
                           restatement it actually was.
                         */}
                         {event.intent === 'writeoff' ? (
-                          <span className="text-red-700">{t.treasury.writeoffIntent}</span>
+                          <span className="text-danger-ink">{t.treasury.writeoffIntent}</span>
                         ) : event.intent === 'correction' ? (
-                          <span className="num text-slate-700">
+                          <span className="num text-ink-secondary">
                             {t.treasury.correctionIntent}: <Money value={event.priorBalance ?? '0.00'} /> →{' '}
                             <Money value={event.targetBalance ?? '0.00'} />
                           </span>
@@ -1678,7 +1672,7 @@ export function Treasury(): ReactNode {
                         )}
                       </td>
                       <td className="px-3 py-2"><Money value={event.amount} /></td>
-                      <td className="px-3 py-2 text-slate-600">{event.reason}</td>
+                      <td className="px-3 py-2 text-ink-secondary">{event.reason}</td>
                     </tr>
                   ))}
                 </Table>
@@ -1694,8 +1688,8 @@ export function Treasury(): ReactNode {
         It reads the ledger-backed office balance and shows the two boxes side by side: what the
         system says is in each box, what is out on ذمم, and how far that stands from رأس مال المكتب.
       */}
-      <Card title={t.treasury.restoration} className="lg:col-span-2">
-        <p className="text-xs text-slate-600">{t.treasury.restorationHint}</p>
+      <Card title={t.glossary.finance.dailyRestoration} className="lg:col-span-2">
+        <p className="text-label text-ink-secondary">{t.treasury.restorationHint}</p>
         {!restoration ? (
           <Pending
             error={restorationError}
@@ -1705,51 +1699,48 @@ export function Treasury(): ReactNode {
             retryLabel={t.common.retry}
           />
         ) : restoration.source !== 'live_ledger' ? (
-          <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-800">
+          <div role="status" className="mt-3 rounded-lg border border-warning-line bg-warning-surface p-3 text-body font-semibold text-warning-ink">
             {t.treasury.restorationServerUpdateRequired}
           </div>
         ) : (
           <>
             {canDeposit ? (
-              <section className="mt-3 rounded-xl border border-slate-200 bg-slate-50/70 p-3">
+              <section className="mt-3 rounded-xl border border-line bg-surface-muted p-3">
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div>
-                    <h3 className="text-sm font-bold text-slate-800">{t.treasury.editCapitalTargets}</h3>
-                    <p className="mt-0.5 text-xs text-slate-600">{t.treasury.capitalTargetsHint}</p>
+                    <h3 className="text-title font-bold text-ink">{t.treasury.editCapitalTargets}</h3>
+                    <p className="mt-0.5 text-label text-ink-secondary">{t.treasury.capitalTargetsHint}</p>
                   </div>
                   {restoration.alreadyRestored === true ? (
-                    <span className="text-xs font-semibold text-amber-700">{t.treasury.capitalTargetsLocked}</span>
+                    <span className="text-label font-semibold text-warning-ink">{t.treasury.capitalTargetsLocked}</span>
                   ) : null}
                 </div>
                 <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                  <label className="text-xs font-medium text-slate-600">
-                    {t.treasury.cashCapitalTarget}
+                  <Field label={t.treasury.cashCapitalTarget}>
                     <MoneyInput
-                      className="mt-1 w-full"
+                      className="w-full"
                       value={capitalTargetsDraft.cash}
                       disabled={capitalTargetsBusy || restoration.alreadyRestored === true}
                       onChange={(event) => setCapitalTargetsDraft((current) => ({ ...current, cash: event.target.value }))}
                     />
-                  </label>
-                  <label className="text-xs font-medium text-slate-600">
-                    {t.treasury.walletCapitalTarget}
+                  </Field>
+                  <Field label={t.treasury.walletCapitalTarget}>
                     <MoneyInput
-                      className="mt-1 w-full"
+                      className="w-full"
                       value={capitalTargetsDraft.wallet}
                       disabled={capitalTargetsBusy || restoration.alreadyRestored === true}
                       onChange={(event) => setCapitalTargetsDraft((current) => ({ ...current, wallet: event.target.value }))}
                     />
-                  </label>
-                  <label className="text-xs font-medium text-slate-600">
-                    {t.treasury.capitalTargetReason}
+                  </Field>
+                  <Field label={t.treasury.capitalTargetReason}>
                     <TextInput
-                      className="mt-1 w-full"
+                      className="w-full"
                       value={capitalTargetReason}
                       placeholder={t.treasury.capitalTargetReasonPlaceholder}
                       disabled={capitalTargetsBusy || restoration.alreadyRestored === true}
                       onChange={(event) => setCapitalTargetReason(event.target.value)}
                     />
-                  </label>
+                  </Field>
                   <Button
                     className="self-end"
                     disabled={capitalTargetsBusy || restoration.alreadyRestored === true || !capitalTargetsReady}
@@ -1762,25 +1753,25 @@ export function Treasury(): ReactNode {
             ) : null}
             {restorationSummary ? (
               <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
-                <div className="rounded-lg bg-slate-50 p-3">
-                  <div className="text-xs font-medium text-slate-500">{t.treasury.currentPosition}</div>
-                  <div className="mt-1 text-lg font-bold"><Money value={restorationSummary.position} /></div>
+                <div className="rounded-lg bg-surface-muted p-3">
+                  <div className="text-label font-medium text-ink-muted">{t.treasury.currentPosition}</div>
+                  <div className="mt-1 text-figure font-bold text-ink"><Money value={restorationSummary.position} /></div>
                 </div>
-                <div className="rounded-lg bg-slate-50 p-3">
-                  <div className="text-xs font-medium text-slate-500">{t.treasury.capitalTarget}</div>
-                  <div className="mt-1 text-lg font-bold"><Money value={restorationSummary.target} /></div>
+                <div className="rounded-lg bg-surface-muted p-3">
+                  <div className="text-label font-medium text-ink-muted">{t.treasury.capitalTarget}</div>
+                  <div className="mt-1 text-figure font-bold text-ink"><Money value={restorationSummary.target} /></div>
                 </div>
                 <div
                   className={`rounded-lg p-3 ${
                     restorationSummary.delta.direction === 'increase'
-                      ? 'bg-emerald-50 text-emerald-800'
+                      ? 'bg-success-surface text-success-ink'
                       : restorationSummary.delta.direction === 'shortage'
-                        ? 'bg-amber-50 text-amber-800'
-                        : 'bg-slate-50 text-slate-700'
+                        ? 'bg-warning-surface text-warning-ink'
+                        : 'bg-surface-muted text-ink-secondary'
                   }`}
                 >
-                  <div className="text-xs font-medium">{directionLabel(restorationSummary.delta.direction, true)}</div>
-                  <div className="mt-1 text-lg font-bold"><Money value={restorationSummary.delta.amount} /></div>
+                  <div className="text-label font-medium">{directionLabel(restorationSummary.delta.direction, true)}</div>
+                  <div className="mt-1 text-figure font-bold"><Money value={restorationSummary.delta.amount} /></div>
                 </div>
               </div>
             ) : null}
@@ -1788,13 +1779,13 @@ export function Treasury(): ReactNode {
               {restoration.legs.map((leg) => {
                 const delta = differenceView(leg.delta)
                 return (
-                  <div key={leg.fundCode} className="rounded-lg border border-slate-200 p-3">
-                    <div className="text-xs font-semibold text-slate-500">
+                  <div key={leg.fundCode} className="rounded-lg border border-line p-3">
+                    <div className="text-label font-semibold text-ink-muted">
                       {leg.fundCode === 'office_cash' ? t.treasury.cashBox : t.treasury.wallet}
                     </div>
-                    <dl className="mt-2 grid grid-cols-2 gap-y-1 text-sm">
-                      <div className="col-span-2 rounded-lg bg-slate-50 px-2 py-1.5">
-                        <dt className="text-xs text-slate-500">{t.treasury.positionFormula}</dt>
+                    <dl className="mt-2 grid grid-cols-2 gap-y-1 text-body">
+                      <div className="col-span-2 rounded-lg bg-surface-muted px-2 py-1.5">
+                        <dt className="text-label text-ink-muted">{t.treasury.positionFormula}</dt>
                         <dd className="mt-1 flex flex-wrap items-center justify-end gap-1 font-semibold" dir="ltr">
                           <Money value={leg.officeBalance} />
                           <span>+</span>
@@ -1803,18 +1794,18 @@ export function Treasury(): ReactNode {
                           <Money value={leg.position} />
                         </dd>
                       </div>
-                      <dt className="text-slate-600">{t.treasury.capitalTarget}</dt>
+                      <dt className="text-ink-secondary">{t.treasury.capitalTarget}</dt>
                       <dd className="text-end">
                         <Money value={leg.capitalTarget} />
                       </dd>
                     </dl>
                     <div
-                      className={`mt-2 border-t border-slate-100 pt-2 text-sm font-semibold ${
+                      className={`mt-2 border-t border-line-subtle pt-2 text-body font-semibold ${
                         delta.direction === 'increase'
-                          ? 'text-emerald-700'
+                          ? 'text-success-ink'
                           : delta.direction === 'shortage'
-                            ? 'text-amber-700'
-                            : 'text-slate-600'
+                            ? 'text-warning-ink'
+                            : 'text-ink-secondary'
                       }`}
                     >
                       <div>
@@ -1827,7 +1818,7 @@ export function Treasury(): ReactNode {
                       </div>
                     </div>
                     {leg.refusals.map((code) => (
-                      <p key={code} className="mt-2 text-xs text-red-700">
+                      <p key={code} className="mt-2 text-label text-danger-ink">
                         {t.treasury.restorationRefusal[code]}
                       </p>
                     ))}
@@ -1838,12 +1829,12 @@ export function Treasury(): ReactNode {
             <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
               {restorationNet ? (
                 <span
-                  className={`text-sm font-semibold ${
+                  className={`text-body font-semibold ${
                     restorationNet.direction === 'increase'
-                      ? 'text-emerald-700'
+                      ? 'text-success-ink'
                       : restorationNet.direction === 'shortage'
-                        ? 'text-amber-700'
-                        : 'text-slate-600'
+                        ? 'text-warning-ink'
+                        : 'text-ink-secondary'
                   }`}
                 >
                   {t.treasury.netMovement}: {' '}
@@ -1864,7 +1855,7 @@ export function Treasury(): ReactNode {
               */}
               <div className="flex flex-wrap items-center gap-3">
                 {restoration.alreadyRestored === true ? (
-                  <span className="text-sm font-semibold text-emerald-700">
+                  <span className="text-body font-semibold text-success-ink">
                     {t.treasury.restored} ✓
                     {restoration.runsToday === undefined
                       ? ''
@@ -1875,7 +1866,7 @@ export function Treasury(): ReactNode {
                   {restoration.alreadyRestored === true ? t.treasury.doRestoreAgain : t.treasury.doRestore}
                 </Button>
                 {canManageCompanyFund ? (
-                  <a className="inline-flex min-h-10 items-center rounded-lg border border-line-strong bg-surface-card px-4 text-body font-semibold text-brand hover:bg-surface-muted" href="#companyFund?tab=depreciation">
+                  <a className={`inline-flex min-h-10 items-center rounded-lg border border-line-strong bg-surface-card px-4 text-body font-semibold text-brand hover:bg-surface-muted ${FOCUS_RING}`} href="#companyFund?tab=depreciation">
                     {t.companyFinance.transfer}
                   </a>
                 ) : null}
@@ -1892,11 +1883,11 @@ export function Treasury(): ReactNode {
               {t.week.closeSunday}
             </Button>
             {closeResult?.weekStart ? (
-              <p className="mt-2 text-sm text-emerald-700">
+              <p role="status" className="mt-2 text-body text-success-ink">
                 {t.week.sealed}: {closeResult.weekStart}
               </p>
             ) : closeResult?.blockers ? (
-              <ul className="mt-2 text-sm text-red-600">
+              <ul role="alert" className="mt-2 text-body text-danger-ink">
                 {closeResult.blockers.map((b, i) => (
                   <li key={i}>• {t.treasury.closeBlockers[b.kind as keyof typeof t.treasury.closeBlockers] ?? b.kind}</li>
                 ))}
@@ -1906,11 +1897,11 @@ export function Treasury(): ReactNode {
               // the sysadmin pressed «إقفال الأحد», nothing changed on screen, and the reason
               // (branch_required) was never shown. Silence is the worst failure mode for the one
               // action that makes a week immutable.
-              <p className="mt-2 text-sm font-medium text-red-600">{explainError(closeResult.error, t)}</p>
+              <p role="alert" className="mt-2 text-body font-medium text-danger-ink">{explainError(closeResult.error, t)}</p>
             ) : null}
           </>
         ) : (
-          <p className="text-sm text-slate-600">{t.week.closeSunday} — {t.common.no}</p>
+          <p className="text-body text-ink-secondary">{t.week.closeSunday} — {t.common.no}</p>
         )}
       </Card>
 
@@ -1956,18 +1947,18 @@ export function Treasury(): ReactNode {
               <Button variant="ghost" onClick={addLine}>
                 + {t.treasury.addLine}
               </Button>
-              <span className="num ms-auto text-xs text-slate-500" dir="ltr">
+              <span className="num ms-auto text-label text-ink-muted" dir="ltr">
                 D <Money value={sideTotal('D')} /> · C <Money value={sideTotal('C')} />
                 {entryBalanced ? '' : ` · ${t.treasury.unbalanced}`}
               </span>
             </div>
-            {manualError ? <p className="text-sm text-red-600">{explainError(manualError, t)}</p> : null}
-            {manualMsg ? <p className="text-sm font-medium text-emerald-700">{manualMsg}</p> : null}
+            {manualError ? <p role="alert" className="text-body text-danger-ink">{explainError(manualError, t)}</p> : null}
+            {manualMsg ? <p role="status" className="text-body font-medium text-success-ink">{manualMsg}</p> : null}
             <Button variant="primary" className="self-start" disabled={!entryBalanced} onClick={postManual}>
               {t.treasury.post}
             </Button>
 
-            <div className="mt-1 flex flex-wrap items-end gap-2 border-t border-slate-100 pt-3">
+            <div className="mt-1 flex flex-wrap items-end gap-2 border-t border-line-subtle pt-3">
               <Field label={t.treasury.entryId}>
                 <TextInput inputMode="numeric" value={revId} onChange={(e) => setRevId(e.target.value)} className="w-24" />
               </Field>
@@ -1978,7 +1969,7 @@ export function Treasury(): ReactNode {
                 {t.treasury.reverse}
               </Button>
             </div>
-            {revMsg ? <p className="text-sm text-slate-600">{revMsg}</p> : null}
+            {revMsg ? <p role="status" className="text-body text-ink-secondary">{revMsg}</p> : null}
           </div>
         </Card>
       ) : null}

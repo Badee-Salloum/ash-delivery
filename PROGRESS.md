@@ -1,5 +1,31 @@
 # PROGRESS
 
+## 2026-09-19 — ASH Delivery design-system unification complete, verified, and deployed
+
+**Scope.** This is a presentation-only migration across the admin and driver web apps. It establishes
+the ASH Delivery product identity (with ASH GROUP as a secondary reference), a central Arabic/English
+operational glossary, shared Damascus time/money presentation, semantic theme tokens, and consistent
+loading, empty, error, form, toast, and confirmation behavior. It explicitly changes **no** financial
+calculation, journal behavior, permission, API contract, database schema/data, or backend production state.
+
+**Current slice.** The shared layer adds safe foreground/contrast and map-state tokens, motion/focus
+tokens, an accessible confirmation dialog and labelled field contract, a shared page header, central
+translation parity/boundary guards, and a guard against browser-local date/time formatting. Finance and
+admin screens now use the first migration slice. The driver app has the same persisted Auto/Light/Dark
+choice and its phone-first feedback/confirmation contract. Canonical copy distinguishes net profit,
+daily restoration, and operating capital; restoration states whether it sends a surplus to, or funds a
+shortfall from, the company fund.
+
+**Production release.** On 2026-09-19 the static Admin bundle was promoted as
+`dpl_75oexHWPgAVMa4axYC3Qyna4662M` and the Driver PWA as `dpl_6QkYMwTAfojD5HzvNsz5RAt6bwQq`.
+The API function, Neon database, and migration head were untouched; no production database action or
+migration ran.
+
+**Verified.** On Node 24, `pnpm check` and `pnpm build:apps` passed. The visual suite recorded
+**9 passing / 18 skipped** cases, and production smoke passed for both stable front-end URLs and
+their same-origin API proxies. The visual coverage includes Arabic/English, light/dark, desktop Admin
+finance states, and 320px/390px Driver login, registration, and suspended-shift states.
+
 ## 2026-09-18 — current finance and fleet changes deployed
 
 **Live.** Commit `bb39ffd79a4dcd5c47cbbff4ecee33ef79257004` is deployed to all three

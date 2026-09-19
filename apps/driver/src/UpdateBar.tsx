@@ -325,16 +325,16 @@ export function UpdateBar({ safeBoundary }: UpdateBarProps): ReactNode {
   return (
     <>
       {updateAvailable ? (
-        <div role="status" className="flex items-center justify-between gap-3 bg-amber-500 px-4 py-2 text-sm font-medium text-white">
+        <div role="status" className="flex items-center justify-between gap-3 bg-warning-solid px-4 py-2 text-sm font-medium text-on-warning">
           <span>{applying ? applyingCopy : delayed ? delayedCopy : t.app.updateAvailable}</span>
           {!applying && !delayed ? (
-            <button onClick={() => void activate()} className="rounded-lg bg-white/20 px-3 py-1 font-semibold">
+            <button type="button" onClick={() => void activate()} className="min-h-11 rounded-xl bg-white/20 px-3 py-1 font-semibold outline-none focus-visible:ring-2 focus-visible:ring-on-warning">
               {t.app.updateNow}
             </button>
           ) : null}
         </div>
       ) : null}
-      <div className="bg-brand px-2 py-0.5 text-center text-[10px] font-medium text-white/70">
+      <div className="bg-brand px-2 py-0.5 text-center text-[10px] font-medium text-on-brand/70">
         {buildCopy} <span dir="ltr" className="num">{DRIVER_BUILD_ID}</span>
       </div>
       {applying ? <div aria-hidden="true" className="fixed inset-0 z-50 bg-slate-950/20" /> : null}

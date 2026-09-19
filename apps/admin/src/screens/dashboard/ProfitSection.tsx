@@ -5,7 +5,7 @@ import { TrendBars } from '../../components/TrendBars.tsx'
 import { drill } from '../../drill.ts'
 import { explainError } from '../../errors.ts'
 import { useApp } from '../../app-context.tsx'
-import { Card, Figure, Money, Pending, Stat } from '../../ui.tsx'
+import { Card, Figure, FOCUS_RING, Money, Pending, Stat } from '../../ui.tsx'
 import { SectionHeading } from './SectionHeading.tsx'
 import type { ProfitDigest } from './types.ts'
 import { useDashboardRead } from './use-dashboard-read.ts'
@@ -21,7 +21,7 @@ export function ProfitSection({ range }: { range: DateRange }): ReactNode {
         title={t.dashboard.profitTitle}
         subtitle={t.dashboard.profitSubtitle}
         action={
-          <a className="text-label font-semibold text-brand underline" href={drill.expenses({ from: range.from, to: range.to })}>
+          <a className={`text-label font-semibold text-brand underline ${FOCUS_RING}`} href={drill.expenses({ from: range.from, to: range.to })}>
             {t.dashboard.openExpenses} ›
           </a>
         }

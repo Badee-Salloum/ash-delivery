@@ -1,4 +1,13 @@
-import { type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, useId } from 'react'
+import {
+  cloneElement,
+  isValidElement,
+  type ButtonHTMLAttributes,
+  type InputHTMLAttributes,
+  type ReactElement,
+  type ReactNode,
+  type SelectHTMLAttributes,
+  useId,
+} from 'react'
 import { groupThousands } from '@ash/client'
 import type { Currency } from '@ash/domain'
 import { useApp } from './app-context.tsx'
@@ -16,12 +25,13 @@ export const FOCUS_RING =
   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-surface-card'
 
 /**
- * The ASH GROUP mark: a hexagon around an ascending bar chart, navy rising to blue. Drawn in the
+ * The ASH Delivery mark: a hexagon around an ascending bar chart, navy rising to blue. Drawn in the
  * brand CSS variables so it recolours with the theme and stays crisp at any size — no raster asset.
  */
 export function Logo({ size = 40, className = '' }: { size?: number; className?: string }): ReactNode {
+  const { t } = useApp()
   return (
-    <svg width={size} height={size} viewBox="0 0 48 48" fill="none" role="img" aria-label="ASH GROUP" className={className}>
+    <svg width={size} height={size} viewBox="0 0 48 48" fill="none" role="img" aria-label={t.glossary.brand.product} className={className}>
       <path
         d="M24 3 L43 13.5 L43 34.5 L24 45 L5 34.5 L5 13.5 Z"
         fill="none"
@@ -38,14 +48,13 @@ export function Logo({ size = 40, className = '' }: { size?: number; className?:
 
 /** Mark + wordmark, for the header rail and the login card. */
 export function Wordmark({ size = 34 }: { size?: number }): ReactNode {
+  const { t } = useApp()
   return (
     <div className="flex items-center gap-2.5">
       <Logo size={size} />
       <div className="leading-tight">
-        <div className="text-base font-extrabold tracking-tight text-brand">
-          ASH <span className="text-accent">GROUP</span>
-        </div>
-        <div className="text-[9px] font-semibold tracking-[0.22em] text-slate-400">FINANCIAL SERVICES</div>
+        <div className="text-base font-extrabold tracking-tight text-brand">{t.glossary.brand.product}</div>
+        <div className="text-[9px] font-semibold tracking-[0.16em] text-ink-faint">{t.glossary.brand.group}</div>
       </div>
     </div>
   )
@@ -110,10 +119,10 @@ export function Button({
   size?: 'sm' | 'md'
 }): ReactNode {
   const styles: Record<string, string> = {
-    primary: 'bg-brand text-ink-inverse shadow-sm hover:bg-brand-700',
+    primary: 'bg-brand text-on-brand shadow-sm hover:bg-brand-700',
     ghost: 'bg-surface-card text-brand border border-line-strong hover:border-brand hover:bg-surface-muted',
-    danger: 'bg-danger-solid text-white hover:bg-danger-solid-hover',
-    success: 'bg-success-solid text-white hover:bg-success-solid-hover',
+    danger: 'bg-danger-solid text-on-danger hover:bg-danger-solid-hover',
+    success: 'bg-success-solid text-on-success hover:bg-success-solid-hover',
   }
   const sizes: Record<string, string> = {
     sm: 'min-h-8 px-2.5 text-label',
@@ -132,7 +141,7 @@ export function Button({
 export function TextInput({ className = '', ...rest }: InputHTMLAttributes<HTMLInputElement>): ReactNode {
   return (
     <input
-      className={`min-h-10 rounded-lg border border-slate-300 bg-surface-card px-3 text-sm outline-none transition-colors focus:border-brand focus:ring-2 focus:ring-brand/15 ${className}`}
+      className={`min-h-10 rounded-lg border border-line-strong bg-surface-card px-3 text-sm text-ink outline-none transition-colors focus:border-brand ${FOCUS_RING} ${className}`}
       {...rest}
     />
   )
@@ -150,7 +159,7 @@ export function MoneyInput({ className = '', ...rest }: InputHTMLAttributes<HTML
 export function Select({ className = '', children, ...rest }: SelectHTMLAttributes<HTMLSelectElement>): ReactNode {
   return (
     <select
-      className={`min-h-10 rounded-lg border border-slate-300 bg-surface-card px-2 text-sm outline-none transition-colors focus:border-brand focus:ring-2 focus:ring-brand/15 ${className}`}
+      className={`min-h-10 rounded-lg border border-line-strong bg-surface-card px-2 text-sm text-ink outline-none transition-colors focus:border-brand ${FOCUS_RING} ${className}`}
       {...rest}
     >
       {children}
@@ -185,7 +194,7 @@ export function DateField({
         value={value}
         aria-label={label}
         onChange={(e) => onChange(e.target.value)}
-        className="num min-h-10 rounded-lg border border-slate-300 bg-surface-card px-3 text-sm outline-none transition-colors focus:border-brand focus:ring-2 focus:ring-brand/15"
+        className={`num min-h-10 rounded-lg border border-line-strong bg-surface-card px-3 text-sm text-ink outline-none transition-colors focus:border-brand ${FOCUS_RING}`}
       />
     </Field>
   )
@@ -211,17 +220,35 @@ export function Field({
   children: ReactNode
   className?: string
 }): ReactNode {
+  type ControlProps = {
+    id?: string
+    'aria-describedby'?: string
+    'aria-invalid'?: boolean | 'true' | 'false'
+  }
+  const generatedId = useId()
+  const control = isValidElement<ControlProps>(children) ? children : null
+  const fieldId = control?.props.id ?? htmlFor ?? generatedId
+  const hintId = hint ? `${fieldId}-hint` : undefined
+  const errorId = error ? `${fieldId}-error` : undefined
+  const describedBy = [control?.props['aria-describedby'], hintId, errorId].filter(Boolean).join(' ') || undefined
+  const controlProps: ControlProps = { id: control?.props.id ?? fieldId }
+  if (error) controlProps['aria-invalid'] = true
+  else if (control?.props['aria-invalid'] !== undefined) controlProps['aria-invalid'] = control.props['aria-invalid']
+  if (describedBy !== undefined) controlProps['aria-describedby'] = describedBy
+  const labelledChild: ReactNode = control
+    ? cloneElement(control as ReactElement<ControlProps>, controlProps)
+    : children
   return (
     <div className={`flex flex-col gap-1 ${className}`}>
-      <label htmlFor={htmlFor} className="text-label font-medium text-ink-muted">
+      <label htmlFor={fieldId} className="text-label font-medium text-ink-muted">
         {label}
       </label>
-      {children}
-      {hint ? <span className="text-label text-ink-muted">{hint}</span> : null}
+      {labelledChild}
+      {hint ? <span id={hintId} className="text-label text-ink-muted">{hint}</span> : null}
       {/* `role="alert"` so a validation failure is ANNOUNCED. A red line a screen-reader user never
           hears is not an error message. */}
       {error ? (
-        <span role="alert" className="text-label font-medium text-danger-ink">
+        <span id={errorId} role="alert" className="text-label font-medium text-danger-ink">
           {error}
         </span>
       ) : null}
@@ -314,6 +341,32 @@ export function Card({
       ) : null}
       {children}
     </section>
+  )
+}
+
+/**
+ * The single page-level heading contract. Cards own `<h2>` titles; a screen gets exactly one
+ * `<h1>` here, with an optional explanation and actions aligned consistently in RTL and LTR.
+ */
+export function PageHeader({
+  title,
+  subtitle,
+  actions,
+  className = '',
+}: {
+  title: string
+  subtitle?: ReactNode
+  actions?: ReactNode
+  className?: string
+}): ReactNode {
+  return (
+    <header className={`mb-4 flex flex-wrap items-start justify-between gap-3 ${className}`}>
+      <div className="min-w-0">
+        <h1 className="text-page font-bold text-ink">{title}</h1>
+        {subtitle ? <p className="mt-1 text-body text-ink-muted">{subtitle}</p> : null}
+      </div>
+      {actions ? <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div> : null}
+    </header>
   )
 }
 
@@ -529,7 +582,7 @@ export function Pending({
       <div role="status" aria-live="polite" aria-busy="true" className="flex flex-col gap-2 py-2">
         <span className="sr-only">{loadingLabel}</span>
         {[0, 1, 2].map((i) => (
-          <div key={i} className="h-4 animate-pulse rounded bg-surface-muted" style={{ inlineSize: `${90 - i * 18}%` }} />
+          <div key={i} className="h-4 animate-pulse rounded bg-surface-muted motion-reduce:animate-none" style={{ inlineSize: `${90 - i * 18}%` }} />
         ))}
       </div>
     )

@@ -1,8 +1,8 @@
-import { type ReactNode, useState } from 'react'
+import { type ReactNode, type SelectHTMLAttributes, useState } from 'react'
 import type { BatteryReadingInput } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
-import { Button, Card, Field, TextInput } from '../ui.tsx'
+import { Button, Card, Field, Select, TextInput } from '../ui.tsx'
 import { FIELDS, type FittedBattery, toStored } from './BatteryPanel.tsx'
 
 type Reading = Omit<BatteryReadingInput, 'batteryId'>
@@ -161,7 +161,7 @@ export function BatterySwap({
         onOcr={setInOcr}
       />
 
-      {err ? <p className="text-sm text-red-600">{err}</p> : null}
+      {err ? <p role="alert" className="text-sm font-medium text-danger-ink">{err}</p> : null}
       <div className="flex gap-2">
         <Button variant="success" className="flex-1" disabled={!ready || busy} onClick={submit}>
           {busy ? t.common.loading : t.battery.swap.confirm}
@@ -225,7 +225,7 @@ function BmsMiniForm({
   return (
     <Card className="flex flex-col gap-2">
       <p className="text-sm font-medium">{title}</p>
-      <label className="cursor-pointer rounded-lg border border-dashed border-slate-300 px-3 py-2 text-center text-sm text-slate-500">
+      <label className="flex min-h-11 cursor-pointer items-center justify-center rounded-xl border border-dashed border-line-strong px-3 py-2 text-center text-sm text-ink-secondary">
         {reading ? `${t.shift.reading}…` : t.battery.swap.scan}
         <input
           type="file"
@@ -255,18 +255,20 @@ function BareSelect({
   value,
   onChange,
   children,
+  ...rest
 }: {
   value: string
   onChange(v: string): void
   children: ReactNode
-}): ReactNode {
+} & Omit<SelectHTMLAttributes<HTMLSelectElement>, 'value' | 'onChange' | 'children'>): ReactNode {
   return (
-    <select
-      className="min-h-10 w-full rounded-lg border border-slate-300 bg-surface-card px-3 text-sm outline-none focus:border-brand"
+    <Select
+      {...rest}
+      className="rounded-xl px-3 text-sm"
       value={value}
       onChange={(e) => onChange(e.target.value)}
     >
       {children}
-    </select>
+    </Select>
   )
 }

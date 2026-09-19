@@ -45,7 +45,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error: E
           <button
             type="button"
             onClick={() => void hardReset()}
-            className="mt-4 inline-flex min-h-12 w-full items-center justify-center rounded-xl bg-slate-800 px-4 text-sm font-semibold text-white"
+            className="mt-4 inline-flex min-h-12 w-full items-center justify-center rounded-xl bg-brand px-4 text-sm font-semibold text-on-brand"
           >
             إعادة التحميل من جديد
           </button>

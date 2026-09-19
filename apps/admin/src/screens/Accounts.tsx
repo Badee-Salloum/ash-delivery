@@ -2,7 +2,7 @@ import { type ReactNode, useEffect, useState } from 'react'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { useConfirm } from '../feedback.tsx'
-import { Badge, Button, Card, Table, TextInput } from '../ui.tsx'
+import { Badge, Button, Card, Field, Select, Table, TextInput } from '../ui.tsx'
 
 /**
  * Accounts (SRS A-2): create and list login accounts. `user.manage` is a sysadmin/GM permission,
@@ -127,48 +127,39 @@ export function Accounts(): ReactNode {
 
   return (
     <div className="flex max-w-4xl flex-col gap-5">
-      <h1 className="text-xl font-bold text-slate-800">{t.accounts.title}</h1>
 
       <Card title={t.accounts.add}>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-semibold text-slate-500">{t.accounts.fullName}</span>
+          <Field label={t.accounts.fullName}>
             <TextInput value={form.fullNameAr} onChange={(e) => setForm({ ...form, fullNameAr: e.target.value })} />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-semibold text-slate-500">{t.accounts.role}</span>
-            <select
+          </Field>
+          <Field label={t.accounts.role}>
+            <Select
               value={form.roleKey}
               onChange={(e) => setForm({ ...form, roleKey: e.target.value })}
-              className="min-h-10 rounded-lg border border-slate-300 bg-surface-card px-3 text-sm outline-none focus:border-brand"
             >
               {ROLE_KEYS.map((r) => (
                 <option key={r} value={r}>
                   {t.roles[r]}
                 </option>
               ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-semibold text-slate-500">{t.accounts.username}</span>
+            </Select>
+          </Field>
+          <Field label={t.accounts.username}>
             <TextInput value={form.username} autoCapitalize="none" onChange={(e) => setForm({ ...form, username: e.target.value })} />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-semibold text-slate-500">{t.accounts.password}</span>
+          </Field>
+          <Field label={t.accounts.password} hint={t.accounts.passwordHint}>
             <TextInput
               type="password"
               value={form.password}
               onChange={(e) => setForm({ ...form, password: e.target.value })}
-              placeholder={t.accounts.passwordHint}
             />
-          </label>
+          </Field>
           {branchScoped ? (
-            <label className="flex flex-col gap-1">
-              <span className="text-xs font-semibold text-slate-500">{t.accounts.branch}</span>
-              <select
+            <Field label={t.accounts.branch} hint={t.accounts.branchHint}>
+              <Select
                 value={form.branchId}
                 onChange={(e) => setForm({ ...form, branchId: e.target.value })}
-                className="min-h-10 rounded-lg border border-slate-300 bg-surface-card px-3 text-sm outline-none focus:border-brand"
               >
                 <option value="">—</option>
                 {branches.map((b) => (
@@ -176,17 +167,16 @@ export function Accounts(): ReactNode {
                     {lang === 'ar' ? b.nameAr : b.nameEn}
                   </option>
                 ))}
-              </select>
-              <span className="text-xs text-slate-600">{t.accounts.branchHint}</span>
-            </label>
+              </Select>
+            </Field>
           ) : null}
         </div>
         <div className="mt-4 flex items-center gap-3">
           <Button onClick={submit} disabled={busy || !canSubmit}>
             {busy ? t.common.loading : t.accounts.create}
           </Button>
-          {ok ? <span className="text-sm font-medium text-emerald-600">{ok}</span> : null}
-          {error ? <span className="text-sm font-medium text-red-600">{explainError(error, t)}</span> : null}
+          {ok ? <span role="status" className="text-sm font-medium text-success-ink">{ok}</span> : null}
+          {error ? <span role="alert" className="text-sm font-medium text-danger-ink">{explainError(error, t)}</span> : null}
         </div>
       </Card>
 
@@ -206,26 +196,24 @@ export function Accounts(): ReactNode {
                   />
                 </td>
                 <td className="px-3 py-2">
-                  <select
+                  <Select
                     aria-label={t.accounts.role}
                     value={editForm.roleKey}
                     onChange={(e) => setEditForm({ ...editForm, roleKey: e.target.value })}
-                    className="min-h-10 rounded-lg border border-slate-300 bg-surface-card px-2 text-sm outline-none focus:border-brand focus-visible:ring-2 focus-visible:ring-brand/40"
                   >
                     {ROLE_KEYS.map((r) => (
                       <option key={r} value={r}>
                         {t.roles[r]}
                       </option>
                     ))}
-                  </select>
+                  </Select>
                 </td>
                 <td className="px-3 py-2">
                   {BRANCH_SCOPED.has(editForm.roleKey) ? (
-                    <select
+                    <Select
                       aria-label={t.accounts.branch}
                       value={editForm.branchId}
                       onChange={(e) => setEditForm({ ...editForm, branchId: e.target.value })}
-                      className="min-h-10 rounded-lg border border-slate-300 bg-surface-card px-2 text-sm outline-none focus:border-brand focus-visible:ring-2 focus-visible:ring-brand/40"
                     >
                       <option value="">—</option>
                       {branches.map((b) => (
@@ -233,7 +221,7 @@ export function Accounts(): ReactNode {
                           {lang === 'ar' ? b.nameAr : b.nameEn}
                         </option>
                       ))}
-                    </select>
+                    </Select>
                   ) : (
                     '—'
                   )}

@@ -64,7 +64,7 @@ export function NotificationBell({
           <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
         {unread > 0 ? (
-          <span className="absolute -top-0.5 end-0 min-w-4 rounded-full bg-danger-solid px-1 text-center text-[10px] font-bold leading-4 text-white">
+          <span className="absolute -top-0.5 end-0 min-w-4 rounded-full bg-danger-solid px-1 text-center text-[10px] font-bold leading-4 text-on-danger">
             {unread}
           </span>
         ) : null}

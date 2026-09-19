@@ -175,7 +175,7 @@ function DuePanel({
   return (
     <div className="flex flex-col gap-3">
       {olderUnresolved > 0 ? (
-        <p className="rounded-lg border border-warning-line bg-warning-surface p-3 text-sm text-warning-ink">
+        <p role="status" className="rounded-lg border border-warning-line bg-warning-surface p-3 text-body text-warning-ink">
           {t.expenses.olderUnresolved.replace('{n}', String(olderUnresolved))}
         </p>
       ) : null}
@@ -183,7 +183,7 @@ function DuePanel({
         const grouped = rows.filter((row) => row.status === group.status)
         return (
           <Card key={group.status} title={`${group.title} · ${grouped.length}`}>
-            {grouped.length === 0 ? <p className="text-sm text-ink-muted">{t.expenses.nothingDue}</p> : (
+            {grouped.length === 0 ? <p className="text-body text-ink-muted">{t.expenses.nothingDue}</p> : (
               <div className="divide-y divide-line">
                 {grouped.map((row) => (
                   <div key={`${row.id}:${row.dueDate}`} className="flex flex-wrap items-center gap-3 py-3 first:pt-0 last:pb-0">
@@ -216,7 +216,7 @@ function DuePanel({
                 <Field label={t.expenses.amount}>
                   <MoneyInput value={amount} onChange={(event) => setAmount(event.target.value)} className="w-36" />
                 </Field>
-                <DateField label={t.expenses.paymentDate} value={businessDate} onChange={setBusinessDate} />
+                <DateField label={t.glossary.time.businessDay} value={businessDate} onChange={setBusinessDate} />
                 <Field label={t.expenses.receipt}>
                   <input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => void upload(event)} className="max-w-64 text-sm" />
                   <span className="text-label text-ink-muted">
@@ -228,7 +228,7 @@ function DuePanel({
             <Field label={action === 'pay' ? t.expenses.adjustmentReason : t.expenses.skipReason}>
               <TextInput value={reason} onChange={(event) => setReason(event.target.value)} />
             </Field>
-            {formError ? <p className="text-sm text-danger-ink">{explainError(formError, t)}</p> : null}
+            {formError ? <p role="alert" className="text-body text-danger-ink">{explainError(formError, t)}</p> : null}
             <div className="flex gap-2">
               <Button
                 variant={action === 'pay' ? 'primary' : 'ghost'}
@@ -336,6 +336,8 @@ function TemplatesPanel({
   }
 
   const catName = (id: string) => categories.find((category) => category.id === id)?.nameAr ?? id.slice(0, 8)
+  const channelLabel = (value: 'office_cash' | 'office_wallet'): string =>
+    value === 'office_cash' ? t.glossary.finance.officeCash : t.glossary.finance.officeWallet
   const centreName = (row: RecurringExpenseTemplateView) =>
     row.costCenterKind === 'vehicle'
       ? vehicles.find((vehicle) => vehicle.id === row.vehicleId)?.code ?? row.vehicleId?.slice(0, 8)
@@ -357,7 +359,7 @@ function TemplatesPanel({
               <td className="px-3 py-2 font-medium">{row.title}</td>
               <td className="px-3 py-2">{catName(row.categoryId)}</td>
               <td className="px-3 py-2">{centreName(row)}</td>
-              <td className="px-3 py-2">{row.channel === 'office_cash' ? t.movements.channelCash : t.movements.channelWallet}</td>
+              <td className="px-3 py-2">{channelLabel(row.channel)}</td>
               <td className="px-3 py-2"><Money value={row.amount} /></td>
               <td className="px-3 py-2">{scheduleLabel(row, t)}</td>
               <td className="px-3 py-2">{row.active ? t.expenses.active : t.expenses.inactive}</td>
@@ -413,8 +415,8 @@ function TemplatesPanel({
               ) : null}
               <Field label={t.expenses.channel}>
                 <Select value={channel} onChange={(event) => setChannel(event.target.value as typeof channel)}>
-                  <option value="office_cash">{t.movements.channelCash}</option>
-                  <option value="office_wallet">{t.movements.channelWallet}</option>
+                  <option value="office_cash">{channelLabel('office_cash')}</option>
+                  <option value="office_wallet">{channelLabel('office_wallet')}</option>
                 </Select>
               </Field>
               <Field label={t.expenses.amount}><MoneyInput value={amount} onChange={(event) => setAmount(event.target.value)} className="w-36" /></Field>
@@ -440,7 +442,7 @@ function TemplatesPanel({
               <DateField label={t.expenses.startsOn} value={startsOn} onChange={setStartsOn} />
               <DateField label={t.expenses.endsOn} value={endsOn} onChange={setEndsOn} />
             </div>
-            {formError ? <p className="mt-3 text-sm text-danger-ink">{explainError(formError, t)}</p> : null}
+            {formError ? <p role="alert" className="mt-3 text-body text-danger-ink">{explainError(formError, t)}</p> : null}
             <div className="mt-3 flex gap-2">
               <Button
                 disabled={busy || !title.trim() || !categoryId || !amount.trim() || !startsOn ||

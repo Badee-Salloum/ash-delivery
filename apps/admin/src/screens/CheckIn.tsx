@@ -1,11 +1,12 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import type { CheckInReportView, CheckInWindowView } from '@ash/client'
+import { formatDateTimeSeconds, type CheckInReportView, type CheckInWindowView } from '@ash/client'
 import { type RoleKey, can } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
 import { explainError } from '../errors.ts'
+import { leafletBranchPaint } from '../map-theme.ts'
 import { Badge, Button, Card, Field, Pending, Select, Table, TextInput } from '../ui.tsx'
 
 /**
@@ -71,6 +72,7 @@ function FencePicker({
   hint: string
   onPick: (lat: number, lng: number) => void
 }): ReactNode {
+  const { theme } = useApp()
   const div = useRef<HTMLDivElement | null>(null)
   const map = useRef<L.Map | null>(null)
   const layer = useRef<L.LayerGroup | null>(null)
@@ -103,9 +105,10 @@ function FencePicker({
     if (!group) return
     group.clearLayers()
     if (lat === null || lng === null) return
-    L.circle([lat, lng], { radius: radiusM, color: '#1d4ed8', weight: 1, fillOpacity: 0.12 }).addTo(group)
-    L.circleMarker([lat, lng], { radius: 6, color: '#1d4ed8', fillColor: '#1d4ed8', fillOpacity: 1 }).addTo(group)
-  }, [lat, lng, radiusM])
+    const paint = leafletBranchPaint()
+    L.circle([lat, lng], { radius: radiusM, color: paint.color, fillColor: paint.fillColor, weight: 1, fillOpacity: 0.12 }).addTo(group)
+    L.circleMarker([lat, lng], { radius: 6, color: paint.color, fillColor: paint.fillColor, fillOpacity: 1 }).addTo(group)
+  }, [lat, lng, radiusM, theme])
 
   // Follow the point when it is set from outside the map — the device fix, or the swap correction.
   useEffect(() => {
@@ -121,7 +124,7 @@ function FencePicker({
 }
 
 export function CheckIn(): ReactNode {
-  const { api, t, session, branchId } = useApp()
+  const { api, t, lang, session, branchId } = useApp()
   const toast = useToast()
   const [report, setReport] = useState<CheckInReportView | null>(null)
   const [windows, setWindows] = useState<CheckInWindowView[]>([])
@@ -386,7 +389,7 @@ export function CheckIn(): ReactNode {
           {report.checkIns.map((c) => (
             <tr key={c.id}>
               <td className="px-3 py-2 tabular-nums">
-                {new Date(c.capturedAt).toLocaleTimeString('en-GB', { hour12: false })}
+                {formatDateTimeSeconds(c.capturedAt, lang)}
               </td>
               <td className="px-3 py-2">
                 <Badge tone={toneFor(c.verdict)}>{t.checkin.status[c.verdict]}</Badge>

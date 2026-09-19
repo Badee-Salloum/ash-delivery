@@ -106,6 +106,7 @@ independently to every shift that was not approved when the policy launched.
 | 22 | **Company debts and fixed assets** (2026-09-17). Debts run in both directions, carry no interest or planned instalment schedule, and every payment/write-off is an immutable event against one debt-specific fund. An asset keeps its purchase currency and may be paid from the company pocket, depreciation reserve, or outside by the owner; any unpaid purchase balance is one linked payable, so instalments live in the debt register. One asset may link to one vehicle; branch managers never see purchase price, instalments, outstanding balances, or book value. |
 | 23 | **Straight-line depreciation and cumulative finance view** (2026-09-17). Every fixed asset has 36 monthly periods and period 1 is its purchase month. Book value is time-based (`price − scheduled depreciation due through the selected month`), including catch-up for existing vehicles. A manager button moves `min(due, available)` from the same-currency company pocket to «الاستهلاك», FIFO oldest period first; any shortfall remains due. This reserve may buy assets/pay instalments and may be released back with a written reason; releases and spending never reopen funded months. Depreciation is displayed beside net profit and never subtracted from it. The dashboard defaults to the cumulative go-live range and keeps branch, company, and combined results explicit. |
 | 24 | **Public active driver signup is a narrow exception to `user.manage`** (2026-09-18). A logged-out caller may create only their own active account with the fixed `driver` role, one selected operating branch, and its linked driver identity. The server never accepts role, activation state, IDs, or extended profile fields. Creation and the eight-hour session commit together, with no invitation or approval. Abuse control is exactly three schema-valid submissions per normalized network address per rolling hour; `DRIVER_SELF_REGISTRATION_ENABLED=false` is the emergency stop. This exception grants no ability to list, edit, deactivate, or create another kind of account. |
+| 25 | **ASH Delivery UI system** (2026-09-19). **ASH Delivery** is the product name; **ASH GROUP** is a secondary company reference only, and `FINANCIAL SERVICES` is not product-facing copy. Arabic operational terminology, Damascus time display, semantic design tokens, accessible feedback/confirmation controls, and the same Auto/Light/Dark preference in Admin and Driver are presentation rules. This rollout changes no permission, financial calculation, API contract, or stored data. |
 
 ---
 
@@ -166,6 +167,40 @@ independently to every shift that was not approved when the policy launched.
   entries become immutable is the worst available failure.
 - Asia/Damascus is UTC+3 year-round since Syria abolished DST in October 2022. The offset is
   **injected as a value** so the domain stays deterministic and backfilled pre-2022 data stays right.
+
+## UI design-system contract
+
+- **Identity and language.** Display **ASH Delivery** as the product. `ASH GROUP` may appear only as
+  a subordinate company reference; do not revive `FINANCIAL SERVICES`. Arabic is the default
+  operational language and RTL is first-class; English has an equivalent path. Amounts, dates,
+  times, identifiers, and percentages use Latin digits in both languages.
+- **Canonical operating words.** Use `نوبة` (shift), `العهدة النقدية` (cash float), `خزينة الفرع`
+  (branch treasury), `صندوق النقد في المكتب` (office cash box), `محفظة المكتب` (office wallet),
+  `صندوق الشركة` (company fund), `الترميم اليومي` (daily restoration), `الصرفيات` (expenses),
+  `الإيرادات` (income), `ذمّة` / `ذمم` (receivable / receivables), `يلاغو` (Yallago), and
+  `القراءة الذكية` (smart read). `كيش` and `شحن` are explanatory secondary copy, never competing
+  headings. Keep **صافي الربح** (net profit), **الترميم اليومي** (daily restoration), and
+  **رأس المال التشغيلي** (operating capital) distinct; restoration always names its direction:
+  surplus to the company fund or funding a shortfall from it.
+- **Time and money presentation.** `يوم العمل`, `وقت التسجيل`, `تاريخ الحدث`, and `آخر تحديث` are
+  different concepts. Every operational or financial instant is rendered through the shared
+  Asia/Damascus formatter (including seconds where the audit needs them), never the browser's
+  `toLocale*` defaults. Multi-currency money always names its currency.
+- **Tokens, not paint literals.** New or changed front-end work uses the semantic token layer for
+  color, contrast, focus, spacing, radius, elevation, motion, z-index, and map states. Use safe
+  foreground tokens such as `on-brand`, `on-success`, and `on-warning` on solid surfaces. Do not add
+  raw Tailwind palette classes, hex/RGB/HSL values, or browser-specific colors to application JSX/CSS.
+- **Interaction contract.** A field owns an id, label, hint, error, and the appropriate ARIA links;
+  blocking validation is inline, transient results are toasts, and failed loads provide an explicit
+  retry state. Use the shared accessible confirmation dialog instead of `window.confirm`: it traps
+  focus, supports Escape, restores focus to its opener, and makes destructive actions explicit.
+  Buttons retain primary, secondary, text, success, and danger hierarchy. Driver primary actions are
+  at least 56px and secondary touch targets at least 44px.
+- **Appearance.** Admin and Driver share the persisted `Auto`, `Light`, and `Dark` preference,
+  including a pre-paint choice that avoids a theme flash. The admin remains information-dense; the
+  driver remains a linear, phone-first flow.
+- **Scope boundary.** This is a UI/UX and presentation-system migration only. It must not change
+  RBAC, financial rules, journal behavior, API contracts, database schema/data, or production state.
 
 ## Database rules
 

@@ -1,6 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useId, useRef, useState } from 'react'
 import type { ShiftPattern, ShiftSlot } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
+import { useConfirm } from '../feedback.tsx'
 import { shiftPatternLabel, shiftPatternTone } from '../shift-shape.ts'
 import { explainError } from '../errors.ts'
 import { explainLiveShiftActionError, type LiveShiftApiError } from '../live-shift-error.ts'
@@ -280,6 +281,7 @@ function LiveRow({
   readAtMs: number
 }): ReactNode {
   const { api, t, lang } = useApp()
+  const confirm = useConfirm()
   const [panel, setPanel] = useState<'none' | 'suspend' | 'tranche' | 'void' | 'forceClose'>('none')
   const [note, setNote] = useState('')
   const [trancheRecovery, setTrancheRecovery] = useState(() => readPendingTranche(shift.id))
@@ -460,7 +462,14 @@ function LiveRow({
       Number.isFinite(parsedOdometer) &&
       shift.odometerStart != null &&
       parsedOdometer < shift.odometerStart
-    if (anomalousOdometer && !window.confirm(t.approval.odometerAnomalyConfirm)) return
+    if (
+      anomalousOdometer &&
+      !(await confirm({
+        title: t.approval.odometerAnomalyConfirm,
+        confirmLabel: t.common.confirm,
+        cancelLabel: t.common.cancel,
+      }))
+    ) return
     setBusy(true)
     setErr(null)
     try {

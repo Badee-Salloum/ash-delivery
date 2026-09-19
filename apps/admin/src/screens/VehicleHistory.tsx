@@ -11,7 +11,7 @@ import {
   resolveSelection,
   writeStoredSelection,
 } from '../time-range.ts'
-import { Card, Money, Pending, Stat, Table } from '../ui.tsx'
+import { Card, FOCUS_RING, Money, PageHeader, Pending, Stat, Table } from '../ui.tsx'
 import { useHashParams } from '../use-hash-params.ts'
 import { useDashboardRead } from './dashboard/use-dashboard-read.ts'
 
@@ -110,13 +110,11 @@ export function VehicleHistory({ initial = {} }: { initial?: RouteParams }): Rea
 
   return (
     <div className="flex flex-col gap-5">
-      <header className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-page font-bold text-ink">{t.vehicleHistory.title}</h1>
-          <p className="text-body text-ink-muted">{t.vehicleHistory.subtitle}</p>
-        </div>
-        <a className="text-label font-semibold text-brand underline" href="#fleet">{t.vehicleHistory.backToFleet}</a>
-      </header>
+      <PageHeader
+        title={t.vehicleHistory.title}
+        subtitle={t.vehicleHistory.subtitle}
+        actions={<a className={`text-label font-semibold text-brand underline ${FOCUS_RING}`} href="#fleet">{t.vehicleHistory.backToFleet}</a>}
+      />
       <TimeRangeBar
         selection={selection}
         onChange={changeSelection}

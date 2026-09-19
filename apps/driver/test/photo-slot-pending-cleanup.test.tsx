@@ -44,6 +44,7 @@ vi.mock('../src/app-context.tsx', () => ({
 }))
 
 import { PhotoSlot } from '../src/screens/PhotoSlot.tsx'
+import { FeedbackProvider } from '../src/feedback.tsx'
 
 function attachment(attachmentToken: string): CloseDraftAttachment {
   return {
@@ -102,14 +103,16 @@ describe('PhotoSlot retained-evidence terminal cleanup', () => {
 
   it('does not let an older attachment terminal result delete a pending replacement', async () => {
     await act(async () => root.render(
-      <PhotoSlot
-        shiftId="shift-1"
-        pkg="end"
-        slot="dashboard"
-        label="dashboard"
-        attachment={attachment('attachment-old')}
-        onUploaded={vi.fn()}
-      />,
+      <FeedbackProvider>
+        <PhotoSlot
+          shiftId="shift-1"
+          pkg="end"
+          slot="dashboard"
+          label="dashboard"
+          attachment={attachment('attachment-old')}
+          onUploaded={vi.fn()}
+        />
+      </FeedbackProvider>,
     ))
     await flushEffects()
 
@@ -120,14 +123,16 @@ describe('PhotoSlot retained-evidence terminal cleanup', () => {
 
   it('settles an accepted same-token terminal generation without a second reload', async () => {
     await act(async () => root.render(
-      <PhotoSlot
-        shiftId="shift-1"
-        pkg="end"
-        slot="dashboard"
-        label="dashboard"
-        attachment={attachment('attachment-new')}
-        onUploaded={vi.fn()}
-      />,
+      <FeedbackProvider>
+        <PhotoSlot
+          shiftId="shift-1"
+          pkg="end"
+          slot="dashboard"
+          label="dashboard"
+          attachment={attachment('attachment-new')}
+          onUploaded={vi.fn()}
+        />
+      </FeedbackProvider>,
     ))
     await flushEffects()
 

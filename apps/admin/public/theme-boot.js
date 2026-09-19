@@ -11,17 +11,19 @@
  * a concrete 'light' or 'dark', never 'system', because the CSS matches on the attribute itself.
  */
 ;(function () {
+  var saved = null
   try {
-    var saved = localStorage.getItem('ash.theme')
-    var resolved =
-      saved === 'dark' || saved === 'light'
-        ? saved
-        : window.matchMedia('(prefers-color-scheme: dark)').matches
-          ? 'dark'
-          : 'light'
-    document.documentElement.setAttribute('data-theme', resolved)
+    saved = localStorage.getItem('ash.theme')
   } catch (e) {
-    /* private mode, storage disabled, or no matchMedia — light is the right default anyway, and it
-       is what the stylesheet already assumes, so there is nothing to write. */
+    /* Storage can be unavailable without affecting matchMedia. */
   }
+  var resolved = saved === 'dark' || saved === 'light' ? saved : 'light'
+  if (saved !== 'dark' && saved !== 'light') {
+    try {
+      resolved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+    } catch (e) {
+      /* A legacy webview without matchMedia retains the explicit light fallback. */
+    }
+  }
+  document.documentElement.setAttribute('data-theme', resolved)
 })()

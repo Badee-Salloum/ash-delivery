@@ -1,7 +1,7 @@
 import { type FormEvent, type ReactNode, useEffect, useState } from 'react'
 import type { ApiError } from '@ash/client'
 import { useApp } from '../app-context.tsx'
-import { Button, Card, Field, Screen, TextInput } from '../ui.tsx'
+import { Button, Card, Field, Screen, Select, TextInput, ThemeChoiceGroup } from '../ui.tsx'
 
 interface BranchOption {
   id: string
@@ -38,7 +38,7 @@ export function validateDriverRegistration(input: {
 }
 
 export function Register({ onBack }: { onBack(): void }): ReactNode {
-  const { api, lang, t, refreshSession } = useApp()
+  const { api, lang, t, theme, setTheme, refreshSession } = useApp()
   const [branches, setBranches] = useState<BranchOption[]>([])
   const [fullNameAr, setFullNameAr] = useState('')
   const [branchId, setBranchId] = useState('')
@@ -124,16 +124,25 @@ export function Register({ onBack }: { onBack(): void }): ReactNode {
 
   return (
     <Screen title={t.auth.registrationTitle}>
+      <ThemeChoiceGroup
+        value={theme}
+        onChange={setTheme}
+        label={t.common.theme}
+        labels={{
+          system: t.common.themeSystem,
+          light: t.common.themeLight,
+          dark: t.common.themeDark,
+        }}
+      />
       <Card>
         <form onSubmit={submit} className="flex flex-col gap-4">
           <Field label={t.auth.fullNameAr}>
             <TextInput value={fullNameAr} onChange={(event) => setFullNameAr(event.target.value)} autoComplete="name" />
           </Field>
           <Field label={t.auth.branch}>
-            <select
+            <Select
               value={branchId}
               onChange={(event) => setBranchId(event.target.value)}
-              className="min-h-14 rounded-2xl border border-line-strong bg-surface-card px-4 text-lg outline-none focus:border-ink"
               disabled={busy || branches.length === 0}
             >
               <option value="">{t.auth.selectBranch}</option>
@@ -142,7 +151,7 @@ export function Register({ onBack }: { onBack(): void }): ReactNode {
                   {lang === 'ar' ? branch.nameAr : branch.nameEn}
                 </option>
               ))}
-            </select>
+            </Select>
           </Field>
           <Field label={t.auth.username}>
             <TextInput

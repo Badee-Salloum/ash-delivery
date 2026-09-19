@@ -1,6 +1,7 @@
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { useApp } from './app-context.tsx'
-import { Button, Card, Screen } from './ui.tsx'
+import { useConfirm } from './feedback.tsx'
+import { Button, Card, Screen, ThemeChoiceGroup } from './ui.tsx'
 import { Login } from './screens/Login.tsx'
 import { ShiftFlow } from './screens/Shift.tsx'
 import {
@@ -81,7 +82,8 @@ function withLocalStorage(action: (storage: Storage) => void): void {
  * No side menu, no dashboard — a driver on a phone wants the next action, not navigation.
  */
 export function DriverApp(): ReactNode {
-  const { session, t, lang, setLang, api, setSession } = useApp()
+  const { session, t, lang, setLang, theme, setTheme, api, setSession } = useApp()
+  const confirm = useConfirm()
   /** Whether the phone thinks it has a network. Cheap, and the difference between "the app is
       broken" and "wait until you are back in range". */
   const [online, setOnline] = useState(navigator.onLine)
@@ -174,24 +176,44 @@ export function DriverApp(): ReactNode {
           ends in «تعذّر تنفيذ العملية». A driver cannot tell a dead network from a broken app or a
           rejected shift, and the three call for completely different things. */}
       {!online ? (
-        <div role="status" className="bg-amber-500 px-4 py-2 text-center text-sm font-semibold text-white">
+        <div role="status" className="bg-offline-solid px-4 py-2 text-center text-sm font-semibold text-on-offline">
           {t.common.offline}
         </div>
       ) : null}
-      <div className="flex items-center justify-between bg-brand-700 px-2 py-1 text-xs text-white/80">
+      <div className="flex flex-wrap items-center justify-between gap-2 bg-brand-700 px-2 py-2 text-xs text-on-brand/80">
+        <ThemeChoiceGroup
+          value={theme}
+          onChange={setTheme}
+          label={t.common.theme}
+          labels={{
+            system: t.common.themeSystem,
+            light: t.common.themeLight,
+            dark: t.common.themeDark,
+          }}
+          tone="header"
+          className="min-w-44 flex-1"
+        />
         {/* 44px targets with names. Two unlabelled 12px glyphs at the top of every screen, one of
             which flipped the whole app to English mid-shift and the other of which signed the
             driver out — neither asking, both a mis-tap away. */}
         <button
+          type="button"
           onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}
-          aria-label={lang === 'ar' ? 'English' : 'العربية'}
-          className="min-h-11 rounded-lg px-3 font-semibold active:bg-white/20"
+          aria-label={lang === 'ar' ? t.common.english : t.common.arabic}
+          className="min-h-11 rounded-xl px-3 font-semibold text-on-brand outline-none transition-colors active:bg-white/20 focus-visible:ring-2 focus-visible:ring-on-brand focus-visible:ring-offset-2 focus-visible:ring-offset-brand-700 motion-reduce:transition-none"
         >
           {lang === 'ar' ? 'EN' : 'ع'}
         </button>
         <button
+          type="button"
           onClick={async () => {
-            if (!window.confirm(t.common.confirmLogout)) return
+            if (!await confirm({
+              title: t.common.logout,
+              body: t.common.confirmLogout,
+              confirmLabel: t.common.logout,
+              cancelLabel: t.common.cancel,
+              danger: true,
+            })) return
             try {
               await api.logout()
             } finally {
@@ -203,7 +225,7 @@ export function DriverApp(): ReactNode {
               setSession(null)
             }
           }}
-          className="min-h-11 rounded-lg px-3 font-semibold active:bg-white/20"
+          className="min-h-11 rounded-xl px-3 font-semibold text-on-brand outline-none transition-colors active:bg-white/20 focus-visible:ring-2 focus-visible:ring-on-brand focus-visible:ring-offset-2 focus-visible:ring-offset-brand-700 motion-reduce:transition-none"
         >
           {t.common.logout}
         </button>

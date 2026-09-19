@@ -18,6 +18,7 @@ import {
   uploadEvidencePath,
 } from '@ash/client'
 import { useApp } from '../app-context.tsx'
+import { useConfirm } from '../feedback.tsx'
 import {
   deletePendingEvidence,
   getPendingEvidence,
@@ -127,6 +128,7 @@ export function PhotoSlot({
   recognitionFocus,
 }: PhotoSlotProps): ReactNode {
   const { api, t } = useApp()
+  const confirm = useConfirm()
   const ref = useRef<HTMLInputElement>(null)
   const attached = uploaded || attachment !== null
   const [state, setState] = useState<'idle' | 'preparing' | 'uploading' | 'done' | 'error'>(
@@ -301,7 +303,12 @@ export function PhotoSlot({
               preflight.error === 'stale_evidence_confirmation_required' ||
               preflight.error === 'evidence_replacement_confirmation_required'
             if (!confirmable) throw candidateError
-            if (!window.confirm(t.shift.reusedEvidenceConfirm)) {
+            if (!await confirm({
+              title: t.common.confirm,
+              body: t.shift.reusedEvidenceConfirm,
+              confirmLabel: t.common.confirm,
+              cancelLabel: t.common.cancel,
+            })) {
               // Preflight rejected without mutating the attachment. Discard only this local attempt.
               currentAttempt.current = null
               setPicked(null)
@@ -447,6 +454,7 @@ export function PhotoSlot({
       onUploaded,
       onImage,
       ocrField,
+      confirm,
     ],
   )
 
@@ -468,7 +476,12 @@ export function PhotoSlot({
       if (pickedAge.kind === 'stale' && !acknowledgedFiles.current.has(file)) {
         const ageLabel =
           pickedAge.minutes < 60 ? `${pickedAge.minutes}m` : `${Math.round(pickedAge.minutes / 60)}h`
-        if (!window.confirm(t.shift.staleEvidenceConfirm.replace('{n}', ageLabel))) {
+        if (!await confirm({
+          title: t.common.confirm,
+          body: t.shift.staleEvidenceConfirm.replace('{n}', ageLabel),
+          confirmLabel: t.common.confirm,
+          cancelLabel: t.common.cancel,
+        })) {
           if (ref.current) ref.current.value = ''
           return
         }
@@ -535,7 +548,7 @@ export function PhotoSlot({
         }
       }
     },
-    [t, recognitionQuality, recognitionFocus, pkg, shiftId, slot, execute],
+    [t, recognitionQuality, recognitionFocus, pkg, shiftId, slot, execute, confirm],
   )
 
   const retryUpload = useCallback((): void => {
@@ -819,7 +832,7 @@ export function PhotoSlot({
                         type="button"
                         disabled={restoreReason.trim().length === 0 || restoringHistoryId !== null}
                         onClick={() => void restoreHistory(item)}
-                        className="mt-1 min-h-8 w-full rounded-lg bg-ink px-2 text-[10px] font-medium text-ink-inverse disabled:opacity-40"
+                        className="mt-1 min-h-8 w-full rounded-lg bg-brand px-2 text-[10px] font-medium text-on-brand disabled:opacity-40"
                       >
                         {restoringHistoryId === item.historyId ? t.common.loading : t.shift.restoreAttachment}
                       </button>
@@ -874,7 +887,7 @@ export function PhotoSlot({
             onClick={() => (confirming ? void remove() : setConfirming(true))}
             onBlur={() => setConfirming(false)}
             className={`mt-1 min-h-8 w-full rounded-lg px-1 text-[10px] font-medium ${
-              confirming ? 'bg-danger-solid text-white' : 'text-slate-500'
+              confirming ? 'bg-danger-solid text-on-danger' : 'text-slate-500'
             }`}
           >
             {confirming ? t.shift.removePhotoConfirm : t.shift.removePhoto}

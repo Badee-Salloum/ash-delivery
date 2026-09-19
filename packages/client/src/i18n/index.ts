@@ -12,6 +12,21 @@ export const DEFAULT_LANG: Lang = 'ar'
 export const catalogs: Record<Lang, Catalog> = { ar, en }
 export const dir = (lang: Lang): 'rtl' | 'ltr' => (lang === 'ar' ? 'rtl' : 'ltr')
 
+/** The approved product wording, kept separate from page-specific copy. */
+export type Glossary = Catalog['glossary']
+export const glossary = (lang: Lang): Glossary => catalogs[lang].glossary
+
+/**
+ * Replace the named placeholders used in catalog copy without making a locale-dependent number.
+ * Both `{name}` and the older `{{name}}` spelling are supported during the migration.
+ */
+export function interpolate(template: string, values: Record<string, string | number | undefined>): string {
+  return template.replace(/\{\{([A-Za-z0-9_]+)\}\}|\{([A-Za-z0-9_]+)\}/g, (match, doubleKey: string | undefined, singleKey: string | undefined) => {
+    const value = values[doubleKey ?? singleKey ?? '']
+    return value === undefined ? match : String(value)
+  })
+}
+
 /**
  * Arabic counts in six categories, and the app was using one.
  *

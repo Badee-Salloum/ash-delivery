@@ -2,6 +2,7 @@ import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useSta
 import type { Currency } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
+import { useTextPrompt } from '../feedback.tsx'
 import type { RouteParams } from '../route.ts'
 import { Button, Card, DateField, Field, Money, MoneyInput, Pending, Select, Stat, Table, TextInput } from '../ui.tsx'
 
@@ -175,7 +176,7 @@ export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactN
             aria-selected={tab === item}
             onClick={() => setTab(item)}
             className={`min-h-10 rounded-lg border px-3 text-body font-semibold ${
-              tab === item ? 'border-brand bg-brand text-ink-inverse' : 'border-line-strong bg-surface-card text-ink hover:bg-surface-muted'
+              tab === item ? 'border-brand bg-brand text-on-brand' : 'border-line-strong bg-surface-card text-ink hover:bg-surface-muted'
             }`}
           >
             {t.companyFinance.tabs[item]}
@@ -576,6 +577,7 @@ function RecurringTab({
   mutate: Mutate
 }): ReactNode {
   const { api, t } = useApp()
+  const requestText = useTextPrompt()
   const [title, setTitle] = useState('')
   const [categoryId, setCategoryId] = useState(categories[0]?.id ?? '')
   const [currency, setCurrency] = useState<Currency>('SYP_NEW')
@@ -603,14 +605,33 @@ function RecurringTab({
     }), t.expenses.paid)
   }
   const skip = (row: RecurringDue): void => {
-    const reason = window.prompt(t.expenses.skipReason)?.trim() ?? ''
-    if (reason === '') return
-    void mutate(() => api.post(`/company/recurring-expenses/${row.id}/occurrences/${row.dueDate}/skip`, { reason }), t.expenses.skipped)
+    void (async () => {
+      const reason = await requestText({
+        title: t.expenses.skip,
+        label: t.expenses.skipReason,
+        confirmLabel: t.expenses.skip,
+      })
+      if (reason === null) return
+      await mutate(
+        () => api.post(`/company/recurring-expenses/${row.id}/occurrences/${row.dueDate}/skip`, { reason }),
+        t.expenses.skipped,
+      )
+    })()
   }
   const deactivate = (row: RecurringTemplate): void => {
-    const reason = window.prompt(t.expenses.deactivationReason)?.trim() ?? ''
-    if (reason === '') return
-    void mutate(() => api.post(`/company/recurring-expenses/${row.id}/deactivate`, { reason }), t.expenses.deactivated)
+    void (async () => {
+      const reason = await requestText({
+        title: t.expenses.deactivate,
+        label: t.expenses.deactivationReason,
+        confirmLabel: t.expenses.deactivate,
+        danger: true,
+      })
+      if (reason === null) return
+      await mutate(
+        () => api.post(`/company/recurring-expenses/${row.id}/deactivate`, { reason }),
+        t.expenses.deactivated,
+      )
+    })()
   }
 
   return (

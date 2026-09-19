@@ -35,6 +35,7 @@ import {
   type DuplicateChoiceView,
 } from '../duplicate-choice.ts'
 import { useConfirm, useToast } from '../feedback.tsx'
+import { leafletBranchPaint } from '../map-theme.ts'
 import { LatestRequestGuard } from '../latest-request.ts'
 import { shiftPatternLabel, shiftPatternTone } from '../shift-shape.ts'
 import { isValidOpeningFundInput, openingApprovalRequest } from '../opening-funds.ts'
@@ -4160,6 +4161,7 @@ function ReviseFigures({
   onRevised(): void
 }): ReactNode {
   const { api, t } = useApp()
+  const confirm = useConfirm()
   const [open, setOpen] = useState(false)
   const [odo, setOdo] = useState(String(review.endPackage.odometerKm ?? ''))
   const [cash, setCash] = useState(review.endPackage.cashDeclared ?? '')
@@ -4187,7 +4189,14 @@ function ReviseFigures({
         Number.isFinite(odometerKm) &&
         review.startPackage.odometerKm !== null &&
         odometerKm < review.startPackage.odometerKm
-      if (anomalous && !window.confirm(t.approval.odometerAnomalyConfirm)) return
+      if (
+        anomalous &&
+        !(await confirm({
+          title: t.approval.odometerAnomalyConfirm,
+          confirmLabel: t.common.confirm,
+          cancelLabel: t.common.cancel,
+        }))
+      ) return
       await api.post(`/shifts/${shiftId}/close-figures`, {
         odometerKm,
         odometerAnomalyConfirmed: anomalous,
@@ -4463,7 +4472,7 @@ function MapPin({
   onPick(lat: number, lng: number): void
   onClear(): void
 }): ReactNode {
-  const { t } = useApp()
+  const { t, theme } = useApp()
   const [open, setOpen] = useState(false)
   const host = useRef<HTMLDivElement | null>(null)
   const map = useRef<LeafletMap | null>(null)
@@ -4471,15 +4480,16 @@ function MapPin({
 
   useEffect(() => {
     if (!open || !host.current || map.current) return
+    const paint = leafletBranchPaint()
     const m = L.map(host.current).setView([lat ?? DAMASCUS[0], lng ?? DAMASCUS[1]], lat === null ? 12 : 16)
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(m)
     if (lat !== null && lng !== null) {
-      marker.current = L.circleMarker([lat, lng], { radius: 8, color: '#1e3a8a', fillOpacity: 0.9 }).addTo(m)
+      marker.current = L.circleMarker([lat, lng], { radius: 8, color: paint.color, fillColor: paint.fillColor, fillOpacity: 0.9 }).addTo(m)
     }
     m.on('click', (e: LeafletMouseEvent) => {
       const { lat: y, lng: x } = e.latlng
       marker.current?.remove()
-      marker.current = L.circleMarker([y, x], { radius: 8, color: '#1e3a8a', fillOpacity: 0.9 }).addTo(m)
+      marker.current = L.circleMarker([y, x], { radius: 8, color: paint.color, fillColor: paint.fillColor, fillOpacity: 0.9 }).addTo(m)
       onPick(Number(y.toFixed(6)), Number(x.toFixed(6)))
     })
     map.current = m
@@ -4488,7 +4498,7 @@ function MapPin({
       map.current = null
       marker.current = null
     }
-  }, [open, lat, lng, onPick])
+  }, [open, lat, lng, onPick, theme])
 
   const pinned = lat !== null && lng !== null
   return (

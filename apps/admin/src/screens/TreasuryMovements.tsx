@@ -267,7 +267,7 @@ export function TreasuryMovements({ initial = {} }: { initial?: RouteParams }): 
         </div>
       </Card>
 
-      <Card title={t.treasuryMovements.results}>
+      <Card title={t.treasuryMovements.results} subtitle={`${t.glossary.time.recordedAt} · ${t.glossary.time.damascusTime}`}>
         {page === null ? (
           <Pending
             error={error}
@@ -291,8 +291,8 @@ export function TreasuryMovements({ initial = {} }: { initial?: RouteParams }): 
             ) : null}
             <Table
               head={[
-                t.treasuryMovements.registeredAt,
-                t.treasuryMovements.businessDay,
+                `${t.glossary.time.recordedAt} (${t.glossary.time.damascusTime})`,
+                t.glossary.time.businessDay,
                 t.treasuryMovements.kind,
                 t.treasuryMovements.cash,
                 t.treasuryMovements.wallet,

@@ -79,7 +79,7 @@ function fillTemplate(template: string, values: Readonly<Record<string, string>>
 const pillClass = (on: boolean): string =>
   `shrink-0 whitespace-nowrap rounded-full border px-3 py-1.5 text-label font-medium outline-none transition-colors ${FOCUS_RING} ${
     on
-      ? 'border-brand bg-brand text-ink-inverse'
+      ? 'border-brand bg-brand text-on-brand'
       : 'border-line bg-surface-card text-ink-secondary hover:bg-surface-raised'
   }`
 

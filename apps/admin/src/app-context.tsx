@@ -113,6 +113,9 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
   // should not have to reload to see it.
   useEffect(() => {
     if (theme !== 'system') return
+    // Cover storage-disabled/private sessions where the synchronous boot script could not read
+    // its preference before React mounted; Auto must still follow the operating system.
+    applyTheme('system')
     return watchSystemTheme(() => applyTheme('system'))
   }, [theme])
 

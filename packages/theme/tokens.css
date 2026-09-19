@@ -49,6 +49,16 @@
   --color-accent: var(--ash-accent);
   --color-accent-600: var(--ash-accent-strong);
 
+  /* Foregrounds for saturated fills. `on-solid` is the safe default for a solid whose own
+     foreground is not more specific; use an `on-*` pair when the fill has a semantic role. */
+  --color-on-solid: var(--ash-on-solid);
+  --color-on-brand: var(--ash-on-brand);
+  --color-on-success: var(--ash-on-success);
+  --color-on-warning: var(--ash-on-warning);
+  --color-on-danger: var(--ash-on-danger);
+  --color-on-info: var(--ash-on-info);
+  --color-on-offline: var(--ash-on-offline);
+
   /* Surfaces — five levels, because today ONE card style (`rounded-xl bg-white p-4 shadow-sm`) is
      used 71 times at every level of the hierarchy, including nested inside itself, which renders as
      white-on-white with doubled padding. */
@@ -80,6 +90,8 @@
   --color-warning-surface: var(--ash-warning-surface);
   --color-warning-ink: var(--ash-warning-ink);
   --color-warning-line: var(--ash-warning-line);
+  --color-warning-solid: var(--ash-warning-solid);
+  --color-warning-solid-hover: var(--ash-warning-solid-hover);
 
   --color-danger-surface: var(--ash-danger-surface);
   --color-danger-ink: var(--ash-danger-ink);
@@ -88,6 +100,27 @@
   --color-info-surface: var(--ash-info-surface);
   --color-info-ink: var(--ash-info-ink);
   --color-info-line: var(--ash-info-line);
+  --color-info-solid: var(--ash-info-solid);
+  --color-info-solid-hover: var(--ash-info-solid-hover);
+
+  /* Offline is intentionally distinct from a business warning. A lost connection needs a
+     persistent status treatment, whereas a warning is normally tied to one field or decision. */
+  --color-offline-surface: var(--ash-offline-surface);
+  --color-offline-ink: var(--ash-offline-ink);
+  --color-offline-line: var(--ash-offline-line);
+  --color-offline-solid: var(--ash-offline-solid);
+  --color-offline-solid-hover: var(--ash-offline-solid-hover);
+
+  /* Leaflet reads CSS variables at runtime rather than Tailwind utilities. These aliases still
+     make the paints available to ordinary UI when a map legend or status key is needed. */
+  --color-map-fresh-stroke: var(--ash-map-fresh-stroke);
+  --color-map-fresh-fill: var(--ash-map-fresh-fill);
+  --color-map-recent-stroke: var(--ash-map-recent-stroke);
+  --color-map-recent-fill: var(--ash-map-recent-fill);
+  --color-map-stale-stroke: var(--ash-map-stale-stroke);
+  --color-map-stale-fill: var(--ash-map-stale-fill);
+  --color-map-branch-stroke: var(--ash-map-branch-stroke);
+  --color-map-branch-fill: var(--ash-map-branch-fill);
 
   /* SOLID fills, which are a different job from the inks above and must not be confused with them.
      A `-ink` is text ON a tinted surface, so in dark it LIGHTENS. A `-solid` is a saturated block
@@ -105,6 +138,12 @@
      covers the screen for a dialog); baking alpha in here would flatten that distinction. */
   --color-scrim: var(--ash-scrim);
   --color-focus: var(--ash-focus);
+  --color-focus-offset: var(--ash-focus-offset);
+
+  /* Motion is semantic too. Components may opt into the named easings while reduced-motion
+     users receive the same transition with a zero duration below. */
+  --ease-standard: var(--ash-ease-standard);
+  --ease-emphasized: var(--ash-ease-emphasized);
 
   /*
    * Type scale, named for the JOB.
@@ -154,6 +193,16 @@
   --ash-accent: #2d6cb0;
   --ash-accent-strong: #245a97;
 
+  /* Every foreground below has at least a 4.5:1 contrast ratio against its paired solid fill.
+     Do not replace these with a prettier near-white without updating the contrast guard. */
+  --ash-on-solid: #ffffff;
+  --ash-on-brand: #ffffff;
+  --ash-on-success: #ffffff;
+  --ash-on-warning: #ffffff;
+  --ash-on-danger: #ffffff;
+  --ash-on-info: #ffffff;
+  --ash-on-offline: #ffffff;
+
   --ash-surface-page: #eef1f8;
   --ash-surface-card: #ffffff;
   --ash-surface-raised: #f1f5f9;
@@ -177,6 +226,8 @@
   --ash-warning-surface: #fffbeb;
   --ash-warning-ink: #92400e;
   --ash-warning-line: #fde68a;
+  --ash-warning-solid: #92400e;
+  --ash-warning-solid-hover: #78350f;
 
   --ash-danger-surface: #fef2f2;
   --ash-danger-ink: #b91c1c;
@@ -185,14 +236,48 @@
   --ash-info-surface: #f0f9ff;
   --ash-info-ink: #0369a1;
   --ash-info-line: #bae6fd;
+  --ash-info-solid: #0369a1;
+  --ash-info-solid-hover: #075985;
+
+  --ash-offline-surface: #fff7ed;
+  --ash-offline-ink: #9a3412;
+  --ash-offline-line: #fed7aa;
+  --ash-offline-solid: #9a3412;
+  --ash-offline-solid-hover: #7c2d12;
+
+  /*
+   * Map paint is not body text: it sits over third-party cartography and needs a visible outline
+   * plus a separately readable fill. Keep fresh/recent/stale as operational freshness, not as
+   * success/warning/danger; a stale GPS point is not an error.
+   */
+  --ash-map-fresh-stroke: #1d4ed8;
+  --ash-map-fresh-fill: #3b82f6;
+  --ash-map-recent-stroke: #92400e;
+  --ash-map-recent-fill: #f59e0b;
+  --ash-map-stale-stroke: #475569;
+  --ash-map-stale-fill: #94a3b8;
+  --ash-map-branch-stroke: #1e3a8a;
+  --ash-map-branch-fill: #3b82f6;
 
   --ash-danger-solid: #dc2626;
   --ash-danger-solid-hover: #b91c1c;
-  --ash-success-solid: #059669;
-  --ash-success-solid-hover: #047857;
+  /* #059669 looked close to the former green, but white text on it is only 3.77:1. */
+  --ash-success-solid: #047857;
+  --ash-success-solid-hover: #065f46;
 
   --ash-scrim: #0f172a;
-  --ash-focus: #2d6cb0;
+  --ash-focus: #1d4ed8;
+  --ash-focus-offset: #ffffff;
+  --ash-focus-ring-width: 2px;
+  --ash-focus-ring-offset: 2px;
+
+  --ash-motion-instant: 0ms;
+  --ash-motion-fast: 150ms;
+  --ash-motion-standard: 200ms;
+  --ash-motion-deliberate: 300ms;
+  --ash-motion-emphasis: 450ms;
+  --ash-ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ash-ease-emphasized: cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 /*
@@ -217,6 +302,14 @@
   --ash-accent: #6fa8e8;
   --ash-accent-strong: #5b93d4;
 
+  --ash-on-solid: #ffffff;
+  --ash-on-brand: #ffffff;
+  --ash-on-success: #ffffff;
+  --ash-on-warning: #ffffff;
+  --ash-on-danger: #ffffff;
+  --ash-on-info: #ffffff;
+  --ash-on-offline: #ffffff;
+
   --ash-surface-page: #0b1220;
   --ash-surface-card: #131c30;
   --ash-surface-raised: #22304a;
@@ -240,6 +333,8 @@
   --ash-warning-surface: #2e2208;
   --ash-warning-ink: #fcd34d;
   --ash-warning-line: #6b4c12;
+  --ash-warning-solid: #92400e;
+  --ash-warning-solid-hover: #78350f;
 
   --ash-danger-surface: #2d1214;
   --ash-danger-ink: #fca5a5;
@@ -248,16 +343,53 @@
   --ash-info-surface: #0b2436;
   --ash-info-ink: #7dd3fc;
   --ash-info-line: #175071;
+  --ash-info-solid: #0369a1;
+  --ash-info-solid-hover: #075985;
 
-  /* Unchanged from light on purpose: white text sits on these, and #dc2626 / #059669 clear AA
-     against white. Lightening them for the dark theme would cost that and gain nothing. */
+  --ash-offline-surface: #321908;
+  --ash-offline-ink: #fdba74;
+  --ash-offline-line: #7c2d12;
+  --ash-offline-solid: #9a3412;
+  --ash-offline-solid-hover: #7c2d12;
+
+  /* Map tiles may remain light even when the surrounding product is dark, so use high-chroma
+     paints rather than inheriting the muted dark-theme semantic inks. */
+  --ash-map-fresh-stroke: #1d4ed8;
+  --ash-map-fresh-fill: #3b82f6;
+  --ash-map-recent-stroke: #92400e;
+  --ash-map-recent-fill: #f59e0b;
+  --ash-map-stale-stroke: #475569;
+  --ash-map-stale-fill: #94a3b8;
+  --ash-map-branch-stroke: #1e3a8a;
+  --ash-map-branch-fill: #3b82f6;
+
+  /* Unchanged from light on purpose: white text sits on these, and each paired `on-*` foreground
+     clears AA. Lightening them for the dark theme would cost that and gain nothing. */
   --ash-danger-solid: #dc2626;
   --ash-danger-solid-hover: #b91c1c;
-  --ash-success-solid: #059669;
-  --ash-success-solid-hover: #047857;
+  --ash-success-solid: #047857;
+  --ash-success-solid-hover: #065f46;
 
   --ash-scrim: #000000;
-  --ash-focus: #6ba4e2;
+  --ash-focus: #93c5fd;
+  --ash-focus-offset: #131c30;
+  --ash-focus-ring-width: 2px;
+  --ash-focus-ring-offset: 2px;
+}
+
+/*
+ * Motion durations live as variables rather than one-off utility values so a component can retain
+ * its state change without forcing motion on someone who has asked the operating system to reduce
+ * it. Existing animated components continue to carry their explicit motion-reduce fallbacks; new
+ * components should use these tokens for transitions and animation durations.
+ */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --ash-motion-fast: 0ms;
+    --ash-motion-standard: 0ms;
+    --ash-motion-deliberate: 0ms;
+    --ash-motion-emphasis: 0ms;
+  }
 }
 
 /*
@@ -312,6 +444,9 @@
   --color-amber-200: var(--ash-warning-line);
   --color-amber-300: var(--ash-warning-line);
   --color-amber-400: var(--ash-warning-line);
+  /* Existing offline banners use bg-amber-500 with white text. Point it at the AA-safe solid,
+     not Tailwind's #f59e0b, whose white foreground fails contrast. */
+  --color-amber-500: var(--ash-warning-solid);
   --color-amber-600: var(--ash-warning-ink);
   --color-amber-700: var(--ash-warning-ink);
   --color-amber-800: var(--ash-warning-ink);
@@ -323,6 +458,7 @@
   --color-red-200: var(--ash-danger-line);
   --color-red-300: var(--ash-danger-line);
   --color-red-400: var(--ash-danger-ink);
+  --color-red-500: var(--ash-danger-solid);
   --color-red-600: var(--ash-danger-ink);
   --color-red-700: var(--ash-danger-ink);
   --color-red-800: var(--ash-danger-ink);
@@ -340,6 +476,7 @@
   --color-sky-100: var(--ash-info-surface);
   --color-sky-200: var(--ash-info-line);
   --color-sky-300: var(--ash-info-line);
+  --color-sky-500: var(--ash-info-solid);
   --color-sky-600: var(--ash-info-ink);
   --color-sky-700: var(--ash-info-ink);
   --color-sky-800: var(--ash-info-ink);

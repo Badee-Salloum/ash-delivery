@@ -278,6 +278,7 @@ export function OperationsList({
         title={t.orders.editFee}
         open={open !== null}
         onClose={() => setOpenId(null)}
+        closeLabel={t.common.close}
         footer={
           <Button variant="primary" className="w-full" onClick={() => setOpenId(null)}>
             {t.common.confirm}
