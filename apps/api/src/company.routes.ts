@@ -14,6 +14,8 @@ import type {
   FinancialTransactionDeps,
   FixedAssetRecord,
   JournalEntryRecord,
+  AssetInstallmentOccurrenceRecord,
+  AssetInstallmentPlanRecord,
 } from '@ash/contracts'
 import { lockBranchThenCompany, moneySchema, reversalTargetKindOf, serializeMoney } from '@ash/contracts'
 import {
@@ -25,9 +27,11 @@ import {
   type CompanyPaidFrom,
   type Currency,
   type Minor,
+  addDays,
   assetBookValue,
   assetPurchase,
   can,
+  countOccurrencesBetween,
   companyDebtOpen,
   companyDebtOutstanding,
   companyDebtPayment,
@@ -42,6 +46,9 @@ import {
   depreciationRelease,
   depreciationSchedule,
   depreciationTransfer,
+  defaultDueWindow,
+  daysBetween,
+  dueStatus,
   exchangeRate,
   fundCode,
   fundRefFromCode,
@@ -49,7 +56,9 @@ import {
   minor,
   monthStartFor,
   normalizePartyName,
+  occurrencesBetween,
   planDepreciationTransfer,
+  recurrenceMatches,
   resolveFxDay,
   weekStartFor,
 } from '@ash/domain'
@@ -178,6 +187,37 @@ function presentDebt(debt: CompanyDebtRecord, outstanding: Minor, events?: Compa
 function debtFundCode(debt: CompanyDebtRecord): string {
   const head = debt.direction === 'payable' ? 'company_payable' : 'company_receivable'
   return `${head}:${debt.currency}:${debt.id}`
+}
+
+function wireInstallmentPlan(plan: AssetInstallmentPlanRecord): Record<string, unknown> {
+  return { ...plan, amount: serializeMoney(plan.amount) }
+}
+
+function wireInstallmentOccurrence(occurrence: AssetInstallmentOccurrenceRecord): Record<string, unknown> {
+  return { ...occurrence }
+}
+
+/** A deactivated plan retains earlier dues, but never produces one on/after its deactivation day. */
+function installmentSchedule(plan: AssetInstallmentPlanRecord) {
+  return {
+    kind: plan.scheduleKind,
+    startsOn: plan.startsOn,
+    endsOn: plan.deactivatedOn === null ? null : addDays(plan.deactivatedOn, -1),
+    weekday: plan.weekday,
+    intervalDays: plan.intervalDays,
+  }
+}
+
+function installmentPlanMatches(existing: AssetInstallmentPlanRecord, requested: AssetInstallmentPlanRecord): boolean {
+  return existing.id === requested.id && existing.assetId === requested.assetId && existing.debtId === requested.debtId &&
+    existing.branchId === requested.branchId && existing.currency === requested.currency && existing.amount === requested.amount &&
+    existing.paidFrom === requested.paidFrom && existing.scheduleKind === requested.scheduleKind &&
+    existing.weekday === requested.weekday && existing.intervalDays === requested.intervalDays &&
+    existing.startsOn === requested.startsOn && existing.createdBy === requested.createdBy
+}
+
+function installmentPaymentReason(asset: FixedAssetRecord, dueDate: CalendarDate): string {
+  return `Asset installment for ${asset.name} due ${dueDate}`
 }
 
 function postingFromEntry(entry: JournalEntryRecord) {
@@ -972,6 +1012,442 @@ export function registerCompanyRoutes(app: FastifyInstance, deps: Deps): void {
   app.post('/company/debts/:id/payments', permission, (req, reply) => debtEvent(req, reply, 'payment'))
   app.post('/company/debts/:id/writeoffs', permission, (req, reply) => debtEvent(req, reply, 'writeoff'))
 
+  const installmentPlanFields = z.object({
+    amount: positiveMoney,
+    paidFrom: z.enum(['pocket', 'reserve', 'owner_outside']).default('pocket'),
+    scheduleKind: z.enum(['weekly', 'monthly_first', 'every_n_days']),
+    weekday: z.number().int().min(0).max(6).nullable().default(null),
+    intervalDays: z.number().int().min(1).max(366).nullable().default(null),
+    startsOn: dateSchema,
+  }).superRefine((body, context) => {
+    const matches =
+      (body.scheduleKind === 'weekly' && body.weekday !== null && body.intervalDays === null) ||
+      (body.scheduleKind === 'monthly_first' && body.weekday === null && body.intervalDays === null) ||
+      (body.scheduleKind === 'every_n_days' && body.weekday === null && body.intervalDays !== null)
+    if (!matches) context.addIssue({ code: 'custom', message: 'installment schedule fields do not match kind' })
+  })
+  const installmentPlanCreateSchema = z.object({ idempotencyKey: idSchema }).and(installmentPlanFields)
+  const installmentPlanParamsSchema = z.object({ assetId: idSchema, planId: idSchema })
+  const installmentOccurrenceParamsSchema = installmentPlanParamsSchema.extend({ dueDate: z.string() })
+
+  type InstallmentPlanTerms = z.infer<typeof installmentPlanFields>
+
+  const planDraft = (
+    id: string,
+    terms: InstallmentPlanTerms,
+    asset: FixedAssetRecord,
+    debt: CompanyDebtRecord,
+    actorId: string,
+    now: number,
+  ): AssetInstallmentPlanRecord => ({
+    id,
+    assetId: asset.id,
+    debtId: debt.id,
+    branchId: asset.branchId,
+    currency: asset.currency,
+    amount: terms.amount,
+    paidFrom: terms.paidFrom,
+    scheduleKind: terms.scheduleKind,
+    weekday: terms.weekday,
+    intervalDays: terms.intervalDays,
+    startsOn: terms.startsOn,
+    active: true,
+    deactivatedOn: null,
+    deactivatedAtMs: null,
+    deactivatedBy: null,
+    deactivationReason: null,
+    createdBy: actorId,
+    createdAtMs: now,
+  })
+
+  async function financedAsset(assetId: string, companyBranchId: string): Promise<{
+    asset: FixedAssetRecord
+    debt: CompanyDebtRecord
+  }> {
+    const asset = await deps.companyFinance.getAsset(assetId)
+    if (!asset || asset.branchId !== companyBranchId) throw new ServiceError(404, 'asset_not_found')
+    if (asset.debtId === null) throw new ServiceError(422, 'asset_installment_requires_financed_asset')
+    const debt = await deps.companyFinance.getDebt(asset.debtId)
+    if (
+      debt === null || debt.branchId !== asset.branchId || debt.id !== asset.debtId || debt.assetId !== asset.id ||
+      debt.direction !== 'payable' || debt.origin !== 'asset_purchase' || debt.currency !== asset.currency
+    ) throw new ServiceError(409, 'asset_installment_debt_mismatch')
+    return { asset, debt }
+  }
+
+  function assertInstallmentStartsAfterPurchase(terms: InstallmentPlanTerms, asset: FixedAssetRecord): void {
+    if (terms.startsOn < asset.purchasedOn) throw new ServiceError(422, 'asset_installment_starts_before_purchase')
+  }
+
+  /**
+   * A deactivated plan remains usable for a due that it generated before its deactivation date:
+   * those historical obligations must be paid or explicitly skipped rather than silently erased.
+   * It must never, however, accept a due introduced after a replacement/deactivation won the lock.
+   */
+  function assertInstallmentOccurrenceDate(plan: AssetInstallmentPlanRecord, dueDate: CalendarDate): void {
+    if (recurrenceMatches(installmentSchedule(plan), dueDate)) return
+    if (!plan.active && plan.deactivatedOn !== null && dueDate >= plan.deactivatedOn) {
+      throw new ServiceError(409, 'asset_installment_plan_inactive')
+    }
+    throw new ServiceError(422, 'asset_installment_invalid_due_date')
+  }
+
+  function matchesInstallmentPayment(
+    occurrence: AssetInstallmentOccurrenceRecord,
+    event: CompanyDebtEventRecord | null,
+    debt: CompanyDebtRecord,
+    idempotencyKey: string,
+    source: 'pocket' | 'reserve' | 'owner_outside',
+    occurredOn: CalendarDate,
+    reason: string,
+    actorId: string,
+  ): boolean {
+    return occurrence.status === 'paid' && occurrence.debtEventId === idempotencyKey && event !== null &&
+      event.id === idempotencyKey && event.debtId === debt.id && event.kind === 'payment' && event.source === source &&
+      event.occurredOn === occurredOn && event.reason === reason && event.createdBy === actorId
+  }
+
+  // Static routes stay before `/company/assets/:id`, otherwise Fastify would read
+  // `installment-plans` as an asset UUID in some routers.
+  app.get('/company/assets/installment-plans/due', permission, async (req) => {
+    const query = z.object({ from: z.string().optional(), to: z.string().optional() }).parse(req.query)
+    const today = todayFor(deps)
+    const defaults = defaultDueWindow(today)
+    const from = (query.from ?? defaults.from) as CalendarDate
+    const to = (query.to ?? defaults.to) as CalendarDate
+    if (!isCalendarDate(from) || !isCalendarDate(to) || from > to) throw new ServiceError(422, 'invalid_date_range')
+    if (daysBetween(from, to) + 1 > 366) {
+      throw new ServiceError(422, 'range_too_large', { maxDays: 366 })
+    }
+    const company = await companyBranch()
+    const [plans, resolved, assets] = await Promise.all([
+      deps.companyFinance.listInstallmentPlans(company.id, true),
+      deps.companyFinance.listAssetInstallmentOccurrences(company.id, from, to),
+      deps.companyFinance.listAssets(company.id),
+    ])
+    const resolvedKeys = new Set(resolved.map((row) => `${row.planId}|${row.dueDate}`))
+    const assetsById = new Map(assets.map((asset) => [asset.id, asset]))
+    const due: Array<Record<string, unknown>> = []
+    let olderUnresolved = 0
+    for (const plan of plans) {
+      const [debt, asset] = await Promise.all([
+        deps.companyFinance.getDebt(plan.debtId),
+        Promise.resolve(assetsById.get(plan.assetId) ?? null),
+      ])
+      if (debt === null || asset === null) continue
+      const outstanding = companyDebtOutstanding(debt.direction, await deps.ledger.fundBalance(company.id, debtFundCode(debt)))
+      if (outstanding <= 0n) continue
+      const schedule = installmentSchedule(plan)
+      for (const dueDate of occurrencesBetween(schedule, from, to)) {
+        if (!resolvedKeys.has(`${plan.id}|${dueDate}`)) {
+          due.push({
+            ...wireInstallmentPlan(plan),
+            assetName: asset.name,
+            dueDate,
+            status: dueStatus(dueDate, today),
+            amountDue: serializeMoney(minor(plan.amount < outstanding ? plan.amount : outstanding)),
+          })
+        }
+      }
+      const before = addDays(from, -1)
+      if (schedule.startsOn <= before && (schedule.endsOn === null || schedule.endsOn >= schedule.startsOn)) {
+        const effectiveBefore = schedule.endsOn !== null && schedule.endsOn < before ? schedule.endsOn : before
+        const generated = effectiveBefore < schedule.startsOn ? 0 : countOccurrencesBetween(schedule, schedule.startsOn, effectiveBefore)
+        const acted = await deps.companyFinance.countAssetInstallmentOccurrencesBefore(plan.id, from)
+        olderUnresolved += Math.max(0, generated - acted)
+      }
+    }
+    due.sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)) || String(a.assetName).localeCompare(String(b.assetName)))
+    return { today, from, to, olderUnresolved, due }
+  })
+
+  app.get('/company/assets/:assetId/installment-plans', permission, async (req) => {
+    const { assetId } = z.object({ assetId: idSchema }).parse(req.params)
+    const { includeInactive } = z.object({ includeInactive: z.enum(['true', 'false']).optional() }).parse(req.query)
+    const company = await companyBranch()
+    await financedAsset(assetId, company.id)
+    return {
+      plans: (await deps.companyFinance.listAssetInstallmentPlans(assetId, includeInactive === 'true')).map(wireInstallmentPlan),
+    }
+  })
+
+  app.get('/company/assets/:assetId/installment-plans/:planId/occurrences', permission, async (req) => {
+    const { assetId, planId } = installmentPlanParamsSchema.parse(req.params)
+    const company = await companyBranch()
+    const { asset, debt } = await financedAsset(assetId, company.id)
+    const plan = await deps.companyFinance.getAssetInstallmentPlan(planId)
+    if (plan === null || plan.assetId !== asset.id || plan.debtId !== debt.id || plan.branchId !== company.id) {
+      throw new ServiceError(404, 'asset_installment_plan_not_found')
+    }
+    const occurrences = await deps.companyFinance.listAssetInstallmentOccurrencesForPlan(plan.id)
+    return {
+      occurrences: await Promise.all(occurrences.map(async (occurrence) => {
+        const event = occurrence.debtEventId === null ? null : await deps.companyFinance.getDebtEvent(occurrence.debtEventId)
+        return {
+          ...wireInstallmentOccurrence(occurrence),
+          event: event === null ? null : {
+            ...event,
+            amount: serializeMoney(event.amount),
+            sypMinorPerUsd: wireRate(event.sypMinorPerUsd),
+          },
+        }
+      })),
+    }
+  })
+
+  app.post('/company/assets/:assetId/installment-plans', permission, async (req, reply) => {
+    const { assetId } = z.object({ assetId: idSchema }).parse(req.params)
+    const body = installmentPlanCreateSchema.parse(req.body)
+    const company = await companyBranch()
+    const { asset, debt } = await financedAsset(assetId, company.id)
+    assertInstallmentStartsAfterPurchase(body, asset)
+    const draft = planDraft(body.idempotencyKey, body, asset, debt, req.actor!.userId, deps.clock.nowMs())
+    const prior = await deps.companyFinance.getAssetInstallmentPlan(draft.id)
+    if (prior) {
+      if (!installmentPlanMatches(prior, draft)) throw new ServiceError(409, 'idempotency_key_conflict')
+      return reply.code(200).send({ plan: wireInstallmentPlan(prior), replayed: true })
+    }
+    const result = await deps.financialUnitOfWork.run(
+      { lockKey: `receivables:${company.id}`, actorId: req.actor!.userId, requestId: req.requestId },
+      async (tx) => {
+        const concurrent = await tx.companyFinance.getAssetInstallmentPlan(draft.id)
+        if (concurrent) {
+          if (!installmentPlanMatches(concurrent, draft)) throw new ServiceError(409, 'idempotency_key_conflict')
+          return { plan: concurrent, created: false }
+        }
+        if ((await tx.companyFinance.listAssetInstallmentPlans(asset.id)).some((row) => row.active)) {
+          throw new ServiceError(409, 'asset_installment_plan_active')
+        }
+        const outstanding = companyDebtOutstanding(
+          debt.direction,
+          await tx.ledger.fundBalance(company.id, debtFundCode(debt)),
+        )
+        if (outstanding <= 0n) throw new ServiceError(422, 'asset_debt_not_outstanding')
+        await tx.companyFinance.createAssetInstallmentPlan(draft)
+        return { plan: draft, created: true }
+      },
+    )
+    return reply.code(result.created ? 201 : 200).send({ plan: wireInstallmentPlan(result.plan), replayed: !result.created })
+  })
+
+  app.post('/company/assets/:assetId/installment-plans/:planId/deactivate', permission, async (req) => {
+    const { assetId, planId } = installmentPlanParamsSchema.parse(req.params)
+    const { reason } = z.object({ reason: reasonSchema }).parse(req.body)
+    const company = await companyBranch()
+    await financedAsset(assetId, company.id)
+    const current = await deps.companyFinance.getAssetInstallmentPlan(planId)
+    if (current === null || current.assetId !== assetId || current.branchId !== company.id) {
+      throw new ServiceError(404, 'asset_installment_plan_not_found')
+    }
+    if (!current.active) {
+      if (current.deactivationReason !== reason) throw new ServiceError(409, 'asset_installment_plan_inactive')
+      return { plan: wireInstallmentPlan(current), replayed: true }
+    }
+    const now = deps.clock.nowMs()
+    const result = await deps.financialUnitOfWork.run(
+      { lockKey: `receivables:${company.id}`, actorId: req.actor!.userId, requestId: req.requestId },
+      async (tx) => {
+        const locked = await tx.companyFinance.getAssetInstallmentPlan(planId)
+        if (locked === null || locked.assetId !== assetId || locked.branchId !== company.id) {
+          throw new ServiceError(404, 'asset_installment_plan_not_found')
+        }
+        if (!locked.active) {
+          if (locked.deactivationReason !== reason) throw new ServiceError(409, 'asset_installment_plan_inactive')
+          return { plan: locked, replayed: true }
+        }
+        const updated: AssetInstallmentPlanRecord = {
+          ...locked,
+          active: false,
+          deactivatedOn: todayFor(deps),
+          deactivatedAtMs: now,
+          deactivatedBy: req.actor!.userId,
+          deactivationReason: reason,
+        }
+        await tx.companyFinance.deactivateAssetInstallmentPlan(updated)
+        return { plan: updated, replayed: false }
+      },
+    )
+    return { plan: wireInstallmentPlan(result.plan), replayed: result.replayed }
+  })
+
+  const installmentPaySchema = z.object({
+    idempotencyKey: idSchema,
+    source: z.enum(['pocket', 'reserve', 'owner_outside']).optional(),
+    occurredOn: dateSchema.optional(),
+    reason: z.string().trim().min(1).max(500).nullable().default(null),
+  })
+
+  app.post('/company/assets/:assetId/installment-plans/:planId/occurrences/:dueDate/pay', permission, async (req, reply) => {
+    const { assetId, planId, dueDate: rawDueDate } = installmentOccurrenceParamsSchema.parse(req.params)
+    if (!isCalendarDate(rawDueDate)) throw new ServiceError(422, 'invalid_due_date')
+    const dueDate = rawDueDate as CalendarDate
+    const body = installmentPaySchema.parse(req.body)
+    const company = await companyBranch()
+    const { asset, debt } = await financedAsset(assetId, company.id)
+    const plan = await deps.companyFinance.getAssetInstallmentPlan(planId)
+    if (plan === null || plan.assetId !== asset.id || plan.debtId !== debt.id || plan.branchId !== company.id) {
+      throw new ServiceError(404, 'asset_installment_plan_not_found')
+    }
+    const day = await companyDay(debt.currency)
+    const occurredOn = body.occurredOn ?? dueDate
+    const source = body.source ?? plan.paidFrom
+    const reason = body.reason ?? installmentPaymentReason(asset, dueDate)
+    const existing = await deps.companyFinance.getAssetInstallmentOccurrence(plan.id, dueDate)
+    if (existing) {
+      const event = existing.debtEventId === null ? null : await deps.companyFinance.getDebtEvent(existing.debtEventId)
+      if (!matchesInstallmentPayment(existing, event, debt, body.idempotencyKey, source, occurredOn, reason, req.actor!.userId)) {
+        throw new ServiceError(409, 'asset_installment_already_resolved')
+      }
+      const outstanding = companyDebtOutstanding(debt.direction, await deps.ledger.fundBalance(company.id, debtFundCode(debt)))
+      return reply.code(200).send({
+        occurrence: wireInstallmentOccurrence(existing),
+        event: { ...event!, amount: serializeMoney(event!.amount), sypMinorPerUsd: wireRate(event!.sypMinorPerUsd) },
+        outstanding: serializeMoney(outstanding),
+        replayed: true,
+      })
+    }
+    if (dueDate > day.businessDate) throw new ServiceError(409, 'asset_installment_not_due')
+    if (occurredOn < dueDate || occurredOn > day.businessDate) throw new ServiceError(422, 'asset_installment_invalid_payment_date')
+    assertInstallmentOccurrenceDate(plan, dueDate)
+    const result = await deps.financialUnitOfWork.run(
+      { lockKey: `receivables:${company.id}`, actorId: req.actor!.userId, requestId: req.requestId },
+      async (tx) => {
+        const lockedPlan = await tx.companyFinance.getAssetInstallmentPlan(planId)
+        if (lockedPlan === null || lockedPlan.assetId !== asset.id || lockedPlan.debtId !== debt.id || lockedPlan.branchId !== company.id) {
+          throw new ServiceError(404, 'asset_installment_plan_not_found')
+        }
+        const concurrent = await tx.companyFinance.getAssetInstallmentOccurrence(plan.id, dueDate)
+        if (concurrent) {
+          const event = concurrent.debtEventId === null ? null : await tx.companyFinance.getDebtEvent(concurrent.debtEventId)
+          if (!matchesInstallmentPayment(concurrent, event, debt, body.idempotencyKey, source, occurredOn, reason, req.actor!.userId)) {
+            throw new ServiceError(409, 'asset_installment_already_resolved')
+          }
+          const outstanding = companyDebtOutstanding(debt.direction, await tx.ledger.fundBalance(company.id, debtFundCode(debt)))
+          return { occurrence: concurrent, event: event!, outstanding, created: false }
+        }
+        assertInstallmentOccurrenceDate(lockedPlan, dueDate)
+        const priorOccurrence = await tx.companyFinance.getAssetInstallmentOccurrenceById(body.idempotencyKey)
+        if (priorOccurrence !== null) throw new ServiceError(409, 'idempotency_key_conflict')
+        const priorEvent = await tx.companyFinance.getDebtEvent(body.idempotencyKey)
+        if (priorEvent !== null) throw new ServiceError(409, 'idempotency_key_conflict')
+        const outstanding = companyDebtOutstanding(debt.direction, await tx.ledger.fundBalance(company.id, debtFundCode(debt)))
+        if (outstanding <= 0n) throw new ServiceError(422, 'asset_debt_not_outstanding')
+        const amount = minor(lockedPlan.amount < outstanding ? lockedPlan.amount : outstanding)
+        const posting = companyDebtPayment({
+          debtId: debt.id,
+          direction: 'payable',
+          currency: debt.currency,
+          amount,
+          outstanding,
+          paidFrom: source,
+          occurrenceKey: body.idempotencyKey,
+        })
+        await assertCompanyPocketBalances(tx, company.id, posting)
+        const [entry] = await tx.ledger.post(company.id, [posting], {
+          shiftId: null,
+          businessDate: day.businessDate,
+          postingDate: day.businessDate,
+          weekStartDate: weekStartFor(day.businessDate),
+          fxDayId: day.fxDayId,
+          sypMinorPerUsd: day.rate,
+          createdBy: req.actor!.userId,
+          reason,
+        })
+        if (!entry) throw new ServiceError(409, 'idempotency_key_conflict')
+        const event: CompanyDebtEventRecord = {
+          id: body.idempotencyKey,
+          debtId: debt.id,
+          branchId: company.id,
+          kind: 'payment',
+          amount,
+          source,
+          sypMinorPerUsd: day.rate,
+          occurredOn,
+          businessDate: day.businessDate,
+          reason,
+          journalEntryId: entry.id,
+          createdBy: req.actor!.userId,
+          createdAtMs: deps.clock.nowMs(),
+        }
+        await tx.companyFinance.createDebtEvent(event)
+        const occurrence: AssetInstallmentOccurrenceRecord = {
+          id: body.idempotencyKey,
+          planId: lockedPlan.id,
+          branchId: company.id,
+          dueDate,
+          status: 'paid',
+          debtEventId: event.id,
+          reason: null,
+          actedBy: req.actor!.userId,
+          actedAtMs: deps.clock.nowMs(),
+        }
+        await tx.companyFinance.createAssetInstallmentOccurrence(occurrence)
+        return { occurrence, event, outstanding: minor(outstanding - amount), created: true }
+      },
+    )
+    return reply.code(result.created ? 201 : 200).send({
+      occurrence: wireInstallmentOccurrence(result.occurrence),
+      event: { ...result.event, amount: serializeMoney(result.event.amount), sypMinorPerUsd: wireRate(result.event.sypMinorPerUsd) },
+      outstanding: serializeMoney(result.outstanding),
+      replayed: !result.created,
+    })
+  })
+
+  app.post('/company/assets/:assetId/installment-plans/:planId/occurrences/:dueDate/skip', permission, async (req, reply) => {
+    const { assetId, planId, dueDate: rawDueDate } = installmentOccurrenceParamsSchema.parse(req.params)
+    if (!isCalendarDate(rawDueDate)) throw new ServiceError(422, 'invalid_due_date')
+    const dueDate = rawDueDate as CalendarDate
+    const { idempotencyKey, reason } = z.object({ idempotencyKey: idSchema, reason: reasonSchema }).parse(req.body)
+    const company = await companyBranch()
+    const { asset, debt } = await financedAsset(assetId, company.id)
+    const plan = await deps.companyFinance.getAssetInstallmentPlan(planId)
+    if (plan === null || plan.assetId !== asset.id || plan.debtId !== debt.id || plan.branchId !== company.id) {
+      throw new ServiceError(404, 'asset_installment_plan_not_found')
+    }
+    const existing = await deps.companyFinance.getAssetInstallmentOccurrence(plan.id, dueDate)
+    if (existing) {
+      if (existing.status === 'skipped' && existing.id === idempotencyKey && existing.reason === reason) {
+        return reply.code(200).send({ occurrence: wireInstallmentOccurrence(existing), replayed: true })
+      }
+      throw new ServiceError(409, 'asset_installment_already_resolved')
+    }
+    assertInstallmentOccurrenceDate(plan, dueDate)
+    if (dueDate > todayFor(deps)) throw new ServiceError(409, 'asset_installment_not_due')
+    const occurrence: AssetInstallmentOccurrenceRecord = {
+      id: idempotencyKey,
+      planId: plan.id,
+      branchId: company.id,
+      dueDate,
+      status: 'skipped',
+      debtEventId: null,
+      reason,
+      actedBy: req.actor!.userId,
+      actedAtMs: deps.clock.nowMs(),
+    }
+    const result = await deps.financialUnitOfWork.run(
+      { lockKey: `receivables:${company.id}`, actorId: req.actor!.userId, requestId: req.requestId },
+      async (tx) => {
+        const lockedPlan = await tx.companyFinance.getAssetInstallmentPlan(planId)
+        if (lockedPlan === null || lockedPlan.assetId !== asset.id || lockedPlan.debtId !== debt.id || lockedPlan.branchId !== company.id) {
+          throw new ServiceError(404, 'asset_installment_plan_not_found')
+        }
+        const existing = await tx.companyFinance.getAssetInstallmentOccurrence(plan.id, dueDate)
+        if (existing) {
+          if (existing.status === 'skipped' && existing.id === idempotencyKey && existing.reason === reason) {
+            return { occurrence: existing, created: false }
+          }
+          throw new ServiceError(409, 'asset_installment_already_resolved')
+        }
+        assertInstallmentOccurrenceDate(lockedPlan, dueDate)
+        const priorOccurrence = await tx.companyFinance.getAssetInstallmentOccurrenceById(idempotencyKey)
+        if (priorOccurrence !== null) throw new ServiceError(409, 'idempotency_key_conflict')
+        await tx.companyFinance.createAssetInstallmentOccurrence({ ...occurrence, planId: lockedPlan.id })
+        return { occurrence, created: true }
+      },
+    )
+    return reply.code(result.created ? 201 : 200).send({ occurrence: wireInstallmentOccurrence(result.occurrence), replayed: !result.created })
+  })
+
   const assetSchema = z.object({
     idempotencyKey: idSchema,
     kind: z.enum(['vehicle', 'equipment', 'property', 'other']),
@@ -986,10 +1462,16 @@ export function registerCompanyRoutes(app: FastifyInstance, deps: Deps): void {
     financedPartyName: z.string().trim().min(1).max(120).nullable().default(null),
     financedDueOn: dateSchema.nullable().default(null),
     financedNote: z.string().trim().min(1).max(500).nullable().default(null),
+    /** Created atomically with a financed purchase; later corrections deactivate and replace it. */
+    installmentPlan: installmentPlanCreateSchema.nullable().optional(),
   })
 
   async function presentAsset(asset: FixedAssetRecord, asOf: CalendarDate): Promise<Record<string, unknown>> {
-    const schedule = await deps.companyFinance.listAssetSchedule(asset.id)
+    const [schedule, installmentPlans] = await Promise.all([
+      deps.companyFinance.listAssetSchedule(asset.id),
+      deps.companyFinance.listAssetInstallmentPlans(asset.id, true),
+    ])
+    const activeInstallmentPlan = installmentPlans.find((plan) => plan.active) ?? null
     const funded = await deps.companyFinance.listDepreciationAllocations(asset.branchId, asset.currency)
     const fundedTotal = minor(funded.filter((row) => row.assetId === asset.id).reduce((sum, row) => sum + row.amount, 0n))
     const dueTotal = minor(schedule.filter((row) => row.periodMonth <= monthStartFor(asOf)).reduce((sum, row) => sum + row.amount, 0n))
@@ -1007,6 +1489,8 @@ export function registerCompanyRoutes(app: FastifyInstance, deps: Deps): void {
       depreciationFunded: serializeMoney(fundedTotal),
       outstanding: serializeMoney(outstanding),
       schedule: schedule.map((row) => ({ ...row, amount: serializeMoney(row.amount) })),
+      installmentPlans: installmentPlans.map(wireInstallmentPlan),
+      activeInstallmentPlan: activeInstallmentPlan === null ? null : wireInstallmentPlan(activeInstallmentPlan),
     }
   }
 
@@ -1046,6 +1530,12 @@ export function registerCompanyRoutes(app: FastifyInstance, deps: Deps): void {
     if (body.vehicleId !== null && !(await deps.directory.vehicle(body.vehicleId))) throw new ServiceError(404, 'vehicle_not_found')
     const financed = minor(body.price - body.paidNow)
     if ((financed > 0n) !== (body.financedPartyName !== null)) throw new ServiceError(422, 'asset_financing_party_mismatch')
+    if (body.installmentPlan !== undefined && body.installmentPlan !== null) {
+      if (financed <= 0n) throw new ServiceError(422, 'asset_installment_requires_financed_asset')
+      if (body.installmentPlan.startsOn < body.purchasedOn) {
+        throw new ServiceError(422, 'asset_installment_starts_before_purchase')
+      }
+    }
     const assetMatches = async (
       asset: FixedAssetRecord,
       source: Pick<FinancialTransactionDeps, 'companyFinance'>,
@@ -1059,14 +1549,26 @@ export function registerCompanyRoutes(app: FastifyInstance, deps: Deps): void {
         return body.financedPartyName === null && body.financedDueOn === null && body.financedNote === null
       }
       const linkedDebt = await source.companyFinance.getDebt(asset.debtId)
-      return linkedDebt !== null && linkedDebt.partyName === body.financedPartyName &&
+      const debtMatchesAsset = linkedDebt !== null && linkedDebt.partyName === body.financedPartyName &&
         linkedDebt.dueOn === body.financedDueOn && linkedDebt.note === body.financedNote &&
         linkedDebt.principal === financed
+      if (!debtMatchesAsset) return false
+      if (body.installmentPlan === undefined || body.installmentPlan === null) return true
+      const plan = await source.companyFinance.getAssetInstallmentPlan(body.installmentPlan.idempotencyKey)
+      return plan !== null && installmentPlanMatches(
+        plan,
+        planDraft(body.installmentPlan.idempotencyKey, body.installmentPlan, asset, linkedDebt, req.actor!.userId, plan.createdAtMs),
+      )
     }
     const prior = await deps.companyFinance.getAsset(body.idempotencyKey)
     if (prior) {
       if (!(await assetMatches(prior, deps))) throw new ServiceError(409, 'idempotency_key_conflict')
       return reply.code(200).send({ asset: await presentAsset(prior, day.businessDate), replayed: true })
+    }
+    if (body.installmentPlan !== undefined && body.installmentPlan !== null) {
+      if (await deps.companyFinance.getAssetInstallmentPlan(body.installmentPlan.idempotencyKey)) {
+        throw new ServiceError(409, 'idempotency_key_conflict')
+      }
     }
     const debtId = financed > 0n ? deps.ids.uuid() : null
     const purchase = assetPurchase({
@@ -1086,6 +1588,11 @@ export function registerCompanyRoutes(app: FastifyInstance, deps: Deps): void {
           if (!(await assetMatches(concurrent, tx))) throw new ServiceError(409, 'idempotency_key_conflict')
           return { asset: concurrent, replayed: true }
         }
+        if (body.installmentPlan !== undefined && body.installmentPlan !== null) {
+          if (await tx.companyFinance.getAssetInstallmentPlan(body.installmentPlan.idempotencyKey)) {
+            throw new ServiceError(409, 'idempotency_key_conflict')
+          }
+        }
         await assertCompanyPocketBalances(tx, day.companyBranchId, purchase.posting)
         const [entry] = await tx.ledger.post(day.companyBranchId, [purchase.posting], {
           shiftId: null,
@@ -1098,6 +1605,7 @@ export function registerCompanyRoutes(app: FastifyInstance, deps: Deps): void {
           reason: body.description,
         })
         if (!entry) throw new ServiceError(409, 'idempotency_key_conflict')
+        const createdAtMs = deps.clock.nowMs()
         const asset: FixedAssetRecord = {
           id: body.idempotencyKey,
           branchId: day.companyBranchId,
@@ -1116,11 +1624,11 @@ export function registerCompanyRoutes(app: FastifyInstance, deps: Deps): void {
           description: body.description,
           journalEntryId: entry.id,
           createdBy: req.actor!.userId,
-          createdAtMs: deps.clock.nowMs(),
+          createdAtMs,
         }
         await tx.companyFinance.createAsset(asset)
         if (debtId !== null) {
-          await tx.companyFinance.createDebt({
+          const debt: CompanyDebtRecord = {
             id: debtId,
             branchId: day.companyBranchId,
             direction: 'payable',
@@ -1141,8 +1649,14 @@ export function registerCompanyRoutes(app: FastifyInstance, deps: Deps): void {
             assetId: asset.id,
             journalEntryId: entry.id,
             createdBy: req.actor!.userId,
-            createdAtMs: deps.clock.nowMs(),
-          })
+            createdAtMs,
+          }
+          await tx.companyFinance.createDebt(debt)
+          if (body.installmentPlan !== undefined && body.installmentPlan !== null) {
+            await tx.companyFinance.createAssetInstallmentPlan(
+              planDraft(body.installmentPlan.idempotencyKey, body.installmentPlan, asset, debt, req.actor!.userId, createdAtMs),
+            )
+          }
         }
         await tx.companyFinance.createAssetSchedule(depreciationSchedule(asset.id, asset.price, asset.purchasedOn))
         return { asset, replayed: false }

@@ -6,6 +6,7 @@ import type {
   CompanyPaidFrom,
   Currency,
   Minor,
+  RecurrenceKind,
 } from '@ash/domain'
 
 export interface CompanyDebtRecord {
@@ -76,6 +77,51 @@ export interface AssetDepreciationPeriodRecord {
   amount: Minor
 }
 
+/**
+ * A human-confirmed payment promise for the one payable created by a financed fixed asset.
+ *
+ * It is deliberately not a debt payment: the underlying `CompanyDebtEventRecord` remains the
+ * sole monetary fact. This row only supplies the recurring reminder and its default source.
+ */
+export interface AssetInstallmentPlanRecord {
+  /** Client-owned UUID: identity and create-retry key. */
+  id: string
+  assetId: string
+  debtId: string
+  branchId: string
+  currency: Currency
+  amount: Minor
+  paidFrom: CompanyPaidFrom
+  scheduleKind: RecurrenceKind
+  weekday: number | null
+  intervalDays: number | null
+  startsOn: CalendarDate
+  active: boolean
+  /** The first calendar date no longer generated after a reasoned deactivation. */
+  deactivatedOn: CalendarDate | null
+  deactivatedAtMs: number | null
+  deactivatedBy: string | null
+  deactivationReason: string | null
+  createdBy: string
+  createdAtMs: number
+}
+
+/** One human resolution of one generated asset-installment due date. */
+export interface AssetInstallmentOccurrenceRecord {
+  /** Client-owned UUID: the payment or skip retry key. */
+  id: string
+  planId: string
+  branchId: string
+  dueDate: CalendarDate
+  status: 'paid' | 'skipped'
+  /** The existing immutable debt-payment fact when paid; null for a skip. */
+  debtEventId: string | null
+  /** Required for a skip; payment details live on the debt event. */
+  reason: string | null
+  actedBy: string
+  actedAtMs: number
+}
+
 export interface DepreciationAllocationRecord {
   transferId: string
   assetId: string
@@ -127,6 +173,28 @@ export interface CompanyFinanceRepo {
   createAsset(row: FixedAssetRecord): Promise<void>
   listAssetSchedule(assetId?: string): Promise<AssetDepreciationPeriodRecord[]>
   createAssetSchedule(rows: readonly AssetDepreciationPeriodRecord[]): Promise<void>
+
+  getAssetInstallmentPlan(id: string): Promise<AssetInstallmentPlanRecord | null>
+  /** All plans owned by one fixed asset, newest plan last. */
+  listAssetInstallmentPlans(assetId: string, includeInactive?: boolean): Promise<AssetInstallmentPlanRecord[]>
+  /** Company-wide read used by the due-reminders feed. */
+  listInstallmentPlans(companyBranchId: string, includeInactive?: boolean): Promise<AssetInstallmentPlanRecord[]>
+  createAssetInstallmentPlan(row: AssetInstallmentPlanRecord): Promise<void>
+  deactivateAssetInstallmentPlan(row: AssetInstallmentPlanRecord): Promise<void>
+  getAssetInstallmentOccurrence(
+    planId: string,
+    dueDate: CalendarDate,
+  ): Promise<AssetInstallmentOccurrenceRecord | null>
+  /** Global occurrence id lookup: client retry keys cannot resolve two different dues. */
+  getAssetInstallmentOccurrenceById(id: string): Promise<AssetInstallmentOccurrenceRecord | null>
+  listAssetInstallmentOccurrencesForPlan(planId: string): Promise<AssetInstallmentOccurrenceRecord[]>
+  listAssetInstallmentOccurrences(
+    companyBranchId: string,
+    from: CalendarDate,
+    to: CalendarDate,
+  ): Promise<AssetInstallmentOccurrenceRecord[]>
+  countAssetInstallmentOccurrencesBefore(planId: string, before: CalendarDate): Promise<number>
+  createAssetInstallmentOccurrence(row: AssetInstallmentOccurrenceRecord): Promise<void>
 
   listDepreciationAllocations(companyBranchId: string, currency?: Currency): Promise<DepreciationAllocationRecord[]>
   createDepreciationTransfer(

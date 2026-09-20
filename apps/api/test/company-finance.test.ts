@@ -201,6 +201,179 @@ describe('company debts, assets, and depreciation', () => {
     expect(debts.json().debts).toHaveLength(1)
     expect(debts.json().debts[0]).toMatchObject({ origin: 'asset_purchase', outstanding: '3000.00' })
   })
+
+  it('creates a human-confirmed installment plan with the financed asset and caps its final debt payment', async () => {
+    await post('/company/deposits', {
+      idempotencyKey: crypto.randomUUID(), currency: 'SYP_NEW', amount: sypStr(2_000), reason: 'installment cash',
+    })
+    const assetId = crypto.randomUUID()
+    const planId = crypto.randomUUID()
+    const asset = await post('/company/assets', {
+      idempotencyKey: assetId,
+      kind: 'equipment',
+      name: 'Financed charger',
+      currency: 'SYP_NEW',
+      price: sypStr(1_000),
+      purchasedOn: '2026-07-01',
+      paidNow: sypStr(0),
+      paidFrom: 'owner_outside',
+      description: 'Financed workshop charger',
+      financedPartyName: 'Charger supplier',
+      installmentPlan: {
+        idempotencyKey: planId,
+        amount: sypStr(400),
+        paidFrom: 'pocket',
+        scheduleKind: 'weekly',
+        weekday: 3,
+        intervalDays: null,
+        startsOn: '2026-07-01',
+      },
+    })
+    expect(asset.statusCode, asset.body).toBe(201)
+    expect(asset.json().asset).toMatchObject({
+      outstanding: sypStr(1_000),
+      activeInstallmentPlan: { id: planId, amount: sypStr(400), paidFrom: 'pocket' },
+    })
+    const collidedPlanKey = await post('/company/assets', {
+      idempotencyKey: crypto.randomUUID(),
+      kind: 'equipment',
+      name: 'Other financed charger',
+      currency: 'SYP_NEW',
+      price: sypStr(100),
+      purchasedOn: '2026-07-01',
+      paidNow: sypStr(0),
+      paidFrom: 'owner_outside',
+      description: 'Must not reuse another plan key',
+      financedPartyName: 'Another supplier',
+      installmentPlan: {
+        idempotencyKey: planId,
+        amount: sypStr(100),
+        paidFrom: 'pocket',
+        scheduleKind: 'weekly',
+        weekday: 3,
+        intervalDays: null,
+        startsOn: '2026-07-01',
+      },
+    })
+    expect(collidedPlanKey.statusCode, collidedPlanKey.body).toBe(409)
+    const manager = await h.loginAs('manager')
+    const denied = await post(`/company/assets/${assetId}/installment-plans`, {
+      idempotencyKey: crypto.randomUUID(), amount: sypStr(1), paidFrom: 'pocket',
+      scheduleKind: 'weekly', weekday: 3, intervalDays: null, startsOn: '2026-07-22',
+    }, manager)
+    expect(denied.statusCode).toBe(403)
+
+    const due = await h.app.inject({
+      method: 'GET',
+      url: '/company/assets/installment-plans/due?from=2026-07-01&to=2026-07-21',
+      headers: { cookie: h.cookie(gm) },
+    })
+    expect(due.statusCode, due.body).toBe(200)
+    expect(due.json().due).toHaveLength(3)
+    expect(due.json().due[0]).toMatchObject({ assetId, dueDate: '2026-07-01', amountDue: sypStr(400) })
+
+    const pay = async (dueDate: string, idempotencyKey = crypto.randomUUID()) => await post(
+      `/company/assets/${assetId}/installment-plans/${planId}/occurrences/${dueDate}/pay`, { idempotencyKey },
+    )
+    const firstKey = crypto.randomUUID()
+    const first = await pay('2026-07-01', firstKey)
+    expect(first.statusCode, first.body).toBe(201)
+    expect(first.json()).toMatchObject({ outstanding: sypStr(600), event: { amount: sypStr(400), source: 'pocket' } })
+    const replay = await pay('2026-07-01', firstKey)
+    expect(replay.statusCode, replay.body).toBe(200)
+    expect(replay.json().replayed).toBe(true)
+    const changedSource = await post(`/company/assets/${assetId}/installment-plans/${planId}/occurrences/2026-07-01/pay`, {
+      idempotencyKey: firstKey, source: 'owner_outside',
+    })
+    expect(changedSource.statusCode).toBe(409)
+
+    expect((await pay('2026-07-08')).json().outstanding).toBe(sypStr(200))
+    const final = await pay('2026-07-15')
+    expect(final.statusCode, final.body).toBe(201)
+    expect(final.json()).toMatchObject({ outstanding: sypStr(0), event: { amount: sypStr(200) } })
+    expect(h.deps.ledger.entries.filter((entry) => entry.eventType === 'company_expense')).toHaveLength(0)
+    const history = await h.app.inject({
+      method: 'GET',
+      url: `/company/assets/${assetId}/installment-plans/${planId}/occurrences`,
+      headers: { cookie: h.cookie(gm) },
+    })
+    expect(history.statusCode, history.body).toBe(200)
+    expect(history.json().occurrences.map((row: { event: { amount: string } | null }) => row.event?.amount))
+      .toEqual([sypStr(400), sypStr(400), sypStr(200)])
+
+    const after = await h.app.inject({
+      method: 'GET',
+      url: '/company/assets/installment-plans/due?from=2026-07-01&to=2026-07-29',
+      headers: { cookie: h.cookie(gm) },
+    })
+    expect(after.json().due).toEqual([])
+  })
+
+  it('keeps pre-deactivation dues auditable while allowing a corrected replacement installment plan', async () => {
+    await post('/company/deposits', {
+      idempotencyKey: crypto.randomUUID(), currency: 'SYP_NEW', amount: sypStr(1_000), reason: 'installment cash',
+    })
+    const assetId = crypto.randomUUID()
+    const asset = await post('/company/assets', {
+      idempotencyKey: assetId,
+      kind: 'equipment',
+      name: 'Financed terminal',
+      currency: 'SYP_NEW',
+      price: sypStr(800),
+      purchasedOn: '2026-07-01',
+      paidNow: sypStr(0),
+      paidFrom: 'owner_outside',
+      description: 'Financed terminal',
+      financedPartyName: 'Terminal supplier',
+    })
+    expect(asset.statusCode, asset.body).toBe(201)
+    const planId = crypto.randomUUID()
+    const planBody = {
+      idempotencyKey: planId,
+      amount: sypStr(300),
+      paidFrom: 'pocket',
+      scheduleKind: 'weekly',
+      weekday: 3,
+      intervalDays: null,
+      startsOn: '2026-07-01',
+    }
+    expect((await post(`/company/assets/${assetId}/installment-plans`, planBody)).statusCode).toBe(201)
+    const skipKey = crypto.randomUUID()
+    const skipped = await post(`/company/assets/${assetId}/installment-plans/${planId}/occurrences/2026-07-01/skip`, {
+      idempotencyKey: skipKey, reason: 'Supplier asked to defer',
+    })
+    expect(skipped.statusCode, skipped.body).toBe(201)
+    const reusedSkipKey = await post(`/company/assets/${assetId}/installment-plans/${planId}/occurrences/2026-07-08/skip`, {
+      idempotencyKey: skipKey, reason: 'A distinct due must get its own key',
+    })
+    expect(reusedSkipKey.statusCode, reusedSkipKey.body).toBe(409)
+    expect(reusedSkipKey.json().error).toBe('idempotency_key_conflict')
+
+    const deactivated = await post(`/company/assets/${assetId}/installment-plans/${planId}/deactivate`, {
+      reason: 'Replace weekly amount',
+    })
+    expect(deactivated.statusCode, deactivated.body).toBe(200)
+    const replacementId = crypto.randomUUID()
+    expect((await post(`/company/assets/${assetId}/installment-plans`, {
+      ...planBody,
+      idempotencyKey: replacementId,
+      amount: sypStr(200),
+      startsOn: '2026-07-22',
+    })).statusCode).toBe(201)
+
+    // July 8 was generated before the July 21 deactivation and remains an explainable decision.
+    const oldDuePayment = await post(`/company/assets/${assetId}/installment-plans/${planId}/occurrences/2026-07-08/pay`, {
+      idempotencyKey: crypto.randomUUID(),
+    })
+    expect(oldDuePayment.statusCode, oldDuePayment.body).toBe(201)
+    const plans = await h.app.inject({
+      method: 'GET', url: `/company/assets/${assetId}/installment-plans?includeInactive=true`, headers: { cookie: h.cookie(gm) },
+    })
+    expect(plans.json().plans).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: planId, active: false }),
+      expect.objectContaining({ id: replacementId, active: true, amount: sypStr(200) }),
+    ]))
+  })
 })
 
 describe('company cutover', () => {

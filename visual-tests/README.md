@@ -5,6 +5,10 @@ surfaces only:
 
 - the admin login in Arabic/light and English/dark, the desktop navigation shell, and Treasury
   Movements with rows plus a filtered-empty state;
+- the embedded seven-day dashboard table (including the privileged financial columns) and its
+  phone-card reflow; Company Fund's live three-field currency exchange plus its confirmation, and
+  asset-installment reminders, payment confirmation, and plan form across Arabic/English,
+  light/dark, desktop/mobile;
 - driver login and registration at 320px and 390px, across Arabic/English and light/dark, plus an
   authenticated suspended-shift state with its resume alert.
 

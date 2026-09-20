@@ -19,6 +19,7 @@ import { FleetSection } from './dashboard/FleetSection.tsx'
 import { NowSection } from './dashboard/NowSection.tsx'
 import { OperationsSection } from './dashboard/OperationsSection.tsx'
 import { ProfitSection } from './dashboard/ProfitSection.tsx'
+import { SevenDaySection } from './dashboard/SevenDaySection.tsx'
 
 /** P3 dashboard: one shared range, with each section owning its read/error boundary. */
 export function Dashboard({ initial = {} }: { initial?: RouteParams }): ReactNode {
@@ -59,6 +60,7 @@ export function Dashboard({ initial = {} }: { initial?: RouteParams }): ReactNod
         onRetryMeta={retryMeta}
       />
       <NowSection />
+      <SevenDaySection />
       {range ? (
         <>
           {canSeeProfit ? <ProfitSection range={range} /> : null}

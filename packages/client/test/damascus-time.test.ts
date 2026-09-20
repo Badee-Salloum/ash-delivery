@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { damascusParts, formatDateTime, formatDateTimeSeconds } from '../src/index.ts'
+import { damascusParts, formatBusinessDateRange, formatDateTime, formatDateTimeSeconds } from '../src/index.ts'
 
 /**
  * Every timestamp in this console is the BRANCH's wall clock, never the reader's.
@@ -51,5 +51,21 @@ describe('timestamps are the branch’s wall clock, not the reader’s', () => {
     // 2026-09-06 was a Sunday — the first day of the financial week under BR7.
     expect(damascusParts(new Date('2026-09-06T12:00:00.000Z')).weekday).toBe(0)
     expect(damascusParts(new Date('2026-09-07T12:00:00.000Z')).weekday).toBe(1)
+  })
+
+  it('formats written business-date ranges without turning them into the reader\'s local day', () => {
+    expect(formatBusinessDateRange('2026-09-20', '2026-09-26', 'en')).toEqual({
+      from: '20',
+      to: '26 September',
+    })
+    expect(formatBusinessDateRange('2026-12-30', '2027-01-05', 'en')).toEqual({
+      from: '30 December 2026',
+      to: '5 January 2027',
+    })
+    const arabic = formatBusinessDateRange('2026-09-20', '2026-09-26', 'ar')
+    expect(arabic.from).toBe('20')
+    expect(arabic.to).toContain('26')
+    // Damascus Arabic may render the local month form «أيلول» rather than «سبتمبر».
+    expect(arabic.to).not.toBe('26')
   })
 })

@@ -7,7 +7,7 @@ import { LatestRequestGuard } from './latest-request.ts'
 const approvalSource = readFileSync(new URL('./screens/Approval.tsx', import.meta.url), 'utf8')
 const dashboardReadSource = readFileSync(new URL('./screens/dashboard/use-dashboard-read.ts', import.meta.url), 'utf8')
 const dashboardSections = [
-  'NowSection', 'ProfitSection', 'OperationsSection', 'FleetSection',
+  'NowSection', 'SevenDaySection', 'ProfitSection', 'OperationsSection', 'FleetSection',
   'CapitalSection', 'CompanyFundSection', 'DueSection', 'AlertsSection',
 ].map((name) => readFileSync(new URL(`./screens/dashboard/${name}.tsx`, import.meta.url), 'utf8')).join('\n')
 const adminAppSource = readFileSync(new URL('./AdminApp.tsx', import.meta.url), 'utf8')
@@ -47,8 +47,8 @@ describe('LatestRequestGuard', () => {
     expect(dashboardReadSource).toContain('signal: request.signal')
     expect(dashboardReadSource).toContain('if (!request.isCurrent()) return')
     expect(dashboardReadSource).toContain('requests.current.cancel()')
-    expect(dashboardSections.match(/useDashboardRead</g)).toHaveLength(8)
-    for (const endpoint of ['/dashboard/profit', '/dashboard/shifts-summary', '/dashboard/fleet-performance', '/dashboard/treasury', '/documents/expiring']) {
+    expect(dashboardSections.match(/useDashboardRead</g)).toHaveLength(9)
+    for (const endpoint of ['/dashboard/last-seven-days', '/dashboard/profit', '/dashboard/shifts-summary', '/dashboard/fleet-performance', '/dashboard/treasury', '/documents/expiring']) {
       expect(dashboardSections, endpoint).toContain(endpoint)
     }
   })

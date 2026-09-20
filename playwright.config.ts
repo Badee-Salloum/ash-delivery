@@ -34,6 +34,13 @@ export default defineConfig({
       use: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
     },
     {
+      // The console uses the same responsive table/card primitives on a manager's phone. Keep an
+      // admin project here instead of borrowing a Driver viewport so admin visual specs exercise
+      // the real compact shell, drawer and reflow rules.
+      name: 'admin-mobile',
+      use: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
+    },
+    {
       name: 'driver-320',
       use: { viewport: { width: 320, height: 740 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
     },

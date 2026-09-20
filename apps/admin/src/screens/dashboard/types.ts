@@ -12,6 +12,26 @@ export interface DashboardSnapshot {
   completeness: { openShifts: number; awaitingApproval: number; missingEndPackage: number; suspended: number }
 }
 
+/** The fixed seven-business-day digest shown directly below the live «Now» section. */
+export interface LastSevenDaysSnapshot {
+  from: string
+  to: string
+  /** Company share, expenses, and net are absent on the wire unless the server grants `profit.view_total`. */
+  profitVisible: boolean
+  days: Array<{
+    businessDate: string
+    shifts: number
+    ordinaryShifts: number
+    doubleShifts: number
+    orders: number
+    /** Order fees stay with the operational order count for every `branch_data.view` caller. */
+    feesSyp: string
+    companyShareSyp?: string
+    expensesSyp?: string
+    netProfitSyp?: string
+  }>
+}
+
 export interface ShiftSummaryTally {
   shifts: number
   doubles: number

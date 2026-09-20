@@ -1,5 +1,34 @@
 # PROGRESS
 
+## 2026-09-20 — embedded seven-day dashboard, asset installments, and direct company FX complete
+
+**Dashboard.** The live dashboard now says «إيراد الأجور» and embeds a server-owned last-seven-business-day
+section directly below «الآن». It zero-fills and orders the seven dates newest first, displays shifts
+(total/ordinary/double), approved orders and fee value, and — only with the existing profit permission —
+company share, expenses and net. Its localized date-range title, responsive phone cards, and day-scoped
+completed-shift links use the shared date, table and focus contracts.
+
+**Company finance.** Company Fund now has a three-field SYP/USD exchange card: entering any two actual
+amounts/rate calculates the third with `bigint` minor units before confirmation, and the existing server
+command freezes the actual implied rate. Movement rows make both currencies and that frozen rate explicit.
+
+**Financed assets.** Migration `0079_asset_installment_plans.sql` adds immutable, audited reminder plans
+for an existing financed-asset payable. A plan can be created atomically with the asset or later for an
+unpaid asset; it supports first-of-month, weekly, and every-N-days recurrence, a default payment source,
+and a final payment capped at the remaining balance. Due items are reminders only: a manager explicitly
+pays (creating the ordinary debt-payment event/journal), skips with a reason, or deactivates with a reason.
+Earlier due dates remain resolvable after deactivation. No cron or read operation moves money.
+
+**Presentation and proof.** All new UI uses the existing `Card`, `Table`, `Field`, `MoneyInput`, `Select`,
+`Button`, confirmation, semantic-token and RTL contracts. Focused API tests pass **60/60**; focused Admin
+tests pass **18/18**; the new visual suite passes **6/6** applicable cases (6 project-specific skips),
+covering Arabic/English, light/dark, desktop/mobile, table-to-card reflow and confirmation dialogs.
+`pnpm check`, `pnpm build:apps`, SQL/wire/type checks and visual checks were run locally; Node 25 emits the
+known engine warning because this repository targets Node 24. The PostgreSQL-specific installment guard
+suite is intentionally skipped without `DATABASE_URL`; it must run against a real disposable PostgreSQL
+database before production migration. This change is not deployed and migration 0079 has not been applied
+to production.
+
 ## 2026-09-19 — ASH Delivery design-system unification complete, verified, and deployed
 
 **Scope.** This is a presentation-only migration across the admin and driver web apps. It establishes

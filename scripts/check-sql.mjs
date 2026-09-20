@@ -50,7 +50,7 @@ const MUST_AUDIT = [
   'company_debts', 'company_debt_events',
   // Purchase price, financing link and schedule are financial facts; the deterministic schedule
   // rows themselves are immutable derived data and are exempted below.
-  'fixed_assets',
+  'fixed_assets', 'asset_installment_plans', 'asset_installment_occurrences',
   'depreciation_transfers', 'depreciation_releases',
   // Fixed expenses are promises plus explicit human paid/skipped decisions. Both influence what
   // managers expect to leave the box, and a paid occurrence links to an ordinary audited expense.

@@ -16,6 +16,7 @@ import {
   type FxDay,
   REQUIRED_END_SLOTS,
   SHIFT_TARGET_MINUTES,
+  addDays,
   addProfitLine,
   addShiftDistance,
   can,
@@ -223,6 +224,116 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
         missingEndPackage: missingEndPackage.length,
         suspended: shifts.filter((s) => s.state === 'suspended').length,
       },
+    }
+  })
+
+  /**
+   * A fixed, server-owned lookback for the compact dashboard strip below «Now».
+   *
+   * This deliberately has no date query: its promise is exactly the latest seven BUSINESS days,
+   * including the server's current day (which rolls at the configured 04:00 boundary). Filling
+   * the date sequence here also means a quiet day is a visible zero, rather than an ambiguous
+   * missing row in the client.
+   *
+   * The operational columns use the same financially completed population as the completed-shift
+   * screen. Profit values are not merely hidden in the browser: company share, expenses and net
+   * are omitted from the response unless the caller holds `profit.view_total`. The order-fee value
+   * stays with the operational order count, like the existing dashboard revenue tile.
+   */
+  app.get('/dashboard/last-seven-days', { config: { permission: 'branch_data.view', subject: ownBranch } }, async (req, reply) => {
+    reply.header('cache-control', 'private, no-store')
+    const branchId = resolveBranchId(req)
+    const to = todayFor(deps)
+    const from = addDays(to, -6)
+    const profitVisible = await holdsPermission(req, 'profit.view_total')
+
+    const [timing, finance] = await Promise.all([
+      deps.shifts.listTimingBetween(branchId, from, to),
+      profitVisible
+        ? (async () => {
+            const [goLive, vehicles] = await Promise.all([
+              goLiveDate(deps),
+              deps.directory.listVehicles(branchId),
+            ])
+            const reportFrom = clampToGoLive(from, goLive)
+            const range = reportFrom <= to
+              ? await deps.ledgerRange.readRange(branchId, reportFrom, to)
+              : null
+            return { range, vehicleIds: new Set(vehicles.map((vehicle) => vehicle.id)) }
+          })()
+        : Promise.resolve(null),
+    ])
+
+    const completed = timing.filter((shift) => COMPLETED_SHIFT_STATES.has(shift.state))
+    const orderRows = await deps.orders.listByShiftIds(completed.map((shift) => shift.id))
+    const ordersByShift = new Map<string, ShiftOrderRecord[]>()
+    for (const order of orderRows) {
+      const rows = ordersByShift.get(order.shiftId) ?? []
+      rows.push(order)
+      ordersByShift.set(order.shiftId, rows)
+    }
+
+    const days = Array.from({ length: 7 }, (_, index) => addDays(to, -index))
+    const daily = new Map<CalendarDate, SevenDayTally>(
+      days.map((businessDate) => [businessDate, emptySevenDayTally()]),
+    )
+    const offset = deps.clock.offsetMinutes()
+    const dayStart = deps.clock.dayStartMinutes()
+    for (const shift of completed) {
+      const tally = daily.get(shift.businessDate)
+      // `listTimingBetween` is inclusive on this exact range. Keep this guard so a faulty adapter
+      // can never manufacture an eighth row or corrupt a different business day.
+      if (!tally) continue
+      tally.shifts += 1
+      const pattern = workedTime(
+        shift.windowOpensAt === null ? null : Date.parse(shift.windowOpensAt),
+        shift.submittedAt === null ? null : Date.parse(shift.submittedAt),
+        offset,
+        dayStart,
+      ).pattern
+      if (pattern === 'day' || pattern === 'evening') tally.ordinaryShifts += 1
+      else if (pattern === 'full') tally.doubleShifts += 1
+
+      const orders = includedOrders(ordersByShift.get(shift.id) ?? [])
+      tally.orders += orders.length
+      tally.fees += orders.reduce((total, order) => total + order.fee, 0n)
+    }
+
+    const profitByDay = new Map<CalendarDate, ReturnType<typeof emptyProfitTotals>>()
+    if (finance?.range !== null && finance?.range !== undefined) {
+      const classification = { vehicleIds: finance.vehicleIds }
+      for (const line of finance.range.lines) {
+        const cls = classifyProfitLine(line.fundCode, classification)
+        if (cls === null) continue
+        const profit = profitByDay.get(line.businessDate) ?? emptyProfitTotals()
+        addProfitLine(profit, cls, line.side, line.amount, line.lineCount)
+        profitByDay.set(line.businessDate, profit)
+      }
+    }
+
+    return {
+      from,
+      to,
+      profitVisible,
+      days: days.map((businessDate) => {
+        const tally = daily.get(businessDate)!
+        const row = {
+          businessDate,
+          shifts: tally.shifts,
+          ordinaryShifts: tally.ordinaryShifts,
+          doubleShifts: tally.doubleShifts,
+          orders: tally.orders,
+          feesSyp: serializeMoney(minor(tally.fees)),
+        }
+        if (!profitVisible) return row
+        const profit = profitByDay.get(businessDate) ?? emptyProfitTotals()
+        return {
+          ...row,
+          companyShareSyp: serializeMoney(minor(profit.company)),
+          expensesSyp: serializeMoney(minor(totalCost(profit))),
+          netProfitSyp: serializeMoney(minor(netProfit(profit))),
+        }
+      }),
     }
   })
 
@@ -1017,6 +1128,19 @@ function emptyFleetTally(): FleetTally {
 
 /** The population the completed-shifts screen lists: a close that was actually settled. */
 const COMPLETED_SHIFT_STATES = new Set<string>(['approved', 'week_locked'])
+
+/** One zero-fillable row of `GET /dashboard/last-seven-days`, before wire serialization. */
+interface SevenDayTally {
+  shifts: number
+  ordinaryShifts: number
+  doubleShifts: number
+  orders: number
+  fees: bigint
+}
+
+function emptySevenDayTally(): SevenDayTally {
+  return { shifts: 0, ordinaryShifts: 0, doubleShifts: 0, orders: 0, fees: 0n }
+}
 
 /** Per-driver / per-vehicle / whole-range counters of `/dashboard/shifts-summary`. */
 interface ShiftTally {

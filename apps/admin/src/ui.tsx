@@ -177,11 +177,13 @@ export function DateField({
   label,
   value,
   onChange,
+  disabled = false,
   className = '',
 }: {
   label: string
   value: string
   onChange: (value: string) => void
+  disabled?: boolean
   className?: string
 }): ReactNode {
   const id = useId()
@@ -192,6 +194,7 @@ export function DateField({
         type="date"
         dir="ltr"
         value={value}
+        disabled={disabled}
         aria-label={label}
         onChange={(e) => onChange(e.target.value)}
         className={`num min-h-10 rounded-lg border border-line-strong bg-surface-card px-3 text-sm text-ink outline-none transition-colors focus:border-brand ${FOCUS_RING}`}

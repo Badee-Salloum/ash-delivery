@@ -1,3 +1,5 @@
+import { isCalendarDate, type CalendarDate } from '@ash/domain'
+
 export * from './api.ts'
 export * from './order-entry.ts'
 export * from './order-match.ts'
@@ -80,6 +82,70 @@ export function damascusParts(value: Date): {
     stamp: `${date} ${time}`,
     stampSeconds: `${date} ${time}:${get('second')}`,
     weekday: Math.max(0, WEEKDAYS.indexOf(get('weekday'))),
+  }
+}
+
+/**
+ * A business date is already a written Damascus calendar day, not an instant. Formatting it via
+ * `new Date('YYYY-MM-DD')` at the browser's local zone can move it backwards for users west of
+ * UTC, so this formatter anchors the date at UTC noon and fixes the formatter to UTC.
+ *
+ * Arabic still uses Arabic month names, while the product's `u-nu-latn` policy preserves Latin
+ * digits in both languages. Screens should use this instead of making their own `Intl` formatter.
+ */
+function businessDateAtNoon(value: CalendarDate): Date | null {
+  if (!isCalendarDate(value)) return null
+  const [year, month, day] = value.split('-').map(Number)
+  return new Date(Date.UTC(year!, month! - 1, day!, 12))
+}
+
+const businessDateLocale = (lang: 'ar' | 'en'): string =>
+  lang === 'ar' ? 'ar-SY-u-ca-gregory-nu-latn' : 'en-GB-u-ca-gregory-nu-latn'
+
+/** A compact local label for a written business date, e.g. «Tue, 26 Sep» / «الثلاثاء، 26 سبتمبر». */
+export function formatBusinessDate(value: CalendarDate, lang: 'ar' | 'en'): string {
+  const date = businessDateAtNoon(value)
+  if (date === null) return value
+  return new Intl.DateTimeFormat(businessDateLocale(lang), {
+    timeZone: 'UTC',
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+  }).format(date)
+}
+
+/**
+ * Localized endpoints for a concise business-date range. The caller owns the surrounding words,
+ * so Arabic can render «من 20 إلى 26 سبتمبر» and English «From 20 to 26 September» naturally.
+ */
+export function formatBusinessDateRange(
+  from: CalendarDate,
+  to: CalendarDate,
+  lang: 'ar' | 'en',
+): { from: string; to: string } {
+  const start = businessDateAtNoon(from)
+  const end = businessDateAtNoon(to)
+  if (start === null || end === null) return { from, to }
+  const locale = businessDateLocale(lang)
+  const format = (date: Date, options: Intl.DateTimeFormatOptions): string =>
+    new Intl.DateTimeFormat(locale, { timeZone: 'UTC', ...options }).format(date)
+  const sameMonth = from.slice(0, 7) === to.slice(0, 7)
+  const sameYear = from.slice(0, 4) === to.slice(0, 4)
+  if (sameMonth) {
+    return {
+      from: format(start, { day: 'numeric' }),
+      to: format(end, { day: 'numeric', month: 'long' }),
+    }
+  }
+  if (sameYear) {
+    return {
+      from: format(start, { day: 'numeric', month: 'long' }),
+      to: format(end, { day: 'numeric', month: 'long' }),
+    }
+  }
+  return {
+    from: format(start, { day: 'numeric', month: 'long', year: 'numeric' }),
+    to: format(end, { day: 'numeric', month: 'long', year: 'numeric' }),
   }
 }
 

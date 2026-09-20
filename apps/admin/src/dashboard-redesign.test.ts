@@ -9,8 +9,8 @@ const dashboard = readFileSync(new URL('./screens/Dashboard.tsx', import.meta.ur
 const trend = readFileSync(new URL('./components/TrendBars.tsx', import.meta.url), 'utf8')
 
 describe('P3 dashboard composition', () => {
-  it('keeps the dashboard a thin range owner and splits all eight sections', () => {
-    for (const section of ['Now', 'Profit', 'Operations', 'Fleet', 'Capital', 'CompanyFund', 'Due', 'Alerts']) {
+  it('keeps the dashboard a thin range owner and splits all nine sections', () => {
+    for (const section of ['Now', 'SevenDay', 'Profit', 'Operations', 'Fleet', 'Capital', 'CompanyFund', 'Due', 'Alerts']) {
       expect(dashboard).toContain(`<${section}Section`)
     }
     expect(dashboard).toContain('<TimeRangeBar')
@@ -29,7 +29,7 @@ describe('P3 dashboard composition', () => {
 
   it('ships matching Arabic and English copy for every new section', () => {
     for (const catalog of [ar, en]) {
-      for (const key of ['nowTitle', 'profitTitle', 'operationsTitle', 'fleetTitle', 'capitalTitle', 'companyFundTitle', 'dueTitle', 'alertsTitle'] as const) {
+      for (const key of ['nowTitle', 'lastSevenDaysTitle', 'profitTitle', 'operationsTitle', 'fleetTitle', 'capitalTitle', 'companyFundTitle', 'dueTitle', 'alertsTitle'] as const) {
         expect(catalog.dashboard[key].length, key).toBeGreaterThan(2)
       }
     }

@@ -1,5 +1,7 @@
 import type {
   AssetDepreciationPeriodRecord,
+  AssetInstallmentOccurrenceRecord,
+  AssetInstallmentPlanRecord,
   CompanyDebtEventRecord,
   CompanyDebtRecord,
   CompanyFinanceRepo,
@@ -8,13 +10,15 @@ import type {
   DepreciationTransferRecord,
   FixedAssetRecord,
 } from '@ash/contracts'
-import type { Currency } from '@ash/domain'
+import type { CalendarDate, Currency } from '@ash/domain'
 
 interface State {
   debts: CompanyDebtRecord[]
   debtEvents: CompanyDebtEventRecord[]
   assets: FixedAssetRecord[]
   schedule: AssetDepreciationPeriodRecord[]
+  installmentPlans: AssetInstallmentPlanRecord[]
+  installmentOccurrences: AssetInstallmentOccurrenceRecord[]
   allocations: DepreciationAllocationRecord[]
   transfers: DepreciationTransferRecord[]
   releases: DepreciationReleaseRecord[]
@@ -25,7 +29,8 @@ const duplicate = (code: string): Error & { code: string } => Object.assign(new 
 
 export class MemoryCompanyFinanceRepo implements CompanyFinanceRepo {
   private state: State = {
-    debts: [], debtEvents: [], assets: [], schedule: [], allocations: [], transfers: [], releases: [],
+    debts: [], debtEvents: [], assets: [], schedule: [], installmentPlans: [], installmentOccurrences: [],
+    allocations: [], transfers: [], releases: [],
   }
 
   snapshot(): State { return clone(this.state) }
@@ -77,6 +82,71 @@ export class MemoryCompanyFinanceRepo implements CompanyFinanceRepo {
       }
       this.state.schedule.push(clone(row))
     }
+  }
+
+  async getAssetInstallmentPlan(id: string): Promise<AssetInstallmentPlanRecord | null> {
+    return clone(this.state.installmentPlans.find((row) => row.id === id) ?? null)
+  }
+  async listAssetInstallmentPlans(assetId: string, includeInactive = false): Promise<AssetInstallmentPlanRecord[]> {
+    return clone(this.state.installmentPlans.filter((row) => row.assetId === assetId && (includeInactive || row.active)))
+  }
+  async listInstallmentPlans(companyBranchId: string, includeInactive = false): Promise<AssetInstallmentPlanRecord[]> {
+    return clone(this.state.installmentPlans.filter((row) => row.branchId === companyBranchId && (includeInactive || row.active)))
+  }
+  async createAssetInstallmentPlan(row: AssetInstallmentPlanRecord): Promise<void> {
+    if (this.state.installmentPlans.some((stored) => stored.id === row.id)) {
+      throw duplicate('DUPLICATE_ASSET_INSTALLMENT_PLAN')
+    }
+    if (row.active && this.state.installmentPlans.some((stored) => stored.assetId === row.assetId && stored.active)) {
+      throw duplicate('ACTIVE_ASSET_INSTALLMENT_PLAN')
+    }
+    this.state.installmentPlans.push(clone(row))
+  }
+  async deactivateAssetInstallmentPlan(row: AssetInstallmentPlanRecord): Promise<void> {
+    const index = this.state.installmentPlans.findIndex((stored) => stored.id === row.id)
+    if (index === -1) throw duplicate('ASSET_INSTALLMENT_PLAN_NOT_FOUND')
+    this.state.installmentPlans[index] = clone(row)
+  }
+  async getAssetInstallmentOccurrence(
+    planId: string,
+    dueDate: CalendarDate,
+  ): Promise<AssetInstallmentOccurrenceRecord | null> {
+    return clone(this.state.installmentOccurrences.find((row) => row.planId === planId && row.dueDate === dueDate) ?? null)
+  }
+  async getAssetInstallmentOccurrenceById(id: string): Promise<AssetInstallmentOccurrenceRecord | null> {
+    return clone(this.state.installmentOccurrences.find((row) => row.id === id) ?? null)
+  }
+  async listAssetInstallmentOccurrencesForPlan(planId: string): Promise<AssetInstallmentOccurrenceRecord[]> {
+    return clone(this.state.installmentOccurrences
+      .filter((row) => row.planId === planId)
+      .sort((a, b) => a.dueDate.localeCompare(b.dueDate) || a.id.localeCompare(b.id)))
+  }
+  async listAssetInstallmentOccurrences(
+    companyBranchId: string,
+    from: CalendarDate,
+    to: CalendarDate,
+  ): Promise<AssetInstallmentOccurrenceRecord[]> {
+    return clone(this.state.installmentOccurrences.filter((row) =>
+      row.branchId === companyBranchId && row.dueDate >= from && row.dueDate <= to,
+    ))
+  }
+  async countAssetInstallmentOccurrencesBefore(
+    planId: string,
+    before: CalendarDate,
+  ): Promise<number> {
+    return this.state.installmentOccurrences.filter((row) => row.planId === planId && row.dueDate < before).length
+  }
+  async createAssetInstallmentOccurrence(row: AssetInstallmentOccurrenceRecord): Promise<void> {
+    if (this.state.installmentOccurrences.some((stored) => stored.id === row.id)) {
+      throw duplicate('DUPLICATE_ASSET_INSTALLMENT_OCCURRENCE_ID')
+    }
+    if (this.state.installmentOccurrences.some((stored) => stored.planId === row.planId && stored.dueDate === row.dueDate)) {
+      throw duplicate('DUPLICATE_ASSET_INSTALLMENT_OCCURRENCE')
+    }
+    if (row.debtEventId !== null && this.state.installmentOccurrences.some((stored) => stored.debtEventId === row.debtEventId)) {
+      throw duplicate('DUPLICATE_ASSET_INSTALLMENT_DEBT_EVENT')
+    }
+    this.state.installmentOccurrences.push(clone(row))
   }
 
   async listDepreciationAllocations(

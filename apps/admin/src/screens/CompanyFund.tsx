@@ -1,10 +1,11 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
-import type { Currency } from '@ash/domain'
+import { exchangeRate, formatMinor, money, minor, parseMinor, sypToUsdMinor, type Currency, usdToSypMinor } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
-import { useTextPrompt } from '../feedback.tsx'
+import { useConfirm, useTextPrompt } from '../feedback.tsx'
 import type { RouteParams } from '../route.ts'
 import { Button, Card, DateField, Field, Money, MoneyInput, Pending, Select, Stat, Table, TextInput } from '../ui.tsx'
+import { AssetInstallmentPanel, InstallmentPlanFields, installmentPlanPayload, newInstallmentPlanDraft, type InstallmentPlanDraft } from './AssetInstallments.tsx'
 
 type Tab = 'overview' | 'movements' | 'debts' | 'assets' | 'depreciation' | 'recurring'
 
@@ -17,7 +18,18 @@ interface Overview {
 
 interface Movement {
   entry: { id: number; businessDate: string; eventType: string; reason: string | null; sypMinorPerUsd: string | null }
-  command: null | { id: string; kind: string; currency?: Currency; amount?: string; fromAmount?: string; toAmount?: string }
+  command: null | {
+    id: string
+    kind: string
+    currency?: Currency
+    amount?: string
+    fromCurrency?: Currency
+    fromAmount?: string
+    toCurrency?: Currency
+    toAmount?: string
+    sypMinorPerUsd?: string | null
+    reason?: string
+  }
 }
 
 interface Debt {
@@ -31,7 +43,7 @@ interface Debt {
   dueOn: string | null
 }
 
-interface Asset {
+export interface Asset {
   id: string
   kind: 'vehicle' | 'equipment' | 'property' | 'other'
   name: string
@@ -41,6 +53,43 @@ interface Asset {
   bookValue: string
   outstanding: string
   depreciationDue: string
+  debtId: string | null
+  installmentPlans: AssetInstallmentPlan[]
+  activeInstallmentPlan: AssetInstallmentPlan | null
+}
+
+type InstallmentPaidFrom = 'pocket' | 'reserve' | 'owner_outside'
+type InstallmentScheduleKind = 'weekly' | 'monthly_first' | 'every_n_days'
+
+export interface AssetInstallmentPlan {
+  id: string
+  assetId: string
+  debtId: string
+  currency: Currency
+  amount: string
+  paidFrom: InstallmentPaidFrom
+  scheduleKind: InstallmentScheduleKind
+  weekday: number | null
+  intervalDays: number | null
+  startsOn: string
+  active: boolean
+  deactivatedOn: string | null
+  deactivationReason: string | null
+}
+
+export interface AssetInstallmentDue extends AssetInstallmentPlan {
+  assetName: string
+  dueDate: string
+  status: 'overdue' | 'today' | 'upcoming' | 'later'
+  amountDue: string
+}
+
+export interface AssetInstallmentDueFeed {
+  today: string
+  from: string
+  to: string
+  olderUnresolved: number
+  due: AssetInstallmentDue[]
 }
 
 interface DepreciationPlan {
@@ -96,10 +145,108 @@ interface CompanyData {
   vehicles: VehicleOption[]
   recurring: RecurringTemplate[]
   recurringDue: RecurringDue[]
+  installmentDue: AssetInstallmentDueFeed
   categories: Array<{ id: string; nameAr: string; code: string }>
 }
 
 const tabs: readonly Tab[] = ['overview', 'movements', 'debts', 'assets', 'depreciation', 'recurring']
+
+type ExchangeField = 'fromAmount' | 'toAmount' | 'rate'
+
+export interface ExchangeFormValues {
+  fromCurrency: Currency
+  toCurrency: Currency
+  fromAmount: string
+  toAmount: string
+  /** Ordinary SYP per USD, rendered from the stored minor-unit rate. */
+  rate: string
+}
+
+const exchangeFields: readonly ExchangeField[] = ['fromAmount', 'toAmount', 'rate']
+
+interface ExchangeCalculation {
+  sourceA: ExchangeField
+  sourceB: ExchangeField
+  derived: ExchangeField
+}
+
+function positiveExchangeMoney(value: string): ReturnType<typeof parseMinor> | null {
+  try {
+    const amount = parseMinor(value)
+    return amount > 0n ? amount : null
+  } catch {
+    return null
+  }
+}
+
+function previewFxDay(rate: bigint) {
+  return { businessDate: '2000-01-01', sypMinorPerUsd: rate, provisional: false }
+}
+
+/**
+ * Derive exactly one of the three exchange values using integer minor units. This is a preview
+ * only: the server still freezes the rate it derives from the two actual amounts it posts.
+ */
+export function deriveExchangeField(values: ExchangeFormValues, derived: ExchangeField): string | null {
+  if (values.fromCurrency === values.toCurrency) return null
+  const from = positiveExchangeMoney(values.fromAmount)
+  const to = positiveExchangeMoney(values.toAmount)
+  const rate = positiveExchangeMoney(values.rate)
+
+  try {
+    if (derived === 'fromAmount') {
+      if (to === null || rate === null) return null
+      return formatMinor(values.fromCurrency === 'SYP_NEW'
+        ? usdToSypMinor(to, rate)
+        : sypToUsdMinor(to, previewFxDay(rate)))
+    }
+    if (derived === 'toAmount') {
+      if (from === null || rate === null) return null
+      return formatMinor(values.toCurrency === 'SYP_NEW'
+        ? usdToSypMinor(from, rate)
+        : sypToUsdMinor(from, previewFxDay(rate)))
+    }
+    if (from === null || to === null) return null
+    return formatMinor(minor(exchangeRate(money(values.fromCurrency, from), money(values.toCurrency, to))))
+  } catch {
+    return null
+  }
+}
+
+function thirdExchangeField(first: ExchangeField, second: ExchangeField): ExchangeField | null {
+  return exchangeFields.find((field) => field !== first && field !== second) ?? null
+}
+
+function nextExchangeCalculation(
+  current: ExchangeCalculation | null,
+  changed: ExchangeField,
+  values: ExchangeFormValues,
+): ExchangeCalculation | null {
+  if (positiveExchangeMoney(values[changed]) === null) return null
+  if (current !== null) {
+    if (changed === current.derived && positiveExchangeMoney(values[current.sourceA]) !== null) {
+      const derived = thirdExchangeField(current.sourceA, changed)
+      if (derived !== null) return { sourceA: current.sourceA, sourceB: changed, derived }
+    }
+    if (
+      (changed === current.sourceA || changed === current.sourceB) &&
+      positiveExchangeMoney(values[current.sourceA]) !== null &&
+      positiveExchangeMoney(values[current.sourceB]) !== null
+    ) return current
+  }
+  const other = exchangeFields.find((field) => field !== changed && positiveExchangeMoney(values[field]) !== null)
+  const derived = other === undefined ? null : thirdExchangeField(other, changed)
+  return other === undefined || derived === null ? null : { sourceA: other, sourceB: changed, derived }
+}
+
+function normalizedFrozenRate(rate: string | null | undefined): string | null {
+  if (rate === null || rate === undefined) return null
+  try {
+    return /^\d+$/.test(rate) ? formatMinor(minor(BigInt(rate))) : null
+  } catch {
+    return null
+  }
+}
 
 export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactNode {
   const { api, session, t, branchId } = useApp()
@@ -124,12 +271,13 @@ export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactN
       api.get<{ vehicles: VehicleOption[] }>('/vehicles'),
       api.get<{ templates: RecurringTemplate[] }>('/company/recurring-expenses?includeInactive=true'),
       api.get<{ due: RecurringDue[] }>('/company/recurring-expenses/due'),
+      api.get<AssetInstallmentDueFeed>('/company/assets/installment-plans/due'),
       api.get<{ categories: Array<{ id: string; nameAr: string; code: string }> }>('/expense-categories'),
-    ]).then(([overview, movements, debts, assets, depreciation, vehicles, recurring, recurringDue, categories]) => {
+    ]).then(([overview, movements, debts, assets, depreciation, vehicles, recurring, recurringDue, installmentDue, categories]) => {
       setData({
         overview, movements: movements.movements, debts: debts.debts, assets: assets.assets,
         depreciation, vehicles: vehicles.vehicles, recurring: recurring.templates,
-        recurringDue: recurringDue.due, categories: categories.categories,
+        recurringDue: recurringDue.due, installmentDue, categories: categories.categories,
       })
     }).catch((cause: { error?: string }) => {
       setData(null)
@@ -145,7 +293,7 @@ export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactN
     load()
   }, [load])
 
-  const mutate = async (operation: () => Promise<unknown>, success: string): Promise<void> => {
+  const mutate = async (operation: () => Promise<unknown>, success: string): Promise<boolean> => {
     setBusy(true)
     setError(null)
     setNotice(null)
@@ -153,8 +301,10 @@ export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactN
       await operation()
       setNotice(success)
       load()
+      return true
     } catch (cause) {
       setError((cause as { error?: string }).error ?? 'error')
+      return false
     } finally {
       setBusy(false)
     }
@@ -188,14 +338,14 @@ export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactN
       {tab === 'overview' ? <OverviewTab data={data.overview} busy={busy} mutate={mutate} /> : null}
       {tab === 'movements' ? <MovementsTab rows={data.movements} /> : null}
       {tab === 'debts' ? <DebtsTab rows={data.debts} today={today} busy={busy} mutate={mutate} /> : null}
-      {tab === 'assets' ? <AssetsTab rows={data.assets} vehicles={data.vehicles} today={today} busy={busy} mutate={mutate} /> : null}
+      {tab === 'assets' ? <AssetsTab rows={data.assets} due={data.installmentDue} vehicles={data.vehicles} today={today} busy={busy} mutate={mutate} /> : null}
       {tab === 'depreciation' ? <DepreciationTab plan={data.depreciation} busy={busy} mutate={mutate} /> : null}
       {tab === 'recurring' ? <RecurringTab rows={data.recurring} due={data.recurringDue} categories={data.categories} today={today} busy={busy} mutate={mutate} /> : null}
     </div>
   )
 }
 
-type Mutate = (operation: () => Promise<unknown>, success: string) => Promise<void>
+export type Mutate = (operation: () => Promise<unknown>, success: string) => Promise<boolean>
 
 function OverviewTab({ data, busy, mutate }: { data: Overview; busy: boolean; mutate: Mutate }): ReactNode {
   const { api, t } = useApp()
@@ -239,7 +389,8 @@ function OverviewTab({ data, busy, mutate }: { data: Overview; busy: boolean; mu
             <Button type="submit" disabled={busy}>{t.companyFinance.submit}</Button>
           </form>
         </Card>
-        <Card title={t.companyFinance.branches}>
+        <ExchangeCard busy={busy} mutate={mutate} />
+        <Card title={t.companyFinance.branches} className="xl:col-span-2">
           <Table head={[t.accounts.branch, t.dashboard.balance, t.companyFinance.clearing, t.accounts.status]} isEmpty={data.branches.length === 0} empty={t.companyFinance.noBranches}>
             {data.branches.map((branch) => (
               <tr key={branch.branchId}>
@@ -256,20 +407,157 @@ function OverviewTab({ data, busy, mutate }: { data: Overview; busy: boolean; mu
   )
 }
 
+function ExchangeCard({ busy, mutate }: { busy: boolean; mutate: Mutate }): ReactNode {
+  const { api, t } = useApp()
+  const confirm = useConfirm()
+  const [fromCurrency, setFromCurrency] = useState<Currency>('USD')
+  const [toCurrency, setToCurrency] = useState<Currency>('SYP_NEW')
+  const [exchange, setExchange] = useState<ExchangeFormValues>({
+    fromCurrency: 'USD', toCurrency: 'SYP_NEW', fromAmount: '', toAmount: '', rate: '',
+  })
+  const [calculation, setCalculation] = useState<ExchangeCalculation | null>(null)
+  const [reason, setReason] = useState('')
+  const [formError, setFormError] = useState<string | null>(null)
+
+  const reset = (): void => {
+    setExchange({ fromCurrency, toCurrency, fromAmount: '', toAmount: '', rate: '' })
+    setCalculation(null)
+    setReason('')
+    setFormError(null)
+  }
+
+  const changeCurrency = (side: 'from' | 'to', currency: Currency): void => {
+    const nextFrom = side === 'from' ? currency : fromCurrency
+    const nextTo = side === 'to' ? currency : toCurrency
+    const normalizedFrom = nextFrom === nextTo && side === 'to'
+      ? (nextTo === 'USD' ? 'SYP_NEW' : 'USD')
+      : nextFrom
+    const normalizedTo = normalizedFrom === nextTo
+      ? (normalizedFrom === 'USD' ? 'SYP_NEW' : 'USD')
+      : nextTo
+    setFromCurrency(normalizedFrom)
+    setToCurrency(normalizedTo)
+    setExchange({ fromCurrency: normalizedFrom, toCurrency: normalizedTo, fromAmount: '', toAmount: '', rate: '' })
+    setCalculation(null)
+    setFormError(null)
+  }
+
+  const changeValue = (field: ExchangeField, value: string): void => {
+    const next = { ...exchange, fromCurrency, toCurrency, [field]: value }
+    const nextCalculation = nextExchangeCalculation(calculation, field, next)
+    if (nextCalculation !== null) {
+      const derived = deriveExchangeField(next, nextCalculation.derived)
+      if (derived !== null) next[nextCalculation.derived] = derived
+    }
+    setExchange(next)
+    setCalculation(nextCalculation)
+    setFormError(null)
+  }
+
+  const submit = (event: FormEvent): void => {
+    event.preventDefault()
+    const values = { ...exchange, fromCurrency, toCurrency }
+    const from = positiveExchangeMoney(values.fromAmount)
+    const to = positiveExchangeMoney(values.toAmount)
+    const frozenRate = deriveExchangeField(values, 'rate')
+    if (from === null || to === null || frozenRate === null || reason.trim() === '') {
+      setFormError(t.companyFinance.exchangeInvalid)
+      return
+    }
+    const fromText = `${formatMinor(from)} ${t.currency[fromCurrency]}`
+    const toText = `${formatMinor(to)} ${t.currency[toCurrency]}`
+    const rateText = `${frozenRate} ${t.companyFinance.ratePerUsd}`
+    void (async () => {
+      const accepted = await confirm({
+        title: t.companyFinance.exchangeConfirmTitle,
+        body: t.companyFinance.exchangeConfirmBody
+          .replace('{from}', fromText)
+          .replace('{to}', toText)
+          .replace('{rate}', rateText),
+        confirmLabel: t.companyFinance.exchangeSubmit,
+      })
+      if (!accepted) return
+      const saved = await mutate(
+        () => api.post('/company/exchanges', {
+          idempotencyKey: crypto.randomUUID(), fromCurrency, fromAmount: formatMinor(from),
+          toCurrency, toAmount: formatMinor(to), reason: reason.trim(),
+        }),
+        t.companyFinance.exchangeSaved,
+      )
+      if (saved) reset()
+    })()
+  }
+
+  return (
+    <Card title={t.companyFinance.exchange} subtitle={t.companyFinance.exchangeHint}>
+      <form className="grid grid-cols-1 gap-3 sm:grid-cols-2" onSubmit={submit}>
+        <Field label={t.companyFinance.fromCurrency}>
+          <Select value={fromCurrency} disabled={busy} onChange={(event) => changeCurrency('from', event.target.value as Currency)} aria-label={t.companyFinance.fromCurrency}>
+            <option value="SYP_NEW" disabled={toCurrency === 'SYP_NEW'}>{t.currency.SYP_NEW}</option>
+            <option value="USD" disabled={toCurrency === 'USD'}>{t.currency.USD}</option>
+          </Select>
+        </Field>
+        <Field label={t.companyFinance.toCurrency}>
+          <Select value={toCurrency} disabled={busy} onChange={(event) => changeCurrency('to', event.target.value as Currency)} aria-label={t.companyFinance.toCurrency}>
+            <option value="SYP_NEW" disabled={fromCurrency === 'SYP_NEW'}>{t.currency.SYP_NEW}</option>
+            <option value="USD" disabled={fromCurrency === 'USD'}>{t.currency.USD}</option>
+          </Select>
+        </Field>
+        <Field label={t.companyFinance.fromAmount}>
+          <MoneyInput required value={exchange.fromAmount} disabled={busy} onChange={(event) => changeValue('fromAmount', event.target.value)} aria-label={t.companyFinance.fromAmount} />
+        </Field>
+        <Field label={t.companyFinance.toAmount}>
+          <MoneyInput required value={exchange.toAmount} disabled={busy} onChange={(event) => changeValue('toAmount', event.target.value)} aria-label={t.companyFinance.toAmount} />
+        </Field>
+        <Field label={t.companyFinance.exchangeRate} hint={t.companyFinance.ratePerUsd}>
+          <MoneyInput required value={exchange.rate} disabled={busy} onChange={(event) => changeValue('rate', event.target.value)} aria-label={t.companyFinance.exchangeRate} />
+        </Field>
+        <Field label={t.companyFinance.reason}>
+          <TextInput required value={reason} disabled={busy} onChange={(event) => { setReason(event.target.value); setFormError(null) }} aria-label={t.companyFinance.reason} />
+        </Field>
+        {formError ? <p role="alert" className="sm:col-span-2 text-label font-medium text-danger-ink">{formError}</p> : null}
+        <Button type="submit" disabled={busy} className="sm:col-span-2">{t.companyFinance.exchangeSubmit}</Button>
+      </form>
+    </Card>
+  )
+}
+
 function MovementsTab({ rows }: { rows: Movement[] }): ReactNode {
   const { t } = useApp()
   return (
     <Card title={t.companyFinance.tabs.movements}>
       <Table head={[t.companyFinance.date, t.companyFinance.kind, t.companyFinance.amount, t.companyFinance.description, t.companyFinance.rate]} isEmpty={rows.length === 0} empty={t.companyFinance.emptyMovements}>
         {rows.map((row) => {
-          const amount = row.command?.amount ?? row.command?.fromAmount ?? row.command?.toAmount ?? null
+          const command = row.command
+          const exchange = command?.kind === 'exchange' &&
+            command.fromCurrency !== undefined && command.fromAmount !== undefined &&
+            command.toCurrency !== undefined && command.toAmount !== undefined
+            ? {
+              fromCurrency: command.fromCurrency,
+              fromAmount: command.fromAmount,
+              toCurrency: command.toCurrency,
+              toAmount: command.toAmount,
+            }
+            : null
+          const amount = command?.amount ?? command?.fromAmount ?? command?.toAmount ?? null
+          const frozenRate = normalizedFrozenRate(command?.sypMinorPerUsd ?? row.entry.sypMinorPerUsd)
           return (
             <tr key={row.entry.id}>
               <td className="num px-3 py-2">{row.entry.businessDate}</td>
-              <td className="px-3 py-2">{row.command?.kind ?? row.entry.eventType}</td>
-              <td className="px-3 py-2 text-end">{amount === null ? '—' : <Money value={amount} currency={row.command?.currency ?? 'SYP_NEW'} />}</td>
-              <td className="px-3 py-2">{row.entry.reason ?? '—'}</td>
-              <td className="num px-3 py-2">{row.entry.sypMinorPerUsd ?? '—'}</td>
+              <td className="px-3 py-2">{command?.kind ?? row.entry.eventType}</td>
+              <td className="px-3 py-2 text-end">
+                {exchange ? (
+                  <span className="inline-flex flex-wrap items-center justify-end gap-1">
+                    <Money value={exchange.fromAmount} currency={exchange.fromCurrency} />
+                    <span aria-hidden="true" className="text-ink-muted">→</span>
+                    <Money value={exchange.toAmount} currency={exchange.toCurrency} />
+                  </span>
+                ) : amount === null ? '—' : <Money value={amount} currency={command?.currency ?? 'SYP_NEW'} />}
+              </td>
+              <td className="px-3 py-2">{command?.reason ?? row.entry.reason ?? '—'}</td>
+              <td className="px-3 py-2 text-end">
+                {frozenRate === null ? '—' : <span className="inline-flex items-center gap-1"><Money value={frozenRate} currency="SYP_NEW" /><span className="text-ink-muted">/ {t.currency.USD}</span></span>}
+              </td>
             </tr>
           )
         })}
@@ -411,7 +699,14 @@ function AssetVehicleCreator({ onCreated }: { onCreated(vehicle: VehicleOption):
   )
 }
 
-function AssetsTab({ rows, vehicles, today, busy, mutate }: { rows: Asset[]; vehicles: CompanyData['vehicles']; today: string; busy: boolean; mutate: Mutate }): ReactNode {
+function AssetsTab({ rows, due, vehicles, today, busy, mutate }: {
+  rows: Asset[]
+  due: AssetInstallmentDueFeed
+  vehicles: CompanyData['vehicles']
+  today: string
+  busy: boolean
+  mutate: Mutate
+}): ReactNode {
   const { api, t, branchId } = useApp()
   const [kind, setKind] = useState<Asset['kind']>('equipment')
   const [vehicleId, setVehicleId] = useState('')
@@ -426,6 +721,8 @@ function AssetsTab({ rows, vehicles, today, busy, mutate }: { rows: Asset[]; veh
   const [paidFrom, setPaidFrom] = useState<'pocket' | 'reserve' | 'owner_outside' | 'opening'>('pocket')
   const [financedPartyName, setFinancedPartyName] = useState('')
   const [financedDueOn, setFinancedDueOn] = useState('')
+  const [scheduleNewAsset, setScheduleNewAsset] = useState(false)
+  const [newPlan, setNewPlan] = useState<InstallmentPlanDraft>(() => newInstallmentPlanDraft(due.today || today))
   const availableVehicles = useMemo(() => {
     const byId = new Map(vehicles.map((vehicle) => [vehicle.id, vehicle]))
     for (const vehicle of createdVehicles) byId.set(vehicle.id, vehicle)
@@ -459,10 +756,18 @@ function AssetsTab({ rows, vehicles, today, busy, mutate }: { rows: Asset[]; veh
       financedPartyName: financedPartyName === '' ? null : financedPartyName,
       financedDueOn: financedDueOn === '' ? null : financedDueOn,
       financedNote: null,
-    }), t.companyFinance.saved).then(() => { setName(''); setPrice(''); setPaidNow(''); setFinancedPartyName(''); setFinancedDueOn('') })
+      ...(scheduleNewAsset ? { installmentPlan: installmentPlanPayload(newPlan) } : {}),
+    }), t.companyFinance.saved).then((saved) => {
+      if (!saved) return
+      setName(''); setPrice(''); setPaidNow(''); setFinancedPartyName(''); setFinancedDueOn('')
+      setScheduleNewAsset(false)
+      setNewPlan(newInstallmentPlanDraft(due.today || purchasedOn))
+    })
   }
   return (
-    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(20rem,1fr)_2fr]">
+    <div className="flex flex-col gap-4">
+      <AssetInstallmentPanel rows={rows} due={due} today={due.today || today} busy={busy} mutate={mutate} />
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(20rem,1fr)_2fr]">
       <Card title={t.companyFinance.addAsset}>
         <form className="flex flex-col gap-3" onSubmit={submit}>
           <Field label={t.companyFinance.assetKind}>
@@ -508,11 +813,19 @@ function AssetsTab({ rows, vehicles, today, busy, mutate }: { rows: Asset[]; veh
             <Field label={t.companyFinance.currency}><Select value={currency} onChange={(event) => setCurrency(event.target.value as Currency)} aria-label={t.companyFinance.currency}><option value="SYP_NEW">{t.currency.SYP_NEW}</option><option value="USD">{t.currency.USD}</option></Select></Field>
             <Field label={t.companyFinance.price}><MoneyInput required value={price} onChange={(event) => setPrice(event.target.value)} aria-label={t.companyFinance.price} /></Field>
           </div>
-          <DateField label={t.companyFinance.purchasedOn} value={purchasedOn} onChange={setPurchasedOn} />
+          <DateField label={t.companyFinance.purchasedOn} value={purchasedOn} onChange={(next) => {
+            if (newPlan.startsOn === purchasedOn) setNewPlan((current) => ({ ...current, startsOn: next }))
+            setPurchasedOn(next)
+          }} />
           <Field label={t.companyFinance.paidNow}><MoneyInput required value={paidNow} onChange={(event) => setPaidNow(event.target.value)} aria-label={t.companyFinance.paidNow} /></Field>
           <Field label={t.companyFinance.paidFrom}><Select value={paidFrom} onChange={(event) => setPaidFrom(event.target.value as typeof paidFrom)} aria-label={t.companyFinance.paidFrom}><option value="pocket">{t.companyFinance.pocket}</option><option value="reserve">{t.companyFinance.reserve}</option><option value="owner_outside">{t.companyFinance.ownerOutside}</option><option value="opening">{t.companyFinance.opening}</option></Select></Field>
-          <Field label={t.companyFinance.financedParty}><TextInput value={financedPartyName} onChange={(event) => setFinancedPartyName(event.target.value)} aria-label={t.companyFinance.financedParty} /></Field>
+          <Field label={t.companyFinance.financedParty}><TextInput required={scheduleNewAsset} value={financedPartyName} onChange={(event) => setFinancedPartyName(event.target.value)} aria-label={t.companyFinance.financedParty} /></Field>
           <DateField label={t.companyFinance.financedDue} value={financedDueOn} onChange={setFinancedDueOn} />
+          <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-line-strong bg-surface-muted p-3 text-body text-ink">
+            <input type="checkbox" checked={scheduleNewAsset} onChange={(event) => setScheduleNewAsset(event.target.checked)} className="mt-0.5 size-4 accent-brand" />
+            <span>{t.companyFinance.scheduleInstallments}</span>
+          </label>
+          {scheduleNewAsset ? <InstallmentPlanFields value={newPlan} onChange={setNewPlan} disabled={busy} /> : null}
           <Button type="submit" disabled={busy}>{t.companyFinance.addAsset}</Button>
         </form>
       </Card>
@@ -529,6 +842,7 @@ function AssetsTab({ rows, vehicles, today, busy, mutate }: { rows: Asset[]; veh
           ))}
         </Table>
       </Card>
+      </div>
     </div>
   )
 }

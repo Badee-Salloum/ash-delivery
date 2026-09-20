@@ -1502,6 +1502,115 @@ describe('the range read behind /dashboard/profit and /dashboard/treasury (P2)',
   })
 })
 
+describe('GET /dashboard/last-seven-days', () => {
+  it('zero-fills the server-owned business-date range, classifies shift shapes, and keeps order fees operational', async () => {
+    await runCanonicalShift()
+    await seedCountShift('seven-day-ordinary', 'approved', {
+      driverId: DRIVER2_ID,
+      vehicleId: 'vehicle-2',
+      businessDate: '2026-07-20',
+      shiftNo: 1,
+      openApprovedAt: '2026-07-20T06:00:00.000Z',
+      windowOpensAt: '2026-07-20T06:00:00.000Z',
+      submittedAt: '2026-07-20T14:00:00.000Z',
+    })
+    await seedCountShift('seven-day-double', 'week_locked', {
+      driverId: 'driver-seven-day-double',
+      vehicleId: 'vehicle-seven-day-double',
+      businessDate: '2026-07-20',
+      shiftNo: 1,
+      openApprovedAt: '2026-07-20T06:00:00.000Z',
+      windowOpensAt: '2026-07-20T06:00:00.000Z',
+      submittedAt: '2026-07-20T18:00:00.000Z',
+    })
+    // Pending work is not on the completed-shift screen, so it cannot inflate a row that drills
+    // into that screen either.
+    await seedCountShift('seven-day-pending', 'pending_review', { businessDate: '2026-07-20', shiftNo: 2 })
+
+    // A branch expense on a day with no delivery revenue proves that expenses/net use the current
+    // branch-profit definition, rather than deriving both from the order rows.
+    h.deps.ledger.entries.push({
+      id: 71_000,
+      branchId: BRANCH,
+      eventType: 'manual',
+      shiftId: null,
+      occurrenceKey: 'seven-day-expense',
+      businessDate: '2026-07-20',
+      postingDate: '2026-07-20',
+      weekStartDate: weekStartFor('2026-07-20'),
+      fxDayId: 1,
+      sypMinorPerUsd: null,
+      weekLockId: null,
+      reason: 'seven day dashboard fixture',
+      createdBy: 'u-bm',
+      createdAtMs: NOW_MS,
+      lines: [
+        { fundCode: `cost_center:branch:${BRANCH}`, side: 'D', amount: syp(1_000), currency: 'SYP_NEW' },
+        { fundCode: 'office_cash', side: 'C', amount: syp(1_000), currency: 'SYP_NEW' },
+      ],
+    })
+
+    const manager = await get(await h.loginAs('manager'), '/dashboard/last-seven-days')
+    expect(manager.statusCode, manager.body).toBe(200)
+    expect(manager.headers['cache-control']).toBe('private, no-store')
+    expect(manager.json()).toMatchObject({
+      from: '2026-07-15',
+      to: today,
+      profitVisible: false,
+    })
+    const managerDays = manager.json().days as Array<Record<string, unknown>>
+    expect(managerDays.map((day) => day.businessDate)).toEqual([
+      '2026-07-21', '2026-07-20', '2026-07-19', '2026-07-18', '2026-07-17', '2026-07-16', '2026-07-15',
+    ])
+    expect(managerDays[0]).toMatchObject({
+      shifts: 1,
+      ordinaryShifts: 1,
+      doubleShifts: 0,
+      orders: 20,
+      feesSyp: sypStr(100_000),
+    })
+    expect(managerDays[1]).toMatchObject({
+      shifts: 2,
+      ordinaryShifts: 1,
+      doubleShifts: 1,
+      orders: 0,
+      feesSyp: sypStr(0),
+    })
+    expect(managerDays[2]).toMatchObject({
+      shifts: 0,
+      ordinaryShifts: 0,
+      doubleShifts: 0,
+      orders: 0,
+      feesSyp: sypStr(0),
+    })
+    for (const day of managerDays) {
+      expect(day).not.toHaveProperty('companyShareSyp')
+      expect(day).not.toHaveProperty('expensesSyp')
+      expect(day).not.toHaveProperty('netProfitSyp')
+    }
+
+    const profitReader = await get(await scopedProfitReader(), '/dashboard/last-seven-days')
+    expect(profitReader.statusCode, profitReader.body).toBe(200)
+    const profitDays = profitReader.json().days as Array<Record<string, unknown>>
+    expect(profitReader.json().profitVisible).toBe(true)
+    expect(profitDays[0]).toMatchObject({
+      companyShareSyp: sypStr(40_000),
+      expensesSyp: sypStr(0),
+      netProfitSyp: sypStr(40_000),
+    })
+    expect(profitDays[1]).toMatchObject({
+      companyShareSyp: sypStr(0),
+      expensesSyp: sypStr(1_000),
+      netProfitSyp: sypStr(-1_000),
+    })
+  })
+
+  it('uses the ordinary dashboard branch guard', async () => {
+    expect((await get(await h.loginAs('driver1'), '/dashboard/last-seven-days')).statusCode).toBe(403)
+    expect((await get(await h.loginAs('manager2'), `/dashboard/last-seven-days?branchId=${BRANCH}`)).statusCode).toBe(403)
+  })
+})
+
 describe('GET /dashboard/shifts-summary (P2)', () => {
   const day = '2026-07-21'
   const dayBefore = '2026-07-20'

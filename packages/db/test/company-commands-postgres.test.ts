@@ -1438,5 +1438,143 @@ if (!DATABASE_URL) {
       expect((await finance(ids.gm).listDepreciationAllocations(HQ, 'SYP_NEW'))
         .filter((row) => row.transferId === transferId).length).toBeGreaterThan(0)
     })
+
+    it('keeps an asset installment as a plan around the existing payable payment, never an expense', async () => {
+      const assetId = randomUUID()
+      const debtId = randomUUID()
+      const planId = randomUUID()
+      const paymentId = randomUUID()
+      const price = m(900n)
+      const installment = m(300n)
+      const expensesBefore = await client.query<{ n: number }>('SELECT count(*)::int AS n FROM company_expenses')
+      const purchase = assetPurchase({
+        assetId,
+        currency: 'SYP_NEW',
+        price,
+        paidNow: m(0n),
+        paidFrom: 'owner_outside',
+        debtId,
+        occurrenceKey: assetId,
+      })
+      expect(await outcome(ids.gm, async () => {
+        const entry = await post(HQ, purchase.posting, ids.gm, 'financed terminal')
+        const asset: FixedAssetRecord = {
+          id: assetId,
+          branchId: HQ,
+          kind: 'equipment',
+          vehicleId: null,
+          name: 'Installment terminal',
+          currency: 'SYP_NEW',
+          price,
+          sypMinorPerUsd: null,
+          purchasedOn: DATE,
+          businessDate: DATE,
+          usefulMonths: 36,
+          paidNow: m(0n),
+          paidFrom: 'owner_outside',
+          debtId,
+          description: 'financed terminal',
+          journalEntryId: entry.id,
+          createdBy: ids.gm,
+          createdAtMs: 0,
+        }
+        const debt: CompanyDebtRecord = {
+          id: debtId,
+          branchId: HQ,
+          direction: 'payable',
+          partyName: 'Terminal supplier',
+          partyKey: 'terminal supplier',
+          currency: 'SYP_NEW',
+          principal: price,
+          sypMinorPerUsd: null,
+          openedOn: DATE,
+          businessDate: DATE,
+          dueOn: null,
+          note: null,
+          origin: 'asset_purchase',
+          expenseCategoryId: null,
+          incomeCategoryId: null,
+          costCenterKind: null,
+          vehicleId: null,
+          assetId,
+          journalEntryId: entry.id,
+          createdBy: ids.gm,
+          createdAtMs: 0,
+        }
+        await finance(ids.gm).createAsset(asset)
+        await finance(ids.gm).createDebt(debt)
+        await finance(ids.gm).createAssetSchedule(depreciationSchedule(assetId, price, DATE))
+        await finance(ids.gm).createAssetInstallmentPlan({
+          id: planId,
+          assetId,
+          debtId,
+          branchId: HQ,
+          currency: 'SYP_NEW',
+          amount: installment,
+          paidFrom: 'owner_outside',
+          scheduleKind: 'weekly',
+          weekday: 4,
+          intervalDays: null,
+          startsOn: DATE,
+          active: true,
+          deactivatedOn: null,
+          deactivatedAtMs: null,
+          deactivatedBy: null,
+          deactivationReason: null,
+          createdBy: ids.gm,
+          createdAtMs: 0,
+        })
+      })).toBeNull()
+
+      expect((await finance(ids.gm).listAssetInstallmentPlans(assetId)).map((row) => row.id)).toEqual([planId])
+      expect(await outcome(ids.gm, async () => {
+        const outstanding = companyDebtOutstanding(
+          'payable',
+          await ledger(ids.gm).fundBalance(HQ, `company_payable:SYP_NEW:${debtId}`),
+        )
+        const payment = companyDebtPayment({
+          debtId,
+          direction: 'payable',
+          currency: 'SYP_NEW',
+          amount: installment,
+          outstanding,
+          paidFrom: 'owner_outside',
+          occurrenceKey: paymentId,
+        })
+        const entry = await post(HQ, payment, ids.gm, 'terminal installment')
+        await finance(ids.gm).createDebtEvent({
+          id: paymentId,
+          debtId,
+          branchId: HQ,
+          kind: 'payment',
+          amount: installment,
+          source: 'owner_outside',
+          sypMinorPerUsd: null,
+          occurredOn: DATE,
+          businessDate: DATE,
+          reason: 'terminal installment',
+          journalEntryId: entry.id,
+          createdBy: ids.gm,
+          createdAtMs: 0,
+        })
+        await finance(ids.gm).createAssetInstallmentOccurrence({
+          id: paymentId,
+          planId,
+          branchId: HQ,
+          dueDate: DATE,
+          status: 'paid',
+          debtEventId: paymentId,
+          reason: null,
+          actedBy: ids.gm,
+          actedAtMs: 0,
+        })
+      })).toBeNull()
+      expect(await finance(ids.gm).getAssetInstallmentOccurrence(planId, DATE)).toMatchObject({
+        debtEventId: paymentId,
+        status: 'paid',
+      })
+      const expenses = await client.query<{ n: number }>('SELECT count(*)::int AS n FROM company_expenses')
+      expect(expenses.rows).toEqual(expensesBefore.rows)
+    })
   })
 }
