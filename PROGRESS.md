@@ -1,5 +1,30 @@
 # PROGRESS
 
+## 2026-09-20 — finance dashboard, installments, and FX deployed
+
+**Live release.** Commit `3916fdd7d4c78bbfadec2482b0c09db9020bbfbb` is deployed to the stable
+Admin, Driver, and API surfaces. It delivers the embedded seven-day dashboard, scheduled financed-asset
+installments, and the direct SYP/USD Company Fund exchange workflow described in the implementation entry
+below. Deployment ids: Admin `dpl_E1NaPtgkDbs95RnuTdERNzURziwR`, Driver
+`dpl_F8MXHozAXEGjC24gEvvM7hePTC99`, and API `dpl_FpBPpBeGugWNs977f3fmM4qN81Nx`.
+
+**Schema and safeguards.** The API was paused and drained before migration, then `0079_asset_installment_plans.sql`
+was applied exactly once and verified at 75 migrations. The validated pre-backup at
+`Desktop\\ash-backups\\release-0079-20260920\\pre\\2026-09-20T17-08-36-496Z` contains 84 tables /
+91,675 rows / 74 migrations; the validated post-backup at
+`Desktop\\ash-backups\\release-0079-20260920\\post\\2026-09-20T17-22-24-237Z` contains 86 tables /
+91,676 rows / 75 migrations. Postflight verified the migration ledger, permissions, enabled triggers,
+ledger balance, and all 17 permanent shift-money integrity groups.
+
+**Recovery proof and smoke.** The post-backup restored into an isolated 0079 scratch database, where all
+91,676 rows, 29 owned sequences, enabled triggers, and journal balances passed. A real transaction created
+then rolled back an audited change, proving no state remained. Its re-backup at
+`Desktop\\ash-backups\\release-0079-20260920\\restore-check\\2026-09-20T19-09-12-079Z` passed validation
+and matched all 86 table fingerprints exactly; the scratch database was then disconnected and dropped.
+GitHub Actions run [35523859836](https://github.com/Badee-Salloum/ash-delivery/actions/runs/35523859836)
+passed, and final stable smoke returned 200 for every public surface/SPA proxy and 401 for both new protected
+API routes without a session.
+
 ## 2026-09-20 — embedded seven-day dashboard, asset installments, and direct company FX complete
 
 **Dashboard.** The live dashboard now says «إيراد الأجور» and embeds a server-owned last-seven-business-day
@@ -26,8 +51,8 @@ covering Arabic/English, light/dark, desktop/mobile, table-to-card reflow and co
 `pnpm check`, `pnpm build:apps`, SQL/wire/type checks and visual checks were run locally; Node 25 emits the
 known engine warning because this repository targets Node 24. The PostgreSQL-specific installment guard
 suite is intentionally skipped without `DATABASE_URL`; it must run against a real disposable PostgreSQL
-database before production migration. This change is not deployed and migration 0079 has not been applied
-to production.
+database before production migration. These pre-deployment checks preceded the successful production
+release recorded above.
 
 ## 2026-09-19 — ASH Delivery design-system unification complete, verified, and deployed
 

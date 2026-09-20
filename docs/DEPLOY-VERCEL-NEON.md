@@ -12,16 +12,22 @@ Team `hadis-projects-3c86ccdb`, three projects, all public (no deployment protec
 
 | Surface | URL | Live deployment / notes |
 | --- | --- | --- |
-| Admin console | https://ash-admin-eta.vercel.app | `dpl_75oexHWPgAVMa4axYC3Qyna4662M`; 2026-09-19 UI-only release; React SPA, `/api/*` proxied to API |
-| Driver PWA | https://ash-driver.vercel.app | `dpl_6QkYMwTAfojD5HzvNsz5RAt6bwQq`; 2026-09-19 UI-only release; installable PWA, `/api/*` proxied to API |
-| API | https://ash-api-xi.vercel.app | `dpl_BEPgw85iwZzEaBapUa7KdzmyEwfa`; Fastify serverless function |
-| Database | Neon `ep-billowing-butterfly-…` (eu-central-1, **Postgres 18**) | live at `0078` (74 migrations) + bootstrapped |
+| Admin console | https://ash-admin-eta.vercel.app | `dpl_E1NaPtgkDbs95RnuTdERNzURziwR`; 2026-09-20 coordinated 0079 release; React SPA, `/api/*` proxied to API |
+| Driver PWA | https://ash-driver.vercel.app | `dpl_F8MXHozAXEGjC24gEvvM7hePTC99`; 2026-09-20 coordinated 0079 release; installable PWA, `/api/*` proxied to API |
+| API | https://ash-api-xi.vercel.app | `dpl_FpBPpBeGugWNs977f3fmM4qN81Nx`; 2026-09-20 coordinated 0079 release; Fastify serverless function |
+| Database | Neon `ep-billowing-butterfly-…` (eu-central-1, **Postgres 18**) | live at `0079` (75 migrations) + bootstrapped |
 | Evidence | Vercel Blob store `ash-evidence` (private) | linked to `ash-api` |
 
-**UI release boundary (2026-09-19):** only the static Admin and Driver outputs were promoted, after
-Node 24 `pnpm check` and `pnpm build:apps` passed, the visual suite recorded 9 passing / 18 skipped,
-and the stable front-end URLs plus their API proxies passed smoke. No API function was promoted and
-no Neon action or migration ran. The ledger remains at `0078` with 74 applied migrations.
+**Current coordinated release boundary (2026-09-20):** all three public surfaces now run commit
+`3916fdd7d4c78bbfadec2482b0c09db9020bbfbb`; migration `0079_asset_installment_plans.sql` is applied
+once and the ledger is at 75 migrations. The API was paused and drained for the migration, then resumed
+only after postflight and post-backup validation. Stable API/Admin/Driver smoke, both SPA proxies,
+the Driver manifest/service worker, and unauthenticated responses from the two new protected API routes
+all passed.
+
+**Previous UI-only boundary (2026-09-19):** only the static Admin and Driver outputs were promoted after
+Node 24 `pnpm check` and `pnpm build:apps` passed. It is historical evidence only; it has been superseded
+by the coordinated 0079 release above.
 
 **Previous coordinated runtime boundary:** all three public surfaces used runtime commit
 `bb39ffd79a4dcd5c47cbbff4ecee33ef79257004`, deployed on 2026-09-18. That release required no
@@ -232,6 +238,33 @@ redeploy a front-end: `pnpm build:apps`, copy `apps/<app>/dist/*` into a staging
 ---
 
 ## 7. Deploy checklist
+
+### Validated live `0079` checklist — 2026-09-20
+
+- [x] Frozen commit `3916fdd7d4c78bbfadec2482b0c09db9020bbfbb`; CI run
+      [35523859836](https://github.com/Badee-Salloum/ash-delivery/actions/runs/35523859836) passed,
+      including the real PostgreSQL guards
+- [x] Staged Admin `dpl_E1NaPtgkDbs95RnuTdERNzURziwR`, Driver
+      `dpl_F8MXHozAXEGjC24gEvvM7hePTC99`, and API `dpl_FpBPpBeGugWNs977f3fmM4qN81Nx`
+- [x] Paused the API and drained production activity before the migration
+- [x] Validated pre-backup
+      `Desktop\\ash-backups\\release-0079-20260920\\pre\\2026-09-20T17-08-36-496Z`:
+      84 tables / 91,675 rows / 74 migrations
+- [x] Applied `0079_asset_installment_plans.sql` exactly once; rerun found 75 migrations present
+- [x] Postflight verified the release checksums, least privilege, enabled triggers, zero ledger imbalance,
+      and all 17 permanent shift-money integrity groups
+- [x] Validated post-backup
+      `Desktop\\ash-backups\\release-0079-20260920\\post\\2026-09-20T17-22-24-237Z`:
+      86 tables / 91,676 rows / 75 migrations
+- [x] Promoted all three staged candidates and resumed the API
+- [x] Final stable smoke: API health, Admin/Driver SPAs and proxies, Driver manifest/service worker all
+      returned 200; unauthenticated last-seven-days and installment-due routes returned 401
+- [x] Restored 91,676/91,676 rows into isolated database
+      `ash_release_gate_0079_restore_20260920_2230`; 29 sequences, triggers, ledger balance, and a real
+      transaction rollback probe passed; re-backup
+      `Desktop\\ash-backups\\release-0079-20260920\\restore-check\\2026-09-20T19-09-12-079Z`
+      matched all 86 table fingerprints; the scratch database was disconnected and dropped
+- [ ] Rotate the Vercel deployment token and Neon owner credential that were disclosed in the release chat
 
 ### Validated live `0078` checklist — 2026-09-18
 
