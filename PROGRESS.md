@@ -1,5 +1,31 @@
 # PROGRESS
 
+## 2026-09-21 — tracker background-reliability audit and fixes
+
+An adversarial multi-agent audit of the tracker (22 findings raised, 12 confirmed after each was
+verified against the code and real Android behaviour) surfaced several ways background location could
+silently stop. Fixed and rebuilt (clean `assembleDebug` green; APK on the Desktop):
+
+- **GMS-less fallback.** `FusedLocationProviderClient` is a Play-Services API; on Huawei/EMUI and any
+  device without current Play Services it returns a client but delivers no fixes. The service now
+  checks `GoogleApiAvailability` and falls back to the platform `LocationManager`.
+- **Watchdog.** If fixes stop arriving (a Play-Services background update, a long Doze, an OEM
+  hiccup) the 15s ticker re-arms the location request instead of showing a live notification over
+  nothing.
+- **Wake lock** spanning each upload, so the CPU cannot suspend mid-POST and freeze the socket.
+- **Guarded `startForeground` + a permission gate** — an Android 14+ permission-less restart stops
+  cleanly instead of crash-looping; the executor race on stop is guarded; the boot restart is gated
+  on background location so it never starts a zombie.
+- **Session cookie slides.** The 8h cookie outlived by a 12h double shift was dropped mid-shift,
+  turning every upload into a silently-buffered 401. The server now re-sets the cookie on activity
+  and the tracker writes response cookies back into the WebView jar, keeping the session alive even
+  backgrounded.
+
+Not fixable in code (left as onboarding/ops): OEM autostart allow-listing, and beating an OEM
+force-stop mid-shift. Verified: typecheck, the tracker/gps/auth/session test set green directly (the
+full 77-file API suite would not load in one process on this 7.4 GB machine — an environment memory
+limit, not a failure).
+
 ## 2026-09-21 — the recorded GPS path, linked to each order by time (+ tracker infra)
 
 **The path we already record, now readable and per-order.** Live GPS tracking (SRS K) was built long
