@@ -1,5 +1,28 @@
 # PROGRESS
 
+## 2026-09-21 — GPS path + tracker infrastructure DEPLOYED to production
+
+**Live.** Branch `feat/gps-order-paths` merged to `main` (`23be6db`) and deployed. Migration
+**0080** (`tracker_devices`) applied to the Neon production DB over the HTTP migrator (`1 applied,
+75 already present`; re-run confirms `0 applied, 76 present`). All three Vercel apps redeployed to
+production and verified: **API** `ash-api-xi` (`/health` ok, the new `GET /shifts/:id/gps/path`
+returns 401 auth-gated — route live), **admin** `ash-admin-eta` (200), **driver** `ash-driver` (200,
+`/api/*` proxy ok).
+
+**What's live:** the recorded per-order GPS path + `ShiftPathMap` in the review overlay / vehicle
+history / new Recorded Paths screen; the "not reporting" live-map alert; the sliding session cookie
+for 12h shifts; and the hardware-tracker registry + ingest seam — the seam ships **disabled**
+(`TRACKER_INGEST_ENABLED` unset), so no behaviour changes until a device is fitted.
+
+**Pre-deploy gate:** typecheck, all `check:*`, and every package suite green (domain, contracts,
+client, adapters, admin, driver, and all 77 api files). The one red test is the pre-existing
+`recurrence-parity-postgres` (C6 company-recurring), unrelated to this work and already on `main`.
+
+**Android APK** (`ash-driver-debug.apk`) is built with the full background hardening but is
+sideloaded manually onto the handsets — not part of the Vercel deploy.
+
+**Next.** Distribute the APK to drivers; the GT06 hardware gateway waits for procurement.
+
 ## 2026-09-21 — tracker background-reliability audit and fixes
 
 An adversarial multi-agent audit of the tracker (22 findings raised, 12 confirmed after each was
