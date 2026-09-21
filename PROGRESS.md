@@ -21,10 +21,14 @@ silently stop. Fixed and rebuilt (clean `assembleDebug` green; APK on the Deskto
   and the tracker writes response cookies back into the WebView jar, keeping the session alive even
   backgrounded.
 
-Not fixable in code (left as onboarding/ops): OEM autostart allow-listing, and beating an OEM
-force-stop mid-shift. Verified: typecheck, the tracker/gps/auth/session test set green directly (the
-full 77-file API suite would not load in one process on this 7.4 GB machine — an environment memory
-limit, not a failure).
+OEM autostart allow-listing is now guided too: on MIUI/ColorOS/EMUI/FuntouchOS/One UI the app
+deep-links the driver once into the security-centre autostart screen (best-effort, with an Arabic
+explainer), sequenced after the battery-optimisation prompt. What genuinely can't be beaten in code
+is a manual force-stop mid-shift — the server "not reporting" alert is the backstop there.
+
+Verified: typecheck, the tracker/gps/auth/session test set green directly, and every Android change
+rebuilds cleanly (APK built locally from `C:/Android/sdk`). The full 77-file API suite would not load
+in one process on this 7.4 GB machine — an environment memory limit, not a failure.
 
 ## 2026-09-21 — the recorded GPS path, linked to each order by time (+ tracker infra)
 
