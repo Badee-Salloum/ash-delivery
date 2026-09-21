@@ -494,7 +494,14 @@ public class TrackerService extends Service {
                 out.write(body.toString());
             }
             int status = connection.getResponseCode();
-            if (status >= 200 && status < 300) return Outcome.ACCEPTED;
+            if (status >= 200 && status < 300) {
+                // Carry the server's rolled session cookie back into the WebView jar, so the NEXT
+                // post reads a fresh one. This is what keeps a 12h double shift alive even when the
+                // app is never opened: the server slides the cookie on our own upload, and without
+                // this write-back that slide would land nowhere and the 8h cookie would still lapse.
+                writeBackCookies(url, connection);
+                return Outcome.ACCEPTED;
+            }
             if (status == 409) return Outcome.SHIFT_OVER;
             // 401/403 are RETRY on purpose rather than a stop: a session that lapses while the
             // driver is out comes back when he next opens the app, and the fixes he took in
@@ -504,6 +511,25 @@ public class TrackerService extends Service {
             return Outcome.RETRY;
         } finally {
             if (connection != null) connection.disconnect();
+        }
+    }
+
+    /** Feed any Set-Cookie from our response into the WebView's shared cookie jar. */
+    private void writeBackCookies(String url, HttpURLConnection connection) {
+        try {
+            java.util.Map<String, java.util.List<String>> headers = connection.getHeaderFields();
+            if (headers == null) return;
+            CookieManager cm = CookieManager.getInstance();
+            boolean any = false;
+            for (java.util.Map.Entry<String, java.util.List<String>> entry : headers.entrySet()) {
+                if (entry.getKey() != null && entry.getKey().equalsIgnoreCase("Set-Cookie") && entry.getValue() != null) {
+                    for (String value : entry.getValue()) cm.setCookie(url, value);
+                    any = true;
+                }
+            }
+            if (any) cm.flush();
+        } catch (Exception ignored) {
+            // A cookie we could not persist just means the next post falls back to the old one.
         }
     }
 }

@@ -202,8 +202,26 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   const authorize = makeAuthorize(deps)
 
+  /**
+   * The session cookie options, shared so a slide writes exactly what the login wrote.
+   *
+   * `maxAge` mirrors the DB idle window, and — critically — the cookie must be RE-SENT on activity,
+   * not just written once at login. Without that, a driver on a twelve-hour double shift (decision
+   * 18) keeps his DB session alive by working, but the browser drops the persistent cookie eight
+   * hours after login; the native tracker then reads no cookie, every upload 401s, and the fixes are
+   * silently buffered and never delivered. Sliding the cookie on each authenticated request keeps it
+   * alive as long as he is active.
+   */
+  const sessionCookieOptions = () => ({
+    httpOnly: true as const,
+    sameSite: 'lax' as const,
+    secure: process.env.NODE_ENV === 'production',
+    path: '/',
+    maxAge: SESSION_IDLE_MS / 1000,
+  })
+
   // Resolve the session before authorization, on every request.
-  app.addHook('onRequest', async (req) => {
+  app.addHook('onRequest', async (req, reply) => {
     req.requestId = String(req.id)
     const token = req.cookies[SESSION_COOKIE]
     if (!token) return
@@ -212,6 +230,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       req.actor = check.actor
       req.sessionToken = token
       req.mfaSatisfied = check.session.mfaSatisfied
+      // Slide the cookie with the session so a long-running shift never lets it lapse. The native
+      // tracker feeds this Set-Cookie back into the WebView jar, so its own posts keep it fresh.
+      reply.setCookie(SESSION_COOKIE, token, sessionCookieOptions())
 
       // B-4 (س41): «نفس تسجيل الدخول اليومي» — an admin staffer's daily login IS their attendance.
       // Drivers are tracked by their shifts, and org-wide roles have no branch to stamp, so only a
