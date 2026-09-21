@@ -515,6 +515,51 @@ export interface GpsLiveDriver {
   receivedAt: string
 }
 
+/** A GPS source: the foreground beacon, the Android background service, or a hardware tracker. */
+export type GpsSource = 'phone_fg' | 'phone_bg' | 'tracker'
+
+export interface GpsPathPing {
+  lat: number
+  lng: number
+  accuracyM: number | null
+  source: GpsSource
+  capturedAt: string
+  receivedAt: string
+}
+
+/** A half-open `[pingStartIndex, pingEndIndex)` slice into a `GpsPathView.pings` array. */
+export interface GpsPathRange {
+  pingStartIndex: number
+  pingEndIndex: number
+}
+
+export interface GpsPathOrder {
+  id: string
+  providerOrderNo: string
+  occurredDate: string | null
+  occurredMinute: string | null
+  fee: string
+}
+
+export interface GpsPathSegment extends GpsPathRange {
+  orderId: string
+  providerOrderNo: string
+  minuteKey: string
+}
+
+/** One shift's recorded trail, split into a path segment per order by printed time. */
+export interface GpsPathView {
+  shiftId: string
+  windowOpensAt: string | null
+  submittedAt: string | null
+  pings: GpsPathPing[]
+  orders: GpsPathOrder[]
+  segments: GpsPathSegment[]
+  untimedOrderIds: string[]
+  beforeFirst: GpsPathRange
+  afterClose: GpsPathRange
+}
+
 // ── Expenses (SRS G) ────────────────────────────────────────────────────────────────────────
 export interface ExpenseCategoryView {
   id: string
@@ -2244,6 +2289,10 @@ export class ApiClient {
   /** The manager's live map: the latest fix per driver in the selected branch. */
   gpsLive() {
     return this.get<{ drivers: GpsLiveDriver[] }>('/gps/live')
+  }
+  /** One shift's recorded trail, split into a path segment per order by printed time (gps.view). */
+  getShiftGpsPath(shiftId: string) {
+    return this.get<GpsPathView>(`/shifts/${shiftId}/gps/path`)
   }
 
   // ── Documents (SRS B-1 / س37) ───────────────────────────────────────────────────────────────

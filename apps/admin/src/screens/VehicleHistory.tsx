@@ -1,6 +1,7 @@
 import { type ReactNode, useCallback, useMemo, useState } from 'react'
 import { type DateRange, type RangeSelection, parseMinor } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
+import { ShiftPathMap } from '../components/ShiftPathMap.tsx'
 import { TimeRangeBar, useRangeMeta } from '../components/TimeRangeBar.tsx'
 import { explainError } from '../errors.ts'
 import type { RouteParams } from '../route.ts'
@@ -133,6 +134,7 @@ export function VehicleHistory({ initial = {} }: { initial?: RouteParams }): Rea
 
 function VehicleHistoryData({ vehicleId, range }: { vehicleId: string; range: DateRange }): ReactNode {
   const { t } = useApp()
+  const [pathShiftId, setPathShiftId] = useState<string | null>(null)
   const path = `/vehicles/${encodeURIComponent(vehicleId)}/history?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`
   const { data, error, retry } = useDashboardRead<VehicleHistoryResponse>(path)
   if (data === null) {
@@ -157,7 +159,7 @@ function VehicleHistoryData({ vehicleId, range }: { vehicleId: string; range: Da
 
       <Card title={t.vehicleHistory.shiftHistory}>
         <Table
-          head={[t.vehicleHistory.date, t.vehicleHistory.driver, t.vehicleHistory.status, t.vehicleHistory.duration, t.vehicleHistory.odometer, { label: t.vehicleHistory.distance, numeric: true }, { label: t.vehicleHistory.orders, numeric: true }]}
+          head={[t.vehicleHistory.date, t.vehicleHistory.driver, t.vehicleHistory.status, t.vehicleHistory.duration, t.vehicleHistory.odometer, { label: t.vehicleHistory.distance, numeric: true }, { label: t.vehicleHistory.orders, numeric: true }, t.vehicleHistory.path]}
           isEmpty={data.shifts.length === 0}
           empty={t.vehicleHistory.noShifts}
         >
@@ -170,10 +172,17 @@ function VehicleHistoryData({ vehicleId, range }: { vehicleId: string; range: Da
               <td className="num px-3 py-2">{shift.odometerStart ?? '—'} → {shift.odometerEnd ?? '—'}</td>
               <td className="num px-3 py-2 text-end">{shift.distance.recorded ? shift.distance.km : '—'}</td>
               <td className="num px-3 py-2 text-end">{shift.orderCount}</td>
+              <td className="px-3 py-2">
+                <button type="button" className={`text-brand underline ${FOCUS_RING}`} onClick={() => setPathShiftId(shift.id === pathShiftId ? null : shift.id)} aria-pressed={pathShiftId === shift.id}>
+                  {t.vehicleHistory.path}
+                </button>
+              </td>
             </tr>
           ))}
         </Table>
       </Card>
+
+      {pathShiftId ? <ShiftPathMap key={pathShiftId} shiftId={pathShiftId} /> : null}
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <Card title={t.vehicleHistory.expenses}>

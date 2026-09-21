@@ -17,6 +17,7 @@ import {
 } from '@ash/client'
 import { abs, add, formatMinor, minor, parseMinor, sub, workedTime } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
+import { ShiftPathMap } from '../components/ShiftPathMap.tsx'
 import { explainError } from '../errors.ts'
 import { evidenceReviewWarning } from '../evidence-warning.ts'
 import { br1SplitView, employeeShareChain } from '../money-story.ts'
@@ -1548,6 +1549,10 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           </ul>
         </Card>
       ) : null}
+
+      {/* The recorded GPS trail, split into a path segment per order (gps.view). Hidden when the
+          shift has no trail, so it never shows an empty map on a shift that was never tracked. */}
+      <ShiftPathMap shiftId={shiftId} hideWhenEmpty />
 
       {/* A reason for the re-shoot / reject the driver will see — only where a decision is taken. */}
       {atGate ? (
