@@ -49,6 +49,7 @@ import {
   dayOfWeek,
   minor,
   resolveFxDay,
+  sliceTrailByOrders,
   sum,
   weekClosedOn,
   weekStartFor,
@@ -2345,6 +2346,45 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   const MAX_GPS_PINGS_PER_SHIFT = 20_000
   const GPS_LIVE_WINDOW_MS = 60 * 60_000
 
+  /**
+   * The shared ingest core: quota, clock-skew drop, capture-sort and the deduped append, used by
+   * both the driver route below and (later) the hardware-tracker route. The caller has already
+   * confirmed the shift is live; the `source` is the caller's, never the client's, for the tracker.
+   */
+  type IngestFix = { lat: number; lng: number; accuracyM: number | null; capturedAtMs: number }
+  const ingestFixes = async (
+    shift: { id: string; driverId: string; branchId: string },
+    fixes: readonly IngestFix[],
+    source: 'phone_fg' | 'phone_bg' | 'tracker',
+    nowMs: number,
+  ): Promise<{ status: 'quota'; stored: number } | { status: 'ok'; accepted: number; duplicates: number; rejected: number }> => {
+    // One wedged handset (or tracker) must not fill the table. A count against the natural-key index
+    // costs microseconds at batch cadence.
+    const stored = await deps.gps.countForShift(shift.id)
+    if (stored >= MAX_GPS_PINGS_PER_SHIFT) return { status: 'quota', stored }
+    // A fix from tomorrow or from last week is a broken clock, not a position. Dropped rather than
+    // refused, so one bad reading never costs the whole batch.
+    const usable = fixes.filter(
+      (fix) => fix.capturedAtMs <= nowMs + 5 * 60_000 && fix.capturedAtMs >= nowMs - 24 * 60 * 60_000,
+    )
+    // Sorted so IDENTITY runs in capture order, which keeps `captured_at ASC, id ASC` stable.
+    const ordered = [...usable].sort((a, b) => a.capturedAtMs - b.capturedAtMs)
+    const { inserted } = await deps.gps.appendMany(
+      ordered.map((fix) => ({
+        shiftId: shift.id,
+        driverId: shift.driverId,
+        branchId: shift.branchId,
+        lat: fix.lat,
+        lng: fix.lng,
+        accuracyM: fix.accuracyM,
+        capturedAtMs: fix.capturedAtMs,
+        receivedAtMs: nowMs,
+        source,
+      })),
+    )
+    return { status: 'ok', accepted: inserted, duplicates: ordered.length - inserted, rejected: fixes.length - usable.length }
+  }
+
   // ── Live GPS (SRS K) — the driver's phone streams its location while the shift is open ────────
   /*
    * Ingest: the driver's own shift (shift.operate). The server stamps received_at, so a skewed
@@ -2386,39 +2426,15 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         return reply.code(409).send({ error: 'shift_not_live', detail: { state: shift.state } })
       }
 
-      // One wedged handset must not be able to fill the table. A count against the natural-key
-      // index costs microseconds at batch cadence.
-      const stored = await deps.gps.countForShift(shift.id)
-      if (stored >= MAX_GPS_PINGS_PER_SHIFT) {
-        return reply.code(429).send({ error: 'gps_shift_quota_exhausted', detail: { stored } })
+      const result = await ingestFixes(shift, parsed.fixes, parsed.source, deps.clock.nowMs())
+      if (result.status === 'quota') {
+        return reply.code(429).send({ error: 'gps_shift_quota_exhausted', detail: { stored: result.stored } })
       }
-
-      const nowMs = deps.clock.nowMs()
-      // A fix from tomorrow or from last week is a broken clock, not a position. Dropped rather
-      // than refused, so one bad reading never costs the whole batch.
-      const usable = parsed.fixes.filter(
-        (fix) => fix.capturedAtMs <= nowMs + 5 * 60_000 && fix.capturedAtMs >= nowMs - 24 * 60 * 60_000,
-      )
-      // Sorted so IDENTITY runs in capture order, which keeps `captured_at ASC, id ASC` stable.
-      const ordered = [...usable].sort((a, b) => a.capturedAtMs - b.capturedAtMs)
-      const { inserted } = await deps.gps.appendMany(
-        ordered.map((fix) => ({
-          shiftId: shift.id,
-          driverId: shift.driverId,
-          branchId: shift.branchId,
-          lat: fix.lat,
-          lng: fix.lng,
-          accuracyM: fix.accuracyM,
-          capturedAtMs: fix.capturedAtMs,
-          receivedAtMs: nowMs,
-          source: parsed.source,
-        })),
-      )
       return reply.code(202).send({
         ok: true,
-        accepted: inserted,
-        duplicates: ordered.length - inserted,
-        rejected: parsed.fixes.length - usable.length,
+        accepted: result.accepted,
+        duplicates: result.duplicates,
+        rejected: result.rejected,
       })
     },
   )
@@ -2456,6 +2472,58 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           capturedAt: new Date(p.capturedAtMs).toISOString(),
           receivedAt: new Date(p.receivedAtMs).toISOString(),
         })),
+    }
+  })
+
+  /*
+   * The recorded trail of ONE shift, split into a path segment per order by printed time (gps.view).
+   *
+   * An order carries only a minute-precision printed clock that is often illegible, so the split is
+   * best-effort by time, never proof a position belongs to an order — the segmentation is pure and
+   * lives in the domain (`sliceTrailByOrders`). The pings come back in capture order from the repo,
+   * which is the function's precondition; the indices in `segments`/`beforeFirst`/`afterClose` are
+   * into the `pings` array returned here.
+   */
+  app.get('/shifts/:id/gps/path', { config: { permission: 'gps.view', subject: shiftSubject } }, async (req, reply) => {
+    const { id } = z.object({ id: z.string() }).parse(req.params)
+    const shift = await deps.shifts.findById(id)
+    if (!shift) return reply.code(404).send({ error: 'shift_not_found' })
+    const [pings, allOrders] = await Promise.all([deps.gps.listForShift(id), deps.orders.listByShift(id)])
+    const orders = allOrders.filter((o) => o.included)
+    const segmentation = sliceTrailByOrders({
+      pings,
+      orders: orders.map((o) => ({
+        orderId: o.id,
+        providerOrderNo: o.providerOrderNo,
+        occurredDate: o.occurredDate,
+        occurredMinute: o.occurredMinute,
+      })),
+      submittedAtMs: shift.submittedAt === null ? null : Date.parse(shift.submittedAt),
+      offsetMinutes: deps.clock.offsetMinutes(),
+    })
+    return {
+      shiftId: id,
+      windowOpensAt: shift.windowOpensAt,
+      submittedAt: shift.submittedAt,
+      pings: pings.map((p) => ({
+        lat: p.lat,
+        lng: p.lng,
+        accuracyM: p.accuracyM,
+        source: p.source,
+        capturedAt: new Date(p.capturedAtMs).toISOString(),
+        receivedAt: new Date(p.receivedAtMs).toISOString(),
+      })),
+      orders: orders.map((o) => ({
+        id: o.id,
+        providerOrderNo: o.providerOrderNo,
+        occurredDate: o.occurredDate,
+        occurredMinute: o.occurredMinute,
+        fee: serializeMoney(o.fee),
+      })),
+      segments: segmentation.segments,
+      untimedOrderIds: segmentation.untimedOrderIds,
+      beforeFirst: segmentation.beforeFirst,
+      afterClose: segmentation.afterClose,
     }
   })
 
