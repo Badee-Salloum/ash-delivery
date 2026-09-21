@@ -1,5 +1,39 @@
 # PROGRESS
 
+## 2026-09-21 — the recorded GPS path, linked to each order by time (+ tracker infra)
+
+**The path we already record, now readable and per-order.** Live GPS tracking (SRS K) was built long
+ago but the stored trail was wired to nothing. `sliceTrailByOrders` (pure domain, brute-force-oracle
+property tested) splits a shift's capture-ordered pings into a **path segment per order** by printed
+time: an order owns the trail from its own printed minute to the next order's, the last runs to close,
+and an unreadable minute gets no segment — best-effort, never proof. `GET /shifts/:id/gps/path`
+(`gps.view`) serves it; one reusable `ShiftPathMap` (Leaflet, token-painted, per-order highlight,
+green start / red end) shows it in the **review overlay, the vehicle history, and a new Recorded Paths
+screen**.
+
+**Background reliability, the manager's half.** A tracked live shift that has sent nothing for ten
+minutes now shows as «لا تبثّ» on the live map, so a stopped phone tracker is noticed instead of the
+driver silently vanishing. The phone-side native hardening (boot restart, battery-optimisation
+exemption) is deferred — it needs the Android build, unavailable here.
+
+**Hardware tracker — infrastructure only (no device yet).** `tracker_devices` (0080) registers a
+bike unit by IMEI (hash-only secret, one active per bike) under `fleet.manage`; `POST /tracker/ingest`
+is the gateway seam, **disabled by default** (`TRACKER_INGEST_ENABLED` + `TRACKER_GATEWAY_TOKEN`),
+resolving a device's bike to its live shift and forcing `source='tracker'`. The GT06 gateway process
+is deferred to procurement.
+
+**Verified.** domain 833 (+13 gps), api 1029 (+9 gps/tracker), admin 360, client 320; conformance on
+memory + real PostgreSQL (tracker registry, one-active-per-bike, migration 0080); typecheck and every
+`check:*`. **Not deployed** — migration 0080 and the routes wait for the owner's go-ahead. Branch
+`feat/gps-order-paths`.
+
+**Next.** Optional: a small admin device-registration panel; then, at procurement, the GT06 gateway
+and the Android background-survival hardening.
+
+**See it in 2 minutes.** Open a completed shift's review → «المسار المسجّل» draws the trail; click an
+order in the side list to highlight its leg. On the live map, a shift with no recent fix appears under
+«لا تبثّ».
+
 ## 2026-09-20 — finance dashboard, installments, and FX deployed
 
 **Live release.** Commit `3916fdd7d4c78bbfadec2482b0c09db9020bbfbb` is deployed to the stable
