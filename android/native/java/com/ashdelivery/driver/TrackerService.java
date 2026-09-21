@@ -91,9 +91,10 @@ public class TrackerService extends Service {
     private static final int NOTIFICATION_ID = 4711;
 
     /** Where the assignment survives a restart. See {@link #onStartCommand}. */
-    private static final String PREFS = "ash_tracker";
-    private static final String KEY_SHIFT_ID = "shiftId";
-    private static final String KEY_ORIGIN = "origin";
+    // Package-private so BootReceiver can restart from the same saved assignment after a reboot.
+    static final String PREFS = "ash_tracker";
+    static final String KEY_SHIFT_ID = "shiftId";
+    static final String KEY_ORIGIN = "origin";
 
     /**
      * How often a fix is requested, and how often the buffer is flushed.

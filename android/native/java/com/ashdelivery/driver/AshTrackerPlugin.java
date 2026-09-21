@@ -1,9 +1,14 @@
 package com.ashdelivery.driver;
 
 import android.Manifest;
+import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Build;
+import android.os.PowerManager;
+import android.provider.Settings;
 
 import androidx.core.content.ContextCompat;
 
@@ -49,6 +54,13 @@ import com.getcapacitor.annotation.PermissionCallback;
                 @Permission(
                         alias = AshTrackerPlugin.NOTIFICATIONS,
                         strings = { Manifest.permission.POST_NOTIFICATIONS }
+                ),
+                // «Allow all the time». Not for ordinary tracking — the foreground service works on
+                // in-use location while the app has been opened — but so BootReceiver can restart
+                // the service after a reboot, which the platform only permits with this grant.
+                @Permission(
+                        alias = AshTrackerPlugin.BACKGROUND,
+                        strings = { Manifest.permission.ACCESS_BACKGROUND_LOCATION }
                 )
         }
 )
@@ -56,6 +68,7 @@ public class AshTrackerPlugin extends Plugin {
 
     static final String LOCATION = "location";
     static final String NOTIFICATIONS = "notifications";
+    static final String BACKGROUND = "background";
 
     /**
      * Start tracking one shift.
@@ -77,7 +90,7 @@ public class AshTrackerPlugin extends Plugin {
             requestPermissionForAlias(LOCATION, call, "onLocationPermission");
             return;
         }
-        launch(call);
+        afterForeground(call);
     }
 
     @PermissionCallback
@@ -92,6 +105,29 @@ public class AshTrackerPlugin extends Plugin {
             call.resolve(new JSObject().put("started", false).put("reason", "permission_denied"));
             return;
         }
+        afterForeground(call);
+    }
+
+    /**
+     * Between foreground location and launching, ask ONCE for «allow all the time».
+     *
+     * This is only so tracking can come back on its own after a reboot (BootReceiver). It is
+     * best-effort and never gates the service: tracking proceeds whether or not it is granted,
+     * because the foreground service runs on in-use location while the app has been opened. Asked at
+     * most once per install so a decline does not turn into a prompt every shift.
+     */
+    private void afterForeground(PluginCall call) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !hasBackgroundPermission() && !askedBackground()) {
+            markAskedBackground();
+            requestPermissionForAlias(BACKGROUND, call, "onBackgroundPermission");
+            return;
+        }
+        launch(call);
+    }
+
+    @PermissionCallback
+    private void onBackgroundPermission(PluginCall call) {
+        // Granted or not, tracking proceeds; background only helps the post-reboot restart.
         launch(call);
     }
 
@@ -127,6 +163,7 @@ public class AshTrackerPlugin extends Plugin {
         } else {
             getContext().startService(intent);
         }
+        maybeRequestBatteryExemption();
         call.resolve(new JSObject().put("started", true));
     }
 
@@ -158,5 +195,47 @@ public class AshTrackerPlugin extends Plugin {
     private boolean hasNotificationPermission() {
         return ContextCompat.checkSelfPermission(getContext(), Manifest.permission.POST_NOTIFICATIONS)
                 == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private boolean hasBackgroundPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return true;
+        return ContextCompat.checkSelfPermission(getContext(), Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private boolean askedBackground() {
+        return getContext().getSharedPreferences(TrackerService.PREFS, Context.MODE_PRIVATE)
+                .getBoolean("askedBackground", false);
+    }
+
+    private void markAskedBackground() {
+        getContext().getSharedPreferences(TrackerService.PREFS, Context.MODE_PRIVATE)
+                .edit().putBoolean("askedBackground", true).apply();
+    }
+
+    /**
+     * Ask ONCE for exemption from battery optimisation.
+     *
+     * This is the single biggest reason a foreground service is killed in the field: OEM power
+     * managers (MIUI, ColorOS, EMUI, One UI) stop even a foreground service unless the app is
+     * whitelisted. The system dialog is shown once per install and only when not already exempt; if
+     * the driver declines we do not nag him every shift. Fired after the service starts, so tracking
+     * is never delayed waiting on it.
+     */
+    private void maybeRequestBatteryExemption() {
+        PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
+        String pkg = getContext().getPackageName();
+        if (pm != null && pm.isIgnoringBatteryOptimizations(pkg)) return;
+        SharedPreferences prefs = getContext().getSharedPreferences(TrackerService.PREFS, Context.MODE_PRIVATE);
+        if (prefs.getBoolean("askedBattery", false)) return;
+        prefs.edit().putBoolean("askedBattery", true).apply();
+        try {
+            Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+            intent.setData(Uri.parse("package:" + pkg));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(intent);
+        } catch (Exception ignored) {
+            // No activity to handle it (rare). The service still runs; it is just more killable.
+        }
     }
 }

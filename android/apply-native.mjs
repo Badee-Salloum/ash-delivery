@@ -48,20 +48,26 @@ const manifestPath = join(main, 'AndroidManifest.xml')
 let manifest = readFileSync(manifestPath, 'utf8')
 
 /**
- * Deliberately NOT `ACCESS_BACKGROUND_LOCATION`.
+ * Ordinary tracking uses only foreground (in-use) location: the service is started from the shift
+ * screen, which is by definition visible. `ACCESS_BACKGROUND_LOCATION` is added ONLY so tracking can
+ * come back on its own after a REBOOT — `BootReceiver` starts the service with no UI, which the
+ * platform permits only with that grant. The plugin asks for it once and never gates the service on
+ * it (`AshTrackerPlugin.afterForeground`), so a decline costs nothing but the post-reboot restart.
  *
- * A `location`-typed foreground service started while the app is visible does not need it, and
- * asking for it shows the driver the much more alarming «allow all the time» dialog — a scarier
- * prompt for a capability we do not use. The service is started from the shift screen, which is by
- * definition visible.
+ * `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` lets the app ask, once, to be exempted from OEM battery
+ * killers — the biggest real cause of a stopped tracker in the field. `RECEIVE_BOOT_COMPLETED` is
+ * what lets `BootReceiver` hear the reboot at all.
  */
 const permissions = [
   'android.permission.INTERNET',
   'android.permission.ACCESS_FINE_LOCATION',
   'android.permission.ACCESS_COARSE_LOCATION',
+  'android.permission.ACCESS_BACKGROUND_LOCATION',
   'android.permission.FOREGROUND_SERVICE',
   'android.permission.FOREGROUND_SERVICE_LOCATION',
   'android.permission.POST_NOTIFICATIONS',
+  'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+  'android.permission.RECEIVE_BOOT_COMPLETED',
 ]
 
 for (const name of permissions) {
@@ -78,6 +84,22 @@ const service =
   '            android:foregroundServiceType="location" />'
 if (!manifest.includes('.TrackerService')) {
   manifest = manifest.replace('</application>', `${service}\n    </application>`)
+}
+
+// The boot receiver, so tracking resumes after a reboot. Exported so the system's BOOT_COMPLETED
+// broadcast can reach it; it only ever restarts the service from the saved assignment.
+const receiver =
+  '        <receiver\n' +
+  '            android:name=".BootReceiver"\n' +
+  '            android:exported="true"\n' +
+  '            android:enabled="true">\n' +
+  '            <intent-filter>\n' +
+  '                <action android:name="android.intent.action.BOOT_COMPLETED" />\n' +
+  '                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />\n' +
+  '            </intent-filter>\n' +
+  '        </receiver>'
+if (!manifest.includes('.BootReceiver')) {
+  manifest = manifest.replace('</application>', `${receiver}\n    </application>`)
 }
 
 writeFileSync(manifestPath, manifest)
@@ -98,4 +120,4 @@ if (!gradle.includes('play-services-location')) {
   writeFileSync(gradlePath, gradle)
 }
 
-console.log('native sources applied: 3 Java files, 2 string resources, manifest, gradle')
+console.log('native sources applied: 4 Java files, 2 string resources, manifest, gradle')
