@@ -2345,6 +2345,16 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
    */
   const MAX_GPS_PINGS_PER_SHIFT = 20_000
   const GPS_LIVE_WINDOW_MS = 60 * 60_000
+  /*
+   * How long a tracked shift may run with NO fix before the map calls it silent.
+   *
+   * Foreground phone tracking is best-effort — an OEM battery-killer, a denied permission, a phone
+   * that rebooted — and when it stops the driver simply VANISHES from the map rather than turning
+   * red, so a manager cannot tell a dead tracker from a driver standing still. A shift that has been
+   * tracked longer than this with nothing received is surfaced so someone calls him. The grace
+   * covers a shift that only just opened and has not had time to send its first fix.
+   */
+  const GPS_SILENCE_GRACE_MS = 10 * 60_000
 
   /**
    * The shared ingest core: quota, clock-skew drop, capture-sort and the deduped append, used by
@@ -2455,23 +2465,38 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
      * and the screen decides what counts as fresh — it now shows the CAPTURE time, so a stale pin
      * announces its own staleness instead of borrowing the arrival time's credibility.
      */
-    const pings = await deps.gps.latestForDriversInBranch(
-      branchId,
-      [...liveShiftByDriver.keys()],
-      deps.clock.nowMs() - GPS_LIVE_WINDOW_MS,
-    )
+    const nowMs = deps.clock.nowMs()
+    const pings = await deps.gps.latestForDriversInBranch(branchId, [...liveShiftByDriver.keys()], nowMs - GPS_LIVE_WINDOW_MS)
+    const shown = pings.filter((p) => liveShiftByDriver.get(p.driverId) === p.shiftId)
+    const onMap = new Set(shown.map((p) => p.driverId))
+
+    /*
+     * The silent ones: a TRACKED live shift (open / suspended / pending_review — not a draft the
+     * driver is still filling) that has no recent fix at all and has been running past the grace, so
+     * its absence is a stopped tracker, not a slow start. Measured from the driver's confirmation,
+     * the same instant tracking begins on the phone.
+     */
+    const silent = liveShifts
+      .filter((s) => isTracked(s.state) && !onMap.has(s.driverId))
+      .map((s) => ({ shift: s, since: s.windowOpensAt ?? s.driverConfirmedAt }))
+      .filter((x): x is { shift: (typeof liveShifts)[number]; since: string } => x.since !== null && nowMs - Date.parse(x.since) >= GPS_SILENCE_GRACE_MS)
+      .map((x) => ({
+        driverId: x.shift.driverId,
+        shiftId: x.shift.id,
+        silentMinutes: Math.floor((nowMs - Date.parse(x.since)) / 60_000),
+      }))
+
     return {
-      drivers: pings
-        .filter((p) => liveShiftByDriver.get(p.driverId) === p.shiftId)
-        .map((p) => ({
-          driverId: p.driverId,
-          lat: p.lat,
-          lng: p.lng,
-          accuracyM: p.accuracyM,
-          source: p.source,
-          capturedAt: new Date(p.capturedAtMs).toISOString(),
-          receivedAt: new Date(p.receivedAtMs).toISOString(),
-        })),
+      drivers: shown.map((p) => ({
+        driverId: p.driverId,
+        lat: p.lat,
+        lng: p.lng,
+        accuracyM: p.accuracyM,
+        source: p.source,
+        capturedAt: new Date(p.capturedAtMs).toISOString(),
+        receivedAt: new Date(p.receivedAtMs).toISOString(),
+      })),
+      silent,
     }
   })
 

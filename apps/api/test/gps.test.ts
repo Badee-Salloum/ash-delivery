@@ -60,6 +60,28 @@ describe('live GPS (SRS K)', () => {
     expect(d.lng).toBeCloseTo(36.2765)
   })
 
+  it('flags a tracked shift whose tracker has gone silent past the grace, and clears it on a fix', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const gm = await h.loginAs('gm')
+    const id = await toOpen(driver, manager)
+
+    // A freshly opened shift is inside the grace: it may not have had time to send its first fix.
+    expect((await get(gm, `/gps/live?branchId=${BRANCH}`)).json().silent).toEqual([])
+
+    // Backdate the window so it has been tracked past the grace with nothing received.
+    const s = h.deps.shifts.rows.get(id)!
+    h.deps.shifts.rows.set(id, { ...s, windowOpensAt: new Date(h.deps.clock.nowMs() - 11 * 60_000).toISOString() })
+
+    const silent = (await get(gm, `/gps/live?branchId=${BRANCH}`)).json().silent as Array<{ shiftId: string; silentMinutes: number }>
+    expect(silent.map((x) => x.shiftId)).toContain(id)
+    expect(silent.find((x) => x.shiftId === id)!.silentMinutes).toBeGreaterThanOrEqual(11)
+
+    // The moment a fix arrives the driver is on the map, not silent.
+    await post(driver, `/shifts/${id}/gps`, { lat: 33.5, lng: 36.2, accuracyM: null, capturedAtMs: h.deps.clock.nowMs() })
+    expect((await get(gm, `/gps/live?branchId=${BRANCH}`)).json().silent).toEqual([])
+  })
+
   it('the live map shows the LATEST fix per driver', async () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')

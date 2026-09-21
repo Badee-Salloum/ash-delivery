@@ -1925,6 +1925,10 @@ orderNo: 'Order no.',
     // The fix's own age. The map used to print when the OFFICE received it, which made a
     // half-hour-old position look thirty seconds old.
     lastSeen: '{n} min ago',
+    // A tracked shift that has sent nothing — a stopped tracker, not a driver standing still.
+    silentTitle: 'Not reporting',
+    silentHint: 'These shifts are running but their tracker has gone quiet — call the driver.',
+    silentFor: 'silent {n} min',
   },
   shiftPath: {
     title: 'Recorded path',

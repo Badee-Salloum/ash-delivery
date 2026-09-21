@@ -1980,6 +1980,10 @@ orderNo: 'رقم الطلب',
     // The fix's own age. The map used to print when the OFFICE received it, which made a
     // half-hour-old position look thirty seconds old.
     lastSeen: 'قبل {n} دقيقة',
+    // A tracked shift that has sent nothing — a stopped tracker, not a driver standing still.
+    silentTitle: 'لا تبثّ',
+    silentHint: 'هذه النوبات جارية لكن مُتتبّعها صمت — اتصل بالسائق.',
+    silentFor: 'صامتة {n} دقيقة',
   },
   shiftPath: {
     title: 'المسار المسجّل',
