@@ -11,10 +11,12 @@ and an unreadable minute gets no segment — best-effort, never proof. `GET /shi
 green start / red end) shows it in the **review overlay, the vehicle history, and a new Recorded Paths
 screen**.
 
-**Background reliability, the manager's half.** A tracked live shift that has sent nothing for ten
-minutes now shows as «لا تبثّ» on the live map, so a stopped phone tracker is noticed instead of the
-driver silently vanishing. The phone-side native hardening (boot restart, battery-optimisation
-exemption) is deferred — it needs the Android build, unavailable here.
+**Background reliability, both halves.** A tracked live shift that has sent nothing for ten minutes
+now shows as «لا تبثّ» on the live map, so a stopped phone tracker is noticed instead of the driver
+silently vanishing. And the Android shell is hardened for background survival: a one-time
+battery-optimisation exemption against OEM power-killers, and a `BootReceiver` that restarts tracking
+after a reboot. Built and verified — `./gradlew clean assembleDebug` succeeds and the compiled
+manifest carries the new permissions and receiver (the APK is built locally from `C:/Android/sdk`).
 
 **Hardware tracker — infrastructure only (no device yet).** `tracker_devices` (0080) registers a
 bike unit by IMEI (hash-only secret, one active per bike) under `fleet.manage`; `POST /tracker/ingest`
@@ -27,8 +29,7 @@ memory + real PostgreSQL (tracker registry, one-active-per-bike, migration 0080)
 `check:*`. **Not deployed** — migration 0080 and the routes wait for the owner's go-ahead. Branch
 `feat/gps-order-paths`.
 
-**Next.** Optional: a small admin device-registration panel; then, at procurement, the GT06 gateway
-and the Android background-survival hardening.
+**Next.** Optional: a small admin device-registration panel; the GT06 gateway waits for procurement.
 
 **See it in 2 minutes.** Open a completed shift's review → «المسار المسجّل» draws the trail; click an
 order in the side list to highlight its leg. On the live map, a shift with no recent fix appears under
