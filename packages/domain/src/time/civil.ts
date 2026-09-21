@@ -207,3 +207,33 @@ export function daysBetween(a: CalendarDate, b: CalendarDate): number {
   const pb = parseCalendarDate(b)
   return daysFromCivil(pb.y, pb.m, pb.d) - daysFromCivil(pa.y, pa.m, pa.d)
 }
+
+// ── Branch-local minute keys (GPS ↔ order path linking) ──────────────────────────────────────
+//
+// A `"YYYY-MM-DD HH:MM"` string whose lexical order is chronological, so a ping's captured instant
+// and an order's printed clock compare like for like, and a prior-calendar-day order sorts first.
+// This is the WALL-CLOCK local minute (offset only — NOT the 04:00 business-day shift), because an
+// order's `occurred_date`/`occurred_minute` is the actual local date and clock printed on the
+// screen, not a business date. It is the pure, `Date`-free twin of the fallback branch in
+// `contracts/operation-window.ts`.
+
+/** The branch-local minute an epoch instant falls in, as a chronological `"YYYY-MM-DD HH:MM"` key. */
+export function minuteKeyForOffset(epochMs: number, offsetMinutes = DAMASCUS_OFFSET_MINUTES): string {
+  const localMs = epochMs + offsetMinutes * 60_000
+  const dayIndex = Math.floor(localMs / 86_400_000)
+  const { y, m, d } = civilFromDays(dayIndex)
+  const minuteOfDay = Math.floor((localMs - dayIndex * 86_400_000) / 60_000)
+  return `${pad(y, 4)}-${pad(m)}-${pad(d)} ${pad(Math.floor(minuteOfDay / 60))}:${pad(minuteOfDay % 60)}`
+}
+
+/**
+ * The same key for a printed calendar date + `"HH:MM"` clock, or `null` when either is unreadable.
+ * Mirrors the validation of `operationMinuteKey` in the operation-window classifier, so the two
+ * agree on which order times are usable.
+ */
+export function printedMinuteKey(date: string | null, minute: string | null): string | null {
+  if (date === null || minute === null) return null
+  if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(minute)) return null
+  if (!isCalendarDate(date)) return null
+  return `${date} ${minute}`
+}

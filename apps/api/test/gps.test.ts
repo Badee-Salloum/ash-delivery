@@ -1,5 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { minor, minuteKeyForOffset } from '@ash/domain'
 import { BRANCH, DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
 
 /**
@@ -57,6 +58,28 @@ describe('live GPS (SRS K)', () => {
     const d = live.find((x) => x.driverId === DRIVER_ID)!
     expect(d.lat).toBeCloseTo(33.5138)
     expect(d.lng).toBeCloseTo(36.2765)
+  })
+
+  it('flags a tracked shift whose tracker has gone silent past the grace, and clears it on a fix', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const gm = await h.loginAs('gm')
+    const id = await toOpen(driver, manager)
+
+    // A freshly opened shift is inside the grace: it may not have had time to send its first fix.
+    expect((await get(gm, `/gps/live?branchId=${BRANCH}`)).json().silent).toEqual([])
+
+    // Backdate the window so it has been tracked past the grace with nothing received.
+    const s = h.deps.shifts.rows.get(id)!
+    h.deps.shifts.rows.set(id, { ...s, windowOpensAt: new Date(h.deps.clock.nowMs() - 11 * 60_000).toISOString() })
+
+    const silent = (await get(gm, `/gps/live?branchId=${BRANCH}`)).json().silent as Array<{ shiftId: string; silentMinutes: number }>
+    expect(silent.map((x) => x.shiftId)).toContain(id)
+    expect(silent.find((x) => x.shiftId === id)!.silentMinutes).toBeGreaterThanOrEqual(11)
+
+    // The moment a fix arrives the driver is on the map, not silent.
+    await post(driver, `/shifts/${id}/gps`, { lat: 33.5, lng: 36.2, accuracyM: null, capturedAtMs: h.deps.clock.nowMs() })
+    expect((await get(gm, `/gps/live?branchId=${BRANCH}`)).json().silent).toEqual([])
   })
 
   it('the live map shows the LATEST fix per driver', async () => {
@@ -234,6 +257,104 @@ describe('live GPS (SRS K)', () => {
       const trail = await h.deps.gps.listForShift(id)
       expect(trail).toHaveLength(1)
       expect(trail[0]!.source).toBe('phone_fg')
+    })
+  })
+
+  describe('recorded path — a segment per order by printed time', () => {
+    /** Seed an order straight into the repo with a printed minute derived from a real instant. */
+    function seedOrder(shiftId: string, providerOrderNo: string, atMs: number, included = true): Promise<void> {
+      const [occurredDate, occurredMinute] = minuteKeyForOffset(atMs, h.deps.clock.offsetMinutes()).split(' ')
+      return h.deps.orders.create(
+        {
+          id: `ord-${providerOrderNo}`,
+          shiftId,
+          providerOrderNo,
+          payMode: 'cash',
+          fee: minor(5_000n),
+          zone: null,
+          driverConfirmed: true,
+          source: 'manual',
+          feeOcr: null,
+          kind: 'yallago',
+          driverShare: null,
+          companyShare: null,
+          notes: null,
+          createdBy: null,
+          points: [],
+          included,
+          walletAmount: null,
+          occurredDate: occurredDate!,
+          occurredMinute: occurredMinute!,
+          windowStatus: 'in_window',
+          decisionReason: null,
+          decidedBy: null,
+          decidedAt: null,
+        },
+        null,
+      )
+    }
+
+    it('splits the trail into before-first / per-order / after, and skips excluded and untimed orders', async () => {
+      const driver = await h.loginAs('driver1')
+      const manager = await h.loginAs('manager')
+      const gm = await h.loginAs('gm')
+      const id = await toOpen(driver, manager)
+
+      const now = h.deps.clock.nowMs()
+      const M = 60_000
+      const tA = now - 15 * M
+      const tB = now - 8 * M
+      await seedOrder(id, 'YAL-A', tA)
+      await seedOrder(id, 'YAL-B', tB)
+      await seedOrder(id, 'YAL-X', now - 12 * M, false) // excluded → never a segment
+      await seedOrder(id, 'YAL-N', now) // timed, but we blank its minute below to make it untimed
+      // Blank YAL-N's minute so it becomes an untimed order (no segment), as an illegible clock does.
+      const n = h.deps.orders.rows.get('ord-YAL-N')!
+      h.deps.orders.rows.set('ord-YAL-N', { ...n, occurredMinute: null })
+
+      const res = await post(driver, `/shifts/${id}/gps`, {
+        fixes: [
+          { lat: 33.5, lng: 36.2, accuracyM: 8, capturedAtMs: now - 20 * M }, // before A
+          { lat: 33.51, lng: 36.21, accuracyM: 8, capturedAtMs: tA }, // A
+          { lat: 33.52, lng: 36.22, accuracyM: 8, capturedAtMs: tA + 2 * M }, // A
+          { lat: 33.53, lng: 36.23, accuracyM: 8, capturedAtMs: tB }, // B
+          { lat: 33.54, lng: 36.24, accuracyM: 8, capturedAtMs: now - 5 * M }, // B
+        ],
+      })
+      expect(res.statusCode, res.body).toBe(202)
+
+      const path = (await get(gm, `/shifts/${id}/gps/path`)).json()
+      expect(path.pings).toHaveLength(5)
+      // Capture order is preserved, which is the whole point of the trail read.
+      expect(path.pings.map((p: { lat: number }) => p.lat)).toEqual([33.5, 33.51, 33.52, 33.53, 33.54])
+      expect(path.beforeFirst).toEqual({ pingStartIndex: 0, pingEndIndex: 1 })
+      expect(
+        path.segments.map((s: { providerOrderNo: string; pingStartIndex: number; pingEndIndex: number }) => [
+          s.providerOrderNo,
+          s.pingStartIndex,
+          s.pingEndIndex,
+        ]),
+      ).toEqual([
+        ['YAL-A', 1, 3],
+        ['YAL-B', 3, 5],
+      ])
+      // The shift is still open, so the last order runs to the end and nothing is after-close.
+      expect(path.afterClose).toEqual({ pingStartIndex: 5, pingEndIndex: 5 })
+      expect(path.untimedOrderIds).toEqual(['ord-YAL-N'])
+    })
+
+    it('is gps.view only, and 404s an unknown shift', async () => {
+      const driver = await h.loginAs('driver1')
+      const manager = await h.loginAs('manager')
+      const gm = await h.loginAs('gm')
+      const id = await toOpen(driver, manager)
+
+      // The driver holds shift.operate on his own shift, but not gps.view.
+      expect((await get(driver, `/shifts/${id}/gps/path`)).statusCode).toBe(403)
+      // The branch manager reads his own branch's trail.
+      expect((await get(manager, `/shifts/${id}/gps/path`)).statusCode).toBe(200)
+      // An org-wide viewer on a shift that does not exist gets a clean 404.
+      expect((await get(gm, `/shifts/00000000-0000-4000-8000-000000000999/gps/path`)).statusCode).toBe(404)
     })
   })
 })

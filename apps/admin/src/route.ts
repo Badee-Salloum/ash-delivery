@@ -33,6 +33,7 @@ export const SECTIONS = [
   'completedShifts',
   'preapprovedShifts',
   'gpsLive',
+  'recordedPaths',
   'fleet',
   'vehicle',
   'fleetConfig',

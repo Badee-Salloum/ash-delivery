@@ -829,6 +829,7 @@ orderNo: 'رقم الطلب',
 
   vehicleHistory: {
     title: 'سجل الآلية',
+    path: 'المسار',
     subtitle: 'النوبات والمسافة والبطاريات والكلف وأدلة سجل الحياة في خط زمني واحد',
     backToFleet: 'العودة إلى الأسطول',
     noVehicle: 'اختر آلية من لوحة الأسطول.',
@@ -1979,6 +1980,29 @@ orderNo: 'رقم الطلب',
     // The fix's own age. The map used to print when the OFFICE received it, which made a
     // half-hour-old position look thirty seconds old.
     lastSeen: 'قبل {n} دقيقة',
+    // A tracked shift that has sent nothing — a stopped tracker, not a driver standing still.
+    silentTitle: 'لا تبثّ',
+    silentHint: 'هذه النوبات جارية لكن مُتتبّعها صمت — اتصل بالسائق.',
+    silentFor: 'صامتة {n} دقيقة',
+  },
+  shiftPath: {
+    title: 'المسار المسجّل',
+    empty: 'لم يُسجَّل أي موقع لهذه النوبة',
+    ordersTitle: 'الطلبات على المسار',
+    wholeTrail: 'المسار كامل',
+    points: '{n} نقطة',
+    beforeFirst: 'قبل أول طلب',
+    afterClose: 'بعد الإغلاق',
+    noSegment: 'لا مقطع',
+    // Orders whose printed clock was unreadable cannot be placed on the trail.
+    untimed: '{n} طلبات بلا وقت مقروء',
+    sourceTracker: 'مُتتبّع الآلية',
+    mixedSources: 'جزء من هذا المسار من مُتتبّع الدراجة',
+  },
+  recordedPaths: {
+    title: 'المسارات المسجّلة',
+    day: 'اليوم',
+    noShifts: 'لا نوبات في هذا اليوم',
   },
 
   checkin: {

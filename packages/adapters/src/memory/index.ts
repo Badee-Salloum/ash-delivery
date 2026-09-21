@@ -46,6 +46,8 @@ import type {
   ShiftCloseUnitOfWorkInput,
   GpsPingRecord,
   GpsPingRepo,
+  TrackerDeviceRecord,
+  TrackerDeviceRepo,
   OrderPointRecord,
   OperationBatch,
   OperationBatchRepo,
@@ -2266,6 +2268,62 @@ export class MemoryGpsPingRepo implements GpsPingRepo {
   }
 }
 
+/** The hardware tracker registry (SRS K-1 infrastructure); mirrors the SQL uniqueness rules. */
+export class MemoryTrackerDeviceRepo implements TrackerDeviceRepo {
+  readonly rows = new Map<string, TrackerDeviceRecord>()
+
+  // Mirror the partial unique index: at most one ACTIVE device may name a given bike.
+  private assertActiveVehicleFree(vehicleId: string | null, active: boolean, selfId: string): void {
+    if (vehicleId === null || !active) return
+    for (const d of this.rows.values()) {
+      if (d.id !== selfId && d.active && d.vehicleId === vehicleId) {
+        throw Object.assign(new Error(`vehicle ${vehicleId} already has an active tracker`), { code: 'ACTIVE_VEHICLE_TAKEN' })
+      }
+    }
+  }
+
+  async register(device: TrackerDeviceRecord): Promise<void> {
+    for (const d of this.rows.values()) {
+      if (d.imei === device.imei) throw Object.assign(new Error(`duplicate imei ${device.imei}`), { code: 'DUPLICATE_IMEI' })
+    }
+    this.assertActiveVehicleFree(device.vehicleId, device.active, device.id)
+    this.rows.set(device.id, { ...device })
+  }
+
+  async findByImei(imei: string): Promise<TrackerDeviceRecord | null> {
+    for (const d of this.rows.values()) if (d.imei === imei) return { ...d }
+    return null
+  }
+
+  async findActiveByImei(imei: string): Promise<TrackerDeviceRecord | null> {
+    for (const d of this.rows.values()) if (d.imei === imei && d.active) return { ...d }
+    return null
+  }
+
+  async bindToVehicle(id: string, vehicleId: string | null, _actorId: string): Promise<void> {
+    const d = this.rows.get(id)
+    if (!d) return
+    this.assertActiveVehicleFree(vehicleId, d.active, id)
+    this.rows.set(id, { ...d, vehicleId })
+  }
+
+  async deactivate(id: string, _actorId: string): Promise<void> {
+    const d = this.rows.get(id)
+    if (!d) return
+    this.rows.set(id, { ...d, active: false })
+  }
+
+  async touchLastSeen(id: string, atMs: number): Promise<void> {
+    const d = this.rows.get(id)
+    if (!d) return
+    this.rows.set(id, { ...d, lastSeenAtMs: atMs })
+  }
+
+  async listByBranch(branchId: string): Promise<TrackerDeviceRecord[]> {
+    return [...this.rows.values()].filter((d) => d.branchId === branchId).map((d) => ({ ...d }))
+  }
+}
+
 /** Admin-staff attendance (SRS B-4 / س41): one row per user per day, last-seen bumped on repeat. */
 export class MemoryAttendanceRepo implements AttendanceRepo {
   readonly rows: AttendanceRecord[] = []
@@ -2334,6 +2392,7 @@ export interface MemoryDeps extends Deps {
   settlements: MemoryShiftSettlementRepo
   closeDrafts: MemoryCloseDraftRepo
   gps: MemoryGpsPingRepo
+  trackerDevices: MemoryTrackerDeviceRepo
 }
 
 /** In-memory parity for ledger-backed financial commands. */
@@ -2706,5 +2765,6 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     settlements,
     closeDrafts,
     gps: new MemoryGpsPingRepo(),
+    trackerDevices: new MemoryTrackerDeviceRepo(),
   }
 }

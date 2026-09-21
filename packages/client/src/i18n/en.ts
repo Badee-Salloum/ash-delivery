@@ -789,6 +789,7 @@ orderNo: 'Order no.',
 
   vehicleHistory: {
     title: 'Vehicle history',
+    path: 'Path',
     subtitle: 'Shifts, distance, batteries, costs and life-log evidence in one timeline',
     backToFleet: 'Back to fleet',
     noVehicle: 'Choose a vehicle from the fleet board.',
@@ -1924,6 +1925,29 @@ orderNo: 'Order no.',
     // The fix's own age. The map used to print when the OFFICE received it, which made a
     // half-hour-old position look thirty seconds old.
     lastSeen: '{n} min ago',
+    // A tracked shift that has sent nothing — a stopped tracker, not a driver standing still.
+    silentTitle: 'Not reporting',
+    silentHint: 'These shifts are running but their tracker has gone quiet — call the driver.',
+    silentFor: 'silent {n} min',
+  },
+  shiftPath: {
+    title: 'Recorded path',
+    empty: 'No location was recorded for this shift',
+    ordersTitle: 'Orders on the path',
+    wholeTrail: 'Whole trail',
+    points: '{n} points',
+    beforeFirst: 'Before the first order',
+    afterClose: 'After close',
+    noSegment: 'no segment',
+    // Orders whose printed clock was unreadable cannot be placed on the trail.
+    untimed: '{n} orders with no readable time',
+    sourceTracker: 'Vehicle tracker',
+    mixedSources: 'part of this trail came from the bike tracker',
+  },
+  recordedPaths: {
+    title: 'Recorded paths',
+    day: 'Day',
+    noShifts: 'No shifts on this day',
   },
 
   checkin: {

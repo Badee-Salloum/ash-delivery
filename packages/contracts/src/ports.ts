@@ -2823,6 +2823,40 @@ export interface GpsPingRepo {
 }
 
 /**
+ * A registered hardware GPS tracker (SRS K-1 — infrastructure only; no device exists yet).
+ *
+ * A tracker measures a BIKE (a phone measures a driver), so it is fitted to a vehicle at a branch
+ * and known by its IMEI. Only the secret's hash is kept. `lastSeenAtMs` is liveness, updated by the
+ * ingest seam; registration, binding and deactivation are the audited authority decisions.
+ */
+export interface TrackerDeviceRecord {
+  id: string
+  branchId: string
+  imei: string
+  vehicleId: string | null
+  secretHash: string
+  label: string
+  active: boolean
+  lastSeenAtMs: number | null
+  createdBy: string
+  createdAtMs: number
+  updatedAtMs: number
+}
+
+export interface TrackerDeviceRepo {
+  register(device: TrackerDeviceRecord): Promise<void>
+  findByImei(imei: string): Promise<TrackerDeviceRecord | null>
+  /** The device that may currently write telemetry for this IMEI — active only. */
+  findActiveByImei(imei: string): Promise<TrackerDeviceRecord | null>
+  /** Fit the device to a bike (or unfit with null). One active device per bike is enforced in SQL. */
+  bindToVehicle(id: string, vehicleId: string | null, actorId: string): Promise<void>
+  deactivate(id: string, actorId: string): Promise<void>
+  /** A bare liveness touch — deliberately not audited, like the pings themselves. */
+  touchLastSeen(id: string, atMs: number): Promise<void>
+  listByBranch(branchId: string): Promise<TrackerDeviceRecord[]>
+}
+
+/**
  * The repository slice available while a close boundary or approval transaction owns the shift.
  *
  * Keeping this list explicit prevents network/blob/notification work from accidentally being held
@@ -2937,6 +2971,7 @@ export interface Deps {
   /** Revisioned, server-owned recovery state for the driver's closing workflow. */
   closeDrafts: CloseDraftRepo
   gps: GpsPingRepo
+  trackerDevices: TrackerDeviceRepo
   /** Atomic close-boundary/review writer; callback work is database-only. */
   closeUnitOfWork: ShiftCloseUnitOfWork
 }

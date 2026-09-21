@@ -8,6 +8,7 @@ import {
   adjustCashFloatRequest,
   adjustWalletTopupRequest,
   gpsIngestRequest,
+  trackerIngestRequest,
   approveCloseRequest,
   forceCloseRequest,
   approveOpenRequest,
@@ -49,6 +50,7 @@ import {
   dayOfWeek,
   minor,
   resolveFxDay,
+  sliceTrailByOrders,
   sum,
   weekClosedOn,
   weekStartFor,
@@ -151,6 +153,9 @@ export interface AppOptions {
   maxOcrReadsPerShift?: number
   /** Emergency public-signup kill switch. Enabled by default. */
   driverSelfRegistrationEnabled?: boolean
+  /** The hardware-tracker ingest seam. Off unless both this and a gateway token are set. */
+  trackerIngestEnabled?: boolean
+  trackerGatewayToken?: string | undefined
 }
 
 /**
@@ -197,8 +202,26 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   const authorize = makeAuthorize(deps)
 
+  /**
+   * The session cookie options, shared so a slide writes exactly what the login wrote.
+   *
+   * `maxAge` mirrors the DB idle window, and — critically — the cookie must be RE-SENT on activity,
+   * not just written once at login. Without that, a driver on a twelve-hour double shift (decision
+   * 18) keeps his DB session alive by working, but the browser drops the persistent cookie eight
+   * hours after login; the native tracker then reads no cookie, every upload 401s, and the fixes are
+   * silently buffered and never delivered. Sliding the cookie on each authenticated request keeps it
+   * alive as long as he is active.
+   */
+  const sessionCookieOptions = () => ({
+    httpOnly: true as const,
+    sameSite: 'lax' as const,
+    secure: process.env.NODE_ENV === 'production',
+    path: '/',
+    maxAge: SESSION_IDLE_MS / 1000,
+  })
+
   // Resolve the session before authorization, on every request.
-  app.addHook('onRequest', async (req) => {
+  app.addHook('onRequest', async (req, reply) => {
     req.requestId = String(req.id)
     const token = req.cookies[SESSION_COOKIE]
     if (!token) return
@@ -207,6 +230,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       req.actor = check.actor
       req.sessionToken = token
       req.mfaSatisfied = check.session.mfaSatisfied
+      // Slide the cookie with the session so a long-running shift never lets it lapse. The native
+      // tracker feeds this Set-Cookie back into the WebView jar, so its own posts keep it fresh.
+      reply.setCookie(SESSION_COOKIE, token, sessionCookieOptions())
 
       // B-4 (س41): «نفس تسجيل الدخول اليومي» — an admin staffer's daily login IS their attendance.
       // Drivers are tracked by their shifts, and org-wide roles have no branch to stamp, so only a
@@ -2344,6 +2370,55 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
    */
   const MAX_GPS_PINGS_PER_SHIFT = 20_000
   const GPS_LIVE_WINDOW_MS = 60 * 60_000
+  /*
+   * How long a tracked shift may run with NO fix before the map calls it silent.
+   *
+   * Foreground phone tracking is best-effort — an OEM battery-killer, a denied permission, a phone
+   * that rebooted — and when it stops the driver simply VANISHES from the map rather than turning
+   * red, so a manager cannot tell a dead tracker from a driver standing still. A shift that has been
+   * tracked longer than this with nothing received is surfaced so someone calls him. The grace
+   * covers a shift that only just opened and has not had time to send its first fix.
+   */
+  const GPS_SILENCE_GRACE_MS = 10 * 60_000
+
+  /**
+   * The shared ingest core: quota, clock-skew drop, capture-sort and the deduped append, used by
+   * both the driver route below and (later) the hardware-tracker route. The caller has already
+   * confirmed the shift is live; the `source` is the caller's, never the client's, for the tracker.
+   */
+  type IngestFix = { lat: number; lng: number; accuracyM: number | null; capturedAtMs: number }
+  const ingestFixes = async (
+    shift: { id: string; driverId: string; branchId: string },
+    fixes: readonly IngestFix[],
+    source: 'phone_fg' | 'phone_bg' | 'tracker',
+    nowMs: number,
+  ): Promise<{ status: 'quota'; stored: number } | { status: 'ok'; accepted: number; duplicates: number; rejected: number }> => {
+    // One wedged handset (or tracker) must not fill the table. A count against the natural-key index
+    // costs microseconds at batch cadence.
+    const stored = await deps.gps.countForShift(shift.id)
+    if (stored >= MAX_GPS_PINGS_PER_SHIFT) return { status: 'quota', stored }
+    // A fix from tomorrow or from last week is a broken clock, not a position. Dropped rather than
+    // refused, so one bad reading never costs the whole batch.
+    const usable = fixes.filter(
+      (fix) => fix.capturedAtMs <= nowMs + 5 * 60_000 && fix.capturedAtMs >= nowMs - 24 * 60 * 60_000,
+    )
+    // Sorted so IDENTITY runs in capture order, which keeps `captured_at ASC, id ASC` stable.
+    const ordered = [...usable].sort((a, b) => a.capturedAtMs - b.capturedAtMs)
+    const { inserted } = await deps.gps.appendMany(
+      ordered.map((fix) => ({
+        shiftId: shift.id,
+        driverId: shift.driverId,
+        branchId: shift.branchId,
+        lat: fix.lat,
+        lng: fix.lng,
+        accuracyM: fix.accuracyM,
+        capturedAtMs: fix.capturedAtMs,
+        receivedAtMs: nowMs,
+        source,
+      })),
+    )
+    return { status: 'ok', accepted: inserted, duplicates: ordered.length - inserted, rejected: fixes.length - usable.length }
+  }
 
   // ── Live GPS (SRS K) — the driver's phone streams its location while the shift is open ────────
   /*
@@ -2386,39 +2461,15 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         return reply.code(409).send({ error: 'shift_not_live', detail: { state: shift.state } })
       }
 
-      // One wedged handset must not be able to fill the table. A count against the natural-key
-      // index costs microseconds at batch cadence.
-      const stored = await deps.gps.countForShift(shift.id)
-      if (stored >= MAX_GPS_PINGS_PER_SHIFT) {
-        return reply.code(429).send({ error: 'gps_shift_quota_exhausted', detail: { stored } })
+      const result = await ingestFixes(shift, parsed.fixes, parsed.source, deps.clock.nowMs())
+      if (result.status === 'quota') {
+        return reply.code(429).send({ error: 'gps_shift_quota_exhausted', detail: { stored: result.stored } })
       }
-
-      const nowMs = deps.clock.nowMs()
-      // A fix from tomorrow or from last week is a broken clock, not a position. Dropped rather
-      // than refused, so one bad reading never costs the whole batch.
-      const usable = parsed.fixes.filter(
-        (fix) => fix.capturedAtMs <= nowMs + 5 * 60_000 && fix.capturedAtMs >= nowMs - 24 * 60 * 60_000,
-      )
-      // Sorted so IDENTITY runs in capture order, which keeps `captured_at ASC, id ASC` stable.
-      const ordered = [...usable].sort((a, b) => a.capturedAtMs - b.capturedAtMs)
-      const { inserted } = await deps.gps.appendMany(
-        ordered.map((fix) => ({
-          shiftId: shift.id,
-          driverId: shift.driverId,
-          branchId: shift.branchId,
-          lat: fix.lat,
-          lng: fix.lng,
-          accuracyM: fix.accuracyM,
-          capturedAtMs: fix.capturedAtMs,
-          receivedAtMs: nowMs,
-          source: parsed.source,
-        })),
-      )
       return reply.code(202).send({
         ok: true,
-        accepted: inserted,
-        duplicates: ordered.length - inserted,
-        rejected: parsed.fixes.length - usable.length,
+        accepted: result.accepted,
+        duplicates: result.duplicates,
+        rejected: result.rejected,
       })
     },
   )
@@ -2439,24 +2490,125 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
      * and the screen decides what counts as fresh — it now shows the CAPTURE time, so a stale pin
      * announces its own staleness instead of borrowing the arrival time's credibility.
      */
-    const pings = await deps.gps.latestForDriversInBranch(
-      branchId,
-      [...liveShiftByDriver.keys()],
-      deps.clock.nowMs() - GPS_LIVE_WINDOW_MS,
-    )
+    const nowMs = deps.clock.nowMs()
+    const pings = await deps.gps.latestForDriversInBranch(branchId, [...liveShiftByDriver.keys()], nowMs - GPS_LIVE_WINDOW_MS)
+    const shown = pings.filter((p) => liveShiftByDriver.get(p.driverId) === p.shiftId)
+    const onMap = new Set(shown.map((p) => p.driverId))
+
+    /*
+     * The silent ones: a TRACKED live shift (open / suspended / pending_review — not a draft the
+     * driver is still filling) that has no recent fix at all and has been running past the grace, so
+     * its absence is a stopped tracker, not a slow start. Measured from the driver's confirmation,
+     * the same instant tracking begins on the phone.
+     */
+    const silent = liveShifts
+      .filter((s) => isTracked(s.state) && !onMap.has(s.driverId))
+      .map((s) => ({ shift: s, since: s.windowOpensAt ?? s.driverConfirmedAt }))
+      .filter((x): x is { shift: (typeof liveShifts)[number]; since: string } => x.since !== null && nowMs - Date.parse(x.since) >= GPS_SILENCE_GRACE_MS)
+      .map((x) => ({
+        driverId: x.shift.driverId,
+        shiftId: x.shift.id,
+        silentMinutes: Math.floor((nowMs - Date.parse(x.since)) / 60_000),
+      }))
+
     return {
-      drivers: pings
-        .filter((p) => liveShiftByDriver.get(p.driverId) === p.shiftId)
-        .map((p) => ({
-          driverId: p.driverId,
-          lat: p.lat,
-          lng: p.lng,
-          accuracyM: p.accuracyM,
-          source: p.source,
-          capturedAt: new Date(p.capturedAtMs).toISOString(),
-          receivedAt: new Date(p.receivedAtMs).toISOString(),
-        })),
+      drivers: shown.map((p) => ({
+        driverId: p.driverId,
+        lat: p.lat,
+        lng: p.lng,
+        accuracyM: p.accuracyM,
+        source: p.source,
+        capturedAt: new Date(p.capturedAtMs).toISOString(),
+        receivedAt: new Date(p.receivedAtMs).toISOString(),
+      })),
+      silent,
     }
+  })
+
+  /*
+   * The recorded trail of ONE shift, split into a path segment per order by printed time (gps.view).
+   *
+   * An order carries only a minute-precision printed clock that is often illegible, so the split is
+   * best-effort by time, never proof a position belongs to an order — the segmentation is pure and
+   * lives in the domain (`sliceTrailByOrders`). The pings come back in capture order from the repo,
+   * which is the function's precondition; the indices in `segments`/`beforeFirst`/`afterClose` are
+   * into the `pings` array returned here.
+   */
+  app.get('/shifts/:id/gps/path', { config: { permission: 'gps.view', subject: shiftSubject } }, async (req, reply) => {
+    const { id } = z.object({ id: z.string() }).parse(req.params)
+    const shift = await deps.shifts.findById(id)
+    if (!shift) return reply.code(404).send({ error: 'shift_not_found' })
+    const [pings, allOrders] = await Promise.all([deps.gps.listForShift(id), deps.orders.listByShift(id)])
+    const orders = allOrders.filter((o) => o.included)
+    const segmentation = sliceTrailByOrders({
+      pings,
+      orders: orders.map((o) => ({
+        orderId: o.id,
+        providerOrderNo: o.providerOrderNo,
+        occurredDate: o.occurredDate,
+        occurredMinute: o.occurredMinute,
+      })),
+      submittedAtMs: shift.submittedAt === null ? null : Date.parse(shift.submittedAt),
+      offsetMinutes: deps.clock.offsetMinutes(),
+    })
+    return {
+      shiftId: id,
+      windowOpensAt: shift.windowOpensAt,
+      submittedAt: shift.submittedAt,
+      pings: pings.map((p) => ({
+        lat: p.lat,
+        lng: p.lng,
+        accuracyM: p.accuracyM,
+        source: p.source,
+        capturedAt: new Date(p.capturedAtMs).toISOString(),
+        receivedAt: new Date(p.receivedAtMs).toISOString(),
+      })),
+      orders: orders.map((o) => ({
+        id: o.id,
+        providerOrderNo: o.providerOrderNo,
+        occurredDate: o.occurredDate,
+        occurredMinute: o.occurredMinute,
+        fee: serializeMoney(o.fee),
+      })),
+      segments: segmentation.segments,
+      untimedOrderIds: segmentation.untimedOrderIds,
+      beforeFirst: segmentation.beforeFirst,
+      afterClose: segmentation.afterClose,
+    }
+  })
+
+  /*
+   * The hardware-tracker ingest seam (SRS K-1 — INFRASTRUCTURE, off by default).
+   *
+   * No device exists yet. This is the interface a future gateway posts to: it is not a driver
+   * route (a bike unit has no session), so it is public in the RBAC sense and guarded instead by a
+   * shared gateway secret. It stays 404 until `TRACKER_INGEST_ENABLED` and a token are both set, so
+   * an idle deployment exposes nothing. When live it resolves the device's bike to its currently
+   * live shift, stamps the fixes from that shift, and forces `source='tracker'` — a client can never
+   * claim to be a bike. Off-shift fixes are dropped: a ping with no shift has no driver/branch/order
+   * home, and storing a parked bike's continuous location is a privacy liability. All writes go
+   * through the SAME `ingestFixes` core as the phone route, so quota, clock-skew and dedup are one.
+   */
+  app.post('/tracker/ingest', { bodyLimit: 256 * 1024, config: { permission: null } }, async (req, reply) => {
+    if (opts.trackerIngestEnabled !== true || !opts.trackerGatewayToken) {
+      return reply.code(404).send({ error: 'not_found' })
+    }
+    if (req.headers['x-tracker-gateway-token'] !== opts.trackerGatewayToken) {
+      return reply.code(401).send({ error: 'unauthorized' })
+    }
+    const body = trackerIngestRequest.parse(req.body)
+    const device = await deps.trackerDevices.findActiveByImei(body.deviceImei)
+    if (!device) return reply.code(403).send({ error: 'unknown_device' })
+    const nowMs = deps.clock.nowMs()
+    await deps.trackerDevices.touchLastSeen(device.id, nowMs)
+    if (device.vehicleId === null) return reply.code(202).send({ accepted: 0, reason: 'device_not_bound' })
+    const shift = (await deps.shifts.listLiveForVehicle(device.vehicleId)).find((s) => isTracked(s.state))
+    if (!shift) return reply.code(202).send({ accepted: 0, reason: 'no_live_shift' })
+    const result = await ingestFixes(shift, body.fixes, 'tracker', nowMs)
+    if (result.status === 'quota') {
+      return reply.code(429).send({ error: 'gps_shift_quota_exhausted', detail: { stored: result.stored } })
+    }
+    return reply.code(202).send({ accepted: result.accepted, duplicates: result.duplicates, rejected: result.rejected })
   })
 
   // C-5: a second (or later) cash-float / wallet top-up disbursed mid-day. Branch money the manager

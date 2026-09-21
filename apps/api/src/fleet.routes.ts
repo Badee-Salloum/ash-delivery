@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import type { Deps, DocumentRecord, DriverRecord, ShiftOrderRecord, VehicleEventRecord } from '@ash/contracts'
+import type { Deps, DocumentRecord, DriverRecord, ShiftOrderRecord, TrackerDeviceRecord, VehicleEventRecord } from '@ash/contracts'
 import {
   createAssignmentRequest,
   createBatteryRequest,
@@ -1108,6 +1108,98 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
         name: nameOf.get(r.userId) ?? r.userId,
         firstSeenAt: new Date(r.firstSeenAtMs).toISOString(),
         lastSeenAt: new Date(r.lastSeenAtMs).toISOString(),
+      })),
+    }
+  })
+
+  // ── Hardware GPS tracker registry (SRS K-1 infrastructure) ──────────────────────────────────
+  //
+  // Registering a device, or fitting it to a bike, is fleet data like a driver or a vehicle, so it
+  // is `fleet.manage`. No hardware exists yet; this is the seam a future gateway authenticates
+  // against. The device's secret is shown ONCE at registration and only its hash is stored.
+  app.post('/tracker/devices', { config: { permission: 'fleet.manage', subject: targetBranch } }, async (req, reply) => {
+    const body = z
+      .object({
+        imei: z.string().regex(/^[0-9]{10,20}$/),
+        vehicleId: z.string().min(1).max(64).nullable().default(null),
+        label: z.string().trim().min(1).max(120),
+      })
+      .parse(req.body)
+    const branchId = resolveBranch(req)
+    if (body.vehicleId !== null) {
+      const vehicle = await deps.directory.vehicle(body.vehicleId)
+      if (!vehicle) throw new ServiceError(404, 'vehicle_not_found')
+      if (vehicle.branchId !== branchId) throw new ServiceError(422, 'vehicle_in_another_branch')
+    }
+    const secret = deps.ids.token()
+    const now = deps.clock.nowMs()
+    const record: TrackerDeviceRecord = {
+      id: deps.ids.uuid(),
+      branchId,
+      imei: body.imei,
+      vehicleId: body.vehicleId,
+      secretHash: await deps.hasher.hash(secret),
+      label: body.label,
+      active: true,
+      lastSeenAtMs: null,
+      createdBy: req.actor!.userId,
+      createdAtMs: now,
+      updatedAtMs: now,
+    }
+    try {
+      await deps.trackerDevices.register(record)
+    } catch (err) {
+      const code = (err as { code?: string }).code
+      if (code === 'DUPLICATE_IMEI') throw new ServiceError(409, 'duplicate_imei', { imei: body.imei })
+      if (code === 'ACTIVE_VEHICLE_TAKEN' || code === '23505') throw new ServiceError(409, 'vehicle_has_active_tracker')
+      throw err
+    }
+    // The secret cannot be shown again — it is not stored in the clear.
+    return reply.code(201).send({ id: record.id, imei: record.imei, secret })
+  })
+
+  app.post('/tracker/devices/:id/bind', { config: { permission: 'fleet.manage', subject: targetBranch } }, async (req, reply) => {
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(req.params)
+    const { vehicleId } = z.object({ vehicleId: z.string().min(1).max(64).nullable() }).parse(req.body)
+    const branchId = resolveBranch(req)
+    const device = (await deps.trackerDevices.listByBranch(branchId)).find((d) => d.id === id)
+    if (!device) throw new ServiceError(404, 'tracker_device_not_found')
+    if (vehicleId !== null) {
+      const vehicle = await deps.directory.vehicle(vehicleId)
+      if (!vehicle) throw new ServiceError(404, 'vehicle_not_found')
+      if (vehicle.branchId !== branchId) throw new ServiceError(422, 'vehicle_in_another_branch')
+    }
+    try {
+      await deps.trackerDevices.bindToVehicle(id, vehicleId, req.actor!.userId)
+    } catch (err) {
+      const code = (err as { code?: string }).code
+      if (code === 'ACTIVE_VEHICLE_TAKEN' || code === '23505') throw new ServiceError(409, 'vehicle_has_active_tracker')
+      throw err
+    }
+    return reply.code(200).send({ ok: true })
+  })
+
+  app.post('/tracker/devices/:id/deactivate', { config: { permission: 'fleet.manage', subject: targetBranch } }, async (req, reply) => {
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(req.params)
+    const branchId = resolveBranch(req)
+    const device = (await deps.trackerDevices.listByBranch(branchId)).find((d) => d.id === id)
+    if (!device) throw new ServiceError(404, 'tracker_device_not_found')
+    await deps.trackerDevices.deactivate(id, req.actor!.userId)
+    return reply.code(200).send({ ok: true })
+  })
+
+  app.get('/tracker/devices', { config: { permission: 'fleet.manage', subject: ownBranch } }, async (req) => {
+    const branchId = resolveBranch(req)
+    const devices = await deps.trackerDevices.listByBranch(branchId)
+    // The secret hash never leaves the server.
+    return {
+      devices: devices.map((d) => ({
+        id: d.id,
+        imei: d.imei,
+        vehicleId: d.vehicleId,
+        label: d.label,
+        active: d.active,
+        lastSeenAt: d.lastSeenAtMs === null ? null : new Date(d.lastSeenAtMs).toISOString(),
       })),
     }
   })

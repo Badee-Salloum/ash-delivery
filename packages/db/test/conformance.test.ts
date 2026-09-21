@@ -54,6 +54,7 @@ import {
   PgVehicleEventRepo,
   PgWeekLockRepo,
 } from '../src/repos-shift.ts'
+import { PgTrackerDeviceRepo } from '../src/repos-tracker.ts'
 
 /**
  * The PostgreSQL adapters run the SAME conformance suite as the in-memory ones.
@@ -264,6 +265,7 @@ if (!DATABASE_URL) {
         settlements: new PgShiftSettlementRepo(pool),
         closeDrafts: new PgCloseDraftRepo(pool),
         gps: new PgGpsPingRepo(pool),
+        trackerDevices: new PgTrackerDeviceRepo(pool),
         closeUnitOfWork: new PgShiftCloseUnitOfWork(pool),
       }
     }

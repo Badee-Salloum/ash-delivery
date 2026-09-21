@@ -39,6 +39,9 @@ export * from './reporting/ledger-range.ts'
 // P3 — kilometres per shift, behind the dashboard's fleet table (P6 extends it).
 export * from './fleet/odometer.ts'
 
+// GPS — split a shift's recorded trail into a path segment per order, by printed time.
+export * from './gps/segment.ts'
+
 // C4/C5 — fixed-asset schedules, book value and FIFO depreciation funding.
 export * from './assets/depreciation.ts'
 

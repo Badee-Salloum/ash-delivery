@@ -515,6 +515,58 @@ export interface GpsLiveDriver {
   receivedAt: string
 }
 
+/** A tracked live shift the map has heard nothing from — a probably-stopped tracker. */
+export interface GpsSilentShift {
+  driverId: string
+  shiftId: string
+  silentMinutes: number
+}
+
+/** A GPS source: the foreground beacon, the Android background service, or a hardware tracker. */
+export type GpsSource = 'phone_fg' | 'phone_bg' | 'tracker'
+
+export interface GpsPathPing {
+  lat: number
+  lng: number
+  accuracyM: number | null
+  source: GpsSource
+  capturedAt: string
+  receivedAt: string
+}
+
+/** A half-open `[pingStartIndex, pingEndIndex)` slice into a `GpsPathView.pings` array. */
+export interface GpsPathRange {
+  pingStartIndex: number
+  pingEndIndex: number
+}
+
+export interface GpsPathOrder {
+  id: string
+  providerOrderNo: string
+  occurredDate: string | null
+  occurredMinute: string | null
+  fee: string
+}
+
+export interface GpsPathSegment extends GpsPathRange {
+  orderId: string
+  providerOrderNo: string
+  minuteKey: string
+}
+
+/** One shift's recorded trail, split into a path segment per order by printed time. */
+export interface GpsPathView {
+  shiftId: string
+  windowOpensAt: string | null
+  submittedAt: string | null
+  pings: GpsPathPing[]
+  orders: GpsPathOrder[]
+  segments: GpsPathSegment[]
+  untimedOrderIds: string[]
+  beforeFirst: GpsPathRange
+  afterClose: GpsPathRange
+}
+
 // ── Expenses (SRS G) ────────────────────────────────────────────────────────────────────────
 export interface ExpenseCategoryView {
   id: string
@@ -2241,9 +2293,13 @@ export class ApiClient {
   sendGps(shiftId: string, body: { lat: number; lng: number; accuracyM: number | null; capturedAtMs: number }) {
     return this.post(`/shifts/${shiftId}/gps`, body)
   }
-  /** The manager's live map: the latest fix per driver in the selected branch. */
+  /** The manager's live map: the latest fix per driver, plus tracked shifts that have gone silent. */
   gpsLive() {
-    return this.get<{ drivers: GpsLiveDriver[] }>('/gps/live')
+    return this.get<{ drivers: GpsLiveDriver[]; silent: GpsSilentShift[] }>('/gps/live')
+  }
+  /** One shift's recorded trail, split into a path segment per order by printed time (gps.view). */
+  getShiftGpsPath(shiftId: string) {
+    return this.get<GpsPathView>(`/shifts/${shiftId}/gps/path`)
   }
 
   // ── Documents (SRS B-1 / س37) ───────────────────────────────────────────────────────────────

@@ -25,3 +25,13 @@ export function leafletBranchPaint(): LeafletPaint {
     fillColor: token('--ash-map-branch-fill'),
   }
 }
+
+/** The recorded-path colours: the full trail, a selected order's segment, and the two endpoints. */
+export function leafletPathPaints(): { path: string; segment: string; start: string; end: string } {
+  return {
+    path: token('--ash-map-path-stroke'),
+    segment: token('--ash-map-segment-stroke'),
+    start: token('--ash-map-start-fill'),
+    end: token('--ash-map-end-fill'),
+  }
+}

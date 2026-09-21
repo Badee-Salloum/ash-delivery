@@ -1855,6 +1855,83 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
       })
     })
 
+    describe('tracker devices', () => {
+      const DEVICE_1 = 'dddddddd-dddd-4ddd-8ddd-ddddddddddd1'
+      const DEVICE_2 = 'dddddddd-dddd-4ddd-8ddd-ddddddddddd2'
+      const device = (over: Partial<Parameters<typeof buildDevice>[0]> = {}) => buildDevice(over)
+      function buildDevice(over: Record<string, unknown>) {
+        return {
+          id: DEVICE_1,
+          branchId: BRANCH,
+          imei: '350000000000001',
+          vehicleId: null as string | null,
+          secretHash: 'x'.repeat(40),
+          label: 'Tracker A',
+          active: true,
+          lastSeenAtMs: null as number | null,
+          createdBy: USER,
+          createdAtMs: 1_784_000_000_000,
+          updatedAtMs: 1_784_000_000_000,
+          ...over,
+        }
+      }
+
+      it('registers a device and finds it by imei', async () => {
+        const deps = await fresh()
+        try {
+          await deps.trackerDevices.register(device())
+          const found = await deps.trackerDevices.findByImei('350000000000001')
+          expect(found?.id).toBe(DEVICE_1)
+          expect(found?.active).toBe(true)
+          expect(await deps.trackerDevices.findByImei('999999999999')).toBeNull()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('refuses a duplicate imei', async () => {
+        const deps = await fresh()
+        try {
+          await deps.trackerDevices.register(device())
+          await expect(deps.trackerDevices.register(device({ id: DEVICE_2 }))).rejects.toThrow()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('allows one active device per bike, and a replacement only after deactivation', async () => {
+        const deps = await fresh()
+        try {
+          await deps.trackerDevices.register(device({ vehicleId: VEHICLE }))
+          await expect(
+            deps.trackerDevices.register(device({ id: DEVICE_2, imei: '350000000000002', vehicleId: VEHICLE })),
+          ).rejects.toThrow()
+          await deps.trackerDevices.deactivate(DEVICE_1, USER)
+          await deps.trackerDevices.register(device({ id: DEVICE_2, imei: '350000000000002', vehicleId: VEHICLE }))
+          expect((await deps.trackerDevices.findActiveByImei('350000000000002'))?.id).toBe(DEVICE_2)
+          expect(await deps.trackerDevices.findActiveByImei('350000000000001')).toBeNull()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('binds a bike, touches last-seen without auditing it, deactivates, and lists the branch', async () => {
+        const deps = await fresh()
+        try {
+          await deps.trackerDevices.register(device())
+          await deps.trackerDevices.bindToVehicle(DEVICE_1, VEHICLE, USER)
+          expect((await deps.trackerDevices.findByImei('350000000000001'))?.vehicleId).toBe(VEHICLE)
+          await deps.trackerDevices.touchLastSeen(DEVICE_1, 1_784_000_100_000)
+          expect((await deps.trackerDevices.findByImei('350000000000001'))?.lastSeenAtMs).toBe(1_784_000_100_000)
+          await deps.trackerDevices.deactivate(DEVICE_1, USER)
+          expect(await deps.trackerDevices.findActiveByImei('350000000000001')).toBeNull()
+          expect(await deps.trackerDevices.listByBranch(BRANCH)).toHaveLength(1)
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+    })
+
     describe('battery reading replacement generations', () => {
       it('same-image correction replaces the OCR baseline submitted with the correction', async () => {
         const deps = await fresh()

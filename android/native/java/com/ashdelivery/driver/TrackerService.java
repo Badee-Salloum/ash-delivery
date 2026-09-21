@@ -1,5 +1,6 @@
 package com.ashdelivery.driver;
 
+import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -7,16 +8,25 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
+import android.os.SystemClock;
 import android.webkit.CookieManager;
 
 import androidx.annotation.NonNull;
 import androidx.core.app.NotificationCompat;
+import androidx.core.content.ContextCompat;
 
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.GoogleApiAvailability;
 import com.google.android.gms.location.FusedLocationProviderClient;
 import com.google.android.gms.location.LocationCallback;
 import com.google.android.gms.location.LocationRequest;
@@ -36,6 +46,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * The thing the whole Android app exists for: location that keeps flowing with the screen off.
@@ -49,7 +60,7 @@ import java.util.concurrent.Executors;
  *
  * WHY JAVA. Capacitor's Android template ships no Kotlin plugin, and adding one drags in a
  * Kotlin/AGP version matrix that somebody would have to keep matched — on a project whose Android
- * surface is two files that will be opened once a year, by people who are not Android developers.
+ * surface is a few files that will be opened once a year, by people who are not Android developers.
  * Staying on the template's own rails is the cheaper thing to own.
  *
  *
@@ -81,6 +92,14 @@ import java.util.concurrent.Executors;
  * the only signal that reliably arrives. Every other failure — offline, 5xx, a timeout — means «not
  * yet», so the buffer is kept and the next tick retries. Reverse those two and a phone hammers a
  * closed shift every fifteen seconds for weeks with nobody watching.
+ *
+ *
+ * KEEPING IT ALIVE. Three background-reliability hardenings, each closing a way location silently
+ * stops: a fallback to the platform `LocationManager` when Google Play Services is absent (Huawei
+ * and any GMS-less device), a watchdog that re-arms the location request when fixes stop arriving,
+ * a wake lock spanning the upload so an in-flight POST is not frozen when the CPU suspends, and a
+ * guarded `startForeground` so a permission-less restart on Android 14+ stops cleanly rather than
+ * crash-looping.
  */
 public class TrackerService extends Service {
 
@@ -91,9 +110,10 @@ public class TrackerService extends Service {
     private static final int NOTIFICATION_ID = 4711;
 
     /** Where the assignment survives a restart. See {@link #onStartCommand}. */
-    private static final String PREFS = "ash_tracker";
-    private static final String KEY_SHIFT_ID = "shiftId";
-    private static final String KEY_ORIGIN = "origin";
+    // Package-private so BootReceiver can restart from the same saved assignment after a reboot.
+    static final String PREFS = "ash_tracker";
+    static final String KEY_SHIFT_ID = "shiftId";
+    static final String KEY_ORIGIN = "origin";
 
     /**
      * How often a fix is requested, and how often the buffer is flushed.
@@ -107,6 +127,12 @@ public class TrackerService extends Service {
     /** Never faster than this, whatever the platform decides to deliver. */
     private static final long FASTEST_INTERVAL_MS = 10_000L;
 
+    /**
+     * How long with NO fix before the watchdog assumes the provider callback was silently dropped
+     * (a Play-services background update, a long Doze, an OEM hiccup) and re-arms the request.
+     */
+    private static final long STALE_AFTER_MS = 6 * INTERVAL_MS;
+
     /** The batch cap, matching the server's: a phone out of signal returns with a run, not a fix. */
     private static final int FLUSH_MAX = 500;
 
@@ -116,32 +142,23 @@ public class TrackerService extends Service {
     private final ArrayDeque<JSONObject> buffer = new ArrayDeque<>();
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final Handler ticker = new Handler(Looper.getMainLooper());
+
     private FusedLocationProviderClient client;
+    private LocationRequest fusedRequest;
+    private LocationManager platformManager;
+    private LocationListener platformListener;
+    private boolean usingPlatform = false;
+
     private String shiftId;
     private String origin;
     private volatile boolean stopped = false;
+    /** Elapsed-realtime of the last fix, for the watchdog. Set when updates start so it does not fire early. */
+    private volatile long lastFixElapsedMs = 0L;
 
     private final LocationCallback callback = new LocationCallback() {
         @Override
         public void onLocationResult(@NonNull LocationResult result) {
-            Location location = result.getLastLocation();
-            if (location == null) return;
-            JSONObject fix = new JSONObject();
-            try {
-                fix.put("lat", location.getLatitude());
-                fix.put("lng", location.getLongitude());
-                fix.put("accuracyM", location.hasAccuracy() ? (double) location.getAccuracy() : JSONObject.NULL);
-                fix.put("capturedAtMs", location.getTime());
-            } catch (Exception ignored) {
-                return;
-            }
-            synchronized (buffer) {
-                // Oldest out when full: when the buffer overflows the recent minutes are the ones
-                // worth keeping, because a stale position is what the live map must never be given.
-                while (buffer.size() >= BUFFER_MAX) buffer.removeFirst();
-                buffer.addLast(fix);
-            }
-            io.execute(this_flush);
+            enqueue(result.getLastLocation());
         }
     };
 
@@ -149,18 +166,19 @@ public class TrackerService extends Service {
     private final Runnable this_flush = this::flush;
 
     /**
-     * A flush that does not depend on a fix arriving.
+     * The heartbeat: flush regardless of a fix arriving, and re-arm the provider if it went silent.
      *
-     * The upload used to be driven only by `onLocationResult`, which strands the buffer exactly
-     * when it matters: indoors, with the GPS disabled, or when the provider simply stalls, no fix
-     * arrives — so nothing is sent and nothing retries. A failed POST had the same shape, waiting
-     * on a fix that might never come. This ticks regardless.
+     * The upload used to be driven only by `onLocationResult`, which strands the buffer exactly when
+     * it matters: indoors, with the GPS disabled, or when the provider simply stalls, no fix arrives
+     * — so nothing is sent and nothing retries. A failed POST had the same shape. This ticks
+     * regardless, and if fixes have stopped entirely it re-establishes the location request.
      */
     private final Runnable tick = new Runnable() {
         @Override
         public void run() {
             if (stopped) return;
-            io.execute(this_flush);
+            if (SystemClock.elapsedRealtime() - lastFixElapsedMs > STALE_AFTER_MS) rearmUpdates();
+            submitFlush();
             ticker.postDelayed(this, INTERVAL_MS);
         }
     };
@@ -191,36 +209,166 @@ public class TrackerService extends Service {
             return START_NOT_STICKY;
         }
         while (base.endsWith("/")) base = base.substring(0, base.length() - 1);
-        prefs.edit().putString(KEY_SHIFT_ID, id).putString(KEY_ORIGIN, base).apply();
 
-        shiftId = id;
-        origin = base;
-        stopped = false;
-
-        startForeground(NOTIFICATION_ID, notification());
-        client = LocationServices.getFusedLocationProviderClient(this);
-        LocationRequest request = new LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, INTERVAL_MS)
-                .setMinUpdateIntervalMillis(FASTEST_INTERVAL_MS)
-                .build();
-        try {
-            client.requestLocationUpdates(request, callback, Looper.getMainLooper());
-        } catch (SecurityException denied) {
-            // The permission was revoked between starting and now. Stopping is the honest response:
-            // a foreground notification promising tracking that cannot happen is worse than none.
+        /*
+         * A permission-less restart must stop, not crash. On Android 14+ the location foreground
+         * service type is validated INSIDE startForeground(): if the runtime location permission was
+         * revoked while the app process was dead, startForeground() itself throws. A sticky null
+         * intent (memory kill) or a BootReceiver restart can land here in exactly that state, and an
+         * uncaught throw crash-loops a START_STICKY service. Gate first, then guard.
+         */
+        if (!hasLocationPermission()) {
             forget();
             stopSelf();
             return START_NOT_STICKY;
         }
+
+        prefs.edit().putString(KEY_SHIFT_ID, id).putString(KEY_ORIGIN, base).apply();
+        shiftId = id;
+        origin = base;
+        stopped = false;
+
+        try {
+            startForeground(NOTIFICATION_ID, notification());
+        } catch (Exception startDenied) {
+            // Location FGS-type validation (API 34+) or an OEM restriction refused the start. A plain
+            // stopSelf() after a failed startForeground is the sanctioned abort and does not trip the
+            // "did not call startForeground in time" crash.
+            forget();
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
+        lastFixElapsedMs = SystemClock.elapsedRealtime();
+        startLocationUpdates();
+
         ticker.removeCallbacks(tick);
         ticker.postDelayed(tick, INTERVAL_MS);
         return START_STICKY;
+    }
+
+    /**
+     * Start the fixes, preferring the fused provider but falling back to the platform.
+     *
+     * `FusedLocationProviderClient` is a Google Play Services API. On a GMS-less device (Huawei/EMUI
+     * since 2019, or any phone where Play Services is disabled or stale) `getFusedLocationProviderClient`
+     * still returns a client, but its `requestLocationUpdates` task fails and NO callback ever fires —
+     * the service shows its notification and flushes empty batches while location silently never
+     * flows. So: use fused only when Play Services is actually available, and hand any failure — sync
+     * or async — to the platform `LocationManager`, which every Android phone has.
+     */
+    private void startLocationUpdates() {
+        boolean gms = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(this) == ConnectionResult.SUCCESS;
+        if (!gms) {
+            startPlatformUpdates();
+            return;
+        }
+        usingPlatform = false;
+        client = LocationServices.getFusedLocationProviderClient(this);
+        fusedRequest = new LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, INTERVAL_MS)
+                .setMinUpdateIntervalMillis(FASTEST_INTERVAL_MS)
+                .build();
+        try {
+            client.requestLocationUpdates(fusedRequest, callback, Looper.getMainLooper())
+                    .addOnFailureListener(e -> startPlatformUpdates());
+        } catch (SecurityException denied) {
+            forget();
+            stopSelf();
+        }
+    }
+
+    /** The universal fallback: raw GPS/network providers, delivered to the same buffer. */
+    private void startPlatformUpdates() {
+        if (stopped) return;
+        if (platformManager == null) platformManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+        if (platformManager == null) return;
+        usingPlatform = true;
+        if (platformListener == null) {
+            platformListener = new LocationListener() {
+                @Override
+                public void onLocationChanged(@NonNull Location location) {
+                    enqueue(location);
+                }
+
+                // Abstract on API 24–29, so all three must be implemented even though newer Android
+                // no longer calls onStatusChanged.
+                @Override
+                public void onStatusChanged(String provider, int status, Bundle extras) {}
+
+                @Override
+                public void onProviderEnabled(@NonNull String provider) {}
+
+                @Override
+                public void onProviderDisabled(@NonNull String provider) {}
+            };
+        }
+        try {
+            for (String provider : new String[]{ LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER }) {
+                if (platformManager.getAllProviders().contains(provider) && platformManager.isProviderEnabled(provider)) {
+                    platformManager.requestLocationUpdates(provider, INTERVAL_MS, 0f, platformListener, Looper.getMainLooper());
+                }
+            }
+        } catch (SecurityException denied) {
+            forget();
+            stopSelf();
+        }
+    }
+
+    /** Tear down whichever provider is running, then start it again — the watchdog's re-arm. */
+    private void rearmUpdates() {
+        // Bump first, so a provider that is simply out of signal is not re-armed on every tick.
+        lastFixElapsedMs = SystemClock.elapsedRealtime();
+        removeUpdates();
+        startLocationUpdates();
+    }
+
+    private void removeUpdates() {
+        if (client != null) {
+            try { client.removeLocationUpdates(callback); } catch (Exception ignored) {}
+        }
+        if (platformManager != null && platformListener != null) {
+            try { platformManager.removeUpdates(platformListener); } catch (Exception ignored) {}
+        }
+    }
+
+    /** One place both providers hand a fix to: buffer it, note it for the watchdog, and flush. */
+    private void enqueue(Location location) {
+        if (stopped || location == null) return;
+        lastFixElapsedMs = SystemClock.elapsedRealtime();
+        JSONObject fix = new JSONObject();
+        try {
+            fix.put("lat", location.getLatitude());
+            fix.put("lng", location.getLongitude());
+            fix.put("accuracyM", location.hasAccuracy() ? (double) location.getAccuracy() : JSONObject.NULL);
+            fix.put("capturedAtMs", location.getTime());
+        } catch (Exception ignored) {
+            return;
+        }
+        synchronized (buffer) {
+            // Oldest out when full: when the buffer overflows the recent minutes are the ones worth
+            // keeping, because a stale position is what the live map must never be given.
+            while (buffer.size() >= BUFFER_MAX) buffer.removeFirst();
+            buffer.addLast(fix);
+        }
+        submitFlush();
+    }
+
+    /** Submit a flush, tolerating the teardown window where the IO executor is already shut down. */
+    private void submitFlush() {
+        if (stopped) return;
+        try {
+            io.execute(this_flush);
+        } catch (RejectedExecutionException shuttingDown) {
+            // A fix already on the main looper can arrive after onDestroy()'s io.shutdown(). Not an
+            // error — the shift is ending; there is nothing left to flush to.
+        }
     }
 
     @Override
     public void onDestroy() {
         stopped = true;
         ticker.removeCallbacks(tick);
-        if (client != null) client.removeLocationUpdates(callback);
+        removeUpdates();
         io.shutdown();
         super.onDestroy();
     }
@@ -228,6 +376,11 @@ public class TrackerService extends Service {
     /** Drop the persisted assignment, so a later restart does not resume a shift that is over. */
     private void forget() {
         getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply();
+    }
+
+    private boolean hasLocationPermission() {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                || ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
     }
 
     /**
@@ -279,26 +432,47 @@ public class TrackerService extends Service {
             return;
         }
 
-        Outcome outcome = post(base + "/api/shifts/" + id + "/gps", body);
-        if (outcome == Outcome.ACCEPTED) {
-            synchronized (buffer) {
-                // Remove exactly what was sent; anything captured meanwhile stays queued. Compared
-                // by identity because the overflow rule above may have dropped from the front while
-                // the request was in flight.
-                for (JSONObject sent : sending) {
-                    if (!buffer.isEmpty() && buffer.peekFirst() == sent) buffer.removeFirst();
-                }
-            }
-        } else if (outcome == Outcome.SHIFT_OVER) {
-            // The server will never take these. Drop them and stop — see the class comment.
-            synchronized (buffer) {
-                buffer.clear();
-            }
-            stopped = true;
-            forget();
-            stopSelf();
+        /*
+         * Hold a partial wake lock across the upload.
+         *
+         * A location fix briefly wakes the CPU (the location HAL holds its own wakelock while
+         * delivering), which is what let us reach this flush with the screen off. But nothing keeps
+         * the CPU awake for the network round-trip: it can suspend mid-POST, freezing the socket
+         * until the next fix wakes it — on a bad connection the upload never completes and the buffer
+         * only grows. The lock is timed as a safety valve so a wedged request can never hold it open.
+         */
+        PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        PowerManager.WakeLock lock = pm != null ? pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ash:gps-flush") : null;
+        if (lock != null) {
+            try { lock.acquire(40_000L); } catch (Exception ignored) { lock = null; }
         }
-        // RETRY: keep the buffer; the ticker will try again.
+
+        try {
+            Outcome outcome = post(base + "/api/shifts/" + id + "/gps", body);
+            if (outcome == Outcome.ACCEPTED) {
+                synchronized (buffer) {
+                    // Remove exactly what was sent; anything captured meanwhile stays queued. Compared
+                    // by identity because the overflow rule above may have dropped from the front while
+                    // the request was in flight.
+                    for (JSONObject sent : sending) {
+                        if (!buffer.isEmpty() && buffer.peekFirst() == sent) buffer.removeFirst();
+                    }
+                }
+            } else if (outcome == Outcome.SHIFT_OVER) {
+                // The server will never take these. Drop them and stop — see the class comment.
+                synchronized (buffer) {
+                    buffer.clear();
+                }
+                stopped = true;
+                forget();
+                stopSelf();
+            }
+            // RETRY: keep the buffer; the ticker will try again.
+        } finally {
+            if (lock != null && lock.isHeld()) {
+                try { lock.release(); } catch (Exception ignored) {}
+            }
+        }
     }
 
     private enum Outcome { ACCEPTED, SHIFT_OVER, RETRY }
@@ -320,7 +494,14 @@ public class TrackerService extends Service {
                 out.write(body.toString());
             }
             int status = connection.getResponseCode();
-            if (status >= 200 && status < 300) return Outcome.ACCEPTED;
+            if (status >= 200 && status < 300) {
+                // Carry the server's rolled session cookie back into the WebView jar, so the NEXT
+                // post reads a fresh one. This is what keeps a 12h double shift alive even when the
+                // app is never opened: the server slides the cookie on our own upload, and without
+                // this write-back that slide would land nowhere and the 8h cookie would still lapse.
+                writeBackCookies(url, connection);
+                return Outcome.ACCEPTED;
+            }
             if (status == 409) return Outcome.SHIFT_OVER;
             // 401/403 are RETRY on purpose rather than a stop: a session that lapses while the
             // driver is out comes back when he next opens the app, and the fixes he took in
@@ -330,6 +511,25 @@ public class TrackerService extends Service {
             return Outcome.RETRY;
         } finally {
             if (connection != null) connection.disconnect();
+        }
+    }
+
+    /** Feed any Set-Cookie from our response into the WebView's shared cookie jar. */
+    private void writeBackCookies(String url, HttpURLConnection connection) {
+        try {
+            java.util.Map<String, java.util.List<String>> headers = connection.getHeaderFields();
+            if (headers == null) return;
+            CookieManager cm = CookieManager.getInstance();
+            boolean any = false;
+            for (java.util.Map.Entry<String, java.util.List<String>> entry : headers.entrySet()) {
+                if (entry.getKey() != null && entry.getKey().equalsIgnoreCase("Set-Cookie") && entry.getValue() != null) {
+                    for (String value : entry.getValue()) cm.setCookie(url, value);
+                    any = true;
+                }
+            }
+            if (any) cm.flush();
+        } catch (Exception ignored) {
+            // A cookie we could not persist just means the next post falls back to the old one.
         }
     }
 }

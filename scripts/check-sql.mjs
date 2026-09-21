@@ -35,6 +35,10 @@ const MUST_AUDIT = [
   'vehicle_types', 'batteries', 'shift_battery_readings',
   // Where a manual order went — part of the evidence a manager approves a shift against.
   'shift_order_points',
+  // Registering a hardware tracker, or binding one to a bike, grants a device the authority to write
+  // that bike's telemetry — who did it is a decision worth keeping. A bare last-seen touch is kept
+  // out of its audit trigger, the way gps_pings itself is exempt high-frequency liveness.
+  'tracker_devices',
   // What the wallet actually did. An unmatched movement is a term in BR1, and whether a row is
   // included or which order it answers to changes the money a manager approves.
   'shift_wallet_movements',
