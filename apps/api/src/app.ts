@@ -8,6 +8,7 @@ import {
   adjustCashFloatRequest,
   adjustWalletTopupRequest,
   gpsIngestRequest,
+  trackerIngestRequest,
   approveCloseRequest,
   forceCloseRequest,
   approveOpenRequest,
@@ -152,6 +153,9 @@ export interface AppOptions {
   maxOcrReadsPerShift?: number
   /** Emergency public-signup kill switch. Enabled by default. */
   driverSelfRegistrationEnabled?: boolean
+  /** The hardware-tracker ingest seam. Off unless both this and a gateway token are set. */
+  trackerIngestEnabled?: boolean
+  trackerGatewayToken?: string | undefined
 }
 
 /**
@@ -2550,6 +2554,40 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       beforeFirst: segmentation.beforeFirst,
       afterClose: segmentation.afterClose,
     }
+  })
+
+  /*
+   * The hardware-tracker ingest seam (SRS K-1 — INFRASTRUCTURE, off by default).
+   *
+   * No device exists yet. This is the interface a future gateway posts to: it is not a driver
+   * route (a bike unit has no session), so it is public in the RBAC sense and guarded instead by a
+   * shared gateway secret. It stays 404 until `TRACKER_INGEST_ENABLED` and a token are both set, so
+   * an idle deployment exposes nothing. When live it resolves the device's bike to its currently
+   * live shift, stamps the fixes from that shift, and forces `source='tracker'` — a client can never
+   * claim to be a bike. Off-shift fixes are dropped: a ping with no shift has no driver/branch/order
+   * home, and storing a parked bike's continuous location is a privacy liability. All writes go
+   * through the SAME `ingestFixes` core as the phone route, so quota, clock-skew and dedup are one.
+   */
+  app.post('/tracker/ingest', { bodyLimit: 256 * 1024, config: { permission: null } }, async (req, reply) => {
+    if (opts.trackerIngestEnabled !== true || !opts.trackerGatewayToken) {
+      return reply.code(404).send({ error: 'not_found' })
+    }
+    if (req.headers['x-tracker-gateway-token'] !== opts.trackerGatewayToken) {
+      return reply.code(401).send({ error: 'unauthorized' })
+    }
+    const body = trackerIngestRequest.parse(req.body)
+    const device = await deps.trackerDevices.findActiveByImei(body.deviceImei)
+    if (!device) return reply.code(403).send({ error: 'unknown_device' })
+    const nowMs = deps.clock.nowMs()
+    await deps.trackerDevices.touchLastSeen(device.id, nowMs)
+    if (device.vehicleId === null) return reply.code(202).send({ accepted: 0, reason: 'device_not_bound' })
+    const shift = (await deps.shifts.listLiveForVehicle(device.vehicleId)).find((s) => isTracked(s.state))
+    if (!shift) return reply.code(202).send({ accepted: 0, reason: 'no_live_shift' })
+    const result = await ingestFixes(shift, body.fixes, 'tracker', nowMs)
+    if (result.status === 'quota') {
+      return reply.code(429).send({ error: 'gps_shift_quota_exhausted', detail: { stored: result.stored } })
+    }
+    return reply.code(202).send({ accepted: result.accepted, duplicates: result.duplicates, rejected: result.rejected })
   })
 
   // C-5: a second (or later) cash-float / wallet top-up disbursed mid-day. Branch money the manager

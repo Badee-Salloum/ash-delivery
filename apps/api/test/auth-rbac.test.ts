@@ -131,6 +131,9 @@ describe('the boot assertion — no route can escape RBAC', () => {
         'POST /auth/2fa/verify', 'POST /auth/2fa/enroll', 'POST /auth/2fa/confirm',
         'GET /auth/register/branches', 'POST /auth/register',
         'GET /notifications', 'POST /notifications/:id/read',
+        // The hardware-tracker ingest seam: public in the RBAC sense (a bike unit has no session),
+        // but guarded by a gateway secret and 404 until enabled. See app.ts.
+        'POST /tracker/ingest',
       ].sort(),
     )
   })

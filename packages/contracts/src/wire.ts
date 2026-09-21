@@ -912,6 +912,18 @@ export const gpsBatchRequest = z.object({
  */
 export const gpsIngestRequest = z.union([gpsBatchRequest, gpsPingRequest])
 
+/**
+ * What the hardware-tracker gateway posts (SRS K-1 infrastructure; disabled by default).
+ *
+ * The device is named by its IMEI and authenticated by the gateway's own secret, not a driver
+ * cookie. `source` is never on the wire — the route forces `'tracker'`, so a client can never
+ * claim to be a bike unit.
+ */
+export const trackerIngestRequest = z.object({
+  deviceImei: z.string().regex(/^[0-9]{10,20}$/),
+  fixes: z.array(gpsPingRequest).min(1).max(500),
+})
+
 // ── Fleet (SRS B) ─────────────────────────────────────────────────────────────────────────
 
 /** A driver's profile fields (B-1). `nationalId` is plaintext in transit (HTTPS); stored encrypted. */

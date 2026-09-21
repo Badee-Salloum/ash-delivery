@@ -99,6 +99,8 @@ export async function makeHarness(
     ocr?: OcrReader
     maxOcrReadsPerShift?: number
     driverSelfRegistrationEnabled?: boolean
+    trackerIngestEnabled?: boolean
+    trackerGatewayToken?: string
   } = {},
 ): Promise<Harness> {
   const deps = createMemoryDeps(NOW_MS)
@@ -186,6 +188,8 @@ export async function makeHarness(
     ...(opts.driverSelfRegistrationEnabled !== undefined
       ? { driverSelfRegistrationEnabled: opts.driverSelfRegistrationEnabled }
       : {}),
+    ...(opts.trackerIngestEnabled !== undefined ? { trackerIngestEnabled: opts.trackerIngestEnabled } : {}),
+    ...(opts.trackerGatewayToken !== undefined ? { trackerGatewayToken: opts.trackerGatewayToken } : {}),
   })
 
   const cookieFor = (token: string) => `${SESSION_COOKIE}=${token}`
