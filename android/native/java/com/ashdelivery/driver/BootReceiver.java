@@ -1,10 +1,14 @@
 package com.ashdelivery.driver;
 
+import android.Manifest;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.os.Build;
+
+import androidx.core.content.ContextCompat;
 
 /**
  * Bring tracking back after the phone reboots mid-shift.
@@ -19,9 +23,12 @@ import android.os.Build;
  * shuts itself down (see {@link TrackerService}). So the worst case of a stale assignment is one
  * rejected request, not a phone hammering a closed shift.
  *
- * Starting a location foreground service from the background is restricted on Android 12+, and needs
- * `ACCESS_BACKGROUND_LOCATION`. If that is refused the start throws and we swallow it: the driver
- * reopening the app restarts tracking, and the office's own "not reporting" alert covers the gap.
+ * A boot restart runs with NO visible UI, so a location foreground service can only actually get
+ * fixes if the app holds `ACCESS_BACKGROUND_LOCATION` ("allow all the time"). Without it, starting
+ * the service from here would show a tracking notification and drain battery while producing zero
+ * fixes — worse than nothing. So on Android 10+ we start only when background location is granted;
+ * otherwise we leave it, and the driver reopening the app restarts tracking with foreground
+ * location while the office's "not reporting" alert covers the gap.
  */
 public class BootReceiver extends BroadcastReceiver {
 
@@ -36,6 +43,14 @@ public class BootReceiver extends BroadcastReceiver {
         String shiftId = prefs.getString(TrackerService.KEY_SHIFT_ID, null);
         String origin = prefs.getString(TrackerService.KEY_ORIGIN, null);
         if (shiftId == null || shiftId.trim().isEmpty() || origin == null || origin.trim().isEmpty()) {
+            return;
+        }
+
+        // From boot the app is not visible, so only "allow all the time" location yields fixes.
+        // Starting without it would be a zombie service: notification on, battery burning, no data.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                && ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                        != PackageManager.PERMISSION_GRANTED) {
             return;
         }
 

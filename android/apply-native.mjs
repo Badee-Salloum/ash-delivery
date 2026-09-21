@@ -68,6 +68,8 @@ const permissions = [
   'android.permission.POST_NOTIFICATIONS',
   'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
   'android.permission.RECEIVE_BOOT_COMPLETED',
+  // Held only across each upload, so the CPU cannot suspend mid-POST and freeze the socket.
+  'android.permission.WAKE_LOCK',
 ]
 
 for (const name of permissions) {
