@@ -3,4 +3,5 @@
   <string name="tracking_channel_name">Shift tracking</string>
   <string name="tracking_title">Shift open</string>
   <string name="tracking_text">Your location is recorded during the shift, and stops when it closes.</string>
+  <string name="tracking_autostart_hint">Enable Autostart for ASH Delivery so tracking keeps working during the shift.</string>
 </resources>

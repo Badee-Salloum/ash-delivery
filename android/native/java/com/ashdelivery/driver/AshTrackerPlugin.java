@@ -1,6 +1,7 @@
 package com.ashdelivery.driver;
 
 import android.Manifest;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -9,8 +10,12 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.PowerManager;
 import android.provider.Settings;
+import android.widget.Toast;
 
 import androidx.core.content.ContextCompat;
+
+import java.util.ArrayList;
+import java.util.List;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -163,7 +168,12 @@ public class AshTrackerPlugin extends Plugin {
         } else {
             getContext().startService(intent);
         }
+        boolean batteryStepDone = batteryStepDone();
         maybeRequestBatteryExemption();
+        // Sequence the two one-time setup prompts across shifts so the driver is never shown both at
+        // once: battery optimisation on the first tracked shift, the OEM autostart screen on a later
+        // one. Only aggressive-OEM handsets ever see the autostart step.
+        if (batteryStepDone) maybeGuideAutostart();
         call.resolve(new JSObject().put("started", true));
     }
 
@@ -237,5 +247,97 @@ public class AshTrackerPlugin extends Plugin {
         } catch (Exception ignored) {
             // No activity to handle it (rare). The service still runs; it is just more killable.
         }
+    }
+
+    /** True once the battery-optimisation step has happened (asked, or already exempt). */
+    private boolean batteryStepDone() {
+        SharedPreferences prefs = getContext().getSharedPreferences(TrackerService.PREFS, Context.MODE_PRIVATE);
+        if (prefs.getBoolean("askedBattery", false)) return true;
+        PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
+        return pm != null && pm.isIgnoringBatteryOptimizations(getContext().getPackageName());
+    }
+
+    /**
+     * Send the driver, ONCE, to his OEM's «autostart» screen so he can allow-list the app.
+     *
+     * The last background-reliability gap that cannot be closed in code: MIUI, ColorOS, EMUI,
+     * FuntouchOS and One UI block BOOT_COMPLETED and force-stop apps that are not on their own
+     * autostart / «don't kill» list — a switch only the user can flip, buried in the OEM security
+     * centre. Stock Android has no such screen, so this fires only on those makers, best-effort: it
+     * tries the known component for the device and falls back to the app's own settings page, always
+     * showing a one-line Arabic reason first so the driver knows why he is there.
+     */
+    private void maybeGuideAutostart() {
+        String maker = Build.MANUFACTURER == null ? "" : Build.MANUFACTURER.toLowerCase();
+        List<Intent> candidates = autostartCandidates(maker);
+        if (candidates.isEmpty()) return; // stock Android or an unknown maker: nothing to open
+        SharedPreferences prefs = getContext().getSharedPreferences(TrackerService.PREFS, Context.MODE_PRIVATE);
+        if (prefs.getBoolean("askedAutostart", false)) return;
+        prefs.edit().putBoolean("askedAutostart", true).apply();
+
+        // Last resort: the app's own settings page, where every OEM buries these controls somewhere.
+        Intent details = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+        details.setData(Uri.parse("package:" + getContext().getPackageName()));
+        candidates.add(details);
+
+        for (Intent candidate : candidates) {
+            try {
+                if (getContext().getPackageManager().resolveActivity(candidate, 0) != null) {
+                    showAutostartHint();
+                    candidate.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    getContext().startActivity(candidate);
+                    return;
+                }
+            } catch (Exception unavailable) {
+                // Try the next candidate; a component that does not exist on this build just fails.
+            }
+        }
+    }
+
+    private void showAutostartHint() {
+        try {
+            if (getActivity() != null) {
+                getActivity().runOnUiThread(() ->
+                        Toast.makeText(getContext(), getContext().getString(R.string.tracking_autostart_hint), Toast.LENGTH_LONG).show());
+            }
+        } catch (Exception ignored) {
+            // A missing UI thread just means no toast; the settings screen still opens.
+        }
+    }
+
+    private static Intent componentIntent(String pkg, String cls) {
+        Intent intent = new Intent();
+        intent.setComponent(new ComponentName(pkg, cls));
+        return intent;
+    }
+
+    /** The known «autostart / don't-kill» screens per OEM. Empty for stock Android. */
+    private List<Intent> autostartCandidates(String maker) {
+        List<Intent> list = new ArrayList<>();
+        if (maker.contains("xiaomi") || maker.contains("redmi") || maker.contains("poco")) {
+            list.add(componentIntent("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity"));
+        } else if (maker.contains("oppo") || maker.contains("realme")) {
+            list.add(componentIntent("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity"));
+            list.add(componentIntent("com.coloros.safecenter", "com.coloros.safecenter.startupapp.StartupAppListActivity"));
+            list.add(componentIntent("com.oppo.safe", "com.oppo.safe.permission.startup.StartupAppListActivity"));
+        } else if (maker.contains("vivo") || maker.contains("iqoo")) {
+            list.add(componentIntent("com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"));
+            list.add(componentIntent("com.iqoo.secure", "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity"));
+        } else if (maker.contains("huawei") || maker.contains("honor")) {
+            list.add(componentIntent("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"));
+            list.add(componentIntent("com.huawei.systemmanager", "com.huawei.systemmanager.optimize.process.ProtectActivity"));
+        } else if (maker.contains("oneplus")) {
+            list.add(componentIntent("com.oneplus.security", "com.oneplus.security.chainlaunch.view.ChainLaunchAppListActivity"));
+        } else if (maker.contains("samsung")) {
+            list.add(componentIntent("com.samsung.android.lool", "com.samsung.android.sm.ui.battery.BatteryActivity"));
+            list.add(componentIntent("com.samsung.android.sm", "com.samsung.android.sm.ui.battery.BatteryActivity"));
+        } else if (maker.contains("letv")) {
+            list.add(componentIntent("com.letv.android.letvsafe", "com.letv.android.letvsafe.AutobootManageActivity"));
+        } else if (maker.contains("asus")) {
+            list.add(componentIntent("com.asus.mobilemanager", "com.asus.mobilemanager.MainActivity"));
+        } else if (maker.contains("meizu")) {
+            list.add(componentIntent("com.meizu.safe", "com.meizu.safe.security.SHOW_APPSEC"));
+        }
+        return list;
     }
 }
