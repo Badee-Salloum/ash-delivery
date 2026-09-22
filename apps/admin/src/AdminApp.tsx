@@ -194,8 +194,11 @@ export function AdminApp(): ReactNode {
   const canManageCompanyFund = session.roleKey === 'system_admin' || session.roleKey === 'general_manager'
   const canSeeTreasuryMovements =
     session.roleKey === 'system_admin' || session.roleKey === 'general_manager' || session.roleKey === 'branch_manager'
-  // gps.view — the same two roles; the branch manager no longer has it.
-  const canSeeMap = canManageUsers
+  // gps.view — the branch manager IS the dispatcher and sees his own branch's live tracking (owner
+  // 2026-09-08, restoring SRS §3 «التتبع الحي GPS ✓ فرعه»), alongside the GM and system admin. The
+  // API scopes him to his branch; this just stops hiding the map he is entitled to.
+  const canSeeMap =
+    session.roleKey === 'system_admin' || session.roleKey === 'general_manager' || session.roleKey === 'branch_manager'
   /*
    * Grouped by FUNCTION, and every item carries a glyph.
    *
