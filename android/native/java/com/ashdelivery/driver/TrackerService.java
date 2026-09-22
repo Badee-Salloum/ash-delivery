@@ -1,9 +1,11 @@
 package com.ashdelivery.driver;
 
 import android.Manifest;
+import android.app.AlarmManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
@@ -362,6 +364,38 @@ public class TrackerService extends Service {
             // A fix already on the main looper can arrive after onDestroy()'s io.shutdown(). Not an
             // error — the shift is ending; there is nothing left to flush to.
         }
+    }
+
+    /**
+     * The driver swiped the app off the recents list.
+     *
+     * With `stopWithTask="false"` the service already keeps running on stock Android after a swipe;
+     * this is the belt-and-suspenders for OEMs that kill it anyway. It schedules a near-future
+     * restart from the saved assignment (not exact — no special alarm permission — but wake-while-
+     * idle so Doze does not swallow it). If the shift has since closed, the restarted service's first
+     * flush gets the 409 and shuts down cleanly. It cannot beat a deliberate force-stop, which
+     * cancels the alarm too — that is what the office's "not reporting" alert is for.
+     */
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        if (!stopped && shiftId != null && origin != null) {
+            Intent restart = new Intent(getApplicationContext(), TrackerService.class);
+            restart.putExtra(EXTRA_SHIFT_ID, shiftId);
+            restart.putExtra(EXTRA_ORIGIN, origin);
+            int flags = PendingIntent.FLAG_ONE_SHOT | PendingIntent.FLAG_IMMUTABLE;
+            PendingIntent pending = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                    ? PendingIntent.getForegroundService(this, 42, restart, flags)
+                    : PendingIntent.getService(this, 42, restart, flags);
+            AlarmManager am = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+            if (am != null && pending != null) {
+                try {
+                    am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + 3_000L, pending);
+                } catch (Exception ignored) {
+                    // Some OEMs cap alarms; nothing else to do, and stopWithTask already covers stock.
+                }
+            }
+        }
+        super.onTaskRemoved(rootIntent);
     }
 
     @Override

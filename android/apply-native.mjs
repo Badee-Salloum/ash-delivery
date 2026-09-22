@@ -79,14 +79,18 @@ for (const name of permissions) {
   }
 }
 
+// `stopWithTask="false"` keeps the service alive when the driver swipes the app off the recents
+// list — the single most common way tracking would otherwise die mid-shift. Remove any prior
+// TrackerService element first, so an attribute change here actually takes effect on re-run rather
+// than being skipped as "already present".
+manifest = manifest.replace(/\s*<service\b[\s\S]*?\.TrackerService[\s\S]*?\/>/, '')
 const service =
   '        <service\n' +
   '            android:name=".TrackerService"\n' +
   '            android:exported="false"\n' +
+  '            android:stopWithTask="false"\n' +
   '            android:foregroundServiceType="location" />'
-if (!manifest.includes('.TrackerService')) {
-  manifest = manifest.replace('</application>', `${service}\n    </application>`)
-}
+manifest = manifest.replace('</application>', `${service}\n    </application>`)
 
 // The boot receiver, so tracking resumes after a reboot. Exported so the system's BOOT_COMPLETED
 // broadcast can reach it; it only ever restarts the service from the saved assignment.
