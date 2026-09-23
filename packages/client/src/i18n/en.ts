@@ -1943,6 +1943,11 @@ orderNo: 'Order no.',
     untimed: '{n} orders with no readable time',
     sourceTracker: 'Vehicle tracker',
     mixedSources: 'part of this trail came from the bike tracker',
+    // The length of the recorded path — best-effort, not an odometer reading.
+    distance: 'Path distance',
+    totalDistance: 'Total distance',
+    km: 'km',
+    metres: 'm',
   },
   recordedPaths: {
     title: 'Recorded paths',

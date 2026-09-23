@@ -49,6 +49,7 @@ import {
   checkWeekClose,
   dayOfWeek,
   minor,
+  pathLengthMetres,
   resolveFxDay,
   sliceTrailByOrders,
   sum,
@@ -2551,10 +2552,17 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       submittedAtMs: shift.submittedAt === null ? null : Date.parse(shift.submittedAt),
       offsetMinutes: deps.clock.offsetMinutes(),
     })
+    // The length of the path travelled, measured once here from the pings the timing-only
+    // segmentation could not see. Whole metres on the wire; the UI decides km vs m. Best-effort,
+    // exactly like the segmentation: it measures the recorded trail, not an odometer.
+    const pingPoints = pings.map((p) => ({ lat: p.lat, lng: p.lng }))
+    const rangeMetres = (r: { pingStartIndex: number; pingEndIndex: number }): number =>
+      Math.round(pathLengthMetres(pingPoints.slice(r.pingStartIndex, r.pingEndIndex)))
     return {
       shiftId: id,
       windowOpensAt: shift.windowOpensAt,
       submittedAt: shift.submittedAt,
+      totalDistanceMetres: Math.round(pathLengthMetres(pingPoints)),
       pings: pings.map((p) => ({
         lat: p.lat,
         lng: p.lng,
@@ -2570,10 +2578,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         occurredMinute: o.occurredMinute,
         fee: serializeMoney(o.fee),
       })),
-      segments: segmentation.segments,
+      segments: segmentation.segments.map((s) => ({ ...s, distanceMetres: rangeMetres(s) })),
       untimedOrderIds: segmentation.untimedOrderIds,
-      beforeFirst: segmentation.beforeFirst,
-      afterClose: segmentation.afterClose,
+      beforeFirst: { ...segmentation.beforeFirst, distanceMetres: rangeMetres(segmentation.beforeFirst) },
+      afterClose: { ...segmentation.afterClose, distanceMetres: rangeMetres(segmentation.afterClose) },
     }
   })
 

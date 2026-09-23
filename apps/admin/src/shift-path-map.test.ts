@@ -33,6 +33,12 @@ describe('ShiftPathMap', () => {
       expect(map).toContain(`t.shiftPath.${key}`)
     }
   })
+
+  it('shows each order’s path length and the whole-trail total', () => {
+    expect(map).toContain('formatDistance')
+    expect(map).toContain('totalDistanceMetres')
+    expect(map).toContain('distanceMetres')
+  })
 })
 
 describe('the map is mounted in every surface', () => {
@@ -63,6 +69,10 @@ describe('i18n', () => {
     for (const dict of [ar, en]) {
       expect(dict.shiftPath.title).toBeTruthy()
       expect(dict.shiftPath.beforeFirst).toBeTruthy()
+      expect(dict.shiftPath.distance).toBeTruthy()
+      expect(dict.shiftPath.totalDistance).toBeTruthy()
+      expect(dict.shiftPath.km).toBeTruthy()
+      expect(dict.shiftPath.metres).toBeTruthy()
       expect(dict.recordedPaths.title).toBeTruthy()
     }
   })

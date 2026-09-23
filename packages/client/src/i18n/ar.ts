@@ -1998,6 +1998,11 @@ orderNo: 'رقم الطلب',
     untimed: '{n} طلبات بلا وقت مقروء',
     sourceTracker: 'مُتتبّع الآلية',
     mixedSources: 'جزء من هذا المسار من مُتتبّع الدراجة',
+    // The length of the recorded path — best-effort, not an odometer reading.
+    distance: 'مسافة المسار',
+    totalDistance: 'إجمالي المسافة',
+    km: 'كم',
+    metres: 'م',
   },
   recordedPaths: {
     title: 'المسارات المسجّلة',

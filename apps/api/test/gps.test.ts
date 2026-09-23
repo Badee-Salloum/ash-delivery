@@ -327,7 +327,7 @@ describe('live GPS (SRS K)', () => {
       expect(path.pings).toHaveLength(5)
       // Capture order is preserved, which is the whole point of the trail read.
       expect(path.pings.map((p: { lat: number }) => p.lat)).toEqual([33.5, 33.51, 33.52, 33.53, 33.54])
-      expect(path.beforeFirst).toEqual({ pingStartIndex: 0, pingEndIndex: 1 })
+      expect(path.beforeFirst).toMatchObject({ pingStartIndex: 0, pingEndIndex: 1 })
       expect(
         path.segments.map((s: { providerOrderNo: string; pingStartIndex: number; pingEndIndex: number }) => [
           s.providerOrderNo,
@@ -339,8 +339,22 @@ describe('live GPS (SRS K)', () => {
         ['YAL-B', 3, 5],
       ])
       // The shift is still open, so the last order runs to the end and nothing is after-close.
-      expect(path.afterClose).toEqual({ pingStartIndex: 5, pingEndIndex: 5 })
+      expect(path.afterClose).toMatchObject({ pingStartIndex: 5, pingEndIndex: 5 })
       expect(path.untimedOrderIds).toEqual(['ord-YAL-N'])
+
+      // Each range carries its recorded path length (whole metres). A one-ping bucket (beforeFirst)
+      // and an empty one (afterClose) have no length; each two-ping order segment has a real one.
+      expect(path.beforeFirst.distanceMetres).toBe(0)
+      expect(path.afterClose.distanceMetres).toBe(0)
+      for (const s of path.segments as { distanceMetres: number }[]) {
+        expect(s.distanceMetres).toBeGreaterThan(0)
+      }
+      // A ~0.01°×0.01° hop near Damascus is roughly 1.4 km — a worked sanity bound, not a golden value.
+      expect(path.segments[0].distanceMetres).toBeGreaterThan(1000)
+      expect(path.segments[0].distanceMetres).toBeLessThan(2000)
+      // The whole-trail total covers every hop, so it is at least the longest single order segment.
+      const maxSegment = Math.max(...path.segments.map((s: { distanceMetres: number }) => s.distanceMetres))
+      expect(path.totalDistanceMetres).toBeGreaterThanOrEqual(maxSegment)
     })
 
     it('is gps.view only, and 404s an unknown shift', async () => {

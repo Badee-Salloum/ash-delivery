@@ -538,6 +538,8 @@ export interface GpsPathPing {
 export interface GpsPathRange {
   pingStartIndex: number
   pingEndIndex: number
+  /** Great-circle length of this slice's recorded path, in whole metres. */
+  distanceMetres: number
 }
 
 export interface GpsPathOrder {
@@ -559,6 +561,8 @@ export interface GpsPathView {
   shiftId: string
   windowOpensAt: string | null
   submittedAt: string | null
+  /** Great-circle length of the whole recorded trail, in whole metres. */
+  totalDistanceMetres: number
   pings: GpsPathPing[]
   orders: GpsPathOrder[]
   segments: GpsPathSegment[]

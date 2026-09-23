@@ -4,6 +4,7 @@ import 'leaflet/dist/leaflet.css'
 import { type GpsPathView, formatDateTimeSeconds } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
+import { formatDistance } from '../format-distance.ts'
 import { leafletPathPaints } from '../map-theme.ts'
 import { Badge, Card } from '../ui.tsx'
 
@@ -19,23 +20,37 @@ import { Badge, Card } from '../ui.tsx'
 
 const DAMASCUS: [number, number] = [33.5138, 36.2765]
 
-export function ShiftPathMap({ shiftId, hideWhenEmpty = false }: { shiftId: string; hideWhenEmpty?: boolean }): ReactNode {
+export function ShiftPathMap({
+  shiftId,
+  hideWhenEmpty = false,
+  view: externalView,
+}: {
+  shiftId: string
+  hideWhenEmpty?: boolean
+  /** When a parent already fetched the path (e.g. the review), it passes it here so we don't refetch. */
+  view?: GpsPathView | null
+}): ReactNode {
   const { api, t, lang, theme } = useApp()
-  const [view, setView] = useState<GpsPathView | null>(null)
+  const [fetchedView, setFetchedView] = useState<GpsPathView | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
+
+  // Controlled when a `view` prop is present (even `null`, meaning "the parent is still loading").
+  const controlled = externalView !== undefined
+  const view = controlled ? externalView : fetchedView
 
   const mapDiv = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<L.Map | null>(null)
   const layerRef = useRef<L.LayerGroup | null>(null)
 
   const load = useCallback(() => {
+    if (controlled) return
     setError(null)
     void api
       .getShiftGpsPath(shiftId)
-      .then(setView)
+      .then(setFetchedView)
       .catch((e: { error?: string }) => setError(e.error ?? 'error'))
-  }, [api, shiftId])
+  }, [api, shiftId, controlled])
 
   useEffect(() => {
     load()
@@ -117,17 +132,18 @@ export function ShiftPathMap({ shiftId, hideWhenEmpty = false }: { shiftId: stri
               <button
                 type="button"
                 onClick={() => setSelected(null)}
-                className="w-full text-start"
+                className="flex w-full items-center gap-2 text-start"
                 aria-pressed={selected === null}
               >
-                {t.shiftPath.wholeTrail} · {t.shiftPath.points.replace('{n}', String(view.pings.length))}
+                <span>{t.shiftPath.wholeTrail} · {t.shiftPath.points.replace('{n}', String(view.pings.length))}</span>
+                <span className="num ms-auto font-semibold" dir="ltr">
+                  {formatDistance(view.totalDistanceMetres, t.shiftPath)}
+                </span>
               </button>
             </li>
             <li className="flex items-center gap-2 border-t border-line-subtle py-1 text-ink-muted">
               {t.shiftPath.beforeFirst}
-              <span className="num ms-auto" dir="ltr">
-                {view.beforeFirst.pingEndIndex - view.beforeFirst.pingStartIndex}
-              </span>
+              <DistanceCell metres={view.beforeFirst.distanceMetres} count={view.beforeFirst.pingEndIndex - view.beforeFirst.pingStartIndex} units={t.shiftPath} />
             </li>
             {view.segments.map((s) => {
               const count = s.pingEndIndex - s.pingStartIndex
@@ -143,18 +159,14 @@ export function ShiftPathMap({ shiftId, hideWhenEmpty = false }: { shiftId: stri
                       {orderLabel(s.providerOrderNo, s.minuteKey.slice(11))}
                     </span>
                     {count === 0 ? <Badge tone="slate">{t.shiftPath.noSegment}</Badge> : null}
-                    <span className="num ms-auto" dir="ltr">
-                      {count}
-                    </span>
+                    <DistanceCell metres={s.distanceMetres} count={count} units={t.shiftPath} />
                   </button>
                 </li>
               )
             })}
             <li className="flex items-center gap-2 border-t border-line-subtle py-1 text-ink-muted">
               {t.shiftPath.afterClose}
-              <span className="num ms-auto" dir="ltr">
-                {view.afterClose.pingEndIndex - view.afterClose.pingStartIndex}
-              </span>
+              <DistanceCell metres={view.afterClose.distanceMetres} count={view.afterClose.pingEndIndex - view.afterClose.pingStartIndex} units={t.shiftPath} />
             </li>
             {view.untimedOrderIds.length > 0 ? (
               <li className="border-t border-line-subtle py-1 text-ink-muted">
@@ -171,5 +183,26 @@ export function ShiftPathMap({ shiftId, hideWhenEmpty = false }: { shiftId: stri
         </Card>
       ) : null}
     </div>
+  )
+}
+
+/**
+ * A path length beside its row: the distance leads (it is what the owner asked for), the ping count
+ * trails muted as the evidence behind it — a distance from three fixes is thinner than one from thirty.
+ */
+function DistanceCell({
+  metres,
+  count,
+  units,
+}: {
+  metres: number
+  count: number
+  units: { readonly km: string; readonly metres: string }
+}): ReactNode {
+  return (
+    <span className="num ms-auto flex items-baseline gap-2" dir="ltr">
+      <span>{formatDistance(metres, units)}</span>
+      <span className="text-xs text-ink-muted">{count}</span>
+    </span>
   )
 }
