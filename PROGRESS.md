@@ -1,5 +1,48 @@
 # PROGRESS
 
+## 2026-09-25 — driver breaks and GPS work distance deployed to web production
+
+**Live.** PR #4 merged as `1431e6e` (release source `197a7a7`). Neon migrations
+`0081_shift_breaks.sql` and `0082_gps_live_capture_index.sql` were applied once;
+the checksum rerun found 0 pending and 78 present. Vercel production now serves API
+`dpl_EfrU5XUPcuEhK9kbUdnr2htkS72R`, Admin `dpl_DWhfWN5MT1q2JXwX23McvQHK7EvR`,
+and Driver `dpl_35taGHBsMVJJsSb9cNNVo8UBNX1t`. The central break allowance starts
+at 60 minutes per shift. Breaks are audited, do not close a shift, and are subtracted
+from work time and GPS work distance. The live map uses fix capture time; invalid
+jumps and gaps are excluded from recorded work distance while raw pings remain.
+
+**Gates.** Node 24 `pnpm check`, both SPA builds, and the API bundle passed locally.
+PR CI run `36102354221` and merged-main run `36104881040` passed static, domain,
+and real PostgreSQL 17 guard/conformance jobs. The API was paused and `/health`
+returned 503 while two database samples showed zero active transactions. The 17
+permanent shift-money integrity groups passed before and after the migration.
+Postflight verified the new setting, break indexes, audit trigger, runtime privileges,
+GPS index, migration checksums, zero trial balance, and no open shifts. Stable smoke
+after promotion passed API health and auth, both SPAs and API proxies, the driver
+manifest and service worker, and the exact new bundle URLs.
+
+**Backups and restore.** Validated pre-backup:
+`Desktop/ash-backups/release-0082-20260925/pre/2026-09-25T06-28-33-714Z`
+(87 tables, 135,744 rows, 76 migrations). Validated post-backup:
+`Desktop/ash-backups/release-0082-20260925/post/2026-09-25T06-36-15-193Z`
+(88 tables, 135,748 rows, 78 migrations). Only `audit_log`, `settings`, and
+`schema_migrations` changed among existing tables. The post-backup was restored
+into `ash_release_gate_0082_restore_20260925_0650`; a validated re-backup in
+`Desktop/ash-backups/release-0082-20260925/restore-check/2026-09-25T07-07-10-837Z`
+matched all 88 table fingerprints and 135,748 rows. All 29 sequences, the 17
+integrity groups, the break audit trigger, and a write-with-rollback probe passed. The scratch
+database was disconnected and dropped. Two interrupted HTTPS export directories
+are marked `INCOMPLETE.txt` and must not be used for restore.
+
+**Android distribution remains.** GitHub Android run `36102341504` produced the
+debug APK from `197a7a7`; its SHA-256 is recorded in
+`Desktop/ASH Delivery Release/2026-09-25/android-197a7a7/SHA256SUMS.txt`.
+It has not been installed on company phones. Each CI debug build uses a new
+signing key, so an existing installation may require uninstalling after its
+unsent GPS queue is drained. The production web UI is already live; the native
+SQLite queue and idle service stop take effect on handsets only after APK update.
+Rotate the disclosed Neon owner credential and Vercel token after the release.
+
 ## 2026-09-21 — GPS path + tracker infrastructure DEPLOYED to production
 
 **Live.** Branch `feat/gps-order-paths` merged to `main` (`23be6db`) and deployed. Migration
