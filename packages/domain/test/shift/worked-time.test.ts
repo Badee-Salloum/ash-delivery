@@ -145,6 +145,18 @@ describe('a shift that has not ended yet', () => {
   })
 })
 
+describe('break time', () => {
+  it('uses net work for classification and target judgement', () => {
+    const start = damascus('2026-09-07', '09:00')
+    const end = damascus('2026-09-07', '19:30')
+    const withoutBreak = workedTime(start, end)
+    const withBreak = workedTime(start, end, undefined, undefined, 90 * 60_000)
+    expect(withoutBreak.pattern).toBe('full')
+    expect(withBreak).toMatchObject({ minutes: 9 * 60, pattern: 'day' })
+    expect(shortfallMinutes(withBreak)).toBe(0)
+  })
+})
+
 describe('a close package nobody sent', () => {
   /*
    * Six of 113 measured shifts ran past sixteen hours, the longest 24.64. Every genuine double

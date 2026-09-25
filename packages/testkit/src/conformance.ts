@@ -820,6 +820,8 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
         await deps.gps.appendMany([fix(20_000, { receivedAtMs: 20_500 })])
         const trail = await deps.gps.listForShift(SHIFT)
         expect(trail.map((p) => p.capturedAtMs)).toEqual([10_000, 20_000, 30_000])
+        expect((await deps.gps.listByShiftIds([SHIFT, SHIFT])).map((p) => p.capturedAtMs)).toEqual([10_000, 20_000, 30_000])
+        expect(await deps.gps.listByShiftIds([])).toEqual([])
       })
 
       it('returns the latest fix per named driver, and nothing older than the window', async () => {
@@ -836,6 +838,27 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
         expect(await deps.gps.latestForDriversInBranch(BRANCH, [OTHER_DRIVER], 0)).toEqual([])
         // And a fix older than the window is a memory, not a position.
         expect(await deps.gps.latestForDriversInBranch(BRANCH, [DRIVER], 3_000)).toEqual([])
+      })
+
+      it('selects the latest capture when an older fix arrives in a later batch', async () => {
+        const deps = await fresh()
+        await deps.gps.appendMany([fix(20_000, { receivedAtMs: 20_500, lat: 33.2 })])
+        await deps.gps.appendMany([fix(10_000, { receivedAtMs: 50_000, lat: 33.1 })])
+        const latest = await deps.gps.latestForDriversInBranch(BRANCH, [DRIVER], 15_000)
+        expect(latest).toHaveLength(1)
+        expect(latest[0]!.lat).toBeCloseTo(33.2)
+      })
+
+      it('selects the latest fix within the named shift and ignores untracked shift IDs', async () => {
+        const deps = await fresh()
+        await deps.gps.appendMany([
+          fix(20_000, { shiftId: SHIFT, lat: 33.2 }),
+          fix(30_000, { shiftId: SHIFT, lat: 33.3 }),
+        ])
+        const latest = await deps.gps.latestForShiftIds([SHIFT, OTHER_SHIFT])
+        expect(latest).toHaveLength(1)
+        expect(latest[0]?.lat).toBeCloseTo(33.3)
+        expect(await deps.gps.latestForShiftIds([])).toEqual([])
       })
 
       it('round-trips every field, including the capture layer', async () => {

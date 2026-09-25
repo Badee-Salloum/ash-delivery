@@ -47,6 +47,7 @@ import {
   workedTime,
 } from '@ash/domain'
 import { ServiceError, recordVehicleEvent, todayFor } from './shifts.service.ts'
+import { summarizeBreaks } from './breaks.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
 import { completedShiftFinancial } from './shift-financial.ts'
 import { grantsFromRows } from './rbac.ts'
@@ -709,7 +710,7 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
 
     const shifts = await deps.shifts.listByVehicle(vehicle.branchId, id, q.from, q.to)
     const shiftIds = shifts.map((shift) => shift.id)
-    const [orderRows, settlements, readings, swaps, expenses, categories, rawEvents, drivers] = await Promise.all([
+    const [orderRows, settlements, readings, swaps, expenses, categories, rawEvents, drivers, breakRows] = await Promise.all([
       deps.orders.listByShiftIds(shiftIds),
       deps.settlements.listByShiftIds(shiftIds),
       deps.batteryReadings.listByShiftIds(shiftIds),
@@ -718,11 +719,13 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
       deps.expenses.listCategories(),
       deps.vehicleEvents.listByVehicle(id),
       deps.directory.listDrivers(vehicle.branchId),
+      deps.breaks.listByShiftIds(shiftIds),
     ])
     const ordersByShift = groupByShift(orderRows)
     const settlementsByShift = new Map(settlements.map((settlement) => [settlement.shiftId, settlement]))
     const readingsByShift = groupByShift(readings)
     const swapsByShift = groupByShift(swaps)
+    const breaksByShift = groupByShift(breakRows)
     const driverNames = new Map(drivers.map((driver) => [driver.id, driver.fullNameAr]))
     const categoryNames = new Map(categories.map((category) => [category.id, category.nameAr]))
     const distance = odometerTimeline(shifts.map((shift) => ({ start: shift.odoStart, end: shift.odoEnd })))
@@ -792,6 +795,7 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
         const orders = ordersByShift.get(shift.id) ?? []
         const settlement = settlementsByShift.get(shift.id)
         const perShiftDistance = shiftDistance({ start: shift.odoStart, end: shift.odoEnd })
+        const shiftBreak = summarizeBreaks(breaksByShift.get(shift.id) ?? [], deps.clock.nowMs())
         return {
           id: shift.id,
           businessDate: shift.businessDate,
@@ -801,6 +805,7 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
           driverName: driverNames.get(shift.driverId) ?? shift.driverId,
           windowOpensAt: shift.windowOpensAt ?? shift.openApprovedAt,
           submittedAt: shift.submittedAt,
+          break: shiftBreak,
           worked: workedTime(
             (shift.windowOpensAt ?? shift.openApprovedAt) === null
               ? null
@@ -808,6 +813,7 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
             shift.submittedAt === null ? null : Date.parse(shift.submittedAt),
             deps.clock.offsetMinutes(),
             deps.clock.dayStartMinutes(),
+            shiftBreak.totalBreakMs,
           ),
           odometerStart: shift.odoStart,
           odometerEnd: shift.odoEnd,

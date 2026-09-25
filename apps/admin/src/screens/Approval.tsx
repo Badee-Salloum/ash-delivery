@@ -3,6 +3,7 @@ import L, { type CircleMarker, type LeafletMouseEvent, type Map as LeafletMap } 
 import 'leaflet/dist/leaflet.css'
 import {
   type GpsPathView,
+  type BreakSummary,
   type ManagerOrderEvidenceRereadResponse,
   type ManagerOrderEvidenceRereadTarget,
   type OcrScalar,
@@ -125,6 +126,7 @@ interface Review {
   /** The operation window's start — the driver's own confirmation, not the manager's signature. */
   windowOpensAt?: string | null
   submittedAt?: string | null
+  break?: BreakSummary
   /** Current branch+driver shift funding captured by the locked manager-review read. */
   shiftFunding: { cash: string; wallet: string }
   startPackage: {
@@ -333,7 +335,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   }, [api, shiftId])
   /** Path length per order, keyed by the provider number the order rows carry. */
   const distanceByOrderNo = useMemo(
-    () => new Map((gpsPath?.segments ?? []).map((s) => [s.providerOrderNo, s.distanceMetres])),
+    () => new Map((gpsPath?.segments ?? []).filter((s) => s.distanceMetres !== null).map((s) => [s.providerOrderNo, s.distanceMetres!])),
     [gpsPath],
   )
 
@@ -574,6 +576,9 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   const shiftWorked = workedTime(
     shiftStart === null ? null : Date.parse(shiftStart),
     shiftEnd === null ? null : Date.parse(shiftEnd),
+    undefined,
+    undefined,
+    review.break?.totalBreakMs ?? 0,
   )
   // One shift judged alone, so it cannot see a second one that day — the dashboard, which holds
   // the whole day per driver, is where a two-row double is caught. Only an open or suspended shift
@@ -1073,6 +1078,26 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         </span>
       </div>
 
+      {review.break && review.break.breaks.length > 0 ? (
+        <Card title={t.shift.breakHistory}>
+          <p className="text-sm">{t.shift.breakUsed.replace('{minutes}', String(Math.floor(review.break.totalBreakMs / 60_000)))}</p>
+          {review.break.overLimitMs > 0 ? (
+            <p role="alert" className="mt-1 font-bold text-danger-ink">
+              {t.shift.breakOver.replace('{minutes}', String(Math.ceil(review.break.overLimitMs / 60_000)))}
+            </p>
+          ) : null}
+          <ol className="mt-2 flex flex-col gap-1 text-sm">
+            {review.break.breaks.map((record) => (
+              <li key={record.id} className="border-t border-line-subtle pt-1">
+                <span className="num">{formatDateTime(new Date(record.startedAtMs).toISOString(), lang)} → {record.endedAtMs === null ? t.shift.breakOpen : formatDateTime(new Date(record.endedAtMs).toISOString(), lang)}</span>
+                {record.endReason && record.endReason !== 'driver_resumed' ? <span className="ms-2 text-warning-ink">{t.shift.breakEndedByManager}</span> : null}
+                {record.overLimitMs > 0 ? <strong className="ms-2 text-danger-ink">{t.shift.breakOver.replace('{minutes}', String(Math.ceil(record.overLimitMs / 60_000)))}</strong> : null}
+              </li>
+            ))}
+          </ol>
+        </Card>
+      ) : null}
+
       <OperationWindowAdvisory
         openApprovedAt={review.openApprovedAt ?? null}
         submittedAt={review.submittedAt ?? null}
@@ -1502,7 +1527,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                 {distanceByOrderNo.has(o.providerOrderNo) ? (
                   <span className="num" dir="ltr">{formatDistance(distanceByOrderNo.get(o.providerOrderNo)!, t.shiftPath)}</span>
                 ) : (
-                  <span className="text-ink-muted">—</span>
+                  <span className="text-ink-muted">{gpsPath ? t.shiftPath.unavailable : '—'}</span>
                 )}
               </td>
               <td className="min-w-64 px-3 py-1">
@@ -1543,14 +1568,15 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         </Table>
 
         {/* The whole trail's length, once, under the per-order column it totals. */}
-        {gpsPath && gpsPath.totalDistanceMetres > 0 ? (
+        {gpsPath ? (
           <p className="mt-2 flex items-center gap-2 text-sm">
-            <span className="text-ink-muted">{t.shiftPath.totalDistance}</span>
+            <span className="text-ink-muted">{t.shiftPath.workDistance}</span>
             <span className="num ms-auto font-semibold" dir="ltr">
-              {formatDistance(gpsPath.totalDistanceMetres, t.shiftPath)}
+              {gpsPath.workDistanceMetres === null ? t.shiftPath.unavailable : formatDistance(gpsPath.workDistanceMetres, t.shiftPath)}
             </span>
           </p>
         ) : null}
+        {gpsPath?.coverageIncomplete ? <p className="text-sm font-semibold text-warning-ink">{t.shiftPath.incompleteCoverage}</p> : null}
 
         {/* The payments log is deliberately read-only here. It remains useful evidence, but its
             rows do not change BR1, order fees, the fixed share or ledger postings. */}

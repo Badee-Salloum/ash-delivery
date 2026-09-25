@@ -50,6 +50,9 @@ import {
   dayOfWeek,
   minor,
   pathLengthMetres,
+  workDistance,
+  workDistanceForRange,
+  GPS_COMPLETE_COVERAGE_PERCENT,
   resolveFxDay,
   sliceTrailByOrders,
   sum,
@@ -137,6 +140,7 @@ import {
   todayFor,
 } from './shifts.service.ts'
 import { completedShiftFinancial } from './shift-financial.ts'
+import { BREAK_LIMIT_SETTING_KEY, breakLimitMinutes, breakSummary, resumeBreak, startBreak, summarizeBreaks } from './breaks.service.ts'
 
 /**
  * A week-close blocker as it crosses the wire. A trial-balance difference is money, so it goes as a
@@ -598,9 +602,11 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       // Apart from avoiding a per-shift round trip, reading both sets before shaping rows means the
       // order count and the financial split always come from the same in-memory order snapshot.
       const shiftIds = shifts.map((shift) => shift.id)
-      const [orderRows, settlementRows] = await Promise.all([
+      const [orderRows, settlementRows, breakRows, defaultBreakLimit] = await Promise.all([
         deps.orders.listByShiftIds(shiftIds),
         deps.settlements.listByShiftIds(shiftIds),
+        deps.breaks.listByShiftIds(shiftIds),
+        breakLimitMinutes(deps),
       ])
       const ordersByShift = new Map<string, ShiftOrderRecord[]>()
       for (const order of orderRows) {
@@ -609,18 +615,27 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         ordersByShift.set(order.shiftId, grouped)
       }
       const settlementsByShift = new Map(settlementRows.map((row) => [row.shiftId, row]))
+      const breaksByShift = new Map<string, typeof breakRows>()
+      for (const entry of breakRows) {
+        const grouped = breaksByShift.get(entry.shiftId) ?? []
+        grouped.push(entry)
+        breaksByShift.set(entry.shiftId, grouped)
+      }
+      const serverNowMs = deps.clock.nowMs()
       return {
         businessDate,
         shifts: shifts.map((s) => {
           const shiftOrders = ordersByShift.get(s.id) ?? []
           const countedOrders = includedOrders(shiftOrders)
           const settlement = settlementsByShift.get(s.id)
+          const shiftBreak = summarizeBreaks(breaksByShift.get(s.id) ?? [], serverNowMs, defaultBreakLimit)
           return {
             id: s.id,
             driverId: s.driverId,
             vehicleId: s.vehicleId,
             shiftNo: s.shiftNo,
             state: s.state,
+            break: shiftBreak,
             // Enough for a manager to judge a running shift at a glance without opening it: the
             // odometer he started on, the branch money he is carrying, and how much work is on the
             // shift so far. Money crosses as decimal strings, never JSON numbers.
@@ -674,6 +689,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
               s.submittedAt === null ? null : Date.parse(s.submittedAt),
               deps.clock.offsetMinutes(),
               deps.clock.dayStartMinutes(),
+              shiftBreak.totalBreakMs,
             ),
           }
         }),
@@ -1753,6 +1769,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const [latest] = await deps.decisions.listByShift(id)
       return {
         ...snapshot.body,
+        break: await breakSummary(deps, id),
         lastDecision: latest ? { decision: latest.decision, notes: latest.notes } : null,
       }
     },
@@ -1788,6 +1805,23 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       return { ok: true, id: shift.id }
     },
   )
+
+  // A break leaves the shift operational. The client supplies a stable UUID so a lost response
+  // can be retried without opening another pause; resume targets that exact break for the same
+  // reason. Both writes serialize with close/suspend/void on the shift row.
+  app.get('/shifts/:id/break', { config: { permission: 'shift.operate', subject: shiftSubject } }, async (req) => {
+    const { id } = z.object({ id: z.string() }).parse(req.params)
+    return breakSummary(deps, id)
+  })
+  app.post('/shifts/:id/break/start', { config: { permission: 'shift.operate', subject: shiftSubject } }, async (req) => {
+    const { id } = z.object({ id: z.string() }).parse(req.params)
+    const { breakId } = z.object({ breakId: z.string().uuid() }).parse(req.body)
+    return startBreak(deps, req.actor!, id, breakId)
+  })
+  app.post('/shifts/:id/break/:breakId/resume', { config: { permission: 'shift.operate', subject: shiftSubject } }, async (req) => {
+    const { id, breakId } = z.object({ id: z.string(), breakId: z.string().uuid() }).parse(req.params)
+    return resumeBreak(deps, req.actor!, id, breakId)
+  })
 
   /** Immutable fixed-policy preview. Optional actuals let force-close preview the same calculation. */
   app.get(
@@ -1959,6 +1993,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
             .parse(await buildScanDuplicateHints(transactionDeps, id))
           return {
             ...snapshot.body,
+            break: await breakSummary(transactionDeps, id),
             duplicateHints,
             shiftFunding: shiftFundingPreviewSchema.parse({
               cash: serializeMoney(shiftFundingCash),
@@ -2434,6 +2469,17 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
    * `bodyLimit` refuses a hostile body in Fastify before Zod ever runs, the same way the two
    * evidence-upload routes do.
    */
+  // A native tracker with an empty buffer still needs to learn that its shift has ended.
+  app.get(
+    '/shifts/:id/gps/status',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req, reply) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const shift = await deps.shifts.findById(id)
+      if (!shift) return reply.code(404).send({ error: 'shift_not_found' })
+      return { live: isTracked(shift.state), state: shift.state }
+    },
+  )
   app.post(
     '/shifts/:id/gps',
     {
@@ -2474,7 +2520,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       })
     },
   )
-  // The manager's live map: the latest fix per driver in the branch (gps.view — BM/GM/sysadmin).
+  // The manager's live map: the latest captured fix on each active shift (gps.view — BM/GM/sysadmin).
   app.get('/gps/live', { config: { permission: 'gps.view', subject: branchSubject } }, async (req) => {
     const branchId = resolveBranchId(req)
     // The live map is "who is out RIGHT NOW", so a ping only counts while its shift is live. Without
@@ -2483,33 +2529,32 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     // just the driver, so a stale ping from an already-ended shift is dropped even when the driver has
     // since opened a fresh one that has not pinged yet.
     const liveShifts = await deps.shifts.listLiveForBranch(branchId)
-    const liveShiftByDriver = new Map(liveShifts.map((s) => [s.driverId, s.id]))
     /*
-     * Ask for the drivers who are actually out, rather than scanning the branch's whole history.
+     * Ask for the active shift IDs, rather than scanning the branch's whole history or letting an
+     * old shift's late batch mask the current shift's fix.
      *
-     * The window is generous on purpose: a fix older than it is not a live position but a memory,
-     * and the screen decides what counts as fresh — it now shows the CAPTURE time, so a stale pin
-     * announces its own staleness instead of borrowing the arrival time's credibility.
+     * Seek the newest captured fix even when it is older than the map's one-hour pin window: the
+     * silence duration still starts at that fix. The screen shows capture time for every pin.
      */
     const nowMs = deps.clock.nowMs()
-    const pings = await deps.gps.latestForDriversInBranch(branchId, [...liveShiftByDriver.keys()], nowMs - GPS_LIVE_WINDOW_MS)
-    const shown = pings.filter((p) => liveShiftByDriver.get(p.driverId) === p.shiftId)
-    const onMap = new Set(shown.map((p) => p.driverId))
+    const current = await deps.gps.latestForShiftIds(liveShifts.map((shift) => shift.id))
+    const shown = current.filter((p) => p.capturedAtMs >= nowMs - GPS_LIVE_WINDOW_MS)
+    // Even after a pin leaves the one-hour map window, its last capture is the true silence start.
+    const latestByShift = new Map(current.map((p) => [p.shiftId, p]))
 
     /*
-     * The silent ones: a TRACKED live shift (open / suspended / pending_review — not a draft the
-     * driver is still filling) that has no recent fix at all and has been running past the grace, so
-     * its absence is a stopped tracker, not a slow start. Measured from the driver's confirmation,
-     * the same instant tracking begins on the phone.
+     * The silent ones: tracked live shifts with no fix captured in the last ten minutes. Before
+     * the first fix, the grace starts at driver confirmation. A buffered upload does not restart it.
      */
     const silent = liveShifts
-      .filter((s) => isTracked(s.state) && !onMap.has(s.driverId))
-      .map((s) => ({ shift: s, since: s.windowOpensAt ?? s.driverConfirmedAt }))
-      .filter((x): x is { shift: (typeof liveShifts)[number]; since: string } => x.since !== null && nowMs - Date.parse(x.since) >= GPS_SILENCE_GRACE_MS)
+      .filter((s) => isTracked(s.state))
+      // A batch received now can contain a fix captured long ago. Arrival does not reset silence.
+      .map((s) => ({ shift: s, sinceMs: latestByShift.get(s.id)?.capturedAtMs ?? Date.parse(s.windowOpensAt ?? s.driverConfirmedAt ?? '') }))
+      .filter((x) => Number.isFinite(x.sinceMs) && nowMs - x.sinceMs >= GPS_SILENCE_GRACE_MS)
       .map((x) => ({
         driverId: x.shift.driverId,
         shiftId: x.shift.id,
-        silentMinutes: Math.floor((nowMs - Date.parse(x.since)) / 60_000),
+        silentMinutes: Math.floor((nowMs - x.sinceMs) / 60_000),
       }))
 
     return {
@@ -2539,7 +2584,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     const { id } = z.object({ id: z.string() }).parse(req.params)
     const shift = await deps.shifts.findById(id)
     if (!shift) return reply.code(404).send({ error: 'shift_not_found' })
-    const [pings, allOrders] = await Promise.all([deps.gps.listForShift(id), deps.orders.listByShift(id)])
+    const [pings, allOrders, breaks] = await Promise.all([
+      deps.gps.listForShift(id), deps.orders.listByShift(id), deps.breaks.listByShift(id),
+    ])
     const orders = allOrders.filter((o) => o.included)
     const segmentation = sliceTrailByOrders({
       pings,
@@ -2552,22 +2599,38 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       submittedAtMs: shift.submittedAt === null ? null : Date.parse(shift.submittedAt),
       offsetMinutes: deps.clock.offsetMinutes(),
     })
-    // The length of the path travelled, measured once here from the pings the timing-only
-    // segmentation could not see. Whole metres on the wire; the UI decides km vs m. Best-effort,
-    // exactly like the segmentation: it measures the recorded trail, not an odometer.
+    const work = workDistance({
+      pings,
+      windowOpensAtMs: shift.windowOpensAt === null ? null : Date.parse(shift.windowOpensAt),
+      submittedAtMs: shift.submittedAt === null ? null : Date.parse(shift.submittedAt),
+      asOfMs: deps.clock.nowMs(),
+      breaks,
+    })
+    // Keep the raw path available for investigation; every work figure uses validated edges.
     const pingPoints = pings.map((p) => ({ lat: p.lat, lng: p.lng }))
-    const rangeMetres = (r: { pingStartIndex: number; pingEndIndex: number }): number =>
-      Math.round(pathLengthMetres(pingPoints.slice(r.pingStartIndex, r.pingEndIndex)))
+    const rangeMetres = (r: { pingStartIndex: number; pingEndIndex: number }): number | null => {
+      const metres = workDistanceForRange(work, r.pingStartIndex, r.pingEndIndex)
+      return metres === null ? null : Math.round(metres)
+    }
     return {
       shiftId: id,
       windowOpensAt: shift.windowOpensAt,
       submittedAt: shift.submittedAt,
       totalDistanceMetres: Math.round(pathLengthMetres(pingPoints)),
-      pings: pings.map((p) => ({
+      workDistanceMetres: work.distanceMetres === null ? null : Math.round(work.distanceMetres),
+      coveragePercent: work.coveragePercent,
+      coverageIncomplete: work.coveragePercent === null || work.coveragePercent < GPS_COMPLETE_COVERAGE_PERCENT,
+      breaks: breaks.map((item) => ({
+        startedAt: new Date(item.startedAtMs).toISOString(),
+        endedAt: item.endedAtMs === null ? null : new Date(item.endedAtMs).toISOString(),
+      })),
+      pings: pings.map((p, index) => ({
         lat: p.lat,
         lng: p.lng,
         accuracyM: p.accuracyM,
         source: p.source,
+        phase: work.phases[index],
+        workEdgeMetres: work.edgeMetres[index] === null ? null : Math.round(work.edgeMetres[index]!),
         capturedAt: new Date(p.capturedAtMs).toISOString(),
         receivedAt: new Date(p.receivedAtMs).toISOString(),
       })),
@@ -2818,15 +2881,17 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   /** The receipt ceiling and the kWh price, as decimal strings for the settings screen. */
   app.get('/settings', { config: { permission: 'settings.write' } }, async () => {
-    const [ceiling, kwh, goLive] = await Promise.all([
+    const [ceiling, kwh, goLive, breakLimit] = await Promise.all([
       deps.settings.receiptRequiredAbove(''),
       deps.settings.kwhPriceMinor(),
       goLiveDate(deps),
+      breakLimitMinutes(deps),
     ])
     return {
       receiptCeilingMinor: ceiling === null ? null : serializeMoney(ceiling),
       kwhPriceMinor: kwh === null ? null : serializeMoney(kwh),
       goLiveBusinessDate: goLive,
+      breakLimitMinutes: breakLimit,
     }
   })
 
@@ -2848,6 +2913,11 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       if (value === undefined) continue
       await deps.settings.set(key, value.toString(), actorId)
       written[key] = serializeMoney(value)
+    }
+
+    if (body.breakLimitMinutes !== undefined) {
+      await deps.settings.set(BREAK_LIMIT_SETTING_KEY, body.breakLimitMinutes, actorId)
+      written[BREAK_LIMIT_SETTING_KEY] = String(body.breakLimitMinutes)
     }
 
     /*

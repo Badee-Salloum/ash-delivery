@@ -8,6 +8,9 @@ import { SectionHeading } from './SectionHeading.tsx'
 import type { FleetPerformance } from './types.ts'
 import { useDashboardRead } from './use-dashboard-read.ts'
 
+const gpsKm = (metres: number | null, unavailable: string): string =>
+  metres === null ? unavailable : (metres / 1000).toFixed(1)
+
 export function FleetSection({ range }: { range: DateRange }): ReactNode {
   const { t } = useApp()
   const query = `?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`
@@ -26,18 +29,25 @@ export function FleetSection({ range }: { range: DateRange }): ReactNode {
         />
       ) : (
         <div id="dashboard-fleet" className="flex flex-col gap-3">
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
             <Stat label={t.dashboard.completedCount} value={data.totals.shifts} />
             <Stat label={t.dashboard.kilometres} value={data.totals.km} sub={data.totals.kmUnrecorded > 0 ? t.dashboard.unrecordedKm.replace('{n}', String(data.totals.kmUnrecorded)) : undefined} />
+            <Stat label={t.dashboard.gpsWorkDistance} value={gpsKm(data.totals.workDistanceMetres, t.shiftPath.unavailable)} sub={t.dashboard.gpsCoverage.replace('{n}', data.totals.gpsCoveragePercent === null ? t.shiftPath.unavailable : `${data.totals.gpsCoveragePercent}%`)} />
             <Stat label={t.dashboard.orders} value={data.totals.orders} />
             <Stat label={t.dashboard.revenue} value={<Money value={data.totals.feesSyp} />} />
           </div>
+          {(data.totals.gpsIncompleteShifts > 0 || data.totals.gpsUnavailableShifts > 0) ? (
+            <p role="alert" className="text-sm font-semibold text-warning-ink">
+              {t.dashboard.gpsIncomplete.replace('{n}', String(data.totals.gpsIncompleteShifts))} · {t.dashboard.gpsUnavailable.replace('{n}', String(data.totals.gpsUnavailableShifts))}
+            </p>
+          ) : null}
           <Card title={t.dashboard.vehiclePerformance} subtitle={t.dashboard.vehicleRowHint}>
             <Table
               head={[
                 t.fleet.vehicleNumber,
                 { label: t.dashboard.completedCount, numeric: true },
                 { label: t.dashboard.kilometres, numeric: true },
+                { label: t.dashboard.gpsWorkDistance, numeric: true },
                 { label: t.dashboard.orders, numeric: true },
                 ...(data.financeVisible
                   ? [
@@ -67,6 +77,12 @@ export function FleetSection({ range }: { range: DateRange }): ReactNode {
                     <td className="num px-3 py-2 text-end">
                       {vehicle.km}
                       {vehicle.kmUnrecorded > 0 ? <span className="ms-1 text-label text-warning-ink">+?</span> : null}
+                    </td>
+                    <td className="num px-3 py-2 text-end">
+                      {gpsKm(vehicle.workDistanceMetres, t.shiftPath.unavailable)}
+                      <span className={`block text-xs ${vehicle.gpsIncompleteShifts > 0 ? 'text-warning-ink' : 'text-ink-muted'}`}>
+                        {t.dashboard.gpsCoverage.replace('{n}', vehicle.gpsCoveragePercent === null ? t.shiftPath.unavailable : `${vehicle.gpsCoveragePercent}%`)}
+                      </span>
                     </td>
                     <td className="num px-3 py-2 text-end">{vehicle.orders}</td>
                     {data.financeVisible ? (

@@ -16,6 +16,10 @@ export interface LiveBoardRow {
   readonly state: string
   readonly windowOpensAt?: string | null
   readonly worked?: { readonly pattern: ShiftPattern; readonly slot?: ShiftSlot | null } | undefined
+  readonly break?: {
+    readonly activeBreak: { readonly id: string } | null
+    readonly totalBreakMs: number
+  } | undefined
 }
 
 export interface LiveBoardFilters {
@@ -35,11 +39,11 @@ export const NO_LIVE_FILTERS: LiveBoardFilters = Object.freeze({
 })
 
 /** Whole minutes since the shift's operation window opened, or null when it has no start yet. */
-export function liveElapsedMinutes(windowOpensAt: string | null | undefined, nowMs: number): number | null {
+export function liveElapsedMinutes(windowOpensAt: string | null | undefined, nowMs: number, breakMs = 0): number | null {
   if (!windowOpensAt) return null
   const started = Date.parse(windowOpensAt)
   if (!Number.isFinite(started)) return null
-  return Math.max(0, Math.floor((nowMs - started) / 60_000))
+  return Math.max(0, Math.floor((nowMs - started - Math.max(0, breakMs)) / 60_000))
 }
 
 /** The target a running shift is measured against: its slot's, never a double's. */
@@ -50,7 +54,7 @@ export function liveTargetMinutes(row: Pick<LiveBoardRow, 'worked'>): number | n
 
 /** Minutes past the slot's target, or 0 when within it, or null when it cannot be said. */
 export function liveOverMinutes(row: LiveBoardRow, nowMs: number): number | null {
-  const elapsed = liveElapsedMinutes(row.windowOpensAt, nowMs)
+  const elapsed = liveElapsedMinutes(row.windowOpensAt, nowMs, row.break?.totalBreakMs ?? 0)
   const target = liveTargetMinutes(row)
   if (elapsed === null || target === null) return null
   return Math.max(0, elapsed - target)

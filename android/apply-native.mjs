@@ -126,4 +126,4 @@ if (!gradle.includes('play-services-location')) {
   writeFileSync(gradlePath, gradle)
 }
 
-console.log('native sources applied: 4 Java files, 2 string resources, manifest, gradle')
+console.log('native sources applied: 5 Java files, 2 string resources, manifest, gradle')

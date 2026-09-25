@@ -265,6 +265,7 @@
   /* The recorded path: a muted full trail, a bright segment for the selected order, and a green
      start / red end so a route reads direction at a glance. Not success/danger — route endpoints. */
   --ash-map-path-stroke: #475569;
+  --ash-map-break-stroke: #b45309;
   --ash-map-segment-stroke: #7c3aed;
   --ash-map-start-fill: #047857;
   --ash-map-end-fill: #dc2626;
@@ -375,6 +376,7 @@
   /* The recorded path: a muted full trail, a bright segment for the selected order, and a green
      start / red end so a route reads direction at a glance. Not success/danger — route endpoints. */
   --ash-map-path-stroke: #475569;
+  --ash-map-break-stroke: #fbbf24;
   --ash-map-segment-stroke: #7c3aed;
   --ash-map-start-fill: #047857;
   --ash-map-end-fill: #dc2626;

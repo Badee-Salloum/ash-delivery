@@ -44,6 +44,7 @@ export * from './fleet/odometer.ts'
 // and measure the great-circle length of a run of pings.
 export * from './gps/segment.ts'
 export * from './gps/distance.ts'
+export * from './gps/work-distance.ts'
 
 // C4/C5 — fixed-asset schedules, book value and FIFO depreciation funding.
 export * from './assets/depreciation.ts'

@@ -25,7 +25,7 @@ const MUST_AUDIT = [
   'drivers', 'vehicles', 'documents',
   'funds', 'fx_days', 'week_locks', 'journal_entries', 'journal_lines',
   'cash_counts', 'expenses', 'incomes', 'receivable_events', 'checkins',
-  'shifts', 'shift_orders', 'cash_deductions', 'shift_media', 'float_tranches', 'tier_rules',
+  'shifts', 'shift_breaks', 'shift_orders', 'cash_deductions', 'shift_media', 'float_tranches', 'tier_rules',
   // Decision-complete cash/wallet close snapshots. Append-only, but creation is a money decision.
   'shift_settlements',
   // Advance authority plus the exact cash/wallet values a driver may receive automatically.

@@ -1,5 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useId, useRef, useState } from 'react'
 import type { ShiftPattern, ShiftSlot } from '@ash/domain'
+import type { BreakSummary } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { useConfirm } from '../feedback.tsx'
 import { shiftPatternLabel, shiftPatternTone } from '../shift-shape.ts'
@@ -52,6 +53,7 @@ interface ShiftRow {
    */
   worked?: { minutes: number | null; pattern: ShiftPattern; slot?: ShiftSlot | null; abandoned: boolean }
   windowOpensAt?: string | null
+  break?: BreakSummary
 }
 interface DriverLite {
   id: string
@@ -173,6 +175,7 @@ export function LiveShifts({
   const filters = { driver: driverFilter, vehicle: vehicleFilter, state: stateFilter, slot: slotFilter, over: onlyOver }
   const shown = rows.filter((row) => matchesLiveFilters(row, filters, readAtMs))
   const counts = liveCounts(rows, readAtMs)
+  const restingCount = rows.filter((row) => row.state === 'open' && row.break?.activeBreak).length
   // Everyone on the board, plus whoever a link named — so a filter is never a value the list lacks.
   const withSelected = (ids: string[], selected: string): string[] =>
     [...new Set([...ids, ...(selected === '' ? [] : [selected])])]
@@ -230,8 +233,9 @@ export function LiveShifts({
           {t.liveShifts.onlyOver}
         </label>
       </div>
-      <div className="grid grid-cols-3 gap-3">
-        <Stat label={t.liveShifts.countOpen} value={<span className="num">{counts.open}</span>} />
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Stat label={t.liveShifts.countWorking} value={<span className="num">{counts.open - restingCount}</span>} />
+        <Stat label={t.liveShifts.countResting} value={<span className="num">{restingCount}</span>} />
         <Stat label={t.liveShifts.countSuspended} value={<span className="num">{counts.suspended}</span>} />
         <Stat
           label={t.liveShifts.countOver}
@@ -305,7 +309,7 @@ function LiveRow({
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<LiveShiftApiError | null>(null)
   const forceCloseReady = forceClosePreparationReady(cashDeclared, walletDeclared)
-  const elapsedMinutes = liveElapsedMinutes(shift.windowOpensAt, readAtMs)
+  const elapsedMinutes = liveElapsedMinutes(shift.windowOpensAt, readAtMs, shift.break?.totalBreakMs ?? 0)
   const targetMinutes = liveTargetMinutes(shift)
   const overMinutes = liveOverMinutes(shift, readAtMs)
 
@@ -509,6 +513,10 @@ function LiveRow({
         <Badge tone={shift.state === 'suspended' ? 'amber' : 'green'}>
           {t.shift.states[shift.state as keyof typeof t.shift.states] ?? shift.state}
         </Badge>
+        {shift.break?.activeBreak ? <Badge tone="amber">{t.liveShifts.resting}</Badge> : null}
+        {(shift.break?.overLimitMs ?? 0) > 0 ? (
+          <Badge tone="danger">{t.liveShifts.breakOver.replace('{t}', hoursMinutes(Math.ceil(shift.break!.overLimitMs / 60_000)))}</Badge>
+        ) : null}
         <span className="font-medium">{driverName}</span>
         <span className="num text-sm text-slate-500">
           {vehicleCode} · #{shift.shiftNo}
@@ -560,6 +568,9 @@ function LiveRow({
           is on the shift so far, and the odometer he left on. A shift that opened yesterday and is
           still running shows its own date, so «جارية منذ أمس» is visible rather than surprising. */}
       <div className="num flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+        {shift.break && shift.break.totalBreakMs > 0 ? (
+          <span>{t.liveShifts.breakUsed.replace('{t}', hoursMinutes(Math.floor(shift.break.totalBreakMs / 60_000)))}</span>
+        ) : null}
         <span>
           {t.shift.cashFloat}: {shift.floatTotal ?? '—'}
         </span>

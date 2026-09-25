@@ -1545,6 +1545,8 @@ export function serializeFxRateNumber(sypMinorPerUsd: bigint): number {
  * precision through JSON. Every field is optional: only what is sent changes.
  */
 export const updateSettingsRequest = z.object({
+  /** One global cumulative allowance for every driver's shift. */
+  breakLimitMinutes: z.number().int().min(1).max(1440).optional(),
   /** «سقف الإيصال» — above this an expense/manual entry needs a photographed receipt (G-3 / س52). */
   receiptCeilingMinor: moneySchema.optional(),
   /** «سعر الكيلوواط-ساعة» — fixed kWh price for charging cost (G-2 / س64). */

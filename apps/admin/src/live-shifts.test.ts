@@ -31,6 +31,7 @@ const row = (over: Partial<LiveBoardRow> & { id?: string }): LiveBoardRow => ({
 describe('a running shift is measured against its slot', () => {
   it('counts elapsed whole minutes from the window start', () => {
     expect(liveElapsedMinutes('2026-09-17T06:00:00.000Z', NOW)).toBe(180)
+    expect(liveElapsedMinutes('2026-09-17T06:00:00.000Z', NOW, 60 * 60_000)).toBe(120)
     expect(liveElapsedMinutes('2026-09-17T08:59:30.000Z', NOW)).toBe(0)
     expect(liveElapsedMinutes('2026-09-17T10:00:00.000Z', NOW)).toBe(0)
     expect(liveElapsedMinutes(null, NOW)).toBeNull()
@@ -45,6 +46,7 @@ describe('a running shift is measured against its slot', () => {
     // not «a double in progress», which only a close can make it.
     const long = row({ windowOpensAt: '2026-09-16T23:50:00.000Z', worked: { pattern: 'unknown', slot: 'evening' } })
     expect(liveOverMinutes(long, NOW)).toBe(70)
+    expect(liveOverMinutes(row({ ...long, break: { activeBreak: null, totalBreakMs: 80 * 60_000 } }), NOW)).toBe(0)
     expect(isOverTarget(long, NOW)).toBe(true)
     expect(liveOverMinutes(row({}), NOW)).toBe(0)
     expect(isOverTarget(row({ windowOpensAt: null }), NOW)).toBe(false)

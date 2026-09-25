@@ -114,6 +114,16 @@ describe('sliceTrailByOrders — worked cases', () => {
     expect(r.afterClose).toEqual({ pingStartIndex: 2, pingEndIndex: 2 })
   })
 
+  it('classifies fixes after submission even when every order is untimed', () => {
+    const pings = [ping('2026-09-21 09:00'), ping('2026-09-21 10:00')]
+    const r = sliceTrailByOrders({
+      pings, orders: [order('1', '2026-09-21', null)],
+      submittedAtMs: at('2026-09-21 09:30'), offsetMinutes: OFFSET,
+    })
+    expect(r.beforeFirst).toEqual({ pingStartIndex: 0, pingEndIndex: 1 })
+    expect(r.afterClose).toEqual({ pingStartIndex: 1, pingEndIndex: 2 })
+  })
+
   it('handles an empty trail', () => {
     const orders = [order('1', '2026-09-21', '09:00')]
     const r = sliceTrailByOrders({ pings: [], orders, submittedAtMs: at('2026-09-21 09:30'), offsetMinutes: OFFSET })
@@ -141,13 +151,12 @@ function oracle(input: {
     .map((o) => ({ providerOrderNo: o.providerOrderNo, key: printedMinuteKey(o.occurredDate, o.occurredMinute) }))
     .filter((o): o is { providerOrderNo: string; key: string } => o.key !== null)
     .sort((a, b) => (a.key !== b.key ? (a.key < b.key ? -1 : 1) : a.providerOrderNo < b.providerOrderNo ? -1 : 1))
-  const submittedKey = input.submittedAtMs === null ? null : minuteKeyForOffset(input.submittedAtMs, input.offsetMinutes)
   return input.pings.map((p) => {
     const pk = minuteKeyForOffset(p.capturedAtMs, input.offsetMinutes)
     let active = -1
     for (let j = 0; j < timed.length; j++) if (timed[j]!.key <= pk) active = j
+    if (input.submittedAtMs !== null && p.capturedAtMs >= input.submittedAtMs) return { kind: 'after' }
     if (active === -1) return { kind: 'before' }
-    if (active === timed.length - 1 && submittedKey !== null && pk >= submittedKey) return { kind: 'after' }
     return { kind: 'order', orderIndex: active }
   })
 }

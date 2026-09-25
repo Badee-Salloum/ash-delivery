@@ -39,12 +39,11 @@ import com.google.android.gms.location.Priority;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -89,19 +88,17 @@ import java.util.concurrent.RejectedExecutionException;
  *
  * WHAT STOPS IT.
  *
- * A 409 from the ingest route, and nothing else. The service outlives the WebView, so JavaScript
- * may never get the chance to call `stop()`; the server saying «this shift is no longer live» is
- * the only signal that reliably arrives. Every other failure — offline, 5xx, a timeout — means «not
- * yet», so the buffer is kept and the next tick retries. Reverse those two and a phone hammers a
- * closed shift every fifteen seconds for weeks with nobody watching.
+ * A 409 from the ingest route, or an ended result from the status route when no fixes are queued.
+ * The service outlives the WebView, so JavaScript may never get the chance to call `stop()`.
+ * Offline, 5xx, and timeouts preserve the queue and retry on the next tick.
  *
  *
- * KEEPING IT ALIVE. Three background-reliability hardenings, each closing a way location silently
+ * KEEPING IT ALIVE. Background-reliability hardenings close ways location silently
  * stops: a fallback to the platform `LocationManager` when Google Play Services is absent (Huawei
  * and any GMS-less device), a watchdog that re-arms the location request when fixes stop arriving,
  * a wake lock spanning the upload so an in-flight POST is not frozen when the CPU suspends, and a
  * guarded `startForeground` so a permission-less restart on Android 14+ stops cleanly rather than
- * crash-looping.
+ * crash-looping. SQLite keeps queued fixes across process death and reboot.
  */
 public class TrackerService extends Service {
 
@@ -140,8 +137,9 @@ public class TrackerService extends Service {
 
     /** Bounded so a phone that never regains signal cannot grow this without limit. */
     private static final int BUFFER_MAX = 2_000;
+    private static final long STATUS_INTERVAL_MS = 60_000L;
 
-    private final ArrayDeque<JSONObject> buffer = new ArrayDeque<>();
+    private GpsFixStore fixStore;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final Handler ticker = new Handler(Looper.getMainLooper());
 
@@ -156,6 +154,13 @@ public class TrackerService extends Service {
     private volatile boolean stopped = false;
     /** Elapsed-realtime of the last fix, for the watchdog. Set when updates start so it does not fire early. */
     private volatile long lastFixElapsedMs = 0L;
+    private long lastStatusCheckElapsedMs = 0L;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        fixStore = new GpsFixStore(this);
+    }
 
     private final LocationCallback callback = new LocationCallback() {
         @Override
@@ -229,6 +234,7 @@ public class TrackerService extends Service {
         shiftId = id;
         origin = base;
         stopped = false;
+        lastStatusCheckElapsedMs = 0L;
 
         try {
             startForeground(NOTIFICATION_ID, notification());
@@ -246,6 +252,7 @@ public class TrackerService extends Service {
 
         ticker.removeCallbacks(tick);
         ticker.postDelayed(tick, INTERVAL_MS);
+        submitFlush(); // Check an empty queue immediately after a sticky restart.
         return START_STICKY;
     }
 
@@ -337,22 +344,23 @@ public class TrackerService extends Service {
     private void enqueue(Location location) {
         if (stopped || location == null) return;
         lastFixElapsedMs = SystemClock.elapsedRealtime();
-        JSONObject fix = new JSONObject();
+        String assignedShift = shiftId;
+        if (assignedShift == null) return;
         try {
-            fix.put("lat", location.getLatitude());
-            fix.put("lng", location.getLongitude());
-            fix.put("accuracyM", location.hasAccuracy() ? (double) location.getAccuracy() : JSONObject.NULL);
-            fix.put("capturedAtMs", location.getTime());
-        } catch (Exception ignored) {
-            return;
+            final double lat = location.getLatitude();
+            final double lng = location.getLongitude();
+            final Float accuracy = location.hasAccuracy() ? location.getAccuracy() : null;
+            final long capturedAtMs = location.getTime();
+            io.execute(() -> {
+                if (stopped || !assignedShift.equals(shiftId)) return;
+                // Serializing disk writes with uploads means a 202 can only acknowledge rows that
+                // were committed before the request. The queue survives process death and reboot.
+                fixStore.enqueue(assignedShift, lat, lng, accuracy, capturedAtMs, BUFFER_MAX);
+                flush();
+            });
+        } catch (RejectedExecutionException shuttingDown) {
+            // The service is already stopping; a callback posted earlier may arrive after teardown.
         }
-        synchronized (buffer) {
-            // Oldest out when full: when the buffer overflows the recent minutes are the ones worth
-            // keeping, because a stale position is what the live map must never be given.
-            while (buffer.size() >= BUFFER_MAX) buffer.removeFirst();
-            buffer.addLast(fix);
-        }
-        submitFlush();
     }
 
     /** Submit a flush, tolerating the teardown window where the IO executor is already shut down. */
@@ -451,17 +459,23 @@ public class TrackerService extends Service {
         String base = origin;
         if (id == null || base == null) return;
 
-        List<JSONObject> sending = new ArrayList<>();
-        synchronized (buffer) {
-            if (buffer.isEmpty()) return;
-            Iterator<JSONObject> it = buffer.iterator();
-            while (it.hasNext() && sending.size() < FLUSH_MAX) sending.add(it.next());
+        List<GpsFixStore.Fix> sending = fixStore.batch(id, FLUSH_MAX);
+        if (sending.isEmpty()) {
+            // A closed shift with no fresh GPS fix still needs a stop signal.
+            long now = SystemClock.elapsedRealtime();
+            if (lastStatusCheckElapsedMs == 0L || now - lastStatusCheckElapsedMs >= STATUS_INTERVAL_MS) {
+                lastStatusCheckElapsedMs = now;
+                if (getStatus(base + "/api/shifts/" + id + "/gps/status") == Outcome.SHIFT_OVER) stopEndedShift(id);
+            }
+            return;
         }
 
         JSONObject body = new JSONObject();
         try {
             body.put("source", "phone_bg");
-            body.put("fixes", new JSONArray(sending));
+            JSONArray fixes = new JSONArray();
+            for (GpsFixStore.Fix fix : sending) fixes.put(fix.json);
+            body.put("fixes", fixes);
         } catch (Exception malformed) {
             return;
         }
@@ -484,24 +498,11 @@ public class TrackerService extends Service {
         try {
             Outcome outcome = post(base + "/api/shifts/" + id + "/gps", body);
             if (outcome == Outcome.ACCEPTED) {
-                synchronized (buffer) {
-                    // Remove exactly what was sent; anything captured meanwhile stays queued. Compared
-                    // by identity because the overflow rule above may have dropped from the front while
-                    // the request was in flight.
-                    for (JSONObject sent : sending) {
-                        if (!buffer.isEmpty() && buffer.peekFirst() == sent) buffer.removeFirst();
-                    }
-                }
+                fixStore.acknowledge(sending);
             } else if (outcome == Outcome.SHIFT_OVER) {
-                // The server will never take these. Drop them and stop — see the class comment.
-                synchronized (buffer) {
-                    buffer.clear();
-                }
-                stopped = true;
-                forget();
-                stopSelf();
+                stopEndedShift(id);
             }
-            // RETRY: keep the buffer; the ticker will try again.
+            // RETRY: keep the on-disk queue; the ticker will try again.
         } finally {
             if (lock != null && lock.isHeld()) {
                 try { lock.release(); } catch (Exception ignored) {}
@@ -510,6 +511,42 @@ public class TrackerService extends Service {
     }
 
     private enum Outcome { ACCEPTED, SHIFT_OVER, RETRY }
+
+    private void stopEndedShift(String id) {
+        fixStore.clearShift(id);
+        if (!id.equals(shiftId)) return; // A new assignment started during the old request.
+        stopped = true;
+        forget();
+        stopSelf();
+    }
+
+    /** Empty-buffer heartbeat. Only an explicit ended/deleted shift stops tracking. */
+    private Outcome getStatus(String url) {
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(url).openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(15_000);
+            connection.setReadTimeout(20_000);
+            String cookie = CookieManager.getInstance().getCookie(url);
+            if (cookie != null) connection.setRequestProperty("cookie", cookie);
+            int status = connection.getResponseCode();
+            if (status == 404 || status == 409) return Outcome.SHIFT_OVER;
+            if (status != 200) return Outcome.RETRY;
+            writeBackCookies(url, connection);
+            StringBuilder response = new StringBuilder();
+            try (BufferedReader in = new BufferedReader(new InputStreamReader(connection.getInputStream()))) {
+                String line;
+                while ((line = in.readLine()) != null) response.append(line);
+            }
+            return new JSONObject(response.toString()).optBoolean("live", true)
+                    ? Outcome.ACCEPTED : Outcome.SHIFT_OVER;
+        } catch (Exception offline) {
+            return Outcome.RETRY;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
 
     private Outcome post(String url, JSONObject body) {
         HttpURLConnection connection = null;

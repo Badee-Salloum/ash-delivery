@@ -6,7 +6,7 @@ import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { formatDistance } from '../format-distance.ts'
 import { leafletPathPaints } from '../map-theme.ts'
-import { Badge, Card } from '../ui.tsx'
+import { Badge, Button, Card } from '../ui.tsx'
 
 /**
  * One shift's recorded GPS trail (SRS K), with a path segment per order by printed time.
@@ -34,6 +34,7 @@ export function ShiftPathMap({
   const [fetchedView, setFetchedView] = useState<GpsPathView | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
+  const [showRawExtent, setShowRawExtent] = useState(false)
 
   // Controlled when a `view` prop is present (even `null`, meaning "the parent is still loading").
   const controlled = externalView !== undefined
@@ -78,15 +79,41 @@ export function ShiftPathMap({
     if (!view || view.pings.length === 0) return
     const paints = leafletPathPaints()
     const points: [number, number][] = view.pings.map((p) => [p.lat, p.lng])
+    const workBounds: [number, number][] = []
+    const breakBounds: [number, number][] = []
 
-    // The whole trail, muted.
-    L.polyline(points, { color: paints.path, weight: 3, opacity: 0.65 }).addTo(layer)
+    // Draw only adjacent, credible edges. Raw fixes remain visible as points for inspection, while
+    // breaks have their own dashed trail and never join a work segment.
+    for (let index = 1; index < view.pings.length; index += 1) {
+      const from = view.pings[index - 1]!
+      const to = view.pings[index]!
+      const edge: [number, number][] = [[from.lat, from.lng], [to.lat, to.lng]]
+      if (to.phase === 'work' && to.workEdgeMetres !== null) {
+        L.polyline(edge, { color: paints.path, weight: 4, opacity: 0.85 }).addTo(layer)
+        workBounds.push(...edge)
+      } else if (from.phase === 'break' && to.phase === 'break'
+        && Date.parse(to.capturedAt) - Date.parse(from.capturedAt) <= 5 * 60_000) {
+        L.polyline(edge, { color: paints.break, weight: 3, opacity: 0.8, dashArray: '7 5' }).addTo(layer)
+        breakBounds.push(...edge)
+      }
+    }
+    for (const ping of view.pings) {
+      L.circleMarker([ping.lat, ping.lng], {
+        radius: 2, color: ping.phase === 'break' ? paints.break : paints.path,
+        fillColor: ping.phase === 'break' ? paints.break : paints.path,
+        fillOpacity: 0.7, weight: 0,
+      }).addTo(layer)
+    }
 
     // The selected order's own stretch, drawn bright and on top.
     const seg = selected === null ? null : view.segments.find((s) => s.orderId === selected)
     if (seg && seg.pingEndIndex > seg.pingStartIndex) {
       const slice = points.slice(seg.pingStartIndex, seg.pingEndIndex)
-      L.polyline(slice, { color: paints.segment, weight: 6, opacity: 0.95 }).addTo(layer)
+      for (let index = seg.pingStartIndex + 1; index < seg.pingEndIndex; index += 1) {
+        const to = view.pings[index]!
+        if (to.phase !== 'work' || to.workEdgeMetres === null) continue
+        L.polyline([points[index - 1]!, points[index]!], { color: paints.segment, weight: 6, opacity: 0.95 }).addTo(layer)
+      }
       const head = slice[0]
       if (head) L.circleMarker(head, { radius: 6, color: paints.segment, fillColor: paints.segment, fillOpacity: 1, weight: 2 }).addTo(layer)
     }
@@ -97,8 +124,9 @@ export function ShiftPathMap({
     if (first) L.circleMarker(first, { radius: 7, color: paints.start, fillColor: paints.start, fillOpacity: 1, weight: 2 }).addTo(layer)
     if (last) L.circleMarker(last, { radius: 7, color: paints.end, fillColor: paints.end, fillOpacity: 1, weight: 2 }).addTo(layer)
 
-    if (mapRef.current) mapRef.current.fitBounds(L.latLngBounds(points).pad(0.3), { maxZoom: 16 })
-  }, [view, selected, theme])
+    const extent = showRawExtent ? points : workBounds.length > 0 ? workBounds : breakBounds.length > 0 ? breakBounds : points
+    if (mapRef.current && extent.length > 0) mapRef.current.fitBounds(L.latLngBounds(extent).pad(0.3), { maxZoom: 16 })
+  }, [view, selected, theme, showRawExtent])
 
   const orderLabel = useCallback(
     (providerOrderNo: string, minute: string | null): string =>
@@ -117,7 +145,21 @@ export function ShiftPathMap({
       <Card title={t.shiftPath.title}>
         {error ? <p className="mb-2 text-sm text-danger-ink">{explainError(error, t)}</p> : null}
         <div ref={mapDiv} className="h-[55vh] w-full rounded-lg" />
+        {view && view.pings.length > 0 ? (
+          <Button variant="ghost" className="mt-2" onClick={() => setShowRawExtent((value) => !value)}>
+            {showRawExtent ? t.shiftPath.showWorkExtent : t.shiftPath.showRawExtent}
+          </Button>
+        ) : null}
         {view && view.pings.length === 0 ? <p className="mt-2 text-sm text-ink-muted">{t.shiftPath.empty}</p> : null}
+        {view ? (
+          <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-sm">
+            <span className="font-semibold">{t.shiftPath.workDistance}: <span className="num">{view.workDistanceMetres === null ? t.shiftPath.unavailable : formatDistance(view.workDistanceMetres, t.shiftPath)}</span></span>
+            <span>{t.shiftPath.coverage}: <span className="num">{view.coveragePercent === null ? t.shiftPath.unavailable : `${view.coveragePercent}%`}</span></span>
+            {view.coverageIncomplete ? <Badge tone="amber">{t.shiftPath.incompleteCoverage}</Badge> : null}
+            <span className="text-ink-muted">{t.shiftPath.rawTrailDistance}: <span className="num">{formatDistance(view.totalDistanceMetres, t.shiftPath)}</span></span>
+            {view.breaks.length > 0 ? <span className="text-warning-ink">{t.shiftPath.breakTrail}</span> : null}
+          </div>
+        ) : null}
         {trackerPings > 0 ? (
           <p className="mt-2 text-xs text-ink-muted">
             <Badge tone="slate">{t.shiftPath.sourceTracker}</Badge> {t.shiftPath.mixedSources}
@@ -137,7 +179,7 @@ export function ShiftPathMap({
               >
                 <span>{t.shiftPath.wholeTrail} · {t.shiftPath.points.replace('{n}', String(view.pings.length))}</span>
                 <span className="num ms-auto font-semibold" dir="ltr">
-                  {formatDistance(view.totalDistanceMetres, t.shiftPath)}
+                  {view.workDistanceMetres === null ? t.shiftPath.unavailable : formatDistance(view.workDistanceMetres, t.shiftPath)}
                 </span>
               </button>
             </li>
@@ -195,13 +237,13 @@ function DistanceCell({
   count,
   units,
 }: {
-  metres: number
+  metres: number | null
   count: number
-  units: { readonly km: string; readonly metres: string }
+  units: { readonly km: string; readonly metres: string; readonly unavailable: string }
 }): ReactNode {
   return (
     <span className="num ms-auto flex items-baseline gap-2" dir="ltr">
-      <span>{formatDistance(metres, units)}</span>
+      <span>{metres === null ? units.unavailable : formatDistance(metres, units)}</span>
       <span className="text-xs text-ink-muted">{count}</span>
     </span>
   )

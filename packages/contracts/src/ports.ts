@@ -886,6 +886,31 @@ export interface DriverAccountProvisioningRepo {
   provision(input: DriverAccountProvisionInput): Promise<void>
 }
 
+export type ShiftBreakEndReason = 'driver_resumed' | 'manager_suspended' | 'manager_voided' | 'manager_force_closed'
+
+/** One pause within an operational shift. Milliseconds use the server clock. */
+export interface ShiftBreakRecord {
+  id: string
+  shiftId: string
+  startedAtMs: number
+  endedAtMs: number | null
+  endReason: ShiftBreakEndReason | null
+  /** Global allowance captured when this break began. */
+  limitMinutes: number
+  /** Completed pauses before this one; makes later setting changes non-retroactive. */
+  consumedBeforeMs: number
+  /** Stored on end; active rows are projected with the current server time. */
+  overLimitMs: number
+}
+
+export interface ShiftBreakRepo {
+  findById(id: string): Promise<ShiftBreakRecord | null>
+  listByShift(shiftId: string): Promise<ShiftBreakRecord[]>
+  listByShiftIds(shiftIds: readonly string[]): Promise<ShiftBreakRecord[]>
+  create(record: ShiftBreakRecord, actorId: string): Promise<void>
+  end(id: string, endedAtMs: number, reason: ShiftBreakEndReason, overLimitMs: number, actorId: string): Promise<void>
+}
+
 export interface ShiftRepo {
   create(shift: ShiftRecord, actorId: string | null): Promise<void>
   findById(id: string): Promise<ShiftRecord | null>
@@ -2798,18 +2823,20 @@ export interface GpsPingRepo {
    */
   appendMany(pings: readonly Omit<GpsPingRecord, 'id'>[]): Promise<{ inserted: number }>
   /**
-   * The latest fix for each of the named drivers — what the live map draws.
+   * The latest fix for each of the named drivers, for driver-wide history reads.
    *
-   * Takes the driver ids because the caller already knows who is live, and a seek per driver is
+   * Takes the driver ids so a seek per driver is
    * O(drivers) forever. Its predecessor was `DISTINCT ON (driver_id)` over the whole branch, which
    * does not skip: it reads every tuple the branch has ever written, so it degraded with history.
-   * `sinceMs` bounds it further — a fix older than that is not a live position, it is a memory.
+   * `sinceMs` bounds capture time, since a newly received buffered fix may describe an old position.
    */
   latestForDriversInBranch(
     branchId: string,
     driverIds: readonly string[],
     sinceMs: number,
   ): Promise<GpsPingRecord[]>
+  /** Latest captured fix on each named live shift; old-shift late uploads cannot mask it. */
+  latestForShiftIds(shiftIds: readonly string[]): Promise<GpsPingRecord[]>
   /**
    * A shift's whole trail, in CAPTURE order.
    *
@@ -2818,6 +2845,8 @@ export interface GpsPingRepo {
    * and the summed distance inflates without bound. That number is one a manager acts on.
    */
   listForShift(shiftId: string): Promise<GpsPingRecord[]>
+  /** Resolve all trails in one reporting read, capture-ordered within each shift. */
+  listByShiftIds(shiftIds: readonly string[]): Promise<GpsPingRecord[]>
   /** How many fixes a shift has stored. Guards one wedged handset from filling the table. */
   countForShift(shiftId: string): Promise<number>
 }
@@ -2865,6 +2894,7 @@ export interface TrackerDeviceRepo {
  */
 export interface ShiftCloseTransactionDeps {
   shifts: ShiftRepo
+  breaks: ShiftBreakRepo
   preapprovedShiftRules: PreapprovedShiftRuleRepo
   orders: OrderRepo
   cashDeductions: CashDeductionRepo
@@ -2911,6 +2941,7 @@ export interface Deps {
   sessions: SessionRepo
   driverAccounts: DriverAccountProvisioningRepo
   shifts: ShiftRepo
+  breaks: ShiftBreakRepo
   preapprovedShiftRules: PreapprovedShiftRuleRepo
   assignments: AssignmentRepo
   batteryReadings: BatteryReadingRepo

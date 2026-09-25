@@ -97,6 +97,52 @@ describe('live GPS (SRS K)', () => {
     expect(live.find((x) => x.driverId === DRIVER_ID)!.lat).toBeCloseTo(33.6)
   })
 
+  it('keeps the current shift visible when an older shift has a later captured fix', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const gm = await h.loginAs('gm')
+    const id = await toOpen(driver, manager)
+    const now = h.deps.clock.nowMs()
+    await post(driver, `/shifts/${id}/gps`, { lat: 33.6, lng: 36.3, capturedAtMs: now - 60_000 })
+    // A late batch on an already closed shift remains in the raw store. It must not win the
+    // driver's latest-position lookup ahead of the current shift's own fix.
+    await h.deps.gps.append({
+      shiftId: crypto.randomUUID(), driverId: DRIVER_ID, branchId: BRANCH,
+      lat: 33.1, lng: 36.1, accuracyM: null, source: 'phone_bg',
+      capturedAtMs: now, receivedAtMs: now,
+    })
+    const live = (await get(gm, `/gps/live?branchId=${BRANCH}`)).json()
+    expect((live.drivers as LiveDriver[]).find((row) => row.driverId === DRIVER_ID)?.lat).toBeCloseTo(33.6)
+    expect(live.silent).toEqual([])
+  })
+
+  it('does not let a late buffered batch replace a newer captured position or mask silence', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const gm = await h.loginAs('gm')
+    const id = await toOpen(driver, manager)
+    const now = h.deps.clock.nowMs()
+    await post(driver, `/shifts/${id}/gps`, { lat: 33.6, lng: 36.3, capturedAtMs: now - 12 * 60_000 })
+    await post(driver, `/shifts/${id}/gps`, {
+      source: 'phone_bg', fixes: [{ lat: 33.5, lng: 36.2, capturedAtMs: now - 20 * 60_000 }],
+    })
+    const live = (await get(gm, `/gps/live?branchId=${BRANCH}`)).json()
+    expect((live.drivers as LiveDriver[]).find((x) => x.driverId === DRIVER_ID)?.lat).toBeCloseTo(33.6)
+    expect(live.silent).toContainEqual({ driverId: DRIVER_ID, shiftId: id, silentMinutes: 12 })
+  })
+
+  it('keeps the true last-capture silence duration after the pin leaves the map', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const gm = await h.loginAs('gm')
+    const id = await toOpen(driver, manager)
+    const now = h.deps.clock.nowMs()
+    await post(driver, `/shifts/${id}/gps`, { lat: 33.6, lng: 36.3, capturedAtMs: now - 90 * 60_000 })
+    const live = (await get(gm, `/gps/live?branchId=${BRANCH}`)).json()
+    expect((live.drivers as LiveDriver[]).find((x) => x.driverId === DRIVER_ID)).toBeUndefined()
+    expect(live.silent).toContainEqual({ driverId: DRIVER_ID, shiftId: id, silentMinutes: 90 })
+  })
+
   it('drops a driver off the live map once his shift ends — a voided stuck shift no longer lingers', async () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
@@ -243,6 +289,17 @@ describe('live GPS (SRS K)', () => {
       expect(res.json().error).toBe('shift_not_live')
     })
 
+    it('reports shift status when the native queue is empty', async () => {
+      const driver = await h.loginAs('driver1')
+      const otherDriver = await h.loginAs('driver2')
+      const manager = await h.loginAs('manager')
+      const id = await toOpen(driver, manager)
+      expect((await get(driver, `/shifts/${id}/gps/status`)).json()).toMatchObject({ live: true })
+      expect((await get(otherDriver, `/shifts/${id}/gps/status`)).statusCode).toBe(403)
+      await post(manager, `/shifts/${id}/void`, { reason: 'stuck shift' })
+      expect((await get(driver, `/shifts/${id}/gps/status`)).json()).toMatchObject({ live: false })
+    })
+
     it('still accepts the single-fix body an installed phone keeps sending', async () => {
       // The driver PWA reaches a phone only when its driver taps «تحديث». Assuming otherwise is
       // what let the 2026-08-24 close failures survive their own fix.
@@ -304,6 +361,9 @@ describe('live GPS (SRS K)', () => {
       const M = 60_000
       const tA = now - 15 * M
       const tB = now - 8 * M
+      // This fixture injects historic captures directly; its operation window must cover them.
+      const shift = h.deps.shifts.rows.get(id)!
+      h.deps.shifts.rows.set(id, { ...shift, windowOpensAt: new Date(now - 21 * M).toISOString() })
       await seedOrder(id, 'YAL-A', tA)
       await seedOrder(id, 'YAL-B', tB)
       await seedOrder(id, 'YAL-X', now - 12 * M, false) // excluded → never a segment
@@ -342,10 +402,9 @@ describe('live GPS (SRS K)', () => {
       expect(path.afterClose).toMatchObject({ pingStartIndex: 5, pingEndIndex: 5 })
       expect(path.untimedOrderIds).toEqual(['ord-YAL-N'])
 
-      // Each range carries its recorded path length (whole metres). A one-ping bucket (beforeFirst)
-      // and an empty one (afterClose) have no length; each two-ping order segment has a real one.
-      expect(path.beforeFirst.distanceMetres).toBe(0)
-      expect(path.afterClose.distanceMetres).toBe(0)
+      // No valid consecutive pair is unavailable, not a confirmed zero kilometres.
+      expect(path.beforeFirst.distanceMetres).toBeNull()
+      expect(path.afterClose.distanceMetres).toBeNull()
       for (const s of path.segments as { distanceMetres: number }[]) {
         expect(s.distanceMetres).toBeGreaterThan(0)
       }
@@ -355,6 +414,48 @@ describe('live GPS (SRS K)', () => {
       // The whole-trail total covers every hop, so it is at least the longest single order segment.
       const maxSegment = Math.max(...path.segments.map((s: { distanceMetres: number }) => s.distanceMetres))
       expect(path.totalDistanceMetres).toBeGreaterThanOrEqual(maxSegment)
+      expect(path.workDistanceMetres).toBeGreaterThanOrEqual(maxSegment)
+      expect(path.coverageIncomplete).toBe(true)
+    })
+
+    it('keeps the raw trail while excluding break and after-close movement from work', async () => {
+      const driver = await h.loginAs('driver1')
+      const manager = await h.loginAs('manager')
+      const id = await toOpen(driver, manager)
+      const now = h.deps.clock.nowMs()
+      const M = 60_000
+      const shift = h.deps.shifts.rows.get(id)!
+      h.deps.shifts.rows.set(id, {
+        ...shift,
+        windowOpensAt: new Date(now - 8 * M).toISOString(),
+        submittedAt: new Date(now - 2 * M).toISOString(),
+      })
+      await h.deps.breaks.create({
+        id: 'path-break', shiftId: id, startedAtMs: now - 6 * M,
+        endedAtMs: now - 4 * M, endReason: 'driver_resumed',
+        limitMinutes: 60, consumedBeforeMs: 0, overLimitMs: 0,
+      }, 'u-driver')
+      await h.deps.gps.appendMany([
+        [-8, 36.300], [-7, 36.301], [-6, 36.302], [-5, 36.303],
+        [-4, 36.304], [-3, 36.305], [-1, 36.306],
+      ].map(([minutes, lng]) => ({
+        shiftId: id, driverId: DRIVER_ID, branchId: BRANCH,
+        lat: 33.5, lng: lng!, accuracyM: 8,
+        capturedAtMs: now + minutes! * M, receivedAtMs: now,
+        source: 'phone_bg' as const,
+      })))
+      const response = await get(manager, `/shifts/${id}/gps/path`)
+      expect(response.statusCode, response.body).toBe(200)
+      const path = response.json()
+      expect(path.pings.map((p: { phase: string }) => p.phase)).toEqual([
+        'work', 'work', 'break', 'break', 'work', 'work', 'after_close',
+      ])
+      expect(path.afterClose).toMatchObject({ pingStartIndex: 6, pingEndIndex: 7, distanceMetres: null })
+      expect(path.totalDistanceMetres).toBeGreaterThan(path.workDistanceMetres)
+      expect(path.workDistanceMetres).toBeGreaterThan(100)
+      expect(path.workDistanceMetres).toBeLessThan(300)
+      expect(path.beforeFirst.distanceMetres).toBe(path.workDistanceMetres)
+      expect(path.coverageIncomplete).toBe(true)
     })
 
     it('is gps.view only, and 404s an unknown shift', async () => {

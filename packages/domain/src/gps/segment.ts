@@ -9,7 +9,7 @@
  * Ownership is START-OWNED (owner's rule): an order owns the pings from ITS OWN printed minute up to
  * the NEXT timed order's printed minute; the last timed order runs to the shift's close-submission
  * minute (`submittedAtMs`); pings before the first timed order are `beforeFirst`; pings at or after
- * the submit minute are `afterClose`. Orders with an unreadable minute get no segment.
+ * the actual close submission are `afterClose`. Orders with an unreadable minute get no segment.
  *
  * This module is timing-only — it never sees lat/lng, so it is trivially testable and the map layer
  * is the only place that needs coordinates. All keys are branch-local minute strings, so a ping and
@@ -87,8 +87,6 @@ export function sliceTrailByOrders(input: {
 
   const n = boundaries.length
   const total = pings.length
-  const submittedKey = submittedAtMs === null ? null : minuteKeyForOffset(submittedAtMs, offsetMinutes)
-
   // 2. Label each ping with a slot: 0 = beforeFirst, 1..n = order (boundary a → slot a+1),
   //    n+1 = afterClose. The pointer only advances because pings are capture-ordered, so the slot
   //    sequence is non-decreasing and every slot is therefore a contiguous index range.
@@ -104,8 +102,8 @@ export function sliceTrailByOrders(input: {
       next++
     }
     let slot: number
-    if (active === -1) slot = 0
-    else if (active === n - 1 && submittedKey !== null && pKey >= submittedKey) slot = n + 1
+    if (submittedAtMs !== null && pings[i]!.capturedAtMs >= submittedAtMs) slot = n + 1
+    else if (active === -1) slot = 0
     else slot = active + 1
     if (slot > prevSlot) {
       // Fill this slot and every skipped (empty) slot below it with this first index.

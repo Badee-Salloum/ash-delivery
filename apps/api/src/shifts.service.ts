@@ -86,6 +86,7 @@ import {
   varianceDirection,
 } from './fixed-settlement.ts'
 import { closeDraftHash, sameCloseDraftEvidence } from './close-draft.hash.ts'
+import { endActiveBreakLocked } from './breaks.service.ts'
 
 export class ServiceError extends Error {
   readonly status: number
@@ -1361,6 +1362,7 @@ async function suspendShiftLocked(deps: Deps, actor: Actor, shiftId: string): Pr
   if (shift.state !== 'open') throw new ServiceError(409, 'shift_not_operational', { state: shift.state })
   const result = await guard(deps, shift, 'suspend', actor)
   if (!result.ok) fail(result)
+  await endActiveBreakLocked(deps, shiftId, 'manager_suspended', actor.userId)
   const updated: ShiftRecord = { ...shift, state: result.next }
   await deps.shifts.update(updated, actor.userId)
   return updated
@@ -2624,6 +2626,9 @@ async function submitEndPackageLocked(
   input: EndPackageInput,
 ): Promise<{ shift: ShiftRecord; br1: Br1View }> {
   const shift = await mustFind(deps, shiftId)
+  if ((await deps.breaks.listByShift(shiftId)).some((entry) => entry.endedAtMs === null)) {
+    throw new ServiceError(409, 'break_active')
+  }
   const closeDraft = await deps.closeDrafts.findByShift(shiftId)
   if (closeDraft?.submittedAtMs !== null && closeDraft !== null && shift.state === 'pending_review') {
     if (input.draftRevision === closeDraft.revision && input.draftHash === closeDraft.draftHash) {
@@ -4765,6 +4770,7 @@ async function voidShiftLocked(
   }
   const result = await guard(deps, shift, 'manager_force_cancel', actor)
   if (!result.ok) fail(result)
+  await endActiveBreakLocked(deps, shiftId, 'manager_voided', actor.userId)
 
   const postings: Posting[] = []
   assertPersistableTrancheTotals(shift)
@@ -4916,6 +4922,7 @@ async function forceCloseLocked(
   // the force override bypasses BR1, not the requirement to say which operations belong here.
   if (shift.submittedAt === null) {
     if (!input.prepareOnly) throw new ServiceError(409, 'force_close_preparation_required')
+    await endActiveBreakLocked(deps, shiftId, 'manager_force_closed', actor.userId)
     const submittedAt = new Date(deps.clock.nowMs()).toISOString()
     const closeDraft = await deps.closeDrafts.findByShift(shiftId)
     if (closeDraft !== null) {
